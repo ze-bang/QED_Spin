@@ -10,7 +10,7 @@ void cg_lowest_eigenvalue(
     ComplexVector& eigenvector                             // Output eigenvector
 ) {
     // Initialize random starting vector
-    std::mt19937 gen(std::random_device{}());
+    static thread_local std::mt19937 gen(std::random_device{}());
     std::uniform_real_distribution<double> dist(-1.0, 1.0);
     
     eigenvector.resize(N);
@@ -47,6 +47,8 @@ void cg_lowest_eigenvalue(
     
     std::cout << "CG: Starting iterations..." << std::endl;
     std::cout << "Initial eigenvalue estimate: " << eigenvalue << std::endl;
+
+    ComplexVector r_new(N);
     
     for (int iter = 0; iter < max_iter; iter++) {
         // Apply H to search direction
@@ -75,18 +77,17 @@ void cg_lowest_eigenvalue(
         double new_eigenvalue = std::real(rayleigh);
         
         // Calculate new residual
-        ComplexVector r_new(N);
         for (int i = 0; i < N; i++) {
             r_new[i] = Hv[i] - new_eigenvalue * eigenvector[i];
         }
-        
+
         // Check convergence
         double res_norm = cblas_dznrm2(N, r_new.data(), 1);
         double eig_change = std::abs(new_eigenvalue - eigenvalue);
-        
-        if (iter % 10 == 0 || res_norm < tol) {
-            std::cout << "Iteration " << iter << ": eigenvalue = " << new_eigenvalue 
-                      << ", residual = " << res_norm 
+
+        if (iter % 50 == 0 || res_norm < tol) {
+            std::cout << "Iteration " << iter << ": eigenvalue = " << new_eigenvalue
+                      << ", residual = " << res_norm
                       << ", change = " << eig_change << std::endl;
         }
         
@@ -149,17 +150,17 @@ void cg_multiple_eigenvalues(
     
     std::cout << "CG: Finding " << num_eigenvalues << " eigenvalues..." << std::endl;
     
+    static thread_local std::mt19937 gen(std::random_device{}());
+    std::uniform_real_distribution<double> dist(-1.0, 1.0);
+
     // Find eigenvalues one by one using deflation
     for (int k = 0; k < num_eigenvalues; k++) {
         std::cout << "Finding eigenvalue " << k+1 << " of " << num_eigenvalues << std::endl;
-        
+
         double eigenvalue;
         ComplexVector eigenvector;
-        
+
         // Initialize random starting vector
-        std::mt19937 gen(std::random_device{}());
-        std::uniform_real_distribution<double> dist(-1.0, 1.0);
-        
         eigenvector.resize(N);
         for (int i = 0; i < N; i++) {
             eigenvector[i] = Complex(dist(gen), dist(gen));
@@ -182,9 +183,10 @@ void cg_multiple_eigenvalues(
         
         // Workspace
         ComplexVector Hv(N);
-        ComplexVector r(N);  // Residual
-        ComplexVector p(N);  // Search direction
-        ComplexVector Hp(N); // H*p
+        ComplexVector r(N);      // Residual
+        ComplexVector p(N);      // Search direction
+        ComplexVector Hp(N);     // H*p
+        ComplexVector r_new(N);  // Updated residual
         
         // Apply deflated operator to initial vector
         apply_deflated_operator(eigenvector.data(), Hv.data(), N);
@@ -248,7 +250,6 @@ void cg_multiple_eigenvalues(
             double new_eigenvalue = std::real(orig_rayleigh);
             
             // Calculate new residual with deflated operator
-            ComplexVector r_new(N);
             for (int i = 0; i < N; i++) {
                 r_new[i] = Hv[i] - new_eigenvalue * eigenvector[i];
             }
@@ -257,9 +258,9 @@ void cg_multiple_eigenvalues(
             double res_norm = cblas_dznrm2(N, r_new.data(), 1);
             double eig_change = std::abs(new_eigenvalue - eigenvalue);
             
-            if (iter % 10 == 0 || res_norm < tol) {
-                std::cout << "Iteration " << iter << ": eigenvalue = " << new_eigenvalue 
-                          << ", residual = " << res_norm 
+            if (iter % 50 == 0 || res_norm < tol) {
+                std::cout << "Iteration " << iter << ": eigenvalue = " << new_eigenvalue
+                          << ", residual = " << res_norm
                           << ", change = " << eig_change << std::endl;
             }
             
