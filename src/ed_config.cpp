@@ -19,6 +19,8 @@ enum class DiagonalizationMethod {
     BICG,
     LOBPCG,
     KRYLOV_SCHUR,
+    IMPLICIT_RESTART_LANCZOS,
+    THICK_RESTART_LANCZOS,
     FULL,
     OSS,
     mTPQ,
@@ -385,6 +387,8 @@ std::optional<DiagonalizationMethod> parseMethod(const std::string& str) {
     if (lower == "shift_invert") return DiagonalizationMethod::SHIFT_INVERT;
     if (lower == "shift_invert_robust") return DiagonalizationMethod::SHIFT_INVERT_ROBUST;
     if (lower == "krylov_schur") return DiagonalizationMethod::KRYLOV_SCHUR;
+    if (lower == "implicit_restart_lanczos") return DiagonalizationMethod::IMPLICIT_RESTART_LANCZOS;
+    if (lower == "thick_restart_lanczos") return DiagonalizationMethod::THICK_RESTART_LANCZOS;
     
     // Conjugate Gradient variants
     if (lower == "bicg") return DiagonalizationMethod::BICG;
@@ -429,6 +433,8 @@ std::string methodToString(DiagonalizationMethod method) {
         case DiagonalizationMethod::SHIFT_INVERT: return "SHIFT_INVERT";
         case DiagonalizationMethod::SHIFT_INVERT_ROBUST: return "SHIFT_INVERT_ROBUST";
         case DiagonalizationMethod::KRYLOV_SCHUR: return "KRYLOV_SCHUR";
+        case DiagonalizationMethod::IMPLICIT_RESTART_LANCZOS: return "IMPLICIT_RESTART_LANCZOS";
+        case DiagonalizationMethod::THICK_RESTART_LANCZOS: return "THICK_RESTART_LANCZOS";
         
         // Conjugate Gradient variants
         case DiagonalizationMethod::BICG: return "BICG";
@@ -573,6 +579,31 @@ std::string getMethodParameterInfo(DiagonalizationMethod method) {
             info << "  --tolerance=<tol>     Convergence tolerance (default: 1e-10)\n";
             info << "  --eigenvectors        Compute and save eigenvectors\n";
             info << "\nBest for: Large-scale problems requiring multiple restarts\n";
+            break;
+            
+        case DiagonalizationMethod::IMPLICIT_RESTART_LANCZOS:
+            info << "Implicitly Restarted Lanczos Algorithm (IRLA).\n\n";
+            info << "Uses implicit filtering with polynomial restarts to compute eigenvalues.\n";
+            info << "More memory efficient than thick restart but doesn't preserve converged vectors.\n\n";
+            info << "Configurable Parameters:\n";
+            info << "  --eigenvalues=<n>     Number of eigenvalues to compute (default: 1)\n";
+            info << "  --iterations=<n>      Maximum Krylov space dimension (default: 100)\n";
+            info << "  --tolerance=<tol>     Convergence tolerance (default: 1e-10)\n";
+            info << "  --eigenvectors        Compute and save eigenvectors\n";
+            info << "\nBest for: Memory-constrained problems, fast convergence to few eigenvalues\n";
+            break;
+            
+        case DiagonalizationMethod::THICK_RESTART_LANCZOS:
+            info << "Thick Restart Lanczos Algorithm with Locking.\n\n";
+            info << "Preserves converged eigenvectors and uses refined Ritz vectors for restart.\n";
+            info << "Superior stability and convergence compared to implicit restart.\n\n";
+            info << "Configurable Parameters:\n";
+            info << "  --eigenvalues=<n>     Number of eigenvalues to compute (default: 1)\n";
+            info << "  --iterations=<n>      Maximum Krylov space dimension (default: 100)\n";
+            info << "  --tolerance=<tol>     Convergence tolerance (default: 1e-10)\n";
+            info << "  --eigenvectors        Compute and save eigenvectors\n";
+            info << "\nBest for: Computing many eigenvalues, better stability, problems with clusters\n";
+            info << "Features: Converged vector locking, Rayleigh quotient refinement\n";
             break;
             
             

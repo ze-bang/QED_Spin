@@ -107,6 +107,8 @@ enum class DiagonalizationMethod {
     BICG,                  // Biconjugate gradient
     LOBPCG,                // Locally optimal block preconditioned conjugate gradient
     KRYLOV_SCHUR,          // Krylov-Schur algorithm
+    IMPLICIT_RESTART_LANCZOS,  // Implicitly restarted Lanczos algorithm
+    THICK_RESTART_LANCZOS,     // Thick restart Lanczos algorithm with locking
     FULL,                  // Full diagonalization
     OSS,                   // Optimal spectrum solver
     
@@ -406,6 +408,22 @@ EDResults exact_diagonalization_core(
                        params.num_eigenvalues, params.tolerance, 
                        results.eigenvalues, params.output_dir, 
                        params.compute_eigenvectors);
+            break;
+            
+        case DiagonalizationMethod::IMPLICIT_RESTART_LANCZOS:
+            std::cout << "Using Implicitly Restarted Lanczos method" << std::endl;
+            implicitly_restarted_lanczos(H, hilbert_space_dim, params.max_iterations, 
+                                       params.num_eigenvalues, params.tolerance, 
+                                       results.eigenvalues, params.output_dir, 
+                                       params.compute_eigenvectors);
+            break;
+            
+        case DiagonalizationMethod::THICK_RESTART_LANCZOS:
+            std::cout << "Using Thick Restart Lanczos method" << std::endl;
+            thick_restart_lanczos(H, hilbert_space_dim, params.max_iterations, 
+                                params.num_eigenvalues, params.tolerance, 
+                                results.eigenvalues, params.output_dir, 
+                                params.compute_eigenvectors);
             break;
         
         case DiagonalizationMethod::OSS:

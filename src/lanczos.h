@@ -106,6 +106,13 @@ void implicitly_restarted_lanczos(std::function<void(const Complex*, Complex*, i
                                  std::vector<double>& eigenvalues, std::string dir = "",
                                  bool compute_eigenvectors = false);
 
+// Thick Restart Lanczos algorithm implementation
+// Combines the benefits of implicit restart with retention of converged vectors
+void thick_restart_lanczos(std::function<void(const Complex*, Complex*, int)> H, int N, 
+                           int max_iter, int num_eigs, double tol, 
+                           std::vector<double>& eigenvalues, std::string dir = "",
+                           bool compute_eigenvectors = false);
+
 // Helper function to estimate number of eigenvalues in an interval
 int estimate_eigenvalue_count(std::function<void(const Complex*, Complex*, int)> H, int N, 
                             double lower_bound, double upper_bound);
