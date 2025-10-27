@@ -387,16 +387,6 @@ EDResults exact_diagonalization_core(
             }
             break;
             
-        case DiagonalizationMethod::BICG:
-            {
-                std::cout << "Using biconjugate gradient method" << std::endl;
-                std::vector<ComplexVector> eigenvectors;
-                bicg_eigenvalues(H, hilbert_space_dim, params.max_iterations, 
-                              params.tolerance, results.eigenvalues, 
-                              eigenvectors, params.output_dir);
-            }
-            break;
-            
         case DiagonalizationMethod::LOBPCG:
             std::cout << "Using LOBPCG method" << std::endl;
             lobpcg_diagonalization(H, hilbert_space_dim, params.max_iterations, 
