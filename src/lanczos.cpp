@@ -1744,25 +1744,10 @@ void shift_invert_lanczos(std::function<void(const Complex*, Complex*, int)> H, 
         cblas_zaxpy(size, &neg_sigma, v, 1, result, 1);
     };
     
-    // Define preconditioner (optional - here using diagonal preconditioning)
-    std::vector<Complex> M_diag(N);
-    bool use_preconditioner = true;
-    
-    if (use_preconditioner) {
-        std::cout << "Computing diagonal preconditioner..." << std::endl;
-        #pragma omp parallel for
-        for (int i = 0; i < N; i++) {
-            ComplexVector e_i(N, Complex(0.0, 0.0));
-            e_i[i] = Complex(1.0, 0.0);
-            ComplexVector He_i(N);
-            H_shifted(e_i.data(), He_i.data(), N);
-            M_diag[i] = He_i[i];
-            // Regularize to avoid division by zero
-            if (std::abs(M_diag[i]) < 1e-10) {
-                M_diag[i] = Complex(1e-10, 0.0);
-            }
-        }
-    }
+    // Preconditioner disabled for now - can be expensive to compute
+    // In practice, CG/GMRES often works well without preconditioning for moderate-sized systems
+    bool use_preconditioner = false;
+    std::vector<Complex> M_diag(N, Complex(1.0, 0.0)); // Identity preconditioner
     
     // Statistics tracking
     std::vector<int> cg_iterations;
@@ -1869,20 +1854,28 @@ void shift_invert_lanczos(std::function<void(const Complex*, Complex*, int)> H, 
                   << " (residual: " << std::scientific << residual_norms.back() << ")"
                   << " - Time: " << duration.count() << "ms" << std::endl;
         
-        // Continue with standard Lanczos on w
+        // Now w = (H - σI)^{-1} v_j
+        // Apply standard Lanczos orthogonalization
         
-        // w = w - beta_j * v_{j-1}
+        // Orthogonalize against v_{j-1} if j > 0
         if (j > 0) {
-            Complex neg_beta = Complex(-beta[j], 0.0);
-            cblas_zaxpy(N, &neg_beta, v_prev.data(), 1, w.data(), 1);
+            Complex overlap;
+            cblas_zdotc_sub(N, v_prev.data(), 1, w.data(), 1, &overlap);
+            Complex neg_overlap = -overlap;
+            cblas_zaxpy(N, &neg_overlap, v_prev.data(), 1, w.data(), 1);
+            
+            // Store off-diagonal element (should be close to beta[j] from previous iteration)
+            if (j > 0 && beta.size() > j) {
+                beta[j] = std::abs(overlap);
+            }
         }
         
-        // alpha_j = <v_j, w>
+        // Compute diagonal element: alpha_j = <v_j, w>
         Complex dot_product;
         cblas_zdotc_sub(N, v_current.data(), 1, w.data(), 1, &dot_product);
         alpha.push_back(std::real(dot_product));
         
-        // w = w - alpha_j * v_j
+        // Orthogonalize against v_j
         Complex neg_alpha = Complex(-alpha[j], 0.0);
         cblas_zaxpy(N, &neg_alpha, v_current.data(), 1, w.data(), 1);
         
