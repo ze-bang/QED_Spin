@@ -37,26 +37,37 @@ void time_evolve_taylor(
         coefficients[order] = coef * std::pow(delta_t, order) / factorial;
     }
     
+    const double base_norm = std::max(1e-16, cblas_dznrm2(N, state.data(), 1));
+    const double contribution_tol = 1e-12;
+
     // Apply Taylor expansion terms
     for (int order = 1; order <= n_max; order++) {
         // Apply H to the previous term
         H(term.data(), Hterm.data(), N);
         std::swap(term, Hterm);
-        
+
         // Add this term to the result
         for (int i = 0; i < N; i++) {
             result[i] += coefficients[order] * term[i];
         }
+
+        double term_norm = cblas_dznrm2(N, term.data(), 1);
+        double scaled_norm = std::abs(coefficients[order]) * term_norm;
+        if (scaled_norm < contribution_tol * base_norm) {
+            break;
+        }
     }
-    
+
     // Replace state with the evolved state
     std::swap(state, result);
-    
+
     // Normalize if requested
     if (normalize) {
         double norm = cblas_dznrm2(N, state.data(), 1);
-        Complex scale_factor = Complex(1.0/norm, 0.0);
-        cblas_zscal(N, &scale_factor, state.data(), 1);
+        if (norm > 0.0) {
+            Complex scale_factor = Complex(1.0/norm, 0.0);
+            cblas_zscal(N, &scale_factor, state.data(), 1);
+        }
     }
 }
 
@@ -76,6 +87,9 @@ void imaginary_time_evolve_taylor(
     // Iteratively build coefficients to avoid factorial overflow
     // c0 = 1; c_{k} = c_{k-1} * (-Δβ) / k
     double coef_real = 1.0;
+    double base_norm = std::max(1e-16, cblas_dznrm2(N, state.data(), 1));
+    const double contribution_tol = 1e-12;
+
     for (int order = 1; order <= n_max; ++order) {
         // term <- H * term
         H(term.data(), Hterm.data(), N);
@@ -86,6 +100,12 @@ void imaginary_time_evolve_taylor(
 
         for (int i = 0; i < N; ++i) {
             result[i] += coef * term[i];
+        }
+
+        double term_norm = cblas_dznrm2(N, term.data(), 1);
+        double scaled_norm = std::abs(coef_real) * term_norm;
+        if (scaled_norm < contribution_tol * base_norm) {
+            break;
         }
     }
 
@@ -343,8 +363,10 @@ void time_evolve_chebyshev(
     // Normalize if requested
     if (normalize) {
         double norm = cblas_dznrm2(N, state.data(), 1);
-        Complex scale_factor = Complex(1.0/norm, 0.0);
-        cblas_zscal(N, &scale_factor, state.data(), 1);
+        if (norm > 0.0) {
+            Complex scale_factor = Complex(1.0/norm, 0.0);
+            cblas_zscal(N, &scale_factor, state.data(), 1);
+        }
     }
 }
 
@@ -511,12 +533,12 @@ std::vector<Complex> compute_time_correlation(
     ComplexVector O1_psi(N);
     O1(state.data(), O1_psi.data(), N);
     
-    // Calculate initial correlation: C(0) = ⟨ψ|O2†O1|ψ⟩
+    // Calculate initial correlation: C(0) = ⟨ψ|O1†O2|ψ⟩
     ComplexVector O2_psi(N);
     O2(state.data(), O2_psi.data(), N);
     
     Complex initial_corr;
-    cblas_zdotc_sub(N, O2_psi.data(), 1, O1_psi.data(), 1, &initial_corr);
+    cblas_zdotc_sub(N, O1_psi.data(), 1, O2_psi.data(), 1, &initial_corr);
     time_correlation[0] = initial_corr;
     
     // Initialize evolution states
@@ -528,22 +550,22 @@ std::vector<Complex> compute_time_correlation(
     for (int step = 1; step < num_steps; step++) {
         // Evolve states
         if (time_evolution_method == 0) {
-            time_evolve_taylor(H, evolved_psi, N, dt, taylor_order, true);
-            time_evolve_taylor(H, evolved_O1_psi, N, dt, taylor_order, true);
+            time_evolve_taylor(H, evolved_psi, N, dt, taylor_order, false);
+            time_evolve_taylor(H, evolved_O1_psi, N, dt, taylor_order, false);
         } else if (time_evolution_method == 1) {
-            time_evolve_krylov(H, evolved_psi, N, dt, krylov_dim, true);
-            time_evolve_krylov(H, evolved_O1_psi, N, dt, krylov_dim, true);
+            time_evolve_krylov(H, evolved_psi, N, dt, krylov_dim, false);
+            time_evolve_krylov(H, evolved_O1_psi, N, dt, krylov_dim, false);
         } else if (time_evolution_method == 2) {
-            time_evolve_rk4(H, evolved_psi, N, dt, true);
-            time_evolve_rk4(H, evolved_O1_psi, N, dt, true);
+            time_evolve_rk4(H, evolved_psi, N, dt, false);
+            time_evolve_rk4(H, evolved_O1_psi, N, dt, false);
         }
-        
+
         // Apply O2 to evolved state
         O2(evolved_psi.data(), O2_evolved_psi.data(), N);
-        
+
         // Calculate correlation
         Complex corr_t;
-        cblas_zdotc_sub(N, O2_evolved_psi.data(), 1, evolved_O1_psi.data(), 1, &corr_t);
+        cblas_zdotc_sub(N, evolved_O1_psi.data(), 1, O2_evolved_psi.data(), 1, &corr_t);
         time_correlation[step] = corr_t;
     }
     
@@ -583,7 +605,7 @@ std::vector<std::vector<Complex>> compute_multiple_time_correlations(
         operators_2[op](state.data(), O2_psi_vec[op].data(), N);
         
         Complex init_corr;
-        cblas_zdotc_sub(N, O2_psi_vec[op].data(), 1, O1_psi_vec[op].data(), 1, &init_corr);
+        cblas_zdotc_sub(N, O1_psi_vec[op].data(), 1, O2_psi_vec[op].data(), 1, &init_corr);
         time_correlations[op][0] = init_corr;
     }
     
@@ -591,11 +613,11 @@ std::vector<std::vector<Complex>> compute_multiple_time_correlations(
     for (int step = 1; step < num_steps; step++) {
         // Evolve state
         if (time_evolution_method == 0) {
-            time_evolve_taylor(H, evolved_psi, N, dt, taylor_order, true);
+            time_evolve_taylor(H, evolved_psi, N, dt, taylor_order, false);
         } else if (time_evolution_method == 1) {
-            time_evolve_krylov(H, evolved_psi, N, dt, krylov_dim, true);
+            time_evolve_krylov(H, evolved_psi, N, dt, krylov_dim, false);
         } else if (time_evolution_method == 2) {
-            time_evolve_rk4(H, evolved_psi, N, dt, true);
+            time_evolve_rk4(H, evolved_psi, N, dt, false);
         }
         
         // Parallel over operators
@@ -603,11 +625,11 @@ std::vector<std::vector<Complex>> compute_multiple_time_correlations(
         for (int op = 0; op < num_operators; op++) {
             // Evolve O1_psi
             if (time_evolution_method == 0) {
-                time_evolve_taylor(H, evolved_O1_psi_vec[op], N, dt, taylor_order, true);
+                time_evolve_taylor(H, evolved_O1_psi_vec[op], N, dt, taylor_order, false);
             } else if (time_evolution_method == 1) {
-                time_evolve_krylov(H, evolved_O1_psi_vec[op], N, dt, krylov_dim, true);
+                time_evolve_krylov(H, evolved_O1_psi_vec[op], N, dt, krylov_dim, false);
             } else if (time_evolution_method == 2) {
-                time_evolve_rk4(H, evolved_O1_psi_vec[op], N, dt, true);
+                time_evolve_rk4(H, evolved_O1_psi_vec[op], N, dt, false);
             }
             
             // Apply O2 to evolved state
@@ -615,7 +637,7 @@ std::vector<std::vector<Complex>> compute_multiple_time_correlations(
             
             // Calculate correlation
             Complex corr_t;
-            cblas_zdotc_sub(N, O2_evolved_psi_vec[op].data(), 1, evolved_O1_psi_vec[op].data(), 1, &corr_t);
+            cblas_zdotc_sub(N, evolved_O1_psi_vec[op].data(), 1, O2_evolved_psi_vec[op].data(), 1, &corr_t);
             time_correlations[op][step] = corr_t;
         }
     }
@@ -886,12 +908,12 @@ void compute_operator_dynamics(
         // Apply O_1 to initial state: |φ⟩ = O_1|ψ⟩
         operators_1[op_idx].apply(state.data(), O1_psi.data(), N);
         
-        // Calculate initial correlation: C(0) = ⟨ψ|O_2†O_1|ψ⟩
+        // Calculate initial correlation: C(0) = ⟨ψ|O_1†O_2|ψ⟩
         operators_2[op_idx].apply(state.data(), O2_psi.data(), N);
         
         // Use BLAS for dot product
         Complex initial_corr;
-        cblas_zdotc_sub(N, O2_psi.data(), 1, O1_psi.data(), 1, &initial_corr);
+        cblas_zdotc_sub(N, O1_psi.data(), 1, O2_psi.data(), 1, &initial_corr);
         time_correlation[0] = initial_corr;
 
         std::cout << "    Initial correlation C(0) = " 
@@ -920,15 +942,15 @@ void compute_operator_dynamics(
         // Time evolution loop using Krylov method
         for (int step = 1; step < num_steps; step++) {
             // Evolve states using Krylov method
-            time_evolve_krylov(H, evolved_psi, N, dt, krylov_dim, true);
-            time_evolve_krylov(H, evolved_O1_psi, N, dt, krylov_dim, true);
+            time_evolve_krylov(H, evolved_psi, N, dt, krylov_dim, false);
+            time_evolve_krylov(H, evolved_O1_psi, N, dt, krylov_dim, false);
             
             // Apply O_2 to evolved state
             operators_2[op_idx].apply(evolved_psi.data(), O2_evolved_psi.data(), N);
             
             // Calculate correlation using BLAS
             Complex corr_t;
-            cblas_zdotc_sub(N, O2_evolved_psi.data(), 1, evolved_O1_psi.data(), 1, &corr_t);
+            cblas_zdotc_sub(N, evolved_O1_psi.data(), 1, O2_evolved_psi.data(), 1, &corr_t);
             time_correlation[step] = corr_t;
             
             // Write current time point to file

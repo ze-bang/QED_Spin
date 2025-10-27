@@ -272,102 +272,100 @@ int solve_tridiagonal_matrix(const std::vector<double>& alpha, const std::vector
         }
         
         std::cout << "Eigendecomposition successful, transforming eigenvectors..." << std::endl;
-        
-        // Transform and save eigenvectors with improved accuracy
-        #pragma omp parallel for
+
+        std::vector<ComplexVector> full_vectors(n_eigenvalues, ComplexVector(N, Complex(0.0, 0.0)));
+        std::vector<ComplexVector> compensation(n_eigenvalues, ComplexVector(N, Complex(0.0, 0.0)));
+
+        for (int j = 0; j < m; j++) {
+            ComplexVector basis_j = read_basis_vector(temp_dir, j, N);
+
+            if (j % 50 == 0 || j == m - 1) {
+                std::cout << "  Accumulating basis vector " << j + 1 << " / " << m << std::endl;
+            }
+
+            #pragma omp parallel for schedule(static)
+            for (int i = 0; i < n_eigenvalues; i++) {
+                double coef = evecs[j + i * m];
+                ComplexVector& full_vector = full_vectors[i];
+                ComplexVector& comp_vec = compensation[i];
+
+                for (int k = 0; k < N; k++) {
+                    Complex contrib = basis_j[k] * coef;
+                    Complex y = contrib - comp_vec[k];
+                    Complex t = full_vector[k] + y;
+                    comp_vec[k] = (t - full_vector[k]) - y;
+                    full_vector[k] = t;
+                }
+            }
+        }
+
         for (int i = 0; i < n_eigenvalues; i++) {
             if (i % 10 == 0) {
                 std::cout << "Transforming eigenvector " << i + 1 << " of " << n_eigenvalues << std::endl;
             }
-            
-            ComplexVector full_vector(N, Complex(0.0, 0.0));
-            
-            // Transform from Lanczos basis to original basis
-            // Use compensated summation for better accuracy
-            ComplexVector compensation(N, Complex(0.0, 0.0));
-            
-            for (int j = 0; j < m; j++) {
-                ComplexVector basis_j = read_basis_vector(temp_dir, j, N);
-                double coef = evecs[j + i * m];  // Column i of eigenvector matrix
-                
-                // Kahan summation for improved accuracy
-                for (int k = 0; k < N; k++) {
-                    Complex y = basis_j[k] * coef - compensation[k];
-                    Complex t = full_vector[k] + y;
-                    compensation[k] = (t - full_vector[k]) - y;
-                    full_vector[k] = t;
-                }
-            }
-            
-            // Normalize with high precision
+
+            ComplexVector& full_vector = full_vectors[i];
+
             double norm = cblas_dznrm2(N, full_vector.data(), 1);
             if (norm < 1e-14) {
                 std::cerr << "Warning: Eigenvector " << i << " has very small norm: " << norm << std::endl;
                 continue;
             }
-            
+
             Complex scale = Complex(1.0/norm, 0.0);
             cblas_zscal(N, &scale, full_vector.data(), 1);
-            
-            // Verify orthogonality and refine if needed
-            if (i > 0 && i < 10) {  // Check first few eigenvectors
-                // Read previous eigenvector for orthogonality check
+
+            if (i > 0 && i < 10) {
                 std::string prev_file = evec_dir + "/eigenvector_" + std::to_string(i-1) + ".dat";
                 std::ifstream prev_infile(prev_file, std::ios::binary);
                 if (prev_infile) {
                     ComplexVector prev_vec(N);
                     prev_infile.read(reinterpret_cast<char*>(prev_vec.data()), N * sizeof(Complex));
                     prev_infile.close();
-                    
+
                     Complex overlap;
                     cblas_zdotc_sub(N, prev_vec.data(), 1, full_vector.data(), 1, &overlap);
-                    
+
                     if (std::abs(overlap) > 1e-10) {
-                        std::cerr << "Warning: Eigenvectors " << i-1 << " and " << i 
+                        std::cerr << "Warning: Eigenvectors " << i-1 << " and " << i
                                   << " have overlap " << std::abs(overlap) << std::endl;
-                        
-                        // Orthogonalize
+
                         Complex neg_overlap = -overlap;
                         cblas_zaxpy(N, &neg_overlap, prev_vec.data(), 1, full_vector.data(), 1);
-                        
-                        // Re-normalize
+
                         norm = cblas_dznrm2(N, full_vector.data(), 1);
                         scale = Complex(1.0/norm, 0.0);
                         cblas_zscal(N, &scale, full_vector.data(), 1);
                     }
                 }
             }
-            
-            
-            // Save to file in binary format for accuracy
+
             std::string evec_file = evec_dir + "/eigenvector_" + std::to_string(i) + ".dat";
             std::ofstream evec_outfile(evec_file, std::ios::binary);
             if (!evec_outfile) {
                 std::cerr << "Error: Cannot open file " << evec_file << " for writing" << std::endl;
                 continue;
             }
-            
-            // Write in binary format for full precision
+
             evec_outfile.write(reinterpret_cast<const char*>(full_vector.data()), N * sizeof(Complex));
             evec_outfile.close();
-            
-            // Also save in text format for debugging
+
             std::string evec_text_file = evec_dir + "/eigenvector_" + std::to_string(i) + ".txt";
             std::ofstream evec_text_outfile(evec_text_file);
             if (evec_text_outfile) {
                 evec_text_outfile << std::scientific << std::setprecision(15);
                 for (int j = 0; j < N; j++) {
-                    evec_text_outfile << std::real(full_vector[j]) << " " 
+                    evec_text_outfile << std::real(full_vector[j]) << " "
                                      << std::imag(full_vector[j]) << std::endl;
                 }
                 evec_text_outfile.close();
             }
-            
+
             if (i % 10 == 0 || i == n_eigenvalues - 1) {
                 std::cout << "  Saved eigenvector " << i + 1 << " of " << n_eigenvalues << std::endl;
             }
         }
-    
+
     } else {
         // Just compute eigenvalues
         info = LAPACKE_dstevd(LAPACK_COL_MAJOR, 'N', m, diag.data(), offdiag.data(), nullptr, m);
