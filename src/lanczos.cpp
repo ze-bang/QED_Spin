@@ -898,48 +898,32 @@ void lanczos(std::function<void(const Complex*, Complex*, int)> H, int N, int ma
 // Block Lanczos algorithm for finding eigenvalues with degeneracies
 void block_lanczos(std::function<void(const Complex*, Complex*, int)> H, int N, int max_iter, 
                    int num_eigs, int block_size, double tol, std::vector<double>& eigenvalues, 
-                   std::string dir, bool compute_eigenvectors){
+                   std::string dir, bool compute_eigenvectors) {
     std::cout << "Starting Block Lanczos algorithm" << std::endl;
-
     eigenvalues.clear();
 
+    // ===== Validate and normalize parameters =====
     if (N <= 0) {
         std::cerr << "Block Lanczos: invalid Hilbert space dimension" << std::endl;
         return;
     }
 
-    if (block_size <= 0) {
-        block_size = std::min(4, N);
-    }
-    block_size = std::min(block_size, N);
-
-    if (max_iter <= 0) {
-        max_iter = (N + block_size - 1) / block_size;
-    }
-
-    if (num_eigs <= 0) {
-        num_eigs = 1;
-    }
-    num_eigs = std::min(num_eigs, N);
-
-    if (tol <= 0.0) {
-        tol = 1e-12;
-    }
-
-    const int b = block_size;
-    const int target_eigs = std::max(1, num_eigs);
-    const int max_blocks = std::min(max_iter, std::max(1, (N + b - 1) / b));
+    const int b = (block_size <= 0) ? std::min(4, N) : std::min(block_size, N);
+    const int target_eigs = std::max(1, std::min(num_eigs > 0 ? num_eigs : 1, N));
+    const int max_blocks = (max_iter <= 0) ? (N + b - 1) / b : std::min(max_iter, (N + b - 1) / b);
+    const double convergence_tol = (tol <= 0.0) ? 1e-12 : tol;
     const double breakdown_tol = 1e-12;
 
-    std::string temp_dir = (dir.empty() ? "./block_lanczos_basis" : dir + "/block_lanczos_basis");
-    std::string evec_dir = (dir.empty() ? "./eigenvectors" : dir + "/eigenvectors");
-
+    // ===== Setup directories =====
+    const std::string temp_dir = (dir.empty() ? "./block_lanczos_basis" : dir + "/block_lanczos_basis");
+    const std::string evec_dir = (dir.empty() ? "./eigenvectors" : dir + "/eigenvectors");
     system(("mkdir -p " + temp_dir).c_str());
     system(("mkdir -p " + evec_dir).c_str());
 
+    // ===== Initialize random starting block with QR =====
     std::mt19937 gen(std::random_device{}());
     std::uniform_real_distribution<double> dist(-1.0, 1.0);
-
+    
     std::vector<Complex> V_curr(N * b);
     for (int col = 0; col < b; ++col) {
         for (int row = 0; row < N; ++row) {
@@ -947,12 +931,13 @@ void block_lanczos(std::function<void(const Complex*, Complex*, int)> H, int N, 
         }
     }
 
+    // QR factorization to orthonormalize initial block
     std::vector<Complex> tau(b);
     int info = LAPACKE_zgeqrf(LAPACK_COL_MAJOR, N, b,
                               reinterpret_cast<lapack_complex_double*>(V_curr.data()), N,
                               reinterpret_cast<lapack_complex_double*>(tau.data()));
     if (info != 0) {
-        std::cerr << "Block Lanczos: initial QR factorization failed with info = " << info << std::endl;
+        std::cerr << "Block Lanczos: initial QR factorization failed (info=" << info << ")" << std::endl;
         return;
     }
 
@@ -960,87 +945,99 @@ void block_lanczos(std::function<void(const Complex*, Complex*, int)> H, int N, 
                           reinterpret_cast<lapack_complex_double*>(V_curr.data()), N,
                           reinterpret_cast<lapack_complex_double*>(tau.data()));
     if (info != 0) {
-        std::cerr << "Block Lanczos: initial Q extraction failed with info = " << info << std::endl;
+        std::cerr << "Block Lanczos: initial Q extraction failed (info=" << info << ")" << std::endl;
         return;
     }
 
+    // ===== Allocate workspace and storage =====
     std::vector<Complex> V_prev(N * b, Complex(0.0, 0.0));
     std::vector<Complex> B_prev(b * b, Complex(0.0, 0.0));
-
+    
     std::vector<std::vector<Complex>> alpha_blocks;
     std::vector<std::vector<Complex>> beta_blocks;
     alpha_blocks.reserve(max_blocks);
-    beta_blocks.reserve(std::max(0, max_blocks - 1));
+    beta_blocks.reserve(max_blocks);
 
-    Complex one(1.0, 0.0);
-    Complex zero(0.0, 0.0);
-    Complex neg_one(-1.0, 0.0);
+    // BLAS constants
+    const Complex one(1.0, 0.0), zero(0.0, 0.0), neg_one(-1.0, 0.0);
 
+    // Workspace buffers
     std::vector<Complex> W(N * b);
     std::vector<Complex> Aj(b * b);
     std::vector<Complex> correction(b * b);
     std::vector<Complex> B_next(b * b);
     std::vector<Complex> residual_block(b);
-
     std::vector<double> residuals(target_eigs, 1e12);
-
+    
     ComplexVector column_buffer(N);
     int basis_index = 0;
 
-    auto build_projected_matrix = [&](std::vector<Complex>& matrix, int blocks) {
-        const int total_dim = blocks * b;
+    // ===== Lambda to build block-tridiagonal projected matrix =====
+    auto build_projected_matrix = [&](std::vector<Complex>& matrix, int num_blocks) {
+        const int total_dim = num_blocks * b;
         matrix.assign(total_dim * total_dim, Complex(0.0, 0.0));
 
-        for (int blk = 0; blk < blocks; ++blk) {
+        // Fill diagonal blocks (alpha)
+        for (int blk = 0; blk < num_blocks; ++blk) {
             const auto& A = alpha_blocks[blk];
+            const int offset = blk * b;
             for (int col = 0; col < b; ++col) {
                 for (int row = 0; row < b; ++row) {
-                    matrix[(blk * b + row) + (blk * b + col) * total_dim] = A[row + col * b];
+                    matrix[(offset + row) + (offset + col) * total_dim] = A[row + col * b];
                 }
             }
         }
 
-        for (int blk = 0; blk < blocks - 1; ++blk) {
+        // Fill off-diagonal blocks (beta and beta†)
+        for (int blk = 0; blk < num_blocks - 1; ++blk) {
             const auto& B = beta_blocks[blk];
+            const int offset = blk * b;
             for (int col = 0; col < b; ++col) {
                 for (int row = 0; row < b; ++row) {
-                    matrix[((blk + 1) * b + row) + (blk * b + col) * total_dim] = B[row + col * b];
-                    matrix[(blk * b + row) + ((blk + 1) * b + col) * total_dim] = std::conj(B[col + row * b]);
+                    // Lower block: B
+                    matrix[(offset + b + row) + (offset + col) * total_dim] = B[row + col * b];
+                    // Upper block: B†
+                    matrix[(offset + row) + (offset + b + col) * total_dim] = std::conj(B[col + row * b]);
                 }
             }
         }
     };
 
+    // ===== Main Block Lanczos iteration =====
     for (int iter = 0; iter < max_blocks; ++iter) {
         std::cout << "Block Lanczos iteration " << iter + 1 << " / " << max_blocks << std::endl;
 
+        // Store current basis block to disk
         for (int col = 0; col < b; ++col) {
             for (int row = 0; row < N; ++row) {
                 column_buffer[row] = V_curr[row + col * N];
             }
-            if (!write_basis_vector(temp_dir, basis_index, column_buffer, N)) {
-                std::cerr << "Block Lanczos: failed to write basis vector " << basis_index << std::endl;
+            if (!write_basis_vector(temp_dir, basis_index++, column_buffer, N)) {
+                std::cerr << "Block Lanczos: failed to write basis vector " << basis_index - 1 << std::endl;
             }
-            ++basis_index;
         }
 
+        // Apply Hamiltonian to each column: W = H * V_curr
         for (int col = 0; col < b; ++col) {
             H(&V_curr[col * N], &W[col * N], N);
         }
 
+        // Compute Rayleigh quotient block: Aj = V_curr† * W
         cblas_zgemm(CblasColMajor, CblasConjTrans, CblasNoTrans,
                     b, b, N, &one, V_curr.data(), N, W.data(), N,
                     &zero, Aj.data(), b);
 
+        // Enforce Hermiticity of Aj (symmetrize and make diagonal real)
         for (int col = 0; col < b; ++col) {
             Aj[col * b + col] = Complex(std::real(Aj[col * b + col]), 0.0);
             for (int row = col + 1; row < b; ++row) {
-                Complex avg = Complex(0.5) * (Aj[row + col * b] + std::conj(Aj[col + row * b]));
+                const Complex avg = 0.5 * (Aj[row + col * b] + std::conj(Aj[col + row * b]));
                 Aj[row + col * b] = avg;
                 Aj[col + row * b] = std::conj(avg);
             }
         }
 
+        // Block recurrence: W = W - V_curr * Aj - V_prev * B_prev†
         cblas_zgemm(CblasColMajor, CblasNoTrans, CblasNoTrans,
                     N, b, b, &neg_one, V_curr.data(), N, Aj.data(), b,
                     &one, W.data(), N);
@@ -1051,6 +1048,7 @@ void block_lanczos(std::function<void(const Complex*, Complex*, int)> H, int N, 
                         &one, W.data(), N);
         }
 
+        // Reorthogonalize W against V_curr (and V_prev if needed)
         cblas_zgemm(CblasColMajor, CblasConjTrans, CblasNoTrans,
                     b, b, N, &one, V_curr.data(), N, W.data(), N,
                     &zero, correction.data(), b);
@@ -1067,58 +1065,65 @@ void block_lanczos(std::function<void(const Complex*, Complex*, int)> H, int N, 
                         &one, W.data(), N);
         }
 
+        // Store alpha and beta blocks
         alpha_blocks.push_back(Aj);
         if (iter > 0) {
             beta_blocks.push_back(B_prev);
         }
 
+        // QR factorization: W = V_next * B_next
         std::fill(tau.begin(), tau.end(), Complex(0.0, 0.0));
         info = LAPACKE_zgeqrf(LAPACK_COL_MAJOR, N, b,
                               reinterpret_cast<lapack_complex_double*>(W.data()), N,
                               reinterpret_cast<lapack_complex_double*>(tau.data()));
         if (info != 0) {
-            std::cerr << "Block Lanczos: zgeqrf failed with info = " << info << std::endl;
+            std::cerr << "Block Lanczos: QR factorization failed (info=" << info << ")" << std::endl;
             break;
         }
 
+        // Extract upper triangular R factor (B_next)
         std::fill(B_next.begin(), B_next.end(), Complex(0.0, 0.0));
         for (int col = 0; col < b; ++col) {
-            for (int row = 0; row <= col && row < N; ++row) {
+            for (int row = 0; row <= std::min(col, N - 1); ++row) {
                 B_next[row + col * b] = W[row + col * N];
             }
         }
 
+        // Check for breakdown: if any diagonal of R is too small
         double min_diag = std::numeric_limits<double>::max();
         for (int i = 0; i < b; ++i) {
             min_diag = std::min(min_diag, std::abs(B_next[i + i * b]));
         }
 
+        // Extract orthonormal Q factor
         info = LAPACKE_zungqr(LAPACK_COL_MAJOR, N, b, b,
                               reinterpret_cast<lapack_complex_double*>(W.data()), N,
                               reinterpret_cast<lapack_complex_double*>(tau.data()));
         if (info != 0) {
-            std::cerr << "Block Lanczos: zungqr failed with info = " << info << std::endl;
+            std::cerr << "Block Lanczos: Q extraction failed (info=" << info << ")" << std::endl;
             break;
         }
 
+        // ===== Check convergence periodically =====
         const int total_blocks = static_cast<int>(alpha_blocks.size());
         const int total_dim = total_blocks * b;
+        
         if (total_dim >= target_eigs) {
             std::vector<Complex> T_matrix;
             build_projected_matrix(T_matrix, total_blocks);
 
             std::vector<double> evals(total_dim);
-            int info_eig = LAPACKE_zheevd(LAPACK_COL_MAJOR, 'V', 'U', total_dim,
-                                          reinterpret_cast<lapack_complex_double*>(T_matrix.data()),
-                                          total_dim, evals.data());
-            if (info_eig != 0) {
-                std::cerr << "Block Lanczos: zheevd failed with info = " << info_eig << std::endl;
-            } else {
-                int available = std::min(target_eigs, total_dim);
-
-                bool have_next = (min_diag > breakdown_tol) && (iter + 1 < max_blocks);
+            const int info_eig = LAPACKE_zheevd(LAPACK_COL_MAJOR, 'V', 'U', total_dim,
+                                                reinterpret_cast<lapack_complex_double*>(T_matrix.data()),
+                                                total_dim, evals.data());
+            
+            if (info_eig == 0) {
+                const int available = std::min(target_eigs, total_dim);
+                const bool have_next_block = (min_diag > breakdown_tol) && (iter + 1 < max_blocks);
+                
+                // Estimate residuals: ||B_next * y_last_block||
                 for (int k = 0; k < available; ++k) {
-                    if (have_next) {
+                    if (have_next_block) {
                         cblas_zgemv(CblasColMajor, CblasNoTrans,
                                     b, b, &one, B_next.data(), b,
                                     &T_matrix[(total_blocks - 1) * b + k * total_dim], 1,
@@ -1129,31 +1134,39 @@ void block_lanczos(std::function<void(const Complex*, Complex*, int)> H, int N, 
                     }
                 }
 
+                // Check if enough eigenvalues have converged
                 int converged_count = 0;
                 for (int k = 0; k < available; ++k) {
-                    if (residuals[k] <= tol) {
+                    if (residuals[k] <= convergence_tol) {
                         ++converged_count;
                     }
                 }
+                
                 if (converged_count >= target_eigs) {
+                    std::cout << "Block Lanczos: " << converged_count << " eigenvalues converged" << std::endl;
                     break;
                 }
+            } else {
+                std::cerr << "Block Lanczos: intermediate eigensolve failed (info=" << info_eig << ")" << std::endl;
             }
         }
 
+        // Check for breakdown
         if (min_diag < breakdown_tol) {
-            std::cout << "Block Lanczos: Breakdown detected (min diag " << min_diag << "), stopping." << std::endl;
+            std::cout << "Block Lanczos: breakdown detected (min R diagonal = " << min_diag << ")" << std::endl;
             break;
         }
 
+        // Update for next iteration
         V_prev = V_curr;
         V_curr = W;
         B_prev = B_next;
     }
 
+    // ===== Final eigensolve of projected problem =====
     const int total_blocks = static_cast<int>(alpha_blocks.size());
     if (total_blocks == 0) {
-        std::cerr << "Block Lanczos: no Krylov basis generated." << std::endl;
+        std::cerr << "Block Lanczos: no Krylov basis generated" << std::endl;
         system(("rm -rf " + temp_dir).c_str());
         return;
     }
@@ -1167,7 +1180,7 @@ void block_lanczos(std::function<void(const Complex*, Complex*, int)> H, int N, 
                           reinterpret_cast<lapack_complex_double*>(T_matrix.data()), total_dim,
                           evals.data());
     if (info != 0) {
-        std::cerr << "Block Lanczos: final zheevd failed with info = " << info << std::endl;
+        std::cerr << "Block Lanczos: final eigensolve failed (info=" << info << ")" << std::endl;
         system(("rm -rf " + temp_dir).c_str());
         return;
     }
@@ -1175,28 +1188,31 @@ void block_lanczos(std::function<void(const Complex*, Complex*, int)> H, int N, 
     const int output_eigs = std::min(target_eigs, total_dim);
     eigenvalues.assign(evals.begin(), evals.begin() + output_eigs);
 
+    // ===== Reconstruct eigenvectors if requested =====
     if (compute_eigenvectors) {
+        std::cout << "Reconstructing " << output_eigs << " eigenvectors..." << std::endl;
+        
         std::vector<ComplexVector> full_vectors(output_eigs, ComplexVector(N, Complex(0.0, 0.0)));
         std::vector<ComplexVector> compensation(output_eigs, ComplexVector(N, Complex(0.0, 0.0)));
         ComplexVector basis_vector(N);
 
+        // Kahan compensated summation for numerical stability
         for (int block_idx = 0; block_idx < total_blocks; ++block_idx) {
             for (int col = 0; col < b; ++col) {
-                int basis_id = block_idx * b + col;
-                if (basis_id >= basis_index) {
-                    break;
-                }
+                const int basis_id = block_idx * b + col;
+                if (basis_id >= basis_index) break;
+                
                 basis_vector = read_basis_vector(temp_dir, basis_id, N);
 
                 for (int vec_idx = 0; vec_idx < output_eigs; ++vec_idx) {
-                    Complex coef = T_matrix[basis_id + vec_idx * total_dim];
+                    const Complex coef = T_matrix[basis_id + vec_idx * total_dim];
                     ComplexVector& target = full_vectors[vec_idx];
                     ComplexVector& comp = compensation[vec_idx];
 
                     for (int r = 0; r < N; ++r) {
-                        Complex contrib = basis_vector[r] * coef;
-                        Complex y = contrib - comp[r];
-                        Complex t = target[r] + y;
+                        const Complex contrib = basis_vector[r] * coef;
+                        const Complex y = contrib - comp[r];
+                        const Complex t = target[r] + y;
                         comp[r] = (t - target[r]) - y;
                         target[r] = t;
                     }
@@ -1204,58 +1220,65 @@ void block_lanczos(std::function<void(const Complex*, Complex*, int)> H, int N, 
             }
         }
 
+        // Normalize and save eigenvectors
         for (int vec_idx = 0; vec_idx < output_eigs; ++vec_idx) {
             ComplexVector& vec = full_vectors[vec_idx];
-            double norm = cblas_dznrm2(N, vec.data(), 1);
+            const double norm = cblas_dznrm2(N, vec.data(), 1);
+            
             if (norm > 0.0) {
-                Complex scale = Complex(1.0 / norm, 0.0);
+                const Complex scale = Complex(1.0 / norm, 0.0);
                 cblas_zscal(N, &scale, vec.data(), 1);
             }
 
-            std::string evec_file = evec_dir + "/eigenvector_" + std::to_string(vec_idx) + ".dat";
+            // Save binary format
+            const std::string evec_file = evec_dir + "/eigenvector_" + std::to_string(vec_idx) + ".dat";
             std::ofstream evec_out(evec_file, std::ios::binary);
-            if (!evec_out) {
-                std::cerr << "Block Lanczos: failed to open " << evec_file << " for writing" << std::endl;
-            } else {
+            if (evec_out) {
                 evec_out.write(reinterpret_cast<const char*>(vec.data()), N * sizeof(Complex));
                 evec_out.close();
+            } else {
+                std::cerr << "Block Lanczos: failed to write " << evec_file << std::endl;
             }
 
-            std::string evec_text_file = evec_dir + "/eigenvector_" + std::to_string(vec_idx) + ".txt";
+            // Save text format
+            const std::string evec_text_file = evec_dir + "/eigenvector_" + std::to_string(vec_idx) + ".txt";
             std::ofstream evec_text_out(evec_text_file);
             if (evec_text_out) {
                 evec_text_out << std::scientific << std::setprecision(15);
                 for (int r = 0; r < N; ++r) {
-                    evec_text_out << std::real(vec[r]) << " " << std::imag(vec[r]) << std::endl;
+                    evec_text_out << std::real(vec[r]) << " " << std::imag(vec[r]) << "\n";
                 }
                 evec_text_out.close();
             }
         }
     }
 
-    std::string eigenvalue_file = evec_dir + "/eigenvalues.dat";
+    // ===== Save eigenvalues =====
+    const std::string eigenvalue_file = evec_dir + "/eigenvalues.dat";
     std::ofstream eval_out(eigenvalue_file, std::ios::binary);
-    if (!eval_out) {
-        std::cerr << "Block Lanczos: cannot open " << eigenvalue_file << " for writing" << std::endl;
-    } else {
-        size_t count = eigenvalues.size();
+    if (eval_out) {
+        const size_t count = eigenvalues.size();
         eval_out.write(reinterpret_cast<const char*>(&count), sizeof(size_t));
         eval_out.write(reinterpret_cast<const char*>(eigenvalues.data()), count * sizeof(double));
         eval_out.close();
+    } else {
+        std::cerr << "Block Lanczos: failed to write " << eigenvalue_file << std::endl;
     }
 
-    std::string eigenvalue_text_file = evec_dir + "/eigenvalues.txt";
+    const std::string eigenvalue_text_file = evec_dir + "/eigenvalues.txt";
     std::ofstream eval_text_out(eigenvalue_text_file);
     if (eval_text_out) {
         eval_text_out << std::scientific << std::setprecision(15);
-        eval_text_out << eigenvalues.size() << std::endl;
-        for (double val : eigenvalues) {
-            eval_text_out << val << std::endl;
+        eval_text_out << eigenvalues.size() << "\n";
+        for (const double val : eigenvalues) {
+            eval_text_out << val << "\n";
         }
         eval_text_out.close();
     }
 
+    // Cleanup temporary files
     system(("rm -rf " + temp_dir).c_str());
+    std::cout << "Block Lanczos: completed successfully with " << output_eigs << " eigenvalues" << std::endl;
 }
 // Chebyshev Filtered Lanczos algorithm with automatic spectrum range estimation
 void chebyshev_filtered_lanczos(std::function<void(const Complex*, Complex*, int)> H, int N, 
