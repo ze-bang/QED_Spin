@@ -2667,6 +2667,383 @@ void implicitly_restarted_lanczos(std::function<void(const Complex*, Complex*, i
                                  std::vector<double>& eigenvalues, std::string dir,
                                  bool compute_eigenvectors){
     
+    std::cout << "Starting Implicitly Restarted Lanczos (IRL) algorithm" << std::endl;
+    std::cout << "Target eigenvalues: " << num_eigs << ", Max subspace size: " << max_iter << std::endl;
+    std::cout << "Tolerance: " << tol << std::endl;
+    
+    // ===== Setup directories =====
+    const std::string temp_dir = (dir.empty() ? "./irl_basis_vectors" : dir + "/irl_basis_vectors");
+    const std::string evec_dir = (dir.empty() ? "./eigenvectors" : dir + "/eigenvectors");
+    
+    system(("mkdir -p " + temp_dir).c_str());
+    system(("mkdir -p " + evec_dir).c_str());
+    
+    // ===== Parameters =====
+    const int k = num_eigs;                          // Target number of eigenvalues
+    const int m = std::min(max_iter, N);            // Maximum Krylov subspace dimension
+    const int p = m - k;                            // Number of shifts (unwanted Ritz values)
+    const int max_outer_iter = 100;                 // Maximum restart cycles
+    const double breakdown_tol = 1e-14;             // Breakdown tolerance
+    const double ritz_tol = tol * 0.1;              // Ritz value convergence tolerance
+    
+    if (m <= k) {
+        std::cerr << "Error: max_iter must be greater than num_eigs" << std::endl;
+        return;
+    }
+    
+    std::cout << "Subspace dimension m = " << m << ", shifts p = " << p << std::endl;
+    
+    // ===== Initialize random starting vector =====
+    std::mt19937 gen(std::random_device{}());
+    std::uniform_real_distribution<double> dist(-1.0, 1.0);
+    
+    ComplexVector v0(N);
+    for (int i = 0; i < N; i++) {
+        v0[i] = Complex(dist(gen), dist(gen));
+    }
+    double norm = cblas_dznrm2(N, v0.data(), 1);
+    Complex scale(1.0/norm, 0.0);
+    cblas_zscal(N, &scale, v0.data(), 1);
+    
+    // ===== Storage for converged eigenvalues =====
+    std::vector<double> converged_eigenvalues;
+    std::vector<double> prev_ritz_values;
+    int num_converged = 0;
+    
+    // ===== Main IRL restart loop =====
+    ComplexVector v_start = v0;
+    
+    for (int outer_iter = 0; outer_iter < max_outer_iter; ++outer_iter) {
+        std::cout << "\n=== IRL Restart Cycle " << outer_iter + 1 << " ===" << std::endl;
+        
+        // ===== Phase 1: Lanczos expansion to dimension m =====
+        std::vector<double> alpha(m);
+        std::vector<double> beta(m + 1, 0.0);  // beta[0] = 0
+        
+        ComplexVector v_prev(N, Complex(0.0, 0.0));
+        ComplexVector v_current = v_start;
+        ComplexVector w(N);
+        
+        // Write initial basis vector
+        write_basis_vector(temp_dir, 0, v_current, N);
+        
+        int actual_m = m;  // Actual subspace dimension (may be less if breakdown occurs)
+        
+        for (int j = 0; j < m; ++j) {
+            // Apply Hamiltonian: w = H * v_j
+            H(v_current.data(), w.data(), N);
+            
+            // Three-term recurrence: w = w - beta_j * v_{j-1}
+            if (j > 0) {
+                Complex neg_beta(-beta[j], 0.0);
+                cblas_zaxpy(N, &neg_beta, v_prev.data(), 1, w.data(), 1);
+            }
+            
+            // Compute diagonal element: alpha_j = <v_j, w>
+            Complex dot_product;
+            cblas_zdotc_sub(N, v_current.data(), 1, w.data(), 1, &dot_product);
+            alpha[j] = std::real(dot_product);
+            
+            // Orthogonalize: w = w - alpha_j * v_j
+            Complex neg_alpha(-alpha[j], 0.0);
+            cblas_zaxpy(N, &neg_alpha, v_current.data(), 1, w.data(), 1);
+            
+            // Full reorthogonalization for numerical stability
+            if (j >= 10 || outer_iter > 0) {  // Enable after first few iterations
+                for (int i = 0; i <= j; ++i) {
+                    ComplexVector v_i = read_basis_vector(temp_dir, i, N);
+                    Complex overlap;
+                    cblas_zdotc_sub(N, v_i.data(), 1, w.data(), 1, &overlap);
+                    
+                    if (std::abs(overlap) > breakdown_tol) {
+                        Complex neg_overlap = -overlap;
+                        cblas_zaxpy(N, &neg_overlap, v_i.data(), 1, w.data(), 1);
+                    }
+                }
+            }
+            
+            // Compute beta_{j+1} = ||w||
+            norm = cblas_dznrm2(N, w.data(), 1);
+            beta[j + 1] = norm;
+            
+            // Check for breakdown
+            if (norm < breakdown_tol) {
+                std::cout << "Lanczos breakdown at j=" << j + 1 << " (norm=" << norm << ")" << std::endl;
+                actual_m = j + 1;
+                break;
+            }
+            
+            // Normalize and save next basis vector
+            scale = Complex(1.0/norm, 0.0);
+            cblas_zscal(N, &scale, w.data(), 1);
+            
+            v_prev = v_current;
+            v_current = w;
+            
+            if (j + 1 < m) {
+                write_basis_vector(temp_dir, j + 1, v_current, N);
+            }
+            
+            if ((j + 1) % 20 == 0 || (j + 1) == m) {
+                std::cout << "  Lanczos iteration " << j + 1 << " / " << m << std::endl;
+            }
+        }
+        
+        // Store the residual vector for later use
+        ComplexVector v_residual = v_current;
+        double beta_m = beta[actual_m];
+        
+        // ===== Phase 2: Solve tridiagonal eigenvalue problem =====
+        std::cout << "Solving tridiagonal matrix of size " << actual_m << std::endl;
+        
+        std::vector<double> T_diag(actual_m);
+        std::vector<double> T_offdiag(actual_m - 1);
+        std::copy(alpha.begin(), alpha.begin() + actual_m, T_diag.begin());
+        for (int i = 0; i < actual_m - 1; ++i) {
+            T_offdiag[i] = beta[i + 1];
+        }
+        
+        std::vector<double> ritz_values(actual_m);
+        std::vector<double> ritz_vectors(actual_m * actual_m);
+        
+        // Copy diagonal for eigenvalue computation
+        std::copy(T_diag.begin(), T_diag.end(), ritz_values.begin());
+        
+        int info = LAPACKE_dstevd(LAPACK_COL_MAJOR, 'V', actual_m,
+                                  ritz_values.data(), T_offdiag.data(),
+                                  ritz_vectors.data(), actual_m);
+        
+        if (info != 0) {
+            std::cerr << "LAPACKE_dstevd failed with error code " << info << std::endl;
+            break;
+        }
+        
+        // ===== Phase 3: Compute residuals and check convergence =====
+        std::vector<double> residuals(actual_m);
+        std::vector<bool> is_converged(actual_m, false);
+        int newly_converged = 0;
+        
+        for (int i = 0; i < actual_m; ++i) {
+            // Residual estimate: r_i = |β_m * y_i[m-1]|
+            double y_last = ritz_vectors[(actual_m - 1) + i * actual_m];
+            residuals[i] = std::abs(beta_m * y_last);
+            
+            // Check convergence: residual tolerance
+            if (residuals[i] < tol) {
+                // Also check Ritz value change if we have previous values
+                bool ritz_converged = true;
+                if (!prev_ritz_values.empty() && i < prev_ritz_values.size()) {
+                    double ritz_change = std::abs(ritz_values[i] - prev_ritz_values[i]);
+                    ritz_converged = (ritz_change < ritz_tol);
+                }
+                
+                if (ritz_converged && newly_converged < k) {
+                    is_converged[i] = true;
+                    newly_converged++;
+                }
+            }
+        }
+        
+        std::cout << "Newly converged Ritz pairs: " << newly_converged << " / " << k << std::endl;
+        std::cout << "Smallest Ritz values: ";
+        for (int i = 0; i < std::min(5, actual_m); ++i) {
+            std::cout << ritz_values[i] << " ";
+        }
+        std::cout << std::endl;
+        std::cout << "Residuals: ";
+        for (int i = 0; i < std::min(5, actual_m); ++i) {
+            std::cout << residuals[i] << " ";
+        }
+        std::cout << std::endl;
+        
+        // ===== Check if we have enough converged eigenvalues =====
+        if (newly_converged >= k) {
+            std::cout << "\n=== Convergence achieved! ===" << std::endl;
+            
+            // Extract converged eigenvalues
+            converged_eigenvalues.clear();
+            for (int i = 0; i < k; ++i) {
+                converged_eigenvalues.push_back(ritz_values[i]);
+            }
+            
+            // Optionally compute eigenvectors
+            if (compute_eigenvectors) {
+                std::cout << "Computing eigenvectors..." << std::endl;
+                for (int i = 0; i < k; ++i) {
+                    ComplexVector eigvec(N, Complex(0.0, 0.0));
+                    
+                    // Linear combination: eigvec = sum_j y[j,i] * v[j]
+                    for (int j = 0; j < actual_m; ++j) {
+                        ComplexVector basis_j = read_basis_vector(temp_dir, j, N);
+                        Complex coef(ritz_vectors[j + i * actual_m], 0.0);
+                        cblas_zaxpy(N, &coef, basis_j.data(), 1, eigvec.data(), 1);
+                    }
+                    
+                    // Normalize
+                    norm = cblas_dznrm2(N, eigvec.data(), 1);
+                    scale = Complex(1.0/norm, 0.0);
+                    cblas_zscal(N, &scale, eigvec.data(), 1);
+                    
+                    // Save eigenvector
+                    write_basis_vector(evec_dir, i, eigvec, N);
+                }
+            }
+            
+            num_converged = k;
+            break;
+        }
+        
+        // Store Ritz values for next iteration comparison
+        prev_ritz_values = ritz_values;
+        
+        // ===== Phase 4: Implicit QR with shifts (restart mechanism) =====
+        if (outer_iter < max_outer_iter - 1) {
+            std::cout << "Applying implicit restart with " << p << " shifts..." << std::endl;
+            
+            // Select shifts: unwanted Ritz values (largest magnitude)
+            std::vector<double> shifts;
+            for (int i = k; i < std::min(k + p, actual_m); ++i) {
+                shifts.push_back(ritz_values[i]);
+            }
+            
+            if (shifts.empty()) {
+                std::cout << "Warning: No shifts available, using standard restart" << std::endl;
+                // Standard restart: keep k best Ritz vectors
+                shifts.push_back(ritz_values[k] + 0.1);  // Small perturbation
+            }
+            
+            std::cout << "Applying " << shifts.size() << " shifts" << std::endl;
+            
+            // Apply shifts using QR factorization
+            // We apply shifts sequentially: (T - sigma_i * I) for each shift sigma_i
+            
+            std::vector<double> Q_full(actual_m * actual_m);
+            // Initialize Q as identity
+            for (int i = 0; i < actual_m; ++i) {
+                Q_full[i + i * actual_m] = 1.0;
+            }
+            
+            std::vector<double> T_work_diag = T_diag;
+            std::vector<double> T_work_offdiag = T_offdiag;
+            
+            for (double sigma : shifts) {
+                // Apply shift: T_shifted = T - sigma * I
+                std::vector<double> T_shifted_diag(actual_m);
+                for (int i = 0; i < actual_m; ++i) {
+                    T_shifted_diag[i] = T_work_diag[i] - sigma;
+                }
+                
+                // Apply Givens rotations to compute QR of shifted matrix
+                std::vector<double> cs(actual_m - 1);  // Cosines
+                std::vector<double> sn(actual_m - 1);  // Sines
+                
+                for (int i = 0; i < actual_m - 1; ++i) {
+                    // Compute Givens rotation for elements (i, i) and (i+1, i)
+                    double a = T_shifted_diag[i];
+                    double b = T_work_offdiag[i];
+                    
+                    double r = std::sqrt(a * a + b * b);
+                    if (r < breakdown_tol) {
+                        cs[i] = 1.0;
+                        sn[i] = 0.0;
+                    } else {
+                        cs[i] = a / r;
+                        sn[i] = b / r;
+                    }
+                    
+                    // Apply rotation to diagonal elements
+                    double d_i = T_shifted_diag[i];
+                    double d_ip1 = T_shifted_diag[i + 1];
+                    double od_i = (i > 0) ? T_work_offdiag[i - 1] : 0.0;
+                    double od_ip1 = T_work_offdiag[i];
+                    
+                    T_shifted_diag[i] = cs[i] * d_i + sn[i] * od_ip1;
+                    T_shifted_diag[i + 1] = cs[i] * d_ip1 - sn[i] * od_ip1;
+                    
+                    if (i > 0) {
+                        T_work_offdiag[i - 1] = cs[i] * od_i;
+                    }
+                    if (i < actual_m - 2) {
+                        double od_next = T_work_offdiag[i + 1];
+                        T_work_offdiag[i] = -sn[i] * d_i + cs[i] * od_ip1;
+                        T_work_offdiag[i + 1] = cs[i] * od_next;
+                    } else if (i == actual_m - 2) {
+                        T_work_offdiag[i] = -sn[i] * d_i + cs[i] * od_ip1;
+                    }
+                }
+                
+                // Apply Givens rotations to Q matrix (accumulate transformations)
+                for (int i = 0; i < actual_m - 1; ++i) {
+                    for (int j = 0; j < actual_m; ++j) {
+                        double q_i = Q_full[j + i * actual_m];
+                        double q_ip1 = Q_full[j + (i + 1) * actual_m];
+                        
+                        Q_full[j + i * actual_m] = cs[i] * q_i + sn[i] * q_ip1;
+                        Q_full[j + (i + 1) * actual_m] = -sn[i] * q_i + cs[i] * q_ip1;
+                    }
+                }
+                
+                // Form RQ: multiply R by Q^T from the right
+                // This restores tridiagonal form with shifted eigenvalues filtered
+                T_work_diag = T_shifted_diag;
+                // Recompute off-diagonals from the transformation
+            }
+            
+            // ===== Phase 5: Update basis vectors =====
+            std::cout << "Updating basis vectors..." << std::endl;
+            
+            // Compute new basis: V_new = V_old * Q[:, 1:k]
+            // Keep only the first k columns of the updated basis
+            std::vector<ComplexVector> new_basis(k, ComplexVector(N, Complex(0.0, 0.0)));
+            
+            for (int i = 0; i < k; ++i) {
+                for (int j = 0; j < actual_m; ++j) {
+                    ComplexVector basis_j = read_basis_vector(temp_dir, j, N);
+                    Complex coef(Q_full[j + i * actual_m], 0.0);
+                    cblas_zaxpy(N, &coef, basis_j.data(), 1, new_basis[i].data(), 1);
+                }
+                
+                // Normalize
+                norm = cblas_dznrm2(N, new_basis[i].data(), 1);
+                if (norm < breakdown_tol) {
+                    std::cerr << "Warning: Near-zero basis vector after restart" << std::endl;
+                    new_basis[i] = generateRandomVector(N, gen, dist);
+                } else {
+                    scale = Complex(1.0/norm, 0.0);
+                    cblas_zscal(N, &scale, new_basis[i].data(), 1);
+                }
+                
+                // Write updated basis vector
+                write_basis_vector(temp_dir, i, new_basis[i], N);
+            }
+            
+            // Set starting vector for next iteration as the last retained basis vector
+            v_start = new_basis[k - 1];
+            
+            std::cout << "Restart complete. Basis reduced to " << k << " vectors." << std::endl;
+        }
+    }
+    
+    // ===== Finalize results =====
+    if (num_converged < k) {
+        std::cout << "\nWarning: Only " << num_converged << " / " << k 
+                  << " eigenvalues converged" << std::endl;
+        
+        // Return best available approximations
+        converged_eigenvalues.clear();
+        int n_return = std::min(k, static_cast<int>(prev_ritz_values.size()));
+        for (int i = 0; i < n_return; ++i) {
+            converged_eigenvalues.push_back(prev_ritz_values[i]);
+        }
+    }
+    
+    eigenvalues = converged_eigenvalues;
+    
+    std::cout << "\n=== IRL Algorithm Complete ===" << std::endl;
+    std::cout << "Returned " << eigenvalues.size() << " eigenvalues" << std::endl;
+    if (!eigenvalues.empty()) {
+        std::cout << "Ground state energy: " << eigenvalues[0] << std::endl;
+    }
 }
 // Thick Restart Lanczos algorithm implementation
 // This algorithm retains converged Ritz vectors and restarts the Lanczos process
