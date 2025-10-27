@@ -103,8 +103,6 @@ enum class DiagonalizationMethod {
     BLOCK_LANCZOS,         // Block Lanczos
     SHIFT_INVERT,          // Shift-invert Lanczos
     SHIFT_INVERT_ROBUST,   // Robust shift-invert Lanczos
-    CG,                    // Conjugate gradient
-    BLOCK_CG,              // Block conjugate gradient
     DAVIDSON,              // Davidson method
     BICG,                  // Biconjugate gradient
     LOBPCG,                // Locally optimal block preconditioned conjugate gradient
@@ -157,7 +155,7 @@ struct EDParameters {
     
     // ========== Method-Specific Parameters ==========
     double shift = 0.0;        // For shift-invert methods
-    int block_size = 10;       // For block methods
+    int block_size = 4;       // For block methods
     int max_subspace = 100;    // For Davidson method
     
     // ========== TPQ-Specific Parameters ==========
@@ -373,25 +371,6 @@ EDResults exact_diagonalization_core(
                                 params.output_dir, params.compute_eigenvectors);
             break;
             
-        case DiagonalizationMethod::CG:
-            std::cout << "Using conjugate gradient method" << std::endl;
-            cg_diagonalization(H, hilbert_space_dim, params.max_iterations, 
-                             params.num_eigenvalues, params.tolerance, 
-                             results.eigenvalues, params.output_dir, 
-                             params.compute_eigenvectors);
-            break;
-            
-        case DiagonalizationMethod::BLOCK_CG:
-            {
-                std::cout << "Using block conjugate gradient method with block size = " 
-                         << params.block_size << std::endl;
-                std::vector<ComplexVector> eigenvectors;
-                block_cg(H, hilbert_space_dim, params.max_iterations, 
-                      params.block_size, params.tolerance, 
-                      results.eigenvalues, eigenvectors, params.output_dir);
-            }
-            break;
-            
         case DiagonalizationMethod::DAVIDSON:
             {
                 std::cout << "Using Davidson method" << std::endl;
@@ -552,6 +531,42 @@ EDResults exact_diagonalization_core(
                 std::cerr << "ARPACK advanced solver returned info=" << info << std::endl;
             }
             break; }
+        
+        // Methods not yet fully implemented
+        case DiagonalizationMethod::SHIFT_INVERT_ROBUST:
+            std::cerr << "SHIFT_INVERT_ROBUST not yet implemented. Using standard SHIFT_INVERT instead." << std::endl;
+            shift_invert_lanczos(H, hilbert_space_dim, params.max_iterations, 
+                                params.num_eigenvalues, params.shift, 
+                                params.tolerance, results.eigenvalues, 
+                                params.output_dir, params.compute_eigenvectors);
+            break;
+        
+        case DiagonalizationMethod::mTPQ_MPI:
+            std::cerr << "Error: mTPQ_MPI requires MPI build. Use standard mTPQ instead." << std::endl;
+            throw std::runtime_error("mTPQ_MPI not available");
+            break;
+        
+        case DiagonalizationMethod::FTLM:
+            std::cerr << "Error: FTLM (Finite Temperature Lanczos Method) not yet implemented." << std::endl;
+            std::cerr << "Please use FULL diagonalization with thermodynamics or mTPQ/cTPQ methods." << std::endl;
+            throw std::runtime_error("FTLM not yet implemented");
+            break;
+        
+        case DiagonalizationMethod::LTLM:
+            std::cerr << "Error: LTLM (Low Temperature Lanczos Method) not yet implemented." << std::endl;
+            std::cerr << "Please use standard Lanczos or mTPQ/cTPQ methods." << std::endl;
+            throw std::runtime_error("LTLM not yet implemented");
+            break;
+        
+        case DiagonalizationMethod::LANCZOS_GPU:
+            std::cerr << "Error: LANCZOS_GPU requires CUDA build." << std::endl;
+            throw std::runtime_error("GPU methods not available in this build");
+            break;
+        
+        case DiagonalizationMethod::LANCZOS_GPU_FIXED_SZ:
+            std::cerr << "Error: LANCZOS_GPU_FIXED_SZ requires CUDA build." << std::endl;
+            throw std::runtime_error("GPU methods not available in this build");
+            break;
 
         default:
             std::cerr << "Unknown diagonalization method selected" << std::endl;

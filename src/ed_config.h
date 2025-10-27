@@ -33,7 +33,7 @@ struct DiagonalizationConfig {
     
     // Method-specific
     double shift = 0.0;           // For shift-invert
-    int block_size = 10;          // For block methods
+    int block_size = 4;          // For block methods
     int max_subspace = 100;       // For Davidson
 };
 
@@ -286,6 +286,11 @@ namespace ed_config {
      * @brief Setup default configuration for a method
      */
     EDConfig defaultConfigFor(DiagonalizationMethod method);
+    
+    /**
+     * @brief Get detailed parameter information for a method
+     */
+    std::string getMethodParameterInfo(DiagonalizationMethod method);
 }
 
 #endif // ED_CONFIG_H

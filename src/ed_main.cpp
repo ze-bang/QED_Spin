@@ -189,6 +189,7 @@ void print_help(const char* prog_name) {
     std::cout << "General Options:\n";
     std::cout << "  --config=<file>         Load configuration from file\n";
     std::cout << "  --method=<name>         Diagonalization method (LANCZOS, FULL, mTPQ, etc.)\n";
+    std::cout << "  --method-info=<name>    Show detailed parameters for specific method\n";
     std::cout << "  --num_sites=<n>         Number of sites (auto-detected if omitted)\n";
     std::cout << "  --output=<dir>          Output directory\n\n";
     
@@ -212,14 +213,50 @@ void print_help(const char* prog_name) {
     std::cout << "  --temp_bins=<n>         Number of temperature bins\n\n";
     
     std::cout << "Available Methods:\n";
-    std::cout << "  LANCZOS                 Standard Lanczos (default)\n";
-    std::cout << "  FULL                    Full diagonalization\n";
-    std::cout << "  mTPQ                    Microcanonical TPQ\n";
-    std::cout << "  cTPQ                    Canonical TPQ\n";
-    std::cout << "  ARPACK_SM               ARPACK (smallest eigenvalues)\n";
-    std::cout << "  ARPACK_ADVANCED         ARPACK with advanced options\n";
-    std::cout << "  CG                      Conjugate gradient\n";
-    std::cout << "  DAVIDSON                Davidson method\n\n";
+    std::cout << "  Lanczos Variants:\n";
+    std::cout << "    LANCZOS                Standard Lanczos (default)\n";
+    std::cout << "    LANCZOS_SELECTIVE      Lanczos with selective reorthogonalization\n";
+    std::cout << "    LANCZOS_NO_ORTHO       Lanczos without reorthogonalization (fastest, least stable)\n";
+    std::cout << "    BLOCK_LANCZOS          Block Lanczos for degenerate eigenvalues\n";
+    std::cout << "    SHIFT_INVERT           Shift-invert Lanczos for interior eigenvalues\n";
+    std::cout << "    SHIFT_INVERT_ROBUST    Robust shift-invert (fallback to standard)\n";
+    std::cout << "    KRYLOV_SCHUR           Krylov-Schur method (restarted Lanczos)\n";
+    std::cout << "\n";
+    std::cout << "  Conjugate Gradient Variants:\n";
+    std::cout << "    BICG                   Biconjugate gradient\n";
+    std::cout << "    LOBPCG                 Locally optimal block preconditioned CG\n";
+    std::cout << "\n";
+    std::cout << "  Other Iterative Methods:\n";
+    std::cout << "    DAVIDSON               Davidson method\n";
+    std::cout << "\n";
+    std::cout << "  Full Diagonalization:\n";
+    std::cout << "    FULL                   Complete spectrum (exact, memory intensive)\n";
+    std::cout << "    OSS                    Optimal spectrum solver (adaptive slicing)\n";
+    std::cout << "\n";
+    std::cout << "  Thermal Methods:\n";
+    std::cout << "    mTPQ                   Microcanonical TPQ\n";
+    std::cout << "    cTPQ                   Canonical TPQ\n";
+    std::cout << "    mTPQ_MPI               MPI parallel mTPQ (requires MPI build)\n";
+    std::cout << "    mTPQ_CUDA              GPU-accelerated mTPQ (requires CUDA build)\n";
+    std::cout << "    FTLM                   Finite Temperature Lanczos Method (not yet implemented)\n";
+    std::cout << "    LTLM                   Low Temperature Lanczos Method (not yet implemented)\n";
+    std::cout << "\n";
+    std::cout << "  ARPACK Methods:\n";
+    std::cout << "    ARPACK_SM              ARPACK (smallest eigenvalues)\n";
+    std::cout << "    ARPACK_LM              ARPACK (largest eigenvalues)\n";
+    std::cout << "    ARPACK_SHIFT_INVERT    ARPACK with shift-invert\n";
+    std::cout << "    ARPACK_ADVANCED        ARPACK with advanced multi-attempt strategy\n";
+    std::cout << "\n";
+    std::cout << "  GPU Methods (require CUDA build):\n";
+    std::cout << "    LANCZOS_GPU            GPU-accelerated Lanczos\n";
+    std::cout << "    LANCZOS_GPU_FIXED_SZ   GPU Lanczos for fixed Sz sector\n\n";
+    
+    std::cout << "For detailed parameters of any method, use:\n";
+    std::cout << "  " << prog_name << " --method-info=<METHOD_NAME>\n";
+    std::cout << "\nExample:\n";
+    std::cout << "  " << prog_name << " --method-info=LANCZOS\n";
+    std::cout << "  " << prog_name << " --method-info=LOBPCG\n";
+    std::cout << "  " << prog_name << " --method-info=mTPQ\n\n";
     
     std::cout << "For more options, see documentation or generated config file.\n";
 }
@@ -236,6 +273,20 @@ int main(int argc, char* argv[]) {
             print_help(argv[0]);
             return 0;
         }
+        
+        // Check for --method-info
+        if (arg.find("--method-info=") == 0) {
+            std::string method_name = arg.substr(14);
+            auto method = ed_config::parseMethod(method_name);
+            if (method.has_value()) {
+                std::cout << ed_config::getMethodParameterInfo(method.value());
+            } else {
+                std::cerr << "Error: Unknown method '" << method_name << "'\n";
+                std::cerr << "Use --help to see available methods.\n";
+                return 1;
+            }
+            return 0;
+        }
     }
     
     if (argc < 2) {
@@ -245,6 +296,7 @@ int main(int argc, char* argv[]) {
     
     // Parse configuration
     EDConfig config = EDConfig::fromCommandLine(argc, argv);
+
     
     // Validate
     if (!config.validate()) {
