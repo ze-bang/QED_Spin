@@ -35,6 +35,8 @@ struct DiagonalizationConfig {
     double shift = 0.0;           // For shift-invert
     int block_size = 4;          // For block methods
     int max_subspace = 100;       // For Davidson
+    double target_lower = 0.0;    // For Chebyshev filtered (lower energy bound)
+    double target_upper = 0.0;    // For Chebyshev filtered (upper energy bound)
 };
 
 /**
@@ -157,6 +159,11 @@ public:
     EDConfig& eigenvectors(bool b = true) { diag.compute_eigenvectors = b; return *this; }
     EDConfig& shift(double s) { diag.shift = s; return *this; }
     EDConfig& blockSize(int b) { diag.block_size = b; return *this; }
+    EDConfig& targetRange(double lower, double upper) { 
+        diag.target_lower = lower; 
+        diag.target_upper = upper; 
+        return *this; 
+    }
     
     // Thermal
     EDConfig& samples(int n) { thermal.num_samples = n; return *this; }

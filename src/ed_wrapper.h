@@ -101,6 +101,7 @@ enum class DiagonalizationMethod {
     LANCZOS_SELECTIVE,     // Lanczos with selective reorthogonalization
     LANCZOS_NO_ORTHO,      // Lanczos without reorthogonalization
     BLOCK_LANCZOS,         // Block Lanczos
+    CHEBYSHEV_FILTERED,    // Chebyshev filtered Lanczos for spectral slicing
     SHIFT_INVERT,          // Shift-invert Lanczos
     SHIFT_INVERT_ROBUST,   // Robust shift-invert Lanczos
     DAVIDSON,              // Davidson method
@@ -159,6 +160,8 @@ struct EDParameters {
     double shift = 0.0;        // For shift-invert methods
     int block_size = 4;       // For block methods
     int max_subspace = 100;    // For Davidson method
+    double target_lower = 0.0; // Lower energy bound for Chebyshev filtered (0 = auto)
+    double target_upper = 0.0; // Upper energy bound for Chebyshev filtered (0 = auto)
     
     // ========== TPQ-Specific Parameters ==========
     int num_samples = 1;
@@ -491,6 +494,21 @@ EDResults exact_diagonalization_core(
                         params.max_iterations, params.num_eigenvalues, params.block_size, 
                         params.tolerance, results.eigenvalues, 
                         params.output_dir, params.compute_eigenvectors);
+            break;
+            
+        case DiagonalizationMethod::CHEBYSHEV_FILTERED:
+            std::cout << "Using Chebyshev filtered Lanczos method" << std::endl;
+            if (params.target_lower != 0.0 || params.target_upper != 0.0) {
+                std::cout << "  Target energy range: [" << params.target_lower 
+                          << ", " << params.target_upper << "]" << std::endl;
+            } else {
+                std::cout << "  Auto-detecting spectral range" << std::endl;
+            }
+            chebyshev_filtered_lanczos(H, hilbert_space_dim, 
+                                     params.max_iterations, params.num_eigenvalues, 
+                                     params.tolerance, results.eigenvalues, 
+                                     params.output_dir, params.compute_eigenvectors,
+                                     params.target_lower, params.target_upper);
             break;
             
         

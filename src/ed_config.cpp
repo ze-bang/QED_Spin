@@ -87,6 +87,8 @@ EDConfig EDConfig::fromFile(const std::string& filename) {
             else if (key == "compute_eigenvectors") config.diag.compute_eigenvectors = (value == "true" || value == "1");
             else if (key == "shift") config.diag.shift = std::stod(value);
             else if (key == "block_size") config.diag.block_size = std::stoi(value);
+            else if (key == "target_lower") config.diag.target_lower = std::stod(value);
+            else if (key == "target_upper") config.diag.target_upper = std::stod(value);
             else if (key == "num_sites") config.system.num_sites = std::stoi(value);
             else if (key == "spin_length") config.system.spin_length = std::stof(value);
             else if (key == "hamiltonian_dir") config.system.hamiltonian_dir = value;
@@ -152,6 +154,8 @@ EDConfig EDConfig::fromCommandLine(int argc, char* argv[]) {
             else if (arg == "--eigenvectors") config.diag.compute_eigenvectors = true;
             else if (arg.find("--shift=") == 0) config.diag.shift = std::stod(parse_value("--shift="));
             else if (arg.find("--block-size=") == 0) config.diag.block_size = std::stoi(parse_value("--block-size="));
+            else if (arg.find("--target-lower=") == 0) config.diag.target_lower = std::stod(parse_value("--target-lower="));
+            else if (arg.find("--target-upper=") == 0) config.diag.target_upper = std::stod(parse_value("--target-upper="));
             else if (arg.find("--num_sites=") == 0) config.system.num_sites = std::stoi(parse_value("--num_sites="));
             else if (arg.find("--spin_length=") == 0) config.system.spin_length = std::stof(parse_value("--spin_length="));
             else if (arg == "--fixed-sz") config.system.use_fixed_sz = true;
@@ -384,11 +388,13 @@ std::optional<DiagonalizationMethod> parseMethod(const std::string& str) {
     if (lower == "lanczos_selective") return DiagonalizationMethod::LANCZOS_SELECTIVE;
     if (lower == "lanczos_no_ortho") return DiagonalizationMethod::LANCZOS_NO_ORTHO;
     if (lower == "block_lanczos") return DiagonalizationMethod::BLOCK_LANCZOS;
+    if (lower == "chebyshev_filtered") return DiagonalizationMethod::CHEBYSHEV_FILTERED;
+    if (lower == "chebyshev") return DiagonalizationMethod::CHEBYSHEV_FILTERED;
     if (lower == "shift_invert") return DiagonalizationMethod::SHIFT_INVERT;
     if (lower == "shift_invert_robust") return DiagonalizationMethod::SHIFT_INVERT_ROBUST;
     if (lower == "krylov_schur") return DiagonalizationMethod::KRYLOV_SCHUR;
-    if (lower == "implicit_restart_lanczos") return DiagonalizationMethod::IMPLICIT_RESTART_LANCZOS;
-    if (lower == "thick_restart_lanczos") return DiagonalizationMethod::THICK_RESTART_LANCZOS;
+    if (lower == "irl") return DiagonalizationMethod::IMPLICIT_RESTART_LANCZOS;
+    if (lower == "trlan") return DiagonalizationMethod::THICK_RESTART_LANCZOS;
     
     // Conjugate Gradient variants
     if (lower == "bicg") return DiagonalizationMethod::BICG;
@@ -430,6 +436,7 @@ std::string methodToString(DiagonalizationMethod method) {
         case DiagonalizationMethod::LANCZOS_SELECTIVE: return "LANCZOS_SELECTIVE";
         case DiagonalizationMethod::LANCZOS_NO_ORTHO: return "LANCZOS_NO_ORTHO";
         case DiagonalizationMethod::BLOCK_LANCZOS: return "BLOCK_LANCZOS";
+        case DiagonalizationMethod::CHEBYSHEV_FILTERED: return "CHEBYSHEV_FILTERED";
         case DiagonalizationMethod::SHIFT_INVERT: return "SHIFT_INVERT";
         case DiagonalizationMethod::SHIFT_INVERT_ROBUST: return "SHIFT_INVERT_ROBUST";
         case DiagonalizationMethod::KRYLOV_SCHUR: return "KRYLOV_SCHUR";
@@ -547,6 +554,24 @@ std::string getMethodParameterInfo(DiagonalizationMethod method) {
             info << "  --tolerance=<tol>     Convergence tolerance (default: 1e-10)\n";
             info << "  --eigenvectors        Compute and save eigenvectors\n";
             info << "\nBest for: Degenerate or near-degenerate eigenvalues\n";
+            break;
+            
+        case DiagonalizationMethod::CHEBYSHEV_FILTERED:
+            info << "Chebyshev Filtered Lanczos for spectral slicing and interior eigenvalues.\n\n";
+            info << "Uses Chebyshev polynomial filtering to focus on eigenvalues within a target\n";
+            info << "energy window. Automatically estimates spectral bounds if not provided.\n\n";
+            info << "Configurable Parameters:\n";
+            info << "  --eigenvalues=<n>     Number of eigenvalues to compute (default: 1)\n";
+            info << "  --iterations=<n>      Maximum iterations (default: 100000)\n";
+            info << "  --tolerance=<tol>     Convergence tolerance (default: 1e-10)\n";
+            info << "  --target_lower=<E>    Lower bound of target energy window (default: auto)\n";
+            info << "  --target_upper=<E>    Upper bound of target energy window (default: auto)\n";
+            info << "  --eigenvectors        Compute and save eigenvectors\n";
+            info << "\nBest for: Computing eigenvalues in specific energy ranges\n";
+            info << "          Interior spectrum without shift-invert\n";
+            info << "          Avoiding eigenvalues outside target window\n";
+            info << "\nNote: If target range not specified, computes lowest eigenvalues\n";
+            info << "      Filter degree automatically determined from spectral properties\n";
             break;
             
         case DiagonalizationMethod::SHIFT_INVERT:

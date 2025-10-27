@@ -26,6 +26,8 @@ inline EDParameters toEDParameters(const EDConfig& config) {
     params.shift = config.diag.shift;
     params.block_size = config.diag.block_size;
     params.max_subspace = config.diag.max_subspace;
+    params.target_lower = config.diag.target_lower;
+    params.target_upper = config.diag.target_upper;
     
     // Thermal
     params.num_samples = config.thermal.num_samples;
@@ -91,6 +93,8 @@ inline EDConfig fromEDParameters(const EDParameters& params, DiagonalizationMeth
     config.diag.shift = params.shift;
     config.diag.block_size = params.block_size;
     config.diag.max_subspace = params.max_subspace;
+    config.diag.target_lower = params.target_lower;
+    config.diag.target_upper = params.target_upper;
     
     // Thermal
     config.thermal.num_samples = params.num_samples;
