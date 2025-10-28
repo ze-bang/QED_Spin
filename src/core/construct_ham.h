@@ -787,7 +787,8 @@ public:
             size_t sector_basis_count = 0;
             
             for (size_t basis = 0; basis < dim; ++basis) {
-                if (basis % (dim / 20) == 0 && dim > 20) {
+                size_t progress_interval = dim / 20;
+                if (progress_interval > 0 && basis % progress_interval == 0 && dim > 20) {
                     std::cout << "\r  Progress: " << (100 * basis / dim) << "%" << std::flush;
                 }
                 
@@ -1329,7 +1330,8 @@ public:
             for (int basis_idx = 0; basis_idx < fixed_sz_dim_; ++basis_idx) {
                 uint64_t basis = basis_states_[basis_idx];
                 
-                if (basis_idx % (fixed_sz_dim_ / 20) == 0 && fixed_sz_dim_ > 20) {
+                size_t progress_interval = fixed_sz_dim_ / 20;
+                if (progress_interval > 0 && basis_idx % progress_interval == 0 && fixed_sz_dim_ > 20) {
                     std::cout << "\r  Progress: " << (100 * basis_idx / fixed_sz_dim_) << "%" << std::flush;
                 }
                 
