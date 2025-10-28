@@ -965,17 +965,18 @@ int main(int argc, char* argv[]) {
             }
         }
     } else {
-        // Master-worker dynamic scheduling
+        // Master-worker dynamic scheduling with rank 0 also processing tasks
         const int TASK_TAG = 1;
         const int STOP_TAG = 2;
         const int DONE_TAG = 3;
+        const int REQUEST_TAG = 4;
         
         if (rank == 0) {
-            // Master: dispatch tasks
+            // Master: dispatch tasks and also process tasks itself
             int next_task = 0;
             int active_workers = std::min(size - 1, num_tasks);
             
-            // Send initial batch
+            // Send initial batch to other workers
             for (int r = 1; r <= active_workers; ++r) {
                 MPI_Send(&next_task, 1, MPI_INT, r, TASK_TAG, MPI_COMM_WORLD);
                 next_task++;
@@ -987,20 +988,50 @@ int main(int argc, char* argv[]) {
                 MPI_Send(&dummy, 1, MPI_INT, r, STOP_TAG, MPI_COMM_WORLD);
             }
             
-            // Dispatch remaining tasks as workers finish
+            // Process tasks on rank 0 while managing other workers
             int completed = 0;
             while (completed < num_tasks) {
-                int done_task;
-                MPI_Status status;
-                MPI_Recv(&done_task, 1, MPI_INT, MPI_ANY_SOURCE, DONE_TAG, MPI_COMM_WORLD, &status);
-                completed++;
-                
+                // Check if rank 0 can grab a task
                 if (next_task < num_tasks) {
-                    MPI_Send(&next_task, 1, MPI_INT, status.MPI_SOURCE, TASK_TAG, MPI_COMM_WORLD);
+                    int my_task = next_task;
                     next_task++;
-                } else {
-                    int dummy = -1;
-                    MPI_Send(&dummy, 1, MPI_INT, status.MPI_SOURCE, STOP_TAG, MPI_COMM_WORLD);
+                    
+                    std::cout << "Rank 0 processing task " << my_task << "/" << num_tasks;
+                    if (all_tasks[my_task].momentum_idx >= 0) {
+                        std::cout << " (state=" << all_tasks[my_task].state_idx 
+                                  << ", Q=" << all_tasks[my_task].momentum_idx
+                                  << ", combo=" << all_tasks[my_task].combo_idx;
+                        if (all_tasks[my_task].sublattice_i >= 0) {
+                            std::cout << ", sub_i=" << all_tasks[my_task].sublattice_i 
+                                      << ", sub_j=" << all_tasks[my_task].sublattice_j;
+                        }
+                        std::cout << ")";
+                    }
+                    std::cout << std::endl;
+                    
+                    if (process_task(all_tasks[my_task])) {
+                        local_processed_count++;
+                    }
+                    completed++;
+                }
+                
+                // Check for completed tasks from other workers (non-blocking)
+                int flag;
+                MPI_Status status;
+                MPI_Iprobe(MPI_ANY_SOURCE, DONE_TAG, MPI_COMM_WORLD, &flag, &status);
+                
+                if (flag) {
+                    int done_task;
+                    MPI_Recv(&done_task, 1, MPI_INT, status.MPI_SOURCE, DONE_TAG, MPI_COMM_WORLD, &status);
+                    completed++;
+                    
+                    if (next_task < num_tasks) {
+                        MPI_Send(&next_task, 1, MPI_INT, status.MPI_SOURCE, TASK_TAG, MPI_COMM_WORLD);
+                        next_task++;
+                    } else {
+                        int dummy = -1;
+                        MPI_Send(&dummy, 1, MPI_INT, status.MPI_SOURCE, STOP_TAG, MPI_COMM_WORLD);
+                    }
                 }
             }
         } else {

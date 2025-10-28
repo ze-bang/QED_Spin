@@ -30,7 +30,7 @@ EDResults run_standard_workflow(const EDConfig& config) {
     std::cout << "==========================================\n";
     
     auto params = ed_adapter::toEDParameters(config);
-    params.output_dir = config.workflow.output_dir + "/standard";
+    params.output_dir = config.workflow.output_dir;
     system(("mkdir -p " + params.output_dir).c_str());
     
     auto start = std::chrono::high_resolution_clock::now();
@@ -88,7 +88,7 @@ EDResults run_symmetrized_workflow(const EDConfig& config) {
     std::cout << "==========================================\n";
     
     auto params = ed_adapter::toEDParameters(config);
-    params.output_dir = config.workflow.output_dir + "/symmetrized";
+    params.output_dir = config.workflow.output_dir;
     system(("mkdir -p " + params.output_dir).c_str());
     
     auto start = std::chrono::high_resolution_clock::now();

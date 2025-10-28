@@ -256,8 +256,10 @@ int arpack_core(const std::function<void(const Complex*, Complex*, int)>& H,
     // Sanitize WHICH to valid ARPACK options for complex: {LM, SM, LR, SR, LI, SI}
     std::string W = which;
     std::transform(W.begin(), W.end(), W.begin(), [](unsigned char c){ return std::toupper(c); });
-    if (W == "SA") W = "SM"; // map algebraic to magnitude for complex
-    if (W == "LA") W = "LM";
+    // For Hermitian matrices: algebraic ordering = real part ordering
+    if (W == "SA") W = "SR"; // Smallest Algebraic -> Smallest Real
+    if (W == "LA") W = "LR"; // Largest Algebraic -> Largest Real
+    if (W == "BE") W = "LR"; // Both Ends not supported in complex interface
     if (!(W == "LM" || W == "SM" || W == "LR" || W == "SR" || W == "LI" || W == "SI")) {
         W = "SM";
     }
@@ -347,8 +349,8 @@ int arpack_core(const std::function<void(const Complex*, Complex*, int)>& H,
     int rvec = want_evecs ? 1 : 0;
     char howmny = 'A';
     std::vector<int> select(ncv, 0);
-    std::vector<Complex> D(nev);
-    std::vector<Complex> Z; Z.resize(static_cast<size_t>(N) * nev);
+    std::vector<Complex> D(nev + 1);  // ARPACK may write nev+1 values in some cases
+    std::vector<Complex> Z; Z.resize(static_cast<size_t>(N) * (nev + 1));
     Complex SIGMA(sigma, 0.0);
     std::vector<Complex> workev(2 * ncv);
 
@@ -404,15 +406,15 @@ int arpack_core(const std::function<void(const Complex*, Complex*, int)>& H,
             if (nrm > 0) {
                 Complex sc(1.0 / nrm, 0.0);
                 cblas_zscal(N, &sc, &evecs_out[static_cast<size_t>(k) * N], 1);
+                // Phase normalization: make largest component real and positive
                 int imax = 0; double amax = 0.0;
                 for (int i = 0; i < N; ++i) {
-                    double a = std::norm(evecs_out[static_cast<size_t>(k) * N + i]);
+                    double a = std::abs(evecs_out[static_cast<size_t>(k) * N + i]);
                     if (a > amax) { amax = a; imax = i; }
                 }
-                if (amax > 0.0) {
+                if (amax > 1e-14) {
                     Complex v = evecs_out[static_cast<size_t>(k) * N + imax];
-                    double abs_v = std::sqrt(amax);
-                    Complex phase = (abs_v > 0.0) ? (v / abs_v) : Complex(1.0, 0.0);
+                    Complex phase = v / std::abs(v);  // unit phase factor
                     Complex phase_conj = std::conj(phase);
                     cblas_zscal(N, &phase_conj, &evecs_out[static_cast<size_t>(k) * N], 1);
                 }
@@ -431,7 +433,7 @@ int arpack_core_advanced(const std::function<void(const Complex*, Complex*, int)
                          bool want_evecs) {
     
     int base_ncv = (opts.ncv > 0) ? opts.ncv
-                    : std::min(N, std::max( (opts.which == "SM" ? 6 : 4) * opts.nev + 40, 30));
+                    : std::min(N, std::max( (opts.which == "SM" || opts.which == "SR" ? 6 : 4) * opts.nev + 40, 30));
     double target_tol = opts.tol;
     double first_tol = (opts.two_phase_refine && opts.relaxed_tol > target_tol) ? opts.relaxed_tol : target_tol;
 
@@ -451,14 +453,18 @@ int arpack_core_advanced(const std::function<void(const Complex*, Complex*, int)
         int ncv_attempt = base_ncv;
         if (attempt_idx > 0 && opts.auto_enlarge_ncv) {
             double growth = std::pow(opts.ncv_growth, attempt_idx);
-            ncv_attempt = std::min(N-1, static_cast<int>(std::ceil(base_ncv * growth)));
-            ncv_attempt = std::max(ncv_attempt, std::min(N-1, opts.nev + 10));
+            ncv_attempt = std::min(N, static_cast<int>(std::ceil(base_ncv * growth)));
+            ncv_attempt = std::max(ncv_attempt, std::min(N, opts.nev + 10));
         }
+        // Ensure ncv > nev and ncv <= N
+        ncv_attempt = std::max(ncv_attempt, opts.nev + 2);
+        ncv_attempt = std::min(ncv_attempt, N);
         int inner_max = opts.inner_max_iter;
         double inner_tol = -1.0;
         if (use_shift_invert) {
             if (opts.adaptive_inner_tol) {
-                double ratio = std::max(0.1, tol_this / target_tol);
+                // Clamp ratio to prevent extreme values
+                double ratio = std::max(0.1, std::min(10.0, tol_this / target_tol));
                 inner_tol = std::max(opts.inner_tol_min, ratio * opts.inner_tol_factor * tol_this);
             } else {
                 inner_tol = std::max(opts.inner_tol_min, opts.inner_tol_factor * tol_this);
@@ -583,14 +589,17 @@ void arpack_ground_state(std::function<void(const Complex*, Complex*, int)> H, i
                          int max_iter, int exct, double tol,
                          std::vector<double>& eigenvalues,
                          std::string dir, bool eigenvectors) {
-    arpack_eigs(H, N, max_iter, exct, tol, eigenvalues, dir, eigenvectors, "SM");
+    // For Hermitian matrices, "SR" finds algebraically smallest (most negative) eigenvalues
+    // "SM" would find eigenvalues closest to zero, which is wrong for ground state
+    arpack_eigs(H, N, max_iter, exct, tol, eigenvalues, dir, eigenvectors, "SR");
 }
 
 void arpack_largest(std::function<void(const Complex*, Complex*, int)> H, int N,
                     int max_iter, int exct, double tol,
                     std::vector<double>& eigenvalues,
                     std::string dir, bool eigenvectors) {
-    arpack_eigs(H, N, max_iter, exct, tol, eigenvalues, dir, eigenvectors, "LM");
+    // For Hermitian matrices, "LR" finds algebraically largest (most positive) eigenvalues
+    arpack_eigs(H, N, max_iter, exct, tol, eigenvalues, dir, eigenvectors, "LR");
 }
 
 void arpack_shift_invert(std::function<void(const Complex*, Complex*, int)> H, int N,
