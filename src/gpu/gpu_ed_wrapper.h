@@ -50,6 +50,27 @@ public:
                                     bool eigenvectors = false);
     
     /**
+     * Run GPU Lanczos on a sparse matrix block (for symmetrized ED)
+     * Converts Eigen sparse matrix to CSR format and runs Lanczos on GPU
+     * 
+     * @param block_matrix Sparse matrix representing symmetry block
+     * @param max_iter Maximum Lanczos iterations
+     * @param num_eigs Number of eigenvalues to compute
+     * @param tol Convergence tolerance
+     * @param eigenvalues Output eigenvalues
+     * @param dir Output directory (optional)
+     * @param eigenvectors Whether to compute eigenvectors
+     */
+    template<typename Scalar>
+    static void runGPULanczosOnSparseBlock(const void* block_matrix_ptr,
+                                          int block_dim,
+                                          int max_iter, int num_eigs,
+                                          double tol,
+                                          std::vector<double>& eigenvalues,
+                                          std::string dir = "",
+                                          bool eigenvectors = false);
+    
+    /**
      * Matrix-vector product using GPU
      * y = H * x
      */

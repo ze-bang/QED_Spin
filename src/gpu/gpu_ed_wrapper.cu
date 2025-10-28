@@ -362,6 +362,123 @@ bool GPUEDWrapper::createGPUOperatorFromCPU(const Operator& cpu_op,
     return false;
 }
 
+// Explicit template instantiation needs Eigen headers
+#include <Eigen/Sparse>
+
+template<typename Scalar>
+void GPUEDWrapper::runGPULanczosOnSparseBlock(const void* block_matrix_ptr,
+                                             int block_dim,
+                                             int max_iter, int num_eigs,
+                                             double tol,
+                                             std::vector<double>& eigenvalues,
+                                             std::string dir,
+                                             bool eigenvectors) {
+    // Cast to Eigen sparse matrix
+    using SpMat = Eigen::SparseMatrix<Scalar>;
+    const SpMat& block_matrix = *reinterpret_cast<const SpMat*>(block_matrix_ptr);
+    
+    std::cout << "\n=== GPU Lanczos on Sparse Block ===" << std::endl;
+    std::cout << "Block dimension: " << block_dim << std::endl;
+    std::cout << "Non-zeros: " << block_matrix.nonZeros() << std::endl;
+    
+    // Convert Eigen sparse matrix to CSR format
+    std::vector<int> csr_row_ptr(block_dim + 1);
+    std::vector<int> csr_col_ind;
+    std::vector<std::complex<double>> csr_values;
+    
+    csr_col_ind.reserve(block_matrix.nonZeros());
+    csr_values.reserve(block_matrix.nonZeros());
+    
+    // Eigen stores in column-major (CSC) by default, but we can iterate row-wise
+    csr_row_ptr[0] = 0;
+    for (int i = 0; i < block_dim; ++i) {
+        for (typename SpMat::InnerIterator it(block_matrix, i); it; ++it) {
+            if (it.row() == i) {  // On-diagonal and upper triangle
+                csr_col_ind.push_back(it.col());
+                csr_values.push_back(it.value());
+            }
+        }
+        csr_row_ptr[i + 1] = csr_col_ind.size();
+    }
+    
+    // If matrix is not in row-major, we need to transpose or iterate differently
+    // For Hermitian matrices, let's use the more robust approach
+    if (csr_col_ind.size() != block_matrix.nonZeros()) {
+        // Matrix is stored column-major, need to build row-major
+        csr_col_ind.clear();
+        csr_values.clear();
+        csr_row_ptr.assign(block_dim + 1, 0);
+        
+        // Count non-zeros per row
+        for (int k = 0; k < block_matrix.outerSize(); ++k) {
+            for (typename SpMat::InnerIterator it(block_matrix, k); it; ++it) {
+                csr_row_ptr[it.row() + 1]++;
+            }
+        }
+        
+        // Compute cumulative sum for row pointers
+        for (int i = 0; i < block_dim; ++i) {
+            csr_row_ptr[i + 1] += csr_row_ptr[i];
+        }
+        
+        // Allocate space
+        csr_col_ind.resize(block_matrix.nonZeros());
+        csr_values.resize(block_matrix.nonZeros());
+        
+        // Fill CSR arrays
+        std::vector<int> current_pos = csr_row_ptr;
+        for (int k = 0; k < block_matrix.outerSize(); ++k) {
+            for (typename SpMat::InnerIterator it(block_matrix, k); it; ++it) {
+                int row = it.row();
+                int pos = current_pos[row]++;
+                csr_col_ind[pos] = it.col();
+                csr_values[pos] = it.value();
+            }
+        }
+    }
+    
+    std::cout << "Converted to CSR format: " << csr_values.size() << " non-zeros" << std::endl;
+    
+    // Create GPU operator with dummy n_sites (not used for CSR mode)
+    int dummy_n_sites = static_cast<int>(std::log2(block_dim));
+    if ((1 << dummy_n_sites) != block_dim) {
+        dummy_n_sites = 1;  // Fallback for non-power-of-2 blocks
+    }
+    
+    GPUOperator* gpu_op = new GPUOperator(dummy_n_sites);
+    
+    // Load CSR matrix to GPU
+    gpu_op->loadCSRMatrix(block_dim, csr_row_ptr.data(), csr_col_ind.data(),
+                         csr_values.data(), csr_values.size());
+    
+    // Allocate GPU memory
+    gpu_op->allocateGPUMemory(block_dim);
+    
+    // Create GPU Lanczos solver
+    GPULanczos lanczos(gpu_op, max_iter, tol);
+    
+    // Run Lanczos
+    std::vector<std::vector<std::complex<double>>> eigvecs;
+    lanczos.run(num_eigs, eigenvalues, eigvecs, eigenvectors);
+    
+    // Print statistics
+    auto stats = lanczos.getStats();
+    std::cout << "\nGPU Lanczos Statistics (Sparse Block):\n";
+    std::cout << "  Total time: " << stats.total_time << " s\n";
+    std::cout << "  MatVec time: " << stats.matvec_time << " s\n";
+    std::cout << "  Ortho time: " << stats.ortho_time << " s\n";
+    std::cout << "  Iterations: " << stats.iterations << "\n";
+    
+    // Clean up
+    delete gpu_op;
+    
+    std::cout << "=================================\n";
+}
+
+// Explicit instantiation for complex double (most common case)
+template void GPUEDWrapper::runGPULanczosOnSparseBlock<std::complex<double>>(
+    const void*, int, int, int, double, std::vector<double>&, std::string, bool);
+
 #else // !WITH_CUDA
 
 // Stub implementations when CUDA is not available

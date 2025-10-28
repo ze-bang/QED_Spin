@@ -900,7 +900,52 @@ EDResults diagonalize_symmetry_block(
     bool is_target_block,
     double large_value_override
 ) {
-    // Define matrix-vector product for this block
+    // If a GPU method was requested for a single symmetry block, use GPU!
+#ifdef WITH_CUDA
+    if (method == DiagonalizationMethod::LANCZOS_GPU ||
+        method == DiagonalizationMethod::LANCZOS_GPU_FIXED_SZ) {
+        
+        if (!GPUEDWrapper::isGPUAvailable()) {
+            std::cerr << "Warning: GPU requested but not available. Falling back to CPU Lanczos.\n";
+            method = DiagonalizationMethod::LANCZOS;
+        } else {
+            std::cout << "Using GPU Lanczos for symmetry block (dim=" << block_dim << ")\n";
+            
+            EDResults results;
+            results.eigenvectors_computed = params.compute_eigenvectors;
+            
+            try {
+                // Call GPU Lanczos on sparse block
+                GPUEDWrapper::runGPULanczosOnSparseBlock<Complex>(
+                    &block_matrix,
+                    block_dim,
+                    params.max_iterations,
+                    std::min(params.num_eigenvalues, block_dim),
+                    params.tolerance,
+                    results.eigenvalues,
+                    params.output_dir,
+                    params.compute_eigenvectors
+                );
+                
+                return results;
+                
+            } catch (const std::exception& e) {
+                std::cerr << "GPU Lanczos failed: " << e.what() << "\n";
+                std::cerr << "Falling back to CPU Lanczos\n";
+                method = DiagonalizationMethod::LANCZOS;
+            }
+        }
+    }
+#else
+    // No CUDA support - fall back to CPU
+    if (method == DiagonalizationMethod::LANCZOS_GPU ||
+        method == DiagonalizationMethod::LANCZOS_GPU_FIXED_SZ) {
+        std::cerr << "Warning: GPU method requested but CUDA not available. Using CPU Lanczos.\n";
+        method = DiagonalizationMethod::LANCZOS;
+    }
+#endif
+
+    // CPU path (either requested or fallback)
     std::function<void(const Complex*, Complex*, int)> apply_block =
         [block_matrix](const Complex* in, Complex* out, int n) {
             if (n != block_matrix.rows()) {

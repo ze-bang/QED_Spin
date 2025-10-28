@@ -291,4 +291,52 @@ bool GPUOperator::buildSparseMatrix(int N) {
     return sparse_matrix_built_;
 }
 
+bool GPUOperator::loadCSRMatrix(int N, const int* row_ptr, const int* col_ind,
+                                const std::complex<double>* values, size_t nnz) {
+    std::cout << "Loading CSR matrix to GPU...\n";
+    std::cout << "  Dimension: " << N << "\n";
+    std::cout << "  Non-zeros: " << nnz << "\n";
+    
+    // Free existing sparse matrix if any
+    if (d_csr_row_ptr_) cudaFree(d_csr_row_ptr_);
+    if (d_csr_col_ind_) cudaFree(d_csr_col_ind_);
+    if (d_csr_values_) cudaFree(d_csr_values_);
+    
+    // Store metadata
+    dimension_ = N;
+    nnz_ = nnz;
+    
+    // Allocate GPU memory for CSR arrays
+    CUDA_CHECK(cudaMalloc(&d_csr_row_ptr_, (N + 1) * sizeof(int)));
+    CUDA_CHECK(cudaMalloc(&d_csr_col_ind_, nnz * sizeof(int)));
+    CUDA_CHECK(cudaMalloc(&d_csr_values_, nnz * sizeof(cuDoubleComplex)));
+    
+    // Copy data to GPU
+    CUDA_CHECK(cudaMemcpy(d_csr_row_ptr_, row_ptr, (N + 1) * sizeof(int),
+                        cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(d_csr_col_ind_, col_ind, nnz * sizeof(int),
+                        cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(d_csr_values_, values, nnz * sizeof(cuDoubleComplex),
+                        cudaMemcpyHostToDevice));
+    
+    // Create cuSPARSE matrix descriptor
+    CUSPARSE_CHECK(cusparseCreateCsr(&mat_descriptor_,
+                                    N, N, nnz,
+                                    d_csr_row_ptr_, d_csr_col_ind_, d_csr_values_,
+                                    CUSPARSE_INDEX_32I, CUSPARSE_INDEX_32I,
+                                    CUSPARSE_INDEX_BASE_ZERO, CUDA_C_64F));
+    
+    sparse_matrix_built_ = true;
+    
+    // Update memory stats
+    size_t csr_memory = (N + 1) * sizeof(int) + nnz * sizeof(int) + 
+                       nnz * sizeof(cuDoubleComplex);
+    stats_.memoryUsed += csr_memory;
+    
+    std::cout << "CSR matrix loaded successfully\n";
+    std::cout << "  GPU memory used: " << csr_memory / (1024.0 * 1024.0) << " MB\n";
+    
+    return true;
+}
+
 #endif // WITH_CUDA
