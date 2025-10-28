@@ -291,51 +291,46 @@ bool GPUOperator::buildSparseMatrix(int N) {
     return sparse_matrix_built_;
 }
 
-bool GPUOperator::loadCSRMatrix(int N, const int* row_ptr, const int* col_ind,
-                                const std::complex<double>* values, size_t nnz) {
-    std::cout << "Loading CSR matrix to GPU...\n";
-    std::cout << "  Dimension: " << N << "\n";
-    std::cout << "  Non-zeros: " << nnz << "\n";
-    
-    // Free existing sparse matrix if any
-    if (d_csr_row_ptr_) cudaFree(d_csr_row_ptr_);
-    if (d_csr_col_ind_) cudaFree(d_csr_col_ind_);
-    if (d_csr_values_) cudaFree(d_csr_values_);
-    
-    // Store metadata
-    dimension_ = N;
+bool GPUOperator::loadCSR(int N, const std::vector<int>& row_ptr,
+                         const std::vector<int>& col_ind,
+                         const std::vector<std::complex<double>>& values) {
+    if (row_ptr.size() != static_cast<size_t>(N + 1)) {
+        std::cerr << "loadCSR: row_ptr size mismatch\n";
+        return false;
+    }
+
+    size_t nnz = values.size();
     nnz_ = nnz;
-    
-    // Allocate GPU memory for CSR arrays
+
+    // Allocate device CSR arrays
     CUDA_CHECK(cudaMalloc(&d_csr_row_ptr_, (N + 1) * sizeof(int)));
-    CUDA_CHECK(cudaMalloc(&d_csr_col_ind_, nnz * sizeof(int)));
-    CUDA_CHECK(cudaMalloc(&d_csr_values_, nnz * sizeof(cuDoubleComplex)));
-    
-    // Copy data to GPU
-    CUDA_CHECK(cudaMemcpy(d_csr_row_ptr_, row_ptr, (N + 1) * sizeof(int),
-                        cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaMemcpy(d_csr_col_ind_, col_ind, nnz * sizeof(int),
-                        cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaMemcpy(d_csr_values_, values, nnz * sizeof(cuDoubleComplex),
-                        cudaMemcpyHostToDevice));
-    
-    // Create cuSPARSE matrix descriptor
+    CUDA_CHECK(cudaMalloc(&d_csr_col_ind_, nnz_ * sizeof(int)));
+    CUDA_CHECK(cudaMalloc(&d_csr_values_, nnz_ * sizeof(cuDoubleComplex)));
+
+    // Copy row ptr and col ind
+    CUDA_CHECK(cudaMemcpy(d_csr_row_ptr_, row_ptr.data(), (N + 1) * sizeof(int), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(d_csr_col_ind_, col_ind.data(), nnz_ * sizeof(int), cudaMemcpyHostToDevice));
+
+    // Convert values to cuDoubleComplex temporary buffer
+    std::vector<cuDoubleComplex> tmp(nnz_);
+    for (size_t i = 0; i < nnz_; ++i) {
+        tmp[i] = make_cuDoubleComplex(values[i].real(), values[i].imag());
+    }
+    CUDA_CHECK(cudaMemcpy(d_csr_values_, tmp.data(), nnz_ * sizeof(cuDoubleComplex), cudaMemcpyHostToDevice));
+
+    // Create cuSPARSE CSR matrix descriptor
+    cusparseIndexType_t idxType = CUSPARSE_INDEX_32I;
+    cusparseIndexBase_t idxBase = CUSPARSE_INDEX_BASE_ZERO;
     CUSPARSE_CHECK(cusparseCreateCsr(&mat_descriptor_,
-                                    N, N, nnz,
+                                    static_cast<int64_t>(N), static_cast<int64_t>(N), static_cast<int64_t>(nnz_),
                                     d_csr_row_ptr_, d_csr_col_ind_, d_csr_values_,
-                                    CUSPARSE_INDEX_32I, CUSPARSE_INDEX_32I,
-                                    CUSPARSE_INDEX_BASE_ZERO, CUDA_C_64F));
-    
+                                    idxType, idxType, idxBase, CUDA_C_64F));
+
+    // Create dense vector descriptors (d_vector_in_/out_ must be allocated)
+    CUSPARSE_CHECK(cusparseCreateDnVec(&vec_x_descriptor_, static_cast<int64_t>(N), reinterpret_cast<void*>(d_vector_in_), CUDA_C_64F));
+    CUSPARSE_CHECK(cusparseCreateDnVec(&vec_y_descriptor_, static_cast<int64_t>(N), reinterpret_cast<void*>(d_vector_out_), CUDA_C_64F));
+
     sparse_matrix_built_ = true;
-    
-    // Update memory stats
-    size_t csr_memory = (N + 1) * sizeof(int) + nnz * sizeof(int) + 
-                       nnz * sizeof(cuDoubleComplex);
-    stats_.memoryUsed += csr_memory;
-    
-    std::cout << "CSR matrix loaded successfully\n";
-    std::cout << "  GPU memory used: " << csr_memory / (1024.0 * 1024.0) << " MB\n";
-    
     return true;
 }
 

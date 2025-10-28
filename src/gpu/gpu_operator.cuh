@@ -51,9 +51,10 @@ public:
     // Build sparse matrix representation (if memory allows)
     bool buildSparseMatrix(int N);
     
-    // Load pre-built CSR matrix (for symmetrized blocks)
-    bool loadCSRMatrix(int N, const int* row_ptr, const int* col_ind, 
-                      const std::complex<double>* values, size_t nnz);
+    // Load CSR arrays (host) into GPUOperator and construct cuSPARSE descriptors
+    bool loadCSR(int N, const std::vector<int>& row_ptr,
+                 const std::vector<int>& col_ind,
+                 const std::vector<std::complex<double>>& values);
     
     // Get dimension
     int getDimension() const { return dimension_; }

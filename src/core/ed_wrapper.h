@@ -900,52 +900,107 @@ EDResults diagonalize_symmetry_block(
     bool is_target_block,
     double large_value_override
 ) {
-    // If a GPU method was requested for a single symmetry block, use GPU!
+    // If a GPU method was requested for a single symmetry block, attempt
+    // to convert the Eigen sparse block into CSR and dispatch to the
+    // GPU implementation. If CUDA is not available, or the conversion
+    // / upload fails, gracefully fall back to the CPU Lanczos path.
 #ifdef WITH_CUDA
     if (method == DiagonalizationMethod::LANCZOS_GPU ||
         method == DiagonalizationMethod::LANCZOS_GPU_FIXED_SZ) {
-        
         if (!GPUEDWrapper::isGPUAvailable()) {
-            std::cerr << "Warning: GPU requested but not available. Falling back to CPU Lanczos.\n";
+            std::cerr << "Warning: No CUDA-capable GPU found. Falling back to CPU Lanczos for this block (dim="
+                      << block_dim << ").\n";
             method = DiagonalizationMethod::LANCZOS;
         } else {
-            std::cout << "Using GPU Lanczos for symmetry block (dim=" << block_dim << ")\n";
-            
-            EDResults results;
-            results.eigenvectors_computed = params.compute_eigenvectors;
-            
+            // Convert Eigen sparse matrix (which may be column-major) to
+            // row-major CSR arrays expected by the GPU upload path.
             try {
-                // Call GPU Lanczos on sparse block
-                GPUEDWrapper::runGPULanczosOnSparseBlock<Complex>(
-                    &block_matrix,
-                    block_dim,
-                    params.max_iterations,
-                    std::min(params.num_eigenvalues, block_dim),
-                    params.tolerance,
-                    results.eigenvalues,
-                    params.output_dir,
-                    params.compute_eigenvectors
-                );
-                
-                return results;
-                
-            } catch (const std::exception& e) {
-                std::cerr << "GPU Lanczos failed: " << e.what() << "\n";
-                std::cerr << "Falling back to CPU Lanczos\n";
+                int N = block_dim;
+                int nnz = static_cast<int>(block_matrix.nonZeros());
+
+                std::vector<std::vector<std::pair<int, std::complex<double>>>> rows(N);
+                rows.assign(N, {});
+
+                for (int k = 0; k < block_matrix.outerSize(); ++k) {
+                    for (Eigen::SparseMatrix<Complex>::InnerIterator it(block_matrix, k); it; ++it) {
+                        int r = it.row();
+                        int c = it.col();
+                        std::complex<double> v = it.value();
+                        if (r < 0 || r >= N || c < 0 || c >= N) continue;
+                        rows[r].emplace_back(c, v);
+                    }
+                }
+
+                std::vector<int> row_ptr(N + 1, 0);
+                std::vector<int> col_ind; col_ind.reserve(nnz);
+                std::vector<std::complex<double>> values; values.reserve(nnz);
+
+                int counter = 0;
+                for (int i = 0; i < N; ++i) {
+                    row_ptr[i] = counter;
+                    // Optionally, keep columns sorted for cuSPARSE efficiency
+                    auto &row = rows[i];
+                    if (row.size() > 1) std::sort(row.begin(), row.end(), [](const auto &a, const auto &b){ return a.first < b.first; });
+                    for (const auto &p : row) {
+                        col_ind.push_back(p.first);
+                        values.push_back(p.second);
+                        ++counter;
+                    }
+                }
+                row_ptr[N] = counter;
+
+                // Sanity check
+                if (counter != nnz) {
+                    // Some sparse matrices report a different nonZeros() due to structural zeros
+                    // adjust nnz to actual count
+                    // proceed with the actual count
+                }
+
+                // Create GPU operator and run Lanczos
+                void* gpu_op = GPUEDWrapper::createGPUOperatorFromCSR(params.num_sites, N, row_ptr, col_ind, values);
+                if (!gpu_op) {
+                    std::cerr << "Warning: Failed to create GPU operator from CSR. Falling back to CPU Lanczos for this block (dim="
+                              << block_dim << ").\n";
+                    method = DiagonalizationMethod::LANCZOS;
+                } else {
+                    std::vector<double> eigenvalues;
+                    GPUEDWrapper::printGPUInfo();
+                    GPUEDWrapper::runGPULanczos(
+                        gpu_op,
+                        N,
+                        params.max_iterations,
+                        std::min(params.num_eigenvalues, block_dim),
+                        params.tolerance,
+                        eigenvalues,
+                        params.output_dir,
+                        params.compute_eigenvectors
+                    );
+
+                    // Fill results and clean up
+                    EDResults results;
+                    results.eigenvectors_computed = params.compute_eigenvectors;
+                    results.eigenvalues = eigenvalues;
+                    GPUEDWrapper::destroyGPUOperator(gpu_op);
+
+                    return results;
+                }
+            } catch (const std::exception &e) {
+                std::cerr << "Warning: Exception during GPU dispatch for symmetry block: " << e.what()
+                          << "\nFalling back to CPU Lanczos for this block (dim=" << block_dim << ").\n";
                 method = DiagonalizationMethod::LANCZOS;
             }
         }
     }
 #else
-    // No CUDA support - fall back to CPU
     if (method == DiagonalizationMethod::LANCZOS_GPU ||
         method == DiagonalizationMethod::LANCZOS_GPU_FIXED_SZ) {
-        std::cerr << "Warning: GPU method requested but CUDA not available. Using CPU Lanczos.\n";
+        std::cerr << "Warning: GPU diagonalization for individual symmetry blocks requested but CUDA not available.\n";
+        std::cerr << "         Falling back to CPU Lanczos for this block (dim=" << block_dim << ").\n";
         method = DiagonalizationMethod::LANCZOS;
     }
 #endif
 
-    // CPU path (either requested or fallback)
+    // Define matrix-vector product for this block
     std::function<void(const Complex*, Complex*, int)> apply_block =
         [block_matrix](const Complex* in, Complex* out, int n) {
             if (n != block_matrix.rows()) {
