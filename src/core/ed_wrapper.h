@@ -4,16 +4,21 @@
 // ============================================================================
 // INCLUDES
 // ============================================================================
-#include "TPQ.h"
-#include "CG.h"
-#include "arpack.h"
-#include "lanczos.h"
+#include "../cpu_solvers/TPQ.h"
+#include "../cpu_solvers/CG.h"
+#include "../cpu_solvers/arpack.h"
+#include "../cpu_solvers/lanczos.h"
 #include "construct_ham.h"
-#include "observables.h"
+#include "../cpu_solvers/observables.h"
 #include "ed_config.h"
 #include <sys/stat.h>
 #include <filesystem>
 #include <algorithm>
+
+// GPU support
+#ifdef WITH_CUDA
+#include "gpu/gpu_ed_wrapper.h"
+#endif
 
 
 // ============================================================================
@@ -150,7 +155,7 @@ struct EDResults {
  */
 struct EDParameters {
     // ========== General Parameters ==========
-    int max_iterations = 100000;
+    int max_iterations = 10000;
     int num_eigenvalues = 1;
     double tolerance = 1e-10;
     bool compute_eigenvectors = false;
@@ -194,7 +199,7 @@ struct EDParameters {
     // Used when method == ARPACK_ADVANCED
     // These mirror (a subset of) detail_arpack::ArpackAdvancedOptions
     bool arpack_advanced_verbose = false;
-    std::string arpack_which = "SM";                            // SM|LM|SR|LR|... (Hermitian typical: SM/LM)
+    std::string arpack_which = "SR";                            // SR=Smallest Real (ground state), LR=Largest Real, SM/LM=by magnitude
     int arpack_ncv = -1;                                        // Number of Lanczos vectors
     int arpack_max_restarts = 2;                                // Maximum number of restarts
     double arpack_ncv_growth = 1.5;                             // Growth factor for ncv
@@ -585,13 +590,12 @@ EDResults exact_diagonalization_core(
             break;
         
         case DiagonalizationMethod::LANCZOS_GPU:
-            std::cerr << "Error: LANCZOS_GPU requires CUDA build." << std::endl;
-            throw std::runtime_error("GPU methods not available in this build");
-            break;
-        
         case DiagonalizationMethod::LANCZOS_GPU_FIXED_SZ:
-            std::cerr << "Error: LANCZOS_GPU_FIXED_SZ requires CUDA build." << std::endl;
-            throw std::runtime_error("GPU methods not available in this build");
+            // These should be handled in exact_diagonalization_from_files
+            // If we reach here, it means they were called incorrectly
+            std::cerr << "Error: GPU methods must be called via exact_diagonalization_from_files" << std::endl;
+            std::cerr << "Use: ED <directory> --method=LANCZOS_GPU" << std::endl;
+            throw std::runtime_error("GPU methods require file-based interface");
             break;
 
         default:
@@ -1286,6 +1290,71 @@ EDResults exact_diagonalization_from_files(
 ) {
     std::cerr << "[DEBUG] exact_diagonalization_from_files: num_sites=" << params.num_sites 
               << ", method=" << static_cast<int>(method) << std::endl;
+    
+    // Handle GPU methods separately (they don't need CPU Operator)
+#ifdef WITH_CUDA
+    if (method == DiagonalizationMethod::LANCZOS_GPU || 
+        method == DiagonalizationMethod::LANCZOS_GPU_FIXED_SZ) {
+        
+        std::cout << "Running GPU-accelerated Lanczos algorithm..." << std::endl;
+        
+        // Check if GPU is available
+        if (!GPUEDWrapper::isGPUAvailable()) {
+            std::cerr << "Error: No CUDA-capable GPU found!" << std::endl;
+            throw std::runtime_error("GPU not available");
+        }
+        
+        GPUEDWrapper::printGPUInfo();
+        
+        EDResults results;
+        int hilbert_space_dim = static_cast<int>(1ULL << params.num_sites);
+        
+        if (method == DiagonalizationMethod::LANCZOS_GPU) {
+            // Check if files exist
+            if (!std::filesystem::exists(interaction_file)) {
+                std::cerr << "Error: " << interaction_file << " not found!" << std::endl;
+                throw std::runtime_error("InterAll.dat file not found");
+            }
+            
+            // Create GPU operator from files
+            void* gpu_op = GPUEDWrapper::createGPUOperatorFromFiles(
+                params.num_sites, interaction_file, single_site_file);
+            
+            if (!gpu_op) {
+                std::cerr << "Error: Failed to create GPU operator" << std::endl;
+                throw std::runtime_error("GPU operator creation failed");
+            }
+            
+            // Run GPU Lanczos
+            std::vector<double> eigenvalues;
+            GPUEDWrapper::runGPULanczos(
+                gpu_op,
+                hilbert_space_dim,
+                params.max_iterations,
+                params.num_eigenvalues,
+                params.tolerance,
+                eigenvalues,
+                params.output_dir,
+                params.compute_eigenvectors
+            );
+            
+            // Store results
+            results.eigenvalues = eigenvalues;
+            
+            // Clean up
+            GPUEDWrapper::destroyGPUOperator(gpu_op);
+            
+            std::cout << "GPU Lanczos completed successfully!" << std::endl;
+            
+        } else if (method == DiagonalizationMethod::LANCZOS_GPU_FIXED_SZ) {
+            std::cerr << "Error: LANCZOS_GPU_FIXED_SZ file interface not yet implemented." << std::endl;
+            std::cerr << "Please use GPU_FILE_TEST for now." << std::endl;
+            throw std::runtime_error("Fixed Sz GPU method not yet integrated with file interface");
+        }
+        
+        return results;
+    }
+#endif
     
     // Load Hamiltonian (for CPU methods)
     Operator hamiltonian = ed_internal::load_hamiltonian_from_files(

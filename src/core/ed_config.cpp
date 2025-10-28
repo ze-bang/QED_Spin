@@ -229,7 +229,7 @@ EDConfig& EDConfig::merge(const EDConfig& other) {
     
     // Merge diag
     if (other.diag.num_eigenvalues != 1) diag.num_eigenvalues = other.diag.num_eigenvalues;
-    if (other.diag.max_iterations != 100000) diag.max_iterations = other.diag.max_iterations;
+    if (other.diag.max_iterations != 10000) diag.max_iterations = other.diag.max_iterations;
     if (other.diag.tolerance != 1e-10) diag.tolerance = other.diag.tolerance;
     if (other.diag.compute_eigenvectors) diag.compute_eigenvectors = true;
     
@@ -731,23 +731,25 @@ std::string getMethodParameterInfo(DiagonalizationMethod method) {
             break;
             
         case DiagonalizationMethod::ARPACK_SM:
-            info << "ARPACK smallest magnitude eigenvalues.\n\n";
+            info << "ARPACK smallest real (algebraically smallest) eigenvalues.\n\n";
             info << "Configurable Parameters:\n";
             info << "  --eigenvalues=<n>     Number of eigenvalues to compute (default: 1)\n";
             info << "  --iterations=<n>      Maximum iterations (default: 100000)\n";
             info << "  --tolerance=<tol>     Convergence tolerance (default: 1e-10)\n";
             info << "  --eigenvectors        Compute and save eigenvectors\n";
-            info << "\nBest for: Smallest eigenvalues using ARPACK library\n";
+            info << "\nBest for: Ground state (most negative eigenvalues) using ARPACK\n";
+            info << "Note: Uses SR (Smallest Real) internally for Hermitian matrices\n";
             break;
             
         case DiagonalizationMethod::ARPACK_LM:
-            info << "ARPACK largest magnitude eigenvalues.\n\n";
+            info << "ARPACK largest real (algebraically largest) eigenvalues.\n\n";
             info << "Configurable Parameters:\n";
             info << "  --eigenvalues=<n>     Number of eigenvalues to compute (default: 1)\n";
             info << "  --iterations=<n>      Maximum iterations (default: 100000)\n";
             info << "  --tolerance=<tol>     Convergence tolerance (default: 1e-10)\n";
             info << "  --eigenvectors        Compute and save eigenvectors\n";
-            info << "\nBest for: Largest eigenvalues using ARPACK library\n";
+            info << "\nBest for: Highest energy states (most positive eigenvalues) using ARPACK\n";
+            info << "Note: Uses LR (Largest Real) internally for Hermitian matrices\n";
             break;
             
         case DiagonalizationMethod::ARPACK_SHIFT_INVERT:
@@ -769,7 +771,7 @@ std::string getMethodParameterInfo(DiagonalizationMethod method) {
             info << "  --tolerance=<tol>     Convergence tolerance (default: 1e-10)\n";
             info << "  --eigenvectors        Compute and save eigenvectors\n";
             info << "\nAdvanced ARPACK Options (requires config file):\n";
-            info << "  arpack_which          Which eigenvalues: SM, LM, SR, LR (default: SM)\n";
+            info << "  arpack_which          Which eigenvalues: SR (ground state), LR (excited), SM, LM (default: SR)\n";
             info << "  arpack_ncv            Number of Lanczos vectors (default: auto)\n";
             info << "  arpack_max_restarts   Maximum restarts (default: 2)\n";
             info << "  arpack_ncv_growth     NCV growth factor (default: 1.5)\n";

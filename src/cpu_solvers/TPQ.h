@@ -9,7 +9,7 @@
 #include <functional>
 #include <random>
 #include <cmath>
-#include "blas_lapack_wrapper.h"
+#include "../core/blas_lapack_wrapper.h"
 #include <fstream>
 #include <iomanip>
 #include <algorithm>
@@ -22,7 +22,7 @@
 #include <Eigen/Sparse>
 #include <unsupported/Eigen/MatrixFunctions>
 #include "observables.h"
-#include "construct_ham.h"
+#include "../core/blas_lapack_wrapper.h"
 #include "dynamics.h"
 #include <memory>
 

@@ -27,7 +27,7 @@ enum class DiagonalizationMethod;
  */
 struct DiagonalizationConfig {
     int num_eigenvalues = 1;
-    int max_iterations = 100000;
+    int max_iterations = 10000;
     double tolerance = 1e-10;
     bool compute_eigenvectors = false;
     
@@ -98,7 +98,7 @@ struct SystemConfig {
  */
 struct ArpackConfig {
     bool verbose = false;
-    std::string which = "SM";
+    std::string which = "SR";  // For Hermitian matrices: SR=Smallest Real (ground state), LR=Largest Real
     int ncv = -1;
     int max_restarts = 2;
     double ncv_growth = 1.5;

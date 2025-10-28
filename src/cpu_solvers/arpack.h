@@ -10,7 +10,7 @@
 #include <vector>
 #include <functional>
 #include <string>
-#include "blas_lapack_wrapper.h"
+#include "../core/blas_lapack_wrapper.h"
 
 using Complex = std::complex<double>;
 using ComplexVector = std::vector<Complex>;

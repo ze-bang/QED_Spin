@@ -13,10 +13,10 @@
 #include <algorithm> // for std::sort, std::max_element, std::min_element
 #include <numeric> // for std::accumulate
 #include "construct_ham.h"
-#include "TPQ.h"
+#include "../cpu_solvers/TPQ.h"
 #include "observables.h"
 #include <mpi.h>
-#include "dynamics.h"
+#include "../cpu_solvers/dynamics.h"
 
 
 using Complex = std::complex<double>;

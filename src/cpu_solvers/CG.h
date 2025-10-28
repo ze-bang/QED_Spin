@@ -13,7 +13,7 @@
 #include <iomanip>
 #include <algorithm>
 #include <cstdlib>
-#include "blas_lapack_wrapper.h"
+#include "../core/blas_lapack_wrapper.h"
 #include <Eigen/Dense>
 #include <Eigen/Eigenvalues>
 #include <string>

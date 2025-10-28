@@ -82,7 +82,14 @@ endif()
 
 # Source directories
 set(SRC_DIR ${CMAKE_CURRENT_SOURCE_DIR}/src)
+set(CORE_DIR ${SRC_DIR}/core)
+set(CPU_SOLVERS_DIR ${SRC_DIR}/cpu_solvers)
+set(GPU_DIR ${SRC_DIR}/gpu)
+
 include_directories(${SRC_DIR})
+include_directories(${CORE_DIR})
+include_directories(${CPU_SOLVERS_DIR})
+include_directories(${GPU_DIR})
 
 # Configure BLAS/LAPACK backends
 set(BLAS_LIBRARIES "")
@@ -248,14 +255,14 @@ endif()
 
 # New elegant main sources
 set(SOURCES
-    ${SRC_DIR}/ed_main.cpp
-    ${SRC_DIR}/ed_config.cpp
-    ${SRC_DIR}/arpack.cpp
-    ${SRC_DIR}/observables.cpp
-    ${SRC_DIR}/lanczos.cpp
-    ${SRC_DIR}/CG.cpp
-    ${SRC_DIR}/dynamics.cpp
-    ${SRC_DIR}/TPQ.cpp
+    ${CORE_DIR}/ed_main.cpp
+    ${CORE_DIR}/ed_config.cpp
+    ${CPU_SOLVERS_DIR}/arpack.cpp
+    ${CPU_SOLVERS_DIR}/observables.cpp
+    ${CPU_SOLVERS_DIR}/lanczos.cpp
+    ${CPU_SOLVERS_DIR}/CG.cpp
+    ${CPU_SOLVERS_DIR}/dynamics.cpp
+    ${CPU_SOLVERS_DIR}/TPQ.cpp
 )
 
 # Header-only sources that should be included in compilation
@@ -263,19 +270,37 @@ set(HEADER_SOURCES
     ${SRC_DIR}/*.h
 )
 
+# GPU sources for CUDA-enabled builds
+if(WITH_CUDA)
+    set(GPU_SOURCES
+        ${GPU_DIR}/gpu_operator.cu
+        ${GPU_DIR}/gpu_kernels.cu
+        ${GPU_DIR}/gpu_fixed_sz_operator.cu
+        ${GPU_DIR}/gpu_lanczos.cu
+        ${GPU_DIR}/gpu_ed_wrapper.cu
+    )
+    
+    set(GPU_HEADERS
+        ${GPU_DIR}/kernel_config.h
+        ${GPU_DIR}/bit_operations.cuh
+        ${GPU_DIR}/gpu_operator.cuh
+        ${GPU_DIR}/gpu_lanczos.cuh
+        ${GPU_DIR}/gpu_ed_wrapper.h
+    )
+endif()
+
 # Define executables
 
 # New elegant main (add GPU sources if CUDA is enabled)
 if(WITH_CUDA)
     add_executable(ED ${SOURCES} ${GPU_SOURCES})
+    target_include_directories(ED PRIVATE ${GPU_DIR})
 else()
     add_executable(ED ${SOURCES})
 endif()
 
 # Add TPQ_DSSF executable (only if MPI is enabled since it uses MPI)
-add_executable(TPQ_DSSF ${SRC_DIR}/TPQ_DSSF.cpp ${SRC_DIR}/dynamics.cpp ${SRC_DIR}/TPQ.cpp)
-
-
+add_executable(TPQ_DSSF ${CORE_DIR}/TPQ_DSSF.cpp ${CPU_SOLVERS_DIR}/dynamics.cpp ${CPU_SOLVERS_DIR}/TPQ.cpp)
 
 # Link libraries for new main
 target_link_libraries(ED

@@ -7,8 +7,8 @@
 #include <functional>
 #include <random>
 #include <cmath>
-#include "blas_lapack_wrapper.h"
-#include "construct_ham.h"
+#include "../core/blas_lapack_wrapper.h"
+#include "../core/construct_ham.h"
 #include <iomanip>
 #include <algorithm>
 #include <Eigen/Dense>
