@@ -174,7 +174,7 @@ int main(int argc, char* argv[]) {
         if (rank == 0) {
             std::cerr << "Usage: " << argv[0] << " <directory> <num_sites> <spin_length> <krylov_dim_or_nmax> <spin_combinations> [method] [operator_type] [basis] [dt,t_end] [unit_cell_size] [momentum_points] [polarization] [theta]" << std::endl;
             std::cerr << "  method (optional): krylov (default) | taylor" << std::endl;
-            std::cerr << "  operator_type (optional): sum (default) | transverse | sublattice | experimental" << std::endl;
+            std::cerr << "  operator_type (optional): sum (default) | transverse | sublattice | experimental | transverse_experimental" << std::endl;
             std::cerr << "  basis (optional): ladder (default) | xyz" << std::endl;
             std::cerr << "    - ladder: Use Sp/Sm/Sz operators (raising/lowering operators)" << std::endl;
             std::cerr << "    - xyz: Use Sx/Sy/Sz operators (Cartesian components)" << std::endl;
@@ -208,9 +208,9 @@ int main(int argc, char* argv[]) {
     std::string basis = (argc >= 9) ? std::string(argv[8]) : std::string("ladder");
     
     // Experimental operators always use XYZ basis internally
-    if (operator_type == "experimental" && basis != "xyz") {
+    if ((operator_type == "experimental" || operator_type == "transverse_experimental") && basis != "xyz") {
         if (rank == 0) {
-            std::cout << "Note: experimental operator type requires xyz basis, setting basis=xyz" << std::endl;
+            std::cout << "Note: " << operator_type << " operator type requires xyz basis, setting basis=xyz" << std::endl;
         }
         basis = "xyz";
     }
@@ -513,7 +513,7 @@ int main(int argc, char* argv[]) {
     // Pre-compute transverse bases for transverse operators (needed for both krylov and taylor methods)
     std::vector<std::array<double,3>> transverse_basis_1, transverse_basis_2;
     
-    if (operator_type == "transverse") {
+    if (operator_type == "transverse" || operator_type == "transverse_experimental") {
         int num_momentum = momentum_points.size();
         transverse_basis_1.resize(num_momentum);
         transverse_basis_2.resize(num_momentum);
@@ -680,8 +680,34 @@ int main(int argc, char* argv[]) {
                 std::cout << "Parallelization: per-transverse-component (" << all_tasks.size() << " tasks = "
                           << num_files << " states × " << num_momentum << " momenta × "
                           << num_combos << " combos × 2 components)" << std::endl;
+            } else if (operator_type == "transverse_experimental") {
+                // Transverse experimental operators: create 2 tasks per (state, momentum) for SF/NSF
+                // Does NOT depend on combo (only uses theta parameter)
+                for (int s = 0; s < num_files; s++) {
+                    for (int q = 0; q < num_momentum; q++) {
+                        // Use sublattice_i as a flag: 0=SF, 1=NSF
+                        // Set combo_idx to 0 (dummy value, not used)
+                        size_t task_weight = file_sizes[s] / (num_momentum * 2);
+                        all_tasks.push_back({s, q, 0, 0, -1, task_weight}); // SF component
+                        all_tasks.push_back({s, q, 0, 1, -1, task_weight}); // NSF component
+                    }
+                }
+                std::cout << "Parallelization: per-transverse-component (" << all_tasks.size() << " tasks = "
+                          << num_files << " states × " << num_momentum << " momenta × 2 components)" << std::endl;
+            } else if (operator_type == "experimental") {
+                // Experimental operators: parallelize across (state, momentum) only
+                // Does NOT depend on combo (only uses theta parameter)
+                for (int s = 0; s < num_files; s++) {
+                    for (int q = 0; q < num_momentum; q++) {
+                        // Set combo_idx to 0 (dummy value, not used)
+                        size_t task_weight = file_sizes[s] / num_momentum;
+                        all_tasks.push_back({s, q, 0, -1, -1, task_weight});
+                    }
+                }
+                std::cout << "Parallelization: per-operator (" << all_tasks.size() << " tasks = "
+                          << num_files << " states × " << num_momentum << " momenta)" << std::endl;
             } else {
-                // Sum or experimental operators: parallelize across (state, momentum, combo)
+                // Sum operators: parallelize across (state, momentum, combo)
                 for (int s = 0; s < num_files; s++) {
                     for (int q = 0; q < num_momentum; q++) {
                         for (int c = 0; c < num_combos; c++) {
@@ -917,6 +943,36 @@ int main(int argc, char* argv[]) {
                 
                 obs_1.push_back(Operator(exp_op_1));
                 obs_2.push_back(Operator(exp_op_2));
+                
+            } else if (operator_type == "transverse_experimental") {
+                // Transverse experimental operators with SF/NSF separation: cos(θ)Sz + sin(θ)Sx
+                const auto &b1 = transverse_basis_1[momentum_idx];
+                const auto &b2 = transverse_basis_2[momentum_idx];
+                std::vector<double> e1_vec = {b1[0], b1[1], b1[2]};
+                std::vector<double> e2_vec = {b2[0], b2[1], b2[2]};
+                
+                // SF component (transverse_basis_1)
+                std::stringstream name_sf;
+                name_sf << "TransverseExperimental_q_Qx" << Q[0] << "_Qy" << Q[1] << "_Qz" << Q[2] 
+                        << "_theta" << theta << "_NSF";
+                
+                // NSF component (transverse_basis_2)
+                std::stringstream name_nsf;
+                name_nsf << "TransverseExperimental_q_Qx" << Q[0] << "_Qy" << Q[1] << "_Qz" << Q[2] 
+                         << "_theta" << theta << "_SF";
+                
+                TransverseExperimentalOperator op1_sf(num_sites, spin_length, theta, momentum_points[momentum_idx], e1_vec, positions_file);
+                TransverseExperimentalOperator op2_sf(num_sites, spin_length, theta, momentum_points[momentum_idx], e1_vec, positions_file);
+                TransverseExperimentalOperator op1_nsf(num_sites, spin_length, theta, momentum_points[momentum_idx], e2_vec, positions_file);
+                TransverseExperimentalOperator op2_nsf(num_sites, spin_length, theta, momentum_points[momentum_idx], e2_vec, positions_file);
+                
+                obs_1.push_back(Operator(op1_sf));
+                obs_2.push_back(Operator(op2_sf));
+                obs_1.push_back(Operator(op1_nsf));
+                obs_2.push_back(Operator(op2_nsf));
+                
+                obs_names.push_back(name_sf.str());
+                obs_names.push_back(name_nsf.str());
             }
             
         } catch (const std::exception &e) {

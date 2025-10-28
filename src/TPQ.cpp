@@ -86,7 +86,7 @@ void time_evolve_tpq_adaptive(
 
 /**
  * Compute dynamical correlations for TPQ using Krylov method
- * Delegates to the general dynamics module with TPQ-specific file naming
+ * Uses the same output format as Taylor method for consistency
  */
 void computeDynamicCorrelationsKrylov(
     std::function<void(const Complex*, Complex*, int)> H,
@@ -102,12 +102,97 @@ void computeDynamicCorrelationsKrylov(
     double dt,
     int krylov_dim
 ) {
-    // Create TPQ-specific label
-    std::string label = "sample" + std::to_string(sample) + "_beta" + std::to_string(inv_temp);
+    std::cout << "Computing dynamical susceptibility for sample " << sample 
+              << ", beta = " << inv_temp << ", for " << operators_1.size() << " observables" << std::endl;
     
-    // Delegate to the general dynamics module
-    compute_operator_dynamics(H, tpq_state, operators_1, operators_2, operator_names,
-                             N, dir, label, t_end, dt, krylov_dim);
+    // Ensure Krylov dimension doesn't exceed system size
+    krylov_dim = std::min(krylov_dim, N/2);
+    
+    int num_steps = static_cast<int>(t_end / dt) + 1;
+    
+    // Pre-allocate reusable buffers
+    ComplexVector evolved_psi(N);
+    ComplexVector evolved_O1_psi(N);
+    ComplexVector O2_psi(N);
+    ComplexVector O1_psi(N);
+    ComplexVector O2_evolved_psi(N);
+    
+    // Process each operator pair
+    for (size_t op_idx = 0; op_idx < operators_1.size(); op_idx++) {
+        std::string op_name = operator_names[op_idx];
+        
+        std::cout << "  Computing " << op_name << " correlations..." << std::endl;
+
+        // Apply O_1 to initial state: |φ⟩ = O_1|ψ⟩
+        operators_1[op_idx].apply(tpq_state.data(), O1_psi.data(), N);
+        
+        // Calculate initial correlation: C(0) = ⟨ψ|O_2†O_1|ψ⟩
+        operators_2[op_idx].apply(tpq_state.data(), O2_psi.data(), N);
+        
+        // Use BLAS for dot product
+        Complex initial_corr;
+        cblas_zdotc_sub(N, O2_psi.data(), 1, O1_psi.data(), 1, &initial_corr);
+
+        std::cout << "    Initial correlation C(0) = " 
+                  << initial_corr.real() << " + i*" 
+                  << initial_corr.imag() << std::endl;
+        
+        // Initialize evolution states
+        std::copy(tpq_state.begin(), tpq_state.end(), evolved_psi.begin());
+        std::copy(O1_psi.begin(), O1_psi.end(), evolved_O1_psi.begin());
+        
+        // Open file with SAME format as Taylor method
+        std::string time_corr_file = dir + "/time_corr_rand" + std::to_string(sample) + "_" 
+                             + op_name + "_beta=" + std::to_string(inv_temp) + ".dat";
+        
+        std::ofstream time_corr_out(time_corr_file);
+        if (!time_corr_out.is_open()) {
+            std::cerr << "Error: Could not open file " << time_corr_file << " for writing" << std::endl;
+            continue;
+        }
+        
+        // SAME header as Taylor method
+        time_corr_out << "# t time_correlation_real time_correlation_imag" << std::endl;
+        time_corr_out << std::setprecision(16);
+        
+        // Write initial time point
+        time_corr_out << 0.0 << " " 
+            << initial_corr.real() << " " 
+            << initial_corr.imag() << std::endl;
+        time_corr_out.flush();
+        
+        // Time evolution loop using Krylov method
+        // Want to compute <O_1(t) O_2(0)> = ⟨ψ| e^{iHt} O_2 e^{-iHt} O_1 |ψ⟩
+        // which is equivalent to ⟨ψ(t)| O_2 |ψ_O1(t)⟩
+        for (int step = 1; step < num_steps; step++) {
+            // Evolve states using Krylov method
+            time_evolve_krylov(H, evolved_psi, N, dt, krylov_dim, false);
+            time_evolve_krylov(H, evolved_O1_psi, N, dt, krylov_dim, false);
+            
+            // Apply O_2 to evolved state
+            operators_2[op_idx].apply(evolved_psi.data(), O2_evolved_psi.data(), N);
+            
+            // Calculate correlation using BLAS
+            Complex corr_t;
+            cblas_zdotc_sub(N, O2_evolved_psi.data(), 1, evolved_O1_psi.data(), 1, &corr_t);
+            
+            // Write current time point to file
+            double t = step * dt;
+            time_corr_out << t << " " 
+                << corr_t.real() << " " 
+                << corr_t.imag() << std::endl;
+            
+            // Flush every 100 steps
+            if (step % 100 == 0) {
+                time_corr_out.flush();
+                std::cout << "    Completed time step " << step << " / " << num_steps << std::endl;
+            }
+        }
+        
+        // Close the file
+        time_corr_out.close();
+        std::cout << "Time correlation saved to " << time_corr_file << std::endl;
+    }
 }
 
 /**

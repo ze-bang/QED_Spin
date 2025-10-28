@@ -63,10 +63,22 @@ def parse_filename_new(filename):
     """Extract species (including momentum), beta, and sample index from filenames.
 
     Supports numeric beta and the special strings 'inf' / 'infty' (case-insensitive).
+    
+    Handles both old and new filename patterns:
+    - Old: time_corr_rand{N}_{species}_beta={beta}.dat
+    - New: time_corr_rand{N}_{species}_beta={beta}.dat (same format)
+    
+    The species name may include momentum information like:
+    - SpSm_q_Qx0_Qy0_Qz6.28319
+    - SzSz_q_Qx0_Qy0_Qz0
+    - Experimental_q_Qx0_Qy0_Qz0_theta0
+    - etc.
 
     Returns: (species_with_momentum, beta(float or np.inf), sample_idx) or (None, None, None)
     """
     basename = os.path.basename(filename)
+    # Updated regex to be more flexible with species names
+    # Species can contain letters, numbers, underscores, dots, and minus signs
     m = re.match(r'^time_corr_(?:rand|sample)(\d+)_(.+?)_beta=([0-9.+-eE]+|inf|infty)\.dat$', basename, re.IGNORECASE)
     if not m:
         return None, None, None
@@ -128,6 +140,15 @@ def find_spectral_peaks(omega, spectral_function, min_prominence=0.1, min_height
 def parse_QFI_data_new(structure_factor_dir, beta_tol=1e-2, average_after_fft=True):
     """Parse QFI data from the new directory structure and compute spectral functions.
     
+    Updated to work with TPQ_DSSF.cpp output structure:
+    - structure_factor_results/
+      - beta_{value}/
+        - {operator_type}/  (e.g., 'sum', 'transverse', 'sublattice', 'experimental', etc.)
+          - time_corr_rand{N}_{species}_beta={beta}.dat
+    
+    The function automatically scans all subdirectories within each beta_* folder,
+    making it flexible to handle any operator_type name.
+    
     Parameters:
     structure_factor_dir: Directory containing beta_* subdirectories
     beta_tol: Tolerance for grouping beta values
@@ -170,7 +191,12 @@ def parse_QFI_data_new(structure_factor_dir, beta_tol=1e-2, average_after_fft=Tr
 
 def _collect_data_files(structure_factor_dir, species_data, species_names, 
                         beta_bins, beta_bin_values, beta_tol):
-    """Collect and organize all data files by species and beta values."""
+    """Collect and organize all data files by species and beta values.
+    
+    Updated to scan all subdirectories within each beta_* folder to support
+    the new structure from TPQ_DSSF.cpp where operator_type determines the subdirectory name
+    (e.g., 'sum', 'transverse', 'sublattice', 'experimental', etc.)
+    """
     
     beta_dirs = glob.glob(os.path.join(structure_factor_dir, 'beta_*'))
     print(f"Found {len(beta_dirs)} beta directories")
@@ -183,70 +209,31 @@ def _collect_data_files(structure_factor_dir, species_data, species_names,
         bin_idx = _assign_beta_bin(beta_value, beta_bins, beta_tol)
         beta_bin_values[bin_idx].append(beta_value)
         
-        # Find all correlation files in taylor directory
-        taylor_dir = os.path.join(beta_dir, 'taylor')
-        files = glob.glob(os.path.join(taylor_dir, 'time_corr_rand*.dat'))
-        
-        for file_path in files:
-            species_with_momentum, _, _ = parse_filename_new(file_path)
-            if species_with_momentum:
-                species_names.add(species_with_momentum)
-                species_data[species_with_momentum][bin_idx].append(file_path)
-        
-        # Also find correlation files in global directory
-        global_dir = os.path.join(beta_dir, 'global')
-        global_files = glob.glob(os.path.join(global_dir, 'time_corr_rand*.dat'))
-        
-        for file_path in global_files:
-            species_with_momentum, _, _ = parse_filename_new(file_path)
-            if species_with_momentum:
-                species_names.add(species_with_momentum)
-                species_data[species_with_momentum][bin_idx].append(file_path)
-
-        # Find correlation files in pedantic directory
-        pedantic_dir = os.path.join(beta_dir, 'pedantic')
-        pedantic_files = glob.glob(os.path.join(pedantic_dir, 'time_corr_rand*.dat'))
-        for file_path in pedantic_files:
-            species_with_momentum, _, _ = parse_filename_new(file_path)
-            if species_with_momentum:
-                species_names.add(species_with_momentum)
-                species_data[species_with_momentum][bin_idx].append(file_path)
-        
-        # Find correlation files in taylorXYZ directory
-        taylorXYZ_dir = os.path.join(beta_dir, 'taylorXYZ')
-        taylorXYZ_files = glob.glob(os.path.join(taylorXYZ_dir, 'time_corr_rand*.dat'))
-        for file_path in taylorXYZ_files:
-            species_with_momentum, _, _ = parse_filename_new(file_path)
-            if species_with_momentum:
-                species_names.add(species_with_momentum)
-                species_data[species_with_momentum][bin_idx].append(file_path)
-        
-        # Find correlation files in globalXYZ directory
-        globalXYZ_dir = os.path.join(beta_dir, 'globalXYZ')
-        globalXYZ_files = glob.glob(os.path.join(globalXYZ_dir, 'time_corr_rand*.dat'))
-        for file_path in globalXYZ_files:
-            species_with_momentum, _, _ = parse_filename_new(file_path)
-            if species_with_momentum:
-                species_names.add(species_with_momentum)
-                species_data[species_with_momentum][bin_idx].append(file_path)
-        
-        # Find correlation files in experimentalXYZ directory
-        experimentalXYZ_dir = os.path.join(beta_dir, 'experimentalXYZ')
-        experimentalXYZ_files = glob.glob(os.path.join(experimentalXYZ_dir, 'time_corr_rand*.dat'))
-        for file_path in experimentalXYZ_files:
-            species_with_momentum, _, _ = parse_filename_new(file_path)
-            if species_with_momentum:
-                species_names.add(species_with_momentum)
-                species_data[species_with_momentum][bin_idx].append(file_path)
-        
-        # Find correlation files in experimentalGlobalXYZ directory
-        experimentalGlobalXYZ_dir = os.path.join(beta_dir, 'experimentalGlobalXYZ')
-        experimentalGlobalXYZ_files = glob.glob(os.path.join(experimentalGlobalXYZ_dir, 'time_corr_rand*.dat'))
-        for file_path in experimentalGlobalXYZ_files:
-            species_with_momentum, _, _ = parse_filename_new(file_path)
-            if species_with_momentum:
-                species_names.add(species_with_momentum)
-                species_data[species_with_momentum][bin_idx].append(file_path)
+        # Scan all subdirectories within this beta directory
+        # This handles both old structure (taylor, global, etc.) and new structure (sum, transverse, etc.)
+        if os.path.isdir(beta_dir):
+            subdirs = [d for d in os.listdir(beta_dir) if os.path.isdir(os.path.join(beta_dir, d))]
+            
+            if not subdirs:
+                print(f"Warning: No subdirectories found in {beta_dir}")
+                continue
+            
+            print(f"  Beta={beta_value:.6g}: Found subdirectories: {subdirs}")
+            
+            for subdir in subdirs:
+                subdir_path = os.path.join(beta_dir, subdir)
+                files = glob.glob(os.path.join(subdir_path, 'time_corr_*.dat'))
+                
+                for file_path in files:
+                    species_with_momentum, _, _ = parse_filename_new(file_path)
+                    if species_with_momentum:
+                        species_names.add(species_with_momentum)
+                        species_data[species_with_momentum][bin_idx].append(file_path)
+            
+            # Count total files found for this beta
+            total_files = sum(len(glob.glob(os.path.join(beta_dir, subdir, 'time_corr_*.dat'))) 
+                            for subdir in subdirs)
+            print(f"  Beta={beta_value:.6g}: Found {total_files} correlation files across {len(subdirs)} subdirectories")
 
 
 def _extract_beta_from_dirname(beta_dir):
