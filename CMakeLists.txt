@@ -278,6 +278,8 @@ if(WITH_CUDA)
         ${GPU_DIR}/gpu_fixed_sz_operator.cu
         ${GPU_DIR}/gpu_lanczos.cu
         ${GPU_DIR}/gpu_ed_wrapper.cu
+        ${GPU_DIR}/gpu_tpq.cu
+        ${GPU_DIR}/gpu_cg.cu
     )
     
     set(GPU_HEADERS
@@ -286,6 +288,8 @@ if(WITH_CUDA)
         ${GPU_DIR}/gpu_operator.cuh
         ${GPU_DIR}/gpu_lanczos.cuh
         ${GPU_DIR}/gpu_ed_wrapper.h
+        ${GPU_DIR}/gpu_tpq.cuh
+        ${GPU_DIR}/gpu_cg.cuh
     )
 endif()
 
@@ -318,6 +322,7 @@ if(WITH_CUDA)
         CUDA::cublas
         CUDA::cusparse
         CUDA::curand
+        CUDA::cusolver
     )
 endif()
 
@@ -404,6 +409,7 @@ if(WITH_CUDA)
         CUDA::cublas
         CUDA::cusparse
         CUDA::curand
+        CUDA::cusolver
     )
     
     if(TARGET TPQ_DSSF)
@@ -412,6 +418,7 @@ if(WITH_CUDA)
             CUDA::cublas
             CUDA::cusparse
             CUDA::curand
+            CUDA::cusolver
         )
     endif()
     

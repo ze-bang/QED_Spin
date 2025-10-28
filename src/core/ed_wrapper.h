@@ -134,7 +134,11 @@ enum class DiagonalizationMethod {
     
     // GPU methods
     LANCZOS_GPU,           // GPU-accelerated Lanczos (full Hilbert space)
-    LANCZOS_GPU_FIXED_SZ   // GPU-accelerated Lanczos (fixed Sz sector)
+    LANCZOS_GPU_FIXED_SZ,  // GPU-accelerated Lanczos (fixed Sz sector)
+    DAVIDSON_GPU,          // GPU-accelerated Davidson method
+    LOBPCG_GPU,            // GPU-accelerated LOBPCG method
+    mTPQ_GPU,              // GPU-accelerated microcanonical TPQ
+    cTPQ_GPU               // GPU-accelerated canonical TPQ
 };
 
 /**
@@ -591,10 +595,14 @@ EDResults exact_diagonalization_core(
         
         case DiagonalizationMethod::LANCZOS_GPU:
         case DiagonalizationMethod::LANCZOS_GPU_FIXED_SZ:
+        case DiagonalizationMethod::DAVIDSON_GPU:
+        case DiagonalizationMethod::LOBPCG_GPU:
+        case DiagonalizationMethod::mTPQ_GPU:
+        case DiagonalizationMethod::cTPQ_GPU:
             // These should be handled in exact_diagonalization_from_files
             // If we reach here, it means they were called incorrectly
             std::cerr << "Error: GPU methods must be called via exact_diagonalization_from_files" << std::endl;
-            std::cerr << "Use: ED <directory> --method=LANCZOS_GPU" << std::endl;
+            std::cerr << "Use: ED <directory> --method=<GPU_METHOD>" << std::endl;
             throw std::runtime_error("GPU methods require file-based interface");
             break;
 
@@ -906,11 +914,20 @@ EDResults diagonalize_symmetry_block(
     // / upload fails, gracefully fall back to the CPU Lanczos path.
 #ifdef WITH_CUDA
     if (method == DiagonalizationMethod::LANCZOS_GPU ||
-        method == DiagonalizationMethod::LANCZOS_GPU_FIXED_SZ) {
+        method == DiagonalizationMethod::LANCZOS_GPU_FIXED_SZ ||
+        method == DiagonalizationMethod::DAVIDSON_GPU ||
+        method == DiagonalizationMethod::LOBPCG_GPU) {
         if (!GPUEDWrapper::isGPUAvailable()) {
-            std::cerr << "Warning: No CUDA-capable GPU found. Falling back to CPU Lanczos for this block (dim="
+            std::cerr << "Warning: No CUDA-capable GPU found. Falling back to CPU for this block (dim="
                       << block_dim << ").\n";
-            method = DiagonalizationMethod::LANCZOS;
+            // Map GPU methods to appropriate CPU methods
+            if (method == DiagonalizationMethod::DAVIDSON_GPU) {
+                method = DiagonalizationMethod::DAVIDSON;
+            } else if (method == DiagonalizationMethod::LOBPCG_GPU) {
+                method = DiagonalizationMethod::LOBPCG;
+            } else {
+                method = DiagonalizationMethod::LANCZOS;
+            }
         } else {
             // Convert Eigen sparse matrix (which may be column-major) to
             // row-major CSR arrays expected by the GPU upload path.
@@ -949,32 +966,55 @@ EDResults diagonalize_symmetry_block(
                 }
                 row_ptr[N] = counter;
 
-                // Sanity check
-                if (counter != nnz) {
-                    // Some sparse matrices report a different nonZeros() due to structural zeros
-                    // adjust nnz to actual count
-                    // proceed with the actual count
-                }
-
-                // Create GPU operator and run Lanczos
+                // Create GPU operator and run appropriate method
                 void* gpu_op = GPUEDWrapper::createGPUOperatorFromCSR(params.num_sites, N, row_ptr, col_ind, values);
                 if (!gpu_op) {
-                    std::cerr << "Warning: Failed to create GPU operator from CSR. Falling back to CPU Lanczos for this block (dim="
+                    std::cerr << "Warning: Failed to create GPU operator from CSR. Falling back to CPU for this block (dim="
                               << block_dim << ").\n";
-                    method = DiagonalizationMethod::LANCZOS;
+                    if (method == DiagonalizationMethod::DAVIDSON_GPU) {
+                        method = DiagonalizationMethod::DAVIDSON;
+                    } else if (method == DiagonalizationMethod::LOBPCG_GPU) {
+                        method = DiagonalizationMethod::LOBPCG;
+                    } else {
+                        method = DiagonalizationMethod::LANCZOS;
+                    }
                 } else {
                     std::vector<double> eigenvalues;
                     GPUEDWrapper::printGPUInfo();
-                    GPUEDWrapper::runGPULanczos(
-                        gpu_op,
-                        N,
-                        params.max_iterations,
-                        std::min(params.num_eigenvalues, block_dim),
-                        params.tolerance,
-                        eigenvalues,
-                        params.output_dir,
-                        params.compute_eigenvectors
-                    );
+                    
+                    if (method == DiagonalizationMethod::DAVIDSON_GPU) {
+                        GPUEDWrapper::runGPUDavidson(
+                            gpu_op, N,
+                            std::min(params.num_eigenvalues, block_dim),
+                            params.max_iterations,
+                            params.max_subspace,
+                            params.tolerance,
+                            eigenvalues,
+                            params.output_dir,
+                            params.compute_eigenvectors
+                        );
+                    } else if (method == DiagonalizationMethod::LOBPCG_GPU) {
+                        GPUEDWrapper::runGPULOBPCG(
+                            gpu_op, N,
+                            std::min(params.num_eigenvalues, block_dim),
+                            params.max_iterations,
+                            params.tolerance,
+                            eigenvalues,
+                            params.output_dir,
+                            params.compute_eigenvectors
+                        );
+                    } else {
+                        // LANCZOS_GPU or LANCZOS_GPU_FIXED_SZ
+                        GPUEDWrapper::runGPULanczos(
+                            gpu_op, N,
+                            params.max_iterations,
+                            std::min(params.num_eigenvalues, block_dim),
+                            params.tolerance,
+                            eigenvalues,
+                            params.output_dir,
+                            params.compute_eigenvectors
+                        );
+                    }
 
                     // Fill results and clean up
                     EDResults results;
@@ -986,17 +1026,40 @@ EDResults diagonalize_symmetry_block(
                 }
             } catch (const std::exception &e) {
                 std::cerr << "Warning: Exception during GPU dispatch for symmetry block: " << e.what()
-                          << "\nFalling back to CPU Lanczos for this block (dim=" << block_dim << ").\n";
-                method = DiagonalizationMethod::LANCZOS;
+                          << "\nFalling back to CPU for this block (dim=" << block_dim << ").\n";
+                if (method == DiagonalizationMethod::DAVIDSON_GPU) {
+                    method = DiagonalizationMethod::DAVIDSON;
+                } else if (method == DiagonalizationMethod::LOBPCG_GPU) {
+                    method = DiagonalizationMethod::LOBPCG;
+                } else {
+                    method = DiagonalizationMethod::LANCZOS;
+                }
             }
         }
     }
-#else
-    if (method == DiagonalizationMethod::LANCZOS_GPU ||
-        method == DiagonalizationMethod::LANCZOS_GPU_FIXED_SZ) {
-        std::cerr << "Warning: GPU diagonalization for individual symmetry blocks requested but CUDA not available.\n";
+    
+    // TPQ methods shouldn't be used for individual blocks - fall back to Lanczos
+    if (method == DiagonalizationMethod::mTPQ_GPU || method == DiagonalizationMethod::cTPQ_GPU) {
+        std::cerr << "Warning: GPU TPQ methods not applicable to individual symmetry blocks.\n";
         std::cerr << "         Falling back to CPU Lanczos for this block (dim=" << block_dim << ").\n";
         method = DiagonalizationMethod::LANCZOS;
+    }
+#else
+    if (method == DiagonalizationMethod::LANCZOS_GPU ||
+        method == DiagonalizationMethod::LANCZOS_GPU_FIXED_SZ ||
+        method == DiagonalizationMethod::DAVIDSON_GPU ||
+        method == DiagonalizationMethod::LOBPCG_GPU ||
+        method == DiagonalizationMethod::mTPQ_GPU ||
+        method == DiagonalizationMethod::cTPQ_GPU) {
+        std::cerr << "Warning: GPU methods requested but CUDA not available.\n";
+        std::cerr << "         Falling back to CPU for this block (dim=" << block_dim << ").\n";
+        if (method == DiagonalizationMethod::DAVIDSON_GPU) {
+            method = DiagonalizationMethod::DAVIDSON;
+        } else if (method == DiagonalizationMethod::LOBPCG_GPU) {
+            method = DiagonalizationMethod::LOBPCG;
+        } else {
+            method = DiagonalizationMethod::LANCZOS;
+        }
     }
 #endif
 
@@ -1394,9 +1457,13 @@ EDResults exact_diagonalization_from_files(
     // Handle GPU methods separately (they don't need CPU Operator)
 #ifdef WITH_CUDA
     if (method == DiagonalizationMethod::LANCZOS_GPU || 
-        method == DiagonalizationMethod::LANCZOS_GPU_FIXED_SZ) {
+        method == DiagonalizationMethod::LANCZOS_GPU_FIXED_SZ ||
+        method == DiagonalizationMethod::DAVIDSON_GPU ||
+        method == DiagonalizationMethod::LOBPCG_GPU ||
+        method == DiagonalizationMethod::mTPQ_GPU ||
+        method == DiagonalizationMethod::cTPQ_GPU) {
         
-        std::cout << "Running GPU-accelerated Lanczos algorithm..." << std::endl;
+        std::cout << "Running GPU-accelerated algorithm..." << std::endl;
         
         // Check if GPU is available
         if (!GPUEDWrapper::isGPUAvailable()) {
@@ -1450,6 +1517,120 @@ EDResults exact_diagonalization_from_files(
             std::cerr << "Error: LANCZOS_GPU_FIXED_SZ file interface not yet implemented." << std::endl;
             std::cerr << "Please use GPU_FILE_TEST for now." << std::endl;
             throw std::runtime_error("Fixed Sz GPU method not yet integrated with file interface");
+            
+        } else if (method == DiagonalizationMethod::DAVIDSON_GPU) {
+            std::cout << "Running GPU Davidson method..." << std::endl;
+            
+            void* gpu_op = GPUEDWrapper::createGPUOperatorFromFiles(
+                params.num_sites, interaction_file, single_site_file);
+            
+            if (!gpu_op) {
+                std::cerr << "Error: Failed to create GPU operator" << std::endl;
+                throw std::runtime_error("GPU operator creation failed");
+            }
+            
+            std::vector<double> eigenvalues;
+            GPUEDWrapper::runGPUDavidson(
+                gpu_op,
+                hilbert_space_dim,
+                params.num_eigenvalues,
+                params.max_iterations,
+                params.max_subspace,
+                params.tolerance,
+                eigenvalues,
+                params.output_dir,
+                params.compute_eigenvectors
+            );
+            
+            results.eigenvalues = eigenvalues;
+            GPUEDWrapper::destroyGPUOperator(gpu_op);
+            
+            std::cout << "GPU Davidson completed successfully!" << std::endl;
+            
+        } else if (method == DiagonalizationMethod::LOBPCG_GPU) {
+            std::cout << "Running GPU LOBPCG method..." << std::endl;
+            
+            void* gpu_op = GPUEDWrapper::createGPUOperatorFromFiles(
+                params.num_sites, interaction_file, single_site_file);
+            
+            if (!gpu_op) {
+                std::cerr << "Error: Failed to create GPU operator" << std::endl;
+                throw std::runtime_error("GPU operator creation failed");
+            }
+            
+            std::vector<double> eigenvalues;
+            GPUEDWrapper::runGPULOBPCG(
+                gpu_op,
+                hilbert_space_dim,
+                params.num_eigenvalues,
+                params.max_iterations,
+                params.tolerance,
+                eigenvalues,
+                params.output_dir,
+                params.compute_eigenvectors
+            );
+            
+            results.eigenvalues = eigenvalues;
+            GPUEDWrapper::destroyGPUOperator(gpu_op);
+            
+            std::cout << "GPU LOBPCG completed successfully!" << std::endl;
+            
+        } else if (method == DiagonalizationMethod::mTPQ_GPU) {
+            std::cout << "Running GPU microcanonical TPQ..." << std::endl;
+            
+            void* gpu_op = GPUEDWrapper::createGPUOperatorFromFiles(
+                params.num_sites, interaction_file, single_site_file);
+            
+            if (!gpu_op) {
+                std::cerr << "Error: Failed to create GPU operator" << std::endl;
+                throw std::runtime_error("GPU operator creation failed");
+            }
+            
+            std::vector<double> eigenvalues;
+            GPUEDWrapper::runGPUMicrocanonicalTPQ(
+                gpu_op,
+                hilbert_space_dim,
+                params.max_iterations,
+                params.num_samples,
+                params.num_measure_freq,
+                eigenvalues,
+                params.output_dir,
+                params.large_value
+            );
+            
+            results.eigenvalues = eigenvalues;
+            GPUEDWrapper::destroyGPUOperator(gpu_op);
+            
+            std::cout << "GPU mTPQ completed successfully!" << std::endl;
+            
+        } else if (method == DiagonalizationMethod::cTPQ_GPU) {
+            std::cout << "Running GPU canonical TPQ..." << std::endl;
+            
+            void* gpu_op = GPUEDWrapper::createGPUOperatorFromFiles(
+                params.num_sites, interaction_file, single_site_file);
+            
+            if (!gpu_op) {
+                std::cerr << "Error: Failed to create GPU operator" << std::endl;
+                throw std::runtime_error("GPU operator creation failed");
+            }
+            
+            std::vector<double> eigenvalues;
+            GPUEDWrapper::runGPUCanonicalTPQ(
+                gpu_op,
+                hilbert_space_dim,
+                params.temp_max,
+                params.num_samples,
+                params.num_measure_freq,
+                eigenvalues,
+                params.output_dir,
+                params.delta_tau,
+                params.num_order
+            );
+            
+            results.eigenvalues = eigenvalues;
+            GPUEDWrapper::destroyGPUOperator(gpu_op);
+            
+            std::cout << "GPU cTPQ completed successfully!" << std::endl;
         }
         
         return results;

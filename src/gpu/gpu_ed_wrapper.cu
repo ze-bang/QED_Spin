@@ -8,6 +8,8 @@
 #include <cuda_runtime.h>
 #include "gpu_operator.cuh"
 #include "gpu_lanczos.cuh"
+#include "gpu_tpq.cuh"
+#include "gpu_cg.cuh"
 
 bool GPUEDWrapper::isGPUAvailable() {
     int device_count = 0;
@@ -375,6 +377,80 @@ void GPUEDWrapper::runGPULanczosFixedSz(void* gpu_op_handle,
     std::cout << "GPU Fixed Sz Lanczos not yet fully implemented\n";
 }
 
+void GPUEDWrapper::runGPUMicrocanonicalTPQ(void* gpu_op_handle,
+                                           int N, int max_iter, int num_samples,
+                                           int temp_interval,
+                                           std::vector<double>& eigenvalues,
+                                           std::string dir,
+                                           double large_value) {
+    if (!gpu_op_handle) {
+        std::cerr << "Error: NULL GPU operator handle\n";
+        return;
+    }
+    
+    GPUOperator* gpu_op = static_cast<GPUOperator*>(gpu_op_handle);
+    GPUTPQSolver tpq_solver(gpu_op, N);
+    
+    tpq_solver.runMicrocanonicalTPQ(max_iter, num_samples, temp_interval,
+                                    eigenvalues, dir, large_value);
+}
+
+void GPUEDWrapper::runGPUCanonicalTPQ(void* gpu_op_handle,
+                                      int N, double beta_max, int num_samples,
+                                      int temp_interval,
+                                      std::vector<double>& energies,
+                                      std::string dir,
+                                      double delta_beta,
+                                      int taylor_order) {
+    if (!gpu_op_handle) {
+        std::cerr << "Error: NULL GPU operator handle\n";
+        return;
+    }
+    
+    GPUOperator* gpu_op = static_cast<GPUOperator*>(gpu_op_handle);
+    GPUTPQSolver tpq_solver(gpu_op, N);
+    
+    tpq_solver.runCanonicalTPQ(beta_max, num_samples, temp_interval,
+                               energies, dir, delta_beta, taylor_order);
+}
+
+void GPUEDWrapper::runGPUDavidson(void* gpu_op_handle,
+                                  int N, int num_eigenvalues, int max_iter,
+                                  int max_subspace, double tol,
+                                  std::vector<double>& eigenvalues,
+                                  std::string dir,
+                                  bool compute_eigenvectors) {
+    if (!gpu_op_handle) {
+        std::cerr << "Error: NULL GPU operator handle\n";
+        return;
+    }
+    
+    GPUOperator* gpu_op = static_cast<GPUOperator*>(gpu_op_handle);
+    GPUIterativeSolver solver(gpu_op, N);
+    
+    std::vector<std::vector<std::complex<double>>> eigenvectors;
+    solver.runDavidson(num_eigenvalues, max_iter, max_subspace, tol,
+                      eigenvalues, eigenvectors, dir, compute_eigenvectors);
+}
+
+void GPUEDWrapper::runGPULOBPCG(void* gpu_op_handle,
+                                int N, int num_eigenvalues, int max_iter,
+                                double tol,
+                                std::vector<double>& eigenvalues,
+                                std::string dir,
+                                bool compute_eigenvectors) {
+    if (!gpu_op_handle) {
+        std::cerr << "Error: NULL GPU operator handle\n";
+        return;
+    }
+    
+    GPUOperator* gpu_op = static_cast<GPUOperator*>(gpu_op_handle);
+    GPUIterativeSolver solver(gpu_op, N);
+    
+    solver.runLOBPCG(num_eigenvalues, max_iter, tol,
+                    eigenvalues, dir, compute_eigenvectors);
+}
+
 bool GPUEDWrapper::createGPUOperatorFromCPU(const Operator& cpu_op,
                                            void** gpu_op_handle,
                                            int n_sites) {
@@ -410,6 +486,14 @@ void* GPUEDWrapper::createGPUOperatorFromFiles(
     return nullptr;
 }
 
+void* GPUEDWrapper::createGPUOperatorFromCSR(int n_sites,
+                                            int N,
+                                            const std::vector<int>& row_ptr,
+                                            const std::vector<int>& col_ind,
+                                            const std::vector<std::complex<double>>& values) {
+    return nullptr;
+}
+
 void GPUEDWrapper::destroyGPUOperator(void* gpu_op_handle) {}
 
 void GPUEDWrapper::gpuMatVec(void* gpu_op_handle,
@@ -431,6 +515,35 @@ void GPUEDWrapper::runGPULanczosFixedSz(void* gpu_op_handle,
                                        std::vector<double>& eigenvalues,
                                        std::string dir,
                                        bool eigenvectors) {}
+
+void GPUEDWrapper::runGPUMicrocanonicalTPQ(void* gpu_op_handle,
+                                           int N, int max_iter, int num_samples,
+                                           int temp_interval,
+                                           std::vector<double>& eigenvalues,
+                                           std::string dir,
+                                           double large_value) {}
+
+void GPUEDWrapper::runGPUCanonicalTPQ(void* gpu_op_handle,
+                                      int N, double beta_max, int num_samples,
+                                      int temp_interval,
+                                      std::vector<double>& energies,
+                                      std::string dir,
+                                      double delta_beta,
+                                      int taylor_order) {}
+
+void GPUEDWrapper::runGPUDavidson(void* gpu_op_handle,
+                                  int N, int num_eigenvalues, int max_iter,
+                                  int max_subspace, double tol,
+                                  std::vector<double>& eigenvalues,
+                                  std::string dir,
+                                  bool compute_eigenvectors) {}
+
+void GPUEDWrapper::runGPULOBPCG(void* gpu_op_handle,
+                                int N, int num_eigenvalues, int max_iter,
+                                double tol,
+                                std::vector<double>& eigenvalues,
+                                std::string dir,
+                                bool compute_eigenvectors) {}
 
 bool GPUEDWrapper::createGPUOperatorFromCPU(const Operator& cpu_op,
                                            void** gpu_op_handle,

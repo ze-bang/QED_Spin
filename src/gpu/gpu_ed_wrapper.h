@@ -108,6 +108,47 @@ public:
      */
     static bool shouldUseGPU(int n_sites, bool fixed_sz = false);
     
+    /**
+     * Run GPU-accelerated microcanonical TPQ
+     */
+    static void runGPUMicrocanonicalTPQ(void* gpu_op_handle,
+                                        int N, int max_iter, int num_samples,
+                                        int temp_interval,
+                                        std::vector<double>& eigenvalues,
+                                        std::string dir = "",
+                                        double large_value = 1e5);
+    
+    /**
+     * Run GPU-accelerated canonical TPQ
+     */
+    static void runGPUCanonicalTPQ(void* gpu_op_handle,
+                                   int N, double beta_max, int num_samples,
+                                   int temp_interval,
+                                   std::vector<double>& energies,
+                                   std::string dir = "",
+                                   double delta_beta = 0.1,
+                                   int taylor_order = 50);
+    
+    /**
+     * Run GPU-accelerated Davidson method
+     */
+    static void runGPUDavidson(void* gpu_op_handle,
+                              int N, int num_eigenvalues, int max_iter,
+                              int max_subspace, double tol,
+                              std::vector<double>& eigenvalues,
+                              std::string dir = "",
+                              bool compute_eigenvectors = false);
+    
+    /**
+     * Run GPU-accelerated LOBPCG method
+     */
+    static void runGPULOBPCG(void* gpu_op_handle,
+                            int N, int num_eigenvalues, int max_iter,
+                            double tol,
+                            std::vector<double>& eigenvalues,
+                            std::string dir = "",
+                            bool compute_eigenvectors = false);
+    
 private:
     static int getGPUCount();
     static size_t getAvailableGPUMemory(int device = 0);
