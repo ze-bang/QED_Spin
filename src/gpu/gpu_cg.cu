@@ -5,8 +5,6 @@
 #include <iomanip>
 #include <chrono>
 #include <cmath>
-#include <algorithm>
-#include <numeric>
 #include <curand.h>
 #include <curand_kernel.h>
 #include <Eigen/Dense>
@@ -25,29 +23,6 @@ __global__ void initRandomVectorsKernel(cuDoubleComplex* vectors, int N, int num
         double real = curand_normal_double(&rand_state);
         double imag = curand_normal_double(&rand_state);
         vectors[vec_idx * N + idx] = make_cuDoubleComplex(real, imag);
-    }
-}
-
-// Kernel to apply Jacobi preconditioner: out = (H_diag - shift*I)^(-1) * in
-// This approximates solving (H - shift*I) * out = in
-__global__ void applyJacobiPreconditioner(cuDoubleComplex* out, const cuDoubleComplex* in,
-                                          const double* H_diag, double shift, int N) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    
-    if (idx < N) {
-        double diag_element = H_diag[idx] - shift;
-        // For stability, only precondition when denominator is not too small
-        // If diag is close to shift, don't precondition (identity operation)
-        if (fabs(diag_element) > 0.1) {  // More conservative threshold
-            double inv_diag = 1.0 / diag_element;
-            out[idx] = make_cuDoubleComplex(
-                cuCreal(in[idx]) * inv_diag,
-                cuCimag(in[idx]) * inv_diag
-            );
-        } else {
-            // Near-singular: use identity (no preconditioning)
-            out[idx] = in[idx];
-        }
     }
 }
 
@@ -511,11 +486,6 @@ void GPUIterativeSolver::runLOBPCG(
     cudaMalloc(&d_HX, N_ * block_size * sizeof(cuDoubleComplex));
     cudaMalloc(&d_HP, N_ * block_size * sizeof(cuDoubleComplex));
     
-    // Note: Diagonal extraction disabled - simple Jacobi preconditioning
-    // was found to hurt convergence for this problem. More sophisticated
-    // preconditioning (e.g., multigrid or approximate eigenvector-based)
-    // would be needed for significant speedup.
-    
     // Allocate subspace matrices
     cuDoubleComplex* d_hsub;    // Subspace Hamiltonian
     cuDoubleComplex* d_ovlp;    // Subspace overlap matrix
@@ -604,11 +574,9 @@ void GPUIterativeSolver::runLOBPCG(
             break;
         }
         
-        // Skip preconditioning for now - simple diagonal preconditioning
-        // doesn't help and can make convergence worse for this problem
-        // TODO: Implement proper two-level preconditioning or use approximate eigenvectors
+        // No preconditioning for now - can add proper preconditioner later
         
-        // Apply H to W (residual)
+        // Apply H to W
         matvec_start = std::chrono::high_resolution_clock::now();
         for (int i = 0; i < block_size; ++i) {
             gpu_op_->matVecGPU(d_W + i * N_, d_HW + i * N_, N_);
@@ -843,7 +811,6 @@ void GPUIterativeSolver::runLOBPCG(
     cudaFree(d_HW);
     cudaFree(d_HX);
     cudaFree(d_HP);
-    cudaFree(d_H_diag);
     cudaFree(d_hsub);
     cudaFree(d_ovlp);
     cudaFree(d_eigsub);
