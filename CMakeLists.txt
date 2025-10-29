@@ -280,6 +280,7 @@ if(WITH_CUDA)
         ${GPU_DIR}/gpu_ed_wrapper.cu
         ${GPU_DIR}/gpu_tpq.cu
         ${GPU_DIR}/gpu_cg.cu
+        ${GPU_DIR}/gpu_dynamics.cu
     )
     
     set(GPU_HEADERS
@@ -290,6 +291,7 @@ if(WITH_CUDA)
         ${GPU_DIR}/gpu_ed_wrapper.h
         ${GPU_DIR}/gpu_tpq.cuh
         ${GPU_DIR}/gpu_cg.cuh
+        ${GPU_DIR}/gpu_dynamics.cuh
     )
 endif()
 

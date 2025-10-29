@@ -5,6 +5,8 @@
 #include <iomanip>
 #include <chrono>
 #include <cmath>
+#include <algorithm>
+#include <numeric>
 #include <curand.h>
 #include <curand_kernel.h>
 #include <Eigen/Dense>
@@ -23,6 +25,29 @@ __global__ void initRandomVectorsKernel(cuDoubleComplex* vectors, int N, int num
         double real = curand_normal_double(&rand_state);
         double imag = curand_normal_double(&rand_state);
         vectors[vec_idx * N + idx] = make_cuDoubleComplex(real, imag);
+    }
+}
+
+// Kernel to apply Jacobi preconditioner: out = (H_diag - shift*I)^(-1) * in
+// This approximates solving (H - shift*I) * out = in
+__global__ void applyJacobiPreconditioner(cuDoubleComplex* out, const cuDoubleComplex* in,
+                                          const double* H_diag, double shift, int N) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    
+    if (idx < N) {
+        double diag_element = H_diag[idx] - shift;
+        // For stability, only precondition when denominator is not too small
+        // If diag is close to shift, don't precondition (identity operation)
+        if (fabs(diag_element) > 0.1) {  // More conservative threshold
+            double inv_diag = 1.0 / diag_element;
+            out[idx] = make_cuDoubleComplex(
+                cuCreal(in[idx]) * inv_diag,
+                cuCimag(in[idx]) * inv_diag
+            );
+        } else {
+            // Near-singular: use identity (no preconditioning)
+            out[idx] = in[idx];
+        }
     }
 }
 
@@ -486,6 +511,11 @@ void GPUIterativeSolver::runLOBPCG(
     cudaMalloc(&d_HX, N_ * block_size * sizeof(cuDoubleComplex));
     cudaMalloc(&d_HP, N_ * block_size * sizeof(cuDoubleComplex));
     
+    // Note: Diagonal extraction disabled - simple Jacobi preconditioning
+    // was found to hurt convergence for this problem. More sophisticated
+    // preconditioning (e.g., multigrid or approximate eigenvector-based)
+    // would be needed for significant speedup.
+    
     // Allocate subspace matrices
     cuDoubleComplex* d_hsub;    // Subspace Hamiltonian
     cuDoubleComplex* d_ovlp;    // Subspace overlap matrix
@@ -574,14 +604,11 @@ void GPUIterativeSolver::runLOBPCG(
             break;
         }
         
-        // Apply preconditioning to residuals (simple diagonal scaling)
-        for (int i = 0; i < block_size; ++i) {
-            double scale = 1.0 / std::max(std::abs(eigenvalues[i]), 0.1);
-            cuDoubleComplex scale_c = make_cuDoubleComplex(scale, 0.0);
-            cublasZscal(cublas_handle_, N_, &scale_c, d_W + i * N_, 1);
-        }
+        // Skip preconditioning for now - simple diagonal preconditioning
+        // doesn't help and can make convergence worse for this problem
+        // TODO: Implement proper two-level preconditioning or use approximate eigenvectors
         
-        // Apply H to W
+        // Apply H to W (residual)
         matvec_start = std::chrono::high_resolution_clock::now();
         for (int i = 0; i < block_size; ++i) {
             gpu_op_->matVecGPU(d_W + i * N_, d_HW + i * N_, N_);
@@ -656,17 +683,38 @@ void GPUIterativeSolver::runLOBPCG(
         Eigen::MatrixXcd o_eigenvecs = o_solver.eigenvectors();
         
         // Compute O^(-1/2) using only non-negligible eigenvalues
+        // Ensure we keep at least block_size vectors for stability
+        double threshold = 1.0e-10;
         int nsub_cut = 0;
         for (int i = 0; i < nsub; ++i) {
-            if (o_eigenvals(i) > 1.0e-10) {
+            if (o_eigenvals(i) > threshold) {
                 nsub_cut++;
+            }
+        }
+        
+        // If we filtered too aggressively, keep more vectors
+        if (nsub_cut < block_size) {
+            nsub_cut = std::min(block_size, nsub);
+            // Find the block_size-th largest eigenvalue and use that as threshold
+            std::vector<double> sorted_eigs(o_eigenvals.data(), o_eigenvals.data() + nsub);
+            std::sort(sorted_eigs.begin(), sorted_eigs.end(), std::greater<double>());
+            if (nsub_cut < (int)sorted_eigs.size()) {
+                threshold = sorted_eigs[nsub_cut - 1] * 0.1;  // Keep slightly more
+            } else {
+                threshold = 0.0;
+            }
+            nsub_cut = 0;
+            for (int i = 0; i < nsub; ++i) {
+                if (o_eigenvals(i) > threshold) {
+                    nsub_cut++;
+                }
             }
         }
         
         Eigen::MatrixXcd o_sqrt_inv = Eigen::MatrixXcd::Zero(nsub, nsub_cut);
         int idx = 0;
         for (int i = 0; i < nsub; ++i) {
-            if (o_eigenvals(i) > 1.0e-10) {
+            if (o_eigenvals(i) > threshold) {
                 o_sqrt_inv.col(idx) = o_eigenvecs.col(i) / std::sqrt(o_eigenvals(i));
                 idx++;
             }
@@ -706,7 +754,7 @@ void GPUIterativeSolver::runLOBPCG(
         
         for (int block_idx = 0; block_idx < 3; ++block_idx) {
             cuDoubleComplex alpha = make_cuDoubleComplex(1.0, 0.0);
-            cuDoubleComplex beta = make_cuDoubleComplex(1.0, 0.0);
+            cuDoubleComplex beta = (block_idx == 0) ? make_cuDoubleComplex(0.0, 0.0) : make_cuDoubleComplex(1.0, 0.0);
             
             cublasZgemm(cublas_handle_,
                        CUBLAS_OP_N, CUBLAS_OP_N,
@@ -721,9 +769,10 @@ void GPUIterativeSolver::runLOBPCG(
         // Update P: P_new = W*c_W + P*c_P (no X component for conjugate direction)
         cudaMemset(d_new_P, 0, N_ * block_size * sizeof(cuDoubleComplex));
         
+        int p_block = 0;
         for (int block_idx = 0; block_idx < 3; block_idx += 2) {  // Only W (0) and P (2)
             cuDoubleComplex alpha = make_cuDoubleComplex(1.0, 0.0);
-            cuDoubleComplex beta = make_cuDoubleComplex(1.0, 0.0);
+            cuDoubleComplex beta = (p_block == 0) ? make_cuDoubleComplex(0.0, 0.0) : make_cuDoubleComplex(1.0, 0.0);
             
             cublasZgemm(cublas_handle_,
                        CUBLAS_OP_N, CUBLAS_OP_N,
@@ -733,6 +782,7 @@ void GPUIterativeSolver::runLOBPCG(
                        d_eigvec_sub + block_idx * block_size, nsub,
                        &beta,
                        d_new_P, N_);
+            p_block++;
         }
         
         // Copy new X and P
@@ -741,26 +791,7 @@ void GPUIterativeSolver::runLOBPCG(
         cudaMemcpy(d_P, d_new_P, N_ * block_size * sizeof(cuDoubleComplex),
                    cudaMemcpyDeviceToDevice);
         
-        // Normalize X and P
-        auto ortho_start = std::chrono::high_resolution_clock::now();
-        for (int i = 0; i < block_size; ++i) {
-            double norm;
-            cublasDznrm2(cublas_handle_, N_, d_X + i * N_, 1, &norm);
-            if (norm > 1e-10) {
-                cuDoubleComplex scale = make_cuDoubleComplex(1.0 / norm, 0.0);
-                cublasZscal(cublas_handle_, N_, &scale, d_X + i * N_, 1);
-            }
-            
-            cublasDznrm2(cublas_handle_, N_, d_P + i * N_, 1, &norm);
-            if (norm > 1e-10) {
-                cuDoubleComplex scale = make_cuDoubleComplex(1.0 / norm, 0.0);
-                cublasZscal(cublas_handle_, N_, &scale, d_P + i * N_, 1);
-            }
-        }
-        auto ortho_end = std::chrono::high_resolution_clock::now();
-        stats_.ortho_time += std::chrono::duration<double>(ortho_end - ortho_start).count();
-        
-        // Recompute H*X and H*P
+        // Apply H to the updated X and P vectors FIRST
         matvec_start = std::chrono::high_resolution_clock::now();
         for (int i = 0; i < block_size; ++i) {
             gpu_op_->matVecGPU(d_X + i * N_, d_HX + i * N_, N_);
@@ -768,6 +799,31 @@ void GPUIterativeSolver::runLOBPCG(
         }
         matvec_end = std::chrono::high_resolution_clock::now();
         stats_.matvec_time += std::chrono::duration<double>(matvec_end - matvec_start).count();
+        
+        // Normalize X and P (and their H-applications) - matching CPU approach
+        auto ortho_start = std::chrono::high_resolution_clock::now();
+        
+        for (int i = 0; i < block_size; ++i) {
+            // Normalize X and H*X together
+            double norm;
+            cublasDznrm2(cublas_handle_, N_, d_X + i * N_, 1, &norm);
+            if (norm > 1e-10) {
+                cuDoubleComplex scale = make_cuDoubleComplex(1.0 / norm, 0.0);
+                cublasZscal(cublas_handle_, N_, &scale, d_X + i * N_, 1);
+                cublasZscal(cublas_handle_, N_, &scale, d_HX + i * N_, 1);
+            }
+            
+            // Normalize P and H*P together
+            cublasDznrm2(cublas_handle_, N_, d_P + i * N_, 1, &norm);
+            if (norm > 1e-10) {
+                cuDoubleComplex scale = make_cuDoubleComplex(1.0 / norm, 0.0);
+                cublasZscal(cublas_handle_, N_, &scale, d_P + i * N_, 1);
+                cublasZscal(cublas_handle_, N_, &scale, d_HP + i * N_, 1);
+            }
+        }
+        
+        auto ortho_end = std::chrono::high_resolution_clock::now();
+        stats_.ortho_time += std::chrono::duration<double>(ortho_end - ortho_start).count();
         
         stats_.iterations++;
     }
@@ -787,6 +843,7 @@ void GPUIterativeSolver::runLOBPCG(
     cudaFree(d_HW);
     cudaFree(d_HX);
     cudaFree(d_HP);
+    cudaFree(d_H_diag);
     cudaFree(d_hsub);
     cudaFree(d_ovlp);
     cudaFree(d_eigsub);

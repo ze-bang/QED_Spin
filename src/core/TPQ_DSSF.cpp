@@ -17,6 +17,10 @@
 #include "observables.h"
 #include <mpi.h>
 #include "../cpu_solvers/dynamics.h"
+#ifdef ENABLE_GPU
+#include "../gpu/gpu_operator.cuh"
+#include "../gpu/gpu_dynamics.cuh"
+#endif
 
 
 using Complex = std::complex<double>;
@@ -170,9 +174,9 @@ int main(int argc, char* argv[]) {
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
     MPI_Comm_size(MPI_COMM_WORLD, &size);
     
-    if (argc < 6 || argc > 14) {
+    if (argc < 6 || argc > 15) {
         if (rank == 0) {
-            std::cerr << "Usage: " << argv[0] << " <directory> <num_sites> <spin_length> <krylov_dim_or_nmax> <spin_combinations> [method] [operator_type] [basis] [dt,t_end] [unit_cell_size] [momentum_points] [polarization] [theta]" << std::endl;
+            std::cerr << "Usage: " << argv[0] << " <directory> <num_sites> <spin_length> <krylov_dim_or_nmax> <spin_combinations> [method] [operator_type] [basis] [dt,t_end] [unit_cell_size] [momentum_points] [polarization] [theta] [use_gpu]" << std::endl;
             std::cerr << "  method (optional): krylov (default) | taylor" << std::endl;
             std::cerr << "  operator_type (optional): sum (default) | transverse | sublattice | experimental | transverse_experimental" << std::endl;
             std::cerr << "  basis (optional): ladder (default) | xyz" << std::endl;
@@ -188,6 +192,7 @@ int main(int argc, char* argv[]) {
             std::cerr << "  momentum_points (optional): \"Qx1,Qy1,Qz1;Qx2,Qy2,Qz2;...\" (default: (0,0,0);(0,0,2π))" << std::endl;
             std::cerr << "  polarization (optional, for transverse operators): \"px,py,pz\" normalized polarization vector (default: (1/√2,-1/√2,0))" << std::endl;
             std::cerr << "  theta (optional, for experimental operators): angle in radians (default: 0.0)" << std::endl;
+            std::cerr << "  use_gpu (optional): 1 to use GPU if available, 0 for CPU only (default: 0)" << std::endl;
             std::cerr << "\nOperator type details:" << std::endl;
             std::cerr << "  sum: Standard sum operators S^{op1}(Q) S^{op2}(-Q)" << std::endl;
             std::cerr << "  transverse: Polarization-weighted operators for SF/NSF separation" << std::endl;
@@ -334,6 +339,29 @@ int main(int argc, char* argv[]) {
         }
     }
 
+    // Parse GPU flag
+    bool use_gpu = false;
+    if (argc >= 15) {
+        try {
+            int gpu_flag = std::stoi(argv[14]);
+            use_gpu = (gpu_flag != 0);
+#ifndef ENABLE_GPU
+            if (use_gpu && rank == 0) {
+                std::cerr << "Warning: GPU requested but code not compiled with GPU support. Using CPU." << std::endl;
+                use_gpu = false;
+            }
+#endif
+            if (rank == 0 && use_gpu) {
+                std::cout << "GPU acceleration enabled for time evolution" << std::endl;
+            }
+        } catch (...) {
+            if (rank == 0) {
+                std::cerr << "Warning: Failed to parse GPU flag, using CPU" << std::endl;
+            }
+            use_gpu = false;
+        }
+    }
+
     // Parse spin combinations
     std::vector<std::pair<int, int>> spin_combinations;
     std::stringstream ss(spin_combinations_str);
@@ -460,6 +488,31 @@ int main(int argc, char* argv[]) {
         return 1;
     }
     int N = static_cast<int>(N64);
+    
+#ifdef ENABLE_GPU
+    // Initialize GPU operator if GPU is enabled
+    GPUOperator* gpu_op = nullptr;
+    GPUDynamicsSolver* gpu_solver = nullptr;
+    if (use_gpu) {
+        try {
+            gpu_op = new GPUOperator(N, ham_op.J_, ham_op.trans_);
+            gpu_solver = new GPUDynamicsSolver(gpu_op, N);
+            if (rank == 0) {
+                std::cout << "GPU dynamics solver initialized successfully" << std::endl;
+            }
+        } catch (const std::exception& e) {
+            if (rank == 0) {
+                std::cerr << "Warning: Failed to initialize GPU: " << e.what() << std::endl;
+                std::cerr << "Falling back to CPU computation" << std::endl;
+            }
+            if (gpu_solver) delete gpu_solver;
+            if (gpu_op) delete gpu_op;
+            gpu_op = nullptr;
+            gpu_solver = nullptr;
+            use_gpu = false;
+        }
+    }
+#endif
     
     // Helper function for cross product
     auto cross_product = [](const std::vector<double>& a, const std::vector<double>& b) -> std::array<double, 3> {
@@ -984,22 +1037,78 @@ int main(int argc, char* argv[]) {
         ensureDirectoryExists(method_dir);
         
         try {
-            if (method == "taylor") {
-                computeObservableDynamics_U_t(
-                    U_t, tpq_state, obs_1, obs_2, obs_names, N,
-                    method_dir, sample_index, beta, t_end_opt, dt_opt
-                );
-            } else if (method == "krylov") {
-                // Use Krylov method with Operator objects directly
+#ifdef ENABLE_GPU
+            // Check if GPU should be used for this method
+            bool use_gpu_for_task = use_gpu && gpu_solver != nullptr;
+            
+            if (use_gpu_for_task && method == "krylov") {
+                // GPU Krylov method
                 int krylov_dim = krylov_dim_or_nmax;
                 
-                computeDynamicCorrelationsKrylov(
-                    H, tpq_state, obs_1, obs_2, obs_names,
-                    N, method_dir, sample_index, beta, t_end_opt, dt_opt, krylov_dim
+                // Convert Operator objects to function pointers
+                std::vector<std::function<void(const Complex*, Complex*, int)>> obs_1_funcs;
+                std::vector<std::function<void(const Complex*, Complex*, int)>> obs_2_funcs;
+                
+                for (const auto& op : obs_1) {
+                    obs_1_funcs.push_back([&op](const Complex* in, Complex* out, int size) {
+                        op.apply(in, out, size);
+                    });
+                }
+                
+                for (const auto& op : obs_2) {
+                    obs_2_funcs.push_back([&op](const Complex* in, Complex* out, int size) {
+                        op.apply(in, out, size);
+                    });
+                }
+                
+                gpu_solver->computeKrylovCorrelations(
+                    tpq_state, obs_1_funcs, obs_2_funcs, obs_names,
+                    method_dir, sample_index, beta, t_end_opt, dt_opt, krylov_dim
                 );
-            } else {
-                std::cerr << "Rank " << rank << " unknown method: " << method << std::endl;
-                return false;
+                
+            } else if (use_gpu_for_task && method == "taylor") {
+                // GPU Taylor method
+                std::vector<std::function<void(const Complex*, Complex*, int)>> obs_1_funcs;
+                std::vector<std::function<void(const Complex*, Complex*, int)>> obs_2_funcs;
+                
+                for (const auto& op : obs_1) {
+                    obs_1_funcs.push_back([&op](const Complex* in, Complex* out, int size) {
+                        op.apply(in, out, size);
+                    });
+                }
+                
+                for (const auto& op : obs_2) {
+                    obs_2_funcs.push_back([&op](const Complex* in, Complex* out, int size) {
+                        op.apply(in, out, size);
+                    });
+                }
+                
+                gpu_solver->computeTaylorCorrelations(
+                    U_t, tpq_state, obs_1_funcs, obs_2_funcs, obs_names,
+                    method_dir, sample_index, beta, t_end_opt, dt_opt
+                );
+                
+            } else
+#endif
+            {
+                // CPU fallback
+                if (method == "taylor") {
+                    computeObservableDynamics_U_t(
+                        U_t, tpq_state, obs_1, obs_2, obs_names, N,
+                        method_dir, sample_index, beta, t_end_opt, dt_opt
+                    );
+                } else if (method == "krylov") {
+                    // Use Krylov method with Operator objects directly
+                    int krylov_dim = krylov_dim_or_nmax;
+                    
+                    computeDynamicCorrelationsKrylov(
+                        H, tpq_state, obs_1, obs_2, obs_names,
+                        N, method_dir, sample_index, beta, t_end_opt, dt_opt, krylov_dim
+                    );
+                } else {
+                    std::cerr << "Rank " << rank << " unknown method: " << method << std::endl;
+                    return false;
+                }
             }
         } catch (const std::exception &e) {
             std::cerr << "Rank " << rank << " failed time evolution: " << e.what() << std::endl;
@@ -1167,6 +1276,18 @@ int main(int argc, char* argv[]) {
             std::cout << "  Rank " << r << ": " << all_times[r] << " seconds" << std::endl;
         }
     }
+    
+#ifdef ENABLE_GPU
+    // Clean up GPU resources
+    if (gpu_solver) {
+        delete gpu_solver;
+        gpu_solver = nullptr;
+    }
+    if (gpu_op) {
+        delete gpu_op;
+        gpu_op = nullptr;
+    }
+#endif
     
     MPI_Finalize();
     return 0;
