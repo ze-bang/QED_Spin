@@ -249,14 +249,19 @@ void print_help(const char* prog_name) {
     std::cout << "\n";
     std::cout << "  GPU Methods (require CUDA build):\n";
     std::cout << "    LANCZOS_GPU            GPU-accelerated Lanczos\n";
-    std::cout << "    LANCZOS_GPU_FIXED_SZ   GPU Lanczos for fixed Sz sector\n\n";
+    std::cout << "    LANCZOS_GPU_FIXED_SZ   GPU Lanczos for fixed Sz sector\n";
+    std::cout << "    DAVIDSON_GPU           GPU-accelerated Davidson method\n";
+    std::cout << "    LOBPCG_GPU             GPU-accelerated LOBPCG method\n";
+    std::cout << "    mTPQ_GPU               GPU-accelerated microcanonical TPQ\n";
+    std::cout << "    cTPQ_GPU               GPU-accelerated canonical TPQ\n\n";
     
     std::cout << "For detailed parameters of any method, use:\n";
     std::cout << "  " << prog_name << " --method-info=<METHOD_NAME>\n";
     std::cout << "\nExample:\n";
     std::cout << "  " << prog_name << " --method-info=LANCZOS\n";
     std::cout << "  " << prog_name << " --method-info=LOBPCG\n";
-    std::cout << "  " << prog_name << " --method-info=mTPQ\n\n";
+    std::cout << "  " << prog_name << " --method-info=mTPQ\n";
+    std::cout << "  " << prog_name << " --method-info=DAVIDSON_GPU\n\n";
     
     std::cout << "For more options, see documentation or generated config file.\n";
 }

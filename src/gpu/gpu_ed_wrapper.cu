@@ -134,6 +134,21 @@ void* GPUEDWrapper::createGPUOperatorDirect(
         gpu_op->setSingleSite(site, op_type, coupling);
     }
     
+    // Allocate GPU memory for vectors
+    int N = static_cast<int>(1ULL << n_sites);
+    gpu_op->allocateGPUMemory(N);
+    
+    // Build sparse matrix representation for methods that need it (Davidson, LOBPCG, etc.)
+    // This is required for cuSPARSE-based methods
+    std::cout << "Building sparse matrix representation (N=" << N << ")..." << std::endl;
+    bool success = gpu_op->buildSparseMatrix(N);
+    if (!success) {
+        std::cerr << "Warning: Failed to build sparse matrix. "
+                  << "On-the-fly computation will be used instead." << std::endl;
+    } else {
+        std::cout << "Sparse matrix built successfully." << std::endl;
+    }
+    
     return static_cast<void*>(gpu_op);
 }
 

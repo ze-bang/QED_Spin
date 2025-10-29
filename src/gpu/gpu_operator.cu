@@ -217,6 +217,10 @@ void GPUOperator::matVecGPU(const cuDoubleComplex* d_x, cuDoubleComplex* d_y, in
         cuDoubleComplex alpha = make_cuDoubleComplex(1.0, 0.0);
         cuDoubleComplex beta = make_cuDoubleComplex(0.0, 0.0);
         
+        // Update the dense vector descriptors with the provided pointers
+        CUSPARSE_CHECK(cusparseDnVecSetValues(vec_x_descriptor_, (void*)d_x));
+        CUSPARSE_CHECK(cusparseDnVecSetValues(vec_y_descriptor_, (void*)d_y));
+        
         size_t buffer_size = 0;
         void* d_buffer = nullptr;
         

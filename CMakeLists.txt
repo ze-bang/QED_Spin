@@ -299,6 +299,13 @@ endif()
 if(WITH_CUDA)
     add_executable(ED ${SOURCES} ${GPU_SOURCES})
     target_include_directories(ED PRIVATE ${GPU_DIR})
+    
+    # Add GPU Davidson test executables
+    add_executable(test_davidson_gpu test/test_davidson_gpu.cpp ${GPU_SOURCES})
+    target_include_directories(test_davidson_gpu PRIVATE ${GPU_DIR} src/core src/cpu_solvers)
+    
+    add_executable(test_davidson_tridiag test/test_davidson_tridiag.cpp ${GPU_SOURCES})
+    target_include_directories(test_davidson_tridiag PRIVATE ${GPU_DIR} src/core src/cpu_solvers)
 else()
     add_executable(ED ${SOURCES})
 endif()
@@ -318,6 +325,23 @@ target_link_libraries(ED
 # Add CUDA libraries to ED if CUDA is enabled
 if(WITH_CUDA)
     target_link_libraries(ED
+        CUDA::cudart
+        CUDA::cublas
+        CUDA::cusparse
+        CUDA::curand
+        CUDA::cusolver
+    )
+    
+    # Link libraries for GPU Davidson tests
+    target_link_libraries(test_davidson_gpu
+        CUDA::cudart
+        CUDA::cublas
+        CUDA::cusparse
+        CUDA::curand
+        CUDA::cusolver
+    )
+    
+    target_link_libraries(test_davidson_tridiag
         CUDA::cudart
         CUDA::cublas
         CUDA::cusparse

@@ -35,7 +35,11 @@ enum class DiagonalizationMethod {
     ARPACK_SHIFT_INVERT,
     ARPACK_ADVANCED,
     LANCZOS_GPU,
-    LANCZOS_GPU_FIXED_SZ
+    LANCZOS_GPU_FIXED_SZ,
+    DAVIDSON_GPU,
+    LOBPCG_GPU,
+    mTPQ_GPU,
+    cTPQ_GPU
 };
 
 // ============================================================================
@@ -425,6 +429,10 @@ std::optional<DiagonalizationMethod> parseMethod(const std::string& str) {
     // GPU methods
     if (lower == "lanczos_gpu") return DiagonalizationMethod::LANCZOS_GPU;
     if (lower == "lanczos_gpu_fixed_sz") return DiagonalizationMethod::LANCZOS_GPU_FIXED_SZ;
+    if (lower == "davidson_gpu") return DiagonalizationMethod::DAVIDSON_GPU;
+    if (lower == "lobpcg_gpu") return DiagonalizationMethod::LOBPCG_GPU;
+    if (lower == "mtpq_gpu") return DiagonalizationMethod::mTPQ_GPU;
+    if (lower == "ctpq_gpu") return DiagonalizationMethod::cTPQ_GPU;
 
     std::cerr << "Warning: Unknown method '" << str << "', using LANCZOS\n";
     return std::nullopt;
@@ -472,6 +480,10 @@ std::string methodToString(DiagonalizationMethod method) {
         // GPU methods
         case DiagonalizationMethod::LANCZOS_GPU: return "LANCZOS_GPU";
         case DiagonalizationMethod::LANCZOS_GPU_FIXED_SZ: return "LANCZOS_GPU_FIXED_SZ";
+        case DiagonalizationMethod::DAVIDSON_GPU: return "DAVIDSON_GPU";
+        case DiagonalizationMethod::LOBPCG_GPU: return "LOBPCG_GPU";
+        case DiagonalizationMethod::mTPQ_GPU: return "mTPQ_GPU";
+        case DiagonalizationMethod::cTPQ_GPU: return "cTPQ_GPU";
         
         default: return "UNKNOWN";
     }
@@ -788,13 +800,69 @@ std::string getMethodParameterInfo(DiagonalizationMethod method) {
         case DiagonalizationMethod::LANCZOS_GPU:
             info << "GPU-accelerated Lanczos (requires CUDA build).\n\n";
             info << "Requires: CUDA-enabled build\n";
-            info << "Status: Not available in current build\n";
+            info << "Configurable Parameters:\n";
+            info << "  - num_eigenvalues: Number of eigenvalues to compute\n";
+            info << "  - max_iterations: Maximum Lanczos iterations\n";
+            info << "  - tolerance: Convergence tolerance\n";
+            info << "  - compute_eigenvectors: Whether to compute eigenvectors\n\n";
+            info << "Best for: Large systems requiring GPU acceleration\n";
             break;
             
         case DiagonalizationMethod::LANCZOS_GPU_FIXED_SZ:
             info << "GPU Lanczos for fixed Sz sector (requires CUDA build).\n\n";
             info << "Requires: CUDA-enabled build\n";
-            info << "Status: Not available in current build\n";
+            info << "Configurable Parameters:\n";
+            info << "  - n_up: Number of up spins (determines Sz sector)\n";
+            info << "  - num_eigenvalues: Number of eigenvalues to compute\n";
+            info << "  - max_iterations: Maximum Lanczos iterations\n";
+            info << "  - tolerance: Convergence tolerance\n\n";
+            info << "Best for: Fixed Sz calculations with GPU acceleration\n";
+            break;
+            
+        case DiagonalizationMethod::DAVIDSON_GPU:
+            info << "GPU-accelerated Davidson method (requires CUDA build).\n\n";
+            info << "Requires: CUDA-enabled build\n";
+            info << "Configurable Parameters:\n";
+            info << "  - num_eigenvalues: Number of eigenvalues to compute\n";
+            info << "  - max_iterations: Maximum iterations\n";
+            info << "  - max_subspace: Maximum subspace dimension\n";
+            info << "  - tolerance: Convergence tolerance\n";
+            info << "  - compute_eigenvectors: Whether to compute eigenvectors\n\n";
+            info << "Best for: GPU-accelerated eigenvalue calculations with subspace expansion\n";
+            break;
+            
+        case DiagonalizationMethod::LOBPCG_GPU:
+            info << "GPU-accelerated LOBPCG method (requires CUDA build).\n\n";
+            info << "Requires: CUDA-enabled build\n";
+            info << "Configurable Parameters:\n";
+            info << "  - num_eigenvalues: Number of eigenvalues to compute\n";
+            info << "  - max_iterations: Maximum iterations\n";
+            info << "  - tolerance: Convergence tolerance\n";
+            info << "  - compute_eigenvectors: Whether to compute eigenvectors\n\n";
+            info << "Best for: GPU-accelerated block optimization for multiple eigenpairs\n";
+            break;
+            
+        case DiagonalizationMethod::mTPQ_GPU:
+            info << "GPU-accelerated microcanonical TPQ (requires CUDA build).\n\n";
+            info << "Requires: CUDA-enabled build\n";
+            info << "Configurable Parameters:\n";
+            info << "  - num_samples: Number of TPQ samples\n";
+            info << "  - max_iterations: Maximum iterations per sample\n";
+            info << "  - num_measure_freq: Measurement frequency\n";
+            info << "  - large_value: Large value parameter for TPQ\n\n";
+            info << "Best for: GPU-accelerated finite-temperature calculations (microcanonical)\n";
+            break;
+            
+        case DiagonalizationMethod::cTPQ_GPU:
+            info << "GPU-accelerated canonical TPQ (requires CUDA build).\n\n";
+            info << "Requires: CUDA-enabled build\n";
+            info << "Configurable Parameters:\n";
+            info << "  - num_samples: Number of TPQ samples\n";
+            info << "  - temp_max: Maximum temperature\n";
+            info << "  - num_measure_freq: Measurement frequency\n";
+            info << "  - delta_tau: Imaginary time step\n";
+            info << "  - num_order: Order parameter for TPQ\n\n";
+            info << "Best for: GPU-accelerated finite-temperature calculations (canonical)\n";
             break;
             
         default:
