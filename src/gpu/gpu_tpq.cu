@@ -266,6 +266,8 @@ void GPUTPQSolver::runMicrocanonicalTPQ(
     std::cout << "Hilbert space dimension: " << N_ << std::endl;
     std::cout << "Number of samples: " << num_samples << std::endl;
     std::cout << "Max iterations: " << max_iter << std::endl;
+    std::cout << "Large value (energy shift): " << large_value << std::endl;
+    std::cout << "Algorithm: Power method on (L-H) to find ground state" << std::endl;
     
     // Create output directory
     if (!dir.empty()) {
@@ -275,47 +277,97 @@ void GPUTPQSolver::runMicrocanonicalTPQ(
     
     eigenvalues.clear();
     
+    // Calculate dimension entropy S = log2(N)
+    double D_S = std::log2(static_cast<double>(N_));
+    
     for (int sample = 0; sample < num_samples; ++sample) {
         std::cout << "\nSample " << sample + 1 << "/" << num_samples << std::endl;
         
-        // Generate random initial state
+        // Generate random initial state |v1⟩
         generateRandomState(12345 + sample * 67890);
+        
+        // Apply H|v1⟩ -> d_temp_
+        gpu_op_->matVecGPU(d_state_, d_temp_, N_);
+        
+        // Compute |v0⟩ = (L*D_S - H)|v1⟩ = L*D_S*|v1⟩ - H|v1⟩
+        // Save H|v1⟩ in d_h_state_ first
+        cudaMemcpy(d_h_state_, d_temp_, N_ * sizeof(cuDoubleComplex), cudaMemcpyDeviceToDevice);
+        
+        // d_state_ *= L*D_S
+        cuDoubleComplex alpha = make_cuDoubleComplex(large_value * D_S, 0.0);
+        cublasZscal(cublas_handle_, N_, &alpha, d_state_, 1);
+        
+        // d_state_ -= H|v1⟩
+        cuDoubleComplex minus_one = make_cuDoubleComplex(-1.0, 0.0);
+        cublasZaxpy(cublas_handle_, N_, &minus_one, d_h_state_, 1, d_state_, 1);
+        
+        // Normalize |v0⟩
+        double first_norm = computeNorm();
+        cuDoubleComplex scale = make_cuDoubleComplex(1.0 / first_norm, 0.0);
+        cublasZscal(cublas_handle_, N_, &scale, d_state_, 1);
         
         // Output file for this sample
         std::string sample_file = dir + "/tpq_sample_" + std::to_string(sample) + ".dat";
         
-        // Initial measurements
+        // Initial measurements (step 1)
         std::pair<double, double> energy_var_pair = computeEnergyAndVariance();
         double energy = energy_var_pair.first;
         double variance = energy_var_pair.second;
-        double norm = computeNorm();
-        double inv_temp = 0.0;
         
-        writeTPQData(sample_file, inv_temp, energy, variance, norm, 0);
+        // Compute inverse temperature: β = 2*step / (L*D_S - E)
+        double inv_temp = 2.0 / (large_value * D_S - energy);
         
-        // Main TPQ loop
-        for (int step = 1; step <= max_iter; ++step) {
-            // Apply H|state> / ||H|state>||
+        writeTPQData(sample_file, inv_temp, energy, variance, first_norm, 1);
+        
+        std::cout << "Step 1: E = " << energy << ", β = " << inv_temp << std::endl;
+        
+        // Main TPQ loop - applies (L-H) repeatedly
+        for (int step = 2; step <= max_iter; ++step) {
+            // Apply H|v0⟩ -> d_temp_
             auto matvec_start = std::chrono::high_resolution_clock::now();
             gpu_op_->matVecGPU(d_state_, d_temp_, N_);
             auto matvec_end = std::chrono::high_resolution_clock::now();
             stats_.matvec_time += std::chrono::duration<double>(matvec_end - matvec_start).count();
             
-            // Update state
-            cudaMemcpy(d_state_, d_temp_, N_ * sizeof(cuDoubleComplex), cudaMemcpyDeviceToDevice);
-            normalizeState();
+            // Compute |v0_new⟩ = (L*D_S - H)|v0⟩ = L*D_S*|v0⟩ - H|v0⟩
+            // Save H|v0⟩ in d_h_state_ first
+            cudaMemcpy(d_h_state_, d_temp_, N_ * sizeof(cuDoubleComplex), cudaMemcpyDeviceToDevice);
+            
+            // d_state_ *= L*D_S
+            alpha = make_cuDoubleComplex(large_value * D_S, 0.0);
+            cublasZscal(cublas_handle_, N_, &alpha, d_state_, 1);
+            
+            // d_state_ -= H|v0⟩
+            cuDoubleComplex minus_one = make_cuDoubleComplex(-1.0, 0.0);
+            cublasZaxpy(cublas_handle_, N_, &minus_one, d_h_state_, 1, d_state_, 1);
+            
+            // Normalize
+            double current_norm = computeNorm();
+            scale = make_cuDoubleComplex(1.0 / current_norm, 0.0);
+            cublasZscal(cublas_handle_, N_, &scale, d_state_, 1);
             
             // Measurements every temp_interval steps
-            if (step % temp_interval == 0) {
+            if (step % temp_interval == 0 || step == max_iter) {
                 std::pair<double, double> E_var_pair = computeEnergyAndVariance();
                 double E = E_var_pair.first;
                 double var = E_var_pair.second;
-                norm = computeNorm();
                 
-                // Estimate inverse temperature from energy
-                inv_temp = (step > 0) ? step * 1.0 / std::abs(E - energy) : 0.0;
+                // Update inverse temperature
+                inv_temp = (2.0 * step) / (large_value * D_S - E);
                 
-                writeTPQData(sample_file, inv_temp, E, var, norm, step);
+                writeTPQData(sample_file, inv_temp, E, var, current_norm, step);
+                
+                if (step % (temp_interval * 10) == 0 || step == max_iter) {
+                    std::cout << "Step " << step << ": E = " << E 
+                              << ", var = " << var 
+                              << ", β = " << inv_temp << std::endl;
+                }
+                
+                // Check convergence
+                if (var < 1e-10 && step > 100) {
+                    std::cout << "Converged to eigenstate at step " << step << std::endl;
+                    break;
+                }
                 
                 // Save state periodically
                 if (step % (temp_interval * 10) == 0) {
@@ -336,7 +388,7 @@ void GPUTPQSolver::runMicrocanonicalTPQ(
         double final_var = final_pair.second;
         eigenvalues.push_back(final_energy);
         
-        std::cout << "Final energy: " << final_energy << std::endl;
+        std::cout << "Final energy: " << final_energy << " (variance: " << final_var << ")" << std::endl;
     }
     
     auto total_end = std::chrono::high_resolution_clock::now();
