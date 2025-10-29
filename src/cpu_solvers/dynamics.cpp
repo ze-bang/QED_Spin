@@ -135,31 +135,18 @@ void time_evolve_krylov(
     // Ensure Krylov dimension doesn't exceed system size
     krylov_dim = std::max(1, std::min(krylov_dim, N));
     
-    // Pre-allocate all memory to avoid repeated allocations
-    static thread_local std::vector<ComplexVector> krylov_vectors;
-    static thread_local std::vector<double> alpha;
-    static thread_local std::vector<double> beta;
-    static thread_local ComplexVector w;
-    static thread_local int last_N = 0;
-    static thread_local int last_krylov_dim = 0;
-    
-    // Resize only if dimensions changed
-    if (last_N != N || last_krylov_dim < krylov_dim) {
-        krylov_vectors.resize(krylov_dim);
-        for (auto& vec : krylov_vectors) {
-            vec.resize(N);
-        }
-        alpha.resize(krylov_dim);
-        beta.resize(krylov_dim > 1 ? krylov_dim - 1 : 0);
-        w.resize(N);
-        last_N = N;
-        last_krylov_dim = krylov_dim;
+    // Allocate buffers locally (more thread-safe and less memory waste than thread_local)
+    std::vector<ComplexVector> krylov_vectors(krylov_dim);
+    for (auto& vec : krylov_vectors) {
+        vec.resize(N);
     }
+    std::vector<double> alpha(krylov_dim);
+    std::vector<double> beta(krylov_dim - 1);
+    ComplexVector w(N);
     
     // Initialize first Krylov vector as normalized input state
     double norm = cblas_dznrm2(N, state.data(), 1);
     if (norm < 1e-14) {
-        // Handle zero state
         return;
     }
     
@@ -167,37 +154,46 @@ void time_evolve_krylov(
     cblas_zcopy(N, state.data(), 1, krylov_vectors[0].data(), 1);
     cblas_zscal(N, &scale_factor, krylov_vectors[0].data(), 1);
     
-    // Lanczos iteration with improved numerical stability
+    // Lanczos iteration - three-term recurrence (no full reorthogonalization needed in theory)
+    // For better stability, we do selective reorthogonalization only when needed
     int effective_dim = krylov_dim;
-    constexpr double ortho_threshold = 1e-10;
     constexpr double breakdown_threshold = 1e-14;
+    constexpr double reortho_threshold = 0.7;  // Reorthogonalize if ||w|| drops below this fraction
     
     for (int j = 0; j < krylov_dim - 1; j++) {
         // Apply Hamiltonian: w = H * v_j
         H(krylov_vectors[j].data(), w.data(), N);
         
-        // Compute alpha_j = Re(<v_j | H | v_j>) - use BLAS for efficiency
+        // Compute alpha_j = <v_j | w>
         Complex alpha_complex;
         cblas_zdotc_sub(N, krylov_vectors[j].data(), 1, w.data(), 1, &alpha_complex);
         alpha[j] = alpha_complex.real();
         
-        // w = w - alpha_j * v_j
+        // w = w - alpha_j * v_j - beta_{j-1} * v_{j-1}
         Complex neg_alpha = Complex(-alpha[j], 0.0);
         cblas_zaxpy(N, &neg_alpha, krylov_vectors[j].data(), 1, w.data(), 1);
         
-        // Full reorthogonalization for better stability
-        // This is more expensive but necessary for numerical accuracy
-        for (int i = 0; i <= j; i++) {
-            Complex overlap;
-            cblas_zdotc_sub(N, krylov_vectors[i].data(), 1, w.data(), 1, &overlap);
-            if (std::abs(overlap) > ortho_threshold) {
+        if (j > 0) {
+            Complex neg_beta = Complex(-beta[j-1], 0.0);
+            cblas_zaxpy(N, &neg_beta, krylov_vectors[j-1].data(), 1, w.data(), 1);
+        }
+        
+        // Compute beta_j = ||w||
+        double beta_j = cblas_dznrm2(N, w.data(), 1);
+        
+        // Selective reorthogonalization: only if norm drops significantly
+        if (j > 0 && beta_j < reortho_threshold * beta[j-1]) {
+            // Reorthogonalize against all previous vectors
+            for (int i = 0; i <= j; i++) {
+                Complex overlap;
+                cblas_zdotc_sub(N, krylov_vectors[i].data(), 1, w.data(), 1, &overlap);
                 Complex neg_overlap = -overlap;
                 cblas_zaxpy(N, &neg_overlap, krylov_vectors[i].data(), 1, w.data(), 1);
             }
+            beta_j = cblas_dznrm2(N, w.data(), 1);
         }
         
-        // Compute beta_{j} = ||w||
-        beta[j] = cblas_dznrm2(N, w.data(), 1);
+        beta[j] = beta_j;
         
         // Check for breakdown
         if (beta[j] < breakdown_threshold) {
@@ -205,13 +201,13 @@ void time_evolve_krylov(
             break;
         }
         
-        // v_{j+1} = w / beta_{j}
+        // v_{j+1} = w / beta_j (combined copy and scale)
         Complex inv_beta = Complex(1.0/beta[j], 0.0);
         cblas_zcopy(N, w.data(), 1, krylov_vectors[j+1].data(), 1);
         cblas_zscal(N, &inv_beta, krylov_vectors[j+1].data(), 1);
     }
     
-    // Handle the last alpha
+    // Compute last alpha
     if (effective_dim == krylov_dim) {
         H(krylov_vectors[effective_dim-1].data(), w.data(), N);
         Complex alpha_complex;
@@ -219,41 +215,42 @@ void time_evolve_krylov(
         alpha[effective_dim-1] = alpha_complex.real();
     }
     
-    // Use Eigen's optimized routines for the small tridiagonal problem
-    Eigen::MatrixXd H_krylov(effective_dim, effective_dim);
+    // Diagonalize tridiagonal matrix using LAPACK (faster than Eigen for small matrices)
+    std::vector<double> eigenvalues = alpha;
+    std::vector<double> eigenvectors_data(effective_dim * effective_dim);
+    std::vector<double> offdiag(beta.begin(), beta.begin() + effective_dim - 1);
+    std::vector<double> work(std::max(1, 2 * effective_dim - 2));
     
-    // Build tridiagonal matrix efficiently
-    H_krylov.setZero();
-    for (int i = 0; i < effective_dim; i++) {
-        H_krylov(i, i) = alpha[i];
-    }
-    for (int i = 0; i < effective_dim - 1; i++) {
-        H_krylov(i, i+1) = beta[i];
-        H_krylov(i+1, i) = beta[i];
+    char jobz = 'V';
+    int n = effective_dim;
+    int ldz = effective_dim;
+    int info = 0;
+    
+    // Call LAPACK dstev (AOCL version requires string length as last parameter)
+    dstev_(&jobz, &n, eigenvalues.data(), offdiag.data(), 
+           eigenvectors_data.data(), &ldz, work.data(), &info, 1);
+    
+    if (info != 0) {
+        std::cerr << "Warning: Krylov eigendecomposition failed with info=" << info << std::endl;
+        return;
     }
     
-    // Compute eigendecomposition (more stable than matrix exponential)
-    Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> solver(H_krylov);
-    const auto& eigenvalues = solver.eigenvalues();
-    const auto& eigenvectors = solver.eigenvectors();
-    
-    // Apply time evolution using eigendecomposition
-    // exp(-i*H*t)|ψ⟩ = V * exp(-i*D*t) * V^† * |e_0⟩
-    Eigen::VectorXcd phase_factors(effective_dim);
-    for (int i = 0; i < effective_dim; i++) {
-        phase_factors(i) = std::exp(Complex(0, -eigenvalues(i) * delta_t)) * eigenvectors(0, i);
-    }
-
-    // Reconstruct state in original basis
+    // Compute exp(-i*H*t) * e_1 in eigenbasis efficiently
+    // Result: c_j = sum_i U[0,i] * exp(-i*λ_i*t) * U[j,i] 
+    // This avoids the intermediate transforms that were in the old code
     std::fill(state.begin(), state.end(), Complex(0, 0));
-
-    for (int i = 0; i < effective_dim; i++) {
+    
+    for (int j = 0; j < effective_dim; j++) {
         Complex coeff(0, 0);
-        for (int j = 0; j < effective_dim; j++) {
-            coeff += eigenvectors(i, j) * phase_factors(j);
+        for (int i = 0; i < effective_dim; i++) {
+            // eigenvectors stored column-major: U[row,col] = data[col*ldz + row]
+            double u_0i = eigenvectors_data[i * ldz];        // U[0,i]
+            double u_ji = eigenvectors_data[i * ldz + j];    // U[j,i]
+            Complex phase = std::exp(Complex(0, -eigenvalues[i] * delta_t));
+            coeff += u_0i * phase * u_ji;
         }
-        coeff *= norm;
-        cblas_zaxpy(N, &coeff, krylov_vectors[i].data(), 1, state.data(), 1);
+        coeff *= norm;  // Restore original norm
+        cblas_zaxpy(N, &coeff, krylov_vectors[j].data(), 1, state.data(), 1);
     }
     
     // Normalize if requested
