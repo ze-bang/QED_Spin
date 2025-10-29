@@ -8,6 +8,7 @@
 #include "../cpu_solvers/CG.h"
 #include "../cpu_solvers/arpack.h"
 #include "../cpu_solvers/lanczos.h"
+#include "../cpu_solvers/ftlm.h"
 #include "construct_ham.h"
 #include "../cpu_solvers/observables.h"
 #include "ed_config.h"
@@ -181,6 +182,14 @@ struct EDParameters {
     int num_measure_freq = 100;    // Frequency of measurements
     double delta_tau = 1e-2;       // Time step for imaginary-time evolution (cTPQ)
     double large_value = 1e5;      // Large value for TPQ
+    
+    // ========== FTLM-Specific Parameters ==========
+    int ftlm_krylov_dim = 100;     // Krylov subspace dimension per sample
+    bool ftlm_full_reorth = false; // Use full reorthogonalization
+    int ftlm_reorth_freq = 10;     // Reorthogonalization frequency
+    unsigned int ftlm_seed = 0;    // Random seed (0 = auto)
+    bool ftlm_store_samples = false; // Store per-sample intermediate data
+    bool ftlm_error_bars = true;   // Compute error bars
     
     // ========== Observable Calculations ==========
     mutable std::vector<Operator> observables = {};             // Observables to calculate for TPQ
@@ -582,9 +591,42 @@ EDResults exact_diagonalization_core(
             break;
         
         case DiagonalizationMethod::FTLM:
-            std::cerr << "Error: FTLM (Finite Temperature Lanczos Method) not yet implemented." << std::endl;
-            std::cerr << "Please use FULL diagonalization with thermodynamics or mTPQ/cTPQ methods." << std::endl;
-            throw std::runtime_error("FTLM not yet implemented");
+            std::cout << "Using Finite Temperature Lanczos Method (FTLM)" << std::endl;
+            {
+                // Setup FTLM parameters
+                FTLMParameters ftlm_params;
+                ftlm_params.krylov_dim = params.ftlm_krylov_dim;
+                ftlm_params.num_samples = params.num_samples;
+                ftlm_params.max_iterations = params.max_iterations;
+                ftlm_params.tolerance = params.tolerance;
+                ftlm_params.full_reorthogonalization = params.ftlm_full_reorth;
+                ftlm_params.reorth_frequency = params.ftlm_reorth_freq;
+                ftlm_params.random_seed = params.ftlm_seed;
+                ftlm_params.store_intermediate = params.ftlm_store_samples;
+                ftlm_params.compute_error_bars = params.ftlm_error_bars;
+                
+                // Run FTLM
+                FTLMResults ftlm_results = finite_temperature_lanczos(
+                    H, hilbert_space_dim, ftlm_params,
+                    params.temp_min, params.temp_max, params.num_temp_bins,
+                    params.output_dir
+                );
+                
+                // Store results
+                results.thermo_data = ftlm_results.thermo_data;
+                
+                // Store ground state estimate as eigenvalue
+                if (ftlm_results.ground_state_estimate != 0.0) {
+                    results.eigenvalues.push_back(ftlm_results.ground_state_estimate);
+                }
+                
+                // Save FTLM results to file
+                if (!params.output_dir.empty()) {
+                    std::string ftlm_dir = params.output_dir + "/thermo";
+                    system(("mkdir -p " + ftlm_dir).c_str());
+                    save_ftlm_results(ftlm_results, ftlm_dir + "/ftlm_thermo.txt");
+                }
+            }
             break;
         
         case DiagonalizationMethod::LTLM:

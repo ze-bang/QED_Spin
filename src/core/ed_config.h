@@ -53,6 +53,14 @@ struct ThermalConfig {
     int num_measure_freq = 100;   // Measurement frequency
     double delta_tau = 1e-2;      // Time step for cTPQ
     double large_value = 1e5;     // Large value for mTPQ
+    
+    // FTLM-specific
+    int ftlm_krylov_dim = 100;    // Krylov subspace dimension per sample
+    bool ftlm_full_reorth = false; // Use full reorthogonalization
+    int ftlm_reorth_freq = 10;    // Reorthogonalization frequency
+    unsigned int ftlm_seed = 0;   // Random seed (0 = auto)
+    bool ftlm_store_samples = false; // Store per-sample intermediate data
+    bool ftlm_error_bars = true;  // Compute error bars
 };
 
 /**

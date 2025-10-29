@@ -39,6 +39,14 @@ inline EDParameters toEDParameters(const EDConfig& config) {
     params.delta_tau = config.thermal.delta_tau;
     params.large_value = config.thermal.large_value;
     
+    // FTLM (via thermal config)
+    params.ftlm_krylov_dim = config.thermal.ftlm_krylov_dim;
+    params.ftlm_full_reorth = config.thermal.ftlm_full_reorth;
+    params.ftlm_reorth_freq = config.thermal.ftlm_reorth_freq;
+    params.ftlm_seed = config.thermal.ftlm_seed;
+    params.ftlm_store_samples = config.thermal.ftlm_store_samples;
+    params.ftlm_error_bars = config.thermal.ftlm_error_bars;
+    
     // Observable
     params.calc_observables = config.observable.calculate;
     params.measure_spin = config.observable.measure_spin;
@@ -105,6 +113,14 @@ inline EDConfig fromEDParameters(const EDParameters& params, DiagonalizationMeth
     config.thermal.num_measure_freq = params.num_measure_freq;
     config.thermal.delta_tau = params.delta_tau;
     config.thermal.large_value = params.large_value;
+    
+    // FTLM (via thermal config)
+    config.thermal.ftlm_krylov_dim = params.ftlm_krylov_dim;
+    config.thermal.ftlm_full_reorth = params.ftlm_full_reorth;
+    config.thermal.ftlm_reorth_freq = params.ftlm_reorth_freq;
+    config.thermal.ftlm_seed = params.ftlm_seed;
+    config.thermal.ftlm_store_samples = params.ftlm_store_samples;
+    config.thermal.ftlm_error_bars = params.ftlm_error_bars;
     
     // Observable
     config.observable.calculate = params.calc_observables;

@@ -238,7 +238,7 @@ void print_help(const char* prog_name) {
     std::cout << "    cTPQ                   Canonical TPQ\n";
     std::cout << "    mTPQ_MPI               MPI parallel mTPQ (requires MPI build)\n";
     std::cout << "    mTPQ_CUDA              GPU-accelerated mTPQ (requires CUDA build)\n";
-    std::cout << "    FTLM                   Finite Temperature Lanczos Method (not yet implemented)\n";
+    std::cout << "    FTLM                   Finite Temperature Lanczos Method\n";
     std::cout << "    LTLM                   Low Temperature Lanczos Method (not yet implemented)\n";
     std::cout << "\n";
     std::cout << "  ARPACK Methods:\n";

@@ -104,6 +104,12 @@ EDConfig EDConfig::fromFile(const std::string& filename) {
             else if (key == "temp_min") config.thermal.temp_min = std::stod(value);
             else if (key == "temp_max") config.thermal.temp_max = std::stod(value);
             else if (key == "temp_bins") config.thermal.num_temp_bins = std::stoi(value);
+            else if (key == "ftlm_krylov_dim") config.thermal.ftlm_krylov_dim = std::stoi(value);
+            else if (key == "ftlm_full_reorth") config.thermal.ftlm_full_reorth = (value == "true" || value == "1");
+            else if (key == "ftlm_reorth_freq") config.thermal.ftlm_reorth_freq = std::stoi(value);
+            else if (key == "ftlm_seed") config.thermal.ftlm_seed = std::stoul(value);
+            else if (key == "ftlm_store_samples") config.thermal.ftlm_store_samples = (value == "true" || value == "1");
+            else if (key == "ftlm_error_bars") config.thermal.ftlm_error_bars = (value == "true" || value == "1");
             else if (key == "calc_observables") config.observable.calculate = (value == "true" || value == "1");
             else if (key == "measure_spin") config.observable.measure_spin = (value == "true" || value == "1");
             else if (key == "run_standard") config.workflow.run_standard = (value == "true" || value == "1");
@@ -187,6 +193,13 @@ EDConfig EDConfig::fromCommandLine(int argc, char* argv[]) {
             else if (arg.find("--t_end=") == 0) config.observable.t_end = std::stod(parse_value("--t_end="));
             else if (arg.find("--dt=") == 0) config.observable.dt = std::stod(parse_value("--dt="));
             else if (arg.find("--max_subspace=") == 0) config.diag.max_subspace = std::stoi(parse_value("--max_subspace="));
+            // FTLM options
+            else if (arg.find("--ftlm-krylov=") == 0) config.thermal.ftlm_krylov_dim = std::stoi(parse_value("--ftlm-krylov="));
+            else if (arg == "--ftlm-full-reorth") config.thermal.ftlm_full_reorth = true;
+            else if (arg.find("--ftlm-reorth-freq=") == 0) config.thermal.ftlm_reorth_freq = std::stoi(parse_value("--ftlm-reorth-freq="));
+            else if (arg.find("--ftlm-seed=") == 0) config.thermal.ftlm_seed = std::stoul(parse_value("--ftlm-seed="));
+            else if (arg == "--ftlm-store-samples") config.thermal.ftlm_store_samples = true;
+            else if (arg == "--ftlm-no-error-bars") config.thermal.ftlm_error_bars = false;
             // ARPACK options
             else if (arg.find("--arpack-which=") == 0) config.arpack.which = parse_value("--arpack-which=");
             else if (arg.find("--arpack-ncv=") == 0) config.arpack.ncv = std::stoi(parse_value("--arpack-ncv="));
@@ -731,11 +744,29 @@ std::string getMethodParameterInfo(DiagonalizationMethod method) {
             break;
             
         case DiagonalizationMethod::FTLM:
-            info << "Finite Temperature Lanczos Method.\n\n";
-            info << "Status: Not yet implemented\n";
-            info << "Alternative: Use FULL with --thermo or mTPQ/cTPQ methods\n";
+            info << "Finite Temperature Lanczos Method (FTLM).\n\n";
+            info << "Computes thermodynamic properties (energy, entropy, specific heat, free energy)\n";
+            info << "at finite temperature without computing the full spectrum. Uses random sampling\n";
+            info << "and Krylov subspace projections.\n\n";
+            info << "Configurable Parameters:\n";
+            info << "  --samples=<n>         Number of random samples (default: 10)\n";
+            info << "  --ftlm-krylov=<m>     Krylov dimension per sample (default: 100)\n";
+            info << "  --temp_min=<T>        Minimum temperature (default: 1e-3)\n";
+            info << "  --temp_max=<T>        Maximum temperature (default: 20.0)\n";
+            info << "  --temp_bins=<n>       Number of temperature points (default: 100)\n";
+            info << "  --ftlm-full-reorth    Use full reorthogonalization (slower, more stable)\n";
+            info << "  --ftlm-reorth-freq=<k>  Reorthogonalization frequency (default: 10)\n";
+            info << "  --ftlm-seed=<seed>    Random seed (0 = random, default: 0)\n";
+            info << "  --ftlm-store-samples  Store per-sample intermediate data for debugging\n";
+            info << "  --ftlm-no-error-bars  Disable error bar computation\n";
+            info << "\nOutput:\n";
+            info << "  Saves to: output_dir/thermo/ftlm_thermo.txt\n";
+            info << "  Format: Temperature  Energy  E_error  Specific_Heat  C_error  Entropy  S_error  Free_Energy  F_error\n";
+            info << "\nBest for: Finite-temperature thermodynamics without full spectrum\n";
+            info << "Advantages: Memory efficient, scales to larger systems than FULL diagonalization\n";
+            info << "Note: Accuracy improves with more samples and larger Krylov dimension\n";
             break;
-            
+        
         case DiagonalizationMethod::LTLM:
             info << "Low Temperature Lanczos Method.\n\n";
             info << "Status: Not yet implemented\n";
