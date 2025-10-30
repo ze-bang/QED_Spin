@@ -286,7 +286,7 @@ def generate_clusters(tet_graph, max_order):
         if order == 1:
             first_tet = nodes_sorted[0]
             distinct_clusters.append([first_tet])
-            multiplicities.append(0.125)  # per-site normalization
+            multiplicities.append(0.5)  # per-site normalization
             continue
 
         # Hash-bucket: signature -> list of groups; each group is (rep_nodes_set, embedding_count)
@@ -341,7 +341,7 @@ def generate_clusters(tet_graph, max_order):
         for sig_groups in buckets.values():
             for rep_nodes, count in sig_groups:
                 reps.append(sorted(rep_nodes))
-                mults.append(count / (8*N))  # embeddings per tetrahedron (site)
+                mults.append(count / (2*N))  # embeddings per tetrahedron (site)
 
         distinct_clusters.extend(reps)
         multiplicities.extend(mults)

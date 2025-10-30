@@ -181,11 +181,11 @@ def prepare_hamiltonian_parameters(cluster_filepath, output_dir, Jxx, Jyy, Jzz, 
     
     # Prepare Hamiltonian parameters
 
-    Jpm = -(Jxx+Jyy)/4
-    Jpmpm = (Jxx-Jyy)/4
+    # Jpm = -(Jxx+Jyy)/4
+    # Jpmpm = (Jxx-Jyy)/4
 
-    # Jpm = Jxx
-    # Jpmpm = Jyy
+    Jpm = Jxx
+    Jpmpm = Jyy
     
     # Define local z-axes for pyrochlore lattice
     z_local = np.array([

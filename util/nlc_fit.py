@@ -153,6 +153,19 @@ def _run_single_nlce(args):
     run_work_dir = os.path.join(work_dir, f'run_{run_idx}')
     os.makedirs(run_work_dir, exist_ok=True)
     
+    # If we're not skipping ham_prep, remove old ED results and Hamiltonian directory to force recomputation
+    if not fixed_params.get("skip_ham_prep", False):
+        ed_dir = os.path.join(run_work_dir, f'ed_results_order_{fixed_params["max_order"]}')
+        if os.path.exists(ed_dir):
+            import shutil
+            shutil.rmtree(ed_dir)
+        
+        # Also remove old Hamiltonian directory which contains sym_blocks and sym_basis
+        ham_dir = os.path.join(run_work_dir, f'hamiltonians_order_{fixed_params["max_order"]}')
+        if os.path.exists(ham_dir):
+            import shutil
+            shutil.rmtree(ham_dir)
+    
     # Update command with run-specific base directory and shared cluster directory
     cluster_dir = os.path.join(work_dir, f'clusters_order_{fixed_params["max_order"]}')
     cmd_updated = cmd + ['--base_dir', run_work_dir]
@@ -185,40 +198,6 @@ def _run_single_nlce(args):
         logging.error(f"Stderr: {e.stderr.decode('utf-8')}")
         return None, None
 
-def get_symmetry_equivalent_field_dirs(field_dir):
-    """
-    Generate all cubic symmetry-equivalent field directions for a given field_dir.
-    For [1,1,1], returns all 8 [±1,±1,±1] directions (normalized).
-    For [1,0,0], returns all 6 [±1,0,0], [0,±1,0], [0,0,±1] directions.
-    """
-    field_dir = np.array(field_dir, dtype=float)
-    
-    if np.allclose(np.abs(field_dir), [1/np.sqrt(3)]*3, atol=1e-6) or np.allclose(np.abs(field_dir), [1,1,1], atol=1e-6):
-        # All 8 permutations of [±1,±1,±1]
-        dirs = []
-        for sx in [-1, 1]:
-            for sy in [-1, 1]:
-                for sz in [-1, 1]:
-                    v = np.array([sx, sy, sz], dtype=float)
-                    v /= np.linalg.norm(v)
-                    dirs.append(v)
-        return dirs
-    elif np.allclose(np.abs(field_dir), [1,0,0], atol=1e-6) or np.allclose(np.abs(field_dir), [0,1,0], atol=1e-6) or np.allclose(np.abs(field_dir), [0,0,1], atol=1e-6):
-        # All 6 permutations of [±1,0,0], [0,±1,0], [0,0,±1]
-        dirs = []
-        for i in range(3):
-            for sign in [-1, 1]:
-                v = np.zeros(3)
-                v[i] = sign
-                dirs.append(v)
-        return dirs
-    else:
-        # Default: just return the input direction normalized
-        v = field_dir / np.linalg.norm(field_dir)
-        return [v]
-
-
-
 def run_nlce(params, fixed_params, exp_temp, work_dir, h_field=None, temp_range=None):
     """Run NLCE with the given parameters and return the calculated specific heat"""
     # Extract J parameters (first 3) - other parameters are handled in calc_chi_squared
@@ -228,6 +207,7 @@ def run_nlce(params, fixed_params, exp_temp, work_dir, h_field=None, temp_range=
     
     # Use provided h_field if given, otherwise use the one from fixed_params
     h_value = h_field if h_field is not None else fixed_params["h"]
+    h_value = h_value * 5.4 * 0.0578 # Convert Tesla to Kelvin
     field_dir = fixed_params["field_dir"]
     
     # Currently using single field direction (symmetry averaging commented out)
@@ -294,12 +274,29 @@ def run_nlce(params, fixed_params, exp_temp, work_dir, h_field=None, temp_range=
             ]
 
         cmd.append('--skip_cluster_gen')
-        if fixed_params.get("skip_ham_prep", False):
-            cmd.append('--skip_ham_prep')
-        if fixed_params.get("measure_spin", False):
-            cmd.append('--measure_spin')
-        if random_transverse_field > 0:
-            cmd.extend(['--random_field_width', f'{random_transverse_field:.12f}'])
+    
+        # If we're not skipping ham_prep, we need to ensure old eigenvalue files and symmetry blocks are removed
+        # so that ED will recompute them with the new Hamiltonian parameters
+        if not fixed_params.get("skip_ham_prep", False):
+            # Remove old ED results to force recomputation
+            ed_dir = os.path.join(work_dir, f'ed_results_order_{fixed_params["max_order"]}')
+            if os.path.exists(ed_dir):
+                logging.info(f"Removing old ED results directory to ensure eigenvalues are recomputed: {ed_dir}")
+                import shutil
+                shutil.rmtree(ed_dir)
+            
+            # Also remove old Hamiltonian directory which contains sym_blocks and sym_basis
+            # These need to be regenerated when Hamiltonian parameters change
+            ham_dir = os.path.join(work_dir, f'hamiltonians_order_{fixed_params["max_order"]}')
+            if os.path.exists(ham_dir):
+                logging.info(f"Removing old Hamiltonian directory (including sym_blocks) to ensure symmetry blocks are regenerated: {ham_dir}")
+                shutil.rmtree(ham_dir)
+        else:
+            cmd.append('--skip_ham_prep')        
+            if fixed_params.get("measure_spin", False):
+                cmd.append('--measure_spin')
+            if random_transverse_field > 0:
+                cmd.extend(['--random_field_width', f'{random_transverse_field:.12f}'])
             
         if n_runs > 1:
             num_workers = fixed_params.get("num_workers", os.cpu_count())
@@ -1391,64 +1388,66 @@ def main():
         # Check if we need multiple runs (for random transverse field fitting)
         n_runs = args.random_field_n_runs if args.fit_random_transverse_field else 1
         
-        def generate_clusters_subprocess(run_idx):
-            """Generate clusters for a single run using subprocess"""
-            run_work_dir = os.path.join(work_dir, f'run_{run_idx}')
-            os.makedirs(run_work_dir, exist_ok=True)
+        if n_runs > 1:
+
+            def generate_clusters_subprocess(run_idx):
+                """Generate clusters for a single run using subprocess"""
+                run_work_dir = os.path.join(work_dir, f'run_{run_idx}')
+                os.makedirs(run_work_dir, exist_ok=True)
+                
+                cluster_gen_cmd = [
+                    'python3',
+                    os.path.join(os.path.dirname(os.path.abspath(__file__)), 'generate_pyrochlore_clusters.py'),
+                    '--max_order', str(args.max_order),
+                    '--output_dir', os.path.join(run_work_dir, f'clusters_order_{args.max_order}')
+                ]
+                
+                try:
+                    result = subprocess.run(cluster_gen_cmd, check=True, capture_output=True, text=True)
+                    return run_idx, True, f"Clusters successfully generated in run_{run_idx}"
+                except subprocess.CalledProcessError as e:
+                    return run_idx, False, f"Error in run_{run_idx}: {e.stderr}"
             
+            logging.info(f"Generating pyrochlore clusters up to order {args.max_order} in {n_runs} directories (parallel)")
+            
+            # Use ThreadPoolExecutor for parallel subprocess execution
+            max_workers = min(args.num_workers, n_runs)
+            logging.info(f"Using {max_workers} parallel workers for cluster generation")
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                # Submit all tasks
+                futures = {executor.submit(generate_clusters_subprocess, i): i for i in range(n_runs)}
+                
+                # Process results as they complete
+                successful = 0
+                failed = 0
+                for future in as_completed(futures):
+                    run_idx, success, message = future.result()
+                    if success:
+                        successful += 1
+                        logging.info(message)
+                    else:
+                        failed += 1
+                        logging.error(message)
+                
+                logging.info(f"Cluster generation completed: {successful} successful, {failed} failed")
+                
+                if failed > 0:
+                    logging.warning("Some cluster generations failed, but continuing with optimization")
+        else:
+            # Single run - generate clusters in main work directory
+            logging.info(f"Generating pyrochlore clusters up to order {args.max_order}")
             cluster_gen_cmd = [
                 'python3',
                 os.path.join(os.path.dirname(os.path.abspath(__file__)), 'generate_pyrochlore_clusters.py'),
                 '--max_order', str(args.max_order),
-                '--output_dir', os.path.join(run_work_dir, f'clusters_order_{args.max_order}')
+                '--output_dir', os.path.join(work_dir, f'clusters_order_{args.max_order}'),
             ]
-            
             try:
-                result = subprocess.run(cluster_gen_cmd, check=True, capture_output=True, text=True)
-                return run_idx, True, f"Clusters successfully generated in run_{run_idx}"
+                subprocess.run(cluster_gen_cmd, check=True)
+                logging.info(f"Clusters successfully generated in {work_dir}")
             except subprocess.CalledProcessError as e:
-                return run_idx, False, f"Error in run_{run_idx}: {e.stderr}"
-        
-        logging.info(f"Generating pyrochlore clusters up to order {args.max_order} in {n_runs} directories (parallel)")
-        
-        # Use ThreadPoolExecutor for parallel subprocess execution
-        max_workers = min(args.num_workers, n_runs)
-        logging.info(f"Using {max_workers} parallel workers for cluster generation")
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            # Submit all tasks
-            futures = {executor.submit(generate_clusters_subprocess, i): i for i in range(n_runs)}
-            
-            # Process results as they complete
-            successful = 0
-            failed = 0
-            for future in as_completed(futures):
-                run_idx, success, message = future.result()
-                if success:
-                    successful += 1
-                    logging.info(message)
-                else:
-                    failed += 1
-                    logging.error(message)
-            
-            logging.info(f"Cluster generation completed: {successful} successful, {failed} failed")
-            
-            if failed > 0:
-                logging.warning("Some cluster generations failed, but continuing with optimization")
-    else:
-        # Single run - generate clusters in main work directory
-        logging.info(f"Generating pyrochlore clusters up to order {args.max_order}")
-        cluster_gen_cmd = [
-            'python3',
-            os.path.join(os.path.dirname(os.path.abspath(__file__)), 'generate_pyrochlore_clusters.py'),
-            '--max_order', str(args.max_order),
-            '--output_dir', os.path.join(work_dir, f'clusters_order_{args.max_order}'),
-        ]
-        try:
-            subprocess.run(cluster_gen_cmd, check=True)
-            logging.info(f"Clusters successfully generated in {work_dir}")
-        except subprocess.CalledProcessError as e:
-            logging.error(f"Error generating clusters: {e}")
-            logging.error("Continuing without pre-generating clusters")
+                logging.error(f"Error generating clusters: {e}")
+                logging.error("Continuing without pre-generating clusters")
     
     # Define fixed parameters for NLCE
     fixed_params = {

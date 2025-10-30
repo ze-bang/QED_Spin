@@ -20,8 +20,9 @@ import logging
 import argparse
 import subprocess
 import json
+import shutil
 import numpy as np
-from scipy.optimize import minimize
+from scipy.optimize import minimize, NonlinearConstraint
 from scipy.interpolate import interp1d
 
 
@@ -45,6 +46,27 @@ def load_experimental_data(file_path):
     return temp, spec_heat
 
 
+def load_multiple_experimental_data(exp_data_configs):
+    """Load experimental data from multiple files with their respective parameters"""
+    exp_datasets = []
+    for config in exp_data_configs:
+        temp, spec_heat = load_experimental_data(config['file'])
+        dataset = {
+            'temp': temp,
+            'spec_heat': spec_heat,
+            'h': config['h'],
+            'field_dir': config.get('field_dir', [1/np.sqrt(3), 1/np.sqrt(3), 1/np.sqrt(3)]),
+            'weight': config.get('weight', 1.0)
+        }
+        # Add temp_min and temp_max if they exist in the config
+        if 'temp_min' in config:
+            dataset['temp_min'] = config['temp_min']
+        if 'temp_max' in config:
+            dataset['temp_max'] = config['temp_max']
+        exp_datasets.append(dataset)
+    return exp_datasets
+
+
 def run_nlce_ftlm(params, fixed_params, exp_temp, work_dir, h_field=None, temp_range=None):
     """
     Run NLCE with FTLM for the given parameters and return calculated specific heat
@@ -64,6 +86,7 @@ def run_nlce_ftlm(params, fixed_params, exp_temp, work_dir, h_field=None, temp_r
     
     Jxx, Jyy, Jzz = params[:3]
     h_value = h_field if h_field is not None else fixed_params["h"]
+    h_value *= 5.4 * 0.0578
     field_dir = fixed_params["field_dir"]
     
     # Temperature range
@@ -113,7 +136,12 @@ def run_nlce_ftlm(params, fixed_params, exp_temp, work_dir, h_field=None, temp_r
         f'--temp_min={temp_min}',
         f'--temp_max={temp_max}',
         f'--temp_bins={fixed_params["temp_bins"]}',
+        '--SI_units'
     ]
+    
+    # Add ED executable path if specified
+    if 'ed_executable' in fixed_params and fixed_params['ed_executable']:
+        cmd.extend(['--ed_executable', fixed_params['ed_executable']])
     
     if fixed_params.get("symmetrized", False):
         cmd.append('--symmetrized')
@@ -138,7 +166,7 @@ def run_nlce_ftlm(params, fixed_params, exp_temp, work_dir, h_field=None, temp_r
                                   bounds_error=False, fill_value=0.0)
             interp_spec_heat = interp_func(exp_temp)
             
-            return calc_temp, interp_spec_heat
+            return calc_temp, interp_spec_heat/8
         else:
             logging.error(f"NLC results file not found: {nlc_result_file}")
             return np.array([]), np.zeros_like(exp_temp)
@@ -155,44 +183,101 @@ def run_nlce_ftlm(params, fixed_params, exp_temp, work_dir, h_field=None, temp_r
         return np.array([]), np.zeros_like(exp_temp)
 
 
-def calc_chi_squared(params, fixed_params, exp_temp, exp_spec_heat, work_dir):
-    """Calculate chi-squared between experimental and calculated specific heat"""
+def calc_chi_squared(params, fixed_params, exp_datasets, work_dir):
+    """Calculate combined chi-squared between experimental and calculated specific heat for multiple datasets"""
+    total_chi_squared = 0.0
     
-    _, calc_spec_heat = run_nlce_ftlm(params, fixed_params, exp_temp, work_dir)
+    # Clear cache if requested
+    if fixed_params.get("clear_cache", False):
+        cache_dirs = glob.glob(os.path.join(work_dir, 'run_*'))
+        for cache_dir in cache_dirs:
+            try:
+                shutil.rmtree(cache_dir)
+                logging.debug(f"Cleared cache directory: {cache_dir}")
+            except Exception as e:
+                logging.debug(f"Failed to clear cache {cache_dir}: {e}")
     
-    if len(calc_spec_heat) == 0:
-        logging.error("No calculated data available")
-        return 1e10  # Large penalty
-    
-    # Calculate chi-squared
-    diff = exp_spec_heat - calc_spec_heat
-    chi_squared = np.sum(diff**2)
+    for i, dataset in enumerate(exp_datasets):
+        exp_temp = dataset['temp']
+        exp_spec_heat = dataset['spec_heat']
+        h_field = dataset['h']
+        weight = dataset['weight']
+        
+        # Get dataset-specific temperature range if available
+        temp_range = None
+        if 'temp_min' in dataset and 'temp_max' in dataset:
+            temp_range = (dataset['temp_min'], dataset['temp_max'])
+        
+        # Run NLCE with dataset-specific h field
+        calc_temp, calc_spec_heat = run_nlce_ftlm(params, fixed_params, exp_temp, work_dir, 
+                                                   h_field=h_field, temp_range=temp_range)
+        
+        if len(calc_spec_heat) == 0:
+            logging.error(f"No calculated data available for dataset {i+1}")
+            return 1e10  # Large penalty
+        
+        # Calculate chi-squared for this dataset
+        diff = exp_spec_heat - calc_spec_heat
+        dataset_chi_squared = np.sum(diff**2)
+        
+        # Apply dataset weight
+        weighted_chi_squared = weight * dataset_chi_squared
+        total_chi_squared += weighted_chi_squared
+        
+        logging.info(f"Dataset {i+1} (h={h_field}): Chi-squared={dataset_chi_squared:.4f}, "
+                    f"Weighted={weighted_chi_squared:.4f}")
     
     logging.info(f"Parameters: Jxx={params[0]:.4f}, Jyy={params[1]:.4f}, Jzz={params[2]:.4f}, "
-                f"Chi-squared={chi_squared:.4f}")
+                f"Total Chi-squared={total_chi_squared:.4f}")
     
-    return chi_squared
+    return total_chi_squared
 
 
-def plot_results(exp_temp, exp_spec_heat, best_params, fixed_params, work_dir, output_dir):
-    """Plot experimental data and best fit"""
+def plot_results(exp_datasets, best_params, fixed_params, work_dir, output_dir):
+    """Plot experimental data and best fit for all datasets"""
     try:
         import matplotlib.pyplot as plt
     except ImportError:
         logging.warning("Matplotlib not available. Skipping plot.")
         return
     
-    # Get best fit results
-    _, best_spec_heat = run_nlce_ftlm(best_params, fixed_params, exp_temp, work_dir)
+    plt.figure(figsize=(12, 8))
     
-    plt.figure(figsize=(10, 6))
-    plt.plot(exp_temp, exp_spec_heat, 'o', label='Experimental', markersize=6)
-    plt.plot(exp_temp, best_spec_heat, '-', linewidth=2, 
-            label=f'NLCE-FTLM Fit: Jxx={best_params[0]:.3f}, Jyy={best_params[1]:.3f}, Jzz={best_params[2]:.3f}')
+    colors = plt.cm.tab10(np.linspace(0, 1, len(exp_datasets)))
+    
+    for i, (dataset, color) in enumerate(zip(exp_datasets, colors)):
+        exp_temp = dataset['temp']
+        exp_spec_heat = dataset['spec_heat']
+        h_field = dataset['h']
+        
+        # Get dataset-specific temperature range if available
+        temp_range = None
+        if 'temp_min' in dataset and 'temp_max' in dataset:
+            temp_range = (dataset['temp_min'], dataset['temp_max'])
+        
+        # Plot experimental data
+        plt.scatter(exp_temp, exp_spec_heat, color=color, alpha=0.7, 
+                   label=f'Exp Data (h={h_field})', zorder=5)
+        
+        # Calculate and plot fitted data
+        calc_temp, calc_spec_heat = run_nlce_ftlm(best_params, fixed_params, exp_temp, work_dir,
+                                                   h_field=h_field, temp_range=temp_range)
+        
+        if len(calc_temp) > 0:
+            # Sort calculated data by temperature
+            sort_idx = np.argsort(calc_temp)
+            calc_temp = calc_temp[sort_idx]
+            calc_spec_heat = calc_spec_heat[sort_idx]
+            
+            # Plot calculated data
+            plt.plot(calc_temp, calc_spec_heat, color=color, linestyle='-', linewidth=2,
+                    label=f'NLCE-FTLM Fit (h={h_field})')
+    
+    title_str = f'NLCE-FTLM Fit: Jxx={best_params[0]:.3f}, Jyy={best_params[1]:.3f}, Jzz={best_params[2]:.3f}'
     
     plt.xlabel('Temperature (K)', fontsize=12)
     plt.ylabel('Specific Heat (J/mol·K)', fontsize=12)
-    plt.title('NLCE-FTLM Fit to Experimental Data', fontsize=14)
+    plt.title(title_str, fontsize=14)
     plt.xscale('log')
     plt.grid(True, alpha=0.3)
     plt.legend(fontsize=11)
@@ -210,27 +295,60 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Example usage:
-  # Basic fitting
+  # Single dataset fitting
   python nlc_fit_ftlm.py --exp_data experimental_cv.txt --max_order 4 --output_dir fit_results/
+  
+  # Multiple datasets with config file
+  python nlc_fit_ftlm.py --exp_config exp_config.json --max_order 4 --output_dir fit_results/
   
   # With custom FTLM parameters
   python nlc_fit_ftlm.py --exp_data experimental_cv.txt --max_order 4 --ftlm_samples 30 --krylov_dim 200
   
   # Parallel execution
   python nlc_fit_ftlm.py --exp_data experimental_cv.txt --max_order 4 --parallel --num_cores 8
+
+Example config file (exp_config.json):
+{
+  "experimental_data": [
+    {
+      "file": "data_h0.txt",
+      "h": 0.0,
+      "weight": 1.0,
+      "temp_min": 0.1,
+      "temp_max": 10.0
+    },
+    {
+      "file": "data_h1.txt",
+      "h": 1.0,
+      "field_dir": [0.5773, 0.5773, 0.5773],
+      "weight": 1.0,
+      "temp_min": 0.1,
+      "temp_max": 10.0
+    }
+  ],
+  "global_params": {
+    "max_order": 4,
+    "ftlm_samples": 30
+  }
+}
         """
     )
     
     # Input/output
-    parser.add_argument('--exp_data', required=True, help='Experimental specific heat data file')
+    parser.add_argument('--exp_data', type=str, default='specific_heat_data.txt',
+                       help='Path to experimental specific heat data (for single file mode)')
+    parser.add_argument('--exp_config', type=str, default=None,
+                       help='Path to JSON config file for multiple experimental datasets')
     parser.add_argument('--output_dir', default='./nlce_ftlm_fit', help='Output directory')
     parser.add_argument('--work_dir', default='./nlce_ftlm_fit_work', help='Working directory')
+    parser.add_argument('--ed_executable', type=str, default='./build/FTLM',
+                       help='Path to the FTLM executable')
     
     # NLCE parameters
     parser.add_argument('--max_order', type=int, default=4, help='Maximum cluster order')
     
     # FTLM parameters
-    parser.add_argument('--ftlm_samples', type=int, default=20, help='Number of FTLM samples')
+    parser.add_argument('--ftlm_samples', type=int, default=40, help='Number of FTLM samples')
     parser.add_argument('--krylov_dim', type=int, default=150, help='Krylov subspace dimension')
     
     # Model parameters (initial guess)
@@ -239,9 +357,9 @@ Example usage:
     parser.add_argument('--Jzz_init', type=float, default=1.0, help='Initial Jzz')
     
     # Parameter bounds
-    parser.add_argument('--Jxx_bounds', type=float, nargs=2, default=[0.1, 2.0])
-    parser.add_argument('--Jyy_bounds', type=float, nargs=2, default=[0.1, 2.0])
-    parser.add_argument('--Jzz_bounds', type=float, nargs=2, default=[0.1, 2.0])
+    parser.add_argument('--Jxx_bounds', type=float, nargs=2, default=[-4.0, 4.0])
+    parser.add_argument('--Jyy_bounds', type=float, nargs=2, default=[0, 8.0])
+    parser.add_argument('--Jzz_bounds', type=float, nargs=2, default=[0.1, 8.0])
     
     # Other model parameters
     parser.add_argument('--h', type=float, default=0.0, help='Magnetic field')
@@ -255,7 +373,7 @@ Example usage:
     
     # Optimization
     parser.add_argument('--method', default='Nelder-Mead', 
-                       choices=['Nelder-Mead', 'Powell', 'COBYLA', 'L-BFGS-B'],
+                       choices=['Nelder-Mead', 'Powell', 'COBYLA', 'L-BFGS-B', 'SLSQP', 'trust-constr'],
                        help='Optimization method')
     parser.add_argument('--maxiter', type=int, default=50, help='Maximum iterations')
     parser.add_argument('--timeout', type=int, default=3600, 
@@ -265,6 +383,8 @@ Example usage:
     parser.add_argument('--parallel', action='store_true', help='Run FTLM in parallel')
     parser.add_argument('--num_cores', type=int, default=4, help='Number of cores for parallel')
     parser.add_argument('--symmetrized', action='store_true', help='Use symmetrized Hamiltonian')
+    parser.add_argument('--clear_cache', action='store_true', 
+                       help='Clear cached results between optimization steps')
     
     args = parser.parse_args()
     
@@ -279,16 +399,72 @@ Example usage:
     logging.info("="*80)
     logging.info("NLCE-FTLM Fitting Tool")
     logging.info("="*80)
-    logging.info(f"Experimental data: {args.exp_data}")
+    
+    # Load experimental data
+    if args.exp_config:
+        # Load multiple datasets from config file
+        logging.info(f"Loading experimental data configuration from {args.exp_config}")
+        with open(args.exp_config, 'r') as f:
+            config = json.load(f)
+        
+        exp_datasets = load_multiple_experimental_data(config['experimental_data'])
+        logging.info(f"Loaded {len(exp_datasets)} experimental datasets")
+        
+        # Update fixed_params with any global config values
+        if 'global_params' in config:
+            for key, value in config['global_params'].items():
+                if key in ['max_order', 'ftlm_samples', 'krylov_dim', 'temp_min', 
+                          'temp_max', 'temp_bins', 'h', 'field_dir']:
+                    logging.info(f"Overriding {key} from config: {value}")
+    else:
+        # Single dataset mode (backward compatibility)
+        logging.info(f"Loading experimental data from {args.exp_data}")
+        exp_temp, exp_spec_heat = load_experimental_data(args.exp_data)
+        
+        # Create single dataset
+        exp_datasets = [{
+            'temp': exp_temp,
+            'spec_heat': exp_spec_heat,
+            'h': args.h,
+            'field_dir': args.field_dir,
+            'weight': 1.0
+        }]
+        logging.info(f"Loaded {len(exp_temp)} data points")
+    
     logging.info(f"Max order: {args.max_order}")
     logging.info(f"FTLM samples: {args.ftlm_samples}")
     logging.info(f"Krylov dimension: {args.krylov_dim}")
     logging.info("="*80)
     
-    # Load experimental data
-    exp_temp, exp_spec_heat = load_experimental_data(args.exp_data)
-    logging.info(f"Loaded {len(exp_temp)} experimental data points")
-    logging.info(f"Temperature range: [{exp_temp.min():.4f}, {exp_temp.max():.4f}] K")
+    # Filter experimental data based on temperature range for all datasets
+    filtered_datasets = []
+    for dataset in exp_datasets:
+        exp_temp = dataset['temp']
+        exp_spec_heat = dataset['spec_heat']
+        
+        # Use dataset-specific temp range if available, otherwise use global
+        temp_min = dataset.get('temp_min', args.temp_min)
+        temp_max = dataset.get('temp_max', args.temp_max)
+        
+        valid_indices = (exp_temp >= temp_min) & (exp_temp <= temp_max)
+        filtered_temp = exp_temp[valid_indices]
+        filtered_spec_heat = exp_spec_heat[valid_indices]
+        
+        if len(filtered_temp) > 0:
+            filtered_dataset = dataset.copy()
+            filtered_dataset['temp'] = filtered_temp
+            filtered_dataset['spec_heat'] = filtered_spec_heat
+            filtered_datasets.append(filtered_dataset)
+            logging.info(f"Dataset h={dataset['h']}: {len(filtered_temp)} points in "
+                        f"range [{temp_min:.4f}, {temp_max:.4f}] K")
+        else:
+            logging.warning(f"Dataset h={dataset['h']}: No points in temperature range")
+    
+    if not filtered_datasets:
+        logging.error("No experimental data points within temperature range for any dataset")
+        sys.exit(1)
+    
+    exp_datasets = filtered_datasets
     
     # Set up fixed parameters
     fixed_params = {
@@ -303,7 +479,9 @@ Example usage:
         'symmetrized': args.symmetrized,
         'parallel': args.parallel,
         'num_cores': args.num_cores,
-        'timeout': args.timeout
+        'timeout': args.timeout,
+        'ed_executable': args.ed_executable,
+        'clear_cache': args.clear_cache
     }
     
     # Initial parameters and bounds
@@ -318,6 +496,18 @@ Example usage:
                 f"Jyy={initial_params[1]:.4f}, Jzz={initial_params[2]:.4f}")
     logging.info(f"Parameter bounds: Jxx={bounds[0]}, Jyy={bounds[1]}, Jzz={bounds[2]}")
     
+    # Define constraints
+    def constraint_func(params):
+        Jxx, Jyy, Jzz = params[:3]
+        # Return array of constraint values (should be >= 0)
+        return np.array([
+            0.125*Jzz - Jxx,
+            0.2*Jzz - Jyy + 0.4 * Jxx,
+            Jyy + 0.4 * Jxx + 0.2*Jzz,
+        ])
+    
+    constraints = NonlinearConstraint(constraint_func, 0, np.inf)
+    
     # Run optimization
     logging.info(f"\nStarting optimization with method: {args.method}")
     logging.info(f"Maximum iterations: {args.maxiter}")
@@ -326,9 +516,10 @@ Example usage:
     result = minimize(
         calc_chi_squared,
         initial_params,
-        args=(fixed_params, exp_temp, exp_spec_heat, args.work_dir),
+        args=(fixed_params, exp_datasets, args.work_dir),
         method=args.method,
         bounds=bounds if args.method == 'L-BFGS-B' else None,
+        constraints=constraints if args.method in ['SLSQP', 'COBYLA', 'trust-constr'] else None,
         options={'maxiter': args.maxiter, 'disp': True}
     )
     
@@ -369,7 +560,7 @@ Example usage:
     logging.info(f"Results saved to: {results_file}")
     
     # Generate plot
-    plot_results(exp_temp, exp_spec_heat, result.x, fixed_params, 
+    plot_results(exp_datasets, result.x, fixed_params, 
                 args.work_dir, args.output_dir)
     
     logging.info(f"\nAll outputs saved to: {args.output_dir}")
