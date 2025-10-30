@@ -1,47 +1,29 @@
 // ltlm.cpp - Low Temperature Lanczos Method implementation
 
 #include "ltlm.h"
+#include "ftlm.h"  // For build_lanczos_tridiagonal function
 #include <fstream>
 #include <iomanip>
 #include <numeric>
 #include <cstring>
-#include <map>
 
 /**
- * @brief Compute low-energy eigenstates using Lanczos method
+ * @brief Find ground state using Lanczos iteration
  */
-LTLMEigenResults compute_low_energy_spectrum(
+double find_ground_state_lanczos(
     std::function<void(const Complex*, Complex*, int)> H,
     int N,
-    int num_states,
-    const LTLMParameters& params
+    int krylov_dim,
+    double tolerance,
+    bool full_reorth,
+    int reorth_freq,
+    ComplexVector& ground_state
 ) {
-    LTLMEigenResults results;
+    std::cout << "  Finding ground state via Lanczos...\n";
     
-    std::cout << "\n==========================================\n";
-    std::cout << "Low Temperature Lanczos Method (LTLM)\n";
-    std::cout << "Computing Low-Energy Eigenspectrum\n";
-    std::cout << "==========================================\n";
-    std::cout << "Hilbert space dimension: " << N << std::endl;
-    std::cout << "Requested eigenstates: " << num_states << std::endl;
-    std::cout << "Krylov dimension: " << params.krylov_dim << std::endl;
-    
-    if (params.krylov_dim <= num_states) {
-        std::cerr << "Warning: Krylov dimension should be larger than num_eigenstates\n";
-        std::cerr << "         Adjusting krylov_dim to " << num_states * 2 << std::endl;
-    }
-    
-    int krylov_dim = std::max(params.krylov_dim, num_states * 2);
-    krylov_dim = std::min(krylov_dim, N);
-    
-    // Initialize random initial vector
-    std::mt19937 gen;
-    if (params.random_seed == 0) {
-        std::random_device rd;
-        gen.seed(rd());
-    } else {
-        gen.seed(params.random_seed);
-    }
+    // Generate random initial vector
+    std::random_device rd;
+    std::mt19937 gen(rd());
     std::uniform_real_distribution<double> dist(-1.0, 1.0);
     
     ComplexVector v0(N);
@@ -49,301 +31,192 @@ LTLMEigenResults compute_low_energy_spectrum(
         v0[i] = Complex(dist(gen), dist(gen));
     }
     
-    // Normalize initial vector
+    // Normalize
     double norm = cblas_dznrm2(N, v0.data(), 1);
-    Complex scale_factor = Complex(1.0/norm, 0.0);
-    cblas_zscal(N, &scale_factor, v0.data(), 1);
+    Complex scale(1.0/norm, 0.0);
+    cblas_zscal(N, &scale, v0.data(), 1);
     
-    // Working vectors
-    ComplexVector v_current = v0;
-    ComplexVector v_prev(N, Complex(0.0, 0.0));
-    ComplexVector v_next(N);
-    ComplexVector w(N);
+    // Build Lanczos tridiagonal
+    std::vector<double> alpha, beta;
+    int iterations = build_lanczos_tridiagonal(
+        H, v0, N, krylov_dim, tolerance,
+        full_reorth, reorth_freq,
+        alpha, beta
+    );
     
-    // Store basis vectors for reconstruction
-    std::vector<ComplexVector> lanczos_vectors;
-    if (params.store_eigenvectors || params.verify_eigenvalues) {
-        lanczos_vectors.push_back(v_current);
-    }
+    std::cout << "  Lanczos iterations for ground state: " << iterations << std::endl;
     
-    // Tridiagonal matrix elements
-    std::vector<double> alpha;
-    std::vector<double> beta;
-    beta.push_back(0.0); // β_0 is not used
-    
-    std::cout << "Running Lanczos iterations..." << std::endl;
-    
-    // Lanczos iteration
-    int iterations;
-    for (iterations = 0; iterations < krylov_dim; iterations++) {
-        // w = H*v_j
-        H(v_current.data(), w.data(), N);
-        
-        // w = w - beta_j * v_{j-1}
-        if (iterations > 0) {
-            Complex neg_beta = Complex(-beta[iterations], 0.0);
-            cblas_zaxpy(N, &neg_beta, v_prev.data(), 1, w.data(), 1);
-        }
-        
-        // alpha_j = <v_j, w>
-        Complex dot_product;
-        cblas_zdotc_sub(N, v_current.data(), 1, w.data(), 1, &dot_product);
-        alpha.push_back(std::real(dot_product));
-        
-        // w = w - alpha_j * v_j
-        Complex neg_alpha = Complex(-alpha[iterations], 0.0);
-        cblas_zaxpy(N, &neg_alpha, v_current.data(), 1, w.data(), 1);
-        
-        // Reorthogonalization
-        if (params.full_reorthogonalization) {
-            // Full reorthogonalization against all previous vectors
-            for (size_t k = 0; k < lanczos_vectors.size(); k++) {
-                Complex overlap;
-                cblas_zdotc_sub(N, lanczos_vectors[k].data(), 1, w.data(), 1, &overlap);
-                Complex neg_overlap = -overlap;
-                cblas_zaxpy(N, &neg_overlap, lanczos_vectors[k].data(), 1, w.data(), 1);
-            }
-        } else if (params.reorth_frequency > 0 && (iterations + 1) % params.reorth_frequency == 0) {
-            // Periodic reorthogonalization
-            for (size_t k = 0; k < lanczos_vectors.size(); k++) {
-                Complex overlap;
-                cblas_zdotc_sub(N, lanczos_vectors[k].data(), 1, w.data(), 1, &overlap);
-                if (std::abs(overlap) > params.tolerance) {
-                    Complex neg_overlap = -overlap;
-                    cblas_zaxpy(N, &neg_overlap, lanczos_vectors[k].data(), 1, w.data(), 1);
-                }
-            }
-        }
-        
-        // beta_{j+1} = ||w||
-        norm = cblas_dznrm2(N, w.data(), 1);
-        beta.push_back(norm);
-        
-        // Check for breakdown or convergence
-        if (norm < params.tolerance) {
-            std::cout << "Lanczos breakdown at iteration " << iterations + 1 << std::endl;
-            iterations++;
-            break;
-        }
-        
-        // v_{j+1} = w / beta_{j+1}
-        for (int i = 0; i < N; i++) {
-            v_next[i] = w[i] / norm;
-        }
-        
-        // Store for reorthogonalization or reconstruction
-        if (params.store_eigenvectors || params.verify_eigenvalues) {
-            lanczos_vectors.push_back(v_next);
-        }
-        
-        // Update for next iteration
-        v_prev = v_current;
-        v_current = v_next;
-        
-        // Print progress periodically
-        if ((iterations + 1) % 50 == 0) {
-            std::cout << "  Iteration " << iterations + 1 << "/" << krylov_dim << std::endl;
-        }
-    }
-    
-    results.lanczos_iterations = iterations;
     int m = alpha.size();
     
-    std::cout << "Lanczos iterations completed: " << iterations << std::endl;
-    std::cout << "Tridiagonal matrix size: " << m << " x " << m << std::endl;
-    
-    // Diagonalize tridiagonal matrix
-    std::cout << "Diagonalizing tridiagonal matrix..." << std::endl;
-    
+    // Diagonalize tridiagonal matrix to find ground state
     std::vector<double> diag = alpha;
     std::vector<double> offdiag(m - 1);
     for (int i = 0; i < m - 1; i++) {
         offdiag[i] = beta[i + 1];
     }
     
-    std::vector<double> evecs;
-    if (params.store_eigenvectors || params.verify_eigenvalues) {
-        evecs.resize(m * m);
-    }
-    
-    int info;
-    if (params.store_eigenvectors || params.verify_eigenvalues) {
-        info = LAPACKE_dstevd(LAPACK_COL_MAJOR, 'V', m, diag.data(), offdiag.data(), evecs.data(), m);
-    } else {
-        info = LAPACKE_dstevd(LAPACK_COL_MAJOR, 'N', m, diag.data(), offdiag.data(), nullptr, m);
-    }
+    std::vector<double> evecs(m * m);
+    int info = LAPACKE_dstevd(LAPACK_COL_MAJOR, 'V', m, diag.data(), offdiag.data(), evecs.data(), m);
     
     if (info != 0) {
-        std::cerr << "Error: Tridiagonal diagonalization failed with code " << info << std::endl;
-        results.all_converged = false;
-        return results;
+        std::cerr << "  Error: Ground state tridiagonal diagonalization failed with code " << info << std::endl;
+        ground_state = v0;  // Return initial state as fallback
+        return diag[0];
     }
     
-    std::cout << "Diagonalization successful" << std::endl;
+    double ground_energy = diag[0];
+    std::cout << "  Ground state energy: " << ground_energy << std::endl;
     
-    // Extract the lowest num_states eigenvalues
-    int num_extracted = std::min(num_states, m);
-    results.eigenvalues.resize(num_extracted);
+    // Reconstruct ground state in full Hilbert space
+    // |ψ_0⟩ = Σ_j c_j |v_j⟩ where c_j = evecs[0*m + j]
+    ground_state.resize(N, Complex(0.0, 0.0));
     
-    for (int i = 0; i < num_extracted; i++) {
-        results.eigenvalues[i] = diag[i];
-    }
+    // Store Lanczos vectors
+    std::vector<ComplexVector> lanczos_vectors;
+    lanczos_vectors.push_back(v0);
     
-    std::cout << "Extracted " << num_extracted << " lowest eigenvalues" << std::endl;
-    std::cout << "Ground state energy: " << results.eigenvalues[0] << std::endl;
-    if (num_extracted > 1) {
-        std::cout << "First excitation gap: " << results.eigenvalues[1] - results.eigenvalues[0] << std::endl;
-    }
+    ComplexVector v_current = v0;
+    ComplexVector v_prev(N, Complex(0.0, 0.0));
+    ComplexVector v_next(N);
+    ComplexVector w(N);
     
-    // Reconstruct eigenvectors in full space if requested
-    if (params.store_eigenvectors && !lanczos_vectors.empty()) {
-        std::cout << "Reconstructing eigenvectors in full space..." << std::endl;
-        results.eigenvectors.resize(num_extracted);
+    // Rebuild Lanczos vectors (we need them to reconstruct ground state)
+    for (int j = 0; j < m - 1; j++) {
+        H(v_current.data(), w.data(), N);
         
-        for (int i = 0; i < num_extracted; i++) {
-            results.eigenvectors[i].resize(N, Complex(0.0, 0.0));
-            
-            // |ψ_i⟩ = Σ_j evecs[i,j] |v_j⟩
-            for (int j = 0; j < m; j++) {
-                double coeff = evecs[i * m + j];
-                Complex alpha_c(coeff, 0.0);
-                cblas_zaxpy(N, &alpha_c, lanczos_vectors[j].data(), 1, 
-                           results.eigenvectors[i].data(), 1);
-            }
-            
-            // Normalize (should already be normalized, but double-check)
-            double vec_norm = cblas_dznrm2(N, results.eigenvectors[i].data(), 1);
-            if (std::abs(vec_norm - 1.0) > 1e-10) {
-                Complex norm_factor(1.0/vec_norm, 0.0);
-                cblas_zscal(N, &norm_factor, results.eigenvectors[i].data(), 1);
-            }
+        if (j > 0) {
+            Complex neg_beta(-beta[j], 0.0);
+            cblas_zaxpy(N, &neg_beta, v_prev.data(), 1, w.data(), 1);
         }
         
-        std::cout << "Eigenvector reconstruction complete" << std::endl;
+        Complex neg_alpha(-alpha[j], 0.0);
+        cblas_zaxpy(N, &neg_alpha, v_current.data(), 1, w.data(), 1);
+        
+        norm = cblas_dznrm2(N, w.data(), 1);
+        for (int i = 0; i < N; i++) {
+            v_next[i] = w[i] / norm;
+        }
+        
+        lanczos_vectors.push_back(v_next);
+        v_prev = v_current;
+        v_current = v_next;
     }
     
-    // Verify eigenvalues using residual test if requested
-    if (params.verify_eigenvalues && !lanczos_vectors.empty()) {
-        std::cout << "Verifying eigenvalues using residual norms..." << std::endl;
-        results.residual_norms.resize(num_extracted);
-        results.converged_states = 0;
-        
-        // Reconstruct eigenvectors if not already done
-        std::vector<ComplexVector> eigenvecs_full;
-        if (!params.store_eigenvectors) {
-            eigenvecs_full.resize(num_extracted);
-            for (int i = 0; i < num_extracted; i++) {
-                eigenvecs_full[i].resize(N, Complex(0.0, 0.0));
-                for (int j = 0; j < m; j++) {
-                    double coeff = evecs[i * m + j];
-                    Complex alpha_c(coeff, 0.0);
-                    cblas_zaxpy(N, &alpha_c, lanczos_vectors[j].data(), 1, 
-                               eigenvecs_full[i].data(), 1);
-                }
-                // Normalize
-                double vec_norm = cblas_dznrm2(N, eigenvecs_full[i].data(), 1);
-                Complex norm_factor(1.0/vec_norm, 0.0);
-                cblas_zscal(N, &norm_factor, eigenvecs_full[i].data(), 1);
-            }
-        }
-        
-        for (int i = 0; i < num_extracted; i++) {
-            // Compute residual: r = H|ψ⟩ - λ|ψ⟩
-            ComplexVector residual(N);
-            const ComplexVector& eigenvec = params.store_eigenvectors ? 
-                                           results.eigenvectors[i] : eigenvecs_full[i];
-            
-            H(eigenvec.data(), residual.data(), N);
-            
-            Complex lambda(-results.eigenvalues[i], 0.0);
-            cblas_zaxpy(N, &lambda, eigenvec.data(), 1, residual.data(), 1);
-            
-            double residual_norm = cblas_dznrm2(N, residual.data(), 1);
-            results.residual_norms[i] = residual_norm;
-            
-            if (residual_norm < params.residual_tolerance) {
-                results.converged_states++;
-            }
-            
-            if (i < 10 || residual_norm > params.residual_tolerance) {
-                std::cout << "  State " << i << ": E = " << std::setw(15) << std::setprecision(10)
-                         << results.eigenvalues[i] << ", ||r|| = " << std::scientific 
-                         << residual_norm << std::fixed << std::endl;
-            }
-        }
-        
-        std::cout << "Converged states: " << results.converged_states << " / " 
-                 << num_extracted << std::endl;
-        results.all_converged = (results.converged_states == num_extracted);
-        
-        if (!results.all_converged) {
-            std::cout << "Warning: Not all eigenvalues converged to requested tolerance" << std::endl;
-        }
-    } else {
-        results.converged_states = num_extracted;
-        results.all_converged = true;
+    // Reconstruct ground state: |ψ_0⟩ = Σ_j c_j |v_j⟩
+    for (int j = 0; j < m; j++) {
+        double coeff = evecs[j];  // First eigenvector (ground state)
+        Complex alpha_c(coeff, 0.0);
+        cblas_zaxpy(N, &alpha_c, lanczos_vectors[j].data(), 1, ground_state.data(), 1);
     }
     
-    std::cout << "\n==========================================\n";
-    std::cout << "Eigenspectrum Computation Complete\n";
-    std::cout << "==========================================\n";
+    // Normalize
+    norm = cblas_dznrm2(N, ground_state.data(), 1);
+    scale = Complex(1.0/norm, 0.0);
+    cblas_zscal(N, &scale, ground_state.data(), 1);
     
-    return results;
+    return ground_energy;
 }
 
 /**
- * @brief Compute thermodynamic properties from exact low-energy eigenstates
+ * @brief Build Krylov subspace from ground state for low-lying excitations
+ */
+int build_excitation_spectrum(
+    std::function<void(const Complex*, Complex*, int)> H,
+    const ComplexVector& ground_state,
+    double ground_energy,
+    int N,
+    int krylov_dim,
+    double tolerance,
+    bool full_reorth,
+    int reorth_freq,
+    std::vector<double>& excitation_energies,
+    std::vector<double>& weights
+) {
+    std::cout << "  Building excitation spectrum from ground state...\n";
+    
+    // Build Lanczos tridiagonal starting from ground state
+    std::vector<double> alpha, beta;
+    int iterations = build_lanczos_tridiagonal(
+        H, ground_state, N, krylov_dim, tolerance,
+        full_reorth, reorth_freq,
+        alpha, beta
+    );
+    
+    std::cout << "  Lanczos iterations for excitations: " << iterations << std::endl;
+    
+    int m = alpha.size();
+    
+    // Diagonalize tridiagonal matrix
+    std::vector<double> diag = alpha;
+    std::vector<double> offdiag(m - 1);
+    for (int i = 0; i < m - 1; i++) {
+        offdiag[i] = beta[i + 1];
+    }
+    
+    std::vector<double> evecs(m * m);
+    int info = LAPACKE_dstevd(LAPACK_COL_MAJOR, 'V', m, diag.data(), offdiag.data(), evecs.data(), m);
+    
+    if (info != 0) {
+        std::cerr << "  Warning: Excitation spectrum diagonalization failed with code " << info << std::endl;
+        return 0;
+    }
+    
+    // Extract excitation energies and weights
+    excitation_energies.resize(m);
+    weights.resize(m);
+    
+    for (int i = 0; i < m; i++) {
+        // Excitation energy relative to ground state
+        excitation_energies[i] = diag[i];
+        // Weight is squared first component of eigenvector
+        weights[i] = evecs[i * m] * evecs[i * m];
+    }
+    
+    std::cout << "  Found " << m << " excitation states\n";
+    std::cout << "  Energy range: [" << excitation_energies[0] << ", " 
+              << excitation_energies[m-1] << "]\n";
+    
+    return m;
+}
+
+/**
+ * @brief Compute thermodynamics from ground state and low-lying excitations
  */
 ThermodynamicData compute_ltlm_thermodynamics(
-    const std::vector<double>& eigenvalues,
-    const std::vector<double>& degeneracies,
+    double ground_energy,
+    const std::vector<double>& excitation_energies,
+    const std::vector<double>& weights,
     const std::vector<double>& temperatures
 ) {
     ThermodynamicData thermo;
     thermo.temperatures = temperatures;
     
     int n_temps = temperatures.size();
-    int n_states = eigenvalues.size();
-    
-    if (n_states == 0) {
-        std::cerr << "Error: No eigenvalues provided" << std::endl;
-        return thermo;
-    }
+    int n_states = excitation_energies.size();
     
     thermo.energy.resize(n_temps);
     thermo.specific_heat.resize(n_temps);
     thermo.entropy.resize(n_temps);
     thermo.free_energy.resize(n_temps);
     
-    // Use degeneracies if provided, otherwise assume all states are non-degenerate
-    std::vector<double> degeneracy_weights = degeneracies;
-    if (degeneracy_weights.empty() || degeneracy_weights.size() != eigenvalues.size()) {
-        degeneracy_weights.assign(n_states, 1.0);
-    }
-    
-    // Find minimum energy for numerical stability
-    double e_min = eigenvalues[0];  // Eigenvalues should be sorted
-    
-    std::cout << "Computing thermodynamic properties..." << std::endl;
-    std::cout << "Number of states: " << n_states << std::endl;
-    std::cout << "Ground state energy: " << e_min << std::endl;
-    
     for (int t = 0; t < n_temps; t++) {
         double T = temperatures[t];
         double beta = 1.0 / T;
         
-        // Compute partition function and observables using shifted energies
-        // Z = Σ_i g_i * exp(-β * (E_i - E_min))
+        // Compute partition function using shifted energies
+        // All energies are already relative to some reference
+        // Z = Σ_i w_i * exp(-β * E_i)
         double Z = 0.0;
         double E_avg = 0.0;
         double E2_avg = 0.0;
         
         std::vector<double> boltzmann_factors(n_states);
         
-        // Compute Boltzmann factors with shift
+        // Compute Boltzmann factors (excitation_energies already include ground state energy)
         for (int i = 0; i < n_states; i++) {
-            double shifted_energy = eigenvalues[i] - e_min;
-            boltzmann_factors[i] = degeneracy_weights[i] * std::exp(-beta * shifted_energy);
+            // For numerical stability, shift by ground state energy
+            double shifted_energy = excitation_energies[i] - ground_energy;
+            boltzmann_factors[i] = weights[i] * std::exp(-beta * shifted_energy);
             Z += boltzmann_factors[i];
         }
         
@@ -351,75 +224,25 @@ ThermodynamicData compute_ltlm_thermodynamics(
         if (Z > 1e-300) {
             for (int i = 0; i < n_states; i++) {
                 double prob = boltzmann_factors[i] / Z;
-                E_avg += prob * eigenvalues[i];
-                E2_avg += prob * eigenvalues[i] * eigenvalues[i];
+                E_avg += prob * excitation_energies[i];
+                E2_avg += prob * excitation_energies[i] * excitation_energies[i];
             }
             
             // Thermodynamic quantities
             thermo.energy[t] = E_avg;
             thermo.specific_heat[t] = beta * beta * (E2_avg - E_avg * E_avg);
-            thermo.entropy[t] = beta * (E_avg - e_min) + std::log(Z);
-            thermo.free_energy[t] = e_min - T * std::log(Z);
+            thermo.entropy[t] = beta * (E_avg - ground_energy) + std::log(Z);
+            thermo.free_energy[t] = ground_energy - T * std::log(Z);
         } else {
-            // Very low temperature - use ground state
-            thermo.energy[t] = e_min;
+            // Very low temperature - use ground state only
+            thermo.energy[t] = ground_energy;
             thermo.specific_heat[t] = 0.0;
-            thermo.entropy[t] = std::log(degeneracy_weights[0]);  // Ground state degeneracy
-            thermo.free_energy[t] = e_min;
+            thermo.entropy[t] = 0.0;
+            thermo.free_energy[t] = ground_energy;
         }
     }
-    
-    std::cout << "Thermodynamic calculation complete" << std::endl;
     
     return thermo;
-}
-
-/**
- * @brief Compute thermodynamics with automatic degeneracy detection
- */
-ThermodynamicData compute_ltlm_thermodynamics_auto_degeneracy(
-    const std::vector<double>& eigenvalues,
-    const std::vector<double>& temperatures,
-    double degeneracy_threshold
-) {
-    if (eigenvalues.empty()) {
-        std::cerr << "Error: No eigenvalues provided" << std::endl;
-        return ThermodynamicData();
-    }
-    
-    std::cout << "Detecting degeneracies (threshold = " << degeneracy_threshold << ")..." << std::endl;
-    
-    // Group nearly-degenerate eigenvalues
-    std::vector<double> unique_energies;
-    std::vector<double> degeneracies;
-    
-    unique_energies.push_back(eigenvalues[0]);
-    degeneracies.push_back(1.0);
-    
-    for (size_t i = 1; i < eigenvalues.size(); i++) {
-        double energy_diff = std::abs(eigenvalues[i] - unique_energies.back());
-        
-        if (energy_diff < degeneracy_threshold) {
-            // Degenerate with previous level
-            degeneracies.back() += 1.0;
-        } else {
-            // New energy level
-            unique_energies.push_back(eigenvalues[i]);
-            degeneracies.push_back(1.0);
-        }
-    }
-    
-    std::cout << "Found " << unique_energies.size() << " unique energy levels from " 
-             << eigenvalues.size() << " states" << std::endl;
-    
-    // Print degeneracies for first few levels
-    int num_to_print = std::min(10, (int)unique_energies.size());
-    for (int i = 0; i < num_to_print; i++) {
-        std::cout << "  Level " << i << ": E = " << std::setprecision(12) 
-                 << unique_energies[i] << ", g = " << (int)degeneracies[i] << std::endl;
-    }
-    
-    return compute_ltlm_thermodynamics(unique_energies, degeneracies, temperatures);
 }
 
 /**
@@ -432,18 +255,17 @@ LTLMResults low_temperature_lanczos(
     double temp_min,
     double temp_max,
     int num_temp_bins,
+    const ComplexVector* ground_state_input,
     const std::string& output_dir
 ) {
     std::cout << "\n==========================================\n";
     std::cout << "Low Temperature Lanczos Method (LTLM)\n";
-    std::cout << "Full Thermodynamic Calculation\n";
     std::cout << "==========================================\n";
     std::cout << "Hilbert space dimension: " << N << std::endl;
-    std::cout << "Number of eigenstates: " << params.num_eigenstates << std::endl;
+    std::cout << "Ground state Krylov dim: " << params.ground_state_krylov << std::endl;
+    std::cout << "Excitation Krylov dim: " << params.krylov_dim << std::endl;
     std::cout << "Temperature range: [" << temp_min << ", " << temp_max << "]" << std::endl;
     std::cout << "Temperature bins: " << num_temp_bins << std::endl;
-    
-    LTLMResults results;
     
     // Generate temperature grid (logarithmic spacing)
     std::vector<double> temperatures(num_temp_bins);
@@ -455,52 +277,94 @@ LTLMResults low_temperature_lanczos(
         temperatures[i] = std::exp(log_tmin + i * log_step);
     }
     
-    // Step 1: Compute low-energy spectrum
-    results.eigen_results = compute_low_energy_spectrum(H, N, params.num_eigenstates, params);
+    LTLMResults results;
+    results.total_samples = 1;
     
-    if (results.eigen_results.eigenvalues.empty()) {
-        std::cerr << "Error: Failed to compute eigenspectrum" << std::endl;
+    // Create output directory if needed
+    if (!output_dir.empty() && params.store_intermediate) {
+        std::string cmd = "mkdir -p " + output_dir + "/ltlm_data";
+        system(cmd.c_str());
+    }
+    
+    // Step 1: Find or use ground state
+    ComplexVector ground_state;
+    double ground_energy;
+    
+    if (ground_state_input != nullptr && params.use_exact_ground_state) {
+        std::cout << "\n--- Using provided ground state ---\n";
+        ground_state = *ground_state_input;
+        
+        // Compute ground state energy
+        ComplexVector H_gs(N);
+        H(ground_state.data(), H_gs.data(), N);
+        Complex energy_complex;
+        cblas_zdotc_sub(N, ground_state.data(), 1, H_gs.data(), 1, &energy_complex);
+        ground_energy = std::real(energy_complex);
+        
+        std::cout << "Ground state energy: " << ground_energy << std::endl;
+    } else {
+        std::cout << "\n--- Step 1: Finding Ground State ---\n";
+        ground_energy = find_ground_state_lanczos(
+            H, N, params.ground_state_krylov, params.tolerance,
+            params.full_reorthogonalization, params.reorth_frequency,
+            ground_state
+        );
+    }
+    
+    results.ground_state_energy = ground_energy;
+    
+    // Step 2: Build excitation spectrum from ground state
+    std::cout << "\n--- Step 2: Building Excitation Spectrum ---\n";
+    std::vector<double> excitation_energies, weights;
+    int n_excitations = build_excitation_spectrum(
+        H, ground_state, ground_energy, N, params.krylov_dim,
+        params.tolerance, params.full_reorthogonalization, params.reorth_frequency,
+        excitation_energies, weights
+    );
+    
+    results.krylov_dimension = n_excitations;
+    results.low_lying_spectrum = excitation_energies;
+    
+    if (n_excitations == 0) {
+        std::cerr << "Error: Failed to build excitation spectrum\n";
         return results;
     }
     
-    results.ground_state_energy = results.eigen_results.eigenvalues[0];
-    results.num_states_used = results.eigen_results.eigenvalues.size();
-    
-    // Step 2: Compute thermodynamic properties with automatic degeneracy detection
-    results.thermo_data = compute_ltlm_thermodynamics_auto_degeneracy(
-        results.eigen_results.eigenvalues,
-        temperatures,
-        1e-10  // Degeneracy threshold
+    // Step 3: Compute thermodynamics
+    std::cout << "\n--- Step 3: Computing Thermodynamics ---\n";
+    results.thermo_data = compute_ltlm_thermodynamics(
+        ground_energy, excitation_energies, weights, temperatures
     );
     
-    // Save eigenspectrum if output directory is provided
-    if (!output_dir.empty()) {
-        std::string spectrum_file = output_dir + "/ltlm_spectrum.txt";
-        save_eigenspectrum(results.eigen_results, spectrum_file);
-    }
+    // Initialize error bars to zero (LTLM is deterministic with single sample)
+    results.energy_error.resize(num_temp_bins, 0.0);
+    results.specific_heat_error.resize(num_temp_bins, 0.0);
+    results.entropy_error.resize(num_temp_bins, 0.0);
+    results.free_energy_error.resize(num_temp_bins, 0.0);
     
-    // Estimate validity range of LTLM
-    if (results.num_states_used > 1) {
-        double max_energy = results.eigen_results.eigenvalues.back();
-        double energy_window = max_energy - results.ground_state_energy;
-        double max_valid_temp = energy_window / 10.0;  // Rule of thumb: kT < ΔE/10
-        
-        std::cout << "\n==========================================\n";
-        std::cout << "LTLM Validity Estimate\n";
-        std::cout << "==========================================\n";
-        std::cout << "Energy window covered: " << energy_window << std::endl;
-        std::cout << "LTLM recommended for T < " << max_valid_temp << std::endl;
-        
-        if (temp_max > max_valid_temp) {
-            std::cout << "\nWarning: Maximum temperature exceeds recommended range!" << std::endl;
-            std::cout << "         Consider using FTLM for T > " << max_valid_temp << std::endl;
-            std::cout << "         or increase num_eigenstates in LTLM parameters." << std::endl;
+    // Save intermediate data if requested
+    if (params.store_intermediate && !output_dir.empty()) {
+        // Save excitation spectrum
+        std::string spectrum_file = output_dir + "/ltlm_data/excitation_spectrum.txt";
+        std::ofstream f(spectrum_file);
+        if (f.is_open()) {
+            f << "# Index  Energy  Weight\n";
+            for (int i = 0; i < n_excitations; i++) {
+                f << std::scientific << std::setprecision(12)
+                  << i << " "
+                  << excitation_energies[i] << " "
+                  << weights[i] << "\n";
+            }
+            f.close();
+            std::cout << "Saved excitation spectrum to: " << spectrum_file << std::endl;
         }
     }
     
     std::cout << "\n==========================================\n";
     std::cout << "LTLM Calculation Complete\n";
     std::cout << "==========================================\n";
+    std::cout << "Ground state energy: " << ground_energy << std::endl;
+    std::cout << "Number of excitations: " << n_excitations << std::endl;
     
     return results;
 }
@@ -518,54 +382,24 @@ void save_ltlm_results(
         return;
     }
     
-    file << "# LTLM Results (exact low-energy spectrum with " << results.num_states_used << " states)\n";
+    file << "# LTLM Results\n";
     file << "# Ground state energy: " << results.ground_state_energy << "\n";
-    file << "# Temperature  Energy  Specific_Heat  Entropy  Free_Energy\n";
+    file << "# Krylov dimension: " << results.krylov_dimension << "\n";
+    file << "# Temperature  Energy  E_error  Specific_Heat  C_error  Entropy  S_error  Free_Energy  F_error\n";
     file << std::scientific << std::setprecision(12);
     
     for (size_t i = 0; i < results.thermo_data.temperatures.size(); i++) {
         file << results.thermo_data.temperatures[i] << " "
              << results.thermo_data.energy[i] << " "
+             << results.energy_error[i] << " "
              << results.thermo_data.specific_heat[i] << " "
+             << results.specific_heat_error[i] << " "
              << results.thermo_data.entropy[i] << " "
-             << results.thermo_data.free_energy[i] << "\n";
+             << results.entropy_error[i] << " "
+             << results.thermo_data.free_energy[i] << " "
+             << results.free_energy_error[i] << "\n";
     }
     
     file.close();
     std::cout << "LTLM results saved to: " << filename << std::endl;
 }
-
-/**
- * @brief Save eigenspectrum to file
- */
-void save_eigenspectrum(
-    const LTLMEigenResults& eigen_results,
-    const std::string& filename
-) {
-    std::ofstream file(filename);
-    if (!file.is_open()) {
-        std::cerr << "Error: Cannot open file " << filename << " for writing" << std::endl;
-        return;
-    }
-    
-    file << "# Low-Energy Eigenspectrum from LTLM\n";
-    file << "# Lanczos iterations: " << eigen_results.lanczos_iterations << "\n";
-    file << "# Converged states: " << eigen_results.converged_states << " / " 
-         << eigen_results.eigenvalues.size() << "\n";
-    file << "# Index  Eigenvalue  Residual_Norm\n";
-    file << std::scientific << std::setprecision(15);
-    
-    for (size_t i = 0; i < eigen_results.eigenvalues.size(); i++) {
-        file << i << " " << eigen_results.eigenvalues[i];
-        
-        if (i < eigen_results.residual_norms.size()) {
-            file << " " << eigen_results.residual_norms[i];
-        }
-        
-        file << "\n";
-    }
-    
-    file.close();
-    std::cout << "Eigenspectrum saved to: " << filename << std::endl;
-}
-

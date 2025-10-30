@@ -30,6 +30,7 @@ enum class DiagonalizationMethod {
     mTPQ_CUDA,
     FTLM,
     LTLM,
+    HYBRID,
     ARPACK_SM,
     ARPACK_LM,
     ARPACK_SHIFT_INVERT,
@@ -111,21 +112,15 @@ EDConfig EDConfig::fromFile(const std::string& filename) {
             else if (key == "ftlm_store_samples") config.thermal.ftlm_store_samples = (value == "true" || value == "1");
             else if (key == "ftlm_error_bars") config.thermal.ftlm_error_bars = (value == "true" || value == "1");
             // LTLM parameters
-            else if (key == "ltlm_num_eigenstates") config.thermal.ltlm_num_eigenstates = std::stoi(value);
             else if (key == "ltlm_krylov_dim") config.thermal.ltlm_krylov_dim = std::stoi(value);
-            else if (key == "ltlm_tolerance") config.thermal.ltlm_tolerance = std::stod(value);
+            else if (key == "ltlm_ground_krylov") config.thermal.ltlm_ground_krylov = std::stoi(value);
             else if (key == "ltlm_full_reorth") config.thermal.ltlm_full_reorth = (value == "true" || value == "1");
             else if (key == "ltlm_reorth_freq") config.thermal.ltlm_reorth_freq = std::stoi(value);
             else if (key == "ltlm_seed") config.thermal.ltlm_seed = std::stoul(value);
-            else if (key == "ltlm_store_eigenvectors") config.thermal.ltlm_store_eigenvectors = (value == "true" || value == "1");
-            else if (key == "ltlm_verify_eigenvalues") config.thermal.ltlm_verify_eigenvalues = (value == "true" || value == "1");
-            else if (key == "ltlm_residual_tol") config.thermal.ltlm_residual_tol = std::stod(value);
-            else if (key == "ltlm_degeneracy_threshold") config.thermal.ltlm_degeneracy_threshold = std::stod(value);
-            // HYBRID mode parameters
-            else if (key == "hybrid_mode") config.thermal.hybrid_mode = (value == "true" || value == "1");
-            else if (key == "hybrid_crossover_temp") config.thermal.hybrid_crossover_temp = std::stod(value);
-            else if (key == "hybrid_overlap_bins") config.thermal.hybrid_overlap_bins = std::stoi(value);
-            else if (key == "hybrid_ltlm_temp_max") config.thermal.hybrid_ltlm_temp_max = std::stod(value);
+            else if (key == "ltlm_store_data") config.thermal.ltlm_store_data = (value == "true" || value == "1");
+            // Hybrid method parameters
+            else if (key == "use_hybrid_method") config.thermal.use_hybrid_method = (value == "true" || value == "1");
+            else if (key == "hybrid_crossover") config.thermal.hybrid_crossover = std::stod(value);
             else if (key == "calc_observables") config.observable.calculate = (value == "true" || value == "1");
             else if (key == "measure_spin") config.observable.measure_spin = (value == "true" || value == "1");
             else if (key == "run_standard") config.workflow.run_standard = (value == "true" || value == "1");
@@ -249,6 +244,16 @@ EDConfig EDConfig::fromCommandLine(int argc, char* argv[]) {
             else if (arg.find("--ftlm-seed=") == 0) config.thermal.ftlm_seed = std::stoul(parse_value("--ftlm-seed="));
             else if (arg == "--ftlm-store-samples") config.thermal.ftlm_store_samples = true;
             else if (arg == "--ftlm-no-error-bars") config.thermal.ftlm_error_bars = false;
+            // LTLM options
+            else if (arg.find("--ltlm-krylov=") == 0) config.thermal.ltlm_krylov_dim = std::stoi(parse_value("--ltlm-krylov="));
+            else if (arg.find("--ltlm-ground-krylov=") == 0) config.thermal.ltlm_ground_krylov = std::stoi(parse_value("--ltlm-ground-krylov="));
+            else if (arg == "--ltlm-full-reorth") config.thermal.ltlm_full_reorth = true;
+            else if (arg.find("--ltlm-reorth-freq=") == 0) config.thermal.ltlm_reorth_freq = std::stoi(parse_value("--ltlm-reorth-freq="));
+            else if (arg.find("--ltlm-seed=") == 0) config.thermal.ltlm_seed = std::stoul(parse_value("--ltlm-seed="));
+            else if (arg == "--ltlm-store-data") config.thermal.ltlm_store_data = true;
+            // Hybrid LTLM/FTLM options
+            else if (arg == "--hybrid-thermal") config.thermal.use_hybrid_method = true;
+            else if (arg.find("--hybrid-crossover=") == 0) config.thermal.hybrid_crossover = std::stod(parse_value("--hybrid-crossover="));
             // Dynamical response options
             else if (arg == "--dyn-thermal") config.dynamical.thermal_average = true;
             else if (arg.find("--dyn-samples=") == 0) config.dynamical.num_random_states = std::stoi(parse_value("--dyn-samples="));
@@ -513,6 +518,7 @@ std::optional<DiagonalizationMethod> parseMethod(const std::string& str) {
     if (lower == "mtpq_cuda") return DiagonalizationMethod::mTPQ_CUDA;
     if (lower == "ftlm") return DiagonalizationMethod::FTLM;
     if (lower == "ltlm") return DiagonalizationMethod::LTLM;
+    if (lower == "hybrid") return DiagonalizationMethod::HYBRID;
     
     // ARPACK methods
     if (lower == "arpack" || lower == "arpack_sm") return DiagonalizationMethod::ARPACK_SM;
@@ -564,6 +570,7 @@ std::string methodToString(DiagonalizationMethod method) {
         case DiagonalizationMethod::mTPQ_CUDA: return "mTPQ_CUDA";
         case DiagonalizationMethod::FTLM: return "FTLM";
         case DiagonalizationMethod::LTLM: return "LTLM";
+        case DiagonalizationMethod::HYBRID: return "HYBRID";
         
         // ARPACK methods
         case DiagonalizationMethod::ARPACK_SM: return "ARPACK_SM";
@@ -849,9 +856,29 @@ std::string getMethodParameterInfo(DiagonalizationMethod method) {
             break;
         
         case DiagonalizationMethod::LTLM:
-            info << "Low Temperature Lanczos Method.\n\n";
-            info << "Status: Not yet implemented\n";
-            info << "Alternative: Use standard LANCZOS or mTPQ/cTPQ methods\n";
+            info << "Low Temperature Lanczos Method (LTLM).\n\n";
+            info << "Specialized method for low-temperature thermodynamics. First finds the ground\n";
+            info << "state, then builds Krylov subspace from it to capture low-lying excitations.\n";
+            info << "More accurate than FTLM at low temperatures.\n\n";
+            info << "Configurable Parameters:\n";
+            info << "  --ltlm-krylov=<m>        Krylov dimension for excitations (default: 200)\n";
+            info << "  --ltlm-ground-krylov=<m> Krylov dimension for ground state (default: 100)\n";
+            info << "  --temp_min=<T>           Minimum temperature (default: 1e-3)\n";
+            info << "  --temp_max=<T>           Maximum temperature (default: 20.0)\n";
+            info << "  --temp_bins=<n>          Number of temperature points (default: 100)\n";
+            info << "  --ltlm-full-reorth       Use full reorthogonalization (slower, more stable)\n";
+            info << "  --ltlm-reorth-freq=<k>   Reorthogonalization frequency (default: 10)\n";
+            info << "  --ltlm-seed=<seed>       Random seed for initial state (0 = random, default: 0)\n";
+            info << "  --ltlm-store-data        Store intermediate data (spectrum, etc.)\n";
+            info << "\nHybrid LTLM/FTLM Mode:\n";
+            info << "  --hybrid-thermal         Use hybrid method (LTLM at low T, FTLM at high T)\n";
+            info << "  --hybrid-crossover=<T>   Temperature crossover (default: 1.0)\n";
+            info << "\nOutput:\n";
+            info << "  Saves to: output_dir/thermo/ltlm_thermo.txt (or hybrid_thermo.txt for hybrid)\n";
+            info << "  Format: Temperature  Energy  E_error  Specific_Heat  C_error  Entropy  S_error  Free_Energy  F_error\n";
+            info << "\nBest for: Low-temperature thermodynamics where ground state dominates\n";
+            info << "Advantages: More accurate than FTLM at low T, deterministic ground state\n";
+            info << "Note: Combine with FTLM using --hybrid-thermal for full temperature range\n";
             break;
             
         case DiagonalizationMethod::ARPACK_SM:

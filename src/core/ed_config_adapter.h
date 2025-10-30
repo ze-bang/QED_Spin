@@ -47,6 +47,16 @@ inline EDParameters toEDParameters(const EDConfig& config) {
     params.ftlm_store_samples = config.thermal.ftlm_store_samples;
     params.ftlm_error_bars = config.thermal.ftlm_error_bars;
     
+    // LTLM (via thermal config)
+    params.ltlm_krylov_dim = config.thermal.ltlm_krylov_dim;
+    params.ltlm_ground_krylov = config.thermal.ltlm_ground_krylov;
+    params.ltlm_full_reorth = config.thermal.ltlm_full_reorth;
+    params.ltlm_reorth_freq = config.thermal.ltlm_reorth_freq;
+    params.ltlm_seed = config.thermal.ltlm_seed;
+    params.ltlm_store_data = config.thermal.ltlm_store_data;
+    params.use_hybrid_method = config.thermal.use_hybrid_method;
+    params.hybrid_crossover = config.thermal.hybrid_crossover;
+    
     // Observable
     params.calc_observables = config.observable.calculate;
     params.measure_spin = config.observable.measure_spin;
@@ -121,6 +131,16 @@ inline EDConfig fromEDParameters(const EDParameters& params, DiagonalizationMeth
     config.thermal.ftlm_seed = params.ftlm_seed;
     config.thermal.ftlm_store_samples = params.ftlm_store_samples;
     config.thermal.ftlm_error_bars = params.ftlm_error_bars;
+    
+    // LTLM (via thermal config)
+    config.thermal.ltlm_krylov_dim = params.ltlm_krylov_dim;
+    config.thermal.ltlm_ground_krylov = params.ltlm_ground_krylov;
+    config.thermal.ltlm_full_reorth = params.ltlm_full_reorth;
+    config.thermal.ltlm_reorth_freq = params.ltlm_reorth_freq;
+    config.thermal.ltlm_seed = params.ltlm_seed;
+    config.thermal.ltlm_store_data = params.ltlm_store_data;
+    config.thermal.use_hybrid_method = params.use_hybrid_method;
+    config.thermal.hybrid_crossover = params.hybrid_crossover;
     
     // Observable
     config.observable.calculate = params.calc_observables;

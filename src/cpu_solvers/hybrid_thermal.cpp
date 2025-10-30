@@ -1,218 +1,302 @@
-/**
- * @file hybrid_thermal.cpp
- * @brief Implementation of hybrid LTLM+FTLM thermal calculations
- */
+// hybrid_thermal.cpp - Implementation of Hybrid Thermal Method
 
 #include "hybrid_thermal.h"
-#include <cmath>
-#include <algorithm>
-#include <iostream>
+#include "ltlm.h"
+#include "ftlm.h"
+#include <fstream>
 #include <iomanip>
+#include <algorithm>
 
-namespace hybrid_thermal {
-
-double determine_crossover_temperature(
+/**
+ * @brief Main Hybrid Thermal Method implementation
+ */
+HybridThermalResults hybrid_thermal_method(
+    std::function<void(const Complex*, Complex*, int)> H,
+    int N,
+    const HybridThermalParameters& params,
     double temp_min,
     double temp_max,
-    size_t hilbert_space_dim,
-    int num_eigenstates
+    int num_temp_bins,
+    const std::string& output_dir
 ) {
-    // Rule of thumb: LTLM is efficient when k_B*T << (E_max - E_0)
-    // where E_max is the highest computed eigenstate
+    std::cout << "\n================================================\n";
+    std::cout << "       Hybrid Thermal Method (LTLM+FTLM)       \n";
+    std::cout << "================================================\n";
+    std::cout << "Temperature range: " << temp_min << " - " << temp_max << std::endl;
+    std::cout << "Temperature bins: " << num_temp_bins << std::endl;
+    std::cout << "Crossover temperature: " << params.crossover_temperature << std::endl;
+    std::cout << "  • LTLM for T < " << params.crossover_temperature << " (accurate ground state)\n";
+    std::cout << "  • FTLM for T ≥ " << params.crossover_temperature << " (efficient sampling)\n";
+    std::cout << "================================================\n\n";
     
-    // Estimate: use temperature where ~50% of the Boltzmann weight
-    // is outside the computed eigenstates
+    // Generate full temperature grid (logarithmic spacing)
+    std::vector<double> temperatures(num_temp_bins);
+    double log_tmin = std::log(temp_min);
+    double log_tmax = std::log(temp_max);
+    double log_step = (log_tmax - log_tmin) / std::max(1, num_temp_bins - 1);
     
-    // Simple heuristic: crossover at T where k_B*T ~ spacing between eigenstates
-    // For quantum spin systems, this is typically around 0.1-0.5 * J (exchange coupling)
-    
-    // Conservative approach: use geometric mean with bounds
-    double geometric_mean = std::sqrt(temp_min * temp_max);
-    
-    // Adjust based on coverage: fraction of Hilbert space covered by eigenstates
-    double coverage_fraction = static_cast<double>(num_eigenstates) / hilbert_space_dim;
-    
-    // If we have good coverage (>1%), we can push crossover higher
-    double coverage_factor = 1.0;
-    if (coverage_fraction > 0.01) {
-        coverage_factor = 1.5;
-    } else if (coverage_fraction > 0.001) {
-        coverage_factor = 1.2;
+    for (int i = 0; i < num_temp_bins; i++) {
+        temperatures[i] = std::exp(log_tmin + i * log_step);
     }
     
-    double crossover = geometric_mean * coverage_factor;
+    // Find crossover index in temperature grid
+    int crossover_index = 0;
+    double actual_crossover = params.crossover_temperature;
     
-    // Clamp to reasonable range: between 10% and 60% of temp_max
-    crossover = std::max(crossover, 0.1 * temp_max);
-    crossover = std::min(crossover, 0.6 * temp_max);
+    for (int i = 0; i < num_temp_bins; i++) {
+        if (temperatures[i] >= params.crossover_temperature) {
+            crossover_index = i;
+            actual_crossover = temperatures[i];
+            break;
+        }
+    }
     
-    return crossover;
-}
-
-std::vector<double> create_ltlm_temperature_grid(
-    double temp_min,
-    double temp_max,
-    int num_bins,
-    bool log_spacing
-) {
-    std::vector<double> temps(num_bins);
+    // If crossover is beyond temp_max, use only LTLM
+    if (crossover_index == 0 && params.crossover_temperature > temp_max) {
+        crossover_index = num_temp_bins;
+        actual_crossover = temp_max;
+    }
     
-    if (log_spacing && temp_min > 0) {
-        // Logarithmic spacing for low temperatures
-        double log_min = std::log(temp_min);
-        double log_max = std::log(temp_max);
-        double dlog = (log_max - log_min) / (num_bins - 1);
+    // Initialize results structure
+    HybridThermalResults results;
+    results.thermo_data.temperatures = temperatures;
+    results.thermo_data.energy.resize(num_temp_bins);
+    results.thermo_data.specific_heat.resize(num_temp_bins);
+    results.thermo_data.entropy.resize(num_temp_bins);
+    results.thermo_data.free_energy.resize(num_temp_bins);
+    results.energy_error.resize(num_temp_bins, 0.0);
+    results.specific_heat_error.resize(num_temp_bins, 0.0);
+    results.entropy_error.resize(num_temp_bins, 0.0);
+    results.free_energy_error.resize(num_temp_bins, 0.0);
+    results.actual_crossover_temp = actual_crossover;
+    results.crossover_index = crossover_index;
+    results.ltlm_points = 0;
+    results.ftlm_points = 0;
+    results.ftlm_samples_used = 0;
+    
+    // ========================================================================
+    // LTLM Phase: Low Temperature (T < T_crossover)
+    // ========================================================================
+    
+    if (crossover_index > 0) {
+        std::cout << "┌────────────────────────────────────────────┐\n";
+        std::cout << "│  Phase 1: LTLM (Low Temperature)          │\n";
+        std::cout << "└────────────────────────────────────────────┘\n";
+        std::cout << "Temperature points: " << crossover_index 
+                  << " (T = " << temperatures[0] << " to " << temperatures[crossover_index-1] << ")\n\n";
         
-        for (int i = 0; i < num_bins; ++i) {
-            temps[i] = std::exp(log_min + i * dlog);
-        }
-    } else {
-        // Linear spacing
-        double dt = (temp_max - temp_min) / (num_bins - 1);
-        for (int i = 0; i < num_bins; ++i) {
-            temps[i] = temp_min + i * dt;
-        }
-    }
-    
-    return temps;
-}
-
-std::vector<double> create_ftlm_temperature_grid(
-    double temp_min,
-    double temp_max,
-    int num_bins
-) {
-    std::vector<double> temps(num_bins);
-    double dt = (temp_max - temp_min) / (num_bins - 1);
-    
-    for (int i = 0; i < num_bins; ++i) {
-        temps[i] = temp_min + i * dt;
-    }
-    
-    return temps;
-}
-
-double smooth_interpolation_weight(
-    double temp,
-    double temp_min,
-    double temp_max
-) {
-    if (temp <= temp_min) return 0.0;
-    if (temp >= temp_max) return 1.0;
-    
-    // Use smooth Hermite interpolation (3rd order polynomial)
-    // Ensures C^1 continuity (smooth first derivative)
-    double x = (temp - temp_min) / (temp_max - temp_min);
-    return x * x * (3.0 - 2.0 * x);
-}
-
-ThermodynamicData stitch_thermodynamic_data(
-    const ThermodynamicData& ltlm_data,
-    const ThermodynamicData& ftlm_data,
-    double crossover_temp,
-    int overlap_bins
-) {
-    ThermodynamicData result;
-    
-    // Find indices for overlap region
-    // Overlap region: [crossover_temp - delta, crossover_temp + delta]
-    
-    const auto& ltlm_temps = ltlm_data.temperatures;
-    const auto& ftlm_temps = ftlm_data.temperatures;
-    
-    if (ltlm_temps.empty() || ftlm_temps.empty()) {
-        std::cerr << "Error: Empty temperature arrays in stitch_thermodynamic_data" << std::endl;
-        return result;
-    }
-    
-    // Determine overlap region width
-    double temp_span = std::min(
-        ltlm_temps.back() - ltlm_temps.front(),
-        ftlm_temps.back() - ftlm_temps.front()
-    );
-    double overlap_width = temp_span * 0.2; // 20% overlap
-    
-    double overlap_min = crossover_temp - overlap_width / 2;
-    double overlap_max = crossover_temp + overlap_width / 2;
-    
-    // Build combined temperature array
-    std::vector<double> combined_temps;
-    std::vector<double> combined_energy;
-    std::vector<double> combined_entropy;
-    std::vector<double> combined_cv;
-    std::vector<double> combined_free_energy;
-    
-    // Add LTLM data (below overlap region)
-    for (size_t i = 0; i < ltlm_temps.size(); ++i) {
-        double T = ltlm_temps[i];
+        // Setup LTLM parameters
+        LTLMParameters ltlm_params;
+        ltlm_params.krylov_dim = params.ltlm_krylov_dim;
+        ltlm_params.ground_state_krylov = params.ltlm_ground_krylov;
+        ltlm_params.full_reorthogonalization = params.ltlm_full_reorth;
+        ltlm_params.reorth_frequency = params.ltlm_reorth_freq;
+        ltlm_params.random_seed = params.ltlm_seed;
+        ltlm_params.store_intermediate = params.ltlm_store_data;
+        ltlm_params.max_iterations = params.max_iterations;
+        ltlm_params.tolerance = params.tolerance;
+        ltlm_params.num_samples = 1;  // LTLM uses single deterministic calculation
+        ltlm_params.compute_error_bars = false;
         
-        if (T < overlap_min) {
-            // Pure LTLM region
-            combined_temps.push_back(T);
-            combined_energy.push_back(ltlm_data.energy[i]);
-            combined_entropy.push_back(ltlm_data.entropy[i]);
-            combined_cv.push_back(ltlm_data.specific_heat[i]);
-            combined_free_energy.push_back(ltlm_data.free_energy[i]);
-        } else if (T <= overlap_max) {
-            // Overlap region: interpolate
-            // Find corresponding FTLM point
-            auto ftlm_it = std::lower_bound(ftlm_temps.begin(), ftlm_temps.end(), T);
-            if (ftlm_it != ftlm_temps.end()) {
-                size_t ftlm_idx = ftlm_it - ftlm_temps.begin();
-                
-                // Interpolation weight (0 = LTLM, 1 = FTLM)
-                double w = smooth_interpolation_weight(T, overlap_min, overlap_max);
-                
-                combined_temps.push_back(T);
-                combined_energy.push_back(
-                    (1 - w) * ltlm_data.energy[i] + w * ftlm_data.energy[ftlm_idx]
-                );
-                combined_entropy.push_back(
-                    (1 - w) * ltlm_data.entropy[i] + w * ftlm_data.entropy[ftlm_idx]
-                );
-                combined_cv.push_back(
-                    (1 - w) * ltlm_data.specific_heat[i] + w * ftlm_data.specific_heat[ftlm_idx]
-                );
-                combined_free_energy.push_back(
-                    (1 - w) * ltlm_data.free_energy[i] + w * ftlm_data.free_energy[ftlm_idx]
-                );
-            }
-        }
-    }
-    
-    // Add FTLM data (above overlap region)
-    for (size_t i = 0; i < ftlm_temps.size(); ++i) {
-        double T = ftlm_temps[i];
+        // Extract low temperature range
+        std::vector<double> ltlm_temps(temperatures.begin(), temperatures.begin() + crossover_index);
         
-        if (T > overlap_max) {
-            // Pure FTLM region
-            combined_temps.push_back(T);
-            combined_energy.push_back(ftlm_data.energy[i]);
-            combined_entropy.push_back(ftlm_data.entropy[i]);
-            combined_cv.push_back(ftlm_data.specific_heat[i]);
-            combined_free_energy.push_back(ftlm_data.free_energy[i]);
+        // Run LTLM
+        LTLMResults ltlm_results = low_temperature_lanczos(
+            H, N, ltlm_params,
+            ltlm_temps.front(), ltlm_temps.back(), ltlm_temps.size(),
+            nullptr, output_dir
+        );
+        
+        // Store LTLM results
+        results.ground_state_energy = ltlm_results.ground_state_energy;
+        results.ltlm_points = ltlm_temps.size();
+        results.low_lying_spectrum = ltlm_results.low_lying_spectrum;
+        
+        // Copy LTLM thermodynamic data
+        for (size_t i = 0; i < ltlm_temps.size(); i++) {
+            results.thermo_data.energy[i] = ltlm_results.thermo_data.energy[i];
+            results.thermo_data.specific_heat[i] = ltlm_results.thermo_data.specific_heat[i];
+            results.thermo_data.entropy[i] = ltlm_results.thermo_data.entropy[i];
+            results.thermo_data.free_energy[i] = ltlm_results.thermo_data.free_energy[i];
+            results.energy_error[i] = ltlm_results.energy_error[i];
+            results.specific_heat_error[i] = ltlm_results.specific_heat_error[i];
+            results.entropy_error[i] = ltlm_results.entropy_error[i];
+            results.free_energy_error[i] = ltlm_results.free_energy_error[i];
         }
+        
+        std::cout << "\n✓ LTLM phase completed successfully\n";
+        std::cout << "  Ground state energy: " << results.ground_state_energy << "\n";
+        std::cout << "  Low-lying excitations found: " << results.low_lying_spectrum.size() << "\n\n";
     }
     
-    // Store in result
-    result.temperatures = combined_temps;
-    result.energy = combined_energy;
-    result.entropy = combined_entropy;
-    result.specific_heat = combined_cv;
-    result.free_energy = combined_free_energy;
+    // ========================================================================
+    // FTLM Phase: High Temperature (T >= T_crossover)
+    // ========================================================================
     
-    return result;
+    if (crossover_index < num_temp_bins) {
+        std::cout << "┌────────────────────────────────────────────┐\n";
+        std::cout << "│  Phase 2: FTLM (High Temperature)         │\n";
+        std::cout << "└────────────────────────────────────────────┘\n";
+        std::cout << "Temperature points: " << (num_temp_bins - crossover_index)
+                  << " (T = " << temperatures[crossover_index] << " to " << temperatures.back() << ")\n";
+        std::cout << "Random samples: " << params.ftlm_num_samples << "\n\n";
+        
+        // Setup FTLM parameters
+        FTLMParameters ftlm_params;
+        ftlm_params.num_samples = params.ftlm_num_samples;
+        ftlm_params.krylov_dim = params.ftlm_krylov_dim;
+        ftlm_params.full_reorthogonalization = params.ftlm_full_reorth;
+        ftlm_params.reorth_frequency = params.ftlm_reorth_freq;
+        ftlm_params.random_seed = params.ftlm_seed;
+        ftlm_params.store_intermediate = params.ftlm_store_samples;
+        ftlm_params.compute_error_bars = params.ftlm_error_bars;
+        ftlm_params.max_iterations = params.max_iterations;
+        ftlm_params.tolerance = params.tolerance;
+        
+        // Extract high temperature range
+        std::vector<double> ftlm_temps(temperatures.begin() + crossover_index, temperatures.end());
+        
+        // Run FTLM
+        FTLMResults ftlm_results = finite_temperature_lanczos(
+            H, N, ftlm_params,
+            ftlm_temps.front(), ftlm_temps.back(), ftlm_temps.size(),
+            output_dir
+        );
+        
+        // Store FTLM results
+        results.ftlm_points = ftlm_temps.size();
+        results.ftlm_samples_used = params.ftlm_num_samples;
+        
+        // If LTLM didn't run, use FTLM's ground state estimate
+        if (crossover_index == 0) {
+            results.ground_state_energy = ftlm_results.ground_state_estimate;
+        }
+        
+        // Copy FTLM thermodynamic data
+        for (size_t i = 0; i < ftlm_temps.size(); i++) {
+            int idx = crossover_index + i;
+            results.thermo_data.energy[idx] = ftlm_results.thermo_data.energy[i];
+            results.thermo_data.specific_heat[idx] = ftlm_results.thermo_data.specific_heat[i];
+            results.thermo_data.entropy[idx] = ftlm_results.thermo_data.entropy[i];
+            results.thermo_data.free_energy[idx] = ftlm_results.thermo_data.free_energy[i];
+            results.energy_error[idx] = ftlm_results.energy_error[i];
+            results.specific_heat_error[idx] = ftlm_results.specific_heat_error[i];
+            results.entropy_error[idx] = ftlm_results.entropy_error[i];
+            results.free_energy_error[idx] = ftlm_results.free_energy_error[i];
+        }
+        
+        std::cout << "\n✓ FTLM phase completed successfully\n";
+        std::cout << "  Samples per temperature: " << params.ftlm_num_samples << "\n";
+        std::cout << "  Error bars computed: " << (params.ftlm_error_bars ? "Yes" : "No") << "\n\n";
+    }
+    
+    // ========================================================================
+    // Summary
+    // ========================================================================
+    
+    std::cout << "================================================\n";
+    std::cout << "       Hybrid Thermal Calculation Complete     \n";
+    std::cout << "================================================\n";
+    std::cout << "Total temperature points: " << num_temp_bins << "\n";
+    std::cout << "  • LTLM contribution: " << results.ltlm_points << " points\n";
+    std::cout << "  • FTLM contribution: " << results.ftlm_points << " points\n";
+    std::cout << "Crossover at index " << crossover_index << " (T = " << actual_crossover << ")\n";
+    std::cout << "Ground state energy: " << results.ground_state_energy << "\n";
+    std::cout << "================================================\n\n";
+    
+    return results;
 }
 
-// NOTE: compute_hybrid_thermodynamics is temporarily disabled pending proper integration
-// with the Hamiltonian construction infrastructure. To use hybrid mode, implement a
-// wrapper that constructs the Hamiltonian matrix-vector product function from your
-// specific Hamiltonian representation.
-//
-// Example usage pattern:
-// auto H = [&your_hamiltonian](const Complex* in, Complex* out, int N) {
-//     // Your matrix-vector product implementation
-// };
-// Then call LTLM and FTLM separately and stitch results using stitch_thermodynamic_data()
+/**
+ * @brief Save hybrid thermal results to file
+ */
+void save_hybrid_thermal_results(
+    const HybridThermalResults& results,
+    const std::string& filename
+) {
+    std::ofstream file(filename);
+    if (!file.is_open()) {
+        std::cerr << "Error: Cannot open file " << filename << " for writing" << std::endl;
+        return;
+    }
+    
+    // Write header with metadata
+    file << "# Hybrid Thermal Method Results (LTLM + FTLM)\n";
+    file << "# ============================================\n";
+    file << "# Ground state energy: " << results.ground_state_energy << "\n";
+    file << "# Crossover temperature: " << results.actual_crossover_temp << "\n";
+    file << "# Crossover index: " << results.crossover_index << "\n";
+    file << "# LTLM temperature points: " << results.ltlm_points << "\n";
+    file << "# FTLM temperature points: " << results.ftlm_points << "\n";
+    file << "# FTLM samples used: " << results.ftlm_samples_used << "\n";
+    file << "#\n";
+    file << "# Method assignment:\n";
+    file << "#   Indices [0, " << results.crossover_index << "): LTLM (deterministic, accurate ground state)\n";
+    file << "#   Indices [" << results.crossover_index << ", " << results.thermo_data.temperatures.size() 
+         << "): FTLM (random sampling, error bars)\n";
+    file << "#\n";
+    file << "# Columns:\n";
+    file << "# 1: Temperature\n";
+    file << "# 2: Energy\n";
+    file << "# 3: Energy_Error\n";
+    file << "# 4: Specific_Heat\n";
+    file << "# 5: SpecificHeat_Error\n";
+    file << "# 6: Entropy\n";
+    file << "# 7: Entropy_Error\n";
+    file << "# 8: Free_Energy\n";
+    file << "# 9: FreeEnergy_Error\n";
+    file << "# 10: Method (L=LTLM, F=FTLM)\n";
+    file << "#\n";
+    
+    file << std::scientific << std::setprecision(12);
+    
+    for (size_t i = 0; i < results.thermo_data.temperatures.size(); i++) {
+        char method_flag = (i < static_cast<size_t>(results.crossover_index)) ? 'L' : 'F';
+        
+        file << results.thermo_data.temperatures[i] << "  "
+             << results.thermo_data.energy[i] << "  "
+             << results.energy_error[i] << "  "
+             << results.thermo_data.specific_heat[i] << "  "
+             << results.specific_heat_error[i] << "  "
+             << results.thermo_data.entropy[i] << "  "
+             << results.entropy_error[i] << "  "
+             << results.thermo_data.free_energy[i] << "  "
+             << results.free_energy_error[i] << "  "
+             << method_flag << "\n";
+    }
+    
+    file.close();
+    std::cout << "Hybrid thermal results saved to: " << filename << std::endl;
+}
 
-} // namespace hybrid_thermal
+/**
+ * @brief Estimate optimal crossover temperature (future enhancement)
+ * 
+ * Current implementation uses a simple heuristic:
+ * T_crossover ≈ (E1 - E0) / 2
+ * 
+ * where E0 is ground state energy and E1 is first excited state energy.
+ * This ensures LTLM is used when ground state dominates the partition function.
+ */
+double estimate_optimal_crossover(
+    std::function<void(const Complex*, Complex*, int)> H,
+    int N,
+    double ground_energy,
+    double first_excitation
+) {
+    // Energy gap to first excited state
+    double gap = first_excitation - ground_energy;
+    
+    // Heuristic: Use LTLM when k_B T < gap/2
+    // This ensures ground state contribution is > 60% of partition function
+    double T_opt = gap / 2.0;
+    
+    // Sanity bounds: crossover should be in reasonable range
+    T_opt = std::max(0.01, std::min(T_opt, 10.0));
+    
+    std::cout << "Estimated optimal crossover temperature: " << T_opt << std::endl;
+    std::cout << "  (Based on energy gap: " << gap << ")\n";
+    
+    return T_opt;
+}

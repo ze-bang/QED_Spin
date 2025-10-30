@@ -9,6 +9,8 @@
 #include "../cpu_solvers/arpack.h"
 #include "../cpu_solvers/lanczos.h"
 #include "../cpu_solvers/ftlm.h"
+#include "../cpu_solvers/ltlm.h"
+#include "../cpu_solvers/hybrid_thermal.h"
 #include "construct_ham.h"
 #include "../cpu_solvers/observables.h"
 #include "ed_config.h"
@@ -126,6 +128,7 @@ enum class DiagonalizationMethod {
     mTPQ_CUDA,             // CUDA microcanonical Thermal Pure Quantum states
     FTLM,                  // Finite Temperature Lanczos Method
     LTLM,                  // Low Temperature Lanczos Method
+    HYBRID,                // Hybrid Thermal Method (LTLM + FTLM with automatic crossover)
     
     // ARPACK methods
     ARPACK_SM,             // ARPACK smallest magnitude eigenvalues
@@ -190,6 +193,17 @@ struct EDParameters {
     unsigned int ftlm_seed = 0;    // Random seed (0 = auto)
     bool ftlm_store_samples = false; // Store per-sample intermediate data
     bool ftlm_error_bars = true;   // Compute error bars
+    
+    // ========== LTLM-Specific Parameters ==========
+    int ltlm_krylov_dim = 200;     // Krylov subspace dimension for excitations
+    int ltlm_ground_krylov = 100;  // Krylov dimension for finding ground state
+    bool ltlm_full_reorth = false; // Use full reorthogonalization
+    int ltlm_reorth_freq = 10;     // Reorthogonalization frequency
+    unsigned int ltlm_seed = 0;    // Random seed (0 = auto)
+    bool ltlm_store_data = false;  // Store intermediate data
+    bool use_hybrid_method = false; // Use hybrid LTLM/FTLM (deprecated, use method=HYBRID)
+    double hybrid_crossover = 1.0; // Temperature crossover for hybrid
+    bool hybrid_auto_crossover = false; // Auto-determine crossover temperature
     
     // ========== Observable Calculations ==========
     mutable std::vector<Operator> observables = {};             // Observables to calculate for TPQ
@@ -630,9 +644,97 @@ EDResults exact_diagonalization_core(
             break;
         
         case DiagonalizationMethod::LTLM:
-            std::cerr << "Error: LTLM (Low Temperature Lanczos Method) not yet implemented." << std::endl;
-            std::cerr << "Please use standard Lanczos or mTPQ/cTPQ methods." << std::endl;
-            throw std::runtime_error("LTLM not yet implemented");
+            std::cout << "Using Low Temperature Lanczos Method (LTLM)" << std::endl;
+            {
+                if (params.use_hybrid_method) {
+                    // Deprecated: use method=HYBRID instead
+                    std::cerr << "Warning: use_hybrid_method flag is deprecated. Use --method=HYBRID instead.\n";
+                    std::cerr << "Falling back to standard LTLM.\n";
+                }
+                
+                // Standard LTLM
+                // Setup LTLM parameters
+                LTLMParameters ltlm_params;
+                ltlm_params.krylov_dim = params.ltlm_krylov_dim;
+                ltlm_params.ground_state_krylov = params.ltlm_ground_krylov;
+                ltlm_params.num_samples = 1;  // LTLM typically uses 1 sample
+                ltlm_params.max_iterations = params.max_iterations;
+                ltlm_params.tolerance = params.tolerance;
+                ltlm_params.full_reorthogonalization = params.ltlm_full_reorth;
+                ltlm_params.reorth_frequency = params.ltlm_reorth_freq;
+                ltlm_params.random_seed = params.ltlm_seed;
+                ltlm_params.store_intermediate = params.ltlm_store_data;
+                ltlm_params.compute_error_bars = false;  // Not needed for single sample
+                
+                // Run LTLM
+                LTLMResults ltlm_results = low_temperature_lanczos(
+                    H, hilbert_space_dim, ltlm_params,
+                    params.temp_min, params.temp_max, params.num_temp_bins,
+                    nullptr, params.output_dir
+                );
+                
+                // Store results
+                results.thermo_data = ltlm_results.thermo_data;
+                results.eigenvalues.push_back(ltlm_results.ground_state_energy);
+                
+                // Save LTLM results to file
+                if (!params.output_dir.empty()) {
+                    std::string ltlm_dir = params.output_dir + "/thermo";
+                    system(("mkdir -p " + ltlm_dir).c_str());
+                    save_ltlm_results(ltlm_results, ltlm_dir + "/ltlm_thermo.txt");
+                }
+            }
+            break;
+        
+        case DiagonalizationMethod::HYBRID:
+            std::cout << "Using Hybrid Thermal Method (LTLM+FTLM)" << std::endl;
+            {
+                // Setup Hybrid Thermal parameters
+                HybridThermalParameters hybrid_params;
+                
+                // Temperature and crossover settings
+                hybrid_params.crossover_temperature = params.hybrid_crossover;
+                hybrid_params.auto_crossover = params.hybrid_auto_crossover;
+                
+                // LTLM parameters (low temperature)
+                hybrid_params.ltlm_krylov_dim = params.ltlm_krylov_dim;
+                hybrid_params.ltlm_ground_krylov = params.ltlm_ground_krylov;
+                hybrid_params.ltlm_full_reorth = params.ltlm_full_reorth;
+                hybrid_params.ltlm_reorth_freq = params.ltlm_reorth_freq;
+                hybrid_params.ltlm_seed = params.ltlm_seed;
+                hybrid_params.ltlm_store_data = params.ltlm_store_data;
+                
+                // FTLM parameters (high temperature)
+                hybrid_params.ftlm_num_samples = params.num_samples;
+                hybrid_params.ftlm_krylov_dim = params.ftlm_krylov_dim;
+                hybrid_params.ftlm_full_reorth = params.ftlm_full_reorth;
+                hybrid_params.ftlm_reorth_freq = params.ftlm_reorth_freq;
+                hybrid_params.ftlm_seed = params.ftlm_seed;
+                hybrid_params.ftlm_store_samples = params.ftlm_store_samples;
+                hybrid_params.ftlm_error_bars = params.ftlm_error_bars;
+                
+                // General parameters
+                hybrid_params.max_iterations = params.max_iterations;
+                hybrid_params.tolerance = params.tolerance;
+                
+                // Run hybrid thermal method
+                HybridThermalResults hybrid_results = hybrid_thermal_method(
+                    H, hilbert_space_dim, hybrid_params,
+                    params.temp_min, params.temp_max, params.num_temp_bins,
+                    params.output_dir
+                );
+                
+                // Store results
+                results.thermo_data = hybrid_results.thermo_data;
+                results.eigenvalues.push_back(hybrid_results.ground_state_energy);
+                
+                // Save results to file
+                if (!params.output_dir.empty()) {
+                    std::string thermo_dir = params.output_dir + "/thermo";
+                    system(("mkdir -p " + thermo_dir).c_str());
+                    save_hybrid_thermal_results(hybrid_results, thermo_dir + "/hybrid_thermo.txt");
+                }
+            }
             break;
         
         case DiagonalizationMethod::LANCZOS_GPU:

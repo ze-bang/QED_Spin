@@ -1,5 +1,5 @@
 // ltlm.h - Low Temperature Lanczos Method implementation
-// Computes exact low-energy eigenspectrum for accurate low-T thermodynamics
+// Specialized for low temperature thermodynamics using ground state projection
 
 #ifndef LTLM_H
 #define LTLM_H
@@ -19,135 +19,125 @@ using ComplexVector = std::vector<Complex>;
 
 /**
  * @brief Parameters for LTLM calculation
+ * 
+ * LTLM differs from FTLM by:
+ * 1. First finding the ground state via Lanczos
+ * 2. Building Krylov subspace from ground state
+ * 3. More accurate at low temperatures
  */
 struct LTLMParameters {
-    int num_eigenstates = 50;          // Number of low-energy eigenstates to compute
-    int krylov_dim = 200;              // Dimension of Krylov subspace (should be > num_eigenstates)
-    double tolerance = 1e-12;          // Eigenvalue convergence tolerance
-    bool full_reorthogonalization = true;   // Use full reorthogonalization (recommended)
-    int reorth_frequency = 1;          // Reorthogonalization frequency (if not full)
-    unsigned int random_seed = 0;      // Random seed (0 = use random_device)
-    bool store_eigenvectors = false;   // Store eigenvectors (memory intensive)
-    bool verify_eigenvalues = true;    // Verify eigenvalues using residual test
-    double residual_tolerance = 1e-10; // Tolerance for residual verification
-    double degeneracy_threshold = 1e-10; // Threshold for detecting degenerate eigenvalues
-    bool verbose = false;              // Print detailed progress information
+    int krylov_dim = 200;              // Dimension of Krylov subspace for thermodynamics
+    int ground_state_krylov = 100;     // Krylov dimension for finding ground state
+    int num_samples = 1;               // Usually 1 for LTLM (ground state is deterministic)
+    int max_iterations = 1000;         // Maximum Lanczos iterations
+    double tolerance = 1e-12;          // Convergence tolerance for Lanczos
+    bool full_reorthogonalization = false;  // Use full reorthogonalization
+    int reorth_frequency = 10;         // Frequency of reorthogonalization (if not full)
+    unsigned int random_seed = 0;      // Random seed (0 = use random_device) for initial state
+    bool store_intermediate = false;   // Store intermediate data for debugging
+    bool compute_error_bars = false;   // Compute standard error (only useful if num_samples > 1)
+    bool use_exact_ground_state = false; // If true and ground state eigenvector provided, use it
 };
 
 /**
- * @brief Results from eigenspectrum computation
- */
-struct LTLMEigenResults {
-    std::vector<double> eigenvalues;         // Low-energy eigenvalues (sorted)
-    std::vector<int> degeneracies;           // Degeneracy of each eigenvalue
-    std::vector<ComplexVector> eigenvectors; // Eigenvectors (if stored)
-    std::vector<double> residual_norms;      // Residual norms ||H|ψ⟩ - E|ψ⟩||
-    int lanczos_iterations;                  // Actual number of Lanczos iterations
-    bool converged;                          // Whether eigenvalues converged
-    int converged_states;                    // Number of converged states
-    bool all_converged;                      // Whether all requested states converged
-};
-
-/**
- * @brief Complete LTLM results including thermodynamics
+ * @brief Results from LTLM calculation
  */
 struct LTLMResults {
-    LTLMEigenResults eigen_results;    // Eigenspectrum data
-    ThermodynamicData thermo_data;     // Thermodynamic properties vs temperature
-    double ground_state_energy;        // Ground state energy (E_0)
-    int num_states_used;               // Number of eigenstates used
-    double max_valid_temperature;      // Estimated maximum valid temperature
-    bool success;                      // Whether calculation succeeded
-    std::string error_message;         // Error message if failed
+    ThermodynamicData thermo_data;           // Thermodynamic properties
+    std::vector<ThermodynamicData> per_sample_data;  // Per-sample data (if stored)
+    std::vector<double> energy_error;        // Standard error in energy
+    std::vector<double> specific_heat_error; // Standard error in specific heat
+    std::vector<double> entropy_error;       // Standard error in entropy
+    std::vector<double> free_energy_error;   // Standard error in free energy
+    double ground_state_energy;              // Ground state energy
+    std::vector<double> low_lying_spectrum;  // Low-lying excitation energies
+    int total_samples;                       // Number of samples used
+    int krylov_dimension;                    // Actual Krylov dimension achieved
 };
 
 /**
- * @brief Compute low-energy eigenspectrum using Lanczos method
+ * @brief Find ground state using Lanczos iteration
  * 
- * This function computes the lowest num_states eigenvalues and (optionally)
- * eigenvectors of a Hamiltonian using the Lanczos algorithm. It employs
- * reorthogonalization to maintain numerical stability and can verify
- * eigenvalue accuracy using residual tests.
+ * This is the first step of LTLM - find the ground state accurately.
+ * Returns the ground state energy and eigenvector.
  * 
- * Algorithm:
- * 1. Generate random initial vector |v_0⟩
- * 2. Build Krylov subspace {|v_0⟩, H|v_0⟩, H²|v_0⟩, ...} via Lanczos iteration
- * 3. Construct tridiagonal matrix T from Lanczos coefficients
- * 4. Diagonalize T to obtain Ritz values (approximate eigenvalues)
- * 5. Optionally reconstruct eigenvectors in full Hilbert space
- * 6. Verify eigenvalues using residual ||H|ψ⟩ - E|ψ⟩||
- * 
- * @param H Hamiltonian matrix-vector product function: H(in, out, N)
+ * @param H Hamiltonian matrix-vector product function
  * @param N Hilbert space dimension
- * @param num_states Number of lowest eigenstates to compute
- * @param params LTLM parameters
- * @return LTLMEigenResults containing eigenvalues, degeneracies, and metadata
+ * @param krylov_dim Krylov subspace dimension
+ * @param tolerance Convergence tolerance
+ * @param full_reorth Use full reorthogonalization
+ * @param reorth_freq Reorthogonalization frequency
+ * @param ground_state Output: ground state eigenvector
+ * @return Ground state energy
  */
-LTLMEigenResults compute_low_energy_spectrum(
+double find_ground_state_lanczos(
     std::function<void(const Complex*, Complex*, int)> H,
     int N,
-    int num_states,
-    const LTLMParameters& params
+    int krylov_dim,
+    double tolerance,
+    bool full_reorth,
+    int reorth_freq,
+    ComplexVector& ground_state
 );
 
 /**
- * @brief Compute thermodynamic properties from exact eigenspectrum
+ * @brief Build Krylov subspace from ground state for low-lying excitations
  * 
- * Computes thermodynamic observables using the canonical ensemble:
- * - Partition function: Z(β) = Σ_i g_i exp(-β E_i)
- * - Energy: E(T) = ⟨H⟩ = Tr(H e^(-βH)) / Z
- * - Specific heat: C_v(T) = β²(⟨H²⟩ - ⟨H⟩²)
- * - Entropy: S(T) = (E - F) / T
- * - Free energy: F(T) = -k_B T ln Z
+ * After finding the ground state, build a Krylov subspace to capture
+ * low-lying excitations. This gives accurate thermodynamics at low T.
  * 
- * where g_i is the degeneracy of eigenstate i.
+ * @param H Hamiltonian matrix-vector product function
+ * @param ground_state Ground state vector
+ * @param ground_energy Ground state energy
+ * @param N Hilbert space dimension
+ * @param krylov_dim Maximum Krylov dimension
+ * @param tolerance Convergence tolerance
+ * @param full_reorth Use full reorthogonalization
+ * @param reorth_freq Reorthogonalization frequency
+ * @param excitation_energies Output: excitation energies (relative to ground state)
+ * @param weights Output: statistical weights
+ * @return Number of excitations found
+ */
+int build_excitation_spectrum(
+    std::function<void(const Complex*, Complex*, int)> H,
+    const ComplexVector& ground_state,
+    double ground_energy,
+    int N,
+    int krylov_dim,
+    double tolerance,
+    bool full_reorth,
+    int reorth_freq,
+    std::vector<double>& excitation_energies,
+    std::vector<double>& weights
+);
+
+/**
+ * @brief Compute thermodynamics from ground state and low-lying excitations
  * 
- * @param eigenvalues Sorted list of eigenvalues
- * @param degeneracies Degeneracy of each eigenvalue
- * @param temperatures Temperature grid
- * @return ThermodynamicData structure with E(T), C_v(T), S(T), F(T)
+ * Uses the ground state and excitation spectrum to compute thermodynamic
+ * properties. More accurate than FTLM at low temperatures.
+ * 
+ * @param ground_energy Ground state energy
+ * @param excitation_energies Excitation energies (relative to ground state)
+ * @param weights Statistical weights
+ * @param temperatures Temperature points to evaluate
+ * @return ThermodynamicData structure with thermodynamic properties
  */
 ThermodynamicData compute_ltlm_thermodynamics(
-    const std::vector<double>& eigenvalues,
-    const std::vector<double>& degeneracies,
+    double ground_energy,
+    const std::vector<double>& excitation_energies,
+    const std::vector<double>& weights,
     const std::vector<double>& temperatures
-);
-
-/**
- * @brief Compute thermodynamics with automatic degeneracy detection
- * 
- * Automatically groups nearly-degenerate eigenvalues within a threshold
- * and computes thermodynamic properties with proper degeneracy factors.
- * 
- * Degeneracy detection:
- * - Eigenvalues E_i and E_j are considered degenerate if |E_i - E_j| < threshold
- * - Consecutive degenerate eigenvalues are grouped together
- * - Each group is assigned degeneracy = group_size
- * 
- * @param eigenvalues Sorted list of eigenvalues
- * @param temperatures Temperature grid
- * @param degeneracy_threshold Threshold for degeneracy detection (default: 1e-10)
- * @return ThermodynamicData with automatic degeneracy handling
- */
-ThermodynamicData compute_ltlm_thermodynamics_auto_degeneracy(
-    const std::vector<double>& eigenvalues,
-    const std::vector<double>& temperatures,
-    double degeneracy_threshold = 1e-10
 );
 
 /**
  * @brief Main LTLM driver function
  * 
- * Performs complete Low-Temperature Lanczos Method calculation:
- * 1. Compute low-energy eigenspectrum via Lanczos
- * 2. Detect degeneracies automatically
- * 3. Compute thermodynamic properties across temperature range
- * 4. Estimate validity range of LTLM approximation
- * 5. Optionally save results to files
- * 
- * The LTLM is most accurate when:
- * - k_B T << (E_max - E_0) where E_max is the highest computed eigenstate
- * - The computed eigenstates capture >99% of the partition function weight
+ * Low Temperature Lanczos Method for thermodynamics:
+ * 1. Find ground state via Lanczos
+ * 2. Build Krylov subspace from ground state to get low-lying excitations
+ * 3. Compute thermodynamics using ground state + excitations
+ * 4. More accurate than FTLM at low temperatures
  * 
  * @param H Hamiltonian matrix-vector product function
  * @param N Hilbert space dimension
@@ -155,44 +145,29 @@ ThermodynamicData compute_ltlm_thermodynamics_auto_degeneracy(
  * @param temp_min Minimum temperature
  * @param temp_max Maximum temperature
  * @param num_temp_bins Number of temperature points
- * @param output_dir Directory for output files (empty = no file output)
- * @return LTLMResults containing eigenspectrum and thermodynamics
+ * @param ground_state Optional: pre-computed ground state vector (if available)
+ * @param output_dir Directory for output files
+ * @return LTLMResults containing thermodynamic properties vs temperature
  */
 LTLMResults low_temperature_lanczos(
     std::function<void(const Complex*, Complex*, int)> H,
     int N,
     const LTLMParameters& params,
-    double temp_min = 0.01,
-    double temp_max = 1.0,
-    int num_temp_bins = 100,
+    double temp_min,
+    double temp_max,
+    int num_temp_bins,
+    const ComplexVector* ground_state = nullptr,
     const std::string& output_dir = ""
 );
 
 /**
  * @brief Save LTLM results to file
  * 
- * Saves thermodynamic data to a text file with columns:
- * Temperature | Energy | Specific_Heat | Entropy | Free_Energy
- * 
  * @param results LTLM results to save
  * @param filename Output filename
  */
 void save_ltlm_results(
     const LTLMResults& results,
-    const std::string& filename
-);
-
-/**
- * @brief Save eigenspectrum to file
- * 
- * Saves eigenvalues and associated metadata to a text file.
- * Includes degeneracies and residuals (if computed).
- * 
- * @param eigen_results Eigenspectrum data to save
- * @param filename Output filename
- */
-void save_eigenspectrum(
-    const LTLMEigenResults& eigen_results,
     const std::string& filename
 );
 

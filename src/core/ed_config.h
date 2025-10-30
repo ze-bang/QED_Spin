@@ -63,22 +63,17 @@ struct ThermalConfig {
     bool ftlm_error_bars = true;  // Compute error bars
     
     // LTLM-specific
-    int ltlm_num_eigenstates = 100;   // Number of low-energy eigenstates to compute
-    int ltlm_krylov_dim = 300;        // Krylov subspace dimension (should be > num_eigenstates)
-    double ltlm_tolerance = 1e-12;    // Eigenvalue convergence tolerance
-    bool ltlm_full_reorth = true;     // Use full reorthogonalization
-    int ltlm_reorth_freq = 1;         // Reorthogonalization frequency (if not full)
-    unsigned int ltlm_seed = 0;       // Random seed (0 = auto)
-    bool ltlm_store_eigenvectors = false;  // Store eigenvectors (memory intensive)
-    bool ltlm_verify_eigenvalues = true;   // Verify using residual test
-    double ltlm_residual_tol = 1e-10;      // Residual tolerance for verification
-    double ltlm_degeneracy_threshold = 1e-10; // Threshold for degeneracy detection
+    int ltlm_krylov_dim = 200;    // Krylov subspace dimension for excitations
+    int ltlm_ground_krylov = 100; // Krylov dimension for finding ground state
+    bool ltlm_full_reorth = false; // Use full reorthogonalization
+    int ltlm_reorth_freq = 10;    // Reorthogonalization frequency
+    unsigned int ltlm_seed = 0;   // Random seed (0 = auto)
+    bool ltlm_store_data = false; // Store intermediate data
     
-    // HYBRID mode (automatic LTLM + FTLM stitching)
-    bool hybrid_mode = false;         // Enable hybrid mode
-    double hybrid_crossover_temp = -1.0; // Crossover temperature (auto if < 0)
-    int hybrid_overlap_bins = 10;     // Number of overlapping temperature points
-    double hybrid_ltlm_temp_max = 0.5; // Max temperature for LTLM in hybrid mode
+    // Hybrid Thermal (LTLM+FTLM standalone method)
+    bool use_hybrid_method = false; // Use hybrid LTLM (low T) + FTLM (high T) - deprecated, use method=HYBRID instead
+    double hybrid_crossover = 1.0;  // Temperature crossover for hybrid method
+    bool hybrid_auto_crossover = false; // Automatically determine crossover temperature
 };
 
 /**

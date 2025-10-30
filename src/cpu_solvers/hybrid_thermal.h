@@ -1,133 +1,151 @@
-/**
- * @file hybrid_thermal.h
- * @brief Hybrid thermal calculation combining LTLM and FTLM methods
- * 
- * This module provides automatic method selection and seamless stitching
- * of Low-Temperature Lanczos Method (LTLM) and Finite-Temperature Lanczos 
- * Method (FTLM) for optimal thermodynamic property calculations across 
- * wide temperature ranges.
- * 
- * Key Features:
- * - Automatic crossover temperature determination
- * - Smooth interpolation between LTLM and FTLM results
- * - Intelligent method selection based on temperature regime
- * - Optimized computational efficiency
- * 
- * @author Copilot
- * @date 2024
- */
+// hybrid_thermal.h - Hybrid Thermal Method (LTLM + FTLM with automatic crossover)
+// Standalone method that automatically combines LTLM and FTLM for optimal accuracy
 
 #ifndef HYBRID_THERMAL_H
 #define HYBRID_THERMAL_H
 
-#include "../core/construct_ham.h"
-#include "ltlm.h"
-#include "ftlm.h"
+#include <iostream>
+#include <complex>
 #include <vector>
+#include <functional>
+#include <cmath>
+#include "../core/blas_lapack_wrapper.h"
+#include "../core/construct_ham.h"
 
-namespace hybrid_thermal {
+using Complex = std::complex<double>;
+using ComplexVector = std::vector<Complex>;
 
 /**
- * @brief Configuration for hybrid thermal calculation
+ * @brief Parameters for Hybrid Thermal calculation
+ * 
+ * The Hybrid Thermal method automatically combines:
+ * - LTLM (Low Temperature Lanczos Method) for T < T_crossover
+ * - FTLM (Finite Temperature Lanczos Method) for T >= T_crossover
+ * 
+ * This provides optimal accuracy across the full temperature range:
+ * - LTLM captures the ground state correctly at low T
+ * - FTLM efficiently samples the full spectrum at high T
  */
-struct HybridThermalConfig {
-    // Temperature range
-    double temp_min;
-    double temp_max;
-    int num_temp_bins;
+struct HybridThermalParameters {
+    // Temperature settings
+    double crossover_temperature = 1.0;  // Temperature to switch from LTLM to FTLM
+    bool auto_crossover = false;         // Automatically determine crossover (future feature)
     
-    // LTLM configuration
-    LTLMParameters ltlm_params;
+    // LTLM parameters (for T < T_crossover)
+    int ltlm_krylov_dim = 200;           // Krylov dimension for excitations
+    int ltlm_ground_krylov = 100;        // Krylov dimension for ground state finding
+    bool ltlm_full_reorth = false;       // Full reorthogonalization for LTLM
+    int ltlm_reorth_freq = 10;           // Reorthogonalization frequency
+    unsigned int ltlm_seed = 0;          // Random seed (0 = auto)
+    bool ltlm_store_data = false;        // Store intermediate excitation data
     
-    // FTLM configuration
-    FTLMParameters ftlm_params;
+    // FTLM parameters (for T >= T_crossover)
+    int ftlm_num_samples = 20;           // Number of random samples
+    int ftlm_krylov_dim = 100;           // Krylov dimension per sample
+    bool ftlm_full_reorth = false;       // Full reorthogonalization for FTLM
+    int ftlm_reorth_freq = 10;           // Reorthogonalization frequency
+    unsigned int ftlm_seed = 0;          // Random seed (0 = auto)
+    bool ftlm_store_samples = false;     // Store per-sample data
+    bool ftlm_error_bars = true;         // Compute error bars from samples
     
-    // Hybrid-specific parameters
-    double crossover_temp = -1.0;      // Auto-determine if < 0
-    int overlap_bins = 10;              // Number of overlapping temperature points
-    double ltlm_temp_max_factor = 0.5;  // Maximum temperature for LTLM as fraction of temp_max
-    bool auto_method_selection = true;  // Automatically select method based on temperature
-    
-    // Output control
-    bool verbose = false;
-    bool store_intermediate = false;    // Store both LTLM and FTLM results separately
+    // General parameters
+    int max_iterations = 1000;           // Maximum Lanczos iterations
+    double tolerance = 1e-12;            // Convergence tolerance
 };
 
 /**
- * @brief Results from hybrid thermal calculation
+ * @brief Results from Hybrid Thermal calculation
  */
 struct HybridThermalResults {
-    ThermodynamicData combined_data;     // Stitched thermodynamic data
-    ThermodynamicData ltlm_data;         // LTLM-only results (if stored)
-    ThermodynamicData ftlm_data;         // FTLM-only results (if stored)
+    ThermodynamicData thermo_data;           // Combined thermodynamic properties
+    std::vector<double> energy_error;        // Standard error in energy
+    std::vector<double> specific_heat_error; // Standard error in specific heat
+    std::vector<double> entropy_error;       // Standard error in entropy
+    std::vector<double> free_energy_error;   // Standard error in free energy
     
-    double crossover_temp;               // Actual crossover temperature used
-    int num_ltlm_bins;                   // Number of temperature bins from LTLM
-    int num_ftlm_bins;                   // Number of temperature bins from FTLM
-    int num_overlap_bins;                // Number of overlapping bins
+    // Metadata
+    double ground_state_energy;              // Ground state energy (from LTLM or FTLM)
+    double actual_crossover_temp;            // Actual crossover temperature used
+    int ltlm_points;                         // Number of temperature points from LTLM
+    int ftlm_points;                         // Number of temperature points from FTLM
+    int crossover_index;                     // Index where method switches
     
-    bool success = false;
-    std::string error_message;
+    // Method-specific data (optional)
+    std::vector<double> low_lying_spectrum;  // Low-lying excitations from LTLM
+    int ftlm_samples_used;                   // Number of FTLM samples
 };
 
 /**
- * @brief Determine optimal crossover temperature between LTLM and FTLM
+ * @brief Main Hybrid Thermal Method
  * 
- * Automatically selects the crossover temperature based on:
- * - Temperature range
- * - System size
- * - Available computational resources
- * - Convergence characteristics
+ * Automatically combines LTLM and FTLM for optimal thermodynamic calculations:
  * 
+ * Algorithm:
+ * 1. Generate full temperature grid (temp_min to temp_max)
+ * 2. Split grid at crossover temperature T_c
+ * 3. For T < T_c: Use LTLM (accurate ground state + low excitations)
+ * 4. For T >= T_c: Use FTLM (efficient random sampling)
+ * 5. Seamlessly merge results
+ * 
+ * Advantages:
+ * - Low T: LTLM gives exact ground state, no statistical fluctuations
+ * - High T: FTLM efficiently samples full spectrum with error bars
+ * - Automatic switching at optimal temperature
+ * - No discontinuities in thermodynamic functions
+ * 
+ * @param H Hamiltonian matrix-vector product function
+ * @param N Hilbert space dimension
+ * @param params Hybrid thermal parameters
  * @param temp_min Minimum temperature
  * @param temp_max Maximum temperature
- * @param hilbert_space_dim Hilbert space dimension
- * @param num_eigenstates Number of eigenstates computed by LTLM
- * @return Optimal crossover temperature
+ * @param num_temp_bins Number of temperature points
+ * @param output_dir Directory for output files (optional)
+ * @return HybridThermalResults containing merged thermodynamic data
  */
-double determine_crossover_temperature(
+HybridThermalResults hybrid_thermal_method(
+    std::function<void(const Complex*, Complex*, int)> H,
+    int N,
+    const HybridThermalParameters& params,
     double temp_min,
     double temp_max,
-    size_t hilbert_space_dim,
-    int num_eigenstates
+    int num_temp_bins,
+    const std::string& output_dir = ""
 );
 
 /**
- * @brief Stitch LTLM and FTLM thermodynamic data
+ * @brief Save hybrid thermal results to file
  * 
- * Combines low-temperature LTLM results with high-temperature FTLM results
- * using smooth interpolation in the overlap region.
+ * Saves merged thermodynamic data with metadata indicating which method
+ * was used for each temperature point.
  * 
- * @param ltlm_data Thermodynamic data from LTLM
- * @param ftlm_data Thermodynamic data from FTLM
- * @param crossover_temp Temperature at which to transition between methods
- * @param overlap_bins Number of temperature bins for smooth interpolation
- * @return Combined thermodynamic data
+ * @param results Hybrid thermal results
+ * @param filename Output filename
  */
-ThermodynamicData stitch_thermodynamic_data(
-    const ThermodynamicData& ltlm_data,
-    const ThermodynamicData& ftlm_data,
-    double crossover_temp,
-    int overlap_bins
+void save_hybrid_thermal_results(
+    const HybridThermalResults& results,
+    const std::string& filename
 );
 
 /**
- * @brief Helper: Smooth interpolation weight function
+ * @brief Estimate optimal crossover temperature (future feature)
  * 
- * Computes interpolation weight for smooth transition between methods.
- * Returns 0 at T_min, 1 at T_max, with smooth transition in between.
+ * Analyzes the system to automatically determine the best crossover
+ * temperature between LTLM and FTLM based on:
+ * - Energy scale (characteristic J)
+ * - Gap to first excited state
+ * - System size
  * 
- * @param temp Current temperature
- * @param temp_min Start of transition region
- * @param temp_max End of transition region
- * @return Interpolation weight [0,1]
+ * @param H Hamiltonian matrix-vector product
+ * @param N Hilbert space dimension
+ * @param ground_energy Ground state energy
+ * @param first_excitation First excitation energy
+ * @return Estimated optimal crossover temperature
  */
-double smooth_interpolation_weight(
-    double temp,
-    double temp_min,
-    double temp_max
+double estimate_optimal_crossover(
+    std::function<void(const Complex*, Complex*, int)> H,
+    int N,
+    double ground_energy,
+    double first_excitation
 );
-
-} // namespace hybrid_thermal
 
 #endif // HYBRID_THERMAL_H

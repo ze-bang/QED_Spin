@@ -6,9 +6,7 @@
 #include "ed_wrapper.h"
 #include "construct_ham.h"
 #include "../cpu_solvers/ftlm.h"
-// Note: LTLM and hybrid thermal support will be integrated in future updates
-// #include "../cpu_solvers/ltlm.h"
-// #include "../cpu_solvers/hybrid_thermal.h"
+#include "../cpu_solvers/ltlm.h"
 
 /**
  * @file ed_main.cpp
@@ -529,7 +527,8 @@ void print_help(const char* prog_name) {
     std::cout << "    mTPQ_MPI               MPI parallel mTPQ (requires MPI build)\n";
     std::cout << "    mTPQ_CUDA              GPU-accelerated mTPQ (requires CUDA build)\n";
     std::cout << "    FTLM                   Finite Temperature Lanczos Method\n";
-    std::cout << "    LTLM                   Low Temperature Lanczos Method (not yet implemented)\n";
+    std::cout << "    LTLM                   Low Temperature Lanczos Method\n";
+    std::cout << "    HYBRID                 Hybrid Thermal Method (LTLM+FTLM auto-switch)\n";
     std::cout << "\n";
     std::cout << "  ARPACK Methods:\n";
     std::cout << "    ARPACK_SM              ARPACK (smallest eigenvalues)\n";
