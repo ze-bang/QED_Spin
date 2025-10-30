@@ -117,6 +117,11 @@ void computeDynamicCorrelationsKrylov(
     ComplexVector O1_psi(N);
     ComplexVector O2_evolved_psi(N);
     
+    // Buffers for negative time evolution
+    ComplexVector evolved_psi_neg(N);
+    ComplexVector evolved_O1_psi_neg(N);
+    ComplexVector O2_evolved_psi_neg(N);
+    
     // Process each operator pair
     for (size_t op_idx = 0; op_idx < operators_1.size(); op_idx++) {
         std::string op_name = operator_names[op_idx];
@@ -137,35 +142,20 @@ void computeDynamicCorrelationsKrylov(
                   << initial_corr.real() << " + i*" 
                   << initial_corr.imag() << std::endl;
         
-        // Initialize evolution states
+        // Storage for time correlation data
+        std::vector<std::tuple<double, double, double>> time_data; // (time, real, imag)
+        time_data.reserve(2 * num_steps - 1); // Reserve space for both positive and negative times
+        
+        // Add initial time point
+        time_data.push_back(std::make_tuple(0.0, initial_corr.real(), initial_corr.imag()));
+        
+        // ===== POSITIVE TIME EVOLUTION =====
+        std::cout << "    Computing positive time evolution (0 to " << t_end << ")..." << std::endl;
         std::copy(tpq_state.begin(), tpq_state.end(), evolved_psi.begin());
         std::copy(O1_psi.begin(), O1_psi.end(), evolved_O1_psi.begin());
         
-        // Open file with SAME format as Taylor method
-        std::string time_corr_file = dir + "/time_corr_rand" + std::to_string(sample) + "_" 
-                             + op_name + "_beta=" + std::to_string(inv_temp) + ".dat";
-        
-        std::ofstream time_corr_out(time_corr_file);
-        if (!time_corr_out.is_open()) {
-            std::cerr << "Error: Could not open file " << time_corr_file << " for writing" << std::endl;
-            continue;
-        }
-        
-        // SAME header as Taylor method
-        time_corr_out << "# t time_correlation_real time_correlation_imag" << std::endl;
-        time_corr_out << std::setprecision(16);
-        
-        // Write initial time point
-        time_corr_out << 0.0 << " " 
-            << initial_corr.real() << " " 
-            << initial_corr.imag() << std::endl;
-        time_corr_out.flush();
-        
-        // Time evolution loop using Krylov method
-        // Want to compute <O_2(t) O_1(0)> = ⟨ψ| e^{iHt} O_2 e^{-iHt} O_1 |ψ⟩
-        // which is equivalent to ⟨ψ(t)| O_2 |ψ_O1(t)⟩
         for (int step = 1; step < num_steps; step++) {
-            // Evolve states using Krylov method
+            // Evolve states using Krylov method (forward in time)
             time_evolve_krylov(H, evolved_psi, N, dt, krylov_dim, true);
             time_evolve_krylov(H, evolved_O1_psi, N, dt, krylov_dim, false);
             
@@ -176,22 +166,66 @@ void computeDynamicCorrelationsKrylov(
             Complex corr_t;
             cblas_zdotc_sub(N, O2_evolved_psi.data(), 1, evolved_O1_psi.data(), 1, &corr_t);
             
-            // Write current time point to file
             double t = step * dt;
-            time_corr_out << t << " " 
-                << corr_t.real() << " " 
-                << corr_t.imag() << std::endl;
+            time_data.push_back(std::make_tuple(t, corr_t.real(), corr_t.imag()));
             
-            // Flush every 100 steps
             if (step % 100 == 0) {
-                time_corr_out.flush();
-                std::cout << "    Completed time step " << step << " / " << num_steps << std::endl;
+                std::cout << "      Positive time step " << step << " / " << num_steps << std::endl;
             }
         }
         
-        // Close the file
+        // ===== NEGATIVE TIME EVOLUTION =====
+        std::cout << "    Computing negative time evolution (0 to " << -t_end << ")..." << std::endl;
+        std::copy(tpq_state.begin(), tpq_state.end(), evolved_psi_neg.begin());
+        std::copy(O1_psi.begin(), O1_psi.end(), evolved_O1_psi_neg.begin());
+        
+        for (int step = 1; step < num_steps; step++) {
+            // Evolve states backward in time (use -dt)
+            time_evolve_krylov(H, evolved_psi_neg, N, -dt, krylov_dim, true);
+            time_evolve_krylov(H, evolved_O1_psi_neg, N, -dt, krylov_dim, false);
+            
+            // Apply O_2 to evolved state
+            operators_2[op_idx].apply(evolved_psi_neg.data(), O2_evolved_psi_neg.data(), N);
+            
+            // Calculate correlation using BLAS
+            Complex corr_t_neg;
+            cblas_zdotc_sub(N, O2_evolved_psi_neg.data(), 1, evolved_O1_psi_neg.data(), 1, &corr_t_neg);
+            
+            double t_neg = -step * dt;
+            time_data.push_back(std::make_tuple(t_neg, corr_t_neg.real(), corr_t_neg.imag()));
+            
+            if (step % 100 == 0) {
+                std::cout << "      Negative time step " << step << " / " << num_steps << std::endl;
+            }
+        }
+        
+        // Sort by time (ascending order)
+        std::sort(time_data.begin(), time_data.end(), 
+                  [](const auto& a, const auto& b) { return std::get<0>(a) < std::get<0>(b); });
+        
+        // Write sorted data to file
+        std::string time_corr_file = dir + "/time_corr_rand" + std::to_string(sample) + "_" 
+                             + op_name + "_beta=" + std::to_string(inv_temp) + ".dat";
+        
+        std::ofstream time_corr_out(time_corr_file);
+        if (!time_corr_out.is_open()) {
+            std::cerr << "Error: Could not open file " << time_corr_file << " for writing" << std::endl;
+            continue;
+        }
+        
+        time_corr_out << "# t time_correlation_real time_correlation_imag" << std::endl;
+        time_corr_out << std::setprecision(16);
+        
+        for (const auto& data_point : time_data) {
+            time_corr_out << std::get<0>(data_point) << " " 
+                         << std::get<1>(data_point) << " " 
+                         << std::get<2>(data_point) << std::endl;
+        }
+        
         time_corr_out.close();
-        std::cout << "Time correlation saved to " << time_corr_file << std::endl;
+        std::cout << "    Time correlation saved to " << time_corr_file << std::endl;
+        std::cout << "    Time range: [" << std::get<0>(time_data.front()) << ", " 
+                  << std::get<0>(time_data.back()) << "]" << std::endl;
     }
 }
 
@@ -284,52 +318,192 @@ void computeObservableDynamics_U_t(
         op.buildSparseMatrix();
     }
 
-    // Create array of operator functions
-    std::vector<std::function<void(const Complex*, Complex*, int)>> operatorFuncs_1;
-    std::vector<std::function<void(const Complex*, Complex*, int)>> operatorFuncs_2;
-    operatorFuncs_1.reserve(observables_1.size());
-    operatorFuncs_2.reserve(observables_2.size());
-
-    for (size_t i = 0; i < observables_1.size(); i++) {
-        operatorFuncs_1.emplace_back([&observables_1, i](const Complex* in, Complex* out, int size) {
-            std::vector<Complex> input(in, in + size);
-            std::vector<Complex> result = observables_1[i].apply(input);
-            std::copy(result.begin(), result.end(), out);
-        });
-        operatorFuncs_2.emplace_back([&observables_2, i](const Complex* in, Complex* out, int size) {
-            std::vector<Complex> input(in, in + size);
-            std::vector<Complex> result = observables_2[i].apply(input);
-            std::copy(result.begin(), result.end(), out);
-        });
+    int num_steps = static_cast<int>(t_end / dt) + 1;
+    
+    // Pre-allocate all buffers needed for calculation
+    std::vector<ComplexVector> O_psi_vec(observables_1.size(), ComplexVector(N));
+    std::vector<ComplexVector> O_psi_next_vec(observables_1.size(), ComplexVector(N));
+    ComplexVector evolved_state(N);
+    ComplexVector state_next(N);
+    std::vector<ComplexVector> O_dag_state_vec(observables_1.size(), ComplexVector(N));
+    
+    // Buffers for negative time evolution
+    std::vector<ComplexVector> O_psi_vec_neg(observables_1.size(), ComplexVector(N));
+    std::vector<ComplexVector> O_psi_next_vec_neg(observables_1.size(), ComplexVector(N));
+    ComplexVector evolved_state_neg(N);
+    ComplexVector state_next_neg(N);
+    std::vector<ComplexVector> O_dag_state_vec_neg(observables_1.size(), ComplexVector(N));
+    
+    // Storage for time correlation data for all observables
+    std::vector<std::vector<std::tuple<double, double, double>>> all_time_data(observables_1.size());
+    for (auto& time_data : all_time_data) {
+        time_data.reserve(2 * num_steps - 1); // Reserve space for both positive and negative times
     }
+    
+    // ===== INITIALIZE =====
+    std::copy(tpq_state.begin(), tpq_state.end(), evolved_state.begin());
+    
+    // Calculate O|ψ> once for each operator (parallel over operators)
+    #pragma omp parallel for schedule(static)
+    for (size_t op = 0; op < observables_1.size(); op++) {
+        observables_1[op].apply(evolved_state.data(), O_psi_vec[op].data(), N);
+    }
+    
+    // Calculate initial O†|ψ> for each operator and store initial time point
+    #pragma omp parallel for schedule(static)
+    for (size_t op = 0; op < observables_1.size(); op++) {
+        observables_2[op].apply(evolved_state.data(), O_dag_state_vec[op].data(), N);
+        
+        // Calculate initial correlation C(0) = <ψ|O†O|ψ>
+        Complex init_corr = Complex(0.0, 0.0);
+        for (int i = 0; i < N; i++) {
+            init_corr += std::conj(O_dag_state_vec[op][i]) * O_psi_vec[op][i];
+        }
+        
+        all_time_data[op].push_back(std::make_tuple(0.0, init_corr.real(), init_corr.imag()));
+    }
+    
+    // ===== POSITIVE TIME EVOLUTION =====
+    std::cout << "  Computing positive time evolution (0 to " << t_end << ")..." << std::endl;
+    
+    for (int step = 1; step < num_steps; step++) {
+        double current_time = step * dt;
+        
+        // Evolve state: |ψ(t)> = U_t|ψ(t-dt)>
+        U_t(evolved_state.data(), state_next.data(), N);
 
-    // Open output files and write headers for each observable
-    std::vector<std::ofstream> time_corr_files(observables_1.size());
+        // Parallel over operators for this time slice
+        #pragma omp parallel for schedule(static)
+        for (size_t op = 0; op < observables_1.size(); op++) {
+            // Evolve O_psi: O|ψ(t)> = U_t(O|ψ(t-dt)>)
+            U_t(O_psi_vec[op].data(), O_psi_next_vec[op].data(), N);
+
+            // Calculate O†|ψ(t)>
+            observables_2[op].apply(state_next.data(), O_dag_state_vec[op].data(), N);
+
+            // Calculate correlation C(t) = <ψ(t)|O†O|ψ(t)>
+            Complex corr = Complex(0.0, 0.0);
+            for (int i = 0; i < N; i++) {
+                corr += std::conj(O_dag_state_vec[op][i]) * O_psi_next_vec[op][i];
+            }
+            
+            all_time_data[op].push_back(std::make_tuple(current_time, corr.real(), corr.imag()));
+        }
+
+        // Update buffers and state for next step
+        for (size_t op = 0; op < observables_1.size(); op++) {
+            std::swap(O_psi_vec[op], O_psi_next_vec[op]);
+        }
+        std::swap(evolved_state, state_next);
+        
+        if (step % 100 == 0) {
+            std::cout << "    Positive time step " << step << " / " << num_steps << std::endl;
+        }
+    }
+    
+    // ===== NEGATIVE TIME EVOLUTION =====
+    std::cout << "  Computing negative time evolution (0 to " << -t_end << ")..." << std::endl;
+    
+    // Re-initialize for negative time evolution
+    std::copy(tpq_state.begin(), tpq_state.end(), evolved_state_neg.begin());
+    
+    // Re-calculate O|ψ> for each operator
+    #pragma omp parallel for schedule(static)
+    for (size_t op = 0; op < observables_1.size(); op++) {
+        observables_1[op].apply(evolved_state_neg.data(), O_psi_vec_neg[op].data(), N);
+    }
+    
+    // Create inverse time evolution operator (U_t^†)
+    // Note: For backward evolution, we need to apply U_t^† which for Hermitian H means U(-dt)
+    // Since we already have U(dt), we'll create a wrapper that applies the adjoint
+    auto U_t_dagger = [&U_t, N](const Complex* in, Complex* out, int size) {
+        // For a unitary operator U = exp(-iHt), U^† = exp(iHt)
+        // This is equivalent to time evolution with -t
+        // However, since we only have U(dt), we need to apply it in reverse
+        // For now, we'll compute U^†|ψ> = (U|ψ*>)*
+        ComplexVector in_conj(size);
+        ComplexVector out_temp(size);
+        
+        // Conjugate input
+        for (int i = 0; i < size; i++) {
+            in_conj[i] = std::conj(in[i]);
+        }
+        
+        // Apply U_t
+        U_t(in_conj.data(), out_temp.data(), size);
+        
+        // Conjugate output
+        for (int i = 0; i < size; i++) {
+            out[i] = std::conj(out_temp[i]);
+        }
+    };
+    
+    for (int step = 1; step < num_steps; step++) {
+        double current_time = -step * dt;
+        
+        // Evolve state backward: |ψ(-t)> = U_t^†|ψ(-t+dt)>
+        U_t_dagger(evolved_state_neg.data(), state_next_neg.data(), N);
+
+        // Parallel over operators for this time slice
+        #pragma omp parallel for schedule(static)
+        for (size_t op = 0; op < observables_1.size(); op++) {
+            // Evolve O_psi backward
+            U_t_dagger(O_psi_vec_neg[op].data(), O_psi_next_vec_neg[op].data(), N);
+
+            // Calculate O†|ψ(-t)>
+            observables_2[op].apply(state_next_neg.data(), O_dag_state_vec_neg[op].data(), N);
+
+            // Calculate correlation C(-t) = <ψ(-t)|O†O|ψ(-t)>
+            Complex corr = Complex(0.0, 0.0);
+            for (int i = 0; i < N; i++) {
+                corr += std::conj(O_dag_state_vec_neg[op][i]) * O_psi_next_vec_neg[op][i];
+            }
+            
+            all_time_data[op].push_back(std::make_tuple(current_time, corr.real(), corr.imag()));
+        }
+
+        // Update buffers and state for next step
+        for (size_t op = 0; op < observables_1.size(); op++) {
+            std::swap(O_psi_vec_neg[op], O_psi_next_vec_neg[op]);
+        }
+        std::swap(evolved_state_neg, state_next_neg);
+        
+        if (step % 100 == 0) {
+            std::cout << "    Negative time step " << step << " / " << num_steps << std::endl;
+        }
+    }
+    
+    // ===== WRITE SORTED OUTPUT =====
+    std::cout << "  Writing sorted time correlation data..." << std::endl;
+    
     for (size_t i = 0; i < observables_1.size(); i++) {
+        // Sort by time (ascending order)
+        std::sort(all_time_data[i].begin(), all_time_data[i].end(), 
+                  [](const auto& a, const auto& b) { return std::get<0>(a) < std::get<0>(b); });
+        
+        // Write to file
         std::string time_corr_file = dir + "/time_corr_rand" + std::to_string(sample) + "_" 
                              + observable_names[i] + "_beta=" + std::to_string(inv_temp) + ".dat";
         
-        time_corr_files[i].open(time_corr_file);
-        if (time_corr_files[i].is_open()) {
-            time_corr_files[i] << "# t time_correlation_real time_correlation_imag" << std::endl;
-            time_corr_files[i] << std::setprecision(16);
-        } else {
+        std::ofstream time_corr_out(time_corr_file);
+        if (!time_corr_out.is_open()) {
             std::cerr << "Error: Could not open file " << time_corr_file << " for writing" << std::endl;
+            continue;
         }
-    }
-
-    // Call the general dynamics module's incremental function
-    compute_time_correlations_incremental(
-        U_t, operatorFuncs_1, operatorFuncs_2, tpq_state, N, int(t_end/dt + 1), dt, time_corr_files);
-
-    // Close all files
-    for (size_t i = 0; i < observables_1.size(); i++) {
-        if (time_corr_files[i].is_open()) {
-            time_corr_files[i].close();
-            std::string time_corr_file = dir + "/time_corr_rand" + std::to_string(sample) + "_" 
-                                 + observable_names[i] + "_beta=" + std::to_string(inv_temp) + ".dat";
-            std::cout << "Time correlation saved to " << time_corr_file << std::endl;
+        
+        time_corr_out << "# t time_correlation_real time_correlation_imag" << std::endl;
+        time_corr_out << std::setprecision(16);
+        
+        for (const auto& data_point : all_time_data[i]) {
+            time_corr_out << std::get<0>(data_point) << " " 
+                         << std::get<1>(data_point) << " " 
+                         << std::get<2>(data_point) << std::endl;
         }
+        
+        time_corr_out.close();
+        std::cout << "    Time correlation saved to " << time_corr_file << std::endl;
+        std::cout << "    Time range: [" << std::get<0>(all_time_data[i].front()) << ", " 
+                  << std::get<0>(all_time_data[i].back()) << "]" << std::endl;
     }
 }
 

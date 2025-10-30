@@ -894,7 +894,11 @@ void compute_operator_dynamics(
     ComplexVector O2_psi(N);
     ComplexVector O1_psi(N);
     ComplexVector O2_evolved_psi(N);
-    std::vector<Complex> time_correlation(num_steps);
+    
+    // Buffers for negative time evolution
+    ComplexVector evolved_psi_neg(N);
+    ComplexVector evolved_O1_psi_neg(N);
+    ComplexVector O2_evolved_psi_neg(N);
     
     // Process each operator pair
     for (size_t op_idx = 0; op_idx < operators_1.size(); op_idx++) {
@@ -911,32 +915,23 @@ void compute_operator_dynamics(
         // Use BLAS for dot product
         Complex initial_corr;
         cblas_zdotc_sub(N, O1_psi.data(), 1, O2_psi.data(), 1, &initial_corr);
-        time_correlation[0] = initial_corr;
 
         std::cout << "    Initial correlation C(0) = " 
                   << initial_corr.real() << " + i*" 
                   << initial_corr.imag() << std::endl;
         
-        // Initialize evolution states
+        // Storage for time correlation data
+        std::vector<std::tuple<double, double, double>> time_data; // (time, real, imag)
+        time_data.reserve(2 * num_steps - 1); // Reserve space for both positive and negative times
+        
+        // Add initial time point
+        time_data.push_back(std::make_tuple(0.0, initial_corr.real(), initial_corr.imag()));
+        
+        // ===== POSITIVE TIME EVOLUTION =====
+        std::cout << "    Computing positive time evolution (0 to " << t_max << ")..." << std::endl;
         std::copy(state.begin(), state.end(), evolved_psi.begin());
         std::copy(O1_psi.begin(), O1_psi.end(), evolved_O1_psi.begin());
         
-        // Open file for writing time correlation data
-        std::string time_corr_file = output_dir + "/" + op_name + "_" + label + "_time_correlation.dat";
-        
-        std::ofstream time_corr_out(time_corr_file);
-        if (time_corr_out.is_open()) {
-            time_corr_out << "# time real(C(t)) imag(C(t))" << std::endl;
-            time_corr_out << std::setprecision(16);
-            
-            // Write initial time point
-            time_corr_out << 0.0 << " " 
-                << time_correlation[0].real() << " " 
-                << time_correlation[0].imag() << std::endl;
-            time_corr_out.flush();
-        }
-        
-        // Time evolution loop using Krylov method
         for (int step = 1; step < num_steps; step++) {
             // Evolve states using Krylov method
             time_evolve_krylov(H, evolved_psi, N, dt, krylov_dim, false);
@@ -948,31 +943,67 @@ void compute_operator_dynamics(
             // Calculate correlation using BLAS
             Complex corr_t;
             cblas_zdotc_sub(N, evolved_O1_psi.data(), 1, O2_evolved_psi.data(), 1, &corr_t);
-            time_correlation[step] = corr_t;
             
-            // Write current time point to file
-            if (time_corr_out.is_open()) {
-                double t = step * dt;
-                time_corr_out << t << " " 
-                    << time_correlation[step].real() << " " 
-                    << time_correlation[step].imag() << std::endl;
-                
-                // Flush every 100 steps
-                if (step % 100 == 0) {
-                    time_corr_out.flush();
-                }
-            }
+            double t = step * dt;
+            time_data.push_back(std::make_tuple(t, corr_t.real(), corr_t.imag()));
             
             if (step % 100 == 0) {
-                std::cout << "    Completed time step " << step << " / " << num_steps << std::endl;
+                std::cout << "      Positive time step " << step << " / " << num_steps << std::endl;
             }
         }
         
-        // Close the file
-        if (time_corr_out.is_open()) {
-            time_corr_out.close();
-            std::cout << "    Time correlation saved to " << time_corr_file << std::endl;
+        // ===== NEGATIVE TIME EVOLUTION =====
+        std::cout << "    Computing negative time evolution (0 to " << -t_max << ")..." << std::endl;
+        std::copy(state.begin(), state.end(), evolved_psi_neg.begin());
+        std::copy(O1_psi.begin(), O1_psi.end(), evolved_O1_psi_neg.begin());
+        
+        for (int step = 1; step < num_steps; step++) {
+            // Evolve states backward in time (use -dt)
+            time_evolve_krylov(H, evolved_psi_neg, N, -dt, krylov_dim, false);
+            time_evolve_krylov(H, evolved_O1_psi_neg, N, -dt, krylov_dim, false);
+            
+            // Apply O_2 to evolved state
+            operators_2[op_idx].apply(evolved_psi_neg.data(), O2_evolved_psi_neg.data(), N);
+            
+            // Calculate correlation using BLAS
+            Complex corr_t_neg;
+            cblas_zdotc_sub(N, evolved_O1_psi_neg.data(), 1, O2_evolved_psi_neg.data(), 1, &corr_t_neg);
+            
+            double t_neg = -step * dt;
+            time_data.push_back(std::make_tuple(t_neg, corr_t_neg.real(), corr_t_neg.imag()));
+            
+            if (step % 100 == 0) {
+                std::cout << "      Negative time step " << step << " / " << num_steps << std::endl;
+            }
         }
+        
+        // Sort by time (ascending order)
+        std::sort(time_data.begin(), time_data.end(), 
+                  [](const auto& a, const auto& b) { return std::get<0>(a) < std::get<0>(b); });
+        
+        // Open file for writing time correlation data
+        std::string time_corr_file = output_dir + "/" + op_name + "_" + label + "_time_correlation.dat";
+        
+        std::ofstream time_corr_out(time_corr_file);
+        if (!time_corr_out.is_open()) {
+            std::cerr << "Error: Could not open file " << time_corr_file << " for writing" << std::endl;
+            continue;
+        }
+        
+        time_corr_out << "# time real(C(t)) imag(C(t))" << std::endl;
+        time_corr_out << std::setprecision(16);
+        
+        // Write sorted data
+        for (const auto& data_point : time_data) {
+            time_corr_out << std::get<0>(data_point) << " " 
+                         << std::get<1>(data_point) << " " 
+                         << std::get<2>(data_point) << std::endl;
+        }
+        
+        time_corr_out.close();
+        std::cout << "    Time correlation saved to " << time_corr_file << std::endl;
+        std::cout << "    Time range: [" << std::get<0>(time_data.front()) << ", " 
+                  << std::get<0>(time_data.back()) << "]" << std::endl;
     }
     
     std::cout << "Dynamical correlation calculation complete for label: " << label << std::endl;
