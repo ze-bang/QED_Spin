@@ -56,6 +56,7 @@ inline EDParameters toEDParameters(const EDConfig& config) {
     params.ltlm_store_data = config.thermal.ltlm_store_data;
     params.use_hybrid_method = config.thermal.use_hybrid_method;
     params.hybrid_crossover = config.thermal.hybrid_crossover;
+    params.hybrid_auto_crossover = config.thermal.hybrid_auto_crossover;
     
     // Observable
     params.calc_observables = config.observable.calculate;

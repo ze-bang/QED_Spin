@@ -121,6 +121,7 @@ EDConfig EDConfig::fromFile(const std::string& filename) {
             // Hybrid method parameters
             else if (key == "use_hybrid_method") config.thermal.use_hybrid_method = (value == "true" || value == "1");
             else if (key == "hybrid_crossover") config.thermal.hybrid_crossover = std::stod(value);
+            else if (key == "hybrid_auto_crossover") config.thermal.hybrid_auto_crossover = (value == "true" || value == "1");
             else if (key == "calc_observables") config.observable.calculate = (value == "true" || value == "1");
             else if (key == "measure_spin") config.observable.measure_spin = (value == "true" || value == "1");
             else if (key == "run_standard") config.workflow.run_standard = (value == "true" || value == "1");
@@ -254,6 +255,7 @@ EDConfig EDConfig::fromCommandLine(int argc, char* argv[]) {
             // Hybrid LTLM/FTLM options
             else if (arg == "--hybrid-thermal") config.thermal.use_hybrid_method = true;
             else if (arg.find("--hybrid-crossover=") == 0) config.thermal.hybrid_crossover = std::stod(parse_value("--hybrid-crossover="));
+            else if (arg == "--hybrid-auto-crossover") config.thermal.hybrid_auto_crossover = true;
             // Dynamical response options
             else if (arg == "--dyn-thermal") config.dynamical.thermal_average = true;
             else if (arg.find("--dyn-samples=") == 0) config.dynamical.num_random_states = std::stoi(parse_value("--dyn-samples="));
@@ -871,8 +873,9 @@ std::string getMethodParameterInfo(DiagonalizationMethod method) {
             info << "  --ltlm-seed=<seed>       Random seed for initial state (0 = random, default: 0)\n";
             info << "  --ltlm-store-data        Store intermediate data (spectrum, etc.)\n";
             info << "\nHybrid LTLM/FTLM Mode:\n";
-            info << "  --hybrid-thermal         Use hybrid method (LTLM at low T, FTLM at high T)\n";
+            info << "  --hybrid-thermal         Use hybrid method (LTLM at low T, FTLM at high T) [DEPRECATED: use --method=HYBRID]\n";
             info << "  --hybrid-crossover=<T>   Temperature crossover (default: 1.0)\n";
+            info << "  --hybrid-auto-crossover  Automatically determine optimal crossover temperature\n";
             info << "\nOutput:\n";
             info << "  Saves to: output_dir/thermo/ltlm_thermo.txt (or hybrid_thermo.txt for hybrid)\n";
             info << "  Format: Temperature  Energy  E_error  Specific_Heat  C_error  Entropy  S_error  Free_Energy  F_error\n";

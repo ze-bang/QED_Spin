@@ -24,9 +24,59 @@ HybridThermalResults hybrid_thermal_method(
     std::cout << "================================================\n";
     std::cout << "Temperature range: " << temp_min << " - " << temp_max << std::endl;
     std::cout << "Temperature bins: " << num_temp_bins << std::endl;
-    std::cout << "Crossover temperature: " << params.crossover_temperature << std::endl;
-    std::cout << "  • LTLM for T < " << params.crossover_temperature << " (accurate ground state)\n";
-    std::cout << "  • FTLM for T ≥ " << params.crossover_temperature << " (efficient sampling)\n";
+    
+    // Determine crossover temperature
+    double crossover_temp = params.crossover_temperature;
+    
+    if (params.auto_crossover) {
+        std::cout << "Auto-crossover enabled: Determining optimal crossover temperature...\n";
+        
+        // Quick ground state and first excitation calculation
+        ComplexVector ground_state;
+        double ground_energy = find_ground_state_lanczos(
+            H, N, params.ltlm_ground_krylov, params.tolerance,
+            params.ltlm_full_reorth, params.ltlm_reorth_freq, ground_state
+        );
+        
+        // Build small excitation spectrum to find gap
+        std::vector<double> excitation_energies;
+        std::vector<double> weights;
+        int num_excitations = build_excitation_spectrum(
+            H, ground_state, ground_energy, N,
+            std::min(50, params.ltlm_krylov_dim),  // Use smaller dimension for quick estimate
+            params.tolerance, params.ltlm_full_reorth, params.ltlm_reorth_freq,
+            excitation_energies, weights
+        );
+        
+        // Find first non-degenerate excited state
+        double first_excitation = ground_energy;
+        if (num_excitations > 0 && !excitation_energies.empty()) {
+            // Threshold for degeneracy: 1e-6 (relative to energy scale)
+            double degeneracy_threshold = 1e-6;
+            
+            for (int i = 0; i < num_excitations; i++) {
+                double gap = excitation_energies[i] - ground_energy;
+                if (std::abs(gap) > degeneracy_threshold) {
+                    first_excitation = excitation_energies[i];
+                    break;
+                }
+            }
+            
+            // If all states are degenerate, use the last one (might have larger numerical error)
+            if (std::abs(first_excitation - ground_energy) <= degeneracy_threshold) {
+                first_excitation = excitation_energies.back();
+            }
+        }
+        
+        // Estimate optimal crossover
+        crossover_temp = estimate_optimal_crossover(H, N, ground_energy, first_excitation);
+        
+        std::cout << "Auto-determined crossover temperature: " << crossover_temp << "\n";
+    }
+    
+    std::cout << "Crossover temperature: " << crossover_temp << std::endl;
+    std::cout << "  • LTLM for T < " << crossover_temp << " (accurate ground state)\n";
+    std::cout << "  • FTLM for T ≥ " << crossover_temp << " (efficient sampling)\n";
     std::cout << "================================================\n\n";
     
     // Generate full temperature grid (logarithmic spacing)
@@ -41,10 +91,10 @@ HybridThermalResults hybrid_thermal_method(
     
     // Find crossover index in temperature grid
     int crossover_index = 0;
-    double actual_crossover = params.crossover_temperature;
+    double actual_crossover = crossover_temp;
     
     for (int i = 0; i < num_temp_bins; i++) {
-        if (temperatures[i] >= params.crossover_temperature) {
+        if (temperatures[i] >= crossover_temp) {
             crossover_index = i;
             actual_crossover = temperatures[i];
             break;
@@ -52,7 +102,7 @@ HybridThermalResults hybrid_thermal_method(
     }
     
     // If crossover is beyond temp_max, use only LTLM
-    if (crossover_index == 0 && params.crossover_temperature > temp_max) {
+    if (crossover_index == 0 && crossover_temp > temp_max) {
         crossover_index = num_temp_bins;
         actual_crossover = temp_max;
     }
@@ -271,13 +321,22 @@ void save_hybrid_thermal_results(
 }
 
 /**
- * @brief Estimate optimal crossover temperature (future enhancement)
+ * @brief Estimate optimal crossover temperature
  * 
- * Current implementation uses a simple heuristic:
- * T_crossover ≈ (E1 - E0) / 2
+ * Determines the optimal temperature to switch from LTLM to FTLM based on
+ * the energy gap to the first excited state. Uses the heuristic:
  * 
- * where E0 is ground state energy and E1 is first excited state energy.
- * This ensures LTLM is used when ground state dominates the partition function.
+ *   T_crossover ≈ Δ/2, where Δ = E1 - E0
+ * 
+ * This ensures LTLM is used when the ground state dominates the partition
+ * function (contribution > 60%), while FTLM is used when excited states
+ * become thermally accessible.
+ * 
+ * @param H Hamiltonian matrix-vector product
+ * @param N Hilbert space dimension
+ * @param ground_energy Ground state energy E0
+ * @param first_excitation First excited state energy E1
+ * @return Estimated optimal crossover temperature
  */
 double estimate_optimal_crossover(
     std::function<void(const Complex*, Complex*, int)> H,
@@ -288,15 +347,42 @@ double estimate_optimal_crossover(
     // Energy gap to first excited state
     double gap = first_excitation - ground_energy;
     
+    std::cout << "\n--- Automatic Crossover Determination ---\n";
+    std::cout << "  Ground state energy (E0): " << ground_energy << "\n";
+    std::cout << "  First excitation (E1): " << first_excitation << "\n";
+    std::cout << "  Energy gap (Δ = E1 - E0): " << gap << "\n";
+    
+    // Check if gap is essentially zero (degenerate or numerical error)
+    if (std::abs(gap) < 1e-6) {
+        std::cout << "  Warning: Very small or zero gap detected!\n";
+        std::cout << "  This may indicate:\n";
+        std::cout << "    - Degenerate ground state\n";
+        std::cout << "    - Insufficient Krylov dimension\n";
+        std::cout << "    - Small system with high symmetry\n";
+        std::cout << "  Using minimum crossover temperature.\n";
+    }
+    
     // Heuristic: Use LTLM when k_B T < gap/2
-    // This ensures ground state contribution is > 60% of partition function
+    // At T = gap/2, the Boltzmann factor exp(-gap/2T) = exp(-1) ≈ 0.37
+    // This means ground state has ~73% weight, first excited ~27%
     double T_opt = gap / 2.0;
     
     // Sanity bounds: crossover should be in reasonable range
-    T_opt = std::max(0.01, std::min(T_opt, 10.0));
+    // Minimum: 0.01 (very low T)
+    // Maximum: 10.0 (high T, most systems)
+    double T_bounded = std::max(0.01, std::min(T_opt, 10.0));
     
-    std::cout << "Estimated optimal crossover temperature: " << T_opt << std::endl;
-    std::cout << "  (Based on energy gap: " << gap << ")\n";
+    if (T_opt != T_bounded) {
+        std::cout << "  Raw estimate: " << T_opt << " (out of bounds)\n";
+        std::cout << "  Bounded to: [0.01, 10.0]\n";
+    }
     
-    return T_opt;
+    std::cout << "  Optimal crossover temperature: " << T_bounded << "\n";
+    std::cout << "  Rationale: LTLM for T < " << T_bounded 
+              << " (ground state dominant)\n";
+    std::cout << "             FTLM for T ≥ " << T_bounded 
+              << " (excited states accessible)\n";
+    std::cout << "-------------------------------------------\n\n";
+    
+    return T_bounded;
 }
