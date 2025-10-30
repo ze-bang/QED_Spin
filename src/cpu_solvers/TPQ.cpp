@@ -166,7 +166,7 @@ void computeDynamicCorrelationsKrylov(
         // which is equivalent to ⟨ψ(t)| O_2 |ψ_O1(t)⟩
         for (int step = 1; step < num_steps; step++) {
             // Evolve states using Krylov method
-            time_evolve_krylov(H, evolved_psi, N, dt, krylov_dim, false);
+            time_evolve_krylov(H, evolved_psi, N, dt, krylov_dim, true);
             time_evolve_krylov(H, evolved_O1_psi, N, dt, krylov_dim, false);
             
             // Apply O_2 to evolved state

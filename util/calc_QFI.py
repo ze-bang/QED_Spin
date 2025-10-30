@@ -542,10 +542,26 @@ def _compute_spectral_and_qfi(mean_correlation, reference_time, beta):
 
 def _prepare_time_data(mean_correlation, reference_time):
     """Prepare correlation data for FFT (data starts from t=0)."""
-    # Raw data already starts from t=0 with positive times only
-    # No need to construct negative times or reorder
-    print(f"    Using time data as-is: [{reference_time.min():.2f}, {reference_time.max():.2f}]")
-    return reference_time, mean_correlation
+    if reference_time[0] < 0 and reference_time[-1] > 0:
+        # Data already time-ordered
+        t_full = reference_time
+        C_full = mean_correlation
+        print(f"    Using pre-ordered time data: [{t_full.min():.2f}, {t_full.max():.2f}]")
+    else:
+        # Construct negative times using C(-t) = C(t)*
+        t_pos = reference_time
+        C_pos = mean_correlation
+        
+        t_neg = -t_pos[1:][::-1]
+        C_neg = np.conj(C_pos[1:][::-1])
+        
+        t_full = np.concatenate((t_neg, t_pos))
+        C_full = np.concatenate((C_neg, C_pos))
+        
+        print(f"    Constructed full time range: [{t_full.min():.2f}, {t_full.max():.2f}]")
+    
+    return t_full, C_full
+
 
 
 def _compute_spectral_function(t_full, C_full, gamma):
