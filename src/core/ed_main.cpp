@@ -5,6 +5,7 @@
 #include "ed_config_adapter.h"
 #include "ed_wrapper.h"
 #include "construct_ham.h"
+#include "../cpu_solvers/ftlm.h"
 
 /**
  * @file ed_main.cpp
@@ -154,6 +155,262 @@ void compute_thermodynamics(const std::vector<double>& eigenvalues, const EDConf
 }
 
 /**
+ * @brief Compute dynamical response (spectral functions)
+ */
+void compute_dynamical_response_workflow(const std::vector<double>& eigenvalues,
+                                        const EDConfig& config) {
+    if (eigenvalues.empty()) {
+        std::cerr << "Error: Dynamical response requires eigenvalues\n";
+        return;
+    }
+    
+    // Note: Currently only thermal mode is supported in the integrated pipeline
+    // For ground state dynamical response with eigenvectors, use the standalone
+    // example in examples/dynamical_response_example.cpp
+    if (!config.dynamical.thermal_average) {
+        std::cerr << "Note: Only thermal mode (--dyn-thermal) is currently supported in the integrated pipeline.\n";
+        std::cerr << "Setting thermal_average mode automatically.\n";
+    }
+    
+    std::cout << "\n==========================================\n";
+    std::cout << "Computing Dynamical Response\n";
+    std::cout << "==========================================\n";
+    
+    // Load operator
+    if (config.dynamical.operator_file.empty()) {
+        std::cerr << "Error: --dyn-operator=<file> is required for dynamical response\n";
+        return;
+    }
+    
+    std::string op_path = config.system.hamiltonian_dir + "/" + config.dynamical.operator_file;
+    Operator op(config.system.num_sites, config.system.spin_length);
+    op.loadFromInterAllFile(op_path);
+    
+    // Setup parameters
+    DynamicalResponseParameters params;
+    params.num_samples = config.dynamical.num_random_states;
+    params.krylov_dim = config.dynamical.krylov_dim;
+    params.broadening = config.dynamical.broadening;
+    params.random_seed = config.dynamical.random_seed;
+    
+    // Prepare Hamiltonian
+    Operator ham(config.system.num_sites, config.system.spin_length);
+    std::string interaction_file = config.system.hamiltonian_dir + "/" + config.system.interaction_file;
+    std::string single_site_file = config.system.hamiltonian_dir + "/" + config.system.single_site_file;
+    ham.loadFromInterAllFile(interaction_file);
+    ham.loadFromFile(single_site_file);
+    
+    // Build sparse matrices
+    ham.buildSparseMatrix();
+    op.buildSparseMatrix();
+    
+    // Hilbert space dimension
+    int N = 1 << config.system.num_sites;
+    
+    // Create function wrappers for matrix-vector products
+    auto H_func = [&ham](const Complex* in, Complex* out, int dim) {
+        ham.apply(in, out, dim);
+    };
+    
+    auto O_func = [&op](const Complex* in, Complex* out, int dim) {
+        op.apply(in, out, dim);
+    };
+    
+    // Compute response (thermal mode) - default to two-operator correlation ⟨O†O⟩
+    std::string output_subdir = config.workflow.output_dir + "/dynamical_response";
+    system(("mkdir -p " + output_subdir).c_str());
+    
+    std::cout << "Computing thermal-averaged dynamical response...\n";
+    std::cout << "  Random states: " << params.num_samples << "\n";
+    std::cout << "  Krylov dimension: " << params.krylov_dim << "\n";
+    std::cout << "  Temperature range: [" << config.dynamical.temp_min << ", " << config.dynamical.temp_max << "]\n";
+    std::cout << "  Temperature bins: " << config.dynamical.num_temp_bins << "\n";
+    
+    // Generate temperature grid
+    std::vector<double> temperatures(config.dynamical.num_temp_bins);
+    if (config.dynamical.num_temp_bins == 1) {
+        temperatures[0] = config.dynamical.temp_min;
+    } else {
+        double log_tmin = std::log(config.dynamical.temp_min);
+        double log_tmax = std::log(config.dynamical.temp_max);
+        double log_step = (log_tmax - log_tmin) / (config.dynamical.num_temp_bins - 1);
+        for (int i = 0; i < config.dynamical.num_temp_bins; i++) {
+            temperatures[i] = std::exp(log_tmin + i * log_step);
+        }
+    }
+    
+    // Compute for each temperature
+    for (int t_idx = 0; t_idx < config.dynamical.num_temp_bins; t_idx++) {
+        double temperature = temperatures[t_idx];
+        
+        std::cout << "\n--- Temperature " << (t_idx + 1) << " / " << config.dynamical.num_temp_bins 
+                  << ": T = " << temperature << " ---\n";
+    
+        DynamicalResponseResults results;
+    
+        if (!config.dynamical.operator2_file.empty()) {
+            // Two different operators: ⟨O₁†(t)O₂⟩
+            std::cout << "Computing two-operator dynamical correlation ⟨O₁†(t)O₂⟩...\n";
+            std::string op2_path = config.system.hamiltonian_dir + "/" + config.dynamical.operator2_file;
+            Operator op2(config.system.num_sites, config.system.spin_length);
+            op2.loadFromInterAllFile(op2_path);
+            op2.buildSparseMatrix();
+            
+            auto O2_func = [&op2](const Complex* in, Complex* out, int dim) {
+                op2.apply(in, out, dim);
+            };
+            
+            results = compute_dynamical_correlation(
+                H_func, O_func, O2_func, N, params,
+                config.dynamical.omega_min,
+                config.dynamical.omega_max,
+                config.dynamical.num_omega_points,
+                temperature,  // Use current temperature from loop
+                output_subdir
+            );
+        } else {
+            // Same operator: ⟨O†(t)O⟩ (default auto-correlation)
+            std::cout << "Computing dynamical response ⟨O†(t)O⟩...\n";
+            results = compute_dynamical_response_thermal(
+                H_func, O_func, N, params,
+                config.dynamical.omega_min,
+                config.dynamical.omega_max,
+                config.dynamical.num_omega_points,
+                temperature,  // Use current temperature from loop
+                output_subdir
+            );
+        }
+        
+        // Save results for this temperature
+        std::string output_file = output_subdir + "/" + config.dynamical.output_prefix;
+        if (config.dynamical.num_temp_bins > 1) {
+            // Multi-temperature: add T to filename
+            output_file += "_T" + std::to_string(temperature);
+        }
+        output_file += ".txt";
+        
+        save_dynamical_response_results(results, output_file);
+        
+        std::cout << "Results saved to: " << output_file << "\n";
+    } // end temperature loop
+    
+    std::cout << "\nDynamical response complete.\n";
+    std::cout << "Frequency range: [" << config.dynamical.omega_min << ", " << config.dynamical.omega_max << "]\n";
+    std::cout << "Number of points: " << config.dynamical.num_omega_points << "\n";
+}
+
+/**
+ * @brief Compute static response (thermal expectation values)
+ */
+void compute_static_response_workflow(const std::vector<double>& eigenvalues,
+                                     const EDConfig& config) {
+    if (eigenvalues.empty()) {
+        std::cerr << "Error: Static response requires eigenvalues\n";
+        return;
+    }
+    
+    std::cout << "\n==========================================\n";
+    std::cout << "Computing Static Response\n";
+    std::cout << "==========================================\n";
+    
+    // Load operator
+    if (config.static_resp.operator_file.empty()) {
+        std::cerr << "Error: --static-operator=<file> is required for static response\n";
+        return;
+    }
+    
+    std::string op_path = config.system.hamiltonian_dir + "/" + config.static_resp.operator_file;
+    Operator op(config.system.num_sites, config.system.spin_length);
+    op.loadFromInterAllFile(op_path);
+    
+    // Setup parameters
+    StaticResponseParameters params;
+    params.num_samples = config.static_resp.num_random_states;
+    params.krylov_dim = config.static_resp.krylov_dim;
+    params.random_seed = config.static_resp.random_seed;
+    
+    // Prepare Hamiltonian
+    Operator ham(config.system.num_sites, config.system.spin_length);
+    std::string interaction_file = config.system.hamiltonian_dir + "/" + config.system.interaction_file;
+    std::string single_site_file = config.system.hamiltonian_dir + "/" + config.system.single_site_file;
+    ham.loadFromInterAllFile(interaction_file);
+    ham.loadFromFile(single_site_file);
+    
+    // Build sparse matrices
+    ham.buildSparseMatrix();
+    op.buildSparseMatrix();
+    
+    // Hilbert space dimension
+    int N = 1 << config.system.num_sites;
+    
+    // Create function wrappers for matrix-vector products
+    auto H_func = [&ham](const Complex* in, Complex* out, int dim) {
+        ham.apply(in, out, dim);
+    };
+    
+    auto O_func = [&op](const Complex* in, Complex* out, int dim) {
+        op.apply(in, out, dim);
+    };
+    
+    std::cout << "Random states: " << params.num_samples << "\n";
+    std::cout << "Krylov dimension: " << params.krylov_dim << "\n";
+    std::cout << "Temperature range: [" << config.static_resp.temp_min << ", " << config.static_resp.temp_max << "]\n";
+    
+    // Compute response
+    StaticResponseResults results;
+    std::string output_subdir = config.workflow.output_dir + "/static_response";
+    
+    if (config.static_resp.single_operator_mode) {
+        // Single operator expectation value: ⟨O⟩
+        std::cout << "Computing thermal expectation value ⟨O⟩...\n";
+        results = compute_thermal_expectation_value(
+            H_func, O_func, N, params,
+            config.static_resp.temp_min,
+            config.static_resp.temp_max,
+            config.static_resp.num_temp_points,
+            output_subdir
+        );
+    } else if (!config.static_resp.operator2_file.empty()) {
+        // Two different operators: ⟨O₁†O₂⟩
+        std::cout << "Computing two-operator static response ⟨O₁†O₂⟩...\n";
+        std::string op2_path = config.system.hamiltonian_dir + "/" + config.static_resp.operator2_file;
+        Operator op2(config.system.num_sites, config.system.spin_length);
+        op2.loadFromInterAllFile(op2_path);
+        op2.buildSparseMatrix();
+        
+        auto O2_func = [&op2](const Complex* in, Complex* out, int dim) {
+            op2.apply(in, out, dim);
+        };
+        
+        results = compute_static_response(
+            H_func, O_func, O2_func, N, params,
+            config.static_resp.temp_min,
+            config.static_resp.temp_max,
+            config.static_resp.num_temp_points,
+            output_subdir
+        );
+    } else {
+        // Same operator: ⟨O†O⟩ (default two-point correlation)
+        std::cout << "Computing static response ⟨O†O⟩...\n";
+        results = compute_static_response(
+            H_func, O_func, O_func, N, params,
+            config.static_resp.temp_min,
+            config.static_resp.temp_max,
+            config.static_resp.num_temp_points,
+            output_subdir
+        );
+    }
+    
+    // Save results
+    system(("mkdir -p " + output_subdir).c_str());
+    
+    std::string output_file = output_subdir + "/" + config.static_resp.output_prefix + ".txt";
+    save_static_response_results(results, output_file);
+    
+    std::cout << "Static response saved to: " << output_file << "\n";
+}
+
+/**
  * @brief Print eigenvalue summary
  */
 void print_eigenvalue_summary(const std::vector<double>& eigenvalues, int max_show = 10) {
@@ -203,6 +460,8 @@ void print_help(const char* prog_name) {
     std::cout << "  --standard              Run standard diagonalization\n";
     std::cout << "  --symmetrized           Run symmetrized diagonalization (exploits symmetries)\n";
     std::cout << "  --thermo                Compute thermodynamic properties\n";
+    std::cout << "  --dynamical-response    Compute dynamical response (spectral functions)\n";
+    std::cout << "  --static-response       Compute static response (thermal expectation values)\n";
     std::cout << "  --calc_observables      Calculate custom observables\n";
     std::cout << "  --measure_spin          Measure spin expectations\n\n";
     
@@ -211,6 +470,34 @@ void print_help(const char* prog_name) {
     std::cout << "  --temp_min=<T>          Minimum temperature\n";
     std::cout << "  --temp_max=<T>          Maximum temperature\n";
     std::cout << "  --temp_bins=<n>         Number of temperature bins\n\n";
+    
+    std::cout << "Dynamical Response Options:\n";
+    std::cout << "  --dyn-thermal           Use thermal averaging (multiple random states)\n";
+    std::cout << "  --dyn-samples=<n>       Number of random states (default: 20)\n";
+    std::cout << "  --dyn-krylov=<n>        Krylov dimension per sample (default: 100)\n";
+    std::cout << "  --dyn-omega-min=<ω>     Minimum frequency (default: -10)\n";
+    std::cout << "  --dyn-omega-max=<ω>     Maximum frequency (default: 10)\n";
+    std::cout << "  --dyn-omega-points=<n>  Number of frequency points (default: 1000)\n";
+    std::cout << "  --dyn-broadening=<η>    Lorentzian broadening (default: 0.1)\n";
+    std::cout << "  --dyn-correlation       Compute two-operator dynamical correlation\n";
+    std::cout << "  --dyn-operator=<file>   Operator file to probe\n";
+    std::cout << "  --dyn-operator2=<file>  Second operator for correlation\n";
+    std::cout << "  --dyn-output=<prefix>   Output file prefix (default: dynamical_response)\n";
+    std::cout << "  --dyn-seed=<n>          Random seed (0 = auto)\n\n";
+    
+    std::cout << "Static Response Options:\n";
+    std::cout << "  --static-samples=<n>    Number of random states (default: 20)\n";
+    std::cout << "  --static-krylov=<n>     Krylov dimension per sample (default: 100)\n";
+    std::cout << "  --static-temp-min=<T>   Minimum temperature (default: 0.01)\n";
+    std::cout << "  --static-temp-max=<T>   Maximum temperature (default: 10.0)\n";
+    std::cout << "  --static-temp-points=<n> Number of temperature points (default: 100)\n";
+    std::cout << "  --static-no-susceptibility  Don't compute susceptibility\n";
+    std::cout << "  --static-correlation    Compute two-operator correlation\n";
+    std::cout << "  --static-expectation    Compute single-operator <O> (implies --static-response)\n";
+    std::cout << "  --static-operator=<file>    Operator file to probe\n";
+    std::cout << "  --static-operator2=<file>   Second operator for correlation\n";
+    std::cout << "  --static-output=<prefix>    Output file prefix (default: static_response)\n";
+    std::cout << "  --static-seed=<n>       Random seed (0 = auto)\n\n";
     
     std::cout << "Available Methods:\n";
     std::cout << "  Lanczos Variants:\n";
@@ -329,6 +616,14 @@ int main(int argc, char* argv[]) {
             if (config.workflow.compute_thermo && !standard_results.eigenvalues.empty()) {
                 compute_thermodynamics(standard_results.eigenvalues, config);
             }
+            
+            if (config.workflow.compute_dynamical_response && !standard_results.eigenvalues.empty()) {
+                compute_dynamical_response_workflow(standard_results.eigenvalues, config);
+            }
+            
+            if (config.workflow.compute_static_response && !standard_results.eigenvalues.empty()) {
+                compute_static_response_workflow(standard_results.eigenvalues, config);
+            }
         }
         
         if (config.workflow.run_symmetrized && !config.workflow.skip_ed) {
@@ -337,6 +632,14 @@ int main(int argc, char* argv[]) {
             
             if (config.workflow.compute_thermo && !sym_results.eigenvalues.empty()) {
                 compute_thermodynamics(sym_results.eigenvalues, config);
+            }
+            
+            if (config.workflow.compute_dynamical_response && !sym_results.eigenvalues.empty()) {
+                compute_dynamical_response_workflow(sym_results.eigenvalues, config);
+            }
+            
+            if (config.workflow.compute_static_response && !sym_results.eigenvalues.empty()) {
+                compute_static_response_workflow(sym_results.eigenvalues, config);
             }
         }
         

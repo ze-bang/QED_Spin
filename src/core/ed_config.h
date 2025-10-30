@@ -85,6 +85,47 @@ struct ObservableConfig {
 };
 
 /**
+ * @brief Dynamical response calculation parameters
+ */
+struct DynamicalResponseConfig {
+    bool calculate = false;
+    bool thermal_average = false;     // If true, compute thermal-averaged response
+    int num_random_states = 20;       // Number of random states for thermal averaging
+    int krylov_dim = 100;             // Krylov subspace dimension
+    double omega_min = -10.0;         // Minimum frequency
+    double omega_max = 10.0;          // Maximum frequency
+    int num_omega_points = 1000;      // Number of frequency points
+    double broadening = 0.1;          // Lorentzian broadening parameter
+    double temp_min = 0.01;           // Minimum temperature (for temperature scan)
+    double temp_max = 10.0;           // Maximum temperature (for temperature scan)
+    int num_temp_bins = 1;            // Number of temperature points (1 = single temperature at temp_min)
+    bool compute_correlation = false; // Compute two-operator correlation
+    std::string operator_file = "";   // File containing operator to probe
+    std::string operator2_file = "";  // Second operator file (for correlation)
+    std::string output_prefix = "dynamical_response";
+    unsigned int random_seed = 0;     // Random seed (0 = auto)
+};
+
+/**
+ * @brief Static response calculation parameters
+ */
+struct StaticResponseConfig {
+    bool calculate = false;
+    int num_random_states = 20;       // Number of random states for thermal averaging
+    int krylov_dim = 100;             // Krylov subspace dimension
+    double temp_min = 0.01;           // Minimum temperature
+    double temp_max = 10.0;           // Maximum temperature
+    int num_temp_points = 100;        // Number of temperature points
+    bool compute_susceptibility = true; // Compute susceptibility dO/dT
+    bool compute_correlation = false; // Compute two-operator correlation
+    bool single_operator_mode = false; // Compute single-operator ⟨O⟩ instead of ⟨O†O⟩
+    std::string operator_file = "";   // File containing operator(s) to probe
+    std::string operator2_file = "";  // Second operator file (for correlation)
+    std::string output_prefix = "static_response";
+    unsigned int random_seed = 0;     // Random seed (0 = auto)
+};
+
+/**
  * @brief System/lattice parameters
  */
 struct SystemConfig {
@@ -130,6 +171,8 @@ struct WorkflowConfig {
     bool run_standard = false;
     bool run_symmetrized = false;
     bool compute_thermo = false;
+    bool compute_dynamical_response = false;
+    bool compute_static_response = false;
     bool skip_ed = false;
     std::string output_dir = "output";
 };
@@ -150,6 +193,8 @@ public:
     DiagonalizationConfig diag;
     ThermalConfig thermal;
     ObservableConfig observable;
+    DynamicalResponseConfig dynamical;
+    StaticResponseConfig static_resp;
     SystemConfig system;
     ArpackConfig arpack;
     WorkflowConfig workflow;
@@ -200,6 +245,8 @@ public:
     EDConfig& standard(bool b = true) { workflow.run_standard = b; return *this; }
     EDConfig& symmetrized(bool b = true) { workflow.run_symmetrized = b; return *this; }
     EDConfig& thermo(bool b = true) { workflow.compute_thermo = b; return *this; }
+    EDConfig& dynamicalResponse(bool b = true) { workflow.compute_dynamical_response = b; return *this; }
+    EDConfig& staticResponse(bool b = true) { workflow.compute_static_response = b; return *this; }
     EDConfig& outputDir(const std::string& dir) { workflow.output_dir = dir; return *this; }
     
     // ========== Configuration Loading ==========

@@ -115,6 +115,37 @@ EDConfig EDConfig::fromFile(const std::string& filename) {
             else if (key == "run_standard") config.workflow.run_standard = (value == "true" || value == "1");
             else if (key == "run_symmetrized") config.workflow.run_symmetrized = (value == "true" || value == "1");
             else if (key == "compute_thermo") config.workflow.compute_thermo = (value == "true" || value == "1");
+            else if (key == "compute_dynamical_response") config.workflow.compute_dynamical_response = (value == "true" || value == "1");
+            else if (key == "compute_static_response") config.workflow.compute_static_response = (value == "true" || value == "1");
+            // Dynamical response parameters
+            else if (key == "dynamical_thermal_average") config.dynamical.thermal_average = (value == "true" || value == "1");
+            else if (key == "dynamical_num_random_states") config.dynamical.num_random_states = std::stoi(value);
+            else if (key == "dynamical_krylov_dim") config.dynamical.krylov_dim = std::stoi(value);
+            else if (key == "dynamical_omega_min") config.dynamical.omega_min = std::stod(value);
+            else if (key == "dynamical_omega_max") config.dynamical.omega_max = std::stod(value);
+            else if (key == "dynamical_num_omega_points") config.dynamical.num_omega_points = std::stoi(value);
+            else if (key == "dynamical_broadening") config.dynamical.broadening = std::stod(value);
+            else if (key == "dynamical_temp_min") config.dynamical.temp_min = std::stod(value);
+            else if (key == "dynamical_temp_max") config.dynamical.temp_max = std::stod(value);
+            else if (key == "dynamical_num_temp_bins") config.dynamical.num_temp_bins = std::stoi(value);
+            else if (key == "dynamical_compute_correlation") config.dynamical.compute_correlation = (value == "true" || value == "1");
+            else if (key == "dynamical_operator_file") config.dynamical.operator_file = value;
+            else if (key == "dynamical_operator2_file") config.dynamical.operator2_file = value;
+            else if (key == "dynamical_output_prefix") config.dynamical.output_prefix = value;
+            else if (key == "dynamical_random_seed") config.dynamical.random_seed = std::stoul(value);
+            // Static response parameters
+            else if (key == "static_num_random_states") config.static_resp.num_random_states = std::stoi(value);
+            else if (key == "static_krylov_dim") config.static_resp.krylov_dim = std::stoi(value);
+            else if (key == "static_temp_min") config.static_resp.temp_min = std::stod(value);
+            else if (key == "static_temp_max") config.static_resp.temp_max = std::stod(value);
+            else if (key == "static_num_temp_points") config.static_resp.num_temp_points = std::stoi(value);
+            else if (key == "static_compute_susceptibility") config.static_resp.compute_susceptibility = (value == "true" || value == "1");
+            else if (key == "static_compute_correlation") config.static_resp.compute_correlation = (value == "true" || value == "1");
+            else if (key == "static_single_operator_mode") config.static_resp.single_operator_mode = (value == "true" || value == "1");
+            else if (key == "static_operator_file") config.static_resp.operator_file = value;
+            else if (key == "static_operator2_file") config.static_resp.operator2_file = value;
+            else if (key == "static_output_prefix") config.static_resp.output_prefix = value;
+            else if (key == "static_random_seed") config.static_resp.random_seed = std::stoul(value);
             else {
                 std::cerr << "Warning: Unknown config key '" << key << "' at line " << line_num << std::endl;
             }
@@ -185,6 +216,8 @@ EDConfig EDConfig::fromCommandLine(int argc, char* argv[]) {
             else if (arg == "--standard") config.workflow.run_standard = true;
             else if (arg == "--symmetrized") config.workflow.run_symmetrized = true;
             else if (arg == "--thermo") config.workflow.compute_thermo = true;
+            else if (arg == "--dynamical-response") config.workflow.compute_dynamical_response = true;
+            else if (arg == "--static-response") config.workflow.compute_static_response = true;
             else if (arg == "--skip_ED") config.workflow.skip_ed = true;
             else if (arg.find("--sublattice_size=") == 0) config.system.sublattice_size = std::stoi(parse_value("--sublattice_size="));
             else if (arg.find("--omega_min=") == 0) config.observable.omega_min = std::stod(parse_value("--omega_min="));
@@ -200,6 +233,38 @@ EDConfig EDConfig::fromCommandLine(int argc, char* argv[]) {
             else if (arg.find("--ftlm-seed=") == 0) config.thermal.ftlm_seed = std::stoul(parse_value("--ftlm-seed="));
             else if (arg == "--ftlm-store-samples") config.thermal.ftlm_store_samples = true;
             else if (arg == "--ftlm-no-error-bars") config.thermal.ftlm_error_bars = false;
+            // Dynamical response options
+            else if (arg == "--dyn-thermal") config.dynamical.thermal_average = true;
+            else if (arg.find("--dyn-samples=") == 0) config.dynamical.num_random_states = std::stoi(parse_value("--dyn-samples="));
+            else if (arg.find("--dyn-krylov=") == 0) config.dynamical.krylov_dim = std::stoi(parse_value("--dyn-krylov="));
+            else if (arg.find("--dyn-omega-min=") == 0) config.dynamical.omega_min = std::stod(parse_value("--dyn-omega-min="));
+            else if (arg.find("--dyn-omega-max=") == 0) config.dynamical.omega_max = std::stod(parse_value("--dyn-omega-max="));
+            else if (arg.find("--dyn-omega-points=") == 0) config.dynamical.num_omega_points = std::stoi(parse_value("--dyn-omega-points="));
+            else if (arg.find("--dyn-broadening=") == 0) config.dynamical.broadening = std::stod(parse_value("--dyn-broadening="));
+            else if (arg.find("--dyn-temp-min=") == 0) config.dynamical.temp_min = std::stod(parse_value("--dyn-temp-min="));
+            else if (arg.find("--dyn-temp-max=") == 0) config.dynamical.temp_max = std::stod(parse_value("--dyn-temp-max="));
+            else if (arg.find("--dyn-temp-bins=") == 0) config.dynamical.num_temp_bins = std::stoi(parse_value("--dyn-temp-bins="));
+            else if (arg == "--dyn-correlation") config.dynamical.compute_correlation = true;
+            else if (arg.find("--dyn-operator=") == 0) config.dynamical.operator_file = parse_value("--dyn-operator=");
+            else if (arg.find("--dyn-operator2=") == 0) config.dynamical.operator2_file = parse_value("--dyn-operator2=");
+            else if (arg.find("--dyn-output=") == 0) config.dynamical.output_prefix = parse_value("--dyn-output=");
+            else if (arg.find("--dyn-seed=") == 0) config.dynamical.random_seed = std::stoul(parse_value("--dyn-seed="));
+            // Static response options
+            else if (arg.find("--static-samples=") == 0) config.static_resp.num_random_states = std::stoi(parse_value("--static-samples="));
+            else if (arg.find("--static-krylov=") == 0) config.static_resp.krylov_dim = std::stoi(parse_value("--static-krylov="));
+            else if (arg.find("--static-temp-min=") == 0) config.static_resp.temp_min = std::stod(parse_value("--static-temp-min="));
+            else if (arg.find("--static-temp-max=") == 0) config.static_resp.temp_max = std::stod(parse_value("--static-temp-max="));
+            else if (arg.find("--static-temp-points=") == 0) config.static_resp.num_temp_points = std::stoi(parse_value("--static-temp-points="));
+            else if (arg == "--static-no-susceptibility") config.static_resp.compute_susceptibility = false;
+            else if (arg == "--static-correlation") config.static_resp.compute_correlation = true;
+            else if (arg == "--static-expectation") {
+                config.static_resp.single_operator_mode = true;
+                config.workflow.compute_static_response = true;
+            }
+            else if (arg.find("--static-operator=") == 0) config.static_resp.operator_file = parse_value("--static-operator=");
+            else if (arg.find("--static-operator2=") == 0) config.static_resp.operator2_file = parse_value("--static-operator2=");
+            else if (arg.find("--static-output=") == 0) config.static_resp.output_prefix = parse_value("--static-output=");
+            else if (arg.find("--static-seed=") == 0) config.static_resp.random_seed = std::stoul(parse_value("--static-seed="));
             // ARPACK options
             else if (arg.find("--arpack-which=") == 0) config.arpack.which = parse_value("--arpack-which=");
             else if (arg.find("--arpack-ncv=") == 0) config.arpack.ncv = std::stoi(parse_value("--arpack-ncv="));
