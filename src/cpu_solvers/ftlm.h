@@ -343,6 +343,51 @@ DynamicalResponseResults compute_dynamical_correlation(
 );
 
 /**
+ * @brief Compute dynamical correlation S_{O1,O2}(ω) = ⟨O₁†(ω)O₂⟩ for a given state
+ * 
+ * Computes the spectral function S(ω) = Σₙ ⟨ψ|O₁†|n⟩⟨n|O₂|ψ⟩ δ(ω - Eₙ)
+ * where |n⟩ are eigenstates of H with energy Eₙ, for a specific state |ψ⟩.
+ * 
+ * This is the single-state version of compute_dynamical_correlation.
+ * Use this when you have a specific quantum state (e.g., ground state, 
+ * excited state, or thermal state) rather than averaging over random samples.
+ * 
+ * The calculation uses the Lehmann representation:
+ * - Applies O₂ to the given state: |φ⟩ = O₂|ψ⟩
+ * - Builds Krylov subspace from |φ⟩ using H
+ * - Diagonalizes H in Krylov basis to get approximate eigenstates |n⟩
+ * - Computes ⟨ψ|O₁†|n⟩ and ⟨n|O₂|ψ⟩
+ * - Constructs S(ω) with Lorentzian broadening
+ * 
+ * For the same operator (O1=O2=O), this gives the spectral density.
+ * For different operators, it gives cross-correlations.
+ * 
+ * @param H Hamiltonian matrix-vector product function
+ * @param O1 First operator (O₁) matrix-vector product function
+ * @param O2 Second operator (O₂) matrix-vector product function
+ * @param state Input quantum state |ψ⟩ (should be normalized)
+ * @param N Hilbert space dimension
+ * @param params Parameters for dynamical response calculation
+ * @param omega_min Minimum frequency
+ * @param omega_max Maximum frequency
+ * @param num_omega_bins Number of frequency points
+ * @param temperature Temperature for Boltzmann weighting (0 = no weighting)
+ * @return DynamicalResponseResults containing S_{O1,O2}(ω) vs frequency
+ */
+DynamicalResponseResults compute_dynamical_correlation_state(
+    std::function<void(const Complex*, Complex*, int)> H,
+    std::function<void(const Complex*, Complex*, int)> O1,
+    std::function<void(const Complex*, Complex*, int)> O2,
+    const ComplexVector& state,
+    int N,
+    const DynamicalResponseParameters& params,
+    double omega_min,
+    double omega_max,
+    int num_omega_bins,
+    double temperature = 0.0
+);
+
+/**
  * @brief Save dynamical response results to file
  * 
  * @param results Dynamical response results to save

@@ -1115,6 +1115,228 @@ DynamicalResponseResults compute_dynamical_correlation(
     
     return results;
 }
+
+/**
+ * @brief Compute dynamical correlation S_{O1,O2}(ω) = ⟨O₁†(ω)O₂⟩ for a given state
+ * 
+ * Computes the spectral function S(ω) = Σₙ ⟨ψ|O₁†|n⟩⟨n|O₂|ψ⟩ δ(ω - Eₙ)
+ * where |n⟩ are eigenstates of H with energy Eₙ, for a specific state |ψ⟩.
+ * 
+ * This function uses the Lehmann representation computed via Lanczos:
+ * - Applies O₂ to the given state: |φ⟩ = O₂|ψ⟩
+ * - Builds Krylov subspace starting from |φ⟩
+ * - Diagonalizes H in the Krylov basis to get approximate eigenstates
+ * - Computes weights: ⟨ψ|O₁†|n⟩⟨n|O₂|ψ⟩
+ * - Constructs spectral function with Lorentzian broadening
+ * 
+ * @param H Hamiltonian matrix-vector product function
+ * @param O1 First operator (O₁) matrix-vector product function
+ * @param O2 Second operator (O₂) matrix-vector product function
+ * @param state Input quantum state |ψ⟩ (must be normalized)
+ * @param N Hilbert space dimension
+ * @param params Parameters for dynamical response calculation
+ * @param omega_min Minimum frequency
+ * @param omega_max Maximum frequency
+ * @param num_omega_bins Number of frequency points
+ * @param temperature Temperature for Boltzmann weighting of eigenstates (0 = no weighting)
+ * @return DynamicalResponseResults containing S_{O1,O2}(ω) vs frequency
+ */
+DynamicalResponseResults compute_dynamical_correlation_state(
+    std::function<void(const Complex*, Complex*, int)> H,
+    std::function<void(const Complex*, Complex*, int)> O1,
+    std::function<void(const Complex*, Complex*, int)> O2,
+    const ComplexVector& state,
+    int N,
+    const DynamicalResponseParameters& params,
+    double omega_min,
+    double omega_max,
+    int num_omega_bins,
+    double temperature
+){
+    std::cout << "\n==========================================\n";
+    std::cout << "Dynamical Correlation (Given State): S(ω) = ⟨O₁†(ω)O₂⟩\n";
+    std::cout << "==========================================\n";
+    std::cout << "Hilbert space dimension: " << N << std::endl;
+    std::cout << "Krylov dimension: " << params.krylov_dim << std::endl;
+    std::cout << "Frequency range: [" << omega_min << ", " << omega_max << "]" << std::endl;
+    std::cout << "Broadening: " << params.broadening << std::endl;
+    if (temperature > 1e-14) {
+        std::cout << "Temperature: " << temperature << std::endl;
+    } else {
+        std::cout << "Temperature: 0 (no thermal weighting)" << std::endl;
+    }
+    
+    DynamicalResponseResults results;
+    results.total_samples = 1;
+    
+    // Generate frequency grid
+    results.frequencies.resize(num_omega_bins);
+    double omega_step = (omega_max - omega_min) / std::max(1, num_omega_bins - 1);
+    for (int i = 0; i < num_omega_bins; i++) {
+        results.frequencies[i] = omega_min + i * omega_step;
+    }
+    
+    // Verify state is normalized
+    double state_norm = cblas_dznrm2(N, state.data(), 1);
+    if (std::abs(state_norm - 1.0) > 1e-10) {
+        std::cout << "  Warning: Input state norm = " << state_norm << " (expected 1.0)\n";
+        std::cout << "  Normalizing state...\n";
+    }
+    
+    ComplexVector psi = state;
+    Complex scale(1.0/state_norm, 0.0);
+    cblas_zscal(N, &scale, psi.data(), 1);
+    
+    // Apply operator O2: |φ⟩ = O₂|ψ⟩
+    ComplexVector phi(N);
+    O2(psi.data(), phi.data(), N);
+    
+    // Get norm of |φ⟩
+    double phi_norm = cblas_dznrm2(N, phi.data(), 1);
+    if (phi_norm < 1e-14) {
+        std::cerr << "  Error: O₂|ψ⟩ has zero norm\n";
+        results.spectral_function.resize(num_omega_bins, 0.0);
+        results.spectral_error.resize(num_omega_bins, 0.0);
+        return results;
+    }
+    
+    std::cout << "  Norm of O₂|ψ⟩: " << phi_norm << std::endl;
+    
+    // Normalize |φ⟩
+    Complex phi_scale(1.0/phi_norm, 0.0);
+    cblas_zscal(N, &phi_scale, phi.data(), 1);
+    
+    // Build Lanczos tridiagonal for H starting from |φ⟩
+    std::vector<double> alpha, beta;
+    std::vector<ComplexVector> lanczos_vectors;
+    lanczos_vectors.push_back(phi);
+    
+    ComplexVector v_current = phi;
+    ComplexVector v_prev(N, Complex(0.0, 0.0));
+    ComplexVector v_next(N);
+    ComplexVector w(N);
+    
+    beta.push_back(0.0);
+    int max_iter = std::min(N, params.krylov_dim);
+    
+    // Lanczos iteration
+    for (int j = 0; j < max_iter; j++) {
+        H(v_current.data(), w.data(), N);
+        
+        if (j > 0) {
+            Complex neg_beta(-beta[j], 0.0);
+            cblas_zaxpy(N, &neg_beta, v_prev.data(), 1, w.data(), 1);
+        }
+        
+        Complex dot_product;
+        cblas_zdotc_sub(N, v_current.data(), 1, w.data(), 1, &dot_product);
+        alpha.push_back(std::real(dot_product));
+        
+        Complex neg_alpha(-alpha[j], 0.0);
+        cblas_zaxpy(N, &neg_alpha, v_current.data(), 1, w.data(), 1);
+        
+        // Reorthogonalization
+        if (params.full_reorthogonalization) {
+            for (const auto& v : lanczos_vectors) {
+                Complex overlap;
+                cblas_zdotc_sub(N, v.data(), 1, w.data(), 1, &overlap);
+                Complex neg_overlap(-overlap.real(), -overlap.imag());
+                cblas_zaxpy(N, &neg_overlap, v.data(), 1, w.data(), 1);
+            }
+        } else if (params.reorth_frequency > 0 && (j + 1) % params.reorth_frequency == 0) {
+            for (const auto& v : lanczos_vectors) {
+                Complex overlap;
+                cblas_zdotc_sub(N, v.data(), 1, w.data(), 1, &overlap);
+                if (std::abs(overlap) > params.tolerance) {
+                    Complex neg_overlap(-overlap.real(), -overlap.imag());
+                    cblas_zaxpy(N, &neg_overlap, v.data(), 1, w.data(), 1);
+                }
+            }
+        }
+        
+        double norm = cblas_dznrm2(N, w.data(), 1);
+        beta.push_back(norm);
+        
+        if (norm < params.tolerance) {
+            std::cout << "  Converged at iteration " << j + 1 << std::endl;
+            break;
+        }
+        
+        for (int i = 0; i < N; i++) {
+            v_next[i] = w[i] / norm;
+        }
+        
+        lanczos_vectors.push_back(v_next);
+        v_prev = v_current;
+        v_current = v_next;
+    }
+    
+    int m = alpha.size();
+    std::cout << "  Lanczos iterations: " << m << std::endl;
+    
+    // Diagonalize tridiagonal
+    std::vector<double> diag = alpha;
+    std::vector<double> offdiag(m - 1);
+    for (int i = 0; i < m - 1; i++) {
+        offdiag[i] = beta[i + 1];
+    }
+    
+    std::vector<double> evecs(m * m);
+    int info = LAPACKE_dstevd(LAPACK_COL_MAJOR, 'V', m, diag.data(), offdiag.data(), evecs.data(), m);
+    
+    if (info != 0) {
+        std::cerr << "  Error: Tridiagonal diagonalization failed\n";
+        results.spectral_function.resize(num_omega_bins, 0.0);
+        results.spectral_error.resize(num_omega_bins, 0.0);
+        return results;
+    }
+    
+    // Extract Ritz values
+    std::vector<double> ritz_values(m);
+    for (int i = 0; i < m; i++) {
+        ritz_values[i] = diag[i];
+    }
+    
+    // Compute weights for S(ω) = Σₙ ⟨ψ|O₁†|n⟩⟨n|O₂|ψ⟩ δ(ω - Eₙ)
+    // where |n⟩ are eigenstates in the Krylov basis
+    
+    // Apply O1 to original state: |O₁ψ⟩
+    ComplexVector O1_psi(N);
+    O1(psi.data(), O1_psi.data(), N);
+    
+    std::vector<double> weights(m);
+    
+    for (int n = 0; n < m; n++) {
+        // Compute ⟨ψ|O₁†|n⟩ = ⟨O₁ψ|n⟩ = Σⱼ evecs[n,j] ⟨O₁ψ|vⱼ⟩
+        Complex overlap_O1 = Complex(0.0, 0.0);
+        for (int j = 0; j < m; j++) {
+            Complex bracket;
+            cblas_zdotc_sub(N, O1_psi.data(), 1, lanczos_vectors[j].data(), 1, &bracket);
+            overlap_O1 += Complex(evecs[n * m + j], 0.0) * bracket;
+        }
+        
+        // Compute ⟨n|O₂|ψ⟩ = evecs[n,0] × ||O₂|ψ|| (since |v₀⟩ = O₂|ψ⟩/||O₂|ψ||)
+        Complex overlap_O2 = Complex(evecs[n * m + 0] * phi_norm, 0.0);
+        
+        // Weight is ⟨ψ|O₁†|n⟩⟨n|O₂|ψ⟩ (complex product, take real part for spectral weight)
+        Complex weight_complex = std::conj(overlap_O1) * overlap_O2;
+        weights[n] = weight_complex.real();  // Spectral function is real
+    }
+    
+    // Compute spectral function
+    compute_spectral_function(ritz_values, weights, results.frequencies,
+                             params.broadening, temperature, results.spectral_function);
+    
+    // No error bars for single state
+    results.spectral_error.resize(num_omega_bins, 0.0);
+    
+    std::cout << "\n==========================================\n";
+    std::cout << "Dynamical Correlation (Given State) Complete\n";
+    std::cout << "==========================================\n";
+    
+    return results;
+}
+
 /**
  * @brief Helper function to compute expectation values in Krylov basis
  */

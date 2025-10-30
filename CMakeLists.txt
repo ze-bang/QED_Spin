@@ -309,7 +309,8 @@ else()
 endif()
 
 # Add TPQ_DSSF executable (only if MPI is enabled since it uses MPI)
-add_executable(TPQ_DSSF ${CORE_DIR}/TPQ_DSSF.cpp ${CPU_SOLVERS_DIR}/dynamics.cpp ${CPU_SOLVERS_DIR}/TPQ.cpp)
+add_executable(TPQ_DSSF ${CORE_DIR}/TPQ_DSSF.cpp ${CPU_SOLVERS_DIR}/dynamics.cpp ${CPU_SOLVERS_DIR}/TPQ.cpp ${CPU_SOLVERS_DIR}/ftlm.cpp)
+
 
 # Link libraries for new main
 target_link_libraries(ED

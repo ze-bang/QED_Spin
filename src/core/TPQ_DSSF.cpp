@@ -17,6 +17,7 @@
 #include "observables.h"
 #include <mpi.h>
 #include "../cpu_solvers/dynamics.h"
+#include "../cpu_solvers/ftlm.h"
 #ifdef ENABLE_GPU
 #include "../gpu/gpu_operator.cuh"
 #include "../gpu/gpu_dynamics.cuh"
@@ -177,13 +178,17 @@ int main(int argc, char* argv[]) {
     if (argc < 6 || argc > 15) {
         if (rank == 0) {
             std::cerr << "Usage: " << argv[0] << " <directory> <num_sites> <spin_length> <krylov_dim_or_nmax> <spin_combinations> [method] [operator_type] [basis] [dt,t_end] [unit_cell_size] [momentum_points] [polarization] [theta] [use_gpu]" << std::endl;
-            std::cerr << "  method (optional): krylov (default) | taylor" << std::endl;
+            std::cerr << "  method (optional): krylov (default) | taylor | spectral" << std::endl;
+            std::cerr << "    - krylov: Time-domain correlation using Krylov time evolution" << std::endl;
+            std::cerr << "    - taylor: Time-domain correlation using Taylor expansion" << std::endl;
+            std::cerr << "    - spectral: Frequency-domain spectral function S(ω) = ⟨O₁†(ω)O₂⟩" << std::endl;
             std::cerr << "  operator_type (optional): sum (default) | transverse | sublattice | experimental | transverse_experimental" << std::endl;
             std::cerr << "  basis (optional): ladder (default) | xyz" << std::endl;
             std::cerr << "    - ladder: Use Sp/Sm/Sz operators (raising/lowering operators)" << std::endl;
             std::cerr << "    - xyz: Use Sx/Sy/Sz operators (Cartesian components)" << std::endl;
             std::cerr << "    - Note: experimental operator type always uses xyz basis internally" << std::endl;
             std::cerr << "  dt,t_end (optional, only for taylor): e.g. 0.01,50.0" << std::endl;
+            std::cerr << "    For spectral method: omega_min,omega_max,num_omega_bins,broadening (e.g. -5.0,5.0,200,0.1)" << std::endl;
             std::cerr << "  spin_combinations format: \"op1,op2;op3,op4;...\" where op is:" << std::endl;
             std::cerr << "    - ladder basis: 0=Sp, 1=Sm, 2=Sz" << std::endl;
             std::cerr << "    - xyz basis: 0=Sx, 1=Sy, 2=Sz" << std::endl;
@@ -222,17 +227,48 @@ int main(int argc, char* argv[]) {
     
     double dt_opt = 0.01;
     double t_end_opt = 50.0;
+    double omega_min = -5.0;
+    double omega_max = 5.0;
+    int num_omega_bins = 200;
+    double broadening = 0.1;
+    
     if (argc >= 10) {
-        // Parse dt,t_end combined argument
-        std::string dt_tend = argv[9];
-        auto comma_pos = dt_tend.find(',');
-        if (comma_pos != std::string::npos) {
+        std::string param_str = argv[9];
+        
+        if (method == "spectral") {
+            // Parse omega_min,omega_max,num_omega_bins,broadening for spectral method
+            std::stringstream ss(param_str);
+            std::string val;
+            std::vector<std::string> tokens;
+            while (std::getline(ss, val, ',')) {
+                tokens.push_back(val);
+            }
+            
             try {
-                dt_opt = std::stod(dt_tend.substr(0, comma_pos));
-                t_end_opt = std::stod(dt_tend.substr(comma_pos + 1));
+                if (tokens.size() >= 1) omega_min = std::stod(tokens[0]);
+                if (tokens.size() >= 2) omega_max = std::stod(tokens[1]);
+                if (tokens.size() >= 3) num_omega_bins = std::stoi(tokens[2]);
+                if (tokens.size() >= 4) broadening = std::stod(tokens[3]);
+                if (rank == 0) {
+                    std::cout << "Spectral method parameters: omega=[" << omega_min << "," << omega_max 
+                              << "], bins=" << num_omega_bins << ", broadening=" << broadening << std::endl;
+                }
             } catch (...) {
                 if (rank == 0) {
-                    std::cerr << "Warning: failed to parse dt,t_end argument. Using defaults 0.01,50.0" << std::endl;
+                    std::cerr << "Warning: failed to parse spectral parameters. Using defaults." << std::endl;
+                }
+            }
+        } else {
+            // Parse dt,t_end for time-domain methods
+            auto comma_pos = param_str.find(',');
+            if (comma_pos != std::string::npos) {
+                try {
+                    dt_opt = std::stod(param_str.substr(0, comma_pos));
+                    t_end_opt = std::stod(param_str.substr(comma_pos + 1));
+                } catch (...) {
+                    if (rank == 0) {
+                        std::cerr << "Warning: failed to parse dt,t_end argument. Using defaults 0.01,50.0" << std::endl;
+                    }
                 }
             }
         }
@@ -1105,6 +1141,46 @@ int main(int argc, char* argv[]) {
                         H, tpq_state, obs_1, obs_2, obs_names,
                         N, method_dir, sample_index, beta, t_end_opt, dt_opt, krylov_dim
                     );
+                } else if (method == "spectral") {
+                    // Use spectral method with FTLM approach
+                    int krylov_dim = krylov_dim_or_nmax;
+                    
+                    // Set up FTLM parameters
+                    DynamicalResponseParameters params;
+                    params.krylov_dim = krylov_dim;
+                    params.broadening = broadening;
+                    params.tolerance = 1e-10;
+                    params.full_reorthogonalization = true;
+                    
+                    // Process each operator pair
+                    for (size_t i = 0; i < obs_1.size(); i++) {
+                        // Create function wrappers for operators
+                        auto O1_func = [&obs_1, i](const Complex* in, Complex* out, int size) {
+                            obs_1[i].apply(in, out, size);
+                        };
+                        
+                        auto O2_func = [&obs_2, i](const Complex* in, Complex* out, int size) {
+                            obs_2[i].apply(in, out, size);
+                        };
+                        
+                        // Compute spectral function
+                        auto results = compute_dynamical_correlation_state(
+                            H, O1_func, O2_func, tpq_state, N, params,
+                            omega_min, omega_max, num_omega_bins, 0.0
+                        );
+                        
+                        // Save results
+                        std::stringstream filename_ss;
+                        filename_ss << method_dir << "/" << obs_names[i] 
+                                    << "_spectral_sample_" << sample_index 
+                                    << "_beta_" << beta << ".txt";
+                        
+                        save_dynamical_response_results(results, filename_ss.str());
+                        
+                        if (rank == 0) {
+                            std::cout << "  Saved spectral function: " << filename_ss.str() << std::endl;
+                        }
+                    }
                 } else {
                     std::cerr << "Rank " << rank << " unknown method: " << method << std::endl;
                     return false;
