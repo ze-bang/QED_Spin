@@ -1,0 +1,26 @@
+# NLCE Cluster Multiplicity Information
+# Generated using state-of-the-art canonical labeling
+# Method: pynauty
+#
+# Format:
+# Cluster_ID | Order | Nodes | Multiplicity | |Aut(C)| | Edges
+#
+# Total clusters: 2
+#
+
+Cluster 1:
+  Order: 1
+  Nodes: [0]
+  Multiplicity: 1.0000000000
+  |Aut(C)|: 1
+  Edges: 0
+  Edge list: []
+
+Cluster 2:
+  Order: 2
+  Nodes: [0, 1]
+  Multiplicity: 0.8702190258
+  |Aut(C)|: 2.0
+  Edges: 1
+  Edge list: [(0, 1)]
+

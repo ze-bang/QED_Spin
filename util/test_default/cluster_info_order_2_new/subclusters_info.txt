@@ -1,0 +1,9 @@
+# Subclusters information for each topologically distinct cluster
+# Format: Cluster_ID, Order, Multiplicity, Subclusters[(ID, Multiplicity), ...]
+
+Cluster 1 (Order 1):
+  No subclusters (order 1 cluster)
+
+Cluster 2 (Order 2):
+  Subclusters: (1, 2)
+
