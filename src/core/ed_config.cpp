@@ -110,6 +110,22 @@ EDConfig EDConfig::fromFile(const std::string& filename) {
             else if (key == "ftlm_seed") config.thermal.ftlm_seed = std::stoul(value);
             else if (key == "ftlm_store_samples") config.thermal.ftlm_store_samples = (value == "true" || value == "1");
             else if (key == "ftlm_error_bars") config.thermal.ftlm_error_bars = (value == "true" || value == "1");
+            // LTLM parameters
+            else if (key == "ltlm_num_eigenstates") config.thermal.ltlm_num_eigenstates = std::stoi(value);
+            else if (key == "ltlm_krylov_dim") config.thermal.ltlm_krylov_dim = std::stoi(value);
+            else if (key == "ltlm_tolerance") config.thermal.ltlm_tolerance = std::stod(value);
+            else if (key == "ltlm_full_reorth") config.thermal.ltlm_full_reorth = (value == "true" || value == "1");
+            else if (key == "ltlm_reorth_freq") config.thermal.ltlm_reorth_freq = std::stoi(value);
+            else if (key == "ltlm_seed") config.thermal.ltlm_seed = std::stoul(value);
+            else if (key == "ltlm_store_eigenvectors") config.thermal.ltlm_store_eigenvectors = (value == "true" || value == "1");
+            else if (key == "ltlm_verify_eigenvalues") config.thermal.ltlm_verify_eigenvalues = (value == "true" || value == "1");
+            else if (key == "ltlm_residual_tol") config.thermal.ltlm_residual_tol = std::stod(value);
+            else if (key == "ltlm_degeneracy_threshold") config.thermal.ltlm_degeneracy_threshold = std::stod(value);
+            // HYBRID mode parameters
+            else if (key == "hybrid_mode") config.thermal.hybrid_mode = (value == "true" || value == "1");
+            else if (key == "hybrid_crossover_temp") config.thermal.hybrid_crossover_temp = std::stod(value);
+            else if (key == "hybrid_overlap_bins") config.thermal.hybrid_overlap_bins = std::stoi(value);
+            else if (key == "hybrid_ltlm_temp_max") config.thermal.hybrid_ltlm_temp_max = std::stod(value);
             else if (key == "calc_observables") config.observable.calculate = (value == "true" || value == "1");
             else if (key == "measure_spin") config.observable.measure_spin = (value == "true" || value == "1");
             else if (key == "run_standard") config.workflow.run_standard = (value == "true" || value == "1");

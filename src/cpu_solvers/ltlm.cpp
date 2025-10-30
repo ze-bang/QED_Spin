@@ -568,3 +568,4 @@ void save_eigenspectrum(
     file.close();
     std::cout << "Eigenspectrum saved to: " << filename << std::endl;
 }
+

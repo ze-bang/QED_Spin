@@ -265,6 +265,7 @@ set(SOURCES
     ${CPU_SOLVERS_DIR}/TPQ.cpp
     ${CPU_SOLVERS_DIR}/ftlm.cpp
     ${CPU_SOLVERS_DIR}/ltlm.cpp
+    ${CPU_SOLVERS_DIR}/hybrid_thermal.cpp
 )
 
 # Header-only sources that should be included in compilation

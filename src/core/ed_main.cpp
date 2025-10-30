@@ -6,6 +6,9 @@
 #include "ed_wrapper.h"
 #include "construct_ham.h"
 #include "../cpu_solvers/ftlm.h"
+// Note: LTLM and hybrid thermal support will be integrated in future updates
+// #include "../cpu_solvers/ltlm.h"
+// #include "../cpu_solvers/hybrid_thermal.h"
 
 /**
  * @file ed_main.cpp
