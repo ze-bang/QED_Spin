@@ -487,6 +487,48 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|amd64|AMD64")
     endif()
 endif()
 
+# CPU optimization flags
+set(CPU_OPT_FLAGS "")
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    list(APPEND CPU_OPT_FLAGS
+        -O3                          # Maximum optimization
+        -march=native                # Optimize for the build machine's CPU
+        -mtune=native                # Tune for the build machine's CPU
+        -ffast-math                  # Aggressive floating-point optimizations
+        -funroll-loops               # Unroll loops for better performance
+        -ftree-vectorize             # Enable auto-vectorization
+        -fomit-frame-pointer         # Remove frame pointer for extra register
+    )
+    
+    # Additional flags for GCC
+    if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+        list(APPEND CPU_OPT_FLAGS
+            -fprefetch-loop-arrays   # Enable prefetching
+            -fipa-pta                # Inter-procedural pointer analysis
+        )
+    endif()
+    
+    # Additional flags for Clang
+    if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+        list(APPEND CPU_OPT_FLAGS
+            -fvectorize              # Explicit vectorization flag
+        )
+    endif()
+    
+    message(STATUS "  CPU Optimization Flags: ${CPU_OPT_FLAGS}")
+endif()
+
+# Apply CPU optimization flags to all targets
+target_compile_options(ED PRIVATE
+    $<$<COMPILE_LANGUAGE:CXX>:${CPU_OPT_FLAGS}>
+)
+
+if(TARGET TPQ_DSSF)
+    target_compile_options(TPQ_DSSF PRIVATE
+        $<$<COMPILE_LANGUAGE:CXX>:${CPU_OPT_FLAGS}>
+    )
+endif()
+
 # CUDA-specific compile options
 if(WITH_CUDA)
 

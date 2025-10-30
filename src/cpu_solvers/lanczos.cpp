@@ -2339,6 +2339,8 @@ void full_diagonalization(std::function<void(const Complex*, Complex*, int)> H, 
     std::cout << "Full diagonalization completed successfully" << std::endl;
 }
 
+
+
 // Krylov-Schur algorithm implementation
 void krylov_schur(std::function<void(const Complex*, Complex*, int)> H, int N, int max_iter, 
                   int num_eigs, double tol, std::vector<double>& eigenvalues, std::string dir,

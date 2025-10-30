@@ -520,7 +520,107 @@ public:
         matrixBuilt_ = false;
     }
     
+    /**
+     * Matrix-free apply: H|vec⟩ using on-the-fly transform evaluation
+     * Faster and more memory-efficient than building sparse matrix
+     * Parallelized with OpenMP for multi-core performance
+     */
     std::vector<Complex> apply(const std::vector<Complex>& vec) const {
+        int dim = 1 << n_bits_;
+        if (vec.size() != static_cast<size_t>(dim)) {
+            throw std::invalid_argument("Input vector size mismatch");
+        }
+        
+        std::vector<Complex> result(dim, Complex(0.0, 0.0));
+        
+        // Parallel reduction: each thread accumulates to local buffer, then combine
+        #pragma omp parallel if(dim > 1024)
+        {
+            std::vector<Complex> local_result(dim, Complex(0.0, 0.0));
+            
+            #pragma omp for schedule(static) nowait
+            for (int i = 0; i < dim; ++i) {
+                Complex coeff = vec[i];
+                if (std::abs(coeff) < 1e-15) continue;
+                
+                // Prefetch next input (helps if vec is large)
+                if (i + 8 < dim) {
+                    __builtin_prefetch(&vec[i + 8], 0, 1);
+                }
+                
+                // Apply all transforms to this basis state
+                for (const auto& transform : transforms_) {
+                    auto [j, scalar] = transform(i);
+                    if (j >= 0 && j < dim && std::abs(scalar) > 1e-15) {
+                        local_result[j] += scalar * coeff;
+                    }
+                }
+            }
+            
+            // Combine local results with critical section
+            #pragma omp critical
+            {
+                for (int i = 0; i < dim; ++i) {
+                    result[i] += local_result[i];
+                }
+            }
+        }
+        
+        return result;
+    }
+    
+    /**
+     * Matrix-free apply for raw arrays (optimized for Lanczos/Davidson solvers)
+     * Parallelized with OpenMP and optimized memory access patterns
+     */
+    void apply(const Complex* in, Complex* out, size_t size) const {
+        int dim = 1 << n_bits_;
+        if (size != static_cast<size_t>(dim)) {
+            throw std::invalid_argument("Input/output vector size mismatch");
+        }
+        
+        // Zero output
+        std::fill(out, out + dim, Complex(0.0, 0.0));
+        
+        // Parallel with thread-local buffers to avoid race conditions
+        #pragma omp parallel if(dim > 1024)
+        {
+            std::vector<Complex> local_out(dim, Complex(0.0, 0.0));
+            
+            #pragma omp for schedule(static) nowait
+            for (int i = 0; i < dim; ++i) {
+                Complex coeff = in[i];
+                if (std::abs(coeff) < 1e-15) continue;
+                
+                // Prefetch ahead
+                if (i + 8 < dim) {
+                    __builtin_prefetch(&in[i + 8], 0, 1);
+                }
+                
+                // Apply all transforms
+                for (const auto& transform : transforms_) {
+                    auto [j, scalar] = transform(i);
+                    if (j >= 0 && j < dim && std::abs(scalar) > 1e-15) {
+                        local_out[j] += scalar * coeff;
+                    }
+                }
+            }
+            
+            // Reduce: combine thread-local results
+            #pragma omp critical
+            {
+                for (int i = 0; i < dim; ++i) {
+                    out[i] += local_out[i];
+                }
+            }
+        }
+    }
+    
+    /**
+     * Original apply methods (use sparse matrix - kept for compatibility)
+     * For matrix-free operation, use apply() instead
+     */
+    std::vector<Complex> apply_sparse(const std::vector<Complex>& vec) const {
         int dim = 1 << n_bits_;
         if (vec.size() != static_cast<size_t>(dim)) {
             throw std::invalid_argument("Input vector size mismatch");
@@ -541,7 +641,7 @@ public:
         return resultVec;
     }
     
-    void apply(const Complex* in, Complex* out, size_t size) const {
+    void apply_sparse(const Complex* in, Complex* out, size_t size) const {
         int dim = 1 << n_bits_;
         if (size != static_cast<size_t>(dim)) {
             throw std::invalid_argument("Input/output vector size mismatch");
@@ -1168,10 +1268,121 @@ public:
     const std::vector<uint64_t>& getBasisStates() const { return basis_states_; }
     
     /**
-     * Apply operator to vector in fixed Sz basis
-     * Override to work with reduced dimension
+     * Matrix-free apply for fixed Sz basis
+     * More efficient than building matrix
+     * Parallelized with OpenMP
      */
     std::vector<Complex> apply(const std::vector<Complex>& vec) const {
+        if (vec.size() != static_cast<size_t>(fixed_sz_dim_)) {
+            throw std::invalid_argument("Input vector size mismatch with fixed Sz dimension");
+        }
+        
+        std::vector<Complex> result(fixed_sz_dim_, Complex(0.0, 0.0));
+        
+        // Parallel with thread-local buffers
+        #pragma omp parallel if(fixed_sz_dim_ > 512)
+        {
+            std::vector<Complex> local_result(fixed_sz_dim_, Complex(0.0, 0.0));
+            
+            #pragma omp for schedule(static) nowait
+            for (int i = 0; i < fixed_sz_dim_; ++i) {
+                Complex coeff = vec[i];
+                if (std::abs(coeff) < 1e-15) continue;
+                
+                uint64_t basis_i = basis_states_[i];
+                
+                // Prefetch next basis state
+                if (i + 4 < fixed_sz_dim_) {
+                    __builtin_prefetch(&basis_states_[i + 4], 0, 1);
+                    __builtin_prefetch(&vec[i + 4], 0, 1);
+                }
+                
+                // Apply all transforms
+                for (const auto& transform : transforms_) {
+                    auto [j_state, scalar] = transform(basis_i);
+                    
+                    // Check if resulting state is in the fixed Sz sector
+                    if (j_state >= 0 && popcount(j_state) == n_up_ && std::abs(scalar) > 1e-15) {
+                        auto it = state_to_index_.find(j_state);
+                        if (it != state_to_index_.end()) {
+                            int j = it->second;
+                            local_result[j] += scalar * coeff;
+                        }
+                    }
+                }
+            }
+            
+            // Reduce thread-local results
+            #pragma omp critical
+            {
+                for (int i = 0; i < fixed_sz_dim_; ++i) {
+                    result[i] += local_result[i];
+                }
+            }
+        }
+        
+        return result;
+    }
+    
+    /**
+     * Matrix-free apply for raw arrays (optimized for solvers)
+     * Parallelized with OpenMP
+     */
+    void apply(const Complex* in, Complex* out, size_t size) const {
+        if (size != static_cast<size_t>(fixed_sz_dim_)) {
+            throw std::invalid_argument("Input/output vector size mismatch with fixed Sz dimension");
+        }
+        
+        // Zero output
+        std::fill(out, out + fixed_sz_dim_, Complex(0.0, 0.0));
+        
+        // Parallel with thread-local buffers
+        #pragma omp parallel if(fixed_sz_dim_ > 512)
+        {
+            std::vector<Complex> local_out(fixed_sz_dim_, Complex(0.0, 0.0));
+            
+            #pragma omp for schedule(static) nowait
+            for (int i = 0; i < fixed_sz_dim_; ++i) {
+                Complex coeff = in[i];
+                if (std::abs(coeff) < 1e-15) continue;
+                
+                uint64_t basis_i = basis_states_[i];
+                
+                // Prefetch ahead
+                if (i + 4 < fixed_sz_dim_) {
+                    __builtin_prefetch(&basis_states_[i + 4], 0, 1);
+                    __builtin_prefetch(&in[i + 4], 0, 1);
+                }
+                
+                // Apply all transforms
+                for (const auto& transform : transforms_) {
+                    auto [j_state, scalar] = transform(basis_i);
+                    
+                    if (j_state >= 0 && popcount(j_state) == n_up_ && std::abs(scalar) > 1e-15) {
+                        auto it = state_to_index_.find(j_state);
+                        if (it != state_to_index_.end()) {
+                            int j = it->second;
+                            local_out[j] += scalar * coeff;
+                        }
+                    }
+                }
+            }
+            
+            // Reduce
+            #pragma omp critical
+            {
+                for (int i = 0; i < fixed_sz_dim_; ++i) {
+                    out[i] += local_out[i];
+                }
+            }
+        }
+    }
+    
+    /**
+     * Apply operator to vector in fixed Sz basis (uses sparse matrix)
+     * For matrix-free operation, use apply() instead
+     */
+    std::vector<Complex> apply_sparse(const std::vector<Complex>& vec) const {
         if (vec.size() != static_cast<size_t>(fixed_sz_dim_)) {
             throw std::invalid_argument("Input vector size mismatch with fixed Sz dimension");
         }
@@ -1195,7 +1406,7 @@ public:
     /**
      * Apply operator to raw arrays in fixed Sz basis
      */
-    void apply(const Complex* in, Complex* out, size_t size) const {
+    void apply_sparse(const Complex* in, Complex* out, size_t size) const {
         if (size != static_cast<size_t>(fixed_sz_dim_)) {
             throw std::invalid_argument("Input/output vector size mismatch with fixed Sz dimension");
         }

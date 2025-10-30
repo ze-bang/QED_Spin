@@ -162,7 +162,7 @@ void computeDynamicCorrelationsKrylov(
         time_corr_out.flush();
         
         // Time evolution loop using Krylov method
-        // Want to compute <O_1(t) O_2(0)> = ⟨ψ| e^{iHt} O_2 e^{-iHt} O_1 |ψ⟩
+        // Want to compute <O_2(t) O_1(0)> = ⟨ψ| e^{iHt} O_2 e^{-iHt} O_1 |ψ⟩
         // which is equivalent to ⟨ψ(t)| O_2 |ψ_O1(t)⟩
         for (int step = 1; step < num_steps; step++) {
             // Evolve states using Krylov method
