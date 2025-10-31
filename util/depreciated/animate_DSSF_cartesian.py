@@ -35,7 +35,7 @@ from mpl_toolkits.mplot3d import Axes3D
 from matplotlib import cm
 
 # Configuration
-BASE_DIR = "/scratch/zhouzb79/DSSF_PCD_mag_field_sweep_CZO_pi_4"
+BASE_DIR = "/scratch/zhouzb79/DSSF_PCD_mag_field_sweep_CZO_pi_4_krylov"
 OUTPUT_DIR = os.path.join(BASE_DIR, "spectral_animations_cartesian")
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
@@ -978,6 +978,144 @@ def create_animation(h_values, freq_data, spectral_data, component_name, output_
     plt.close()
 
 
+def create_spectral_weight_plot(h_values, weights, component_names, colors, q_pattern, suffix, output_file):
+    """
+    Create a plot showing the spectral weight (integral over frequency) for each component.
+    
+    Parameters:
+    - h_values: list of h field values
+    - weights: dict mapping component name -> list of spectral weights
+    - component_names: list of component names
+    - colors: dict mapping component name -> color
+    - q_pattern: Q-vector pattern string
+    - suffix: suffix string
+    - output_file: path to save the plot
+    """
+    # Calculate mixing coefficients for labels
+    cos_theta = np.cos(EXPERIMENTAL_ANGLE)
+    sin_theta = np.sin(EXPERIMENTAL_ANGLE)
+    cos2_theta = cos_theta**2
+    sin2_theta = sin_theta**2
+    sin_cos_theta = sin_theta * cos_theta
+    
+    coefficients = {
+        'SzSz': cos2_theta,
+        'SxSx': sin2_theta,
+        'SxSz': 2 * sin_cos_theta
+    }
+    
+    fig, ax = plt.subplots(figsize=(12, 6))
+    
+    h_values_converted = np.array(h_values) * H_CONVERSION_FACTOR
+    
+    # Plot each component
+    for comp_name in component_names:
+        coeff = coefficients[comp_name]
+        if comp_name == 'SzSz':
+            label = f'{comp_name} (cos²θ = {coeff:.3f})'
+        elif comp_name == 'SxSx':
+            label = f'{comp_name} (sin²θ = {coeff:.3f})'
+        elif comp_name == 'SxSz':
+            label = f'{comp_name} (2sinθcosθ = {coeff:.3f})'
+        else:
+            label = f'{comp_name} ({coeff:.3f})'
+        
+        ax.plot(h_values_converted, weights[comp_name], 'o-', 
+               color=colors[comp_name], linewidth=2.5, markersize=6, 
+               label=label, alpha=0.8)
+    
+    # Plot total
+    ax.plot(h_values_converted, weights['Total'], 'ko-', 
+           linewidth=3.0, markersize=8, label='Total', alpha=0.9)
+    
+    theta_deg = np.degrees(EXPERIMENTAL_ANGLE)
+    ax.set_xlabel('Magnetic Field (h) [T]', fontsize=12)
+    ax.set_ylabel('Spectral Weight (∫S(ω)dω)', fontsize=12)
+    ax.set_title(f'Spectral Weight vs Field - {q_pattern}{suffix} - θ={theta_deg:.1f}°', 
+                fontsize=14, fontweight='bold')
+    ax.legend(loc='best', fontsize=11)
+    ax.grid(True, alpha=0.3)
+    
+    # Limit x-axis to 0.6T
+    ax.set_xlim([0, 0.6])
+    
+    plt.tight_layout()
+    plt.savefig(output_file, dpi=300, bbox_inches='tight')
+    print(f"Saved spectral weight plot: {output_file}")
+    plt.close()
+
+
+def compute_spectral_weights(h_values, freq_data_dict, spectral_data_dict, component_names):
+    """
+    Compute total spectral weight (integral over frequency) for each component at each h value.
+    
+    Parameters:
+    - h_values: list of h field values
+    - freq_data_dict: dict mapping component name -> freq_data dict
+    - spectral_data_dict: dict mapping component name -> spectral_data dict
+    - component_names: list of component names
+    
+    Returns:
+    - weights: dict mapping component name -> list of spectral weights (one per h value)
+    """
+    # Calculate mixing coefficients
+    cos_theta = np.cos(EXPERIMENTAL_ANGLE)
+    sin_theta = np.sin(EXPERIMENTAL_ANGLE)
+    cos2_theta = cos_theta**2
+    sin2_theta = sin_theta**2
+    sin_cos_theta = sin_theta * cos_theta
+    
+    # Define coefficients for each component
+    coefficients = {
+        'SzSz': cos2_theta,
+        'SxSx': sin2_theta,
+        'SxSz': 2 * sin_cos_theta
+    }
+    
+    weights = {comp: [] for comp in component_names}
+    weights['Total'] = []
+    
+    for h in h_values:
+        component_weights = {}
+        
+        for comp_name in component_names:
+            freq_data = freq_data_dict[comp_name]
+            spectral_data = spectral_data_dict[comp_name]
+            coeff = coefficients[comp_name]
+            
+            if h in freq_data and h in spectral_data:
+                freq = freq_data[h]
+                spec = spectral_data[h]
+                
+                # Filter frequency range
+                mask = (freq >= FREQ_MIN) & (freq <= FREQ_MAX)
+                freq_filtered = freq[mask]
+                spec_filtered = spec[mask]
+                
+                # Apply coefficient weighting
+                weighted_spec = coeff * spec_filtered
+                
+                # Compute integral using trapezoidal rule
+                if len(freq_filtered) > 1:
+                    weight = np.trapz(weighted_spec, freq_filtered)
+                else:
+                    weight = 0.0
+                
+                component_weights[comp_name] = weight
+                weights[comp_name].append(weight)
+            else:
+                weights[comp_name].append(np.nan)
+        
+        # Compute total weight
+        if len(component_weights) == len(component_names):
+            total_weight = sum(component_weights.values())
+            weights['Total'].append(total_weight)
+        else:
+            weights['Total'].append(np.nan)
+    
+    return weights
+
+
 def create_overlay_animation(h_values, freq_data_dict, spectral_data_dict, component_names, colors, q_pattern, suffix, output_file):
     """
     Create an overlay animation showing multiple spectral functions on the same plot.
@@ -1805,7 +1943,8 @@ def main():
     # STEP 1: Calculate experimental angle from magnetization data
     # EXPERIMENTAL_ANGLE = calculate_experimental_angle(h_values, h_dirs)
     # EXPERIMENTAL_ANGLE = 0.31416104734 # For Cartesian basis, we set angle to 0
-    EXPERIMENTAL_ANGLE = 40/180*np.pi  # 40 degrees in radians
+    # EXPERIMENTAL_ANGLE = 40/180*np.pi  # 40 degrees in radians
+    EXPERIMENTAL_ANGLE = 0.15
     # Find all unique species (in spherical basis)
     print("\nFinding all spherical basis species...")
     all_species = set()
@@ -2050,6 +2189,18 @@ def main():
                 
                 print(f"    ✓ Comparison plots created")
                 
+                # Compute and plot spectral weights
+                print(f"  Computing spectral weights (integrals over frequency)...")
+                weights = compute_spectral_weights(h_values, freq_dict, spec_dict, component_names)
+                
+                # Create spectral weight plot
+                weight_plot_file = os.path.join(SUBDIRS['experimental'], 
+                                               f"spectral_weight_{q_pattern}{suffix}.png".replace("/", "_").replace(" ", "_"))
+                create_spectral_weight_plot(h_values, weights, component_names, colors, 
+                                           q_pattern, suffix, weight_plot_file)
+                
+                print(f"    ✓ Spectral weight plot created")
+                
                 # Now construct the combined experimental channel
                 print(f"  Constructing combined experimental channel θ={theta_deg:.0f}°...")
                 
@@ -2203,6 +2354,18 @@ def main():
                                         q_pattern, '_DO', scaling_factor, scaled_sidebyside_file)
                 
                 print(f"    ✓ DO comparison plots created")
+                
+                # Compute and plot spectral weights for DO
+                print(f"  Computing DO spectral weights (integrals over frequency)...")
+                weights_do = compute_spectral_weights(h_values, freq_dict, spec_dict, component_names)
+                
+                # Create spectral weight plot for DO
+                weight_plot_file_do = os.path.join(SUBDIRS['experimental'], 
+                                                   f"spectral_weight_{q_pattern}_DO.png".replace("/", "_").replace(" ", "_"))
+                create_spectral_weight_plot(h_values, weights_do, component_names, colors, 
+                                           q_pattern, '_DO', weight_plot_file_do)
+                
+                print(f"    ✓ DO spectral weight plot created")
                 
                 # Construct combined experimental DO channel from DO components
                 print(f"  Constructing combined DO experimental channel θ={theta_deg:.0f}°...")

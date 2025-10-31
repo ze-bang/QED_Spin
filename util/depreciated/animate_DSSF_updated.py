@@ -18,9 +18,16 @@ The species names come from TPQ_DSSF.cpp and include the operator_type prefix:
 - transverse_experimental: TransverseExperimental_q_Qx0_Qy0_Qz0_theta0_SF, etc.
 
 Special Features:
-- Automatically detects and combines SF/NSF pairs into DO (double-differential) channels
-- DO = SF + NSF
-- DO channels are plotted with dashed lines in comparison plots
+1. Automatically detects and combines SF/NSF pairs into DO (double-differential) channels
+   - DO = SF + NSF
+   - Works for both Transverse and TransverseExperimental operator types
+   - DO channels are plotted with dashed lines in comparison plots
+
+2. Overlay visualization for TransverseExperimental
+   - Automatically finds corresponding SxSx and SzSz Transverse species
+   - Computes and overlays: cos²(θ)·SxSx + sin²(θ)·SzSz
+   - This theoretical combination should match TransverseExperimental data
+   - Overlay plots use dotted lines in comparison plots
 """
 
 import numpy as np
@@ -34,7 +41,7 @@ from mpl_toolkits.mplot3d import Axes3D
 from matplotlib import cm
 
 # Configuration
-BASE_DIR = "/scratch/zhouzb79/DSSF_example_output"  # Change to your directory
+BASE_DIR = "/scratch/zhouzb79/DSSF_PCD_mag_field_sweep_CZO_pi_4"  # Change to your directory
 OUTPUT_DIR = os.path.join(BASE_DIR, "spectral_animations")
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
@@ -44,6 +51,7 @@ SUBDIRS = {
     'combined': os.path.join(OUTPUT_DIR, "2_combined_plots"),
     'beta_evolution': os.path.join(OUTPUT_DIR, "3_beta_evolution"),
     'heatmaps': os.path.join(OUTPUT_DIR, "4_heatmaps"),
+    'h_evolution': os.path.join(OUTPUT_DIR, "5_h_field_evolution"),
     'summary': os.path.join(OUTPUT_DIR, "0_summary")
 }
 
@@ -52,12 +60,41 @@ for subdir in SUBDIRS.values():
     os.makedirs(subdir, exist_ok=True)
 
 # Conversion factors (adjust for your system)
+# For magnetic field: adjust based on your system
+H_CONVERSION_FACTOR = 0.063 / (2.5 * 0.0578)  # Default: no conversion
 # For omega values (energy/frequency): Jzz = 0.063 meV for example material
 ENERGY_CONVERSION_FACTOR = 0.063  # converts from Jzz units to meV
 
 # Frequency range limits (in Jzz units)
 FREQ_MIN = -3.0
 FREQ_MAX = 6.0
+
+
+def extract_h_value(h_dir):
+    """Extract numerical h value from directory name like 'h=0.1'"""
+    match = re.search(r'h=([0-9.eE+-]+)', os.path.basename(h_dir))
+    if match:
+        try:
+            return float(match.group(1))
+        except ValueError:
+            pass
+    return None
+
+
+def find_all_h_directories():
+    """Find all h=# directories and sort them by h value"""
+    h_dirs = glob.glob(os.path.join(BASE_DIR, "h=*"))
+    h_dirs = [d for d in h_dirs if os.path.isdir(d)]
+    
+    # Extract h values and sort
+    h_data = []
+    for d in h_dirs:
+        h_val = extract_h_value(d)
+        if h_val is not None:
+            h_data.append((h_val, d))
+    
+    h_data.sort(key=lambda x: x[0])
+    return h_data
 
 
 def find_all_species(base_dir):
@@ -231,9 +268,11 @@ def get_base_species_name(species):
 def find_sf_nsf_pairs(all_species):
     """
     Find pairs of SF/NSF species that can be combined into DO.
+    This applies to both Transverse and TransverseExperimental operator types.
     
     Returns:
-    - do_species: list of tuples (base_name, sf_species, nsf_species)
+    - do_species: list of tuples (base_name, sf_species, nsf_species, operator_type)
+      where operator_type is either 'Transverse' or 'TransverseExperimental'
     """
     # Group species by base name
     from collections import defaultdict
@@ -254,9 +293,96 @@ def find_sf_nsf_pairs(all_species):
             # Pair them up (should be 1:1)
             for sf in sf_species:
                 for nsf in nsf_species:
-                    do_species.append((base_name + '_DO', sf, nsf))
+                    # Determine operator type
+                    if 'TransverseExperimental' in sf:
+                        operator_type = 'TransverseExperimental'
+                    else:
+                        operator_type = 'Transverse'
+                    do_species.append((base_name + '_DO', sf, nsf, operator_type))
     
     return do_species
+
+
+def find_transverse_overlay_pairs(all_species):
+    """
+    Find TransverseExperimental species and their corresponding SxSx and SzSz Transverse species
+    for overlay plotting: cos²θ·SxSx + sin²θ·SzSz should match TransverseExperimental.
+    
+    Returns:
+    - overlay_pairs: list of tuples (transverse_exp_species, sxsx_species, szsz_species, theta)
+    """
+    overlay_pairs = []
+    
+    for species in all_species:
+        if 'TransverseExperimental' in species:
+            info = parse_species_name(species)
+            if info['theta'] is not None and info['q_pattern'] is not None:
+                # Construct the corresponding SxSx and SzSz Transverse species names
+                # TransverseExperimental_q_Qx0_Qy0_Qz0_theta30_SF -> 
+                #   SxSx_q_Qx0_Qy0_Qz0_SF and SzSz_q_Qx0_Qy0_Qz0_SF
+                
+                channel_suffix = ''
+                if info['channel']:
+                    channel_suffix = f"_{info['channel']}"
+                
+                sxsx_species = f"SxSx_{info['q_pattern']}{channel_suffix}"
+                szsz_species = f"SzSz_{info['q_pattern']}{channel_suffix}"
+                
+                # Check if both exist
+                if sxsx_species in all_species and szsz_species in all_species:
+                    overlay_pairs.append((species, sxsx_species, szsz_species, info['theta']))
+    
+    return overlay_pairs
+
+
+def compute_transverse_overlay(base_dir, sxsx_species, szsz_species, theta_deg, beta_values):
+    """
+    Compute the overlay: cos²(theta) * SxSx + sin²(theta) * SzSz
+    
+    Args:
+    - base_dir: base directory
+    - sxsx_species: SxSx species name
+    - szsz_species: SzSz species name
+    - theta_deg: theta angle in degrees
+    - beta_values: list of (beta, beta_str, file_path) tuples
+    
+    Returns:
+    - spectral_data_dict: dict mapping beta_str -> (freq, spectral_real, spectral_imag)
+    """
+    spectral_data_dict = {}
+    
+    # Convert theta to radians
+    theta_rad = np.deg2rad(theta_deg)
+    cos2_theta = np.cos(theta_rad) ** 2
+    sin2_theta = np.sin(theta_rad) ** 2
+    
+    sxsx_dir = os.path.join(base_dir, "structure_factor_results", "processed_data", sxsx_species)
+    szsz_dir = os.path.join(base_dir, "structure_factor_results", "processed_data", szsz_species)
+    
+    for beta, beta_str, _ in beta_values:
+        # Read SxSx data
+        sxsx_file = os.path.join(sxsx_dir, f"spectral_beta_{beta_str}.dat")
+        freq_sxsx, spectral_sxsx_real, spectral_sxsx_imag = read_spectral_data(sxsx_file)
+        
+        # Read SzSz data
+        szsz_file = os.path.join(szsz_dir, f"spectral_beta_{beta_str}.dat")
+        freq_szsz, spectral_szsz_real, spectral_szsz_imag = read_spectral_data(szsz_file)
+        
+        if freq_sxsx is None or freq_szsz is None:
+            continue
+        
+        # Check that frequency arrays match
+        if not np.allclose(freq_sxsx, freq_szsz):
+            print(f"    Warning: Frequency arrays don't match for SxSx/SzSz at β={beta_str}, skipping")
+            continue
+        
+        # Compute overlay: cos²θ·SxSx + sin²θ·SzSz
+        spectral_overlay_real = cos2_theta * spectral_sxsx_real + sin2_theta * spectral_szsz_real
+        spectral_overlay_imag = cos2_theta * spectral_sxsx_imag + sin2_theta * spectral_szsz_imag
+        
+        spectral_data_dict[beta_str] = (freq_sxsx, spectral_overlay_real, spectral_overlay_imag)
+    
+    return spectral_data_dict
 
 
 def combine_sf_nsf_to_do(base_dir, sf_species, nsf_species, beta_values):
@@ -525,22 +651,34 @@ def create_animation(beta_values, spectral_data_dict, peak_data_dict, species, o
     
     anim = FuncAnimation(fig, update, frames=len(beta_values), interval=500)
     
-    writer = PillowWriter(fps=2)
+    writer = PillowWriter(fps=0.5)
     anim.save(output_file, writer=writer)
     plt.close()
     
     print(f"  Created animation: {output_file}")
 
 
-def create_comparison_plot(base_dir, species_list, beta_str, output_file, do_species_list=None):
-    """Create a comparison plot of multiple species at the same beta"""
+def create_comparison_plot(base_dir, species_list, beta_str, output_file, do_species_list=None, overlay_pairs_list=None):
+    """
+    Create a comparison plot of multiple species at the same beta.
+    
+    Args:
+    - base_dir: base directory
+    - species_list: list of species names to plot
+    - beta_str: beta value as string
+    - output_file: output file path
+    - do_species_list: list of (do_name, sf_species, nsf_species, operator_type) tuples
+    - overlay_pairs_list: list of (transverse_exp, sxsx, szsz, theta) tuples for overlay
+    """
     
     fig, ax = plt.subplots(figsize=(14, 8))
     
-    # Count total species including DO
+    # Count total species including DO and overlays
     total_species = len(species_list)
     if do_species_list:
         total_species += len(do_species_list)
+    if overlay_pairs_list:
+        total_species += len(overlay_pairs_list)
     
     colors = cm.tab10(np.linspace(0, 1, min(total_species, 10)))
     if total_species > 10:
@@ -570,6 +708,8 @@ def create_comparison_plot(base_dir, species_list, beta_str, output_file, do_spe
             label += f" (sub{info['sublattices'][0]},{info['sublattices'][1]})"
         if info['channel']:
             label += f" [{info['channel']}]"
+        if info['theta'] is not None:
+            label += f" (θ={info['theta']}°)"
         
         ax.plot(freq_filtered, spectral_filtered, 
                 label=label, color=colors[idx % len(colors)], linewidth=2)
@@ -577,7 +717,14 @@ def create_comparison_plot(base_dir, species_list, beta_str, output_file, do_spe
     
     # Plot DO species (combined SF+NSF)
     if do_species_list:
-        for do_name, sf_species, nsf_species in do_species_list:
+        for do_tuple in do_species_list:
+            if len(do_tuple) == 4:
+                do_name, sf_species, nsf_species, operator_type = do_tuple
+            else:
+                # Backward compatibility
+                do_name, sf_species, nsf_species = do_tuple
+                operator_type = 'Transverse'
+            
             # Find beta values for this DO pair
             sf_beta_values = find_all_beta_values(base_dir, sf_species)
             nsf_beta_values = find_all_beta_values(base_dir, nsf_species)
@@ -616,9 +763,49 @@ def create_comparison_plot(base_dir, species_list, beta_str, output_file, do_spe
                 label += f" (sub{info['sublattices'][0]},{info['sublattices'][1]})"
             if info['channel']:
                 label += f" [{info['channel']}]"
+            if info['theta'] is not None:
+                label += f" (θ={info['theta']}°)"
             
             ax.plot(freq_filtered, spectral_filtered, 
                     label=label, color=colors[idx % len(colors)], linewidth=2, linestyle='--')
+            idx += 1
+    
+    # Plot overlay: cos²θ·SxSx + sin²θ·SzSz on TransverseExperimental
+    if overlay_pairs_list:
+        for transverse_exp, sxsx_species, szsz_species, theta in overlay_pairs_list:
+            # Find beta values for the transverse experimental species
+            exp_beta_values = find_all_beta_values(base_dir, transverse_exp)
+            exp_beta_strs = set([bs for _, bs, _ in exp_beta_values])
+            
+            if beta_str not in exp_beta_strs:
+                continue
+            
+            # Get the beta value
+            beta_val = next((beta for beta, bs, _ in exp_beta_values if bs == beta_str), None)
+            if beta_val is None:
+                continue
+            
+            beta_values = [(beta_val, beta_str, None)]
+            
+            # Compute overlay
+            overlay_data_dict = compute_transverse_overlay(
+                base_dir, sxsx_species, szsz_species, theta, beta_values)
+            
+            if beta_str not in overlay_data_dict:
+                continue
+            
+            freq, spectral_real, _ = overlay_data_dict[beta_str]
+            
+            # Filter frequency range
+            mask = (freq >= FREQ_MIN) & (freq <= FREQ_MAX)
+            freq_filtered = freq[mask]
+            spectral_filtered = spectral_real[mask]
+            
+            # Create label
+            label = f"cos²({theta}°)·SxSx + sin²({theta}°)·SzSz"
+            
+            ax.plot(freq_filtered, spectral_filtered, 
+                    label=label, color=colors[idx % len(colors)], linewidth=2, linestyle=':')
             idx += 1
     
     ax.set_xlabel('Frequency (ω/Jzz)', fontsize=12)
@@ -626,7 +813,7 @@ def create_comparison_plot(base_dir, species_list, beta_str, output_file, do_spe
     
     beta_label = r'$\beta = \infty$' if beta_str == 'inf' else f'$\\beta = {beta_str}$'
     ax.set_title(f'Spectral Function Comparison at {beta_label}', fontsize=14)
-    ax.legend(fontsize=10)
+    ax.legend(fontsize=9, loc='best')
     ax.grid(True, alpha=0.3)
     
     plt.tight_layout()
@@ -634,6 +821,255 @@ def create_comparison_plot(base_dir, species_list, beta_str, output_file, do_spe
     plt.close()
     
     print(f"  Created comparison plot: {output_file}")
+
+
+
+def create_h_evolution_plot(h_data, species, beta_str, output_file):
+    """
+    Create a plot showing how spectral function evolves with magnetic field h.
+    Stacked plot with offset for different h values.
+    """
+    fig, ax = plt.subplots(figsize=(12, 8))
+    
+    colors = cm.viridis(np.linspace(0, 1, len(h_data)))
+    
+    offset = 0
+    max_spectral = 0
+    
+    for idx, (h_val, h_dir) in enumerate(h_data):
+        species_dir = os.path.join(h_dir, "structure_factor_results", "processed_data", species)
+        file_path = os.path.join(species_dir, f"spectral_beta_{beta_str}.dat")
+        
+        freq, spectral_real, _ = read_spectral_data(file_path)
+        
+        if freq is None:
+            continue
+        
+        # Filter frequency range
+        mask = (freq >= FREQ_MIN) & (freq <= FREQ_MAX)
+        freq_filtered = freq[mask]
+        spectral_filtered = spectral_real[mask]
+        
+        # Track maximum for normalization
+        if len(spectral_filtered) > 0:
+            max_spectral = max(max_spectral, np.max(spectral_filtered))
+        
+        # Plot with offset
+        h_label = f'h = {h_val * H_CONVERSION_FACTOR:.3f}'
+        ax.plot(freq_filtered, spectral_filtered + offset, 
+                label=h_label, color=colors[idx], linewidth=1.5)
+        
+        offset += max_spectral * 0.5 if max_spectral > 0 else 1.0
+    
+    ax.set_xlabel('Frequency (ω/Jzz)', fontsize=12)
+    ax.set_ylabel('Spectral Function S(ω) [offset]', fontsize=12)
+    
+    info = parse_species_name(species)
+    operator_label = get_operator_latex_name(info['operator'])
+    beta_label = r'$\beta = \infty$' if beta_str == 'inf' else f'$\\beta = {beta_str}$'
+    title = f'H-Field Evolution: {operator_label} at {beta_label}'
+    if info['q_pattern']:
+        title += f" @ {info['q_pattern']}"
+    if info['sublattices']:
+        title += f" (sub{info['sublattices'][0]},{info['sublattices'][1]})"
+    if info['channel']:
+        title += f" [{info['channel']}]"
+    
+    ax.set_title(title, fontsize=14)
+    ax.legend(fontsize=10, loc='upper right')
+    ax.grid(True, alpha=0.3)
+    
+    plt.tight_layout()
+    plt.savefig(output_file, dpi=300)
+    plt.close()
+    
+    print(f"  Created h-evolution plot: {output_file}")
+
+
+def create_h_heatmap(h_data, species, beta_str, output_file):
+    """
+    Create a 2D heatmap showing spectral function as function of frequency (x) and h field (y).
+    Similar to animate_DSSF_cartesian.py style.
+    """
+    if not h_data:
+        print(f"  No h data available for {species}")
+        return
+    
+    # Get reference frequency array from first h directory
+    h_val_ref, h_dir_ref = h_data[0]
+    species_dir_ref = os.path.join(h_dir_ref, "structure_factor_results", "processed_data", species)
+    file_path_ref = os.path.join(species_dir_ref, f"spectral_beta_{beta_str}.dat")
+    freq_ref_full, _, _ = read_spectral_data(file_path_ref)
+    
+    if freq_ref_full is None:
+        print(f"  No reference data for {species}")
+        return
+    
+    # Filter to frequency range
+    mask = (freq_ref_full >= FREQ_MIN) & (freq_ref_full <= FREQ_MAX)
+    freq_ref = freq_ref_full[mask]
+    
+    # Build spectral matrix: rows = frequency, columns = h values
+    h_values = [h_val for h_val, _ in h_data]
+    spectral_matrix = np.zeros((len(freq_ref), len(h_values)))
+    
+    for i, (h_val, h_dir) in enumerate(h_data):
+        species_dir = os.path.join(h_dir, "structure_factor_results", "processed_data", species)
+        file_path = os.path.join(species_dir, f"spectral_beta_{beta_str}.dat")
+        
+        freq_h, spectral_h, _ = read_spectral_data(file_path)
+        
+        if freq_h is None:
+            continue
+        
+        # Filter and interpolate to reference frequency grid
+        mask_h = (freq_h >= FREQ_MIN) & (freq_h <= FREQ_MAX)
+        freq_h_filtered = freq_h[mask_h]
+        spectral_h_filtered = spectral_h[mask_h]
+        
+        # Interpolate to match reference frequency grid
+        spectral_matrix[:, i] = np.interp(freq_ref, freq_h_filtered, spectral_h_filtered)
+    
+    # Create heatmap
+    fig, ax = plt.subplots(figsize=(12, 8))
+    
+    # Convert h values
+    h_values_converted = np.array(h_values) * H_CONVERSION_FACTOR
+    freq_converted = freq_ref * ENERGY_CONVERSION_FACTOR
+    
+    # Create edges for pcolormesh
+    h_edges = np.zeros(len(h_values_converted) + 1)
+    if len(h_values_converted) > 1:
+        h_edges[0] = h_values_converted[0] - (h_values_converted[1] - h_values_converted[0]) / 2
+        h_edges[-1] = h_values_converted[-1] + (h_values_converted[-1] - h_values_converted[-2]) / 2
+        for i in range(1, len(h_values_converted)):
+            h_edges[i] = (h_values_converted[i-1] + h_values_converted[i]) / 2
+    else:
+        h_edges[0] = h_values_converted[0] - 0.5
+        h_edges[1] = h_values_converted[0] + 0.5
+    
+    freq_edges = np.zeros(len(freq_converted) + 1)
+    if len(freq_converted) > 1:
+        freq_edges[0] = freq_converted[0] - (freq_converted[1] - freq_converted[0]) / 2
+        freq_edges[-1] = freq_converted[-1] + (freq_converted[-1] - freq_converted[-2]) / 2
+        for i in range(1, len(freq_converted)):
+            freq_edges[i] = (freq_converted[i-1] + freq_converted[i]) / 2
+    else:
+        freq_edges[0] = freq_converted[0] - 0.5
+        freq_edges[1] = freq_converted[0] + 0.5
+    
+    # Plot with h on y-axis, frequency on x-axis
+    im = ax.pcolormesh(freq_edges, h_edges, spectral_matrix.T, 
+                       cmap='viridis', shading='flat')
+    
+    cbar = plt.colorbar(im, ax=ax)
+    cbar.set_label('Spectral Function S(ω)', fontsize=12)
+    
+    ax.set_xlabel('Energy (meV)' if ENERGY_CONVERSION_FACTOR != 1.0 else 'Frequency (ω/Jzz)', fontsize=12)
+    ax.set_ylabel('Magnetic Field (h)', fontsize=12)
+    
+    info = parse_species_name(species)
+    operator_label = get_operator_latex_name(info['operator'])
+    beta_label = r'$\beta = \infty$' if beta_str == 'inf' else f'$\\beta = {beta_str}$'
+    title = f'Spectral Function Heatmap: {operator_label} at {beta_label}'
+    if info['q_pattern']:
+        title += f" @ {info['q_pattern']}"
+    if info['sublattices']:
+        title += f" (sub{info['sublattices'][0]},{info['sublattices'][1]})"
+    if info['channel']:
+        title += f" [{info['channel']}]"
+    
+    ax.set_title(title, fontsize=14)
+    
+    plt.tight_layout()
+    plt.savefig(output_file, dpi=300, bbox_inches='tight')
+    plt.close()
+    
+    print(f"  Created h-heatmap: {output_file}")
+
+
+def create_h_animation(h_data, species, beta_str, output_file):
+    """
+    Create an animated plot showing spectral function evolution with h field.
+    Similar to animate_DSSF_cartesian.py style - animates through h values.
+    """
+    
+    fig, ax = plt.subplots(figsize=(12, 6))
+    
+    # Find global y-limits for consistent axes
+    all_spectral = []
+    freq_ref = None
+    
+    for h_val, h_dir in h_data:
+        species_dir = os.path.join(h_dir, "structure_factor_results", "processed_data", species)
+        file_path = os.path.join(species_dir, f"spectral_beta_{beta_str}.dat")
+        
+        freq, spectral_real, _ = read_spectral_data(file_path)
+        if freq is not None:
+            mask = (freq >= FREQ_MIN) & (freq <= FREQ_MAX)
+            all_spectral.extend(spectral_real[mask])
+            if freq_ref is None:
+                freq_ref = freq[mask]
+    
+    if len(all_spectral) == 0:
+        print(f"  No data to animate for {species}")
+        return
+    
+    ymin = min(all_spectral)
+    ymax = max(all_spectral)
+    y_range = ymax - ymin
+    ymin -= 0.1 * y_range
+    ymax += 0.1 * y_range
+    
+    line, = ax.plot([], [], 'b-', linewidth=2)
+    ax.set_xlim(FREQ_MIN * ENERGY_CONVERSION_FACTOR, FREQ_MAX * ENERGY_CONVERSION_FACTOR)
+    ax.set_ylim(ymin, ymax)
+    ax.set_xlabel('Energy (meV)' if ENERGY_CONVERSION_FACTOR != 1.0 else 'Frequency (ω/Jzz)', fontsize=12)
+    ax.set_ylabel('Spectral Function S(ω)', fontsize=12)
+    ax.grid(True, alpha=0.3)
+    
+    info = parse_species_name(species)
+    operator_label = get_operator_latex_name(info['operator'])
+    beta_label = r'$\beta = \infty$' if beta_str == 'inf' else f'$\\beta = {beta_str}$'
+    
+    title = ax.set_title('', fontsize=14, fontweight='bold')
+    
+    def init():
+        line.set_data([], [])
+        return line, title
+    
+    def animate(frame):
+        h_val, h_dir = h_data[frame]
+        species_dir = os.path.join(h_dir, "structure_factor_results", "processed_data", species)
+        file_path = os.path.join(species_dir, f"spectral_beta_{beta_str}.dat")
+        
+        freq, spectral_real, _ = read_spectral_data(file_path)
+        
+        if freq is not None:
+            mask = (freq >= FREQ_MIN) & (freq <= FREQ_MAX)
+            freq_converted = freq[mask] * ENERGY_CONVERSION_FACTOR
+            line.set_data(freq_converted, spectral_real[mask])
+            
+            h_label = f'h = {h_val * H_CONVERSION_FACTOR:.3f}'
+            title_text = f'{operator_label} at {beta_label}, {h_label}'
+            if info['q_pattern']:
+                title_text += f" @ {info['q_pattern']}"
+            if info['sublattices']:
+                title_text += f" (sub{info['sublattices'][0]},{info['sublattices'][1]})"
+            if info['channel']:
+                title_text += f" [{info['channel']}]"
+            title.set_text(title_text)
+        
+        return line, title
+    
+    anim = FuncAnimation(fig, animate, init_func=init,
+                        frames=len(h_data), interval=200, blit=True)
+    
+    writer = PillowWriter(fps=0.5)
+    anim.save(output_file, writer=writer)
+    plt.close()
+    
+    print(f"  Created h-animation: {output_file}")
 
 
 # ============================================================================
@@ -650,8 +1086,34 @@ def main():
     print(f"Output directory: {OUTPUT_DIR}")
     print()
     
+    # Check if we have h=* directories (multiple field strengths)
+    h_data = find_all_h_directories()
+    
+    if h_data:
+        print(f"Found {len(h_data)} magnetic field directories:")
+        for h_val, h_dir in h_data:
+            print(f"  - h = {h_val * H_CONVERSION_FACTOR:.4f} ({os.path.basename(h_dir)})")
+        print()
+        
+        # Process multiple h directories
+        process_multiple_h_directories(h_data)
+    else:
+        # Single directory mode (no h=* subdirectories)
+        print("No h=* directories found, processing single directory")
+        print()
+        process_single_directory(BASE_DIR)
+    
+    print("\n" + "="*80)
+    print("PROCESSING COMPLETE")
+    print("="*80)
+    print(f"Output saved to: {OUTPUT_DIR}")
+
+
+def process_single_directory(base_dir):
+    """Process a single directory (no h field scan)"""
+    
     # Find all species
-    all_species = find_all_species(BASE_DIR)
+    all_species = find_all_species(base_dir)
     
     if not all_species:
         print("No species found in processed_data directory!")
@@ -667,8 +1129,22 @@ def main():
     
     if do_species_list:
         print(f"\nFound {len(do_species_list)} SF/NSF pairs to combine into DO:")
-        for do_name, sf_name, nsf_name in do_species_list:
-            print(f"  - {do_name} = {sf_name} + {nsf_name}")
+        for do_tuple in do_species_list:
+            if len(do_tuple) == 4:
+                do_name, sf_name, nsf_name, operator_type = do_tuple
+                print(f"  - {do_name} = {sf_name} + {nsf_name} ({operator_type})")
+            else:
+                do_name, sf_name, nsf_name = do_tuple
+                print(f"  - {do_name} = {sf_name} + {nsf_name}")
+        print()
+    
+    # Find TransverseExperimental species and their overlay pairs
+    overlay_pairs = find_transverse_overlay_pairs(all_species)
+    
+    if overlay_pairs:
+        print(f"\nFound {len(overlay_pairs)} TransverseExperimental species with overlay pairs:")
+        for transverse_exp, sxsx, szsz, theta in overlay_pairs:
+            print(f"  - {transverse_exp} ~ cos²({theta}°)·{sxsx} + sin²({theta}°)·{szsz}")
         print()
     
     # Process each species
@@ -692,7 +1168,7 @@ def main():
         # Load all spectral data
         spectral_data_dict = {}
         peak_data_dict = {}
-        species_dir = os.path.join(BASE_DIR, "structure_factor_results", "processed_data", species)
+        species_dir = os.path.join(base_dir, "structure_factor_results", "processed_data", species)
         
         for beta, beta_str, file_path in beta_values:
             freq, spectral_real, spectral_imag = read_spectral_data(file_path)
@@ -726,12 +1202,19 @@ def main():
         print("Processing DO (SF+NSF) combined channels")
         print(f"{'='*60}")
         
-        for do_name, sf_species, nsf_species in do_species_list:
-            print(f"\nCombining {sf_species} + {nsf_species} -> {do_name}")
+        for do_tuple in do_species_list:
+            if len(do_tuple) == 4:
+                do_name, sf_species, nsf_species, operator_type = do_tuple
+            else:
+                # Backward compatibility
+                do_name, sf_species, nsf_species = do_tuple
+                operator_type = 'Unknown'
+            
+            print(f"\nCombining {sf_species} + {nsf_species} -> {do_name} ({operator_type})")
             
             # Find common beta values between SF and NSF
-            sf_beta_values = find_all_beta_values(BASE_DIR, sf_species)
-            nsf_beta_values = find_all_beta_values(BASE_DIR, nsf_species)
+            sf_beta_values = find_all_beta_values(base_dir, sf_species)
+            nsf_beta_values = find_all_beta_values(base_dir, nsf_species)
             
             sf_beta_strs = set([beta_str for _, beta_str, _ in sf_beta_values])
             nsf_beta_strs = set([beta_str for _, beta_str, _ in nsf_beta_values])
@@ -749,7 +1232,7 @@ def main():
             
             # Combine SF and NSF data
             spectral_data_dict, peak_data_dict = combine_sf_nsf_to_do(
-                BASE_DIR, sf_species, nsf_species, beta_values)
+                base_dir, sf_species, nsf_species, beta_values)
             
             if not spectral_data_dict:
                 print(f"  No data to combine, skipping")
@@ -773,6 +1256,54 @@ def main():
             animation_file = os.path.join(SUBDIRS['beta_evolution'], f"{safe_do_name}_animation.gif")
             create_animation(beta_values, spectral_data_dict, peak_data_dict, do_name, animation_file)
     
+    # Process overlay pairs (cos²θ·SxSx + sin²θ·SzSz)
+    if overlay_pairs:
+        print(f"\n{'='*60}")
+        print("Processing TransverseExperimental overlay pairs")
+        print(f"{'='*60}")
+        
+        for transverse_exp, sxsx_species, szsz_species, theta in overlay_pairs:
+            print(f"\nCreating overlay for {transverse_exp}")
+            print(f"  cos²({theta}°)·{sxsx_species} + sin²({theta}°)·{szsz_species}")
+            
+            # Find common beta values
+            exp_beta_values = find_all_beta_values(base_dir, transverse_exp)
+            sxsx_beta_values = find_all_beta_values(base_dir, sxsx_species)
+            szsz_beta_values = find_all_beta_values(base_dir, szsz_species)
+            
+            exp_beta_strs = set([bs for _, bs, _ in exp_beta_values])
+            sxsx_beta_strs = set([bs for _, bs, _ in sxsx_beta_values])
+            szsz_beta_strs = set([bs for _, bs, _ in szsz_beta_values])
+            common_beta_strs = exp_beta_strs & sxsx_beta_strs & szsz_beta_strs
+            
+            # Filter to common betas
+            beta_values = [(beta, beta_str, file_path) for beta, beta_str, file_path in exp_beta_values 
+                          if beta_str in common_beta_strs]
+            
+            if not beta_values:
+                print(f"  No common beta values found, skipping")
+                continue
+            
+            print(f"  Found {len(beta_values)} common beta values")
+            
+            # Compute overlay
+            overlay_data_dict = compute_transverse_overlay(
+                base_dir, sxsx_species, szsz_species, theta, beta_values)
+            
+            if not overlay_data_dict:
+                print(f"  No overlay data computed, skipping")
+                continue
+            
+            # Create safe filename for overlay
+            safe_overlay_name = f"Overlay_theta{theta}_{sxsx_species}_{szsz_species}".replace('/', '_').replace('\\', '_')
+            overlay_name = f"cos²({theta}°)·SxSx + sin²({theta}°)·SzSz"
+            
+            # Create plots for overlay
+            print(f"  Generating overlay plots...")
+            
+            # Note: We create visualizations but not individual stacked/heatmap/animation for overlay
+            # They will appear in comparison plots
+    
     # Create comparison plots at key beta values
     print(f"\n{'='*60}")
     print("Creating comparison plots")
@@ -780,20 +1311,27 @@ def main():
     
     # Combine regular species and DO species for comparison
     all_species_for_comparison = list(all_species)
-    do_names = [do_name for do_name, _, _ in do_species_list]
+    
+    # Extract do_names from do_species_list (handling both 3-tuple and 4-tuple formats)
+    do_names = []
+    for do_tuple in do_species_list:
+        if len(do_tuple) >= 3:
+            do_names.append(do_tuple[0])  # do_name is always the first element
     
     # Find common beta values across all species (including DO)
     beta_sets = []
     for species in all_species:
-        beta_values = find_all_beta_values(BASE_DIR, species)
+        beta_values = find_all_beta_values(base_dir, species)
         beta_strs = set([beta_str for _, beta_str, _ in beta_values])
         beta_sets.append(beta_strs)
     
     # For DO species, we need to check SF channel (representative)
-    for do_name, sf_species, _ in do_species_list:
-        beta_values = find_all_beta_values(BASE_DIR, sf_species)
-        beta_strs = set([beta_str for _, beta_str, _ in beta_values])
-        beta_sets.append(beta_strs)
+    for do_tuple in do_species_list:
+        if len(do_tuple) >= 2:
+            sf_species = do_tuple[1]  # sf_species is always the second element
+            beta_values = find_all_beta_values(base_dir, sf_species)
+            beta_strs = set([beta_str for _, beta_str, _ in beta_values])
+            beta_sets.append(beta_strs)
     
     if beta_sets:
         common_betas = set.intersection(*beta_sets)
@@ -803,14 +1341,81 @@ def main():
             print(f"  Creating comparison for β = {beta_str}")
             comparison_file = os.path.join(SUBDIRS['combined'], f"comparison_beta_{beta_str}.png")
             
-            # Pass DO species info for comparison plot
-            create_comparison_plot(BASE_DIR, all_species, beta_str, comparison_file, 
-                                 do_species_list=do_species_list)
+            # Pass DO species info and overlay pairs for comparison plot
+            create_comparison_plot(base_dir, all_species, beta_str, comparison_file, 
+                                 do_species_list=do_species_list,
+                                 overlay_pairs_list=overlay_pairs)
+
+
+def process_multiple_h_directories(h_data):
+    """Process multiple h=* directories (magnetic field scan)"""
     
-    print("\n" + "="*80)
-    print("PROCESSING COMPLETE")
-    print("="*80)
-    print(f"Output saved to: {OUTPUT_DIR}")
+    # First, find all species that are common across all h directories
+    all_species_per_h = []
+    for h_val, h_dir in h_data:
+        species = find_all_species(h_dir)
+        all_species_per_h.append(set(species))
+    
+    if not all_species_per_h:
+        print("No species found in any h directory!")
+        return
+    
+    # Find common species across all h values
+    common_species = set.intersection(*all_species_per_h)
+    
+    if not common_species:
+        print("No common species found across all h directories!")
+        return
+    
+    print(f"Found {len(common_species)} common species across all h values:")
+    for species in sorted(common_species):
+        print(f"  - {species}")
+    print()
+    
+    # For each common species, create h-evolution plots
+    for species in sorted(common_species):
+        print(f"\n{'='*60}")
+        print(f"Processing h-evolution for: {species}")
+        print(f"{'='*60}")
+        
+        # Find common beta values across all h directories for this species
+        beta_sets = []
+        for h_val, h_dir in h_data:
+            beta_values = find_all_beta_values(h_dir, species)
+            beta_strs = set([beta_str for _, beta_str, _ in beta_values])
+            beta_sets.append(beta_strs)
+        
+        if not beta_sets:
+            continue
+        
+        common_betas = set.intersection(*beta_sets)
+        
+        if not common_betas:
+            print(f"  No common beta values across h directories, skipping")
+            continue
+        
+        print(f"  Found {len(common_betas)} common beta values: {sorted(common_betas)}")
+        
+        # Create h-evolution plots for each common beta
+        safe_species_name = species.replace('/', '_').replace('\\', '_')
+        
+        for beta_str in sorted(common_betas):
+            print(f"  Creating h-evolution plots for β = {beta_str}")
+            
+            # Stacked plot
+            h_stacked_file = os.path.join(SUBDIRS['h_evolution'], 
+                                         f"{safe_species_name}_beta_{beta_str}_h_stacked.png")
+            create_h_evolution_plot(h_data, species, beta_str, h_stacked_file)
+            
+            # Heatmap
+            h_heatmap_file = os.path.join(SUBDIRS['h_evolution'], 
+                                         f"{safe_species_name}_beta_{beta_str}_h_heatmap.png")
+            create_h_heatmap(h_data, species, beta_str, h_heatmap_file)
+            
+            # Animation
+            h_animation_file = os.path.join(SUBDIRS['h_evolution'], 
+                                           f"{safe_species_name}_beta_{beta_str}_h_animation.gif")
+            create_h_animation(h_data, species, beta_str, h_animation_file)
 
 
 if __name__ == "__main__":
