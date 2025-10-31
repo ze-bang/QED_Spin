@@ -705,14 +705,15 @@ public:
             double E, F;
             
             if (!(lineStream >> Op >> indx >> E >> F)) continue;
-            
+            Complex coeff(E, F);
+            if (std::abs(coeff) < 1e-15) continue;
             addTransform([=](int basis) -> std::pair<int, Complex> {
                 if (Op == 2) {
-                    return {basis, Complex(E, F) * double(spin_l_) * pow(-1, (basis >> indx) & 1)};
+                    return {basis, coeff * double(spin_l_) * pow(-1, (basis >> indx) & 1)};
                 } else {
                     if (((basis >> indx) & 1) != Op) {
                         int flipped_basis = basis ^ (1 << indx);
-                        return {flipped_basis, Complex(E, F)};
+                        return {flipped_basis, coeff};
                     }
                 }
                 return {basis, Complex(0.0, 0.0)};
@@ -745,19 +746,20 @@ public:
             double E, F;
             
             if (!(lineStream >> Op_i >> indx_i >> Op_j >> indx_j >> E >> F)) continue;
-            
+            Complex coeff(E, F);
+            if (std::abs(coeff) < 1e-15) continue;
+
             addTransform([=](int basis) -> std::pair<int, Complex> {
                 int bit_i = (basis >> indx_i) & 1;
                 int bit_j = (basis >> indx_j) & 1;
                 
-                Complex factor(E, F);
-                
                 if (Op_i == 2 && Op_j == 2) {
                     double sign_i = pow(-1, bit_i);
                     double sign_j = pow(-1, bit_j);
-                    return {basis, factor * double(spin_l_) * double(spin_l_) * sign_i * sign_j};
+                    return {basis, coeff * double(spin_l_) * double(spin_l_) * sign_i * sign_j};
                 }
                 
+                Complex local_coeff = coeff;
                 int new_basis = basis;
                 bool valid = true;
                 
@@ -768,7 +770,7 @@ public:
                         valid = false;
                     }
                 } else {
-                    factor *= double(spin_l_) * pow(-1, bit_i);
+                    local_coeff *= double(spin_l_) * pow(-1, bit_i);
                 }
                 
                 if (valid && Op_j != 2) {
@@ -780,11 +782,11 @@ public:
                     }
                 } else if (valid) {
                     int new_bit_j = (new_basis >> indx_j) & 1;
-                    factor *= double(spin_l_) * pow(-1, new_bit_j);
+                    local_coeff *= double(spin_l_) * pow(-1, new_bit_j);
                 }
                 
                 if (valid) {
-                    return {new_basis, factor};
+                    return {new_basis, local_coeff};
                 }
                 return {basis, Complex(0.0, 0.0)};
             });

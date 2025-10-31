@@ -509,6 +509,84 @@ static void compute_spectral_function(
         }
     }
 }
+
+/**
+ * @brief Compute complex spectral function from complex weights
+ * 
+ * For cross-correlation S_{O1,O2}(ω) = ⟨ψ|O₁†|n⟩⟨n|O₂|ψ⟩, the weights can be complex.
+ * This function computes both real and imaginary parts of the spectral function.
+ */
+static void compute_spectral_function_complex(
+    const std::vector<double>& ritz_values,
+    const std::vector<Complex>& complex_weights,
+    const std::vector<double>& frequencies,
+    double broadening,
+    double temperature,
+    std::vector<double>& spectral_function_real,
+    std::vector<double>& spectral_function_imag
+){
+    int n_omega = frequencies.size();
+    int n_states = ritz_values.size();
+    
+    spectral_function_real.resize(n_omega, 0.0);
+    spectral_function_imag.resize(n_omega, 0.0);
+    
+    // Compute thermal weights if temperature > 0
+    std::vector<Complex> thermal_weights = complex_weights;
+    
+    if (temperature > 1e-14) {
+        double beta = 1.0 / temperature;
+        
+        // Find minimum energy for numerical stability
+        double e_min = *std::min_element(ritz_values.begin(), ritz_values.end());
+        
+        // Compute partition function with shifted energies
+        // For complex weights: Z = Σ_i Re[w_i] * exp(-βE_i)
+        double Z = 0.0;
+        for (int i = 0; i < n_states; i++) {
+            double shifted_energy = ritz_values[i] - e_min;
+            double boltzmann_factor = std::exp(-beta * shifted_energy);
+            thermal_weights[i] = complex_weights[i] * boltzmann_factor;
+            Z += thermal_weights[i].real() * boltzmann_factor;
+        }
+        
+        // Normalize by partition function
+        if (Z > 1e-300) {
+            for (int i = 0; i < n_states; i++) {
+                thermal_weights[i] /= Z;
+            }
+        } else {
+            // Very low temperature - only ground state contributes
+            thermal_weights.assign(n_states, Complex(0.0, 0.0));
+            int gs_idx = std::distance(ritz_values.begin(),
+                                      std::min_element(ritz_values.begin(), ritz_values.end()));
+            thermal_weights[gs_idx] = complex_weights[gs_idx];
+            // Normalize by real part sum
+            Complex sum = Complex(0.0, 0.0);
+            for (const auto& w : thermal_weights) sum += w;
+            if (std::abs(sum) > 0) {
+                for (auto& w : thermal_weights) w /= sum;
+            }
+        }
+    }
+    
+    // For each frequency, sum contributions from all states
+    // S(ω,T) = Σ_i w_i * exp(-βE_i)/Z * δ(ω - E_i)
+    // Using Lorentzian broadening: δ(ω - E) → (η/π) / ((ω - E)² + η²)
+    double norm_factor = broadening / M_PI;
+    
+    for (int i_omega = 0; i_omega < n_omega; i_omega++) {
+        double omega = frequencies[i_omega];
+        
+        for (int i = 0; i < n_states; i++) {
+            double delta = omega - ritz_values[i];
+            double lorentzian = norm_factor / (delta * delta + broadening * broadening);
+            Complex contribution = thermal_weights[i] * lorentzian;
+            spectral_function_real[i_omega] += contribution.real();
+            spectral_function_imag[i_omega] += contribution.imag();
+        }
+    }
+}
 /**
  * @brief Compute dynamical response S(ω) for operator O using Lanczos method
  */
@@ -556,7 +634,9 @@ DynamicalResponseResults compute_dynamical_response(
     if (phi_norm < 1e-14) {
         std::cerr << "Warning: O|ψ⟩ has zero norm, operator has no matrix elements\n";
         results.spectral_function.resize(num_omega_bins, 0.0);
+        results.spectral_function_imag.resize(num_omega_bins, 0.0);
         results.spectral_error.resize(num_omega_bins, 0.0);
+        results.spectral_error_imag.resize(num_omega_bins, 0.0);
         return results;
     }
     
@@ -616,7 +696,10 @@ DynamicalResponseResults compute_dynamical_response(
                              params.broadening, temperature, results.spectral_function);
     
     // No error bars for single state
+    // For self-correlation (O†O), imaginary part is zero
+    results.spectral_function_imag.resize(num_omega_bins, 0.0);
     results.spectral_error.resize(num_omega_bins, 0.0);
+    results.spectral_error_imag.resize(num_omega_bins, 0.0);
     
     std::cout << "\n==========================================\n";
     std::cout << "Dynamical Response Complete\n";
@@ -771,12 +854,14 @@ DynamicalResponseResults compute_dynamical_response_thermal(
         }
     }
     
-    // Average over all samples
+    // Average over all samples (FTLM thermal)
     int n_valid_samples = sample_spectra.size();
     std::cout << "\n--- Averaging over " << n_valid_samples << " samples ---\n";
     
     results.spectral_function.resize(num_omega_bins, 0.0);
+    results.spectral_function_imag.resize(num_omega_bins, 0.0);  // Self-correlation: imaginary part is zero
     results.spectral_error.resize(num_omega_bins, 0.0);
+    results.spectral_error_imag.resize(num_omega_bins, 0.0);
     
     if (n_valid_samples == 0) {
         std::cerr << "Error: No valid samples obtained\n";
@@ -829,17 +914,46 @@ void save_dynamical_response_results(
     }
     
     file << "# Dynamical Response Results (averaged over " << results.total_samples << " samples)\n";
-    file << "# Frequency  Spectral_Function  Error\n";
+    
+    // Check if we have imaginary parts (non-zero for cross-correlation)
+    bool has_imaginary = false;
+    if (!results.spectral_function_imag.empty()) {
+        for (double val : results.spectral_function_imag) {
+            if (std::abs(val) > 1e-14) {
+                has_imaginary = true;
+                break;
+            }
+        }
+    }
+    
+    if (has_imaginary) {
+        file << "# Frequency  Re[S(ω)]  Im[S(ω)]  Re[Error]  Im[Error]\n";
+    } else {
+        file << "# Frequency  Spectral_Function  Error\n";
+    }
+    
     file << std::scientific << std::setprecision(12);
     
     for (size_t i = 0; i < results.frequencies.size(); i++) {
         file << results.frequencies[i] << " "
-             << results.spectral_function[i] << " "
-             << results.spectral_error[i] << "\n";
+             << results.spectral_function[i];
+        
+        if (has_imaginary) {
+            file << " " << results.spectral_function_imag[i]
+                 << " " << results.spectral_error[i]
+                 << " " << results.spectral_error_imag[i];
+        } else {
+            file << " " << results.spectral_error[i];
+        }
+        
+        file << "\n";
     }
     
     file.close();
     std::cout << "Dynamical response results saved to: " << filename << std::endl;
+    if (has_imaginary) {
+        std::cout << "  (Complex spectral function with both real and imaginary parts)" << std::endl;
+    }
 }
 
 /**
@@ -1071,12 +1185,14 @@ DynamicalResponseResults compute_dynamical_correlation(
         }
     }
     
-    // Average over all samples
+    // Average over all samples (Dynamical Correlation FTLM)
     int n_valid_samples = sample_spectra.size();
     std::cout << "\n--- Averaging over " << n_valid_samples << " samples ---\n";
     
     results.spectral_function.resize(num_omega_bins, 0.0);
+    results.spectral_function_imag.resize(num_omega_bins, 0.0);  // FTLM averages: imaginary parts cancel
     results.spectral_error.resize(num_omega_bins, 0.0);
+    results.spectral_error_imag.resize(num_omega_bins, 0.0);
     
     if (n_valid_samples == 0) {
         std::cerr << "Error: No valid samples obtained\n";
@@ -1196,7 +1312,9 @@ DynamicalResponseResults compute_dynamical_correlation_state(
     if (phi_norm < 1e-14) {
         std::cerr << "  Error: O₂|ψ⟩ has zero norm\n";
         results.spectral_function.resize(num_omega_bins, 0.0);
+        results.spectral_function_imag.resize(num_omega_bins, 0.0);
         results.spectral_error.resize(num_omega_bins, 0.0);
+        results.spectral_error_imag.resize(num_omega_bins, 0.0);
         return results;
     }
     
@@ -1287,7 +1405,9 @@ DynamicalResponseResults compute_dynamical_correlation_state(
     if (info != 0) {
         std::cerr << "  Error: Tridiagonal diagonalization failed\n";
         results.spectral_function.resize(num_omega_bins, 0.0);
+        results.spectral_function_imag.resize(num_omega_bins, 0.0);
         results.spectral_error.resize(num_omega_bins, 0.0);
+        results.spectral_error_imag.resize(num_omega_bins, 0.0);
         return results;
     }
     
@@ -1297,6 +1417,15 @@ DynamicalResponseResults compute_dynamical_correlation_state(
         ritz_values[i] = diag[i];
     }
     
+    // For dynamical structure factors, shift energies so ground state is at E=0
+    // This ensures spectral function has weight only at positive frequencies (excitation energies)
+    double E_min = *std::min_element(ritz_values.begin(), ritz_values.end());
+    std::cout << "  Ground state energy (before shift): " << E_min << std::endl;
+    for (int i = 0; i < m; i++) {
+        ritz_values[i] -= E_min;
+    }
+    std::cout << "  Shifted to excitation energies (E_gs = 0)" << std::endl;
+    
     // Compute weights for S(ω) = Σₙ ⟨ψ|O₁†|n⟩⟨n|O₂|ψ⟩ δ(ω - Eₙ)
     // where |n⟩ are eigenstates in the Krylov basis
     
@@ -1304,7 +1433,7 @@ DynamicalResponseResults compute_dynamical_correlation_state(
     ComplexVector O1_psi(N);
     O1(psi.data(), O1_psi.data(), N);
     
-    std::vector<double> weights(m);
+    std::vector<Complex> complex_weights(m);
     
     for (int n = 0; n < m; n++) {
         // Compute ⟨ψ|O₁†|n⟩ = ⟨O₁ψ|n⟩ = Σⱼ evecs[n,j] ⟨O₁ψ|vⱼ⟩
@@ -1318,17 +1447,19 @@ DynamicalResponseResults compute_dynamical_correlation_state(
         // Compute ⟨n|O₂|ψ⟩ = evecs[n,0] × ||O₂|ψ|| (since |v₀⟩ = O₂|ψ⟩/||O₂|ψ||)
         Complex overlap_O2 = Complex(evecs[n * m + 0] * phi_norm, 0.0);
         
-        // Weight is ⟨ψ|O₁†|n⟩⟨n|O₂|ψ⟩ (complex product, take real part for spectral weight)
+        // Weight is ⟨ψ|O₁†|n⟩⟨n|O₂|ψ⟩ (complex product for general cross-correlation)
         Complex weight_complex = std::conj(overlap_O1) * overlap_O2;
-        weights[n] = weight_complex.real();  // Spectral function is real
+        complex_weights[n] = weight_complex;
     }
     
-    // Compute spectral function
-    compute_spectral_function(ritz_values, weights, results.frequencies,
-                             params.broadening, temperature, results.spectral_function);
+    // Compute spectral function (both real and imaginary parts)
+    compute_spectral_function_complex(ritz_values, complex_weights, results.frequencies,
+                                      params.broadening, temperature, 
+                                      results.spectral_function, results.spectral_function_imag);
     
     // No error bars for single state
     results.spectral_error.resize(num_omega_bins, 0.0);
+    results.spectral_error_imag.resize(num_omega_bins, 0.0);
     
     std::cout << "\n==========================================\n";
     std::cout << "Dynamical Correlation (Given State) Complete\n";

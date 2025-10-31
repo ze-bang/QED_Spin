@@ -75,7 +75,8 @@ struct DynamicalResponseParameters {
  */
 struct DynamicalResponseSample {
     std::vector<double> ritz_values;   // Eigenvalues from Krylov subspace
-    std::vector<double> weights;       // Spectral weights |<psi_i|O|0>|^2
+    std::vector<double> weights;       // Spectral weights |<psi_i|O|0>|^2 (real, for self-correlation)
+    std::vector<Complex> complex_weights;  // Complex spectral weights (for cross-correlation)
     int lanczos_iterations;            // Actual iterations performed
 };
 
@@ -84,8 +85,10 @@ struct DynamicalResponseSample {
  */
 struct DynamicalResponseResults {
     std::vector<double> frequencies;         // Frequency grid (ω)
-    std::vector<double> spectral_function;   // Averaged S(ω)
-    std::vector<double> spectral_error;      // Standard error in S(ω)
+    std::vector<double> spectral_function;   // Averaged Re[S(ω)]
+    std::vector<double> spectral_function_imag;  // Averaged Im[S(ω)] (for cross-correlation)
+    std::vector<double> spectral_error;      // Standard error in Re[S(ω)]
+    std::vector<double> spectral_error_imag; // Standard error in Im[S(ω)]
     std::vector<DynamicalResponseSample> per_sample_data;  // Per-sample results
     int total_samples;                       // Number of samples used
     double omega_min;                        // Minimum frequency

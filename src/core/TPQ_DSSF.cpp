@@ -29,6 +29,30 @@ using ComplexVector = std::vector<Complex>;
 namespace fs = std::filesystem;
 
 
+// Helper function to read num_sites from positions.dat file
+int read_num_sites_from_positions(const std::string& positions_file) {
+    std::ifstream file(positions_file);
+    if (!file.is_open()) {
+        throw std::runtime_error("Failed to open positions.dat file: " + positions_file);
+    }
+    
+    int num_sites = 0;
+    std::string line;
+    while (std::getline(file, line)) {
+        // Skip comment lines starting with #
+        if (line.empty() || line[0] == '#') continue;
+        num_sites++;
+    }
+    
+    file.close();
+    
+    if (num_sites == 0) {
+        throw std::runtime_error("No sites found in positions.dat file: " + positions_file);
+    }
+    
+    return num_sites;
+}
+
 void printSpinConfiguration(ComplexVector &state, int num_sites, float spin_length, const std::string &dir) {
     // Compute and print <S_i> for all sites
     std::vector<std::vector<Complex>> result(num_sites, std::vector<Complex>(3));
@@ -175,47 +199,123 @@ int main(int argc, char* argv[]) {
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
     MPI_Comm_size(MPI_COMM_WORLD, &size);
     
-    if (argc < 6 || argc > 15) {
+    if (argc < 4 || argc > 13) {
         if (rank == 0) {
-            std::cerr << "Usage: " << argv[0] << " <directory> <num_sites> <spin_length> <krylov_dim_or_nmax> <spin_combinations> [method] [operator_type] [basis] [dt,t_end] [unit_cell_size] [momentum_points] [polarization] [theta] [use_gpu]" << std::endl;
-            std::cerr << "  method (optional): krylov (default) | taylor | spectral" << std::endl;
-            std::cerr << "    - krylov: Time-domain correlation using Krylov time evolution" << std::endl;
-            std::cerr << "    - taylor: Time-domain correlation using Taylor expansion" << std::endl;
-            std::cerr << "    - spectral: Frequency-domain spectral function S(ω) = ⟨O₁†(ω)O₂⟩" << std::endl;
-            std::cerr << "  operator_type (optional): sum (default) | transverse | sublattice | experimental | transverse_experimental" << std::endl;
-            std::cerr << "  basis (optional): ladder (default) | xyz" << std::endl;
+            std::cerr << "Usage: " << argv[0] << " <directory> <krylov_dim_or_nmax> <spin_combinations> [method] [operator_type] [basis] [dt,t_end]/[omega_min,omega_max,omega_bins,broadening] [unit_cell_size] [momentum_points] [polarization] [theta] [use_gpu]" << std::endl;
+            std::cerr << "\nNote: num_sites is automatically detected from positions.dat, spin_length is fixed at 0.5" << std::endl;
+            std::cerr << "\n" << std::string(80, '=') << std::endl;
+            std::cerr << "REQUIRED ARGUMENTS:" << std::endl;
+            std::cerr << std::string(80, '=') << std::endl;
+            std::cerr << "  directory: Path containing InterAll.dat, Trans.dat, and positions.dat files" << std::endl;
+            std::cerr << "  krylov_dim_or_nmax: Dimension of Krylov subspace (krylov/taylor) or Lanczos order (spectral)" << std::endl;
+            std::cerr << "  spin_combinations: Format \"op1,op2;op3,op4;...\" where op is:" << std::endl;
+            std::cerr << "    - ladder basis: 0=Sp, 1=Sm, 2=Sz" << std::endl;
+            std::cerr << "    - xyz basis: 0=Sx, 1=Sy, 2=Sz" << std::endl;
+            std::cerr << "    - Example: \"0,1;2,2\" for SpSm/SxSy, SzSz combinations" << std::endl;
+            std::cerr << "\n" << std::string(80, '=') << std::endl;
+            std::cerr << "OPTIONAL ARGUMENTS:" << std::endl;
+            std::cerr << std::string(80, '=') << std::endl;
+            std::cerr << "  method (default: krylov): krylov | taylor | spectral" << std::endl;
+            std::cerr << "    - krylov: Time-domain correlation C(t) using Krylov time evolution" << std::endl;
+            std::cerr << "    - taylor: Time-domain correlation C(t) using Taylor expansion" << std::endl;
+            std::cerr << "    - spectral: Frequency-domain spectral function S(ω) via FTLM" << std::endl;
+            std::cerr << "\n  operator_type (default: sum): sum | transverse | sublattice | experimental | transverse_experimental" << std::endl;
+            std::cerr << "    - sum: Standard momentum-resolved sum operators S^{op1}(Q) S^{op2}(-Q)" << std::endl;
+            std::cerr << "    - transverse: Polarization-dependent operators for magnetic scattering" << std::endl;
+            std::cerr << "    - sublattice: Sublattice-resolved correlations (use unit_cell_size)" << std::endl;
+            std::cerr << "    - experimental: General form cos(θ)Sz + sin(θ)Sx (use theta)" << std::endl;
+            std::cerr << "    - transverse_experimental: Transverse version with experimental angle" << std::endl;
+            std::cerr << "\n  basis (default: ladder): ladder | xyz" << std::endl;
             std::cerr << "    - ladder: Use Sp/Sm/Sz operators (raising/lowering operators)" << std::endl;
             std::cerr << "    - xyz: Use Sx/Sy/Sz operators (Cartesian components)" << std::endl;
             std::cerr << "    - Note: experimental operator type always uses xyz basis internally" << std::endl;
-            std::cerr << "  dt,t_end (optional, only for taylor): e.g. 0.01,50.0" << std::endl;
-            std::cerr << "    For spectral method: omega_min,omega_max,num_omega_bins,broadening (e.g. -5.0,5.0,200,0.1)" << std::endl;
-            std::cerr << "  spin_combinations format: \"op1,op2;op3,op4;...\" where op is:" << std::endl;
-            std::cerr << "    - ladder basis: 0=Sp, 1=Sm, 2=Sz" << std::endl;
-            std::cerr << "    - xyz basis: 0=Sx, 1=Sy, 2=Sz" << std::endl;
-            std::cerr << "  Example: \"0,1;2,2\" for SpSm/SxSy, SzSz combinations" << std::endl;
-            std::cerr << "  unit_cell_size (optional, for sublattice operators): number of sublattices (default: 4)" << std::endl;
-            std::cerr << "  momentum_points (optional): \"Qx1,Qy1,Qz1;Qx2,Qy2,Qz2;...\" (default: (0,0,0);(0,0,2π))" << std::endl;
-            std::cerr << "  polarization (optional, for transverse operators): \"px,py,pz\" normalized polarization vector (default: (1/√2,-1/√2,0))" << std::endl;
-            std::cerr << "  theta (optional, for experimental operators): angle in radians (default: 0.0)" << std::endl;
-            std::cerr << "  use_gpu (optional): 1 to use GPU if available, 0 for CPU only (default: 0)" << std::endl;
-            std::cerr << "\nOperator type details:" << std::endl;
-            std::cerr << "  sum: Standard sum operators S^{op1}(Q) S^{op2}(-Q)" << std::endl;
-            std::cerr << "  transverse: Polarization-weighted operators for SF/NSF separation" << std::endl;
-            std::cerr << "  sublattice: Sublattice-resolved correlations" << std::endl;
-            std::cerr << "  experimental: cos(θ)Sz + sin(θ)Sx combinations (always xyz)" << std::endl;
+            std::cerr << "\n  dt,t_end (format depends on method):" << std::endl;
+            std::cerr << "    - For krylov/taylor: \"dt,t_end\" e.g., \"0.01,50.0\"" << std::endl;
+            std::cerr << "      * dt: time step for evolution" << std::endl;
+            std::cerr << "      * t_end: maximum evolution time" << std::endl;
+            std::cerr << "    - For spectral: \"omega_min,omega_max,num_omega_bins,broadening\" e.g., \"-5.0,5.0,200,0.1\"" << std::endl;
+            std::cerr << "      * omega_min: minimum frequency" << std::endl;
+            std::cerr << "      * omega_max: maximum frequency" << std::endl;
+            std::cerr << "      * num_omega_bins: number of frequency points (resolution)" << std::endl;
+            std::cerr << "      * broadening: Lorentzian broadening parameter (eta)" << std::endl;
+            std::cerr << "\n  unit_cell_size (for sublattice operators): number of sublattices (default: 4)" << std::endl;
+            std::cerr << "  momentum_points (default: (0,0,0);(0,0,2π)): \"Qx1,Qy1,Qz1;Qx2,Qy2,Qz2;...\"" << std::endl;
+            std::cerr << "  polarization (for transverse operators): \"px,py,pz\" normalized vector (default: (1/√2,-1/√2,0))" << std::endl;
+            std::cerr << "  theta (for experimental operators): angle in radians (default: 0.0)" << std::endl;
+            std::cerr << "  use_gpu (optional): 1 for GPU acceleration, 0 for CPU only (default: 0)" << std::endl;
+            std::cerr << "\n" << std::string(80, '=') << std::endl;
+            std::cerr << "SPECTRAL METHOD (method=spectral) DETAILS:" << std::endl;
+            std::cerr << std::string(80, '=') << std::endl;
+            std::cerr << "The spectral method computes the dynamical structure factor (DSF):" << std::endl;
+            std::cerr << "  S(q,ω) = (1/π) × Im[⟨ψ|O₁†(q) G(ω) O₂(q)|ψ⟩]" << std::endl;
+            std::cerr << "where G(ω) = 1/(ω - H + iη) is the Green's function." << std::endl;
+            std::cerr << "\nParameters:" << std::endl;
+            std::cerr << "  krylov_dim_or_nmax: Lanczos order (typical values: 30-100)" << std::endl;
+            std::cerr << "    - Higher values = better convergence but more computational cost" << std::endl;
+            std::cerr << "    - Recommended: 50-100 for most systems" << std::endl;
+            std::cerr << "\n  Broadening (eta) in spectral parameters:" << std::endl;
+            std::cerr << "    - Controls smoothing of spectral features (peak width)" << std::endl;
+            std::cerr << "    - Small values (0.01-0.05): High resolution, shows sharp features" << std::endl;
+            std::cerr << "    - Medium values (0.1): Balanced (default), good for most cases" << std::endl;
+            std::cerr << "    - Large values (0.2-0.5): Smoothed, reduces noise artifacts" << std::endl;
+            std::cerr << "\n  Frequency resolution:" << std::endl;
+            std::cerr << "    - num_omega_bins: Number of frequency points" << std::endl;
+            std::cerr << "    - Larger values give finer frequency resolution" << std::endl;
+            std::cerr << "    - Typical values: 100-500 depending on energy scale" << std::endl;
+            std::cerr << "\nOutput files (spectral method):" << std::endl;
+            std::cerr << "  - Format: <operator>_spectral_sample_<idx>_beta_<beta>.txt" << std::endl;
+            std::cerr << "  - Columns: frequency(ω) | spectral_intensity S(ω)" << std::endl;
+            std::cerr << "\n" << std::string(80, '=') << std::endl;
+            std::cerr << "TIME-DOMAIN METHODS (method=krylov or method=taylor) DETAILS:" << std::endl;
+            std::cerr << std::string(80, '=') << std::endl;
+            std::cerr << "Compute time correlation function C(t) = ⟨ψ|O₁†(0) O₂(t)|ψ⟩" << std::endl;
+            std::cerr << "\nKrylov method:" << std::endl;
+            std::cerr << "  - Most accurate and stable approach" << std::endl;
+            std::cerr << "  - Uses Lanczos algorithm for exponential evolution" << std::endl;
+            std::cerr << "  - Parameter: krylov_dim = subspace dimension (typical: 20-50)" << std::endl;
+            std::cerr << "\nTaylor method:" << std::endl;
+            std::cerr << "  - Fast but less stable for long times" << std::endl;
+            std::cerr << "  - Uses Taylor series: exp(-iHt) ≈ Σ (-iHt)ⁿ/n!" << std::endl;
+            std::cerr << "  - Parameter: krylov_dim_or_nmax = max order of Taylor expansion" << std::endl;
+            std::cerr << "\nOutput files (time-domain methods):" << std::endl;
+            std::cerr << "  - Format: <operator>_<method>_sample_<idx>_beta_<beta>.txt" << std::endl;
+            std::cerr << "  - Columns: step_index | time_value | Re[C(t)] | Im[C(t)]" << std::endl;
+            std::cerr << "\n" << std::string(80, '=') << std::endl;
+            std::cerr << "EXAMPLES:" << std::endl;
+            std::cerr << std::string(80, '=') << std::endl;
+            std::cerr << "1. Spectral function with momentum resolution:" << std::endl;
+            std::cerr << "   " << argv[0] << " ./data 50 \"2,2\" spectral sum ladder \"-5,5,200,0.1\" 4 \"0,0,0;0,0,1\"" << std::endl;
+            std::cerr << "\n2. Time-domain using Krylov (recommended):" << std::endl;
+            std::cerr << "   " << argv[0] << " ./data 30 \"0,1;2,2\" krylov sum ladder \"0.01,50.0\"" << std::endl;
+            std::cerr << "\n3. Transverse scattering with custom polarization:" << std::endl;
+            std::cerr << "   " << argv[0] << " ./data 40 \"2,2\" spectral transverse xyz \"-10,10,300,0.2\" 4 \"0,0,0\" \"1,0,0\"" << std::endl;
+            std::cerr << "\n4. Experimental geometry with angle:" << std::endl;
+            std::cerr << "   " << argv[0] << " ./data 50 \"2,2\" spectral experimental xyz \"-5,5,250,0.1\" 4 \"0,0,0\" \"0,0,0\" 0.785" << std::endl;
         }
         MPI_Finalize();
         return 1;
     }
 
     std::string directory = argv[1];
-    int num_sites = std::stoi(argv[2]);
-    float spin_length = std::stof(argv[3]);
-    int krylov_dim_or_nmax = std::stoi(argv[4]);
-    std::string spin_combinations_str = argv[5];
-    std::string method = (argc >= 7) ? std::string(argv[6]) : std::string("krylov");
-    std::string operator_type = (argc >= 8) ? std::string(argv[7]) : std::string("sum");
-    std::string basis = (argc >= 9) ? std::string(argv[8]) : std::string("ladder");
+    int krylov_dim_or_nmax = std::stoi(argv[2]);
+    std::string spin_combinations_str = argv[3];
+    std::string method = (argc >= 5) ? std::string(argv[4]) : std::string("krylov");
+    std::string operator_type = (argc >= 6) ? std::string(argv[5]) : std::string("sum");
+    std::string basis = (argc >= 7) ? std::string(argv[6]) : std::string("ladder");
+    
+    // Read num_sites from positions.dat and set spin_length to 0.5
+    std::string positions_file = directory + "/positions.dat";
+    int num_sites;
+    try {
+        num_sites = read_num_sites_from_positions(positions_file);
+    } catch (const std::exception& e) {
+        if (rank == 0) {
+            std::cerr << "Error: " << e.what() << std::endl;
+        }
+        MPI_Finalize();
+        return 1;
+    }
+    float spin_length = 0.5f;
     
     // Experimental operators always use XYZ basis internally
     if ((operator_type == "experimental" || operator_type == "transverse_experimental") && basis != "xyz") {
@@ -232,8 +332,8 @@ int main(int argc, char* argv[]) {
     int num_omega_bins = 200;
     double broadening = 0.1;
     
-    if (argc >= 10) {
-        std::string param_str = argv[9];
+    if (argc >= 8) {
+        std::string param_str = argv[7];
         
         if (method == "spectral") {
             // Parse omega_min,omega_max,num_omega_bins,broadening for spectral method
@@ -275,14 +375,14 @@ int main(int argc, char* argv[]) {
     }
     
     int unit_cell_size = 4; // Default for pyrochlore
-    if (argc >= 11) {
-        try { unit_cell_size = std::stoi(argv[10]); } catch (...) { unit_cell_size = 4; }
+    if (argc >= 9) {
+        try { unit_cell_size = std::stoi(argv[8]); } catch (...) { unit_cell_size = 4; }
     }
 
     // Parse momentum points
     std::vector<std::vector<double>> momentum_points;
-    if (argc >= 12) {
-        std::string momentum_str = argv[11];
+    if (argc >= 10) {
+        std::string momentum_str = argv[9];
         std::stringstream mom_ss(momentum_str);
         std::string point_str;
         
@@ -324,8 +424,8 @@ int main(int argc, char* argv[]) {
 
     // Parse polarization vector for transverse operators
     std::vector<double> polarization = {1.0/std::sqrt(2.0), -1.0/std::sqrt(2.0), 0.0};
-    if (argc >= 13) {
-        std::string pol_str = argv[12];
+    if (argc >= 11) {
+        std::string pol_str = argv[10];
         std::stringstream pol_ss(pol_str);
         std::string coord_str;
         std::vector<double> pol_temp;
@@ -360,9 +460,9 @@ int main(int argc, char* argv[]) {
 
     // Parse theta for experimental operators
     double theta = 0.0;  // Default to 0
-    if (argc >= 14) {
+    if (argc >= 12) {
         try {
-            theta = std::stod(argv[13]);
+            theta = std::stod(argv[11]);
             theta *= M_PI;
             if (rank == 0) {
                 std::cout << "Using theta = " << theta << " radians" << std::endl;
@@ -377,9 +477,9 @@ int main(int argc, char* argv[]) {
 
     // Parse GPU flag
     bool use_gpu = false;
-    if (argc >= 15) {
+    if (argc >= 13) {
         try {
-            int gpu_flag = std::stoi(argv[14]);
+            int gpu_flag = std::stoi(argv[12]);
             use_gpu = (gpu_flag != 0);
 #ifndef ENABLE_GPU
             if (use_gpu && rank == 0) {
@@ -494,7 +594,6 @@ int main(int argc, char* argv[]) {
     
     std::string interall_file = directory + "/InterAll.dat";
     std::string trans_file = directory + "/Trans.dat";
-    std::string positions_file = directory + "/positions.dat";
     
     // Check if files exist
     if (!fs::exists(interall_file) || !fs::exists(trans_file)) {
