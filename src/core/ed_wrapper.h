@@ -14,6 +14,7 @@
 #include "construct_ham.h"
 #include "../cpu_solvers/observables.h"
 #include "ed_config.h"
+#include "system_utils.h"
 #include <sys/stat.h>
 #include <filesystem>
 #include <algorithm>
@@ -359,7 +360,7 @@ EDResults exact_diagonalization_core(
     // Initialize output directory if needed
     if (!params.output_dir.empty()) {
         std::string cmd = "mkdir -p " + params.output_dir;
-        system(cmd.c_str());
+        safe_system_call(cmd);
     }
     
     // Set eigenvectors flag in results
@@ -637,7 +638,7 @@ EDResults exact_diagonalization_core(
                 // Save FTLM results to file
                 if (!params.output_dir.empty()) {
                     std::string ftlm_dir = params.output_dir + "/thermo";
-                    system(("mkdir -p " + ftlm_dir).c_str());
+                    safe_system_call("mkdir -p " + ftlm_dir);
                     save_ftlm_results(ftlm_results, ftlm_dir + "/ftlm_thermo.txt");
                 }
             }
@@ -680,7 +681,7 @@ EDResults exact_diagonalization_core(
                 // Save LTLM results to file
                 if (!params.output_dir.empty()) {
                     std::string ltlm_dir = params.output_dir + "/thermo";
-                    system(("mkdir -p " + ltlm_dir).c_str());
+                    safe_system_call("mkdir -p " + ltlm_dir);
                     save_ltlm_results(ltlm_results, ltlm_dir + "/ltlm_thermo.txt");
                 }
             }
@@ -731,7 +732,7 @@ EDResults exact_diagonalization_core(
                 // Save results to file
                 if (!params.output_dir.empty()) {
                     std::string thermo_dir = params.output_dir + "/thermo";
-                    system(("mkdir -p " + thermo_dir).c_str());
+                    safe_system_call("mkdir -p " + thermo_dir);
                     save_hybrid_thermal_results(hybrid_results, thermo_dir + "/hybrid_thermo.txt");
                 }
             }
@@ -792,7 +793,7 @@ void process_thermal_correlations(
     // Create output directory for thermal correlation results
     std::string output_correlations_dir = params.output_dir + "/thermal_correlations";
     std::string cmd_mkdir = "mkdir -p " + output_correlations_dir;
-    system(cmd_mkdir.c_str());
+    safe_system_call(cmd_mkdir);
 
     // Determine base directory where correlation files might be located
     std::string base_dir;
@@ -816,7 +817,7 @@ void process_thermal_correlations(
             // Find matching files
             std::string temp_list_file = output_correlations_dir + "/" + prefix + "_files.txt";
             std::string find_command = "find \"" + base_dir + "\" -name \"" + pattern + "\" 2>/dev/null > \"" + temp_list_file + "\"";
-            system(find_command.c_str());
+            safe_system_call(find_command);
             
             // Read the list of files
             std::ifstream file_list(temp_list_file);
@@ -1247,7 +1248,7 @@ void transform_and_save_tpq_states(
     // Find all TPQ state files
     std::string temp_list_file = main_output_dir + "/tpq_state_files_" + std::to_string(block_idx) + ".txt";
     std::string find_command = "find \"" + block_output_dir + "\" -name \"tpq_state_*.dat\" 2>/dev/null > \"" + temp_list_file + "\"";
-    system(find_command.c_str());
+    safe_system_call(find_command);
     
     std::ifstream file_list(temp_list_file);
     if (!file_list.is_open()) return;
@@ -1876,9 +1877,8 @@ EDResults exact_diagonalization_from_directory_symmetrized(
         automorphism_finder_path += "/automorphism_finder.py";
         std::string cmd = "python " + automorphism_finder_path + " --data_dir=\"" + directory + "\"";
         std::cout << "Running automorphism finder: " << cmd << std::endl;
-        uint64_t result = system(cmd.c_str());
-        if (result != 0) {
-            std::cerr << "Warning: Automorphism finder returned non-zero code: " << result << std::endl;
+        if (!safe_system_call(cmd)) {
+            std::cerr << "Warning: Automorphism finder failed" << std::endl;
         }
     } else {
         std::cout << "Using existing automorphism results from: " << automorphism_file << std::endl;
@@ -1911,7 +1911,7 @@ EDResults exact_diagonalization_from_directory_symmetrized(
     }
     
     if (!params.output_dir.empty()) {
-        system(("mkdir -p " + params.output_dir).c_str());
+        safe_system_call("mkdir -p " + params.output_dir);
     }
     
     // ========== Step 4: For TPQ - Find Ground State Sector ==========
@@ -1949,7 +1949,7 @@ EDResults exact_diagonalization_from_directory_symmetrized(
         block_params.num_eigenvalues = std::min(params.num_eigenvalues, block_dim);
         if (params.compute_eigenvectors) {
             block_params.output_dir = params.output_dir + "/min_sector";
-            system(("mkdir -p " + block_params.output_dir).c_str());
+            safe_system_call("mkdir -p " + block_params.output_dir);
         }
         
         // Diagonalize (only target block for TPQ)
@@ -1970,13 +1970,13 @@ EDResults exact_diagonalization_from_directory_symmetrized(
             
         // Store eigenvalues
         for (size_t i = 0; i < block_results.eigenvalues.size(); ++i) {
-            all_eigen_info.push_back({block_results.eigenvalues[i], static_cast<int>(block_idx), static_cast<int>(i)});
+            all_eigen_info.push_back({block_results.eigenvalues[i], block_idx, static_cast<uint64_t>(i)});
         }
         
         // Transform eigenvectors/states if needed
         if (params.compute_eigenvectors || (is_tpq_method && is_target_block)) {
             std::string eigenvector_dir = params.output_dir + "/eigenvectors";
-            system(("mkdir -p " + eigenvector_dir).c_str());
+            safe_system_call("mkdir -p " + eigenvector_dir);
             
             if (is_tpq_method && is_target_block) {
                 ed_internal::transform_and_save_tpq_states(

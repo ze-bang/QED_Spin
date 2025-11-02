@@ -1,5 +1,6 @@
 // arpack.cpp - Implementation of ARPACK-NG wrapper functions
 #include "arpack.h"
+#include "../core/system_utils.h"
 #include <iostream>
 #include <fstream>
 #include <iomanip>
@@ -540,7 +541,7 @@ void save_eigs_to_dir(const std::vector<double>& evals,
     if (dir.empty()) return;
     std::string evec_dir = dir + "/eigenvectors";
     std::string cmd = "mkdir -p " + evec_dir;
-    system(cmd.c_str());
+    safe_system_call(cmd);
 
     {
         std::string fbin = evec_dir + "/eigenvalues.dat";

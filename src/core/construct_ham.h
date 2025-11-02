@@ -16,6 +16,7 @@
 #include <map>
 #include <tuple>
 #include <unordered_map>
+#include "system_utils.h"
 
 // Define complex number type for convenience
 using Complex = std::complex<double>;
@@ -870,7 +871,7 @@ public:
         
         // Setup output directory
         std::string sym_basis_dir = dir + "/sym_basis";
-        system(("mkdir -p " + sym_basis_dir).c_str());
+        safe_system_call("mkdir -p " + sym_basis_dir);
         
         // Generate basis for each sector
         const size_t dim = 1ULL << n_bits_;
@@ -942,7 +943,7 @@ public:
         buildSparseMatrix();
         
         std::string block_dir = dir + "/sym_blocks";
-        system(("mkdir -p " + block_dir).c_str());
+        safe_system_call("mkdir -p " + block_dir);
         
         uint64_t block_start = 0;
         for (size_t block_idx = 0; block_idx < symmetrized_block_ham_sizes.size(); ++block_idx) {
@@ -1522,7 +1523,7 @@ public:
         
         // Setup output directory
         std::string sym_basis_dir = dir + "/sym_basis_fixed_sz";
-        system(("mkdir -p " + sym_basis_dir).c_str());
+        safe_system_call("mkdir -p " + sym_basis_dir);
         
         // Generate basis for each sector
         size_t total_written = 0;

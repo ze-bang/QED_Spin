@@ -1,4 +1,5 @@
 #include "lanczos.h"
+#include "../core/system_utils.h"
 #include <limits>
 
 ComplexVector generateRandomVector(int N, std::mt19937& gen, std::uniform_real_distribution<double>& dist) {
@@ -434,7 +435,7 @@ void lanczos_no_ortho(std::function<void(const Complex*, Complex*, int)> H, uint
     // Create a directory for temporary basis vector files
     std::string temp_dir = (dir.empty() ? "./lanczos_basis_vectors" : dir+"/lanczos_basis_vectors");
     std::string cmd = "mkdir -p " + temp_dir;
-    system(cmd.c_str());
+    safe_system_call(cmd);
 
     // Write the first basis vector to file
     if (!write_basis_vector(temp_dir, 0, v_current, N)) {
@@ -515,7 +516,7 @@ void lanczos_no_ortho(std::function<void(const Complex*, Complex*, int)> H, uint
     // Write eigenvalues and eigenvectors to files
     std::string evec_dir = (dir.empty() ? "./eigenvectors" : dir + "/eigenvectors");
     std::string cmd_mkdir = "mkdir -p " + evec_dir;
-    system(cmd_mkdir.c_str());
+    safe_system_call(cmd_mkdir);
 
     // Solve the tridiagonal eigenvalue problem
     uint64_t info = solve_tridiagonal_matrix(alpha, beta, m, exct, eigenvalues, temp_dir, evec_dir, eigenvectors, N);
@@ -523,12 +524,12 @@ void lanczos_no_ortho(std::function<void(const Complex*, Complex*, int)> H, uint
     if (info != 0) {
         std::cerr << "Tridiagonal eigenvalue solver failed with error code " << info << std::endl;
         // Clean up temporary files before returning
-        system(("rm -rf " + temp_dir).c_str());
+        safe_system_call("rm -rf " + temp_dir);
         return;
     }
     
     // Clean up temporary files
-    system(("rm -rf " + temp_dir).c_str());
+    safe_system_call("rm -rf " + temp_dir);
 }
 
 // Lanczos algorithm with selective reorthogonalization
@@ -555,7 +556,7 @@ void lanczos_selective_reorth(std::function<void(const Complex*, Complex*, int)>
     // Create a directory for temporary basis vector files
     std::string temp_dir = (dir.empty() ? "./lanczos_basis_vectors" : dir+"/lanczos_basis_vectors");
     std::string cmd = "mkdir -p " + temp_dir;
-    system(cmd.c_str());
+    safe_system_call(cmd);
 
     // Write the first basis vector to file
     if (!write_basis_vector(temp_dir, 0, v_current, N)) {
@@ -746,7 +747,7 @@ void lanczos_selective_reorth(std::function<void(const Complex*, Complex*, int)>
     // Write eigenvalues and eigenvectors to files
     std::string evec_dir = (dir.empty() ? "./eigenvectors" : dir + "/eigenvectors");
     std::string cmd_mkdir = "mkdir -p " + evec_dir;
-    system(cmd_mkdir.c_str());
+    safe_system_call(cmd_mkdir);
 
     // Solve the tridiagonal eigenvalue problem
     uint64_t info = solve_tridiagonal_matrix(alpha, beta, m, exct, eigenvalues, temp_dir, evec_dir, eigenvectors, N);
@@ -754,12 +755,12 @@ void lanczos_selective_reorth(std::function<void(const Complex*, Complex*, int)>
     if (info != 0) {
         std::cerr << "Tridiagonal eigenvalue solver failed with error code " << info << std::endl;
         // Clean up temporary files before returning
-        system(("rm -rf " + temp_dir).c_str());
+        safe_system_call("rm -rf " + temp_dir);
         return;
     }
     
     // Clean up temporary files
-    system(("rm -rf " + temp_dir).c_str());
+    safe_system_call("rm -rf " + temp_dir);
 }
 
 // Lanczos algorithm implementation with basis vectors stored on disk
@@ -786,7 +787,7 @@ void lanczos(std::function<void(const Complex*, Complex*, int)> H, uint64_t N, u
     // Create a directory for temporary basis vector files
     std::string temp_dir = (dir.empty() ? "./lanczos_basis_vectors" : dir+"/lanczos_basis_vectors");
     std::string cmd = "mkdir -p " + temp_dir;
-    system(cmd.c_str());
+    safe_system_call(cmd);
 
     // Write the first basis vector to file
     if (!write_basis_vector(temp_dir, 0, v_current, N)) {
@@ -879,7 +880,7 @@ void lanczos(std::function<void(const Complex*, Complex*, int)> H, uint64_t N, u
     // Write eigenvalues and eigenvectors to files
     std::string evec_dir = (dir.empty() ? "./eigenvectors" : dir + "/eigenvectors");
     std::string cmd_mkdir = "mkdir -p " + evec_dir;
-    system(cmd_mkdir.c_str());
+    safe_system_call(cmd_mkdir);
 
     // Solve the tridiagonal eigenvalue problem
     uint64_t info = solve_tridiagonal_matrix(alpha, beta, m, exct, eigenvalues, temp_dir, evec_dir, eigenvectors, N);
@@ -887,12 +888,12 @@ void lanczos(std::function<void(const Complex*, Complex*, int)> H, uint64_t N, u
     if (info != 0) {
         std::cerr << "Tridiagonal eigenvalue solver failed with error code " << info << std::endl;
         // Clean up temporary files before returning
-        system(("rm -rf " + temp_dir).c_str());
+        safe_system_call("rm -rf " + temp_dir);
         return;
     }
     
     // Clean up temporary files
-    system(("rm -rf " + temp_dir).c_str());
+    safe_system_call("rm -rf " + temp_dir);
 }
 
 // Block Lanczos algorithm for finding eigenvalues with degeneracies
@@ -917,8 +918,8 @@ void block_lanczos(std::function<void(const Complex*, Complex*, int)> H, uint64_
     // ===== Setup directories =====
     const std::string temp_dir = (dir.empty() ? "./block_lanczos_basis" : dir + "/block_lanczos_basis");
     const std::string evec_dir = (dir.empty() ? "./eigenvectors" : dir + "/eigenvectors");
-    system(("mkdir -p " + temp_dir).c_str());
-    system(("mkdir -p " + evec_dir).c_str());
+    safe_system_call("mkdir -p " + temp_dir);
+    safe_system_call("mkdir -p " + evec_dir);
 
     // ===== Initialize random starting block with QR =====
     std::mt19937 gen(std::random_device{}());
@@ -1167,7 +1168,7 @@ void block_lanczos(std::function<void(const Complex*, Complex*, int)> H, uint64_
     const uint64_t total_blocks = static_cast<int>(alpha_blocks.size());
     if (total_blocks == 0) {
         std::cerr << "Block Lanczos: no Krylov basis generated" << std::endl;
-        system(("rm -rf " + temp_dir).c_str());
+        safe_system_call("rm -rf " + temp_dir);
         return;
     }
 
@@ -1181,7 +1182,7 @@ void block_lanczos(std::function<void(const Complex*, Complex*, int)> H, uint64_
                           evals.data());
     if (info != 0) {
         std::cerr << "Block Lanczos: final eigensolve failed (info=" << info << ")" << std::endl;
-        system(("rm -rf " + temp_dir).c_str());
+        safe_system_call("rm -rf " + temp_dir);
         return;
     }
 
@@ -1277,7 +1278,7 @@ void block_lanczos(std::function<void(const Complex*, Complex*, int)> H, uint64_
     }
 
     // Cleanup temporary files
-    system(("rm -rf " + temp_dir).c_str());
+    safe_system_call("rm -rf " + temp_dir);
     std::cout << "Block Lanczos: completed successfully with " << output_eigs << " eigenvalues" << std::endl;
 }
 // Chebyshev Filtered Lanczos algorithm with automatic spectrum range estimation
@@ -1294,8 +1295,8 @@ void chebyshev_filtered_lanczos(std::function<void(const Complex*, Complex*, int
     const std::string temp_dir = (dir.empty() ? "./chebyshev_lanczos_basis" : dir + "/chebyshev_lanczos_basis");
     const std::string evec_dir = (dir.empty() ? "./eigenvectors" : dir + "/eigenvectors");
     
-    system(("mkdir -p " + temp_dir).c_str());
-    system(("mkdir -p " + evec_dir).c_str());
+    safe_system_call("mkdir -p " + temp_dir);
+    safe_system_call("mkdir -p " + evec_dir);
     
     // ===== Step 1: Estimate spectral bounds if not provided =====
     double lambda_min, lambda_max;
@@ -1634,7 +1635,7 @@ void chebyshev_filtered_lanczos(std::function<void(const Complex*, Complex*, int
     
     if (info != 0) {
         std::cerr << "Tridiagonal eigenvalue solver failed with error code " << info << std::endl;
-        system(("rm -rf " + temp_dir).c_str());
+        safe_system_call("rm -rf " + temp_dir);
         return;
     }
     
@@ -1661,7 +1662,7 @@ void chebyshev_filtered_lanczos(std::function<void(const Complex*, Complex*, int
     }
     
     // Cleanup temporary files
-    system(("rm -rf " + temp_dir).c_str());
+    safe_system_call("rm -rf " + temp_dir);
     
     std::cout << "Chebyshev Filtered Lanczos completed successfully" << std::endl;
 }
@@ -1680,8 +1681,8 @@ void shift_invert_lanczos(std::function<void(const Complex*, Complex*, int)> H, 
     std::string temp_dir = (dir.empty() ? "./lanczos_basis_vectors" : dir+"/lanczos_basis_vectors");
     std::string result_dir = (dir.empty() ? "./eigenvectors" : dir + "/eigenvectors");
     
-    system(("mkdir -p " + temp_dir).c_str());
-    system(("mkdir -p " + result_dir).c_str());
+    safe_system_call("mkdir -p " + temp_dir);
+    safe_system_call("mkdir -p " + result_dir);
     
     // Parameters for iterative solver (CG/GMRES)
     const uint64_t max_cg_iter = 100;
@@ -1965,7 +1966,7 @@ void shift_invert_lanczos(std::function<void(const Complex*, Complex*, int)> H, 
     
     if (info != 0) {
         std::cerr << "LAPACKE_dstevd failed with error code " << info << std::endl;
-        system(("rm -rf " + temp_dir).c_str());
+        safe_system_call("rm -rf " + temp_dir);
         return;
     }
     
@@ -2049,7 +2050,7 @@ void shift_invert_lanczos(std::function<void(const Complex*, Complex*, int)> H, 
     }
     
     // Cleanup
-    system(("rm -rf " + temp_dir).c_str());
+    safe_system_call("rm -rf " + temp_dir);
     
     std::cout << "Shift-Invert Lanczos completed successfully" << std::endl;
 }
@@ -2065,7 +2066,7 @@ void full_diagonalization(std::function<void(const Complex*, Complex*, int)> H, 
         dir = ".";
     }
     if (compute_eigenvectors) {
-        system(("mkdir -p " + dir).c_str());
+        safe_system_call("mkdir -p " + dir);
     }
 
     // Detect if matrix is small enough for dense approach or needs sparse optimization
@@ -2353,9 +2354,9 @@ void krylov_schur(std::function<void(const Complex*, Complex*, int)> H, uint64_t
     std::string evec_dir = (dir.empty() ? "./eigenvectors" : dir + "/eigenvectors");
     
     if (compute_eigenvectors) {
-        system(("mkdir -p " + evec_dir).c_str());
+        safe_system_call("mkdir -p " + evec_dir);
     }
-    system(("mkdir -p " + temp_dir).c_str());
+    safe_system_call("mkdir -p " + temp_dir);
 
     // Initialize random starting vector
     std::mt19937 gen(std::random_device{}());
@@ -2633,7 +2634,7 @@ void krylov_schur(std::function<void(const Complex*, Complex*, int)> H, uint64_t
     }
     
     // Clean up temporary files
-    system(("rm -rf " + temp_dir).c_str());
+    safe_system_call("rm -rf " + temp_dir);
     
     if (!converged) {
         std::cout << "Krylov-Schur: Maximum iterations reached without full convergence" << std::endl;
@@ -2656,8 +2657,8 @@ void implicitly_restarted_lanczos(std::function<void(const Complex*, Complex*, i
     const std::string temp_dir = (dir.empty() ? "./irl_basis_vectors" : dir + "/irl_basis_vectors");
     const std::string evec_dir = (dir.empty() ? "./eigenvectors" : dir + "/eigenvectors");
     
-    system(("mkdir -p " + temp_dir).c_str());
-    system(("mkdir -p " + evec_dir).c_str());
+    safe_system_call("mkdir -p " + temp_dir);
+    safe_system_call("mkdir -p " + evec_dir);
     
     // ===== Parameters =====
     const uint64_t k = num_eigs;                          // Target number of eigenvalues
@@ -3043,9 +3044,9 @@ void thick_restart_lanczos(std::function<void(const Complex*, Complex*, int)> H,
     const std::string locked_dir = (dir.empty() ? "./trl_locked" : dir + "/trl_locked");
     const std::string evec_dir = (dir.empty() ? "./eigenvectors" : dir + "/eigenvectors");
     
-    system(("mkdir -p " + temp_dir).c_str());
-    system(("mkdir -p " + locked_dir).c_str());
-    system(("mkdir -p " + evec_dir).c_str());
+    safe_system_call("mkdir -p " + temp_dir);
+    safe_system_call("mkdir -p " + locked_dir);
+    safe_system_call("mkdir -p " + evec_dir);
     
     // ===== Parameters =====
     const uint64_t k = num_eigs;                          // Target number of eigenvalues
@@ -3419,8 +3420,8 @@ void thick_restart_lanczos(std::function<void(const Complex*, Complex*, int)> H,
     }
     
     // Cleanup temporary files
-    system(("rm -rf " + temp_dir).c_str());
-    system(("rm -rf " + locked_dir).c_str());
+    safe_system_call("rm -rf " + temp_dir);
+    safe_system_call("rm -rf " + locked_dir);
     
     std::cout << "\n=== Thick-Restart Lanczos completed successfully ===" << std::endl;
 }
@@ -3614,7 +3615,7 @@ void optimal_spectrum_solver(std::function<void(const Complex*, Complex*, int)> 
     }
     std::string evec_dir = dir + "/eigenvectors";
     if (compute_eigenvectors) {
-        system(("mkdir -p " + evec_dir).c_str());
+        safe_system_call("mkdir -p " + evec_dir);
     }
     
     // Step 1: Estimate spectral bounds and density
@@ -3944,7 +3945,7 @@ void optimal_spectrum_solver(std::function<void(const Complex*, Complex*, int)> 
         // Clean up temporary slice directories
         for (size_t i = 0; i < slices.size(); i++) {
             std::string slice_dir = dir + "/slice_" + std::to_string(i);
-            system(("rm -rf " + slice_dir).c_str());
+            safe_system_call("rm -rf " + slice_dir);
         }
     }
     

@@ -1,4 +1,5 @@
 #include "CG.h"
+#include "../core/system_utils.h"
 
 // Davidson method for finding lowest eigenvalues
 void davidson_method(
@@ -16,7 +17,7 @@ void davidson_method(
     std::string temp_dir = dir + "/davidson_temp";
     if (!dir.empty()) {
         std::string cmd = "mkdir -p " + temp_dir;
-        system(cmd.c_str());
+        safe_system_call(cmd);
     }
     
     // Initialize subspace with random vectors
@@ -199,7 +200,7 @@ void davidson_method(
     // Clean up temporary directory if created
     if (!dir.empty()) {
         std::string cmd = "rm -rf " + temp_dir;
-        system(cmd.c_str());
+        safe_system_call(cmd);
     }
 }
 
@@ -217,7 +218,7 @@ void bicg_eigenvalues(
     std::string temp_dir = dir + "/bicg_temp";
     if (!dir.empty()) {
         std::string cmd = "mkdir -p " + temp_dir;
-        system(cmd.c_str());
+        safe_system_call(cmd);
     }
     
     // Initialize random vectors
@@ -427,7 +428,7 @@ void bicg_eigenvalues(
     // Clean up temporary directory if created
     if (!dir.empty()) {
         std::string cmd = "rm -rf " + temp_dir;
-        system(cmd.c_str());
+        safe_system_call(cmd);
     }
 }
 
@@ -702,7 +703,7 @@ void lobpcg_method(
     if (!dir.empty()) {
         std::string evec_dir = dir + "/eigenvectors";
         std::string cmd = "mkdir -p " + evec_dir;
-        system(cmd.c_str());
+        safe_system_call(cmd);
         
         for (int i = 0; i < block_size; i++) {
             std::string evec_file = evec_dir + "/eigenvector_" + std::to_string(i) + ".dat";

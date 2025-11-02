@@ -1,4 +1,5 @@
 // ltlm.cpp - Low Temperature Lanczos Method implementation
+#include "../core/system_utils.h"
 
 #include "ltlm.h"
 #include "ftlm.h"  // For build_lanczos_tridiagonal function
@@ -283,7 +284,7 @@ LTLMResults low_temperature_lanczos(
     // Create output directory if needed
     if (!output_dir.empty() && params.store_intermediate) {
         std::string cmd = "mkdir -p " + output_dir + "/ltlm_data";
-        system(cmd.c_str());
+        safe_system_call(cmd);
     }
     
     // Step 1: Find or use ground state

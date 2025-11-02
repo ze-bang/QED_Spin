@@ -1,5 +1,6 @@
 #include "gpu_tpq.cuh"
 #include "gpu_operator.cuh"
+#include "../core/system_utils.h"
 #include <iostream>
 #include <fstream>
 #include <iomanip>
@@ -272,7 +273,7 @@ void GPUTPQSolver::runMicrocanonicalTPQ(
     // Create output directory
     if (!dir.empty()) {
         std::string cmd = "mkdir -p " + dir;
-        system(cmd.c_str());
+        safe_system_call(cmd);
     }
     
     eigenvalues.clear();
@@ -422,7 +423,7 @@ void GPUTPQSolver::runCanonicalTPQ(
     // Create output directory
     if (!dir.empty()) {
         std::string cmd = "mkdir -p " + dir;
-        system(cmd.c_str());
+        safe_system_call(cmd);
     }
     
     energies.clear();
@@ -478,7 +479,7 @@ void GPUTPQSolver::runCanonicalTPQ(
         // Final energy
         std::pair<double, double> final_pair = computeEnergyAndVariance();
         double final_energy = final_pair.first;
-        double final_var = final_pair.second;
+        // double final_var = final_pair.second;  // Currently unused
         energies.push_back(final_energy);
         
         std::cout << "Final energy at beta=" << beta_max << ": " << final_energy << std::endl;

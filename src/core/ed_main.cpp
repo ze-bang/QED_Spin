@@ -33,7 +33,7 @@ EDResults run_standard_workflow(const EDConfig& config) {
     
     auto params = ed_adapter::toEDParameters(config);
     params.output_dir = config.workflow.output_dir;
-    system(("mkdir -p " + params.output_dir).c_str());
+    safe_system_call("mkdir -p " + params.output_dir);
     
     auto start = std::chrono::high_resolution_clock::now();
     
@@ -91,7 +91,7 @@ EDResults run_symmetrized_workflow(const EDConfig& config) {
     
     auto params = ed_adapter::toEDParameters(config);
     params.output_dir = config.workflow.output_dir;
-    system(("mkdir -p " + params.output_dir).c_str());
+    safe_system_call("mkdir -p " + params.output_dir);
     
     auto start = std::chrono::high_resolution_clock::now();
     
@@ -139,7 +139,7 @@ void compute_thermodynamics(const std::vector<double>& eigenvalues, const EDConf
     
     // Save results
     std::string thermo_dir = config.workflow.output_dir + "/thermo";
-    system(("mkdir -p " + thermo_dir).c_str());
+    safe_system_call("mkdir -p " + thermo_dir);
     
     std::ofstream file(thermo_dir + "/thermo_data.txt");
     if (file.is_open()) {
@@ -219,7 +219,7 @@ void compute_dynamical_response_workflow(const std::vector<double>& eigenvalues,
     
     // Compute response (thermal mode) - default to two-operator correlation ⟨O†O⟩
     std::string output_subdir = config.workflow.output_dir + "/dynamical_response";
-    system(("mkdir -p " + output_subdir).c_str());
+    safe_system_call("mkdir -p " + output_subdir);
     
     std::cout << "Computing thermal-averaged dynamical response...\n";
     std::cout << "  Random states: " << params.num_samples << "\n";
@@ -403,7 +403,7 @@ void compute_static_response_workflow(const std::vector<double>& eigenvalues,
     }
     
     // Save results
-    system(("mkdir -p " + output_subdir).c_str());
+    safe_system_call("mkdir -p " + output_subdir);
     
     std::string output_file = output_subdir + "/" + config.static_resp.output_prefix + ".txt";
     save_static_response_results(results, output_file);
@@ -605,7 +605,7 @@ int main(int argc, char* argv[]) {
     config.save(config.workflow.output_dir + "/ed_config.txt");
     
     // Create output directory
-    system(("mkdir -p " + config.workflow.output_dir).c_str());
+    safe_system_call("mkdir -p " + config.workflow.output_dir);
     
     // Execute workflows
     EDResults standard_results, sym_results;

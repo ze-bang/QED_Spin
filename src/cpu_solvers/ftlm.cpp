@@ -1,4 +1,5 @@
 // ftlm.cpp - Finite Temperature Lanczos Method implementation
+#include "../core/system_utils.h"
 
 #include "ftlm.h"
 #include <fstream>
@@ -294,7 +295,7 @@ FTLMResults finite_temperature_lanczos(
     // Create output directory if needed
     if (!output_dir.empty() && params.store_intermediate) {
         std::string cmd = "mkdir -p " + output_dir + "/ftlm_samples";
-        system(cmd.c_str());
+        safe_system_call(cmd);
     }
     
     // Loop over samples
@@ -761,7 +762,7 @@ DynamicalResponseResults compute_dynamical_response_thermal(
     // Create output directory if needed
     if (!output_dir.empty() && params.store_intermediate) {
         std::string cmd = "mkdir -p " + output_dir + "/dynamical_samples";
-        system(cmd.c_str());
+        safe_system_call(cmd);
     }
     
     // Loop over random samples
@@ -1011,7 +1012,7 @@ DynamicalResponseResults compute_dynamical_correlation(
     // Create output directory if needed
     if (!output_dir.empty() && params.store_intermediate) {
         std::string cmd = "mkdir -p " + output_dir + "/dynamical_correlation_samples";
-        system(cmd.c_str());
+        safe_system_call(cmd);
     }
     
     // Loop over random samples
@@ -1660,7 +1661,7 @@ StaticResponseResults compute_thermal_expectation_value(
     // Create output directory if needed
     if (!output_dir.empty() && params.store_intermediate) {
         std::string cmd = "mkdir -p " + output_dir + "/static_samples";
-        system(cmd.c_str());
+        safe_system_call(cmd);
     }
     
     // Loop over samples
@@ -1882,7 +1883,7 @@ StaticResponseResults compute_static_response(
     // Create output directory if needed
     if (!output_dir.empty() && params.store_intermediate) {
         std::string cmd = "mkdir -p " + output_dir + "/static_correlation_samples";
-        system(cmd.c_str());
+        safe_system_call(cmd);
     }
     
     // Loop over random samples
