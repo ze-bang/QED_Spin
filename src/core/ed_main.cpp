@@ -4,6 +4,7 @@
 #include "ed_config.h"
 #include "ed_config_adapter.h"
 #include "ed_wrapper.h"
+#include "ed_wrapper_streaming.h"
 #include "construct_ham.h"
 #include "../cpu_solvers/ftlm.h"
 #include "../cpu_solvers/ltlm.h"
@@ -101,6 +102,63 @@ EDResults run_symmetrized_workflow(const EDConfig& config) {
         params,
         HamiltonianFileFormat::STANDARD
     );
+    
+    auto end = std::chrono::high_resolution_clock::now();
+    auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
+    
+    std::cout << "Completed in " << duration / 1000.0 << " seconds\n";
+    
+    // Save eigenvalues
+    std::ofstream file(params.output_dir + "/eigenvalues.txt");
+    if (file.is_open()) {
+        file << std::setprecision(16);
+        for (const auto& val : results.eigenvalues) {
+            file << val << "\n";
+        }
+        std::cout << "Saved " << results.eigenvalues.size() << " eigenvalues\n";
+    }
+    
+    return results;
+}
+
+/**
+ * @brief Run streaming symmetry diagonalization workflow
+ */
+EDResults run_streaming_symmetry_workflow(const EDConfig& config) {
+    std::cout << "\n==========================================\n";
+    std::cout << "Streaming Symmetry Exact Diagonalization\n";
+    std::cout << "==========================================\n";
+    
+    auto params = ed_adapter::toEDParameters(config);
+    params.output_dir = config.workflow.output_dir;
+    safe_system_call("mkdir -p " + params.output_dir);
+    
+    auto start = std::chrono::high_resolution_clock::now();
+    
+    EDResults results;
+    
+    // Check if fixed Sz mode is enabled
+    if (config.system.use_fixed_sz) {
+        uint64_t n_up = (config.system.n_up >= 0) ? config.system.n_up : config.system.num_sites / 2;
+        
+        std::cout << "Using Fixed Sz + Streaming Symmetry mode\n";
+        std::cout << "  Number of up spins: " << n_up << "\n";
+        
+        results = exact_diagonalization_streaming_symmetry_fixed_sz(
+            config.system.hamiltonian_dir,
+            n_up,
+            config.method,
+            params
+        );
+    } else {
+        std::cout << "Using Streaming Symmetry mode (full Hilbert space)\n";
+        
+        results = exact_diagonalization_streaming_symmetry(
+            config.system.hamiltonian_dir,
+            config.method,
+            params
+        );
+    }
     
     auto end = std::chrono::high_resolution_clock::now();
     auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
@@ -441,6 +499,8 @@ void print_help(const char* prog_name) {
     std::cout << "  " << prog_name << " ./data --method=FULL --thermo\n\n";
     std::cout << "  # Symmetrized calculation\n";
     std::cout << "  " << prog_name << " ./data --symmetrized --eigenvalues=10\n\n";
+    std::cout << "  # Streaming symmetry (memory-efficient)\n";
+    std::cout << "  " << prog_name << " ./data --streaming-symmetry --eigenvalues=10\n\n";
     std::cout << "  # Use config file\n";
     std::cout << "  " << prog_name << " --config=ed_config.txt\n\n";
     
@@ -460,6 +520,8 @@ void print_help(const char* prog_name) {
     std::cout << "Workflow Options:\n";
     std::cout << "  --standard              Run standard diagonalization\n";
     std::cout << "  --symmetrized           Run symmetrized diagonalization (exploits symmetries)\n";
+    std::cout << "  --streaming-symmetry    Run streaming symmetry diagonalization (memory-efficient,\n";
+    std::cout << "                          recommended for systems ≥12 sites)\n";
     std::cout << "  --thermo                Compute thermodynamic properties\n";
     std::cout << "  --dynamical-response    Compute dynamical response (spectral functions)\n";
     std::cout << "  --static-response       Compute static response (thermal expectation values)\n";
@@ -642,6 +704,23 @@ int main(int argc, char* argv[]) {
             
             if (config.workflow.compute_static_response && !sym_results.eigenvalues.empty()) {
                 compute_static_response_workflow(sym_results.eigenvalues, config);
+            }
+        }
+        
+        if (config.workflow.run_streaming_symmetry && !config.workflow.skip_ed) {
+            EDResults streaming_results = run_streaming_symmetry_workflow(config);
+            print_eigenvalue_summary(streaming_results.eigenvalues);
+            
+            if (config.workflow.compute_thermo && !streaming_results.eigenvalues.empty()) {
+                compute_thermodynamics(streaming_results.eigenvalues, config);
+            }
+            
+            if (config.workflow.compute_dynamical_response && !streaming_results.eigenvalues.empty()) {
+                compute_dynamical_response_workflow(streaming_results.eigenvalues, config);
+            }
+            
+            if (config.workflow.compute_static_response && !streaming_results.eigenvalues.empty()) {
+                compute_static_response_workflow(streaming_results.eigenvalues, config);
             }
         }
         

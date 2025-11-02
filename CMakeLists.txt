@@ -562,3 +562,28 @@ if(OpenMP_CXX_FOUND)
 else()
     message(STATUS "  OpenMP Support: NO")
 endif()
+
+# Debug test for projected matrix (commented out - file missing)
+# add_executable(debug_projected_matrix test/debug_projected_matrix.cpp)
+# target_link_libraries(debug_projected_matrix 
+#     ${BLAS_LIBRARIES}
+#     ${LAPACK_LIBRARIES}
+#     ${LAPACKE_LIBRARIES}
+#     ${EXTRA_LINALG_LIBRARIES}
+#     ${ARPACK_LIBRARY}
+# )
+# target_link_libraries(debug_projected_matrix OpenMP::OpenMP_CXX)
+
+# Streaming symmetry test
+add_executable(test_streaming_symmetry test_streaming_symmetry.cpp)
+target_link_libraries(test_streaming_symmetry 
+    ${BLAS_LIBRARIES}
+    ${LAPACK_LIBRARIES}
+    ${LAPACKE_LIBRARIES}
+    ${EXTRA_LINALG_LIBRARIES}
+    ${ARPACK_LIBRARY}
+)
+if(OpenMP_CXX_FOUND)
+    target_link_libraries(test_streaming_symmetry OpenMP::OpenMP_CXX)
+endif()
+# target_compile_options(debug_projected_matrix PRIVATE ${CPU_OPT_FLAGS})

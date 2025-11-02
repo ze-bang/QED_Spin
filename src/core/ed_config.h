@@ -183,6 +183,7 @@ struct ArpackConfig {
 struct WorkflowConfig {
     bool run_standard = false;
     bool run_symmetrized = false;
+    bool run_streaming_symmetry = false;  // New streaming symmetry mode
     bool compute_thermo = false;
     bool compute_dynamical_response = false;
     bool compute_static_response = false;
@@ -257,6 +258,7 @@ public:
     // Workflow
     EDConfig& standard(bool b = true) { workflow.run_standard = b; return *this; }
     EDConfig& symmetrized(bool b = true) { workflow.run_symmetrized = b; return *this; }
+    EDConfig& streamingSymmetry(bool b = true) { workflow.run_streaming_symmetry = b; return *this; }
     EDConfig& thermo(bool b = true) { workflow.compute_thermo = b; return *this; }
     EDConfig& dynamicalResponse(bool b = true) { workflow.compute_dynamical_response = b; return *this; }
     EDConfig& staticResponse(bool b = true) { workflow.compute_static_response = b; return *this; }

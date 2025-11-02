@@ -974,22 +974,26 @@ public:
             throw std::runtime_error("Could not open block file: " + filepath);
         }
         
-        uint64_t rows, cols;
+        // Read dimensions as int to match what was written
+        int rows_int, cols_int;
         size_t nnz;
-        file.read(reinterpret_cast<char*>(&rows), sizeof(int));
-        file.read(reinterpret_cast<char*>(&cols), sizeof(int));
+        file.read(reinterpret_cast<char*>(&rows_int), sizeof(int));
+        file.read(reinterpret_cast<char*>(&cols_int), sizeof(int));
         file.read(reinterpret_cast<char*>(&nnz), sizeof(size_t));
+        
+        uint64_t rows = rows_int;
+        uint64_t cols = cols_int;
         
         std::vector<Eigen::Triplet<Complex>> triplets;
         triplets.reserve(nnz);
         
         for (size_t i = 0; i < nnz; ++i) {
-            uint64_t row, col;
+            int row_int, col_int;
             Complex val;
-            file.read(reinterpret_cast<char*>(&row), sizeof(int));
-            file.read(reinterpret_cast<char*>(&col), sizeof(int));
+            file.read(reinterpret_cast<char*>(&row_int), sizeof(int));
+            file.read(reinterpret_cast<char*>(&col_int), sizeof(int));
             file.read(reinterpret_cast<char*>(&val), sizeof(Complex));
-            triplets.emplace_back(row, col, val);
+            triplets.emplace_back(row_int, col_int, val);
         }
         
         Eigen::SparseMatrix<Complex> matrix(rows, cols);

@@ -126,6 +126,7 @@ EDConfig EDConfig::fromFile(const std::string& filename) {
             else if (key == "measure_spin") config.observable.measure_spin = (value == "true" || value == "1");
             else if (key == "run_standard") config.workflow.run_standard = (value == "true" || value == "1");
             else if (key == "run_symmetrized") config.workflow.run_symmetrized = (value == "true" || value == "1");
+            else if (key == "run_streaming_symmetry") config.workflow.run_streaming_symmetry = (value == "true" || value == "1");
             else if (key == "compute_thermo") config.workflow.compute_thermo = (value == "true" || value == "1");
             else if (key == "compute_dynamical_response") config.workflow.compute_dynamical_response = (value == "true" || value == "1");
             else if (key == "compute_static_response") config.workflow.compute_static_response = (value == "true" || value == "1");
@@ -227,6 +228,7 @@ EDConfig EDConfig::fromCommandLine(uint64_t argc, char* argv[]) {
             else if (arg == "--measure_spin") config.observable.measure_spin = true;
             else if (arg == "--standard") config.workflow.run_standard = true;
             else if (arg == "--symmetrized") config.workflow.run_symmetrized = true;
+            else if (arg == "--streaming-symmetry") config.workflow.run_streaming_symmetry = true;
             else if (arg == "--thermo") config.workflow.compute_thermo = true;
             else if (arg == "--dynamical-response") config.workflow.compute_dynamical_response = true;
             else if (arg == "--static-response") config.workflow.compute_static_response = true;
@@ -320,7 +322,7 @@ EDConfig EDConfig::fromCommandLine(uint64_t argc, char* argv[]) {
     }
     
     // Default to standard workflow if nothing specified
-    if (!config.workflow.run_standard && !config.workflow.run_symmetrized) {
+    if (!config.workflow.run_standard && !config.workflow.run_symmetrized && !config.workflow.run_streaming_symmetry) {
         config.workflow.run_standard = true;
     }
     
@@ -346,6 +348,7 @@ EDConfig& EDConfig::merge(const EDConfig& other) {
     // Merge workflow
     if (other.workflow.run_standard) workflow.run_standard = true;
     if (other.workflow.run_symmetrized) workflow.run_symmetrized = true;
+    if (other.workflow.run_streaming_symmetry) workflow.run_streaming_symmetry = true;
     if (other.workflow.compute_thermo) workflow.compute_thermo = true;
     if (!other.workflow.output_dir.empty()) workflow.output_dir = other.workflow.output_dir;
     
@@ -404,6 +407,7 @@ void EDConfig::save(const std::string& filename) const {
     file << "output_dir = " << workflow.output_dir << "\n";
     file << "run_standard = " << (workflow.run_standard ? "true" : "false") << "\n";
     file << "run_symmetrized = " << (workflow.run_symmetrized ? "true" : "false") << "\n";
+    file << "run_streaming_symmetry = " << (workflow.run_streaming_symmetry ? "true" : "false") << "\n";
     file << "compute_thermo = " << (workflow.compute_thermo ? "true" : "false") << "\n";
 }
 
@@ -441,6 +445,7 @@ void EDConfig::print(std::ostream& out) const {
     
     if (workflow.run_standard) out << "  - Running standard diagonalization\n";
     if (workflow.run_symmetrized) out << "  - Running symmetrized diagonalization\n";
+    if (workflow.run_streaming_symmetry) out << "  - Running streaming symmetry diagonalization (memory-efficient)\n";
     if (workflow.compute_thermo) out << "  - Computing thermodynamics\n";
     if (observable.calculate) out << "  - Calculating observables\n";
     if (observable.measure_spin) out << "  - Measuring spin expectations\n";
