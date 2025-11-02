@@ -32,24 +32,24 @@ struct HybridThermalParameters {
     bool auto_crossover = false;         // Automatically determine crossover (future feature)
     
     // LTLM parameters (for T < T_crossover)
-    int ltlm_krylov_dim = 200;           // Krylov dimension for excitations
-    int ltlm_ground_krylov = 100;        // Krylov dimension for ground state finding
+    uint64_t ltlm_krylov_dim = 200;           // Krylov dimension for excitations
+    uint64_t ltlm_ground_krylov = 100;        // Krylov dimension for ground state finding
     bool ltlm_full_reorth = false;       // Full reorthogonalization for LTLM
-    int ltlm_reorth_freq = 10;           // Reorthogonalization frequency
-    unsigned int ltlm_seed = 0;          // Random seed (0 = auto)
+    uint64_t ltlm_reorth_freq = 10;           // Reorthogonalization frequency
+    uint64_t ltlm_seed = 0;          // Random seed (0 = auto)
     bool ltlm_store_data = false;        // Store intermediate excitation data
     
     // FTLM parameters (for T >= T_crossover)
-    int ftlm_num_samples = 20;           // Number of random samples
-    int ftlm_krylov_dim = 100;           // Krylov dimension per sample
+    uint64_t ftlm_num_samples = 20;           // Number of random samples
+    uint64_t ftlm_krylov_dim = 100;           // Krylov dimension per sample
     bool ftlm_full_reorth = false;       // Full reorthogonalization for FTLM
-    int ftlm_reorth_freq = 10;           // Reorthogonalization frequency
-    unsigned int ftlm_seed = 0;          // Random seed (0 = auto)
+    uint64_t ftlm_reorth_freq = 10;           // Reorthogonalization frequency
+    uint64_t ftlm_seed = 0;          // Random seed (0 = auto)
     bool ftlm_store_samples = false;     // Store per-sample data
     bool ftlm_error_bars = true;         // Compute error bars from samples
     
     // General parameters
-    int max_iterations = 1000;           // Maximum Lanczos iterations
+    uint64_t max_iterations = 1000;           // Maximum Lanczos iterations
     double tolerance = 1e-12;            // Convergence tolerance
 };
 
@@ -66,13 +66,13 @@ struct HybridThermalResults {
     // Metadata
     double ground_state_energy;              // Ground state energy (from LTLM or FTLM)
     double actual_crossover_temp;            // Actual crossover temperature used
-    int ltlm_points;                         // Number of temperature points from LTLM
-    int ftlm_points;                         // Number of temperature points from FTLM
-    int crossover_index;                     // Index where method switches
+    uint64_t ltlm_points;                         // Number of temperature points from LTLM
+    uint64_t ftlm_points;                         // Number of temperature points from FTLM
+    uint64_t crossover_index;                     // Index where method switches
     
     // Method-specific data (optional)
     std::vector<double> low_lying_spectrum;  // Low-lying excitations from LTLM
-    int ftlm_samples_used;                   // Number of FTLM samples
+    uint64_t ftlm_samples_used;                   // Number of FTLM samples
 };
 
 /**
@@ -104,11 +104,11 @@ struct HybridThermalResults {
  */
 HybridThermalResults hybrid_thermal_method(
     std::function<void(const Complex*, Complex*, int)> H,
-    int N,
+    uint64_t N,
     const HybridThermalParameters& params,
     double temp_min,
     double temp_max,
-    int num_temp_bins,
+    uint64_t num_temp_bins,
     const std::string& output_dir = ""
 );
 
@@ -143,7 +143,7 @@ void save_hybrid_thermal_results(
  */
 double estimate_optimal_crossover(
     std::function<void(const Complex*, Complex*, int)> H,
-    int N,
+    uint64_t N,
     double ground_energy,
     double first_excitation
 );

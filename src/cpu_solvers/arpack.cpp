@@ -16,7 +16,7 @@ int solve_shifted_linear_system_CGNR(
     const std::function<void(const Complex*, Complex*, int)>& H,
     double sigma,
     const Complex* rhs, Complex* x,
-    int N, int max_iter, double tol_rel) {
+    uint64_t N, uint64_t max_iter, double tol_rel) {
     
     // CGNR on A^H A x = A^H rhs, A = (H - sigma I) (Hermitian => A^H = A)
     std::vector<Complex> r(N), z(N), p(N), Ap(N), Az(N), Ax(N);
@@ -40,7 +40,7 @@ int solve_shifted_linear_system_CGNR(
     Complex z_dot_z;
     cblas_zdotc_sub(N, z.data(), 1, z.data(), 1, &z_dot_z);
 
-    int it = 0;
+    uint64_t it = 0;
     for (it = 0; it < max_iter; ++it) {
         // Ap = A p
         apply_shifted_H(H, p.data(), Ap.data(), N, sigma);
@@ -86,8 +86,8 @@ int solve_shifted_linear_system_Hermitian_CG_or_CGNR(
     double sigma,
     const Complex* rhs,
     Complex* x,
-    int N,
-    int max_iter,
+    uint64_t N,
+    uint64_t max_iter,
     double tol_rel,
     const std::function<void(const Complex*, Complex*, int)>* M_prec) {
     
@@ -118,7 +118,7 @@ int solve_shifted_linear_system_Hermitian_CG_or_CGNR(
     cblas_zdotc_sub(N, r.data(), 1, z.data(), 1, &rsold_c); // r^H z
     double rsold = rsold_c.real();
 
-    int it = 0;
+    uint64_t it = 0;
     bool fell_back = false;
     for (it = 0; it < max_iter; ++it) {
         // Ap = A p
@@ -165,19 +165,19 @@ int solve_shifted_linear_system_Hermitian_CG_or_CGNR(
     if (!fell_back) return it; // used up iterations
 
     // Fallback 1: MINRES-like via Conjugate Residuals (robust for Hermitian indefinite)
-    auto solve_MINRES_CR = [&](const Complex* b, Complex* y, int max_it, double tol_rel_inner) {
+    auto solve_MINRES_CR = [&](const Complex* b, Complex* y, uint64_t max_it, double tol_rel_inner) -> uint64_t {
         std::vector<Complex> rr(N), pp(N), App(N), Ar(N);
         // y0 = 0
         std::fill(y, y + N, Complex(0.0, 0.0));
         // rr0 = b - A y0 = b
         std::copy(b, b + N, rr.begin());
         double nb = cblas_dznrm2(N, rr.data(), 1);
-        if (nb == 0.0) return 0;
+        if (nb == 0.0) return uint64_t(0);
         // p0 = rr0; App0 = A p0
         std::copy(rr.begin(), rr.end(), pp.begin());
         apply_shifted_H(H, pp.data(), App.data(), N, sigma);
 
-        int k = 0;
+        uint64_t k = 0;
         for (k = 0; k < max_it; ++k) {
             // alpha = (r^H A p) / (A p^H A p)
             Complex rHAp;
@@ -222,36 +222,43 @@ int solve_shifted_linear_system_Hermitian_CG_or_CGNR(
     std::vector<Complex> rhs_corr(N);
     for (int i = 0; i < N; ++i) rhs_corr[i] = rhs[i] - Ax[i];
 
-    int it_cr = solve_MINRES_CR(rhs_corr.data(), delta.data(), std::max(1, max_iter - it), tol_rel);
+    uint64_t it_cr = solve_MINRES_CR(rhs_corr.data(), delta.data(), std::max(uint64_t(1), max_iter - it), tol_rel);
     Complex one(1.0, 0.0);
     cblas_zaxpy(N, &one, delta.data(), 1, x, 1);
 
     if (it_cr > 0) return it + it_cr;
 
     // Fallback 2: CGNR as last resort
-    int it2 = solve_shifted_linear_system_CGNR(H, sigma, rhs_corr.data(), delta.data(), N, std::max(1, max_iter - it), tol_rel);
+    uint64_t it2 = solve_shifted_linear_system_CGNR(H, sigma, rhs_corr.data(), delta.data(), N, std::max(uint64_t(1), max_iter - it), tol_rel);
     cblas_zaxpy(N, &one, delta.data(), 1, x, 1);
     return it + it2;
 }
 
 int arpack_core(const std::function<void(const Complex*, Complex*, int)>& H,
-                int N, int max_iter, int nev, double tol,
+                uint64_t N, uint64_t max_iter, uint64_t nev, double tol,
                 const std::string& which,
                 bool shift_invert, double sigma,
                 std::vector<double>& evals_out,
                 std::vector<Complex>& evecs_out,
                 bool want_evecs,
                 const std::function<void(const Complex*, Complex*, int)>* M_prec,
-                int explicit_ncv,
+                uint64_t explicit_ncv,
                 bool use_initial_resid,
                 const std::vector<Complex>* initial_resid,
-                int inner_max_override,
+                uint64_t inner_max_override,
                 double inner_tol_override) {
     
-    int ncv = (explicit_ncv > 0) ? std::min(N, explicit_ncv)
-                                 : std::min(N, std::max(4 * nev + 20, 30));
-    int ldv = N;
-    int ido = 0;
+    uint64_t ncv = (explicit_ncv > 0) ? std::min(N, explicit_ncv)
+                                 : std::min(N, std::max(uint64_t(4 * nev + 20), uint64_t(30)));
+    uint64_t ldv = N;
+    
+    // ARPACK requires int parameters
+    int ido_int = 0;
+    int N_int = static_cast<int>(N);
+    int nev_int = static_cast<int>(nev);
+    int ncv_int = static_cast<int>(ncv);
+    int ldv_int = static_cast<int>(ldv);
+    
     char bmat = 'I';
     // Sanitize WHICH to valid ARPACK options for complex: {LM, SM, LR, SR, LI, SI}
     std::string W = which;
@@ -267,7 +274,7 @@ int arpack_core(const std::function<void(const Complex*, Complex*, int)>& H,
     which_c[0] = W[0];
     which_c[1] = W[1];
     double tol_a = tol > 0 ? tol : 1e-10;
-    int info = 0;
+    uint64_t info = 0;
     std::vector<Complex> resid(N, Complex(0.0, 0.0));
     if (use_initial_resid && initial_resid && (int)initial_resid->size() == N) {
         std::copy(initial_resid->begin(), initial_resid->end(), resid.begin());
@@ -284,27 +291,29 @@ int arpack_core(const std::function<void(const Complex*, Complex*, int)>& H,
     }
     std::vector<Complex> V(static_cast<size_t>(ldv) * ncv);
     std::vector<Complex> workd(3 * N);
-    int lworkl = 3 * ncv * ncv + 5 * ncv;
+    uint64_t lworkl = 3 * ncv * ncv + 5 * ncv;
+    int lworkl_int = static_cast<int>(lworkl);
     std::vector<Complex> workl(lworkl);
     std::vector<double> rwork(ncv, 0.0);
     int iparam[11] = {0};
     int ipntr[14] = {0};
+    int info_int = info;
 
     iparam[0] = 1;
-    iparam[2] = std::max(1, max_iter);
+    iparam[2] = static_cast<int>(std::max(uint64_t(1), max_iter));
     iparam[6] = shift_invert ? 3 : 1;
 
-    int debug_iter = 0;
+    uint64_t debug_iter = 0;
     do {
-        znaupd_(&ido, &bmat, &N, which_c, &nev, &tol_a, resid.data(),
-                &ncv, V.data(), &ldv, iparam, ipntr, workd.data(),
-                workl.data(), &lworkl, rwork.data(), &info,
+        znaupd_(&ido_int, &bmat, &N_int, which_c, &nev_int, &tol_a, resid.data(),
+                &ncv_int, V.data(), &ldv_int, iparam, ipntr, workd.data(),
+                workl.data(), &lworkl_int, rwork.data(), &info_int,
                 (ftnlen)1, (ftnlen)2);
 
         if (arpack_debug_enabled) {
             std::cerr << "[ARPACK DEBUG] iter=" << debug_iter++
-                      << " ido=" << ido
-                      << " info=" << info
+                      << " ido=" << ido_int
+                      << " info=" << info_int
                       << " nev=" << nev
                       << " ncv=" << ncv
                       << " iparam[2](max_iter)=" << iparam[2]
@@ -313,37 +322,37 @@ int arpack_core(const std::function<void(const Complex*, Complex*, int)>& H,
                       << " which=" << which_c
                       << std::endl;
         }
-        if (ido == -1 || ido == 1) {
+        if (ido_int == -1 || ido_int == 1) {
             Complex* x = &workd[ipntr[0] - 1];
             Complex* y = &workd[ipntr[1] - 1];
             if (!shift_invert) {
                 apply_H(H, x, y, N);
             } else {
-                int inner_max = (inner_max_override > 0) ? inner_max_override
-                                : std::max(50, std::min(N, 200));
+                uint64_t inner_max = (inner_max_override > 0) ? inner_max_override
+                                : std::max(uint64_t(50), std::min(N, uint64_t(200)));
                 double inner_tol = (inner_tol_override > 0) ? inner_tol_override
                                    : std::max(1e-14, tol * 1e-2);
                 solve_shifted_linear_system_Hermitian_CG_or_CGNR(H, sigma, x, y, N, inner_max, inner_tol, M_prec);
             }
-        } else if (ido == 2) {
+        } else if (ido_int == 2) {
             Complex* x = &workd[ipntr[0] - 1];
             Complex* y = &workd[ipntr[1] - 1];
             std::copy(x, x + N, y);
         }
-    } while (ido != 99);
+    } while (ido_int != 99);
 
     if (arpack_debug_enabled) {
-        std::cerr << "[ARPACK DEBUG] znaupd exit info=" << info
+        std::cerr << "[ARPACK DEBUG] znaupd exit info=" << info_int
                   << " nconv=" << iparam[4]
                   << " iterations=" << iparam[2]
                   << " num_OPx=" << iparam[8]
                   << std::endl;
     }
 
-    int nconv = iparam[4];
-    if (info != 0 && info != 1) {
-        std::cerr << "ARPACK znaupd failed with info = " << info << std::endl;
-        return info;
+    uint64_t nconv = iparam[4];
+    if (info_int != 0 && info_int != 1) {
+        std::cerr << "ARPACK znaupd failed with info = " << info_int << std::endl;
+        return info_int;
     }
 
     int rvec = want_evecs ? 1 : 0;
@@ -354,14 +363,14 @@ int arpack_core(const std::function<void(const Complex*, Complex*, int)>& H,
     Complex SIGMA(sigma, 0.0);
     std::vector<Complex> workev(2 * ncv);
 
-    int ldz = N;
+    int ldz = static_cast<int>(N);
     int info2 = 0;
 
     zneupd_(&rvec, &howmny, select.data(),
             D.data(), Z.data(), &ldz, &SIGMA, workev.data(),
-            &bmat, &N, which_c, &nev, &tol_a, resid.data(),
-            &ncv, V.data(), &ldv, iparam, ipntr, workd.data(),
-            workl.data(), &lworkl, rwork.data(), &info2,
+            &bmat, &N_int, which_c, &nev_int, &tol_a, resid.data(),
+            &ncv_int, V.data(), &ldv_int, iparam, ipntr, workd.data(),
+            workl.data(), &lworkl_int, rwork.data(), &info2,
             (ftnlen)1, (ftnlen)1, (ftnlen)2);
 
     if (info2 != 0) {
@@ -376,7 +385,7 @@ int arpack_core(const std::function<void(const Complex*, Complex*, int)>& H,
         return info2;
     }
 
-    int have = std::min(nconv, nev);
+    uint64_t have = std::min(nconv, nev);
     if (have <= 0) {
         std::cerr << "No converged Ritz pairs (nconv=" << nconv << ")" << std::endl;
         return info;
@@ -389,7 +398,7 @@ int arpack_core(const std::function<void(const Complex*, Complex*, int)>& H,
 
     std::vector<int> perm(have);
     std::iota(perm.begin(), perm.end(), 0);
-    std::sort(perm.begin(), perm.end(), [&](int a, int b) { return evals_out[a] < evals_out[b]; });
+    std::sort(perm.begin(), perm.end(), [&](int a, uint64_t b) { return evals_out[a] < evals_out[b]; });
 
     std::vector<double> evals_sorted(have);
     for (int i = 0; i < have; ++i) evals_sorted[i] = evals_out[perm[i]];
@@ -398,7 +407,7 @@ int arpack_core(const std::function<void(const Complex*, Complex*, int)>& H,
     if (want_evecs) {
         evecs_out.resize(static_cast<size_t>(N) * have);
         for (int k = 0; k < have; ++k) {
-            int src = perm[k];
+            uint64_t src = perm[k];
             for (int i = 0; i < N; ++i) {
                 evecs_out[static_cast<size_t>(k) * N + i] = Z[static_cast<size_t>(src) * N + i];
             }
@@ -407,7 +416,7 @@ int arpack_core(const std::function<void(const Complex*, Complex*, int)>& H,
                 Complex sc(1.0 / nrm, 0.0);
                 cblas_zscal(N, &sc, &evecs_out[static_cast<size_t>(k) * N], 1);
                 // Phase normalization: make largest component real and positive
-                int imax = 0; double amax = 0.0;
+                uint64_t imax = 0; double amax = 0.0;
                 for (int i = 0; i < N; ++i) {
                     double a = std::abs(evecs_out[static_cast<size_t>(k) * N + i]);
                     if (a > amax) { amax = a; imax = i; }
@@ -426,14 +435,14 @@ int arpack_core(const std::function<void(const Complex*, Complex*, int)>& H,
 }
 
 int arpack_core_advanced(const std::function<void(const Complex*, Complex*, int)>& H,
-                         int N,
+                         uint64_t N,
                          const ArpackAdvancedOptions& opts,
                          std::vector<double>& evals_out,
                          std::vector<Complex>& evecs_out,
                          bool want_evecs) {
     
-    int base_ncv = (opts.ncv > 0) ? opts.ncv
-                    : std::min(N, std::max( (opts.which == "SM" || opts.which == "SR" ? 6 : 4) * opts.nev + 40, 30));
+    uint64_t base_ncv = (opts.ncv > 0) ? opts.ncv
+                    : std::min(N, std::max(uint64_t((opts.which == "SM" || opts.which == "SR" ? 6 : 4) * opts.nev + 40), uint64_t(30)));
     double target_tol = opts.tol;
     double first_tol = (opts.two_phase_refine && opts.relaxed_tol > target_tol) ? opts.relaxed_tol : target_tol;
 
@@ -441,25 +450,25 @@ int arpack_core_advanced(const std::function<void(const Complex*, Complex*, int)
     bool use_shift_invert = opts.shift_invert;
     double sigma = opts.shift_invert ? opts.sigma : 0.0;
 
-    int attempts = opts.max_restarts + 1;
-    int attempt_idx = 0;
-    int last_info = 0;
+    uint64_t attempts = opts.max_restarts + 1;
+    uint64_t attempt_idx = 0;
+    uint64_t last_info = 0;
     std::vector<double> best_evals;
     std::vector<Complex> best_evecs;
-    int best_converged = 0;
+    uint64_t best_converged = 0;
 
     for (attempt_idx = 0; attempt_idx < attempts; ++attempt_idx) {
         double tol_this = (attempt_idx == 0) ? first_tol : target_tol;
-        int ncv_attempt = base_ncv;
+        uint64_t ncv_attempt = base_ncv;
         if (attempt_idx > 0 && opts.auto_enlarge_ncv) {
             double growth = std::pow(opts.ncv_growth, attempt_idx);
-            ncv_attempt = std::min(N, static_cast<int>(std::ceil(base_ncv * growth)));
+            ncv_attempt = std::min(N, static_cast<uint64_t>(std::ceil(base_ncv * growth)));
             ncv_attempt = std::max(ncv_attempt, std::min(N, opts.nev + 10));
         }
         // Ensure ncv > nev and ncv <= N
         ncv_attempt = std::max(ncv_attempt, opts.nev + 2);
         ncv_attempt = std::min(ncv_attempt, N);
-        int inner_max = opts.inner_max_iter;
+        uint64_t inner_max = opts.inner_max_iter;
         double inner_tol = -1.0;
         if (use_shift_invert) {
             if (opts.adaptive_inner_tol) {
@@ -483,7 +492,7 @@ int arpack_core_advanced(const std::function<void(const Complex*, Complex*, int)
 
         std::vector<double> evals_cur;
         std::vector<Complex> evecs_cur;
-        int info = arpack_core(H, N, opts.max_iter, opts.nev, tol_this, opts.which,
+        uint64_t info = arpack_core(H, N, opts.max_iter, opts.nev, tol_this, opts.which,
                                use_shift_invert, sigma, evals_cur, evecs_cur, want_evecs,
                                (opts.M_prec ? &opts.M_prec : nullptr),
                                ncv_attempt,
@@ -492,7 +501,7 @@ int arpack_core_advanced(const std::function<void(const Complex*, Complex*, int)
                                use_shift_invert ? inner_tol : -1.0);
         last_info = info;
 
-        int converged = static_cast<int>(evals_cur.size());
+        uint64_t converged = static_cast<int>(evals_cur.size());
         if (converged > best_converged) {
             best_converged = converged;
             best_evals.swap(evals_cur);
@@ -527,7 +536,7 @@ int arpack_core_advanced(const std::function<void(const Complex*, Complex*, int)
 
 void save_eigs_to_dir(const std::vector<double>& evals,
                       const std::vector<Complex>* evecs,
-                      int N, int nev, const std::string& dir) {
+                      uint64_t N, uint64_t nev, const std::string& dir) {
     if (dir.empty()) return;
     std::string evec_dir = dir + "/eigenvectors";
     std::string cmd = "mkdir -p " + evec_dir;
@@ -566,13 +575,13 @@ void save_eigs_to_dir(const std::vector<double>& evals,
 } // namespace detail_arpack
 
 // Public API implementations
-void arpack_eigs(std::function<void(const Complex*, Complex*, int)> H, int N,
-                 int max_iter, int exct, double tol,
+void arpack_eigs(std::function<void(const Complex*, Complex*, int)> H, uint64_t N,
+                 uint64_t max_iter, uint64_t exct, double tol,
                  std::vector<double>& eigenvalues,
                  std::string dir, bool eigenvectors,
                  const std::string& which) {
     std::vector<Complex> evecs;
-    int info = detail_arpack::arpack_core(H, N, max_iter, exct, tol, which, false, 0.0,
+    uint64_t info = detail_arpack::arpack_core(H, N, max_iter, exct, tol, which, false, 0.0,
                                           eigenvalues, evecs, eigenvectors);
     if (info != 0) {
         std::cerr << "arpack_eigs failed with info=" << info << std::endl;
@@ -585,8 +594,8 @@ void arpack_eigs(std::function<void(const Complex*, Complex*, int)> H, int N,
     }
 }
 
-void arpack_ground_state(std::function<void(const Complex*, Complex*, int)> H, int N,
-                         int max_iter, int exct, double tol,
+void arpack_ground_state(std::function<void(const Complex*, Complex*, int)> H, uint64_t N,
+                         uint64_t max_iter, uint64_t exct, double tol,
                          std::vector<double>& eigenvalues,
                          std::string dir, bool eigenvectors) {
     // For Hermitian matrices, "SR" finds algebraically smallest (most negative) eigenvalues
@@ -594,20 +603,20 @@ void arpack_ground_state(std::function<void(const Complex*, Complex*, int)> H, i
     arpack_eigs(H, N, max_iter, exct, tol, eigenvalues, dir, eigenvectors, "SR");
 }
 
-void arpack_largest(std::function<void(const Complex*, Complex*, int)> H, int N,
-                    int max_iter, int exct, double tol,
+void arpack_largest(std::function<void(const Complex*, Complex*, int)> H, uint64_t N,
+                    uint64_t max_iter, uint64_t exct, double tol,
                     std::vector<double>& eigenvalues,
                     std::string dir, bool eigenvectors) {
     // For Hermitian matrices, "LR" finds algebraically largest (most positive) eigenvalues
     arpack_eigs(H, N, max_iter, exct, tol, eigenvalues, dir, eigenvectors, "LR");
 }
 
-void arpack_shift_invert(std::function<void(const Complex*, Complex*, int)> H, int N,
-                         int max_iter, int num_eigs, double sigma, double tol,
+void arpack_shift_invert(std::function<void(const Complex*, Complex*, int)> H, uint64_t N,
+                         uint64_t max_iter, uint64_t num_eigs, double sigma, double tol,
                          std::vector<double>& eigenvalues,
                          std::string dir, bool compute_eigenvectors) {
     std::vector<Complex> evecs;
-    int info = detail_arpack::arpack_core(H, N, max_iter, num_eigs, tol, "LM", true, sigma,
+    uint64_t info = detail_arpack::arpack_core(H, N, max_iter, num_eigs, tol, "LM", true, sigma,
                                           eigenvalues, evecs, compute_eigenvectors);
     if (info != 0) {
         std::cerr << "arpack_shift_invert failed with info=" << info << std::endl;
@@ -620,13 +629,13 @@ void arpack_shift_invert(std::function<void(const Complex*, Complex*, int)> H, i
     }
 }
 
-void arpack_shift_invert_prec(std::function<void(const Complex*, Complex*, int)> H, int N,
-                              int max_iter, int num_eigs, double sigma, double tol,
+void arpack_shift_invert_prec(std::function<void(const Complex*, Complex*, int)> H, uint64_t N,
+                              uint64_t max_iter, uint64_t num_eigs, double sigma, double tol,
                               std::function<void(const Complex*, Complex*, int)> M_prec,
                               std::vector<double>& eigenvalues,
                               std::string dir, bool compute_eigenvectors) {
     std::vector<Complex> evecs;
-    int info = detail_arpack::arpack_core(H, N, max_iter, num_eigs, tol, "LM", true, sigma,
+    uint64_t info = detail_arpack::arpack_core(H, N, max_iter, num_eigs, tol, "LM", true, sigma,
                                           eigenvalues, evecs, compute_eigenvectors, &M_prec);
     if (info != 0) {
         std::cerr << "arpack_shift_invert_prec failed with info=" << info << std::endl;
@@ -639,14 +648,14 @@ void arpack_shift_invert_prec(std::function<void(const Complex*, Complex*, int)>
     }
 }
 
-int arpack_eigs_advanced(std::function<void(const Complex*, Complex*, int)> H, int N,
+int arpack_eigs_advanced(std::function<void(const Complex*, Complex*, int)> H, uint64_t N,
                          const detail_arpack::ArpackAdvancedOptions& opts,
                          std::vector<double>& eigenvalues,
                          std::string dir, bool eigenvectors,
                          std::vector<Complex>* out_evecs) {
     std::vector<Complex> evecs_local;
     std::vector<Complex>& evecs_ref = out_evecs ? *out_evecs : evecs_local;
-    int info = detail_arpack::arpack_core_advanced(H, N, opts, eigenvalues, evecs_ref, eigenvectors);
+    uint64_t info = detail_arpack::arpack_core_advanced(H, N, opts, eigenvalues, evecs_ref, eigenvectors);
     if (info != 0 && opts.verbose) {
         std::cerr << "arpack_eigs_advanced: final info=" << info
                   << " eigenvalues_found=" << eigenvalues.size() << std::endl;

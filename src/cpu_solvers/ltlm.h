@@ -26,14 +26,14 @@ using ComplexVector = std::vector<Complex>;
  * 3. More accurate at low temperatures
  */
 struct LTLMParameters {
-    int krylov_dim = 200;              // Dimension of Krylov subspace for thermodynamics
-    int ground_state_krylov = 100;     // Krylov dimension for finding ground state
-    int num_samples = 1;               // Usually 1 for LTLM (ground state is deterministic)
-    int max_iterations = 1000;         // Maximum Lanczos iterations
+    uint64_t krylov_dim = 200;              // Dimension of Krylov subspace for thermodynamics
+    uint64_t ground_state_krylov = 100;     // Krylov dimension for finding ground state
+    uint64_t num_samples = 1;               // Usually 1 for LTLM (ground state is deterministic)
+    uint64_t max_iterations = 1000;         // Maximum Lanczos iterations
     double tolerance = 1e-12;          // Convergence tolerance for Lanczos
     bool full_reorthogonalization = false;  // Use full reorthogonalization
-    int reorth_frequency = 10;         // Frequency of reorthogonalization (if not full)
-    unsigned int random_seed = 0;      // Random seed (0 = use random_device) for initial state
+    uint64_t reorth_frequency = 10;         // Frequency of reorthogonalization (if not full)
+    uint64_t random_seed = 0;      // Random seed (0 = use random_device) for initial state
     bool store_intermediate = false;   // Store intermediate data for debugging
     bool compute_error_bars = false;   // Compute standard error (only useful if num_samples > 1)
     bool use_exact_ground_state = false; // If true and ground state eigenvector provided, use it
@@ -51,8 +51,8 @@ struct LTLMResults {
     std::vector<double> free_energy_error;   // Standard error in free energy
     double ground_state_energy;              // Ground state energy
     std::vector<double> low_lying_spectrum;  // Low-lying excitation energies
-    int total_samples;                       // Number of samples used
-    int krylov_dimension;                    // Actual Krylov dimension achieved
+    uint64_t total_samples;                       // Number of samples used
+    uint64_t krylov_dimension;                    // Actual Krylov dimension achieved
 };
 
 /**
@@ -72,11 +72,11 @@ struct LTLMResults {
  */
 double find_ground_state_lanczos(
     std::function<void(const Complex*, Complex*, int)> H,
-    int N,
-    int krylov_dim,
+    uint64_t N,
+    uint64_t krylov_dim,
     double tolerance,
     bool full_reorth,
-    int reorth_freq,
+    uint64_t reorth_freq,
     ComplexVector& ground_state
 );
 
@@ -102,11 +102,11 @@ int build_excitation_spectrum(
     std::function<void(const Complex*, Complex*, int)> H,
     const ComplexVector& ground_state,
     double ground_energy,
-    int N,
-    int krylov_dim,
+    uint64_t N,
+    uint64_t krylov_dim,
     double tolerance,
     bool full_reorth,
-    int reorth_freq,
+    uint64_t reorth_freq,
     std::vector<double>& excitation_energies,
     std::vector<double>& weights
 );
@@ -151,11 +151,11 @@ ThermodynamicData compute_ltlm_thermodynamics(
  */
 LTLMResults low_temperature_lanczos(
     std::function<void(const Complex*, Complex*, int)> H,
-    int N,
+    uint64_t N,
     const LTLMParameters& params,
     double temp_min,
     double temp_max,
-    int num_temp_bins,
+    uint64_t num_temp_bins,
     const ComplexVector* ground_state = nullptr,
     const std::string& output_dir = ""
 );

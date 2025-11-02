@@ -12,11 +12,11 @@
  */
 HybridThermalResults hybrid_thermal_method(
     std::function<void(const Complex*, Complex*, int)> H,
-    int N,
+    uint64_t N,
     const HybridThermalParameters& params,
     double temp_min,
     double temp_max,
-    int num_temp_bins,
+    uint64_t num_temp_bins,
     const std::string& output_dir
 ) {
     std::cout << "\n================================================\n";
@@ -41,9 +41,9 @@ HybridThermalResults hybrid_thermal_method(
         // Build small excitation spectrum to find gap
         std::vector<double> excitation_energies;
         std::vector<double> weights;
-        int num_excitations = build_excitation_spectrum(
+        uint64_t num_excitations = build_excitation_spectrum(
             H, ground_state, ground_energy, N,
-            std::min(50, params.ltlm_krylov_dim),  // Use smaller dimension for quick estimate
+            std::min(uint64_t(50), params.ltlm_krylov_dim),  // Use smaller dimension for quick estimate
             params.tolerance, params.ltlm_full_reorth, params.ltlm_reorth_freq,
             excitation_energies, weights
         );
@@ -83,14 +83,14 @@ HybridThermalResults hybrid_thermal_method(
     std::vector<double> temperatures(num_temp_bins);
     double log_tmin = std::log(temp_min);
     double log_tmax = std::log(temp_max);
-    double log_step = (log_tmax - log_tmin) / std::max(1, num_temp_bins - 1);
+    double log_step = (log_tmax - log_tmin) / std::max(uint64_t(1), num_temp_bins - 1);
     
     for (int i = 0; i < num_temp_bins; i++) {
         temperatures[i] = std::exp(log_tmin + i * log_step);
     }
     
     // Find crossover index in temperature grid
-    int crossover_index = 0;
+    uint64_t crossover_index = 0;
     double actual_crossover = crossover_temp;
     
     for (int i = 0; i < num_temp_bins; i++) {
@@ -225,7 +225,7 @@ HybridThermalResults hybrid_thermal_method(
         
         // Copy FTLM thermodynamic data
         for (size_t i = 0; i < ftlm_temps.size(); i++) {
-            int idx = crossover_index + i;
+            uint64_t idx = crossover_index + i;
             results.thermo_data.energy[idx] = ftlm_results.thermo_data.energy[i];
             results.thermo_data.specific_heat[idx] = ftlm_results.thermo_data.specific_heat[i];
             results.thermo_data.entropy[idx] = ftlm_results.thermo_data.entropy[i];
@@ -340,7 +340,7 @@ void save_hybrid_thermal_results(
  */
 double estimate_optimal_crossover(
     std::function<void(const Complex*, Complex*, int)> H,
-    int N,
+    uint64_t N,
     double ground_energy,
     double first_excitation
 ) {

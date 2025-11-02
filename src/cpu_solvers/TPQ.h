@@ -36,7 +36,7 @@
  * @param seed Random seed to use
  * @return Random normalized vector
  */
-ComplexVector generateTPQVector(int N, unsigned int seed);
+ComplexVector generateTPQVector(int N, uint64_t seed);
 /**
  * Create directory if it doesn't exist
  */
@@ -52,7 +52,7 @@ bool ensureDirectoryExists(const std::string& path);
 std::pair<double, double> calculateEnergyAndVariance(
     std::function<void(const Complex*, Complex*, int)> H,
     const ComplexVector& v,
-    int N
+    uint64_t N
 );
 std::vector<SingleSiteOperator> createSzOperators(int num_sites, float spin_length);
 std::vector<SingleSiteOperator> createSxOperators(int num_sites, float spin_length);
@@ -60,18 +60,18 @@ std::vector<SingleSiteOperator> createSyOperators(int num_sites, float spin_leng
 
 std::pair<std::vector<Complex>, std::vector<Complex>> calculateSzandSz2(
     const ComplexVector& tpq_state,
-    int num_sites,
+    uint64_t num_sites,
     float spin_length,
     const std::vector<SingleSiteOperator>& Sz_ops,
-    int sublattice_size
+    uint64_t sublattice_size
 );
 
 Complex calculateSpm_onsite(
     const ComplexVector& tpq_state,
-    int num_sites,
+    uint64_t num_sites,
     float spin_length,
     const std::vector<SingleSiteOperator>& Spm_ops,
-    int sublattice_size
+    uint64_t sublattice_size
 );
 
 std::pair<std::vector<DoubleSiteOperator>, std::vector<DoubleSiteOperator>> createDoubleSiteOperators(int num_sites, float spin_length);
@@ -81,30 +81,30 @@ std::pair<std::vector<SingleSiteOperator>, std::vector<SingleSiteOperator>> crea
 
 std::pair<std::vector<Complex>, std::vector<Complex>> calculateSzzSpm(
     const ComplexVector& tpq_state,
-    int num_sites,
+    uint64_t num_sites,
     float spin_length,
     std::pair<std::vector<DoubleSiteOperator>, std::vector<DoubleSiteOperator>> double_site_ops,
-    int sublattice_size
+    uint64_t sublattice_size
 );
 
 std::tuple<std::vector<Complex>, std::vector<Complex>, std::vector<Complex>, std::vector<Complex>> calculateSzzSpm(
     const ComplexVector& tpq_state,
-    int num_sites,
+    uint64_t num_sites,
     float spin_length,
     std::pair<std::vector<SingleSiteOperator>, std::vector<SingleSiteOperator>> double_site_ops,
-    int sublattice_size
+    uint64_t sublattice_size
 );
 
 /**
  * Write TPQ data to file
  */
 void writeTPQData(const std::string& filename, double inv_temp, double energy, 
-                 double variance, double norm, int step);
+                 double variance, double norm, uint64_t step);
 
 /**
  * Read TPQ data from file
  */
-bool readTPQData(const std::string& filename, int step, double& energy, 
+bool readTPQData(const std::string& filename, uint64_t step, double& energy, 
                 double& temp, double& specificHeat);
 
 /**
@@ -133,7 +133,7 @@ bool load_tpq_state(ComplexVector& tpq_state, const std::string& filename);
  * @param N Expected size of the vector
  * @return True if successful
  */
-bool load_raw_data(ComplexVector& tpq_state, const std::string& filename, int N);
+bool load_raw_data(ComplexVector& tpq_state, const std::string& filename, uint64_t N);
 
 /**
  * Compute spin expectations (S^+, S^-, S^z) at each site using a TPQ state
@@ -147,7 +147,7 @@ bool load_raw_data(ComplexVector& tpq_state, const std::string& filename, int N)
  */
 std::vector<std::vector<Complex>> compute_spin_expectations_from_tpq(
     const ComplexVector& tpq_state,
-    int num_sites,
+    uint64_t num_sites,
     float spin_l,
     const std::string& output_file = "",
     bool print_output = true
@@ -158,14 +158,14 @@ void writeFluctuationData(
     const std::vector<std::string>& spin_corr,
     double inv_temp,
     const ComplexVector& tpq_state,
-    int num_sites,
+    uint64_t num_sites,
     float spin_length,
     const std::vector<SingleSiteOperator>& Sx_ops,
     const std::vector<SingleSiteOperator>& Sy_ops,
     const std::vector<SingleSiteOperator>& Sz_ops,
     const std::pair<std::vector<SingleSiteOperator>, std::vector<SingleSiteOperator>>& double_site_ops,
-    int sublattice_size,
-    int step
+    uint64_t sublattice_size,
+    uint64_t step
 );
 
 /**
@@ -179,9 +179,9 @@ void writeFluctuationData(
  */
 ComplexVector get_tpq_state_at_temperature(
     const std::string& tpq_dir,
-    int sample,
+    uint64_t sample,
     double target_beta,
-    int N
+    uint64_t N
 );
 
 /**
@@ -194,8 +194,8 @@ ComplexVector get_tpq_state_at_temperature(
  */
 std::tuple<std::string, std::string, std::string, std::vector<std::string>> initializeTPQFiles(
     const std::string& dir,
-    int sample,
-    int sublattice_size
+    uint64_t sample,
+    uint64_t sublattice_size
 );
 
 /**
@@ -212,10 +212,10 @@ std::tuple<std::string, std::string, std::string, std::vector<std::string>> init
  */
 void microcanonical_tpq(
     std::function<void(const Complex*, Complex*, int)> H,
-    int N, 
-    int max_iter,
-    int num_samples,
-    int temp_interval,
+    uint64_t N, 
+    uint64_t max_iter,
+    uint64_t num_samples,
+    uint64_t temp_interval,
     std::vector<double>& eigenvalues,
     std::string dir = "",
     bool compute_spectrum = false,
@@ -225,47 +225,47 @@ void microcanonical_tpq(
     std::vector<std::string> observable_names = {},
     double omega_min = -20.0,
     double omega_max = 20.0,
-    int num_points = 10000,
+    uint64_t num_points = 10000,
     double t_end = 50.0,
     double dt = 0.01,
     float spin_length = 0.5,
     bool measure_sz = false,
-    int sublattice_size = 1,
-    int num_sites = 16
+    uint64_t sublattice_size = 1,
+    uint64_t num_sites = 16
 );
 
 // Canonical TPQ using imaginary-time propagation e^{-βH} |r>
 inline void imaginary_time_evolve_tpq_taylor(
     std::function<void(const Complex*, Complex*, int)> H,
     ComplexVector& state,
-    int N,
+    uint64_t N,
     double delta_beta,
-    int n_max = 50,
+    uint64_t n_max = 50,
     bool normalize = true
 );
 
 void canonical_tpq(
     std::function<void(const Complex*, Complex*, int)> H,
-    int N,
+    uint64_t N,
     double beta_max,
-    int num_samples,
-    int temp_interval,
+    uint64_t num_samples,
+    uint64_t temp_interval,
     std::vector<double>& energies,
     std::string dir = "",
     double delta_beta = 0.1,
-    int taylor_order = 50,
+    uint64_t taylor_order = 50,
     bool compute_observables = false,
     std::vector<Operator> observables = {},
     std::vector<std::string> observable_names = {},
     double omega_min = -20.0,
     double omega_max = 20.0,
-    int num_points = 10000,
+    uint64_t num_points = 10000,
     double t_end = 50.0,
     double dt = 0.01,
     float spin_length = 0.5,
     bool measure_sz = false,
-    int sublattice_size = 1,
-    int num_sites = 16
+    uint64_t sublattice_size = 1,
+    uint64_t num_sites = 16
 );
 
 /**
@@ -278,13 +278,13 @@ void computeDynamicCorrelationsKrylov(
     const std::vector<Operator>& operators_1,
     const std::vector<Operator>& operators_2,
     const std::vector<std::string>& operator_names,
-    int N,
+    uint64_t N,
     const std::string& dir,
-    int sample,
+    uint64_t sample,
     double inv_temp,
     double t_end,
     double dt,
-    int krylov_dim
+    uint64_t krylov_dim
 );
 
 /**
@@ -296,9 +296,9 @@ void computeObservableDynamics_U_t(
     const std::vector<Operator>& observables_1,
     const std::vector<Operator>& observables_2,
     const std::vector<std::string>& observable_names,
-    int N,
+    uint64_t N,
     const std::string& dir,
-    int sample,
+    uint64_t sample,
     double inv_temp,
     double t_end,
     double dt

@@ -309,8 +309,8 @@ def prepare_hamiltonian_parameters(output_dir, non_kramer, nn_list, positions, s
         # Zeeman term
         sub_idx = sublattice_indices[site_id]
         local_field = h * np.dot(field_dir, z_local[sub_idx])
-        local_field_x = local_field * np.cos(theta)
-        local_field_z = local_field * np.sin(theta)
+        local_field_x = local_field * np.sin(theta)
+        local_field_z = local_field * np.cos(theta)
         transfer.append([0, node_mapping[i], -local_field_x/2, 0])
         transfer.append([1, node_mapping[i], -local_field_x/2, 0])
         transfer.append([2, node_mapping[i], -local_field_z, 0])  # Sz term

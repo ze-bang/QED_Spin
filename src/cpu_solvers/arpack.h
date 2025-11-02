@@ -22,15 +22,15 @@ extern bool arpack_debug_enabled;
 // Advanced tuning / rescue strategies for difficult convergence cases.
 struct ArpackAdvancedOptions {
     // Core selection
-    int nev = 1;                 // number of eigenvalues requested
+    uint64_t nev = 1;                 // number of eigenvalues requested
     std::string which = "SM";    // which set (SM, LM, SR, LR, etc.)
     double tol = 1e-10;          // target final tolerance
-    int max_iter = 1000;         // max Arnoldi iterations (iparam[2])
-    int ncv = -1;                // subspace dimension override (if <=0 use heuristic)
+    uint64_t max_iter = 1000;         // max Arnoldi iterations (iparam[2])
+    uint64_t ncv = -1;                // subspace dimension override (if <=0 use heuristic)
 
     // Multi-attempt escalation
     bool auto_enlarge_ncv = true;
-    int max_restarts = 2;        // number of escalation attempts (total attempts = max_restarts+1)
+    uint64_t max_restarts = 2;        // number of escalation attempts (total attempts = max_restarts+1)
     double ncv_growth = 1.5;     // growth factor for ncv each restart
 
     // Two-phase tolerance (relax then refine)
@@ -51,7 +51,7 @@ struct ArpackAdvancedOptions {
     bool adaptive_inner_tol = true; // adapt inner tol with outer progress
     double inner_tol_factor = 1e-2; // base factor relative to (current target tol)
     double inner_tol_min = 1e-14;   // floor for inner tolerance
-    int inner_max_iter = 300;       // cap for inner solver iterations
+    uint64_t inner_max_iter = 300;       // cap for inner solver iterations
 
     // Preconditioner (optional apply of M^{-1})
     std::function<void(const Complex*, Complex*, int)> M_prec; // if set, used in inner solves
@@ -90,13 +90,13 @@ void zneupd_(int* rvec, char* howmny, int* select,
 // Small inline helper functions (kept in header for performance)
 // y = H(x)
 inline void apply_H(const std::function<void(const Complex*, Complex*, int)>& H,
-                    const Complex* x, Complex* y, int N) {
+                    const Complex* x, Complex* y, uint64_t N) {
     H(x, y, N);
 }
 
 // y = (H - sigma I) x
 inline void apply_shifted_H(const std::function<void(const Complex*, Complex*, int)>& H,
-                            const Complex* x, Complex* y, int N, double sigma) {
+                            const Complex* x, Complex* y, uint64_t N, double sigma) {
     H(x, y, N);
     Complex neg_sigma(-sigma, 0.0);
     cblas_zaxpy(N, &neg_sigma, x, 1, y, 1);
@@ -107,34 +107,34 @@ int solve_shifted_linear_system_CGNR(
     const std::function<void(const Complex*, Complex*, int)>& H,
     double sigma,
     const Complex* rhs, Complex* x,
-    int N, int max_iter, double tol_rel);
+    uint64_t N, uint64_t max_iter, double tol_rel);
 
 int solve_shifted_linear_system_Hermitian_CG_or_CGNR(
     const std::function<void(const Complex*, Complex*, int)>& H,
     double sigma,
     const Complex* rhs,
     Complex* x,
-    int N,
-    int max_iter,
+    uint64_t N,
+    uint64_t max_iter,
     double tol_rel,
     const std::function<void(const Complex*, Complex*, int)>* M_prec = nullptr);
 
 int arpack_core(const std::function<void(const Complex*, Complex*, int)>& H,
-                int N, int max_iter, int nev, double tol,
+                uint64_t N, uint64_t max_iter, uint64_t nev, double tol,
                 const std::string& which,
                 bool shift_invert, double sigma,
                 std::vector<double>& evals_out,
                 std::vector<Complex>& evecs_out,
                 bool want_evecs,
                 const std::function<void(const Complex*, Complex*, int)>* M_prec = nullptr,
-                int explicit_ncv = -1,
+                uint64_t explicit_ncv = -1,
                 bool use_initial_resid = false,
                 const std::vector<Complex>* initial_resid = nullptr,
-                int inner_max_override = -1,
+                uint64_t inner_max_override = -1,
                 double inner_tol_override = -1.0);
 
 int arpack_core_advanced(const std::function<void(const Complex*, Complex*, int)>& H,
-                         int N,
+                         uint64_t N,
                          const ArpackAdvancedOptions& opts,
                          std::vector<double>& evals_out,
                          std::vector<Complex>& evecs_out,
@@ -142,44 +142,44 @@ int arpack_core_advanced(const std::function<void(const Complex*, Complex*, int)
 
 void save_eigs_to_dir(const std::vector<double>& evals,
                       const std::vector<Complex>* evecs,
-                      int N, int nev, const std::string& dir);
+                      uint64_t N, uint64_t nev, const std::string& dir);
 
 } // namespace detail_arpack
 
 // Generic ARPACK eigensolver (standard mode). Same I/O style as lanczos(...).
-void arpack_eigs(std::function<void(const Complex*, Complex*, int)> H, int N,
-                 int max_iter, int exct, double tol,
+void arpack_eigs(std::function<void(const Complex*, Complex*, int)> H, uint64_t N,
+                 uint64_t max_iter, uint64_t exct, double tol,
                  std::vector<double>& eigenvalues,
                  std::string dir = "", bool eigenvectors = false,
                  const std::string& which = "SM");
 
 // Ground state (smallest magnitude for Hermitian => "SM")
-void arpack_ground_state(std::function<void(const Complex*, Complex*, int)> H, int N,
-                         int max_iter, int exct, double tol,
+void arpack_ground_state(std::function<void(const Complex*, Complex*, int)> H, uint64_t N,
+                         uint64_t max_iter, uint64_t exct, double tol,
                          std::vector<double>& eigenvalues,
                          std::string dir = "", bool eigenvectors = false);
 
 // Largest eigenvalues ("LM")
-void arpack_largest(std::function<void(const Complex*, Complex*, int)> H, int N,
-                    int max_iter, int exct, double tol,
+void arpack_largest(std::function<void(const Complex*, Complex*, int)> H, uint64_t N,
+                    uint64_t max_iter, uint64_t exct, double tol,
                     std::vector<double>& eigenvalues,
                     std::string dir = "", bool eigenvectors = false);
 
 // Shift-invert wrapper (near target sigma). Same I/O style as shift_invert_lanczos(...)
-void arpack_shift_invert(std::function<void(const Complex*, Complex*, int)> H, int N,
-                         int max_iter, int num_eigs, double sigma, double tol,
+void arpack_shift_invert(std::function<void(const Complex*, Complex*, int)> H, uint64_t N,
+                         uint64_t max_iter, uint64_t num_eigs, double sigma, double tol,
                          std::vector<double>& eigenvalues,
                          std::string dir = "", bool compute_eigenvectors = false);
 
 // Shift-invert with optional left preconditioner M^{-1} apply for the inner solves
-void arpack_shift_invert_prec(std::function<void(const Complex*, Complex*, int)> H, int N,
-                              int max_iter, int num_eigs, double sigma, double tol,
+void arpack_shift_invert_prec(std::function<void(const Complex*, Complex*, int)> H, uint64_t N,
+                              uint64_t max_iter, uint64_t num_eigs, double sigma, double tol,
                               std::function<void(const Complex*, Complex*, int)> M_prec,
                               std::vector<double>& eigenvalues,
                               std::string dir = "", bool compute_eigenvectors = false);
 
 // Advanced strategy wrapper for difficult convergence. Returns 0 on full success.
-int arpack_eigs_advanced(std::function<void(const Complex*, Complex*, int)> H, int N,
+int arpack_eigs_advanced(std::function<void(const Complex*, Complex*, int)> H, uint64_t N,
                          const detail_arpack::ArpackAdvancedOptions& opts,
                          std::vector<double>& eigenvalues,
                          std::string dir = "", bool eigenvectors = false,

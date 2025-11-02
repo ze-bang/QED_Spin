@@ -21,13 +21,13 @@ using ComplexVector = std::vector<Complex>;
  * @brief Parameters for FTLM calculation
  */
 struct FTLMParameters {
-    int krylov_dim = 100;              // Dimension of Krylov subspace per sample
-    int num_samples = 10;              // Number of random initial states
-    int max_iterations = 1000;         // Maximum Lanczos iterations
+    uint64_t krylov_dim = 100;              // Dimension of Krylov subspace per sample
+    uint64_t num_samples = 10;              // Number of random initial states
+    uint64_t max_iterations = 1000;         // Maximum Lanczos iterations
     double tolerance = 1e-10;          // Convergence tolerance for Lanczos
     bool full_reorthogonalization = false;  // Use full reorthogonalization
-    int reorth_frequency = 10;         // Frequency of reorthogonalization (if not full)
-    unsigned int random_seed = 0;      // Random seed (0 = use random_device)
+    uint64_t reorth_frequency = 10;         // Frequency of reorthogonalization (if not full)
+    uint64_t random_seed = 0;      // Random seed (0 = use random_device)
     bool store_intermediate = false;   // Store per-sample intermediate data for debugging
     bool compute_error_bars = true;    // Compute standard error across samples
 };
@@ -39,7 +39,7 @@ struct FTLMSampleResult {
     std::vector<double> ritz_values;   // Eigenvalues from Krylov subspace
     std::vector<double> weights;       // Statistical weights (squared overlap with initial state)
     double ground_state_estimate;      // Lowest Ritz value
-    int lanczos_iterations;            // Actual number of Lanczos iterations performed
+    uint64_t lanczos_iterations;            // Actual number of Lanczos iterations performed
 };
 
 /**
@@ -53,19 +53,19 @@ struct FTLMResults {
     std::vector<double> entropy_error;       // Standard error in entropy
     std::vector<double> free_energy_error;   // Standard error in free energy
     double ground_state_estimate;            // Best estimate of ground state energy
-    int total_samples;                       // Number of samples used
+    uint64_t total_samples;                       // Number of samples used
 };
 
 /**
  * @brief Parameters for dynamical response calculation
  */
 struct DynamicalResponseParameters {
-    int krylov_dim = 200;              // Dimension of Krylov subspace
-    int num_samples = 10;              // Number of random initial states
+    uint64_t krylov_dim = 200;              // Dimension of Krylov subspace
+    uint64_t num_samples = 10;              // Number of random initial states
     double tolerance = 1e-10;          // Convergence tolerance for Lanczos
     bool full_reorthogonalization = false;  // Use full reorthogonalization
-    int reorth_frequency = 10;         // Frequency of reorthogonalization
-    unsigned int random_seed = 0;      // Random seed (0 = use random_device)
+    uint64_t reorth_frequency = 10;         // Frequency of reorthogonalization
+    uint64_t random_seed = 0;      // Random seed (0 = use random_device)
     double broadening = 0.1;           // Lorentzian broadening parameter (eta)
     bool store_intermediate = false;   // Store per-sample data
 };
@@ -77,7 +77,7 @@ struct DynamicalResponseSample {
     std::vector<double> ritz_values;   // Eigenvalues from Krylov subspace
     std::vector<double> weights;       // Spectral weights |<psi_i|O|0>|^2 (real, for self-correlation)
     std::vector<Complex> complex_weights;  // Complex spectral weights (for cross-correlation)
-    int lanczos_iterations;            // Actual iterations performed
+    uint64_t lanczos_iterations;            // Actual iterations performed
 };
 
 /**
@@ -90,7 +90,7 @@ struct DynamicalResponseResults {
     std::vector<double> spectral_error;      // Standard error in Re[S(ω)]
     std::vector<double> spectral_error_imag; // Standard error in Im[S(ω)]
     std::vector<DynamicalResponseSample> per_sample_data;  // Per-sample results
-    int total_samples;                       // Number of samples used
+    uint64_t total_samples;                       // Number of samples used
     double omega_min;                        // Minimum frequency
     double omega_max;                        // Maximum frequency
 };
@@ -99,12 +99,12 @@ struct DynamicalResponseResults {
  * @brief Parameters for static response calculation
  */
 struct StaticResponseParameters {
-    int krylov_dim = 100;              // Dimension of Krylov subspace per sample
-    int num_samples = 10;              // Number of random initial states
+    uint64_t krylov_dim = 100;              // Dimension of Krylov subspace per sample
+    uint64_t num_samples = 10;              // Number of random initial states
     double tolerance = 1e-10;          // Convergence tolerance for Lanczos
     bool full_reorthogonalization = false;  // Use full reorthogonalization
-    int reorth_frequency = 10;         // Frequency of reorthogonalization
-    unsigned int random_seed = 0;      // Random seed (0 = use random_device)
+    uint64_t reorth_frequency = 10;         // Frequency of reorthogonalization
+    uint64_t random_seed = 0;      // Random seed (0 = use random_device)
     bool store_intermediate = false;   // Store per-sample data
     bool compute_error_bars = true;    // Compute standard error across samples
 };
@@ -116,7 +116,7 @@ struct StaticResponseSample {
     std::vector<double> ritz_values;   // Eigenvalues from Krylov subspace
     std::vector<double> weights;       // Statistical weights
     std::vector<double> expectation_values;  // <n|O|n> for each Ritz state
-    int lanczos_iterations;            // Actual iterations performed
+    uint64_t lanczos_iterations;            // Actual iterations performed
 };
 
 /**
@@ -131,7 +131,7 @@ struct StaticResponseResults {
     std::vector<double> susceptibility;      // χ = β(⟨O²⟩ - ⟨O⟩²)
     std::vector<double> susceptibility_error;  // Standard error in χ
     std::vector<StaticResponseSample> per_sample_data;  // Per-sample results
-    int total_samples;                       // Number of samples used
+    uint64_t total_samples;                       // Number of samples used
 };
 
 /**
@@ -155,11 +155,11 @@ struct StaticResponseResults {
 int build_lanczos_tridiagonal(
     std::function<void(const Complex*, Complex*, int)> H,
     const ComplexVector& v0,
-    int N,
-    int max_iter,
+    uint64_t N,
+    uint64_t max_iter,
     double tol,
     bool full_reorth,
-    int reorth_freq,
+    uint64_t reorth_freq,
     std::vector<double>& alpha,
     std::vector<double>& beta
 );
@@ -213,11 +213,11 @@ void average_ftlm_samples(
  */
 FTLMResults finite_temperature_lanczos(
     std::function<void(const Complex*, Complex*, int)> H,
-    int N,
+    uint64_t N,
     const FTLMParameters& params,
     double temp_min,
     double temp_max,
-    int num_temp_bins,
+    uint64_t num_temp_bins,
     const std::string& output_dir = ""
 );
 
@@ -261,11 +261,11 @@ DynamicalResponseResults compute_dynamical_response(
     std::function<void(const Complex*, Complex*, int)> H,
     std::function<void(const Complex*, Complex*, int)> O,
     const ComplexVector& psi,
-    int N,
+    uint64_t N,
     const DynamicalResponseParameters& params,
     double omega_min,
     double omega_max,
-    int num_omega_bins,
+    uint64_t num_omega_bins,
     double temperature = 0.0,  // Temperature (0 = no thermal weighting)
     const std::string& output_dir = ""
 );
@@ -291,11 +291,11 @@ DynamicalResponseResults compute_dynamical_response(
 DynamicalResponseResults compute_dynamical_response_thermal(
     std::function<void(const Complex*, Complex*, int)> H,
     std::function<void(const Complex*, Complex*, int)> O,
-    int N,
+    uint64_t N,
     const DynamicalResponseParameters& params,
     double omega_min,
     double omega_max,
-    int num_omega_bins,
+    uint64_t num_omega_bins,
     double temperature = 0.0,
     const std::string& output_dir = ""
 );
@@ -336,11 +336,11 @@ DynamicalResponseResults compute_dynamical_correlation(
     std::function<void(const Complex*, Complex*, int)> H,
     std::function<void(const Complex*, Complex*, int)> O1,
     std::function<void(const Complex*, Complex*, int)> O2,
-    int N,
+    uint64_t N,
     const DynamicalResponseParameters& params,
     double omega_min,
     double omega_max,
-    int num_omega_bins,
+    uint64_t num_omega_bins,
     double temperature = 0.0,
     const std::string& output_dir = ""
 );
@@ -382,11 +382,11 @@ DynamicalResponseResults compute_dynamical_correlation_state(
     std::function<void(const Complex*, Complex*, int)> O1,
     std::function<void(const Complex*, Complex*, int)> O2,
     const ComplexVector& state,
-    int N,
+    uint64_t N,
     const DynamicalResponseParameters& params,
     double omega_min,
     double omega_max,
-    int num_omega_bins,
+    uint64_t num_omega_bins,
     double temperature = 0.0
 );
 
@@ -429,11 +429,11 @@ void save_dynamical_response_results(
 StaticResponseResults compute_thermal_expectation_value(
     std::function<void(const Complex*, Complex*, int)> H,
     std::function<void(const Complex*, Complex*, int)> O,
-    int N,
+    uint64_t N,
     const StaticResponseParameters& params,
     double temp_min,
     double temp_max,
-    int num_temp_bins,
+    uint64_t num_temp_bins,
     const std::string& output_dir = ""
 );
 
@@ -466,11 +466,11 @@ StaticResponseResults compute_static_response(
     std::function<void(const Complex*, Complex*, int)> H,
     std::function<void(const Complex*, Complex*, int)> O1,
     std::function<void(const Complex*, Complex*, int)> O2,
-    int N,
+    uint64_t N,
     const StaticResponseParameters& params,
     double temp_min,
     double temp_max,
-    int num_temp_bins,
+    uint64_t num_temp_bins,
     const std::string& output_dir = ""
 );
 

@@ -12,11 +12,11 @@
  */
 double find_ground_state_lanczos(
     std::function<void(const Complex*, Complex*, int)> H,
-    int N,
-    int krylov_dim,
+    uint64_t N,
+    uint64_t krylov_dim,
     double tolerance,
     bool full_reorth,
-    int reorth_freq,
+    uint64_t reorth_freq,
     ComplexVector& ground_state
 ) {
     std::cout << "  Finding ground state via Lanczos...\n";
@@ -38,7 +38,7 @@ double find_ground_state_lanczos(
     
     // Build Lanczos tridiagonal
     std::vector<double> alpha, beta;
-    int iterations = build_lanczos_tridiagonal(
+    uint64_t iterations = build_lanczos_tridiagonal(
         H, v0, N, krylov_dim, tolerance,
         full_reorth, reorth_freq,
         alpha, beta
@@ -46,7 +46,7 @@ double find_ground_state_lanczos(
     
     std::cout << "  Lanczos iterations for ground state: " << iterations << std::endl;
     
-    int m = alpha.size();
+    uint64_t m = alpha.size();
     
     // Diagonalize tridiagonal matrix to find ground state
     std::vector<double> diag = alpha;
@@ -56,7 +56,7 @@ double find_ground_state_lanczos(
     }
     
     std::vector<double> evecs(m * m);
-    int info = LAPACKE_dstevd(LAPACK_COL_MAJOR, 'V', m, diag.data(), offdiag.data(), evecs.data(), m);
+    uint64_t info = LAPACKE_dstevd(LAPACK_COL_MAJOR, 'V', m, diag.data(), offdiag.data(), evecs.data(), m);
     
     if (info != 0) {
         std::cerr << "  Error: Ground state tridiagonal diagonalization failed with code " << info << std::endl;
@@ -124,11 +124,11 @@ int build_excitation_spectrum(
     std::function<void(const Complex*, Complex*, int)> H,
     const ComplexVector& ground_state,
     double ground_energy,
-    int N,
-    int krylov_dim,
+    uint64_t N,
+    uint64_t krylov_dim,
     double tolerance,
     bool full_reorth,
-    int reorth_freq,
+    uint64_t reorth_freq,
     std::vector<double>& excitation_energies,
     std::vector<double>& weights
 ) {
@@ -136,7 +136,7 @@ int build_excitation_spectrum(
     
     // Build Lanczos tridiagonal starting from ground state
     std::vector<double> alpha, beta;
-    int iterations = build_lanczos_tridiagonal(
+    uint64_t iterations = build_lanczos_tridiagonal(
         H, ground_state, N, krylov_dim, tolerance,
         full_reorth, reorth_freq,
         alpha, beta
@@ -144,7 +144,7 @@ int build_excitation_spectrum(
     
     std::cout << "  Lanczos iterations for excitations: " << iterations << std::endl;
     
-    int m = alpha.size();
+    uint64_t m = alpha.size();
     
     // Diagonalize tridiagonal matrix
     std::vector<double> diag = alpha;
@@ -154,7 +154,7 @@ int build_excitation_spectrum(
     }
     
     std::vector<double> evecs(m * m);
-    int info = LAPACKE_dstevd(LAPACK_COL_MAJOR, 'V', m, diag.data(), offdiag.data(), evecs.data(), m);
+    uint64_t info = LAPACKE_dstevd(LAPACK_COL_MAJOR, 'V', m, diag.data(), offdiag.data(), evecs.data(), m);
     
     if (info != 0) {
         std::cerr << "  Warning: Excitation spectrum diagonalization failed with code " << info << std::endl;
@@ -191,8 +191,8 @@ ThermodynamicData compute_ltlm_thermodynamics(
     ThermodynamicData thermo;
     thermo.temperatures = temperatures;
     
-    int n_temps = temperatures.size();
-    int n_states = excitation_energies.size();
+    uint64_t n_temps = temperatures.size();
+    uint64_t n_states = excitation_energies.size();
     
     thermo.energy.resize(n_temps);
     thermo.specific_heat.resize(n_temps);
@@ -250,11 +250,11 @@ ThermodynamicData compute_ltlm_thermodynamics(
  */
 LTLMResults low_temperature_lanczos(
     std::function<void(const Complex*, Complex*, int)> H,
-    int N,
+    uint64_t N,
     const LTLMParameters& params,
     double temp_min,
     double temp_max,
-    int num_temp_bins,
+    uint64_t num_temp_bins,
     const ComplexVector* ground_state_input,
     const std::string& output_dir
 ) {
@@ -271,7 +271,7 @@ LTLMResults low_temperature_lanczos(
     std::vector<double> temperatures(num_temp_bins);
     double log_tmin = std::log(temp_min);
     double log_tmax = std::log(temp_max);
-    double log_step = (log_tmax - log_tmin) / std::max(1, num_temp_bins - 1);
+    double log_step = (log_tmax - log_tmin) / std::max(static_cast<uint64_t>(1), num_temp_bins - 1);
     
     for (int i = 0; i < num_temp_bins; i++) {
         temperatures[i] = std::exp(log_tmin + i * log_step);
@@ -316,7 +316,7 @@ LTLMResults low_temperature_lanczos(
     // Step 2: Build excitation spectrum from ground state
     std::cout << "\n--- Step 2: Building Excitation Spectrum ---\n";
     std::vector<double> excitation_energies, weights;
-    int n_excitations = build_excitation_spectrum(
+    uint64_t n_excitations = build_excitation_spectrum(
         H, ground_state, ground_energy, N, params.krylov_dim,
         params.tolerance, params.full_reorthogonalization, params.reorth_frequency,
         excitation_energies, weights

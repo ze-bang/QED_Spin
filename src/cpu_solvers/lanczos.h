@@ -42,87 +42,87 @@ ComplexVector generateRandomVector(int N, std::mt19937& gen, std::uniform_real_d
 ComplexVector generateOrthogonalVector(int N, const std::vector<ComplexVector>& vectors, std::mt19937& gen, std::uniform_real_distribution<double>& dist);
 
 void refine_eigenvector_with_cg(std::function<void(const Complex*, Complex*, int)> H,
-                               ComplexVector& v, double& lambda, int N, double tol);
+                               ComplexVector& v, double& lambda, uint64_t N, double tol);
                                
 // Helper function to refine a set of degenerate eigenvectors
 void refine_degenerate_eigenvectors(std::function<void(const Complex*, Complex*, int)> H,
-                                  std::vector<ComplexVector>& vectors, double lambda, int N, double tol);
-ComplexVector read_basis_vector(const std::string& temp_dir, int index, int N);
+                                  std::vector<ComplexVector>& vectors, double lambda, uint64_t N, double tol);
+ComplexVector read_basis_vector(const std::string& temp_dir, uint64_t index, uint64_t N);
 
 // Helper function to write a basis vector to file
-bool write_basis_vector(const std::string& temp_dir, int index, const ComplexVector& vec, int N);
+bool write_basis_vector(const std::string& temp_dir, uint64_t index, const ComplexVector& vec, uint64_t N);
 
 // Helper function to solve tridiagonal eigenvalue problem
 int solve_tridiagonal_matrix(const std::vector<double>& alpha, const std::vector<double>& beta, 
-                            int m, int exct, std::vector<double>& eigenvalues, 
+                            uint64_t m, uint64_t exct, std::vector<double>& eigenvalues, 
                             const std::string& temp_dir, const std::string& evec_dir, 
-                            bool eigenvectors, int N);
+                            bool eigenvectors, uint64_t N);
 
-void lanczos_no_ortho(std::function<void(const Complex*, Complex*, int)> H, int N, int max_iter, int exct, 
+void lanczos_no_ortho(std::function<void(const Complex*, Complex*, int)> H, uint64_t N, uint64_t max_iter, uint64_t exct, 
              double tol, std::vector<double>& eigenvalues, std::string dir = "",
              bool eigenvectors = false);
 
 // Lanczos algorithm with selective reorthogonalization
-void lanczos_selective_reorth(std::function<void(const Complex*, Complex*, int)> H, int N, int max_iter, int exct, 
+void lanczos_selective_reorth(std::function<void(const Complex*, Complex*, int)> H, uint64_t N, uint64_t max_iter, uint64_t exct, 
              double tol, std::vector<double>& eigenvalues, std::string dir = "",
              bool eigenvectors = false);
 
 // Lanczos algorithm implementation with basis vectors stored on disk
-void lanczos(std::function<void(const Complex*, Complex*, int)> H, int N, int max_iter, int exct, 
+void lanczos(std::function<void(const Complex*, Complex*, int)> H, uint64_t N, uint64_t max_iter, uint64_t exct, 
              double tol, std::vector<double>& eigenvalues, std::string dir = "",
              bool eigenvectors = false);
 
 // Block Lanczos algorithm for finding eigenvalues with degeneracies
-void block_lanczos(std::function<void(const Complex*, Complex*, int)> H, int N, int max_iter, 
-                   int num_eigs, int block_size, double tol, std::vector<double>& eigenvalues, 
+void block_lanczos(std::function<void(const Complex*, Complex*, int)> H, uint64_t N, uint64_t max_iter, 
+                   uint64_t num_eigs, uint64_t block_size, double tol, std::vector<double>& eigenvalues, 
                    std::string dir = "", bool compute_eigenvectors = false);
 
 // Chebyshev Filtered Lanczos algorithm with automatic spectrum range estimation
-void chebyshev_filtered_lanczos(std::function<void(const Complex*, Complex*, int)> H, int N, 
-                              int max_iter, int num_eigs,
+void chebyshev_filtered_lanczos(std::function<void(const Complex*, Complex*, int)> H, uint64_t N, 
+                              uint64_t max_iter, uint64_t num_eigs,
                               double tol, std::vector<double>& eigenvalues, std::string dir = "",
                               bool compute_eigenvectors = false, double target_lower=0, double target_upper=0);
 
 // Shift-Invert Lanczos algorithm - state-of-the-art implementation
 // Finds eigenvalues near a target shift σ by solving (H - σI)^{-1} eigenproblem
-void shift_invert_lanczos(std::function<void(const Complex*, Complex*, int)> H, int N, 
-                         int max_iter, int num_eigs, double sigma, double tol, 
+void shift_invert_lanczos(std::function<void(const Complex*, Complex*, int)> H, uint64_t N, 
+                         uint64_t max_iter, uint64_t num_eigs, double sigma, double tol, 
                          std::vector<double>& eigenvalues, std::string dir = "",
                          bool compute_eigenvectors = false);
 
 // Full diagonalization algorithm optimized for sparse matrices
-void full_diagonalization(std::function<void(const Complex*, Complex*, int)> H, int N, int num_eigs, 
+void full_diagonalization(std::function<void(const Complex*, Complex*, int)> H, uint64_t N, uint64_t num_eigs, 
                        std::vector<double>& eigenvalues, std::string dir = "",
                        bool compute_eigenvectors = true);
 
 // Krylov-Schur algorithm implementation
-void krylov_schur(std::function<void(const Complex*, Complex*, int)> H, int N, int max_iter, 
-                  int num_eigs, double tol, std::vector<double>& eigenvalues, std::string dir = "",
+void krylov_schur(std::function<void(const Complex*, Complex*, int)> H, uint64_t N, uint64_t max_iter, 
+                  uint64_t num_eigs, double tol, std::vector<double>& eigenvalues, std::string dir = "",
                   bool compute_eigenvectors = false);
 
 // Implicitly Restarted Lanczos algorithm implementation
-void implicitly_restarted_lanczos(std::function<void(const Complex*, Complex*, int)> H, int N, 
-                                 int max_iter, int num_eigs, double tol, 
+void implicitly_restarted_lanczos(std::function<void(const Complex*, Complex*, int)> H, uint64_t N, 
+                                 uint64_t max_iter, uint64_t num_eigs, double tol, 
                                  std::vector<double>& eigenvalues, std::string dir = "",
                                  bool compute_eigenvectors = false);
 
 // Thick Restart Lanczos algorithm implementation
 // Combines the benefits of implicit restart with retention of converged vectors
-void thick_restart_lanczos(std::function<void(const Complex*, Complex*, int)> H, int N, 
-                           int max_iter, int num_eigs, double tol, 
+void thick_restart_lanczos(std::function<void(const Complex*, Complex*, int)> H, uint64_t N, 
+                           uint64_t max_iter, uint64_t num_eigs, double tol, 
                            std::vector<double>& eigenvalues, std::string dir = "",
                            bool compute_eigenvectors = false);
 
 // Helper function to estimate number of eigenvalues in an interval
-int estimate_eigenvalue_count(std::function<void(const Complex*, Complex*, int)> H, int N, 
+int estimate_eigenvalue_count(std::function<void(const Complex*, Complex*, int)> H, uint64_t N, 
                             double lower_bound, double upper_bound);
 
 // Helper function to orthogonalize degenerate eigenvector subspace
 void orthogonalize_degenerate_subspace(std::vector<ComplexVector>& vectors, double eigenvalue,
-                                     std::function<void(const Complex*, Complex*, int)> H, int N);
+                                     std::function<void(const Complex*, Complex*, int)> H, uint64_t N);
 
 // Adaptive Spectrum Slicing Full Diagonalization with Degeneracy Preservation
-void optimal_spectrum_solver(std::function<void(const Complex*, Complex*, int)> H, int N, int max_iter,
+void optimal_spectrum_solver(std::function<void(const Complex*, Complex*, int)> H, uint64_t N, uint64_t max_iter,
                                              std::vector<double>& eigenvalues, std::string dir = "",
                                              bool compute_eigenvectors = true);
 #endif // LANCZOS_H

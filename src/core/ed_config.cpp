@@ -60,7 +60,7 @@ EDConfig EDConfig::fromFile(const std::string& filename) {
     }
     
     std::string line;
-    int line_num = 0;
+    uint64_t line_num = 0;
     
     while (std::getline(file, line)) {
         line_num++;
@@ -170,7 +170,7 @@ EDConfig EDConfig::fromFile(const std::string& filename) {
     return config;
 }
 
-EDConfig EDConfig::fromCommandLine(int argc, char* argv[]) {
+EDConfig EDConfig::fromCommandLine(uint64_t argc, char* argv[]) {
     EDConfig config;
     
     if (argc < 2) {
@@ -182,7 +182,7 @@ EDConfig EDConfig::fromCommandLine(int argc, char* argv[]) {
     config.workflow.output_dir = config.system.hamiltonian_dir + "/output";
     
     // Parse remaining arguments
-    for (int i = 2; i < argc; i++) {
+    for (uint64_t i = 2; i < argc; i++) {
         std::string arg = argv[i];
         
         auto parse_value = [&](const std::string& prefix) -> std::string {
@@ -416,22 +416,22 @@ void EDConfig::print(std::ostream& out) const {
     out << "System: " << system.num_sites << " sites, spin = " << system.spin_length << "\n";
     
     if (system.use_fixed_sz) {
-        int n_up_actual = (system.n_up >= 0) ? system.n_up : system.num_sites / 2;
+        uint64_t n_up_actual = (system.n_up >= 0) ? system.n_up : system.num_sites / 2;
         double sz = n_up_actual - system.num_sites / 2.0;
         out << "Fixed Sz: n_up = " << n_up_actual << " (Sz = " << sz << ")\n";
         
         // Calculate dimension reduction
-        auto binomial = [](int n, int k) {
+        auto binomial = [](uint64_t n, uint64_t k) {
             if (k > n || k < 0) return 0;
             if (k == 0 || k == n) return 1;
             long long result = 1;
-            for (int i = 1; i <= k; ++i) {
+            for (uint64_t i = 1; i <= k; ++i) {
                 result = result * (n - k + i) / i;
             }
             return (int)result;
         };
-        int full_dim = 1 << system.num_sites;
-        int fixed_dim = binomial(system.num_sites, n_up_actual);
+        uint64_t full_dim = 1 << system.num_sites;
+        uint64_t fixed_dim = binomial(system.num_sites, n_up_actual);
         out << "Hilbert space: " << fixed_dim << " (reduced from " << full_dim 
             << ", factor: " << (double)full_dim / fixed_dim << "x)\n";
     }
@@ -456,15 +456,14 @@ bool EDConfig::autoDetectNumSites() {
         return false;
     }
     
-    int max_site_id = -1;
+    uint64_t max_site_id = 0;
     std::string line;
     
     while (std::getline(file, line)) {
         if (line.empty() || line[0] == '#') continue;
         
         std::istringstream iss(line);
-        int site_id;
-        
+        uint64_t site_id;
         if (iss >> site_id) {
             max_site_id = std::max(max_site_id, site_id);
         }
@@ -1041,10 +1040,10 @@ CommandLineParser& CommandLineParser::addOption(
     return *this;
 }
 
-bool CommandLineParser::parse(int argc, char* argv[]) {
+bool CommandLineParser::parse(uint64_t argc, char* argv[]) {
     program_name_ = argv[0];
     
-    for (int i = 1; i < argc; i++) {
+    for (uint64_t i = 1; i < argc; i++) {
         std::string arg = argv[i];
         
         // Handle --key=value

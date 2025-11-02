@@ -57,7 +57,7 @@ struct SpectralFunctionData {
  * @param x Integer to count bits in
  * @return Number of bits set to 1
  */
-inline int popcount(uint64_t x) {
+inline uint64_t popcount(uint64_t x) {
     return __builtin_popcountll(x);
 }
 
@@ -68,7 +68,7 @@ inline int popcount(uint64_t x) {
  * @param n_up Number of bits that should be 1
  * @return Vector of basis states (as integers)
  */
-inline std::vector<uint64_t> generateFixedSzBasis(int n_bits, int n_up) {
+inline std::vector<uint64_t> generateFixedSzBasis(uint64_t n_bits, uint64_t n_up) {
     std::vector<uint64_t> basis;
     if (n_up < 0 || n_up > n_bits) return basis;
     
@@ -110,8 +110,8 @@ inline std::unordered_map<uint64_t, int> buildBasisIndexMap(const std::vector<ui
  * @param perm The permutation to apply
  * @return The permuted basis state
  */
-inline int applyPermutation(int basis, const std::vector<int>& perm) {
-    int result = 0;
+inline uint64_t applyPermutation(uint64_t basis, const std::vector<int>& perm) {
+    uint64_t result = 0;
     for (size_t i = 0; i < perm.size(); ++i) {
         result |= ((basis >> perm[i]) & 1) << i;
     }
@@ -126,10 +126,10 @@ inline int applyPermutation(int basis, const std::vector<int>& perm) {
  * Structure to hold symmetry sector metadata
  */
 struct SectorMetadata {
-    int sector_id;
+    uint64_t sector_id;
     std::vector<int> quantum_numbers;
     std::vector<Complex> phase_factors;
-    int dimension;  // Computed during basis generation
+    uint64_t dimension;  // Computed during basis generation
     
     SectorMetadata() : sector_id(0), dimension(0) {}
 };
@@ -139,7 +139,7 @@ struct SectorMetadata {
  * Loads data from JSON files produced by automorphism_finder.py
  */
 struct SymmetryGroupInfo {
-    int num_generators;
+    uint64_t num_generators;
     std::vector<int> generator_orders;
     std::vector<std::vector<int>> generators;
     std::vector<std::vector<int>> max_clique;
@@ -160,7 +160,7 @@ struct SymmetryGroupInfo {
         std::cout << "Loaded symmetry group information:" << std::endl;
         std::cout << "  Number of generators: " << num_generators << std::endl;
         std::cout << "  Generator orders: ";
-        for (int order : generator_orders) std::cout << order << " ";
+        for (uint64_t order : generator_orders) std::cout << order << " ";
         std::cout << std::endl;
         std::cout << "  Number of symmetry sectors: " << sectors.size() << std::endl;
         std::cout << "  Group size: " << max_clique.size() << std::endl;
@@ -257,7 +257,7 @@ private:
         
         // Find the end of the sectors array by counting brackets
         size_t array_end = pos;
-        int bracket_depth = 1;
+        uint64_t bracket_depth = 1;
         while (array_end < json.size() && bracket_depth > 0) {
             if (json[array_end] == '[') bracket_depth++;
             else if (json[array_end] == ']') bracket_depth--;
@@ -278,7 +278,7 @@ private:
                 // Find the matching closing brace for this sector
                 size_t sector_start = pos;
                 size_t sector_end = sector_start + 1;
-                int brace_depth = 1;
+                uint64_t brace_depth = 1;
                 while (sector_end < array_end && brace_depth > 0) {
                     if (json[sector_end] == '{') brace_depth++;
                     else if (json[sector_end] == '}') brace_depth--;
@@ -378,9 +378,9 @@ private:
     std::vector<int> representAsGeneratorPowers(const std::vector<int>& automorphism) {
         if (generators.empty()) return std::vector<int>();
         
-        int n = automorphism.size();
+        uint64_t n = automorphism.size();
         std::vector<int> identity(n);
-        for (int i = 0; i < n; ++i) identity[i] = i;
+        for (uint64_t i = 0; i < n; ++i) identity[i] = i;
         
         // Check if it's identity
         if (automorphism == identity) {
@@ -408,7 +408,7 @@ private:
             
             for (size_t g = 0; g < generators.size(); ++g) {
                 std::vector<int> new_perm(n);
-                for (int i = 0; i < n; ++i) {
+                for (uint64_t i = 0; i < n; ++i) {
                     new_perm[i] = curr.perm[generators[g][i]];
                 }
                 
@@ -495,7 +495,7 @@ public:
     SymmetryGroupInfo symmetry_info;
     
     // Constructor
-    Operator(int n_bits, float spin_l) : n_bits_(n_bits), spin_l_(spin_l), matrixBuilt_(false) {}
+    Operator(uint64_t n_bits, float spin_l) : n_bits_(n_bits), spin_l_(spin_l), matrixBuilt_(false) {}
     
     // Assignment operator
     Operator& operator=(const Operator& other) {
@@ -526,7 +526,7 @@ public:
      * Parallelized with OpenMP for multi-core performance
      */
     std::vector<Complex> apply(const std::vector<Complex>& vec) const {
-        int dim = 1 << n_bits_;
+        uint64_t dim = 1ULL << n_bits_;
         if (vec.size() != static_cast<size_t>(dim)) {
             throw std::invalid_argument("Input vector size mismatch");
         }
@@ -539,7 +539,7 @@ public:
             std::vector<Complex> local_result(dim, Complex(0.0, 0.0));
             
             #pragma omp for schedule(static) nowait
-            for (int i = 0; i < dim; ++i) {
+            for (uint64_t i = 0; i < dim; ++i) {
                 Complex coeff = vec[i];
                 if (std::abs(coeff) < 1e-15) continue;
                 
@@ -560,7 +560,7 @@ public:
             // Combine local results with critical section
             #pragma omp critical
             {
-                for (int i = 0; i < dim; ++i) {
+                for (uint64_t i = 0; i < dim; ++i) {
                     result[i] += local_result[i];
                 }
             }
@@ -574,7 +574,7 @@ public:
      * Parallelized with OpenMP and optimized memory access patterns
      */
     void apply(const Complex* in, Complex* out, size_t size) const {
-        int dim = 1 << n_bits_;
+        uint64_t dim = 1ULL << n_bits_;
         if (size != static_cast<size_t>(dim)) {
             throw std::invalid_argument("Input/output vector size mismatch");
         }
@@ -588,7 +588,7 @@ public:
             std::vector<Complex> local_out(dim, Complex(0.0, 0.0));
             
             #pragma omp for schedule(static) nowait
-            for (int i = 0; i < dim; ++i) {
+            for (uint64_t i = 0; i < dim; ++i) {
                 Complex coeff = in[i];
                 if (std::abs(coeff) < 1e-15) continue;
                 
@@ -609,7 +609,7 @@ public:
             // Reduce: combine thread-local results
             #pragma omp critical
             {
-                for (int i = 0; i < dim; ++i) {
+                for (uint64_t i = 0; i < dim; ++i) {
                     out[i] += local_out[i];
                 }
             }
@@ -621,28 +621,28 @@ public:
      * For matrix-free operation, use apply() instead
      */
     std::vector<Complex> apply_sparse(const std::vector<Complex>& vec) const {
-        int dim = 1 << n_bits_;
+        uint64_t dim = 1ULL << n_bits_;
         if (vec.size() != static_cast<size_t>(dim)) {
             throw std::invalid_argument("Input vector size mismatch");
         }
         
         buildSparseMatrix();
         Eigen::VectorXcd eigenVec(dim);
-        for (int i = 0; i < dim; ++i) {
+        for (uint64_t i = 0; i < dim; ++i) {
             eigenVec(i) = vec[i];
         }
         
         Eigen::VectorXcd result = sparseMatrix_ * eigenVec;
         
         std::vector<Complex> resultVec(dim);
-        for (int i = 0; i < dim; ++i) {
+        for (uint64_t i = 0; i < dim; ++i) {
             resultVec[i] = result(i);
         }
         return resultVec;
     }
     
     void apply_sparse(const Complex* in, Complex* out, size_t size) const {
-        int dim = 1 << n_bits_;
+        uint64_t dim = 1ULL << n_bits_;
         if (size != static_cast<size_t>(dim)) {
             throw std::invalid_argument("Input/output vector size mismatch");
         }
@@ -656,11 +656,11 @@ public:
     void buildSparseMatrix() const {
         if (matrixBuilt_) return;
         
-        int dim = 1 << n_bits_;
+        uint64_t dim = 1ULL << n_bits_;
         sparseMatrix_.resize(dim, dim);
         
         std::vector<Eigen::Triplet<Complex>> triplets;
-        for (int i = 0; i < dim; ++i) {
+        for (uint64_t i = 0; i < dim; ++i) {
             for (const auto& transform : transforms_) {
                 auto [j, scalar] = transform(i);
                 if (j >= 0 && j < dim) {
@@ -692,27 +692,27 @@ public:
         std::getline(file, line);
         std::getline(file, line);
         std::istringstream iss(line);
-        int numLines;
+        uint64_t numLines;
         std::string m;
         iss >> m >> numLines;
         
-        for (int i = 0; i < 3; ++i) std::getline(file, line);
+        for (uint64_t i = 0; i < 3; ++i) std::getline(file, line);
         
-        int lineCount = 0;
+        uint64_t lineCount = 0;
         while (std::getline(file, line) && lineCount < numLines) {
             std::istringstream lineStream(line);
-            int Op, indx;
+            uint64_t Op, indx;
             double E, F;
             
             if (!(lineStream >> Op >> indx >> E >> F)) continue;
             Complex coeff(E, F);
             if (std::abs(coeff) < 1e-15) continue;
-            addTransform([=](int basis) -> std::pair<int, Complex> {
+            addTransform([=](uint64_t basis) -> std::pair<int, Complex> {
                 if (Op == 2) {
                     return {basis, coeff * double(spin_l_) * pow(-1, (basis >> indx) & 1)};
                 } else {
                     if (((basis >> indx) & 1) != Op) {
-                        int flipped_basis = basis ^ (1 << indx);
+                        uint64_t flipped_basis = basis ^ (1 << indx);
                         return {flipped_basis, coeff};
                     }
                 }
@@ -733,25 +733,25 @@ public:
         std::getline(file, line);
         std::getline(file, line);
         std::istringstream iss(line);
-        int numLines;
+        uint64_t numLines;
         std::string m;
         iss >> m >> numLines;
         
-        for (int i = 0; i < 3; ++i) std::getline(file, line);
+        for (uint64_t i = 0; i < 3; ++i) std::getline(file, line);
         
-        int lineCount = 0;
+        uint64_t lineCount = 0;
         while (std::getline(file, line) && lineCount < numLines) {
             std::istringstream lineStream(line);
-            int Op_i, indx_i, Op_j, indx_j;
+            uint64_t Op_i, indx_i, Op_j, indx_j;
             double E, F;
             
             if (!(lineStream >> Op_i >> indx_i >> Op_j >> indx_j >> E >> F)) continue;
             Complex coeff(E, F);
             if (std::abs(coeff) < 1e-15) continue;
 
-            addTransform([=](int basis) -> std::pair<int, Complex> {
-                int bit_i = (basis >> indx_i) & 1;
-                int bit_j = (basis >> indx_j) & 1;
+            addTransform([=](uint64_t basis) -> std::pair<int, Complex> {
+                uint64_t bit_i = (basis >> indx_i) & 1;
+                uint64_t bit_j = (basis >> indx_j) & 1;
                 
                 if (Op_i == 2 && Op_j == 2) {
                     double sign_i = pow(-1, bit_i);
@@ -760,7 +760,7 @@ public:
                 }
                 
                 Complex local_coeff = coeff;
-                int new_basis = basis;
+                uint64_t new_basis = basis;
                 bool valid = true;
                 
                 if (Op_i != 2) {
@@ -774,14 +774,14 @@ public:
                 }
                 
                 if (valid && Op_j != 2) {
-                    int new_bit_j = (new_basis >> indx_j) & 1;
+                    uint64_t new_bit_j = (new_basis >> indx_j) & 1;
                     if (new_bit_j != Op_j) {
                         new_basis ^= (1 << indx_j);
                     } else {
                         valid = false;
                     }
                 } else if (valid) {
-                    int new_bit_j = (new_basis >> indx_j) & 1;
+                    uint64_t new_bit_j = (new_basis >> indx_j) & 1;
                     local_coeff *= double(spin_l_) * pow(-1, new_bit_j);
                 }
                 
@@ -795,13 +795,13 @@ public:
         }
     }
     
-    void loadonebodycorrelation(const int Op, const int indx) {
-        addTransform([=](int basis) -> std::pair<int, Complex> {
+    void loadonebodycorrelation(const uint64_t Op, const uint64_t indx) {
+        addTransform([=](uint64_t basis) -> std::pair<int, Complex> {
             if (Op == 2) {
                 return {basis, Complex(double(spin_l_) * pow(-1, (basis >> indx) & 1), 0.0)};
             } else {
                 if (((basis >> indx) & 1) != Op) {
-                    int flipped_basis = basis ^ (1 << indx);
+                    uint64_t flipped_basis = basis ^ (1 << indx);
                     return {flipped_basis, Complex(1.0, 0.0)};
                 }
             }
@@ -809,10 +809,10 @@ public:
         });
     }
     
-    void loadtwobodycorrelation(const int Op1, const int indx1, const int Op2, const int indx2) {
-        addTransform([=](int basis) -> std::pair<int, Complex> {
-            int bit1 = (basis >> indx1) & 1;
-            int bit2 = (basis >> indx2) & 1;
+    void loadtwobodycorrelation(const uint64_t Op1, const uint64_t indx1, const uint64_t Op2, const uint64_t indx2) {
+        addTransform([=](uint64_t basis) -> std::pair<int, Complex> {
+            uint64_t bit1 = (basis >> indx1) & 1;
+            uint64_t bit2 = (basis >> indx2) & 1;
             
             Complex factor(1.0, 0.0);
             
@@ -820,7 +820,7 @@ public:
                 return {basis, Complex(double(spin_l_) * double(spin_l_) * pow(-1, bit1) * pow(-1, bit2), 0.0)};
             }
             
-            int new_basis = basis;
+            uint64_t new_basis = basis;
             bool valid = true;
             
             if (Op1 != 2) {
@@ -834,14 +834,14 @@ public:
             }
             
             if (valid && Op2 != 2) {
-                int new_bit2 = (new_basis >> indx2) & 1;
+                uint64_t new_bit2 = (new_basis >> indx2) & 1;
                 if (new_bit2 != Op2) {
                     new_basis ^= (1 << indx2);
                 } else {
                     valid = false;
                 }
             } else if (valid) {
-                int new_bit2 = (new_basis >> indx2) & 1;
+                uint64_t new_bit2 = (new_basis >> indx2) & 1;
                 factor *= Complex(double(spin_l_) * pow(-1, new_bit2), 0.0);
             }
             
@@ -850,7 +850,7 @@ public:
         });
     }
     
-    std::vector<Complex> read_sym_basis(int index, const std::string& dir) const {
+    std::vector<Complex> read_sym_basis(uint64_t index, const std::string& dir) const {
         return readSymBasisVector(dir, index);
     }
     
@@ -882,7 +882,7 @@ public:
             
             std::cout << "\nProcessing sector " << (sector_idx + 1) << "/"
                       << symmetry_info.sectors.size() << " (QN: ";
-            for (int qn : sector.quantum_numbers) std::cout << qn << " ";
+            for (uint64_t qn : sector.quantum_numbers) std::cout << qn << " ";
             std::cout << ")" << std::endl;
             
             std::set<size_t> processed_orbits;
@@ -944,9 +944,9 @@ public:
         std::string block_dir = dir + "/sym_blocks";
         system(("mkdir -p " + block_dir).c_str());
         
-        int block_start = 0;
+        uint64_t block_start = 0;
         for (size_t block_idx = 0; block_idx < symmetrized_block_ham_sizes.size(); ++block_idx) {
-            int block_size = symmetrized_block_ham_sizes[block_idx];
+            uint64_t block_size = symmetrized_block_ham_sizes[block_idx];
             
             if (block_size == 0) {
                 std::cout << "  Block " << block_idx << ": empty (skipping)" << std::endl;
@@ -973,7 +973,7 @@ public:
             throw std::runtime_error("Could not open block file: " + filepath);
         }
         
-        int rows, cols;
+        uint64_t rows, cols;
         size_t nnz;
         file.read(reinterpret_cast<char*>(&rows), sizeof(int));
         file.read(reinterpret_cast<char*>(&cols), sizeof(int));
@@ -983,7 +983,7 @@ public:
         triplets.reserve(nnz);
         
         for (size_t i = 0; i < nnz; ++i) {
-            int row, col;
+            uint64_t row, col;
             Complex val;
             file.read(reinterpret_cast<char*>(&row), sizeof(int));
             file.read(reinterpret_cast<char*>(&col), sizeof(int));
@@ -1039,7 +1039,7 @@ public:
 protected:
     // Member variables (protected so derived classes can access)
     std::vector<TransformFunction> transforms_;
-    int n_bits_;
+    uint64_t n_bits_;
     float spin_l_;
     mutable Eigen::SparseMatrix<Complex> sparseMatrix_;
     mutable bool matrixBuilt_;
@@ -1079,7 +1079,7 @@ private:
             Complex character(1.0, 0.0);
             for (size_t k = 0; k < powers.size(); ++k) {
                 Complex phase = phase_factors[k];
-                for (int p = 0; p < powers[k]; ++p) {
+                for (uint64_t p = 0; p < powers[k]; ++p) {
                     character *= phase;
                 }
             }
@@ -1127,7 +1127,7 @@ private:
     
     void saveBlockSizes(const std::string& dir) const {
         std::ofstream file(dir + "/sym_basis/sym_block_sizes.txt");
-        for (int size : symmetrized_block_ham_sizes) {
+        for (uint64_t size : symmetrized_block_ham_sizes) {
             file << size << "\n";
         }
         
@@ -1148,19 +1148,19 @@ private:
             throw std::runtime_error("Could not open block sizes file. Run generateSymmetrizedBasis first.");
         }
         
-        int size;
+        uint64_t size;
         while (file >> size) {
             symmetrized_block_ham_sizes.push_back(size);
         }
     }
     
     void buildSingleBlock(const std::string& dir, const std::string& block_dir,
-                         size_t block_idx, int block_start, int block_size) {
+                         size_t block_idx, uint64_t block_start, uint64_t block_size) {
         
         std::vector<Eigen::Triplet<Complex>> triplets;
         
         // Build matrix elements: H_ij = ⟨ψ_i|H|ψ_j⟩
-        for (int col = 0; col < block_size; ++col) {
+        for (uint64_t col = 0; col < block_size; ++col) {
             auto basis_col = readSymBasisVector(dir, block_start + col);
             
             // Apply Hamiltonian
@@ -1177,7 +1177,7 @@ private:
             }
             
             // Compute matrix elements with all rows
-            for (int row = 0; row < block_size; ++row) {
+            for (uint64_t row = 0; row < block_size; ++row) {
                 auto basis_row = readSymBasisVector(dir, block_start + row);
                 
                 Complex element(0.0, 0.0);
@@ -1199,14 +1199,14 @@ private:
         std::string filename = block_dir + "/block_" + std::to_string(block_idx) + ".dat";
         std::ofstream file(filename, std::ios::binary);
         
-        int rows = block_size, cols = block_size;
+        uint64_t rows = block_size, cols = block_size;
         size_t nnz = triplets.size();
         file.write(reinterpret_cast<const char*>(&rows), sizeof(int));
         file.write(reinterpret_cast<const char*>(&cols), sizeof(int));
         file.write(reinterpret_cast<const char*>(&nnz), sizeof(size_t));
         
         for (const auto& t : triplets) {
-            int row = t.row(), col = t.col();
+            uint64_t row = t.row(), col = t.col();
             Complex val = t.value();
             file.write(reinterpret_cast<const char*>(&row), sizeof(int));
             file.write(reinterpret_cast<const char*>(&col), sizeof(int));
@@ -1230,10 +1230,10 @@ private:
  */
 class FixedSzOperator : public Operator {
 protected:
-    int n_up_;  // Number of up spins (fixed Sz = N/2 - n_up for spin-1/2)
+    uint64_t n_up_;  // Number of up spins (fixed Sz = N/2 - n_up for spin-1/2)
     std::vector<uint64_t> basis_states_;  // Basis states in fixed Sz sector
     std::unordered_map<uint64_t, int> state_to_index_;  // Map state -> index
-    int fixed_sz_dim_;  // Dimension of fixed Sz sector
+    uint64_t fixed_sz_dim_;  // Dimension of fixed Sz sector
     mutable Eigen::SparseMatrix<Complex> fixed_sz_matrix_;  // Sparse matrix in fixed Sz basis
     mutable bool fixed_sz_matrix_built_;
     
@@ -1244,7 +1244,7 @@ public:
      * @param spin_l Spin length (1/2 for spin-1/2)
      * @param n_up Number of up spins (determines Sz sector)
      */
-    FixedSzOperator(int n_bits, float spin_l, int n_up) 
+    FixedSzOperator(uint64_t n_bits, float spin_l, uint64_t n_up) 
         : Operator(n_bits, spin_l), 
           n_up_(n_up),
           fixed_sz_matrix_built_(false) {
@@ -1264,7 +1264,7 @@ public:
     }
     
     // Get dimension of fixed Sz sector
-    int getFixedSzDim() const { return fixed_sz_dim_; }
+    uint64_t getFixedSzDim() const { return fixed_sz_dim_; }
     
     // Get basis states
     const std::vector<uint64_t>& getBasisStates() const { return basis_states_; }
@@ -1287,7 +1287,7 @@ public:
             std::vector<Complex> local_result(fixed_sz_dim_, Complex(0.0, 0.0));
             
             #pragma omp for schedule(static) nowait
-            for (int i = 0; i < fixed_sz_dim_; ++i) {
+            for (uint64_t i = 0; i < fixed_sz_dim_; ++i) {
                 Complex coeff = vec[i];
                 if (std::abs(coeff) < 1e-15) continue;
                 
@@ -1307,7 +1307,7 @@ public:
                     if (j_state >= 0 && popcount(j_state) == n_up_ && std::abs(scalar) > 1e-15) {
                         auto it = state_to_index_.find(j_state);
                         if (it != state_to_index_.end()) {
-                            int j = it->second;
+                            uint64_t j = it->second;
                             local_result[j] += scalar * coeff;
                         }
                     }
@@ -1317,7 +1317,7 @@ public:
             // Reduce thread-local results
             #pragma omp critical
             {
-                for (int i = 0; i < fixed_sz_dim_; ++i) {
+                for (uint64_t i = 0; i < fixed_sz_dim_; ++i) {
                     result[i] += local_result[i];
                 }
             }
@@ -1344,7 +1344,7 @@ public:
             std::vector<Complex> local_out(fixed_sz_dim_, Complex(0.0, 0.0));
             
             #pragma omp for schedule(static) nowait
-            for (int i = 0; i < fixed_sz_dim_; ++i) {
+            for (uint64_t i = 0; i < fixed_sz_dim_; ++i) {
                 Complex coeff = in[i];
                 if (std::abs(coeff) < 1e-15) continue;
                 
@@ -1363,7 +1363,7 @@ public:
                     if (j_state >= 0 && popcount(j_state) == n_up_ && std::abs(scalar) > 1e-15) {
                         auto it = state_to_index_.find(j_state);
                         if (it != state_to_index_.end()) {
-                            int j = it->second;
+                            uint64_t j = it->second;
                             local_out[j] += scalar * coeff;
                         }
                     }
@@ -1373,7 +1373,7 @@ public:
             // Reduce
             #pragma omp critical
             {
-                for (int i = 0; i < fixed_sz_dim_; ++i) {
+                for (uint64_t i = 0; i < fixed_sz_dim_; ++i) {
                     out[i] += local_out[i];
                 }
             }
@@ -1392,14 +1392,14 @@ public:
         buildFixedSzMatrix();
         
         Eigen::VectorXcd eigenVec(fixed_sz_dim_);
-        for (int i = 0; i < fixed_sz_dim_; ++i) {
+        for (uint64_t i = 0; i < fixed_sz_dim_; ++i) {
             eigenVec(i) = vec[i];
         }
         
         Eigen::VectorXcd result = fixed_sz_matrix_ * eigenVec;
         
         std::vector<Complex> resultVec(fixed_sz_dim_);
-        for (int i = 0; i < fixed_sz_dim_; ++i) {
+        for (uint64_t i = 0; i < fixed_sz_dim_; ++i) {
             resultVec[i] = result(i);
         }
         return resultVec;
@@ -1431,7 +1431,7 @@ public:
         std::vector<Eigen::Triplet<Complex>> triplets;
         
         // For each basis state
-        for (int i = 0; i < fixed_sz_dim_; ++i) {
+        for (uint64_t i = 0; i < fixed_sz_dim_; ++i) {
             uint64_t basis_i = basis_states_[i];
             
             // Apply all transforms
@@ -1442,7 +1442,7 @@ public:
                 if (j_state >= 0 && popcount(j_state) == n_up_) {
                     auto it = state_to_index_.find(j_state);
                     if (it != state_to_index_.end()) {
-                        int j = it->second;
+                        uint64_t j = it->second;
                         triplets.emplace_back(j, i, scalar);
                     }
                 }
@@ -1469,13 +1469,13 @@ public:
      * Projects out components not in the fixed Sz sector
      */
     std::vector<Complex> projectToFixedSz(const std::vector<Complex>& full_vec) const {
-        int full_dim = 1 << n_bits_;
+        uint64_t full_dim = 1ULL << n_bits_;
         if (full_vec.size() != static_cast<size_t>(full_dim)) {
             throw std::invalid_argument("Input vector size mismatch with full dimension");
         }
         
         std::vector<Complex> fixed_sz_vec(fixed_sz_dim_, Complex(0.0, 0.0));
-        for (int i = 0; i < fixed_sz_dim_; ++i) {
+        for (uint64_t i = 0; i < fixed_sz_dim_; ++i) {
             uint64_t state = basis_states_[i];
             fixed_sz_vec[i] = full_vec[state];
         }
@@ -1491,9 +1491,9 @@ public:
             throw std::invalid_argument("Input vector size mismatch with fixed Sz dimension");
         }
         
-        int full_dim = 1 << n_bits_;
+        uint64_t full_dim = 1ULL << n_bits_;
         std::vector<Complex> full_vec(full_dim, Complex(0.0, 0.0));
-        for (int i = 0; i < fixed_sz_dim_; ++i) {
+        for (uint64_t i = 0; i < fixed_sz_dim_; ++i) {
             uint64_t state = basis_states_[i];
             full_vec[state] = fixed_sz_vec[i];
         }
@@ -1533,14 +1533,14 @@ public:
             
             std::cout << "\nProcessing sector " << (sector_idx + 1) << "/"
                       << symmetry_info.sectors.size() << " (QN: ";
-            for (int qn : sector.quantum_numbers) std::cout << qn << " ";
+            for (uint64_t qn : sector.quantum_numbers) std::cout << qn << " ";
             std::cout << ")" << std::endl;
             
             std::set<uint64_t> processed_orbits;
             size_t sector_basis_count = 0;
             
             // Only iterate over fixed Sz basis states
-            for (int basis_idx = 0; basis_idx < fixed_sz_dim_; ++basis_idx) {
+            for (uint64_t basis_idx = 0; basis_idx < fixed_sz_dim_; ++basis_idx) {
                 uint64_t basis = basis_states_[basis_idx];
                 
                 size_t progress_interval = fixed_sz_dim_ / 20;
@@ -1639,7 +1639,7 @@ protected:
         for (uint64_t state : orbit) {
             auto it = state_to_index_.find(state);
             if (it != state_to_index_.end()) {
-                int idx = it->second;
+                uint64_t idx = it->second;
                 
                 // Calculate phase based on how we got to this state
                 Complex phase = calculatePhaseFixedSz(seed_state, state, quantum_numbers, phase_factors);
@@ -1683,7 +1683,7 @@ protected:
         std::string filename = dir + "/basis_" + std::to_string(index) + ".dat";
         std::ofstream file(filename, std::ios::binary);
         
-        int dim = fixed_sz_dim_;
+        uint64_t dim = fixed_sz_dim_;
         file.write(reinterpret_cast<const char*>(&dim), sizeof(int));
         file.write(reinterpret_cast<const char*>(vec.data()), dim * sizeof(Complex));
     }
@@ -1715,7 +1715,7 @@ protected:
  */
 class SingleSiteOperator : public Operator {
 public:
-    SingleSiteOperator(int num_site, float spin_l, int op, int site_j) 
+    SingleSiteOperator(uint64_t num_site, float spin_l, uint64_t op, uint64_t site_j) 
         : Operator(num_site, spin_l) {
         
         if (op < 0 || op > 4) {
@@ -1728,12 +1728,12 @@ public:
         
         if (op <= 2) {
             // S+, S-, Sz
-            addTransform([=](int basis) -> std::pair<int, Complex> {
+            addTransform([=](uint64_t basis) -> std::pair<int, Complex> {
                 if (op == 2) {
                     return {basis, Complex(spin_l * pow(-1, (basis >> site_j) & 1), 0.0)};
                 } else {
                     if (((basis >> site_j) & 1) != op) {
-                        int flipped = basis ^ (1 << site_j);
+                        uint64_t flipped = basis ^ (1 << site_j);
                         return {flipped, Complex(1.0, 0.0)};
                     }
                 }
@@ -1741,8 +1741,8 @@ public:
             });
         } else {
             // Sx or Sy
-            addTransform([=](int basis) -> std::pair<int, Complex> {
-                int flipped = basis ^ (1 << site_j);
+            addTransform([=](uint64_t basis) -> std::pair<int, Complex> {
+                uint64_t flipped = basis ^ (1 << site_j);
                 if (op == 3) {
                     // Sx = (S+ + S-) / 2
                     return {flipped, Complex(0.5, 0.0)};
@@ -1763,7 +1763,7 @@ class DoubleSiteOperator : public Operator {
 public:
     DoubleSiteOperator() : Operator(0, 0.0) {}
     
-    DoubleSiteOperator(int num_site, float spin_l, int op_i, int site_i, int op_j, int site_j)
+    DoubleSiteOperator(uint64_t num_site, float spin_l, uint64_t op_i, uint64_t site_i, uint64_t op_j, uint64_t site_j)
         : Operator(num_site, spin_l) {
         
         if (op_i < 0 || op_i > 2 || op_j < 0 || op_j > 2) {
@@ -1774,9 +1774,9 @@ public:
             throw std::invalid_argument("Invalid site indices");
         }
         
-        addTransform([=](int basis) -> std::pair<int, Complex> {
-            int bit_i = (basis >> site_i) & 1;
-            int bit_j = (basis >> site_j) & 1;
+        addTransform([=](uint64_t basis) -> std::pair<int, Complex> {
+            uint64_t bit_i = (basis >> site_i) & 1;
+            uint64_t bit_j = (basis >> site_j) & 1;
             
             Complex factor(1.0, 0.0);
             
@@ -1784,7 +1784,7 @@ public:
                 return {basis, Complex(spin_l * spin_l * pow(-1, bit_i) * pow(-1, bit_j), 0.0)};
             }
             
-            int new_basis = basis;
+            uint64_t new_basis = basis;
             bool valid = true;
             
             if (op_i != 2) {
@@ -1798,14 +1798,14 @@ public:
             }
             
             if (valid && op_j != 2) {
-                int new_bit_j = (new_basis >> site_j) & 1;
+                uint64_t new_bit_j = (new_basis >> site_j) & 1;
                 if (new_bit_j != op_j) {
                     new_basis ^= (1 << site_j);
                 } else {
                     valid = false;
                 }
             } else if (valid) {
-                int new_bit_j = (new_basis >> site_j) & 1;
+                uint64_t new_bit_j = (new_basis >> site_j) & 1;
                 factor *= Complex(spin_l * pow(-1, new_bit_j), 0.0);
             }
             
@@ -1820,7 +1820,7 @@ public:
  */
 class BasePositionOperator : public Operator {
 protected:
-    std::vector<std::vector<double>> readPositionsFromFile(const std::string& filename, int expected_sites) {
+    std::vector<std::vector<double>> readPositionsFromFile(const std::string& filename, uint64_t expected_sites) {
         std::ifstream file(filename);
         if (!file.is_open()) {
             throw std::runtime_error("Could not open positions file: " + filename);
@@ -1837,7 +1837,7 @@ protected:
             if (line.empty() || line[0] == '#') continue;
             
             std::istringstream iss(line);
-            int site_id, matrix_idx, sublattice;
+            uint64_t site_id, matrix_idx, sublattice;
             double x, y, z;
             
             if (iss >> site_id >> matrix_idx >> sublattice >> x >> y >> z) {
@@ -1865,7 +1865,7 @@ protected:
     }
     
 public:
-    BasePositionOperator(int num_site, float spin_l) : Operator(num_site, spin_l) {}
+    BasePositionOperator(uint64_t num_site, float spin_l) : Operator(num_site, spin_l) {}
 };
 
 /**
@@ -1873,21 +1873,21 @@ public:
  */
 class SumOperator : public BasePositionOperator {
 public:
-    SumOperator(int num_site, float spin_l, int op, const std::vector<double>& Q_vector,
+    SumOperator(uint64_t num_site, float spin_l, uint64_t op, const std::vector<double>& Q_vector,
                 const std::string& positions_file)
         : BasePositionOperator(num_site, spin_l) {
         
         auto positions = readPositionsFromFile(positions_file, num_site);
         auto phases = calculatePhaseFactors(Q_vector, positions, 1.0 / std::sqrt(num_site));
         
-        for (int site = 0; site < num_site; ++site) {
+        for (uint64_t site = 0; site < num_site; ++site) {
             Complex phase = phases[site];
-            addTransform([=](int basis) -> std::pair<int, Complex> {
+            addTransform([=](uint64_t basis) -> std::pair<int, Complex> {
                 if (op == 2) {
                     return {basis, phase * Complex(spin_l * pow(-1, (basis >> site) & 1), 0.0)};
                 } else {
                     if (((basis >> site) & 1) != op) {
-                        int flipped = basis ^ (1 << site);
+                        uint64_t flipped = basis ^ (1 << site);
                         return {flipped, phase};
                     }
                 }
@@ -1902,32 +1902,32 @@ public:
  */
 class SumOperatorXYZ : public BasePositionOperator {
 public:
-    SumOperatorXYZ(int num_site, float spin_l, int op, const std::vector<double>& Q_vector,
+    SumOperatorXYZ(uint64_t num_site, float spin_l, uint64_t op, const std::vector<double>& Q_vector,
                    const std::string& positions_file)
         : BasePositionOperator(num_site, spin_l) {
         
         auto positions = readPositionsFromFile(positions_file, num_site);
         auto phases = calculatePhaseFactors(Q_vector, positions, 1.0 / std::sqrt(num_site));
         
-        for (int site = 0; site < num_site; ++site) {
+        for (uint64_t site = 0; site < num_site; ++site) {
             Complex phase = phases[site];
             
             if (op == 0) {
                 // Sx = (S+ + S-) / 2
-                addTransform([=](int basis) -> std::pair<int, Complex> {
-                    int flipped = basis ^ (1 << site);
+                addTransform([=](uint64_t basis) -> std::pair<int, Complex> {
+                    uint64_t flipped = basis ^ (1 << site);
                     return {flipped, phase * Complex(0.5, 0.0)};
                 });
             } else if (op == 1) {
                 // Sy = (S+ - S-) / (2i)
-                addTransform([=](int basis) -> std::pair<int, Complex> {
-                    int flipped = basis ^ (1 << site);
+                addTransform([=](uint64_t basis) -> std::pair<int, Complex> {
+                    uint64_t flipped = basis ^ (1 << site);
                     bool is_up = ((basis >> site) & 1) == 0;
                     return {flipped, phase * Complex(0.0, is_up ? 0.5 : -0.5)};
                 });
             } else if (op == 2) {
                 // Sz
-                addTransform([=](int basis) -> std::pair<int, Complex> {
+                addTransform([=](uint64_t basis) -> std::pair<int, Complex> {
                     return {basis, phase * Complex(spin_l * pow(-1, (basis >> site) & 1), 0.0)};
                 });
             }
@@ -1940,22 +1940,22 @@ public:
  */
 class SublatticeOperator : public BasePositionOperator {
 public:
-    SublatticeOperator(int sublattice_idx, int unit_cell_size, int num_site, float spin_l,
-                      int op, const std::vector<double>& Q_vector,
+    SublatticeOperator(uint64_t sublattice_idx, uint64_t unit_cell_size, uint64_t num_site, float spin_l,
+                      uint64_t op, const std::vector<double>& Q_vector,
                       const std::string& positions_file)
         : BasePositionOperator(num_site, spin_l) {
         
         auto positions = readPositionsFromFile(positions_file, num_site);
         auto phases = calculatePhaseFactors(Q_vector, positions, 1.0 / std::sqrt(num_site));
         
-        for (int site = sublattice_idx; site < num_site; site += unit_cell_size) {
+        for (uint64_t site = sublattice_idx; site < num_site; site += unit_cell_size) {
             Complex phase = phases[site];
-            addTransform([=](int basis) -> std::pair<int, Complex> {
+            addTransform([=](uint64_t basis) -> std::pair<int, Complex> {
                 if (op == 2) {
                     return {basis, phase * Complex(spin_l * pow(-1, (basis >> site) & 1), 0.0)};
                 } else {
                     if (((basis >> site) & 1) != op) {
-                        int flipped = basis ^ (1 << site);
+                        uint64_t flipped = basis ^ (1 << site);
                         return {flipped, phase};
                     }
                 }
@@ -1970,7 +1970,7 @@ public:
  */
 class TransverseOperator : public BasePositionOperator {
 public:
-    TransverseOperator(int num_site, float spin_l, int op,
+    TransverseOperator(uint64_t num_site, float spin_l, uint64_t op,
                       const std::vector<double>& Q_vector,
                       const std::vector<double>& v,
                       const std::string& positions_file)
@@ -1987,29 +1987,29 @@ public:
             {1/std::sqrt(3), 1/std::sqrt(3), -1/std::sqrt(3)}
         };
         
-        for (int i = 0; i < num_site; ++i) {
+        for (uint64_t i = 0; i < num_site; ++i) {
             double Q_dot_R = 0.0;
-            for (int d = 0; d < 3; ++d) {
+            for (uint64_t d = 0; d < 3; ++d) {
                 Q_dot_R += Q_vector[d] * positions[i][d];
             }
             
-            int sublattice = i % 4;
+            uint64_t sublattice = i % 4;
             double v_dot_z = 0.0;
-            for (int d = 0; d < 3; ++d) {
+            for (uint64_t d = 0; d < 3; ++d) {
                 v_dot_z += v[d] * z_mu[sublattice][d];
             }
             
             phases[i] = (1.0 / std::sqrt(num_site)) * v_dot_z * std::exp(Complex(0.0, Q_dot_R));
         }
         
-        for (int site = 0; site < num_site; ++site) {
+        for (uint64_t site = 0; site < num_site; ++site) {
             Complex phase = phases[site];
-            addTransform([=](int basis) -> std::pair<int, Complex> {
+            addTransform([=](uint64_t basis) -> std::pair<int, Complex> {
                 if (op == 2) {
                     return {basis, phase * Complex(spin_l * pow(-1, (basis >> site) & 1), 0.0)};
                 } else {
                     if (((basis >> site) & 1) != op) {
-                        int flipped = basis ^ (1 << site);
+                        uint64_t flipped = basis ^ (1 << site);
                         return {flipped, phase};
                     }
                 }
@@ -2024,7 +2024,7 @@ public:
  */
 class TransverseOperatorXYZ : public BasePositionOperator {
 public:
-    TransverseOperatorXYZ(int num_site, float spin_l, int op,
+    TransverseOperatorXYZ(uint64_t num_site, float spin_l, uint64_t op,
                          const std::vector<double>& Q_vector,
                          const std::vector<double>& v,
                          const std::string& positions_file)
@@ -2041,40 +2041,40 @@ public:
             {1/std::sqrt(3), 1/std::sqrt(3), -1/std::sqrt(3)}
         };
         
-        for (int i = 0; i < num_site; ++i) {
+        for (uint64_t i = 0; i < num_site; ++i) {
             double Q_dot_R = 0.0;
-            for (int d = 0; d < 3; ++d) {
+            for (uint64_t d = 0; d < 3; ++d) {
                 Q_dot_R += Q_vector[d] * positions[i][d];
             }
             
-            int sublattice = i % 4;
+            uint64_t sublattice = i % 4;
             double v_dot_z = 0.0;
-            for (int d = 0; d < 3; ++d) {
+            for (uint64_t d = 0; d < 3; ++d) {
                 v_dot_z += v[d] * z_mu[sublattice][d];
             }
             
             phases[i] = (1.0 / std::sqrt(num_site)) * v_dot_z * std::exp(Complex(0.0, Q_dot_R));
         }
         
-        for (int site = 0; site < num_site; ++site) {
+        for (uint64_t site = 0; site < num_site; ++site) {
             Complex phase = phases[site];
             
             if (op == 0) {
                 // Sx
-                addTransform([=](int basis) -> std::pair<int, Complex> {
-                    int flipped = basis ^ (1 << site);
+                addTransform([=](uint64_t basis) -> std::pair<int, Complex> {
+                    uint64_t flipped = basis ^ (1 << site);
                     return {flipped, phase * Complex(0.5, 0.0)};
                 });
             } else if (op == 1) {
                 // Sy
-                addTransform([=](int basis) -> std::pair<int, Complex> {
-                    int flipped = basis ^ (1 << site);
+                addTransform([=](uint64_t basis) -> std::pair<int, Complex> {
+                    uint64_t flipped = basis ^ (1 << site);
                     bool is_up = ((basis >> site) & 1) == 0;
                     return {flipped, phase * Complex(0.0, is_up ? 0.5 : -0.5)};
                 });
             } else if (op == 2) {
                 // Sz
-                addTransform([=](int basis) -> std::pair<int, Complex> {
+                addTransform([=](uint64_t basis) -> std::pair<int, Complex> {
                     return {basis, phase * Complex(spin_l * pow(-1, (basis >> site) & 1), 0.0)};
                 });
             }
@@ -2087,7 +2087,7 @@ public:
  */
 class ExperimentalOperator : public BasePositionOperator {
 public:
-    ExperimentalOperator(int num_site, float spin_l, double theta,
+    ExperimentalOperator(uint64_t num_site, float spin_l, double theta,
                         const std::vector<double>& Q_vector,
                         const std::string& positions_file)
         : BasePositionOperator(num_site, spin_l) {
@@ -2098,17 +2098,17 @@ public:
         double cos_theta = std::cos(theta);
         double sin_theta = std::sin(theta);
         
-        for (int site = 0; site < num_site; ++site) {
+        for (uint64_t site = 0; site < num_site; ++site) {
             Complex phase = phases[site];
             
             // Sz contribution
-            addTransform([=](int basis) -> std::pair<int, Complex> {
+            addTransform([=](uint64_t basis) -> std::pair<int, Complex> {
                 return {basis, phase * Complex(cos_theta * spin_l * pow(-1, (basis >> site) & 1), 0.0)};
             });
             
             // Sx contribution = (S+ + S-) / 2
-            addTransform([=](int basis) -> std::pair<int, Complex> {
-                int flipped = basis ^ (1 << site);
+            addTransform([=](uint64_t basis) -> std::pair<int, Complex> {
+                uint64_t flipped = basis ^ (1 << site);
                 return {flipped, phase * Complex(sin_theta * 0.5, 0.0)};
             });
         }
@@ -2120,7 +2120,7 @@ public:
  */
 class TransverseExperimentalOperator : public BasePositionOperator {
 public:
-    TransverseExperimentalOperator(int num_site, float spin_l, double theta,
+    TransverseExperimentalOperator(uint64_t num_site, float spin_l, double theta,
                                   const std::vector<double>& Q_vector,
                                   const std::vector<double>& v,
                                   const std::string& positions_file)
@@ -2137,15 +2137,15 @@ public:
             {1/std::sqrt(3), 1/std::sqrt(3), -1/std::sqrt(3)}
         };
         
-        for (int i = 0; i < num_site; ++i) {
+        for (uint64_t i = 0; i < num_site; ++i) {
             double Q_dot_R = 0.0;
-            for (int d = 0; d < 3; ++d) {
+            for (uint64_t d = 0; d < 3; ++d) {
                 Q_dot_R += Q_vector[d] * positions[i][d];
             }
             
-            int sublattice = i % 4;
+            uint64_t sublattice = i % 4;
             double v_dot_z = 0.0;
-            for (int d = 0; d < 3; ++d) {
+            for (uint64_t d = 0; d < 3; ++d) {
                 v_dot_z += v[d] * z_mu[sublattice][d];
             }
             
@@ -2155,17 +2155,17 @@ public:
         double cos_theta = std::cos(theta);
         double sin_theta = std::sin(theta);
         
-        for (int site = 0; site < num_site; ++site) {
+        for (uint64_t site = 0; site < num_site; ++site) {
             Complex phase = phases[site];
             
             // Sz contribution
-            addTransform([=](int basis) -> std::pair<int, Complex> {
+            addTransform([=](uint64_t basis) -> std::pair<int, Complex> {
                 return {basis, phase * Complex(cos_theta * spin_l * pow(-1, (basis >> site) & 1), 0.0)};
             });
             
             // Sx contribution
-            addTransform([=](int basis) -> std::pair<int, Complex> {
-                int flipped = basis ^ (1 << site);
+            addTransform([=](uint64_t basis) -> std::pair<int, Complex> {
+                uint64_t flipped = basis ^ (1 << site);
                 return {flipped, phase * Complex(sin_theta * 0.5, 0.0)};
             });
         }
@@ -2181,7 +2181,7 @@ public:
  */
 class FixedSzSingleSiteOperator : public FixedSzOperator {
 public:
-    FixedSzSingleSiteOperator(int num_site, float spin_l, int n_up, int op, int site_j) 
+    FixedSzSingleSiteOperator(uint64_t num_site, float spin_l, uint64_t n_up, uint64_t op, uint64_t site_j) 
         : FixedSzOperator(num_site, spin_l, n_up) {
         
         if (op < 0 || op > 4) {
@@ -2194,12 +2194,12 @@ public:
         
         if (op <= 2) {
             // S+, S-, Sz
-            addTransform([=](int basis) -> std::pair<int, Complex> {
+            addTransform([=](uint64_t basis) -> std::pair<int, Complex> {
                 if (op == 2) {
                     return {basis, Complex(spin_l * pow(-1, (basis >> site_j) & 1), 0.0)};
                 } else {
                     if (((basis >> site_j) & 1) != op) {
-                        int flipped = basis ^ (1 << site_j);
+                        uint64_t flipped = basis ^ (1 << site_j);
                         return {flipped, Complex(1.0, 0.0)};
                     }
                 }
@@ -2207,8 +2207,8 @@ public:
             });
         } else {
             // Sx or Sy
-            addTransform([=](int basis) -> std::pair<int, Complex> {
-                int flipped = basis ^ (1 << site_j);
+            addTransform([=](uint64_t basis) -> std::pair<int, Complex> {
+                uint64_t flipped = basis ^ (1 << site_j);
                 if (op == 3) {
                     // Sx = (S+ + S-) / 2
                     return {flipped, Complex(0.5, 0.0)};
@@ -2227,8 +2227,8 @@ public:
  */
 class FixedSzDoubleSiteOperator : public FixedSzOperator {
 public:
-    FixedSzDoubleSiteOperator(int num_site, float spin_l, int n_up, 
-                              int op_i, int site_i, int op_j, int site_j)
+    FixedSzDoubleSiteOperator(uint64_t num_site, float spin_l, uint64_t n_up, 
+                              uint64_t op_i, uint64_t site_i, uint64_t op_j, uint64_t site_j)
         : FixedSzOperator(num_site, spin_l, n_up) {
         
         if (op_i < 0 || op_i > 2 || op_j < 0 || op_j > 2) {
@@ -2239,9 +2239,9 @@ public:
             throw std::invalid_argument("Invalid site indices");
         }
         
-        addTransform([=](int basis) -> std::pair<int, Complex> {
-            int bit_i = (basis >> site_i) & 1;
-            int bit_j = (basis >> site_j) & 1;
+        addTransform([=](uint64_t basis) -> std::pair<int, Complex> {
+            uint64_t bit_i = (basis >> site_i) & 1;
+            uint64_t bit_j = (basis >> site_j) & 1;
             
             Complex factor(1.0, 0.0);
             
@@ -2249,7 +2249,7 @@ public:
                 return {basis, Complex(spin_l * spin_l * pow(-1, bit_i) * pow(-1, bit_j), 0.0)};
             }
             
-            int new_basis = basis;
+            uint64_t new_basis = basis;
             bool valid = true;
             
             if (op_i != 2) {
@@ -2263,14 +2263,14 @@ public:
             }
             
             if (valid && op_j != 2) {
-                int new_bit_j = (new_basis >> site_j) & 1;
+                uint64_t new_bit_j = (new_basis >> site_j) & 1;
                 if (new_bit_j != op_j) {
                     new_basis ^= (1 << site_j);
                 } else {
                     valid = false;
                 }
             } else if (valid) {
-                int new_bit_j = (new_basis >> site_j) & 1;
+                uint64_t new_bit_j = (new_basis >> site_j) & 1;
                 factor *= Complex(spin_l * pow(-1, new_bit_j), 0.0);
             }
             

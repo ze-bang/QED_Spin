@@ -41,7 +41,7 @@ EDResults run_standard_workflow(const EDConfig& config) {
     
     // Check if fixed Sz mode is enabled
     if (config.system.use_fixed_sz) {
-        int n_up = (config.system.n_up >= 0) ? config.system.n_up : config.system.num_sites / 2;
+        uint64_t n_up = (config.system.n_up >= 0) ? config.system.n_up : config.system.num_sites / 2;
         std::string interaction_file = config.system.hamiltonian_dir + "/" + config.system.interaction_file;
         std::string single_site_file = config.system.hamiltonian_dir + "/" + config.system.single_site_file;
         
@@ -206,14 +206,14 @@ void compute_dynamical_response_workflow(const std::vector<double>& eigenvalues,
     op.buildSparseMatrix();
     
     // Hilbert space dimension
-    int N = 1 << config.system.num_sites;
+    uint64_t N = 1ULL << config.system.num_sites;
     
     // Create function wrappers for matrix-vector products
-    auto H_func = [&ham](const Complex* in, Complex* out, int dim) {
+    auto H_func = [&ham](const Complex* in, Complex* out, uint64_t dim) {
         ham.apply(in, out, dim);
     };
     
-    auto O_func = [&op](const Complex* in, Complex* out, int dim) {
+    auto O_func = [&op](const Complex* in, Complex* out, uint64_t dim) {
         op.apply(in, out, dim);
     };
     
@@ -257,7 +257,7 @@ void compute_dynamical_response_workflow(const std::vector<double>& eigenvalues,
             op2.loadFromInterAllFile(op2_path);
             op2.buildSparseMatrix();
             
-            auto O2_func = [&op2](const Complex* in, Complex* out, int dim) {
+            auto O2_func = [&op2](const Complex* in, Complex* out, uint64_t dim) {
                 op2.apply(in, out, dim);
             };
             
@@ -342,14 +342,14 @@ void compute_static_response_workflow(const std::vector<double>& eigenvalues,
     op.buildSparseMatrix();
     
     // Hilbert space dimension
-    int N = 1 << config.system.num_sites;
+    uint64_t N = 1ULL << config.system.num_sites;
     
     // Create function wrappers for matrix-vector products
-    auto H_func = [&ham](const Complex* in, Complex* out, int dim) {
+    auto H_func = [&ham](const Complex* in, Complex* out, uint64_t dim) {
         ham.apply(in, out, dim);
     };
     
-    auto O_func = [&op](const Complex* in, Complex* out, int dim) {
+    auto O_func = [&op](const Complex* in, Complex* out, uint64_t dim) {
         op.apply(in, out, dim);
     };
     
@@ -379,7 +379,7 @@ void compute_static_response_workflow(const std::vector<double>& eigenvalues,
         op2.loadFromInterAllFile(op2_path);
         op2.buildSparseMatrix();
         
-        auto O2_func = [&op2](const Complex* in, Complex* out, int dim) {
+        auto O2_func = [&op2](const Complex* in, Complex* out, uint64_t dim) {
             op2.apply(in, out, dim);
         };
         
@@ -414,7 +414,7 @@ void compute_static_response_workflow(const std::vector<double>& eigenvalues,
 /**
  * @brief Print eigenvalue summary
  */
-void print_eigenvalue_summary(const std::vector<double>& eigenvalues, int max_show = 10) {
+void print_eigenvalue_summary(const std::vector<double>& eigenvalues, uint64_t max_show = 10) {
     std::cout << "\nEigenvalues:\n";
     for (size_t i = 0; i < eigenvalues.size() && i < max_show; i++) {
         std::cout << "  " << i << ": " << std::setprecision(12) << eigenvalues[i] << "\n";
@@ -651,7 +651,7 @@ int main(int argc, char* argv[]) {
             std::cout << "Comparison\n";
             std::cout << "==========================================\n";
             
-            int n = std::min(standard_results.eigenvalues.size(), sym_results.eigenvalues.size());
+            uint64_t n = std::min(standard_results.eigenvalues.size(), sym_results.eigenvalues.size());
             double max_diff = 0.0;
             for (int i = 0; i < n; i++) {
                 double diff = std::abs(standard_results.eigenvalues[i] - sym_results.eigenvalues[i]);

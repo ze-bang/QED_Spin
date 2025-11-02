@@ -163,43 +163,43 @@ struct EDResults {
  */
 struct EDParameters {
     // ========== General Parameters ==========
-    int max_iterations = 10000;
-    int num_eigenvalues = 1;
+    uint64_t max_iterations = 10000;
+    uint64_t num_eigenvalues = 1;
     double tolerance = 1e-10;
     bool compute_eigenvectors = false;
     std::string output_dir = "";
     
     // ========== Method-Specific Parameters ==========
     double shift = 0.0;        // For shift-invert methods
-    int block_size = 4;       // For block methods
-    int max_subspace = 100;    // For Davidson method
+    uint64_t block_size = 4;       // For block methods
+    uint64_t max_subspace = 100;    // For Davidson method
     double target_lower = 0.0; // Lower energy bound for Chebyshev filtered (0 = auto)
     double target_upper = 0.0; // Upper energy bound for Chebyshev filtered (0 = auto)
     
     // ========== TPQ-Specific Parameters ==========
-    int num_samples = 1;
+    uint64_t num_samples = 1;
     double temp_min = 1e-3;
     double temp_max = 20;
-    int num_temp_bins = 100;
-    int num_order = 100;           // Order (steps) for canonical TPQ imaginary-time evolution
-    int num_measure_freq = 100;    // Frequency of measurements
+    uint64_t num_temp_bins = 100;
+    uint64_t num_order = 100;           // Order (steps) for canonical TPQ imaginary-time evolution
+    uint64_t num_measure_freq = 100;    // Frequency of measurements
     double delta_tau = 1e-2;       // Time step for imaginary-time evolution (cTPQ)
     double large_value = 1e5;      // Large value for TPQ
     
     // ========== FTLM-Specific Parameters ==========
-    int ftlm_krylov_dim = 100;     // Krylov subspace dimension per sample
+    uint64_t ftlm_krylov_dim = 100;     // Krylov subspace dimension per sample
     bool ftlm_full_reorth = false; // Use full reorthogonalization
-    int ftlm_reorth_freq = 10;     // Reorthogonalization frequency
-    unsigned int ftlm_seed = 0;    // Random seed (0 = auto)
+    uint64_t ftlm_reorth_freq = 10;     // Reorthogonalization frequency
+    uint64_t ftlm_seed = 0;    // Random seed (0 = auto)
     bool ftlm_store_samples = false; // Store per-sample intermediate data
     bool ftlm_error_bars = true;   // Compute error bars
     
     // ========== LTLM-Specific Parameters ==========
-    int ltlm_krylov_dim = 200;     // Krylov subspace dimension for excitations
-    int ltlm_ground_krylov = 100;  // Krylov dimension for finding ground state
+    uint64_t ltlm_krylov_dim = 200;     // Krylov subspace dimension for excitations
+    uint64_t ltlm_ground_krylov = 100;  // Krylov dimension for finding ground state
     bool ltlm_full_reorth = false; // Use full reorthogonalization
-    int ltlm_reorth_freq = 10;     // Reorthogonalization frequency
-    unsigned int ltlm_seed = 0;    // Random seed (0 = auto)
+    uint64_t ltlm_reorth_freq = 10;     // Reorthogonalization frequency
+    uint64_t ltlm_seed = 0;    // Random seed (0 = auto)
     bool ltlm_store_data = false;  // Store intermediate data
     bool use_hybrid_method = false; // Use hybrid LTLM/FTLM (deprecated, use method=HYBRID)
     double hybrid_crossover = 1.0; // Temperature crossover for hybrid
@@ -210,14 +210,14 @@ struct EDParameters {
     mutable std::vector<std::string> observable_names = {};     // Names of observables
     double omega_min = -10.0;      // Minimum frequency for spectral function
     double omega_max = 10.0;       // Maximum frequency for spectral function
-    int num_points = 1000;         // Number of points for spectral function
+    uint64_t num_points = 1000;         // Number of points for spectral function
     double t_end = 50.0;           // End time for time evolution
     double dt = 0.01;              // Time step for time evolution
     
     // ========== Lattice Parameters ==========
-    int num_sites = 0;             // Number of sites in the system
+    uint64_t num_sites = 0;             // Number of sites in the system
     float spin_length = 0.5;       // Spin length
-    int sublattice_size = 1;       // Size of the sublattice
+    uint64_t sublattice_size = 1;       // Size of the sublattice
     
     bool calc_observables = false; // Calculate custom observables
     bool measure_spin = false;     // Measure spins
@@ -227,8 +227,8 @@ struct EDParameters {
     // These mirror (a subset of) detail_arpack::ArpackAdvancedOptions
     bool arpack_advanced_verbose = false;
     std::string arpack_which = "SR";                            // SR=Smallest Real (ground state), LR=Largest Real, SM/LM=by magnitude
-    int arpack_ncv = -1;                                        // Number of Lanczos vectors
-    int arpack_max_restarts = 2;                                // Maximum number of restarts
+    uint64_t arpack_ncv = -1;                                        // Number of Lanczos vectors
+    uint64_t arpack_max_restarts = 2;                                // Maximum number of restarts
     double arpack_ncv_growth = 1.5;                             // Growth factor for ncv
     bool arpack_auto_enlarge_ncv = true;                        // Automatically enlarge ncv
     bool arpack_two_phase_refine = true;                        // Use two-phase refinement
@@ -240,7 +240,7 @@ struct EDParameters {
     bool arpack_adaptive_inner_tol = true;                      // Adaptive inner tolerance
     double arpack_inner_tol_factor = 1e-2;                      // Inner tolerance factor
     double arpack_inner_tol_min = 1e-14;                        // Minimum inner tolerance
-    int arpack_inner_max_iter = 300;                            // Maximum inner iterations
+    uint64_t arpack_inner_max_iter = 300;                            // Maximum inner iterations
 };
 
 /**
@@ -259,7 +259,7 @@ enum class HamiltonianFileFormat {
 // Core diagonalization function
 EDResults exact_diagonalization_core(
     std::function<void(const Complex*, Complex*, int)> H, 
-    int hilbert_space_dim,
+    uint64_t hilbert_space_dim,
     DiagonalizationMethod method,
     const EDParameters& params
 );
@@ -268,13 +268,13 @@ EDResults exact_diagonalization_core(
 namespace ed_internal {
     void process_thermal_correlations(
         const EDParameters& params,
-        int hilbert_space_dim
+        uint64_t hilbert_space_dim
     );
     
     Operator load_hamiltonian_from_files(
         const std::string& interaction_file,
         const std::string& single_site_file,
-        int num_sites,
+        uint64_t num_sites,
         float spin_length,
         DiagonalizationMethod method,
         HamiltonianFileFormat format
@@ -286,7 +286,7 @@ namespace ed_internal {
     
     EDResults diagonalize_symmetry_block(
         Eigen::SparseMatrix<Complex>& block_matrix,
-        int block_dim,
+        uint64_t block_dim,
         DiagonalizationMethod method,
         const EDParameters& params,
         bool is_target_block = false,
@@ -298,10 +298,10 @@ namespace ed_internal {
         const std::string& main_output_dir,
         Operator& hamiltonian,
         const std::string& directory,
-        int block_dim,
-        int block_start_dim,
-        int block_idx,
-        int num_sites
+        uint64_t block_dim,
+        uint64_t block_start_dim,
+        uint64_t block_idx,
+        uint64_t num_sites
     );
     
     void transform_and_save_eigenvectors(
@@ -310,14 +310,14 @@ namespace ed_internal {
         Operator& hamiltonian,
         const std::string& directory,
         const std::vector<double>& eigenvalues,
-        int block_dim,
-        int block_start_dim,
-        int block_idx,
-        int num_sites
+        uint64_t block_dim,
+        uint64_t block_start_dim,
+        uint64_t block_idx,
+        uint64_t num_sites
     );
     
     struct GroundStateSectorInfo {
-        int target_block;
+        uint64_t target_block;
         double min_energy;
         double max_energy;
     };
@@ -350,7 +350,7 @@ namespace ed_internal {
  */
 EDResults exact_diagonalization_core(
     std::function<void(const Complex*, Complex*, int)> H, 
-    int hilbert_space_dim,
+    uint64_t hilbert_space_dim,
     DiagonalizationMethod method = DiagonalizationMethod::LANCZOS,
     const EDParameters& params = EDParameters()
 ) {
@@ -580,7 +580,7 @@ EDResults exact_diagonalization_core(
             opts.inner_max_iter = params.arpack_inner_max_iter;
             opts.verbose = params.arpack_advanced_verbose;
             std::vector<Complex> evecs; // optionally capture
-            int info = arpack_eigs_advanced(H, hilbert_space_dim, opts,
+            uint64_t info = arpack_eigs_advanced(H, hilbert_space_dim, opts,
                                             results.eigenvalues,
                                             params.output_dir,
                                             params.compute_eigenvectors,
@@ -784,7 +784,7 @@ namespace ed_internal {
  */
 void process_thermal_correlations(
     const EDParameters& params,
-    int hilbert_space_dim
+    uint64_t hilbert_space_dim
 ) {
     std::cout << "Calculating custom observables..." << std::endl;
     std::cout << "Calculating thermal expectation values for correlation operators..." << std::endl;
@@ -823,7 +823,7 @@ void process_thermal_correlations(
             if (!file_list.is_open()) continue;
             
             std::string correlation_file;
-            int file_count = 0;
+            uint64_t file_count = 0;
 
             // Compute thermal expectations at different temperatures
             std::string results_file_path = output_correlations_dir + "/thermal_expectation_" + 
@@ -864,13 +864,13 @@ void process_thermal_correlations(
             
                     std::getline(file, line);
                     std::istringstream iss(line);
-                    int numLines;
+                    uint64_t numLines;
                     std::string m;
                     iss >> m >> numLines;
                     // std::cout << "Number of lines: " << numLines << std::endl;
                     
                     // Skip the next 3 lines (separators/headers)
-                    for (int i = 0; i < 3; ++i) {
+                    for (uint64_t i = 0; i < 3; ++i) {
                         std::getline(file, line);
                     }
                                             
@@ -891,11 +891,11 @@ void process_thermal_correlations(
                     }
 
                     // Process transform data
-                    int lineCount = 0;
+                    uint64_t lineCount = 0;
                     while (std::getline(file, line) && lineCount < numLines) {
                         Operator correlation_op(params.num_sites, params.spin_length);
                         std::istringstream lineStream(line);
-                        int Op1, indx1, Op2, indx2;
+                        uint64_t Op1, indx1, Op2, indx2;
                         double E, F;
                         if (prefix == "one_body_correlations") {
 
@@ -915,7 +915,7 @@ void process_thermal_correlations(
                         }
 
                         // Create a lambda to apply the operator
-                        auto apply_correlation_op = [&correlation_op](const Complex* in, Complex* out, int n) {
+                        auto apply_correlation_op = [&correlation_op](const Complex* in, Complex* out, uint64_t n) {
                             std::vector<Complex> in_vec(in, in + n);
                             std::vector<Complex> out_vec = correlation_op.apply(in_vec);
                             std::copy(out_vec.begin(), out_vec.end(), out);
@@ -923,12 +923,12 @@ void process_thermal_correlations(
                         
 
                         // Calculate thermal expectations at temperature points
-                        int num_temps = std::min(params.num_temp_bins, 20);
+                        uint64_t num_temps = std::min(params.num_temp_bins, static_cast<uint64_t>(20));
                         double log_temp_min = std::log(params.temp_min);
                         double log_temp_max = std::log(params.temp_max);
-                        double log_temp_step = (log_temp_max - log_temp_min) / std::max(1, num_temps - 1);
+                        double log_temp_step = (log_temp_max - log_temp_min) / std::max(1, static_cast<int>(num_temps - 1));
 
-                        for (int i = 0; i < num_temps; i++) {
+                        for (uint64_t i = 0; i < num_temps; i++) {
                             double T = std::exp(log_temp_min + i * log_temp_step);
                             double beta = 1.0 / T;
                                 // Compute thermal expectation
@@ -980,7 +980,7 @@ void process_thermal_correlations(
 template<typename OperatorType = Operator>
 OperatorType* create_operator(const SystemConfig& config) {
     if (config.use_fixed_sz) {
-        int n_up = (config.n_up >= 0) ? config.n_up : config.num_sites / 2;
+        uint64_t n_up = (config.n_up >= 0) ? config.n_up : config.num_sites / 2;
         return new FixedSzOperator(config.num_sites, config.spin_length, n_up);
     } else {
         return new OperatorType(config.num_sites, config.spin_length);
@@ -993,7 +993,7 @@ OperatorType* create_operator(const SystemConfig& config) {
 Operator load_hamiltonian_from_files(
     const std::string& interaction_file,
     const std::string& single_site_file,
-    int num_sites,
+    uint64_t num_sites,
     float spin_length,
     DiagonalizationMethod method,
     HamiltonianFileFormat format
@@ -1034,7 +1034,7 @@ Operator load_hamiltonian_from_files(
 std::function<void(const Complex*, Complex*, int)> create_hamiltonian_apply_function(
     Operator& hamiltonian
 ) {
-    return [&hamiltonian](const Complex* in, Complex* out, int n) {
+    return [&hamiltonian](const Complex* in, Complex* out, uint64_t n) {
         std::vector<Complex> in_vec(in, in + n);
         std::vector<Complex> out_vec = hamiltonian.apply(in_vec);
         std::copy(out_vec.begin(), out_vec.end(), out);
@@ -1046,7 +1046,7 @@ std::function<void(const Complex*, Complex*, int)> create_hamiltonian_apply_func
  */
 EDResults diagonalize_symmetry_block(
     Eigen::SparseMatrix<Complex>& block_matrix,
-    int block_dim,
+    uint64_t block_dim,
     DiagonalizationMethod method,
     const EDParameters& params,
     bool is_target_block,
@@ -1076,16 +1076,16 @@ EDResults diagonalize_symmetry_block(
             // Convert Eigen sparse matrix (which may be column-major) to
             // row-major CSR arrays expected by the GPU upload path.
             try {
-                int N = block_dim;
-                int nnz = static_cast<int>(block_matrix.nonZeros());
+                uint64_t N = block_dim;
+                uint64_t nnz = static_cast<int>(block_matrix.nonZeros());
 
                 std::vector<std::vector<std::pair<int, std::complex<double>>>> rows(N);
                 rows.assign(N, {});
 
-                for (int k = 0; k < block_matrix.outerSize(); ++k) {
+                for (uint64_t k = 0; k < block_matrix.outerSize(); ++k) {
                     for (Eigen::SparseMatrix<Complex>::InnerIterator it(block_matrix, k); it; ++it) {
-                        int r = it.row();
-                        int c = it.col();
+                        uint64_t r = it.row();
+                        uint64_t c = it.col();
                         std::complex<double> v = it.value();
                         if (r < 0 || r >= N || c < 0 || c >= N) continue;
                         rows[r].emplace_back(c, v);
@@ -1096,8 +1096,8 @@ EDResults diagonalize_symmetry_block(
                 std::vector<int> col_ind; col_ind.reserve(nnz);
                 std::vector<std::complex<double>> values; values.reserve(nnz);
 
-                int counter = 0;
-                for (int i = 0; i < N; ++i) {
+                uint64_t counter = 0;
+                for (uint64_t i = 0; i < N; ++i) {
                     row_ptr[i] = counter;
                     // Optionally, keep columns sorted for cuSPARSE efficiency
                     auto &row = rows[i];
@@ -1209,7 +1209,7 @@ EDResults diagonalize_symmetry_block(
 
     // Define matrix-vector product for this block
     std::function<void(const Complex*, Complex*, int)> apply_block =
-        [block_matrix](const Complex* in, Complex* out, int n) {
+        [block_matrix](const Complex* in, Complex* out, uint64_t n) {
             if (n != block_matrix.rows()) {
                 throw std::invalid_argument("Block apply: dimension mismatch");
             }
@@ -1237,10 +1237,10 @@ void transform_and_save_tpq_states(
     const std::string& main_output_dir,
     Operator& hamiltonian,
     const std::string& directory,
-    int block_dim,
-    int block_start_dim,
-    int block_idx,
-    int num_sites
+    uint64_t block_dim,
+    uint64_t block_start_dim,
+    uint64_t block_idx,
+    uint64_t num_sites
 ) {
     std::cout << "Transforming TPQ states for block " << block_idx << std::endl;
     
@@ -1308,7 +1308,7 @@ void transform_and_save_tpq_states(
         
         // Transform to full Hilbert space
         ComplexVector full_tpq_state(1ULL << num_sites, Complex(0.0, 0.0));
-        for (int i = 0; i < block_dim; ++i) {
+        for (uint64_t i = 0; i < block_dim; ++i) {
             std::vector<Complex> basis_vector = hamiltonian.read_sym_basis(i + block_start_dim, directory);
             full_tpq_state += basis_vector * block_tpq_state[i];
         }
@@ -1338,10 +1338,10 @@ void transform_and_save_eigenvectors(
     Operator& hamiltonian,
     const std::string& directory,
     const std::vector<double>& eigenvalues,
-    int block_dim,
-    int block_start_dim,
-    int block_idx,
-    int num_sites
+    uint64_t block_dim,
+    uint64_t block_start_dim,
+    uint64_t block_idx,
+    uint64_t num_sites
 ) {
     std::cout << "Processing eigenvectors for block " << block_idx << std::endl;
     
@@ -1357,7 +1357,7 @@ void transform_and_save_eigenvectors(
         }
         
         std::string line;
-        int num_entries = 0;
+        uint64_t num_entries = 0;
         while (std::getline(eigen_file, line) && num_entries < block_dim) {
             if (line.empty()) continue;
             std::istringstream iss(line);
@@ -1419,7 +1419,7 @@ GroundStateSectorInfo find_ground_state_sector(
     info.target_block = 0;
     
     for (size_t block_idx = 0; block_idx < block_sizes.size(); ++block_idx) {
-        int block_dim = block_sizes[block_idx];
+        uint64_t block_dim = block_sizes[block_idx];
         std::cout << "Scanning block " << block_idx + 1 << "/" << block_sizes.size() 
                   << " (dimension: " << block_dim << ")" << std::endl;
         
@@ -1429,7 +1429,7 @@ GroundStateSectorInfo find_ground_state_sector(
         
         // Quick Lanczos scan
         EDParameters scan_params = params;
-        scan_params.num_eigenvalues = std::min(10, block_dim);
+        scan_params.num_eigenvalues = std::min(static_cast<uint64_t>(10), block_dim);
         scan_params.max_iterations = scan_params.num_eigenvalues * 4 + 20;
         scan_params.compute_eigenvectors = false;
         scan_params.calc_observables = false;
@@ -1515,9 +1515,9 @@ void setup_symmetry_basis(
 inline EDResults exact_diagonalization_fixed_sz(
     const std::string& interaction_file,
     const std::string& single_site_file,
-    int num_sites,
+    uint64_t num_sites,
     float spin_length,
-    int n_up,
+    uint64_t n_up,
     DiagonalizationMethod method,
     const EDParameters& params
 ) {
@@ -1543,8 +1543,8 @@ inline EDResults exact_diagonalization_fixed_sz(
     }
     
     // Get dimension of fixed Sz sector
-    int fixed_sz_dim = hamiltonian.getFixedSzDim();
-    int full_dim = 1 << num_sites;
+    uint64_t fixed_sz_dim = hamiltonian.getFixedSzDim();
+    uint64_t full_dim = 1 << num_sites;
     
     std::cout << "Hilbert space dimension:" << std::endl;
     std::cout << "  Full space: " << full_dim << std::endl;
@@ -1557,7 +1557,7 @@ inline EDResults exact_diagonalization_fixed_sz(
     }
     
     // Create apply function
-    auto apply_hamiltonian = [&hamiltonian, fixed_sz_dim](const Complex* in, Complex* out, int n) {
+    auto apply_hamiltonian = [&hamiltonian, fixed_sz_dim](const Complex* in, Complex* out, uint64_t n) {
         if (n != fixed_sz_dim) {
             throw std::runtime_error("Dimension mismatch in fixed Sz apply");
         }
@@ -1618,7 +1618,7 @@ EDResults exact_diagonalization_from_files(
         GPUEDWrapper::printGPUInfo();
         
         EDResults results;
-        int hilbert_space_dim = static_cast<int>(1ULL << params.num_sites);
+        uint64_t hilbert_space_dim = static_cast<int>(1ULL << params.num_sites);
         
         if (method == DiagonalizationMethod::LANCZOS_GPU) {
             // Check if files exist
@@ -1787,7 +1787,7 @@ EDResults exact_diagonalization_from_files(
     );
     
     // Calculate Hilbert space dimension
-    int hilbert_space_dim = static_cast<int>(1ULL << params.num_sites);
+    uint64_t hilbert_space_dim = static_cast<int>(1ULL << params.num_sites);
     std::cerr << "[DEBUG] hilbert_space_dim=" << hilbert_space_dim << std::endl;
     
     // Create Hamiltonian apply function
@@ -1876,7 +1876,7 @@ EDResults exact_diagonalization_from_directory_symmetrized(
         automorphism_finder_path += "/automorphism_finder.py";
         std::string cmd = "python " + automorphism_finder_path + " --data_dir=\"" + directory + "\"";
         std::cout << "Running automorphism finder: " << cmd << std::endl;
-        int result = system(cmd.c_str());
+        uint64_t result = system(cmd.c_str());
         if (result != 0) {
             std::cerr << "Warning: Automorphism finder returned non-zero code: " << result << std::endl;
         }
@@ -1927,15 +1927,15 @@ EDResults exact_diagonalization_from_directory_symmetrized(
     // ========== Step 5: Diagonalize Each Block ==========
     struct EigenInfo {
         double value;
-        int block_idx;
-        int eigen_idx;
+        uint64_t block_idx;
+        uint64_t eigen_idx;
         bool operator<(const EigenInfo& other) const { return value < other.value; }
     };
     std::vector<EigenInfo> all_eigen_info;
     
-    int block_start_dim = 0;
+    uint64_t block_start_dim = 0;
     for (size_t block_idx = 0; block_idx < block_sizes.size(); ++block_idx) {
-        int block_dim = block_sizes[block_idx];
+        uint64_t block_dim = block_sizes[block_idx];
         std::cout << "Diagonalizing block " << block_idx + 1 << "/" << block_sizes.size() 
                   << " (dimension: " << block_dim << ")" << std::endl;
         

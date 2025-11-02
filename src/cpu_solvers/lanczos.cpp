@@ -44,7 +44,7 @@ ComplexVector generateOrthogonalVector(int N, const std::vector<ComplexVector>& 
 
 // Helper function to refine a single eigenvector with CG
 void refine_eigenvector_with_cg(std::function<void(const Complex*, Complex*, int)> H,
-                               ComplexVector& v, double& lambda, int N, double tol) {
+                               ComplexVector& v, double& lambda, uint64_t N, double tol) {
     // Normalize initial vector
     double norm = cblas_dznrm2(N, v.data(), 1);
     Complex scale = Complex(1.0/norm, 0.0);
@@ -64,7 +64,7 @@ void refine_eigenvector_with_cg(std::function<void(const Complex*, Complex*, int
     std::copy(r.begin(), r.end(), p.begin());
     
     // CG iteration
-    const int max_cg_iter = 50;
+    const uint64_t max_cg_iter = 50;
     const double cg_tol = tol * 0.1;
     double res_norm = cblas_dznrm2(N, r.data(), 1);
     
@@ -111,8 +111,8 @@ void refine_eigenvector_with_cg(std::function<void(const Complex*, Complex*, int
 
 // Helper function to refine a set of degenerate eigenvectors
 void refine_degenerate_eigenvectors(std::function<void(const Complex*, Complex*, int)> H,
-                                  std::vector<ComplexVector>& vectors, double lambda, int N, double tol) {
-    const int block_size = vectors.size();
+                                  std::vector<ComplexVector>& vectors, double lambda, uint64_t N, double tol) {
+    const uint64_t block_size = vectors.size();
     
     // Make sure the initial set is orthogonal
     for (int i = 0; i < block_size; i++) {
@@ -172,7 +172,7 @@ void refine_degenerate_eigenvectors(std::function<void(const Complex*, Complex*,
             }
         }
         
-        int info = LAPACKE_zheev(LAPACK_COL_MAJOR, 'V', 'U', block_size,
+        uint64_t info = LAPACKE_zheev(LAPACK_COL_MAJOR, 'V', 'U', block_size,
                                reinterpret_cast<lapack_complex_double*>(evecs.data()),
                                block_size, evals.data());
         
@@ -216,7 +216,7 @@ void refine_degenerate_eigenvectors(std::function<void(const Complex*, Complex*,
 }
 
 
-ComplexVector read_basis_vector(const std::string& temp_dir, int index, int N) {
+ComplexVector read_basis_vector(const std::string& temp_dir, uint64_t index, uint64_t N) {
     ComplexVector vec(N);
     std::string filename = temp_dir + "/basis_" + std::to_string(index) + ".dat";
     std::ifstream infile(filename, std::ios::binary);
@@ -229,7 +229,7 @@ ComplexVector read_basis_vector(const std::string& temp_dir, int index, int N) {
 }
 
 // Helper function to write a basis vector to file
-bool write_basis_vector(const std::string& temp_dir, int index, const ComplexVector& vec, int N) {
+bool write_basis_vector(const std::string& temp_dir, uint64_t index, const ComplexVector& vec, uint64_t N) {
     std::string filename = temp_dir + "/basis_" + std::to_string(index) + ".dat";
     std::ofstream outfile(filename, std::ios::binary);
     if (!outfile) {
@@ -243,11 +243,11 @@ bool write_basis_vector(const std::string& temp_dir, int index, const ComplexVec
 
 // Helper function to solve tridiagonal eigenvalue problem
 int solve_tridiagonal_matrix(const std::vector<double>& alpha, const std::vector<double>& beta, 
-                            int m, int exct, std::vector<double>& eigenvalues, 
+                            uint64_t m, uint64_t exct, std::vector<double>& eigenvalues, 
                             const std::string& temp_dir, const std::string& evec_dir, 
-                            bool eigenvectors, int N) {
+                            bool eigenvectors, uint64_t N) {
     // Save only the first exct eigenvalues, or all of them if m < exct
-    int n_eigenvalues = std::min(exct, m);
+    uint64_t n_eigenvalues = std::min(exct, m);
     
     // Allocate arrays for LAPACKE
     std::vector<double> diag = alpha;    // Copy of diagonal elements
@@ -257,7 +257,7 @@ int solve_tridiagonal_matrix(const std::vector<double>& alpha, const std::vector
         offdiag[i] = beta[i+1];
     }
     
-    int info;
+    uint64_t info;
     
     if (eigenvectors) {
         // Use dstevd for all eigenvectors at once - simpler and more reliable
@@ -411,7 +411,7 @@ int solve_tridiagonal_matrix(const std::vector<double>& alpha, const std::vector
     return info;
 }
 
-void lanczos_no_ortho(std::function<void(const Complex*, Complex*, int)> H, int N, int max_iter, int exct, 
+void lanczos_no_ortho(std::function<void(const Complex*, Complex*, int)> H, uint64_t N, uint64_t max_iter, uint64_t exct, 
              double tol, std::vector<double>& eigenvalues, std::string dir,
              bool eigenvectors) {
     
@@ -507,7 +507,7 @@ void lanczos_no_ortho(std::function<void(const Complex*, Complex*, int)> H, int 
     }
     
     // Construct and solve tridiagonal matrix
-    int m = alpha.size();
+    uint64_t m = alpha.size();
     
     std::cout << "Lanczos: Constructing tridiagonal matrix" << std::endl;
     std::cout << "Lanczos: Solving tridiagonal matrix" << std::endl;
@@ -518,7 +518,7 @@ void lanczos_no_ortho(std::function<void(const Complex*, Complex*, int)> H, int 
     system(cmd_mkdir.c_str());
 
     // Solve the tridiagonal eigenvalue problem
-    int info = solve_tridiagonal_matrix(alpha, beta, m, exct, eigenvalues, temp_dir, evec_dir, eigenvectors, N);
+    uint64_t info = solve_tridiagonal_matrix(alpha, beta, m, exct, eigenvalues, temp_dir, evec_dir, eigenvectors, N);
     
     if (info != 0) {
         std::cerr << "Tridiagonal eigenvalue solver failed with error code " << info << std::endl;
@@ -532,7 +532,7 @@ void lanczos_no_ortho(std::function<void(const Complex*, Complex*, int)> H, int 
 }
 
 // Lanczos algorithm with selective reorthogonalization
-void lanczos_selective_reorth(std::function<void(const Complex*, Complex*, int)> H, int N, int max_iter, int exct, 
+void lanczos_selective_reorth(std::function<void(const Complex*, Complex*, int)> H, uint64_t N, uint64_t max_iter, uint64_t exct, 
              double tol, std::vector<double>& eigenvalues, std::string dir,
              bool eigenvectors) {
     
@@ -580,11 +580,11 @@ void lanczos_selective_reorth(std::function<void(const Complex*, Complex*, int)>
     
     // Parameters for selective reorthogonalization
     const double orth_threshold = 1e-5;  // Threshold for selective reorthogonalization
-    const int periodic_full_reorth = max_iter/10; // Periodically do full reorthogonalization
+    const uint64_t periodic_full_reorth = max_iter/10; // Periodically do full reorthogonalization
     
     // Storage for tracking loss of orthogonality
     std::vector<ComplexVector> recent_vectors; // Store most recent vectors in memory
-    const int max_recent = 5;                  // Maximum number of recent vectors to keep in memory
+    const uint64_t max_recent = 5;                  // Maximum number of recent vectors to keep in memory
     
     // Lanczos iteration
     for (int j = 0; j < max_iter; j++) {
@@ -738,7 +738,7 @@ void lanczos_selective_reorth(std::function<void(const Complex*, Complex*, int)>
     }
     
     // Construct and solve tridiagonal matrix
-    int m = alpha.size();
+    uint64_t m = alpha.size();
     
     std::cout << "Lanczos: Constructing tridiagonal matrix" << std::endl;
     std::cout << "Lanczos: Solving tridiagonal matrix" << std::endl;
@@ -749,7 +749,7 @@ void lanczos_selective_reorth(std::function<void(const Complex*, Complex*, int)>
     system(cmd_mkdir.c_str());
 
     // Solve the tridiagonal eigenvalue problem
-    int info = solve_tridiagonal_matrix(alpha, beta, m, exct, eigenvalues, temp_dir, evec_dir, eigenvectors, N);
+    uint64_t info = solve_tridiagonal_matrix(alpha, beta, m, exct, eigenvalues, temp_dir, evec_dir, eigenvectors, N);
     
     if (info != 0) {
         std::cerr << "Tridiagonal eigenvalue solver failed with error code " << info << std::endl;
@@ -763,7 +763,7 @@ void lanczos_selective_reorth(std::function<void(const Complex*, Complex*, int)>
 }
 
 // Lanczos algorithm implementation with basis vectors stored on disk
-void lanczos(std::function<void(const Complex*, Complex*, int)> H, int N, int max_iter, int exct, 
+void lanczos(std::function<void(const Complex*, Complex*, int)> H, uint64_t N, uint64_t max_iter, uint64_t exct, 
              double tol, std::vector<double>& eigenvalues, std::string dir,
              bool eigenvectors) {
 
@@ -871,7 +871,7 @@ void lanczos(std::function<void(const Complex*, Complex*, int)> H, int N, int ma
     }
     
     // Construct and solve tridiagonal matrix
-    int m = alpha.size();
+    uint64_t m = alpha.size();
     
     std::cout << "Lanczos: Constructing tridiagonal matrix" << std::endl;
     std::cout << "Lanczos: Solving tridiagonal matrix" << std::endl;
@@ -882,7 +882,7 @@ void lanczos(std::function<void(const Complex*, Complex*, int)> H, int N, int ma
     system(cmd_mkdir.c_str());
 
     // Solve the tridiagonal eigenvalue problem
-    int info = solve_tridiagonal_matrix(alpha, beta, m, exct, eigenvalues, temp_dir, evec_dir, eigenvectors, N);
+    uint64_t info = solve_tridiagonal_matrix(alpha, beta, m, exct, eigenvalues, temp_dir, evec_dir, eigenvectors, N);
     
     if (info != 0) {
         std::cerr << "Tridiagonal eigenvalue solver failed with error code " << info << std::endl;
@@ -896,8 +896,8 @@ void lanczos(std::function<void(const Complex*, Complex*, int)> H, int N, int ma
 }
 
 // Block Lanczos algorithm for finding eigenvalues with degeneracies
-void block_lanczos(std::function<void(const Complex*, Complex*, int)> H, int N, int max_iter, 
-                   int num_eigs, int block_size, double tol, std::vector<double>& eigenvalues, 
+void block_lanczos(std::function<void(const Complex*, Complex*, int)> H, uint64_t N, uint64_t max_iter, 
+                   uint64_t num_eigs, uint64_t block_size, double tol, std::vector<double>& eigenvalues, 
                    std::string dir, bool compute_eigenvectors) {
     std::cout << "Starting Block Lanczos algorithm" << std::endl;
     eigenvalues.clear();
@@ -908,9 +908,9 @@ void block_lanczos(std::function<void(const Complex*, Complex*, int)> H, int N, 
         return;
     }
 
-    const int b = (block_size <= 0) ? std::min(4, N) : std::min(block_size, N);
-    const int target_eigs = std::max(1, std::min(num_eigs > 0 ? num_eigs : 1, N));
-    const int max_blocks = (max_iter <= 0) ? (N + b - 1) / b : std::min(max_iter, (N + b - 1) / b);
+    const uint64_t b = (block_size <= 0) ? std::min(static_cast<uint64_t>(4), N) : std::min(block_size, N);
+    const uint64_t target_eigs = std::max(static_cast<uint64_t>(1), std::min(num_eigs > 0 ? num_eigs : static_cast<uint64_t>(1), N));
+    const uint64_t max_blocks = (max_iter <= 0) ? (N + b - 1) / b : std::min(max_iter, (N + b - 1) / b);
     const double convergence_tol = (tol <= 0.0) ? 1e-12 : tol;
     const double breakdown_tol = 1e-12;
 
@@ -933,7 +933,7 @@ void block_lanczos(std::function<void(const Complex*, Complex*, int)> H, int N, 
 
     // QR factorization to orthonormalize initial block
     std::vector<Complex> tau(b);
-    int info = LAPACKE_zgeqrf(LAPACK_COL_MAJOR, N, b,
+    uint64_t info = LAPACKE_zgeqrf(LAPACK_COL_MAJOR, N, b,
                               reinterpret_cast<lapack_complex_double*>(V_curr.data()), N,
                               reinterpret_cast<lapack_complex_double*>(tau.data()));
     if (info != 0) {
@@ -970,17 +970,17 @@ void block_lanczos(std::function<void(const Complex*, Complex*, int)> H, int N, 
     std::vector<double> residuals(target_eigs, 1e12);
     
     ComplexVector column_buffer(N);
-    int basis_index = 0;
+    uint64_t basis_index = 0;
 
     // ===== Lambda to build block-tridiagonal projected matrix =====
-    auto build_projected_matrix = [&](std::vector<Complex>& matrix, int num_blocks) {
-        const int total_dim = num_blocks * b;
+    auto build_projected_matrix = [&](std::vector<Complex>& matrix, uint64_t num_blocks) {
+        const uint64_t total_dim = num_blocks * b;
         matrix.assign(total_dim * total_dim, Complex(0.0, 0.0));
 
         // Fill diagonal blocks (alpha)
         for (int blk = 0; blk < num_blocks; ++blk) {
             const auto& A = alpha_blocks[blk];
-            const int offset = blk * b;
+            const uint64_t offset = blk * b;
             for (int col = 0; col < b; ++col) {
                 for (int row = 0; row < b; ++row) {
                     matrix[(offset + row) + (offset + col) * total_dim] = A[row + col * b];
@@ -991,7 +991,7 @@ void block_lanczos(std::function<void(const Complex*, Complex*, int)> H, int N, 
         // Fill off-diagonal blocks (beta and beta†)
         for (int blk = 0; blk < num_blocks - 1; ++blk) {
             const auto& B = beta_blocks[blk];
-            const int offset = blk * b;
+            const uint64_t offset = blk * b;
             for (int col = 0; col < b; ++col) {
                 for (int row = 0; row < b; ++row) {
                     // Lower block: B
@@ -1084,7 +1084,7 @@ void block_lanczos(std::function<void(const Complex*, Complex*, int)> H, int N, 
         // Extract upper triangular R factor (B_next)
         std::fill(B_next.begin(), B_next.end(), Complex(0.0, 0.0));
         for (int col = 0; col < b; ++col) {
-            for (int row = 0; row <= std::min(col, N - 1); ++row) {
+            for (int row = 0; row <= std::min(col, static_cast<int>(N - 1)); ++row) {
                 B_next[row + col * b] = W[row + col * N];
             }
         }
@@ -1105,20 +1105,20 @@ void block_lanczos(std::function<void(const Complex*, Complex*, int)> H, int N, 
         }
 
         // ===== Check convergence periodically =====
-        const int total_blocks = static_cast<int>(alpha_blocks.size());
-        const int total_dim = total_blocks * b;
+        const uint64_t total_blocks = static_cast<int>(alpha_blocks.size());
+        const uint64_t total_dim = total_blocks * b;
         
         if (total_dim >= target_eigs) {
             std::vector<Complex> T_matrix;
             build_projected_matrix(T_matrix, total_blocks);
 
             std::vector<double> evals(total_dim);
-            const int info_eig = LAPACKE_zheevd(LAPACK_COL_MAJOR, 'V', 'U', total_dim,
+            const uint64_t info_eig = LAPACKE_zheevd(LAPACK_COL_MAJOR, 'V', 'U', total_dim,
                                                 reinterpret_cast<lapack_complex_double*>(T_matrix.data()),
                                                 total_dim, evals.data());
             
             if (info_eig == 0) {
-                const int available = std::min(target_eigs, total_dim);
+                const uint64_t available = std::min(target_eigs, total_dim);
                 const bool have_next_block = (min_diag > breakdown_tol) && (iter + 1 < max_blocks);
                 
                 // Estimate residuals: ||B_next * y_last_block||
@@ -1135,7 +1135,7 @@ void block_lanczos(std::function<void(const Complex*, Complex*, int)> H, int N, 
                 }
 
                 // Check if enough eigenvalues have converged
-                int converged_count = 0;
+                uint64_t converged_count = 0;
                 for (int k = 0; k < available; ++k) {
                     if (residuals[k] <= convergence_tol) {
                         ++converged_count;
@@ -1164,14 +1164,14 @@ void block_lanczos(std::function<void(const Complex*, Complex*, int)> H, int N, 
     }
 
     // ===== Final eigensolve of projected problem =====
-    const int total_blocks = static_cast<int>(alpha_blocks.size());
+    const uint64_t total_blocks = static_cast<int>(alpha_blocks.size());
     if (total_blocks == 0) {
         std::cerr << "Block Lanczos: no Krylov basis generated" << std::endl;
         system(("rm -rf " + temp_dir).c_str());
         return;
     }
 
-    const int total_dim = total_blocks * b;
+    const uint64_t total_dim = total_blocks * b;
     std::vector<Complex> T_matrix;
     build_projected_matrix(T_matrix, total_blocks);
 
@@ -1185,7 +1185,7 @@ void block_lanczos(std::function<void(const Complex*, Complex*, int)> H, int N, 
         return;
     }
 
-    const int output_eigs = std::min(target_eigs, total_dim);
+    const uint64_t output_eigs = std::min(target_eigs, total_dim);
     eigenvalues.assign(evals.begin(), evals.begin() + output_eigs);
 
     // ===== Reconstruct eigenvectors if requested =====
@@ -1199,7 +1199,7 @@ void block_lanczos(std::function<void(const Complex*, Complex*, int)> H, int N, 
         // Kahan compensated summation for numerical stability
         for (int block_idx = 0; block_idx < total_blocks; ++block_idx) {
             for (int col = 0; col < b; ++col) {
-                const int basis_id = block_idx * b + col;
+                const uint64_t basis_id = block_idx * b + col;
                 if (basis_id >= basis_index) break;
                 
                 basis_vector = read_basis_vector(temp_dir, basis_id, N);
@@ -1281,8 +1281,8 @@ void block_lanczos(std::function<void(const Complex*, Complex*, int)> H, int N, 
     std::cout << "Block Lanczos: completed successfully with " << output_eigs << " eigenvalues" << std::endl;
 }
 // Chebyshev Filtered Lanczos algorithm with automatic spectrum range estimation
-void chebyshev_filtered_lanczos(std::function<void(const Complex*, Complex*, int)> H, int N, 
-                              int max_iter, int num_eigs,
+void chebyshev_filtered_lanczos(std::function<void(const Complex*, Complex*, int)> H, uint64_t N, 
+                              uint64_t max_iter, uint64_t num_eigs,
                               double tol, std::vector<double>& eigenvalues, std::string dir,
                               bool compute_eigenvectors, double target_lower, double target_upper){
     
@@ -1303,7 +1303,7 @@ void chebyshev_filtered_lanczos(std::function<void(const Complex*, Complex*, int
     if (target_lower == 0.0 && target_upper == 0.0) {
         std::cout << "Estimating full spectral bounds using preliminary Lanczos..." << std::endl;
         std::vector<double> bounds_estimate;
-        lanczos_no_ortho(H, N, std::min(100, N/10), 20, 1e-6, bounds_estimate, "", false);
+        lanczos_no_ortho(H, N, std::min(static_cast<uint64_t>(100), N/10), 20, 1e-6, bounds_estimate, "", false);
         
         if (bounds_estimate.size() < 2) {
             std::cerr << "Error: Failed to estimate spectral bounds" << std::endl;
@@ -1329,7 +1329,7 @@ void chebyshev_filtered_lanczos(std::function<void(const Complex*, Complex*, int
     } else {
         // Use provided bounds, but expand for better filter stability
         std::vector<double> bounds_estimate;
-        lanczos_no_ortho(H, N, std::min(50, N/20), 10, 1e-6, bounds_estimate, "", false);
+        lanczos_no_ortho(H, N, std::min(static_cast<uint64_t>(50), N/20), 10, 1e-6, bounds_estimate, "", false);
         
         if (bounds_estimate.size() >= 2) {
             lambda_min = bounds_estimate.front();
@@ -1361,9 +1361,9 @@ void chebyshev_filtered_lanczos(std::function<void(const Complex*, Complex*, int
     const double target_halfwidth_norm = (target_upper_norm - target_lower_norm) / 2.0;
     
     // Chebyshev filter parameters
-    const int filter_degree = std::max(20, std::min(100, N/100));  // Adaptive degree
+    const uint64_t filter_degree = std::max(static_cast<uint64_t>(20), std::min(static_cast<uint64_t>(100), N/100));  // Adaptive degree
     // Use only one filter application to avoid over-filtering and maintain robustness
-    const int num_filter_applications = 1;
+    const uint64_t num_filter_applications = 1;
     
     std::cout << "Chebyshev filter degree: " << filter_degree << std::endl;
     std::cout << "Filter applications: " << num_filter_applications << std::endl;
@@ -1379,7 +1379,7 @@ void chebyshev_filtered_lanczos(std::function<void(const Complex*, Complex*, int
     // Compute Chebyshev coefficients for filter function
     // Using a smooth window function centered at target interval
     std::vector<double> cheb_coeff(filter_degree + 1, 0.0);
-    const int quad_points = 200;
+    const uint64_t quad_points = 200;
     
     for (int k = 0; k <= filter_degree; k++) {
         for (int j = 0; j < quad_points; j++) {
@@ -1463,7 +1463,7 @@ void chebyshev_filtered_lanczos(std::function<void(const Complex*, Complex*, int
     std::uniform_real_distribution<double> dist(-1.0, 1.0);
     
     // Generate multiple random starting vectors and filter them
-    const int num_starts = std::min(3, std::max(1, num_eigs / 10));
+    const uint64_t num_starts = std::min(static_cast<uint64_t>(3), std::max(static_cast<uint64_t>(1), num_eigs / 10));
     std::vector<ComplexVector> filtered_starts;
     
     for (int start_idx = 0; start_idx < num_starts; start_idx++) {
@@ -1534,7 +1534,7 @@ void chebyshev_filtered_lanczos(std::function<void(const Complex*, Complex*, int
     beta.push_back(0.0);
     
     max_iter = std::min(N, max_iter);
-    const int effective_max_iter = std::min(max_iter, std::max(2 * num_eigs, 100));
+    const uint64_t effective_max_iter = std::min(max_iter, std::max(2 * num_eigs, static_cast<uint64_t>(100)));
     
     for (int j = 0; j < effective_max_iter; j++) {
         if ((j + 1) % 10 == 0 || j == 0) {
@@ -1602,12 +1602,12 @@ void chebyshev_filtered_lanczos(std::function<void(const Complex*, Complex*, int
                 offdiag[i] = beta[i + 1];
             }
             
-            int info = LAPACKE_dstevd(LAPACK_COL_MAJOR, 'N', diag.size(),
+            uint64_t info = LAPACKE_dstevd(LAPACK_COL_MAJOR, 'N', diag.size(),
                                      diag.data(), offdiag.data(), nullptr, diag.size());
             
             if (info == 0) {
                 // Count eigenvalues in target range
-                int in_range = 0;
+                uint64_t in_range = 0;
                 for (double eval : diag) {
                     if (eval >= target_lower && eval <= target_upper) {
                         in_range++;
@@ -1625,11 +1625,11 @@ void chebyshev_filtered_lanczos(std::function<void(const Complex*, Complex*, int
     }
     
     // ===== Step 6: Solve tridiagonal eigenvalue problem =====
-    int m = alpha.size();
+    uint64_t m = alpha.size();
     std::cout << "Solving tridiagonal eigenvalue problem of size " << m << std::endl;
     
     std::vector<double> eigenvalues_temp;
-    int info = solve_tridiagonal_matrix(alpha, beta, m, N, eigenvalues_temp, 
+    uint64_t info = solve_tridiagonal_matrix(alpha, beta, m, N, eigenvalues_temp, 
                                        temp_dir, evec_dir, compute_eigenvectors, N);
     
     if (info != 0) {
@@ -1668,8 +1668,8 @@ void chebyshev_filtered_lanczos(std::function<void(const Complex*, Complex*, int
 
 // Shift-Invert Lanczos algorithm - state-of-the-art implementation
 // Finds eigenvalues near a target shift σ by solving (H - σI)^{-1} eigenproblem
-void shift_invert_lanczos(std::function<void(const Complex*, Complex*, int)> H, int N, 
-                         int max_iter, int num_eigs, double sigma, double tol, 
+void shift_invert_lanczos(std::function<void(const Complex*, Complex*, int)> H, uint64_t N, 
+                         uint64_t max_iter, uint64_t num_eigs, double sigma, double tol, 
                          std::vector<double>& eigenvalues, std::string dir,
                          bool compute_eigenvectors) {
     
@@ -1684,7 +1684,7 @@ void shift_invert_lanczos(std::function<void(const Complex*, Complex*, int)> H, 
     system(("mkdir -p " + result_dir).c_str());
     
     // Parameters for iterative solver (CG/GMRES)
-    const int max_cg_iter = 100;
+    const uint64_t max_cg_iter = 100;
     const double cg_tol = tol * 0.01; // Tighter tolerance for inner solver
     
     // Initialize random starting vector
@@ -1717,7 +1717,7 @@ void shift_invert_lanczos(std::function<void(const Complex*, Complex*, int)> H, 
     ComplexVector r(N), p(N), Ap(N), z(N);
     
     // Define shifted operator (H - σI)
-    auto H_shifted = [&H, sigma, N](const Complex* v, Complex* result, int size) {
+    auto H_shifted = [&H, sigma, N](const Complex* v, Complex* result, uint64_t size) {
         H(v, result, size);
         Complex neg_sigma(-sigma, 0.0);
         cblas_zaxpy(size, &neg_sigma, v, 1, result, 1);
@@ -1767,7 +1767,7 @@ void shift_invert_lanczos(std::function<void(const Complex*, Complex*, int)> H, 
         cblas_zdotc_sub(N, r.data(), 1, z.data(), 1, &r_dot_z);
         
         double initial_res_norm = cblas_dznrm2(N, r.data(), 1);
-        int cg_iter = 0;
+        uint64_t cg_iter = 0;
         
         // PCG iteration
         for (cg_iter = 0; cg_iter < max_cg_iter; cg_iter++) {
@@ -1896,7 +1896,7 @@ void shift_invert_lanczos(std::function<void(const Complex*, Complex*, int)> H, 
         // Periodically check convergence of Ritz values
         if ((j + 1) % 10 == 0 || j == max_iter - 1) {
             // Solve the tridiagonal eigenvalue problem
-            int current_size = alpha.size();
+            uint64_t current_size = alpha.size();
             std::vector<double> T_eigenvalues(current_size);
             std::vector<double> diag = alpha;
             std::vector<double> offdiag(current_size - 1);
@@ -1905,12 +1905,12 @@ void shift_invert_lanczos(std::function<void(const Complex*, Complex*, int)> H, 
                 offdiag[i] = beta[i + 1];
             }
             
-            int info = LAPACKE_dstevd(LAPACK_COL_MAJOR, 'N', current_size,
+            uint64_t info = LAPACKE_dstevd(LAPACK_COL_MAJOR, 'N', current_size,
                                      diag.data(), offdiag.data(), nullptr, current_size);
             
             if (info == 0) {
                 // Convert back from shift-inverted spectrum
-                int converged_count = 0;
+                uint64_t converged_count = 0;
                 for (int i = 0; i < std::min(num_eigs, current_size); i++) {
                     double theta = diag[i];  // Eigenvalue of (H - σI)^{-1}
                     double lambda = sigma + 1.0 / theta;  // Original eigenvalue
@@ -1941,7 +1941,7 @@ void shift_invert_lanczos(std::function<void(const Complex*, Complex*, int)> H, 
     std::cout << "  Min PCG iterations: " << *std::min_element(cg_iterations.begin(), cg_iterations.end()) << std::endl;
     
     // Solve final tridiagonal problem
-    int m = alpha.size();
+    uint64_t m = alpha.size();
     std::cout << "\nSolving tridiagonal eigenvalue problem of size " << m << std::endl;
     
     std::vector<double> diag = alpha;
@@ -1953,7 +1953,7 @@ void shift_invert_lanczos(std::function<void(const Complex*, Complex*, int)> H, 
     std::vector<double> T_eigenvalues(m);
     std::vector<double> T_eigenvectors;
     
-    int info;
+    uint64_t info;
     if (compute_eigenvectors) {
         T_eigenvectors.resize(m * m);
         info = LAPACKE_dstevd(LAPACK_COL_MAJOR, 'V', m,
@@ -1989,12 +1989,12 @@ void shift_invert_lanczos(std::function<void(const Complex*, Complex*, int)> H, 
     std::sort(eigenvalue_pairs.begin(), eigenvalue_pairs.end());
     
     // Extract the requested number of eigenvalues
-    int n_extracted = std::min(num_eigs, static_cast<int>(eigenvalue_pairs.size()));
+    uint64_t n_extracted = std::min(num_eigs, static_cast<uint64_t>(eigenvalue_pairs.size()));
     eigenvalues.clear();
     eigenvalues.reserve(n_extracted);
     
     for (int i = 0; i < n_extracted; i++) {
-        int idx = eigenvalue_pairs[i].second;
+        uint64_t idx = eigenvalue_pairs[i].second;
         double theta = diag[idx];
         eigenvalues.push_back(sigma + 1.0 / theta);
     }
@@ -2010,7 +2010,7 @@ void shift_invert_lanczos(std::function<void(const Complex*, Complex*, int)> H, 
         
         #pragma omp parallel for
         for (int i = 0; i < n_extracted; i++) {
-            int idx = eigenvalue_pairs[i].second;
+            uint64_t idx = eigenvalue_pairs[i].second;
             ComplexVector eigenvector(N, Complex(0.0, 0.0));
             
             // Transform from Lanczos basis: v = V * y
@@ -2055,7 +2055,7 @@ void shift_invert_lanczos(std::function<void(const Complex*, Complex*, int)> H, 
 }
 
 // Full diagonalization algorithm optimized for sparse matrices
-void full_diagonalization(std::function<void(const Complex*, Complex*, int)> H, int N, int num_eigs, 
+void full_diagonalization(std::function<void(const Complex*, Complex*, int)> H, uint64_t N, uint64_t num_eigs, 
                        std::vector<double>& eigenvalues, std::string dir,
                        bool compute_eigenvectors) {
     std::cout << "Starting full diagonalization for matrix of dimension " << N << std::endl;
@@ -2069,7 +2069,7 @@ void full_diagonalization(std::function<void(const Complex*, Complex*, int)> H, 
     }
 
     // Detect if matrix is small enough for dense approach or needs sparse optimization
-    const int DENSE_THRESHOLD = 20000;  // Example threshold for dense vs sparse
+    const uint64_t DENSE_THRESHOLD = 20000;  // Example threshold for dense vs sparse
     
     if (N <= DENSE_THRESHOLD) {
         // For smaller matrices, use dense approach with MKL for best performance
@@ -2092,7 +2092,7 @@ void full_diagonalization(std::function<void(const Complex*, Complex*, int)> H, 
         std::cout << "Constructing dense matrix..." << std::endl;
 
         // Construct full matrix from operator function with progress reporting
-        const int chunk_size = std::max(1, N / 100);  // Report progress every 1%
+        const uint64_t chunk_size = std::max(static_cast<uint64_t>(1), N / 100);  // Report progress every 1%
         
         #pragma omp parallel for schedule(dynamic, chunk_size)
         for (int j = 0; j < N; j++) {
@@ -2114,8 +2114,8 @@ void full_diagonalization(std::function<void(const Complex*, Complex*, int)> H, 
                 #pragma omp critical
                 {
                     double percentage = 100.0 * j / N;
-                    int barWidth = 50;
-                    int pos = barWidth * j / N;
+                    uint64_t barWidth = 50;
+                    uint64_t pos = barWidth * j / N;
                     
                     std::cout << "\rProgress: [";
                     for (int k = 0; k < barWidth; ++k) {
@@ -2135,7 +2135,7 @@ void full_diagonalization(std::function<void(const Complex*, Complex*, int)> H, 
         std::vector<Complex> evecs;
         
         // Call LAPACKE to perform eigendecomposition
-        int info;
+        uint64_t info;
         if (compute_eigenvectors) {
             evecs.resize(N*N);
             // Call LAPACKE_zheev to compute eigenvalues and eigenvectors
@@ -2161,7 +2161,7 @@ void full_diagonalization(std::function<void(const Complex*, Complex*, int)> H, 
         std::cout << "Eigenvalue decomposition completed" << std::endl;
 
         // Extract requested number of eigenvalues
-        int actual_num_eigs = std::min(num_eigs, N);
+        uint64_t actual_num_eigs = std::min(num_eigs, N);
         eigenvalues.resize(actual_num_eigs);
         for (int i = 0; i < actual_num_eigs; i++) {
             eigenvalues[i] = evals[i];
@@ -2263,7 +2263,7 @@ void full_diagonalization(std::function<void(const Complex*, Complex*, int)> H, 
             // or implement our own Lanczos on the sparse matrix
             
             // Define matrix-vector operation for the sparse matrix
-            auto sparse_mv = [&sparse_H, N](const Complex* v, Complex* result, int size) {
+            auto sparse_mv = [&sparse_H, N](const Complex* v, Complex* result, uint64_t size) {
                 Eigen::Map<const Eigen::VectorXcd> v_eigen(v, size);
                 Eigen::Map<Eigen::VectorXcd> result_eigen(result, size);
                 result_eigen = sparse_H * v_eigen;
@@ -2271,7 +2271,7 @@ void full_diagonalization(std::function<void(const Complex*, Complex*, int)> H, 
             
             // Use our Lanczos implementation with the sparse matrix operator
             std::vector<double> sparse_eigenvalues;
-            lanczos(sparse_mv, N, std::min(2*num_eigs, 1000), num_eigs, 1e-10, 
+            lanczos(sparse_mv, N, std::min(2*num_eigs, static_cast<uint64_t>(1000)), num_eigs, 1e-10, 
                    sparse_eigenvalues, dir, compute_eigenvectors);
             
             eigenvalues = sparse_eigenvalues;
@@ -2289,7 +2289,7 @@ void full_diagonalization(std::function<void(const Complex*, Complex*, int)> H, 
             }
             
             // Extract eigenvalues
-            int actual_num_eigs = std::min(num_eigs, N);
+            uint64_t actual_num_eigs = std::min(num_eigs, N);
             eigenvalues.resize(actual_num_eigs);
             for (int i = 0; i < actual_num_eigs; i++) {
                 eigenvalues[i] = eigensolver.eigenvalues()(i);
@@ -2342,8 +2342,8 @@ void full_diagonalization(std::function<void(const Complex*, Complex*, int)> H, 
 
 
 // Krylov-Schur algorithm implementation
-void krylov_schur(std::function<void(const Complex*, Complex*, int)> H, int N, int max_iter, 
-                  int num_eigs, double tol, std::vector<double>& eigenvalues, std::string dir,
+void krylov_schur(std::function<void(const Complex*, Complex*, int)> H, uint64_t N, uint64_t max_iter, 
+                  uint64_t num_eigs, double tol, std::vector<double>& eigenvalues, std::string dir,
                   bool compute_eigenvectors) {
     
     std::cout << "Starting Krylov-Schur algorithm for " << num_eigs << " eigenvalues" << std::endl;
@@ -2374,9 +2374,9 @@ void krylov_schur(std::function<void(const Complex*, Complex*, int)> H, int N, i
     cblas_zscal(N, &scale, v_current.data(), 1);
     
     // Krylov-Schur parameters
-    int m = std::min(2*num_eigs + 20, max_iter);  // Maximum Krylov subspace size
-    int k = num_eigs;                              // Number of desired eigenvalues
-    int p = std::min(num_eigs + 5, m - k);        // Number of shifts to apply
+    uint64_t m = std::min(2*num_eigs + 20, max_iter);  // Maximum Krylov subspace size
+    uint64_t k = num_eigs;                              // Number of desired eigenvalues
+    uint64_t p = std::min(num_eigs + 5, m - k);        // Number of shifts to apply
     
     // Store the first basis vector
     write_basis_vector(temp_dir, 0, v_current, N);
@@ -2387,8 +2387,8 @@ void krylov_schur(std::function<void(const Complex*, Complex*, int)> H, int N, i
     // Arnoldi vectors are stored on disk
     ComplexVector w(N);
     
-    int iter = 0;
-    int max_outer_iter = 50;
+    uint64_t iter = 0;
+    uint64_t max_outer_iter = 50;
     bool converged = false;
     
     std::cout << "Krylov-Schur: Starting with subspace size m=" << m << ", seeking k=" << k << " eigenvalues" << std::endl;
@@ -2397,7 +2397,7 @@ void krylov_schur(std::function<void(const Complex*, Complex*, int)> H, int N, i
         std::cout << "Krylov-Schur: Outer iteration " << iter+1 << std::endl;
         
         // Determine starting index for Arnoldi (after restart)
-        int j_start = (iter == 0) ? 0 : k;
+        uint64_t j_start = (iter == 0) ? 0 : k;
         
         // Step 1: Arnoldi iteration to build/extend Krylov subspace
         for (int j = j_start; j < m; j++) {
@@ -2473,7 +2473,7 @@ void krylov_schur(std::function<void(const Complex*, Complex*, int)> H, int N, i
         // Copy H_dense to eigenvectors_m (zheev overwrites input)
         std::copy(H_dense.begin(), H_dense.end(), eigenvectors_m.begin());
         
-        int info = LAPACKE_zheev(LAPACK_COL_MAJOR, 'V', 'U', m,
+        uint64_t info = LAPACKE_zheev(LAPACK_COL_MAJOR, 'V', 'U', m,
                                reinterpret_cast<lapack_complex_double*>(eigenvectors_m.data()),
                                m, eigenvalues_m.data());
         
@@ -2484,7 +2484,7 @@ void krylov_schur(std::function<void(const Complex*, Complex*, int)> H, int N, i
         
         // Step 3: Check convergence
         std::vector<bool> converged_flags(k, false);
-        int num_converged = 0;
+        uint64_t num_converged = 0;
         
         for (int i = 0; i < k; i++) {
             // Compute residual norm for each Ritz pair
@@ -2643,8 +2643,8 @@ void krylov_schur(std::function<void(const Complex*, Complex*, int)> H, int N, i
 }
 
 // Implicitly Restarted Lanczos algorithm implementation
-void implicitly_restarted_lanczos(std::function<void(const Complex*, Complex*, int)> H, int N, 
-                                 int max_iter, int num_eigs, double tol, 
+void implicitly_restarted_lanczos(std::function<void(const Complex*, Complex*, int)> H, uint64_t N, 
+                                 uint64_t max_iter, uint64_t num_eigs, double tol, 
                                  std::vector<double>& eigenvalues, std::string dir,
                                  bool compute_eigenvectors){
     
@@ -2660,10 +2660,10 @@ void implicitly_restarted_lanczos(std::function<void(const Complex*, Complex*, i
     system(("mkdir -p " + evec_dir).c_str());
     
     // ===== Parameters =====
-    const int k = num_eigs;                          // Target number of eigenvalues
-    const int m = std::min(max_iter, N);            // Maximum Krylov subspace dimension
-    const int p = m - k;                            // Number of shifts (unwanted Ritz values)
-    const int max_outer_iter = 100;                 // Maximum restart cycles
+    const uint64_t k = num_eigs;                          // Target number of eigenvalues
+    const uint64_t m = std::min(max_iter, N);            // Maximum Krylov subspace dimension
+    const uint64_t p = m - k;                            // Number of shifts (unwanted Ritz values)
+    const uint64_t max_outer_iter = 100;                 // Maximum restart cycles
     const double breakdown_tol = 1e-14;             // Breakdown tolerance
     const double ritz_tol = tol * 0.1;              // Ritz value convergence tolerance
     
@@ -2689,7 +2689,7 @@ void implicitly_restarted_lanczos(std::function<void(const Complex*, Complex*, i
     // ===== Storage for converged eigenvalues =====
     std::vector<double> converged_eigenvalues;
     std::vector<double> prev_ritz_values;
-    int num_converged = 0;
+    uint64_t num_converged = 0;
     
     // ===== Main IRL restart loop =====
     ComplexVector v_start = v0;
@@ -2708,7 +2708,7 @@ void implicitly_restarted_lanczos(std::function<void(const Complex*, Complex*, i
         // Write initial basis vector
         write_basis_vector(temp_dir, 0, v_current, N);
         
-        int actual_m = m;  // Actual subspace dimension (may be less if breakdown occurs)
+        uint64_t actual_m = m;  // Actual subspace dimension (may be less if breakdown occurs)
         
         for (int j = 0; j < m; ++j) {
             // Apply Hamiltonian: w = H * v_j
@@ -2790,7 +2790,7 @@ void implicitly_restarted_lanczos(std::function<void(const Complex*, Complex*, i
         // Copy diagonal for eigenvalue computation
         std::copy(T_diag.begin(), T_diag.end(), ritz_values.begin());
         
-        int info = LAPACKE_dstevd(LAPACK_COL_MAJOR, 'V', actual_m,
+        uint64_t info = LAPACKE_dstevd(LAPACK_COL_MAJOR, 'V', actual_m,
                                   ritz_values.data(), T_offdiag.data(),
                                   ritz_vectors.data(), actual_m);
         
@@ -2802,7 +2802,7 @@ void implicitly_restarted_lanczos(std::function<void(const Complex*, Complex*, i
         // ===== Phase 3: Compute residuals and check convergence =====
         std::vector<double> residuals(actual_m);
         std::vector<bool> is_converged(actual_m, false);
-        int newly_converged = 0;
+        uint64_t newly_converged = 0;
         
         for (int i = 0; i < actual_m; ++i) {
             // Residual estimate: r_i = |β_m * y_i[m-1]|
@@ -2827,12 +2827,12 @@ void implicitly_restarted_lanczos(std::function<void(const Complex*, Complex*, i
         
         std::cout << "Newly converged Ritz pairs: " << newly_converged << " / " << k << std::endl;
         std::cout << "Smallest Ritz values: ";
-        for (int i = 0; i < std::min(5, actual_m); ++i) {
+        for (int i = 0; i < std::min(static_cast<int>(5), static_cast<int>(actual_m)); ++i) {
             std::cout << ritz_values[i] << " ";
         }
         std::cout << std::endl;
         std::cout << "Residuals: ";
-        for (int i = 0; i < std::min(5, actual_m); ++i) {
+        for (int i = 0; i < std::min(static_cast<int>(5), static_cast<int>(actual_m)); ++i) {
             std::cout << residuals[i] << " ";
         }
         std::cout << std::endl;
@@ -3012,7 +3012,7 @@ void implicitly_restarted_lanczos(std::function<void(const Complex*, Complex*, i
         
         // Return best available approximations
         converged_eigenvalues.clear();
-        int n_return = std::min(k, static_cast<int>(prev_ritz_values.size()));
+        uint64_t n_return = std::min(k, static_cast<uint64_t>(prev_ritz_values.size()));
         for (int i = 0; i < n_return; ++i) {
             converged_eigenvalues.push_back(prev_ritz_values[i]);
         }
@@ -3029,8 +3029,8 @@ void implicitly_restarted_lanczos(std::function<void(const Complex*, Complex*, i
 // Thick Restart Lanczos algorithm implementation
 // This algorithm retains converged Ritz vectors and restarts the Lanczos process
 // in a subspace orthogonal to them, providing better convergence for multiple eigenvalues
-void thick_restart_lanczos(std::function<void(const Complex*, Complex*, int)> H, int N, 
-                           int max_iter, int num_eigs, double tol, 
+void thick_restart_lanczos(std::function<void(const Complex*, Complex*, int)> H, uint64_t N, 
+                           uint64_t max_iter, uint64_t num_eigs, double tol, 
                            std::vector<double>& eigenvalues, std::string dir,
                            bool compute_eigenvectors) {
     
@@ -3048,10 +3048,10 @@ void thick_restart_lanczos(std::function<void(const Complex*, Complex*, int)> H,
     system(("mkdir -p " + evec_dir).c_str());
     
     // ===== Parameters =====
-    const int k = num_eigs;                          // Target number of eigenvalues
-    const int m = std::min(max_iter, N);            // Maximum Krylov subspace dimension
-    const int p = std::min(k + 10, m - k);          // Number of active Ritz vectors to retain
-    const int max_outer_iter = 100;                 // Maximum restart cycles
+    const uint64_t k = num_eigs;                          // Target number of eigenvalues
+    const uint64_t m = std::min(max_iter, N);            // Maximum Krylov subspace dimension
+    const uint64_t p = std::min(k + 10, m - k);          // Number of active Ritz vectors to retain
+    const uint64_t max_outer_iter = 100;                 // Maximum restart cycles
     const double breakdown_tol = 1e-14;             // Breakdown tolerance
     
     if (m <= k) {
@@ -3078,7 +3078,7 @@ void thick_restart_lanczos(std::function<void(const Complex*, Complex*, int)> H,
     
     // ===== Locked (converged) eigenvalues and vectors =====
     std::vector<double> locked_eigenvalues;
-    int num_locked = 0;
+    uint64_t num_locked = 0;
     
     // ===== Workspace =====
     ComplexVector v_prev(N, Complex(0.0, 0.0));
@@ -3088,7 +3088,7 @@ void thick_restart_lanczos(std::function<void(const Complex*, Complex*, int)> H,
     
     // Write initial basis vector
     write_basis_vector(temp_dir, 0, v_current, N);
-    int basis_size = 1;
+    uint64_t basis_size = 1;
     
     // ===== Main thick-restart loop =====
     for (int outer_iter = 0; outer_iter < max_outer_iter; ++outer_iter) {
@@ -3172,7 +3172,7 @@ void thick_restart_lanczos(std::function<void(const Complex*, Complex*, int)> H,
         }
         
         // ===== Build and solve tridiagonal eigenvalue problem =====
-        const int current_m = basis_size;
+        const uint64_t current_m = basis_size;
         std::cout << "Solving tridiagonal matrix of size " << current_m << std::endl;
         
         std::vector<double> T_diag(alpha.begin(), alpha.begin() + current_m);
@@ -3187,7 +3187,7 @@ void thick_restart_lanczos(std::function<void(const Complex*, Complex*, int)> H,
         // Copy diagonal for eigenvalue computation
         std::copy(T_diag.begin(), T_diag.end(), ritz_values.begin());
         
-        int info = LAPACKE_dstevd(LAPACK_COL_MAJOR, 'V', current_m,
+        uint64_t info = LAPACKE_dstevd(LAPACK_COL_MAJOR, 'V', current_m,
                                   ritz_values.data(), T_offdiag.data(),
                                   ritz_vectors.data(), current_m);
         
@@ -3261,7 +3261,7 @@ void thick_restart_lanczos(std::function<void(const Complex*, Complex*, int)> H,
         // Combine indices to keep
         std::vector<int> keep_indices = locked_indices;
         keep_indices.insert(keep_indices.end(), active_indices.begin(), active_indices.end());
-        const int new_basis_size = keep_indices.size();
+        const uint64_t new_basis_size = keep_indices.size();
         
         if (new_basis_size == 0) {
             std::cerr << "Error: No basis vectors to retain during restart" << std::endl;
@@ -3272,7 +3272,7 @@ void thick_restart_lanczos(std::function<void(const Complex*, Complex*, int)> H,
         std::vector<ComplexVector> new_basis(new_basis_size, ComplexVector(N));
         
         for (int i = 0; i < new_basis_size; ++i) {
-            int ritz_idx = keep_indices[i];
+            uint64_t ritz_idx = keep_indices[i];
             ComplexVector& new_vec = new_basis[i];
             std::fill(new_vec.begin(), new_vec.end(), Complex(0.0, 0.0));
             
@@ -3327,7 +3327,7 @@ void thick_restart_lanczos(std::function<void(const Complex*, Complex*, int)> H,
         std::vector<double> new_beta(new_basis_size + 1, 0.0);
         
         for (int i = 0; i < new_basis_size; ++i) {
-            int ritz_idx = keep_indices[i];
+            uint64_t ritz_idx = keep_indices[i];
             new_alpha[i] = ritz_values[ritz_idx];
         }
         
@@ -3368,7 +3368,7 @@ void thick_restart_lanczos(std::function<void(const Complex*, Complex*, int)> H,
     std::sort(locked_eigenvalues.begin(), locked_eigenvalues.end());
     
     // Return requested number of eigenvalues
-    int n_output = std::min(k, num_locked);
+    uint64_t n_output = std::min(k, num_locked);
     eigenvalues.assign(locked_eigenvalues.begin(), locked_eigenvalues.begin() + n_output);
     
     std::cout << "Computed " << eigenvalues.size() << " eigenvalues" << std::endl;
@@ -3427,18 +3427,18 @@ void thick_restart_lanczos(std::function<void(const Complex*, Complex*, int)> H,
 
 
 // Helper function to estimate number of eigenvalues in an interval
-int estimate_eigenvalue_count(std::function<void(const Complex*, Complex*, int)> H, int N, 
+int estimate_eigenvalue_count(std::function<void(const Complex*, Complex*, int)> H, uint64_t N, 
                             double lower_bound, double upper_bound) {
     // Use stochastic trace estimation with Chebyshev expansion
-    const int num_samples = 10;
-    const int chebyshev_degree = 50;
+    const uint64_t num_samples = 10;
+    const uint64_t chebyshev_degree = 50;
     
     std::mt19937 gen(std::random_device{}());
     std::uniform_real_distribution<double> dist(-1.0, 1.0);
     
     // First estimate spectral bounds
     std::vector<double> bounds_estimate;
-    lanczos_no_ortho(H, N, std::min(50, N/20), 10, 1e-6, bounds_estimate, "", false);
+    lanczos_no_ortho(H, N, std::min(static_cast<uint64_t>(50), N/20), 10, 1e-6, bounds_estimate, "", false);
     
     double lambda_min, lambda_max;
     if (bounds_estimate.size() >= 2) {
@@ -3486,7 +3486,7 @@ int estimate_eigenvalue_count(std::function<void(const Complex*, Complex*, int)>
         
         // Chebyshev coefficients for characteristic function
         std::vector<double> cheb_coeff(chebyshev_degree + 1);
-        const int quad_points = 100;
+        const uint64_t quad_points = 100;
         for (int k = 0; k <= chebyshev_degree; k++) {
             cheb_coeff[k] = 0.0;
             for (int j = 0; j < quad_points; j++) {
@@ -3548,8 +3548,8 @@ int estimate_eigenvalue_count(std::function<void(const Complex*, Complex*, int)>
 
 // Helper function to orthogonalize degenerate eigenvector subspace
 void orthogonalize_degenerate_subspace(std::vector<ComplexVector>& vectors, double eigenvalue,
-                                     std::function<void(const Complex*, Complex*, int)> H, int N) {
-    const int subspace_dim = vectors.size();
+                                     std::function<void(const Complex*, Complex*, int)> H, uint64_t N) {
+    const uint64_t subspace_dim = vectors.size();
     if (subspace_dim <= 1) return;
     
     // Use modified Gram-Schmidt with re-orthogonalization
@@ -3602,7 +3602,7 @@ void orthogonalize_degenerate_subspace(std::vector<ComplexVector>& vectors, doub
 }
 
 // Adaptive Spectrum Slicing Full Diagonalization with Degeneracy Preservation
-void optimal_spectrum_solver(std::function<void(const Complex*, Complex*, int)> H, int N, int max_iter,
+void optimal_spectrum_solver(std::function<void(const Complex*, Complex*, int)> H, uint64_t N, uint64_t max_iter,
                                              std::vector<double>& eigenvalues, std::string dir,
                                              bool compute_eigenvectors) {
     std::cout << "Starting Adaptive Spectrum Slicing Full Diagonalization for dimension " << N << std::endl;
@@ -3622,7 +3622,7 @@ void optimal_spectrum_solver(std::function<void(const Complex*, Complex*, int)> 
     
     // Use a combination of Lanczos and stochastic estimation
     std::vector<double> spectral_samples;
-    lanczos_no_ortho(H, N, std::min(200, N/10), 100, 1e-6, spectral_samples, "", false);
+    lanczos_no_ortho(H, N, std::min(static_cast<uint64_t>(200), N/10), 100, 1e-6, spectral_samples, "", false);
     
     if (spectral_samples.size() < 2) {
         std::cerr << "Failed to estimate spectral bounds" << std::endl;
@@ -3644,7 +3644,7 @@ void optimal_spectrum_solver(std::function<void(const Complex*, Complex*, int)> 
     std::cout << "Step 2: Determining adaptive slices based on spectral density..." << std::endl;
     
     // Estimate spectral density using kernel polynomial method
-    const int kde_points = 1000;
+    const uint64_t kde_points = 1000;
     std::vector<double> spectral_density(kde_points, 0.0);
     
     // Use Gaussian kernel density estimation on samples
@@ -3661,8 +3661,8 @@ void optimal_spectrum_solver(std::function<void(const Complex*, Complex*, int)> 
     
     // Determine adaptive slices based on density
     std::vector<std::pair<double, double>> slices;
-    const int target_eigenvalues_per_slice = std::min(1000, N/20); // Adaptive slice size
-    const int min_eigenvalues_per_slice = 100;
+    const uint64_t target_eigenvalues_per_slice = std::min(static_cast<uint64_t>(1000), N/20); // Adaptive slice size
+    const uint64_t min_eigenvalues_per_slice = 100;
     
     double current_lower = lambda_min;
     double integrated_density = 0.0;
@@ -3711,7 +3711,7 @@ void optimal_spectrum_solver(std::function<void(const Complex*, Complex*, int)> 
                   << " [" << slice_lower << ", " << slice_upper << "]" << std::endl;
         
         // Estimate number of eigenvalues in this slice
-        int estimated_count = estimate_eigenvalue_count(H, N, slice_lower, slice_upper);
+        uint64_t estimated_count = estimate_eigenvalue_count(H, N, slice_lower, slice_upper);
         std::cout << "Estimated eigenvalues in slice: " << estimated_count << std::endl;
         
         if (estimated_count == 0) {
@@ -3755,9 +3755,9 @@ void optimal_spectrum_solver(std::function<void(const Complex*, Complex*, int)> 
             std::cout << "Using polynomial filtered Krylov-Schur for dense slice" << std::endl;
             
             // Define filtered operator
-            auto filtered_H = [&](const Complex* v_in, Complex* v_out, int size) {
+            auto filtered_H = [&](const Complex* v_in, Complex* v_out, uint64_t size) {
                 // Apply polynomial filter to concentrate spectrum in [slice_lower, slice_upper]
-                const int poly_degree = 10;
+                const uint64_t poly_degree = 10;
                 
                 // Chebyshev polynomial filter
                 ComplexVector t0(size), t1(size), t2(size), temp(size);
@@ -3820,7 +3820,7 @@ void optimal_spectrum_solver(std::function<void(const Complex*, Complex*, int)> 
         size_t i = 0;
         while (i < slice_eigenvalues.size()) {
             double current_eval = slice_eigenvalues[i];
-            int multiplicity = 1;
+            uint64_t multiplicity = 1;
             
             // Count degeneracy
             while (i + multiplicity < slice_eigenvalues.size() && 
@@ -3969,7 +3969,7 @@ void optimal_spectrum_solver(std::function<void(const Complex*, Complex*, int)> 
     std::map<int, int> degeneracy_histogram;
     size_t i = 0;
     while (i < eigenvalues.size()) {
-        int mult = 1;
+        uint64_t mult = 1;
         while (i + mult < eigenvalues.size() && 
                std::abs(eigenvalues[i + mult] - eigenvalues[i]) < 1e-10) {
             mult++;

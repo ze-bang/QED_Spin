@@ -9,9 +9,9 @@
 void time_evolve_taylor(
     std::function<void(const Complex*, Complex*, int)> H,
     ComplexVector& state,
-    int N,
+    uint64_t N,
     double delta_t,
-    int n_max,
+    uint64_t n_max,
     bool normalize
 ) {
     // Temporary vectors for calculation
@@ -74,9 +74,9 @@ void time_evolve_taylor(
 void imaginary_time_evolve_taylor(
     std::function<void(const Complex*, Complex*, int)> H,
     ComplexVector& state,
-    int N,
+    uint64_t N,
     double delta_beta,
-    int n_max,
+    uint64_t n_max,
     bool normalize
 ) {
     // result = sum_{n=0}^{n_max} (-Δβ H)^n / n! |ψ⟩
@@ -123,9 +123,9 @@ void imaginary_time_evolve_taylor(
 void time_evolve_krylov(
     std::function<void(const Complex*, Complex*, int)> H,
     ComplexVector& state,
-    int N,
+    uint64_t N,
     double delta_t,
-    int krylov_dim,
+    uint64_t krylov_dim,
     bool normalize
 ) {
     if (N <= 0) {
@@ -133,7 +133,7 @@ void time_evolve_krylov(
     }
 
     // Ensure Krylov dimension doesn't exceed system size
-    krylov_dim = std::max(1, std::min(krylov_dim, N));
+    krylov_dim = std::max(static_cast<uint64_t>(1), std::min(krylov_dim, N));
     
     // Allocate buffers locally (more thread-safe and less memory waste than thread_local)
     std::vector<ComplexVector> krylov_vectors(krylov_dim);
@@ -156,7 +156,7 @@ void time_evolve_krylov(
     
     // Lanczos iteration - three-term recurrence (no full reorthogonalization needed in theory)
     // For better stability, we do selective reorthogonalization only when needed
-    int effective_dim = krylov_dim;
+    uint64_t effective_dim = krylov_dim;
     constexpr double breakdown_threshold = 1e-14;
     constexpr double reortho_threshold = 0.7;  // Reorthogonalize if ||w|| drops below this fraction
     
@@ -219,12 +219,12 @@ void time_evolve_krylov(
     std::vector<double> eigenvalues = alpha;
     std::vector<double> eigenvectors_data(effective_dim * effective_dim);
     std::vector<double> offdiag(beta.begin(), beta.begin() + effective_dim - 1);
-    std::vector<double> work(std::max(1, 2 * effective_dim - 2));
+    std::vector<double> work(std::max(static_cast<uint64_t>(1), 2 * effective_dim - 2));
     
     char jobz = 'V';
-    int n = effective_dim;
-    int ldz = effective_dim;
-    int info = 0;
+    int32_t n = static_cast<int32_t>(effective_dim);
+    int32_t ldz = static_cast<int32_t>(effective_dim);
+    int32_t info = 0;
     
     // Call LAPACK dstev (AOCL version requires string length as last parameter)
     dstev_(&jobz, &n, eigenvalues.data(), offdiag.data(), 
@@ -266,11 +266,11 @@ void time_evolve_krylov(
 void time_evolve_chebyshev(
     std::function<void(const Complex*, Complex*, int)> H,
     ComplexVector& state,
-    int N,
+    uint64_t N,
     double delta_t,
     double E_min,
     double E_max,
-    int num_terms,
+    uint64_t num_terms,
     bool normalize
 ) {
     // Scale Hamiltonian to [-1, 1] range for Chebyshev expansion
@@ -296,7 +296,7 @@ void time_evolve_chebyshev(
     double tau = delta_t * E_scale;
     
     // Create scaled Hamiltonian operator: H_scaled = (H - E_center * I) / E_scale
-    auto H_scaled = [&](const Complex* input, Complex* output, int size) {
+    auto H_scaled = [&](const Complex* input, Complex* output, uint64_t size) {
         H(input, output, size);
         // output = (H - E_center * I) * input / E_scale
         Complex center_factor = Complex(-E_center / E_scale, 0.0);
@@ -370,7 +370,7 @@ void time_evolve_chebyshev(
 void time_evolve_rk4(
     std::function<void(const Complex*, Complex*, int)> H,
     ComplexVector& state,
-    int N,
+    uint64_t N,
     double delta_t,
     bool normalize
 ) {
@@ -429,9 +429,9 @@ void time_evolve_rk4(
 void time_evolve_adaptive(
     std::function<void(const Complex*, Complex*, int)> H,
     ComplexVector& state,
-    int N,
+    uint64_t N,
     double delta_t,
-    int accuracy_level,
+    uint64_t accuracy_level,
     bool normalize
 ) {
     if (accuracy_level == 1) {
@@ -439,14 +439,14 @@ void time_evolve_adaptive(
         time_evolve_taylor(H, state, N, delta_t, 50, normalize);
     } else if (accuracy_level == 2) {
         // Balanced: Use Krylov method
-        int krylov_dim = std::max(1, std::min(30, std::max(N / 2, 1)));
+        uint64_t krylov_dim = std::max(static_cast<uint64_t>(1), std::min(static_cast<uint64_t>(30), std::max(N / 2, static_cast<uint64_t>(1))));
         time_evolve_krylov(H, state, N, delta_t, krylov_dim, normalize);
     } else {
         // High accuracy: Use RK4 for small systems, Krylov for large
         if (N < 1000) {
             time_evolve_rk4(H, state, N, delta_t, normalize);
         } else {
-            int krylov_dim = std::max(1, std::min(50, std::max(N / 2, 1)));
+            uint64_t krylov_dim = std::max(static_cast<uint64_t>(1), std::min(static_cast<uint64_t>(50), std::max(N / 2, static_cast<uint64_t>(1))));
             time_evolve_krylov(H, state, N, delta_t, krylov_dim, normalize);
         }
     }
@@ -455,7 +455,7 @@ void time_evolve_adaptive(
 std::function<void(const Complex*, Complex*, int)> create_time_evolution_operator(
     std::function<void(const Complex*, Complex*, int)> H,
     double delta_t,
-    int n_max,
+    uint64_t n_max,
     bool normalize
 ) {
     // Precompute coefficients for each term in the Taylor series
@@ -471,7 +471,7 @@ std::function<void(const Complex*, Complex*, int)> create_time_evolution_operato
     }
     
     // Return a function that applies the time evolution
-    return [H, coefficients, n_max, normalize](const Complex* input, Complex* output, int size) -> void {
+    return [H, coefficients, n_max, normalize](const Complex* input, Complex* output, uint64_t size) -> void {
         // Temporary vectors for calculation
         std::vector<Complex> term(size);
         std::vector<Complex> Hterm(size);
@@ -516,14 +516,14 @@ std::vector<Complex> compute_time_correlation(
     std::function<void(const Complex*, Complex*, int)> O1,
     std::function<void(const Complex*, Complex*, int)> O2,
     const ComplexVector& state,
-    int N,
+    uint64_t N,
     double t_max,
     double dt,
-    int time_evolution_method,
-    int taylor_order,
-    int krylov_dim
+    uint64_t time_evolution_method,
+    uint64_t taylor_order,
+    uint64_t krylov_dim
 ) {
-    int num_steps = static_cast<int>(t_max / dt) + 1;
+    uint64_t num_steps = static_cast<int>(t_max / dt) + 1;
     std::vector<Complex> time_correlation(num_steps);
     
     // Apply O1 to initial state: |φ⟩ = O1|ψ⟩
@@ -574,15 +574,15 @@ std::vector<std::vector<Complex>> compute_multiple_time_correlations(
     const std::vector<std::function<void(const Complex*, Complex*, int)>>& operators_1,
     const std::vector<std::function<void(const Complex*, Complex*, int)>>& operators_2,
     const ComplexVector& state,
-    int N,
+    uint64_t N,
     double t_max,
     double dt,
-    int time_evolution_method,
-    int taylor_order,
-    int krylov_dim
+    uint64_t time_evolution_method,
+    uint64_t taylor_order,
+    uint64_t krylov_dim
 ) {
-    int num_steps = static_cast<int>(t_max / dt) + 1;
-    int num_operators = operators_1.size();
+    uint64_t num_steps = static_cast<int>(t_max / dt) + 1;
+    uint64_t num_operators = operators_1.size();
     
     std::vector<std::vector<Complex>> time_correlations(num_operators, std::vector<Complex>(num_steps));
     
@@ -647,10 +647,10 @@ std::vector<std::vector<Complex>> compute_time_correlations_with_U_t(
     const std::vector<std::function<void(const Complex*, Complex*, int)>>& operators_1,
     const std::vector<std::function<void(const Complex*, Complex*, int)>>& operators_2,
     const ComplexVector& state,
-    int N,
-    int num_steps
+    uint64_t N,
+    uint64_t num_steps
 ) {
-    int num_operators = operators_1.size();
+    uint64_t num_operators = operators_1.size();
     
     // Pre-allocate all buffers needed for calculation
     std::vector<ComplexVector> O_psi_vec(num_operators, ComplexVector(N));
@@ -721,12 +721,12 @@ void compute_time_correlations_incremental(
     const std::vector<std::function<void(const Complex*, Complex*, int)>>& operators_1,
     const std::vector<std::function<void(const Complex*, Complex*, int)>>& operators_2,
     const ComplexVector& state,
-    int N,
-    int num_steps,
+    uint64_t N,
+    uint64_t num_steps,
     double dt,
     std::vector<std::ofstream>& output_files
 ) {
-    int num_operators = operators_1.size();
+    uint64_t num_operators = operators_1.size();
     
     // Pre-allocate all buffers
     std::vector<ComplexVector> O_psi_vec(num_operators, ComplexVector(N));
@@ -825,7 +825,7 @@ SpectralFunctionData compute_spectral_function(
     double dt,
     double omega_min,
     double omega_max,
-    int num_omega,
+    uint64_t num_omega,
     double eta,
     bool use_lorentzian
 ) {
@@ -839,7 +839,7 @@ SpectralFunctionData compute_spectral_function(
     }
     result.spectral_function.resize(num_omega, 0.0);
     
-    int num_steps = time_correlation.size();
+    uint64_t num_steps = time_correlation.size();
     
     // Perform Fourier transform to get spectral function
     for (int i = 0; i < num_omega; i++) {
@@ -874,19 +874,19 @@ void compute_operator_dynamics(
     const std::vector<Operator>& operators_1,
     const std::vector<Operator>& operators_2,
     const std::vector<std::string>& operator_names,
-    int N,
+    uint64_t N,
     const std::string& output_dir,
     const std::string& label,
     double t_max,
     double dt,
-    int krylov_dim
+    uint64_t krylov_dim
 ) {
     std::cout << "Computing dynamical correlations using Krylov method, label: " << label << std::endl;
     
     // Ensure Krylov dimension doesn't exceed system size
     krylov_dim = std::min(krylov_dim, N/2);
     
-    int num_steps = static_cast<int>(t_max / dt) + 1;
+    uint64_t num_steps = static_cast<int>(t_max / dt) + 1;
     
     // Pre-allocate reusable buffers
     ComplexVector evolved_psi(N);

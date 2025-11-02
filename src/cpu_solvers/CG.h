@@ -26,10 +26,10 @@ using ComplexVector = std::vector<Complex>;
 // Davidson method for finding lowest eigenvalues
 void davidson_method(
     std::function<void(const Complex*, Complex*, int)> H,  // Hamiltonian operator
-    int N,                                                 // Hilbert space dimension
-    int max_iter,                                          // Maximum iterations
-    int max_subspace,                                      // Maximum subspace size
-    int num_eigenvalues,                                   // Number of eigenvalues to find
+    uint64_t N,                                                 // Hilbert space dimension
+    uint64_t max_iter,                                          // Maximum iterations
+    uint64_t max_subspace,                                      // Maximum subspace size
+    uint64_t num_eigenvalues,                                   // Number of eigenvalues to find
     double tol,                                            // Tolerance for convergence
     std::vector<double>& eigenvalues,                      // Output eigenvalues
     std::vector<ComplexVector>& eigenvectors,              // Output eigenvectors
@@ -38,9 +38,9 @@ void davidson_method(
 
 void lobpcg_method(
     std::function<void(const Complex*, Complex*, int)> H,  // Hamiltonian operator
-    int N,                                                 // Hilbert space dimension
-    int max_iter,                                          // Maximum iterations
-    int num_eigenvalues,                                   // Number of eigenvalues to find
+    uint64_t N,                                                 // Hilbert space dimension
+    uint64_t max_iter,                                          // Maximum iterations
+    uint64_t num_eigenvalues,                                   // Number of eigenvalues to find
     double tol,                                           // Tolerance for convergence
     std::vector<double>& eigenvalues,                     // Output eigenvalues
     std::vector<ComplexVector>& eigenvectors,             // Output eigenvectors
@@ -51,9 +51,9 @@ void lobpcg_method(
 // Function with same interface as cg_diagonalization
 void lobpcg_diagonalization(
     std::function<void(const Complex*, Complex*, int)> H, 
-    int N, 
-    int max_iter, 
-    int exct, 
+    uint64_t N, 
+    uint64_t max_iter, 
+    uint64_t exct, 
     double tol, 
     std::vector<double>& eigenvalues, 
     std::string dir = "",

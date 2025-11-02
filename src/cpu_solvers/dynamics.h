@@ -38,9 +38,9 @@
 void time_evolve_taylor(
     std::function<void(const Complex*, Complex*, int)> H,
     ComplexVector& state,
-    int N,
+    uint64_t N,
     double delta_t,
-    int n_max = 100,
+    uint64_t n_max = 100,
     bool normalize = true
 );
 
@@ -58,9 +58,9 @@ void time_evolve_taylor(
 void imaginary_time_evolve_taylor(
     std::function<void(const Complex*, Complex*, int)> H,
     ComplexVector& state,
-    int N,
+    uint64_t N,
     double delta_beta,
-    int n_max = 50,
+    uint64_t n_max = 50,
     bool normalize = true
 );
 
@@ -78,9 +78,9 @@ void imaginary_time_evolve_taylor(
 void time_evolve_krylov(
     std::function<void(const Complex*, Complex*, int)> H,
     ComplexVector& state,
-    int N,
+    uint64_t N,
     double delta_t,
-    int krylov_dim = 30,
+    uint64_t krylov_dim = 30,
     bool normalize = true
 );
 
@@ -100,11 +100,11 @@ void time_evolve_krylov(
 void time_evolve_chebyshev(
     std::function<void(const Complex*, Complex*, int)> H,
     ComplexVector& state,
-    int N,
+    uint64_t N,
     double delta_t,
     double E_min,
     double E_max,
-    int num_terms = 100,
+    uint64_t num_terms = 100,
     bool normalize = true
 );
 
@@ -121,7 +121,7 @@ void time_evolve_chebyshev(
 void time_evolve_rk4(
     std::function<void(const Complex*, Complex*, int)> H,
     ComplexVector& state,
-    int N,
+    uint64_t N,
     double delta_t,
     bool normalize = true
 );
@@ -140,9 +140,9 @@ void time_evolve_rk4(
 void time_evolve_adaptive(
     std::function<void(const Complex*, Complex*, int)> H,
     ComplexVector& state,
-    int N,
+    uint64_t N,
     double delta_t,
-    int accuracy_level = 2,
+    uint64_t accuracy_level = 2,
     bool normalize = true
 );
 
@@ -158,7 +158,7 @@ void time_evolve_adaptive(
 std::function<void(const Complex*, Complex*, int)> create_time_evolution_operator(
     std::function<void(const Complex*, Complex*, int)> H,
     double delta_t,
-    int n_max = 10,
+    uint64_t n_max = 10,
     bool normalize = true
 );
 
@@ -187,12 +187,12 @@ std::vector<Complex> compute_time_correlation(
     std::function<void(const Complex*, Complex*, int)> O1,
     std::function<void(const Complex*, Complex*, int)> O2,
     const ComplexVector& state,
-    int N,
+    uint64_t N,
     double t_max,
     double dt,
-    int time_evolution_method = 1,
-    int taylor_order = 100,
-    int krylov_dim = 30
+    uint64_t time_evolution_method = 1,
+    uint64_t taylor_order = 100,
+    uint64_t krylov_dim = 30
 );
 
 /**
@@ -216,12 +216,12 @@ std::vector<std::vector<Complex>> compute_multiple_time_correlations(
     const std::vector<std::function<void(const Complex*, Complex*, int)>>& operators_1,
     const std::vector<std::function<void(const Complex*, Complex*, int)>>& operators_2,
     const ComplexVector& state,
-    int N,
+    uint64_t N,
     double t_max,
     double dt,
-    int time_evolution_method = 1,
-    int taylor_order = 100,
-    int krylov_dim = 30
+    uint64_t time_evolution_method = 1,
+    uint64_t taylor_order = 100,
+    uint64_t krylov_dim = 30
 );
 
 /**
@@ -241,8 +241,8 @@ std::vector<std::vector<Complex>> compute_time_correlations_with_U_t(
     const std::vector<std::function<void(const Complex*, Complex*, int)>>& operators_1,
     const std::vector<std::function<void(const Complex*, Complex*, int)>>& operators_2,
     const ComplexVector& state,
-    int N,
-    int num_steps
+    uint64_t N,
+    uint64_t num_steps
 );
 
 /**
@@ -263,8 +263,8 @@ void compute_time_correlations_incremental(
     const std::vector<std::function<void(const Complex*, Complex*, int)>>& operators_1,
     const std::vector<std::function<void(const Complex*, Complex*, int)>>& operators_2,
     const ComplexVector& state,
-    int N,
-    int num_steps,
+    uint64_t N,
+    uint64_t num_steps,
     double dt,
     std::vector<std::ofstream>& output_files
 );
@@ -287,7 +287,7 @@ SpectralFunctionData compute_spectral_function(
     double dt,
     double omega_min,
     double omega_max,
-    int num_omega,
+    uint64_t num_omega,
     double eta = 0.1,
     bool use_lorentzian = false
 );
@@ -313,12 +313,12 @@ void compute_operator_dynamics(
     const std::vector<Operator>& operators_1,
     const std::vector<Operator>& operators_2,
     const std::vector<std::string>& operator_names,
-    int N,
+    uint64_t N,
     const std::string& output_dir,
     const std::string& label,
     double t_max = 100.0,
     double dt = 0.01,
-    int krylov_dim = 30
+    uint64_t krylov_dim = 30
 );
 
 #endif // DYNAMICS_H

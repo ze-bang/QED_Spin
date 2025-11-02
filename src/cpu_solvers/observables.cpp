@@ -6,7 +6,7 @@ ThermodynamicData calculate_thermodynamics_from_spectrum(
     const std::vector<double>& eigenvalues,
     double T_min,        // Minimum temperature
     double T_max,        // Maximum temperature
-    int num_points        // Number of temperature points
+    uint64_t num_points        // Number of temperature points
 ) {
     ThermodynamicData results;
     
@@ -80,7 +80,7 @@ ThermodynamicData calculate_thermodynamics_from_spectrum(
         results.specific_heat[0] = 0.0;
         
         // Entropy → 0 (third law of thermodynamics) or ln(g) if g-fold degenerate
-        int degeneracy = 0;
+        uint64_t degeneracy = 0;
         for (double E : eigenvalues) {
             if (std::abs(E - E0) < 1e-10) degeneracy++;
         }
@@ -97,7 +97,7 @@ ThermodynamicData calculate_thermodynamics_from_spectrum(
 // <A> = (1/Z) * ∑_i exp(-β*E_i) * <ψ_i|A|ψ_i>
 Complex calculate_thermal_expectation(
     std::function<void(const Complex*, Complex*, int)> A,  // Observable operator
-    int N,                                               // Hilbert space dimension
+    uint64_t N,                                               // Hilbert space dimension
     double beta,                                         // Inverse temperature β = 1/kT
     const std::string& eig_dir                           // Directory with eigenvector files
 ) {
@@ -167,7 +167,7 @@ Complex calculate_matrix_element(
     std::function<void(const Complex*, Complex*, int)> A,  // Operator A
     const ComplexVector& psi1,                           // First state vector |ψ₁⟩
     const ComplexVector& psi2,                           // Second state vector |ψ₂⟩
-    int N                                               // Dimension of Hilbert space
+    uint64_t N                                               // Dimension of Hilbert space
 ) {
     // Check that dimensions match
     if (psi1.size() != N || psi2.size() != N) {
@@ -188,11 +188,11 @@ Complex calculate_matrix_element(
 
 SpectralFunctionData calculate_spectral_function(
     std::function<void(const Complex*, Complex*, int)> O,  // Operator O
-    int N,                                                // Hilbert space dimension
+    uint64_t N,                                                // Hilbert space dimension
     const std::string& eig_dir,                           // Directory with eigenvector files
     double omega_min,                            // Minimum frequency
     double omega_max,                             // Maximum frequency
-    int num_points,                               // Number of frequency points
+    uint64_t num_points,                               // Number of frequency points
     double eta,                                    // Broadening parameter
     double temperature,                            // Temperature (0 for ground state only)
     bool use_lorentzian                          // Use Lorentzian (true) or Gaussian (false) broadening
@@ -324,11 +324,11 @@ SpectralFunctionData calculate_spectral_function(
 
 DynamicalSusceptibilityData calculate_dynamical_susceptibility(
     std::function<void(const Complex*, Complex*, int)> A,  // Operator A
-    int N,                                                // Hilbert space dimension
+    uint64_t N,                                                // Hilbert space dimension
     const std::string& eig_dir,                           // Directory with eigenvector files
     double omega_min,                            // Minimum frequency
     double omega_max,                             // Maximum frequency
-    int num_points,                               // Number of frequency points
+    uint64_t num_points,                               // Number of frequency points
     double eta,                                    // Broadening parameter
     double temperature                            // Temperature (in energy units)
 ) {
@@ -446,7 +446,7 @@ DynamicalSusceptibilityData calculate_dynamical_susceptibility(
 // Calculate quantum Fisher information for operator A at temperature T
 double calculate_quantum_fisher_information(
     std::function<void(const Complex*, Complex*, int)> A,  // Observable operator
-    int N,                                               // Hilbert space dimension
+    uint64_t N,                                               // Hilbert space dimension
     double temperature,                                  // Temperature (in energy units)
     const std::string& eig_dir                           // Directory with eigenvector files
 ) {
@@ -532,7 +532,7 @@ double calculate_quantum_fisher_information(
                 }
                 
                 ComplexVector psi_m(N);
-                int dimension;
+                uint64_t dimension;
                 evec_stream_m >> dimension;
                 if (dimension != N) {
                     std::lock_guard<std::mutex> lock(cout_mutex);
@@ -542,7 +542,7 @@ double calculate_quantum_fisher_information(
                 }
                 
                 std::fill(psi_m.begin(), psi_m.end(), Complex(0.0, 0.0));
-                int index;
+                uint64_t index;
                 double real_part, imag_part;
                 while (evec_stream_m >> index >> real_part >> imag_part) {
                     psi_m[index] = Complex(real_part, imag_part);
@@ -568,7 +568,7 @@ double calculate_quantum_fisher_information(
                     if (!evec_stream_n) continue;
                     
                     ComplexVector psi_n(N);
-                    int dim_n;
+                    uint64_t dim_n;
                     evec_stream_n >> dim_n;
                     if (dim_n != N) {
                         evec_stream_n.close();
@@ -620,13 +620,13 @@ double calculate_quantum_fisher_information(
 void compute_spin_expectations(
     const std::string& eigdir,  // Directory with eigenvalues and eigenvectors
     const std::string output_dir, // Directory for output files
-    int num_sites,              // Number of sites
+    uint64_t num_sites,              // Number of sites
     float spin_l,              // Spin length (e.g., 0.5 for spin-1/2)
     double temperature,         // Temperature T (in energy units)
     bool print_output    // Whether to print the results to console
 ) {
     // Calculate the dimension of the Hilbert space
-    int N = 1 << num_sites;  // 2^num_sites
+    uint64_t N = 1 << num_sites;  // 2^num_sites
     
     // Initialize expectations matrix: 3 rows (S^+, S^-, S^z) x num_sites columns
     std::vector<std::vector<Complex>> expectations(3, std::vector<Complex>(num_sites, Complex(0.0, 0.0)));
@@ -689,7 +689,7 @@ void compute_spin_expectations(
         
         ComplexVector psi(N);
         // Read the file contents - first line is dimension
-        int dimension;
+        uint64_t dimension;
         evec_stream >> dimension;
         if (dimension != N) {
             std::cerr << "Error: Eigenvector dimension " << dimension << " doesn't match expected size " << N << std::endl;
@@ -701,7 +701,7 @@ void compute_spin_expectations(
         std::fill(psi.begin(), psi.end(), Complex(0.0, 0.0));
 
         // Read non-zero entries
-        int index;
+        uint64_t index;
         double real_part, imag_part;
         while (evec_stream >> index >> real_part >> imag_part) {
             psi[index] = Complex(real_part, imag_part);
@@ -783,7 +783,7 @@ void compute_spin_expectations(
 }
 
 // Load eigenstate from file with format like eigenvector_block0_0.dat
-ComplexVector load_eigenstate_from_file(const std::string& filename, int expected_dimension) {
+ComplexVector load_eigenstate_from_file(const std::string& filename, uint64_t expected_dimension) {
     std::ifstream file(filename);
     if (!file) {
         std::cerr << "Error: Cannot open eigenvector file " << filename << std::endl;
@@ -791,7 +791,7 @@ ComplexVector load_eigenstate_from_file(const std::string& filename, int expecte
     }
     
     // Read the first line which contains dimension
-    int dimension;
+    uint64_t dimension;
     file >> dimension;
     
     if (expected_dimension > 0 && dimension != expected_dimension) {
@@ -803,7 +803,7 @@ ComplexVector load_eigenstate_from_file(const std::string& filename, int expecte
     ComplexVector eigenstate(dimension, Complex(0.0, 0.0));
     
     // Read entries
-    int index;
+    uint64_t index;
     double real_part, imag_part;
 
     // skip the first line
@@ -821,8 +821,8 @@ ComplexVector load_eigenstate_from_file(const std::string& filename, int expecte
 // Load classical eigenstate (basis state with Nth largest amplitude) from file
 ComplexVector load_classical_eigenstate_from_file(
     const std::string& filename, 
-    int expected_dimension,
-    int nth_state            // Select the nth most probable state (default: most probable)
+    uint64_t expected_dimension,
+    uint64_t nth_state            // Select the nth most probable state (default: most probable)
 ) {
     std::ifstream file(filename);
     if (!file) {
@@ -831,7 +831,7 @@ ComplexVector load_classical_eigenstate_from_file(
     }
     
     // Read the first line which contains dimension
-    int dimension;
+    uint64_t dimension;
     file >> dimension;
     
     if (expected_dimension > 0 && dimension != expected_dimension) {
@@ -843,7 +843,7 @@ ComplexVector load_classical_eigenstate_from_file(
     std::vector<std::pair<int, double>> state_probs;
     
     // Read entries
-    int index;
+    uint64_t index;
     double real_part, imag_part;
     
     // Skip the first line
@@ -912,7 +912,7 @@ ComplexVector load_classical_eigenstate_from_file(
     // Create eigenstate with selected states
     ComplexVector eigenstate(dimension, Complex(0.0, 0.0));
     for (const auto& state : selected_group) {
-        int idx = std::get<0>(state);
+        uint64_t idx = std::get<0>(state);
         Complex value = std::get<2>(state);
         eigenstate[idx] = value;
     }
@@ -937,13 +937,13 @@ ComplexVector load_classical_eigenstate_from_file(
 // Calculate spin expectations for a single eigenstate
 std::vector<std::vector<Complex>> compute_eigenstate_spin_expectations(
     const ComplexVector& eigenstate,   // Eigenstate as complex vector
-    int num_sites,                     // Number of sites
+    uint64_t num_sites,                     // Number of sites
     float spin_l,                      // Spin length (e.g., 0.5 for spin-1/2)
     const std::string& output_file,  // Optional: output file path
     bool print_output           // Whether to print the results to console
 ) {
     // Check dimension
-    int N = 1 << num_sites;  // 2^num_sites
+    uint64_t N = 1 << num_sites;  // 2^num_sites
     if (eigenstate.size() != N) {
         std::cerr << "Error: Eigenstate dimension " << eigenstate.size() 
                   << " doesn't match expected size " << N << std::endl;
@@ -1044,13 +1044,13 @@ std::vector<std::vector<Complex>> compute_eigenstate_spin_expectations(
 // Compute two-site correlations (Sz*Sz and S+*S-) for a single eigenstate
 std::vector<std::vector<std::vector<Complex>>> compute_eigenstate_spin_correlations(
     const ComplexVector& eigenstate,   // Eigenstate as complex vector
-    int num_sites,                     // Number of sites
+    uint64_t num_sites,                     // Number of sites
     float spin_l,                      // Spin length (e.g., 0.5 for spin-1/2)
     const std::string& output_file,  // Optional: output file path
     bool print_output           // Whether to print the results to console
 ) {
     // Check dimension
-    int N = 1 << num_sites;  // 2^num_sites
+    uint64_t N = 1 << num_sites;  // 2^num_sites
     if (eigenstate.size() != N) {
         std::cerr << "Error: Eigenstate dimension " << eigenstate.size() 
                   << " doesn't match expected size " << N << std::endl;
@@ -1154,15 +1154,15 @@ std::vector<std::vector<std::vector<Complex>>> compute_eigenstate_spin_correlati
 // Compute spin expectations for a specific eigenstate loaded from a file
 std::vector<std::vector<Complex>> compute_eigenstate_spin_expectations_from_file(
     const std::string& eigenstate_file, // File containing the eigenstate
-    int num_sites,                     // Number of sites
+    uint64_t num_sites,                     // Number of sites
     float spin_l,                      // Spin length (e.g., 0.5 for spin-1/2)
     const std::string& output_file,  // Optional: output file path
     bool print_output,           // Whether to print the results to console
     bool classical,               // Whether to load a classical eigenstate
-    int nth_state                   // Select the nth most probable state (default: most probable)
+    uint64_t nth_state                   // Select the nth most probable state (default: most probable)
 ) {
     // Calculate expected dimension
-    int expected_dimension = 1 << num_sites;  // 2^num_sites
+    uint64_t expected_dimension = 1 << num_sites;  // 2^num_sites
     
     // Load eigenstate from file
     ComplexVector eigenstate;
@@ -1184,15 +1184,15 @@ std::vector<std::vector<Complex>> compute_eigenstate_spin_expectations_from_file
 
 std::vector<std::vector<std::vector<Complex>>> compute_eigenstate_spin_correlations_from_file(
     const std::string& eigenstate_file, // File containing the eigenstate
-    int num_sites,                     // Number of sites
+    uint64_t num_sites,                     // Number of sites
     float spin_l,                      // Spin length (e.g., 0.5 for spin-1/2)
     const std::string& output_file,  // Optional: output file path
     bool print_output,           // Whether to print the results to console
     bool classical,               // Whether to load a classical eigenstate
-    int nth_state                 // Select the nth most probable state (default: most probable)
+    uint64_t nth_state                 // Select the nth most probable state (default: most probable)
 ) {
     // Calculate expected dimension
-    int expected_dimension = 1 << num_sites;  // 2^num_sites
+    uint64_t expected_dimension = 1 << num_sites;  // 2^num_sites
     
     // Load eigenstate from file
     ComplexVector eigenstate;
@@ -1217,13 +1217,13 @@ std::vector<std::vector<std::vector<Complex>>> compute_eigenstate_spin_correlati
 void compute_spin_correlations(
     const std::string& eigdir,  // Directory with eigenvalues and eigenvectors
     const std::string output_dir, // Directory for output files
-    int num_sites,              // Number of sites
+    uint64_t num_sites,              // Number of sites
     float spin_l,              // Spin length (e.g., 0.5 for spin-1/2)
     double temperature,         // Temperature T (in energy units)
     bool print_output    // Whether to print the results to console
 ) {
     // Calculate the dimension of the Hilbert space
-    int N = 1 << num_sites;  // 2^num_sites
+    uint64_t N = 1 << num_sites;  // 2^num_sites
     
     // Initialize correlations tensor: 2 types (Sz*Sz, S+*S-) x num_sites x num_sites
     std::vector<std::vector<std::vector<Complex>>> correlations(
@@ -1292,7 +1292,7 @@ void compute_spin_correlations(
         
         ComplexVector psi(N);
         // Read the file contents - first line is dimension
-        int dimension;
+        uint64_t dimension;
         evec_stream >> dimension;
         if (dimension != N) {
             std::cerr << "Error: Eigenvector dimension " << dimension << " doesn't match expected size " << N << std::endl;
@@ -1304,7 +1304,7 @@ void compute_spin_correlations(
         std::fill(psi.begin(), psi.end(), Complex(0.0, 0.0));
 
         // Read non-zero entries
-        int index;
+        uint64_t index;
         double real_part, imag_part;
         while (evec_stream >> index >> real_part >> imag_part) {
             psi[index] = Complex(real_part, imag_part);

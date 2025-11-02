@@ -12,11 +12,11 @@
 int build_lanczos_tridiagonal(
     std::function<void(const Complex*, Complex*, int)> H,
     const ComplexVector& v0,
-    int N,
-    int max_iter,
+    uint64_t N,
+    uint64_t max_iter,
     double tol,
     bool full_reorth,
-    int reorth_freq,
+    uint64_t reorth_freq,
     std::vector<double>& alpha,
     std::vector<double>& beta
 ) {
@@ -122,8 +122,8 @@ ThermodynamicData compute_ftlm_thermodynamics(
     ThermodynamicData thermo;
     thermo.temperatures = temperatures;
     
-    int n_temps = temperatures.size();
-    int n_states = ritz_values.size();
+    uint64_t n_temps = temperatures.size();
+    uint64_t n_states = ritz_values.size();
     
     thermo.energy.resize(n_temps);
     thermo.specific_heat.resize(n_temps);
@@ -184,10 +184,10 @@ void average_ftlm_samples(
     const std::vector<ThermodynamicData>& sample_data,
     FTLMResults& results
 ) {
-    int n_samples = sample_data.size();
+    uint64_t n_samples = sample_data.size();
     if (n_samples == 0) return;
     
-    int n_temps = sample_data[0].temperatures.size();
+    uint64_t n_temps = sample_data[0].temperatures.size();
     
     results.thermo_data.temperatures = sample_data[0].temperatures;
     results.thermo_data.energy.resize(n_temps, 0.0);
@@ -249,11 +249,11 @@ void average_ftlm_samples(
  */
 FTLMResults finite_temperature_lanczos(
     std::function<void(const Complex*, Complex*, int)> H,
-    int N,
+    uint64_t N,
     const FTLMParameters& params,
     double temp_min,
     double temp_max,
-    int num_temp_bins,
+    uint64_t num_temp_bins,
     const std::string& output_dir
 ) {
     std::cout << "\n==========================================\n";
@@ -269,7 +269,7 @@ FTLMResults finite_temperature_lanczos(
     std::vector<double> temperatures(num_temp_bins);
     double log_tmin = std::log(temp_min);
     double log_tmax = std::log(temp_max);
-    double log_step = (log_tmax - log_tmin) / std::max(1, num_temp_bins - 1);
+    double log_step = (log_tmax - log_tmin) / std::max(uint64_t(1), num_temp_bins - 1);
     
     for (int i = 0; i < num_temp_bins; i++) {
         temperatures[i] = std::exp(log_tmin + i * log_step);
@@ -314,7 +314,7 @@ FTLMResults finite_temperature_lanczos(
         
         // Build Lanczos tridiagonal
         std::vector<double> alpha, beta;
-        int iterations = build_lanczos_tridiagonal(
+        uint64_t iterations = build_lanczos_tridiagonal(
             H, v0, N, params.krylov_dim, params.tolerance,
             params.full_reorthogonalization, params.reorth_frequency,
             alpha, beta
@@ -322,7 +322,7 @@ FTLMResults finite_temperature_lanczos(
         
         std::cout << "  Lanczos iterations: " << iterations << std::endl;
         
-        int m = alpha.size();
+        uint64_t m = alpha.size();
         
         // Diagonalize tridiagonal matrix
         std::vector<double> diag = alpha;
@@ -332,7 +332,7 @@ FTLMResults finite_temperature_lanczos(
         }
         
         std::vector<double> evecs(m * m);
-        int info = LAPACKE_dstevd(LAPACK_COL_MAJOR, 'V', m, diag.data(), offdiag.data(), evecs.data(), m);
+        uint64_t info = LAPACKE_dstevd(LAPACK_COL_MAJOR, 'V', m, diag.data(), offdiag.data(), evecs.data(), m);
         
         if (info != 0) {
             std::cerr << "  Warning: Tridiagonal diagonalization failed with code " << info << std::endl;
@@ -452,8 +452,8 @@ static void compute_spectral_function(
     double temperature,
     std::vector<double>& spectral_function
 ){
-    int n_omega = frequencies.size();
-    int n_states = ritz_values.size();
+    uint64_t n_omega = frequencies.size();
+    uint64_t n_states = ritz_values.size();
     
     spectral_function.resize(n_omega, 0.0);
     
@@ -482,7 +482,7 @@ static void compute_spectral_function(
         } else {
             // Very low temperature - only ground state contributes
             thermal_weights.assign(n_states, 0.0);
-            int gs_idx = std::distance(ritz_values.begin(),
+            uint64_t gs_idx = std::distance(ritz_values.begin(),
                                       std::min_element(ritz_values.begin(), ritz_values.end()));
             thermal_weights[gs_idx] = weights[gs_idx];
             // Normalize
@@ -525,8 +525,8 @@ static void compute_spectral_function_complex(
     std::vector<double>& spectral_function_real,
     std::vector<double>& spectral_function_imag
 ){
-    int n_omega = frequencies.size();
-    int n_states = ritz_values.size();
+    uint64_t n_omega = frequencies.size();
+    uint64_t n_states = ritz_values.size();
     
     spectral_function_real.resize(n_omega, 0.0);
     spectral_function_imag.resize(n_omega, 0.0);
@@ -558,7 +558,7 @@ static void compute_spectral_function_complex(
         } else {
             // Very low temperature - only ground state contributes
             thermal_weights.assign(n_states, Complex(0.0, 0.0));
-            int gs_idx = std::distance(ritz_values.begin(),
+            uint64_t gs_idx = std::distance(ritz_values.begin(),
                                       std::min_element(ritz_values.begin(), ritz_values.end()));
             thermal_weights[gs_idx] = complex_weights[gs_idx];
             // Normalize by real part sum
@@ -594,11 +594,11 @@ DynamicalResponseResults compute_dynamical_response(
     std::function<void(const Complex*, Complex*, int)> H,
     std::function<void(const Complex*, Complex*, int)> O,
     const ComplexVector& psi,
-    int N,
+    uint64_t N,
     const DynamicalResponseParameters& params,
     double omega_min,
     double omega_max,
-    int num_omega_bins,
+    uint64_t num_omega_bins,
     double temperature,
     const std::string& output_dir
 ){
@@ -620,7 +620,7 @@ DynamicalResponseResults compute_dynamical_response(
     
     // Generate frequency grid
     results.frequencies.resize(num_omega_bins);
-    double omega_step = (omega_max - omega_min) / std::max(1, num_omega_bins - 1);
+    double omega_step = (omega_max - omega_min) / std::max(uint64_t(1), num_omega_bins - 1);
     for (int i = 0; i < num_omega_bins; i++) {
         results.frequencies[i] = omega_min + i * omega_step;
     }
@@ -646,14 +646,14 @@ DynamicalResponseResults compute_dynamical_response(
     
     // Build Lanczos tridiagonal for H starting from |φ⟩
     std::vector<double> alpha, beta;
-    int iterations = build_lanczos_tridiagonal(
+    uint64_t iterations = build_lanczos_tridiagonal(
         H, phi, N, params.krylov_dim, params.tolerance,
         params.full_reorthogonalization, params.reorth_frequency,
         alpha, beta
     );
     
     std::cout << "Lanczos iterations: " << iterations << std::endl;
-    int m = alpha.size();
+    uint64_t m = alpha.size();
     
     // Diagonalize tridiagonal matrix
     std::vector<double> diag = alpha;
@@ -663,7 +663,7 @@ DynamicalResponseResults compute_dynamical_response(
     }
     
     std::vector<double> evecs(m * m);
-    int info = LAPACKE_dstevd(LAPACK_COL_MAJOR, 'V', m, diag.data(), offdiag.data(), evecs.data(), m);
+    uint64_t info = LAPACKE_dstevd(LAPACK_COL_MAJOR, 'V', m, diag.data(), offdiag.data(), evecs.data(), m);
     
     if (info != 0) {
         std::cerr << "Error: Tridiagonal diagonalization failed with code " << info << std::endl;
@@ -713,11 +713,11 @@ DynamicalResponseResults compute_dynamical_response(
 DynamicalResponseResults compute_dynamical_response_thermal(
     std::function<void(const Complex*, Complex*, int)> H,
     std::function<void(const Complex*, Complex*, int)> O,
-    int N,
+    uint64_t N,
     const DynamicalResponseParameters& params,
     double omega_min,
     double omega_max,
-    int num_omega_bins,
+    uint64_t num_omega_bins,
     double temperature,
     const std::string& output_dir
 ){
@@ -740,7 +740,7 @@ DynamicalResponseResults compute_dynamical_response_thermal(
     
     // Generate frequency grid
     results.frequencies.resize(num_omega_bins);
-    double omega_step = (omega_max - omega_min) / std::max(1, num_omega_bins - 1);
+    double omega_step = (omega_max - omega_min) / std::max(uint64_t(1), num_omega_bins - 1);
     for (int i = 0; i < num_omega_bins; i++) {
         results.frequencies[i] = omega_min + i * omega_step;
     }
@@ -798,14 +798,14 @@ DynamicalResponseResults compute_dynamical_response_thermal(
         
         // Build Lanczos tridiagonal
         std::vector<double> alpha, beta;
-        int iterations = build_lanczos_tridiagonal(
+        uint64_t iterations = build_lanczos_tridiagonal(
             H, phi, N, params.krylov_dim, params.tolerance,
             params.full_reorthogonalization, params.reorth_frequency,
             alpha, beta
         );
         
         std::cout << "  Lanczos iterations: " << iterations << std::endl;
-        int m = alpha.size();
+        uint64_t m = alpha.size();
         
         // Diagonalize tridiagonal
         std::vector<double> diag = alpha;
@@ -815,7 +815,7 @@ DynamicalResponseResults compute_dynamical_response_thermal(
         }
         
         std::vector<double> evecs(m * m);
-        int info = LAPACKE_dstevd(LAPACK_COL_MAJOR, 'V', m, diag.data(), offdiag.data(), evecs.data(), m);
+        uint64_t info = LAPACKE_dstevd(LAPACK_COL_MAJOR, 'V', m, diag.data(), offdiag.data(), evecs.data(), m);
         
         if (info != 0) {
             std::cerr << "  Warning: Tridiagonal diagonalization failed\n";
@@ -855,7 +855,7 @@ DynamicalResponseResults compute_dynamical_response_thermal(
     }
     
     // Average over all samples (FTLM thermal)
-    int n_valid_samples = sample_spectra.size();
+    uint64_t n_valid_samples = sample_spectra.size();
     std::cout << "\n--- Averaging over " << n_valid_samples << " samples ---\n";
     
     results.spectral_function.resize(num_omega_bins, 0.0);
@@ -963,11 +963,11 @@ DynamicalResponseResults compute_dynamical_correlation(
     std::function<void(const Complex*, Complex*, int)> H,
     std::function<void(const Complex*, Complex*, int)> O1,
     std::function<void(const Complex*, Complex*, int)> O2,
-    int N,
+    uint64_t N,
     const DynamicalResponseParameters& params,
     double omega_min,
     double omega_max,
-    int num_omega_bins,
+    uint64_t num_omega_bins,
     double temperature,
     const std::string& output_dir
 ){
@@ -990,7 +990,7 @@ DynamicalResponseResults compute_dynamical_correlation(
     
     // Generate frequency grid
     results.frequencies.resize(num_omega_bins);
-    double omega_step = (omega_max - omega_min) / std::max(1, num_omega_bins - 1);
+    double omega_step = (omega_max - omega_min) / std::max(uint64_t(1), num_omega_bins - 1);
     for (int i = 0; i < num_omega_bins; i++) {
         results.frequencies[i] = omega_min + i * omega_step;
     }
@@ -1058,7 +1058,7 @@ DynamicalResponseResults compute_dynamical_correlation(
         ComplexVector w(N);
         
         beta.push_back(0.0);
-        int max_iter = std::min(N, params.krylov_dim);
+        uint64_t max_iter = std::min(N, params.krylov_dim);
         
         // Lanczos iteration
         for (int j = 0; j < max_iter; j++) {
@@ -1112,7 +1112,7 @@ DynamicalResponseResults compute_dynamical_correlation(
             v_current = v_next;
         }
         
-        int m = alpha.size();
+        uint64_t m = alpha.size();
         std::cout << "  Lanczos iterations: " << m << std::endl;
         
         // Diagonalize tridiagonal
@@ -1123,7 +1123,7 @@ DynamicalResponseResults compute_dynamical_correlation(
         }
         
         std::vector<double> evecs(m * m);
-        int info = LAPACKE_dstevd(LAPACK_COL_MAJOR, 'V', m, diag.data(), offdiag.data(), evecs.data(), m);
+        uint64_t info = LAPACKE_dstevd(LAPACK_COL_MAJOR, 'V', m, diag.data(), offdiag.data(), evecs.data(), m);
         
         if (info != 0) {
             std::cerr << "  Warning: Tridiagonal diagonalization failed\n";
@@ -1186,7 +1186,7 @@ DynamicalResponseResults compute_dynamical_correlation(
     }
     
     // Average over all samples (Dynamical Correlation FTLM)
-    int n_valid_samples = sample_spectra.size();
+    uint64_t n_valid_samples = sample_spectra.size();
     std::cout << "\n--- Averaging over " << n_valid_samples << " samples ---\n";
     
     results.spectral_function.resize(num_omega_bins, 0.0);
@@ -1262,11 +1262,11 @@ DynamicalResponseResults compute_dynamical_correlation_state(
     std::function<void(const Complex*, Complex*, int)> O1,
     std::function<void(const Complex*, Complex*, int)> O2,
     const ComplexVector& state,
-    int N,
+    uint64_t N,
     const DynamicalResponseParameters& params,
     double omega_min,
     double omega_max,
-    int num_omega_bins,
+    uint64_t num_omega_bins,
     double temperature
 ){
     std::cout << "\n==========================================\n";
@@ -1287,7 +1287,7 @@ DynamicalResponseResults compute_dynamical_correlation_state(
     
     // Generate frequency grid
     results.frequencies.resize(num_omega_bins);
-    double omega_step = (omega_max - omega_min) / std::max(1, num_omega_bins - 1);
+    double omega_step = (omega_max - omega_min) / std::max(uint64_t(1), num_omega_bins - 1);
     for (int i = 0; i < num_omega_bins; i++) {
         results.frequencies[i] = omega_min + i * omega_step;
     }
@@ -1335,7 +1335,7 @@ DynamicalResponseResults compute_dynamical_correlation_state(
     ComplexVector w(N);
     
     beta.push_back(0.0);
-    int max_iter = std::min(N, params.krylov_dim);
+    uint64_t max_iter = std::min(N, params.krylov_dim);
     
     // Lanczos iteration
     for (int j = 0; j < max_iter; j++) {
@@ -1389,7 +1389,7 @@ DynamicalResponseResults compute_dynamical_correlation_state(
         v_current = v_next;
     }
     
-    int m = alpha.size();
+    uint64_t m = alpha.size();
     std::cout << "  Lanczos iterations: " << m << std::endl;
     
     // Diagonalize tridiagonal
@@ -1400,7 +1400,7 @@ DynamicalResponseResults compute_dynamical_correlation_state(
     }
     
     std::vector<double> evecs(m * m);
-    int info = LAPACKE_dstevd(LAPACK_COL_MAJOR, 'V', m, diag.data(), offdiag.data(), evecs.data(), m);
+    uint64_t info = LAPACKE_dstevd(LAPACK_COL_MAJOR, 'V', m, diag.data(), offdiag.data(), evecs.data(), m);
     
     if (info != 0) {
         std::cerr << "  Error: Tridiagonal diagonalization failed\n";
@@ -1475,11 +1475,11 @@ static void compute_krylov_expectation_values(
     std::function<void(const Complex*, Complex*, int)> H,
     std::function<void(const Complex*, Complex*, int)> O,
     const ComplexVector& v0,
-    int N,
-    int krylov_dim,
+    uint64_t N,
+    uint64_t krylov_dim,
     double tolerance,
     bool full_reorth,
-    int reorth_freq,
+    uint64_t reorth_freq,
     std::vector<double>& ritz_values,
     std::vector<double>& weights,
     std::vector<double>& expectation_values
@@ -1500,7 +1500,7 @@ static void compute_krylov_expectation_values(
     cblas_zscal(N, &scale_factor, v_current.data(), 1);
     
     beta.push_back(0.0);
-    int max_iter = std::min(N, krylov_dim);
+    uint64_t max_iter = std::min(N, krylov_dim);
     
     // Lanczos iteration (store basis vectors for later)
     for (int j = 0; j < max_iter; j++) {
@@ -1560,7 +1560,7 @@ static void compute_krylov_expectation_values(
         v_current = v_next;
     }
     
-    int m = alpha.size();
+    uint64_t m = alpha.size();
     
     // Diagonalize tridiagonal matrix
     std::vector<double> diag = alpha;
@@ -1570,7 +1570,7 @@ static void compute_krylov_expectation_values(
     }
     
     std::vector<double> evecs(m * m);
-    int info = LAPACKE_dstevd(LAPACK_COL_MAJOR, 'V', m, diag.data(), offdiag.data(), evecs.data(), m);
+    uint64_t info = LAPACKE_dstevd(LAPACK_COL_MAJOR, 'V', m, diag.data(), offdiag.data(), evecs.data(), m);
     
     if (info != 0) {
         std::cerr << "Warning: Tridiagonal diagonalization failed" << std::endl;
@@ -1614,11 +1614,11 @@ static void compute_krylov_expectation_values(
 StaticResponseResults compute_thermal_expectation_value(
     std::function<void(const Complex*, Complex*, int)> H,
     std::function<void(const Complex*, Complex*, int)> O,
-    int N,
+    uint64_t N,
     const StaticResponseParameters& params,
     double temp_min,
     double temp_max,
-    int num_temp_bins,
+    uint64_t num_temp_bins,
     const std::string& output_dir
 ) {
     std::cout << "\n==========================================\n";
@@ -1637,7 +1637,7 @@ StaticResponseResults compute_thermal_expectation_value(
     results.temperatures.resize(num_temp_bins);
     double log_tmin = std::log(temp_min);
     double log_tmax = std::log(temp_max);
-    double log_step = (log_tmax - log_tmin) / std::max(1, num_temp_bins - 1);
+    double log_step = (log_tmax - log_tmin) / std::max(uint64_t(1), num_temp_bins - 1);
     
     for (int i = 0; i < num_temp_bins; i++) {
         results.temperatures[i] = std::exp(log_tmin + i * log_step);
@@ -1686,7 +1686,7 @@ StaticResponseResults compute_thermal_expectation_value(
             ritz_values, weights, expectation_values
         );
         
-        int m = ritz_values.size();
+        uint64_t m = ritz_values.size();
         std::cout << "  Krylov subspace size: " << m << std::endl;
         
         if (m == 0) {
@@ -1740,7 +1740,7 @@ StaticResponseResults compute_thermal_expectation_value(
                 sample_variances[sample][t] = O2_avg - O_avg * O_avg;
             } else {
                 // Very low temperature - use ground state
-                int gs_idx = std::distance(ritz_values.begin(), 
+                uint64_t gs_idx = std::distance(ritz_values.begin(), 
                                           std::min_element(ritz_values.begin(), ritz_values.end()));
                 sample_expectations[sample][t] = expectation_values[gs_idx];
                 sample_variances[sample][t] = 0.0;
@@ -1765,7 +1765,7 @@ StaticResponseResults compute_thermal_expectation_value(
     }
     
     // Average over all samples
-    int n_valid_samples = 0;
+    uint64_t n_valid_samples = 0;
     for (int s = 0; s < params.num_samples; s++) {
         if (!sample_expectations[s].empty()) n_valid_samples++;
     }
@@ -1839,11 +1839,11 @@ StaticResponseResults compute_static_response(
     std::function<void(const Complex*, Complex*, int)> H,
     std::function<void(const Complex*, Complex*, int)> O1,
     std::function<void(const Complex*, Complex*, int)> O2,
-    int N,
+    uint64_t N,
     const StaticResponseParameters& params,
     double temp_min,
     double temp_max,
-    int num_temp_bins,
+    uint64_t num_temp_bins,
     const std::string& output_dir
 ) {
     std::cout << "\n==========================================\n";
@@ -1860,7 +1860,7 @@ StaticResponseResults compute_static_response(
     
     // Generate temperature grid
     results.temperatures.resize(num_temp_bins);
-    double temp_step = (temp_max - temp_min) / std::max(1, num_temp_bins - 1);
+    double temp_step = (temp_max - temp_min) / std::max(uint64_t(1), num_temp_bins - 1);
     for (int i = 0; i < num_temp_bins; i++) {
         results.temperatures[i] = temp_min + i * temp_step;
     }
@@ -1911,7 +1911,7 @@ StaticResponseResults compute_static_response(
         ComplexVector w(N);
         
         beta.push_back(0.0);
-        int max_iter = std::min(N, params.krylov_dim);
+        uint64_t max_iter = std::min(N, params.krylov_dim);
         
         // Lanczos iteration
         for (int j = 0; j < max_iter; j++) {
@@ -1965,7 +1965,7 @@ StaticResponseResults compute_static_response(
             v_current = v_next;
         }
         
-        int m = alpha.size();
+        uint64_t m = alpha.size();
         std::cout << "  Lanczos iterations: " << m << std::endl;
         
         // Diagonalize tridiagonal
@@ -1976,7 +1976,7 @@ StaticResponseResults compute_static_response(
         }
         
         std::vector<double> evecs(m * m);
-        int info = LAPACKE_dstevd(LAPACK_COL_MAJOR, 'V', m, diag.data(), offdiag.data(), evecs.data(), m);
+        uint64_t info = LAPACKE_dstevd(LAPACK_COL_MAJOR, 'V', m, diag.data(), offdiag.data(), evecs.data(), m);
         
         if (info != 0) {
             std::cerr << "  Warning: Tridiagonal diagonalization failed" << std::endl;
@@ -2061,7 +2061,7 @@ StaticResponseResults compute_static_response(
     }
     
     // Average over samples
-    int n_valid_samples = sample_expectations.size();
+    uint64_t n_valid_samples = sample_expectations.size();
     std::cout << "\n--- Averaging over " << n_valid_samples << " samples ---\n";
     
     results.expectation.resize(num_temp_bins, 0.0);

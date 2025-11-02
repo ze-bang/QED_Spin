@@ -15,9 +15,9 @@
 void time_evolve_tpq_state(
     std::function<void(const Complex*, Complex*, int)> H,
     ComplexVector& tpq_state,
-    int N,
+    uint64_t N,
     double delta_t,
-    int n_max,
+    uint64_t n_max,
     bool normalize
 ) {
     time_evolve_taylor(H, tpq_state, N, delta_t, n_max, normalize);
@@ -30,9 +30,9 @@ void time_evolve_tpq_state(
 void time_evolve_tpq_krylov(
     std::function<void(const Complex*, Complex*, int)> H,
     ComplexVector& tpq_state,
-    int N,
+    uint64_t N,
     double delta_t,
-    int krylov_dim,
+    uint64_t krylov_dim,
     bool normalize
 ) {
     time_evolve_krylov(H, tpq_state, N, delta_t, krylov_dim, normalize);
@@ -45,11 +45,11 @@ void time_evolve_tpq_krylov(
 void time_evolve_tpq_chebyshev(
     std::function<void(const Complex*, Complex*, int)> H,
     ComplexVector& tpq_state,
-    int N,
+    uint64_t N,
     double delta_t,
     double E_min,
     double E_max,
-    int num_terms,
+    uint64_t num_terms,
     bool normalize
 ) {
     time_evolve_chebyshev(H, tpq_state, N, delta_t, E_min, E_max, num_terms, normalize);
@@ -62,7 +62,7 @@ void time_evolve_tpq_chebyshev(
 void time_evolve_tpq_rk4(
     std::function<void(const Complex*, Complex*, int)> H,
     ComplexVector& tpq_state,
-    int N,
+    uint64_t N,
     double delta_t,
     bool normalize
 ) {
@@ -76,9 +76,9 @@ void time_evolve_tpq_rk4(
 void time_evolve_tpq_adaptive(
     std::function<void(const Complex*, Complex*, int)> H,
     ComplexVector& tpq_state,
-    int N,
+    uint64_t N,
     double delta_t,
-    int accuracy_level,
+    uint64_t accuracy_level,
     bool normalize
 ) {
     time_evolve_adaptive(H, tpq_state, N, delta_t, accuracy_level, normalize);
@@ -94,13 +94,13 @@ void computeDynamicCorrelationsKrylov(
     const std::vector<Operator>& operators_1,
     const std::vector<Operator>& operators_2,
     const std::vector<std::string>& operator_names,
-    int N,
+    uint64_t N,
     const std::string& dir,
-    int sample,
+    uint64_t sample,
     double inv_temp,
     double t_end,
     double dt,
-    int krylov_dim
+    uint64_t krylov_dim
 ) {
     std::cout << "Computing dynamical susceptibility for sample " << sample 
               << ", beta = " << inv_temp << ", for " << operators_1.size() << " observables" << std::endl;
@@ -108,7 +108,7 @@ void computeDynamicCorrelationsKrylov(
     // Ensure Krylov dimension doesn't exceed system size
     krylov_dim = std::min(krylov_dim, N/2);
     
-    int num_steps = static_cast<int>(t_end / dt) + 1;
+    uint64_t num_steps = static_cast<int>(t_end / dt) + 1;
     
     // Pre-allocate reusable buffers
     ComplexVector evolved_psi(N);
@@ -236,15 +236,15 @@ SpectralFunctionData calculate_spectral_function_from_tpq(
     std::function<void(const Complex*, Complex*, int)> H,
     std::function<void(const Complex*, Complex*, int)> O,
     const ComplexVector& tpq_state,
-    int N,
+    uint64_t N,
     double omega_min,
     double omega_max,
-    int num_points,
+    uint64_t num_points,
     double tmax,
     double dt,
     double eta,
     bool use_lorentzian,
-    int n_max
+    uint64_t n_max
 ) {
     // Compute time correlation using the general dynamics module
     std::vector<Complex> time_corr = compute_time_correlation(
@@ -263,8 +263,8 @@ std::vector<std::vector<Complex>> calculate_spectral_function_from_tpq_U_t(
     const std::vector<std::function<void(const Complex*, Complex*, int)>>& operators_1,
     const std::vector<std::function<void(const Complex*, Complex*, int)>>& operators_2,   
     const ComplexVector& tpq_state,
-    int N,
-    const int num_steps
+    uint64_t N,
+    const uint64_t num_steps
 ) {
     return compute_time_correlations_with_U_t(U_t, operators_1, operators_2, 
                                              tpq_state, N, num_steps);
@@ -278,8 +278,8 @@ void calculate_spectral_function_from_tpq_U_t_incremental(
     const std::vector<std::function<void(const Complex*, Complex*, int)>>& operators_1,
     const std::vector<std::function<void(const Complex*, Complex*, int)>>& operators_2,   
     const ComplexVector& tpq_state,
-    int N,
-    const int num_steps,
+    uint64_t N,
+    const uint64_t num_steps,
     double dt,
     std::vector<std::ofstream>& output_files
 ) {
@@ -296,9 +296,9 @@ void computeObservableDynamics_U_t(
     const std::vector<Operator>& observables_1,
     const std::vector<Operator>& observables_2,
     const std::vector<std::string>& observable_names,
-    int N,
+    uint64_t N,
     const std::string& dir,
-    int sample,
+    uint64_t sample,
     double inv_temp,
     double t_end,
     double dt
@@ -318,7 +318,7 @@ void computeObservableDynamics_U_t(
         op.buildSparseMatrix();
     }
 
-    int num_steps = static_cast<int>(t_end / dt) + 1;
+    uint64_t num_steps = static_cast<int>(t_end / dt) + 1;
     
     // Pre-allocate all buffers needed for calculation
     std::vector<ComplexVector> O_psi_vec(observables_1.size(), ComplexVector(N));
@@ -416,7 +416,7 @@ void computeObservableDynamics_U_t(
     // Create inverse time evolution operator (U_t^†)
     // Note: For backward evolution, we need to apply U_t^† which for Hermitian H means U(-dt)
     // Since we already have U(dt), we'll create a wrapper that applies the adjoint
-    auto U_t_dagger = [&U_t, N](const Complex* in, Complex* out, int size) {
+    auto U_t_dagger = [&U_t, N](const Complex* in, Complex* out, uint64_t size) {
         // For a unitary operator U = exp(-iHt), U^† = exp(iHt)
         // This is equivalent to time evolution with -t
         // However, since we only have U(dt), we need to apply it in reverse
@@ -518,7 +518,7 @@ void computeObservableDynamics_U_t(
  * @param seed Random seed to use
  * @return Random normalized vector
  */
-ComplexVector generateTPQVector(int N, unsigned int seed) {
+ComplexVector generateTPQVector(int N,  uint64_t seed) {
     std::mt19937 gen(seed);
     std::uniform_real_distribution<double> dist(-1.0, 1.0);
     
@@ -566,7 +566,7 @@ bool ensureDirectoryExists(const std::string& path) {
 std::pair<double, double> calculateEnergyAndVariance(
     std::function<void(const Complex*, Complex*, int)> H,
     const ComplexVector& v,
-    int N
+    uint64_t N
 ) {
     // Calculate H|v⟩
     ComplexVector Hv(N);
@@ -619,10 +619,10 @@ std::vector<SingleSiteOperator> createSyOperators(int num_sites, float spin_leng
 
 std::pair<std::vector<Complex>, std::vector<Complex>> calculateSzandSz2(
     const ComplexVector& tpq_state,
-    int num_sites,
+    uint64_t num_sites,
     float spin_length,
     const std::vector<SingleSiteOperator>& Sz_ops,
-    int sublattice_size
+    uint64_t sublattice_size
 ){
     // Calculate the dimension of the Hilbert space
     size_t N = 1ULL << num_sites;  // 2^num_sites (64-bit to avoid overflow)
@@ -632,7 +632,7 @@ std::pair<std::vector<Complex>, std::vector<Complex>> calculateSzandSz2(
     
     // For each site, compute the expectation values
     for (int site = 0; site < num_sites; site++) {
-        int i = site % sublattice_size;
+        uint64_t i = site % sublattice_size;
 
         // Apply operators - use direct vector construction to avoid copy
         std::vector<Complex> Sz_psi = Sz_ops[i].apply({tpq_state.begin(), tpq_state.end()});
@@ -671,10 +671,10 @@ std::pair<std::vector<Complex>, std::vector<Complex>> calculateSzandSz2(
 
 Complex calculateSpm_onsite(
     const ComplexVector& tpq_state,
-    int num_sites,
+    uint64_t num_sites,
     float spin_length,
     const std::vector<SingleSiteOperator>& Spm_ops,
-    int sublattice_size
+    uint64_t sublattice_size
 ){
     // Calculate the dimension of the Hilbert space
     size_t N = 1ULL << num_sites;  // 2^num_sites (64-bit)
@@ -683,7 +683,7 @@ Complex calculateSpm_onsite(
     
     // For each site, compute the expectation values
     for (int site = 0; site < num_sites; site++) {
-        int i = site % sublattice_size;
+        uint64_t i = site % sublattice_size;
 
         // Apply operators - use direct vector construction to avoid copy
         std::vector<Complex> Spm_psi = Spm_ops[i].apply({tpq_state.begin(), tpq_state.end()});
@@ -726,10 +726,10 @@ std::pair<std::vector<SingleSiteOperator>, std::vector<SingleSiteOperator>> crea
 
 std::pair<std::vector<Complex>, std::vector<Complex>> calculateSzzSpm(
     const ComplexVector& tpq_state,
-    int num_sites,
+    uint64_t num_sites,
     float spin_length,
     std::pair<std::vector<DoubleSiteOperator>, std::vector<DoubleSiteOperator>> double_site_ops,
-    int sublattice_size
+    uint64_t sublattice_size
 ){
     // Calculate the dimension of the Hilbert space
     size_t N = 1ULL << num_sites;  // 2^num_sites (64-bit)
@@ -745,8 +745,8 @@ std::pair<std::vector<Complex>, std::vector<Complex>> calculateSzzSpm(
     Spm_ops = double_site_ops.second;            // For each site, compute the expectation values
     for (int site = 0; site < num_sites; site++) {
         for (int site2 = 0; site2 < num_sites; site2++) {
-            int n1 = site % sublattice_size;
-            int n2 = site2 % sublattice_size;
+            uint64_t n1 = site % sublattice_size;
+            uint64_t n2 = site2 % sublattice_size;
 
             // Apply operators
             std::vector<Complex> Szz_psi = Szz_ops[site*num_sites+site2].apply({tpq_state.begin(), tpq_state.end()});
@@ -781,10 +781,10 @@ std::pair<std::vector<Complex>, std::vector<Complex>> calculateSzzSpm(
 
 std::tuple<std::vector<Complex>, std::vector<Complex>, std::vector<Complex>, std::vector<Complex>> calculateSzzSpm(
     const ComplexVector& tpq_state,
-    int num_sites,
+    uint64_t num_sites,
     float spin_length,
     std::pair<std::vector<SingleSiteOperator>, std::vector<SingleSiteOperator>> double_site_ops,
-    int sublattice_size
+    uint64_t sublattice_size
 ){
     // Calculate the dimension of the Hilbert space
     size_t N = 1ULL << num_sites;  // 2^num_sites (64-bit)
@@ -801,8 +801,8 @@ std::tuple<std::vector<Complex>, std::vector<Complex>, std::vector<Complex>, std
     Spm_ops = double_site_ops.second;            // For each site, compute the expectation values
     for (int site = 0; site < num_sites; site++) {
         for (int site2 = 0; site2 < num_sites; site2++) {
-            int n1 = site % sublattice_size;
-            int n2 = site2 % sublattice_size;
+            uint64_t n1 = site % sublattice_size;
+            uint64_t n2 = site2 % sublattice_size;
 
             // Apply operators
             // SzSz
@@ -862,7 +862,7 @@ std::tuple<std::vector<Complex>, std::vector<Complex>, std::vector<Complex>, std
  * Write TPQ data to file
  */
 void writeTPQData(const std::string& filename, double inv_temp, double energy, 
-                 double variance, double norm, int step) {
+                 double variance, double norm, uint64_t step) {
     std::ofstream file(filename, std::ios::app);
     if (file.is_open()) {
         file << std::setprecision(16) << inv_temp << " " << energy << " " 
@@ -874,7 +874,7 @@ void writeTPQData(const std::string& filename, double inv_temp, double energy,
 /**
  * Read TPQ data from file
  */
-bool readTPQData(const std::string& filename, int step, double& energy, 
+bool readTPQData(const std::string& filename, uint64_t step, double& energy, 
                 double& temp, double& specificHeat) {
     std::ifstream file(filename);
     if (!file.is_open()) {
@@ -886,7 +886,7 @@ bool readTPQData(const std::string& filename, int step, double& energy,
     std::getline(file, line);
     
     double inv_temp, e, var, n, doublon;
-    int s;
+    uint64_t s;
     
     while (std::getline(file, line)) {
         std::istringstream iss(line);
@@ -962,7 +962,7 @@ bool load_tpq_state(ComplexVector& tpq_state, const std::string& filename) {
  * @param N Expected size of the vector
  * @return True if successful
  */
-bool load_raw_data(ComplexVector& tpq_state, const std::string& filename, int N) {
+bool load_raw_data(ComplexVector& tpq_state, const std::string& filename, uint64_t N) {
     std::ifstream in(filename, std::ios::binary);
     if (!in.is_open()) {
         std::cerr << "Error: Could not open file " << filename << " for reading" << std::endl;
@@ -994,7 +994,7 @@ bool load_raw_data(ComplexVector& tpq_state, const std::string& filename, int N)
  */
 std::vector<std::vector<Complex>> compute_spin_expectations_from_tpq(
     const ComplexVector& tpq_state,
-    int num_sites,
+    uint64_t num_sites,
     float spin_l,
     const std::string& output_file,
     bool print_output
@@ -1093,14 +1093,14 @@ void writeFluctuationData(
     const std::vector<std::string>& spin_corr,
     double inv_temp,
     const ComplexVector& tpq_state,
-    int num_sites,
+    uint64_t num_sites,
     float spin_length,
     const std::vector<SingleSiteOperator>& Sx_ops,
     const std::vector<SingleSiteOperator>& Sy_ops,
     const std::vector<SingleSiteOperator>& Sz_ops,
     const std::pair<std::vector<SingleSiteOperator>, std::vector<SingleSiteOperator>>& double_site_ops,
-    int sublattice_size,
-    int step
+    uint64_t sublattice_size,
+    uint64_t step
 ) {
     auto [Sz, Sz2] = calculateSzandSz2(tpq_state, num_sites, spin_length, Sz_ops, sublattice_size);
     auto [Sy, Sy2] = calculateSzandSz2(tpq_state, num_sites, spin_length, Sy_ops, sublattice_size);
@@ -1191,9 +1191,9 @@ void writeFluctuationData(
  */
 ComplexVector get_tpq_state_at_temperature(
     const std::string& tpq_dir,
-    int sample,
+    uint64_t sample,
     double target_beta,
-    int N
+    uint64_t N
 ) {
     std::string ss_file = tpq_dir + "/SS_rand" + std::to_string(sample) + ".dat";
     std::ifstream file(ss_file);
@@ -1207,14 +1207,14 @@ ComplexVector get_tpq_state_at_temperature(
     std::getline(file, line);
     
     double best_beta = 0.0;
-    int best_step = 0;
+    uint64_t best_step = 0;
     double min_diff = std::numeric_limits<double>::max();
     
     // Find the step with the closest inverse temperature
     while (std::getline(file, line)) {
         std::istringstream iss(line);
         double beta, energy, variance, norm, doublon;
-        int step;
+        uint64_t step;
         
         if (!(iss >> beta >> energy >> variance >> norm >> doublon >> step)) {
             continue;
@@ -1263,8 +1263,8 @@ ComplexVector get_tpq_state_at_temperature(
  */
 std::tuple<std::string, std::string, std::string, std::vector<std::string>> initializeTPQFiles(
     const std::string& dir,
-    int sample,
-    int sublattice_size
+    uint64_t sample,
+    uint64_t sublattice_size
 ) {
     std::string ss_file = dir + "/SS_rand" + std::to_string(sample) + ".dat";
     std::string norm_file = dir + "/norm_rand" + std::to_string(sample) + ".dat";
@@ -1330,9 +1330,9 @@ std::tuple<std::string, std::string, std::string, std::vector<std::string>> init
  */
 void calculate_spectrum_from_tpq(
     std::function<void(const Complex*, Complex*, int)> H,
-    int N,
-    int tpq_sample,
-    int tpq_step,
+    uint64_t N,
+    uint64_t tpq_sample,
+    uint64_t tpq_step,
     double omega_min,
     double omega_max,
     double omega_step,
@@ -1364,7 +1364,7 @@ void calculate_spectrum_from_tpq(
     spectrum_file << "# omega re(spectrum) im(spectrum)" << std::endl;
     
     // Calculate number of frequency points
-    int n_omega = static_cast<int>((omega_max - omega_min) / omega_step) + 1;
+    uint64_t n_omega = static_cast<int>((omega_max - omega_min) / omega_step) + 1;
     
     // Pre-factor for Gaussian broadening
     double pre_factor = 2.0 * temp * temp * specificHeat;
@@ -1406,10 +1406,10 @@ void calculate_spectrum_from_tpq(
  */
 void microcanonical_tpq(
     std::function<void(const Complex*, Complex*, int)> H,
-    int N, 
-    int max_iter,
-    int num_samples,
-    int temp_interval,
+    uint64_t N, 
+    uint64_t max_iter,
+    uint64_t num_samples,
+    uint64_t temp_interval,
     std::vector<double>& eigenvalues,
     std::string dir,
     bool compute_spectrum,
@@ -1419,13 +1419,13 @@ void microcanonical_tpq(
     std::vector<std::string> observable_names,
     double omega_min,
     double omega_max,
-    int num_points,
+    uint64_t num_points,
     double t_end,
     double dt,
     float spin_length,
     bool measure_sz,
-    int sublattice_size,
-    int num_sites
+    uint64_t sublattice_size,
+    uint64_t num_sites
 ) {
     // Create output directory if needed
     if (!dir.empty()) {
@@ -1470,7 +1470,7 @@ void microcanonical_tpq(
 
 
 
-    const int num_temp_points = 20;
+    const uint64_t num_temp_points = 20;
     std::vector<double> measure_inv_temp(num_temp_points);
     double log_min = std::log10(1);   // Start from β = 1
     double log_max = std::log10(1000); // End at β = 1000
@@ -1490,7 +1490,7 @@ void microcanonical_tpq(
         auto [ss_file, norm_file, flct_file, spin_corr] = initializeTPQFiles(dir, sample, sublattice_size);
         
         // Generate initial random state
-        unsigned int seed = static_cast<unsigned int>(time(NULL)) + sample;
+         uint64_t seed = static_cast< int>(time(NULL)) + sample;
         ComplexVector v1 = generateTPQVector(N, seed);
         
         // Apply hamiltonian to get v0 = H|v1⟩
@@ -1504,7 +1504,7 @@ void microcanonical_tpq(
         
         // Write initial state (infinite temperature)
         double inv_temp = 0.0;
-        int step = 1;
+        uint64_t step = 1;
         
         // Calculate energy and variance for step 1
         auto [energy1, variance1] = calculateEnergyAndVariance(H, v0, N);
@@ -1591,9 +1591,9 @@ void microcanonical_tpq(
 inline void imaginary_time_evolve_tpq_taylor(
     std::function<void(const Complex*, Complex*, int)> H,
     ComplexVector& state,
-    int N,
+    uint64_t N,
     double delta_beta,
-    int n_max,
+    uint64_t n_max,
     bool normalize
 ){
     // result = sum_{n=0}^{n_max} (-Δβ H)^n / n! |ψ⟩
@@ -1630,26 +1630,26 @@ inline void imaginary_time_evolve_tpq_taylor(
 
 void canonical_tpq(
     std::function<void(const Complex*, Complex*, int)> H,
-    int N,
+    uint64_t N,
     double beta_max,
-    int num_samples,
-    int temp_interval,
+    uint64_t num_samples,
+    uint64_t temp_interval,
     std::vector<double>& energies,
     std::string dir,
     double delta_beta,
-    int taylor_order,
+    uint64_t taylor_order,
     bool compute_observables,
     std::vector<Operator> observables,
     std::vector<std::string> observable_names,
     double omega_min,
     double omega_max,
-    int num_points,
+    uint64_t num_points,
     double t_end,
     double dt,
     float spin_length,
     bool measure_sz,
-    int sublattice_size,
-    int num_sites
+    uint64_t sublattice_size,
+    uint64_t num_sites
 ){
     if (!dir.empty()) { ensureDirectoryExists(dir); }
     energies.clear();
@@ -1661,7 +1661,7 @@ void canonical_tpq(
     auto double_site_ops = createSingleOperators_pair(num_sites, spin_length);
 
     // Temperature checkpoints (log-spaced β for saving states)
-    const int num_temp_points = 20;
+    const uint64_t num_temp_points = 20;
     std::vector<double> measure_inv_temp(num_temp_points);
     double log_min = std::log10(1.0);
     double log_max = std::log10(1000.0);
@@ -1669,7 +1669,7 @@ void canonical_tpq(
         measure_inv_temp[i] = std::pow(10.0, log_min + i * (log_max - log_min) / (num_temp_points - 1));
     }
 
-    int max_steps = std::max(1, int(std::ceil(beta_max / delta_beta)));
+    uint64_t max_steps = std::max(1, int(std::ceil(beta_max / delta_beta)));
 
     for (int sample = 0; sample < num_samples; ++sample) {
         std::vector<bool> temp_measured(num_temp_points, false);
@@ -1678,7 +1678,7 @@ void canonical_tpq(
         auto [ss_file, norm_file, flct_file, spin_corr] = initializeTPQFiles(dir, sample, sublattice_size);
 
         // Initial random normalized state (β=0)
-        unsigned int seed = static_cast<unsigned int>(time(NULL)) + sample;
+         uint64_t seed = static_cast< int>(time(NULL)) + sample;
         ComplexVector psi = generateTPQVector(N, seed);
 
         // Step 1: record β=0
@@ -1691,7 +1691,7 @@ void canonical_tpq(
         }
 
         // Main imaginary-time loop
-        int step = 2;
+        uint64_t step = 2;
         double beta = 0.0;
         for (int k = 1; k <= max_steps; ++k, ++step) {
             beta += delta_beta;
@@ -1710,7 +1710,7 @@ void canonical_tpq(
                 norm_out << std::setprecision(16) << inv_temp << " " << 1.0 << " " << 1.0 << " " << step << std::endl;
             }
 
-            if ((measure_sz && (k % std::max(1, temp_interval) == 0 || k == max_steps))) {
+            if ((measure_sz && (k % std::max(static_cast<uint64_t>(1), temp_interval) == 0 || k == max_steps))) {
                 writeFluctuationData(flct_file, spin_corr, inv_temp, psi,
                                      num_sites, spin_length, Sx_ops, Sy_ops, Sz_ops, double_site_ops, sublattice_size, step);
             }
@@ -1726,7 +1726,7 @@ void canonical_tpq(
                 }
             }
 
-            if (k % std::max(1, max_steps / 10) == 0 || k == max_steps) {
+            if (k % std::max(static_cast<uint64_t>(1), max_steps / 10) == 0 || k == max_steps) {
                 std::cout << "  β = " << beta << " (" << k << "/" << max_steps << "), E = " << e << std::endl;
             }
         }

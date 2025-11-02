@@ -3,10 +3,10 @@
 // Davidson method for finding lowest eigenvalues
 void davidson_method(
     std::function<void(const Complex*, Complex*, int)> H,  // Hamiltonian operator
-    int N,                                                 // Hilbert space dimension
-    int max_iter,                                          // Maximum iterations
-    int max_subspace,                                      // Maximum subspace size
-    int num_eigenvalues,                                   // Number of eigenvalues to find
+    uint64_t N,                                                 // Hilbert space dimension
+    uint64_t max_iter,                                          // Maximum iterations
+    uint64_t max_subspace,                                      // Maximum subspace size
+    uint64_t num_eigenvalues,                                   // Number of eigenvalues to find
     double tol,                                            // Tolerance for convergence
     std::vector<double>& eigenvalues,                      // Output eigenvalues
     std::vector<ComplexVector>& eigenvectors,              // Output eigenvectors
@@ -63,7 +63,7 @@ void davidson_method(
     std::cout << "Davidson: Starting iterations..." << std::endl;
     
     for (int iter = 0; iter < max_iter; iter++) {
-        int subspace_size = V.size();
+        uint64_t subspace_size = V.size();
         
         // Construct the projected Hamiltonian matrix H_proj = V^H * H * V
         std::vector<std::vector<Complex>> H_proj(subspace_size, std::vector<Complex>(subspace_size));
@@ -206,8 +206,8 @@ void davidson_method(
 // BiCG method for finding eigenvalues from CalcSpectrumByBiCG.c
 void bicg_eigenvalues(
     std::function<void(const Complex*, Complex*, int)> H,  // Hamiltonian operator
-    int N,                                                 // Hilbert space dimension
-    int max_iter,                                          // Maximum iterations
+    uint64_t N,                                                 // Hilbert space dimension
+    uint64_t max_iter,                                          // Maximum iterations
     double tol,                                            // Tolerance for convergence
     std::vector<double>& eigenvalues,                      // Output eigenvalues
     std::vector<ComplexVector>& eigenvectors,              // Output eigenvectors
@@ -337,7 +337,7 @@ void bicg_eigenvalues(
         
         // Check convergence by computing the tridiagonal matrix eigenvalues
         if ((j+1) % 10 == 0 || j == max_iter-1) {
-            int m = alpha.size();
+            uint64_t m = alpha.size();
             std::vector<double> diag(m);
             std::vector<double> offdiag(m-1);
             
@@ -351,7 +351,7 @@ void bicg_eigenvalues(
             
             // Solve the tridiagonal eigenvalue problem
             std::vector<double> evals(m);
-            int info = LAPACKE_dstev(LAPACK_COL_MAJOR, 'N', m, diag.data(), 
+            uint64_t info = LAPACKE_dstev(LAPACK_COL_MAJOR, 'N', m, diag.data(), 
                                     offdiag.data(), nullptr, m);
             
             if (info == 0) {
@@ -389,7 +389,7 @@ void bicg_eigenvalues(
     // Always update eigenvalues from final tridiagonal matrix
     {
         // Construct the full tridiagonal matrix
-        int m = alpha.size();
+        uint64_t m = alpha.size();
         std::vector<double> diag(m);
         std::vector<double> offdiag(m-1);
         
@@ -403,7 +403,7 @@ void bicg_eigenvalues(
         
         // Solve the tridiagonal eigenvalue problem with eigenvectors
         std::vector<double> evecs(m * m);
-        int info = LAPACKE_dstev(LAPACK_COL_MAJOR, 'V', m, diag.data(), 
+        uint64_t info = LAPACKE_dstev(LAPACK_COL_MAJOR, 'V', m, diag.data(), 
                                 offdiag.data(), evecs.data(), m);
         
         if (info == 0) {
@@ -434,9 +434,9 @@ void bicg_eigenvalues(
 // LOBPCG method based on CalcByLOBPCG.c
 void lobpcg_method(
     std::function<void(const Complex*, Complex*, int)> H,  // Hamiltonian operator
-    int N,                                                 // Hilbert space dimension
-    int max_iter,                                          // Maximum iterations
-    int num_eigenvalues,                                   // Number of eigenvalues to find
+    uint64_t N,                                                 // Hilbert space dimension
+    uint64_t max_iter,                                          // Maximum iterations
+    uint64_t num_eigenvalues,                                   // Number of eigenvalues to find
     double tol,                                            // Tolerance for convergence
     std::vector<double>& eigenvalues,                      // Output eigenvalues
     std::vector<ComplexVector>& eigenvectors,              // Output eigenvectors
@@ -448,7 +448,7 @@ void lobpcg_method(
     eigenvectors.resize(num_eigenvalues, ComplexVector(N));
     
     // Block size = number of eigenvalues to find
-    int block_size = num_eigenvalues;
+    uint64_t block_size = num_eigenvalues;
     
     // Workspace for LOBPCG
     // [0] W (residuals), [1] X (current vectors), [2] P (search directions)
@@ -509,7 +509,7 @@ void lobpcg_method(
     std::cout << std::endl;
     
     // Subspace size is 3*block_size (for W, X, P)
-    int nsub = 3 * block_size;
+    uint64_t nsub = 3 * block_size;
     std::vector<Complex> hsub(nsub * nsub, Complex(0.0, 0.0));
     std::vector<Complex> ovlp(nsub * nsub, Complex(0.0, 0.0));
     std::vector<double> eigsub(nsub, 0.0);
@@ -605,7 +605,7 @@ void lobpcg_method(
         Eigen::MatrixXcd o_eigenvecs = o_solver.eigenvectors();
         
         // Compute O^(-1/2) using only non-negligible eigenvalues
-        int nsub_cut = 0;
+        uint64_t nsub_cut = 0;
         for (int i = 0; i < nsub; i++) {
             if (o_eigenvals(i) > 1.0e-10) {
                 nsub_cut++;
@@ -613,7 +613,7 @@ void lobpcg_method(
         }
         
         Eigen::MatrixXcd o_sqrt_inv = Eigen::MatrixXcd::Zero(nsub, nsub_cut);
-        int idx = 0;
+        uint64_t idx = 0;
         for (int i = 0; i < nsub; i++) {
             if (o_eigenvals(i) > 1.0e-10) {
                 o_sqrt_inv.col(idx) = o_eigenvecs.col(i) / std::sqrt(o_eigenvals(i));
@@ -732,9 +732,9 @@ void lobpcg_method(
 // Function with same interface as cg_diagonalization
 void lobpcg_diagonalization(
     std::function<void(const Complex*, Complex*, int)> H, 
-    int N, 
-    int max_iter, 
-    int exct, 
+    uint64_t N, 
+    uint64_t max_iter, 
+    uint64_t exct, 
     double tol, 
     std::vector<double>& eigenvalues, 
     std::string dir,
