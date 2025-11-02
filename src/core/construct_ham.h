@@ -2280,5 +2280,359 @@ public:
     }
 };
 
+/**
+ * Base class for position-dependent operators in fixed Sz sector
+ */
+class FixedSzBasePositionOperator : public FixedSzOperator {
+protected:
+    std::vector<std::vector<double>> readPositionsFromFile(const std::string& filename, uint64_t expected_sites) {
+        std::ifstream file(filename);
+        if (!file.is_open()) {
+            throw std::runtime_error("Could not open positions file: " + filename);
+        }
+        
+        std::vector<std::vector<double>> positions(expected_sites);
+        std::string line;
+        
+        while (std::getline(file, line) && line[0] == '#');
+        
+        bool process_current = !line.empty() && line[0] != '#';
+        
+        do {
+            if (line.empty() || line[0] == '#') continue;
+            
+            std::istringstream iss(line);
+            uint64_t site_id, matrix_idx, sublattice;
+            double x, y, z;
+            
+            if (iss >> site_id >> matrix_idx >> sublattice >> x >> y >> z) {
+                if (site_id >= 0 && site_id < expected_sites) {
+                    positions[site_id] = {x, y, z};
+                }
+            }
+        } while (std::getline(file, line));
+        
+        return positions;
+    }
+    
+    std::vector<Complex> calculatePhaseFactors(const std::vector<double>& Q_vector,
+                                                const std::vector<std::vector<double>>& positions,
+                                                double normalization) {
+        std::vector<Complex> phases(positions.size());
+        for (size_t i = 0; i < positions.size(); ++i) {
+            double dot_product = 0.0;
+            for (size_t d = 0; d < 3; ++d) {
+                dot_product += Q_vector[d] * positions[i][d];
+            }
+            phases[i] = normalization * std::exp(Complex(0.0, dot_product));
+        }
+        return phases;
+    }
+    
+public:
+    FixedSzBasePositionOperator(uint64_t num_site, float spin_l, uint64_t n_up) 
+        : FixedSzOperator(num_site, spin_l, n_up) {}
+};
+
+/**
+ * Sum operator for fixed Sz sector: S^α = Σᵢ S^α_i e^(iQ·Rᵢ) / √N
+ */
+class FixedSzSumOperator : public FixedSzBasePositionOperator {
+public:
+    FixedSzSumOperator(uint64_t num_site, float spin_l, uint64_t n_up, uint64_t op, 
+                       const std::vector<double>& Q_vector, const std::string& positions_file)
+        : FixedSzBasePositionOperator(num_site, spin_l, n_up) {
+        
+        auto positions = readPositionsFromFile(positions_file, num_site);
+        auto phases = calculatePhaseFactors(Q_vector, positions, 1.0 / std::sqrt(num_site));
+        
+        for (uint64_t site = 0; site < num_site; ++site) {
+            Complex phase = phases[site];
+            addTransform([=](uint64_t basis) -> std::pair<int, Complex> {
+                if (op == 2) {
+                    return {basis, phase * Complex(spin_l * pow(-1, (basis >> site) & 1), 0.0)};
+                } else {
+                    if (((basis >> site) & 1) != op) {
+                        uint64_t flipped = basis ^ (1 << site);
+                        return {flipped, phase};
+                    }
+                }
+                return {basis, Complex(0.0, 0.0)};
+            });
+        }
+    }
+};
+
+/**
+ * Sum operator with Cartesian basis for fixed Sz sector (Sx, Sy, Sz)
+ */
+class FixedSzSumOperatorXYZ : public FixedSzBasePositionOperator {
+public:
+    FixedSzSumOperatorXYZ(uint64_t num_site, float spin_l, uint64_t n_up, uint64_t op,
+                          const std::vector<double>& Q_vector, const std::string& positions_file)
+        : FixedSzBasePositionOperator(num_site, spin_l, n_up) {
+        
+        auto positions = readPositionsFromFile(positions_file, num_site);
+        auto phases = calculatePhaseFactors(Q_vector, positions, 1.0 / std::sqrt(num_site));
+        
+        for (uint64_t site = 0; site < num_site; ++site) {
+            Complex phase = phases[site];
+            
+            if (op == 0) {
+                // Sx = (S+ + S-) / 2
+                addTransform([=](uint64_t basis) -> std::pair<int, Complex> {
+                    uint64_t flipped = basis ^ (1 << site);
+                    return {flipped, phase * Complex(0.5, 0.0)};
+                });
+            } else if (op == 1) {
+                // Sy = (S+ - S-) / (2i)
+                addTransform([=](uint64_t basis) -> std::pair<int, Complex> {
+                    uint64_t flipped = basis ^ (1 << site);
+                    bool is_up = ((basis >> site) & 1) == 0;
+                    return {flipped, phase * Complex(0.0, is_up ? 0.5 : -0.5)};
+                });
+            } else if (op == 2) {
+                // Sz
+                addTransform([=](uint64_t basis) -> std::pair<int, Complex> {
+                    return {basis, phase * Complex(spin_l * pow(-1, (basis >> site) & 1), 0.0)};
+                });
+            }
+        }
+    }
+};
+
+/**
+ * Sublattice operator for fixed Sz sector: sum over specific sublattice sites
+ */
+class FixedSzSublatticeOperator : public FixedSzBasePositionOperator {
+public:
+    FixedSzSublatticeOperator(uint64_t sublattice_idx, uint64_t unit_cell_size, uint64_t num_site, 
+                              float spin_l, uint64_t n_up, uint64_t op, 
+                              const std::vector<double>& Q_vector, const std::string& positions_file)
+        : FixedSzBasePositionOperator(num_site, spin_l, n_up) {
+        
+        auto positions = readPositionsFromFile(positions_file, num_site);
+        auto phases = calculatePhaseFactors(Q_vector, positions, 1.0 / std::sqrt(num_site));
+        
+        for (uint64_t site = sublattice_idx; site < num_site; site += unit_cell_size) {
+            Complex phase = phases[site];
+            addTransform([=](uint64_t basis) -> std::pair<int, Complex> {
+                if (op == 2) {
+                    return {basis, phase * Complex(spin_l * pow(-1, (basis >> site) & 1), 0.0)};
+                } else {
+                    if (((basis >> site) & 1) != op) {
+                        uint64_t flipped = basis ^ (1 << site);
+                        return {flipped, phase};
+                    }
+                }
+                return {basis, Complex(0.0, 0.0)};
+            });
+        }
+    }
+};
+
+/**
+ * Transverse operator for fixed Sz sector with sublattice-dependent weighting
+ */
+class FixedSzTransverseOperator : public FixedSzBasePositionOperator {
+public:
+    FixedSzTransverseOperator(uint64_t num_site, float spin_l, uint64_t n_up, uint64_t op,
+                              const std::vector<double>& Q_vector, const std::vector<double>& v,
+                              const std::string& positions_file)
+        : FixedSzBasePositionOperator(num_site, spin_l, n_up) {
+        
+        auto positions = readPositionsFromFile(positions_file, num_site);
+        
+        // Calculate transverse phase factors with sublattice weighting
+        std::vector<Complex> phases(num_site);
+        const std::vector<std::vector<double>> z_mu = {
+            {-1/std::sqrt(3), -1/std::sqrt(3), -1/std::sqrt(3)},
+            {-1/std::sqrt(3), 1/std::sqrt(3), 1/std::sqrt(3)},
+            {1/std::sqrt(3), -1/std::sqrt(3), 1/std::sqrt(3)},
+            {1/std::sqrt(3), 1/std::sqrt(3), -1/std::sqrt(3)}
+        };
+        
+        for (uint64_t i = 0; i < num_site; ++i) {
+            double Q_dot_R = 0.0;
+            for (uint64_t d = 0; d < 3; ++d) {
+                Q_dot_R += Q_vector[d] * positions[i][d];
+            }
+            
+            uint64_t sublattice = i % 4;
+            double v_dot_z = 0.0;
+            for (uint64_t d = 0; d < 3; ++d) {
+                v_dot_z += v[d] * z_mu[sublattice][d];
+            }
+            
+            phases[i] = (1.0 / std::sqrt(num_site)) * v_dot_z * std::exp(Complex(0.0, Q_dot_R));
+        }
+        
+        for (uint64_t site = 0; site < num_site; ++site) {
+            Complex phase = phases[site];
+            addTransform([=](uint64_t basis) -> std::pair<int, Complex> {
+                if (op == 2) {
+                    return {basis, phase * Complex(spin_l * pow(-1, (basis >> site) & 1), 0.0)};
+                } else {
+                    if (((basis >> site) & 1) != op) {
+                        uint64_t flipped = basis ^ (1 << site);
+                        return {flipped, phase};
+                    }
+                }
+                return {basis, Complex(0.0, 0.0)};
+            });
+        }
+    }
+};
+
+/**
+ * Transverse operator with Cartesian basis for fixed Sz sector
+ */
+class FixedSzTransverseOperatorXYZ : public FixedSzBasePositionOperator {
+public:
+    FixedSzTransverseOperatorXYZ(uint64_t num_site, float spin_l, uint64_t n_up, uint64_t op,
+                                 const std::vector<double>& Q_vector, const std::vector<double>& v,
+                                 const std::string& positions_file)
+        : FixedSzBasePositionOperator(num_site, spin_l, n_up) {
+        
+        auto positions = readPositionsFromFile(positions_file, num_site);
+        
+        // Calculate transverse phase factors with sublattice weighting
+        std::vector<Complex> phases(num_site);
+        const std::vector<std::vector<double>> z_mu = {
+            {-1/std::sqrt(3), -1/std::sqrt(3), -1/std::sqrt(3)},
+            {-1/std::sqrt(3), 1/std::sqrt(3), 1/std::sqrt(3)},
+            {1/std::sqrt(3), -1/std::sqrt(3), 1/std::sqrt(3)},
+            {1/std::sqrt(3), 1/std::sqrt(3), -1/std::sqrt(3)}
+        };
+        
+        for (uint64_t i = 0; i < num_site; ++i) {
+            double Q_dot_R = 0.0;
+            for (uint64_t d = 0; d < 3; ++d) {
+                Q_dot_R += Q_vector[d] * positions[i][d];
+            }
+            
+            uint64_t sublattice = i % 4;
+            double v_dot_z = 0.0;
+            for (uint64_t d = 0; d < 3; ++d) {
+                v_dot_z += v[d] * z_mu[sublattice][d];
+            }
+            
+            phases[i] = (1.0 / std::sqrt(num_site)) * v_dot_z * std::exp(Complex(0.0, Q_dot_R));
+        }
+        
+        for (uint64_t site = 0; site < num_site; ++site) {
+            Complex phase = phases[site];
+            
+            if (op == 0) {
+                // Sx
+                addTransform([=](uint64_t basis) -> std::pair<int, Complex> {
+                    uint64_t flipped = basis ^ (1 << site);
+                    return {flipped, phase * Complex(0.5, 0.0)};
+                });
+            } else if (op == 1) {
+                // Sy
+                addTransform([=](uint64_t basis) -> std::pair<int, Complex> {
+                    uint64_t flipped = basis ^ (1 << site);
+                    bool is_up = ((basis >> site) & 1) == 0;
+                    return {flipped, phase * Complex(0.0, is_up ? 0.5 : -0.5)};
+                });
+            } else if (op == 2) {
+                // Sz
+                addTransform([=](uint64_t basis) -> std::pair<int, Complex> {
+                    return {basis, phase * Complex(spin_l * pow(-1, (basis >> site) & 1), 0.0)};
+                });
+            }
+        }
+    }
+};
+
+/**
+ * Experimental operator for fixed Sz sector: cos(θ)Sz + sin(θ)Sx
+ */
+class FixedSzExperimentalOperator : public FixedSzBasePositionOperator {
+public:
+    FixedSzExperimentalOperator(uint64_t num_site, float spin_l, uint64_t n_up, double theta,
+                                const std::vector<double>& Q_vector, const std::string& positions_file)
+        : FixedSzBasePositionOperator(num_site, spin_l, n_up) {
+        
+        auto positions = readPositionsFromFile(positions_file, num_site);
+        auto phases = calculatePhaseFactors(Q_vector, positions, 1.0 / std::sqrt(num_site));
+        
+        double cos_theta = std::cos(theta);
+        double sin_theta = std::sin(theta);
+        
+        for (uint64_t site = 0; site < num_site; ++site) {
+            Complex phase = phases[site];
+            
+            // Sz contribution
+            addTransform([=](uint64_t basis) -> std::pair<int, Complex> {
+                return {basis, phase * Complex(cos_theta * spin_l * pow(-1, (basis >> site) & 1), 0.0)};
+            });
+            
+            // Sx contribution = (S+ + S-) / 2
+            addTransform([=](uint64_t basis) -> std::pair<int, Complex> {
+                uint64_t flipped = basis ^ (1 << site);
+                return {flipped, phase * Complex(sin_theta * 0.5, 0.0)};
+            });
+        }
+    }
+};
+
+/**
+ * Transverse experimental operator for fixed Sz sector with sublattice weighting
+ */
+class FixedSzTransverseExperimentalOperator : public FixedSzBasePositionOperator {
+public:
+    FixedSzTransverseExperimentalOperator(uint64_t num_site, float spin_l, uint64_t n_up, double theta,
+                                          const std::vector<double>& Q_vector, const std::vector<double>& v,
+                                          const std::string& positions_file)
+        : FixedSzBasePositionOperator(num_site, spin_l, n_up) {
+        
+        auto positions = readPositionsFromFile(positions_file, num_site);
+        
+        // Calculate transverse phase factors
+        std::vector<Complex> phases(num_site);
+        const std::vector<std::vector<double>> z_mu = {
+            {-1/std::sqrt(3), -1/std::sqrt(3), -1/std::sqrt(3)},
+            {-1/std::sqrt(3), 1/std::sqrt(3), 1/std::sqrt(3)},
+            {1/std::sqrt(3), -1/std::sqrt(3), 1/std::sqrt(3)},
+            {1/std::sqrt(3), 1/std::sqrt(3), -1/std::sqrt(3)}
+        };
+        
+        for (uint64_t i = 0; i < num_site; ++i) {
+            double Q_dot_R = 0.0;
+            for (uint64_t d = 0; d < 3; ++d) {
+                Q_dot_R += Q_vector[d] * positions[i][d];
+            }
+            
+            uint64_t sublattice = i % 4;
+            double v_dot_z = 0.0;
+            for (uint64_t d = 0; d < 3; ++d) {
+                v_dot_z += v[d] * z_mu[sublattice][d];
+            }
+            
+            phases[i] = (1.0 / std::sqrt(num_site)) * v_dot_z * std::exp(Complex(0.0, Q_dot_R));
+        }
+        
+        double cos_theta = std::cos(theta);
+        double sin_theta = std::sin(theta);
+        
+        for (uint64_t site = 0; site < num_site; ++site) {
+            Complex phase = phases[site];
+            
+            // Sz contribution
+            addTransform([=](uint64_t basis) -> std::pair<int, Complex> {
+                return {basis, phase * Complex(cos_theta * spin_l * pow(-1, (basis >> site) & 1), 0.0)};
+            });
+            
+            // Sx contribution
+            addTransform([=](uint64_t basis) -> std::pair<int, Complex> {
+                uint64_t flipped = basis ^ (1 << site);
+                return {flipped, phase * Complex(sin_theta * 0.5, 0.0)};
+            });
+        }
+    }
+};
+
 #endif // CONSTRUCT_HAM_H
 

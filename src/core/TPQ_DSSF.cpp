@@ -199,9 +199,9 @@ int main(int argc, char* argv[]) {
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
     MPI_Comm_size(MPI_COMM_WORLD, &size);
     
-    if (argc < 4 || argc > 13) {
+    if (argc < 4 || argc > 14) {
         if (rank == 0) {
-            std::cerr << "Usage: " << argv[0] << " <directory> <krylov_dim_or_nmax> <spin_combinations> [method] [operator_type] [basis] [dt,t_end]/[omega_min,omega_max,omega_bins,broadening] [unit_cell_size] [momentum_points] [polarization] [theta] [use_gpu]" << std::endl;
+            std::cerr << "Usage: " << argv[0] << " <directory> <krylov_dim_or_nmax> <spin_combinations> [method] [operator_type] [basis] [dt,t_end]/[omega_min,omega_max,omega_bins,broadening] [unit_cell_size] [momentum_points] [polarization] [theta] [use_gpu] [n_up]" << std::endl;
             std::cerr << "\nNote: num_sites is automatically detected from positions.dat, spin_length is fixed at 0.5" << std::endl;
             std::cerr << "\n" << std::string(80, '=') << std::endl;
             std::cerr << "REQUIRED ARGUMENTS:" << std::endl;
@@ -243,6 +243,10 @@ int main(int argc, char* argv[]) {
             std::cerr << "  polarization (for transverse operators): \"px,py,pz\" normalized vector (default: (1/√2,-1/√2,0))" << std::endl;
             std::cerr << "  theta (for experimental operators): angle in radians (default: 0.0)" << std::endl;
             std::cerr << "  use_gpu (optional): 1 for GPU acceleration, 0 for CPU only (default: 0)" << std::endl;
+            std::cerr << "  n_up (optional): number of up spins for fixed-Sz sector (default: -1 = use full Hilbert space)" << std::endl;
+            std::cerr << "    - When n_up >= 0: restricts to fixed total Sz = n_up - n_down = n_up - (num_sites - n_up)" << std::endl;
+            std::cerr << "    - Reduces Hilbert space dimension from 2^N to C(N, n_up)" << std::endl;
+            std::cerr << "    - Example: for 16 sites with n_up=8, dimension reduces from 65536 to 12870" << std::endl;
             std::cerr << "\n" << std::string(80, '=') << std::endl;
             std::cerr << "SPECTRAL METHOD (method=spectral) DETAILS:" << std::endl;
             std::cerr << std::string(80, '=') << std::endl;
@@ -291,6 +295,8 @@ int main(int argc, char* argv[]) {
             std::cerr << "   " << argv[0] << " ./data 40 \"2,2\" spectral transverse xyz \"-10,10,300,0.2\" 4 \"0,0,0\" \"1,0,0\"" << std::endl;
             std::cerr << "\n4. Experimental geometry with angle:" << std::endl;
             std::cerr << "   " << argv[0] << " ./data 50 \"2,2\" spectral experimental xyz \"-5,5,250,0.1\" 4 \"0,0,0\" \"0,0,0\" 0.785" << std::endl;
+            std::cerr << "\n5. Fixed-Sz sector calculation (Sz = 0 for 16 sites):" << std::endl;
+            std::cerr << "   " << argv[0] << " ./data 50 \"2,2\" spectral sum ladder \"-5,5,200,0.1\" 4 \"0,0,0\" \"0,0,0\" 0 0 8" << std::endl;
         }
         MPI_Finalize();
         return 1;
@@ -495,6 +501,42 @@ int main(int argc, char* argv[]) {
                 std::cerr << "Warning: Failed to parse GPU flag, using CPU" << std::endl;
             }
             use_gpu = false;
+        }
+    }
+
+    // Parse n_up for fixed-Sz sector (optional)
+    int n_up = -1;  // Default: -1 means use full Hilbert space
+    bool use_fixed_sz = false;
+    if (argc >= 14) {
+        try {
+            n_up = std::stoi(argv[13]);
+            if (n_up >= 0 && n_up <= num_sites) {
+                use_fixed_sz = true;
+                if (rank == 0) {
+                    std::cout << "Using fixed-Sz sector: n_up = " << n_up 
+                              << ", Sz = " << (n_up - (num_sites - n_up)) * 0.5 << std::endl;
+                    // Calculate and display dimension
+                    size_t fixed_sz_dim = 1;
+                    for (int i = 0; i < n_up; ++i) {
+                        fixed_sz_dim = fixed_sz_dim * (num_sites - i) / (i + 1);
+                    }
+                    std::cout << "Fixed-Sz dimension: " << fixed_sz_dim 
+                              << " (reduced from " << (1ULL << num_sites) << ")" << std::endl;
+                }
+            } else {
+                if (rank == 0) {
+                    std::cerr << "Warning: Invalid n_up value " << n_up 
+                              << " (must be 0 <= n_up <= " << num_sites << "), using full Hilbert space" << std::endl;
+                }
+                n_up = -1;
+                use_fixed_sz = false;
+            }
+        } catch (...) {
+            if (rank == 0) {
+                std::cerr << "Warning: Failed to parse n_up, using full Hilbert space" << std::endl;
+            }
+            n_up = -1;
+            use_fixed_sz = false;
         }
     }
 
@@ -1042,6 +1084,11 @@ int main(int argc, char* argv[]) {
         std::vector<std::string> obs_names;
         std::string method_dir = output_dir + "/" + operator_type;
         
+        // Add suffix to directory if using fixed-Sz
+        if (use_fixed_sz) {
+            method_dir += "_fixed_sz_nup" + std::to_string(n_up);
+        }
+        
         const auto &Q = momentum_points[momentum_idx];
         int op_type_1 = spin_combinations[combo_idx].first;
         int op_type_2 = spin_combinations[combo_idx].second;
@@ -1054,16 +1101,32 @@ int main(int argc, char* argv[]) {
                 name_ss << base_name << "_q_Qx" << Q[0] << "_Qy" << Q[1] << "_Qz" << Q[2];
                 obs_names.push_back(name_ss.str());
                 
-                if (use_xyz_basis) {
-                    SumOperatorXYZ sum_op_1(num_sites, spin_length, op_type_1, momentum_points[momentum_idx], positions_file);
-                    SumOperatorXYZ sum_op_2(num_sites, spin_length, op_type_2, momentum_points[momentum_idx], positions_file);
-                    obs_1.push_back(Operator(sum_op_1));
-                    obs_2.push_back(Operator(sum_op_2));
+                if (use_fixed_sz) {
+                    // Fixed-Sz operators
+                    if (use_xyz_basis) {
+                        FixedSzSumOperatorXYZ sum_op_1(num_sites, spin_length, n_up, op_type_1, momentum_points[momentum_idx], positions_file);
+                        FixedSzSumOperatorXYZ sum_op_2(num_sites, spin_length, n_up, op_type_2, momentum_points[momentum_idx], positions_file);
+                        obs_1.push_back(Operator(sum_op_1));
+                        obs_2.push_back(Operator(sum_op_2));
+                    } else {
+                        FixedSzSumOperator sum_op_1(num_sites, spin_length, n_up, op_type_1, momentum_points[momentum_idx], positions_file);
+                        FixedSzSumOperator sum_op_2(num_sites, spin_length, n_up, op_type_2, momentum_points[momentum_idx], positions_file);
+                        obs_1.push_back(Operator(sum_op_1));
+                        obs_2.push_back(Operator(sum_op_2));
+                    }
                 } else {
-                    SumOperator sum_op_1(num_sites, spin_length, op_type_1, momentum_points[momentum_idx], positions_file);
-                    SumOperator sum_op_2(num_sites, spin_length, op_type_2, momentum_points[momentum_idx], positions_file);
-                    obs_1.push_back(Operator(sum_op_1));
-                    obs_2.push_back(Operator(sum_op_2));
+                    // Full Hilbert space operators
+                    if (use_xyz_basis) {
+                        SumOperatorXYZ sum_op_1(num_sites, spin_length, op_type_1, momentum_points[momentum_idx], positions_file);
+                        SumOperatorXYZ sum_op_2(num_sites, spin_length, op_type_2, momentum_points[momentum_idx], positions_file);
+                        obs_1.push_back(Operator(sum_op_1));
+                        obs_2.push_back(Operator(sum_op_2));
+                    } else {
+                        SumOperator sum_op_1(num_sites, spin_length, op_type_1, momentum_points[momentum_idx], positions_file);
+                        SumOperator sum_op_2(num_sites, spin_length, op_type_2, momentum_points[momentum_idx], positions_file);
+                        obs_1.push_back(Operator(sum_op_1));
+                        obs_2.push_back(Operator(sum_op_2));
+                    }
                 }
                 
             } else if (operator_type == "transverse") {
@@ -1081,26 +1144,52 @@ int main(int argc, char* argv[]) {
                 std::stringstream name_nsf;
                 name_nsf << base_name << "_q_Qx" << Q[0] << "_Qy" << Q[1] << "_Qz" << Q[2] << "_SF";
                 
-                if (use_xyz_basis) {
-                    TransverseOperatorXYZ op1_sf(num_sites, spin_length, op_type_1, momentum_points[momentum_idx], e1_vec, positions_file);
-                    TransverseOperatorXYZ op2_sf(num_sites, spin_length, op_type_2, momentum_points[momentum_idx], e1_vec, positions_file);
-                    TransverseOperatorXYZ op1_nsf(num_sites, spin_length, op_type_1, momentum_points[momentum_idx], e2_vec, positions_file);
-                    TransverseOperatorXYZ op2_nsf(num_sites, spin_length, op_type_2, momentum_points[momentum_idx], e2_vec, positions_file);
-                    
-                    obs_1.push_back(Operator(op1_sf));
-                    obs_2.push_back(Operator(op2_sf));
-                    obs_1.push_back(Operator(op1_nsf));
-                    obs_2.push_back(Operator(op2_nsf));
+                if (use_fixed_sz) {
+                    // Fixed-Sz transverse operators
+                    if (use_xyz_basis) {
+                        FixedSzTransverseOperatorXYZ op1_sf(num_sites, spin_length, n_up, op_type_1, momentum_points[momentum_idx], e1_vec, positions_file);
+                        FixedSzTransverseOperatorXYZ op2_sf(num_sites, spin_length, n_up, op_type_2, momentum_points[momentum_idx], e1_vec, positions_file);
+                        FixedSzTransverseOperatorXYZ op1_nsf(num_sites, spin_length, n_up, op_type_1, momentum_points[momentum_idx], e2_vec, positions_file);
+                        FixedSzTransverseOperatorXYZ op2_nsf(num_sites, spin_length, n_up, op_type_2, momentum_points[momentum_idx], e2_vec, positions_file);
+                        
+                        obs_1.push_back(Operator(op1_sf));
+                        obs_2.push_back(Operator(op2_sf));
+                        obs_1.push_back(Operator(op1_nsf));
+                        obs_2.push_back(Operator(op2_nsf));
+                    } else {
+                        FixedSzTransverseOperator op1_sf(num_sites, spin_length, n_up, op_type_1, momentum_points[momentum_idx], e1_vec, positions_file);
+                        FixedSzTransverseOperator op2_sf(num_sites, spin_length, n_up, op_type_2, momentum_points[momentum_idx], e1_vec, positions_file);
+                        FixedSzTransverseOperator op1_nsf(num_sites, spin_length, n_up, op_type_1, momentum_points[momentum_idx], e2_vec, positions_file);
+                        FixedSzTransverseOperator op2_nsf(num_sites, spin_length, n_up, op_type_2, momentum_points[momentum_idx], e2_vec, positions_file);
+                        
+                        obs_1.push_back(Operator(op1_sf));
+                        obs_2.push_back(Operator(op2_sf));
+                        obs_1.push_back(Operator(op1_nsf));
+                        obs_2.push_back(Operator(op2_nsf));
+                    }
                 } else {
-                    TransverseOperator op1_sf(num_sites, spin_length, op_type_1, momentum_points[momentum_idx], e1_vec, positions_file);
-                    TransverseOperator op2_sf(num_sites, spin_length, op_type_2, momentum_points[momentum_idx], e1_vec, positions_file);
-                    TransverseOperator op1_nsf(num_sites, spin_length, op_type_1, momentum_points[momentum_idx], e2_vec, positions_file);
-                    TransverseOperator op2_nsf(num_sites, spin_length, op_type_2, momentum_points[momentum_idx], e2_vec, positions_file);
-                    
-                    obs_1.push_back(Operator(op1_sf));
-                    obs_2.push_back(Operator(op2_sf));
-                    obs_1.push_back(Operator(op1_nsf));
-                    obs_2.push_back(Operator(op2_nsf));
+                    // Full Hilbert space transverse operators
+                    if (use_xyz_basis) {
+                        TransverseOperatorXYZ op1_sf(num_sites, spin_length, op_type_1, momentum_points[momentum_idx], e1_vec, positions_file);
+                        TransverseOperatorXYZ op2_sf(num_sites, spin_length, op_type_2, momentum_points[momentum_idx], e1_vec, positions_file);
+                        TransverseOperatorXYZ op1_nsf(num_sites, spin_length, op_type_1, momentum_points[momentum_idx], e2_vec, positions_file);
+                        TransverseOperatorXYZ op2_nsf(num_sites, spin_length, op_type_2, momentum_points[momentum_idx], e2_vec, positions_file);
+                        
+                        obs_1.push_back(Operator(op1_sf));
+                        obs_2.push_back(Operator(op2_sf));
+                        obs_1.push_back(Operator(op1_nsf));
+                        obs_2.push_back(Operator(op2_nsf));
+                    } else {
+                        TransverseOperator op1_sf(num_sites, spin_length, op_type_1, momentum_points[momentum_idx], e1_vec, positions_file);
+                        TransverseOperator op2_sf(num_sites, spin_length, op_type_2, momentum_points[momentum_idx], e1_vec, positions_file);
+                        TransverseOperator op1_nsf(num_sites, spin_length, op_type_1, momentum_points[momentum_idx], e2_vec, positions_file);
+                        TransverseOperator op2_nsf(num_sites, spin_length, op_type_2, momentum_points[momentum_idx], e2_vec, positions_file);
+                        
+                        obs_1.push_back(Operator(op1_sf));
+                        obs_2.push_back(Operator(op2_sf));
+                        obs_1.push_back(Operator(op1_nsf));
+                        obs_2.push_back(Operator(op2_nsf));
+                    }
                 }
                 
                 obs_names.push_back(name_sf.str());
@@ -1114,11 +1203,22 @@ int main(int argc, char* argv[]) {
                 obs_names.push_back(name_ss.str());
                 
                 std::vector<double> Q_vec = {Q[0], Q[1], Q[2]};
-                SublatticeOperator sub_op_1(sublattice_i, unit_cell_size, num_sites, spin_length, op_type_1, Q_vec, positions_file);
-                SublatticeOperator sub_op_2(sublattice_j, unit_cell_size, num_sites, spin_length, op_type_2, Q_vec, positions_file);
                 
-                obs_1.push_back(Operator(sub_op_1));
-                obs_2.push_back(Operator(sub_op_2));
+                if (use_fixed_sz) {
+                    // Fixed-Sz sublattice operators
+                    FixedSzSublatticeOperator sub_op_1(sublattice_i, unit_cell_size, num_sites, spin_length, n_up, op_type_1, Q_vec, positions_file);
+                    FixedSzSublatticeOperator sub_op_2(sublattice_j, unit_cell_size, num_sites, spin_length, n_up, op_type_2, Q_vec, positions_file);
+                    
+                    obs_1.push_back(Operator(sub_op_1));
+                    obs_2.push_back(Operator(sub_op_2));
+                } else {
+                    // Full Hilbert space sublattice operators
+                    SublatticeOperator sub_op_1(sublattice_i, unit_cell_size, num_sites, spin_length, op_type_1, Q_vec, positions_file);
+                    SublatticeOperator sub_op_2(sublattice_j, unit_cell_size, num_sites, spin_length, op_type_2, Q_vec, positions_file);
+                    
+                    obs_1.push_back(Operator(sub_op_1));
+                    obs_2.push_back(Operator(sub_op_2));
+                }
                 
             } else if (operator_type == "experimental") {
                 // Experimental operators: cos(θ)Sz + sin(θ)Sx
@@ -1126,11 +1226,21 @@ int main(int argc, char* argv[]) {
                 name_ss << "Experimental_q_Qx" << Q[0] << "_Qy" << Q[1] << "_Qz" << Q[2] << "_theta" << theta;
                 obs_names.push_back(name_ss.str());
                 
-                ExperimentalOperator exp_op_1(num_sites, spin_length, theta, momentum_points[momentum_idx], positions_file);
-                ExperimentalOperator exp_op_2(num_sites, spin_length, theta, momentum_points[momentum_idx], positions_file);
-                
-                obs_1.push_back(Operator(exp_op_1));
-                obs_2.push_back(Operator(exp_op_2));
+                if (use_fixed_sz) {
+                    // Fixed-Sz experimental operators
+                    FixedSzExperimentalOperator exp_op_1(num_sites, spin_length, n_up, theta, momentum_points[momentum_idx], positions_file);
+                    FixedSzExperimentalOperator exp_op_2(num_sites, spin_length, n_up, theta, momentum_points[momentum_idx], positions_file);
+                    
+                    obs_1.push_back(Operator(exp_op_1));
+                    obs_2.push_back(Operator(exp_op_2));
+                } else {
+                    // Full Hilbert space experimental operators
+                    ExperimentalOperator exp_op_1(num_sites, spin_length, theta, momentum_points[momentum_idx], positions_file);
+                    ExperimentalOperator exp_op_2(num_sites, spin_length, theta, momentum_points[momentum_idx], positions_file);
+                    
+                    obs_1.push_back(Operator(exp_op_1));
+                    obs_2.push_back(Operator(exp_op_2));
+                }
                 
             } else if (operator_type == "transverse_experimental") {
                 // Transverse experimental operators with SF/NSF separation: cos(θ)Sz + sin(θ)Sx
@@ -1149,15 +1259,29 @@ int main(int argc, char* argv[]) {
                 name_nsf << "TransverseExperimental_q_Qx" << Q[0] << "_Qy" << Q[1] << "_Qz" << Q[2] 
                          << "_theta" << theta << "_SF";
                 
-                TransverseExperimentalOperator op1_sf(num_sites, spin_length, theta, momentum_points[momentum_idx], e1_vec, positions_file);
-                TransverseExperimentalOperator op2_sf(num_sites, spin_length, theta, momentum_points[momentum_idx], e1_vec, positions_file);
-                TransverseExperimentalOperator op1_nsf(num_sites, spin_length, theta, momentum_points[momentum_idx], e2_vec, positions_file);
-                TransverseExperimentalOperator op2_nsf(num_sites, spin_length, theta, momentum_points[momentum_idx], e2_vec, positions_file);
-                
-                obs_1.push_back(Operator(op1_sf));
-                obs_2.push_back(Operator(op2_sf));
-                obs_1.push_back(Operator(op1_nsf));
-                obs_2.push_back(Operator(op2_nsf));
+                if (use_fixed_sz) {
+                    // Fixed-Sz transverse experimental operators
+                    FixedSzTransverseExperimentalOperator op1_sf(num_sites, spin_length, n_up, theta, momentum_points[momentum_idx], e1_vec, positions_file);
+                    FixedSzTransverseExperimentalOperator op2_sf(num_sites, spin_length, n_up, theta, momentum_points[momentum_idx], e1_vec, positions_file);
+                    FixedSzTransverseExperimentalOperator op1_nsf(num_sites, spin_length, n_up, theta, momentum_points[momentum_idx], e2_vec, positions_file);
+                    FixedSzTransverseExperimentalOperator op2_nsf(num_sites, spin_length, n_up, theta, momentum_points[momentum_idx], e2_vec, positions_file);
+                    
+                    obs_1.push_back(Operator(op1_sf));
+                    obs_2.push_back(Operator(op2_sf));
+                    obs_1.push_back(Operator(op1_nsf));
+                    obs_2.push_back(Operator(op2_nsf));
+                } else {
+                    // Full Hilbert space transverse experimental operators
+                    TransverseExperimentalOperator op1_sf(num_sites, spin_length, theta, momentum_points[momentum_idx], e1_vec, positions_file);
+                    TransverseExperimentalOperator op2_sf(num_sites, spin_length, theta, momentum_points[momentum_idx], e1_vec, positions_file);
+                    TransverseExperimentalOperator op1_nsf(num_sites, spin_length, theta, momentum_points[momentum_idx], e2_vec, positions_file);
+                    TransverseExperimentalOperator op2_nsf(num_sites, spin_length, theta, momentum_points[momentum_idx], e2_vec, positions_file);
+                    
+                    obs_1.push_back(Operator(op1_sf));
+                    obs_2.push_back(Operator(op2_sf));
+                    obs_1.push_back(Operator(op1_nsf));
+                    obs_2.push_back(Operator(op2_nsf));
+                }
                 
                 obs_names.push_back(name_sf.str());
                 obs_names.push_back(name_nsf.str());
