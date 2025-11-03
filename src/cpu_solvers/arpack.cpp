@@ -243,13 +243,13 @@ int arpack_core(const std::function<void(const Complex*, Complex*, int)>& H,
                 std::vector<Complex>& evecs_out,
                 bool want_evecs,
                 const std::function<void(const Complex*, Complex*, int)>* M_prec,
-                uint64_t explicit_ncv,
+                int64_t explicit_ncv,
                 bool use_initial_resid,
                 const std::vector<Complex>* initial_resid,
                 uint64_t inner_max_override,
                 double inner_tol_override) {
     
-    uint64_t ncv = (explicit_ncv > 0) ? std::min(N, explicit_ncv)
+    uint64_t ncv = (explicit_ncv > 0) ? std::min(N, static_cast<uint64_t>(explicit_ncv))
                                  : std::min(N, std::max(uint64_t(4 * nev + 20), uint64_t(30)));
     uint64_t ldv = N;
     

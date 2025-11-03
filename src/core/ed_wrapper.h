@@ -228,7 +228,7 @@ struct EDParameters {
     // These mirror (a subset of) detail_arpack::ArpackAdvancedOptions
     bool arpack_advanced_verbose = false;
     std::string arpack_which = "SR";                            // SR=Smallest Real (ground state), LR=Largest Real, SM/LM=by magnitude
-    uint64_t arpack_ncv = -1;                                        // Number of Lanczos vectors
+    int64_t arpack_ncv = -1;                                        // Number of Lanczos vectors
     uint64_t arpack_max_restarts = 2;                                // Maximum number of restarts
     double arpack_ncv_growth = 1.5;                             // Growth factor for ncv
     bool arpack_auto_enlarge_ncv = true;                        // Automatically enlarge ncv

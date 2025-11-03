@@ -148,7 +148,7 @@ struct SystemConfig {
     
     // Fixed Sz mode
     bool use_fixed_sz = false;
-    uint64_t n_up = -1;  // Number of up spins (-1 = not set, will use num_sites/2)
+    int64_t n_up = -1;  // Number of up spins (-1 = not set, will use num_sites/2)
     
     std::string hamiltonian_dir = "";
     std::string interaction_file = "InterAll.dat";
@@ -161,7 +161,7 @@ struct SystemConfig {
 struct ArpackConfig {
     bool verbose = false;
     std::string which = "SR";  // For Hermitian matrices: SR=Smallest Real (ground state), LR=Largest Real
-    uint64_t ncv = -1;
+    int64_t ncv = -1;
     uint64_t max_restarts = 2;
     double ncv_growth = 1.5;
     bool auto_enlarge_ncv = true;

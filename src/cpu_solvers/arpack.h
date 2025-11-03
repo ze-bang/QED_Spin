@@ -26,7 +26,7 @@ struct ArpackAdvancedOptions {
     std::string which = "SM";    // which set (SM, LM, SR, LR, etc.)
     double tol = 1e-10;          // target final tolerance
     uint64_t max_iter = 1000;         // max Arnoldi iterations (iparam[2])
-    uint64_t ncv = -1;                // subspace dimension override (if <=0 use heuristic)
+    int64_t ncv = -1;                // subspace dimension override (if <=0 use heuristic)
 
     // Multi-attempt escalation
     bool auto_enlarge_ncv = true;
@@ -127,7 +127,7 @@ int arpack_core(const std::function<void(const Complex*, Complex*, int)>& H,
                 std::vector<Complex>& evecs_out,
                 bool want_evecs,
                 const std::function<void(const Complex*, Complex*, int)>* M_prec = nullptr,
-                uint64_t explicit_ncv = -1,
+                int64_t explicit_ncv = -1,
                 bool use_initial_resid = false,
                 const std::vector<Complex>* initial_resid = nullptr,
                 uint64_t inner_max_override = -1,

@@ -72,7 +72,7 @@ inline uint64_t popcount(uint64_t x) {
  */
 inline std::vector<uint64_t> generateFixedSzBasis(uint64_t n_bits, uint64_t n_up) {
     std::vector<uint64_t> basis;
-    if (n_up < 0 || n_up > n_bits) return basis;
+    if (n_up > n_bits) return basis;
     
     // Start with lowest n_up bits set
     uint64_t state = (1ULL << n_up) - 1;
@@ -1449,7 +1449,7 @@ public:
           n_up_(n_up),
           fixed_sz_matrix_built_(false) {
         
-        if (n_up < 0 || n_up > n_bits) {
+        if (n_up > n_bits) {
             throw std::invalid_argument("Invalid n_up: must be between 0 and n_bits");
         }
         
