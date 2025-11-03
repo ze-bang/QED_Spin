@@ -327,12 +327,14 @@ namespace ed_internal {
         const std::vector<int>& block_sizes,
         const std::string& directory,
         Operator& hamiltonian,
-        const EDParameters& params
+        const EDParameters& params,
+        bool use_hdf5
     );
     
     void setup_symmetry_basis(
         const std::string& directory,
-        Operator& hamiltonian
+        Operator& hamiltonian,
+        bool use_hdf5
     );
 }
 
@@ -1410,9 +1412,11 @@ GroundStateSectorInfo find_ground_state_sector(
     const std::vector<int>& block_sizes,
     const std::string& directory,
     Operator& hamiltonian,
-    const EDParameters& params
+    const EDParameters& params,
+    bool use_hdf5 = true
 ) {
-    std::cout << "=== Scanning blocks to find ground state sector ===" << std::endl;
+    std::cout << "\n=== Quick Scan: Finding Target Sector ===" << std::endl;
+    std::cout << "Performing lightweight scan of all sectors to identify which contains lowest eigenvalues..." << std::endl;
     
     GroundStateSectorInfo info;
     info.min_energy = std::numeric_limits<double>::max();
@@ -1421,17 +1425,27 @@ GroundStateSectorInfo find_ground_state_sector(
     
     for (size_t block_idx = 0; block_idx < block_sizes.size(); ++block_idx) {
         uint64_t block_dim = block_sizes[block_idx];
-        std::cout << "Scanning block " << block_idx + 1 << "/" << block_sizes.size() 
-                  << " (dimension: " << block_dim << ")" << std::endl;
+        
+        if (block_dim == 0) {
+            std::cout << "  Block " << block_idx << ": empty (skipping)" << std::endl;
+            continue;
+        }
+        
+        std::cout << "  Scanning block " << block_idx << " (dim=" << block_dim << ")..." << std::flush;
         
         // Load block Hamiltonian
-        std::string block_file = directory + "/sym_blocks/block_" + std::to_string(block_idx) + ".dat";
-        Eigen::SparseMatrix<Complex> block_matrix = hamiltonian.loadSymmetrizedBlock(block_file);
+        Eigen::SparseMatrix<Complex> block_matrix;
+        if (use_hdf5) {
+            block_matrix = hamiltonian.loadSymmetrizedBlockHDF5(directory, block_idx);
+        } else {
+            std::string block_file = directory + "/sym_blocks/block_" + std::to_string(block_idx) + ".dat";
+            block_matrix = hamiltonian.loadSymmetrizedBlock(block_file);
+        }
         
-        // Quick Lanczos scan
+        // Quick Lanczos scan with minimal eigenvalues
         EDParameters scan_params = params;
-        scan_params.num_eigenvalues = std::min(static_cast<uint64_t>(10), block_dim);
-        scan_params.max_iterations = scan_params.num_eigenvalues * 4 + 20;
+        scan_params.num_eigenvalues = std::min(static_cast<uint64_t>(5), block_dim);  // Only need a few
+        scan_params.max_iterations = scan_params.num_eigenvalues * 3 + 15;  // Minimal iterations
         scan_params.compute_eigenvectors = false;
         scan_params.calc_observables = false;
         scan_params.measure_spin = false;
@@ -1440,9 +1454,15 @@ GroundStateSectorInfo find_ground_state_sector(
             block_matrix, block_dim, DiagonalizationMethod::LANCZOS, scan_params
         );
         
+        if (block_results.eigenvalues.empty()) {
+            std::cout << " no eigenvalues found" << std::endl;
+            continue;
+        }
+        
         double min_block = *std::min_element(block_results.eigenvalues.begin(), block_results.eigenvalues.end());
         double max_block = *std::max_element(block_results.eigenvalues.begin(), block_results.eigenvalues.end());
-        std::cout << "  Block " << block_idx << ": E_min=" << min_block << ", E_max=" << max_block << std::endl;
+        std::cout << " E_min=" << std::fixed << std::setprecision(6) << min_block 
+                  << ", E_max=" << max_block << std::endl;
         
         if (min_block < info.min_energy) {
             info.min_energy = min_block;
@@ -1451,10 +1471,12 @@ GroundStateSectorInfo find_ground_state_sector(
         }
     }
     
-    std::cout << "\nGround state sector identified:" << std::endl;
+    std::cout << "\n=== Target Sector Identified ===" << std::endl;
     std::cout << "  Block index: " << info.target_block << std::endl;
-    std::cout << "  E_min (estimated ground state): " << info.min_energy << std::endl;
-    std::cout << "  E_max in sector: " << info.max_energy << std::endl;
+    std::cout << "  Block dimension: " << block_sizes[info.target_block] << std::endl;
+    std::cout << "  Estimated E_min: " << std::fixed << std::setprecision(6) << info.min_energy << std::endl;
+    std::cout << "  Estimated E_max: " << info.max_energy << std::endl;
+    std::cout << "=================================\n" << std::endl;
     
     return info;
 }
@@ -1464,31 +1486,48 @@ GroundStateSectorInfo find_ground_state_sector(
  */
 void setup_symmetry_basis(
     const std::string& directory,
-    Operator& hamiltonian
+    Operator& hamiltonian,
+    bool use_hdf5 = true  // Use HDF5 by default for better file management
 ) {
+    std::string hdf5_file = directory + "/symmetry_data.h5";
     std::string sym_basis_dir = directory + "/sym_basis";
     std::string sym_blocks_dir = directory + "/sym_blocks";
     std::string block_sizes_file = sym_basis_dir + "/sym_block_sizes.txt";
     
     struct stat buffer;
-    // Check if the actual block sizes file exists, not just the directory
-    bool sym_basis_exists = (stat(block_sizes_file.c_str(), &buffer) == 0);
     
-    // Check if at least one block file exists (block_0.dat)
-    std::string first_block_file = sym_blocks_dir + "/block_0.dat";
-    bool sym_blocks_exist = (stat(first_block_file.c_str(), &buffer) == 0);
-    
-    if (!sym_basis_exists) {
-        std::cout << "Symmetrized basis not found. Generating..." << std::endl;
-        hamiltonian.generateSymmetrizedBasis(directory);
+    if (use_hdf5) {
+        // HDF5 workflow
+        bool hdf5_exists = HDF5SymmetryIO::fileExists(hdf5_file);
+        
+        if (!hdf5_exists) {
+            std::cout << "Symmetrized basis (HDF5) not found. Generating..." << std::endl;
+            hamiltonian.generateSymmetrizedBasisHDF5(directory);
+            hamiltonian.buildAndSaveSymmetrizedBlocksHDF5(directory);
+        } else {
+            std::cout << "Using existing symmetrized basis from HDF5: " << hdf5_file << std::endl;
+            // Load block sizes from HDF5
+            auto dims = HDF5SymmetryIO::loadSectorDimensions(hdf5_file);
+            hamiltonian.symmetrized_block_ham_sizes.assign(dims.begin(), dims.end());
+        }
     } else {
-        std::cout << "Using existing symmetrized basis from " << sym_basis_dir << std::endl;
-    }
-    
-    if (!sym_blocks_exist) {
-        hamiltonian.buildAndSaveSymmetrizedBlocks(directory);
-    } else {
-        hamiltonian.loadAllSymmetrizedBlocks(directory);
+        // Legacy text file workflow
+        bool sym_basis_exists = (stat(block_sizes_file.c_str(), &buffer) == 0);
+        std::string first_block_file = sym_blocks_dir + "/block_0.dat";
+        bool sym_blocks_exist = (stat(first_block_file.c_str(), &buffer) == 0);
+        
+        if (!sym_basis_exists) {
+            std::cout << "Symmetrized basis not found. Generating..." << std::endl;
+            hamiltonian.generateSymmetrizedBasis(directory);
+        } else {
+            std::cout << "Using existing symmetrized basis from " << sym_basis_dir << std::endl;
+        }
+        
+        if (!sym_blocks_exist) {
+            hamiltonian.buildAndSaveSymmetrizedBlocks(directory);
+        } else {
+            hamiltonian.loadAllSymmetrizedBlocks(directory);
+        }
     }
 }
 
@@ -1899,7 +1938,8 @@ EDResults exact_diagonalization_from_directory_symmetrized(
     hamiltonian.loadFromInterAllFile(interaction_file);
     
     // ========== Step 3: Setup Symmetrized Basis ==========
-    ed_internal::setup_symmetry_basis(directory, hamiltonian);
+    bool use_hdf5 = true;  // Use HDF5 by default
+    ed_internal::setup_symmetry_basis(directory, hamiltonian, use_hdf5);
     
     std::vector<int> block_sizes = hamiltonian.symmetrized_block_ham_sizes;
     std::cout << "Found " << block_sizes.size() << " symmetrized blocks with sizes: ";
@@ -1914,17 +1954,48 @@ EDResults exact_diagonalization_from_directory_symmetrized(
         safe_system_call("mkdir -p " + params.output_dir);
     }
     
-    // ========== Step 4: For TPQ - Find Ground State Sector ==========
+    // ========== Step 4: Determine if we need targeted diagonalization ==========
     bool is_tpq_method = (method == DiagonalizationMethod::mTPQ || 
                           method == DiagonalizationMethod::mTPQ_CUDA || 
                           method == DiagonalizationMethod::cTPQ);
     
+    // Optimization: if we only need a few eigenvalues, find the target sector first
+    bool use_targeted_diagonalization = false;
     ed_internal::GroundStateSectorInfo gs_info;
-    if (is_tpq_method) {
-        gs_info = ed_internal::find_ground_state_sector(block_sizes, directory, hamiltonian, params);
+    
+    // Use targeted approach if:
+    // 1. TPQ method (always needs ground state sector)
+    // 2. Requesting small number of eigenvalues compared to total dimension
+    uint64_t total_dimension = 0;
+    for (const auto& size : block_sizes) total_dimension += size;
+    
+    // Use targeted if requesting < 10 eigenvalues OR < 1% of total dimension
+    bool small_eigenvalue_request = (params.num_eigenvalues < 10) || 
+                                   (params.num_eigenvalues < total_dimension / 100);
+    
+    if (is_tpq_method || small_eigenvalue_request) {
+        use_targeted_diagonalization = true;
+        std::cout << "\n=== Using Targeted Diagonalization ===" << std::endl;
+        std::cout << "Requested eigenvalues: " << params.num_eigenvalues << std::endl;
+        std::cout << "Total Hilbert space dimension: " << total_dimension 
+                  << " (across " << block_sizes.size() << " sectors)" << std::endl;
+        std::cout << "Scanning blocks to identify target sector(s)..." << std::endl;
+        
+        gs_info = ed_internal::find_ground_state_sector(block_sizes, directory, hamiltonian, params, use_hdf5);
+        
+        std::cout << "Target sector: block " << gs_info.target_block 
+                  << " (dimension: " << block_sizes[gs_info.target_block] << ")" << std::endl;
+        std::cout << "Will only diagonalize this sector to save computation." << std::endl;
+    } else {
+        std::cout << "\n=== Using Full Diagonalization ===" << std::endl;
+        std::cout << "Requested eigenvalues: " << params.num_eigenvalues << std::endl;
+        std::cout << "Total dimension: " << total_dimension 
+                  << " (across " << block_sizes.size() << " sectors)" << std::endl;
+        std::cout << "Will diagonalize all sectors." << std::endl;
     }
 
-    // ========== Step 5: Diagonalize Each Block ==========
+    // ========== Step 5: Diagonalize Block(s) ==========
+    // ========== Step 5: Diagonalize Block(s) ==========
     struct EigenInfo {
         double value;
         uint64_t block_idx;
@@ -1936,12 +2007,29 @@ EDResults exact_diagonalization_from_directory_symmetrized(
     uint64_t block_start_dim = 0;
     for (size_t block_idx = 0; block_idx < block_sizes.size(); ++block_idx) {
         uint64_t block_dim = block_sizes[block_idx];
+        
+        // Skip this block if using targeted diagonalization and it's not the target
+        bool is_target_block = (use_targeted_diagonalization && 
+                               gs_info.target_block == static_cast<int>(block_idx));
+        
+        if (use_targeted_diagonalization && !is_target_block) {
+            std::cout << "Skipping block " << block_idx + 1 << "/" << block_sizes.size() 
+                      << " (not the target sector)" << std::endl;
+            block_start_dim += block_dim;
+            continue;
+        }
+        
         std::cout << "Diagonalizing block " << block_idx + 1 << "/" << block_sizes.size() 
                   << " (dimension: " << block_dim << ")" << std::endl;
         
         // Load block Hamiltonian
-        std::string block_file = directory + "/sym_blocks/block_" + std::to_string(block_idx) + ".dat";
-        Eigen::SparseMatrix<Complex> block_matrix = hamiltonian.loadSymmetrizedBlock(block_file);
+        Eigen::SparseMatrix<Complex> block_matrix;
+        if (use_hdf5) {
+            block_matrix = hamiltonian.loadSymmetrizedBlockHDF5(directory, block_idx);
+        } else {
+            std::string block_file = directory + "/sym_blocks/block_" + std::to_string(block_idx) + ".dat";
+            block_matrix = hamiltonian.loadSymmetrizedBlock(block_file);
+        }
 
         // Configure block parameters
         EDParameters block_params = params;
@@ -1952,21 +2040,18 @@ EDResults exact_diagonalization_from_directory_symmetrized(
             safe_system_call("mkdir -p " + block_params.output_dir);
         }
         
-        // Diagonalize (only target block for TPQ)
+        // Diagonalize the block
         EDResults block_results;
-        bool is_target_block = (is_tpq_method && gs_info.target_block == static_cast<int>(block_idx));
+        double large_val = (is_tpq_method && is_target_block) ? 
+                          std::max(gs_info.max_energy * 10, params.large_value) : 0.0;
         
-        if (is_tpq_method && !is_target_block) {
-            // Skip non-target blocks for TPQ
-        } else {
-            double large_val = is_target_block ? std::max(gs_info.max_energy * 10, params.large_value) : 0.0;
-            if (is_target_block) {
-                std::cout << "Running TPQ in ground state sector with large value " << large_val << std::endl;
-            }
-            block_results = ed_internal::diagonalize_symmetry_block(
-                block_matrix, block_dim, method, block_params, is_target_block, large_val
-            );
+        if (is_tpq_method && is_target_block) {
+            std::cout << "Running TPQ in ground state sector with large value " << large_val << std::endl;
         }
+        
+        block_results = ed_internal::diagonalize_symmetry_block(
+            block_matrix, block_dim, method, block_params, is_target_block, large_val
+        );
             
         // Store eigenvalues
         for (size_t i = 0; i < block_results.eigenvalues.size(); ++i) {

@@ -17,6 +17,7 @@
 #include <tuple>
 #include <unordered_map>
 #include "system_utils.h"
+#include "hdf5_symmetry_io.h"
 
 // Define complex number type for convenience
 using Complex = std::complex<double>;
@@ -857,6 +858,200 @@ public:
     
     // ========================================================================
     // Symmetry-Adapted Basis Generation
+    // ========================================================================
+    
+    // HDF5-based methods (recommended for better file management)
+    
+    /**
+     * Generate symmetrized basis vectors using HDF5 storage
+     * More efficient than individual text files for large systems
+     */
+    void generateSymmetrizedBasisHDF5(const std::string& dir) {
+        std::cout << "\n=== Generating Symmetrized Basis (HDF5) ===" << std::endl;
+        
+        // Load symmetry information
+        symmetry_info.loadFromDirectory(dir);
+        
+        // Create HDF5 file
+        std::string hdf5_file = HDF5SymmetryIO::createFile(dir);
+        
+        // Generate basis for each sector
+        const size_t dim = 1ULL << n_bits_;
+        size_t total_written = 0;
+        symmetrized_block_ham_sizes.assign(symmetry_info.sectors.size(), 0);
+        
+        for (size_t sector_idx = 0; sector_idx < symmetry_info.sectors.size(); ++sector_idx) {
+            const auto& sector = symmetry_info.sectors[sector_idx];
+            
+            std::cout << "\nProcessing sector " << (sector_idx + 1) << "/"
+                      << symmetry_info.sectors.size() << " (QN: ";
+            for (uint64_t qn : sector.quantum_numbers) std::cout << qn << " ";
+            std::cout << ")" << std::endl;
+            
+            std::set<size_t> processed_orbits;
+            size_t sector_basis_count = 0;
+            
+            for (size_t basis = 0; basis < dim; ++basis) {
+                size_t progress_interval = dim / 20;
+                if (progress_interval > 0 && basis % progress_interval == 0 && dim > 20) {
+                    std::cout << "\r  Progress: " << (100 * basis / dim) << "%" << std::flush;
+                }
+                
+                // Check if this basis state's orbit was already processed
+                size_t orbit_rep = getOrbitRepresentative(basis);
+                if (processed_orbits.count(orbit_rep)) continue;
+                processed_orbits.insert(orbit_rep);
+                
+                // Create symmetrized vector for this sector
+                std::vector<Complex> sym_vec = createSymmetrizedVector(
+                    basis, sector.quantum_numbers, sector.phase_factors);
+                
+                // Check if vector is valid (non-zero norm)
+                double norm_sq = 0.0;
+                for (const auto& v : sym_vec) norm_sq += std::norm(v);
+                
+                if (norm_sq > 1e-10) {
+                    // Normalize
+                    double norm = std::sqrt(norm_sq);
+                    for (auto& v : sym_vec) v /= norm;
+                    
+                    // Save vector to HDF5
+                    HDF5SymmetryIO::saveBasisVector(hdf5_file, total_written, sym_vec);
+                    sector_basis_count++;
+                    total_written++;
+                }
+            }
+            
+            symmetrized_block_ham_sizes[sector_idx] = sector_basis_count;
+            std::cout << "\r  Sector " << (sector_idx + 1) << " complete: "
+                      << sector_basis_count << " basis vectors" << std::endl;
+        }
+        
+        // Save block sizes to HDF5
+        HDF5SymmetryIO::saveSectorDimensions(hdf5_file, 
+            std::vector<uint64_t>(symmetrized_block_ham_sizes.begin(), 
+                                  symmetrized_block_ham_sizes.end()));
+        
+        std::cout << "\nTotal symmetrized basis vectors: " << total_written << std::endl;
+        std::cout << "=== Symmetrized Basis Generation Complete (HDF5) ===" << std::endl;
+    }
+    
+    /**
+     * Build and save block-diagonal Hamiltonian matrices using HDF5
+     * All blocks are stored in a single HDF5 file for efficient access
+     */
+    void buildAndSaveSymmetrizedBlocksHDF5(const std::string& dir) {
+        std::cout << "\n=== Building Symmetrized Hamiltonian Blocks (HDF5) ===" << std::endl;
+        
+        std::string hdf5_file = dir + "/symmetry_data.h5";
+        
+        // Load block sizes from HDF5 if not already loaded
+        if (symmetrized_block_ham_sizes.empty()) {
+            auto dims = HDF5SymmetryIO::loadSectorDimensions(hdf5_file);
+            symmetrized_block_ham_sizes.assign(dims.begin(), dims.end());
+        }
+        
+        buildSparseMatrix();
+        
+        uint64_t block_start = 0;
+        const size_t dim = 1ULL << n_bits_;
+        
+        for (size_t block_idx = 0; block_idx < symmetrized_block_ham_sizes.size(); ++block_idx) {
+            uint64_t block_size = symmetrized_block_ham_sizes[block_idx];
+            
+            if (block_size == 0) {
+                std::cout << "  Skipping empty block " << block_idx << std::endl;
+                continue;
+            }
+            
+            std::cout << "  Building block " << block_idx << " ("
+                      << block_size << "x" << block_size << ")..." << std::flush;
+            
+            // Build block matrix
+            std::vector<Eigen::Triplet<Complex>> triplets;
+            
+            // Build matrix elements: H_ij = ⟨ψ_i|H|ψ_j⟩
+            for (uint64_t col = 0; col < block_size; ++col) {
+                auto basis_col = HDF5SymmetryIO::loadBasisVector(hdf5_file, block_start + col, dim);
+                
+                // Apply Hamiltonian
+                std::vector<Complex> h_basis_col(dim, Complex(0.0, 0.0));
+                for (size_t k = 0; k < basis_col.size(); ++k) {
+                    if (std::abs(basis_col[k]) < 1e-12) continue;
+                    
+                    for (const auto& transform : transforms_) {
+                        auto [j, scalar] = transform(k);
+                        if (j >= 0 && j < (1 << n_bits_)) {
+                            h_basis_col[j] += scalar * basis_col[k];
+                        }
+                    }
+                }
+                
+                // Compute matrix elements with all rows
+                for (uint64_t row = 0; row < block_size; ++row) {
+                    auto basis_row = HDF5SymmetryIO::loadBasisVector(hdf5_file, block_start + row, dim);
+                    
+                    Complex element(0.0, 0.0);
+                    for (size_t k = 0; k < basis_row.size(); ++k) {
+                        element += std::conj(basis_row[k]) * h_basis_col[k];
+                    }
+                    
+                    if (std::abs(element) > 1e-12) {
+                        triplets.emplace_back(row, col, element);
+                    }
+                }
+            }
+            
+            // Create sparse matrix
+            Eigen::SparseMatrix<Complex> block(block_size, block_size);
+            block.setFromTriplets(triplets.begin(), triplets.end());
+            block.makeCompressed();
+            
+            // Save to HDF5
+            HDF5SymmetryIO::saveBlockMatrix(hdf5_file, block_idx, block);
+            
+            block_start += block_size;
+        }
+        
+        std::cout << "=== Block Construction Complete (HDF5) ===" << std::endl;
+    }
+    
+    /**
+     * Load a specific symmetrized block matrix from HDF5
+     */
+    Eigen::SparseMatrix<Complex> loadSymmetrizedBlockHDF5(const std::string& dir, size_t block_idx) {
+        std::string hdf5_file = dir + "/symmetry_data.h5";
+        return HDF5SymmetryIO::loadBlockMatrix(hdf5_file, block_idx);
+    }
+    
+    /**
+     * Load all symmetrized blocks from HDF5
+     */
+    std::vector<Eigen::SparseMatrix<Complex>> loadAllSymmetrizedBlocksHDF5(const std::string& dir) {
+        std::string hdf5_file = dir + "/symmetry_data.h5";
+        
+        // Load block sizes if not already loaded
+        if (symmetrized_block_ham_sizes.empty()) {
+            auto dims = HDF5SymmetryIO::loadSectorDimensions(hdf5_file);
+            symmetrized_block_ham_sizes.assign(dims.begin(), dims.end());
+        }
+        
+        std::vector<Eigen::SparseMatrix<Complex>> blocks;
+        blocks.reserve(symmetrized_block_ham_sizes.size());
+        
+        for (size_t i = 0; i < symmetrized_block_ham_sizes.size(); ++i) {
+            if (symmetrized_block_ham_sizes[i] > 0) {
+                blocks.push_back(HDF5SymmetryIO::loadBlockMatrix(hdf5_file, i));
+            } else {
+                blocks.emplace_back(0, 0);
+            }
+        }
+        
+        return blocks;
+    }
+    
+    // ========================================================================
+    // Legacy text-based methods (kept for backward compatibility)
     // ========================================================================
     
     /**

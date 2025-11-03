@@ -231,6 +231,14 @@ endif()
 find_package(Eigen3 REQUIRED)
 include_directories(SYSTEM ${EIGEN3_INCLUDE_DIR})
 
+# Find HDF5 (with C++ bindings)
+find_package(HDF5 REQUIRED COMPONENTS CXX)
+include_directories(SYSTEM ${HDF5_INCLUDE_DIRS})
+message(STATUS "HDF5 found: ${HDF5_VERSION}")
+message(STATUS "HDF5 include directories: ${HDF5_INCLUDE_DIRS}")
+message(STATUS "HDF5 libraries: ${HDF5_LIBRARIES}")
+add_definitions(${HDF5_DEFINITIONS})
+
 # CUDA setup
 if(WITH_CUDA)
     find_package(CUDAToolkit REQUIRED)
@@ -319,6 +327,7 @@ target_link_libraries(ED
     ${LAPACKE_LIBRARIES}
     ${EXTRA_LINALG_LIBRARIES}
     ${ARPACK_LIBRARY}
+    ${HDF5_LIBRARIES}
 )
 
 # Add CUDA libraries to ED if CUDA is enabled
@@ -341,6 +350,7 @@ if(TARGET TPQ_DSSF)
         ${LAPACKE_LIBRARIES}
         ${EXTRA_LINALG_LIBRARIES}
         ${ARPACK_LIBRARY}
+        ${HDF5_LIBRARIES}
     )
 endif()
 
@@ -574,47 +584,50 @@ endif()
 # )
 # target_link_libraries(debug_projected_matrix OpenMP::OpenMP_CXX)
 
-# Streaming symmetry test
-set(TEST_STREAMING_SOURCES
-    test_streaming_symmetry.cpp
-    ${CORE_DIR}/ed_config.cpp
-    ${CPU_SOLVERS_DIR}/arpack.cpp
-    ${CPU_SOLVERS_DIR}/lanczos.cpp
-    ${CPU_SOLVERS_DIR}/CG.cpp
-    ${CPU_SOLVERS_DIR}/dynamics.cpp
-    ${CPU_SOLVERS_DIR}/TPQ.cpp
-    ${CPU_SOLVERS_DIR}/ftlm.cpp
-    ${CPU_SOLVERS_DIR}/ltlm.cpp
-    ${CPU_SOLVERS_DIR}/hybrid_thermal.cpp
-    ${CPU_SOLVERS_DIR}/observables.cpp
-)
-
-if(WITH_CUDA)
-    add_executable(test_streaming_symmetry ${TEST_STREAMING_SOURCES} ${GPU_SOURCES})
-    target_include_directories(test_streaming_symmetry PRIVATE ${GPU_DIR})
-else()
-    add_executable(test_streaming_symmetry ${TEST_STREAMING_SOURCES})
-endif()
-
-target_link_libraries(test_streaming_symmetry 
-    ${BLAS_LIBRARIES}
-    ${LAPACK_LIBRARIES}
-    ${LAPACKE_LIBRARIES}
-    ${EXTRA_LINALG_LIBRARIES}
-    ${ARPACK_LIBRARY}
-)
-
-if(WITH_CUDA)
-    target_link_libraries(test_streaming_symmetry
-        CUDA::cudart
-        CUDA::cublas
-        CUDA::cusparse
-        CUDA::curand
-        CUDA::cusolver
+# Streaming symmetry test (only build if file exists)
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/test_streaming_symmetry.cpp")
+    set(TEST_STREAMING_SOURCES
+        test_streaming_symmetry.cpp
+        ${CORE_DIR}/ed_config.cpp
+        ${CPU_SOLVERS_DIR}/arpack.cpp
+        ${CPU_SOLVERS_DIR}/lanczos.cpp
+        ${CPU_SOLVERS_DIR}/CG.cpp
+        ${CPU_SOLVERS_DIR}/dynamics.cpp
+        ${CPU_SOLVERS_DIR}/TPQ.cpp
+        ${CPU_SOLVERS_DIR}/ftlm.cpp
+        ${CPU_SOLVERS_DIR}/ltlm.cpp
+        ${CPU_SOLVERS_DIR}/hybrid_thermal.cpp
+        ${CPU_SOLVERS_DIR}/observables.cpp
     )
-endif()
 
-if(OpenMP_CXX_FOUND)
-    target_link_libraries(test_streaming_symmetry OpenMP::OpenMP_CXX)
+    if(WITH_CUDA)
+        add_executable(test_streaming_symmetry ${TEST_STREAMING_SOURCES} ${GPU_SOURCES})
+        target_include_directories(test_streaming_symmetry PRIVATE ${GPU_DIR})
+    else()
+        add_executable(test_streaming_symmetry ${TEST_STREAMING_SOURCES})
+    endif()
+
+    target_link_libraries(test_streaming_symmetry 
+        ${BLAS_LIBRARIES}
+        ${LAPACK_LIBRARIES}
+        ${LAPACKE_LIBRARIES}
+        ${EXTRA_LINALG_LIBRARIES}
+        ${ARPACK_LIBRARY}
+        ${HDF5_LIBRARIES}
+    )
+
+    if(WITH_CUDA)
+        target_link_libraries(test_streaming_symmetry
+            CUDA::cudart
+            CUDA::cublas
+            CUDA::cusparse
+            CUDA::curand
+            CUDA::cusolver
+        )
+    endif()
+
+    if(OpenMP_CXX_FOUND)
+        target_link_libraries(test_streaming_symmetry OpenMP::OpenMP_CXX)
+    endif()
 endif()
 # target_compile_options(debug_projected_matrix PRIVATE ${CPU_OPT_FLAGS})
