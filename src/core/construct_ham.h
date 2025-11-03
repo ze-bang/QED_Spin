@@ -950,9 +950,7 @@ public:
             auto dims = HDF5SymmetryIO::loadSectorDimensions(hdf5_file);
             symmetrized_block_ham_sizes.assign(dims.begin(), dims.end());
         }
-        
-        buildSparseMatrix();
-        
+                
         uint64_t block_start = 0;
         const size_t dim = 1ULL << n_bits_;
         
@@ -1135,7 +1133,6 @@ public:
         std::cout << "\n=== Building Symmetrized Hamiltonian Blocks ===" << std::endl;
         
         loadBlockSizesIfNeeded(dir);
-        buildSparseMatrix();
         
         std::string block_dir = dir + "/sym_blocks";
         safe_system_call("mkdir -p " + block_dir);
