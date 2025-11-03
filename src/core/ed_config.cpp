@@ -420,7 +420,7 @@ void EDConfig::print(std::ostream& out) const {
     out << "System: " << system.num_sites << " sites, spin = " << system.spin_length << "\n";
     
     if (system.use_fixed_sz) {
-        uint64_t n_up_actual = (system.n_up >= 0) ? system.n_up : system.num_sites / 2;
+        int64_t n_up_actual = (system.n_up >= 0) ? system.n_up : system.num_sites / 2;
         double sz = n_up_actual - system.num_sites / 2.0;
         out << "Fixed Sz: n_up = " << n_up_actual << " (Sz = " << sz << ")\n";
         

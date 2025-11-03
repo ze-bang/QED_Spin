@@ -231,7 +231,7 @@ inline EDResults exact_diagonalization_streaming_symmetry(
  */
 inline EDResults exact_diagonalization_streaming_symmetry_fixed_sz(
     const std::string& directory,
-    uint64_t n_up,
+    int64_t n_up,
     DiagonalizationMethod method = DiagonalizationMethod::LANCZOS,
     const EDParameters& params = EDParameters(),
     const std::string& interaction_filename = "InterAll.dat",

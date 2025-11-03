@@ -983,7 +983,7 @@ void process_thermal_correlations(
 template<typename OperatorType = Operator>
 OperatorType* create_operator(const SystemConfig& config) {
     if (config.use_fixed_sz) {
-        uint64_t n_up = (config.n_up >= 0) ? config.n_up : config.num_sites / 2;
+        int64_t n_up = (config.n_up >= 0) ? config.n_up : config.num_sites / 2;
         return new FixedSzOperator(config.num_sites, config.spin_length, n_up);
     } else {
         return new OperatorType(config.num_sites, config.spin_length);
@@ -1557,7 +1557,7 @@ inline EDResults exact_diagonalization_fixed_sz(
     const std::string& single_site_file,
     uint64_t num_sites,
     float spin_length,
-    uint64_t n_up,
+    int64_t n_up,
     DiagonalizationMethod method,
     const EDParameters& params
 ) {

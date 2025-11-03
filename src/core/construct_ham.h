@@ -70,7 +70,7 @@ inline uint64_t popcount(uint64_t x) {
  * @param n_up Number of bits that should be 1
  * @return Vector of basis states (as integers)
  */
-inline std::vector<uint64_t> generateFixedSzBasis(uint64_t n_bits, uint64_t n_up) {
+inline std::vector<uint64_t> generateFixedSzBasis(uint64_t n_bits, int64_t n_up) {
     std::vector<uint64_t> basis;
     if (n_up > n_bits) return basis;
     
@@ -1427,7 +1427,7 @@ private:
  */
 class FixedSzOperator : public Operator {
 protected:
-    uint64_t n_up_;  // Number of up spins (fixed Sz = N/2 - n_up for spin-1/2)
+    int64_t n_up_;  // Number of up spins (fixed Sz = N/2 - n_up for spin-1/2)
     std::vector<uint64_t> basis_states_;  // Basis states in fixed Sz sector
     std::unordered_map<uint64_t, int> state_to_index_;  // Map state -> index
     uint64_t fixed_sz_dim_;  // Dimension of fixed Sz sector
@@ -1441,7 +1441,7 @@ public:
      * @param spin_l Spin length (1/2 for spin-1/2)
      * @param n_up Number of up spins (determines Sz sector)
      */
-    FixedSzOperator(uint64_t n_bits, float spin_l, uint64_t n_up) 
+    FixedSzOperator(uint64_t n_bits, float spin_l, int64_t n_up) 
         : Operator(n_bits, spin_l), 
           n_up_(n_up),
           fixed_sz_matrix_built_(false) {
@@ -2378,7 +2378,7 @@ public:
  */
 class FixedSzSingleSiteOperator : public FixedSzOperator {
 public:
-    FixedSzSingleSiteOperator(uint64_t num_site, float spin_l, uint64_t n_up, uint64_t op, uint64_t site_j) 
+    FixedSzSingleSiteOperator(uint64_t num_site, float spin_l, int64_t n_up, uint64_t op, uint64_t site_j) 
         : FixedSzOperator(num_site, spin_l, n_up) {
         
         if (op < 0 || op > 4) {
@@ -2424,7 +2424,7 @@ public:
  */
 class FixedSzDoubleSiteOperator : public FixedSzOperator {
 public:
-    FixedSzDoubleSiteOperator(uint64_t num_site, float spin_l, uint64_t n_up, 
+    FixedSzDoubleSiteOperator(uint64_t num_site, float spin_l, int64_t n_up, 
                               uint64_t op_i, uint64_t site_i, uint64_t op_j, uint64_t site_j)
         : FixedSzOperator(num_site, spin_l, n_up) {
         
@@ -2527,7 +2527,7 @@ protected:
     }
     
 public:
-    FixedSzBasePositionOperator(uint64_t num_site, float spin_l, uint64_t n_up) 
+    FixedSzBasePositionOperator(uint64_t num_site, float spin_l, int64_t n_up) 
         : FixedSzOperator(num_site, spin_l, n_up) {}
 };
 
@@ -2536,7 +2536,7 @@ public:
  */
 class FixedSzSumOperator : public FixedSzBasePositionOperator {
 public:
-    FixedSzSumOperator(uint64_t num_site, float spin_l, uint64_t n_up, uint64_t op, 
+    FixedSzSumOperator(uint64_t num_site, float spin_l, int64_t n_up, uint64_t op, 
                        const std::vector<double>& Q_vector, const std::string& positions_file)
         : FixedSzBasePositionOperator(num_site, spin_l, n_up) {
         
@@ -2565,7 +2565,7 @@ public:
  */
 class FixedSzSumOperatorXYZ : public FixedSzBasePositionOperator {
 public:
-    FixedSzSumOperatorXYZ(uint64_t num_site, float spin_l, uint64_t n_up, uint64_t op,
+    FixedSzSumOperatorXYZ(uint64_t num_site, float spin_l, int64_t n_up, uint64_t op,
                           const std::vector<double>& Q_vector, const std::string& positions_file)
         : FixedSzBasePositionOperator(num_site, spin_l, n_up) {
         
@@ -2604,7 +2604,7 @@ public:
 class FixedSzSublatticeOperator : public FixedSzBasePositionOperator {
 public:
     FixedSzSublatticeOperator(uint64_t sublattice_idx, uint64_t unit_cell_size, uint64_t num_site, 
-                              float spin_l, uint64_t n_up, uint64_t op, 
+                              float spin_l, int64_t n_up, uint64_t op, 
                               const std::vector<double>& Q_vector, const std::string& positions_file)
         : FixedSzBasePositionOperator(num_site, spin_l, n_up) {
         
@@ -2633,7 +2633,7 @@ public:
  */
 class FixedSzTransverseOperator : public FixedSzBasePositionOperator {
 public:
-    FixedSzTransverseOperator(uint64_t num_site, float spin_l, uint64_t n_up, uint64_t op,
+    FixedSzTransverseOperator(uint64_t num_site, float spin_l, int64_t n_up, uint64_t op,
                               const std::vector<double>& Q_vector, const std::vector<double>& v,
                               const std::string& positions_file)
         : FixedSzBasePositionOperator(num_site, spin_l, n_up) {
@@ -2686,7 +2686,7 @@ public:
  */
 class FixedSzTransverseOperatorXYZ : public FixedSzBasePositionOperator {
 public:
-    FixedSzTransverseOperatorXYZ(uint64_t num_site, float spin_l, uint64_t n_up, uint64_t op,
+    FixedSzTransverseOperatorXYZ(uint64_t num_site, float spin_l, int64_t n_up, uint64_t op,
                                  const std::vector<double>& Q_vector, const std::vector<double>& v,
                                  const std::string& positions_file)
         : FixedSzBasePositionOperator(num_site, spin_l, n_up) {
@@ -2748,7 +2748,7 @@ public:
  */
 class FixedSzExperimentalOperator : public FixedSzBasePositionOperator {
 public:
-    FixedSzExperimentalOperator(uint64_t num_site, float spin_l, uint64_t n_up, double theta,
+    FixedSzExperimentalOperator(uint64_t num_site, float spin_l, int64_t n_up, double theta,
                                 const std::vector<double>& Q_vector, const std::string& positions_file)
         : FixedSzBasePositionOperator(num_site, spin_l, n_up) {
         
@@ -2780,7 +2780,7 @@ public:
  */
 class FixedSzTransverseExperimentalOperator : public FixedSzBasePositionOperator {
 public:
-    FixedSzTransverseExperimentalOperator(uint64_t num_site, float spin_l, uint64_t n_up, double theta,
+    FixedSzTransverseExperimentalOperator(uint64_t num_site, float spin_l, int64_t n_up, double theta,
                                           const std::vector<double>& Q_vector, const std::vector<double>& v,
                                           const std::string& positions_file)
         : FixedSzBasePositionOperator(num_site, spin_l, n_up) {

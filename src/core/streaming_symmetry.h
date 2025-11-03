@@ -517,7 +517,7 @@ private:
     mutable std::unordered_map<uint64_t, uint64_t> state_to_orbit_cache_;
     
 public:
-    FixedSzStreamingSymmetryOperator(uint64_t n_bits, float spin_l, uint64_t n_up)
+    FixedSzStreamingSymmetryOperator(uint64_t n_bits, float spin_l, int64_t n_up)
         : FixedSzOperator(n_bits, spin_l, n_up) {}
     
     /**

@@ -42,7 +42,7 @@ EDResults run_standard_workflow(const EDConfig& config) {
     
     // Check if fixed Sz mode is enabled
     if (config.system.use_fixed_sz) {
-        uint64_t n_up = (config.system.n_up >= 0) ? config.system.n_up : config.system.num_sites / 2;
+        int64_t n_up = (config.system.n_up >= 0) ? config.system.n_up : config.system.num_sites / 2;
         std::string interaction_file = config.system.hamiltonian_dir + "/" + config.system.interaction_file;
         std::string single_site_file = config.system.hamiltonian_dir + "/" + config.system.single_site_file;
         
@@ -139,7 +139,7 @@ EDResults run_streaming_symmetry_workflow(const EDConfig& config) {
     
     // Check if fixed Sz mode is enabled
     if (config.system.use_fixed_sz) {
-        uint64_t n_up = (config.system.n_up >= 0) ? config.system.n_up : config.system.num_sites / 2;
+        int64_t n_up = (config.system.n_up >= 0) ? config.system.n_up : config.system.num_sites / 2;
         
         std::cout << "Using Fixed Sz + Streaming Symmetry mode\n";
         std::cout << "  Number of up spins: " << n_up << "\n";
