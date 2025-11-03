@@ -575,7 +575,27 @@ endif()
 # target_link_libraries(debug_projected_matrix OpenMP::OpenMP_CXX)
 
 # Streaming symmetry test
-add_executable(test_streaming_symmetry test_streaming_symmetry.cpp)
+set(TEST_STREAMING_SOURCES
+    test_streaming_symmetry.cpp
+    ${CORE_DIR}/ed_config.cpp
+    ${CPU_SOLVERS_DIR}/arpack.cpp
+    ${CPU_SOLVERS_DIR}/lanczos.cpp
+    ${CPU_SOLVERS_DIR}/CG.cpp
+    ${CPU_SOLVERS_DIR}/dynamics.cpp
+    ${CPU_SOLVERS_DIR}/TPQ.cpp
+    ${CPU_SOLVERS_DIR}/ftlm.cpp
+    ${CPU_SOLVERS_DIR}/ltlm.cpp
+    ${CPU_SOLVERS_DIR}/hybrid_thermal.cpp
+    ${CPU_SOLVERS_DIR}/observables.cpp
+)
+
+if(WITH_CUDA)
+    add_executable(test_streaming_symmetry ${TEST_STREAMING_SOURCES} ${GPU_SOURCES})
+    target_include_directories(test_streaming_symmetry PRIVATE ${GPU_DIR})
+else()
+    add_executable(test_streaming_symmetry ${TEST_STREAMING_SOURCES})
+endif()
+
 target_link_libraries(test_streaming_symmetry 
     ${BLAS_LIBRARIES}
     ${LAPACK_LIBRARIES}
@@ -583,6 +603,17 @@ target_link_libraries(test_streaming_symmetry
     ${EXTRA_LINALG_LIBRARIES}
     ${ARPACK_LIBRARY}
 )
+
+if(WITH_CUDA)
+    target_link_libraries(test_streaming_symmetry
+        CUDA::cudart
+        CUDA::cublas
+        CUDA::cusparse
+        CUDA::curand
+        CUDA::cusolver
+    )
+endif()
+
 if(OpenMP_CXX_FOUND)
     target_link_libraries(test_streaming_symmetry OpenMP::OpenMP_CXX)
 endif()

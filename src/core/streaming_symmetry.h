@@ -388,17 +388,17 @@ private:
             const auto& perm = symmetry_info.max_clique[g];
             const auto& powers = symmetry_info.power_representation[g];
             
-            // Compute character: χ_q(g)* = exp(-2πi Σ_k q_k * n_k / order_k)
+            // Compute character: χ_q(g)
             Complex character(1.0, 0.0);
             for (size_t k = 0; k < powers.size(); ++k) {
-                Complex phase = std::conj(phase_factors[k]);  // Conjugate for projection
+                Complex phase = phase_factors[k];
                 for (int p = 0; p < powers[k]; ++p) {
                     character *= phase;
                 }
             }
             
             uint64_t permuted_basis = applyPermutation(basis, perm);
-            orbit_coefficients[permuted_basis] += character;
+            orbit_coefficients[permuted_basis] += std::conj(character);  // Use conjugate for projection
         }
         
         // Compute norm
@@ -464,10 +464,10 @@ private:
             const auto& perm = symmetry_info.max_clique[g];
             const auto& powers = symmetry_info.power_representation[g];
             
-            // Compute character (conjugated for bra)
+            // Compute character χ_q(g) for the bra
             Complex character(1.0, 0.0);
             for (size_t k = 0; k < powers.size(); ++k) {
-                Complex phase = std::conj(phase_factors[k]);
+                Complex phase = phase_factors[k];
                 for (int p = 0; p < powers[k]; ++p) {
                     character *= phase;
                 }
@@ -686,7 +686,7 @@ private:
             
             Complex character(1.0, 0.0);
             for (size_t k = 0; k < powers.size(); ++k) {
-                Complex phase = std::conj(phase_factors[k]);
+                Complex phase = phase_factors[k];
                 for (int p = 0; p < powers[k]; ++p) {
                     character *= phase;
                 }
@@ -695,7 +695,7 @@ private:
             uint64_t permuted_basis = applyPermutation(basis, perm);
             // Only include if in fixed Sz sector
             if (state_to_index_.count(permuted_basis)) {
-                orbit_coefficients[permuted_basis] += character;
+                orbit_coefficients[permuted_basis] += std::conj(character);  // Use conjugate for projection
             }
         }
         
@@ -751,7 +751,7 @@ private:
             
             Complex character(1.0, 0.0);
             for (size_t k = 0; k < powers.size(); ++k) {
-                Complex phase = std::conj(phase_factors[k]);
+                Complex phase = phase_factors[k];
                 for (int p = 0; p < powers[k]; ++p) {
                     character *= phase;
                 }
