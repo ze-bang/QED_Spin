@@ -1,57 +1,66 @@
-# filepath: /home/pc_linux/exact_diagonalization_cpp/src/automorphism_finder.py
+# filepath: /home/pc_linux/exact_diagonalization_cpp/src/core/automorphism_finder.py
 import numpy as np
 from pynauty import Graph, autgrp
-from collections import defaultdict
+from collections import defaultdict, deque
 import argparse
 import os
 import subprocess
 import json
 import networkx as nx
-from itertools import combinations
 
 
 def read_trans_file(filename):
     """Read vertex weights from Trans.dat file."""
     vertex_weights = {}
-    with open(filename, 'r') as f:
-        lines = f.readlines()
-        # Skip header lines
-        for line in lines:
-            line = line.strip()
-            if line and not line.startswith('=') and not line.startswith('num'):
-                parts = line.split()
-                if len(parts) >= 4:
-                    vertex_type = int(parts[0])
-                    vertex_id = int(parts[1])
-                    weight_real = float(parts[2])
-                    weight_imag = float(parts[3])
-                    vertex_weights[vertex_id] = (vertex_type, weight_real, weight_imag)
+    try:
+        with open(filename, 'r') as f:
+            lines = f.readlines()
+            # Skip header lines
+            for line in lines:
+                line = line.strip()
+                if line and not line.startswith('=') and not line.startswith('num'):
+                    parts = line.split()
+                    if len(parts) >= 4:
+                        vertex_type = int(parts[0])
+                        vertex_id = int(parts[1])
+                        weight_real = float(parts[2])
+                        weight_imag = float(parts[3])
+                        vertex_weights[vertex_id] = (vertex_type, weight_real, weight_imag)
+    except FileNotFoundError:
+        raise FileNotFoundError(f"Trans.dat file not found: {filename}")
+    except Exception as e:
+        raise RuntimeError(f"Error reading Trans.dat file: {e}")
     return vertex_weights
 
 def read_interall_file(filename):
     """Read edge information from InterAll.dat file."""
     edges = []
-    with open(filename, 'r') as f:
-        lines = f.readlines()
-        # Skip header lines
-        for line in lines:
-            line = line.strip()
-            if line and not line.startswith('=') and not line.startswith('num'):
-                parts = line.split()
-                if len(parts) >= 6:
-                    type1 = int(parts[0])
-                    vertex1 = int(parts[1])
-                    type2 = int(parts[2])
-                    vertex2 = int(parts[3])
-                    weight_real = float(parts[4])
-                    weight_imag = float(parts[5])
-                    edges.append({
-                        'vertex1': vertex1,
-                        'vertex2': vertex2,
-                        'type1': type1,
-                        'type2': type2,
-                        'weight': (weight_real, weight_imag)
-                    })
+    try:
+        with open(filename, 'r') as f:
+            lines = f.readlines()
+            # Skip header lines
+            for line in lines:
+                line = line.strip()
+                if line and not line.startswith('=') and not line.startswith('num'):
+                    parts = line.split()
+                    if len(parts) >= 6:
+                        type1 = int(parts[0])
+                        vertex1 = int(parts[1])
+                        type2 = int(parts[2])
+                        vertex2 = int(parts[3])
+                        weight_real = float(parts[4])
+                        weight_imag = float(parts[5])
+                        edges.append({
+                            'vertex1': vertex1,
+                            'vertex2': vertex2,
+                            'type1': type1,
+                            'type2': type2,
+                            'weight': (weight_real, weight_imag)
+                        })
+    except FileNotFoundError:
+        raise FileNotFoundError(f"InterAll.dat file not found: {filename}")
+    except Exception as e:
+        raise RuntimeError(f"Error reading InterAll.dat file: {e}")
     return edges
 
 def _round_tuple(t, decimals=8):
@@ -66,8 +75,18 @@ def _edge_label(edge, decimals=8):
     tmin, tmax = (t1, t2) if t1 <= t2 else (t2, t1)
     return (tmin, tmax, w)
 
-def compute_vertex_colors(vertex_weights, edges, decimals=8, wl_iterations=5):
-    """Compute vertex colors using Weisfeiler-Lehman refinement with edge/vertex labels."""
+def compute_vertex_colors(vertex_weights, edges, decimals=8, wl_iterations=10):
+    """Compute vertex colors using Weisfeiler-Lehman refinement with edge/vertex labels.
+    
+    Args:
+        vertex_weights: Dictionary of vertex_id -> (type, weight_real, weight_imag)
+        edges: List of edge dictionaries
+        decimals: Number of decimal places for rounding (default: 8)
+        wl_iterations: Maximum WL refinement iterations (default: 10, increased from 5)
+    
+    Returns:
+        Dictionary mapping vertex_id -> color (integer)
+    """
     # Collect all vertices that appear in either Trans.dat or edges
     vertex_ids = set(vertex_weights.keys())
     for e in edges:
@@ -123,13 +142,22 @@ def compute_vertex_colors(vertex_weights, edges, decimals=8, wl_iterations=5):
     return vertex_colors
 
 def construct_colored_graph(vertex_weights, edges):
-    """Construct a colored undirected graph for pynauty with robust vertex indexing."""
+    """Construct a colored undirected graph for pynauty with robust vertex indexing.
+    
+    Returns:
+        tuple: (graph, vertex_colors, idx_to_vid, vid_to_idx)
+            - graph: pynauty Graph object
+            - vertex_colors: dict mapping original vertex_id -> color
+            - idx_to_vid: list mapping nauty index -> original vertex_id
+            - vid_to_idx: dict mapping original vertex_id -> nauty index
+    """
     # Compute WL-refined vertex colors
     vertex_colors = compute_vertex_colors(vertex_weights, edges)
 
     # Build stable vertex index mapping 0..n-1
     all_vertices = sorted(vertex_colors.keys())
     vid_to_idx = {v: i for i, v in enumerate(all_vertices)}
+    idx_to_vid = all_vertices  # This is a list: idx_to_vid[i] gives original vertex_id
     n = len(all_vertices)
 
     # Build adjacency dictionary in terms of contiguous indices
@@ -156,15 +184,11 @@ def construct_colored_graph(vertex_weights, edges):
 
     # Create pynauty graph (ensure keys are 0..n-1)
     g = Graph(n, directed=False, adjacency_dict=adjacency_dict, vertex_coloring=coloring)
-    return g, vertex_colors
+    return g, vertex_colors, idx_to_vid, vid_to_idx
 
 
 class AutomorphismCliqueAnalyzer:
     """Class for analyzing cliques of compatible automorphisms"""
-    
-    def __init__(self):
-        """Initialize the analyzer"""
-        pass
     
     def do_permutations_commute(self, perm1, perm2):
         """Check if two permutations commute"""
@@ -243,12 +267,23 @@ class AutomorphismCliqueAnalyzer:
         # Try to generate the image directly
         self.save_graph_image(f"{filename}/automorphism_graph.png", dot_file)
         
-    def visualize_clique(self, automorphisms, clique, filename, finder):
-        """Generate a visualization highlighting a specific clique in the graph"""
+    def visualize_clique(self, automorphisms, clique, output_dir, finder):
+        """Generate a visualization highlighting a specific clique in the graph
+        
+        Args:
+            automorphisms: List of all automorphisms
+            clique: List of indices into automorphisms representing the clique
+            output_dir: Directory path where output files should be saved
+            finder: AutomorphismFinder instance for cycle notation conversion
+        """
         comm_graph = self.build_commutation_graph(automorphisms)
         
-        # Generate DOT file
-        with open(filename, 'w') as f:
+        # Ensure directory exists
+        os.makedirs(output_dir, exist_ok=True)
+        
+        # Generate DOT file in the output directory
+        dot_file = os.path.join(output_dir, "max_clique_visualization.dot")
+        with open(dot_file, 'w') as f:
             f.write("graph AutomorphismClique {\n")
             f.write("  node [shape=box];\n")
             
@@ -276,11 +311,12 @@ class AutomorphismCliqueAnalyzer:
                 
             f.write("}\n")
         
-        print(f"Generated clique visualization: {filename}")
-        print(f"Visualize with: dot -Tpng {filename} -o clique_visualization.png")
+        print(f"Generated clique visualization: {dot_file}")
+        png_file = os.path.join(output_dir, "max_clique_visualization.png")
+        print(f"Visualize with: dot -Tpng {dot_file} -o {png_file}")
         
         # Try to generate the image directly
-        self.save_graph_image("clique_visualization.png", filename)
+        self.save_graph_image(png_file, dot_file)
         
     def save_graph_image(self, output_file, dot_file):
         """Generate PNG image from DOT file using Graphviz"""
@@ -295,12 +331,16 @@ class AutomorphismCliqueAnalyzer:
 class AutomorphismFinder:
     """Class for finding and analyzing automorphisms"""
     
-    def __init__(self):
-        """Initialize the finder"""
-        pass
-    
     def generate_all_automorphisms(self, generators, n):
-        """Generate all automorphisms from the given generators"""
+        """Generate all automorphisms from the given generators using BFS.
+        
+        Args:
+            generators: List of generator permutations from nauty
+            n: Number of vertices
+            
+        Returns:
+            List of all automorphisms (permutations)
+        """
         if not generators:
             return [list(range(n))]
         
@@ -311,11 +351,12 @@ class AutomorphismFinder:
         automorphisms.extend([list(gen) for gen in generators])
         
         # Generate all possible combinations (closure under composition)
-        queue = list(automorphisms)
+        # Use deque for efficient O(1) popleft instead of O(n) pop(0)
+        queue = deque(automorphisms)
         seen = {tuple(perm) for perm in automorphisms}
         
         while queue:
-            perm1 = queue.pop(0)
+            perm1 = queue.popleft()
             for gen in generators:
                 # Compose perm1 with generator and generator with perm1 for faster closure
                 new_perm1 = [perm1[gen[i]] for i in range(n)]  # perm1 ∘ gen
@@ -333,7 +374,14 @@ class AutomorphismFinder:
         return automorphisms
     
     def permutation_to_cycle_notation(self, perm):
-        """Convert permutation to cycle notation"""
+        """Convert permutation to cycle notation.
+        
+        Args:
+            perm: List representing a permutation
+            
+        Returns:
+            List of tuples representing non-trivial cycles, or empty list if identity
+        """
         n = len(perm)
         visited = [False] * n
         cycles = []
@@ -352,24 +400,23 @@ class AutomorphismFinder:
                 if len(cycle) > 1:
                     cycles.append(tuple(cycle))
         
-        return cycles if cycles else [(0,)]
+        return cycles  # Return empty list for identity instead of [(0,)]
     
     def save_automorphisms_json(self, automorphisms, filename):
         """Save automorphisms to JSON file"""
-        os.makedirs(os.path.dirname(filename), exist_ok=True)
-        
-        with open(filename, 'w') as f:
-            json.dump(automorphisms, f, indent=2)
-        
-        print(f"Saved {len(automorphisms)} automorphisms to {filename}")
+        try:
+            os.makedirs(os.path.dirname(filename), exist_ok=True)
+            
+            with open(filename, 'w') as f:
+                json.dump(automorphisms, f, indent=2)
+            
+            print(f"Saved {len(automorphisms)} automorphisms to {filename}")
+        except Exception as e:
+            raise RuntimeError(f"Error saving automorphisms to JSON: {e}")
 
 
 class MaximalAbelianSubgroupFinder:
     """Class for finding minimal generators of abelian subgroups"""
-    
-    def __init__(self):
-        """Initialize the finder"""
-        pass
     
     def permutation_order(self, perm):
         """Calculate the order of a permutation"""
@@ -407,7 +454,15 @@ class MaximalAbelianSubgroupFinder:
         return [perm1[perm2[i]] for i in range(len(perm1))]
     
     def is_generated_by(self, element, generators):
-        """Check if element can be generated by the given generators"""
+        """Check if element can be generated by the given generators using BFS.
+        
+        Args:
+            element: Permutation to check
+            generators: List of generator permutations
+            
+        Returns:
+            bool: True if element can be generated from generators
+        """
         if not generators:
             return element == list(range(len(element)))
         
@@ -416,10 +471,10 @@ class MaximalAbelianSubgroupFinder:
         
         # Start with identity
         generated = {tuple(identity)}
-        queue = [identity]
+        queue = deque([identity])
         
         while queue:
-            current = queue.pop(0)
+            current = queue.popleft()
             
             for gen in generators:
                 # Compose with generator
@@ -483,8 +538,8 @@ def main():
     vertex_weights = read_trans_file(trans_file)
     edges = read_interall_file(inter_all_file)
 
-    # Construct colored graph
-    graph, vertex_colors = construct_colored_graph(vertex_weights, edges)
+    # Construct colored graph with vertex mappings
+    graph, vertex_colors, idx_to_vid, vid_to_idx = construct_colored_graph(vertex_weights, edges)
     
     # Find automorphism group
     aut_group = autgrp(graph)
@@ -500,19 +555,40 @@ def main():
     print(f"  Number of generators: {len(aut_group[0])}")
     print(f"  Order of automorphism group: {aut_group[1]}")
     print(f"  Orbit partition: {aut_group[2]}")
+    
     output_dir = os.path.join(args.data_dir, "automorphism_results")
     os.makedirs(output_dir, exist_ok=True)
     
     finder = AutomorphismFinder()
-    automorphisms_file = os.path.join(output_dir, "automorphisms.json")
-    # Generate all automorphisms from generators
-    n_vertices = len(vertex_colors)
-    all_automorphisms = finder.generate_all_automorphisms(aut_group[0], n_vertices)
     
-    # Save all automorphisms to JSON
+    # Generate all automorphisms from generators (these use nauty indices 0..n-1)
+    n_vertices = len(vertex_colors)
+    all_automorphisms_nauty = finder.generate_all_automorphisms(aut_group[0], n_vertices)
+    
+    # Convert automorphisms from nauty indices to original vertex IDs
+    all_automorphisms = []
+    for perm_nauty in all_automorphisms_nauty:
+        # perm_nauty[i] = j means nauty index i maps to nauty index j
+        # We want: original_vid[i] maps to original_vid[j]
+        # So: perm_original[vid] = idx_to_vid[perm_nauty[vid_to_idx[vid]]]
+        perm_original = [idx_to_vid[perm_nauty[vid_to_idx[vid]]] for vid in idx_to_vid]
+        all_automorphisms.append(perm_original)
+    
+    # Save all automorphisms to JSON (now with correct vertex IDs)
+    automorphisms_file = os.path.join(output_dir, "automorphisms.json")
     finder.save_automorphisms_json(all_automorphisms, automorphisms_file)
+    
+    # Save vertex ID mapping for reference
+    mapping_file = os.path.join(output_dir, "vertex_mapping.json")
+    with open(mapping_file, 'w') as f:
+        json.dump({
+            "idx_to_vid": idx_to_vid,
+            "vid_to_idx": vid_to_idx,
+            "note": "Nauty uses contiguous indices 0..n-1, mapped to original vertex IDs"
+        }, f, indent=2)
+    print(f"Saved vertex mapping to {mapping_file}")
 
-    # Initialize the automorphism finder and analyzer
+    # Initialize the analyzer
     analyzer = AutomorphismCliqueAnalyzer()
 
     # Find maximum clique of commuting automorphisms
@@ -520,8 +596,9 @@ def main():
     
     # Save maximum clique to JSON
     max_clique_file = os.path.join(output_dir, "max_clique.json")
+    max_clique = [all_automorphisms[i] for i in max_clique_indices]
     with open(max_clique_file, 'w') as f:
-        json.dump([all_automorphisms[i] for i in max_clique_indices], f, indent=2)
+        json.dump(max_clique, f, indent=2)
 
     print(f"\nSaved maximum clique of {len(max_clique_indices)} commuting automorphisms to {max_clique_file}")
 
@@ -529,14 +606,12 @@ def main():
     analyzer.generate_automorphism_graph(all_automorphisms, output_dir, finder)
     
     # Generate visualization highlighting the maximum clique
-    clique_dot_file = os.path.join(output_dir, "max_clique_visualization.dot")
-    analyzer.visualize_clique(all_automorphisms, max_clique_indices, clique_dot_file, finder)
+    analyzer.visualize_clique(all_automorphisms, max_clique_indices, output_dir, finder)
 
-    max_clique = [all_automorphisms[i] for i in max_clique_indices]
-
-    MaximalAbelianSubgroupFinder().find_minimal_generators(max_clique)
-    print("Maximal abelian subgroup generators (if any):")
-    generators = MaximalAbelianSubgroupFinder().find_minimal_generators(max_clique)
+    # Find minimal generators
+    print("\nMaximal abelian subgroup generators:")
+    subgroup_finder = MaximalAbelianSubgroupFinder()
+    generators = subgroup_finder.find_minimal_generators(max_clique)
     for gen in generators:
         print(f"  Generator: {gen}")
     
@@ -547,7 +622,7 @@ def main():
     print(f"Saved minimal generators to {generators_file}")
 
     # Generate sector metadata for symmetry sectors
-    sector_metadata = generate_sector_metadata(generators, max_clique)
+    sector_metadata = generate_sector_metadata(generators)
     sector_metadata_file = os.path.join(output_dir, "sector_metadata.json")
     with open(sector_metadata_file, 'w') as f:
         json.dump(sector_metadata, f, indent=2)
@@ -555,7 +630,7 @@ def main():
     print(f"Number of symmetry sectors: {len(sector_metadata['sectors'])}")
 
 
-def generate_sector_metadata(generators, max_clique):
+def generate_sector_metadata(generators):
     """
     Generate metadata for all symmetry sectors (irreducible representations).
     
@@ -564,7 +639,6 @@ def generate_sector_metadata(generators, max_clique):
     
     Args:
         generators: List of generator info dictionaries with 'permutation' and 'order'
-        max_clique: List of all group elements (permutations)
         
     Returns:
         Dictionary with sector metadata including quantum numbers and phase factors
