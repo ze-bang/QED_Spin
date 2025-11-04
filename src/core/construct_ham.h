@@ -1782,6 +1782,358 @@ public:
         std::cout << "=== Symmetrized Basis Generation Complete ===" << std::endl;
     }
     
+    // ========================================================================
+    // HDF5-based methods for Fixed Sz (recommended)
+    // ========================================================================
+    
+    /**
+     * Generate symmetrized basis vectors using HDF5 storage (Fixed Sz)
+     * More efficient than individual text files for large systems
+     */
+    void generateSymmetrizedBasisFixedSzHDF5(const std::string& dir) {
+        std::cout << "\n=== Generating Symmetrized Basis (Fixed Sz, HDF5) ===" << std::endl;
+        std::cout << "Fixed Sz sector: n_up=" << n_up_ 
+                  << ", dimension=" << fixed_sz_dim_ << std::endl;
+        
+        // Load symmetry information
+        symmetry_info.loadFromDirectory(dir);
+        
+        // Create HDF5 file
+        std::string hdf5_file = dir + "/symmetry_data_fixed_sz.h5";
+        try {
+            // Create file (overwrite if exists)
+            H5::H5File file(hdf5_file, H5F_ACC_TRUNC);
+            
+            // Create groups
+            file.createGroup("/metadata");
+            file.createGroup("/basis");
+            file.createGroup("/blocks");
+            
+            // Store n_up as metadata
+            H5::DataSpace scalar_space(H5S_SCALAR);
+            H5::Attribute n_up_attr = file.createAttribute("n_up", H5::PredType::NATIVE_INT64, scalar_space);
+            n_up_attr.write(H5::PredType::NATIVE_INT64, &n_up_);
+            n_up_attr.close();
+            
+            H5::Attribute fixed_sz_dim_attr = file.createAttribute("fixed_sz_dim", H5::PredType::NATIVE_UINT64, scalar_space);
+            fixed_sz_dim_attr.write(H5::PredType::NATIVE_UINT64, &fixed_sz_dim_);
+            fixed_sz_dim_attr.close();
+            
+            file.close();
+            std::cout << "Created HDF5 file: " << hdf5_file << std::endl;
+        } catch (H5::Exception& e) {
+            throw std::runtime_error("Failed to create HDF5 file: " + std::string(e.getCDetailMsg()));
+        }
+        
+        // Generate basis for each sector
+        size_t total_written = 0;
+        symmetrized_block_ham_sizes.assign(symmetry_info.sectors.size(), 0);
+        
+        for (size_t sector_idx = 0; sector_idx < symmetry_info.sectors.size(); ++sector_idx) {
+            const auto& sector = symmetry_info.sectors[sector_idx];
+            
+            std::cout << "\nProcessing sector " << (sector_idx + 1) << "/"
+                      << symmetry_info.sectors.size() << " (QN: ";
+            for (uint64_t qn : sector.quantum_numbers) std::cout << qn << " ";
+            std::cout << ")" << std::endl;
+            
+            std::set<uint64_t> processed_orbits;  // PER-SECTOR tracking
+            size_t sector_basis_count = 0;
+            
+            // Only iterate over fixed Sz basis states (THE KEY DIFFERENCE FROM REGULAR VERSION)
+            for (uint64_t basis_idx = 0; basis_idx < fixed_sz_dim_; ++basis_idx) {
+                uint64_t basis = basis_states_[basis_idx];
+                
+                size_t progress_interval = fixed_sz_dim_ / 20;
+                if (progress_interval > 0 && basis_idx % progress_interval == 0 && fixed_sz_dim_ > 20) {
+                    std::cout << "\r  Progress: " << (100 * basis_idx / fixed_sz_dim_) << "%" << std::flush;
+                }
+                
+                // Compute orbit representative using FULL group
+                uint64_t orbit_rep = basis;
+                for (const auto& perm : symmetry_info.max_clique) {
+                    uint64_t transformed = applyPermutation(basis, perm);
+                    if (transformed < orbit_rep) {
+                        orbit_rep = transformed;
+                    }
+                }
+                
+                // Check processed orbits for THIS SECTOR only
+                if (processed_orbits.count(orbit_rep)) continue;
+                processed_orbits.insert(orbit_rep);
+                
+                // Create symmetrized vector using the SAME formula as regular version
+                // but only for fixed-Sz basis states
+                std::vector<Complex> sym_vec(fixed_sz_dim_, Complex(0.0, 0.0));
+                
+                // Apply symmetry projection: |ψ_q⟩ = (1/|G|) Σ_g χ_q(g)* g|basis⟩
+                for (size_t g = 0; g < symmetry_info.max_clique.size(); ++g) {
+                    const auto& perm = symmetry_info.max_clique[g];
+                    const auto& powers = symmetry_info.power_representation[g];
+                    
+                    // Compute character: χ_q(g) = exp(2πi Σ_k q_k * n_k / order_k)
+                    Complex character(1.0, 0.0);
+                    for (size_t k = 0; k < powers.size(); ++k) {
+                        Complex phase = sector.phase_factors[k];
+                        for (uint64_t p = 0; p < powers[k]; ++p) {
+                            character *= phase;
+                        }
+                    }
+                    
+                    uint64_t permuted_basis = applyPermutation(basis, perm);
+                    
+                    // Check if permuted state is in fixed-Sz sector
+                    if (popcount(permuted_basis) == n_up_) {
+                        // Find index in fixed-Sz basis
+                        auto it = state_to_index_.find(permuted_basis);
+                        if (it != state_to_index_.end()) {
+                            sym_vec[it->second] += std::conj(character);
+                        }
+                    }
+                }
+                
+                // Normalize
+                double norm_sq = 0.0;
+                for (const auto& v : sym_vec) norm_sq += std::norm(v);
+                
+                if (norm_sq > 1e-10) {
+                    double norm = std::sqrt(norm_sq);
+                    for (auto& v : sym_vec) v /= norm;
+                    
+                    // Save vector to HDF5
+                    HDF5SymmetryIO::saveBasisVector(hdf5_file, total_written, sym_vec);
+                    sector_basis_count++;
+                    total_written++;
+                }
+            }
+            
+            symmetrized_block_ham_sizes[sector_idx] = sector_basis_count;
+            std::cout << "\r  Sector " << (sector_idx + 1) << " complete: "
+                      << sector_basis_count << " basis vectors" << std::endl;
+        }
+        
+        // Save block sizes to HDF5
+        HDF5SymmetryIO::saveSectorDimensions(hdf5_file, 
+            std::vector<uint64_t>(symmetrized_block_ham_sizes.begin(), 
+                                  symmetrized_block_ham_sizes.end()));
+        
+        std::cout << "\nTotal symmetrized basis vectors (Fixed Sz): " << total_written << std::endl;
+        std::cout << "Fixed-Sz sector dimension: " << fixed_sz_dim_ << std::endl;
+        std::cout << "=== Symmetrized Basis Generation Complete (HDF5) ===" << std::endl;
+    }
+    
+    /**
+     * Build and save block-diagonal Hamiltonian matrices using HDF5 (Fixed Sz)
+     * All blocks are stored in a single HDF5 file for efficient access
+     */
+    void buildAndSaveSymmetrizedBlocksFixedSzHDF5(const std::string& dir) {
+        std::cout << "\n=== Building Symmetrized Hamiltonian Blocks (Fixed Sz, HDF5) ===" << std::endl;
+        
+        std::string hdf5_file = dir + "/symmetry_data_fixed_sz.h5";
+        
+        // Load block sizes from HDF5 if not already loaded
+        if (symmetrized_block_ham_sizes.empty()) {
+            auto dims = HDF5SymmetryIO::loadSectorDimensions(hdf5_file);
+            symmetrized_block_ham_sizes.assign(dims.begin(), dims.end());
+        }
+                
+        uint64_t block_start = 0;
+        
+        for (size_t block_idx = 0; block_idx < symmetrized_block_ham_sizes.size(); ++block_idx) {
+            uint64_t block_size = symmetrized_block_ham_sizes[block_idx];
+            
+            if (block_size == 0) {
+                std::cout << "Block " << block_idx << ": empty (skipped)" << std::endl;
+                continue;
+            }
+            
+            std::cout << "Block " << block_idx << " (size " << block_size << ")..." << std::flush;
+            
+            std::vector<Eigen::Triplet<Complex>> triplets;
+            
+            // Build matrix elements: H_ij = ⟨ψ_i|H|ψ_j⟩
+            for (uint64_t col = 0; col < block_size; ++col) {
+                // Load basis vector |ψ_j⟩
+                std::vector<Complex> psi_j = HDF5SymmetryIO::loadBasisVector(
+                    hdf5_file, block_start + col, fixed_sz_dim_);
+                
+                // Apply Hamiltonian: H|ψ_j⟩
+                std::vector<Complex> H_psi_j = apply(psi_j);
+                
+                // Compute matrix elements with all basis vectors in this block
+                for (uint64_t row = 0; row < block_size; ++row) {
+                    std::vector<Complex> psi_i = HDF5SymmetryIO::loadBasisVector(
+                        hdf5_file, block_start + row, fixed_sz_dim_);
+                    
+                    // H_ij = ⟨ψ_i|H|ψ_j⟩
+                    Complex matrix_element(0.0, 0.0);
+                    for (uint64_t k = 0; k < fixed_sz_dim_; ++k) {
+                        matrix_element += std::conj(psi_i[k]) * H_psi_j[k];
+                    }
+                    
+                    if (std::abs(matrix_element) > 1e-12) {
+                        triplets.emplace_back(row, col, matrix_element);
+                    }
+                }
+            }
+            
+            // Create and save sparse matrix
+            Eigen::SparseMatrix<Complex> block(block_size, block_size);
+            block.setFromTriplets(triplets.begin(), triplets.end());
+            block.makeCompressed();
+            
+            HDF5SymmetryIO::saveBlockMatrix(hdf5_file, block_idx, block);
+            
+            block_start += block_size;
+        }
+        
+        std::cout << "=== Block Construction Complete (HDF5) ===" << std::endl;
+    }
+    
+    /**
+     * Load a specific symmetrized block matrix from HDF5 (Fixed Sz)
+     */
+    Eigen::SparseMatrix<Complex> loadSymmetrizedBlockFixedSzHDF5(const std::string& dir, size_t block_idx) {
+        std::string hdf5_file = dir + "/symmetry_data_fixed_sz.h5";
+        return HDF5SymmetryIO::loadBlockMatrix(hdf5_file, block_idx);
+    }
+    
+    /**
+     * Load all symmetrized blocks from HDF5 (Fixed Sz)
+     */
+    std::vector<Eigen::SparseMatrix<Complex>> loadAllSymmetrizedBlocksFixedSzHDF5(const std::string& dir) {
+        std::string hdf5_file = dir + "/symmetry_data_fixed_sz.h5";
+        
+        // Load block sizes if not already loaded
+        if (symmetrized_block_ham_sizes.empty()) {
+            auto dims = HDF5SymmetryIO::loadSectorDimensions(hdf5_file);
+            symmetrized_block_ham_sizes.assign(dims.begin(), dims.end());
+        }
+        
+        std::vector<Eigen::SparseMatrix<Complex>> blocks;
+        blocks.reserve(symmetrized_block_ham_sizes.size());
+        
+        for (size_t i = 0; i < symmetrized_block_ham_sizes.size(); ++i) {
+            if (symmetrized_block_ham_sizes[i] > 0) {
+                blocks.push_back(HDF5SymmetryIO::loadBlockMatrix(hdf5_file, i));
+            } else {
+                // Empty block
+                blocks.emplace_back(0, 0);
+            }
+        }
+        
+        return blocks;
+    }
+    
+    // ========================================================================
+    // Legacy text-based methods for Fixed Sz (kept for backward compatibility)
+    // ========================================================================
+    
+    /**
+     * Build and save block-diagonal Hamiltonian matrices (Fixed Sz, text files)
+     * Each block corresponds to one symmetry sector within the fixed Sz subspace
+     */
+    void buildAndSaveSymmetrizedBlocksFixedSz(const std::string& dir) {
+        std::cout << "\n=== Building Symmetrized Hamiltonian Blocks (Fixed Sz) ===" << std::endl;
+        
+        loadBlockSizesFixedSzIfNeeded(dir);
+        
+        std::string block_dir = dir + "/sym_blocks_fixed_sz";
+        safe_system_call("mkdir -p " + block_dir);
+        
+        uint64_t block_start = 0;
+        for (size_t block_idx = 0; block_idx < symmetrized_block_ham_sizes.size(); ++block_idx) {
+            uint64_t block_size = symmetrized_block_ham_sizes[block_idx];
+            
+            if (block_size == 0) {
+                std::cout << "Block " << block_idx << ": empty (skipped)" << std::endl;
+                continue;
+            }
+            
+            buildSingleBlockFixedSz(dir, block_dir, block_idx, block_start, block_size);
+            block_start += block_size;
+        }
+        
+        std::cout << "=== Block Construction Complete ===" << std::endl;
+    }
+    
+    /**
+     * Load a specific symmetrized block matrix from disk (Fixed Sz)
+     */
+    Eigen::SparseMatrix<Complex> loadSymmetrizedBlockFixedSz(const std::string& filepath) {
+        std::ifstream file(filepath, std::ios::binary);
+        if (!file.is_open()) {
+            throw std::runtime_error("Cannot open block file: " + filepath);
+        }
+        
+        // Read dimensions as int to match what was written
+        int rows_int, cols_int;
+        size_t nnz;
+        file.read(reinterpret_cast<char*>(&rows_int), sizeof(int));
+        file.read(reinterpret_cast<char*>(&cols_int), sizeof(int));
+        file.read(reinterpret_cast<char*>(&nnz), sizeof(size_t));
+        
+        uint64_t rows = rows_int;
+        uint64_t cols = cols_int;
+        
+        std::vector<Eigen::Triplet<Complex>> triplets;
+        triplets.reserve(nnz);
+        
+        for (size_t i = 0; i < nnz; ++i) {
+            int row, col;
+            Complex value;
+            file.read(reinterpret_cast<char*>(&row), sizeof(int));
+            file.read(reinterpret_cast<char*>(&col), sizeof(int));
+            file.read(reinterpret_cast<char*>(&value), sizeof(Complex));
+            triplets.emplace_back(row, col, value);
+        }
+        
+        Eigen::SparseMatrix<Complex> matrix(rows, cols);
+        matrix.setFromTriplets(triplets.begin(), triplets.end());
+        matrix.makeCompressed();
+        
+        return matrix;
+    }
+    
+    /**
+     * Load a block by its index (Fixed Sz)
+     */
+    Eigen::SparseMatrix<Complex> loadSymmetrizedBlockFixedSzByIndex(const std::string& dir, size_t block_idx) {
+        loadBlockSizesFixedSzIfNeeded(dir);
+        
+        if (block_idx >= symmetrized_block_ham_sizes.size()) {
+            throw std::runtime_error("Block index out of range");
+        }
+        
+        if (symmetrized_block_ham_sizes[block_idx] == 0) {
+            return Eigen::SparseMatrix<Complex>(0, 0);
+        }
+        
+        std::string filepath = dir + "/sym_blocks_fixed_sz/block_" + std::to_string(block_idx) + ".dat";
+        return loadSymmetrizedBlockFixedSz(filepath);
+    }
+    
+    /**
+     * Load all symmetrized blocks (Fixed Sz)
+     */
+    std::vector<Eigen::SparseMatrix<Complex>> loadAllSymmetrizedBlocksFixedSz(const std::string& dir) {
+        loadBlockSizesFixedSzIfNeeded(dir);
+        
+        std::vector<Eigen::SparseMatrix<Complex>> blocks;
+        blocks.reserve(symmetrized_block_ham_sizes.size());
+        
+        for (size_t i = 0; i < symmetrized_block_ham_sizes.size(); ++i) {
+            if (symmetrized_block_ham_sizes[i] > 0) {
+                blocks.push_back(loadSymmetrizedBlockFixedSzByIndex(dir, i));
+            } else {
+                // Empty block
+                blocks.emplace_back(0, 0);
+            }
+        }
+        
+        return blocks;
+    }
+    
 protected:
     /**
      * Get orbit representative for a state in fixed Sz sector
@@ -1900,6 +2252,115 @@ protected:
         for (size_t i = 0; i < symmetrized_block_ham_sizes.size(); ++i) {
             file << i << " " << symmetrized_block_ham_sizes[i] << "\n";
         }
+    }
+    
+private:
+    /**
+     * Load block sizes if needed (Fixed Sz)
+     */
+    void loadBlockSizesFixedSzIfNeeded(const std::string& dir) {
+        if (!symmetrized_block_ham_sizes.empty()) return;
+        
+        std::string filepath = dir + "/sym_basis_fixed_sz/block_sizes.txt";
+        std::ifstream file(filepath);
+        if (!file.is_open()) {
+            throw std::runtime_error("Cannot open block sizes file: " + filepath);
+        }
+        
+        std::string line;
+        while (std::getline(file, line)) {
+            if (line.empty() || line[0] == '#') continue;
+            // Parse "index size" format
+            std::istringstream iss(line);
+            uint64_t idx, size;
+            if (iss >> idx >> size) {
+                symmetrized_block_ham_sizes.push_back(size);
+            }
+        }
+    }
+    
+    /**
+     * Build a single block for fixed Sz sector
+     */
+    void buildSingleBlockFixedSz(const std::string& dir, const std::string& block_dir,
+                                 size_t block_idx, uint64_t block_start, uint64_t block_size) {
+        
+        std::cout << "Block " << block_idx << " (size " << block_size << ")..." << std::flush;
+        
+        std::vector<Eigen::Triplet<Complex>> triplets;
+        
+        // Build matrix elements: H_ij = ⟨ψ_i|H|ψ_j⟩
+        for (uint64_t col = 0; col < block_size; ++col) {
+            // Load basis vector |ψ_j⟩
+            std::vector<Complex> psi_j = readSymBasisVectorFixedSz(
+                dir + "/sym_basis_fixed_sz", block_start + col);
+            
+            // Apply Hamiltonian: H|ψ_j⟩
+            std::vector<Complex> H_psi_j = apply(psi_j);
+            
+            // Compute matrix elements with all basis vectors in this block
+            for (uint64_t row = 0; row < block_size; ++row) {
+                std::vector<Complex> psi_i = readSymBasisVectorFixedSz(
+                    dir + "/sym_basis_fixed_sz", block_start + row);
+                
+                // H_ij = ⟨ψ_i|H|ψ_j⟩
+                Complex matrix_element(0.0, 0.0);
+                for (uint64_t k = 0; k < fixed_sz_dim_; ++k) {
+                    matrix_element += std::conj(psi_i[k]) * H_psi_j[k];
+                }
+                
+                if (std::abs(matrix_element) > 1e-12) {
+                    triplets.emplace_back(row, col, matrix_element);
+                }
+            }
+        }
+        
+        // Create and save sparse matrix
+        Eigen::SparseMatrix<Complex> block(block_size, block_size);
+        block.setFromTriplets(triplets.begin(), triplets.end());
+        block.makeCompressed();
+        
+        std::string filename = block_dir + "/block_" + std::to_string(block_idx) + ".dat";
+        std::ofstream file(filename, std::ios::binary);
+        
+        int rows = block_size, cols = block_size;
+        size_t nnz = triplets.size();
+        file.write(reinterpret_cast<const char*>(&rows), sizeof(int));
+        file.write(reinterpret_cast<const char*>(&cols), sizeof(int));
+        file.write(reinterpret_cast<const char*>(&nnz), sizeof(size_t));
+        
+        for (const auto& t : triplets) {
+            int row = t.row(), col = t.col();
+            Complex value = t.value();
+            file.write(reinterpret_cast<const char*>(&row), sizeof(int));
+            file.write(reinterpret_cast<const char*>(&col), sizeof(int));
+            file.write(reinterpret_cast<const char*>(&value), sizeof(Complex));
+        }
+        
+        std::cout << " done (" << nnz << " nnz, "
+                  << std::fixed << std::setprecision(2)
+                  << (100.0 * nnz / (block_size * block_size)) << "% fill)" << std::endl;
+    }
+    
+    /**
+     * Read symmetrized basis vector for fixed Sz
+     */
+    std::vector<Complex> readSymBasisVectorFixedSz(const std::string& dir, size_t index) const {
+        std::string filename = dir + "/basis_" + std::to_string(index) + ".dat";
+        std::ifstream file(filename, std::ios::binary);
+        
+        if (!file.is_open()) {
+            throw std::runtime_error("Cannot open basis vector file: " + filename);
+        }
+        
+        int dim_int;
+        file.read(reinterpret_cast<char*>(&dim_int), sizeof(int));
+        uint64_t dim = dim_int;
+        
+        std::vector<Complex> vec(dim);
+        file.read(reinterpret_cast<char*>(vec.data()), dim * sizeof(Complex));
+        
+        return vec;
     }
 };
 

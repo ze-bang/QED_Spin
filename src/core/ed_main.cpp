@@ -5,6 +5,7 @@
 #include "ed_config_adapter.h"
 #include "ed_wrapper.h"
 #include "ed_wrapper_streaming.h"
+#include "ed_wrapper_fixed_sz_symmetry.h"
 #include "construct_ham.h"
 #include "../cpu_solvers/ftlm.h"
 #include "../cpu_solvers/ltlm.h"
@@ -96,12 +97,30 @@ EDResults run_symmetrized_workflow(const EDConfig& config) {
     
     auto start = std::chrono::high_resolution_clock::now();
     
-    auto results = exact_diagonalization_from_directory_symmetrized(
-        config.system.hamiltonian_dir,
-        config.method,
-        params,
-        HamiltonianFileFormat::STANDARD
-    );
+    EDResults results;
+    
+    // Check if fixed Sz mode is enabled
+    if (config.system.use_fixed_sz) {
+        int64_t n_up = (config.system.n_up >= 0) ? config.system.n_up : config.system.num_sites / 2;
+        
+        std::cout << "Using Fixed Sz + Symmetrized mode\n";
+        std::cout << "  Number of up spins: " << n_up << "\n";
+        
+        results = exact_diagonalization_fixed_sz_symmetrized(
+            config.system.hamiltonian_dir,
+            n_up,
+            config.method,
+            params,
+            HamiltonianFileFormat::STANDARD
+        );
+    } else {
+        results = exact_diagonalization_from_directory_symmetrized(
+            config.system.hamiltonian_dir,
+            config.method,
+            params,
+            HamiltonianFileFormat::STANDARD
+        );
+    }
     
     auto end = std::chrono::high_resolution_clock::now();
     auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();

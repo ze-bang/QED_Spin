@@ -319,6 +319,9 @@ endif()
 # Add TPQ_DSSF executable (only if MPI is enabled since it uses MPI)
 add_executable(TPQ_DSSF ${CORE_DIR}/TPQ_DSSF.cpp ${CPU_SOLVERS_DIR}/dynamics.cpp ${CPU_SOLVERS_DIR}/TPQ.cpp ${CPU_SOLVERS_DIR}/ftlm.cpp)
 
+# Add Fixed-Sz Symmetry demonstration executable
+add_executable(test_fixed_sz_symmetry_demo test_fixed_sz_symmetry_demo.cpp)
+
 
 # Link libraries for new main
 target_link_libraries(ED
@@ -345,6 +348,18 @@ endif()
 # Link libraries for TPQ_DSSF executable (only if it exists)
 if(TARGET TPQ_DSSF)
     target_link_libraries(TPQ_DSSF
+        ${BLAS_LIBRARIES}
+        ${LAPACK_LIBRARIES}
+        ${LAPACKE_LIBRARIES}
+        ${EXTRA_LINALG_LIBRARIES}
+        ${ARPACK_LIBRARY}
+        ${HDF5_LIBRARIES}
+    )
+endif()
+
+# Link libraries for Fixed-Sz Symmetry demonstration
+if(TARGET test_fixed_sz_symmetry_demo)
+    target_link_libraries(test_fixed_sz_symmetry_demo
         ${BLAS_LIBRARIES}
         ${LAPACK_LIBRARIES}
         ${LAPACKE_LIBRARIES}
