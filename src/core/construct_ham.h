@@ -9,6 +9,7 @@
 #include <string>
 #include <fstream>
 #include <sstream>
+#include <chrono>
 #include <Eigen/Sparse>
 #include <Eigen/Dense>
 #include <set>
@@ -939,6 +940,7 @@ public:
     /**
      * Build and save block-diagonal Hamiltonian matrices using HDF5
      * All blocks are stored in a single HDF5 file for efficient access
+     * OPTIMIZED: Caches basis vectors, parallelizes columns, minimizes I/O
      */
     void buildAndSaveSymmetrizedBlocksHDF5(const std::string& dir) {
         std::cout << "\n=== Building Symmetrized Hamiltonian Blocks (HDF5) ===" << std::endl;
@@ -965,39 +967,59 @@ public:
             std::cout << "  Building block " << block_idx << " ("
                       << block_size << "x" << block_size << ")..." << std::flush;
             
-            // Build block matrix
-            std::vector<Eigen::Triplet<Complex>> triplets;
+            auto start_time = std::chrono::high_resolution_clock::now();
             
-            // Build matrix elements: H_ij = ⟨ψ_i|H|ψ_j⟩
+            // OPTIMIZATION 1: Load ALL basis vectors for this block ONCE (batch I/O)
+            std::cout << " [loading basis]" << std::flush;
+            std::vector<std::vector<Complex>> basis_vectors(block_size);
+            for (uint64_t i = 0; i < block_size; ++i) {
+                basis_vectors[i] = HDF5SymmetryIO::loadBasisVector(hdf5_file, block_start + i, dim);
+            }
+            
+            // OPTIMIZATION 2: Parallel computation over columns
+            std::cout << " [computing]" << std::flush;
+            std::vector<std::vector<Eigen::Triplet<Complex>>> thread_triplets(block_size);
+            
+            #pragma omp parallel for schedule(dynamic, 1) if(block_size > 4)
             for (uint64_t col = 0; col < block_size; ++col) {
-                auto basis_col = HDF5SymmetryIO::loadBasisVector(hdf5_file, block_start + col, dim);
+                const auto& basis_col = basis_vectors[col];
                 
-                // Apply Hamiltonian
-                std::vector<Complex> h_basis_col(dim, Complex(0.0, 0.0));
-                for (size_t k = 0; k < basis_col.size(); ++k) {
-                    if (std::abs(basis_col[k]) < 1e-12) continue;
-                    
-                    for (const auto& transform : transforms_) {
-                        auto [j, scalar] = transform(k);
-                        if (j >= 0 && j < (1 << n_bits_)) {
-                            h_basis_col[j] += scalar * basis_col[k];
-                        }
-                    }
-                }
+                // Apply Hamiltonian: H|ψ_j⟩ (matrix-free)
+                std::vector<Complex> H_psi_j = apply(basis_col);
                 
-                // Compute matrix elements with all rows
-                for (uint64_t row = 0; row < block_size; ++row) {
-                    auto basis_row = HDF5SymmetryIO::loadBasisVector(hdf5_file, block_start + row, dim);
+                // Compute matrix elements with all rows (row-wise)
+                // OPTIMIZATION 3: Use conjugate symmetry for Hermitian operators
+                for (uint64_t row = 0; row <= col; ++row) {  // Only compute lower triangle + diagonal
+                    const auto& basis_row = basis_vectors[row];
                     
+                    // H_ij = ⟨ψ_i|H|ψ_j⟩ = Σ_k ψ_i*(k) * (H|ψ_j⟩)(k)
                     Complex element(0.0, 0.0);
-                    for (size_t k = 0; k < basis_row.size(); ++k) {
-                        element += std::conj(basis_row[k]) * h_basis_col[k];
+                    for (uint64_t k = 0; k < dim; ++k) {
+                        if (std::abs(basis_row[k]) > 1e-15 && std::abs(H_psi_j[k]) > 1e-15) {
+                            element += std::conj(basis_row[k]) * H_psi_j[k];
+                        }
                     }
                     
                     if (std::abs(element) > 1e-12) {
-                        triplets.emplace_back(row, col, element);
+                        thread_triplets[col].emplace_back(row, col, element);
+                        // Add conjugate transpose element (if not diagonal)
+                        if (row != col) {
+                            thread_triplets[col].emplace_back(col, row, std::conj(element));
+                        }
                     }
                 }
+            }
+            
+            // OPTIMIZATION 4: Merge triplets efficiently
+            std::vector<Eigen::Triplet<Complex>> triplets;
+            size_t total_nnz = 0;
+            for (const auto& t : thread_triplets) total_nnz += t.size();
+            triplets.reserve(total_nnz);
+            
+            for (auto& t : thread_triplets) {
+                triplets.insert(triplets.end(), 
+                               std::make_move_iterator(t.begin()), 
+                               std::make_move_iterator(t.end()));
             }
             
             // Create sparse matrix
@@ -1007,6 +1029,14 @@ public:
             
             // Save to HDF5
             HDF5SymmetryIO::saveBlockMatrix(hdf5_file, block_idx, block);
+            
+            auto end_time = std::chrono::high_resolution_clock::now();
+            auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time);
+            
+            double fill_percent = 100.0 * triplets.size() / (block_size * block_size);
+            std::cout << " done (" << triplets.size() << " nnz, "
+                      << std::fixed << std::setprecision(2) << fill_percent << "% fill, "
+                      << duration.count() << " ms)" << std::endl;
             
             block_start += block_size;
         }
@@ -1354,14 +1384,26 @@ private:
     void buildSingleBlock(const std::string& dir, const std::string& block_dir,
                          size_t block_idx, uint64_t block_start, uint64_t block_size) {
         
-        std::vector<Eigen::Triplet<Complex>> triplets;
+        std::cout << "Block " << block_idx << " (size " << block_size << ")..." << std::flush;
         
-        // Build matrix elements: H_ij = ⟨ψ_i|H|ψ_j⟩
+        auto start_time = std::chrono::high_resolution_clock::now();
+        
+        // OPTIMIZATION 1: Load all basis vectors once
+        const size_t dim = 1ULL << n_bits_;
+        std::vector<std::vector<Complex>> basis_vectors(block_size);
+        for (uint64_t i = 0; i < block_size; ++i) {
+            basis_vectors[i] = readSymBasisVector(dir, block_start + i);
+        }
+        
+        // OPTIMIZATION 2: Parallel computation with Hermitian symmetry
+        std::vector<std::vector<Eigen::Triplet<Complex>>> thread_triplets(block_size);
+        
+        #pragma omp parallel for schedule(dynamic, 1) if(block_size > 4)
         for (uint64_t col = 0; col < block_size; ++col) {
-            auto basis_col = readSymBasisVector(dir, block_start + col);
+            const auto& basis_col = basis_vectors[col];
             
-            // Apply Hamiltonian
-            std::vector<Complex> h_basis_col(1ULL << n_bits_, Complex(0.0, 0.0));
+            // Apply Hamiltonian (matrix-free)
+            std::vector<Complex> h_basis_col(dim, Complex(0.0, 0.0));
             for (size_t k = 0; k < basis_col.size(); ++k) {
                 if (std::abs(basis_col[k]) < 1e-12) continue;
                 
@@ -1373,19 +1415,36 @@ private:
                 }
             }
             
-            // Compute matrix elements with all rows
-            for (uint64_t row = 0; row < block_size; ++row) {
-                auto basis_row = readSymBasisVector(dir, block_start + row);
+            // Compute matrix elements (use Hermitian symmetry)
+            for (uint64_t row = 0; row <= col; ++row) {  // Only lower triangle + diagonal
+                const auto& basis_row = basis_vectors[row];
                 
                 Complex element(0.0, 0.0);
-                for (size_t k = 0; k < basis_row.size(); ++k) {
-                    element += std::conj(basis_row[k]) * h_basis_col[k];
+                for (size_t k = 0; k < dim; ++k) {
+                    if (std::abs(basis_row[k]) > 1e-15 && std::abs(h_basis_col[k]) > 1e-15) {
+                        element += std::conj(basis_row[k]) * h_basis_col[k];
+                    }
                 }
                 
                 if (std::abs(element) > 1e-12) {
-                    triplets.emplace_back(row, col, element);
+                    thread_triplets[col].emplace_back(row, col, element);
+                    if (row != col) {
+                        thread_triplets[col].emplace_back(col, row, std::conj(element));
+                    }
                 }
             }
+        }
+        
+        // Merge triplets
+        std::vector<Eigen::Triplet<Complex>> triplets;
+        size_t total_nnz = 0;
+        for (const auto& t : thread_triplets) total_nnz += t.size();
+        triplets.reserve(total_nnz);
+        
+        for (auto& t : thread_triplets) {
+            triplets.insert(triplets.end(), 
+                           std::make_move_iterator(t.begin()), 
+                           std::make_move_iterator(t.end()));
         }
         
         // Create and save sparse matrix
@@ -1410,9 +1469,13 @@ private:
             file.write(reinterpret_cast<const char*>(&val), sizeof(Complex));
         }
         
+        auto end_time = std::chrono::high_resolution_clock::now();
+        auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time);
+        
         std::cout << " done (" << nnz << " nnz, "
                   << std::fixed << std::setprecision(2)
-                  << (100.0 * nnz / (block_size * block_size)) << "% fill)" << std::endl;
+                  << (100.0 * nnz / (block_size * block_size)) << "% fill, "
+                  << duration.count() << " ms)" << std::endl;
     }
 };
 
@@ -1925,6 +1988,7 @@ public:
     /**
      * Build and save block-diagonal Hamiltonian matrices using HDF5 (Fixed Sz)
      * All blocks are stored in a single HDF5 file for efficient access
+     * OPTIMIZED: Caches basis vectors, parallelizes columns, minimizes I/O
      */
     void buildAndSaveSymmetrizedBlocksFixedSzHDF5(const std::string& dir) {
         std::cout << "\n=== Building Symmetrized Hamiltonian Blocks (Fixed Sz, HDF5) ===" << std::endl;
@@ -1949,32 +2013,57 @@ public:
             
             std::cout << "Block " << block_idx << " (size " << block_size << ")..." << std::flush;
             
-            std::vector<Eigen::Triplet<Complex>> triplets;
+            auto start_time = std::chrono::high_resolution_clock::now();
             
-            // Build matrix elements: H_ij = ⟨ψ_i|H|ψ_j⟩
+            // OPTIMIZATION 1: Load ALL basis vectors for this block ONCE (batch I/O)
+            std::cout << " [loading basis]" << std::flush;
+            std::vector<std::vector<Complex>> basis_vectors(block_size);
+            for (uint64_t i = 0; i < block_size; ++i) {
+                basis_vectors[i] = HDF5SymmetryIO::loadBasisVector(
+                    hdf5_file, block_start + i, fixed_sz_dim_);
+            }
+            
+            // OPTIMIZATION 2: Parallel computation over columns
+            std::cout << " [computing]" << std::flush;
+            std::vector<std::vector<Eigen::Triplet<Complex>>> thread_triplets(block_size);
+            
+            #pragma omp parallel for schedule(dynamic, 1) if(block_size > 4)
             for (uint64_t col = 0; col < block_size; ++col) {
-                // Load basis vector |ψ_j⟩
-                std::vector<Complex> psi_j = HDF5SymmetryIO::loadBasisVector(
-                    hdf5_file, block_start + col, fixed_sz_dim_);
-                
                 // Apply Hamiltonian: H|ψ_j⟩
-                std::vector<Complex> H_psi_j = apply(psi_j);
+                std::vector<Complex> H_psi_j = apply(basis_vectors[col]);
                 
-                // Compute matrix elements with all basis vectors in this block
-                for (uint64_t row = 0; row < block_size; ++row) {
-                    std::vector<Complex> psi_i = HDF5SymmetryIO::loadBasisVector(
-                        hdf5_file, block_start + row, fixed_sz_dim_);
+                // Compute matrix elements with all rows (use Hermitian symmetry)
+                for (uint64_t row = 0; row <= col; ++row) {  // Only compute lower triangle + diagonal
+                    const auto& basis_row = basis_vectors[row];
                     
                     // H_ij = ⟨ψ_i|H|ψ_j⟩
                     Complex matrix_element(0.0, 0.0);
                     for (uint64_t k = 0; k < fixed_sz_dim_; ++k) {
-                        matrix_element += std::conj(psi_i[k]) * H_psi_j[k];
+                        if (std::abs(basis_row[k]) > 1e-15 && std::abs(H_psi_j[k]) > 1e-15) {
+                            matrix_element += std::conj(basis_row[k]) * H_psi_j[k];
+                        }
                     }
                     
                     if (std::abs(matrix_element) > 1e-12) {
-                        triplets.emplace_back(row, col, matrix_element);
+                        thread_triplets[col].emplace_back(row, col, matrix_element);
+                        // Add conjugate transpose element (if not diagonal)
+                        if (row != col) {
+                            thread_triplets[col].emplace_back(col, row, std::conj(matrix_element));
+                        }
                     }
                 }
+            }
+            
+            // OPTIMIZATION 3: Merge triplets efficiently
+            std::vector<Eigen::Triplet<Complex>> triplets;
+            size_t total_nnz = 0;
+            for (const auto& t : thread_triplets) total_nnz += t.size();
+            triplets.reserve(total_nnz);
+            
+            for (auto& t : thread_triplets) {
+                triplets.insert(triplets.end(), 
+                               std::make_move_iterator(t.begin()), 
+                               std::make_move_iterator(t.end()));
             }
             
             // Create and save sparse matrix
@@ -1983,6 +2072,14 @@ public:
             block.makeCompressed();
             
             HDF5SymmetryIO::saveBlockMatrix(hdf5_file, block_idx, block);
+            
+            auto end_time = std::chrono::high_resolution_clock::now();
+            auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time);
+            
+            double fill_percent = 100.0 * triplets.size() / (block_size * block_size);
+            std::cout << " done (" << triplets.size() << " nnz, "
+                      << std::fixed << std::setprecision(2) << fill_percent << "% fill, "
+                      << duration.count() << " ms)" << std::endl;
             
             block_start += block_size;
         }
@@ -2287,32 +2384,54 @@ private:
         
         std::cout << "Block " << block_idx << " (size " << block_size << ")..." << std::flush;
         
-        std::vector<Eigen::Triplet<Complex>> triplets;
+        auto start_time = std::chrono::high_resolution_clock::now();
         
-        // Build matrix elements: H_ij = ⟨ψ_i|H|ψ_j⟩
+        // OPTIMIZATION 1: Load all basis vectors once
+        std::vector<std::vector<Complex>> basis_vectors(block_size);
+        for (uint64_t i = 0; i < block_size; ++i) {
+            basis_vectors[i] = readSymBasisVectorFixedSz(
+                dir + "/sym_basis_fixed_sz", block_start + i);
+        }
+        
+        // OPTIMIZATION 2: Parallel computation with Hermitian symmetry
+        std::vector<std::vector<Eigen::Triplet<Complex>>> thread_triplets(block_size);
+        
+        #pragma omp parallel for schedule(dynamic, 1) if(block_size > 4)
         for (uint64_t col = 0; col < block_size; ++col) {
-            // Load basis vector |ψ_j⟩
-            std::vector<Complex> psi_j = readSymBasisVectorFixedSz(
-                dir + "/sym_basis_fixed_sz", block_start + col);
-            
             // Apply Hamiltonian: H|ψ_j⟩
-            std::vector<Complex> H_psi_j = apply(psi_j);
+            std::vector<Complex> H_psi_j = apply(basis_vectors[col]);
             
-            // Compute matrix elements with all basis vectors in this block
-            for (uint64_t row = 0; row < block_size; ++row) {
-                std::vector<Complex> psi_i = readSymBasisVectorFixedSz(
-                    dir + "/sym_basis_fixed_sz", block_start + row);
+            // Compute matrix elements (use Hermitian symmetry)
+            for (uint64_t row = 0; row <= col; ++row) {  // Only lower triangle + diagonal
+                const auto& psi_i = basis_vectors[row];
                 
                 // H_ij = ⟨ψ_i|H|ψ_j⟩
                 Complex matrix_element(0.0, 0.0);
                 for (uint64_t k = 0; k < fixed_sz_dim_; ++k) {
-                    matrix_element += std::conj(psi_i[k]) * H_psi_j[k];
+                    if (std::abs(psi_i[k]) > 1e-15 && std::abs(H_psi_j[k]) > 1e-15) {
+                        matrix_element += std::conj(psi_i[k]) * H_psi_j[k];
+                    }
                 }
                 
                 if (std::abs(matrix_element) > 1e-12) {
-                    triplets.emplace_back(row, col, matrix_element);
+                    thread_triplets[col].emplace_back(row, col, matrix_element);
+                    if (row != col) {
+                        thread_triplets[col].emplace_back(col, row, std::conj(matrix_element));
+                    }
                 }
             }
+        }
+        
+        // Merge triplets
+        std::vector<Eigen::Triplet<Complex>> triplets;
+        size_t total_nnz = 0;
+        for (const auto& t : thread_triplets) total_nnz += t.size();
+        triplets.reserve(total_nnz);
+        
+        for (auto& t : thread_triplets) {
+            triplets.insert(triplets.end(), 
+                           std::make_move_iterator(t.begin()), 
+                           std::make_move_iterator(t.end()));
         }
         
         // Create and save sparse matrix
@@ -2337,9 +2456,13 @@ private:
             file.write(reinterpret_cast<const char*>(&value), sizeof(Complex));
         }
         
+        auto end_time = std::chrono::high_resolution_clock::now();
+        auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time);
+        
         std::cout << " done (" << nnz << " nnz, "
                   << std::fixed << std::setprecision(2)
-                  << (100.0 * nnz / (block_size * block_size)) << "% fill)" << std::endl;
+                  << (100.0 * nnz / (block_size * block_size)) << "% fill, "
+                  << duration.count() << " ms)" << std::endl;
     }
     
     /**
