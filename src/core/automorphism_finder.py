@@ -188,56 +188,109 @@ def construct_colored_graph(vertex_weights, edges):
 
 
 class AutomorphismCliqueAnalyzer:
-    """Class for analyzing cliques of compatible automorphisms"""
+    """Class for analyzing cliques of compatible automorphisms with caching"""
+    
+    def __init__(self):
+        """Initialize with cache for commutation graph"""
+        self._cached_graph = None
+        self._cached_automorphisms_hash = None
     
     def do_permutations_commute(self, perm1, perm2):
-        """Check if two permutations commute"""
+        """Check if two permutations commute - optimized version"""
+        # Quick checks first
+        if perm1 is perm2:
+            return True
         if len(perm1) != len(perm2):
             return False
         
-        # Check if perm1 ∘ perm2 = perm2 ∘ perm1
+        # Early exit optimization: check if they commute by testing composition
+        # Only check positions that differ from identity or are affected by either permutation
         n = len(perm1)
         
-        for i in range(n):
-            # perm1(perm2[i]) should equal perm2(perm1[i])
+        # Find positions affected by each permutation
+        affected1 = {i for i in range(n) if perm1[i] != i}
+        affected2 = {i for i in range(n) if perm2[i] != i}
+        
+        # If they affect disjoint sets of positions, they commute
+        if affected1.isdisjoint(affected2):
+            return True
+        
+        # Check commutation only at affected positions
+        check_positions = affected1 | affected2
+        for i in check_positions:
             if perm1[perm2[i]] != perm2[perm1[i]]:
                 return False
                 
         return True
     
     def build_commutation_graph(self, automorphisms):
-        """Build a graph where nodes are automorphisms and edges connect commuting pairs"""
+        """Build a graph where nodes are automorphisms and edges connect commuting pairs.
+        
+        Uses caching to avoid rebuilding the graph multiple times for the same automorphisms.
+        """
+        # Create a hash of the automorphisms for cache validation
+        auto_hash = hash(tuple(tuple(perm) for perm in automorphisms))
+        
+        # Return cached graph if available
+        if self._cached_graph is not None and self._cached_automorphisms_hash == auto_hash:
+            return self._cached_graph
+        
+        n_autos = len(automorphisms)
+        print(f"Building commutation graph for {n_autos} automorphisms...")
         G = nx.Graph()
         
         # Add nodes for each automorphism
-        for i, auto in enumerate(automorphisms):
-            G.add_node(i, perm=auto)
+        for i in range(n_autos):
+            G.add_node(i)
         
         # Add edges between commuting automorphisms
-        for i in range(len(automorphisms)):
-            for j in range(i+1, len(automorphisms)):
+        edge_count = 0
+        total_pairs = (n_autos * (n_autos - 1)) // 2
+        
+        # Show progress for large graphs
+        show_progress = total_pairs > 10000
+        progress_step = total_pairs // 20 if show_progress else total_pairs + 1
+        
+        pairs_checked = 0
+        for i in range(n_autos):
+            for j in range(i+1, n_autos):
                 if self.do_permutations_commute(automorphisms[i], automorphisms[j]):
                     G.add_edge(i, j)
+                    edge_count += 1
+                
+                pairs_checked += 1
+                if show_progress and pairs_checked % progress_step == 0:
+                    pct = 100 * pairs_checked / total_pairs
+                    print(f"  Progress: {pct:.0f}% ({pairs_checked}/{total_pairs} pairs checked, {edge_count} commuting pairs found)")
+        
+        print(f"  Completed: Found {edge_count} commuting pairs out of {total_pairs} total pairs")
+        
+        # Cache the graph
+        self._cached_graph = G
+        self._cached_automorphisms_hash = auto_hash
         
         return G
     
     def find_maximum_clique(self, automorphisms):
         """Find the maximum clique of commuting automorphisms using NetworkX"""
-        # Build the commutation graph
+        # Build the commutation graph (cached)
         comm_graph = self.build_commutation_graph(automorphisms)
         
+        print(f"Finding maximum clique...")
         # Use NetworkX to find the maximum clique
         max_clique_indices = list(nx.find_cliques(comm_graph))
         
         # Get the maximum clique by size
         if max_clique_indices:
             max_clique = max(max_clique_indices, key=len)
+            print(f"  Maximum clique size: {len(max_clique)}")
             return max_clique
         else:
             return []
     
     def generate_automorphism_graph(self, automorphisms, filename, finder):
         """Generate a DOT file visualizing the automorphism commutation graph"""
+        # Use cached graph
         comm_graph = self.build_commutation_graph(automorphisms)
         
         # Ensure directory exists
@@ -245,6 +298,7 @@ class AutomorphismCliqueAnalyzer:
         
         # Generate DOT file
         dot_file = f"{filename}/automorphism_graph.dot"
+        print(f"Generating DOT file...")
         with open(dot_file, 'w') as f:
             f.write("graph AutomorphismGraph {\n")
             f.write("  node [shape=box];\n")
@@ -252,7 +306,7 @@ class AutomorphismCliqueAnalyzer:
             # Add nodes
             for i, auto in enumerate(automorphisms):
                 cycles = finder.permutation_to_cycle_notation(auto)
-                label = ' '.join(str(c) for c in cycles)
+                label = ' '.join(str(c) for c in cycles) if cycles else 'id'
                 f.write(f'  {i} [label="{label}"];\n')
             
             # Add edges
@@ -276,6 +330,7 @@ class AutomorphismCliqueAnalyzer:
             output_dir: Directory path where output files should be saved
             finder: AutomorphismFinder instance for cycle notation conversion
         """
+        # Use cached graph
         comm_graph = self.build_commutation_graph(automorphisms)
         
         # Ensure directory exists
@@ -283,6 +338,7 @@ class AutomorphismCliqueAnalyzer:
         
         # Generate DOT file in the output directory
         dot_file = os.path.join(output_dir, "max_clique_visualization.dot")
+        print(f"Generating clique visualization...")
         with open(dot_file, 'w') as f:
             f.write("graph AutomorphismClique {\n")
             f.write("  node [shape=box];\n")
@@ -293,7 +349,7 @@ class AutomorphismCliqueAnalyzer:
             # Add nodes
             for i, auto in enumerate(automorphisms):
                 cycles = finder.permutation_to_cycle_notation(auto)
-                label = ' '.join(str(c) for c in cycles)
+                label = ' '.join(str(c) for c in cycles) if cycles else 'id'
                 
                 if i in clique_set:
                     # Highlight clique members
