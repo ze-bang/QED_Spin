@@ -92,7 +92,7 @@ void printSpinConfiguration(ComplexVector &state, int num_sites, float spin_leng
     outfile.close();
 }
 
-void printSpinCorrelation(ComplexVector &state, int num_sites, float spin_length, const std::string &dir) {
+void printSpinCorrelation(ComplexVector &state, int num_sites, float spin_length, const std::string &dir, int unit_cell_size) {
     // Compute and print <S_i . S_j> for all pairs (i,j)
     std::vector<std::vector<std::vector<Complex>>> result(2, std::vector<std::vector<Complex>>(num_sites, std::vector<Complex>(num_sites)));
 
@@ -142,14 +142,14 @@ void printSpinCorrelation(ComplexVector &state, int num_sites, float spin_length
     subfile << "sub_i sub_j <S+_i S-_j>_sum <Sz_i Sz_j>_sum count\n";
     
     // Compute sublattice sums
-    std::vector<std::vector<Complex>> sublattice_sums_plus(4, std::vector<Complex>(4, 0.0));
-    std::vector<std::vector<Complex>> sublattice_sums_z(4, std::vector<Complex>(4, 0.0));
-    std::vector<std::vector<int>> sublattice_counts(4, std::vector<int>(4, 0));
+    std::vector<std::vector<Complex>> sublattice_sums_plus(unit_cell_size, std::vector<Complex>(unit_cell_size, 0.0));
+    std::vector<std::vector<Complex>> sublattice_sums_z(unit_cell_size, std::vector<Complex>(unit_cell_size, 0.0));
+    std::vector<std::vector<int>> sublattice_counts(unit_cell_size, std::vector<int>(unit_cell_size, 0));
     
     for (int i = 0; i < num_sites; i++) {
         for (int j = 0; j < num_sites; j++) {
-            int sub_i = i % 4;
-            int sub_j = j % 4;
+            int sub_i = i % unit_cell_size;
+            int sub_j = j % unit_cell_size;
             sublattice_sums_plus[sub_i][sub_j] += result[0][i][j];
             sublattice_sums_z[sub_i][sub_j] += result[1][i][j];
             sublattice_counts[sub_i][sub_j]++;
@@ -157,8 +157,8 @@ void printSpinCorrelation(ComplexVector &state, int num_sites, float spin_length
     }
     
     // Write sublattice results
-    for (int sub_i = 0; sub_i < 4; sub_i++) {
-        for (int sub_j = 0; sub_j < 4; sub_j++) {
+    for (int sub_i = 0; sub_i < unit_cell_size; sub_i++) {
+        for (int sub_j = 0; sub_j < unit_cell_size; sub_j++) {
             subfile << sub_i << " " << sub_j << " " 
                    << sublattice_sums_plus[sub_i][sub_j] << " "
                    << sublattice_sums_z[sub_i][sub_j] << " "
@@ -1074,7 +1074,7 @@ int main(int argc, char* argv[]) {
         
         // Special methods that don't follow (operators) × (method) structure
         if (method == "spin_correlation") {
-            printSpinCorrelation(tpq_state, num_sites, spin_length, output_dir);
+            printSpinCorrelation(tpq_state, num_sites, spin_length, output_dir, unit_cell_size);
             return true;
         } else if (method == "spin_configuration") {
             printSpinConfiguration(tpq_state, num_sites, spin_length, output_dir);
