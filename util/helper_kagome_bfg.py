@@ -298,7 +298,7 @@ def create_nn_lists(edges, edges_2nn, edges_3nn, node_mapping, vertices, vertex_
     return nn_list, nn_list_2nn, nn_list_3nn, positions, sublattice_indices
 
 def write_cluster_nn_list(output_dir, cluster_name, nn_list, nn_list_2nn, nn_list_3nn, 
-                          positions, sublattice_indices, node_mapping):
+                          positions, sublattice_indices, node_mapping, vertex_to_cell=None):
     """
     Write nearest neighbor lists, positions, and sublattice indices to files
     """
@@ -357,11 +357,12 @@ def write_cluster_nn_list(output_dir, cluster_name, nn_list, nn_list_2nn, nn_lis
             sub_idx = sublattice_indices[site_id]
             matrix_index = node_mapping.get(site_id, site_id)
             
-            f.write(f"{site_id} {matrix_index} {sub_idx} {pos[0]:.6f} {pos[1]:.6f}\n")
+            f.write(f"{site_id} {matrix_index} {sub_idx} {pos[0]:.6f} {pos[1]:.6f} 0.000000\n")
 
     # Write lattice parameters
     with open(f"{output_dir}/{cluster_name}_lattice_parameters.dat", 'w') as f:
-        f.write("# Kagome lattice parameters\n\n")
+        f.write("# Kagome lattice parameters\n")
+        f.write("# Generated for BFG (Balents-Fisher-Girvin) model\n\n")
         
         # Unit cell vectors
         a1 = np.array([1.0, 0.0])
@@ -374,8 +375,22 @@ def write_cluster_nn_list(output_dir, cluster_name, nn_list, nn_list_2nn, nn_lis
             [0.25, np.sqrt(3)/4]
         ])
         
+        # Write lattice type
+        f.write("# Lattice type: Kagome (2D)\n")
+        f.write("# Sites per unit cell: 3\n")
+        f.write("# Coordination number (NN): 4 per site\n\n")
+        
+        # Write dimensions
+        f.write("# Cluster dimensions\n")
+        # Get dimensions from any vertex_to_cell entry
+        if vertex_to_cell:
+            max_i = max(cell[0] for cell in vertex_to_cell.values())
+            max_j = max(cell[1] for cell in vertex_to_cell.values())
+            f.write(f"# Unit cells: {max_i + 1} x {max_j + 1}\n")
+            f.write(f"# Total sites: {len(positions)}\n\n")
+        
         # Write unit cell vectors
-        f.write("# Unit cell lattice vectors\n")
+        f.write("# Unit cell lattice vectors (primitive basis)\n")
         f.write("# vector_index, x, y\n")
         f.write(f"0 {a1[0]:.6f} {a1[1]:.6f}\n")
         f.write(f"1 {a2[0]:.6f} {a2[1]:.6f}\n")
@@ -383,10 +398,70 @@ def write_cluster_nn_list(output_dir, cluster_name, nn_list, nn_list_2nn, nn_lis
         f.write("\n")
         
         # Write site offsets
-        f.write("# Site offsets within each unit cell\n")
+        f.write("# Site offsets within each unit cell (fractional coordinates)\n")
         f.write("# site_index, x, y\n")
         for i, offset in enumerate(site_offsets):
             f.write(f"{i} {offset[0]:.6f} {offset[1]:.6f}\n")
+        
+        f.write("\n")
+        
+        # Write nearest neighbor vectors (within unit cell and to adjacent cells)
+        f.write("# Nearest neighbor bond vectors\n")
+        f.write("# NN bonds connect sites within triangular motifs\n")
+        f.write("# Bond_type: description\n")
+        f.write("# Internal: (0,0,0)-(0,0,1), (0,0,0)-(0,0,2), (0,0,1)-(0,0,2)\n")
+        f.write("# External: connecting to adjacent unit cells\n\n")
+        
+        # Calculate and write characteristic distances
+        f.write("# Characteristic distances\n")
+        nn_dist = 0.5  # Distance between NN sites
+        f.write(f"# NN distance: {nn_dist:.6f}\n")
+        f.write(f"# 2NN distance: {nn_dist * np.sqrt(3):.6f}\n")
+        f.write(f"# 3NN distance: {nn_dist * 2:.6f}\n\n")
+        
+        # Write reciprocal lattice vectors
+        f.write("# Reciprocal lattice vectors\n")
+        # Calculate reciprocal vectors: b1 = 2π(a2 x z)/(a1 · (a2 x z))
+        # For 2D: b1 = 2π(-a2_y, a2_x) / (a1_x*a2_y - a1_y*a2_x)
+        det = a1[0]*a2[1] - a1[1]*a2[0]
+        b1 = 2*np.pi*np.array([a2[1], -a2[0]]) / det
+        b2 = 2*np.pi*np.array([-a1[1], a1[0]]) / det
+        f.write("# vector_index, kx, ky\n")
+        f.write(f"0 {b1[0]:.6f} {b1[1]:.6f}\n")
+        f.write(f"1 {b2[0]:.6f} {b2[1]:.6f}\n")
+        
+        f.write("\n")
+        
+        # Write allowed k-points for this finite cluster
+        f.write("# Allowed momentum points (k-points) for finite cluster\n")
+        if vertex_to_cell:
+            max_i = max(cell[0] for cell in vertex_to_cell.values())
+            max_j = max(cell[1] for cell in vertex_to_cell.values())
+            dim1_actual = max_i + 1
+            dim2_actual = max_j + 1
+            
+            f.write(f"# Grid dimensions: {dim1_actual} x {dim2_actual}\n")
+            f.write(f"# k-point mesh: For periodic BC, k = (n1/N1)*b1 + (n2/N2)*b2\n")
+            f.write(f"#                where n1 = 0,...,N1-1 and n2 = 0,...,N2-1\n")
+            f.write(f"#                For open BC, discrete k-points from edge states\n")
+            f.write("# Format: k_index, n1, n2, kx, ky\n")
+            
+            # Generate k-points
+            k_index = 0
+            for n1 in range(dim1_actual):
+                for n2 in range(dim2_actual):
+                    kx = (n1 / dim1_actual) * b1[0] + (n2 / dim2_actual) * b2[0]
+                    ky = (n1 / dim1_actual) * b1[1] + (n2 / dim2_actual) * b2[1]
+                    f.write(f"{k_index} {n1} {n2} {kx:.6f} {ky:.6f}\n")
+                    k_index += 1
+            
+            f.write(f"\n# Total number of k-points: {k_index}\n")
+            
+            # Add high-symmetry points for reference
+            f.write("\n# High-symmetry points in the Brillouin zone\n")
+            f.write("# Gamma: (0, 0)\n")
+            f.write(f"# K: ({b1[0]/3 + b2[0]/3:.6f}, {b1[1]/3 + b2[1]/3:.6f})\n")
+            f.write(f"# M: ({b1[0]/2:.6f}, {b1[1]/2:.6f})\n")
 
 def prepare_hamiltonian_parameters(output_dir, nn_list, nn_list_2nn, nn_list_3nn, 
                                   positions, sublattice_indices, node_mapping, 
@@ -423,11 +498,7 @@ def prepare_hamiltonian_parameters(output_dir, nn_list, nn_list_2nn, nn_list_3nn
         i = site_id
         
         # Zeeman term
-        local_field_x = h * np.sin(theta)
-        local_field_z = h * np.cos(theta)
-        transfer.append([0, node_mapping[i], -local_field_x/2, 0])
-        transfer.append([1, node_mapping[i], -local_field_x/2, 0])
-        transfer.append([2, node_mapping[i], -local_field_z, 0])  # Sz term
+        transfer.append([2, node_mapping[i], -h, 0])  # Sz term
         
         # Nearest neighbor interactions
         for neighbor_id in nn_list[site_id]:
@@ -709,7 +780,7 @@ def main():
     
     # Write nearest neighbor lists and site info
     write_cluster_nn_list(output_dir, cluster_name, nn_list, nn_list_2nn, nn_list_3nn, 
-                          positions, sublattice_indices, node_mapping)
+                          positions, sublattice_indices, node_mapping, vertex_to_cell)
     
     # Prepare Hamiltonian parameters
     prepare_hamiltonian_parameters(output_dir, nn_list, nn_list_2nn, nn_list_3nn, 

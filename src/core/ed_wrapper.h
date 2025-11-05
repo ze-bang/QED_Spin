@@ -1613,7 +1613,41 @@ inline EDResults exact_diagonalization_fixed_sz(
     // Perform diagonalization
     std::cout << "\nDiagonalizing..." << std::endl;
     auto results = exact_diagonalization_core(apply_hamiltonian, fixed_sz_dim, method, params);
-    
+
+    // If eigenvectors were computed, transform them from fixed-Sz basis to full basis
+    if (params.compute_eigenvectors && !params.output_dir.empty()) {
+        std::cout << "Transforming eigenvectors from fixed-Sz basis to full Hilbert space..." << std::endl;
+        std::cout << "  Fixed Sz dim: " << fixed_sz_dim << ", Full dim: " << full_dim << std::endl;
+        std::cout << "  Output directory: " << params.output_dir << std::endl;
+        std::cout << "  Number of eigenvectors: " << results.eigenvalues.size() << std::endl;
+        // Process each eigenvector file
+        for (size_t i = 0; i < results.eigenvalues.size(); ++i) {
+            std::string eigvec_file = params.output_dir + "/eigenvectors/eigenvector_" + std::to_string(i) + ".dat";
+            std::cout << "  Processing eigenvector file: " << eigvec_file << std::endl;
+            std::ifstream infile(eigvec_file, std::ios::binary);
+            
+            if (infile.is_open()) {
+                // Read eigenvector in fixed-Sz basis
+                std::vector<Complex> fixed_sz_vec(fixed_sz_dim);
+                infile.read(reinterpret_cast<char*>(fixed_sz_vec.data()), fixed_sz_dim * sizeof(Complex));
+                infile.close();
+                
+                // Transform to full basis
+                std::vector<Complex> full_vec = hamiltonian.embedToFull(fixed_sz_vec);
+                
+                // Overwrite file with full-space eigenvector
+                std::ofstream outfile(eigvec_file, std::ios::binary);
+                outfile.write(reinterpret_cast<const char*>(full_vec.data()), full_dim * sizeof(Complex));
+                outfile.close();
+                
+                std::cout << "  Transformed eigenvector " << i << " to full space (dim: " 
+                          << fixed_sz_dim << " -> " << full_dim << ")" << std::endl;
+            }
+        }
+        
+        std::cout << "All eigenvectors successfully transformed to full Hilbert space." << std::endl;
+    }
+
     std::cout << "=== Fixed Sz Diagonalization Complete ===" << std::endl;
     return results;
 }

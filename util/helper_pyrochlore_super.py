@@ -206,7 +206,7 @@ def create_nn_lists(edges, node_mapping, vertices, vertex_to_cell):
     
     return nn_list, positions, sublattice_indices
 
-def write_cluster_nn_list(output_dir, cluster_name, nn_list, positions, sublattice_indices, node_mapping):
+def write_cluster_nn_list(output_dir, cluster_name, nn_list, positions, sublattice_indices, node_mapping, vertex_to_cell=None):
     """
     Write nearest neighbor list, positions, and sublattice indices to a file
     """
@@ -241,7 +241,8 @@ def write_cluster_nn_list(output_dir, cluster_name, nn_list, positions, sublatti
 
     # Write lattice parameters
     with open(f"{output_dir}/{cluster_name}_lattice_parameters.dat", 'w') as f:
-        f.write("# Pyrochlore super lattice parameters\n\n")
+        f.write("# Pyrochlore super lattice parameters\n")
+        f.write("# Generated for quantum spin ice models\n\n")
         
         # Tetrahedron centers
         tetrahedron_centers = np.array([
@@ -258,10 +259,34 @@ def write_cluster_nn_list(output_dir, cluster_name, nn_list, positions, sublatti
             [0.25, 0, 0.25],
             [0.25, 0.25, 0]
         ])
-
+        
+        # Write lattice type
+        f.write("# Lattice type: Pyrochlore (3D)\n")
+        f.write("# Sites per unit cell: 16 (4 tetrahedra × 4 sites)\n")
+        f.write("# Coordination number (NN): 6 per site\n")
+        f.write("# Structure: Corner-sharing tetrahedra\n\n")
+        
+        # Write dimensions
+        f.write("# Cluster dimensions\n")
+        if vertex_to_cell:
+            max_i = max(cell[0] for cell in vertex_to_cell.values())
+            max_j = max(cell[1] for cell in vertex_to_cell.values())
+            max_k = max(cell[2] for cell in vertex_to_cell.values())
+            f.write(f"# Unit cells: {max_i + 1} x {max_j + 1} x {max_k + 1}\n")
+            f.write(f"# Total sites: {len(positions)}\n")
+            f.write(f"# Total tetrahedra: {(max_i + 1) * (max_j + 1) * (max_k + 1) * 4}\n\n")
+        
+        # Write unit cell vectors
+        f.write("# Unit cell lattice vectors (cubic basis)\n")
+        f.write("# vector_index, x, y, z\n")
+        f.write("0 1.000000 0.000000 0.000000\n")
+        f.write("1 0.000000 1.000000 0.000000\n")
+        f.write("2 0.000000 0.000000 1.000000\n")
+        
+        f.write("\n")
         
         # Write tetrahedron centers
-        f.write("# Tetrahedron centers in unit cell\n")
+        f.write("# Tetrahedron centers in unit cell (relative coordinates)\n")
         f.write("# tet_index, x, y, z\n")
         for i, center in enumerate(tetrahedron_centers):
             f.write(f"{i} {center[0]:.6f} {center[1]:.6f} {center[2]:.6f}\n")
@@ -269,10 +294,92 @@ def write_cluster_nn_list(output_dir, cluster_name, nn_list, positions, sublatti
         f.write("\n")
         
         # Write site offsets
-        f.write("# Site offsets within each tetrahedron\n")
+        f.write("# Site offsets within each tetrahedron (relative coordinates)\n")
         f.write("# site_index, x, y, z\n")
         for i, offset in enumerate(site_offsets):
             f.write(f"{i} {offset[0]:.6f} {offset[1]:.6f} {offset[2]:.6f}\n")
+        
+        f.write("\n")
+        
+        # Write local z-axes for each sublattice
+        f.write("# Local z-axes for each sublattice (pointing towards tetrahedron center)\n")
+        f.write("# sublattice_index, zx, zy, zz\n")
+        z_local = np.array([
+            np.array([1, 1, 1]) / np.sqrt(3),
+            np.array([1, -1, -1]) / np.sqrt(3),
+            np.array([-1, 1, -1]) / np.sqrt(3),
+            np.array([-1, -1, 1]) / np.sqrt(3)
+        ])
+        for i, z_axis in enumerate(z_local):
+            f.write(f"{i} {z_axis[0]:.6f} {z_axis[1]:.6f} {z_axis[2]:.6f}\n")
+        
+        f.write("\n")
+        
+        # Write characteristic distances
+        f.write("# Characteristic distances\n")
+        nn_dist = 0.25 * np.sqrt(2)  # Distance between NN sites in pyrochlore
+        f.write(f"# NN distance: {nn_dist:.6f}\n")
+        f.write(f"# Tetrahedron edge length: {nn_dist:.6f}\n")
+        f.write(f"# Intra-tetrahedron distances: {nn_dist:.6f}\n\n")
+        
+        # Write reciprocal lattice vectors
+        f.write("# Reciprocal lattice vectors\n")
+        f.write("# For cubic lattice: b_i = 2π * a_i / |a_i|^2\n")
+        f.write("# vector_index, kx, ky, kz\n")
+        f.write(f"0 {2*np.pi:.6f} {0:.6f} {0:.6f}\n")
+        f.write(f"1 {0:.6f} {2*np.pi:.6f} {0:.6f}\n")
+        f.write(f"2 {0:.6f} {0:.6f} {2*np.pi:.6f}\n")
+        
+        f.write("\n")
+        
+        # Write allowed k-points for this finite cluster
+        f.write("# Allowed momentum points (k-points) for finite cluster\n")
+        if vertex_to_cell:
+            max_i = max(cell[0] for cell in vertex_to_cell.values())
+            max_j = max(cell[1] for cell in vertex_to_cell.values())
+            max_k = max(cell[2] for cell in vertex_to_cell.values())
+            dim1_actual = max_i + 1
+            dim2_actual = max_j + 1
+            dim3_actual = max_k + 1
+            
+            f.write(f"# Grid dimensions: {dim1_actual} x {dim2_actual} x {dim3_actual}\n")
+            f.write(f"# k-point mesh: For periodic BC, k = (n1/N1)*b1 + (n2/N2)*b2 + (n3/N3)*b3\n")
+            f.write(f"#                where n1 = 0,...,N1-1, n2 = 0,...,N2-1, n3 = 0,...,N3-1\n")
+            f.write(f"#                For open BC, discrete k-points from edge states\n")
+            f.write("# Format: k_index, n1, n2, n3, kx, ky, kz\n")
+            
+            # Generate k-points
+            b1 = np.array([2*np.pi, 0, 0])
+            b2 = np.array([0, 2*np.pi, 0])
+            b3 = np.array([0, 0, 2*np.pi])
+            
+            k_index = 0
+            for n1 in range(dim1_actual):
+                for n2 in range(dim2_actual):
+                    for n3 in range(dim3_actual):
+                        kx = (n1 / dim1_actual) * b1[0] + (n2 / dim2_actual) * b2[0] + (n3 / dim3_actual) * b3[0]
+                        ky = (n1 / dim1_actual) * b1[1] + (n2 / dim2_actual) * b2[1] + (n3 / dim3_actual) * b3[1]
+                        kz = (n1 / dim1_actual) * b1[2] + (n2 / dim2_actual) * b2[2] + (n3 / dim3_actual) * b3[2]
+                        f.write(f"{k_index} {n1} {n2} {n3} {kx:.6f} {ky:.6f} {kz:.6f}\n")
+                        k_index += 1
+            
+            f.write(f"\n# Total number of k-points: {k_index}\n")
+            
+            # Add high-symmetry points for reference (cubic Brillouin zone)
+            f.write("\n# High-symmetry points in the cubic Brillouin zone\n")
+            f.write("# Gamma: (0, 0, 0)\n")
+            f.write(f"# X: ({np.pi:.6f}, 0, 0)\n")
+            f.write(f"# M: ({np.pi:.6f}, {np.pi:.6f}, 0)\n")
+            f.write(f"# R: ({np.pi:.6f}, {np.pi:.6f}, {np.pi:.6f})\n")
+        
+        f.write("\n")
+        
+        # Write symmetry information
+        f.write("# Symmetry information\n")
+        f.write("# Space group: Fd-3m (227)\n")
+        f.write("# Point group: O_h (cubic)\n")
+        f.write("# Tetrahedra arrangement: Each vertex shared by 2 tetrahedra (up and down)\n")
+        f.write("# Connectivity: Corner-sharing tetrahedra forming a 3D network\n")
 
 def prepare_hamiltonian_parameters(output_dir, non_kramer, nn_list, positions, sublattice_indices, 
                                   node_mapping, Jxx, Jyy, Jzz, h, theta, field_dir):
@@ -978,7 +1085,7 @@ def main():
     nn_list, positions, sublattice_indices = create_nn_lists(edges, node_mapping, vertices, vertex_to_cell)
     
     # Write nearest neighbor list and site info
-    write_cluster_nn_list(output_dir, cluster_name, nn_list, positions, sublattice_indices, node_mapping)
+    write_cluster_nn_list(output_dir, cluster_name, nn_list, positions, sublattice_indices, node_mapping, vertex_to_cell)
     
     # Prepare Hamiltonian parameters
     prepare_hamiltonian_parameters(output_dir, non_kramer, nn_list, positions, sublattice_indices, 
