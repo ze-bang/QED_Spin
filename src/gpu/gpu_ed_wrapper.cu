@@ -195,7 +195,10 @@ void* GPUEDWrapper::createGPUOperatorFromFiles(
             double E, F;
             
             if (!(lineStream >> Op_i >> indx_i >> Op_j >> indx_j >> E >> F)) continue;
-            
+            if (std::abs(E) < 1e-12 && std::abs(F) < 1e-12) {
+                lineCount++;
+                continue;  // Skip zero couplings
+            }
             // Convert to our format
             // For Sz-Sz interactions (Op_i=2, Op_j=2), we need special handling
             if (Op_i == 2 && Op_j == 2) {
@@ -357,8 +360,9 @@ void GPUEDWrapper::runGPULanczos(void* gpu_op_handle,
     
     GPUOperator* gpu_op = static_cast<GPUOperator*>(gpu_op_handle);
     
-    // Allocate GPU memory
-    gpu_op->allocateGPUMemory(N);
+    // Note: Do NOT call allocateGPUMemory here if already allocated
+    // (it was already done in createGPUOperatorFromCSR or createGPUOperatorFromFiles)
+    // Calling it again would clear the CSR data for symmetrized blocks
     
     // Create GPU Lanczos solver
     GPULanczos lanczos(gpu_op, max_iter, tol);
@@ -454,16 +458,14 @@ void GPUEDWrapper::runGPULOBPCG(void* gpu_op_handle,
                                 std::vector<double>& eigenvalues,
                                 std::string dir,
                                 bool compute_eigenvectors) {
-    if (!gpu_op_handle) {
-        std::cerr << "Error: NULL GPU operator handle\n";
-        return;
-    }
+    // LOBPCG_GPU is retired - redirect to Davidson GPU which is more robust
+    std::cout << "Note: LOBPCG_GPU is deprecated. Using Davidson GPU instead.\n";
     
-    GPUOperator* gpu_op = static_cast<GPUOperator*>(gpu_op_handle);
-    GPUIterativeSolver solver(gpu_op, N);
+    // Use a reasonable max_subspace for Davidson (typically 2-3x num_eigenvalues)
+    int max_subspace = std::max(50, 3 * num_eigenvalues);
     
-    solver.runLOBPCG(num_eigenvalues, max_iter, tol,
-                    eigenvalues, dir, compute_eigenvectors);
+    runGPUDavidson(gpu_op_handle, N, num_eigenvalues, max_iter, max_subspace,
+                   tol, eigenvalues, dir, compute_eigenvectors);
 }
 
 bool GPUEDWrapper::createGPUOperatorFromCPU(const Operator& cpu_op,
@@ -558,7 +560,10 @@ void GPUEDWrapper::runGPULOBPCG(void* gpu_op_handle,
                                 double tol,
                                 std::vector<double>& eigenvalues,
                                 std::string dir,
-                                bool compute_eigenvectors) {}
+                                bool compute_eigenvectors) {
+    // Stub: LOBPCG_GPU redirects to Davidson GPU
+    std::cerr << "CUDA not available - cannot run GPU methods\n";
+}
 
 bool GPUEDWrapper::createGPUOperatorFromCPU(const Operator& cpu_op,
                                            void** gpu_op_handle,

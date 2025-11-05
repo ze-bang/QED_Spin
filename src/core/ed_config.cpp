@@ -978,14 +978,17 @@ std::string getMethodParameterInfo(DiagonalizationMethod method) {
             break;
             
         case DiagonalizationMethod::LOBPCG_GPU:
-            info << "GPU-accelerated LOBPCG method (requires CUDA build).\n\n";
+            info << "GPU-accelerated LOBPCG method (requires CUDA build).\n";
+            info << "*** DEPRECATED: This method now redirects to DAVIDSON_GPU ***\n\n";
             info << "Requires: CUDA-enabled build\n";
             info << "Configurable Parameters:\n";
             info << "  - num_eigenvalues: Number of eigenvalues to compute\n";
             info << "  - max_iterations: Maximum iterations\n";
             info << "  - tolerance: Convergence tolerance\n";
             info << "  - compute_eigenvectors: Whether to compute eigenvectors\n\n";
-            info << "Best for: GPU-accelerated block optimization for multiple eigenpairs\n";
+            info << "Note: LOBPCG_GPU has been retired due to numerical stability issues.\n";
+            info << "      It now redirects to DAVIDSON_GPU which provides superior accuracy.\n";
+            info << "      Please use DAVIDSON_GPU directly for new projects.\n";
             break;
             
         case DiagonalizationMethod::mTPQ_GPU:

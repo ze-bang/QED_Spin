@@ -164,17 +164,10 @@ inline EDResults exact_diagonalization_fixed_sz_symmetrized(
             safe_system_call("mkdir -p " + block_params.output_dir);
         }
         
-        // Create matrix-vector function
-        auto matvec = [&block_matrix](const Complex* in, Complex* out, int size) {
-            Eigen::Map<const Eigen::VectorXcd> in_vec(in, size);
-            Eigen::Map<Eigen::VectorXcd> out_vec(out, size);
-            out_vec = block_matrix * in_vec;
-        };
-        
-        // Diagonalize this block
+        // Diagonalize this block (with GPU support)
         std::cout << "  Diagonalizing..." << std::endl;
-        EDResults block_results = exact_diagonalization_core(
-            matvec, block_dim, method, block_params
+        EDResults block_results = ed_internal::diagonalize_symmetry_block(
+            block_matrix, block_dim, method, block_params, false, 0.0
         );
         
         // Store eigenvalue information

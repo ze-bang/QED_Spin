@@ -141,6 +141,7 @@ public:
     
     /**
      * Run GPU-accelerated LOBPCG method
+     * @deprecated This method now redirects to Davidson GPU for better stability
      */
     static void runGPULOBPCG(void* gpu_op_handle,
                             int N, int num_eigenvalues, int max_iter,

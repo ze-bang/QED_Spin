@@ -459,19 +459,6 @@ void GPUIterativeSolver::runLOBPCG(
     const std::string& dir,
     bool compute_eigenvectors
 ){
-    // LOBPCG is a variant of Davidson; we can reuse the Davidson implementation
-    std::cout << "\n=== GPU LOBPCG Method ===" << std::endl;
-    std::cout << "\nUsing Davidson implementation with LOBPCG parameters===" << std::endl;
-    GPUIterativeSolver::runDavidson(
-        num_eigenvalues,
-        max_iter,
-        3 * num_eigenvalues, // LOBPCG typically uses a subspace of size ~3*num_eigenvalues
-        tol,
-        eigenvalues,
-        std::vector<std::vector<std::complex<double>>>(), // Not used here
-        dir,
-        compute_eigenvectors
-    );
 
     
 }
