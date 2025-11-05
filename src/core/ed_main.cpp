@@ -263,7 +263,6 @@ void compute_dynamical_response_workflow(const std::vector<double>& eigenvalues,
     std::string op_path = config.system.hamiltonian_dir + "/" + config.dynamical.operator_file;
     Operator op(config.system.num_sites, config.system.spin_length);
     op.loadFromInterAllFile(op_path);
-    
     // Setup parameters
     DynamicalResponseParameters params;
     params.num_samples = config.dynamical.num_random_states;

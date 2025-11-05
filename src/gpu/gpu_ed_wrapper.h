@@ -50,6 +50,47 @@ public:
                                     bool eigenvectors = false);
     
     /**
+     * Run GPU Davidson for Fixed Sz sector
+     */
+    static void runGPUDavidsonFixedSz(void* gpu_op_handle,
+                                     int n_up,
+                                     int num_eigenvalues, int max_iter,
+                                     int max_subspace, double tol,
+                                     std::vector<double>& eigenvalues,
+                                     std::string dir = "",
+                                     bool compute_eigenvectors = false);
+    
+    /**
+     * Run GPU TPQ for Fixed Sz sector (microcanonical)
+     */
+    static void runGPUMicrocanonicalTPQFixedSz(void* gpu_op_handle,
+                                              int n_up,
+                                              int max_iter, int num_samples,
+                                              int temp_interval,
+                                              std::vector<double>& eigenvalues,
+                                              std::string dir = "",
+                                              double large_value = 1e5);
+    
+    /**
+     * Run GPU TPQ for Fixed Sz sector (canonical)
+     */
+    static void runGPUCanonicalTPQFixedSz(void* gpu_op_handle,
+                                         int n_up,
+                                         double beta_max, int num_samples,
+                                         int temp_interval,
+                                         std::vector<double>& energies,
+                                         std::string dir = "",
+                                         double delta_beta = 0.1,
+                                         int taylor_order = 50);
+    
+    /**
+     * Create GPU Fixed Sz operator directly from interaction lists
+     */
+    static void* createGPUFixedSzOperatorDirect(int n_sites, int n_up, float spin_l,
+                                               const std::vector<std::tuple<int, int, char, char, double>>& interactions,
+                                               const std::vector<std::tuple<int, char, double>>& single_site_ops);
+    
+    /**
      * Matrix-vector product using GPU
      * y = H * x
      */
@@ -149,6 +190,18 @@ public:
                             std::vector<double>& eigenvalues,
                             std::string dir = "",
                             bool compute_eigenvectors = false);
+    
+    /**
+     * Run GPU-accelerated LOBPCG method for Fixed Sz sector
+     * @deprecated This method now redirects to Davidson GPU for better stability
+     */
+    static void runGPULOBPCGFixedSz(void* gpu_op_handle,
+                                   int n_up,
+                                   int num_eigenvalues, int max_iter,
+                                   double tol,
+                                   std::vector<double>& eigenvalues,
+                                   std::string dir = "",
+                                   bool compute_eigenvectors = false);
     
 private:
     static int getGPUCount();

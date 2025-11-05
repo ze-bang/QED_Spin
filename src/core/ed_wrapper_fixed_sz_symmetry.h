@@ -60,7 +60,8 @@ inline EDResults exact_diagonalization_fixed_sz_symmetrized(
     FixedSzOperator hamiltonian(params.num_sites, params.spin_length, n_up);
     hamiltonian.loadFromFile(single_site_file);
     hamiltonian.loadFromInterAllFile(interaction_file);
-    
+    hamiltonian.loadCounterTerm(directory + "/CounterTerm.dat");
+
     std::cout << "Fixed Sz dimension: " << hamiltonian.getFixedSzDim() << std::endl;
     
     // ========== Step 3: Generate/Load Symmetrized Basis (HDF5) ==========

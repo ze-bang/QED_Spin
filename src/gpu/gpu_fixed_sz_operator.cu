@@ -57,6 +57,17 @@ GPUFixedSzOperator::GPUFixedSzOperator(int n_sites, int n_up, float spin_l)
     buildBasisOnGPU();
 }
 
+GPUFixedSzOperator::~GPUFixedSzOperator() {
+    if (d_basis_states_) {
+        cudaFree(d_basis_states_);
+        d_basis_states_ = nullptr;
+    }
+    if (d_hash_table_) {
+        cudaFree(d_hash_table_);
+        d_hash_table_ = nullptr;
+    }
+}
+
 void GPUFixedSzOperator::buildBasisOnGPU() {
     std::cout << "Building fixed Sz basis on GPU...\n";
     
@@ -135,6 +146,36 @@ void GPUFixedSzOperator::matVecFixedSz(const cuDoubleComplex* d_x, cuDoubleCompl
     
     CUDA_CHECK(cudaEventDestroy(start));
     CUDA_CHECK(cudaEventDestroy(stop));
+}
+
+// Override matVecGPU to use fixed Sz version
+void GPUFixedSzOperator::matVecGPU(const cuDoubleComplex* d_x, cuDoubleComplex* d_y, int N) {
+    if (N != fixed_sz_dim_) {
+        throw std::runtime_error("GPUFixedSzOperator::matVecGPU: dimension mismatch");
+    }
+    matVecFixedSz(d_x, d_y);
+}
+
+// Override host-side matVec to use fixed Sz version
+void GPUFixedSzOperator::matVec(const std::complex<double>* x, std::complex<double>* y, int N) {
+    if (N != fixed_sz_dim_) {
+        throw std::runtime_error("GPUFixedSzOperator::matVec: dimension mismatch");
+    }
+    
+    if (!gpu_memory_allocated_) {
+        allocateGPUMemory(N);
+    }
+    
+    // Copy input to device
+    CUDA_CHECK(cudaMemcpy(d_vector_in_, x, N * sizeof(cuDoubleComplex), 
+                         cudaMemcpyHostToDevice));
+    
+    // Perform matrix-vector product
+    matVecFixedSz(d_vector_in_, d_vector_out_);
+    
+    // Copy output to host
+    CUDA_CHECK(cudaMemcpy(y, d_vector_out_, N * sizeof(cuDoubleComplex),
+                         cudaMemcpyDeviceToHost));
 }
 
 #endif // WITH_CUDA

@@ -798,6 +798,115 @@ public:
         }
     }
     
+    void loadCounterTerm(const std::string& filename) {
+        std::ifstream file(filename);
+        if (!file.is_open()) {
+            throw std::runtime_error("Could not open CounterTerm file: " + filename);
+        }
+        
+        std::string line;
+        // Read header lines
+        std::getline(file, line);  // "==================="
+        std::getline(file, line);  // "num       72"
+        std::istringstream iss(line);
+        std::string label;
+        uint64_t numLines;
+        iss >> label >> numLines;
+        
+        // Skip next 3 lines
+        for (uint64_t i = 0; i < 3; ++i) std::getline(file, line);
+        
+        uint64_t lineCount = 0;
+        while (std::getline(file, line) && lineCount < numLines) {
+            std::istringstream lineStream(line);
+            uint64_t Op_i, indx_i, Op_j, indx_j, Op_k, indx_k, Op_l, indx_l;
+            double E, F;
+            
+            if (!(lineStream >> Op_i >> indx_i >> Op_j >> indx_j >> Op_k >> indx_k >> Op_l >> indx_l >> E >> F)) continue;
+            Complex coeff(E, F);
+            if (std::abs(coeff) < 1e-15) continue;
+
+            addTransform([=](uint64_t basis) -> std::pair<int, Complex> {
+                uint64_t bit_i = (basis >> indx_i) & 1;
+                uint64_t bit_j = (basis >> indx_j) & 1;
+                uint64_t bit_k = (basis >> indx_k) & 1;
+                uint64_t bit_l = (basis >> indx_l) & 1;
+                
+                // Handle all Sz operators (Op == 2)
+                if (Op_i == 2 && Op_j == 2 && Op_k == 2 && Op_l == 2) {
+                    double sign_i = pow(-1, bit_i);
+                    double sign_j = pow(-1, bit_j);
+                    double sign_k = pow(-1, bit_k);
+                    double sign_l = pow(-1, bit_l);
+                    return {basis, coeff * double(spin_l_) * double(spin_l_) * double(spin_l_) * double(spin_l_) 
+                                   * sign_i * sign_j * sign_k * sign_l};
+                }
+                
+                Complex local_coeff = coeff;
+                uint64_t new_basis = basis;
+                bool valid = true;
+                
+                // Apply operator i
+                if (Op_i != 2) {
+                    if (bit_i != Op_i) {
+                        new_basis ^= (1ULL << indx_i);
+                    } else {
+                        valid = false;
+                    }
+                } else {
+                    local_coeff *= double(spin_l_) * pow(-1, bit_i);
+                }
+                
+                // Apply operator j
+                if (valid && Op_j != 2) {
+                    uint64_t new_bit_j = (new_basis >> indx_j) & 1;
+                    if (new_bit_j != Op_j) {
+                        new_basis ^= (1ULL << indx_j);
+                    } else {
+                        valid = false;
+                    }
+                } else if (valid) {
+                    uint64_t new_bit_j = (new_basis >> indx_j) & 1;
+                    local_coeff *= double(spin_l_) * pow(-1, new_bit_j);
+                }
+                
+                // Apply operator k
+                if (valid && Op_k != 2) {
+                    uint64_t new_bit_k = (new_basis >> indx_k) & 1;
+                    if (new_bit_k != Op_k) {
+                        new_basis ^= (1ULL << indx_k);
+                    } else {
+                        valid = false;
+                    }
+                } else if (valid) {
+                    uint64_t new_bit_k = (new_basis >> indx_k) & 1;
+                    local_coeff *= double(spin_l_) * pow(-1, new_bit_k);
+                }
+                
+                // Apply operator l
+                if (valid && Op_l != 2) {
+                    uint64_t new_bit_l = (new_basis >> indx_l) & 1;
+                    if (new_bit_l != Op_l) {
+                        new_basis ^= (1ULL << indx_l);
+                    } else {
+                        valid = false;
+                    }
+                } else if (valid) {
+                    uint64_t new_bit_l = (new_basis >> indx_l) & 1;
+                    local_coeff *= double(spin_l_) * pow(-1, new_bit_l);
+                }
+                
+                if (valid) {
+                    return {new_basis, local_coeff};
+                }
+                return {basis, Complex(0.0, 0.0)};
+            });
+            
+            lineCount++;
+        }
+    }
+
+
     void loadonebodycorrelation(const uint64_t Op, const uint64_t indx) {
         addTransform([=](uint64_t basis) -> std::pair<int, Complex> {
             if (Op == 2) {
@@ -1272,7 +1381,7 @@ protected:
     mutable bool matrixBuilt_;
     
     const std::array<std::array<double, 4>, 3> operators_ = {
-        {{0, 1, 0, 0}, {0, 0, 1, 0}, {1, 0, 0, -1}}
+        {{0, 1, 0, 0}, {0, 0, 1, 0}, {0.5, 0, 0, -0.5}}
     };
     
 private:

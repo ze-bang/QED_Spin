@@ -305,6 +305,40 @@ void* GPUEDWrapper::createGPUOperatorFromFiles(
     return createGPUOperatorDirect(n_sites, interactions, single_site_ops);
 }
 
+void* GPUEDWrapper::createGPUFixedSzOperatorDirect(
+    int n_sites, int n_up, float spin_l,
+    const std::vector<std::tuple<int, int, char, char, double>>& interactions,
+    const std::vector<std::tuple<int, char, double>>& single_site_ops) {
+    
+    std::cout << "Creating GPU Fixed Sz Operator...\n";
+    std::cout << "  Sites: " << n_sites << ", N_up: " << n_up << ", Spin: " << spin_l << "\n";
+    
+    GPUFixedSzOperator* gpu_op = new GPUFixedSzOperator(n_sites, n_up, spin_l);
+    
+    // Add interactions
+    for (const auto& inter : interactions) {
+        int site1, site2;
+        char op1, op2;
+        double coupling;
+        std::tie(site1, site2, op1, op2, coupling) = inter;
+        gpu_op->setInteraction(site1, site2, op1, op2, coupling);
+    }
+    
+    // Add single-site operators
+    for (const auto& op : single_site_ops) {
+        int site;
+        char op_type;
+        double coupling;
+        std::tie(site, op_type, coupling) = op;
+        gpu_op->setSingleSite(site, op_type, coupling);
+    }
+    
+    std::cout << "GPU Fixed Sz Operator created successfully\n";
+    std::cout << "  Fixed Sz dimension: " << gpu_op->getFixedSzDimension() << "\n";
+    
+    return static_cast<void*>(gpu_op);
+}
+
 void* GPUEDWrapper::createGPUOperatorFromCSR(int n_sites,
                                             int N,
                                             const std::vector<int>& row_ptr,
@@ -391,9 +425,39 @@ void GPUEDWrapper::runGPULanczosFixedSz(void* gpu_op_handle,
                                        std::vector<double>& eigenvalues,
                                        std::string dir,
                                        bool eigenvectors) {
-    // This would require casting to GPUFixedSzOperator
-    // Placeholder for now
-    std::cout << "GPU Fixed Sz Lanczos not yet fully implemented\n";
+    if (!gpu_op_handle) {
+        std::cerr << "Error: NULL GPU operator handle\n";
+        return;
+    }
+    
+    // Cast to GPUFixedSzOperator
+    GPUFixedSzOperator* gpu_op = static_cast<GPUFixedSzOperator*>(gpu_op_handle);
+    int fixed_sz_dim = gpu_op->getFixedSzDimension();
+    
+    std::cout << "Running GPU Lanczos for fixed Sz sector (N_up=" << n_up 
+              << ", dim=" << fixed_sz_dim << ")\n";
+    
+    // Allocate GPU memory for vectors
+    gpu_op->allocateGPUMemory(fixed_sz_dim);
+    
+    // Create GPU Lanczos solver with fixed Sz operator
+    GPULanczos lanczos(gpu_op, max_iter, tol);
+    
+    // Run Lanczos
+    std::vector<std::vector<std::complex<double>>> eigvecs;
+    lanczos.run(num_eigs, eigenvalues, eigvecs, eigenvectors);
+    
+    // Print statistics
+    auto stats = lanczos.getStats();
+    std::cout << "\nGPU Lanczos Fixed Sz Statistics:\n";
+    std::cout << "  Total time: " << stats.total_time << " s\n";
+    std::cout << "  MatVec time: " << stats.matvec_time << " s\n";
+    std::cout << "  Ortho time: " << stats.ortho_time << " s\n";
+    std::cout << "  Iterations: " << stats.iterations << "\n";
+    
+    // Get operator performance stats
+    auto op_stats = gpu_op->getStats();
+    std::cout << "  Throughput: " << op_stats.throughput << " GFLOPS\n";
 }
 
 void GPUEDWrapper::runGPUMicrocanonicalTPQ(void* gpu_op_handle,
@@ -412,6 +476,34 @@ void GPUEDWrapper::runGPUMicrocanonicalTPQ(void* gpu_op_handle,
     
     tpq_solver.runMicrocanonicalTPQ(max_iter, num_samples, temp_interval,
                                     eigenvalues, dir, large_value);
+}
+
+void GPUEDWrapper::runGPUMicrocanonicalTPQFixedSz(void* gpu_op_handle,
+                                                 int n_up,
+                                                 int max_iter, int num_samples,
+                                                 int temp_interval,
+                                                 std::vector<double>& eigenvalues,
+                                                 std::string dir,
+                                                 double large_value) {
+    if (!gpu_op_handle) {
+        std::cerr << "Error: NULL GPU operator handle\n";
+        return;
+    }
+    
+    // Cast to GPUFixedSzOperator
+    GPUFixedSzOperator* gpu_op = static_cast<GPUFixedSzOperator*>(gpu_op_handle);
+    int fixed_sz_dim = gpu_op->getFixedSzDimension();
+    
+    std::cout << "Running GPU Microcanonical TPQ for fixed Sz sector (N_up=" << n_up 
+              << ", dim=" << fixed_sz_dim << ")\n";
+    
+    // Create GPU TPQ solver with fixed Sz operator
+    GPUTPQSolver tpq_solver(gpu_op, fixed_sz_dim);
+    
+    tpq_solver.runMicrocanonicalTPQ(max_iter, num_samples, temp_interval,
+                                    eigenvalues, dir, large_value);
+    
+    std::cout << "\nGPU Microcanonical TPQ Fixed Sz complete\n";
 }
 
 void GPUEDWrapper::runGPUCanonicalTPQ(void* gpu_op_handle,
@@ -433,6 +525,35 @@ void GPUEDWrapper::runGPUCanonicalTPQ(void* gpu_op_handle,
                                energies, dir, delta_beta, taylor_order);
 }
 
+void GPUEDWrapper::runGPUCanonicalTPQFixedSz(void* gpu_op_handle,
+                                            int n_up,
+                                            double beta_max, int num_samples,
+                                            int temp_interval,
+                                            std::vector<double>& energies,
+                                            std::string dir,
+                                            double delta_beta,
+                                            int taylor_order) {
+    if (!gpu_op_handle) {
+        std::cerr << "Error: NULL GPU operator handle\n";
+        return;
+    }
+    
+    // Cast to GPUFixedSzOperator
+    GPUFixedSzOperator* gpu_op = static_cast<GPUFixedSzOperator*>(gpu_op_handle);
+    int fixed_sz_dim = gpu_op->getFixedSzDimension();
+    
+    std::cout << "Running GPU Canonical TPQ for fixed Sz sector (N_up=" << n_up 
+              << ", dim=" << fixed_sz_dim << ")\n";
+    
+    // Create GPU TPQ solver with fixed Sz operator
+    GPUTPQSolver tpq_solver(gpu_op, fixed_sz_dim);
+    
+    tpq_solver.runCanonicalTPQ(beta_max, num_samples, temp_interval,
+                               energies, dir, delta_beta, taylor_order);
+    
+    std::cout << "\nGPU Canonical TPQ Fixed Sz complete\n";
+}
+
 void GPUEDWrapper::runGPUDavidson(void* gpu_op_handle,
                                   int N, int num_eigenvalues, int max_iter,
                                   int max_subspace, double tol,
@@ -452,6 +573,38 @@ void GPUEDWrapper::runGPUDavidson(void* gpu_op_handle,
                       eigenvalues, eigenvectors, dir, compute_eigenvectors);
 }
 
+void GPUEDWrapper::runGPUDavidsonFixedSz(void* gpu_op_handle,
+                                        int n_up,
+                                        int num_eigenvalues, int max_iter,
+                                        int max_subspace, double tol,
+                                        std::vector<double>& eigenvalues,
+                                        std::string dir,
+                                        bool compute_eigenvectors) {
+    if (!gpu_op_handle) {
+        std::cerr << "Error: NULL GPU operator handle\n";
+        return;
+    }
+    
+    // Cast to GPUFixedSzOperator
+    GPUFixedSzOperator* gpu_op = static_cast<GPUFixedSzOperator*>(gpu_op_handle);
+    int fixed_sz_dim = gpu_op->getFixedSzDimension();
+    
+    std::cout << "Running GPU Davidson for fixed Sz sector (N_up=" << n_up 
+              << ", dim=" << fixed_sz_dim << ")\n";
+    
+    // Allocate GPU memory for vectors
+    gpu_op->allocateGPUMemory(fixed_sz_dim);
+    
+    // Create GPU Davidson solver with fixed Sz operator
+    GPUIterativeSolver solver(gpu_op, fixed_sz_dim);
+    
+    std::vector<std::vector<std::complex<double>>> eigenvectors;
+    solver.runDavidson(num_eigenvalues, max_iter, max_subspace, tol,
+                      eigenvalues, eigenvectors, dir, compute_eigenvectors);
+    
+    std::cout << "\nGPU Davidson Fixed Sz complete\n";
+}
+
 void GPUEDWrapper::runGPULOBPCG(void* gpu_op_handle,
                                 int N, int num_eigenvalues, int max_iter,
                                 double tol,
@@ -466,6 +619,23 @@ void GPUEDWrapper::runGPULOBPCG(void* gpu_op_handle,
     
     runGPUDavidson(gpu_op_handle, N, num_eigenvalues, max_iter, max_subspace,
                    tol, eigenvalues, dir, compute_eigenvectors);
+}
+
+void GPUEDWrapper::runGPULOBPCGFixedSz(void* gpu_op_handle,
+                                      int n_up,
+                                      int num_eigenvalues, int max_iter,
+                                      double tol,
+                                      std::vector<double>& eigenvalues,
+                                      std::string dir,
+                                      bool compute_eigenvectors) {
+    // LOBPCG_GPU is retired - redirect to Davidson GPU which is more robust
+    std::cout << "Note: LOBPCG_GPU Fixed Sz is deprecated. Using Davidson GPU Fixed Sz instead.\n";
+    
+    // Use a reasonable max_subspace for Davidson (typically 2-3x num_eigenvalues)
+    int max_subspace = std::max(50, 3 * num_eigenvalues);
+    
+    runGPUDavidsonFixedSz(gpu_op_handle, n_up, num_eigenvalues, max_iter, max_subspace,
+                         tol, eigenvalues, dir, compute_eigenvectors);
 }
 
 bool GPUEDWrapper::createGPUOperatorFromCPU(const Operator& cpu_op,
@@ -533,6 +703,38 @@ void GPUEDWrapper::runGPULanczosFixedSz(void* gpu_op_handle,
                                        std::string dir,
                                        bool eigenvectors) {}
 
+void GPUEDWrapper::runGPUDavidsonFixedSz(void* gpu_op_handle,
+                                        int n_up,
+                                        int num_eigenvalues, int max_iter,
+                                        int max_subspace, double tol,
+                                        std::vector<double>& eigenvalues,
+                                        std::string dir,
+                                        bool compute_eigenvectors) {}
+
+void GPUEDWrapper::runGPUMicrocanonicalTPQFixedSz(void* gpu_op_handle,
+                                                 int n_up,
+                                                 int max_iter, int num_samples,
+                                                 int temp_interval,
+                                                 std::vector<double>& eigenvalues,
+                                                 std::string dir,
+                                                 double large_value) {}
+
+void GPUEDWrapper::runGPUCanonicalTPQFixedSz(void* gpu_op_handle,
+                                            int n_up,
+                                            double beta_max, int num_samples,
+                                            int temp_interval,
+                                            std::vector<double>& energies,
+                                            std::string dir,
+                                            double delta_beta,
+                                            int taylor_order) {}
+
+void* GPUEDWrapper::createGPUFixedSzOperatorDirect(
+    int n_sites, int n_up, float spin_l,
+    const std::vector<std::tuple<int, int, char, char, double>>& interactions,
+    const std::vector<std::tuple<int, char, double>>& single_site_ops) {
+    return nullptr;
+}
+
 void GPUEDWrapper::runGPUMicrocanonicalTPQ(void* gpu_op_handle,
                                            int N, int max_iter, int num_samples,
                                            int temp_interval,
@@ -562,6 +764,17 @@ void GPUEDWrapper::runGPULOBPCG(void* gpu_op_handle,
                                 std::string dir,
                                 bool compute_eigenvectors) {
     // Stub: LOBPCG_GPU redirects to Davidson GPU
+    std::cerr << "CUDA not available - cannot run GPU methods\n";
+}
+
+void GPUEDWrapper::runGPULOBPCGFixedSz(void* gpu_op_handle,
+                                      int n_up,
+                                      int num_eigenvalues, int max_iter,
+                                      double tol,
+                                      std::vector<double>& eigenvalues,
+                                      std::string dir,
+                                      bool compute_eigenvectors) {
+    // Stub: LOBPCG_GPU Fixed Sz redirects to Davidson GPU
     std::cerr << "CUDA not available - cannot run GPU methods\n";
 }
 

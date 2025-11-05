@@ -37,10 +37,10 @@ public:
     void addTransform(const std::function<std::pair<int, Complex>(int)>& transform);
     
     // Matrix-vector product: y = H * x (core operation for Lanczos)
-    void matVec(const std::complex<double>* x, std::complex<double>* y, int N);
+    virtual void matVec(const std::complex<double>* x, std::complex<double>* y, int N);
     
     // GPU-accelerated matrix-vector product
-    void matVecGPU(const cuDoubleComplex* d_x, cuDoubleComplex* d_y, int N);
+    virtual void matVecGPU(const cuDoubleComplex* d_x, cuDoubleComplex* d_y, int N);
     
     // Set interaction parameters
     void setInteraction(int site1, int site2, char op1, char op2, double coupling);
@@ -153,9 +153,14 @@ protected:
 class GPUFixedSzOperator : public GPUOperator {
 public:
     GPUFixedSzOperator(int n_sites, int n_up, float spin_l = 0.5f);
+    ~GPUFixedSzOperator();
     
     // Override matrix-vector product for fixed Sz basis
     void matVecFixedSz(const cuDoubleComplex* d_x, cuDoubleComplex* d_y);
+    
+    // Override base class methods to use fixed Sz
+    void matVecGPU(const cuDoubleComplex* d_x, cuDoubleComplex* d_y, int N) override;
+    void matVec(const std::complex<double>* x, std::complex<double>* y, int N) override;
     
     // Build basis states on GPU
     void buildBasisOnGPU();

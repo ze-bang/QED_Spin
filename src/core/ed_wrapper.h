@@ -275,6 +275,7 @@ namespace ed_internal {
     Operator load_hamiltonian_from_files(
         const std::string& interaction_file,
         const std::string& single_site_file,
+        const std::string& counterterm_file,
         uint64_t num_sites,
         float spin_length,
         DiagonalizationMethod method,
@@ -996,6 +997,7 @@ OperatorType* create_operator(const SystemConfig& config) {
 Operator load_hamiltonian_from_files(
     const std::string& interaction_file,
     const std::string& single_site_file,
+    const std::string& counterterm_file,
     uint64_t num_sites,
     float spin_length,
     DiagonalizationMethod method,
@@ -1011,6 +1013,9 @@ Operator load_hamiltonian_from_files(
             }
             if (!interaction_file.empty()) {
                 hamiltonian.loadFromInterAllFile(interaction_file);
+            }
+            if (!counterterm_file.empty()){
+                hamiltonian.loadCounterTerm(counterterm_file);
             }
             // Build sparse matrix (except for full diagonalization)
             if (method != DiagonalizationMethod::FULL) {
@@ -1631,6 +1636,7 @@ inline EDResults exact_diagonalization_fixed_sz(
 EDResults exact_diagonalization_from_files(
     const std::string& interaction_file,
     const std::string& single_site_file = "",
+    const std::string& counterterm_file = "",
     DiagonalizationMethod method = DiagonalizationMethod::LANCZOS,
     const EDParameters& params = EDParameters(),
     HamiltonianFileFormat format = HamiltonianFileFormat::STANDARD
@@ -1823,7 +1829,7 @@ EDResults exact_diagonalization_from_files(
     
     // Load Hamiltonian (for CPU methods)
     Operator hamiltonian = ed_internal::load_hamiltonian_from_files(
-        interaction_file, single_site_file, params.num_sites, params.spin_length, method, format
+        interaction_file, single_site_file, counterterm_file, params.num_sites, params.spin_length, method, format
     );
     
     // Calculate Hilbert space dimension
@@ -1857,15 +1863,23 @@ EDResults exact_diagonalization_from_directory(
     const EDParameters& params = EDParameters(),
     HamiltonianFileFormat format = HamiltonianFileFormat::STANDARD,
     const std::string& interaction_filename = "InterAll.dat",
-    const std::string& single_site_filename = "Trans.dat"
+    const std::string& single_site_filename = "Trans.dat",
+    const std::string& counterterm_filename = "CounterTerm.dat"
 ) {
     // Construct full file paths
     std::string interaction_file = directory + "/" + interaction_filename;
     std::string single_site_file = directory + "/" + single_site_filename;
+    std::string counterterm_file = directory + "/" + counterterm_filename;
+    
+    // Check if counter term file exists
+    struct stat buffer;
+    if (stat(counterterm_file.c_str(), &buffer) != 0) {
+        counterterm_file = "";  // File doesn't exist, pass empty string
+    }
     
     // Call the file-based wrapper
     return exact_diagonalization_from_files(
-        interaction_file, single_site_file, method, params, format
+        interaction_file, single_site_file, counterterm_file, method, params, format
     );
 }
 
@@ -1892,6 +1906,7 @@ EDResults exact_diagonalization_from_directory(
  * @param format File format for Hamiltonian
  * @param interaction_filename Name of interaction file (default: "InterAll.dat")
  * @param single_site_filename Name of single-site file (default: "Trans.dat")
+ * @param counterterm_filename Name of counter term file (default: "CounterTerm.dat")
  * @return EDResults containing eigenvalues and metadata
  */
 EDResults exact_diagonalization_from_directory_symmetrized(
@@ -1900,7 +1915,8 @@ EDResults exact_diagonalization_from_directory_symmetrized(
     const EDParameters& params = EDParameters(),
     HamiltonianFileFormat format = HamiltonianFileFormat::STANDARD,
     const std::string& interaction_filename = "InterAll.dat",
-    const std::string& single_site_filename = "Trans.dat"
+    const std::string& single_site_filename = "Trans.dat",
+    const std::string& counterterm_filename = "CounterTerm.dat"
 ) {
     std::cerr << "[DEBUG] exact_diagonalization_from_directory_symmetrized: num_sites=" 
               << params.num_sites << ", method=" << static_cast<int>(method) << std::endl;
@@ -1926,6 +1942,11 @@ EDResults exact_diagonalization_from_directory_symmetrized(
     // ========== Step 2: Load Hamiltonian ==========
     std::string interaction_file = directory + "/" + interaction_filename;
     std::string single_site_file = directory + "/" + single_site_filename;
+    std::string counterterm_file = directory + "/" + counterterm_filename;
+    
+    // Check if counter term file exists
+    struct stat counterterm_buffer;
+    bool counterterm_exists = (stat(counterterm_file.c_str(), &counterterm_buffer) == 0);
     
     EDResults results;
     results.eigenvectors_computed = params.compute_eigenvectors;
@@ -1936,7 +1957,9 @@ EDResults exact_diagonalization_from_directory_symmetrized(
     Operator hamiltonian(params.num_sites, params.spin_length);
     hamiltonian.loadFromFile(single_site_file);
     hamiltonian.loadFromInterAllFile(interaction_file);
-    
+    if (counterterm_exists) {
+        hamiltonian.loadCounterTerm(counterterm_file);
+    }
     // ========== Step 3: Setup Symmetrized Basis ==========
     bool use_hdf5 = true;  // Use HDF5 by default
     ed_internal::setup_symmetry_basis(directory, hamiltonian, use_hdf5);

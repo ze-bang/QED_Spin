@@ -2,11 +2,15 @@ import numpy as np
 import sys
 import os
 import re
-from mpl_toolkits.mplot3d import Axes3D
-import matplotlib as mpl
-from matplotlib.ticker import NullFormatter
 
-import matplotlib.pyplot as plt
+try:
+    from mpl_toolkits.mplot3d import Axes3D
+    import matplotlib as mpl
+    from matplotlib.ticker import NullFormatter
+    import matplotlib.pyplot as plt
+    MATPLOTLIB_AVAILABLE = True
+except ImportError:
+    MATPLOTLIB_AVAILABLE = False
 
 def generate_pyrochlore_super_cluster(dim1, dim2, dim3, use_pbc=False):
     """
@@ -423,6 +427,377 @@ def write_two_body_correlations(output_dir, Op1, Op2, N, file_name):
                        f" {0:8f}   " \
                        f"\n")
 
+def find_counter_term_chains(vertices, nn_list, vertex_to_cell, dim1, dim2, dim3, use_pbc):
+    """
+    Find chains (or loops) of 4 connected sites that preserve the spin ice manifold.
+    
+    In pyrochlore lattice, each site belongs to TWO tetrahedra (one up-pointing 
+    and one down-pointing). The ice rule must be satisfied for both.
+    
+    The criterion is that for each tetrahedron touched by the chain, it must be 
+    visited an even number of times. This ensures that flipping spins along the 
+    chain maintains the "2-in, 2-out" ice rule for all tetrahedra.
+    
+    Returns:
+        List of chains, where each chain is a list of 4 vertex IDs
+    """
+    # Find all tetrahedra as 4-cliques (complete subgraphs with 4 vertices) in the NN graph
+    # This correctly identifies tetrahedra based on actual connectivity, including PBC effects
+    tetrahedra = []
+    sites = sorted(nn_list.keys())
+    for i, a in enumerate(sites):
+        for b in [x for x in nn_list[a] if x > a]:
+            common_ab = set(nn_list[a]).intersection(set(nn_list[b]))
+            for c in [x for x in common_ab if x > b]:
+                common_abc = common_ab.intersection(set(nn_list[c]))
+                for d in [x for x in common_abc if x > c]:
+                    tetrahedra.append(tuple(sorted([a, b, c, d])))
+    
+    # Build mapping: vertex to ALL tetrahedra it belongs to
+    # In pyrochlore, each site belongs to 2 tetrahedra (one up, one down)
+    vertex_to_tets = {}
+    for tet in tetrahedra:
+        for v in tet:
+            if v not in vertex_to_tets:
+                vertex_to_tets[v] = []
+            vertex_to_tets[v].append(tet)
+    
+    def check_ice_rule_preserved(chain):
+        """
+        Check if a chain of 4 sites preserves the ice rule.
+        Each tetrahedron touched must be visited an even number of times.
+        Since each site belongs to 2 tetrahedra, we need to check all tetrahedra
+        that are touched by any site in the chain.
+        """
+        tet_visit_count = {}
+        for vertex_id in chain:
+            # Each vertex belongs to 2 tetrahedra
+            for tet_key in vertex_to_tets.get(vertex_id, []):
+                tet_visit_count[tet_key] = tet_visit_count.get(tet_key, 0) + 1
+        
+        # Check if all counts are even
+        for count in tet_visit_count.values():
+            if count % 2 != 0:
+                return False
+        return True
+    
+    chains = []
+    visited_chains = set()
+    
+    # Try all possible starting vertices
+    for start_vertex in sorted(vertices.keys()):
+        # Try to build chains starting from this vertex
+        # Use DFS to explore all possible 4-site paths
+        def dfs_find_chains(current_path):
+            if len(current_path) == 4:
+                # Check if this chain preserves ice rule
+                if check_ice_rule_preserved(current_path):
+                    # Normalize chain representation to avoid duplicates
+                    # (sort to get canonical form)
+                    chain_normalized = tuple(sorted(current_path))
+                    if chain_normalized not in visited_chains:
+                        visited_chains.add(chain_normalized)
+                        chains.append(list(current_path))
+                return
+            
+            current_vertex = current_path[-1]
+            for neighbor in nn_list[current_vertex]:
+                # Allow revisiting vertices for loops, but limit to reasonable paths
+                if neighbor not in current_path or (len(current_path) == 3 and neighbor == current_path[0]):
+                    # If we're at the 3rd site and neighbor is the start, we have a 4-site loop
+                    if len(current_path) == 3 and neighbor == current_path[0]:
+                        # Create a closed loop
+                        loop_path = current_path + [neighbor]
+                        if check_ice_rule_preserved(current_path):  # Check the 4 unique vertices
+                            chain_normalized = tuple(sorted(current_path))
+                            if chain_normalized not in visited_chains:
+                                visited_chains.add(chain_normalized)
+                                chains.append(list(current_path))
+                    elif neighbor not in current_path:
+                        dfs_find_chains(current_path + [neighbor])
+        
+        dfs_find_chains([start_vertex])
+    
+    # Verbose output: verify each chain
+    print("\n" + "="*80)
+    print(f"VERIFICATION: Found {len(chains)} chains that preserve ice rule")
+    print("="*80)
+    for i, chain in enumerate(chains):
+        print(f"\nChain {i+1}: {chain}")
+        
+        # Build detailed tracking of which sites contribute to which tetrahedra
+        tet_contributions = {}  # Maps tet -> list of (site, [tets_for_site])
+        for vertex_id in chain:
+            site_tets = vertex_to_tets.get(vertex_id, [])
+            for tet_key in site_tets:
+                if tet_key not in tet_contributions:
+                    tet_contributions[tet_key] = []
+                tet_contributions[tet_key].append((vertex_id, site_tets))
+        
+        # Show each site and which tetrahedra it belongs to
+        print(f"  Site-to-Tetrahedra membership in this chain:")
+        for vertex_id in chain:
+            site_tets = vertex_to_tets.get(vertex_id, [])
+            print(f"    Site {vertex_id} belongs to {len(site_tets)} tetrahedra: {site_tets}")
+        
+        # Find all tetrahedra touched by this chain
+        tet_visit_count = {}
+        for vertex_id in chain:
+            for tet_key in vertex_to_tets.get(vertex_id, []):
+                tet_visit_count[tet_key] = tet_visit_count.get(tet_key, 0) + 1
+        
+        print(f"\n  Tetrahedra touched and visit breakdown:")
+        all_even = True
+        for tet_key, count in sorted(tet_visit_count.items()):
+            even_str = "✓ EVEN" if count % 2 == 0 else "✗ ODD"
+            print(f"    Tetrahedron {tet_key}:")
+            print(f"      Visited {count} times {even_str}")
+            print(f"      Contributing sites:", end=" ")
+            contributing_sites = [site for site, _ in tet_contributions[tet_key]]
+            print(f"{contributing_sites}")
+            print(f"      Detail: ", end="")
+            for site in contributing_sites:
+                print(f"site {site} ∈ {tet_key}", end="; ")
+            print()
+            if count % 2 != 0:
+                all_even = False
+        
+        if all_even:
+            print(f"  ✓ All tetrahedra visited even number of times - ICE RULE PRESERVED")
+        else:
+            print(f"  ✗ ERROR: Some tetrahedra visited odd number of times!")
+    
+    print("\n" + "="*80)
+    print(f"Verification complete: {len(chains)} valid chains")
+    print("="*80 + "\n")
+    
+    return chains
+
+def write_counter_term(output_dir, chains, Jxx, Jyy, Jzz, file_name="CounterTerm.dat"):
+    """
+    Write counter term chains to a file in InterAll.dat format.
+    Each chain contributes terms for each connected edge.
+    
+    For each edge in a chain, we add two lines:
+    - One with operators 0 1 0 1 (S+ S- S+ S-)
+    - One with operators 1 0 1 0 (S- S+ S- S+)
+    
+    Coefficient is 4*(Jpm^2)/Jzz where Jpm = -(Jxx+Jyy)/4
+    """
+    # Calculate coefficient
+    Jpm = -(Jxx + Jyy) / 4
+    coeff = 4 * (Jpm**2) / Jzz
+    
+    # Actually, re-reading the request: "two lines per connected edge"
+    # Let me reinterpret: for each edge in the chain, write two lines
+    counter_terms = []
+    
+    for chain in chains:
+        # First line: 0 site_i 1 site_j 0 site_i 1 site_j (S+ S- S+ S-)
+        counter_terms.append([0, chain[0], 1, chain[1], 0, chain[2], 1, chain[3], coeff, 0])
+
+        # Second line: 1 site_i 0 site_j 1 site_i 0 site_j (S- S+ S- S+)
+        counter_terms.append([1, chain[0], 0, chain[1], 1, chain[2], 0, chain[3], coeff, 0])
+
+    num_terms = len(counter_terms)
+    
+    with open(f"{output_dir}/{file_name}", 'w') as f:
+        f.write("===================\n")
+        f.write(f"num {num_terms:8d}\n")
+        f.write("===================\n")
+        f.write("===================\n")
+        f.write("===================\n")
+        
+        for term in counter_terms:
+            f.write(f" {int(term[0]):8d} " \
+                   f" {int(term[1]):8d}   " \
+                   f" {int(term[2]):8d}   " \
+                   f" {int(term[3]):8d}   " \
+                   f" {int(term[4]):8d}   " \
+                   f" {int(term[5]):8d}   " \
+                   f" {int(term[6]):8d}   " \
+                   f" {int(term[7]):8d}   " \
+                   f" {term[8]:8f}   " \
+                   f" {term[9]:8f}   " \
+                   f"\n")
+
+def plot_counter_term_chains(vertices, edges, chains, output_dir, cluster_name, sublattice_indices=None):
+    """
+    Plot the cluster with counter term chains highlighted
+    """
+    try:
+        import matplotlib.pyplot as plt
+        from matplotlib.ticker import NullFormatter
+
+        # Publication-quality params
+        mpl.rcParams['font.family'] = 'serif'
+        mpl.rcParams['font.serif'] = ['Computer Modern Roman', 'Times New Roman']
+        mpl.rcParams['font.size'] = 10
+        mpl.rcParams['axes.labelsize'] = 12
+        mpl.rcParams['axes.titlesize'] = 12
+        mpl.rcParams['xtick.labelsize'] = 10
+        mpl.rcParams['ytick.labelsize'] = 10
+        mpl.rcParams['legend.fontsize'] = 9
+        mpl.rcParams['figure.dpi'] = 100
+        mpl.rcParams['savefig.dpi'] = 300
+        mpl.rcParams['axes.linewidth'] = 1.0
+        mpl.rcParams['xtick.major.width'] = 0.8
+        mpl.rcParams['ytick.major.width'] = 0.8
+
+        # Helper: equal aspect ratio
+        def set_equal_aspect_3d(ax, pts):
+            pts = np.asarray(pts)
+            mins = pts.min(axis=0)
+            maxs = pts.max(axis=0)
+            centers = (mins + maxs) / 2.0
+            max_range = ((maxs - mins).max()) / 2.0
+            ax.set_xlim(centers[0] - max_range, centers[0] + max_range)
+            ax.set_ylim(centers[1] - max_range, centers[1] + max_range)
+            ax.set_zlim(centers[2] - max_range, centers[2] + max_range)
+
+        # Create figure with two subplots
+        fig = plt.figure(figsize=(14, 6.5))
+        
+        # Muted, colorblind-friendly sublattice palette
+        muted_colors = ['#0072B2', '#009E73', '#E69F00', '#CC79A7']
+        
+        # Create a set of all edges in chains for easy lookup
+        chain_edges = set()
+        for chain in chains:
+            for i in range(len(chain) - 1):
+                edge = tuple(sorted([chain[i], chain[i+1]]))
+                chain_edges.add(edge)
+        
+        # Get all vertices in chains
+        chain_vertices = set()
+        for chain in chains:
+            chain_vertices.update(chain)
+        
+        if sublattice_indices is None:
+            sublattice_indices = {}
+        
+        # --- Left plot: Regular lattice structure ---
+        ax1 = fig.add_subplot(121, projection='3d')
+        
+        # Plot all edges faintly
+        for v1, v2 in edges:
+            p1 = np.array(vertices[v1])
+            p2 = np.array(vertices[v2])
+            ax1.plot([p1[0], p2[0]], [p1[1], p2[1]], [p1[2], p2[2]],
+                    color='gray', alpha=0.3, linewidth=0.5, zorder=1)
+        
+        # Plot vertices by sublattice
+        for sub_idx in range(4):
+            sub_ids = [v for v in vertices if sublattice_indices.get(v, v % 4) == sub_idx]
+            if not sub_ids:
+                continue
+            sub_positions = np.array([vertices[v] for v in sub_ids])
+            ax1.scatter(sub_positions[:, 0], sub_positions[:, 1], sub_positions[:, 2],
+                        s=50, c=muted_colors[sub_idx], marker='o', alpha=0.8,
+                        edgecolors='black', linewidth=0.5,
+                        label=f'Sublattice {sub_idx}', depthshade=True, zorder=2)
+        
+        ax1.set_title('Pyrochlore Lattice Structure', fontsize=12, pad=10)
+        set_equal_aspect_3d(ax1, list(vertices.values()))
+        ax1.view_init(elev=24, azim=135)
+        ax1.grid(True, alpha=0.3, linewidth=0.5)
+        ax1.xaxis.set_major_formatter(NullFormatter())
+        ax1.yaxis.set_major_formatter(NullFormatter())
+        ax1.zaxis.set_major_formatter(NullFormatter())
+        
+        leg1 = ax1.legend(loc='upper left', frameon=True, fancybox=False, shadow=False, 
+                         framealpha=0.9, edgecolor='black', borderpad=0.4, 
+                         columnspacing=0.8, handlelength=1.5, handletextpad=0.4)
+        leg1.get_frame().set_linewidth(0.5)
+        
+        # --- Right plot: Counter term chains highlighted ---
+        ax2 = fig.add_subplot(122, projection='3d')
+        
+        # Plot all edges very faintly
+        for v1, v2 in edges:
+            edge = tuple(sorted([v1, v2]))
+            p1 = np.array(vertices[v1])
+            p2 = np.array(vertices[v2])
+            if edge in chain_edges:
+                # Counter term edges - thick and colored
+                ax2.plot([p1[0], p2[0]], [p1[1], p2[1]], [p1[2], p2[2]],
+                        color='red', alpha=0.8, linewidth=2.5, zorder=3)
+            else:
+                # Regular edges - very faint
+                ax2.plot([p1[0], p2[0]], [p1[1], p2[1]], [p1[2], p2[2]],
+                        color='gray', alpha=0.15, linewidth=0.3, zorder=1)
+        
+        # Plot vertices
+        for sub_idx in range(4):
+            sub_ids = [v for v in vertices if sublattice_indices.get(v, v % 4) == sub_idx]
+            if not sub_ids:
+                continue
+            
+            # Separate chain vertices from others
+            chain_sub_ids = [v for v in sub_ids if v in chain_vertices]
+            other_sub_ids = [v for v in sub_ids if v not in chain_vertices]
+            
+            # Other vertices - small and faint
+            if other_sub_ids:
+                other_positions = np.array([vertices[v] for v in other_sub_ids])
+                ax2.scatter(other_positions[:, 0], other_positions[:, 1], other_positions[:, 2],
+                           s=20, c=muted_colors[sub_idx], marker='o', alpha=0.3,
+                           edgecolors='black', linewidth=0.3, depthshade=True, zorder=2)
+            
+            # Chain vertices - larger and prominent
+            if chain_sub_ids:
+                chain_positions = np.array([vertices[v] for v in chain_sub_ids])
+                ax2.scatter(chain_positions[:, 0], chain_positions[:, 1], chain_positions[:, 2],
+                           s=60, c=muted_colors[sub_idx], marker='o', alpha=0.9,
+                           edgecolors='red', linewidth=1.0,
+                           label=f'Sublattice {sub_idx}' if sub_idx == 0 else None,
+                           depthshade=True, zorder=4)
+        
+        # Add labels to chain vertices
+        for v in chain_vertices:
+            pos = vertices[v]
+            ax2.text(pos[0], pos[1], pos[2], f'{v}', fontsize=7, 
+                    ha='center', va='bottom', color='black', weight='bold', zorder=5)
+        
+        ax2.set_title(f'Counter Term Chains ({len(chains)} chains)', fontsize=12, pad=10)
+        set_equal_aspect_3d(ax2, list(vertices.values()))
+        ax2.view_init(elev=24, azim=135)
+        ax2.grid(True, alpha=0.3, linewidth=0.5)
+        ax2.xaxis.set_major_formatter(NullFormatter())
+        ax2.yaxis.set_major_formatter(NullFormatter())
+        ax2.zaxis.set_major_formatter(NullFormatter())
+        
+        # Add custom legend for counter term chains
+        from matplotlib.lines import Line2D
+        legend_elements = [
+            Line2D([0], [0], color='red', linewidth=2.5, label='Counter term chains'),
+            Line2D([0], [0], marker='o', color='w', markerfacecolor='gray', 
+                   markeredgecolor='red', markersize=8, label='Chain vertices', linewidth=0)
+        ]
+        leg2 = ax2.legend(handles=legend_elements, loc='upper left', frameon=True,
+                         fancybox=False, shadow=False, framealpha=0.9, 
+                         edgecolor='black', borderpad=0.4, columnspacing=0.8,
+                         handlelength=1.5, handletextpad=0.4)
+        leg2.get_frame().set_linewidth(0.5)
+        
+        plt.tight_layout(pad=1.0)
+        
+        if not os.path.isdir(output_dir):
+            os.makedirs(output_dir)
+        
+        plt.savefig(f"{output_dir}/{cluster_name}_counter_terms.png",
+                    dpi=300, bbox_inches='tight', pad_inches=0.05)
+        plt.savefig(f"{output_dir}/{cluster_name}_counter_terms.pdf",
+                    bbox_inches='tight', pad_inches=0.05)
+        
+        print(f"Counter term visualization saved to: {output_dir}/{cluster_name}_counter_terms.png")
+        plt.close(fig)
+        return True
+
+    except ImportError:
+        print("Warning: matplotlib not installed, skipping counter term plot")
+        return False
+
 
 def plot_cluster(vertices, edges, output_dir, cluster_name, sublattice_indices=None):
     """
@@ -605,8 +980,15 @@ def main():
     prepare_hamiltonian_parameters(output_dir, non_kramer, nn_list, positions, sublattice_indices, 
                                   node_mapping, Jxx, Jyy, Jzz, h, theta, field_dir)
 
+    # Find and write counter term chains
+    chains = find_counter_term_chains(vertices, nn_list, vertex_to_cell, dim1, dim2, dim3, use_pbc)
+    write_counter_term(output_dir, chains, Jxx, Jyy, Jzz)
+
     # Plot cluster
     plot_cluster(vertices, edges, output_dir, cluster_name, sublattice_indices)
+    
+    # Plot counter term chains
+    plot_counter_term_chains(vertices, edges, chains, output_dir, cluster_name, sublattice_indices)
     
     print(f"Generated pyrochlore super lattice cluster with dimensions {dim1}x{dim2}x{dim3}")
     print(f"Number of sites: {len(vertices)}")
