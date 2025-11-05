@@ -60,7 +60,9 @@ inline EDResults exact_diagonalization_fixed_sz_symmetrized(
     FixedSzOperator hamiltonian(params.num_sites, params.spin_length, n_up);
     hamiltonian.loadFromFile(single_site_file);
     hamiltonian.loadFromInterAllFile(interaction_file);
-    hamiltonian.loadCounterTerm(directory + "/CounterTerm.dat");
+    
+    // COUNTERTERM DISABLED
+    // hamiltonian.loadCounterTerm(directory + "/CounterTerm.dat");
 
     std::cout << "Fixed Sz dimension: " << hamiltonian.getFixedSzDim() << std::endl;
     
@@ -119,7 +121,68 @@ inline EDResults exact_diagonalization_fixed_sz_symmetrized(
     std::cout << "Dimension reduction: " 
               << static_cast<double>(hamiltonian.getFixedSzDim()) / total_dim << "x\n" << std::endl;
     
-    // ========== Step 4: Diagonalize Each Block ==========
+    // ========== Step 4: Determine if we need targeted diagonalization ==========
+    bool is_tpq_method = (method == DiagonalizationMethod::mTPQ || 
+                          method == DiagonalizationMethod::mTPQ_CUDA || 
+                          method == DiagonalizationMethod::cTPQ);
+    
+    // For TPQ methods, find the ground state sector
+    bool use_targeted_diagonalization = false;
+    size_t target_sector = 0;
+    double min_energy = 0.0;
+    double max_energy = 0.0;
+    
+    if (is_tpq_method) {
+        use_targeted_diagonalization = true;
+        std::cout << "\n=== Finding Ground State Sector for TPQ ===" << std::endl;
+        std::cout << "Scanning all sectors to identify ground state sector..." << std::endl;
+        
+        min_energy = std::numeric_limits<double>::max();
+        max_energy = -std::numeric_limits<double>::max();
+        
+        for (size_t block_idx = 0; block_idx < block_sizes.size(); ++block_idx) {
+            uint64_t block_dim = block_sizes[block_idx];
+            if (block_dim == 0) continue;
+            
+            std::cout << "  Scanning sector " << (block_idx + 1) << "/" << block_sizes.size() 
+                      << " (dim=" << block_dim << ")" << std::endl;
+            
+            Eigen::SparseMatrix<Complex> block_matrix = 
+                hamiltonian.loadSymmetrizedBlockFixedSzHDF5(directory, block_idx);
+            
+            EDParameters scan_params = params;
+            scan_params.num_eigenvalues = std::min(uint64_t(5), block_dim);
+            scan_params.compute_eigenvectors = false;
+            scan_params.output_dir = "";
+            
+            EDResults scan_results = ed_internal::diagonalize_symmetry_block(
+                block_matrix, block_dim, DiagonalizationMethod::LANCZOS, scan_params, false, 0.0
+            );
+            
+            if (!scan_results.eigenvalues.empty()) {
+                double sector_min = scan_results.eigenvalues[0];
+                double sector_max = scan_results.eigenvalues.back();
+                
+                std::cout << "    Energy range: [" << sector_min << ", " << sector_max << "]" << std::endl;
+                
+                if (sector_min < min_energy) {
+                    min_energy = sector_min;
+                    target_sector = block_idx;
+                }
+                if (sector_max > max_energy) {
+                    max_energy = sector_max;
+                }
+            }
+        }
+        
+        std::cout << "\nTarget sector: " << (target_sector + 1) 
+                  << " (dimension: " << block_sizes[target_sector] << ")" << std::endl;
+        std::cout << "Ground state energy: " << min_energy << std::endl;
+        std::cout << "Maximum energy found: " << max_energy << std::endl;
+        std::cout << "Will only diagonalize target sector for TPQ.\n" << std::endl;
+    }
+    
+    // ========== Step 5: Diagonalize Sector(s) ==========
     std::cout << "========== Diagonalizing Sectors ==========\n" << std::endl;
     
     struct EigenInfo {
@@ -140,12 +203,24 @@ inline EDResults exact_diagonalization_fixed_sz_symmetrized(
         safe_system_call("mkdir -p " + params.output_dir);
     }
     
+    uint64_t block_start_dim = 0;
     for (size_t block_idx = 0; block_idx < block_sizes.size(); ++block_idx) {
         uint64_t block_dim = block_sizes[block_idx];
         
+        // Skip empty blocks
         if (block_dim == 0) {
             std::cout << "Sector " << (block_idx + 1) << "/" << block_sizes.size() 
                      << ": empty (skipping)" << std::endl;
+            continue;
+        }
+        
+        // Skip non-target blocks for TPQ
+        bool is_target_block = (use_targeted_diagonalization && block_idx == target_sector);
+        
+        if (use_targeted_diagonalization && !is_target_block) {
+            std::cout << "Sector " << (block_idx + 1) << "/" << block_sizes.size() 
+                     << " (dim=" << block_dim << "): skipping (not target sector)" << std::endl;
+            block_start_dim += block_dim;
             continue;
         }
         
@@ -160,15 +235,22 @@ inline EDResults exact_diagonalization_fixed_sz_symmetrized(
         EDParameters block_params = params;
         block_params.num_eigenvalues = std::min(params.num_eigenvalues, block_dim);
         
-        if (params.compute_eigenvectors) {
+        if (params.compute_eigenvectors || (is_tpq_method && is_target_block)) {
             block_params.output_dir = params.output_dir + "/sector_" + std::to_string(block_idx);
             safe_system_call("mkdir -p " + block_params.output_dir);
+        }
+        
+        // Set large value for TPQ in target block
+        double large_val = 0.0;
+        if (is_tpq_method && is_target_block) {
+            large_val = std::max(max_energy * 10, params.large_value);
+            std::cout << "  Running TPQ in ground state sector with large value " << large_val << std::endl;
         }
         
         // Diagonalize this block (with GPU support)
         std::cout << "  Diagonalizing..." << std::endl;
         EDResults block_results = ed_internal::diagonalize_symmetry_block(
-            block_matrix, block_dim, method, block_params, false, 0.0
+            block_matrix, block_dim, method, block_params, is_target_block, large_val
         );
         
         // Store eigenvalue information
@@ -180,11 +262,41 @@ inline EDResults exact_diagonalization_fixed_sz_symmetrized(
             });
         }
         
+        // Transform TPQ states or eigenvectors if needed
+        if (params.compute_eigenvectors || (is_tpq_method && is_target_block)) {
+            std::string eigenvector_dir = params.output_dir + "/eigenvectors";
+            safe_system_call("mkdir -p " + eigenvector_dir);
+            
+            if (is_tpq_method && is_target_block) {
+                std::cout << "  Transforming TPQ states from sector basis to full basis..." << std::endl;
+                // Cast FixedSzOperator to Operator (safe since FixedSzOperator inherits from Operator)
+                Operator& op_ref = static_cast<Operator&>(hamiltonian);
+                ed_internal::transform_and_save_tpq_states(
+                    block_params.output_dir, params.output_dir, 
+                    op_ref, directory,
+                    block_dim, block_start_dim, block_idx, params.num_sites
+                );
+            }
+            
+            if (params.compute_eigenvectors && method != DiagonalizationMethod::mTPQ && 
+                method != DiagonalizationMethod::mTPQ_CUDA && method != DiagonalizationMethod::cTPQ) {
+                std::cout << "  Transforming eigenvectors from sector basis to full basis..." << std::endl;
+                Operator& op_ref = static_cast<Operator&>(hamiltonian);
+                ed_internal::transform_and_save_eigenvectors(
+                    block_params.output_dir, params.output_dir,
+                    op_ref, directory,
+                    block_results.eigenvalues, block_dim, block_start_dim, block_idx, params.num_sites
+                );
+            }
+        }
+        
         std::cout << "  Found " << block_results.eigenvalues.size() << " eigenvalues" << std::endl;
         if (!block_results.eigenvalues.empty()) {
             std::cout << "  Lowest: " << block_results.eigenvalues[0] << std::endl;
         }
         std::cout << std::endl;
+        
+        block_start_dim += block_dim;
     }
     
     // ========== Step 5: Collect and Sort Results ==========

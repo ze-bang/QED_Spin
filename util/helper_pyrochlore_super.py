@@ -573,7 +573,7 @@ def find_counter_term_chains(vertices, nn_list, vertex_to_cell, dim1, dim2, dim3
     
     return chains
 
-def write_counter_term(output_dir, chains, Jxx, Jyy, Jzz, file_name="CounterTerm.dat"):
+def write_counter_term(output_dir, chains, Jxx, Jyy, Jzz, counterterm_coeff=1.0, file_name="CounterTerm.dat"):
     """
     Write counter term chains to a file in InterAll.dat format.
     Each chain contributes terms for each connected edge.
@@ -582,11 +582,14 @@ def write_counter_term(output_dir, chains, Jxx, Jyy, Jzz, file_name="CounterTerm
     - One with operators 0 1 0 1 (S+ S- S+ S-)
     - One with operators 1 0 1 0 (S- S+ S- S+)
     
-    Coefficient is 4*(Jpm^2)/Jzz where Jpm = -(Jxx+Jyy)/4
+    Coefficient is counterterm_coeff * 4*(Jpm^2)/Jzz where Jpm = -(Jxx+Jyy)/4
+    
+    Args:
+        counterterm_coeff: Multiplier for the counter term strength (default 1.0)
     """
     # Calculate coefficient
     Jpm = -(Jxx + Jyy) / 4
-    coeff = 4 * (Jpm**2) / Jzz
+    coeff = counterterm_coeff * 4 * (Jpm**2) / Jzz
     
     # Actually, re-reading the request: "two lines per connected edge"
     # Let me reinterpret: for each edge in the chain, write two lines
@@ -941,7 +944,7 @@ def plot_cluster(vertices, edges, output_dir, cluster_name, sublattice_indices=N
 def main():
     """Main function to process command line arguments and run the program"""
     if len(sys.argv) < 13:
-        print("Usage: python helper_pyrochlore_super.py Jxx Jyy Jzz h fieldx fieldy fieldz output_dir dim1 dim2 dim3 pbc [non_kramer]")
+        print("Usage: python helper_pyrochlore_super.py Jxx Jyy Jzz h fieldx fieldy fieldz output_dir dim1 dim2 dim3 pbc [non_kramer] [theta] [counterterm_coeff]")
         sys.exit(1)
     
     # Parse command line arguments
@@ -958,6 +961,7 @@ def main():
     non_kramer = bool(int(sys.argv[13])) if len(sys.argv) > 13 else False
     theta = float(sys.argv[14]) if len(sys.argv) > 14 else 0.0  # Default theta=0.0 if not provided
     theta = theta * np.pi
+    counterterm_coeff = float(sys.argv[15]) if len(sys.argv) > 15 else 1.0  # Default counterterm_coeff=1.0 if not provided
     # Ensure output directory exists
     if not os.path.isdir(output_dir):
         os.makedirs(output_dir)
@@ -982,7 +986,7 @@ def main():
 
     # Find and write counter term chains
     chains = find_counter_term_chains(vertices, nn_list, vertex_to_cell, dim1, dim2, dim3, use_pbc)
-    write_counter_term(output_dir, chains, Jxx, Jyy, Jzz)
+    write_counter_term(output_dir, chains, Jxx, Jyy, Jzz, counterterm_coeff)
 
     # Plot cluster
     plot_cluster(vertices, edges, output_dir, cluster_name, sublattice_indices)
@@ -995,6 +999,7 @@ def main():
     print(f"Number of bonds: {len(edges)}")
     print(f"Number of tetrahedra: {len(tetrahedra)}")
     print(f"Sites per unit cell: 16 (4 tetrahedra × 4 sites)")
+    print(f"Counter term coefficient: {counterterm_coeff}")
     print(f"Output written to: {output_dir}")
 
 if __name__ == "__main__":

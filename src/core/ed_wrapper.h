@@ -1014,9 +1014,10 @@ Operator load_hamiltonian_from_files(
             if (!interaction_file.empty()) {
                 hamiltonian.loadFromInterAllFile(interaction_file);
             }
-            if (!counterterm_file.empty()){
-                hamiltonian.loadCounterTerm(counterterm_file);
-            }
+            // COUNTERTERM DISABLED
+            // if (!counterterm_file.empty()){
+            //     hamiltonian.loadCounterTerm(counterterm_file);
+            // }
             // Build sparse matrix (except for full diagonalization)
             if (method != DiagonalizationMethod::FULL) {
                 hamiltonian.buildSparseMatrix();
@@ -1957,9 +1958,11 @@ EDResults exact_diagonalization_from_directory_symmetrized(
     Operator hamiltonian(params.num_sites, params.spin_length);
     hamiltonian.loadFromFile(single_site_file);
     hamiltonian.loadFromInterAllFile(interaction_file);
-    if (counterterm_exists) {
-        hamiltonian.loadCounterTerm(counterterm_file);
-    }
+    
+    // COUNTERTERM DISABLED
+    // if (counterterm_exists) {
+    //     hamiltonian.loadCounterTerm(counterterm_file);
+    // }
     // ========== Step 3: Setup Symmetrized Basis ==========
     bool use_hdf5 = true;  // Use HDF5 by default
     ed_internal::setup_symmetry_basis(directory, hamiltonian, use_hdf5);

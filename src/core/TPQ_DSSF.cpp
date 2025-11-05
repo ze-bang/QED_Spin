@@ -639,7 +639,7 @@ int main(int argc, char* argv[]) {
     std::string counterterm_file = directory + "/CounterTerm.dat";
 
     // Check if files exist
-    if (!fs::exists(interall_file) || !fs::exists(trans_file) || !fs::exists(counterterm_file)) {
+    if (!fs::exists(interall_file) || !fs::exists(trans_file)) {
         if (rank == 0) {
             std::cerr << "Error: Hamiltonian files not found in " << directory << std::endl;
         }
@@ -650,7 +650,11 @@ int main(int argc, char* argv[]) {
     // Load Hamiltonian
     ham_op.loadFromInterAllFile(interall_file);
     ham_op.loadFromFile(trans_file);
-    ham_op.loadCounterTerm(counterterm_file);
+    
+    // COUNTERTERM DISABLED
+    // if (fs::exists(counterterm_file)) {
+    //     ham_op.loadCounterTerm(counterterm_file);
+    // }
     
     auto H = [&ham_op](const Complex* in, Complex* out, int size) {
         ham_op.apply(in, out, size);
