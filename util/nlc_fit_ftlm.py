@@ -100,8 +100,9 @@ def run_nlce_ftlm(params, fixed_params, exp_temp, work_dir, h_field=None, temp_r
     param_hash = hashlib.md5(f"{Jxx}{Jyy}{Jzz}{h_value}".encode()).hexdigest()[:8]
     run_dir = os.path.join(work_dir, f'run_{param_hash}')
     
-    # Check if results already exist
-    nlc_result_file = os.path.join(run_dir, 'nlc_results', 'nlc_specific_heat.txt')
+    # Check if results already exist (use correct directory name with order)
+    max_order = fixed_params["max_order"]
+    nlc_result_file = os.path.join(run_dir, f'nlc_results_order_{max_order}', 'nlc_specific_heat.txt')
     if os.path.exists(nlc_result_file):
         logging.info(f"Using cached results from {run_dir}")
         try:
@@ -113,7 +114,8 @@ def run_nlce_ftlm(params, fixed_params, exp_temp, work_dir, h_field=None, temp_r
             interp_func = interp1d(calc_temp, calc_spec_heat, kind='cubic',
                                   bounds_error=False, fill_value=0.0)
             interp_spec_heat = interp_func(exp_temp)
-            return calc_temp, interp_spec_heat
+            # Consistent normalization: divide by 8 (number of sites per unit cell for pyrochlore)
+            return calc_temp, interp_spec_heat / 8
         except Exception as e:
             logging.warning(f"Failed to load cached results: {e}")
     

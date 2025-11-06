@@ -14,18 +14,32 @@ import hashlib
 """
 Generate topologically distinct clusters on a pyrochlore lattice for
 numerical linked cluster expansion (NLCE) calculations.
+
+Usage:
+    # Open boundary conditions (default):
+    python3 generate_pyrochlore_clusters.py --max_order 5 --lattice_size 10
+    
+    # Periodic boundary conditions:
+    python3 generate_pyrochlore_clusters.py --max_order 5 --lattice_size 10 --periodic
+    
+The --periodic flag enables periodic boundary conditions, which:
+- Creates wrap-around connections at lattice boundaries
+- Results in more tetrahedra in the finite lattice
+- Produces multiplicities that account for the full periodic symmetry
+- Is more appropriate for bulk thermodynamic properties in NLCE
 """
 
 import matplotlib.pyplot as plt
 
-def get_cache_key(max_order, lattice_size):
+def get_cache_key(max_order, lattice_size, periodic=False):
     """Generate a unique cache key based on computation parameters."""
-    key_str = f"pyrochlore_clusters_order_{max_order}_lattice_{lattice_size}"
+    bc_str = "pbc" if periodic else "obc"
+    key_str = f"pyrochlore_clusters_order_{max_order}_lattice_{lattice_size}_{bc_str}"
     return hashlib.md5(key_str.encode()).hexdigest()
 
-def get_cache_path(cache_dir, max_order, lattice_size):
+def get_cache_path(cache_dir, max_order, lattice_size, periodic=False):
     """Get the path to the cache file."""
-    cache_key = get_cache_key(max_order, lattice_size)
+    cache_key = get_cache_key(max_order, lattice_size, periodic)
     return os.path.join(cache_dir, f"clusters_cache_{cache_key}.pkl")
 
 def save_cache(cache_path, data):
@@ -154,11 +168,16 @@ def parse_arguments():
     parser.add_argument('--cache_dir', type=str, default='./cache', help='Directory for cache files')
     parser.add_argument('--no_cache', action='store_true', help='Disable cache (recompute everything)')
     parser.add_argument('--force_recompute', action='store_true', help='Force recomputation even if cache exists')
+    parser.add_argument('--periodic', action='store_true', help='Use periodic boundary conditions')
     return parser.parse_args()
 
-def create_pyrochlore_lattice(L):
+def create_pyrochlore_lattice(L, periodic=False):
     """
     Create a pyrochlore lattice of size L×L×L unit cells.
+    
+    Args:
+    - L: Size of the lattice in each direction
+    - periodic: If True, use periodic boundary conditions
     
     Returns:
     - G: NetworkX graph representing the lattice
@@ -213,12 +232,17 @@ def create_pyrochlore_lattice(L):
                     G.add_edge(v1, v2)
         
         # Second tetrahedron (spans across unit cells)
-        if all(0 <= x < L for x in [i, j, k, i+1, j+1, k+1]):
+        # Apply periodic boundary conditions if enabled
+        i_next = (i + 1) % L if periodic else i + 1
+        j_next = (j + 1) % L if periodic else j + 1
+        k_next = (k + 1) % L if periodic else k + 1
+        
+        if periodic or all(0 <= x < L for x in [i, j, k, i+1, j+1, k+1]):
             tet2 = [
                 site_mapping.get((i, j, k, 0)),
-                site_mapping.get((i+1, j, k, 1)),
-                site_mapping.get((i, j+1, k, 2)),
-                site_mapping.get((i, j, k+1, 3))
+                site_mapping.get((i_next, j, k, 1)),
+                site_mapping.get((i, j_next, k, 2)),
+                site_mapping.get((i, j, k_next, 3))
             ]
             if None not in tet2:
                 tetrahedra.append(tet2)
@@ -486,11 +510,15 @@ def main():
     max_order = args.max_order
     
     # Set lattice size
-    L = args.lattice_size if args.lattice_size > 0 else max(10, 6*max_order)
+    L = args.lattice_size if args.lattice_size > 0 else max(10, max_order)
+    
+    # Boundary condition string for output
+    bc_str = "PBC" if args.periodic else "OBC"
+    print(f"Using {bc_str} (Periodic Boundary Conditions: {args.periodic})")
     
     # Check cache unless disabled or forced recompute
     cache_data = None
-    cache_path = get_cache_path(args.cache_dir, max_order, L)
+    cache_path = get_cache_path(args.cache_dir, max_order, L, args.periodic)
     
     if not args.no_cache and not args.force_recompute:
         print(f"Checking for cached results...")
@@ -509,8 +537,8 @@ def main():
     
     # Compute if no valid cache
     if cache_data is None:
-        print(f"Generating pyrochlore lattice of size {L}×{L}×{L}...")
-        lattice, pos, tetrahedra = create_pyrochlore_lattice(L)
+        print(f"Generating pyrochlore lattice of size {L}×{L}×{L} with {bc_str}...")
+        lattice, pos, tetrahedra = create_pyrochlore_lattice(L, args.periodic)
         print(f"Generated lattice with {lattice.number_of_nodes()} sites and {len(tetrahedra)} tetrahedra")
         
         print("Building tetrahedron adjacency graph...")
@@ -529,7 +557,8 @@ def main():
                 'distinct_clusters': distinct_clusters,
                 'multiplicities': multiplicities,
                 'max_order': max_order,
-                'lattice_size': L
+                'lattice_size': L,
+                'periodic': args.periodic
             }
             save_cache(cache_path, cache_data)
     
@@ -545,6 +574,7 @@ def main():
         print(f"  Order {order}: {len(clusters_by_order[order])} distinct clusters")
     
     # Create output directory for cluster info
+    bc_suffix = "pbc" if args.periodic else "obc"
     output_dir = args.output_dir + f"/cluster_info_order_{max_order}"
     os.makedirs(output_dir, exist_ok=True)
 

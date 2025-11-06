@@ -249,7 +249,8 @@ Example usage:
             'python3', 
             os.path.join(os.path.dirname(__file__), 'generate_pyrochlore_clusters.py'),
             f'--max_order={args.max_order}',
-            f'--output_dir={cluster_dir}'
+            f'--output_dir={cluster_dir}',
+            f'--periodic'
         ]
         
         logging.info(f"Running command: {' '.join(cmd)}")
