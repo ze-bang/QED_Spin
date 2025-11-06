@@ -319,6 +319,8 @@ endif()
 # Add TPQ_DSSF executable (only if MPI is enabled since it uses MPI)
 add_executable(TPQ_DSSF ${CORE_DIR}/TPQ_DSSF.cpp ${CPU_SOLVERS_DIR}/dynamics.cpp ${CPU_SOLVERS_DIR}/TPQ.cpp ${CPU_SOLVERS_DIR}/ftlm.cpp)
 
+# Add test for dynamical correlation
+add_executable(test_dynamical_correlation test_dynamical_correlation.cpp ${CPU_SOLVERS_DIR}/ftlm.cpp)
 
 # Link libraries for new main
 target_link_libraries(ED
@@ -352,6 +354,26 @@ if(TARGET TPQ_DSSF)
         ${ARPACK_LIBRARY}
         ${HDF5_LIBRARIES}
     )
+endif()
+
+# Link libraries for test_dynamical_correlation
+if(TARGET test_dynamical_correlation)
+    target_link_libraries(test_dynamical_correlation
+        ${BLAS_LIBRARIES}
+        ${LAPACK_LIBRARIES}
+        ${LAPACKE_LIBRARIES}
+        ${EXTRA_LINALG_LIBRARIES}
+    )
+    
+    # Add CPU optimization flags
+    target_compile_options(test_dynamical_correlation PRIVATE
+        $<$<COMPILE_LANGUAGE:CXX>:${CPU_OPT_FLAGS}>
+    )
+    
+    # Add OpenMP if available
+    if(OpenMP_CXX_FOUND)
+        target_link_libraries(test_dynamical_correlation OpenMP::OpenMP_CXX)
+    endif()
 endif()
 
 

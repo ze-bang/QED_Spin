@@ -226,9 +226,9 @@ int main(int argc, char* argv[]) {
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
     MPI_Comm_size(MPI_COMM_WORLD, &size);
     
-    if (argc < 4 || argc > 14) {
+    if (argc < 4 || argc > 15) {
         if (rank == 0) {
-            std::cerr << "Usage: " << argv[0] << " <directory> <krylov_dim_or_nmax> <spin_combinations> [method] [operator_type] [basis] [dt,t_end]/[omega_min,omega_max,omega_bins,broadening] [unit_cell_size] [momentum_points] [polarization] [theta] [use_gpu] [n_up]" << std::endl;
+            std::cerr << "Usage: " << argv[0] << " <directory> <krylov_dim_or_nmax> <spin_combinations> [method] [operator_type] [basis] [dt,t_end]/[omega_min,omega_max,omega_bins,broadening] [unit_cell_size] [momentum_points] [polarization] [theta] [use_gpu] [n_up] [T_min,T_max,T_steps]" << std::endl;
             std::cerr << "\nNote: num_sites is automatically detected from positions.dat, spin_length is fixed at 0.5" << std::endl;
             std::cerr << "\n" << std::string(80, '=') << std::endl;
             std::cerr << "REQUIRED ARGUMENTS:" << std::endl;
@@ -242,10 +242,11 @@ int main(int argc, char* argv[]) {
             std::cerr << "\n" << std::string(80, '=') << std::endl;
             std::cerr << "OPTIONAL ARGUMENTS:" << std::endl;
             std::cerr << std::string(80, '=') << std::endl;
-            std::cerr << "  method (default: krylov): krylov | taylor | spectral" << std::endl;
+            std::cerr << "  method (default: krylov): krylov | taylor | spectral | spectral_thermal" << std::endl;
             std::cerr << "    - krylov: Time-domain correlation C(t) using Krylov time evolution" << std::endl;
             std::cerr << "    - taylor: Time-domain correlation C(t) using Taylor expansion" << std::endl;
-            std::cerr << "    - spectral: Frequency-domain spectral function S(ω) via FTLM" << std::endl;
+            std::cerr << "    - spectral: Frequency-domain spectral function S(ω) via FTLM (single state)" << std::endl;
+            std::cerr << "    - spectral_thermal: Frequency-domain S(ω) with thermal averaging (FTLM random sampling)" << std::endl;
             std::cerr << "\n  operator_type (default: sum): sum | transverse | sublattice | experimental | transverse_experimental" << std::endl;
             std::cerr << "    - sum: Standard momentum-resolved sum operators S^{op1}(Q) S^{op2}(-Q)" << std::endl;
             std::cerr << "    - transverse: Polarization-dependent operators for magnetic scattering" << std::endl;
@@ -274,12 +275,29 @@ int main(int argc, char* argv[]) {
             std::cerr << "    - When n_up >= 0: restricts to fixed total Sz = n_up - n_down = n_up - (num_sites - n_up)" << std::endl;
             std::cerr << "    - Reduces Hilbert space dimension from 2^N to C(N, n_up)" << std::endl;
             std::cerr << "    - Example: for 16 sites with n_up=8, dimension reduces from 65536 to 12870" << std::endl;
+            std::cerr << "  T_min,T_max,T_steps (for spectral_thermal only): Temperature scan parameters" << std::endl;
+            std::cerr << "    - Format: \"T_min,T_max,T_steps\" e.g., \"0.1,10.0,10\"" << std::endl;
+            std::cerr << "    - T_min: Minimum temperature" << std::endl;
+            std::cerr << "    - T_max: Maximum temperature" << std::endl;
+            std::cerr << "    - T_steps: Number of temperature points (logarithmic spacing)" << std::endl;
+            std::cerr << "    - If not specified, uses temperature from TPQ state (T = 1/β)" << std::endl;
+            std::cerr << "    - When specified, computes S(ω,T) for each temperature in the range" << std::endl;
             std::cerr << "\n" << std::string(80, '=') << std::endl;
-            std::cerr << "SPECTRAL METHOD (method=spectral) DETAILS:" << std::endl;
+            std::cerr << "SPECTRAL METHOD (method=spectral or method=spectral_thermal) DETAILS:" << std::endl;
             std::cerr << std::string(80, '=') << std::endl;
-            std::cerr << "The spectral method computes the dynamical structure factor (DSF):" << std::endl;
+            std::cerr << "The spectral methods compute the dynamical structure factor (DSF):" << std::endl;
             std::cerr << "  S(q,ω) = (1/π) × Im[⟨ψ|O₁†(q) G(ω) O₂(q)|ψ⟩]" << std::endl;
             std::cerr << "where G(ω) = 1/(ω - H + iη) is the Green's function." << std::endl;
+            std::cerr << "\nTwo variants available:" << std::endl;
+            std::cerr << "  1. spectral: Single-state calculation (for T=0 or specific TPQ states)" << std::endl;
+            std::cerr << "     - Uses the given state |ψ⟩ directly" << std::endl;
+            std::cerr << "     - Fastest option for ground state calculations" << std::endl;
+            std::cerr << "  2. spectral_thermal: Finite-temperature with thermal averaging" << std::endl;
+            std::cerr << "     - Uses FTLM with random sampling for thermal ensemble averaging" << std::endl;
+            std::cerr << "     - Computes S(q,ω,T) = Tr[ρ(T) O₁†(q) δ(ω-H) O₂(q)]" << std::endl;
+            std::cerr << "     - Number of samples: 40 (configurable in code)" << std::endl;
+            std::cerr << "     - Temperature: Can scan over T range or use TPQ state temperature" << std::endl;
+            std::cerr << "     - More accurate for finite temperature but slower" << std::endl;
             std::cerr << "\nParameters:" << std::endl;
             std::cerr << "  krylov_dim_or_nmax: Lanczos order (typical values: 30-100)" << std::endl;
             std::cerr << "    - Higher values = better convergence but more computational cost" << std::endl;
@@ -293,9 +311,10 @@ int main(int argc, char* argv[]) {
             std::cerr << "    - num_omega_bins: Number of frequency points" << std::endl;
             std::cerr << "    - Larger values give finer frequency resolution" << std::endl;
             std::cerr << "    - Typical values: 100-500 depending on energy scale" << std::endl;
-            std::cerr << "\nOutput files (spectral method):" << std::endl;
-            std::cerr << "  - Format: <operator>_spectral_sample_<idx>_beta_<beta>.txt" << std::endl;
-            std::cerr << "  - Columns: frequency(ω) | spectral_intensity S(ω)" << std::endl;
+            std::cerr << "\nOutput files:" << std::endl;
+            std::cerr << "  - spectral method: <operator>_spectral_sample_<idx>_beta_<beta>.txt" << std::endl;
+            std::cerr << "  - spectral_thermal method: <operator>_spectral_thermal_sample_<idx>_beta_<beta>_T_<T>_nsamples_<N>.txt" << std::endl;
+            std::cerr << "  - Columns: frequency(ω) | spectral_intensity S(ω) | error (if applicable)" << std::endl;
             std::cerr << "\n" << std::string(80, '=') << std::endl;
             std::cerr << "TIME-DOMAIN METHODS (method=krylov or method=taylor) DETAILS:" << std::endl;
             std::cerr << std::string(80, '=') << std::endl;
@@ -314,16 +333,22 @@ int main(int argc, char* argv[]) {
             std::cerr << "\n" << std::string(80, '=') << std::endl;
             std::cerr << "EXAMPLES:" << std::endl;
             std::cerr << std::string(80, '=') << std::endl;
-            std::cerr << "1. Spectral function with momentum resolution:" << std::endl;
+            std::cerr << "1. Spectral function with momentum resolution (single state):" << std::endl;
             std::cerr << "   " << argv[0] << " ./data 50 \"2,2\" spectral sum ladder \"-5,5,200,0.1\" 4 \"0,0,0;0,0,1\"" << std::endl;
-            std::cerr << "\n2. Time-domain using Krylov (recommended):" << std::endl;
+            std::cerr << "\n2. Thermal spectral function with FTLM averaging:" << std::endl;
+            std::cerr << "   " << argv[0] << " ./data 50 \"2,2\" spectral_thermal sum ladder \"-5,5,200,0.1\" 4 \"0,0,0;0,0,1\"" << std::endl;
+            std::cerr << "\n3. Time-domain using Krylov (recommended):" << std::endl;
             std::cerr << "   " << argv[0] << " ./data 30 \"0,1;2,2\" krylov sum ladder \"0.01,50.0\"" << std::endl;
-            std::cerr << "\n3. Transverse scattering with custom polarization:" << std::endl;
+            std::cerr << "\n4. Transverse scattering with custom polarization:" << std::endl;
             std::cerr << "   " << argv[0] << " ./data 40 \"2,2\" spectral transverse xyz \"-10,10,300,0.2\" 4 \"0,0,0\" \"1,0,0\"" << std::endl;
-            std::cerr << "\n4. Experimental geometry with angle:" << std::endl;
+            std::cerr << "\n5. Experimental geometry with angle:" << std::endl;
             std::cerr << "   " << argv[0] << " ./data 50 \"2,2\" spectral experimental xyz \"-5,5,250,0.1\" 4 \"0,0,0\" \"0,0,0\" 0.785" << std::endl;
-            std::cerr << "\n5. Fixed-Sz sector calculation (Sz = 0 for 16 sites):" << std::endl;
+            std::cerr << "\n6. Fixed-Sz sector calculation (Sz = 0 for 16 sites):" << std::endl;
             std::cerr << "   " << argv[0] << " ./data 50 \"2,2\" spectral sum ladder \"-5,5,200,0.1\" 4 \"0,0,0\" \"0,0,0\" 0 0 8" << std::endl;
+            std::cerr << "\n7. Thermal spectral with fixed-Sz:" << std::endl;
+            std::cerr << "   " << argv[0] << " ./data 50 \"2,2\" spectral_thermal sum ladder \"-5,5,200,0.1\" 4 \"0,0,0\" \"0,0,0\" 0 0 8" << std::endl;
+            std::cerr << "\n8. Temperature scan with spectral_thermal:" << std::endl;
+            std::cerr << "   " << argv[0] << " ./data 50 \"2,2\" spectral_thermal sum ladder \"-5,5,200,0.1\" 4 \"0,0,0\" \"0,0,0\" 0 0 -1 \"0.1,10.0,10\"" << std::endl;
         }
         MPI_Finalize();
         return 1;
@@ -564,6 +589,56 @@ int main(int argc, char* argv[]) {
             }
             n_up = -1;
             use_fixed_sz = false;
+        }
+    }
+
+    // Parse temperature scan parameters for spectral_thermal (optional)
+    double T_min = 1e-3;  // Negative means use TPQ state temperature
+    double T_max = 1.0;
+    int T_steps = 20;
+    bool use_temperature_scan = true;
+    
+    if (argc >= 15) {
+        std::string temp_str = argv[14];
+        std::stringstream temp_ss(temp_str);
+        std::string val;
+        std::vector<std::string> tokens;
+        
+        while (std::getline(temp_ss, val, ',')) {
+            tokens.push_back(val);
+        }
+        
+        try {
+            if (tokens.size() >= 3) {
+                T_min = std::stod(tokens[0]);
+                T_max = std::stod(tokens[1]);
+                T_steps = std::stoi(tokens[2]);
+                
+                if (T_min > 0 && T_max > T_min && T_steps > 0) {
+                    use_temperature_scan = true;
+                    if (rank == 0) {
+                        std::cout << "Temperature scan enabled: T ∈ [" << T_min << ", " << T_max 
+                                  << "], " << T_steps << " points (log scale)" << std::endl;
+                    }
+                } else {
+                    if (rank == 0) {
+                        std::cerr << "Warning: Invalid temperature parameters (need T_min > 0, T_max > T_min, T_steps > 0)" << std::endl;
+                        std::cerr << "Using TPQ state temperature instead" << std::endl;
+                    }
+                    use_temperature_scan = false;
+                }
+            } else {
+                if (rank == 0) {
+                    std::cerr << "Warning: Temperature parameter needs 3 values (T_min,T_max,T_steps)" << std::endl;
+                    std::cerr << "Using TPQ state temperature instead" << std::endl;
+                }
+            }
+        } catch (...) {
+            if (rank == 0) {
+                std::cerr << "Warning: Failed to parse temperature parameters" << std::endl;
+                std::cerr << "Using TPQ state temperature instead" << std::endl;
+            }
+            use_temperature_scan = false;
         }
     }
 
@@ -1454,6 +1529,100 @@ int main(int argc, char* argv[]) {
                         
                         if (rank == 0) {
                             std::cout << "  Saved spectral function: " << filename_ss.str() << std::endl;
+                        }
+                    }
+                } else if (method == "spectral_thermal") {
+                    // Use spectral method with finite-temperature FTLM (thermal averaging)
+                    // This uses random sampling to compute thermal averages at finite temperature
+                    int krylov_dim = krylov_dim_or_nmax;
+                    
+                    // Set up FTLM parameters for thermal averaging
+                    DynamicalResponseParameters params;
+                    params.krylov_dim = krylov_dim;
+                    params.broadening = broadening;
+                    params.tolerance = 1e-10;
+                    params.full_reorthogonalization = true;
+                    params.num_samples = 40;  // Number of random samples for FTLM thermal averaging
+                    params.random_seed = state_idx * 1000 + momentum_idx * 100 + combo_idx;  // Reproducible but unique per task
+                    params.store_intermediate = false;
+                    
+                    // Determine temperature(s) to compute
+                    std::vector<double> temperatures;
+                    
+                    if (use_temperature_scan) {
+                        // Use user-specified temperature range (log spacing)
+                        double log_T_min = std::log(T_min);
+                        double log_T_max = std::log(T_max);
+                        double log_step = (log_T_max - log_T_min) / std::max(1, T_steps - 1);
+                        
+                        for (int i = 0; i < T_steps; i++) {
+                            double log_T = log_T_min + i * log_step;
+                            temperatures.push_back(std::exp(log_T));
+                        }
+                        
+                        if (rank == 0) {
+                            std::cout << "  Computing for " << T_steps << " temperature points:" << std::endl;
+                            for (size_t i = 0; i < temperatures.size(); i++) {
+                                std::cout << "    T[" << i << "] = " << temperatures[i] << std::endl;
+                            }
+                        }
+                    } else {
+                        // Use temperature from TPQ state beta
+                        double temperature = 0.0;
+                        if (std::isfinite(beta) && beta > 1e-10) {
+                            temperature = 1.0 / beta;
+                        }
+                        temperatures.push_back(temperature);
+                        
+                        if (rank == 0) {
+                            std::cout << "  Using TPQ state temperature: T = " << temperature 
+                                      << " (β = " << beta << ")" << std::endl;
+                        }
+                    }
+                    std::cout << "Observables to compute thermal spectral functions for:" << std::endl;
+                    std::cout << "  Number of operators: " << obs_1.size() << std::endl;
+                    // Process each operator pair
+                    for (size_t i = 0; i < obs_1.size(); i++) {
+                        std::cout << "  Processing operator " << obs_names[i] << std::endl;
+                        // Create function wrappers for operators
+                        auto O1_func = [&obs_1, i](const Complex* in, Complex* out, int size) {
+                            obs_1[i].apply(in, out, size);
+                        };
+                        
+                        auto O2_func = [&obs_2, i](const Complex* in, Complex* out, int size) {
+                            obs_2[i].apply(in, out, size);
+                        };
+                        
+                        // Compute thermal spectral function for each temperature
+                        for (size_t t_idx = 0; t_idx < temperatures.size(); t_idx++) {
+                            double temperature = temperatures[t_idx];
+                            
+                            if (rank == 0) {
+                                std::cout << "  Processing operator " << obs_names[i] 
+                                          << " at T = " << temperature << std::endl;
+                            }
+                            
+                            // Compute thermal spectral function using FTLM
+                            auto results = compute_dynamical_correlation(
+                                H, O1_func, O2_func, N, params,
+                                omega_min, omega_max, num_omega_bins, temperature, method_dir
+                            );
+                            
+                            // Save results with thermal averaging info
+                            std::stringstream filename_ss;
+                            filename_ss << method_dir << "/" << obs_names[i] 
+                                        << "_spectral_thermal_sample_" << sample_index 
+                                        << "_beta_" << beta 
+                                        << "_T_" << temperature
+                                        << "_nsamples_" << params.num_samples << ".txt";
+                            
+                            save_dynamical_response_results(results, filename_ss.str());
+                            
+                            if (rank == 0) {
+                                std::cout << "  Saved thermal spectral function: " << filename_ss.str() << std::endl;
+                                std::cout << "    Temperature: " << temperature << ", Beta: " << beta << std::endl;
+                                std::cout << "    FTLM samples: " << params.num_samples << std::endl;
+                            }
                         }
                     }
                 } else {
