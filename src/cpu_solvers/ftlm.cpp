@@ -436,6 +436,142 @@ void save_ftlm_results(
 }
 
 /**
+ * @brief Combine FTLM results from multiple symmetry sectors
+ */
+ThermodynamicData combine_ftlm_sector_results(
+    const std::vector<FTLMResults>& sector_results,
+    const std::vector<uint64_t>& sector_dims
+) {
+    if (sector_results.empty()) {
+        throw std::runtime_error("combine_ftlm_sector_results: No sector results to combine");
+    }
+    
+    if (sector_results.size() != sector_dims.size()) {
+        throw std::runtime_error("combine_ftlm_sector_results: Mismatch between number of sectors and dimensions");
+    }
+    
+    size_t n_sectors = sector_results.size();
+    std::cout << "\n=== Combining FTLM Results from " << n_sectors << " Symmetry Sectors ===" << std::endl;
+    
+    // All sectors should have the same temperature grid
+    const auto& temps = sector_results[0].thermo_data.temperatures;
+    size_t n_temps = temps.size();
+    
+    // Verify all sectors have same temperature grid
+    for (size_t s = 1; s < n_sectors; ++s) {
+        if (sector_results[s].thermo_data.temperatures.size() != n_temps) {
+            throw std::runtime_error("combine_ftlm_sector_results: Sectors have different temperature grids");
+        }
+    }
+    
+    // Initialize combined results
+    ThermodynamicData combined;
+    combined.temperatures = temps;
+    combined.energy.resize(n_temps, 0.0);
+    combined.specific_heat.resize(n_temps, 0.0);
+    combined.entropy.resize(n_temps, 0.0);
+    combined.free_energy.resize(n_temps, 0.0);
+    
+    // Report sector dimensions
+    uint64_t total_dim = 0;
+    for (size_t s = 0; s < n_sectors; ++s) {
+        std::cout << "  Sector " << s << ": dimension = " << sector_dims[s] << std::endl;
+        total_dim += sector_dims[s];
+    }
+    std::cout << "  Total dimension: " << total_dim << std::endl;
+    
+    // For each temperature, combine sector contributions
+    for (size_t t = 0; t < n_temps; ++t) {
+        double T = temps[t];
+        double beta = 1.0 / T;
+        
+        // Step 1: Compute partition function for each sector
+        // Z_s(β) = exp(-β F_s)
+        std::vector<double> Z_sectors;
+        double Z_total = 0.0;
+        
+        for (size_t s = 0; s < n_sectors; ++s) {
+            double F_s = sector_results[s].thermo_data.free_energy[t];
+            double Z_s = std::exp(-beta * F_s);
+            
+            // Handle numerical overflow/underflow
+            if (!std::isfinite(Z_s) || Z_s <= 0.0) {
+                // Use high-precision approach: shift all energies
+                std::cerr << "Warning: Numerical issue in sector " << s << " at T=" << T 
+                          << ". Falling back to energy-based calculation." << std::endl;
+                Z_s = 0.0;  // Will be handled below
+            }
+            
+            Z_sectors.push_back(Z_s);
+            Z_total += Z_s;
+        }
+        
+        // Check if we need to use a more stable approach
+        if (Z_total <= 1e-300 || !std::isfinite(Z_total)) {
+            // Very low temperature or numerical issues
+            // Use the sector with minimum free energy as reference
+            double F_min = sector_results[0].thermo_data.free_energy[t];
+            size_t min_sector = 0;
+            
+            for (size_t s = 1; s < n_sectors; ++s) {
+                double F_s = sector_results[s].thermo_data.free_energy[t];
+                if (F_s < F_min) {
+                    F_min = F_s;
+                    min_sector = s;
+                }
+            }
+            
+            // Recompute with shifted free energies
+            Z_total = 0.0;
+            for (size_t s = 0; s < n_sectors; ++s) {
+                double delta_F = sector_results[s].thermo_data.free_energy[t] - F_min;
+                Z_sectors[s] = std::exp(-beta * delta_F);
+                Z_total += Z_sectors[s];
+            }
+            
+            // Total free energy is shifted back
+            combined.free_energy[t] = F_min - T * std::log(Z_total);
+        } else {
+            combined.free_energy[t] = -T * std::log(Z_total);
+        }
+        
+        // Step 2: Compute sector weights
+        std::vector<double> weights(n_sectors);
+        for (size_t s = 0; s < n_sectors; ++s) {
+            weights[s] = Z_sectors[s] / Z_total;
+        }
+        
+        // Step 3: Combine observables with proper weights
+        double E_total = 0.0;
+        double E2_total = 0.0;
+        
+        for (size_t s = 0; s < n_sectors; ++s) {
+            double w_s = weights[s];
+            double E_s = sector_results[s].thermo_data.energy[t];
+            double C_s = sector_results[s].thermo_data.specific_heat[t];
+            
+            // Weighted energy
+            E_total += w_s * E_s;
+            
+            // Weighted energy squared
+            // From C = β²(<E²> - <E>²), we get <E²> = C/β² + <E>²
+            double E2_s = C_s / (beta * beta) + E_s * E_s;
+            E2_total += w_s * E2_s;
+        }
+        
+        // Step 4: Final thermodynamic quantities
+        combined.energy[t] = E_total;
+        combined.specific_heat[t] = beta * beta * (E2_total - E_total * E_total);
+        combined.entropy[t] = beta * (E_total - combined.free_energy[t]);
+    }
+    
+    std::cout << "Successfully combined thermodynamic data from all sectors" << std::endl;
+    std::cout << "=== Sector Combination Complete ===" << std::endl;
+    
+    return combined;
+}
+
+/**
  * @brief Helper function to compute spectral function from Ritz values and weights
  * 
  * @param ritz_values Eigenvalues (energies)

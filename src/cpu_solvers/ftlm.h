@@ -233,6 +233,27 @@ void save_ftlm_results(
 );
 
 /**
+ * @brief Combine FTLM results from multiple symmetry sectors
+ * 
+ * When using symmetrized or fixed-Sz bases, FTLM is run independently on each
+ * symmetry sector. This function properly combines the thermodynamic results
+ * from all sectors by:
+ * 1. Computing the total partition function: Z_total = Σ_α Z_α
+ * 2. Weighting each sector's contribution: weight_α = Z_α / Z_total
+ * 3. Combining observables: <O> = Σ_α weight_α * <O>_α
+ * 
+ * This ensures correct thermal averages across the full Hilbert space.
+ * 
+ * @param sector_results FTLM results for each symmetry sector
+ * @param sector_dims Dimension of each sector (for validation)
+ * @return Combined thermodynamic data representing the full system
+ */
+ThermodynamicData combine_ftlm_sector_results(
+    const std::vector<FTLMResults>& sector_results,
+    const std::vector<uint64_t>& sector_dims
+);
+
+/**
  * @brief Compute dynamical response S(ω) for operator O using Lanczos method
  * 
  * Computes the spectral function S(ω) = <ψ|O†δ(ω - H)O|ψ> where:

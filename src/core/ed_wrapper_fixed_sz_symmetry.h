@@ -193,6 +193,11 @@ inline EDResults exact_diagonalization_fixed_sz_symmetrized(
     };
     std::vector<EigenInfo> all_eigen_info;
     
+    // For FTLM: collect results from all sectors for proper combination
+    bool is_ftlm = (method == DiagonalizationMethod::FTLM);
+    std::vector<FTLMResults> sector_ftlm_results;
+    std::vector<uint64_t> sector_dimensions;
+    
     EDResults results;
     results.eigenvectors_computed = params.compute_eigenvectors;
     if (params.compute_eigenvectors) {
@@ -252,6 +257,12 @@ inline EDResults exact_diagonalization_fixed_sz_symmetrized(
         EDResults block_results = ed_internal::diagonalize_symmetry_block(
             block_matrix, block_dim, method, block_params, is_target_block, large_val
         );
+        
+        // For FTLM: store sector results for later combination
+        if (is_ftlm) {
+            sector_ftlm_results.push_back(block_results.ftlm_results);
+            sector_dimensions.push_back(block_dim);
+        }
         
         // Store eigenvalue information
         for (size_t i = 0; i < block_results.eigenvalues.size(); ++i) {
@@ -367,7 +378,7 @@ inline EDResults exact_diagonalization_fixed_sz_symmetrized(
         block_start_dim += block_dim;
     }
     
-    // ========== Step 5: Collect and Sort Results ==========
+    // ========== Step 5.5: Sort Eigenvalues First ==========
     std::sort(all_eigen_info.begin(), all_eigen_info.end());
     
     if (all_eigen_info.size() > static_cast<size_t>(params.num_eigenvalues)) {
@@ -379,7 +390,59 @@ inline EDResults exact_diagonalization_fixed_sz_symmetrized(
         results.eigenvalues[i] = all_eigen_info[i].value;
     }
     
-    // Create eigenvector mapping file if eigenvectors were computed
+    // ========== Step 5.6: Combine FTLM Results from Multiple Sectors ==========
+    
+    // For FTLM with multiple sectors: combine thermodynamic results properly
+    if (is_ftlm && sector_ftlm_results.size() > 1) {
+        std::cout << "\n=== Combining FTLM Results from " << sector_ftlm_results.size() 
+                  << " Symmetry Sectors ===" << std::endl;
+        
+        // Combine sector results with proper statistical weights
+        results.thermo_data = combine_ftlm_sector_results(
+            sector_ftlm_results, sector_dimensions
+        );
+        
+        // Save combined results
+        if (!params.output_dir.empty()) {
+            std::string ftlm_dir = params.output_dir + "/thermo";
+            safe_system_call("mkdir -p " + ftlm_dir);
+            
+            // Create a combined FTLMResults for saving
+            FTLMResults combined_results;
+            combined_results.thermo_data = results.thermo_data;
+            combined_results.ground_state_estimate = results.eigenvalues.empty() ? 0.0 : results.eigenvalues[0];
+            combined_results.total_samples = sector_ftlm_results[0].total_samples;
+            
+            // Initialize error arrays with zeros (no error bars for combined results)
+            size_t n_temps = combined_results.thermo_data.temperatures.size();
+            combined_results.energy_error.assign(n_temps, 0.0);
+            combined_results.specific_heat_error.assign(n_temps, 0.0);
+            combined_results.entropy_error.assign(n_temps, 0.0);
+            combined_results.free_energy_error.assign(n_temps, 0.0);
+            
+            // Save combined thermodynamics
+            save_ftlm_results(combined_results, ftlm_dir + "/ftlm_thermo_combined.txt");
+            
+            std::cout << "Combined FTLM results saved to: " << ftlm_dir << "/ftlm_thermo_combined.txt" << std::endl;
+            
+            // Also save individual sector results for debugging
+            for (size_t s = 0; s < sector_ftlm_results.size(); ++s) {
+                std::string sector_file = ftlm_dir + "/ftlm_thermo_sector_" + 
+                                         std::to_string(s) + ".txt";
+                save_ftlm_results(sector_ftlm_results[s], sector_file);
+            }
+            std::cout << "Individual sector results saved to: " << ftlm_dir << "/ftlm_thermo_sector_*.txt" << std::endl;
+        }
+        
+        std::cout << "=== FTLM Sector Combination Complete ===" << std::endl;
+    } else if (is_ftlm && sector_ftlm_results.size() == 1) {
+        // Single sector - use it directly
+        std::cout << "\nNote: Only one symmetry sector computed. Results represent this sector only." << std::endl;
+        results.thermo_data = sector_ftlm_results[0].thermo_data;
+        results.ftlm_results = sector_ftlm_results[0];
+    }
+    
+    // ========== Step 6: Create Eigenvector Mapping ==========
     if (params.compute_eigenvectors && !params.output_dir.empty()) {
         std::ofstream map_file(params.output_dir + "/eigenvector_mapping.txt");
         if (map_file.is_open()) {
