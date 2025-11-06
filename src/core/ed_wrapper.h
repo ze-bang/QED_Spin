@@ -766,9 +766,9 @@ EDResults exact_diagonalization_core(
     }
 
     // Calculate thermal observables if requested
-    if (params.calc_observables) {
-        ed_internal::process_thermal_correlations(params, hilbert_space_dim);
-    }
+    // if (params.calc_observables) {
+    //     ed_internal::process_thermal_correlations(params, hilbert_space_dim);
+    // }
 
     return results;
 }
@@ -1324,16 +1324,20 @@ void transform_and_save_tpq_states(
             full_tpq_state += basis_vector * block_tpq_state[i];
         }
 
-        // Save transformed state
+        // Save transformed state in binary format (same as original TPQ saves)
         std::string transformed_file = main_output_dir + "/tpq_state_" + sample_str + "_beta=" + beta_str + ".dat";
-        std::ofstream out_file(transformed_file);
-        out_file << full_tpq_state.size() << std::endl;
-        for (size_t i = 0; i < full_tpq_state.size(); ++i) {
-            if (std::abs(full_tpq_state[i]) > 1e-10) {
-                out_file << i << " " << full_tpq_state[i].real() << " " << full_tpq_state[i].imag() << std::endl;
-            }
+        std::ofstream out_file(transformed_file, std::ios::binary);
+        if (!out_file.is_open()) {
+            std::cerr << "Warning: Could not open file for writing: " << transformed_file << std::endl;
+            continue;
         }
+        
+        size_t full_dim = full_tpq_state.size();
+        out_file.write(reinterpret_cast<const char*>(&full_dim), sizeof(size_t));
+        out_file.write(reinterpret_cast<const char*>(full_tpq_state.data()), full_dim * sizeof(Complex));
         out_file.close();
+        
+        std::cout << "  Saved transformed TPQ state (dim: " << block_dim << " -> " << full_dim << ")" << std::endl;
     }
     
     file_list.close();
@@ -1616,38 +1620,116 @@ inline EDResults exact_diagonalization_fixed_sz(
     std::cout << "\nDiagonalizing..." << std::endl;
     auto results = exact_diagonalization_core(apply_hamiltonian, fixed_sz_dim, method, params);
 
-    // If eigenvectors were computed, transform them from fixed-Sz basis to full basis
-    if (params.compute_eigenvectors && !params.output_dir.empty()) {
-        std::cout << "Transforming eigenvectors from fixed-Sz basis to full Hilbert space..." << std::endl;
+    // Check if this is a TPQ method
+    bool is_tpq_method = (method == DiagonalizationMethod::mTPQ || 
+                          method == DiagonalizationMethod::mTPQ_CUDA || 
+                          method == DiagonalizationMethod::cTPQ);
+
+    // Transform eigenvectors or TPQ states from fixed-Sz basis to full basis
+    if (!params.output_dir.empty() && (params.compute_eigenvectors || is_tpq_method)) {
+        std::cout << "Transforming vectors from fixed-Sz basis to full Hilbert space..." << std::endl;
         std::cout << "  Fixed Sz dim: " << fixed_sz_dim << ", Full dim: " << full_dim << std::endl;
         std::cout << "  Output directory: " << params.output_dir << std::endl;
-        std::cout << "  Number of eigenvectors: " << results.eigenvalues.size() << std::endl;
-        // Process each eigenvector file
-        for (size_t i = 0; i < results.eigenvalues.size(); ++i) {
-            std::string eigvec_file = params.output_dir + "/eigenvectors/eigenvector_" + std::to_string(i) + ".dat";
-            std::cout << "  Processing eigenvector file: " << eigvec_file << std::endl;
-            std::ifstream infile(eigvec_file, std::ios::binary);
-            
-            if (infile.is_open()) {
-                // Read eigenvector in fixed-Sz basis
-                std::vector<Complex> fixed_sz_vec(fixed_sz_dim);
-                infile.read(reinterpret_cast<char*>(fixed_sz_vec.data()), fixed_sz_dim * sizeof(Complex));
-                infile.close();
+        
+        // Transform eigenvectors if computed
+        if (params.compute_eigenvectors) {
+            std::cout << "  Number of eigenvectors: " << results.eigenvalues.size() << std::endl;
+            for (size_t i = 0; i < results.eigenvalues.size(); ++i) {
+                std::string eigvec_file = params.output_dir + "/eigenvectors/eigenvector_" + std::to_string(i) + ".dat";
+                std::cout << "  Processing eigenvector file: " << eigvec_file << std::endl;
+                std::ifstream infile(eigvec_file, std::ios::binary);
                 
-                // Transform to full basis
-                std::vector<Complex> full_vec = hamiltonian.embedToFull(fixed_sz_vec);
-                
-                // Overwrite file with full-space eigenvector
-                std::ofstream outfile(eigvec_file, std::ios::binary);
-                outfile.write(reinterpret_cast<const char*>(full_vec.data()), full_dim * sizeof(Complex));
-                outfile.close();
-                
-                std::cout << "  Transformed eigenvector " << i << " to full space (dim: " 
-                          << fixed_sz_dim << " -> " << full_dim << ")" << std::endl;
+                if (infile.is_open()) {
+                    // Read eigenvector in fixed-Sz basis
+                    std::vector<Complex> fixed_sz_vec(fixed_sz_dim);
+                    infile.read(reinterpret_cast<char*>(fixed_sz_vec.data()), fixed_sz_dim * sizeof(Complex));
+                    infile.close();
+                    
+                    // Transform to full basis
+                    std::vector<Complex> full_vec = hamiltonian.embedToFull(fixed_sz_vec);
+                    
+                    // Overwrite file with full-space eigenvector
+                    std::ofstream outfile(eigvec_file, std::ios::binary);
+                    outfile.write(reinterpret_cast<const char*>(full_vec.data()), full_dim * sizeof(Complex));
+                    outfile.close();
+                    
+                    std::cout << "  Transformed eigenvector " << i << " to full space (dim: " 
+                              << fixed_sz_dim << " -> " << full_dim << ")" << std::endl;
+                }
             }
+            std::cout << "All eigenvectors successfully transformed to full Hilbert space." << std::endl;
         }
         
-        std::cout << "All eigenvectors successfully transformed to full Hilbert space." << std::endl;
+        // Transform TPQ states if TPQ method was used
+        if (is_tpq_method) {
+            std::cout << "\nTransforming TPQ states from fixed-Sz basis to full Hilbert space..." << std::endl;
+            
+            // Find all TPQ state files
+            std::string find_command = "find \"" + params.output_dir + "\" -name \"tpq_state_*.dat\" 2>/dev/null";
+            FILE* pipe = popen(find_command.c_str(), "r");
+            if (!pipe) {
+                std::cerr << "Warning: Could not search for TPQ state files" << std::endl;
+            } else {
+                char buffer[1024];
+                std::vector<std::string> tpq_files;
+                while (fgets(buffer, sizeof(buffer), pipe) != nullptr) {
+                    std::string filename(buffer);
+                    // Remove trailing newline
+                    if (!filename.empty() && filename[filename.length()-1] == '\n') {
+                        filename.erase(filename.length()-1);
+                    }
+                    if (!filename.empty()) {
+                        tpq_files.push_back(filename);
+                    }
+                }
+                pclose(pipe);
+                
+                std::cout << "  Found " << tpq_files.size() << " TPQ state files to transform" << std::endl;
+                
+                // Transform each TPQ state file
+                for (const auto& tpq_file : tpq_files) {
+                    std::cout << "  Processing: " << tpq_file << std::endl;
+                    
+                    std::ifstream infile(tpq_file, std::ios::binary);
+                    if (!infile.is_open()) {
+                        std::cerr << "    Warning: Could not open " << tpq_file << std::endl;
+                        continue;
+                    }
+                    
+                    // Read size header
+                    size_t stored_size = 0;
+                    infile.read(reinterpret_cast<char*>(&stored_size), sizeof(size_t));
+                    
+                    if (stored_size != fixed_sz_dim) {
+                        std::cerr << "    Warning: Size mismatch (expected " << fixed_sz_dim 
+                                  << ", got " << stored_size << ")" << std::endl;
+                        infile.close();
+                        continue;
+                    }
+                    
+                    // Read TPQ state in fixed-Sz basis
+                    std::vector<Complex> fixed_sz_state(fixed_sz_dim);
+                    infile.read(reinterpret_cast<char*>(fixed_sz_state.data()), fixed_sz_dim * sizeof(Complex));
+                    infile.close();
+                    
+                    // Transform to full basis
+                    std::vector<Complex> full_state = hamiltonian.embedToFull(fixed_sz_state);
+                    
+                    // Overwrite file with full-space TPQ state
+                    std::ofstream outfile(tpq_file, std::ios::binary);
+                    outfile.write(reinterpret_cast<const char*>(&full_dim), sizeof(size_t));
+                    outfile.write(reinterpret_cast<const char*>(full_state.data()), full_dim * sizeof(Complex));
+                    outfile.close();
+                    
+                    std::cout << "    Transformed TPQ state to full space (dim: " 
+                              << fixed_sz_dim << " -> " << full_dim << ")" << std::endl;
+                }
+                
+                if (!tpq_files.empty()) {
+                    std::cout << "All TPQ states successfully transformed to full Hilbert space." << std::endl;
+                }
+            }
+        }
     }
 
     std::cout << "=== Fixed Sz Diagonalization Complete ===" << std::endl;
