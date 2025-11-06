@@ -85,8 +85,7 @@ def run_nlce_ftlm(params, fixed_params, exp_temp, work_dir, h_field=None, temp_r
     logging.info(f"Running NLCE-FTLM with J=({params[0]:.4f}, {params[1]:.4f}, {params[2]:.4f})")
     
     Jxx, Jyy, Jzz = params[:3]
-    h_value = h_field if h_field is not None else fixed_params["h"]
-    h_value *= 5.4 * 0.0578
+    h_value = h_field * 5.4 * 0.0578 if h_field is not None else fixed_params["h"]
     field_dir = fixed_params["field_dir"]
     
     # Temperature range
@@ -183,7 +182,46 @@ def run_nlce_ftlm(params, fixed_params, exp_temp, work_dir, h_field=None, temp_r
         return np.array([]), np.zeros_like(exp_temp)
 
 
-def calc_chi_squared(params, fixed_params, exp_datasets, work_dir):
+def save_checkpoint(params, chi_squared, iteration, output_dir):
+    """Save current optimization state to checkpoint file"""
+    checkpoint = {
+        'params': params.tolist() if isinstance(params, np.ndarray) else params,
+        'chi_squared': float(chi_squared),
+        'iteration': int(iteration),
+        'timestamp': np.datetime64('now').astype(str)
+    }
+    
+    checkpoint_file = os.path.join(output_dir, 'fit_checkpoint.json')
+    with open(checkpoint_file, 'w') as f:
+        json.dump(checkpoint, f, indent=2)
+    
+    logging.debug(f"Checkpoint saved: iteration {iteration}, chi_squared={chi_squared:.6f}")
+
+
+def load_checkpoint(output_dir):
+    """Load optimization state from checkpoint file"""
+    checkpoint_file = os.path.join(output_dir, 'fit_checkpoint.json')
+    
+    if not os.path.exists(checkpoint_file):
+        return None
+    
+    try:
+        with open(checkpoint_file, 'r') as f:
+            checkpoint = json.load(f)
+        
+        params = np.array(checkpoint['params'])
+        logging.info(f"Loaded checkpoint from iteration {checkpoint['iteration']}")
+        logging.info(f"  Parameters: Jxx={params[0]:.6f}, Jyy={params[1]:.6f}, Jzz={params[2]:.6f}")
+        logging.info(f"  Chi-squared: {checkpoint['chi_squared']:.6f}")
+        logging.info(f"  Timestamp: {checkpoint['timestamp']}")
+        
+        return params
+    except Exception as e:
+        logging.warning(f"Failed to load checkpoint: {e}")
+        return None
+
+
+def calc_chi_squared(params, fixed_params, exp_datasets, work_dir, output_dir=None):
     """Calculate combined chi-squared between experimental and calculated specific heat for multiple datasets"""
     total_chi_squared = 0.0
     
@@ -230,11 +268,18 @@ def calc_chi_squared(params, fixed_params, exp_datasets, work_dir):
     logging.info(f"Parameters: Jxx={params[0]:.4f}, Jyy={params[1]:.4f}, Jzz={params[2]:.4f}, "
                 f"Total Chi-squared={total_chi_squared:.4f}")
     
+    # Save checkpoint if output_dir is provided
+    if output_dir is not None:
+        if not hasattr(calc_chi_squared, 'iteration'):
+            calc_chi_squared.iteration = 0
+        calc_chi_squared.iteration += 1
+        save_checkpoint(params, total_chi_squared, calc_chi_squared.iteration, output_dir)
+    
     return total_chi_squared
 
 
 def plot_results(exp_datasets, best_params, fixed_params, work_dir, output_dir):
-    """Plot experimental data and best fit for all datasets"""
+    """Plot experimental data and best fit for all datasets (without error bars)"""
     try:
         import matplotlib.pyplot as plt
     except ImportError:
@@ -255,9 +300,9 @@ def plot_results(exp_datasets, best_params, fixed_params, work_dir, output_dir):
         if 'temp_min' in dataset and 'temp_max' in dataset:
             temp_range = (dataset['temp_min'], dataset['temp_max'])
         
-        # Plot experimental data
+        # Plot experimental data (without error bars)
         plt.scatter(exp_temp, exp_spec_heat, color=color, alpha=0.7, 
-                   label=f'Exp Data (h={h_field})', zorder=5)
+                   label=f'Experimental Data (h={h_field})', zorder=5, s=50)
         
         # Calculate and plot fitted data
         calc_temp, calc_spec_heat = run_nlce_ftlm(best_params, fixed_params, exp_temp, work_dir,
@@ -297,6 +342,12 @@ def main():
 Example usage:
   # Single dataset fitting
   python nlc_fit_ftlm.py --exp_data experimental_cv.txt --max_order 4 --output_dir fit_results/
+  
+  # Resume from checkpoint
+  python nlc_fit_ftlm.py --exp_data experimental_cv.txt --max_order 4 --output_dir fit_results/ --resume
+  
+  # Load from specific checkpoint file
+  python nlc_fit_ftlm.py --exp_data experimental_cv.txt --max_order 4 --checkpoint_file path/to/fit_checkpoint.json
   
   # Multiple datasets with config file
   python nlc_fit_ftlm.py --exp_config exp_config.json --max_order 4 --output_dir fit_results/
@@ -348,7 +399,7 @@ Example config file (exp_config.json):
     parser.add_argument('--max_order', type=int, default=4, help='Maximum cluster order')
     
     # FTLM parameters
-    parser.add_argument('--ftlm_samples', type=int, default=40, help='Number of FTLM samples')
+    parser.add_argument('--ftlm_samples', type=int, default=100, help='Number of FTLM samples')
     parser.add_argument('--krylov_dim', type=int, default=150, help='Krylov subspace dimension')
     
     # Model parameters (initial guess)
@@ -385,6 +436,12 @@ Example config file (exp_config.json):
     parser.add_argument('--symmetrized', action='store_true', help='Use symmetrized Hamiltonian')
     parser.add_argument('--clear_cache', action='store_true', 
                        help='Clear cached results between optimization steps')
+    
+    # Checkpoint functionality
+    parser.add_argument('--resume', action='store_true', 
+                       help='Resume from checkpoint if available')
+    parser.add_argument('--checkpoint_file', type=str, default=None,
+                       help='Path to specific checkpoint file to load (overrides --resume)')
     
     args = parser.parse_args()
     
@@ -486,13 +543,36 @@ Example config file (exp_config.json):
     
     # Initial parameters and bounds
     initial_params = np.array([args.Jxx_init, args.Jyy_init, args.Jzz_init])
+    
+    # Try to load from checkpoint if requested
+    if args.checkpoint_file:
+        # Load from specific checkpoint file
+        logging.info(f"Loading checkpoint from: {args.checkpoint_file}")
+        try:
+            with open(args.checkpoint_file, 'r') as f:
+                checkpoint = json.load(f)
+            loaded_params = np.array(checkpoint['params'])
+            logging.info(f"Loaded parameters from checkpoint: Jxx={loaded_params[0]:.6f}, "
+                        f"Jyy={loaded_params[1]:.6f}, Jzz={loaded_params[2]:.6f}")
+            initial_params = loaded_params
+        except Exception as e:
+            logging.warning(f"Failed to load checkpoint file {args.checkpoint_file}: {e}")
+            logging.info("Using default initial parameters")
+    elif args.resume:
+        # Try to load from default checkpoint in output_dir
+        loaded_params = load_checkpoint(args.output_dir)
+        if loaded_params is not None:
+            initial_params = loaded_params
+        else:
+            logging.info("No checkpoint found, using default initial parameters")
+    
     bounds = [
         tuple(args.Jxx_bounds),
         tuple(args.Jyy_bounds),
         tuple(args.Jzz_bounds)
     ]
     
-    logging.info(f"Initial parameters: Jxx={initial_params[0]:.4f}, "
+    logging.info(f"Starting parameters: Jxx={initial_params[0]:.4f}, "
                 f"Jyy={initial_params[1]:.4f}, Jzz={initial_params[2]:.4f}")
     logging.info(f"Parameter bounds: Jxx={bounds[0]}, Jyy={bounds[1]}, Jzz={bounds[2]}")
     
@@ -513,10 +593,13 @@ Example config file (exp_config.json):
     logging.info(f"Maximum iterations: {args.maxiter}")
     logging.info("="*80)
     
+    # Reset iteration counter for checkpoint saving
+    calc_chi_squared.iteration = 0
+    
     result = minimize(
         calc_chi_squared,
         initial_params,
-        args=(fixed_params, exp_datasets, args.work_dir),
+        args=(fixed_params, exp_datasets, args.work_dir, args.output_dir),
         method=args.method,
         bounds=bounds if args.method == 'L-BFGS-B' else None,
         constraints=constraints if args.method in ['SLSQP', 'COBYLA', 'trust-constr'] else None,

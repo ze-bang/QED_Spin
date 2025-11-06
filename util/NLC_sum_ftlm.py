@@ -264,14 +264,15 @@ class NLCExpansionFTLM:
             # Get thermodynamic data for this cluster
             thermo = self.clusters[cluster_id]['thermo_data']
             
-            # For each quantity, weight = multiplicity * (cluster_value - sum of weighted subcluster values)
-            # Error propagation: σ²_weight = mult² * σ²_cluster + Σ(sub_mult² * σ²_subcluster_weight)
+            # For each quantity, weight = cluster_value - sum of (subcluster_multiplicity * subcluster_weight)
+            # NOTE: We do NOT multiply by cluster multiplicity here - that happens in sum_nlc()
+            # Error propagation: σ²_weight = σ²_cluster + Σ(sub_mult² * σ²_subcluster_weight)
             for quantity in ['energy', 'specific_heat', 'entropy', 'free_energy']:
                 cluster_value = thermo[quantity]
                 cluster_error = thermo[f'{quantity}_error']
                 
-                weight_value = multiplicity * cluster_value.copy()
-                weight_error_sq = (multiplicity * cluster_error)**2
+                weight_value = cluster_value.copy()
+                weight_error_sq = cluster_error**2
                 
                 # Subtract weighted contributions from subclusters
                 for sub_id, sub_mult in subclusters.items():
@@ -507,6 +508,7 @@ class NLCExpansionFTLM:
         }
         
         # Track contributions by order for resummation
+        # Store the contribution of each order (sum of all cluster weights at that order)
         order_contributions = defaultdict(lambda: {
             'energy': np.zeros_like(self.temp_values),
             'specific_heat': np.zeros_like(self.temp_values),
@@ -523,24 +525,27 @@ class NLCExpansionFTLM:
         })
         
         # Accumulate contributions by order
+        # Each cluster's weight is multiplied by its multiplicity when adding to the sum
         for cluster_id in self.clusters:
             if not self.clusters[cluster_id].get('has_data', False):
                 continue
             
             order = self.clusters[cluster_id]['order']
+            multiplicity = self.clusters[cluster_id]['multiplicity']
             
             # Apply order cutoff if specified
             if order_cutoff is not None and order > order_cutoff:
                 continue
             
-            # Add weighted contributions for this order
+            # Add weight * multiplicity for this cluster to its order
+            # This matches the NLC_sum.py implementation
             for quantity in ['energy', 'specific_heat', 'entropy', 'free_energy']:
                 weight = self.weights[quantity][cluster_id]
                 weight_error = self.weight_errors[quantity][cluster_id]
                 
-                order_contributions[order][quantity] += weight
-                # Error propagation: add weight errors in quadrature
-                order_error_contributions[order][quantity] += weight_error**2
+                order_contributions[order][quantity] += weight * multiplicity
+                # Error propagation: multiply error by multiplicity, add in quadrature
+                order_error_contributions[order][quantity] += (weight_error * multiplicity)**2
         
         # Take square root for final errors by order
         for order in order_error_contributions:
@@ -550,21 +555,26 @@ class NLCExpansionFTLM:
                 )
         
         # Build partial sums by order for resummation
+        # Partial sum S_n = sum of all weights with order <= n
         max_order = max(order_contributions.keys()) if order_contributions else 0
         
         for quantity in ['energy', 'specific_heat', 'entropy', 'free_energy']:
             partial_sums = []
             partial_errors = []
-            cumsum = np.zeros_like(self.temp_values)
-            cum_error_sq = np.zeros_like(self.temp_values)
             
-            for order in range(1, max_order + 1):
-                if order in order_contributions:
-                    cumsum = cumsum + order_contributions[order][quantity]
-                    # Accumulate errors in quadrature
-                    cum_error_sq = cum_error_sq + order_error_contributions[order][quantity]**2
-                partial_sums.append(cumsum.copy())
-                partial_errors.append(np.sqrt(cum_error_sq.copy()))
+            # For each order, compute the sum of all contributions up to that order
+            for n in range(1, max_order + 1):
+                # Sum all order contributions from 1 to n
+                partial_sum = np.zeros_like(self.temp_values)
+                partial_error_sq = np.zeros_like(self.temp_values)
+                
+                for order in range(1, n + 1):
+                    if order in order_contributions:
+                        partial_sum += order_contributions[order][quantity]
+                        partial_error_sq += order_error_contributions[order][quantity]**2
+                
+                partial_sums.append(partial_sum)
+                partial_errors.append(np.sqrt(partial_error_sq))
             
             # Apply resummation
             if len(partial_sums) > 0:
@@ -618,7 +628,7 @@ class NLCExpansionFTLM:
         
         return results
     
-    def run(self, resummation_method='auto', order_cutoff=None):
+    def run(self, resummation_method='euler', order_cutoff=None):
         """Run the complete NLC calculation."""
         self.read_clusters()
         self.read_ftlm_data()
@@ -704,6 +714,49 @@ class NLCExpansionFTLM:
             plt.show()
         
         plt.close()
+    
+    def plot_specific_heat_with_experiment(self, results, exp_temp=None, exp_spec_heat=None, save_path=None):
+        """Plot specific heat results with optional experimental data overlay."""
+        try:
+            import matplotlib.pyplot as plt
+        except ImportError:
+            print("Matplotlib not available. Skipping plot.")
+            return
+        
+        plt.figure(figsize=(10, 7))
+        
+        temps = results['temperatures']
+        
+        # Determine unit labels
+        if self.SI:
+            cv_unit = 'J/(K·mol)'
+        else:
+            cv_unit = 'natural units'
+        
+        # Plot NLC specific heat
+        plt.plot(temps, results['specific_heat'], 'o-', color='orange', linewidth=2.5, 
+                markersize=6, label='NLCE-FTLM', zorder=3)
+        
+        # Plot experimental data if provided
+        if exp_temp is not None and exp_spec_heat is not None:
+            plt.scatter(exp_temp, exp_spec_heat, color='blue', s=80, alpha=0.7, 
+                       label='Experimental Data', zorder=4)
+        
+        plt.xlabel('Temperature (K)' if self.SI else 'Temperature', fontsize=12)
+        plt.ylabel(f'Specific Heat per site ({cv_unit})', fontsize=12)
+        plt.title('Specific Heat Comparison', fontsize=14, fontweight='bold')
+        plt.xscale('log')
+        plt.grid(True, alpha=0.3)
+        plt.legend(fontsize=11)
+        plt.tight_layout()
+        
+        if save_path:
+            plt.savefig(save_path, dpi=300, bbox_inches='tight')
+            print(f"Specific heat plot saved to: {save_path}")
+        else:
+            plt.show()
+        
+        plt.close()
 
 
 if __name__ == "__main__":
@@ -725,6 +778,8 @@ Example usage:
                        help='Directory containing FTLM output files')
     parser.add_argument('--output_dir', default='.', 
                        help='Directory to save output files')
+    parser.add_argument('--exp_data', type=str, default=None,
+                       help='Path to experimental specific heat data file')
     parser.add_argument('--order_cutoff', type=int, 
                        help='Maximum order to include in summation')
     parser.add_argument('--resummation', type=str, default='auto',
@@ -809,5 +864,23 @@ Example usage:
     if args.plot:
         plot_path = os.path.join(args.output_dir, "nlc_results_ftlm.png")
         nlc.plot_results(results, save_path=plot_path)
+        
+        # Plot specific heat with experimental data overlay if available
+        exp_temp = None
+        exp_spec_heat = None
+        
+        if args.exp_data:
+            try:
+                exp_data = np.loadtxt(args.exp_data)
+                exp_temp = exp_data[:, 0]
+                exp_spec_heat = exp_data[:, 1]
+                print(f"\nLoaded experimental data from {args.exp_data}")
+            except Exception as e:
+                print(f"Warning: Could not load experimental data: {e}")
+        
+        # Plot specific heat comparison
+        spec_heat_plot_path = os.path.join(args.output_dir, "nlc_specific_heat_comparison.png")
+        nlc.plot_specific_heat_with_experiment(results, exp_temp, exp_spec_heat, 
+                                               save_path=spec_heat_plot_path)
     
     print(f"\nNLC calculation completed! Results saved to {args.output_dir}")
