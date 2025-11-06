@@ -10,6 +10,10 @@
 #include "../cpu_solvers/ftlm.h"
 #include "../cpu_solvers/ltlm.h"
 
+#ifdef WITH_MPI
+#include <mpi.h>
+#endif
+
 /**
  * @file ed_main.cpp
  * @brief Elegant main entry point for exact diagonalization
@@ -19,6 +23,7 @@
  * - Separated concerns
  * - No massive if-else chains
  * - Support for config files
+ * - MPI support for parallel TPQ sample execution
  */
 
 // ============================================================================
@@ -640,6 +645,24 @@ void print_help(const char* prog_name) {
 // ============================================================================
 
 int main(int argc, char* argv[]) {
+    #ifdef WITH_MPI
+    // Initialize MPI
+    MPI_Init(&argc, &argv);
+    
+    int rank, size;
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    MPI_Comm_size(MPI_COMM_WORLD, &size);
+    
+    if (rank == 0 && size > 1) {
+        std::cout << "\n===========================================\n";
+        std::cout << "Exact Diagonalization with MPI Support\n";
+        std::cout << "===========================================\n";
+        std::cout << "Running on " << size << " MPI ranks\n";
+        std::cout << "MPI parallelization enabled for TPQ samples\n";
+        std::cout << "===========================================\n\n";
+    }
+    #endif
+    
     // Check for help
     for (int i = 1; i < argc; i++) {
         std::string arg = argv[i];
@@ -764,8 +787,16 @@ int main(int argc, char* argv[]) {
         
     } catch (const std::exception& e) {
         std::cerr << "\nError: " << e.what() << "\n";
+        #ifdef WITH_MPI
+        MPI_Finalize();
+        #endif
         return 1;
     }
+    
+    #ifdef WITH_MPI
+    // Finalize MPI
+    MPI_Finalize();
+    #endif
     
     return 0;
 }

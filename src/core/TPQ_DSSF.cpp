@@ -1612,9 +1612,7 @@ int main(int argc, char* argv[]) {
                             std::stringstream filename_ss;
                             filename_ss << method_dir << "/" << obs_names[i] 
                                         << "_spectral_thermal_sample_" << sample_index 
-                                        << "_beta_" << beta 
-                                        << "_T_" << temperature
-                                        << "_nsamples_" << params.num_samples << ".txt";
+                                        << "_beta_" << 1/temperature << ".txt";
                             
                             save_dynamical_response_results(results, filename_ss.str());
                             

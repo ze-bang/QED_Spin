@@ -1,5 +1,9 @@
 #include "TPQ.h"
 
+#ifdef WITH_MPI
+#include <mpi.h>
+#endif
+
 // Note: Time evolution and dynamics computation methods have been moved to dynamics.cpp
 // This file now focuses on TPQ-specific functionality and wraps the general dynamics module
 
@@ -1427,12 +1431,50 @@ void microcanonical_tpq(
     uint64_t sublattice_size,
     uint64_t num_sites
 ) {
+    #ifdef WITH_MPI
+    int rank = 0, size = 1;
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    MPI_Comm_size(MPI_COMM_WORLD, &size);
+    
+    // Distribute samples across ranks using balanced assignment
+    uint64_t samples_per_rank = num_samples / size;
+    uint64_t remainder = num_samples % size;
+    
+    // Calculate start and end sample for this rank
+    // Ranks with index < remainder get one extra sample
+    uint64_t start_sample = rank * samples_per_rank + std::min((uint64_t)rank, remainder);
+    uint64_t end_sample = start_sample + samples_per_rank + (rank < remainder ? 1 : 0);
+    uint64_t local_num_samples = end_sample - start_sample;
+    
+    if (rank == 0) {
+        std::cout << "\n==========================================\n";
+        std::cout << "MPI-Parallel TPQ Calculation\n";
+        std::cout << "==========================================\n";
+        std::cout << "Total MPI ranks: " << size << "\n";
+        std::cout << "Total samples: " << num_samples << "\n";
+        std::cout << "Samples per rank: " << samples_per_rank << " (+ " << remainder << " remainder)\n";
+        std::cout << "==========================================\n\n";
+    }
+    
+    std::cout << "Rank " << rank << " processing samples [" 
+              << start_sample << ", " << end_sample << ")\n";
+    
+    // Synchronize before starting computation
+    MPI_Barrier(MPI_COMM_WORLD);
+    #else
+    // Serial execution: process all samples on single rank
+    uint64_t start_sample = 0;
+    uint64_t end_sample = num_samples;
+    uint64_t local_num_samples = num_samples;
+    #endif
+    
     // Create output directory if needed
     if (!dir.empty()) {
         ensureDirectoryExists(dir);
     }
     double D_S = std::log2(N);
     eigenvalues.clear();
+    eigenvalues.reserve(local_num_samples);
 
     // Create Sz operators
     std::vector<SingleSiteOperator> Sz_ops = createSzOperators(num_sites, spin_length);
@@ -1481,12 +1523,19 @@ void microcanonical_tpq(
     std::cout << "Setting LargeValue: " << LargeValue << std::endl;
 
     std::cout << "Setting LargeValue: " << LargeValue << std::endl;
-    // For each random sample
-    for (int sample = 0; sample < num_samples; sample++) {
-        std::vector<bool> temp_measured(num_temp_points, false);
-        std::cout << "TPQ sample " << sample+1 << " of " << num_samples << std::endl;
+    
+    // Modified loop: only process samples assigned to this rank
+    for (uint64_t sample = start_sample; sample < end_sample; sample++) {
+        #ifdef WITH_MPI
+        std::cout << "[Rank " << rank << "] TPQ sample " << sample 
+                  << " of " << num_samples 
+                  << " (local: " << (sample-start_sample+1) 
+                  << " of " << local_num_samples << ")" << std::endl;
+        #else
+        std::cout << "TPQ sample " << (sample+1) << " of " << num_samples << std::endl;
+        #endif
         
-        // Setup filenames
+        std::vector<bool> temp_measured(num_temp_points, false);
         auto [ss_file, norm_file, flct_file, spin_corr] = initializeTPQFiles(dir, sample, sublattice_size);
         
         // Generate initial random state
@@ -1585,6 +1634,48 @@ void microcanonical_tpq(
         // Store final energy for this sample
         eigenvalues.push_back(energy1);
     }
+    
+    #ifdef WITH_MPI
+    // Gather all eigenvalues from all ranks to rank 0
+    std::vector<double> all_eigenvalues;
+    if (rank == 0) {
+        all_eigenvalues.resize(num_samples);
+    }
+    
+    // Calculate receive counts and displacements for MPI_Gatherv
+    std::vector<int> recvcounts(size);
+    std::vector<int> displs(size);
+    
+    for (int r = 0; r < size; r++) {
+        uint64_t r_samples_per_rank = num_samples / size;
+        uint64_t r_remainder = num_samples % size;
+        uint64_t r_start = r * r_samples_per_rank + std::min((uint64_t)r, r_remainder);
+        uint64_t r_count = r_samples_per_rank + (r < r_remainder ? 1 : 0);
+        
+        recvcounts[r] = static_cast<int>(r_count);
+        displs[r] = static_cast<int>(r_start);
+    }
+    
+    // Gather eigenvalues from all ranks
+    MPI_Gatherv(eigenvalues.data(), static_cast<int>(eigenvalues.size()), MPI_DOUBLE,
+                all_eigenvalues.data(), recvcounts.data(), displs.data(), 
+                MPI_DOUBLE, 0, MPI_COMM_WORLD);
+    
+    // Update eigenvalues on rank 0 with complete set
+    if (rank == 0) {
+        eigenvalues = std::move(all_eigenvalues);
+        std::cout << "\n==========================================\n";
+        std::cout << "MPI TPQ Computation Complete\n";
+        std::cout << "Collected " << eigenvalues.size() << " sample energies\n";
+        std::cout << "==========================================\n";
+    } else {
+        // Clear eigenvalues on non-root ranks to save memory
+        eigenvalues.clear();
+    }
+    
+    // Final barrier before returning
+    MPI_Barrier(MPI_COMM_WORLD);
+    #endif
 }
 
 // Canonical TPQ using imaginary-time propagation e^{-βH} |r>
@@ -1651,8 +1742,45 @@ void canonical_tpq(
     uint64_t sublattice_size,
     uint64_t num_sites
 ){
+    #ifdef WITH_MPI
+    int rank = 0, size = 1;
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    MPI_Comm_size(MPI_COMM_WORLD, &size);
+    
+    // Distribute samples across ranks using balanced assignment
+    uint64_t samples_per_rank = num_samples / size;
+    uint64_t remainder = num_samples % size;
+    
+    // Calculate start and end sample for this rank
+    uint64_t start_sample = rank * samples_per_rank + std::min((uint64_t)rank, remainder);
+    uint64_t end_sample = start_sample + samples_per_rank + (rank < remainder ? 1 : 0);
+    uint64_t local_num_samples = end_sample - start_sample;
+    
+    if (rank == 0) {
+        std::cout << "\n==========================================\n";
+        std::cout << "MPI-Parallel Canonical TPQ Calculation\n";
+        std::cout << "==========================================\n";
+        std::cout << "Total MPI ranks: " << size << "\n";
+        std::cout << "Total samples: " << num_samples << "\n";
+        std::cout << "Samples per rank: " << samples_per_rank << " (+ " << remainder << " remainder)\n";
+        std::cout << "==========================================\n\n";
+    }
+    
+    std::cout << "Rank " << rank << " processing samples [" 
+              << start_sample << ", " << end_sample << ")\n";
+    
+    // Synchronize before starting computation
+    MPI_Barrier(MPI_COMM_WORLD);
+    #else
+    // Serial execution: process all samples
+    uint64_t start_sample = 0;
+    uint64_t end_sample = num_samples;
+    uint64_t local_num_samples = num_samples;
+    #endif
+    
     if (!dir.empty()) { ensureDirectoryExists(dir); }
     energies.clear();
+    energies.reserve(local_num_samples);
 
     // Operators for fluctuations/correlations
     std::vector<SingleSiteOperator> Sz_ops = createSzOperators(num_sites, spin_length);
@@ -1671,10 +1799,20 @@ void canonical_tpq(
 
     uint64_t max_steps = std::max(1, int(std::ceil(beta_max / delta_beta)));
 
-    for (int sample = 0; sample < num_samples; ++sample) {
+    // Modified loop: only process samples assigned to this rank
+    for (uint64_t sample = start_sample; sample < end_sample; ++sample) {
+        #ifdef WITH_MPI
+        std::cout << "[Rank " << rank << "] Canonical TPQ sample " << sample 
+                  << " of " << num_samples 
+                  << " (local: " << (sample-start_sample+1) 
+                  << " of " << local_num_samples << ")" << std::endl;
+        #else
+        std::cout << "Canonical TPQ sample " << (sample + 1) << " of " << num_samples << std::endl;
+        #endif
+        
         std::vector<bool> temp_measured(num_temp_points, false);
-        std::cout << "Canonical TPQ sample " << sample + 1 << " of " << num_samples << std::endl;
-
+        
+        // Setup filenames for this sample
         auto [ss_file, norm_file, flct_file, spin_corr] = initializeTPQFiles(dir, sample, sublattice_size);
 
         // Initial random normalized state (β=0)
@@ -1735,4 +1873,46 @@ void canonical_tpq(
         auto [ef, _varf] = calculateEnergyAndVariance(H, psi, N);
         energies.push_back(ef);
     }
+    
+    #ifdef WITH_MPI
+    // Gather all energies from all ranks to rank 0
+    std::vector<double> all_energies;
+    if (rank == 0) {
+        all_energies.resize(num_samples);
+    }
+    
+    // Calculate receive counts and displacements for MPI_Gatherv
+    std::vector<int> recvcounts(size);
+    std::vector<int> displs(size);
+    
+    for (int r = 0; r < size; r++) {
+        uint64_t r_samples_per_rank = num_samples / size;
+        uint64_t r_remainder = num_samples % size;
+        uint64_t r_start = r * r_samples_per_rank + std::min((uint64_t)r, r_remainder);
+        uint64_t r_count = r_samples_per_rank + (r < r_remainder ? 1 : 0);
+        
+        recvcounts[r] = static_cast<int>(r_count);
+        displs[r] = static_cast<int>(r_start);
+    }
+    
+    // Gather energies from all ranks
+    MPI_Gatherv(energies.data(), static_cast<int>(energies.size()), MPI_DOUBLE,
+                all_energies.data(), recvcounts.data(), displs.data(), 
+                MPI_DOUBLE, 0, MPI_COMM_WORLD);
+    
+    // Update energies on rank 0 with complete set
+    if (rank == 0) {
+        energies = std::move(all_energies);
+        std::cout << "\n==========================================\n";
+        std::cout << "MPI Canonical TPQ Computation Complete\n";
+        std::cout << "Collected " << energies.size() << " sample energies\n";
+        std::cout << "==========================================\n";
+    } else {
+        // Clear energies on non-root ranks to save memory
+        energies.clear();
+    }
+    
+    // Final barrier before returning
+    MPI_Barrier(MPI_COMM_WORLD);
+    #endif
 }
