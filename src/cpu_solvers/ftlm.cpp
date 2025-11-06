@@ -1268,7 +1268,8 @@ DynamicalResponseResults compute_dynamical_correlation_state(
     double omega_min,
     double omega_max,
     uint64_t num_omega_bins,
-    double temperature
+    double temperature,
+    double energy_shift
 ){
     std::cout << "\n==========================================\n";
     std::cout << "Dynamical Correlation (Given State): S(ω) = ⟨O₁†(ω)O₂⟩\n";
@@ -1420,10 +1421,19 @@ DynamicalResponseResults compute_dynamical_correlation_state(
     
     // For dynamical structure factors, shift energies so ground state is at E=0
     // This ensures spectral function has weight only at positive frequencies (excitation energies)
-    double E_min = *std::min_element(ritz_values.begin(), ritz_values.end());
-    std::cout << "  Ground state energy (before shift): " << E_min << std::endl;
+    double E_shift;
+    if (std::abs(energy_shift) > 1e-14) {
+        // Use provided ground state energy shift
+        E_shift = energy_shift;
+        std::cout << "  Using provided ground state energy shift: " << E_shift << std::endl;
+    } else {
+        // Auto-detect from Krylov subspace
+        E_shift = *std::min_element(ritz_values.begin(), ritz_values.end());
+        std::cout << "  Ground state energy (auto-detected from Krylov): " << E_shift << std::endl;
+    }
+    
     for (int i = 0; i < m; i++) {
-        ritz_values[i] -= E_min;
+        ritz_values[i] -= E_shift;
     }
     std::cout << "  Shifted to excitation energies (E_gs = 0)" << std::endl;
     

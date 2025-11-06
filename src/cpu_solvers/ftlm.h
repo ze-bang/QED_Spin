@@ -375,6 +375,7 @@ DynamicalResponseResults compute_dynamical_correlation(
  * @param omega_max Maximum frequency
  * @param num_omega_bins Number of frequency points
  * @param temperature Temperature for Boltzmann weighting (0 = no weighting)
+ * @param energy_shift Energy shift to apply (typically ground state energy, 0 = auto-detect from Krylov)
  * @return DynamicalResponseResults containing S_{O1,O2}(ω) vs frequency
  */
 DynamicalResponseResults compute_dynamical_correlation_state(
@@ -387,7 +388,8 @@ DynamicalResponseResults compute_dynamical_correlation_state(
     double omega_min,
     double omega_max,
     uint64_t num_omega_bins,
-    double temperature = 0.0
+    double temperature = 0.0,
+    double energy_shift = 0.0
 );
 
 /**

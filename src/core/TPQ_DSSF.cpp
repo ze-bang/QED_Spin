@@ -53,6 +53,33 @@ int read_num_sites_from_positions(const std::string& positions_file) {
     return num_sites;
 }
 
+// Helper function to read ground state energy from eigenvalues.dat file
+double read_ground_state_energy(const std::string& directory) {
+    std::string eigenvalues_file = directory + "/output/eigenvectors/eigenvalues.dat";
+    
+    std::ifstream infile(eigenvalues_file, std::ios::binary);
+    if (!infile.is_open()) {
+        throw std::runtime_error("Failed to open eigenvalues.dat file: " + eigenvalues_file);
+    }
+    
+    // Read number of eigenvalues
+    size_t num_eigenvalues;
+    infile.read(reinterpret_cast<char*>(&num_eigenvalues), sizeof(size_t));
+    
+    if (num_eigenvalues == 0) {
+        infile.close();
+        throw std::runtime_error("No eigenvalues found in file: " + eigenvalues_file);
+    }
+    
+    // Read the first eigenvalue (ground state energy)
+    double ground_state_energy;
+    infile.read(reinterpret_cast<char*>(&ground_state_energy), sizeof(double));
+    
+    infile.close();
+    
+    return ground_state_energy;
+}
+
 void printSpinConfiguration(ComplexVector &state, int num_sites, float spin_length, const std::string &dir) {
     // Compute and print <S_i> for all sites
     std::vector<std::vector<Complex>> result(num_sites, std::vector<Complex>(3));
@@ -659,6 +686,25 @@ int main(int argc, char* argv[]) {
     auto H = [&ham_op](const Complex* in, Complex* out, int size) {
         ham_op.apply(in, out, size);
     };
+    
+    // Read ground state energy for energy shift in spectral functions
+    double ground_state_energy = 0.0;
+    bool has_ground_state_energy = false;
+    if (method == "spectral") {
+        try {
+            ground_state_energy = read_ground_state_energy(directory);
+            has_ground_state_energy = true;
+            if (rank == 0) {
+                std::cout << "Ground state energy read from eigenvalues.dat: " 
+                          << std::fixed << std::setprecision(10) << ground_state_energy << std::endl;
+            }
+        } catch (const std::exception& e) {
+            if (rank == 0) {
+                std::cerr << "Warning: Could not read ground state energy: " << e.what() << std::endl;
+                std::cerr << "Proceeding without energy shift" << std::endl;
+            }
+        }
+    }
     
     // Use 64-bit to compute Hilbert space dimension and guard against int overflow
     size_t N64 = 1ULL << num_sites;
@@ -1395,7 +1441,7 @@ int main(int argc, char* argv[]) {
                         // Compute spectral function
                         auto results = compute_dynamical_correlation_state(
                             H, O1_func, O2_func, tpq_state, N, params,
-                            omega_min, omega_max, num_omega_bins, 0.0
+                            omega_min, omega_max, num_omega_bins, 0.0, ground_state_energy
                         );
                         
                         // Save results
