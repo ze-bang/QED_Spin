@@ -1,15 +1,30 @@
+#!/usr/bin/env python3
+"""
+NLCE Fitting Tool for Specific Heat Data
+
+This script fits Numerical Linked Cluster Expansion (NLCE) calculations
+to experimental specific heat data using various optimization methods.
+"""
+
 import os
 import sys
 import subprocess
 import argparse
+import logging
+import tempfile
+import shutil
+import json
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from multiprocessing import Pool
+
 import numpy as np
+import matplotlib.pyplot as plt
 from scipy.optimize import minimize, NonlinearConstraint, differential_evolution, basinhopping, dual_annealing
 from scipy.stats import qmc
 from scipy.interpolate import interp1d
 from scipy.ndimage import gaussian_filter1d
-from multiprocessing import Pool
 
-# Bayesian optimization imports
+# Bayesian optimization imports (optional dependency)
 try:
     from skopt import gp_minimize, forest_minimize, gbrt_minimize
     from skopt.space import Real
@@ -20,14 +35,7 @@ except ImportError:
     BAYESIAN_OPT_AVAILABLE = False
     print("Warning: scikit-optimize not available. Install with: pip install scikit-optimize")
     print("Bayesian optimization methods will not be available.")
-import logging
-import tempfile
-import shutil
-import json
-from concurrent.futures import ThreadPoolExecutor, as_completed
 
-#!/usr/bin/env python3
-import matplotlib.pyplot as plt
 
 class NumpyJSONEncoder(json.JSONEncoder):
     """Custom JSON encoder to handle NumPy data types"""
@@ -42,6 +50,9 @@ class NumpyJSONEncoder(json.JSONEncoder):
             return obj.tolist()
         return super().default(obj)
 
+
+
+
 def setup_logging(log_file):
     """Set up logging to file and console"""
     logging.basicConfig(
@@ -53,12 +64,18 @@ def setup_logging(log_file):
         ]
     )
 
+
+
+
 def load_experimental_data(file_path):
     """Load experimental data from the specified file"""
     data = np.loadtxt(file_path)
     temp = data[:, 0]  # Temperature (K)
     spec_heat = data[:, 1]  # Specific heat (J*mol/K)
     return temp, spec_heat
+
+
+
 
 def load_multiple_experimental_data(exp_data_configs):
     """Load experimental data from multiple files with their respective parameters"""
@@ -79,6 +96,8 @@ def load_multiple_experimental_data(exp_data_configs):
             dataset['temp_max'] = config['temp_max']
         exp_datasets.append(dataset)
     return exp_datasets
+
+
 
 def apply_gaussian_broadening(temp, spec_heat, sigma, broadening_type='linear'):
     """
@@ -134,6 +153,19 @@ def _run_single_nlce(args):
     run_work_dir = os.path.join(work_dir, f'run_{run_idx}')
     os.makedirs(run_work_dir, exist_ok=True)
     
+    # If we're not skipping ham_prep, remove old ED results and Hamiltonian directory to force recomputation
+    if not fixed_params.get("skip_ham_prep", False):
+        ed_dir = os.path.join(run_work_dir, f'ed_results_order_{fixed_params["max_order"]}')
+        if os.path.exists(ed_dir):
+            import shutil
+            shutil.rmtree(ed_dir)
+        
+        # Also remove old Hamiltonian directory which contains sym_blocks and sym_basis
+        ham_dir = os.path.join(run_work_dir, f'hamiltonians_order_{fixed_params["max_order"]}')
+        if os.path.exists(ham_dir):
+            import shutil
+            shutil.rmtree(ham_dir)
+    
     # Update command with run-specific base directory and shared cluster directory
     cluster_dir = os.path.join(work_dir, f'clusters_order_{fixed_params["max_order"]}')
     cmd_updated = cmd + ['--base_dir', run_work_dir]
@@ -166,60 +198,23 @@ def _run_single_nlce(args):
         logging.error(f"Stderr: {e.stderr.decode('utf-8')}")
         return None, None
 
-def get_symmetry_equivalent_field_dirs(field_dir):
-    """
-    Generate all cubic symmetry-equivalent field directions for a given field_dir.
-    For [1,1,1], returns all 8 [±1,±1,±1] directions (normalized).
-    """
-    # Only handle [1,1,1] and [1,0,0] style directions for now
-    field_dir = np.array(field_dir, dtype=float)
-    # Check if field_dir is close to [1,1,1] (within tolerance)
-    print("Checking field direction:", field_dir)
-    if np.allclose(np.abs(field_dir), [1/np.sqrt(3)]*3, atol=1e-6) or np.allclose(np.abs(field_dir), [1,1,1], atol=1e-6):
-        # All 8 permutations of [±1,±1,±1]
-        print("Generating symmetry-equivalent field directions for [1,1,1] style direction")
-        dirs = []
-        for sx in [-1, 1]:
-            for sy in [-1, 1]:
-                for sz in [-1, 1]:
-                    v = np.array([sx, sy, sz], dtype=float)
-                    v /= np.linalg.norm(v)
-                    dirs.append(v)
-        return dirs
-    elif np.allclose(np.abs(field_dir), [1,0,0], atol=1e-6) or np.allclose(np.abs(field_dir), [0,1,0], atol=1e-6) or np.allclose(np.abs(field_dir), [0,0,1], atol=1e-6):
-        # All 6 permutations of [±1,0,0], [0,±1,0], [0,0,±1]
-        dirs = []
-        for i in range(3):
-            for sign in [-1, 1]:
-                v = np.zeros(3)
-                v[i] = sign
-                dirs.append(v)
-        return dirs
-    else:
-        # Default: just return the input direction normalized
-        v = field_dir / np.linalg.norm(field_dir)
-        return [v]
-
-
 def run_nlce(params, fixed_params, exp_temp, work_dir, h_field=None, temp_range=None):
     """Run NLCE with the given parameters and return the calculated specific heat"""
     # Extract J parameters (first 3) - other parameters are handled in calc_chi_squared
-    print("Running NLCE with parameters:", params)
+    logging.info(f"Running NLCE with parameters: {params}")
 
     Jxx, Jyy, Jzz = params[:3]
     
     # Use provided h_field if given, otherwise use the one from fixed_params
     h_value = h_field if h_field is not None else fixed_params["h"]
+    h_value = h_value * 5.4 * 0.0578 # Convert Tesla to Kelvin
     field_dir = fixed_params["field_dir"]
     
-    # If h_value is nonzero, average over all symmetry-equivalent field directions
-    # if h_value != 0:
-    #     field_dirs = get_symmetry_equivalent_field_dirs(field_dir)
-    # else:
+    # Currently using single field direction (symmetry averaging commented out)
     field_dirs = [field_dir]
     all_calc_temp = []
     all_calc_spec_heat = []
-    print("Symmetry-equivalent field directions:", field_dirs)
+    
     for sym_field_dir in field_dirs:
         # Determine temperature range
         temp_min = temp_range['temp_min'] if temp_range and 'temp_min' in temp_range else fixed_params["temp_min"]
@@ -279,12 +274,30 @@ def run_nlce(params, fixed_params, exp_temp, work_dir, h_field=None, temp_range=
             ]
 
         cmd.append('--skip_cluster_gen')
-        if fixed_params.get("skip_ham_prep", False):
-            cmd.append('--skip_ham_prep')
-        if fixed_params.get("measure_spin", False):
-            cmd.append('--measure_spin')
-        if random_transverse_field > 0:
-            cmd.extend(['--random_field_width', f'{random_transverse_field:.12f}'])
+    
+        # If we're not skipping ham_prep, we need to ensure old eigenvalue files and symmetry blocks are removed
+        # so that ED will recompute them with the new Hamiltonian parameters
+        if not fixed_params.get("skip_ham_prep", False):
+            # Remove old ED results to force recomputation
+            ed_dir = os.path.join(work_dir, f'ed_results_order_{fixed_params["max_order"]}')
+            if os.path.exists(ed_dir):
+                logging.info(f"Removing old ED results directory to ensure eigenvalues are recomputed: {ed_dir}")
+                import shutil
+                shutil.rmtree(ed_dir)
+            
+            # Also remove old Hamiltonian directory which contains sym_blocks and sym_basis
+            # These need to be regenerated when Hamiltonian parameters change
+            ham_dir = os.path.join(work_dir, f'hamiltonians_order_{fixed_params["max_order"]}')
+            if os.path.exists(ham_dir):
+                logging.info(f"Removing old Hamiltonian directory (including sym_blocks) to ensure symmetry blocks are regenerated: {ham_dir}")
+                shutil.rmtree(ham_dir)
+        else:
+            cmd.append('--skip_ham_prep')        
+            if fixed_params.get("measure_spin", False):
+                cmd.append('--measure_spin')
+            if random_transverse_field > 0:
+                cmd.extend(['--random_field_width', f'{random_transverse_field:.12f}'])
+            
         if n_runs > 1:
             num_workers = fixed_params.get("num_workers", os.cpu_count())
             logging.info(f"Running {n_runs} NLCE instances in parallel with {num_workers} workers (symmetry field_dir: {sym_field_dir})")
@@ -297,7 +310,6 @@ def run_nlce(params, fixed_params, exp_temp, work_dir, h_field=None, temp_range=
             logging.info(f"Running NLCE with Jxx={Jxx}, Jyy={Jyy}, Jzz={Jzz}, h={h_value}, field_dir={sym_field_dir}")
             cmd.extend(['--base_dir', work_dir])
             try:
-                # logging.info(f"Command: {' '.join(cmd)}")
                 env = os.environ.copy()
                 base_seed = int(fixed_params.get("disorder_seed_base", 123456))
                 env['NLC_DISORDER_SEED'] = str(base_seed)
@@ -315,8 +327,9 @@ def run_nlce(params, fixed_params, exp_temp, work_dir, h_field=None, temp_range=
                 logging.error(f"Error running NLCE: {e}")
                 logging.error(f"Stdout: {e.stdout.decode('utf-8')}")
                 logging.error(f"Stderr: {e.stderr.decode('utf-8')}")
-                logging.info("NLCE calculation failed, trying with lanczos")
+                logging.info("NLCE calculation failed")
                 continue
+                
         # Average over n_runs for this field_dir
         if len(calc_spec_heat_list) == 0:
             logging.error(f"All NLCE runs failed for field_dir {sym_field_dir}")
@@ -332,10 +345,12 @@ def run_nlce(params, fixed_params, exp_temp, work_dir, h_field=None, temp_range=
             averaged_spec_heat /= len(calc_spec_heat_list)
             all_calc_temp.append(final_calc_temp)
             all_calc_spec_heat.append(averaged_spec_heat)
+            
     # Now average over all symmetry-equivalent field directions
     if len(all_calc_spec_heat) == 0:
         logging.error("All NLCE runs failed for all symmetry-equivalent field directions")
         return np.array([]), np.array([])
+        
     # Use the temperature grid from the first successful run
     final_calc_temp = all_calc_temp[0]
     averaged_spec_heat = np.zeros_like(all_calc_spec_heat[0])
@@ -343,6 +358,7 @@ def run_nlce(params, fixed_params, exp_temp, work_dir, h_field=None, temp_range=
         averaged_spec_heat += spec_heat
     averaged_spec_heat /= len(all_calc_spec_heat)
     return final_calc_temp, averaged_spec_heat
+
 
 def interpolate_calc_data(calc_temp, calc_spec_heat, exp_temp):
     """Interpolate calculated data to match experimental temperature points"""
@@ -361,6 +377,12 @@ def interpolate_calc_data(calc_temp, calc_spec_heat, exp_temp):
     # Interpolate at experimental temperatures
     interp_spec_heat = interp_func(exp_temp)
     
+    # Replace NaN values with zeros
+    interp_spec_heat = np.nan_to_num(interp_spec_heat)
+    
+    return interp_spec_heat
+
+
     # Replace NaN values with zeros
     interp_spec_heat = np.nan_to_num(interp_spec_heat)
     
@@ -444,10 +466,8 @@ def calc_chi_squared(params, fixed_params, exp_datasets, work_dir):
         # Interpolate calculated data to match experimental temperature points
         calc_interp = interpolate_calc_data(calc_temp, calc_spec_heat, exp_temp)
         
-        # Plot results for this dataset if in plot-only mode
+        # Plot results for this dataset
         if len(calc_temp) > 0:
-            import matplotlib.pyplot as plt
-            
             plt.figure(figsize=(12, 10))
             
             # Plot 1: Experimental vs Calculated with weight visualization
@@ -553,11 +573,14 @@ def calc_chi_squared(params, fixed_params, exp_datasets, work_dir):
         logging.info(log_msg)
     
     param_str = f"Jxx={params[0]:.4f}, Jyy={params[1]:.4f}, Jzz={params[2]:.4f}"
-    if fit_random_transverse_field:
-        param_str += f", random_field_strength={params[3]:.4f}"
     if fit_broadening and len(params) > 3:
         sigma_str = ", ".join([f"σ{i+1}={s:.4f}" for i, s in enumerate(sigmas)])
         param_str += f", {sigma_str}"
+    if fit_random_transverse_field:
+        # Get the correct index for random transverse field
+        random_field_idx = 3 + n_datasets if fit_broadening else 3
+        if len(params) > random_field_idx:
+            param_str += f", random_field_strength={params[random_field_idx]:.4f}"
     if fit_g_renorm:
         param_str += f", g_renorm={g_renorm:.4f}"
 
@@ -576,8 +599,7 @@ def plot_results(exp_datasets, fixed_params, best_params, work_dir, output_dir):
     if fit_broadening:
         sigmas = best_params[3:3+n_datasets] if len(best_params) > 3 else [0.0] * n_datasets
     else:
-        # sigmas = [5, 0.4771, 0.4771, 0.4771]
-        sigmas = [0, 0, 0, 0]
+        sigmas = [0.0] * n_datasets
     
     # Extract g_renorm if fitted
     fit_g_renorm = fixed_params.get("fit_g_renorm", False)
@@ -645,23 +667,56 @@ def plot_results(exp_datasets, fixed_params, best_params, work_dir, output_dir):
     
     plt.close()
 
-def multi_start_optimization(obj_func, initial_params, bounds, n_starts=10, method='SLSQP', 
-                            constraints=None, args=(), **kwargs):
+def multi_start_optimization(obj_func, initial_params, bounds, n_starts=30, method='COBYLA', 
+                            constraints=None, args=(), top_m=10, randomize=False, 
+                            output_dir=None, **kwargs):
     """
     Perform multi-start optimization with different initial conditions
+    
+    Parameters:
+    -----------
+    obj_func : callable
+        Objective function to minimize
+    initial_params : array
+        Initial parameter values (used as center for randomization if randomize=True)
+    bounds : list of tuples
+        Parameter bounds
+    n_starts : int
+        Number of starting points to try
+    method : str
+        Optimization method
+    constraints : object
+        Constraints for optimization
+    args : tuple
+        Additional arguments to pass to obj_func
+    top_m : int
+        Number of top results to display and save (default: 10)
+    randomize : bool
+        If True, use pure random sampling; if False, use Latin Hypercube Sampling
+    output_dir : str
+        Directory to save top m results (optional)
+    **kwargs : dict
+        Additional keyword arguments for the optimizer
     """
     best_result = None
     best_score = np.inf
     all_results = []
     
-    # Generate initial points using Latin Hypercube Sampling for better coverage
-    sampler = qmc.LatinHypercube(d=len(initial_params), seed=42)
-    sample = sampler.random(n=n_starts)
-    
-    # Scale to bounds
+    # Generate initial points
     lower_bounds = np.array([b[0] for b in bounds])
     upper_bounds = np.array([b[1] for b in bounds])
-    scaled_samples = qmc.scale(sample, lower_bounds, upper_bounds)
+    
+    if randomize:
+        # Use pure random sampling
+        logging.info(f"Using random sampling for {n_starts} starting points")
+        np.random.seed(42)
+        scaled_samples = np.random.uniform(lower_bounds, upper_bounds, (n_starts, len(initial_params)))
+    else:
+        # Use Latin Hypercube Sampling for better coverage
+        logging.info(f"Using Latin Hypercube Sampling for {n_starts} starting points")
+        sampler = qmc.LatinHypercube(d=len(initial_params), seed=42)
+        sample = sampler.random(n=n_starts)
+        scaled_samples = qmc.scale(sample, lower_bounds, upper_bounds)
     
     logging.info(f"Starting multi-start optimization with {n_starts} different initial conditions using {method}")
     
@@ -690,7 +745,96 @@ def multi_start_optimization(obj_func, initial_params, bounds, n_starts=10, meth
             logging.warning(f"Multi-start iteration {i+1} failed: {e}")
             continue
     
-    logging.info(f"Multi-start optimization completed. Best chi-squared: {best_score:.4f}")
+    # Sort results by objective function value
+    successful_results = [r for r in all_results if hasattr(r, 'fun')]
+    successful_results.sort(key=lambda x: x.fun)
+    
+    # Display top m results
+    logging.info(f"\n{'='*80}")
+    logging.info(f"Multi-start optimization completed. Displaying top {min(top_m, len(successful_results))} results:")
+    logging.info(f"{'='*80}")
+    
+    top_results_data = []
+    for i, result in enumerate(successful_results[:top_m]):
+        logging.info(f"\nRank {i+1}:")
+        logging.info(f"  Chi-squared: {result.fun:.6f}")
+        param_str = ", ".join([f"{result.x[j]:.6f}" for j in range(min(3, len(result.x)))])
+        logging.info(f"  Parameters (Jxx, Jyy, Jzz): {param_str}")
+        
+        # Store result data
+        result_data = {
+            'rank': i + 1,
+            'chi_squared': float(result.fun),
+            'Jxx': float(result.x[0]),
+            'Jyy': float(result.x[1]),
+            'Jzz': float(result.x[2]),
+            'success': bool(getattr(result, 'success', None)) if getattr(result, 'success', None) is not None else None,
+            'nfev': int(getattr(result, 'nfev', 0)) if getattr(result, 'nfev', None) is not None else None,
+            'nit': int(getattr(result, 'nit', 0)) if getattr(result, 'nit', None) is not None else None
+        }
+        
+        if len(result.x) > 3:
+            extra_params = ", ".join([f"{result.x[j]:.6f}" for j in range(3, len(result.x))])
+            logging.info(f"  Additional parameters: {extra_params}")
+            # Store additional parameters
+            for j in range(3, len(result.x)):
+                result_data[f'param_{j}'] = float(result.x[j])
+        
+        top_results_data.append(result_data)
+    
+    logging.info(f"\n{'='*80}")
+    logging.info(f"Best chi-squared: {best_score:.4f}")
+    logging.info(f"{'='*80}\n")
+    
+    # Save top m results to file if output_dir is provided
+    if output_dir is not None and len(top_results_data) > 0:
+        os.makedirs(output_dir, exist_ok=True)
+        
+        # Save as JSON
+        json_file = os.path.join(output_dir, 'multi_start_top_results.json')
+        with open(json_file, 'w') as f:
+            json.dump({
+                'method': method,
+                'n_starts': n_starts,
+                'top_m': top_m,
+                'results': top_results_data
+            }, f, indent=2, cls=NumpyJSONEncoder)
+        logging.info(f"Top {len(top_results_data)} results saved to {json_file}")
+        
+        # Save as human-readable text file
+        txt_file = os.path.join(output_dir, 'multi_start_top_results.txt')
+        with open(txt_file, 'w') as f:
+            f.write(f"Multi-Start Optimization Results\n")
+            f.write(f"{'='*80}\n")
+            f.write(f"Method: {method}\n")
+            f.write(f"Number of starts: {n_starts}\n")
+            f.write(f"Top {len(top_results_data)} results:\n")
+            f.write(f"{'='*80}\n\n")
+            
+            for result_data in top_results_data:
+                f.write(f"Rank {result_data['rank']}:\n")
+                f.write(f"  Chi-squared: {result_data['chi_squared']:.8f}\n")
+                f.write(f"  Jxx: {result_data['Jxx']:.8f}\n")
+                f.write(f"  Jyy: {result_data['Jyy']:.8f}\n")
+                f.write(f"  Jzz: {result_data['Jzz']:.8f}\n")
+                if result_data['success'] is not None:
+                    f.write(f"  Success: {result_data['success']}\n")
+                if result_data['nfev'] is not None and result_data['nfev'] > 0:
+                    f.write(f"  Function evaluations: {result_data['nfev']}\n")
+                if result_data['nit'] is not None and result_data['nit'] > 0:
+                    f.write(f"  Iterations: {result_data['nit']}\n")
+                
+                # Write additional parameters
+                extra_param_keys = [k for k in result_data.keys() if k.startswith('param_')]
+                if extra_param_keys:
+                    f.write("  Additional parameters:\n")
+                    for key in sorted(extra_param_keys):
+                        idx = int(key.split('_')[1])
+                        f.write(f"    param[{idx}]: {result_data[key]:.8f}\n")
+                f.write("\n")
+        
+        logging.info(f"Top {len(top_results_data)} results saved to {txt_file}")
+    
     return best_result, all_results
 
 def basin_hopping_optimization(obj_func, initial_params, bounds, args=(), **kwargs):
@@ -707,7 +851,7 @@ def basin_hopping_optimization(obj_func, initial_params, bounds, args=(), **kwar
         return True
     
     minimizer_kwargs = {
-        "method": "SLSQP",
+        "method": "COBYLA",
         "bounds": bounds,
         "args": args,
         "options": kwargs.get('options', {})
@@ -926,7 +1070,7 @@ def multi_objective_bayesian_optimization(obj_func, bounds, args=(), **kwargs):
     
     return best_result
 
-def robust_optimization(obj_func, initial_params, bounds, method='auto', constraints=None, args=(), **kwargs):
+def robust_optimization(obj_func, initial_params, bounds, method='auto', constraints=None, args=(), output_dir=None, **kwargs):
     """
     Robust optimization combining multiple algorithms
     """
@@ -937,7 +1081,10 @@ def robust_optimization(obj_func, initial_params, bounds, method='auto', constra
             result, all_results = multi_start_optimization(
                 obj_func, initial_params, bounds, 
                 n_starts=kwargs.get('n_starts', 10),
-                constraints=constraints, args=args
+                top_m=kwargs.get('top_m', 5),
+                randomize=kwargs.get('randomize', False),
+                constraints=constraints, args=args,
+                output_dir=output_dir
             )
             results['multi_start'] = result
         except Exception as e:
@@ -1062,8 +1209,6 @@ def plot_bayesian_convergence(result, output_dir):
         return
     
     try:
-        import matplotlib.pyplot as plt
-        
         plt.figure(figsize=(12, 8))
         
         # Plot convergence
@@ -1133,6 +1278,8 @@ def plot_bayesian_convergence(result, output_dir):
     except Exception as e:
         logging.warning(f"Error creating Bayesian convergence plot: {e}")
 
+
+
 def main():
     parser = argparse.ArgumentParser(description='Fit NLCE calculations to experimental specific heat data')
     
@@ -1156,14 +1303,14 @@ def main():
     parser.add_argument('--initial_sigma', type=float, default=0.1, help='Initial guess for Gaussian broadening width')
     parser.add_argument('--initial_g_renorm', type=float, default=1.0, help='Initial guess for g-factor renormalization')
     parser.add_argument('--initial_random_transverse_field', type=float, default=0.0, help='Initial guess for random transverse field')
-    parser.add_argument('--bound_min', type=float, default=-10.0, help='Lower bound for J parameters')
-    parser.add_argument('--bound_max', type=float, default=10.0, help='Upper bound for J parameters')
+    parser.add_argument('--bound_min', type=float, default=-6.0, help='Lower bound for J parameters')
+    parser.add_argument('--bound_max', type=float, default=6.0, help='Upper bound for J parameters')
     parser.add_argument('--sigma_bound_min', type=float, default=0.0, help='Lower bound for sigma parameters')
     parser.add_argument('--sigma_bound_max', type=float, default=10.0, help='Upper bound for sigma parameters')
     parser.add_argument('--g_renorm_bound_min', type=float, default=0.8, help='Lower bound for g_renorm parameter')
     parser.add_argument('--g_renorm_bound_max', type=float, default=1.2, help='Upper bound for g_renorm parameter')
     parser.add_argument('--random_transverse_field_bound_min', type=float, default=0.0, help='Lower bound for random transverse field parameter')
-    parser.add_argument('--random_transverse_field_bound_max', type=float, default=10.0, help='Upper bound for random transverse field parameter')
+    parser.add_argument('--random_transverse_field_bound_max', type=float, default=1.0, help='Upper bound for random transverse field parameter')
     parser.add_argument('--fit_broadening', action='store_true', help='Include Gaussian broadening as fitting parameters')
     parser.add_argument('--fit_g_renorm', action='store_true', help='Include g-factor renormalization as fitting parameter')
     parser.add_argument('--fit_random_transverse_field', action='store_true', help='Include random transverse field as fitting parameter')
@@ -1188,6 +1335,8 @@ def main():
     parser.add_argument('--num_workers', type=int, default=os.cpu_count(), 
                         help='Number of parallel workers for random field averaging')
     parser.add_argument('--n_starts', type=int, default=10, help='Number of random starts for multi-start optimization')
+    parser.add_argument('--top_m', type=int, default=5, help='Number of top results to display in multi-start optimization')
+    parser.add_argument('--randomize', action='store_true', help='Use random sampling instead of Latin Hypercube Sampling for multi-start')
     parser.add_argument('--popsize', type=int, default=15, help='Population size for differential evolution')
     parser.add_argument('--n_calls', type=int, default=100, help='Number of function calls for Bayesian optimization')
     parser.add_argument('--n_initial_points', type=int, default=10, help='Number of initial points for Bayesian optimization')
@@ -1234,73 +1383,71 @@ def main():
         work_dir = args.work_dir
         os.makedirs(work_dir, exist_ok=True)
 
-
     # Generate clusters once before optimization starts to avoid redundant generation
     if not args.skip_cluster_gen:
         # Check if we need multiple runs (for random transverse field fitting)
         n_runs = args.random_field_n_runs if args.fit_random_transverse_field else 1
         
-        # Parallel cluster generation using subprocess
-        
-        def generate_clusters_subprocess(run_idx):
-            """Generate clusters for a single run using subprocess"""
-            run_work_dir = os.path.join(work_dir, f'run_{run_idx}')
-            os.makedirs(run_work_dir, exist_ok=True)
+        if n_runs > 1:
+
+            def generate_clusters_subprocess(run_idx):
+                """Generate clusters for a single run using subprocess"""
+                run_work_dir = os.path.join(work_dir, f'run_{run_idx}')
+                os.makedirs(run_work_dir, exist_ok=True)
+                
+                cluster_gen_cmd = [
+                    'python3',
+                    os.path.join(os.path.dirname(os.path.abspath(__file__)), 'generate_pyrochlore_clusters.py'),
+                    '--max_order', str(args.max_order),
+                    '--output_dir', os.path.join(run_work_dir, f'clusters_order_{args.max_order}')
+                ]
+                
+                try:
+                    result = subprocess.run(cluster_gen_cmd, check=True, capture_output=True, text=True)
+                    return run_idx, True, f"Clusters successfully generated in run_{run_idx}"
+                except subprocess.CalledProcessError as e:
+                    return run_idx, False, f"Error in run_{run_idx}: {e.stderr}"
             
+            logging.info(f"Generating pyrochlore clusters up to order {args.max_order} in {n_runs} directories (parallel)")
+            
+            # Use ThreadPoolExecutor for parallel subprocess execution
+            max_workers = min(args.num_workers, n_runs)
+            logging.info(f"Using {max_workers} parallel workers for cluster generation")
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                # Submit all tasks
+                futures = {executor.submit(generate_clusters_subprocess, i): i for i in range(n_runs)}
+                
+                # Process results as they complete
+                successful = 0
+                failed = 0
+                for future in as_completed(futures):
+                    run_idx, success, message = future.result()
+                    if success:
+                        successful += 1
+                        logging.info(message)
+                    else:
+                        failed += 1
+                        logging.error(message)
+                
+                logging.info(f"Cluster generation completed: {successful} successful, {failed} failed")
+                
+                if failed > 0:
+                    logging.warning("Some cluster generations failed, but continuing with optimization")
+        else:
+            # Single run - generate clusters in main work directory
+            logging.info(f"Generating pyrochlore clusters up to order {args.max_order}")
             cluster_gen_cmd = [
                 'python3',
                 os.path.join(os.path.dirname(os.path.abspath(__file__)), 'generate_pyrochlore_clusters.py'),
                 '--max_order', str(args.max_order),
-                '--output_dir', os.path.join(run_work_dir, f'clusters_order_{args.max_order}')
+                '--output_dir', os.path.join(work_dir, f'clusters_order_{args.max_order}'),
             ]
-            
             try:
-                result = subprocess.run(cluster_gen_cmd, check=True, capture_output=True, text=True)
-                return run_idx, True, f"Clusters successfully generated in run_{run_idx}"
+                subprocess.run(cluster_gen_cmd, check=True)
+                logging.info(f"Clusters successfully generated in {work_dir}")
             except subprocess.CalledProcessError as e:
-                return run_idx, False, f"Error in run_{run_idx}: {e.stderr}"
-        
-        logging.info(f"Generating pyrochlore clusters up to order {args.max_order} in {n_runs} directories (parallel)")
-        
-        # Use ThreadPoolExecutor for parallel subprocess execution
-        max_workers = min(args.num_workers, n_runs)
-        print(f"Using {max_workers} parallel workers for cluster generation")
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            # Submit all tasks
-            futures = {executor.submit(generate_clusters_subprocess, i): i for i in range(n_runs)}
-            
-            # Process results as they complete
-            successful = 0
-            failed = 0
-            for future in as_completed(futures):
-                run_idx, success, message = future.result()
-                if success:
-                    successful += 1
-                    logging.info(message)
-                else:
-                    failed += 1
-                    logging.error(message)
-            
-            logging.info(f"Cluster generation completed: {successful} successful, {failed} failed")
-            
-            if failed > 0:
-                logging.warning("Some cluster generations failed, but continuing with optimization")
-            
-        # Single run - generate clusters in main work directory
-        logging.info(f"Generating pyrochlore clusters up to order {args.max_order}")
-        cluster_gen_cmd = [
-            'python3',
-            os.path.join(os.path.dirname(os.path.abspath(__file__)), 'generate_pyrochlore_clusters.py'),
-            '--max_order', str(args.max_order),
-            '--output_dir', os.path.join(work_dir, f'clusters_order_{args.max_order}'),
-        ]
-        try:
-            subprocess.run(cluster_gen_cmd, check=True)
-            logging.info(f"Clusters successfully generated in {work_dir}")
-        except subprocess.CalledProcessError as e:
-            logging.error(f"Error generating clusters: {e}")
-            logging.error("Continuing without pre-generating clusters")
-
+                logging.error(f"Error generating clusters: {e}")
+                logging.error("Continuing without pre-generating clusters")
     
     # Define fixed parameters for NLCE
     fixed_params = {
@@ -1353,8 +1500,6 @@ def main():
                 'weight': 1.0
             }]
             logging.info(f"Loaded {len(exp_temp)} data points")
-        
-
         
         # Filter experimental data based on temperature range for all datasets
         filtered_datasets = []
@@ -1484,8 +1629,11 @@ def main():
                     method=args.method,
                     constraints=constraints if args.method not in ['differential_evolution', 'dual_annealing'] and not args.method.startswith('bayesian') and args.method != 'adaptive_bayesian' and args.method != 'multi_fidelity_bayesian' else None,
                     args=(fixed_params, exp_datasets, work_dir),
+                    output_dir=args.output_dir,
                     maxiter=args.max_iter,
                     n_starts=args.n_starts,
+                    top_m=args.top_m,
+                    randomize=args.randomize,
                     popsize=args.popsize,
                     atol=args.tolerance,
                     n_calls=args.n_calls,

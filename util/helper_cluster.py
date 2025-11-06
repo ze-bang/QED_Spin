@@ -2,7 +2,6 @@ import numpy as np
 import sys
 import os
 import re
-import hashlib
 
 def read_cluster_file(filepath):
     """
@@ -213,35 +212,6 @@ def prepare_hamiltonian_parameters(cluster_filepath, output_dir, Jxx, Jyy, Jzz, 
                                   [gamma, gamma**2, 0, 1],
                                   [gamma**2, gamma, 1, 0]])
     
-    # Configure deterministic disorder sampling (common random numbers via prefix mapping)
-    transverse_field_width = float(random_field_width)
-    seed_env = os.getenv('NLC_DISORDER_SEED', None)
-    disorder_mode = os.getenv('NLC_DISORDER_MODE', 'prefix').lower()
-    rng = None
-    per_site_transverse = None
-    if transverse_field_width > 0:
-        # Build a deterministic RNG if a seed is provided
-        if seed_env is not None:
-            try:
-                base_seed = int(seed_env)
-            except ValueError:
-                # Hash arbitrary string to a 64-bit integer seed
-                hsh = hashlib.sha1(seed_env.encode('utf-8')).digest()
-                base_seed = int.from_bytes(hsh[:8], byteorder='little', signed=False)
-            rng = np.random.default_rng(base_seed)
-        else:
-            rng = np.random.default_rng()
-
-        # If using prefix mode, pre-generate a sequence indexed by matrix index (0..N-1)
-        if disorder_mode == 'prefix':
-            if len(node_mapping) > 0:
-                N = max(node_mapping.values()) + 1
-            else:
-                # Fallback to number of vertices
-                N = len(nn_list)
-            # Folded Cauchy (Lorentzian) width scaling, absolute value
-            per_site_transverse = np.abs(transverse_field_width * rng.standard_cauchy(size=N))
-
     # Generate Heisenberg interactions
     for site_id in sorted(nn_list.keys()):
         # Site index (for the Hamiltonian)
@@ -253,16 +223,15 @@ def prepare_hamiltonian_parameters(cluster_filepath, output_dir, Jxx, Jyy, Jzz, 
 
         # Add random transverse field from a Lorentzian distribution
         # The transverse field is coupled to Sx = 0.5 * (S+ + S-)
+        # We need a parameter for the width of the distribution, let's assume a default value for now.
+        # For a real application, this should be an input parameter.
+        transverse_field_width = float(random_field_width) # Example width (gamma) of the Lorentzian distribution
+
         if transverse_field_width > 0:
-            if per_site_transverse is not None:
-                # Prefix mapping by matrix index ensures subclusters reuse the prefix
-                idx = node_mapping.get(i, i)
-                random_h_x = per_site_transverse[idx]
-            else:
-                # Fallback sampling (deterministic if rng is seeded)
-                if rng is None:
-                    rng = np.random.default_rng()
-                random_h_x = np.abs(transverse_field_width * rng.standard_cauchy())
+            # Sample from a folded Cauchy (Lorentzian) distribution
+            # np.random.standard_cauchy() samples from a Cauchy distribution with location=0, scale=1
+            # We scale it by the width and take the absolute value for a strictly positive field.
+            random_h_x = np.abs(transverse_field_width * np.random.standard_cauchy())
         else:
             random_h_x = 0.0
 

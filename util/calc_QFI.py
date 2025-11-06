@@ -10,305 +10,21 @@ import pandas as pd
 import seaborn as sns
 from scipy.interpolate import griddata
 from scipy.signal import find_peaks, peak_prominences
-from mpi4py import MPI
 from collections import defaultdict
 from scipy.interpolate import interp1d
 
-# ============================================================================
-# Channel Combination Functions (integrated from combine_channels.py)
-# ============================================================================
+# Try to import mpi4py, but make it optional
+try:
+    from mpi4py import MPI
+    HAS_MPI = True
+except ImportError:
+    HAS_MPI = False
 
-def parse_channel_filename(filename):
-    """
-    Extract information from time correlation filenames for channel combination.
-    
-    Expected format: time_corr_rand<N>_<SpinCombo>_q_Qx<x>_Qy<y>_Qz<z>[_SF|_NSF]_beta=<beta>.dat
-    
-    Returns:
-        dict with keys: sample_idx, spin_combo, Qx, Qy, Qz, channel (SF/NSF/None), beta
-    """
-    basename = os.path.basename(filename)
-    
-    # Pattern to match the filename structure
-    pattern = r'time_corr_(?:rand|sample)(\d+)_(\w+)_q_Qx([-\d.]+)_Qy([-\d.]+)_Qz([-\d.]+)(?:_(SF|NSF))?_beta=([\d.]+|inf)\.dat'
-    
-    match = re.match(pattern, basename)
-    if not match:
-        return None
-    
-    sample_idx = int(match.group(1))
-    spin_combo = match.group(2)
-    Qx = float(match.group(3))
-    Qy = float(match.group(4))
-    Qz = float(match.group(5))
-    channel = match.group(6)  # SF, NSF, or None
-    beta_str = match.group(7)
-    beta = float('inf') if beta_str == 'inf' else float(beta_str)
-    
-    return {
-        'sample_idx': sample_idx,
-        'spin_combo': spin_combo,
-        'Qx': Qx,
-        'Qy': Qy,
-        'Qz': Qz,
-        'channel': channel,
-        'beta': beta,
-        'basename': basename
-    }
-
-
-def load_channel_correlation_data(filepath):
-    """Load time correlation data from file for channel combination."""
-    try:
-        data = np.loadtxt(filepath, comments='#')
-        if data.ndim == 1:
-            data = data.reshape(-1, 1)
-        
-        time = data[:, 0]
-        
-        if data.shape[1] >= 3:
-            real_part = data[:, 1]
-            imag_part = data[:, 2]
-        elif data.shape[1] == 2:
-            real_part = data[:, 1]
-            imag_part = np.zeros_like(real_part)
-        else:
-            return None, None
-        
-        corr = real_part + 1j * imag_part
-        return time, corr
-    except Exception as e:
-        print(f"Error loading {filepath}: {e}")
-        return None, None
-
-
-def save_channel_correlation_data(filepath, time, corr):
-    """Save time correlation data to file after channel combination."""
-    real_part = np.real(corr)
-    imag_part = np.imag(corr)
-    
-    data = np.column_stack((time, real_part, imag_part))
-    header = "t correlation_real correlation_imag"
-    
-    os.makedirs(os.path.dirname(filepath), exist_ok=True)
-    np.savetxt(filepath, data, header=header, fmt='%.8e')
-
-
-def combine_taylor_channels(beta_dir, beta_value):
-    """
-    Combine taylor mode channels: (SpSm + SmSp)/2
-    """
-    taylor_dir = os.path.join(beta_dir, 'taylor')
-    if not os.path.isdir(taylor_dir):
-        return
-    
-    print(f"  Combining taylor mode channels for beta={beta_value}")
-    
-    # Find all correlation files
-    files = glob.glob(os.path.join(taylor_dir, 'time_corr_*.dat'))
-    
-    # Organize files by momentum and sample
-    file_info = defaultdict(lambda: defaultdict(dict))
-    
-    for filepath in files:
-        info = parse_channel_filename(filepath)
-        if info is None or info['channel'] is not None:
-            continue  # Skip if parsing failed or if it has SF/NSF suffix
-        
-        Q_key = (info['Qx'], info['Qy'], info['Qz'])
-        sample = info['sample_idx']
-        spin_combo = info['spin_combo']
-        
-        file_info[Q_key][sample][spin_combo] = filepath
-    
-    # Process each momentum point
-    output_dir = os.path.join(beta_dir, 'taylor_combined')
-    
-    combined_count = 0
-    for Q_key, sample_data in file_info.items():
-        Qx, Qy, Qz = Q_key
-        
-        for sample, spin_files in sample_data.items():
-            # Check if we have both SpSm and SmSp
-            if 'SpSm' not in spin_files or 'SmSp' not in spin_files:
-                continue
-            
-            # Load data
-            time_spsm, corr_spsm = load_channel_correlation_data(spin_files['SpSm'])
-            time_smsp, corr_smsp = load_channel_correlation_data(spin_files['SmSp'])
-            
-            if time_spsm is None or time_smsp is None:
-                continue
-            
-            # Check if time arrays match
-            if not np.allclose(time_spsm, time_smsp):
-                print(f"    Warning: Time arrays don't match for sample {sample}, Q={Q_key}")
-                continue
-            
-            # Compute average
-            corr_avg = (corr_spsm + corr_smsp) / 2.0
-            
-            # Save result
-            output_filename = f'time_corr_rand{sample}_SpSm+SmSp_q_Qx{Qx}_Qy{Qy}_Qz{Qz}_beta={beta_value}.dat'
-            output_path = os.path.join(output_dir, output_filename)
-            
-            save_channel_correlation_data(output_path, time_spsm, corr_avg)
-            combined_count += 1
-    
-    if combined_count > 0:
-        print(f"    Combined {combined_count} taylor channel files")
-
-
-def combine_global_channels(beta_dir, beta_value):
-    """
-    Combine global mode channels:
-    1. (SpSm_SF + SmSp_SF)/2
-    2. (SpSm_NSF + SmSp_NSF)/2
-    3. (SpSm_SF + SmSp_SF)/2 + (SpSm_NSF + SmSp_NSF)/2
-    """
-    global_dir = os.path.join(beta_dir, 'global')
-    if not os.path.isdir(global_dir):
-        return
-    
-    print(f"  Combining global mode channels for beta={beta_value}")
-    
-    # Find all correlation files
-    files = glob.glob(os.path.join(global_dir, 'time_corr_*.dat'))
-    
-    # Organize files by momentum, channel, and sample
-    file_info = defaultdict(lambda: defaultdict(lambda: defaultdict(dict)))
-    
-    for filepath in files:
-        info = parse_channel_filename(filepath)
-        if info is None or info['channel'] is None:
-            continue  # Skip if parsing failed or if it doesn't have SF/NSF
-        
-        Q_key = (info['Qx'], info['Qy'], info['Qz'])
-        channel = info['channel']
-        sample = info['sample_idx']
-        spin_combo = info['spin_combo']
-        
-        file_info[Q_key][channel][sample][spin_combo] = filepath
-    
-    # Process each momentum point
-    output_dir = os.path.join(beta_dir, 'global_combined')
-    
-    combined_count = 0
-    for Q_key, channel_data in file_info.items():
-        Qx, Qy, Qz = Q_key
-        
-        # Check if we have both SF and NSF channels
-        if 'SF' not in channel_data or 'NSF' not in channel_data:
-            continue
-        
-        # Process each sample
-        sf_samples = set(channel_data['SF'].keys())
-        nsf_samples = set(channel_data['NSF'].keys())
-        common_samples = sf_samples & nsf_samples
-        
-        for sample in common_samples:
-            sf_files = channel_data['SF'][sample]
-            nsf_files = channel_data['NSF'][sample]
-            
-            # Check if we have SpSm and SmSp for both channels
-            if 'SpSm' not in sf_files or 'SmSp' not in sf_files:
-                continue
-            
-            if 'SpSm' not in nsf_files or 'SmSp' not in nsf_files:
-                continue
-            
-            # Load SF channel data
-            time_sf_spsm, corr_sf_spsm = load_channel_correlation_data(sf_files['SpSm'])
-            time_sf_smsp, corr_sf_smsp = load_channel_correlation_data(sf_files['SmSp'])
-            
-            # Load NSF channel data
-            time_nsf_spsm, corr_nsf_spsm = load_channel_correlation_data(nsf_files['SpSm'])
-            time_nsf_smsp, corr_nsf_smsp = load_channel_correlation_data(nsf_files['SmSp'])
-            
-            if any(x is None for x in [time_sf_spsm, time_sf_smsp, time_nsf_spsm, time_nsf_smsp]):
-                continue
-            
-            # Check time arrays match
-            if not (np.allclose(time_sf_spsm, time_sf_smsp) and 
-                    np.allclose(time_sf_spsm, time_nsf_spsm) and
-                    np.allclose(time_sf_spsm, time_nsf_smsp)):
-                print(f"    Warning: Time arrays don't match for sample {sample}, Q={Q_key}")
-                continue
-            
-            time = time_sf_spsm
-            
-            # Compute averages for each channel
-            corr_sf_avg = (corr_sf_spsm + corr_sf_smsp) / 2.0
-            corr_nsf_avg = (corr_nsf_spsm + corr_nsf_smsp) / 2.0
-            
-            # Save SF channel average
-            output_sf = f'time_corr_rand{sample}_SpSm+SmSp_q_Qx{Qx}_Qy{Qy}_Qz{Qz}_SF_beta={beta_value}.dat'
-            save_channel_correlation_data(os.path.join(output_dir, output_sf), time, corr_sf_avg)
-            
-            # Save NSF channel average
-            output_nsf = f'time_corr_rand{sample}_SpSm+SmSp_q_Qx{Qx}_Qy{Qy}_Qz{Qz}_NSF_beta={beta_value}.dat'
-            save_channel_correlation_data(os.path.join(output_dir, output_nsf), time, corr_nsf_avg)
-            
-            # Compute total (SF + NSF)
-            corr_total = corr_sf_avg + corr_nsf_avg
-            
-            # Save total
-            output_total = f'time_corr_rand{sample}_SpSm+SmSp_q_Qx{Qx}_Qy{Qy}_Qz{Qz}_SF+NSF_beta={beta_value}.dat'
-            save_channel_correlation_data(os.path.join(output_dir, output_total), time, corr_total)
-            
-            combined_count += 1
-    
-    if combined_count > 0:
-        print(f"    Combined {combined_count} global channel files")
-
-
-def combine_channels_for_structure_factor(structure_factor_dir):
-    """
-    Combine channels for all beta directories in structure_factor_results.
-    This creates taylor_combined/ and global_combined/ directories.
-    """
-    # Find all beta directories
-    beta_dirs = glob.glob(os.path.join(structure_factor_dir, 'beta_*'))
-    
-    if not beta_dirs:
-        return
-    
-    print(f"\n{'='*60}")
-    print(f"Combining channels in: {structure_factor_dir}")
-    print(f"{'='*60}")
-    
-    for beta_dir in sorted(beta_dirs):
-        # Extract beta value
-        beta_match = re.search(r'beta_([\d\.]+|inf)', os.path.basename(beta_dir))
-        if not beta_match:
-            continue
-        
-        beta_str = beta_match.group(1)
-        
-        # Check if combined directories already exist and have files
-        taylor_combined = os.path.join(beta_dir, 'taylor_combined')
-        global_combined = os.path.join(beta_dir, 'global_combined')
-        
-        taylor_exists = os.path.isdir(taylor_combined) and len(glob.glob(os.path.join(taylor_combined, '*.dat'))) > 0
-        global_exists = os.path.isdir(global_combined) and len(glob.glob(os.path.join(global_combined, '*.dat'))) > 0
-        
-        if taylor_exists and global_exists:
-            print(f"  Skipping beta={beta_str} (combined channels already exist)")
-            continue
-        
-        # Combine taylor mode
-        if not taylor_exists:
-            combine_taylor_channels(beta_dir, beta_str)
-        
-        # Combine global mode
-        if not global_exists:
-            combine_global_channels(beta_dir, beta_str)
-    
-    print(f"{'='*60}\n")
-
-# ============================================================================
-# End of Channel Combination Functions
-# ============================================================================
+# NumPy compatibility: use trapezoid (new) or trapz (old)
+if hasattr(np, 'trapezoid'):
+    np_trapz = np.trapezoid
+else:
+    np_trapz = np.trapz
 
 # Function to apply broadening in time domain
 def apply_time_broadening(t_values, data, broadening_type='gaussian', sigma=None, gamma=None):
@@ -347,10 +63,22 @@ def parse_filename_new(filename):
     """Extract species (including momentum), beta, and sample index from filenames.
 
     Supports numeric beta and the special strings 'inf' / 'infty' (case-insensitive).
+    
+    Handles both old and new filename patterns:
+    - Old: time_corr_rand{N}_{species}_beta={beta}.dat
+    - New: time_corr_rand{N}_{species}_beta={beta}.dat (same format)
+    
+    The species name may include momentum information like:
+    - SpSm_q_Qx0_Qy0_Qz6.28319
+    - SzSz_q_Qx0_Qy0_Qz0
+    - Experimental_q_Qx0_Qy0_Qz0_theta0
+    - etc.
 
     Returns: (species_with_momentum, beta(float or np.inf), sample_idx) or (None, None, None)
     """
     basename = os.path.basename(filename)
+    # Updated regex to be more flexible with species names
+    # Species can contain letters, numbers, underscores, dots, and minus signs
     m = re.match(r'^time_corr_(?:rand|sample)(\d+)_(.+?)_beta=([0-9.+-eE]+|inf|infty)\.dat$', basename, re.IGNORECASE)
     if not m:
         return None, None, None
@@ -409,19 +137,24 @@ def find_spectral_peaks(omega, spectral_function, min_prominence=0.1, min_height
     
     return peak_positions.tolist(), peak_heights.tolist(), prominences.tolist()
 
-def parse_QFI_data_new(structure_factor_dir, beta_tol=1e-2, mode='taylor', auto_combine=True):
+def parse_QFI_data_new(structure_factor_dir, beta_tol=1e-2, average_after_fft=True):
     """Parse QFI data from the new directory structure and compute spectral functions.
     
-    Args:
-        structure_factor_dir: Path to structure_factor_results directory
-        beta_tol: Tolerance for beta binning
-        mode: 'taylor', 'global', 'taylor_combined', or 'global_combined'
-        auto_combine: Whether to automatically combine channels (set False when called from parameter sweeps)
-    """
+    Updated to work with TPQ_DSSF.cpp output structure:
+    - structure_factor_results/
+      - beta_{value}/
+        - {operator_type}/  (e.g., 'sum', 'transverse', 'sublattice', 'experimental', etc.)
+          - time_corr_rand{N}_{species}_beta={beta}.dat
     
-    # Automatically combine channels if processing combined modes
-    if auto_combine and mode in ['taylor_combined', 'global_combined']:
-        combine_channels_for_structure_factor(structure_factor_dir)
+    The function automatically scans all subdirectories within each beta_* folder,
+    making it flexible to handle any operator_type name.
+    
+    Parameters:
+    structure_factor_dir: Directory containing beta_* subdirectories
+    beta_tol: Tolerance for grouping beta values
+    average_after_fft: If True, average spectra after FFT (recommended).
+                       If False, average in time domain (assumes identical time arrays).
+    """
     
     # Initialize data structures
     species_data = defaultdict(lambda: defaultdict(list))
@@ -430,11 +163,12 @@ def parse_QFI_data_new(structure_factor_dir, beta_tol=1e-2, mode='taylor', auto_
     beta_bin_values = defaultdict(list)
     
     # Step 1: Discover and organize data files
-    print(f"Scanning directory: {structure_factor_dir} (mode: {mode})")
+    print(f"Scanning directory: {structure_factor_dir}")
     _collect_data_files(structure_factor_dir, species_data, species_names, 
-                        beta_bins, beta_bin_values, beta_tol, mode)
+                        beta_bins, beta_bin_values, beta_tol)
     
     print(f"\nFound species (with momentum): {sorted(species_names)}")
+    print(f"Averaging strategy: {'After FFT' if average_after_fft else 'Before FFT (time domain)'}")
     
     # Step 2: Process each species
     all_species_qfi_data = defaultdict(list)
@@ -445,21 +179,23 @@ def parse_QFI_data_new(structure_factor_dir, beta_tol=1e-2, mode='taylor', auto_
         print(f"{'='*60}")
         
         _process_species_data(species, beta_groups, beta_bin_values, 
-                            structure_factor_dir, all_species_qfi_data, mode)
+                            structure_factor_dir, all_species_qfi_data,
+                            average_after_fft=average_after_fft)
     
-    # # Step 3: Generate summary plots
-    # _create_summary_plots(all_species_qfi_data, structure_factor_dir)
+    # Step 3: Generate summary plots
+    _create_summary_plots(all_species_qfi_data, structure_factor_dir)
     
     print("\nProcessing complete!")
     return all_species_qfi_data
 
 
 def _collect_data_files(structure_factor_dir, species_data, species_names, 
-                        beta_bins, beta_bin_values, beta_tol, mode='taylor'):
+                        beta_bins, beta_bin_values, beta_tol):
     """Collect and organize all data files by species and beta values.
     
-    Args:
-        mode: 'taylor', 'global', 'taylor_combined', or 'global_combined'
+    Updated to scan all subdirectories within each beta_* folder to support
+    the new structure from TPQ_DSSF.cpp where operator_type determines the subdirectory name
+    (e.g., 'sum', 'transverse', 'sublattice', 'experimental', etc.)
     """
     
     beta_dirs = glob.glob(os.path.join(structure_factor_dir, 'beta_*'))
@@ -473,18 +209,31 @@ def _collect_data_files(structure_factor_dir, species_data, species_names,
         bin_idx = _assign_beta_bin(beta_value, beta_bins, beta_tol)
         beta_bin_values[bin_idx].append(beta_value)
         
-        # Find all correlation files based on mode
-        mode_dir = os.path.join(beta_dir, mode)
-        if not os.path.isdir(mode_dir):
-            continue
+        # Scan all subdirectories within this beta directory
+        # This handles both old structure (taylor, global, etc.) and new structure (sum, transverse, etc.)
+        if os.path.isdir(beta_dir):
+            subdirs = [d for d in os.listdir(beta_dir) if os.path.isdir(os.path.join(beta_dir, d))]
             
-        files = glob.glob(os.path.join(mode_dir, 'time_corr_rand*.dat'))
-        
-        for file_path in files:
-            species_with_momentum, _, _ = parse_filename_new(file_path)
-            if species_with_momentum:
-                species_names.add(species_with_momentum)
-                species_data[species_with_momentum][bin_idx].append(file_path)
+            if not subdirs:
+                print(f"Warning: No subdirectories found in {beta_dir}")
+                continue
+            
+            print(f"  Beta={beta_value:.6g}: Found subdirectories: {subdirs}")
+            
+            for subdir in subdirs:
+                subdir_path = os.path.join(beta_dir, subdir)
+                files = glob.glob(os.path.join(subdir_path, 'time_corr_*.dat'))
+                
+                for file_path in files:
+                    species_with_momentum, _, _ = parse_filename_new(file_path)
+                    if species_with_momentum:
+                        species_names.add(species_with_momentum)
+                        species_data[species_with_momentum][bin_idx].append(file_path)
+            
+            # Count total files found for this beta
+            total_files = sum(len(glob.glob(os.path.join(beta_dir, subdir, 'time_corr_*.dat'))) 
+                            for subdir in subdirs)
+            print(f"  Beta={beta_value:.6g}: Found {total_files} correlation files across {len(subdirs)} subdirectories")
 
 
 def _extract_beta_from_dirname(beta_dir):
@@ -527,25 +276,63 @@ def _assign_beta_bin(beta_val, bins, tol):
 
 
 def _process_species_data(species, beta_groups, beta_bin_values, 
-                            structure_factor_dir, all_species_qfi_data, mode='taylor'):
-    """Process all data for a single species across different beta values."""
+                            structure_factor_dir, all_species_qfi_data, 
+                            average_after_fft=True):
+    """Process all data for a single species across different beta values.
+    
+    Parameters:
+    average_after_fft: If True, average spectra after FFT (recommended when time arrays differ).
+                       If False, average in time domain (original behavior).
+    """
     
     for beta_bin_idx, file_list in beta_groups.items():
         # Get representative beta for this bin
         beta = _get_bin_beta(beta_bin_values.get(beta_bin_idx, []))
         print(f"\n  Beta≈{beta:.6g} (bin {beta_bin_idx}): {len(file_list)} files")
         
-        # Load and average correlation data
-        mean_correlation, reference_time = _load_and_average_data(file_list)
-        if mean_correlation is None:
-            print(f"    No valid data for beta={beta}")
-            continue
+        if average_after_fft:
+            # New approach: average after FFT
+            result = _load_and_average_data(file_list, average_after_fft=True)
+            if result[0] is None:
+                print(f"    No valid data for beta={beta}")
+                continue
+            
+            mean_spectrum, mean_spectrum_imag, omega, time_arrays = result
+            
+            # Extract positive frequencies and compensate
+            omega_pos, s_omega_compensated = _extract_positive_frequencies(mean_spectrum, omega)
+            
+            # Calculate QFI
+            qfi = _calculate_qfi(omega_pos, s_omega_compensated, beta)
+            
+            # Find peaks
+            peak_positions, peak_heights, peak_prominences = find_spectral_peaks(
+                omega_pos, s_omega_compensated, min_prominence=0.1, omega_range=(0, 6))
+            
+            results = {
+                'omega': omega,
+                'S_omega_real': mean_spectrum,
+                'S_omega_imag': mean_spectrum_imag,
+                'omega_pos': omega_pos,
+                's_omega_compensated': s_omega_compensated,
+                'qfi': qfi,
+                'peak_positions': peak_positions,
+                'peak_heights': peak_heights,
+                'peak_prominences': peak_prominences
+            }
+            
+        else:
+            # Original approach: average in time domain
+            mean_correlation, reference_time = _load_and_average_data(file_list, average_after_fft=False)
+            if mean_correlation is None:
+                print(f"    No valid data for beta={beta}")
+                continue
+            
+            # Compute spectral function and QFI
+            results = _compute_spectral_and_qfi(mean_correlation, reference_time, beta)
         
-        # Compute spectral function and QFI
-        results = _compute_spectral_and_qfi(mean_correlation, reference_time, beta)
-        
-        # Save results with mode suffix
-        _save_species_results(species, beta, results, structure_factor_dir, mode)
+        # Save results
+        _save_species_results(species, beta, results, structure_factor_dir)
         
         # Store QFI for summary plots
         all_species_qfi_data[species].append((beta, results['qfi']))
@@ -561,11 +348,22 @@ def _get_bin_beta(beta_vals):
         return float(np.mean(beta_vals))
 
 
-def _load_and_average_data(file_list):
-    """Load and average correlation data from multiple files."""
+def _load_and_average_data(file_list, average_after_fft=True):
+    """Load and average correlation data from multiple files.
+    
+    Parameters:
+    file_list: List of file paths to load
+    average_after_fft: If True, compute FFT for each sample and average spectra.
+                      If False, average time-domain data (only works if time arrays match).
+    
+    Returns:
+    If average_after_fft=False: (mean_correlation, reference_time)
+    If average_after_fft=True: (mean_spectral_function, omega, all_time_arrays)
+    """
+    print(f"    [DEBUG] Loading {len(file_list)} files...")
     all_data = []
     
-    for file_path in file_list:
+    for idx, file_path in enumerate(file_list):
         try:
             data = np.loadtxt(file_path, comments='#')
             time = data[:, 0]
@@ -573,18 +371,106 @@ def _load_and_average_data(file_list):
             imag_part = data[:, 2] if data.shape[1] > 2 else np.zeros_like(real_part)
             val = real_part + 1j * imag_part
             all_data.append((time, val))
+            if idx == 0:
+                print(f"    [DEBUG] First file: {os.path.basename(file_path)}, time shape: {time.shape}, data shape: {data.shape}")
         except Exception as e:
-            print(f"    Error reading {file_path}: {e}")
+            print(f"    [ERROR] reading {file_path}: {e}")
     
     if not all_data:
-        return None, None
+        print(f"    [DEBUG] No valid data loaded!")
+        return None, None, None if average_after_fft else None, None
     
-    # Average correlation functions
-    reference_time = all_data[0][0]
-    all_complex_values = np.vstack([data[1] for data in all_data])
-    mean_correlation = np.mean(all_complex_values, axis=0)
+    print(f"    [DEBUG] Successfully loaded {len(all_data)} files")
     
-    return mean_correlation, reference_time
+    if not average_after_fft:
+        # Original behavior: average in time domain
+        # Warning: assumes all time arrays are identical!
+        reference_time = all_data[0][0]
+        all_complex_values = np.vstack([data[1] for data in all_data])
+        mean_correlation = np.mean(all_complex_values, axis=0)
+        print(f"    [DEBUG] Averaged in time domain, result shape: {mean_correlation.shape}")
+        return mean_correlation, reference_time
+    
+    else:
+        # New behavior: average after FFT
+        # This is more robust when time arrays differ between samples
+        print(f"    Computing FFT for {len(all_data)} samples individually...")
+        
+        # Check if time arrays are consistent
+        time_arrays_match = all(np.array_equal(all_data[0][0], d[0]) for d in all_data)
+        if not time_arrays_match:
+            print(f"    WARNING: Time arrays differ between samples - will interpolate to common grid!")
+            # Debug: show time array lengths
+            time_lengths = [len(d[0]) for d in all_data]
+            print(f"    [DEBUG] Time array lengths: {time_lengths}")
+        
+        all_spectra = []
+        all_spectra_imag = []
+        all_omegas = []
+        
+        for idx, (time, correlation) in enumerate(all_data):
+            # Prepare full time range
+            t_full, C_full = _prepare_time_data(correlation, time)
+            
+            # Subtract mean
+            C_full = C_full - np.mean(C_full)
+            
+            # Apply broadening and compute FFT
+            gamma = 0.15
+            S_omega_real, S_omega_imag, omega = _compute_spectral_function(t_full, C_full, gamma)
+            
+            all_spectra.append(S_omega_real)
+            all_spectra_imag.append(S_omega_imag)
+            all_omegas.append(omega)
+            
+            if idx == 0:
+                print(f"    [DEBUG] Sample {idx}: omega shape = {omega.shape}, spectrum shape = {S_omega_real.shape}")
+        
+        # Create common frequency grid
+        # Use the grid from the longest time series (finest frequency resolution)
+        omega_ref = max(all_omegas, key=len)
+        print(f"    [DEBUG] Reference omega grid length: {len(omega_ref)}")
+        
+        # Interpolate all spectra onto common grid if needed
+        interpolated_spectra = []
+        interpolated_spectra_imag = []
+        for i, (S_omega, S_omega_imag, omega) in enumerate(zip(all_spectra, all_spectra_imag, all_omegas)):
+            if len(omega) != len(omega_ref):
+                # Need to interpolate due to different lengths
+                print(f"      Sample {i}: interpolating from {len(omega)} to {len(omega_ref)} points")
+                from scipy.interpolate import interp1d
+                f_interp_real = interp1d(omega, S_omega, kind='linear', 
+                                   bounds_error=False, fill_value=0.0)
+                f_interp_imag = interp1d(omega, S_omega_imag, kind='linear', 
+                                   bounds_error=False, fill_value=0.0)
+                S_interpolated = f_interp_real(omega_ref)
+                S_interpolated_imag = f_interp_imag(omega_ref)
+                interpolated_spectra.append(S_interpolated)
+                interpolated_spectra_imag.append(S_interpolated_imag)
+            elif not np.allclose(omega, omega_ref, rtol=1e-9, atol=1e-12):
+                # Lengths match but values differ - still need interpolation
+                print(f"      Sample {i}: interpolating due to frequency grid mismatch")
+                from scipy.interpolate import interp1d
+                f_interp_real = interp1d(omega, S_omega, kind='linear',
+                                   bounds_error=False, fill_value=0.0)
+                f_interp_imag = interp1d(omega, S_omega_imag, kind='linear',
+                                   bounds_error=False, fill_value=0.0)
+                S_interpolated = f_interp_real(omega_ref)
+                S_interpolated_imag = f_interp_imag(omega_ref)
+                interpolated_spectra.append(S_interpolated)
+                interpolated_spectra_imag.append(S_interpolated_imag)
+            else:
+                # Grids match perfectly
+                interpolated_spectra.append(S_omega)
+                interpolated_spectra_imag.append(S_omega_imag)
+        
+        # Average spectra
+        mean_spectrum = np.mean(interpolated_spectra, axis=0)
+        mean_spectrum_imag = np.mean(interpolated_spectra_imag, axis=0)
+        print(f"    Averaged {len(interpolated_spectra)} spectra in frequency domain")
+        print(f"    [DEBUG] Mean spectrum shape: {mean_spectrum.shape}, min: {mean_spectrum.min():.6e}, max: {mean_spectrum.max():.6e}")
+        
+        return mean_spectrum, mean_spectrum_imag, omega_ref, [d[0] for d in all_data]
 
 
 def _compute_spectral_and_qfi(mean_correlation, reference_time, beta):
@@ -593,9 +479,43 @@ def _compute_spectral_and_qfi(mean_correlation, reference_time, beta):
     # Prepare time data
     t_full, C_full = _prepare_time_data(mean_correlation, reference_time)
     
+    # Subtract mean from correlation data
+    C_full = C_full - np.mean(C_full)
+    print(f"    Subtracted mean from correlation data (mean = {np.mean(C_full):.6e})")
+
+    # Apply taper to reduce spectral leakage
+    def apply_taper(t_data, c_data, taper_type='hann'):
+        """Apply a windowing function to the time data."""
+        n = len(t_data)
+        
+        if taper_type == 'hann':
+            window = np.hanning(n)
+        elif taper_type == 'hamming':
+            window = np.hamming(n)
+        elif taper_type == 'blackman':
+            window = np.blackman(n)
+        elif taper_type == 'tukey':
+            # Tukey window with 10% taper on each side
+            window = np.ones(n)
+            taper_fraction = 0.1
+            taper_len = int(n * taper_fraction)
+            # Apply cosine taper to both ends
+            for i in range(taper_len):
+                window[i] = 0.5 * (1 - np.cos(np.pi * i / taper_len))
+                window[n-1-i] = 0.5 * (1 - np.cos(np.pi * i / taper_len))
+        else:
+            # No taper
+            window = np.ones(n)
+        
+        return c_data * window
+    
+    # Apply taper
+    # C_full = apply_taper(t_full, C_full, taper_type='tukey')
+    print(f"    Applied Tukey taper to time data")
+
     # Apply broadening and compute FFT
-    gamma = 0.3
-    S_omega_real, omega = _compute_spectral_function(t_full, C_full, gamma)
+    gamma = 0.15
+    S_omega_real, S_omega_imag, omega = _compute_spectral_function(t_full, C_full, gamma)
     
     # Extract positive frequencies and compensate
     omega_pos, s_omega_compensated = _extract_positive_frequencies(S_omega_real, omega)
@@ -610,6 +530,7 @@ def _compute_spectral_and_qfi(mean_correlation, reference_time, beta):
     return {
         'omega': omega,
         'S_omega_real': S_omega_real,
+        'S_omega_imag': S_omega_imag,
         'omega_pos': omega_pos,
         's_omega_compensated': s_omega_compensated,
         'qfi': qfi,
@@ -620,8 +541,7 @@ def _compute_spectral_and_qfi(mean_correlation, reference_time, beta):
 
 
 def _prepare_time_data(mean_correlation, reference_time):
-    """Prepare time-ordered correlation data for FFT."""
-    
+    """Prepare correlation data for FFT (data starts from t=0)."""
     if reference_time[0] < 0 and reference_time[-1] > 0:
         # Data already time-ordered
         t_full = reference_time
@@ -643,16 +563,13 @@ def _prepare_time_data(mean_correlation, reference_time):
     return t_full, C_full
 
 
+
 def _compute_spectral_function(t_full, C_full, gamma):
     """Compute spectral function via FFT with broadening."""
     
-    # Reorder for FFT
-    C_fft_input = np.fft.ifftshift(C_full)
-    t_fft_ordered = np.fft.ifftshift(t_full)
-    
-    # Apply broadening
+    # Apply broadening directly (no need to reorder since data starts from t=0)
     C_broadened, _ = apply_time_broadening(
-        t_fft_ordered, C_fft_input, 'lorentzian', gamma=gamma)
+        t_full, C_full, 'lorentzian', gamma=gamma)
     
     # FFT convention
     C_broadened = np.conj(C_broadened)
@@ -665,14 +582,14 @@ def _compute_spectral_function(t_full, C_full, gamma):
     # Frequency axis
     omega = np.fft.fftshift(np.fft.fftfreq(len(C_broadened), d=dt)) * 2 * np.pi
     
-    return S_w.real, omega
+    return S_w.real, S_w.imag, omega
 
 
 def _extract_positive_frequencies(S_omega_real, omega):
     """Extract positive frequencies and apply compensation."""
     
     # Calculate integral before truncation
-    integral_before = np.trapezoid(S_omega_real, omega)
+    # integral_before = np_trapz(S_omega_real, omega)
     
     # Extract positive frequencies
     positive_mask = omega > 0
@@ -680,9 +597,9 @@ def _extract_positive_frequencies(S_omega_real, omega):
     s_omega_pos = S_omega_real[positive_mask]
     
     # Calculate compensation factor
-    integral_after = np.trapezoid(s_omega_pos, omega_pos)
-    compensation_factor = integral_before / integral_after if integral_after != 0 else 1.0
-    
+    # integral_after = np_trapz(s_omega_pos, omega_pos)
+    # compensation_factor = integral_before / integral_after if integral_after != 0 else 1.0
+    compensation_factor = 1
     s_omega_compensated = s_omega_pos * compensation_factor
     
     print(f"    Compensation factor: {compensation_factor:.6f}")
@@ -699,22 +616,22 @@ def _calculate_qfi(omega_pos, s_omega_pos, beta):
     else:
         integrand = s_omega_pos * np.tanh(beta * omega_pos / 2.0) * (1 - np.exp(-beta * omega_pos))
     
-    return 4 * np.trapezoid(integrand, omega_pos)
+    return 4 * np_trapz(integrand, omega_pos)
 
 
-def _save_species_results(species, beta, results, structure_factor_dir, mode='taylor'):
+def _save_species_results(species, beta, results, structure_factor_dir):
     """Save computed results for a species at given beta."""
     
-    # Create output directory with mode suffix
-    outdir = os.path.join(structure_factor_dir, f'processed_data_{mode}', species)
+    # Create output directory
+    outdir = os.path.join(structure_factor_dir, 'processed_data', species)
     os.makedirs(outdir, exist_ok=True)
     
     beta_label = 'inf' if np.isinf(beta) else f'{beta:.6g}'
     
     # Save spectral data
-    data_out = np.column_stack((results['omega'], results['S_omega_real']))
+    data_out = np.column_stack((results['omega'], results['S_omega_real'], results['S_omega_imag']))
     data_filename = os.path.join(outdir, f'spectral_beta_{beta_label}.dat')
-    np.savetxt(data_filename, data_out, header='freq spectral_function')
+    np.savetxt(data_filename, data_out, header='freq spectral_function_real spectral_function_imag')
     
     # Save peak information
     if results['peak_positions']:
@@ -727,23 +644,27 @@ def _save_species_results(species, beta, results, structure_factor_dir, mode='ta
         np.savetxt(peak_filename, peak_data, header='freq height prominence')
     
     # Create spectral function plot
-    _plot_spectral_function(species, beta, results, outdir, mode)
+    _plot_spectral_function(species, beta, results, outdir)
     
     print(f"    QFI = {results['qfi']:.4f}, Peaks at: {results['peak_positions']}")
 
 
-def _plot_spectral_function(species, beta, results, outdir, mode='taylor'):
+def _plot_spectral_function(species, beta, results, outdir):
     """Plot spectral function with peaks marked."""
     
     plt.figure(figsize=(10, 6))
     
     beta_label = 'inf' if np.isinf(beta) else f'{beta:.6g}'
     
-    # Plot spectral function
+    # Plot real and imaginary parts of spectral function
     plt.scatter(results['omega'], results['S_omega_real'], 
-                label=f'Beta≈{beta_label} QFI={results["qfi"]:.4f}')
+                label=f'Real part (Beta≈{beta_label}, QFI={results["qfi"]:.4f})', 
+                alpha=0.7, s=20)
+    plt.scatter(results['omega'], results['S_omega_imag'], 
+                label=f'Imaginary part (Beta≈{beta_label})', 
+                alpha=0.7, s=20, marker='^')
     
-    # Mark peaks
+    # Mark peaks on the real part
     if results['peak_positions']:
         plt.scatter(results['peak_positions'], results['peak_heights'], 
                     color='red', s=80, marker='x', zorder=5,
@@ -752,7 +673,7 @@ def _plot_spectral_function(species, beta, results, outdir, mode='taylor'):
     plt.xlabel('Frequency (rad/s)')
     plt.ylabel('Spectral Function S(ω)')
     plt.xlim(-3, 6)
-    plt.title(f'Spectral Function for {species} at Beta≈{beta_label} ({mode})')
+    plt.title(f'Spectral Function for {species} at Beta≈{beta_label}')
     plt.grid(True)
     plt.legend()
     
@@ -868,18 +789,17 @@ def _plot_qfi_derivative(species, qfi_data, plot_outdir):
     plt.savefig(plot_filename, dpi=300)
     plt.close()
 
-def parse_QFI_across_Jpm(data_dir, mode='all'):
-    """
-    Parse QFI across multiple Jpm values.
+def parse_QFI_across_Jpm(data_dir):
     
-    Args:
-        data_dir: Base directory containing Jpm=* subdirectories
-        mode: 'taylor', 'global', 'taylor_combined', 'global_combined', or 'all'
-    """
-    
-    comm = MPI.COMM_WORLD
-    rank = comm.Get_rank()
-    size = comm.Get_size()
+    if HAS_MPI:
+        comm = MPI.COMM_WORLD
+        rank = comm.Get_rank()
+        size = comm.Get_size()
+    else:
+        # Serial mode
+        rank = 0
+        size = 1
+        comm = None
     
     # Find all subdirectories matching the pattern Jpm=*
     subdirs = []
@@ -887,24 +807,9 @@ def parse_QFI_across_Jpm(data_dir, mode='all'):
         subdirs = glob.glob(os.path.join(data_dir, 'Jpm=*'))
         subdirs.sort()  # Ensure consistent ordering
     
-    # Broadcast subdirs to all processes
-    subdirs = comm.bcast(subdirs, root=0)
-    
-    # Determine which modes to process
-    if mode == 'all':
-        modes_to_process = ['taylor', 'taylor_combined', 'global', 'global_combined']
-    else:
-        modes_to_process = [mode]
-    
-    # Combine channels first (only rank 0 does this to avoid conflicts)
-    if rank == 0:
-        for subdir in subdirs:
-            structure_factor_dir = os.path.join(subdir, 'structure_factor_results')
-            if os.path.exists(structure_factor_dir):
-                combine_channels_for_structure_factor(structure_factor_dir)
-    
-    # Wait for rank 0 to finish combining channels
-    comm.Barrier()
+    # Broadcast subdirs to all processes (only if MPI is available)
+    if HAS_MPI:
+        subdirs = comm.bcast(subdirs, root=0)
     
     # Distribute subdirectories among processes
     local_subdirs = []
@@ -913,7 +818,7 @@ def parse_QFI_across_Jpm(data_dir, mode='all'):
             local_subdirs.append(subdir)
     
     # Each process handles its assigned subdirectories
-    local_jpm_qfi_data = {m: {} for m in modes_to_process}
+    local_jpm_qfi_data = {}
     
     for subdir in local_subdirs:
         # Extract Jpm value from the directory name
@@ -930,236 +835,193 @@ def parse_QFI_across_Jpm(data_dir, mode='all'):
             continue
         
         print(f"[Rank {rank}] Processing directory: {subdir} for Jpm={jpm_value}")
-        
-        # Run the QFI analysis for each mode
-        for m in modes_to_process:
-            print(f"[Rank {rank}]   Mode: {m}")
-            try:
-                # auto_combine=False because we already combined channels at the beginning
-                species_qfi_data = parse_QFI_data_new(structure_factor_dir, mode=m, auto_combine=False)
-                local_jpm_qfi_data[m][jpm_value] = species_qfi_data
-            except Exception as e:
-                print(f"[Rank {rank}] Error processing mode {m}: {e}")
+        # Run the QFI analysis for the current Jpm value
+        species_qfi_data = parse_QFI_data_new(structure_factor_dir)
+        local_jpm_qfi_data[jpm_value] = species_qfi_data
     
-    # Gather all results at rank 0
-    all_jpm_qfi_data = comm.gather(local_jpm_qfi_data, root=0)
+    # Gather all results at rank 0 (only if MPI is available)
+    if HAS_MPI:
+        all_jpm_qfi_data = comm.gather(local_jpm_qfi_data, root=0)
+    else:
+        all_jpm_qfi_data = [local_jpm_qfi_data]
     
     if rank == 0:
-        # Merge all results for each mode
-        jpm_qfi_data_by_mode = {m: {} for m in modes_to_process}
-        
+        # Merge all results
+        jpm_qfi_data = {}
         for process_data in all_jpm_qfi_data:
-            for m in modes_to_process:
-                jpm_qfi_data_by_mode[m].update(process_data[m])
+            jpm_qfi_data.update(process_data)
         
-        # Reorganize data by species for heatmap plotting - for each mode
-        for m in modes_to_process:
-            print(f"\n{'='*60}")
-            print(f"Organizing data for mode: {m}")
-            print(f"{'='*60}")
-            
-            all_qfi_data = defaultdict(list)
-            all_derivative_data = defaultdict(list)
-            
-            for jpm, all_species_data in jpm_qfi_data_by_mode[m].items():
-                for species, qfi_beta_list in all_species_data.items():
-                    for beta, qfi in qfi_beta_list:
-                        all_qfi_data[species].append((jpm, beta, qfi))
+        # Reorganize data by species for heatmap plotting
+        all_qfi_data = defaultdict(list)
+        all_derivative_data = defaultdict(list)
+        
+        for jpm, all_species_data in jpm_qfi_data.items():
+            for species, qfi_beta_list in all_species_data.items():
+                for beta, qfi in qfi_beta_list:
+                    all_qfi_data[species].append((jpm, beta, qfi))
+                
+                # Calculate derivatives for this species and jpm
+                if len(qfi_beta_list) > 1:
+                    qfi_beta_list.sort()
+                    qfi_beta_array = np.array(qfi_beta_list)
+                    betas = qfi_beta_array[:, 0]
+                    qfis = qfi_beta_array[:, 1]
                     
-                    # Calculate derivatives for this species and jpm
-                    if len(qfi_beta_list) > 1:
-                        qfi_beta_list.sort()
-                        qfi_beta_array = np.array(qfi_beta_list)
-                        betas = qfi_beta_array[:, 0]
-                        qfis = qfi_beta_array[:, 1]
-                        
-                        # Use central differences for the derivative
-                        mid_betas = (betas[:-1] + betas[1:]) / 2
-                        delta_beta = np.diff(betas)
-                        delta_qfi = np.diff(qfis)
-                        qfi_derivative = delta_qfi / delta_beta
-                        
-                        for mid_beta, derivative in zip(mid_betas, qfi_derivative):
-                            all_derivative_data[species].append((jpm, mid_beta, derivative))
+                    # Use central differences for the derivative
+                    mid_betas = (betas[:-1] + betas[1:]) / 2
+                    delta_beta = np.diff(betas)
+                    delta_qfi = np.diff(qfis)
+                    qfi_derivative = delta_qfi / delta_beta
+                    
+                    for mid_beta, derivative in zip(mid_betas, qfi_derivative):
+                        all_derivative_data[species].append((jpm, mid_beta, derivative))
 
-            # Create output directory for this mode
-            plot_outdir = os.path.join(data_dir, f'plots_{m}')
-            os.makedirs(plot_outdir, exist_ok=True)
-            
-            print(f"Heatmap plots will be saved to: {plot_outdir}")
-        
-        return jpm_qfi_data_by_mode
+        # Create output directory
+        plot_outdir = os.path.join(data_dir, 'plots')
+        os.makedirs(plot_outdir, exist_ok=True)
+        return jpm_qfi_data
     else:
         return None
 
 
 
-def parse_QFI_across_hi(data_dir, mode='all'):
+def parse_QFI_across_hi(data_dir):
     """
     Scan subdirectories named 'h=i=*' under data_dir, run QFI parsing per folder,
     and build heatmaps across the parameter h=i.
-    
-    Args:
-        data_dir: Base directory containing h=* subdirectories
-        mode: 'taylor', 'global', 'taylor_combined', 'global_combined', or 'all'
     """
-    comm = MPI.COMM_WORLD
-    rank = comm.Get_rank()
-    size = comm.Get_size()
+    if HAS_MPI:
+        comm = MPI.COMM_WORLD
+        rank = comm.Get_rank()
+        size = comm.Get_size()
+    else:
+        # Serial mode
+        rank = 0
+        size = 1
+        comm = None
 
     # Discover parameter sweep folders on rank 0
     if rank == 0:
         sweep_dirs = sorted(glob.glob(os.path.join(data_dir, 'h=*')))
     else:
         sweep_dirs = None
-    sweep_dirs = comm.bcast(sweep_dirs, root=0)
+    
+    # Broadcast only if MPI is available
+    if HAS_MPI:
+        sweep_dirs = comm.bcast(sweep_dirs, root=0)
 
     # Round-robin assignment
     my_dirs = sweep_dirs[rank::size]
 
-    # Determine which modes to process
-    if mode == 'all':
-        modes_to_process = ['taylor', 'taylor_combined', 'global', 'global_combined']
-    else:
-        modes_to_process = [mode]
-    
-    # Combine channels first (only rank 0 does this to avoid conflicts)
-    if rank == 0:
-        for d in sweep_dirs:
-            sf_path = os.path.join(d, 'structure_factor_results')
-            if os.path.isdir(sf_path):
-                combine_channels_for_structure_factor(sf_path)
-    
-    # Wait for rank 0 to finish combining channels
-    comm.Barrier()
-
     # Local compute
-    local_results = {m: {} for m in modes_to_process}
+    local_results = {}
     param_regex = re.compile(r'h=([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)')
     for d in my_dirs:
-        m_match = param_regex.search(os.path.basename(d))
-        if not m_match:
+        m = param_regex.search(os.path.basename(d))
+        if not m:
             continue
-        hi_val = float(m_match.group(1))
+        hi_val = float(m.group(1))
         sf_path = os.path.join(d, 'structure_factor_results')
         if not os.path.isdir(sf_path):
             print(f"[Rank {rank}] Missing structure_factor_results at: {sf_path}")
             continue
         print(f"[Rank {rank}] Processing {d} (h=i={hi_val})")
-        
-        # Process each mode
-        for mode_name in modes_to_process:
-            print(f"[Rank {rank}]   Mode: {mode_name}")
-            try:
-                # auto_combine=False because we already combined channels at the beginning
-                local_results[mode_name][hi_val] = parse_QFI_data_new(sf_path, mode=mode_name, auto_combine=False)
-            except Exception as e:
-                print(f"[Rank {rank}] Error processing mode {mode_name}: {e}")
+        local_results[hi_val] = parse_QFI_data_new(sf_path)
 
-    # Gather and merge on root
-    gathered = comm.gather(local_results, root=0)
+    # Gather and merge on root (only if MPI is available)
+    if HAS_MPI:
+        gathered = comm.gather(local_results, root=0)
+    else:
+        gathered = [local_results]
+    
     if rank != 0:
         return None
 
-    merged_by_mode = {m: {} for m in modes_to_process}
+    merged = {}
     for part in gathered:
-        for mode_name in modes_to_process:
-            merged_by_mode[mode_name].update(part[mode_name])
+        merged.update(part)
 
-    merged_by_mode = {m: {} for m in modes_to_process}
-    for part in gathered:
-        for mode_name in modes_to_process:
-            merged_by_mode[mode_name].update(part[mode_name])
+    # Reformat per-species arrays and compute derivatives
+    by_species = defaultdict(list)
+    by_species_deriv = defaultdict(list)
+    for hi, species_map in merged.items():
+        for sp, beta_qfi in species_map.items():
+            for b, q in beta_qfi:
+                by_species[sp].append((hi, b, q))
 
-    # Process each mode
-    for mode_name in modes_to_process:
-        print(f"\n{'='*60}")
-        print(f"Processing heatmaps for mode: {mode_name}")
-        print(f"{'='*60}")
-        
-        merged = merged_by_mode[mode_name]
-        
-        # Reformat per-species arrays and compute derivatives
-        by_species = defaultdict(list)
-        by_species_deriv = defaultdict(list)
-        for hi, species_map in merged.items():
-            for sp, beta_qfi in species_map.items():
-                for b, q in beta_qfi:
-                    by_species[sp].append((hi, b, q))
+            if len(beta_qfi) > 1:
+                bq = np.array(sorted(beta_qfi, key=lambda x: x[0]), dtype=float)
+                bvals, qvals = bq[:, 0], bq[:, 1]
+                mid = 0.5 * (bvals[:-1] + bvals[1:])
+                dq = np.diff(qvals)
+                db = np.diff(bvals)
+                deriv = dq / db
+                for mb, dv in zip(mid, deriv):
+                    by_species_deriv[sp].append((hi, mb, dv))
 
-                if len(beta_qfi) > 1:
-                    bq = np.array(sorted(beta_qfi, key=lambda x: x[0]), dtype=float)
-                    bvals, qvals = bq[:, 0], bq[:, 1]
-                    mid = 0.5 * (bvals[:-1] + bvals[1:])
-                    dq = np.diff(qvals)
-                    db = np.diff(bvals)
-                    deriv = dq / db
-                    for mb, dv in zip(mid, deriv):
-                        by_species_deriv[sp].append((hi, mb, dv))
+    # Plotting
+    out_dir = os.path.join(data_dir, 'plots_hi')
+    os.makedirs(out_dir, exist_ok=True)
 
-        # Plotting
-        out_dir = os.path.join(data_dir, f'plots_hi_{mode_name}')
-        os.makedirs(out_dir, exist_ok=True)
+    # Heatmaps for QFI
+    for sp, triples in by_species.items():
+        if not triples:
+            continue
+        arr = np.array(triples, dtype=float)
+        X, Y, Z = arr[:, 0], arr[:, 1], arr[:, 2]
 
-        # Heatmaps for QFI
-        for sp, triples in by_species.items():
-            if not triples:
-                continue
-            arr = np.array(triples, dtype=float)
-            X, Y, Z = arr[:, 0], arr[:, 1], arr[:, 2]
+        # Build grid in parameter (linear) and beta (log)
+        x_min, x_max = np.nanmin(X), np.nanmax(X)
+        y_min, y_max = np.nanmin(Y[Y > 0]), np.nanmax(Y)
+        x_lin = np.linspace(x_min, x_max, 120)
+        y_log = np.logspace(np.log10(y_min), np.log10(y_max), 120)
+        XX, YY = np.meshgrid(x_lin, y_log)
+        ZZ = griddata((X, Y), Z, (XX, YY), method='cubic')
 
-            # Build grid in parameter (linear) and beta (log)
-            x_min, x_max = np.nanmin(X), np.nanmax(X)
-            y_min, y_max = np.nanmin(Y[Y > 0]), np.nanmax(Y)
-            x_lin = np.linspace(x_min, x_max, 120)
-            y_log = np.logspace(np.log10(y_min), np.log10(y_max), 120)
-            XX, YY = np.meshgrid(x_lin, y_log)
-            ZZ = griddata((X, Y), Z, (XX, YY), method='cubic')
+        plt.figure(figsize=(11, 7))
+        mesh = plt.pcolormesh(XX, YY, ZZ, shading='auto', cmap='viridis')
+        plt.colorbar(mesh, label='QFI')
+        plt.scatter(X, Y, s=14, c='k', alpha=0.6, label='samples')
+        plt.yscale('log')
+        plt.xlabel('h=i')
+        plt.ylabel('Beta (β)')
+        plt.title(f'QFI heatmap (h=i sweep): {sp}')
+        plt.legend(loc='best')
+        fout = os.path.join(out_dir, f'qfi_heatmap_hi_{sp}.png')
+        plt.savefig(fout, dpi=300, bbox_inches='tight')
+        plt.close()
+        print(f"Saved: {fout}")
 
-            plt.figure(figsize=(11, 7))
-            mesh = plt.pcolormesh(XX, YY, ZZ, shading='auto', cmap='viridis')
-            plt.colorbar(mesh, label='QFI')
-            plt.scatter(X, Y, s=14, c='k', alpha=0.6, label='samples')
-            plt.yscale('log')
-            plt.xlabel('h=i')
-            plt.ylabel('Beta (β)')
-            plt.title(f'QFI heatmap (h=i sweep, {mode_name}): {sp}')
-            plt.legend(loc='best')
-            fout = os.path.join(out_dir, f'qfi_heatmap_hi_{sp}.png')
-            plt.savefig(fout, dpi=300, bbox_inches='tight')
-            plt.close()
-            print(f"Saved: {fout}")
+    # Heatmaps for dQFI/dβ
+    for sp, triples in by_species_deriv.items():
+        if not triples:
+            continue
+        arr = np.array(triples, dtype=float)
+        X, Y, Z = arr[:, 0], arr[:, 1], arr[:, 2]
 
-        # Heatmaps for dQFI/dβ
-        for sp, triples in by_species_deriv.items():
-            if not triples:
-                continue
-            arr = np.array(triples, dtype=float)
-            X, Y, Z = arr[:, 0], arr[:, 1], arr[:, 2]
+        x_min, x_max = np.nanmin(X), np.nanmax(X)
+        y_min, y_max = np.nanmin(Y[Y > 0]), np.nanmax(Y)
+        x_lin = np.linspace(x_min, x_max, 120)
+        y_log = np.logspace(np.log10(y_min), np.log10(y_max), 120)
+        XX, YY = np.meshgrid(x_lin, y_log)
+        ZZ = griddata((X, Y), Z, (XX, YY), method='cubic')
 
-            x_min, x_max = np.nanmin(X), np.nanmax(X)
-            y_min, y_max = np.nanmin(Y[Y > 0]), np.nanmax(Y)
-            x_lin = np.linspace(x_min, x_max, 120)
-            y_log = np.logspace(np.log10(y_min), np.log10(y_max), 120)
-            XX, YY = np.meshgrid(x_lin, y_log)
-            ZZ = griddata((X, Y), Z, (XX, YY), method='cubic')
-
-            plt.figure(figsize=(11, 7))
-            mesh = plt.pcolormesh(XX, YY, ZZ, shading='auto', cmap='viridis')
-            plt.colorbar(mesh, label='dQFI/dβ')
-            plt.scatter(X, Y, s=14, c='k', alpha=0.6, label='samples')
-            plt.yscale('log')
-            plt.xlabel('h=i')
-            plt.ylabel('Beta (β)')
-            plt.title(f'dQFI/dβ heatmap (h=i sweep, {mode_name}): {sp}')
-            plt.legend(loc='best')
-            fout = os.path.join(out_dir, f'qfi_derivative_heatmap_hi_{sp}.png')
-            plt.savefig(fout, dpi=300, bbox_inches='tight')
-            plt.close()
-            print(f"Saved: {fout}")
+        plt.figure(figsize=(11, 7))
+        mesh = plt.pcolormesh(XX, YY, ZZ, shading='auto', cmap='viridis')
+        plt.colorbar(mesh, label='dQFI/dβ')
+        plt.scatter(X, Y, s=14, c='k', alpha=0.6, label='samples')
+        plt.yscale('log')
+        plt.xlabel('h=i')
+        plt.ylabel('Beta (β)')
+        plt.title(f'dQFI/dβ heatmap (h=i sweep): {sp}')
+        plt.legend(loc='best')
+        fout = os.path.join(out_dir, f'qfi_derivative_heatmap_hi_{sp}.png')
+        plt.savefig(fout, dpi=300, bbox_inches='tight')
+        plt.close()
+        print(f"Saved: {fout}")
 
     print("h=i sweep processing complete!")
-    return merged_by_mode
+    return merged
 
 
 def track_peak_evolution_across_h(data_dir, target_beta=None):
@@ -1173,16 +1035,25 @@ def track_peak_evolution_across_h(data_dir, target_beta=None):
     Returns:
     peak_evolution_data: Dictionary containing peak tracking results for each species
     """
-    comm = MPI.COMM_WORLD
-    rank = comm.Get_rank()
-    size = comm.Get_size()
+    if HAS_MPI:
+        comm = MPI.COMM_WORLD
+        rank = comm.Get_rank()
+        size = comm.Get_size()
+    else:
+        # Serial mode
+        rank = 0
+        size = 1
+        comm = None
 
     # Discover parameter sweep folders on rank 0
     if rank == 0:
         sweep_dirs = sorted(glob.glob(os.path.join(data_dir, 'h=*')))
     else:
         sweep_dirs = None
-    sweep_dirs = comm.bcast(sweep_dirs, root=0)
+    
+    # Broadcast only if MPI is available
+    if HAS_MPI:
+        sweep_dirs = comm.bcast(sweep_dirs, root=0)
 
     # Round-robin assignment
     my_dirs = sweep_dirs[rank::size]
@@ -1252,8 +1123,12 @@ def track_peak_evolution_across_h(data_dir, target_beta=None):
             if species_peaks:
                 local_peak_data[hi_val][species] = species_peaks
 
-    # Gather and merge on root
-    gathered = comm.gather(local_peak_data, root=0)
+    # Gather and merge on root (only if MPI is available)
+    if HAS_MPI:
+        gathered = comm.gather(local_peak_data, root=0)
+    else:
+        gathered = [local_peak_data]
+    
     if rank != 0:
         return None
 
@@ -1385,81 +1260,85 @@ def track_peak_evolution_across_h(data_dir, target_beta=None):
     return species_peak_evolution
 
 
-def plot_heatmaps_from_processed_data(data_dir, mode='all'):
+def plot_heatmaps_from_processed_data(data_dir):
     """Plot heatmaps and fixed-beta line plots by reading processed QFI data from subdirectories.
-       Only plot rows where there is no NaN, and save all intermediate and plot data.
-       
-    Args:
-        data_dir: Base directory containing Jpm=* subdirectories
-        mode: 'taylor', 'global', 'taylor_combined', 'global_combined', or 'all'
-    """
+       Only plot rows where there is no NaN, and save all intermediate and plot data."""
     
-    # Determine which modes to process
-    if mode == 'all':
-        modes_to_process = ['taylor', 'taylor_combined', 'global', 'global_combined']
-    else:
-        modes_to_process = [mode]
+    print(f"\n{'='*70}")
+    print(f"Starting heatmap plotting from processed data")
+    print(f"Data directory: {data_dir}")
+    print(f"{'='*70}\n")
     
-    for mode_name in modes_to_process:
-        print(f"\n{'='*80}")
-        print(f"Plotting heatmaps for mode: {mode_name}")
-        print(f"{'='*80}\n")
-        
-        # Step 1: Load all QFI and derivative data for this mode
-        all_qfi_data, all_derivative_data = load_processed_data(data_dir, mode_name)
-        
-        if not all_qfi_data and not all_derivative_data:
-            print(f"No processed data found for mode: {mode_name}")
-            continue
-        
-        # Step 2: Create output directory for this mode
-        plot_outdir = os.path.join(data_dir, f'plots_{mode_name}')
-        os.makedirs(plot_outdir, exist_ok=True)
-        
-        # Step 3: Save raw data points
-        save_raw_data_points(all_qfi_data, all_derivative_data, plot_outdir)
-        
-        # Step 4: Process and plot QFI heatmaps
-        for species, data_points in all_qfi_data.items():
-            if data_points:
+    # Step 1: Load all QFI and derivative data
+    all_qfi_data, all_derivative_data = load_processed_data(data_dir)
+    
+    print(f"Loaded QFI data for {len(all_qfi_data)} species")
+    print(f"Loaded derivative data for {len(all_derivative_data)} species")
+    
+    # Step 2: Create output directory
+    plot_outdir = os.path.join(data_dir, 'plots')
+    os.makedirs(plot_outdir, exist_ok=True)
+    print(f"Output directory: {plot_outdir}")
+    
+    # Step 3: Save raw data points
+    save_raw_data_points(all_qfi_data, all_derivative_data, plot_outdir)
+    
+    # Step 4: Process and plot QFI heatmaps
+    print(f"\n{'='*70}")
+    print("Processing QFI heatmaps...")
+    print(f"{'='*70}")
+    for species, data_points in all_qfi_data.items():
+        if data_points:
+            try:
                 process_species_heatmap(
                     species, data_points, plot_outdir, 
                     data_type='qfi', ref_target=0.08
                 )
-        
-        # Step 5: Process and plot derivative heatmaps
-        for species, data_points in all_derivative_data.items():
-            if data_points:
+            except Exception as e:
+                print(f"ERROR processing QFI heatmap for {species}: {e}")
+                import traceback
+                traceback.print_exc()
+    
+    # Step 5: Process and plot derivative heatmaps
+    print(f"\n{'='*70}")
+    print("Processing derivative heatmaps...")
+    print(f"{'='*70}")
+    for species, data_points in all_derivative_data.items():
+        if data_points:
+            try:
                 process_species_heatmap(
                     species, data_points, plot_outdir,
                     data_type='derivative', ref_target=0.09
                 )
-
-
-def load_processed_data(data_dir, mode='taylor'):
-    """Load QFI and derivative data from all Jpm subdirectories for a specific mode.
+            except Exception as e:
+                print(f"ERROR processing derivative heatmap for {species}: {e}")
+                import traceback
+                traceback.print_exc()
     
-    Args:
-        data_dir: Base directory containing Jpm=* subdirectories
-        mode: 'taylor', 'global', 'taylor_combined', or 'global_combined'
-    """
+    print(f"\n{'='*70}")
+    print("Heatmap plotting complete!")
+    print(f"{'='*70}\n")
+
+
+def load_processed_data(data_dir):
+    """Load QFI and derivative data from all Jpm subdirectories."""
+    print(f"[DEBUG] load_processed_data: scanning directory {data_dir}")
     all_qfi_data = defaultdict(list)
     all_derivative_data = defaultdict(list)
     
     subdirs = glob.glob(os.path.join(data_dir, 'Jpm=*'))
+    print(f"[DEBUG] Found {len(subdirs)} Jpm subdirectories")
     
     for subdir in subdirs:
         jpm_value = extract_jpm_value(subdir)
         if jpm_value is None:
+            print(f"[DEBUG] Could not extract Jpm value from {subdir}")
             continue
-        
-        # Look for mode-specific plots directory
-        plots_dir = os.path.join(subdir, 'structure_factor_results', f'plots_{mode}')
+            
+        plots_dir = os.path.join(subdir, 'structure_factor_results', 'plots')
         if not os.path.exists(plots_dir):
-            # Fall back to old 'plots' directory for backward compatibility
-            plots_dir = os.path.join(subdir, 'structure_factor_results', 'plots')
-            if not os.path.exists(plots_dir):
-                continue
+            print(f"[DEBUG] Plots directory does not exist: {plots_dir}")
+            continue
             
         print(f"Reading processed data from: {plots_dir} for Jpm={jpm_value}")
         
@@ -1475,6 +1354,7 @@ def load_processed_data(data_dir, mode='taylor'):
             jpm_value, all_derivative_data
         )
     
+    print(f"[DEBUG] Loaded data for {len(all_qfi_data)} species (QFI), {len(all_derivative_data)} species (derivative)")
     return all_qfi_data, all_derivative_data
 
 
@@ -1487,15 +1367,18 @@ def extract_jpm_value(subdir):
 def load_data_files(plots_dir, pattern, jpm_value, data_dict):
     """Load data files matching pattern and add to data dictionary."""
     files = glob.glob(os.path.join(plots_dir, pattern))
+    print(f"[DEBUG] load_data_files: pattern={pattern}, found {len(files)} files")
     
     for file_path in files:
         species = extract_species_from_filename(file_path, pattern)
         if not species:
+            print(f"[DEBUG] Could not extract species from {os.path.basename(file_path)}")
             continue
             
         try:
             data = np.loadtxt(file_path)
             if data.size == 0:
+                print(f"[DEBUG] Empty file: {file_path}")
                 continue
             if data.ndim == 1:
                 data = data.reshape(1, -1)
@@ -1503,8 +1386,10 @@ def load_data_files(plots_dir, pattern, jpm_value, data_dict):
             for row in data:
                 beta, value = row[0], row[1]
                 data_dict[species].append((jpm_value, beta, value))
+            
+            print(f"[DEBUG] Loaded {len(data)} rows from {os.path.basename(file_path)} for species {species}")
         except Exception as e:
-            print(f"Error reading {file_path}: {e}")
+            print(f"[ERROR] reading {file_path}: {e}")
 
 
 def extract_species_from_filename(file_path, pattern):
@@ -1536,23 +1421,41 @@ def save_raw_data_points(all_qfi_data, all_derivative_data, plot_outdir):
 def process_species_heatmap(species, data_points, plot_outdir, data_type, ref_target):
     """Process and create heatmaps for a single species."""
     
+    print(f"\n{'='*60}")
+    print(f"Processing heatmap for species: {species}, type: {data_type}")
+    print(f"Number of data points: {len(data_points)}")
+    
     # Convert data to array
     arr = np.array(data_points, dtype=float)
     jpm_vals, beta_vals, values = arr[:, 0], arr[:, 1], arr[:, 2]
     
+    print(f"Jpm range: [{jpm_vals.min():.3f}, {jpm_vals.max():.3f}]")
+    print(f"Beta range: [{beta_vals.min():.3f}, {beta_vals.max():.3f}]")
+    print(f"Value range: [{values.min():.3f}, {values.max():.3f}]")
+    
     # Get beta grid
     target_beta = get_beta_grid(jpm_vals, beta_vals, ref_target)
     if target_beta.size < 2:
+        print(f"WARNING: Insufficient beta grid size ({target_beta.size}). Skipping species.")
         return
+    
+    print(f"Target beta grid size: {target_beta.size}")
     
     # Split into positive and negative Jpm
     jpm_neg, jpm_pos = split_jpm_values(jpm_vals)
+    
+    print(f"Negative Jpm values: {jpm_neg.size}, Positive Jpm values: {jpm_pos.size}")
     
     # Interpolate data onto regular grid
     Z_neg, Z_pos = interpolate_to_grid(
         jpm_vals, beta_vals, values, 
         jpm_neg, jpm_pos, target_beta
     )
+    
+    if Z_neg is not None:
+        print(f"Z_neg shape: {Z_neg.shape}, NaN count: {np.isnan(Z_neg).sum()}")
+    if Z_pos is not None:
+        print(f"Z_pos shape: {Z_pos.shape}, NaN count: {np.isnan(Z_pos).sum()}")
     
     # Save grids
     save_grids(species, target_beta, jpm_neg, jpm_pos, 
@@ -1561,18 +1464,34 @@ def process_species_heatmap(species, data_points, plot_outdir, data_type, ref_ta
     # Filter rows with no NaN
     filtered_data = filter_nan_rows(target_beta, Z_neg, Z_pos, True)
     
+    print(f"Filtered data keys: {filtered_data.keys()}")
+    
     # Save filtered grids
     save_filtered_grids(species, filtered_data, jpm_neg, jpm_pos, 
                        plot_outdir, data_type)
     
     # Create plots
-    create_heatmap_plots(species, filtered_data, jpm_neg, jpm_pos, 
-                        plot_outdir, data_type)
+    try:
+        create_heatmap_plots(species, filtered_data, jpm_neg, jpm_pos, 
+                            plot_outdir, data_type)
+        print(f"Successfully created heatmap plots for {species}")
+    except Exception as e:
+        print(f"ERROR creating heatmap plots for {species}: {e}")
+        import traceback
+        traceback.print_exc()
     
     # Create line plots at fixed beta
-    create_fixed_beta_plots(species, target_beta, Z_neg, Z_pos, 
-                           jpm_neg, jpm_pos, filtered_data, 
-                           plot_outdir, data_type)
+    try:
+        create_fixed_beta_plots(species, target_beta, Z_neg, Z_pos, 
+                               jpm_neg, jpm_pos, filtered_data, 
+                               plot_outdir, data_type)
+        print(f"Successfully created fixed beta plots for {species}")
+    except Exception as e:
+        print(f"ERROR creating fixed beta plots for {species}: {e}")
+        import traceback
+        traceback.print_exc()
+    
+    print(f"{'='*60}\n")
 
 
 def get_beta_grid(jpm_vals, beta_vals, ref_target):
@@ -1610,12 +1529,15 @@ def split_jpm_values(jpm_vals):
 def interpolate_to_grid(jpm_vals, beta_vals, values, jpm_neg, jpm_pos, target_beta):
     """Interpolate data onto regular beta grid for each Jpm value."""
     
+    print(f"[DEBUG] interpolate_to_grid: target_beta size={len(target_beta)}, jpm_neg size={len(jpm_neg)}, jpm_pos size={len(jpm_pos)}")
+    
     def interp_at_jpm(j):
         mask = np.isclose(jpm_vals, j, rtol=1e-8, atol=1e-12)
         b = beta_vals[mask]
         v = values[mask]
         
         if b.size == 0:
+            print(f"[DEBUG] Jpm={j:.3f}: No data points found")
             return np.full_like(target_beta, np.nan, dtype=float)
         
         # Sort and average duplicates
@@ -1630,13 +1552,23 @@ def interpolate_to_grid(jpm_vals, beta_vals, values, jpm_neg, jpm_pos, target_be
         v_mean = v_mean / np.maximum(counts, 1)
         
         if bu.size < 2:
+            print(f"[DEBUG] Jpm={j:.3f}: Insufficient unique beta values ({bu.size}), returning NaN")
             return np.full_like(target_beta, np.nan, dtype=float)
         
         f = interp1d(bu, v_mean, kind='linear', bounds_error=False, fill_value=np.nan)
-        return f(target_beta)
+        result = f(target_beta)
+        nan_count = np.isnan(result).sum()
+        if nan_count > 0:
+            print(f"[DEBUG] Jpm={j:.3f}: Interpolation produced {nan_count} NaN values out of {len(result)}")
+        return result
     
     Z_neg = np.column_stack([interp_at_jpm(j) for j in jpm_neg]) if jpm_neg.size > 0 else None
     Z_pos = np.column_stack([interp_at_jpm(j) for j in jpm_pos]) if jpm_pos.size > 0 else None
+    
+    if Z_neg is not None:
+        print(f"[DEBUG] Z_neg created: shape={Z_neg.shape}, NaN count={np.isnan(Z_neg).sum()}")
+    if Z_pos is not None:
+        print(f"[DEBUG] Z_pos created: shape={Z_pos.shape}, NaN count={np.isnan(Z_pos).sum()}")
     
     return Z_neg, Z_pos
 
@@ -1650,6 +1582,11 @@ def filter_nan_rows(target_beta, Z_neg, Z_pos, naive = False):
         result['Z_pos_f'] = Z_pos
         result['beta_neg_f'] = target_beta
         result['beta_pos_f'] = target_beta
+        # Create masks for naive mode too (all True if data exists)
+        if Z_neg is not None and Z_neg.size > 0:
+            result['mask_neg'] = np.ones(len(target_beta), dtype=bool)
+        if Z_pos is not None and Z_pos.size > 0:
+            result['mask_pos'] = np.ones(len(target_beta), dtype=bool)
         return result
     else:
         if Z_neg is not None and Z_neg.size > 0:
@@ -1763,18 +1700,29 @@ def get_color_limits(filtered_data):
 
 def plot_single_heatmap(jpm, beta, Z, vmin, vmax, value_label, title, filename):
     """Create a single heatmap plot."""
+    print(f"[DEBUG] plot_single_heatmap: jpm shape={jpm.shape}, beta shape={beta.shape}, Z shape={Z.shape}")
+    print(f"[DEBUG] vmin={vmin:.6f}, vmax={vmax:.6f}")
+    
     J, B = np.meshgrid(jpm, beta)
+    print(f"[DEBUG] Meshgrid J shape={J.shape}, B shape={B.shape}")
     
     plt.figure(figsize=(12, 8))
-    plt.pcolormesh(J, B, Z, shading='auto', cmap='viridis', vmin=vmin, vmax=vmax)
-    plt.yscale('log')
-    plt.gca().invert_yaxis()  # large beta at bottom
-    plt.xlabel('Jpm')
-    plt.ylabel('Beta (β)')
-    plt.title(title)
-    plt.colorbar(label=value_label)
-    plt.savefig(filename, dpi=300, bbox_inches='tight')
-    plt.close()
+    try:
+        plt.pcolormesh(J, B, Z, shading='auto', cmap='viridis', vmin=vmin, vmax=vmax)
+        plt.yscale('log')
+        plt.gca().invert_yaxis()  # large beta at bottom
+        plt.xlabel('Jpm')
+        plt.ylabel('Beta (β)')
+        plt.title(title)
+        plt.colorbar(label=value_label)
+        plt.savefig(filename, dpi=300, bbox_inches='tight')
+        print(f"[DEBUG] Successfully saved heatmap to {filename}")
+    except Exception as e:
+        print(f"[ERROR] Failed to create heatmap: {e}")
+        import traceback
+        traceback.print_exc()
+    finally:
+        plt.close()
 
 
 def plot_side_by_side_heatmap(species, filtered_data, jpm_neg, jpm_pos, 
@@ -1905,27 +1853,11 @@ if __name__ == "__main__":
     # Path to the directory containing the data files
     data_dir = sys.argv[1] if len(sys.argv) > 1 else 'data'
     across_QFI = sys.argv[2] if len(sys.argv) > 2 else 'False'
-    mode = sys.argv[3] if len(sys.argv) > 3 else 'all'  # 'taylor', 'global', 'taylor_combined', 'global_combined', or 'all'
-    
     across_QFI = across_QFI.lower() == 'true'
-    
     if across_QFI:
-        parse_QFI_across_Jpm(data_dir, mode=mode)
-        parse_QFI_across_hi(data_dir, mode=mode)
-        plot_heatmaps_from_processed_data(data_dir, mode=mode)
+        parse_QFI_across_Jpm(data_dir)
+        parse_QFI_across_hi(data_dir)
+        plot_heatmaps_from_processed_data(data_dir)
     else:
-        if mode == 'all':
-            # Process all available modes
-            modes = ['taylor', 'taylor_combined', 'global', 'global_combined']
-            for m in modes:
-                print(f"\n{'='*80}")
-                print(f"Processing mode: {m}")
-                print(f"{'='*80}\n")
-                try:
-                    parse_QFI_data_new(data_dir, mode=m)
-                except Exception as e:
-                    print(f"Error processing mode {m}: {e}")
-        else:
-            parse_QFI_data_new(data_dir, mode=mode)
-    
+        parse_QFI_data_new(data_dir)
     print("All processing complete.")
