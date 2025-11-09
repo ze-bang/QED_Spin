@@ -166,9 +166,9 @@ def parse_arguments():
     parser.add_argument('--lattice_size', type=int, default=0, help='Size of finite lattice (default: 2*max_order)')
     parser.add_argument('--output_dir', type=str, default='.', help='Output directory for cluster information')
     parser.add_argument('--cache_dir', type=str, default='./cache', help='Directory for cache files')
-    parser.add_argument('--no_cache', action='store_true', help='Disable cache (recompute everything)')
-    parser.add_argument('--force_recompute', action='store_true', help='Force recomputation even if cache exists')
-    parser.add_argument('--periodic', action='store_true', help='Use periodic boundary conditions')
+    parser.add_argument('--no_cache', action='store_false', help='Disable cache (recompute everything)')
+    parser.add_argument('--force_recompute', action='store_false', help='Force recomputation even if cache exists')
+    parser.add_argument('--periodic', action='store_false', help='Use periodic boundary conditions')
     return parser.parse_args()
 
 def create_pyrochlore_lattice(L, periodic=False):
@@ -293,10 +293,15 @@ def _wl_hash_subgraph(G, nodes):
             degs = sorted([d for _, d in H.degree()])
             return f"{len(H)}|{H.number_of_edges()}|{tuple(degs)}"
 
-def generate_clusters(tet_graph, max_order):
+def generate_clusters(tet_graph, max_order, num_sites):
     """
     Generate all topologically distinct clusters up to max_order and their multiplicities.
     Uses anchored expansion + WL hashing for fast dedup, exact iso only within same-hash buckets.
+    
+    Args:
+    - tet_graph: Graph where nodes are tetrahedra
+    - max_order: Maximum cluster order
+    - num_sites: Total number of lattice sites (for multiplicity normalization)
     """
     distinct_clusters = []
     multiplicities = []
@@ -306,11 +311,12 @@ def generate_clusters(tet_graph, max_order):
     for order in range(1, max_order + 1):
         print(f"Generating clusters of order {order}...")
 
-        # Order-1: one representative, multiplicity 1 per site
+        # Order-1: one representative, multiplicity is count/num_sites
         if order == 1:
             first_tet = nodes_sorted[0]
             distinct_clusters.append([first_tet])
-            multiplicities.append(0.5)  # per-site normalization
+            # Each tetrahedron appears N times in the lattice, normalize by number of sites
+            multiplicities.append(N / num_sites)
             continue
 
         # Hash-bucket: signature -> list of groups; each group is (rep_nodes_set, embedding_count)
@@ -365,7 +371,8 @@ def generate_clusters(tet_graph, max_order):
         for sig_groups in buckets.values():
             for rep_nodes, count in sig_groups:
                 reps.append(sorted(rep_nodes))
-                mults.append(count / (2*N))  # embeddings per tetrahedron (site)
+                # Multiplicity = number of embeddings / number of lattice sites
+                mults.append(count / num_sites)
 
         distinct_clusters.extend(reps)
         multiplicities.extend(mults)
@@ -510,7 +517,7 @@ def main():
     max_order = args.max_order
     
     # Set lattice size
-    L = args.lattice_size if args.lattice_size > 0 else max(10, max_order)
+    L = args.lattice_size if args.lattice_size > 0 else max(1, max_order)
     
     # Boundary condition string for output
     bc_str = "PBC" if args.periodic else "OBC"
@@ -539,13 +546,15 @@ def main():
     if cache_data is None:
         print(f"Generating pyrochlore lattice of size {L}×{L}×{L} with {bc_str}...")
         lattice, pos, tetrahedra = create_pyrochlore_lattice(L, args.periodic)
-        print(f"Generated lattice with {lattice.number_of_nodes()} sites and {len(tetrahedra)} tetrahedra")
+        print(f"Lattice generated with {len(pos)} sites and {len(tetrahedra)} tetrahedra")
+        num_sites = lattice.number_of_nodes()
+        print(f"Generated lattice with {num_sites} sites and {len(tetrahedra)} tetrahedra")
         
         print("Building tetrahedron adjacency graph...")
         tet_graph = build_tetrahedron_graph(tetrahedra)
         
         print(f"Generating clusters up to order {max_order}...")
-        distinct_clusters, multiplicities = generate_clusters(tet_graph, max_order)
+        distinct_clusters, multiplicities = generate_clusters(tet_graph, max_order, num_sites)
         
         # Save to cache unless disabled
         if not args.no_cache:
@@ -574,7 +583,6 @@ def main():
         print(f"  Order {order}: {len(clusters_by_order[order])} distinct clusters")
     
     # Create output directory for cluster info
-    bc_suffix = "pbc" if args.periodic else "obc"
     output_dir = args.output_dir + f"/cluster_info_order_{max_order}"
     os.makedirs(output_dir, exist_ok=True)
 

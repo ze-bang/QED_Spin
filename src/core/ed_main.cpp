@@ -5,7 +5,6 @@
 #include "ed_config_adapter.h"
 #include "ed_wrapper.h"
 #include "ed_wrapper_streaming.h"
-#include "ed_wrapper_fixed_sz_symmetry.h"
 #include "construct_ham.h"
 #include "../cpu_solvers/ftlm.h"
 #include "../cpu_solvers/ltlm.h"

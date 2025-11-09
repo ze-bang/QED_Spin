@@ -40,7 +40,9 @@ enum class DiagonalizationMethod {
     DAVIDSON_GPU,
     LOBPCG_GPU,
     mTPQ_GPU,
-    cTPQ_GPU
+    cTPQ_GPU,
+    FTLM_GPU,
+    FTLM_GPU_FIXED_SZ
 };
 
 // ============================================================================
@@ -539,7 +541,6 @@ std::optional<DiagonalizationMethod> parseMethod(const std::string& str) {
     if (lower == "lobpcg_gpu") return DiagonalizationMethod::LOBPCG_GPU;
     if (lower == "mtpq_gpu") return DiagonalizationMethod::mTPQ_GPU;
     if (lower == "ctpq_gpu") return DiagonalizationMethod::cTPQ_GPU;
-
     std::cerr << "Warning: Unknown method '" << str << "', using LANCZOS\n";
     return std::nullopt;
 }
