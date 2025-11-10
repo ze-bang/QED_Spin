@@ -17,6 +17,7 @@
 #include <map>
 #include <tuple>
 #include <unordered_map>
+#include <omp.h>
 #include "system_utils.h"
 #include "hdf5_symmetry_io.h"
 
@@ -1061,19 +1062,30 @@ public:
             auto dims = HDF5SymmetryIO::loadSectorDimensions(hdf5_file);
             symmetrized_block_ham_sizes.assign(dims.begin(), dims.end());
         }
+        
+        // Count non-empty blocks for progress tracking
+        size_t non_empty_blocks = 0;
+        for (const auto& size : symmetrized_block_ham_sizes) {
+            if (size > 0) non_empty_blocks++;
+        }
+        
+        std::cout << "Total blocks: " << symmetrized_block_ham_sizes.size() 
+                  << " (non-empty: " << non_empty_blocks << ")" << std::endl;
                 
         uint64_t block_start = 0;
         const size_t dim = 1ULL << n_bits_;
+        size_t blocks_completed = 0;
         
         for (size_t block_idx = 0; block_idx < symmetrized_block_ham_sizes.size(); ++block_idx) {
             uint64_t block_size = symmetrized_block_ham_sizes[block_idx];
             
             if (block_size == 0) {
-                std::cout << "  Skipping empty block " << block_idx << std::endl;
                 continue;
             }
             
-            std::cout << "  Building block " << block_idx << " ("
+            blocks_completed++;
+            std::cout << "\n[" << blocks_completed << "/" << non_empty_blocks << "] "
+                      << "Building block " << block_idx << " ("
                       << block_size << "x" << block_size << ")..." << std::flush;
             
             auto start_time = std::chrono::high_resolution_clock::now();
@@ -1089,12 +1101,20 @@ public:
             std::cout << " [computing]" << std::flush;
             std::vector<std::vector<Eigen::Triplet<Complex>>> thread_triplets(block_size);
             
+            // FIX: Disable nested parallelism to avoid CPU stalls
             #pragma omp parallel for schedule(dynamic, 1) if(block_size > 4)
             for (uint64_t col = 0; col < block_size; ++col) {
                 const auto& basis_col = basis_vectors[col];
                 
-                // Apply Hamiltonian: H|ψ_j⟩ (matrix-free)
-                std::vector<Complex> H_psi_j = apply(basis_col);
+                // CRITICAL FIX: Disable OpenMP nesting inside parallel region
+                int old_max_levels = omp_get_max_active_levels();
+                omp_set_max_active_levels(1);
+                
+                // Apply Hamiltonian: H|ψ_j⟩ (matrix-free, but single-threaded in this context)
+                std::vector<Complex> basis_col_copy = basis_col;
+                std::vector<Complex> H_psi_j = apply(basis_col_copy);
+                
+                omp_set_max_active_levels(old_max_levels);
                 
                 // Compute matrix elements with all rows (row-wise)
                 // OPTIMIZATION 3: Use conjugate symmetry for Hermitian operators
@@ -1143,14 +1163,17 @@ public:
             auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time);
             
             double fill_percent = 100.0 * triplets.size() / (block_size * block_size);
+            double progress_percent = 100.0 * blocks_completed / non_empty_blocks;
             std::cout << " done (" << triplets.size() << " nnz, "
                       << std::fixed << std::setprecision(2) << fill_percent << "% fill, "
-                      << duration.count() << " ms)" << std::endl;
+                      << duration.count() << " ms) [" 
+                      << std::fixed << std::setprecision(1) << progress_percent << "% complete]" 
+                      << std::endl;
             
             block_start += block_size;
         }
         
-        std::cout << "=== Block Construction Complete (HDF5) ===" << std::endl;
+        std::cout << "\n=== Block Construction Complete (HDF5) ===" << std::endl;
     }
     
     /**
@@ -1276,24 +1299,40 @@ public:
         std::string block_dir = dir + "/sym_blocks";
         safe_system_call("mkdir -p " + block_dir);
         
+        // Count non-empty blocks for progress tracking
+        size_t non_empty_blocks = 0;
+        for (const auto& size : symmetrized_block_ham_sizes) {
+            if (size > 0) non_empty_blocks++;
+        }
+        
+        std::cout << "Total blocks: " << symmetrized_block_ham_sizes.size() 
+                  << " (non-empty: " << non_empty_blocks << ")" << std::endl;
+        
         uint64_t block_start = 0;
+        size_t blocks_completed = 0;
+        
         for (size_t block_idx = 0; block_idx < symmetrized_block_ham_sizes.size(); ++block_idx) {
             uint64_t block_size = symmetrized_block_ham_sizes[block_idx];
             
             if (block_size == 0) {
-                std::cout << "  Block " << block_idx << ": empty (skipping)" << std::endl;
                 continue;
             }
             
-            std::cout << "  Building block " << block_idx << " ("
+            blocks_completed++;
+            std::cout << "\n[" << blocks_completed << "/" << non_empty_blocks << "] "
+                      << "Building block " << block_idx << " ("
                       << block_size << "x" << block_size << ")..." << std::flush;
             
             buildSingleBlock(dir, block_dir, block_idx, block_start, block_size);
             
+            double progress_percent = 100.0 * blocks_completed / non_empty_blocks;
+            std::cout << "    [" << std::fixed << std::setprecision(1) 
+                      << progress_percent << "% complete]" << std::endl;
+            
             block_start += block_size;
         }
         
-        std::cout << "=== Block Construction Complete ===" << std::endl;
+        std::cout << "\n=== Block Construction Complete ===" << std::endl;
     }
     
     /**
@@ -1507,22 +1546,22 @@ private:
         // OPTIMIZATION 2: Parallel computation with Hermitian symmetry
         std::vector<std::vector<Eigen::Triplet<Complex>>> thread_triplets(block_size);
         
+        // FIX: Sequential application of H (avoid nested parallelism), parallel only over columns
         #pragma omp parallel for schedule(dynamic, 1) if(block_size > 4)
         for (uint64_t col = 0; col < block_size; ++col) {
             const auto& basis_col = basis_vectors[col];
             
-            // Apply Hamiltonian (matrix-free)
-            std::vector<Complex> h_basis_col(dim, Complex(0.0, 0.0));
-            for (size_t k = 0; k < basis_col.size(); ++k) {
-                if (std::abs(basis_col[k]) < 1e-12) continue;
-                
-                for (const auto& transform : transforms_) {
-                    auto [j, scalar] = transform(k);
-                    if (j >= 0 && j < (1 << n_bits_)) {
-                        h_basis_col[j] += scalar * basis_col[k];
-                    }
-                }
-            }
+            // Apply Hamiltonian using matrix-free method (apply() already optimized)
+            // Create non-const copy for apply
+            std::vector<Complex> basis_col_copy = basis_col;
+            
+            // CRITICAL FIX: Disable nested OpenMP inside apply() by limiting active levels to 1
+            int old_max_levels = omp_get_max_active_levels();
+            omp_set_max_active_levels(1);
+            
+            std::vector<Complex> h_basis_col = apply(basis_col_copy);
+            
+            omp_set_max_active_levels(old_max_levels);
             
             // Compute matrix elements (use Hermitian symmetry)
             for (uint64_t row = 0; row <= col; ++row) {  // Only lower triangle + diagonal
@@ -1584,7 +1623,8 @@ private:
         std::cout << " done (" << nnz << " nnz, "
                   << std::fixed << std::setprecision(2)
                   << (100.0 * nnz / (block_size * block_size)) << "% fill, "
-                  << duration.count() << " ms)" << std::endl;
+                  << duration.count() << " ms)";
+        // Note: Progress percentage printed by caller
     }
 };
 
@@ -2505,10 +2545,18 @@ private:
         // OPTIMIZATION 2: Parallel computation with Hermitian symmetry
         std::vector<std::vector<Eigen::Triplet<Complex>>> thread_triplets(block_size);
         
+        // FIX: Disable nested parallelism to avoid CPU stalls
         #pragma omp parallel for schedule(dynamic, 1) if(block_size > 4)
         for (uint64_t col = 0; col < block_size; ++col) {
+            // CRITICAL FIX: Disable OpenMP nesting inside parallel region
+            int old_max_levels = omp_get_max_active_levels();
+            omp_set_max_active_levels(1);
+            
             // Apply Hamiltonian: H|ψ_j⟩
-            std::vector<Complex> H_psi_j = apply(basis_vectors[col]);
+            std::vector<Complex> basis_col_copy = basis_vectors[col];
+            std::vector<Complex> H_psi_j = apply(basis_col_copy);
+            
+            omp_set_max_active_levels(old_max_levels);
             
             // Compute matrix elements (use Hermitian symmetry)
             for (uint64_t row = 0; row <= col; ++row) {  // Only lower triangle + diagonal
