@@ -143,7 +143,9 @@ enum class DiagonalizationMethod {
     DAVIDSON_GPU,          // GPU-accelerated Davidson method
     LOBPCG_GPU,            // GPU-accelerated LOBPCG method
     mTPQ_GPU,              // GPU-accelerated microcanonical TPQ
-    cTPQ_GPU               // GPU-accelerated canonical TPQ
+    cTPQ_GPU,              // GPU-accelerated canonical TPQ
+    FTLM_GPU,              // GPU-accelerated Finite Temperature Lanczos Method
+    FTLM_GPU_FIXED_SZ      // GPU-accelerated FTLM (fixed Sz sector)
 };
 
 /**
@@ -749,6 +751,8 @@ EDResults exact_diagonalization_core(
         case DiagonalizationMethod::LOBPCG_GPU:
         case DiagonalizationMethod::mTPQ_GPU:
         case DiagonalizationMethod::cTPQ_GPU:
+        case DiagonalizationMethod::FTLM_GPU:
+        case DiagonalizationMethod::FTLM_GPU_FIXED_SZ:
             // These should be handled in exact_diagonalization_from_files
             // If we reach here, it means they were called incorrectly
             std::cerr << "Error: GPU methods must be called via exact_diagonalization_from_files" << std::endl;
@@ -1770,7 +1774,9 @@ EDResults exact_diagonalization_from_files(
         method == DiagonalizationMethod::DAVIDSON_GPU ||
         method == DiagonalizationMethod::LOBPCG_GPU ||
         method == DiagonalizationMethod::mTPQ_GPU ||
-        method == DiagonalizationMethod::cTPQ_GPU) {
+        method == DiagonalizationMethod::cTPQ_GPU ||
+        method == DiagonalizationMethod::FTLM_GPU ||
+        method == DiagonalizationMethod::FTLM_GPU_FIXED_SZ) {
         
         std::cout << "Running GPU-accelerated algorithm..." << std::endl;
         
@@ -1940,6 +1946,44 @@ EDResults exact_diagonalization_from_files(
             GPUEDWrapper::destroyGPUOperator(gpu_op);
             
             std::cout << "GPU cTPQ completed successfully!" << std::endl;
+            
+        } else if (method == DiagonalizationMethod::FTLM_GPU) {
+            std::cout << "Running GPU Finite Temperature Lanczos Method..." << std::endl;
+            
+            void* gpu_op = GPUEDWrapper::createGPUOperatorFromFiles(
+                params.num_sites, interaction_file, single_site_file);
+            
+            if (!gpu_op) {
+                std::cerr << "Error: Failed to create GPU operator" << std::endl;
+                throw std::runtime_error("GPU operator creation failed");
+            }
+            
+            GPUEDWrapper::runGPUFTLM(
+                gpu_op,
+                hilbert_space_dim,
+                params.ftlm_krylov_dim,
+                params.num_samples,
+                params.temp_min,
+                params.temp_max,
+                params.num_temp_bins,
+                params.tolerance,
+                params.output_dir,
+                params.ftlm_full_reorth,
+                params.ftlm_reorth_freq,
+                params.ftlm_seed
+            );
+            
+            // FTLM doesn't return eigenvalues in the traditional sense
+            // Results are thermodynamic quantities written to files
+            
+            GPUEDWrapper::destroyGPUOperator(gpu_op);
+            
+            std::cout << "GPU FTLM completed successfully!" << std::endl;
+            
+        } else if (method == DiagonalizationMethod::FTLM_GPU_FIXED_SZ) {
+            std::cerr << "Error: FTLM_GPU_FIXED_SZ file interface not yet implemented." << std::endl;
+            std::cerr << "Please use the fixed_sz wrapper function directly." << std::endl;
+            throw std::runtime_error("Fixed Sz GPU FTLM not yet integrated with file interface");
         }
         
         return results;

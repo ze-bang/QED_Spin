@@ -24,17 +24,8 @@
 // Define complex number type for convenience
 using Complex = std::complex<double>;
 
-
-
-// Calculate thermodynamic quantities directly from eigenvalues
-struct ThermodynamicData {
-    std::vector<double> temperatures;
-    std::vector<double> energy;
-    std::vector<double> specific_heat;
-    std::vector<double> entropy;
-    std::vector<double> free_energy;
-};
-
+// Include shared thermal types for CPU/GPU compatibility
+#include "thermal_types.h"
 
 // Calculate dynamical susceptibility χ(ω) for operator A
 // χ(ω) = ∑_{n,m} (p_m - p_n) * |<n|A|m>|^2 / (ω - (E_n - E_m) + iη)

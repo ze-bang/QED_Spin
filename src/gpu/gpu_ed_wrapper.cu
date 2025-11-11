@@ -3,6 +3,8 @@
 #include <fstream>
 #include <sstream>
 #include <cmath>
+#include <sys/stat.h>
+#include <sys/types.h>
 
 #ifdef WITH_CUDA
 #include <cuda_runtime.h>
@@ -10,6 +12,7 @@
 #include "gpu_lanczos.cuh"
 #include "gpu_tpq.cuh"
 #include "gpu_cg.cuh"
+#include "gpu_ftlm.cuh"
 
 bool GPUEDWrapper::isGPUAvailable() {
     int device_count = 0;
@@ -638,6 +641,107 @@ void GPUEDWrapper::runGPULOBPCGFixedSz(void* gpu_op_handle,
                          tol, eigenvalues, dir, compute_eigenvectors);
 }
 
+void GPUEDWrapper::runGPUFTLM(void* gpu_op_handle,
+                             int N,
+                             int krylov_dim,
+                             int num_samples,
+                             double temp_min,
+                             double temp_max,
+                             int num_temp_bins,
+                             double tolerance,
+                             std::string dir,
+                             bool full_reorth,
+                             int reorth_freq,
+                             unsigned int random_seed) {
+    if (!gpu_op_handle) {
+        std::cerr << "Error: GPU operator handle is null\n";
+        return;
+    }
+    
+    GPUOperator* gpu_op = static_cast<GPUOperator*>(gpu_op_handle);
+    
+    // Create GPU FTLM solver
+    GPUFTLMSolver ftlm_solver(gpu_op, N, krylov_dim, tolerance);
+    
+    // Run FTLM
+    FTLMResults results = ftlm_solver.run(num_samples, temp_min, temp_max, 
+                                         num_temp_bins, dir, full_reorth, 
+                                         reorth_freq, random_seed);
+    
+    // Save results if directory provided
+    if (!dir.empty()) {
+        // Create thermo subdirectory if it doesn't exist
+        std::string thermo_dir = dir + "/thermo";
+        mkdir(thermo_dir.c_str(), 0755);
+        
+        std::string output_file = thermo_dir + "/ftlm_thermo.txt";
+        save_ftlm_results(results, output_file);
+    }
+    
+    // Print statistics
+    auto stats = ftlm_solver.getStats();
+    std::cout << "\nGPU FTLM Statistics:\n";
+    std::cout << "  Total time: " << stats.total_time << " s\n";
+    std::cout << "  Lanczos time: " << stats.lanczos_time << " s\n";
+    std::cout << "  Thermodynamics time: " << stats.thermo_time << " s\n";
+    std::cout << "  Total iterations: " << stats.total_iterations << "\n";
+    std::cout << "  Samples completed: " << stats.num_samples_completed << "\n";
+}
+
+void GPUEDWrapper::runGPUFTLMFixedSz(void* gpu_op_handle,
+                                    int n_up,
+                                    int krylov_dim,
+                                    int num_samples,
+                                    double temp_min,
+                                    double temp_max,
+                                    int num_temp_bins,
+                                    double tolerance,
+                                    std::string dir,
+                                    bool full_reorth,
+                                    int reorth_freq,
+                                    unsigned int random_seed) {
+    if (!gpu_op_handle) {
+        std::cerr << "Error: GPU operator handle is null\n";
+        return;
+    }
+    
+    // Cast to GPUFixedSzOperator
+    GPUFixedSzOperator* gpu_op = static_cast<GPUFixedSzOperator*>(gpu_op_handle);
+    int fixed_sz_dim = gpu_op->getFixedSzDimension();
+    
+    std::cout << "Running GPU FTLM for fixed Sz sector (N_up=" << n_up 
+              << ", dimension=" << fixed_sz_dim << ")\n";
+    
+    // Create GPU FTLM solver for fixed Sz
+    GPUFTLMSolver ftlm_solver(gpu_op, fixed_sz_dim, krylov_dim, tolerance);
+    
+    // Run FTLM
+    FTLMResults results = ftlm_solver.run(num_samples, temp_min, temp_max, 
+                                         num_temp_bins, dir, full_reorth, 
+                                         reorth_freq, random_seed);
+    
+    // Save results if directory provided
+    if (!dir.empty()) {
+        // Create thermo subdirectory if it doesn't exist
+        std::string thermo_dir = dir + "/thermo";
+        mkdir(thermo_dir.c_str(), 0755);
+        
+        std::string output_file = thermo_dir + "/ftlm_thermo.txt";
+        save_ftlm_results(results, output_file);
+    }
+    
+    // Print statistics
+    auto stats = ftlm_solver.getStats();
+    std::cout << "\nGPU FTLM Fixed Sz Statistics:\n";
+    std::cout << "  Total time: " << stats.total_time << " s\n";
+    std::cout << "  Lanczos time: " << stats.lanczos_time << " s\n";
+    std::cout << "  Thermodynamics time: " << stats.thermo_time << " s\n";
+    std::cout << "  Total iterations: " << stats.total_iterations << "\n";
+    std::cout << "  Samples completed: " << stats.num_samples_completed << "\n";
+    
+    std::cout << "\nGPU FTLM Fixed Sz complete\n";
+}
+
 bool GPUEDWrapper::createGPUOperatorFromCPU(const Operator& cpu_op,
                                            void** gpu_op_handle,
                                            int n_sites) {
@@ -776,6 +880,36 @@ void GPUEDWrapper::runGPULOBPCGFixedSz(void* gpu_op_handle,
                                       bool compute_eigenvectors) {
     // Stub: LOBPCG_GPU Fixed Sz redirects to Davidson GPU
     std::cerr << "CUDA not available - cannot run GPU methods\n";
+}
+
+void GPUEDWrapper::runGPUFTLM(void* gpu_op_handle,
+                             int N,
+                             int krylov_dim,
+                             int num_samples,
+                             double temp_min,
+                             double temp_max,
+                             int num_temp_bins,
+                             double tolerance,
+                             std::string dir,
+                             bool full_reorth,
+                             int reorth_freq,
+                             unsigned int random_seed) {
+    std::cerr << "CUDA not available - cannot run GPU FTLM\n";
+}
+
+void GPUEDWrapper::runGPUFTLMFixedSz(void* gpu_op_handle,
+                                    int n_up,
+                                    int krylov_dim,
+                                    int num_samples,
+                                    double temp_min,
+                                    double temp_max,
+                                    int num_temp_bins,
+                                    double tolerance,
+                                    std::string dir,
+                                    bool full_reorth,
+                                    int reorth_freq,
+                                    unsigned int random_seed) {
+    std::cerr << "CUDA not available - cannot run GPU FTLM Fixed Sz\n";
 }
 
 bool GPUEDWrapper::createGPUOperatorFromCPU(const Operator& cpu_op,

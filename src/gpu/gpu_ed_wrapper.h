@@ -203,6 +203,38 @@ public:
                                    std::string dir = "",
                                    bool compute_eigenvectors = false);
     
+    /**
+     * Run GPU-accelerated Finite Temperature Lanczos Method (FTLM)
+     */
+    static void runGPUFTLM(void* gpu_op_handle,
+                          int N,
+                          int krylov_dim,
+                          int num_samples,
+                          double temp_min,
+                          double temp_max,
+                          int num_temp_bins,
+                          double tolerance,
+                          std::string dir = "",
+                          bool full_reorth = false,
+                          int reorth_freq = 10,
+                          unsigned int random_seed = 0);
+    
+    /**
+     * Run GPU-accelerated FTLM for Fixed Sz sector
+     */
+    static void runGPUFTLMFixedSz(void* gpu_op_handle,
+                                 int n_up,
+                                 int krylov_dim,
+                                 int num_samples,
+                                 double temp_min,
+                                 double temp_max,
+                                 int num_temp_bins,
+                                 double tolerance,
+                                 std::string dir = "",
+                                 bool full_reorth = false,
+                                 int reorth_freq = 10,
+                                 unsigned int random_seed = 0);
+    
 private:
     static int getGPUCount();
     static size_t getAvailableGPUMemory(int device = 0);

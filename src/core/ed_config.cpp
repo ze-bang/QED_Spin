@@ -541,6 +541,8 @@ std::optional<DiagonalizationMethod> parseMethod(const std::string& str) {
     if (lower == "lobpcg_gpu") return DiagonalizationMethod::LOBPCG_GPU;
     if (lower == "mtpq_gpu") return DiagonalizationMethod::mTPQ_GPU;
     if (lower == "ctpq_gpu") return DiagonalizationMethod::cTPQ_GPU;
+    if (lower == "ftlm_gpu") return DiagonalizationMethod::FTLM_GPU;
+    if (lower == "ftlm_gpu_fixed_sz") return DiagonalizationMethod::FTLM_GPU_FIXED_SZ;
     std::cerr << "Warning: Unknown method '" << str << "', using LANCZOS\n";
     return std::nullopt;
 }
@@ -592,6 +594,8 @@ std::string methodToString(DiagonalizationMethod method) {
         case DiagonalizationMethod::LOBPCG_GPU: return "LOBPCG_GPU";
         case DiagonalizationMethod::mTPQ_GPU: return "mTPQ_GPU";
         case DiagonalizationMethod::cTPQ_GPU: return "cTPQ_GPU";
+        case DiagonalizationMethod::FTLM_GPU: return "FTLM_GPU";
+        case DiagonalizationMethod::FTLM_GPU_FIXED_SZ: return "FTLM_GPU_FIXED_SZ";
         
         default: return "UNKNOWN";
     }
@@ -1013,6 +1017,51 @@ std::string getMethodParameterInfo(DiagonalizationMethod method) {
             info << "  - delta_tau: Imaginary time step\n";
             info << "  - num_order: Order parameter for TPQ\n\n";
             info << "Best for: GPU-accelerated finite-temperature calculations (canonical)\n";
+            break;
+            
+        case DiagonalizationMethod::FTLM_GPU:
+            info << "GPU-accelerated Finite Temperature Lanczos Method (requires CUDA build).\n\n";
+            info << "Computes thermodynamic properties (energy, entropy, specific heat, free energy)\n";
+            info << "at finite temperature using GPU-accelerated Lanczos iterations. Significantly\n";
+            info << "faster than CPU FTLM for large systems.\n\n";
+            info << "Requires: CUDA-enabled build\n";
+            info << "Configurable Parameters:\n";
+            info << "  --samples=<n>         Number of random samples (default: 10)\n";
+            info << "  --ftlm-krylov=<m>     Krylov dimension per sample (default: 100)\n";
+            info << "  --temp_min=<T>        Minimum temperature (default: 1e-3)\n";
+            info << "  --temp_max=<T>        Maximum temperature (default: 20.0)\n";
+            info << "  --temp_bins=<n>       Number of temperature points (default: 100)\n";
+            info << "  --ftlm-full-reorth    Use full reorthogonalization (slower, more stable)\n";
+            info << "  --ftlm-reorth-freq=<k>  Reorthogonalization frequency (default: 10)\n";
+            info << "  --ftlm-seed=<seed>    Random seed (0 = random, default: 0)\n";
+            info << "\nOutput:\n";
+            info << "  Saves to: output_dir/thermo/ftlm_gpu_thermo.txt\n";
+            info << "  Format: Temperature  Energy  E_error  Specific_Heat  C_error  Entropy  S_error  Free_Energy  F_error\n";
+            info << "\nBest for: GPU-accelerated finite-temperature thermodynamics\n";
+            info << "Advantages: Much faster than CPU FTLM, scales to larger systems\n";
+            info << "Note: Requires sufficient GPU memory for Hamiltonian and Lanczos vectors\n";
+            break;
+            
+        case DiagonalizationMethod::FTLM_GPU_FIXED_SZ:
+            info << "GPU-accelerated FTLM for fixed Sz sector (requires CUDA build).\n\n";
+            info << "Computes thermodynamic properties in a specific Sz sector using GPU acceleration.\n";
+            info << "Useful when only a particular spin sector is of interest.\n\n";
+            info << "Requires: CUDA-enabled build\n";
+            info << "Configurable Parameters:\n";
+            info << "  --n_up=<n>            Number of up spins (determines Sz sector)\n";
+            info << "  --samples=<n>         Number of random samples (default: 10)\n";
+            info << "  --ftlm-krylov=<m>     Krylov dimension per sample (default: 100)\n";
+            info << "  --temp_min=<T>        Minimum temperature (default: 1e-3)\n";
+            info << "  --temp_max=<T>        Maximum temperature (default: 20.0)\n";
+            info << "  --temp_bins=<n>       Number of temperature points (default: 100)\n";
+            info << "  --ftlm-full-reorth    Use full reorthogonalization (slower, more stable)\n";
+            info << "  --ftlm-reorth-freq=<k>  Reorthogonalization frequency (default: 10)\n";
+            info << "  --ftlm-seed=<seed>    Random seed (0 = random, default: 0)\n";
+            info << "\nOutput:\n";
+            info << "  Saves to: output_dir/thermo/ftlm_gpu_fixedsz_thermo.txt\n";
+            info << "  Format: Temperature  Energy  E_error  Specific_Heat  C_error  Entropy  S_error  Free_Energy  F_error\n";
+            info << "\nBest for: Fixed Sz sector thermodynamics with GPU acceleration\n";
+            info << "Advantages: Reduced Hilbert space, faster than full space calculations\n";
             break;
             
         default:
