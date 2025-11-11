@@ -95,6 +95,89 @@ public:
     
     Stats getStats() const { return stats_; }
     
+    /**
+     * @brief Compute dynamical response S(ω) for operator O applied to a given state
+     * 
+     * GPU-accelerated version of compute_dynamical_response.
+     * Computes S(ω) = <ψ|O†δ(ω - H)O|ψ> where:
+     * - H is the Hamiltonian (via GPU operator)
+     * - O is an operator (via GPU operator)
+     * - |ψ> is an initial state vector (on GPU)
+     * 
+     * @param d_psi Initial state vector on GPU (normalized)
+     * @param op_O GPU operator for O (if nullptr, uses H)
+     * @param omega_min Minimum frequency
+     * @param omega_max Maximum frequency
+     * @param num_omega_bins Number of frequency points
+     * @param broadening Lorentzian broadening parameter (η)
+     * @param temperature Temperature for thermal weighting (0 = none)
+     * @return Spectral function data (frequencies and S(ω))
+     */
+    std::pair<std::vector<double>, std::vector<double>> 
+    computeDynamicalResponse(const cuDoubleComplex* d_psi,
+                           GPUOperator* op_O,
+                           double omega_min,
+                           double omega_max,
+                           int num_omega_bins,
+                           double broadening,
+                           double temperature = 0.0);
+    
+    /**
+     * @brief Compute dynamical response averaged over random initial states
+     * 
+     * GPU-accelerated thermal dynamical response using FTLM approach.
+     * Averages S(ω) over multiple random initial states to approximate
+     * finite temperature response.
+     * 
+     * @param num_samples Number of random initial states
+     * @param op_O GPU operator for O (if nullptr, uses H)
+     * @param omega_min Minimum frequency
+     * @param omega_max Maximum frequency
+     * @param num_omega_bins Number of frequency points
+     * @param broadening Lorentzian broadening parameter
+     * @param temperature Temperature for thermal weighting
+     * @param random_seed Random seed (0 = random)
+     * @return Spectral function with error bars
+     */
+    std::tuple<std::vector<double>, std::vector<double>, std::vector<double>>
+    computeDynamicalResponseThermal(int num_samples,
+                                  GPUOperator* op_O,
+                                  double omega_min,
+                                  double omega_max,
+                                  int num_omega_bins,
+                                  double broadening,
+                                  double temperature = 0.0,
+                                  unsigned int random_seed = 0);
+    
+    /**
+     * @brief Compute dynamical correlation S_{O1,O2}(ω) = <O₁†(ω)O₂>
+     * 
+     * GPU-accelerated computation of cross-correlation spectral function.
+     * For O1=O2, gives auto-correlation/spectral density.
+     * 
+     * @param num_samples Number of random samples for thermal average
+     * @param op_O1 GPU operator for O₁
+     * @param op_O2 GPU operator for O₂
+     * @param omega_min Minimum frequency
+     * @param omega_max Maximum frequency
+     * @param num_omega_bins Number of frequency points
+     * @param broadening Lorentzian broadening parameter
+     * @param temperature Temperature for thermal weighting
+     * @param random_seed Random seed (0 = random)
+     * @return Spectral function with real/imaginary parts and errors
+     */
+    std::tuple<std::vector<double>, std::vector<double>, std::vector<double>,
+               std::vector<double>, std::vector<double>>
+    computeDynamicalCorrelation(int num_samples,
+                              GPUOperator* op_O1,
+                              GPUOperator* op_O2,
+                              double omega_min,
+                              double omega_max,
+                              int num_omega_bins,
+                              double broadening,
+                              double temperature = 0.0,
+                              unsigned int random_seed = 0);
+    
 private:
     GPUOperator* op_;
     int N_;  // Hilbert space dimension
@@ -150,6 +233,26 @@ private:
                                const std::vector<double>& beta,
                                std::vector<double>& ritz_values,
                                std::vector<double>& weights);
+
+    // Helper functions for spectral calculations
+    /**
+     * @brief Build Lanczos tridiagonal from a given starting vector
+     */
+    int buildLanczosTridiagonalFromVector(const cuDoubleComplex* d_start_vec,
+                                         bool full_reorth,
+                                         int reorth_freq,
+                                         std::vector<double>& alpha,
+                                         std::vector<double>& beta);
+    
+    /**
+     * @brief Compute spectral function from Ritz values and weights
+     */
+    void computeSpectralFunction(const std::vector<double>& ritz_values,
+                                const std::vector<double>& weights,
+                                const std::vector<double>& frequencies,
+                                double broadening,
+                                double temperature,
+                                std::vector<double>& spectral_func);
 };
 
 /**

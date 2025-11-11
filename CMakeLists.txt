@@ -244,6 +244,7 @@ if(WITH_CUDA)
     find_package(CUDAToolkit REQUIRED)
     add_definitions(-DWITH_CUDA)
     add_definitions(-DTPQ_HAVE_CUDA)
+    add_definitions(-DENABLE_GPU)
     message(STATUS "CUDA Toolkit found: ${CUDAToolkit_VERSION}")
     message(STATUS "CUDA Toolkit include directories: ${CUDAToolkit_INCLUDE_DIRS}")
 endif()
@@ -292,6 +293,7 @@ if(WITH_CUDA)
         ${GPU_DIR}/gpu_tpq.cu
         ${GPU_DIR}/gpu_cg.cu
         ${GPU_DIR}/gpu_dynamics.cu
+        ${GPU_DIR}/gpu_ftlm.cu
     )
     
     set(GPU_HEADERS
@@ -303,6 +305,7 @@ if(WITH_CUDA)
         ${GPU_DIR}/gpu_tpq.cuh
         ${GPU_DIR}/gpu_cg.cuh
         ${GPU_DIR}/gpu_dynamics.cuh
+        ${GPU_DIR}/gpu_ftlm.cuh
     )
 endif()
 

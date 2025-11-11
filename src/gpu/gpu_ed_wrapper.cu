@@ -742,6 +742,135 @@ void GPUEDWrapper::runGPUFTLMFixedSz(void* gpu_op_handle,
     std::cout << "\nGPU FTLM Fixed Sz complete\n";
 }
 
+std::pair<std::vector<double>, std::vector<double>>
+GPUEDWrapper::runGPUDynamicalResponse(void* gpu_op_handle,
+                                     void* gpu_obs_handle,
+                                     void* d_psi_state,
+                                     int N,
+                                     int krylov_dim,
+                                     double omega_min,
+                                     double omega_max,
+                                     int num_omega_bins,
+                                     double broadening,
+                                     double temperature,
+                                     double ground_state_energy) {
+    if (!gpu_op_handle) {
+        std::cerr << "Error: GPU operator handle is null\n";
+        return {{}, {}};
+    }
+    
+    GPUOperator* gpu_op = static_cast<GPUOperator*>(gpu_op_handle);
+    GPUOperator* gpu_obs = gpu_obs_handle ? static_cast<GPUOperator*>(gpu_obs_handle) : nullptr;
+    cuDoubleComplex* d_psi = static_cast<cuDoubleComplex*>(d_psi_state);
+    
+    // Create GPU FTLM solver
+    GPUFTLMSolver ftlm_solver(gpu_op, N, krylov_dim, 1e-10);
+    
+    // Shift frequencies by ground state energy
+    double omega_min_shifted = omega_min + ground_state_energy;
+    double omega_max_shifted = omega_max + ground_state_energy;
+    
+    // Compute dynamical response
+    auto result = ftlm_solver.computeDynamicalResponse(
+        d_psi, gpu_obs, omega_min_shifted, omega_max_shifted, 
+        num_omega_bins, broadening, temperature
+    );
+    
+    // Shift frequencies back for output
+    for (auto& freq : result.first) {
+        freq -= ground_state_energy;
+    }
+    
+    return result;
+}
+
+std::tuple<std::vector<double>, std::vector<double>, std::vector<double>>
+GPUEDWrapper::runGPUDynamicalResponseThermal(void* gpu_op_handle,
+                                            void* gpu_obs_handle,
+                                            int N,
+                                            int num_samples,
+                                            int krylov_dim,
+                                            double omega_min,
+                                            double omega_max,
+                                            int num_omega_bins,
+                                            double broadening,
+                                            double temperature,
+                                            unsigned int random_seed,
+                                            double ground_state_energy) {
+    if (!gpu_op_handle) {
+        std::cerr << "Error: GPU operator handle is null\n";
+        return {{}, {}, {}};
+    }
+    
+    GPUOperator* gpu_op = static_cast<GPUOperator*>(gpu_op_handle);
+    GPUOperator* gpu_obs = gpu_obs_handle ? static_cast<GPUOperator*>(gpu_obs_handle) : nullptr;
+    
+    // Create GPU FTLM solver
+    GPUFTLMSolver ftlm_solver(gpu_op, N, krylov_dim, 1e-10);
+    
+    // Shift frequencies by ground state energy
+    double omega_min_shifted = omega_min + ground_state_energy;
+    double omega_max_shifted = omega_max + ground_state_energy;
+    
+    // Compute thermal dynamical response
+    auto result = ftlm_solver.computeDynamicalResponseThermal(
+        num_samples, gpu_obs, omega_min_shifted, omega_max_shifted,
+        num_omega_bins, broadening, temperature, random_seed
+    );
+    
+    // Shift frequencies back for output
+    for (auto& freq : std::get<0>(result)) {
+        freq -= ground_state_energy;
+    }
+    
+    return result;
+}
+
+std::tuple<std::vector<double>, std::vector<double>, std::vector<double>,
+          std::vector<double>, std::vector<double>>
+GPUEDWrapper::runGPUDynamicalCorrelation(void* gpu_op_handle,
+                                        void* gpu_obs1_handle,
+                                        void* gpu_obs2_handle,
+                                        int N,
+                                        int num_samples,
+                                        int krylov_dim,
+                                        double omega_min,
+                                        double omega_max,
+                                        int num_omega_bins,
+                                        double broadening,
+                                        double temperature,
+                                        unsigned int random_seed,
+                                        double ground_state_energy) {
+    if (!gpu_op_handle || !gpu_obs1_handle || !gpu_obs2_handle) {
+        std::cerr << "Error: GPU operator handles are null\n";
+        return {{}, {}, {}, {}, {}};
+    }
+    
+    GPUOperator* gpu_op = static_cast<GPUOperator*>(gpu_op_handle);
+    GPUOperator* gpu_obs1 = static_cast<GPUOperator*>(gpu_obs1_handle);
+    GPUOperator* gpu_obs2 = static_cast<GPUOperator*>(gpu_obs2_handle);
+    
+    // Create GPU FTLM solver
+    GPUFTLMSolver ftlm_solver(gpu_op, N, krylov_dim, 1e-10);
+    
+    // Shift frequencies by ground state energy
+    double omega_min_shifted = omega_min + ground_state_energy;
+    double omega_max_shifted = omega_max + ground_state_energy;
+    
+    // Compute dynamical correlation
+    auto result = ftlm_solver.computeDynamicalCorrelation(
+        num_samples, gpu_obs1, gpu_obs2, omega_min_shifted, omega_max_shifted,
+        num_omega_bins, broadening, temperature, random_seed
+    );
+    
+    // Shift frequencies back for output
+    for (auto& freq : std::get<0>(result)) {
+        freq -= ground_state_energy;
+    }
+    
+    return result;
+}
+
 bool GPUEDWrapper::createGPUOperatorFromCPU(const Operator& cpu_op,
                                            void** gpu_op_handle,
                                            int n_sites) {
@@ -910,6 +1039,58 @@ void GPUEDWrapper::runGPUFTLMFixedSz(void* gpu_op_handle,
                                     int reorth_freq,
                                     unsigned int random_seed) {
     std::cerr << "CUDA not available - cannot run GPU FTLM Fixed Sz\n";
+}
+
+std::pair<std::vector<double>, std::vector<double>>
+GPUEDWrapper::runGPUDynamicalResponse(void* gpu_op_handle,
+                                     void* gpu_obs_handle,
+                                     void* d_psi_state,
+                                     int N,
+                                     int krylov_dim,
+                                     double omega_min,
+                                     double omega_max,
+                                     int num_omega_bins,
+                                     double broadening,
+                                     double temperature,
+                                     double ground_state_energy) {
+    std::cerr << "CUDA not available - cannot run GPU dynamical response\n";
+    return {{}, {}};
+}
+
+std::tuple<std::vector<double>, std::vector<double>, std::vector<double>>
+GPUEDWrapper::runGPUDynamicalResponseThermal(void* gpu_op_handle,
+                                            void* gpu_obs_handle,
+                                            int N,
+                                            int num_samples,
+                                            int krylov_dim,
+                                            double omega_min,
+                                            double omega_max,
+                                            int num_omega_bins,
+                                            double broadening,
+                                            double temperature,
+                                            unsigned int random_seed,
+                                            double ground_state_energy) {
+    std::cerr << "CUDA not available - cannot run GPU thermal dynamical response\n";
+    return {{}, {}, {}};
+}
+
+std::tuple<std::vector<double>, std::vector<double>, std::vector<double>,
+          std::vector<double>, std::vector<double>>
+GPUEDWrapper::runGPUDynamicalCorrelation(void* gpu_op_handle,
+                                        void* gpu_obs1_handle,
+                                        void* gpu_obs2_handle,
+                                        int N,
+                                        int num_samples,
+                                        int krylov_dim,
+                                        double omega_min,
+                                        double omega_max,
+                                        int num_omega_bins,
+                                        double broadening,
+                                        double temperature,
+                                        unsigned int random_seed,
+                                        double ground_state_energy) {
+    std::cerr << "CUDA not available - cannot run GPU dynamical correlation\n";
+    return {{}, {}, {}, {}, {}};
 }
 
 bool GPUEDWrapper::createGPUOperatorFromCPU(const Operator& cpu_op,

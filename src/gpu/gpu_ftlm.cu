@@ -579,4 +579,393 @@ FTLMResults GPUFTLMSolver::run(int num_samples,
     return results;
 }
 
+// ============================================================================
+// Dynamical Response / Spectral Functions
+// ============================================================================
+
+int GPUFTLMSolver::buildLanczosTridiagonalFromVector(
+    const cuDoubleComplex* d_start_vec,
+    bool full_reorth,
+    int reorth_freq,
+    std::vector<double>& alpha,
+    std::vector<double>& beta) {
+    
+    alpha.clear();
+    beta.clear();
+    beta.push_back(0.0);
+    
+    // Setup for full reorthogonalization if requested
+    store_basis_ = full_reorth || (reorth_freq > 0);
+    if (store_basis_) {
+        d_lanczos_basis_ = new cuDoubleComplex*[krylov_dim_];
+        for (int i = 0; i < krylov_dim_; i++) {
+            CUDA_CHECK(cudaMalloc(&d_lanczos_basis_[i], N_ * sizeof(cuDoubleComplex)));
+        }
+        num_stored_vectors_ = 0;
+    }
+    
+    // Copy starting vector to v_current and normalize
+    vectorCopy(d_start_vec, d_v_current_);
+    normalizeVector(d_v_current_);
+    
+    // Store first basis vector
+    if (store_basis_) {
+        vectorCopy(d_v_current_, d_lanczos_basis_[0]);
+        num_stored_vectors_ = 1;
+    }
+    
+    // Ensure v_prev is zero
+    CUDA_CHECK(cudaMemset(d_v_prev_, 0, N_ * sizeof(cuDoubleComplex)));
+    
+    int max_iter = std::min(N_, krylov_dim_);
+    
+    // Lanczos iteration
+    for (int j = 0; j < max_iter; j++) {
+        // w = H * v_current
+        op_->matVecGPU(d_v_current_, d_w_, N_);
+        
+        // α_j = ⟨v_current|w⟩
+        std::complex<double> alpha_complex = vectorDot(d_v_current_, d_w_);
+        double alpha_j = alpha_complex.real();
+        alpha.push_back(alpha_j);
+        
+        // w = w - α_j * v_current
+        cuDoubleComplex neg_alpha = make_cuDoubleComplex(-alpha_j, 0.0);
+        vectorAxpy(d_v_current_, d_w_, neg_alpha);
+        
+        // w = w - β_j * v_prev
+        if (j > 0) {
+            cuDoubleComplex neg_beta = make_cuDoubleComplex(-beta[j], 0.0);
+            vectorAxpy(d_v_prev_, d_w_, neg_beta);
+        }
+        
+        // Reorthogonalization
+        if (full_reorth) {
+            orthogonalizeAgainstBasis(d_w_, num_stored_vectors_);
+        } else if (reorth_freq > 0 && (j % reorth_freq == 0)) {
+            orthogonalizeAgainstBasis(d_w_, num_stored_vectors_);
+        } else {
+            gramSchmidt(d_w_, j);
+        }
+        
+        // β_{j+1} = ||w||
+        double beta_next = vectorNorm(d_w_);
+        
+        if (beta_next < tolerance_) {
+            beta.push_back(0.0);
+            return j + 1;
+        }
+        
+        beta.push_back(beta_next);
+        
+        // Normalize and cycle vectors
+        normalizeVector(d_w_);
+        vectorCopy(d_v_current_, d_v_prev_);
+        vectorCopy(d_w_, d_v_current_);
+        
+        if (store_basis_ && num_stored_vectors_ < krylov_dim_) {
+            vectorCopy(d_v_current_, d_lanczos_basis_[num_stored_vectors_]);
+            num_stored_vectors_++;
+        }
+    }
+    
+    return max_iter;
+}
+
+void GPUFTLMSolver::computeSpectralFunction(
+    const std::vector<double>& ritz_values,
+    const std::vector<double>& weights,
+    const std::vector<double>& frequencies,
+    double broadening,
+    double temperature,
+    std::vector<double>& spectral_func) {
+    
+    int n_states = ritz_values.size();
+    int n_omega = frequencies.size();
+    spectral_func.resize(n_omega, 0.0);
+    
+    double e_min = *std::min_element(ritz_values.begin(), ritz_values.end());
+    double beta = (temperature > 1e-14) ? 1.0 / temperature : 0.0;
+    
+    // Compute partition function if needed
+    double Z = 0.0;
+    if (temperature > 1e-14) {
+        for (int i = 0; i < n_states; i++) {
+            double e_shifted = ritz_values[i] - e_min;
+            Z += weights[i] * std::exp(-beta * e_shifted);
+        }
+    }
+    
+    // Compute spectral function with Lorentzian broadening
+    for (int iw = 0; iw < n_omega; iw++) {
+        double omega = frequencies[iw];
+        double sum = 0.0;
+        
+        for (int i = 0; i < n_states; i++) {
+            double E = ritz_values[i];
+            double w = weights[i];
+            
+            // Apply thermal weighting if T > 0
+            if (temperature > 1e-14) {
+                double e_shifted = E - e_min;
+                double boltzmann = std::exp(-beta * e_shifted);
+                w *= boltzmann / Z;
+            }
+            
+            // Lorentzian: L(ω - E) = (η/π) / ((ω - E)² + η²)
+            double delta = omega - E;
+            double lorentzian = (broadening / M_PI) / (delta * delta + broadening * broadening);
+            
+            sum += w * lorentzian;
+        }
+        
+        spectral_func[iw] = sum;
+    }
+}
+
+std::pair<std::vector<double>, std::vector<double>>
+GPUFTLMSolver::computeDynamicalResponse(
+    const cuDoubleComplex* d_psi,
+    GPUOperator* op_O,
+    double omega_min,
+    double omega_max,
+    int num_omega_bins,
+    double broadening,
+    double temperature) {
+    
+    std::cout << "\n==========================================\n";
+    std::cout << "GPU Dynamical Response: S(ω)\n";
+    std::cout << "==========================================\n";
+    std::cout << "Hilbert space dimension: " << N_ << "\n";
+    std::cout << "Krylov dimension: " << krylov_dim_ << "\n";
+    std::cout << "Frequency range: [" << omega_min << ", " << omega_max << "]\n";
+    std::cout << "Broadening: " << broadening << "\n";
+    
+    // Generate frequency grid
+    std::vector<double> frequencies(num_omega_bins);
+    double omega_step = (omega_max - omega_min) / std::max(1, num_omega_bins - 1);
+    for (int i = 0; i < num_omega_bins; i++) {
+        frequencies[i] = omega_min + i * omega_step;
+    }
+    
+    // Apply operator O to initial state: |φ⟩ = O|ψ⟩
+    // If op_O is nullptr, use identity (just copy)
+    cuDoubleComplex* d_phi = d_temp_;  // Reuse temp buffer
+    
+    if (op_O != nullptr) {
+        op_O->matVecGPU(d_psi, d_phi, N_);
+    } else {
+        vectorCopy(d_psi, d_phi);
+    }
+    
+    // Check norm
+    double phi_norm = vectorNorm(d_phi);
+    if (phi_norm < 1e-14) {
+        std::cerr << "Warning: O|ψ⟩ has zero norm\n";
+        std::vector<double> zero_spec(num_omega_bins, 0.0);
+        return {frequencies, zero_spec};
+    }
+    
+    std::cout << "Norm of O|ψ⟩: " << phi_norm << "\n";
+    normalizeVector(d_phi);
+    
+    // Build Lanczos tridiagonal from |φ⟩
+    std::vector<double> alpha, beta;
+    int iterations = buildLanczosTridiagonalFromVector(d_phi, false, 10, alpha, beta);
+    
+    std::cout << "Lanczos iterations: " << iterations << "\n";
+    
+    // Diagonalize tridiagonal
+    std::vector<double> ritz_values, weights;
+    diagonalizeTridiagonal(alpha, beta, ritz_values, weights);
+    
+    // Scale weights by norm factor
+    double norm_factor = phi_norm * phi_norm;
+    for (auto& w : weights) {
+        w *= norm_factor;
+    }
+    
+    std::cout << "Ground state estimate: " << ritz_values[0] << "\n";
+    
+    // Compute spectral function
+    std::vector<double> spectral_func;
+    computeSpectralFunction(ritz_values, weights, frequencies, 
+                           broadening, temperature, spectral_func);
+    
+    std::cout << "Dynamical response complete\n";
+    
+    return {frequencies, spectral_func};
+}
+
+std::tuple<std::vector<double>, std::vector<double>, std::vector<double>>
+GPUFTLMSolver::computeDynamicalResponseThermal(
+    int num_samples,
+    GPUOperator* op_O,
+    double omega_min,
+    double omega_max,
+    int num_omega_bins,
+    double broadening,
+    double temperature,
+    unsigned int random_seed) {
+    
+    std::cout << "\n==========================================\n";
+    std::cout << "GPU Thermal Dynamical Response (FTLM)\n";
+    std::cout << "==========================================\n";
+    std::cout << "Hilbert space dimension: " << N_ << "\n";
+    std::cout << "Krylov dimension: " << krylov_dim_ << "\n";
+    std::cout << "Number of samples: " << num_samples << "\n";
+    std::cout << "Frequency range: [" << omega_min << ", " << omega_max << "]\n";
+    std::cout << "Broadening: " << broadening << "\n";
+    
+    // Generate frequency grid
+    std::vector<double> frequencies(num_omega_bins);
+    double omega_step = (omega_max - omega_min) / std::max(1, num_omega_bins - 1);
+    for (int i = 0; i < num_omega_bins; i++) {
+        frequencies[i] = omega_min + i * omega_step;
+    }
+    
+    // Initialize seed
+    unsigned int seed = random_seed;
+    if (seed == 0) {
+        seed = std::chrono::system_clock::now().time_since_epoch().count();
+    }
+    
+    // Storage for sample spectral functions
+    std::vector<std::vector<double>> sample_spectra;
+    
+    // Loop over samples
+    for (int sample = 0; sample < num_samples; sample++) {
+        std::cout << "\n--- Sample " << (sample + 1) << "/" << num_samples << " ---\n";
+        
+        unsigned int sample_seed = seed + sample * 12345;
+        
+        // Generate random state |ψ⟩
+        initializeRandomVector(d_v_current_, sample_seed);
+        
+        // Apply O: |φ⟩ = O|ψ⟩
+        cuDoubleComplex* d_phi = d_temp_;
+        if (op_O != nullptr) {
+            op_O->matVecGPU(d_v_current_, d_phi, N_);
+        } else {
+            vectorCopy(d_v_current_, d_phi);
+        }
+        
+        double phi_norm = vectorNorm(d_phi);
+        if (phi_norm < 1e-14) {
+            std::cout << "  Warning: O|ψ⟩ has zero norm, skipping\n";
+            continue;
+        }
+        
+        normalizeVector(d_phi);
+        
+        // Build Lanczos tridiagonal
+        std::vector<double> alpha, beta;
+        int iterations = buildLanczosTridiagonalFromVector(d_phi, false, 10, alpha, beta);
+        
+        std::cout << "  Lanczos iterations: " << iterations << "\n";
+        
+        // Diagonalize
+        std::vector<double> ritz_values, weights;
+        diagonalizeTridiagonal(alpha, beta, ritz_values, weights);
+        
+        // Scale weights
+        double norm_factor = phi_norm * phi_norm;
+        for (auto& w : weights) {
+            w *= norm_factor;
+        }
+        
+        // Compute spectral function for this sample
+        std::vector<double> spec;
+        computeSpectralFunction(ritz_values, weights, frequencies, 
+                               broadening, temperature, spec);
+        
+        sample_spectra.push_back(spec);
+    }
+    
+    // Average over samples and compute error bars
+    std::vector<double> avg_spec(num_omega_bins, 0.0);
+    std::vector<double> error_spec(num_omega_bins, 0.0);
+    
+    int valid_samples = sample_spectra.size();
+    
+    if (valid_samples == 0) {
+        std::cerr << "Error: No valid samples\n";
+        return {frequencies, avg_spec, error_spec};
+    }
+    
+    // Compute average
+    for (int iw = 0; iw < num_omega_bins; iw++) {
+        for (int s = 0; s < valid_samples; s++) {
+            avg_spec[iw] += sample_spectra[s][iw];
+        }
+        avg_spec[iw] /= valid_samples;
+    }
+    
+    // Compute standard error
+    if (valid_samples > 1) {
+        for (int iw = 0; iw < num_omega_bins; iw++) {
+            double variance = 0.0;
+            for (int s = 0; s < valid_samples; s++) {
+                double diff = sample_spectra[s][iw] - avg_spec[iw];
+                variance += diff * diff;
+            }
+            error_spec[iw] = std::sqrt(variance / (valid_samples * (valid_samples - 1)));
+        }
+    }
+    
+    std::cout << "\n==========================================\n";
+    std::cout << "Thermal dynamical response complete\n";
+    std::cout << "Valid samples: " << valid_samples << "\n";
+    std::cout << "==========================================\n";
+    
+    return {frequencies, avg_spec, error_spec};
+}
+
+std::tuple<std::vector<double>, std::vector<double>, std::vector<double>,
+           std::vector<double>, std::vector<double>>
+GPUFTLMSolver::computeDynamicalCorrelation(
+    int num_samples,
+    GPUOperator* op_O1,
+    GPUOperator* op_O2,
+    double omega_min,
+    double omega_max,
+    int num_omega_bins,
+    double broadening,
+    double temperature,
+    unsigned int random_seed) {
+    
+    std::cout << "\n==========================================\n";
+    std::cout << "GPU Dynamical Correlation: S_{O1,O2}(ω)\n";
+    std::cout << "==========================================\n";
+    std::cout << "Hilbert space dimension: " << N_ << "\n";
+    std::cout << "Krylov dimension: " << krylov_dim_ << "\n";
+    std::cout << "Number of samples: " << num_samples << "\n";
+    std::cout << "Frequency range: [" << omega_min << ", " << omega_max << "]\n";
+    std::cout << "Broadening: " << broadening << "\n";
+    
+    // For cross-correlation, we would need to compute complex weights
+    // and keep track of both real and imaginary parts
+    // This is a simplified version that assumes O1 = O2 (auto-correlation)
+    
+    if (op_O1 != op_O2 && op_O1 != nullptr && op_O2 != nullptr) {
+        std::cerr << "Warning: Cross-correlation (O1 != O2) not yet fully implemented\n";
+        std::cerr << "         Falling back to O2 auto-correlation\n";
+    }
+    
+    // Use the simpler thermal response for now
+    auto result = computeDynamicalResponseThermal(
+        num_samples, op_O2, omega_min, omega_max, num_omega_bins, 
+        broadening, temperature, random_seed);
+    
+    std::vector<double> frequencies = std::get<0>(result);
+    std::vector<double> spec_real = std::get<1>(result);
+    std::vector<double> error_real = std::get<2>(result);
+    
+    // For auto-correlation, imaginary part is zero
+    std::vector<double> spec_imag(num_omega_bins, 0.0);
+    std::vector<double> error_imag(num_omega_bins, 0.0);
+    
+    return std::make_tuple(frequencies, spec_real, spec_imag, error_real, error_imag);
+}
+
 #endif // WITH_CUDA
