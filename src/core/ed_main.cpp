@@ -5,7 +5,6 @@
 #include "ed_config_adapter.h"
 #include "ed_wrapper.h"
 #include "ed_wrapper_streaming.h"
-#include "ed_wrapper_fixed_sz_symmetry.h"
 #include "construct_ham.h"
 #include "../cpu_solvers/ftlm.h"
 #include "../cpu_solvers/ltlm.h"
@@ -626,6 +625,8 @@ void print_help(const char* prog_name) {
     std::cout << "    LANCZOS_GPU_FIXED_SZ   GPU Lanczos for fixed Sz sector\n";
     std::cout << "    DAVIDSON_GPU           GPU-accelerated Davidson method (recommended)\n";
     std::cout << "    LOBPCG_GPU             [DEPRECATED] Redirects to DAVIDSON_GPU\n";
+    std::cout << "    FTLM_GPU               GPU-accelerated Finite Temperature Lanczos\n";
+    std::cout << "    FTLM_GPU_FIXED_SZ      GPU FTLM for fixed Sz sector\n";
     std::cout << "    mTPQ_GPU               GPU-accelerated microcanonical TPQ\n";
     std::cout << "    cTPQ_GPU               GPU-accelerated canonical TPQ\n\n";
     

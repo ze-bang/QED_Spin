@@ -487,18 +487,31 @@ ThermodynamicData combine_ftlm_sector_results(
         
         // Step 1: Compute partition function for each sector
         // Z_s(β) = exp(-β F_s)
+        // Since sectors may have different ground state energies, we need to use a reference
+        // to avoid numerical overflow/underflow
+        
+        // Find minimum free energy across all sectors for numerical stability
+        double F_ref = sector_results[0].thermo_data.free_energy[t];
+        for (size_t s = 1; s < n_sectors; ++s) {
+            double F_s = sector_results[s].thermo_data.free_energy[t];
+            if (F_s < F_ref) {
+                F_ref = F_s;
+            }
+        }
+        
+        // Compute shifted partition functions: Z_s = exp(-β(F_s - F_ref))
         std::vector<double> Z_sectors;
         double Z_total = 0.0;
         
         for (size_t s = 0; s < n_sectors; ++s) {
             double F_s = sector_results[s].thermo_data.free_energy[t];
-            double Z_s = std::exp(-beta * F_s);
+            double delta_F = F_s - F_ref;
+            double Z_s = std::exp(-beta * delta_F);
             
             // Handle numerical overflow/underflow
-            if (!std::isfinite(Z_s) || Z_s <= 0.0) {
-                // Use high-precision approach: shift all energies
+            if (!std::isfinite(Z_s) || Z_s < 0.0) {
                 std::cerr << "Warning: Numerical issue in sector " << s << " at T=" << T 
-                          << ". Falling back to energy-based calculation." << std::endl;
+                          << ", F_s=" << F_s << ", delta_F=" << delta_F << std::endl;
                 Z_s = 0.0;  // Will be handled below
             }
             
@@ -506,42 +519,41 @@ ThermodynamicData combine_ftlm_sector_results(
             Z_total += Z_s;
         }
         
-        // Check if we need to use a more stable approach
+        // Check for numerical issues
         if (Z_total <= 1e-300 || !std::isfinite(Z_total)) {
-            // Very low temperature or numerical issues
-            // Use the sector with minimum free energy as reference
-            double F_min = sector_results[0].thermo_data.free_energy[t];
-            size_t min_sector = 0;
-            
-            for (size_t s = 1; s < n_sectors; ++s) {
-                double F_s = sector_results[s].thermo_data.free_energy[t];
-                if (F_s < F_min) {
-                    F_min = F_s;
-                    min_sector = s;
-                }
-            }
-            
-            // Recompute with shifted free energies
-            Z_total = 0.0;
-            for (size_t s = 0; s < n_sectors; ++s) {
-                double delta_F = sector_results[s].thermo_data.free_energy[t] - F_min;
-                Z_sectors[s] = std::exp(-beta * delta_F);
-                Z_total += Z_sectors[s];
-            }
-            
-            // Total free energy is shifted back
-            combined.free_energy[t] = F_min - T * std::log(Z_total);
-        } else {
-            combined.free_energy[t] = -T * std::log(Z_total);
+            std::cerr << "Error: Total partition function is zero or invalid at T=" << T << std::endl;
+            std::cerr << "  This suggests all sectors have very high free energies." << std::endl;
+            // Use the minimum free energy sector as fallback
+            combined.free_energy[t] = F_ref;
+            combined.energy[t] = sector_results[0].thermo_data.energy[t];  // Will be overwritten if Z_total > 0
+            combined.specific_heat[t] = 0.0;
+            combined.entropy[t] = 0.0;
+            continue;  // Skip to next temperature
         }
         
-        // Step 2: Compute sector weights
+        // Total free energy with reference shift: F_total = F_ref - T ln(Z_total)
+        combined.free_energy[t] = F_ref - T * std::log(Z_total);
+        
+        // Step 2: Compute sector weights (normalized partition function contributions)
         std::vector<double> weights(n_sectors);
         for (size_t s = 0; s < n_sectors; ++s) {
             weights[s] = Z_sectors[s] / Z_total;
         }
         
+        // Debug output for first and last temperature
+        if (t == 0 || t == n_temps - 1) {
+            std::cout << "\n  T=" << T << " (beta=" << beta << "):" << std::endl;
+            std::cout << "    F_ref=" << F_ref << std::endl;
+            for (size_t s = 0; s < n_sectors; ++s) {
+                std::cout << "    Sector " << s << ": F=" << sector_results[s].thermo_data.free_energy[t]
+                          << ", Z_s/Z_total=" << weights[s] << ", <E>=" << sector_results[s].thermo_data.energy[t]
+                          << std::endl;
+            }
+        }
+        
         // Step 3: Combine observables with proper weights
+        // For energy: <E>_total = Σ_s (Z_s/Z_total) <E>_s
+        // For variance: Var[E]_total requires combining sector variances
         double E_total = 0.0;
         double E2_total = 0.0;
         
@@ -550,22 +562,77 @@ ThermodynamicData combine_ftlm_sector_results(
             double E_s = sector_results[s].thermo_data.energy[t];
             double C_s = sector_results[s].thermo_data.specific_heat[t];
             
-            // Weighted energy
+            // Weighted energy: <E> = Σ_s w_s <E>_s
             E_total += w_s * E_s;
             
-            // Weighted energy squared
-            // From C = β²(<E²> - <E>²), we get <E²> = C/β² + <E>²
+            // For specific heat combination, we need <E²>:
+            // C_s = β²(<E²>_s - <E>_s²) → <E²>_s = C_s/β² + <E>_s²
+            // Then: <E²>_total = Σ_s w_s <E²>_s
             double E2_s = C_s / (beta * beta) + E_s * E_s;
             E2_total += w_s * E2_s;
         }
         
         // Step 4: Final thermodynamic quantities
         combined.energy[t] = E_total;
+        
+        // Combined specific heat: C = β²(<E²> - <E>²)
         combined.specific_heat[t] = beta * beta * (E2_total - E_total * E_total);
+        
+        // Entropy from thermodynamic relation: S = β(E - F)
         combined.entropy[t] = beta * (E_total - combined.free_energy[t]);
+        
+        // Additional diagnostic output for first/last temperature
+        if (t == 0 || t == n_temps - 1) {
+            std::cout << "    Combined: F=" << combined.free_energy[t] 
+                      << ", <E>=" << combined.energy[t]
+                      << ", C=" << combined.specific_heat[t]
+                      << ", S=" << combined.entropy[t] << std::endl;
+        }
     }
     
-    std::cout << "Successfully combined thermodynamic data from all sectors" << std::endl;
+    // Final verification: check that combined results make physical sense
+    std::cout << "\n=== Verification of Combined Results ===" << std::endl;
+    
+    // Check a mid-range temperature for sanity
+    size_t mid_t = n_temps / 2;
+    double mid_T = temps[mid_t];
+    double mid_E = combined.energy[mid_t];
+    
+    // Find min/max energies across sectors at this temperature
+    double E_min = sector_results[0].thermo_data.energy[mid_t];
+    double E_max = E_min;
+    for (size_t s = 1; s < n_sectors; ++s) {
+        double E_s = sector_results[s].thermo_data.energy[mid_t];
+        if (E_s < E_min) E_min = E_s;
+        if (E_s > E_max) E_max = E_s;
+    }
+    
+    std::cout << "  At T=" << mid_T << ":" << std::endl;
+    std::cout << "    Sector energy range: [" << E_min << ", " << E_max << "]" << std::endl;
+    std::cout << "    Combined energy: " << mid_E << std::endl;
+    
+    if (mid_E < E_min || mid_E > E_max) {
+        std::cout << "    ⚠ WARNING: Combined energy is outside sector range!" << std::endl;
+        std::cout << "    This may indicate an issue with sector combination." << std::endl;
+    } else {
+        std::cout << "    ✓ Combined energy is within expected range" << std::endl;
+    }
+    
+    // Check that specific heat is non-negative
+    bool all_positive_C = true;
+    for (size_t t = 0; t < n_temps; ++t) {
+        if (combined.specific_heat[t] < -1e-10) {  // Allow small numerical errors
+            all_positive_C = false;
+            std::cout << "  ⚠ WARNING: Negative specific heat at T=" << temps[t] 
+                      << ", C=" << combined.specific_heat[t] << std::endl;
+        }
+    }
+    
+    if (all_positive_C) {
+        std::cout << "  ✓ All specific heat values are non-negative" << std::endl;
+    }
+    
+    std::cout << "\nSuccessfully combined thermodynamic data from all sectors" << std::endl;
     std::cout << "=== Sector Combination Complete ===" << std::endl;
     
     return combined;

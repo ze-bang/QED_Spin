@@ -18,10 +18,6 @@
 #include <mpi.h>
 #include "../cpu_solvers/dynamics.h"
 #include "../cpu_solvers/ftlm.h"
-#ifdef ENABLE_GPU
-#include "../gpu/gpu_operator.cuh"
-#include "../gpu/gpu_dynamics.cuh"
-#endif
 
 
 using Complex = std::complex<double>;
@@ -562,7 +558,10 @@ int main(int argc, char* argv[]) {
     if (argc >= 14) {
         try {
             n_up = std::stoi(argv[13]);
-            if (n_up >= 0 && n_up <= num_sites) {
+            if (n_up == -1) {
+                // Explicitly using full Hilbert space
+                use_fixed_sz = false;
+            } else if (n_up >= 0 && n_up <= num_sites) {
                 use_fixed_sz = true;
                 if (rank == 0) {
                     std::cout << "Using fixed-Sz sector: n_up = " << n_up 
@@ -578,7 +577,7 @@ int main(int argc, char* argv[]) {
             } else {
                 if (rank == 0) {
                     std::cerr << "Warning: Invalid n_up value " << n_up 
-                              << " (must be 0 <= n_up <= " << num_sites << "), using full Hilbert space" << std::endl;
+                              << " (must be -1 or 0 <= n_up <= " << num_sites << "), using full Hilbert space" << std::endl;
                 }
                 n_up = -1;
                 use_fixed_sz = false;
@@ -792,31 +791,6 @@ int main(int argc, char* argv[]) {
         return 1;
     }
     int N = static_cast<int>(N64);
-    
-#ifdef ENABLE_GPU
-    // Initialize GPU operator if GPU is enabled
-    GPUOperator* gpu_op = nullptr;
-    GPUDynamicsSolver* gpu_solver = nullptr;
-    if (use_gpu) {
-        try {
-            gpu_op = new GPUOperator(N, ham_op.J_, ham_op.trans_);
-            gpu_solver = new GPUDynamicsSolver(gpu_op, N);
-            if (rank == 0) {
-                std::cout << "GPU dynamics solver initialized successfully" << std::endl;
-            }
-        } catch (const std::exception& e) {
-            if (rank == 0) {
-                std::cerr << "Warning: Failed to initialize GPU: " << e.what() << std::endl;
-                std::cerr << "Falling back to CPU computation" << std::endl;
-            }
-            if (gpu_solver) delete gpu_solver;
-            if (gpu_op) delete gpu_op;
-            gpu_op = nullptr;
-            gpu_solver = nullptr;
-            use_gpu = false;
-        }
-    }
-#endif
     
     // Helper function for cross product
     auto cross_product = [](const std::vector<double>& a, const std::vector<double>& b) -> std::array<double, 3> {
@@ -1423,78 +1397,25 @@ int main(int argc, char* argv[]) {
         ensureDirectoryExists(method_dir);
         
         try {
-#ifdef ENABLE_GPU
-            // Check if GPU should be used for this method
-            bool use_gpu_for_task = use_gpu && gpu_solver != nullptr;
-            
-            if (use_gpu_for_task && method == "krylov") {
-                // GPU Krylov method
-                int krylov_dim = krylov_dim_or_nmax;
-                
-                // Convert Operator objects to function pointers
-                std::vector<std::function<void(const Complex*, Complex*, int)>> obs_1_funcs;
-                std::vector<std::function<void(const Complex*, Complex*, int)>> obs_2_funcs;
-                
-                for (const auto& op : obs_1) {
-                    obs_1_funcs.push_back([&op](const Complex* in, Complex* out, int size) {
-                        op.apply(in, out, size);
-                    });
-                }
-                
-                for (const auto& op : obs_2) {
-                    obs_2_funcs.push_back([&op](const Complex* in, Complex* out, int size) {
-                        op.apply(in, out, size);
-                    });
-                }
-                
-                gpu_solver->computeKrylovCorrelations(
-                    tpq_state, obs_1_funcs, obs_2_funcs, obs_names,
-                    method_dir, sample_index, beta, t_end_opt, dt_opt, krylov_dim
-                );
-                
-            } else if (use_gpu_for_task && method == "taylor") {
-                // GPU Taylor method
-                std::vector<std::function<void(const Complex*, Complex*, int)>> obs_1_funcs;
-                std::vector<std::function<void(const Complex*, Complex*, int)>> obs_2_funcs;
-                
-                for (const auto& op : obs_1) {
-                    obs_1_funcs.push_back([&op](const Complex* in, Complex* out, int size) {
-                        op.apply(in, out, size);
-                    });
-                }
-                
-                for (const auto& op : obs_2) {
-                    obs_2_funcs.push_back([&op](const Complex* in, Complex* out, int size) {
-                        op.apply(in, out, size);
-                    });
-                }
-                
-                gpu_solver->computeTaylorCorrelations(
-                    U_t, tpq_state, obs_1_funcs, obs_2_funcs, obs_names,
+            // CPU implementation
+            if (method == "taylor") {
+                computeObservableDynamics_U_t(
+                    U_t, tpq_state, obs_1, obs_2, obs_names, N,
                     method_dir, sample_index, beta, t_end_opt, dt_opt
                 );
+            } else if (method == "krylov") {
+                // Use Krylov method with Operator objects directly
+                int krylov_dim = krylov_dim_or_nmax;
                 
-            } else
-#endif
-            {
-                // CPU fallback
-                if (method == "taylor") {
-                    computeObservableDynamics_U_t(
-                        U_t, tpq_state, obs_1, obs_2, obs_names, N,
-                        method_dir, sample_index, beta, t_end_opt, dt_opt
-                    );
-                } else if (method == "krylov") {
-                    // Use Krylov method with Operator objects directly
-                    int krylov_dim = krylov_dim_or_nmax;
-                    
-                    computeDynamicCorrelationsKrylov(
-                        H, tpq_state, obs_1, obs_2, obs_names,
-                        N, method_dir, sample_index, beta, t_end_opt, dt_opt, krylov_dim
-                    );
-                } else if (method == "spectral") {
+                computeDynamicCorrelationsKrylov(
+                    H, tpq_state, obs_1, obs_2, obs_names,
+                    N, method_dir, sample_index, beta, t_end_opt, dt_opt, krylov_dim
+                );
+            } else if (method == "spectral") {
                     // Use spectral method with FTLM approach
                     int krylov_dim = krylov_dim_or_nmax;
                     
+                    // CPU spectral calculation
                     // Set up FTLM parameters
                     DynamicalResponseParameters params;
                     params.krylov_dim = krylov_dim;
@@ -1535,16 +1456,8 @@ int main(int argc, char* argv[]) {
                     // Use spectral method with finite-temperature FTLM (thermal averaging)
                     // This uses random sampling to compute thermal averages at finite temperature
                     int krylov_dim = krylov_dim_or_nmax;
-                    
-                    // Set up FTLM parameters for thermal averaging
-                    DynamicalResponseParameters params;
-                    params.krylov_dim = krylov_dim;
-                    params.broadening = broadening;
-                    params.tolerance = 1e-10;
-                    params.full_reorthogonalization = true;
-                    params.num_samples = 40;  // Number of random samples for FTLM thermal averaging
-                    params.random_seed = state_idx * 1000 + momentum_idx * 100 + combo_idx;  // Reproducible but unique per task
-                    params.store_intermediate = false;
+                    int num_samples = 40;  // Number of random samples for FTLM thermal averaging
+                    unsigned int random_seed = state_idx * 1000 + momentum_idx * 100 + combo_idx;
                     
                     // Determine temperature(s) to compute
                     std::vector<double> temperatures;
@@ -1579,8 +1492,23 @@ int main(int argc, char* argv[]) {
                                       << " (β = " << beta << ")" << std::endl;
                         }
                     }
-                    std::cout << "Observables to compute thermal spectral functions for:" << std::endl;
-                    std::cout << "  Number of operators: " << obs_1.size() << std::endl;
+                    
+                    // CPU thermal spectral calculation
+                    // Set up FTLM parameters for thermal averaging
+                    DynamicalResponseParameters params;
+                    params.krylov_dim = krylov_dim;
+                    params.broadening = broadening;
+                    params.tolerance = 1e-10;
+                    params.full_reorthogonalization = true;
+                    params.num_samples = num_samples;
+                    params.random_seed = random_seed;
+                    params.store_intermediate = false;
+                    
+                    if (rank == 0) {
+                        std::cout << "Observables to compute thermal spectral functions for:" << std::endl;
+                        std::cout << "  Number of operators: " << obs_1.size() << std::endl;
+                    }
+                    
                     // Process each operator pair
                     for (size_t i = 0; i < obs_1.size(); i++) {
                         std::cout << "  Processing operator " << obs_names[i] << std::endl;
@@ -1615,10 +1543,10 @@ int main(int argc, char* argv[]) {
                                         << "_beta_" << 1/temperature << ".txt";
                             
                             save_dynamical_response_results(results, filename_ss.str());
-                            
+                        
                             if (rank == 0) {
                                 std::cout << "  Saved thermal spectral function: " << filename_ss.str() << std::endl;
-                                std::cout << "    Temperature: " << temperature << ", Beta: " << beta << std::endl;
+                                std::cout << "    Temperature: " << temperature << ", Beta: " << 1/temperature << std::endl;
                                 std::cout << "    FTLM samples: " << params.num_samples << std::endl;
                             }
                         }
@@ -1627,7 +1555,6 @@ int main(int argc, char* argv[]) {
                     std::cerr << "Rank " << rank << " unknown method: " << method << std::endl;
                     return false;
                 }
-            }
         } catch (const std::exception &e) {
             std::cerr << "Rank " << rank << " failed time evolution: " << e.what() << std::endl;
             return false;
@@ -1794,18 +1721,6 @@ int main(int argc, char* argv[]) {
             std::cout << "  Rank " << r << ": " << all_times[r] << " seconds" << std::endl;
         }
     }
-    
-#ifdef ENABLE_GPU
-    // Clean up GPU resources
-    if (gpu_solver) {
-        delete gpu_solver;
-        gpu_solver = nullptr;
-    }
-    if (gpu_op) {
-        delete gpu_op;
-        gpu_op = nullptr;
-    }
-#endif
     
     MPI_Finalize();
     return 0;

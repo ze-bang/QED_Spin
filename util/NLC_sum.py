@@ -153,7 +153,6 @@ class NLCExpansion:
             
             # Specific heat = β² * (⟨E²⟩ - ⟨E⟩²)
             specific_heat = (energy_squared - energy**2) / (temp * temp)
-            
             # Calculate entropy, accounting for shifted partition function
             # S = kB * [ln(Z) + βE]
             # where ln(Z) = ln(Z_shifted) + β*ground_state_energy
@@ -994,7 +993,7 @@ if __name__ == "__main__":
     parser.add_argument('--cluster_dir', required=True, help='Directory containing cluster information files')
     parser.add_argument('--eigenvalue_dir', required=True, help='Directory containing eigenvalue files from ED calculations')
     parser.add_argument('--output_dir', default='.', help='Directory to save output files')
-    parser.add_argument('--resummation_method', default='euler', 
+    parser.add_argument('--resummation_method', default='auto', 
                        choices=['auto', 'direct', 'euler', 'wynn', 'shanks', 'aitken', 'pade'],
                        help='Resummation method for series acceleration')
     parser.add_argument('--euler_resum', action='store_true', help='Use Euler resummation (deprecated, use --resummation_method euler)')

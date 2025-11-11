@@ -203,6 +203,135 @@ public:
                                    std::string dir = "",
                                    bool compute_eigenvectors = false);
     
+    /**
+     * Run GPU-accelerated Finite Temperature Lanczos Method (FTLM)
+     */
+    static void runGPUFTLM(void* gpu_op_handle,
+                          int N,
+                          int krylov_dim,
+                          int num_samples,
+                          double temp_min,
+                          double temp_max,
+                          int num_temp_bins,
+                          double tolerance,
+                          std::string dir = "",
+                          bool full_reorth = false,
+                          int reorth_freq = 10,
+                          unsigned int random_seed = 0);
+    
+    /**
+     * Run GPU-accelerated FTLM for Fixed Sz sector
+     */
+    static void runGPUFTLMFixedSz(void* gpu_op_handle,
+                                 int n_up,
+                                 int krylov_dim,
+                                 int num_samples,
+                                 double temp_min,
+                                 double temp_max,
+                                 int num_temp_bins,
+                                 double tolerance,
+                                 std::string dir = "",
+                                 bool full_reorth = false,
+                                 int reorth_freq = 10,
+                                 unsigned int random_seed = 0);
+    
+    /**
+     * Run GPU-accelerated dynamical response (spectral function) for a single state
+     * Computes S(ω) = <ψ|O†δ(ω - H)O|ψ>
+     * 
+     * @param gpu_op_handle GPU Hamiltonian operator handle
+     * @param gpu_obs_handle GPU observable operator handle (nullptr = identity)
+     * @param d_psi_state Device pointer to initial state |ψ> (normalized)
+     * @param N Hilbert space dimension
+     * @param krylov_dim Lanczos order
+     * @param omega_min Minimum frequency
+     * @param omega_max Maximum frequency
+     * @param num_omega_bins Number of frequency points
+     * @param broadening Lorentzian broadening parameter (eta)
+     * @param temperature Temperature for thermal weighting (0 = none)
+     * @param ground_state_energy Ground state energy for frequency shift
+     * @return tuple(frequencies, spectral_function)
+     */
+    static std::pair<std::vector<double>, std::vector<double>>
+    runGPUDynamicalResponse(void* gpu_op_handle,
+                           void* gpu_obs_handle,
+                           void* d_psi_state,
+                           int N,
+                           int krylov_dim,
+                           double omega_min,
+                           double omega_max,
+                           int num_omega_bins,
+                           double broadening,
+                           double temperature = 0.0,
+                           double ground_state_energy = 0.0);
+    
+    /**
+     * Run GPU-accelerated thermal dynamical response (spectral function) with FTLM averaging
+     * Computes S(ω,T) averaged over random samples
+     * 
+     * @param gpu_op_handle GPU Hamiltonian operator handle
+     * @param gpu_obs_handle GPU observable operator handle
+     * @param N Hilbert space dimension
+     * @param num_samples Number of random samples for thermal averaging
+     * @param krylov_dim Lanczos order
+     * @param omega_min Minimum frequency
+     * @param omega_max Maximum frequency
+     * @param num_omega_bins Number of frequency points
+     * @param broadening Lorentzian broadening parameter
+     * @param temperature Temperature
+     * @param random_seed Random seed (0 = random)
+     * @param ground_state_energy Ground state energy for frequency shift
+     * @return tuple(frequencies, avg_spectral_function, error_bars)
+     */
+    static std::tuple<std::vector<double>, std::vector<double>, std::vector<double>>
+    runGPUDynamicalResponseThermal(void* gpu_op_handle,
+                                  void* gpu_obs_handle,
+                                  int N,
+                                  int num_samples,
+                                  int krylov_dim,
+                                  double omega_min,
+                                  double omega_max,
+                                  int num_omega_bins,
+                                  double broadening,
+                                  double temperature,
+                                  unsigned int random_seed = 0,
+                                  double ground_state_energy = 0.0);
+    
+    /**
+     * Run GPU-accelerated dynamical correlation between two operators
+     * Computes S_{O1,O2}(ω) = Σ_n ⟨ψ|O₁†|n⟩⟨n|O₂|ψ⟩ δ(ω - E_n)
+     * 
+     * @param gpu_op_handle GPU Hamiltonian operator handle
+     * @param gpu_obs1_handle First GPU observable operator handle
+     * @param gpu_obs2_handle Second GPU observable operator handle
+     * @param N Hilbert space dimension
+     * @param num_samples Number of random samples
+     * @param krylov_dim Lanczos order
+     * @param omega_min Minimum frequency
+     * @param omega_max Maximum frequency
+     * @param num_omega_bins Number of frequency points
+     * @param broadening Lorentzian broadening parameter
+     * @param temperature Temperature
+     * @param random_seed Random seed (0 = random)
+     * @param ground_state_energy Ground state energy for frequency shift
+     * @return tuple(frequencies, S_real, S_imag, error_real, error_imag)
+     */
+    static std::tuple<std::vector<double>, std::vector<double>, std::vector<double>,
+                     std::vector<double>, std::vector<double>>
+    runGPUDynamicalCorrelation(void* gpu_op_handle,
+                              void* gpu_obs1_handle,
+                              void* gpu_obs2_handle,
+                              int N,
+                              int num_samples,
+                              int krylov_dim,
+                              double omega_min,
+                              double omega_max,
+                              int num_omega_bins,
+                              double broadening,
+                              double temperature,
+                              unsigned int random_seed = 0,
+                              double ground_state_energy = 0.0);
+    
 private:
     static int getGPUCount();
     static size_t getAvailableGPUMemory(int device = 0);

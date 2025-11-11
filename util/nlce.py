@@ -227,7 +227,7 @@ def main():
     # Step 1: Generate clusters
     if not args.skip_cluster_gen:
         logging.info("="*80)
-        logging.info("Step 1: Generating topologically distinct clusters")
+        logging.info("Step 1: Generating topologically distinct clusters with multiplicities")
         logging.info("="*80)
         
         cmd = [
@@ -355,83 +355,107 @@ def main():
             # Iterate through all clusters
             for cluster_id, order, _ in tqdm(clusters, desc="Plotting thermodynamic data"):
                 cluster_ed_dir = os.path.join(ed_dir, f'cluster_{cluster_id}_order_{order}')
-                
-                # Check if thermodynamic data exists
-                thermo_file = os.path.join(cluster_ed_dir, "thermo/thermo_data.txt")
+
+                # Check if thermodynamic data exists (ED writes into output/thermo)
+                thermo_file = os.path.join(cluster_ed_dir, "output/thermo/thermo_data.txt")
                 if not os.path.exists(thermo_file):
                     logging.warning(f"No thermodynamic data found for cluster {cluster_id}")
                     continue
                 
                 # Load thermodynamic data
                 try:
-                    # First read the header to determine the columns
+                    # Parse header to determine the available columns
                     columns = []
                     with open(thermo_file, 'r') as f:
                         for line in f:
-                            if line.startswith('#') and 'Column' in line:
-                                parts = line.strip('# \n').split(':')
+                            if not line.startswith('#'):
+                                break
+                            stripped = line.lstrip('#').strip()
+                            if not stripped:
+                                continue
+                            if 'Column' in stripped:
+                                parts = stripped.split(':')
                                 if len(parts) >= 2:
                                     col_num = int(parts[0].replace('Column', '').strip()) - 1
                                     col_name = parts[1].strip()
                                     while len(columns) <= col_num:
                                         columns.append(None)
                                     columns[col_num] = col_name
-                    
+                            else:
+                                tokens = stripped.split()
+                                if tokens:
+                                    columns = tokens
+
+                    if not columns:
+                        # Fall back to the expected ordering if the header is absent
+                        columns = ['Temperature', 'Energy', 'Specific Heat', 'Entropy', 'Free Energy']
+
+                    def _normalize(name):
+                        return name.strip().lower().replace('_', ' ')
+
+                    normalized_columns = [(_normalize(col) if col else None) for col in columns]
+
+                    def _get_index(candidates, default_idx):
+                        for candidate in candidates:
+                            norm_candidate = _normalize(candidate)
+                            if norm_candidate in normalized_columns:
+                                return normalized_columns.index(norm_candidate)
+                        return default_idx
+
                     # Load the data
                     data = np.loadtxt(thermo_file, comments='#')
-                    
+                    data = np.atleast_2d(data)
+
                     # Create plots
                     fig, axs = plt.subplots(2, 2, figsize=(12, 10))
                     fig.suptitle(f"Thermodynamic Properties for Cluster {cluster_id} (Order {order})")
-                    
-                    # Get indices for each quantity
-                    beta_idx = columns.index('Temperature') if 'Temperature' in columns else 0
-                    energy_idx = columns.index('Energy') if 'Energy' in columns else 1
-                    free_energy_idx = columns.index('Free Energy') if 'Free Energy' in columns else 4
-                    spec_heat_idx = columns.index('Specific Heat') if 'Specific Heat' in columns else 2
-                    entropy_idx = columns.index('Entropy') if 'Entropy' in columns else 3
-                    
-                    # Convert beta to temperature
-                    T = data[:, beta_idx]
-                    
-                    # Sort by temperature (ascending)
+
+                    temp_idx = _get_index(['Temperature', 'Temp', 'T'], 0)
+                    energy_idx = _get_index(['Energy', 'Internal Energy'], 1 if data.shape[1] > 1 else 0)
+                    spec_heat_idx = _get_index(['Specific Heat', 'Specific_Heat', 'SpecificHeat'], 2 if data.shape[1] > 2 else min(energy_idx + 1, data.shape[1] - 1))
+                    entropy_idx = _get_index(['Entropy'], 3 if data.shape[1] > 3 else min(spec_heat_idx + 1, data.shape[1] - 1))
+                    free_energy_idx = _get_index(['Free Energy', 'Free_Energy', 'FreeEnergy'], 4 if data.shape[1] > 4 else min(entropy_idx + 1, data.shape[1] - 1))
+
+                    T = data[:, temp_idx]
+
+                    # Sort by temperature (ascending) for smoother plots
                     sort_idx = np.argsort(T)
                     T = T[sort_idx]
-                    data = data[sort_idx]
-                    
+                    sorted_data = data[sort_idx]
+
                     # Plot energy
-                    axs[0, 0].plot(T, data[:, energy_idx], 'r-')
+                    axs[0, 0].plot(T, sorted_data[:, energy_idx], 'r-')
                     axs[0, 0].set_xlabel("Temperature")
                     axs[0, 0].set_ylabel("Energy")
                     axs[0, 0].set_xscale('log')
                     axs[0, 0].grid(True)
-                    
+
                     # Plot specific heat
-                    axs[0, 1].plot(T, data[:, spec_heat_idx], 'b-')
+                    axs[0, 1].plot(T, sorted_data[:, spec_heat_idx], 'b-')
                     axs[0, 1].set_xlabel("Temperature")
                     axs[0, 1].set_ylabel("Specific Heat")
                     axs[0, 1].set_xscale('log')
                     axs[0, 1].grid(True)
-                    
+
                     # Plot entropy
-                    axs[1, 0].plot(T, data[:, entropy_idx], 'g-')
+                    axs[1, 0].plot(T, sorted_data[:, entropy_idx], 'g-')
                     axs[1, 0].set_xlabel("Temperature")
                     axs[1, 0].set_ylabel("Entropy")
                     axs[1, 0].set_xscale('log')
                     axs[1, 0].grid(True)
-                    
+
                     # Plot free energy
-                    axs[1, 1].plot(T, data[:, free_energy_idx], 'm-')
+                    axs[1, 1].plot(T, sorted_data[:, free_energy_idx], 'm-')
                     axs[1, 1].set_xlabel("Temperature")
                     axs[1, 1].set_ylabel("Free Energy")
                     axs[1, 1].set_xscale('log')
                     axs[1, 1].grid(True)
-                    
+
                     # Save plot
                     plt.tight_layout()
                     plt.savefig(os.path.join(thermo_plots_dir, f"thermo_cluster_{cluster_id}_order_{order}.png"))
                     plt.close(fig)
-                    
+
                     logging.info(f"Thermodynamic plots created for cluster {cluster_id}")
                     
                 except Exception as e:
@@ -528,7 +552,7 @@ def main():
                 '--plot',
                 f'--temp_min={args.temp_min}',
                 f'--temp_max={args.temp_max}',
-                f'--temp_bins={args.temp_bins}',
+                f'--temp_bins={args.temp_bins}'
             ]
         else:
             nlc_params = [
@@ -541,6 +565,7 @@ def main():
                 f'--temp_min={args.temp_min}',
                 f'--temp_max={args.temp_max}',
                 f'--temp_bins={args.temp_bins}',
+                f'--resummation_method=auto'
             ]
             
         if args.SI_units:

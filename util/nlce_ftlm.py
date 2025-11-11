@@ -174,7 +174,7 @@ Example usage:
                        help='Width of the random transverse field')
     
     # FTLM parameters
-    parser.add_argument('--ftlm_samples', type=int, default=20, 
+    parser.add_argument('--ftlm_samples', type=int, default=40, 
                        help='Number of random samples for FTLM')
     parser.add_argument('--krylov_dim', type=int, default=150, 
                        help='Krylov subspace dimension for FTLM')
@@ -249,8 +249,7 @@ Example usage:
             'python3', 
             os.path.join(os.path.dirname(__file__), 'generate_pyrochlore_clusters.py'),
             f'--max_order={args.max_order}',
-            f'--output_dir={cluster_dir}',
-            f'--periodic'
+            f'--output_dir={cluster_dir}'
         ]
         
         logging.info(f"Running command: {' '.join(cmd)}")
