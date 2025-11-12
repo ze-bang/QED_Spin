@@ -1335,26 +1335,22 @@ public:
             throw std::runtime_error("Could not open block file: " + filepath);
         }
         
-        // Read dimensions as int to match what was written
-        int rows_int, cols_int;
-        size_t nnz;
-        file.read(reinterpret_cast<char*>(&rows_int), sizeof(int));
-        file.read(reinterpret_cast<char*>(&cols_int), sizeof(int));
-        file.read(reinterpret_cast<char*>(&nnz), sizeof(size_t));
-        
-        uint64_t rows = rows_int;
-        uint64_t cols = cols_int;
+        // Read dimensions as uint64_t (consistent with write)
+        uint64_t rows, cols, nnz;
+        file.read(reinterpret_cast<char*>(&rows), sizeof(uint64_t));
+        file.read(reinterpret_cast<char*>(&cols), sizeof(uint64_t));
+        file.read(reinterpret_cast<char*>(&nnz), sizeof(uint64_t));
         
         std::vector<Eigen::Triplet<Complex>> triplets;
         triplets.reserve(nnz);
         
-        for (size_t i = 0; i < nnz; ++i) {
-            int row_int, col_int;
+        for (uint64_t i = 0; i < nnz; ++i) {
+            uint64_t row, col;
             Complex val;
-            file.read(reinterpret_cast<char*>(&row_int), sizeof(int));
-            file.read(reinterpret_cast<char*>(&col_int), sizeof(int));
+            file.read(reinterpret_cast<char*>(&row), sizeof(uint64_t));
+            file.read(reinterpret_cast<char*>(&col), sizeof(uint64_t));
             file.read(reinterpret_cast<char*>(&val), sizeof(Complex));
-            triplets.emplace_back(row_int, col_int, val);
+            triplets.emplace_back(row, col, val);
         }
         
         Eigen::SparseMatrix<Complex> matrix(rows, cols);
@@ -1419,13 +1415,34 @@ private:
     // Private Helper Functions
     // ========================================================================
     
+    /**
+     * Get orbit representative for a basis state
+     * Uses BFS to generate complete orbit from generators, then returns lexicographic minimum
+     * More efficient than iterating over all group elements (max_clique)
+     */
     size_t getOrbitRepresentative(size_t basis) const {
-        size_t rep = basis;
-        for (const auto& perm : symmetry_info.max_clique) {
-            size_t permuted = applyPermutation(basis, perm);
-            if (permuted < rep) rep = permuted;
+        std::set<size_t> orbit;
+        std::queue<size_t> to_process;
+        to_process.push(basis);
+        orbit.insert(basis);
+        
+        // Generate full orbit using BFS with generators
+        while (!to_process.empty()) {
+            size_t current = to_process.front();
+            to_process.pop();
+            
+            for (const auto& gen : symmetry_info.generators) {
+                size_t transformed = applyPermutation(current, gen);
+                
+                if (orbit.find(transformed) == orbit.end()) {
+                    orbit.insert(transformed);
+                    to_process.push(transformed);
+                }
+            }
         }
-        return rep;
+        
+        // Return lexicographic minimum as canonical representative
+        return *orbit.begin();
     }
     
     std::vector<Complex> createSymmetrizedVector(
@@ -1441,12 +1458,16 @@ private:
             const auto& perm = symmetry_info.max_clique[g];
             const auto& powers = symmetry_info.power_representation[g];
             
-            // Compute character: χ_q(g) = exp(2πi Σ_k q_k * n_k / order_k)
+            // Compute character: χ_q(g) = ∏_k phase_k^{power_k}
+            // Optimized: use std::pow instead of loops
             Complex character(1.0, 0.0);
             for (size_t k = 0; k < powers.size(); ++k) {
-                Complex phase = phase_factors[k];
-                for (uint64_t p = 0; p < powers[k]; ++p) {
-                    character *= phase;
+                if (powers[k] == 0) continue;  // Skip identity
+                if (powers[k] == 1) {
+                    character *= phase_factors[k];
+                } else {
+                    // Use std::pow for higher powers (more efficient than loop)
+                    character *= std::pow(phase_factors[k], static_cast<double>(powers[k]));
                 }
             }
             
@@ -1454,9 +1475,8 @@ private:
             result[permuted_basis] += std::conj(character);
         }
         
-        // Normalization factor: 1/√|G|
-        double norm_factor = 1.0 / std::sqrt(symmetry_info.max_clique.size());
-        for (auto& v : result) v *= norm_factor;
+        // No normalization here - will be normalized to unit norm in calling code
+        // The 1/√|G| factor is incorrect for states with non-trivial stabilizers
         
         return result;
     }
@@ -1594,17 +1614,18 @@ private:
         std::string filename = block_dir + "/block_" + std::to_string(block_idx) + ".dat";
         std::ofstream file(filename, std::ios::binary);
         
+        // Use uint64_t consistently to avoid truncation
         uint64_t rows = block_size, cols = block_size;
-        size_t nnz = triplets.size();
-        file.write(reinterpret_cast<const char*>(&rows), sizeof(int));
-        file.write(reinterpret_cast<const char*>(&cols), sizeof(int));
-        file.write(reinterpret_cast<const char*>(&nnz), sizeof(size_t));
+        uint64_t nnz = triplets.size();
+        file.write(reinterpret_cast<const char*>(&rows), sizeof(uint64_t));
+        file.write(reinterpret_cast<const char*>(&cols), sizeof(uint64_t));
+        file.write(reinterpret_cast<const char*>(&nnz), sizeof(uint64_t));
         
         for (const auto& t : triplets) {
             uint64_t row = t.row(), col = t.col();
             Complex val = t.value();
-            file.write(reinterpret_cast<const char*>(&row), sizeof(int));
-            file.write(reinterpret_cast<const char*>(&col), sizeof(int));
+            file.write(reinterpret_cast<const char*>(&row), sizeof(uint64_t));
+            file.write(reinterpret_cast<const char*>(&col), sizeof(uint64_t));
             file.write(reinterpret_cast<const char*>(&val), sizeof(Complex));
         }
         
@@ -1911,9 +1932,14 @@ public:
     /**
      * Generate symmetrized basis for fixed Sz sector with spatial symmetries
      * Combines Sz conservation with spatial symmetry group
+     * 
+     * WARNING: This legacy text-based version has known issues with phase calculation.
+     * Use generateSymmetrizedBasisFixedSzHDF5() instead for correct results.
+     * @deprecated Use generateSymmetrizedBasisFixedSzHDF5() instead
      */
     void generateSymmetrizedBasisFixedSz(const std::string& dir) {
         std::cout << "\n=== Generating Symmetrized Basis (Fixed Sz) ===" << std::endl;
+        std::cout << "WARNING: Using legacy text-based method. Consider using HDF5 version instead." << std::endl;
         std::cout << "Fixed Sz sector: n_up=" << n_up_ 
                   << ", dimension=" << fixed_sz_dim_ << std::endl;
         
@@ -2074,12 +2100,16 @@ public:
                     const auto& perm = symmetry_info.max_clique[g];
                     const auto& powers = symmetry_info.power_representation[g];
                     
-                    // Compute character: χ_q(g) = exp(2πi Σ_k q_k * n_k / order_k)
+                    // Compute character: χ_q(g) = ∏_k phase_k^{power_k}
+                    // Optimized: use std::pow instead of loops
                     Complex character(1.0, 0.0);
                     for (size_t k = 0; k < powers.size(); ++k) {
-                        Complex phase = sector.phase_factors[k];
-                        for (uint64_t p = 0; p < powers[k]; ++p) {
-                            character *= phase;
+                        if (powers[k] == 0) continue;  // Skip identity
+                        if (powers[k] == 1) {
+                            character *= sector.phase_factors[k];
+                        } else {
+                            // Use std::pow for higher powers (more efficient than loop)
+                            character *= std::pow(sector.phase_factors[k], static_cast<double>(powers[k]));
                         }
                     }
                     
@@ -2303,24 +2333,20 @@ public:
             throw std::runtime_error("Cannot open block file: " + filepath);
         }
         
-        // Read dimensions as int to match what was written
-        int rows_int, cols_int;
-        size_t nnz;
-        file.read(reinterpret_cast<char*>(&rows_int), sizeof(int));
-        file.read(reinterpret_cast<char*>(&cols_int), sizeof(int));
-        file.read(reinterpret_cast<char*>(&nnz), sizeof(size_t));
-        
-        uint64_t rows = rows_int;
-        uint64_t cols = cols_int;
+        // Read dimensions as uint64_t (consistent with write)
+        uint64_t rows, cols, nnz;
+        file.read(reinterpret_cast<char*>(&rows), sizeof(uint64_t));
+        file.read(reinterpret_cast<char*>(&cols), sizeof(uint64_t));
+        file.read(reinterpret_cast<char*>(&nnz), sizeof(uint64_t));
         
         std::vector<Eigen::Triplet<Complex>> triplets;
         triplets.reserve(nnz);
         
-        for (size_t i = 0; i < nnz; ++i) {
-            int row, col;
+        for (uint64_t i = 0; i < nnz; ++i) {
+            uint64_t row, col;
             Complex value;
-            file.read(reinterpret_cast<char*>(&row), sizeof(int));
-            file.read(reinterpret_cast<char*>(&col), sizeof(int));
+            file.read(reinterpret_cast<char*>(&row), sizeof(uint64_t));
+            file.read(reinterpret_cast<char*>(&col), sizeof(uint64_t));
             file.read(reinterpret_cast<char*>(&value), sizeof(Complex));
             triplets.emplace_back(row, col, value);
         }
@@ -2374,91 +2400,56 @@ public:
 protected:
     /**
      * Get orbit representative for a state in fixed Sz sector
+     * Uses BFS to generate complete orbit, then returns lexicographic minimum
      */
     uint64_t getOrbitRepresentativeFixedSz(uint64_t state) const {
-        uint64_t min_state = state;
+        std::set<uint64_t> orbit;
+        std::queue<uint64_t> to_process;
+        to_process.push(state);
+        orbit.insert(state);
         
-        for (const auto& generator : symmetry_info.generators) {
-            uint64_t permuted = applyPermutation(state, generator);
-            if (permuted < min_state) {
-                min_state = permuted;
+        // Generate full orbit using BFS with generators
+        while (!to_process.empty()) {
+            uint64_t current = to_process.front();
+            to_process.pop();
+            
+            for (const auto& gen : symmetry_info.generators) {
+                uint64_t transformed = applyPermutation(current, gen);
+                
+                // Check if still in fixed Sz sector
+                if (popcount(transformed) != static_cast<uint64_t>(n_up_)) continue;
+                
+                if (orbit.find(transformed) == orbit.end()) {
+                    orbit.insert(transformed);
+                    to_process.push(transformed);
+                }
             }
         }
         
-        return min_state;
+        // Return lexicographic minimum as canonical representative
+        return *orbit.begin();
     }
     
     /**
      * Create symmetrized vector in fixed Sz basis
+     * @deprecated This function has incorrect phase calculation. Use HDF5-based methods instead.
      */
     std::vector<Complex> createSymmetrizedVectorFixedSz(
         uint64_t seed_state,
         const std::vector<int>& quantum_numbers,
         const std::vector<Complex>& phase_factors) const {
         
-        std::vector<Complex> sym_vec(fixed_sz_dim_, Complex(0.0, 0.0));
+        throw std::runtime_error(
+            "createSymmetrizedVectorFixedSz() is deprecated due to incorrect phase calculation.\n"
+            "Use generateSymmetrizedBasisFixedSzHDF5() instead, which implements correct projection."
+        );
         
-        // Apply symmetry operations and accumulate
-        std::set<uint64_t> orbit;
-        std::queue<uint64_t> to_process;
-        to_process.push(seed_state);
-        orbit.insert(seed_state);
+        // Dead code below - kept for reference only
+        // The issue is that calculatePhaseFixedSz() only checks single generator applications,
+        // missing most phase relationships in the orbit. The HDF5 version uses the full
+        // group projection formula directly.
         
-        while (!to_process.empty()) {
-            uint64_t current = to_process.front();
-            to_process.pop();
-            
-            for (size_t g = 0; g < symmetry_info.generators.size(); ++g) {
-                uint64_t permuted = applyPermutation(current, symmetry_info.generators[g]);
-                
-                // Check if still in fixed Sz sector
-                if (popcount(permuted) != n_up_) continue;
-                
-                if (orbit.find(permuted) == orbit.end()) {
-                    orbit.insert(permuted);
-                    to_process.push(permuted);
-                }
-            }
-        }
-        
-        // Build symmetrized vector with phase factors
-        for (uint64_t state : orbit) {
-            auto it = state_to_index_.find(state);
-            if (it != state_to_index_.end()) {
-                uint64_t idx = it->second;
-                
-                // Calculate phase based on how we got to this state
-                Complex phase = calculatePhaseFixedSz(seed_state, state, quantum_numbers, phase_factors);
-                sym_vec[idx] = phase;
-            }
-        }
-        
-        return sym_vec;
-    }
-    
-    /**
-     * Calculate phase factor for symmetrized state
-     */
-    Complex calculatePhaseFixedSz(
-        uint64_t seed_state,
-        uint64_t target_state,
-        const std::vector<int>& quantum_numbers,
-        const std::vector<Complex>& phase_factors) const {
-        
-        // Simple implementation: accumulate phases along transformation path
-        // For more sophisticated implementation, track actual group element
-        Complex phase(1.0, 0.0);
-        
-        uint64_t current = seed_state;
-        for (size_t g = 0; g < symmetry_info.generators.size(); ++g) {
-            uint64_t permuted = applyPermutation(current, symmetry_info.generators[g]);
-            if (permuted == target_state) {
-                phase *= phase_factors[g];
-                break;
-            }
-        }
-        
-        return phase;
+        return std::vector<Complex>();  // Never reached
     }
     
     /**
@@ -2590,17 +2581,18 @@ private:
         std::string filename = block_dir + "/block_" + std::to_string(block_idx) + ".dat";
         std::ofstream file(filename, std::ios::binary);
         
-        int rows = block_size, cols = block_size;
-        size_t nnz = triplets.size();
-        file.write(reinterpret_cast<const char*>(&rows), sizeof(int));
-        file.write(reinterpret_cast<const char*>(&cols), sizeof(int));
-        file.write(reinterpret_cast<const char*>(&nnz), sizeof(size_t));
+        // Use uint64_t consistently to avoid truncation
+        uint64_t rows = block_size, cols = block_size;
+        uint64_t nnz = triplets.size();
+        file.write(reinterpret_cast<const char*>(&rows), sizeof(uint64_t));
+        file.write(reinterpret_cast<const char*>(&cols), sizeof(uint64_t));
+        file.write(reinterpret_cast<const char*>(&nnz), sizeof(uint64_t));
         
         for (const auto& t : triplets) {
-            int row = t.row(), col = t.col();
+            uint64_t row = t.row(), col = t.col();
             Complex value = t.value();
-            file.write(reinterpret_cast<const char*>(&row), sizeof(int));
-            file.write(reinterpret_cast<const char*>(&col), sizeof(int));
+            file.write(reinterpret_cast<const char*>(&row), sizeof(uint64_t));
+            file.write(reinterpret_cast<const char*>(&col), sizeof(uint64_t));
             file.write(reinterpret_cast<const char*>(&value), sizeof(Complex));
         }
         

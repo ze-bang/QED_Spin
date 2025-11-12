@@ -757,6 +757,144 @@ class NLCExpansionFTLM:
             plt.show()
         
         plt.close()
+    
+    def plot_order_by_order_thermo(self, save_dir=None):
+        """Plot thermodynamic properties for each order."""
+        try:
+            import matplotlib.pyplot as plt
+        except ImportError:
+            print("Matplotlib not available. Skipping order-by-order plots.")
+            return
+        
+        # Determine unit labels
+        if self.SI:
+            energy_unit = 'J/mol'
+            cv_unit = 'J/(K·mol)'
+            entropy_unit = 'J/(K·mol)'
+            free_energy_unit = 'J/mol'
+        else:
+            energy_unit = 'natural units'
+            cv_unit = 'natural units'
+            entropy_unit = 'natural units'
+            free_energy_unit = 'natural units'
+        
+        # Organize clusters by order
+        clusters_by_order = defaultdict(list)
+        for cluster_id, data in self.clusters.items():
+            if data.get('has_data', False):
+                clusters_by_order[data['order']].append(cluster_id)
+        
+        # Get all orders
+        orders = sorted(clusters_by_order.keys())
+        
+        if not orders:
+            print("No data available for order-by-order plotting.")
+            return
+        
+        # Compute partial sums for each order
+        partial_sums = defaultdict(lambda: {
+            'energy': np.zeros_like(self.temp_values),
+            'specific_heat': np.zeros_like(self.temp_values),
+            'entropy': np.zeros_like(self.temp_values),
+            'free_energy': np.zeros_like(self.temp_values)
+        })
+        
+        # Calculate cumulative sums up to each order
+        for order in orders:
+            # Sum contributions from all orders up to current
+            for o in range(1, order + 1):
+                if o not in clusters_by_order:
+                    continue
+                
+                for cluster_id in clusters_by_order[o]:
+                    multiplicity = self.clusters[cluster_id]['multiplicity']
+                    
+                    for quantity in ['energy', 'specific_heat', 'entropy', 'free_energy']:
+                        if cluster_id in self.weights[quantity]:
+                            weight = self.weights[quantity][cluster_id]
+                            partial_sums[order][quantity] += weight * multiplicity
+        
+        # Create plots
+        fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+        fig.suptitle('NLCE Convergence: Partial Sums by Order', fontsize=16, fontweight='bold')
+        
+        temps = self.temp_values
+        
+        # Define colors for different orders
+        colors = plt.cm.viridis(np.linspace(0, 0.9, len(orders)))
+        
+        # Energy
+        ax = axes[0, 0]
+        for idx, order in enumerate(orders):
+            ax.plot(temps, partial_sums[order]['energy'], 
+                   label=f'Order {order}', color=colors[idx], linewidth=2)
+        ax.set_xlabel('Temperature (K)' if self.SI else 'Temperature')
+        ax.set_ylabel(f'Energy per site ({energy_unit})')
+        ax.set_xscale('log')
+        ax.grid(True, alpha=0.3)
+        ax.legend()
+        ax.set_title('Energy')
+        
+        # Specific Heat
+        ax = axes[0, 1]
+        for idx, order in enumerate(orders):
+            ax.plot(temps, partial_sums[order]['specific_heat'], 
+                   label=f'Order {order}', color=colors[idx], linewidth=2)
+        ax.set_xlabel('Temperature (K)' if self.SI else 'Temperature')
+        ax.set_ylabel(f'Specific Heat per site ({cv_unit})')
+        ax.set_xscale('log')
+        ax.grid(True, alpha=0.3)
+        ax.legend()
+        ax.set_title('Specific Heat')
+        
+        # Entropy
+        ax = axes[1, 0]
+        for idx, order in enumerate(orders):
+            ax.plot(temps, partial_sums[order]['entropy'], 
+                   label=f'Order {order}', color=colors[idx], linewidth=2)
+        ax.set_xlabel('Temperature (K)' if self.SI else 'Temperature')
+        ax.set_ylabel(f'Entropy per site ({entropy_unit})')
+        ax.set_xscale('log')
+        ax.grid(True, alpha=0.3)
+        ax.legend()
+        ax.set_title('Entropy')
+        
+        # Free Energy
+        ax = axes[1, 1]
+        for idx, order in enumerate(orders):
+            ax.plot(temps, partial_sums[order]['free_energy'], 
+                   label=f'Order {order}', color=colors[idx], linewidth=2)
+        ax.set_xlabel('Temperature (K)' if self.SI else 'Temperature')
+        ax.set_ylabel(f'Free Energy per site ({free_energy_unit})')
+        ax.set_xscale('log')
+        ax.grid(True, alpha=0.3)
+        ax.legend()
+        ax.set_title('Free Energy')
+        
+        plt.tight_layout()
+        
+        if save_dir:
+            save_path = os.path.join(save_dir, "nlc_order_by_order_convergence.png")
+            plt.savefig(save_path, dpi=300, bbox_inches='tight')
+            print(f"Order-by-order convergence plot saved to: {save_path}")
+        else:
+            plt.show()
+        
+        plt.close()
+        
+        # Also save partial sum data to files
+        if save_dir:
+            for order in orders:
+                order_file = os.path.join(save_dir, f"nlc_partial_sum_order_{order}.txt")
+                with open(order_file, 'w') as f:
+                    f.write(f"# NLCE Partial Sum up to Order {order}\n")
+                    f.write(f"# Temperature  Energy  Specific_Heat  Entropy  Free_Energy\n")
+                    for i, temp in enumerate(temps):
+                        f.write(f"{temp:.12e}  {partial_sums[order]['energy'][i]:.12e}  "
+                               f"{partial_sums[order]['specific_heat'][i]:.12e}  "
+                               f"{partial_sums[order]['entropy'][i]:.12e}  "
+                               f"{partial_sums[order]['free_energy'][i]:.12e}\n")
+                print(f"Partial sum data for order {order} saved to: {order_file}")
 
 
 if __name__ == "__main__":
@@ -864,6 +1002,9 @@ Example usage:
     if args.plot:
         plot_path = os.path.join(args.output_dir, "nlc_results_ftlm.png")
         nlc.plot_results(results, save_path=plot_path)
+        
+        # Plot order-by-order convergence
+        nlc.plot_order_by_order_thermo(save_dir=args.output_dir)
         
         # Plot specific heat with experimental data overlay if available
         exp_temp = None

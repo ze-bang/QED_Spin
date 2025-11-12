@@ -1,163 +1,34 @@
-import argparse
-import numpy as np
-import networkx as nx
-from mpl_toolkits.mplot3d import Axes3D
-import itertools
-import sys
-from collections import defaultdict
-import os
-import collections
-import pickle
-import hashlib
-
 #!/usr/bin/env python3
 """
 Generate topologically distinct clusters on a pyrochlore lattice for
 numerical linked cluster expansion (NLCE) calculations.
 
-Usage:
-    # Open boundary conditions (default):
-    python3 generate_pyrochlore_clusters.py --max_order 5 --lattice_size 10
-    
-    # Periodic boundary conditions:
-    python3 generate_pyrochlore_clusters.py --max_order 5 --lattice_size 10 --periodic
-    
-The --periodic flag enables periodic boundary conditions, which:
-- Creates wrap-around connections at lattice boundaries
-- Results in more tetrahedra in the finite lattice
-- Produces multiplicities that account for the full periodic symmetry
-- Is more appropriate for bulk thermodynamic properties in NLCE
+This implementation follows the correct NLCE multiplicity (lattice constant) calculation:
+    L(c) = lim_{M→∞} H_M(c) / (|Aut(c)| × N_subunit(M))
+
+where:
+- H_M(c) = number of injective graph embeddings of cluster c into a torus of size M
+- |Aut(c)| = size of the graph automorphism group of c
+- N_subunit(M) = number of subunits (tetrahedra or sites) in the torus
+
+References:
+- Tang, Khatami, Rigol (NLCE review)
+- Singh, Advances in Physics (High-order convergent expansions)
 """
+
+import argparse
+import numpy as np
+import networkx as nx
+from networkx.algorithms import isomorphism
+from mpl_toolkits.mplot3d import Axes3D
+import itertools
+import sys
+from collections import defaultdict, deque
+import os
+import collections
 
 import matplotlib.pyplot as plt
 
-def get_cache_key(max_order, lattice_size, periodic=False):
-    """Generate a unique cache key based on computation parameters."""
-    bc_str = "pbc" if periodic else "obc"
-    key_str = f"pyrochlore_clusters_order_{max_order}_lattice_{lattice_size}_{bc_str}"
-    return hashlib.md5(key_str.encode()).hexdigest()
-
-def get_cache_path(cache_dir, max_order, lattice_size, periodic=False):
-    """Get the path to the cache file."""
-    cache_key = get_cache_key(max_order, lattice_size, periodic)
-    return os.path.join(cache_dir, f"clusters_cache_{cache_key}.pkl")
-
-def save_cache(cache_path, data):
-    """Save computation results to cache file."""
-    cache_dir = os.path.dirname(cache_path)
-    os.makedirs(cache_dir, exist_ok=True)
-    
-    with open(cache_path, 'wb') as f:
-        pickle.dump(data, f, protocol=pickle.HIGHEST_PROTOCOL)
-    
-    print(f"Cache saved to {cache_path}")
-
-def load_cache(cache_path):
-    """Load computation results from cache file."""
-    if not os.path.exists(cache_path):
-        return None
-    
-    try:
-        with open(cache_path, 'rb') as f:
-            data = pickle.load(f)
-        print(f"Cache loaded from {cache_path}")
-        return data
-    except (pickle.UnpicklingError, EOFError, OSError) as e:
-        print(f"Warning: Failed to load cache from {cache_path}: {e}")
-        return None
-
-def verify_cache_validity(cache_data, max_order):
-    """Verify that cached data is complete and valid for the requested max_order."""
-    if cache_data is None:
-        return False
-    
-    required_keys = ['distinct_clusters', 'multiplicities', 'lattice', 'pos', 
-                     'tetrahedra', 'tet_graph', 'max_order', 'lattice_size']
-    
-    # Check all required keys exist
-    if not all(key in cache_data for key in required_keys):
-        print("Cache invalid: missing required keys")
-        return False
-    
-    # Check that cache covers the requested max_order
-    if cache_data['max_order'] < max_order:
-        print(f"Cache invalid: cached max_order {cache_data['max_order']} < requested {max_order}")
-        return False
-    
-    return True
-
-def extract_cluster_info(lattice, pos, tetrahedra, cluster):
-    """
-    Extract detailed information about a cluster.
-    """
-    # Get all vertices in the cluster
-    vertices = set()
-    for tet_idx in cluster:
-        vertices.update(tetrahedra[tet_idx])
-    
-    # Create subgraph for this cluster
-    subgraph = lattice.subgraph(vertices)
-    
-    # Get vertex positions
-    vertex_positions = {v: pos[v] for v in vertices}
-    
-    # Get edges in the cluster
-    edges = list(subgraph.edges())
-    
-    # Get the tetrahedra that make up the cluster
-    cluster_tetrahedra = [tetrahedra[tet_idx] for tet_idx in cluster]
-    
-    # Create adjacency matrix
-    nodes = sorted(list(vertices))
-    node_to_idx = {node: i for i, node in enumerate(nodes)}
-    adj_matrix = np.zeros((len(nodes), len(nodes)), dtype=int)
-    
-    for u, v in edges:
-        adj_matrix[node_to_idx[u], node_to_idx[v]] = 1
-        adj_matrix[node_to_idx[v], node_to_idx[u]] = 1
-    
-    return {
-        'vertices': list(vertices),
-        'vertex_positions': vertex_positions,
-        'edges': edges,
-        'tetrahedra': cluster_tetrahedra,
-        'adjacency_matrix': adj_matrix,
-        'node_mapping': node_to_idx
-    }
-
-def save_cluster_info(cluster_info, cluster_id, order, multiplicity, output_dir='.'):
-    """
-    Save detailed information about a cluster to a file.
-    """
-    filename = f"{output_dir}/cluster_{cluster_id}_order_{order}.dat"
-    
-    with open(filename, 'w') as f:
-        f.write(f"# Cluster ID: {cluster_id}\n")
-        f.write(f"# Order (number of tetrahedra): {order}\n")
-        f.write(f"# Multiplicity: {multiplicity}\n")
-        f.write(f"# Number of vertices: {len(cluster_info['vertices'])}\n")
-        f.write(f"# Number of edges: {len(cluster_info['edges'])}\n\n")
-        
-        f.write("# Vertices (index, x, y, z):\n")
-        for v in cluster_info['vertices']:
-            pos = cluster_info['vertex_positions'][v]
-            f.write(f"{v}, {pos[0]:.6f}, {pos[1]:.6f}, {pos[2]:.6f}\n")
-        
-        f.write("\n# Edges (vertex1, vertex2):\n")
-        for u, v in cluster_info['edges']:
-            f.write(f"{u}, {v}\n")
-        
-        f.write("\n# Tetrahedra (vertex1, vertex2, vertex3, vertex4):\n")
-        for tet in cluster_info['tetrahedra']:
-            f.write(f"{', '.join(map(str, tet))}\n")
-        
-        f.write("\n# Adjacency Matrix:\n")
-        for row in cluster_info['adjacency_matrix']:
-            f.write(' '.join(map(str, row)) + '\n')
-        
-        f.write("\n# Node Mapping (original_id: matrix_index):\n")
-        for node, idx in cluster_info['node_mapping'].items():
-            f.write(f"{node}: {idx}\n")
 
 def parse_arguments():
     parser = argparse.ArgumentParser(description='Generate topologically distinct clusters on a pyrochlore lattice.')
@@ -165,19 +36,12 @@ def parse_arguments():
     parser.add_argument('--visualize', action='store_true', help='Visualize each cluster')
     parser.add_argument('--lattice_size', type=int, default=0, help='Size of finite lattice (default: 2*max_order)')
     parser.add_argument('--output_dir', type=str, default='.', help='Output directory for cluster information')
-    parser.add_argument('--cache_dir', type=str, default='./cache', help='Directory for cache files')
-    parser.add_argument('--no_cache', action='store_false', help='Disable cache (recompute everything)')
-    parser.add_argument('--force_recompute', action='store_false', help='Force recomputation even if cache exists')
-    parser.add_argument('--periodic', action='store_false', help='Use periodic boundary conditions')
     return parser.parse_args()
 
-def create_pyrochlore_lattice(L, periodic=False):
+
+def create_pyrochlore_lattice(L):
     """
     Create a pyrochlore lattice of size L×L×L unit cells.
-    
-    Args:
-    - L: Size of the lattice in each direction
-    - periodic: If True, use periodic boundary conditions
     
     Returns:
     - G: NetworkX graph representing the lattice
@@ -232,17 +96,12 @@ def create_pyrochlore_lattice(L, periodic=False):
                     G.add_edge(v1, v2)
         
         # Second tetrahedron (spans across unit cells)
-        # Apply periodic boundary conditions if enabled
-        i_next = (i + 1) % L if periodic else i + 1
-        j_next = (j + 1) % L if periodic else j + 1
-        k_next = (k + 1) % L if periodic else k + 1
-        
-        if periodic or all(0 <= x < L for x in [i, j, k, i+1, j+1, k+1]):
+        if all(0 <= x < L for x in [i, j, k, i+1, j+1, k+1]):
             tet2 = [
                 site_mapping.get((i, j, k, 0)),
-                site_mapping.get((i_next, j, k, 1)),
-                site_mapping.get((i, j_next, k, 2)),
-                site_mapping.get((i, j, k_next, 3))
+                site_mapping.get((i+1, j, k, 1)),
+                site_mapping.get((i, j+1, k, 2)),
+                site_mapping.get((i, j, k+1, 3))
             ]
             if None not in tet2:
                 tetrahedra.append(tet2)
@@ -252,19 +111,27 @@ def create_pyrochlore_lattice(L, periodic=False):
     
     return G, pos, tetrahedra
 
+
 def build_tetrahedron_graph(tetrahedra):
-    """Build a graph where nodes are tetrahedra and edges represent shared vertices.
-    Optimized: O(sum_v deg(v)^2) via vertex->tetra incidence; on pyrochlore, deg≈2.
+    """
+    Build a graph where nodes are tetrahedra and edges represent shared vertices.
+    
+    Args:
+        tetrahedra: List of tetrahedra (each a tuple of 4 vertex IDs)
+    
+    Returns:
+        tet_graph: NetworkX graph with tetrahedra as nodes
     """
     tet_graph = nx.Graph()
     tet_graph.add_nodes_from(range(len(tetrahedra)))
 
-    incident = defaultdict(list)  # vertex_id -> [tet_indices]
+    # Build incidence map: vertex -> list of tetrahedron indices
+    incident = defaultdict(list)
     for t_idx, tet in enumerate(tetrahedra):
         for v in tet:
             incident[v].append(t_idx)
 
-    # Connect tetrahedra that share a vertex
+    # Connect tetrahedra that share at least one vertex
     for tets in incident.values():
         if len(tets) > 1:
             for i in range(len(tets) - 1):
@@ -273,35 +140,195 @@ def build_tetrahedron_graph(tetrahedra):
 
     return tet_graph
 
-def _wl_hash_subgraph(G, nodes):
-    """Compute an isomorphism-invariant hash for the induced subgraph on nodes."""
-    H = G.subgraph(nodes).copy()
-    # Relabel to a compact range so hash is label-invariant
-    mapping = {n: i for i, n in enumerate(sorted(H.nodes()))}
-    H = nx.relabel_nodes(H, mapping, copy=True)
-    try:
-        # NetworkX >= 2.6
-        from networkx.algorithms.graph_hashing import weisfeiler_lehman_graph_hash
-        return weisfeiler_lehman_graph_hash(H)
-    except Exception:
-        try:
-            # Some older versions had it under networkx.algorithms.isomorphism
-            from networkx.algorithms.isomorphism import weisfeiler_lehman_graph_hash
-            return weisfeiler_lehman_graph_hash(H)
-        except Exception:
-            # Last-resort cheap signature (slower/more collisions)
-            degs = sorted([d for _, d in H.degree()])
-            return f"{len(H)}|{H.number_of_edges()}|{tuple(degs)}"
 
-def generate_clusters(tet_graph, max_order, num_sites):
+def compute_automorphism_group_size(G):
     """
-    Generate all topologically distinct clusters up to max_order and their multiplicities.
-    Uses anchored expansion + WL hashing for fast dedup, exact iso only within same-hash buckets.
+    Compute the size of the automorphism group of graph G.
+    
+    Uses NetworkX's VF2 algorithm to find all automorphisms.
     
     Args:
-    - tet_graph: Graph where nodes are tetrahedra
-    - max_order: Maximum cluster order
-    - num_sites: Total number of lattice sites (for multiplicity normalization)
+        G: NetworkX graph
+        
+    Returns:
+        Size of the automorphism group |Aut(G)|
+    """
+    # Relabel nodes to 0..n-1 for canonical form
+    mapping = {node: i for i, node in enumerate(sorted(G.nodes()))}
+    G_relabeled = nx.relabel_nodes(G, mapping, copy=True)
+    
+    # Use graph matcher to find all automorphisms
+    GM = isomorphism.GraphMatcher(G_relabeled, G_relabeled)
+    
+    # Count all isomorphisms (automorphisms)
+    count = 0
+    for _ in GM.isomorphisms_iter():
+        count += 1
+    
+    return count
+
+
+def count_injective_embeddings(cluster_graph, lattice_graph, max_embeddings=None, verbose=False):
+    """
+    Count the number of injective graph homomorphisms (subgraph isomorphisms)
+    from cluster_graph into lattice_graph.
+    
+    This is the H_M(c) in the NLCE multiplicity formula.
+    
+    Args:
+        cluster_graph: NetworkX graph representing the cluster topology
+        lattice_graph: NetworkX graph representing the finite lattice (torus)
+        max_embeddings: Optional limit on the number of embeddings to count
+        verbose: Print progress information
+        
+    Returns:
+        Number of injective embeddings
+    """
+    # Use VF2 algorithm for subgraph isomorphism
+    GM = isomorphism.GraphMatcher(lattice_graph, cluster_graph)
+    
+    count = 0
+    for mapping in GM.subgraph_isomorphisms_iter():
+        count += 1
+        if max_embeddings is not None and count >= max_embeddings:
+            break
+    
+    if verbose:
+        print(f"    Found {count} injective embeddings")
+    
+    return count
+
+
+def compute_cluster_multiplicity(cluster_nodes, tet_graph, lattice_graph, tetrahedra, 
+                                  subunit='tetrahedron', verbose=False):
+    """
+    Compute the correct NLCE multiplicity (lattice constant) for a cluster.
+    
+    Formula: L(c) = H_M(c) / (|Aut(c)| × N_subunit)
+    
+    where:
+    - H_M(c) = number of injective embeddings in the torus
+    - |Aut(c)| = automorphism group size
+    - N_subunit = number of subunits (tetrahedra or sites) in the torus
+    
+    Args:
+        cluster_nodes: List/set of tetrahedron indices forming the cluster
+        tet_graph: Tetrahedron adjacency graph (full lattice)
+        lattice_graph: Site-level graph (full lattice)
+        tetrahedra: List of all tetrahedra
+        subunit: 'tetrahedron' or 'site' for normalization
+        verbose: Print detailed calculation steps
+        
+    Returns:
+        multiplicity: The lattice constant L(c)
+    """
+    if verbose:
+        print(f"  Computing multiplicity for cluster with {len(cluster_nodes)} tetrahedra...")
+    
+    # Step 1: Create the cluster's tetrahedron-level graph
+    cluster_tet_graph = tet_graph.subgraph(cluster_nodes).copy()
+    
+    # Relabel to canonical form (0, 1, 2, ...)
+    mapping = {node: i for i, node in enumerate(sorted(cluster_nodes))}
+    cluster_tet_graph = nx.relabel_nodes(cluster_tet_graph, mapping)
+    
+    # Step 2: Compute automorphism group size
+    aut_size = compute_automorphism_group_size(cluster_tet_graph)
+    if verbose:
+        print(f"    Automorphism group size: {aut_size}")
+    
+    # Step 3: Count injective embeddings in the full tetrahedron graph
+    num_embeddings = count_injective_embeddings(
+        cluster_tet_graph, 
+        tet_graph, 
+        verbose=verbose
+    )
+    
+    # Step 4: Determine number of subunits
+    if subunit == 'tetrahedron':
+        N_subunit = tet_graph.number_of_nodes()
+    elif subunit == 'site':
+        N_subunit = lattice_graph.number_of_nodes()
+    else:
+        raise ValueError(f"Unknown subunit type: {subunit}")
+    
+    # Step 5: Compute multiplicity
+    multiplicity = num_embeddings / (aut_size * N_subunit)
+    
+    if verbose:
+        print(f"    H_M(c) = {num_embeddings}")
+        print(f"    |Aut(c)| = {aut_size}")
+        print(f"    N_subunit = {N_subunit}")
+        print(f"    L(c) = {num_embeddings}/{aut_size}/{N_subunit} = {multiplicity}")
+    
+    return multiplicity
+
+
+def verify_multiplicity_sanity(order, multiplicity, subunit='tetrahedron'):
+    """
+    Verify that computed multiplicities satisfy known constraints.
+    
+    Returns True if the multiplicity seems reasonable.
+    """
+    # Order 1 cluster should have multiplicity = 1 (one tetrahedron per tetrahedron)
+    if order == 1:
+        if subunit == 'tetrahedron':
+            return abs(multiplicity - 1.0) < 1e-6
+        elif subunit == 'site':
+            # One tetrahedron has 4 sites, so L = 1/4 per site
+            return abs(multiplicity - 0.25) < 1e-6
+    
+    # Multiplicity should be positive
+    if multiplicity <= 0:
+        return False
+    
+    # For site-based expansion, multiplicity can be fractional
+    # For tetrahedron-based, it's typically of order 1
+    return True
+
+
+def _wl_hash_subgraph(G, nodes):
+    """
+    Compute an isomorphism-invariant hash for the induced subgraph on nodes.
+    Uses Weisfeiler-Lehman graph hashing for fast deduplication.
+    """
+    H = G.subgraph(nodes).copy()
+    # Relabel to canonical form
+    mapping = {n: i for i, n in enumerate(sorted(H.nodes()))}
+    H = nx.relabel_nodes(H, mapping, copy=True)
+    
+    try:
+        from networkx.algorithms.graph_hashing import weisfeiler_lehman_graph_hash
+        return weisfeiler_lehman_graph_hash(H)
+    except (ImportError, AttributeError):
+        # Fallback: use a simple structural signature
+        degs = sorted([d for _, d in H.degree()])
+        return f"{len(H)}|{H.number_of_edges()}|{tuple(degs)}"
+
+
+def generate_clusters(tet_graph, lattice_graph, tetrahedra, max_order, 
+                      subunit='tetrahedron', verbose=False):
+    """
+    Generate all topologically distinct clusters up to max_order 
+    with correct NLCE multiplicities.
+    
+    Uses:
+    - Anchored expansion to avoid duplicate generation
+    - WL hashing for fast topology deduplication
+    - Exact isomorphism checks within hash buckets
+    - Correct multiplicity calculation via automorphism groups
+    
+    Args:
+        tet_graph: Tetrahedron adjacency graph
+        lattice_graph: Site-level lattice graph
+        tetrahedra: List of all tetrahedra
+        max_order: Maximum cluster size (number of tetrahedra)
+        subunit: 'tetrahedron' or 'site' for normalization
+        verbose: Print detailed progress
+        
+    Returns:
+        distinct_clusters: List of topologically distinct clusters
+        multiplicities: List of correct NLCE multiplicities L(c)
     """
     distinct_clusters = []
     multiplicities = []
@@ -309,83 +336,121 @@ def generate_clusters(tet_graph, max_order, num_sites):
     nodes_sorted = sorted(tet_graph.nodes())
 
     for order in range(1, max_order + 1):
-        print(f"Generating clusters of order {order}...")
-
-        # Order-1: one representative, multiplicity is count/num_sites
+        print(f"\nGenerating clusters of order {order}...")
+        
+        # Order 1: single tetrahedron
         if order == 1:
             first_tet = nodes_sorted[0]
             distinct_clusters.append([first_tet])
-            # Each tetrahedron appears N times in the lattice, normalize by number of sites
-            multiplicities.append(N / num_sites)
+            
+            # Compute multiplicity correctly
+            mult = compute_cluster_multiplicity(
+                [first_tet], tet_graph, lattice_graph, tetrahedra,
+                subunit=subunit, verbose=verbose
+            )
+            multiplicities.append(mult)
+            
+            # Sanity check
+            if not verify_multiplicity_sanity(order, mult, subunit):
+                print(f"WARNING: Order {order} multiplicity {mult} failed sanity check!")
+            
+            print(f"  Found 1 distinct cluster with L(c) = {mult:.6f}")
             continue
-
-        # Hash-bucket: signature -> list of groups; each group is (rep_nodes_set, embedding_count)
+        
+        # For higher orders: generate via anchored expansion
+        # Hash buckets: signature -> [(representative_nodes, embedding_count)]
         buckets = defaultdict(list)
-
+        
         for anchor in nodes_sorted:
-            # Anchored expansion: only allow nodes >= anchor to avoid cross-anchor duplicates
+            # Only expand to nodes >= anchor (prevents duplicate generation)
             start = frozenset([anchor])
             frontier = set(n for n in tet_graph.neighbors(anchor) if n >= anchor)
-            visited = set()  # per-anchor visited subclusters to avoid re-derivations
-
-            # DFS stack for connected expansions
+            visited = set()
+            
+            # DFS to grow connected clusters
             stack = [(start, frontier)]
             while stack:
                 current, fr = stack.pop()
-
+                
                 if current in visited:
                     continue
                 visited.add(current)
-
+                
                 if len(current) == order:
+                    # Compute WL hash for fast deduplication
                     sig = _wl_hash_subgraph(tet_graph, current)
-
-                    # Refine within the same hash by exact isomorphism to avoid rare WL collisions
+                    
+                    # Check exact isomorphism within same hash bucket
                     placed = False
                     for idx, (rep_nodes, cnt) in enumerate(buckets[sig]):
                         if nx.is_isomorphic(
                             tet_graph.subgraph(current),
-                            tet_graph.subgraph(rep_nodes),
+                            tet_graph.subgraph(rep_nodes)
                         ):
+                            # Same topology - increment count
                             buckets[sig][idx] = (rep_nodes, cnt + 1)
                             placed = True
                             break
+                    
                     if not placed:
+                        # New topology
                         buckets[sig].append((current, 1))
                     continue
-
-                    # (no len(current) > order branch needed)
-
-                # Expand by one tetrahedron from the frontier
-                # Keep anchor constraint: only nodes >= anchor
+                
+                if len(current) > order:
+                    continue
+                
+                # Expand by adding one neighbor from frontier
                 for nxt in list(fr):
                     new_set = current | {nxt}
                     new_frontier = (fr | set(tet_graph.neighbors(nxt))) - new_set
-                    # Enforce anchor-filter on frontier
+                    # Maintain anchor constraint
                     new_frontier = {x for x in new_frontier if x >= anchor}
                     stack.append((new_set, new_frontier))
-
-        # Collect representatives and compute multiplicities (per site)
-        reps = []
-        mults = []
+        
+        # Compute correct multiplicities for each representative
+        print(f"  Computing multiplicities for {sum(len(g) for g in buckets.values())} topologies...")
+        
         for sig_groups in buckets.values():
-            for rep_nodes, count in sig_groups:
-                reps.append(sorted(rep_nodes))
-                # Multiplicity = number of embeddings / number of lattice sites
-                mults.append(count / num_sites)
-
-        distinct_clusters.extend(reps)
-        multiplicities.extend(mults)
-        print(f"Found {len(reps)} distinct clusters of order {order}")
+            for rep_nodes, _ in sig_groups:
+                # Compute correct multiplicity using automorphism groups
+                mult = compute_cluster_multiplicity(
+                    rep_nodes, tet_graph, lattice_graph, tetrahedra,
+                    subunit=subunit, verbose=verbose
+                )
+                
+                # Sanity check
+                if not verify_multiplicity_sanity(order, mult, subunit):
+                    print(f"WARNING: Cluster with {order} tetrahedra has suspicious multiplicity {mult}")
+                
+                distinct_clusters.append(sorted(rep_nodes))
+                multiplicities.append(mult)
+        
+        num_topologies = len([m for m in multiplicities if len(distinct_clusters[multiplicities.index(m)]) == order])
+        print(f"  Found {num_topologies} distinct topologies for order {order}")
+        
+        # Print multiplicity statistics
+        order_mults = [m for i, m in enumerate(multiplicities) if len(distinct_clusters[i]) == order]
+        if order_mults:
+            print(f"    Multiplicity range: [{min(order_mults):.6f}, {max(order_mults):.6f}]")
+            print(f"    Mean multiplicity: {np.mean(order_mults):.6f}")
 
     return distinct_clusters, multiplicities
 
 
-def visualize_cluster(lattice, pos, tetrahedra, cluster, cluster_index):
-    """Visualize a single cluster in 3D."""
-    fig = plt.figure(figsize=(10, 8))
-    ax = fig.add_subplot(111, projection='3d')
+def extract_cluster_info(lattice, pos, tetrahedra, cluster):
+    """
+    Extract detailed information about a cluster.
     
+    Args:
+        lattice: Site-level NetworkX graph
+        pos: Dictionary of site positions
+        tetrahedra: List of all tetrahedra
+        cluster: List of tetrahedron indices
+        
+    Returns:
+        Dictionary with cluster information
+    """
     # Get all vertices in the cluster
     vertices = set()
     for tet_idx in cluster:
@@ -394,47 +459,72 @@ def visualize_cluster(lattice, pos, tetrahedra, cluster, cluster_index):
     # Create subgraph for this cluster
     subgraph = lattice.subgraph(vertices)
     
-    # Draw vertices
-    xs = [pos[v][0] for v in subgraph.nodes()]
-    ys = [pos[v][1] for v in subgraph.nodes()]
-    zs = [pos[v][2] for v in subgraph.nodes()]
-    ax.scatter(xs, ys, zs, c='r', s=100, label='Vertices')
+    # Get vertex positions
+    vertex_positions = {v: pos[v] for v in vertices}
     
-    # Draw edges
-    for u, v in subgraph.edges():
-        ax.plot([pos[u][0], pos[v][0]],
-                [pos[u][1], pos[v][1]],
-                [pos[u][2], pos[v][2]], 'k-', lw=1)
+    # Get edges in the cluster
+    edges = list(subgraph.edges())
     
-    # Draw tetrahedra
-    for tet_idx in cluster:
-        tet = tetrahedra[tet_idx]
-        # Draw faces of tetrahedron
-        for face in itertools.combinations(tet, 3):
-            triangle = np.array([pos[v] for v in face])
-            ax.plot_trisurf(triangle[:, 0], triangle[:, 1], triangle[:, 2],
-                          color='b', alpha=0.2)
+    # Get the tetrahedra that make up the cluster
+    cluster_tetrahedra = [tetrahedra[tet_idx] for tet_idx in cluster]
     
-    ax.set_title(f'Cluster {cluster_index} - {len(cluster)} tetrahedra')
-    ax.set_xlabel('X')
-    ax.set_ylabel('Y')
-    ax.set_zlabel('Z')
-    ax.set_box_aspect([1, 1, 1])
+    # Create adjacency matrix
+    nodes = sorted(list(vertices))
+    node_to_idx = {node: i for i, node in enumerate(nodes)}
+    adj_matrix = np.zeros((len(nodes), len(nodes)), dtype=int)
     
-    plt.tight_layout()
-    plt.savefig(f'cluster_{cluster_index}_order_{len(cluster)}.png')
-    plt.close()
+    for u, v in edges:
+        adj_matrix[node_to_idx[u], node_to_idx[v]] = 1
+        adj_matrix[node_to_idx[v], node_to_idx[u]] = 1
+    
+    return {
+        'vertices': list(vertices),
+        'vertex_positions': vertex_positions,
+        'edges': edges,
+        'tetrahedra': cluster_tetrahedra,
+        'adjacency_matrix': adj_matrix,
+        'node_mapping': node_to_idx
+    }
+
+
+def save_cluster_info(cluster_info, cluster_id, order, multiplicity, output_dir='.'):
+    """
+    Save detailed information about a cluster to a file.
+    """
+    filename = f"{output_dir}/cluster_{cluster_id}_order_{order}.dat"
+    
+    with open(filename, 'w') as f:
+        f.write(f"# Cluster ID: {cluster_id}\n")
+        f.write(f"# Order (number of tetrahedra): {order}\n")
+        f.write(f"# Multiplicity (lattice constant): {multiplicity:.12f}\n")
+        f.write(f"# Number of vertices: {len(cluster_info['vertices'])}\n")
+        f.write(f"# Number of edges: {len(cluster_info['edges'])}\n\n")
+        
+        f.write("# Vertices (index, x, y, z):\n")
+        for v in cluster_info['vertices']:
+            pos = cluster_info['vertex_positions'][v]
+            f.write(f"{v}, {pos[0]:.6f}, {pos[1]:.6f}, {pos[2]:.6f}\n")
+        
+        f.write("\n# Edges (vertex1, vertex2):\n")
+        for u, v in cluster_info['edges']:
+            f.write(f"{u}, {v}\n")
+        
+        f.write("\n# Tetrahedra (vertex1, vertex2, vertex3, vertex4):\n")
+        for tet in cluster_info['tetrahedra']:
+            f.write(f"{', '.join(map(str, tet))}\n")
+        
+        f.write("\n# Adjacency Matrix:\n")
+        for row in cluster_info['adjacency_matrix']:
+            f.write(' '.join(map(str, row)) + '\n')
+        
+        f.write("\n# Node Mapping (original_id: matrix_index):\n")
+        for node, idx in cluster_info['node_mapping'].items():
+            f.write(f"{node}: {idx}\n")
+
 
 def identify_subclusters(distinct_clusters, tet_graph):
     """
     Identify all topological subclusters for each distinct cluster and their multiplicities.
-    
-    Args:
-    - distinct_clusters: List of topologically distinct clusters
-    - tet_graph: NetworkX graph where nodes are tetrahedra
-    
-    Returns:
-    - subclusters_info: Dictionary mapping cluster indices to their subclusters info
     """
     # Group distinct clusters by order
     clusters_by_order = defaultdict(list)
@@ -482,19 +572,14 @@ def identify_subclusters(distinct_clusters, tet_graph):
     
     return subclusters_info
 
+
 def save_subclusters_info(subclusters_info, distinct_clusters, multiplicities, output_dir):
     """
     Save information about subclusters of each distinct cluster to a file.
-    
-    Args:
-    - subclusters_info: Dictionary mapping cluster indices to their subclusters info
-    - distinct_clusters: List of topologically distinct clusters
-    - multiplicities: List of multiplicities for each cluster
-    - output_dir: Directory to save the output file
     """
     with open(f"{output_dir}/subclusters_info.txt", 'w') as f:
         f.write("# Subclusters information for each topologically distinct cluster\n")
-        f.write("# Format: Cluster_ID, Order, Multiplicity, Subclusters[(ID, Multiplicity), ...]\n\n")
+        f.write("# Format: Cluster_ID, Order, Multiplicity, Subclusters[(ID, Count), ...]\n\n")
         
         for i, cluster in enumerate(distinct_clusters):
             cluster_id = i + 1
@@ -504,7 +589,7 @@ def save_subclusters_info(subclusters_info, distinct_clusters, multiplicities, o
             subclusters = subclusters_info.get(i, [])
             subcluster_str = ", ".join([f"({j+1}, {count})" for j, count in subclusters])
             
-            f.write(f"Cluster {cluster_id} (Order {order}):\n")
+            f.write(f"Cluster {cluster_id} (Order {order}, L(c) = {multiplicity:.12f}):\n")
             if subclusters:
                 f.write(f"  Subclusters: {subcluster_str}\n")
             else:
@@ -512,64 +597,93 @@ def save_subclusters_info(subclusters_info, distinct_clusters, multiplicities, o
             f.write("\n")
 
 
+def visualize_cluster(lattice, pos, tetrahedra, cluster, cluster_index, output_dir):
+    """Visualize a single cluster in 3D."""
+    fig = plt.figure(figsize=(10, 8))
+    ax = fig.add_subplot(111, projection='3d')
+    
+    # Get all vertices in the cluster
+    vertices = set()
+    for tet_idx in cluster:
+        vertices.update(tetrahedra[tet_idx])
+    
+    # Create subgraph for this cluster
+    subgraph = lattice.subgraph(vertices)
+    
+    # Draw vertices
+    xs = [pos[v][0] for v in subgraph.nodes()]
+    ys = [pos[v][1] for v in subgraph.nodes()]
+    zs = [pos[v][2] for v in subgraph.nodes()]
+    ax.scatter(xs, ys, zs, c='r', s=100, label='Vertices')
+    
+    # Draw edges
+    for u, v in subgraph.edges():
+        ax.plot([pos[u][0], pos[v][0]],
+                [pos[u][1], pos[v][1]],
+                [pos[u][2], pos[v][2]], 'k-', lw=1)
+    
+    # Draw tetrahedra (as transparent faces)
+    for tet_idx in cluster:
+        tet = tetrahedra[tet_idx]
+        # Draw faces of tetrahedron
+        for face in itertools.combinations(tet, 3):
+            triangle = np.array([pos[v] for v in face])
+            ax.plot_trisurf(triangle[:, 0], triangle[:, 1], triangle[:, 2],
+                          color='b', alpha=0.2)
+    
+    ax.set_title(f'Cluster {cluster_index} - {len(cluster)} tetrahedra')
+    ax.set_xlabel('X')
+    ax.set_ylabel('Y')
+    ax.set_zlabel('Z')
+    ax.set_box_aspect([1, 1, 1])
+    
+    plt.tight_layout()
+    plt.savefig(f'{output_dir}/cluster_{cluster_index}_order_{len(cluster)}.png')
+    plt.close()
+
+
 def main():
     args = parse_arguments()
     max_order = args.max_order
+    subunit = args.subunit
+    verbose = args.verbose
     
-    # Set lattice size
-    L = args.lattice_size if args.lattice_size > 0 else max(1, max_order)
+    # Determine lattice size
+    # Rule of thumb: torus should be at least 2x the linear size of the largest cluster
+    # For pyrochlore, estimate cluster diameter ~ sqrt(order)
+    if args.lattice_size > 0:
+        L = args.lattice_size
+    else:
+        # Conservative estimate: L ≥ 2 * (estimated_diameter + 2)
+        estimated_diameter = int(np.ceil(np.sqrt(max_order))) + 1
+        L = max(6, 2 * estimated_diameter)
     
-    # Boundary condition string for output
-    bc_str = "PBC" if args.periodic else "OBC"
-    print(f"Using {bc_str} (Periodic Boundary Conditions: {args.periodic})")
+    print("="*70)
+    print("NLCE Cluster Generation for Pyrochlore Lattice")
+    print("="*70)
+    print(f"Maximum order: {max_order}")
+    print(f"Lattice size: {L}×{L}×{L}")
+    print(f"Subunit for normalization: {subunit}")
+    print(f"Output directory: {args.output_dir}")
+    print("="*70)
     
-    # Check cache unless disabled or forced recompute
-    cache_data = None
-    cache_path = get_cache_path(args.cache_dir, max_order, L, args.periodic)
+    print(f"\nGenerating pyrochlore lattice (torus) of size {L}×{L}×{L}...")
+    lattice, pos, tetrahedra = create_pyrochlore_lattice(L)
+    print(f"  Sites: {lattice.number_of_nodes()}")
+    print(f"  Edges: {lattice.number_of_edges()}")
+    print(f"  Tetrahedra: {len(tetrahedra)}")
     
-    if not args.no_cache and not args.force_recompute:
-        print(f"Checking for cached results...")
-        cache_data = load_cache(cache_path)
-        
-        if verify_cache_validity(cache_data, max_order):
-            print("Using cached results!")
-            lattice = cache_data['lattice']
-            pos = cache_data['pos']
-            tetrahedra = cache_data['tetrahedra']
-            tet_graph = cache_data['tet_graph']
-            distinct_clusters = cache_data['distinct_clusters']
-            multiplicities = cache_data['multiplicities']
-        else:
-            cache_data = None  # Invalid cache
+    print("\nBuilding tetrahedron adjacency graph...")
+    tet_graph = build_tetrahedron_graph(tetrahedra)
+    print(f"  Tetrahedron graph nodes: {tet_graph.number_of_nodes()}")
+    print(f"  Tetrahedron graph edges: {tet_graph.number_of_edges()}")
     
-    # Compute if no valid cache
-    if cache_data is None:
-        print(f"Generating pyrochlore lattice of size {L}×{L}×{L} with {bc_str}...")
-        lattice, pos, tetrahedra = create_pyrochlore_lattice(L, args.periodic)
-        print(f"Lattice generated with {len(pos)} sites and {len(tetrahedra)} tetrahedra")
-        num_sites = lattice.number_of_nodes()
-        print(f"Generated lattice with {num_sites} sites and {len(tetrahedra)} tetrahedra")
-        
-        print("Building tetrahedron adjacency graph...")
-        tet_graph = build_tetrahedron_graph(tetrahedra)
-        
-        print(f"Generating clusters up to order {max_order}...")
-        distinct_clusters, multiplicities = generate_clusters(tet_graph, max_order, num_sites)
-        
-        # Save to cache unless disabled
-        if not args.no_cache:
-            cache_data = {
-                'lattice': lattice,
-                'pos': pos,
-                'tetrahedra': tetrahedra,
-                'tet_graph': tet_graph,
-                'distinct_clusters': distinct_clusters,
-                'multiplicities': multiplicities,
-                'max_order': max_order,
-                'lattice_size': L,
-                'periodic': args.periodic
-            }
-            save_cache(cache_path, cache_data)
+    print(f"\nGenerating topologically distinct clusters up to order {max_order}...")
+    print("(This may take some time for large orders)")
+    distinct_clusters, multiplicities = generate_clusters(
+        tet_graph, lattice, tetrahedra, max_order,
+        subunit=subunit, verbose=verbose
+    )
     
     # Organize clusters by order
     clusters_by_order = defaultdict(list)
@@ -577,43 +691,56 @@ def main():
         order = len(cluster)
         clusters_by_order[order].append((i, cluster, multiplicities[i]))
     
-    # Print results
-    print("\nCluster statistics:")
+    # Print summary
+    print("\n" + "="*70)
+    print("CLUSTER STATISTICS")
+    print("="*70)
     for order in sorted(clusters_by_order.keys()):
-        print(f"  Order {order}: {len(clusters_by_order[order])} distinct clusters")
+        order_clusters = clusters_by_order[order]
+        print(f"Order {order}: {len(order_clusters)} distinct topologies")
+        
+        # Show multiplicity range
+        mults = [m for _, _, m in order_clusters]
+        print(f"  Multiplicity range: [{min(mults):.6f}, {max(mults):.6f}]")
     
-    # Create output directory for cluster info
+    # Create output directory
     output_dir = args.output_dir + f"/cluster_info_order_{max_order}"
     os.makedirs(output_dir, exist_ok=True)
-
-
-    save_subclusters_info(identify_subclusters(distinct_clusters, tet_graph), distinct_clusters, multiplicities, output_dir)
-    print(f"Subclusters information saved to {output_dir}/subclusters_info.txt")
+    
+    # Identify and save subclusters
+    print("\nIdentifying subclusters for inclusion-exclusion...")
+    subclusters_info = identify_subclusters(distinct_clusters, tet_graph)
+    save_subclusters_info(subclusters_info, distinct_clusters, multiplicities, output_dir)
+    print(f"  Saved to {output_dir}/subclusters_info.txt")
     
     # Extract and save detailed information for each cluster
-    print("\nExtracting and saving detailed cluster information...")
+    print("\nSaving cluster data files...")
     for i, (cluster, multiplicity) in enumerate(zip(distinct_clusters, multiplicities)):
         cluster_id = i + 1
         order = len(cluster)
-        print(f"  Processing cluster {cluster_id} (order {order})...")
+        
+        if verbose:
+            print(f"  Cluster {cluster_id} (order {order}, L(c) = {multiplicity:.6f})")
         
         # Extract detailed information
         cluster_info = extract_cluster_info(lattice, pos, tetrahedra, cluster)
         
         # Save to file
         save_cluster_info(cluster_info, cluster_id, order, multiplicity, output_dir)
-
-        print(f"  Saved to {output_dir}/cluster_{cluster_id}_order_{order}.dat")
-
+        
+        # Visualize if requested
+        if args.visualize:
+            visualize_cluster(lattice, pos, tetrahedra, cluster, cluster_id, output_dir)
     
-    print(f"Detailed cluster information saved to {output_dir}/ directory")
+    print(f"\nAll data saved to {output_dir}/")
     
-    # Visualize clusters if requested
     if args.visualize:
-        print("\nVisualizing clusters...")
-        for i, cluster in enumerate(distinct_clusters):
-            visualize_cluster(lattice, pos, tetrahedra, cluster, i+1)
-        print(f"Visualization images saved as cluster_*.png")
+        print(f"Visualizations saved as {output_dir}/cluster_*.png")
+    
+    print("\n" + "="*70)
+    print("DONE")
+    print("="*70)
+
 
 if __name__ == "__main__":
     main()

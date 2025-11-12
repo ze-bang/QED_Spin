@@ -90,7 +90,7 @@ def run_ftlm_for_cluster(args):
     cmd = [
         ed_executable,
         ham_subdir,
-        '--method=FTLM',
+        '--method=FTLM_GPU',
         f'--output={cluster_ftlm_dir}/output',
         f'--num_sites={num_sites}',
         '--spin_length=0.5',
