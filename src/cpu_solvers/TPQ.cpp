@@ -590,30 +590,28 @@ std::pair<std::vector<Complex>, std::vector<Complex>> calculateSzandSz2(
     ComplexVector Sz_exps(sublattice_size+1, Complex(0.0, 0.0));
     ComplexVector Sz2_exps(sublattice_size+1, Complex(0.0, 0.0));
     
+    // OPTIMIZED: Pre-allocate reusable buffers outside loop
+    std::vector<Complex> Sz_psi(N);
+    std::vector<Complex> Sz2_psi(N);
+    
     // For each site, compute the expectation values
     for (int site = 0; site < num_sites; site++) {
         uint64_t i = site % sublattice_size;
 
-        // Apply operators - use direct vector construction to avoid copy
-        std::vector<Complex> Sz_psi = Sz_ops[i].apply({tpq_state.begin(), tpq_state.end()});
+        // Apply operator into pre-allocated buffer
+        Sz_ops[i].apply(tpq_state.data(), Sz_psi.data(), N);
         
-        // Calculate expectation values
-        Complex Sz_exp = Complex(0.0, 0.0);
-        
-        for (size_t j = 0; j < N; j++) {
-            Sz_exp += std::conj(tpq_state[j]) * Sz_psi[j];
-        }
-        
-        // Store expectation values
+        // Calculate expectation value using BLAS
+        Complex Sz_exp;
+        cblas_zdotc_sub(N, tpq_state.data(), 1, Sz_psi.data(), 1, &Sz_exp);
         Sz_exps[i] += Sz_exp;
 
-        // Apply operator directly to avoid temporary vector copy
-        std::vector<Complex> Sz2_psi = Sz_ops[i].apply(std::move(Sz_psi));
-
-        Complex Sz2_exp = Complex(0.0, 0.0);
-    for (size_t j = 0; j < N; j++) {
-            Sz2_exp += std::conj(tpq_state[j]) * Sz2_psi[j];
-        }
+        // Apply operator again for Sz^2
+        Sz_ops[i].apply(Sz_psi.data(), Sz2_psi.data(), N);
+        
+        // Calculate Sz^2 expectation using BLAS
+        Complex Sz2_exp;
+        cblas_zdotc_sub(N, tpq_state.data(), 1, Sz2_psi.data(), 1, &Sz2_exp);
         Sz2_exps[i] += Sz2_exp;
     }
 
@@ -623,7 +621,6 @@ std::pair<std::vector<Complex>, std::vector<Complex>> calculateSzandSz2(
         Sz_exps[sublattice_size] += Sz_exps[i];
         Sz2_exps[sublattice_size] += Sz2_exps[i];
     }
-
 
     return {Sz_exps, Sz2_exps};
 }
@@ -641,19 +638,23 @@ Complex calculateSpm_onsite(
 
     Complex Spm_exp(0.0, 0.0);
     
+    // OPTIMIZED: Pre-allocate reusable buffer
+    std::vector<Complex> Spm_psi(N);
+    
     // For each site, compute the expectation values
     for (int site = 0; site < num_sites; site++) {
         uint64_t i = site % sublattice_size;
 
-        // Apply operators - use direct vector construction to avoid copy
-        std::vector<Complex> Spm_psi = Spm_ops[i].apply({tpq_state.begin(), tpq_state.end()});
+        // Apply operator into pre-allocated buffer
+        Spm_ops[i].apply(tpq_state.data(), Spm_psi.data(), N);
 
-    for (size_t j = 0; j < N; j++) {
-            Spm_exp += std::conj(Spm_psi[j]) * Spm_psi[j];
-        }
+        // Calculate <Spm_psi|Spm_psi> using BLAS
+        Complex site_exp;
+        cblas_zdotc_sub(N, Spm_psi.data(), 1, Spm_psi.data(), 1, &site_exp);
+        Spm_exp += site_exp;
     }
 
-    return Spm_exp/ double(num_sites);
+    return Spm_exp / double(num_sites);
 }
 
 
@@ -697,32 +698,29 @@ std::pair<std::vector<Complex>, std::vector<Complex>> calculateSzzSpm(
     ComplexVector Szz_exps(sublattice_size*sublattice_size+1, Complex(0.0, 0.0));
     ComplexVector Spm_exps(sublattice_size*sublattice_size+1, Complex(0.0, 0.0));
 
-    // Create S operators for each site
-    std::vector<DoubleSiteOperator> Szz_ops;
-    std::vector<DoubleSiteOperator> Spm_ops;
-
-    Szz_ops = double_site_ops.first;
-    Spm_ops = double_site_ops.second;            // For each site, compute the expectation values
+    // Reference operators (avoid copy)
+    const std::vector<DoubleSiteOperator>& Szz_ops = double_site_ops.first;
+    const std::vector<DoubleSiteOperator>& Spm_ops = double_site_ops.second;
+    
+    // OPTIMIZED: Pre-allocate reusable buffers outside nested loop
+    std::vector<Complex> Szz_psi(N);
+    std::vector<Complex> Spm_psi(N);
+    
+    // For each site, compute the expectation values
     for (int site = 0; site < num_sites; site++) {
         for (int site2 = 0; site2 < num_sites; site2++) {
             uint64_t n1 = site % sublattice_size;
             uint64_t n2 = site2 % sublattice_size;
 
-            // Apply operators
-            std::vector<Complex> Szz_psi = Szz_ops[site*num_sites+site2].apply({tpq_state.begin(), tpq_state.end()});
-            std::vector<Complex> Spm_psi = Spm_ops[site*num_sites+site2].apply({tpq_state.begin(), tpq_state.end()});
+            // Apply operators into pre-allocated buffers
+            Szz_ops[site*num_sites+site2].apply(tpq_state.data(), Szz_psi.data(), N);
+            Spm_ops[site*num_sites+site2].apply(tpq_state.data(), Spm_psi.data(), N);
 
-            // Calculate expectation values
-            Complex Szz_exp = Complex(0.0, 0.0);
-            Complex Spm_exp = Complex(0.0, 0.0);
-
-
-            for (size_t i = 0; i < N; i++) {
-                Szz_exp += std::conj(tpq_state[i]) * Szz_psi[i];
-            }
-            for (size_t i = 0; i < N; i++) {
-                Spm_exp += std::conj(tpq_state[i]) * Spm_psi[i];
-            }
+            // Calculate expectation values using BLAS
+            Complex Szz_exp, Spm_exp;
+            cblas_zdotc_sub(N, tpq_state.data(), 1, Szz_psi.data(), 1, &Szz_exp);
+            cblas_zdotc_sub(N, tpq_state.data(), 1, Spm_psi.data(), 1, &Spm_exp);
+            
             Spm_exps[n1*sublattice_size+n2] += Spm_exp;
             Szz_exps[n1*sublattice_size+n2] += Szz_exp;
         }
@@ -753,52 +751,42 @@ std::tuple<std::vector<Complex>, std::vector<Complex>, std::vector<Complex>, std
     ComplexVector Spm_exps(sublattice_size*sublattice_size+1, Complex(0.0, 0.0));
     ComplexVector Spp_exps(sublattice_size*sublattice_size+1, Complex(0.0, 0.0));
     ComplexVector Spz_exps(sublattice_size*sublattice_size+1, Complex(0.0, 0.0));
-    // Create S operators for each site
-    std::vector<SingleSiteOperator> Szz_ops;
-    std::vector<SingleSiteOperator> Spm_ops;
-
-    Szz_ops = double_site_ops.first;
-    Spm_ops = double_site_ops.second;            // For each site, compute the expectation values
+    
+    // Reference operators (avoid copy)
+    const std::vector<SingleSiteOperator>& Szz_ops = double_site_ops.first;
+    const std::vector<SingleSiteOperator>& Spm_ops = double_site_ops.second;
+    
+    // OPTIMIZED: Pre-allocate reusable buffers outside nested loop
+    std::vector<Complex> Szz_psi(N);
+    std::vector<Complex> Szz_psi2(N);
+    std::vector<Complex> Spm_psi(N);
+    std::vector<Complex> Spm_psi2(N);
+    std::vector<Complex> Spp_psi(N);
+    
+    // For each site, compute the expectation values
     for (int site = 0; site < num_sites; site++) {
         for (int site2 = 0; site2 < num_sites; site2++) {
             uint64_t n1 = site % sublattice_size;
             uint64_t n2 = site2 % sublattice_size;
 
-            // Apply operators
-            // SzSz
-            std::vector<Complex> Szz_psi = Szz_ops[site].apply({tpq_state.begin(), tpq_state.end()});
-            std::vector<Complex> Szz_psi2 = Szz_ops[site2].apply({tpq_state.begin(), tpq_state.end()});
+            // Apply operators into pre-allocated buffers
+            Szz_ops[site].apply(tpq_state.data(), Szz_psi.data(), N);
+            Szz_ops[site2].apply(tpq_state.data(), Szz_psi2.data(), N);
+            Spm_ops[site].apply(tpq_state.data(), Spm_psi.data(), N);
+            Spm_ops[site2].apply(tpq_state.data(), Spm_psi2.data(), N);
+            Spm_ops[site2].apply(Spm_psi.data(), Spp_psi.data(), N);
 
-            // S+S-
-            std::vector<Complex> Spm_psi = Spm_ops[site].apply({tpq_state.begin(), tpq_state.end()});
-            std::vector<Complex> Spm_psi2 = Spm_ops[site2].apply({tpq_state.begin(), tpq_state.end()});
-
-            // S+S+
-            std::vector<Complex> Spp_psi = Spm_ops[site2].apply({Spm_psi.begin(), Spm_psi.end()});
-
-            // Calculate expectation values
-            Complex Szz_exp = Complex(0.0, 0.0);
-            Complex Spm_exp = Complex(0.0, 0.0);
-            Complex Spp_exp = Complex(0.0, 0.0);
-            Complex Spz_exp = Complex(0.0, 0.0);
-
-            for (size_t i = 0; i < N; i++) {
-                Szz_exp += std::conj(Szz_psi[i]) * Szz_psi2[i];
-            }
-            for (size_t i = 0; i < N; i++) {
-                Spm_exp += std::conj(Spm_psi[i]) * Spm_psi2[i];
-            }
-            for (size_t i = 0; i < N; i++) {
-                Spp_exp += std::conj(tpq_state[i]) * Spp_psi[i];
-            }
-            for (size_t i = 0; i < N; i++) {
-                Spz_exp += std::conj(Spm_psi[i]) * Szz_psi2[i];
-            }
+            // Calculate expectation values using BLAS
+            Complex Szz_exp, Spm_exp, Spp_exp, Spz_exp;
+            cblas_zdotc_sub(N, Szz_psi.data(), 1, Szz_psi2.data(), 1, &Szz_exp);
+            cblas_zdotc_sub(N, Spm_psi.data(), 1, Spm_psi2.data(), 1, &Spm_exp);
+            cblas_zdotc_sub(N, tpq_state.data(), 1, Spp_psi.data(), 1, &Spp_exp);
+            cblas_zdotc_sub(N, Spm_psi.data(), 1, Szz_psi2.data(), 1, &Spz_exp);
+            
             Spm_exps[n1*sublattice_size+n2] += Spm_exp;
             Szz_exps[n1*sublattice_size+n2] += Szz_exp;
             Spp_exps[n1*sublattice_size+n2] += Spp_exp;
             Spz_exps[n1*sublattice_size+n2] += Spz_exp;
-
         }
     }
 
