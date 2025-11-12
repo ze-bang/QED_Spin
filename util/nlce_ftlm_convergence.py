@@ -355,7 +355,7 @@ Example usage:
     # FTLM parameters
     parser.add_argument('--ftlm_samples', type=int, default=80, 
                        help='Number of random samples for FTLM')
-    parser.add_argument('--krylov_dim', type=int, default=200, 
+    parser.add_argument('--krylov_dim', type=int, default=1000, 
                        help='Krylov subspace dimension for FTLM')
     parser.add_argument('--temp_min', type=float, default=0.001, 
                        help='Minimum temperature')
