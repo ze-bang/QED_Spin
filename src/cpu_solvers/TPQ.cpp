@@ -1438,11 +1438,13 @@ void microcanonical_tpq(
 
     // Create Sz operators
     std::vector<SingleSiteOperator> Sz_ops, Sx_ops, Sy_ops;
+    std::pair<std::vector<SingleSiteOperator>, std::vector<SingleSiteOperator>> double_site_ops;
     if (measure_sz)
-    {    std::vector<SingleSiteOperator> Sz_ops = createSzOperators(num_sites, spin_length);
-        std::vector<SingleSiteOperator> Sx_ops = createSxOperators(num_sites, spin_length);
-        std::vector<SingleSiteOperator> Sy_ops = createSyOperators(num_sites, spin_length);
-        std::pair<std::vector<SingleSiteOperator>, std::vector<SingleSiteOperator>> double_site_ops = createSingleOperators_pair(num_sites, spin_length);
+    {   
+        Sz_ops = createSzOperators(num_sites, spin_length);
+        Sx_ops = createSxOperators(num_sites, spin_length);
+        Sy_ops = createSyOperators(num_sites, spin_length);
+        double_site_ops = createSingleOperators_pair(num_sites, spin_length);
     }
     std::cout << "Begin TPQ calculation with dimension " << N << std::endl;
     std::string position_file;
