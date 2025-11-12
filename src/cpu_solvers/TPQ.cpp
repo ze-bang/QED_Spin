@@ -1437,19 +1437,12 @@ void microcanonical_tpq(
     eigenvalues.reserve(local_num_samples);
 
     // Create Sz operators
-    std::vector<SingleSiteOperator> Sz_ops = createSzOperators(num_sites, spin_length);
-    std::vector<SingleSiteOperator> Sx_ops = createSxOperators(num_sites, spin_length);
-    std::vector<SingleSiteOperator> Sy_ops = createSyOperators(num_sites, spin_length);
-
-    std::pair<std::vector<SingleSiteOperator>, std::vector<SingleSiteOperator>> double_site_ops = createSingleOperators_pair(num_sites, spin_length);
-
-    std::function<void(const Complex*, Complex*, int)> U_t;
-    std::function<void(const Complex*, Complex*, int)> U_nt;
-    std::vector<std::vector<double>> momentum_positions;
-    if (compute_observables) {
-        momentum_positions = {{0,0,0},
-                             {0,0,4*M_PI},
-                             {0,0,2*M_PI}};
+    std::vector<SingleSiteOperator> Sz_ops, Sx_ops, Sy_ops;
+    if (measure_sz)
+    {    std::vector<SingleSiteOperator> Sz_ops = createSzOperators(num_sites, spin_length);
+        std::vector<SingleSiteOperator> Sx_ops = createSxOperators(num_sites, spin_length);
+        std::vector<SingleSiteOperator> Sy_ops = createSyOperators(num_sites, spin_length);
+        std::pair<std::vector<SingleSiteOperator>, std::vector<SingleSiteOperator>> double_site_ops = createSingleOperators_pair(num_sites, spin_length);
     }
     std::cout << "Begin TPQ calculation with dimension " << N << std::endl;
     std::string position_file;
@@ -1499,7 +1492,7 @@ void microcanonical_tpq(
         auto [ss_file, norm_file, flct_file, spin_corr] = initializeTPQFiles(dir, sample, sublattice_size);
         
         // Generate initial random state (already normalized)
-         uint64_t seed = static_cast< int>(time(NULL)) + sample;
+        uint64_t seed = static_cast< int>(time(NULL)) + sample;
         ComplexVector v0 = generateTPQVector(N, seed);
         
         // Temp buffer for Hamiltonian applications (reused throughout)
@@ -1583,8 +1576,6 @@ void microcanonical_tpq(
                 if (!temp_measured[i] && std::abs(inv_temp - measure_inv_temp[i]) < 4e-3) {
                     std::cout << "Computing observables at inv_temp = " << inv_temp << std::endl;
                     if (compute_observables) {
-                        // computeSpinStructureFactorKrylov(H, v0, momentum_positions, position_file, N, num_sites, spin_length, dir, sample, inv_temp);
-                        // Just save the state for now
                         std::string state_file = dir + "/tpq_state_" + std::to_string(sample) + "_beta=" + std::to_string(inv_temp) + ".dat";
                         save_tpq_state(v0, state_file);
                     }
