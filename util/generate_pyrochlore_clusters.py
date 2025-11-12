@@ -36,10 +36,12 @@ def parse_arguments():
     parser.add_argument('--visualize', action='store_true', help='Visualize each cluster')
     parser.add_argument('--lattice_size', type=int, default=0, help='Size of finite lattice (default: 2*max_order)')
     parser.add_argument('--output_dir', type=str, default='.', help='Output directory for cluster information')
+    parser.add_argument('--subunit', type=str, choices=['tetrahedron', 'site'], default='site', help='Expansion subunit type')
+    parser.add_argument('--verbose', action='store_true', help='Enable verbose output')
     return parser.parse_args()
 
 
-def create_pyrochlore_lattice(L):
+def create_pyrochlore_lattice(L, periodic=True):
     """
     Create a pyrochlore lattice of size L×L×L unit cells.
     
@@ -95,20 +97,23 @@ def create_pyrochlore_lattice(L):
                 for v1, v2 in itertools.combinations(tet1, 2):
                     G.add_edge(v1, v2)
         
+        i_next = (i + 1) % L if periodic else i + 1
+        j_next = (j + 1) % L if periodic else j + 1
+        k_next = (k + 1) % L if periodic else k + 1
+
         # Second tetrahedron (spans across unit cells)
-        if all(0 <= x < L for x in [i, j, k, i+1, j+1, k+1]):
+        if all(0 <= x < L for x in [i, j, k, i_next, j_next, k_next]):
             tet2 = [
                 site_mapping.get((i, j, k, 0)),
-                site_mapping.get((i+1, j, k, 1)),
-                site_mapping.get((i, j+1, k, 2)),
-                site_mapping.get((i, j, k+1, 3))
+                site_mapping.get((i_next, j, k, 1)),
+                site_mapping.get((i, j_next, k, 2)),
+                site_mapping.get((i, j, k_next, 3))
             ]
             if None not in tet2:
                 tetrahedra.append(tet2)
                 # Add edges within tetrahedron
                 for v1, v2 in itertools.combinations(tet2, 2):
                     G.add_edge(v1, v2)
-    
     return G, pos, tetrahedra
 
 
@@ -306,14 +311,52 @@ def _wl_hash_subgraph(G, nodes):
         return f"{len(H)}|{H.number_of_edges()}|{tuple(degs)}"
 
 
+def find_central_node(G, pos_dict=None):
+    """
+    Find a central node in the graph to use as anchor for cluster generation.
+    
+    Uses geometric center if positions are available, otherwise uses
+    graph-theoretic center (node minimizing eccentricity).
+    
+    Args:
+        G: NetworkX graph
+        pos_dict: Optional dictionary of node positions {node_id: np.array([x, y, z])}
+        
+    Returns:
+        Central node ID
+    """
+    if pos_dict is not None and len(pos_dict) > 0:
+        # Compute geometric center
+        nodes = list(G.nodes())
+        positions = np.array([pos_dict[n] for n in nodes])
+        center = np.mean(positions, axis=0)
+        
+        # Find node closest to geometric center
+        distances = [np.linalg.norm(pos_dict[n] - center) for n in nodes]
+        central_idx = np.argmin(distances)
+        return nodes[central_idx]
+    else:
+        # Use graph-theoretic center (minimize eccentricity)
+        # For large graphs, use approximation via BFS from random node
+        nodes = list(G.nodes())
+        if len(nodes) == 0:
+            return None
+        
+        # Pick node with maximum degree as heuristic for central node
+        degrees = dict(G.degree())
+        central_node = max(nodes, key=lambda n: degrees[n])
+        return central_node
+
+
 def generate_clusters(tet_graph, lattice_graph, tetrahedra, max_order, 
-                      subunit='tetrahedron', verbose=False):
+                      subunit='tetrahedron', verbose=False, pos=None):
     """
     Generate all topologically distinct clusters up to max_order 
     with correct NLCE multiplicities.
     
     Uses:
     - Anchored expansion to avoid duplicate generation
+    - Central node as primary anchor for symmetric cluster representatives
     - WL hashing for fast topology deduplication
     - Exact isomorphism checks within hash buckets
     - Correct multiplicity calculation via automorphism groups
@@ -325,6 +368,7 @@ def generate_clusters(tet_graph, lattice_graph, tetrahedra, max_order,
         max_order: Maximum cluster size (number of tetrahedra)
         subunit: 'tetrahedron' or 'site' for normalization
         verbose: Print detailed progress
+        pos: Optional dictionary of site positions (for finding geometric center)
         
     Returns:
         distinct_clusters: List of topologically distinct clusters
@@ -334,6 +378,15 @@ def generate_clusters(tet_graph, lattice_graph, tetrahedra, max_order,
     multiplicities = []
     N = tet_graph.number_of_nodes()
     nodes_sorted = sorted(tet_graph.nodes())
+    
+    # Compute tetrahedron centers if site positions are available
+    tet_positions = None
+    if pos is not None:
+        tet_positions = {}
+        for tet_idx, tet in enumerate(tetrahedra):
+            # Compute center of mass of tetrahedron
+            tet_pos = np.array([pos[v] for v in tet])
+            tet_positions[tet_idx] = np.mean(tet_pos, axis=0)
 
     for order in range(1, max_order + 1):
         print(f"\nGenerating clusters of order {order}...")
@@ -361,7 +414,19 @@ def generate_clusters(tet_graph, lattice_graph, tetrahedra, max_order,
         # Hash buckets: signature -> [(representative_nodes, embedding_count)]
         buckets = defaultdict(list)
         
-        for anchor in nodes_sorted:
+        # Find central node to use as primary anchor for representative clusters
+        # This generates more symmetric clusters
+        central_node = find_central_node(tet_graph, pos_dict=tet_positions)
+        
+        if verbose:
+            print(f"  Using central node {central_node} as primary anchor")
+        
+        # Use central node as anchor, but still iterate through all nodes
+        # to ensure we find all topologically distinct clusters
+        # Prioritize central node to get nice representative clusters first
+        anchor_order = [central_node] + [n for n in nodes_sorted if n != central_node]
+        
+        for anchor in anchor_order:
             # Only expand to nodes >= anchor (prevents duplicate generation)
             start = frozenset([anchor])
             frontier = set(n for n in tet_graph.neighbors(anchor) if n >= anchor)
@@ -682,7 +747,7 @@ def main():
     print("(This may take some time for large orders)")
     distinct_clusters, multiplicities = generate_clusters(
         tet_graph, lattice, tetrahedra, max_order,
-        subunit=subunit, verbose=verbose
+        subunit=subunit, verbose=verbose, pos=pos
     )
     
     # Organize clusters by order

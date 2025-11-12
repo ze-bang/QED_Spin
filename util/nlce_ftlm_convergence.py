@@ -80,6 +80,12 @@ def run_nlce_ftlm_for_order(order, args):
         cmd.append('--skip_cluster_gen')
     if args.order_cutoff:
         cmd.append(f'--order_cutoff={args.order_cutoff}')
+    if args.robust_pipeline:
+        cmd.append('--robust_pipeline')
+        cmd.append(f'--n_spins_per_unit={args.n_spins_per_unit}')
+    
+    # Add resummation method
+    cmd.append(f'--resummation={args.resummation}')
         
     # Add field direction if specified
     if args.field_dir:
@@ -362,8 +368,8 @@ Example usage:
     parser.add_argument('--order_cutoff', type=int, 
                        help='Maximum order for NLCE summation')
     parser.add_argument('--resummation', type=str, default='euler',
-                       choices=['auto', 'direct', 'euler', 'wynn'],
-                       help='Resummation method for series acceleration')
+                       choices=['auto', 'direct', 'euler', 'wynn', 'theta', 'robust'],
+                       help='Resummation method for series acceleration (default: auto)')
     
     # Control flow
     parser.add_argument('--skip_calculations', action='store_true', 
@@ -379,6 +385,12 @@ Example usage:
     parser.add_argument('--num_cores', type=int, default=None, 
                        help='Number of cores to use for parallel processing')
     
+    # Robust pipeline options
+    parser.add_argument('--robust_pipeline', action='store_true',
+                       help='Use robust two-pipeline cross-validation for C(T)')
+    parser.add_argument('--n_spins_per_unit', type=int, default=4,
+                       help='Spins per expansion unit (default: 4 for pyrochlore tetrahedron)')
+    
     # Output options
     parser.add_argument('--symmetrized', action='store_true', 
                        help='Use symmetrized Hamiltonian')
@@ -392,11 +404,11 @@ Example usage:
                        help='Y-axis minimum for energy plot')
     parser.add_argument('--energy_ymax', type=float, default=None, 
                        help='Y-axis maximum for energy plot')
-    parser.add_argument('--specific_heat_ymin', type=float, default=None, 
+    parser.add_argument('--specific_heat_ymin', type=float, default=0, 
                        help='Y-axis minimum for specific heat plot')
-    parser.add_argument('--specific_heat_ymax', type=float, default=None, 
+    parser.add_argument('--specific_heat_ymax', type=float, default=0.25, 
                        help='Y-axis maximum for specific heat plot')
-    parser.add_argument('--entropy_ymin', type=float, default=None, 
+    parser.add_argument('--entropy_ymin', type=float, default=0, 
                        help='Y-axis minimum for entropy plot')
     parser.add_argument('--entropy_ymax', type=float, default=None, 
                        help='Y-axis maximum for entropy plot')

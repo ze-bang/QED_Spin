@@ -188,6 +188,9 @@ Example usage:
     # NLCE parameters
     parser.add_argument('--order_cutoff', type=int, 
                        help='Maximum order for NLCE summation')
+    parser.add_argument('--resummation', type=str, default='auto',
+                       choices=['auto', 'direct', 'euler', 'wynn', 'theta', 'robust'],
+                       help='Resummation method for series acceleration (default: auto)')
     
     # Control flow
     parser.add_argument('--skip_cluster_gen', action='store_true', 
@@ -204,6 +207,12 @@ Example usage:
                        help='Run FTLM in parallel')
     parser.add_argument('--num_cores', type=int, default=multiprocessing.cpu_count(), 
                        help='Number of cores to use for parallel processing')
+    
+    # Robust pipeline options
+    parser.add_argument('--robust_pipeline', action='store_true',
+                       help='Use robust two-pipeline cross-validation for C(T)')
+    parser.add_argument('--n_spins_per_unit', type=int, default=4,
+                       help='Spins per expansion unit (default: 4 for pyrochlore tetrahedron)')
     
     # Other options
     parser.add_argument('--symmetrized', action='store_true', 
@@ -249,7 +258,8 @@ Example usage:
             'python3', 
             os.path.join(os.path.dirname(__file__), 'generate_pyrochlore_clusters.py'),
             f'--max_order={args.max_order}',
-            f'--output_dir={cluster_dir}'
+            f'--output_dir={cluster_dir}',
+            '--subunit=site'  # Use site-based NLCE (L(c)=0.25 for single site)
         ]
         
         logging.info(f"Running command: {' '.join(cmd)}")
@@ -374,6 +384,7 @@ Example usage:
             f'--temp_min={args.temp_min}',
             f'--temp_max={args.temp_max}',
             f'--temp_bins={args.temp_bins}',
+            f'--resummation={args.resummation}',
         ]
         
         if args.SI_units:
@@ -381,6 +392,10 @@ Example usage:
             
         if args.order_cutoff:
             nlc_params.append(f'--order_cutoff={args.order_cutoff}')
+        
+        if args.robust_pipeline:
+            nlc_params.append('--robust_pipeline')
+            nlc_params.append(f'--n_spins_per_unit={args.n_spins_per_unit}')
         
         logging.info(f"Running command: {' '.join(nlc_params)}")
         try:

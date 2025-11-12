@@ -397,12 +397,17 @@ class NLCExpansion:
 
 
 
-    def euler_resummation(self, partial_sums):
+    def euler_resummation(self, partial_sums, l=3):
         """
         Apply Euler transformation for series acceleration.
         
+        Implementation follows Tang–Khatami–Rigol (arXiv:1207.3366):
+        Keep first (n-l) bare terms, apply Euler transform to the tail using
+        forward differences with 2^{-(k+1)} weights.
+        
         Args:
             partial_sums: Array of partial sums S_n = sum_{k=0}^n a_k
+            l: Number of highest-order terms to keep "as is" (default: 3)
             
         Returns:
             Accelerated series approximation
@@ -410,26 +415,44 @@ class NLCExpansion:
         n = len(partial_sums)
         if n < 2:
             return partial_sums[-1] if n > 0 else 0.0
-            
-        # Create difference table
-        diff_table = np.zeros((n, partial_sums.shape[1]) if len(partial_sums.shape) > 1 else (n,))
-        diff_table[0] = partial_sums[0]
         
+        # Convert partial sums to increments (the a_n terms)
+        increments = [partial_sums[0]]
         for i in range(1, n):
-            diff_table[i] = partial_sums[i] - partial_sums[i-1]
-            
-        # Apply Euler transformation: E_n = (1/2^n) * sum_{k=0}^n C(n,k) * S_k
-        euler_sum = np.zeros_like(partial_sums[-1])
+            increments.append(partial_sums[i] - partial_sums[i-1])
         
-        for k in range(n):
-            # Binomial coefficient C(n-1, k)
-            binomial_coeff = 1
-            for j in range(k):
-                binomial_coeff = binomial_coeff * (n - 1 - j) // (j + 1)
-            
-            euler_sum += binomial_coeff * diff_table[k]
-            
-        return euler_sum / (2**(n-1))
+        # Choose l adaptively if sequence is short
+        l_use = min(l, max(2, n - 3))
+        
+        if n <= l_use:
+            # Not enough terms for Euler, return last partial sum
+            return partial_sums[-1]
+        
+        # Keep first (n - l_use) bare terms as-is
+        bare_sum = partial_sums[n - l_use - 1] if n - l_use - 1 >= 0 else (
+            np.zeros_like(partial_sums[-1]) if len(partial_sums.shape) > 1 
+            else 0.0
+        )
+        
+        # Apply Euler transform to the last l_use increments
+        tail_increments = increments[n - l_use:]
+        
+        # Build forward difference triangle
+        diff_triangle = [tail_increments]
+        for k in range(len(tail_increments) - 1):
+            prev_row = diff_triangle[-1]
+            next_row = [prev_row[i+1] - prev_row[i] for i in range(len(prev_row) - 1)]
+            if len(next_row) == 0:
+                break
+            diff_triangle.append(next_row)
+        
+        # Accumulate Euler tail: sum_k Δ^k a_{n-l}/2^{k+1}
+        euler_tail = np.zeros_like(partial_sums[-1]) if len(partial_sums.shape) > 1 else 0.0
+        for k, diff_row in enumerate(diff_triangle):
+            if len(diff_row) > 0:
+                euler_tail += diff_row[0] / (2**(k+1))
+        
+        return bare_sum + euler_tail
     
     def wynn_epsilon(self, sequence):
         """
