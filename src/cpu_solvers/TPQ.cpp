@@ -314,16 +314,8 @@ void computeObservableDynamics_U_t(
 
     std::cout << "Computing dynamical susceptibility for sample " << sample 
               << ", beta = " << inv_temp << ", for " << observables_1.size() << " observables" << std::endl;
-    std::cout << "  Using memory-optimized on-demand observable computation" << std::endl;
+    std::cout << "  Using memory-optimized matrix-free observable computation" << std::endl;
     
-    // Prebuild sparse matrices for all observables to ensure thread-safe applies
-    for (const auto& op : observables_1) {
-        op.buildSparseMatrix();
-    }
-    for (const auto& op : observables_2) {
-        op.buildSparseMatrix();
-    }
-
     uint64_t num_steps = static_cast<int>(t_end / dt) + 1;
     
     // Create inverse time evolution operator (U_t^†) for negative time
@@ -1424,17 +1416,12 @@ void microcanonical_tpq(
     eigenvalues.clear();
     eigenvalues.reserve(local_num_samples);
 
-    // Create Sz operators
-    std::vector<SingleSiteOperator> Sz_ops, Sx_ops, Sy_ops;
-    std::pair<std::vector<SingleSiteOperator>, std::vector<SingleSiteOperator>> double_site_ops;
-    if (measure_sz)
-    {   
-        Sz_ops = createSzOperators(num_sites, spin_length);
-        Sx_ops = createSxOperators(num_sites, spin_length);
-        Sy_ops = createSyOperators(num_sites, spin_length);
-        double_site_ops = createSingleOperators_pair(num_sites, spin_length);
-    }
+    // NOTE: Operators are now created INSIDE the sample loop on-demand
+    // to avoid keeping all operators in memory simultaneously
     std::cout << "Begin TPQ calculation with dimension " << N << std::endl;
+    if (measure_sz) {
+        std::cout << "Observable measurements enabled (operators created on-demand per sample)" << std::endl;
+    }
     std::string position_file;
     if (!dir.empty()) {
         size_t last_slash_pos = dir.find_last_of('/');
@@ -1558,7 +1545,15 @@ void microcanonical_tpq(
             // Write fluctuation data at specified intervals
             if (step % temp_interval == 0 || step == max_iter) {
                 if (measure_sz){
+                    // Create operators on-demand only when needed (they are freed after use)
+                    std::cout << "  Creating operators on-demand for fluctuation measurement..." << std::endl;
+                    auto Sx_ops = createSxOperators(num_sites, spin_length);
+                    auto Sy_ops = createSyOperators(num_sites, spin_length);
+                    auto Sz_ops = createSzOperators(num_sites, spin_length);
+                    auto double_site_ops = createSingleOperators_pair(num_sites, spin_length);
+                    
                     writeFluctuationData(flct_file, spin_corr, inv_temp, v0, num_sites, spin_length, Sx_ops, Sy_ops, Sz_ops, double_site_ops, sublattice_size, step);
+                    // Operators are automatically freed here when they go out of scope
                 }
             }
             // If inv_temp is at one of the specified inverse temperature points, compute observables
