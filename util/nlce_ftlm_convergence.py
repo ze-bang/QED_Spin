@@ -406,7 +406,7 @@ Example usage:
                        help='Y-axis maximum for energy plot')
     parser.add_argument('--specific_heat_ymin', type=float, default=0, 
                        help='Y-axis minimum for specific heat plot')
-    parser.add_argument('--specific_heat_ymax', type=float, default=0.25, 
+    parser.add_argument('--specific_heat_ymax', type=float, default=0.6, 
                        help='Y-axis maximum for specific heat plot')
     parser.add_argument('--entropy_ymin', type=float, default=0, 
                        help='Y-axis minimum for entropy plot')

@@ -293,6 +293,7 @@ void calculate_spectral_function_from_tpq_U_t_incremental(
 
 /**
  * Compute observable dynamics for TPQ with legacy interface
+ * OPTIMIZED: Process observables on-demand and stream results to disk
  */
 void computeObservableDynamics_U_t(
     std::function<void(const Complex*, Complex*, int)> U_t,
@@ -313,6 +314,7 @@ void computeObservableDynamics_U_t(
 
     std::cout << "Computing dynamical susceptibility for sample " << sample 
               << ", beta = " << inv_temp << ", for " << observables_1.size() << " observables" << std::endl;
+    std::cout << "  Using memory-optimized on-demand observable computation" << std::endl;
     
     // Prebuild sparse matrices for all observables to ensure thread-safe applies
     for (const auto& op : observables_1) {
@@ -324,181 +326,131 @@ void computeObservableDynamics_U_t(
 
     uint64_t num_steps = static_cast<int>(t_end / dt) + 1;
     
-    // Pre-allocate all buffers needed for calculation
-    std::vector<ComplexVector> O_psi_vec(observables_1.size(), ComplexVector(N));
-    std::vector<ComplexVector> O_psi_next_vec(observables_1.size(), ComplexVector(N));
-    ComplexVector evolved_state(N);
-    ComplexVector state_next(N);
-    std::vector<ComplexVector> O_dag_state_vec(observables_1.size(), ComplexVector(N));
-    
-    // Buffers for negative time evolution
-    std::vector<ComplexVector> O_psi_vec_neg(observables_1.size(), ComplexVector(N));
-    std::vector<ComplexVector> O_psi_next_vec_neg(observables_1.size(), ComplexVector(N));
-    ComplexVector evolved_state_neg(N);
-    ComplexVector state_next_neg(N);
-    std::vector<ComplexVector> O_dag_state_vec_neg(observables_1.size(), ComplexVector(N));
-    
-    // Storage for time correlation data for all observables
-    std::vector<std::vector<std::tuple<double, double, double>>> all_time_data(observables_1.size());
-    for (auto& time_data : all_time_data) {
-        time_data.reserve(2 * num_steps - 1); // Reserve space for both positive and negative times
-    }
-    
-    // ===== INITIALIZE =====
-    std::copy(tpq_state.begin(), tpq_state.end(), evolved_state.begin());
-    
-    // Calculate O|ψ> once for each operator (parallel over operators)
-    #pragma omp parallel for schedule(static)
-    for (size_t op = 0; op < observables_1.size(); op++) {
-        observables_1[op].apply(evolved_state.data(), O_psi_vec[op].data(), N);
-    }
-    
-    // Calculate initial O†|ψ> for each operator and store initial time point
-    #pragma omp parallel for schedule(static)
-    for (size_t op = 0; op < observables_1.size(); op++) {
-        observables_2[op].apply(evolved_state.data(), O_dag_state_vec[op].data(), N);
-        
-        // Calculate initial correlation C(0) = <ψ|O†O|ψ>
-        Complex init_corr = Complex(0.0, 0.0);
-        for (int i = 0; i < N; i++) {
-            init_corr += std::conj(O_dag_state_vec[op][i]) * O_psi_vec[op][i];
-        }
-        
-        all_time_data[op].push_back(std::make_tuple(0.0, init_corr.real(), init_corr.imag()));
-    }
-    
-    // ===== POSITIVE TIME EVOLUTION =====
-    std::cout << "  Computing positive time evolution (0 to " << t_end << ")..." << std::endl;
-    
-    for (int step = 1; step < num_steps; step++) {
-        double current_time = step * dt;
-        
-        // Evolve state: |ψ(t)> = U_t|ψ(t-dt)>
-        U_t(evolved_state.data(), state_next.data(), N);
-
-        // Parallel over operators for this time slice
-        #pragma omp parallel for schedule(static)
-        for (size_t op = 0; op < observables_1.size(); op++) {
-            // Evolve O_psi: O|ψ(t)> = U_t(O|ψ(t-dt)>)
-            U_t(O_psi_vec[op].data(), O_psi_next_vec[op].data(), N);
-
-            // Calculate O†|ψ(t)>
-            observables_2[op].apply(state_next.data(), O_dag_state_vec[op].data(), N);
-
-            // Calculate correlation C(t) = <ψ(t)|O†O|ψ(t)>
-            Complex corr = Complex(0.0, 0.0);
-            for (int i = 0; i < N; i++) {
-                corr += std::conj(O_dag_state_vec[op][i]) * O_psi_next_vec[op][i];
-            }
-            
-            all_time_data[op].push_back(std::make_tuple(current_time, corr.real(), corr.imag()));
-        }
-
-        // Update buffers and state for next step
-        for (size_t op = 0; op < observables_1.size(); op++) {
-            std::swap(O_psi_vec[op], O_psi_next_vec[op]);
-        }
-        std::swap(evolved_state, state_next);
-        
-        if (step % 100 == 0) {
-            std::cout << "    Positive time step " << step << " / " << num_steps << std::endl;
-        }
-    }
-    
-    // ===== NEGATIVE TIME EVOLUTION =====
-    std::cout << "  Computing negative time evolution (0 to " << -t_end << ")..." << std::endl;
-    
-    // Re-initialize for negative time evolution
-    std::copy(tpq_state.begin(), tpq_state.end(), evolved_state_neg.begin());
-    
-    // Re-calculate O|ψ> for each operator
-    #pragma omp parallel for schedule(static)
-    for (size_t op = 0; op < observables_1.size(); op++) {
-        observables_1[op].apply(evolved_state_neg.data(), O_psi_vec_neg[op].data(), N);
-    }
-    
-    // Create inverse time evolution operator (U_t^†)
-    // Note: For backward evolution, we need to apply U_t^† which for Hermitian H means U(-dt)
-    // Since we already have U(dt), we'll create a wrapper that applies the adjoint
+    // Create inverse time evolution operator (U_t^†) for negative time
     auto U_t_dagger = [&U_t, N](const Complex* in, Complex* out, uint64_t size) {
         // For a unitary operator U = exp(-iHt), U^† = exp(iHt)
-        // This is equivalent to time evolution with -t
-        // However, since we only have U(dt), we need to apply it in reverse
-        // For now, we'll compute U^†|ψ> = (U|ψ*>)*
+        // We compute U^†|ψ> = (U|ψ*>)*
         ComplexVector in_conj(size);
         ComplexVector out_temp(size);
         
-        // Conjugate input
         for (int i = 0; i < size; i++) {
             in_conj[i] = std::conj(in[i]);
         }
-        
-        // Apply U_t
         U_t(in_conj.data(), out_temp.data(), size);
-        
-        // Conjugate output
         for (int i = 0; i < size; i++) {
             out[i] = std::conj(out_temp[i]);
         }
     };
     
-    for (int step = 1; step < num_steps; step++) {
-        double current_time = -step * dt;
+    // ===== PROCESS EACH OBSERVABLE ON-DEMAND =====
+    // This saves memory by not keeping all observables in memory simultaneously
+    for (size_t op_idx = 0; op_idx < observables_1.size(); op_idx++) {
+        std::cout << "  Processing observable " << (op_idx+1) << "/" << observables_1.size() 
+                  << " (" << observable_names[op_idx] << ")..." << std::endl;
         
-        // Evolve state backward: |ψ(-t)> = U_t^†|ψ(-t+dt)>
-        U_t_dagger(evolved_state_neg.data(), state_next_neg.data(), N);
-
-        // Parallel over operators for this time slice
-        #pragma omp parallel for schedule(static)
-        for (size_t op = 0; op < observables_1.size(); op++) {
-            // Evolve O_psi backward
-            U_t_dagger(O_psi_vec_neg[op].data(), O_psi_next_vec_neg[op].data(), N);
-
-            // Calculate O†|ψ(-t)>
-            observables_2[op].apply(state_next_neg.data(), O_dag_state_vec_neg[op].data(), N);
-
-            // Calculate correlation C(-t) = <ψ(-t)|O†O|ψ(-t)>
-            Complex corr = Complex(0.0, 0.0);
-            for (int i = 0; i < N; i++) {
-                corr += std::conj(O_dag_state_vec_neg[op][i]) * O_psi_next_vec_neg[op][i];
-            }
-            
-            all_time_data[op].push_back(std::make_tuple(current_time, corr.real(), corr.imag()));
-        }
-
-        // Update buffers and state for next step
-        for (size_t op = 0; op < observables_1.size(); op++) {
-            std::swap(O_psi_vec_neg[op], O_psi_next_vec_neg[op]);
-        }
-        std::swap(evolved_state_neg, state_next_neg);
-        
-        if (step % 100 == 0) {
-            std::cout << "    Negative time step " << step << " / " << num_steps << std::endl;
-        }
-    }
-    
-    // ===== WRITE SORTED OUTPUT =====
-    std::cout << "  Writing sorted time correlation data..." << std::endl;
-    
-    for (size_t i = 0; i < observables_1.size(); i++) {
-        // Sort by time (ascending order)
-        std::sort(all_time_data[i].begin(), all_time_data[i].end(), 
-                  [](const auto& a, const auto& b) { return std::get<0>(a) < std::get<0>(b); });
-        
-        // Write to file
+        // Open output file for streaming results
         std::string time_corr_file = dir + "/time_corr_rand" + std::to_string(sample) + "_" 
-                             + observable_names[i] + "_beta=" + std::to_string(inv_temp) + ".dat";
-        
+                                   + observable_names[op_idx] + "_beta=" + std::to_string(inv_temp) + ".dat";
         std::ofstream time_corr_out(time_corr_file);
         if (!time_corr_out.is_open()) {
             std::cerr << "Error: Could not open file " << time_corr_file << " for writing" << std::endl;
             continue;
         }
-        
         time_corr_out << "# t time_correlation_real time_correlation_imag" << std::endl;
         time_corr_out << std::setprecision(16);
         
-        for (const auto& data_point : all_time_data[i]) {
+        // Temporary storage for this observable (will be sorted before writing)
+        std::vector<std::tuple<double, double, double>> time_data;
+        time_data.reserve(2 * num_steps - 1);
+        
+        // Buffers for this observable only (reused for positive and negative time)
+        ComplexVector O_psi(N);
+        ComplexVector O_psi_next(N);
+        ComplexVector evolved_state(N);
+        ComplexVector state_next(N);
+        ComplexVector O_dag_state(N);
+        
+        // ===== INITIALIZE =====
+        std::copy(tpq_state.begin(), tpq_state.end(), evolved_state.begin());
+        observables_1[op_idx].apply(evolved_state.data(), O_psi.data(), N);
+        observables_2[op_idx].apply(evolved_state.data(), O_dag_state.data(), N);
+        
+        // Calculate initial correlation C(0)
+        Complex init_corr = Complex(0.0, 0.0);
+        for (int i = 0; i < N; i++) {
+            init_corr += std::conj(O_dag_state[i]) * O_psi[i];
+        }
+        time_data.push_back(std::make_tuple(0.0, init_corr.real(), init_corr.imag()));
+        
+        // ===== POSITIVE TIME EVOLUTION =====
+        std::cout << "    Computing positive time evolution (0 to " << t_end << ")..." << std::endl;
+        
+        for (int step = 1; step < num_steps; step++) {
+            double current_time = step * dt;
+            
+            // Evolve state and O|ψ>
+            U_t(evolved_state.data(), state_next.data(), N);
+            U_t(O_psi.data(), O_psi_next.data(), N);
+            
+            // Calculate O†|ψ(t)>
+            observables_2[op_idx].apply(state_next.data(), O_dag_state.data(), N);
+            
+            // Calculate correlation
+            Complex corr = Complex(0.0, 0.0);
+            for (int i = 0; i < N; i++) {
+                corr += std::conj(O_dag_state[i]) * O_psi_next[i];
+            }
+            time_data.push_back(std::make_tuple(current_time, corr.real(), corr.imag()));
+            
+            // Update for next step
+            std::swap(O_psi, O_psi_next);
+            std::swap(evolved_state, state_next);
+            
+            if (step % 100 == 0) {
+                std::cout << "      Positive time step " << step << " / " << num_steps << std::endl;
+            }
+        }
+        
+        // ===== NEGATIVE TIME EVOLUTION =====
+        std::cout << "    Computing negative time evolution (0 to " << -t_end << ")..." << std::endl;
+        
+        // Re-initialize
+        std::copy(tpq_state.begin(), tpq_state.end(), evolved_state.begin());
+        observables_1[op_idx].apply(evolved_state.data(), O_psi.data(), N);
+    
+        
+        for (int step = 1; step < num_steps; step++) {
+            double current_time = -step * dt;
+            
+            // Evolve backward
+            U_t_dagger(evolved_state.data(), state_next.data(), N);
+            U_t_dagger(O_psi.data(), O_psi_next.data(), N);
+            
+            // Calculate O†|ψ(-t)>
+            observables_2[op_idx].apply(state_next.data(), O_dag_state.data(), N);
+            
+            // Calculate correlation
+            Complex corr = Complex(0.0, 0.0);
+            for (int i = 0; i < N; i++) {
+                corr += std::conj(O_dag_state[i]) * O_psi_next[i];
+            }
+            time_data.push_back(std::make_tuple(current_time, corr.real(), corr.imag()));
+            
+            // Update for next step
+            std::swap(O_psi, O_psi_next);
+            std::swap(evolved_state, state_next);
+            
+            if (step % 100 == 0) {
+                std::cout << "      Negative time step " << step << " / " << num_steps << std::endl;
+            }
+        }
+        
+        // ===== STREAM SORTED OUTPUT =====
+        // Sort by time and write to file
+        std::sort(time_data.begin(), time_data.end(), 
+                  [](const auto& a, const auto& b) { return std::get<0>(a) < std::get<0>(b); });
+        
+        for (const auto& data_point : time_data) {
             time_corr_out << std::get<0>(data_point) << " " 
                          << std::get<1>(data_point) << " " 
                          << std::get<2>(data_point) << std::endl;
@@ -506,9 +458,13 @@ void computeObservableDynamics_U_t(
         
         time_corr_out.close();
         std::cout << "    Time correlation saved to " << time_corr_file << std::endl;
-        std::cout << "    Time range: [" << std::get<0>(all_time_data[i].front()) << ", " 
-                  << std::get<0>(all_time_data[i].back()) << "]" << std::endl;
+        std::cout << "    Time range: [" << std::get<0>(time_data.front()) << ", " 
+                  << std::get<0>(time_data.back()) << "]" << std::endl;
+        
+        // time_data is freed here before next observable
     }
+    
+    std::cout << "  All observables processed successfully!" << std::endl;
 }
 
 // ============================================================================
@@ -1106,12 +1062,9 @@ void writeFluctuationData(
     uint64_t sublattice_size,
     uint64_t step
 ) {
+    // Compute and write Sz on-demand (memory is freed after computation)
     auto [Sz, Sz2] = calculateSzandSz2(tpq_state, num_sites, spin_length, Sz_ops, sublattice_size);
-    auto [Sy, Sy2] = calculateSzandSz2(tpq_state, num_sites, spin_length, Sy_ops, sublattice_size);
-    auto [Sx, Sx2] = calculateSzandSz2(tpq_state, num_sites, spin_length, Sx_ops, sublattice_size);
-
-    auto Spm2exp = calculateSpm_onsite(tpq_state, num_sites, spin_length, double_site_ops.second, sublattice_size);
-
+    
     std::ofstream flct_out(flct_file, std::ios::app);
     flct_out << std::setprecision(16) << inv_temp 
              << " " << Sz[sublattice_size].real() << " " << Sz[sublattice_size].imag() 
@@ -1122,10 +1075,14 @@ void writeFluctuationData(
                  << " " << Sz2[i].real() << " " << Sz2[i].imag();
     }
 
+    auto Spm2exp = calculateSpm_onsite(tpq_state, num_sites, spin_length, double_site_ops.second, sublattice_size);
     flct_out << std::setprecision(16) << " " << Spm2exp.real() << " " << Spm2exp.imag();
-
-    flct_out << " " << step << std::endl;   
-
+    flct_out << " " << step << std::endl;
+    flct_out.close();
+    
+    // Compute and write Sx on-demand (Sz memory is freed before this)
+    auto [Sx, Sx2] = calculateSzandSz2(tpq_state, num_sites, spin_length, Sx_ops, sublattice_size);
+    
     std::string flct_file_x_string = flct_file.substr(0,flct_file.size()-4) + "_Sx.dat";
     std::ofstream flct_out_x(flct_file_x_string, std::ios::app);
     flct_out_x << std::setprecision(16) << inv_temp 
@@ -1138,9 +1095,12 @@ void writeFluctuationData(
     }
 
     flct_out_x << std::setprecision(16) << " " << Spm2exp.real() << " " << Spm2exp.imag();
-
     flct_out_x << " " << step << std::endl;
+    flct_out_x.close();
 
+    // Compute and write Sy on-demand (Sx memory is freed before this)
+    auto [Sy, Sy2] = calculateSzandSz2(tpq_state, num_sites, spin_length, Sy_ops, sublattice_size);
+    
     std::string flct_file_y_string = flct_file.substr(0,flct_file.size()-4) + "_Sy.dat";
     std::ofstream flct_out_y(flct_file_y_string, std::ios::app);
     flct_out_y << std::setprecision(16) << inv_temp 
@@ -1153,14 +1113,14 @@ void writeFluctuationData(
     }
 
     flct_out_y << std::setprecision(16) << " " << Spm2exp.real() << " " << Spm2exp.imag();
-
     flct_out_y << " " << step << std::endl;
+    flct_out_y.close();
 
-
+    // Compute and stream correlation data one type at a time
     auto [Szz, Spm, Spp, Spz] = calculateSzzSpm(tpq_state, num_sites, spin_length, double_site_ops, sublattice_size);
+    
     for (size_t idx = 0; idx < spin_corr.size(); idx++) {
         std::ofstream corr_out(spin_corr[idx], std::ios::app);
-        
         corr_out << std::setprecision(16) << inv_temp;
         
         // Write total (last element)
@@ -1538,18 +1498,19 @@ void microcanonical_tpq(
         std::vector<bool> temp_measured(num_temp_points, false);
         auto [ss_file, norm_file, flct_file, spin_corr] = initializeTPQFiles(dir, sample, sublattice_size);
         
-        // Generate initial random state
+        // Generate initial random state (already normalized)
          uint64_t seed = static_cast< int>(time(NULL)) + sample;
-        ComplexVector v1 = generateTPQVector(N, seed);
+        ComplexVector v0 = generateTPQVector(N, seed);
         
-        // Apply hamiltonian to get v0 = H|v1⟩
-        ComplexVector v0(N);
-        H(v1.data(), v0.data(), N);
-        // For each element, compute v0 = (L-H)|v1⟩ = Lv1 - v0
-        for (int i = 0; i < N; i++) {
-            v0[i] = (LargeValue * num_sites * v1[i]) - v0[i];
-        }
-        H(v1.data(), v0.data(), N);
+        // Temp buffer for Hamiltonian applications (reused throughout)
+        ComplexVector temp(N);
+        Complex minus_one(-1.0, 0.0);
+        
+        // Apply initial transformation: v0 = (L*D_S - H)|v0⟩
+        H(v0.data(), temp.data(), N);
+        Complex scale_factor_large(LargeValue * D_S, 0.0);
+        cblas_zscal(N, &scale_factor_large, v0.data(), 1);  // v0 *= L*D_S
+        cblas_zaxpy(N, &minus_one, temp.data(), 1, v0.data(), 1);  // v0 = v0 - temp
         
         // Write initial state (infinite temperature)
         double inv_temp = 0.0;
@@ -1575,20 +1536,21 @@ void microcanonical_tpq(
                      << current_norm << " " << first_norm << " " << step << std::endl;
         }
         
-        // Main TPQ loop
+        // Main TPQ loop - using in-place operations with single temp buffer
         for (step = 2; step <= max_iter; step++) {
             // Report progress
             if (step % (max_iter/10) == 0 || step == max_iter) {
                 std::cout << "  Step " << step << " of " << max_iter << std::endl;
             }
             
-            // Compute v1 = H|v0⟩
-            H(v0.data(), v1.data(), N);
+            // In-place evolution: v0 = (L*D_S - H)|v0⟩
+            // First compute temp = H|v0⟩
+            H(v0.data(), temp.data(), N);
             
-            // For each element, compute v0 = (L-H)|v0⟩ = L*v0 - v1
-            for (int i = 0; i < N; i++) {
-                v0[i] = (LargeValue * D_S * v0[i]) - v1[i];
-            }
+            // Then v0 = L*D_S*v0 - temp (in-place)
+            Complex scale_ld(LargeValue * D_S, 0.0);
+            cblas_zscal(N, &scale_ld, v0.data(), 1);  // v0 *= L*D_S
+            cblas_zaxpy(N, &minus_one, temp.data(), 1, v0.data(), 1);  // v0 = v0 - temp
 
             current_norm = cblas_dznrm2(N, v0.data(), 1);
             scale_factor = Complex(1.0/current_norm, 0.0);
