@@ -91,13 +91,36 @@ void GPUOperator::addTwoBodyTerm(uint8_t op1, uint32_t site1, uint8_t op2, uint3
     transform_data_.push_back(tdata);
 }
 
-// Legacy methods (kept for compatibility)
+// Legacy methods (kept for compatibility with char-based interface)
+// FIXED: Now also populates transform_data_ for optimized kernels
 void GPUOperator::setInteraction(int site1, int site2, char op1, char op2, double coupling) {
     interactions_.push_back({site1, site2, op1, op2, coupling});
+    
+    // Map char operators to uint8_t: 0=S+, 1=S-, 2=Sz
+    // Kernel uses: 0=S+ (raises spin), 1=S- (lowers spin), 2=Sz (diagonal)
+    auto mapOp = [](char c) -> uint8_t {
+        if (c == '+') return 0;  // S+ (raising operator)
+        if (c == '-') return 1;  // S- (lowering operator)
+        if (c == 'z' || c == 'Z') return 2;  // Sz (diagonal)
+        throw std::runtime_error(std::string("Invalid operator '") + c + "': must be '+', '-', or 'z'");
+    };
+    
+    addTwoBodyTerm(mapOp(op1), site1, mapOp(op2), site2, std::complex<double>(coupling, 0.0));
 }
 
 void GPUOperator::setSingleSite(int site, char op, double coupling) {
     single_site_ops_.push_back({site, op, coupling});
+    
+    // Map char operators to uint8_t: 0=S+, 1=S-, 2=Sz
+    // Kernel uses: 0=S+ (raises spin), 1=S- (lowers spin), 2=Sz (diagonal)
+    auto mapOp = [](char c) -> uint8_t {
+        if (c == '+') return 0;  // S+ (raising operator)
+        if (c == '-') return 1;  // S- (lowering operator)
+        if (c == 'z' || c == 'Z') return 2;  // Sz (diagonal)
+        throw std::runtime_error(std::string("Invalid operator '") + c + "': must be '+', '-', or 'z'");
+    };
+    
+    addOneBodyTerm(mapOp(op), site, std::complex<double>(coupling, 0.0));
 }
 
 size_t GPUOperator::estimateMemoryRequirement(int N) const {

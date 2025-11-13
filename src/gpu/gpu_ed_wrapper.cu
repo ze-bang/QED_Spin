@@ -202,49 +202,24 @@ void* GPUEDWrapper::createGPUOperatorFromFiles(
                 lineCount++;
                 continue;  // Skip zero couplings
             }
-            // Convert to our format
-            // For Sz-Sz interactions (Op_i=2, Op_j=2), we need special handling
+            // Convert to our format using ladder operators (+, -, z)
+            // Direct mapping: no decomposition into Cartesian components
             if (Op_i == 2 && Op_j == 2) {
                 // Sz*Sz interaction
                 interactions.push_back(std::make_tuple(indx_i, indx_j, 'z', 'z', E));
             } else if (Op_i == 2) {
                 // Sz * (S+ or S-)
                 char op_j = op_to_char(Op_j);
-                // For mixed terms, we need to handle Sx and Sy components
-                if (Op_j == 0) {  // S+
-                    // Sz*S+ = Sz*(Sx+iSy)
-                    interactions.push_back(std::make_tuple(indx_i, indx_j, 'z', 'x', E * 0.5));
-                    interactions.push_back(std::make_tuple(indx_i, indx_j, 'z', 'y', E * 0.5));
-                } else if (Op_j == 1) {  // S-
-                    // Sz*S- = Sz*(Sx-iSy)
-                    interactions.push_back(std::make_tuple(indx_i, indx_j, 'z', 'x', E * 0.5));
-                    interactions.push_back(std::make_tuple(indx_i, indx_j, 'z', 'y', -E * 0.5));
-                }
+                interactions.push_back(std::make_tuple(indx_i, indx_j, 'z', op_j, E));
             } else if (Op_j == 2) {
                 // (S+ or S-) * Sz
                 char op_i = op_to_char(Op_i);
-                if (Op_i == 0) {  // S+
-                    interactions.push_back(std::make_tuple(indx_i, indx_j, 'x', 'z', E * 0.5));
-                    interactions.push_back(std::make_tuple(indx_i, indx_j, 'y', 'z', E * 0.5));
-                } else if (Op_i == 1) {  // S-
-                    interactions.push_back(std::make_tuple(indx_i, indx_j, 'x', 'z', E * 0.5));
-                    interactions.push_back(std::make_tuple(indx_i, indx_j, 'y', 'z', -E * 0.5));
-                }
+                interactions.push_back(std::make_tuple(indx_i, indx_j, op_i, 'z', E));
             } else {
-                // Both are S+ or S- operators
-                // S+*S+ = (Sx+iSy)*(Sx+iSy) = Sx*Sx - Sy*Sy + i(Sx*Sy + Sy*Sx)
-                // S+*S- = (Sx+iSy)*(Sx-iSy) = Sx*Sx + Sy*Sy
-                // S-*S+ = (Sx-iSy)*(Sx+iSy) = Sx*Sx + Sy*Sy
-                // S-*S- = (Sx-iSy)*(Sx-iSy) = Sx*Sx - Sy*Sy - i(Sx*Sy + Sy*Sx)
-                
-                if (Op_i == 0 && Op_j == 1) {  // S+ * S-
-                    interactions.push_back(std::make_tuple(indx_i, indx_j, 'x', 'x', E));
-                    interactions.push_back(std::make_tuple(indx_i, indx_j, 'y', 'y', E));
-                } else if (Op_i == 1 && Op_j == 0) {  // S- * S+
-                    interactions.push_back(std::make_tuple(indx_i, indx_j, 'x', 'x', E));
-                    interactions.push_back(std::make_tuple(indx_i, indx_j, 'y', 'y', E));
-                }
-                // S+*S+ and S-*S- create complex terms that need careful handling
+                // Both are S+ or S- operators (ladder operators)
+                char op_i = op_to_char(Op_i);
+                char op_j = op_to_char(Op_j);
+                interactions.push_back(std::make_tuple(indx_i, indx_j, op_i, op_j, E));
             }
             
             lineCount++;
@@ -280,18 +255,9 @@ void* GPUEDWrapper::createGPUOperatorFromFiles(
             
             // Only process if coupling is non-zero
             if (std::abs(E) > 1e-12 || std::abs(F) > 1e-12) {
+                // Direct mapping: use ladder operators (+, -, z)
                 char op_char = op_to_char(Op);
-                
-                // For S+ and S-, convert to Sx and Sy components
-                if (Op == 0) {  // S+ = Sx + iSy
-                    single_site_ops.push_back(std::make_tuple(indx, 'x', E));
-                    single_site_ops.push_back(std::make_tuple(indx, 'y', E));
-                } else if (Op == 1) {  // S- = Sx - iSy
-                    single_site_ops.push_back(std::make_tuple(indx, 'x', E));
-                    single_site_ops.push_back(std::make_tuple(indx, 'y', -E));
-                } else if (Op == 2) {  // Sz
-                    single_site_ops.push_back(std::make_tuple(indx, 'z', E));
-                }
+                single_site_ops.push_back(std::make_tuple(indx, op_char, E));
             }
             
             lineCount++;

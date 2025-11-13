@@ -7,6 +7,11 @@ using namespace GPUBitOps;
 
 // ============================================================================
 // CUDA Kernels Implementation
+// 
+// OPERATOR ENCODING (used throughout all GPU kernels):
+//   0 = S+ (raising operator, flips spin up)
+//   1 = S- (lowering operator, flips spin down)
+//   2 = Sz (diagonal, measures spin)
 // ============================================================================
 
 namespace GPUKernels {
@@ -438,32 +443,6 @@ __device__ int lookupState(uint64_t state, const void* basis_states_ptr, int num
         } else {
             right = mid - 1;
         }
-    }
-    
-    return -1;  // Not found
-}
-
-/**
- * DEPRECATED: Old hash table lookup with linear probing
- * Kept for reference but not used in optimized code
- */
-__device__ int lookupStateHashTable(uint64_t state, const void* hash_table_ptr, int hash_size) {
-    typedef struct {uint64_t state; int index;} HashEntry;
-    const HashEntry* hash_table = static_cast<const HashEntry*>(hash_table_ptr);
-    
-    int hash = state % hash_size;
-    
-    for (int probe = 0; probe < hash_size; ++probe) {
-        uint64_t stored_state = hash_table[hash].state;
-        
-        if (stored_state == state) {
-            return hash_table[hash].index;
-        }
-        if (stored_state == 0) {
-            return -1;  // Not found
-        }
-        
-        hash = (hash + 1) % hash_size;
     }
     
     return -1;  // Not found

@@ -210,21 +210,6 @@ private:
     
     // Basis states stored on GPU
     uint64_t* d_basis_states_;
-    
-    // Hash table for state lookup
-    struct HashEntry {
-        uint64_t state;
-        int index;
-    };
-    
-    HashEntry* d_hash_table_;
-    int hash_table_size_;
-    
-    // Build hash table on GPU
-    void buildHashTableOnGPU();
-    
-    // Hash function
-    __device__ static uint64_t hash_function(uint64_t state, int table_size);
 };
 
 // CUDA kernel declarations

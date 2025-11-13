@@ -1715,6 +1715,7 @@ public:
     /**
      * Matrix-free apply for raw arrays (optimized for solvers)
      * Parallelized with OpenMP
+     * FIXED: Now uses transform_data_ instead of transforms_ to match optimized HamiltonianOperator
      */
     void apply(const Complex* in, Complex* out, size_t size) const {
         if (size != static_cast<size_t>(fixed_sz_dim_)) {
@@ -1742,12 +1743,67 @@ public:
                     __builtin_prefetch(&in[i + 4], 0, 1);
                 }
                 
-                // Apply all transforms
-                for (const auto& transform : transforms_) {
-                    auto [j_state, scalar] = transform(basis_i);
-                    
-                    if (j_state >= 0 && popcount(j_state) == n_up_ && std::abs(scalar) > 1e-15) {
-                        auto it = state_to_index_.find(j_state);
+                // Process all transforms using optimized transform_data_ representation
+                for (const auto& tdata : transform_data_) {
+                    uint64_t new_basis = basis_i;
+                    Complex scalar = tdata.coefficient;
+                    bool valid = true;
+
+                    if (!tdata.is_two_body) {
+                        // One-body operator: S^α_i
+                        if (tdata.op_type == 2) {
+                            // Sz: diagonal, just multiply by eigenvalue
+                            double sign = ((basis_i >> tdata.site_index) & 1) ? -1.0 : 1.0;
+                            scalar *= spin_l_ * sign;
+                        } else {
+                            // S+ or S-: off-diagonal, flip bit
+                            uint64_t bit = (basis_i >> tdata.site_index) & 1;
+                            if (bit != tdata.op_type) {
+                                new_basis ^= (1ULL << tdata.site_index);
+                            } else {
+                                valid = false;
+                            }
+                        }
+                    } else {
+                        // Two-body operator: S^α_i S^β_j
+                        uint64_t bit_i = (basis_i >> tdata.site_index) & 1;
+                        uint64_t bit_j = (basis_i >> tdata.site_index_2) & 1;
+
+                        if (tdata.op_type == 2 && tdata.op_type_2 == 2) {
+                            // Sz_i Sz_j: purely diagonal
+                            double sign_i = bit_i ? -1.0 : 1.0;
+                            double sign_j = bit_j ? -1.0 : 1.0;
+                            scalar *= spin_l_ * spin_l_ * sign_i * sign_j;
+                        } else {
+                            // Mixed or off-diagonal terms
+                            if (tdata.op_type != 2) {
+                                if (bit_i != tdata.op_type) {
+                                    new_basis ^= (1ULL << tdata.site_index);
+                                } else {
+                                    valid = false;
+                                }
+                            } else {
+                                double sign_i = bit_i ? -1.0 : 1.0;
+                                scalar *= spin_l_ * sign_i;
+                            }
+
+                            if (valid && tdata.op_type_2 != 2) {
+                                uint64_t new_bit_j = (new_basis >> tdata.site_index_2) & 1;
+                                if (new_bit_j != tdata.op_type_2) {
+                                    new_basis ^= (1ULL << tdata.site_index_2);
+                                } else {
+                                    valid = false;
+                                }
+                            } else if (valid) {
+                                double sign_j = bit_j ? -1.0 : 1.0;
+                                scalar *= spin_l_ * sign_j;
+                            }
+                        }
+                    }
+
+                    // Check if resulting state is in the fixed Sz sector and add contribution
+                    if (valid && popcount(new_basis) == n_up_ && std::abs(scalar) > 1e-15) {
+                        auto it = state_to_index_.find(new_basis);
                         if (it != state_to_index_.end()) {
                             uint64_t j = it->second;
                             local_out[j] += scalar * coeff;
@@ -1820,13 +1876,67 @@ public:
         for (uint64_t i = 0; i < fixed_sz_dim_; ++i) {
             uint64_t basis_i = basis_states_[i];
             
-            // Apply all transforms
-            for (const auto& transform : transforms_) {
-                auto [j_state, scalar] = transform(basis_i);
-                
+            // Process all transforms using optimized transform_data_ representation
+            for (const auto& tdata : transform_data_) {
+                uint64_t new_basis = basis_i;
+                Complex scalar = tdata.coefficient;
+                bool valid = true;
+
+                if (!tdata.is_two_body) {
+                    // One-body operator: S^α_i
+                    if (tdata.op_type == 2) {
+                        // Sz: diagonal, just multiply by eigenvalue
+                        double sign = ((basis_i >> tdata.site_index) & 1) ? -1.0 : 1.0;
+                        scalar *= spin_l_ * sign;
+                    } else {
+                        // S+ or S-: off-diagonal, flip bit
+                        uint64_t bit = (basis_i >> tdata.site_index) & 1;
+                        if (bit != tdata.op_type) {
+                            new_basis ^= (1ULL << tdata.site_index);
+                        } else {
+                            valid = false;
+                        }
+                    }
+                } else {
+                    // Two-body operator: S^α_i S^β_j
+                    uint64_t bit_i = (basis_i >> tdata.site_index) & 1;
+                    uint64_t bit_j = (basis_i >> tdata.site_index_2) & 1;
+
+                    if (tdata.op_type == 2 && tdata.op_type_2 == 2) {
+                        // Sz_i Sz_j: purely diagonal
+                        double sign_i = bit_i ? -1.0 : 1.0;
+                        double sign_j = bit_j ? -1.0 : 1.0;
+                        scalar *= spin_l_ * spin_l_ * sign_i * sign_j;
+                    } else {
+                        // Mixed or off-diagonal terms
+                        if (tdata.op_type != 2) {
+                            if (bit_i != tdata.op_type) {
+                                new_basis ^= (1ULL << tdata.site_index);
+                            } else {
+                                valid = false;
+                            }
+                        } else {
+                            double sign_i = bit_i ? -1.0 : 1.0;
+                            scalar *= spin_l_ * sign_i;
+                        }
+
+                        if (valid && tdata.op_type_2 != 2) {
+                            uint64_t new_bit_j = (new_basis >> tdata.site_index_2) & 1;
+                            if (new_bit_j != tdata.op_type_2) {
+                                new_basis ^= (1ULL << tdata.site_index_2);
+                            } else {
+                                valid = false;
+                            }
+                        } else if (valid) {
+                            double sign_j = bit_j ? -1.0 : 1.0;
+                            scalar *= spin_l_ * sign_j;
+                        }
+                    }
+                }
+
                 // Check if resulting state is in the fixed Sz sector
-                if (j_state >= 0 && popcount(j_state) == n_up_) {
-                    auto it = state_to_index_.find(j_state);
+                if (valid && popcount(new_basis) == n_up_ && std::abs(scalar) > 1e-15) {
+                    auto it = state_to_index_.find(new_basis);
                     if (it != state_to_index_.end()) {
                         uint64_t j = it->second;
                         triplets.emplace_back(j, i, scalar);

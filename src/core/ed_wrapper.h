@@ -1604,22 +1604,142 @@ inline EDResults exact_diagonalization_fixed_sz(
     std::cout << "  Fixed Sz:   " << fixed_sz_dim << std::endl;
     std::cout << "  Reduction:  " << (double)full_dim / fixed_sz_dim << "x" << std::endl;
     
-    // Build sparse matrix
-    if (method != DiagonalizationMethod::FULL) {
-        hamiltonian.buildFixedSzMatrix();
-    }
+    // Check if GPU method requested
+    bool is_gpu_method = (method == DiagonalizationMethod::DAVIDSON_GPU ||
+                          method == DiagonalizationMethod::LOBPCG_GPU ||
+                          method == DiagonalizationMethod::FTLM_GPU_FIXED_SZ);
     
-    // Create apply function
-    auto apply_hamiltonian = [&hamiltonian, fixed_sz_dim](const Complex* in, Complex* out, uint64_t n) {
-        if (n != fixed_sz_dim) {
-            throw std::runtime_error("Dimension mismatch in fixed Sz apply");
+    EDResults results;
+    
+    if (is_gpu_method) {
+#ifdef WITH_CUDA
+        std::cout << "\n=== GPU Fixed-Sz Diagonalization ===" << std::endl;
+        
+        // Prepare interactions and single-site operators
+        std::vector<std::tuple<int, int, char, char, double>> gpu_interactions;
+        std::vector<std::tuple<int, char, double>> gpu_single_site_ops;
+        
+        // Load from files
+        std::ifstream inter_file(interaction_file);
+        if (inter_file.is_open()) {
+            std::string line;
+            std::getline(inter_file, line);
+            std::getline(inter_file, line);
+            std::istringstream iss(line);
+            uint64_t numLines;
+            std::string m;
+            iss >> m >> numLines;
+            
+            for (uint64_t i = 0; i < 3; ++i) std::getline(inter_file, line);
+            
+            uint64_t lineCount = 0;
+            while (std::getline(inter_file, line) && lineCount < numLines) {
+                std::istringstream lineStream(line);
+                uint64_t Op_i, indx_i, Op_j, indx_j;
+                double E, F;
+                
+                if (!(lineStream >> Op_i >> indx_i >> Op_j >> indx_j >> E >> F)) continue;
+                
+                // File operator codes: 0=S+, 1=S-, 2=Sz
+                // Map to chars: '+'=S+, '-'=S-, 'z'=Sz
+                auto mapOp = [](uint64_t op) -> char {
+                    if (op == 0) return '+';  // S+
+                    if (op == 1) return '-';  // S-
+                    return 'z';  // Sz
+                };
+                
+                gpu_interactions.push_back(std::make_tuple(indx_i, indx_j, mapOp(Op_i), mapOp(Op_j), E));
+                lineCount++;
+            }
         }
-        hamiltonian.apply(in, out, n);
-    };
-    
-    // Perform diagonalization
-    std::cout << "\nDiagonalizing..." << std::endl;
-    auto results = exact_diagonalization_core(apply_hamiltonian, fixed_sz_dim, method, params);
+        
+        // Load single-site terms if present
+        if (!single_site_file.empty()) {
+            std::ifstream ss_file(single_site_file);
+            if (ss_file.is_open()) {
+                std::string line;
+                std::getline(ss_file, line);
+                std::getline(ss_file, line);
+                std::istringstream iss(line);
+                uint64_t numLines;
+                std::string m;
+                iss >> m >> numLines;
+                
+                for (uint64_t i = 0; i < 3; ++i) std::getline(ss_file, line);
+                
+                uint64_t lineCount = 0;
+                while (std::getline(ss_file, line) && lineCount < numLines) {
+                    std::istringstream lineStream(line);
+                    uint64_t Op_i, indx_i;
+                    double E, F;
+                    
+                    if (!(lineStream >> Op_i >> indx_i >> E >> F)) continue;
+                    
+                    // File operator codes: 0=S+, 1=S-, 2=Sz
+                    // Map to chars: '+'=S+, '-'=S-, 'z'=Sz
+                    auto mapOp = [](uint64_t op) -> char {
+                        if (op == 0) return '+';  // S+
+                        if (op == 1) return '-';  // S-
+                        return 'z';  // Sz
+                    };
+                    
+                    gpu_single_site_ops.push_back(std::make_tuple(indx_i, mapOp(Op_i), E));
+                    lineCount++;
+                }
+            }
+        }
+        
+        // Create GPU operator
+        void* gpu_op_handle = GPUEDWrapper::createGPUFixedSzOperatorDirect(
+            num_sites, n_up, spin_length,
+            gpu_interactions, gpu_single_site_ops);
+        
+        std::cout << "Loaded " << gpu_interactions.size() << " interactions and " 
+                  << gpu_single_site_ops.size() << " single-site terms\n";
+        
+        // Run GPU Davidson
+        if (method == DiagonalizationMethod::DAVIDSON_GPU || method == DiagonalizationMethod::LOBPCG_GPU) {
+            std::vector<double> eigenvalues;
+            
+            GPUEDWrapper::runGPUDavidsonFixedSz(
+                gpu_op_handle, n_up,
+                params.num_eigenvalues,
+                params.max_iterations,
+                params.max_subspace,
+                params.tolerance,
+                eigenvalues,
+                params.output_dir,
+                params.compute_eigenvectors);
+            
+            results.eigenvalues = eigenvalues;
+        }
+        
+        // Cleanup
+        GPUEDWrapper::destroyGPUOperator(gpu_op_handle);
+        
+        std::cout << "GPU diagonalization complete\n";
+#else
+        throw std::runtime_error("GPU methods require CUDA support (compile with -DWITH_CUDA=ON)");
+#endif
+    } else {
+        // CPU path
+        // Build sparse matrix
+        if (method != DiagonalizationMethod::FULL) {
+            hamiltonian.buildFixedSzMatrix();
+        }
+        
+        // Create apply function
+        auto apply_hamiltonian = [&hamiltonian, fixed_sz_dim](const Complex* in, Complex* out, uint64_t n) {
+            if (n != fixed_sz_dim) {
+                throw std::runtime_error("Dimension mismatch in fixed Sz apply");
+            }
+            hamiltonian.apply(in, out, n);
+        };
+        
+        // Perform diagonalization
+        std::cout << "\nDiagonalizing..." << std::endl;
+        results = exact_diagonalization_core(apply_hamiltonian, fixed_sz_dim, method, params);
+    }
 
     // Check if this is a TPQ method
     bool is_tpq_method = (method == DiagonalizationMethod::mTPQ || 

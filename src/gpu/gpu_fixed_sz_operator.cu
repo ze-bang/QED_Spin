@@ -15,7 +15,7 @@ using namespace GPUConfig;
 
 GPUFixedSzOperator::GPUFixedSzOperator(int n_sites, int n_up, float spin_l)
     : GPUOperator(n_sites, spin_l), n_up_(n_up),
-      d_basis_states_(nullptr), d_hash_table_(nullptr) {
+      d_basis_states_(nullptr) {
     
     // Calculate binomial coefficient C(n_sites, n_up) for dimension
     auto binomial = [](int n, int k) -> int64_t {
@@ -35,10 +35,7 @@ GPUFixedSzOperator::GPUFixedSzOperator(int n_sites, int n_up, float spin_l)
     std::cout << "  Sites: " << n_sites << ", N_up: " << n_up << "\n";
     std::cout << "  Fixed Sz dimension: " << fixed_sz_dim_ << "\n";
     std::cout << "  Reduction factor: " << (1 << n_sites) / (double)fixed_sz_dim_ << "x\n";
-    std::cout << "  State lookup: Binary search (warp-coherent, no hash table)\n";
-    
-    // Hash table not needed - using binary search instead
-    hash_table_size_ = 0;
+    std::cout << "  State lookup: Binary search (warp-coherent)\n";
     
     // Build basis on GPU
     buildBasisOnGPU();
@@ -48,10 +45,6 @@ GPUFixedSzOperator::~GPUFixedSzOperator() {
     if (d_basis_states_) {
         cudaFree(d_basis_states_);
         d_basis_states_ = nullptr;
-    }
-    if (d_hash_table_) {
-        cudaFree(d_hash_table_);
-        d_hash_table_ = nullptr;
     }
 }
 
@@ -75,18 +68,6 @@ void GPUFixedSzOperator::buildBasisOnGPU() {
     
     std::cout << "  Basis generation complete (naturally sorted)\n";
     std::cout << "  State lookup optimized: Binary search O(log N) with no warp divergence\n";
-    
-    // Hash table construction REMOVED - using binary search instead
-    // Binary search on sorted basis is faster and more warp-coherent
-}
-
-void GPUFixedSzOperator::buildHashTableOnGPU() {
-    // DEPRECATED: Hash table no longer used
-    // Binary search on sorted basis states is superior:
-    // - No warp divergence (all threads follow same path)
-    // - O(log N) complexity with better cache behavior
-    // - No memory overhead for hash table
-    std::cout << "  Note: Hash table construction skipped (using binary search)\n";
 }
 
 void GPUFixedSzOperator::matVecFixedSz(const cuDoubleComplex* d_x, cuDoubleComplex* d_y) {
