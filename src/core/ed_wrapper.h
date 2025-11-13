@@ -1025,9 +1025,9 @@ Operator load_hamiltonian_from_files(
             //     hamiltonian.loadCounterTerm(counterterm_file);
             // }
             // Build sparse matrix (except for full diagonalization)
-            if (method != DiagonalizationMethod::FULL) {
-                hamiltonian.buildSparseMatrix();
-            }
+            // if (method == DiagonalizationMethod::FULL) {
+            //     hamiltonian.buildSparseMatrix();
+            // }
             break;
             
         case HamiltonianFileFormat::SPARSE_MATRIX:
@@ -1050,9 +1050,8 @@ std::function<void(const Complex*, Complex*, int)> create_hamiltonian_apply_func
     Operator& hamiltonian
 ) {
     return [&hamiltonian](const Complex* in, Complex* out, uint64_t n) {
-        std::vector<Complex> in_vec(in, in + n);
-        std::vector<Complex> out_vec = hamiltonian.apply(in_vec);
-        std::copy(out_vec.begin(), out_vec.end(), out);
+        // Directly use pointer-based apply to avoid temporary vector allocations
+        hamiltonian.apply(in, out, n);
     };
 }
 

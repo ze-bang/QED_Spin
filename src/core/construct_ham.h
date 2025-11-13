@@ -518,7 +518,10 @@ public:
     /**
      * Matrix-free apply: H|vec⟩ using on-the-fly transform evaluation
      * Faster and more memory-efficient than building sparse matrix
-     * Parallelized with OpenMP for multi-core performance
+     * Parallelized with OpenMP using atomic operations (MEMORY-EFFICIENT VERSION)
+     * 
+     * IMPORTANT: This version uses atomic operations to avoid OOM issues.
+     * See the raw pointer version apply(const Complex*, Complex*, size_t) for details.
      */
     std::vector<Complex> apply(const std::vector<Complex>& vec) const {
         uint64_t dim = 1ULL << n_bits_;
@@ -528,45 +531,22 @@ public:
         
         std::vector<Complex> result(dim, Complex(0.0, 0.0));
         
-        // Parallel reduction: each thread accumulates to local buffer, then combine
-        #pragma omp parallel if(dim > 1024)
-        {
-            std::vector<Complex> local_result(dim, Complex(0.0, 0.0));
-            
-            #pragma omp for schedule(static) nowait
-            for (uint64_t i = 0; i < dim; ++i) {
-                Complex coeff = vec[i];
-                if (std::abs(coeff) < 1e-15) continue;
-                
-                // Prefetch next input (helps if vec is large)
-                if (i + 8 < dim) {
-                    __builtin_prefetch(&vec[i + 8], 0, 1);
-                }
-                
-                // Apply all transforms to this basis state
-                for (const auto& transform : transforms_) {
-                    auto [j, scalar] = transform(i);
-                    if (j >= 0 && j < dim && std::abs(scalar) > 1e-15) {
-                        local_result[j] += scalar * coeff;
-                    }
-                }
-            }
-            
-            // Combine local results with critical section
-            #pragma omp critical
-            {
-                for (uint64_t i = 0; i < dim; ++i) {
-                    result[i] += local_result[i];
-                }
-            }
-        }
+        // Use the memory-efficient raw pointer version
+        apply(vec.data(), result.data(), dim);
         
         return result;
     }
     
     /**
      * Matrix-free apply for raw arrays (optimized for Lanczos/Davidson solvers)
-     * Parallelized with OpenMP and optimized memory access patterns
+     * Parallelized with OpenMP using atomic operations (MEMORY-EFFICIENT VERSION)
+     * 
+     * IMPORTANT: This version uses atomic operations instead of thread-local buffers
+     * to avoid allocating dim×num_threads memory, which causes OOM for large systems.
+     * 
+     * For 2^27 dimension with 64 threads:
+     *   Old version: 64 × 2GB = 128 GB (causes OOM)
+     *   New version: 2 × 2GB = 4 GB (just input + output)
      */
     void apply(const Complex* in, Complex* out, size_t size) const {
         uint64_t dim = 1ULL << n_bits_;
@@ -577,38 +557,50 @@ public:
         // Zero output
         std::fill(out, out + dim, Complex(0.0, 0.0));
         
-        // Parallel with thread-local buffers to avoid race conditions
-        #pragma omp parallel if(dim > 1024)
-        {
-            std::vector<Complex> local_out(dim, Complex(0.0, 0.0));
+        // For small systems or if OpenMP is disabled, use simple loop
+        #if !defined(_OPENMP) || defined(DISABLE_OMP_ATOMIC_APPLY)
+        for (uint64_t i = 0; i < dim; ++i) {
+            Complex coeff = in[i];
+            if (std::abs(coeff) < 1e-15) continue;
             
-            #pragma omp for schedule(static) nowait
-            for (uint64_t i = 0; i < dim; ++i) {
-                Complex coeff = in[i];
-                if (std::abs(coeff) < 1e-15) continue;
-                
-                // Prefetch ahead
-                if (i + 8 < dim) {
-                    __builtin_prefetch(&in[i + 8], 0, 1);
-                }
-                
-                // Apply all transforms
-                for (const auto& transform : transforms_) {
-                    auto [j, scalar] = transform(i);
-                    if (j >= 0 && j < dim && std::abs(scalar) > 1e-15) {
-                        local_out[j] += scalar * coeff;
-                    }
-                }
-            }
-            
-            // Reduce: combine thread-local results
-            #pragma omp critical
-            {
-                for (uint64_t i = 0; i < dim; ++i) {
-                    out[i] += local_out[i];
+            for (const auto& transform : transforms_) {
+                auto [j, scalar] = transform(i);
+                if (j >= 0 && j < dim && std::abs(scalar) > 1e-15) {
+                    out[j] += scalar * coeff;
                 }
             }
         }
+        #else
+        // Parallel version using atomic operations (memory-efficient)
+        // Use dynamic scheduling to handle load imbalance from sparsity
+        #pragma omp parallel for schedule(dynamic, 256) if(dim > 10000)
+        for (uint64_t i = 0; i < dim; ++i) {
+            Complex coeff = in[i];
+            if (std::abs(coeff) < 1e-15) continue;
+            
+            // Prefetch next input element
+            if (i + 8 < dim) {
+                __builtin_prefetch(&in[i + 8], 0, 1);
+            }
+            
+            // Apply all transforms for this basis state
+            for (const auto& transform : transforms_) {
+                auto [j, scalar] = transform(i);
+                if (j >= 0 && j < dim && std::abs(scalar) > 1e-15) {
+                    Complex contrib = scalar * coeff;
+                    
+                    // Atomic addition to output (thread-safe without full-size buffers)
+                    // This may have some overhead from atomic operations, but saves
+                    // massive amounts of memory (e.g., 128 GB for 64 threads @ 2^27 dim)
+                    double* out_ptr = reinterpret_cast<double*>(&out[j]);
+                    #pragma omp atomic
+                    out_ptr[0] += contrib.real();
+                    #pragma omp atomic
+                    out_ptr[1] += contrib.imag();
+                }
+            }
+        }
+        #endif
     }
     
     /**
