@@ -1529,24 +1529,39 @@ void microcanonical_tpq(
             scale_factor = Complex(1.0/current_norm, 0.0);
             cblas_zscal(N, &scale_factor, v0.data(), 1);
             
-            // Calculate energy and variance
-            auto [energy_step, variance_step] = calculateEnergyAndVariance(H, v0, N);
-            // Update inverse temperature
-            inv_temp = (2.0*step) / (LargeValue * num_sites - energy_step);
-            
-            // Write data
-            writeTPQData(ss_file, inv_temp, energy_step, variance_step, current_norm, step);
-            
-            {
-                std::ofstream norm_out(norm_file, std::ios::app);
-                norm_out << std::setprecision(16) << inv_temp << " " 
-                         << current_norm << " " << first_norm << " " << step << std::endl;
-            }
-            
-            energy1 = energy_step;
-
-            // Write fluctuation data at specified intervals
+            // OPTIMIZED: Calculate energy and variance only at specified intervals (like GPU version)
+            // This significantly reduces computational cost for large systems
             if (step % temp_interval == 0 || step == max_iter) {
+                // Calculate energy and variance
+                auto [energy_step, variance_step] = calculateEnergyAndVariance(H, v0, N);
+                // Update inverse temperature
+                inv_temp = (2.0*step) / (LargeValue * num_sites - energy_step);
+                
+                // Write data
+                writeTPQData(ss_file, inv_temp, energy_step, variance_step, current_norm, step);
+                
+                {
+                    std::ofstream norm_out(norm_file, std::ios::app);
+                    norm_out << std::setprecision(16) << inv_temp << " " 
+                             << current_norm << " " << first_norm << " " << step << std::endl;
+                }
+                
+                energy1 = energy_step;
+                
+                // Report detailed progress
+                if (step % (temp_interval * 10) == 0 || step == max_iter) {
+                    std::cout << "  Step " << step << ": E = " << energy_step 
+                              << ", var = " << variance_step 
+                              << ", β = " << inv_temp << std::endl;
+                }
+                
+                // Check convergence
+                if (variance_step < 1e-10 && step > 100) {
+                    std::cout << "  Converged to eigenstate at step " << step << std::endl;
+                    break;
+                }
+
+                // Write fluctuation data
                 if (measure_sz){
                     // Create operators on-demand only when needed (they are freed after use)
                     std::cout << "  Creating operators on-demand for fluctuation measurement..." << std::endl;
@@ -1779,34 +1794,38 @@ void canonical_tpq(
             // Evolve by Δβ
             imaginary_time_evolve_tpq_taylor(H, psi, N, delta_beta, taylor_order, /*normalize=*/true);
 
-            // Measurements
-            auto [e, var] = calculateEnergyAndVariance(H, psi, N);
-            double inv_temp = beta;
+            // OPTIMIZED: Measurements only at specified intervals (like GPU version)
+            // This significantly reduces computational cost for large systems
+            if (k % temp_interval == 0 || k == max_steps) {
+                auto [e, var] = calculateEnergyAndVariance(H, psi, N);
+                double inv_temp = beta;
 
-            writeTPQData(ss_file, inv_temp, e, var, /*norm*/1.0, step);
-            {
-                std::ofstream norm_out(norm_file, std::ios::app);
-                norm_out << std::setprecision(16) << inv_temp << " " << 1.0 << " " << 1.0 << " " << step << std::endl;
-            }
-
-            if ((measure_sz && (k % std::max(static_cast<uint64_t>(1), temp_interval) == 0 || k == max_steps))) {
-                writeFluctuationData(flct_file, spin_corr, inv_temp, psi,
-                                     num_sites, spin_length, Sx_ops, Sy_ops, Sz_ops, double_site_ops, sublattice_size, step);
-            }
-
-            for (int i = 0; i < num_temp_points; ++i) {
-                if (!temp_measured[i] && std::abs(inv_temp - measure_inv_temp[i]) < 4e-3) {
-                    if (compute_observables) {
-                        std::string state_file = dir + "/tpq_state_" + std::to_string(sample)
-                                               + "_beta=" + std::to_string(inv_temp) + ".dat";
-                        save_tpq_state(psi, state_file);
-                    }
-                    temp_measured[i] = true;
+                writeTPQData(ss_file, inv_temp, e, var, /*norm*/1.0, step);
+                {
+                    std::ofstream norm_out(norm_file, std::ios::app);
+                    norm_out << std::setprecision(16) << inv_temp << " " << 1.0 << " " << 1.0 << " " << step << std::endl;
                 }
-            }
 
-            if (k % std::max(static_cast<uint64_t>(1), max_steps / 10) == 0 || k == max_steps) {
-                std::cout << "  β = " << beta << " (" << k << "/" << max_steps << "), E = " << e << std::endl;
+                if (measure_sz) {
+                    writeFluctuationData(flct_file, spin_corr, inv_temp, psi,
+                                         num_sites, spin_length, Sx_ops, Sy_ops, Sz_ops, double_site_ops, sublattice_size, step);
+                }
+                
+                // Save state at specified temperature checkpoints
+                for (int i = 0; i < num_temp_points; ++i) {
+                    if (!temp_measured[i] && std::abs(inv_temp - measure_inv_temp[i]) < 4e-3) {
+                        if (compute_observables) {
+                            std::string state_file = dir + "/tpq_state_" + std::to_string(sample)
+                                                   + "_beta=" + std::to_string(inv_temp) + ".dat";
+                            save_tpq_state(psi, state_file);
+                        }
+                        temp_measured[i] = true;
+                    }
+                }
+                
+                if (k % std::max(static_cast<uint64_t>(1), max_steps / 10) == 0 || k == max_steps) {
+                    std::cout << "  β = " << beta << " (" << k << "/" << max_steps << "), E = " << e << std::endl;
+                }
             }
         }
 
