@@ -714,9 +714,12 @@ void compute_spin_expectations(
         // For each site, compute the expectation values
         for (int site = 0; site < num_sites; site++) {
             // Apply operators
-            std::vector<Complex> Sp_psi = Sp_ops[site].apply(std::vector<Complex>(psi.begin(), psi.end()));
-            std::vector<Complex> Sm_psi = Sm_ops[site].apply(std::vector<Complex>(psi.begin(), psi.end()));
-            std::vector<Complex> Sz_psi = Sz_ops[site].apply(std::vector<Complex>(psi.begin(), psi.end()));
+            std::vector<Complex> Sp_psi(N);
+            std::vector<Complex> Sm_psi(N);
+            std::vector<Complex> Sz_psi(N);
+            Sp_ops[site].apply(psi.data(), Sp_psi.data(), N);
+            Sm_ops[site].apply(psi.data(), Sm_psi.data(), N);
+            Sz_ops[site].apply(psi.data(), Sz_psi.data(), N);
             
             // Calculate expectation values
             Complex Sp_exp = Complex(0.0, 0.0);
@@ -967,9 +970,12 @@ std::vector<std::vector<Complex>> compute_eigenstate_spin_expectations(
     // For each site, compute the expectation values
     for (int site = 0; site < num_sites; site++) {
         // Apply operators
-        std::vector<Complex> Sp_psi = Sp_ops[site].apply(std::vector<Complex>(eigenstate.begin(), eigenstate.end()));
-        std::vector<Complex> Sm_psi = Sm_ops[site].apply(std::vector<Complex>(eigenstate.begin(), eigenstate.end()));
-        std::vector<Complex> Sz_psi = Sz_ops[site].apply(std::vector<Complex>(eigenstate.begin(), eigenstate.end()));
+        std::vector<Complex> Sp_psi(N);
+        std::vector<Complex> Sm_psi(N);
+        std::vector<Complex> Sz_psi(N);
+        Sp_ops[site].apply(eigenstate.data(), Sp_psi.data(), N);
+        Sm_ops[site].apply(eigenstate.data(), Sm_psi.data(), N);
+        Sz_ops[site].apply(eigenstate.data(), Sz_psi.data(), N);
         
         std::vector<Complex> Sx_psi(N);
         std::vector<Complex> Sy_psi(N);
@@ -1074,8 +1080,10 @@ std::vector<std::vector<std::vector<Complex>>> compute_eigenstate_spin_correlati
             DoubleSiteOperator SpSm_op(num_sites, spin_l, 0, site_i, 1, site_j); // S+*S-
             
             // Apply operators
-            std::vector<Complex> SzSz_psi = SzSz_op.apply(std::vector<Complex>(eigenstate.begin(), eigenstate.end()));
-            std::vector<Complex> SpSm_psi = SpSm_op.apply(std::vector<Complex>(eigenstate.begin(), eigenstate.end()));
+            std::vector<Complex> SzSz_psi(N);
+            std::vector<Complex> SpSm_psi(N);
+            SzSz_op.apply(eigenstate.data(), SzSz_psi.data(), N);
+            SpSm_op.apply(eigenstate.data(), SpSm_psi.data(), N);
             
             // Calculate expectation values
             Complex SzSz_exp = Complex(0.0, 0.0);
@@ -1320,8 +1328,10 @@ void compute_spin_correlations(
                 if (i == j) continue; // Skip same site
                 
                 // Apply operators
-                std::vector<Complex> SzSz_psi = SzSz_ops[i][j].apply(std::vector<Complex>(psi.begin(), psi.end()));
-                std::vector<Complex> SpSm_psi = SpSm_ops[i][j].apply(std::vector<Complex>(psi.begin(), psi.end()));
+                std::vector<Complex> SzSz_psi(N);
+                std::vector<Complex> SpSm_psi(N);
+                SzSz_ops[i][j].apply(psi.data(), SzSz_psi.data(), N);
+                SpSm_ops[i][j].apply(psi.data(), SpSm_psi.data(), N);
                 
                 // Calculate expectation values
                 Complex SzSz_exp = Complex(0.0, 0.0);

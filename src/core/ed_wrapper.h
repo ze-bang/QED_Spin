@@ -926,9 +926,7 @@ void process_thermal_correlations(
 
                         // Create a lambda to apply the operator
                         auto apply_correlation_op = [&correlation_op](const Complex* in, Complex* out, uint64_t n) {
-                            std::vector<Complex> in_vec(in, in + n);
-                            std::vector<Complex> out_vec = correlation_op.apply(in_vec);
-                            std::copy(out_vec.begin(), out_vec.end(), out);
+                            correlation_op.apply(in, out, n);
                         };
                         
 

@@ -959,9 +959,12 @@ std::vector<std::vector<Complex>> compute_spin_expectations_from_tpq(
     // For each site, compute the expectation values
     for (int site = 0; site < num_sites; site++) {
         // Apply operators
-        std::vector<Complex> Sp_psi = Sp_ops[site].apply({tpq_state.begin(), tpq_state.end()});
-        std::vector<Complex> Sm_psi = Sm_ops[site].apply({tpq_state.begin(), tpq_state.end()});
-        std::vector<Complex> Sz_psi = Sz_ops[site].apply({tpq_state.begin(), tpq_state.end()});
+        std::vector<Complex> Sp_psi(N);
+        std::vector<Complex> Sm_psi(N);
+        std::vector<Complex> Sz_psi(N);
+        Sp_ops[site].apply(tpq_state.data(), Sp_psi.data(), N);
+        Sm_ops[site].apply(tpq_state.data(), Sm_psi.data(), N);
+        Sz_ops[site].apply(tpq_state.data(), Sz_psi.data(), N);
         
         // Calculate expectation values
         Complex Sp_exp = Complex(0.0, 0.0);
