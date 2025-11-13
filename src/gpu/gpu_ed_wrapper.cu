@@ -141,17 +141,6 @@ void* GPUEDWrapper::createGPUOperatorDirect(
     int N = static_cast<int>(1ULL << n_sites);
     gpu_op->allocateGPUMemory(N);
     
-    // Build sparse matrix representation for methods that need it (Davidson, LOBPCG, etc.)
-    // This is required for cuSPARSE-based methods
-    std::cout << "Building sparse matrix representation (N=" << N << ")..." << std::endl;
-    bool success = gpu_op->buildSparseMatrix(N);
-    if (!success) {
-        std::cerr << "Warning: Failed to build sparse matrix. "
-                  << "On-the-fly computation will be used instead." << std::endl;
-    } else {
-        std::cout << "Sparse matrix built successfully." << std::endl;
-    }
-    
     return static_cast<void*>(gpu_op);
 }
 
@@ -160,18 +149,12 @@ void* GPUEDWrapper::createGPUOperatorFromFiles(
     const std::string& interall_file,
     const std::string& trans_file) {
     
-    std::vector<std::tuple<int, int, char, char, double>> interactions;
-    std::vector<std::tuple<int, char, double>> single_site_ops;
+    // Create GPU operator and populate directly with integers (no char conversion)
+    // File format: 0=S+, 1=S-, 2=Sz (matches kernel encoding exactly)
+    GPUOperator* gpu_op = new GPUOperator(n_sites);
     
-    // Lambda to convert operator code to character
-    auto op_to_char = [](int op_code) -> char {
-        switch(op_code) {
-            case 0: return '+';  // S+
-            case 1: return '-';  // S-
-            case 2: return 'z';  // Sz
-            default: return '?';
-        }
-    };
+    int num_interactions = 0;
+    int num_single_site = 0;
     
     // Load InterAll.dat (two-site interactions)
     std::ifstream interall(interall_file);
@@ -190,7 +173,7 @@ void* GPUEDWrapper::createGPUOperatorFromFiles(
         // Skip 3 separator lines
         for (int i = 0; i < 3; ++i) std::getline(interall, line);
         
-        // Read interactions
+        // Read interactions and add directly
         int lineCount = 0;
         while (std::getline(interall, line) && lineCount < numLines) {
             std::istringstream lineStream(line);
@@ -202,25 +185,17 @@ void* GPUEDWrapper::createGPUOperatorFromFiles(
                 lineCount++;
                 continue;  // Skip zero couplings
             }
-            // Convert to our format using ladder operators (+, -, z)
-            // Direct mapping: no decomposition into Cartesian components
-            if (Op_i == 2 && Op_j == 2) {
-                // Sz*Sz interaction
-                interactions.push_back(std::make_tuple(indx_i, indx_j, 'z', 'z', E));
-            } else if (Op_i == 2) {
-                // Sz * (S+ or S-)
-                char op_j = op_to_char(Op_j);
-                interactions.push_back(std::make_tuple(indx_i, indx_j, 'z', op_j, E));
-            } else if (Op_j == 2) {
-                // (S+ or S-) * Sz
-                char op_i = op_to_char(Op_i);
-                interactions.push_back(std::make_tuple(indx_i, indx_j, op_i, 'z', E));
-            } else {
-                // Both are S+ or S- operators (ladder operators)
-                char op_i = op_to_char(Op_i);
-                char op_j = op_to_char(Op_j);
-                interactions.push_back(std::make_tuple(indx_i, indx_j, op_i, op_j, E));
+            
+            // Validate operator codes
+            if (Op_i < 0 || Op_i > 2 || Op_j < 0 || Op_j > 2) {
+                std::cerr << "Warning: Invalid operator codes: Op_i=" << Op_i << ", Op_j=" << Op_j << "\n";
+                lineCount++;
+                continue;
             }
+            
+            // Add directly to transform_data_ - no char conversion!
+            gpu_op->addTwoBodyTerm(Op_i, indx_i, Op_j, indx_j, std::complex<double>(E, 0.0));
+            num_interactions++;
             
             lineCount++;
         }
@@ -244,7 +219,7 @@ void* GPUEDWrapper::createGPUOperatorFromFiles(
         // Skip 3 separator lines
         for (int i = 0; i < 3; ++i) std::getline(trans, line);
         
-        // Read single-site terms
+        // Read single-site terms and add directly
         int lineCount = 0;
         while (std::getline(trans, line) && lineCount < numLines) {
             std::istringstream lineStream(line);
@@ -255,9 +230,9 @@ void* GPUEDWrapper::createGPUOperatorFromFiles(
             
             // Only process if coupling is non-zero
             if (std::abs(E) > 1e-12 || std::abs(F) > 1e-12) {
-                // Direct mapping: use ladder operators (+, -, z)
-                char op_char = op_to_char(Op);
-                single_site_ops.push_back(std::make_tuple(indx, op_char, E));
+                // Add directly to transform_data_ - no char conversion!
+                gpu_op->addOneBodyTerm(Op, indx, std::complex<double>(E, 0.0));
+                num_single_site++;
             }
             
             lineCount++;
@@ -265,13 +240,16 @@ void* GPUEDWrapper::createGPUOperatorFromFiles(
         trans.close();
     }
     
-    std::cout << "Loaded " << interactions.size() << " interaction terms from " 
+    std::cout << "Loaded " << num_interactions << " interaction terms from " 
               << interall_file << "\n";
-    std::cout << "Loaded " << single_site_ops.size() << " single-site terms from " 
+    std::cout << "Loaded " << num_single_site << " single-site terms from " 
               << trans_file << "\n";
     
-    // Create GPU operator with loaded interactions
-    return createGPUOperatorDirect(n_sites, interactions, single_site_ops);
+    // Allocate GPU memory for vectors
+    int N = static_cast<int>(1ULL << n_sites);
+    gpu_op->allocateGPUMemory(N);
+    
+    return static_cast<void*>(gpu_op);
 }
 
 void* GPUEDWrapper::createGPUFixedSzOperatorDirect(
@@ -466,6 +444,9 @@ void GPUEDWrapper::runGPUMicrocanonicalTPQFixedSz(void* gpu_op_handle,
     std::cout << "Running GPU Microcanonical TPQ for fixed Sz sector (N_up=" << n_up 
               << ", dim=" << fixed_sz_dim << ")\n";
     
+    // Allocate GPU memory for vectors
+    gpu_op->allocateGPUMemory(fixed_sz_dim);
+    
     // Create GPU TPQ solver with fixed Sz operator
     GPUTPQSolver tpq_solver(gpu_op, fixed_sz_dim);
     
@@ -513,6 +494,9 @@ void GPUEDWrapper::runGPUCanonicalTPQFixedSz(void* gpu_op_handle,
     
     std::cout << "Running GPU Canonical TPQ for fixed Sz sector (N_up=" << n_up 
               << ", dim=" << fixed_sz_dim << ")\n";
+    
+    // Allocate GPU memory for vectors
+    gpu_op->allocateGPUMemory(fixed_sz_dim);
     
     // Create GPU TPQ solver with fixed Sz operator
     GPUTPQSolver tpq_solver(gpu_op, fixed_sz_dim);

@@ -335,7 +335,7 @@ void GPUOperator::matVecGPU(const cuDoubleComplex* d_x, cuDoubleComplex* d_y, in
         if (d_buffer) {
             cudaFree(d_buffer);
         }
-    } else if (num_transforms_ > 0) {
+    } else if (!transform_data_.empty()) {
         // Copy transform data to device if not already done
         if (d_transform_data_ == nullptr) {
             copyTransformDataToDevice();
@@ -414,16 +414,6 @@ void GPUOperator::processChunk(const ChunkInfo& chunk, const cuDoubleComplex* d_
         d_single_site_ops_, num_single_site_ops_);
     
     CUDA_CHECK(cudaGetLastError());
-}
-
-bool GPUOperator::buildSparseMatrix(int N) {
-    std::cout << "Building sparse matrix on GPU (this may take a while)...\n";
-    
-    // This is a placeholder - actual implementation would build CSR matrix
-    // For now, we use on-the-fly computation
-    sparse_matrix_built_ = false;
-    
-    return sparse_matrix_built_;
 }
 
 bool GPUOperator::loadCSR(int N, const std::vector<int>& row_ptr,

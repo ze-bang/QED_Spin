@@ -73,9 +73,6 @@ public:
     // Set single-site operator
     void setSingleSite(int site, char op, double coupling);
     
-    // Build sparse matrix representation (if memory allows)
-    bool buildSparseMatrix(int N);
-    
     // Load CSR arrays (host) into GPUOperator and construct cuSPARSE descriptors
     bool loadCSR(int N, const std::vector<int>& row_ptr,
                  const std::vector<int>& col_ind,

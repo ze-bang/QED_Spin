@@ -1607,6 +1607,9 @@ inline EDResults exact_diagonalization_fixed_sz(
     // Check if GPU method requested
     bool is_gpu_method = (method == DiagonalizationMethod::DAVIDSON_GPU ||
                           method == DiagonalizationMethod::LOBPCG_GPU ||
+                          method == DiagonalizationMethod::LANCZOS_GPU ||
+                          method == DiagonalizationMethod::mTPQ_GPU ||
+                          method == DiagonalizationMethod::cTPQ_GPU ||
                           method == DiagonalizationMethod::FTLM_GPU_FIXED_SZ);
     
     EDResults results;
@@ -1697,10 +1700,10 @@ inline EDResults exact_diagonalization_fixed_sz(
         std::cout << "Loaded " << gpu_interactions.size() << " interactions and " 
                   << gpu_single_site_ops.size() << " single-site terms\n";
         
-        // Run GPU Davidson
+        // Run appropriate GPU method
+        std::vector<double> eigenvalues;
+        
         if (method == DiagonalizationMethod::DAVIDSON_GPU || method == DiagonalizationMethod::LOBPCG_GPU) {
-            std::vector<double> eigenvalues;
-            
             GPUEDWrapper::runGPUDavidsonFixedSz(
                 gpu_op_handle, n_up,
                 params.num_eigenvalues,
@@ -1710,9 +1713,37 @@ inline EDResults exact_diagonalization_fixed_sz(
                 eigenvalues,
                 params.output_dir,
                 params.compute_eigenvectors);
-            
-            results.eigenvalues = eigenvalues;
+        } else if (method == DiagonalizationMethod::LANCZOS_GPU) {
+            GPUEDWrapper::runGPULanczosFixedSz(
+                gpu_op_handle, n_up,
+                params.max_iterations,
+                params.num_eigenvalues,
+                params.tolerance,
+                eigenvalues,
+                params.output_dir,
+                params.compute_eigenvectors);
+        } else if (method == DiagonalizationMethod::mTPQ_GPU) {
+            GPUEDWrapper::runGPUMicrocanonicalTPQFixedSz(
+                gpu_op_handle, n_up,
+                params.max_iterations,
+                params.num_samples,
+                params.num_measure_freq,
+                eigenvalues,
+                params.output_dir,
+                params.large_value);
+        } else if (method == DiagonalizationMethod::cTPQ_GPU) {
+            GPUEDWrapper::runGPUCanonicalTPQFixedSz(
+                gpu_op_handle, n_up,
+                params.temp_max,  // beta_max
+                params.num_samples,
+                params.num_measure_freq,
+                eigenvalues,
+                params.output_dir,
+                params.delta_tau,  // delta_beta
+                params.num_order);  // taylor_order
         }
+        
+        results.eigenvalues = eigenvalues;
         
         // Cleanup
         GPUEDWrapper::destroyGPUOperator(gpu_op_handle);

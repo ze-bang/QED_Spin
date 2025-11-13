@@ -335,7 +335,6 @@ void compute_dynamical_response_workflow(const std::vector<double>& eigenvalues,
             std::string op2_path = config.system.hamiltonian_dir + "/" + config.dynamical.operator2_file;
             Operator op2(config.system.num_sites, config.system.spin_length);
             op2.loadFromInterAllFile(op2_path);
-            op2.buildSparseMatrix();
             
             auto O2_func = [&op2](const Complex* in, Complex* out, uint64_t dim) {
                 op2.apply(in, out, dim);
@@ -417,10 +416,6 @@ void compute_static_response_workflow(const std::vector<double>& eigenvalues,
     ham.loadFromInterAllFile(interaction_file);
     ham.loadFromFile(single_site_file);
     
-    // Build sparse matrices
-    ham.buildSparseMatrix();
-    op.buildSparseMatrix();
-    
     // Hilbert space dimension
     uint64_t N = 1ULL << config.system.num_sites;
     
@@ -457,7 +452,6 @@ void compute_static_response_workflow(const std::vector<double>& eigenvalues,
         std::string op2_path = config.system.hamiltonian_dir + "/" + config.static_resp.operator2_file;
         Operator op2(config.system.num_sites, config.system.spin_length);
         op2.loadFromInterAllFile(op2_path);
-        op2.buildSparseMatrix();
         
         auto O2_func = [&op2](const Complex* in, Complex* out, uint64_t dim) {
             op2.apply(in, out, dim);
