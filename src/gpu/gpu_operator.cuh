@@ -21,9 +21,32 @@
 using Complex = std::complex<double>;
 
 /**
+ * Optimized transform data structure (Structure-of-Arrays)
+ * Matches CPU implementation for consistency
+ */
+struct GPUTransformData {
+    uint8_t op_type;        // 0=S+, 1=S-, 2=Sz
+    uint32_t site_index;    // Which site to act on
+    cuDoubleComplex coefficient;  // Coupling constant
+    uint32_t site_index_2;  // Second site for two-body operators
+    uint8_t op_type_2;      // Second operator type for two-body
+    uint8_t is_two_body;    // Flag for two-body vs one-body
+    uint8_t _padding[2];    // Align to 32 bytes
+    
+    __host__ __device__ GPUTransformData() 
+        : op_type(0), site_index(0), site_index_2(0), 
+          op_type_2(0), is_two_body(0) {
+        coefficient = make_cuDoubleComplex(0.0, 0.0);
+        _padding[0] = _padding[1] = 0;
+    }
+};
+
+/**
  * GPU-accelerated Operator class for large-scale exact diagonalization
  * Supports up to 32 sites (4.3 billion basis states)
  * Uses chunked processing and on-the-fly matrix element computation
+ * 
+ * OPTIMIZED: Uses Structure-of-Arrays to eliminate std::function overhead
  */
 class GPUOperator {
 public:
@@ -33,8 +56,10 @@ public:
     // Destructor
     ~GPUOperator();
     
-    // Add transform (operator term)
-    void addTransform(const std::function<std::pair<int, Complex>(int)>& transform);
+    // OPTIMIZED: Direct data population (no std::function overhead)
+    void addOneBodyTerm(uint8_t op_type, uint32_t site, const std::complex<double>& coeff);
+    void addTwoBodyTerm(uint8_t op1, uint32_t site1, uint8_t op2, uint32_t site2, 
+                       const std::complex<double>& coeff);
     
     // Matrix-vector product: y = H * x (core operation for Lanczos)
     virtual void matVec(const std::complex<double>* x, std::complex<double>* y, int N);
@@ -79,7 +104,12 @@ protected:
     float spin_l_;
     int dimension_;
     
-    // Interaction storage
+    // OPTIMIZED: Structure-of-Arrays storage
+    std::vector<GPUTransformData> transform_data_;  // Host storage
+    GPUTransformData* d_transform_data_;            // Device storage
+    int num_transforms_;
+    
+    // Legacy interaction storage (deprecated, kept for compatibility)
     struct Interaction {
         int site1, site2;
         char op1, op2;
@@ -99,6 +129,9 @@ protected:
     cuDoubleComplex* d_vector_in_;
     cuDoubleComplex* d_vector_out_;
     cuDoubleComplex* d_temp_;
+    
+    // Texture object for optimized random access to input vector
+    cudaTextureObject_t tex_input_vector_;
     
     // Sparse matrix storage (CSR format)
     int* d_csr_row_ptr_;
@@ -142,6 +175,9 @@ protected:
     
     // Helper functions
     void copyInteractionsToDevice();
+    void copyTransformDataToDevice();
+    void createTextureObject(cuDoubleComplex* d_data, int size);
+    void destroyTextureObject();
     void initializeCUSPARSE();
     void initializeCUBLAS();
 };
@@ -194,7 +230,19 @@ private:
 // CUDA kernel declarations
 namespace GPUKernels {
 
-// Matrix-vector product kernel (on-the-fly computation)
+// GPU-NATIVE: Transform-parallel kernel (maximum GPU utilization)
+// Launches N×T threads where each computes one (state,transform) contribution
+__global__ void matVecTransformParallel(const cuDoubleComplex* x, cuDoubleComplex* y,
+                                        const GPUTransformData* transforms,
+                                        int num_transforms, int N, int n_sites, float spin_l);
+
+// OPTIMIZED: State-parallel kernel with shared memory
+__global__ void matVecKernelOptimized(cudaTextureObject_t tex_x_unused, cuDoubleComplex* y,
+                                      int N, int n_sites, float spin_l,
+                                      const GPUTransformData* transforms, int num_transforms,
+                                      const cuDoubleComplex* x);
+
+// Legacy: Matrix-vector product kernel (on-the-fly computation)
 __global__ void matVecKernel(const cuDoubleComplex* x, cuDoubleComplex* y,
                              int N, int n_sites,
                              const void* interactions, int num_interactions,
@@ -206,7 +254,19 @@ __global__ void sparseMatVecKernel(const int* row_ptr, const int* col_ind,
                                    const cuDoubleComplex* x, cuDoubleComplex* y,
                                    int N);
 
-// Fixed Sz matrix-vector product kernel
+// OPTIMIZED: Fixed-Sz matrix-vector product using Structure-of-Arrays
+// GPU-NATIVE: Transform-parallel Fixed-Sz kernel
+__global__ void matVecFixedSzTransformParallel(const cuDoubleComplex* x, cuDoubleComplex* y,
+                                               const uint64_t* basis_states,
+                                               const GPUTransformData* transforms,
+                                               int num_transforms, int N, int n_sites, float spin_l);
+
+__global__ void matVecFixedSzKernelOptimized(const cuDoubleComplex* x, cuDoubleComplex* y,
+                                             const uint64_t* basis_states,
+                                             int N, int n_sites, float spin_l,
+                                             const GPUTransformData* transforms, int num_transforms);
+
+// Legacy: Fixed Sz matrix-vector product kernel
 __global__ void matVecFixedSzKernel(const cuDoubleComplex* x, cuDoubleComplex* y,
                                     const uint64_t* basis_states,
                                     const void* hash_table, int hash_size,

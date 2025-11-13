@@ -20,6 +20,7 @@ GPUOperator::GPUOperator(int n_sites, float spin_l)
       d_csr_row_ptr_(nullptr), d_csr_col_ind_(nullptr), d_csr_values_(nullptr),
       nnz_(0), d_interactions_(nullptr), d_single_site_ops_(nullptr),
       num_interactions_(0), num_single_site_ops_(0),
+      d_transform_data_(nullptr), num_transforms_(0), tex_input_vector_(0),
       gpu_memory_allocated_(false), sparse_matrix_built_(false) {
     
     if (n_sites > MAX_SITES) {
@@ -49,6 +50,7 @@ GPUOperator::GPUOperator(int n_sites, float spin_l)
 }
 
 GPUOperator::~GPUOperator() {
+    destroyTextureObject();
     freeGPUMemory();
     
     if (cusparse_handle_) {
@@ -67,6 +69,29 @@ void GPUOperator::initializeCUBLAS() {
     CUBLAS_CHECK(cublasCreate(&cublas_handle_));
 }
 
+// OPTIMIZED: Direct data population methods
+void GPUOperator::addOneBodyTerm(uint8_t op_type, uint32_t site, const std::complex<double>& coeff) {
+    GPUTransformData tdata;
+    tdata.op_type = op_type;
+    tdata.site_index = site;
+    tdata.coefficient = make_cuDoubleComplex(coeff.real(), coeff.imag());
+    tdata.is_two_body = 0;
+    transform_data_.push_back(tdata);
+}
+
+void GPUOperator::addTwoBodyTerm(uint8_t op1, uint32_t site1, uint8_t op2, uint32_t site2,
+                                const std::complex<double>& coeff) {
+    GPUTransformData tdata;
+    tdata.op_type = op1;
+    tdata.site_index = site1;
+    tdata.op_type_2 = op2;
+    tdata.site_index_2 = site2;
+    tdata.coefficient = make_cuDoubleComplex(coeff.real(), coeff.imag());
+    tdata.is_two_body = 1;
+    transform_data_.push_back(tdata);
+}
+
+// Legacy methods (kept for compatibility)
 void GPUOperator::setInteraction(int site1, int site2, char op1, char op2, double coupling) {
     interactions_.push_back({site1, site2, op1, op2, coupling});
 }
@@ -136,6 +161,7 @@ void GPUOperator::freeGPUMemory() {
     if (d_csr_values_) cudaFree(d_csr_values_);
     if (d_interactions_) cudaFree(d_interactions_);
     if (d_single_site_ops_) cudaFree(d_single_site_ops_);
+    if (d_transform_data_) cudaFree(d_transform_data_);
     
     d_vector_in_ = nullptr;
     d_vector_out_ = nullptr;
@@ -145,6 +171,7 @@ void GPUOperator::freeGPUMemory() {
     d_csr_values_ = nullptr;
     d_interactions_ = nullptr;
     d_single_site_ops_ = nullptr;
+    d_transform_data_ = nullptr;
     
     gpu_memory_allocated_ = false;
     sparse_matrix_built_ = false;
@@ -167,6 +194,48 @@ void GPUOperator::copyInteractionsToDevice() {
         CUDA_CHECK(cudaMemcpy(d_single_site_ops_, single_site_ops_.data(),
                             num_single_site_ops_ * sizeof(SingleSiteOp),
                             cudaMemcpyHostToDevice));
+    }
+}
+
+void GPUOperator::copyTransformDataToDevice() {
+    num_transforms_ = transform_data_.size();
+    
+    if (num_transforms_ > 0) {
+        CUDA_CHECK(cudaMalloc(&d_transform_data_, num_transforms_ * sizeof(GPUTransformData)));
+        CUDA_CHECK(cudaMemcpy(d_transform_data_, transform_data_.data(),
+                            num_transforms_ * sizeof(GPUTransformData),
+                            cudaMemcpyHostToDevice));
+        
+        std::cout << "Copied " << num_transforms_ << " transform operations to GPU\n";
+    }
+}
+
+void GPUOperator::createTextureObject(cuDoubleComplex* d_data, int size) {
+    if (tex_input_vector_ != 0) {
+        destroyTextureObject();
+    }
+    
+    // Create resource descriptor
+    cudaResourceDesc resDesc;
+    memset(&resDesc, 0, sizeof(resDesc));
+    resDesc.resType = cudaResourceTypeLinear;
+    resDesc.res.linear.devPtr = d_data;
+    resDesc.res.linear.desc = cudaCreateChannelDesc<double2>();
+    resDesc.res.linear.sizeInBytes = size * sizeof(cuDoubleComplex);
+    
+    // Create texture descriptor
+    cudaTextureDesc texDesc;
+    memset(&texDesc, 0, sizeof(texDesc));
+    texDesc.readMode = cudaReadModeElementType;
+    
+    // Create texture object
+    CUDA_CHECK(cudaCreateTextureObject(&tex_input_vector_, &resDesc, &texDesc, NULL));
+}
+
+void GPUOperator::destroyTextureObject() {
+    if (tex_input_vector_ != 0) {
+        cudaDestroyTextureObject(tex_input_vector_);
+        tex_input_vector_ = 0;
     }
 }
 
@@ -243,8 +312,47 @@ void GPUOperator::matVecGPU(const cuDoubleComplex* d_x, cuDoubleComplex* d_y, in
         if (d_buffer) {
             cudaFree(d_buffer);
         }
+    } else if (num_transforms_ > 0) {
+        // Copy transform data to device if not already done
+        if (d_transform_data_ == nullptr) {
+            copyTransformDataToDevice();
+        }
+        
+        // Auto-select kernel based on parallelism potential
+        // Transform-parallel benefits from high T (more parallel work)
+        // Threshold: Use transform-parallel when T > 64 for maximum GPU utilization
+        const int TRANSFORM_PARALLEL_THRESHOLD = 64;
+        
+        if (num_transforms_ > TRANSFORM_PARALLEL_THRESHOLD) {
+            // GPU-NATIVE: Transform-parallel kernel (2D parallelism)
+            // Zero output vector (required for atomic accumulation)
+            CUDA_CHECK(cudaMemset(d_y, 0, N * sizeof(cuDoubleComplex)));
+            
+            // 2D grid: (N/16, T/16) with 16×16 blocks
+            dim3 block(16, 16);  // 256 threads per block
+            dim3 grid((N + block.x - 1) / block.x,
+                     (num_transforms_ + block.y - 1) / block.y);
+            
+            GPUKernels::matVecTransformParallel<<<grid, block>>>(
+                d_x, d_y, d_transform_data_, num_transforms_, N, n_sites_, spin_l_);
+            
+            CUDA_CHECK(cudaGetLastError());
+        } else {
+            // State-parallel kernel (better for small T)
+            int num_blocks = (N + BLOCK_SIZE - 1) / BLOCK_SIZE;
+            num_blocks = std::min(num_blocks, MAX_BLOCKS);
+            
+            // Calculate shared memory size
+            size_t shared_mem_size = std::min(num_transforms_, 4096) * sizeof(GPUTransformData);
+            
+            GPUKernels::matVecKernelOptimized<<<num_blocks, BLOCK_SIZE, shared_mem_size>>>(
+                0, d_y, N, n_sites_, spin_l_,
+                d_transform_data_, num_transforms_, d_x);
+            
+            CUDA_CHECK(cudaGetLastError());
+        }
     } else {
-        // Use on-the-fly computation kernel
+        // Fallback to legacy kernel
         int num_blocks = (N + BLOCK_SIZE - 1) / BLOCK_SIZE;
         num_blocks = std::min(num_blocks, MAX_BLOCKS);
         

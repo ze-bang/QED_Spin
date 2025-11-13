@@ -31,27 +31,14 @@ GPUFixedSzOperator::GPUFixedSzOperator(int n_sites, int n_up, float spin_l)
     fixed_sz_dim_ = binomial(n_sites, n_up);
     dimension_ = fixed_sz_dim_;  // Override full dimension
     
-    std::cout << "GPU Fixed Sz Operator initialized\n";
+    std::cout << "GPU Fixed Sz Operator initialized (OPTIMIZED)\n";
     std::cout << "  Sites: " << n_sites << ", N_up: " << n_up << "\n";
     std::cout << "  Fixed Sz dimension: " << fixed_sz_dim_ << "\n";
     std::cout << "  Reduction factor: " << (1 << n_sites) / (double)fixed_sz_dim_ << "x\n";
+    std::cout << "  State lookup: Binary search (warp-coherent, no hash table)\n";
     
-    // Choose hash table size (should be prime and larger than basis size)
-    hash_table_size_ = fixed_sz_dim_ * 2 + 1;
-    // Find next prime
-    while (true) {
-        bool is_prime = true;
-        for (int i = 2; i * i <= hash_table_size_; ++i) {
-            if (hash_table_size_ % i == 0) {
-                is_prime = false;
-                break;
-            }
-        }
-        if (is_prime) break;
-        hash_table_size_++;
-    }
-    
-    std::cout << "  Hash table size: " << hash_table_size_ << "\n";
+    // Hash table not needed - using binary search instead
+    hash_table_size_ = 0;
     
     // Build basis on GPU
     buildBasisOnGPU();
@@ -86,31 +73,20 @@ void GPUFixedSzOperator::buildBasisOnGPU() {
     CUDA_CHECK(cudaGetLastError());
     CUDA_CHECK(cudaDeviceSynchronize());
     
-    std::cout << "  Basis generation complete\n";
+    std::cout << "  Basis generation complete (naturally sorted)\n";
+    std::cout << "  State lookup optimized: Binary search O(log N) with no warp divergence\n";
     
-    // Build hash table
-    buildHashTableOnGPU();
+    // Hash table construction REMOVED - using binary search instead
+    // Binary search on sorted basis is faster and more warp-coherent
 }
 
 void GPUFixedSzOperator::buildHashTableOnGPU() {
-    std::cout << "Building hash table on GPU...\n";
-    
-    // Allocate hash table
-    CUDA_CHECK(cudaMalloc(&d_hash_table_, hash_table_size_ * sizeof(HashEntry)));
-    
-    // Initialize hash table to zero
-    CUDA_CHECK(cudaMemset(d_hash_table_, 0, hash_table_size_ * sizeof(HashEntry)));
-    
-    // Build hash table
-    int num_blocks = (fixed_sz_dim_ + BLOCK_SIZE - 1) / BLOCK_SIZE;
-    
-    GPUKernels::buildHashTableKernel<<<num_blocks, BLOCK_SIZE>>>(
-        d_basis_states_, d_hash_table_, hash_table_size_, fixed_sz_dim_);
-    
-    CUDA_CHECK(cudaGetLastError());
-    CUDA_CHECK(cudaDeviceSynchronize());
-    
-    std::cout << "  Hash table construction complete\n";
+    // DEPRECATED: Hash table no longer used
+    // Binary search on sorted basis states is superior:
+    // - No warp divergence (all threads follow same path)
+    // - O(log N) complexity with better cache behavior
+    // - No memory overhead for hash table
+    std::cout << "  Note: Hash table construction skipped (using binary search)\n";
 }
 
 void GPUFixedSzOperator::matVecFixedSz(const cuDoubleComplex* d_x, cuDoubleComplex* d_y) {
@@ -122,13 +98,47 @@ void GPUFixedSzOperator::matVecFixedSz(const cuDoubleComplex* d_x, cuDoubleCompl
     int num_blocks = (fixed_sz_dim_ + BLOCK_SIZE - 1) / BLOCK_SIZE;
     num_blocks = std::min(num_blocks, MAX_BLOCKS);
     
-    GPUKernels::matVecFixedSzKernel<<<num_blocks, BLOCK_SIZE>>>(
-        d_x, d_y,
-        d_basis_states_,
-        d_hash_table_, hash_table_size_,
-        fixed_sz_dim_, n_sites_,
-        d_interactions_, num_interactions_,
-        d_single_site_ops_, num_single_site_ops_);
+    if (num_transforms_ > 0) {
+        // Copy transform data to device if not already done
+        if (d_transform_data_ == nullptr) {
+            copyTransformDataToDevice();
+        }
+        
+        // Auto-select kernel based on parallelism potential
+        const int TRANSFORM_PARALLEL_THRESHOLD = 64;
+        
+        if (num_transforms_ > TRANSFORM_PARALLEL_THRESHOLD) {
+            // GPU-NATIVE: Transform-parallel kernel (2D parallelism)
+            // Zero output vector (required for atomic accumulation)
+            CUDA_CHECK(cudaMemset(d_y, 0, fixed_sz_dim_ * sizeof(cuDoubleComplex)));
+            
+            // 2D grid: (N/16, T/16) with 16×16 blocks
+            dim3 block(16, 16);
+            dim3 grid((fixed_sz_dim_ + block.x - 1) / block.x,
+                     (num_transforms_ + block.y - 1) / block.y);
+            
+            GPUKernels::matVecFixedSzTransformParallel<<<grid, block>>>(
+                d_x, d_y, d_basis_states_,
+                d_transform_data_, num_transforms_, fixed_sz_dim_, n_sites_, spin_l_);
+        } else {
+            // State-parallel kernel (better for small T)
+            size_t shared_mem_size = std::min(num_transforms_, 4096) * sizeof(GPUTransformData);
+            
+            GPUKernels::matVecFixedSzKernelOptimized<<<num_blocks, BLOCK_SIZE, shared_mem_size>>>(
+                d_x, d_y, d_basis_states_,
+                fixed_sz_dim_, n_sites_, spin_l_,
+                d_transform_data_, num_transforms_);
+        }
+    } else {
+        // Fallback to legacy kernel
+        GPUKernels::matVecFixedSzKernel<<<num_blocks, BLOCK_SIZE>>>(
+            d_x, d_y,
+            d_basis_states_,
+            nullptr, 0,  // Hash table unused (binary search instead)
+            fixed_sz_dim_, n_sites_,
+            d_interactions_, num_interactions_,
+            d_single_site_ops_, num_single_site_ops_);
+    }
     
     CUDA_CHECK(cudaGetLastError());
     CUDA_CHECK(cudaDeviceSynchronize());
