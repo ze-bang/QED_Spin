@@ -518,10 +518,7 @@ public:
     /**
      * Matrix-free apply: H|vec⟩ using on-the-fly transform evaluation
      * Faster and more memory-efficient than building sparse matrix
-     * Parallelized with OpenMP using atomic operations (MEMORY-EFFICIENT VERSION)
-     * 
-     * IMPORTANT: This version uses atomic operations to avoid OOM issues.
-     * See the raw pointer version apply(const Complex*, Complex*, size_t) for details.
+     * Parallelized with OpenMP for multi-core performance
      */
     std::vector<Complex> apply(const std::vector<Complex>& vec) const {
         uint64_t dim = 1ULL << n_bits_;
@@ -531,8 +528,38 @@ public:
         
         std::vector<Complex> result(dim, Complex(0.0, 0.0));
         
-        // Use the memory-efficient raw pointer version
-        apply(vec.data(), result.data(), dim);
+        // Parallel reduction: each thread accumulates to local buffer, then combine
+        #pragma omp parallel if(dim > 1024)
+        {
+            std::vector<Complex> local_result(dim, Complex(0.0, 0.0));
+            
+            #pragma omp for schedule(static) nowait
+            for (uint64_t i = 0; i < dim; ++i) {
+                Complex coeff = vec[i];
+                if (std::abs(coeff) < 1e-15) continue;
+                
+                // Prefetch next input (helps if vec is large)
+                if (i + 8 < dim) {
+                    __builtin_prefetch(&vec[i + 8], 0, 1);
+                }
+                
+                // Apply all transforms to this basis state
+                for (const auto& transform : transforms_) {
+                    auto [j, scalar] = transform(i);
+                    if (j >= 0 && j < dim && std::abs(scalar) > 1e-15) {
+                        local_result[j] += scalar * coeff;
+                    }
+                }
+            }
+            
+            // Combine local results with critical section
+            #pragma omp critical
+            {
+                for (uint64_t i = 0; i < dim; ++i) {
+                    result[i] += local_result[i];
+                }
+            }
+        }
         
         return result;
     }
