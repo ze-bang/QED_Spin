@@ -58,6 +58,57 @@ int solve_tridiagonal_matrix(const std::vector<double>& alpha, const std::vector
                             const std::string& temp_dir, const std::string& evec_dir, 
                             bool eigenvectors, uint64_t N);
 
+/**
+ * @brief Diagonalize tridiagonal matrix and extract Ritz values and weights
+ * 
+ * This is a lightweight helper for FTLM-style calculations that just need
+ * the Ritz values and weights (squared first component) without full eigenvector reconstruction.
+ * 
+ * @param alpha Diagonal elements of tridiagonal matrix
+ * @param beta Off-diagonal elements (beta[0] should be 0)
+ * @param ritz_values Output: eigenvalues sorted in ascending order
+ * @param weights Output: squared first component of each eigenvector (for FTLM weighting)
+ * @param evecs Optional output: eigenvectors in column-major order (m x m)
+ */
+void diagonalize_tridiagonal_ritz(
+    const std::vector<double>& alpha,
+    const std::vector<double>& beta,
+    std::vector<double>& ritz_values,
+    std::vector<double>& weights,
+    std::vector<double>* evecs = nullptr
+);
+
+/**
+ * @brief Build Lanczos tridiagonal with optional in-memory basis vector storage
+ * 
+ * Similar to build_lanczos_tridiagonal in ftlm.cpp, but with option to store
+ * basis vectors in memory for later use (e.g., computing expectation values).
+ * 
+ * @param H Hamiltonian matrix-vector product
+ * @param v0 Initial vector (should be normalized)
+ * @param N Hilbert space dimension
+ * @param max_iter Maximum Lanczos iterations
+ * @param tol Convergence tolerance
+ * @param full_reorth Use full reorthogonalization
+ * @param reorth_freq Reorthogonalization frequency
+ * @param alpha Output: diagonal elements
+ * @param beta Output: off-diagonal elements
+ * @param basis_vectors Optional: store basis vectors in memory
+ * @return Number of iterations performed
+ */
+int build_lanczos_tridiagonal_with_basis(
+    std::function<void(const Complex*, Complex*, int)> H,
+    const ComplexVector& v0,
+    uint64_t N,
+    uint64_t max_iter,
+    double tol,
+    bool full_reorth,
+    uint64_t reorth_freq,
+    std::vector<double>& alpha,
+    std::vector<double>& beta,
+    std::vector<ComplexVector>* basis_vectors = nullptr
+);
+
 void lanczos_no_ortho(std::function<void(const Complex*, Complex*, int)> H, uint64_t N, uint64_t max_iter, uint64_t exct, 
              double tol, std::vector<double>& eigenvalues, std::string dir = "",
              bool eigenvectors = false);

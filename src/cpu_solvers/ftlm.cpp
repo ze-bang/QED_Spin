@@ -2,6 +2,7 @@
 #include "../core/system_utils.h"
 
 #include "ftlm.h"
+#include "lanczos.h"
 #include <fstream>
 #include <iomanip>
 #include <numeric>
@@ -303,15 +304,7 @@ FTLMResults finite_temperature_lanczos(
         std::cout << "\n--- FTLM Sample " << sample + 1 << " / " << params.num_samples << " ---\n";
         
         // Generate random initial state
-        ComplexVector v0(N);
-        for (int i = 0; i < N; i++) {
-            v0[i] = Complex(dist(gen), dist(gen));
-        }
-        
-        // Normalize
-        double norm = cblas_dznrm2(N, v0.data(), 1);
-        Complex scale = Complex(1.0/norm, 0.0);
-        cblas_zscal(N, &scale, v0.data(), 1);
+        ComplexVector v0 = generateRandomVector(N, gen, dist);
         
         // Build Lanczos tridiagonal
         std::vector<double> alpha, beta;
@@ -323,31 +316,13 @@ FTLMResults finite_temperature_lanczos(
         
         std::cout << "  Lanczos iterations: " << iterations << std::endl;
         
-        uint64_t m = alpha.size();
+        // Diagonalize tridiagonal and extract Ritz values/weights
+        std::vector<double> ritz_values, weights;
+        diagonalize_tridiagonal_ritz(alpha, beta, ritz_values, weights);
         
-        // Diagonalize tridiagonal matrix
-        std::vector<double> diag = alpha;
-        std::vector<double> offdiag(m - 1);
-        for (int i = 0; i < m - 1; i++) {
-            offdiag[i] = beta[i + 1];
-        }
-        
-        std::vector<double> evecs(m * m);
-        uint64_t info = LAPACKE_dstevd(LAPACK_COL_MAJOR, 'V', m, diag.data(), offdiag.data(), evecs.data(), m);
-        
-        if (info != 0) {
-            std::cerr << "  Warning: Tridiagonal diagonalization failed with code " << info << std::endl;
+        if (ritz_values.empty()) {
+            std::cerr << "  Warning: Tridiagonal diagonalization failed" << std::endl;
             continue;
-        }
-        
-        // Extract Ritz values and weights
-        std::vector<double> ritz_values(m);
-        std::vector<double> weights(m);
-        
-        for (int i = 0; i < m; i++) {
-            ritz_values[i] = diag[i];
-            // Weight is squared first component of eigenvector
-            weights[i] = evecs[i * m] * evecs[i * m];
         }
         
         ground_state_estimates.push_back(ritz_values[0]);
@@ -857,39 +832,21 @@ DynamicalResponseResults compute_dynamical_response(
     );
     
     std::cout << "Lanczos iterations: " << iterations << std::endl;
-    uint64_t m = alpha.size();
     
-    // Diagonalize tridiagonal matrix
-    std::vector<double> diag = alpha;
-    std::vector<double> offdiag(m - 1);
-    for (int i = 0; i < m - 1; i++) {
-        offdiag[i] = beta[i + 1];
-    }
+    // Diagonalize tridiagonal and extract Ritz values/weights
+    std::vector<double> ritz_values, weights;
+    diagonalize_tridiagonal_ritz(alpha, beta, ritz_values, weights);
     
-    std::vector<double> evecs(m * m);
-    uint64_t info = LAPACKE_dstevd(LAPACK_COL_MAJOR, 'V', m, diag.data(), offdiag.data(), evecs.data(), m);
-    
-    if (info != 0) {
-        std::cerr << "Error: Tridiagonal diagonalization failed with code " << info << std::endl;
+    if (ritz_values.empty()) {
+        std::cerr << "Error: Tridiagonal diagonalization failed" << std::endl;
         results.spectral_function.resize(num_omega_bins, 0.0);
         results.spectral_error.resize(num_omega_bins, 0.0);
         return results;
     }
     
-    // Extract Ritz values and weights
-    // Weight for state i is |⟨v_0|i⟩|² where v_0 is the first Lanczos vector
-    // This equals the squared first component of the eigenvector
-    std::vector<double> ritz_values(m);
-    std::vector<double> weights(m);
-    
-    for (int i = 0; i < m; i++) {
-        ritz_values[i] = diag[i];
-        weights[i] = evecs[i * m] * evecs[i * m];
-    }
-    
     // Scale weights by the norm factor
     double norm_factor = phi_norm * phi_norm;
-    for (int i = 0; i < m; i++) {
+    for (int i = 0; i < weights.size(); i++) {
         weights[i] *= norm_factor;
     }
     
@@ -973,15 +930,7 @@ DynamicalResponseResults compute_dynamical_response_thermal(
         std::cout << "\n--- Sample " << sample + 1 << " / " << params.num_samples << " ---\n";
         
         // Generate random initial state |ψ⟩
-        ComplexVector psi(N);
-        for (int i = 0; i < N; i++) {
-            psi[i] = Complex(dist(gen), dist(gen));
-        }
-        
-        // Normalize |ψ⟩
-        double norm = cblas_dznrm2(N, psi.data(), 1);
-        Complex scale(1.0/norm, 0.0);
-        cblas_zscal(N, &scale, psi.data(), 1);
+        ComplexVector psi = generateRandomVector(N, gen, dist);
         
         // Apply operator O: |φ⟩ = O|ψ⟩
         ComplexVector phi(N);
@@ -1009,30 +958,19 @@ DynamicalResponseResults compute_dynamical_response_thermal(
         );
         
         std::cout << "  Lanczos iterations: " << iterations << std::endl;
-        uint64_t m = alpha.size();
         
-        // Diagonalize tridiagonal
-        std::vector<double> diag = alpha;
-        std::vector<double> offdiag(m - 1);
-        for (int i = 0; i < m - 1; i++) {
-            offdiag[i] = beta[i + 1];
-        }
+        // Diagonalize tridiagonal and extract Ritz values/weights
+        std::vector<double> ritz_values, weights;
+        diagonalize_tridiagonal_ritz(alpha, beta, ritz_values, weights);
         
-        std::vector<double> evecs(m * m);
-        uint64_t info = LAPACKE_dstevd(LAPACK_COL_MAJOR, 'V', m, diag.data(), offdiag.data(), evecs.data(), m);
-        
-        if (info != 0) {
+        if (ritz_values.empty()) {
             std::cerr << "  Warning: Tridiagonal diagonalization failed\n";
             continue;
         }
         
-        // Extract Ritz values and weights
-        std::vector<double> ritz_values(m);
-        std::vector<double> weights(m);
-        
-        for (int i = 0; i < m; i++) {
-            ritz_values[i] = diag[i];
-            weights[i] = evecs[i * m] * evecs[i * m] * phi_norm * phi_norm;
+        // Scale weights by phi_norm squared
+        for (int i = 0; i < weights.size(); i++) {
+            weights[i] *= phi_norm * phi_norm;
         }
         
         // Compute spectral function for this sample
@@ -1223,15 +1161,7 @@ DynamicalResponseResults compute_dynamical_correlation(
         std::cout << "\n--- Sample " << sample + 1 << " / " << params.num_samples << " ---\n";
         
         // Generate random initial state |ψ⟩
-        ComplexVector psi(N);
-        for (int i = 0; i < N; i++) {
-            psi[i] = Complex(dist(gen), dist(gen));
-        }
-        
-        // Normalize |ψ⟩
-        double norm = cblas_dznrm2(N, psi.data(), 1);
-        Complex scale(1.0/norm, 0.0);
-        cblas_zscal(N, &scale, psi.data(), 1);
+        ComplexVector psi = generateRandomVector(N, gen, dist);
         
         // Apply operator O2: |φ⟩ = O₂|ψ⟩
         ComplexVector phi(N);
@@ -1254,90 +1184,24 @@ DynamicalResponseResults compute_dynamical_correlation(
         // Store basis vectors for computing matrix elements
         std::vector<double> alpha, beta;
         std::vector<ComplexVector> lanczos_vectors;
-        lanczos_vectors.push_back(phi);
         
-        ComplexVector v_current = phi;
-        ComplexVector v_prev(N, Complex(0.0, 0.0));
-        ComplexVector v_next(N);
-        ComplexVector w(N);
-        
-        beta.push_back(0.0);
-        uint64_t max_iter = std::min(N, params.krylov_dim);
-        
-        // Lanczos iteration
-        for (int j = 0; j < max_iter; j++) {
-            H(v_current.data(), w.data(), N);
-            
-            if (j > 0) {
-                Complex neg_beta(-beta[j], 0.0);
-                cblas_zaxpy(N, &neg_beta, v_prev.data(), 1, w.data(), 1);
-            }
-            
-            Complex dot_product;
-            cblas_zdotc_sub(N, v_current.data(), 1, w.data(), 1, &dot_product);
-            alpha.push_back(std::real(dot_product));
-            
-            Complex neg_alpha(-alpha[j], 0.0);
-            cblas_zaxpy(N, &neg_alpha, v_current.data(), 1, w.data(), 1);
-            
-            // Reorthogonalization
-            if (params.full_reorthogonalization) {
-                for (const auto& v : lanczos_vectors) {
-                    Complex overlap;
-                    cblas_zdotc_sub(N, v.data(), 1, w.data(), 1, &overlap);
-                    Complex neg_overlap(-overlap.real(), -overlap.imag());
-                    cblas_zaxpy(N, &neg_overlap, v.data(), 1, w.data(), 1);
-                }
-            } else if (params.reorth_frequency > 0 && (j + 1) % params.reorth_frequency == 0) {
-                for (const auto& v : lanczos_vectors) {
-                    Complex overlap;
-                    cblas_zdotc_sub(N, v.data(), 1, w.data(), 1, &overlap);
-                    if (std::abs(overlap) > params.tolerance) {
-                        Complex neg_overlap(-overlap.real(), -overlap.imag());
-                        cblas_zaxpy(N, &neg_overlap, v.data(), 1, w.data(), 1);
-                    }
-                }
-            }
-            
-            norm = cblas_dznrm2(N, w.data(), 1);
-            beta.push_back(norm);
-            
-            if (norm < params.tolerance) {
-                std::cout << "  Converged at iteration " << j + 1 << std::endl;
-                break;
-            }
-            
-            for (int i = 0; i < N; i++) {
-                v_next[i] = w[i] / norm;
-            }
-            
-            lanczos_vectors.push_back(v_next);
-            v_prev = v_current;
-            v_current = v_next;
-        }
+        uint64_t iterations = build_lanczos_tridiagonal_with_basis(
+            H, phi, N, params.krylov_dim, params.tolerance,
+            params.full_reorthogonalization, params.reorth_frequency,
+            alpha, beta, &lanczos_vectors
+        );
         
         uint64_t m = alpha.size();
         std::cout << "  Lanczos iterations: " << m << std::endl;
         
-        // Diagonalize tridiagonal
-        std::vector<double> diag = alpha;
-        std::vector<double> offdiag(m - 1);
-        for (int i = 0; i < m - 1; i++) {
-            offdiag[i] = beta[i + 1];
-        }
+        // Diagonalize tridiagonal (need eigenvectors for weight computation)
+        std::vector<double> ritz_values, dummy_weights;
+        std::vector<double> evecs;
+        diagonalize_tridiagonal_ritz(alpha, beta, ritz_values, dummy_weights, &evecs);
         
-        std::vector<double> evecs(m * m);
-        uint64_t info = LAPACKE_dstevd(LAPACK_COL_MAJOR, 'V', m, diag.data(), offdiag.data(), evecs.data(), m);
-        
-        if (info != 0) {
+        if (ritz_values.empty()) {
             std::cerr << "  Warning: Tridiagonal diagonalization failed\n";
             continue;
-        }
-        
-        // Extract Ritz values
-        std::vector<double> ritz_values(m);
-        for (int i = 0; i < m; i++) {
-            ritz_values[i] = diag[i];
         }
         
         // Compute weights |⟨n|O₁|ψ⟩|² for cross-correlation
@@ -1532,94 +1396,28 @@ DynamicalResponseResults compute_dynamical_correlation_state(
     // Build Lanczos tridiagonal for H starting from |φ⟩
     std::vector<double> alpha, beta;
     std::vector<ComplexVector> lanczos_vectors;
-    lanczos_vectors.push_back(phi);
     
-    ComplexVector v_current = phi;
-    ComplexVector v_prev(N, Complex(0.0, 0.0));
-    ComplexVector v_next(N);
-    ComplexVector w(N);
-    
-    beta.push_back(0.0);
-    uint64_t max_iter = std::min(N, params.krylov_dim);
-    
-    // Lanczos iteration
-    for (int j = 0; j < max_iter; j++) {
-        H(v_current.data(), w.data(), N);
-        
-        if (j > 0) {
-            Complex neg_beta(-beta[j], 0.0);
-            cblas_zaxpy(N, &neg_beta, v_prev.data(), 1, w.data(), 1);
-        }
-        
-        Complex dot_product;
-        cblas_zdotc_sub(N, v_current.data(), 1, w.data(), 1, &dot_product);
-        alpha.push_back(std::real(dot_product));
-        
-        Complex neg_alpha(-alpha[j], 0.0);
-        cblas_zaxpy(N, &neg_alpha, v_current.data(), 1, w.data(), 1);
-        
-        // Reorthogonalization
-        if (params.full_reorthogonalization) {
-            for (const auto& v : lanczos_vectors) {
-                Complex overlap;
-                cblas_zdotc_sub(N, v.data(), 1, w.data(), 1, &overlap);
-                Complex neg_overlap(-overlap.real(), -overlap.imag());
-                cblas_zaxpy(N, &neg_overlap, v.data(), 1, w.data(), 1);
-            }
-        } else if (params.reorth_frequency > 0 && (j + 1) % params.reorth_frequency == 0) {
-            for (const auto& v : lanczos_vectors) {
-                Complex overlap;
-                cblas_zdotc_sub(N, v.data(), 1, w.data(), 1, &overlap);
-                if (std::abs(overlap) > params.tolerance) {
-                    Complex neg_overlap(-overlap.real(), -overlap.imag());
-                    cblas_zaxpy(N, &neg_overlap, v.data(), 1, w.data(), 1);
-                }
-            }
-        }
-        
-        double norm = cblas_dznrm2(N, w.data(), 1);
-        beta.push_back(norm);
-        
-        if (norm < params.tolerance) {
-            std::cout << "  Converged at iteration " << j + 1 << std::endl;
-            break;
-        }
-        
-        for (int i = 0; i < N; i++) {
-            v_next[i] = w[i] / norm;
-        }
-        
-        lanczos_vectors.push_back(v_next);
-        v_prev = v_current;
-        v_current = v_next;
-    }
+    uint64_t iterations = build_lanczos_tridiagonal_with_basis(
+        H, phi, N, params.krylov_dim, params.tolerance,
+        params.full_reorthogonalization, params.reorth_frequency,
+        alpha, beta, &lanczos_vectors
+    );
     
     uint64_t m = alpha.size();
     std::cout << "  Lanczos iterations: " << m << std::endl;
     
-    // Diagonalize tridiagonal
-    std::vector<double> diag = alpha;
-    std::vector<double> offdiag(m - 1);
-    for (int i = 0; i < m - 1; i++) {
-        offdiag[i] = beta[i + 1];
-    }
+    // Diagonalize tridiagonal (need eigenvectors for weight computation)
+    std::vector<double> ritz_values, dummy_weights;
+    std::vector<double> evecs;
+    diagonalize_tridiagonal_ritz(alpha, beta, ritz_values, dummy_weights, &evecs);
     
-    std::vector<double> evecs(m * m);
-    uint64_t info = LAPACKE_dstevd(LAPACK_COL_MAJOR, 'V', m, diag.data(), offdiag.data(), evecs.data(), m);
-    
-    if (info != 0) {
+    if (ritz_values.empty()) {
         std::cerr << "  Error: Tridiagonal diagonalization failed\n";
         results.spectral_function.resize(num_omega_bins, 0.0);
         results.spectral_function_imag.resize(num_omega_bins, 0.0);
         results.spectral_error.resize(num_omega_bins, 0.0);
         results.spectral_error_imag.resize(num_omega_bins, 0.0);
         return results;
-    }
-    
-    // Extract Ritz values
-    std::vector<double> ritz_values(m);
-    for (int i = 0; i < m; i++) {
-        ritz_values[i] = diag[i];
     }
     
     // For dynamical structure factors, shift energies so ground state is at E=0
@@ -1698,107 +1496,28 @@ static void compute_krylov_expectation_values(
     std::vector<double>& weights,
     std::vector<double>& expectation_values
 ) {
-    // Build Lanczos tridiagonal for Hamiltonian
+    // Build Lanczos tridiagonal for Hamiltonian with basis storage
     std::vector<double> alpha, beta;
     std::vector<ComplexVector> lanczos_vectors;
-    lanczos_vectors.push_back(v0);
     
-    ComplexVector v_current = v0;
-    ComplexVector v_prev(N, Complex(0.0, 0.0));
-    ComplexVector v_next(N);
-    ComplexVector w(N);
-    
-    // Normalize initial vector
-    double norm = cblas_dznrm2(N, v_current.data(), 1);
-    Complex scale_factor = Complex(1.0/norm, 0.0);
-    cblas_zscal(N, &scale_factor, v_current.data(), 1);
-    
-    beta.push_back(0.0);
-    uint64_t max_iter = std::min(N, krylov_dim);
-    
-    // Lanczos iteration (store basis vectors for later)
-    for (int j = 0; j < max_iter; j++) {
-        // w = H*v_j
-        H(v_current.data(), w.data(), N);
-        
-        // w = w - beta_j * v_{j-1}
-        if (j > 0) {
-            Complex neg_beta = Complex(-beta[j], 0.0);
-            cblas_zaxpy(N, &neg_beta, v_prev.data(), 1, w.data(), 1);
-        }
-        
-        // alpha_j = <v_j, w>
-        Complex dot_product;
-        cblas_zdotc_sub(N, v_current.data(), 1, w.data(), 1, &dot_product);
-        alpha.push_back(std::real(dot_product));
-        
-        // w = w - alpha_j * v_j
-        Complex neg_alpha = Complex(-alpha[j], 0.0);
-        cblas_zaxpy(N, &neg_alpha, v_current.data(), 1, w.data(), 1);
-        
-        // Reorthogonalization
-        if (full_reorth) {
-            for (size_t k = 0; k < lanczos_vectors.size(); k++) {
-                Complex overlap;
-                cblas_zdotc_sub(N, lanczos_vectors[k].data(), 1, w.data(), 1, &overlap);
-                Complex neg_overlap = -overlap;
-                cblas_zaxpy(N, &neg_overlap, lanczos_vectors[k].data(), 1, w.data(), 1);
-            }
-        } else if (reorth_freq > 0 && (j + 1) % reorth_freq == 0) {
-            for (size_t k = 0; k < lanczos_vectors.size(); k++) {
-                Complex overlap;
-                cblas_zdotc_sub(N, lanczos_vectors[k].data(), 1, w.data(), 1, &overlap);
-                if (std::abs(overlap) > tolerance) {
-                    Complex neg_overlap = -overlap;
-                    cblas_zaxpy(N, &neg_overlap, lanczos_vectors[k].data(), 1, w.data(), 1);
-                }
-            }
-        }
-        
-        // beta_{j+1} = ||w||
-        norm = cblas_dznrm2(N, w.data(), 1);
-        beta.push_back(norm);
-        
-        // Check for breakdown
-        if (norm < tolerance) {
-            break;
-        }
-        
-        // v_{j+1} = w / beta_{j+1}
-        for (int i = 0; i < N; i++) {
-            v_next[i] = w[i] / norm;
-        }
-        
-        lanczos_vectors.push_back(v_next);
-        v_prev = v_current;
-        v_current = v_next;
-    }
+    uint64_t iterations = build_lanczos_tridiagonal_with_basis(
+        H, v0, N, krylov_dim, tolerance,
+        full_reorth, reorth_freq,
+        alpha, beta, &lanczos_vectors
+    );
     
     uint64_t m = alpha.size();
     
-    // Diagonalize tridiagonal matrix
-    std::vector<double> diag = alpha;
-    std::vector<double> offdiag(m - 1);
-    for (int i = 0; i < m - 1; i++) {
-        offdiag[i] = beta[i + 1];
-    }
+    // Diagonalize tridiagonal (need eigenvectors for expectation value computation)
+    std::vector<double> evecs;
+    diagonalize_tridiagonal_ritz(alpha, beta, ritz_values, weights, &evecs);
     
-    std::vector<double> evecs(m * m);
-    uint64_t info = LAPACKE_dstevd(LAPACK_COL_MAJOR, 'V', m, diag.data(), offdiag.data(), evecs.data(), m);
-    
-    if (info != 0) {
+    if (ritz_values.empty()) {
         std::cerr << "Warning: Tridiagonal diagonalization failed" << std::endl;
         return;
     }
     
-    ritz_values.resize(m);
-    weights.resize(m);
     expectation_values.resize(m);
-    
-    for (int i = 0; i < m; i++) {
-        ritz_values[i] = diag[i];
-        weights[i] = evecs[i * m] * evecs[i * m];
-    }
     
     // Now compute <n|O|n> for each Ritz state in the Krylov basis
     // |n> = Σ_j evecs[n,j] |v_j>
@@ -1882,15 +1601,7 @@ StaticResponseResults compute_thermal_expectation_value(
         std::cout << "\n--- Sample " << sample + 1 << " / " << params.num_samples << " ---\n";
         
         // Generate random initial state
-        ComplexVector v0(N);
-        for (int i = 0; i < N; i++) {
-            v0[i] = Complex(dist(gen), dist(gen));
-        }
-        
-        // Normalize
-        double norm = cblas_dznrm2(N, v0.data(), 1);
-        Complex scale = Complex(1.0/norm, 0.0);
-        cblas_zscal(N, &scale, v0.data(), 1);
+        ComplexVector v0 = generateRandomVector(N, gen, dist);
         
         // Build Krylov subspace and compute expectation values
         std::vector<double> ritz_values, weights, expectation_values;
@@ -2104,107 +1815,32 @@ StaticResponseResults compute_static_response(
         std::cout << "\n--- Sample " << sample + 1 << " / " << params.num_samples << " ---\n";
         
         // Generate random initial state
-        ComplexVector v0(N);
-        for (int i = 0; i < N; i++) {
-            v0[i] = Complex(dist(gen), dist(gen));
-        }
-        
-        // Normalize
-        double norm = cblas_dznrm2(N, v0.data(), 1);
-        Complex scale = Complex(1.0/norm, 0.0);
-        cblas_zscal(N, &scale, v0.data(), 1);
+        ComplexVector v0 = generateRandomVector(N, gen, dist);
         
         // Build Lanczos tridiagonal for Hamiltonian (store basis vectors)
         std::vector<double> alpha, beta;
         std::vector<ComplexVector> lanczos_vectors;
-        lanczos_vectors.push_back(v0);
         
-        ComplexVector v_current = v0;
-        ComplexVector v_prev(N, Complex(0.0, 0.0));
-        ComplexVector v_next(N);
-        ComplexVector w(N);
-        
-        beta.push_back(0.0);
-        uint64_t max_iter = std::min(N, params.krylov_dim);
-        
-        // Lanczos iteration
-        for (int j = 0; j < max_iter; j++) {
-            H(v_current.data(), w.data(), N);
-            
-            if (j > 0) {
-                Complex neg_beta(-beta[j], 0.0);
-                cblas_zaxpy(N, &neg_beta, v_prev.data(), 1, w.data(), 1);
-            }
-            
-            Complex dot_product;
-            cblas_zdotc_sub(N, v_current.data(), 1, w.data(), 1, &dot_product);
-            alpha.push_back(std::real(dot_product));
-            
-            Complex neg_alpha(-alpha[j], 0.0);
-            cblas_zaxpy(N, &neg_alpha, v_current.data(), 1, w.data(), 1);
-            
-            // Reorthogonalization
-            if (params.full_reorthogonalization) {
-                for (const auto& v : lanczos_vectors) {
-                    Complex overlap;
-                    cblas_zdotc_sub(N, v.data(), 1, w.data(), 1, &overlap);
-                    Complex neg_overlap(-overlap.real(), -overlap.imag());
-                    cblas_zaxpy(N, &neg_overlap, v.data(), 1, w.data(), 1);
-                }
-            } else if (params.reorth_frequency > 0 && (j + 1) % params.reorth_frequency == 0) {
-                for (const auto& v : lanczos_vectors) {
-                    Complex overlap;
-                    cblas_zdotc_sub(N, v.data(), 1, w.data(), 1, &overlap);
-                    if (std::abs(overlap) > params.tolerance) {
-                        Complex neg_overlap(-overlap.real(), -overlap.imag());
-                        cblas_zaxpy(N, &neg_overlap, v.data(), 1, w.data(), 1);
-                    }
-                }
-            }
-            
-            norm = cblas_dznrm2(N, w.data(), 1);
-            beta.push_back(norm);
-            
-            if (norm < params.tolerance) {
-                std::cout << "  Converged at iteration " << j + 1 << std::endl;
-                break;
-            }
-            
-            for (int i = 0; i < N; i++) {
-                v_next[i] = w[i] / norm;
-            }
-            
-            lanczos_vectors.push_back(v_next);
-            v_prev = v_current;
-            v_current = v_next;
-        }
+        uint64_t iterations = build_lanczos_tridiagonal_with_basis(
+            H, v0, N, params.krylov_dim, params.tolerance,
+            params.full_reorthogonalization, params.reorth_frequency,
+            alpha, beta, &lanczos_vectors
+        );
         
         uint64_t m = alpha.size();
         std::cout << "  Lanczos iterations: " << m << std::endl;
         
-        // Diagonalize tridiagonal
-        std::vector<double> diag = alpha;
-        std::vector<double> offdiag(m - 1);
-        for (int i = 0; i < m - 1; i++) {
-            offdiag[i] = beta[i + 1];
-        }
+        // Diagonalize tridiagonal (need eigenvectors for correlation computation)
+        std::vector<double> ritz_values, weights;
+        std::vector<double> evecs;
+        diagonalize_tridiagonal_ritz(alpha, beta, ritz_values, weights, &evecs);
         
-        std::vector<double> evecs(m * m);
-        uint64_t info = LAPACKE_dstevd(LAPACK_COL_MAJOR, 'V', m, diag.data(), offdiag.data(), evecs.data(), m);
-        
-        if (info != 0) {
+        if (ritz_values.empty()) {
             std::cerr << "  Warning: Tridiagonal diagonalization failed" << std::endl;
             continue;
         }
         
-        std::vector<double> ritz_values(m);
-        std::vector<double> weights(m);
         std::vector<double> correlation_values(m);
-        
-        for (int i = 0; i < m; i++) {
-            ritz_values[i] = diag[i];
-            weights[i] = evecs[i * m] * evecs[i * m];
-        }
         
         // Compute ⟨n|O₁†O₂|n⟩ for each eigenstate |n⟩
         // This equals ⟨O₁n|O₂n⟩ = (O₁|n⟩)† · (O₂|n⟩)

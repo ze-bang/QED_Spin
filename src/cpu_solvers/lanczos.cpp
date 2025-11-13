@@ -242,6 +242,169 @@ bool write_basis_vector(const std::string& temp_dir, uint64_t index, const Compl
     return true;
 }
 
+// Diagonalize tridiagonal matrix and extract Ritz values and weights
+void diagonalize_tridiagonal_ritz(
+    const std::vector<double>& alpha,
+    const std::vector<double>& beta,
+    std::vector<double>& ritz_values,
+    std::vector<double>& weights,
+    std::vector<double>* evecs
+) {
+    uint64_t m = alpha.size();
+    
+    // Prepare diagonal and off-diagonal arrays for LAPACK
+    std::vector<double> diag = alpha;
+    std::vector<double> offdiag(m - 1);
+    for (int i = 0; i < m - 1; i++) {
+        offdiag[i] = beta[i + 1];
+    }
+    
+    // Allocate eigenvector storage
+    std::vector<double> evecs_local;
+    double* evecs_ptr = nullptr;
+    
+    if (evecs != nullptr) {
+        evecs->resize(m * m);
+        evecs_ptr = evecs->data();
+    } else {
+        evecs_local.resize(m * m);
+        evecs_ptr = evecs_local.data();
+    }
+    
+    // Diagonalize
+    uint64_t info = LAPACKE_dstevd(LAPACK_COL_MAJOR, 'V', m, 
+                                    diag.data(), offdiag.data(), 
+                                    evecs_ptr, m);
+    
+    if (info != 0) {
+        std::cerr << "LAPACKE_dstevd failed in diagonalize_tridiagonal_ritz with error code " << info << std::endl;
+        ritz_values.clear();
+        weights.clear();
+        return;
+    }
+    
+    // Extract Ritz values (eigenvalues are now in diag, sorted)
+    ritz_values.resize(m);
+    std::copy(diag.begin(), diag.end(), ritz_values.begin());
+    
+    // Extract weights: squared first component of each eigenvector
+    weights.resize(m);
+    for (int i = 0; i < m; i++) {
+        // First component of eigenvector i (column-major: evecs[0 + i*m])
+        double first_component = evecs_ptr[i * m];  // First row, column i
+        weights[i] = first_component * first_component;
+    }
+}
+
+// Build Lanczos tridiagonal with optional basis storage
+int build_lanczos_tridiagonal_with_basis(
+    std::function<void(const Complex*, Complex*, int)> H,
+    const ComplexVector& v0,
+    uint64_t N,
+    uint64_t max_iter,
+    double tol,
+    bool full_reorth,
+    uint64_t reorth_freq,
+    std::vector<double>& alpha,
+    std::vector<double>& beta,
+    std::vector<ComplexVector>* basis_vectors
+) {
+    alpha.clear();
+    beta.clear();
+    beta.push_back(0.0); // β_0 is not used
+    
+    // Working vectors
+    ComplexVector v_current = v0;
+    ComplexVector v_prev(N, Complex(0.0, 0.0));
+    ComplexVector v_next(N);
+    ComplexVector w(N);
+    
+    // Normalize initial vector
+    double norm = cblas_dznrm2(N, v_current.data(), 1);
+    Complex scale_factor = Complex(1.0/norm, 0.0);
+    cblas_zscal(N, &scale_factor, v_current.data(), 1);
+    
+    // Store basis vectors if requested
+    if (basis_vectors != nullptr) {
+        basis_vectors->clear();
+        basis_vectors->reserve(max_iter);
+        basis_vectors->push_back(v_current);
+    }
+    
+    max_iter = std::min(N, max_iter);
+    
+    // Lanczos iteration
+    for (int j = 0; j < max_iter; j++) {
+        // w = H*v_j
+        H(v_current.data(), w.data(), N);
+        
+        // w = w - beta_j * v_{j-1}
+        if (j > 0) {
+            Complex neg_beta = Complex(-beta[j], 0.0);
+            cblas_zaxpy(N, &neg_beta, v_prev.data(), 1, w.data(), 1);
+        }
+        
+        // alpha_j = <v_j, w>
+        Complex dot_product;
+        cblas_zdotc_sub(N, v_current.data(), 1, w.data(), 1, &dot_product);
+        alpha.push_back(std::real(dot_product));
+        
+        // w = w - alpha_j * v_j
+        Complex neg_alpha = Complex(-alpha[j], 0.0);
+        cblas_zaxpy(N, &neg_alpha, v_current.data(), 1, w.data(), 1);
+        
+        // Reorthogonalization
+        if (full_reorth) {
+            // Full reorthogonalization against all previous vectors
+            if (basis_vectors != nullptr) {
+                for (int k = 0; k <= j; k++) {
+                    Complex overlap;
+                    cblas_zdotc_sub(N, (*basis_vectors)[k].data(), 1, w.data(), 1, &overlap);
+                    Complex neg_overlap = -overlap;
+                    cblas_zaxpy(N, &neg_overlap, (*basis_vectors)[k].data(), 1, w.data(), 1);
+                }
+            }
+        } else if (reorth_freq > 0 && (j + 1) % reorth_freq == 0) {
+            // Periodic reorthogonalization
+            if (basis_vectors != nullptr) {
+                for (int k = 0; k <= j; k++) {
+                    Complex overlap;
+                    cblas_zdotc_sub(N, (*basis_vectors)[k].data(), 1, w.data(), 1, &overlap);
+                    if (std::abs(overlap) > tol) {
+                        Complex neg_overlap = -overlap;
+                        cblas_zaxpy(N, &neg_overlap, (*basis_vectors)[k].data(), 1, w.data(), 1);
+                    }
+                }
+            }
+        }
+        
+        // beta_{j+1} = ||w||
+        norm = cblas_dznrm2(N, w.data(), 1);
+        beta.push_back(norm);
+        
+        // Check for convergence/breakdown
+        if (norm < tol) {
+            break;
+        }
+        
+        // v_{j+1} = w / beta_{j+1}
+        for (int i = 0; i < N; i++) {
+            v_next[i] = w[i] / norm;
+        }
+        
+        // Store next basis vector if requested
+        if (basis_vectors != nullptr && j < max_iter - 1) {
+            basis_vectors->push_back(v_next);
+        }
+        
+        // Update for next iteration
+        v_prev = v_current;
+        v_current = v_next;
+    }
+    
+    return alpha.size();
+}
+
 // Helper function to solve tridiagonal eigenvalue problem
 int solve_tridiagonal_matrix(const std::vector<double>& alpha, const std::vector<double>& beta, 
                             uint64_t m, uint64_t exct, std::vector<double>& eigenvalues, 
