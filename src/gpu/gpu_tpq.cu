@@ -281,8 +281,20 @@ void GPUTPQSolver::runMicrocanonicalTPQ(
     // Calculate dimension entropy S = log2(N)
     double D_S = std::log2(static_cast<double>(N_));
     
+    // Define measurement temperatures (similar to CPU version)
+    const int num_temp_points = 20;
+    std::vector<double> measure_inv_temp(num_temp_points);
+    double log_min = std::log10(1);   // Start from β = 1
+    double log_max = std::log10(1000); // End at β = 1000
+    for (int i = 0; i < num_temp_points; ++i) {
+        measure_inv_temp[i] = std::pow(10.0, log_min + (log_max - log_min) * i / (num_temp_points - 1));
+    }
+    
     for (int sample = 0; sample < num_samples; ++sample) {
         std::cout << "\nSample " << sample + 1 << "/" << num_samples << std::endl;
+        
+        // Track which measurement temperatures have been saved
+        std::vector<bool> temp_measured(num_temp_points, false);
         
         // Generate random initial state |v1⟩
         generateRandomState(12345 + sample * 67890);
@@ -364,24 +376,23 @@ void GPUTPQSolver::runMicrocanonicalTPQ(
                               << ", β = " << inv_temp << std::endl;
                 }
                 
-                // Check convergence
-                if (var < 1e-10 && step > 100) {
-                    std::cout << "Converged to eigenstate at step " << step << std::endl;
-                    break;
-                }
-                
-                // Save state periodically
-                if (step % (temp_interval * 10) == 0) {
-                    std::string state_file = dir + "/tpq_state_" + std::to_string(sample) + 
-                                           "_step=" + std::to_string(step) + ".dat";
-                    saveTPQState(state_file);
-                }
-                
                 energy = E;
+            }
+            
+            // Save TPQ state at specified measurement temperatures
+            for (int i = 0; i < num_temp_points; ++i) {
+                if (!temp_measured[i] && std::abs(inv_temp - measure_inv_temp[i]) < 4e-3) {
+                    std::cout << "  Saving TPQ state at β = " << inv_temp << std::endl;
+                    std::string state_file = dir + "/tpq_state_" + std::to_string(sample) + 
+                                           "_beta=" + std::to_string(inv_temp) + ".dat";
+                    saveTPQState(state_file);
+                    temp_measured[i] = true; // Mark this temperature as saved
+                }
             }
             
             stats_.iterations++;
         }
+        
         
         // Save final energy
         std::pair<double, double> final_pair = computeEnergyAndVariance();
@@ -430,8 +441,20 @@ void GPUTPQSolver::runCanonicalTPQ(
     
     int num_steps = static_cast<int>(beta_max / delta_beta);
     
+    // Define measurement temperatures (similar to microcanonical version)
+    const int num_temp_points = 20;
+    std::vector<double> measure_inv_temp(num_temp_points);
+    double log_min = std::log10(1);   // Start from β = 1
+    double log_max = std::log10(1000); // End at β = 1000
+    for (int i = 0; i < num_temp_points; ++i) {
+        measure_inv_temp[i] = std::pow(10.0, log_min + (log_max - log_min) * i / (num_temp_points - 1));
+    }
+    
     for (int sample = 0; sample < num_samples; ++sample) {
         std::cout << "\nSample " << sample + 1 << "/" << num_samples << std::endl;
+        
+        // Track which measurement temperatures have been saved
+        std::vector<bool> temp_measured(num_temp_points, false);
         
         // Generate random initial state
         generateRandomState(98765 + sample * 43210);
@@ -470,6 +493,17 @@ void GPUTPQSolver::runCanonicalTPQ(
                     std::string state_file = dir + "/ctpq_state_" + std::to_string(sample) + 
                                            "_beta=" + std::to_string(beta) + ".dat";
                     saveTPQState(state_file);
+                }
+            }
+            
+            // Save TPQ state at specified measurement temperatures
+            for (int i = 0; i < num_temp_points; ++i) {
+                if (!temp_measured[i] && std::abs(beta - measure_inv_temp[i]) < 4e-3) {
+                    std::cout << "  Saving TPQ state at β = " << beta << std::endl;
+                    std::string state_file = dir + "/tpq_state_" + std::to_string(sample) + 
+                                           "_beta=" + std::to_string(beta) + ".dat";
+                    saveTPQState(state_file);
+                    temp_measured[i] = true; // Mark this temperature as saved
                 }
             }
             

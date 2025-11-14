@@ -1521,34 +1521,40 @@ int main(int argc, char* argv[]) {
                             obs_2[i].apply(in, out, size);
                         };
                         
-                        // Compute thermal spectral function for each temperature
-                        for (size_t t_idx = 0; t_idx < temperatures.size(); t_idx++) {
-                            double temperature = temperatures[t_idx];
-                            
-                            if (rank == 0) {
-                                std::cout << "  Processing operator " << obs_names[i] 
-                                          << " at T = " << temperature << std::endl;
-                            }
-                            
-                            // Compute thermal spectral function using FTLM
-                            auto results = compute_dynamical_correlation(
-                                H, O1_func, O2_func, N, params,
-                                omega_min, omega_max, num_omega_bins, temperature, method_dir
-                            );
-                            
-                            // Save results with thermal averaging info
+                        // OPTIMIZATION: Compute spectral function for ALL temperatures at once
+                        // This runs Lanczos ONCE and reuses the spectral decomposition for all temperatures
+                        // Much more efficient than running Lanczos separately for each temperature!
+                        if (rank == 0) {
+                            std::cout << "  *** OPTIMIZED MODE: Computing " << temperatures.size() 
+                                      << " temperature points with SINGLE Lanczos run ***" << std::endl;
+                        }
+                        
+                        // Use the optimized multi-temperature function
+                        auto results_map = compute_dynamical_correlation_state_multi_temperature(
+                            H, O1_func, O2_func, tpq_state, N, params,
+                            omega_min, omega_max, num_omega_bins, 
+                            temperatures, ground_state_energy
+                        );
+                        
+                        // Save results for each temperature
+                        for (const auto& [temperature, results] : results_map) {
                             std::stringstream filename_ss;
                             filename_ss << method_dir << "/" << obs_names[i] 
                                         << "_spectral_thermal_sample_" << sample_index 
-                                        << "_beta_" << 1/temperature << ".txt";
+                                        << "_beta_" << std::fixed << std::setprecision(6) << (1.0/temperature)
+                                        << "_T_" << temperature << "_nsamples_1.txt";
                             
                             save_dynamical_response_results(results, filename_ss.str());
                         
                             if (rank == 0) {
                                 std::cout << "  Saved thermal spectral function: " << filename_ss.str() << std::endl;
-                                std::cout << "    Temperature: " << temperature << ", Beta: " << 1/temperature << std::endl;
-                                std::cout << "    FTLM samples: " << params.num_samples << std::endl;
+                                std::cout << "    Temperature: " << temperature << ", Beta: " << (1.0/temperature) << std::endl;
                             }
+                        }
+                        
+                        if (rank == 0) {
+                            std::cout << "  *** Optimization saved ~" << (temperatures.size() - 1) 
+                                      << " Lanczos iterations! ***" << std::endl;
                         }
                     }
                 } else {

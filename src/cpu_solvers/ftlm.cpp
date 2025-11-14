@@ -1111,7 +1111,8 @@ DynamicalResponseResults compute_dynamical_correlation(
     double omega_max,
     uint64_t num_omega_bins,
     double temperature,
-    const std::string& output_dir
+    const std::string& output_dir,
+    double energy_shift
 ){
     std::cout << "\n==========================================\n";
     std::cout << "Dynamical Correlation: S(ω) = <O₁†δ(ω-H)O₂>\n";
@@ -1202,6 +1203,32 @@ DynamicalResponseResults compute_dynamical_correlation(
         if (ritz_values.empty()) {
             std::cerr << "  Warning: Tridiagonal diagonalization failed\n";
             continue;
+        }
+        
+        // For dynamical structure factors, shift energies so ground state is at E=0
+        // This ensures spectral function has weight only at positive frequencies (excitation energies)
+        if (sample == 0) {
+            // Only print this message once for the first sample
+            double E_shift;
+            if (std::abs(energy_shift) > 1e-14) {
+                // Use provided ground state energy shift
+                E_shift = energy_shift;
+                std::cout << "  Using provided ground state energy shift: " << E_shift << std::endl;
+            } else {
+                // Auto-detect from Krylov subspace (first sample only)
+                E_shift = *std::min_element(ritz_values.begin(), ritz_values.end());
+                std::cout << "  Ground state energy (auto-detected from Krylov): " << E_shift << std::endl;
+            }
+            std::cout << "  Shifting to excitation energies (E_gs = 0)" << std::endl;
+        }
+        
+        // Apply energy shift for this sample
+        double E_shift = (std::abs(energy_shift) > 1e-14) ? 
+                         energy_shift : 
+                         *std::min_element(ritz_values.begin(), ritz_values.end());
+        
+        for (int i = 0; i < m; i++) {
+            ritz_values[i] -= E_shift;
         }
         
         // Compute weights |⟨n|O₁|ψ⟩|² for cross-correlation
@@ -2004,4 +2031,449 @@ void save_static_response_results(
     
     file.close();
     std::cout << "Static response results saved to: " << filename << std::endl;
+}
+
+// ============================================================================
+// TEMPERATURE-INDEPENDENT SPECTRAL DECOMPOSITION (OPTIMIZATION)
+// ============================================================================
+
+/**
+ * @brief Compute temperature-independent spectral decomposition via Lanczos
+ * 
+ * This function runs the Lanczos iteration once to compute the spectral
+ * decomposition (eigenvalues and weights) which is temperature-independent.
+ * The results can then be reused to efficiently compute S(ω,T) at multiple
+ * temperatures without re-running the expensive Lanczos iteration.
+ */
+LanczosSpectralData compute_lanczos_spectral_data(
+    std::function<void(const Complex*, Complex*, int)> H,
+    std::function<void(const Complex*, Complex*, int)> O1,
+    std::function<void(const Complex*, Complex*, int)> O2,
+    const ComplexVector& state,
+    uint64_t N,
+    const DynamicalResponseParameters& params,
+    double energy_shift
+) {
+    std::cout << "\n==========================================\n";
+    std::cout << "Computing Temperature-Independent Spectral Data\n";
+    std::cout << "==========================================\n";
+    std::cout << "Hilbert space dimension: " << N << std::endl;
+    std::cout << "Krylov dimension: " << params.krylov_dim << std::endl;
+    std::cout << "Broadening: " << params.broadening << std::endl;
+    
+    LanczosSpectralData spectral_data;
+    
+    // Verify state is normalized
+    double state_norm = cblas_dznrm2(N, state.data(), 1);
+    ComplexVector psi = state;
+    if (std::abs(state_norm - 1.0) > 1e-10) {
+        std::cout << "  Normalizing input state (norm = " << state_norm << ")\n";
+        Complex scale(1.0/state_norm, 0.0);
+        cblas_zscal(N, &scale, psi.data(), 1);
+    }
+    
+    // Apply operator O2: |φ⟩ = O₂|ψ⟩
+    ComplexVector phi(N);
+    O2(psi.data(), phi.data(), N);
+    
+    // Get norm of |φ⟩
+    double phi_norm = cblas_dznrm2(N, phi.data(), 1);
+    if (phi_norm < 1e-14) {
+        std::cerr << "  Error: O₂|ψ⟩ has zero norm\n";
+        return spectral_data;
+    }
+    
+    std::cout << "  Norm of O₂|ψ⟩: " << phi_norm << std::endl;
+    
+    // Normalize |φ⟩
+    Complex phi_scale(1.0/phi_norm, 0.0);
+    cblas_zscal(N, &phi_scale, phi.data(), 1);
+    
+    // Build Lanczos tridiagonal for H starting from |φ⟩
+    std::vector<double> alpha, beta;
+    std::vector<ComplexVector> lanczos_vectors;
+    
+    uint64_t iterations = build_lanczos_tridiagonal_with_basis(
+        H, phi, N, params.krylov_dim, params.tolerance,
+        params.full_reorthogonalization, params.reorth_frequency,
+        alpha, beta, &lanczos_vectors
+    );
+    
+    uint64_t m = alpha.size();
+    std::cout << "  Lanczos iterations: " << m << std::endl;
+    
+    spectral_data.krylov_dim = m;
+    spectral_data.lanczos_iterations = iterations;
+    
+    // Diagonalize tridiagonal (need eigenvectors for weight computation)
+    std::vector<double> ritz_values, dummy_weights;
+    std::vector<double> evecs;
+    diagonalize_tridiagonal_ritz(alpha, beta, ritz_values, dummy_weights, &evecs);
+    
+    if (ritz_values.empty()) {
+        std::cerr << "  Error: Tridiagonal diagonalization failed\n";
+        return spectral_data;
+    }
+    
+    // Determine and apply energy shift
+    double E_shift;
+    if (std::abs(energy_shift) > 1e-14) {
+        E_shift = energy_shift;
+        std::cout << "  Using provided ground state energy shift: " << E_shift << std::endl;
+    } else {
+        E_shift = *std::min_element(ritz_values.begin(), ritz_values.end());
+        std::cout << "  Ground state energy (auto-detected from Krylov): " << E_shift << std::endl;
+    }
+    
+    spectral_data.ground_state_energy = E_shift;
+    
+    // Shift to excitation energies
+    for (int i = 0; i < m; i++) {
+        ritz_values[i] -= E_shift;
+    }
+    spectral_data.ritz_values = ritz_values;
+    
+    std::cout << "  Shifted to excitation energies (E_gs = 0)" << std::endl;
+    std::cout << "  Energy range: [" << *std::min_element(ritz_values.begin(), ritz_values.end())
+              << ", " << *std::max_element(ritz_values.begin(), ritz_values.end()) << "]" << std::endl;
+    
+    // Compute temperature-independent spectral weights
+    // w_n = ⟨ψ|O₁†|n⟩⟨n|O₂|ψ⟩
+    
+    // Apply O1 to original state: |O₁ψ⟩
+    ComplexVector O1_psi(N);
+    O1(psi.data(), O1_psi.data(), N);
+    
+    spectral_data.spectral_weights.resize(m);
+    
+    for (int n = 0; n < m; n++) {
+        // Compute ⟨ψ|O₁†|n⟩ = ⟨O₁ψ|n⟩ = Σⱼ evecs[n,j] ⟨O₁ψ|vⱼ⟩
+        Complex overlap_O1 = Complex(0.0, 0.0);
+        for (int j = 0; j < m; j++) {
+            Complex bracket;
+            cblas_zdotc_sub(N, O1_psi.data(), 1, lanczos_vectors[j].data(), 1, &bracket);
+            overlap_O1 += Complex(evecs[n * m + j], 0.0) * bracket;
+        }
+        
+        // Compute ⟨n|O₂|ψ⟩ = evecs[n,0] × ||O₂|ψ|| (since |v₀⟩ = O₂|ψ⟩/||O₂|ψ||)
+        Complex overlap_O2 = Complex(evecs[n * m + 0] * phi_norm, 0.0);
+        
+        // Weight is ⟨ψ|O₁†|n⟩⟨n|O₂|ψ⟩
+        Complex weight_complex = std::conj(overlap_O1) * overlap_O2;
+        spectral_data.spectral_weights[n] = weight_complex;
+    }
+    
+    std::cout << "==========================================\n";
+    std::cout << "Spectral Data Computation Complete\n";
+    std::cout << "==========================================\n";
+    
+    return spectral_data;
+}
+
+/**
+ * @brief Compute spectral function from Lanczos data for multiple temperatures
+ * 
+ * This function takes pre-computed spectral data and efficiently computes
+ * S(ω,T) for multiple temperatures. This is much faster than re-running
+ * Lanczos for each temperature.
+ */
+std::map<double, DynamicalResponseResults> compute_spectral_function_from_lanczos_data(
+    const LanczosSpectralData& spectral_data,
+    double omega_min,
+    double omega_max,
+    uint64_t num_omega_bins,
+    const std::vector<double>& temperatures,
+    double broadening
+) {
+    std::cout << "\n==========================================\n";
+    std::cout << "Computing Spectral Functions for Multiple Temperatures\n";
+    std::cout << "==========================================\n";
+    std::cout << "Number of temperatures: " << temperatures.size() << std::endl;
+    std::cout << "Temperature range: [" << *std::min_element(temperatures.begin(), temperatures.end())
+              << ", " << *std::max_element(temperatures.begin(), temperatures.end()) << "]" << std::endl;
+    std::cout << "Frequency range: [" << omega_min << ", " << omega_max << "]" << std::endl;
+    std::cout << "Broadening: " << broadening << std::endl;
+    
+    std::map<double, DynamicalResponseResults> results_map;
+    
+    // Generate frequency grid
+    std::vector<double> frequencies(num_omega_bins);
+    double omega_step = (omega_max - omega_min) / std::max(uint64_t(1), num_omega_bins - 1);
+    for (int i = 0; i < num_omega_bins; i++) {
+        frequencies[i] = omega_min + i * omega_step;
+    }
+    
+    const auto& ritz_values = spectral_data.ritz_values;
+    const auto& weights = spectral_data.spectral_weights;
+    uint64_t m = ritz_values.size();
+    
+    // Compute spectral function for each temperature
+    for (double T : temperatures) {
+        std::cout << "  Computing for T = " << T << " ..." << std::endl;
+        
+        DynamicalResponseResults results;
+        results.frequencies = frequencies;
+        results.total_samples = 1;
+        results.omega_min = omega_min;
+        results.omega_max = omega_max;
+        
+        // Initialize spectral function arrays
+        results.spectral_function.resize(num_omega_bins, 0.0);
+        results.spectral_function_imag.resize(num_omega_bins, 0.0);
+        results.spectral_error.resize(num_omega_bins, 0.0);
+        results.spectral_error_imag.resize(num_omega_bins, 0.0);
+        
+        // Compute partition function and thermal weights
+        double beta = 1.0 / T;
+        std::vector<double> thermal_weights(m);
+        double Z = 0.0;
+        
+        // Find minimum energy for numerical stability
+        double E_min = *std::min_element(ritz_values.begin(), ritz_values.end());
+        
+        for (int n = 0; n < m; n++) {
+            double shifted_energy = ritz_values[n] - E_min;
+            double boltzmann = std::exp(-beta * shifted_energy);
+            thermal_weights[n] = boltzmann;
+            Z += boltzmann;
+        }
+        
+        // Normalize thermal weights
+        if (Z > 0.0) {
+            for (int n = 0; n < m; n++) {
+                thermal_weights[n] /= Z;
+            }
+        }
+        
+        // Compute spectral function at each frequency
+        double eta = broadening;
+        double norm_factor = eta / M_PI;
+        
+        for (int i = 0; i < num_omega_bins; i++) {
+            double omega = frequencies[i];
+            Complex S_omega(0.0, 0.0);
+            
+            for (int n = 0; n < m; n++) {
+                double E_n = ritz_values[n];
+                double lorentzian = norm_factor / ((omega - E_n) * (omega - E_n) + eta * eta);
+                
+                // Include thermal weight and spectral weight
+                S_omega += weights[n] * lorentzian * thermal_weights[n];
+            }
+            
+            results.spectral_function[i] = std::real(S_omega);
+            results.spectral_function_imag[i] = std::imag(S_omega);
+        }
+        
+        results_map[T] = results;
+    }
+    
+    std::cout << "==========================================\n";
+    std::cout << "Multi-Temperature Spectral Function Complete\n";
+    std::cout << "==========================================\n";
+    
+    return results_map;
+}
+
+/**
+ * @brief Optimized version for computing dynamical correlation at multiple temperatures
+ * 
+ * This combines compute_lanczos_spectral_data and compute_spectral_function_from_lanczos_data
+ * into a single convenient function for temperature scans.
+ */
+std::map<double, DynamicalResponseResults> compute_dynamical_correlation_state_multi_temperature(
+    std::function<void(const Complex*, Complex*, int)> H,
+    std::function<void(const Complex*, Complex*, int)> O1,
+    std::function<void(const Complex*, Complex*, int)> O2,
+    const ComplexVector& state,
+    uint64_t N,
+    const DynamicalResponseParameters& params,
+    double omega_min,
+    double omega_max,
+    uint64_t num_omega_bins,
+    const std::vector<double>& temperatures,
+    double energy_shift
+) {
+    std::cout << "\n=========================================="  << std::endl;
+    std::cout << "OPTIMIZED MULTI-TEMPERATURE DYNAMICAL CORRELATION" << std::endl;
+    std::cout << "==========================================" << std::endl;
+    std::cout << "Running Lanczos ONCE for " << temperatures.size() << " temperature points" << std::endl;
+    std::cout << "This is much more efficient than running Lanczos " << temperatures.size() << " times!" << std::endl;
+    std::cout << "==========================================" << std::endl;
+    
+    // Step 1: Compute temperature-independent spectral data (Lanczos run)
+    LanczosSpectralData spectral_data = compute_lanczos_spectral_data(
+        H, O1, O2, state, N, params, energy_shift
+    );
+    
+    if (spectral_data.ritz_values.empty()) {
+        std::cerr << "Error: Failed to compute spectral data\n";
+        return {};
+    }
+    
+    // Step 2: Compute spectral functions for all temperatures (fast!)
+    return compute_spectral_function_from_lanczos_data(
+        spectral_data, omega_min, omega_max, num_omega_bins,
+        temperatures, params.broadening
+    );
+}
+
+/**
+ * @brief Multi-sample multi-temperature dynamical correlation (OPTIMIZED!)
+ * 
+ * This function extends the temperature scan optimization to handle multiple
+ * random samples. It provides ~N× speedup for N temperature points.
+ */
+std::map<double, DynamicalResponseResults> compute_dynamical_correlation_multi_sample_multi_temperature(
+    std::function<void(const Complex*, Complex*, int)> H,
+    std::function<void(const Complex*, Complex*, int)> O1,
+    std::function<void(const Complex*, Complex*, int)> O2,
+    uint64_t N,
+    const DynamicalResponseParameters& params,
+    double omega_min,
+    double omega_max,
+    uint64_t num_omega_bins,
+    const std::vector<double>& temperatures,
+    double energy_shift,
+    const std::string& output_dir
+) {
+    std::cout << "\n=========================================="  << std::endl;
+    std::cout << "OPTIMIZED MULTI-SAMPLE MULTI-TEMPERATURE" << std::endl;
+    std::cout << "==========================================" << std::endl;
+    std::cout << "Samples: " << params.num_samples << std::endl;
+    std::cout << "Temperatures: " << temperatures.size() << std::endl;
+    std::cout << "Running Lanczos " << params.num_samples << " times (once per sample)" << std::endl;
+    std::cout << "Then computing " << temperatures.size() << " temperatures from cached data" << std::endl;
+    std::cout << "Expected speedup: ~" << (temperatures.size() * 0.9) << "× vs standard approach" << std::endl;
+    std::cout << "==========================================" << std::endl;
+    
+    // Initialize random number generator
+    std::mt19937 gen;
+    if (params.random_seed == 0) {
+        std::random_device rd;
+        gen.seed(rd());
+    } else {
+        gen.seed(params.random_seed);
+    }
+    std::uniform_real_distribution<double> dist(-1.0, 1.0);
+    
+    // We'll accumulate spectral data across samples
+    // First, determine the ground state energy if not provided
+    double E_shift = energy_shift;
+    if (std::abs(E_shift) < 1e-14) {
+        std::cout << "\nDetermining ground state energy from first sample...\n";
+        ComplexVector test_state(N);
+        for (uint64_t i = 0; i < N; i++) {
+            test_state[i] = Complex(dist(gen), dist(gen));
+        }
+        double norm = cblas_dznrm2(N, test_state.data(), 1);
+        Complex scale(1.0/norm, 0.0);
+        cblas_zscal(N, &scale, test_state.data(), 1);
+        
+        // Quick Lanczos to get ground state
+        ComplexVector phi(N);
+        O2(test_state.data(), phi.data(), N);
+        double phi_norm = cblas_dznrm2(N, phi.data(), 1);
+        if (phi_norm > 1e-14) {
+            Complex phi_scale(1.0/phi_norm, 0.0);
+            cblas_zscal(N, &phi_scale, phi.data(), 1);
+            
+            std::vector<double> alpha, beta;
+            build_lanczos_tridiagonal(
+                H, phi, N, std::min(params.krylov_dim, (uint64_t)100),
+                params.tolerance, false, 10, alpha, beta
+            );
+            
+            std::vector<double> ritz_vals, weights;
+            diagonalize_tridiagonal_ritz(alpha, beta, ritz_vals, weights);
+            
+            if (!ritz_vals.empty()) {
+                E_shift = *std::min_element(ritz_vals.begin(), ritz_vals.end());
+                std::cout << "Ground state energy (estimated): " << E_shift << std::endl;
+            }
+        }
+    }
+    
+    // Storage for accumulated spectral data
+    std::vector<double> accumulated_eigenvalues;  // These should be consistent across samples
+    std::vector<Complex> accumulated_weights;     // These we'll average
+    int krylov_dim_used = 0;
+    
+    std::cout << "\n--- Processing " << params.num_samples << " random samples ---\n";
+    
+    // Loop over samples
+    for (uint64_t sample_idx = 0; sample_idx < params.num_samples; sample_idx++) {
+        std::cout << "\nSample " << (sample_idx + 1) << "/" << params.num_samples << ":\n";
+        
+        // Generate random state
+        ComplexVector state(N);
+        for (uint64_t i = 0; i < N; i++) {
+            state[i] = Complex(dist(gen), dist(gen));
+        }
+        double state_norm = cblas_dznrm2(N, state.data(), 1);
+        Complex scale(1.0/state_norm, 0.0);
+        cblas_zscal(N, &scale, state.data(), 1);
+        
+        // Compute spectral data for this sample
+        LanczosSpectralData sample_data = compute_lanczos_spectral_data(
+            H, O1, O2, state, N, params, E_shift
+        );
+        
+        if (sample_data.ritz_values.empty()) {
+            std::cerr << "Warning: Sample " << sample_idx << " failed, skipping\n";
+            continue;
+        }
+        
+        // For the first sample, initialize accumulated arrays
+        if (sample_idx == 0) {
+            accumulated_eigenvalues = sample_data.ritz_values;
+            accumulated_weights.resize(sample_data.spectral_weights.size(), Complex(0.0, 0.0));
+            krylov_dim_used = sample_data.krylov_dim;
+        }
+        
+        // Verify eigenvalues are consistent (they should be, up to numerical precision)
+        if (sample_data.ritz_values.size() != accumulated_eigenvalues.size()) {
+            std::cerr << "Warning: Sample " << sample_idx << " has different Krylov dimension ("
+                      << sample_data.ritz_values.size() << " vs " << accumulated_eigenvalues.size()
+                      << "), using min\n";
+            size_t min_size = std::min(sample_data.ritz_values.size(), accumulated_eigenvalues.size());
+            sample_data.ritz_values.resize(min_size);
+            sample_data.spectral_weights.resize(min_size);
+            accumulated_eigenvalues.resize(min_size);
+            accumulated_weights.resize(min_size);
+        }
+        
+        // Accumulate spectral weights (we'll average at the end)
+        for (size_t i = 0; i < accumulated_weights.size(); i++) {
+            accumulated_weights[i] += sample_data.spectral_weights[i];
+        }
+        
+        std::cout << "  Accumulated spectral weights from sample " << (sample_idx + 1) << std::endl;
+    }
+    
+    // Average the accumulated weights
+    if (params.num_samples > 0) {
+        double inv_num_samples = 1.0 / static_cast<double>(params.num_samples);
+        for (size_t i = 0; i < accumulated_weights.size(); i++) {
+            accumulated_weights[i] *= inv_num_samples;
+        }
+        std::cout << "\n--- Averaged spectral weights over " << params.num_samples << " samples ---\n";
+    }
+    
+    // Create averaged spectral data structure
+    LanczosSpectralData averaged_spectral_data;
+    averaged_spectral_data.ritz_values = accumulated_eigenvalues;
+    averaged_spectral_data.spectral_weights = accumulated_weights;
+    averaged_spectral_data.ground_state_energy = E_shift;
+    averaged_spectral_data.krylov_dim = krylov_dim_used;
+    averaged_spectral_data.lanczos_iterations = krylov_dim_used;
+    
+    std::cout << "\n--- Computing spectral functions for " << temperatures.size() 
+              << " temperatures (FAST!) ---\n";
+    
+    // Now compute spectral functions for all temperatures using averaged data
+    return compute_spectral_function_from_lanczos_data(
+        averaged_spectral_data, omega_min, omega_max, num_omega_bins,
+        temperatures, params.broadening
+    );
 }

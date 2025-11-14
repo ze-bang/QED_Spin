@@ -1555,12 +1555,6 @@ void microcanonical_tpq(
                               << ", β = " << inv_temp << std::endl;
                 }
                 
-                // Check convergence
-                if (variance_step < 1e-10 && step > 100) {
-                    std::cout << "  Converged to eigenstate at step " << step << std::endl;
-                    break;
-                }
-
                 // Write fluctuation data
                 if (measure_sz){
                     // Create operators on-demand only when needed (they are freed after use)

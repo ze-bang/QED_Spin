@@ -2,7 +2,8 @@
 #include "../core/system_utils.h"
 
 #include "ltlm.h"
-#include "ftlm.h"  // For build_lanczos_tridiagonal function
+#include "ftlm.h"     // For build_lanczos_tridiagonal function
+#include "lanczos.h"  // For helper functions
 #include <fstream>
 #include <iomanip>
 #include <numeric>
@@ -22,88 +23,42 @@ double find_ground_state_lanczos(
 ) {
     std::cout << "  Finding ground state via Lanczos...\n";
     
-    // Generate random initial vector
-    std::random_device rd;
-    std::mt19937 gen(rd());
+    // Generate random initial vector using helper function
+    std::mt19937 gen(std::random_device{}());
     std::uniform_real_distribution<double> dist(-1.0, 1.0);
+    ComplexVector v0 = generateRandomVector(N, gen, dist);
     
-    ComplexVector v0(N);
-    for (int i = 0; i < N; i++) {
-        v0[i] = Complex(dist(gen), dist(gen));
-    }
-    
-    // Normalize
-    double norm = cblas_dznrm2(N, v0.data(), 1);
-    Complex scale(1.0/norm, 0.0);
-    cblas_zscal(N, &scale, v0.data(), 1);
-    
-    // Build Lanczos tridiagonal
+    // Build Lanczos tridiagonal with basis storage
     std::vector<double> alpha, beta;
-    uint64_t iterations = build_lanczos_tridiagonal(
+    std::vector<ComplexVector> lanczos_vectors;
+    uint64_t iterations = build_lanczos_tridiagonal_with_basis(
         H, v0, N, krylov_dim, tolerance,
         full_reorth, reorth_freq,
-        alpha, beta
+        alpha, beta, &lanczos_vectors
     );
     
     std::cout << "  Lanczos iterations for ground state: " << iterations << std::endl;
     
     uint64_t m = alpha.size();
     
-    // Diagonalize tridiagonal matrix to find ground state
-    std::vector<double> diag = alpha;
-    std::vector<double> offdiag(m - 1);
-    for (int i = 0; i < m - 1; i++) {
-        offdiag[i] = beta[i + 1];
-    }
+    // Diagonalize tridiagonal matrix using helper function
+    std::vector<double> ritz_values, weights;
+    std::vector<double> evecs;
+    diagonalize_tridiagonal_ritz(alpha, beta, ritz_values, weights, &evecs);
     
-    std::vector<double> evecs(m * m);
-    uint64_t info = LAPACKE_dstevd(LAPACK_COL_MAJOR, 'V', m, diag.data(), offdiag.data(), evecs.data(), m);
-    
-    if (info != 0) {
-        std::cerr << "  Error: Ground state tridiagonal diagonalization failed with code " << info << std::endl;
+    if (ritz_values.empty()) {
+        std::cerr << "  Error: Ground state tridiagonal diagonalization failed" << std::endl;
         ground_state = v0;  // Return initial state as fallback
-        return diag[0];
+        return 0.0;
     }
     
-    double ground_energy = diag[0];
+    double ground_energy = ritz_values[0];
     std::cout << "  Ground state energy: " << ground_energy << std::endl;
     
     // Reconstruct ground state in full Hilbert space
-    // |ψ_0⟩ = Σ_j c_j |v_j⟩ where c_j = evecs[0*m + j]
+    // |ψ_0⟩ = Σ_j c_j |v_j⟩ where c_j = evecs[j] (first eigenvector)
     ground_state.resize(N, Complex(0.0, 0.0));
     
-    // Store Lanczos vectors
-    std::vector<ComplexVector> lanczos_vectors;
-    lanczos_vectors.push_back(v0);
-    
-    ComplexVector v_current = v0;
-    ComplexVector v_prev(N, Complex(0.0, 0.0));
-    ComplexVector v_next(N);
-    ComplexVector w(N);
-    
-    // Rebuild Lanczos vectors (we need them to reconstruct ground state)
-    for (int j = 0; j < m - 1; j++) {
-        H(v_current.data(), w.data(), N);
-        
-        if (j > 0) {
-            Complex neg_beta(-beta[j], 0.0);
-            cblas_zaxpy(N, &neg_beta, v_prev.data(), 1, w.data(), 1);
-        }
-        
-        Complex neg_alpha(-alpha[j], 0.0);
-        cblas_zaxpy(N, &neg_alpha, v_current.data(), 1, w.data(), 1);
-        
-        norm = cblas_dznrm2(N, w.data(), 1);
-        for (int i = 0; i < N; i++) {
-            v_next[i] = w[i] / norm;
-        }
-        
-        lanczos_vectors.push_back(v_next);
-        v_prev = v_current;
-        v_current = v_next;
-    }
-    
-    // Reconstruct ground state: |ψ_0⟩ = Σ_j c_j |v_j⟩
     for (int j = 0; j < m; j++) {
         double coeff = evecs[j];  // First eigenvector (ground state)
         Complex alpha_c(coeff, 0.0);
@@ -111,8 +66,8 @@ double find_ground_state_lanczos(
     }
     
     // Normalize
-    norm = cblas_dznrm2(N, ground_state.data(), 1);
-    scale = Complex(1.0/norm, 0.0);
+    double norm = cblas_dznrm2(N, ground_state.data(), 1);
+    Complex scale(1.0/norm, 0.0);
     cblas_zscal(N, &scale, ground_state.data(), 1);
     
     return ground_energy;
@@ -147,30 +102,12 @@ int build_excitation_spectrum(
     
     uint64_t m = alpha.size();
     
-    // Diagonalize tridiagonal matrix
-    std::vector<double> diag = alpha;
-    std::vector<double> offdiag(m - 1);
-    for (int i = 0; i < m - 1; i++) {
-        offdiag[i] = beta[i + 1];
-    }
+    // Diagonalize tridiagonal matrix using helper function
+    diagonalize_tridiagonal_ritz(alpha, beta, excitation_energies, weights);
     
-    std::vector<double> evecs(m * m);
-    uint64_t info = LAPACKE_dstevd(LAPACK_COL_MAJOR, 'V', m, diag.data(), offdiag.data(), evecs.data(), m);
-    
-    if (info != 0) {
-        std::cerr << "  Warning: Excitation spectrum diagonalization failed with code " << info << std::endl;
+    if (excitation_energies.empty()) {
+        std::cerr << "  Warning: Excitation spectrum diagonalization failed" << std::endl;
         return 0;
-    }
-    
-    // Extract excitation energies and weights
-    excitation_energies.resize(m);
-    weights.resize(m);
-    
-    for (int i = 0; i < m; i++) {
-        // Excitation energy relative to ground state
-        excitation_energies[i] = diag[i];
-        // Weight is squared first component of eigenvector
-        weights[i] = evecs[i * m] * evecs[i * m];
     }
     
     std::cout << "  Found " << m << " excitation states\n";
