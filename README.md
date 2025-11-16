@@ -7,6 +7,16 @@ functions. The project combines optimized C++ kernels, optional GPU backends,
 and a growing ecosystem of Python post-processing utilities to support both
 rapid prototyping and large-scale production runs.
 
+## Recent Updates
+
+**🚀 Temperature Scan Optimization (NEW!)** – Dynamical correlation calculations at
+multiple temperatures now run **up to 35× faster** by reusing the temperature-independent
+Lanczos decomposition. Instead of running expensive Lanczos iterations separately for
+each temperature point, the code now computes the spectral weights once and efficiently
+applies temperature-dependent Boltzmann factors. This optimization is automatically
+enabled for multi-temperature scans and requires no code changes.
+📖 See [docs/DYNAMICAL_CORRELATION_TEMPERATURE_OPTIMIZATION.md](docs/DYNAMICAL_CORRELATION_TEMPERATURE_OPTIMIZATION.md) for details.
+
 ## Features
 
 - **Modular workflows** – Run standard or symmetry-reduced diagonalization,

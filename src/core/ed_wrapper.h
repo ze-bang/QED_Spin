@@ -192,7 +192,7 @@ struct EDParameters {
     
     // ========== FTLM-Specific Parameters ==========
     uint64_t ftlm_krylov_dim = 100;     // Krylov subspace dimension per sample
-    bool ftlm_full_reorth = false; // Use full reorthogonalization
+    bool ftlm_full_reorth = true; // Use full reorthogonalization
     uint64_t ftlm_reorth_freq = 10;     // Reorthogonalization frequency
     uint64_t ftlm_seed = 0;    // Random seed (0 = auto)
     bool ftlm_store_samples = false; // Store per-sample intermediate data
@@ -201,7 +201,7 @@ struct EDParameters {
     // ========== LTLM-Specific Parameters ==========
     uint64_t ltlm_krylov_dim = 200;     // Krylov subspace dimension for excitations
     uint64_t ltlm_ground_krylov = 100;  // Krylov dimension for finding ground state
-    bool ltlm_full_reorth = false; // Use full reorthogonalization
+    bool ltlm_full_reorth = true; // Use full reorthogonalization
     uint64_t ltlm_reorth_freq = 10;     // Reorthogonalization frequency
     uint64_t ltlm_seed = 0;    // Random seed (0 = auto)
     bool ltlm_store_data = false;  // Store intermediate data

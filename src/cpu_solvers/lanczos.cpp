@@ -1,5 +1,6 @@
 #include "lanczos.h"
 #include "../core/system_utils.h"
+#include "../core/hdf5_io.h"
 #include <limits>
 
 ComplexVector generateRandomVector(int N, std::mt19937& gen, std::uniform_real_distribution<double>& dist) {
@@ -505,25 +506,35 @@ int solve_tridiagonal_matrix(const std::vector<double>& alpha, const std::vector
                 }
             }
 
-            std::string evec_file = evec_dir + "/eigenvector_" + std::to_string(i) + ".dat";
-            std::ofstream evec_outfile(evec_file, std::ios::binary);
-            if (!evec_outfile) {
-                std::cerr << "Error: Cannot open file " << evec_file << " for writing" << std::endl;
-                continue;
-            }
-
-            evec_outfile.write(reinterpret_cast<const char*>(full_vector.data()), N * sizeof(Complex));
-            evec_outfile.close();
-
-            std::string evec_text_file = evec_dir + "/eigenvector_" + std::to_string(i) + ".txt";
-            std::ofstream evec_text_outfile(evec_text_file);
-            if (evec_text_outfile) {
-                evec_text_outfile << std::scientific << std::setprecision(15);
-                for (int j = 0; j < N; j++) {
-                    evec_text_outfile << std::real(full_vector[j]) << " "
-                                     << std::imag(full_vector[j]) << std::endl;
+            // Save eigenvector using HDF5 (primary format)
+            try {
+                std::string hdf5_file = HDF5IO::createOrOpenFile(evec_dir);
+                HDF5IO::saveEigenvector(hdf5_file, i, full_vector);
+            } catch (const std::exception& e) {
+                std::cerr << "Warning: Failed to save eigenvector " << i << " to HDF5: " << e.what() << std::endl;
+                std::cerr << "Falling back to binary format..." << std::endl;
+                
+                // Fallback to binary format
+                std::string evec_file = evec_dir + "/eigenvector_" + std::to_string(i) + ".dat";
+                std::ofstream evec_outfile(evec_file, std::ios::binary);
+                if (evec_outfile) {
+                    evec_outfile.write(reinterpret_cast<const char*>(full_vector.data()), N * sizeof(Complex));
+                    evec_outfile.close();
                 }
-                evec_text_outfile.close();
+            }
+            
+            // Also save in text format for backward compatibility (can be disabled for large systems)
+            if (N < 10000) {  // Only save text for small systems
+                std::string evec_text_file = evec_dir + "/eigenvector_" + std::to_string(i) + ".txt";
+                std::ofstream evec_text_outfile(evec_text_file);
+                if (evec_text_outfile) {
+                    evec_text_outfile << std::scientific << std::setprecision(15);
+                    for (int j = 0; j < N; j++) {
+                        evec_text_outfile << std::real(full_vector[j]) << " "
+                                         << std::imag(full_vector[j]) << std::endl;
+                    }
+                    evec_text_outfile.close();
+                }
             }
 
             if (i % 10 == 0 || i == n_eigenvalues - 1) {
@@ -545,22 +556,27 @@ int solve_tridiagonal_matrix(const std::vector<double>& alpha, const std::vector
     eigenvalues.resize(n_eigenvalues);
     std::copy(diag.begin(), diag.begin() + n_eigenvalues, eigenvalues.begin());
 
-    // Save eigenvalues to a single file
-    std::string eigenvalue_file = evec_dir + "/eigenvalues.dat";
-    std::ofstream eval_outfile(eigenvalue_file, std::ios::binary);
-    if (!eval_outfile) {
-        std::cerr << "Error: Cannot open file " << eigenvalue_file << " for writing" << std::endl;
-    } else {
-        // Write the number of eigenvalues first
-        size_t n_evals = eigenvalues.size();
-        eval_outfile.write(reinterpret_cast<const char*>(&n_evals), sizeof(size_t));
-        // Write all eigenvalues
-        eval_outfile.write(reinterpret_cast<const char*>(eigenvalues.data()), n_eigenvalues * sizeof(double));
-        eval_outfile.close();
-        std::cout << "Saved " << n_eigenvalues << " eigenvalues to " << eigenvalue_file << std::endl;
+    // Save eigenvalues using HDF5 (primary format)
+    try {
+        std::string hdf5_file = HDF5IO::createOrOpenFile(evec_dir);
+        HDF5IO::saveEigenvalues(hdf5_file, eigenvalues);
+        std::cout << "Saved " << n_eigenvalues << " eigenvalues to HDF5" << std::endl;
+    } catch (const std::exception& e) {
+        std::cerr << "Warning: Failed to save eigenvalues to HDF5: " << e.what() << std::endl;
+        std::cerr << "Falling back to binary format..." << std::endl;
+        
+        // Fallback to binary format
+        std::string eigenvalue_file = evec_dir + "/eigenvalues.dat";
+        std::ofstream eval_outfile(eigenvalue_file, std::ios::binary);
+        if (eval_outfile) {
+            size_t n_evals = eigenvalues.size();
+            eval_outfile.write(reinterpret_cast<const char*>(&n_evals), sizeof(size_t));
+            eval_outfile.write(reinterpret_cast<const char*>(eigenvalues.data()), n_eigenvalues * sizeof(double));
+            eval_outfile.close();
+        }
     }
     
-    // Also save eigenvalues in text format for verification
+    // Also save eigenvalues in text format for backward compatibility
     std::string eigenvalue_text_file = evec_dir + "/eigenvalues.txt";
     std::ofstream eval_text_outfile(eigenvalue_text_file);
     if (eval_text_outfile) {

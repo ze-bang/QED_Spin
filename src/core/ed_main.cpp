@@ -8,6 +8,7 @@
 #include "ed_wrapper.h"
 #include "ed_wrapper_streaming.h"
 #include "construct_ham.h"
+#include "hdf5_io.h"
 #include "../cpu_solvers/ftlm.h"
 #include "../cpu_solvers/ltlm.h"
 #include "observables.h"
@@ -630,6 +631,20 @@ void compute_thermodynamics(const std::vector<double>& eigenvalues, const EDConf
     std::string thermo_dir = config.workflow.output_dir + "/thermo";
     safe_system_call("mkdir -p " + thermo_dir);
     
+    // Try to save to HDF5 first
+    try {
+        std::string hdf5_file = HDF5IO::createOrOpenFile(config.workflow.output_dir);
+        HDF5IO::saveThermodynamics(hdf5_file, thermo_data.temperatures, "energy", thermo_data.energy);
+        HDF5IO::saveThermodynamics(hdf5_file, thermo_data.temperatures, "specific_heat", thermo_data.specific_heat);
+        HDF5IO::saveThermodynamics(hdf5_file, thermo_data.temperatures, "entropy", thermo_data.entropy);
+        HDF5IO::saveThermodynamics(hdf5_file, thermo_data.temperatures, "free_energy", thermo_data.free_energy);
+        std::cout << "Saved thermodynamic data to HDF5\n";
+    } catch (const std::exception& e) {
+        std::cerr << "Warning: Failed to save thermodynamics to HDF5: " << e.what() << std::endl;
+        std::cerr << "Falling back to text format..." << std::endl;
+    }
+    
+    // Also save text format for backward compatibility
     std::ofstream file(thermo_dir + "/thermo_data.txt");
     if (file.is_open()) {
         file << "# Temperature  Energy  Specific_Heat  Entropy  Free_Energy\n";
@@ -640,7 +655,6 @@ void compute_thermodynamics(const std::vector<double>& eigenvalues, const EDConf
                  << thermo_data.entropy[i] << " "
                  << thermo_data.free_energy[i] << "\n";
         }
-        std::cout << "Saved thermodynamic data\n";
     }
 }
 
@@ -713,7 +727,7 @@ void compute_dynamical_response_workflow(const EDConfig& config) {
         std::cout << "\n--- Finding ground state energy for spectrum normalization ---\n";
         
         // First, try to read from eigenvalues.dat if it exists
-        std::string eigenvalues_file = config.workflow.output_dir + "/output/eigenvectors/eigenvalues.dat";
+        std::string eigenvalues_file = config.workflow.output_dir + "/eigenvectors/eigenvalues.dat";
         std::cout << "Checking for eigenvalues file: " << eigenvalues_file << std::endl;
         std::ifstream check_file(eigenvalues_file, std::ios::binary);
         

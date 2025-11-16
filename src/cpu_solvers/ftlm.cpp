@@ -3,6 +3,7 @@
 
 #include "ftlm.h"
 #include "lanczos.h"
+#include "../core/hdf5_io.h"
 #include <fstream>
 #include <iomanip>
 #include <numeric>
@@ -336,19 +337,36 @@ FTLMResults finite_temperature_lanczos(
         
         // Save intermediate data if requested
         if (params.store_intermediate && !output_dir.empty()) {
-            std::string sample_file = output_dir + "/ftlm_samples/sample_" + std::to_string(sample) + ".txt";
-            std::ofstream f(sample_file);
-            if (f.is_open()) {
-                f << "# Temperature  Energy  Specific_Heat  Entropy  Free_Energy\n";
-                for (size_t t = 0; t < temperatures.size(); t++) {
-                    f << std::scientific << std::setprecision(12)
-                      << temperatures[t] << " "
-                      << sample_thermo.energy[t] << " "
-                      << sample_thermo.specific_heat[t] << " "
-                      << sample_thermo.entropy[t] << " "
-                      << sample_thermo.free_energy[t] << "\n";
+            // Try to save to HDF5 first
+            try {
+                std::string hdf5_file = HDF5IO::createOrOpenFile(output_dir);
+                std::map<std::string, std::vector<double>> observables;
+                observables["energy"] = sample_thermo.energy;
+                observables["specific_heat"] = sample_thermo.specific_heat;
+                observables["entropy"] = sample_thermo.entropy;
+                observables["free_energy"] = sample_thermo.free_energy;
+                observables["temperature"] = temperatures;
+                HDF5IO::saveFTLMSample(hdf5_file, sample, ritz_values, observables);
+            } catch (const std::exception& e) {
+                std::cerr << "Warning: Failed to save FTLM sample " << sample 
+                          << " to HDF5: " << e.what() << std::endl;
+                std::cerr << "Falling back to text format..." << std::endl;
+                
+                // Fallback to text format
+                std::string sample_file = output_dir + "/ftlm_samples/sample_" + std::to_string(sample) + ".txt";
+                std::ofstream f(sample_file);
+                if (f.is_open()) {
+                    f << "# Temperature  Energy  Specific_Heat  Entropy  Free_Energy\n";
+                    for (size_t t = 0; t < temperatures.size(); t++) {
+                        f << std::scientific << std::setprecision(12)
+                          << temperatures[t] << " "
+                          << sample_thermo.energy[t] << " "
+                          << sample_thermo.specific_heat[t] << " "
+                          << sample_thermo.entropy[t] << " "
+                          << sample_thermo.free_energy[t] << "\n";
+                    }
+                    f.close();
                 }
-                f.close();
             }
         }
     }
@@ -1057,35 +1075,29 @@ void save_dynamical_response_results(
     
     file << "# Dynamical Response Results (averaged over " << results.total_samples << " samples)\n";
     
-    // Check if we have imaginary parts (non-zero for cross-correlation)
-    bool has_imaginary = false;
-    if (!results.spectral_function_imag.empty()) {
-        for (double val : results.spectral_function_imag) {
-            if (std::abs(val) > 1e-14) {
-                has_imaginary = true;
-                break;
-            }
-        }
-    }
-    
-    if (has_imaginary) {
-        file << "# Frequency  Re[S(ω)]  Im[S(ω)]  Re[Error]  Im[Error]\n";
-    } else {
-        file << "# Frequency  Spectral_Function  Error\n";
-    }
+    // Always output complex format for consistency
+    file << "# Frequency  Re[S(ω)]  Im[S(ω)]  Re[Error]  Im[Error]\n";
     
     file << std::scientific << std::setprecision(12);
     
     for (size_t i = 0; i < results.frequencies.size(); i++) {
         file << results.frequencies[i] << " "
-             << results.spectral_function[i];
+             << results.spectral_function[i] << " ";
         
-        if (has_imaginary) {
-            file << " " << results.spectral_function_imag[i]
-                 << " " << results.spectral_error[i]
-                 << " " << results.spectral_error_imag[i];
+        // Output imaginary part (will be zero if not computed)
+        if (!results.spectral_function_imag.empty() && i < results.spectral_function_imag.size()) {
+            file << results.spectral_function_imag[i];
         } else {
-            file << " " << results.spectral_error[i];
+            file << "0.000000000000e+00";
+        }
+        
+        file << " " << results.spectral_error[i] << " ";
+        
+        // Output imaginary error (will be zero if not computed)
+        if (!results.spectral_error_imag.empty() && i < results.spectral_error_imag.size()) {
+            file << results.spectral_error_imag[i];
+        } else {
+            file << "0.000000000000e+00";
         }
         
         file << "\n";
@@ -1093,9 +1105,6 @@ void save_dynamical_response_results(
     
     file.close();
     std::cout << "Dynamical response results saved to: " << filename << std::endl;
-    if (has_imaginary) {
-        std::cout << "  (Complex spectral function with both real and imaginary parts)" << std::endl;
-    }
 }
 
 /**
@@ -2183,7 +2192,9 @@ std::map<double, DynamicalResponseResults> compute_spectral_function_from_lanczo
     double omega_max,
     uint64_t num_omega_bins,
     const std::vector<double>& temperatures,
-    double broadening
+    double broadening,
+    uint64_t num_samples,
+    const std::vector<std::vector<Complex>>* per_sample_weights
 ) {
     std::cout << "\n==========================================\n";
     std::cout << "Computing Spectral Functions for Multiple Temperatures\n";
@@ -2213,7 +2224,7 @@ std::map<double, DynamicalResponseResults> compute_spectral_function_from_lanczo
         
         DynamicalResponseResults results;
         results.frequencies = frequencies;
-        results.total_samples = 1;
+        results.total_samples = num_samples;
         results.omega_min = omega_min;
         results.omega_max = omega_max;
         
@@ -2265,6 +2276,49 @@ std::map<double, DynamicalResponseResults> compute_spectral_function_from_lanczo
             results.spectral_function_imag[i] = std::imag(S_omega);
         }
         
+        // Compute error bars if per-sample data is available
+        if (per_sample_weights && num_samples > 1) {
+            std::vector<std::vector<double>> per_sample_spectral_real(num_samples, std::vector<double>(num_omega_bins, 0.0));
+            std::vector<std::vector<double>> per_sample_spectral_imag(num_samples, std::vector<double>(num_omega_bins, 0.0));
+            
+            // Compute spectral function for each sample
+            for (uint64_t s = 0; s < num_samples && s < per_sample_weights->size(); s++) {
+                const auto& sample_weights = (*per_sample_weights)[s];
+                
+                for (int i = 0; i < num_omega_bins; i++) {
+                    double omega = frequencies[i];
+                    Complex S_omega_sample(0.0, 0.0);
+                    
+                    for (int n = 0; n < m && n < sample_weights.size(); n++) {
+                        double E_n = ritz_values[n];
+                        double lorentzian = norm_factor / ((omega - E_n) * (omega - E_n) + eta * eta);
+                        S_omega_sample += sample_weights[n] * lorentzian * thermal_weights[n];
+                    }
+                    
+                    per_sample_spectral_real[s][i] = std::real(S_omega_sample);
+                    per_sample_spectral_imag[s][i] = std::imag(S_omega_sample);
+                }
+            }
+            
+            // Compute standard error: SE = sqrt(variance / num_samples)
+            for (int i = 0; i < num_omega_bins; i++) {
+                double mean_real = results.spectral_function[i];
+                double mean_imag = results.spectral_function_imag[i];
+                double var_real = 0.0, var_imag = 0.0;
+                
+                for (uint64_t s = 0; s < num_samples && s < per_sample_weights->size(); s++) {
+                    double diff_real = per_sample_spectral_real[s][i] - mean_real;
+                    double diff_imag = per_sample_spectral_imag[s][i] - mean_imag;
+                    var_real += diff_real * diff_real;
+                    var_imag += diff_imag * diff_imag;
+                }
+                
+                // Standard error of the mean
+                results.spectral_error[i] = std::sqrt(var_real / (num_samples * (num_samples - 1)));
+                results.spectral_error_imag[i] = std::sqrt(var_imag / (num_samples * (num_samples - 1)));
+            }
+        }
+        
         results_map[T] = results;
     }
     
@@ -2314,7 +2368,7 @@ std::map<double, DynamicalResponseResults> compute_dynamical_correlation_state_m
     // Step 2: Compute spectral functions for all temperatures (fast!)
     return compute_spectral_function_from_lanczos_data(
         spectral_data, omega_min, omega_max, num_omega_bins,
-        temperatures, params.broadening
+        temperatures, params.broadening, 1
     );
 }
 
@@ -2397,6 +2451,7 @@ std::map<double, DynamicalResponseResults> compute_dynamical_correlation_multi_s
     // Storage for accumulated spectral data
     std::vector<double> accumulated_eigenvalues;  // These should be consistent across samples
     std::vector<Complex> accumulated_weights;     // These we'll average
+    std::vector<std::vector<Complex>> per_sample_weights;  // For computing error bars
     int krylov_dim_used = 0;
     
     std::cout << "\n--- Processing " << params.num_samples << " random samples ---\n";
@@ -2443,6 +2498,9 @@ std::map<double, DynamicalResponseResults> compute_dynamical_correlation_multi_s
             accumulated_weights.resize(min_size);
         }
         
+        // Store per-sample weights for error computation
+        per_sample_weights.push_back(sample_data.spectral_weights);
+        
         // Accumulate spectral weights (we'll average at the end)
         for (size_t i = 0; i < accumulated_weights.size(); i++) {
             accumulated_weights[i] += sample_data.spectral_weights[i];
@@ -2474,6 +2532,6 @@ std::map<double, DynamicalResponseResults> compute_dynamical_correlation_multi_s
     // Now compute spectral functions for all temperatures using averaged data
     return compute_spectral_function_from_lanczos_data(
         averaged_spectral_data, omega_min, omega_max, num_omega_bins,
-        temperatures, params.broadening
+        temperatures, params.broadening, params.num_samples, &per_sample_weights
     );
 }

@@ -49,8 +49,8 @@ struct FTLMSampleResult {
  * @brief Parameters for dynamical response calculation
  */
 struct DynamicalResponseParameters {
-    uint64_t krylov_dim = 200;              // Dimension of Krylov subspace
-    uint64_t num_samples = 10;              // Number of random initial states
+    uint64_t krylov_dim = 400;              // Dimension of Krylov subspace
+    uint64_t num_samples = 40;              // Number of random initial states
     double tolerance = 1e-10;          // Convergence tolerance for Lanczos
     bool full_reorthogonalization = false;  // Use full reorthogonalization
     uint64_t reorth_frequency = 10;         // Frequency of reorthogonalization
@@ -596,7 +596,9 @@ std::map<double, DynamicalResponseResults> compute_spectral_function_from_lanczo
     double omega_max,
     uint64_t num_omega_bins,
     const std::vector<double>& temperatures,
-    double broadening
+    double broadening,
+    uint64_t num_samples = 1,
+    const std::vector<std::vector<Complex>>* per_sample_weights = nullptr
 );
 
 /**
