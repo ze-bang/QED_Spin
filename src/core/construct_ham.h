@@ -2916,22 +2916,43 @@ public:
             
             if (op == 0) {
                 // Sx = (S+ + S-) / 2
-                addTransform([=](uint64_t basis) -> std::pair<int, Complex> {
-                    uint64_t flipped = basis ^ (1 << site);
-                    return {flipped, phase * Complex(0.5, 0.0)};
-                });
+                // Need to add both S+ and S- with coefficient 0.5
+                TransformData tdata_plus, tdata_minus;
+                tdata_plus.op_type = 0; // S+
+                tdata_plus.site_index = site;
+                tdata_plus.coefficient = phase * Complex(0.5, 0.0);
+                tdata_plus.is_two_body = false;
+                transform_data_.push_back(tdata_plus);
+                
+                tdata_minus.op_type = 1; // S-
+                tdata_minus.site_index = site;
+                tdata_minus.coefficient = phase * Complex(0.5, 0.0);
+                tdata_minus.is_two_body = false;
+                transform_data_.push_back(tdata_minus);
             } else if (op == 1) {
-                // Sy = (S+ - S-) / (2i)
-                addTransform([=](uint64_t basis) -> std::pair<int, Complex> {
-                    uint64_t flipped = basis ^ (1 << site);
-                    bool is_up = ((basis >> site) & 1) == 0;
-                    return {flipped, phase * Complex(0.0, is_up ? 0.5 : -0.5)};
-                });
+                // Sy = (S+ - S-) / (2i) = -i(S+ - S-)/2
+                // S+: coefficient = -i/2 * phase = phase * (0, -0.5)
+                // S-: coefficient = +i/2 * phase = phase * (0, +0.5)
+                TransformData tdata_plus, tdata_minus;
+                tdata_plus.op_type = 0; // S+
+                tdata_plus.site_index = site;
+                tdata_plus.coefficient = phase * Complex(0.0, -0.5);
+                tdata_plus.is_two_body = false;
+                transform_data_.push_back(tdata_plus);
+                
+                tdata_minus.op_type = 1; // S-
+                tdata_minus.site_index = site;
+                tdata_minus.coefficient = phase * Complex(0.0, 0.5);
+                tdata_minus.is_two_body = false;
+                transform_data_.push_back(tdata_minus);
             } else if (op == 2) {
                 // Sz
-                addTransform([=](uint64_t basis) -> std::pair<int, Complex> {
-                    return {basis, phase * Complex(spin_l * pow(-1, (basis >> site) & 1), 0.0)};
-                });
+                TransformData tdata;
+                tdata.op_type = 2; // Sz
+                tdata.site_index = site;
+                tdata.coefficient = phase * Complex(spin_l, 0.0);
+                tdata.is_two_body = false;
+                transform_data_.push_back(tdata);
             }
         }
     }
@@ -3056,23 +3077,41 @@ public:
             Complex phase = phases[site];
             
             if (op == 0) {
-                // Sx
-                addTransform([=](uint64_t basis) -> std::pair<int, Complex> {
-                    uint64_t flipped = basis ^ (1 << site);
-                    return {flipped, phase * Complex(0.5, 0.0)};
-                });
+                // Sx = (S+ + S-) / 2
+                TransformData tdata_plus, tdata_minus;
+                tdata_plus.op_type = 0; // S+
+                tdata_plus.site_index = site;
+                tdata_plus.coefficient = phase * Complex(0.5, 0.0);
+                tdata_plus.is_two_body = false;
+                transform_data_.push_back(tdata_plus);
+                
+                tdata_minus.op_type = 1; // S-
+                tdata_minus.site_index = site;
+                tdata_minus.coefficient = phase * Complex(0.5, 0.0);
+                tdata_minus.is_two_body = false;
+                transform_data_.push_back(tdata_minus);
             } else if (op == 1) {
-                // Sy
-                addTransform([=](uint64_t basis) -> std::pair<int, Complex> {
-                    uint64_t flipped = basis ^ (1 << site);
-                    bool is_up = ((basis >> site) & 1) == 0;
-                    return {flipped, phase * Complex(0.0, is_up ? 0.5 : -0.5)};
-                });
+                // Sy = (S+ - S-) / (2i) = -i(S+ - S-)/2
+                TransformData tdata_plus, tdata_minus;
+                tdata_plus.op_type = 0; // S+
+                tdata_plus.site_index = site;
+                tdata_plus.coefficient = phase * Complex(0.0, -0.5);
+                tdata_plus.is_two_body = false;
+                transform_data_.push_back(tdata_plus);
+                
+                tdata_minus.op_type = 1; // S-
+                tdata_minus.site_index = site;
+                tdata_minus.coefficient = phase * Complex(0.0, 0.5);
+                tdata_minus.is_two_body = false;
+                transform_data_.push_back(tdata_minus);
             } else if (op == 2) {
                 // Sz
-                addTransform([=](uint64_t basis) -> std::pair<int, Complex> {
-                    return {basis, phase * Complex(spin_l * pow(-1, (basis >> site) & 1), 0.0)};
-                });
+                TransformData tdata;
+                tdata.op_type = 2; // Sz
+                tdata.site_index = site;
+                tdata.coefficient = phase * Complex(spin_l, 0.0);
+                tdata.is_two_body = false;
+                transform_data_.push_back(tdata);
             }
         }
     }
@@ -3373,22 +3412,40 @@ public:
             
             if (op == 0) {
                 // Sx = (S+ + S-) / 2
-                addTransform([=](uint64_t basis) -> std::pair<int, Complex> {
-                    uint64_t flipped = basis ^ (1 << site);
-                    return {flipped, phase * Complex(0.5, 0.0)};
-                });
+                TransformData tdata_plus, tdata_minus;
+                tdata_plus.op_type = 0; // S+
+                tdata_plus.site_index = site;
+                tdata_plus.coefficient = phase * Complex(0.5, 0.0);
+                tdata_plus.is_two_body = false;
+                transform_data_.push_back(tdata_plus);
+                
+                tdata_minus.op_type = 1; // S-
+                tdata_minus.site_index = site;
+                tdata_minus.coefficient = phase * Complex(0.5, 0.0);
+                tdata_minus.is_two_body = false;
+                transform_data_.push_back(tdata_minus);
             } else if (op == 1) {
-                // Sy = (S+ - S-) / (2i)
-                addTransform([=](uint64_t basis) -> std::pair<int, Complex> {
-                    uint64_t flipped = basis ^ (1 << site);
-                    bool is_up = ((basis >> site) & 1) == 0;
-                    return {flipped, phase * Complex(0.0, is_up ? 0.5 : -0.5)};
-                });
+                // Sy = (S+ - S-) / (2i) = -i(S+ - S-)/2
+                TransformData tdata_plus, tdata_minus;
+                tdata_plus.op_type = 0; // S+
+                tdata_plus.site_index = site;
+                tdata_plus.coefficient = phase * Complex(0.0, -0.5);
+                tdata_plus.is_two_body = false;
+                transform_data_.push_back(tdata_plus);
+                
+                tdata_minus.op_type = 1; // S-
+                tdata_minus.site_index = site;
+                tdata_minus.coefficient = phase * Complex(0.0, 0.5);
+                tdata_minus.is_two_body = false;
+                transform_data_.push_back(tdata_minus);
             } else if (op == 2) {
                 // Sz
-                addTransform([=](uint64_t basis) -> std::pair<int, Complex> {
-                    return {basis, phase * Complex(spin_l * pow(-1, (basis >> site) & 1), 0.0)};
-                });
+                TransformData tdata;
+                tdata.op_type = 2; // Sz
+                tdata.site_index = site;
+                tdata.coefficient = phase * Complex(spin_l, 0.0);
+                tdata.is_two_body = false;
+                transform_data_.push_back(tdata);
             }
         }
     }
@@ -3511,23 +3568,41 @@ public:
             Complex phase = phases[site];
             
             if (op == 0) {
-                // Sx
-                addTransform([=](uint64_t basis) -> std::pair<int, Complex> {
-                    uint64_t flipped = basis ^ (1 << site);
-                    return {flipped, phase * Complex(0.5, 0.0)};
-                });
+                // Sx = (S+ + S-) / 2
+                TransformData tdata_plus, tdata_minus;
+                tdata_plus.op_type = 0; // S+
+                tdata_plus.site_index = site;
+                tdata_plus.coefficient = phase * Complex(0.5, 0.0);
+                tdata_plus.is_two_body = false;
+                transform_data_.push_back(tdata_plus);
+                
+                tdata_minus.op_type = 1; // S-
+                tdata_minus.site_index = site;
+                tdata_minus.coefficient = phase * Complex(0.5, 0.0);
+                tdata_minus.is_two_body = false;
+                transform_data_.push_back(tdata_minus);
             } else if (op == 1) {
-                // Sy
-                addTransform([=](uint64_t basis) -> std::pair<int, Complex> {
-                    uint64_t flipped = basis ^ (1 << site);
-                    bool is_up = ((basis >> site) & 1) == 0;
-                    return {flipped, phase * Complex(0.0, is_up ? 0.5 : -0.5)};
-                });
+                // Sy = (S+ - S-) / (2i) = -i(S+ - S-)/2
+                TransformData tdata_plus, tdata_minus;
+                tdata_plus.op_type = 0; // S+
+                tdata_plus.site_index = site;
+                tdata_plus.coefficient = phase * Complex(0.0, -0.5);
+                tdata_plus.is_two_body = false;
+                transform_data_.push_back(tdata_plus);
+                
+                tdata_minus.op_type = 1; // S-
+                tdata_minus.site_index = site;
+                tdata_minus.coefficient = phase * Complex(0.0, 0.5);
+                tdata_minus.is_two_body = false;
+                transform_data_.push_back(tdata_minus);
             } else if (op == 2) {
                 // Sz
-                addTransform([=](uint64_t basis) -> std::pair<int, Complex> {
-                    return {basis, phase * Complex(spin_l * pow(-1, (basis >> site) & 1), 0.0)};
-                });
+                TransformData tdata;
+                tdata.op_type = 2; // Sz
+                tdata.site_index = site;
+                tdata.coefficient = phase * Complex(spin_l, 0.0);
+                tdata.is_two_body = false;
+                transform_data_.push_back(tdata);
             }
         }
     }
