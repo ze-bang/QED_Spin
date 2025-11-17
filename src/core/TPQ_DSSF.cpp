@@ -742,7 +742,7 @@ int main(int argc, char* argv[]) {
     std::string interall_file = directory + "/InterAll.dat";
     std::string trans_file = directory + "/Trans.dat";
     std::string counterterm_file = directory + "/CounterTerm.dat";
-
+    std::string three_body_file = directory + "/ThreeBodyG.dat";
     // Check if files exist
     if (!fs::exists(interall_file) || !fs::exists(trans_file)) {
         if (rank == 0) {
@@ -755,6 +755,12 @@ int main(int argc, char* argv[]) {
     // Load Hamiltonian
     ham_op.loadFromInterAllFile(interall_file);
     ham_op.loadFromFile(trans_file);
+    if (fs::exists(three_body_file)) {
+        if (rank == 0) {
+            std::cout << "Loading three-body interactions from " << three_body_file << std::endl;
+        }
+        ham_op.loadThreeBodyTerm(three_body_file);
+    }
     
     // COUNTERTERM DISABLED
     // if (fs::exists(counterterm_file)) {

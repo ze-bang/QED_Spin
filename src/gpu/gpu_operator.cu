@@ -5,6 +5,9 @@
 
 #include "gpu_operator.cuh"
 #include <iostream>
+#include <fstream>
+#include <sstream>
+#include <string>
 #include <cmath>
 #include <algorithm>
 
@@ -20,7 +23,9 @@ GPUOperator::GPUOperator(int n_sites, float spin_l)
       d_csr_row_ptr_(nullptr), d_csr_col_ind_(nullptr), d_csr_values_(nullptr),
       nnz_(0), d_interactions_(nullptr), d_single_site_ops_(nullptr),
       num_interactions_(0), num_single_site_ops_(0),
-      d_transform_data_(nullptr), num_transforms_(0), tex_input_vector_(0),
+      d_transform_data_(nullptr), num_transforms_(0), 
+      d_three_body_data_(nullptr), num_three_body_(0),
+      tex_input_vector_(0),
       gpu_memory_allocated_(false), sparse_matrix_built_(false) {
     
     if (n_sites > MAX_SITES) {
@@ -89,6 +94,74 @@ void GPUOperator::addTwoBodyTerm(uint8_t op1, uint32_t site1, uint8_t op2, uint3
     tdata.coefficient = make_cuDoubleComplex(coeff.real(), coeff.imag());
     tdata.is_two_body = 1;
     transform_data_.push_back(tdata);
+}
+
+void GPUOperator::addThreeBodyTerm(uint8_t op1, uint32_t site1, uint8_t op2, uint32_t site2,
+                                  uint8_t op3, uint32_t site3, const std::complex<double>& coeff) {
+    GPUThreeBodyTransformData tdata;
+    tdata.op_type_1 = op1;
+    tdata.site_index_1 = site1;
+    tdata.op_type_2 = op2;
+    tdata.site_index_2 = site2;
+    tdata.op_type_3 = op3;
+    tdata.site_index_3 = site3;
+    tdata.coefficient = make_cuDoubleComplex(coeff.real(), coeff.imag());
+    three_body_data_.push_back(tdata);
+}
+
+void GPUOperator::loadThreeBodyFile(const std::string& filename) {
+    std::ifstream file(filename);
+    if (!file.is_open()) {
+        throw std::runtime_error("Could not open three-body file: " + filename);
+    }
+    
+    std::string line;
+    std::getline(file, line);  // "==================="
+    std::getline(file, line);  // "num       352"
+    std::istringstream iss(line);
+    std::string label;
+    int numLines;
+    iss >> label >> numLines;
+    
+    // Skip separator lines
+    for (int i = 0; i < 3; ++i) std::getline(file, line);
+    
+    int lineCount = 0;
+    while (std::getline(file, line) && lineCount < numLines) {
+        std::istringstream lineStream(line);
+        int op_type_1, site_1, op_type_2, op_type_3, op_type_4, site_2;
+        double real_part, imag_part;
+        
+        if (!(lineStream >> op_type_1 >> site_1 >> op_type_2 >> op_type_3 
+                        >> op_type_4 >> site_2 >> real_part >> imag_part)) {
+            continue;
+        }
+        
+        std::complex<double> coeff(real_part, imag_part);
+        if (std::abs(coeff) < 1e-15) continue;
+        
+        addThreeBodyTerm(static_cast<uint8_t>(op_type_1), site_1,
+                        static_cast<uint8_t>(op_type_2), static_cast<uint32_t>(op_type_3),
+                        static_cast<uint8_t>(op_type_4), site_2, coeff);
+        
+        lineCount++;
+    }
+    
+    std::cout << "GPU: Loaded " << three_body_data_.size() << " three-body terms from " 
+              << filename << std::endl;
+}
+
+void GPUOperator::copyThreeBodyDataToDevice() {
+    num_three_body_ = three_body_data_.size();
+    
+    if (num_three_body_ > 0) {
+        CUDA_CHECK(cudaMalloc(&d_three_body_data_, num_three_body_ * sizeof(GPUThreeBodyTransformData)));
+        CUDA_CHECK(cudaMemcpy(d_three_body_data_, three_body_data_.data(),
+                            num_three_body_ * sizeof(GPUThreeBodyTransformData),
+                            cudaMemcpyHostToDevice));
+        
+        std::cout << "GPU: Copied " << num_three_body_ << " three-body operations to device\n";
+    }
 }
 
 // Legacy methods (kept for compatibility with char-based interface)
@@ -185,6 +258,7 @@ void GPUOperator::freeGPUMemory() {
     if (d_interactions_) cudaFree(d_interactions_);
     if (d_single_site_ops_) cudaFree(d_single_site_ops_);
     if (d_transform_data_) cudaFree(d_transform_data_);
+    if (d_three_body_data_) cudaFree(d_three_body_data_);
     
     d_vector_in_ = nullptr;
     d_vector_out_ = nullptr;
@@ -195,6 +269,7 @@ void GPUOperator::freeGPUMemory() {
     d_interactions_ = nullptr;
     d_single_site_ops_ = nullptr;
     d_transform_data_ = nullptr;
+    d_three_body_data_ = nullptr;
     
     gpu_memory_allocated_ = false;
     sparse_matrix_built_ = false;

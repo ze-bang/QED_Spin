@@ -173,6 +173,7 @@ struct SystemConfig {
     std::string hamiltonian_dir = "";
     std::string interaction_file = "InterAll.dat";
     std::string single_site_file = "Trans.dat";
+    std::string three_body_file = "ThreeBodyG.dat";  // Optional: three-body interaction file (e.g., ThreeBodyG.dat)
 };
 
 /**

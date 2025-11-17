@@ -42,6 +42,28 @@ struct GPUTransformData {
 };
 
 /**
+ * Three-body transform data structure
+ * For interactions like S^α_i S^β_j S^γ_k
+ */
+struct GPUThreeBodyTransformData {
+    uint8_t op_type_1;      // First operator type
+    uint32_t site_index_1;  // First site
+    uint8_t op_type_2;      // Second operator type
+    uint32_t site_index_2;  // Second site
+    uint8_t op_type_3;      // Third operator type
+    uint32_t site_index_3;  // Third site
+    cuDoubleComplex coefficient;  // Coupling constant
+    uint8_t _padding[6];    // Alignment padding
+    
+    __host__ __device__ GPUThreeBodyTransformData()
+        : op_type_1(0), site_index_1(0), op_type_2(0),
+          site_index_2(0), op_type_3(0), site_index_3(0) {
+        coefficient = make_cuDoubleComplex(0.0, 0.0);
+        for (int i = 0; i < 6; ++i) _padding[i] = 0;
+    }
+};
+
+/**
  * GPU-accelerated Operator class for large-scale exact diagonalization
  * Supports up to 32 sites (4.3 billion basis states)
  * Uses chunked processing and on-the-fly matrix element computation
@@ -60,6 +82,14 @@ public:
     void addOneBodyTerm(uint8_t op_type, uint32_t site, const std::complex<double>& coeff);
     void addTwoBodyTerm(uint8_t op1, uint32_t site1, uint8_t op2, uint32_t site2, 
                        const std::complex<double>& coeff);
+    void addThreeBodyTerm(uint8_t op1, uint32_t site1, uint8_t op2, uint32_t site2,
+                         uint8_t op3, uint32_t site3, const std::complex<double>& coeff);
+    
+    // Load three-body terms from file
+    void loadThreeBodyFile(const std::string& filename);
+    
+    // Copy three-body data to device
+    void copyThreeBodyDataToDevice();
     
     // Matrix-vector product: y = H * x (core operation for Lanczos)
     virtual void matVec(const std::complex<double>* x, std::complex<double>* y, int N);
@@ -108,6 +138,11 @@ protected:
     std::vector<GPUTransformData> transform_data_;  // Host storage
     GPUTransformData* d_transform_data_;            // Device storage
     int num_transforms_;
+    
+    // Three-body term storage
+    std::vector<GPUThreeBodyTransformData> three_body_data_;  // Host storage
+    GPUThreeBodyTransformData* d_three_body_data_;            // Device storage
+    int num_three_body_;
     
     // Legacy interaction storage (deprecated, kept for compatibility)
     struct Interaction {

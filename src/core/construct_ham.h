@@ -500,7 +500,23 @@ public:
                          site_index_2(0), op_type_2(0), is_two_body(false) {}
     };
     
-    std::vector<TransformData> transform_data_;  // Optimized storage
+    // Three-body transform representation
+    struct ThreeBodyTransformData {
+        uint8_t op_type_1;      // First operator type (0=S+, 1=S-, 2=Sz)
+        uint64_t site_index_1;  // First site
+        uint8_t op_type_2;      // Second operator type
+        uint64_t site_index_2;  // Second site (actual site, not op type)
+        uint8_t op_type_3;      // Third operator type
+        uint64_t site_index_3;  // Third site
+        Complex coefficient;    // Coupling constant
+        
+        ThreeBodyTransformData() : op_type_1(0), site_index_1(0), op_type_2(0), 
+                                  site_index_2(0), op_type_3(0), site_index_3(0),
+                                  coefficient(0.0, 0.0) {}
+    };
+    
+    std::vector<TransformData> transform_data_;  // Optimized storage for 1 and 2-body
+    std::vector<ThreeBodyTransformData> three_body_data_;  // Storage for 3-body terms
     
     // Legacy transform type (kept for buildSparseMatrix and XYZ operators)
     using TransformFunction = std::function<std::pair<int, Complex>(uint64_t)>;
@@ -696,6 +712,74 @@ public:
                         }
                     }
                 }
+                
+                // Process three-body terms: S^α_i S^β_j S^γ_k
+                for (const auto& tdata : three_body_data_) {
+                    uint64_t new_basis = basis;
+                    Complex scalar = tdata.coefficient;
+                    bool valid = true;
+                    
+                    // Apply first operator
+                    if (tdata.op_type_1 == 2) {
+                        // Sz: diagonal
+                        uint64_t bit_1 = (new_basis >> tdata.site_index_1) & 1;
+                        double sign_1 = bit_1 ? -1.0 : 1.0;
+                        scalar *= spin_l_ * sign_1;
+                    } else {
+                        // S+ or S-: flip bit
+                        uint64_t bit_1 = (new_basis >> tdata.site_index_1) & 1;
+                        if (bit_1 != tdata.op_type_1) {
+                            new_basis ^= (1ULL << tdata.site_index_1);
+                        } else {
+                            valid = false;
+                        }
+                    }
+                    
+                    // Apply second operator
+                    if (valid) {
+                        if (tdata.op_type_2 == 2) {
+                            // Sz: diagonal
+                            uint64_t bit_2 = (new_basis >> tdata.site_index_2) & 1;
+                            double sign_2 = bit_2 ? -1.0 : 1.0;
+                            scalar *= spin_l_ * sign_2;
+                        } else {
+                            // S+ or S-: flip bit
+                            uint64_t bit_2 = (new_basis >> tdata.site_index_2) & 1;
+                            if (bit_2 != tdata.op_type_2) {
+                                new_basis ^= (1ULL << tdata.site_index_2);
+                            } else {
+                                valid = false;
+                            }
+                        }
+                    }
+                    
+                    // Apply third operator
+                    if (valid) {
+                        if (tdata.op_type_3 == 2) {
+                            // Sz: diagonal
+                            uint64_t bit_3 = (new_basis >> tdata.site_index_3) & 1;
+                            double sign_3 = bit_3 ? -1.0 : 1.0;
+                            scalar *= spin_l_ * sign_3;
+                        } else {
+                            // S+ or S-: flip bit
+                            uint64_t bit_3 = (new_basis >> tdata.site_index_3) & 1;
+                            if (bit_3 != tdata.op_type_3) {
+                                new_basis ^= (1ULL << tdata.site_index_3);
+                            } else {
+                                valid = false;
+                            }
+                        }
+                    }
+                    
+                    if (valid && std::abs(scalar) > 1e-15) {
+                        Complex contrib = scalar * coeff;
+                        local_buffer.push_back({new_basis, contrib});
+
+                        if (local_buffer.size() >= kFlushThreshold) {
+                            flush_buffer();
+                        }
+                    }
+                }
             }
 
             flush_buffer();
@@ -844,6 +928,70 @@ public:
             
             lineCount++;
         }
+    }
+    
+    void loadThreeBodyTerm(const std::string& filename) {
+        std::ifstream file(filename);
+        if (!file.is_open()) {
+            throw std::runtime_error("Could not open three-body file: " + filename);
+        }
+        
+        std::string line;
+        // Read header lines
+        std::getline(file, line);  // "==================="
+        std::getline(file, line);  // "num       352"
+        std::istringstream iss(line);
+        std::string label;
+        uint64_t numLines;
+        iss >> label >> numLines;
+        
+        // Skip separator lines (there are 3 more)
+        for (uint64_t i = 0; i < 3; ++i) std::getline(file, line);
+        
+        uint64_t lineCount = 0;
+        uint64_t skipped_oob = 0;
+        while (std::getline(file, line) && lineCount < numLines) {
+            std::istringstream lineStream(line);
+            uint64_t op_type_1, site_1, op_type_2, op_type_3, op_type_4, site_2;
+            double real_part, imag_part;
+            
+            if (!(lineStream >> op_type_1 >> site_1 >> op_type_2 >> op_type_3 
+                            >> op_type_4 >> site_2 >> real_part >> imag_part)) {
+                continue;
+            }
+            
+            Complex coeff(real_part, imag_part);
+            if (std::abs(coeff) < 1e-15) continue;
+            
+            // Skip if site indices are out of bounds
+            if (site_1 >= n_bits_ || op_type_3 >= n_bits_ || site_2 >= n_bits_) {
+                skipped_oob++;
+                lineCount++;
+                continue;
+            }
+            
+            // Store three-body term
+            // Format appears to be: op1(site1) * op2(op_type_3) * op3(site2)
+            // where op_type_3 is actually a site index
+            ThreeBodyTransformData tdata;
+            tdata.op_type_1 = static_cast<uint8_t>(op_type_1);
+            tdata.site_index_1 = site_1;
+            tdata.op_type_2 = static_cast<uint8_t>(op_type_2);
+            tdata.site_index_2 = static_cast<uint64_t>(op_type_3);  // This is a site index
+            tdata.op_type_3 = static_cast<uint8_t>(op_type_4);
+            tdata.site_index_3 = site_2;
+            tdata.coefficient = coeff;
+            three_body_data_.push_back(tdata);
+            
+            lineCount++;
+        }
+        
+        std::cout << "Loaded " << three_body_data_.size() << " three-body terms from " 
+                  << filename;
+        if (skipped_oob > 0) {
+            std::cout << " (skipped " << skipped_oob << " out-of-bounds terms)";
+        }
+        std::cout << std::endl;
     }
     
     void loadCounterTerm(const std::string& filename) {
@@ -1802,8 +1950,8 @@ public:
                     if (!tdata.is_two_body) {
                         // One-body operator: S^α_i
                         if (tdata.op_type == 2) {
-                            // Sz: diagonal, bit=1 (up) → +spin_l, bit=0 (down) → -spin_l
-                            double sign = ((basis_i >> tdata.site_index) & 1) ? 1.0 : -1.0;
+                            // Sz: diagonal, just multiply by eigenvalue
+                            double sign = ((basis_i >> tdata.site_index) & 1) ? -1.0 : 1.0;
                             scalar *= spin_l_ * sign;
                         } else {
                             // S+ or S-: off-diagonal, flip bit
@@ -1820,9 +1968,9 @@ public:
                         uint64_t bit_j = (basis_i >> tdata.site_index_2) & 1;
 
                         if (tdata.op_type == 2 && tdata.op_type_2 == 2) {
-                            // Sz_i Sz_j: purely diagonal (bit=1 → +spin_l, bit=0 → -spin_l)
-                            double sign_i = bit_i ? 1.0 : -1.0;
-                            double sign_j = bit_j ? 1.0 : -1.0;
+                            // Sz_i Sz_j: purely diagonal
+                            double sign_i = bit_i ? -1.0 : 1.0;
+                            double sign_j = bit_j ? -1.0 : 1.0;
                             scalar *= spin_l_ * spin_l_ * sign_i * sign_j;
                         } else {
                             // Mixed or off-diagonal terms
@@ -1833,7 +1981,7 @@ public:
                                     valid = false;
                                 }
                             } else {
-                                double sign_i = bit_i ? 1.0 : -1.0;
+                                double sign_i = bit_i ? -1.0 : 1.0;
                                 scalar *= spin_l_ * sign_i;
                             }
 
@@ -1846,12 +1994,85 @@ public:
                                 }
                             } else if (valid) {
                                 uint64_t new_bit_j = (new_basis >> tdata.site_index_2) & 1;
-                                double sign_j = new_bit_j ? 1.0 : -1.0;
+                                double sign_j = new_bit_j ? -1.0 : 1.0;
                                 scalar *= spin_l_ * sign_j;
                             }
                         }
                     }
 
+                    // Check if resulting state is in the fixed Sz sector and add contribution
+                    if (valid && popcount(new_basis) == n_up_ && std::abs(scalar) > 1e-15) {
+                        auto it = state_to_index_.find(new_basis);
+                        if (it != state_to_index_.end()) {
+                            uint64_t j = it->second;
+                            Complex contrib = scalar * coeff;
+                            local_buffer.push_back({j, contrib});
+
+                            if (local_buffer.size() >= kFlushThreshold) {
+                                flush_buffer();
+                            }
+                        }
+                    }
+                }
+                
+                // Process three-body terms: S^α_i S^β_j S^γ_k
+                for (const auto& tdata : three_body_data_) {
+                    uint64_t new_basis = basis_i;
+                    Complex scalar = tdata.coefficient;
+                    bool valid = true;
+                    
+                    // Apply first operator
+                    if (tdata.op_type_1 == 2) {
+                        // Sz: diagonal
+                        uint64_t bit_1 = (new_basis >> tdata.site_index_1) & 1;
+                        double sign_1 = bit_1 ? -1.0 : 1.0;
+                        scalar *= spin_l_ * sign_1;
+                    } else {
+                        // S+ or S-: flip bit
+                        uint64_t bit_1 = (new_basis >> tdata.site_index_1) & 1;
+                        if (bit_1 != tdata.op_type_1) {
+                            new_basis ^= (1ULL << tdata.site_index_1);
+                        } else {
+                            valid = false;
+                        }
+                    }
+                    
+                    // Apply second operator
+                    if (valid) {
+                        if (tdata.op_type_2 == 2) {
+                            // Sz: diagonal
+                            uint64_t bit_2 = (new_basis >> tdata.site_index_2) & 1;
+                            double sign_2 = bit_2 ? -1.0 : 1.0;
+                            scalar *= spin_l_ * sign_2;
+                        } else {
+                            // S+ or S-: flip bit
+                            uint64_t bit_2 = (new_basis >> tdata.site_index_2) & 1;
+                            if (bit_2 != tdata.op_type_2) {
+                                new_basis ^= (1ULL << tdata.site_index_2);
+                            } else {
+                                valid = false;
+                            }
+                        }
+                    }
+                    
+                    // Apply third operator
+                    if (valid) {
+                        if (tdata.op_type_3 == 2) {
+                            // Sz: diagonal
+                            uint64_t bit_3 = (new_basis >> tdata.site_index_3) & 1;
+                            double sign_3 = bit_3 ? -1.0 : 1.0;
+                            scalar *= spin_l_ * sign_3;
+                        } else {
+                            // S+ or S-: flip bit
+                            uint64_t bit_3 = (new_basis >> tdata.site_index_3) & 1;
+                            if (bit_3 != tdata.op_type_3) {
+                                new_basis ^= (1ULL << tdata.site_index_3);
+                            } else {
+                                valid = false;
+                            }
+                        }
+                    }
+                    
                     // Check if resulting state is in the fixed Sz sector and add contribution
                     if (valid && popcount(new_basis) == n_up_ && std::abs(scalar) > 1e-15) {
                         auto it = state_to_index_.find(new_basis);

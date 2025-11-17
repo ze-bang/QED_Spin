@@ -282,6 +282,7 @@ namespace ed_internal {
         const std::string& interaction_file,
         const std::string& single_site_file,
         const std::string& counterterm_file,
+        const std::string& three_body_file,
         uint64_t num_sites,
         float spin_length,
         DiagonalizationMethod method,
@@ -1007,6 +1008,7 @@ Operator load_hamiltonian_from_files(
     const std::string& interaction_file,
     const std::string& single_site_file,
     const std::string& counterterm_file,
+    const std::string& three_body_file,
     uint64_t num_sites,
     float spin_length,
     DiagonalizationMethod method,
@@ -1022,6 +1024,11 @@ Operator load_hamiltonian_from_files(
             }
             if (!interaction_file.empty()) {
                 hamiltonian.loadFromInterAllFile(interaction_file);
+            }
+            // Load three-body terms if provided
+            if (!three_body_file.empty() && std::filesystem::exists(three_body_file)) {
+                std::cout << "Loading three-body terms from: " << three_body_file << std::endl;
+                hamiltonian.loadThreeBodyTerm(three_body_file);
             }
             // COUNTERTERM DISABLED
             // if (!counterterm_file.empty()){
@@ -1845,6 +1852,8 @@ inline EDResults exact_diagonalization_fixed_sz(
  * 
  * @param interaction_file Path to interaction file (e.g., InterAll.dat)
  * @param single_site_file Path to single-site file (e.g., Trans.dat)
+ * @param counterterm_file Path to counter term file (optional)
+ * @param three_body_file Path to three-body interaction file (e.g., ThreeBodyG.dat, optional)
  * @param method Diagonalization method to use
  * @param params Parameters for diagonalization
  * @param format File format for Hamiltonian
@@ -1854,6 +1863,7 @@ EDResults exact_diagonalization_from_files(
     const std::string& interaction_file,
     const std::string& single_site_file = "",
     const std::string& counterterm_file = "",
+    const std::string& three_body_file = "",
     DiagonalizationMethod method = DiagonalizationMethod::LANCZOS,
     const EDParameters& params = EDParameters(),
     HamiltonianFileFormat format = HamiltonianFileFormat::STANDARD
@@ -2086,7 +2096,8 @@ EDResults exact_diagonalization_from_files(
     
     // Load Hamiltonian (for CPU methods)
     Operator hamiltonian = ed_internal::load_hamiltonian_from_files(
-        interaction_file, single_site_file, counterterm_file, params.num_sites, params.spin_length, method, format
+        interaction_file, single_site_file, counterterm_file, three_body_file, 
+        params.num_sites, params.spin_length, method, format
     );
     
     // Calculate Hilbert space dimension
@@ -2121,12 +2132,14 @@ EDResults exact_diagonalization_from_directory(
     HamiltonianFileFormat format = HamiltonianFileFormat::STANDARD,
     const std::string& interaction_filename = "InterAll.dat",
     const std::string& single_site_filename = "Trans.dat",
-    const std::string& counterterm_filename = "CounterTerm.dat"
+    const std::string& counterterm_filename = "CounterTerm.dat",
+    const std::string& three_body_filename = "ThreeBodyG.dat"
 ) {
     // Construct full file paths
     std::string interaction_file = directory + "/" + interaction_filename;
     std::string single_site_file = directory + "/" + single_site_filename;
     std::string counterterm_file = directory + "/" + counterterm_filename;
+    std::string three_body_file = directory + "/" + three_body_filename;
     
     // Check if counter term file exists
     struct stat buffer;
@@ -2134,9 +2147,14 @@ EDResults exact_diagonalization_from_directory(
         counterterm_file = "";  // File doesn't exist, pass empty string
     }
     
+    // Check if three-body file exists
+    if (stat(three_body_file.c_str(), &buffer) != 0) {
+        three_body_file = "";  // File doesn't exist, pass empty string
+    }
+    
     // Call the file-based wrapper
     return exact_diagonalization_from_files(
-        interaction_file, single_site_file, counterterm_file, method, params, format
+        interaction_file, single_site_file, counterterm_file, three_body_file, method, params, format
     );
 }
 
@@ -2173,7 +2191,8 @@ EDResults exact_diagonalization_from_directory_symmetrized(
     HamiltonianFileFormat format = HamiltonianFileFormat::STANDARD,
     const std::string& interaction_filename = "InterAll.dat",
     const std::string& single_site_filename = "Trans.dat",
-    const std::string& counterterm_filename = "CounterTerm.dat"
+    const std::string& counterterm_filename = "CounterTerm.dat",
+    const std::string& three_body_filename = "ThreeBodyG.dat"
 ) {
     std::cerr << "[DEBUG] exact_diagonalization_from_directory_symmetrized: num_sites=" 
               << params.num_sites << ", method=" << static_cast<int>(method) << std::endl;
@@ -2200,10 +2219,15 @@ EDResults exact_diagonalization_from_directory_symmetrized(
     std::string interaction_file = directory + "/" + interaction_filename;
     std::string single_site_file = directory + "/" + single_site_filename;
     std::string counterterm_file = directory + "/" + counterterm_filename;
+    std::string three_body_file = directory + "/" + three_body_filename;
     
     // Check if counter term file exists
     struct stat counterterm_buffer;
     bool counterterm_exists = (stat(counterterm_file.c_str(), &counterterm_buffer) == 0);
+    
+    // Check if three-body file exists
+    struct stat three_body_buffer;
+    bool three_body_exists = (stat(three_body_file.c_str(), &three_body_buffer) == 0);
     
     EDResults results;
     results.eigenvectors_computed = params.compute_eigenvectors;
@@ -2214,6 +2238,12 @@ EDResults exact_diagonalization_from_directory_symmetrized(
     Operator hamiltonian(params.num_sites, params.spin_length);
     hamiltonian.loadFromFile(single_site_file);
     hamiltonian.loadFromInterAllFile(interaction_file);
+    
+    // Load three-body terms if available
+    if (three_body_exists) {
+        std::cout << "Loading three-body terms from: " << three_body_file << std::endl;
+        hamiltonian.loadThreeBodyTerm(three_body_file);
+    }
     
     // COUNTERTERM DISABLED
     // if (counterterm_exists) {
@@ -2481,7 +2511,8 @@ inline EDResults exact_diagonalization_fixed_sz_symmetrized(
     const EDParameters& params = EDParameters(),
     HamiltonianFileFormat format = HamiltonianFileFormat::STANDARD,
     const std::string& interaction_filename = "InterAll.dat",
-    const std::string& single_site_filename = "Trans.dat"
+    const std::string& single_site_filename = "Trans.dat",
+    const std::string& three_body_filename = "ThreeBodyG.dat"
 ) {
     std::cout << "\n========================================" << std::endl;
     std::cout << "  Fixed-Sz + Symmetrized ED (HDF5)" << std::endl;
@@ -2509,10 +2540,18 @@ inline EDResults exact_diagonalization_fixed_sz_symmetrized(
     std::cout << "\nLoading Hamiltonian..." << std::endl;
     std::string interaction_file = directory + "/" + interaction_filename;
     std::string single_site_file = directory + "/" + single_site_filename;
+    std::string three_body_file = directory + "/" + three_body_filename;
     
     FixedSzOperator hamiltonian(params.num_sites, params.spin_length, n_up);
     hamiltonian.loadFromFile(single_site_file);
     hamiltonian.loadFromInterAllFile(interaction_file);
+    
+    // Load three-body terms if available
+    struct stat three_body_buffer;
+    if (stat(three_body_file.c_str(), &three_body_buffer) == 0) {
+        std::cout << "Loading three-body terms from: " << three_body_file << std::endl;
+        hamiltonian.loadThreeBodyTerm(three_body_file);
+    }
     
     // COUNTERTERM DISABLED
     // hamiltonian.loadCounterTerm(directory + "/CounterTerm.dat");

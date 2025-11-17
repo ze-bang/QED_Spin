@@ -678,3 +678,41 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/test_streaming_symmetry.cpp")
         target_link_libraries(test_streaming_symmetry OpenMP::OpenMP_CXX)
     endif()
 endif()
+
+# Validation test for dynamical correlation
+add_executable(test_dynamical_correlation_validation 
+    test_dynamical_correlation_validation.cpp
+    ${CPU_SOLVERS_DIR}/ftlm.cpp
+    ${CPU_SOLVERS_DIR}/lanczos.cpp
+    ${CPU_SOLVERS_DIR}/observables.cpp
+)
+
+target_link_libraries(test_dynamical_correlation_validation
+    ${BLAS_LIBRARIES}
+    ${LAPACK_LIBRARIES}
+    ${LAPACKE_LIBRARIES}
+    ${EXTRA_LINALG_LIBRARIES}
+    ${ARPACK_LIBRARY}
+    ${HDF5_LIBRARIES}
+)
+
+if(OpenMP_CXX_FOUND)
+    target_link_libraries(test_dynamical_correlation_validation OpenMP::OpenMP_CXX)
+endif()
+
+# Test for three-body interaction loading
+add_executable(test_three_body_loading 
+    test_three_body_loading.cpp
+)
+
+target_link_libraries(test_three_body_loading
+    ${BLAS_LIBRARIES}
+    ${LAPACK_LIBRARIES}
+    ${LAPACKE_LIBRARIES}
+    ${EXTRA_LINALG_LIBRARIES}
+    ${HDF5_LIBRARIES}
+)
+
+if(OpenMP_CXX_FOUND)
+    target_link_libraries(test_three_body_loading OpenMP::OpenMP_CXX)
+endif()

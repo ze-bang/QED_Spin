@@ -726,6 +726,15 @@ void compute_dynamical_response_workflow(const EDConfig& config) {
     ham.loadFromInterAllFile(interaction_file);
     ham.loadFromFile(single_site_file);
     
+    // Load three-body terms if specified
+    if (!config.system.three_body_file.empty()) {
+        std::string three_body_file = config.system.hamiltonian_dir + "/" + config.system.three_body_file;
+        if (std::filesystem::exists(three_body_file)) {
+            std::cout << "Loading three-body terms from: " << three_body_file << "\n";
+            ham.loadThreeBodyTerm(three_body_file);
+        }
+    }
+    
     // Hilbert space dimension
     uint64_t N = 1ULL << config.system.num_sites;
     
@@ -1462,6 +1471,15 @@ void compute_static_response_workflow(const EDConfig& config) {
     std::string single_site_file = config.system.hamiltonian_dir + "/" + config.system.single_site_file;
     ham.loadFromInterAllFile(interaction_file);
     ham.loadFromFile(single_site_file);
+    
+    // Load three-body terms if specified
+    if (!config.system.three_body_file.empty()) {
+        std::string three_body_file = config.system.hamiltonian_dir + "/" + config.system.three_body_file;
+        if (std::filesystem::exists(three_body_file)) {
+            std::cout << "Loading three-body terms from: " << three_body_file << "\n";
+            ham.loadThreeBodyTerm(three_body_file);
+        }
+    }
     
     // Hilbert space dimension
     uint64_t N = 1ULL << config.system.num_sites;

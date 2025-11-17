@@ -74,8 +74,8 @@ __global__ void matVecTransformParallel(const cuDoubleComplex* x, cuDoubleComple
         
         // Apply first operator
         if (tdata.op_type == 2) {
-            // Sz operator (bit=1 (up) → +spin_l, bit=0 (down) → -spin_l)
-            double sign = spin_l * ((bit1 == 1) ? 1.0 : -1.0);
+            // Sz operator
+            double sign = spin_l * ((bit1 == 0) ? 1.0 : -1.0);
             factor = complex_scale(factor, sign);
         } else {
             // S+ or S- operator
@@ -91,8 +91,8 @@ __global__ void matVecTransformParallel(const cuDoubleComplex* x, cuDoubleComple
             uint64_t bit2_new = (new_state >> tdata.site_index_2) & 1;
             
             if (tdata.op_type_2 == 2) {
-                // Sz operator (bit=1 (up) → +spin_l, bit=0 (down) → -spin_l)
-                double sign = spin_l * ((bit2_new == 1) ? 1.0 : -1.0);
+                // Sz operator
+                double sign = spin_l * ((bit2_new == 0) ? 1.0 : -1.0);
                 factor = complex_scale(factor, sign);
             } else {
                 // S+ or S- operator
@@ -108,8 +108,8 @@ __global__ void matVecTransformParallel(const cuDoubleComplex* x, cuDoubleComple
         uint64_t bit = (state >> tdata.site_index) & 1;
         
         if (tdata.op_type == 2) {
-            // Sz operator: diagonal (bit=1 (up) → +spin_l, bit=0 (down) → -spin_l)
-            double sign = spin_l * ((bit == 1) ? 1.0 : -1.0);
+            // Sz operator: diagonal
+            double sign = spin_l * ((bit == 0) ? 1.0 : -1.0);
             factor = complex_scale(factor, sign);
         } else {
             // S+ or S- operator: off-diagonal
@@ -182,8 +182,8 @@ __global__ void matVecKernelOptimized(cudaTextureObject_t tex_x_unused, cuDouble
             
             // Apply first operator
             if (tdata.op_type == 2) {
-                // Sz operator (bit=1 (up) → +spin_l, bit=0 (down) → -spin_l)
-                double sign = spin_l * ((bit1 == 1) ? 1.0 : -1.0);
+                // Sz operator
+                double sign = spin_l * ((bit1 == 0) ? 1.0 : -1.0);
                 factor = complex_scale(factor, sign);
             } else {
                 // S+ or S- operator
@@ -199,8 +199,8 @@ __global__ void matVecKernelOptimized(cudaTextureObject_t tex_x_unused, cuDouble
                 uint64_t bit2_new = (new_state >> tdata.site_index_2) & 1;
                 
                 if (tdata.op_type_2 == 2) {
-                    // Sz operator (bit=1 (up) → +spin_l, bit=0 (down) → -spin_l)
-                    double sign = spin_l * ((bit2_new == 1) ? 1.0 : -1.0);
+                    // Sz operator
+                    double sign = spin_l * ((bit2_new == 0) ? 1.0 : -1.0);
                     factor = complex_scale(factor, sign);
                 } else {
                     // S+ or S- operator
@@ -226,8 +226,8 @@ __global__ void matVecKernelOptimized(cudaTextureObject_t tex_x_unused, cuDouble
             bool valid = true;
             
             if (tdata.op_type == 2) {
-                // Sz operator: diagonal (bit=1 (up) → +spin_l, bit=0 (down) → -spin_l)
-                double sign = spin_l * ((bit == 1) ? 1.0 : -1.0);
+                // Sz operator: diagonal
+                double sign = spin_l * ((bit == 0) ? 1.0 : -1.0);
                 factor = complex_scale(factor, sign);
             } else {
                 // S+ or S- operator: off-diagonal
@@ -508,7 +508,7 @@ __global__ void matVecFixedSzTransformParallel(const cuDoubleComplex* x, cuDoubl
         
         // Apply first operator
         if (tdata.op_type == 2) {
-            double sign = spin_l * ((bit1 == 1) ? 1.0 : -1.0);
+            double sign = spin_l * ((bit1 == 0) ? 1.0 : -1.0);
             factor = complex_scale(factor, sign);
         } else {
             if (bit1 != tdata.op_type) {
@@ -522,7 +522,7 @@ __global__ void matVecFixedSzTransformParallel(const cuDoubleComplex* x, cuDoubl
             uint64_t bit2_new = (new_state >> tdata.site_index_2) & 1;
             
             if (tdata.op_type_2 == 2) {
-                double sign = spin_l * ((bit2_new == 1) ? 1.0 : -1.0);
+                double sign = spin_l * ((bit2_new == 0) ? 1.0 : -1.0);
                 factor = complex_scale(factor, sign);
             } else {
                 if (bit2_new != tdata.op_type_2) {
@@ -537,7 +537,7 @@ __global__ void matVecFixedSzTransformParallel(const cuDoubleComplex* x, cuDoubl
         uint64_t bit = (state >> tdata.site_index) & 1;
         
         if (tdata.op_type == 2) {
-            double sign = spin_l * ((bit == 1) ? 1.0 : -1.0);
+            double sign = spin_l * ((bit == 0) ? 1.0 : -1.0);
             factor = complex_scale(factor, sign);
         } else {
             if (bit != tdata.op_type) {
@@ -604,7 +604,7 @@ __global__ void matVecFixedSzKernelOptimized(const cuDoubleComplex* x, cuDoubleC
             
             // Apply first operator
             if (tdata.op_type == 2) {
-                double sign = spin_l * ((bit1 == 1) ? 1.0 : -1.0);
+                double sign = spin_l * ((bit1 == 0) ? 1.0 : -1.0);
                 factor = complex_scale(factor, sign);
             } else {
                 if (bit1 != tdata.op_type) {
@@ -618,7 +618,7 @@ __global__ void matVecFixedSzKernelOptimized(const cuDoubleComplex* x, cuDoubleC
                 uint64_t bit2_new = (new_state >> tdata.site_index_2) & 1;
                 
                 if (tdata.op_type_2 == 2) {
-                    double sign = spin_l * ((bit2_new == 1) ? 1.0 : -1.0);
+                    double sign = spin_l * ((bit2_new == 0) ? 1.0 : -1.0);
                     factor = complex_scale(factor, sign);
                 } else {
                     if (bit2_new != tdata.op_type_2) {
@@ -646,7 +646,7 @@ __global__ void matVecFixedSzKernelOptimized(const cuDoubleComplex* x, cuDoubleC
             bool valid = true;
             
             if (tdata.op_type == 2) {
-                double sign = spin_l * ((bit == 1) ? 1.0 : -1.0);
+                double sign = spin_l * ((bit == 0) ? 1.0 : -1.0);
                 factor = complex_scale(factor, sign);
             } else {
                 if (bit != tdata.op_type) {
