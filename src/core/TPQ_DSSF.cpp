@@ -1466,6 +1466,10 @@ int main(int argc, char* argv[]) {
                                 results.frequencies = frequencies;
                                 results.spectral_function = S_real;
                                 results.spectral_function_imag = S_imag;
+                                // Initialize error vectors to zero (single-state, no error bars)
+                                results.spectral_error.resize(frequencies.size(), 0.0);
+                                results.spectral_error_imag.resize(frequencies.size(), 0.0);
+                                results.total_samples = 1;
                                 
                                 // Save results
                                 std::stringstream filename_ss;
@@ -1619,6 +1623,10 @@ int main(int argc, char* argv[]) {
                                     results.frequencies = frequencies;
                                     results.spectral_function = S_real;
                                     results.spectral_function_imag = S_imag;
+                                    // Initialize error vectors to zero (single-state, no error bars)
+                                    results.spectral_error.resize(frequencies.size(), 0.0);
+                                    results.spectral_error_imag.resize(frequencies.size(), 0.0);
+                                    results.total_samples = 1;
                                     
                                     // Save results
                                     std::stringstream filename_ss;

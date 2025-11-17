@@ -1106,6 +1106,10 @@ void compute_dynamical_response_workflow(const EDConfig& config) {
                             result.frequencies = freqs;
                             result.spectral_function = S_real;
                             result.spectral_function_imag = S_imag;
+                            // Initialize error vectors to zero (GPU computation doesn't provide errors yet)
+                            result.spectral_error.resize(freqs.size(), 0.0);
+                            result.spectral_error_imag.resize(freqs.size(), 0.0);
+                            result.total_samples = params.num_samples;
                             
                             results_map[temp] = result;
                         }
