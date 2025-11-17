@@ -53,31 +53,94 @@ int read_num_sites_from_positions(const std::string& positions_file) {
     return num_sites;
 }
 
-// Helper function to read ground state energy from eigenvalues.dat file
+// Helper function to read ground state energy with multiple fallback methods
+// Returns the MINIMUM energy across all available sources for robustness against corruption
 double read_ground_state_energy(const std::string& directory) {
-    std::string eigenvalues_file = directory + "/output/eigenvectors/eigenvalues.dat";
+    std::vector<double> candidate_energies;
+    std::vector<std::string> sources;
     
-    std::ifstream infile(eigenvalues_file, std::ios::binary);
-    if (!infile.is_open()) {
-        throw std::runtime_error("Failed to open eigenvalues.dat file: " + eigenvalues_file);
+    // Method 1: Try eigenvalues.dat (binary format)
+    std::string eigenvalues_dat = directory + "/output/eigenvectors/eigenvalues.dat";
+    std::ifstream infile_dat(eigenvalues_dat, std::ios::binary);
+    if (infile_dat.is_open()) {
+        size_t num_eigenvalues;
+        infile_dat.read(reinterpret_cast<char*>(&num_eigenvalues), sizeof(size_t));
+        
+        if (num_eigenvalues > 0) {
+            double ground_state_energy;
+            infile_dat.read(reinterpret_cast<char*>(&ground_state_energy), sizeof(double));
+            candidate_energies.push_back(ground_state_energy);
+            sources.push_back("eigenvalues.dat");
+        }
+        infile_dat.close();
     }
     
-    // Read number of eigenvalues
-    size_t num_eigenvalues;
-    infile.read(reinterpret_cast<char*>(&num_eigenvalues), sizeof(size_t));
-    
-    if (num_eigenvalues == 0) {
-        infile.close();
-        throw std::runtime_error("No eigenvalues found in file: " + eigenvalues_file);
+    // Method 2: Try eigenvalues.txt (text format)
+    std::string eigenvalues_txt = directory + "/output/eigenvalues.txt";
+    std::ifstream infile_txt(eigenvalues_txt);
+    if (infile_txt.is_open()) {
+        double ground_state_energy;
+        if (infile_txt >> ground_state_energy) {
+            candidate_energies.push_back(ground_state_energy);
+            sources.push_back("eigenvalues.txt");
+        }
+        infile_txt.close();
     }
     
-    // Read the first eigenvalue (ground state energy)
-    double ground_state_energy;
-    infile.read(reinterpret_cast<char*>(&ground_state_energy), sizeof(double));
+    // Method 3: Try finding minimum energy in SS_rand0.dat
+    std::string ss_file = directory + "/output/SS_rand0.dat";
+    std::ifstream infile_ss(ss_file);
+    if (infile_ss.is_open()) {
+        std::string line;
+        double min_energy = std::numeric_limits<double>::max();
+        bool found_energy = false;
+        
+        while (std::getline(infile_ss, line)) {
+            // Skip comment lines and empty lines
+            if (line.empty() || line[0] == '#') continue;
+            
+            std::istringstream iss(line);
+            double inv_temp, energy;
+            
+            // Read first two columns: inv_temp and energy
+            if (iss >> inv_temp >> energy) {
+                if (energy < min_energy) {
+                    min_energy = energy;
+                    found_energy = true;
+                }
+            }
+        }
+        infile_ss.close();
+        
+        if (found_energy) {
+            candidate_energies.push_back(min_energy);
+            sources.push_back("SS_rand0.dat");
+        }
+    }
     
-    infile.close();
+    // If no methods succeeded, throw an error
+    if (candidate_energies.empty()) {
+        throw std::runtime_error("Failed to read ground state energy from any available file: " 
+                                 "eigenvalues.dat, eigenvalues.txt, or SS_rand0.dat");
+    }
     
-    return ground_state_energy;
+    // Return the minimum energy across all sources (most robust against corruption)
+    auto min_it = std::min_element(candidate_energies.begin(), candidate_energies.end());
+    size_t min_idx = std::distance(candidate_energies.begin(), min_it);
+    double final_energy = *min_it;
+    
+    // Report all found energies and which one was selected
+    std::cout << "Ground state energy candidates found:" << std::endl;
+    for (size_t i = 0; i < candidate_energies.size(); i++) {
+        std::cout << "  " << sources[i] << ": " 
+                  << std::fixed << std::setprecision(10) << candidate_energies[i];
+        if (i == min_idx) {
+            std::cout << " ← SELECTED (minimum)";
+        }
+        std::cout << std::endl;
+    }
+    
+    return final_energy;
 }
 
 void printSpinConfiguration(ComplexVector &state, int num_sites, float spin_length, const std::string &dir) {
@@ -776,10 +839,13 @@ int main(int argc, char* argv[]) {
     bool has_ground_state_energy = false;
     if (method == "spectral") {
         try {
+            if (rank == 0) {
+                std::cout << "Reading ground state energy (minimum across all sources)..." << std::endl;
+            }
             ground_state_energy = read_ground_state_energy(directory);
             has_ground_state_energy = true;
             if (rank == 0) {
-                std::cout << "Ground state energy read from eigenvalues.dat: " 
+                std::cout << "Final ground state energy (for spectral shift): " 
                           << std::fixed << std::setprecision(10) << ground_state_energy << std::endl;
             }
         } catch (const std::exception& e) {

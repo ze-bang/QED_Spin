@@ -765,39 +765,99 @@ void compute_dynamical_response_workflow(const EDConfig& config) {
     if (rank == 0) {
         std::cout << "\n--- Finding ground state energy for spectrum normalization ---\n";
         
-        // First, try to read from eigenvalues.dat if it exists
-        std::string eigenvalues_file = config.workflow.output_dir + "/eigenvectors/eigenvalues.dat";
-        std::cout << "Checking for eigenvalues file: " << eigenvalues_file << std::endl;
-        std::ifstream check_file(eigenvalues_file, std::ios::binary);
+        // Method 1: Try eigenvalues.dat (binary format)
+        std::string eigenvalues_dat = config.workflow.output_dir + "/eigenvectors/eigenvalues.dat";
+        std::cout << "Method 1: Checking for eigenvalues.dat: " << eigenvalues_dat << std::endl;
+        std::ifstream infile_dat(eigenvalues_dat, std::ios::binary);
         
-        if (check_file.is_open()) {
-            check_file.close();
+        if (infile_dat.is_open()) {
             try {
-                // Read number of eigenvalues
-                std::ifstream infile(eigenvalues_file, std::ios::binary);
                 size_t num_eigenvalues;
-                infile.read(reinterpret_cast<char*>(&num_eigenvalues), sizeof(size_t));
+                infile_dat.read(reinterpret_cast<char*>(&num_eigenvalues), sizeof(size_t));
                 
                 if (num_eigenvalues > 0) {
-                    // Read the first eigenvalue (ground state energy)
-                    infile.read(reinterpret_cast<char*>(&ground_state_energy), sizeof(double));
-                    infile.close();
+                    infile_dat.read(reinterpret_cast<char*>(&ground_state_energy), sizeof(double));
+                    infile_dat.close();
                     
-                    std::cout << "Ground state energy read from eigenvalues.dat: " 
+                    std::cout << "✓ Ground state energy read from eigenvalues.dat: " 
                               << std::fixed << std::setprecision(10) << ground_state_energy << std::endl;
                     found_ground_state = true;
                 } else {
-                    infile.close();
+                    infile_dat.close();
+                    std::cout << "✗ eigenvalues.dat is empty" << std::endl;
                 }
             } catch (const std::exception& e) {
-                std::cout << "Warning: Failed to read eigenvalues.dat: " << e.what() << std::endl;
-                std::cout << "Will compute ground state energy using Lanczos...\n";
+                std::cout << "✗ Failed to read eigenvalues.dat: " << e.what() << std::endl;
+            }
+        } else {
+            std::cout << "✗ eigenvalues.dat not found" << std::endl;
+        }
+        
+        // Method 2: Try eigenvalues.txt (text format)
+        if (!found_ground_state) {
+            std::string eigenvalues_txt = config.workflow.output_dir + "/eigenvalues.txt";
+            std::cout << "Method 2: Checking for eigenvalues.txt: " << eigenvalues_txt << std::endl;
+            std::ifstream infile_txt(eigenvalues_txt);
+            
+            if (infile_txt.is_open()) {
+                if (infile_txt >> ground_state_energy) {
+                    infile_txt.close();
+                    std::cout << "✓ Ground state energy read from eigenvalues.txt: " 
+                              << std::fixed << std::setprecision(10) << ground_state_energy << std::endl;
+                    found_ground_state = true;
+                } else {
+                    infile_txt.close();
+                    std::cout << "✗ eigenvalues.txt is empty or invalid" << std::endl;
+                }
+            } else {
+                std::cout << "✗ eigenvalues.txt not found" << std::endl;
             }
         }
         
-        // If eigenvalues.dat doesn't exist or failed to read, use Lanczos
+        // Method 3: Try finding minimum energy in SS_rand0.dat
         if (!found_ground_state) {
-            std::cout << "eigenvalues.dat not found. Computing ground state energy using Lanczos...\n";
+            std::string ss_file = config.workflow.output_dir + "/SS_rand0.dat";
+            std::cout << "Method 3: Checking for SS_rand0.dat: " << ss_file << std::endl;
+            std::ifstream infile_ss(ss_file);
+            
+            if (infile_ss.is_open()) {
+                std::string line;
+                double min_energy = std::numeric_limits<double>::max();
+                bool found_energy = false;
+                
+                while (std::getline(infile_ss, line)) {
+                    // Skip comment lines and empty lines
+                    if (line.empty() || line[0] == '#') continue;
+                    
+                    std::istringstream iss(line);
+                    double inv_temp, energy;
+                    
+                    // Read first two columns: inv_temp and energy
+                    if (iss >> inv_temp >> energy) {
+                        if (energy < min_energy) {
+                            min_energy = energy;
+                            found_energy = true;
+                        }
+                    }
+                }
+                infile_ss.close();
+                
+                if (found_energy) {
+                    ground_state_energy = min_energy;
+                    std::cout << "✓ Ground state energy read from SS_rand0.dat (minimum): " 
+                              << std::fixed << std::setprecision(10) << ground_state_energy << std::endl;
+                    found_ground_state = true;
+                } else {
+                    std::cout << "✗ SS_rand0.dat contains no valid energy data" << std::endl;
+                }
+            } else {
+                std::cout << "✗ SS_rand0.dat not found" << std::endl;
+            }
+        }
+        
+        // Method 4 (fallback): If all file methods fail, use Lanczos
+        if (!found_ground_state) {
+            std::cout << "Method 4: All file methods failed. Computing ground state energy using Lanczos...\n";
             ComplexVector ground_state(N);
             ground_state_energy = find_ground_state_lanczos(
                 H_func, N, params.krylov_dim, params.tolerance,
@@ -805,7 +865,8 @@ void compute_dynamical_response_workflow(const EDConfig& config) {
                 ground_state
             );
             found_ground_state = true;
-            std::cout << "Ground state energy from Lanczos: " << ground_state_energy << std::endl;
+            std::cout << "✓ Ground state energy computed from Lanczos: " 
+                      << std::fixed << std::setprecision(10) << ground_state_energy << std::endl;
         }
         
         std::cout << "Dynamical correlations will be shifted to excitation energies (E_gs = 0)\n";
