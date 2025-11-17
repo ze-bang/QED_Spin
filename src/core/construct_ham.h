@@ -1802,8 +1802,8 @@ public:
                     if (!tdata.is_two_body) {
                         // One-body operator: S^α_i
                         if (tdata.op_type == 2) {
-                            // Sz: diagonal, just multiply by eigenvalue
-                            double sign = ((basis_i >> tdata.site_index) & 1) ? -1.0 : 1.0;
+                            // Sz: diagonal, bit=1 (up) → +spin_l, bit=0 (down) → -spin_l
+                            double sign = ((basis_i >> tdata.site_index) & 1) ? 1.0 : -1.0;
                             scalar *= spin_l_ * sign;
                         } else {
                             // S+ or S-: off-diagonal, flip bit
@@ -1820,9 +1820,9 @@ public:
                         uint64_t bit_j = (basis_i >> tdata.site_index_2) & 1;
 
                         if (tdata.op_type == 2 && tdata.op_type_2 == 2) {
-                            // Sz_i Sz_j: purely diagonal
-                            double sign_i = bit_i ? -1.0 : 1.0;
-                            double sign_j = bit_j ? -1.0 : 1.0;
+                            // Sz_i Sz_j: purely diagonal (bit=1 → +spin_l, bit=0 → -spin_l)
+                            double sign_i = bit_i ? 1.0 : -1.0;
+                            double sign_j = bit_j ? 1.0 : -1.0;
                             scalar *= spin_l_ * spin_l_ * sign_i * sign_j;
                         } else {
                             // Mixed or off-diagonal terms
@@ -1833,7 +1833,7 @@ public:
                                     valid = false;
                                 }
                             } else {
-                                double sign_i = bit_i ? -1.0 : 1.0;
+                                double sign_i = bit_i ? 1.0 : -1.0;
                                 scalar *= spin_l_ * sign_i;
                             }
 
@@ -1846,7 +1846,7 @@ public:
                                 }
                             } else if (valid) {
                                 uint64_t new_bit_j = (new_basis >> tdata.site_index_2) & 1;
-                                double sign_j = new_bit_j ? -1.0 : 1.0;
+                                double sign_j = new_bit_j ? 1.0 : -1.0;
                                 scalar *= spin_l_ * sign_j;
                             }
                         }
