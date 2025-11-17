@@ -1,4 +1,5 @@
 #include "TPQ.h"
+#include "../core/construct_ham.h"
 
 #ifdef WITH_MPI
 #include <mpi.h>
@@ -850,20 +851,32 @@ bool readTPQData(const std::string& filename, uint64_t step, double& energy,
 /**
  * Save the current TPQ state to a file
  * 
- * @param tpq_state TPQ state vector to save
+ * @param tpq_state TPQ state vector to save (in fixed-Sz or full basis)
  * @param filename Name of the file to save to
+ * @param fixed_sz_op Optional FixedSzOperator - if provided, transforms to full basis before saving
  * @return True if successful
  */
-bool save_tpq_state(const ComplexVector& tpq_state, const std::string& filename) {
+bool save_tpq_state(const ComplexVector& tpq_state, const std::string& filename, 
+                    FixedSzOperator* fixed_sz_op) {
     std::ofstream out(filename, std::ios::binary);
     if (!out.is_open()) {
         std::cerr << "Error: Could not open file " << filename << " for writing" << std::endl;
         return false;
     }
     
-    size_t size = tpq_state.size();
-    out.write(reinterpret_cast<const char*>(&size), sizeof(size_t));
-    out.write(reinterpret_cast<const char*>(tpq_state.data()), size * sizeof(Complex));
+    // Transform to full basis if using fixed-Sz
+    if (fixed_sz_op != nullptr) {
+        std::vector<Complex> full_state = fixed_sz_op->embedToFull(tpq_state);
+        size_t full_size = full_state.size();
+        out.write(reinterpret_cast<const char*>(&full_size), sizeof(size_t));
+        out.write(reinterpret_cast<const char*>(full_state.data()), full_size * sizeof(Complex));
+        std::cout << "  [Fixed-Sz] Transformed state from dim " << tpq_state.size() 
+                  << " to full space dim " << full_size << " before saving" << std::endl;
+    } else {
+        size_t size = tpq_state.size();
+        out.write(reinterpret_cast<const char*>(&size), sizeof(size_t));
+        out.write(reinterpret_cast<const char*>(tpq_state.data()), size * sizeof(Complex));
+    }
     
     out.close();
     return true;
@@ -1343,13 +1356,14 @@ void calculate_spectrum_from_tpq(
  * Standard TPQ (microcanonical) implementation
  * 
  * @param H Hamiltonian operator function
- * @param N Dimension of the Hilbert space
+ * @param N Dimension of the Hilbert space (fixed-Sz dimension if using fixed-Sz)
  * @param max_iter Maximum number of iterations
  * @param num_samples Number of random samples
  * @param temp_interval Interval for calculating physical quantities
  * @param eigenvalues Optional output vector for final state energies
  * @param dir Output directory
  * @param compute_spectrum Whether to compute spectrum
+ * @param fixed_sz_op Optional FixedSzOperator - if provided, transforms states to full basis before saving
  */
 void microcanonical_tpq(
     std::function<void(const Complex*, Complex*, int)> H,
@@ -1372,7 +1386,8 @@ void microcanonical_tpq(
     float spin_length,
     bool measure_sz,
     uint64_t sublattice_size,
-    uint64_t num_sites
+    uint64_t num_sites,
+    FixedSzOperator* fixed_sz_op
 ) {
     #ifdef WITH_MPI
     int rank = 0, size = 1;
@@ -1529,15 +1544,54 @@ void microcanonical_tpq(
             scale_factor = Complex(1.0/current_norm, 0.0);
             cblas_zscal(N, &scale_factor, v0.data(), 1);
             
-            // OPTIMIZED: Calculate energy and variance only at specified intervals (like GPU version)
+            // Check if we should measure observables at target temperatures
+            // We need to check this at EVERY step to avoid missing temperature points
+            bool should_measure_observables = false;
+            int target_temp_idx = -1;
+            
+            // First, do a quick check using estimated temperature
+            // Estimate current inverse temperature (using last known energy)
+            double estimated_inv_temp = (2.0 * step) / (LargeValue * num_sites - energy1);
+            
+            // Check if we're potentially near any target temperature
+            // Use a wider search window (5% instead of 1%) for the initial check
+            for (int i = 0; i < num_temp_points; ++i) {
+                if (!temp_measured[i]) {
+                    double search_tolerance = 0.05 * measure_inv_temp[i];  // 5% search window
+                    if (std::abs(estimated_inv_temp - measure_inv_temp[i]) < search_tolerance) {
+                        // We're potentially close - need to compute actual energy to be sure
+                        should_measure_observables = true;
+                        target_temp_idx = i;
+                        break;
+                    }
+                }
+            }
+            
+            // Determine if we should do measurements this step
+            bool do_regular_measurement = (step % temp_interval == 0 || step == max_iter);
+            bool do_measurement = do_regular_measurement || should_measure_observables;
+            
+            // OPTIMIZED: Calculate energy and variance only when needed
             // This significantly reduces computational cost for large systems
-            if (step % temp_interval == 0 || step == max_iter) {
+            if (do_measurement) {
                 // Calculate energy and variance
                 auto [energy_step, variance_step] = calculateEnergyAndVariance(H, v0, N);
-                // Update inverse temperature
+                // Update inverse temperature with accurate energy
                 inv_temp = (2.0*step) / (LargeValue * num_sites - energy_step);
                 
-                // Write data
+                // Update energy for next iteration's estimate
+                energy1 = energy_step;
+                
+                // Now check with accurate temperature if we're really at the target
+                bool actually_at_target = false;
+                if (should_measure_observables && target_temp_idx >= 0) {
+                    double precise_tolerance = 0.01 * measure_inv_temp[target_temp_idx];  // 1% precise tolerance
+                    if (std::abs(inv_temp - measure_inv_temp[target_temp_idx]) < precise_tolerance) {
+                        actually_at_target = true;
+                    }
+                }
+                
+                // Write data (always write when we compute energy)
                 writeTPQData(ss_file, inv_temp, energy_step, variance_step, current_norm, step);
                 
                 {
@@ -1546,8 +1600,6 @@ void microcanonical_tpq(
                              << current_norm << " " << first_norm << " " << step << std::endl;
                 }
                 
-                energy1 = energy_step;
-                
                 // Report detailed progress
                 if (step % (temp_interval * 10) == 0 || step == max_iter) {
                     std::cout << "  Step " << step << ": E = " << energy_step 
@@ -1555,8 +1607,8 @@ void microcanonical_tpq(
                               << ", β = " << inv_temp << std::endl;
                 }
                 
-                // Write fluctuation data
-                if (measure_sz){
+                // Write fluctuation data only at regular intervals
+                if (measure_sz && do_regular_measurement){
                     // Create operators on-demand only when needed (they are freed after use)
                     std::cout << "  Creating operators on-demand for fluctuation measurement..." << std::endl;
                     auto Sx_ops = createSxOperators(num_sites, spin_length);
@@ -1567,16 +1619,16 @@ void microcanonical_tpq(
                     writeFluctuationData(flct_file, spin_corr, inv_temp, v0, num_sites, spin_length, Sx_ops, Sy_ops, Sz_ops, double_site_ops, sublattice_size, step);
                     // Operators are automatically freed here when they go out of scope
                 }
-            }
-            // If inv_temp is at one of the specified inverse temperature points, compute observables
-            for (int i = 0; i < num_temp_points; ++i) {
-                if (!temp_measured[i] && std::abs(inv_temp - measure_inv_temp[i]) < 4e-3) {
-                    std::cout << "Computing observables at inv_temp = " << inv_temp << std::endl;
+                
+                // Save observables at target temperatures (with accurate inv_temp)
+                if (actually_at_target) {
+                    std::cout << "  *** Saving TPQ state at β = " << inv_temp 
+                              << " (target: " << measure_inv_temp[target_temp_idx] << ") ***" << std::endl;
                     if (compute_observables) {
                         std::string state_file = dir + "/tpq_state_" + std::to_string(sample) + "_beta=" + std::to_string(inv_temp) + ".dat";
-                        save_tpq_state(v0, state_file);
+                        save_tpq_state(v0, state_file, fixed_sz_op);
                     }
-                    temp_measured[i] = true; // Mark this temperature as measured
+                    temp_measured[target_temp_idx] = true;
                 }
             }
         }
@@ -1690,7 +1742,8 @@ void canonical_tpq(
     float spin_length,
     bool measure_sz,
     uint64_t sublattice_size,
-    uint64_t num_sites
+    uint64_t num_sites,
+    FixedSzOperator* fixed_sz_op
 ){
     #ifdef WITH_MPI
     int rank = 0, size = 1;
@@ -1732,11 +1785,12 @@ void canonical_tpq(
     energies.clear();
     energies.reserve(local_num_samples);
 
-    // Operators for fluctuations/correlations
-    std::vector<SingleSiteOperator> Sz_ops = createSzOperators(num_sites, spin_length);
-    std::vector<SingleSiteOperator> Sx_ops = createSxOperators(num_sites, spin_length);
-    std::vector<SingleSiteOperator> Sy_ops = createSyOperators(num_sites, spin_length);
-    auto double_site_ops = createSingleOperators_pair(num_sites, spin_length);
+    // NOTE: Operators are now created INSIDE the sample loop on-demand
+    // to avoid keeping all operators in memory simultaneously
+    std::cout << "Begin Canonical TPQ calculation with dimension " << N << std::endl;
+    if (measure_sz) {
+        std::cout << "Observable measurements enabled (operators created on-demand per sample)" << std::endl;
+    }
 
     // Temperature checkpoints (log-spaced β for saving states)
     const uint64_t num_temp_points = 20;
@@ -1788,9 +1842,30 @@ void canonical_tpq(
             // Evolve by Δβ
             imaginary_time_evolve_tpq_taylor(H, psi, N, delta_beta, taylor_order, /*normalize=*/true);
 
-            // OPTIMIZED: Measurements only at specified intervals (like GPU version)
+            // Check if we should measure observables at target temperatures
+            // In canonical TPQ, beta is known exactly, so we can check directly
+            bool should_measure_observables = false;
+            int target_temp_idx = -1;
+            
+            for (int i = 0; i < num_temp_points; ++i) {
+                if (!temp_measured[i]) {
+                    // Use relative tolerance
+                    double tolerance = 0.01 * measure_inv_temp[i];  // 1% tolerance
+                    if (std::abs(beta - measure_inv_temp[i]) < tolerance) {
+                        should_measure_observables = true;
+                        target_temp_idx = i;
+                        break;
+                    }
+                }
+            }
+
+            // Determine if we should do measurements this step
+            bool do_regular_measurement = (k % temp_interval == 0 || k == max_steps);
+            bool do_measurement = do_regular_measurement || should_measure_observables;
+
+            // OPTIMIZED: Measurements only when needed
             // This significantly reduces computational cost for large systems
-            if (k % temp_interval == 0 || k == max_steps) {
+            if (do_measurement) {
                 auto [e, var] = calculateEnergyAndVariance(H, psi, N);
                 double inv_temp = beta;
 
@@ -1800,21 +1875,30 @@ void canonical_tpq(
                     norm_out << std::setprecision(16) << inv_temp << " " << 1.0 << " " << 1.0 << " " << step << std::endl;
                 }
 
-                if (measure_sz) {
+                // Write fluctuation data only at regular intervals
+                if (measure_sz && do_regular_measurement){
+                    // Create operators on-demand only when needed (they are freed after use)
+                    std::cout << "  Creating operators on-demand for fluctuation measurement..." << std::endl;
+                    auto Sx_ops = createSxOperators(num_sites, spin_length);
+                    auto Sy_ops = createSyOperators(num_sites, spin_length);
+                    auto Sz_ops = createSzOperators(num_sites, spin_length);
+                    auto double_site_ops = createSingleOperators_pair(num_sites, spin_length);
+                    
                     writeFluctuationData(flct_file, spin_corr, inv_temp, psi,
                                          num_sites, spin_length, Sx_ops, Sy_ops, Sz_ops, double_site_ops, sublattice_size, step);
+                    // Operators are automatically freed here when they go out of scope
                 }
                 
-                // Save state at specified temperature checkpoints
-                for (int i = 0; i < num_temp_points; ++i) {
-                    if (!temp_measured[i] && std::abs(inv_temp - measure_inv_temp[i]) < 4e-3) {
-                        if (compute_observables) {
-                            std::string state_file = dir + "/tpq_state_" + std::to_string(sample)
-                                                   + "_beta=" + std::to_string(inv_temp) + ".dat";
-                            save_tpq_state(psi, state_file);
-                        }
-                        temp_measured[i] = true;
+                // Save state at target temperature checkpoints
+                if (should_measure_observables && target_temp_idx >= 0) {
+                    std::cout << "  *** Saving TPQ state at β = " << inv_temp 
+                              << " (target: " << measure_inv_temp[target_temp_idx] << ") ***" << std::endl;
+                    if (compute_observables) {
+                        std::string state_file = dir + "/tpq_state_" + std::to_string(sample)
+                                               + "_beta=" + std::to_string(inv_temp) + ".dat";
+                        save_tpq_state(psi, state_file, fixed_sz_op);
                     }
+                    temp_measured[target_temp_idx] = true;
                 }
                 
                 if (k % std::max(static_cast<uint64_t>(1), max_steps / 10) == 0 || k == max_steps) {

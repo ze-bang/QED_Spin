@@ -253,13 +253,40 @@ bool GPUTPQSolver::saveTPQState(const std::string& filename) {
     return true;
 }
 
+bool GPUTPQSolver::saveTPQState(const std::string& filename, GPUFixedSzOperator* fixed_sz_op) {
+    // Copy state from GPU to host
+    std::vector<std::complex<double>> h_state(N_);
+    cudaMemcpy(h_state.data(), d_state_, N_ * sizeof(cuDoubleComplex), cudaMemcpyDeviceToHost);
+    
+    std::ofstream file(filename, std::ios::binary);
+    if (!file.is_open()) return false;
+    
+    // Transform to full basis if using fixed-Sz
+    if (fixed_sz_op != nullptr) {
+        std::vector<std::complex<double>> full_state = fixed_sz_op->embedToFull(h_state);
+        size_t full_size = full_state.size();
+        file.write(reinterpret_cast<const char*>(&full_size), sizeof(size_t));
+        file.write(reinterpret_cast<const char*>(full_state.data()), full_size * sizeof(std::complex<double>));
+        std::cout << "  [GPU Fixed-Sz] Transformed state from dim " << N_ 
+                  << " to full space dim " << full_size << " before saving" << std::endl;
+    } else {
+        size_t size = N_;
+        file.write(reinterpret_cast<const char*>(&size), sizeof(size_t));
+        file.write(reinterpret_cast<const char*>(h_state.data()), N_ * sizeof(std::complex<double>));
+    }
+    
+    file.close();
+    return true;
+}
+
 void GPUTPQSolver::runMicrocanonicalTPQ(
     int max_iter,
     int num_samples,
     int temp_interval,
     std::vector<double>& eigenvalues,
     const std::string& dir,
-    double large_value
+    double large_value,
+    GPUFixedSzOperator* fixed_sz_op
 ) {
     auto total_start = std::chrono::high_resolution_clock::now();
     
@@ -359,15 +386,55 @@ void GPUTPQSolver::runMicrocanonicalTPQ(
             scale = make_cuDoubleComplex(1.0 / current_norm, 0.0);
             cublasZscal(cublas_handle_, N_, &scale, d_state_, 1);
             
-            // Measurements every temp_interval steps
-            if (step % temp_interval == 0 || step == max_iter) {
+            // Check if we should measure observables at target temperatures
+            // We need to check this at EVERY step to avoid missing temperature points
+            bool should_measure_observables = false;
+            int target_temp_idx = -1;
+            
+            // First, do a quick check using estimated temperature
+            // Estimate current inverse temperature (using last known energy)
+            double estimated_inv_temp = (2.0 * step) / (large_value * D_S - energy);
+            
+            // Check if we're potentially near any target temperature
+            // Use a wider search window (5% instead of 1%) for the initial check
+            for (int i = 0; i < num_temp_points; ++i) {
+                if (!temp_measured[i]) {
+                    double search_tolerance = 0.05 * measure_inv_temp[i];  // 5% search window
+                    if (std::abs(estimated_inv_temp - measure_inv_temp[i]) < search_tolerance) {
+                        // We're potentially close - need to compute actual energy to be sure
+                        should_measure_observables = true;
+                        target_temp_idx = i;
+                        break;
+                    }
+                }
+            }
+            
+            // Determine if we should do measurements this step
+            bool do_regular_measurement = (step % temp_interval == 0 || step == max_iter);
+            bool do_measurement = do_regular_measurement || should_measure_observables;
+            
+            // Measurements when needed
+            if (do_measurement) {
                 std::pair<double, double> E_var_pair = computeEnergyAndVariance();
                 double E = E_var_pair.first;
                 double var = E_var_pair.second;
                 
-                // Update inverse temperature
+                // Update inverse temperature with accurate energy
                 inv_temp = (2.0 * step) / (large_value * D_S - E);
                 
+                // Update energy for next iteration's estimate
+                energy = E;
+                
+                // Now check with accurate temperature if we're really at the target
+                bool actually_at_target = false;
+                if (should_measure_observables && target_temp_idx >= 0) {
+                    double precise_tolerance = 0.01 * measure_inv_temp[target_temp_idx];  // 1% precise tolerance
+                    if (std::abs(inv_temp - measure_inv_temp[target_temp_idx]) < precise_tolerance) {
+                        actually_at_target = true;
+                    }
+                }
+                
+                // Write data (always write when we compute energy)
                 writeTPQData(sample_file, inv_temp, E, var, current_norm, step);
                 
                 if (step % (temp_interval * 10) == 0 || step == max_iter) {
@@ -376,17 +443,14 @@ void GPUTPQSolver::runMicrocanonicalTPQ(
                               << ", β = " << inv_temp << std::endl;
                 }
                 
-                energy = E;
-            }
-            
-            // Save TPQ state at specified measurement temperatures
-            for (int i = 0; i < num_temp_points; ++i) {
-                if (!temp_measured[i] && std::abs(inv_temp - measure_inv_temp[i]) < 4e-3) {
-                    std::cout << "  Saving TPQ state at β = " << inv_temp << std::endl;
+                // Save TPQ state at target temperatures (with accurate inv_temp)
+                if (actually_at_target) {
+                    std::cout << "  *** Saving TPQ state at β = " << inv_temp 
+                              << " (target: " << measure_inv_temp[target_temp_idx] << ") ***" << std::endl;
                     std::string state_file = dir + "/tpq_state_" + std::to_string(sample) + 
                                            "_beta=" + std::to_string(inv_temp) + ".dat";
-                    saveTPQState(state_file);
-                    temp_measured[i] = true; // Mark this temperature as saved
+                    saveTPQState(state_file, fixed_sz_op);
+                    temp_measured[target_temp_idx] = true;
                 }
             }
             
@@ -421,7 +485,8 @@ void GPUTPQSolver::runCanonicalTPQ(
     std::vector<double>& energies,
     const std::string& dir,
     double delta_beta,
-    int taylor_order
+    int taylor_order,
+    GPUFixedSzOperator* fixed_sz_op
 ) {
     auto total_start = std::chrono::high_resolution_clock::now();
     
@@ -479,8 +544,29 @@ void GPUTPQSolver::runCanonicalTPQ(
             auto evolve_end = std::chrono::high_resolution_clock::now();
             stats_.matvec_time += std::chrono::duration<double>(evolve_end - evolve_start).count();
             
-            // Measurements
-            if (step % temp_interval == 0 || step == num_steps) {
+            // Check if we should measure observables at target temperatures
+            // In canonical TPQ, beta is known exactly, so we can check directly
+            bool should_measure_observables = false;
+            int target_temp_idx = -1;
+            
+            for (int i = 0; i < num_temp_points; ++i) {
+                if (!temp_measured[i]) {
+                    // Use relative tolerance
+                    double tolerance = 0.01 * measure_inv_temp[i];  // 1% tolerance
+                    if (std::abs(beta - measure_inv_temp[i]) < tolerance) {
+                        should_measure_observables = true;
+                        target_temp_idx = i;
+                        break;
+                    }
+                }
+            }
+            
+            // Determine if we should do measurements this step
+            bool do_regular_measurement = (step % temp_interval == 0 || step == num_steps);
+            bool do_measurement = do_regular_measurement || should_measure_observables;
+            
+            // Measurements when needed
+            if (do_measurement) {
                 std::pair<double, double> E_var_pair = computeEnergyAndVariance();
                 double E = E_var_pair.first;
                 double var = E_var_pair.second;
@@ -492,18 +578,17 @@ void GPUTPQSolver::runCanonicalTPQ(
                 if (step % (temp_interval * 5) == 0) {
                     std::string state_file = dir + "/ctpq_state_" + std::to_string(sample) + 
                                            "_beta=" + std::to_string(beta) + ".dat";
-                    saveTPQState(state_file);
+                    saveTPQState(state_file, fixed_sz_op);
                 }
-            }
-            
-            // Save TPQ state at specified measurement temperatures
-            for (int i = 0; i < num_temp_points; ++i) {
-                if (!temp_measured[i] && std::abs(beta - measure_inv_temp[i]) < 4e-3) {
-                    std::cout << "  Saving TPQ state at β = " << beta << std::endl;
+                
+                // Save TPQ state at target temperatures
+                if (should_measure_observables && target_temp_idx >= 0) {
+                    std::cout << "  *** Saving TPQ state at β = " << beta 
+                              << " (target: " << measure_inv_temp[target_temp_idx] << ") ***" << std::endl;
                     std::string state_file = dir + "/tpq_state_" + std::to_string(sample) + 
                                            "_beta=" + std::to_string(beta) + ".dat";
-                    saveTPQState(state_file);
-                    temp_measured[i] = true; // Mark this temperature as saved
+                    saveTPQState(state_file, fixed_sz_op);
+                    temp_measured[target_temp_idx] = true;
                 }
             }
             

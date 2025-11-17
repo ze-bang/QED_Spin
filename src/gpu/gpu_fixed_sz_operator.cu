@@ -169,4 +169,30 @@ void GPUFixedSzOperator::matVec(const std::complex<double>* x, std::complex<doub
                          cudaMemcpyDeviceToHost));
 }
 
+// Transform vector from fixed-Sz basis to full Hilbert space
+std::vector<std::complex<double>> GPUFixedSzOperator::embedToFull(
+    const std::vector<std::complex<double>>& fixed_sz_vec) {
+    
+    if (fixed_sz_vec.size() != static_cast<size_t>(fixed_sz_dim_)) {
+        throw std::invalid_argument("Input vector size mismatch with fixed Sz dimension");
+    }
+    
+    // Copy basis states from GPU to host
+    std::vector<uint64_t> h_basis_states(fixed_sz_dim_);
+    CUDA_CHECK(cudaMemcpy(h_basis_states.data(), d_basis_states_, 
+                         fixed_sz_dim_ * sizeof(uint64_t), cudaMemcpyDeviceToHost));
+    
+    // Create full-space vector
+    uint64_t full_dim = 1ULL << n_sites_;
+    std::vector<std::complex<double>> full_vec(full_dim, std::complex<double>(0.0, 0.0));
+    
+    // Map fixed-Sz coefficients to full-space positions
+    for (int i = 0; i < fixed_sz_dim_; ++i) {
+        uint64_t state = h_basis_states[i];
+        full_vec[state] = fixed_sz_vec[i];
+    }
+    
+    return full_vec;
+}
+
 #endif // WITH_CUDA

@@ -286,6 +286,7 @@ set(HEADER_SOURCES
 if(WITH_CUDA)
     set(GPU_SOURCES
         ${GPU_DIR}/gpu_operator.cu
+        ${GPU_DIR}/gpu_operator_conversion.cpp
         ${GPU_DIR}/gpu_kernels.cu
         ${GPU_DIR}/gpu_fixed_sz_operator.cu
         ${GPU_DIR}/gpu_lanczos.cu
@@ -355,6 +356,30 @@ if(TARGET TPQ_DSSF)
         ${ARPACK_LIBRARY}
         ${HDF5_LIBRARIES}
     )
+    
+    # Add CUDA support for TPQ_DSSF if enabled
+    if(WITH_CUDA)
+        # Add GPU source files to TPQ_DSSF
+        target_sources(TPQ_DSSF PRIVATE
+            ${GPU_DIR}/gpu_ed_wrapper.cu
+            ${GPU_DIR}/gpu_operator.cu
+            ${GPU_DIR}/gpu_operator_conversion.cpp
+            ${GPU_DIR}/gpu_kernels.cu
+            ${GPU_DIR}/gpu_fixed_sz_operator.cu
+            ${GPU_DIR}/gpu_lanczos.cu
+            ${GPU_DIR}/gpu_tpq.cu
+            ${GPU_DIR}/gpu_cg.cu
+            ${GPU_DIR}/gpu_ftlm.cu
+        )
+        
+        target_link_libraries(TPQ_DSSF
+            CUDA::cudart
+            CUDA::cublas
+            CUDA::cusparse
+            CUDA::curand
+            CUDA::cusolver
+        )
+    endif()
 endif()
 
 # Link libraries for test_dynamical_correlation

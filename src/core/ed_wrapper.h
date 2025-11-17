@@ -226,6 +226,9 @@ struct EDParameters {
     bool calc_observables = false; // Calculate custom observables
     bool measure_spin = false;     // Measure spins
     
+    // ========== Fixed-Sz Parameters ==========
+    mutable class FixedSzOperator* fixed_sz_op = nullptr;  // If using fixed-Sz, pointer to operator for embedding
+    
     // ========== ARPACK Advanced Options ==========
     // Used when method == ARPACK_ADVANCED
     // These mirror (a subset of) detail_arpack::ArpackAdvancedOptions
@@ -480,7 +483,8 @@ EDResults exact_diagonalization_core(
                             params.calc_observables,params.observables, params.observable_names,
                             params.omega_min, params.omega_max,
                             params.num_points, params.t_end, params.dt, params.spin_length, 
-                            params.measure_spin, params.sublattice_size, params.num_sites); 
+                            params.measure_spin, params.sublattice_size, params.num_sites,
+                            params.fixed_sz_op); 
             break;
 
         case DiagonalizationMethod::cTPQ:
@@ -508,7 +512,8 @@ EDResults exact_diagonalization_core(
                 params.spin_length,     // spin length
                 params.measure_spin,    // measure Sz and fluctuations
                 params.sublattice_size, // sublattice size
-                params.num_sites        // number of sites
+                params.num_sites,       // number of sites
+                params.fixed_sz_op      // Fixed-Sz operator for embedding
             );
             break;
 
@@ -1745,6 +1750,12 @@ inline EDResults exact_diagonalization_fixed_sz(
         
         results.eigenvalues = eigenvalues;
         
+        // Note: GPU TPQ states are now automatically transformed during save (via saveTPQState)
+        // No post-processing transformation needed
+        if (method == DiagonalizationMethod::mTPQ_GPU || method == DiagonalizationMethod::cTPQ_GPU) {
+            std::cout << "\nGPU TPQ states were automatically transformed to full Hilbert space during save." << std::endl;
+        }
+        
         // Cleanup
         GPUEDWrapper::destroyGPUOperator(gpu_op_handle);
         
@@ -1753,11 +1764,7 @@ inline EDResults exact_diagonalization_fixed_sz(
         throw std::runtime_error("GPU methods require CUDA support (compile with -DWITH_CUDA=ON)");
 #endif
     } else {
-        // CPU path
-        // Build sparse matrix
-        if (method != DiagonalizationMethod::FULL) {
-            hamiltonian.buildFixedSzMatrix();
-        }
+
         
         // Create apply function
         auto apply_hamiltonian = [&hamiltonian, fixed_sz_dim](const Complex* in, Complex* out, uint64_t n) {
@@ -1766,6 +1773,9 @@ inline EDResults exact_diagonalization_fixed_sz(
             }
             hamiltonian.apply(in, out, n);
         };
+        
+        // Set the fixed_sz_op in params so TPQ can transform states before saving
+        params.fixed_sz_op = &hamiltonian;
         
         // Perform diagonalization
         std::cout << "\nDiagonalizing..." << std::endl;
@@ -1777,9 +1787,10 @@ inline EDResults exact_diagonalization_fixed_sz(
                           method == DiagonalizationMethod::mTPQ_CUDA || 
                           method == DiagonalizationMethod::cTPQ);
 
-    // Transform eigenvectors or TPQ states from fixed-Sz basis to full basis
-    if (!params.output_dir.empty() && (params.compute_eigenvectors || is_tpq_method)) {
-        std::cout << "Transforming vectors from fixed-Sz basis to full Hilbert space..." << std::endl;
+    // Transform eigenvectors from fixed-Sz basis to full basis
+    // Note: TPQ states are now transformed during save, so no post-processing needed for them
+    if (!params.output_dir.empty() && params.compute_eigenvectors) {
+        std::cout << "Transforming eigenvectors from fixed-Sz basis to full Hilbert space..." << std::endl;
         std::cout << "  Fixed Sz dim: " << fixed_sz_dim << ", Full dim: " << full_dim << std::endl;
         std::cout << "  Output directory: " << params.output_dir << std::endl;
         
@@ -1812,75 +1823,10 @@ inline EDResults exact_diagonalization_fixed_sz(
             std::cout << "All eigenvectors successfully transformed to full Hilbert space." << std::endl;
         }
         
-        // Transform TPQ states if TPQ method was used
+        // Note: TPQ states are now automatically transformed during save (via save_tpq_state)
+        // No post-processing transformation needed for TPQ states
         if (is_tpq_method) {
-            std::cout << "\nTransforming TPQ states from fixed-Sz basis to full Hilbert space..." << std::endl;
-            
-            // Find all TPQ state files
-            std::string find_command = "find \"" + params.output_dir + "\" -name \"tpq_state_*.dat\" 2>/dev/null";
-            FILE* pipe = popen(find_command.c_str(), "r");
-            if (!pipe) {
-                std::cerr << "Warning: Could not search for TPQ state files" << std::endl;
-            } else {
-                char buffer[1024];
-                std::vector<std::string> tpq_files;
-                while (fgets(buffer, sizeof(buffer), pipe) != nullptr) {
-                    std::string filename(buffer);
-                    // Remove trailing newline
-                    if (!filename.empty() && filename[filename.length()-1] == '\n') {
-                        filename.erase(filename.length()-1);
-                    }
-                    if (!filename.empty()) {
-                        tpq_files.push_back(filename);
-                    }
-                }
-                pclose(pipe);
-                
-                std::cout << "  Found " << tpq_files.size() << " TPQ state files to transform" << std::endl;
-                
-                // Transform each TPQ state file
-                for (const auto& tpq_file : tpq_files) {
-                    std::cout << "  Processing: " << tpq_file << std::endl;
-                    
-                    std::ifstream infile(tpq_file, std::ios::binary);
-                    if (!infile.is_open()) {
-                        std::cerr << "    Warning: Could not open " << tpq_file << std::endl;
-                        continue;
-                    }
-                    
-                    // Read size header
-                    size_t stored_size = 0;
-                    infile.read(reinterpret_cast<char*>(&stored_size), sizeof(size_t));
-                    
-                    if (stored_size != fixed_sz_dim) {
-                        std::cerr << "    Warning: Size mismatch (expected " << fixed_sz_dim 
-                                  << ", got " << stored_size << ")" << std::endl;
-                        infile.close();
-                        continue;
-                    }
-                    
-                    // Read TPQ state in fixed-Sz basis
-                    std::vector<Complex> fixed_sz_state(fixed_sz_dim);
-                    infile.read(reinterpret_cast<char*>(fixed_sz_state.data()), fixed_sz_dim * sizeof(Complex));
-                    infile.close();
-                    
-                    // Transform to full basis
-                    std::vector<Complex> full_state = hamiltonian.embedToFull(fixed_sz_state);
-                    
-                    // Overwrite file with full-space TPQ state
-                    std::ofstream outfile(tpq_file, std::ios::binary);
-                    outfile.write(reinterpret_cast<const char*>(&full_dim), sizeof(size_t));
-                    outfile.write(reinterpret_cast<const char*>(full_state.data()), full_dim * sizeof(Complex));
-                    outfile.close();
-                    
-                    std::cout << "    Transformed TPQ state to full space (dim: " 
-                              << fixed_sz_dim << " -> " << full_dim << ")" << std::endl;
-                }
-                
-                if (!tpq_files.empty()) {
-                    std::cout << "All TPQ states successfully transformed to full Hilbert space." << std::endl;
-                }
-            }
+            std::cout << "\nTPQ states were automatically transformed to full Hilbert space during save." << std::endl;
         }
     }
 

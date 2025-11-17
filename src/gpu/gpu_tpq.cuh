@@ -42,6 +42,7 @@ public:
      * @param eigenvalues Output energies
      * @param dir Output directory
      * @param large_value Large value for high energy cutoff
+     * @param fixed_sz_op Optional GPUFixedSzOperator for embedding to full space
      */
     void runMicrocanonicalTPQ(
         int max_iter,
@@ -49,7 +50,8 @@ public:
         int temp_interval,
         std::vector<double>& eigenvalues,
         const std::string& dir = "",
-        double large_value = 1e5
+        double large_value = 1e5,
+        class GPUFixedSzOperator* fixed_sz_op = nullptr
     );
     
     /**
@@ -61,6 +63,7 @@ public:
      * @param dir Output directory
      * @param delta_beta Time step for imaginary time evolution
      * @param taylor_order Order of Taylor expansion
+     * @param fixed_sz_op Optional GPUFixedSzOperator for embedding to full space
      */
     void runCanonicalTPQ(
         double beta_max,
@@ -69,7 +72,8 @@ public:
         std::vector<double>& energies,
         const std::string& dir = "",
         double delta_beta = 0.1,
-        int taylor_order = 50
+        int taylor_order = 50,
+        class GPUFixedSzOperator* fixed_sz_op = nullptr
     );
     
     /**
@@ -111,6 +115,7 @@ private:
     void writeTPQData(const std::string& filename, double inv_temp, 
                      double energy, double variance, double norm, int step);
     bool saveTPQState(const std::string& filename);
+    bool saveTPQState(const std::string& filename, class GPUFixedSzOperator* fixed_sz_op);
 };
 
 #endif // GPU_TPQ_CUH

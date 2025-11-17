@@ -738,19 +738,21 @@ static void compute_spectral_function_complex(
         double e_min = *std::min_element(ritz_values.begin(), ritz_values.end());
         
         // Compute partition function with shifted energies
-        // For complex weights: Z = Σ_i Re[w_i] * exp(-βE_i)
+        // Z = Σ_i exp(-βE_i) where the sum is over Krylov states
+        // The weights already contain the ⟨ψ|O₁†|n⟩⟨n|O₂|ψ⟩ matrix elements
         double Z = 0.0;
         for (int i = 0; i < n_states; i++) {
             double shifted_energy = ritz_values[i] - e_min;
             double boltzmann_factor = std::exp(-beta * shifted_energy);
-            thermal_weights[i] = complex_weights[i] * boltzmann_factor;
-            Z += thermal_weights[i].real() * boltzmann_factor;
+            Z += boltzmann_factor;
         }
         
-        // Normalize by partition function
+        // Apply thermal weights: w_n → w_n * exp(-βE_n) / Z
         if (Z > 1e-300) {
             for (int i = 0; i < n_states; i++) {
-                thermal_weights[i] /= Z;
+                double shifted_energy = ritz_values[i] - e_min;
+                double boltzmann_factor = std::exp(-beta * shifted_energy);
+                thermal_weights[i] = complex_weights[i] * (boltzmann_factor / Z);
             }
         } else {
             // Very low temperature - only ground state contributes
@@ -758,10 +760,10 @@ static void compute_spectral_function_complex(
             uint64_t gs_idx = std::distance(ritz_values.begin(),
                                       std::min_element(ritz_values.begin(), ritz_values.end()));
             thermal_weights[gs_idx] = complex_weights[gs_idx];
-            // Normalize by real part sum
+            // Normalize by complex magnitude
             Complex sum = Complex(0.0, 0.0);
             for (const auto& w : thermal_weights) sum += w;
-            if (std::abs(sum) > 0) {
+            if (std::abs(sum) > 1e-300) {
                 for (auto& w : thermal_weights) w /= sum;
             }
         }
@@ -1157,8 +1159,9 @@ DynamicalResponseResults compute_dynamical_correlation(
     }
     std::uniform_real_distribution<double> dist(-1.0, 1.0);
     
-    // Storage for per-sample spectral functions
-    std::vector<std::vector<double>> sample_spectra;
+    // Storage for per-sample spectral functions (real and imaginary parts)
+    std::vector<std::vector<double>> sample_spectra_real;
+    std::vector<std::vector<double>> sample_spectra_imag;
     
     // Create output directory if needed
     if (!output_dir.empty() && params.store_intermediate) {
@@ -1240,49 +1243,53 @@ DynamicalResponseResults compute_dynamical_correlation(
             ritz_values[i] -= E_shift;
         }
         
-        // Compute weights |⟨n|O₁|ψ⟩|² for cross-correlation
+        // Compute weights ⟨ψ|O₁†|n⟩⟨n|O₂|ψ⟩ for cross-correlation
         // |n⟩ = Σ_j evecs[n,j] |v_j⟩ where |v_0⟩ = O₂|ψ⟩/||O₂|ψ⟩||
-        // We need ⟨ψ|O₁†|n⟩ = ⟨O₁ψ|n⟩
+        // Need complex weights to preserve phase information
         
         // Apply O1 to original state
         ComplexVector O1_psi(N);
         O1(psi.data(), O1_psi.data(), N);
         
-        std::vector<double> weights(m);
+        std::vector<Complex> complex_weights(m);
         
         for (int n = 0; n < m; n++) {
-            // Reconstruct |n⟩ in full space
-            ComplexVector psi_n(N, Complex(0.0, 0.0));
+            // Compute ⟨ψ|O₁†|n⟩ = ⟨O₁ψ|n⟩ = Σⱼ evecs[n,j] ⟨O₁ψ|vⱼ⟩
+            Complex overlap_O1 = Complex(0.0, 0.0);
             for (int j = 0; j < m; j++) {
-                Complex coeff(evecs[n * m + j], 0.0);
-                cblas_zaxpy(N, &coeff, lanczos_vectors[j].data(), 1, psi_n.data(), 1);
+                Complex bracket;
+                cblas_zdotc_sub(N, O1_psi.data(), 1, lanczos_vectors[j].data(), 1, &bracket);
+                overlap_O1 += Complex(evecs[n * m + j], 0.0) * bracket;
             }
             
-            // Compute ⟨O₁ψ|n⟩
-            Complex overlap;
-            cblas_zdotc_sub(N, O1_psi.data(), 1, psi_n.data(), 1, &overlap);
+            // Compute ⟨n|O₂|ψ⟩ = evecs[n,0] × ||O₂|ψ|| (since |v₀⟩ = O₂|ψ⟩/||O₂|ψ||)
+            Complex overlap_O2 = Complex(evecs[n * m + 0] * phi_norm, 0.0);
             
-            // Weight is |overlap|² * phi_norm²
-            weights[n] = std::norm(overlap) * phi_norm * phi_norm;
+            // Weight is ⟨ψ|O₁†|n⟩⟨n|O₂|ψ⟩ (complex product for general cross-correlation)
+            Complex weight_complex = std::conj(overlap_O1) * overlap_O2;
+            complex_weights[n] = weight_complex;
         }
         
-        // Compute spectral function for this sample
-        std::vector<double> sample_spectrum;
-        compute_spectral_function(ritz_values, weights, results.frequencies,
-                                 params.broadening, temperature, sample_spectrum);
+        // Compute spectral function for this sample (both real and imaginary parts)
+        std::vector<double> sample_spectrum_real, sample_spectrum_imag;
+        compute_spectral_function_complex(ritz_values, complex_weights, results.frequencies,
+                                         params.broadening, temperature, 
+                                         sample_spectrum_real, sample_spectrum_imag);
         
-        sample_spectra.push_back(sample_spectrum);
+        sample_spectra_real.push_back(sample_spectrum_real);
+        sample_spectra_imag.push_back(sample_spectrum_imag);
         
         // Save intermediate data if requested
         if (params.store_intermediate && !output_dir.empty()) {
             std::string sample_file = output_dir + "/dynamical_correlation_samples/sample_" + std::to_string(sample) + ".txt";
             std::ofstream f(sample_file);
             if (f.is_open()) {
-                f << "# Frequency  Spectral_Function\n";
+                f << "# Frequency  Re[S(ω)]  Im[S(ω)]\n";
                 for (int i = 0; i < num_omega_bins; i++) {
                     f << std::scientific << std::setprecision(12)
                       << results.frequencies[i] << " "
-                      << sample_spectrum[i] << "\n";
+                      << sample_spectrum_real[i] << " "
+                      << sample_spectrum_imag[i] << "\n";
                 }
                 f.close();
             }
@@ -1290,11 +1297,11 @@ DynamicalResponseResults compute_dynamical_correlation(
     }
     
     // Average over all samples (Dynamical Correlation FTLM)
-    uint64_t n_valid_samples = sample_spectra.size();
+    uint64_t n_valid_samples = sample_spectra_real.size();
     std::cout << "\n--- Averaging over " << n_valid_samples << " samples ---\n";
     
     results.spectral_function.resize(num_omega_bins, 0.0);
-    results.spectral_function_imag.resize(num_omega_bins, 0.0);  // FTLM averages: imaginary parts cancel
+    results.spectral_function_imag.resize(num_omega_bins, 0.0);
     results.spectral_error.resize(num_omega_bins, 0.0);
     results.spectral_error_imag.resize(num_omega_bins, 0.0);
     
@@ -1303,29 +1310,34 @@ DynamicalResponseResults compute_dynamical_correlation(
         return results;
     }
     
-    // Compute mean
+    // Compute mean (real and imaginary parts)
     for (int s = 0; s < n_valid_samples; s++) {
         for (int i = 0; i < num_omega_bins; i++) {
-            results.spectral_function[i] += sample_spectra[s][i];
+            results.spectral_function[i] += sample_spectra_real[s][i];
+            results.spectral_function_imag[i] += sample_spectra_imag[s][i];
         }
     }
     
     for (int i = 0; i < num_omega_bins; i++) {
         results.spectral_function[i] /= n_valid_samples;
+        results.spectral_function_imag[i] /= n_valid_samples;
     }
     
-    // Compute standard error
+    // Compute standard error (real and imaginary parts)
     if (n_valid_samples > 1) {
         for (int s = 0; s < n_valid_samples; s++) {
             for (int i = 0; i < num_omega_bins; i++) {
-                double diff = sample_spectra[s][i] - results.spectral_function[i];
-                results.spectral_error[i] += diff * diff;
+                double diff_real = sample_spectra_real[s][i] - results.spectral_function[i];
+                double diff_imag = sample_spectra_imag[s][i] - results.spectral_function_imag[i];
+                results.spectral_error[i] += diff_real * diff_real;
+                results.spectral_error_imag[i] += diff_imag * diff_imag;
             }
         }
         
         double norm_factor = std::sqrt(static_cast<double>(n_valid_samples * (n_valid_samples - 1)));
         for (int i = 0; i < num_omega_bins; i++) {
             results.spectral_error[i] = std::sqrt(results.spectral_error[i]) / norm_factor;
+            results.spectral_error_imag[i] = std::sqrt(results.spectral_error_imag[i]) / norm_factor;
         }
     }
     

@@ -9,6 +9,7 @@ class Operator;
 #include <functional>
 #include <string>
 #include <tuple>
+#include <map>
 
 // Forward declarations only - don't include CUDA headers in this header
 // They will be included in the .cu implementation file
@@ -331,6 +332,129 @@ public:
                               double temperature,
                               unsigned int random_seed = 0,
                               double ground_state_energy = 0.0);
+    
+    /**
+     * Run GPU-accelerated dynamical correlation for a specific state (no sampling)
+     * Computes S_{O1,O2}(ω) = Σ_n ⟨ψ|O₁†|n⟩⟨n|O₂|ψ⟩ δ(ω - E_n) for given state |ψ⟩
+     * 
+     * @param gpu_op_handle GPU Hamiltonian operator handle
+     * @param gpu_obs1_handle First GPU observable operator handle
+     * @param gpu_obs2_handle Second GPU observable operator handle
+     * @param d_psi_state Device pointer to initial state |ψ> (must be on GPU, normalized)
+     * @param N Hilbert space dimension
+     * @param krylov_dim Lanczos order
+     * @param omega_min Minimum frequency
+     * @param omega_max Maximum frequency
+     * @param num_omega_bins Number of frequency points
+     * @param broadening Lorentzian broadening parameter
+     * @param temperature Temperature for thermal weighting (0 = none)
+     * @param ground_state_energy Ground state energy for frequency shift (0 = auto-detect)
+     * @return tuple(frequencies, S_real, S_imag)
+     */
+    static std::tuple<std::vector<double>, std::vector<double>, std::vector<double>>
+    runGPUDynamicalCorrelationState(void* gpu_op_handle,
+                                   void* gpu_obs1_handle,
+                                   void* gpu_obs2_handle,
+                                   void* d_psi_state,
+                                   int N,
+                                   int krylov_dim,
+                                   double omega_min,
+                                   double omega_max,
+                                   int num_omega_bins,
+                                   double broadening,
+                                   double temperature = 0.0,
+                                   double ground_state_energy = 0.0);
+    
+    /**
+     * Run GPU-accelerated multi-temperature dynamical correlation (OPTIMIZED)
+     * Runs Lanczos once per sample, then computes all temperatures efficiently
+     * Equivalent to compute_dynamical_correlation_multi_sample_multi_temperature on CPU
+     * 
+     * @param gpu_op_handle GPU Hamiltonian operator handle
+     * @param gpu_obs1_handle First GPU observable operator handle
+     * @param gpu_obs2_handle Second GPU observable operator handle
+     * @param N Hilbert space dimension
+     * @param num_samples Number of random samples
+     * @param krylov_dim Lanczos order
+     * @param omega_min Minimum frequency
+     * @param omega_max Maximum frequency
+     * @param num_omega_bins Number of frequency points
+     * @param broadening Lorentzian broadening parameter
+     * @param temperatures Vector of temperature points
+     * @param random_seed Random seed (0 = random)
+     * @param ground_state_energy Ground state energy for frequency shift (0 = auto-detect)
+     * @return map<temperature, tuple(frequencies, S_real, S_imag)>
+     */
+    static std::map<double, std::tuple<std::vector<double>, std::vector<double>, std::vector<double>>>
+    runGPUDynamicalCorrelationMultiTemp(void* gpu_op_handle,
+                                       void* gpu_obs1_handle,
+                                       void* gpu_obs2_handle,
+                                       int N,
+                                       int num_samples,
+                                       int krylov_dim,
+                                       double omega_min,
+                                       double omega_max,
+                                       int num_omega_bins,
+                                       double broadening,
+                                       const std::vector<double>& temperatures,
+                                       unsigned int random_seed = 0,
+                                       double ground_state_energy = 0.0);
+    
+    /**
+     * Run GPU-accelerated thermal expectation value calculation
+     * Computes ⟨O⟩_T and susceptibility χ_T = β(⟨O²⟩ - ⟨O⟩²) via FTLM
+     * 
+     * @param gpu_op_handle GPU Hamiltonian operator handle
+     * @param gpu_obs_handle GPU observable operator handle
+     * @param N Hilbert space dimension
+     * @param num_samples Number of random samples
+     * @param krylov_dim Lanczos order
+     * @param temp_min Minimum temperature
+     * @param temp_max Maximum temperature
+     * @param num_temp_bins Number of temperature points
+     * @param random_seed Random seed (0 = random)
+     * @return tuple(temperatures, expectation, susceptibility, exp_error, sus_error)
+     */
+    static std::tuple<std::vector<double>, std::vector<double>, std::vector<double>,
+                     std::vector<double>, std::vector<double>>
+    runGPUThermalExpectation(void* gpu_op_handle,
+                            void* gpu_obs_handle,
+                            int N,
+                            int num_samples,
+                            int krylov_dim,
+                            double temp_min,
+                            double temp_max,
+                            int num_temp_bins,
+                            unsigned int random_seed = 0);
+    
+    /**
+     * Run GPU-accelerated static correlation function calculation
+     * Computes ⟨O₁†O₂⟩_T via FTLM
+     * 
+     * @param gpu_op_handle GPU Hamiltonian operator handle
+     * @param gpu_obs1_handle First GPU observable operator handle
+     * @param gpu_obs2_handle Second GPU observable operator handle
+     * @param N Hilbert space dimension
+     * @param num_samples Number of random samples
+     * @param krylov_dim Lanczos order
+     * @param temp_min Minimum temperature
+     * @param temp_max Maximum temperature
+     * @param num_temp_bins Number of temperature points
+     * @param random_seed Random seed (0 = random)
+     * @return tuple(temperatures, corr_real, corr_imag, error_real, error_imag)
+     */
+    static std::tuple<std::vector<double>, std::vector<double>, std::vector<double>,
+                     std::vector<double>, std::vector<double>>
+    runGPUStaticCorrelation(void* gpu_op_handle,
+                           void* gpu_obs1_handle,
+                           void* gpu_obs2_handle,
+                           int N,
+                           int num_samples,
+                           int krylov_dim,
+                           double temp_min,
+                           double temp_max,
+                           int num_temp_bins,
+                           unsigned int random_seed = 0);
     
 private:
     static int getGPUCount();

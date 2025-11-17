@@ -103,6 +103,7 @@ struct ObservableConfig {
 struct DynamicalResponseConfig {
     bool calculate = false;
     bool thermal_average = false;     // If true, compute thermal-averaged response
+    bool use_gpu = false;             // Use GPU acceleration (requires CUDA)
     uint64_t num_random_states = 20;       // Number of random states for thermal averaging
     uint64_t krylov_dim = 400;             // Krylov subspace dimension
     double omega_min = -5.0;         // Minimum frequency
@@ -133,6 +134,7 @@ struct DynamicalResponseConfig {
  */
 struct StaticResponseConfig {
     bool calculate = false;
+    bool use_gpu = false;             // Use GPU acceleration (requires CUDA)
     uint64_t num_random_states = 20;       // Number of random states for thermal averaging
     uint64_t krylov_dim = 400;             // Krylov subspace dimension
     double temp_min = 0.001;           // Minimum temperature

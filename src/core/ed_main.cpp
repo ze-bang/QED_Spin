@@ -17,6 +17,12 @@
 #include <mpi.h>
 #endif
 
+#ifdef WITH_CUDA
+#include "../gpu/gpu_operator.cuh"
+#include "../gpu/gpu_ed_wrapper.h"
+#include <cuda_runtime.h>
+#endif
+
 /**
  * @file ed_main.cpp
  * @brief Elegant main entry point for exact diagonalization
@@ -683,6 +689,30 @@ void compute_dynamical_response_workflow(const EDConfig& config) {
         std::cout << "\n==========================================\n";
         std::cout << "Computing Dynamical Response\n";
         std::cout << "==========================================\n";
+        
+        // Print GPU status
+#ifdef WITH_CUDA
+        if (config.dynamical.use_gpu) {
+            std::cout << "GPU Acceleration: ENABLED\n";
+            if (config.system.use_fixed_sz) {
+                std::cout << "  Warning: Fixed-Sz mode detected - GPU will be disabled (not yet supported)\n";
+            }
+            // Print GPU device info
+            int device_count = 0;
+            cudaGetDeviceCount(&device_count);
+            if (device_count > 0) {
+                cudaDeviceProp prop;
+                cudaGetDeviceProperties(&prop, 0);
+                std::cout << "  GPU Device: " << prop.name << "\n";
+                std::cout << "  Compute Capability: " << prop.major << "." << prop.minor << "\n";
+                std::cout << "  Global Memory: " << (prop.totalGlobalMem / (1024*1024*1024.0)) << " GB\n";
+            }
+        } else {
+            std::cout << "GPU Acceleration: DISABLED (use --dyn-use-gpu to enable)\n";
+        }
+#else
+        std::cout << "GPU Acceleration: NOT AVAILABLE (compiled without CUDA support)\n";
+#endif
     }
     
     // Check if using configuration-based or legacy file-based operator loading
@@ -934,25 +964,77 @@ void compute_dynamical_response_workflow(const EDConfig& config) {
             int op_idx = task.op_idx;
             double temperature = temperatures[t_idx];
             
-            // Create function wrappers for this operator pair
-            auto O1_func = [&obs_1, op_idx](const Complex* in, Complex* out, uint64_t dim) {
-                obs_1[op_idx].apply(in, out, dim);
-            };
+            DynamicalResponseResults results;
             
-            auto O2_func = [&obs_2, op_idx](const Complex* in, Complex* out, uint64_t dim) {
-                obs_2[op_idx].apply(in, out, dim);
-            };
+#ifdef WITH_CUDA
+            if (config.dynamical.use_gpu) {
+                // Check for Fixed-Sz mode (not yet supported on GPU)
+                if (config.system.use_fixed_sz) {
+                    if (rank == 0) {
+                        std::cout << "  Note: Fixed-Sz GPU support not yet implemented, using CPU" << std::endl;
+                    }
+                    // Fall through to CPU path
+                } else {
+                    // GPU acceleration path
+                    try {
+                        // Convert operators to GPU
+                        GPUOperator gpu_ham(config.system.num_sites, config.system.spin_length);
+                        GPUOperator gpu_obs1(config.system.num_sites, config.system.spin_length);
+                        GPUOperator gpu_obs2(config.system.num_sites, config.system.spin_length);
+                    
+                    if (!convertOperatorToGPU(ham, gpu_ham) || 
+                        !convertOperatorToGPU(obs_1[op_idx], gpu_obs1) ||
+                        !convertOperatorToGPU(obs_2[op_idx], gpu_obs2)) {
+                        std::cerr << "  GPU operator conversion failed, falling back to CPU" << std::endl;
+                        throw std::runtime_error("GPU conversion failed");
+                    }
+                    
+                    // Call GPU FTLM thermal expectation
+                    auto [temps, exps, suscept, exp_err, sus_err] = GPUEDWrapper::runGPUThermalExpectation(
+                        &gpu_ham, &gpu_obs1,
+                        N, params.num_samples, params.krylov_dim,
+                        temperature, temperature, 1,  // Single temperature
+                        params.random_seed
+                    );
+                    
+                        // Package results for dynamical correlation
+                        // Note: This is thermal expectation, not full dynamical correlation
+                        // For full dynamical correlation with GPU, need different approach
+                        std::cout << "  Note: GPU currently supports thermal expectation only" << std::endl;
+                        throw std::runtime_error("Full GPU dynamical correlation not implemented for multi-sample");
+                        
+                    } catch (const std::exception& e) {
+                        if (rank == 0) {
+                            std::cerr << "  GPU computation failed: " << e.what() << ", using CPU" << std::endl;
+                        }
+                        // Fall through to CPU path
+                    }
+                }
+            }
+#endif
             
-            // Compute response
-            DynamicalResponseResults results = compute_dynamical_correlation(
-                H_func, O1_func, O2_func, N, params,
-                config.dynamical.omega_min,
-                config.dynamical.omega_max,
-                config.dynamical.num_omega_points,
-                temperature,
-                output_subdir,
-                ground_state_energy
-            );
+            // CPU computation path
+            {
+                // Create function wrappers for this operator pair
+                auto O1_func = [&obs_1, op_idx](const Complex* in, Complex* out, uint64_t dim) {
+                    obs_1[op_idx].apply(in, out, dim);
+                };
+                
+                auto O2_func = [&obs_2, op_idx](const Complex* in, Complex* out, uint64_t dim) {
+                    obs_2[op_idx].apply(in, out, dim);
+                };
+                
+                // Compute response on CPU
+                results = compute_dynamical_correlation(
+                    H_func, O1_func, O2_func, N, params,
+                    config.dynamical.omega_min,
+                    config.dynamical.omega_max,
+                    config.dynamical.num_omega_points,
+                    temperature,
+                    output_subdir,
+                    ground_state_energy
+                );
+            }
             
             // Save results
             std::string output_file = output_subdir + "/" + names[op_idx];
@@ -973,59 +1055,127 @@ void compute_dynamical_response_workflow(const EDConfig& config) {
                           << " for ALL " << temperatures.size() << " temperatures with SINGLE Lanczos run ===\n";
             }
             
-            // Create function wrappers for this operator pair
-            auto O1_func = [&obs_1, op_idx](const Complex* in, Complex* out, uint64_t dim) {
-                obs_1[op_idx].apply(in, out, dim);
-            };
-            
-            auto O2_func = [&obs_2, op_idx](const Complex* in, Complex* out, uint64_t dim) {
-                obs_2[op_idx].apply(in, out, dim);
-            };
-            
             // Use optimized multi-temperature function
             // This runs Lanczos once per sample, then computes all temperatures efficiently
             std::map<double, DynamicalResponseResults> results_map;
             
-            if (params.num_samples == 1) {
-                // Single sample mode - use state-based optimization
-                // Generate a random state
-                ComplexVector state(N);
-                std::random_device rd;
-                std::mt19937 gen(rd());
-                std::uniform_real_distribution<double> dist(-1.0, 1.0);
-                for (uint64_t i = 0; i < N; i++) {
-                    state[i] = Complex(dist(gen), dist(gen));
+#ifdef WITH_CUDA
+            if (config.dynamical.use_gpu) {
+                // Check for Fixed-Sz mode (not yet supported on GPU)
+                if (config.system.use_fixed_sz) {
+                    if (rank == 0) {
+                        std::cout << "  Note: Fixed-Sz GPU support not yet implemented, using CPU" << std::endl;
+                    }
+                    // Fall through to CPU path
+                } else {
+                    // GPU acceleration path
+                    try {
+                        if (rank == 0) {
+                            std::cout << "Using GPU for multi-temperature computation\n";
+                        }
+                        
+                        // Convert operators to GPU
+                        GPUOperator gpu_ham(config.system.num_sites, config.system.spin_length);
+                        GPUOperator gpu_obs1(config.system.num_sites, config.system.spin_length);
+                        GPUOperator gpu_obs2(config.system.num_sites, config.system.spin_length);
+                        
+                        if (!convertOperatorToGPU(ham, gpu_ham) || 
+                            !convertOperatorToGPU(obs_1[op_idx], gpu_obs1) ||
+                            !convertOperatorToGPU(obs_2[op_idx], gpu_obs2)) {
+                            throw std::runtime_error("GPU operator conversion failed");
+                        }
+                        
+                        // Call optimized GPU multi-temperature dynamical correlation
+                        auto gpu_results = GPUEDWrapper::runGPUDynamicalCorrelationMultiTemp(
+                            &gpu_ham, &gpu_obs1, &gpu_obs2,
+                            N, params.num_samples, params.krylov_dim,
+                            config.dynamical.omega_min,
+                            config.dynamical.omega_max,
+                            config.dynamical.num_omega_points,
+                            params.broadening,
+                            temperatures,
+                            params.random_seed,
+                            ground_state_energy
+                        );
+                        
+                        // Convert GPU results to DynamicalResponseResults format
+                        for (const auto& [temp, result_tuple] : gpu_results) {
+                            auto [freqs, S_real, S_imag] = result_tuple;
+                            
+                            DynamicalResponseResults result;
+                            result.frequencies = freqs;
+                            result.spectral_function = S_real;
+                            result.spectral_function_imag = S_imag;
+                            
+                            results_map[temp] = result;
+                        }
+                        
+                        if (rank == 0) {
+                            std::cout << "  GPU multi-temperature computation successful!" << std::endl;
+                        }
+                        
+                    } catch (const std::exception& e) {
+                        if (rank == 0) {
+                            std::cerr << "  GPU computation failed: " << e.what() << ", using CPU" << std::endl;
+                        }
+                        // Fall through to CPU path
+                    }
                 }
-                double norm = cblas_dznrm2(N, state.data(), 1);
-                Complex scale(1.0/norm, 0.0);
-                cblas_zscal(N, &scale, state.data(), 1);
+            }
+#endif
+            
+            // CPU computation path (only if GPU didn't produce results)
+            if (results_map.empty()) {
+                // Create function wrappers for this operator pair
+                auto O1_func = [&obs_1, op_idx](const Complex* in, Complex* out, uint64_t dim) {
+                    obs_1[op_idx].apply(in, out, dim);
+                };
                 
-                results_map = compute_dynamical_correlation_state_multi_temperature(
-                    H_func, O1_func, O2_func, state, N, params,
-                    config.dynamical.omega_min,
-                    config.dynamical.omega_max,
-                    config.dynamical.num_omega_points,
-                    temperatures,
-                    ground_state_energy
-                );
-            } else {
-                // Multiple samples - use multi-sample multi-temperature optimization!
-                if (rank == 0) {
-                    std::cout << "Using multi-sample multi-temperature optimization\n";
-                    std::cout << "Lanczos will run " << params.num_samples 
-                              << " times, then compute " << temperatures.size() 
-                              << " temperatures from cached data\n";
+                auto O2_func = [&obs_2, op_idx](const Complex* in, Complex* out, uint64_t dim) {
+                    obs_2[op_idx].apply(in, out, dim);
+                };
+                
+                if (params.num_samples == 1) {
+                    // Single sample mode - use state-based optimization
+                    // Generate a random state
+                    ComplexVector state(N);
+                    std::random_device rd;
+                    std::mt19937 gen(rd());
+                    std::uniform_real_distribution<double> dist(-1.0, 1.0);
+                    for (uint64_t i = 0; i < N; i++) {
+                        state[i] = Complex(dist(gen), dist(gen));
+                    }
+                    double norm = cblas_dznrm2(N, state.data(), 1);
+                    Complex scale(1.0/norm, 0.0);
+                    cblas_zscal(N, &scale, state.data(), 1);
+                    
+                    results_map = compute_dynamical_correlation_state_multi_temperature(
+                        H_func, O1_func, O2_func, state, N, params,
+                        config.dynamical.omega_min,
+                        config.dynamical.omega_max,
+                        config.dynamical.num_omega_points,
+                        temperatures,
+                        ground_state_energy
+                    );
+                } else {
+                    // Multiple samples - use multi-sample multi-temperature optimization!
+                    if (rank == 0) {
+                        std::cout << "Using multi-sample multi-temperature optimization\n";
+                        std::cout << "Lanczos will run " << params.num_samples 
+                                  << " times, then compute " << temperatures.size() 
+                                  << " temperatures from cached data\n";
+                    }
+                    
+                    results_map = compute_dynamical_correlation_multi_sample_multi_temperature(
+                        H_func, O1_func, O2_func, N, params,
+                        config.dynamical.omega_min,
+                        config.dynamical.omega_max,
+                        config.dynamical.num_omega_points,
+                        temperatures,
+                        ground_state_energy,
+                        output_subdir
+                    );
                 }
-                
-                results_map = compute_dynamical_correlation_multi_sample_multi_temperature(
-                    H_func, O1_func, O2_func, N, params,
-                    config.dynamical.omega_min,
-                    config.dynamical.omega_max,
-                    config.dynamical.num_omega_points,
-                    temperatures,
-                    ground_state_energy,
-                    output_subdir
-                );
             }
             
             // Save results for all temperatures
@@ -1272,6 +1422,30 @@ void compute_static_response_workflow(const EDConfig& config) {
         std::cout << "\n==========================================\n";
         std::cout << "Computing Static Response\n";
         std::cout << "==========================================\n";
+        
+        // Print GPU status
+#ifdef WITH_CUDA
+        if (config.static_resp.use_gpu) {
+            std::cout << "GPU Acceleration: ENABLED\n";
+            if (config.system.use_fixed_sz) {
+                std::cout << "  Warning: Fixed-Sz mode detected - GPU will be disabled (not yet supported)\n";
+            }
+            // Print GPU device info
+            int device_count = 0;
+            cudaGetDeviceCount(&device_count);
+            if (device_count > 0) {
+                cudaDeviceProp prop;
+                cudaGetDeviceProperties(&prop, 0);
+                std::cout << "  GPU Device: " << prop.name << "\n";
+                std::cout << "  Compute Capability: " << prop.major << "." << prop.minor << "\n";
+                std::cout << "  Global Memory: " << (prop.totalGlobalMem / (1024*1024*1024.0)) << " GB\n";
+            }
+        } else {
+            std::cout << "GPU Acceleration: DISABLED (use --static-use-gpu to enable)\n";
+        }
+#else
+        std::cout << "GPU Acceleration: NOT AVAILABLE (compiled without CUDA support)\n";
+#endif
     }
     
     // Check if using configuration-based or legacy file-based operator loading
@@ -1408,23 +1582,85 @@ void compute_static_response_workflow(const EDConfig& config) {
         auto process_task = [&](const StaticTask& task) -> bool {
             int op_idx = task.op_idx;
             
-            // Create function wrappers for this operator pair
-            auto O1_func = [&obs_1, op_idx](const Complex* in, Complex* out, uint64_t dim) {
-                obs_1[op_idx].apply(in, out, dim);
-            };
+            StaticResponseResults results;
             
-            auto O2_func = [&obs_2, op_idx](const Complex* in, Complex* out, uint64_t dim) {
-                obs_2[op_idx].apply(in, out, dim);
-            };
+#ifdef WITH_CUDA
+            if (config.static_resp.use_gpu) {
+                // Check for Fixed-Sz mode (not yet supported on GPU)
+                if (config.system.use_fixed_sz) {
+                    if (rank == 0) {
+                        std::cout << "  Note: Fixed-Sz GPU support not yet implemented, using CPU" << std::endl;
+                    }
+                    // Fall through to CPU path
+                } else {
+                    // GPU acceleration path
+                    try {
+                        // Convert operators to GPU
+                        GPUOperator gpu_ham(config.system.num_sites, config.system.spin_length);
+                        GPUOperator gpu_obs1(config.system.num_sites, config.system.spin_length);
+                        GPUOperator gpu_obs2(config.system.num_sites, config.system.spin_length);
+                    
+                    if (!convertOperatorToGPU(ham, gpu_ham) || 
+                        !convertOperatorToGPU(obs_1[op_idx], gpu_obs1) ||
+                        !convertOperatorToGPU(obs_2[op_idx], gpu_obs2)) {
+                        throw std::runtime_error("GPU operator conversion failed");
+                    }
+                    
+                    // Call GPU static correlation - returns tuple
+                    auto [temps, corr_real, corr_imag, err_real, err_imag] = 
+                        GPUEDWrapper::runGPUStaticCorrelation(
+                            &gpu_ham, &gpu_obs1, &gpu_obs2,
+                            N, params.num_samples, params.krylov_dim,
+                            config.static_resp.temp_min,
+                            config.static_resp.temp_max,
+                            config.static_resp.num_temp_points,
+                            params.random_seed
+                        );
+                    
+                    // Package into results struct
+                    // Note: GPU returns complex correlation (real, imag parts)
+                    // CPU returns expectation value and susceptibility
+                    // For now, store real part as expectation
+                    results.temperatures = temps;
+                    results.expectation = corr_real;
+                    results.expectation_error = err_real;
+                    // TODO: Map imag part appropriately or compute susceptibility on GPU
+                    results.total_samples = params.num_samples;
+                    
+                        if (rank == 0) {
+                            std::cout << "  GPU computation successful for operator " << names[op_idx] << std::endl;
+                        }
+                        
+                    } catch (const std::exception& e) {
+                        if (rank == 0) {
+                            std::cerr << "  GPU computation failed: " << e.what() << ", using CPU" << std::endl;
+                        }
+                        // Fall through to CPU path
+                    }
+                }
+            }
+#endif
             
-            // Compute response
-            StaticResponseResults results = compute_static_response(
-                H_func, O1_func, O2_func, N, params,
-                config.static_resp.temp_min,
-                config.static_resp.temp_max,
-                config.static_resp.num_temp_points,
-                output_subdir
-            );
+            // CPU computation path
+            if (results.temperatures.empty()) {  // Only compute on CPU if GPU didn't succeed
+                // Create function wrappers for this operator pair
+                auto O1_func = [&obs_1, op_idx](const Complex* in, Complex* out, uint64_t dim) {
+                    obs_1[op_idx].apply(in, out, dim);
+                };
+                
+                auto O2_func = [&obs_2, op_idx](const Complex* in, Complex* out, uint64_t dim) {
+                    obs_2[op_idx].apply(in, out, dim);
+                };
+                
+                // Compute response on CPU
+                results = compute_static_response(
+                    H_func, O1_func, O2_func, N, params,
+                    config.static_resp.temp_min,
+                    config.static_resp.temp_max,
+                    config.static_resp.num_temp_points,
+                    output_subdir
+                );
+            }
             
             // Save results
             std::string output_file = output_subdir + "/" + names[op_idx] + ".txt";
@@ -1702,6 +1938,12 @@ void print_help(const char* prog_name) {
     std::cout << "                                 Values are multiples of π\n";
     std::cout << "  --dyn-polarization=<str>       Polarization vector: \"ex,ey,ez\" (default: auto)\n";
     std::cout << "  --dyn-theta=<θ>                Rotation angle for experimental operators (radians)\n\n";
+    
+    std::cout << "GPU Acceleration Options:\n";
+    std::cout << "  --use-gpu               Enable GPU acceleration for both dynamical and static response\n";
+    std::cout << "  --dyn-use-gpu           Enable GPU acceleration for dynamical response only\n";
+    std::cout << "  --static-use-gpu        Enable GPU acceleration for static response only\n";
+    std::cout << "                          Note: Fixed-Sz GPU support is not yet implemented\n\n";
     
     std::cout << "Static Response Options:\n";
     std::cout << "  --static-samples=<n>    Number of random states (default: 20)\n";

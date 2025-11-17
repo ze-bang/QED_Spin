@@ -285,6 +285,13 @@ EDConfig EDConfig::fromCommandLine(uint64_t argc, char* argv[]) {
             else if (arg.find("--dyn-momentum-points=") == 0) config.dynamical.momentum_points = parse_value("--dyn-momentum-points=");
             else if (arg.find("--dyn-polarization=") == 0) config.dynamical.polarization = parse_value("--dyn-polarization=");
             else if (arg.find("--dyn-theta=") == 0) config.dynamical.theta = std::stod(parse_value("--dyn-theta="));
+            // GPU acceleration options
+            else if (arg == "--dyn-use-gpu") config.dynamical.use_gpu = true;
+            else if (arg == "--static-use-gpu") config.static_resp.use_gpu = true;
+            else if (arg == "--use-gpu") {
+                config.dynamical.use_gpu = true;
+                config.static_resp.use_gpu = true;
+            }
             // Static response options
             else if (arg.find("--static-samples=") == 0) config.static_resp.num_random_states = std::stoi(parse_value("--static-samples="));
             else if (arg.find("--static-krylov=") == 0) config.static_resp.krylov_dim = std::stoi(parse_value("--static-krylov="));

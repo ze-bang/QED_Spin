@@ -86,6 +86,9 @@ public:
     bool allocateGPUMemory(int N);
     void freeGPUMemory();
     
+    // Copy transform data to device (public for operator conversion)
+    void copyTransformDataToDevice();
+    
     // Performance monitoring
     struct PerformanceStats {
         double matVecTime;
@@ -172,7 +175,6 @@ protected:
     
     // Helper functions
     void copyInteractionsToDevice();
-    void copyTransformDataToDevice();
     void createTextureObject(cuDoubleComplex* d_data, int size);
     void destroyTextureObject();
     void initializeCUSPARSE();
@@ -200,6 +202,9 @@ public:
     
     // Get basis dimension
     int getFixedSzDimension() const { return fixed_sz_dim_; }
+    
+    // Transform vector from fixed-Sz basis to full Hilbert space
+    std::vector<std::complex<double>> embedToFull(const std::vector<std::complex<double>>& fixed_sz_vec);
     
 private:
     int n_up_;
@@ -268,6 +273,24 @@ __global__ void buildHashTableKernel(const uint64_t* basis_states, void* hash_ta
 __device__ int lookupState(uint64_t state, const void* hash_table, int hash_size);
 
 } // namespace GPUKernels
+
+// ============================================================================
+// CPU → GPU Conversion Helper
+// ============================================================================
+
+// Forward declaration to avoid circular dependency
+class Operator;
+
+/**
+ * @brief Convert CPU Operator to GPUOperator
+ * 
+ * Extracts sparse matrix from CPU operator and loads into GPU memory.
+ * 
+ * @param cpu_op CPU operator to convert
+ * @param gpu_op GPU operator to populate
+ * @return true if successful
+ */
+bool convertOperatorToGPU(const Operator& cpu_op, GPUOperator& gpu_op);
 
 #endif // WITH_CUDA
 
