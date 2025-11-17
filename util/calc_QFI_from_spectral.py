@@ -661,7 +661,7 @@ if __name__ == "__main__":
                        help='Directory containing structure_factor_results')
     parser.add_argument('--beta-tol', type=float, default=1e-2,
                        help='Tolerance for grouping beta values (default: 1e-2)')
-    parser.add_argument('--param-sweep', type=str, default=None,
+    parser.add_argument('--param-sweep', type=str, default='Jpm',
                        help='Parameter name for sweep analysis (e.g., Jpm, h)')
     
     args = parser.parse_args()

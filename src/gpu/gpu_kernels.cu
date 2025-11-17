@@ -14,6 +14,27 @@ using namespace GPUBitOps;
 //   2 = Sz (diagonal, measures spin)
 // ============================================================================
 
+// Helper function for atomic add on double precision
+// Uses native atomicAdd for compute capability >= 6.0, falls back to CAS for older GPUs
+__device__ __forceinline__ double atomicAddDouble(double* address, double val) {
+#if __CUDA_ARCH__ >= 600
+    // For compute capability 6.0+, use native atomicAdd for double
+    return atomicAdd(address, val);
+#else
+    // For older GPUs, use compare-and-swap implementation
+    unsigned long long int* address_as_ull = (unsigned long long int*)address;
+    unsigned long long int old = *address_as_ull, assumed;
+    
+    do {
+        assumed = old;
+        old = atomicCAS(address_as_ull, assumed,
+                       __double_as_longlong(val + __longlong_as_double(assumed)));
+    } while (assumed != old);
+    
+    return __longlong_as_double(old);
+#endif
+}
+
 namespace GPUKernels {
 
 /**
@@ -106,8 +127,8 @@ __global__ void matVecTransformParallel(const cuDoubleComplex* x, cuDoubleComple
         cuDoubleComplex contrib = cuCmul(factor, x_val);
         
         // Atomic add for complex numbers (separate real/imaginary)
-        atomicAdd(&y[state_idx].x, cuCreal(contrib));
-        atomicAdd(&y[state_idx].y, cuCimag(contrib));
+        atomicAddDouble(&y[state_idx].x, cuCreal(contrib));
+        atomicAddDouble(&y[state_idx].y, cuCimag(contrib));
     }
 }
 
@@ -535,8 +556,8 @@ __global__ void matVecFixedSzTransformParallel(const cuDoubleComplex* x, cuDoubl
             cuDoubleComplex contrib = cuCmul(factor, x_val);
             
             // Atomic add for complex numbers
-            atomicAdd(&y[state_idx].x, cuCreal(contrib));
-            atomicAdd(&y[state_idx].y, cuCimag(contrib));
+            atomicAddDouble(&y[state_idx].x, cuCreal(contrib));
+            atomicAddDouble(&y[state_idx].y, cuCimag(contrib));
         }
     }
 }
