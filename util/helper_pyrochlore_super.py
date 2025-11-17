@@ -457,23 +457,8 @@ def generate_three_spin_terms(nn_list, node_mapping, three_spin_coeff, sublattic
                 # Determine the phase based on the triplet geometry
                 sub_i = sublattice_indices[i]
                 sub_k = sublattice_indices[k]
-                
-                # Check if i and k are nearest neighbors (same tetrahedron)
-                i_and_k_are_neighbors = k in nn_list[i]
-                
-                # Classify pair type:
-                # Type A: Same tetrahedron (i and k are NN)
-                # Type B: Collinear opposite (i and k same sublattice, different tetra)
-                # Type C: Non-collinear cross (i and k different sublattice, different tetra)
-                
-                if i_and_k_are_neighbors:
-                    # Type A: Same tetrahedron pairs
-                    # Phase follows C_3 rotation within the tetrahedron
-                    # Use sublattice difference mod 3 to assign (1, ω, ω²)
-                    phase_idx = (sub_i - sub_k) % 3
-                    phase = phase_factors[phase_idx]
                     
-                elif sub_i == sub_k:
+                if sub_i == sub_k:
                     # Type B: Collinear opposite pairs (same sublattice, opposite through j)
                     # CRITICAL: i and k must NOT be the same sublattice as j
                     # If they are, this term is zero (unphysical configuration)
