@@ -3,7 +3,6 @@
 
 #include "ftlm.h"
 #include "lanczos.h"
-#include "../core/hdf5_io.h"
 #include <fstream>
 #include <iomanip>
 #include <numeric>
@@ -337,36 +336,22 @@ FTLMResults finite_temperature_lanczos(
         
         // Save intermediate data if requested
         if (params.store_intermediate && !output_dir.empty()) {
-            // Try to save to HDF5 first
-            try {
-                std::string hdf5_file = HDF5IO::createOrOpenFile(output_dir);
-                std::map<std::string, std::vector<double>> observables;
-                observables["energy"] = sample_thermo.energy;
-                observables["specific_heat"] = sample_thermo.specific_heat;
-                observables["entropy"] = sample_thermo.entropy;
-                observables["free_energy"] = sample_thermo.free_energy;
-                observables["temperature"] = temperatures;
-                HDF5IO::saveFTLMSample(hdf5_file, sample, ritz_values, observables);
-            } catch (const std::exception& e) {
-                std::cerr << "Warning: Failed to save FTLM sample " << sample 
-                          << " to HDF5: " << e.what() << std::endl;
-                std::cerr << "Falling back to text format..." << std::endl;
-                
-                // Fallback to text format
-                std::string sample_file = output_dir + "/ftlm_samples/sample_" + std::to_string(sample) + ".txt";
-                std::ofstream f(sample_file);
-                if (f.is_open()) {
-                    f << "# Temperature  Energy  Specific_Heat  Entropy  Free_Energy\n";
-                    for (size_t t = 0; t < temperatures.size(); t++) {
-                        f << std::scientific << std::setprecision(12)
-                          << temperatures[t] << " "
-                          << sample_thermo.energy[t] << " "
-                          << sample_thermo.specific_heat[t] << " "
-                          << sample_thermo.entropy[t] << " "
-                          << sample_thermo.free_energy[t] << "\n";
-                    }
-                    f.close();
+            std::string sample_file = output_dir + "/ftlm_samples/sample_" + std::to_string(sample) + ".dat";
+            std::ofstream f(sample_file);
+            if (f.is_open()) {
+                f << "# Temperature  Energy  Specific_Heat  Entropy  Free_Energy\n";
+                for (size_t t = 0; t < temperatures.size(); t++) {
+                    f << std::scientific << std::setprecision(12)
+                      << temperatures[t] << " "
+                      << sample_thermo.energy[t] << " "
+                      << sample_thermo.specific_heat[t] << " "
+                      << sample_thermo.entropy[t] << " "
+                      << sample_thermo.free_energy[t] << "\n";
                 }
+                f.close();
+                std::cout << "Saved FTLM sample " << sample << " to " << sample_file << std::endl;
+            } else {
+                std::cerr << "Error: Could not save FTLM sample to " << sample_file << std::endl;
             }
         }
     }
