@@ -39,6 +39,9 @@ public:
         double ortho_time;
         int iterations;
         double convergence_error;
+        uint64_t full_reorth_count;
+        uint64_t selective_reorth_count;
+        uint64_t total_reorth_ops;
     };
     
     Stats getStats() const { return stats_; }
@@ -73,7 +76,14 @@ private:
     void allocateMemory();
     void freeMemory();
     void initializeRandomVector(cuDoubleComplex* d_vec);
-    void orthogonalize(cuDoubleComplex* d_vec, int iter);
+    
+    // Adaptive selective reorthogonalization (Parlett-Simon)
+    void orthogonalize(cuDoubleComplex* d_vec, int iter,
+                      std::vector<std::vector<double>>& omega,
+                      const std::vector<double>& alpha,
+                      const std::vector<double>& beta,
+                      double ortho_threshold);
+    
     void normalizeVector(cuDoubleComplex* d_vec);
     double vectorNorm(const cuDoubleComplex* d_vec);
     void vectorCopy(const cuDoubleComplex* src, cuDoubleComplex* dst);

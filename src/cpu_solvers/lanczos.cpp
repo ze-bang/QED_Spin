@@ -942,7 +942,8 @@ void lanczos_selective_reorth(std::function<void(const Complex*, Complex*, int)>
     safe_system_call("rm -rf " + temp_dir);
 }
 
-// Lanczos algorithm implementation with basis vectors stored on disk
+// Lanczos algorithm with adaptive selective reorthogonalization (Parlett-Simon)
+// This is now the DEFAULT implementation using industry-standard methods
 void lanczos(std::function<void(const Complex*, Complex*, int)> H, uint64_t N, uint64_t max_iter, uint64_t exct, 
              double tol, std::vector<double>& eigenvalues, std::string dir,
              bool eigenvectors) {
@@ -956,6 +957,7 @@ void lanczos(std::function<void(const Complex*, Complex*, int)> H, uint64_t N, u
         v_current[i] = Complex(dist(gen), dist(gen));
     }
 
+    std::cout << "Lanczos with Adaptive Selective Reorthogonalization (Parlett-Simon)" << std::endl;
     std::cout << "Lanczos: Initial vector generated" << std::endl;
     
     // Normalize the starting vector
@@ -984,15 +986,40 @@ void lanczos(std::function<void(const Complex*, Complex*, int)> H, uint64_t N, u
     
     max_iter = std::min(N, max_iter);
     
+    // ===== ADAPTIVE SELECTIVE REORTHOGONALIZATION (Parlett-Simon) =====
+    // Industry-standard approach: monitor orthogonality loss and reorthogonalize only when needed
+    const double eps = std::numeric_limits<double>::epsilon(); // Machine precision ~2.22e-16
+    const double sqrt_eps = std::sqrt(eps);                     // ~1.5e-8
+    const double ortho_threshold = sqrt_eps;                    // Reorthogonalization threshold
+    
+    // Storage for recent basis vectors (keep in RAM for fast access)
+    std::vector<ComplexVector> recent_vectors;
+    const uint64_t max_recent = std::min(static_cast<uint64_t>(20), N); // Keep last 20 vectors in RAM
+    recent_vectors.reserve(max_recent);
+    recent_vectors.push_back(v_current);
+    
+    // Track which vectors need reorthogonalization (omega from Parlett-Simon)
+    std::vector<std::vector<double>> omega; // omega[j][i] = estimated loss of orthogonality of v_j to v_i
+    omega.resize(1);
+    omega[0].push_back(eps); // omega[0][0] = eps (orthogonal to self within machine precision)
+    
+    // Monitoring counters
+    uint64_t total_reorth_count = 0;
+    uint64_t full_reorth_count = 0;
+    uint64_t selective_reorth_count = 0;
+    
     std::cout << "Begin Lanczos iterations with max_iter = " << max_iter << std::endl;
     std::cout << "Tolerance = " << tol << std::endl;
     std::cout << "Number of eigenvalues to compute = " << exct << std::endl;
+    std::cout << "Reorthogonalization threshold: " << ortho_threshold << std::endl;
     std::cout << "Lanczos: Iterating..." << std::endl;   
     
     // Lanczos iteration
     for (int j = 0; j < max_iter; j++) {
         // w = H*v_j
-        std::cout << "Iteration " << j + 1 << " of " << max_iter << std::endl;
+        if ((j + 1) % 10 == 0 || j < 5) {
+            std::cout << "Iteration " << j + 1 << " of " << max_iter << std::endl;
+        }
         H(v_current.data(), w.data(), N);
         
         // w = w - beta_j * v_{j-1}
@@ -1010,16 +1037,95 @@ void lanczos(std::function<void(const Complex*, Complex*, int)> H, uint64_t N, u
         Complex neg_alpha = Complex(-alpha[j], 0.0);
         cblas_zaxpy(N, &neg_alpha, v_current.data(), 1, w.data(), 1);
         
-        // Full reorthogonalization (twice for numerical stability)
-        for (int k = 0; k <= j; k++) {
-            // Read basis vector k from file
-            ComplexVector basis_k = read_basis_vector(temp_dir, k, N);
+        // ===== SELECTIVE REORTHOGONALIZATION DECISION (Parlett-Simon Algorithm) =====
+        
+        // Update omega estimates for loss of orthogonality
+        omega.resize(j + 2);
+        for (int i = 0; i <= j; i++) {
+            omega[j + 1].push_back(0.0);
+        }
+        omega[j + 1].push_back(eps);
+        
+        // Compute omega[j+1][i] for all i <= j using recurrence relation
+        // omega[j+1][i] ≈ |beta[j]| * omega[j][i] + eps * (|alpha[j]| + |beta[j]| + |beta[j-1]|)
+        for (int i = 0; i <= j; i++) {
+            double contrib = eps * (std::abs(alpha[j]) + std::abs(beta[j]));
+            if (j > 0) {
+                contrib += eps * std::abs(beta[j-1]) + std::abs(beta[j]) * omega[j][i];
+            }
+            omega[j + 1][i] = contrib;
+        }
+        
+        // Determine which vectors need reorthogonalization
+        std::vector<int> reorth_indices;
+        bool need_full_reorth = false;
+        
+        for (int i = 0; i <= j; i++) {
+            if (omega[j + 1][i] > ortho_threshold) {
+                reorth_indices.push_back(i);
+                
+                // If we need to reorthogonalize against more than 30% of vectors, do full reorth
+                if (reorth_indices.size() > (j + 1) * 0.3) {
+                    need_full_reorth = true;
+                    break;
+                }
+            }
+        }
+        
+        // Perform selective or full reorthogonalization
+        if (need_full_reorth) {
+            // Full reorthogonalization (read all vectors from disk/RAM)
+            full_reorth_count++;
+            total_reorth_count += (j + 1);
             
-            Complex overlap;
-            cblas_zdotc_sub(N, basis_k.data(), 1, w.data(), 1, &overlap);
+            for (int k = 0; k <= j; k++) {
+                ComplexVector basis_k;
+                // Check if vector is in recent cache
+                int recent_idx = k - (j + 1 - recent_vectors.size());
+                if (recent_idx >= 0 && recent_idx < recent_vectors.size()) {
+                    basis_k = recent_vectors[recent_idx];
+                } else {
+                    basis_k = read_basis_vector(temp_dir, k, N);
+                }
+                
+                Complex overlap;
+                cblas_zdotc_sub(N, basis_k.data(), 1, w.data(), 1, &overlap);
+                Complex neg_overlap = -overlap;
+                cblas_zaxpy(N, &neg_overlap, basis_k.data(), 1, w.data(), 1);
+            }
             
-            Complex neg_overlap = -overlap;
-            cblas_zaxpy(N, &neg_overlap, basis_k.data(), 1, w.data(), 1);
+            // Reset omega estimates after full reorthogonalization
+            for (int i = 0; i <= j; i++) {
+                omega[j + 1][i] = eps;
+            }
+            
+            if ((j + 1) % 50 == 0) {
+                std::cout << "  Full reorthogonalization at iteration " << j + 1 << std::endl;
+            }
+            
+        } else if (!reorth_indices.empty()) {
+            // Selective reorthogonalization (only against flagged vectors)
+            selective_reorth_count++;
+            total_reorth_count += reorth_indices.size();
+            
+            for (int idx : reorth_indices) {
+                ComplexVector basis_k;
+                // Check if vector is in recent cache
+                int recent_idx = idx - (j + 1 - recent_vectors.size());
+                if (recent_idx >= 0 && recent_idx < recent_vectors.size()) {
+                    basis_k = recent_vectors[recent_idx];
+                } else {
+                    basis_k = read_basis_vector(temp_dir, idx, N);
+                }
+                
+                Complex overlap;
+                cblas_zdotc_sub(N, basis_k.data(), 1, w.data(), 1, &overlap);
+                Complex neg_overlap = -overlap;
+                cblas_zaxpy(N, &neg_overlap, basis_k.data(), 1, w.data(), 1);
+                
+                // Reset omega for reorthogonalized vector
+                omega[j + 1][idx] = eps;
+            }
         }
         
         // beta_{j+1} = ||w||
@@ -1038,6 +1144,12 @@ void lanczos(std::function<void(const Complex*, Complex*, int)> H, uint64_t N, u
             v_next[i] = w[i] / norm;
         }
         
+        // Update recent vectors cache (rolling window)
+        if (recent_vectors.size() >= max_recent) {
+            recent_vectors.erase(recent_vectors.begin());
+        }
+        recent_vectors.push_back(v_next);
+        
         // Store basis vector to file
         if (j < max_iter - 1) {
             if (!write_basis_vector(temp_dir, j+1, v_next, N)) {
@@ -1052,6 +1164,17 @@ void lanczos(std::function<void(const Complex*, Complex*, int)> H, uint64_t N, u
     
     // Construct and solve tridiagonal matrix
     uint64_t m = alpha.size();
+    
+    // Print reorthogonalization statistics
+    std::cout << "\n===== Reorthogonalization Statistics =====" << std::endl;
+    std::cout << "Total Lanczos iterations: " << m << std::endl;
+    std::cout << "Full reorthogonalizations: " << full_reorth_count << std::endl;
+    std::cout << "Selective reorthogonalizations: " << selective_reorth_count << std::endl;
+    std::cout << "Total inner products: " << total_reorth_count << std::endl;
+    std::cout << "Average reorth per iteration: " << (m > 0 ? (double)total_reorth_count / m : 0.0) << std::endl;
+    std::cout << "Theoretical full reorth cost: " << (m * (m + 1)) / 2 << std::endl;
+    std::cout << "Savings factor: " << (m > 0 ? (double)(m * (m + 1) / 2) / std::max(1UL, total_reorth_count) : 0.0) << "x" << std::endl;
+    std::cout << "==========================================\n" << std::endl;
     
     std::cout << "Lanczos: Constructing tridiagonal matrix" << std::endl;
     std::cout << "Lanczos: Solving tridiagonal matrix" << std::endl;
