@@ -53,6 +53,9 @@ struct ThermalConfig {
     uint64_t num_measure_freq = 100;   // Measurement frequency
     double delta_tau = 1e-2;      // Time step for cTPQ
     double large_value = 1e5;     // Large value for mTPQ
+    bool continue_quenching = false;  // Continue quenching from saved state
+    uint64_t continue_sample = 0;          // Sample to continue from (0 = auto-detect lowest energy)
+    double continue_beta = 0.0;       // Beta to continue from (0.0 = use saved beta)
     
     // FTLM-specific
     uint64_t ftlm_krylov_dim = 100;    // Krylov subspace dimension per sample
@@ -103,20 +106,30 @@ struct ObservableConfig {
 struct DynamicalResponseConfig {
     bool calculate = false;
     bool thermal_average = false;     // If true, compute thermal-averaged response
+    bool use_gpu = false;             // Use GPU acceleration (requires CUDA)
     uint64_t num_random_states = 20;       // Number of random states for thermal averaging
-    uint64_t krylov_dim = 100;             // Krylov subspace dimension
-    double omega_min = -10.0;         // Minimum frequency
-    double omega_max = 10.0;          // Maximum frequency
+    uint64_t krylov_dim = 400;             // Krylov subspace dimension
+    double omega_min = -5.0;         // Minimum frequency
+    double omega_max = 5.0;          // Maximum frequency
     uint64_t num_omega_points = 1000;      // Number of frequency points
     double broadening = 0.1;          // Lorentzian broadening parameter
-    double temp_min = 0.01;           // Minimum temperature (for temperature scan)
-    double temp_max = 10.0;           // Maximum temperature (for temperature scan)
-    uint64_t num_temp_bins = 1;            // Number of temperature points (1 = single temperature at temp_min)
+    double temp_min = 0.001;           // Minimum temperature (for temperature scan)
+    double temp_max = 1.0;           // Maximum temperature (for temperature scan)
+    uint64_t num_temp_bins = 4;            // Number of temperature points (1 = single temperature at temp_min)
     bool compute_correlation = false; // Compute two-operator correlation
-    std::string operator_file = "";   // File containing operator to probe
-    std::string operator2_file = "";  // Second operator file (for correlation)
+    std::string operator_file = "";   // File containing operator to probe (legacy mode)
+    std::string operator2_file = "";  // Second operator file (for correlation, legacy mode)
     std::string output_prefix = "dynamical_response";
     uint64_t random_seed = 0;     // Random seed (0 = auto)
+    
+    // Configuration-based operator construction (like TPQ_DSSF)
+    std::string operator_type = "sum";  // sum | transverse | sublattice | experimental | transverse_experimental
+    std::string basis = "ladder";       // ladder | xyz
+    std::string spin_combinations = "0,0;2,2";  // Format: "op1,op2;op3,op4;..." (0=Sp/Sx, 1=Sm/Sy, 2=Sz)
+    uint64_t unit_cell_size = 4;            // For sublattice operators
+    std::string momentum_points = "0,0,0;0,0,2";  // Format: "Qx1,Qy1,Qz1;Qx2,Qy2,Qz2;..." (in units of π)
+    std::string polarization = "1,-1,0";  // For transverse operators (normalized)
+    double theta = 0.0;                 // For experimental operators (in radians)
 };
 
 /**
@@ -124,18 +137,28 @@ struct DynamicalResponseConfig {
  */
 struct StaticResponseConfig {
     bool calculate = false;
+    bool use_gpu = false;             // Use GPU acceleration (requires CUDA)
     uint64_t num_random_states = 20;       // Number of random states for thermal averaging
-    uint64_t krylov_dim = 100;             // Krylov subspace dimension
-    double temp_min = 0.01;           // Minimum temperature
-    double temp_max = 10.0;           // Maximum temperature
-    uint64_t num_temp_points = 100;        // Number of temperature points
+    uint64_t krylov_dim = 400;             // Krylov subspace dimension
+    double temp_min = 0.001;           // Minimum temperature
+    double temp_max = 1.0;           // Maximum temperature
+    uint64_t num_temp_points = 4;        // Number of temperature points
     bool compute_susceptibility = true; // Compute susceptibility dO/dT
     bool compute_correlation = false; // Compute two-operator correlation
     bool single_operator_mode = false; // Compute single-operator ⟨O⟩ instead of ⟨O†O⟩
-    std::string operator_file = "";   // File containing operator(s) to probe
-    std::string operator2_file = "";  // Second operator file (for correlation)
+    std::string operator_file = "";   // File containing operator(s) to probe (legacy mode)
+    std::string operator2_file = "";  // Second operator file (for correlation, legacy mode)
     std::string output_prefix = "static_response";
     uint64_t random_seed = 0;     // Random seed (0 = auto)
+    
+    // Configuration-based operator construction (like TPQ_DSSF)
+    std::string operator_type = "sum";  // sum | transverse | sublattice | experimental | transverse_experimental
+    std::string basis = "ladder";       // ladder | xyz
+    std::string spin_combinations = "0,0;2,2";  // Format: "op1,op2;op3,op4;..." (0=Sp/Sx, 1=Sm/Sy, 2=Sz)
+    uint64_t unit_cell_size = 4;            // For sublattice operators
+    std::string momentum_points = "0,0,0;0,0,2";  // Format: "Qx1,Qy1,Qz1;Qx2,Qy2,Qz2;..." (in units of π)
+    std::string polarization = "1,-1,0";  // For transverse operators (normalized)
+    double theta = 0.0;                 // For experimental operators (in radians)
 };
 
 /**
@@ -153,6 +176,7 @@ struct SystemConfig {
     std::string hamiltonian_dir = "";
     std::string interaction_file = "InterAll.dat";
     std::string single_site_file = "Trans.dat";
+    std::string three_body_file = "ThreeBodyG.dat";  // Optional: three-body interaction file (e.g., ThreeBodyG.dat)
 };
 
 /**

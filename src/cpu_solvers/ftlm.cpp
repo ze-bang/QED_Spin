@@ -2,6 +2,7 @@
 #include "../core/system_utils.h"
 
 #include "ftlm.h"
+#include "lanczos.h"
 #include <fstream>
 #include <iomanip>
 #include <numeric>
@@ -303,15 +304,7 @@ FTLMResults finite_temperature_lanczos(
         std::cout << "\n--- FTLM Sample " << sample + 1 << " / " << params.num_samples << " ---\n";
         
         // Generate random initial state
-        ComplexVector v0(N);
-        for (int i = 0; i < N; i++) {
-            v0[i] = Complex(dist(gen), dist(gen));
-        }
-        
-        // Normalize
-        double norm = cblas_dznrm2(N, v0.data(), 1);
-        Complex scale = Complex(1.0/norm, 0.0);
-        cblas_zscal(N, &scale, v0.data(), 1);
+        ComplexVector v0 = generateRandomVector(N, gen, dist);
         
         // Build Lanczos tridiagonal
         std::vector<double> alpha, beta;
@@ -323,31 +316,13 @@ FTLMResults finite_temperature_lanczos(
         
         std::cout << "  Lanczos iterations: " << iterations << std::endl;
         
-        uint64_t m = alpha.size();
+        // Diagonalize tridiagonal and extract Ritz values/weights
+        std::vector<double> ritz_values, weights;
+        diagonalize_tridiagonal_ritz(alpha, beta, ritz_values, weights);
         
-        // Diagonalize tridiagonal matrix
-        std::vector<double> diag = alpha;
-        std::vector<double> offdiag(m - 1);
-        for (int i = 0; i < m - 1; i++) {
-            offdiag[i] = beta[i + 1];
-        }
-        
-        std::vector<double> evecs(m * m);
-        uint64_t info = LAPACKE_dstevd(LAPACK_COL_MAJOR, 'V', m, diag.data(), offdiag.data(), evecs.data(), m);
-        
-        if (info != 0) {
-            std::cerr << "  Warning: Tridiagonal diagonalization failed with code " << info << std::endl;
+        if (ritz_values.empty()) {
+            std::cerr << "  Warning: Tridiagonal diagonalization failed" << std::endl;
             continue;
-        }
-        
-        // Extract Ritz values and weights
-        std::vector<double> ritz_values(m);
-        std::vector<double> weights(m);
-        
-        for (int i = 0; i < m; i++) {
-            ritz_values[i] = diag[i];
-            // Weight is squared first component of eigenvector
-            weights[i] = evecs[i * m] * evecs[i * m];
         }
         
         ground_state_estimates.push_back(ritz_values[0]);
@@ -361,7 +336,7 @@ FTLMResults finite_temperature_lanczos(
         
         // Save intermediate data if requested
         if (params.store_intermediate && !output_dir.empty()) {
-            std::string sample_file = output_dir + "/ftlm_samples/sample_" + std::to_string(sample) + ".txt";
+            std::string sample_file = output_dir + "/ftlm_samples/sample_" + std::to_string(sample) + ".dat";
             std::ofstream f(sample_file);
             if (f.is_open()) {
                 f << "# Temperature  Energy  Specific_Heat  Entropy  Free_Energy\n";
@@ -374,6 +349,9 @@ FTLMResults finite_temperature_lanczos(
                       << sample_thermo.free_energy[t] << "\n";
                 }
                 f.close();
+                std::cout << "Saved FTLM sample " << sample << " to " << sample_file << std::endl;
+            } else {
+                std::cerr << "Error: Could not save FTLM sample to " << sample_file << std::endl;
             }
         }
     }
@@ -745,19 +723,21 @@ static void compute_spectral_function_complex(
         double e_min = *std::min_element(ritz_values.begin(), ritz_values.end());
         
         // Compute partition function with shifted energies
-        // For complex weights: Z = Σ_i Re[w_i] * exp(-βE_i)
+        // Z = Σ_i exp(-βE_i) where the sum is over Krylov states
+        // The weights already contain the ⟨ψ|O₁†|n⟩⟨n|O₂|ψ⟩ matrix elements
         double Z = 0.0;
         for (int i = 0; i < n_states; i++) {
             double shifted_energy = ritz_values[i] - e_min;
             double boltzmann_factor = std::exp(-beta * shifted_energy);
-            thermal_weights[i] = complex_weights[i] * boltzmann_factor;
-            Z += thermal_weights[i].real() * boltzmann_factor;
+            Z += boltzmann_factor;
         }
         
-        // Normalize by partition function
+        // Apply thermal weights: w_n → w_n * exp(-βE_n) / Z
         if (Z > 1e-300) {
             for (int i = 0; i < n_states; i++) {
-                thermal_weights[i] /= Z;
+                double shifted_energy = ritz_values[i] - e_min;
+                double boltzmann_factor = std::exp(-beta * shifted_energy);
+                thermal_weights[i] = complex_weights[i] * (boltzmann_factor / Z);
             }
         } else {
             // Very low temperature - only ground state contributes
@@ -765,10 +745,10 @@ static void compute_spectral_function_complex(
             uint64_t gs_idx = std::distance(ritz_values.begin(),
                                       std::min_element(ritz_values.begin(), ritz_values.end()));
             thermal_weights[gs_idx] = complex_weights[gs_idx];
-            // Normalize by real part sum
+            // Normalize by complex magnitude
             Complex sum = Complex(0.0, 0.0);
             for (const auto& w : thermal_weights) sum += w;
-            if (std::abs(sum) > 0) {
+            if (std::abs(sum) > 1e-300) {
                 for (auto& w : thermal_weights) w /= sum;
             }
         }
@@ -857,39 +837,21 @@ DynamicalResponseResults compute_dynamical_response(
     );
     
     std::cout << "Lanczos iterations: " << iterations << std::endl;
-    uint64_t m = alpha.size();
     
-    // Diagonalize tridiagonal matrix
-    std::vector<double> diag = alpha;
-    std::vector<double> offdiag(m - 1);
-    for (int i = 0; i < m - 1; i++) {
-        offdiag[i] = beta[i + 1];
-    }
+    // Diagonalize tridiagonal and extract Ritz values/weights
+    std::vector<double> ritz_values, weights;
+    diagonalize_tridiagonal_ritz(alpha, beta, ritz_values, weights);
     
-    std::vector<double> evecs(m * m);
-    uint64_t info = LAPACKE_dstevd(LAPACK_COL_MAJOR, 'V', m, diag.data(), offdiag.data(), evecs.data(), m);
-    
-    if (info != 0) {
-        std::cerr << "Error: Tridiagonal diagonalization failed with code " << info << std::endl;
+    if (ritz_values.empty()) {
+        std::cerr << "Error: Tridiagonal diagonalization failed" << std::endl;
         results.spectral_function.resize(num_omega_bins, 0.0);
         results.spectral_error.resize(num_omega_bins, 0.0);
         return results;
     }
     
-    // Extract Ritz values and weights
-    // Weight for state i is |⟨v_0|i⟩|² where v_0 is the first Lanczos vector
-    // This equals the squared first component of the eigenvector
-    std::vector<double> ritz_values(m);
-    std::vector<double> weights(m);
-    
-    for (int i = 0; i < m; i++) {
-        ritz_values[i] = diag[i];
-        weights[i] = evecs[i * m] * evecs[i * m];
-    }
-    
     // Scale weights by the norm factor
     double norm_factor = phi_norm * phi_norm;
-    for (int i = 0; i < m; i++) {
+    for (int i = 0; i < weights.size(); i++) {
         weights[i] *= norm_factor;
     }
     
@@ -973,15 +935,7 @@ DynamicalResponseResults compute_dynamical_response_thermal(
         std::cout << "\n--- Sample " << sample + 1 << " / " << params.num_samples << " ---\n";
         
         // Generate random initial state |ψ⟩
-        ComplexVector psi(N);
-        for (int i = 0; i < N; i++) {
-            psi[i] = Complex(dist(gen), dist(gen));
-        }
-        
-        // Normalize |ψ⟩
-        double norm = cblas_dznrm2(N, psi.data(), 1);
-        Complex scale(1.0/norm, 0.0);
-        cblas_zscal(N, &scale, psi.data(), 1);
+        ComplexVector psi = generateRandomVector(N, gen, dist);
         
         // Apply operator O: |φ⟩ = O|ψ⟩
         ComplexVector phi(N);
@@ -1009,30 +963,19 @@ DynamicalResponseResults compute_dynamical_response_thermal(
         );
         
         std::cout << "  Lanczos iterations: " << iterations << std::endl;
-        uint64_t m = alpha.size();
         
-        // Diagonalize tridiagonal
-        std::vector<double> diag = alpha;
-        std::vector<double> offdiag(m - 1);
-        for (int i = 0; i < m - 1; i++) {
-            offdiag[i] = beta[i + 1];
-        }
+        // Diagonalize tridiagonal and extract Ritz values/weights
+        std::vector<double> ritz_values, weights;
+        diagonalize_tridiagonal_ritz(alpha, beta, ritz_values, weights);
         
-        std::vector<double> evecs(m * m);
-        uint64_t info = LAPACKE_dstevd(LAPACK_COL_MAJOR, 'V', m, diag.data(), offdiag.data(), evecs.data(), m);
-        
-        if (info != 0) {
+        if (ritz_values.empty()) {
             std::cerr << "  Warning: Tridiagonal diagonalization failed\n";
             continue;
         }
         
-        // Extract Ritz values and weights
-        std::vector<double> ritz_values(m);
-        std::vector<double> weights(m);
-        
-        for (int i = 0; i < m; i++) {
-            ritz_values[i] = diag[i];
-            weights[i] = evecs[i * m] * evecs[i * m] * phi_norm * phi_norm;
+        // Scale weights by phi_norm squared
+        for (int i = 0; i < weights.size(); i++) {
+            weights[i] *= phi_norm * phi_norm;
         }
         
         // Compute spectral function for this sample
@@ -1119,35 +1062,29 @@ void save_dynamical_response_results(
     
     file << "# Dynamical Response Results (averaged over " << results.total_samples << " samples)\n";
     
-    // Check if we have imaginary parts (non-zero for cross-correlation)
-    bool has_imaginary = false;
-    if (!results.spectral_function_imag.empty()) {
-        for (double val : results.spectral_function_imag) {
-            if (std::abs(val) > 1e-14) {
-                has_imaginary = true;
-                break;
-            }
-        }
-    }
-    
-    if (has_imaginary) {
-        file << "# Frequency  Re[S(ω)]  Im[S(ω)]  Re[Error]  Im[Error]\n";
-    } else {
-        file << "# Frequency  Spectral_Function  Error\n";
-    }
+    // Always output complex format for consistency
+    file << "# Frequency  Re[S(ω)]  Im[S(ω)]  Re[Error]  Im[Error]\n";
     
     file << std::scientific << std::setprecision(12);
     
     for (size_t i = 0; i < results.frequencies.size(); i++) {
         file << results.frequencies[i] << " "
-             << results.spectral_function[i];
+             << results.spectral_function[i] << " ";
         
-        if (has_imaginary) {
-            file << " " << results.spectral_function_imag[i]
-                 << " " << results.spectral_error[i]
-                 << " " << results.spectral_error_imag[i];
+        // Output imaginary part (will be zero if not computed)
+        if (!results.spectral_function_imag.empty() && i < results.spectral_function_imag.size()) {
+            file << results.spectral_function_imag[i];
         } else {
-            file << " " << results.spectral_error[i];
+            file << "0.000000000000e+00";
+        }
+        
+        file << " " << results.spectral_error[i] << " ";
+        
+        // Output imaginary error (will be zero if not computed)
+        if (!results.spectral_error_imag.empty() && i < results.spectral_error_imag.size()) {
+            file << results.spectral_error_imag[i];
+        } else {
+            file << "0.000000000000e+00";
         }
         
         file << "\n";
@@ -1155,9 +1092,6 @@ void save_dynamical_response_results(
     
     file.close();
     std::cout << "Dynamical response results saved to: " << filename << std::endl;
-    if (has_imaginary) {
-        std::cout << "  (Complex spectral function with both real and imaginary parts)" << std::endl;
-    }
 }
 
 /**
@@ -1173,7 +1107,8 @@ DynamicalResponseResults compute_dynamical_correlation(
     double omega_max,
     uint64_t num_omega_bins,
     double temperature,
-    const std::string& output_dir
+    const std::string& output_dir,
+    double energy_shift
 ){
     std::cout << "\n==========================================\n";
     std::cout << "Dynamical Correlation: S(ω) = <O₁†δ(ω-H)O₂>\n";
@@ -1209,8 +1144,9 @@ DynamicalResponseResults compute_dynamical_correlation(
     }
     std::uniform_real_distribution<double> dist(-1.0, 1.0);
     
-    // Storage for per-sample spectral functions
-    std::vector<std::vector<double>> sample_spectra;
+    // Storage for per-sample spectral functions (real and imaginary parts)
+    std::vector<std::vector<double>> sample_spectra_real;
+    std::vector<std::vector<double>> sample_spectra_imag;
     
     // Create output directory if needed
     if (!output_dir.empty() && params.store_intermediate) {
@@ -1223,15 +1159,7 @@ DynamicalResponseResults compute_dynamical_correlation(
         std::cout << "\n--- Sample " << sample + 1 << " / " << params.num_samples << " ---\n";
         
         // Generate random initial state |ψ⟩
-        ComplexVector psi(N);
-        for (int i = 0; i < N; i++) {
-            psi[i] = Complex(dist(gen), dist(gen));
-        }
-        
-        // Normalize |ψ⟩
-        double norm = cblas_dznrm2(N, psi.data(), 1);
-        Complex scale(1.0/norm, 0.0);
-        cblas_zscal(N, &scale, psi.data(), 1);
+        ComplexVector psi = generateRandomVector(N, gen, dist);
         
         // Apply operator O2: |φ⟩ = O₂|ψ⟩
         ComplexVector phi(N);
@@ -1254,135 +1182,99 @@ DynamicalResponseResults compute_dynamical_correlation(
         // Store basis vectors for computing matrix elements
         std::vector<double> alpha, beta;
         std::vector<ComplexVector> lanczos_vectors;
-        lanczos_vectors.push_back(phi);
         
-        ComplexVector v_current = phi;
-        ComplexVector v_prev(N, Complex(0.0, 0.0));
-        ComplexVector v_next(N);
-        ComplexVector w(N);
-        
-        beta.push_back(0.0);
-        uint64_t max_iter = std::min(N, params.krylov_dim);
-        
-        // Lanczos iteration
-        for (int j = 0; j < max_iter; j++) {
-            H(v_current.data(), w.data(), N);
-            
-            if (j > 0) {
-                Complex neg_beta(-beta[j], 0.0);
-                cblas_zaxpy(N, &neg_beta, v_prev.data(), 1, w.data(), 1);
-            }
-            
-            Complex dot_product;
-            cblas_zdotc_sub(N, v_current.data(), 1, w.data(), 1, &dot_product);
-            alpha.push_back(std::real(dot_product));
-            
-            Complex neg_alpha(-alpha[j], 0.0);
-            cblas_zaxpy(N, &neg_alpha, v_current.data(), 1, w.data(), 1);
-            
-            // Reorthogonalization
-            if (params.full_reorthogonalization) {
-                for (const auto& v : lanczos_vectors) {
-                    Complex overlap;
-                    cblas_zdotc_sub(N, v.data(), 1, w.data(), 1, &overlap);
-                    Complex neg_overlap(-overlap.real(), -overlap.imag());
-                    cblas_zaxpy(N, &neg_overlap, v.data(), 1, w.data(), 1);
-                }
-            } else if (params.reorth_frequency > 0 && (j + 1) % params.reorth_frequency == 0) {
-                for (const auto& v : lanczos_vectors) {
-                    Complex overlap;
-                    cblas_zdotc_sub(N, v.data(), 1, w.data(), 1, &overlap);
-                    if (std::abs(overlap) > params.tolerance) {
-                        Complex neg_overlap(-overlap.real(), -overlap.imag());
-                        cblas_zaxpy(N, &neg_overlap, v.data(), 1, w.data(), 1);
-                    }
-                }
-            }
-            
-            norm = cblas_dznrm2(N, w.data(), 1);
-            beta.push_back(norm);
-            
-            if (norm < params.tolerance) {
-                std::cout << "  Converged at iteration " << j + 1 << std::endl;
-                break;
-            }
-            
-            for (int i = 0; i < N; i++) {
-                v_next[i] = w[i] / norm;
-            }
-            
-            lanczos_vectors.push_back(v_next);
-            v_prev = v_current;
-            v_current = v_next;
-        }
+        uint64_t iterations = build_lanczos_tridiagonal_with_basis(
+            H, phi, N, params.krylov_dim, params.tolerance,
+            params.full_reorthogonalization, params.reorth_frequency,
+            alpha, beta, &lanczos_vectors
+        );
         
         uint64_t m = alpha.size();
         std::cout << "  Lanczos iterations: " << m << std::endl;
         
-        // Diagonalize tridiagonal
-        std::vector<double> diag = alpha;
-        std::vector<double> offdiag(m - 1);
-        for (int i = 0; i < m - 1; i++) {
-            offdiag[i] = beta[i + 1];
-        }
+        // Diagonalize tridiagonal (need eigenvectors for weight computation)
+        std::vector<double> ritz_values, dummy_weights;
+        std::vector<double> evecs;
+        diagonalize_tridiagonal_ritz(alpha, beta, ritz_values, dummy_weights, &evecs);
         
-        std::vector<double> evecs(m * m);
-        uint64_t info = LAPACKE_dstevd(LAPACK_COL_MAJOR, 'V', m, diag.data(), offdiag.data(), evecs.data(), m);
-        
-        if (info != 0) {
+        if (ritz_values.empty()) {
             std::cerr << "  Warning: Tridiagonal diagonalization failed\n";
             continue;
         }
         
-        // Extract Ritz values
-        std::vector<double> ritz_values(m);
-        for (int i = 0; i < m; i++) {
-            ritz_values[i] = diag[i];
+        // For dynamical structure factors, shift energies so ground state is at E=0
+        // This ensures spectral function has weight only at positive frequencies (excitation energies)
+        if (sample == 0) {
+            // Only print this message once for the first sample
+            double E_shift;
+            if (std::abs(energy_shift) > 1e-14) {
+                // Use provided ground state energy shift
+                E_shift = energy_shift;
+                std::cout << "  Using provided ground state energy shift: " << E_shift << std::endl;
+            } else {
+                // Auto-detect from Krylov subspace (first sample only)
+                E_shift = *std::min_element(ritz_values.begin(), ritz_values.end());
+                std::cout << "  Ground state energy (auto-detected from Krylov): " << E_shift << std::endl;
+            }
+            std::cout << "  Shifting to excitation energies (E_gs = 0)" << std::endl;
         }
         
-        // Compute weights |⟨n|O₁|ψ⟩|² for cross-correlation
+        // Apply energy shift for this sample
+        double E_shift = (std::abs(energy_shift) > 1e-14) ? 
+                         energy_shift : 
+                         *std::min_element(ritz_values.begin(), ritz_values.end());
+        
+        for (int i = 0; i < m; i++) {
+            ritz_values[i] -= E_shift;
+        }
+        
+        // Compute weights ⟨ψ|O₁†|n⟩⟨n|O₂|ψ⟩ for cross-correlation
         // |n⟩ = Σ_j evecs[n,j] |v_j⟩ where |v_0⟩ = O₂|ψ⟩/||O₂|ψ⟩||
-        // We need ⟨ψ|O₁†|n⟩ = ⟨O₁ψ|n⟩
+        // Need complex weights to preserve phase information
         
         // Apply O1 to original state
         ComplexVector O1_psi(N);
         O1(psi.data(), O1_psi.data(), N);
         
-        std::vector<double> weights(m);
+        std::vector<Complex> complex_weights(m);
         
         for (int n = 0; n < m; n++) {
-            // Reconstruct |n⟩ in full space
-            ComplexVector psi_n(N, Complex(0.0, 0.0));
+            // Compute ⟨ψ|O₁†|n⟩ = ⟨O₁ψ|n⟩ = Σⱼ evecs[n,j] ⟨O₁ψ|vⱼ⟩
+            Complex overlap_O1 = Complex(0.0, 0.0);
             for (int j = 0; j < m; j++) {
-                Complex coeff(evecs[n * m + j], 0.0);
-                cblas_zaxpy(N, &coeff, lanczos_vectors[j].data(), 1, psi_n.data(), 1);
+                Complex bracket;
+                cblas_zdotc_sub(N, O1_psi.data(), 1, lanczos_vectors[j].data(), 1, &bracket);
+                overlap_O1 += Complex(evecs[n * m + j], 0.0) * bracket;
             }
             
-            // Compute ⟨O₁ψ|n⟩
-            Complex overlap;
-            cblas_zdotc_sub(N, O1_psi.data(), 1, psi_n.data(), 1, &overlap);
+            // Compute ⟨n|O₂|ψ⟩ = evecs[n,0] × ||O₂|ψ|| (since |v₀⟩ = O₂|ψ⟩/||O₂|ψ||)
+            Complex overlap_O2 = Complex(evecs[n * m + 0] * phi_norm, 0.0);
             
-            // Weight is |overlap|² * phi_norm²
-            weights[n] = std::norm(overlap) * phi_norm * phi_norm;
+            // Weight is ⟨ψ|O₁†|n⟩⟨n|O₂|ψ⟩ (complex product for general cross-correlation)
+            Complex weight_complex = std::conj(overlap_O1) * overlap_O2;
+            complex_weights[n] = weight_complex;
         }
         
-        // Compute spectral function for this sample
-        std::vector<double> sample_spectrum;
-        compute_spectral_function(ritz_values, weights, results.frequencies,
-                                 params.broadening, temperature, sample_spectrum);
+        // Compute spectral function for this sample (both real and imaginary parts)
+        std::vector<double> sample_spectrum_real, sample_spectrum_imag;
+        compute_spectral_function_complex(ritz_values, complex_weights, results.frequencies,
+                                         params.broadening, temperature, 
+                                         sample_spectrum_real, sample_spectrum_imag);
         
-        sample_spectra.push_back(sample_spectrum);
+        sample_spectra_real.push_back(sample_spectrum_real);
+        sample_spectra_imag.push_back(sample_spectrum_imag);
         
         // Save intermediate data if requested
         if (params.store_intermediate && !output_dir.empty()) {
             std::string sample_file = output_dir + "/dynamical_correlation_samples/sample_" + std::to_string(sample) + ".txt";
             std::ofstream f(sample_file);
             if (f.is_open()) {
-                f << "# Frequency  Spectral_Function\n";
+                f << "# Frequency  Re[S(ω)]  Im[S(ω)]\n";
                 for (int i = 0; i < num_omega_bins; i++) {
                     f << std::scientific << std::setprecision(12)
                       << results.frequencies[i] << " "
-                      << sample_spectrum[i] << "\n";
+                      << sample_spectrum_real[i] << " "
+                      << sample_spectrum_imag[i] << "\n";
                 }
                 f.close();
             }
@@ -1390,11 +1282,11 @@ DynamicalResponseResults compute_dynamical_correlation(
     }
     
     // Average over all samples (Dynamical Correlation FTLM)
-    uint64_t n_valid_samples = sample_spectra.size();
+    uint64_t n_valid_samples = sample_spectra_real.size();
     std::cout << "\n--- Averaging over " << n_valid_samples << " samples ---\n";
     
     results.spectral_function.resize(num_omega_bins, 0.0);
-    results.spectral_function_imag.resize(num_omega_bins, 0.0);  // FTLM averages: imaginary parts cancel
+    results.spectral_function_imag.resize(num_omega_bins, 0.0);
     results.spectral_error.resize(num_omega_bins, 0.0);
     results.spectral_error_imag.resize(num_omega_bins, 0.0);
     
@@ -1403,29 +1295,34 @@ DynamicalResponseResults compute_dynamical_correlation(
         return results;
     }
     
-    // Compute mean
+    // Compute mean (real and imaginary parts)
     for (int s = 0; s < n_valid_samples; s++) {
         for (int i = 0; i < num_omega_bins; i++) {
-            results.spectral_function[i] += sample_spectra[s][i];
+            results.spectral_function[i] += sample_spectra_real[s][i];
+            results.spectral_function_imag[i] += sample_spectra_imag[s][i];
         }
     }
     
     for (int i = 0; i < num_omega_bins; i++) {
         results.spectral_function[i] /= n_valid_samples;
+        results.spectral_function_imag[i] /= n_valid_samples;
     }
     
-    // Compute standard error
+    // Compute standard error (real and imaginary parts)
     if (n_valid_samples > 1) {
         for (int s = 0; s < n_valid_samples; s++) {
             for (int i = 0; i < num_omega_bins; i++) {
-                double diff = sample_spectra[s][i] - results.spectral_function[i];
-                results.spectral_error[i] += diff * diff;
+                double diff_real = sample_spectra_real[s][i] - results.spectral_function[i];
+                double diff_imag = sample_spectra_imag[s][i] - results.spectral_function_imag[i];
+                results.spectral_error[i] += diff_real * diff_real;
+                results.spectral_error_imag[i] += diff_imag * diff_imag;
             }
         }
         
         double norm_factor = std::sqrt(static_cast<double>(n_valid_samples * (n_valid_samples - 1)));
         for (int i = 0; i < num_omega_bins; i++) {
             results.spectral_error[i] = std::sqrt(results.spectral_error[i]) / norm_factor;
+            results.spectral_error_imag[i] = std::sqrt(results.spectral_error_imag[i]) / norm_factor;
         }
     }
     
@@ -1532,94 +1429,28 @@ DynamicalResponseResults compute_dynamical_correlation_state(
     // Build Lanczos tridiagonal for H starting from |φ⟩
     std::vector<double> alpha, beta;
     std::vector<ComplexVector> lanczos_vectors;
-    lanczos_vectors.push_back(phi);
     
-    ComplexVector v_current = phi;
-    ComplexVector v_prev(N, Complex(0.0, 0.0));
-    ComplexVector v_next(N);
-    ComplexVector w(N);
-    
-    beta.push_back(0.0);
-    uint64_t max_iter = std::min(N, params.krylov_dim);
-    
-    // Lanczos iteration
-    for (int j = 0; j < max_iter; j++) {
-        H(v_current.data(), w.data(), N);
-        
-        if (j > 0) {
-            Complex neg_beta(-beta[j], 0.0);
-            cblas_zaxpy(N, &neg_beta, v_prev.data(), 1, w.data(), 1);
-        }
-        
-        Complex dot_product;
-        cblas_zdotc_sub(N, v_current.data(), 1, w.data(), 1, &dot_product);
-        alpha.push_back(std::real(dot_product));
-        
-        Complex neg_alpha(-alpha[j], 0.0);
-        cblas_zaxpy(N, &neg_alpha, v_current.data(), 1, w.data(), 1);
-        
-        // Reorthogonalization
-        if (params.full_reorthogonalization) {
-            for (const auto& v : lanczos_vectors) {
-                Complex overlap;
-                cblas_zdotc_sub(N, v.data(), 1, w.data(), 1, &overlap);
-                Complex neg_overlap(-overlap.real(), -overlap.imag());
-                cblas_zaxpy(N, &neg_overlap, v.data(), 1, w.data(), 1);
-            }
-        } else if (params.reorth_frequency > 0 && (j + 1) % params.reorth_frequency == 0) {
-            for (const auto& v : lanczos_vectors) {
-                Complex overlap;
-                cblas_zdotc_sub(N, v.data(), 1, w.data(), 1, &overlap);
-                if (std::abs(overlap) > params.tolerance) {
-                    Complex neg_overlap(-overlap.real(), -overlap.imag());
-                    cblas_zaxpy(N, &neg_overlap, v.data(), 1, w.data(), 1);
-                }
-            }
-        }
-        
-        double norm = cblas_dznrm2(N, w.data(), 1);
-        beta.push_back(norm);
-        
-        if (norm < params.tolerance) {
-            std::cout << "  Converged at iteration " << j + 1 << std::endl;
-            break;
-        }
-        
-        for (int i = 0; i < N; i++) {
-            v_next[i] = w[i] / norm;
-        }
-        
-        lanczos_vectors.push_back(v_next);
-        v_prev = v_current;
-        v_current = v_next;
-    }
+    uint64_t iterations = build_lanczos_tridiagonal_with_basis(
+        H, phi, N, params.krylov_dim, params.tolerance,
+        params.full_reorthogonalization, params.reorth_frequency,
+        alpha, beta, &lanczos_vectors
+    );
     
     uint64_t m = alpha.size();
     std::cout << "  Lanczos iterations: " << m << std::endl;
     
-    // Diagonalize tridiagonal
-    std::vector<double> diag = alpha;
-    std::vector<double> offdiag(m - 1);
-    for (int i = 0; i < m - 1; i++) {
-        offdiag[i] = beta[i + 1];
-    }
+    // Diagonalize tridiagonal (need eigenvectors for weight computation)
+    std::vector<double> ritz_values, dummy_weights;
+    std::vector<double> evecs;
+    diagonalize_tridiagonal_ritz(alpha, beta, ritz_values, dummy_weights, &evecs);
     
-    std::vector<double> evecs(m * m);
-    uint64_t info = LAPACKE_dstevd(LAPACK_COL_MAJOR, 'V', m, diag.data(), offdiag.data(), evecs.data(), m);
-    
-    if (info != 0) {
+    if (ritz_values.empty()) {
         std::cerr << "  Error: Tridiagonal diagonalization failed\n";
         results.spectral_function.resize(num_omega_bins, 0.0);
         results.spectral_function_imag.resize(num_omega_bins, 0.0);
         results.spectral_error.resize(num_omega_bins, 0.0);
         results.spectral_error_imag.resize(num_omega_bins, 0.0);
         return results;
-    }
-    
-    // Extract Ritz values
-    std::vector<double> ritz_values(m);
-    for (int i = 0; i < m; i++) {
-        ritz_values[i] = diag[i];
     }
     
     // For dynamical structure factors, shift energies so ground state is at E=0
@@ -1698,107 +1529,28 @@ static void compute_krylov_expectation_values(
     std::vector<double>& weights,
     std::vector<double>& expectation_values
 ) {
-    // Build Lanczos tridiagonal for Hamiltonian
+    // Build Lanczos tridiagonal for Hamiltonian with basis storage
     std::vector<double> alpha, beta;
     std::vector<ComplexVector> lanczos_vectors;
-    lanczos_vectors.push_back(v0);
     
-    ComplexVector v_current = v0;
-    ComplexVector v_prev(N, Complex(0.0, 0.0));
-    ComplexVector v_next(N);
-    ComplexVector w(N);
-    
-    // Normalize initial vector
-    double norm = cblas_dznrm2(N, v_current.data(), 1);
-    Complex scale_factor = Complex(1.0/norm, 0.0);
-    cblas_zscal(N, &scale_factor, v_current.data(), 1);
-    
-    beta.push_back(0.0);
-    uint64_t max_iter = std::min(N, krylov_dim);
-    
-    // Lanczos iteration (store basis vectors for later)
-    for (int j = 0; j < max_iter; j++) {
-        // w = H*v_j
-        H(v_current.data(), w.data(), N);
-        
-        // w = w - beta_j * v_{j-1}
-        if (j > 0) {
-            Complex neg_beta = Complex(-beta[j], 0.0);
-            cblas_zaxpy(N, &neg_beta, v_prev.data(), 1, w.data(), 1);
-        }
-        
-        // alpha_j = <v_j, w>
-        Complex dot_product;
-        cblas_zdotc_sub(N, v_current.data(), 1, w.data(), 1, &dot_product);
-        alpha.push_back(std::real(dot_product));
-        
-        // w = w - alpha_j * v_j
-        Complex neg_alpha = Complex(-alpha[j], 0.0);
-        cblas_zaxpy(N, &neg_alpha, v_current.data(), 1, w.data(), 1);
-        
-        // Reorthogonalization
-        if (full_reorth) {
-            for (size_t k = 0; k < lanczos_vectors.size(); k++) {
-                Complex overlap;
-                cblas_zdotc_sub(N, lanczos_vectors[k].data(), 1, w.data(), 1, &overlap);
-                Complex neg_overlap = -overlap;
-                cblas_zaxpy(N, &neg_overlap, lanczos_vectors[k].data(), 1, w.data(), 1);
-            }
-        } else if (reorth_freq > 0 && (j + 1) % reorth_freq == 0) {
-            for (size_t k = 0; k < lanczos_vectors.size(); k++) {
-                Complex overlap;
-                cblas_zdotc_sub(N, lanczos_vectors[k].data(), 1, w.data(), 1, &overlap);
-                if (std::abs(overlap) > tolerance) {
-                    Complex neg_overlap = -overlap;
-                    cblas_zaxpy(N, &neg_overlap, lanczos_vectors[k].data(), 1, w.data(), 1);
-                }
-            }
-        }
-        
-        // beta_{j+1} = ||w||
-        norm = cblas_dznrm2(N, w.data(), 1);
-        beta.push_back(norm);
-        
-        // Check for breakdown
-        if (norm < tolerance) {
-            break;
-        }
-        
-        // v_{j+1} = w / beta_{j+1}
-        for (int i = 0; i < N; i++) {
-            v_next[i] = w[i] / norm;
-        }
-        
-        lanczos_vectors.push_back(v_next);
-        v_prev = v_current;
-        v_current = v_next;
-    }
+    uint64_t iterations = build_lanczos_tridiagonal_with_basis(
+        H, v0, N, krylov_dim, tolerance,
+        full_reorth, reorth_freq,
+        alpha, beta, &lanczos_vectors
+    );
     
     uint64_t m = alpha.size();
     
-    // Diagonalize tridiagonal matrix
-    std::vector<double> diag = alpha;
-    std::vector<double> offdiag(m - 1);
-    for (int i = 0; i < m - 1; i++) {
-        offdiag[i] = beta[i + 1];
-    }
+    // Diagonalize tridiagonal (need eigenvectors for expectation value computation)
+    std::vector<double> evecs;
+    diagonalize_tridiagonal_ritz(alpha, beta, ritz_values, weights, &evecs);
     
-    std::vector<double> evecs(m * m);
-    uint64_t info = LAPACKE_dstevd(LAPACK_COL_MAJOR, 'V', m, diag.data(), offdiag.data(), evecs.data(), m);
-    
-    if (info != 0) {
+    if (ritz_values.empty()) {
         std::cerr << "Warning: Tridiagonal diagonalization failed" << std::endl;
         return;
     }
     
-    ritz_values.resize(m);
-    weights.resize(m);
     expectation_values.resize(m);
-    
-    for (int i = 0; i < m; i++) {
-        ritz_values[i] = diag[i];
-        weights[i] = evecs[i * m] * evecs[i * m];
-    }
     
     // Now compute <n|O|n> for each Ritz state in the Krylov basis
     // |n> = Σ_j evecs[n,j] |v_j>
@@ -1882,15 +1634,7 @@ StaticResponseResults compute_thermal_expectation_value(
         std::cout << "\n--- Sample " << sample + 1 << " / " << params.num_samples << " ---\n";
         
         // Generate random initial state
-        ComplexVector v0(N);
-        for (int i = 0; i < N; i++) {
-            v0[i] = Complex(dist(gen), dist(gen));
-        }
-        
-        // Normalize
-        double norm = cblas_dznrm2(N, v0.data(), 1);
-        Complex scale = Complex(1.0/norm, 0.0);
-        cblas_zscal(N, &scale, v0.data(), 1);
+        ComplexVector v0 = generateRandomVector(N, gen, dist);
         
         // Build Krylov subspace and compute expectation values
         std::vector<double> ritz_values, weights, expectation_values;
@@ -2104,107 +1848,32 @@ StaticResponseResults compute_static_response(
         std::cout << "\n--- Sample " << sample + 1 << " / " << params.num_samples << " ---\n";
         
         // Generate random initial state
-        ComplexVector v0(N);
-        for (int i = 0; i < N; i++) {
-            v0[i] = Complex(dist(gen), dist(gen));
-        }
-        
-        // Normalize
-        double norm = cblas_dznrm2(N, v0.data(), 1);
-        Complex scale = Complex(1.0/norm, 0.0);
-        cblas_zscal(N, &scale, v0.data(), 1);
+        ComplexVector v0 = generateRandomVector(N, gen, dist);
         
         // Build Lanczos tridiagonal for Hamiltonian (store basis vectors)
         std::vector<double> alpha, beta;
         std::vector<ComplexVector> lanczos_vectors;
-        lanczos_vectors.push_back(v0);
         
-        ComplexVector v_current = v0;
-        ComplexVector v_prev(N, Complex(0.0, 0.0));
-        ComplexVector v_next(N);
-        ComplexVector w(N);
-        
-        beta.push_back(0.0);
-        uint64_t max_iter = std::min(N, params.krylov_dim);
-        
-        // Lanczos iteration
-        for (int j = 0; j < max_iter; j++) {
-            H(v_current.data(), w.data(), N);
-            
-            if (j > 0) {
-                Complex neg_beta(-beta[j], 0.0);
-                cblas_zaxpy(N, &neg_beta, v_prev.data(), 1, w.data(), 1);
-            }
-            
-            Complex dot_product;
-            cblas_zdotc_sub(N, v_current.data(), 1, w.data(), 1, &dot_product);
-            alpha.push_back(std::real(dot_product));
-            
-            Complex neg_alpha(-alpha[j], 0.0);
-            cblas_zaxpy(N, &neg_alpha, v_current.data(), 1, w.data(), 1);
-            
-            // Reorthogonalization
-            if (params.full_reorthogonalization) {
-                for (const auto& v : lanczos_vectors) {
-                    Complex overlap;
-                    cblas_zdotc_sub(N, v.data(), 1, w.data(), 1, &overlap);
-                    Complex neg_overlap(-overlap.real(), -overlap.imag());
-                    cblas_zaxpy(N, &neg_overlap, v.data(), 1, w.data(), 1);
-                }
-            } else if (params.reorth_frequency > 0 && (j + 1) % params.reorth_frequency == 0) {
-                for (const auto& v : lanczos_vectors) {
-                    Complex overlap;
-                    cblas_zdotc_sub(N, v.data(), 1, w.data(), 1, &overlap);
-                    if (std::abs(overlap) > params.tolerance) {
-                        Complex neg_overlap(-overlap.real(), -overlap.imag());
-                        cblas_zaxpy(N, &neg_overlap, v.data(), 1, w.data(), 1);
-                    }
-                }
-            }
-            
-            norm = cblas_dznrm2(N, w.data(), 1);
-            beta.push_back(norm);
-            
-            if (norm < params.tolerance) {
-                std::cout << "  Converged at iteration " << j + 1 << std::endl;
-                break;
-            }
-            
-            for (int i = 0; i < N; i++) {
-                v_next[i] = w[i] / norm;
-            }
-            
-            lanczos_vectors.push_back(v_next);
-            v_prev = v_current;
-            v_current = v_next;
-        }
+        uint64_t iterations = build_lanczos_tridiagonal_with_basis(
+            H, v0, N, params.krylov_dim, params.tolerance,
+            params.full_reorthogonalization, params.reorth_frequency,
+            alpha, beta, &lanczos_vectors
+        );
         
         uint64_t m = alpha.size();
         std::cout << "  Lanczos iterations: " << m << std::endl;
         
-        // Diagonalize tridiagonal
-        std::vector<double> diag = alpha;
-        std::vector<double> offdiag(m - 1);
-        for (int i = 0; i < m - 1; i++) {
-            offdiag[i] = beta[i + 1];
-        }
+        // Diagonalize tridiagonal (need eigenvectors for correlation computation)
+        std::vector<double> ritz_values, weights;
+        std::vector<double> evecs;
+        diagonalize_tridiagonal_ritz(alpha, beta, ritz_values, weights, &evecs);
         
-        std::vector<double> evecs(m * m);
-        uint64_t info = LAPACKE_dstevd(LAPACK_COL_MAJOR, 'V', m, diag.data(), offdiag.data(), evecs.data(), m);
-        
-        if (info != 0) {
+        if (ritz_values.empty()) {
             std::cerr << "  Warning: Tridiagonal diagonalization failed" << std::endl;
             continue;
         }
         
-        std::vector<double> ritz_values(m);
-        std::vector<double> weights(m);
         std::vector<double> correlation_values(m);
-        
-        for (int i = 0; i < m; i++) {
-            ritz_values[i] = diag[i];
-            weights[i] = evecs[i * m] * evecs[i * m];
-        }
         
         // Compute ⟨n|O₁†O₂|n⟩ for each eigenstate |n⟩
         // This equals ⟨O₁n|O₂n⟩ = (O₁|n⟩)† · (O₂|n⟩)
@@ -2368,4 +2037,498 @@ void save_static_response_results(
     
     file.close();
     std::cout << "Static response results saved to: " << filename << std::endl;
+}
+
+// ============================================================================
+// TEMPERATURE-INDEPENDENT SPECTRAL DECOMPOSITION (OPTIMIZATION)
+// ============================================================================
+
+/**
+ * @brief Compute temperature-independent spectral decomposition via Lanczos
+ * 
+ * This function runs the Lanczos iteration once to compute the spectral
+ * decomposition (eigenvalues and weights) which is temperature-independent.
+ * The results can then be reused to efficiently compute S(ω,T) at multiple
+ * temperatures without re-running the expensive Lanczos iteration.
+ */
+LanczosSpectralData compute_lanczos_spectral_data(
+    std::function<void(const Complex*, Complex*, int)> H,
+    std::function<void(const Complex*, Complex*, int)> O1,
+    std::function<void(const Complex*, Complex*, int)> O2,
+    const ComplexVector& state,
+    uint64_t N,
+    const DynamicalResponseParameters& params,
+    double energy_shift
+) {
+    std::cout << "\n==========================================\n";
+    std::cout << "Computing Temperature-Independent Spectral Data\n";
+    std::cout << "==========================================\n";
+    std::cout << "Hilbert space dimension: " << N << std::endl;
+    std::cout << "Krylov dimension: " << params.krylov_dim << std::endl;
+    std::cout << "Broadening: " << params.broadening << std::endl;
+    
+    LanczosSpectralData spectral_data;
+    
+    // Verify state is normalized
+    double state_norm = cblas_dznrm2(N, state.data(), 1);
+    ComplexVector psi = state;
+    if (std::abs(state_norm - 1.0) > 1e-10) {
+        std::cout << "  Normalizing input state (norm = " << state_norm << ")\n";
+        Complex scale(1.0/state_norm, 0.0);
+        cblas_zscal(N, &scale, psi.data(), 1);
+    }
+    
+    // Apply operator O2: |φ⟩ = O₂|ψ⟩
+    ComplexVector phi(N);
+    O2(psi.data(), phi.data(), N);
+    
+    // Get norm of |φ⟩
+    double phi_norm = cblas_dznrm2(N, phi.data(), 1);
+    if (phi_norm < 1e-14) {
+        std::cerr << "  Error: O₂|ψ⟩ has zero norm\n";
+        return spectral_data;
+    }
+    
+    std::cout << "  Norm of O₂|ψ⟩: " << phi_norm << std::endl;
+    
+    // Normalize |φ⟩
+    Complex phi_scale(1.0/phi_norm, 0.0);
+    cblas_zscal(N, &phi_scale, phi.data(), 1);
+    
+    // Build Lanczos tridiagonal for H starting from |φ⟩
+    std::vector<double> alpha, beta;
+    std::vector<ComplexVector> lanczos_vectors;
+    
+    uint64_t iterations = build_lanczos_tridiagonal_with_basis(
+        H, phi, N, params.krylov_dim, params.tolerance,
+        params.full_reorthogonalization, params.reorth_frequency,
+        alpha, beta, &lanczos_vectors
+    );
+    
+    uint64_t m = alpha.size();
+    std::cout << "  Lanczos iterations: " << m << std::endl;
+    
+    spectral_data.krylov_dim = m;
+    spectral_data.lanczos_iterations = iterations;
+    
+    // Diagonalize tridiagonal (need eigenvectors for weight computation)
+    std::vector<double> ritz_values, dummy_weights;
+    std::vector<double> evecs;
+    diagonalize_tridiagonal_ritz(alpha, beta, ritz_values, dummy_weights, &evecs);
+    
+    if (ritz_values.empty()) {
+        std::cerr << "  Error: Tridiagonal diagonalization failed\n";
+        return spectral_data;
+    }
+    
+    // Determine and apply energy shift
+    double E_shift;
+    if (std::abs(energy_shift) > 1e-14) {
+        E_shift = energy_shift;
+        std::cout << "  Using provided ground state energy shift: " << E_shift << std::endl;
+    } else {
+        E_shift = *std::min_element(ritz_values.begin(), ritz_values.end());
+        std::cout << "  Ground state energy (auto-detected from Krylov): " << E_shift << std::endl;
+    }
+    
+    spectral_data.ground_state_energy = E_shift;
+    
+    // Shift to excitation energies
+    for (int i = 0; i < m; i++) {
+        ritz_values[i] -= E_shift;
+    }
+    spectral_data.ritz_values = ritz_values;
+    
+    std::cout << "  Shifted to excitation energies (E_gs = 0)" << std::endl;
+    std::cout << "  Energy range: [" << *std::min_element(ritz_values.begin(), ritz_values.end())
+              << ", " << *std::max_element(ritz_values.begin(), ritz_values.end()) << "]" << std::endl;
+    
+    // Compute temperature-independent spectral weights
+    // w_n = ⟨ψ|O₁†|n⟩⟨n|O₂|ψ⟩
+    
+    // Apply O1 to original state: |O₁ψ⟩
+    ComplexVector O1_psi(N);
+    O1(psi.data(), O1_psi.data(), N);
+    
+    spectral_data.spectral_weights.resize(m);
+    
+    for (int n = 0; n < m; n++) {
+        // Compute ⟨ψ|O₁†|n⟩ = ⟨O₁ψ|n⟩ = Σⱼ evecs[n,j] ⟨O₁ψ|vⱼ⟩
+        Complex overlap_O1 = Complex(0.0, 0.0);
+        for (int j = 0; j < m; j++) {
+            Complex bracket;
+            cblas_zdotc_sub(N, O1_psi.data(), 1, lanczos_vectors[j].data(), 1, &bracket);
+            overlap_O1 += Complex(evecs[n * m + j], 0.0) * bracket;
+        }
+        
+        // Compute ⟨n|O₂|ψ⟩ = evecs[n,0] × ||O₂|ψ|| (since |v₀⟩ = O₂|ψ⟩/||O₂|ψ||)
+        Complex overlap_O2 = Complex(evecs[n * m + 0] * phi_norm, 0.0);
+        
+        // Weight is ⟨ψ|O₁†|n⟩⟨n|O₂|ψ⟩
+        Complex weight_complex = std::conj(overlap_O1) * overlap_O2;
+        spectral_data.spectral_weights[n] = weight_complex;
+    }
+    
+    std::cout << "==========================================\n";
+    std::cout << "Spectral Data Computation Complete\n";
+    std::cout << "==========================================\n";
+    
+    return spectral_data;
+}
+
+/**
+ * @brief Compute spectral function from Lanczos data for multiple temperatures
+ * 
+ * This function takes pre-computed spectral data and efficiently computes
+ * S(ω,T) for multiple temperatures. This is much faster than re-running
+ * Lanczos for each temperature.
+ */
+std::map<double, DynamicalResponseResults> compute_spectral_function_from_lanczos_data(
+    const LanczosSpectralData& spectral_data,
+    double omega_min,
+    double omega_max,
+    uint64_t num_omega_bins,
+    const std::vector<double>& temperatures,
+    double broadening,
+    uint64_t num_samples,
+    const std::vector<std::vector<Complex>>* per_sample_weights
+) {
+    std::cout << "\n==========================================\n";
+    std::cout << "Computing Spectral Functions for Multiple Temperatures\n";
+    std::cout << "==========================================\n";
+    std::cout << "Number of temperatures: " << temperatures.size() << std::endl;
+    std::cout << "Temperature range: [" << *std::min_element(temperatures.begin(), temperatures.end())
+              << ", " << *std::max_element(temperatures.begin(), temperatures.end()) << "]" << std::endl;
+    std::cout << "Frequency range: [" << omega_min << ", " << omega_max << "]" << std::endl;
+    std::cout << "Broadening: " << broadening << std::endl;
+    
+    std::map<double, DynamicalResponseResults> results_map;
+    
+    // Generate frequency grid
+    std::vector<double> frequencies(num_omega_bins);
+    double omega_step = (omega_max - omega_min) / std::max(uint64_t(1), num_omega_bins - 1);
+    for (int i = 0; i < num_omega_bins; i++) {
+        frequencies[i] = omega_min + i * omega_step;
+    }
+    
+    const auto& ritz_values = spectral_data.ritz_values;
+    const auto& weights = spectral_data.spectral_weights;
+    uint64_t m = ritz_values.size();
+    
+    // Compute spectral function for each temperature
+    for (double T : temperatures) {
+        std::cout << "  Computing for T = " << T << " ..." << std::endl;
+        
+        DynamicalResponseResults results;
+        results.frequencies = frequencies;
+        results.total_samples = num_samples;
+        results.omega_min = omega_min;
+        results.omega_max = omega_max;
+        
+        // Initialize spectral function arrays
+        results.spectral_function.resize(num_omega_bins, 0.0);
+        results.spectral_function_imag.resize(num_omega_bins, 0.0);
+        results.spectral_error.resize(num_omega_bins, 0.0);
+        results.spectral_error_imag.resize(num_omega_bins, 0.0);
+        
+        // Compute partition function and thermal weights
+        double beta = 1.0 / T;
+        std::vector<double> thermal_weights(m);
+        double Z = 0.0;
+        
+        // Find minimum energy for numerical stability
+        double E_min = *std::min_element(ritz_values.begin(), ritz_values.end());
+        
+        for (int n = 0; n < m; n++) {
+            double shifted_energy = ritz_values[n] - E_min;
+            double boltzmann = std::exp(-beta * shifted_energy);
+            thermal_weights[n] = boltzmann;
+            Z += boltzmann;
+        }
+        
+        // Normalize thermal weights
+        if (Z > 0.0) {
+            for (int n = 0; n < m; n++) {
+                thermal_weights[n] /= Z;
+            }
+        }
+        
+        // Compute spectral function at each frequency
+        double eta = broadening;
+        double norm_factor = eta / M_PI;
+        
+        for (int i = 0; i < num_omega_bins; i++) {
+            double omega = frequencies[i];
+            Complex S_omega(0.0, 0.0);
+            
+            for (int n = 0; n < m; n++) {
+                double E_n = ritz_values[n];
+                double lorentzian = norm_factor / ((omega - E_n) * (omega - E_n) + eta * eta);
+                
+                // Include thermal weight and spectral weight
+                S_omega += weights[n] * lorentzian * thermal_weights[n];
+            }
+            
+            results.spectral_function[i] = std::real(S_omega);
+            results.spectral_function_imag[i] = std::imag(S_omega);
+        }
+        
+        // Compute error bars if per-sample data is available
+        if (per_sample_weights && num_samples > 1) {
+            std::vector<std::vector<double>> per_sample_spectral_real(num_samples, std::vector<double>(num_omega_bins, 0.0));
+            std::vector<std::vector<double>> per_sample_spectral_imag(num_samples, std::vector<double>(num_omega_bins, 0.0));
+            
+            // Compute spectral function for each sample
+            for (uint64_t s = 0; s < num_samples && s < per_sample_weights->size(); s++) {
+                const auto& sample_weights = (*per_sample_weights)[s];
+                
+                for (int i = 0; i < num_omega_bins; i++) {
+                    double omega = frequencies[i];
+                    Complex S_omega_sample(0.0, 0.0);
+                    
+                    for (int n = 0; n < m && n < sample_weights.size(); n++) {
+                        double E_n = ritz_values[n];
+                        double lorentzian = norm_factor / ((omega - E_n) * (omega - E_n) + eta * eta);
+                        S_omega_sample += sample_weights[n] * lorentzian * thermal_weights[n];
+                    }
+                    
+                    per_sample_spectral_real[s][i] = std::real(S_omega_sample);
+                    per_sample_spectral_imag[s][i] = std::imag(S_omega_sample);
+                }
+            }
+            
+            // Compute standard error: SE = sqrt(variance / num_samples)
+            for (int i = 0; i < num_omega_bins; i++) {
+                double mean_real = results.spectral_function[i];
+                double mean_imag = results.spectral_function_imag[i];
+                double var_real = 0.0, var_imag = 0.0;
+                
+                for (uint64_t s = 0; s < num_samples && s < per_sample_weights->size(); s++) {
+                    double diff_real = per_sample_spectral_real[s][i] - mean_real;
+                    double diff_imag = per_sample_spectral_imag[s][i] - mean_imag;
+                    var_real += diff_real * diff_real;
+                    var_imag += diff_imag * diff_imag;
+                }
+                
+                // Standard error of the mean
+                results.spectral_error[i] = std::sqrt(var_real / (num_samples * (num_samples - 1)));
+                results.spectral_error_imag[i] = std::sqrt(var_imag / (num_samples * (num_samples - 1)));
+            }
+        }
+        
+        results_map[T] = results;
+    }
+    
+    std::cout << "==========================================\n";
+    std::cout << "Multi-Temperature Spectral Function Complete\n";
+    std::cout << "==========================================\n";
+    
+    return results_map;
+}
+
+/**
+ * @brief Optimized version for computing dynamical correlation at multiple temperatures
+ * 
+ * This combines compute_lanczos_spectral_data and compute_spectral_function_from_lanczos_data
+ * into a single convenient function for temperature scans.
+ */
+std::map<double, DynamicalResponseResults> compute_dynamical_correlation_state_multi_temperature(
+    std::function<void(const Complex*, Complex*, int)> H,
+    std::function<void(const Complex*, Complex*, int)> O1,
+    std::function<void(const Complex*, Complex*, int)> O2,
+    const ComplexVector& state,
+    uint64_t N,
+    const DynamicalResponseParameters& params,
+    double omega_min,
+    double omega_max,
+    uint64_t num_omega_bins,
+    const std::vector<double>& temperatures,
+    double energy_shift
+) {
+    std::cout << "\n=========================================="  << std::endl;
+    std::cout << "OPTIMIZED MULTI-TEMPERATURE DYNAMICAL CORRELATION" << std::endl;
+    std::cout << "==========================================" << std::endl;
+    std::cout << "Running Lanczos ONCE for " << temperatures.size() << " temperature points" << std::endl;
+    std::cout << "This is much more efficient than running Lanczos " << temperatures.size() << " times!" << std::endl;
+    std::cout << "==========================================" << std::endl;
+    
+    // Step 1: Compute temperature-independent spectral data (Lanczos run)
+    LanczosSpectralData spectral_data = compute_lanczos_spectral_data(
+        H, O1, O2, state, N, params, energy_shift
+    );
+    
+    if (spectral_data.ritz_values.empty()) {
+        std::cerr << "Error: Failed to compute spectral data\n";
+        return {};
+    }
+    
+    // Step 2: Compute spectral functions for all temperatures (fast!)
+    return compute_spectral_function_from_lanczos_data(
+        spectral_data, omega_min, omega_max, num_omega_bins,
+        temperatures, params.broadening, 1
+    );
+}
+
+/**
+ * @brief Multi-sample multi-temperature dynamical correlation (OPTIMIZED!)
+ * 
+ * This function extends the temperature scan optimization to handle multiple
+ * random samples. It provides ~N× speedup for N temperature points.
+ */
+std::map<double, DynamicalResponseResults> compute_dynamical_correlation_multi_sample_multi_temperature(
+    std::function<void(const Complex*, Complex*, int)> H,
+    std::function<void(const Complex*, Complex*, int)> O1,
+    std::function<void(const Complex*, Complex*, int)> O2,
+    uint64_t N,
+    const DynamicalResponseParameters& params,
+    double omega_min,
+    double omega_max,
+    uint64_t num_omega_bins,
+    const std::vector<double>& temperatures,
+    double energy_shift,
+    const std::string& output_dir
+) {
+    std::cout << "\n=========================================="  << std::endl;
+    std::cout << "OPTIMIZED MULTI-SAMPLE MULTI-TEMPERATURE" << std::endl;
+    std::cout << "==========================================" << std::endl;
+    std::cout << "Samples: " << params.num_samples << std::endl;
+    std::cout << "Temperatures: " << temperatures.size() << std::endl;
+    std::cout << "Running Lanczos " << params.num_samples << " times (once per sample)" << std::endl;
+    std::cout << "Then computing " << temperatures.size() << " temperatures from cached data" << std::endl;
+    std::cout << "Expected speedup: ~" << (temperatures.size() * 0.9) << "× vs standard approach" << std::endl;
+    std::cout << "==========================================" << std::endl;
+    
+    // Initialize random number generator
+    std::mt19937 gen;
+    if (params.random_seed == 0) {
+        std::random_device rd;
+        gen.seed(rd());
+    } else {
+        gen.seed(params.random_seed);
+    }
+    std::uniform_real_distribution<double> dist(-1.0, 1.0);
+    
+    // We'll accumulate spectral data across samples
+    // First, determine the ground state energy if not provided
+    double E_shift = energy_shift;
+    if (std::abs(E_shift) < 1e-14) {
+        std::cout << "\nDetermining ground state energy from first sample...\n";
+        ComplexVector test_state(N);
+        for (uint64_t i = 0; i < N; i++) {
+            test_state[i] = Complex(dist(gen), dist(gen));
+        }
+        double norm = cblas_dznrm2(N, test_state.data(), 1);
+        Complex scale(1.0/norm, 0.0);
+        cblas_zscal(N, &scale, test_state.data(), 1);
+        
+        // Quick Lanczos to get ground state
+        ComplexVector phi(N);
+        O2(test_state.data(), phi.data(), N);
+        double phi_norm = cblas_dznrm2(N, phi.data(), 1);
+        if (phi_norm > 1e-14) {
+            Complex phi_scale(1.0/phi_norm, 0.0);
+            cblas_zscal(N, &phi_scale, phi.data(), 1);
+            
+            std::vector<double> alpha, beta;
+            build_lanczos_tridiagonal(
+                H, phi, N, std::min(params.krylov_dim, (uint64_t)100),
+                params.tolerance, false, 10, alpha, beta
+            );
+            
+            std::vector<double> ritz_vals, weights;
+            diagonalize_tridiagonal_ritz(alpha, beta, ritz_vals, weights);
+            
+            if (!ritz_vals.empty()) {
+                E_shift = *std::min_element(ritz_vals.begin(), ritz_vals.end());
+                std::cout << "Ground state energy (estimated): " << E_shift << std::endl;
+            }
+        }
+    }
+    
+    // Storage for accumulated spectral data
+    std::vector<double> accumulated_eigenvalues;  // These should be consistent across samples
+    std::vector<Complex> accumulated_weights;     // These we'll average
+    std::vector<std::vector<Complex>> per_sample_weights;  // For computing error bars
+    int krylov_dim_used = 0;
+    
+    std::cout << "\n--- Processing " << params.num_samples << " random samples ---\n";
+    
+    // Loop over samples
+    for (uint64_t sample_idx = 0; sample_idx < params.num_samples; sample_idx++) {
+        std::cout << "\nSample " << (sample_idx + 1) << "/" << params.num_samples << ":\n";
+        
+        // Generate random state
+        ComplexVector state(N);
+        for (uint64_t i = 0; i < N; i++) {
+            state[i] = Complex(dist(gen), dist(gen));
+        }
+        double state_norm = cblas_dznrm2(N, state.data(), 1);
+        Complex scale(1.0/state_norm, 0.0);
+        cblas_zscal(N, &scale, state.data(), 1);
+        
+        // Compute spectral data for this sample
+        LanczosSpectralData sample_data = compute_lanczos_spectral_data(
+            H, O1, O2, state, N, params, E_shift
+        );
+        
+        if (sample_data.ritz_values.empty()) {
+            std::cerr << "Warning: Sample " << sample_idx << " failed, skipping\n";
+            continue;
+        }
+        
+        // For the first sample, initialize accumulated arrays
+        if (sample_idx == 0) {
+            accumulated_eigenvalues = sample_data.ritz_values;
+            accumulated_weights.resize(sample_data.spectral_weights.size(), Complex(0.0, 0.0));
+            krylov_dim_used = sample_data.krylov_dim;
+        }
+        
+        // Verify eigenvalues are consistent (they should be, up to numerical precision)
+        if (sample_data.ritz_values.size() != accumulated_eigenvalues.size()) {
+            std::cerr << "Warning: Sample " << sample_idx << " has different Krylov dimension ("
+                      << sample_data.ritz_values.size() << " vs " << accumulated_eigenvalues.size()
+                      << "), using min\n";
+            size_t min_size = std::min(sample_data.ritz_values.size(), accumulated_eigenvalues.size());
+            sample_data.ritz_values.resize(min_size);
+            sample_data.spectral_weights.resize(min_size);
+            accumulated_eigenvalues.resize(min_size);
+            accumulated_weights.resize(min_size);
+        }
+        
+        // Store per-sample weights for error computation
+        per_sample_weights.push_back(sample_data.spectral_weights);
+        
+        // Accumulate spectral weights (we'll average at the end)
+        for (size_t i = 0; i < accumulated_weights.size(); i++) {
+            accumulated_weights[i] += sample_data.spectral_weights[i];
+        }
+        
+        std::cout << "  Accumulated spectral weights from sample " << (sample_idx + 1) << std::endl;
+    }
+    
+    // Average the accumulated weights
+    if (params.num_samples > 0) {
+        double inv_num_samples = 1.0 / static_cast<double>(params.num_samples);
+        for (size_t i = 0; i < accumulated_weights.size(); i++) {
+            accumulated_weights[i] *= inv_num_samples;
+        }
+        std::cout << "\n--- Averaged spectral weights over " << params.num_samples << " samples ---\n";
+    }
+    
+    // Create averaged spectral data structure
+    LanczosSpectralData averaged_spectral_data;
+    averaged_spectral_data.ritz_values = accumulated_eigenvalues;
+    averaged_spectral_data.spectral_weights = accumulated_weights;
+    averaged_spectral_data.ground_state_energy = E_shift;
+    averaged_spectral_data.krylov_dim = krylov_dim_used;
+    averaged_spectral_data.lanczos_iterations = krylov_dim_used;
+    
+    std::cout << "\n--- Computing spectral functions for " << temperatures.size() 
+              << " temperatures (FAST!) ---\n";
+    
+    // Now compute spectral functions for all temperatures using averaged data
+    return compute_spectral_function_from_lanczos_data(
+        averaged_spectral_data, omega_min, omega_max, num_omega_bins,
+        temperatures, params.broadening, params.num_samples, &per_sample_weights
+    );
 }

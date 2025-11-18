@@ -110,11 +110,13 @@ bool readTPQData(const std::string& filename, uint64_t step, double& energy,
 /**
  * Save the current TPQ state to a file
  * 
- * @param tpq_state TPQ state vector to save
+ * @param tpq_state TPQ state vector to save (in fixed-Sz or full basis)
  * @param filename Name of the file to save to
+ * @param fixed_sz_op Optional FixedSzOperator - if provided, transforms to full basis before saving
  * @return True if successful
  */
-bool save_tpq_state(const ComplexVector& tpq_state, const std::string& filename);
+bool save_tpq_state(const ComplexVector& tpq_state, const std::string& filename, 
+                    class FixedSzOperator* fixed_sz_op = nullptr);
 
 /**
  * Load a TPQ state from a file
@@ -185,6 +187,25 @@ ComplexVector get_tpq_state_at_temperature(
 );
 
 /**
+ * Find the lowest energy state from saved TPQ state files
+ * Searches through tpq_state_*_beta=*.dat files for the highest beta value
+ * 
+ * @param tpq_dir Directory containing TPQ data
+ * @param N Dimension of Hilbert space
+ * @param out_sample Output parameter for sample number with highest beta (lowest energy)
+ * @param out_beta Output parameter for beta value of the saved state
+ * @param out_step Output parameter for step number (determined from SS_rand file)
+ * @return True if a valid state was found
+ */
+bool find_lowest_energy_tpq_state(
+    const std::string& tpq_dir,
+    uint64_t N,
+    uint64_t& out_sample,
+    double& out_beta,
+    uint64_t& out_step
+);
+
+/**
  * Initialize TPQ output files with appropriate headers
  * 
  * @param dir Directory for output files
@@ -202,13 +223,17 @@ std::tuple<std::string, std::string, std::string, std::vector<std::string>> init
  * Standard TPQ (microcanonical) implementation
  * 
  * @param H Hamiltonian operator function
- * @param N Dimension of the Hilbert space
+ * @param N Dimension of the Hilbert space (fixed-Sz dimension if using fixed-Sz)
  * @param max_iter Maximum number of iterations
  * @param num_samples Number of random samples
  * @param temp_interval Interval for calculating physical quantities
  * @param eigenvalues Optional output vector for final state energies
  * @param dir Output directory
  * @param compute_spectrum Whether to compute spectrum
+ * @param fixed_sz_op Optional FixedSzOperator - if provided, transforms states to full basis before saving
+ * @param continue_quenching If true, continue from a saved state instead of starting fresh
+ * @param continue_sample Sample number to continue from (0 = auto-detect lowest energy)
+ * @param continue_beta Beta value to continue from (0.0 = use saved beta from state file)
  */
 void microcanonical_tpq(
     std::function<void(const Complex*, Complex*, int)> H,
@@ -231,7 +256,11 @@ void microcanonical_tpq(
     float spin_length = 0.5,
     bool measure_sz = false,
     uint64_t sublattice_size = 1,
-    uint64_t num_sites = 16
+    uint64_t num_sites = 16,
+    class FixedSzOperator* fixed_sz_op = nullptr,
+    bool continue_quenching = false,
+    uint64_t continue_sample = 0,
+    double continue_beta = 0.0
 );
 
 // Canonical TPQ using imaginary-time propagation e^{-βH} |r>
@@ -265,7 +294,8 @@ void canonical_tpq(
     float spin_length = 0.5,
     bool measure_sz = false,
     uint64_t sublattice_size = 1,
-    uint64_t num_sites = 16
+    uint64_t num_sites = 16,
+    class FixedSzOperator* fixed_sz_op = nullptr
 );
 
 /**

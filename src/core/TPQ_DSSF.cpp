@@ -19,6 +19,10 @@
 #include "../cpu_solvers/dynamics.h"
 #include "../cpu_solvers/ftlm.h"
 
+#ifdef WITH_CUDA
+#include "../gpu/gpu_ed_wrapper.h"
+#include "../gpu/gpu_operator.cuh"
+#endif
 
 using Complex = std::complex<double>;
 using ComplexVector = std::vector<Complex>;
@@ -49,31 +53,94 @@ int read_num_sites_from_positions(const std::string& positions_file) {
     return num_sites;
 }
 
-// Helper function to read ground state energy from eigenvalues.dat file
+// Helper function to read ground state energy with multiple fallback methods
+// Returns the MINIMUM energy across all available sources for robustness against corruption
 double read_ground_state_energy(const std::string& directory) {
-    std::string eigenvalues_file = directory + "/output/eigenvectors/eigenvalues.dat";
+    std::vector<double> candidate_energies;
+    std::vector<std::string> sources;
     
-    std::ifstream infile(eigenvalues_file, std::ios::binary);
-    if (!infile.is_open()) {
-        throw std::runtime_error("Failed to open eigenvalues.dat file: " + eigenvalues_file);
+    // Method 1: Try eigenvalues.dat (binary format)
+    std::string eigenvalues_dat = directory + "/output/eigenvectors/eigenvalues.dat";
+    std::ifstream infile_dat(eigenvalues_dat, std::ios::binary);
+    if (infile_dat.is_open()) {
+        size_t num_eigenvalues;
+        infile_dat.read(reinterpret_cast<char*>(&num_eigenvalues), sizeof(size_t));
+        
+        if (num_eigenvalues > 0) {
+            double ground_state_energy;
+            infile_dat.read(reinterpret_cast<char*>(&ground_state_energy), sizeof(double));
+            candidate_energies.push_back(ground_state_energy);
+            sources.push_back("eigenvalues.dat");
+        }
+        infile_dat.close();
     }
     
-    // Read number of eigenvalues
-    size_t num_eigenvalues;
-    infile.read(reinterpret_cast<char*>(&num_eigenvalues), sizeof(size_t));
-    
-    if (num_eigenvalues == 0) {
-        infile.close();
-        throw std::runtime_error("No eigenvalues found in file: " + eigenvalues_file);
+    // Method 2: Try eigenvalues.txt (text format)
+    std::string eigenvalues_txt = directory + "/output/eigenvalues.txt";
+    std::ifstream infile_txt(eigenvalues_txt);
+    if (infile_txt.is_open()) {
+        double ground_state_energy;
+        if (infile_txt >> ground_state_energy) {
+            candidate_energies.push_back(ground_state_energy);
+            sources.push_back("eigenvalues.txt");
+        }
+        infile_txt.close();
     }
     
-    // Read the first eigenvalue (ground state energy)
-    double ground_state_energy;
-    infile.read(reinterpret_cast<char*>(&ground_state_energy), sizeof(double));
+    // Method 3: Try finding minimum energy in SS_rand0.dat
+    std::string ss_file = directory + "/output/SS_rand0.dat";
+    std::ifstream infile_ss(ss_file);
+    if (infile_ss.is_open()) {
+        std::string line;
+        double min_energy = std::numeric_limits<double>::max();
+        bool found_energy = false;
+        
+        while (std::getline(infile_ss, line)) {
+            // Skip comment lines and empty lines
+            if (line.empty() || line[0] == '#') continue;
+            
+            std::istringstream iss(line);
+            double inv_temp, energy;
+            
+            // Read first two columns: inv_temp and energy
+            if (iss >> inv_temp >> energy) {
+                if (energy < min_energy) {
+                    min_energy = energy;
+                    found_energy = true;
+                }
+            }
+        }
+        infile_ss.close();
+        
+        if (found_energy) {
+            candidate_energies.push_back(min_energy);
+            sources.push_back("SS_rand0.dat");
+        }
+    }
     
-    infile.close();
+    // If no methods succeeded, throw an error
+    if (candidate_energies.empty()) {
+        throw std::runtime_error("Failed to read ground state energy from any available file: " 
+                                 "eigenvalues.dat, eigenvalues.txt, or SS_rand0.dat");
+    }
     
-    return ground_state_energy;
+    // Return the minimum energy across all sources (most robust against corruption)
+    auto min_it = std::min_element(candidate_energies.begin(), candidate_energies.end());
+    size_t min_idx = std::distance(candidate_energies.begin(), min_it);
+    double final_energy = *min_it;
+    
+    // Report all found energies and which one was selected
+    std::cout << "Ground state energy candidates found:" << std::endl;
+    for (size_t i = 0; i < candidate_energies.size(); i++) {
+        std::cout << "  " << sources[i] << ": " 
+                  << std::fixed << std::setprecision(10) << candidate_energies[i];
+        if (i == min_idx) {
+            std::cout << " ← SELECTED (minimum)";
+        }
+        std::cout << std::endl;
+    }
+    
+    return final_energy;
 }
 
 void printSpinConfiguration(ComplexVector &state, int num_sites, float spin_length, const std::string &dir) {
@@ -738,7 +805,7 @@ int main(int argc, char* argv[]) {
     std::string interall_file = directory + "/InterAll.dat";
     std::string trans_file = directory + "/Trans.dat";
     std::string counterterm_file = directory + "/CounterTerm.dat";
-
+    std::string three_body_file = directory + "/ThreeBodyG.dat";
     // Check if files exist
     if (!fs::exists(interall_file) || !fs::exists(trans_file)) {
         if (rank == 0) {
@@ -751,6 +818,12 @@ int main(int argc, char* argv[]) {
     // Load Hamiltonian
     ham_op.loadFromInterAllFile(interall_file);
     ham_op.loadFromFile(trans_file);
+    if (fs::exists(three_body_file)) {
+        if (rank == 0) {
+            std::cout << "Loading three-body interactions from " << three_body_file << std::endl;
+        }
+        ham_op.loadThreeBodyTerm(three_body_file);
+    }
     
     // COUNTERTERM DISABLED
     // if (fs::exists(counterterm_file)) {
@@ -766,10 +839,13 @@ int main(int argc, char* argv[]) {
     bool has_ground_state_energy = false;
     if (method == "spectral") {
         try {
+            if (rank == 0) {
+                std::cout << "Reading ground state energy (minimum across all sources)..." << std::endl;
+            }
             ground_state_energy = read_ground_state_energy(directory);
             has_ground_state_energy = true;
             if (rank == 0) {
-                std::cout << "Ground state energy read from eigenvalues.dat: " 
+                std::cout << "Final ground state energy (for spectral shift): " 
                           << std::fixed << std::setprecision(10) << ground_state_energy << std::endl;
             }
         } catch (const std::exception& e) {
@@ -1415,41 +1491,114 @@ int main(int argc, char* argv[]) {
                     // Use spectral method with FTLM approach
                     int krylov_dim = krylov_dim_or_nmax;
                     
-                    // CPU spectral calculation
-                    // Set up FTLM parameters
-                    DynamicalResponseParameters params;
-                    params.krylov_dim = krylov_dim;
-                    params.broadening = broadening;
-                    params.tolerance = 1e-10;
-                    params.full_reorthogonalization = true;
+#ifdef WITH_CUDA
+                    if (use_gpu) {
+                        std::cout << "Using GPU-accelerated FTLM spectral calculation..." << std::endl;
+                        
+                        // Convert CPU Hamiltonian to GPU
+                        GPUOperator gpu_ham(num_sites, spin_length);
+                        if (!convertOperatorToGPU(ham_op, gpu_ham)) {
+                            std::cerr << "Failed to convert Hamiltonian to GPU, falling back to CPU" << std::endl;
+                            use_gpu = false;
+                        } else {
+                            // Process each operator pair on GPU
+                            for (size_t i = 0; i < obs_1.size(); i++) {
+                                std::cout << "  Processing operator pair " << (i+1) << "/" << obs_1.size() 
+                                          << ": " << obs_names[i] << std::endl;
+                                
+                                // Convert observable operators to GPU
+                                GPUOperator gpu_obs1(num_sites, spin_length);
+                                GPUOperator gpu_obs2(num_sites, spin_length);
+                                
+                                if (!convertOperatorToGPU(obs_1[i], gpu_obs1) || 
+                                    !convertOperatorToGPU(obs_2[i], gpu_obs2)) {
+                                    std::cerr << "  Failed to convert operators to GPU, skipping..." << std::endl;
+                                    continue;
+                                }
+                                
+                                // Allocate device memory for TPQ state
+                                cuDoubleComplex* d_psi;
+                                cudaMalloc(&d_psi, N * sizeof(cuDoubleComplex));
+                                cudaMemcpy(d_psi, tpq_state.data(), N * sizeof(cuDoubleComplex), cudaMemcpyHostToDevice);
+                                
+                                // Call GPU wrapper for dynamical correlation on a single state
+                                auto [frequencies, S_real, S_imag] = GPUEDWrapper::runGPUDynamicalCorrelationState(
+                                    &gpu_ham, &gpu_obs1, &gpu_obs2,
+                                    d_psi,  // Device pointer to TPQ state
+                                    N,
+                                    krylov_dim,
+                                    omega_min, omega_max, num_omega_bins,
+                                    broadening,
+                                    0.0,  // temperature (not used for single-state)
+                                    ground_state_energy
+                                );
+                                
+                                // Package results
+                                DynamicalResponseResults results;
+                                results.frequencies = frequencies;
+                                results.spectral_function = S_real;
+                                results.spectral_function_imag = S_imag;
+                                // Initialize error vectors to zero (single-state, no error bars)
+                                results.spectral_error.resize(frequencies.size(), 0.0);
+                                results.spectral_error_imag.resize(frequencies.size(), 0.0);
+                                results.total_samples = 1;
+                                
+                                // Save results
+                                std::stringstream filename_ss;
+                                filename_ss << method_dir << "/" << obs_names[i] 
+                                            << "_spectral_sample_" << sample_index 
+                                            << "_beta_" << beta << ".txt";
+                                
+                                save_dynamical_response_results(results, filename_ss.str());
+                                
+                                if (rank == 0) {
+                                    std::cout << "  Saved GPU spectral function: " << filename_ss.str() << std::endl;
+                                }
+                                
+                                // Cleanup device memory
+                                cudaFree(d_psi);
+                            }
+                        }
+                    }
+#endif
                     
-                    // Process each operator pair
-                    for (size_t i = 0; i < obs_1.size(); i++) {
-                        // Create function wrappers for operators
-                        auto O1_func = [&obs_1, i](const Complex* in, Complex* out, int size) {
-                            obs_1[i].apply(in, out, size);
-                        };
+                    if (!use_gpu) {
+                        // CPU spectral calculation
+                        // Set up FTLM parameters
+                        DynamicalResponseParameters params;
+                        params.krylov_dim = krylov_dim;
+                        params.broadening = broadening;
+                        params.tolerance = 1e-10;
+                        params.full_reorthogonalization = true;
                         
-                        auto O2_func = [&obs_2, i](const Complex* in, Complex* out, int size) {
-                            obs_2[i].apply(in, out, size);
-                        };
-                        
-                        // Compute spectral function
-                        auto results = compute_dynamical_correlation_state(
-                            H, O1_func, O2_func, tpq_state, N, params,
-                            omega_min, omega_max, num_omega_bins, 0.0, ground_state_energy
-                        );
-                        
-                        // Save results
-                        std::stringstream filename_ss;
-                        filename_ss << method_dir << "/" << obs_names[i] 
-                                    << "_spectral_sample_" << sample_index 
-                                    << "_beta_" << beta << ".txt";
-                        
-                        save_dynamical_response_results(results, filename_ss.str());
-                        
-                        if (rank == 0) {
-                            std::cout << "  Saved spectral function: " << filename_ss.str() << std::endl;
+                        // Process each operator pair
+                        for (size_t i = 0; i < obs_1.size(); i++) {
+                            // Create function wrappers for operators
+                            auto O1_func = [&obs_1, i](const Complex* in, Complex* out, int size) {
+                                obs_1[i].apply(in, out, size);
+                            };
+                            
+                            auto O2_func = [&obs_2, i](const Complex* in, Complex* out, int size) {
+                                obs_2[i].apply(in, out, size);
+                            };
+                            
+                            // Compute spectral function
+                            auto results = compute_dynamical_correlation_state(
+                                H, O1_func, O2_func, tpq_state, N, params,
+                                omega_min, omega_max, num_omega_bins, 0.0, ground_state_energy
+                            );
+                            
+                            // Save results
+                            std::stringstream filename_ss;
+                            filename_ss << method_dir << "/" << obs_names[i] 
+                                        << "_spectral_sample_" << sample_index 
+                                        << "_beta_" << beta << ".txt";
+                            
+                            save_dynamical_response_results(results, filename_ss.str());
+                            
+                            if (rank == 0) {
+                                std::cout << "  Saved spectral function: " << filename_ss.str() << std::endl;
+                            }
                         }
                     }
                 } else if (method == "spectral_thermal") {
@@ -1493,61 +1642,147 @@ int main(int argc, char* argv[]) {
                         }
                     }
                     
-                    // CPU thermal spectral calculation
-                    // Set up FTLM parameters for thermal averaging
-                    DynamicalResponseParameters params;
-                    params.krylov_dim = krylov_dim;
-                    params.broadening = broadening;
-                    params.tolerance = 1e-10;
-                    params.full_reorthogonalization = true;
-                    params.num_samples = num_samples;
-                    params.random_seed = random_seed;
-                    params.store_intermediate = false;
-                    
-                    if (rank == 0) {
-                        std::cout << "Observables to compute thermal spectral functions for:" << std::endl;
-                        std::cout << "  Number of operators: " << obs_1.size() << std::endl;
+                    // GPU/CPU thermal spectral calculation
+#ifdef WITH_CUDA
+                    if (use_gpu) {
+                        std::cout << "Using GPU-accelerated FTLM thermal spectral calculation..." << std::endl;
+                        
+                        // Convert CPU Hamiltonian to GPU
+                        GPUOperator gpu_ham(num_sites, spin_length);
+                        if (!convertOperatorToGPU(ham_op, gpu_ham)) {
+                            std::cerr << "Failed to convert Hamiltonian to GPU, falling back to CPU" << std::endl;
+                            use_gpu = false;
+                        } else {
+                            // Process each operator pair on GPU
+                            for (size_t i = 0; i < obs_1.size(); i++) {
+                                std::cout << "  Processing operator pair " << (i+1) << "/" << obs_1.size() 
+                                          << ": " << obs_names[i] << std::endl;
+                                
+                                // Convert observable operators to GPU
+                                GPUOperator gpu_obs1(num_sites, spin_length);
+                                GPUOperator gpu_obs2(num_sites, spin_length);
+                                
+                                if (!convertOperatorToGPU(obs_1[i], gpu_obs1) || 
+                                    !convertOperatorToGPU(obs_2[i], gpu_obs2)) {
+                                    std::cerr << "  Failed to convert operators to GPU, skipping..." << std::endl;
+                                    continue;
+                                }
+                                
+                                // Allocate device memory for TPQ state (reused for all temperatures)
+                                cuDoubleComplex* d_psi;
+                                cudaMalloc(&d_psi, N * sizeof(cuDoubleComplex));
+                                cudaMemcpy(d_psi, tpq_state.data(), N * sizeof(cuDoubleComplex), cudaMemcpyHostToDevice);
+                                
+                                // Call GPU wrapper for thermal spectral function
+                                // Note: Currently processes temperatures sequentially
+                                // TODO: Implement multi-temperature optimization on GPU
+                                for (double temperature : temperatures) {
+                                    std::cout << "    Computing at T = " << temperature << std::endl;
+                                    
+                                    auto [frequencies, S_real, S_imag] = GPUEDWrapper::runGPUDynamicalCorrelationState(
+                                        &gpu_ham, &gpu_obs1, &gpu_obs2,
+                                        d_psi,  // Device pointer to state
+                                        N,
+                                        krylov_dim,
+                                        omega_min, omega_max, num_omega_bins,
+                                        broadening,
+                                        temperature,
+                                        ground_state_energy
+                                    );
+                                    
+                                    // Package results
+                                    DynamicalResponseResults results;
+                                    results.frequencies = frequencies;
+                                    results.spectral_function = S_real;
+                                    results.spectral_function_imag = S_imag;
+                                    // Initialize error vectors to zero (single-state, no error bars)
+                                    results.spectral_error.resize(frequencies.size(), 0.0);
+                                    results.spectral_error_imag.resize(frequencies.size(), 0.0);
+                                    results.total_samples = 1;
+                                    
+                                    // Save results
+                                    std::stringstream filename_ss;
+                                    filename_ss << method_dir << "/" << obs_names[i] 
+                                                << "_spectral_thermal_sample_" << sample_index 
+                                                << "_T_" << temperature << ".txt";
+                                    
+                                    save_dynamical_response_results(results, filename_ss.str());
+                                    
+                                    if (rank == 0) {
+                                        std::cout << "    Saved GPU thermal spectral: " << filename_ss.str() << std::endl;
+                                    }
+                                }
+                                
+                                // Cleanup device memory
+                                cudaFree(d_psi);
+                            }
+                        }
                     }
+#endif
                     
-                    // Process each operator pair
-                    for (size_t i = 0; i < obs_1.size(); i++) {
-                        std::cout << "  Processing operator " << obs_names[i] << std::endl;
-                        // Create function wrappers for operators
-                        auto O1_func = [&obs_1, i](const Complex* in, Complex* out, int size) {
-                            obs_1[i].apply(in, out, size);
-                        };
+                    if (!use_gpu) {
+                        // CPU thermal spectral calculation
+                        // Set up FTLM parameters for thermal averaging
+                        DynamicalResponseParameters params;
+                        params.krylov_dim = krylov_dim;
+                        params.broadening = broadening;
+                        params.tolerance = 1e-10;
+                        params.full_reorthogonalization = true;
+                        params.num_samples = num_samples;
+                        params.random_seed = random_seed;
+                        params.store_intermediate = false;
                         
-                        auto O2_func = [&obs_2, i](const Complex* in, Complex* out, int size) {
-                            obs_2[i].apply(in, out, size);
-                        };
+                        if (rank == 0) {
+                            std::cout << "Observables to compute thermal spectral functions for:" << std::endl;
+                            std::cout << "  Number of operators: " << obs_1.size() << std::endl;
+                        }
                         
-                        // Compute thermal spectral function for each temperature
-                        for (size_t t_idx = 0; t_idx < temperatures.size(); t_idx++) {
-                            double temperature = temperatures[t_idx];
+                        // Process each operator pair
+                        for (size_t i = 0; i < obs_1.size(); i++) {
+                            std::cout << "  Processing operator " << obs_names[i] << std::endl;
+                            // Create function wrappers for operators
+                            auto O1_func = [&obs_1, i](const Complex* in, Complex* out, int size) {
+                                obs_1[i].apply(in, out, size);
+                            };
                             
+                            auto O2_func = [&obs_2, i](const Complex* in, Complex* out, int size) {
+                                obs_2[i].apply(in, out, size);
+                            };
+                            
+                            // OPTIMIZATION: Compute spectral function for ALL temperatures at once
+                            // This runs Lanczos ONCE and reuses the spectral decomposition for all temperatures
+                            // Much more efficient than running Lanczos separately for each temperature!
                             if (rank == 0) {
-                                std::cout << "  Processing operator " << obs_names[i] 
-                                          << " at T = " << temperature << std::endl;
+                                std::cout << "  *** OPTIMIZED MODE: Computing " << temperatures.size() 
+                                          << " temperature points with SINGLE Lanczos run ***" << std::endl;
                             }
                             
-                            // Compute thermal spectral function using FTLM
-                            auto results = compute_dynamical_correlation(
-                                H, O1_func, O2_func, N, params,
-                                omega_min, omega_max, num_omega_bins, temperature, method_dir
+                            // Use the optimized multi-temperature function
+                            auto results_map = compute_dynamical_correlation_state_multi_temperature(
+                                H, O1_func, O2_func, tpq_state, N, params,
+                                omega_min, omega_max, num_omega_bins, 
+                                temperatures, ground_state_energy
                             );
                             
-                            // Save results with thermal averaging info
-                            std::stringstream filename_ss;
-                            filename_ss << method_dir << "/" << obs_names[i] 
-                                        << "_spectral_thermal_sample_" << sample_index 
-                                        << "_beta_" << 1/temperature << ".txt";
+                            // Save results for each temperature
+                            for (const auto& [temperature, results] : results_map) {
+                                std::stringstream filename_ss;
+                                filename_ss << method_dir << "/" << obs_names[i] 
+                                            << "_spectral_thermal_sample_" << sample_index 
+                                            << "_beta_" << std::fixed << std::setprecision(6) << (1.0/temperature)
+                                            << "_T_" << temperature << "_nsamples_1.txt";
+                                
+                                save_dynamical_response_results(results, filename_ss.str());
                             
-                            save_dynamical_response_results(results, filename_ss.str());
-                        
+                                if (rank == 0) {
+                                    std::cout << "  Saved thermal spectral function: " << filename_ss.str() << std::endl;
+                                    std::cout << "    Temperature: " << temperature << ", Beta: " << (1.0/temperature) << std::endl;
+                                }
+                            }
+                            
                             if (rank == 0) {
-                                std::cout << "  Saved thermal spectral function: " << filename_ss.str() << std::endl;
-                                std::cout << "    Temperature: " << temperature << ", Beta: " << 1/temperature << std::endl;
-                                std::cout << "    FTLM samples: " << params.num_samples << std::endl;
+                                std::cout << "  *** Optimization saved ~" << (temperatures.size() - 1) 
+                                          << " Lanczos iterations! ***" << std::endl;
                             }
                         }
                     }

@@ -124,6 +124,10 @@ EDConfig EDConfig::fromFile(const std::string& filename) {
             else if (key == "use_hybrid_method") config.thermal.use_hybrid_method = (value == "true" || value == "1");
             else if (key == "hybrid_crossover") config.thermal.hybrid_crossover = std::stod(value);
             else if (key == "hybrid_auto_crossover") config.thermal.hybrid_auto_crossover = (value == "true" || value == "1");
+            // TPQ continue-quenching parameters
+            else if (key == "continue_quenching") config.thermal.continue_quenching = (value == "true" || value == "1");
+            else if (key == "continue_sample") config.thermal.continue_sample = std::stoi(value);
+            else if (key == "continue_beta") config.thermal.continue_beta = std::stod(value);
             else if (key == "calc_observables") config.observable.calculate = (value == "true" || value == "1");
             else if (key == "measure_spin") config.observable.measure_spin = (value == "true" || value == "1");
             else if (key == "run_standard") config.workflow.run_standard = (value == "true" || value == "1");
@@ -223,7 +227,8 @@ EDConfig EDConfig::fromCommandLine(uint64_t argc, char* argv[]) {
             else if (arg.find("--temp_max=") == 0) config.thermal.temp_max = std::stod(parse_value("--temp_max="));
             else if (arg.find("--temp_bins=") == 0) config.thermal.num_temp_bins = std::stoi(parse_value("--temp_bins="));
             else if (arg.find("--num_order=") == 0) config.thermal.num_order = std::stoi(parse_value("--num_order="));
-            else if (arg.find("--num_measure_freq=") == 0) config.thermal.num_measure_freq = std::stoi(parse_value("--num_measure_freq="));
+            else if (arg.find("--measure-freq=") == 0) config.thermal.num_measure_freq = std::stoi(parse_value("--measure-freq="));
+            else if (arg.find("--num_measure_freq=") == 0) config.thermal.num_measure_freq = std::stoi(parse_value("--num_measure_freq=")); // Deprecated: use --measure-freq
             else if (arg.find("--delta_tau=") == 0) config.thermal.delta_tau = std::stod(parse_value("--delta_tau="));
             else if (arg.find("--large_value=") == 0) config.thermal.large_value = std::stod(parse_value("--large_value="));
             else if (arg == "--calc_observables") config.observable.calculate = true;
@@ -256,8 +261,8 @@ EDConfig EDConfig::fromCommandLine(uint64_t argc, char* argv[]) {
             else if (arg.find("--ltlm-reorth-freq=") == 0) config.thermal.ltlm_reorth_freq = std::stoi(parse_value("--ltlm-reorth-freq="));
             else if (arg.find("--ltlm-seed=") == 0) config.thermal.ltlm_seed = std::stoul(parse_value("--ltlm-seed="));
             else if (arg == "--ltlm-store-data") config.thermal.ltlm_store_data = true;
-            // Hybrid LTLM/FTLM options
-            else if (arg == "--hybrid-thermal") config.thermal.use_hybrid_method = true;
+            // Hybrid LTLM/FTLM options (DEPRECATED: use --method=HYBRID instead)
+            else if (arg == "--hybrid-thermal") config.thermal.use_hybrid_method = true;  // Deprecated: use --method=HYBRID
             else if (arg.find("--hybrid-crossover=") == 0) config.thermal.hybrid_crossover = std::stod(parse_value("--hybrid-crossover="));
             else if (arg == "--hybrid-auto-crossover") config.thermal.hybrid_auto_crossover = true;
             // Dynamical response options
@@ -276,6 +281,21 @@ EDConfig EDConfig::fromCommandLine(uint64_t argc, char* argv[]) {
             else if (arg.find("--dyn-operator2=") == 0) config.dynamical.operator2_file = parse_value("--dyn-operator2=");
             else if (arg.find("--dyn-output=") == 0) config.dynamical.output_prefix = parse_value("--dyn-output=");
             else if (arg.find("--dyn-seed=") == 0) config.dynamical.random_seed = std::stoul(parse_value("--dyn-seed="));
+            // Dynamical response configuration-based operator options
+            else if (arg.find("--dyn-operator-type=") == 0) config.dynamical.operator_type = parse_value("--dyn-operator-type=");
+            else if (arg.find("--dyn-basis=") == 0) config.dynamical.basis = parse_value("--dyn-basis=");
+            else if (arg.find("--dyn-spin-combinations=") == 0) config.dynamical.spin_combinations = parse_value("--dyn-spin-combinations=");
+            else if (arg.find("--dyn-unit-cell-size=") == 0) config.dynamical.unit_cell_size = std::stoi(parse_value("--dyn-unit-cell-size="));
+            else if (arg.find("--dyn-momentum-points=") == 0) config.dynamical.momentum_points = parse_value("--dyn-momentum-points=");
+            else if (arg.find("--dyn-polarization=") == 0) config.dynamical.polarization = parse_value("--dyn-polarization=");
+            else if (arg.find("--dyn-theta=") == 0) config.dynamical.theta = std::stod(parse_value("--dyn-theta="));
+            // GPU acceleration options
+            else if (arg == "--dyn-use-gpu") config.dynamical.use_gpu = true;
+            else if (arg == "--static-use-gpu") config.static_resp.use_gpu = true;
+            else if (arg == "--use-gpu") {
+                config.dynamical.use_gpu = true;
+                config.static_resp.use_gpu = true;
+            }
             // Static response options
             else if (arg.find("--static-samples=") == 0) config.static_resp.num_random_states = std::stoi(parse_value("--static-samples="));
             else if (arg.find("--static-krylov=") == 0) config.static_resp.krylov_dim = std::stoi(parse_value("--static-krylov="));
@@ -292,6 +312,14 @@ EDConfig EDConfig::fromCommandLine(uint64_t argc, char* argv[]) {
             else if (arg.find("--static-operator2=") == 0) config.static_resp.operator2_file = parse_value("--static-operator2=");
             else if (arg.find("--static-output=") == 0) config.static_resp.output_prefix = parse_value("--static-output=");
             else if (arg.find("--static-seed=") == 0) config.static_resp.random_seed = std::stoul(parse_value("--static-seed="));
+            // Static response configuration-based operator options
+            else if (arg.find("--static-operator-type=") == 0) config.static_resp.operator_type = parse_value("--static-operator-type=");
+            else if (arg.find("--static-basis=") == 0) config.static_resp.basis = parse_value("--static-basis=");
+            else if (arg.find("--static-spin-combinations=") == 0) config.static_resp.spin_combinations = parse_value("--static-spin-combinations=");
+            else if (arg.find("--static-unit-cell-size=") == 0) config.static_resp.unit_cell_size = std::stoi(parse_value("--static-unit-cell-size="));
+            else if (arg.find("--static-momentum-points=") == 0) config.static_resp.momentum_points = parse_value("--static-momentum-points=");
+            else if (arg.find("--static-polarization=") == 0) config.static_resp.polarization = parse_value("--static-polarization=");
+            else if (arg.find("--static-theta=") == 0) config.static_resp.theta = std::stod(parse_value("--static-theta="));
             // ARPACK options
             else if (arg.find("--arpack-which=") == 0) config.arpack.which = parse_value("--arpack-which=");
             else if (arg.find("--arpack-ncv=") == 0) config.arpack.ncv = std::stoi(parse_value("--arpack-ncv="));
@@ -323,8 +351,21 @@ EDConfig EDConfig::fromCommandLine(uint64_t argc, char* argv[]) {
         config.diag.num_eigenvalues = (1ULL << config.system.num_sites);
     }
     
-    // Default to standard workflow if nothing specified
-    if (!config.workflow.run_standard && !config.workflow.run_symmetrized && !config.workflow.run_streaming_symmetry) {
+    // Auto-enable skip_ed if only response calculations are requested
+    bool only_response = (config.workflow.compute_dynamical_response || config.workflow.compute_static_response) &&
+                        !config.workflow.run_standard && 
+                        !config.workflow.run_symmetrized && 
+                        !config.workflow.run_streaming_symmetry &&
+                        !config.workflow.compute_thermo;
+    
+    if (only_response && !config.workflow.skip_ed) {
+        std::cout << "Note: Only response calculations requested. Skipping diagonalization (use --standard/--symmetrized to override).\n";
+        config.workflow.skip_ed = true;
+    }
+    
+    // Default to standard workflow if nothing specified (and skip_ed not set)
+    if (!config.workflow.run_standard && !config.workflow.run_symmetrized && 
+        !config.workflow.run_streaming_symmetry && !config.workflow.skip_ed) {
         config.workflow.run_standard = true;
     }
     

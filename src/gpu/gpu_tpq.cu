@@ -7,6 +7,10 @@
 #include <chrono>
 #include <cmath>
 #include <sys/stat.h>
+#include <dirent.h>
+#include <regex>
+#include <sstream>
+#include <algorithm>
 
 // Kernel to generate random complex numbers for initial state
 __global__ void initRandomState(cuDoubleComplex* state, int N, unsigned long long seed) {
@@ -50,6 +54,8 @@ GPUTPQSolver::GPUTPQSolver(GPUOperator* gpu_op, int N)
         std::cerr << "cuBLAS initialization failed!" << std::endl;
         throw std::runtime_error("cuBLAS init failed");
     }
+    // Set cuBLAS to use host pointer mode for scalar results
+    cublasSetPointerMode(cublas_handle_, CUBLAS_POINTER_MODE_HOST);
     
     // Create cuRAND generator
     curandStatus_t rand_stat = curandCreateGenerator(&curand_gen_, CURAND_RNG_PSEUDO_DEFAULT);
@@ -218,22 +224,20 @@ void GPUTPQSolver::imaginaryTimeEvolve(double delta_beta, int taylor_order) {
 void GPUTPQSolver::writeTPQData(const std::string& filename, double inv_temp, 
                                  double energy, double variance, double norm, int step) {
     std::ofstream file;
-    if (step == 0) {
+    if (step == 0 || step == 1) {
         file.open(filename, std::ios::out);
-        file << "# Step    InvTemp    Energy    Variance    Norm    SpecificHeat" << std::endl;
+        file << "# inv_temp energy variance norm doublon step" << std::endl;
     } else {
         file.open(filename, std::ios::app);
     }
     
-    // Estimate specific heat from variance
-    double cv = variance * inv_temp * inv_temp;
-    
-    file << std::setw(8) << step << " "
-         << std::setw(15) << std::scientific << std::setprecision(8) << inv_temp << " "
-         << std::setw(15) << energy << " "
-         << std::setw(15) << variance << " "
-         << std::setw(15) << norm << " "
-         << std::setw(15) << cv << std::endl;
+    // Write data in CPU-compatible format: inv_temp energy variance 0.0 0.0 step
+    file << std::setprecision(16) << inv_temp << " " 
+         << energy << " " 
+         << variance << " " 
+         << 0.0 << " "      // doublon (not used in GPU version)
+         << 0.0 << " "      // reserved field
+         << step << std::endl;
     
     file.close();
 }
@@ -253,13 +257,172 @@ bool GPUTPQSolver::saveTPQState(const std::string& filename) {
     return true;
 }
 
+bool GPUTPQSolver::saveTPQState(const std::string& filename, GPUFixedSzOperator* fixed_sz_op) {
+    // Copy state from GPU to host
+    std::vector<std::complex<double>> h_state(N_);
+    cudaMemcpy(h_state.data(), d_state_, N_ * sizeof(cuDoubleComplex), cudaMemcpyDeviceToHost);
+    
+    std::ofstream file(filename, std::ios::binary);
+    if (!file.is_open()) return false;
+    
+    // Transform to full basis if using fixed-Sz
+    if (fixed_sz_op != nullptr) {
+        std::vector<std::complex<double>> full_state = fixed_sz_op->embedToFull(h_state);
+        size_t full_size = full_state.size();
+        file.write(reinterpret_cast<const char*>(&full_size), sizeof(size_t));
+        file.write(reinterpret_cast<const char*>(full_state.data()), full_size * sizeof(std::complex<double>));
+        std::cout << "  [GPU Fixed-Sz] Transformed state from dim " << N_ 
+                  << " to full space dim " << full_size << " before saving" << std::endl;
+    } else {
+        size_t size = N_;
+        file.write(reinterpret_cast<const char*>(&size), sizeof(size_t));
+        file.write(reinterpret_cast<const char*>(h_state.data()), N_ * sizeof(std::complex<double>));
+    }
+    
+    file.close();
+    return true;
+}
+
+bool GPUTPQSolver::loadTPQState(const std::string& filename) {
+    std::ifstream file(filename, std::ios::binary);
+    if (!file.is_open()) {
+        std::cerr << "Error: Could not open TPQ state file: " << filename << std::endl;
+        return false;
+    }
+    
+    // Read size
+    size_t size;
+    file.read(reinterpret_cast<char*>(&size), sizeof(size_t));
+    
+    if (size != static_cast<size_t>(N_)) {
+        std::cerr << "Error: TPQ state dimension mismatch. Expected " << N_ 
+                  << ", got " << size << std::endl;
+        file.close();
+        return false;
+    }
+    
+    // Read state to host
+    std::vector<std::complex<double>> h_state(N_);
+    file.read(reinterpret_cast<char*>(h_state.data()), N_ * sizeof(std::complex<double>));
+    file.close();
+    
+    // Copy to GPU
+    cudaMemcpy(d_state_, h_state.data(), N_ * sizeof(cuDoubleComplex), cudaMemcpyHostToDevice);
+    
+    std::cout << "Loaded TPQ state from: " << filename << std::endl;
+    return true;
+}
+
+std::string GPUTPQSolver::findLowestEnergyTPQState(const std::string& dir, int sample, 
+                                                   double& beta_out, int& step_out) {
+    // Check if directory exists using POSIX API
+    DIR* directory = opendir(dir.c_str());
+    if (!directory) {
+        std::cerr << "Error: Directory does not exist: " << dir << std::endl;
+        return "";
+    }
+    
+    // Pattern: tpq_state_{sample}_beta={beta}.dat
+    // We need to find all matching files and select the one with highest beta
+    std::regex state_pattern("tpq_state_([0-9]+)_beta=([0-9.]+)\\.dat");
+    
+    double max_beta = -1.0;
+    int best_sample = -1;
+    std::string best_file = "";
+    
+    struct dirent* entry;
+    while ((entry = readdir(directory)) != nullptr) {
+        std::string filename = entry->d_name;
+        
+        // Skip if not a regular file (check using stat)
+        std::string filepath = dir + "/" + filename;
+        struct stat file_stat;
+        if (stat(filepath.c_str(), &file_stat) != 0 || !S_ISREG(file_stat.st_mode)) {
+            continue;
+        }
+        
+        std::smatch match;
+        if (std::regex_match(filename, match, state_pattern)) {
+            int file_sample = std::stoi(match[1].str());
+            double file_beta = std::stod(match[2].str());
+            
+            // If sample is specified (non-zero), only consider that sample
+            if (sample != 0 && file_sample != sample) continue;
+            
+            // Find the highest beta (lowest energy state)
+            if (file_beta > max_beta) {
+                max_beta = file_beta;
+                best_sample = file_sample;
+                best_file = filepath;
+            }
+        }
+    }
+    
+    closedir(directory);
+    
+    if (best_file.empty()) {
+        std::cerr << "Error: No TPQ state files found in directory: " << dir << std::endl;
+        return "";
+    }
+    
+    beta_out = max_beta;
+    
+    // Now look up the step number from the SS_rand file
+    std::string ss_file = dir + "/tpq_sample_" + std::to_string(best_sample) + ".dat";
+    std::ifstream ss_stream(ss_file);
+    
+    if (!ss_stream.is_open()) {
+        std::cerr << "Warning: Could not open SS_rand file: " << ss_file << std::endl;
+        step_out = -1;
+        return best_file;
+    }
+    
+    // Find the step corresponding to this beta
+    // Format: Step    InvTemp    Energy    Variance    Norm    SpecificHeat
+    step_out = -1;
+    double closest_beta_diff = 1e10;
+    int closest_step = -1;
+    
+    std::string line;
+    std::getline(ss_stream, line); // Skip header
+    
+    while (std::getline(ss_stream, line)) {
+        if (line.empty() || line[0] == '#') continue;
+        
+        std::istringstream iss(line);
+        int step;
+        double inv_temp, energy, variance, norm, cv;
+        
+        if (iss >> step >> inv_temp >> energy >> variance >> norm >> cv) {
+            double beta_diff = std::abs(inv_temp - max_beta);
+            if (beta_diff < closest_beta_diff) {
+                closest_beta_diff = beta_diff;
+                closest_step = step;
+            }
+        }
+    }
+    
+    ss_stream.close();
+    step_out = closest_step;
+    
+    std::cout << "Found TPQ state: sample=" << best_sample 
+              << ", beta=" << max_beta 
+              << ", step=" << step_out << std::endl;
+    
+    return best_file;
+}
+
 void GPUTPQSolver::runMicrocanonicalTPQ(
     int max_iter,
     int num_samples,
     int temp_interval,
     std::vector<double>& eigenvalues,
     const std::string& dir,
-    double large_value
+    double large_value,
+    GPUFixedSzOperator* fixed_sz_op,
+    bool continue_quenching,
+    int continue_sample,
+    double continue_beta
 ) {
     auto total_start = std::chrono::high_resolution_clock::now();
     
@@ -269,6 +432,12 @@ void GPUTPQSolver::runMicrocanonicalTPQ(
     std::cout << "Max iterations: " << max_iter << std::endl;
     std::cout << "Large value (energy shift): " << large_value << std::endl;
     std::cout << "Algorithm: Power method on (L-H) to find ground state" << std::endl;
+    
+    if (continue_quenching) {
+        std::cout << "Continue-quenching mode enabled:" << std::endl;
+        std::cout << "  Sample: " << (continue_sample == 0 ? "auto-detect" : std::to_string(continue_sample)) << std::endl;
+        std::cout << "  Beta: " << (continue_beta == 0.0 ? "auto-detect" : std::to_string(continue_beta)) << std::endl;
+    }
     
     // Create output directory
     if (!dir.empty()) {
@@ -281,49 +450,130 @@ void GPUTPQSolver::runMicrocanonicalTPQ(
     // Calculate dimension entropy S = log2(N)
     double D_S = std::log2(static_cast<double>(N_));
     
+    // Define measurement temperatures (similar to CPU version)
+    const int num_temp_points = 20;
+    std::vector<double> measure_inv_temp(num_temp_points);
+    double log_min = std::log10(1);   // Start from β = 1
+    double log_max = std::log10(1000); // End at β = 1000
+    for (int i = 0; i < num_temp_points; ++i) {
+        measure_inv_temp[i] = std::pow(10.0, log_min + (log_max - log_min) * i / (num_temp_points - 1));
+    }
+    
     for (int sample = 0; sample < num_samples; ++sample) {
         std::cout << "\nSample " << sample + 1 << "/" << num_samples << std::endl;
         
-        // Generate random initial state |v1⟩
-        generateRandomState(12345 + sample * 67890);
+        // Track which measurement temperatures have been saved
+        std::vector<bool> temp_measured(num_temp_points, false);
         
-        // Apply H|v1⟩ -> d_temp_
-        gpu_op_->matVecGPU(d_state_, d_temp_, N_);
+        // Variables for continuing from saved state
+        int start_step = 1;
+        double energy = 0.0;
+        double variance = 0.0;
+        double inv_temp = 0.0;
+        bool loaded_from_file = false;
         
-        // Compute |v0⟩ = (L*D_S - H)|v1⟩ = L*D_S*|v1⟩ - H|v1⟩
-        // Save H|v1⟩ in d_h_state_ first
-        cudaMemcpy(d_h_state_, d_temp_, N_ * sizeof(cuDoubleComplex), cudaMemcpyDeviceToDevice);
+        // Check if we should continue from a saved state
+        if (continue_quenching && sample == 0) {
+            double found_beta = 0.0;
+            int found_step = -1;
+            std::string state_file;
+            
+            if (continue_sample != 0 && continue_beta != 0.0) {
+                // Manual specification: load specific sample and beta
+                state_file = dir + "/tpq_state_" + std::to_string(continue_sample) + 
+                            "_beta=" + std::to_string(continue_beta) + ".dat";
+                found_beta = continue_beta;
+                
+                // Look up step from SS_rand file
+                std::string ss_file = dir + "/tpq_sample_" + std::to_string(continue_sample) + ".dat";
+                std::ifstream ss_stream(ss_file);
+                if (ss_stream.is_open()) {
+                    std::string line;
+                    std::getline(ss_stream, line); // Skip header
+                    double closest_beta_diff = 1e10;
+                    while (std::getline(ss_stream, line)) {
+                        if (line.empty() || line[0] == '#') continue;
+                        std::istringstream iss(line);
+                        int step;
+                        double beta, e, var, norm, cv;
+                        if (iss >> step >> beta >> e >> var >> norm >> cv) {
+                            if (std::abs(beta - continue_beta) < closest_beta_diff) {
+                                closest_beta_diff = std::abs(beta - continue_beta);
+                                found_step = step;
+                            }
+                        }
+                    }
+                    ss_stream.close();
+                }
+            } else {
+                // Auto-detect: find lowest energy state
+                state_file = findLowestEnergyTPQState(dir, continue_sample, found_beta, found_step);
+            }
+            
+            if (!state_file.empty() && loadTPQState(state_file)) {
+                loaded_from_file = true;
+                start_step = found_step + 1;
+                inv_temp = found_beta;
+                
+                // Compute energy and variance from loaded state
+                std::pair<double, double> ev_pair = computeEnergyAndVariance();
+                energy = ev_pair.first;
+                variance = ev_pair.second;
+                
+                std::cout << "Continuing from step " << found_step 
+                          << " (beta=" << found_beta << ", E=" << energy << ")" << std::endl;
+            } else {
+                std::cerr << "Warning: Could not load TPQ state, starting fresh" << std::endl;
+            }
+        }
         
-        // d_state_ *= L*D_S
-        cuDoubleComplex alpha = make_cuDoubleComplex(large_value * D_S, 0.0);
-        cublasZscal(cublas_handle_, N_, &alpha, d_state_, 1);
-        
-        // d_state_ -= H|v1⟩
-        cuDoubleComplex minus_one = make_cuDoubleComplex(-1.0, 0.0);
-        cublasZaxpy(cublas_handle_, N_, &minus_one, d_h_state_, 1, d_state_, 1);
-        
-        // Normalize |v0⟩
-        double first_norm = computeNorm();
-        cuDoubleComplex scale = make_cuDoubleComplex(1.0 / first_norm, 0.0);
-        cublasZscal(cublas_handle_, N_, &scale, d_state_, 1);
+        // If not continuing, initialize normally
+        if (!loaded_from_file) {
+            // Generate random initial state |v1⟩
+            generateRandomState(12345 + sample * 67890);
+            
+            // Apply H|v1⟩ -> d_temp_
+            gpu_op_->matVecGPU(d_state_, d_temp_, N_);
+            
+            // Compute |v0⟩ = (L*D_S - H)|v1⟩ = L*D_S*|v1⟩ - H|v1⟩
+            // Save H|v1⟩ in d_h_state_ first
+            cudaMemcpy(d_h_state_, d_temp_, N_ * sizeof(cuDoubleComplex), cudaMemcpyDeviceToDevice);
+            
+            // d_state_ *= L*D_S
+            cuDoubleComplex alpha = make_cuDoubleComplex(large_value * D_S, 0.0);
+            cublasZscal(cublas_handle_, N_, &alpha, d_state_, 1);
+            
+            // d_state_ -= H|v1⟩
+            cuDoubleComplex minus_one = make_cuDoubleComplex(-1.0, 0.0);
+            cublasZaxpy(cublas_handle_, N_, &minus_one, d_h_state_, 1, d_state_, 1);
+            
+            // Normalize |v0⟩
+            double first_norm = computeNorm();
+            cuDoubleComplex scale = make_cuDoubleComplex(1.0 / first_norm, 0.0);
+            cublasZscal(cublas_handle_, N_, &scale, d_state_, 1);
+            
+            // Output file for this sample
+            std::string sample_file = dir + "/tpq_sample_" + std::to_string(sample) + ".dat";
+            
+            // Initial measurements (step 1)
+            std::pair<double, double> energy_var_pair = computeEnergyAndVariance();
+            energy = energy_var_pair.first;
+            variance = energy_var_pair.second;
+            
+            // Compute inverse temperature: β = 2*step / (L*D_S - E)
+            inv_temp = 2.0 / (large_value * D_S - energy);
+            
+            writeTPQData(sample_file, inv_temp, energy, variance, first_norm, 1);
+            
+            std::cout << "Step 1: E = " << energy << ", β = " << inv_temp << std::endl;
+            start_step = 2;
+        }
         
         // Output file for this sample
         std::string sample_file = dir + "/tpq_sample_" + std::to_string(sample) + ".dat";
         
-        // Initial measurements (step 1)
-        std::pair<double, double> energy_var_pair = computeEnergyAndVariance();
-        double energy = energy_var_pair.first;
-        double variance = energy_var_pair.second;
-        
-        // Compute inverse temperature: β = 2*step / (L*D_S - E)
-        double inv_temp = 2.0 / (large_value * D_S - energy);
-        
-        writeTPQData(sample_file, inv_temp, energy, variance, first_norm, 1);
-        
-        std::cout << "Step 1: E = " << energy << ", β = " << inv_temp << std::endl;
-        
         // Main TPQ loop - applies (L-H) repeatedly
-        for (int step = 2; step <= max_iter; ++step) {
+        for (int step = start_step; step <= max_iter; ++step) {
             // Apply H|v0⟩ -> d_temp_
             auto matvec_start = std::chrono::high_resolution_clock::now();
             gpu_op_->matVecGPU(d_state_, d_temp_, N_);
@@ -335,7 +585,7 @@ void GPUTPQSolver::runMicrocanonicalTPQ(
             cudaMemcpy(d_h_state_, d_temp_, N_ * sizeof(cuDoubleComplex), cudaMemcpyDeviceToDevice);
             
             // d_state_ *= L*D_S
-            alpha = make_cuDoubleComplex(large_value * D_S, 0.0);
+            cuDoubleComplex alpha = make_cuDoubleComplex(large_value * D_S, 0.0);
             cublasZscal(cublas_handle_, N_, &alpha, d_state_, 1);
             
             // d_state_ -= H|v0⟩
@@ -344,18 +594,58 @@ void GPUTPQSolver::runMicrocanonicalTPQ(
             
             // Normalize
             double current_norm = computeNorm();
-            scale = make_cuDoubleComplex(1.0 / current_norm, 0.0);
+            cuDoubleComplex scale = make_cuDoubleComplex(1.0 / current_norm, 0.0);
             cublasZscal(cublas_handle_, N_, &scale, d_state_, 1);
             
-            // Measurements every temp_interval steps
-            if (step % temp_interval == 0 || step == max_iter) {
+            // Check if we should measure observables at target temperatures
+            // We need to check this at EVERY step to avoid missing temperature points
+            bool should_measure_observables = false;
+            int target_temp_idx = -1;
+            
+            // First, do a quick check using estimated temperature
+            // Estimate current inverse temperature (using last known energy)
+            double estimated_inv_temp = (2.0 * step) / (large_value * D_S - energy);
+            
+            // Check if we're potentially near any target temperature
+            // Use a wider search window (5% instead of 1%) for the initial check
+            for (int i = 0; i < num_temp_points; ++i) {
+                if (!temp_measured[i]) {
+                    double search_tolerance = 0.05 * measure_inv_temp[i];  // 5% search window
+                    if (std::abs(estimated_inv_temp - measure_inv_temp[i]) < search_tolerance) {
+                        // We're potentially close - need to compute actual energy to be sure
+                        should_measure_observables = true;
+                        target_temp_idx = i;
+                        break;
+                    }
+                }
+            }
+            
+            // Determine if we should do measurements this step
+            bool do_regular_measurement = (step % temp_interval == 0 || step == max_iter);
+            bool do_measurement = do_regular_measurement || should_measure_observables;
+            
+            // Measurements when needed
+            if (do_measurement) {
                 std::pair<double, double> E_var_pair = computeEnergyAndVariance();
                 double E = E_var_pair.first;
                 double var = E_var_pair.second;
                 
-                // Update inverse temperature
+                // Update inverse temperature with accurate energy
                 inv_temp = (2.0 * step) / (large_value * D_S - E);
                 
+                // Update energy for next iteration's estimate
+                energy = E;
+                
+                // Now check with accurate temperature if we're really at the target
+                bool actually_at_target = false;
+                if (should_measure_observables && target_temp_idx >= 0) {
+                    double precise_tolerance = 0.01 * measure_inv_temp[target_temp_idx];  // 1% precise tolerance
+                    if (std::abs(inv_temp - measure_inv_temp[target_temp_idx]) < precise_tolerance) {
+                        actually_at_target = true;
+                    }
+                }
+                
+                // Write data (always write when we compute energy)
                 writeTPQData(sample_file, inv_temp, E, var, current_norm, step);
                 
                 if (step % (temp_interval * 10) == 0 || step == max_iter) {
@@ -364,24 +654,20 @@ void GPUTPQSolver::runMicrocanonicalTPQ(
                               << ", β = " << inv_temp << std::endl;
                 }
                 
-                // Check convergence
-                if (var < 1e-10 && step > 100) {
-                    std::cout << "Converged to eigenstate at step " << step << std::endl;
-                    break;
-                }
-                
-                // Save state periodically
-                if (step % (temp_interval * 10) == 0) {
+                // Save TPQ state at target temperatures (with accurate inv_temp)
+                if (actually_at_target) {
+                    std::cout << "  *** Saving TPQ state at β = " << inv_temp 
+                              << " (target: " << measure_inv_temp[target_temp_idx] << ") ***" << std::endl;
                     std::string state_file = dir + "/tpq_state_" + std::to_string(sample) + 
-                                           "_step=" + std::to_string(step) + ".dat";
-                    saveTPQState(state_file);
+                                           "_beta=" + std::to_string(inv_temp) + ".dat";
+                    saveTPQState(state_file, fixed_sz_op);
+                    temp_measured[target_temp_idx] = true;
                 }
-                
-                energy = E;
             }
             
             stats_.iterations++;
         }
+        
         
         // Save final energy
         std::pair<double, double> final_pair = computeEnergyAndVariance();
@@ -410,7 +696,8 @@ void GPUTPQSolver::runCanonicalTPQ(
     std::vector<double>& energies,
     const std::string& dir,
     double delta_beta,
-    int taylor_order
+    int taylor_order,
+    GPUFixedSzOperator* fixed_sz_op
 ) {
     auto total_start = std::chrono::high_resolution_clock::now();
     
@@ -430,8 +717,20 @@ void GPUTPQSolver::runCanonicalTPQ(
     
     int num_steps = static_cast<int>(beta_max / delta_beta);
     
+    // Define measurement temperatures (similar to microcanonical version)
+    const int num_temp_points = 20;
+    std::vector<double> measure_inv_temp(num_temp_points);
+    double log_min = std::log10(1);   // Start from β = 1
+    double log_max = std::log10(1000); // End at β = 1000
+    for (int i = 0; i < num_temp_points; ++i) {
+        measure_inv_temp[i] = std::pow(10.0, log_min + (log_max - log_min) * i / (num_temp_points - 1));
+    }
+    
     for (int sample = 0; sample < num_samples; ++sample) {
         std::cout << "\nSample " << sample + 1 << "/" << num_samples << std::endl;
+        
+        // Track which measurement temperatures have been saved
+        std::vector<bool> temp_measured(num_temp_points, false);
         
         // Generate random initial state
         generateRandomState(98765 + sample * 43210);
@@ -456,8 +755,29 @@ void GPUTPQSolver::runCanonicalTPQ(
             auto evolve_end = std::chrono::high_resolution_clock::now();
             stats_.matvec_time += std::chrono::duration<double>(evolve_end - evolve_start).count();
             
-            // Measurements
-            if (step % temp_interval == 0 || step == num_steps) {
+            // Check if we should measure observables at target temperatures
+            // In canonical TPQ, beta is known exactly, so we can check directly
+            bool should_measure_observables = false;
+            int target_temp_idx = -1;
+            
+            for (int i = 0; i < num_temp_points; ++i) {
+                if (!temp_measured[i]) {
+                    // Use relative tolerance
+                    double tolerance = 0.01 * measure_inv_temp[i];  // 1% tolerance
+                    if (std::abs(beta - measure_inv_temp[i]) < tolerance) {
+                        should_measure_observables = true;
+                        target_temp_idx = i;
+                        break;
+                    }
+                }
+            }
+            
+            // Determine if we should do measurements this step
+            bool do_regular_measurement = (step % temp_interval == 0 || step == num_steps);
+            bool do_measurement = do_regular_measurement || should_measure_observables;
+            
+            // Measurements when needed
+            if (do_measurement) {
                 std::pair<double, double> E_var_pair = computeEnergyAndVariance();
                 double E = E_var_pair.first;
                 double var = E_var_pair.second;
@@ -469,7 +789,17 @@ void GPUTPQSolver::runCanonicalTPQ(
                 if (step % (temp_interval * 5) == 0) {
                     std::string state_file = dir + "/ctpq_state_" + std::to_string(sample) + 
                                            "_beta=" + std::to_string(beta) + ".dat";
-                    saveTPQState(state_file);
+                    saveTPQState(state_file, fixed_sz_op);
+                }
+                
+                // Save TPQ state at target temperatures
+                if (should_measure_observables && target_temp_idx >= 0) {
+                    std::cout << "  *** Saving TPQ state at β = " << beta 
+                              << " (target: " << measure_inv_temp[target_temp_idx] << ") ***" << std::endl;
+                    std::string state_file = dir + "/tpq_state_" + std::to_string(sample) + 
+                                           "_beta=" + std::to_string(beta) + ".dat";
+                    saveTPQState(state_file, fixed_sz_op);
+                    temp_measured[target_temp_idx] = true;
                 }
             }
             

@@ -189,10 +189,13 @@ struct EDParameters {
     uint64_t num_measure_freq = 100;    // Frequency of measurements
     double delta_tau = 1e-2;       // Time step for imaginary-time evolution (cTPQ)
     double large_value = 1e5;      // Large value for TPQ
+    bool continue_quenching = false;  // Continue quenching from saved state
+    uint64_t continue_sample = 0;          // Sample to continue from (0 = auto-detect lowest energy)
+    double continue_beta = 0.0;       // Beta to continue from (0.0 = use saved beta)
     
     // ========== FTLM-Specific Parameters ==========
     uint64_t ftlm_krylov_dim = 100;     // Krylov subspace dimension per sample
-    bool ftlm_full_reorth = false; // Use full reorthogonalization
+    bool ftlm_full_reorth = true; // Use full reorthogonalization
     uint64_t ftlm_reorth_freq = 10;     // Reorthogonalization frequency
     uint64_t ftlm_seed = 0;    // Random seed (0 = auto)
     bool ftlm_store_samples = false; // Store per-sample intermediate data
@@ -201,7 +204,7 @@ struct EDParameters {
     // ========== LTLM-Specific Parameters ==========
     uint64_t ltlm_krylov_dim = 200;     // Krylov subspace dimension for excitations
     uint64_t ltlm_ground_krylov = 100;  // Krylov dimension for finding ground state
-    bool ltlm_full_reorth = false; // Use full reorthogonalization
+    bool ltlm_full_reorth = true; // Use full reorthogonalization
     uint64_t ltlm_reorth_freq = 10;     // Reorthogonalization frequency
     uint64_t ltlm_seed = 0;    // Random seed (0 = auto)
     bool ltlm_store_data = false;  // Store intermediate data
@@ -225,6 +228,9 @@ struct EDParameters {
     
     bool calc_observables = false; // Calculate custom observables
     bool measure_spin = false;     // Measure spins
+    
+    // ========== Fixed-Sz Parameters ==========
+    mutable class FixedSzOperator* fixed_sz_op = nullptr;  // If using fixed-Sz, pointer to operator for embedding
     
     // ========== ARPACK Advanced Options ==========
     // Used when method == ARPACK_ADVANCED
@@ -279,6 +285,7 @@ namespace ed_internal {
         const std::string& interaction_file,
         const std::string& single_site_file,
         const std::string& counterterm_file,
+        const std::string& three_body_file,
         uint64_t num_sites,
         float spin_length,
         DiagonalizationMethod method,
@@ -480,7 +487,11 @@ EDResults exact_diagonalization_core(
                             params.calc_observables,params.observables, params.observable_names,
                             params.omega_min, params.omega_max,
                             params.num_points, params.t_end, params.dt, params.spin_length, 
-                            params.measure_spin, params.sublattice_size, params.num_sites); 
+                            params.measure_spin, params.sublattice_size, params.num_sites,
+                            params.fixed_sz_op,
+                            params.continue_quenching,
+                            params.continue_sample,
+                            params.continue_beta); 
             break;
 
         case DiagonalizationMethod::cTPQ:
@@ -508,7 +519,8 @@ EDResults exact_diagonalization_core(
                 params.spin_length,     // spin length
                 params.measure_spin,    // measure Sz and fluctuations
                 params.sublattice_size, // sublattice size
-                params.num_sites        // number of sites
+                params.num_sites,       // number of sites
+                params.fixed_sz_op      // Fixed-Sz operator for embedding
             );
             break;
 
@@ -926,9 +938,7 @@ void process_thermal_correlations(
 
                         // Create a lambda to apply the operator
                         auto apply_correlation_op = [&correlation_op](const Complex* in, Complex* out, uint64_t n) {
-                            std::vector<Complex> in_vec(in, in + n);
-                            std::vector<Complex> out_vec = correlation_op.apply(in_vec);
-                            std::copy(out_vec.begin(), out_vec.end(), out);
+                            correlation_op.apply(in, out, n);
                         };
                         
 
@@ -1004,6 +1014,7 @@ Operator load_hamiltonian_from_files(
     const std::string& interaction_file,
     const std::string& single_site_file,
     const std::string& counterterm_file,
+    const std::string& three_body_file,
     uint64_t num_sites,
     float spin_length,
     DiagonalizationMethod method,
@@ -1020,14 +1031,19 @@ Operator load_hamiltonian_from_files(
             if (!interaction_file.empty()) {
                 hamiltonian.loadFromInterAllFile(interaction_file);
             }
+            // Load three-body terms if provided
+            if (!three_body_file.empty() && std::filesystem::exists(three_body_file)) {
+                std::cout << "Loading three-body terms from: " << three_body_file << std::endl;
+                hamiltonian.loadThreeBodyTerm(three_body_file);
+            }
             // COUNTERTERM DISABLED
             // if (!counterterm_file.empty()){
             //     hamiltonian.loadCounterTerm(counterterm_file);
             // }
             // Build sparse matrix (except for full diagonalization)
-            if (method != DiagonalizationMethod::FULL) {
-                hamiltonian.buildSparseMatrix();
-            }
+            // if (method == DiagonalizationMethod::FULL) {
+            //     hamiltonian.buildSparseMatrix();
+            // }
             break;
             
         case HamiltonianFileFormat::SPARSE_MATRIX:
@@ -1050,9 +1066,8 @@ std::function<void(const Complex*, Complex*, int)> create_hamiltonian_apply_func
     Operator& hamiltonian
 ) {
     return [&hamiltonian](const Complex* in, Complex* out, uint64_t n) {
-        std::vector<Complex> in_vec(in, in + n);
-        std::vector<Complex> out_vec = hamiltonian.apply(in_vec);
-        std::copy(out_vec.begin(), out_vec.end(), out);
+        // Directly use pointer-based apply to avoid temporary vector allocations
+        hamiltonian.apply(in, out, n);
     };
 }
 
@@ -1607,31 +1622,191 @@ inline EDResults exact_diagonalization_fixed_sz(
     std::cout << "  Fixed Sz:   " << fixed_sz_dim << std::endl;
     std::cout << "  Reduction:  " << (double)full_dim / fixed_sz_dim << "x" << std::endl;
     
-    // Build sparse matrix
-    if (method != DiagonalizationMethod::FULL) {
-        hamiltonian.buildFixedSzMatrix();
-    }
+    // Check if GPU method requested
+    bool is_gpu_method = (method == DiagonalizationMethod::DAVIDSON_GPU ||
+                          method == DiagonalizationMethod::LOBPCG_GPU ||
+                          method == DiagonalizationMethod::LANCZOS_GPU ||
+                          method == DiagonalizationMethod::mTPQ_GPU ||
+                          method == DiagonalizationMethod::cTPQ_GPU ||
+                          method == DiagonalizationMethod::FTLM_GPU_FIXED_SZ);
     
-    // Create apply function
-    auto apply_hamiltonian = [&hamiltonian, fixed_sz_dim](const Complex* in, Complex* out, uint64_t n) {
-        if (n != fixed_sz_dim) {
-            throw std::runtime_error("Dimension mismatch in fixed Sz apply");
+    EDResults results;
+    
+    if (is_gpu_method) {
+#ifdef WITH_CUDA
+        std::cout << "\n=== GPU Fixed-Sz Diagonalization ===" << std::endl;
+        
+        // Prepare interactions and single-site operators
+        std::vector<std::tuple<int, int, char, char, double>> gpu_interactions;
+        std::vector<std::tuple<int, char, double>> gpu_single_site_ops;
+        
+        // Load from files
+        std::ifstream inter_file(interaction_file);
+        if (inter_file.is_open()) {
+            std::string line;
+            std::getline(inter_file, line);
+            std::getline(inter_file, line);
+            std::istringstream iss(line);
+            uint64_t numLines;
+            std::string m;
+            iss >> m >> numLines;
+            
+            for (uint64_t i = 0; i < 3; ++i) std::getline(inter_file, line);
+            
+            uint64_t lineCount = 0;
+            while (std::getline(inter_file, line) && lineCount < numLines) {
+                std::istringstream lineStream(line);
+                uint64_t Op_i, indx_i, Op_j, indx_j;
+                double E, F;
+                
+                if (!(lineStream >> Op_i >> indx_i >> Op_j >> indx_j >> E >> F)) continue;
+                
+                // File operator codes: 0=S+, 1=S-, 2=Sz
+                // Map to chars: '+'=S+, '-'=S-, 'z'=Sz
+                auto mapOp = [](uint64_t op) -> char {
+                    if (op == 0) return '+';  // S+
+                    if (op == 1) return '-';  // S-
+                    return 'z';  // Sz
+                };
+                
+                gpu_interactions.push_back(std::make_tuple(indx_i, indx_j, mapOp(Op_i), mapOp(Op_j), E));
+                lineCount++;
+            }
         }
-        hamiltonian.apply(in, out, n);
-    };
-    
-    // Perform diagonalization
-    std::cout << "\nDiagonalizing..." << std::endl;
-    auto results = exact_diagonalization_core(apply_hamiltonian, fixed_sz_dim, method, params);
+        
+        // Load single-site terms if present
+        if (!single_site_file.empty()) {
+            std::ifstream ss_file(single_site_file);
+            if (ss_file.is_open()) {
+                std::string line;
+                std::getline(ss_file, line);
+                std::getline(ss_file, line);
+                std::istringstream iss(line);
+                uint64_t numLines;
+                std::string m;
+                iss >> m >> numLines;
+                
+                for (uint64_t i = 0; i < 3; ++i) std::getline(ss_file, line);
+                
+                uint64_t lineCount = 0;
+                while (std::getline(ss_file, line) && lineCount < numLines) {
+                    std::istringstream lineStream(line);
+                    uint64_t Op_i, indx_i;
+                    double E, F;
+                    
+                    if (!(lineStream >> Op_i >> indx_i >> E >> F)) continue;
+                    
+                    // File operator codes: 0=S+, 1=S-, 2=Sz
+                    // Map to chars: '+'=S+, '-'=S-, 'z'=Sz
+                    auto mapOp = [](uint64_t op) -> char {
+                        if (op == 0) return '+';  // S+
+                        if (op == 1) return '-';  // S-
+                        return 'z';  // Sz
+                    };
+                    
+                    gpu_single_site_ops.push_back(std::make_tuple(indx_i, mapOp(Op_i), E));
+                    lineCount++;
+                }
+            }
+        }
+        
+        // Create GPU operator
+        void* gpu_op_handle = GPUEDWrapper::createGPUFixedSzOperatorDirect(
+            num_sites, n_up, spin_length,
+            gpu_interactions, gpu_single_site_ops);
+        
+        std::cout << "Loaded " << gpu_interactions.size() << " interactions and " 
+                  << gpu_single_site_ops.size() << " single-site terms\n";
+        
+        // Run appropriate GPU method
+        std::vector<double> eigenvalues;
+        
+        if (method == DiagonalizationMethod::DAVIDSON_GPU || method == DiagonalizationMethod::LOBPCG_GPU) {
+            GPUEDWrapper::runGPUDavidsonFixedSz(
+                gpu_op_handle, n_up,
+                params.num_eigenvalues,
+                params.max_iterations,
+                params.max_subspace,
+                params.tolerance,
+                eigenvalues,
+                params.output_dir,
+                params.compute_eigenvectors);
+        } else if (method == DiagonalizationMethod::LANCZOS_GPU) {
+            GPUEDWrapper::runGPULanczosFixedSz(
+                gpu_op_handle, n_up,
+                params.max_iterations,
+                params.num_eigenvalues,
+                params.tolerance,
+                eigenvalues,
+                params.output_dir,
+                params.compute_eigenvectors);
+        } else if (method == DiagonalizationMethod::mTPQ_GPU) {
+            GPUEDWrapper::runGPUMicrocanonicalTPQFixedSz(
+                gpu_op_handle, n_up,
+                params.max_iterations,
+                params.num_samples,
+                params.num_measure_freq,
+                eigenvalues,
+                params.output_dir,
+                params.large_value,
+                params.continue_quenching,
+                params.continue_sample,
+                params.continue_beta);
+        } else if (method == DiagonalizationMethod::cTPQ_GPU) {
+            GPUEDWrapper::runGPUCanonicalTPQFixedSz(
+                gpu_op_handle, n_up,
+                params.temp_max,  // beta_max
+                params.num_samples,
+                params.num_measure_freq,
+                eigenvalues,
+                params.output_dir,
+                params.delta_tau,  // delta_beta
+                params.num_order);  // taylor_order
+        }
+        
+        results.eigenvalues = eigenvalues;
+        
+        // Note: GPU TPQ states are now automatically transformed during save (via saveTPQState)
+        // No post-processing transformation needed
+        if (method == DiagonalizationMethod::mTPQ_GPU || method == DiagonalizationMethod::cTPQ_GPU) {
+            std::cout << "\nGPU TPQ states were automatically transformed to full Hilbert space during save." << std::endl;
+        }
+        
+        // Cleanup
+        GPUEDWrapper::destroyGPUOperator(gpu_op_handle);
+        
+        std::cout << "GPU diagonalization complete\n";
+#else
+        throw std::runtime_error("GPU methods require CUDA support (compile with -DWITH_CUDA=ON)");
+#endif
+    } else {
+
+        
+        // Create apply function
+        auto apply_hamiltonian = [&hamiltonian, fixed_sz_dim](const Complex* in, Complex* out, uint64_t n) {
+            if (n != fixed_sz_dim) {
+                throw std::runtime_error("Dimension mismatch in fixed Sz apply");
+            }
+            hamiltonian.apply(in, out, n);
+        };
+        
+        // Set the fixed_sz_op in params so TPQ can transform states before saving
+        params.fixed_sz_op = &hamiltonian;
+        
+        // Perform diagonalization
+        std::cout << "\nDiagonalizing..." << std::endl;
+        results = exact_diagonalization_core(apply_hamiltonian, fixed_sz_dim, method, params);
+    }
 
     // Check if this is a TPQ method
     bool is_tpq_method = (method == DiagonalizationMethod::mTPQ || 
                           method == DiagonalizationMethod::mTPQ_CUDA || 
                           method == DiagonalizationMethod::cTPQ);
 
-    // Transform eigenvectors or TPQ states from fixed-Sz basis to full basis
-    if (!params.output_dir.empty() && (params.compute_eigenvectors || is_tpq_method)) {
-        std::cout << "Transforming vectors from fixed-Sz basis to full Hilbert space..." << std::endl;
+    // Transform eigenvectors from fixed-Sz basis to full basis
+    // Note: TPQ states are now transformed during save, so no post-processing needed for them
+    if (!params.output_dir.empty() && params.compute_eigenvectors) {
+        std::cout << "Transforming eigenvectors from fixed-Sz basis to full Hilbert space..." << std::endl;
         std::cout << "  Fixed Sz dim: " << fixed_sz_dim << ", Full dim: " << full_dim << std::endl;
         std::cout << "  Output directory: " << params.output_dir << std::endl;
         
@@ -1664,75 +1839,10 @@ inline EDResults exact_diagonalization_fixed_sz(
             std::cout << "All eigenvectors successfully transformed to full Hilbert space." << std::endl;
         }
         
-        // Transform TPQ states if TPQ method was used
+        // Note: TPQ states are now automatically transformed during save (via save_tpq_state)
+        // No post-processing transformation needed for TPQ states
         if (is_tpq_method) {
-            std::cout << "\nTransforming TPQ states from fixed-Sz basis to full Hilbert space..." << std::endl;
-            
-            // Find all TPQ state files
-            std::string find_command = "find \"" + params.output_dir + "\" -name \"tpq_state_*.dat\" 2>/dev/null";
-            FILE* pipe = popen(find_command.c_str(), "r");
-            if (!pipe) {
-                std::cerr << "Warning: Could not search for TPQ state files" << std::endl;
-            } else {
-                char buffer[1024];
-                std::vector<std::string> tpq_files;
-                while (fgets(buffer, sizeof(buffer), pipe) != nullptr) {
-                    std::string filename(buffer);
-                    // Remove trailing newline
-                    if (!filename.empty() && filename[filename.length()-1] == '\n') {
-                        filename.erase(filename.length()-1);
-                    }
-                    if (!filename.empty()) {
-                        tpq_files.push_back(filename);
-                    }
-                }
-                pclose(pipe);
-                
-                std::cout << "  Found " << tpq_files.size() << " TPQ state files to transform" << std::endl;
-                
-                // Transform each TPQ state file
-                for (const auto& tpq_file : tpq_files) {
-                    std::cout << "  Processing: " << tpq_file << std::endl;
-                    
-                    std::ifstream infile(tpq_file, std::ios::binary);
-                    if (!infile.is_open()) {
-                        std::cerr << "    Warning: Could not open " << tpq_file << std::endl;
-                        continue;
-                    }
-                    
-                    // Read size header
-                    size_t stored_size = 0;
-                    infile.read(reinterpret_cast<char*>(&stored_size), sizeof(size_t));
-                    
-                    if (stored_size != fixed_sz_dim) {
-                        std::cerr << "    Warning: Size mismatch (expected " << fixed_sz_dim 
-                                  << ", got " << stored_size << ")" << std::endl;
-                        infile.close();
-                        continue;
-                    }
-                    
-                    // Read TPQ state in fixed-Sz basis
-                    std::vector<Complex> fixed_sz_state(fixed_sz_dim);
-                    infile.read(reinterpret_cast<char*>(fixed_sz_state.data()), fixed_sz_dim * sizeof(Complex));
-                    infile.close();
-                    
-                    // Transform to full basis
-                    std::vector<Complex> full_state = hamiltonian.embedToFull(fixed_sz_state);
-                    
-                    // Overwrite file with full-space TPQ state
-                    std::ofstream outfile(tpq_file, std::ios::binary);
-                    outfile.write(reinterpret_cast<const char*>(&full_dim), sizeof(size_t));
-                    outfile.write(reinterpret_cast<const char*>(full_state.data()), full_dim * sizeof(Complex));
-                    outfile.close();
-                    
-                    std::cout << "    Transformed TPQ state to full space (dim: " 
-                              << fixed_sz_dim << " -> " << full_dim << ")" << std::endl;
-                }
-                
-                if (!tpq_files.empty()) {
-                    std::cout << "All TPQ states successfully transformed to full Hilbert space." << std::endl;
-                }
-            }
+            std::cout << "\nTPQ states were automatically transformed to full Hilbert space during save." << std::endl;
         }
     }
 
@@ -1751,6 +1861,8 @@ inline EDResults exact_diagonalization_fixed_sz(
  * 
  * @param interaction_file Path to interaction file (e.g., InterAll.dat)
  * @param single_site_file Path to single-site file (e.g., Trans.dat)
+ * @param counterterm_file Path to counter term file (optional)
+ * @param three_body_file Path to three-body interaction file (e.g., ThreeBodyG.dat, optional)
  * @param method Diagonalization method to use
  * @param params Parameters for diagonalization
  * @param format File format for Hamiltonian
@@ -1760,6 +1872,7 @@ EDResults exact_diagonalization_from_files(
     const std::string& interaction_file,
     const std::string& single_site_file = "",
     const std::string& counterterm_file = "",
+    const std::string& three_body_file = "",
     DiagonalizationMethod method = DiagonalizationMethod::LANCZOS,
     const EDParameters& params = EDParameters(),
     HamiltonianFileFormat format = HamiltonianFileFormat::STANDARD
@@ -1910,7 +2023,10 @@ EDResults exact_diagonalization_from_files(
                 params.num_measure_freq,
                 eigenvalues,
                 params.output_dir,
-                params.large_value
+                params.large_value,
+                params.continue_quenching,
+                params.continue_sample,
+                params.continue_beta
             );
             
             results.eigenvalues = eigenvalues;
@@ -1992,7 +2108,8 @@ EDResults exact_diagonalization_from_files(
     
     // Load Hamiltonian (for CPU methods)
     Operator hamiltonian = ed_internal::load_hamiltonian_from_files(
-        interaction_file, single_site_file, counterterm_file, params.num_sites, params.spin_length, method, format
+        interaction_file, single_site_file, counterterm_file, three_body_file, 
+        params.num_sites, params.spin_length, method, format
     );
     
     // Calculate Hilbert space dimension
@@ -2027,12 +2144,14 @@ EDResults exact_diagonalization_from_directory(
     HamiltonianFileFormat format = HamiltonianFileFormat::STANDARD,
     const std::string& interaction_filename = "InterAll.dat",
     const std::string& single_site_filename = "Trans.dat",
-    const std::string& counterterm_filename = "CounterTerm.dat"
+    const std::string& counterterm_filename = "CounterTerm.dat",
+    const std::string& three_body_filename = "ThreeBodyG.dat"
 ) {
     // Construct full file paths
     std::string interaction_file = directory + "/" + interaction_filename;
     std::string single_site_file = directory + "/" + single_site_filename;
     std::string counterterm_file = directory + "/" + counterterm_filename;
+    std::string three_body_file = directory + "/" + three_body_filename;
     
     // Check if counter term file exists
     struct stat buffer;
@@ -2040,9 +2159,14 @@ EDResults exact_diagonalization_from_directory(
         counterterm_file = "";  // File doesn't exist, pass empty string
     }
     
+    // Check if three-body file exists
+    if (stat(three_body_file.c_str(), &buffer) != 0) {
+        three_body_file = "";  // File doesn't exist, pass empty string
+    }
+    
     // Call the file-based wrapper
     return exact_diagonalization_from_files(
-        interaction_file, single_site_file, counterterm_file, method, params, format
+        interaction_file, single_site_file, counterterm_file, three_body_file, method, params, format
     );
 }
 
@@ -2079,7 +2203,8 @@ EDResults exact_diagonalization_from_directory_symmetrized(
     HamiltonianFileFormat format = HamiltonianFileFormat::STANDARD,
     const std::string& interaction_filename = "InterAll.dat",
     const std::string& single_site_filename = "Trans.dat",
-    const std::string& counterterm_filename = "CounterTerm.dat"
+    const std::string& counterterm_filename = "CounterTerm.dat",
+    const std::string& three_body_filename = "ThreeBodyG.dat"
 ) {
     std::cerr << "[DEBUG] exact_diagonalization_from_directory_symmetrized: num_sites=" 
               << params.num_sites << ", method=" << static_cast<int>(method) << std::endl;
@@ -2106,10 +2231,15 @@ EDResults exact_diagonalization_from_directory_symmetrized(
     std::string interaction_file = directory + "/" + interaction_filename;
     std::string single_site_file = directory + "/" + single_site_filename;
     std::string counterterm_file = directory + "/" + counterterm_filename;
+    std::string three_body_file = directory + "/" + three_body_filename;
     
     // Check if counter term file exists
     struct stat counterterm_buffer;
     bool counterterm_exists = (stat(counterterm_file.c_str(), &counterterm_buffer) == 0);
+    
+    // Check if three-body file exists
+    struct stat three_body_buffer;
+    bool three_body_exists = (stat(three_body_file.c_str(), &three_body_buffer) == 0);
     
     EDResults results;
     results.eigenvectors_computed = params.compute_eigenvectors;
@@ -2120,6 +2250,12 @@ EDResults exact_diagonalization_from_directory_symmetrized(
     Operator hamiltonian(params.num_sites, params.spin_length);
     hamiltonian.loadFromFile(single_site_file);
     hamiltonian.loadFromInterAllFile(interaction_file);
+    
+    // Load three-body terms if available
+    if (three_body_exists) {
+        std::cout << "Loading three-body terms from: " << three_body_file << std::endl;
+        hamiltonian.loadThreeBodyTerm(three_body_file);
+    }
     
     // COUNTERTERM DISABLED
     // if (counterterm_exists) {
@@ -2387,7 +2523,8 @@ inline EDResults exact_diagonalization_fixed_sz_symmetrized(
     const EDParameters& params = EDParameters(),
     HamiltonianFileFormat format = HamiltonianFileFormat::STANDARD,
     const std::string& interaction_filename = "InterAll.dat",
-    const std::string& single_site_filename = "Trans.dat"
+    const std::string& single_site_filename = "Trans.dat",
+    const std::string& three_body_filename = "ThreeBodyG.dat"
 ) {
     std::cout << "\n========================================" << std::endl;
     std::cout << "  Fixed-Sz + Symmetrized ED (HDF5)" << std::endl;
@@ -2415,10 +2552,18 @@ inline EDResults exact_diagonalization_fixed_sz_symmetrized(
     std::cout << "\nLoading Hamiltonian..." << std::endl;
     std::string interaction_file = directory + "/" + interaction_filename;
     std::string single_site_file = directory + "/" + single_site_filename;
+    std::string three_body_file = directory + "/" + three_body_filename;
     
     FixedSzOperator hamiltonian(params.num_sites, params.spin_length, n_up);
     hamiltonian.loadFromFile(single_site_file);
     hamiltonian.loadFromInterAllFile(interaction_file);
+    
+    // Load three-body terms if available
+    struct stat three_body_buffer;
+    if (stat(three_body_file.c_str(), &three_body_buffer) == 0) {
+        std::cout << "Loading three-body terms from: " << three_body_file << std::endl;
+        hamiltonian.loadThreeBodyTerm(three_body_file);
+    }
     
     // COUNTERTERM DISABLED
     // hamiltonian.loadCounterTerm(directory + "/CounterTerm.dat");

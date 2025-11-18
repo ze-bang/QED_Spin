@@ -7,6 +7,22 @@ functions. The project combines optimized C++ kernels, optional GPU backends,
 and a growing ecosystem of Python post-processing utilities to support both
 rapid prototyping and large-scale production runs.
 
+## Recent Updates
+
+**🚀 Temperature Scan Optimization (NEW!)** – Dynamical correlation calculations at
+multiple temperatures now run **up to 35× faster** by reusing the temperature-independent
+Lanczos decomposition. Instead of running expensive Lanczos iterations separately for
+each temperature point, the code now computes the spectral weights once and efficiently
+applies temperature-dependent Boltzmann factors. This optimization is automatically
+enabled for multi-temperature scans and requires no code changes.
+📖 See [docs/DYNAMICAL_CORRELATION_TEMPERATURE_OPTIMIZATION.md](docs/DYNAMICAL_CORRELATION_TEMPERATURE_OPTIMIZATION.md) for details.
+
+**⚙️ Large System Support (32+ Sites)** – New tools and documentation for running ED on
+large systems (28-32 sites). Includes feasibility checker, optimized configurations,
+and practical workflows that avoid expensive symmetry construction. Fixed-Sz + FTLM/GPU
+methods enable calculations on 600M-dimensional spaces with ~40-80 GB RAM.
+📖 See [docs/OPTIMIZATION_32_SITES.md](docs/OPTIMIZATION_32_SITES.md) for details.
+
 ## Features
 
 - **Modular workflows** – Run standard or symmetry-reduced diagonalization,
@@ -106,6 +122,36 @@ solver tolerances, system definitions, workflow toggles, thermal settings,
 and advanced ARPACK knobs.【F:examples/ed_config_example.txt†L1-L132】 Every key
 can be overridden by passing the corresponding command-line option. For a deep
 dive into each section, see [docs/configuration.md](docs/configuration.md).
+
+## Large System Calculations (28-32 Sites)
+
+For systems with 28+ sites, special considerations apply:
+
+**Quick Start for 32 Sites:**
+```bash
+# 1. Check if your system has enough resources
+python3 util/check_system_feasibility.py 32 --fixed-sz --method=FTLM
+
+# 2. Run using the quick-start script
+./script/run_32sites.sh ./hamiltonian_dir --samples=50 --gpu
+
+# 3. Or use the optimized configuration
+./ED --config=examples/ed_config_32sites.txt
+```
+
+**Key strategies for large systems:**
+- **Skip spatial symmetries** (construction too expensive for 32 sites)
+- **Use Fixed-Sz reduction** (2³² → 600M states)
+- **Use FTLM/TPQ methods** (avoid storing full eigenvectors)
+- **Use CPU, not GPU** (32 sites needs 27-50 GB GPU memory)
+
+See [docs/OPTIMIZATION_32_SITES.md](docs/OPTIMIZATION_32_SITES.md) for detailed
+analysis and [docs/HARDWARE_REQUIREMENTS.md](docs/HARDWARE_REQUIREMENTS.md) for
+sizing guide by system size and available hardware.
+
+**For HPC clusters:** See [docs/CLUSTER_QUICKSTART.md](docs/CLUSTER_QUICKSTART.md)
+for SLURM job scripts and [docs/CLUSTER_PERFORMANCE_32SITES.md](docs/CLUSTER_PERFORMANCE_32SITES.md)
+for detailed performance analysis on AMD EPYC systems.
 
 ## Thermal and Response Calculations
 

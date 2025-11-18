@@ -90,7 +90,7 @@ def run_ftlm_for_cluster(args):
     cmd = [
         ed_executable,
         ham_subdir,
-        '--method=FTLM',
+        '--method=FTLM_GPU',
         f'--output={cluster_ftlm_dir}/output',
         f'--num_sites={num_sites}',
         '--spin_length=0.5',
@@ -188,6 +188,9 @@ Example usage:
     # NLCE parameters
     parser.add_argument('--order_cutoff', type=int, 
                        help='Maximum order for NLCE summation')
+    parser.add_argument('--resummation', type=str, default='auto',
+                       choices=['auto', 'direct', 'euler', 'wynn', 'theta', 'robust'],
+                       help='Resummation method for series acceleration (default: auto)')
     
     # Control flow
     parser.add_argument('--skip_cluster_gen', action='store_true', 
@@ -204,6 +207,12 @@ Example usage:
                        help='Run FTLM in parallel')
     parser.add_argument('--num_cores', type=int, default=multiprocessing.cpu_count(), 
                        help='Number of cores to use for parallel processing')
+    
+    # Robust pipeline options
+    parser.add_argument('--robust_pipeline', action='store_true',
+                       help='Use robust two-pipeline cross-validation for C(T)')
+    parser.add_argument('--n_spins_per_unit', type=int, default=4,
+                       help='Spins per expansion unit (default: 4 for pyrochlore tetrahedron)')
     
     # Other options
     parser.add_argument('--symmetrized', action='store_true', 
@@ -249,7 +258,8 @@ Example usage:
             'python3', 
             os.path.join(os.path.dirname(__file__), 'generate_pyrochlore_clusters.py'),
             f'--max_order={args.max_order}',
-            f'--output_dir={cluster_dir}'
+            f'--output_dir={cluster_dir}',
+            '--subunit=site'  # Use site-based NLCE (L(c)=0.25 for single site)
         ]
         
         logging.info(f"Running command: {' '.join(cmd)}")
@@ -358,6 +368,170 @@ Example usage:
     else:
         logging.info("Skipping FTLM calculation step.")
     
+    # Step 3.5: Plot FTLM thermodynamic data for each cluster
+    if not args.skip_ftlm:
+        logging.info("="*80)
+        logging.info("Step 3.5: Plotting FTLM thermodynamic data for each cluster")
+        logging.info("="*80)
+        
+        # Create directory for thermodynamic plots
+        thermo_plots_dir = os.path.join(args.base_dir, f'ftlm_plots_order_{args.max_order}')
+        os.makedirs(thermo_plots_dir, exist_ok=True)
+        
+        try:
+            import matplotlib.pyplot as plt
+            
+            # Iterate through all clusters
+            for cluster_id, order, _ in tqdm(clusters, desc="Plotting FTLM thermodynamic data"):
+                cluster_ftlm_dir = os.path.join(ftlm_dir, f'cluster_{cluster_id}_order_{order}')
+                
+                # Check if FTLM thermodynamic data exists
+                ftlm_thermo_file = os.path.join(cluster_ftlm_dir, "output/thermo/ftlm_thermo.txt")
+                if not os.path.exists(ftlm_thermo_file):
+                    logging.warning(f"No FTLM thermodynamic data found for cluster {cluster_id}")
+                    continue
+                
+                # Load FTLM thermodynamic data
+                try:
+                    # Parse header to determine columns
+                    columns = []
+                    with open(ftlm_thermo_file, 'r') as f:
+                        for line in f:
+                            if not line.startswith('#'):
+                                break
+                            stripped = line.lstrip('#').strip()
+                            if not stripped:
+                                continue
+                            # Try to parse column information
+                            if 'Column' in stripped:
+                                parts = stripped.split(':')
+                                if len(parts) >= 2:
+                                    col_num = int(parts[0].replace('Column', '').strip()) - 1
+                                    col_name = parts[1].strip()
+                                    while len(columns) <= col_num:
+                                        columns.append(None)
+                                    columns[col_num] = col_name
+                            else:
+                                # Try to extract column names directly
+                                tokens = stripped.split()
+                                if tokens:
+                                    columns = tokens
+                    
+                    if not columns:
+                        # Default expected columns for FTLM output
+                        columns = ['Temperature', 'Energy', 'Energy_Error', 'Specific_Heat', 
+                                 'Specific_Heat_Error', 'Entropy', 'Entropy_Error', 
+                                 'Free_Energy', 'Free_Energy_Error']
+                    
+                    # Load the data
+                    data = np.loadtxt(ftlm_thermo_file, comments='#')
+                    data = np.atleast_2d(data)
+                    
+                    # Find column indices (case-insensitive matching)
+                    def find_col(names):
+                        norm_cols = [c.lower().replace('_', ' ') if c else '' for c in columns]
+                        for name in names:
+                            norm_name = name.lower().replace('_', ' ')
+                            if norm_name in norm_cols:
+                                return norm_cols.index(norm_name)
+                        return None
+                    
+                    temp_idx = find_col(['temperature', 'temp', 't'])
+                    if temp_idx is None:
+                        temp_idx = 0
+                    
+                    energy_idx = find_col(['energy', 'internal energy'])
+                    energy_err_idx = find_col(['energy error', 'energy err'])
+                    
+                    spec_heat_idx = find_col(['specific heat', 'specificheat', 'c'])
+                    spec_heat_err_idx = find_col(['specific heat error', 'specific heat err'])
+                    
+                    entropy_idx = find_col(['entropy', 's'])
+                    entropy_err_idx = find_col(['entropy error', 'entropy err'])
+                    
+                    free_energy_idx = find_col(['free energy', 'freeenergy', 'f'])
+                    free_energy_err_idx = find_col(['free energy error', 'free energy err'])
+                    
+                    # Extract temperature
+                    T = data[:, temp_idx]
+                    
+                    # Sort by temperature
+                    sort_idx = np.argsort(T)
+                    T = T[sort_idx]
+                    sorted_data = data[sort_idx]
+                    
+                    # Create plots
+                    fig, axs = plt.subplots(2, 2, figsize=(12, 10))
+                    fig.suptitle(f"FTLM Thermodynamic Properties for Cluster {cluster_id} (Order {order})")
+                    
+                    # Plot energy
+                    if energy_idx is not None:
+                        y = sorted_data[:, energy_idx]
+                        axs[0, 0].plot(T, y, 'r-', label='Energy')
+                        if energy_err_idx is not None and energy_err_idx < sorted_data.shape[1]:
+                            err = sorted_data[:, energy_err_idx]
+                            axs[0, 0].fill_between(T, y-err, y+err, alpha=0.3, color='r')
+                    axs[0, 0].set_xlabel("Temperature")
+                    axs[0, 0].set_ylabel("Energy per site")
+                    axs[0, 0].set_xscale('log')
+                    axs[0, 0].grid(True)
+                    axs[0, 0].legend()
+                    
+                    # Plot specific heat
+                    if spec_heat_idx is not None:
+                        y = sorted_data[:, spec_heat_idx]
+                        axs[0, 1].plot(T, y, 'b-', label='Specific Heat')
+                        if spec_heat_err_idx is not None and spec_heat_err_idx < sorted_data.shape[1]:
+                            err = sorted_data[:, spec_heat_err_idx]
+                            axs[0, 1].fill_between(T, y-err, y+err, alpha=0.3, color='b')
+                    axs[0, 1].set_xlabel("Temperature")
+                    axs[0, 1].set_ylabel("Specific Heat")
+                    axs[0, 1].set_xscale('log')
+                    axs[0, 1].grid(True)
+                    axs[0, 1].legend()
+                    
+                    # Plot entropy
+                    if entropy_idx is not None:
+                        y = sorted_data[:, entropy_idx]
+                        axs[1, 0].plot(T, y, 'g-', label='Entropy')
+                        if entropy_err_idx is not None and entropy_err_idx < sorted_data.shape[1]:
+                            err = sorted_data[:, entropy_err_idx]
+                            axs[1, 0].fill_between(T, y-err, y+err, alpha=0.3, color='g')
+                    axs[1, 0].set_xlabel("Temperature")
+                    axs[1, 0].set_ylabel("Entropy per site")
+                    axs[1, 0].set_xscale('log')
+                    axs[1, 0].grid(True)
+                    axs[1, 0].legend()
+                    
+                    # Plot free energy
+                    if free_energy_idx is not None:
+                        y = sorted_data[:, free_energy_idx]
+                        axs[1, 1].plot(T, y, 'm-', label='Free Energy')
+                        if free_energy_err_idx is not None and free_energy_err_idx < sorted_data.shape[1]:
+                            err = sorted_data[:, free_energy_err_idx]
+                            axs[1, 1].fill_between(T, y-err, y+err, alpha=0.3, color='m')
+                    axs[1, 1].set_xlabel("Temperature")
+                    axs[1, 1].set_ylabel("Free Energy per site")
+                    axs[1, 1].set_xscale('log')
+                    axs[1, 1].grid(True)
+                    axs[1, 1].legend()
+                    
+                    # Save plot
+                    plt.tight_layout()
+                    plt.savefig(os.path.join(thermo_plots_dir, 
+                                           f"ftlm_thermo_cluster_{cluster_id}_order_{order}.png"))
+                    plt.close(fig)
+                    
+                    logging.info(f"FTLM thermodynamic plots created for cluster {cluster_id}")
+                    
+                except Exception as e:
+                    logging.error(f"Error plotting FTLM data for cluster {cluster_id}: {e}")
+                    import traceback
+                    logging.error(traceback.format_exc())
+        
+        except ImportError:
+            logging.error("Matplotlib not installed. Skipping FTLM thermodynamic plots.")
+    
     # Step 4: Perform NLCE summation
     if not args.skip_nlc:
         logging.info("="*80)
@@ -374,6 +548,7 @@ Example usage:
             f'--temp_min={args.temp_min}',
             f'--temp_max={args.temp_max}',
             f'--temp_bins={args.temp_bins}',
+            f'--resummation={args.resummation}',
         ]
         
         if args.SI_units:
@@ -381,6 +556,10 @@ Example usage:
             
         if args.order_cutoff:
             nlc_params.append(f'--order_cutoff={args.order_cutoff}')
+        
+        if args.robust_pipeline:
+            nlc_params.append('--robust_pipeline')
+            nlc_params.append(f'--n_spins_per_unit={args.n_spins_per_unit}')
         
         logging.info(f"Running command: {' '.join(nlc_params)}")
         try:

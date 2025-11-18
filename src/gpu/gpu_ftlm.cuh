@@ -163,7 +163,10 @@ public:
      * @param num_omega_bins Number of frequency points
      * @param broadening Lorentzian broadening parameter
      * @param temperature Temperature for thermal weighting
+     * @param energy_shift Ground state energy shift (0 = auto-detect)
      * @param random_seed Random seed (0 = random)
+     * @param output_dir Output directory for intermediate files (empty = no output)
+     * @param store_intermediate Whether to save per-sample spectra
      * @return Spectral function with real/imaginary parts and errors
      */
     std::tuple<std::vector<double>, std::vector<double>, std::vector<double>,
@@ -176,7 +179,117 @@ public:
                               int num_omega_bins,
                               double broadening,
                               double temperature = 0.0,
-                              unsigned int random_seed = 0);
+                              double energy_shift = 0.0,
+                              unsigned int random_seed = 0,
+                              const std::string& output_dir = "",
+                              bool store_intermediate = false);
+    
+    /**
+     * @brief Compute thermal expectation value ⟨O⟩_T and susceptibility
+     * 
+     * GPU-accelerated computation of thermal averages:
+     * - ⟨O⟩_T = Tr(O exp(-βH)) / Z
+     * - χ_T = β(⟨O²⟩ - ⟨O⟩²)  [generalized susceptibility]
+     * 
+     * Uses FTLM approach with multiple random samples.
+     * 
+     * @param num_samples Number of random samples for thermal average
+     * @param op_O GPU operator for O (if nullptr, uses H for energy)
+     * @param temp_min Minimum temperature
+     * @param temp_max Maximum temperature
+     * @param num_temp_bins Number of temperature points
+     * @param random_seed Random seed (0 = random)
+     * @param output_dir Output directory for intermediate files (empty = no output)
+     * @param store_intermediate Whether to save per-sample data
+     * @return Tuple of (temperatures, expectation values, errors)
+     */
+    std::tuple<std::vector<double>, std::vector<double>, std::vector<double>>
+    computeThermalExpectation(int num_samples,
+                            GPUOperator* op_O,
+                            double temp_min,
+                            double temp_max,
+                            int num_temp_bins,
+                            unsigned int random_seed = 0,
+                            const std::string& output_dir = "",
+                            bool store_intermediate = false);
+    
+    /**
+     * @brief Compute static correlation function ⟨O₁†O₂⟩_T
+     * 
+     * GPU-accelerated computation of static two-point correlation at finite temperature.
+     * Computes ⟨O₁†O₂⟩ = Tr(O₁†O₂ exp(-βH)) / Z
+     * 
+     * This is the static (ω=0) version of the dynamical correlation.
+     * Useful for:
+     * - Structure factors at q=0
+     * - Equal-time correlation functions
+     * - Connected correlations (subtract ⟨O₁⟩*⟨O₂⟩*)
+     * 
+     * @param num_samples Number of random samples for thermal average
+     * @param op_O1 GPU operator for O₁
+     * @param op_O2 GPU operator for O₂
+     * @param temp_min Minimum temperature
+     * @param temp_max Maximum temperature
+     * @param num_temp_bins Number of temperature points
+     * @param random_seed Random seed (0 = random)
+     * @param output_dir Output directory for intermediate files (empty = no output)
+     * @param store_intermediate Whether to save per-sample data
+     * @return Tuple of (temperatures, correlation values, errors)
+     */
+    std::tuple<std::vector<double>, std::vector<double>, std::vector<double>>
+    computeStaticCorrelation(int num_samples,
+                           GPUOperator* op_O1,
+                           GPUOperator* op_O2,
+                           double temp_min,
+                           double temp_max,
+                           int num_temp_bins,
+                           unsigned int random_seed = 0,
+                           const std::string& output_dir = "",
+                           bool store_intermediate = false);
+    
+    /**
+     * @brief Compute dynamical correlation for a given state (single-state version)
+     * 
+     * GPU-accelerated version of compute_dynamical_correlation_state.
+     * Computes S(ω) = Σₙ ⟨ψ|O₁†|n⟩⟨n|O₂|ψ⟩ δ(ω - Eₙ) for a specific state |ψ⟩.
+     * 
+     * This is the single-state version (no random sampling/thermal averaging).
+     * Use this when you have a specific quantum state, such as:
+     * - Ground state from exact diagonalization
+     * - Excited state from Lanczos
+     * - Time-evolved state
+     * - Specific symmetry sector state
+     * 
+     * The function uses the Lehmann representation computed via Lanczos:
+     * 1. Applies O₂ to the given state: |φ⟩ = O₂|ψ⟩
+     * 2. Builds Krylov subspace starting from |φ⟩
+     * 3. Diagonalizes H in the Krylov basis to get approximate eigenstates
+     * 4. Computes weights: ⟨ψ|O₁†|n⟩⟨n|O₂|ψ⟩
+     * 5. Constructs spectral function with Lorentzian broadening
+     * 
+     * For O1=O2, gives spectral density. For different operators, gives cross-correlation.
+     * 
+     * @param d_psi Input quantum state on GPU (must be normalized)
+     * @param op_O1 GPU operator for O₁
+     * @param op_O2 GPU operator for O₂
+     * @param omega_min Minimum frequency
+     * @param omega_max Maximum frequency
+     * @param num_omega_bins Number of frequency points
+     * @param broadening Lorentzian broadening parameter (η)
+     * @param temperature Temperature for Boltzmann weighting (0 = no weighting)
+     * @param energy_shift Ground state energy shift (0 = auto-detect from Krylov)
+     * @return Tuple of (frequencies, Re[S(ω)], Im[S(ω)])
+     */
+    std::tuple<std::vector<double>, std::vector<double>, std::vector<double>>
+    computeDynamicalCorrelationState(const cuDoubleComplex* d_psi,
+                                    GPUOperator* op_O1,
+                                    GPUOperator* op_O2,
+                                    double omega_min,
+                                    double omega_max,
+                                    int num_omega_bins,
+                                    double broadening,
+                                    double temperature = 0.0,
+                                    double energy_shift = 0.0);
     
 private:
     GPUOperator* op_;
@@ -253,6 +366,41 @@ private:
                                 double broadening,
                                 double temperature,
                                 std::vector<double>& spectral_func);
+    
+    /**
+     * @brief Build Lanczos tridiagonal and store basis vectors
+     * 
+     * Extended version that stores all Lanczos basis vectors for 
+     * computing matrix elements with operators.
+     * 
+     * @param d_start_vec Starting vector on device
+     * @param full_reorth Whether to do full reorthogonalization
+     * @param reorth_freq Reorthogonalization frequency (0 = none)
+     * @param alpha Output: diagonal elements
+     * @param beta Output: off-diagonal elements
+     * @param d_basis_out Output: pointer to array of basis vectors (allocated by this function)
+     * @return Number of iterations performed
+     */
+    int buildLanczosTridiagonalWithBasis(const cuDoubleComplex* d_start_vec,
+                                        bool full_reorth,
+                                        int reorth_freq,
+                                        std::vector<double>& alpha,
+                                        std::vector<double>& beta,
+                                        cuDoubleComplex*** d_basis_out);
+    
+    /**
+     * @brief Compute spectral function from complex weights
+     * 
+     * For cross-correlation, weights can be complex. This computes both
+     * real and imaginary parts of the spectral function.
+     */
+    void computeSpectralFunctionComplex(const std::vector<double>& ritz_values,
+                                       const std::vector<std::complex<double>>& complex_weights,
+                                       const std::vector<double>& frequencies,
+                                       double broadening,
+                                       double temperature,
+                                       std::vector<double>& spectral_func_real,
+                                       std::vector<double>& spectral_func_imag);
 };
 
 /**

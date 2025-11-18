@@ -381,10 +381,155 @@ def write_cluster_nn_list(output_dir, cluster_name, nn_list, positions, sublatti
         f.write("# Tetrahedra arrangement: Each vertex shared by 2 tetrahedra (up and down)\n")
         f.write("# Connectivity: Corner-sharing tetrahedra forming a 3D network\n")
 
+def generate_three_spin_terms(nn_list, node_mapping, three_spin_coeff, sublattice_indices):
+    """
+    Generate three-spin terms for ALL 15 neighbor pairs around each central site.
+    
+    For non-Kramers doublets on pyrochlore, the three-spin term has the form:
+    H_3 = Σ_j S^+_j Φ^-_j + h.c.
+    
+    where for each central site j:
+    Φ^-_j = Σ_{i≠k ∈ N(j)} K_{i,j,k} S^z_i S^z_k
+    
+    Each site j has 6 nearest neighbors N(j) = {1,2,3,1',2',3'}, giving 
+    C(6,2) = 15 neighbor pairs. These split into three symmetry types:
+    
+    Type A (6 pairs): Same-tetrahedron pairs
+      - Up tetra: {1,2}, {1,3}, {2,3}
+      - Down tetra: {1',2'}, {1',3'}, {2',3'}
+      
+    Type B (3 pairs): Collinear opposite pairs through j
+      - {1,1'}, {2,2'}, {3,3'}
+      
+    Type C (6 pairs): Non-collinear cross pairs
+      - {1,2'}, {1,3'}, {2,1'}, {2,3'}, {3,1'}, {3,2'}
+    
+    Each type has a coupling J_A, J_B, J_C (all ~ M²/Λ) and bond-dependent
+    phases φ^{A/B/C}_{ijk} ∈ {0, ±2π/3} from C_3 symmetry.
+    
+    For simplicity, we use three_spin_coeff as a single overall scale and
+    implement the phase structure using the non-Kramers phase matrix.
+    
+    Args:
+        nn_list: Dictionary mapping each site to its nearest neighbors
+        node_mapping: Dictionary mapping original IDs to matrix indices
+        three_spin_coeff: Overall coefficient J_3 for the three-spin interaction
+        sublattice_indices: Dictionary mapping site to sublattice (0-3)
+        
+    Returns:
+        List of three-spin terms in the format:
+        [op1, site1, op2, site2, op3, site3, real_coeff, imag_coeff]
+    """
+    three_spin_terms = []
+    processed_triplets = set()
+    
+    # Phase factors: ω = e^(i*2π/3)
+    omega = np.exp(1j * 2 * np.pi / 3)
+    phase_factors = np.array([1, omega, omega**2])
+    
+    # For each site as the central site j
+    for j in sorted(nn_list.keys()):
+        neighbors = list(nn_list[j])
+        sub_j = sublattice_indices[j]
+        
+        # Ensure we have 6 neighbors (standard for pyrochlore)
+        if len(neighbors) != 6:
+            print(f"Warning: Site {j} has {len(neighbors)} neighbors (expected 6)")
+        
+        # Classify neighbors into "up" and "down" tetrahedra
+        # This is geometric: which tetrahedron (up vs down) does each neighbor belong to?
+        # For a proper classification, we check positions, but sublattice gives a proxy
+        
+        # Generate ALL neighbor pairs (i, k) with i ≠ k
+        # This gives us all 15 pairs around site j
+        for idx_i, i in enumerate(neighbors):
+            for idx_k, k in enumerate(neighbors):
+                if i >= k:  # Avoid double counting and self-pairs
+                    continue
+                
+                # Create canonical triplet identifier to avoid duplicates
+                triplet = tuple(sorted([i, j, k]))
+                
+                if triplet in processed_triplets:
+                    continue
+                processed_triplets.add(triplet)
+                
+                # Determine the phase based on the triplet geometry
+                sub_i = sublattice_indices[i]
+                sub_k = sublattice_indices[k]
+                    
+                if sub_i == sub_k:
+                    # Type B: Collinear opposite pairs (same sublattice, opposite through j)
+                    # CRITICAL: i and k must NOT be the same sublattice as j
+                    # If they are, this term is zero (unphysical configuration)
+                    if sub_i == sub_j:
+                        # This should never contribute - set coefficient to zero
+                        phase = 0.0
+                    else:
+                        # Phase follows (1, ω, ω²) based on which sublattice axis
+                        # relative to the central site j
+                        phase_idx = (sub_i - sub_j) % 3
+                        phase = phase_factors[phase_idx]
+                    
+                else:
+                    # Type C: Non-collinear cross pairs
+                    # Phase depends on which sublattices are involved
+                    # Use a consistent rule: phase based on sublattice ordering
+                    phase_idx = (sub_i - sub_k) % 3
+                    phase = phase_factors[phase_idx]
+                
+                coeff = three_spin_coeff * phase
+                coeff_real = np.real(coeff)
+                coeff_imag = np.imag(coeff)
+                
+                # Add triplet term: S^z_i S^+_j S^z_k with phase
+                three_spin_terms.append([2, node_mapping[i], 
+                                        0, node_mapping[j], 
+                                        2, node_mapping[k], 
+                                        coeff_real, coeff_imag])
+                
+                # Add hermitian conjugate: S^z_i S^-_j S^z_k with conjugate phase
+                three_spin_terms.append([2, node_mapping[i], 
+                                        1, node_mapping[j], 
+                                        2, node_mapping[k], 
+                                        coeff_real, -coeff_imag])
+    
+    return three_spin_terms
+
+def write_three_spin_terms(output_dir, three_spin_terms, file_name):
+    """
+    Write three-spin interaction terms to a file.
+    
+    Format matches the ThreeBodyG.dat format:
+    op1 site1 op2 site2 op3 site3 real_coeff imag_coeff
+    """
+    num_terms = len(three_spin_terms)
+    
+    with open(f"{output_dir}/{file_name}", 'w') as f:
+        f.write("===================\n")
+        f.write(f"num {num_terms:8d}\n")
+        f.write("===================\n")
+        f.write("===================\n")
+        f.write("===================\n")
+        
+        for term in three_spin_terms:
+            f.write(f" {int(term[0]):8d} " \
+                   f" {int(term[1]):8d}   " \
+                   f" {int(term[2]):8d}   " \
+                   f" {int(term[3]):8d}   " \
+                   f" {int(term[4]):8d}   " \
+                   f" {int(term[5]):8d}   " \
+                   f" {term[6]:8f}   " \
+                   f" {term[7]:8f}   " \
+                   f"\n")
+
 def prepare_hamiltonian_parameters(output_dir, non_kramer, nn_list, positions, sublattice_indices, 
-                                  node_mapping, Jxx, Jyy, Jzz, h, theta, field_dir):
+                                  node_mapping, Jxx, Jyy, Jzz, h, theta, field_dir, three_spin_coeff=0.0):
     """
     Prepare Hamiltonian parameters for exact diagonalization
+    
+    Args:
+        three_spin_coeff: Coefficient for three-spin nearest neighbor terms
     """
     # Prepare Hamiltonian parameters
     Jpm = -(Jxx+Jyy)/4
@@ -448,6 +593,11 @@ def prepare_hamiltonian_parameters(output_dir, non_kramer, nn_list, positions, s
     # Write interaction and transfer files
     write_interALL(output_dir, interALL, f"InterAll.dat")
     write_transfer(output_dir, transfer, f"Trans.dat")
+    
+    # Generate three-spin terms on nearest neighbor triangles
+    if three_spin_coeff != 0.0:
+        three_spin_terms = generate_three_spin_terms(nn_list, node_mapping, three_spin_coeff, sublattice_indices)
+        write_three_spin_terms(output_dir, three_spin_terms, "ThreeBodyG.dat")
     
     # Write field strength
     fstrength = np.array([[h]])
@@ -1051,7 +1201,7 @@ def plot_cluster(vertices, edges, output_dir, cluster_name, sublattice_indices=N
 def main():
     """Main function to process command line arguments and run the program"""
     if len(sys.argv) < 13:
-        print("Usage: python helper_pyrochlore_super.py Jxx Jyy Jzz h fieldx fieldy fieldz output_dir dim1 dim2 dim3 pbc [non_kramer] [theta] [counterterm_coeff]")
+        print("Usage: python helper_pyrochlore_super.py Jxx Jyy Jzz h fieldx fieldy fieldz output_dir dim1 dim2 dim3 pbc [non_kramer] [theta] [counterterm_coeff] [three_spin_coeff]")
         sys.exit(1)
     
     # Parse command line arguments
@@ -1069,6 +1219,7 @@ def main():
     theta = float(sys.argv[14]) if len(sys.argv) > 14 else 0.0  # Default theta=0.0 if not provided
     theta = theta * np.pi
     counterterm_coeff = float(sys.argv[15]) if len(sys.argv) > 15 else 1.0  # Default counterterm_coeff=1.0 if not provided
+    three_spin_coeff = float(sys.argv[16]) if len(sys.argv) > 16 else 0.0  # Default three_spin_coeff=0.0 if not provided
     # Ensure output directory exists
     if not os.path.isdir(output_dir):
         os.makedirs(output_dir)
@@ -1089,7 +1240,7 @@ def main():
     
     # Prepare Hamiltonian parameters
     prepare_hamiltonian_parameters(output_dir, non_kramer, nn_list, positions, sublattice_indices, 
-                                  node_mapping, Jxx, Jyy, Jzz, h, theta, field_dir)
+                                  node_mapping, Jxx, Jyy, Jzz, h, theta, field_dir, three_spin_coeff)
 
     # Find and write counter term chains
     chains = find_counter_term_chains(vertices, nn_list, vertex_to_cell, dim1, dim2, dim3, use_pbc)
@@ -1107,6 +1258,7 @@ def main():
     print(f"Number of tetrahedra: {len(tetrahedra)}")
     print(f"Sites per unit cell: 16 (4 tetrahedra × 4 sites)")
     print(f"Counter term coefficient: {counterterm_coeff}")
+    print(f"Three-spin coefficient: {three_spin_coeff}")
     print(f"Output written to: {output_dir}")
 
 if __name__ == "__main__":

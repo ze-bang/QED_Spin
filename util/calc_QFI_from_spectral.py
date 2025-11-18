@@ -21,6 +21,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from collections import defaultdict
 from scipy.signal import find_peaks, peak_prominences
+from scipy.interpolate import interp1d
 
 # Try to import mpi4py, but make it optional
 try:
@@ -141,7 +142,7 @@ def calculate_qfi_from_spectral(omega, spectral_function, beta):
     """
     Calculate quantum Fisher information from spectral function.
     
-    QFI = 4 * ∫ S(ω) * [coth(βω/2) - (βω/2)/sinh²(βω/2)] dω
+    QFI = 4 * ∫ S(ω) * tanh(βω/2) * (1 - exp(-βω)) dω
     
     For β → ∞: QFI = 4 * ∫ S(ω) dω (only positive frequencies)
     """
@@ -159,15 +160,10 @@ def calculate_qfi_from_spectral(omega, spectral_function, beta):
         integrand = s_omega_pos
     else:
         # Finite beta case
-        x = beta * omega_pos / 2.0
-        # Avoid numerical issues for small x
-        with np.errstate(divide='ignore', invalid='ignore'):
-            coth_term = 1.0 / np.tanh(x)
-            sinh_term = 1.0 / np.sinh(x)**2
-            integrand = s_omega_pos * (coth_term - x * sinh_term)
-        
+        integrand = s_omega_pos * np.tanh(beta * omega_pos / 2.0) * (1 - np.exp(-beta * omega_pos))
+
         # Handle any NaN or inf values
-        integrand = np.nan_to_num(integrand, nan=0.0, posinf=0.0, neginf=0.0)
+        # integrand = np.nan_to_num(integrand, nan=0.0, posinf=0.0, neginf=0.0)
     
     qfi = 4.0 * np_trapz(integrand, omega_pos)
     return qfi
@@ -372,11 +368,25 @@ def _load_and_average_spectral(file_list):
         mean_omega = ref_omega
         mean_spectral = np.mean(all_spectral, axis=0)
     else:
-        # Need to interpolate to common grid if they don't match
-        print("    Warning: Omega arrays don't match across samples, using first sample's grid")
-        mean_omega = ref_omega
-        # For now, just use the first sample - could implement interpolation if needed
-        mean_spectral = all_spectral[0]
+        # Interpolate to common grid when omega arrays don't match
+        print("    Warning: Omega arrays don't match across samples, interpolating to common grid")
+        
+        # Find the common omega range
+        omega_min = max(omega[0] for omega in all_omega)
+        omega_max = min(omega[-1] for omega in all_omega)
+        
+        # Use the densest grid size among all samples
+        n_points = max(len(omega) for omega in all_omega)
+        mean_omega = np.linspace(omega_min, omega_max, n_points)
+        
+        # Interpolate each spectral function to the common grid
+        interpolated_spectral = []
+        for omega, spectral in zip(all_omega, all_spectral):
+            f = interp1d(omega, spectral, kind='linear', bounds_error=False, fill_value=0.0)
+            interpolated_spectral.append(f(mean_omega))
+        
+        # Average the interpolated spectral functions
+        mean_spectral = np.mean(interpolated_spectral, axis=0)
     
     return mean_omega, mean_spectral
 
@@ -509,6 +519,89 @@ def _add_infinity_annotation(qfi_beta_array, finite_mask):
             fontsize=9, ha='left', va='bottom')
 
 
+def load_processed_qfi_data(data_dir, param_pattern='Jpm'):
+    """
+    Load already processed QFI data from subdirectories and create heatmaps.
+    Skips the spectral function processing step.
+    
+    Parameters:
+    data_dir: Root directory containing parameter subdirectories
+    param_pattern: Parameter name pattern (e.g., 'Jpm', 'h', 'J')
+    """
+    
+    print(f"\n{'='*70}")
+    print(f"Loading processed QFI data for {param_pattern} sweep")
+    print(f"Data directory: {data_dir}")
+    print(f"{'='*70}\n")
+    
+    # Organize data by species
+    species_data = defaultdict(list)
+    
+    # Find all subdirectories matching the pattern
+    subdirs = sorted(glob.glob(os.path.join(data_dir, f'{param_pattern}=*')))
+    print(f"Found {len(subdirs)} {param_pattern} subdirectories")
+    
+    param_regex = re.compile(f'{param_pattern}=([-]?[\d\.]+)')
+    
+    for subdir in subdirs:
+        param_match = param_regex.search(os.path.basename(subdir))
+        if not param_match:
+            continue
+        
+        param_value = float(param_match.group(1))
+        
+        # Look for processed data in plots directory
+        plots_dir = os.path.join(subdir, 'structure_factor_results', 'plots')
+        if not os.path.exists(plots_dir):
+            print(f"  Warning: No plots directory in {os.path.basename(subdir)}")
+            continue
+        
+        print(f"Loading data from: {os.path.basename(subdir)}")
+        
+        # Load QFI vs beta files
+        qfi_files = glob.glob(os.path.join(plots_dir, 'qfi_vs_beta_*.dat'))
+        
+        for file_path in qfi_files:
+            species = _extract_species_from_filename(file_path, 'qfi_vs_beta_*.dat')
+            if not species:
+                print(f"  Warning: Could not extract species from {os.path.basename(file_path)}")
+                continue
+            
+            try:
+                data = np.loadtxt(file_path)
+                if data.size == 0:
+                    print(f"  Warning: Empty file: {file_path}")
+                    continue
+                if data.ndim == 1:
+                    data = data.reshape(1, -1)
+                
+                for row in data:
+                    beta, qfi = row[0], row[1]
+                    species_data[species].append((param_value, beta, qfi))
+                
+                print(f"  Loaded {len(data)} data points from {os.path.basename(file_path)}")
+            except Exception as e:
+                print(f"  ERROR reading {file_path}: {e}")
+    
+    print(f"\nLoaded data for {len(species_data)} species")
+    
+    if not species_data:
+        print("ERROR: No data loaded! Check directory structure and file patterns.")
+        return None
+    
+    # Create summary plots
+    _plot_parameter_sweep_summary(species_data, data_dir, param_pattern)
+    
+    return species_data
+
+
+def _extract_species_from_filename(file_path, pattern):
+    """Extract species name from filename."""
+    base_pattern = pattern.replace('*', '(.+?)')
+    match = re.search(base_pattern, os.path.basename(file_path))
+    return match.group(1) if match else None
+
+
 def parse_QFI_across_parameter(data_dir, param_pattern='Jpm'):
     """
     Scan subdirectories with parameter sweep and compute QFI for each.
@@ -585,71 +678,494 @@ def parse_QFI_across_parameter(data_dir, param_pattern='Jpm'):
         return None
 
 
-def _plot_parameter_sweep_summary(merged_data, data_dir, param_pattern):
-    """Create summary plots for parameter sweep."""
+def _plot_parameter_sweep_summary(data, data_dir, param_pattern):
+    """Create summary plots for parameter sweep with comprehensive error checking.
+    
+    Parameters:
+    data: Either merged_data dict (from parse_QFI_across_parameter) or species_data dict (from load_processed_qfi_data)
+    data_dir: Root data directory
+    param_pattern: Parameter name
+    """
+    
+    print(f"\n{'='*70}")
+    print(f"Starting heatmap plotting for {param_pattern} sweep")
+    print(f"Data directory: {data_dir}")
+    print(f"{'='*70}\n")
     
     plot_outdir = os.path.join(data_dir, f'plots_{param_pattern}')
     os.makedirs(plot_outdir, exist_ok=True)
+    print(f"Output directory: {plot_outdir}")
     
-    # Organize data by species
-    species_data = defaultdict(list)
+    # Check if data is already organized by species or needs to be organized
+    if data and isinstance(next(iter(data.values())), dict):
+        # merged_data format: {param_value: {species: [(beta, qfi), ...]}}
+        species_data = defaultdict(list)
+        for param_value, qfi_dict in data.items():
+            for species, qfi_list in qfi_dict.items():
+                for beta, qfi in qfi_list:
+                    species_data[species].append((param_value, beta, qfi))
+    else:
+        # Already organized by species: {species: [(param_value, beta, qfi), ...]}
+        species_data = data
     
-    for param_value, qfi_dict in merged_data.items():
-        for species, qfi_list in qfi_dict.items():
-            for beta, qfi in qfi_list:
-                species_data[species].append((param_value, beta, qfi))
+    print(f"Organized data for {len(species_data)} species")
+    
+    # Save raw data points
+    _save_raw_data_points_param(species_data, plot_outdir, param_pattern)
     
     # Plot heatmaps for each species
+    print(f"\n{'='*70}")
+    print("Processing QFI heatmaps...")
+    print(f"{'='*70}")
     for species, data_points in species_data.items():
-        _plot_parameter_beta_heatmap(species, data_points, plot_outdir, param_pattern)
+        if data_points:
+            try:
+                _plot_parameter_beta_heatmap(species, data_points, plot_outdir, param_pattern)
+            except Exception as e:
+                print(f"ERROR processing heatmap for {species}: {e}")
+                import traceback
+                traceback.print_exc()
+    
+    print(f"\n{'='*70}")
+    print("Heatmap plotting complete!")
+    print(f"{'='*70}\n")
+
+
+def _save_raw_data_points_param(species_data, plot_outdir, param_pattern):
+    """Save raw assembled points for parameter sweep."""
+    for species, data_points in species_data.items():
+        if data_points:
+            arr = np.array(data_points, dtype=float)
+            np.savetxt(
+                os.path.join(plot_outdir, f'qfi_points_{species}.dat'), 
+                arr, header=f'{param_pattern} beta qfi'
+            )
 
 
 def _plot_parameter_beta_heatmap(species, data_points, plot_outdir, param_pattern):
-    """Create heatmap of QFI vs parameter and beta."""
+    """Create heatmap of QFI vs parameter and beta with comprehensive error checking."""
+    
+    print(f"\n{'='*60}")
+    print(f"Processing heatmap for species: {species}")
+    print(f"Number of data points: {len(data_points)}")
     
     # Convert to array
     arr = np.array(data_points, dtype=float)
-    param_vals = arr[:, 0]
-    beta_vals = arr[:, 1]
-    qfi_vals = arr[:, 2]
+    param_vals, beta_vals, qfi_vals = arr[:, 0], arr[:, 1], arr[:, 2]
     
-    # Create grid for heatmap
-    param_unique = np.unique(param_vals)
-    beta_unique = np.unique(beta_vals[np.isfinite(beta_vals)])
+    print(f"{param_pattern} range: [{param_vals.min():.3f}, {param_vals.max():.3f}]")
+    print(f"Beta range: [{beta_vals.min():.3f}, {beta_vals.max():.3f}]")
+    print(f"QFI range: [{qfi_vals.min():.3f}, {qfi_vals.max():.3f}]")
     
-    if len(param_unique) < 2 or len(beta_unique) < 2:
-        print(f"Not enough data for heatmap: {species}")
+    # Get beta grid - use reference value near middle of param range
+    ref_target = np.median(param_vals)
+    target_beta = _get_beta_grid_param(param_vals, beta_vals, ref_target)
+    if target_beta.size < 2:
+        print(f"WARNING: Insufficient beta grid size ({target_beta.size}). Skipping species.")
         return
     
-    # Create meshgrid
-    param_grid, beta_grid = np.meshgrid(param_unique, beta_unique)
-    qfi_grid = np.zeros_like(param_grid)
+    print(f"Target beta grid size: {target_beta.size}")
     
-    # Fill grid
-    for i, beta in enumerate(beta_unique):
-        for j, param in enumerate(param_unique):
-            mask = (np.abs(beta_vals - beta) < 1e-6) & (np.abs(param_vals - param) < 1e-6)
-            if np.any(mask):
-                qfi_grid[i, j] = np.mean(qfi_vals[mask])
-            else:
-                qfi_grid[i, j] = np.nan
+    # Split into positive and negative parameter values
+    param_neg, param_pos = _split_param_values(param_vals)
     
-    # Create plot
+    print(f"Negative {param_pattern} values: {param_neg.size}, Positive {param_pattern} values: {param_pos.size}")
+    
+    # Interpolate data onto regular grid
+    Z_neg, Z_pos = _interpolate_to_grid_param(
+        param_vals, beta_vals, qfi_vals, 
+        param_neg, param_pos, target_beta, param_pattern
+    )
+    
+    if Z_neg is not None:
+        print(f"Z_neg shape: {Z_neg.shape}, NaN count: {np.isnan(Z_neg).sum()}")
+    if Z_pos is not None:
+        print(f"Z_pos shape: {Z_pos.shape}, NaN count: {np.isnan(Z_pos).sum()}")
+    
+    # Save grids
+    _save_grids_param(species, target_beta, param_neg, param_pos, 
+                      Z_neg, Z_pos, plot_outdir, param_pattern)
+    
+    # Filter rows with no NaN
+    filtered_data = _filter_nan_rows_param(target_beta, Z_neg, Z_pos, True)
+    
+    print(f"Filtered data keys: {filtered_data.keys()}")
+    
+    # Save filtered grids
+    _save_filtered_grids_param(species, filtered_data, param_neg, param_pos, 
+                               plot_outdir, param_pattern)
+    
+    # Create plots
+    try:
+        _create_heatmap_plots_param(species, filtered_data, param_neg, param_pos, 
+                                    plot_outdir, param_pattern)
+        print(f"Successfully created heatmap plots for {species}")
+    except Exception as e:
+        print(f"ERROR creating heatmap plots for {species}: {e}")
+        import traceback
+        traceback.print_exc()
+    
+    # Create line plots at fixed beta
+    try:
+        _create_fixed_beta_plots_param(species, target_beta, Z_neg, Z_pos, 
+                                       param_neg, param_pos, filtered_data, 
+                                       plot_outdir, param_pattern)
+        print(f"Successfully created fixed beta plots for {species}")
+    except Exception as e:
+        print(f"ERROR creating fixed beta plots for {species}: {e}")
+        import traceback
+        traceback.print_exc()
+    
+    print(f"{'='*60}\n")
+
+
+def _get_beta_grid_param(param_vals, beta_vals, ref_target):
+    """Create beta grid based on reference parameter value."""
+    unique_param = np.unique(param_vals)
+    if unique_param.size == 0:
+        return np.array([])
+    
+    # Find parameter closest to reference target
+    ref_param = unique_param[np.argmin(np.abs(unique_param - ref_target))]
+    ref_mask = np.isclose(param_vals, ref_param, rtol=1e-8, atol=1e-12)
+    
+    beta_ref = beta_vals[ref_mask]
+    beta_ref = beta_ref[beta_ref > 0]
+    target_beta = np.unique(beta_ref)
+    target_beta.sort()
+    
+    # Fallback to all positive betas if reference grid insufficient
+    if target_beta.size < 2:
+        target_beta = np.unique(beta_vals[beta_vals > 0])
+        target_beta.sort()
+    
+    return target_beta
+
+
+def _split_param_values(param_vals):
+    """Split parameter values into negative and positive arrays."""
+    param_neg = np.unique(param_vals[param_vals < 0])
+    param_neg.sort()
+    param_pos = np.unique(param_vals[param_vals > 0])
+    param_pos.sort()
+    return param_neg, param_pos
+
+
+def _interpolate_to_grid_param(param_vals, beta_vals, values, param_neg, param_pos, target_beta, param_pattern):
+    """Interpolate data onto regular beta grid for each parameter value."""
+    
+    print(f"[DEBUG] interpolate_to_grid: target_beta size={len(target_beta)}, param_neg size={len(param_neg)}, param_pos size={len(param_pos)}")
+    
+    def interp_at_param(p):
+        mask = np.isclose(param_vals, p, rtol=1e-8, atol=1e-12)
+        b = beta_vals[mask]
+        v = values[mask]
+        
+        if b.size == 0:
+            print(f"[DEBUG] {param_pattern}={p:.3f}: No data points found")
+            return np.full_like(target_beta, np.nan, dtype=float)
+        
+        # Sort and average duplicates
+        order = np.argsort(b)
+        b, v = b[order], v[order]
+        
+        bu, inv = np.unique(b, return_inverse=True)
+        v_mean = np.zeros_like(bu, dtype=float)
+        counts = np.zeros_like(bu, dtype=int)
+        np.add.at(v_mean, inv, v)
+        np.add.at(counts, inv, 1)
+        v_mean = v_mean / np.maximum(counts, 1)
+        
+        if bu.size < 2:
+            print(f"[DEBUG] {param_pattern}={p:.3f}: Insufficient unique beta values ({bu.size}), returning NaN")
+            return np.full_like(target_beta, np.nan, dtype=float)
+        
+        f = interp1d(bu, v_mean, kind='linear', bounds_error=False, fill_value=np.nan)
+        result = f(target_beta)
+        nan_count = np.isnan(result).sum()
+        if nan_count > 0:
+            print(f"[DEBUG] {param_pattern}={p:.3f}: Interpolation produced {nan_count} NaN values out of {len(result)}")
+        return result
+    
+    Z_neg = np.column_stack([interp_at_param(p) for p in param_neg]) if param_neg.size > 0 else None
+    Z_pos = np.column_stack([interp_at_param(p) for p in param_pos]) if param_pos.size > 0 else None
+    
+    if Z_neg is not None:
+        print(f"[DEBUG] Z_neg created: shape={Z_neg.shape}, NaN count={np.isnan(Z_neg).sum()}")
+    if Z_pos is not None:
+        print(f"[DEBUG] Z_pos created: shape={Z_pos.shape}, NaN count={np.isnan(Z_pos).sum()}")
+    
+    return Z_neg, Z_pos
+
+
+def _filter_nan_rows_param(target_beta, Z_neg, Z_pos, naive=False):
+    """Filter out rows containing NaN values."""
+    result = {}
+
+    if naive:
+        result['Z_neg_f'] = Z_neg
+        result['Z_pos_f'] = Z_pos
+        result['beta_neg_f'] = target_beta
+        result['beta_pos_f'] = target_beta
+        # Create masks for naive mode too (all True if data exists)
+        if Z_neg is not None and Z_neg.size > 0:
+            result['mask_neg'] = np.ones(len(target_beta), dtype=bool)
+        if Z_pos is not None and Z_pos.size > 0:
+            result['mask_pos'] = np.ones(len(target_beta), dtype=bool)
+        return result
+    else:
+        if Z_neg is not None and Z_neg.size > 0:
+            mask_neg = np.all(np.isfinite(Z_neg), axis=1)
+            if np.any(mask_neg):
+                result['Z_neg_f'] = Z_neg[mask_neg, :]
+                result['beta_neg_f'] = target_beta[mask_neg]
+                result['mask_neg'] = mask_neg
+        
+        if Z_pos is not None and Z_pos.size > 0:
+            mask_pos = np.all(np.isfinite(Z_pos), axis=1)
+            if np.any(mask_pos):
+                result['Z_pos_f'] = Z_pos[mask_pos, :]
+                result['beta_pos_f'] = target_beta[mask_pos]
+                result['mask_pos'] = mask_pos
+        return result
+
+
+def _save_grids_param(species, target_beta, param_neg, param_pos, Z_neg, Z_pos, plot_outdir, param_pattern):
+    """Save unfiltered grid data."""
+    
+    if Z_neg is not None:
+        _save_grid_data_param(plot_outdir, f'qfi_grid_neg_{species}', 
+                             target_beta, param_neg, Z_neg, param_pattern)
+    
+    if Z_pos is not None:
+        _save_grid_data_param(plot_outdir, f'qfi_grid_pos_{species}',
+                             target_beta, param_pos, Z_pos, param_pattern)
+
+
+def _save_filtered_grids_param(species, filtered_data, param_neg, param_pos, plot_outdir, param_pattern):
+    """Save filtered grid data."""
+    
+    if 'Z_neg_f' in filtered_data:
+        _save_grid_data_param(plot_outdir, f'qfi_grid_neg_filtered_{species}',
+                             filtered_data['beta_neg_f'], param_neg, filtered_data['Z_neg_f'], param_pattern)
+    
+    if 'Z_pos_f' in filtered_data:
+        _save_grid_data_param(plot_outdir, f'qfi_grid_pos_filtered_{species}',
+                             filtered_data['beta_pos_f'], param_pos, filtered_data['Z_pos_f'], param_pattern)
+
+
+def _save_grid_data_param(plot_outdir, base_name, beta, param, Z, param_pattern):
+    """Save grid data in both npz and text formats."""
+    np.savez(os.path.join(plot_outdir, f'{base_name}.npz'),
+             beta=beta, param=param, Z=Z)
+    
+    # Save as text
+    header_cols = ['beta'] + [f'{param_pattern}={v:g}' for v in param]
+    header = ' '.join(header_cols)
+    out = np.column_stack((beta, Z))
+    np.savetxt(os.path.join(plot_outdir, f'{base_name}.dat'), 
+               out, header=header)
+
+
+def _create_heatmap_plots_param(species, filtered_data, param_neg, param_pos, plot_outdir, param_pattern):
+    """Create heatmap plots for the species."""
+    
+    # Get color scale limits
+    vmin, vmax = _get_color_limits_param(filtered_data)
+    if vmin is None:
+        return
+    
+    # Plot negative parameter heatmap
+    if 'Z_neg_f' in filtered_data:
+        _plot_single_heatmap_param(
+            param_neg, filtered_data['beta_neg_f'], filtered_data['Z_neg_f'],
+            vmin, vmax, 
+            f'QFI Heatmap ({param_pattern}<0) for {species}',
+            os.path.join(plot_outdir, f'qfi_heatmap_neg_{species}.png'),
+            param_pattern
+        )
+    
+    # Plot positive parameter heatmap
+    if 'Z_pos_f' in filtered_data:
+        _plot_single_heatmap_param(
+            param_pos, filtered_data['beta_pos_f'], filtered_data['Z_pos_f'],
+            vmin, vmax,
+            f'QFI Heatmap ({param_pattern}>0) for {species}',
+            os.path.join(plot_outdir, f'qfi_heatmap_pos_{species}.png'),
+            param_pattern
+        )
+    
+    # Plot side-by-side view
+    if 'Z_neg_f' in filtered_data and 'Z_pos_f' in filtered_data:
+        _plot_side_by_side_heatmap_param(
+            species, filtered_data, param_neg, param_pos,
+            vmin, vmax, plot_outdir, param_pattern
+        )
+
+
+def _get_color_limits_param(filtered_data):
+    """Get unified color scale limits."""
+    z_list = []
+    if 'Z_neg_f' in filtered_data:
+        z_list.append(filtered_data['Z_neg_f'])
+    if 'Z_pos_f' in filtered_data:
+        z_list.append(filtered_data['Z_pos_f'])
+    
+    if not z_list:
+        return None, None
+    
+    vmin = np.nanmin([np.nanmin(z) for z in z_list])
+    vmax = np.nanmax([np.nanmax(z) for z in z_list])
+    return vmin, vmax
+
+
+def _plot_single_heatmap_param(param, beta, Z, vmin, vmax, title, filename, param_pattern):
+    """Create a single heatmap plot."""
+    print(f"[DEBUG] plot_single_heatmap: param shape={param.shape}, beta shape={beta.shape}, Z shape={Z.shape}")
+    print(f"[DEBUG] vmin={vmin:.6f}, vmax={vmax:.6f}")
+    
+    P, B = np.meshgrid(param, beta)
+    print(f"[DEBUG] Meshgrid P shape={P.shape}, B shape={B.shape}")
+    
     plt.figure(figsize=(12, 8))
-    plt.pcolormesh(param_grid, beta_grid, qfi_grid, shading='auto', cmap='viridis')
-    plt.colorbar(label='QFI')
-    plt.xlabel(f'{param_pattern}')
-    plt.ylabel('Beta (β)')
-    plt.title(f'QFI Heatmap: {species}')
-    plt.yscale('log')
+    try:
+        plt.pcolormesh(P, B, Z, shading='auto', cmap='viridis', vmin=vmin, vmax=vmax)
+        plt.yscale('log')
+        plt.gca().invert_yaxis()  # large beta at bottom
+        plt.xlabel(param_pattern)
+        plt.ylabel('Beta (β)')
+        plt.title(title)
+        plt.colorbar(label='QFI')
+        plt.savefig(filename, dpi=300, bbox_inches='tight')
+        print(f"[DEBUG] Successfully saved heatmap to {filename}")
+    except Exception as e:
+        print(f"[ERROR] Failed to create heatmap: {e}")
+        import traceback
+        traceback.print_exc()
+    finally:
+        plt.close()
+
+
+def _plot_side_by_side_heatmap_param(species, filtered_data, param_neg, param_pos, 
+                                     vmin, vmax, plot_outdir, param_pattern):
+    """Create side-by-side heatmap plot."""
     
-    plot_filename = os.path.join(plot_outdir, f'qfi_heatmap_{species}.png')
-    plt.savefig(plot_filename, dpi=300)
+    beta_neg_f = filtered_data['beta_neg_f']
+    beta_pos_f = filtered_data['beta_pos_f']
+    Z_neg_f = filtered_data['Z_neg_f']
+    Z_pos_f = filtered_data['Z_pos_f']
+    
+    # Create meshgrids
+    PN, BN = np.meshgrid(param_neg, beta_neg_f)
+    PP, BP = np.meshgrid(param_pos, beta_pos_f)
+    
+    # Calculate y-axis limits
+    y_min = float(min(beta_neg_f.min(), beta_pos_f.min()))
+    y_max = float(max(beta_neg_f.max(), beta_pos_f.max()))
+    
+    # Calculate width ratio
+    wr = _calculate_width_ratio_param(param_neg, param_pos)
+    
+    # Create figure
+    fig, (axL, axR) = plt.subplots(
+        1, 2, figsize=(14, 8), sharey=True,
+        gridspec_kw={'wspace': 0.0, 'hspace': 0.0, 'width_ratios': [wr, 1.0]}
+    )
+    
+    # Plot heatmaps
+    axL.pcolormesh(PN, BN, Z_neg_f, shading='auto', cmap='viridis', vmin=vmin, vmax=vmax)
+    axR.pcolormesh(PP, BP, Z_pos_f, shading='auto', cmap='viridis', vmin=vmin, vmax=vmax)
+    
+    # Format axes
+    for ax in (axL, axR):
+        ax.set_yscale('log')
+        ax.set_ylim(y_max, y_min)  # large beta at bottom
+        ax.set_xlabel(param_pattern)
+    
+    axL.set_ylabel('Beta (β)')
+    axR.tick_params(labelleft=False)
+    
+    # Add colorbar
+    fig.subplots_adjust(wspace=0.0)
+    cbar = fig.colorbar(axL.collections[0], ax=[axL, axR], location='right', pad=0.02)
+    cbar.set_label('QFI')
+    
+    fig.suptitle(f'QFI Heatmap ({param_pattern}<0 | {param_pattern}>0) for {species}')
+    fig.savefig(os.path.join(plot_outdir, f'qfi_heatmap_side_by_side_{species}.png'),
+                dpi=300, bbox_inches='tight')
     plt.close()
+
+
+def _calculate_width_ratio_param(param_neg, param_pos):
+    """Calculate width ratio for side-by-side plots."""
+    neg_span = float(np.ptp(param_neg)) if param_neg.size > 0 else 0.0
+    pos_span = float(np.ptp(param_pos)) if param_pos.size > 0 else 0.0
+    
+    if pos_span > 0:
+        wr = neg_span / pos_span
+    else:
+        wr = 1.5
+    
+    return float(np.clip(wr, 1.2, 3.0))
+
+
+def _create_fixed_beta_plots_param(species, target_beta, Z_neg, Z_pos, param_neg, param_pos, 
+                                   filtered_data, plot_outdir, param_pattern):
+    """Create line plots at fixed beta values."""
+    
+    # Find largest valid beta indices
+    idx_neg = _find_largest_valid_beta_index_param(Z_neg, filtered_data.get('mask_neg'))
+    idx_pos = _find_largest_valid_beta_index_param(Z_pos, filtered_data.get('mask_pos'))
+    
+    if idx_neg is None and idx_pos is None:
+        return
+    
+    # Setup plot
+    plt.figure(figsize=(10, 6))
+    color = 'C0'
+    
+    # Plot negative parameter segment
+    if idx_neg is not None:
+        _plot_fixed_beta_segment_param(
+            param_neg, Z_neg[idx_neg, :], target_beta[idx_neg],
+            color, 'neg', plot_outdir, species, param_pattern
+        )
+    
+    # Plot positive parameter segment
+    if idx_pos is not None:
+        _plot_fixed_beta_segment_param(
+            param_pos, Z_pos[idx_pos, :], target_beta[idx_pos],
+            color, 'pos', plot_outdir, species, param_pattern
+        )
+    
+    plt.xlabel(param_pattern)
+    plt.ylabel('QFI')
+    plt.title(f'QFI vs {param_pattern} at largest β rows (no NaN) for {species}')
+    plt.grid(True, alpha=0.3)
+    plt.legend(fontsize=9)
+    
+    fname = os.path.join(plot_outdir, f'qfi_vs_{param_pattern}_fixed_beta_{species}.png')
+    plt.savefig(fname, dpi=300, bbox_inches='tight')
+    plt.close()
+
+
+def _find_largest_valid_beta_index_param(Z, mask):
+    """Find the largest beta index with no NaN values."""
+    if Z is None or Z.size == 0 or mask is None or not np.any(mask):
+        return None
+    
+    valid_idxs = np.where(mask)[0]
+    return valid_idxs[-1] if valid_idxs.size > 0 else None
+
+
+def _plot_fixed_beta_segment_param(param, values, beta, color, segment, plot_outdir, species, param_pattern):
+    """Plot a segment of fixed beta data."""
+    plt.plot(param, values, '-', lw=1.8, color=color, label=f'β={beta:.3g} ({segment})')
     
     # Save data
-    data_filename = os.path.join(plot_outdir, f'qfi_heatmap_{species}.dat')
-    np.savetxt(data_filename, arr, header=f'{param_pattern} beta qfi')
+    filename = os.path.join(plot_outdir, f'qfi_vs_{param_pattern}_fixed_beta_{segment}_{species}.dat')
+    header = f'{param_pattern} beta QFI'
+    np.savetxt(filename, np.column_stack((param, np.full_like(param, beta), values)), header=header)
 
 
 if __name__ == "__main__":
@@ -658,18 +1174,31 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description='Calculate QFI from pre-computed spectral function files')
     parser.add_argument('directory', type=str,
-                       help='Directory containing structure_factor_results')
+                       help='Directory containing structure_factor_results or parameter sweep folders')
     parser.add_argument('--beta-tol', type=float, default=1e-2,
                        help='Tolerance for grouping beta values (default: 1e-2)')
     parser.add_argument('--param-sweep', type=str, default=None,
-                       help='Parameter name for sweep analysis (e.g., Jpm, h)')
+                       help='Parameter name for sweep analysis (e.g., Jpm, h, J)')
+    parser.add_argument('--skip-processing', action='store_true',
+                       help='Skip spectral processing and load existing processed QFI data')
     
     args = parser.parse_args()
     
-    if args.param_sweep:
-        # Parameter sweep mode
+    if args.skip_processing:
+        # Load already processed data mode
+        if not args.param_sweep:
+            print("ERROR: --skip-processing requires --param-sweep to be specified")
+            print("Example: --skip-processing --param-sweep Jpm")
+            sys.exit(1)
+        
+        print(f"Loading processed QFI data for {args.param_sweep} sweep (skipping spectral processing)")
+        results = load_processed_qfi_data(args.directory, args.param_sweep)
+        
+    elif args.param_sweep:
+        # Parameter sweep mode with full processing
         print(f"Running parameter sweep analysis for {args.param_sweep}")
         results = parse_QFI_across_parameter(args.directory, args.param_sweep)
+        
     else:
         # Single directory mode
         sf_dir = os.path.join(args.directory, 'structure_factor_results') \

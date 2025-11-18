@@ -42,6 +42,10 @@ public:
      * @param eigenvalues Output energies
      * @param dir Output directory
      * @param large_value Large value for high energy cutoff
+     * @param fixed_sz_op Optional GPUFixedSzOperator for embedding to full space
+     * @param continue_quenching If true, continue from saved state
+     * @param continue_sample Sample index to continue from (0 = auto-detect)
+     * @param continue_beta Beta value to continue from (0.0 = auto-detect)
      */
     void runMicrocanonicalTPQ(
         int max_iter,
@@ -49,7 +53,11 @@ public:
         int temp_interval,
         std::vector<double>& eigenvalues,
         const std::string& dir = "",
-        double large_value = 1e5
+        double large_value = 1e5,
+        class GPUFixedSzOperator* fixed_sz_op = nullptr,
+        bool continue_quenching = false,
+        int continue_sample = 0,
+        double continue_beta = 0.0
     );
     
     /**
@@ -61,6 +69,7 @@ public:
      * @param dir Output directory
      * @param delta_beta Time step for imaginary time evolution
      * @param taylor_order Order of Taylor expansion
+     * @param fixed_sz_op Optional GPUFixedSzOperator for embedding to full space
      */
     void runCanonicalTPQ(
         double beta_max,
@@ -69,7 +78,8 @@ public:
         std::vector<double>& energies,
         const std::string& dir = "",
         double delta_beta = 0.1,
-        int taylor_order = 50
+        int taylor_order = 50,
+        class GPUFixedSzOperator* fixed_sz_op = nullptr
     );
     
     /**
@@ -111,6 +121,24 @@ private:
     void writeTPQData(const std::string& filename, double inv_temp, 
                      double energy, double variance, double norm, int step);
     bool saveTPQState(const std::string& filename);
+    bool saveTPQState(const std::string& filename, class GPUFixedSzOperator* fixed_sz_op);
+    bool loadTPQState(const std::string& filename);
+    
+    /**
+     * @brief Find the TPQ state file with the highest beta (lowest energy)
+     * 
+     * Scans the output directory for saved TPQ state files matching the pattern
+     * tpq_state_{sample}_beta={beta}.dat and returns the file with the highest beta.
+     * Also looks up the corresponding step number from the SS_rand{sample}.dat file.
+     * 
+     * @param dir Output directory to search
+     * @param sample Sample index (or 0 for auto-detect)
+     * @param beta_out Output parameter for the beta value found
+     * @param step_out Output parameter for the step number found
+     * @return Path to the state file, or empty string if none found
+     */
+    std::string findLowestEnergyTPQState(const std::string& dir, int sample, 
+                                        double& beta_out, int& step_out);
 };
 
 #endif // GPU_TPQ_CUH

@@ -275,6 +275,7 @@ set(SOURCES
     ${CPU_SOLVERS_DIR}/ftlm.cpp
     ${CPU_SOLVERS_DIR}/ltlm.cpp
     ${CPU_SOLVERS_DIR}/hybrid_thermal.cpp
+    ${SRC_DIR}/io/basis_vector_storage.cpp
 )
 
 # Header-only sources that should be included in compilation
@@ -286,6 +287,7 @@ set(HEADER_SOURCES
 if(WITH_CUDA)
     set(GPU_SOURCES
         ${GPU_DIR}/gpu_operator.cu
+        ${GPU_DIR}/gpu_operator_conversion.cpp
         ${GPU_DIR}/gpu_kernels.cu
         ${GPU_DIR}/gpu_fixed_sz_operator.cu
         ${GPU_DIR}/gpu_lanczos.cu
@@ -320,7 +322,7 @@ else()
 endif()
 
 # Add TPQ_DSSF executable (only if MPI is enabled since it uses MPI)
-add_executable(TPQ_DSSF ${CORE_DIR}/TPQ_DSSF.cpp ${CPU_SOLVERS_DIR}/dynamics.cpp ${CPU_SOLVERS_DIR}/TPQ.cpp ${CPU_SOLVERS_DIR}/ftlm.cpp)
+add_executable(TPQ_DSSF ${CORE_DIR}/TPQ_DSSF.cpp ${CPU_SOLVERS_DIR}/dynamics.cpp ${CPU_SOLVERS_DIR}/TPQ.cpp ${CPU_SOLVERS_DIR}/ftlm.cpp ${CPU_SOLVERS_DIR}/lanczos.cpp ${SRC_DIR}/io/basis_vector_storage.cpp)
 
 
 # Link libraries for new main
@@ -355,6 +357,30 @@ if(TARGET TPQ_DSSF)
         ${ARPACK_LIBRARY}
         ${HDF5_LIBRARIES}
     )
+    
+    # Add CUDA support for TPQ_DSSF if enabled
+    if(WITH_CUDA)
+        # Add GPU source files to TPQ_DSSF
+        target_sources(TPQ_DSSF PRIVATE
+            ${GPU_DIR}/gpu_ed_wrapper.cu
+            ${GPU_DIR}/gpu_operator.cu
+            ${GPU_DIR}/gpu_operator_conversion.cpp
+            ${GPU_DIR}/gpu_kernels.cu
+            ${GPU_DIR}/gpu_fixed_sz_operator.cu
+            ${GPU_DIR}/gpu_lanczos.cu
+            ${GPU_DIR}/gpu_tpq.cu
+            ${GPU_DIR}/gpu_cg.cu
+            ${GPU_DIR}/gpu_ftlm.cu
+        )
+        
+        target_link_libraries(TPQ_DSSF
+            CUDA::cudart
+            CUDA::cublas
+            CUDA::cusparse
+            CUDA::curand
+            CUDA::cusolver
+        )
+    endif()
 endif()
 
 # Link libraries for test_dynamical_correlation
@@ -594,62 +620,4 @@ if(OpenMP_CXX_FOUND)
     message(STATUS "  OpenMP Support: YES")
 else()
     message(STATUS "  OpenMP Support: NO")
-endif()
-
-# Debug test for projected matrix (commented out - file missing)
-# add_executable(debug_projected_matrix test/debug_projected_matrix.cpp)
-# target_link_libraries(debug_projected_matrix 
-#     ${BLAS_LIBRARIES}
-#     ${LAPACK_LIBRARIES}
-#     ${LAPACKE_LIBRARIES}
-#     ${EXTRA_LINALG_LIBRARIES}
-#     ${ARPACK_LIBRARY}
-# )
-# target_link_libraries(debug_projected_matrix OpenMP::OpenMP_CXX)
-
-# Streaming symmetry test (only build if file exists)
-if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/test_streaming_symmetry.cpp")
-    set(TEST_STREAMING_SOURCES
-        test_streaming_symmetry.cpp
-        ${CORE_DIR}/ed_config.cpp
-        ${CPU_SOLVERS_DIR}/arpack.cpp
-        ${CPU_SOLVERS_DIR}/lanczos.cpp
-        ${CPU_SOLVERS_DIR}/CG.cpp
-        ${CPU_SOLVERS_DIR}/dynamics.cpp
-        ${CPU_SOLVERS_DIR}/TPQ.cpp
-        ${CPU_SOLVERS_DIR}/ftlm.cpp
-        ${CPU_SOLVERS_DIR}/ltlm.cpp
-        ${CPU_SOLVERS_DIR}/hybrid_thermal.cpp
-        ${CPU_SOLVERS_DIR}/observables.cpp
-    )
-
-    if(WITH_CUDA)
-        add_executable(test_streaming_symmetry ${TEST_STREAMING_SOURCES} ${GPU_SOURCES})
-        target_include_directories(test_streaming_symmetry PRIVATE ${GPU_DIR})
-    else()
-        add_executable(test_streaming_symmetry ${TEST_STREAMING_SOURCES})
-    endif()
-
-    target_link_libraries(test_streaming_symmetry 
-        ${BLAS_LIBRARIES}
-        ${LAPACK_LIBRARIES}
-        ${LAPACKE_LIBRARIES}
-        ${EXTRA_LINALG_LIBRARIES}
-        ${ARPACK_LIBRARY}
-        ${HDF5_LIBRARIES}
-    )
-
-    if(WITH_CUDA)
-        target_link_libraries(test_streaming_symmetry
-            CUDA::cudart
-            CUDA::cublas
-            CUDA::cusparse
-            CUDA::curand
-            CUDA::cusolver
-        )
-    endif()
-
-    if(OpenMP_CXX_FOUND)
-        target_link_libraries(test_streaming_symmetry OpenMP::OpenMP_CXX)
-    endif()
 endif()
