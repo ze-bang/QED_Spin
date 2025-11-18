@@ -275,6 +275,7 @@ set(SOURCES
     ${CPU_SOLVERS_DIR}/ftlm.cpp
     ${CPU_SOLVERS_DIR}/ltlm.cpp
     ${CPU_SOLVERS_DIR}/hybrid_thermal.cpp
+    ${SRC_DIR}/io/basis_vector_storage.cpp
 )
 
 # Header-only sources that should be included in compilation
@@ -321,7 +322,7 @@ else()
 endif()
 
 # Add TPQ_DSSF executable (only if MPI is enabled since it uses MPI)
-add_executable(TPQ_DSSF ${CORE_DIR}/TPQ_DSSF.cpp ${CPU_SOLVERS_DIR}/dynamics.cpp ${CPU_SOLVERS_DIR}/TPQ.cpp ${CPU_SOLVERS_DIR}/ftlm.cpp ${CPU_SOLVERS_DIR}/lanczos.cpp)
+add_executable(TPQ_DSSF ${CORE_DIR}/TPQ_DSSF.cpp ${CPU_SOLVERS_DIR}/dynamics.cpp ${CPU_SOLVERS_DIR}/TPQ.cpp ${CPU_SOLVERS_DIR}/ftlm.cpp ${CPU_SOLVERS_DIR}/lanczos.cpp ${SRC_DIR}/io/basis_vector_storage.cpp)
 
 
 # Link libraries for new main

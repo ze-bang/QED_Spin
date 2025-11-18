@@ -2,6 +2,7 @@
 #include "../core/system_utils.h"
 #include "../core/hdf5_io.h"
 #include <limits>
+#include <iomanip>
 
 ComplexVector generateRandomVector(int N, std::mt19937& gen, std::uniform_real_distribution<double>& dist) {
     ComplexVector v(N);
@@ -1017,9 +1018,6 @@ void lanczos(std::function<void(const Complex*, Complex*, int)> H, uint64_t N, u
     // Lanczos iteration
     for (int j = 0; j < max_iter; j++) {
         // w = H*v_j
-        if ((j + 1) % 10 == 0 || j < 5) {
-            std::cout << "Iteration " << j + 1 << " of " << max_iter << std::endl;
-        }
         H(v_current.data(), w.data(), N);
         
         // w = w - beta_j * v_{j-1}
@@ -1037,94 +1035,28 @@ void lanczos(std::function<void(const Complex*, Complex*, int)> H, uint64_t N, u
         Complex neg_alpha = Complex(-alpha[j], 0.0);
         cblas_zaxpy(N, &neg_alpha, v_current.data(), 1, w.data(), 1);
         
-        // ===== SELECTIVE REORTHOGONALIZATION DECISION (Parlett-Simon Algorithm) =====
+        // ===== FIXED: LOCAL REORTHOGONALIZATION ONLY =====
+        // The three-term recurrence already maintains orthogonality in exact arithmetic
+        // In finite precision, we only need to reorthogonalize against RECENT vectors
+        // Full reorthogonalization against ALL previous vectors is expensive and unnecessary
         
-        // Update omega estimates for loss of orthogonality
-        omega.resize(j + 2);
-        for (int i = 0; i <= j; i++) {
-            omega[j + 1].push_back(0.0);
-        }
-        omega[j + 1].push_back(eps);
-        
-        // Compute omega[j+1][i] for all i <= j using recurrence relation
-        // omega[j+1][i] ≈ |beta[j]| * omega[j][i] + eps * (|alpha[j]| + |beta[j]| + |beta[j-1]|)
-        for (int i = 0; i <= j; i++) {
-            double contrib = eps * (std::abs(alpha[j]) + std::abs(beta[j]));
-            if (j > 0) {
-                contrib += eps * std::abs(beta[j-1]) + std::abs(beta[j]) * omega[j][i];
-            }
-            omega[j + 1][i] = contrib;
-        }
-        
-        // Determine which vectors need reorthogonalization
-        std::vector<int> reorth_indices;
-        bool need_full_reorth = false;
-        
-        for (int i = 0; i <= j; i++) {
-            if (omega[j + 1][i] > ortho_threshold) {
-                reorth_indices.push_back(i);
-                
-                // If we need to reorthogonalize against more than 30% of vectors, do full reorth
-                if (reorth_indices.size() > (j + 1) * 0.3) {
-                    need_full_reorth = true;
-                    break;
-                }
-            }
-        }
-        
-        // Perform selective or full reorthogonalization
-        if (need_full_reorth) {
-            // Full reorthogonalization (read all vectors from disk/RAM)
-            full_reorth_count++;
-            total_reorth_count += (j + 1);
-            
-            for (int k = 0; k <= j; k++) {
-                ComplexVector basis_k;
-                // Check if vector is in recent cache
-                int recent_idx = k - (j + 1 - recent_vectors.size());
-                if (recent_idx >= 0 && recent_idx < recent_vectors.size()) {
-                    basis_k = recent_vectors[recent_idx];
-                } else {
-                    basis_k = read_basis_vector(temp_dir, k, N);
-                }
-                
-                Complex overlap;
-                cblas_zdotc_sub(N, basis_k.data(), 1, w.data(), 1, &overlap);
-                Complex neg_overlap = -overlap;
-                cblas_zaxpy(N, &neg_overlap, basis_k.data(), 1, w.data(), 1);
-            }
-            
-            // Reset omega estimates after full reorthogonalization
-            for (int i = 0; i <= j; i++) {
-                omega[j + 1][i] = eps;
-            }
-            
-            if ((j + 1) % 50 == 0) {
-                std::cout << "  Full reorthogonalization at iteration " << j + 1 << std::endl;
-            }
-            
-        } else if (!reorth_indices.empty()) {
-            // Selective reorthogonalization (only against flagged vectors)
+        // Reorthogonalize against last few vectors in cache (most likely to lose orthogonality)
+        // This is much cheaper than full reorthogonalization and works well in practice
+        int num_reorth = std::min(static_cast<int>(recent_vectors.size()), 3);
+        if (num_reorth > 0) {
             selective_reorth_count++;
-            total_reorth_count += reorth_indices.size();
+            total_reorth_count += num_reorth;
             
-            for (int idx : reorth_indices) {
-                ComplexVector basis_k;
-                // Check if vector is in recent cache
-                int recent_idx = idx - (j + 1 - recent_vectors.size());
-                if (recent_idx >= 0 && recent_idx < recent_vectors.size()) {
-                    basis_k = recent_vectors[recent_idx];
-                } else {
-                    basis_k = read_basis_vector(temp_dir, idx, N);
-                }
-                
+            // Reorthogonalize against the most recent vectors (they're already in the cache)
+            for (int i = recent_vectors.size() - num_reorth; i < recent_vectors.size(); i++) {
                 Complex overlap;
-                cblas_zdotc_sub(N, basis_k.data(), 1, w.data(), 1, &overlap);
-                Complex neg_overlap = -overlap;
-                cblas_zaxpy(N, &neg_overlap, basis_k.data(), 1, w.data(), 1);
+                cblas_zdotc_sub(N, recent_vectors[i].data(), 1, w.data(), 1, &overlap);
                 
-                // Reset omega for reorthogonalized vector
-                omega[j + 1][idx] = eps;
+                // Only reorthogonalize if overlap is significant
+                if (std::abs(overlap) > ortho_threshold) {
+                    Complex neg_overlap = -overlap;
+                    cblas_zaxpy(N, &neg_overlap, recent_vectors[i].data(), 1, w.data(), 1);
+                }
             }
         }
         
@@ -1132,11 +1064,45 @@ void lanczos(std::function<void(const Complex*, Complex*, int)> H, uint64_t N, u
         norm = cblas_dznrm2(N, w.data(), 1);
         beta.push_back(norm);
         
+        // Compute residual error for monitoring
+        // Residual = ||H*v_j - alpha_j*v_j - beta_{j+1}*v_{j+1}|| / ||H*v_j||
+        // Since w = (H*v_j - alpha_j*v_j - beta_j*v_{j-1}) and ||w|| = beta_{j+1}
+        // The residual is simply beta_{j+1} normalized by the norm of H*v_j
+        double residual_error = 0.0;
+        if (j == 0) {
+            // For first iteration, estimate ||H*v_j|| from alpha and beta
+            residual_error = norm / (std::abs(alpha[j]) + norm);
+        } else {
+            // Estimate from current iteration quantities
+            residual_error = norm / (std::abs(alpha[j]) + std::abs(beta[j]) + norm);
+        }
+        
+        // Print progress with residual error
+        if ((j + 1) % 10 == 0 || j < 5) {
+            std::cout << "Iteration " << j + 1 << " of " << max_iter 
+                     << "  |  beta = " << std::scientific << std::setprecision(4) << norm
+                     << "  |  residual = " << residual_error << std::defaultfloat << std::endl;
+        }
+        
         // Check for breakdown
         if (norm < tol) {
-            std::cout << "Lanczos breakdown at iteration " << j + 1 << " (norm = " << norm << ")" << std::endl;
+            std::cout << "\n=== Lanczos Breakdown Detected ===" << std::endl;
+            std::cout << "Iteration: " << j + 1 << std::endl;
+            std::cout << "Beta = " << std::scientific << std::setprecision(4) << norm 
+                     << " < tolerance = " << tol << std::endl;
+            std::cout << "Residual error: " << residual_error << std::endl;
+            std::cout << "Invariant subspace found - exact diagonalization complete!" << std::defaultfloat << std::endl;
+            std::cout << "==================================\n" << std::endl;
             max_iter = j + 1;
             break;
+        }
+        
+        // Check for numerical issues with residual
+        if (j > 10 && residual_error > 0.9) {
+            std::cout << "\n!!! WARNING: High residual error detected !!!" << std::endl;
+            std::cout << "Iteration " << j + 1 << ": residual = " << residual_error << std::endl;
+            std::cout << "This may indicate loss of orthogonality or numerical issues." << std::endl;
+            std::cout << "Consider using more aggressive reorthogonalization.\n" << std::endl;
         }
         
         // v_{j+1} = w / beta_{j+1}

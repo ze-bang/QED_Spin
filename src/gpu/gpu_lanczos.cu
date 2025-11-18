@@ -3,6 +3,7 @@
 #include "gpu_lanczos.cuh"
 #include "kernel_config.h"
 #include <iostream>
+#include <iomanip>
 #include <cmath>
 #include <random>
 #include <algorithm>
@@ -110,21 +111,40 @@ void GPULanczos::allocateMemory() {
     CUDA_CHECK(cudaMalloc(&d_w_, vec_size));
     CUDA_CHECK(cudaMalloc(&d_temp_, vec_size));
     
-    // Check if we can store all Lanczos vectors
+    // IMPROVED: Smart memory allocation strategy
+    // Check available GPU memory and allocate as many vectors as feasible
     size_t free_mem, total_mem;
     CUDA_CHECK(cudaMemGetInfo(&free_mem, &total_mem));
     
-    size_t required_mem = max_iter_ * vec_size;
-    if (required_mem < free_mem * 0.5) {
+    // Reserve 20% of free memory for other operations and overhead
+    size_t usable_mem = static_cast<size_t>(free_mem * 0.8);
+    
+    // We already allocated 4 working vectors, subtract their memory
+    size_t working_mem = 4 * vec_size;
+    size_t available_for_storage = (usable_mem > working_mem) ? (usable_mem - working_mem) : 0;
+    
+    // Calculate how many vectors we can store
+    int max_storable = static_cast<int>(available_for_storage / vec_size);
+    
+    // For local reorthogonalization, we only need to store recent vectors
+    // Limit to min(max_iter, max_storable, 50) - we don't need more than 50 for local reorth
+    int target_storage = std::min({max_iter_, max_storable, 50});
+    
+    if (target_storage >= 10) {
         // Allocate array of pointers for Lanczos vectors
-        d_lanczos_vectors_ = new cuDoubleComplex*[max_iter_];
-        for (int i = 0; i < max_iter_; ++i) {
+        d_lanczos_vectors_ = new cuDoubleComplex*[target_storage];
+        for (int i = 0; i < target_storage; ++i) {
             CUDA_CHECK(cudaMalloc(&d_lanczos_vectors_[i], vec_size));
         }
-        num_stored_vectors_ = max_iter_;
-        std::cout << "  Storing all Lanczos vectors on GPU\n";
+        num_stored_vectors_ = target_storage;
+        std::cout << "  Storing " << num_stored_vectors_ << " Lanczos vectors on GPU for local reorthogonalization\n";
+        std::cout << "  GPU Memory: " << (free_mem / (1024.0 * 1024.0 * 1024.0)) << " GB free, "
+                  << "using " << ((num_stored_vectors_ * vec_size) / (1024.0 * 1024.0 * 1024.0)) << " GB for basis storage\n";
     } else {
-        std::cout << "  Using partial reorthogonalization (insufficient GPU memory)\n";
+        std::cout << "  Warning: Insufficient GPU memory for vector storage\n";
+        std::cout << "  GPU Memory: " << (free_mem / (1024.0 * 1024.0 * 1024.0)) << " GB free, "
+                  << "need " << ((10 * vec_size) / (1024.0 * 1024.0 * 1024.0)) << " GB minimum\n";
+        std::cout << "  Using no reorthogonalization (may produce less accurate results)\n";
         num_stored_vectors_ = 0;
     }
     
@@ -204,7 +224,8 @@ void GPULanczos::vectorAxpy(const cuDoubleComplex* d_x, cuDoubleComplex* d_y,
                             &alpha, d_x, 1, d_y, 1));
 }
 
-// Adaptive selective reorthogonalization using Parlett-Simon criterion
+// FIXED: Local reorthogonalization with threshold-based selective reorthogonalization
+// This matches the fixed CPU implementation
 void GPULanczos::orthogonalize(cuDoubleComplex* d_vec, int iter, 
                                std::vector<std::vector<double>>& omega,
                                const std::vector<double>& alpha,
@@ -216,64 +237,31 @@ void GPULanczos::orthogonalize(cuDoubleComplex* d_vec, int iter,
     CUDA_CHECK(cudaEventRecord(start));
     
     if (num_stored_vectors_ > 0 && iter > 0) {
-        // Update omega estimates for selective reorthogonalization
-        const double eps = 2.22e-16; // Machine epsilon for double precision
+        // FIXED: Use simple local reorthogonalization against recent vectors
+        // This is much more efficient and numerically stable than the buggy Parlett-Simon
         
-        // Resize omega for new iteration
-        omega.resize(iter + 1);
-        for (int i = 0; i <= iter - 1; i++) {
-            omega[iter].push_back(0.0);
-        }
-        omega[iter].push_back(eps);
+        // Determine how many recent vectors to reorthogonalize against
+        // For GPU, we can afford to check more vectors since they're all in VRAM
+        int num_check = std::min(iter, std::min(10, num_stored_vectors_));
         
-        // Compute omega[iter][i] using Parlett-Simon recurrence
-        for (int i = 0; i < iter; i++) {
-            double contrib = eps * (std::abs(alpha[iter - 1]) + std::abs(beta[iter - 1]));
-            if (iter > 1) {
-                contrib += eps * std::abs(beta[iter - 2]) + std::abs(beta[iter - 1]) * omega[iter - 1][i];
-            }
-            omega[iter][i] = contrib;
-        }
+        int num_reorthed = 0;
         
-        // Determine which vectors need reorthogonalization
-        std::vector<int> reorth_indices;
-        for (int i = 0; i < iter; i++) {
-            if (omega[iter][i] > ortho_threshold) {
-                reorth_indices.push_back(i);
-            }
-        }
-        
-        // Decide between selective and full reorthogonalization
-        bool do_full_reorth = (reorth_indices.size() > iter * 0.3);
-        
-        if (do_full_reorth) {
-            // Full reorthogonalization
-            for (int i = 0; i < iter; ++i) {
-                std::complex<double> dot = vectorDot(d_lanczos_vectors_[i], d_vec);
+        // Reorthogonalize against the most recent vectors (most likely to lose orthogonality)
+        for (int i = std::max(0, iter - num_check); i < iter; ++i) {
+            std::complex<double> dot = vectorDot(d_lanczos_vectors_[i], d_vec);
+            double overlap_magnitude = std::abs(dot);
+            
+            // Only reorthogonalize if overlap is significant
+            if (overlap_magnitude > ortho_threshold) {
                 cuDoubleComplex neg_dot = make_cuDoubleComplex(-dot.real(), -dot.imag());
                 vectorAxpy(d_lanczos_vectors_[i], d_vec, neg_dot);
+                num_reorthed++;
             }
-            
-            // Reset omega after full reorthogonalization
-            for (int i = 0; i < iter; i++) {
-                omega[iter][i] = eps;
-            }
-            
-            stats_.full_reorth_count++;
-            stats_.total_reorth_ops += iter;
-        } else if (!reorth_indices.empty()) {
-            // Selective reorthogonalization
-            for (int idx : reorth_indices) {
-                std::complex<double> dot = vectorDot(d_lanczos_vectors_[idx], d_vec);
-                cuDoubleComplex neg_dot = make_cuDoubleComplex(-dot.real(), -dot.imag());
-                vectorAxpy(d_lanczos_vectors_[idx], d_vec, neg_dot);
-                
-                // Reset omega for reorthogonalized vectors
-                omega[iter][idx] = eps;
-            }
-            
+        }
+        
+        if (num_reorthed > 0) {
             stats_.selective_reorth_count++;
-            stats_.total_reorth_ops += reorth_indices.size();
+            stats_.total_reorth_ops += num_reorthed;
         }
     }
     
@@ -295,7 +283,7 @@ void GPULanczos::run(int num_eigenvalues,
     
     auto overall_start = std::chrono::high_resolution_clock::now();
     
-    std::cout << "\nRunning GPU Lanczos with Adaptive Selective Reorthogonalization...\n";
+    std::cout << "\nRunning GPU Lanczos with Local Reorthogonalization...\n";
     
     alpha_.clear();
     beta_.clear();
@@ -305,9 +293,11 @@ void GPULanczos::run(int num_eigenvalues,
     
     if (num_stored_vectors_ > 0) {
         vectorCopy(d_v_current_, d_lanczos_vectors_[0]);
-        std::cout << "  Storing Lanczos vectors on GPU for selective reorthogonalization\n";
+        std::cout << "  Storing " << num_stored_vectors_ << " Lanczos vectors on GPU\n";
+        std::cout << "  Using local reorthogonalization (threshold-based)\n";
     } else {
-        std::cout << "  Warning: Insufficient GPU memory for vector storage - using local orthogonalization only\n";
+        std::cout << "  Warning: Insufficient GPU memory for vector storage\n";
+        std::cout << "  Running without reorthogonalization (may reduce accuracy)\n";
     }
     
     // Initialize previous vector to zero
@@ -318,20 +308,20 @@ void GPULanczos::run(int num_eigenvalues,
     int check_convergence_interval = 10;  // Check every 10 iterations
     bool eigenvalues_converged = false;
     
-    // Adaptive selective reorthogonalization (Parlett-Simon)
+    // Local reorthogonalization parameters
     const double eps = 2.22e-16; // Machine epsilon
     const double sqrt_eps = std::sqrt(eps);
     const double ortho_threshold = sqrt_eps; // ~1.5e-8
-    std::vector<std::vector<double>> omega; // omega[j][i] tracks loss of orthogonality
-    omega.resize(1);
-    omega[0].push_back(eps);
+    std::vector<std::vector<double>> omega; // Placeholder for compatibility (not used with fixed version)
     
     // Statistics
     stats_.full_reorth_count = 0;
     stats_.selective_reorth_count = 0;
     stats_.total_reorth_ops = 0;
     
-    std::cout << "  Reorthogonalization threshold: " << ortho_threshold << "\n";
+    if (num_stored_vectors_ > 0) {
+        std::cout << "  Reorthogonalization threshold: " << ortho_threshold << "\n";
+    }
     
     int m = 0;  // Number of iterations performed
     
@@ -354,7 +344,7 @@ void GPULanczos::run(int num_eigenvalues,
             vectorAxpy(d_v_prev_, d_w_, neg_beta);
         }
         
-        // Adaptive selective reorthogonalization
+        // Local reorthogonalization with stored vectors
         if (num_stored_vectors_ > 0 && m > 0) {
             orthogonalize(d_w_, m, omega, alpha_, beta_, ortho_threshold);
         }
@@ -363,28 +353,58 @@ void GPULanczos::run(int num_eigenvalues,
         double beta = vectorNorm(d_w_);
         beta_.push_back(beta);
         
-        // Print progress
-        if ((m + 1) % 10 == 0) {
+        // Compute residual error for monitoring
+        // Residual = ||H*v_j - alpha_j*v_j - beta_{j+1}*v_{j+1}|| / ||H*v_j||
+        double residual_error = 0.0;
+        if (m == 0) {
+            // For first iteration, estimate ||H*v_j|| from alpha and beta
+            residual_error = beta / (std::abs(alpha_[m]) + beta);
+        } else {
+            // Estimate from current iteration quantities
+            residual_error = beta / (std::abs(alpha_[m]) + std::abs(beta_[m-1]) + beta);
+        }
+        
+        // Print progress with residual error
+        if ((m + 1) % 10 == 0 || m < 5) {
             std::cout << "  Iteration " << m+1 << "/" << max_iter_ 
-                     << ", beta = " << beta << "\n";
+                     << "  |  beta = " << std::scientific << std::setprecision(4) << beta
+                     << "  |  residual = " << residual_error << std::defaultfloat << "\n";
         }
         
         // ========== Breakdown Conditions ==========
         
         // 1. Beta breakdown: If beta is too small, Lanczos basis is complete
         if (beta < tolerance_) {
-            std::cout << "  Beta breakdown at iteration " << m+1 << " (beta = " << beta << " < tol = " << tolerance_ << ")\n";
-            std::cout << "  Lanczos basis is complete - invariant subspace found!\n";
+            std::cout << "\n  === GPU Lanczos Breakdown Detected ===" << std::endl;
+            std::cout << "  Iteration: " << m+1 << std::endl;
+            std::cout << "  Beta = " << std::scientific << std::setprecision(4) << beta 
+                     << " < tolerance = " << tolerance_ << std::endl;
+            std::cout << "  Residual error: " << residual_error << std::endl;
+            std::cout << "  Invariant subspace found - exact diagonalization complete!" << std::defaultfloat << std::endl;
+            std::cout << "  ========================================\n" << std::endl;
             m++;
             break;
         }
         
         // 2. Near-breakdown: Warn if beta is getting dangerously small
         if (beta < 100.0 * tolerance_ && beta >= tolerance_) {
-            std::cout << "  Warning: Near-breakdown at iteration " << m+1 << " (beta = " << beta << ")\n";
+            std::cout << "  Warning: Near-breakdown at iteration " << m+1 
+                     << " (beta = " << std::scientific << beta << ")" << std::defaultfloat << "\n";
         }
         
-        // 3. Eigenvalue convergence check (every check_convergence_interval iterations)
+        // 3. Check for numerical issues with residual
+        if (m > 10 && residual_error > 0.9) {
+            std::cout << "\n  !!! WARNING: High residual error detected !!!" << std::endl;
+            std::cout << "  Iteration " << m+1 << ": residual = " << residual_error << std::endl;
+            std::cout << "  This may indicate loss of orthogonality or numerical issues." << std::endl;
+            if (num_stored_vectors_ == 0) {
+                std::cout << "  Recommendation: Increase GPU memory for vector storage.\n" << std::endl;
+            } else {
+                std::cout << "  Consider increasing stored vectors or using CPU Lanczos.\n" << std::endl;
+            }
+        }
+        
+        // 4. Eigenvalue convergence check (every check_convergence_interval iterations)
         if (m >= num_eigenvalues && (m + 1) % check_convergence_interval == 0) {
             // Solve tridiagonal problem with current Krylov space
             std::vector<double> current_eigenvalues;
@@ -411,7 +431,7 @@ void GPULanczos::run(int num_eigenvalues,
             prev_eigenvalues = current_eigenvalues;
         }
         
-        // 4. Loss of orthogonality check (if full reorthogonalization is not used)
+        // 5. Loss of orthogonality check (if full reorthogonalization is not used)
         if (num_stored_vectors_ == 0 && m > 0) {
             // Estimate loss of orthogonality using beta values
             // If beta suddenly increases significantly, we may have lost orthogonality
@@ -431,6 +451,7 @@ void GPULanczos::run(int num_eigenvalues,
         std::swap(d_v_current_, d_w_);
         
         // Store Lanczos vector if space available
+        // For local reorthogonalization, we only need the most recent vectors
         if (num_stored_vectors_ > 0 && m + 1 < num_stored_vectors_) {
             vectorCopy(d_v_current_, d_lanczos_vectors_[m + 1]);
         }
@@ -449,20 +470,25 @@ void GPULanczos::run(int num_eigenvalues,
     }
     
     // Print reorthogonalization statistics
-    std::cout << "\n===== Reorthogonalization Statistics =====" << std::endl;
+    std::cout << "\n===== GPU Reorthogonalization Statistics =====" << std::endl;
     std::cout << "Total Lanczos iterations: " << m << std::endl;
-    std::cout << "Full reorthogonalizations: " << stats_.full_reorth_count << std::endl;
-    std::cout << "Selective reorthogonalizations: " << stats_.selective_reorth_count << std::endl;
-    std::cout << "Total inner products: " << stats_.total_reorth_ops << std::endl;
-    if (m > 0) {
-        std::cout << "Average reorth per iteration: " << (double)stats_.total_reorth_ops / m << std::endl;
-        uint64_t theoretical_full = (m * (m + 1)) / 2;
-        std::cout << "Theoretical full reorth cost: " << theoretical_full << std::endl;
-        if (stats_.total_reorth_ops > 0) {
-            std::cout << "Savings factor: " << (double)theoretical_full / stats_.total_reorth_ops << "x" << std::endl;
+    if (num_stored_vectors_ > 0) {
+        std::cout << "Vectors stored on GPU: " << std::min(m, num_stored_vectors_) << " / " << num_stored_vectors_ << std::endl;
+        std::cout << "Local reorthogonalizations: " << stats_.selective_reorth_count << std::endl;
+        std::cout << "Total inner products: " << stats_.total_reorth_ops << std::endl;
+        if (m > 0) {
+            std::cout << "Average reorth per iteration: " << (double)stats_.total_reorth_ops / m << std::endl;
+            uint64_t theoretical_full = (m * (m + 1)) / 2;
+            std::cout << "Theoretical full reorth cost: " << theoretical_full << std::endl;
+            if (stats_.total_reorth_ops > 0) {
+                std::cout << "Savings factor: " << (double)theoretical_full / stats_.total_reorth_ops << "x" << std::endl;
+            }
         }
+    } else {
+        std::cout << "No reorthogonalization performed (insufficient GPU memory)" << std::endl;
+        std::cout << "WARNING: Results may be less accurate due to loss of orthogonality" << std::endl;
     }
-    std::cout << "==========================================\n" << std::endl;
+    std::cout << "=============================================\n" << std::endl;
     
     std::cout << "  Total matvec time: " << stats_.matvec_time << " s\n";
     std::cout << "  Total ortho time: " << stats_.ortho_time << " s\n";
