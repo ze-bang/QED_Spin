@@ -142,7 +142,7 @@ def calculate_qfi_from_spectral(omega, spectral_function, beta):
     """
     Calculate quantum Fisher information from spectral function.
     
-    QFI = 4 * ∫ S(ω) * [coth(βω/2) - (βω/2)/sinh²(βω/2)] dω
+    QFI = 4 * ∫ S(ω) * tanh(βω/2) * (1 - exp(-βω)) dω
     
     For β → ∞: QFI = 4 * ∫ S(ω) dω (only positive frequencies)
     """
@@ -163,7 +163,7 @@ def calculate_qfi_from_spectral(omega, spectral_function, beta):
         integrand = s_omega_pos * np.tanh(beta * omega_pos / 2.0) * (1 - np.exp(-beta * omega_pos))
 
         # Handle any NaN or inf values
-        integrand = np.nan_to_num(integrand, nan=0.0, posinf=0.0, neginf=0.0)
+        # integrand = np.nan_to_num(integrand, nan=0.0, posinf=0.0, neginf=0.0)
     
     qfi = 4.0 * np_trapz(integrand, omega_pos)
     return qfi
@@ -368,11 +368,25 @@ def _load_and_average_spectral(file_list):
         mean_omega = ref_omega
         mean_spectral = np.mean(all_spectral, axis=0)
     else:
-        # Need to interpolate to common grid if they don't match
-        print("    Warning: Omega arrays don't match across samples, using first sample's grid")
-        mean_omega = ref_omega
-        # For now, just use the first sample - could implement interpolation if needed
-        mean_spectral = all_spectral[0]
+        # Interpolate to common grid when omega arrays don't match
+        print("    Warning: Omega arrays don't match across samples, interpolating to common grid")
+        
+        # Find the common omega range
+        omega_min = max(omega[0] for omega in all_omega)
+        omega_max = min(omega[-1] for omega in all_omega)
+        
+        # Use the densest grid size among all samples
+        n_points = max(len(omega) for omega in all_omega)
+        mean_omega = np.linspace(omega_min, omega_max, n_points)
+        
+        # Interpolate each spectral function to the common grid
+        interpolated_spectral = []
+        for omega, spectral in zip(all_omega, all_spectral):
+            f = interp1d(omega, spectral, kind='linear', bounds_error=False, fill_value=0.0)
+            interpolated_spectral.append(f(mean_omega))
+        
+        # Average the interpolated spectral functions
+        mean_spectral = np.mean(interpolated_spectral, axis=0)
     
     return mean_omega, mean_spectral
 
