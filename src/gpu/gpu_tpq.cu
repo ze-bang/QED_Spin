@@ -54,6 +54,8 @@ GPUTPQSolver::GPUTPQSolver(GPUOperator* gpu_op, int N)
         std::cerr << "cuBLAS initialization failed!" << std::endl;
         throw std::runtime_error("cuBLAS init failed");
     }
+    // Set cuBLAS to use host pointer mode for scalar results
+    cublasSetPointerMode(cublas_handle_, CUBLAS_POINTER_MODE_HOST);
     
     // Create cuRAND generator
     curandStatus_t rand_stat = curandCreateGenerator(&curand_gen_, CURAND_RNG_PSEUDO_DEFAULT);

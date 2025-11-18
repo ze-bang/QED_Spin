@@ -247,14 +247,17 @@ void GPULanczos::orthogonalize(cuDoubleComplex* d_vec, int iter,
         int num_reorthed = 0;
         
         // Reorthogonalize against the most recent vectors (most likely to lose orthogonality)
+        // Use modulo indexing for circular buffer when iter >= num_stored_vectors_
         for (int i = std::max(0, iter - num_check); i < iter; ++i) {
-            std::complex<double> dot = vectorDot(d_lanczos_vectors_[i], d_vec);
+            // Use modulo for circular buffer indexing
+            int buffer_idx = i % num_stored_vectors_;
+            std::complex<double> dot = vectorDot(d_lanczos_vectors_[buffer_idx], d_vec);
             double overlap_magnitude = std::abs(dot);
             
             // Only reorthogonalize if overlap is significant
             if (overlap_magnitude > ortho_threshold) {
                 cuDoubleComplex neg_dot = make_cuDoubleComplex(-dot.real(), -dot.imag());
-                vectorAxpy(d_lanczos_vectors_[i], d_vec, neg_dot);
+                vectorAxpy(d_lanczos_vectors_[buffer_idx], d_vec, neg_dot);
                 num_reorthed++;
             }
         }
@@ -450,10 +453,12 @@ void GPULanczos::run(int num_eigenvalues,
         std::swap(d_v_prev_, d_v_current_);
         std::swap(d_v_current_, d_w_);
         
-        // Store Lanczos vector if space available
+        // Store Lanczos vector using circular buffer indexing
         // For local reorthogonalization, we only need the most recent vectors
-        if (num_stored_vectors_ > 0 && m + 1 < num_stored_vectors_) {
-            vectorCopy(d_v_current_, d_lanczos_vectors_[m + 1]);
+        if (num_stored_vectors_ > 0) {
+            // Use modulo for circular buffer: always overwrite oldest vector
+            int buffer_idx = (m + 1) % num_stored_vectors_;
+            vectorCopy(d_v_current_, d_lanczos_vectors_[buffer_idx]);
         }
     }
     
@@ -556,6 +561,15 @@ void GPULanczos::computeRitzVectors(
     
     std::cout << "\nComputing Ritz vectors...\n";
     
+    // Safety check: can only compute Ritz vectors if all needed Lanczos vectors are stored
+    size_t num_lanczos_vecs_needed = tridiag_eigenvecs.empty() ? 0 : tridiag_eigenvecs[0].size();
+    if (num_lanczos_vecs_needed > static_cast<size_t>(num_stored_vectors_)) {
+        std::cerr << "Warning: Cannot compute Ritz vectors - not enough Lanczos vectors stored\n";
+        std::cerr << "  Need: " << num_lanczos_vecs_needed << ", have: " << num_stored_vectors_ << "\n";
+        std::cerr << "  Increase GPU memory allocation or reduce max_iterations\n";
+        return;
+    }
+    
     eigenvectors.resize(num_vecs);
     
     for (int i = 0; i < num_vecs; ++i) {
@@ -565,9 +579,11 @@ void GPULanczos::computeRitzVectors(
         CUDA_CHECK(cudaMemset(d_temp_, 0, dimension_ * sizeof(cuDoubleComplex)));
         
         // Linear combination: eigenvec[i] = sum_j tridiag_eigenvecs[i][j] * lanczos_vectors[j]
-        for (size_t j = 0; j < tridiag_eigenvecs[i].size(); ++j) {
+        // Note: This assumes circular buffer hasn't wrapped (i.e., iterations <= num_stored_vectors_)
+        for (size_t j = 0; j < tridiag_eigenvecs[i].size() && j < static_cast<size_t>(num_stored_vectors_); ++j) {
             cuDoubleComplex coeff = make_cuDoubleComplex(tridiag_eigenvecs[i][j], 0.0);
-            vectorAxpy(d_lanczos_vectors_[j], d_temp_, coeff);
+            int buffer_idx = j % num_stored_vectors_;  // Use modulo for safety
+            vectorAxpy(d_lanczos_vectors_[buffer_idx], d_temp_, coeff);
         }
         
         // Copy back to host

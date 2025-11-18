@@ -1005,6 +1005,8 @@ GPUEDWrapper::runGPUDynamicalCorrelationMultiTemp(void* gpu_op_handle,
         // Normalize
         cublasHandle_t cublas_handle;
         cublasCreate(&cublas_handle);
+        // Set cuBLAS to use host pointer mode for scalar results
+        cublasSetPointerMode(cublas_handle, CUBLAS_POINTER_MODE_HOST);
         double norm;
         cublasDznrm2(cublas_handle, N, d_test_state, 1, &norm);
         cuDoubleComplex scale = make_cuDoubleComplex(1.0/norm, 0.0);
