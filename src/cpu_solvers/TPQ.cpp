@@ -1741,7 +1741,6 @@ void microcanonical_tpq(
             auto [e1, v1] = calculateEnergyAndVariance(H, v0, N);
             energy1 = e1;
             variance1 = v1;
-            double nsite = N; // This should be the actual number of sites, approximating as N for now
             inv_temp = (2.0) / (LargeValue* D_S - energy1);
 
             first_norm = cblas_dznrm2(N, v0.data(), 1);
@@ -1789,7 +1788,7 @@ void microcanonical_tpq(
             
             // First, do a quick check using estimated temperature
             // Estimate current inverse temperature (using last known energy)
-            double estimated_inv_temp = (2.0 * step) / (LargeValue * num_sites - energy1);
+            double estimated_inv_temp = (2.0 * step) / (LargeValue * D_S - energy1);
             
             // Check if we're potentially near any target temperature
             // Use a wider search window (5% instead of 1%) for the initial check
@@ -1815,7 +1814,7 @@ void microcanonical_tpq(
                 // Calculate energy and variance
                 auto [energy_step, variance_step] = calculateEnergyAndVariance(H, v0, N);
                 // Update inverse temperature with accurate energy
-                inv_temp = (2.0*step) / (LargeValue * num_sites - energy_step);
+                inv_temp = (2.0*step) / (LargeValue * D_S - energy_step);
                 
                 // Update energy for next iteration's estimate
                 energy1 = energy_step;
