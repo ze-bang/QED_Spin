@@ -189,6 +189,9 @@ struct EDParameters {
     uint64_t num_measure_freq = 100;    // Frequency of measurements
     double delta_tau = 1e-2;       // Time step for imaginary-time evolution (cTPQ)
     double large_value = 1e5;      // Large value for TPQ
+    bool continue_quenching = false;  // Continue quenching from saved state
+    uint64_t continue_sample = 0;          // Sample to continue from (0 = auto-detect lowest energy)
+    double continue_beta = 0.0;       // Beta to continue from (0.0 = use saved beta)
     
     // ========== FTLM-Specific Parameters ==========
     uint64_t ftlm_krylov_dim = 100;     // Krylov subspace dimension per sample
@@ -485,7 +488,10 @@ EDResults exact_diagonalization_core(
                             params.omega_min, params.omega_max,
                             params.num_points, params.t_end, params.dt, params.spin_length, 
                             params.measure_spin, params.sublattice_size, params.num_sites,
-                            params.fixed_sz_op); 
+                            params.fixed_sz_op,
+                            params.continue_quenching,
+                            params.continue_sample,
+                            params.continue_beta); 
             break;
 
         case DiagonalizationMethod::cTPQ:
@@ -1742,7 +1748,10 @@ inline EDResults exact_diagonalization_fixed_sz(
                 params.num_measure_freq,
                 eigenvalues,
                 params.output_dir,
-                params.large_value);
+                params.large_value,
+                params.continue_quenching,
+                params.continue_sample,
+                params.continue_beta);
         } else if (method == DiagonalizationMethod::cTPQ_GPU) {
             GPUEDWrapper::runGPUCanonicalTPQFixedSz(
                 gpu_op_handle, n_up,
@@ -2014,7 +2023,10 @@ EDResults exact_diagonalization_from_files(
                 params.num_measure_freq,
                 eigenvalues,
                 params.output_dir,
-                params.large_value
+                params.large_value,
+                params.continue_quenching,
+                params.continue_sample,
+                params.continue_beta
             );
             
             results.eigenvalues = eigenvalues;

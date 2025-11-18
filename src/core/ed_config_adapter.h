@@ -38,6 +38,9 @@ inline EDParameters toEDParameters(const EDConfig& config) {
     params.num_measure_freq = config.thermal.num_measure_freq;
     params.delta_tau = config.thermal.delta_tau;
     params.large_value = config.thermal.large_value;
+    params.continue_quenching = config.thermal.continue_quenching;
+    params.continue_sample = config.thermal.continue_sample;
+    params.continue_beta = config.thermal.continue_beta;
     
     // FTLM (via thermal config)
     params.ftlm_krylov_dim = config.thermal.ftlm_krylov_dim;
@@ -124,6 +127,9 @@ inline EDConfig fromEDParameters(const EDParameters& params, DiagonalizationMeth
     config.thermal.num_measure_freq = params.num_measure_freq;
     config.thermal.delta_tau = params.delta_tau;
     config.thermal.large_value = params.large_value;
+    config.thermal.continue_quenching = params.continue_quenching;
+    config.thermal.continue_sample = params.continue_sample;
+    config.thermal.continue_beta = params.continue_beta;
     
     // FTLM (via thermal config)
     config.thermal.ftlm_krylov_dim = params.ftlm_krylov_dim;

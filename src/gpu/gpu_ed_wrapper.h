@@ -70,7 +70,10 @@ public:
                                               int temp_interval,
                                               std::vector<double>& eigenvalues,
                                               std::string dir = "",
-                                              double large_value = 1e5);
+                                              double large_value = 1e5,
+                                              bool continue_quenching = false,
+                                              int continue_sample = 0,
+                                              double continue_beta = 0.0);
     
     /**
      * Run GPU TPQ for Fixed Sz sector (canonical)
@@ -158,7 +161,10 @@ public:
                                         int temp_interval,
                                         std::vector<double>& eigenvalues,
                                         std::string dir = "",
-                                        double large_value = 1e5);
+                                        double large_value = 1e5,
+                                        bool continue_quenching = false,
+                                        int continue_sample = 0,
+                                        double continue_beta = 0.0);
     
     /**
      * Run GPU-accelerated canonical TPQ

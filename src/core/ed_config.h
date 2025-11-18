@@ -53,6 +53,9 @@ struct ThermalConfig {
     uint64_t num_measure_freq = 100;   // Measurement frequency
     double delta_tau = 1e-2;      // Time step for cTPQ
     double large_value = 1e5;     // Large value for mTPQ
+    bool continue_quenching = false;  // Continue quenching from saved state
+    uint64_t continue_sample = 0;          // Sample to continue from (0 = auto-detect lowest energy)
+    double continue_beta = 0.0;       // Beta to continue from (0.0 = use saved beta)
     
     // FTLM-specific
     uint64_t ftlm_krylov_dim = 100;    // Krylov subspace dimension per sample

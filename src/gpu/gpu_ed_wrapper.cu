@@ -417,7 +417,10 @@ void GPUEDWrapper::runGPUMicrocanonicalTPQ(void* gpu_op_handle,
                                            int temp_interval,
                                            std::vector<double>& eigenvalues,
                                            std::string dir,
-                                           double large_value) {
+                                           double large_value,
+                                           bool continue_quenching,
+                                           int continue_sample,
+                                           double continue_beta) {
     if (!gpu_op_handle) {
         std::cerr << "Error: NULL GPU operator handle\n";
         return;
@@ -427,7 +430,8 @@ void GPUEDWrapper::runGPUMicrocanonicalTPQ(void* gpu_op_handle,
     GPUTPQSolver tpq_solver(gpu_op, N);
     
     tpq_solver.runMicrocanonicalTPQ(max_iter, num_samples, temp_interval,
-                                    eigenvalues, dir, large_value);
+                                    eigenvalues, dir, large_value, nullptr,
+                                    continue_quenching, continue_sample, continue_beta);
 }
 
 void GPUEDWrapper::runGPUMicrocanonicalTPQFixedSz(void* gpu_op_handle,
@@ -436,7 +440,10 @@ void GPUEDWrapper::runGPUMicrocanonicalTPQFixedSz(void* gpu_op_handle,
                                                  int temp_interval,
                                                  std::vector<double>& eigenvalues,
                                                  std::string dir,
-                                                 double large_value) {
+                                                 double large_value,
+                                                 bool continue_quenching,
+                                                 int continue_sample,
+                                                 double continue_beta) {
     if (!gpu_op_handle) {
         std::cerr << "Error: NULL GPU operator handle\n";
         return;
@@ -456,7 +463,8 @@ void GPUEDWrapper::runGPUMicrocanonicalTPQFixedSz(void* gpu_op_handle,
     GPUTPQSolver tpq_solver(gpu_op, fixed_sz_dim);
     
     tpq_solver.runMicrocanonicalTPQ(max_iter, num_samples, temp_interval,
-                                    eigenvalues, dir, large_value, gpu_op);
+                                    eigenvalues, dir, large_value, gpu_op,
+                                    continue_quenching, continue_sample, continue_beta);
     
     std::cout << "\nGPU Microcanonical TPQ Fixed Sz complete\n";
 }

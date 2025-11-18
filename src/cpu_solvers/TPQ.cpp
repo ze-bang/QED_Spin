@@ -1,5 +1,7 @@
 #include "TPQ.h"
 #include "../core/construct_ham.h"
+#include <filesystem>
+#include <regex>
 
 #ifdef WITH_MPI
 #include <mpi.h>
@@ -1211,6 +1213,108 @@ ComplexVector get_tpq_state_at_temperature(
     return tpq_state;
 }
 
+/**
+ * Find the lowest energy state from saved TPQ state files
+ * Searches through actual tpq_state_*_beta=*.dat files to find the highest beta (lowest energy)
+ */
+bool find_lowest_energy_tpq_state(
+    const std::string& tpq_dir,
+    uint64_t N,
+    uint64_t& out_sample,
+    double& out_beta,
+    uint64_t& out_step
+) {
+    namespace fs = std::filesystem;
+    
+    double max_beta = -1.0;
+    bool found = false;
+    
+    std::cout << "Searching for lowest energy state (highest beta) in " << tpq_dir << std::endl;
+    
+    // Search through directory for tpq_state files
+    if (!fs::exists(tpq_dir) || !fs::is_directory(tpq_dir)) {
+        std::cerr << "Error: Directory " << tpq_dir << " does not exist" << std::endl;
+        return false;
+    }
+    
+    // Regex to match tpq_state_i_beta=*.dat files where i is the sample index
+    std::regex state_pattern("tpq_state_([0-9]+)_beta=([0-9.]+)\\.dat");
+    
+    for (const auto& entry : fs::directory_iterator(tpq_dir)) {
+        if (!entry.is_regular_file()) continue;
+        
+        std::string filename = entry.path().filename().string();
+        std::smatch matches;
+        
+        // Check if this is a tpq_state file and extract sample and beta
+        if (std::regex_match(filename, matches, state_pattern)) {
+            if (matches.size() != 3) continue;
+            
+            try {
+                uint64_t sample = std::stoull(matches[1].str());
+                double beta = std::stod(matches[2].str());
+                
+                // Higher beta = lower energy, so we want the maximum beta
+                if (beta > max_beta) {
+                    max_beta = beta;
+                    out_sample = sample;
+                    out_beta = beta;
+                    found = true;
+                }
+            } catch (const std::exception& e) {
+                std::cerr << "Warning: Failed to parse filename: " << filename << std::endl;
+                continue;
+            }
+        }
+    }
+    
+    if (found) {
+        // Now find the step number from SS_rand file for this sample/beta
+        std::string ss_file = tpq_dir + "/SS_rand" + std::to_string(out_sample) + ".dat";
+        std::ifstream file(ss_file);
+        
+        if (file.is_open()) {
+            std::string line;
+            std::getline(file, line); // Skip header
+            
+            // Find the step corresponding to this beta
+            double min_diff = std::numeric_limits<double>::max();
+            while (std::getline(file, line)) {
+                std::istringstream iss(line);
+                double beta, energy, variance, norm, doublon;
+                uint64_t step;
+                
+                if (!(iss >> beta >> energy >> variance >> norm >> doublon >> step)) {
+                    continue;
+                }
+                
+                double diff = std::abs(beta - out_beta);
+                if (diff < min_diff) {
+                    min_diff = diff;
+                    out_step = step;
+                }
+            }
+            file.close();
+        } else {
+            // If SS_rand file doesn't exist, estimate step from beta
+            // Typical TPQ: beta ~ 2*step / (L*D_S - E)
+            out_step = 0; // Will be set to 0 to indicate unknown
+            std::cout << "Warning: Could not find SS_rand file to determine step number" << std::endl;
+        }
+        
+        std::cout << "Found lowest energy state (highest beta):" << std::endl;
+        std::cout << "  Sample: " << out_sample << std::endl;
+        std::cout << "  Beta: " << out_beta << std::endl;
+        std::cout << "  Step: " << out_step << std::endl;
+        std::cout << "  State file: tpq_state_" << out_sample << "_beta=" << out_beta << ".dat" << std::endl;
+    } else {
+        std::cerr << "Error: No valid TPQ state files found in " << tpq_dir << std::endl;
+        std::cerr << "  Looking for files matching pattern: tpq_state_*_beta=*.dat" << std::endl;
+    }
+    
+    return found;
+}
+
 
 
 /**
@@ -1387,7 +1491,10 @@ void microcanonical_tpq(
     bool measure_sz,
     uint64_t sublattice_size,
     uint64_t num_sites,
-    FixedSzOperator* fixed_sz_op
+    FixedSzOperator* fixed_sz_op,
+    bool continue_quenching,
+    uint64_t continue_sample,
+    double continue_beta
 ) {
     #ifdef WITH_MPI
     int rank = 0, size = 1;
@@ -1472,6 +1579,92 @@ void microcanonical_tpq(
 
     std::cout << "Setting LargeValue: " << LargeValue << std::endl;
     
+    // Handle continue-quenching mode
+    bool is_continuing = false;
+    uint64_t resume_sample = 0;
+    double resume_beta = 0.0;
+    uint64_t resume_step = 0;
+    
+    if (continue_quenching) {
+        std::cout << "\n==========================================\n";
+        std::cout << "CONTINUE QUENCHING MODE ENABLED\n";
+        std::cout << "==========================================\n";
+        
+        if (continue_sample == 0) {
+            // Auto-detect lowest energy state
+            std::cout << "Auto-detecting lowest energy state..." << std::endl;
+            if (find_lowest_energy_tpq_state(dir, N, resume_sample, resume_beta, resume_step)) {
+                is_continuing = true;
+            } else {
+                std::cerr << "Warning: Could not find saved state to continue from. Starting fresh." << std::endl;
+                is_continuing = false;
+            }
+        } else {
+            // Use specified sample
+            resume_sample = continue_sample;
+            std::cout << "Continuing from sample " << resume_sample << std::endl;
+            
+            // Find the beta and step for this sample
+            std::string ss_file = dir + "/SS_rand" + std::to_string(resume_sample) + ".dat";
+            std::ifstream file(ss_file);
+            
+            if (file.is_open()) {
+                std::string line;
+                std::getline(file, line); // Skip header
+                
+                // If continue_beta is specified, find closest beta
+                if (continue_beta > 0.0) {
+                    double min_diff = std::numeric_limits<double>::max();
+                    while (std::getline(file, line)) {
+                        std::istringstream iss(line);
+                        double beta, energy, variance, norm, doublon;
+                        uint64_t step_num;
+                        
+                        if (!(iss >> beta >> energy >> variance >> norm >> doublon >> step_num)) {
+                            continue;
+                        }
+                        
+                        double diff = std::abs(beta - continue_beta);
+                        if (diff < min_diff) {
+                            min_diff = diff;
+                            resume_beta = beta;
+                            resume_step = step_num;
+                        }
+                    }
+                } else {
+                    // Use last line (highest beta/lowest energy)
+                    std::string last_line;
+                    while (std::getline(file, line)) {
+                        if (!line.empty()) last_line = line;
+                    }
+                    
+                    if (!last_line.empty()) {
+                        std::istringstream iss(last_line);
+                        double energy, variance, norm, doublon;
+                        iss >> resume_beta >> energy >> variance >> norm >> doublon >> resume_step;
+                    }
+                }
+                file.close();
+                
+                if (resume_step > 0) {
+                    is_continuing = true;
+                } else {
+                    std::cerr << "Warning: Could not determine step to resume from. Starting fresh." << std::endl;
+                }
+            } else {
+                std::cerr << "Warning: Could not open " << ss_file << ". Starting fresh." << std::endl;
+            }
+        }
+        
+        if (is_continuing) {
+            std::cout << "Resuming from:" << std::endl;
+            std::cout << "  Sample: " << resume_sample << std::endl;
+            std::cout << "  Beta: " << resume_beta << std::endl;
+            std::cout << "  Step: " << resume_step << std::endl;
+            std::cout << "==========================================\n" << std::endl;
+        }
+    }
+    
     // Modified loop: only process samples assigned to this rank
     for (uint64_t sample = start_sample; sample < end_sample; sample++) {
         #ifdef WITH_MPI
@@ -1486,46 +1679,91 @@ void microcanonical_tpq(
         std::vector<bool> temp_measured(num_temp_points, false);
         auto [ss_file, norm_file, flct_file, spin_corr] = initializeTPQFiles(dir, sample, sublattice_size);
         
-        // Generate initial random state (already normalized)
-        uint64_t seed = static_cast< int>(time(NULL)) + sample;
-        ComplexVector v0 = generateTPQVector(N, seed);
+        // Variables that will be initialized differently for continue mode
+        ComplexVector v0;
+        uint64_t step;
+        double inv_temp;
+        double energy1, variance1;
+        double first_norm, current_norm;
         
         // Temp buffer for Hamiltonian applications (reused throughout)
         ComplexVector temp(N);
         Complex minus_one(-1.0, 0.0);
         
-        // Apply initial transformation: v0 = (L*D_S - H)|v0⟩
-        H(v0.data(), temp.data(), N);
-        Complex scale_factor_large(LargeValue * D_S, 0.0);
-        cblas_zscal(N, &scale_factor_large, v0.data(), 1);  // v0 *= L*D_S
-        cblas_zaxpy(N, &minus_one, temp.data(), 1, v0.data(), 1);  // v0 = v0 - temp
-        
-        // Write initial state (infinite temperature)
-        double inv_temp = 0.0;
-        uint64_t step = 1;
-        
-        // Calculate energy and variance for step 1
-        auto [energy1, variance1] = calculateEnergyAndVariance(H, v0, N);
-        double nsite = N; // This should be the actual number of sites, approximating as N for now
-        inv_temp = (2.0) / (LargeValue* D_S - energy1);
+        // Check if we should continue from saved state for this sample
+        if (is_continuing && sample == resume_sample) {
+            std::cout << "Loading saved state to continue quenching..." << std::endl;
+            
+            // Load the saved state
+            std::string state_file = dir + "/tpq_state_" + std::to_string(sample) 
+                                     + "_beta=" + std::to_string(resume_beta) + ".dat";
+            
+            v0.resize(N);
+            if (!load_tpq_state(v0, state_file)) {
+                std::cerr << "Error: Could not load TPQ state from " << state_file << std::endl;
+                std::cerr << "Starting fresh for this sample." << std::endl;
+                goto fresh_start;
+            }
+            
+            // Set starting point from loaded state
+            step = resume_step;
+            inv_temp = resume_beta;
+            
+            // Calculate energy and variance of loaded state
+            auto [loaded_energy, loaded_variance] = calculateEnergyAndVariance(H, v0, N);
+            energy1 = loaded_energy;
+            variance1 = loaded_variance;
+            
+            first_norm = cblas_dznrm2(N, v0.data(), 1);
+            current_norm = first_norm;
+            
+            std::cout << "Loaded state properties:" << std::endl;
+            std::cout << "  Energy: " << energy1 << std::endl;
+            std::cout << "  Variance: " << variance1 << std::endl;
+            std::cout << "  Beta: " << inv_temp << std::endl;
+            std::cout << "Continuing from step " << step << "..." << std::endl;
+        } else {
+            fresh_start:
+            // Generate initial random state (already normalized)
+            uint64_t seed = static_cast< int>(time(NULL)) + sample;
+            v0 = generateTPQVector(N, seed);
+            
+            // Apply initial transformation: v0 = (L*D_S - H)|v0⟩
+            H(v0.data(), temp.data(), N);
+            Complex scale_factor_large(LargeValue * D_S, 0.0);
+            cblas_zscal(N, &scale_factor_large, v0.data(), 1);  // v0 *= L*D_S
+            cblas_zaxpy(N, &minus_one, temp.data(), 1, v0.data(), 1);  // v0 = v0 - temp
+            
+            // Write initial state (infinite temperature)
+            step = 1;
+            
+            // Calculate energy and variance for step 1
+            auto [e1, v1] = calculateEnergyAndVariance(H, v0, N);
+            energy1 = e1;
+            variance1 = v1;
+            double nsite = N; // This should be the actual number of sites, approximating as N for now
+            inv_temp = (2.0) / (LargeValue* D_S - energy1);
 
-        double first_norm = cblas_dznrm2(N, v0.data(), 1);
-        Complex scale_factor = Complex(1.0/first_norm, 0.0);
+            first_norm = cblas_dznrm2(N, v0.data(), 1);
+            Complex scale_factor = Complex(1.0/first_norm, 0.0);
 
-        cblas_zscal(N, &scale_factor, v0.data(), 1);
+            cblas_zscal(N, &scale_factor, v0.data(), 1);
 
-        double current_norm = first_norm;
-        
-        writeTPQData(ss_file, inv_temp, energy1, variance1, current_norm, step);
-        
-        {
-            std::ofstream norm_out(norm_file, std::ios::app);
-            norm_out << std::setprecision(16) << inv_temp << " " 
-                     << current_norm << " " << first_norm << " " << step << std::endl;
+            current_norm = first_norm;
+            
+            writeTPQData(ss_file, inv_temp, energy1, variance1, current_norm, step);
+            
+            {
+                std::ofstream norm_out(norm_file, std::ios::app);
+                norm_out << std::setprecision(16) << inv_temp << " " 
+                         << current_norm << " " << first_norm << " " << step << std::endl;
+            }
+            
+            step = 2; // Start main loop from step 2
         }
         
         // Main TPQ loop - using in-place operations with single temp buffer
-        for (step = 2; step <= max_iter; step++) {
+        for (; step <= max_iter; step++) {
             // Report progress
             if (step % (max_iter/10) == 0 || step == max_iter) {
                 std::cout << "  Step " << step << " of " << max_iter << std::endl;
@@ -1541,7 +1779,7 @@ void microcanonical_tpq(
             cblas_zaxpy(N, &minus_one, temp.data(), 1, v0.data(), 1);  // v0 = v0 - temp
 
             current_norm = cblas_dznrm2(N, v0.data(), 1);
-            scale_factor = Complex(1.0/current_norm, 0.0);
+            Complex scale_factor = Complex(1.0/current_norm, 0.0);
             cblas_zscal(N, &scale_factor, v0.data(), 1);
             
             // Check if we should measure observables at target temperatures

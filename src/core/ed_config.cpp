@@ -124,6 +124,10 @@ EDConfig EDConfig::fromFile(const std::string& filename) {
             else if (key == "use_hybrid_method") config.thermal.use_hybrid_method = (value == "true" || value == "1");
             else if (key == "hybrid_crossover") config.thermal.hybrid_crossover = std::stod(value);
             else if (key == "hybrid_auto_crossover") config.thermal.hybrid_auto_crossover = (value == "true" || value == "1");
+            // TPQ continue-quenching parameters
+            else if (key == "continue_quenching") config.thermal.continue_quenching = (value == "true" || value == "1");
+            else if (key == "continue_sample") config.thermal.continue_sample = std::stoi(value);
+            else if (key == "continue_beta") config.thermal.continue_beta = std::stod(value);
             else if (key == "calc_observables") config.observable.calculate = (value == "true" || value == "1");
             else if (key == "measure_spin") config.observable.measure_spin = (value == "true" || value == "1");
             else if (key == "run_standard") config.workflow.run_standard = (value == "true" || value == "1");
