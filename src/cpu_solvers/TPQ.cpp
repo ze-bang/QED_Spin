@@ -1215,7 +1215,8 @@ ComplexVector get_tpq_state_at_temperature(
 
 /**
  * Find the lowest energy state from saved TPQ state files
- * Searches through actual tpq_state_*_beta=*.dat files to find the highest beta (lowest energy)
+ * Searches through tpq_state_*_beta=*_step=*.dat (or legacy tpq_state_*_beta=*.dat) files 
+ * to find the highest beta (lowest energy)
  */
 bool find_lowest_energy_tpq_state(
     const std::string& tpq_dir,
@@ -1237,8 +1238,10 @@ bool find_lowest_energy_tpq_state(
         return false;
     }
     
-    // Regex to match tpq_state_i_beta=*.dat files where i is the sample index
-    std::regex state_pattern("tpq_state_([0-9]+)_beta=([0-9.]+)\\.dat");
+    // Regex to match tpq_state_i_beta=*_step=*.dat files (new format with step)
+    std::regex state_pattern_new("tpq_state_([0-9]+)_beta=([0-9.]+)_step=([0-9]+)\\.dat");
+    // Also support legacy pattern: tpq_state_i_beta=*.dat
+    std::regex state_pattern_legacy("tpq_state_([0-9]+)_beta=([0-9.]+)\\.dat");
     
     for (const auto& entry : fs::directory_iterator(tpq_dir)) {
         if (!entry.is_regular_file()) continue;
@@ -1246,70 +1249,92 @@ bool find_lowest_energy_tpq_state(
         std::string filename = entry.path().filename().string();
         std::smatch matches;
         
-        // Check if this is a tpq_state file and extract sample and beta
-        if (std::regex_match(filename, matches, state_pattern)) {
-            if (matches.size() != 3) continue;
-            
-            try {
-                uint64_t sample = std::stoull(matches[1].str());
-                double beta = std::stod(matches[2].str());
-                
-                // Higher beta = lower energy, so we want the maximum beta
-                if (beta > max_beta) {
-                    max_beta = beta;
-                    out_sample = sample;
-                    out_beta = beta;
-                    found = true;
+        uint64_t sample = 0;
+        double beta = 0.0;
+        uint64_t step = 0;
+        bool matched = false;
+        
+        // Try new format first
+        if (std::regex_match(filename, matches, state_pattern_new)) {
+            if (matches.size() == 4) {
+                try {
+                    sample = std::stoull(matches[1].str());
+                    beta = std::stod(matches[2].str());
+                    step = std::stoull(matches[3].str());
+                    matched = true;
+                } catch (const std::exception& e) {
+                    std::cerr << "Warning: Failed to parse filename: " << filename << std::endl;
+                    continue;
                 }
-            } catch (const std::exception& e) {
-                std::cerr << "Warning: Failed to parse filename: " << filename << std::endl;
-                continue;
+            }
+        }
+        // Fall back to legacy format
+        else if (std::regex_match(filename, matches, state_pattern_legacy)) {
+            if (matches.size() == 3) {
+                try {
+                    sample = std::stoull(matches[1].str());
+                    beta = std::stod(matches[2].str());
+                    step = 0; // Will need to look up from SS_rand
+                    matched = true;
+                } catch (const std::exception& e) {
+                    std::cerr << "Warning: Failed to parse filename: " << filename << std::endl;
+                    continue;
+                }
+            }
+        }
+        
+        if (matched) {
+            // Higher beta = lower energy, so we want the maximum beta
+            if (beta > max_beta) {
+                max_beta = beta;
+                out_sample = sample;
+                out_beta = beta;
+                out_step = step;
+                found = true;
             }
         }
     }
     
     if (found) {
-        // Now find the step number from SS_rand file for this sample/beta
-        std::string ss_file = tpq_dir + "/SS_rand" + std::to_string(out_sample) + ".dat";
-        std::ifstream file(ss_file);
-        
-        if (file.is_open()) {
-            std::string line;
-            std::getline(file, line); // Skip header
+        // If step was not in filename (legacy format), look it up from SS_rand file
+        if (out_step == 0) {
+            std::string ss_file = tpq_dir + "/SS_rand" + std::to_string(out_sample) + ".dat";
+            std::ifstream file(ss_file);
             
-            // Find the step corresponding to this beta
-            double min_diff = std::numeric_limits<double>::max();
-            while (std::getline(file, line)) {
-                std::istringstream iss(line);
-                double beta, energy, variance, norm, doublon;
-                uint64_t step;
+            if (file.is_open()) {
+                std::string line;
+                std::getline(file, line); // Skip header
                 
-                if (!(iss >> beta >> energy >> variance >> norm >> doublon >> step)) {
-                    continue;
+                // Find the step corresponding to this beta
+                double min_diff = std::numeric_limits<double>::max();
+                while (std::getline(file, line)) {
+                    std::istringstream iss(line);
+                    double beta, energy, variance, norm, doublon;
+                    uint64_t step;
+                    
+                    if (!(iss >> beta >> energy >> variance >> norm >> doublon >> step)) {
+                        continue;
+                    }
+                    
+                    double diff = std::abs(beta - out_beta);
+                    if (diff < min_diff) {
+                        min_diff = diff;
+                        out_step = step;
+                    }
                 }
-                
-                double diff = std::abs(beta - out_beta);
-                if (diff < min_diff) {
-                    min_diff = diff;
-                    out_step = step;
-                }
+                file.close();
+            } else {
+                std::cout << "Warning: Could not find SS_rand file to determine step number" << std::endl;
             }
-            file.close();
-        } else {
-            // If SS_rand file doesn't exist, estimate step from beta
-            // Typical TPQ: beta ~ 2*step / (L*D_S - E)
-            out_step = 0; // Will be set to 0 to indicate unknown
-            std::cout << "Warning: Could not find SS_rand file to determine step number" << std::endl;
         }
         
         std::cout << "Found lowest energy state (highest beta):" << std::endl;
         std::cout << "  Sample: " << out_sample << std::endl;
         std::cout << "  Beta: " << out_beta << std::endl;
         std::cout << "  Step: " << out_step << std::endl;
-        std::cout << "  State file: tpq_state_" << out_sample << "_beta=" << out_beta << ".dat" << std::endl;
     } else {
         std::cerr << "Error: No valid TPQ state files found in " << tpq_dir << std::endl;
-        std::cerr << "  Looking for files matching pattern: tpq_state_*_beta=*.dat" << std::endl;
+        std::cerr << "  Looking for files matching patterns: tpq_state_*_beta=*_step=*.dat or tpq_state_*_beta=*.dat" << std::endl;
     }
     
     return found;
@@ -1582,6 +1607,7 @@ void microcanonical_tpq(
     // Handle continue-quenching mode
     bool is_continuing = false;
     uint64_t resume_sample = 0;
+    uint64_t original_sample = 0;  // Track original sample for loading
     double resume_beta = 0.0;
     uint64_t resume_step = 0;
     
@@ -1591,74 +1617,42 @@ void microcanonical_tpq(
         std::cout << "==========================================\n";
         
         if (continue_sample == 0) {
-            // Auto-detect lowest energy state
-            std::cout << "Auto-detecting lowest energy state..." << std::endl;
-            if (find_lowest_energy_tpq_state(dir, N, resume_sample, resume_beta, resume_step)) {
+            // Auto-detect lowest energy state (highest beta) from any sample
+            std::cout << "Auto-detecting lowest energy state (highest beta)..." << std::endl;
+            if (find_lowest_energy_tpq_state(dir, N, original_sample, resume_beta, resume_step)) {
                 is_continuing = true;
+                resume_sample = 0;  // Will write to sample 0
             } else {
-                std::cerr << "Warning: Could not find saved state to continue from. Starting fresh." << std::endl;
+                std::cout << "Warning: Could not find saved state to continue from. Falling back to normal TPQ (starting fresh)." << std::endl;
                 is_continuing = false;
             }
         } else {
             // Use specified sample
-            resume_sample = continue_sample;
-            std::cout << "Continuing from sample " << resume_sample << std::endl;
+            original_sample = continue_sample;
+            resume_sample = 0;  // Will write to sample 0
+            std::cout << "Continuing from sample " << continue_sample << std::endl;
             
-            // Find the beta and step for this sample
-            std::string ss_file = dir + "/SS_rand" + std::to_string(resume_sample) + ".dat";
-            std::ifstream file(ss_file);
-            
-            if (file.is_open()) {
-                std::string line;
-                std::getline(file, line); // Skip header
-                
-                // If continue_beta is specified, find closest beta
-                if (continue_beta > 0.0) {
-                    double min_diff = std::numeric_limits<double>::max();
-                    while (std::getline(file, line)) {
-                        std::istringstream iss(line);
-                        double beta, energy, variance, norm, doublon;
-                        uint64_t step_num;
-                        
-                        if (!(iss >> beta >> energy >> variance >> norm >> doublon >> step_num)) {
-                            continue;
-                        }
-                        
-                        double diff = std::abs(beta - continue_beta);
-                        if (diff < min_diff) {
-                            min_diff = diff;
-                            resume_beta = beta;
-                            resume_step = step_num;
-                        }
-                    }
-                } else {
-                    // Use last line (highest beta/lowest energy)
-                    std::string last_line;
-                    while (std::getline(file, line)) {
-                        if (!line.empty()) last_line = line;
-                    }
-                    
-                    if (!last_line.empty()) {
-                        std::istringstream iss(last_line);
-                        double energy, variance, norm, doublon;
-                        iss >> resume_beta >> energy >> variance >> norm >> doublon >> resume_step;
-                    }
-                }
-                file.close();
-                
-                if (resume_step > 0) {
+            // Try to find the state file directly
+            if (find_lowest_energy_tpq_state(dir, N, original_sample, resume_beta, resume_step)) {
+                // Verify it's the requested sample
+                if (original_sample == continue_sample) {
                     is_continuing = true;
                 } else {
-                    std::cerr << "Warning: Could not determine step to resume from. Starting fresh." << std::endl;
+                    std::cout << "Warning: Found sample " << original_sample 
+                              << " but requested " << continue_sample << std::endl;
+                    is_continuing = false;
                 }
             } else {
-                std::cerr << "Warning: Could not open " << ss_file << ". Starting fresh." << std::endl;
+                std::cout << "Warning: Could not find state file for sample " << continue_sample 
+                          << ". Falling back to normal TPQ (starting fresh)." << std::endl;
+                is_continuing = false;
             }
         }
         
         if (is_continuing) {
             std::cout << "Resuming from:" << std::endl;
-            std::cout << "  Sample: " << resume_sample << std::endl;
+            std::cout << "  Original sample: " << original_sample << std::endl;
+            std::cout << "  Continuing as sample: 0 (output to SS_rand0.dat)" << std::endl;
             std::cout << "  Beta: " << resume_beta << std::endl;
             std::cout << "  Step: " << resume_step << std::endl;
             std::cout << "==========================================\n" << std::endl;
@@ -1690,17 +1684,35 @@ void microcanonical_tpq(
         ComplexVector temp(N);
         Complex minus_one(-1.0, 0.0);
         
-        // Check if we should continue from saved state for this sample
-        if (is_continuing && sample == resume_sample) {
+        // Check if we should continue from saved state (only for first sample = 0)
+        if (is_continuing && sample == 0) {
             std::cout << "Loading saved state to continue quenching..." << std::endl;
             
-            // Load the saved state
-            std::string state_file = dir + "/tpq_state_" + std::to_string(sample) 
-                                     + "_beta=" + std::to_string(resume_beta) + ".dat";
+            // Construct state file path - try new format first, then fall back to legacy
+            std::string state_file_new = dir + "/tpq_state_" + std::to_string(original_sample) 
+                                       + "_beta=" + std::to_string(resume_beta) 
+                                       + "_step=" + std::to_string(resume_step) + ".dat";
+            std::string state_file_legacy = dir + "/tpq_state_" + std::to_string(original_sample) 
+                                          + "_beta=" + std::to_string(resume_beta) + ".dat";
             
             v0.resize(N);
-            if (!load_tpq_state(v0, state_file)) {
-                std::cerr << "Error: Could not load TPQ state from " << state_file << std::endl;
+            bool loaded = false;
+            
+            // Try new format first
+            if (load_tpq_state(v0, state_file_new)) {
+                std::cout << "Loaded state from: " << state_file_new << std::endl;
+                loaded = true;
+            } 
+            // Fall back to legacy format
+            else if (load_tpq_state(v0, state_file_legacy)) {
+                std::cout << "Loaded state from: " << state_file_legacy << std::endl;
+                loaded = true;
+            }
+            
+            if (!loaded) {
+                std::cerr << "Error: Could not load TPQ state from either format" << std::endl;
+                std::cerr << "  Tried: " << state_file_new << std::endl;
+                std::cerr << "  Tried: " << state_file_legacy << std::endl;
                 std::cerr << "Starting fresh for this sample." << std::endl;
                 goto fresh_start;
             }
@@ -1721,6 +1733,8 @@ void microcanonical_tpq(
             std::cout << "  Energy: " << energy1 << std::endl;
             std::cout << "  Variance: " << variance1 << std::endl;
             std::cout << "  Beta: " << inv_temp << std::endl;
+            std::cout << "  Will run " << max_iter << " additional iterations" << std::endl;
+            std::cout << "  Target final step: " << (step + max_iter) << std::endl;
             std::cout << "Continuing from step " << step << "..." << std::endl;
         } else {
             fresh_start:
@@ -1761,11 +1775,14 @@ void microcanonical_tpq(
             step = 2; // Start main loop from step 2
         }
         
+        // Determine final step: if continuing, run for additional max_iter iterations
+        uint64_t final_step = is_continuing && sample == 0 ? (step - 1 + max_iter) : max_iter;
+        
         // Main TPQ loop - using in-place operations with single temp buffer
-        for (; step <= max_iter; step++) {
+        for (; step <= final_step; step++) {
             // Report progress
-            if (step % (max_iter/10) == 0 || step == max_iter) {
-                std::cout << "  Step " << step << " of " << max_iter << std::endl;
+            if (step % (max_iter/10) == 0 || step == final_step) {
+                std::cout << "  Step " << step << " of " << final_step << std::endl;
             }
             
             // In-place evolution: v0 = (L*D_S - H)|v0⟩
@@ -1805,7 +1822,7 @@ void microcanonical_tpq(
             }
             
             // Determine if we should do measurements this step
-            bool do_regular_measurement = (step % temp_interval == 0 || step == max_iter);
+            bool do_regular_measurement = (step % temp_interval == 0 || step == final_step);
             bool do_measurement = do_regular_measurement || should_measure_observables;
             
             // OPTIMIZED: Calculate energy and variance only when needed
@@ -1838,7 +1855,7 @@ void microcanonical_tpq(
                 }
                 
                 // Report detailed progress
-                if (step % (temp_interval * 10) == 0 || step == max_iter) {
+                if (step % (temp_interval * 10) == 0 || step == final_step) {
                     std::cout << "  Step " << step << ": E = " << energy_step 
                               << ", var = " << variance_step 
                               << ", β = " << inv_temp << std::endl;
@@ -1862,7 +1879,9 @@ void microcanonical_tpq(
                     std::cout << "  *** Saving TPQ state at β = " << inv_temp 
                               << " (target: " << measure_inv_temp[target_temp_idx] << ") ***" << std::endl;
                     if (compute_observables) {
-                        std::string state_file = dir + "/tpq_state_" + std::to_string(sample) + "_beta=" + std::to_string(inv_temp) + ".dat";
+                        std::string state_file = dir + "/tpq_state_" + std::to_string(sample) + 
+                                               "_beta=" + std::to_string(inv_temp) + 
+                                               "_step=" + std::to_string(step) + ".dat";
                         save_tpq_state(v0, state_file, fixed_sz_op);
                     }
                     temp_measured[target_temp_idx] = true;
@@ -2132,7 +2151,8 @@ void canonical_tpq(
                               << " (target: " << measure_inv_temp[target_temp_idx] << ") ***" << std::endl;
                     if (compute_observables) {
                         std::string state_file = dir + "/tpq_state_" + std::to_string(sample)
-                                               + "_beta=" + std::to_string(inv_temp) + ".dat";
+                                               + "_beta=" + std::to_string(inv_temp) 
+                                               + "_step=" + std::to_string(step) + ".dat";
                         save_tpq_state(psi, state_file, fixed_sz_op);
                     }
                     temp_measured[target_temp_idx] = true;

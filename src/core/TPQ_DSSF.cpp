@@ -792,8 +792,11 @@ int main(int argc, char* argv[]) {
         spin_combination_names.push_back(name);
     }
 
-    // Regex to match tpq_state_i_beta=*.dat files where i is the sample index
-    std::regex state_pattern("tpq_state_([0-9]+)_beta=([0-9.]+)\\.dat");
+    // Regex to match tpq_state files - support both new format (with step) and legacy format
+    // New format: tpq_state_i_beta=*_step=*.dat
+    // Legacy format: tpq_state_i_beta=*.dat
+    std::regex state_pattern_new("tpq_state_([0-9]+)_beta=([0-9.]+)_step=([0-9]+)\\.dat");
+    std::regex state_pattern_legacy("tpq_state_([0-9]+)_beta=([0-9.]+)\\.dat");
 
     // Load Hamiltonian (all processes need this)
     if (rank == 0) {
@@ -981,7 +984,15 @@ int main(int argc, char* argv[]) {
             std::string filename = entry.path().filename().string();
             std::smatch match;
             
-            if (std::regex_match(filename, match, state_pattern)) {
+            // Try new format first (with step)
+            if (std::regex_match(filename, match, state_pattern_new)) {
+                tpq_files.push_back(entry.path().string());
+                sample_indices.push_back(std::stoi(match[1]));
+                beta_strings.push_back(match[2]);
+                beta_values.push_back(std::stod(match[2]));
+            }
+            // Fall back to legacy format (without step)
+            else if (std::regex_match(filename, match, state_pattern_legacy)) {
                 tpq_files.push_back(entry.path().string());
                 sample_indices.push_back(std::stoi(match[1]));
                 beta_strings.push_back(match[2]);

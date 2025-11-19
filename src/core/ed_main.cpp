@@ -1990,7 +1990,10 @@ void print_help(const char* prog_name) {
     std::cout << "  --samples=<n>           Number of TPQ samples\n";
     std::cout << "  --temp_min=<T>          Minimum temperature\n";
     std::cout << "  --temp_max=<T>          Maximum temperature\n";
-    std::cout << "  --temp_bins=<n>         Number of temperature bins\n\n";
+    std::cout << "  --temp_bins=<n>         Number of temperature bins\n";
+    std::cout << "  --continue_quenching    Continue TPQ from saved state (requires prior run)\n";
+    std::cout << "  --continue_sample=<n>   Sample to continue from (0 = auto-detect lowest energy)\n";
+    std::cout << "  --continue_beta=<β>     Beta to continue from (0.0 = use saved beta)\n\n";
     
     std::cout << "Dynamical Response Options:\n";
     std::cout << "  --dyn-thermal           Use thermal averaging (multiple random states)\n";

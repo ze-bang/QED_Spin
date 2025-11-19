@@ -231,6 +231,10 @@ EDConfig EDConfig::fromCommandLine(uint64_t argc, char* argv[]) {
             else if (arg.find("--num_measure_freq=") == 0) config.thermal.num_measure_freq = std::stoi(parse_value("--num_measure_freq=")); // Deprecated: use --measure-freq
             else if (arg.find("--delta_tau=") == 0) config.thermal.delta_tau = std::stod(parse_value("--delta_tau="));
             else if (arg.find("--large_value=") == 0) config.thermal.large_value = std::stod(parse_value("--large_value="));
+            // TPQ continue-quenching options
+            else if (arg == "--continue_quenching") config.thermal.continue_quenching = true;
+            else if (arg.find("--continue_sample=") == 0) config.thermal.continue_sample = std::stoi(parse_value("--continue_sample="));
+            else if (arg.find("--continue_beta=") == 0) config.thermal.continue_beta = std::stod(parse_value("--continue_beta="));
             else if (arg == "--calc_observables") config.observable.calculate = true;
             else if (arg == "--measure_spin") config.observable.measure_spin = true;
             else if (arg == "--standard") config.workflow.run_standard = true;

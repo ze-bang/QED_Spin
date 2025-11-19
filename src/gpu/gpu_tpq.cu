@@ -54,8 +54,6 @@ GPUTPQSolver::GPUTPQSolver(GPUOperator* gpu_op, int N)
         std::cerr << "cuBLAS initialization failed!" << std::endl;
         throw std::runtime_error("cuBLAS init failed");
     }
-    // Set cuBLAS to use host pointer mode for scalar results
-    cublasSetPointerMode(cublas_handle_, CUBLAS_POINTER_MODE_HOST);
     
     // Create cuRAND generator
     curandStatus_t rand_stat = curandCreateGenerator(&curand_gen_, CURAND_RNG_PSEUDO_DEFAULT);
@@ -224,7 +222,13 @@ void GPUTPQSolver::imaginaryTimeEvolve(double delta_beta, int taylor_order) {
 void GPUTPQSolver::writeTPQData(const std::string& filename, double inv_temp, 
                                  double energy, double variance, double norm, int step) {
     std::ofstream file;
-    if (step == 0 || step == 1) {
+    
+    // Check if file exists to determine if we need to write header
+    std::ifstream check_file(filename);
+    bool file_exists = check_file.good();
+    check_file.close();
+    
+    if (!file_exists) {
         file.open(filename, std::ios::out);
         file << "# inv_temp energy variance norm doublon step" << std::endl;
     } else {
@@ -322,12 +326,14 @@ std::string GPUTPQSolver::findLowestEnergyTPQState(const std::string& dir, int s
         return "";
     }
     
-    // Pattern: tpq_state_{sample}_beta={beta}.dat
-    // We need to find all matching files and select the one with highest beta
-    std::regex state_pattern("tpq_state_([0-9]+)_beta=([0-9.]+)\\.dat");
+    // Pattern: tpq_state_{sample}_beta={beta}_step={step}.dat (new format with step)
+    // Also support legacy pattern: tpq_state_{sample}_beta={beta}.dat
+    std::regex state_pattern_new("tpq_state_([0-9]+)_beta=([0-9.]+)_step=([0-9]+)\\.dat");
+    std::regex state_pattern_legacy("tpq_state_([0-9]+)_beta=([0-9.]+)\\.dat");
     
     double max_beta = -1.0;
     int best_sample = -1;
+    int best_step = -1;
     std::string best_file = "";
     
     struct dirent* entry;
@@ -342,19 +348,35 @@ std::string GPUTPQSolver::findLowestEnergyTPQState(const std::string& dir, int s
         }
         
         std::smatch match;
-        if (std::regex_match(filename, match, state_pattern)) {
-            int file_sample = std::stoi(match[1].str());
-            double file_beta = std::stod(match[2].str());
-            
-            // If sample is specified (non-zero), only consider that sample
-            if (sample != 0 && file_sample != sample) continue;
-            
-            // Find the highest beta (lowest energy state)
-            if (file_beta > max_beta) {
-                max_beta = file_beta;
-                best_sample = file_sample;
-                best_file = filepath;
-            }
+        int file_sample = -1;
+        double file_beta = -1.0;
+        int file_step = -1;
+        
+        // Try new format first
+        if (std::regex_match(filename, match, state_pattern_new)) {
+            file_sample = std::stoi(match[1].str());
+            file_beta = std::stod(match[2].str());
+            file_step = std::stoi(match[3].str());
+        } 
+        // Fall back to legacy format
+        else if (std::regex_match(filename, match, state_pattern_legacy)) {
+            file_sample = std::stoi(match[1].str());
+            file_beta = std::stod(match[2].str());
+            file_step = -1; // Will need to look up from SS_rand file
+        }
+        else {
+            continue;
+        }
+        
+        // If sample is specified (non-zero), only consider that sample
+        if (sample != 0 && file_sample != sample) continue;
+        
+        // Find the highest beta (lowest energy state)
+        if (file_beta > max_beta) {
+            max_beta = file_beta;
+            best_sample = file_sample;
+            best_step = file_step;
+            best_file = filepath;
         }
     }
     
@@ -367,43 +389,47 @@ std::string GPUTPQSolver::findLowestEnergyTPQState(const std::string& dir, int s
     
     beta_out = max_beta;
     
-    // Now look up the step number from the SS_rand file
-    std::string ss_file = dir + "/tpq_sample_" + std::to_string(best_sample) + ".dat";
-    std::ifstream ss_stream(ss_file);
-    
-    if (!ss_stream.is_open()) {
-        std::cerr << "Warning: Could not open SS_rand file: " << ss_file << std::endl;
-        step_out = -1;
-        return best_file;
-    }
-    
-    // Find the step corresponding to this beta
-    // Format: Step    InvTemp    Energy    Variance    Norm    SpecificHeat
-    step_out = -1;
-    double closest_beta_diff = 1e10;
-    int closest_step = -1;
-    
-    std::string line;
-    std::getline(ss_stream, line); // Skip header
-    
-    while (std::getline(ss_stream, line)) {
-        if (line.empty() || line[0] == '#') continue;
+    // If step was not in filename (legacy format), look it up from SS_rand file
+    if (best_step == -1) {
+        std::string ss_file = dir + "/SS_rand" + std::to_string(best_sample) + ".dat";
+        std::ifstream ss_stream(ss_file);
         
-        std::istringstream iss(line);
-        int step;
-        double inv_temp, energy, variance, norm, cv;
+        if (!ss_stream.is_open()) {
+            std::cerr << "Warning: Could not open SS_rand file: " << ss_file << std::endl;
+            step_out = -1;
+            return best_file;
+        }
         
-        if (iss >> step >> inv_temp >> energy >> variance >> norm >> cv) {
-            double beta_diff = std::abs(inv_temp - max_beta);
-            if (beta_diff < closest_beta_diff) {
-                closest_beta_diff = beta_diff;
-                closest_step = step;
+        // Find the step corresponding to this beta
+        // Format: inv_temp energy variance norm doublon step
+        double closest_beta_diff = 1e10;
+        int closest_step = -1;
+        
+        std::string line;
+        std::getline(ss_stream, line); // Skip header
+        
+        while (std::getline(ss_stream, line)) {
+            if (line.empty() || line[0] == '#') continue;
+            
+            std::istringstream iss(line);
+            double inv_temp, energy, variance, norm, doublon;
+            int step;
+            
+            // Format: inv_temp energy variance norm doublon step
+            if (iss >> inv_temp >> energy >> variance >> norm >> doublon >> step) {
+                double beta_diff = std::abs(inv_temp - max_beta);
+                if (beta_diff < closest_beta_diff) {
+                    closest_beta_diff = beta_diff;
+                    closest_step = step;
+                }
             }
         }
+        
+        ss_stream.close();
+        best_step = closest_step;
     }
     
-    ss_stream.close();
-    step_out = closest_step;
+    step_out = best_step;
     
     std::cout << "Found TPQ state: sample=" << best_sample 
               << ", beta=" << max_beta 
@@ -472,44 +498,47 @@ void GPUTPQSolver::runMicrocanonicalTPQ(
         double inv_temp = 0.0;
         bool loaded_from_file = false;
         
-        // Check if we should continue from a saved state
+        // Check if we should continue from a saved state (only for first sample)
         if (continue_quenching && sample == 0) {
             double found_beta = 0.0;
             int found_step = -1;
+            int found_sample = 0;
             std::string state_file;
             
-            if (continue_sample != 0 && continue_beta != 0.0) {
-                // Manual specification: load specific sample and beta
-                state_file = dir + "/tpq_state_" + std::to_string(continue_sample) + 
-                            "_beta=" + std::to_string(continue_beta) + ".dat";
-                found_beta = continue_beta;
+            if (continue_sample == 0) {
+                // Auto-detect lowest energy state (highest beta) from any sample
+                std::cout << "Auto-detecting lowest energy state (highest beta)..." << std::endl;
+                state_file = findLowestEnergyTPQState(dir, 0, found_beta, found_step);
                 
-                // Look up step from SS_rand file
-                std::string ss_file = dir + "/tpq_sample_" + std::to_string(continue_sample) + ".dat";
-                std::ifstream ss_stream(ss_file);
-                if (ss_stream.is_open()) {
-                    std::string line;
-                    std::getline(ss_stream, line); // Skip header
-                    double closest_beta_diff = 1e10;
-                    while (std::getline(ss_stream, line)) {
-                        if (line.empty() || line[0] == '#') continue;
-                        std::istringstream iss(line);
-                        int step;
-                        double beta, e, var, norm, cv;
-                        if (iss >> step >> beta >> e >> var >> norm >> cv) {
-                            if (std::abs(beta - continue_beta) < closest_beta_diff) {
-                                closest_beta_diff = std::abs(beta - continue_beta);
-                                found_step = step;
-                            }
+                // Extract sample number from the state file name
+                if (!state_file.empty()) {
+                    size_t sample_pos = state_file.find("tpq_state_");
+                    if (sample_pos != std::string::npos) {
+                        size_t beta_pos = state_file.find("_beta=", sample_pos);
+                        if (beta_pos != std::string::npos) {
+                            std::string sample_str = state_file.substr(sample_pos + 10, beta_pos - (sample_pos + 10));
+                            found_sample = std::stoi(sample_str);
                         }
                     }
-                    ss_stream.close();
+                }
+                
+                if (state_file.empty()) {
+                    std::cout << "Warning: Could not find saved state to continue from. Falling back to normal TPQ (starting fresh)." << std::endl;
                 }
             } else {
-                // Auto-detect: find lowest energy state
+                // Use specified sample
+                found_sample = continue_sample;
+                std::cout << "Continuing from sample " << continue_sample << std::endl;
+                
                 state_file = findLowestEnergyTPQState(dir, continue_sample, found_beta, found_step);
+                
+                if (state_file.empty()) {
+                    std::cout << "Warning: Could not find state file for sample " << continue_sample 
+                              << ". Falling back to normal TPQ (starting fresh)." << std::endl;
+                }
             }
             
+            // Try to load the state file if we found one
             if (!state_file.empty() && loadTPQState(state_file)) {
                 loaded_from_file = true;
                 start_step = found_step + 1;
@@ -520,10 +549,17 @@ void GPUTPQSolver::runMicrocanonicalTPQ(
                 energy = ev_pair.first;
                 variance = ev_pair.second;
                 
+                std::cout << "Resuming from:" << std::endl;
+                std::cout << "  Original sample: " << found_sample << std::endl;
+                std::cout << "  Continuing as sample: 0 (output to SS_rand0.dat)" << std::endl;
+                std::cout << "  Beta: " << found_beta << std::endl;
+                std::cout << "  Step: " << found_step << std::endl;
+                std::cout << "  Will run " << max_iter << " additional iterations" << std::endl;
+                std::cout << "  Target final step: " << (found_step + max_iter) << std::endl;
                 std::cout << "Continuing from step " << found_step 
                           << " (beta=" << found_beta << ", E=" << energy << ")" << std::endl;
-            } else {
-                std::cerr << "Warning: Could not load TPQ state, starting fresh" << std::endl;
+            } else if (!state_file.empty()) {
+                std::cout << "Warning: Could not load TPQ state. Falling back to normal TPQ (starting fresh)." << std::endl;
             }
         }
         
@@ -553,7 +589,7 @@ void GPUTPQSolver::runMicrocanonicalTPQ(
             cublasZscal(cublas_handle_, N_, &scale, d_state_, 1);
             
             // Output file for this sample
-            std::string sample_file = dir + "/tpq_sample_" + std::to_string(sample) + ".dat";
+            std::string sample_file = dir + "/SS_rand" + std::to_string(sample) + ".dat";
             
             // Initial measurements (step 1)
             std::pair<double, double> energy_var_pair = computeEnergyAndVariance();
@@ -570,10 +606,13 @@ void GPUTPQSolver::runMicrocanonicalTPQ(
         }
         
         // Output file for this sample
-        std::string sample_file = dir + "/tpq_sample_" + std::to_string(sample) + ".dat";
+        std::string sample_file = dir + "/SS_rand" + std::to_string(sample) + ".dat";
+        
+        // Determine final step: if continuing, run for additional max_iter iterations
+        int final_step = loaded_from_file ? (start_step - 1 + max_iter) : max_iter;
         
         // Main TPQ loop - applies (L-H) repeatedly
-        for (int step = start_step; step <= max_iter; ++step) {
+        for (int step = start_step; step <= final_step; ++step) {
             // Apply H|v0⟩ -> d_temp_
             auto matvec_start = std::chrono::high_resolution_clock::now();
             gpu_op_->matVecGPU(d_state_, d_temp_, N_);
@@ -648,7 +687,7 @@ void GPUTPQSolver::runMicrocanonicalTPQ(
                 // Write data (always write when we compute energy)
                 writeTPQData(sample_file, inv_temp, E, var, current_norm, step);
                 
-                if (step % (temp_interval * 10) == 0 || step == max_iter) {
+                if (step % (temp_interval * 10) == 0 || step == final_step) {
                     std::cout << "Step " << step << ": E = " << E 
                               << ", var = " << var 
                               << ", β = " << inv_temp << std::endl;
@@ -659,7 +698,8 @@ void GPUTPQSolver::runMicrocanonicalTPQ(
                     std::cout << "  *** Saving TPQ state at β = " << inv_temp 
                               << " (target: " << measure_inv_temp[target_temp_idx] << ") ***" << std::endl;
                     std::string state_file = dir + "/tpq_state_" + std::to_string(sample) + 
-                                           "_beta=" + std::to_string(inv_temp) + ".dat";
+                                           "_beta=" + std::to_string(inv_temp) + 
+                                           "_step=" + std::to_string(step) + ".dat";
                     saveTPQState(state_file, fixed_sz_op);
                     temp_measured[target_temp_idx] = true;
                 }
@@ -735,8 +775,8 @@ void GPUTPQSolver::runCanonicalTPQ(
         // Generate random initial state
         generateRandomState(98765 + sample * 43210);
         
-        // Output file
-        std::string sample_file = dir + "/ctpq_sample_" + std::to_string(sample) + ".dat";
+        // Output file (use SS_rand naming convention for consistency)
+        std::string sample_file = dir + "/SS_rand" + std::to_string(sample) + ".dat";
         
         // Initial measurements at beta=0
         std::pair<double, double> energy_var_pair = computeEnergyAndVariance();
@@ -797,7 +837,8 @@ void GPUTPQSolver::runCanonicalTPQ(
                     std::cout << "  *** Saving TPQ state at β = " << beta 
                               << " (target: " << measure_inv_temp[target_temp_idx] << ") ***" << std::endl;
                     std::string state_file = dir + "/tpq_state_" + std::to_string(sample) + 
-                                           "_beta=" + std::to_string(beta) + ".dat";
+                                           "_beta=" + std::to_string(beta) + 
+                                           "_step=" + std::to_string(step) + ".dat";
                     saveTPQState(state_file, fixed_sz_op);
                     temp_measured[target_temp_idx] = true;
                 }
