@@ -626,7 +626,7 @@ void compute_spin_expectations(
     bool print_output    // Whether to print the results to console
 ) {
     // Calculate the dimension of the Hilbert space
-    uint64_t N = 1 << num_sites;  // 2^num_sites
+    uint64_t N = 1ULL << num_sites;  // 2^num_sites
     
     // Initialize expectations matrix: 3 rows (S^+, S^-, S^z) x num_sites columns
     std::vector<std::vector<Complex>> expectations(3, std::vector<Complex>(num_sites, Complex(0.0, 0.0)));
@@ -946,7 +946,7 @@ std::vector<std::vector<Complex>> compute_eigenstate_spin_expectations(
     bool print_output           // Whether to print the results to console
 ) {
     // Check dimension
-    uint64_t N = 1 << num_sites;  // 2^num_sites
+    uint64_t N = 1ULL << num_sites;  // 2^num_sites
     if (eigenstate.size() != N) {
         std::cerr << "Error: Eigenstate dimension " << eigenstate.size() 
                   << " doesn't match expected size " << N << std::endl;
@@ -1056,7 +1056,7 @@ std::vector<std::vector<std::vector<Complex>>> compute_eigenstate_spin_correlati
     bool print_output           // Whether to print the results to console
 ) {
     // Check dimension
-    uint64_t N = 1 << num_sites;  // 2^num_sites
+    uint64_t N = 1ULL << num_sites;  // 2^num_sites
     if (eigenstate.size() != N) {
         std::cerr << "Error: Eigenstate dimension " << eigenstate.size() 
                   << " doesn't match expected size " << N << std::endl;
@@ -1170,7 +1170,7 @@ std::vector<std::vector<Complex>> compute_eigenstate_spin_expectations_from_file
     uint64_t nth_state                   // Select the nth most probable state (default: most probable)
 ) {
     // Calculate expected dimension
-    uint64_t expected_dimension = 1 << num_sites;  // 2^num_sites
+    uint64_t expected_dimension = 1ULL << num_sites;  // 2^num_sites
     
     // Load eigenstate from file
     ComplexVector eigenstate;
@@ -1200,7 +1200,7 @@ std::vector<std::vector<std::vector<Complex>>> compute_eigenstate_spin_correlati
     uint64_t nth_state                 // Select the nth most probable state (default: most probable)
 ) {
     // Calculate expected dimension
-    uint64_t expected_dimension = 1 << num_sites;  // 2^num_sites
+    uint64_t expected_dimension = 1ULL << num_sites;  // 2^num_sites
     
     // Load eigenstate from file
     ComplexVector eigenstate;
@@ -1231,7 +1231,7 @@ void compute_spin_correlations(
     bool print_output    // Whether to print the results to console
 ) {
     // Calculate the dimension of the Hilbert space
-    uint64_t N = 1 << num_sites;  // 2^num_sites
+    uint64_t N = 1ULL << num_sites;  // 2^num_sites
     
     // Initialize correlations tensor: 2 types (Sz*Sz, S+*S-) x num_sites x num_sites
     std::vector<std::vector<std::vector<Complex>>> correlations(
