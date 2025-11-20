@@ -824,6 +824,7 @@ void compute_dynamical_response_workflow(const EDConfig& config) {
                 std::string line;
                 double min_energy = std::numeric_limits<double>::max();
                 bool found_energy = false;
+                bool first_entry_skipped = false;
                 
                 while (std::getline(infile_ss, line)) {
                     // Skip comment lines and empty lines
@@ -834,6 +835,12 @@ void compute_dynamical_response_workflow(const EDConfig& config) {
                     
                     // Read first two columns: inv_temp and energy
                     if (iss >> inv_temp >> energy) {
+                        // Skip the first data entry (initial random state)
+                        if (!first_entry_skipped) {
+                            first_entry_skipped = true;
+                            continue;
+                        }
+                        
                         if (energy < min_energy) {
                             min_energy = energy;
                             found_energy = true;
@@ -844,11 +851,11 @@ void compute_dynamical_response_workflow(const EDConfig& config) {
                 
                 if (found_energy) {
                     ground_state_energy = min_energy;
-                    std::cout << "✓ Ground state energy read from SS_rand0.dat (minimum): " 
+                    std::cout << "✓ Ground state energy read from SS_rand0.dat (minimum, first entry skipped): " 
                               << std::fixed << std::setprecision(10) << ground_state_energy << std::endl;
                     found_ground_state = true;
                 } else {
-                    std::cout << "✗ SS_rand0.dat contains no valid energy data" << std::endl;
+                    std::cout << "✗ SS_rand0.dat contains no valid energy data (or only first entry)" << std::endl;
                 }
             } else {
                 std::cout << "✗ SS_rand0.dat not found" << std::endl;

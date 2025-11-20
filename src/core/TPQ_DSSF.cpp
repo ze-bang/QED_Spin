@@ -94,6 +94,7 @@ double read_ground_state_energy(const std::string& directory) {
         std::string line;
         double min_energy = std::numeric_limits<double>::max();
         bool found_energy = false;
+        bool first_entry_skipped = false;
         
         while (std::getline(infile_ss, line)) {
             // Skip comment lines and empty lines
@@ -104,6 +105,12 @@ double read_ground_state_energy(const std::string& directory) {
             
             // Read first two columns: inv_temp and energy
             if (iss >> inv_temp >> energy) {
+                // Skip the first data entry (initial random state)
+                if (!first_entry_skipped) {
+                    first_entry_skipped = true;
+                    continue;
+                }
+                
                 if (energy < min_energy) {
                     min_energy = energy;
                     found_energy = true;
@@ -984,15 +991,7 @@ int main(int argc, char* argv[]) {
             std::string filename = entry.path().filename().string();
             std::smatch match;
             
-            // Try new format first (with step)
-            if (std::regex_match(filename, match, state_pattern_new)) {
-                tpq_files.push_back(entry.path().string());
-                sample_indices.push_back(std::stoi(match[1]));
-                beta_strings.push_back(match[2]);
-                beta_values.push_back(std::stod(match[2]));
-            }
-            // Fall back to legacy format (without step)
-            else if (std::regex_match(filename, match, state_pattern_legacy)) {
+            if (std::regex_match(filename, match, state_pattern)) {
                 tpq_files.push_back(entry.path().string());
                 sample_indices.push_back(std::stoi(match[1]));
                 beta_strings.push_back(match[2]);
