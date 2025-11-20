@@ -991,7 +991,7 @@ int main(int argc, char* argv[]) {
             std::string filename = entry.path().filename().string();
             std::smatch match;
             
-            if (std::regex_match(filename, match, state_pattern)) {
+            if (std::regex_match(filename, match, state_pattern_new)) {
                 tpq_files.push_back(entry.path().string());
                 sample_indices.push_back(std::stoi(match[1]));
                 beta_strings.push_back(match[2]);
