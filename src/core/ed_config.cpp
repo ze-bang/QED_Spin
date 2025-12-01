@@ -357,7 +357,9 @@ EDConfig EDConfig::fromCommandLine(uint64_t argc, char* argv[]) {
     }
     
     // Auto-enable skip_ed if only response calculations are requested
-    bool only_response = (config.workflow.compute_dynamical_response || config.workflow.compute_static_response) &&
+    bool only_response = (config.workflow.compute_dynamical_response || 
+                          config.workflow.compute_static_response ||
+                          config.workflow.compute_ground_state_dssf) &&
                         !config.workflow.run_standard && 
                         !config.workflow.run_symmetrized && 
                         !config.workflow.run_streaming_symmetry &&
