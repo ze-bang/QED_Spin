@@ -211,8 +211,10 @@ struct WorkflowConfig {
     bool compute_thermo = false;
     bool compute_dynamical_response = false;
     bool compute_static_response = false;
+    bool compute_ground_state_dssf = false;  // Ground state dynamical structure factor (continued fraction)
     bool skip_ed = false;
     std::string output_dir = "output";
+    std::string eigenvector_dir = "";  // Directory with pre-computed eigenvectors (for ground state DSSF)
 };
 
 // ============================================================================
@@ -286,7 +288,9 @@ public:
     EDConfig& thermo(bool b = true) { workflow.compute_thermo = b; return *this; }
     EDConfig& dynamicalResponse(bool b = true) { workflow.compute_dynamical_response = b; return *this; }
     EDConfig& staticResponse(bool b = true) { workflow.compute_static_response = b; return *this; }
+    EDConfig& groundStateDSSF(bool b = true) { workflow.compute_ground_state_dssf = b; return *this; }
     EDConfig& outputDir(const std::string& dir) { workflow.output_dir = dir; return *this; }
+    EDConfig& eigenvectorDir(const std::string& dir) { workflow.eigenvector_dir = dir; return *this; }
     
     // ========== Configuration Loading ==========
     
@@ -295,6 +299,7 @@ public:
      * Supports simple key=value format
      */
     static EDConfig fromFile(const std::string& filename);
+
     
     /**
      * @brief Parse command line arguments
