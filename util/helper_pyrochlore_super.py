@@ -460,9 +460,9 @@ def generate_three_spin_terms(nn_list, node_mapping, three_spin_coeff, sublattic
                 
                 # Base Gamma matrix for sub_j = 0
                 Gamma_base = np.array(([[0,0,0,0],
-                                       [0,1,1,omega**2],
-                                       [0,1,omega, omega],
-                                       [0,omega**2,omega,omega**2]]), dtype=complex)
+                                       [0,1,1,omega],
+                                       [0,1,omega**2, omega**2],
+                                       [0,omega,omega**2,omega]]), dtype=complex)
                 
                 # Permute rows and columns based on sub_j
                 # Create permutation: shift indices by sub_j (cyclic)
