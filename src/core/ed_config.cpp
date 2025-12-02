@@ -1,4 +1,4 @@
-#include "ed_config.h"
+#include <ed/core/ed_config.h>
 // NOTE: We include ed_wrapper.h ONLY in the implementation of conversion functions
 // This is at the end of the file to avoid including it globally
 #include <algorithm>
@@ -243,6 +243,7 @@ EDConfig EDConfig::fromCommandLine(uint64_t argc, char* argv[]) {
             else if (arg == "--thermo") config.workflow.compute_thermo = true;
             else if (arg == "--dynamical-response") config.workflow.compute_dynamical_response = true;
             else if (arg == "--static-response") config.workflow.compute_static_response = true;
+            else if (arg == "--ground-state-dssf") config.workflow.compute_ground_state_dssf = true;
             else if (arg == "--skip_ED") config.workflow.skip_ed = true;
             else if (arg.find("--sublattice_size=") == 0) config.system.sublattice_size = std::stoi(parse_value("--sublattice_size="));
             else if (arg.find("--omega_min=") == 0) config.observable.omega_min = std::stod(parse_value("--omega_min="));
@@ -356,7 +357,9 @@ EDConfig EDConfig::fromCommandLine(uint64_t argc, char* argv[]) {
     }
     
     // Auto-enable skip_ed if only response calculations are requested
-    bool only_response = (config.workflow.compute_dynamical_response || config.workflow.compute_static_response) &&
+    bool only_response = (config.workflow.compute_dynamical_response || 
+                          config.workflow.compute_static_response ||
+                          config.workflow.compute_ground_state_dssf) &&
                         !config.workflow.run_standard && 
                         !config.workflow.run_symmetrized && 
                         !config.workflow.run_streaming_symmetry &&

@@ -1,185 +1,628 @@
 # Exact Diagonalization C++ Toolkit
 
-The Exact Diagonalization C++ Toolkit provides a high-performance pipeline for
-solving quantum lattice models by diagonalizing spin Hamiltonians, exploring
-finite-temperature properties, and generating dynamical or static response
-functions. The project combines optimized C++ kernels, optional GPU backends,
-and a growing ecosystem of Python post-processing utilities to support both
-rapid prototyping and large-scale production runs.
+A high-performance toolkit for solving quantum lattice models through exact
+diagonalization of spin Hamiltonians. Computes ground states, finite-temperature
+thermodynamics, and dynamical/static response functions with support for GPU
+acceleration and Numerical Linked Cluster Expansion (NLCE) workflows.
 
-## Recent Updates
+---
 
-**🚀 Temperature Scan Optimization (NEW!)** – Dynamical correlation calculations at
-multiple temperatures now run **up to 35× faster** by reusing the temperature-independent
-Lanczos decomposition. Instead of running expensive Lanczos iterations separately for
-each temperature point, the code now computes the spectral weights once and efficiently
-applies temperature-dependent Boltzmann factors. This optimization is automatically
-enabled for multi-temperature scans and requires no code changes.
-📖 See [docs/DYNAMICAL_CORRELATION_TEMPERATURE_OPTIMIZATION.md](docs/DYNAMICAL_CORRELATION_TEMPERATURE_OPTIMIZATION.md) for details.
+## Table of Contents
 
-**⚙️ Large System Support (32+ Sites)** – New tools and documentation for running ED on
-large systems (28-32 sites). Includes feasibility checker, optimized configurations,
-and practical workflows that avoid expensive symmetry construction. Fixed-Sz + FTLM/GPU
-methods enable calculations on 600M-dimensional spaces with ~40-80 GB RAM.
-📖 See [docs/OPTIMIZATION_32_SITES.md](docs/OPTIMIZATION_32_SITES.md) for details.
+1. [Quick Start](#quick-start)
+2. [Project Structure](#project-structure)
+3. [Installation](#installation)
+4. [Exact Diagonalization Pipeline](#exact-diagonalization-pipeline)
+   - [Solver Methods](#solver-methods)
+   - [Command-Line Interface](#command-line-interface)
+   - [Configuration Files](#configuration-files)
+   - [Input File Formats](#input-file-formats)
+   - [Output Files](#output-files)
+5. [NLCE Workflow](#nlce-workflow)
+   - [Overview](#nlce-overview)
+   - [Running NLCE Calculations](#running-nlce-calculations)
+   - [NLCE with FTLM](#nlce-with-ftlm)
+   - [Analysis and Fitting](#analysis-and-fitting)
+6. [Advanced Topics](#advanced-topics)
+7. [Python Utilities](#python-utilities)
+8. [License](#license)
 
-## Features
+---
 
-- **Modular workflows** – Run standard or symmetry-reduced diagonalization,
-  compute thermodynamic observables from spectra, and launch dynamical or static
-  response calculations from a single entry point. Workflows share a common
-  configuration layer so the same settings work from either command-line flags
-  or configuration files.【F:src/core/ed_main.cpp†L15-L222】【F:src/core/ed_config.cpp†L43-L213】
-- **Broad solver coverage** – Choose among Lanczos variants, Davidson/LOBPCG,
-  finite-temperature Lanczos (FTLM/LTLM), tensor-product quantum (TPQ) methods,
-  optimal spectrum solvers, and multiple ARPACK strategies. GPU-specialized
-  Lanczos, Davidson, LOBPCG, and TPQ implementations can be enabled when CUDA is
-  available.【F:src/core/ed_main.cpp†L433-L596】
-- **Configurable linear algebra backends** – Build-time options select between
-  CUDA, MPI, Intel MKL/oneMKL, and AMD AOCL BLIS libraries with sensible
-  defaults based on the detected CPU vendor.【F:CMakeLists.txt†L1-L126】【F:CMakeLists.txt†L248-L341】
-- **Example-driven configuration** – Ready-to-run configuration files illustrate
-  how to select solvers, tune convergence thresholds, and control thermal or
-  response calculations. Every parameter can be overridden on the command
-  line.【F:examples/ed_config_example.txt†L1-L88】【F:src/core/ed_config.cpp†L43-L213】
-- **Extensive utility scripts** – The `util/` directory ships plotting,
-  finite-temperature Lanczos analysis, NLCE tooling, and visualization scripts
-  that streamline common post-processing tasks.【F:util/README_animate_DSSF_updated.md†L1-L72】【F:util/nlc_fit.py†L1-L21】
+## Quick Start
 
-## Repository Layout
+```bash
+# 1. Build the toolkit
+mkdir build && cd build
+cmake -DWITH_CUDA=OFF -DWITH_MPI=ON ..
+make -j8
 
-```
-├── CMakeLists.txt           # Top-level build configuration with optional CUDA/MPI/MKL/AOCL toggles
-├── src/
-│   ├── core/                # Main application entry points and configuration plumbing
-│   ├── cpu_solvers/         # Lanczos, FTLM/LTLM, TPQ, ARPACK, and response implementations
-│   └── gpu/                 # CUDA kernels and GPU-optimized solvers (optional)
-├── docs/                    # Extended documentation and user manuals
-├── examples/                # Sample configuration files for typical calculations
-├── util/                    # Python utilities for analysis, plotting, and NLCE workflows
-└── script/                  # Helper scripts for batch execution and automation
+# 2. Run a basic ED calculation
+./ED /path/to/hamiltonian --method=LANCZOS --eigenvalues=6 --thermo
+
+# 3. Run a complete NLCE workflow (from workflows/nlce/run/)
+python3 nlce.py --max_order=4 --Jxx=1.0 --Jyy=1.0 --Jzz=1.0 --thermo
 ```
 
-## Building from Source
+---
 
-The project uses CMake (≥3.18) and targets C++17. Optional CUDA kernels are
-compiled with the CUDA 14 standard when enabled.【F:CMakeLists.txt†L1-L78】 A
-minimal CPU-only build requires:
+## Project Structure
 
-- A C++17 compiler (GCC ≥9, Clang ≥10, or MSVC ≥2019)
-- BLAS/LAPACK libraries (OpenBLAS, MKL, AOCL BLIS, or system-provided)
-- CMake 3.18+
+```
+exact_diagonalization_cpp/
+├── include/ed/               # Public C++ headers
+│   ├── core/                 # Hamiltonian, configuration, types
+│   ├── solvers/              # Lanczos, FTLM, TPQ, ARPACK interfaces
+│   ├── io/                   # HDF5, basis storage
+│   └── gpu/                  # CUDA wrappers and GPU kernels
+├── src/                      # Implementation sources
+│   ├── apps/                 # Entry points: ed_main.cpp, TPQ_DSSF.cpp
+│   ├── core/                 # Core implementations
+│   ├── solvers/
+│   │   ├── cpu/              # CPU solver implementations
+│   │   └── gpu/              # CUDA implementations
+│   └── io/                   # I/O implementations
+├── python/edlib/             # Python utilities package
+│   ├── helper_cluster.py     # Hamiltonian preparation for clusters
+│   ├── helper_pyrochlore.py  # Pyrochlore lattice utilities
+│   ├── hdf5_io.py            # HDF5 I/O utilities
+│   └── ...
+├── workflows/nlce/           # NLCE workflow scripts
+│   ├── prep/                 # Cluster generation
+│   ├── run/                  # ED execution and NLCE summation
+│   └── analysis/             # Fitting and convergence analysis
+├── scripts/                  # Plotting and utility scripts
+├── docs/                     # Extended documentation
+├── examples/                 # Sample configuration files
+├── data/                     # Input data files
+├── results/                  # Output directory (gitignored)
+└── CMakeLists.txt            # Build configuration
+```
 
-Optional components:
+---
 
-- **CUDA** – Enable GPU solvers with `-DWITH_CUDA=ON`. Set `CMAKE_CUDA_ARCHITECTURES`
-  as needed (defaults to `native`).【F:CMakeLists.txt†L52-L74】
-- **MPI** – Build distributed TPQ variants with `-DWITH_MPI=ON`.
-- **Intel MKL / oneMKL** – High-performance CPU BLAS/LAPACK via `-DWITH_MKL=ON`
-  (enabled automatically on Intel systems). To prefer oneMKL, set
-  `-DUSE_ONEMKL=ON`.【F:CMakeLists.txt†L16-L45】【F:CMakeLists.txt†L227-L327】
-- **AMD AOCL BLIS** – Optimized BLAS for AMD CPUs via `-DUSE_AOCL_BLIS=ON`,
-  which automatically disables MKL to avoid mixing backends.【F:CMakeLists.txt†L19-L45】【F:CMakeLists.txt†L227-L327】
+## Installation
 
-A typical build sequence is:
+### Prerequisites
+
+| Component | Required | Notes |
+|-----------|----------|-------|
+| C++17 compiler | ✅ | GCC ≥9, Clang ≥10, or MSVC ≥2019 |
+| CMake | ✅ | Version 3.18+ |
+| BLAS/LAPACK | ✅ | OpenBLAS, MKL, AOCL BLIS, or system |
+| Eigen3 | ✅ | Header-only linear algebra |
+| HDF5 | ✅ | For data I/O |
+| ARPACK | ✅ | Sparse eigenvalue solver |
+| CUDA | ❌ | Optional GPU acceleration |
+| MPI | ❌ | Optional distributed computing |
+| Python 3.8+ | ❌ | For NLCE workflows and plotting |
+
+### Build Options
 
 ```bash
 mkdir build && cd build
+
+# CPU-only build (default)
 cmake -DWITH_CUDA=OFF -DWITH_MPI=OFF ..
-cmake --build . --target ED TPQ_DSSF -j
+
+# With GPU support
+cmake -DWITH_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=80 ..
+
+# With MPI for distributed TPQ
+cmake -DWITH_MPI=ON ..
+
+# With Intel MKL (auto-detected on Intel CPUs)
+cmake -DWITH_MKL=ON ..
+
+# With AMD AOCL BLIS
+cmake -DUSE_AOCL_BLIS=ON ..
+
+# Build
+cmake --build . --target ED TPQ_DSSF -j$(nproc)
 ```
 
-The resulting binaries are placed in the build directory (`ED`, `TPQ_DSSF`, …).
-
-## Running the ED Driver
-
-The `ED` executable is the main entry point. Provide either a Hamiltonian
-directory or a configuration file. Run `ED --help` to display the full set of
-options, including solver selection, workflow toggles, and analysis controls.
-Typical invocations include:
+### Python Dependencies
 
 ```bash
-# Launch a standard Lanczos ground-state run
-./ED ./data --method=LANCZOS --standard --eigenvalues=6
-
-# Use the hybrid LTLM/FTLM finite-temperature workflow
-./ED ./data --method=HYBRID --standard --thermo --dynamical-response \
-    --dyn-thermal --dyn-operator=Sz.dat --dyn-omega-max=20
-
-# Reuse a configuration file and override the output directory
-./ED --config=examples/ed_config_example.txt --output=./runs/demo
+pip install numpy scipy matplotlib h5py networkx tqdm
+# Optional for fitting:
+pip install scikit-optimize
 ```
 
-The driver prints the resolved configuration, executes the requested workflows,
-and saves results (eigenvalues, thermodynamics, response functions, and the
-resolved `ed_config.txt`) underneath the chosen output directory.【F:src/core/ed_main.cpp†L433-L680】
+---
 
-## Configuration Files
+## Exact Diagonalization Pipeline
 
-Configuration files provide a reproducible record of all solver, system, and
-post-processing options. Parameters are grouped into logical sections covering
-solver tolerances, system definitions, workflow toggles, thermal settings,
-and advanced ARPACK knobs.【F:examples/ed_config_example.txt†L1-L132】 Every key
-can be overridden by passing the corresponding command-line option. For a deep
-dive into each section, see [docs/configuration.md](docs/configuration.md).
+The ED pipeline computes eigenvalues and eigenvectors of quantum spin
+Hamiltonians, then derives thermodynamic properties and response functions.
 
-## Large System Calculations (28-32 Sites)
+### Solver Methods
 
-For systems with 28+ sites, special considerations apply:
+| Method | Description | Best For |
+|--------|-------------|----------|
+| `FULL` | Full diagonalization (LAPACK) | Small systems (≤16 sites) |
+| `LANCZOS` | Iterative ground state | Ground state + few excited |
+| `ARPACK` | Sparse eigenvalue solver | Multiple eigenvalues |
+| `ARPACK_ADVANCED` | ARPACK with auto-tuning | Difficult convergence |
+| `FTLM` | Finite-Temperature Lanczos | Thermodynamics (moderate T) |
+| `LTLM` | Low-Temperature Lanczos | Thermodynamics (low T) |
+| `HYBRID` | LTLM (low T) + FTLM (high T) | Full temperature range |
+| `mTPQ` | Microcanonical TPQ | Large systems, high T |
+| `cTPQ` | Canonical TPQ | Large systems |
+| `OSS` | Optimal Spectrum Solver | All eigenvalues |
+| `FTLM_GPU` | GPU-accelerated FTLM | Large systems with GPU |
+| `LANCZOS_GPU` | GPU-accelerated Lanczos | Large ground state calcs |
 
-**Quick Start for 32 Sites:**
+### Command-Line Interface
+
 ```bash
-# 1. Check if your system has enough resources
-python3 util/check_system_feasibility.py 32 --fixed-sz --method=FTLM
-
-# 2. Run using the quick-start script
-./script/run_32sites.sh ./hamiltonian_dir --samples=50 --gpu
-
-# 3. Or use the optimized configuration
-./ED --config=examples/ed_config_32sites.txt
+./ED <hamiltonian_dir> [options]
 ```
 
-**Key strategies for large systems:**
-- **Skip spatial symmetries** (construction too expensive for 32 sites)
-- **Use Fixed-Sz reduction** (2³² → 600M states)
-- **Use FTLM/TPQ methods** (avoid storing full eigenvectors)
-- **Use CPU, not GPU** (32 sites needs 27-50 GB GPU memory)
+#### Basic Options
 
-See [docs/OPTIMIZATION_32_SITES.md](docs/OPTIMIZATION_32_SITES.md) for detailed
-analysis and [docs/HARDWARE_REQUIREMENTS.md](docs/HARDWARE_REQUIREMENTS.md) for
-sizing guide by system size and available hardware.
+| Option | Description | Default |
+|--------|-------------|---------|
+| `--method=<METHOD>` | Diagonalization method | `LANCZOS` |
+| `--eigenvalues=<N>` | Number of eigenvalues | `1` |
+| `--output=<DIR>` | Output directory | `./output` |
+| `--config=<FILE>` | Configuration file | - |
 
-**For HPC clusters:** See [docs/CLUSTER_QUICKSTART.md](docs/CLUSTER_QUICKSTART.md)
-for SLURM job scripts and [docs/CLUSTER_PERFORMANCE_32SITES.md](docs/CLUSTER_PERFORMANCE_32SITES.md)
-for detailed performance analysis on AMD EPYC systems.
+#### System Options
 
-## Thermal and Response Calculations
+| Option | Description | Default |
+|--------|-------------|---------|
+| `--num_sites=<N>` | Number of lattice sites | Auto-detect |
+| `--spin_length=<S>` | Spin quantum number | `0.5` |
+| `--fixed-sz` | Use fixed total Sz sector | Off |
+| `--n_up=<N>` | Number of up spins (with --fixed-sz) | N/2 |
 
-Thermal workloads (mTPQ, cTPQ, FTLM, LTLM, and hybrid combinations) share a
-common configuration surface that controls the sample count, Krylov dimensions,
-temperature grids, and measurement cadence.【F:src/core/ed_config.h†L32-L133】
-Dynamical and static responses build sparse Hamiltonians and operators from the
-provided directory, then sweep the requested temperature and frequency grids to
-produce spectra or thermal expectation values.【F:src/core/ed_main.cpp†L200-L356】
+#### Workflow Options
 
-## Python Utilities and Documentation
+| Option | Description |
+|--------|-------------|
+| `--standard` | Run standard diagonalization |
+| `--symmetrized` | Use symmetry reduction |
+| `--streaming-symmetry` | Stream symmetry sectors (memory-efficient) |
+| `--thermo` | Compute thermodynamics from spectrum |
+| `--dynamical-response` | Compute dynamical correlation functions |
+| `--static-response` | Compute static susceptibilities |
+| `--measure_spin` | Measure spin expectation values |
 
-Beyond the C++ solvers, the repository ships an extensive suite of Python tools
-for numerical linked-cluster expansions (NLCE), TPQ/FTLM data analysis, plotting,
-and animation. Start with the NLCE fit user manual and animated DSSF guides in
-`docs/` and `util/` for worked examples and plotting recipes.【F:docs/nlc_fit_user_manual.md†L1-L203】【F:util/README_animate_DSSF_updated.md†L1-L72】
+#### Thermal Options
+
+| Option | Description | Default |
+|--------|-------------|---------|
+| `--temp_min=<T>` | Minimum temperature | `0.001` |
+| `--temp_max=<T>` | Maximum temperature | `20.0` |
+| `--temp_bins=<N>` | Number of temperature points | `100` |
+| `--samples=<N>` | Random samples (FTLM/TPQ) | `40` |
+| `--krylov_dim=<N>` | Krylov subspace dimension | `100` |
+
+#### Example Commands
+
+```bash
+# Ground state with Lanczos
+./ED ./ham_dir --method=LANCZOS --standard --eigenvalues=10
+
+# Full spectrum for small system
+./ED ./ham_dir --method=FULL --eigenvalues=FULL --thermo
+
+# FTLM thermodynamics
+./ED ./ham_dir --method=FTLM --samples=50 --krylov_dim=150 \
+    --temp_min=0.01 --temp_max=10 --temp_bins=100
+
+# GPU-accelerated FTLM
+./ED ./ham_dir --method=FTLM_GPU --samples=100 --krylov_dim=200
+
+# Fixed-Sz sector
+./ED ./ham_dir --method=LANCZOS --fixed-sz --n_up=8 --eigenvalues=20
+
+# Dynamical structure factor
+./ED ./ham_dir --method=HYBRID --dynamical-response --dyn-thermal \
+    --dyn-omega-min=-5 --dyn-omega-max=5 --dyn-points=1000
+
+# With symmetries
+./ED ./ham_dir --method=LANCZOS --symmetrized --eigenvalues=50
+```
+
+### Configuration Files
+
+Configuration files provide reproducible parameter sets:
+
+```ini
+# ed_config.txt
+[System]
+num_sites = 16
+spin_length = 0.5
+hamiltonian_dir = ./pyrochlore_16
+
+[Diagonalization]
+method = FTLM
+num_eigenvalues = 1
+tolerance = 1e-10
+
+[Thermal]
+temp_min = 0.001
+temp_max = 20.0
+num_temp_bins = 100
+num_samples = 50
+ftlm_krylov_dim = 150
+
+[Workflow]
+output_dir = ./results/pyrochlore_ftlm
+```
+
+Load with: `./ED --config=ed_config.txt`
+
+### Input File Formats
+
+The ED executable expects Hamiltonian files in a specific directory structure:
+
+```
+hamiltonian_dir/
+├── InterAll.dat          # Two-body interactions
+├── Trans.dat             # Single-site terms (magnetic field)
+├── ThreeBodyG.dat        # Three-body terms (optional)
+└── pyrochlore_site_info.dat  # Site positions (for structure factors)
+```
+
+#### InterAll.dat (Two-Body Interactions)
+
+```
+# site_i site_j spin_op_i spin_op_j coupling_real coupling_imag
+0 1 0 0 0.5 0.0    # S+_0 S-_1 term
+0 1 1 1 0.5 0.0    # S-_0 S+_1 term
+0 1 2 2 1.0 0.0    # Sz_0 Sz_1 term
+...
+```
+
+Spin operators: 0 = S+, 1 = S-, 2 = Sz
+
+#### Trans.dat (Single-Site Terms)
+
+```
+# site spin_op coupling_real coupling_imag
+0 2 0.5 0.0    # 0.5 * Sz_0 (magnetic field)
+1 2 0.5 0.0    # 0.5 * Sz_1
+...
+```
+
+### Output Files
+
+```
+output/
+├── eigenvalues.txt           # Eigenvalues (one per line)
+├── ed_config.txt             # Resolved configuration
+├── thermo/
+│   └── thermo_data.txt       # T, E, C, S, F columns
+├── dynamical_response/
+│   └── Sqw_*.dat             # S(q,ω) data files
+├── static_response/
+│   └── chi_*.dat             # χ(T) data files
+├── eigenvectors/             # Eigenvector data (if computed)
+│   ├── eigenvalues.dat
+│   └── eigenvector_*.dat
+└── results.h5                # HDF5 output (all data)
+```
+
+---
+
+## NLCE Workflow
+
+### NLCE Overview
+
+Numerical Linked Cluster Expansion (NLCE) computes bulk thermodynamic properties
+by systematically summing contributions from finite clusters:
+
+$$
+P_\infty = \sum_c L(c) \cdot W_P(c)
+$$
+
+where:
+- $P_\infty$ is the extensive property per site
+- $L(c)$ is the lattice constant (multiplicity) of cluster $c$
+- $W_P(c)$ is the weight of cluster $c$ for property $P$
+
+The weight is computed via inclusion-exclusion:
+
+$$
+W_P(c) = P(c) - \sum_{s \subset c} W_P(s)
+$$
+
+### Workflow Components
+
+```
+workflows/nlce/
+├── prep/
+│   └── generate_pyrochlore_clusters.py  # Cluster enumeration
+├── run/
+│   ├── nlce.py              # Full ED workflow orchestrator
+│   ├── nlce_ftlm.py         # FTLM-based workflow
+│   ├── NLC_sum.py           # NLCE summation (full spectrum)
+│   └── NLC_sum_ftlm.py      # NLCE summation (FTLM data)
+└── analysis/
+    ├── nlc_fit.py           # Fit NLCE to experimental data
+    ├── nlc_fit_ftlm.py      # Fitting for FTLM results
+    ├── nlc_convergence.py   # Order-by-order convergence
+    └── nlce_ftlm_convergence.py  # FTLM convergence analysis
+```
+
+### Running NLCE Calculations
+
+#### Full Diagonalization Workflow
+
+```bash
+cd workflows/nlce/run
+
+# Basic NLCE calculation (Heisenberg model)
+python3 nlce.py --max_order=4 --Jxx=1.0 --Jyy=1.0 --Jzz=1.0 \
+    --thermo --temp_min=0.01 --temp_max=10 --temp_bins=100
+
+# With magnetic field
+python3 nlce.py --max_order=4 --Jxx=1.0 --Jyy=1.0 --Jzz=1.0 \
+    --h=0.5 --field_dir 0 0 1 --thermo
+
+# Parallel execution
+python3 nlce.py --max_order=5 --parallel --num_cores=16 \
+    --Jxx=1.0 --Jyy=1.0 --Jzz=1.0 --thermo
+
+# Skip certain steps (resume interrupted run)
+python3 nlce.py --max_order=4 --skip_cluster_gen --skip_ham_prep \
+    --Jxx=1.0 --Jyy=1.0 --Jzz=1.0 --thermo
+```
+
+#### nlce.py Options
+
+| Option | Description | Default |
+|--------|-------------|---------|
+| `--max_order` | Maximum cluster order | Required |
+| `--base_dir` | Output directory | `./nlce_results` |
+| `--ed_executable` | Path to ED binary | `../../../build/ED` |
+| `--Jxx, --Jyy, --Jzz` | Exchange couplings | `1.0` |
+| `--h` | Magnetic field strength | `0.0` |
+| `--field_dir` | Field direction (x,y,z) | `[1/√3, 1/√3, 1/√3]` |
+| `--method` | ED method (`FULL`, `OSS`, `mTPQ`) | `FULL` |
+| `--thermo` | Compute thermodynamics | Off |
+| `--temp_min/max/bins` | Temperature grid | `0.001, 20.0, 100` |
+| `--parallel` | Enable parallel execution | Off |
+| `--num_cores` | CPU cores for parallel | All available |
+| `--symmetrized` | Use symmetry reduction | Off |
+| `--measure_spin` | Measure ⟨S⟩ values | Off |
+| `--skip_cluster_gen` | Skip cluster generation | Off |
+| `--skip_ham_prep` | Skip Hamiltonian prep | Off |
+| `--skip_ed` | Skip ED calculations | Off |
+| `--skip_nlc` | Skip NLCE summation | Off |
+
+### NLCE with FTLM
+
+For larger clusters (>15 sites), use FTLM instead of full diagonalization:
+
+```bash
+# FTLM-based NLCE
+python3 nlce_ftlm.py --max_order=6 --Jxx=1.0 --Jyy=1.0 --Jzz=1.0 \
+    --ftlm_samples=50 --krylov_dim=200 \
+    --temp_min=0.01 --temp_max=10 --temp_bins=100
+
+# With GPU acceleration
+python3 nlce_ftlm.py --max_order=6 --ftlm_samples=100 --krylov_dim=300 \
+    --Jxx=1.0 --Jyy=1.0 --Jzz=1.0
+```
+
+#### nlce_ftlm.py Additional Options
+
+| Option | Description | Default |
+|--------|-------------|---------|
+| `--ftlm_samples` | Random samples per cluster | `40` |
+| `--krylov_dim` | Krylov subspace dimension | `150` |
+| `--resummation` | Series acceleration method | `auto` |
+| `--robust_pipeline` | Cross-validated C(T) | Off |
+
+### NLCE Output Structure
+
+```
+nlce_results/
+├── clusters_order_N/
+│   └── cluster_info_order_N/
+│       ├── cluster_0_order_1.dat
+│       ├── cluster_1_order_2.dat
+│       └── subclusters_info.txt
+├── hamiltonians_order_N/
+│   └── cluster_X_order_Y/
+│       ├── InterAll.dat
+│       ├── Trans.dat
+│       └── pyrochlore_site_info.dat
+├── ed_results_order_N/
+│   └── cluster_X_order_Y/
+│       └── output/
+│           ├── eigenvalues.txt
+│           └── thermo/
+├── nlc_results_order_N/
+│   ├── specific_heat.dat
+│   ├── entropy.dat
+│   ├── energy.dat
+│   └── nlce_convergence.png
+├── thermo_plots_order_N/
+└── nlce_workflow.log
+```
+
+### Analysis and Fitting
+
+#### Convergence Analysis
+
+```bash
+cd workflows/nlce/analysis
+
+# Check order-by-order convergence
+python3 nlc_convergence.py \
+    --cluster_dir ../run/nlce_results/clusters_order_5/cluster_info_order_5 \
+    --eigenvalue_dir ../run/nlce_results/ed_results_order_5 \
+    --output_dir ./convergence_analysis \
+    --temp_min=0.1 --temp_max=10
+
+# FTLM convergence
+python3 nlce_ftlm_convergence.py \
+    --cluster_dir ../run/nlce_ftlm_results/clusters_order_6 \
+    --ftlm_dir ../run/nlce_ftlm_results/ftlm_results_order_6 \
+    --output_dir ./ftlm_convergence
+```
+
+#### Fitting to Experimental Data
+
+```bash
+# Fit exchange parameters to specific heat data
+python3 nlc_fit.py \
+    --exp_data specific_heat_experiment.txt \
+    --max_order 4 \
+    --Jxx_range 0.5 1.5 \
+    --Jyy_range 0.5 1.5 \
+    --Jzz_range 0.5 1.5 \
+    --optimizer differential_evolution \
+    --output_dir ./fitting_results
+
+# Multi-field fitting
+python3 nlc_fit.py \
+    --exp_data_config multi_field_config.json \
+    --max_order 4 \
+    --optimizer basinhopping
+```
+
+#### Fitting Configuration (JSON)
+
+```json
+[
+  {
+    "file": "specific_heat_0T.txt",
+    "h": 0.0,
+    "field_dir": [0, 0, 1],
+    "weight": 1.0,
+    "temp_min": 0.5,
+    "temp_max": 10.0
+  },
+  {
+    "file": "specific_heat_4T.txt",
+    "h": 4.0,
+    "field_dir": [0, 0, 1],
+    "weight": 0.5
+  }
+]
+```
+
+---
+
+## Advanced Topics
+
+### Large System Calculations (28-32 Sites)
+
+For systems with 28+ sites, special strategies are required:
+
+```bash
+# 1. Check resource requirements
+python3 scripts/check_system_feasibility.py 32 --fixed-sz --method=FTLM
+
+# 2. Use Fixed-Sz + FTLM
+./ED ./ham_dir --method=FTLM --fixed-sz --samples=50 \
+    --krylov_dim=200 --thermo
+
+# 3. Memory-efficient streaming symmetry
+./ED ./ham_dir --method=LANCZOS --streaming-symmetry --eigenvalues=10
+```
+
+Key strategies:
+- **Skip spatial symmetries** (construction too expensive)
+- **Use Fixed-Sz** (reduces 2³² → 600M states)
+- **Use FTLM/TPQ** (no eigenvector storage)
+- **Prefer CPU over GPU** (32 sites needs 27-50 GB GPU memory)
+
+### Temperature Scan Optimization
+
+Multi-temperature dynamical correlations are **up to 35× faster** by reusing
+the Lanczos decomposition across temperatures. Enable automatically for
+temperature scans with `--dyn-thermal --temp_bins>1`.
+
+### GPU Acceleration
+
+```bash
+# GPU-accelerated FTLM
+./ED ./ham_dir --method=FTLM_GPU --samples=100 --krylov_dim=400
+
+# GPU dynamical response
+./ED ./ham_dir --method=HYBRID --dynamical-response --dyn-use-gpu
+```
+
+Requires: CUDA build (`-DWITH_CUDA=ON`) and GPU with sufficient memory.
+
+### MPI Parallel TPQ
+
+```bash
+# Run TPQ with MPI parallelization over samples
+mpirun -np 16 ./ED ./ham_dir --method=mTPQ --samples=160 --thermo
+```
+
+Each MPI rank processes samples/size samples independently.
+
+---
+
+## Python Utilities
+
+### python/edlib Package
+
+```python
+from edlib import helper_pyrochlore, hdf5_io
+
+# Generate pyrochlore Hamiltonian
+helper_pyrochlore.generate_hamiltonian(
+    output_dir="./ham",
+    Jxx=1.0, Jyy=1.0, Jzz=1.0,
+    h=0.0, field_dir=[0, 0, 1]
+)
+
+# Read HDF5 results
+with hdf5_io.open_results("./output/results.h5") as f:
+    eigenvalues = f.get_eigenvalues()
+    temps, cv = f.get_thermodynamics("specific_heat")
+```
+
+### Plotting Scripts
+
+```bash
+cd scripts
+
+# Plot thermodynamics
+python3 plot_ftlm.py --input ../results/thermo/thermo_data.txt
+
+# Animate dynamical structure factor
+python3 animate_DSSF.py --input ../results/dynamical_response/
+
+# Plot NLCE convergence
+python3 plot_ftlm_clusters.py --cluster_dir ../workflows/nlce/run/nlce_results
+```
+
+---
+
+## Recent Updates
+
+**🚀 Temperature Scan Optimization** – Dynamical correlations at multiple
+temperatures now run **up to 35× faster** by reusing the Lanczos decomposition.
+
+**⚙️ Large System Support (32+ Sites)** – Fixed-Sz + FTLM methods enable
+calculations on 600M-dimensional Hilbert spaces with ~40-80 GB RAM.
+
+**📦 Reorganized Codebase** – Modern directory layout with separated headers
+(`include/ed/`), sources (`src/`), Python package (`python/edlib/`), and
+workflows (`workflows/nlce/`).
+
+---
 
 ## Getting Help
 
-- `ED --help` prints the option reference and the list of available solvers.
-- `ED --method-info=<METHOD>` reports solver-specific parameter defaults.
-- Sample configs in `examples/` cover standard, symmetry-reduced, and fixed-Sz
-  calculations.
-- Open an issue or consult the documentation if you encounter build failures or
-  backend configuration problems.
+- `ED --help` – Full option reference
+- `ED --method-info=<METHOD>` – Method-specific parameters
+- `docs/` – Extended documentation
+- `examples/` – Sample configuration files
+
+---
 
 ## License
 
-Please refer to your project or institutional policies regarding distribution
-and licensing of this code base. (Update this section with the appropriate
-license text if applicable.)
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.

@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "edlib"
+version = "0.1.0"
+description = "Python utilities for exact diagonalization calculations"
+readme = "README.md"
+requires-python = ">=3.8"
+license = {text = "MIT"}
+authors = [
+    {name = "ze-bang"}
+]
+dependencies = [
+    "numpy>=1.20.0",
+    "h5py>=3.0.0",
+    "scipy>=1.6.0",
+    "networkx>=2.5",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=6.0",
+    "pytest-cov",
+]
+plotting = [
+    "matplotlib>=3.3.0",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["edlib*"]

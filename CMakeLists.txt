@@ -80,16 +80,26 @@ if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Release)
 endif()
 
-# Source directories
+# Source directories - new organized layout
 set(SRC_DIR ${CMAKE_CURRENT_SOURCE_DIR}/src)
+set(INCLUDE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/include)
 set(CORE_DIR ${SRC_DIR}/core)
-set(CPU_SOLVERS_DIR ${SRC_DIR}/cpu_solvers)
-set(GPU_DIR ${SRC_DIR}/gpu)
+set(APPS_DIR ${SRC_DIR}/apps)
+set(SOLVERS_CPU_DIR ${SRC_DIR}/solvers/cpu)
+set(SOLVERS_GPU_DIR ${SRC_DIR}/solvers/gpu)
+set(IO_DIR ${SRC_DIR}/io)
 
+# Include directories - public headers in include/, private in src/
+include_directories(${INCLUDE_DIR})
+include_directories(${INCLUDE_DIR}/ed/core)
+include_directories(${INCLUDE_DIR}/ed/solvers)
+include_directories(${INCLUDE_DIR}/ed/io)
+include_directories(${INCLUDE_DIR}/ed/gpu)
 include_directories(${SRC_DIR})
 include_directories(${CORE_DIR})
-include_directories(${CPU_SOLVERS_DIR})
-include_directories(${GPU_DIR})
+include_directories(${SOLVERS_CPU_DIR})
+include_directories(${SOLVERS_GPU_DIR})
+include_directories(${IO_DIR})
 
 # Configure BLAS/LAPACK backends
 set(BLAS_LIBRARIES "")
@@ -262,20 +272,20 @@ if(WITH_MPI)
     add_definitions(-DWITH_MPI)
 endif()
 
-# New elegant main sources
+# New elegant main sources - organized layout
 set(SOURCES
-    ${CORE_DIR}/ed_main.cpp
+    ${APPS_DIR}/ed_main.cpp
     ${CORE_DIR}/ed_config.cpp
-    ${CPU_SOLVERS_DIR}/arpack.cpp
-    ${CPU_SOLVERS_DIR}/observables.cpp
-    ${CPU_SOLVERS_DIR}/lanczos.cpp
-    ${CPU_SOLVERS_DIR}/CG.cpp
-    ${CPU_SOLVERS_DIR}/dynamics.cpp
-    ${CPU_SOLVERS_DIR}/TPQ.cpp
-    ${CPU_SOLVERS_DIR}/ftlm.cpp
-    ${CPU_SOLVERS_DIR}/ltlm.cpp
-    ${CPU_SOLVERS_DIR}/hybrid_thermal.cpp
-    ${SRC_DIR}/io/basis_vector_storage.cpp
+    ${SOLVERS_CPU_DIR}/arpack.cpp
+    ${SOLVERS_CPU_DIR}/observables.cpp
+    ${SOLVERS_CPU_DIR}/lanczos.cpp
+    ${SOLVERS_CPU_DIR}/CG.cpp
+    ${SOLVERS_CPU_DIR}/dynamics.cpp
+    ${SOLVERS_CPU_DIR}/TPQ.cpp
+    ${SOLVERS_CPU_DIR}/ftlm.cpp
+    ${SOLVERS_CPU_DIR}/ltlm.cpp
+    ${SOLVERS_CPU_DIR}/hybrid_thermal.cpp
+    ${IO_DIR}/basis_vector_storage.cpp
 )
 
 # Header-only sources that should be included in compilation
@@ -283,31 +293,31 @@ set(HEADER_SOURCES
     ${SRC_DIR}/*.h
 )
 
-# GPU sources for CUDA-enabled builds
+# GPU sources for CUDA-enabled builds - organized layout
 if(WITH_CUDA)
     set(GPU_SOURCES
-        ${GPU_DIR}/gpu_operator.cu
-        ${GPU_DIR}/gpu_operator_conversion.cpp
-        ${GPU_DIR}/gpu_kernels.cu
-        ${GPU_DIR}/gpu_fixed_sz_operator.cu
-        ${GPU_DIR}/gpu_lanczos.cu
-        ${GPU_DIR}/gpu_ed_wrapper.cu
-        ${GPU_DIR}/gpu_tpq.cu
-        ${GPU_DIR}/gpu_cg.cu
-        ${GPU_DIR}/gpu_dynamics.cu
-        ${GPU_DIR}/gpu_ftlm.cu
+        ${SOLVERS_GPU_DIR}/gpu_operator.cu
+        ${SOLVERS_GPU_DIR}/gpu_operator_conversion.cpp
+        ${SOLVERS_GPU_DIR}/gpu_kernels.cu
+        ${SOLVERS_GPU_DIR}/gpu_fixed_sz_operator.cu
+        ${SOLVERS_GPU_DIR}/gpu_lanczos.cu
+        ${SOLVERS_GPU_DIR}/gpu_ed_wrapper.cu
+        ${SOLVERS_GPU_DIR}/gpu_tpq.cu
+        ${SOLVERS_GPU_DIR}/gpu_cg.cu
+        ${SOLVERS_GPU_DIR}/gpu_dynamics.cu
+        ${SOLVERS_GPU_DIR}/gpu_ftlm.cu
     )
     
     set(GPU_HEADERS
-        ${GPU_DIR}/kernel_config.h
-        ${GPU_DIR}/bit_operations.cuh
-        ${GPU_DIR}/gpu_operator.cuh
-        ${GPU_DIR}/gpu_lanczos.cuh
-        ${GPU_DIR}/gpu_ed_wrapper.h
-        ${GPU_DIR}/gpu_tpq.cuh
-        ${GPU_DIR}/gpu_cg.cuh
-        ${GPU_DIR}/gpu_dynamics.cuh
-        ${GPU_DIR}/gpu_ftlm.cuh
+        ${INCLUDE_DIR}/ed/gpu/kernel_config.h
+        ${INCLUDE_DIR}/ed/gpu/bit_operations.cuh
+        ${INCLUDE_DIR}/ed/gpu/gpu_operator.cuh
+        ${INCLUDE_DIR}/ed/gpu/gpu_lanczos.cuh
+        ${INCLUDE_DIR}/ed/gpu/gpu_ed_wrapper.h
+        ${INCLUDE_DIR}/ed/gpu/gpu_tpq.cuh
+        ${INCLUDE_DIR}/ed/gpu/gpu_cg.cuh
+        ${INCLUDE_DIR}/ed/gpu/gpu_dynamics.cuh
+        ${INCLUDE_DIR}/ed/gpu/gpu_ftlm.cuh
     )
 endif()
 
@@ -316,13 +326,13 @@ endif()
 # New elegant main (add GPU sources if CUDA is enabled)
 if(WITH_CUDA)
     add_executable(ED ${SOURCES} ${GPU_SOURCES})
-    target_include_directories(ED PRIVATE ${GPU_DIR})
+    target_include_directories(ED PRIVATE ${SOLVERS_GPU_DIR})
 else()
     add_executable(ED ${SOURCES})
 endif()
 
 # Add TPQ_DSSF executable (only if MPI is enabled since it uses MPI)
-add_executable(TPQ_DSSF ${CORE_DIR}/TPQ_DSSF.cpp ${CPU_SOLVERS_DIR}/dynamics.cpp ${CPU_SOLVERS_DIR}/TPQ.cpp ${CPU_SOLVERS_DIR}/ftlm.cpp ${CPU_SOLVERS_DIR}/lanczos.cpp ${SRC_DIR}/io/basis_vector_storage.cpp)
+add_executable(TPQ_DSSF ${APPS_DIR}/TPQ_DSSF.cpp ${SOLVERS_CPU_DIR}/dynamics.cpp ${SOLVERS_CPU_DIR}/TPQ.cpp ${SOLVERS_CPU_DIR}/ftlm.cpp ${SOLVERS_CPU_DIR}/lanczos.cpp ${IO_DIR}/basis_vector_storage.cpp)
 
 
 # Link libraries for new main
@@ -362,15 +372,15 @@ if(TARGET TPQ_DSSF)
     if(WITH_CUDA)
         # Add GPU source files to TPQ_DSSF
         target_sources(TPQ_DSSF PRIVATE
-            ${GPU_DIR}/gpu_ed_wrapper.cu
-            ${GPU_DIR}/gpu_operator.cu
-            ${GPU_DIR}/gpu_operator_conversion.cpp
-            ${GPU_DIR}/gpu_kernels.cu
-            ${GPU_DIR}/gpu_fixed_sz_operator.cu
-            ${GPU_DIR}/gpu_lanczos.cu
-            ${GPU_DIR}/gpu_tpq.cu
-            ${GPU_DIR}/gpu_cg.cu
-            ${GPU_DIR}/gpu_ftlm.cu
+            ${SOLVERS_GPU_DIR}/gpu_ed_wrapper.cu
+            ${SOLVERS_GPU_DIR}/gpu_operator.cu
+            ${SOLVERS_GPU_DIR}/gpu_operator_conversion.cpp
+            ${SOLVERS_GPU_DIR}/gpu_kernels.cu
+            ${SOLVERS_GPU_DIR}/gpu_fixed_sz_operator.cu
+            ${SOLVERS_GPU_DIR}/gpu_lanczos.cu
+            ${SOLVERS_GPU_DIR}/gpu_tpq.cu
+            ${SOLVERS_GPU_DIR}/gpu_cg.cu
+            ${SOLVERS_GPU_DIR}/gpu_ftlm.cu
         )
         
         target_link_libraries(TPQ_DSSF
