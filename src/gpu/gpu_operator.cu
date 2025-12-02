@@ -72,8 +72,6 @@ void GPUOperator::initializeCUSPARSE() {
 
 void GPUOperator::initializeCUBLAS() {
     CUBLAS_CHECK(cublasCreate(&cublas_handle_));
-    // Set cuBLAS to use host pointer mode for scalar results
-    CUBLAS_CHECK(cublasSetPointerMode(cublas_handle_, CUBLAS_POINTER_MODE_HOST));
 }
 
 // OPTIMIZED: Direct data population methods

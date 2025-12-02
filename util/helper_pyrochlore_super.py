@@ -457,26 +457,25 @@ def generate_three_spin_terms(nn_list, node_mapping, three_spin_coeff, sublattic
                 # Determine the phase based on the triplet geometry
                 sub_i = sublattice_indices[i]
                 sub_k = sublattice_indices[k]
-                    
-                if sub_i == sub_k:
-                    # Type B: Collinear opposite pairs (same sublattice, opposite through j)
-                    # CRITICAL: i and k must NOT be the same sublattice as j
-                    # If they are, this term is zero (unphysical configuration)
-                    if sub_i == sub_j:
-                        # This should never contribute - set coefficient to zero
-                        phase = 0.0
-                    else:
-                        # Phase follows (1, ω, ω²) based on which sublattice axis
-                        # relative to the central site j
-                        phase_idx = (sub_i - sub_j) % 3
-                        phase = phase_factors[phase_idx]
-                    
-                else:
-                    # Type C: Non-collinear cross pairs
-                    # Phase depends on which sublattices are involved
-                    # Use a consistent rule: phase based on sublattice ordering
-                    phase_idx = (sub_i - sub_k) % 3
-                    phase = phase_factors[phase_idx]
+                
+                # Base Gamma matrix for sub_j = 0
+                Gamma_base = np.array(([[0,0,0,0],
+                                       [0,1,1,omega**2],
+                                       [0,1,omega, omega],
+                                       [0,omega**2,omega,omega**2]]), dtype=complex)
+                
+                # Permute rows and columns based on sub_j
+                # Create permutation: shift indices by sub_j (cyclic)
+                perm = np.array([(idx - sub_j) % 4 for idx in range(4)])
+                Gamma = Gamma_base[np.ix_(perm, perm)]
+                
+                # Print for testing (only once per central site j)
+                if i == neighbors[0] and k == neighbors[1]:
+                    print(f"\nCentral site j={j}, sublattice={sub_j}")
+                    print(f"Permutation: {perm}")
+                    print(f"Gamma matrix:\n{Gamma}")
+
+                phase = Gamma[sub_i, sub_k]
                 
                 coeff = three_spin_coeff * phase
                 coeff_real = np.real(coeff)

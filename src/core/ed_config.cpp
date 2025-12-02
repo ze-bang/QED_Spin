@@ -231,6 +231,10 @@ EDConfig EDConfig::fromCommandLine(uint64_t argc, char* argv[]) {
             else if (arg.find("--num_measure_freq=") == 0) config.thermal.num_measure_freq = std::stoi(parse_value("--num_measure_freq=")); // Deprecated: use --measure-freq
             else if (arg.find("--delta_tau=") == 0) config.thermal.delta_tau = std::stod(parse_value("--delta_tau="));
             else if (arg.find("--large_value=") == 0) config.thermal.large_value = std::stod(parse_value("--large_value="));
+            // TPQ continue-quenching options
+            else if (arg == "--continue_quenching") config.thermal.continue_quenching = true;
+            else if (arg.find("--continue_sample=") == 0) config.thermal.continue_sample = std::stoi(parse_value("--continue_sample="));
+            else if (arg.find("--continue_beta=") == 0) config.thermal.continue_beta = std::stod(parse_value("--continue_beta="));
             else if (arg == "--calc_observables") config.observable.calculate = true;
             else if (arg == "--measure_spin") config.observable.measure_spin = true;
             else if (arg == "--standard") config.workflow.run_standard = true;
@@ -239,6 +243,7 @@ EDConfig EDConfig::fromCommandLine(uint64_t argc, char* argv[]) {
             else if (arg == "--thermo") config.workflow.compute_thermo = true;
             else if (arg == "--dynamical-response") config.workflow.compute_dynamical_response = true;
             else if (arg == "--static-response") config.workflow.compute_static_response = true;
+            else if (arg == "--ground-state-dssf") config.workflow.compute_ground_state_dssf = true;
             else if (arg == "--skip_ED") config.workflow.skip_ed = true;
             else if (arg.find("--sublattice_size=") == 0) config.system.sublattice_size = std::stoi(parse_value("--sublattice_size="));
             else if (arg.find("--omega_min=") == 0) config.observable.omega_min = std::stod(parse_value("--omega_min="));
@@ -352,7 +357,9 @@ EDConfig EDConfig::fromCommandLine(uint64_t argc, char* argv[]) {
     }
     
     // Auto-enable skip_ed if only response calculations are requested
-    bool only_response = (config.workflow.compute_dynamical_response || config.workflow.compute_static_response) &&
+    bool only_response = (config.workflow.compute_dynamical_response || 
+                          config.workflow.compute_static_response ||
+                          config.workflow.compute_ground_state_dssf) &&
                         !config.workflow.run_standard && 
                         !config.workflow.run_symmetrized && 
                         !config.workflow.run_streaming_symmetry &&

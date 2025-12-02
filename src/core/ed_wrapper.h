@@ -1615,7 +1615,7 @@ inline EDResults exact_diagonalization_fixed_sz(
     
     // Get dimension of fixed Sz sector
     uint64_t fixed_sz_dim = hamiltonian.getFixedSzDim();
-    uint64_t full_dim = 1 << num_sites;
+    uint64_t full_dim = 1ULL << num_sites;
     
     std::cout << "Hilbert space dimension:" << std::endl;
     std::cout << "  Full space: " << full_dim << std::endl;

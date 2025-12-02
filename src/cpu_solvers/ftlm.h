@@ -685,4 +685,136 @@ std::map<double, DynamicalResponseResults> compute_dynamical_correlation_multi_s
     const std::string& output_dir = ""
 );
 
+// ============================================================================
+// GROUND STATE DYNAMICAL STRUCTURE FACTOR (CONTINUED FRACTION METHOD)
+// ============================================================================
+
+/**
+ * @brief Parameters for ground state DSSF calculation
+ */
+struct GroundStateDSSFParameters {
+    uint64_t krylov_dim = 500;              // Krylov dimension for spectral decomposition
+    double tolerance = 1e-12;               // Lanczos convergence tolerance
+    bool full_reorthogonalization = true;   // Use full reorthogonalization (recommended for accuracy)
+    uint64_t reorth_frequency = 5;          // Reorthogonalization frequency (if not full)
+    double broadening = 0.05;               // Lorentzian broadening η
+    double omega_min = -5.0;                // Minimum frequency
+    double omega_max = 10.0;                // Maximum frequency
+    uint64_t num_omega_points = 2000;       // Number of frequency points
+    bool use_continued_fraction = true;     // Use continued fraction (faster) vs eigendecomposition
+    bool compute_both_directions = true;    // Compute both positive and negative frequency parts
+};
+
+/**
+ * @brief Evaluate spectral function using continued fraction representation
+ * 
+ * This is the OPTIMAL method for ground state (T=0) dynamical correlations.
+ * The Green's function G(z) = ⟨φ|(z-H)⁻¹|φ⟩ is computed as a continued fraction:
+ * 
+ *   G(z) = ||φ||² / (z - α₀ - β₁²/(z - α₁ - β₂²/(z - α₂ - ...)))
+ * 
+ * where α_n, β_n are the Lanczos coefficients starting from |φ⟩ = O|ψ₀⟩.
+ * 
+ * The spectral function is then S(ω) = -Im[G(ω + iη)] / π
+ * 
+ * Advantages over eigenvalue decomposition:
+ * - No need to store/diagonalize tridiagonal matrix
+ * - Numerically stable bottom-up evaluation
+ * - O(M) per frequency point vs O(M²) for eigendecomposition
+ * 
+ * @param alpha Diagonal elements of Lanczos tridiagonal matrix
+ * @param beta Off-diagonal elements (β[0] = 0 is not used, β[1]...β[M-1])
+ * @param omega_grid Frequency grid for evaluation
+ * @param broadening Lorentzian broadening parameter η > 0
+ * @param norm_sq Squared norm ||O|ψ₀⟩||² for proper normalization
+ * @return Spectral function values at each frequency
+ */
+std::vector<double> continued_fraction_spectral_function(
+    const std::vector<double>& alpha,
+    const std::vector<double>& beta,
+    const std::vector<double>& omega_grid,
+    double broadening,
+    double norm_sq
+);
+
+/**
+ * @brief Compute ground state dynamical structure factor S(q,ω)
+ * 
+ * Computes the zero-temperature dynamical correlation function:
+ *   S(ω) = -1/π Im⟨0|O†(ω + E₀ - H + iη)⁻¹O|0⟩
+ * 
+ * This is the gold standard method for ground state dynamics in ED:
+ * 1. Apply operator O to ground state: |φ⟩ = O|0⟩
+ * 2. Run Lanczos starting from |φ⟩ to get tridiagonal matrix
+ * 3. Evaluate continued fraction for each frequency ω
+ * 
+ * Memory efficient: Only stores 2-3 vectors at a time.
+ * No random sampling: Exact result for given ground state.
+ * 
+ * @param H Hamiltonian matrix-vector product function
+ * @param O Operator matrix-vector product function (e.g., S(q))
+ * @param ground_state The ground state |0⟩ (must be normalized)
+ * @param ground_state_energy Ground state energy E₀
+ * @param N Hilbert space dimension
+ * @param params Parameters for calculation
+ * @return DynamicalResponseResults with spectral function S(ω)
+ */
+DynamicalResponseResults compute_ground_state_dssf(
+    std::function<void(const Complex*, Complex*, int)> H,
+    std::function<void(const Complex*, Complex*, int)> O,
+    const ComplexVector& ground_state,
+    double ground_state_energy,
+    uint64_t N,
+    const GroundStateDSSFParameters& params
+);
+
+/**
+ * @brief Compute ground state two-operator correlation S_{O1,O2}(ω)
+ * 
+ * Generalizes compute_ground_state_dssf to different operators:
+ *   S_{O1,O2}(ω) = -1/π Im⟨0|O₁†(ω + E₀ - H + iη)⁻¹O₂|0⟩
+ * 
+ * For structure factor: O₁ = O₂ = S(q) gives standard S(q,ω)
+ * For cross-correlations: Different O₁, O₂ give off-diagonal responses
+ * 
+ * @param H Hamiltonian matrix-vector product function
+ * @param O1 First operator O₁ (conjugated)
+ * @param O2 Second operator O₂ (applied to ground state)
+ * @param ground_state The ground state |0⟩
+ * @param ground_state_energy Ground state energy E₀
+ * @param N Hilbert space dimension
+ * @param params Parameters for calculation
+ * @return DynamicalResponseResults with cross-correlation spectral function
+ */
+DynamicalResponseResults compute_ground_state_cross_correlation(
+    std::function<void(const Complex*, Complex*, int)> H,
+    std::function<void(const Complex*, Complex*, int)> O1,
+    std::function<void(const Complex*, Complex*, int)> O2,
+    const ComplexVector& ground_state,
+    double ground_state_energy,
+    uint64_t N,
+    const GroundStateDSSFParameters& params
+);
+
+/**
+ * @brief Load ground state from eigenvector files
+ * 
+ * Attempts to load ground state from various possible file formats:
+ * 1. Binary eigenvector file (eigenvector_0.dat)
+ * 2. Text eigenvector file (eigenvector_0.txt)
+ * 3. Block-structured files (eigenvector_block0_0.dat)
+ * 
+ * @param eigenvector_dir Directory containing eigenvector files
+ * @param ground_state Output: loaded ground state vector
+ * @param ground_state_energy Output: ground state energy
+ * @param expected_dim Expected Hilbert space dimension (for validation)
+ * @return true if successfully loaded, false otherwise
+ */
+bool load_ground_state_from_file(
+    const std::string& eigenvector_dir,
+    ComplexVector& ground_state,
+    double& ground_state_energy,
+    uint64_t expected_dim = 0
+);
+
 #endif // FTLM_H

@@ -2532,3 +2532,492 @@ std::map<double, DynamicalResponseResults> compute_dynamical_correlation_multi_s
         temperatures, params.broadening, params.num_samples, &per_sample_weights
     );
 }
+
+// ============================================================================
+// GROUND STATE DYNAMICAL STRUCTURE FACTOR (CONTINUED FRACTION METHOD)
+// ============================================================================
+
+/**
+ * @brief Evaluate spectral function using continued fraction representation
+ * 
+ * Computes S(ω) = -Im[G(ω + iη)] / π where G is the continued fraction:
+ * G(z) = norm_sq / (z - α₀ - β₁²/(z - α₁ - β₂²/(z - α₂ - ...)))
+ * 
+ * Uses numerically stable bottom-up evaluation to avoid overflow.
+ */
+std::vector<double> continued_fraction_spectral_function(
+    const std::vector<double>& alpha,
+    const std::vector<double>& beta,
+    const std::vector<double>& omega_grid,
+    double broadening,
+    double norm_sq
+) {
+    if (alpha.empty()) {
+        return std::vector<double>(omega_grid.size(), 0.0);
+    }
+    
+    size_t M = alpha.size();
+    size_t num_omega = omega_grid.size();
+    std::vector<double> spectral(num_omega, 0.0);
+    
+    // Parallel evaluation over frequency points
+    #pragma omp parallel for schedule(static)
+    for (size_t iw = 0; iw < num_omega; iw++) {
+        double omega = omega_grid[iw];
+        Complex z(omega, broadening);  // ω + iη
+        
+        // Evaluate continued fraction from bottom up (numerically stable)
+        // G_M = 0 (termination)
+        // G_{n-1} = β_n² / (z - α_n - G_n)
+        // ...
+        // G(z) = norm_sq / (z - α₀ - G_1)
+        
+        Complex G(0.0, 0.0);
+        
+        // Bottom-up: start from n = M-1 down to n = 1
+        for (int n = M - 1; n >= 1; n--) {
+            // G = β_n² / (z - α_n - G)
+            // Note: beta[n] corresponds to β_n (off-diagonal element)
+            double beta_n_sq = (n < beta.size()) ? beta[n] * beta[n] : 0.0;
+            Complex denom = z - Complex(alpha[n], 0.0) - G;
+            
+            // Avoid division by zero
+            if (std::abs(denom) > 1e-300) {
+                G = Complex(beta_n_sq, 0.0) / denom;
+            } else {
+                G = Complex(0.0, 0.0);
+            }
+        }
+        
+        // Final step: G(z) = norm_sq / (z - α₀ - G)
+        Complex denom = z - Complex(alpha[0], 0.0) - G;
+        Complex G_final;
+        if (std::abs(denom) > 1e-300) {
+            G_final = Complex(norm_sq, 0.0) / denom;
+        } else {
+            G_final = Complex(0.0, 0.0);
+        }
+        
+        // Spectral function: S(ω) = -Im[G(ω + iη)] / π
+        spectral[iw] = -G_final.imag() / M_PI;
+    }
+    
+    return spectral;
+}
+
+/**
+ * @brief Compute ground state dynamical structure factor S(ω)
+ */
+DynamicalResponseResults compute_ground_state_dssf(
+    std::function<void(const Complex*, Complex*, int)> H,
+    std::function<void(const Complex*, Complex*, int)> O,
+    const ComplexVector& ground_state,
+    double ground_state_energy,
+    uint64_t N,
+    const GroundStateDSSFParameters& params
+) {
+    std::cout << "\n==========================================\n";
+    std::cout << "Ground State Dynamical Structure Factor\n";
+    std::cout << "(Continued Fraction / Lanczos Method)\n";
+    std::cout << "==========================================\n";
+    std::cout << "Hilbert space dimension: " << N << std::endl;
+    std::cout << "Ground state energy: " << std::setprecision(10) << ground_state_energy << std::endl;
+    std::cout << "Krylov dimension: " << params.krylov_dim << std::endl;
+    std::cout << "Broadening η: " << params.broadening << std::endl;
+    std::cout << "Frequency range: [" << params.omega_min << ", " << params.omega_max << "]" << std::endl;
+    std::cout << "Frequency points: " << params.num_omega_points << std::endl;
+    std::cout << "Method: " << (params.use_continued_fraction ? "Continued Fraction" : "Eigendecomposition") << std::endl;
+    
+    auto start_time = std::chrono::high_resolution_clock::now();
+    
+    DynamicalResponseResults results;
+    results.total_samples = 1;  // Exact calculation, no random sampling
+    results.omega_min = params.omega_min;
+    results.omega_max = params.omega_max;
+    
+    // Generate frequency grid
+    results.frequencies.resize(params.num_omega_points);
+    double omega_step = (params.omega_max - params.omega_min) / 
+                        std::max(uint64_t(1), params.num_omega_points - 1);
+    for (size_t i = 0; i < params.num_omega_points; i++) {
+        results.frequencies[i] = params.omega_min + i * omega_step;
+    }
+    
+    // Apply operator to ground state: |φ⟩ = O|0⟩
+    std::cout << "\nApplying operator to ground state..." << std::endl;
+    ComplexVector phi(N);
+    O(ground_state.data(), phi.data(), N);
+    
+    // Compute norm ||O|0⟩||²
+    double phi_norm = cblas_dznrm2(N, phi.data(), 1);
+    double phi_norm_sq = phi_norm * phi_norm;
+    
+    std::cout << "  ||O|0⟩|| = " << phi_norm << std::endl;
+    std::cout << "  ||O|0⟩||² = " << phi_norm_sq << std::endl;
+    
+    if (phi_norm < 1e-14) {
+        std::cerr << "Warning: O|0⟩ has zero norm. Operator has no matrix elements from ground state.\n";
+        results.spectral_function.resize(params.num_omega_points, 0.0);
+        results.spectral_function_imag.resize(params.num_omega_points, 0.0);
+        results.spectral_error.resize(params.num_omega_points, 0.0);
+        results.spectral_error_imag.resize(params.num_omega_points, 0.0);
+        return results;
+    }
+    
+    // Normalize |φ⟩ for Lanczos
+    Complex scale(1.0/phi_norm, 0.0);
+    cblas_zscal(N, &scale, phi.data(), 1);
+    
+    // Build Lanczos tridiagonal starting from |φ⟩
+    std::cout << "\nBuilding Lanczos tridiagonal matrix..." << std::endl;
+    auto lanczos_start = std::chrono::high_resolution_clock::now();
+    
+    std::vector<double> alpha, beta;
+    uint64_t iterations = build_lanczos_tridiagonal(
+        H, phi, N, params.krylov_dim, params.tolerance,
+        params.full_reorthogonalization, params.reorth_frequency,
+        alpha, beta
+    );
+    
+    auto lanczos_end = std::chrono::high_resolution_clock::now();
+    double lanczos_time = std::chrono::duration<double>(lanczos_end - lanczos_start).count();
+    
+    std::cout << "  Lanczos iterations: " << iterations << std::endl;
+    std::cout << "  Lanczos time: " << lanczos_time << " seconds" << std::endl;
+    
+    if (alpha.empty()) {
+        std::cerr << "Error: Lanczos failed to build tridiagonal matrix\n";
+        results.spectral_function.resize(params.num_omega_points, 0.0);
+        results.spectral_function_imag.resize(params.num_omega_points, 0.0);
+        results.spectral_error.resize(params.num_omega_points, 0.0);
+        results.spectral_error_imag.resize(params.num_omega_points, 0.0);
+        return results;
+    }
+    
+    // Shift eigenvalues: ω - E₀ + E_n → we need to shift α values
+    // The resolvent is (ω + E₀ - H + iη)⁻¹, so effectively we shift by E₀
+    std::cout << "\nShifting energies by ground state energy E₀ = " << ground_state_energy << std::endl;
+    for (size_t i = 0; i < alpha.size(); i++) {
+        alpha[i] -= ground_state_energy;
+    }
+    
+    // Compute spectral function
+    std::cout << "\nComputing spectral function..." << std::endl;
+    auto spectral_start = std::chrono::high_resolution_clock::now();
+    
+    if (params.use_continued_fraction) {
+        // Use continued fraction method (faster, O(M) per ω)
+        results.spectral_function = continued_fraction_spectral_function(
+            alpha, beta, results.frequencies, params.broadening, phi_norm_sq
+        );
+    } else {
+        // Use eigendecomposition method (for comparison/validation)
+        std::vector<double> ritz_values, weights;
+        diagonalize_tridiagonal_ritz(alpha, beta, ritz_values, weights);
+        
+        // Scale weights by norm²
+        for (size_t i = 0; i < weights.size(); i++) {
+            weights[i] *= phi_norm_sq;
+        }
+        
+        // Compute spectral function using Lorentzian broadening
+        results.spectral_function.resize(params.num_omega_points, 0.0);
+        double eta = params.broadening;
+        
+        #pragma omp parallel for schedule(static)
+        for (size_t iw = 0; iw < params.num_omega_points; iw++) {
+            double omega = results.frequencies[iw];
+            double sum = 0.0;
+            
+            for (size_t n = 0; n < ritz_values.size(); n++) {
+                double delta = omega - ritz_values[n];
+                double lorentzian = (eta / M_PI) / (delta * delta + eta * eta);
+                sum += weights[n] * lorentzian;
+            }
+            
+            results.spectral_function[iw] = sum;
+        }
+    }
+    
+    auto spectral_end = std::chrono::high_resolution_clock::now();
+    double spectral_time = std::chrono::duration<double>(spectral_end - spectral_start).count();
+    
+    std::cout << "  Spectral function time: " << spectral_time << " seconds" << std::endl;
+    
+    // For ground state, imaginary part is zero (self-correlation)
+    results.spectral_function_imag.resize(params.num_omega_points, 0.0);
+    
+    // No error bars for exact ground state calculation
+    results.spectral_error.resize(params.num_omega_points, 0.0);
+    results.spectral_error_imag.resize(params.num_omega_points, 0.0);
+    
+    // Compute sum rule: ∫ S(ω) dω should equal ||O|0⟩||²
+    double integral = 0.0;
+    for (size_t i = 1; i < params.num_omega_points; i++) {
+        double dw = results.frequencies[i] - results.frequencies[i-1];
+        integral += 0.5 * (results.spectral_function[i] + results.spectral_function[i-1]) * dw;
+    }
+    
+    std::cout << "\n--- Sum Rule Check ---" << std::endl;
+    std::cout << "  ∫ S(ω) dω = " << integral << std::endl;
+    std::cout << "  ||O|0⟩||² = " << phi_norm_sq << std::endl;
+    std::cout << "  Ratio: " << integral / phi_norm_sq << " (should be ≈ 1.0)" << std::endl;
+    
+    auto end_time = std::chrono::high_resolution_clock::now();
+    double total_time = std::chrono::duration<double>(end_time - start_time).count();
+    
+    std::cout << "\n==========================================\n";
+    std::cout << "Ground State DSSF Complete\n";
+    std::cout << "Total time: " << total_time << " seconds\n";
+    std::cout << "==========================================\n";
+    
+    return results;
+}
+
+/**
+ * @brief Compute ground state two-operator cross-correlation
+ */
+DynamicalResponseResults compute_ground_state_cross_correlation(
+    std::function<void(const Complex*, Complex*, int)> H,
+    std::function<void(const Complex*, Complex*, int)> O1,
+    std::function<void(const Complex*, Complex*, int)> O2,
+    const ComplexVector& ground_state,
+    double ground_state_energy,
+    uint64_t N,
+    const GroundStateDSSFParameters& params
+) {
+    std::cout << "\n==========================================\n";
+    std::cout << "Ground State Cross-Correlation S_{O1,O2}(ω)\n";
+    std::cout << "(Lanczos Method)\n";
+    std::cout << "==========================================\n";
+    
+    DynamicalResponseResults results;
+    results.total_samples = 1;
+    results.omega_min = params.omega_min;
+    results.omega_max = params.omega_max;
+    
+    // Generate frequency grid
+    results.frequencies.resize(params.num_omega_points);
+    double omega_step = (params.omega_max - params.omega_min) / 
+                        std::max(uint64_t(1), params.num_omega_points - 1);
+    for (size_t i = 0; i < params.num_omega_points; i++) {
+        results.frequencies[i] = params.omega_min + i * omega_step;
+    }
+    
+    // Apply O2 to ground state: |φ₂⟩ = O₂|0⟩
+    ComplexVector phi2(N);
+    O2(ground_state.data(), phi2.data(), N);
+    
+    double phi2_norm = cblas_dznrm2(N, phi2.data(), 1);
+    
+    if (phi2_norm < 1e-14) {
+        std::cerr << "Warning: O₂|0⟩ has zero norm.\n";
+        results.spectral_function.resize(params.num_omega_points, 0.0);
+        results.spectral_function_imag.resize(params.num_omega_points, 0.0);
+        results.spectral_error.resize(params.num_omega_points, 0.0);
+        results.spectral_error_imag.resize(params.num_omega_points, 0.0);
+        return results;
+    }
+    
+    // Normalize for Lanczos
+    ComplexVector phi2_normalized = phi2;
+    Complex scale(1.0/phi2_norm, 0.0);
+    cblas_zscal(N, &scale, phi2_normalized.data(), 1);
+    
+    // Build Lanczos tridiagonal starting from |φ₂⟩
+    std::vector<double> alpha, beta;
+    std::vector<ComplexVector> basis_vectors;
+    
+    // We need basis vectors for cross-correlation
+    int iterations = build_lanczos_tridiagonal_with_basis(
+        H, phi2_normalized, N, params.krylov_dim, params.tolerance,
+        params.full_reorthogonalization, params.reorth_frequency,
+        alpha, beta, &basis_vectors
+    );
+    
+    std::cout << "Lanczos iterations: " << iterations << std::endl;
+    
+    // Diagonalize tridiagonal to get eigenvectors in Krylov basis
+    std::vector<double> ritz_values, weights;
+    std::vector<double> evecs;
+    diagonalize_tridiagonal_ritz(alpha, beta, ritz_values, weights, &evecs);
+    
+    size_t M = ritz_values.size();
+    
+    // Apply O1† to ground state: |φ₁⟩ = O₁†|0⟩
+    // Note: For cross-correlation ⟨0|O₁†|n⟩⟨n|O₂|0⟩, we need O₁†|0⟩
+    // If O1 is Hermitian, O₁† = O₁
+    ComplexVector phi1(N);
+    O1(ground_state.data(), phi1.data(), N);  // Assuming O1 is Hermitian
+    
+    // Compute overlap ⟨0|O₁†|n⟩ = ⟨φ₁|n⟩ for each Ritz state |n⟩
+    // |n⟩ = Σⱼ V[j,n] |vⱼ⟩ where |vⱼ⟩ are Lanczos basis vectors
+    std::vector<Complex> spectral_weights(M);
+    
+    for (size_t n = 0; n < M; n++) {
+        // Reconstruct |n⟩ in full Hilbert space
+        ComplexVector ritz_state(N, Complex(0.0, 0.0));
+        
+        for (size_t j = 0; j < std::min(M, basis_vectors.size()); j++) {
+            // evecs is column-major: V[j,n] = evecs[n*M + j]
+            double v_jn = evecs[n * M + j];
+            Complex coeff(v_jn * phi2_norm, 0.0);  // Scale by original norm
+            cblas_zaxpy(N, &coeff, basis_vectors[j].data(), 1, ritz_state.data(), 1);
+        }
+        
+        // Compute ⟨φ₁|n⟩
+        Complex overlap;
+        cblas_zdotc_sub(N, phi1.data(), 1, ritz_state.data(), 1, &overlap);
+        
+        // Weight = ⟨0|O₁†|n⟩⟨n|O₂|0⟩ = ⟨φ₁|n⟩ * ⟨n|φ₂⟩
+        // ⟨n|φ₂⟩ = sqrt(weights[n]) * phi2_norm (from diagonalization)
+        Complex weight_n = overlap;  // ⟨φ₁|n⟩ already includes proper normalization
+        spectral_weights[n] = weight_n;
+    }
+    
+    // Shift eigenvalues by ground state energy
+    for (size_t i = 0; i < ritz_values.size(); i++) {
+        ritz_values[i] -= ground_state_energy;
+    }
+    
+    // Compute spectral function
+    results.spectral_function.resize(params.num_omega_points, 0.0);
+    results.spectral_function_imag.resize(params.num_omega_points, 0.0);
+    
+    double eta = params.broadening;
+    
+    #pragma omp parallel for schedule(static)
+    for (size_t iw = 0; iw < params.num_omega_points; iw++) {
+        double omega = results.frequencies[iw];
+        Complex sum(0.0, 0.0);
+        
+        for (size_t n = 0; n < M; n++) {
+            double delta = omega - ritz_values[n];
+            // Lorentzian: (η/π) / ((ω - E)² + η²)
+            double lorentzian = (eta / M_PI) / (delta * delta + eta * eta);
+            sum += spectral_weights[n] * lorentzian;
+        }
+        
+        results.spectral_function[iw] = sum.real();
+        results.spectral_function_imag[iw] = sum.imag();
+    }
+    
+    results.spectral_error.resize(params.num_omega_points, 0.0);
+    results.spectral_error_imag.resize(params.num_omega_points, 0.0);
+    
+    return results;
+}
+
+/**
+ * @brief Load ground state from eigenvector files
+ */
+bool load_ground_state_from_file(
+    const std::string& eigenvector_dir,
+    ComplexVector& ground_state,
+    double& ground_state_energy,
+    uint64_t expected_dim
+) {
+    std::cout << "\n--- Loading ground state from " << eigenvector_dir << " ---\n";
+    
+    // Try various file naming conventions
+    std::vector<std::string> eigenvector_files = {
+        eigenvector_dir + "/eigenvectors/eigenvector_0.dat",
+        eigenvector_dir + "/eigenvector_0.dat",
+        eigenvector_dir + "/eigenvectors/eigenvector_block0_0.dat",
+        eigenvector_dir + "/eigenvector_block0_0.dat"
+    };
+    
+    std::vector<std::string> eigenvalue_files = {
+        eigenvector_dir + "/eigenvectors/eigenvalues.dat",
+        eigenvector_dir + "/eigenvalues.dat",
+        eigenvector_dir + "/eigenvectors/eigenvalues.txt",
+        eigenvector_dir + "/eigenvalues.txt"
+    };
+    
+    // Try to load eigenvector
+    bool loaded_eigenvector = false;
+    
+    for (const auto& filename : eigenvector_files) {
+        std::ifstream file(filename, std::ios::binary);
+        if (!file.is_open()) continue;
+        
+        std::cout << "Found eigenvector file: " << filename << std::endl;
+        
+        // Read dimension
+        uint64_t dim;
+        file.read(reinterpret_cast<char*>(&dim), sizeof(uint64_t));
+        
+        if (expected_dim > 0 && dim != expected_dim) {
+            std::cerr << "Warning: Dimension mismatch: file has " << dim 
+                      << ", expected " << expected_dim << std::endl;
+            file.close();
+            continue;
+        }
+        
+        // Read complex vector
+        ground_state.resize(dim);
+        file.read(reinterpret_cast<char*>(ground_state.data()), dim * sizeof(Complex));
+        
+        if (file.good()) {
+            loaded_eigenvector = true;
+            std::cout << "Loaded eigenvector with dimension " << dim << std::endl;
+            
+            // Normalize (should already be normalized, but just in case)
+            double norm = cblas_dznrm2(dim, ground_state.data(), 1);
+            if (std::abs(norm - 1.0) > 1e-6) {
+                std::cout << "Normalizing eigenvector (norm was " << norm << ")" << std::endl;
+                Complex scale(1.0/norm, 0.0);
+                cblas_zscal(dim, &scale, ground_state.data(), 1);
+            }
+            break;
+        }
+        file.close();
+    }
+    
+    if (!loaded_eigenvector) {
+        std::cerr << "Error: Could not load eigenvector from any expected location\n";
+        return false;
+    }
+    
+    // Try to load eigenvalue (ground state energy)
+    bool loaded_energy = false;
+    
+    for (const auto& filename : eigenvalue_files) {
+        std::ifstream file(filename);
+        if (!file.is_open()) continue;
+        
+        // Check if binary or text
+        if (filename.find(".dat") != std::string::npos) {
+            file.close();
+            std::ifstream binfile(filename, std::ios::binary);
+            if (!binfile.is_open()) continue;
+            
+            // Binary format: num_eigenvalues followed by eigenvalues
+            size_t num_eig;
+            binfile.read(reinterpret_cast<char*>(&num_eig), sizeof(size_t));
+            
+            if (num_eig > 0) {
+                binfile.read(reinterpret_cast<char*>(&ground_state_energy), sizeof(double));
+                loaded_energy = true;
+                std::cout << "Loaded ground state energy: " << ground_state_energy << std::endl;
+            }
+            binfile.close();
+        } else {
+            // Text format: one eigenvalue per line
+            if (file >> ground_state_energy) {
+                loaded_energy = true;
+                std::cout << "Loaded ground state energy: " << ground_state_energy << std::endl;
+            }
+            file.close();
+        }
+        
+        if (loaded_energy) break;
+    }
+    
+    if (!loaded_energy) {
+        std::cerr << "Warning: Could not load ground state energy, using 0.0\n";
+        ground_state_energy = 0.0;
+    }
+    
+    return loaded_eigenvector;
+}

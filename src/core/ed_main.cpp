@@ -3,6 +3,7 @@
 #include <iomanip>
 #include <sstream>
 #include <cmath>
+#include <filesystem>
 #include "ed_config.h"
 #include "ed_config_adapter.h"
 #include "ed_wrapper.h"
@@ -824,6 +825,7 @@ void compute_dynamical_response_workflow(const EDConfig& config) {
                 std::string line;
                 double min_energy = std::numeric_limits<double>::max();
                 bool found_energy = false;
+                bool first_entry_skipped = false;
                 
                 while (std::getline(infile_ss, line)) {
                     // Skip comment lines and empty lines
@@ -834,6 +836,12 @@ void compute_dynamical_response_workflow(const EDConfig& config) {
                     
                     // Read first two columns: inv_temp and energy
                     if (iss >> inv_temp >> energy) {
+                        // Skip the first data entry (initial random state)
+                        if (!first_entry_skipped) {
+                            first_entry_skipped = true;
+                            continue;
+                        }
+                        
                         if (energy < min_energy) {
                             min_energy = energy;
                             found_energy = true;
@@ -844,11 +852,11 @@ void compute_dynamical_response_workflow(const EDConfig& config) {
                 
                 if (found_energy) {
                     ground_state_energy = min_energy;
-                    std::cout << "✓ Ground state energy read from SS_rand0.dat (minimum): " 
+                    std::cout << "✓ Ground state energy read from SS_rand0.dat (minimum, first entry skipped): " 
                               << std::fixed << std::setprecision(10) << ground_state_energy << std::endl;
                     found_ground_state = true;
                 } else {
-                    std::cout << "✗ SS_rand0.dat contains no valid energy data" << std::endl;
+                    std::cout << "✗ SS_rand0.dat contains no valid energy data (or only first entry)" << std::endl;
                 }
             } else {
                 std::cout << "✗ SS_rand0.dat not found" << std::endl;
@@ -1928,6 +1936,258 @@ void compute_static_response_workflow(const EDConfig& config) {
 }
 
 /**
+ * @brief Compute ground state dynamical spin structure factor (T=0 DSSF)
+ * 
+ * Uses the continued fraction method for efficient ground state dynamics:
+ * S(q,ω) = -1/π Im⟨GS| O†(-q) 1/(ω + E₀ - H + iη) O(q) |GS⟩
+ * 
+ * This is optimal for 32-site ED where:
+ * - Fixed-Sz sector has 601M states (~9GB per vector)
+ * - Only need to store 2-3 Lanczos vectors (not full spectrum)
+ * - Continued fraction avoids explicit eigendecomposition
+ */
+void compute_ground_state_dssf_workflow(const EDConfig& config) {
+    // Get MPI rank and size
+    int rank = 0, size = 1;
+    #ifdef WITH_MPI
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    MPI_Comm_size(MPI_COMM_WORLD, &size);
+    #endif
+    
+    if (rank == 0) {
+        std::cout << "\n==========================================\n";
+        std::cout << "Computing Ground State DSSF (T=0)\n";
+        std::cout << "==========================================\n";
+        std::cout << "Using continued fraction method for optimal efficiency\n";
+    }
+    
+    // Prepare Hamiltonian
+    Operator ham(config.system.num_sites, config.system.spin_length);
+    std::string interaction_file = config.system.hamiltonian_dir + "/" + config.system.interaction_file;
+    std::string single_site_file = config.system.hamiltonian_dir + "/" + config.system.single_site_file;
+    ham.loadFromInterAllFile(interaction_file);
+    ham.loadFromFile(single_site_file);
+    
+    // Load three-body terms if specified
+    if (!config.system.three_body_file.empty()) {
+        std::string three_body_file = config.system.hamiltonian_dir + "/" + config.system.three_body_file;
+        if (std::filesystem::exists(three_body_file)) {
+            if (rank == 0) {
+                std::cout << "Loading three-body terms from: " << three_body_file << "\n";
+            }
+            ham.loadThreeBodyTerm(three_body_file);
+        }
+    }
+    
+    // Hilbert space dimension
+    bool use_fixed_sz = config.system.use_fixed_sz;
+    int64_t n_up = (use_fixed_sz && config.system.n_up >= 0) ? config.system.n_up : config.system.num_sites / 2;
+    uint64_t N;
+    
+    if (use_fixed_sz) {
+        // Binomial coefficient for fixed Sz
+        uint64_t num_sites = config.system.num_sites;
+        N = 1;
+        for (uint64_t i = 0; i < n_up; i++) {
+            N = N * (num_sites - i) / (i + 1);
+        }
+        if (rank == 0) {
+            std::cout << "Fixed-Sz sector: N_sites=" << num_sites << ", n_up=" << n_up 
+                      << ", dim=" << N << "\n";
+        }
+    } else {
+        N = 1ULL << config.system.num_sites;
+        if (rank == 0) {
+            std::cout << "Full Hilbert space: dim=" << N << "\n";
+        }
+    }
+    
+    // Create function wrapper for Hamiltonian
+    auto H_func = [&ham](const Complex* in, Complex* out, uint64_t dim) {
+        ham.apply(in, out, dim);
+    };
+    
+    // Create output directory
+    std::string output_subdir = config.workflow.output_dir + "/ground_state_dssf";
+    safe_system_call("mkdir -p " + output_subdir);
+    
+    // Setup ground state DSSF parameters
+    GroundStateDSSFParameters gs_params;
+    gs_params.krylov_dim = config.dynamical.krylov_dim > 0 ? config.dynamical.krylov_dim : 300;
+    gs_params.omega_min = config.dynamical.omega_min;
+    gs_params.omega_max = config.dynamical.omega_max;
+    gs_params.num_omega_points = config.dynamical.num_omega_points;
+    gs_params.broadening = config.dynamical.broadening;
+    gs_params.tolerance = config.diag.tolerance;
+    gs_params.full_reorthogonalization = true;  // Important for accuracy
+    
+    if (rank == 0) {
+        std::cout << "Krylov dimension: " << gs_params.krylov_dim << "\n";
+        std::cout << "Frequency range: [" << gs_params.omega_min << ", " << gs_params.omega_max << "]\n";
+        std::cout << "Frequency points: " << gs_params.num_omega_points << "\n";
+        std::cout << "Broadening (eta): " << gs_params.broadening << "\n";
+    }
+    
+    // Parse configuration for operators
+    auto spin_combinations = parse_spin_combinations(config.dynamical.spin_combinations);
+    auto momentum_points = parse_momentum_points(config.dynamical.momentum_points);
+    auto polarization = parse_polarization(config.dynamical.polarization);
+    std::string positions_file = config.system.hamiltonian_dir + "/positions.dat";
+    
+    if (rank == 0) {
+        std::cout << "Operator type: " << config.dynamical.operator_type << "\n";
+        std::cout << "Basis: " << config.dynamical.basis << "\n";
+        std::cout << "Momentum points: " << momentum_points.size() << "\n";
+        std::cout << "Spin combinations: " << spin_combinations.size() << "\n";
+    }
+    
+    // Construct operators
+    std::vector<Operator> obs_1, obs_2;
+    std::vector<std::string> names;
+    
+    construct_operators_from_config(
+        config.dynamical.operator_type,
+        config.dynamical.basis,
+        spin_combinations,
+        momentum_points,
+        polarization,
+        config.dynamical.theta,
+        config.dynamical.unit_cell_size,
+        config.system.num_sites,
+        config.system.spin_length,
+        use_fixed_sz,
+        n_up,
+        positions_file,
+        obs_1, obs_2, names
+    );
+    
+    if (rank == 0) {
+        std::cout << "Constructed " << names.size() << " operator pairs\n";
+    }
+    
+    // Find ground state using Lanczos
+    if (rank == 0) {
+        std::cout << "\n--- Finding ground state ---\n";
+    }
+    
+    ComplexVector ground_state(N);
+    double ground_state_energy;
+    
+    // Check if ground state is already saved
+    std::string gs_file = config.workflow.output_dir + "/eigenvectors/ground_state.dat";
+    std::ifstream gs_in(gs_file, std::ios::binary);
+    bool gs_loaded = false;
+    
+    if (gs_in.is_open()) {
+        try {
+            size_t saved_dim;
+            gs_in.read(reinterpret_cast<char*>(&saved_dim), sizeof(size_t));
+            gs_in.read(reinterpret_cast<char*>(&ground_state_energy), sizeof(double));
+            
+            if (saved_dim == N) {
+                gs_in.read(reinterpret_cast<char*>(ground_state.data()), N * sizeof(Complex));
+                gs_loaded = true;
+                if (rank == 0) {
+                    std::cout << "Loaded ground state from file: E0 = " << ground_state_energy << "\n";
+                }
+            }
+        } catch (...) {
+            gs_loaded = false;
+        }
+        gs_in.close();
+    }
+    
+    if (!gs_loaded) {
+        // Compute ground state
+        // Create int-based wrapper for find_ground_state_lanczos
+        auto H_func_int = [&ham](const Complex* in, Complex* out, int dim) {
+            ham.apply(in, out, static_cast<uint64_t>(dim));
+        };
+        
+        ground_state_energy = find_ground_state_lanczos(
+            H_func_int, N, gs_params.krylov_dim, gs_params.tolerance,
+            gs_params.full_reorthogonalization, gs_params.reorth_frequency,
+            ground_state
+        );
+        
+        if (rank == 0) {
+            std::cout << "Computed ground state: E0 = " << ground_state_energy << "\n";
+            
+            // Save ground state for future use
+            safe_system_call("mkdir -p " + config.workflow.output_dir + "/eigenvectors");
+            std::ofstream gs_out(gs_file, std::ios::binary);
+            if (gs_out.is_open()) {
+                size_t dim = N;
+                gs_out.write(reinterpret_cast<const char*>(&dim), sizeof(size_t));
+                gs_out.write(reinterpret_cast<const char*>(&ground_state_energy), sizeof(double));
+                gs_out.write(reinterpret_cast<const char*>(ground_state.data()), N * sizeof(Complex));
+                gs_out.close();
+                std::cout << "Saved ground state to: " << gs_file << "\n";
+            }
+        }
+    }
+    
+    // Compute DSSF for each operator pair
+    // Distribute work across MPI ranks
+    std::vector<int> my_tasks;
+    for (int i = rank; i < (int)names.size(); i += size) {
+        my_tasks.push_back(i);
+    }
+    
+    if (rank == 0) {
+        std::cout << "\n--- Computing S(q,ω) for " << names.size() << " operators ---\n";
+    }
+    
+    for (int op_idx : my_tasks) {
+        std::cout << "[Rank " << rank << "] Processing: " << names[op_idx] << "\n";
+        
+        // Create function wrappers (with int signature for FTLM functions)
+        auto H_func_int = [&ham](const Complex* in, Complex* out, int dim) {
+            ham.apply(in, out, static_cast<uint64_t>(dim));
+        };
+        
+        auto O1_func = [&obs_1, op_idx](const Complex* in, Complex* out, int dim) {
+            obs_1[op_idx].apply(in, out, static_cast<uint64_t>(dim));
+        };
+        
+        auto O2_func = [&obs_2, op_idx](const Complex* in, Complex* out, int dim) {
+            obs_2[op_idx].apply(in, out, static_cast<uint64_t>(dim));
+        };
+        
+        // Compute ground state DSSF using continued fraction method
+        auto results = compute_ground_state_cross_correlation(
+            H_func_int, O1_func, O2_func, ground_state, ground_state_energy, N, gs_params
+        );
+        
+        // Save results
+        std::string output_file = output_subdir + "/" + names[op_idx] + ".txt";
+        std::ofstream fout(output_file);
+        if (fout.is_open()) {
+            fout << "# Ground State DSSF: " << names[op_idx] << "\n";
+            fout << "# Ground state energy: " << ground_state_energy << "\n";
+            fout << "# omega  S(q,omega)\n";
+            fout << std::scientific << std::setprecision(10);
+            for (size_t i = 0; i < results.frequencies.size(); i++) {
+                fout << results.frequencies[i] << " " << results.spectral_function[i] << "\n";
+            }
+            fout.close();
+            std::cout << "[Rank " << rank << "] Saved: " << output_file << "\n";
+        }
+    }
+    
+    #ifdef WITH_MPI
+    MPI_Barrier(MPI_COMM_WORLD);
+    #endif
+    
+    if (rank == 0) {
+        std::cout << "\n==========================================\n";
+        std::cout << "Ground State DSSF Complete\n";
+        std::cout << "Results saved to: " << output_subdir << "\n";
+        std::cout << "==========================================\n";
+    }
+}
+
+/**
  * @brief Print eigenvalue summary
  */
 void print_eigenvalue_summary(const std::vector<double>& eigenvalues, uint64_t max_show = 10) {
@@ -1983,6 +2243,7 @@ void print_help(const char* prog_name) {
     std::cout << "  --thermo                Compute thermodynamic properties\n";
     std::cout << "  --dynamical-response    Compute dynamical response (spectral functions)\n";
     std::cout << "  --static-response       Compute static response (thermal expectation values)\n";
+    std::cout << "  --ground-state-dssf     Compute T=0 DSSF using continued fraction (optimal for 32-site ED)\n";
     std::cout << "  --calc_observables      Calculate custom observables\n";
     std::cout << "  --measure_spin          Measure spin expectations\n\n";
     
@@ -1990,7 +2251,10 @@ void print_help(const char* prog_name) {
     std::cout << "  --samples=<n>           Number of TPQ samples\n";
     std::cout << "  --temp_min=<T>          Minimum temperature\n";
     std::cout << "  --temp_max=<T>          Maximum temperature\n";
-    std::cout << "  --temp_bins=<n>         Number of temperature bins\n\n";
+    std::cout << "  --temp_bins=<n>         Number of temperature bins\n";
+    std::cout << "  --continue_quenching    Continue TPQ from saved state (requires prior run)\n";
+    std::cout << "  --continue_sample=<n>   Sample to continue from (0 = auto-detect lowest energy)\n";
+    std::cout << "  --continue_beta=<β>     Beta to continue from (0.0 = use saved beta)\n\n";
     
     std::cout << "Dynamical Response Options:\n";
     std::cout << "  --dyn-thermal           Use thermal averaging (multiple random states)\n";
@@ -2054,6 +2318,12 @@ void print_help(const char* prog_name) {
     std::cout << "                                    Values are multiples of π\n";
     std::cout << "  --static-polarization=<str>       Polarization vector: \"ex,ey,ez\" (default: auto)\n";
     std::cout << "  --static-theta=<θ>                Rotation angle for experimental operators (radians)\n\n";
+    
+    std::cout << "Ground State DSSF Options (T=0 Dynamical Correlations):\n";
+    std::cout << "  --ground-state-dssf     Compute T=0 DSSF using continued fraction method\n";
+    std::cout << "                          Uses same operator options as --dynamical-response\n";
+    std::cout << "                          Optimal for 32-site ED with fixed-Sz sector\n";
+    std::cout << "                          (Only needs 2-3 Lanczos vectors instead of full spectrum)\n\n";
     
     std::cout << "Fixed-Sz Sector Options:\n";
     std::cout << "  --fixed-sz              Use fixed-Sz sector (reduced Hilbert space)\n";
@@ -2232,6 +2502,11 @@ int main(int argc, char* argv[]) {
         
         if (config.workflow.compute_static_response) {
             compute_static_response_workflow(config);
+        }
+        
+        // Ground state DSSF (T=0 dynamical correlations using continued fraction)
+        if (config.workflow.compute_ground_state_dssf) {
+            compute_ground_state_dssf_workflow(config);
         }
         
         // Compare results if both were run
