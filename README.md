@@ -625,5 +625,4 @@ workflows (`workflows/nlce/`).
 
 ## License
 
-Please refer to your project or institutional policies regarding distribution
-and licensing of this code base.
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
