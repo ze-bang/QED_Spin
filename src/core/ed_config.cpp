@@ -1,4 +1,4 @@
-#include "ed_config.h"
+#include <ed/core/ed_config.h>
 // NOTE: We include ed_wrapper.h ONLY in the implementation of conversion functions
 // This is at the end of the file to avoid including it globally
 #include <algorithm>
