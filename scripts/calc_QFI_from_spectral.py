@@ -742,6 +742,63 @@ def _save_raw_data_points_param(species_data, plot_outdir, param_pattern):
             )
 
 
+def _create_closeup_heatmap_param(species, target_beta, Z_pos, param_pos, 
+                                  filtered_data, plot_outdir, param_pattern, 
+                                  param_range=(0.04, 0.10)):
+    """Create a zoomed-in heatmap for a specific parameter range."""
+    
+    if Z_pos is None or param_pos.size == 0:
+        print(f"  Warning: No positive parameter data for closeup heatmap")
+        return
+    
+    # Filter parameter values to the specified range (excluding upper boundary)
+    param_mask = (param_pos >= param_range[0]) & (param_pos < param_range[1])
+    if not np.any(param_mask):
+        print(f"  Warning: No data in parameter range {param_range} for closeup heatmap")
+        return
+    
+    param_zoom = param_pos[param_mask]
+    Z_zoom = Z_pos[:, param_mask]
+    
+    # Use filtered beta if available, otherwise use full beta grid
+    if 'beta_pos_f' in filtered_data and 'mask_pos' in filtered_data:
+        beta_zoom = filtered_data['beta_pos_f']
+        Z_zoom_filtered = filtered_data['Z_pos_f'][:, param_mask]
+    else:
+        beta_zoom = target_beta
+        Z_zoom_filtered = Z_zoom
+    
+    # Get color limits from the zoomed data
+    vmin = np.nanmin(Z_zoom_filtered)
+    vmax = np.nanmax(Z_zoom_filtered)
+    
+    # Create meshgrid
+    P, B = np.meshgrid(param_zoom, beta_zoom)
+    
+    plt.figure(figsize=(10, 8))
+    plt.pcolormesh(P, B, Z_zoom_filtered, shading='auto', cmap='RdYlBu_r', vmin=vmin, vmax=vmax)
+    plt.yscale('log')
+    plt.gca().invert_yaxis()  # large beta at bottom
+    plt.xlabel(param_pattern)
+    plt.ylabel('Beta (β)')
+    plt.title(f'QFI Heatmap Closeup ({param_range[0]}-{param_range[1]}) for {species}')
+    plt.colorbar(label='QFI')
+    plt.xlim(param_range)
+    
+    fname = os.path.join(plot_outdir, f'qfi_heatmap_{species}_closeup_{param_range[0]}_{param_range[1]}.png')
+    plt.savefig(fname, dpi=300, bbox_inches='tight')
+    plt.close()
+    
+    # Save zoomed grid data
+    zoom_filename = os.path.join(plot_outdir, f'qfi_grid_{species}_closeup_{param_range[0]}_{param_range[1]}.dat')
+    header_cols = ['beta'] + [f'{param_pattern}={v:g}' for v in param_zoom]
+    header = ' '.join(header_cols)
+    out = np.column_stack((beta_zoom, Z_zoom_filtered))
+    np.savetxt(zoom_filename, out, header=header)
+    
+    print(f"  Created closeup heatmap for {param_pattern} range {param_range}")
+
+
 def _plot_parameter_beta_heatmap(species, data_points, plot_outdir, param_pattern):
     """Create heatmap of QFI vs parameter and beta with comprehensive error checking."""
     
@@ -813,6 +870,17 @@ def _plot_parameter_beta_heatmap(species, data_points, plot_outdir, param_patter
         print(f"Successfully created fixed beta plots for {species}")
     except Exception as e:
         print(f"ERROR creating fixed beta plots for {species}: {e}")
+        import traceback
+        traceback.print_exc()
+    
+    # Create closeup heatmap for specific parameter range
+    try:
+        _create_closeup_heatmap_param(species, target_beta, Z_pos, param_pos,
+                                     filtered_data, plot_outdir, param_pattern,
+                                     param_range=(0.04, 0.10))
+        print(f"Successfully created closeup heatmap for {species}")
+    except Exception as e:
+        print(f"ERROR creating closeup heatmap for {species}: {e}")
         import traceback
         traceback.print_exc()
     
@@ -1029,7 +1097,7 @@ def _plot_single_heatmap_param(param, beta, Z, vmin, vmax, title, filename, para
     
     plt.figure(figsize=(12, 8))
     try:
-        plt.pcolormesh(P, B, Z, shading='auto', cmap='viridis', vmin=vmin, vmax=vmax)
+        plt.pcolormesh(P, B, Z, shading='auto', cmap='RdYlBu_r', vmin=vmin, vmax=vmax)
         plt.yscale('log')
         plt.gca().invert_yaxis()  # large beta at bottom
         plt.xlabel(param_pattern)
@@ -1073,8 +1141,8 @@ def _plot_side_by_side_heatmap_param(species, filtered_data, param_neg, param_po
     )
     
     # Plot heatmaps
-    axL.pcolormesh(PN, BN, Z_neg_f, shading='auto', cmap='viridis', vmin=vmin, vmax=vmax)
-    axR.pcolormesh(PP, BP, Z_pos_f, shading='auto', cmap='viridis', vmin=vmin, vmax=vmax)
+    axL.pcolormesh(PN, BN, Z_neg_f, shading='auto', cmap='RdYlBu_r', vmin=vmin, vmax=vmax)
+    axR.pcolormesh(PP, BP, Z_pos_f, shading='auto', cmap='RdYlBu_r', vmin=vmin, vmax=vmax)
     
     # Format axes
     for ax in (axL, axR):
