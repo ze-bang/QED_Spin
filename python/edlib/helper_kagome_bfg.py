@@ -627,8 +627,7 @@ def plot_cluster(vertices, edges, edges_2nn, edges_3nn, output_dir, cluster_name
         import matplotlib.pyplot as plt
 
         # Publication-quality params
-        mpl.rcParams['font.family'] = 'serif'
-        mpl.rcParams['font.serif'] = ['Computer Modern Roman', 'Times New Roman']
+        mpl.rcParams['font.family'] = 'sans-serif'
         mpl.rcParams['font.size'] = 10
         mpl.rcParams['axes.labelsize'] = 12
         mpl.rcParams['axes.titlesize'] = 12
