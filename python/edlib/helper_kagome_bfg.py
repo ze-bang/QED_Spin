@@ -71,167 +71,82 @@ def generate_kagome_cluster(dim1, dim2, use_pbc=False):
     # Helper function to get vertex id with PBC
     def get_vertex_with_pbc(i, j, site_idx):
         if use_pbc:
-            # Apply periodic boundary conditions
-            i = i % dim1
-            j = j % dim2
-        else:
-            # Check if out of bounds for open boundary conditions
-            if i < 0 or i >= dim1 or j < 0 or j >= dim2:
-                return None
-        
-        key = (i, j, site_idx)
-        return cell_to_vertex.get(key, None)
+            i, j = i % dim1, j % dim2
+        elif i < 0 or i >= dim1 or j < 0 or j >= dim2:
+            return None
+        return cell_to_vertex.get((i, j, site_idx), None)
     
-    # Generate nearest neighbor edges
-    edges = set()  # Use set to avoid duplicates
+    def add_bond(edge_list, v1, v2):
+        """Add a bond to edge list if v2 is valid and not a self-loop"""
+        if v2 is not None and v1 != v2:
+            edge_list.append(tuple(sorted([v1, v2])))
     
-    # Nearest neighbor connectivity for kagome lattice
-    # Each unit cell has internal bonds and bonds to neighboring cells
-    # The kagome lattice has a triangular motif where each site has 4 NN
-    for i in range(dim1):
-        for j in range(dim2):
-            v0 = cell_to_vertex[(i, j, 0)]
-            v1 = cell_to_vertex[(i, j, 1)]
-            v2 = cell_to_vertex[(i, j, 2)]
-            
-            # Internal bonds within unit cell (each unit cell forms a triangle)
-            edges.add(tuple(sorted([v0, v1])))
-            edges.add(tuple(sorted([v0, v2])))
-            edges.add(tuple(sorted([v1, v2])))
-            
-            v1_im1j = get_vertex_with_pbc(i-1, j, 1)
-            if v1_im1j is not None:
-                edges.add(tuple(sorted([v0, v1_im1j])))
-            
-            v1_ijm1 = get_vertex_with_pbc(i, j-1, 2)
-            if v1_ijm1 is not None:
-                edges.add(tuple(sorted([v0, v1_ijm1])))
-            
-            v0_ijm1 = get_vertex_with_pbc(i+1, j, 0)
-            if v0_ijm1 is not None:
-                edges.add(tuple(sorted([v1, v0_ijm1])))
-
-            v0_im1j = get_vertex_with_pbc(i+1, j-1, 2)
-            if v0_im1j is not None:
-                edges.add(tuple(sorted([v1, v0_im1j])))
-
-            v2_ijm1 = get_vertex_with_pbc(i, j+1, 0)
-            if v2_ijm1 is not None:
-                edges.add(tuple(sorted([v2, v2_ijm1])))
-
-            v2_im1j = get_vertex_with_pbc(i-1, j+1, 1)
-            if v2_im1j is not None:
-                edges.add(tuple(sorted([v2, v2_im1j])))
-
-    # Convert edges set to list
-    edges = list(edges)
+    # ==========================================================================
+    # Bond connectivity tables for kagome lattice
+    # Each entry: (source_sublattice, di, dj, target_sublattice)
+    # We only include bonds in "positive" directions to avoid double-counting
+    # ==========================================================================
     
-    # Generate second nearest neighbor edges (explicit connectivity)
-    # 2NN are hexagon edges: sites separated by one intermediate site
-    edges_2nn = set()
+    # Nearest neighbors (NN): distance = 0.5, coordination = 4
+    # Internal triangular bonds within unit cell + cross-cell bonds
+    NN_BONDS = [
+        # Internal unit cell bonds (triangular motif)
+        (0, 0, 0, 1),   # Site 0 -- Site 1 (same cell)
+        (0, 0, 0, 2),   # Site 0 -- Site 2 (same cell)
+        (1, 0, 0, 2),   # Site 1 -- Site 2 (same cell)
+        # Cross-cell bonds (positive directions only)
+        (1, +1,  0, 0), # Site 1 -- Site 0 at (+1, 0)
+        (2,  0, +1, 0), # Site 2 -- Site 0 at (0, +1)
+        (1, +1, -1, 2), # Site 1 -- Site 2 at (+1, -1)
+    ]
+    
+    # Second nearest neighbors (2NN): distance = sqrt(3)/2 ≈ 0.866, coordination = 4
+    # Hexagon edges connecting different sublattices
+    NN2_BONDS = [
+        (0, +1, -1, 2), # Site 0 -- Site 2 at (+1, -1)
+        (0, -1, +1, 1), # Site 0 -- Site 1 at (-1, +1)
+        (1, +1,  0, 2), # Site 1 -- Site 2 at (+1, 0)
+        (1,  0, +1, 0), # Site 1 -- Site 0 at (0, +1)
+        (2, +1,  0, 0), # Site 2 -- Site 0 at (+1, 0)
+        (2,  0, +1, 1), # Site 2 -- Site 1 at (0, +1)
+    ]
+    
+    # Third nearest neighbors (3NN): distance = 1.0, coordination = 6
+    # Same-sublattice connections (positive directions only to avoid double-counting)
+    # Directions: (1,0), (0,1), (1,-1) cover all 6 neighbors (negatives are implicit)
+    NN3_DIRECTIONS = [(+1, 0), (0, +1), (+1, -1)]
+    NN3_BONDS = [(sub, di, dj, sub) for sub in range(3) for di, dj in NN3_DIRECTIONS]
+    
+    # ==========================================================================
+    # Generate edges using the bond tables
+    # Lists preserve bond multiplicity when PBC causes wrap-around overlaps
+    # ==========================================================================
+    
+    edges = []
+    edges_2nn = []
+    edges_3nn = []
     
     for i in range(dim1):
         for j in range(dim2):
-            v0 = cell_to_vertex[(i, j, 0)]
-            v1 = cell_to_vertex[(i, j, 1)]
-            v2 = cell_to_vertex[(i, j, 2)]
+            sites = [cell_to_vertex[(i, j, s)] for s in range(3)]
             
-            # Site 0 2NN connections
-            # Connect to site 1 of same cell through site 2
-            # Already connected via NN, so these are the "next" ones
-            v1_im1j = get_vertex_with_pbc(i-1, j, 2)
-            if v1_im1j is not None:
-                edges_2nn.add(tuple(sorted([v0, v1_im1j])))
+            # Add NN bonds
+            for src_sub, di, dj, tgt_sub in NN_BONDS:
+                v_src = sites[src_sub]
+                v_tgt = get_vertex_with_pbc(i + di, j + dj, tgt_sub)
+                add_bond(edges, v_src, v_tgt)
             
-            v0_ijm1 = get_vertex_with_pbc(i, j-1, 1)
-            if v0_ijm1 is not None:
-                edges_2nn.add(tuple(sorted([v0, v0_ijm1])))
+            # Add 2NN bonds
+            for src_sub, di, dj, tgt_sub in NN2_BONDS:
+                v_src = sites[src_sub]
+                v_tgt = get_vertex_with_pbc(i + di, j + dj, tgt_sub)
+                add_bond(edges_2nn, v_src, v_tgt)
             
-            v1_im1jm1 = get_vertex_with_pbc(i-1, j+1, 1)
-            if v1_im1jm1 is not None:
-                edges_2nn.add(tuple(sorted([v0, v1_im1jm1])))
-            
-            v0_ip1j = get_vertex_with_pbc(i+1, j-1, 2)
-            if v0_ip1j is not None:
-                edges_2nn.add(tuple(sorted([v0, v0_ip1j])))
-            
-            v1_ijm1 = get_vertex_with_pbc(i, j-1, 2)
-            if v1_ijm1 is not None:
-                edges_2nn.add(tuple(sorted([v1, v1_ijm1])))
-            
-            v0_ip1jm1 = get_vertex_with_pbc(i+1, j-1, 0)
-            if v0_ip1jm1 is not None:
-                edges_2nn.add(tuple(sorted([v1, v0_ip1jm1])))
-            
-            v1_ijm11 = get_vertex_with_pbc(i, j+1, 0)
-            if v1_ijm11 is not None:
-                edges_2nn.add(tuple(sorted([v1, v1_ijm11])))
-            
-            v0_ip1jm11 = get_vertex_with_pbc(i+1, j, 2)
-            if v0_ip1jm11 is not None:
-                edges_2nn.add(tuple(sorted([v1, v0_ip1jm11])))
-
-            # Site 2 2NN connections
-            v2_im1j = get_vertex_with_pbc(i-1, j, 1)
-            if v2_im1j is not None:
-                edges_2nn.add(tuple(sorted([v2, v2_im1j])))
-            
-            v2_ijp1 = get_vertex_with_pbc(i, j+1, 1)
-            if v2_ijp1 is not None:
-                edges_2nn.add(tuple(sorted([v2, v2_ijp1])))
-            
-            v2_im1jp1 = get_vertex_with_pbc(i-1, j+1, 0)
-            if v2_im1jp1 is not None:
-                edges_2nn.add(tuple(sorted([v2, v2_im1jp1])))
-
-            v2_im1jp11 = get_vertex_with_pbc(i+1, j, 0)
-            if v2_im1jp11 is not None:
-                edges_2nn.add(tuple(sorted([v2, v2_im1jp11])))
-
-    # Convert to list
-    edges_2nn = list(edges_2nn)
-    
-    # Generate third nearest neighbor edges (explicit connectivity)
-    # 3NN connect sites across the hexagons (longer diagonal connections)
-    edges_3nn = set()
-    
-    for i in range(dim1):
-        for j in range(dim2):
-            v0 = cell_to_vertex[(i, j, 0)]
-            v1 = cell_to_vertex[(i, j, 1)]
-            v2 = cell_to_vertex[(i, j, 2)]
-            
-            # Site 0 3NN connections
-            v0_ip1jm1 = get_vertex_with_pbc(i+1, j-1, 0)
-            if v0_ip1jm1 is not None:
-                edges_3nn.add(tuple(sorted([v0, v0_ip1jm1])))
-            
-            v0_im1jp1 = get_vertex_with_pbc(i-1, j+1, 0)
-            if v0_im1jp1 is not None:
-                edges_3nn.add(tuple(sorted([v0, v0_im1jp1])))
-            
-            # Site 1 3NN connections
-            v1_ip1jm1 = get_vertex_with_pbc(i, j+1, 1)
-            if v1_ip1jm1 is not None:
-                edges_3nn.add(tuple(sorted([v1, v1_ip1jm1])))
-            
-            v1_im1jp1 = get_vertex_with_pbc(i, j-1, 1)
-            if v1_im1jp1 is not None:
-                edges_3nn.add(tuple(sorted([v1, v1_im1jp1])))
-            
-            
-            # Site 2 3NN connections
-            v2_ip1jm1 = get_vertex_with_pbc(i+1, j, 2)
-            if v2_ip1jm1 is not None:
-                edges_3nn.add(tuple(sorted([v2, v2_ip1jm1])))
-            
-            v2_im1jp1 = get_vertex_with_pbc(i-1, j, 2)
-            if v2_im1jp1 is not None:
-                edges_3nn.add(tuple(sorted([v2, v2_im1jp1])))
-            
-    
-    # Convert to list
-    edges_3nn = list(edges_3nn)
+            # Add 3NN bonds
+            for src_sub, di, dj, tgt_sub in NN3_BONDS:
+                v_src = sites[src_sub]
+                v_tgt = get_vertex_with_pbc(i + di, j + dj, tgt_sub)
+                add_bond(edges_3nn, v_src, v_tgt)
     
     # Create node mapping
     node_mapping = {i: i for i in range(len(vertices))}
