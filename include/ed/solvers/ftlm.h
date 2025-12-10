@@ -433,6 +433,32 @@ void save_dynamical_response_results(
 );
 
 /**
+ * @brief Save spectral function to text file in unified format
+ * 
+ * Unified format: 5 columns
+ *   # Frequency  Re[S(ω)]  Im[S(ω)]  Re[Error]  Im[Error]
+ * 
+ * This provides consistent output across all spectral function methods:
+ * - FTLM dynamical response
+ * - Ground state DSSF (continued fraction)
+ * - TPQ DSSF
+ * - Lehmann representation
+ * 
+ * @param results Dynamical response results to save
+ * @param filename Output filename (.txt)
+ * @param method_description Optional description of the method used
+ * @param temperature Temperature (0 for ground state)
+ * @param ground_state_energy Ground state energy for reference
+ */
+void save_spectral_function_txt(
+    const DynamicalResponseResults& results,
+    const std::string& filename,
+    const std::string& method_description = "",
+    double temperature = 0.0,
+    double ground_state_energy = 0.0
+);
+
+/**
  * @brief Compute thermal expectation value ⟨O⟩_T and susceptibility
  * 
  * Computes thermal averages of a single operator O at various temperatures:

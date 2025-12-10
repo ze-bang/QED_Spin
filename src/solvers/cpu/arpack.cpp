@@ -1,12 +1,14 @@
 // arpack.cpp - Implementation of ARPACK-NG wrapper functions
 #include <ed/solvers/arpack.h>
 #include <ed/core/system_utils.h>
+#include <ed/core/hdf5_io.h>       // For HDF5 output
 #include <iostream>
 #include <fstream>
 #include <iomanip>
 #include <algorithm>
 #include <numeric>
 #include <cctype>
+#include <cstring>
 
 namespace detail_arpack {
 
@@ -539,37 +541,21 @@ void save_eigs_to_dir(const std::vector<double>& evals,
                       const std::vector<Complex>* evecs,
                       uint64_t N, uint64_t nev, const std::string& dir) {
     if (dir.empty()) return;
-    std::string evec_dir = dir + "/eigenvectors";
-    std::string cmd = "mkdir -p " + evec_dir;
-    safe_system_call(cmd);
-
-    {
-        std::string fbin = evec_dir + "/eigenvalues.dat";
-        std::ofstream ofs(fbin, std::ios::binary);
-        if (ofs) {
-            size_t n = evals.size();
-            ofs.write(reinterpret_cast<const char*>(&n), sizeof(size_t));
-            ofs.write(reinterpret_cast<const char*>(evals.data()), sizeof(double) * n);
-        }
-    }
-    {
-        std::string ftxt = evec_dir + "/eigenvalues.txt";
-        std::ofstream ofs(ftxt);
-        if (ofs) {
-            ofs << std::scientific << std::setprecision(15);
-            for (double v : evals) ofs << v << "\n";
-        }
-    }
-
-    if (evecs) {
-        for (int k = 0; k < nev; ++k) {
-            std::string fbin = evec_dir + "/evec_" + std::to_string(k) + ".dat";
-            std::ofstream ofs(fbin, std::ios::binary);
-            if (ofs) {
-                const Complex* col = &(*evecs)[static_cast<size_t>(k) * N];
-                ofs.write(reinterpret_cast<const char*>(col), sizeof(Complex) * N);
+    
+    try {
+        // Save to HDF5 using the diagonalization results format
+        std::vector<std::vector<Complex>> eigenvector_list;
+        if (evecs && !evecs->empty()) {
+            eigenvector_list.reserve(nev);
+            for (uint64_t k = 0; k < nev && k < evals.size(); ++k) {
+                std::vector<Complex> vec(N);
+                std::memcpy(vec.data(), &(*evecs)[k * N], sizeof(Complex) * N);
+                eigenvector_list.push_back(std::move(vec));
             }
         }
+        HDF5IO::saveDiagonalizationResults(dir, evals, eigenvector_list, "ARPACK");
+    } catch (const std::exception& e) {
+        std::cerr << "Error saving ARPACK results to HDF5: " << e.what() << std::endl;
     }
 }
 

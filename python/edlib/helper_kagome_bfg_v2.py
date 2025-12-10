@@ -45,7 +45,7 @@ def generate_kagome_cluster(dim1, dim2, use_pbc=False):
     # Site positions within unit cell (relative to unit cell origin)
     site_offsets = np.array([
         [0.0, 0.0],                    # Site 0
-        [0.5, 0.0],                    # Site 1
+        [0.25, -np.sqrt(3)/4],                    # Site 1
         [0.25, np.sqrt(3)/4]           # Site 2
     ])
     
@@ -93,22 +93,23 @@ def generate_kagome_cluster(dim1, dim2, use_pbc=False):
         # Internal unit cell bonds (triangular motif)
         (0, 0, 0, 1),   # Site 0 -- Site 1 (same cell)
         (0, 0, 0, 2),   # Site 0 -- Site 2 (same cell)
-        (1, 0, 0, 2),   # Site 1 -- Site 2 (same cell)
         # Cross-cell bonds (positive directions only)
-        (1, +1,  0, 0), # Site 1 -- Site 0 at (+1, 0)
+        (1, +1,  -1, 0), # Site 1 -- Site 0 at (+1, 0)
+        (1, +1, -1, 2), # Site 1 -- Site 2 at (0, +1)
         (2,  0, +1, 0), # Site 2 -- Site 0 at (0, +1)
-        (1, +1, -1, 2), # Site 1 -- Site 2 at (+1, -1)
+        (2,  0, +1, 1), # Site 2 -- Site 1 at (0, +1)
     ]
     
     # Second nearest neighbors (2NN): distance = sqrt(3)/2 ≈ 0.866, coordination = 4
     # Hexagon edges connecting different sublattices
     NN2_BONDS = [
-        (0, +1, -1, 2), # Site 0 -- Site 2 at (+1, -1)
-        (0, -1, +1, 1), # Site 0 -- Site 1 at (-1, +1)
-        (1, +1,  0, 2), # Site 1 -- Site 2 at (+1, 0)
-        (1,  0, +1, 0), # Site 1 -- Site 0 at (0, +1)
-        (2, +1,  0, 0), # Site 2 -- Site 0 at (+1, 0)
-        (2,  0, +1, 1), # Site 2 -- Site 1 at (0, +1)
+        (0, 0, +1, 1), # Site 0 -- Site 2 at (+1, -1)
+        (0, +1, -1, 2), # Site 0 -- Site 1 at (-1, +1)
+        
+        # (1, +1,  0, 0), # Site 1 -- Site 2 at (+1, 0)
+        # (1,  0, 0, 2), # Site 1 -- Site 0 at (0, +1)
+        # (2, +1,  0, 0), # Site 2 -- Site 0 at (+1, 0)
+        # (2,  0, +1, 1), # Site 2 -- Site 1 at (0, +1)
     ]
     
     # Third nearest neighbors (3NN): distance = 1.0, coordination = 6

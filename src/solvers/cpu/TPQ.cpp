@@ -1,7 +1,10 @@
 #include <ed/solvers/TPQ.h>
 #include <ed/core/construct_ham.h>
+#include <ed/core/hdf5_io.h>
 #include <filesystem>
 #include <regex>
+#include <sstream>
+#include <map>
 
 #ifdef WITH_MPI
 #include <mpi.h>
@@ -1348,12 +1351,14 @@ bool find_lowest_energy_tpq_state(
  * @param dir Directory for output files
  * @param sample Current sample index
  * @param sublattice_size Size of sublattice for measurements
+ * @param measure_sz Whether spin measurements are enabled (controls flct/spin_corr file creation)
  * @return Tuple of filenames (ss_file, norm_file, flct_file, spin_corr)
  */
 std::tuple<std::string, std::string, std::string, std::vector<std::string>> initializeTPQFiles(
     const std::string& dir,
     uint64_t sample,
-    uint64_t sublattice_size
+    uint64_t sublattice_size,
+    bool measure_sz = false
 ) {
     std::string ss_file = dir + "/SS_rand" + std::to_string(sample) + ".dat";
     std::string norm_file = dir + "/norm_rand" + std::to_string(sample) + ".dat";
@@ -1368,7 +1373,8 @@ std::tuple<std::string, std::string, std::string, std::vector<std::string>> init
         spin_corr_files.push_back(filename);
     }
     
-    // Initialize output files
+    // Initialize output files - only create SS and norm files always
+    // Fluctuation and spin correlation files are only created when measure_sz is enabled
     {
         std::ofstream ss_out(ss_file);
         ss_out << "# inv_temp energy variance num doublon step" << std::endl;
@@ -1376,26 +1382,29 @@ std::tuple<std::string, std::string, std::string, std::vector<std::string>> init
         std::ofstream norm_out(norm_file);
         norm_out << "# inv_temp norm first_norm step" << std::endl;
         
-        std::ofstream flct_out(flct_file);
-        flct_out << "# inv_temp sz(real) sz(imag) sz2(real) sz2(imag)";
+        // Only create fluctuation and correlation files if measurements are enabled
+        if (measure_sz) {
+            std::ofstream flct_out(flct_file);
+            flct_out << "# inv_temp sz(real) sz(imag) sz2(real) sz2(imag)";
 
-        for (int i = 0; i < sublattice_size; i++) {
-            flct_out << " sz" << i << "(real) sz" << i << "(imag)"  << " sz2" << i << "(real) sz2" << i << "(imag)";
-        }
-
-        flct_out << " Spm2(real) Spm2(imag)";
-
-        flct_out << " step" << std::endl;
-
-        // Initialize each spin correlation file
-        for (const auto& file : spin_corr_files) {
-            std::ofstream spin_out(file);
-            spin_out << "# inv_temp total(real) total(imag)";
-            
-            for (int i = 0; i < sublattice_size*sublattice_size; i++) {
-                spin_out << " site" << i << "(real) site" << i << "(imag)";
+            for (int i = 0; i < sublattice_size; i++) {
+                flct_out << " sz" << i << "(real) sz" << i << "(imag)"  << " sz2" << i << "(real) sz2" << i << "(imag)";
             }
-            spin_out << " step" << std::endl;
+
+            flct_out << " Spm2(real) Spm2(imag)";
+
+            flct_out << " step" << std::endl;
+
+            // Initialize each spin correlation file
+            for (const auto& file : spin_corr_files) {
+                std::ofstream spin_out(file);
+                spin_out << "# inv_temp total(real) total(imag)";
+                
+                for (int i = 0; i < sublattice_size*sublattice_size; i++) {
+                    spin_out << " site" << i << "(real) site" << i << "(imag)";
+                }
+                spin_out << " step" << std::endl;
+            }
         }
     }
     
@@ -1671,7 +1680,7 @@ void microcanonical_tpq(
         #endif
         
         std::vector<bool> temp_measured(num_temp_points, false);
-        auto [ss_file, norm_file, flct_file, spin_corr] = initializeTPQFiles(dir, sample, sublattice_size);
+        auto [ss_file, norm_file, flct_file, spin_corr] = initializeTPQFiles(dir, sample, sublattice_size, measure_sz);
         
         // Variables that will be initialized differently for continue mode
         ComplexVector v0;
@@ -1748,10 +1757,11 @@ void microcanonical_tpq(
             cblas_zscal(N, &scale_factor_large, v0.data(), 1);  // v0 *= L*D_S
             cblas_zaxpy(N, &minus_one, temp.data(), 1, v0.data(), 1);  // v0 = v0 - temp
             
-            // Write initial state (infinite temperature)
+            // Step 1 is initialization only - do NOT write to file
+            // The data at step 1 is unphysical (not yet thermalized)
             step = 1;
             
-            // Calculate energy and variance for step 1
+            // Calculate energy and variance for step 1 (for internal use only)
             auto [e1, v1] = calculateEnergyAndVariance(H, v0, N);
             energy1 = e1;
             variance1 = v1;
@@ -1764,13 +1774,8 @@ void microcanonical_tpq(
 
             current_norm = first_norm;
             
-            writeTPQData(ss_file, inv_temp, energy1, variance1, current_norm, step);
-            
-            {
-                std::ofstream norm_out(norm_file, std::ios::app);
-                norm_out << std::setprecision(16) << inv_temp << " " 
-                         << current_norm << " " << first_norm << " " << step << std::endl;
-            }
+            // Skip writing step 1 - it contains unphysical initialization data
+            // Physical data starts from step 2
             
             step = 2; // Start main loop from step 2
         }
@@ -1926,6 +1931,9 @@ void microcanonical_tpq(
         std::cout << "MPI TPQ Computation Complete\n";
         std::cout << "Collected " << eigenvalues.size() << " sample energies\n";
         std::cout << "==========================================\n";
+        
+        // Convert TPQ results to unified thermodynamic format
+        convert_tpq_to_unified_thermodynamics(dir, num_samples);
     } else {
         // Clear eigenvalues on non-root ranks to save memory
         eigenvalues.clear();
@@ -1933,6 +1941,9 @@ void microcanonical_tpq(
     
     // Final barrier before returning
     MPI_Barrier(MPI_COMM_WORLD);
+    #else
+    // Non-MPI: convert TPQ results to unified thermodynamic format
+    convert_tpq_to_unified_thermodynamics(dir, num_samples);
     #endif
 }
 
@@ -2073,7 +2084,7 @@ void canonical_tpq(
         std::vector<bool> temp_measured(num_temp_points, false);
         
         // Setup filenames for this sample
-        auto [ss_file, norm_file, flct_file, spin_corr] = initializeTPQFiles(dir, sample, sublattice_size);
+        auto [ss_file, norm_file, flct_file, spin_corr] = initializeTPQFiles(dir, sample, sublattice_size, measure_sz);
 
         // Initial random normalized state (β=0)
          uint64_t seed = static_cast< int>(time(NULL)) + sample;
@@ -2202,6 +2213,14 @@ void canonical_tpq(
         std::cout << "MPI Canonical TPQ Computation Complete\n";
         std::cout << "Collected " << energies.size() << " sample energies\n";
         std::cout << "==========================================\n";
+        
+        // Convert TPQ results to unified thermodynamic format
+        // Note: canonical TPQ uses same SS_rand format, but output as cTPQ
+        std::filesystem::path tpq_path(dir);
+        std::filesystem::path thermo_dir = tpq_path.parent_path() / "thermo";
+        std::filesystem::create_directories(thermo_dir);
+        std::string output_file = (thermo_dir / "thermo.txt").string();
+        convert_tpq_to_unified_thermo(dir, output_file);
     } else {
         // Clear energies on non-root ranks to save memory
         energies.clear();
@@ -2209,5 +2228,290 @@ void canonical_tpq(
     
     // Final barrier before returning
     MPI_Barrier(MPI_COMM_WORLD);
+    #else
+    // Non-MPI: convert TPQ results to unified thermodynamic format
+    std::filesystem::path tpq_path(dir);
+    std::filesystem::path thermo_dir = tpq_path.parent_path() / "thermo";
+    std::filesystem::create_directories(thermo_dir);
+    std::string output_file = (thermo_dir / "thermo.txt").string();
+    convert_tpq_to_unified_thermo(dir, output_file);
     #endif
+}
+
+/**
+ * @brief Convert TPQ SS_rand files to unified thermodynamic format
+ * 
+ * Reads all SS_rand*.dat files in the directory, interpolates/bins them
+ * to a common temperature grid, and outputs a unified thermo file.
+ * 
+ * TPQ provides raw microcanonical data:
+ *   - beta (inverse temperature)
+ *   - energy
+ *   - variance
+ * 
+ * From which we compute:
+ *   - Cv = beta^2 * variance
+ *   - F = E - T*S (requires integration)
+ *   - S = integral(Cv/T) or from free energy
+ * 
+ * @param tpq_dir Directory containing SS_rand*.dat files
+ * @param output_file Output unified thermodynamic file
+ * @param temp_min Minimum temperature for output grid
+ * @param temp_max Maximum temperature for output grid
+ * @param num_temp_bins Number of temperature bins
+ * @return true if successful
+ */
+bool convert_tpq_to_unified_thermo(
+    const std::string& tpq_dir,
+    const std::string& output_file,
+    double temp_min,
+    double temp_max,
+    uint64_t num_temp_bins
+) {
+    std::cout << "\n=== Converting TPQ data to unified thermodynamic format ===" << std::endl;
+    
+    // Find all SS_rand files
+    std::vector<std::string> ss_files;
+    for (int sample = 0; sample < 1000; ++sample) {
+        std::string ss_file = tpq_dir + "/SS_rand" + std::to_string(sample) + ".dat";
+        std::ifstream test(ss_file);
+        if (test.is_open()) {
+            ss_files.push_back(ss_file);
+            test.close();
+        } else {
+            break;  // Assume files are numbered consecutively
+        }
+    }
+    
+    if (ss_files.empty()) {
+        std::cerr << "No SS_rand*.dat files found in " << tpq_dir << std::endl;
+        return false;
+    }
+    
+    std::cout << "Found " << ss_files.size() << " TPQ sample files" << std::endl;
+    
+    // Read all data from SS_rand files
+    // Format: inv_temp energy variance num doublon step
+    struct TPQDataPoint {
+        double beta;
+        double energy;
+        double variance;
+    };
+    
+    std::vector<std::vector<TPQDataPoint>> all_sample_data;
+    
+    for (const auto& ss_file : ss_files) {
+        std::ifstream file(ss_file);
+        if (!file.is_open()) continue;
+        
+        std::vector<TPQDataPoint> sample_data;
+        std::string line;
+        
+        // Skip header
+        std::getline(file, line);
+        
+        while (std::getline(file, line)) {
+            if (line.empty() || line[0] == '#') continue;
+            
+            std::istringstream iss(line);
+            double beta, energy, variance, norm, doublon;
+            uint64_t step;
+            
+            if (iss >> beta >> energy >> variance >> norm >> doublon >> step) {
+                if (beta > 0 && std::isfinite(energy) && std::isfinite(variance)) {
+                    sample_data.push_back({beta, energy, variance});
+                }
+            }
+        }
+        
+        if (!sample_data.empty()) {
+            all_sample_data.push_back(sample_data);
+        }
+    }
+    
+    if (all_sample_data.empty()) {
+        std::cerr << "No valid data found in SS_rand files" << std::endl;
+        return false;
+    }
+    
+    std::cout << "Read data from " << all_sample_data.size() << " samples" << std::endl;
+    
+    // Create temperature grid (logarithmic spacing)
+    std::vector<double> temperatures(num_temp_bins);
+    double log_T_min = std::log(temp_min);
+    double log_T_max = std::log(temp_max);
+    double log_T_step = (log_T_max - log_T_min) / (num_temp_bins - 1);
+    
+    for (size_t i = 0; i < num_temp_bins; ++i) {
+        temperatures[i] = std::exp(log_T_min + i * log_T_step);
+    }
+    
+    // For each temperature, interpolate values from each sample
+    std::vector<double> energy_mean(num_temp_bins, 0.0);
+    std::vector<double> energy_var(num_temp_bins, 0.0);
+    std::vector<double> cv_mean(num_temp_bins, 0.0);
+    std::vector<double> cv_var(num_temp_bins, 0.0);
+    std::vector<uint64_t> counts(num_temp_bins, 0);
+    
+    for (const auto& sample_data : all_sample_data) {
+        // Sort by beta (should already be sorted but ensure)
+        std::vector<TPQDataPoint> sorted_data = sample_data;
+        std::sort(sorted_data.begin(), sorted_data.end(), 
+                  [](const TPQDataPoint& a, const TPQDataPoint& b) { return a.beta < b.beta; });
+        
+        for (size_t t_idx = 0; t_idx < num_temp_bins; ++t_idx) {
+            double T = temperatures[t_idx];
+            double target_beta = 1.0 / T;
+            
+            // Find bracketing points for interpolation
+            size_t i_low = 0, i_high = sorted_data.size() - 1;
+            
+            // Binary search for bracketing
+            for (size_t i = 0; i < sorted_data.size() - 1; ++i) {
+                if (sorted_data[i].beta <= target_beta && sorted_data[i+1].beta >= target_beta) {
+                    i_low = i;
+                    i_high = i + 1;
+                    break;
+                }
+            }
+            
+            // Check if target is within data range
+            if (target_beta < sorted_data.front().beta || target_beta > sorted_data.back().beta) {
+                continue;  // Skip this temperature for this sample
+            }
+            
+            // Linear interpolation in beta
+            double beta_low = sorted_data[i_low].beta;
+            double beta_high = sorted_data[i_high].beta;
+            double alpha = (beta_high > beta_low) ? 
+                           (target_beta - beta_low) / (beta_high - beta_low) : 0.0;
+            
+            double E = sorted_data[i_low].energy * (1.0 - alpha) + sorted_data[i_high].energy * alpha;
+            double var = sorted_data[i_low].variance * (1.0 - alpha) + sorted_data[i_high].variance * alpha;
+            
+            // Cv = beta^2 * variance
+            double Cv = target_beta * target_beta * var;
+            
+            // Update running statistics
+            counts[t_idx]++;
+            double delta_E = E - energy_mean[t_idx];
+            energy_mean[t_idx] += delta_E / counts[t_idx];
+            double delta_E2 = E - energy_mean[t_idx];
+            energy_var[t_idx] += delta_E * delta_E2;
+            
+            double delta_Cv = Cv - cv_mean[t_idx];
+            cv_mean[t_idx] += delta_Cv / counts[t_idx];
+            double delta_Cv2 = Cv - cv_mean[t_idx];
+            cv_var[t_idx] += delta_Cv * delta_Cv2;
+        }
+    }
+    
+    // Finalize variance and compute standard error
+    std::vector<double> energy_error(num_temp_bins);
+    std::vector<double> cv_error(num_temp_bins);
+    
+    for (size_t i = 0; i < num_temp_bins; ++i) {
+        if (counts[i] > 1) {
+            energy_var[i] /= (counts[i] - 1);
+            cv_var[i] /= (counts[i] - 1);
+            energy_error[i] = std::sqrt(energy_var[i] / counts[i]);
+            cv_error[i] = std::sqrt(cv_var[i] / counts[i]);
+        } else {
+            energy_error[i] = 0.0;
+            cv_error[i] = 0.0;
+        }
+    }
+    
+    // Compute entropy and free energy by integration
+    // S(T) = S(0) + ∫_0^T (Cv/T') dT'
+    // For TPQ, we integrate from low T upward
+    std::vector<double> entropy(num_temp_bins, 0.0);
+    std::vector<double> free_energy(num_temp_bins, 0.0);
+    
+    // Use trapezoidal integration for entropy
+    for (size_t i = 1; i < num_temp_bins; ++i) {
+        if (counts[i] > 0 && counts[i-1] > 0) {
+            double T1 = temperatures[i-1];
+            double T2 = temperatures[i];
+            double Cv1 = cv_mean[i-1];
+            double Cv2 = cv_mean[i];
+            
+            // ∫(Cv/T)dT ≈ (T2-T1) * 0.5 * (Cv1/T1 + Cv2/T2)
+            entropy[i] = entropy[i-1] + 0.5 * (T2 - T1) * (Cv1/T1 + Cv2/T2);
+        } else {
+            entropy[i] = entropy[i-1];
+        }
+    }
+    
+    // F = E - TS
+    for (size_t i = 0; i < num_temp_bins; ++i) {
+        free_energy[i] = energy_mean[i] - temperatures[i] * entropy[i];
+    }
+    
+    // Write unified output
+    std::vector<std::string> metadata = {
+        "Method: TPQ (Thermal Pure Quantum state)",
+        "Samples: " + std::to_string(all_sample_data.size()),
+        "Note: Cv computed from variance, S and F from integration",
+        "Note: Data interpolated from microcanonical trajectory"
+    };
+    
+    try {
+        // Create ThermodynamicData struct
+        ThermodynamicData thermo;
+        thermo.temperatures = temperatures;
+        thermo.energy = energy_mean;
+        thermo.specific_heat = cv_mean;
+        thermo.entropy = entropy;
+        thermo.free_energy = free_energy;
+        
+        HDF5IO::saveUnifiedThermodynamicsTxt(
+            output_file, "TPQ",
+            thermo,
+            energy_error, cv_error, {}, {},  // No S/F error from integration
+            metadata
+        );
+        
+        return true;
+    } catch (const std::exception& e) {
+        std::cerr << "Error writing unified TPQ output: " << e.what() << std::endl;
+        return false;
+    }
+}
+
+/**
+ * Convenience wrapper for convert_tpq_to_unified_thermo that auto-generates output path
+ */
+void convert_tpq_to_unified_thermodynamics(
+    const std::string& tpq_dir,
+    uint64_t num_samples,
+    double temp_min,
+    double temp_max,
+    uint64_t num_temp_points
+) {
+    // Auto-generate output path: thermo/thermo.txt relative to tpq_dir
+    // tpq_dir is typically output/tpq/ so we go up to output/thermo/
+    std::filesystem::path tpq_path(tpq_dir);
+    std::filesystem::path thermo_dir = tpq_path.parent_path() / "thermo";
+    
+    // Create thermo directory if it doesn't exist
+    std::filesystem::create_directories(thermo_dir);
+    
+    std::string output_file = (thermo_dir / "thermo.txt").string();
+    
+    std::cout << "Converting TPQ results to unified thermodynamic format..." << std::endl;
+    std::cout << "  Input directory: " << tpq_dir << std::endl;
+    std::cout << "  Output file: " << output_file << std::endl;
+    std::cout << "  Number of samples: " << num_samples << std::endl;
+    std::cout << "  Temperature range: " << temp_min << " to " << temp_max << std::endl;
+    
+    bool success = convert_tpq_to_unified_thermo(
+        tpq_dir, output_file, temp_min, temp_max, num_temp_points
+    );
+    
+    if (success) {
+        std::cout << "Successfully converted TPQ data to unified format." << std::endl;
+    } else {
+        std::cerr << "Warning: Failed to convert TPQ data to unified format." << std::endl;
+    }
 }

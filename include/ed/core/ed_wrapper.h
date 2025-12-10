@@ -276,6 +276,45 @@ EDResults exact_diagonalization_core(
 
 // Helper functions
 namespace ed_internal {
+
+    // ========== Method Classification Helpers ==========
+    
+    /**
+     * @brief Check if method is a TPQ (Thermal Pure Quantum) method
+     */
+    inline bool is_tpq_method(DiagonalizationMethod method) {
+        return method == DiagonalizationMethod::mTPQ ||
+               method == DiagonalizationMethod::mTPQ_CUDA ||
+               method == DiagonalizationMethod::cTPQ ||
+               method == DiagonalizationMethod::mTPQ_GPU ||
+               method == DiagonalizationMethod::cTPQ_GPU;
+    }
+    
+    /**
+     * @brief Check if method is FTLM
+     */
+    inline bool is_ftlm_method(DiagonalizationMethod method) {
+        return method == DiagonalizationMethod::FTLM ||
+               method == DiagonalizationMethod::FTLM_GPU ||
+               method == DiagonalizationMethod::FTLM_GPU_FIXED_SZ;
+    }
+    
+    /**
+     * @brief Check if method requires ground state sector identification
+     */
+    inline bool requires_ground_state_sector(DiagonalizationMethod method) {
+        return is_tpq_method(method);
+    }
+    
+    /**
+     * @brief Check if method produces per-sector thermodynamic data that needs combining
+     */
+    inline bool requires_sector_combination(DiagonalizationMethod method) {
+        return is_ftlm_method(method);
+    }
+
+    // ========== Forward Declarations ==========
+    
     void process_thermal_correlations(
         const EDParameters& params,
         uint64_t hilbert_space_dim
@@ -347,6 +386,112 @@ namespace ed_internal {
         Operator& hamiltonian,
         bool use_hdf5
     );
+    
+    // ========== Fixed-Sz + Symmetry Helpers ==========
+    
+    /**
+     * @brief Information about a symmetry sector for diagonalization
+     */
+    struct SectorInfo {
+        size_t index;
+        uint64_t dimension;
+        bool is_target;          // For TPQ: is this the ground state sector?
+        double large_value;      // For TPQ: energy shift value
+        std::string output_dir;  // Sector-specific output directory
+    };
+    
+    /**
+     * @brief Result from diagonalizing a single sector
+     */
+    struct SectorResult {
+        std::vector<double> eigenvalues;
+        FTLMResults ftlm_results;  // Only populated for FTLM
+        bool success;
+    };
+    
+    /**
+     * @brief Transform a state from symmetry sector basis to fixed-Sz basis
+     * @param sector_state State vector in symmetry sector basis
+     * @param hamiltonian FixedSzOperator with symmetry basis info
+     * @param directory Directory containing symmetry basis data
+     * @param block_idx Symmetry sector index
+     * @param block_start_dim Starting dimension offset for this block
+     * @return State vector in fixed-Sz basis
+     */
+    std::vector<Complex> transform_sector_to_fixed_sz(
+        const std::vector<Complex>& sector_state,
+        FixedSzOperator& hamiltonian,
+        const std::string& directory,
+        size_t block_idx,
+        uint64_t block_start_dim
+    );
+    
+    /**
+     * @brief Transform a state from fixed-Sz basis to full Hilbert space
+     * @param fixed_sz_state State vector in fixed-Sz basis
+     * @param hamiltonian FixedSzOperator for embedding
+     * @return State vector in full Hilbert space
+     */
+    inline std::vector<Complex> transform_fixed_sz_to_full(
+        const std::vector<Complex>& fixed_sz_state,
+        FixedSzOperator& hamiltonian
+    ) {
+        return hamiltonian.embedToFull(fixed_sz_state);
+    }
+    
+    /**
+     * @brief Transform a state from symmetry sector basis directly to full Hilbert space
+     * Combines both transformations: sector → fixed-Sz → full
+     */
+    std::vector<Complex> transform_sector_to_full(
+        const std::vector<Complex>& sector_state,
+        FixedSzOperator& hamiltonian,
+        const std::string& directory,
+        size_t block_idx,
+        uint64_t block_start_dim
+    );
+    
+    /**
+     * @brief Setup Fixed-Sz symmetry basis (generate or load from HDF5)
+     * @return true if successful, false otherwise
+     */
+    bool setup_fixed_sz_symmetry_basis(
+        const std::string& directory,
+        FixedSzOperator& hamiltonian
+    );
+    
+    /**
+     * @brief Find ground state sector for Fixed-Sz + Symmetry
+     */
+    GroundStateSectorInfo find_ground_state_sector_fixed_sz(
+        const std::vector<int>& block_sizes,
+        const std::string& directory,
+        FixedSzOperator& hamiltonian,
+        const EDParameters& params
+    );
+    
+    /**
+     * @brief Diagonalize a single symmetry sector in Fixed-Sz basis
+     */
+    SectorResult diagonalize_fixed_sz_sector(
+        FixedSzOperator& hamiltonian,
+        const std::string& directory,
+        const SectorInfo& sector,
+        DiagonalizationMethod method,
+        const EDParameters& params
+    );
+    
+    /**
+     * @brief Transform and save eigenvectors/TPQ states from sector to full basis
+     */
+    void transform_and_save_sector_states(
+        FixedSzOperator& hamiltonian,
+        const std::string& directory,
+        const SectorInfo& sector,
+        const SectorResult& result,
+        const EDParameters& params,
+        DiagonalizationMethod method
+    );
 }
 
 // ============================================================================
@@ -385,21 +530,18 @@ EDResults exact_diagonalization_core(
     // Call the appropriate diagonalization method
     switch (method) {
         case DiagonalizationMethod::FULL:
-            std::cout << "Using full diagonalization" << std::endl;
             full_diagonalization(H, hilbert_space_dim, params.num_eigenvalues, results.eigenvalues, 
                                  params.output_dir, params.compute_eigenvectors);
             break;
 
 
         case DiagonalizationMethod::LANCZOS:
-            std::cout << "Using standard Lanczos method" << std::endl;
             lanczos(H, hilbert_space_dim, params.max_iterations, params.num_eigenvalues, 
                     params.tolerance, results.eigenvalues, params.output_dir, 
                     params.compute_eigenvectors);
             break;
             
         case DiagonalizationMethod::LANCZOS_SELECTIVE:
-            std::cout << "Using Lanczos with selective reorthogonalization" << std::endl;
             lanczos_selective_reorth(H, hilbert_space_dim, params.max_iterations, 
                                     params.num_eigenvalues, params.tolerance, 
                                     results.eigenvalues, params.output_dir, 
@@ -407,7 +549,6 @@ EDResults exact_diagonalization_core(
             break;
             
         case DiagonalizationMethod::LANCZOS_NO_ORTHO:
-            std::cout << "Using Lanczos without reorthogonalization" << std::endl;
             lanczos_no_ortho(H, hilbert_space_dim, params.max_iterations, 
                            params.num_eigenvalues, params.tolerance, 
                            results.eigenvalues, params.output_dir, 
@@ -415,7 +556,6 @@ EDResults exact_diagonalization_core(
             break;
             
         case DiagonalizationMethod::SHIFT_INVERT:
-            std::cout << "Using shift-invert Lanczos method with shift = " << params.shift << std::endl;
             shift_invert_lanczos(H, hilbert_space_dim, params.max_iterations, 
                                 params.num_eigenvalues, params.shift, 
                                 params.tolerance, results.eigenvalues, 
@@ -424,7 +564,6 @@ EDResults exact_diagonalization_core(
             
         case DiagonalizationMethod::DAVIDSON:
             {
-                std::cout << "Using Davidson method" << std::endl;
                 std::vector<ComplexVector> eigenvectors;
                 davidson_method(H, hilbert_space_dim, params.max_iterations, 
                              params.max_subspace, params.num_eigenvalues, 
@@ -434,7 +573,6 @@ EDResults exact_diagonalization_core(
             break;
             
         case DiagonalizationMethod::LOBPCG:
-            std::cout << "Using LOBPCG method" << std::endl;
             lobpcg_diagonalization(H, hilbert_space_dim, params.max_iterations, 
                             params.num_eigenvalues, params.tolerance, 
                             results.eigenvalues, params.output_dir, 
@@ -442,7 +580,6 @@ EDResults exact_diagonalization_core(
             break;
             
         case DiagonalizationMethod::KRYLOV_SCHUR:
-            std::cout << "Using Krylov-Schur method" << std::endl;
             krylov_schur(H, hilbert_space_dim, params.max_iterations, 
                        params.num_eigenvalues, params.tolerance, 
                        results.eigenvalues, params.output_dir, 
@@ -450,7 +587,6 @@ EDResults exact_diagonalization_core(
             break;
             
         case DiagonalizationMethod::IMPLICIT_RESTART_LANCZOS:
-            std::cout << "Using Implicitly Restarted Lanczos method" << std::endl;
             implicitly_restarted_lanczos(H, hilbert_space_dim, params.max_iterations, 
                                        params.num_eigenvalues, params.tolerance, 
                                        results.eigenvalues, params.output_dir, 
@@ -458,7 +594,6 @@ EDResults exact_diagonalization_core(
             break;
             
         case DiagonalizationMethod::THICK_RESTART_LANCZOS:
-            std::cout << "Using Thick Restart Lanczos method" << std::endl;
             thick_restart_lanczos(H, hilbert_space_dim, params.max_iterations, 
                                 params.num_eigenvalues, params.tolerance, 
                                 results.eigenvalues, params.output_dir, 
@@ -466,7 +601,6 @@ EDResults exact_diagonalization_core(
             break;
         
         case DiagonalizationMethod::OSS:
-            std::cout << "Spectrum slicing for full diagonalization" << std::endl;
             optimal_spectrum_solver(
                 H, hilbert_space_dim, params.max_iterations,
                 results.eigenvalues, params.output_dir, 
@@ -475,8 +609,6 @@ EDResults exact_diagonalization_core(
             break;
             
         case DiagonalizationMethod::mTPQ:
-            std::cout << "Using microcanonical TPQ method" << std::endl;
-        
             microcanonical_tpq(H, hilbert_space_dim,
                             params.max_iterations, params.num_samples,
                             params.num_measure_freq,
@@ -495,9 +627,6 @@ EDResults exact_diagonalization_core(
             break;
 
         case DiagonalizationMethod::cTPQ:
-            std::cout << "Using canonical TPQ method" << std::endl;
-            // Invoke the canonical TPQ routine provided in TPQ.h
-            // Assumes signature analogous to microcanonical_tpq with (num_order, delta_tau)
             canonical_tpq(
                 H,                      // Hamiltonian matvec
                 hilbert_space_dim,      // N
@@ -530,7 +659,6 @@ EDResults exact_diagonalization_core(
         
 
         case DiagonalizationMethod::BLOCK_LANCZOS:
-            std::cout << "Using block Lanczos method" << std::endl;
             block_lanczos(H, hilbert_space_dim, 
                         params.max_iterations, params.num_eigenvalues, params.block_size, 
                         params.tolerance, results.eigenvalues, 
@@ -538,13 +666,6 @@ EDResults exact_diagonalization_core(
             break;
             
         case DiagonalizationMethod::CHEBYSHEV_FILTERED:
-            std::cout << "Using Chebyshev filtered Lanczos method" << std::endl;
-            if (params.target_lower != 0.0 || params.target_upper != 0.0) {
-                std::cout << "  Target energy range: [" << params.target_lower 
-                          << ", " << params.target_upper << "]" << std::endl;
-            } else {
-                std::cout << "  Auto-detecting spectral range" << std::endl;
-            }
             chebyshev_filtered_lanczos(H, hilbert_space_dim, 
                                      params.max_iterations, params.num_eigenvalues, 
                                      params.tolerance, results.eigenvalues, 
@@ -554,21 +675,18 @@ EDResults exact_diagonalization_core(
             
         
         case DiagonalizationMethod::ARPACK_SM:
-            std::cout << "Using ARPACK standard eigenvalue solver" << std::endl;
             arpack_ground_state(H, hilbert_space_dim,
                                 params.max_iterations, params.num_eigenvalues, params.tolerance,
                                 results.eigenvalues, params.output_dir, params.compute_eigenvectors);
             break;
         
         case DiagonalizationMethod::ARPACK_LM:
-            std::cout << "Using ARPACK standard eigenvalue solver" << std::endl;
             arpack_largest(H, hilbert_space_dim,
                             params.max_iterations, params.num_eigenvalues, params.tolerance,
                             results.eigenvalues, params.output_dir, params.compute_eigenvectors);
             break;
 
         case DiagonalizationMethod::ARPACK_SHIFT_INVERT:
-            std::cout << "Using ARPACK shift-invert method with shift = " << params.shift << std::endl;
             arpack_shift_invert(H, hilbert_space_dim,
                                 params.max_iterations, params.num_eigenvalues, params.tolerance,
                                 params.shift,
@@ -577,7 +695,6 @@ EDResults exact_diagonalization_core(
             break;
 
         case DiagonalizationMethod::ARPACK_ADVANCED: {
-            std::cout << "Using ARPACK advanced multi-attempt solver" << std::endl;
             detail_arpack::ArpackAdvancedOptions opts;
             opts.nev = params.num_eigenvalues;
             opts.which = params.arpack_which;
@@ -624,7 +741,6 @@ EDResults exact_diagonalization_core(
             break;
         
         case DiagonalizationMethod::FTLM:
-            std::cout << "Using Finite Temperature Lanczos Method (FTLM)" << std::endl;
             {
                 // Setup FTLM parameters
                 FTLMParameters ftlm_params;
@@ -664,7 +780,6 @@ EDResults exact_diagonalization_core(
             break;
         
         case DiagonalizationMethod::LTLM:
-            std::cout << "Using Low Temperature Lanczos Method (LTLM)" << std::endl;
             {
                 if (params.use_hybrid_method) {
                     // Deprecated: use method=HYBRID instead
@@ -707,7 +822,6 @@ EDResults exact_diagonalization_core(
             break;
         
         case DiagonalizationMethod::HYBRID:
-            std::cout << "Using Hybrid Thermal Method (LTLM+FTLM)" << std::endl;
             {
                 // Setup Hybrid Thermal parameters
                 HybridThermalParameters hybrid_params;
@@ -951,9 +1065,18 @@ void process_thermal_correlations(
                         for (uint64_t i = 0; i < num_temps; i++) {
                             double T = std::exp(log_temp_min + i * log_temp_step);
                             double beta = 1.0 / T;
-                                // Compute thermal expectation
+                            
+                            // TODO: Fix thermal expectation calculation - 
+                            // compute_thermal_expectation_value has a different signature
+                            // and requires StaticResponseParameters. This code path is broken.
+                            Complex expectation(0.0, 0.0);
+                            std::cerr << "Warning: Thermal expectation calculation not implemented for correlation operators" << std::endl;
+                            
+                            /*
+                            // Old broken code:
                             Complex expectation = calculate_thermal_expectation(
                                 apply_correlation_op, hilbert_space_dim, beta, params.output_dir + "/eigenvectors/");
+                            */
                             
                             std::cout << "T: " << T << ", beta: " << beta << ", expectation: " 
                                         << expectation.real() << " + " << expectation.imag() << "i" << std::endl;
@@ -1562,6 +1685,311 @@ void setup_symmetry_basis(
     }
 }
 
+// ============================================================================
+// FIXED-SZ + SYMMETRY HELPER IMPLEMENTATIONS
+// ============================================================================
+
+/**
+ * @brief Transform a state from symmetry sector basis to fixed-Sz basis
+ */
+std::vector<Complex> transform_sector_to_fixed_sz(
+    const std::vector<Complex>& sector_state,
+    FixedSzOperator& hamiltonian,
+    const std::string& directory,
+    size_t block_idx,
+    uint64_t block_start_dim
+) {
+    uint64_t fixed_sz_dim = hamiltonian.getFixedSzDim();
+    std::vector<Complex> fixed_sz_state(fixed_sz_dim, Complex(0.0, 0.0));
+    
+    // Transform: sum over sector basis vectors
+    for (size_t i = 0; i < sector_state.size(); ++i) {
+        if (std::abs(sector_state[i]) < 1e-15) continue;
+        
+        // Read symmetry basis vector (in fixed-Sz basis)
+        std::vector<Complex> basis_vec = hamiltonian.readSymBasisVector(
+            directory, i + block_start_dim
+        );
+        
+        // Accumulate contribution
+        for (size_t j = 0; j < fixed_sz_dim && j < basis_vec.size(); ++j) {
+            fixed_sz_state[j] += sector_state[i] * basis_vec[j];
+        }
+    }
+    
+    return fixed_sz_state;
+}
+
+/**
+ * @brief Transform a state from symmetry sector basis directly to full Hilbert space
+ */
+std::vector<Complex> transform_sector_to_full(
+    const std::vector<Complex>& sector_state,
+    FixedSzOperator& hamiltonian,
+    const std::string& directory,
+    size_t block_idx,
+    uint64_t block_start_dim
+) {
+    // First transform to fixed-Sz basis
+    std::vector<Complex> fixed_sz_state = transform_sector_to_fixed_sz(
+        sector_state, hamiltonian, directory, block_idx, block_start_dim
+    );
+    
+    // Then embed into full Hilbert space
+    return hamiltonian.embedToFull(fixed_sz_state);
+}
+
+/**
+ * @brief Setup Fixed-Sz symmetry basis (generate or load from HDF5)
+ */
+bool setup_fixed_sz_symmetry_basis(
+    const std::string& directory,
+    FixedSzOperator& hamiltonian
+) {
+    std::string hdf5_file = directory + "/symmetry_data_fixed_sz.h5";
+    bool basis_exists = HDF5SymmetryIO::fileExists(hdf5_file);
+    
+    if (!basis_exists) {
+        std::cout << "\nGenerating symmetrized basis (Fixed Sz, HDF5)..." << std::endl;
+        hamiltonian.generateSymmetrizedBasisFixedSzHDF5(directory);
+        
+        std::cout << "\nBuilding block-diagonal Hamiltonian (Fixed Sz, HDF5)..." << std::endl;
+        hamiltonian.buildAndSaveSymmetrizedBlocksFixedSzHDF5(directory);
+    } else {
+        std::cout << "\nUsing existing symmetrized basis from: " << hdf5_file << std::endl;
+        
+        // Load block sizes
+        auto dims = HDF5SymmetryIO::loadSectorDimensions(hdf5_file);
+        hamiltonian.symmetrized_block_ham_sizes.assign(dims.begin(), dims.end());
+        
+        // Check if blocks exist
+        bool blocks_exist = false;
+        try {
+            H5::H5File file(hdf5_file, H5F_ACC_RDONLY);
+            blocks_exist = file.nameExists("/blocks/block_0");
+            file.close();
+        } catch (...) {
+            blocks_exist = false;
+        }
+        
+        if (!blocks_exist) {
+            std::cout << "Blocks not found. Building block-diagonal Hamiltonian..." << std::endl;
+            hamiltonian.buildAndSaveSymmetrizedBlocksFixedSzHDF5(directory);
+        }
+    }
+    
+    return !hamiltonian.symmetrized_block_ham_sizes.empty();
+}
+
+/**
+ * @brief Find ground state sector for Fixed-Sz + Symmetry
+ */
+GroundStateSectorInfo find_ground_state_sector_fixed_sz(
+    const std::vector<int>& block_sizes,
+    const std::string& directory,
+    FixedSzOperator& hamiltonian,
+    const EDParameters& params
+) {
+    std::cout << "\n=== Scanning Sectors for Ground State ===" << std::endl;
+    
+    GroundStateSectorInfo info;
+    info.min_energy = std::numeric_limits<double>::max();
+    info.max_energy = std::numeric_limits<double>::lowest();
+    info.target_block = 0;
+    
+    for (size_t block_idx = 0; block_idx < block_sizes.size(); ++block_idx) {
+        uint64_t block_dim = block_sizes[block_idx];
+        if (block_dim == 0) continue;
+        
+        std::cout << "  Sector " << (block_idx + 1) << "/" << block_sizes.size() 
+                  << " (dim=" << block_dim << ")" << std::flush;
+        
+        // Load block matrix
+        Eigen::SparseMatrix<Complex> block_matrix = 
+            hamiltonian.loadSymmetrizedBlockFixedSzHDF5(directory, block_idx);
+        
+        // Quick scan with minimal parameters
+        EDParameters scan_params;
+        scan_params.num_eigenvalues = std::min(uint64_t(5), block_dim);
+        scan_params.max_iterations = scan_params.num_eigenvalues * 3 + 15;
+        scan_params.tolerance = 1e-6;  // Relaxed tolerance for scanning
+        scan_params.compute_eigenvectors = false;
+        
+        EDResults scan_results = diagonalize_symmetry_block(
+            block_matrix, block_dim, DiagonalizationMethod::LANCZOS, scan_params, false, 0.0
+        );
+        
+        if (!scan_results.eigenvalues.empty()) {
+            double sector_min = scan_results.eigenvalues[0];
+            double sector_max = scan_results.eigenvalues.back();
+            
+            std::cout << " -> E_min=" << std::fixed << std::setprecision(6) 
+                      << sector_min << std::endl;
+            
+            if (sector_min < info.min_energy) {
+                info.min_energy = sector_min;
+                info.target_block = block_idx;
+            }
+            if (sector_max > info.max_energy) {
+                info.max_energy = sector_max;
+            }
+        } else {
+            std::cout << " -> no eigenvalues found" << std::endl;
+        }
+    }
+    
+    std::cout << "\nTarget sector: " << (info.target_block + 1) 
+              << " (dim=" << block_sizes[info.target_block] 
+              << "), E_min=" << info.min_energy << std::endl;
+    std::cout << "===========================================\n" << std::endl;
+    
+    return info;
+}
+
+/**
+ * @brief Diagonalize a single symmetry sector in Fixed-Sz basis
+ */
+SectorResult diagonalize_fixed_sz_sector(
+    FixedSzOperator& hamiltonian,
+    const std::string& directory,
+    const SectorInfo& sector,
+    DiagonalizationMethod method,
+    const EDParameters& params
+) {
+    SectorResult result;
+    result.success = false;
+    
+    // Load block matrix from HDF5
+    Eigen::SparseMatrix<Complex> block_matrix = 
+        hamiltonian.loadSymmetrizedBlockFixedSzHDF5(directory, sector.index);
+    
+    // Configure parameters for this sector
+    EDParameters sector_params = params;
+    sector_params.num_eigenvalues = std::min(params.num_eigenvalues, sector.dimension);
+    sector_params.output_dir = sector.output_dir;
+    
+    // Diagonalize
+    EDResults block_results = diagonalize_symmetry_block(
+        block_matrix, sector.dimension, method, sector_params, 
+        sector.is_target, sector.large_value
+    );
+    
+    result.eigenvalues = block_results.eigenvalues;
+    result.ftlm_results = block_results.ftlm_results;
+    result.success = !block_results.eigenvalues.empty() || is_tpq_method(method);
+    
+    return result;
+}
+
+/**
+ * @brief Transform and save eigenvectors/TPQ states from sector to full basis
+ */
+void transform_and_save_sector_states(
+    FixedSzOperator& hamiltonian,
+    const std::string& directory,
+    const SectorInfo& sector,
+    const SectorResult& result,
+    const EDParameters& params,
+    DiagonalizationMethod method
+) {
+    if (params.output_dir.empty()) return;
+    
+    uint64_t full_dim = 1ULL << params.num_sites;
+    std::string eigenvector_dir = params.output_dir + "/eigenvectors";
+    safe_system_call("mkdir -p " + eigenvector_dir);
+    
+    // Calculate block_start_dim by summing dimensions of previous sectors
+    uint64_t block_start_dim = 0;
+    for (size_t i = 0; i < sector.index; ++i) {
+        if (i < hamiltonian.symmetrized_block_ham_sizes.size()) {
+            block_start_dim += hamiltonian.symmetrized_block_ham_sizes[i];
+        }
+    }
+    
+    if (is_tpq_method(method) && sector.is_target) {
+        // Transform TPQ states
+        std::cout << "  Transforming TPQ states to full Hilbert space..." << std::endl;
+        
+        std::string temp_list = params.output_dir + "/tpq_files_temp.txt";
+        std::string find_cmd = "find \"" + sector.output_dir + "\" -name \"tpq_state_*.dat\" 2>/dev/null > \"" + temp_list + "\"";
+        safe_system_call(find_cmd);
+        
+        std::ifstream file_list(temp_list);
+        if (file_list.is_open()) {
+            std::string tpq_file;
+            while (std::getline(file_list, tpq_file)) {
+                if (tpq_file.empty()) continue;
+                
+                // Read TPQ state in sector basis
+                std::ifstream infile(tpq_file, std::ios::binary);
+                if (!infile.is_open()) continue;
+                
+                size_t stored_size = 0;
+                infile.read(reinterpret_cast<char*>(&stored_size), sizeof(size_t));
+                
+                std::vector<Complex> sector_state(stored_size);
+                infile.read(reinterpret_cast<char*>(sector_state.data()), stored_size * sizeof(Complex));
+                infile.close();
+                
+                // Transform to full basis
+                std::vector<Complex> full_state = transform_sector_to_full(
+                    sector_state, hamiltonian, directory, sector.index, block_start_dim
+                );
+                
+                // Extract filename and save to main output
+                size_t name_start = tpq_file.find_last_of("/\\");
+                std::string filename = (name_start == std::string::npos) ? tpq_file : tpq_file.substr(name_start + 1);
+                std::string out_path = params.output_dir + "/" + filename;
+                
+                std::ofstream outfile(out_path, std::ios::binary);
+                size_t out_size = full_state.size();
+                outfile.write(reinterpret_cast<const char*>(&out_size), sizeof(size_t));
+                outfile.write(reinterpret_cast<const char*>(full_state.data()), out_size * sizeof(Complex));
+                outfile.close();
+            }
+            file_list.close();
+        }
+        std::remove(temp_list.c_str());
+        
+    } else if (params.compute_eigenvectors) {
+        // Transform eigenvectors
+        std::cout << "  Transforming eigenvectors to full Hilbert space..." << std::endl;
+        
+        for (size_t i = 0; i < result.eigenvalues.size(); ++i) {
+            std::string eigvec_file = sector.output_dir + "/eigenvector_" + std::to_string(i) + ".dat";
+            
+            // Read eigenvector in sector basis
+            std::vector<Complex> sector_vec(sector.dimension);
+            std::ifstream infile(eigvec_file);
+            if (!infile.is_open()) continue;
+            
+            std::string line;
+            size_t idx = 0;
+            while (std::getline(infile, line) && idx < sector.dimension) {
+                if (line.empty()) continue;
+                std::istringstream iss(line);
+                double real_part, imag_part;
+                if (iss >> real_part >> imag_part) {
+                    sector_vec[idx++] = Complex(real_part, imag_part);
+                }
+            }
+            infile.close();
+            
+            // Transform to full basis
+            std::vector<Complex> full_vec = transform_sector_to_full(
+                sector_vec, hamiltonian, directory, sector.index, block_start_dim
+            );
+            
+            // Save
+            std::string out_path = eigenvector_dir + "/eigenvector_sector" + 
+                                   std::to_string(sector.index) + "_" + std::to_string(i) + ".dat";
+            std::ofstream outfile(out_path, std::ios::binary);
+            outfile.write(reinterpret_cast<const char*>(full_vec.data()), full_vec.size() * sizeof(Complex));
+            outfile.close();
+        }
+    }
+}
+
 } // namespace ed_internal
 
 // ============================================================================
@@ -1592,10 +2020,6 @@ inline EDResults exact_diagonalization_fixed_sz(
     DiagonalizationMethod method,
     const EDParameters& params
 ) {
-    std::cout << "\n=== Fixed Sz Exact Diagonalization ===" << std::endl;
-    std::cout << "System: " << num_sites << " sites, spin = " << spin_length << std::endl;
-    std::cout << "Fixed Sz sector: n_up = " << n_up << " (Sz = " << (n_up - num_sites/2.0) << ")" << std::endl;
-    
     // Create Fixed Sz operator
     FixedSzOperator hamiltonian(num_sites, spin_length, n_up);
     
@@ -1617,10 +2041,9 @@ inline EDResults exact_diagonalization_fixed_sz(
     uint64_t fixed_sz_dim = hamiltonian.getFixedSzDim();
     uint64_t full_dim = 1ULL << num_sites;
     
-    std::cout << "Hilbert space dimension:" << std::endl;
-    std::cout << "  Full space: " << full_dim << std::endl;
-    std::cout << "  Fixed Sz:   " << fixed_sz_dim << std::endl;
-    std::cout << "  Reduction:  " << (double)full_dim / fixed_sz_dim << "x" << std::endl;
+    std::cout << "Fixed Sz basis: dim=" << fixed_sz_dim 
+              << " (reduction: " << std::fixed << std::setprecision(1) 
+              << (double)full_dim / fixed_sz_dim << "x)" << std::defaultfloat << std::endl;
     
     // Check if GPU method requested
     bool is_gpu_method = (method == DiagonalizationMethod::DAVIDSON_GPU ||
@@ -1634,8 +2057,6 @@ inline EDResults exact_diagonalization_fixed_sz(
     
     if (is_gpu_method) {
 #ifdef WITH_CUDA
-        std::cout << "\n=== GPU Fixed-Sz Diagonalization ===" << std::endl;
-        
         // Prepare interactions and single-site operators
         std::vector<std::tuple<int, int, char, char, double>> gpu_interactions;
         std::vector<std::tuple<int, char, double>> gpu_single_site_ops;
@@ -1804,49 +2225,31 @@ inline EDResults exact_diagonalization_fixed_sz(
                           method == DiagonalizationMethod::cTPQ);
 
     // Transform eigenvectors from fixed-Sz basis to full basis
-    // Note: TPQ states are now transformed during save, so no post-processing needed for them
-    if (!params.output_dir.empty() && params.compute_eigenvectors) {
-        std::cout << "Transforming eigenvectors from fixed-Sz basis to full Hilbert space..." << std::endl;
-        std::cout << "  Fixed Sz dim: " << fixed_sz_dim << ", Full dim: " << full_dim << std::endl;
-        std::cout << "  Output directory: " << params.output_dir << std::endl;
-        
+    size_t n_eigs = results.eigenvalues.size();
+    if (!params.output_dir.empty() && params.compute_eigenvectors && n_eigs > 0) {
         // Transform eigenvectors if computed
-        if (params.compute_eigenvectors) {
-            std::cout << "  Number of eigenvectors: " << results.eigenvalues.size() << std::endl;
-            for (size_t i = 0; i < results.eigenvalues.size(); ++i) {
-                std::string eigvec_file = params.output_dir + "/eigenvectors/eigenvector_" + std::to_string(i) + ".dat";
-                std::cout << "  Processing eigenvector file: " << eigvec_file << std::endl;
-                std::ifstream infile(eigvec_file, std::ios::binary);
+        for (size_t i = 0; i < n_eigs; ++i) {
+            std::string eigvec_file = params.output_dir + "/eigenvectors/eigenvector_" + std::to_string(i) + ".dat";
+            std::ifstream infile(eigvec_file, std::ios::binary);
+            
+            if (infile.is_open()) {
+                // Read eigenvector in fixed-Sz basis
+                std::vector<Complex> fixed_sz_vec(fixed_sz_dim);
+                infile.read(reinterpret_cast<char*>(fixed_sz_vec.data()), fixed_sz_dim * sizeof(Complex));
+                infile.close();
                 
-                if (infile.is_open()) {
-                    // Read eigenvector in fixed-Sz basis
-                    std::vector<Complex> fixed_sz_vec(fixed_sz_dim);
-                    infile.read(reinterpret_cast<char*>(fixed_sz_vec.data()), fixed_sz_dim * sizeof(Complex));
-                    infile.close();
-                    
-                    // Transform to full basis
-                    std::vector<Complex> full_vec = hamiltonian.embedToFull(fixed_sz_vec);
-                    
-                    // Overwrite file with full-space eigenvector
-                    std::ofstream outfile(eigvec_file, std::ios::binary);
-                    outfile.write(reinterpret_cast<const char*>(full_vec.data()), full_dim * sizeof(Complex));
-                    outfile.close();
-                    
-                    std::cout << "  Transformed eigenvector " << i << " to full space (dim: " 
-                              << fixed_sz_dim << " -> " << full_dim << ")" << std::endl;
-                }
+                // Transform to full basis
+                std::vector<Complex> full_vec = hamiltonian.embedToFull(fixed_sz_vec);
+                
+                // Overwrite file with full-space eigenvector
+                std::ofstream outfile(eigvec_file, std::ios::binary);
+                outfile.write(reinterpret_cast<const char*>(full_vec.data()), full_dim * sizeof(Complex));
+                outfile.close();
             }
-            std::cout << "All eigenvectors successfully transformed to full Hilbert space." << std::endl;
         }
-        
-        // Note: TPQ states are now automatically transformed during save (via save_tpq_state)
-        // No post-processing transformation needed for TPQ states
-        if (is_tpq_method) {
-            std::cout << "\nTPQ states were automatically transformed to full Hilbert space during save." << std::endl;
-        }
+        std::cout << "Transformed " << n_eigs << " eigenvectors to full space" << std::endl;
     }
 
-    std::cout << "=== Fixed Sz Diagonalization Complete ===" << std::endl;
     return results;
 }
 
@@ -2507,6 +2910,14 @@ EDResults exact_diagonalization_from_directory_symmetrized(
  * Combines U(1) charge conservation (fixed Sz) with spatial lattice symmetries.
  * This provides maximal dimension reduction: 2^N → C(N,N_up) → C(N,N_up)/|G|
  * 
+ * The workflow is:
+ * 1. Generate/load automorphisms (spatial symmetries)
+ * 2. Load Hamiltonian in fixed-Sz basis
+ * 3. Generate/load symmetrized blocks within the fixed-Sz sector
+ * 4. For TPQ: scan sectors to find ground state sector
+ * 5. Diagonalize relevant sector(s)
+ * 6. Transform results to full Hilbert space basis
+ * 
  * @param directory Directory containing Hamiltonian files and automorphism data
  * @param n_up Number of up spins (determines Sz sector)
  * @param method Diagonalization method to use
@@ -2514,6 +2925,7 @@ EDResults exact_diagonalization_from_directory_symmetrized(
  * @param format Hamiltonian file format
  * @param interaction_filename Interaction file name
  * @param single_site_filename Single-site file name
+ * @param three_body_filename Three-body interaction file name
  * @return EDResults containing eigenvalues and metadata
  */
 inline EDResults exact_diagonalization_fixed_sz_symmetrized(
@@ -2526,442 +2938,244 @@ inline EDResults exact_diagonalization_fixed_sz_symmetrized(
     const std::string& single_site_filename = "Trans.dat",
     const std::string& three_body_filename = "ThreeBodyG.dat"
 ) {
+    using namespace ed_internal;
+    
     std::cout << "\n========================================" << std::endl;
-    std::cout << "  Fixed-Sz + Symmetrized ED (HDF5)" << std::endl;
-    std::cout << "  Sz sector: N_up = " << n_up << std::endl;
+    std::cout << "  Fixed-Sz + Symmetrized ED" << std::endl;
+    std::cout << "  N_up = " << n_up << ", N_sites = " << params.num_sites << std::endl;
     std::cout << "========================================\n" << std::endl;
     
-    // ========== Step 1: Generate or Load Automorphisms ==========
+    // ========== Step 1: Ensure Automorphisms Exist ==========
     std::string automorphism_file = directory + "/automorphism_results/automorphisms.json";
-    struct stat automorphism_buffer;
-    bool automorphisms_exist = (stat(automorphism_file.c_str(), &automorphism_buffer) == 0);
-
-    if (!automorphisms_exist) {
+    struct stat stat_buf;
+    
+    if (stat(automorphism_file.c_str(), &stat_buf) != 0) {
         std::cout << "Generating automorphisms..." << std::endl;
-        std::string automorphism_finder_path = std::string(__FILE__);
-        automorphism_finder_path = automorphism_finder_path.substr(0, automorphism_finder_path.find_last_of("/\\"));
-        automorphism_finder_path += "/automorphism_finder.py";
-        std::string cmd = "python3 " + automorphism_finder_path + " --data_dir=\"" + directory + "\"";
+        std::string finder_path = std::string(__FILE__);
+        finder_path = finder_path.substr(0, finder_path.find_last_of("/\\"));
+        finder_path += "/automorphism_finder.py";
+        std::string cmd = "python3 " + finder_path + " --data_dir=\"" + directory + "\"";
         if (!safe_system_call(cmd)) {
-            std::cerr << "Warning: Automorphism finder failed" << std::endl;
+            std::cerr << "Error: Automorphism generation failed" << std::endl;
             return EDResults();
         }
     }
     
     // ========== Step 2: Load Hamiltonian ==========
-    std::cout << "\nLoading Hamiltonian..." << std::endl;
-    std::string interaction_file = directory + "/" + interaction_filename;
-    std::string single_site_file = directory + "/" + single_site_filename;
-    std::string three_body_file = directory + "/" + three_body_filename;
+    std::cout << "Loading Hamiltonian..." << std::endl;
     
     FixedSzOperator hamiltonian(params.num_sites, params.spin_length, n_up);
-    hamiltonian.loadFromFile(single_site_file);
-    hamiltonian.loadFromInterAllFile(interaction_file);
+    hamiltonian.loadFromFile(directory + "/" + single_site_filename);
+    hamiltonian.loadFromInterAllFile(directory + "/" + interaction_filename);
     
     // Load three-body terms if available
-    struct stat three_body_buffer;
-    if (stat(three_body_file.c_str(), &three_body_buffer) == 0) {
-        std::cout << "Loading three-body terms from: " << three_body_file << std::endl;
-        hamiltonian.loadThreeBodyTerm(three_body_file);
+    std::string three_body_path = directory + "/" + three_body_filename;
+    if (stat(three_body_path.c_str(), &stat_buf) == 0) {
+        std::cout << "Loading three-body terms..." << std::endl;
+        hamiltonian.loadThreeBodyTerm(three_body_path);
     }
     
-    // COUNTERTERM DISABLED
-    // hamiltonian.loadCounterTerm(directory + "/CounterTerm.dat");
-
-    std::cout << "Fixed Sz dimension: " << hamiltonian.getFixedSzDim() << std::endl;
+    uint64_t fixed_sz_dim = hamiltonian.getFixedSzDim();
+    uint64_t full_dim = 1ULL << params.num_sites;
+    std::cout << "Fixed-Sz dimension: " << fixed_sz_dim 
+              << " (reduction from " << full_dim << ": " 
+              << static_cast<double>(full_dim) / fixed_sz_dim << "x)" << std::endl;
     
-    // ========== Step 3: Generate/Load Symmetrized Basis (HDF5) ==========
-    std::string hdf5_file = directory + "/symmetry_data_fixed_sz.h5";
-    bool basis_exists = HDF5SymmetryIO::fileExists(hdf5_file);
-    
-    if (!basis_exists) {
-        std::cout << "\nGenerating symmetrized basis (Fixed Sz, HDF5)..." << std::endl;
-        hamiltonian.generateSymmetrizedBasisFixedSzHDF5(directory);
-        
-        std::cout << "\nBuilding block-diagonal Hamiltonian (Fixed Sz, HDF5)..." << std::endl;
-        hamiltonian.buildAndSaveSymmetrizedBlocksFixedSzHDF5(directory);
-    } else {
-        std::cout << "\nUsing existing symmetrized basis from: " << hdf5_file << std::endl;
-        // Load block sizes
-        auto dims = HDF5SymmetryIO::loadSectorDimensions(hdf5_file);
-        hamiltonian.symmetrized_block_ham_sizes.assign(dims.begin(), dims.end());
-        
-        // Check if blocks exist
-        bool blocks_exist = false;
-        try {
-            H5::H5File file(hdf5_file, H5F_ACC_RDONLY);
-            blocks_exist = file.nameExists("/blocks/block_0");
-            file.close();
-        } catch (...) {
-            blocks_exist = false;
-        }
-        
-        if (!blocks_exist) {
-            std::cout << "Blocks not found. Building block-diagonal Hamiltonian..." << std::endl;
-            hamiltonian.buildAndSaveSymmetrizedBlocksFixedSzHDF5(directory);
-        }
+    // ========== Step 3: Setup Symmetrized Basis ==========
+    if (!setup_fixed_sz_symmetry_basis(directory, hamiltonian)) {
+        throw std::runtime_error("Failed to setup symmetrized basis");
     }
     
-    std::vector<int> block_sizes = hamiltonian.symmetrized_block_ham_sizes;
-    std::cout << "\nFound " << block_sizes.size() << " symmetry sectors within fixed-Sz" << std::endl;
+    const std::vector<int>& block_sizes = hamiltonian.symmetrized_block_ham_sizes;
     
-    if (block_sizes.empty()) {
-        throw std::runtime_error("No symmetrized blocks found in fixed-Sz sector");
-    }
-    
-    // Calculate total dimension
-    uint64_t total_dim = 0;
-    uint64_t non_empty_sectors = 0;
-    for (const auto& size : block_sizes) {
+    // Calculate statistics
+    uint64_t total_sym_dim = 0;
+    size_t non_empty_sectors = 0;
+    for (int size : block_sizes) {
         if (size > 0) {
-            total_dim += size;
+            total_sym_dim += size;
             non_empty_sectors++;
         }
     }
     
-    std::cout << "Non-empty sectors: " << non_empty_sectors << std::endl;
-    std::cout << "Total symmetrized dimension: " << total_dim << std::endl;
-    std::cout << "Fixed-Sz dimension: " << hamiltonian.getFixedSzDim() << std::endl;
-    std::cout << "Dimension reduction: " 
-              << static_cast<double>(hamiltonian.getFixedSzDim()) / total_dim << "x\n" << std::endl;
+    std::cout << "Symmetry sectors: " << non_empty_sectors << " non-empty (of " 
+              << block_sizes.size() << " total)" << std::endl;
+    std::cout << "Total symmetrized dimension: " << total_sym_dim 
+              << " (additional reduction: " 
+              << static_cast<double>(fixed_sz_dim) / total_sym_dim << "x)" << std::endl;
     
-    // ========== Step 4: Determine if we need targeted diagonalization ==========
-    bool is_tpq_method = (method == DiagonalizationMethod::mTPQ || 
-                          method == DiagonalizationMethod::mTPQ_CUDA || 
-                          method == DiagonalizationMethod::cTPQ);
+    // ========== Step 4: Determine Which Sectors to Diagonalize ==========
+    bool need_target_sector = requires_ground_state_sector(method);
+    bool need_all_sectors = requires_sector_combination(method);
     
-    // For TPQ methods, find the ground state sector
-    bool use_targeted_diagonalization = false;
-    size_t target_sector = 0;
-    double min_energy = 0.0;
-    double max_energy = 0.0;
+    GroundStateSectorInfo gs_info;
+    gs_info.target_block = 0;
+    gs_info.min_energy = 0.0;
+    gs_info.max_energy = 0.0;
     
-    if (is_tpq_method) {
-        use_targeted_diagonalization = true;
-        std::cout << "\n=== Finding Ground State Sector for TPQ ===" << std::endl;
-        std::cout << "Scanning all sectors to identify ground state sector..." << std::endl;
-        
-        min_energy = std::numeric_limits<double>::max();
-        max_energy = -std::numeric_limits<double>::max();
-        
-        for (size_t block_idx = 0; block_idx < block_sizes.size(); ++block_idx) {
-            uint64_t block_dim = block_sizes[block_idx];
-            if (block_dim == 0) continue;
-            
-            std::cout << "  Scanning sector " << (block_idx + 1) << "/" << block_sizes.size() 
-                      << " (dim=" << block_dim << ")" << std::endl;
-            
-            Eigen::SparseMatrix<Complex> block_matrix = 
-                hamiltonian.loadSymmetrizedBlockFixedSzHDF5(directory, block_idx);
-            
-            EDParameters scan_params = params;
-            scan_params.num_eigenvalues = std::min(uint64_t(5), block_dim);
-            scan_params.compute_eigenvectors = false;
-            scan_params.output_dir = "";
-            
-            EDResults scan_results = ed_internal::diagonalize_symmetry_block(
-                block_matrix, block_dim, DiagonalizationMethod::LANCZOS, scan_params, false, 0.0
-            );
-            
-            if (!scan_results.eigenvalues.empty()) {
-                double sector_min = scan_results.eigenvalues[0];
-                double sector_max = scan_results.eigenvalues.back();
-                
-                std::cout << "    Energy range: [" << sector_min << ", " << sector_max << "]" << std::endl;
-                
-                if (sector_min < min_energy) {
-                    min_energy = sector_min;
-                    target_sector = block_idx;
-                }
-                if (sector_max > max_energy) {
-                    max_energy = sector_max;
-                }
-            }
-        }
-        
-        std::cout << "\nTarget sector: " << (target_sector + 1) 
-                  << " (dimension: " << block_sizes[target_sector] << ")" << std::endl;
-        std::cout << "Ground state energy: " << min_energy << std::endl;
-        std::cout << "Maximum energy found: " << max_energy << std::endl;
-        std::cout << "Will only diagonalize target sector for TPQ.\n" << std::endl;
+    if (need_target_sector) {
+        std::cout << "\nScanning sectors to find ground state..." << std::endl;
+        gs_info = find_ground_state_sector_fixed_sz(block_sizes, directory, hamiltonian, params);
     }
     
     // ========== Step 5: Diagonalize Sector(s) ==========
-    std::cout << "========== Diagonalizing Sectors ==========\n" << std::endl;
+    std::cout << "\n========== Diagonalization ==========\n" << std::endl;
     
-    struct EigenInfo {
-        double value;
-        uint64_t sector_idx;
-        uint64_t eigen_idx;
-        bool operator<(const EigenInfo& other) const { return value < other.value; }
-    };
-    std::vector<EigenInfo> all_eigen_info;
-    
-    // For FTLM: collect results from all sectors for proper combination
-    bool is_ftlm = (method == DiagonalizationMethod::FTLM);
-    std::vector<FTLMResults> sector_ftlm_results;
-    std::vector<uint64_t> sector_dimensions;
-    
-    EDResults results;
-    results.eigenvectors_computed = params.compute_eigenvectors;
-    if (params.compute_eigenvectors) {
-        results.eigenvectors_path = params.output_dir;
-    }
-    
+    // Prepare output directory
     if (!params.output_dir.empty()) {
         safe_system_call("mkdir -p " + params.output_dir);
     }
     
+    // Eigenvalue collection
+    struct EigenInfo {
+        double value;
+        size_t sector_idx;
+        size_t eigen_idx;
+        bool operator<(const EigenInfo& other) const { return value < other.value; }
+    };
+    std::vector<EigenInfo> all_eigenvalues;
+    
+    // FTLM sector combination data
+    std::vector<FTLMResults> ftlm_sector_results;
+    std::vector<uint64_t> ftlm_sector_dims;
+    
+    // Process each sector
     uint64_t block_start_dim = 0;
-    for (size_t block_idx = 0; block_idx < block_sizes.size(); ++block_idx) {
-        uint64_t block_dim = block_sizes[block_idx];
+    for (size_t idx = 0; idx < block_sizes.size(); ++idx) {
+        uint64_t dim = block_sizes[idx];
         
-        // Skip empty blocks
-        if (block_dim == 0) {
-            std::cout << "Sector " << (block_idx + 1) << "/" << block_sizes.size() 
-                     << ": empty (skipping)" << std::endl;
+        // Skip empty sectors
+        if (dim == 0) continue;
+        
+        // Determine if this sector should be processed
+        bool is_target = (need_target_sector && idx == gs_info.target_block);
+        bool should_process = !need_target_sector || is_target || need_all_sectors;
+        
+        if (!should_process) {
+            std::cout << "Sector " << (idx + 1) << "/" << block_sizes.size() 
+                      << ": skipping (not target)" << std::endl;
+            block_start_dim += dim;
             continue;
         }
         
-        // Skip non-target blocks for TPQ
-        bool is_target_block = (use_targeted_diagonalization && block_idx == target_sector);
+        std::cout << "Sector " << (idx + 1) << "/" << block_sizes.size() 
+                  << " (dim=" << dim << ")" << (is_target ? " [TARGET]" : "") << std::endl;
         
-        if (use_targeted_diagonalization && !is_target_block) {
-            std::cout << "Sector " << (block_idx + 1) << "/" << block_sizes.size() 
-                     << " (dim=" << block_dim << "): skipping (not target sector)" << std::endl;
-            block_start_dim += block_dim;
+        // Build sector info
+        SectorInfo sector;
+        sector.index = idx;
+        sector.dimension = dim;
+        sector.is_target = is_target;
+        sector.large_value = is_target ? std::max(gs_info.max_energy * 10, params.large_value) : 0.0;
+        sector.output_dir = params.output_dir.empty() ? "" : 
+                           params.output_dir + "/sector_" + std::to_string(idx);
+        
+        if (!sector.output_dir.empty()) {
+            safe_system_call("mkdir -p " + sector.output_dir);
+        }
+        
+        // Diagonalize
+        SectorResult result = diagonalize_fixed_sz_sector(
+            hamiltonian, directory, sector, method, params
+        );
+        
+        if (!result.success && !is_tpq_method(method)) {
+            std::cerr << "  Warning: Diagonalization failed for sector " << idx << std::endl;
+            block_start_dim += dim;
             continue;
         }
         
-        std::cout << "Sector " << (block_idx + 1) << "/" << block_sizes.size() 
-                  << " (dim=" << block_dim << ")" << std::endl;
-        
-        // Load block matrix from HDF5
-        Eigen::SparseMatrix<Complex> block_matrix = 
-            hamiltonian.loadSymmetrizedBlockFixedSzHDF5(directory, block_idx);
-        
-        // Configure parameters for this block
-        EDParameters block_params = params;
-        block_params.num_eigenvalues = std::min(params.num_eigenvalues, block_dim);
-        
-        if (params.compute_eigenvectors || (is_tpq_method && is_target_block)) {
-            block_params.output_dir = params.output_dir + "/sector_" + std::to_string(block_idx);
-            safe_system_call("mkdir -p " + block_params.output_dir);
+        // Collect eigenvalues
+        for (size_t i = 0; i < result.eigenvalues.size(); ++i) {
+            all_eigenvalues.push_back({result.eigenvalues[i], idx, i});
         }
         
-        // Set large value for TPQ in target block
-        double large_val = 0.0;
-        if (is_tpq_method && is_target_block) {
-            large_val = std::max(max_energy * 10, params.large_value);
-            std::cout << "  Running TPQ in ground state sector with large value " << large_val << std::endl;
+        // Collect FTLM results for sector combination
+        if (is_ftlm_method(method)) {
+            ftlm_sector_results.push_back(result.ftlm_results);
+            ftlm_sector_dims.push_back(dim);
         }
         
-        // Diagonalize this block (with GPU support)
-        std::cout << "  Diagonalizing..." << std::endl;
-        EDResults block_results = ed_internal::diagonalize_symmetry_block(
-            block_matrix, block_dim, method, block_params, is_target_block, large_val
-        );
-        
-        // For FTLM: store sector results for later combination
-        if (is_ftlm) {
-            sector_ftlm_results.push_back(block_results.ftlm_results);
-            sector_dimensions.push_back(block_dim);
+        // Transform and save states to full basis
+        bool should_transform = params.compute_eigenvectors || (is_tpq_method(method) && is_target);
+        if (should_transform && !params.output_dir.empty()) {
+            transform_and_save_sector_states(
+                hamiltonian, directory, sector, result, params, method
+            );
         }
         
-        // Store eigenvalue information
-        for (size_t i = 0; i < block_results.eigenvalues.size(); ++i) {
-            all_eigen_info.push_back({
-                block_results.eigenvalues[i],
-                block_idx,
-                static_cast<uint64_t>(i)
-            });
+        // Report
+        if (!result.eigenvalues.empty()) {
+            std::cout << "  Eigenvalues: " << result.eigenvalues.size() 
+                      << ", lowest: " << result.eigenvalues[0] << std::endl;
         }
         
-        // Transform TPQ states or eigenvectors if needed
-        if (params.compute_eigenvectors || (is_tpq_method && is_target_block)) {
-            std::string eigenvector_dir = params.output_dir + "/eigenvectors";
-            safe_system_call("mkdir -p " + eigenvector_dir);
-            
-            if (is_tpq_method && is_target_block) {
-                std::cout << "  Transforming TPQ states from sector basis to fixed-Sz basis..." << std::endl;
-                // Cast FixedSzOperator to Operator (safe since FixedSzOperator inherits from Operator)
-                Operator& op_ref = static_cast<Operator&>(hamiltonian);
-                ed_internal::transform_and_save_tpq_states(
-                    block_params.output_dir, params.output_dir, 
-                    op_ref, directory,
-                    block_dim, block_start_dim, block_idx, params.num_sites
-                );
-                
-                // Additional transformation: fixed-Sz basis -> full Hilbert space for TPQ states
-                std::cout << "  Transforming TPQ states from fixed-Sz basis to full Hilbert space..." << std::endl;
-                uint64_t full_dim = 1ULL << params.num_sites;
-                uint64_t fixed_sz_dim = hamiltonian.getFixedSzDim();
-                
-                // Find all TPQ state files in output directory
-                std::string temp_list_file = params.output_dir + "/tpq_state_files.txt";
-                std::string find_command = "find \"" + params.output_dir + "\" -name \"tpq_state_*.dat\" 2>/dev/null > \"" + temp_list_file + "\"";
-                safe_system_call(find_command);
-                
-                std::ifstream file_list(temp_list_file);
-                if (file_list.is_open()) {
-                    std::string tpq_state_file;
-                    while (std::getline(file_list, tpq_state_file)) {
-                        if (tpq_state_file.empty()) continue;
-                        
-                        std::ifstream infile(tpq_state_file, std::ios::binary);
-                        if (infile.is_open()) {
-                            // Read TPQ state in fixed-Sz basis
-                            std::vector<Complex> fixed_sz_vec(fixed_sz_dim);
-                            infile.read(reinterpret_cast<char*>(fixed_sz_vec.data()), fixed_sz_dim * sizeof(Complex));
-                            infile.close();
-                            
-                            // Transform to full Hilbert space basis
-                            std::vector<Complex> full_vec = hamiltonian.embedToFull(fixed_sz_vec);
-                            
-                            // Overwrite file with full-space TPQ state
-                            std::ofstream outfile(tpq_state_file, std::ios::binary);
-                            outfile.write(reinterpret_cast<const char*>(full_vec.data()), full_dim * sizeof(Complex));
-                            outfile.close();
-                        }
-                    }
-                    file_list.close();
-                }
-                std::remove(temp_list_file.c_str());
-                std::cout << "  All TPQ states transformed to full Hilbert space." << std::endl;
-            }
-            
-            if (params.compute_eigenvectors && method != DiagonalizationMethod::mTPQ && 
-                method != DiagonalizationMethod::mTPQ_CUDA && method != DiagonalizationMethod::cTPQ) {
-                std::cout << "  Transforming eigenvectors from sector basis to fixed-Sz basis..." << std::endl;
-                Operator& op_ref = static_cast<Operator&>(hamiltonian);
-                ed_internal::transform_and_save_eigenvectors(
-                    block_params.output_dir, params.output_dir,
-                    op_ref, directory,
-                    block_results.eigenvalues, block_dim, block_start_dim, block_idx, params.num_sites
-                );
-                
-                // Additional transformation: fixed-Sz basis -> full Hilbert space
-                std::cout << "  Transforming eigenvectors from fixed-Sz basis to full Hilbert space..." << std::endl;
-                uint64_t full_dim = 1ULL << params.num_sites;
-                uint64_t fixed_sz_dim = hamiltonian.getFixedSzDim();
-                
-                for (size_t i = 0; i < block_results.eigenvalues.size(); ++i) {
-                    std::string eigvec_file = params.output_dir + "/eigenvector_sector" + 
-                                             std::to_string(block_idx) + "_" + std::to_string(i) + ".dat";
-                    
-                    std::ifstream infile(eigvec_file, std::ios::binary);
-                    if (infile.is_open()) {
-                        // Read eigenvector in fixed-Sz basis
-                        std::vector<Complex> fixed_sz_vec(fixed_sz_dim);
-                        infile.read(reinterpret_cast<char*>(fixed_sz_vec.data()), fixed_sz_dim * sizeof(Complex));
-                        infile.close();
-                        
-                        // Transform to full Hilbert space basis
-                        std::vector<Complex> full_vec = hamiltonian.embedToFull(fixed_sz_vec);
-                        
-                        // Overwrite file with full-space eigenvector
-                        std::ofstream outfile(eigvec_file, std::ios::binary);
-                        outfile.write(reinterpret_cast<const char*>(full_vec.data()), full_dim * sizeof(Complex));
-                        outfile.close();
-                        
-                        std::cout << "    Transformed eigenvector " << i << " to full space (dim: " 
-                                  << fixed_sz_dim << " -> " << full_dim << ")" << std::endl;
-                    } else {
-                        std::cerr << "    Warning: Could not open eigenvector file: " << eigvec_file << std::endl;
-                    }
-                }
-            }
-        }
-        
-        std::cout << "  Found " << block_results.eigenvalues.size() << " eigenvalues" << std::endl;
-        if (!block_results.eigenvalues.empty()) {
-            std::cout << "  Lowest: " << block_results.eigenvalues[0] << std::endl;
-        }
-        std::cout << std::endl;
-        
-        block_start_dim += block_dim;
+        block_start_dim += dim;
     }
     
-    // ========== Step 5.5: Sort Eigenvalues First ==========
-    std::sort(all_eigen_info.begin(), all_eigen_info.end());
+    // ========== Step 6: Finalize Results ==========
+    std::cout << "\n========== Finalizing Results ==========\n" << std::endl;
     
-    if (all_eigen_info.size() > static_cast<size_t>(params.num_eigenvalues)) {
-        all_eigen_info.resize(params.num_eigenvalues);
+    EDResults results;
+    results.eigenvectors_computed = params.compute_eigenvectors;
+    results.eigenvectors_path = params.output_dir;
+    
+    // Sort and collect eigenvalues
+    std::sort(all_eigenvalues.begin(), all_eigenvalues.end());
+    if (all_eigenvalues.size() > params.num_eigenvalues) {
+        all_eigenvalues.resize(params.num_eigenvalues);
     }
     
-    results.eigenvalues.resize(all_eigen_info.size());
-    for (size_t i = 0; i < all_eigen_info.size(); ++i) {
-        results.eigenvalues[i] = all_eigen_info[i].value;
+    results.eigenvalues.reserve(all_eigenvalues.size());
+    for (const auto& ev : all_eigenvalues) {
+        results.eigenvalues.push_back(ev.value);
     }
     
-    // ========== Step 5.6: Combine FTLM Results from Multiple Sectors ==========
-    
-    // For FTLM with multiple sectors: combine thermodynamic results properly
-    if (is_ftlm && sector_ftlm_results.size() > 1) {
-        std::cout << "\n=== Combining FTLM Results from " << sector_ftlm_results.size() 
-                  << " Symmetry Sectors ===" << std::endl;
+    // Combine FTLM results from multiple sectors
+    if (is_ftlm_method(method) && ftlm_sector_results.size() > 1) {
+        std::cout << "Combining FTLM results from " << ftlm_sector_results.size() 
+                  << " sectors..." << std::endl;
         
-        // Combine sector results with proper statistical weights
-        results.thermo_data = combine_ftlm_sector_results(
-            sector_ftlm_results, sector_dimensions
-        );
+        results.thermo_data = combine_ftlm_sector_results(ftlm_sector_results, ftlm_sector_dims);
         
-        // Save combined results
         if (!params.output_dir.empty()) {
-            std::string ftlm_dir = params.output_dir + "/thermo";
-            safe_system_call("mkdir -p " + ftlm_dir);
+            std::string thermo_dir = params.output_dir + "/thermo";
+            safe_system_call("mkdir -p " + thermo_dir);
             
-            // Create a combined FTLMResults for saving
-            FTLMResults combined_results;
-            combined_results.thermo_data = results.thermo_data;
-            combined_results.ground_state_estimate = results.eigenvalues.empty() ? 0.0 : results.eigenvalues[0];
-            combined_results.total_samples = sector_ftlm_results[0].total_samples;
+            FTLMResults combined;
+            combined.thermo_data = results.thermo_data;
+            combined.ground_state_estimate = results.eigenvalues.empty() ? 0.0 : results.eigenvalues[0];
+            combined.total_samples = ftlm_sector_results[0].total_samples;
             
-            // Initialize error arrays with zeros (no error bars for combined results)
-            size_t n_temps = combined_results.thermo_data.temperatures.size();
-            combined_results.energy_error.assign(n_temps, 0.0);
-            combined_results.specific_heat_error.assign(n_temps, 0.0);
-            combined_results.entropy_error.assign(n_temps, 0.0);
-            combined_results.free_energy_error.assign(n_temps, 0.0);
+            size_t n_temps = combined.thermo_data.temperatures.size();
+            combined.energy_error.assign(n_temps, 0.0);
+            combined.specific_heat_error.assign(n_temps, 0.0);
+            combined.entropy_error.assign(n_temps, 0.0);
+            combined.free_energy_error.assign(n_temps, 0.0);
             
-            // Save combined thermodynamics
-            save_ftlm_results(combined_results, ftlm_dir + "/ftlm_thermo_combined.txt");
-            
-            std::cout << "Combined FTLM results saved to: " << ftlm_dir << "/ftlm_thermo_combined.txt" << std::endl;
-            
-            // Also save individual sector results for debugging
-            for (size_t s = 0; s < sector_ftlm_results.size(); ++s) {
-                std::string sector_file = ftlm_dir + "/ftlm_thermo_sector_" + 
-                                         std::to_string(s) + ".txt";
-                save_ftlm_results(sector_ftlm_results[s], sector_file);
-            }
-            std::cout << "Individual sector results saved to: " << ftlm_dir << "/ftlm_thermo_sector_*.txt" << std::endl;
+            save_ftlm_results(combined, thermo_dir + "/ftlm_thermo.txt");
         }
-        
-        std::cout << "=== FTLM Sector Combination Complete ===" << std::endl;
-    } else if (is_ftlm && sector_ftlm_results.size() == 1) {
-        // Single sector - use it directly
-        std::cout << "\nNote: Only one symmetry sector computed. Results represent this sector only." << std::endl;
-        results.thermo_data = sector_ftlm_results[0].thermo_data;
-        results.ftlm_results = sector_ftlm_results[0];
+    } else if (is_ftlm_method(method) && ftlm_sector_results.size() == 1) {
+        results.thermo_data = ftlm_sector_results[0].thermo_data;
+        results.ftlm_results = ftlm_sector_results[0];
     }
     
-    // ========== Step 6: Create Eigenvector Mapping ==========
+    // Save eigenvector mapping
     if (params.compute_eigenvectors && !params.output_dir.empty()) {
         std::ofstream map_file(params.output_dir + "/eigenvector_mapping.txt");
         if (map_file.is_open()) {
-            map_file << "# Global_Index Eigenvalue Sector_Index Sector_Eigenvalue_Index Filename" << std::endl;
-            for (size_t i = 0; i < all_eigen_info.size(); ++i) {
-                const auto& info = all_eigen_info[i];
-                map_file << i << " " << info.value << " " << info.sector_idx << " " << info.eigen_idx 
-                        << " eigenvector_sector" << info.sector_idx << "_" << info.eigen_idx << ".dat" << std::endl;
+            map_file << "# Index Eigenvalue Sector SectorIndex Filename\n";
+            for (size_t i = 0; i < all_eigenvalues.size(); ++i) {
+                const auto& ev = all_eigenvalues[i];
+                map_file << i << " " << ev.value << " " << ev.sector_idx << " " << ev.eigen_idx
+                        << " eigenvector_sector" << ev.sector_idx << "_" << ev.eigen_idx << ".dat\n";
             }
         }
     }
     
-    std::cout << "\n========================================" << std::endl;
-    std::cout << "  Fixed-Sz Symmetrized ED Complete" << std::endl;
-    std::cout << "  Total eigenvalues: " << results.eigenvalues.size() << std::endl;
+    // Summary
+    std::cout << "========================================" << std::endl;
+    std::cout << "  Complete: " << results.eigenvalues.size() << " eigenvalues" << std::endl;
     if (!results.eigenvalues.empty()) {
         std::cout << "  Ground state: " << results.eigenvalues[0] << std::endl;
     }

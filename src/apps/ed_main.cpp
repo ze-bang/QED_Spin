@@ -449,10 +449,6 @@ void construct_operators_from_config(
  * @brief Run standard diagonalization workflow
  */
 EDResults run_standard_workflow(const EDConfig& config) {
-    std::cout << "\n==========================================\n";
-    std::cout << "Standard Exact Diagonalization\n";
-    std::cout << "==========================================\n";
-    
     auto params = ed_adapter::toEDParameters(config);
     params.output_dir = config.workflow.output_dir;
     safe_system_call("mkdir -p " + params.output_dir);
@@ -488,17 +484,22 @@ EDResults run_standard_workflow(const EDConfig& config) {
     auto end = std::chrono::high_resolution_clock::now();
     auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
     
-    std::cout << "Completed in " << duration / 1000.0 << " seconds\n";
-    
-    // Save eigenvalues
-    std::ofstream file(params.output_dir + "/eigenvalues.txt");
-    if (file.is_open()) {
-        file << std::setprecision(16);
-        for (const auto& val : results.eigenvalues) {
-            file << val << "\n";
+    // Print results summary
+    if (!results.eigenvalues.empty()) {
+        std::cout << "\n  Lowest eigenvalues:\n";
+        size_t show = std::min(results.eigenvalues.size(), (size_t)5);
+        for (size_t i = 0; i < show; i++) {
+            std::cout << "    E[" << i << "] = " << std::fixed << std::setprecision(10) 
+                      << results.eigenvalues[i] << "\n";
         }
-        std::cout << "Saved " << results.eigenvalues.size() << " eigenvalues\n";
+        if (results.eigenvalues.size() > 5) {
+            std::cout << "    ... (" << (results.eigenvalues.size() - 5) << " more)\n";
+        }
     }
+    
+    std::cout << "\n  Time: " << std::fixed << std::setprecision(2) << duration / 1000.0 << " s\n";
+    
+    // Eigenvalues are saved to HDF5 by the underlying diagonalization functions
     
     return results;
 }
@@ -507,10 +508,6 @@ EDResults run_standard_workflow(const EDConfig& config) {
  * @brief Run symmetrized diagonalization workflow
  */
 EDResults run_symmetrized_workflow(const EDConfig& config) {
-    std::cout << "\n==========================================\n";
-    std::cout << "Symmetrized Exact Diagonalization\n";
-    std::cout << "==========================================\n";
-    
     auto params = ed_adapter::toEDParameters(config);
     params.output_dir = config.workflow.output_dir;
     safe_system_call("mkdir -p " + params.output_dir);
@@ -522,9 +519,6 @@ EDResults run_symmetrized_workflow(const EDConfig& config) {
     // Check if fixed Sz mode is enabled
     if (config.system.use_fixed_sz) {
         int64_t n_up = (config.system.n_up >= 0) ? config.system.n_up : config.system.num_sites / 2;
-        
-        std::cout << "Using Fixed Sz + Symmetrized mode\n";
-        std::cout << "  Number of up spins: " << n_up << "\n";
         
         results = exact_diagonalization_fixed_sz_symmetrized(
             config.system.hamiltonian_dir,
@@ -545,17 +539,22 @@ EDResults run_symmetrized_workflow(const EDConfig& config) {
     auto end = std::chrono::high_resolution_clock::now();
     auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
     
-    std::cout << "Completed in " << duration / 1000.0 << " seconds\n";
-    
-    // Save eigenvalues
-    std::ofstream file(params.output_dir + "/eigenvalues.txt");
-    if (file.is_open()) {
-        file << std::setprecision(16);
-        for (const auto& val : results.eigenvalues) {
-            file << val << "\n";
+    // Print results summary
+    if (!results.eigenvalues.empty()) {
+        std::cout << "\n  Lowest eigenvalues:\n";
+        size_t show = std::min(results.eigenvalues.size(), (size_t)5);
+        for (size_t i = 0; i < show; i++) {
+            std::cout << "    E[" << i << "] = " << std::fixed << std::setprecision(10) 
+                      << results.eigenvalues[i] << "\n";
         }
-        std::cout << "Saved " << results.eigenvalues.size() << " eigenvalues\n";
+        if (results.eigenvalues.size() > 5) {
+            std::cout << "    ... (" << (results.eigenvalues.size() - 5) << " more)\n";
+        }
     }
+    
+    std::cout << "\n  Time: " << std::fixed << std::setprecision(2) << duration / 1000.0 << " s\n";
+    
+    // Eigenvalues are saved to HDF5 by the underlying diagonalization functions
     
     return results;
 }
@@ -564,10 +563,6 @@ EDResults run_symmetrized_workflow(const EDConfig& config) {
  * @brief Run streaming symmetry diagonalization workflow
  */
 EDResults run_streaming_symmetry_workflow(const EDConfig& config) {
-    std::cout << "\n==========================================\n";
-    std::cout << "Streaming Symmetry Exact Diagonalization\n";
-    std::cout << "==========================================\n";
-    
     auto params = ed_adapter::toEDParameters(config);
     params.output_dir = config.workflow.output_dir;
     safe_system_call("mkdir -p " + params.output_dir);
@@ -576,13 +571,8 @@ EDResults run_streaming_symmetry_workflow(const EDConfig& config) {
     
     EDResults results;
     
-    // Check if fixed Sz mode is enabled
     if (config.system.use_fixed_sz) {
         int64_t n_up = (config.system.n_up >= 0) ? config.system.n_up : config.system.num_sites / 2;
-        
-        std::cout << "Using Fixed Sz + Streaming Symmetry mode\n";
-        std::cout << "  Number of up spins: " << n_up << "\n";
-        
         results = exact_diagonalization_streaming_symmetry_fixed_sz(
             config.system.hamiltonian_dir,
             n_up,
@@ -590,8 +580,6 @@ EDResults run_streaming_symmetry_workflow(const EDConfig& config) {
             params
         );
     } else {
-        std::cout << "Using Streaming Symmetry mode (full Hilbert space)\n";
-        
         results = exact_diagonalization_streaming_symmetry(
             config.system.hamiltonian_dir,
             config.method,
@@ -602,17 +590,22 @@ EDResults run_streaming_symmetry_workflow(const EDConfig& config) {
     auto end = std::chrono::high_resolution_clock::now();
     auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
     
-    std::cout << "Completed in " << duration / 1000.0 << " seconds\n";
-    
-    // Save eigenvalues
-    std::ofstream file(params.output_dir + "/eigenvalues.txt");
-    if (file.is_open()) {
-        file << std::setprecision(16);
-        for (const auto& val : results.eigenvalues) {
-            file << val << "\n";
+    // Print results summary
+    if (!results.eigenvalues.empty()) {
+        std::cout << "\n  Lowest eigenvalues:\n";
+        size_t show = std::min(results.eigenvalues.size(), (size_t)5);
+        for (size_t i = 0; i < show; i++) {
+            std::cout << "    E[" << i << "] = " << std::fixed << std::setprecision(10) 
+                      << results.eigenvalues[i] << "\n";
         }
-        std::cout << "Saved " << results.eigenvalues.size() << " eigenvalues\n";
+        if (results.eigenvalues.size() > 5) {
+            std::cout << "    ... (" << (results.eigenvalues.size() - 5) << " more)\n";
+        }
     }
+    
+    std::cout << "\n  Time: " << std::fixed << std::setprecision(2) << duration / 1000.0 << " s\n";
+    
+    // Eigenvalues are saved to HDF5 by the underlying diagonalization functions
     
     return results;
 }
@@ -623,10 +616,6 @@ EDResults run_streaming_symmetry_workflow(const EDConfig& config) {
 void compute_thermodynamics(const std::vector<double>& eigenvalues, const EDConfig& config) {
     if (eigenvalues.empty()) return;
     
-    std::cout << "\n==========================================\n";
-    std::cout << "Computing Thermodynamics\n";
-    std::cout << "==========================================\n";
-    
     auto thermo_data = calculate_thermodynamics_from_spectrum(
         eigenvalues,
         config.thermal.temp_min,
@@ -634,34 +623,37 @@ void compute_thermodynamics(const std::vector<double>& eigenvalues, const EDConf
         config.thermal.num_temp_bins
     );
     
-    // Save results
-    std::string thermo_dir = config.workflow.output_dir + "/thermo";
-    safe_system_call("mkdir -p " + thermo_dir);
-    
-    // Try to save to HDF5 first
+    // Save results to HDF5
     try {
         std::string hdf5_file = HDF5IO::createOrOpenFile(config.workflow.output_dir);
         HDF5IO::saveThermodynamics(hdf5_file, thermo_data.temperatures, "energy", thermo_data.energy);
         HDF5IO::saveThermodynamics(hdf5_file, thermo_data.temperatures, "specific_heat", thermo_data.specific_heat);
         HDF5IO::saveThermodynamics(hdf5_file, thermo_data.temperatures, "entropy", thermo_data.entropy);
         HDF5IO::saveThermodynamics(hdf5_file, thermo_data.temperatures, "free_energy", thermo_data.free_energy);
-        std::cout << "Saved thermodynamic data to HDF5\n";
+        std::cout << "  Saved thermodynamic data to HDF5\n";
+        
+        // Also save unified text format for consistency with FTLM/LTLM/Hybrid
+        double E0 = *std::min_element(eigenvalues.begin(), eigenvalues.end());
+        std::vector<std::string> metadata = {
+            "Method: Full diagonalization (exact spectrum)",
+            "Number of eigenvalues: " + std::to_string(eigenvalues.size()),
+            "Ground state energy: " + std::to_string(E0),
+            "Note: Error bars are 0 (exact calculation)"
+        };
+        
+        std::string txt_path = config.workflow.output_dir + "/thermo/thermo.txt";
+        // Ensure thermo directory exists
+        std::filesystem::create_directories(config.workflow.output_dir + "/thermo");
+        
+        HDF5IO::saveUnifiedThermodynamicsTxt(
+            txt_path, "Full",
+            thermo_data,
+            {}, {}, {}, {},  // No error bars for exact diagonalization
+            metadata
+        );
+        
     } catch (const std::exception& e) {
-        std::cerr << "Warning: Failed to save thermodynamics to HDF5: " << e.what() << std::endl;
-        std::cerr << "Falling back to text format..." << std::endl;
-    }
-    
-    // Also save text format for backward compatibility
-    std::ofstream file(thermo_dir + "/thermo_data.txt");
-    if (file.is_open()) {
-        file << "# Temperature  Energy  Specific_Heat  Entropy  Free_Energy\n";
-        for (size_t i = 0; i < thermo_data.temperatures.size(); i++) {
-            file << thermo_data.temperatures[i] << " "
-                 << thermo_data.energy[i] << " "
-                 << thermo_data.specific_heat[i] << " "
-                 << thermo_data.entropy[i] << " "
-                 << thermo_data.free_energy[i] << "\n";
-        }
+        std::cerr << "  Error: Failed to save thermodynamics to HDF5: " << e.what() << std::endl;
     }
 }
 
@@ -677,42 +669,23 @@ void compute_dynamical_response_workflow(const EDConfig& config) {
     #endif
     
     // Note: Currently only thermal mode is supported in the integrated pipeline
-    // For ground state dynamical response with eigenvectors, use the standalone
-    // example in examples/dynamical_response_example.cpp
     if (!config.dynamical.thermal_average) {
         if (rank == 0) {
-            std::cerr << "Note: Only thermal mode (--dyn-thermal) is currently supported in the integrated pipeline.\n";
-            std::cerr << "Setting thermal_average mode automatically.\n";
+            std::cerr << "Note: Only thermal mode is supported. Setting thermal_average mode.\n";
         }
     }
     
     if (rank == 0) {
-        std::cout << "\n==========================================\n";
-        std::cout << "Computing Dynamical Response\n";
-        std::cout << "==========================================\n";
+        std::cout << "\nDynamical Response Calculation\n";
         
-        // Print GPU status
 #ifdef WITH_CUDA
         if (config.dynamical.use_gpu) {
-            std::cout << "GPU Acceleration: ENABLED\n";
+            std::cout << "  GPU: enabled";
             if (config.system.use_fixed_sz) {
-                std::cout << "  Warning: Fixed-Sz mode detected - GPU will be disabled (not yet supported)\n";
+                std::cout << " (disabled for fixed-Sz)";
             }
-            // Print GPU device info
-            int device_count = 0;
-            cudaGetDeviceCount(&device_count);
-            if (device_count > 0) {
-                cudaDeviceProp prop;
-                cudaGetDeviceProperties(&prop, 0);
-                std::cout << "  GPU Device: " << prop.name << "\n";
-                std::cout << "  Compute Capability: " << prop.major << "." << prop.minor << "\n";
-                std::cout << "  Global Memory: " << (prop.totalGlobalMem / (1024*1024*1024.0)) << " GB\n";
-            }
-        } else {
-            std::cout << "GPU Acceleration: DISABLED (use --dyn-use-gpu to enable)\n";
+            std::cout << "\n";
         }
-#else
-        std::cout << "GPU Acceleration: NOT AVAILABLE (compiled without CUDA support)\n";
 #endif
     }
     
@@ -764,108 +737,61 @@ void compute_dynamical_response_workflow(const EDConfig& config) {
     bool found_ground_state = false;
     
     if (rank == 0) {
-        std::cout << "\n--- Finding ground state energy for spectrum normalization ---\n";
-        
-        // Method 1: Try eigenvalues.dat (binary format)
+        // Try to load ground state energy from existing files
+        // Method 1: eigenvalues.dat (binary format)
         std::string eigenvalues_dat = config.workflow.output_dir + "/eigenvectors/eigenvalues.dat";
-        std::cout << "Method 1: Checking for eigenvalues.dat: " << eigenvalues_dat << std::endl;
         std::ifstream infile_dat(eigenvalues_dat, std::ios::binary);
         
         if (infile_dat.is_open()) {
             try {
                 size_t num_eigenvalues;
                 infile_dat.read(reinterpret_cast<char*>(&num_eigenvalues), sizeof(size_t));
-                
                 if (num_eigenvalues > 0) {
                     infile_dat.read(reinterpret_cast<char*>(&ground_state_energy), sizeof(double));
-                    infile_dat.close();
-                    
-                    std::cout << "✓ Ground state energy read from eigenvalues.dat: " 
-                              << std::fixed << std::setprecision(10) << ground_state_energy << std::endl;
                     found_ground_state = true;
-                } else {
-                    infile_dat.close();
-                    std::cout << "✗ eigenvalues.dat is empty" << std::endl;
                 }
-            } catch (const std::exception& e) {
-                std::cout << "✗ Failed to read eigenvalues.dat: " << e.what() << std::endl;
-            }
-        } else {
-            std::cout << "✗ eigenvalues.dat not found" << std::endl;
+                infile_dat.close();
+            } catch (...) {}
         }
         
-        // Method 2: Try eigenvalues.txt (text format)
+        // Method 2: eigenvalues.txt (text format)
         if (!found_ground_state) {
             std::string eigenvalues_txt = config.workflow.output_dir + "/eigenvalues.txt";
-            std::cout << "Method 2: Checking for eigenvalues.txt: " << eigenvalues_txt << std::endl;
             std::ifstream infile_txt(eigenvalues_txt);
-            
-            if (infile_txt.is_open()) {
-                if (infile_txt >> ground_state_energy) {
-                    infile_txt.close();
-                    std::cout << "✓ Ground state energy read from eigenvalues.txt: " 
-                              << std::fixed << std::setprecision(10) << ground_state_energy << std::endl;
-                    found_ground_state = true;
-                } else {
-                    infile_txt.close();
-                    std::cout << "✗ eigenvalues.txt is empty or invalid" << std::endl;
-                }
-            } else {
-                std::cout << "✗ eigenvalues.txt not found" << std::endl;
+            if (infile_txt.is_open() && (infile_txt >> ground_state_energy)) {
+                found_ground_state = true;
+                infile_txt.close();
             }
         }
         
-        // Method 3: Try finding minimum energy in SS_rand0.dat
+        // Method 3: minimum energy from SS_rand0.dat
         if (!found_ground_state) {
             std::string ss_file = config.workflow.output_dir + "/SS_rand0.dat";
-            std::cout << "Method 3: Checking for SS_rand0.dat: " << ss_file << std::endl;
             std::ifstream infile_ss(ss_file);
-            
             if (infile_ss.is_open()) {
                 std::string line;
                 double min_energy = std::numeric_limits<double>::max();
-                bool found_energy = false;
                 bool first_entry_skipped = false;
                 
                 while (std::getline(infile_ss, line)) {
-                    // Skip comment lines and empty lines
                     if (line.empty() || line[0] == '#') continue;
-                    
                     std::istringstream iss(line);
                     double inv_temp, energy;
-                    
-                    // Read first two columns: inv_temp and energy
                     if (iss >> inv_temp >> energy) {
-                        // Skip the first data entry (initial random state)
-                        if (!first_entry_skipped) {
-                            first_entry_skipped = true;
-                            continue;
-                        }
-                        
-                        if (energy < min_energy) {
-                            min_energy = energy;
-                            found_energy = true;
-                        }
+                        if (!first_entry_skipped) { first_entry_skipped = true; continue; }
+                        if (energy < min_energy) min_energy = energy;
                     }
                 }
                 infile_ss.close();
-                
-                if (found_energy) {
+                if (min_energy < std::numeric_limits<double>::max()) {
                     ground_state_energy = min_energy;
-                    std::cout << "✓ Ground state energy read from SS_rand0.dat (minimum, first entry skipped): " 
-                              << std::fixed << std::setprecision(10) << ground_state_energy << std::endl;
                     found_ground_state = true;
-                } else {
-                    std::cout << "✗ SS_rand0.dat contains no valid energy data (or only first entry)" << std::endl;
                 }
-            } else {
-                std::cout << "✗ SS_rand0.dat not found" << std::endl;
             }
         }
         
-        // Method 4 (fallback): If all file methods fail, use Lanczos
+        // Method 4 (fallback): Compute using Lanczos
         if (!found_ground_state) {
-            std::cout << "Method 4: All file methods failed. Computing ground state energy using Lanczos...\n";
             ComplexVector ground_state(N);
             ground_state_energy = find_ground_state_lanczos(
                 H_func, N, params.krylov_dim, params.tolerance,
@@ -873,11 +799,10 @@ void compute_dynamical_response_workflow(const EDConfig& config) {
                 ground_state
             );
             found_ground_state = true;
-            std::cout << "✓ Ground state energy computed from Lanczos: " 
-                      << std::fixed << std::setprecision(10) << ground_state_energy << std::endl;
         }
         
-        std::cout << "Dynamical correlations will be shifted to excitation energies (E_gs = 0)\n";
+        std::cout << "  Ground state energy: " << std::fixed << std::setprecision(10) 
+                  << ground_state_energy << "\n";
     }
     
     #ifdef WITH_MPI
@@ -907,13 +832,11 @@ void compute_dynamical_response_workflow(const EDConfig& config) {
     }
     
     if (use_config_operators) {
-        // ============================================================
-        // Configuration-based operator construction (like TPQ_DSSF)
-        // ============================================================
-        std::cout << "\nUsing configuration-based operator construction\n";
-        std::cout << "  Operator type: " << config.dynamical.operator_type << "\n";
-        std::cout << "  Basis: " << config.dynamical.basis << "\n";
-        std::cout << "  Spin combinations: " << config.dynamical.spin_combinations << "\n";
+        // Configuration-based operator construction
+        if (rank == 0) {
+            std::cout << "  Operator type: " << config.dynamical.operator_type 
+                      << " (" << config.dynamical.basis << " basis)\n";
+        }
         
         // Parse configuration
         auto spin_combinations = parse_spin_combinations(config.dynamical.spin_combinations);
@@ -950,29 +873,20 @@ void compute_dynamical_response_workflow(const EDConfig& config) {
         );
         
         if (rank == 0) {
-            std::cout << "Constructed " << obs_1.size() << " operator pair(s)\n";
+            std::cout << "  Operators: " << obs_1.size() << " pair(s)\n";
         }
         
         // ============================================================
-        // MPI Task Distribution (like TPQ_DSSF.cpp)
+        // MPI Task Distribution
         // ============================================================
         
-        // Build task list: each task is (temperature_idx, operator_idx)
         // Decide whether to use optimized multi-temperature workflow
         int num_operators = obs_1.size();
         int num_temps = config.dynamical.num_temp_bins;
-        // Optimization now works for ANY number of samples!
         bool use_optimized_multi_temp = (num_temps > 1);
         
         if (rank == 0 && use_optimized_multi_temp) {
-            std::cout << "\n========================================\n";
-            std::cout << "TEMPERATURE SCAN OPTIMIZATION ENABLED\n";
-            std::cout << "========================================\n";
-            std::cout << "Samples: " << params.num_samples << std::endl;
-            std::cout << "Computing " << num_temps << " temperatures from " << params.num_samples 
-                      << " Lanczos runs per operator\n";
-            std::cout << "Expected speedup: ~" << (num_temps * 0.9) << "× compared to separate runs\n";
-            std::cout << "========================================\n\n";
+            std::cout << "  Multi-temperature optimization enabled (" << num_temps << " temps)\n";
         }
         
         struct DynTask {
@@ -988,17 +902,13 @@ void compute_dynamical_response_workflow(const EDConfig& config) {
             if (use_optimized_multi_temp) {
                 // OPTIMIZED: Create one task per operator (handles all temperatures)
                 for (int o = 0; o < num_operators; o++) {
-                    // Weight is higher since we're doing all temperatures
                     size_t weight = params.num_samples * params.krylov_dim * num_temps;
-                    all_tasks.push_back({0, o, weight, true});  // temp_idx unused for multi-temp
+                    all_tasks.push_back({0, o, weight, true});
                 }
-                std::cout << "\nOptimized Mode: " << all_tasks.size() << " tasks = "
-                          << num_operators << " operators (each processes all " << num_temps << " temperatures)\n";
             } else {
                 // Standard: Create one task per (temperature, operator) pair
                 for (int t = 0; t < num_temps; t++) {
                     for (int o = 0; o < num_operators; o++) {
-                        // Weight is proportional to samples and krylov dimension
                         size_t weight = params.num_samples * params.krylov_dim;
                         all_tasks.push_back({t, o, weight, false});
                     }
@@ -1501,32 +1411,16 @@ void compute_static_response_workflow(const EDConfig& config) {
     #endif
     
     if (rank == 0) {
-        std::cout << "\n==========================================\n";
-        std::cout << "Computing Static Response\n";
-        std::cout << "==========================================\n";
+        std::cout << "\nStatic Response Calculation\n";
         
-        // Print GPU status
 #ifdef WITH_CUDA
         if (config.static_resp.use_gpu) {
-            std::cout << "GPU Acceleration: ENABLED\n";
+            std::cout << "  GPU: enabled";
             if (config.system.use_fixed_sz) {
-                std::cout << "  Warning: Fixed-Sz mode detected - GPU will be disabled (not yet supported)\n";
+                std::cout << " (disabled for fixed-Sz)";
             }
-            // Print GPU device info
-            int device_count = 0;
-            cudaGetDeviceCount(&device_count);
-            if (device_count > 0) {
-                cudaDeviceProp prop;
-                cudaGetDeviceProperties(&prop, 0);
-                std::cout << "  GPU Device: " << prop.name << "\n";
-                std::cout << "  Compute Capability: " << prop.major << "." << prop.minor << "\n";
-                std::cout << "  Global Memory: " << (prop.totalGlobalMem / (1024*1024*1024.0)) << " GB\n";
-            }
-        } else {
-            std::cout << "GPU Acceleration: DISABLED (use --static-use-gpu to enable)\n";
+            std::cout << "\n";
         }
-#else
-        std::cout << "GPU Acceleration: NOT AVAILABLE (compiled without CUDA support)\n";
 #endif
     }
     
@@ -2159,20 +2053,43 @@ void compute_ground_state_dssf_workflow(const EDConfig& config) {
             H_func_int, O1_func, O2_func, ground_state, ground_state_energy, N, gs_params
         );
         
-        // Save results
+        // Save results using unified format (consistent with FTLM dynamical response)
         std::string output_file = output_subdir + "/" + names[op_idx] + ".txt";
+        
+        // Ensure imaginary parts and errors exist (ground state CF typically has zero imaginary part)
+        std::vector<double> spectral_imag = results.spectral_function_imag;
+        if (spectral_imag.empty()) {
+            spectral_imag.resize(results.frequencies.size(), 0.0);
+        }
+        std::vector<double> error_real = results.spectral_error;
+        if (error_real.empty()) {
+            error_real.resize(results.frequencies.size(), 0.0);
+        }
+        std::vector<double> error_imag = results.spectral_error_imag;
+        if (error_imag.empty()) {
+            error_imag.resize(results.frequencies.size(), 0.0);
+        }
+        
+        // Write text file with unified 5-column format
         std::ofstream fout(output_file);
         if (fout.is_open()) {
-            fout << "# Ground State DSSF: " << names[op_idx] << "\n";
+            fout << "# Ground State DSSF (T=0 continued fraction): " << names[op_idx] << "\n";
             fout << "# Ground state energy: " << ground_state_energy << "\n";
-            fout << "# omega  S(q,omega)\n";
+            fout << "# Frequency  Re[S(ω)]  Im[S(ω)]  Re[Error]  Im[Error]\n";
             fout << std::scientific << std::setprecision(10);
             for (size_t i = 0; i < results.frequencies.size(); i++) {
-                fout << results.frequencies[i] << " " << results.spectral_function[i] << "\n";
+                fout << results.frequencies[i] << " " 
+                     << results.spectral_function[i] << " "
+                     << spectral_imag[i] << " "
+                     << error_real[i] << " "
+                     << error_imag[i] << "\n";
             }
             fout.close();
             std::cout << "[Rank " << rank << "] Saved: " << output_file << "\n";
         }
+        
+        // Also save to HDF5 using same function as FTLM
+        save_dynamical_response_results(results, output_file);
     }
     
     #ifdef WITH_MPI
@@ -2408,12 +2325,7 @@ int main(int argc, char* argv[]) {
     MPI_Comm_size(MPI_COMM_WORLD, &size);
     
     if (rank == 0 && size > 1) {
-        std::cout << "\n===========================================\n";
-        std::cout << "Exact Diagonalization with MPI Support\n";
-        std::cout << "===========================================\n";
-        std::cout << "Running on " << size << " MPI ranks\n";
-        std::cout << "MPI parallelization enabled for TPQ samples\n";
-        std::cout << "===========================================\n\n";
+        std::cout << "ED: MPI enabled (" << size << " ranks)\n";
     }
     #endif
     
@@ -2511,23 +2423,16 @@ int main(int argc, char* argv[]) {
         
         // Compare results if both were run
         if (config.workflow.run_standard && config.workflow.run_symmetrized) {
-            std::cout << "\n==========================================\n";
-            std::cout << "Comparison\n";
-            std::cout << "==========================================\n";
-            
             uint64_t n = std::min(standard_results.eigenvalues.size(), sym_results.eigenvalues.size());
             double max_diff = 0.0;
             for (int i = 0; i < n; i++) {
                 double diff = std::abs(standard_results.eigenvalues[i] - sym_results.eigenvalues[i]);
                 max_diff = std::max(max_diff, diff);
             }
-            std::cout << "Maximum difference: " << max_diff << "\n";
+            std::cout << "\nStandard vs Symmetrized max difference: " << max_diff << "\n";
         }
         
-        std::cout << "\n==========================================\n";
-        std::cout << "Calculation Complete\n";
-        std::cout << "Results saved to: " << config.workflow.output_dir << "\n";
-        std::cout << "==========================================\n";
+        std::cout << "\nComplete. Results: " << config.workflow.output_dir << "\n";
         
     } catch (const std::exception& e) {
         std::cerr << "\nError: " << e.what() << "\n";

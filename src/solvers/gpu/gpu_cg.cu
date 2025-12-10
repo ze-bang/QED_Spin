@@ -1,5 +1,6 @@
 #include <ed/gpu/gpu_cg.cuh>
 #include <ed/gpu/gpu_operator.cuh>
+#include <ed/core/hdf5_io.h>
 #include <iostream>
 #include <fstream>
 #include <iomanip>
@@ -350,13 +351,19 @@ void GPUIterativeSolver::runDavidson(
             // Save results
             eigenvalues.assign(current_eigs.begin(), current_eigs.begin() + num_eigenvalues);
             
-            if (compute_eigenvectors) {
+            if (compute_eigenvectors && !dir.empty()) {
+                // Copy eigenvectors from GPU to CPU for HDF5 save
+                std::vector<std::vector<Complex>> cpu_eigenvectors(num_eigenvalues);
                 for (int i = 0; i < num_eigenvalues; ++i) {
-                    if (!dir.empty()) {
-                        std::string filename = dir + "/eigenvector_" + std::to_string(i) + ".dat";
-                        saveEigenvector(filename, d_ritz_vecs + i * N_);
-                    }
+                    std::vector<std::complex<double>> h_vec(N_);
+                    cudaMemcpy(h_vec.data(), d_ritz_vecs + i * N_, N_ * sizeof(cuDoubleComplex), cudaMemcpyDeviceToHost);
+                    cpu_eigenvectors[i] = std::move(h_vec);
                 }
+                
+                // Use unified HDF5 save function
+                HDF5IO::saveDiagonalizationResults(dir, eigenvalues, cpu_eigenvectors, true);
+                std::cout << "GPU Davidson: Saved " << num_eigenvalues << " eigenvalues and " 
+                          << num_eigenvalues << " eigenvectors to " << dir << "/eigenvectors/ed_results.h5" << std::endl;
             }
             
             break;

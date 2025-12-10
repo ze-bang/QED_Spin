@@ -1861,6 +1861,20 @@ public:
     const std::vector<uint64_t>& getBasisStates() const { return basis_states_; }
     
     /**
+     * @brief Read a symmetrized basis vector from file (fixed-Sz sector)
+     * 
+     * The basis vectors are stored in the fixed-Sz basis during symmetry
+     * construction. This reads a single basis vector from the HDF5 or binary files.
+     * 
+     * @param dir Directory containing the symmetry data
+     * @param index Global index of the basis vector
+     * @return Basis vector in fixed-Sz representation
+     */
+    std::vector<Complex> readSymBasisVector(const std::string& dir, size_t index) const {
+        return readSymBasisVectorFixedSz(dir, index);
+    }
+
+    /**
      * Matrix-free apply for raw arrays (ULTRA-OPTIMIZED VERSION)
      * 
      * OPTIMIZATIONS:

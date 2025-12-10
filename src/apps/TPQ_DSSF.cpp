@@ -463,8 +463,8 @@ int main(int argc, char* argv[]) {
     if (argc >= 8) {
         std::string param_str = argv[7];
         
-        if (method == "spectral") {
-            // Parse omega_min,omega_max,num_omega_bins,broadening for spectral method
+        if (method == "spectral" || method == "spectral_thermal") {
+            // Parse omega_min,omega_max,num_omega_bins,broadening for spectral methods
             std::stringstream ss(param_str);
             std::string val;
             std::vector<std::string> tokens;
@@ -847,7 +847,7 @@ int main(int argc, char* argv[]) {
     // Read ground state energy for energy shift in spectral functions
     double ground_state_energy = 0.0;
     bool has_ground_state_energy = false;
-    if (method == "spectral") {
+    if (method == "spectral" || method == "spectral_thermal") {
         try {
             if (rank == 0) {
                 std::cout << "Reading ground state energy (minimum across all sources)..." << std::endl;

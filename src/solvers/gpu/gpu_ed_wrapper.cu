@@ -1,4 +1,5 @@
 #include <ed/gpu/gpu_ed_wrapper.h>
+#include <ed/core/hdf5_io.h>
 #include <iostream>
 #include <fstream>
 #include <sstream>
@@ -357,6 +358,13 @@ void GPUEDWrapper::runGPULanczos(void* gpu_op_handle,
     std::vector<std::vector<std::complex<double>>> eigvecs;
     lanczos.run(num_eigs, eigenvalues, eigvecs, eigenvectors);
     
+    // Save eigenvectors using unified HDF5 function
+    if (eigenvectors && !dir.empty() && !eigvecs.empty()) {
+        HDF5IO::saveDiagonalizationResults(dir, eigenvalues, eigvecs, true);
+        std::cout << "GPU Lanczos: Saved " << eigenvalues.size() << " eigenvalues and " 
+                  << eigvecs.size() << " eigenvectors to " << dir << "/eigenvectors/ed_results.h5" << std::endl;
+    }
+    
     // Print statistics
     auto stats = lanczos.getStats();
     std::cout << "\nGPU Lanczos Statistics:\n";
@@ -398,6 +406,13 @@ void GPUEDWrapper::runGPULanczosFixedSz(void* gpu_op_handle,
     // Run Lanczos
     std::vector<std::vector<std::complex<double>>> eigvecs;
     lanczos.run(num_eigs, eigenvalues, eigvecs, eigenvectors);
+    
+    // Save eigenvectors using unified HDF5 function
+    if (eigenvectors && !dir.empty() && !eigvecs.empty()) {
+        HDF5IO::saveDiagonalizationResults(dir, eigenvalues, eigvecs, true);
+        std::cout << "GPU Lanczos Fixed Sz: Saved " << eigenvalues.size() << " eigenvalues and " 
+                  << eigvecs.size() << " eigenvectors to " << dir << "/eigenvectors/ed_results.h5" << std::endl;
+    }
     
     // Print statistics
     auto stats = lanczos.getStats();

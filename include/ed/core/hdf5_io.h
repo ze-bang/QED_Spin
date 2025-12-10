@@ -8,7 +8,9 @@
 #include <iostream>
 #include <stdexcept>
 #include <iomanip>
+#include <fstream>
 #include <map>
+#include <ed/core/thermal_types.h>
 
 using Complex = std::complex<double>;
 
@@ -163,8 +165,6 @@ public:
             
             dataset.close();
             file.close();
-            
-            std::cout << "Saved " << eigenvalues.size() << " eigenvalues to HDF5" << std::endl;
         } catch (H5::Exception& e) {
             throw std::runtime_error("Failed to save eigenvalues: " + std::string(e.getCDetailMsg()));
         }
@@ -258,6 +258,57 @@ public:
         } catch (H5::Exception& e) {
             throw std::runtime_error("Failed to save eigenvector: " + std::string(e.getCDetailMsg()));
         }
+    }
+    
+    /**
+     * @brief Unified function to save all diagonalization results (eigenvalues + eigenvectors)
+     * 
+     * This is the preferred method for all solvers to save their results.
+     * Creates the output directory and HDF5 file if needed.
+     * 
+     * @param output_dir Base output directory (e.g., "output")
+     * @param eigenvalues Vector of eigenvalues
+     * @param eigenvectors Vector of eigenvectors (can be empty if not computed)
+     * @param solver_name Name of the solver for logging (e.g., "LANCZOS", "LOBPCG")
+     */
+    static void saveDiagonalizationResults(
+        const std::string& output_dir,
+        const std::vector<double>& eigenvalues,
+        const std::vector<std::vector<Complex>>& eigenvectors = {},
+        const std::string& solver_name = ""
+    ) {
+        if (output_dir.empty()) return;
+        
+        // Create eigenvectors subdirectory
+        std::string evec_dir = output_dir + "/eigenvectors";
+        
+        // Use system call to create directory (cross-platform would need filesystem)
+        std::string cmd = "mkdir -p " + evec_dir;
+        int result = system(cmd.c_str());
+        if (result != 0) {
+            std::cerr << "Warning: Could not create directory " << evec_dir << std::endl;
+        }
+        
+        // Create/open HDF5 file
+        std::string h5_path = createOrOpenFile(evec_dir);
+        
+        // Save eigenvalues
+        saveEigenvalues(h5_path, eigenvalues);
+        
+        // Save eigenvectors if provided
+        for (size_t i = 0; i < eigenvectors.size(); ++i) {
+            saveEigenvector(h5_path, i, eigenvectors[i]);
+        }
+        
+        // Log results
+        if (!solver_name.empty()) {
+            std::cout << solver_name << ": ";
+        }
+        std::cout << "Saved " << eigenvalues.size() << " eigenvalues";
+        if (!eigenvectors.empty()) {
+            std::cout << " and " << eigenvectors.size() << " eigenvectors";
+        }
+        std::cout << " to " << h5_path << std::endl;
     }
     
     /**
@@ -683,6 +734,520 @@ public:
         } catch (H5::Exception& e) {
             throw std::runtime_error("Failed to save TPQ state: " + std::string(e.getCDetailMsg()));
         }
+    }
+    
+    // ============================================================================
+    // FTLM/LTLM/Hybrid Thermal Results I/O
+    // ============================================================================
+    
+    /**
+     * @brief Save FTLM thermodynamic results with error bars to HDF5
+     * @param filepath Path to HDF5 file
+     * @param temperatures Temperature array
+     * @param energy Energy values
+     * @param energy_error Energy error bars
+     * @param specific_heat Specific heat values
+     * @param specific_heat_error Specific heat error bars
+     * @param entropy Entropy values
+     * @param entropy_error Entropy error bars
+     * @param free_energy Free energy values
+     * @param free_energy_error Free energy error bars
+     * @param total_samples Number of samples used
+     * @param method Method name (FTLM, LTLM, Hybrid)
+     */
+    static void saveFTLMThermodynamics(
+        const std::string& filepath,
+        const std::vector<double>& temperatures,
+        const std::vector<double>& energy,
+        const std::vector<double>& energy_error,
+        const std::vector<double>& specific_heat,
+        const std::vector<double>& specific_heat_error,
+        const std::vector<double>& entropy,
+        const std::vector<double>& entropy_error,
+        const std::vector<double>& free_energy,
+        const std::vector<double>& free_energy_error,
+        uint64_t total_samples,
+        const std::string& method = "FTLM"
+    ) {
+        try {
+            H5::H5File file(filepath, H5F_ACC_RDWR);
+            
+            std::string base_path = "/ftlm/averaged";
+            
+            // Ensure group exists
+            if (!file.nameExists(base_path)) {
+                file.createGroup(base_path);
+            }
+            
+            // Helper lambda to save an array
+            auto saveDataset = [&](const std::string& name, const std::vector<double>& data) {
+                std::string dataset_name = base_path + "/" + name;
+                if (file.nameExists(dataset_name)) {
+                    file.unlink(dataset_name);
+                }
+                hsize_t dims[1] = {data.size()};
+                H5::DataSpace dataspace(1, dims);
+                H5::DataSet dataset = file.createDataSet(dataset_name,
+                                                         H5::PredType::NATIVE_DOUBLE,
+                                                         dataspace);
+                dataset.write(data.data(), H5::PredType::NATIVE_DOUBLE);
+                dataset.close();
+            };
+            
+            // Save all arrays
+            saveDataset("temperatures", temperatures);
+            saveDataset("energy", energy);
+            saveDataset("energy_error", energy_error);
+            saveDataset("specific_heat", specific_heat);
+            saveDataset("specific_heat_error", specific_heat_error);
+            saveDataset("entropy", entropy);
+            saveDataset("entropy_error", entropy_error);
+            saveDataset("free_energy", free_energy);
+            saveDataset("free_energy_error", free_energy_error);
+            
+            // Save metadata as attributes on the group
+            H5::Group group = file.openGroup(base_path);
+            H5::DataSpace attr_space(H5S_SCALAR);
+            
+            // Total samples attribute
+            if (group.attrExists("total_samples")) {
+                group.removeAttr("total_samples");
+            }
+            H5::Attribute samples_attr = group.createAttribute("total_samples",
+                                                               H5::PredType::NATIVE_UINT64,
+                                                               attr_space);
+            samples_attr.write(H5::PredType::NATIVE_UINT64, &total_samples);
+            samples_attr.close();
+            
+            // Method attribute
+            if (group.attrExists("method")) {
+                group.removeAttr("method");
+            }
+            H5::StrType str_type(H5::PredType::C_S1, method.size() + 1);
+            H5::Attribute method_attr = group.createAttribute("method", str_type, attr_space);
+            method_attr.write(str_type, method.c_str());
+            method_attr.close();
+            
+            group.close();
+            file.close();
+            
+            std::cout << "Saved " << method << " thermodynamic results to HDF5" << std::endl;
+        } catch (H5::Exception& e) {
+            throw std::runtime_error("Failed to save FTLM thermodynamics: " + 
+                                   std::string(e.getCDetailMsg()));
+        }
+    }
+    
+    /**
+     * @brief Save static response results to HDF5
+     * @param filepath Path to HDF5 file
+     * @param operator_name Name of operator
+     * @param temperatures Temperature array
+     * @param expectation Expectation values
+     * @param expectation_error Error bars
+     * @param variance Variance values (optional)
+     * @param variance_error Variance error (optional)
+     * @param susceptibility Susceptibility values (optional)
+     * @param susceptibility_error Susceptibility error (optional)
+     * @param total_samples Number of samples
+     */
+    static void saveStaticResponse(
+        const std::string& filepath,
+        const std::string& operator_name,
+        const std::vector<double>& temperatures,
+        const std::vector<double>& expectation,
+        const std::vector<double>& expectation_error,
+        const std::vector<double>& variance = {},
+        const std::vector<double>& variance_error = {},
+        const std::vector<double>& susceptibility = {},
+        const std::vector<double>& susceptibility_error = {},
+        uint64_t total_samples = 1
+    ) {
+        try {
+            H5::H5File file(filepath, H5F_ACC_RDWR);
+            
+            // Ensure correlations group exists
+            if (!file.nameExists("/correlations")) {
+                file.createGroup("/correlations");
+            }
+            
+            std::string base_path = "/correlations/" + operator_name;
+            if (!file.nameExists(base_path)) {
+                file.createGroup(base_path);
+            }
+            
+            // Helper lambda to save an array
+            auto saveDataset = [&](const std::string& name, const std::vector<double>& data) {
+                if (data.empty()) return;
+                std::string dataset_name = base_path + "/" + name;
+                if (file.nameExists(dataset_name)) {
+                    file.unlink(dataset_name);
+                }
+                hsize_t dims[1] = {data.size()};
+                H5::DataSpace dataspace(1, dims);
+                H5::DataSet dataset = file.createDataSet(dataset_name,
+                                                         H5::PredType::NATIVE_DOUBLE,
+                                                         dataspace);
+                dataset.write(data.data(), H5::PredType::NATIVE_DOUBLE);
+                dataset.close();
+            };
+            
+            // Save all arrays
+            saveDataset("temperatures", temperatures);
+            saveDataset("expectation", expectation);
+            saveDataset("expectation_error", expectation_error);
+            saveDataset("variance", variance);
+            saveDataset("variance_error", variance_error);
+            saveDataset("susceptibility", susceptibility);
+            saveDataset("susceptibility_error", susceptibility_error);
+            
+            // Save metadata
+            H5::Group group = file.openGroup(base_path);
+            H5::DataSpace attr_space(H5S_SCALAR);
+            
+            if (group.attrExists("total_samples")) {
+                group.removeAttr("total_samples");
+            }
+            H5::Attribute samples_attr = group.createAttribute("total_samples",
+                                                               H5::PredType::NATIVE_UINT64,
+                                                               attr_space);
+            samples_attr.write(H5::PredType::NATIVE_UINT64, &total_samples);
+            samples_attr.close();
+            
+            group.close();
+            file.close();
+            
+            std::cout << "Saved static response (" << operator_name << ") to HDF5" << std::endl;
+        } catch (H5::Exception& e) {
+            throw std::runtime_error("Failed to save static response: " + 
+                                   std::string(e.getCDetailMsg()));
+        }
+    }
+    
+    /**
+     * @brief Save dynamical response results with complex values and errors to HDF5
+     * @param filepath Path to HDF5 file
+     * @param operator_name Name of operator
+     * @param frequencies Frequency array
+     * @param spectral_real Real part of spectral function
+     * @param spectral_imag Imaginary part of spectral function
+     * @param error_real Real part of error
+     * @param error_imag Imaginary part of error
+     * @param total_samples Number of samples
+     * @param temperature Temperature (optional metadata)
+     */
+    static void saveDynamicalResponseFull(
+        const std::string& filepath,
+        const std::string& operator_name,
+        const std::vector<double>& frequencies,
+        const std::vector<double>& spectral_real,
+        const std::vector<double>& spectral_imag,
+        const std::vector<double>& error_real,
+        const std::vector<double>& error_imag,
+        uint64_t total_samples = 1,
+        double temperature = 0.0
+    ) {
+        try {
+            H5::H5File file(filepath, H5F_ACC_RDWR);
+            
+            // Ensure dynamical group exists
+            if (!file.nameExists("/dynamical")) {
+                file.createGroup("/dynamical");
+            }
+            
+            std::string base_path = "/dynamical/" + operator_name;
+            if (!file.nameExists(base_path)) {
+                file.createGroup(base_path);
+            }
+            
+            // Helper lambda to save an array
+            auto saveDataset = [&](const std::string& name, const std::vector<double>& data) {
+                if (data.empty()) return;
+                std::string dataset_name = base_path + "/" + name;
+                if (file.nameExists(dataset_name)) {
+                    file.unlink(dataset_name);
+                }
+                hsize_t dims[1] = {data.size()};
+                H5::DataSpace dataspace(1, dims);
+                H5::DataSet dataset = file.createDataSet(dataset_name,
+                                                         H5::PredType::NATIVE_DOUBLE,
+                                                         dataspace);
+                dataset.write(data.data(), H5::PredType::NATIVE_DOUBLE);
+                dataset.close();
+            };
+            
+            // Save all arrays
+            saveDataset("frequencies", frequencies);
+            saveDataset("spectral_real", spectral_real);
+            saveDataset("spectral_imag", spectral_imag);
+            saveDataset("error_real", error_real);
+            saveDataset("error_imag", error_imag);
+            
+            // Save metadata
+            H5::Group group = file.openGroup(base_path);
+            H5::DataSpace attr_space(H5S_SCALAR);
+            
+            if (group.attrExists("total_samples")) {
+                group.removeAttr("total_samples");
+            }
+            H5::Attribute samples_attr = group.createAttribute("total_samples",
+                                                               H5::PredType::NATIVE_UINT64,
+                                                               attr_space);
+            samples_attr.write(H5::PredType::NATIVE_UINT64, &total_samples);
+            samples_attr.close();
+            
+            if (group.attrExists("temperature")) {
+                group.removeAttr("temperature");
+            }
+            H5::Attribute temp_attr = group.createAttribute("temperature",
+                                                            H5::PredType::NATIVE_DOUBLE,
+                                                            attr_space);
+            temp_attr.write(H5::PredType::NATIVE_DOUBLE, &temperature);
+            temp_attr.close();
+            
+            group.close();
+            file.close();
+            
+            std::cout << "Saved dynamical response (" << operator_name << ") to HDF5" << std::endl;
+        } catch (H5::Exception& e) {
+            throw std::runtime_error("Failed to save dynamical response: " + 
+                                   std::string(e.getCDetailMsg()));
+        }
+    }
+    
+    /**
+     * @brief Save hybrid thermal method results with method indicators
+     */
+    static void saveHybridThermalResults(
+        const std::string& filepath,
+        const std::vector<double>& temperatures,
+        const std::vector<double>& energy,
+        const std::vector<double>& energy_error,
+        const std::vector<double>& specific_heat,
+        const std::vector<double>& specific_heat_error,
+        const std::vector<double>& entropy,
+        const std::vector<double>& entropy_error,
+        const std::vector<double>& free_energy,
+        const std::vector<double>& free_energy_error,
+        double ground_state_energy,
+        double crossover_temperature,
+        uint64_t crossover_index,
+        uint64_t ltlm_points,
+        uint64_t ftlm_points,
+        uint64_t ftlm_samples_used
+    ) {
+        try {
+            H5::H5File file(filepath, H5F_ACC_RDWR);
+            
+            std::string base_path = "/ftlm/averaged";
+            
+            // Ensure group exists
+            if (!file.nameExists(base_path)) {
+                file.createGroup(base_path);
+            }
+            
+            // Helper lambda to save an array
+            auto saveDataset = [&](const std::string& name, const std::vector<double>& data) {
+                std::string dataset_name = base_path + "/" + name;
+                if (file.nameExists(dataset_name)) {
+                    file.unlink(dataset_name);
+                }
+                hsize_t dims[1] = {data.size()};
+                H5::DataSpace dataspace(1, dims);
+                H5::DataSet dataset = file.createDataSet(dataset_name,
+                                                         H5::PredType::NATIVE_DOUBLE,
+                                                         dataspace);
+                dataset.write(data.data(), H5::PredType::NATIVE_DOUBLE);
+                dataset.close();
+            };
+            
+            // Save all arrays
+            saveDataset("temperatures", temperatures);
+            saveDataset("energy", energy);
+            saveDataset("energy_error", energy_error);
+            saveDataset("specific_heat", specific_heat);
+            saveDataset("specific_heat_error", specific_heat_error);
+            saveDataset("entropy", entropy);
+            saveDataset("entropy_error", entropy_error);
+            saveDataset("free_energy", free_energy);
+            saveDataset("free_energy_error", free_energy_error);
+            
+            // Create method indicator array (0 = LTLM, 1 = FTLM)
+            std::vector<int> method_indicator(temperatures.size());
+            for (size_t i = 0; i < temperatures.size(); i++) {
+                method_indicator[i] = (i < crossover_index) ? 0 : 1;
+            }
+            
+            // Save method indicator
+            std::string mi_name = base_path + "/method_indicator";
+            if (file.nameExists(mi_name)) {
+                file.unlink(mi_name);
+            }
+            hsize_t dims[1] = {method_indicator.size()};
+            H5::DataSpace mi_dataspace(1, dims);
+            H5::DataSet mi_dataset = file.createDataSet(mi_name,
+                                                        H5::PredType::NATIVE_INT,
+                                                        mi_dataspace);
+            mi_dataset.write(method_indicator.data(), H5::PredType::NATIVE_INT);
+            mi_dataset.close();
+            
+            // Save metadata as attributes on the group
+            H5::Group group = file.openGroup(base_path);
+            H5::DataSpace attr_space(H5S_SCALAR);
+            
+            auto setDoubleAttr = [&](const std::string& name, double value) {
+                if (group.attrExists(name)) group.removeAttr(name);
+                H5::Attribute attr = group.createAttribute(name, H5::PredType::NATIVE_DOUBLE, attr_space);
+                attr.write(H5::PredType::NATIVE_DOUBLE, &value);
+                attr.close();
+            };
+            
+            auto setUint64Attr = [&](const std::string& name, uint64_t value) {
+                if (group.attrExists(name)) group.removeAttr(name);
+                H5::Attribute attr = group.createAttribute(name, H5::PredType::NATIVE_UINT64, attr_space);
+                attr.write(H5::PredType::NATIVE_UINT64, &value);
+                attr.close();
+            };
+            
+            setDoubleAttr("ground_state_energy", ground_state_energy);
+            setDoubleAttr("crossover_temperature", crossover_temperature);
+            setUint64Attr("crossover_index", crossover_index);
+            setUint64Attr("ltlm_points", ltlm_points);
+            setUint64Attr("ftlm_points", ftlm_points);
+            setUint64Attr("ftlm_samples_used", ftlm_samples_used);
+            
+            // Method string
+            std::string method = "Hybrid";
+            if (group.attrExists("method")) group.removeAttr("method");
+            H5::StrType str_type(H5::PredType::C_S1, method.size() + 1);
+            H5::Attribute method_attr = group.createAttribute("method", str_type, attr_space);
+            method_attr.write(str_type, method.c_str());
+            method_attr.close();
+            
+            group.close();
+            file.close();
+            
+            std::cout << "Saved Hybrid thermal results to HDF5" << std::endl;
+        } catch (H5::Exception& e) {
+            throw std::runtime_error("Failed to save hybrid thermal results: " + 
+                                   std::string(e.getCDetailMsg()));
+        }
+    }
+    
+    // ============================================================================
+    // Unified Thermodynamic Output (Text Format)
+    // ============================================================================
+    
+    /**
+     * @brief Save thermodynamic data to a unified text file format
+     * 
+     * This provides a consistent output format for ALL finite-T methods:
+     * - FTLM, LTLM, Hybrid, TPQ, Full diagonalization
+     * 
+     * Output columns:
+     * T, E, E_err, Cv, Cv_err, S, S_err, F, F_err
+     * 
+     * For methods without error bars (Full, TPQ), error columns are 0.
+     * 
+     * @param filepath Output text file path
+     * @param method Method name (for header)
+     * @param temperatures Temperature array
+     * @param energy Energy values
+     * @param energy_error Energy error bars (empty = no errors)
+     * @param specific_heat Specific heat values
+     * @param specific_heat_error Specific heat error bars
+     * @param entropy Entropy values
+     * @param entropy_error Entropy error bars
+     * @param free_energy Free energy values
+     * @param free_energy_error Free energy error bars
+     * @param metadata Additional metadata lines for header
+     */
+    static void saveUnifiedThermodynamicsTxt(
+        const std::string& filepath,
+        const std::string& method,
+        const std::vector<double>& temperatures,
+        const std::vector<double>& energy,
+        const std::vector<double>& energy_error,
+        const std::vector<double>& specific_heat,
+        const std::vector<double>& specific_heat_error,
+        const std::vector<double>& entropy,
+        const std::vector<double>& entropy_error,
+        const std::vector<double>& free_energy,
+        const std::vector<double>& free_energy_error,
+        const std::vector<std::string>& metadata = {}
+    ) {
+        std::ofstream file(filepath);
+        if (!file.is_open()) {
+            throw std::runtime_error("Failed to open file for writing: " + filepath);
+        }
+        
+        // Write header
+        file << "# Thermodynamic data from " << method << "\n";
+        file << "# Generated by ED code - unified output format\n";
+        
+        // Write any additional metadata
+        for (const auto& line : metadata) {
+            file << "# " << line << "\n";
+        }
+        
+        // Column description
+        file << "# Columns:\n";
+        file << "#   T        - Temperature\n";
+        file << "#   E        - Energy <H>\n";
+        file << "#   E_err    - Energy error (0 if not available)\n";
+        file << "#   Cv       - Specific heat (per site or total depending on normalization)\n";
+        file << "#   Cv_err   - Specific heat error\n";
+        file << "#   S        - Entropy\n";
+        file << "#   S_err    - Entropy error\n";
+        file << "#   F        - Free energy\n";
+        file << "#   F_err    - Free energy error\n";
+        file << "#\n";
+        file << "# T E E_err Cv Cv_err S S_err F F_err\n";
+        
+        // Set precision
+        file << std::scientific << std::setprecision(12);
+        
+        // Write data
+        size_t n = temperatures.size();
+        bool has_errors = !energy_error.empty() && energy_error.size() == n;
+        
+        for (size_t i = 0; i < n; ++i) {
+            file << temperatures[i] << " ";
+            file << energy[i] << " ";
+            file << (has_errors ? energy_error[i] : 0.0) << " ";
+            file << specific_heat[i] << " ";
+            file << (has_errors && !specific_heat_error.empty() ? specific_heat_error[i] : 0.0) << " ";
+            file << entropy[i] << " ";
+            file << (has_errors && !entropy_error.empty() ? entropy_error[i] : 0.0) << " ";
+            file << free_energy[i] << " ";
+            file << (has_errors && !free_energy_error.empty() ? free_energy_error[i] : 0.0) << "\n";
+        }
+        
+        file.close();
+        std::cout << "Saved unified thermodynamic data to: " << filepath << std::endl;
+    }
+    
+    /**
+     * @brief Convenience overload using ThermodynamicData struct
+     */
+    static void saveUnifiedThermodynamicsTxt(
+        const std::string& filepath,
+        const std::string& method,
+        const ThermodynamicData& thermo,
+        const std::vector<double>& energy_error = {},
+        const std::vector<double>& specific_heat_error = {},
+        const std::vector<double>& entropy_error = {},
+        const std::vector<double>& free_energy_error = {},
+        const std::vector<std::string>& metadata = {}
+    ) {
+        saveUnifiedThermodynamicsTxt(
+            filepath, method,
+            thermo.temperatures, thermo.energy, energy_error,
+            thermo.specific_heat, specific_heat_error,
+            thermo.entropy, entropy_error,
+            thermo.free_energy, free_energy_error,
+            metadata
+        );
     }
     
     // ============================================================================

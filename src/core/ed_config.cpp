@@ -63,12 +63,29 @@ EDConfig EDConfig::fromFile(const std::string& filename) {
     
     std::string line;
     uint64_t line_num = 0;
+    std::string current_section = "";  // Track current section
+    
+    // Helper to check if a bool value is true
+    auto parse_bool = [](const std::string& value) -> bool {
+        return (value == "true" || value == "1" || value == "yes" || value == "True" || value == "TRUE");
+    };
     
     while (std::getline(file, line)) {
         line_num++;
         
         // Skip empty lines and comments
         if (line.empty() || line[0] == '#') continue;
+        
+        // Check for section header [SectionName]
+        if (line[0] == '[') {
+            size_t end_bracket = line.find(']');
+            if (end_bracket != std::string::npos) {
+                current_section = line.substr(1, end_bracket - 1);
+                // Convert to lowercase for easier matching
+                std::transform(current_section.begin(), current_section.end(), current_section.begin(), ::tolower);
+            }
+            continue;
+        }
         
         // Parse key=value
         size_t eq_pos = line.find('=');
@@ -83,94 +100,200 @@ EDConfig EDConfig::fromFile(const std::string& filename) {
         value.erase(0, value.find_first_not_of(" \t"));
         value.erase(value.find_last_not_of(" \t") + 1);
         
-        // Parse based on key
+        // Parse based on section and key
         try {
-            if (key == "method") {
-                auto m = ed_config::parseMethod(value);
-                if (m) config.method = *m;
+            // ========== [System] section ==========
+            if (current_section == "system") {
+                if (key == "hamiltonian_dir") config.system.hamiltonian_dir = value;
+                else if (key == "num_sites") config.system.num_sites = std::stoi(value);
+                else if (key == "spin_length") config.system.spin_length = std::stof(value);
+                else if (key == "use_fixed_sz") config.system.use_fixed_sz = parse_bool(value);
+                else if (key == "n_up") config.system.n_up = std::stoi(value);
+                else if (key == "sublattice_size") config.system.sublattice_size = std::stoi(value);
+                else if (key == "interaction_file") config.system.interaction_file = value;
+                else if (key == "single_site_file") config.system.single_site_file = value;
+                else if (key == "three_body_file") config.system.three_body_file = value;
             }
-            else if (key == "num_eigenvalues") config.diag.num_eigenvalues = std::stoi(value);
-            else if (key == "max_iterations") config.diag.max_iterations = std::stoi(value);
-            else if (key == "tolerance") config.diag.tolerance = std::stod(value);
-            else if (key == "compute_eigenvectors") config.diag.compute_eigenvectors = (value == "true" || value == "1");
-            else if (key == "shift") config.diag.shift = std::stod(value);
-            else if (key == "block_size") config.diag.block_size = std::stoi(value);
-            else if (key == "target_lower") config.diag.target_lower = std::stod(value);
-            else if (key == "target_upper") config.diag.target_upper = std::stod(value);
-            else if (key == "num_sites") config.system.num_sites = std::stoi(value);
-            else if (key == "spin_length") config.system.spin_length = std::stof(value);
-            else if (key == "hamiltonian_dir") config.system.hamiltonian_dir = value;
-            else if (key == "use_fixed_sz") config.system.use_fixed_sz = (value == "true" || value == "1");
-            else if (key == "n_up") config.system.n_up = std::stoi(value);
-            else if (key == "output_dir") config.workflow.output_dir = value;
-            else if (key == "num_samples") config.thermal.num_samples = std::stoi(value);
-            else if (key == "temp_min") config.thermal.temp_min = std::stod(value);
-            else if (key == "temp_max") config.thermal.temp_max = std::stod(value);
-            else if (key == "temp_bins") config.thermal.num_temp_bins = std::stoi(value);
-            else if (key == "ftlm_krylov_dim") config.thermal.ftlm_krylov_dim = std::stoi(value);
-            else if (key == "ftlm_full_reorth") config.thermal.ftlm_full_reorth = (value == "true" || value == "1");
-            else if (key == "ftlm_reorth_freq") config.thermal.ftlm_reorth_freq = std::stoi(value);
-            else if (key == "ftlm_seed") config.thermal.ftlm_seed = std::stoul(value);
-            else if (key == "ftlm_store_samples") config.thermal.ftlm_store_samples = (value == "true" || value == "1");
-            else if (key == "ftlm_error_bars") config.thermal.ftlm_error_bars = (value == "true" || value == "1");
-            // LTLM parameters
-            else if (key == "ltlm_krylov_dim") config.thermal.ltlm_krylov_dim = std::stoi(value);
-            else if (key == "ltlm_ground_krylov") config.thermal.ltlm_ground_krylov = std::stoi(value);
-            else if (key == "ltlm_full_reorth") config.thermal.ltlm_full_reorth = (value == "true" || value == "1");
-            else if (key == "ltlm_reorth_freq") config.thermal.ltlm_reorth_freq = std::stoi(value);
-            else if (key == "ltlm_seed") config.thermal.ltlm_seed = std::stoul(value);
-            else if (key == "ltlm_store_data") config.thermal.ltlm_store_data = (value == "true" || value == "1");
-            // Hybrid method parameters
-            else if (key == "use_hybrid_method") config.thermal.use_hybrid_method = (value == "true" || value == "1");
-            else if (key == "hybrid_crossover") config.thermal.hybrid_crossover = std::stod(value);
-            else if (key == "hybrid_auto_crossover") config.thermal.hybrid_auto_crossover = (value == "true" || value == "1");
-            // TPQ continue-quenching parameters
-            else if (key == "continue_quenching") config.thermal.continue_quenching = (value == "true" || value == "1");
-            else if (key == "continue_sample") config.thermal.continue_sample = std::stoi(value);
-            else if (key == "continue_beta") config.thermal.continue_beta = std::stod(value);
-            else if (key == "calc_observables") config.observable.calculate = (value == "true" || value == "1");
-            else if (key == "measure_spin") config.observable.measure_spin = (value == "true" || value == "1");
-            else if (key == "run_standard") config.workflow.run_standard = (value == "true" || value == "1");
-            else if (key == "run_symmetrized") config.workflow.run_symmetrized = (value == "true" || value == "1");
-            else if (key == "run_streaming_symmetry") config.workflow.run_streaming_symmetry = (value == "true" || value == "1");
-            else if (key == "compute_thermo") config.workflow.compute_thermo = (value == "true" || value == "1");
-            else if (key == "compute_dynamical_response") config.workflow.compute_dynamical_response = (value == "true" || value == "1");
-            else if (key == "compute_static_response") config.workflow.compute_static_response = (value == "true" || value == "1");
-            // Dynamical response parameters
-            else if (key == "dynamical_thermal_average") config.dynamical.thermal_average = (value == "true" || value == "1");
-            else if (key == "dynamical_num_random_states") config.dynamical.num_random_states = std::stoi(value);
-            else if (key == "dynamical_krylov_dim") config.dynamical.krylov_dim = std::stoi(value);
-            else if (key == "dynamical_omega_min") config.dynamical.omega_min = std::stod(value);
-            else if (key == "dynamical_omega_max") config.dynamical.omega_max = std::stod(value);
-            else if (key == "dynamical_num_omega_points") config.dynamical.num_omega_points = std::stoi(value);
-            else if (key == "dynamical_broadening") config.dynamical.broadening = std::stod(value);
-            else if (key == "dynamical_temp_min") config.dynamical.temp_min = std::stod(value);
-            else if (key == "dynamical_temp_max") config.dynamical.temp_max = std::stod(value);
-            else if (key == "dynamical_num_temp_bins") config.dynamical.num_temp_bins = std::stoi(value);
-            else if (key == "dynamical_compute_correlation") config.dynamical.compute_correlation = (value == "true" || value == "1");
-            else if (key == "dynamical_operator_file") config.dynamical.operator_file = value;
-            else if (key == "dynamical_operator2_file") config.dynamical.operator2_file = value;
-            else if (key == "dynamical_output_prefix") config.dynamical.output_prefix = value;
-            else if (key == "dynamical_random_seed") config.dynamical.random_seed = std::stoul(value);
-            // Static response parameters
-            else if (key == "static_num_random_states") config.static_resp.num_random_states = std::stoi(value);
-            else if (key == "static_krylov_dim") config.static_resp.krylov_dim = std::stoi(value);
-            else if (key == "static_temp_min") config.static_resp.temp_min = std::stod(value);
-            else if (key == "static_temp_max") config.static_resp.temp_max = std::stod(value);
-            else if (key == "static_num_temp_points") config.static_resp.num_temp_points = std::stoi(value);
-            else if (key == "static_compute_susceptibility") config.static_resp.compute_susceptibility = (value == "true" || value == "1");
-            else if (key == "static_compute_correlation") config.static_resp.compute_correlation = (value == "true" || value == "1");
-            else if (key == "static_single_operator_mode") config.static_resp.single_operator_mode = (value == "true" || value == "1");
-            else if (key == "static_operator_file") config.static_resp.operator_file = value;
-            else if (key == "static_operator2_file") config.static_resp.operator2_file = value;
-            else if (key == "static_output_prefix") config.static_resp.output_prefix = value;
-            else if (key == "static_random_seed") config.static_resp.random_seed = std::stoul(value);
+            // ========== [Diagonalization] section ==========
+            else if (current_section == "diagonalization") {
+                if (key == "method") {
+                    auto m = ed_config::parseMethod(value);
+                    if (m) config.method = *m;
+                }
+                else if (key == "num_eigenvalues") config.diag.num_eigenvalues = std::stoi(value);
+                else if (key == "max_iterations") config.diag.max_iterations = std::stoi(value);
+                else if (key == "tolerance") config.diag.tolerance = std::stod(value);
+                else if (key == "compute_eigenvectors") config.diag.compute_eigenvectors = parse_bool(value);
+                else if (key == "shift") config.diag.shift = std::stod(value);
+                else if (key == "block_size") config.diag.block_size = std::stoi(value);
+                else if (key == "max_subspace") config.diag.max_subspace = std::stoi(value);
+                else if (key == "target_lower") config.diag.target_lower = std::stod(value);
+                else if (key == "target_upper") config.diag.target_upper = std::stod(value);
+            }
+            // ========== [Output] section ==========
+            else if (current_section == "output") {
+                if (key == "output_dir") config.workflow.output_dir = value;
+                else if (key == "output_prefix") {
+                    config.dynamical.output_prefix = value;
+                    config.static_resp.output_prefix = value;
+                }
+            }
+            // ========== [Workflow] section ==========
+            else if (current_section == "workflow") {
+                if (key == "run_standard") config.workflow.run_standard = parse_bool(value);
+                else if (key == "run_symmetrized") config.workflow.run_symmetrized = parse_bool(value);
+                else if (key == "run_streaming_symmetry") config.workflow.run_streaming_symmetry = parse_bool(value);
+                else if (key == "compute_thermo") config.workflow.compute_thermo = parse_bool(value);
+                else if (key == "compute_dynamical_response") config.workflow.compute_dynamical_response = parse_bool(value);
+                else if (key == "compute_static_response") config.workflow.compute_static_response = parse_bool(value);
+                else if (key == "compute_ground_state_dssf") config.workflow.compute_ground_state_dssf = parse_bool(value);
+                else if (key == "skip_ed") config.workflow.skip_ed = parse_bool(value);
+            }
+            // ========== [Thermodynamics] section ==========
+            else if (current_section == "thermodynamics") {
+                if (key == "compute_thermo") config.workflow.compute_thermo = parse_bool(value);
+                else if (key == "temp_min") config.thermal.temp_min = std::stod(value);
+                else if (key == "temp_max") config.thermal.temp_max = std::stod(value);
+                else if (key == "num_temp_bins") config.thermal.num_temp_bins = std::stoi(value);
+            }
+            // ========== [FTLM] section ==========
+            else if (current_section == "ftlm") {
+                if (key == "num_samples") config.thermal.num_samples = std::stoi(value);
+                else if (key == "krylov_dim") config.thermal.ftlm_krylov_dim = std::stoi(value);
+                else if (key == "full_reorth") config.thermal.ftlm_full_reorth = parse_bool(value);
+                else if (key == "reorth_freq") config.thermal.ftlm_reorth_freq = std::stoi(value);
+                else if (key == "random_seed") config.thermal.ftlm_seed = std::stoul(value);
+                else if (key == "store_samples") config.thermal.ftlm_store_samples = parse_bool(value);
+                else if (key == "error_bars") config.thermal.ftlm_error_bars = parse_bool(value);
+            }
+            // ========== [LTLM] section ==========
+            else if (current_section == "ltlm") {
+                if (key == "krylov_dim") config.thermal.ltlm_krylov_dim = std::stoi(value);
+                else if (key == "ground_krylov") config.thermal.ltlm_ground_krylov = std::stoi(value);
+                else if (key == "full_reorth") config.thermal.ltlm_full_reorth = parse_bool(value);
+                else if (key == "reorth_freq") config.thermal.ltlm_reorth_freq = std::stoi(value);
+                else if (key == "random_seed") config.thermal.ltlm_seed = std::stoul(value);
+                else if (key == "store_data") config.thermal.ltlm_store_data = parse_bool(value);
+            }
+            // ========== [TPQ] section ==========
+            else if (current_section == "tpq") {
+                if (key == "num_samples") config.thermal.num_samples = std::stoi(value);
+                else if (key == "num_order") config.thermal.num_order = std::stoi(value);
+                else if (key == "measure_freq") config.thermal.num_measure_freq = std::stoi(value);
+                else if (key == "delta_tau") config.thermal.delta_tau = std::stod(value);
+                else if (key == "large_value") config.thermal.large_value = std::stod(value);
+                else if (key == "continue_quenching") config.thermal.continue_quenching = parse_bool(value);
+                else if (key == "continue_sample") config.thermal.continue_sample = std::stoi(value);
+                else if (key == "continue_beta") config.thermal.continue_beta = std::stod(value);
+            }
+            // ========== [DynamicalResponse] section ==========
+            else if (current_section == "dynamicalresponse") {
+                if (key == "compute") config.workflow.compute_dynamical_response = parse_bool(value);
+                else if (key == "thermal_average") config.dynamical.thermal_average = parse_bool(value);
+                else if (key == "use_gpu") config.dynamical.use_gpu = parse_bool(value);
+                else if (key == "num_samples") config.dynamical.num_random_states = std::stoi(value);
+                else if (key == "krylov_dim") config.dynamical.krylov_dim = std::stoi(value);
+                else if (key == "omega_min") config.dynamical.omega_min = std::stod(value);
+                else if (key == "omega_max") config.dynamical.omega_max = std::stod(value);
+                else if (key == "num_omega_points") config.dynamical.num_omega_points = std::stoi(value);
+                else if (key == "broadening") config.dynamical.broadening = std::stod(value);
+                else if (key == "temp_min") config.dynamical.temp_min = std::stod(value);
+                else if (key == "temp_max") config.dynamical.temp_max = std::stod(value);
+                else if (key == "num_temp_bins") config.dynamical.num_temp_bins = std::stoi(value);
+                else if (key == "random_seed") config.dynamical.random_seed = std::stoul(value);
+                else if (key == "output_prefix") config.dynamical.output_prefix = value;
+            }
+            // ========== [GroundStateDSSF] section ==========
+            else if (current_section == "groundstatedssf") {
+                if (key == "compute") config.workflow.compute_ground_state_dssf = parse_bool(value);
+                else if (key == "krylov_dim") config.dynamical.krylov_dim = std::stoi(value);
+                else if (key == "omega_min") config.dynamical.omega_min = std::stod(value);
+                else if (key == "omega_max") config.dynamical.omega_max = std::stod(value);
+                else if (key == "num_omega_points") config.dynamical.num_omega_points = std::stoi(value);
+                else if (key == "broadening") config.dynamical.broadening = std::stod(value);
+                else if (key == "tolerance") config.diag.tolerance = std::stod(value);
+            }
+            // ========== [StaticResponse] section ==========
+            else if (current_section == "staticresponse") {
+                if (key == "compute") config.workflow.compute_static_response = parse_bool(value);
+                else if (key == "use_gpu") config.static_resp.use_gpu = parse_bool(value);
+                else if (key == "num_samples") config.static_resp.num_random_states = std::stoi(value);
+                else if (key == "krylov_dim") config.static_resp.krylov_dim = std::stoi(value);
+                else if (key == "temp_min") config.static_resp.temp_min = std::stod(value);
+                else if (key == "temp_max") config.static_resp.temp_max = std::stod(value);
+                else if (key == "num_temp_points") config.static_resp.num_temp_points = std::stoi(value);
+                else if (key == "compute_susceptibility") config.static_resp.compute_susceptibility = parse_bool(value);
+                else if (key == "single_operator_mode") config.static_resp.single_operator_mode = parse_bool(value);
+                else if (key == "random_seed") config.static_resp.random_seed = std::stoul(value);
+                else if (key == "output_prefix") config.static_resp.output_prefix = value;
+            }
+            // ========== [Operators] section (shared by dynamical and static) ==========
+            else if (current_section == "operators") {
+                if (key == "operator_type") {
+                    config.dynamical.operator_type = value;
+                    config.static_resp.operator_type = value;
+                }
+                else if (key == "basis") {
+                    config.dynamical.basis = value;
+                    config.static_resp.basis = value;
+                }
+                else if (key == "spin_combinations") {
+                    config.dynamical.spin_combinations = value;
+                    config.static_resp.spin_combinations = value;
+                }
+                else if (key == "momentum_points") {
+                    config.dynamical.momentum_points = value;
+                    config.static_resp.momentum_points = value;
+                }
+                else if (key == "polarization") {
+                    config.dynamical.polarization = value;
+                    config.static_resp.polarization = value;
+                }
+                else if (key == "theta") {
+                    config.dynamical.theta = std::stod(value);
+                    config.static_resp.theta = std::stod(value);
+                }
+                else if (key == "unit_cell_size") {
+                    config.dynamical.unit_cell_size = std::stoi(value);
+                    config.static_resp.unit_cell_size = std::stoi(value);
+                }
+            }
+            // ========== Legacy flat format (no section) ==========
             else {
-                std::cerr << "Warning: Unknown config key '" << key << "' at line " << line_num << std::endl;
+                // Support for legacy flat config files without sections
+                if (key == "method") {
+                    auto m = ed_config::parseMethod(value);
+                    if (m) config.method = *m;
+                }
+                else if (key == "num_eigenvalues") config.diag.num_eigenvalues = std::stoi(value);
+                else if (key == "max_iterations") config.diag.max_iterations = std::stoi(value);
+                else if (key == "tolerance") config.diag.tolerance = std::stod(value);
+                else if (key == "compute_eigenvectors") config.diag.compute_eigenvectors = parse_bool(value);
+                else if (key == "shift") config.diag.shift = std::stod(value);
+                else if (key == "block_size") config.diag.block_size = std::stoi(value);
+                else if (key == "target_lower") config.diag.target_lower = std::stod(value);
+                else if (key == "target_upper") config.diag.target_upper = std::stod(value);
+                else if (key == "num_sites") config.system.num_sites = std::stoi(value);
+                else if (key == "spin_length") config.system.spin_length = std::stof(value);
+                else if (key == "hamiltonian_dir") config.system.hamiltonian_dir = value;
+                else if (key == "use_fixed_sz") config.system.use_fixed_sz = parse_bool(value);
+                else if (key == "n_up") config.system.n_up = std::stoi(value);
+                else if (key == "output_dir") config.workflow.output_dir = value;
+                else if (key == "num_samples") config.thermal.num_samples = std::stoi(value);
+                else if (key == "temp_min") config.thermal.temp_min = std::stod(value);
+                else if (key == "temp_max") config.thermal.temp_max = std::stod(value);
+                else if (key == "temp_bins") config.thermal.num_temp_bins = std::stoi(value);
+                else if (key == "run_standard") config.workflow.run_standard = parse_bool(value);
+                else if (key == "run_symmetrized") config.workflow.run_symmetrized = parse_bool(value);
+                else if (key == "run_streaming_symmetry") config.workflow.run_streaming_symmetry = parse_bool(value);
+                else if (key == "compute_thermo") config.workflow.compute_thermo = parse_bool(value);
+                else if (key == "compute_dynamical_response") config.workflow.compute_dynamical_response = parse_bool(value);
+                else if (key == "compute_static_response") config.workflow.compute_static_response = parse_bool(value);
+                // Note: many legacy keys omitted for brevity - the section-based format is preferred
             }
         }
         catch (const std::exception& e) {
-            std::cerr << "Error parsing line " << line_num << ": " << e.what() << std::endl;
+            std::cerr << "Error parsing line " << line_num << " (section: " << current_section << "): " << e.what() << std::endl;
         }
     }
     
@@ -184,13 +307,44 @@ EDConfig EDConfig::fromCommandLine(uint64_t argc, char* argv[]) {
         return config;  // Return default config
     }
     
-    // First argument is directory
-    config.system.hamiltonian_dir = argv[1];
-    config.workflow.output_dir = config.system.hamiltonian_dir + "/output";
+    // Check if first argument is a config file (ends with .cfg, .ini, .txt, or .conf)
+    std::string first_arg = argv[1];
+    bool first_is_config = false;
     
-    // Parse remaining arguments
-    for (uint64_t i = 2; i < argc; i++) {
+    // Check for explicit --config= anywhere in args first
+    for (uint64_t i = 1; i < argc; i++) {
         std::string arg = argv[i];
+        if (arg.find("--config=") == 0) {
+            std::string config_file = arg.substr(9);
+            config = EDConfig::fromFile(config_file);
+            first_is_config = true;  // Skip first arg processing below
+            break;
+        }
+    }
+    
+    // If first argument looks like a config file, load it
+    if (!first_is_config && (first_arg.find(".cfg") != std::string::npos || 
+                              first_arg.find(".ini") != std::string::npos ||
+                              first_arg.find(".conf") != std::string::npos ||
+                              (first_arg.find(".txt") != std::string::npos && first_arg.find("config") != std::string::npos))) {
+        config = EDConfig::fromFile(first_arg);
+        first_is_config = true;
+    }
+    
+    // If first argument is a directory (no config file found)
+    if (!first_is_config && first_arg[0] != '-') {
+        config.system.hamiltonian_dir = first_arg;
+        config.workflow.output_dir = first_arg + "/output";
+    }
+    
+    // Parse remaining arguments (command line overrides config file)
+    // Start from index 2 if first arg was a config file or directory, otherwise 1
+    uint64_t start_idx = (first_arg[0] != '-') ? 2 : 1;
+    for (uint64_t i = start_idx; i < argc; i++) {
+        std::string arg = argv[i];
+        
+        // Skip --config= since we already processed it
+        if (arg.find("--config=") == 0) continue;
         
         auto parse_value = [&](const std::string& prefix) -> std::string {
             return arg.substr(prefix.length());

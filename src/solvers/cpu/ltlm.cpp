@@ -4,6 +4,7 @@
 #include <ed/solvers/ltlm.h>
 #include <ed/solvers/ftlm.h>     // For build_lanczos_tridiagonal function
 #include <ed/solvers/lanczos.h>  // For helper functions
+#include <ed/core/hdf5_io.h>       // For HDF5 output
 #include <fstream>
 #include <iomanip>
 #include <numeric>
@@ -308,36 +309,102 @@ LTLMResults low_temperature_lanczos(
 }
 
 /**
- * @brief Save LTLM results to file
+ * @brief Save LTLM results to HDF5 file and unified text format
  */
 void save_ltlm_results(
     const LTLMResults& results,
     const std::string& filename
 ) {
-    std::ofstream file(filename);
-    if (!file.is_open()) {
-        std::cerr << "Error: Cannot open file " << filename << " for writing" << std::endl;
-        return;
+    // Extract directory from filename to create HDF5 file
+    std::string directory = filename.substr(0, filename.find_last_of('/'));
+    if (directory.empty()) directory = ".";
+    
+    try {
+        std::string h5_path = HDF5IO::createOrOpenFile(directory);
+        
+        HDF5IO::saveFTLMThermodynamics(
+            h5_path,
+            results.thermo_data.temperatures,
+            results.thermo_data.energy,
+            results.energy_error,
+            results.thermo_data.specific_heat,
+            results.specific_heat_error,
+            results.thermo_data.entropy,
+            results.entropy_error,
+            results.thermo_data.free_energy,
+            results.free_energy_error,
+            results.total_samples,
+            "LTLM"
+        );
+        
+        // Also save ground state energy and spectrum if available
+        H5::H5File file(h5_path, H5F_ACC_RDWR);
+        
+        // Save ground state energy as attribute
+        std::string base_path = "/ftlm/averaged";
+        H5::Group group = file.openGroup(base_path);
+        H5::DataSpace attr_space(H5S_SCALAR);
+        
+        if (group.attrExists("ground_state_energy")) {
+            group.removeAttr("ground_state_energy");
+        }
+        H5::Attribute gs_attr = group.createAttribute("ground_state_energy",
+                                                      H5::PredType::NATIVE_DOUBLE,
+                                                      attr_space);
+        gs_attr.write(H5::PredType::NATIVE_DOUBLE, &results.ground_state_energy);
+        gs_attr.close();
+        
+        if (group.attrExists("krylov_dimension")) {
+            group.removeAttr("krylov_dimension");
+        }
+        H5::Attribute krylov_attr = group.createAttribute("krylov_dimension",
+                                                          H5::PredType::NATIVE_UINT64,
+                                                          attr_space);
+        krylov_attr.write(H5::PredType::NATIVE_UINT64, &results.krylov_dimension);
+        krylov_attr.close();
+        
+        group.close();
+        
+        // Save low-lying spectrum if available
+        if (!results.low_lying_spectrum.empty()) {
+            std::string spectrum_name = base_path + "/low_lying_spectrum";
+            if (file.nameExists(spectrum_name)) {
+                file.unlink(spectrum_name);
+            }
+            hsize_t dims[1] = {results.low_lying_spectrum.size()};
+            H5::DataSpace dataspace(1, dims);
+            H5::DataSet dataset = file.createDataSet(spectrum_name,
+                                                     H5::PredType::NATIVE_DOUBLE,
+                                                     dataspace);
+            dataset.write(results.low_lying_spectrum.data(), H5::PredType::NATIVE_DOUBLE);
+            dataset.close();
+        }
+        
+        file.close();
+        
+        std::cout << "LTLM results saved to: " << h5_path << std::endl;
+        
+        // Also save unified text format
+        std::vector<std::string> metadata = {
+            "Method: LTLM (Low Temperature Lanczos Method)",
+            "Samples: " + std::to_string(results.total_samples),
+            "Krylov dimension: " + std::to_string(results.krylov_dimension),
+            "Ground state energy: " + std::to_string(results.ground_state_energy),
+            "Low-lying excitations: " + std::to_string(results.low_lying_spectrum.size())
+        };
+        
+        std::string txt_path = directory + "/thermo.txt";
+        HDF5IO::saveUnifiedThermodynamicsTxt(
+            txt_path, "LTLM",
+            results.thermo_data,
+            results.energy_error,
+            results.specific_heat_error,
+            results.entropy_error,
+            results.free_energy_error,
+            metadata
+        );
+        
+    } catch (const std::exception& e) {
+        std::cerr << "Error saving LTLM results to HDF5: " << e.what() << std::endl;
     }
-    
-    file << "# LTLM Results\n";
-    file << "# Ground state energy: " << results.ground_state_energy << "\n";
-    file << "# Krylov dimension: " << results.krylov_dimension << "\n";
-    file << "# Temperature  Energy  E_error  Specific_Heat  C_error  Entropy  S_error  Free_Energy  F_error\n";
-    file << std::scientific << std::setprecision(12);
-    
-    for (size_t i = 0; i < results.thermo_data.temperatures.size(); i++) {
-        file << results.thermo_data.temperatures[i] << " "
-             << results.thermo_data.energy[i] << " "
-             << results.energy_error[i] << " "
-             << results.thermo_data.specific_heat[i] << " "
-             << results.specific_heat_error[i] << " "
-             << results.thermo_data.entropy[i] << " "
-             << results.entropy_error[i] << " "
-             << results.thermo_data.free_energy[i] << " "
-             << results.free_energy_error[i] << "\n";
-    }
-    
-    file.close();
-    std::cout << "LTLM results saved to: " << filename << std::endl;
 }

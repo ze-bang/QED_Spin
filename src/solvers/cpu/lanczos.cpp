@@ -429,8 +429,6 @@ int solve_tridiagonal_matrix(const std::vector<double>& alpha, const std::vector
         // Use dstevd for all eigenvectors at once - simpler and more reliable
         std::vector<double> evecs(m * m);
         
-        std::cout << "Computing eigenvalues and eigenvectors for tridiagonal matrix of size " << m << std::endl;
-        
         info = LAPACKE_dstevd(LAPACK_COL_MAJOR, 'V', m, diag.data(), offdiag.data(), evecs.data(), m);
         
         if (info != 0) {
@@ -438,17 +436,13 @@ int solve_tridiagonal_matrix(const std::vector<double>& alpha, const std::vector
             return info;
         }
         
-        std::cout << "Eigendecomposition successful, transforming eigenvectors..." << std::endl;
+        std::cout << "Transforming eigenvectors..." << std::endl;
 
         std::vector<ComplexVector> full_vectors(n_eigenvalues, ComplexVector(N, Complex(0.0, 0.0)));
         std::vector<ComplexVector> compensation(n_eigenvalues, ComplexVector(N, Complex(0.0, 0.0)));
 
         for (int j = 0; j < m; j++) {
             ComplexVector basis_j = read_basis_vector(temp_dir, j, N);
-
-            if (j % 50 == 0 || j == m - 1) {
-                std::cout << "  Accumulating basis vector " << j + 1 << " / " << m << std::endl;
-            }
 
             #pragma omp parallel for schedule(static)
             for (int i = 0; i < n_eigenvalues; i++) {
@@ -467,10 +461,6 @@ int solve_tridiagonal_matrix(const std::vector<double>& alpha, const std::vector
         }
 
         for (int i = 0; i < n_eigenvalues; i++) {
-            if (i % 10 == 0) {
-                std::cout << "Transforming eigenvector " << i + 1 << " of " << n_eigenvalues << std::endl;
-            }
-
             ComplexVector& full_vector = full_vectors[i];
 
             double norm = cblas_dznrm2(N, full_vector.data(), 1);
@@ -507,41 +497,16 @@ int solve_tridiagonal_matrix(const std::vector<double>& alpha, const std::vector
                 }
             }
 
-            // Save eigenvector using HDF5 (primary format)
+            // Save eigenvector using HDF5 (only format - no .dat/.txt fallback)
             try {
                 std::string hdf5_file = HDF5IO::createOrOpenFile(evec_dir);
                 HDF5IO::saveEigenvector(hdf5_file, i, full_vector);
             } catch (const std::exception& e) {
                 std::cerr << "Warning: Failed to save eigenvector " << i << " to HDF5: " << e.what() << std::endl;
-                std::cerr << "Falling back to binary format..." << std::endl;
-                
-                // Fallback to binary format
-                std::string evec_file = evec_dir + "/eigenvector_" + std::to_string(i) + ".dat";
-                std::ofstream evec_outfile(evec_file, std::ios::binary);
-                if (evec_outfile) {
-                    evec_outfile.write(reinterpret_cast<const char*>(full_vector.data()), N * sizeof(Complex));
-                    evec_outfile.close();
-                }
-            }
-            
-            // Also save in text format for backward compatibility (can be disabled for large systems)
-            if (N < 10000) {  // Only save text for small systems
-                std::string evec_text_file = evec_dir + "/eigenvector_" + std::to_string(i) + ".txt";
-                std::ofstream evec_text_outfile(evec_text_file);
-                if (evec_text_outfile) {
-                    evec_text_outfile << std::scientific << std::setprecision(15);
-                    for (int j = 0; j < N; j++) {
-                        evec_text_outfile << std::real(full_vector[j]) << " "
-                                         << std::imag(full_vector[j]) << std::endl;
-                    }
-                    evec_text_outfile.close();
-                }
-            }
-
-            if (i % 10 == 0 || i == n_eigenvalues - 1) {
-                std::cout << "  Saved eigenvector " << i + 1 << " of " << n_eigenvalues << std::endl;
             }
         }
+        
+        std::cout << "Saved " << n_eigenvalues << " eigenvectors" << std::endl;
 
     } else {
         // Just compute eigenvalues
@@ -557,36 +522,13 @@ int solve_tridiagonal_matrix(const std::vector<double>& alpha, const std::vector
     eigenvalues.resize(n_eigenvalues);
     std::copy(diag.begin(), diag.begin() + n_eigenvalues, eigenvalues.begin());
 
-    // Save eigenvalues using HDF5 (primary format)
+    // Save eigenvalues using HDF5
     try {
         std::string hdf5_file = HDF5IO::createOrOpenFile(evec_dir);
         HDF5IO::saveEigenvalues(hdf5_file, eigenvalues);
-        std::cout << "Saved " << n_eigenvalues << " eigenvalues to HDF5" << std::endl;
+        std::cout << "Lanczos: Saved " << n_eigenvalues << " eigenvalues to HDF5" << std::endl;
     } catch (const std::exception& e) {
         std::cerr << "Warning: Failed to save eigenvalues to HDF5: " << e.what() << std::endl;
-        std::cerr << "Falling back to binary format..." << std::endl;
-        
-        // Fallback to binary format
-        std::string eigenvalue_file = evec_dir + "/eigenvalues.dat";
-        std::ofstream eval_outfile(eigenvalue_file, std::ios::binary);
-        if (eval_outfile) {
-            size_t n_evals = eigenvalues.size();
-            eval_outfile.write(reinterpret_cast<const char*>(&n_evals), sizeof(size_t));
-            eval_outfile.write(reinterpret_cast<const char*>(eigenvalues.data()), n_eigenvalues * sizeof(double));
-            eval_outfile.close();
-        }
-    }
-    
-    // Also save eigenvalues in text format for backward compatibility
-    std::string eigenvalue_text_file = evec_dir + "/eigenvalues.txt";
-    std::ofstream eval_text_outfile(eigenvalue_text_file);
-    if (eval_text_outfile) {
-        eval_text_outfile << std::scientific << std::setprecision(15);
-        eval_text_outfile << eigenvalues.size() << std::endl;
-        for (size_t i = 0; i < eigenvalues.size(); i++) {
-            eval_text_outfile << eigenvalues[i] << std::endl;
-        }
-        eval_text_outfile.close();
     }
     
     return info;
@@ -958,9 +900,6 @@ void lanczos(std::function<void(const Complex*, Complex*, int)> H, uint64_t N, u
         v_current[i] = Complex(dist(gen), dist(gen));
     }
 
-    std::cout << "Lanczos with Adaptive Selective Reorthogonalization (Parlett-Simon)" << std::endl;
-    std::cout << "Lanczos: Initial vector generated" << std::endl;
-    
     // Normalize the starting vector
     double norm = cblas_dznrm2(N, v_current.data(), 1);
     Complex scale_factor = Complex(1.0/norm, 0.0);
@@ -988,32 +927,28 @@ void lanczos(std::function<void(const Complex*, Complex*, int)> H, uint64_t N, u
     max_iter = std::min(N, max_iter);
     
     // ===== ADAPTIVE SELECTIVE REORTHOGONALIZATION (Parlett-Simon) =====
-    // Industry-standard approach: monitor orthogonality loss and reorthogonalize only when needed
-    const double eps = std::numeric_limits<double>::epsilon(); // Machine precision ~2.22e-16
-    const double sqrt_eps = std::sqrt(eps);                     // ~1.5e-8
-    const double ortho_threshold = sqrt_eps;                    // Reorthogonalization threshold
+    const double eps = std::numeric_limits<double>::epsilon();
+    const double sqrt_eps = std::sqrt(eps);
+    const double ortho_threshold = sqrt_eps;
     
     // Storage for recent basis vectors (keep in RAM for fast access)
     std::vector<ComplexVector> recent_vectors;
-    const uint64_t max_recent = std::min(static_cast<uint64_t>(20), N); // Keep last 20 vectors in RAM
+    const uint64_t max_recent = std::min(static_cast<uint64_t>(20), N);
     recent_vectors.reserve(max_recent);
     recent_vectors.push_back(v_current);
     
-    // Track which vectors need reorthogonalization (omega from Parlett-Simon)
-    std::vector<std::vector<double>> omega; // omega[j][i] = estimated loss of orthogonality of v_j to v_i
+    // Track which vectors need reorthogonalization
+    std::vector<std::vector<double>> omega;
     omega.resize(1);
-    omega[0].push_back(eps); // omega[0][0] = eps (orthogonal to self within machine precision)
+    omega[0].push_back(eps);
     
     // Monitoring counters
     uint64_t total_reorth_count = 0;
     uint64_t full_reorth_count = 0;
     uint64_t selective_reorth_count = 0;
     
-    std::cout << "Begin Lanczos iterations with max_iter = " << max_iter << std::endl;
-    std::cout << "Tolerance = " << tol << std::endl;
-    std::cout << "Number of eigenvalues to compute = " << exct << std::endl;
-    std::cout << "Reorthogonalization threshold: " << ortho_threshold << std::endl;
-    std::cout << "Lanczos: Iterating..." << std::endl;   
+    std::cout << "Lanczos: max_iter=" << max_iter << ", n_eig=" << exct 
+              << ", tol=" << tol << std::endl;
     
     // Lanczos iteration
     for (int j = 0; j < max_iter; j++) {
@@ -1077,8 +1012,9 @@ void lanczos(std::function<void(const Complex*, Complex*, int)> H, uint64_t N, u
             residual_error = norm / (std::abs(alpha[j]) + std::abs(beta[j]) + norm);
         }
         
-        // Print progress with residual error
-        if ((j + 1) % 10 == 0 || j < 5) {
+        // Print progress with residual error (reduced verbosity)
+        bool print_progress = (j == 0) || ((j + 1) % 100 == 0) || (j + 1 == max_iter);
+        if (print_progress) {
             std::cout << "Iteration " << j + 1 << " of " << max_iter 
                      << "  |  beta = " << std::scientific << std::setprecision(4) << norm
                      << "  |  residual = " << residual_error << std::defaultfloat << std::endl;
@@ -1131,19 +1067,10 @@ void lanczos(std::function<void(const Complex*, Complex*, int)> H, uint64_t N, u
     // Construct and solve tridiagonal matrix
     uint64_t m = alpha.size();
     
-    // Print reorthogonalization statistics
-    std::cout << "\n===== Reorthogonalization Statistics =====" << std::endl;
-    std::cout << "Total Lanczos iterations: " << m << std::endl;
-    std::cout << "Full reorthogonalizations: " << full_reorth_count << std::endl;
-    std::cout << "Selective reorthogonalizations: " << selective_reorth_count << std::endl;
-    std::cout << "Total inner products: " << total_reorth_count << std::endl;
-    std::cout << "Average reorth per iteration: " << (m > 0 ? (double)total_reorth_count / m : 0.0) << std::endl;
-    std::cout << "Theoretical full reorth cost: " << (m * (m + 1)) / 2 << std::endl;
-    std::cout << "Savings factor: " << (m > 0 ? (double)(m * (m + 1) / 2) / std::max(1UL, total_reorth_count) : 0.0) << "x" << std::endl;
-    std::cout << "==========================================\n" << std::endl;
-    
-    std::cout << "Lanczos: Constructing tridiagonal matrix" << std::endl;
-    std::cout << "Lanczos: Solving tridiagonal matrix" << std::endl;
+    // Print compact summary
+    std::cout << "Lanczos: " << m << " iterations, "
+              << (m > 0 ? (double)(m * (m + 1) / 2) / std::max(1UL, total_reorth_count) : 0.0) 
+              << "x reorth savings" << std::endl;
     
     // Write eigenvalues and eigenvectors to files
     std::string evec_dir = (dir.empty() ? "./eigenvectors" : dir + "/eigenvectors");
@@ -1489,7 +1416,7 @@ void block_lanczos(std::function<void(const Complex*, Complex*, int)> H, uint64_
             }
         }
 
-        // Normalize and save eigenvectors
+        // Normalize eigenvectors
         for (int vec_idx = 0; vec_idx < output_eigs; ++vec_idx) {
             ComplexVector& vec = full_vectors[vec_idx];
             const double norm = cblas_dznrm2(N, vec.data(), 1);
@@ -1498,51 +1425,13 @@ void block_lanczos(std::function<void(const Complex*, Complex*, int)> H, uint64_
                 const Complex scale = Complex(1.0 / norm, 0.0);
                 cblas_zscal(N, &scale, vec.data(), 1);
             }
-
-            // Save binary format
-            const std::string evec_file = evec_dir + "/eigenvector_" + std::to_string(vec_idx) + ".dat";
-            std::ofstream evec_out(evec_file, std::ios::binary);
-            if (evec_out) {
-                evec_out.write(reinterpret_cast<const char*>(vec.data()), N * sizeof(Complex));
-                evec_out.close();
-            } else {
-                std::cerr << "Block Lanczos: failed to write " << evec_file << std::endl;
-            }
-
-            // Save text format
-            const std::string evec_text_file = evec_dir + "/eigenvector_" + std::to_string(vec_idx) + ".txt";
-            std::ofstream evec_text_out(evec_text_file);
-            if (evec_text_out) {
-                evec_text_out << std::scientific << std::setprecision(15);
-                for (int r = 0; r < N; ++r) {
-                    evec_text_out << std::real(vec[r]) << " " << std::imag(vec[r]) << "\n";
-                }
-                evec_text_out.close();
-            }
         }
-    }
-
-    // ===== Save eigenvalues =====
-    const std::string eigenvalue_file = evec_dir + "/eigenvalues.dat";
-    std::ofstream eval_out(eigenvalue_file, std::ios::binary);
-    if (eval_out) {
-        const size_t count = eigenvalues.size();
-        eval_out.write(reinterpret_cast<const char*>(&count), sizeof(size_t));
-        eval_out.write(reinterpret_cast<const char*>(eigenvalues.data()), count * sizeof(double));
-        eval_out.close();
+        
+        // Save all results using unified HDF5 function
+        HDF5IO::saveDiagonalizationResults(dir, eigenvalues, full_vectors, "Block Lanczos");
     } else {
-        std::cerr << "Block Lanczos: failed to write " << eigenvalue_file << std::endl;
-    }
-
-    const std::string eigenvalue_text_file = evec_dir + "/eigenvalues.txt";
-    std::ofstream eval_text_out(eigenvalue_text_file);
-    if (eval_text_out) {
-        eval_text_out << std::scientific << std::setprecision(15);
-        eval_text_out << eigenvalues.size() << "\n";
-        for (const double val : eigenvalues) {
-            eval_text_out << val << "\n";
-        }
-        eval_text_out.close();
+        // No eigenvectors requested, just save eigenvalues
+        HDF5IO::saveDiagonalizationResults(dir, eigenvalues, {}, "Block Lanczos");
     }
 
     // Cleanup temporary files
@@ -2436,36 +2325,22 @@ void full_diagonalization(std::function<void(const Complex*, Complex*, int)> H, 
             eigenvalues[i] = evals[i];
         }
         
-        // Save eigenvectors if requested
+        // Save results using unified HDF5 function
         if (compute_eigenvectors && !dir.empty()) {
             std::cout << "Saving " << actual_num_eigs << " eigenvectors to disk..." << std::endl;
             
+            // Convert evecs to vector of vectors format
+            std::vector<std::vector<Complex>> eigenvector_list(actual_num_eigs);
             for (int i = 0; i < actual_num_eigs; i++) {
-                std::string evec_file = dir + "/eigenvector_" + std::to_string(i) + ".dat";
-                std::ofstream evec_outfile(evec_file, std::ios::binary);
-                if (!evec_outfile) {
-                    std::cerr << "Error: Cannot open file " << evec_file << " for writing" << std::endl;
-                    continue;
-                }
-                
+                eigenvector_list[i].resize(N);
                 for (int j = 0; j < N; j++) {
-                    evec_outfile << std::real(evecs[i * N + j]) << " "
-                                 << std::imag(evecs[i * N + j]) << "\n";
+                    eigenvector_list[i][j] = evecs[i * N + j];
                 }
-                
-                evec_outfile.close();
             }
             
-            // Save eigenvalues to file
-            std::string eval_file = dir + "/eigenvalues.dat";
-            std::ofstream eval_outfile(eval_file, std::ios::binary);
-            if (eval_outfile) {
-                size_t n_evals = eigenvalues.size();
-                eval_outfile.write(reinterpret_cast<const char*>(&n_evals), sizeof(size_t));
-                eval_outfile.write(reinterpret_cast<const char*>(eigenvalues.data()), n_evals * sizeof(double));
-                eval_outfile.close();
-                std::cout << "Saved " << n_evals << " eigenvalues to " << eval_file << std::endl;
-            }
+            HDF5IO::saveDiagonalizationResults(dir, eigenvalues, eigenvector_list, "Full Diagonalization");
+        } else if (!dir.empty()) {
+            HDF5IO::saveDiagonalizationResults(dir, eigenvalues, {}, "Full Diagonalization");
         }
     } 
     else {
@@ -2564,42 +2439,33 @@ void full_diagonalization(std::function<void(const Complex*, Complex*, int)> H, 
                 eigenvalues[i] = eigensolver.eigenvalues()(i);
             }
             
-            // Save eigenvectors if requested
+            // Save eigenvectors if requested - use HDF5 in /eigenvectors/ subdirectory
             if (compute_eigenvectors && !dir.empty()) {
                 std::cout << "Saving " << actual_num_eigs << " eigenvectors to disk..." << std::endl;
                 
-                #pragma omp parallel for schedule(dynamic)
-                for (int i = 0; i < actual_num_eigs; i++) {
-                    std::string evec_file = dir + "/eigenvector_" + std::to_string(i) + ".dat";
-                    std::ofstream evec_outfile(evec_file, std::ios::binary);
-                    
-                    if (!evec_outfile) {
-                        #pragma omp critical
-                        {
-                            std::cerr << "Error: Cannot open file " << evec_file << " for writing" << std::endl;
-                        }
-                        continue;
-                    }
-                    
-                    // Convert Eigen vector to std::vector<Complex>
-                    std::vector<Complex> eigenvector(N);
-                    for (int j = 0; j < N; j++) {
-                        eigenvector[j] = eigensolver.eigenvectors().col(i)(j);
-                    }
-                    
-                    evec_outfile.write(reinterpret_cast<const char*>(eigenvector.data()), N * sizeof(Complex));
-                    evec_outfile.close();
-                }
+                // Create eigenvectors subdirectory
+                std::string evec_dir = dir + "/eigenvectors";
+                safe_system_call("mkdir -p " + evec_dir);
                 
-                // Save eigenvalues to file
-                std::string eval_file = dir + "/eigenvalues.dat";
-                std::ofstream eval_outfile(eval_file, std::ios::binary);
-                if (eval_outfile) {
-                    size_t n_evals = eigenvalues.size();
-                    eval_outfile.write(reinterpret_cast<const char*>(&n_evals), sizeof(size_t));
-                    eval_outfile.write(reinterpret_cast<const char*>(eigenvalues.data()), n_evals * sizeof(double));
-                    eval_outfile.close();
-                    std::cout << "Saved " << n_evals << " eigenvalues to " << eval_file << std::endl;
+                // Save to HDF5 (primary format)
+                try {
+                    std::string hdf5_file = HDF5IO::createOrOpenFile(evec_dir);
+                    
+                    for (int i = 0; i < actual_num_eigs; i++) {
+                        // Convert Eigen vector to std::vector<Complex>
+                        std::vector<Complex> eigenvector(N);
+                        for (int j = 0; j < N; j++) {
+                            eigenvector[j] = eigensolver.eigenvectors().col(i)(j);
+                        }
+                        HDF5IO::saveEigenvector(hdf5_file, i, eigenvector);
+                    }
+                    
+                    // Also save eigenvalues to HDF5
+                    HDF5IO::saveEigenvalues(hdf5_file, eigenvalues);
+                    std::cout << "Saved " << actual_num_eigs << " eigenvectors and eigenvalues to HDF5" << std::endl;
+                    
+                } catch (const std::exception& e) {
+                    std::cerr << "Warning: Failed to save to HDF5: " << e.what() << std::endl;
                 }
             }
         }
@@ -2786,6 +2652,8 @@ void krylov_schur(std::function<void(const Complex*, Complex*, int)> H, uint64_t
             if (compute_eigenvectors) {
                 std::cout << "  Computing eigenvectors..." << std::endl;
                 
+                std::vector<ComplexVector> full_eigenvectors(k, ComplexVector(N));
+                
                 #pragma omp parallel for
                 for (int i = 0; i < k; i++) {
                     ComplexVector eigenvector(N, Complex(0.0, 0.0));
@@ -2803,20 +2671,14 @@ void krylov_schur(std::function<void(const Complex*, Complex*, int)> H, uint64_t
                     Complex scale = Complex(1.0/vec_norm, 0.0);
                     cblas_zscal(N, &scale, eigenvector.data(), 1);
                     
-                    // Save eigenvector
-                    std::string evec_file = evec_dir + "/eigenvector_" + std::to_string(i) + ".dat";
-                    std::ofstream evec_outfile(evec_file, std::ios::binary);
-                    evec_outfile.write(reinterpret_cast<const char*>(eigenvector.data()), N * sizeof(Complex));
-                    evec_outfile.close();
+                    full_eigenvectors[i] = std::move(eigenvector);
                 }
                 
-                // Save eigenvalues
-                std::string eval_file = evec_dir + "/eigenvalues.dat";
-                std::ofstream eval_outfile(eval_file, std::ios::binary);
-                size_t n_evals = eigenvalues.size();
-                eval_outfile.write(reinterpret_cast<const char*>(&n_evals), sizeof(size_t));
-                eval_outfile.write(reinterpret_cast<const char*>(eigenvalues.data()), k * sizeof(double));
-                eval_outfile.close();
+                // Save all results using unified HDF5 function
+                HDF5IO::saveDiagonalizationResults(dir, eigenvalues, full_eigenvectors, "Krylov-Schur");
+            } else {
+                // Just save eigenvalues
+                HDF5IO::saveDiagonalizationResults(dir, eigenvalues, {}, "Krylov-Schur");
             }
             
             break;

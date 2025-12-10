@@ -591,7 +591,8 @@ void GPUTPQSolver::runMicrocanonicalTPQ(
             // Output file for this sample
             std::string sample_file = dir + "/SS_rand" + std::to_string(sample) + ".dat";
             
-            // Initial measurements (step 1)
+            // Initial measurements (step 1) - for internal use only
+            // Step 1 data is unphysical (not yet thermalized), so we don't write it
             std::pair<double, double> energy_var_pair = computeEnergyAndVariance();
             energy = energy_var_pair.first;
             variance = energy_var_pair.second;
@@ -599,9 +600,9 @@ void GPUTPQSolver::runMicrocanonicalTPQ(
             // Compute inverse temperature: β = 2*step / (L*D_S - E)
             inv_temp = 2.0 / (large_value * D_S - energy);
             
-            writeTPQData(sample_file, inv_temp, energy, variance, first_norm, 1);
+            // Skip writing step 1 - it contains unphysical initialization data
+            // Physical data starts from step 2
             
-            std::cout << "Step 1: E = " << energy << ", β = " << inv_temp << std::endl;
             start_step = 2;
         }
         

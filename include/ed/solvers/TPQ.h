@@ -334,4 +334,42 @@ void computeObservableDynamics_U_t(
     double dt
 );
 
+/**
+ * Convert TPQ results (SS_rand*.dat files) to unified thermodynamic format
+ * 
+ * Reads raw TPQ data from multiple sample files, computes averages and error bars,
+ * then writes to the unified text format consistent with FTLM/LTLM/Hybrid methods.
+ * 
+ * @param tpq_dir Directory containing TPQ output files (SS_rand*.dat)
+ * @param output_file Output file path for unified thermodynamic data
+ * @param temp_min Minimum temperature for output (default 0.01)
+ * @param temp_max Maximum temperature for output (default 100.0)
+ * @param num_temp_bins Number of temperature bins (default 200)
+ * @return true if successful, false otherwise
+ */
+bool convert_tpq_to_unified_thermo(
+    const std::string& tpq_dir,
+    const std::string& output_file,
+    double temp_min = 0.01,
+    double temp_max = 100.0,
+    uint64_t num_temp_bins = 200
+);
+
+/**
+ * Convenience wrapper for convert_tpq_to_unified_thermo that auto-generates output path
+ * 
+ * @param tpq_dir Directory containing TPQ output files (SS_rand*.dat)
+ * @param num_samples Number of TPQ samples (used in output filename)
+ * @param temp_min Minimum temperature for output (default 0.01)
+ * @param temp_max Maximum temperature for output (default 100.0)
+ * @param num_temp_points Number of temperature points (default 200)
+ */
+void convert_tpq_to_unified_thermodynamics(
+    const std::string& tpq_dir,
+    uint64_t num_samples,
+    double temp_min = 0.01,
+    double temp_max = 100.0,
+    uint64_t num_temp_points = 200
+);
+
 #endif // TPQ_H

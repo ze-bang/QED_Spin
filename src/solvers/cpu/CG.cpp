@@ -1,5 +1,6 @@
 #include <ed/solvers/CG.h>
 #include <ed/core/system_utils.h>
+#include <ed/core/hdf5_io.h>
 
 // Davidson method for finding lowest eigenvalues
 void davidson_method(
@@ -699,35 +700,8 @@ void lobpcg_method(
         eigenvectors[b] = WXP[1][b];
     }
     
-    // Save eigenvectors to files if requested
-    if (!dir.empty()) {
-        std::string evec_dir = dir + "/eigenvectors";
-        std::string cmd = "mkdir -p " + evec_dir;
-        safe_system_call(cmd);
-        
-        for (int i = 0; i < block_size; i++) {
-            std::string evec_file = evec_dir + "/eigenvector_" + std::to_string(i) + ".dat";
-            std::ofstream outfile(evec_file);
-            if (outfile) {
-                outfile.write(reinterpret_cast<char*>(eigenvectors[i].data()), N * sizeof(Complex));
-                outfile.close();
-                std::cout << "Saved eigenvector " << i << " to " << evec_file << std::endl;
-            } else {
-                std::cerr << "Error: Could not save eigenvector to " << evec_file << std::endl;
-            }
-        }
-        
-        // Save eigenvalues to a file
-        std::string eval_file = evec_dir + "/eigenvalues.dat";
-        std::ofstream eval_outfile(eval_file);
-        if (eval_outfile) {
-            size_t n_evals = eigenvalues.size();
-            eval_outfile.write(reinterpret_cast<char*>(&n_evals), sizeof(size_t));
-            eval_outfile.write(reinterpret_cast<char*>(eigenvalues.data()), n_evals * sizeof(double));
-            eval_outfile.close();
-            std::cout << "Saved eigenvalues to " << eval_file << std::endl;
-        }
-    }
+    // Save results using unified HDF5 function
+    HDF5IO::saveDiagonalizationResults(dir, eigenvalues, eigenvectors, "LOBPCG");
 }
 
 // Function with same interface as cg_diagonalization

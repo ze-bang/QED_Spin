@@ -3,8 +3,10 @@
 #include <ed/solvers/hybrid_thermal.h>
 #include <ed/solvers/ltlm.h>
 #include <ed/solvers/ftlm.h>
+#include <ed/core/hdf5_io.h>       // For HDF5 output
 #include <fstream>
 #include <iomanip>
+#include <sstream>
 #include <algorithm>
 
 /**
@@ -259,65 +261,65 @@ HybridThermalResults hybrid_thermal_method(
 }
 
 /**
- * @brief Save hybrid thermal results to file
+ * @brief Save hybrid thermal results to HDF5 file and unified text format
  */
 void save_hybrid_thermal_results(
     const HybridThermalResults& results,
     const std::string& filename
 ) {
-    std::ofstream file(filename);
-    if (!file.is_open()) {
-        std::cerr << "Error: Cannot open file " << filename << " for writing" << std::endl;
-        return;
-    }
+    // Extract directory from filename
+    std::string directory = filename.substr(0, filename.find_last_of('/'));
+    if (directory.empty()) directory = ".";
     
-    // Write header with metadata
-    file << "# Hybrid Thermal Method Results (LTLM + FTLM)\n";
-    file << "# ============================================\n";
-    file << "# Ground state energy: " << results.ground_state_energy << "\n";
-    file << "# Crossover temperature: " << results.actual_crossover_temp << "\n";
-    file << "# Crossover index: " << results.crossover_index << "\n";
-    file << "# LTLM temperature points: " << results.ltlm_points << "\n";
-    file << "# FTLM temperature points: " << results.ftlm_points << "\n";
-    file << "# FTLM samples used: " << results.ftlm_samples_used << "\n";
-    file << "#\n";
-    file << "# Method assignment:\n";
-    file << "#   Indices [0, " << results.crossover_index << "): LTLM (deterministic, accurate ground state)\n";
-    file << "#   Indices [" << results.crossover_index << ", " << results.thermo_data.temperatures.size() 
-         << "): FTLM (random sampling, error bars)\n";
-    file << "#\n";
-    file << "# Columns:\n";
-    file << "# 1: Temperature\n";
-    file << "# 2: Energy\n";
-    file << "# 3: Energy_Error\n";
-    file << "# 4: Specific_Heat\n";
-    file << "# 5: SpecificHeat_Error\n";
-    file << "# 6: Entropy\n";
-    file << "# 7: Entropy_Error\n";
-    file << "# 8: Free_Energy\n";
-    file << "# 9: FreeEnergy_Error\n";
-    file << "# 10: Method (L=LTLM, F=FTLM)\n";
-    file << "#\n";
-    
-    file << std::scientific << std::setprecision(12);
-    
-    for (size_t i = 0; i < results.thermo_data.temperatures.size(); i++) {
-        char method_flag = (i < static_cast<size_t>(results.crossover_index)) ? 'L' : 'F';
+    try {
+        HDF5IO::saveHybridThermalResults(
+            filename,
+            results.thermo_data.temperatures,
+            results.thermo_data.energy,
+            results.energy_error,
+            results.thermo_data.specific_heat,
+            results.specific_heat_error,
+            results.thermo_data.entropy,
+            results.entropy_error,
+            results.thermo_data.free_energy,
+            results.free_energy_error,
+            results.ground_state_energy,
+            results.actual_crossover_temp,
+            results.crossover_index,
+            results.ltlm_points,
+            results.ftlm_points,
+            results.ftlm_samples_used
+        );
+        std::cout << "Hybrid thermal results saved to: " << filename << std::endl;
         
-        file << results.thermo_data.temperatures[i] << "  "
-             << results.thermo_data.energy[i] << "  "
-             << results.energy_error[i] << "  "
-             << results.thermo_data.specific_heat[i] << "  "
-             << results.specific_heat_error[i] << "  "
-             << results.thermo_data.entropy[i] << "  "
-             << results.entropy_error[i] << "  "
-             << results.thermo_data.free_energy[i] << "  "
-             << results.free_energy_error[i] << "  "
-             << method_flag << "\n";
+        // Also save unified text format
+        std::ostringstream crossover_ss;
+        crossover_ss << std::fixed << std::setprecision(6) << results.actual_crossover_temp;
+        
+        std::vector<std::string> metadata = {
+            "Method: Hybrid (LTLM + FTLM with automatic crossover)",
+            "Ground state energy: " + std::to_string(results.ground_state_energy),
+            "Crossover temperature: " + crossover_ss.str(),
+            "LTLM points: " + std::to_string(results.ltlm_points),
+            "FTLM points: " + std::to_string(results.ftlm_points),
+            "FTLM samples: " + std::to_string(results.ftlm_samples_used),
+            "Note: T < T_crossover uses LTLM (exact ground state), T >= T_crossover uses FTLM (sampling)"
+        };
+        
+        std::string txt_path = directory + "/thermo.txt";
+        HDF5IO::saveUnifiedThermodynamicsTxt(
+            txt_path, "Hybrid",
+            results.thermo_data,
+            results.energy_error,
+            results.specific_heat_error,
+            results.entropy_error,
+            results.free_energy_error,
+            metadata
+        );
+        
+    } catch (const std::exception& e) {
+        std::cerr << "Error saving hybrid thermal results to HDF5: " << e.what() << std::endl;
     }
-    
-    file.close();
-    std::cout << "Hybrid thermal results saved to: " << filename << std::endl;
 }
 
 /**

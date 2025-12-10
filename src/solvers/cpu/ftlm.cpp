@@ -1,5 +1,6 @@
 // ftlm.cpp - Finite Temperature Lanczos Method implementation
 #include <ed/core/system_utils.h>
+#include <ed/core/hdf5_io.h>       // For HDF5 output
 
 #include <ed/solvers/ftlm.h>
 #include <ed/solvers/lanczos.h>
@@ -381,36 +382,57 @@ FTLMResults finite_temperature_lanczos(
 }
 
 /**
- * @brief Save FTLM results to file
+ * @brief Save FTLM results to HDF5 file and unified text format
  */
 void save_ftlm_results(
     const FTLMResults& results,
     const std::string& filename
 ) {
-    std::ofstream file(filename);
-    if (!file.is_open()) {
-        std::cerr << "Error: Cannot open file " << filename << " for writing" << std::endl;
-        return;
+    // Extract directory from filename to create HDF5 file
+    std::string directory = filename.substr(0, filename.find_last_of('/'));
+    if (directory.empty()) directory = ".";
+    
+    try {
+        std::string h5_path = HDF5IO::createOrOpenFile(directory);
+        
+        HDF5IO::saveFTLMThermodynamics(
+            h5_path,
+            results.thermo_data.temperatures,
+            results.thermo_data.energy,
+            results.energy_error,
+            results.thermo_data.specific_heat,
+            results.specific_heat_error,
+            results.thermo_data.entropy,
+            results.entropy_error,
+            results.thermo_data.free_energy,
+            results.free_energy_error,
+            results.total_samples,
+            "FTLM"
+        );
+        
+        std::cout << "FTLM results saved to: " << h5_path << std::endl;
+        
+        // Also save unified text format
+        std::vector<std::string> metadata = {
+            "Method: FTLM (Finite Temperature Lanczos Method)",
+            "Samples: " + std::to_string(results.total_samples),
+            "Ground state estimate: " + std::to_string(results.ground_state_estimate)
+        };
+        
+        std::string txt_path = directory + "/thermo.txt";
+        HDF5IO::saveUnifiedThermodynamicsTxt(
+            txt_path, "FTLM",
+            results.thermo_data,
+            results.energy_error,
+            results.specific_heat_error,
+            results.entropy_error,
+            results.free_energy_error,
+            metadata
+        );
+        
+    } catch (const std::exception& e) {
+        std::cerr << "Error saving FTLM results to HDF5: " << e.what() << std::endl;
     }
-    
-    file << "# FTLM Results (averaged over " << results.total_samples << " samples)\n";
-    file << "# Temperature  Energy  E_error  Specific_Heat  C_error  Entropy  S_error  Free_Energy  F_error\n";
-    file << std::scientific << std::setprecision(12);
-    
-    for (size_t i = 0; i < results.thermo_data.temperatures.size(); i++) {
-        file << results.thermo_data.temperatures[i] << " "
-             << results.thermo_data.energy[i] << " "
-             << results.energy_error[i] << " "
-             << results.thermo_data.specific_heat[i] << " "
-             << results.specific_heat_error[i] << " "
-             << results.thermo_data.entropy[i] << " "
-             << results.entropy_error[i] << " "
-             << results.thermo_data.free_energy[i] << " "
-             << results.free_energy_error[i] << "\n";
-    }
-    
-    file.close();
-    std::cout << "FTLM results saved to: " << filename << std::endl;
 }
 
 /**
@@ -1047,51 +1069,127 @@ DynamicalResponseResults compute_dynamical_response_thermal(
     
     return results;
 }
+
 /**
- * @brief Save dynamical response results to file
+ * @brief Save spectral function to text file in unified format
+ * 
+ * Unified format: 5 columns
+ *   # Frequency  Re[S(ω)]  Im[S(ω)]  Re[Error]  Im[Error]
+ * 
+ * This provides consistent output across all spectral function methods:
+ * - FTLM dynamical response
+ * - Ground state DSSF (continued fraction)
+ * - TPQ DSSF
+ * - Lehmann representation
+ */
+void save_spectral_function_txt(
+    const DynamicalResponseResults& results,
+    const std::string& filename,
+    const std::string& method_description,
+    double temperature,
+    double ground_state_energy
+) {
+    std::ofstream fout(filename);
+    if (!fout.is_open()) {
+        std::cerr << "Error: Could not open file for writing: " << filename << std::endl;
+        return;
+    }
+    
+    // Prepare imaginary parts and errors (use zeros if not provided)
+    std::vector<double> spectral_imag = results.spectral_function_imag;
+    if (spectral_imag.empty()) {
+        spectral_imag.resize(results.frequencies.size(), 0.0);
+    }
+    std::vector<double> error_real = results.spectral_error;
+    if (error_real.empty()) {
+        error_real.resize(results.frequencies.size(), 0.0);
+    }
+    std::vector<double> error_imag = results.spectral_error_imag;
+    if (error_imag.empty()) {
+        error_imag.resize(results.frequencies.size(), 0.0);
+    }
+    
+    // Write header with metadata
+    fout << "# Dynamical Response Results (averaged over " << results.total_samples << " samples)\n";
+    if (!method_description.empty()) {
+        fout << "# Method: " << method_description << "\n";
+    }
+    if (temperature > 0) {
+        fout << "# Temperature: " << temperature << "\n";
+    }
+    if (std::abs(ground_state_energy) > 1e-14) {
+        fout << "# Ground state energy: " << ground_state_energy << "\n";
+    }
+    fout << "# Frequency  Re[S(ω)]  Im[S(ω)]  Re[Error]  Im[Error]\n";
+    
+    // Write data in unified 5-column format
+    fout << std::scientific << std::setprecision(12);
+    for (size_t i = 0; i < results.frequencies.size(); i++) {
+        fout << results.frequencies[i] << " "
+             << results.spectral_function[i] << " "
+             << spectral_imag[i] << " "
+             << error_real[i] << " "
+             << error_imag[i] << "\n";
+    }
+    
+    fout.close();
+    std::cout << "Spectral function saved to: " << filename << std::endl;
+}
+
+/**
+ * @brief Save dynamical response results to HDF5 file and text file
+ * 
+ * Saves to:
+ * 1. HDF5 file: directory/ed_results.h5 under /dynamical/<operator_name>/
+ * 2. Text file: original filename with unified 5-column format
  */
 void save_dynamical_response_results(
     const DynamicalResponseResults& results,
     const std::string& filename
 ) {
-    std::ofstream file(filename);
-    if (!file.is_open()) {
-        std::cerr << "Error: Cannot open file " << filename << " for writing" << std::endl;
-        return;
-    }
+    // Extract directory from filename to create HDF5 file
+    std::string directory = filename.substr(0, filename.find_last_of('/'));
+    if (directory.empty()) directory = ".";
     
-    file << "# Dynamical Response Results (averaged over " << results.total_samples << " samples)\n";
+    // Extract operator name from filename (remove path and extension)
+    std::string basename = filename.substr(filename.find_last_of('/') + 1);
+    std::string operator_name = basename.substr(0, basename.find_last_of('.'));
+    if (operator_name.empty()) operator_name = "dynamical_response";
     
-    // Always output complex format for consistency
-    file << "# Frequency  Re[S(ω)]  Im[S(ω)]  Re[Error]  Im[Error]\n";
+    // Save to text file using unified format
+    save_spectral_function_txt(results, filename, "FTLM dynamical response");
     
-    file << std::scientific << std::setprecision(12);
-    
-    for (size_t i = 0; i < results.frequencies.size(); i++) {
-        file << results.frequencies[i] << " "
-             << results.spectral_function[i] << " ";
+    // Save to HDF5
+    try {
+        std::string h5_path = HDF5IO::createOrOpenFile(directory);
         
-        // Output imaginary part (will be zero if not computed)
-        if (!results.spectral_function_imag.empty() && i < results.spectral_function_imag.size()) {
-            file << results.spectral_function_imag[i];
-        } else {
-            file << "0.000000000000e+00";
+        // Prepare imaginary parts (use zeros if not provided)
+        std::vector<double> spectral_imag = results.spectral_function_imag;
+        if (spectral_imag.empty()) {
+            spectral_imag.resize(results.frequencies.size(), 0.0);
         }
         
-        file << " " << results.spectral_error[i] << " ";
-        
-        // Output imaginary error (will be zero if not computed)
-        if (!results.spectral_error_imag.empty() && i < results.spectral_error_imag.size()) {
-            file << results.spectral_error_imag[i];
-        } else {
-            file << "0.000000000000e+00";
+        std::vector<double> error_imag = results.spectral_error_imag;
+        if (error_imag.empty()) {
+            error_imag.resize(results.frequencies.size(), 0.0);
         }
         
-        file << "\n";
+        HDF5IO::saveDynamicalResponseFull(
+            h5_path,
+            operator_name,
+            results.frequencies,
+            results.spectral_function,
+            spectral_imag,
+            results.spectral_error,
+            error_imag,
+            results.total_samples,
+            0.0  // temperature not stored in results struct
+        );
+        
+        std::cout << "Dynamical response results saved to: " << h5_path << std::endl;
+    } catch (const std::exception& e) {
+        std::cerr << "Error saving dynamical response to HDF5: " << e.what() << std::endl;
     }
-    
-    file.close();
-    std::cout << "Dynamical response results saved to: " << filename << std::endl;
 }
 
 /**
@@ -2004,39 +2102,41 @@ StaticResponseResults compute_static_response(
 }
 
 /**
- * @brief Save static response results to file
+ * @brief Save static response results to HDF5 file
  */
 void save_static_response_results(
     const StaticResponseResults& results,
     const std::string& filename
 ) {
-    std::ofstream file(filename);
-    if (!file.is_open()) {
-        std::cerr << "Error: Cannot open file " << filename << " for writing" << std::endl;
-        return;
-    }
+    // Extract directory from filename to create HDF5 file
+    std::string directory = filename.substr(0, filename.find_last_of('/'));
+    if (directory.empty()) directory = ".";
     
-    file << "# Static Response Results (averaged over " << results.total_samples << " samples)\n";
-    file << "# Temperature  Expectation  Exp_Error  Variance  Var_Error  Susceptibility  Chi_Error\n";
-    file << std::scientific << std::setprecision(12);
+    // Extract operator name from filename (remove path and extension)
+    std::string basename = filename.substr(filename.find_last_of('/') + 1);
+    std::string operator_name = basename.substr(0, basename.find_last_of('.'));
+    if (operator_name.empty()) operator_name = "static_response";
     
-    for (size_t i = 0; i < results.temperatures.size(); i++) {
-        file << results.temperatures[i] << " "
-             << results.expectation[i] << " "
-             << results.expectation_error[i] << " ";
+    try {
+        std::string h5_path = HDF5IO::createOrOpenFile(directory);
         
-        if (!results.variance.empty()) {
-            file << results.variance[i] << " "
-                 << results.variance_error[i] << " "
-                 << results.susceptibility[i] << " "
-                 << results.susceptibility_error[i];
-        }
+        HDF5IO::saveStaticResponse(
+            h5_path,
+            operator_name,
+            results.temperatures,
+            results.expectation,
+            results.expectation_error,
+            results.variance,
+            results.variance_error,
+            results.susceptibility,
+            results.susceptibility_error,
+            results.total_samples
+        );
         
-        file << "\n";
+        std::cout << "Static response results saved to: " << h5_path << std::endl;
+    } catch (const std::exception& e) {
+        std::cerr << "Error saving static response to HDF5: " << e.what() << std::endl;
     }
-    
-    file.close();
-    std::cout << "Static response results saved to: " << filename << std::endl;
 }
 
 // ============================================================================
@@ -2369,11 +2469,30 @@ std::map<double, DynamicalResponseResults> compute_dynamical_correlation_state_m
     );
 }
 
+// ============================================================================
+// CORRECTED FTLM MULTI-SAMPLE MULTI-TEMPERATURE SPECTRAL FUNCTION
+// ============================================================================
+
 /**
- * @brief Multi-sample multi-temperature dynamical correlation (OPTIMIZED!)
+ * @brief Multi-sample multi-temperature dynamical correlation (CORRECTED FTLM!)
  * 
- * This function extends the temperature scan optimization to handle multiple
- * random samples. It provides ~N× speedup for N temperature points.
+ * CORRECTED VERSION: This implementation properly handles thermal averaging
+ * for FTLM spectral functions. The key insight is that for random state 
+ * sampling, we don't apply Boltzmann weights to the spectral peaks directly.
+ * Instead, the random sampling itself provides the thermal averaging through
+ * the trace identity: Tr[A] = N × E_r[⟨r|A|r⟩] where |r⟩ are random states.
+ * 
+ * For T→0 (low temperature limit), the spectral function should match the
+ * ground state result. This is achieved because random states have some
+ * overlap with the ground state.
+ * 
+ * For finite T, the formula becomes:
+ *   S(ω,T) ∝ Tr[e^{-βH} O†δ(ω-H+E₀)O] / Z
+ *          = (N/Z) × E_r[⟨r|e^{-βH} O†δ(ω-H+E₀)O|r⟩]
+ * 
+ * The key correction is to not double-apply thermal weights. The spectral
+ * weights already capture the transition amplitudes - we only need the
+ * thermal prefactor from the partition function.
  */
 std::map<double, DynamicalResponseResults> compute_dynamical_correlation_multi_sample_multi_temperature(
     std::function<void(const Complex*, Complex*, int)> H,
@@ -2389,13 +2508,16 @@ std::map<double, DynamicalResponseResults> compute_dynamical_correlation_multi_s
     const std::string& output_dir
 ) {
     std::cout << "\n=========================================="  << std::endl;
-    std::cout << "OPTIMIZED MULTI-SAMPLE MULTI-TEMPERATURE" << std::endl;
+    std::cout << "FTLM SPECTRAL FUNCTION (CORRECT FORMULATION)" << std::endl;
     std::cout << "==========================================" << std::endl;
     std::cout << "Samples: " << params.num_samples << std::endl;
     std::cout << "Temperatures: " << temperatures.size() << std::endl;
-    std::cout << "Running Lanczos " << params.num_samples << " times (once per sample)" << std::endl;
-    std::cout << "Then computing " << temperatures.size() << " temperatures from cached data" << std::endl;
-    std::cout << "Expected speedup: ~" << (temperatures.size() * 0.9) << "× vs standard approach" << std::endl;
+    std::cout << "Krylov dimension: " << params.krylov_dim << std::endl;
+    std::cout << "Broadening: " << params.broadening << std::endl;
+    std::cout << "==========================================" << std::endl;
+    std::cout << "\nUsing correct FTLM formulation:" << std::endl;
+    std::cout << "  S(ω,T) = (N/Z) × Σ_r Σ_i e^{-βε_i} |c_i|² S_i(ω)" << std::endl;
+    std::cout << "  where S_i(ω) is computed via continued fraction" << std::endl;
     std::cout << "==========================================" << std::endl;
     
     // Initialize random number generator
@@ -2408,11 +2530,10 @@ std::map<double, DynamicalResponseResults> compute_dynamical_correlation_multi_s
     }
     std::uniform_real_distribution<double> dist(-1.0, 1.0);
     
-    // We'll accumulate spectral data across samples
-    // First, determine the ground state energy if not provided
-    double E_shift = energy_shift;
-    if (std::abs(E_shift) < 1e-14) {
-        std::cout << "\nDetermining ground state energy from first sample...\n";
+    // Ground state energy for shifting
+    double E_gs = energy_shift;
+    if (std::abs(E_gs) < 1e-14) {
+        std::cout << "\nDetermining ground state energy from Lanczos...\n";
         ComplexVector test_state(N);
         for (uint64_t i = 0; i < N; i++) {
             test_state[i] = Complex(dist(gen), dist(gen));
@@ -2421,116 +2542,268 @@ std::map<double, DynamicalResponseResults> compute_dynamical_correlation_multi_s
         Complex scale(1.0/norm, 0.0);
         cblas_zscal(N, &scale, test_state.data(), 1);
         
-        // Quick Lanczos to get ground state
-        ComplexVector phi(N);
-        O2(test_state.data(), phi.data(), N);
-        double phi_norm = cblas_dznrm2(N, phi.data(), 1);
-        if (phi_norm > 1e-14) {
-            Complex phi_scale(1.0/phi_norm, 0.0);
-            cblas_zscal(N, &phi_scale, phi.data(), 1);
+        std::vector<double> alpha, beta;
+        build_lanczos_tridiagonal(H, test_state, N, std::min(params.krylov_dim, (uint64_t)100),
+                                  params.tolerance, false, 10, alpha, beta);
+        
+        std::vector<double> ritz_vals, weights;
+        diagonalize_tridiagonal_ritz(alpha, beta, ritz_vals, weights);
+        
+        if (!ritz_vals.empty()) {
+            E_gs = *std::min_element(ritz_vals.begin(), ritz_vals.end());
+            std::cout << "Ground state energy (estimated): " << E_gs << std::endl;
+        }
+    } else {
+        std::cout << "Using provided ground state energy: " << E_gs << std::endl;
+    }
+    
+    // Generate frequency grid
+    std::vector<double> frequencies(num_omega_bins);
+    double omega_step = (omega_max - omega_min) / std::max(uint64_t(1), num_omega_bins - 1);
+    for (uint64_t i = 0; i < num_omega_bins; i++) {
+        frequencies[i] = omega_min + i * omega_step;
+    }
+    
+    // For each temperature, accumulate numerator (Σ_r Σ_i e^{-βε_i} |c_i|² S_i(ω))
+    // and partition function (Σ_r Σ_i e^{-βε_i} |c_i|²)
+    std::map<double, std::vector<double>> accumulated_spectral;
+    std::map<double, double> accumulated_Z;
+    std::map<double, std::vector<std::vector<double>>> per_sample_spectral;  // For error estimation
+    
+    for (double T : temperatures) {
+        accumulated_spectral[T] = std::vector<double>(num_omega_bins, 0.0);
+        accumulated_Z[T] = 0.0;
+        per_sample_spectral[T] = std::vector<std::vector<double>>();
+    }
+    
+    std::cout << "\n--- Processing " << params.num_samples << " random samples ---\n";
+    
+    // How many Ritz states to use per sample for spectral function
+    // Using all states is expensive; use states with significant thermal weight
+    uint64_t max_ritz_states = std::min(params.krylov_dim, (uint64_t)50);  // Limit for efficiency
+    
+    // Loop over random samples
+    for (uint64_t sample_idx = 0; sample_idx < params.num_samples; sample_idx++) {
+        std::cout << "\n--- Sample " << (sample_idx + 1) << "/" << params.num_samples << " ---\n";
+        
+        // Generate random state |r⟩
+        ComplexVector r_state(N);
+        for (uint64_t i = 0; i < N; i++) {
+            r_state[i] = Complex(dist(gen), dist(gen));
+        }
+        double r_norm = cblas_dznrm2(N, r_state.data(), 1);
+        Complex r_scale(1.0/r_norm, 0.0);
+        cblas_zscal(N, &r_scale, r_state.data(), 1);
+        
+        // Step 1: Build Lanczos from |r⟩ to get approximate eigenstates
+        std::vector<double> alpha_H, beta_H;
+        std::vector<ComplexVector> lanczos_vectors;
+        
+        uint64_t H_iterations = build_lanczos_tridiagonal_with_basis(
+            H, r_state, N, params.krylov_dim, params.tolerance,
+            params.full_reorthogonalization, params.reorth_frequency,
+            alpha_H, beta_H, &lanczos_vectors
+        );
+        
+        uint64_t m_H = alpha_H.size();
+        std::cout << "  Hamiltonian Lanczos: " << m_H << " iterations\n";
+        
+        if (m_H == 0) {
+            std::cerr << "  Warning: Lanczos failed, skipping sample\n";
+            continue;
+        }
+        
+        // Diagonalize tridiagonal to get Ritz values and vectors
+        std::vector<double> ritz_values;
+        std::vector<double> dummy_weights;
+        std::vector<double> evecs;  // Row-major: evecs[i*m_H + j] = V[i,j]
+        diagonalize_tridiagonal_ritz(alpha_H, beta_H, ritz_values, dummy_weights, &evecs);
+        
+        if (ritz_values.empty()) {
+            std::cerr << "  Warning: Diagonalization failed, skipping sample\n";
+            continue;
+        }
+        
+        // Compute |c_i|² = |⟨ψ_i|r⟩|² = V[i,0]² (first Lanczos vector is |r⟩)
+        std::vector<double> c_sq(m_H);
+        for (uint64_t i = 0; i < m_H; i++) {
+            c_sq[i] = evecs[i * m_H + 0] * evecs[i * m_H + 0];
+        }
+        
+        // Find minimum energy for numerical stability
+        double E_min = *std::min_element(ritz_values.begin(), ritz_values.end());
+        
+        // Step 2: For each temperature, compute weighted spectral contributions
+        for (double T : temperatures) {
+            double beta = 1.0 / T;
             
-            std::vector<double> alpha, beta;
-            build_lanczos_tridiagonal(
-                H, phi, N, std::min(params.krylov_dim, (uint64_t)100),
-                params.tolerance, false, 10, alpha, beta
-            );
+            // Compute thermal weights and partition function contribution
+            std::vector<double> thermal_weights(m_H);
+            double Z_sample = 0.0;
+            for (uint64_t i = 0; i < m_H; i++) {
+                double boltzmann = std::exp(-beta * (ritz_values[i] - E_min));
+                thermal_weights[i] = c_sq[i] * boltzmann;
+                Z_sample += thermal_weights[i];
+            }
             
-            std::vector<double> ritz_vals, weights;
-            diagonalize_tridiagonal_ritz(alpha, beta, ritz_vals, weights);
+            accumulated_Z[T] += Z_sample;
             
-            if (!ritz_vals.empty()) {
-                E_shift = *std::min_element(ritz_vals.begin(), ritz_vals.end());
-                std::cout << "Ground state energy (estimated): " << E_shift << std::endl;
+            // For this sample, compute weighted spectral function
+            std::vector<double> sample_spectral(num_omega_bins, 0.0);
+            
+            // Select significant Ritz states (those with non-negligible thermal weight)
+            double weight_threshold = 1e-8 * Z_sample;
+            uint64_t n_significant = 0;
+            
+            for (uint64_t i = 0; i < std::min(m_H, max_ritz_states); i++) {
+                if (thermal_weights[i] < weight_threshold) continue;
+                n_significant++;
+                
+                // Construct approximate eigenstate |ψ_i⟩ = Σ_j V[i,j] |v_j⟩
+                ComplexVector psi_i(N, Complex(0.0, 0.0));
+                for (uint64_t j = 0; j < m_H; j++) {
+                    double coeff = evecs[i * m_H + j];
+                    Complex coeff_c(coeff, 0.0);
+                    cblas_zaxpy(N, &coeff_c, lanczos_vectors[j].data(), 1, psi_i.data(), 1);
+                }
+                
+                // Normalize (should already be normalized, but just in case)
+                double psi_norm = cblas_dznrm2(N, psi_i.data(), 1);
+                if (psi_norm < 1e-14) continue;
+                Complex psi_scale(1.0/psi_norm, 0.0);
+                cblas_zscal(N, &psi_scale, psi_i.data(), 1);
+                
+                // Apply operator O2 to |ψ_i⟩: |φ_i⟩ = O₂|ψ_i⟩
+                ComplexVector phi_i(N);
+                O2(psi_i.data(), phi_i.data(), N);
+                
+                double phi_norm = cblas_dznrm2(N, phi_i.data(), 1);
+                double phi_norm_sq = phi_norm * phi_norm;
+                
+                if (phi_norm < 1e-14) continue;
+                
+                // Normalize for Lanczos
+                Complex phi_scale(1.0/phi_norm, 0.0);
+                cblas_zscal(N, &phi_scale, phi_i.data(), 1);
+                
+                // Build Lanczos from |φ_i⟩ for spectral function via continued fraction
+                std::vector<double> alpha_S, beta_S;
+                build_lanczos_tridiagonal(
+                    H, phi_i, N, params.krylov_dim, params.tolerance,
+                    params.full_reorthogonalization, params.reorth_frequency,
+                    alpha_S, beta_S
+                );
+                
+                if (alpha_S.empty()) continue;
+                
+                // Shift energies by E_gs (ground state energy)
+                for (size_t k = 0; k < alpha_S.size(); k++) {
+                    alpha_S[k] -= E_gs;
+                }
+                
+                // Compute spectral function via continued fraction
+                std::vector<double> S_i = continued_fraction_spectral_function(
+                    alpha_S, beta_S, frequencies, params.broadening, phi_norm_sq
+                );
+                
+                // Add contribution weighted by thermal factor
+                for (uint64_t iw = 0; iw < num_omega_bins; iw++) {
+                    sample_spectral[iw] += thermal_weights[i] * S_i[iw];
+                    accumulated_spectral[T][iw] += thermal_weights[i] * S_i[iw];
+                }
+            }
+            
+            // Store sample contribution for error estimation
+            // Normalize by sample's Z contribution
+            if (Z_sample > 1e-300) {
+                std::vector<double> normalized_sample(num_omega_bins);
+                for (uint64_t iw = 0; iw < num_omega_bins; iw++) {
+                    normalized_sample[iw] = sample_spectral[iw] / Z_sample;
+                }
+                per_sample_spectral[T].push_back(normalized_sample);
+            }
+            
+            if (T == temperatures[0]) {
+                std::cout << "  Processed " << n_significant << " significant Ritz states\n";
             }
         }
     }
     
-    // Storage for accumulated spectral data
-    std::vector<double> accumulated_eigenvalues;  // These should be consistent across samples
-    std::vector<Complex> accumulated_weights;     // These we'll average
-    std::vector<std::vector<Complex>> per_sample_weights;  // For computing error bars
-    int krylov_dim_used = 0;
+    // Compute final results: S(ω) = N × (Σ accumulated_spectral) / (Σ accumulated_Z)
+    std::cout << "\n--- Computing final results ---\n";
     
-    std::cout << "\n--- Processing " << params.num_samples << " random samples ---\n";
+    std::map<double, DynamicalResponseResults> results_map;
     
-    // Loop over samples
-    for (uint64_t sample_idx = 0; sample_idx < params.num_samples; sample_idx++) {
-        std::cout << "\nSample " << (sample_idx + 1) << "/" << params.num_samples << ":\n";
+    for (double T : temperatures) {
+        DynamicalResponseResults results;
+        results.frequencies = frequencies;
+        results.omega_min = omega_min;
+        results.omega_max = omega_max;
+        results.total_samples = per_sample_spectral[T].size();
         
-        // Generate random state
-        ComplexVector state(N);
-        for (uint64_t i = 0; i < N; i++) {
-            state[i] = Complex(dist(gen), dist(gen));
-        }
-        double state_norm = cblas_dznrm2(N, state.data(), 1);
-        Complex scale(1.0/state_norm, 0.0);
-        cblas_zscal(N, &scale, state.data(), 1);
+        results.spectral_function.resize(num_omega_bins, 0.0);
+        results.spectral_function_imag.resize(num_omega_bins, 0.0);
+        results.spectral_error.resize(num_omega_bins, 0.0);
+        results.spectral_error_imag.resize(num_omega_bins, 0.0);
         
-        // Compute spectral data for this sample
-        LanczosSpectralData sample_data = compute_lanczos_spectral_data(
-            H, O1, O2, state, N, params, E_shift
-        );
-        
-        if (sample_data.ritz_values.empty()) {
-            std::cerr << "Warning: Sample " << sample_idx << " failed, skipping\n";
+        double Z_total = accumulated_Z[T];
+        if (Z_total < 1e-300) {
+            std::cerr << "  Warning: Z ≈ 0 for T = " << T << std::endl;
+            results_map[T] = results;
             continue;
         }
         
-        // For the first sample, initialize accumulated arrays
-        if (sample_idx == 0) {
-            accumulated_eigenvalues = sample_data.ritz_values;
-            accumulated_weights.resize(sample_data.spectral_weights.size(), Complex(0.0, 0.0));
-            krylov_dim_used = sample_data.krylov_dim;
+        // Compute spectral function: S(ω) = accumulated_spectral / Z_total
+        // Note: The trace sampling identity Tr[A] = N × E_r[⟨r|A|r⟩] means we should
+        // multiply by N, but in FTLM the ratio of accumulated sums automatically gives
+        // the correct thermal average without an additional factor.
+        // 
+        // accumulated_spectral = Σ_r Σ_i e^{-βε_i} |c_i|² S_i(ω)
+        // accumulated_Z = Σ_r Σ_i e^{-βε_i} |c_i|²
+        // 
+        // The ratio gives: S(ω,T) = ⟨O† δ(ω-H+E₀) O⟩_β 
+        // which is the thermal expectation value as desired.
+        for (uint64_t iw = 0; iw < num_omega_bins; iw++) {
+            results.spectral_function[iw] = accumulated_spectral[T][iw] / Z_total;
         }
         
-        // Verify eigenvalues are consistent (they should be, up to numerical precision)
-        if (sample_data.ritz_values.size() != accumulated_eigenvalues.size()) {
-            std::cerr << "Warning: Sample " << sample_idx << " has different Krylov dimension ("
-                      << sample_data.ritz_values.size() << " vs " << accumulated_eigenvalues.size()
-                      << "), using min\n";
-            size_t min_size = std::min(sample_data.ritz_values.size(), accumulated_eigenvalues.size());
-            sample_data.ritz_values.resize(min_size);
-            sample_data.spectral_weights.resize(min_size);
-            accumulated_eigenvalues.resize(min_size);
-            accumulated_weights.resize(min_size);
+        // Compute error estimate from per-sample variation
+        uint64_t n_samples = per_sample_spectral[T].size();
+        if (n_samples > 1) {
+            // Compute mean of per-sample normalized spectra
+            std::vector<double> mean(num_omega_bins, 0.0);
+            for (uint64_t s = 0; s < n_samples; s++) {
+                for (uint64_t iw = 0; iw < num_omega_bins; iw++) {
+                    mean[iw] += per_sample_spectral[T][s][iw];
+                }
+            }
+            for (uint64_t iw = 0; iw < num_omega_bins; iw++) {
+                mean[iw] /= n_samples;
+            }
+            
+            // Compute variance and standard error
+            for (uint64_t s = 0; s < n_samples; s++) {
+                for (uint64_t iw = 0; iw < num_omega_bins; iw++) {
+                    double diff = per_sample_spectral[T][s][iw] - mean[iw];
+                    results.spectral_error[iw] += diff * diff;
+                }
+            }
+            
+            double norm = std::sqrt(static_cast<double>(n_samples * (n_samples - 1)));
+            for (uint64_t iw = 0; iw < num_omega_bins; iw++) {
+                results.spectral_error[iw] = std::sqrt(results.spectral_error[iw]) / norm;
+            }
         }
         
-        // Store per-sample weights for error computation
-        per_sample_weights.push_back(sample_data.spectral_weights);
-        
-        // Accumulate spectral weights (we'll average at the end)
-        for (size_t i = 0; i < accumulated_weights.size(); i++) {
-            accumulated_weights[i] += sample_data.spectral_weights[i];
-        }
-        
-        std::cout << "  Accumulated spectral weights from sample " << (sample_idx + 1) << std::endl;
+        std::cout << "  T = " << T << ": " << n_samples << " samples, Z = " << Z_total << std::endl;
+        results_map[T] = results;
     }
     
-    // Average the accumulated weights
-    if (params.num_samples > 0) {
-        double inv_num_samples = 1.0 / static_cast<double>(params.num_samples);
-        for (size_t i = 0; i < accumulated_weights.size(); i++) {
-            accumulated_weights[i] *= inv_num_samples;
-        }
-        std::cout << "\n--- Averaged spectral weights over " << params.num_samples << " samples ---\n";
-    }
+    std::cout << "\n==========================================\n";
+    std::cout << "FTLM Spectral Function Complete\n";
+    std::cout << "==========================================" << std::endl;
     
-    // Create averaged spectral data structure
-    LanczosSpectralData averaged_spectral_data;
-    averaged_spectral_data.ritz_values = accumulated_eigenvalues;
-    averaged_spectral_data.spectral_weights = accumulated_weights;
-    averaged_spectral_data.ground_state_energy = E_shift;
-    averaged_spectral_data.krylov_dim = krylov_dim_used;
-    averaged_spectral_data.lanczos_iterations = krylov_dim_used;
-    
-    std::cout << "\n--- Computing spectral functions for " << temperatures.size() 
-              << " temperatures (FAST!) ---\n";
-    
-    // Now compute spectral functions for all temperatures using averaged data
-    return compute_spectral_function_from_lanczos_data(
-        averaged_spectral_data, omega_min, omega_max, num_omega_bins,
-        temperatures, params.broadening, params.num_samples, &per_sample_weights
-    );
+    return results_map;
 }
 
 // ============================================================================
