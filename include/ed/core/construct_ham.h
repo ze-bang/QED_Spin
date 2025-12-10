@@ -2297,6 +2297,7 @@ public:
      * Use generateSymmetrizedBasisFixedSzHDF5() instead for correct results.
      * @deprecated Use generateSymmetrizedBasisFixedSzHDF5() instead
      */
+    [[deprecated("Use generateSymmetrizedBasisFixedSzHDF5() instead - this version has phase calculation issues")]]
     void generateSymmetrizedBasisFixedSz(const std::string& dir) {
         std::cout << "\n=== Generating Symmetrized Basis (Fixed Sz) ===" << std::endl;
         std::cout << "WARNING: Using legacy text-based method. Consider using HDF5 version instead." << std::endl;
@@ -2795,6 +2796,7 @@ protected:
      * Create symmetrized vector in fixed Sz basis
      * @deprecated This function has incorrect phase calculation. Use HDF5-based methods instead.
      */
+    [[deprecated("Use HDF5-based methods instead - this has incorrect phase calculation")]]
     std::vector<Complex> createSymmetrizedVectorFixedSz(
         uint64_t seed_state,
         const std::vector<int>& quantum_numbers,

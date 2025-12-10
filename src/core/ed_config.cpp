@@ -578,8 +578,12 @@ EDConfig& EDConfig::merge(const EDConfig& other) {
 bool EDConfig::validate(std::ostream& err) const {
     bool valid = true;
     
+    // ========== System validation ==========
     if (system.num_sites == 0) {
         err << "Error: num_sites must be specified or auto-detected\n";
+        valid = false;
+    } else if (system.num_sites > 64) {
+        err << "Error: num_sites must be <= 64 (Hilbert space would overflow uint64_t)\n";
         valid = false;
     }
     
@@ -588,6 +592,20 @@ bool EDConfig::validate(std::ostream& err) const {
         valid = false;
     }
     
+    if (system.spin_length <= 0) {
+        err << "Error: spin_length must be positive\n";
+        valid = false;
+    }
+    
+    // Validate n_up for fixed-Sz mode
+    if (system.use_fixed_sz && system.n_up >= 0) {
+        if (static_cast<uint64_t>(system.n_up) > system.num_sites) {
+            err << "Error: n_up (" << system.n_up << ") cannot exceed num_sites (" << system.num_sites << ")\n";
+            valid = false;
+        }
+    }
+    
+    // ========== Diagonalization validation ==========
     if (diag.num_eigenvalues < 1) {
         err << "Error: num_eigenvalues must be >= 1\n";
         valid = false;
@@ -596,6 +614,74 @@ bool EDConfig::validate(std::ostream& err) const {
     if (diag.tolerance <= 0) {
         err << "Error: tolerance must be positive\n";
         valid = false;
+    }
+    
+    if (diag.max_iterations < 1) {
+        err << "Error: max_iterations must be >= 1\n";
+        valid = false;
+    }
+    
+    // ========== Thermal validation ==========
+    if (thermal.temp_min <= 0) {
+        err << "Error: temp_min must be positive\n";
+        valid = false;
+    }
+    
+    if (thermal.temp_max < thermal.temp_min) {
+        err << "Error: temp_max must be >= temp_min\n";
+        valid = false;
+    }
+    
+    if (thermal.num_temp_bins < 1) {
+        err << "Error: num_temp_bins must be >= 1\n";
+        valid = false;
+    }
+    
+    if (thermal.num_samples < 1) {
+        err << "Error: num_samples must be >= 1\n";
+        valid = false;
+    }
+    
+    // TPQ-specific validation
+    if (thermal.tpq_taylor_order < 1) {
+        err << "Error: tpq_taylor_order must be >= 1\n";
+        valid = false;
+    }
+    
+    if (thermal.tpq_delta_beta <= 0) {
+        err << "Error: tpq_delta_beta must be positive\n";
+        valid = false;
+    }
+    
+    // ========== Dynamical response validation ==========
+    if (workflow.compute_dynamical_response) {
+        if (dynamical.num_omega_points < 1) {
+            err << "Error: num_omega_points must be >= 1\n";
+            valid = false;
+        }
+        
+        if (dynamical.broadening < 0) {
+            err << "Error: broadening must be non-negative\n";
+            valid = false;
+        }
+        
+        if (dynamical.krylov_dim < 1) {
+            err << "Error: dynamical krylov_dim must be >= 1\n";
+            valid = false;
+        }
+    }
+    
+    // ========== Static response validation ==========
+    if (workflow.compute_static_response) {
+        if (static_resp.krylov_dim < 1) {
+            err << "Error: static_resp krylov_dim must be >= 1\n";
+            valid = false;
+        }
+        
+        if (static_resp.num_temp_points < 1) {
+            err << "Error: static_resp num_temp_points must be >= 1\n";
+            valid = false;
+        }
     }
     
     return valid;
@@ -644,18 +730,24 @@ void EDConfig::print(std::ostream& out) const {
         double sz = n_up_actual - system.num_sites / 2.0;
         out << "Fixed Sz: n_up = " << n_up_actual << " (Sz = " << sz << ")\n";
         
-        // Calculate dimension reduction
-        auto binomial = [](uint64_t n, uint64_t k) {
-            if (k > n || k < 0) return 0;
+        // Calculate dimension reduction using overflow-safe binomial coefficient
+        // Uses uint64_t throughout and divides early to prevent overflow
+        auto binomial_safe = [](uint64_t n, uint64_t k) -> uint64_t {
+            if (k > n) return 0;
             if (k == 0 || k == n) return 1;
-            long long result = 1;
-            for (uint64_t i = 1; i <= k; ++i) {
-                result = result * (n - k + i) / i;
+            // Use symmetry: C(n,k) = C(n, n-k)
+            if (k > n - k) k = n - k;
+            
+            uint64_t result = 1;
+            for (uint64_t i = 0; i < k; ++i) {
+                // Multiply first, then divide to maintain integer arithmetic
+                // The division is always exact due to properties of binomial coefficients
+                result = result * (n - i) / (i + 1);
             }
-            return (int)result;
+            return result;
         };
-        uint64_t full_dim = 1 << system.num_sites;
-        uint64_t fixed_dim = binomial(system.num_sites, n_up_actual);
+        uint64_t full_dim = 1ULL << system.num_sites;
+        uint64_t fixed_dim = binomial_safe(system.num_sites, static_cast<uint64_t>(n_up_actual));
         out << "Hilbert space: " << fixed_dim << " (reduced from " << full_dim 
             << ", factor: " << (double)full_dim / fixed_dim << "x)\n";
     }

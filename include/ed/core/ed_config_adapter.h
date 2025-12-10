@@ -42,14 +42,8 @@ inline EDParameters toEDParameters(const EDConfig& config) {
     params.tpq_continue = config.thermal.tpq_continue;
     params.tpq_continue_sample = config.thermal.tpq_continue_sample;
     params.tpq_continue_beta = config.thermal.tpq_continue_beta;
-    // Also set legacy aliases for backwards compatibility
-    params.num_order = config.thermal.tpq_taylor_order;
-    params.num_measure_freq = config.thermal.tpq_measurement_interval;
-    params.delta_tau = config.thermal.tpq_delta_beta;
-    params.large_value = config.thermal.tpq_energy_shift;
-    params.continue_quenching = config.thermal.tpq_continue;
-    params.continue_sample = config.thermal.tpq_continue_sample;
-    params.continue_beta = config.thermal.tpq_continue_beta;
+    // Note: Legacy alias methods (num_order(), delta_tau(), etc.) are deprecated
+    // and should not be used. The above tpq_* fields are the canonical ones.
     
     // FTLM (via thermal config)
     params.ftlm_krylov_dim = config.thermal.ftlm_krylov_dim;

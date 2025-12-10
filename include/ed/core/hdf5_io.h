@@ -897,14 +897,18 @@ public:
                                     info.dataset_name = states_path + "/" + state_name;
                                     
                                     states.push_back(info);
+                                } catch (const std::exception& e) {
+                                    std::cerr << "Warning: Failed to parse TPQ state '" << state_name << "': " << e.what() << std::endl;
                                 } catch (...) {
-                                    // Skip malformed entries
+                                    std::cerr << "Warning: Unknown error parsing TPQ state '" << state_name << "'" << std::endl;
                                 }
                             }
                         }
                         states_group.close();
+                    } catch (const std::exception& e) {
+                        std::cerr << "Warning: Failed to process sample directory '" << sample_name << "': " << e.what() << std::endl;
                     } catch (...) {
-                        // Skip malformed sample directories
+                        std::cerr << "Warning: Unknown error processing sample directory '" << sample_name << "'" << std::endl;
                     }
                 }
             }
@@ -913,7 +917,7 @@ public:
             file.close();
             
         } catch (H5::Exception& e) {
-            // Return empty list on error
+            std::cerr << "Warning: HDF5 error listing TPQ states: " << e.getDetailMsg() << std::endl;
         }
         
         return states;
@@ -1450,8 +1454,10 @@ public:
                     try {
                         size_t sample_idx = std::stoull(name.substr(7));
                         samples.push_back(sample_idx);
+                    } catch (const std::exception& e) {
+                        std::cerr << "Warning: Failed to parse sample name '" << name << "': " << e.what() << std::endl;
                     } catch (...) {
-                        // Skip malformed entries
+                        std::cerr << "Warning: Unknown error parsing sample name '" << name << "'" << std::endl;
                     }
                 }
             }
@@ -1462,7 +1468,7 @@ public:
             // Sort samples
             std::sort(samples.begin(), samples.end());
         } catch (H5::Exception& e) {
-            // Return empty vector on error
+            std::cerr << "Warning: HDF5 error listing completed samples: " << e.getDetailMsg() << std::endl;
         }
         
         return samples;

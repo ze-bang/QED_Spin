@@ -451,7 +451,7 @@ void construct_operators_from_config(
 EDResults run_standard_workflow(const EDConfig& config) {
     auto params = ed_adapter::toEDParameters(config);
     params.output_dir = config.workflow.output_dir;
-    safe_system_call("mkdir -p " + params.output_dir);
+    create_directory_mpi_safe(params.output_dir);
     
     auto start = std::chrono::high_resolution_clock::now();
     
@@ -510,7 +510,7 @@ EDResults run_standard_workflow(const EDConfig& config) {
 EDResults run_symmetrized_workflow(const EDConfig& config) {
     auto params = ed_adapter::toEDParameters(config);
     params.output_dir = config.workflow.output_dir;
-    safe_system_call("mkdir -p " + params.output_dir);
+    create_directory_mpi_safe(params.output_dir);
     
     auto start = std::chrono::high_resolution_clock::now();
     
@@ -565,7 +565,7 @@ EDResults run_symmetrized_workflow(const EDConfig& config) {
 EDResults run_streaming_symmetry_workflow(const EDConfig& config) {
     auto params = ed_adapter::toEDParameters(config);
     params.output_dir = config.workflow.output_dir;
-    safe_system_call("mkdir -p " + params.output_dir);
+    create_directory_mpi_safe(params.output_dir);
     
     auto start = std::chrono::high_resolution_clock::now();
     
@@ -705,7 +705,7 @@ void compute_dynamical_response_workflow(const EDConfig& config) {
     params.random_seed = config.dynamical.random_seed;
     
     std::string output_subdir = config.workflow.output_dir + "/dynamical_response";
-    safe_system_call("mkdir -p " + output_subdir);
+    create_directory_mpi_safe(output_subdir);
     
     std::cout << "Random states: " << params.num_samples << "\n";
     std::cout << "Krylov dimension: " << params.krylov_dim << "\n";
@@ -731,7 +731,11 @@ void compute_dynamical_response_workflow(const EDConfig& config) {
                     found_ground_state = true;
                 }
                 infile_dat.close();
-            } catch (...) {}
+            } catch (const std::exception& e) {
+                std::cerr << "Warning: Failed to read eigenvalues.dat: " << e.what() << "\n";
+            } catch (...) {
+                std::cerr << "Warning: Unknown error reading eigenvalues.dat\n";
+            }
         }
         
         // Method 2: eigenvalues.txt (text format)
@@ -1465,7 +1469,7 @@ void compute_static_response_workflow(const EDConfig& config) {
     params.random_seed = config.static_resp.random_seed;
     
     std::string output_subdir = config.workflow.output_dir + "/static_response";
-    safe_system_call("mkdir -p " + output_subdir);
+    create_directory_mpi_safe(output_subdir);
     
     std::cout << "Random states: " << params.num_samples << "\n";
     std::cout << "Krylov dimension: " << params.krylov_dim << "\n";
@@ -1909,7 +1913,7 @@ void compute_ground_state_dssf_workflow(const EDConfig& config) {
     
     // Create output directory
     std::string output_subdir = config.workflow.output_dir + "/ground_state_dssf";
-    safe_system_call("mkdir -p " + output_subdir);
+    create_directory_mpi_safe(output_subdir);
     
     // Setup ground state DSSF parameters
     GroundStateDSSFParameters gs_params;
@@ -1990,8 +1994,20 @@ void compute_ground_state_dssf_workflow(const EDConfig& config) {
                 if (rank == 0) {
                     std::cout << "Loaded ground state from file: E0 = " << ground_state_energy << "\n";
                 }
+            } else {
+                if (rank == 0) {
+                    std::cerr << "Warning: Ground state dimension mismatch (file: " << saved_dim << ", expected: " << N << "), will recompute\n";
+                }
             }
+        } catch (const std::exception& e) {
+            if (rank == 0) {
+                std::cerr << "Warning: Failed to load ground state: " << e.what() << ", will recompute\n";
+            }
+            gs_loaded = false;
         } catch (...) {
+            if (rank == 0) {
+                std::cerr << "Warning: Unknown error loading ground state, will recompute\n";
+            }
             gs_loaded = false;
         }
         gs_in.close();
@@ -2353,7 +2369,7 @@ int main(int argc, char* argv[]) {
     config.save(config.workflow.output_dir + "/ed_config.txt");
     
     // Create output directory
-    safe_system_call("mkdir -p " + config.workflow.output_dir);
+    create_directory_mpi_safe(config.workflow.output_dir);
     
     // Execute workflows
     EDResults standard_results, sym_results;

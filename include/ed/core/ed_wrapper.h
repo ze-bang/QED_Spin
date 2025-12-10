@@ -18,6 +18,7 @@
 #include <sys/stat.h>
 #include <filesystem>
 #include <algorithm>
+#include <memory>  // For std::unique_ptr
 
 // GPU support
 #ifdef WITH_CUDA
@@ -203,15 +204,53 @@ struct EDParameters {
     uint64_t tpq_continue_sample = 0;      // Sample to continue from (0 = auto-detect)
     double tpq_continue_beta = 0.0;        // Beta to continue from (0.0 = use saved)
     
-    // Legacy parameter names (maintained for backwards compatibility)
-    // These are duplicate members with same values - prefer the new names above
-    uint64_t num_order = 100;           // DEPRECATED: use tpq_taylor_order
-    uint64_t num_measure_freq = 100;    // DEPRECATED: use tpq_measurement_interval
-    double delta_tau = 1e-2;            // DEPRECATED: use tpq_delta_beta
-    double large_value = 1e5;           // DEPRECATED: use tpq_energy_shift
-    bool continue_quenching = false;    // DEPRECATED: use tpq_continue
-    uint64_t continue_sample = 0;       // DEPRECATED: use tpq_continue_sample
-    double continue_beta = 0.0;         // DEPRECATED: use tpq_continue_beta
+    // ========== DEPRECATED PARAMETER ACCESSORS ==========
+    // These provide backwards compatibility for legacy code using old parameter names.
+    // New code should use the new names directly.
+    // 
+    // Mapping:
+    //   num_order        -> tpq_taylor_order
+    //   num_measure_freq -> tpq_measurement_interval
+    //   delta_tau        -> tpq_delta_beta
+    //   large_value      -> tpq_energy_shift
+    //   continue_quenching -> tpq_continue
+    //   continue_sample  -> tpq_continue_sample
+    //   continue_beta    -> tpq_continue_beta
+    
+    [[deprecated("Use tpq_taylor_order instead")]]
+    uint64_t& num_order() { return tpq_taylor_order; }
+    [[deprecated("Use tpq_taylor_order instead")]]
+    uint64_t num_order() const { return tpq_taylor_order; }
+    
+    [[deprecated("Use tpq_measurement_interval instead")]]
+    uint64_t& num_measure_freq() { return tpq_measurement_interval; }
+    [[deprecated("Use tpq_measurement_interval instead")]]
+    uint64_t num_measure_freq() const { return tpq_measurement_interval; }
+    
+    [[deprecated("Use tpq_delta_beta instead")]]
+    double& delta_tau() { return tpq_delta_beta; }
+    [[deprecated("Use tpq_delta_beta instead")]]
+    double delta_tau() const { return tpq_delta_beta; }
+    
+    [[deprecated("Use tpq_energy_shift instead")]]
+    double& large_value() { return tpq_energy_shift; }
+    [[deprecated("Use tpq_energy_shift instead")]]
+    double large_value() const { return tpq_energy_shift; }
+    
+    [[deprecated("Use tpq_continue instead")]]
+    bool& continue_quenching() { return tpq_continue; }
+    [[deprecated("Use tpq_continue instead")]]
+    bool continue_quenching() const { return tpq_continue; }
+    
+    [[deprecated("Use tpq_continue_sample instead")]]
+    uint64_t& continue_sample() { return tpq_continue_sample; }
+    [[deprecated("Use tpq_continue_sample instead")]]
+    uint64_t continue_sample() const { return tpq_continue_sample; }
+    
+    [[deprecated("Use tpq_continue_beta instead")]]
+    double& continue_beta() { return tpq_continue_beta; }
+    [[deprecated("Use tpq_continue_beta instead")]]
+    double continue_beta() const { return tpq_continue_beta; }
     
     // ========== FTLM-Specific Parameters ==========
     uint64_t ftlm_krylov_dim = 100;     // Krylov subspace dimension per sample
@@ -228,6 +267,7 @@ struct EDParameters {
     uint64_t ltlm_reorth_freq = 10;     // Reorthogonalization frequency
     uint64_t ltlm_seed = 0;    // Random seed (0 = auto)
     bool ltlm_store_data = false;  // Store intermediate data
+    [[deprecated("Use method=HYBRID instead")]]
     bool use_hybrid_method = false; // Use hybrid LTLM/FTLM (deprecated, use method=HYBRID)
     double hybrid_crossover = 1.0; // Temperature crossover for hybrid
     bool hybrid_auto_crossover = false; // Auto-determine crossover temperature
@@ -252,9 +292,16 @@ struct EDParameters {
     bool save_thermal_states = false;   // Save TPQ states at target β values
     bool compute_spin_correlations = false;  // Compute ⟨Si⟩ and ⟨Si·Sj⟩ correlations
     
-    // Deprecated aliases (for backwards compatibility)
-    bool& calc_observables = save_thermal_states;
-    bool& measure_spin = compute_spin_correlations;
+    // Deprecated aliases (for backwards compatibility) - use accessor methods
+    [[deprecated("Use save_thermal_states instead")]]
+    bool& calc_observables() { return save_thermal_states; }
+    [[deprecated("Use save_thermal_states instead")]]
+    bool calc_observables() const { return save_thermal_states; }
+    
+    [[deprecated("Use compute_spin_correlations instead")]]
+    bool& measure_spin() { return compute_spin_correlations; }
+    [[deprecated("Use compute_spin_correlations instead")]]
+    bool measure_spin() const { return compute_spin_correlations; }
     
     // ========== Fixed-Sz Parameters ==========
     mutable class FixedSzOperator* fixed_sz_op = nullptr;  // If using fixed-Sz, pointer to operator for embedding
@@ -638,19 +685,19 @@ EDResults exact_diagonalization_core(
         case DiagonalizationMethod::mTPQ:
             microcanonical_tpq(H, hilbert_space_dim,
                             params.max_iterations, params.num_samples,
-                            params.num_measure_freq,
+                            params.tpq_measurement_interval,
                             results.eigenvalues,
                             params.output_dir,
                             params.compute_eigenvectors,
-                            params.large_value,
-                            params.calc_observables,params.observables, params.observable_names,
+                            params.tpq_energy_shift,
+                            params.save_thermal_states, params.observables, params.observable_names,
                             params.omega_min, params.omega_max,
                             params.num_points, params.t_end, params.dt, params.spin_length, 
-                            params.measure_spin, params.sublattice_size, params.num_sites,
+                            params.compute_spin_correlations, params.sublattice_size, params.num_sites,
                             params.fixed_sz_op,
-                            params.continue_quenching,
-                            params.continue_sample,
-                            params.continue_beta); 
+                            params.tpq_continue,
+                            params.tpq_continue_sample,
+                            params.tpq_continue_beta); 
             break;
 
         case DiagonalizationMethod::cTPQ:
@@ -659,12 +706,12 @@ EDResults exact_diagonalization_core(
                 hilbert_space_dim,      // N
                 params.temp_max,        // beta_max (use configured max inverse temperature)
                 params.num_samples,     // num_samples
-                params.num_measure_freq,// temp_interval / measurement frequency
+                params.tpq_measurement_interval, // temp_interval / measurement frequency
                 results.eigenvalues,    // energies output vector
                 params.output_dir,      // output dir
-                params.delta_tau,       // delta_beta (imaginary-time step)
-                params.num_order,       // taylor_order
-                params.calc_observables,// compute_observables
+                params.tpq_delta_beta,  // delta_beta (imaginary-time step)
+                params.tpq_taylor_order, // taylor_order
+                params.save_thermal_states, // compute_observables
                 params.observables,     // observables
                 params.observable_names,// observable names
                 params.omega_min,       // omega_min
@@ -673,7 +720,7 @@ EDResults exact_diagonalization_core(
                 params.t_end,           // t_end
                 params.dt,              // dt
                 params.spin_length,     // spin length
-                params.measure_spin,    // measure Sz and fluctuations
+                params.compute_spin_correlations, // measure Sz and fluctuations
                 params.sublattice_size, // sublattice size
                 params.num_sites,       // number of sites
                 params.fixed_sz_op      // Fixed-Sz operator for embedding
@@ -1400,7 +1447,7 @@ EDResults diagonalize_symmetry_block(
     block_params.num_eigenvalues = std::min(params.num_eigenvalues, block_dim);
     
     if (is_target_block && large_value_override > 0) {
-        block_params.large_value = large_value_override;
+        block_params.tpq_energy_shift = large_value_override;
     }
     
     return exact_diagonalization_core(apply_block, block_dim, method, block_params);
@@ -1625,8 +1672,8 @@ GroundStateSectorInfo find_ground_state_sector(
         scan_params.num_eigenvalues = std::min(static_cast<uint64_t>(5), block_dim);  // Only need a few
         scan_params.max_iterations = scan_params.num_eigenvalues * 3 + 15;  // Minimal iterations
         scan_params.compute_eigenvectors = false;
-        scan_params.calc_observables = false;
-        scan_params.measure_spin = false;
+        scan_params.save_thermal_states = false;
+        scan_params.compute_spin_correlations = false;
         
         EDResults block_results = diagonalize_symmetry_block(
             block_matrix, block_dim, DiagonalizationMethod::LANCZOS, scan_params
@@ -1792,7 +1839,11 @@ bool setup_fixed_sz_symmetry_basis(
             H5::H5File file(hdf5_file, H5F_ACC_RDONLY);
             blocks_exist = file.nameExists("/blocks/block_0");
             file.close();
+        } catch (const H5::Exception& e) {
+            std::cerr << "Warning: HDF5 error checking for blocks: " << e.getDetailMsg() << std::endl;
+            blocks_exist = false;
         } catch (...) {
+            std::cerr << "Warning: Unknown error checking for blocks in HDF5 file" << std::endl;
             blocks_exist = false;
         }
         
@@ -2190,23 +2241,23 @@ inline EDResults exact_diagonalization_fixed_sz(
                 gpu_op_handle, n_up,
                 params.max_iterations,
                 params.num_samples,
-                params.num_measure_freq,
+                params.tpq_measurement_interval,
                 eigenvalues,
                 params.output_dir,
-                params.large_value,
-                params.continue_quenching,
-                params.continue_sample,
-                params.continue_beta);
+                params.tpq_energy_shift,
+                params.tpq_continue,
+                params.tpq_continue_sample,
+                params.tpq_continue_beta);
         } else if (method == DiagonalizationMethod::cTPQ_GPU) {
             GPUEDWrapper::runGPUCanonicalTPQFixedSz(
                 gpu_op_handle, n_up,
                 params.temp_max,  // beta_max
                 params.num_samples,
-                params.num_measure_freq,
+                params.tpq_measurement_interval,
                 eigenvalues,
                 params.output_dir,
-                params.delta_tau,  // delta_beta
-                params.num_order);  // taylor_order
+                params.tpq_delta_beta,  // delta_beta
+                params.tpq_taylor_order);  // taylor_order
         }
         
         results.eigenvalues = eigenvalues;
@@ -2447,13 +2498,13 @@ EDResults exact_diagonalization_from_files(
                 hilbert_space_dim,
                 params.max_iterations,
                 params.num_samples,
-                params.num_measure_freq,
+                params.tpq_measurement_interval,
                 eigenvalues,
                 params.output_dir,
-                params.large_value,
-                params.continue_quenching,
-                params.continue_sample,
-                params.continue_beta
+                params.tpq_energy_shift,
+                params.tpq_continue,
+                params.tpq_continue_sample,
+                params.tpq_continue_beta
             );
             
             results.eigenvalues = eigenvalues;
@@ -2804,7 +2855,7 @@ EDResults exact_diagonalization_from_directory_symmetrized(
         // Diagonalize the block
         EDResults block_results;
         double large_val = (is_tpq_method && is_target_block) ? 
-                          std::max(gs_info.max_energy * 10, params.large_value) : 0.0;
+                          std::max(gs_info.max_energy * 10, params.tpq_energy_shift) : 0.0;
         
         if (is_tpq_method && is_target_block) {
             std::cout << "Running TPQ in ground state sector with large value " << large_val << std::endl;
@@ -3089,7 +3140,7 @@ inline EDResults exact_diagonalization_fixed_sz_symmetrized(
         sector.index = idx;
         sector.dimension = dim;
         sector.is_target = is_target;
-        sector.large_value = is_target ? std::max(gs_info.max_energy * 10, params.large_value) : 0.0;
+        sector.large_value = is_target ? std::max(gs_info.max_energy * 10, params.tpq_energy_shift) : 0.0;
         sector.output_dir = params.output_dir.empty() ? "" : 
                            params.output_dir + "/sector_" + std::to_string(idx);
         
