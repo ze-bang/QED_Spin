@@ -497,9 +497,15 @@ int solve_tridiagonal_matrix(const std::vector<double>& alpha, const std::vector
                 }
             }
 
-            // Save eigenvector using HDF5 (only format - no .dat/.txt fallback)
+            // Save eigenvector using HDF5 in main output directory (unified ed_results.h5)
+            // Extract parent directory from evec_dir (remove /eigenvectors suffix if present)
             try {
-                std::string hdf5_file = HDF5IO::createOrOpenFile(evec_dir);
+                std::string h5_dir = evec_dir;
+                size_t pos = h5_dir.rfind("/eigenvectors");
+                if (pos != std::string::npos) {
+                    h5_dir = h5_dir.substr(0, pos);
+                }
+                std::string hdf5_file = HDF5IO::createOrOpenFile(h5_dir);
                 HDF5IO::saveEigenvector(hdf5_file, i, full_vector);
             } catch (const std::exception& e) {
                 std::cerr << "Warning: Failed to save eigenvector " << i << " to HDF5: " << e.what() << std::endl;
@@ -522,9 +528,15 @@ int solve_tridiagonal_matrix(const std::vector<double>& alpha, const std::vector
     eigenvalues.resize(n_eigenvalues);
     std::copy(diag.begin(), diag.begin() + n_eigenvalues, eigenvalues.begin());
 
-    // Save eigenvalues using HDF5
+    // Save eigenvalues using HDF5 in main output directory (unified ed_results.h5)
+    // Extract parent directory from evec_dir (remove /eigenvectors suffix if present)
     try {
-        std::string hdf5_file = HDF5IO::createOrOpenFile(evec_dir);
+        std::string h5_dir = evec_dir;
+        size_t pos = h5_dir.rfind("/eigenvectors");
+        if (pos != std::string::npos) {
+            h5_dir = h5_dir.substr(0, pos);
+        }
+        std::string hdf5_file = HDF5IO::createOrOpenFile(h5_dir);
         HDF5IO::saveEigenvalues(hdf5_file, eigenvalues);
         std::cout << "Lanczos: Saved " << n_eigenvalues << " eigenvalues to HDF5" << std::endl;
     } catch (const std::exception& e) {
@@ -2439,17 +2451,16 @@ void full_diagonalization(std::function<void(const Complex*, Complex*, int)> H, 
                 eigenvalues[i] = eigensolver.eigenvalues()(i);
             }
             
-            // Save eigenvectors if requested - use HDF5 in /eigenvectors/ subdirectory
+            // Save eigenvectors if requested - use HDF5 in main output directory (unified ed_results.h5)
             if (compute_eigenvectors && !dir.empty()) {
                 std::cout << "Saving " << actual_num_eigs << " eigenvectors to disk..." << std::endl;
                 
-                // Create eigenvectors subdirectory
-                std::string evec_dir = dir + "/eigenvectors";
-                safe_system_call("mkdir -p " + evec_dir);
+                // Create output directory if needed
+                safe_system_call("mkdir -p " + dir);
                 
-                // Save to HDF5 (primary format)
+                // Save to HDF5 in main output directory (primary format)
                 try {
-                    std::string hdf5_file = HDF5IO::createOrOpenFile(evec_dir);
+                    std::string hdf5_file = HDF5IO::createOrOpenFile(dir);
                     
                     for (int i = 0; i < actual_num_eigs; i++) {
                         // Convert Eigen vector to std::vector<Complex>

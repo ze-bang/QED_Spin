@@ -41,42 +41,80 @@ struct DiagonalizationConfig {
 
 /**
  * @brief Thermal calculation parameters
+ * 
+ * Unified thermal parameters for all methods: TPQ (mTPQ, cTPQ), FTLM, LTLM, Hybrid.
+ * 
+ * Naming convention for TPQ parameters:
+ * - Old name -> New name (use new names in new code)
+ * - num_order -> tpq_taylor_order
+ * - num_measure_freq -> tpq_measurement_interval
+ * - delta_tau -> tpq_delta_beta
+ * - large_value -> tpq_energy_shift
+ * - continue_quenching -> tpq_continue
+ * - continue_sample -> tpq_continue_sample
+ * - continue_beta -> tpq_continue_beta
  */
 struct ThermalConfig {
-    uint64_t num_samples = 1;
-    double temp_min = 1e-3;
-    double temp_max = 20.0;
-    uint64_t num_temp_bins = 100;
+    // Common parameters
+    uint64_t num_samples = 1;          // Number of random samples for thermal averaging
+    double temp_min = 1e-3;            // Minimum temperature (for output grid)
+    double temp_max = 20.0;            // Maximum temperature (for output grid)
+    uint64_t num_temp_bins = 100;      // Number of temperature bins for output
     
-    // TPQ-specific
-    uint64_t num_order = 100;          // Order for cTPQ
-    uint64_t num_measure_freq = 100;   // Measurement frequency
-    double delta_tau = 1e-2;      // Time step for cTPQ
-    double large_value = 1e5;     // Large value for mTPQ
-    bool continue_quenching = false;  // Continue quenching from saved state
-    uint64_t continue_sample = 0;          // Sample to continue from (0 = auto-detect lowest energy)
-    double continue_beta = 0.0;       // Beta to continue from (0.0 = use saved beta)
+    // ========== TPQ-specific parameters ==========
+    // mTPQ (microcanonical) parameters
+    uint64_t tpq_max_steps = 10000;        // Maximum number of mTPQ evolution steps
+    uint64_t tpq_measurement_interval = 100; // Interval between measurements (in steps)
+    double tpq_energy_shift = 1e5;         // Large energy shift for mTPQ
     
-    // FTLM-specific
+    // cTPQ (canonical) parameters  
+    double tpq_beta_max = 20.0;            // Maximum inverse temperature (1/T_min)
+    double tpq_delta_beta = 1e-2;          // Imaginary-time step for cTPQ evolution
+    uint64_t tpq_taylor_order = 100;       // Taylor expansion order for e^{-delta_beta*H}
+    
+    // Continue quenching options
+    bool tpq_continue = false;             // Continue quenching from saved state
+    uint64_t tpq_continue_sample = 0;      // Sample to continue from (0 = auto-detect)
+    double tpq_continue_beta = 0.0;        // Beta to continue from (0.0 = use saved)
+    
+    // ========== FTLM-specific parameters ==========
     uint64_t ftlm_krylov_dim = 100;    // Krylov subspace dimension per sample
-    bool ftlm_full_reorth = false; // Use full reorthogonalization
+    bool ftlm_full_reorth = false;     // Use full reorthogonalization
     uint64_t ftlm_reorth_freq = 10;    // Reorthogonalization frequency
-    uint64_t ftlm_seed = 0;   // Random seed (0 = auto)
-    bool ftlm_store_samples = false; // Store per-sample intermediate data
-    bool ftlm_error_bars = true;  // Compute error bars
+    uint64_t ftlm_seed = 0;            // Random seed (0 = auto)
+    bool ftlm_store_samples = false;   // Store per-sample intermediate data
+    bool ftlm_error_bars = true;       // Compute error bars
     
-    // LTLM-specific
+    // ========== LTLM-specific parameters ==========
     uint64_t ltlm_krylov_dim = 200;    // Krylov subspace dimension for excitations
     uint64_t ltlm_ground_krylov = 100; // Krylov dimension for finding ground state
-    bool ltlm_full_reorth = false; // Use full reorthogonalization
+    bool ltlm_full_reorth = false;     // Use full reorthogonalization
     uint64_t ltlm_reorth_freq = 10;    // Reorthogonalization frequency
-    uint64_t ltlm_seed = 0;   // Random seed (0 = auto)
-    bool ltlm_store_data = false; // Store intermediate data
+    uint64_t ltlm_seed = 0;            // Random seed (0 = auto)
+    bool ltlm_store_data = false;      // Store intermediate data
     
-    // Hybrid Thermal (LTLM+FTLM standalone method)
-    bool use_hybrid_method = false; // Use hybrid LTLM (low T) + FTLM (high T) - deprecated, use method=HYBRID instead
-    double hybrid_crossover = 1.0;  // Temperature crossover for hybrid method
-    bool hybrid_auto_crossover = false; // Automatically determine crossover temperature
+    // ========== Hybrid Thermal parameters ==========
+    bool use_hybrid_method = false;    // DEPRECATED: use method=HYBRID instead
+    double hybrid_crossover = 1.0;     // Temperature crossover for hybrid method
+    bool hybrid_auto_crossover = false;// Automatically determine crossover temperature
+    
+    // Getter methods for backwards compatibility with old parameter names
+    uint64_t get_num_order() const { return tpq_taylor_order; }
+    uint64_t get_num_measure_freq() const { return tpq_measurement_interval; }
+    double get_delta_tau() const { return tpq_delta_beta; }
+    double get_large_value() const { return tpq_energy_shift; }
+    bool get_continue_quenching() const { return tpq_continue; }
+    uint64_t get_continue_sample() const { return tpq_continue_sample; }
+    double get_continue_beta() const { return tpq_continue_beta; }
+    
+    // Setter methods for backwards compatibility
+    void set_num_order(uint64_t v) { tpq_taylor_order = v; }
+    void set_num_measure_freq(uint64_t v) { tpq_measurement_interval = v; }
+    void set_delta_tau(double v) { tpq_delta_beta = v; }
+    void set_large_value(double v) { tpq_energy_shift = v; }
+    void set_continue_quenching(bool v) { tpq_continue = v; }
+    void set_continue_sample(uint64_t v) { tpq_continue_sample = v; }
+    void set_continue_beta(double v) { tpq_continue_beta = v; }
 };
 
 /**

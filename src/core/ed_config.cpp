@@ -178,13 +178,20 @@ EDConfig EDConfig::fromFile(const std::string& filename) {
             // ========== [TPQ] section ==========
             else if (current_section == "tpq") {
                 if (key == "num_samples") config.thermal.num_samples = std::stoi(value);
-                else if (key == "num_order") config.thermal.num_order = std::stoi(value);
-                else if (key == "measure_freq") config.thermal.num_measure_freq = std::stoi(value);
-                else if (key == "delta_tau") config.thermal.delta_tau = std::stod(value);
-                else if (key == "large_value") config.thermal.large_value = std::stod(value);
-                else if (key == "continue_quenching") config.thermal.continue_quenching = parse_bool(value);
-                else if (key == "continue_sample") config.thermal.continue_sample = std::stoi(value);
-                else if (key == "continue_beta") config.thermal.continue_beta = std::stod(value);
+                // New names (preferred)
+                else if (key == "taylor_order") config.thermal.tpq_taylor_order = std::stoi(value);
+                else if (key == "measurement_interval") config.thermal.tpq_measurement_interval = std::stoi(value);
+                else if (key == "delta_beta") config.thermal.tpq_delta_beta = std::stod(value);
+                else if (key == "energy_shift") config.thermal.tpq_energy_shift = std::stod(value);
+                // Legacy names (for backwards compatibility)
+                else if (key == "num_order") config.thermal.tpq_taylor_order = std::stoi(value);
+                else if (key == "measure_freq") config.thermal.tpq_measurement_interval = std::stoi(value);
+                else if (key == "delta_tau") config.thermal.tpq_delta_beta = std::stod(value);
+                else if (key == "large_value") config.thermal.tpq_energy_shift = std::stod(value);
+                // Continue quenching options
+                else if (key == "continue_quenching" || key == "tpq_continue") config.thermal.tpq_continue = parse_bool(value);
+                else if (key == "continue_sample" || key == "tpq_continue_sample") config.thermal.tpq_continue_sample = std::stoi(value);
+                else if (key == "continue_beta" || key == "tpq_continue_beta") config.thermal.tpq_continue_beta = std::stod(value);
             }
             // ========== [DynamicalResponse] section ==========
             else if (current_section == "dynamicalresponse") {
@@ -380,15 +387,23 @@ EDConfig EDConfig::fromCommandLine(uint64_t argc, char* argv[]) {
             else if (arg.find("--temp_min=") == 0) config.thermal.temp_min = std::stod(parse_value("--temp_min="));
             else if (arg.find("--temp_max=") == 0) config.thermal.temp_max = std::stod(parse_value("--temp_max="));
             else if (arg.find("--temp_bins=") == 0) config.thermal.num_temp_bins = std::stoi(parse_value("--temp_bins="));
-            else if (arg.find("--num_order=") == 0) config.thermal.num_order = std::stoi(parse_value("--num_order="));
-            else if (arg.find("--measure-freq=") == 0) config.thermal.num_measure_freq = std::stoi(parse_value("--measure-freq="));
-            else if (arg.find("--num_measure_freq=") == 0) config.thermal.num_measure_freq = std::stoi(parse_value("--num_measure_freq=")); // Deprecated: use --measure-freq
-            else if (arg.find("--delta_tau=") == 0) config.thermal.delta_tau = std::stod(parse_value("--delta_tau="));
-            else if (arg.find("--large_value=") == 0) config.thermal.large_value = std::stod(parse_value("--large_value="));
-            // TPQ continue-quenching options
-            else if (arg == "--continue_quenching") config.thermal.continue_quenching = true;
-            else if (arg.find("--continue_sample=") == 0) config.thermal.continue_sample = std::stoi(parse_value("--continue_sample="));
-            else if (arg.find("--continue_beta=") == 0) config.thermal.continue_beta = std::stod(parse_value("--continue_beta="));
+            // New TPQ parameter names (preferred)
+            else if (arg.find("--taylor_order=") == 0) config.thermal.tpq_taylor_order = std::stoi(parse_value("--taylor_order="));
+            else if (arg.find("--measurement_interval=") == 0) config.thermal.tpq_measurement_interval = std::stoi(parse_value("--measurement_interval="));
+            else if (arg.find("--delta_beta=") == 0) config.thermal.tpq_delta_beta = std::stod(parse_value("--delta_beta="));
+            else if (arg.find("--energy_shift=") == 0) config.thermal.tpq_energy_shift = std::stod(parse_value("--energy_shift="));
+            // Legacy TPQ parameter names (for backwards compatibility)
+            else if (arg.find("--num_order=") == 0) config.thermal.tpq_taylor_order = std::stoi(parse_value("--num_order="));
+            else if (arg.find("--measure-freq=") == 0) config.thermal.tpq_measurement_interval = std::stoi(parse_value("--measure-freq="));
+            else if (arg.find("--num_measure_freq=") == 0) config.thermal.tpq_measurement_interval = std::stoi(parse_value("--num_measure_freq=")); // Deprecated: use --measurement_interval
+            else if (arg.find("--delta_tau=") == 0) config.thermal.tpq_delta_beta = std::stod(parse_value("--delta_tau="));
+            else if (arg.find("--large_value=") == 0) config.thermal.tpq_energy_shift = std::stod(parse_value("--large_value="));
+            // TPQ continue-quenching options (new and legacy names)
+            else if (arg == "--continue_quenching" || arg == "--tpq_continue") config.thermal.tpq_continue = true;
+            else if (arg.find("--continue_sample=") == 0) config.thermal.tpq_continue_sample = std::stoi(parse_value("--continue_sample="));
+            else if (arg.find("--tpq_continue_sample=") == 0) config.thermal.tpq_continue_sample = std::stoi(parse_value("--tpq_continue_sample="));
+            else if (arg.find("--continue_beta=") == 0) config.thermal.tpq_continue_beta = std::stod(parse_value("--continue_beta="));
+            else if (arg.find("--tpq_continue_beta=") == 0) config.thermal.tpq_continue_beta = std::stod(parse_value("--tpq_continue_beta="));
             else if (arg == "--calc_observables") config.observable.calculate = true;
             else if (arg == "--measure_spin") config.observable.measure_spin = true;
             else if (arg == "--standard") config.workflow.run_standard = true;

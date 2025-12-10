@@ -10,6 +10,7 @@
 #include <iomanip>
 #include <fstream>
 #include <map>
+#include <algorithm>
 #include <ed/core/thermal_types.h>
 
 using Complex = std::complex<double>;
@@ -60,11 +61,20 @@ using Complex = std::complex<double>;
  *   │   └── averaged/
  *   │       └── observables
  *   └── /tpq
- *       ├── states/
- *       │   ├── state_0_beta_X
+ *       ├── samples/
+ *       │   ├── sample_0/
+ *       │   │   ├── thermodynamics [dataset: beta, energy, variance, doublon, step]
+ *       │   │   ├── norm [dataset: beta, norm, first_norm, step]
+ *       │   │   ├── fluctuations [dataset: spin fluctuation data]
+ *       │   │   └── states/
+ *       │   │       ├── beta_0.100000 [dataset: complex state vector]
+ *       │   │       ├── beta_1.000000 [dataset: complex state vector]
+ *       │   │       └── ...
+ *       │   ├── sample_1/
+ *       │   │   └── ...
  *       │   └── ...
- *       └── observables/
- *           └── ...
+ *       └── averaged/
+ *           └── thermodynamics [dataset: averaged over all samples]
  */
 class HDF5IO {
 public:
@@ -102,8 +112,8 @@ public:
             file.createGroup("/ftlm/samples");
             file.createGroup("/ftlm/averaged");
             file.createGroup("/tpq");
-            file.createGroup("/tpq/states");
-            file.createGroup("/tpq/observables");
+            file.createGroup("/tpq/samples");   // Per-sample TPQ data (thermodynamics, norm, states)
+            file.createGroup("/tpq/averaged");  // Averaged thermodynamic results
             
             file.close();
             std::cout << "Created HDF5 results file: " << filepath << std::endl;
@@ -279,18 +289,15 @@ public:
     ) {
         if (output_dir.empty()) return;
         
-        // Create eigenvectors subdirectory
-        std::string evec_dir = output_dir + "/eigenvectors";
-        
-        // Use system call to create directory (cross-platform would need filesystem)
-        std::string cmd = "mkdir -p " + evec_dir;
+        // Create output directory if needed (for .dat files and HDF5)
+        std::string cmd = "mkdir -p " + output_dir;
         int result = system(cmd.c_str());
         if (result != 0) {
-            std::cerr << "Warning: Could not create directory " << evec_dir << std::endl;
+            std::cerr << "Warning: Could not create directory " << output_dir << std::endl;
         }
         
-        // Create/open HDF5 file
-        std::string h5_path = createOrOpenFile(evec_dir);
+        // Create/open HDF5 file in main output directory (unified ed_results.h5)
+        std::string h5_path = createOrOpenFile(output_dir);
         
         // Save eigenvalues
         saveEigenvalues(h5_path, eigenvalues);
@@ -680,8 +687,19 @@ public:
         try {
             H5::H5File file(filepath, H5F_ACC_RDWR);
             
+            // Create sample group and states subgroup if needed
+            std::string sample_group = "/tpq/samples/sample_" + std::to_string(sample_index);
+            std::string states_group = sample_group + "/states";
+            
+            if (!file.nameExists(sample_group)) {
+                file.createGroup(sample_group);
+            }
+            if (!file.nameExists(states_group)) {
+                file.createGroup(states_group);
+            }
+            
             std::stringstream ss;
-            ss << "/tpq/states/state_" << sample_index << "_beta_" 
+            ss << states_group << "/beta_" 
                << std::fixed << std::setprecision(6) << beta;
             std::string dataset_name = ss.str();
             
@@ -752,7 +770,7 @@ public:
             H5::H5File file(filepath, H5F_ACC_RDONLY);
             
             std::stringstream ss;
-            ss << "/tpq/states/state_" << sample_index << "_beta_" 
+            ss << "/tpq/samples/sample_" << sample_index << "/states/beta_" 
                << std::fixed << std::setprecision(6) << beta;
             std::string dataset_name = ss.str();
             
@@ -807,48 +825,73 @@ public:
     /**
      * @brief List all TPQ states stored in an HDF5 file
      * @param filepath Path to HDF5 file
+     * @param sample_index Optional: filter by sample index (-1 for all samples)
      * @return Vector of TPQStateInfo for each stored state
      */
-    static std::vector<TPQStateInfo> listTPQStates(const std::string& filepath) {
+    static std::vector<TPQStateInfo> listTPQStates(const std::string& filepath, 
+                                                    int sample_filter = -1) {
         std::vector<TPQStateInfo> states;
         
         try {
             H5::H5File file(filepath, H5F_ACC_RDONLY);
             
-            if (!file.nameExists("/tpq/states")) {
+            if (!file.nameExists("/tpq/samples")) {
                 file.close();
                 return states;
             }
             
-            H5::Group tpq_group = file.openGroup("/tpq/states");
+            H5::Group samples_group = file.openGroup("/tpq/samples");
+            hsize_t num_samples = samples_group.getNumObjs();
             
-            hsize_t num_objs = tpq_group.getNumObjs();
-            for (hsize_t i = 0; i < num_objs; ++i) {
-                std::string name = tpq_group.getObjnameByIdx(i);
+            for (hsize_t s = 0; s < num_samples; ++s) {
+                std::string sample_name = samples_group.getObjnameByIdx(s);
                 
-                // Parse dataset name: state_<sample>_beta_<beta>
-                // Example: state_0_beta_10.500000
-                if (name.find("state_") == 0) {
-                    size_t beta_pos = name.find("_beta_");
-                    if (beta_pos != std::string::npos) {
-                        try {
-                            std::string sample_str = name.substr(6, beta_pos - 6);
-                            std::string beta_str = name.substr(beta_pos + 6);
-                            
-                            TPQStateInfo info;
-                            info.sample_index = std::stoull(sample_str);
-                            info.beta = std::stod(beta_str);
-                            info.dataset_name = "/tpq/states/" + name;
-                            
-                            states.push_back(info);
-                        } catch (...) {
-                            // Skip malformed entries
+                // Parse sample_N
+                if (sample_name.find("sample_") == 0) {
+                    try {
+                        size_t sample_index = std::stoull(sample_name.substr(7));
+                        
+                        // Apply sample filter if specified
+                        if (sample_filter >= 0 && sample_index != static_cast<size_t>(sample_filter)) {
+                            continue;
                         }
+                        
+                        std::string states_path = "/tpq/samples/" + sample_name + "/states";
+                        if (!file.nameExists(states_path)) {
+                            continue;
+                        }
+                        
+                        H5::Group states_group = file.openGroup(states_path);
+                        hsize_t num_states = states_group.getNumObjs();
+                        
+                        for (hsize_t i = 0; i < num_states; ++i) {
+                            std::string state_name = states_group.getObjnameByIdx(i);
+                            
+                            // Parse dataset name: beta_<beta>
+                            // Example: beta_10.500000
+                            if (state_name.find("beta_") == 0) {
+                                try {
+                                    std::string beta_str = state_name.substr(5);
+                                    
+                                    TPQStateInfo info;
+                                    info.sample_index = sample_index;
+                                    info.beta = std::stod(beta_str);
+                                    info.dataset_name = states_path + "/" + state_name;
+                                    
+                                    states.push_back(info);
+                                } catch (...) {
+                                    // Skip malformed entries
+                                }
+                            }
+                        }
+                        states_group.close();
+                    } catch (...) {
+                        // Skip malformed sample directories
                     }
                 }
             }
             
-            tpq_group.close();
+            samples_group.close();
             file.close();
             
         } catch (H5::Exception& e) {
@@ -859,9 +902,20 @@ public:
     }
     
     /**
+     * @brief List TPQ states for a specific sample
+     * @param filepath Path to HDF5 file  
+     * @param sample_index Sample index
+     * @return Vector of TPQStateInfo for the specified sample
+     */
+    static std::vector<TPQStateInfo> listTPQStatesForSample(const std::string& filepath,
+                                                             size_t sample_index) {
+        return listTPQStates(filepath, static_cast<int>(sample_index));
+    }
+
+    /**
      * @brief Load TPQ state by dataset name
      * @param filepath Path to HDF5 file
-     * @param dataset_name Full dataset path (e.g., /tpq/states/state_0_beta_10.500000)
+     * @param dataset_name Full dataset path (e.g., /tpq/samples/sample_0/states/beta_10.500000)
      * @param state Output state vector
      * @return true if successful, false otherwise
      */
@@ -907,6 +961,586 @@ public:
             
         } catch (H5::Exception& e) {
             return false;
+        }
+    }
+    
+    // ============================================================================
+    // TPQ Per-Sample Thermodynamic Data I/O (replaces SS_rand*.dat / norm_rand*.dat)
+    // ============================================================================
+    
+    /**
+     * @brief Structure to hold TPQ thermodynamic data for a single measurement point
+     */
+    struct TPQThermodynamicPoint {
+        double beta;        // Inverse temperature
+        double energy;      // Energy expectation value
+        double variance;    // Energy variance
+        double doublon;     // Doublon expectation (or other observable)
+        uint64_t step;      // TPQ step number
+    };
+    
+    /**
+     * @brief Structure to hold TPQ norm data for a single measurement point
+     */
+    struct TPQNormPoint {
+        double beta;        // Inverse temperature
+        double norm;        // Current norm
+        double first_norm;  // Initial norm
+        uint64_t step;      // TPQ step number
+    };
+    
+    /**
+     * @brief Ensure TPQ sample group exists in HDF5 file
+     * @param filepath Path to HDF5 file
+     * @param sample_index Sample index
+     */
+    static void ensureTPQSampleGroup(const std::string& filepath, size_t sample_index) {
+        try {
+            H5::H5File file(filepath, H5F_ACC_RDWR);
+            
+            std::string sample_group = "/tpq/samples/sample_" + std::to_string(sample_index);
+            
+            if (!file.nameExists("/tpq")) {
+                file.createGroup("/tpq");
+            }
+            if (!file.nameExists("/tpq/samples")) {
+                file.createGroup("/tpq/samples");
+            }
+            if (!file.nameExists(sample_group)) {
+                file.createGroup(sample_group);
+            }
+            
+            file.close();
+        } catch (H5::Exception& e) {
+            throw std::runtime_error("Failed to create TPQ sample group: " + std::string(e.getCDetailMsg()));
+        }
+    }
+    
+    /**
+     * @brief Append TPQ thermodynamic data point to HDF5 (replaces SS_rand*.dat writing)
+     * 
+     * This function appends a single measurement point to the sample's thermodynamics dataset.
+     * Data is stored as: [beta, energy, variance, doublon, step]
+     * 
+     * @param filepath Path to HDF5 file
+     * @param sample_index Sample index (0, 1, 2, ...)
+     * @param point Thermodynamic data point to append
+     */
+    static void appendTPQThermodynamics(const std::string& filepath,
+                                        size_t sample_index,
+                                        const TPQThermodynamicPoint& point) {
+        try {
+            H5::H5File file(filepath, H5F_ACC_RDWR);
+            
+            std::string dataset_path = "/tpq/samples/sample_" + std::to_string(sample_index) + "/thermodynamics";
+            
+            // Ensure group exists
+            std::string sample_group = "/tpq/samples/sample_" + std::to_string(sample_index);
+            if (!file.nameExists(sample_group)) {
+                file.createGroup(sample_group);
+            }
+            
+            // Data layout: 5 columns [beta, energy, variance, doublon, step]
+            const hsize_t num_cols = 5;
+            double row_data[5] = {point.beta, point.energy, point.variance, point.doublon, static_cast<double>(point.step)};
+            
+            if (!file.nameExists(dataset_path)) {
+                // Create extensible dataset
+                hsize_t dims[2] = {1, num_cols};
+                hsize_t maxdims[2] = {H5S_UNLIMITED, num_cols};
+                H5::DataSpace dataspace(2, dims, maxdims);
+                
+                // Enable chunking for extensible dataset
+                H5::DSetCreatPropList plist;
+                hsize_t chunk_dims[2] = {100, num_cols};  // Chunk by 100 rows
+                plist.setChunk(2, chunk_dims);
+                plist.setDeflate(6);  // Compression level
+                
+                H5::DataSet dataset = file.createDataSet(dataset_path, 
+                                                         H5::PredType::NATIVE_DOUBLE, 
+                                                         dataspace, plist);
+                dataset.write(row_data, H5::PredType::NATIVE_DOUBLE);
+                dataset.close();
+            } else {
+                // Append to existing dataset
+                H5::DataSet dataset = file.openDataSet(dataset_path);
+                H5::DataSpace filespace = dataset.getSpace();
+                
+                hsize_t dims[2];
+                filespace.getSimpleExtentDims(dims);
+                
+                // Extend dataset
+                hsize_t new_dims[2] = {dims[0] + 1, num_cols};
+                dataset.extend(new_dims);
+                
+                // Select hyperslab for the new row
+                filespace = dataset.getSpace();
+                hsize_t offset[2] = {dims[0], 0};
+                hsize_t count[2] = {1, num_cols};
+                filespace.selectHyperslab(H5S_SELECT_SET, count, offset);
+                
+                // Write the new row
+                H5::DataSpace memspace(2, count);
+                dataset.write(row_data, H5::PredType::NATIVE_DOUBLE, memspace, filespace);
+                dataset.close();
+            }
+            
+            file.close();
+        } catch (H5::Exception& e) {
+            throw std::runtime_error("Failed to append TPQ thermodynamics: " + std::string(e.getCDetailMsg()));
+        }
+    }
+    
+    /**
+     * @brief Append TPQ norm data point to HDF5 (replaces norm_rand*.dat writing)
+     * 
+     * Data is stored as: [beta, norm, first_norm, step]
+     * 
+     * @param filepath Path to HDF5 file
+     * @param sample_index Sample index
+     * @param point Norm data point to append
+     */
+    static void appendTPQNorm(const std::string& filepath,
+                              size_t sample_index,
+                              const TPQNormPoint& point) {
+        try {
+            H5::H5File file(filepath, H5F_ACC_RDWR);
+            
+            std::string dataset_path = "/tpq/samples/sample_" + std::to_string(sample_index) + "/norm";
+            
+            // Ensure group exists
+            std::string sample_group = "/tpq/samples/sample_" + std::to_string(sample_index);
+            if (!file.nameExists(sample_group)) {
+                file.createGroup(sample_group);
+            }
+            
+            // Data layout: 4 columns [beta, norm, first_norm, step]
+            const hsize_t num_cols = 4;
+            double row_data[4] = {point.beta, point.norm, point.first_norm, static_cast<double>(point.step)};
+            
+            if (!file.nameExists(dataset_path)) {
+                // Create extensible dataset
+                hsize_t dims[2] = {1, num_cols};
+                hsize_t maxdims[2] = {H5S_UNLIMITED, num_cols};
+                H5::DataSpace dataspace(2, dims, maxdims);
+                
+                H5::DSetCreatPropList plist;
+                hsize_t chunk_dims[2] = {100, num_cols};
+                plist.setChunk(2, chunk_dims);
+                plist.setDeflate(6);
+                
+                H5::DataSet dataset = file.createDataSet(dataset_path, 
+                                                         H5::PredType::NATIVE_DOUBLE, 
+                                                         dataspace, plist);
+                dataset.write(row_data, H5::PredType::NATIVE_DOUBLE);
+                dataset.close();
+            } else {
+                // Append to existing dataset
+                H5::DataSet dataset = file.openDataSet(dataset_path);
+                H5::DataSpace filespace = dataset.getSpace();
+                
+                hsize_t dims[2];
+                filespace.getSimpleExtentDims(dims);
+                
+                hsize_t new_dims[2] = {dims[0] + 1, num_cols};
+                dataset.extend(new_dims);
+                
+                filespace = dataset.getSpace();
+                hsize_t offset[2] = {dims[0], 0};
+                hsize_t count[2] = {1, num_cols};
+                filespace.selectHyperslab(H5S_SELECT_SET, count, offset);
+                
+                H5::DataSpace memspace(2, count);
+                dataset.write(row_data, H5::PredType::NATIVE_DOUBLE, memspace, filespace);
+                dataset.close();
+            }
+            
+            file.close();
+        } catch (H5::Exception& e) {
+            throw std::runtime_error("Failed to append TPQ norm: " + std::string(e.getCDetailMsg()));
+        }
+    }
+    
+    /**
+     * @brief Save complete TPQ thermodynamic trajectory for a sample
+     * 
+     * Batch write of all thermodynamic data points (more efficient than append)
+     * 
+     * @param filepath Path to HDF5 file
+     * @param sample_index Sample index
+     * @param points Vector of thermodynamic data points
+     */
+    static void saveTPQThermodynamics(const std::string& filepath,
+                                      size_t sample_index,
+                                      const std::vector<TPQThermodynamicPoint>& points) {
+        if (points.empty()) return;
+        
+        try {
+            H5::H5File file(filepath, H5F_ACC_RDWR);
+            
+            std::string sample_group = "/tpq/samples/sample_" + std::to_string(sample_index);
+            std::string dataset_path = sample_group + "/thermodynamics";
+            
+            // Ensure groups exist
+            if (!file.nameExists("/tpq/samples")) {
+                file.createGroup("/tpq/samples");
+            }
+            if (!file.nameExists(sample_group)) {
+                file.createGroup(sample_group);
+            }
+            if (file.nameExists(dataset_path)) {
+                file.unlink(dataset_path);
+            }
+            
+            // Prepare data array
+            const hsize_t num_rows = points.size();
+            const hsize_t num_cols = 5;
+            std::vector<double> data(num_rows * num_cols);
+            
+            for (size_t i = 0; i < num_rows; ++i) {
+                data[i * num_cols + 0] = points[i].beta;
+                data[i * num_cols + 1] = points[i].energy;
+                data[i * num_cols + 2] = points[i].variance;
+                data[i * num_cols + 3] = points[i].doublon;
+                data[i * num_cols + 4] = static_cast<double>(points[i].step);
+            }
+            
+            // Create dataset
+            hsize_t dims[2] = {num_rows, num_cols};
+            H5::DataSpace dataspace(2, dims);
+            
+            H5::DSetCreatPropList plist;
+            plist.setDeflate(6);
+            
+            H5::DataSet dataset = file.createDataSet(dataset_path, 
+                                                     H5::PredType::NATIVE_DOUBLE, 
+                                                     dataspace, plist);
+            dataset.write(data.data(), H5::PredType::NATIVE_DOUBLE);
+            
+            // Add column labels as attribute
+            H5::DataSpace attr_space(H5S_SCALAR);
+            H5::StrType str_type(H5::PredType::C_S1, 64);
+            std::string columns = "beta,energy,variance,doublon,step";
+            H5::Attribute attr = dataset.createAttribute("columns", str_type, attr_space);
+            attr.write(str_type, columns.c_str());
+            attr.close();
+            
+            dataset.close();
+            file.close();
+            
+            std::cout << "Saved TPQ thermodynamics for sample " << sample_index 
+                      << " (" << num_rows << " points)" << std::endl;
+        } catch (H5::Exception& e) {
+            throw std::runtime_error("Failed to save TPQ thermodynamics: " + std::string(e.getCDetailMsg()));
+        }
+    }
+    
+    /**
+     * @brief Save complete TPQ norm trajectory for a sample
+     * 
+     * @param filepath Path to HDF5 file
+     * @param sample_index Sample index
+     * @param points Vector of norm data points
+     */
+    static void saveTPQNorm(const std::string& filepath,
+                            size_t sample_index,
+                            const std::vector<TPQNormPoint>& points) {
+        if (points.empty()) return;
+        
+        try {
+            H5::H5File file(filepath, H5F_ACC_RDWR);
+            
+            std::string sample_group = "/tpq/samples/sample_" + std::to_string(sample_index);
+            std::string dataset_path = sample_group + "/norm";
+            
+            // Ensure groups exist
+            if (!file.nameExists("/tpq/samples")) {
+                file.createGroup("/tpq/samples");
+            }
+            if (!file.nameExists(sample_group)) {
+                file.createGroup(sample_group);
+            }
+            if (file.nameExists(dataset_path)) {
+                file.unlink(dataset_path);
+            }
+            
+            // Prepare data array
+            const hsize_t num_rows = points.size();
+            const hsize_t num_cols = 4;
+            std::vector<double> data(num_rows * num_cols);
+            
+            for (size_t i = 0; i < num_rows; ++i) {
+                data[i * num_cols + 0] = points[i].beta;
+                data[i * num_cols + 1] = points[i].norm;
+                data[i * num_cols + 2] = points[i].first_norm;
+                data[i * num_cols + 3] = static_cast<double>(points[i].step);
+            }
+            
+            // Create dataset
+            hsize_t dims[2] = {num_rows, num_cols};
+            H5::DataSpace dataspace(2, dims);
+            
+            H5::DSetCreatPropList plist;
+            plist.setDeflate(6);
+            
+            H5::DataSet dataset = file.createDataSet(dataset_path, 
+                                                     H5::PredType::NATIVE_DOUBLE, 
+                                                     dataspace, plist);
+            dataset.write(data.data(), H5::PredType::NATIVE_DOUBLE);
+            
+            // Add column labels as attribute
+            H5::DataSpace attr_space(H5S_SCALAR);
+            H5::StrType str_type(H5::PredType::C_S1, 64);
+            std::string columns = "beta,norm,first_norm,step";
+            H5::Attribute attr = dataset.createAttribute("columns", str_type, attr_space);
+            attr.write(str_type, columns.c_str());
+            attr.close();
+            
+            dataset.close();
+            file.close();
+            
+            std::cout << "Saved TPQ norm for sample " << sample_index 
+                      << " (" << num_rows << " points)" << std::endl;
+        } catch (H5::Exception& e) {
+            throw std::runtime_error("Failed to save TPQ norm: " + std::string(e.getCDetailMsg()));
+        }
+    }
+    
+    /**
+     * @brief Load TPQ thermodynamic data for a sample
+     * 
+     * @param filepath Path to HDF5 file
+     * @param sample_index Sample index
+     * @return Vector of thermodynamic data points
+     */
+    static std::vector<TPQThermodynamicPoint> loadTPQThermodynamics(const std::string& filepath,
+                                                                     size_t sample_index) {
+        std::vector<TPQThermodynamicPoint> points;
+        
+        try {
+            H5::H5File file(filepath, H5F_ACC_RDONLY);
+            
+            std::string dataset_path = "/tpq/samples/sample_" + std::to_string(sample_index) + "/thermodynamics";
+            
+            if (!file.nameExists(dataset_path)) {
+                file.close();
+                return points;
+            }
+            
+            H5::DataSet dataset = file.openDataSet(dataset_path);
+            H5::DataSpace dataspace = dataset.getSpace();
+            
+            hsize_t dims[2];
+            dataspace.getSimpleExtentDims(dims);
+            hsize_t num_rows = dims[0];
+            hsize_t num_cols = dims[1];
+            
+            std::vector<double> data(num_rows * num_cols);
+            dataset.read(data.data(), H5::PredType::NATIVE_DOUBLE);
+            
+            points.resize(num_rows);
+            for (hsize_t i = 0; i < num_rows; ++i) {
+                points[i].beta = data[i * num_cols + 0];
+                points[i].energy = data[i * num_cols + 1];
+                points[i].variance = data[i * num_cols + 2];
+                points[i].doublon = data[i * num_cols + 3];
+                points[i].step = static_cast<uint64_t>(data[i * num_cols + 4]);
+            }
+            
+            dataset.close();
+            file.close();
+        } catch (H5::Exception& e) {
+            // Return empty vector on error
+        }
+        
+        return points;
+    }
+    
+    /**
+     * @brief Load TPQ norm data for a sample
+     * 
+     * @param filepath Path to HDF5 file
+     * @param sample_index Sample index
+     * @return Vector of norm data points
+     */
+    static std::vector<TPQNormPoint> loadTPQNorm(const std::string& filepath,
+                                                  size_t sample_index) {
+        std::vector<TPQNormPoint> points;
+        
+        try {
+            H5::H5File file(filepath, H5F_ACC_RDONLY);
+            
+            std::string dataset_path = "/tpq/samples/sample_" + std::to_string(sample_index) + "/norm";
+            
+            if (!file.nameExists(dataset_path)) {
+                file.close();
+                return points;
+            }
+            
+            H5::DataSet dataset = file.openDataSet(dataset_path);
+            H5::DataSpace dataspace = dataset.getSpace();
+            
+            hsize_t dims[2];
+            dataspace.getSimpleExtentDims(dims);
+            hsize_t num_rows = dims[0];
+            hsize_t num_cols = dims[1];
+            
+            std::vector<double> data(num_rows * num_cols);
+            dataset.read(data.data(), H5::PredType::NATIVE_DOUBLE);
+            
+            points.resize(num_rows);
+            for (hsize_t i = 0; i < num_rows; ++i) {
+                points[i].beta = data[i * num_cols + 0];
+                points[i].norm = data[i * num_cols + 1];
+                points[i].first_norm = data[i * num_cols + 2];
+                points[i].step = static_cast<uint64_t>(data[i * num_cols + 3]);
+            }
+            
+            dataset.close();
+            file.close();
+        } catch (H5::Exception& e) {
+            // Return empty vector on error
+        }
+        
+        return points;
+    }
+    
+    /**
+     * @brief List all TPQ samples in an HDF5 file
+     * 
+     * @param filepath Path to HDF5 file
+     * @return Vector of sample indices that have data
+     */
+    static std::vector<size_t> listTPQSamples(const std::string& filepath) {
+        std::vector<size_t> samples;
+        
+        try {
+            H5::H5File file(filepath, H5F_ACC_RDONLY);
+            
+            if (!file.nameExists("/tpq/samples")) {
+                file.close();
+                return samples;
+            }
+            
+            H5::Group group = file.openGroup("/tpq/samples");
+            hsize_t num_objs = group.getNumObjs();
+            
+            for (hsize_t i = 0; i < num_objs; ++i) {
+                std::string name = group.getObjnameByIdx(i);
+                // Parse "sample_N" format
+                if (name.find("sample_") == 0) {
+                    try {
+                        size_t sample_idx = std::stoull(name.substr(7));
+                        samples.push_back(sample_idx);
+                    } catch (...) {
+                        // Skip malformed entries
+                    }
+                }
+            }
+            
+            group.close();
+            file.close();
+            
+            // Sort samples
+            std::sort(samples.begin(), samples.end());
+        } catch (H5::Exception& e) {
+            // Return empty vector on error
+        }
+        
+        return samples;
+    }
+    
+    /**
+     * @brief Save TPQ averaged thermodynamics (combined from all samples)
+     * 
+     * @param filepath Path to HDF5 file
+     * @param beta Inverse temperature array
+     * @param energy Energy (mean over samples)
+     * @param energy_error Energy error (std error)
+     * @param specific_heat Specific heat
+     * @param specific_heat_error Specific heat error
+     * @param entropy Entropy
+     * @param entropy_error Entropy error
+     * @param num_samples Number of samples used
+     */
+    static void saveTPQAveragedThermodynamics(
+        const std::string& filepath,
+        const std::vector<double>& beta,
+        const std::vector<double>& energy,
+        const std::vector<double>& energy_error,
+        const std::vector<double>& specific_heat,
+        const std::vector<double>& specific_heat_error,
+        const std::vector<double>& entropy,
+        const std::vector<double>& entropy_error,
+        uint64_t num_samples
+    ) {
+        try {
+            H5::H5File file(filepath, H5F_ACC_RDWR);
+            
+            std::string base_path = "/tpq/averaged";
+            
+            // Ensure group exists
+            if (!file.nameExists("/tpq")) {
+                file.createGroup("/tpq");
+            }
+            if (!file.nameExists(base_path)) {
+                file.createGroup(base_path);
+            }
+            
+            // Helper to save dataset
+            auto saveDataset = [&](const std::string& name, const std::vector<double>& data) {
+                std::string path = base_path + "/" + name;
+                if (file.nameExists(path)) {
+                    file.unlink(path);
+                }
+                hsize_t dims[1] = {data.size()};
+                H5::DataSpace dataspace(1, dims);
+                H5::DataSet dataset = file.createDataSet(path, H5::PredType::NATIVE_DOUBLE, dataspace);
+                dataset.write(data.data(), H5::PredType::NATIVE_DOUBLE);
+                dataset.close();
+            };
+            
+            // Convert beta to temperature for convenience
+            std::vector<double> temperatures(beta.size());
+            for (size_t i = 0; i < beta.size(); ++i) {
+                temperatures[i] = (beta[i] > 0) ? 1.0 / beta[i] : 0.0;
+            }
+            
+            saveDataset("beta", beta);
+            saveDataset("temperatures", temperatures);
+            saveDataset("energy", energy);
+            saveDataset("energy_error", energy_error);
+            saveDataset("specific_heat", specific_heat);
+            saveDataset("specific_heat_error", specific_heat_error);
+            saveDataset("entropy", entropy);
+            saveDataset("entropy_error", entropy_error);
+            
+            // Save metadata
+            H5::Group group = file.openGroup(base_path);
+            H5::DataSpace attr_space(H5S_SCALAR);
+            
+            if (group.attrExists("num_samples")) {
+                group.removeAttr("num_samples");
+            }
+            H5::Attribute attr = group.createAttribute("num_samples", H5::PredType::NATIVE_UINT64, attr_space);
+            attr.write(H5::PredType::NATIVE_UINT64, &num_samples);
+            attr.close();
+            
+            if (group.attrExists("method")) {
+                group.removeAttr("method");
+            }
+            std::string method = "TPQ";
+            H5::StrType str_type(H5::PredType::C_S1, 16);
+            H5::Attribute method_attr = group.createAttribute("method", str_type, attr_space);
+            method_attr.write(str_type, method.c_str());
+            method_attr.close();
+            
+            group.close();
+            file.close();
+            
+            std::cout << "Saved TPQ averaged thermodynamics to HDF5" << std::endl;
+        } catch (H5::Exception& e) {
+            throw std::runtime_error("Failed to save TPQ averaged thermodynamics: " + std::string(e.getCDetailMsg()));
         }
     }
     

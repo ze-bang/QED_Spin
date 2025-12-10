@@ -267,13 +267,16 @@ void save_hybrid_thermal_results(
     const HybridThermalResults& results,
     const std::string& filename
 ) {
-    // Extract directory from filename
+    // Extract directory from filename to create HDF5 file in main output dir
     std::string directory = filename.substr(0, filename.find_last_of('/'));
     if (directory.empty()) directory = ".";
     
     try {
+        // Create/open HDF5 file in main output directory
+        std::string h5_path = HDF5IO::createOrOpenFile(directory);
+        
         HDF5IO::saveHybridThermalResults(
-            filename,
+            h5_path,
             results.thermo_data.temperatures,
             results.thermo_data.energy,
             results.energy_error,
@@ -290,7 +293,7 @@ void save_hybrid_thermal_results(
             results.ftlm_points,
             results.ftlm_samples_used
         );
-        std::cout << "Hybrid thermal results saved to: " << filename << std::endl;
+        std::cout << "Hybrid thermal results saved to: " << h5_path << std::endl;
         
     } catch (const std::exception& e) {
         std::cerr << "Error saving hybrid thermal results to HDF5: " << e.what() << std::endl;

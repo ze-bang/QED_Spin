@@ -180,18 +180,38 @@ struct EDParameters {
     double target_lower = 0.0; // Lower energy bound for Chebyshev filtered (0 = auto)
     double target_upper = 0.0; // Upper energy bound for Chebyshev filtered (0 = auto)
     
+    // ========== Thermal Calculation Parameters ==========
+    // Common to all thermal methods (TPQ, FTLM, LTLM, Hybrid)
+    uint64_t num_samples = 1;              // Number of random samples for thermal averaging
+    double temp_min = 1e-3;                // Minimum temperature (for output grid)
+    double temp_max = 20;                  // Maximum temperature (for output grid)
+    uint64_t num_temp_bins = 100;          // Number of temperature bins for output
+    
     // ========== TPQ-Specific Parameters ==========
-    uint64_t num_samples = 1;
-    double temp_min = 1e-3;
-    double temp_max = 20;
-    uint64_t num_temp_bins = 100;
-    uint64_t num_order = 100;           // Order (steps) for canonical TPQ imaginary-time evolution
-    uint64_t num_measure_freq = 100;    // Frequency of measurements
-    double delta_tau = 1e-2;       // Time step for imaginary-time evolution (cTPQ)
-    double large_value = 1e5;      // Large value for TPQ
-    bool continue_quenching = false;  // Continue quenching from saved state
-    uint64_t continue_sample = 0;          // Sample to continue from (0 = auto-detect lowest energy)
-    double continue_beta = 0.0;       // Beta to continue from (0.0 = use saved beta)
+    // mTPQ (microcanonical) parameters
+    uint64_t tpq_max_steps = 10000;        // Maximum number of mTPQ evolution steps
+    uint64_t tpq_measurement_interval = 100; // Interval between measurements (in steps)
+    double tpq_energy_shift = 1e5;         // Large energy shift for mTPQ (ensures convergence)
+    
+    // cTPQ (canonical) parameters  
+    double tpq_beta_max = 20.0;            // Maximum inverse temperature (1/T_min)
+    double tpq_delta_beta = 1e-2;          // Imaginary-time step for cTPQ evolution
+    uint64_t tpq_taylor_order = 100;       // Taylor expansion order for e^{-delta_beta*H}
+    
+    // Continue quenching options
+    bool tpq_continue = false;             // Continue quenching from saved state
+    uint64_t tpq_continue_sample = 0;      // Sample to continue from (0 = auto-detect)
+    double tpq_continue_beta = 0.0;        // Beta to continue from (0.0 = use saved)
+    
+    // Legacy parameter names (maintained for backwards compatibility)
+    // These are duplicate members with same values - prefer the new names above
+    uint64_t num_order = 100;           // DEPRECATED: use tpq_taylor_order
+    uint64_t num_measure_freq = 100;    // DEPRECATED: use tpq_measurement_interval
+    double delta_tau = 1e-2;            // DEPRECATED: use tpq_delta_beta
+    double large_value = 1e5;           // DEPRECATED: use tpq_energy_shift
+    bool continue_quenching = false;    // DEPRECATED: use tpq_continue
+    uint64_t continue_sample = 0;       // DEPRECATED: use tpq_continue_sample
+    double continue_beta = 0.0;         // DEPRECATED: use tpq_continue_beta
     
     // ========== FTLM-Specific Parameters ==========
     uint64_t ftlm_krylov_dim = 100;     // Krylov subspace dimension per sample
@@ -770,11 +790,10 @@ EDResults exact_diagonalization_core(
                     results.eigenvalues.push_back(ftlm_results.ground_state_estimate);
                 }
                 
-                // Save FTLM results to file
+                // Save FTLM results to file (HDF5 goes to main output dir)
                 if (!params.output_dir.empty()) {
-                    std::string ftlm_dir = params.output_dir + "/thermo";
-                    safe_system_call("mkdir -p " + ftlm_dir);
-                    save_ftlm_results(ftlm_results, ftlm_dir + "/ftlm_thermo.txt");
+                    safe_system_call("mkdir -p " + params.output_dir);
+                    save_ftlm_results(ftlm_results, params.output_dir + "/ftlm_thermo.txt");
                 }
             }
             break;
@@ -812,11 +831,10 @@ EDResults exact_diagonalization_core(
                 results.thermo_data = ltlm_results.thermo_data;
                 results.eigenvalues.push_back(ltlm_results.ground_state_energy);
                 
-                // Save LTLM results to file
+                // Save LTLM results to file (HDF5 goes to main output dir)
                 if (!params.output_dir.empty()) {
-                    std::string ltlm_dir = params.output_dir + "/thermo";
-                    safe_system_call("mkdir -p " + ltlm_dir);
-                    save_ltlm_results(ltlm_results, ltlm_dir + "/ltlm_thermo.txt");
+                    safe_system_call("mkdir -p " + params.output_dir);
+                    save_ltlm_results(ltlm_results, params.output_dir + "/ltlm_thermo.txt");
                 }
             }
             break;
@@ -862,11 +880,10 @@ EDResults exact_diagonalization_core(
                 results.thermo_data = hybrid_results.thermo_data;
                 results.eigenvalues.push_back(hybrid_results.ground_state_energy);
                 
-                // Save results to file
+                // Save results to file (HDF5 goes to main output dir)
                 if (!params.output_dir.empty()) {
-                    std::string thermo_dir = params.output_dir + "/thermo";
-                    safe_system_call("mkdir -p " + thermo_dir);
-                    save_hybrid_thermal_results(hybrid_results, thermo_dir + "/hybrid_thermo.txt");
+                    safe_system_call("mkdir -p " + params.output_dir);
+                    save_hybrid_thermal_results(hybrid_results, params.output_dir + "/hybrid_thermo.txt");
                 }
             }
             break;
@@ -2837,10 +2854,9 @@ EDResults exact_diagonalization_from_directory_symmetrized(
             sector_ftlm_results, sector_dimensions
         );
         
-        // Save combined results
+        // Save combined results (HDF5 goes to main output dir)
         if (!params.output_dir.empty()) {
-            std::string ftlm_dir = params.output_dir + "/thermo";
-            safe_system_call("mkdir -p " + ftlm_dir);
+            safe_system_call("mkdir -p " + params.output_dir);
             
             // Create a combined FTLMResults for saving
             FTLMResults combined_results;
@@ -2856,17 +2872,17 @@ EDResults exact_diagonalization_from_directory_symmetrized(
             combined_results.free_energy_error.assign(n_temps, 0.0);
             
             // Save combined thermodynamics
-            save_ftlm_results(combined_results, ftlm_dir + "/ftlm_thermo_combined.txt");
+            save_ftlm_results(combined_results, params.output_dir + "/ftlm_thermo_combined.txt");
             
-            std::cout << "Combined FTLM results saved to: " << ftlm_dir << "/ftlm_thermo_combined.txt" << std::endl;
+            std::cout << "Combined FTLM results saved to: " << params.output_dir << "/ftlm_thermo_combined.txt" << std::endl;
             
             // Also save individual sector results for debugging
             for (size_t s = 0; s < sector_ftlm_results.size(); ++s) {
-                std::string sector_file = ftlm_dir + "/ftlm_thermo_sector_" + 
+                std::string sector_file = params.output_dir + "/ftlm_thermo_sector_" + 
                                          std::to_string(s) + ".txt";
                 save_ftlm_results(sector_ftlm_results[s], sector_file);
             }
-            std::cout << "Individual sector results saved to: " << ftlm_dir << "/ftlm_thermo_sector_*.txt" << std::endl;
+            std::cout << "Individual sector results saved to: " << params.output_dir << "/ftlm_thermo_sector_*.txt" << std::endl;
         }
         
         std::cout << "=== FTLM Sector Combination Complete ===" << std::endl;
@@ -3139,8 +3155,7 @@ inline EDResults exact_diagonalization_fixed_sz_symmetrized(
         results.thermo_data = combine_ftlm_sector_results(ftlm_sector_results, ftlm_sector_dims);
         
         if (!params.output_dir.empty()) {
-            std::string thermo_dir = params.output_dir + "/thermo";
-            safe_system_call("mkdir -p " + thermo_dir);
+            safe_system_call("mkdir -p " + params.output_dir);
             
             FTLMResults combined;
             combined.thermo_data = results.thermo_data;
@@ -3153,7 +3168,7 @@ inline EDResults exact_diagonalization_fixed_sz_symmetrized(
             combined.entropy_error.assign(n_temps, 0.0);
             combined.free_energy_error.assign(n_temps, 0.0);
             
-            save_ftlm_results(combined, thermo_dir + "/ftlm_thermo.txt");
+            save_ftlm_results(combined, params.output_dir + "/ftlm_thermo.txt");
         }
     } else if (is_ftlm_method(method) && ftlm_sector_results.size() == 1) {
         results.thermo_data = ftlm_sector_results[0].thermo_data;

@@ -821,6 +821,83 @@ void writeTPQData(const std::string& filename, double inv_temp, double energy,
 }
 
 /**
+ * Write TPQ thermodynamic data to both text file and HDF5
+ * 
+ * @param text_file Path to text file (SS_rand*.dat style)
+ * @param h5_file Path to HDF5 file (ed_results.h5)
+ * @param sample Sample index
+ * @param inv_temp Inverse temperature (beta)
+ * @param energy Energy expectation value
+ * @param variance Energy variance
+ * @param doublon Additional observable (e.g., doublon count)
+ * @param step TPQ step number
+ */
+void writeTPQDataHDF5(const std::string& text_file, const std::string& h5_file,
+                      size_t sample, double inv_temp, double energy, 
+                      double variance, double doublon, uint64_t step) {
+    // Write to text file (backwards compatible)
+    std::ofstream file(text_file, std::ios::app);
+    if (file.is_open()) {
+        file << std::setprecision(16) << inv_temp << " " << energy << " " 
+             << variance << " " << 0.0 << " " << doublon << " " << step << std::endl;
+        file.close();
+    }
+    
+    // Write to HDF5 if file exists
+    if (!h5_file.empty() && HDF5IO::fileExists(h5_file)) {
+        try {
+            HDF5IO::TPQThermodynamicPoint point;
+            point.beta = inv_temp;
+            point.energy = energy;
+            point.variance = variance;
+            point.doublon = doublon;
+            point.step = step;
+            HDF5IO::appendTPQThermodynamics(h5_file, sample, point);
+        } catch (const std::exception& e) {
+            // Silently fail HDF5 writing - text file is still written
+            std::cerr << "Warning: Failed to write TPQ thermodynamics to HDF5: " << e.what() << std::endl;
+        }
+    }
+}
+
+/**
+ * Write TPQ norm data to both text file and HDF5
+ * 
+ * @param text_file Path to text file (norm_rand*.dat style)
+ * @param h5_file Path to HDF5 file (ed_results.h5)
+ * @param sample Sample index
+ * @param inv_temp Inverse temperature (beta)
+ * @param norm Current norm
+ * @param first_norm Initial norm
+ * @param step TPQ step number
+ */
+void writeTPQNormHDF5(const std::string& text_file, const std::string& h5_file,
+                      size_t sample, double inv_temp, double norm, 
+                      double first_norm, uint64_t step) {
+    // Write to text file (backwards compatible)
+    std::ofstream file(text_file, std::ios::app);
+    if (file.is_open()) {
+        file << std::setprecision(16) << inv_temp << " " 
+             << norm << " " << first_norm << " " << step << std::endl;
+        file.close();
+    }
+    
+    // Write to HDF5 if file exists
+    if (!h5_file.empty() && HDF5IO::fileExists(h5_file)) {
+        try {
+            HDF5IO::TPQNormPoint point;
+            point.beta = inv_temp;
+            point.norm = norm;
+            point.first_norm = first_norm;
+            point.step = step;
+            HDF5IO::appendTPQNorm(h5_file, sample, point);
+        } catch (const std::exception& e) {
+            std::cerr << "Warning: Failed to write TPQ norm to HDF5: " << e.what() << std::endl;
+        }
+    }
+}
+
+/**
  * Read TPQ data from file
  */
 bool readTPQData(const std::string& filename, uint64_t step, double& energy, 
@@ -1388,9 +1465,9 @@ bool find_lowest_energy_tpq_state(
  * @param sample Current sample index
  * @param sublattice_size Size of sublattice for measurements
  * @param measure_sz Whether spin measurements are enabled (controls flct/spin_corr file creation)
- * @return Tuple of filenames (ss_file, norm_file, flct_file, spin_corr)
+ * @return Tuple of filenames (ss_file, norm_file, flct_file, spin_corr, h5_file)
  */
-std::tuple<std::string, std::string, std::string, std::vector<std::string>> initializeTPQFiles(
+std::tuple<std::string, std::string, std::string, std::vector<std::string>, std::string> initializeTPQFilesWithHDF5(
     const std::string& dir,
     uint64_t sample,
     uint64_t sublattice_size,
@@ -1399,6 +1476,7 @@ std::tuple<std::string, std::string, std::string, std::vector<std::string>> init
     std::string ss_file = dir + "/SS_rand" + std::to_string(sample) + ".dat";
     std::string norm_file = dir + "/norm_rand" + std::to_string(sample) + ".dat";
     std::string flct_file = dir + "/flct_rand" + std::to_string(sample) + ".dat";
+    std::string h5_file = dir + "/ed_results.h5";
     
     // Create vector of spin correlation files
     std::vector<std::string> spin_corr_files;
@@ -1444,6 +1522,38 @@ std::tuple<std::string, std::string, std::string, std::vector<std::string>> init
         }
     }
     
+    // Initialize HDF5 file and sample group
+    try {
+        // Create or open HDF5 file
+        if (!HDF5IO::fileExists(h5_file)) {
+            HDF5IO::createOrOpenFile(dir, "ed_results.h5");
+        }
+        HDF5IO::ensureTPQSampleGroup(h5_file, sample);
+    } catch (const std::exception& e) {
+        std::cerr << "Warning: Could not initialize HDF5 TPQ storage: " << e.what() << std::endl;
+        h5_file = "";  // Disable HDF5 writing
+    }
+    
+    return {ss_file, norm_file, flct_file, spin_corr_files, h5_file};
+}
+
+/**
+ * Initialize TPQ output files with appropriate headers (legacy version without HDF5)
+ * 
+ * @param dir Directory for output files
+ * @param sample Current sample index
+ * @param sublattice_size Size of sublattice for measurements
+ * @param measure_sz Whether spin measurements are enabled (controls flct/spin_corr file creation)
+ * @return Tuple of filenames (ss_file, norm_file, flct_file, spin_corr)
+ */
+std::tuple<std::string, std::string, std::string, std::vector<std::string>> initializeTPQFiles(
+    const std::string& dir,
+    uint64_t sample,
+    uint64_t sublattice_size,
+    bool measure_sz
+) {
+    auto [ss_file, norm_file, flct_file, spin_corr_files, h5_file] = 
+        initializeTPQFilesWithHDF5(dir, sample, sublattice_size, measure_sz);
     return {ss_file, norm_file, flct_file, spin_corr_files};
 }
 
@@ -1716,7 +1826,7 @@ void microcanonical_tpq(
         #endif
         
         std::vector<bool> temp_measured(num_temp_points, false);
-        auto [ss_file, norm_file, flct_file, spin_corr] = initializeTPQFiles(dir, sample, sublattice_size, measure_sz);
+        auto [ss_file, norm_file, flct_file, spin_corr, h5_file] = initializeTPQFilesWithHDF5(dir, sample, sublattice_size, measure_sz);
         
         // Variables that will be initialized differently for continue mode
         ComplexVector v0;
@@ -1886,14 +1996,11 @@ void microcanonical_tpq(
                     }
                 }
                 
-                // Write data (always write when we compute energy)
-                writeTPQData(ss_file, inv_temp, energy_step, variance_step, current_norm, step);
+                // Write data (always write when we compute energy) - now to both text and HDF5
+                writeTPQDataHDF5(ss_file, h5_file, sample, inv_temp, energy_step, variance_step, 0.0, step);
                 
-                {
-                    std::ofstream norm_out(norm_file, std::ios::app);
-                    norm_out << std::setprecision(16) << inv_temp << " " 
-                             << current_norm << " " << first_norm << " " << step << std::endl;
-                }
+                // Write norm data to both text and HDF5
+                writeTPQNormHDF5(norm_file, h5_file, sample, inv_temp, current_norm, first_norm, step);
                 
                 // Report detailed progress
                 if (step % (temp_interval * 10) == 0 || step == final_step) {
@@ -2117,8 +2224,8 @@ void canonical_tpq(
         
         std::vector<bool> temp_measured(num_temp_points, false);
         
-        // Setup filenames for this sample
-        auto [ss_file, norm_file, flct_file, spin_corr] = initializeTPQFiles(dir, sample, sublattice_size, measure_sz);
+        // Setup filenames for this sample (with HDF5 support)
+        auto [ss_file, norm_file, flct_file, spin_corr, h5_file] = initializeTPQFilesWithHDF5(dir, sample, sublattice_size, measure_sz);
 
         // Initial random normalized state (β=0)
          uint64_t seed = static_cast< int>(time(NULL)) + sample;
@@ -2128,9 +2235,8 @@ void canonical_tpq(
         {
             auto [e0, var0] = calculateEnergyAndVariance(H, psi, N);
             double inv_temp = 0.0;
-            writeTPQData(ss_file, inv_temp, e0, var0, /*norm*/1.0, /*step*/1);
-            std::ofstream norm_out(norm_file, std::ios::app);
-            norm_out << std::setprecision(16) << inv_temp << " " << 1.0 << " " << 1.0 << " " << 1 << std::endl;
+            writeTPQDataHDF5(ss_file, h5_file, sample, inv_temp, e0, var0, 0.0, 1);
+            writeTPQNormHDF5(norm_file, h5_file, sample, inv_temp, 1.0, 1.0, 1);
         }
 
         // Main imaginary-time loop
@@ -2170,11 +2276,9 @@ void canonical_tpq(
                 auto [e, var] = calculateEnergyAndVariance(H, psi, N);
                 double inv_temp = beta;
 
-                writeTPQData(ss_file, inv_temp, e, var, /*norm*/1.0, step);
-                {
-                    std::ofstream norm_out(norm_file, std::ios::app);
-                    norm_out << std::setprecision(16) << inv_temp << " " << 1.0 << " " << 1.0 << " " << step << std::endl;
-                }
+                // Write data to both text and HDF5
+                writeTPQDataHDF5(ss_file, h5_file, sample, inv_temp, e, var, 0.0, step);
+                writeTPQNormHDF5(norm_file, h5_file, sample, inv_temp, 1.0, 1.0, step);
 
                 // Write fluctuation data only at regular intervals
                 if (measure_sz && do_regular_measurement){

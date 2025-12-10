@@ -34,13 +34,22 @@ inline EDParameters toEDParameters(const EDConfig& config) {
     params.temp_min = config.thermal.temp_min;
     params.temp_max = config.thermal.temp_max;
     params.num_temp_bins = config.thermal.num_temp_bins;
-    params.num_order = config.thermal.num_order;
-    params.num_measure_freq = config.thermal.num_measure_freq;
-    params.delta_tau = config.thermal.delta_tau;
-    params.large_value = config.thermal.large_value;
-    params.continue_quenching = config.thermal.continue_quenching;
-    params.continue_sample = config.thermal.continue_sample;
-    params.continue_beta = config.thermal.continue_beta;
+    // TPQ-specific parameters (using new names with tpq_ prefix)
+    params.tpq_taylor_order = config.thermal.tpq_taylor_order;
+    params.tpq_measurement_interval = config.thermal.tpq_measurement_interval;
+    params.tpq_delta_beta = config.thermal.tpq_delta_beta;
+    params.tpq_energy_shift = config.thermal.tpq_energy_shift;
+    params.tpq_continue = config.thermal.tpq_continue;
+    params.tpq_continue_sample = config.thermal.tpq_continue_sample;
+    params.tpq_continue_beta = config.thermal.tpq_continue_beta;
+    // Also set legacy aliases for backwards compatibility
+    params.num_order = config.thermal.tpq_taylor_order;
+    params.num_measure_freq = config.thermal.tpq_measurement_interval;
+    params.delta_tau = config.thermal.tpq_delta_beta;
+    params.large_value = config.thermal.tpq_energy_shift;
+    params.continue_quenching = config.thermal.tpq_continue;
+    params.continue_sample = config.thermal.tpq_continue_sample;
+    params.continue_beta = config.thermal.tpq_continue_beta;
     
     // FTLM (via thermal config)
     params.ftlm_krylov_dim = config.thermal.ftlm_krylov_dim;
@@ -123,13 +132,14 @@ inline EDConfig fromEDParameters(const EDParameters& params, DiagonalizationMeth
     config.thermal.temp_min = params.temp_min;
     config.thermal.temp_max = params.temp_max;
     config.thermal.num_temp_bins = params.num_temp_bins;
-    config.thermal.num_order = params.num_order;
-    config.thermal.num_measure_freq = params.num_measure_freq;
-    config.thermal.delta_tau = params.delta_tau;
-    config.thermal.large_value = params.large_value;
-    config.thermal.continue_quenching = params.continue_quenching;
-    config.thermal.continue_sample = params.continue_sample;
-    config.thermal.continue_beta = params.continue_beta;
+    // TPQ-specific parameters (using new names with tpq_ prefix)
+    config.thermal.tpq_taylor_order = params.tpq_taylor_order;
+    config.thermal.tpq_measurement_interval = params.tpq_measurement_interval;
+    config.thermal.tpq_delta_beta = params.tpq_delta_beta;
+    config.thermal.tpq_energy_shift = params.tpq_energy_shift;
+    config.thermal.tpq_continue = params.tpq_continue;
+    config.thermal.tpq_continue_sample = params.tpq_continue_sample;
+    config.thermal.tpq_continue_beta = params.tpq_continue_beta;
     
     // FTLM (via thermal config)
     config.thermal.ftlm_krylov_dim = params.ftlm_krylov_dim;
