@@ -736,6 +736,180 @@ public:
         }
     }
     
+    /**
+     * @brief Load TPQ state vector from HDF5
+     * @param filepath Path to HDF5 file
+     * @param sample_index Sample index
+     * @param beta Inverse temperature
+     * @param state Output state vector
+     * @return true if successful, false otherwise
+     */
+    static bool loadTPQState(const std::string& filepath,
+                             size_t sample_index,
+                             double beta,
+                             std::vector<Complex>& state) {
+        try {
+            H5::H5File file(filepath, H5F_ACC_RDONLY);
+            
+            std::stringstream ss;
+            ss << "/tpq/states/state_" << sample_index << "_beta_" 
+               << std::fixed << std::setprecision(6) << beta;
+            std::string dataset_name = ss.str();
+            
+            if (!file.nameExists(dataset_name)) {
+                file.close();
+                return false;
+            }
+            
+            H5::DataSet dataset = file.openDataSet(dataset_name);
+            H5::DataSpace dataspace = dataset.getSpace();
+            
+            hsize_t dims[1];
+            dataspace.getSimpleExtentDims(dims);
+            size_t N = dims[0];
+            
+            // Create compound datatype for complex numbers
+            H5::CompType complex_type(2 * sizeof(double));
+            complex_type.insertMember("real", 0, H5::PredType::NATIVE_DOUBLE);
+            complex_type.insertMember("imag", sizeof(double), H5::PredType::NATIVE_DOUBLE);
+            
+            struct ComplexPair {
+                double real;
+                double imag;
+            };
+            
+            std::vector<ComplexPair> data(N);
+            dataset.read(data.data(), complex_type);
+            
+            state.resize(N);
+            for (size_t i = 0; i < N; ++i) {
+                state[i] = Complex(data[i].real, data[i].imag);
+            }
+            
+            dataset.close();
+            file.close();
+            return true;
+            
+        } catch (H5::Exception& e) {
+            return false;
+        }
+    }
+    
+    /**
+     * @brief TPQ state info structure
+     */
+    struct TPQStateInfo {
+        size_t sample_index;
+        double beta;
+        std::string dataset_name;
+    };
+    
+    /**
+     * @brief List all TPQ states stored in an HDF5 file
+     * @param filepath Path to HDF5 file
+     * @return Vector of TPQStateInfo for each stored state
+     */
+    static std::vector<TPQStateInfo> listTPQStates(const std::string& filepath) {
+        std::vector<TPQStateInfo> states;
+        
+        try {
+            H5::H5File file(filepath, H5F_ACC_RDONLY);
+            
+            if (!file.nameExists("/tpq/states")) {
+                file.close();
+                return states;
+            }
+            
+            H5::Group tpq_group = file.openGroup("/tpq/states");
+            
+            hsize_t num_objs = tpq_group.getNumObjs();
+            for (hsize_t i = 0; i < num_objs; ++i) {
+                std::string name = tpq_group.getObjnameByIdx(i);
+                
+                // Parse dataset name: state_<sample>_beta_<beta>
+                // Example: state_0_beta_10.500000
+                if (name.find("state_") == 0) {
+                    size_t beta_pos = name.find("_beta_");
+                    if (beta_pos != std::string::npos) {
+                        try {
+                            std::string sample_str = name.substr(6, beta_pos - 6);
+                            std::string beta_str = name.substr(beta_pos + 6);
+                            
+                            TPQStateInfo info;
+                            info.sample_index = std::stoull(sample_str);
+                            info.beta = std::stod(beta_str);
+                            info.dataset_name = "/tpq/states/" + name;
+                            
+                            states.push_back(info);
+                        } catch (...) {
+                            // Skip malformed entries
+                        }
+                    }
+                }
+            }
+            
+            tpq_group.close();
+            file.close();
+            
+        } catch (H5::Exception& e) {
+            // Return empty list on error
+        }
+        
+        return states;
+    }
+    
+    /**
+     * @brief Load TPQ state by dataset name
+     * @param filepath Path to HDF5 file
+     * @param dataset_name Full dataset path (e.g., /tpq/states/state_0_beta_10.500000)
+     * @param state Output state vector
+     * @return true if successful, false otherwise
+     */
+    static bool loadTPQStateByName(const std::string& filepath,
+                                   const std::string& dataset_name,
+                                   std::vector<Complex>& state) {
+        try {
+            H5::H5File file(filepath, H5F_ACC_RDONLY);
+            
+            if (!file.nameExists(dataset_name)) {
+                file.close();
+                return false;
+            }
+            
+            H5::DataSet dataset = file.openDataSet(dataset_name);
+            H5::DataSpace dataspace = dataset.getSpace();
+            
+            hsize_t dims[1];
+            dataspace.getSimpleExtentDims(dims);
+            size_t N = dims[0];
+            
+            // Create compound datatype for complex numbers
+            H5::CompType complex_type(2 * sizeof(double));
+            complex_type.insertMember("real", 0, H5::PredType::NATIVE_DOUBLE);
+            complex_type.insertMember("imag", sizeof(double), H5::PredType::NATIVE_DOUBLE);
+            
+            struct ComplexPair {
+                double real;
+                double imag;
+            };
+            
+            std::vector<ComplexPair> data(N);
+            dataset.read(data.data(), complex_type);
+            
+            state.resize(N);
+            for (size_t i = 0; i < N; ++i) {
+                state[i] = Complex(data[i].real, data[i].imag);
+            }
+            
+            dataset.close();
+            file.close();
+            return true;
+            
+        } catch (H5::Exception& e) {
+            return false;
+        }
+    }
+    
     // ============================================================================
     // FTLM/LTLM/Hybrid Thermal Results I/O
     // ============================================================================
@@ -1132,122 +1306,6 @@ public:
             throw std::runtime_error("Failed to save hybrid thermal results: " + 
                                    std::string(e.getCDetailMsg()));
         }
-    }
-    
-    // ============================================================================
-    // Unified Thermodynamic Output (Text Format)
-    // ============================================================================
-    
-    /**
-     * @brief Save thermodynamic data to a unified text file format
-     * 
-     * This provides a consistent output format for ALL finite-T methods:
-     * - FTLM, LTLM, Hybrid, TPQ, Full diagonalization
-     * 
-     * Output columns:
-     * T, E, E_err, Cv, Cv_err, S, S_err, F, F_err
-     * 
-     * For methods without error bars (Full, TPQ), error columns are 0.
-     * 
-     * @param filepath Output text file path
-     * @param method Method name (for header)
-     * @param temperatures Temperature array
-     * @param energy Energy values
-     * @param energy_error Energy error bars (empty = no errors)
-     * @param specific_heat Specific heat values
-     * @param specific_heat_error Specific heat error bars
-     * @param entropy Entropy values
-     * @param entropy_error Entropy error bars
-     * @param free_energy Free energy values
-     * @param free_energy_error Free energy error bars
-     * @param metadata Additional metadata lines for header
-     */
-    static void saveUnifiedThermodynamicsTxt(
-        const std::string& filepath,
-        const std::string& method,
-        const std::vector<double>& temperatures,
-        const std::vector<double>& energy,
-        const std::vector<double>& energy_error,
-        const std::vector<double>& specific_heat,
-        const std::vector<double>& specific_heat_error,
-        const std::vector<double>& entropy,
-        const std::vector<double>& entropy_error,
-        const std::vector<double>& free_energy,
-        const std::vector<double>& free_energy_error,
-        const std::vector<std::string>& metadata = {}
-    ) {
-        std::ofstream file(filepath);
-        if (!file.is_open()) {
-            throw std::runtime_error("Failed to open file for writing: " + filepath);
-        }
-        
-        // Write header
-        file << "# Thermodynamic data from " << method << "\n";
-        file << "# Generated by ED code - unified output format\n";
-        
-        // Write any additional metadata
-        for (const auto& line : metadata) {
-            file << "# " << line << "\n";
-        }
-        
-        // Column description
-        file << "# Columns:\n";
-        file << "#   T        - Temperature\n";
-        file << "#   E        - Energy <H>\n";
-        file << "#   E_err    - Energy error (0 if not available)\n";
-        file << "#   Cv       - Specific heat (per site or total depending on normalization)\n";
-        file << "#   Cv_err   - Specific heat error\n";
-        file << "#   S        - Entropy\n";
-        file << "#   S_err    - Entropy error\n";
-        file << "#   F        - Free energy\n";
-        file << "#   F_err    - Free energy error\n";
-        file << "#\n";
-        file << "# T E E_err Cv Cv_err S S_err F F_err\n";
-        
-        // Set precision
-        file << std::scientific << std::setprecision(12);
-        
-        // Write data
-        size_t n = temperatures.size();
-        bool has_errors = !energy_error.empty() && energy_error.size() == n;
-        
-        for (size_t i = 0; i < n; ++i) {
-            file << temperatures[i] << " ";
-            file << energy[i] << " ";
-            file << (has_errors ? energy_error[i] : 0.0) << " ";
-            file << specific_heat[i] << " ";
-            file << (has_errors && !specific_heat_error.empty() ? specific_heat_error[i] : 0.0) << " ";
-            file << entropy[i] << " ";
-            file << (has_errors && !entropy_error.empty() ? entropy_error[i] : 0.0) << " ";
-            file << free_energy[i] << " ";
-            file << (has_errors && !free_energy_error.empty() ? free_energy_error[i] : 0.0) << "\n";
-        }
-        
-        file.close();
-        std::cout << "Saved unified thermodynamic data to: " << filepath << std::endl;
-    }
-    
-    /**
-     * @brief Convenience overload using ThermodynamicData struct
-     */
-    static void saveUnifiedThermodynamicsTxt(
-        const std::string& filepath,
-        const std::string& method,
-        const ThermodynamicData& thermo,
-        const std::vector<double>& energy_error = {},
-        const std::vector<double>& specific_heat_error = {},
-        const std::vector<double>& entropy_error = {},
-        const std::vector<double>& free_energy_error = {},
-        const std::vector<std::string>& metadata = {}
-    ) {
-        saveUnifiedThermodynamicsTxt(
-            filepath, method,
-            thermo.temperatures, thermo.energy, energy_error,
-            thermo.specific_heat, specific_heat_error,
-            thermo.entropy, entropy_error,
-            thermo.free_energy, free_energy_error,
-            metadata
-        );
     }
     
     // ============================================================================

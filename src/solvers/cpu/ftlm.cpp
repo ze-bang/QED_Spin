@@ -412,24 +412,6 @@ void save_ftlm_results(
         
         std::cout << "FTLM results saved to: " << h5_path << std::endl;
         
-        // Also save unified text format
-        std::vector<std::string> metadata = {
-            "Method: FTLM (Finite Temperature Lanczos Method)",
-            "Samples: " + std::to_string(results.total_samples),
-            "Ground state estimate: " + std::to_string(results.ground_state_estimate)
-        };
-        
-        std::string txt_path = directory + "/thermo.txt";
-        HDF5IO::saveUnifiedThermodynamicsTxt(
-            txt_path, "FTLM",
-            results.thermo_data,
-            results.energy_error,
-            results.specific_heat_error,
-            results.entropy_error,
-            results.free_energy_error,
-            metadata
-        );
-        
     } catch (const std::exception& e) {
         std::cerr << "Error saving FTLM results to HDF5: " << e.what() << std::endl;
     }
@@ -1077,71 +1059,10 @@ DynamicalResponseResults compute_dynamical_response_thermal(
  *   # Frequency  Re[S(ω)]  Im[S(ω)]  Re[Error]  Im[Error]
  * 
  * This provides consistent output across all spectral function methods:
- * - FTLM dynamical response
- * - Ground state DSSF (continued fraction)
- * - TPQ DSSF
- * - Lehmann representation
- */
-void save_spectral_function_txt(
-    const DynamicalResponseResults& results,
-    const std::string& filename,
-    const std::string& method_description,
-    double temperature,
-    double ground_state_energy
-) {
-    std::ofstream fout(filename);
-    if (!fout.is_open()) {
-        std::cerr << "Error: Could not open file for writing: " << filename << std::endl;
-        return;
-    }
-    
-    // Prepare imaginary parts and errors (use zeros if not provided)
-    std::vector<double> spectral_imag = results.spectral_function_imag;
-    if (spectral_imag.empty()) {
-        spectral_imag.resize(results.frequencies.size(), 0.0);
-    }
-    std::vector<double> error_real = results.spectral_error;
-    if (error_real.empty()) {
-        error_real.resize(results.frequencies.size(), 0.0);
-    }
-    std::vector<double> error_imag = results.spectral_error_imag;
-    if (error_imag.empty()) {
-        error_imag.resize(results.frequencies.size(), 0.0);
-    }
-    
-    // Write header with metadata
-    fout << "# Dynamical Response Results (averaged over " << results.total_samples << " samples)\n";
-    if (!method_description.empty()) {
-        fout << "# Method: " << method_description << "\n";
-    }
-    if (temperature > 0) {
-        fout << "# Temperature: " << temperature << "\n";
-    }
-    if (std::abs(ground_state_energy) > 1e-14) {
-        fout << "# Ground state energy: " << ground_state_energy << "\n";
-    }
-    fout << "# Frequency  Re[S(ω)]  Im[S(ω)]  Re[Error]  Im[Error]\n";
-    
-    // Write data in unified 5-column format
-    fout << std::scientific << std::setprecision(12);
-    for (size_t i = 0; i < results.frequencies.size(); i++) {
-        fout << results.frequencies[i] << " "
-             << results.spectral_function[i] << " "
-             << spectral_imag[i] << " "
-             << error_real[i] << " "
-             << error_imag[i] << "\n";
-    }
-    
-    fout.close();
-    std::cout << "Spectral function saved to: " << filename << std::endl;
-}
-
 /**
- * @brief Save dynamical response results to HDF5 file and text file
+ * @brief Save dynamical response results to HDF5 file
  * 
- * Saves to:
- * 1. HDF5 file: directory/ed_results.h5 under /dynamical/<operator_name>/
- * 2. Text file: original filename with unified 5-column format
+ * Saves to HDF5 file: directory/ed_results.h5 under /dynamical/<operator_name>/
  */
 void save_dynamical_response_results(
     const DynamicalResponseResults& results,
@@ -1155,9 +1076,6 @@ void save_dynamical_response_results(
     std::string basename = filename.substr(filename.find_last_of('/') + 1);
     std::string operator_name = basename.substr(0, basename.find_last_of('.'));
     if (operator_name.empty()) operator_name = "dynamical_response";
-    
-    // Save to text file using unified format
-    save_spectral_function_txt(results, filename, "FTLM dynamical response");
     
     // Save to HDF5
     try {
@@ -2102,7 +2020,15 @@ StaticResponseResults compute_static_response(
 }
 
 /**
+ * @brief Save static response to text file in unified format
+ * 
+ * Unified format: 8 columns
+ *   # T  <O>  <O>_err  Var  Var_err  chi  chi_err  N_samples
+ * 
+/**
  * @brief Save static response results to HDF5 file
+ * 
+ * Saves to HDF5 file: directory/ed_results.h5 under /correlations/<operator_name>/
  */
 void save_static_response_results(
     const StaticResponseResults& results,
@@ -2117,6 +2043,7 @@ void save_static_response_results(
     std::string operator_name = basename.substr(0, basename.find_last_of('.'));
     if (operator_name.empty()) operator_name = "static_response";
     
+    // Save to HDF5
     try {
         std::string h5_path = HDF5IO::createOrOpenFile(directory);
         

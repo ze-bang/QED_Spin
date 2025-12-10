@@ -632,26 +632,6 @@ void compute_thermodynamics(const std::vector<double>& eigenvalues, const EDConf
         HDF5IO::saveThermodynamics(hdf5_file, thermo_data.temperatures, "free_energy", thermo_data.free_energy);
         std::cout << "  Saved thermodynamic data to HDF5\n";
         
-        // Also save unified text format for consistency with FTLM/LTLM/Hybrid
-        double E0 = *std::min_element(eigenvalues.begin(), eigenvalues.end());
-        std::vector<std::string> metadata = {
-            "Method: Full diagonalization (exact spectrum)",
-            "Number of eigenvalues: " + std::to_string(eigenvalues.size()),
-            "Ground state energy: " + std::to_string(E0),
-            "Note: Error bars are 0 (exact calculation)"
-        };
-        
-        std::string txt_path = config.workflow.output_dir + "/thermo/thermo.txt";
-        // Ensure thermo directory exists
-        std::filesystem::create_directories(config.workflow.output_dir + "/thermo");
-        
-        HDF5IO::saveUnifiedThermodynamicsTxt(
-            txt_path, "Full",
-            thermo_data,
-            {}, {}, {}, {},  // No error bars for exact diagonalization
-            metadata
-        );
-        
     } catch (const std::exception& e) {
         std::cerr << "  Error: Failed to save thermodynamics to HDF5: " << e.what() << std::endl;
     }
@@ -2053,43 +2033,12 @@ void compute_ground_state_dssf_workflow(const EDConfig& config) {
             H_func_int, O1_func, O2_func, ground_state, ground_state_energy, N, gs_params
         );
         
-        // Save results using unified format (consistent with FTLM dynamical response)
-        std::string output_file = output_subdir + "/" + names[op_idx] + ".txt";
+        // Save results to HDF5 only (consistent with FTLM dynamical response)
+        std::string output_file = output_subdir + "/" + names[op_idx] + ".h5";
         
-        // Ensure imaginary parts and errors exist (ground state CF typically has zero imaginary part)
-        std::vector<double> spectral_imag = results.spectral_function_imag;
-        if (spectral_imag.empty()) {
-            spectral_imag.resize(results.frequencies.size(), 0.0);
-        }
-        std::vector<double> error_real = results.spectral_error;
-        if (error_real.empty()) {
-            error_real.resize(results.frequencies.size(), 0.0);
-        }
-        std::vector<double> error_imag = results.spectral_error_imag;
-        if (error_imag.empty()) {
-            error_imag.resize(results.frequencies.size(), 0.0);
-        }
-        
-        // Write text file with unified 5-column format
-        std::ofstream fout(output_file);
-        if (fout.is_open()) {
-            fout << "# Ground State DSSF (T=0 continued fraction): " << names[op_idx] << "\n";
-            fout << "# Ground state energy: " << ground_state_energy << "\n";
-            fout << "# Frequency  Re[S(ω)]  Im[S(ω)]  Re[Error]  Im[Error]\n";
-            fout << std::scientific << std::setprecision(10);
-            for (size_t i = 0; i < results.frequencies.size(); i++) {
-                fout << results.frequencies[i] << " " 
-                     << results.spectral_function[i] << " "
-                     << spectral_imag[i] << " "
-                     << error_real[i] << " "
-                     << error_imag[i] << "\n";
-            }
-            fout.close();
-            std::cout << "[Rank " << rank << "] Saved: " << output_file << "\n";
-        }
-        
-        // Also save to HDF5 using same function as FTLM
+        // Save to HDF5 using same function as FTLM
         save_dynamical_response_results(results, output_file);
+        std::cout << "[Rank " << rank << "] Saved: " << output_file << "\n";
     }
     
     #ifdef WITH_MPI

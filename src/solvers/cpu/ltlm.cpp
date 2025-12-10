@@ -384,26 +384,6 @@ void save_ltlm_results(
         
         std::cout << "LTLM results saved to: " << h5_path << std::endl;
         
-        // Also save unified text format
-        std::vector<std::string> metadata = {
-            "Method: LTLM (Low Temperature Lanczos Method)",
-            "Samples: " + std::to_string(results.total_samples),
-            "Krylov dimension: " + std::to_string(results.krylov_dimension),
-            "Ground state energy: " + std::to_string(results.ground_state_energy),
-            "Low-lying excitations: " + std::to_string(results.low_lying_spectrum.size())
-        };
-        
-        std::string txt_path = directory + "/thermo.txt";
-        HDF5IO::saveUnifiedThermodynamicsTxt(
-            txt_path, "LTLM",
-            results.thermo_data,
-            results.energy_error,
-            results.specific_heat_error,
-            results.entropy_error,
-            results.free_energy_error,
-            metadata
-        );
-        
     } catch (const std::exception& e) {
         std::cerr << "Error saving LTLM results to HDF5: " << e.what() << std::endl;
     }

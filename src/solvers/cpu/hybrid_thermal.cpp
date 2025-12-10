@@ -292,31 +292,6 @@ void save_hybrid_thermal_results(
         );
         std::cout << "Hybrid thermal results saved to: " << filename << std::endl;
         
-        // Also save unified text format
-        std::ostringstream crossover_ss;
-        crossover_ss << std::fixed << std::setprecision(6) << results.actual_crossover_temp;
-        
-        std::vector<std::string> metadata = {
-            "Method: Hybrid (LTLM + FTLM with automatic crossover)",
-            "Ground state energy: " + std::to_string(results.ground_state_energy),
-            "Crossover temperature: " + crossover_ss.str(),
-            "LTLM points: " + std::to_string(results.ltlm_points),
-            "FTLM points: " + std::to_string(results.ftlm_points),
-            "FTLM samples: " + std::to_string(results.ftlm_samples_used),
-            "Note: T < T_crossover uses LTLM (exact ground state), T >= T_crossover uses FTLM (sampling)"
-        };
-        
-        std::string txt_path = directory + "/thermo.txt";
-        HDF5IO::saveUnifiedThermodynamicsTxt(
-            txt_path, "Hybrid",
-            results.thermo_data,
-            results.energy_error,
-            results.specific_heat_error,
-            results.entropy_error,
-            results.free_energy_error,
-            metadata
-        );
-        
     } catch (const std::exception& e) {
         std::cerr << "Error saving hybrid thermal results to HDF5: " << e.what() << std::endl;
     }

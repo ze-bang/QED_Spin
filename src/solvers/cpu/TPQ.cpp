@@ -13,6 +13,10 @@
 // Note: Time evolution and dynamics computation methods have been moved to dynamics.cpp
 // This file now focuses on TPQ-specific functionality and wraps the general dynamics module
 
+// Forward declarations
+bool save_tpq_state_hdf5(const ComplexVector& tpq_state, const std::string& dir,
+                         size_t sample, double beta, FixedSzOperator* fixed_sz_op);
+
 // ============================================================================
 // TPQ-SPECIFIC WRAPPER FUNCTIONS
 // These provide backward compatibility while delegating to the dynamics module
@@ -314,9 +318,8 @@ void computeObservableDynamics_U_t(
     double t_end,
     double dt
 ) {
-    // Save the current TPQ state for later analysis
-    std::string state_file = dir + "/tpq_state_" + std::to_string(sample) + "_beta=" + std::to_string(inv_temp) + ".dat";
-    save_tpq_state(tpq_state, state_file);
+    // Save the current TPQ state to unified HDF5 file for later analysis
+    save_tpq_state_hdf5(tpq_state, dir, sample, inv_temp, nullptr);
 
     std::cout << "Computing dynamical susceptibility for sample " << sample 
               << ", beta = " << inv_temp << ", for " << observables_1.size() << " observables" << std::endl;
@@ -885,6 +888,39 @@ bool save_tpq_state(const ComplexVector& tpq_state, const std::string& filename,
     
     out.close();
     return true;
+}
+
+/**
+ * Save a TPQ state to the unified HDF5 file
+ * 
+ * @param tpq_state TPQ state vector to save
+ * @param dir Output directory (HDF5 file will be created at dir/ed_results.h5)
+ * @param sample Sample index
+ * @param beta Inverse temperature
+ * @param fixed_sz_op Optional FixedSzOperator - if provided, transforms to full basis before saving
+ * @return True if successful
+ */
+bool save_tpq_state_hdf5(const ComplexVector& tpq_state, const std::string& dir,
+                         size_t sample, double beta, FixedSzOperator* fixed_sz_op = nullptr) {
+    try {
+        std::string hdf5_path = HDF5IO::createOrOpenFile(dir, "ed_results.h5");
+        
+        // Transform to full basis if using fixed-Sz
+        if (fixed_sz_op != nullptr) {
+            std::vector<Complex> full_state = fixed_sz_op->embedToFull(tpq_state);
+            HDF5IO::saveTPQState(hdf5_path, sample, beta, full_state);
+            std::cout << "  [Fixed-Sz] Transformed state from dim " << tpq_state.size() 
+                      << " to full space dim " << full_state.size() << " before saving to HDF5" << std::endl;
+        } else {
+            HDF5IO::saveTPQState(hdf5_path, sample, beta, tpq_state);
+        }
+        
+        std::cout << "  Saved TPQ state to HDF5: sample=" << sample << ", β=" << beta << std::endl;
+        return true;
+    } catch (const std::exception& e) {
+        std::cerr << "Error saving TPQ state to HDF5: " << e.what() << std::endl;
+        return false;
+    }
 }
 
 /**
@@ -1884,10 +1920,8 @@ void microcanonical_tpq(
                     std::cout << "  *** Saving TPQ state at β = " << inv_temp 
                               << " (target: " << measure_inv_temp[target_temp_idx] << ") ***" << std::endl;
                     if (compute_observables) {
-                        std::string state_file = dir + "/tpq_state_" + std::to_string(sample) + 
-                                               "_beta=" + std::to_string(inv_temp) + 
-                                               "_step=" + std::to_string(step) + ".dat";
-                        save_tpq_state(v0, state_file, fixed_sz_op);
+                        // Save to unified HDF5 file
+                        save_tpq_state_hdf5(v0, dir, sample, inv_temp, fixed_sz_op);
                     }
                     temp_measured[target_temp_idx] = true;
                 }
@@ -2161,10 +2195,8 @@ void canonical_tpq(
                     std::cout << "  *** Saving TPQ state at β = " << inv_temp 
                               << " (target: " << measure_inv_temp[target_temp_idx] << ") ***" << std::endl;
                     if (compute_observables) {
-                        std::string state_file = dir + "/tpq_state_" + std::to_string(sample)
-                                               + "_beta=" + std::to_string(inv_temp) 
-                                               + "_step=" + std::to_string(step) + ".dat";
-                        save_tpq_state(psi, state_file, fixed_sz_op);
+                        // Save to unified HDF5 file
+                        save_tpq_state_hdf5(psi, dir, sample, inv_temp, fixed_sz_op);
                     }
                     temp_measured[target_temp_idx] = true;
                 }
@@ -2214,13 +2246,12 @@ void canonical_tpq(
         std::cout << "Collected " << energies.size() << " sample energies\n";
         std::cout << "==========================================\n";
         
-        // Convert TPQ results to unified thermodynamic format
+        // Convert TPQ results to HDF5 format
         // Note: canonical TPQ uses same SS_rand format, but output as cTPQ
         std::filesystem::path tpq_path(dir);
-        std::filesystem::path thermo_dir = tpq_path.parent_path() / "thermo";
-        std::filesystem::create_directories(thermo_dir);
-        std::string output_file = (thermo_dir / "thermo.txt").string();
-        convert_tpq_to_unified_thermo(dir, output_file);
+        std::filesystem::path output_dir = tpq_path.parent_path();
+        std::string h5_path = HDF5IO::createOrOpenFile(output_dir.string());
+        convert_tpq_to_unified_thermo(dir, h5_path);
     } else {
         // Clear energies on non-root ranks to save memory
         energies.clear();
@@ -2229,12 +2260,11 @@ void canonical_tpq(
     // Final barrier before returning
     MPI_Barrier(MPI_COMM_WORLD);
     #else
-    // Non-MPI: convert TPQ results to unified thermodynamic format
+    // Non-MPI: convert TPQ results to HDF5 format
     std::filesystem::path tpq_path(dir);
-    std::filesystem::path thermo_dir = tpq_path.parent_path() / "thermo";
-    std::filesystem::create_directories(thermo_dir);
-    std::string output_file = (thermo_dir / "thermo.txt").string();
-    convert_tpq_to_unified_thermo(dir, output_file);
+    std::filesystem::path output_dir = tpq_path.parent_path();
+    std::string h5_path = HDF5IO::createOrOpenFile(output_dir.string());
+    convert_tpq_to_unified_thermo(dir, h5_path);
     #endif
 }
 
@@ -2448,33 +2478,28 @@ bool convert_tpq_to_unified_thermo(
         free_energy[i] = energy_mean[i] - temperatures[i] * entropy[i];
     }
     
-    // Write unified output
-    std::vector<std::string> metadata = {
-        "Method: TPQ (Thermal Pure Quantum state)",
-        "Samples: " + std::to_string(all_sample_data.size()),
-        "Note: Cv computed from variance, S and F from integration",
-        "Note: Data interpolated from microcanonical trajectory"
-    };
-    
     try {
-        // Create ThermodynamicData struct
-        ThermodynamicData thermo;
-        thermo.temperatures = temperatures;
-        thermo.energy = energy_mean;
-        thermo.specific_heat = cv_mean;
-        thermo.entropy = entropy;
-        thermo.free_energy = free_energy;
-        
-        HDF5IO::saveUnifiedThermodynamicsTxt(
-            output_file, "TPQ",
-            thermo,
-            energy_error, cv_error, {}, {},  // No S/F error from integration
-            metadata
+        // Save TPQ thermodynamics to HDF5
+        // output_file is the HDF5 file path (ed_results.h5)
+        HDF5IO::saveFTLMThermodynamics(
+            output_file,
+            temperatures,
+            energy_mean,
+            energy_error,
+            cv_mean,
+            cv_error,
+            entropy,
+            {},  // No entropy error from integration
+            free_energy,
+            {},  // No free energy error from integration
+            all_sample_data.size(),
+            "TPQ"
         );
         
+        std::cout << "Saved TPQ thermodynamic data to HDF5: " << output_file << std::endl;
         return true;
     } catch (const std::exception& e) {
-        std::cerr << "Error writing unified TPQ output: " << e.what() << std::endl;
+        std::cerr << "Error writing TPQ output to HDF5: " << e.what() << std::endl;
         return false;
     }
 }
@@ -2489,29 +2514,26 @@ void convert_tpq_to_unified_thermodynamics(
     double temp_max,
     uint64_t num_temp_points
 ) {
-    // Auto-generate output path: thermo/thermo.txt relative to tpq_dir
-    // tpq_dir is typically output/tpq/ so we go up to output/thermo/
+    // Auto-generate output path to HDF5 file
+    // tpq_dir is typically output/tpq/ so we go up to output/
     std::filesystem::path tpq_path(tpq_dir);
-    std::filesystem::path thermo_dir = tpq_path.parent_path() / "thermo";
+    std::filesystem::path output_dir = tpq_path.parent_path();
     
-    // Create thermo directory if it doesn't exist
-    std::filesystem::create_directories(thermo_dir);
+    std::string h5_path = HDF5IO::createOrOpenFile(output_dir.string());
     
-    std::string output_file = (thermo_dir / "thermo.txt").string();
-    
-    std::cout << "Converting TPQ results to unified thermodynamic format..." << std::endl;
+    std::cout << "Converting TPQ results to HDF5..." << std::endl;
     std::cout << "  Input directory: " << tpq_dir << std::endl;
-    std::cout << "  Output file: " << output_file << std::endl;
+    std::cout << "  Output file: " << h5_path << std::endl;
     std::cout << "  Number of samples: " << num_samples << std::endl;
     std::cout << "  Temperature range: " << temp_min << " to " << temp_max << std::endl;
     
     bool success = convert_tpq_to_unified_thermo(
-        tpq_dir, output_file, temp_min, temp_max, num_temp_points
+        tpq_dir, h5_path, temp_min, temp_max, num_temp_points
     );
     
     if (success) {
-        std::cout << "Successfully converted TPQ data to unified format." << std::endl;
+        std::cout << "Successfully saved TPQ data to HDF5." << std::endl;
     } else {
-        std::cerr << "Warning: Failed to convert TPQ data to unified format." << std::endl;
+        std::cerr << "Warning: Failed to save TPQ data to HDF5." << std::endl;
     }
 }

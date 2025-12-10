@@ -27,19 +27,16 @@
 # Usage: ./scripts/run_all_methods_test.sh [test_dir] [output_base]
 #
 # Output Structure:
+#   All output is saved to HDF5 format (ed_results.h5):
 #   output_base/
 #   ├── diag_*/           # Diagonalization results
-#   │   ├── eigenvalues.txt
-#   │   └── ed_results.h5
+#   │   └── ed_results.h5 # Contains: /eigenvalues, /eigenvectors
 #   ├── thermo_*/         # Thermodynamic results
-#   │   ├── thermo.txt    # Unified format: T E E_err Cv Cv_err S S_err F F_err
-#   │   └── ed_results.h5
+#   │   └── ed_results.h5 # Contains: /ftlm/averaged/{temperatures,energy,specific_heat,...}
 #   ├── dssf_*/           # Dynamical structure factor
-#   │   ├── spectral.txt  # Unified format: ω S(ω) S_err
-#   │   └── ed_results.h5
+#   │   └── ed_results.h5 # Contains: /dynamical/<operator>/{frequencies,spectral_real,...}
 #   └── sssf_*/           # Static structure factor
-#       ├── static_sf.txt # Unified format: T S(q) S_err
-#       └── ed_results.h5
+#       └── ed_results.h5 # Contains: /correlations/<operator>/{temperatures,expectation,...}
 # =============================================================================
 
 set -e  # Exit on first error
@@ -129,6 +126,20 @@ check_output_file() {
         local lines=$(wc -l < "$file" 2>/dev/null || echo 0)
         local size=$(du -h "$file" 2>/dev/null | cut -f1 || echo "?")
         echo -e "    ${GREEN}✓${NC} $desc: $lines lines, $size"
+        return 0
+    else
+        echo -e "    ${RED}✗${NC} $desc: NOT FOUND"
+        return 1
+    fi
+}
+
+check_hdf5_file() {
+    local file="$1"
+    local desc="$2"
+    
+    if [ -f "$file" ]; then
+        local size=$(du -h "$file" 2>/dev/null | cut -f1 || echo "?")
+        echo -e "    ${GREEN}✓${NC} $desc: $size"
         return 0
     else
         echo -e "    ${RED}✗${NC} $desc: NOT FOUND"
@@ -241,7 +252,7 @@ if run_test "Lanczos" "$OUTPUT_DIR" \
         --output=$OUTPUT_DIR"; then
     ((PASSED++))
     RESULTS["Lanczos"]="PASS"
-    check_output_file "$OUTPUT_DIR/eigenvalues.txt" "Eigenvalues"
+    check_hdf5_file "$OUTPUT_DIR/ed_results.h5" "HDF5 results"
 else
     ((FAILED++))
     RESULTS["Lanczos"]="FAIL"
@@ -261,7 +272,7 @@ if run_test "ARPACK_SA" "$OUTPUT_DIR" \
         --output=$OUTPUT_DIR"; then
     ((PASSED++))
     RESULTS["ARPACK_SA"]="PASS"
-    check_output_file "$OUTPUT_DIR/eigenvalues.txt" "Eigenvalues"
+    check_hdf5_file "$OUTPUT_DIR/ed_results.h5" "HDF5 results"
 else
     ((FAILED++))
     RESULTS["ARPACK_SA"]="FAIL"
@@ -281,7 +292,7 @@ if run_test "Full" "$OUTPUT_DIR" \
         --output=$OUTPUT_DIR"; then
     ((PASSED++))
     RESULTS["Full_Diag"]="PASS"
-    check_output_file "$OUTPUT_DIR/eigenvalues.txt" "Eigenvalues"
+    check_hdf5_file "$OUTPUT_DIR/ed_results.h5" "HDF5 results"
 else
     ((FAILED++))
     RESULTS["Full_Diag"]="FAIL"
@@ -301,7 +312,7 @@ if run_test "Davidson" "$OUTPUT_DIR" \
         --output=$OUTPUT_DIR"; then
     ((PASSED++))
     RESULTS["Davidson"]="PASS"
-    check_output_file "$OUTPUT_DIR/eigenvalues.txt" "Eigenvalues"
+    check_hdf5_file "$OUTPUT_DIR/ed_results.h5" "HDF5 results"
 else
     ((FAILED++))
     RESULTS["Davidson"]="FAIL"
@@ -321,7 +332,7 @@ if run_test "Block_Lanczos" "$OUTPUT_DIR" \
         --output=$OUTPUT_DIR"; then
     ((PASSED++))
     RESULTS["Block_Lanczos"]="PASS"
-    check_output_file "$OUTPUT_DIR/eigenvalues.txt" "Eigenvalues"
+    check_hdf5_file "$OUTPUT_DIR/ed_results.h5" "HDF5 results"
 else
     ((FAILED++))
     RESULTS["Block_Lanczos"]="FAIL"
@@ -355,12 +366,8 @@ if run_test "Thermo_Full" "$OUTPUT_DIR" \
         --output=$OUTPUT_DIR"; then
     ((PASSED++))
     RESULTS["Thermo_Full"]="PASS"
-    # Check unified thermo output
-    if [ -f "$OUTPUT_DIR/thermo/thermo.txt" ]; then
-        check_output_file "$OUTPUT_DIR/thermo/thermo.txt" "Unified thermo.txt"
-    elif [ -f "$OUTPUT_DIR/thermo.txt" ]; then
-        check_output_file "$OUTPUT_DIR/thermo.txt" "Unified thermo.txt"
-    fi
+    # Check HDF5 output
+    check_hdf5_file "$OUTPUT_DIR/ed_results.h5" "HDF5 results"
 else
     ((FAILED++))
     RESULTS["Thermo_Full"]="FAIL"
@@ -383,7 +390,7 @@ if run_test "FTLM" "$OUTPUT_DIR" \
         --output=$OUTPUT_DIR"; then
     ((PASSED++))
     RESULTS["FTLM"]="PASS"
-    find "$OUTPUT_DIR" -name "thermo.txt" -exec sh -c 'echo "  Found: {}"' \;
+    check_hdf5_file "$OUTPUT_DIR/thermo/ed_results.h5" "HDF5 results"
 else
     ((FAILED++))
     RESULTS["FTLM"]="FAIL"
@@ -406,7 +413,7 @@ if run_test "LTLM" "$OUTPUT_DIR" \
         --output=$OUTPUT_DIR"; then
     ((PASSED++))
     RESULTS["LTLM"]="PASS"
-    find "$OUTPUT_DIR" -name "thermo.txt" -exec sh -c 'echo "  Found: {}"' \;
+    check_hdf5_file "$OUTPUT_DIR/thermo/ed_results.h5" "HDF5 results"
 else
     ((FAILED++))
     RESULTS["LTLM"]="FAIL"
@@ -429,7 +436,7 @@ if run_test "Hybrid" "$OUTPUT_DIR" \
         --output=$OUTPUT_DIR"; then
     ((PASSED++))
     RESULTS["Hybrid"]="PASS"
-    find "$OUTPUT_DIR" -name "thermo.txt" -exec sh -c 'echo "  Found: {}"' \;
+    check_hdf5_file "$OUTPUT_DIR/thermo/ed_results.h5" "HDF5 results"
 else
     ((FAILED++))
     RESULTS["Hybrid"]="FAIL"
@@ -449,7 +456,7 @@ if run_test "mTPQ" "$OUTPUT_DIR" \
         --output=$OUTPUT_DIR"; then
     ((PASSED++))
     RESULTS["mTPQ"]="PASS"
-    find "$OUTPUT_DIR" -name "thermo.txt" -exec sh -c 'echo "  Found: {}"' \;
+    check_hdf5_file "$OUTPUT_DIR/ed_results.h5" "HDF5 results"
     find "$OUTPUT_DIR" -name "SS_rand*.dat" | head -3 | while read f; do
         echo "  TPQ raw data: $(basename $f)"
     done
@@ -472,7 +479,7 @@ if run_test "cTPQ" "$OUTPUT_DIR" \
         --output=$OUTPUT_DIR"; then
     ((PASSED++))
     RESULTS["cTPQ"]="PASS"
-    find "$OUTPUT_DIR" -name "thermo.txt" -exec sh -c 'echo "  Found: {}"' \;
+    check_hdf5_file "$OUTPUT_DIR/ed_results.h5" "HDF5 results"
 else
     ((FAILED++))
     RESULTS["cTPQ"]="FAIL"
@@ -511,8 +518,8 @@ if run_test "GS_DSSF_CF" "$OUTPUT_DIR" \
         --output=$OUTPUT_DIR"; then
     ((PASSED++))
     RESULTS["GS_DSSF"]="PASS"
-    echo "  Checking spectral outputs:"
-    check_spectral_output "$OUTPUT_DIR" "*.txt" "Spectral files"
+    echo "  Checking HDF5 output:"
+    check_hdf5_file "$OUTPUT_DIR/ed_results.h5" "HDF5 results"
 else
     ((FAILED++))
     RESULTS["GS_DSSF"]="FAIL"
@@ -540,9 +547,8 @@ if run_test "FiniteT_DSSF" "$OUTPUT_DIR" \
         --output=$OUTPUT_DIR"; then
     ((PASSED++))
     RESULTS["FiniteT_DSSF"]="PASS"
-    echo "  Checking spectral outputs:"
-    check_spectral_output "$OUTPUT_DIR" "*spectral*.txt" "Spectral files"
-    check_spectral_output "$OUTPUT_DIR" "*.h5" "HDF5 files"
+    echo "  Checking HDF5 output:"
+    check_hdf5_file "$OUTPUT_DIR/ed_results.h5" "HDF5 results"
 else
     ((FAILED++))
     RESULTS["FiniteT_DSSF"]="FAIL"
@@ -571,8 +577,8 @@ if run_test "Lehmann_DSSF" "$OUTPUT_DIR" \
         --output=$OUTPUT_DIR"; then
     ((PASSED++))
     RESULTS["Lehmann_DSSF"]="PASS"
-    echo "  Checking spectral outputs:"
-    check_spectral_output "$OUTPUT_DIR" "*spectral*.txt" "Spectral files"
+    echo "  Checking HDF5 output:"
+    check_hdf5_file "$OUTPUT_DIR/ed_results.h5" "HDF5 results"
 else
     ((FAILED++))
     RESULTS["Lehmann_DSSF"]="FAIL"
@@ -599,8 +605,8 @@ if run_test "GS_SSSF" "$OUTPUT_DIR" \
         --output=$OUTPUT_DIR"; then
     ((PASSED++))
     RESULTS["GS_SSSF"]="PASS"
-    echo "  Checking static outputs:"
-    check_spectral_output "$OUTPUT_DIR" "*static*.txt" "Static SF files"
+    echo "  Checking HDF5 output:"
+    check_hdf5_file "$OUTPUT_DIR/ed_results.h5" "HDF5 results"
 else
     ((FAILED++))
     RESULTS["GS_SSSF"]="FAIL"
@@ -624,8 +630,8 @@ if run_test "FiniteT_SSSF" "$OUTPUT_DIR" \
         --output=$OUTPUT_DIR"; then
     ((PASSED++))
     RESULTS["FiniteT_SSSF"]="PASS"
-    echo "  Checking static outputs:"
-    check_spectral_output "$OUTPUT_DIR" "*static*.txt" "Static SF files"
+    echo "  Checking HDF5 output:"
+    check_hdf5_file "$OUTPUT_DIR/ed_results.h5" "HDF5 results"
 else
     ((FAILED++))
     RESULTS["FiniteT_SSSF"]="FAIL"
@@ -697,26 +703,23 @@ echo "════════════════════════�
 echo ""
 echo -e "${CYAN}Output Format Summary:${NC}"
 echo ""
-echo "Unified Thermodynamic Format (thermo.txt):"
-echo "  # T E E_err Cv Cv_err S S_err F F_err"
+echo "All output is saved in HDF5 format (ed_results.h5):"
 echo ""
-echo "Spectral Function Format:"
-echo "  # Frequency  Re[S(ω)]  Im[S(ω)]  Re[Error]  Im[Error]"
-echo ""
-echo "Static Structure Factor Format:"
-echo "  # T  S(q)  S_err"
+echo "  Thermodynamics:  /ftlm/averaged/{temperatures,energy,specific_heat,...}"
+echo "  Dynamical:       /dynamical/<operator>/{frequencies,spectral_real,...}"
+echo "  Static:          /correlations/<operator>/{temperatures,expectation,...}"
 echo ""
 
-# Check for unified thermo files
-echo "Checking for unified thermo.txt outputs:"
+# Check for HDF5 files
+echo "Checking for ed_results.h5 outputs:"
 for dir in "$OUTPUT_BASE"/thermo_*; do
     if [ -d "$dir" ]; then
         base=$(basename "$dir")
-        found=$(find "$dir" -name "thermo.txt" 2>/dev/null | head -1)
+        found=$(find "$dir" -name "ed_results.h5" 2>/dev/null | head -1)
         if [ -n "$found" ]; then
             echo -e "  ${GREEN}✓${NC} $base"
         else
-            echo -e "  ${YELLOW}?${NC} $base (thermo.txt not found)"
+            echo -e "  ${YELLOW}?${NC} $base (ed_results.h5 not found)"
         fi
     fi
 done

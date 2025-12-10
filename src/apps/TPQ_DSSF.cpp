@@ -13,11 +13,13 @@
 #include <algorithm> // for std::sort, std::max_element, std::min_element
 #include <numeric> // for std::accumulate
 #include <ed/core/construct_ham.h>
+#include <ed/core/hdf5_io.h>
 #include <ed/solvers/TPQ.h>
 #include <ed/solvers/observables.h>
 #include <mpi.h>
 #include <ed/solvers/dynamics.h>
 #include <ed/solvers/ftlm.h>
+#include <H5Cpp.h>
 
 #ifdef WITH_CUDA
 #include <ed/gpu/gpu_ed_wrapper.h>
@@ -59,7 +61,45 @@ double read_ground_state_energy(const std::string& directory) {
     std::vector<double> candidate_energies;
     std::vector<std::string> sources;
     
-    // Method 1: Try eigenvalues.dat (binary format)
+    // Method 0 (PRIMARY): Try HDF5 file (ed_results.h5)
+    // Check multiple possible locations for the HDF5 file
+    std::vector<std::string> h5_paths = {
+        directory + "/output/ed_results.h5",
+        directory + "/output/eigenvectors/ed_results.h5",
+        directory + "/ed_results.h5"
+    };
+    
+    for (const auto& h5_path : h5_paths) {
+        if (std::filesystem::exists(h5_path)) {
+            try {
+                H5::H5File file(h5_path, H5F_ACC_RDONLY);
+                
+                // Try to read from /eigendata/eigenvalues
+                if (file.nameExists("/eigendata/eigenvalues")) {
+                    H5::DataSet dataset = file.openDataSet("/eigendata/eigenvalues");
+                    H5::DataSpace dataspace = dataset.getSpace();
+                    hsize_t dims[1];
+                    dataspace.getSimpleExtentDims(dims, nullptr);
+                    
+                    if (dims[0] > 0) {
+                        std::vector<double> eigenvalues(dims[0]);
+                        dataset.read(eigenvalues.data(), H5::PredType::NATIVE_DOUBLE);
+                        
+                        double ground_state_energy = *std::min_element(eigenvalues.begin(), eigenvalues.end());
+                        candidate_energies.push_back(ground_state_energy);
+                        sources.push_back("HDF5: " + h5_path + " (/eigendata/eigenvalues)");
+                    }
+                    dataset.close();
+                }
+                file.close();
+            } catch (const H5::Exception& e) {
+                // HDF5 error - continue to try other methods
+                std::cerr << "Warning: Could not read from HDF5 file " << h5_path << std::endl;
+            }
+        }
+    }
+    
+    // Method 1: Try eigenvalues.dat (binary format) - LEGACY
     std::string eigenvalues_dat = directory + "/output/eigenvectors/eigenvalues.dat";
     std::ifstream infile_dat(eigenvalues_dat, std::ios::binary);
     if (infile_dat.is_open()) {
@@ -70,24 +110,24 @@ double read_ground_state_energy(const std::string& directory) {
             double ground_state_energy;
             infile_dat.read(reinterpret_cast<char*>(&ground_state_energy), sizeof(double));
             candidate_energies.push_back(ground_state_energy);
-            sources.push_back("eigenvalues.dat");
+            sources.push_back("eigenvalues.dat (legacy binary)");
         }
         infile_dat.close();
     }
     
-    // Method 2: Try eigenvalues.txt (text format)
+    // Method 2: Try eigenvalues.txt (text format) - LEGACY
     std::string eigenvalues_txt = directory + "/output/eigenvalues.txt";
     std::ifstream infile_txt(eigenvalues_txt);
     if (infile_txt.is_open()) {
         double ground_state_energy;
         if (infile_txt >> ground_state_energy) {
             candidate_energies.push_back(ground_state_energy);
-            sources.push_back("eigenvalues.txt");
+            sources.push_back("eigenvalues.txt (legacy text)");
         }
         infile_txt.close();
     }
     
-    // Method 3: Try finding minimum energy in SS_rand0.dat
+    // Method 3: Try finding minimum energy in SS_rand0.dat (TPQ output)
     std::string ss_file = directory + "/output/SS_rand0.dat";
     std::ifstream infile_ss(ss_file);
     if (infile_ss.is_open()) {
@@ -121,14 +161,14 @@ double read_ground_state_energy(const std::string& directory) {
         
         if (found_energy) {
             candidate_energies.push_back(min_energy);
-            sources.push_back("SS_rand0.dat");
+            sources.push_back("SS_rand0.dat (TPQ trajectory)");
         }
     }
     
     // If no methods succeeded, throw an error
     if (candidate_energies.empty()) {
         throw std::runtime_error("Failed to read ground state energy from any available file: " 
-                                 "eigenvalues.dat, eigenvalues.txt, or SS_rand0.dat");
+                                 "ed_results.h5, eigenvalues.dat, eigenvalues.txt, or SS_rand0.dat");
     }
     
     // Return the minimum energy across all sources (most robust against corruption)
@@ -142,7 +182,7 @@ double read_ground_state_energy(const std::string& directory) {
         std::cout << "  " << sources[i] << ": " 
                   << std::fixed << std::setprecision(10) << candidate_energies[i];
         if (i == min_idx) {
-            std::cout << " ← SELECTED (minimum)";
+            std::cout << " <- SELECTED (minimum)";
         }
         std::cout << std::endl;
     }
@@ -286,6 +326,78 @@ void printSpinCorrelation(ComplexVector &state, int num_sites, float spin_length
     std::cout << "  <Sz_i Sz_j> sum: " << total_z_sum << std::endl;
 
     std::cout << "Spin correlation data saved to spin_correlation.txt" << std::endl;
+}
+
+// Helper function to load eigenvector from HDF5 file
+// Returns true if successful, false otherwise
+bool load_eigenvector_from_hdf5(ComplexVector& state, const std::string& h5_path, int eigenvector_idx) {
+    try {
+        if (!std::filesystem::exists(h5_path)) {
+            return false;
+        }
+        
+        H5::H5File file(h5_path, H5F_ACC_RDONLY);
+        
+        std::string dataset_name = "/eigendata/eigenvector_" + std::to_string(eigenvector_idx);
+        if (!file.nameExists(dataset_name)) {
+            file.close();
+            return false;
+        }
+        
+        H5::DataSet dataset = file.openDataSet(dataset_name);
+        H5::DataSpace dataspace = dataset.getSpace();
+        hsize_t dims[1];
+        dataspace.getSimpleExtentDims(dims, nullptr);
+        
+        // Eigenvectors are stored as complex numbers (2 doubles per element)
+        size_t num_elements = dims[0];
+        state.resize(num_elements);
+        
+        // Read complex data
+        H5::CompType complex_type(sizeof(Complex));
+        complex_type.insertMember("r", 0, H5::PredType::NATIVE_DOUBLE);
+        complex_type.insertMember("i", sizeof(double), H5::PredType::NATIVE_DOUBLE);
+        
+        dataset.read(state.data(), complex_type);
+        dataset.close();
+        file.close();
+        
+        std::cout << "Loaded eigenvector " << eigenvector_idx << " from HDF5: " << h5_path 
+                  << " (size: " << state.size() << ")" << std::endl;
+        return true;
+    } catch (const H5::Exception& e) {
+        std::cerr << "Warning: HDF5 error loading eigenvector: " << e.getCDetailMsg() << std::endl;
+        return false;
+    } catch (const std::exception& e) {
+        std::cerr << "Warning: Error loading eigenvector from HDF5: " << e.what() << std::endl;
+        return false;
+    }
+}
+
+// Helper function to find HDF5 file containing eigenvectors
+// Returns empty string if not found
+std::string find_eigenvector_hdf5(const std::string& directory) {
+    std::vector<std::string> h5_paths = {
+        directory + "/output/eigenvectors/ed_results.h5",
+        directory + "/output/ed_results.h5",
+        directory + "/ed_results.h5"
+    };
+    
+    for (const auto& path : h5_paths) {
+        if (std::filesystem::exists(path)) {
+            try {
+                H5::H5File file(path, H5F_ACC_RDONLY);
+                if (file.nameExists("/eigendata/eigenvector_0")) {
+                    file.close();
+                    return path;
+                }
+                file.close();
+            } catch (...) {
+                // Continue to next path
+            }
+        }
+    }
+    return "";
 }
 
 int main(int argc, char* argv[]) {
@@ -977,7 +1089,7 @@ int main(int argc, char* argv[]) {
         }
     }
     
-    // Collect all tpq_state files from the output subdirectory (only rank 0)
+    // Collect all tpq_state files from HDF5 or output subdirectory (only rank 0)
     std::vector<std::string> tpq_files;
     std::vector<int> sample_indices;
     std::vector<double> beta_values;
@@ -985,27 +1097,80 @@ int main(int argc, char* argv[]) {
     
     if (rank == 0) {
         std::string tpq_directory = directory + "/output";
-        for (const auto& entry : fs::directory_iterator(tpq_directory)) {
-            if (!entry.is_regular_file()) continue;
+        
+        // First, check for TPQ states in unified HDF5 file
+        std::string hdf5_path = tpq_directory + "/ed_results.h5";
+        bool found_hdf5_tpq_states = false;
+        
+        if (fs::exists(hdf5_path)) {
+            std::vector<HDF5IO::TPQStateInfo> hdf5_states = HDF5IO::listTPQStates(hdf5_path);
             
-            std::string filename = entry.path().filename().string();
-            std::smatch match;
+            if (!hdf5_states.empty()) {
+                std::cout << "Found " << hdf5_states.size() << " TPQ state(s) in HDF5 file: " << hdf5_path << std::endl;
+                
+                for (const auto& state_info : hdf5_states) {
+                    // Use marker format: "TPQ_HDF5:<path>:<dataset_name>"
+                    std::string marker = "TPQ_HDF5:" + hdf5_path + ":" + state_info.dataset_name;
+                    tpq_files.push_back(marker);
+                    sample_indices.push_back(static_cast<int>(state_info.sample_index));
+                    
+                    // Format beta string to match legacy behavior
+                    std::stringstream beta_ss;
+                    beta_ss << std::fixed << std::setprecision(6) << state_info.beta;
+                    beta_strings.push_back(beta_ss.str());
+                    beta_values.push_back(state_info.beta);
+                    
+                    std::cout << "  - TPQ state: sample=" << state_info.sample_index 
+                              << ", β=" << state_info.beta << std::endl;
+                }
+                found_hdf5_tpq_states = true;
+            }
+        }
+        
+        // Fall back to legacy .dat files if no HDF5 TPQ states found
+        if (!found_hdf5_tpq_states) {
+            std::cout << "No TPQ states in HDF5, checking for legacy .dat files..." << std::endl;
             
-            if (std::regex_match(filename, match, state_pattern_new)) {
-                tpq_files.push_back(entry.path().string());
-                sample_indices.push_back(std::stoi(match[1]));
-                beta_strings.push_back(match[2]);
-                beta_values.push_back(std::stod(match[2]));
+            for (const auto& entry : fs::directory_iterator(tpq_directory)) {
+                if (!entry.is_regular_file()) continue;
+                
+                std::string filename = entry.path().filename().string();
+                std::smatch match;
+                
+                if (std::regex_match(filename, match, state_pattern_new)) {
+                    tpq_files.push_back(entry.path().string());
+                    sample_indices.push_back(std::stoi(match[1]));
+                    beta_strings.push_back(match[2]);
+                    beta_values.push_back(std::stod(match[2]));
+                }
             }
         }
 
         // Optionally include zero-temperature ground-state eigenvector
-        const std::string gs_file = tpq_directory + "/eigenvectors/eigenvector_0.dat";
-        if (fs::exists(gs_file)) {
-            tpq_files.push_back(gs_file);
+        // Priority: HDF5 > legacy .dat file
+        std::string gs_hdf5_path = find_eigenvector_hdf5(directory);
+        const std::string gs_file_legacy = tpq_directory + "/eigenvectors/eigenvector_0.dat";
+        
+        bool gs_found = false;
+        if (!gs_hdf5_path.empty()) {
+            // Use special marker "HDF5:0" to indicate HDF5 eigenvector 0
+            tpq_files.push_back("HDF5:" + gs_hdf5_path + ":0");
             sample_indices.push_back(0); // use 0 as a conventional index for ground state
             beta_strings.push_back("inf");
             beta_values.push_back(std::numeric_limits<double>::infinity());
+            gs_found = true;
+            std::cout << "Found ground state eigenvector in HDF5: " << gs_hdf5_path << std::endl;
+        } else if (fs::exists(gs_file_legacy)) {
+            tpq_files.push_back(gs_file_legacy);
+            sample_indices.push_back(0); // use 0 as a conventional index for ground state
+            beta_strings.push_back("inf");
+            beta_values.push_back(std::numeric_limits<double>::infinity());
+            gs_found = true;
+            std::cout << "Found ground state eigenvector in legacy format: " << gs_file_legacy << std::endl;
+        }
+        
+        if (!gs_found) {
+            std::cout << "No ground state eigenvector found (checked HDF5 and legacy .dat)" << std::endl;
         }
         
         std::cout << "Found " << tpq_files.size() << " state file(s) to process (including ground state if present)" << std::endl;
@@ -1029,10 +1194,33 @@ int main(int argc, char* argv[]) {
     if (rank == 0) {
         for (int i = 0; i < num_files; i++) {
             try {
-                file_sizes[i] = fs::file_size(tpq_files[i]);
+                // Handle HDF5 marker paths specially (eigenvector and TPQ state markers)
+                if (tpq_files[i].rfind("HDF5:", 0) == 0) {
+                    // Parse HDF5 marker to get actual file path: "HDF5:<path>:<idx>"
+                    std::string marker = tpq_files[i].substr(5);
+                    size_t last_colon = marker.rfind(':');
+                    if (last_colon != std::string::npos) {
+                        std::string h5_path = marker.substr(0, last_colon);
+                        file_sizes[i] = fs::file_size(h5_path);
+                    } else {
+                        file_sizes[i] = 1; // Default weight
+                    }
+                } else if (tpq_files[i].rfind("TPQ_HDF5:", 0) == 0) {
+                    // Parse TPQ_HDF5 marker: "TPQ_HDF5:<path>:<dataset_name>"
+                    std::string marker = tpq_files[i].substr(9);
+                    size_t first_colon = marker.find(':');
+                    if (first_colon != std::string::npos) {
+                        std::string h5_path = marker.substr(0, first_colon);
+                        file_sizes[i] = fs::file_size(h5_path);
+                    } else {
+                        file_sizes[i] = 1; // Default weight
+                    }
+                } else {
+                    file_sizes[i] = fs::file_size(tpq_files[i]);
+                }
             } catch (const std::exception& e) {
-                std::cerr << "Warning: Could not get size of " << tpq_files[i] << ": " << e.what() << std::endl;
-                file_sizes[i] = 0;
+                // Use default weight if file size cannot be determined
+                file_sizes[i] = 1;
             }
         }
     }
@@ -1234,16 +1422,47 @@ int main(int argc, char* argv[]) {
         int sample_index = sample_indices[state_idx];
         double beta = beta_values[state_idx];
         std::string beta_str = beta_strings[state_idx];
-        std::string filename = fs::path(tpq_files[state_idx]).filename().string();
+        std::string file_path = tpq_files[state_idx];
+        std::string filename = fs::path(file_path).filename().string();
         std::string output_dir = output_base_dir + "/beta_" + beta_str;
         
         // Load state (or reuse from cache - TODO: implement caching for efficiency)
         ComplexVector tpq_state;
         bool loaded_ok = false;
-        if (filename.find("eigenvector") != std::string::npos) {
-            loaded_ok = load_raw_data(tpq_state, tpq_files[state_idx], N64);
+        
+        // Check for TPQ state HDF5 marker format: "TPQ_HDF5:<path>:<dataset_name>"
+        if (file_path.rfind("TPQ_HDF5:", 0) == 0) {
+            // Parse TPQ_HDF5 marker: "TPQ_HDF5:<h5_path>:<dataset_name>"
+            std::string marker = file_path.substr(9); // Remove "TPQ_HDF5:" prefix
+            size_t first_colon = marker.find(':');
+            if (first_colon != std::string::npos) {
+                std::string h5_path = marker.substr(0, first_colon);
+                std::string dataset_name = marker.substr(first_colon + 1);
+                loaded_ok = HDF5IO::loadTPQStateByName(h5_path, dataset_name, tpq_state);
+                filename = "TPQ state (HDF5): " + dataset_name;
+                if (loaded_ok) {
+                    std::cout << "Loaded TPQ state from HDF5: " << dataset_name 
+                              << " (size: " << tpq_state.size() << ")" << std::endl;
+                }
+            }
+        }
+        // Check for HDF5 eigenvector marker format: "HDF5:<path>:<idx>"
+        else if (file_path.rfind("HDF5:", 0) == 0) {
+            // Parse HDF5 marker: "HDF5:<h5_path>:<eigenvector_idx>"
+            std::string marker = file_path.substr(5); // Remove "HDF5:" prefix
+            size_t last_colon = marker.rfind(':');
+            if (last_colon != std::string::npos) {
+                std::string h5_path = marker.substr(0, last_colon);
+                int eigenvector_idx = std::stoi(marker.substr(last_colon + 1));
+                loaded_ok = load_eigenvector_from_hdf5(tpq_state, h5_path, eigenvector_idx);
+                filename = "eigenvector_" + std::to_string(eigenvector_idx) + " (HDF5)";
+            }
+        } else if (filename.find("eigenvector") != std::string::npos) {
+            // Legacy binary .dat format
+            loaded_ok = load_raw_data(tpq_state, file_path, N64);
         } else {
-            loaded_ok = load_tpq_state(tpq_state, tpq_files[state_idx]);
+            // Legacy TPQ state file
+            loaded_ok = load_tpq_state(tpq_state, file_path);
         }
         
         if (!loaded_ok || (int)tpq_state.size() != N) {
