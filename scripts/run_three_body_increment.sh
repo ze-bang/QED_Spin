@@ -22,10 +22,10 @@ while (( $(echo "$a <= $END" | bc -l) )); do
     # Run helper script
     echo "Step 1: Generating configuration..."
     a_formatted=$(printf "%.1f" $a)
-    python util/helper_pyrochlore_super.py 0.2 0.2 1 0 1 1 1 $dir/K=$a_formatted 1 1 1 1 1 0 0 $a
+    python util/helper_pyrochlore.py 0.2 0.2 1 0 1 1 1 $dir/K=$a_formatted 1 1 1 1 1 0 0 $a
     
     if [ $? -ne 0 ]; then
-        echo "Error: helper_pyrochlore_super.py failed for a=$a"
+        echo "Error: helper_pyrochlore.py failed for a=$a"
         exit 1
     fi
     

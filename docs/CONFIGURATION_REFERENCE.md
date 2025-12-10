@@ -6,9 +6,10 @@ This document provides comprehensive documentation for all configuration options
 
 1. [Overview](#overview)
 2. [Usage Modes](#usage-modes)
-3. [Configuration File Format](#configuration-file-format)
-4. [Command Line Options](#command-line-options)
-5. [Configuration Sections](#configuration-sections)
+3. [Quick Reference: All Methods](#quick-reference-all-methods)
+4. [Configuration File Format](#configuration-file-format)
+5. [Command Line Options](#command-line-options)
+6. [Configuration Sections](#configuration-sections)
    - [System](#system-section)
    - [Diagonalization](#diagonalization-section)
    - [Workflow](#workflow-section)
@@ -22,8 +23,8 @@ This document provides comprehensive documentation for all configuration options
    - [Operators](#operators-section)
    - [ARPACK](#arpack-section)
    - [Output](#output-section)
-6. [Diagonalization Methods](#diagonalization-methods)
-7. [Examples](#examples)
+7. [Diagonalization Methods (Detailed)](#diagonalization-methods)
+8. [Examples](#examples)
 
 ---
 
@@ -63,6 +64,69 @@ Configuration is processed in order:
 ```bash
 ./ED ./my_hamiltonian_dir --config=configs/my_config.cfg --tolerance=1e-14
 ```
+
+---
+
+## Quick Reference: All Methods
+
+All 37 diagonalization methods at a glance. Use `--method=<NAME>` (case-insensitive).
+
+### Complete Method List
+
+| Command Line Name | Internal Enum | Category | Description |
+|-------------------|---------------|----------|-------------|
+| `LANCZOS` | LANCZOS | Iterative | Standard Lanczos with full reorthogonalization (default) |
+| `LANCZOS_SELECTIVE` | LANCZOS_SELECTIVE | Iterative | Lanczos with selective reorthogonalization |
+| `LANCZOS_NO_ORTHO` | LANCZOS_NO_ORTHO | Iterative | Lanczos without reorthogonalization (fastest, least stable) |
+| `BLOCK_LANCZOS` | BLOCK_LANCZOS | Iterative | Block Lanczos for degenerate eigenvalues |
+| `CHEBYSHEV_FILTERED` or `CHEBYSHEV` | CHEBYSHEV_FILTERED | Iterative | Chebyshev polynomial filtering for spectral slicing |
+| `SHIFT_INVERT` | SHIFT_INVERT | Iterative | Shift-invert Lanczos for interior eigenvalues |
+| `SHIFT_INVERT_ROBUST` | SHIFT_INVERT_ROBUST | Iterative | Robust shift-invert with fallback |
+| `KRYLOV_SCHUR` | KRYLOV_SCHUR | Iterative | Krylov-Schur (restarted Lanczos) |
+| `IRL` | IMPLICIT_RESTART_LANCZOS | Iterative | Implicitly restarted Lanczos ⚠️ |
+| `TRLAN` | THICK_RESTART_LANCZOS | Iterative | Thick restart Lanczos with locking ⚠️ |
+| `BICG` | BICG | CG | Biconjugate gradient |
+| `LOBPCG` | LOBPCG | CG | Locally optimal block preconditioned CG |
+| `DAVIDSON` | DAVIDSON | Subspace | Davidson method with subspace expansion |
+| `FULL` | FULL | Direct | Full dense diagonalization (exact) |
+| `OSS` | OSS | Direct | Optimal spectrum solver (adaptive slicing) |
+| `mTPQ` | mTPQ | Thermal | Microcanonical Thermal Pure Quantum states |
+| `cTPQ` | cTPQ | Thermal | Canonical Thermal Pure Quantum states |
+| `mTPQ_MPI` | mTPQ_MPI | Thermal | MPI-parallel mTPQ (requires MPI) |
+| `mTPQ_CUDA` | mTPQ_CUDA | Thermal | CUDA-accelerated mTPQ (requires CUDA) |
+| `FTLM` | FTLM | Thermal | Finite Temperature Lanczos Method |
+| `LTLM` | LTLM | Thermal | Low Temperature Lanczos Method |
+| `HYBRID` | HYBRID | Thermal | Automatic LTLM/FTLM crossover |
+| `ARPACK_SM` or `ARPACK` | ARPACK_SM | ARPACK | Smallest Real eigenvalues |
+| `ARPACK_LM` | ARPACK_LM | ARPACK | Largest Real eigenvalues |
+| `ARPACK_SHIFT_INVERT` | ARPACK_SHIFT_INVERT | ARPACK | ARPACK with shift-invert |
+| `ARPACK_ADVANCED` | ARPACK_ADVANCED | ARPACK | Multi-attempt adaptive strategy |
+| `LANCZOS_GPU` | LANCZOS_GPU | GPU | GPU-accelerated Lanczos |
+| `LANCZOS_GPU_FIXED_SZ` | LANCZOS_GPU_FIXED_SZ | GPU | GPU Lanczos for fixed Sz sector |
+| `DAVIDSON_GPU` | DAVIDSON_GPU | GPU | GPU Davidson (recommended) |
+| `LOBPCG_GPU` | LOBPCG_GPU | GPU | **DEPRECATED** → redirects to DAVIDSON_GPU |
+| `mTPQ_GPU` | mTPQ_GPU | GPU | GPU microcanonical TPQ |
+| `cTPQ_GPU` | cTPQ_GPU | GPU | GPU canonical TPQ |
+| `FTLM_GPU` | FTLM_GPU | GPU | GPU Finite Temperature Lanczos |
+| `FTLM_GPU_FIXED_SZ` | FTLM_GPU_FIXED_SZ | GPU | GPU FTLM for fixed Sz sector |
+
+> ⚠️ **Note**: `IRL` and `TRLAN` are short aliases - the full enum names `IMPLICIT_RESTART_LANCZOS` and `THICK_RESTART_LANCZOS` are NOT recognized by the command-line parser.
+
+### Method Selection Guide
+
+| Use Case | Recommended Method | Alternative |
+|----------|-------------------|-------------|
+| Ground state only | `LANCZOS` | `ARPACK_SM`, `DAVIDSON` |
+| Few low-lying states | `LANCZOS` | `BLOCK_LANCZOS` |
+| Degenerate eigenvalues | `BLOCK_LANCZOS` | `TRLAN` |
+| Interior eigenvalues | `SHIFT_INVERT` | `CHEBYSHEV_FILTERED` |
+| Complete spectrum (small N) | `FULL` | `OSS` |
+| Finite-T thermodynamics | `FTLM` | `HYBRID`, `mTPQ` |
+| Low-T thermodynamics | `LTLM` | `HYBRID` |
+| Full T range | `HYBRID` | `FTLM` (high samples) |
+| Large system (N≥20) | `mTPQ` | `FTLM` |
+| GPU acceleration | `DAVIDSON_GPU` | `LANCZOS_GPU` |
+| Difficult convergence | `ARPACK_ADVANCED` | `LANCZOS_SELECTIVE` |
 
 ---
 
@@ -607,75 +671,117 @@ output_prefix = results
 
 ---
 
-## Diagonalization Methods
+## Diagonalization Methods (Detailed)
 
-### Ground State Methods
+All methods are specified via `--method=<METHOD>` (case-insensitive). Use `--method-info=<METHOD>` for detailed parameter information.
 
-| Method | Description | Best For |
-|--------|-------------|----------|
-| `LANCZOS` | Standard Lanczos with full reorthogonalization | Ground state, few excited states |
-| `LANCZOS_SELECTIVE` | Lanczos with selective reorthogonalization | Faster when stable |
-| `LANCZOS_NO_ORTHO` | Lanczos without reorthogonalization | Quick estimates |
-| `DAVIDSON` | Davidson method | Multiple eigenvalues |
-| `LOBPCG` | Locally optimal block PCG | Multiple eigenvalues |
-| `ARPACK_SM` | ARPACK smallest magnitude | Robust ground state |
-| `ARPACK_ADVANCED` | ARPACK with adaptive strategies | Difficult problems |
+### Standard Lanczos Variants
+
+| Method Flag | Aliases | Description | Parameters | Best For |
+|-------------|---------|-------------|------------|----------|
+| `LANCZOS` | — | Standard Lanczos with full reorthogonalization | `--eigenvalues`, `--iterations`, `--tolerance`, `--eigenvectors` | Ground state, few excited states |
+| `LANCZOS_SELECTIVE` | — | Lanczos with selective reorthogonalization | Same as LANCZOS | When standard Lanczos has convergence issues |
+| `LANCZOS_NO_ORTHO` | — | Lanczos without reorthogonalization (fastest, least stable) | Same as LANCZOS | Quick estimates with well-conditioned H |
+
+### Block and Restart Methods
+
+| Method Flag | Aliases | Description | Parameters | Best For |
+|-------------|---------|-------------|------------|----------|
+| `BLOCK_LANCZOS` | — | Block Lanczos for multiple eigenvalues | `--block-size=<B>` (default: 4), standard Lanczos params | Degenerate or near-degenerate eigenvalues |
+| `KRYLOV_SCHUR` | — | Krylov-Schur (restarted Lanczos with Schur form) | Standard Lanczos params | Large problems requiring restarts |
+| `IRL` | — | Implicitly restarted Lanczos algorithm | `--iterations` (max Krylov dimension) | Memory-constrained, few eigenvalues |
+| `TRLAN` | — | Thick restart Lanczos with locking | `--iterations` (max Krylov dimension) | Many eigenvalues, clustered spectrum |
+
+> **Note**: `IRL` maps to internal enum `IMPLICIT_RESTART_LANCZOS`, `TRLAN` maps to `THICK_RESTART_LANCZOS`. The full names are not accepted on the command line.
+
+### Shift-Invert and Filtered Methods
+
+| Method Flag | Aliases | Description | Parameters | Best For |
+|-------------|---------|-------------|------------|----------|
+| `SHIFT_INVERT` | — | Shift-invert Lanczos for interior eigenvalues | `--shift=<σ>` (target energy) | Excited states at specific energy |
+| `SHIFT_INVERT_ROBUST` | — | Robust shift-invert (fallback to standard) | Same as SHIFT_INVERT | Ill-conditioned problems |
+| `CHEBYSHEV_FILTERED` | `CHEBYSHEV` | Chebyshev polynomial filtering for spectral slicing | `--target-lower=<E>`, `--target-upper=<E>` (0=auto) | Interior spectrum, spectral windows |
+
+### Conjugate Gradient Methods
+
+| Method Flag | Description | Parameters | Best For |
+|-------------|-------------|------------|----------|
+| `BICG` | Biconjugate gradient method | `--iterations`, `--tolerance` | Specialized applications |
+| `LOBPCG` | Locally optimal block preconditioned CG | Standard params | Multiple eigenvalues with preconditioning |
+
+### Other Iterative Methods
+
+| Method Flag | Description | Parameters | Best For |
+|-------------|-------------|------------|----------|
+| `DAVIDSON` | Davidson method with subspace expansion | `--max_subspace=<M>` (default: 100) | Low-lying eigenvalues, controlled memory |
 
 ### Full Spectrum Methods
 
-| Method | Description | Best For |
-|--------|-------------|----------|
-| `FULL` | Full exact diagonalization | Small systems (N ≤ 16) |
-| `OSS` | Optimal spectrum solver | Medium systems |
+| Method Flag | Description | Parameters | Best For |
+|-------------|-------------|------------|----------|
+| `FULL` | Complete dense diagonalization | `--eigenvalues=FULL` or `-1` for all | Small systems (dim < 10⁵), exact thermodynamics |
+| `OSS` | Optimal spectrum solver (adaptive slicing) | `--iterations` | Complete spectrum with memory constraints |
 
-### Interior Eigenvalue Methods
+### Finite Temperature Methods (CPU)
 
-| Method | Description | Best For |
-|--------|-------------|----------|
-| `SHIFT_INVERT` | Shift-invert Lanczos | Excited states at specific energy |
-| `SHIFT_INVERT_ROBUST` | Robust shift-invert | Ill-conditioned problems |
-| `CHEBYSHEV_FILTERED` | Chebyshev polynomial filtering | Spectral slicing |
+| Method Flag | Description | Key Parameters | Best For |
+|-------------|-------------|----------------|----------|
+| `mTPQ` | Microcanonical Thermal Pure Quantum states | `--samples`, `--temp_min/max/bins`, `--large_value`, `--calc_observables`, `--measure_spin` | Thermodynamics, large systems |
+| `cTPQ` | Canonical Thermal Pure Quantum states | `--samples`, `--num_order`, `--delta_tau`, `--temp_*` | Canonical ensemble properties |
+| `mTPQ_MPI` | MPI-parallel mTPQ | Same as mTPQ (requires MPI build) | Parallel TPQ sampling |
+| `mTPQ_CUDA` | CUDA-accelerated mTPQ | Same as mTPQ (requires CUDA build) | GPU-accelerated TPQ |
+| `FTLM` | Finite Temperature Lanczos Method | `--samples`, `--ftlm-krylov`, `--ftlm-full-reorth`, `--ftlm-seed`, `--ftlm-store-samples`, `--ftlm-no-error-bars` | General finite-T thermodynamics |
+| `LTLM` | Low Temperature Lanczos Method | `--ltlm-krylov`, `--ltlm-ground-krylov`, `--ltlm-full-reorth`, `--ltlm-seed`, `--ltlm-store-data` | Low-T where ground state dominates |
+| `HYBRID` | Automatic LTLM (low-T) + FTLM (high-T) crossover | `--hybrid-crossover=<T>`, `--hybrid-auto-crossover`, plus LTLM/FTLM params | Full temperature range with optimal accuracy |
 
-### Block/Restart Methods
+> **Note**: `--hybrid-thermal` flag is deprecated. Use `--method=HYBRID` instead.
 
-| Method | Description | Best For |
-|--------|-------------|----------|
-| `BLOCK_LANCZOS` | Block Lanczos | Degenerate eigenvalues |
-| `KRYLOV_SCHUR` | Krylov-Schur | Large problems with restarts |
-| `IMPLICIT_RESTART_LANCZOS` | Implicitly restarted Lanczos | Memory-constrained |
-| `THICK_RESTART_LANCZOS` | Thick restart with locking | Many eigenvalues |
+### ARPACK Methods
 
-### Finite Temperature Methods
+| Method Flag | Aliases | Description | Key Parameters |
+|-------------|---------|-------------|----------------|
+| `ARPACK_SM` | `ARPACK` | Smallest Real eigenvalues (ground state) | Standard params |
+| `ARPACK_LM` | — | Largest Real eigenvalues | Standard params |
+| `ARPACK_SHIFT_INVERT` | — | ARPACK in shift-invert mode | `--shift=<σ>` |
+| `ARPACK_ADVANCED` | — | Multi-attempt adaptive strategy | `--arpack-which`, `--arpack-ncv`, `--arpack-max-restarts`, `--arpack-shift-invert`, `--arpack-sigma`, `--arpack-verbose` |
 
-| Method | Description | Best For |
-|--------|-------------|----------|
-| `FTLM` | Finite Temperature Lanczos | General finite-T properties |
-| `LTLM` | Low Temperature Lanczos | Low-T when GS is known |
-| `HYBRID` | Automatic LTLM/FTLM crossover | Full temperature range |
-| `mTPQ` | Microcanonical TPQ | Thermodynamics, large systems |
-| `cTPQ` | Canonical TPQ | Fixed temperature |
+### GPU-Accelerated Methods (require CUDA build)
 
-### GPU-Accelerated Methods
+| Method Flag | Description | Key Parameters |
+|-------------|-------------|----------------|
+| `LANCZOS_GPU` | GPU Lanczos (full Hilbert space) | Standard Lanczos params |
+| `LANCZOS_GPU_FIXED_SZ` | GPU Lanczos (fixed Sz sector) | `--fixed-sz`, `--n-up=<N>`, standard params |
+| `DAVIDSON_GPU` | GPU Davidson method (**recommended**) | `--max_subspace`, standard params |
+| `LOBPCG_GPU` | **DEPRECATED** → Redirects to `DAVIDSON_GPU` | — |
+| `FTLM_GPU` | GPU FTLM (full Hilbert space) | Same as FTLM |
+| `FTLM_GPU_FIXED_SZ` | GPU FTLM (fixed Sz sector) | `--n-up=<N>`, same as FTLM |
+| `mTPQ_GPU` | GPU microcanonical TPQ | Same as mTPQ |
+| `cTPQ_GPU` | GPU canonical TPQ | Same as cTPQ |
 
-| Method | Description |
-|--------|-------------|
-| `LANCZOS_GPU` | GPU Lanczos (full Hilbert space) |
-| `LANCZOS_GPU_FIXED_SZ` | GPU Lanczos (fixed Sz sector) |
-| `DAVIDSON_GPU` | GPU Davidson (recommended) |
-| `LOBPCG_GPU` | Redirects to DAVIDSON_GPU |
-| `FTLM_GPU` | GPU FTLM (full Hilbert space) |
-| `FTLM_GPU_FIXED_SZ` | GPU FTLM (fixed Sz) |
-| `mTPQ_GPU` | GPU microcanonical TPQ |
-| `cTPQ_GPU` | GPU canonical TPQ |
+> **Important**: All GPU methods require compilation with `-DWITH_CUDA=ON`. Fixed-Sz GPU support may have limitations.
 
-### ARPACK Variants
+---
 
-| Method | Description |
-|--------|-------------|
-| `ARPACK_SM` | Smallest magnitude eigenvalues |
-| `ARPACK_LM` | Largest magnitude eigenvalues |
-| `ARPACK_SHIFT_INVERT` | Shift-invert mode |
-| `ARPACK_ADVANCED` | Multi-attempt adaptive strategy |
+## Deprecated Features and Migration Guide
+
+### Deprecated Methods
+
+| Deprecated | Replacement | Notes |
+|------------|-------------|-------|
+| `LOBPCG_GPU` | `DAVIDSON_GPU` | LOBPCG_GPU retired due to numerical stability issues |
+
+### Deprecated Flags
+
+| Deprecated Flag | Replacement | Notes |
+|-----------------|-------------|-------|
+| `--hybrid-thermal` | `--method=HYBRID` | Use the standalone HYBRID method instead |
+| `--num_measure_freq=<N>` | `--measure-freq=<N>` | Underscore form deprecated |
+
+### API Notes
+
+- `mTPQ_MPI` requires compilation with `-DWITH_MPI=ON`
+- `mTPQ_CUDA` and all GPU methods require `-DWITH_CUDA=ON`
+- ARPACK methods require linking with ARPACK library
 
 ---
 
