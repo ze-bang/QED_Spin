@@ -1,6 +1,7 @@
 // dynamics.cpp - Implementation of general quantum dynamics computation module
 
 #include <ed/solvers/dynamics.h>
+#include <ed/core/hdf5_io.h>  // For HDF5 output
 
 // ============================================================================
 // TIME EVOLUTION METHODS
@@ -981,27 +982,27 @@ void compute_operator_dynamics(
         std::sort(time_data.begin(), time_data.end(), 
                   [](const auto& a, const auto& b) { return std::get<0>(a) < std::get<0>(b); });
         
-        // Open file for writing time correlation data
-        std::string time_corr_file = output_dir + "/" + op_name + "_" + label + "_time_correlation.dat";
-        
-        std::ofstream time_corr_out(time_corr_file);
-        if (!time_corr_out.is_open()) {
-            std::cerr << "Error: Could not open file " << time_corr_file << " for writing" << std::endl;
-            continue;
+        // Save time correlation data to HDF5
+        std::string h5_file = output_dir + "/ed_results.h5";
+        if (!HDF5IO::fileExists(h5_file)) {
+            HDF5IO::createOrOpenFile(output_dir);
         }
         
-        time_corr_out << "# time real(C(t)) imag(C(t))" << std::endl;
-        time_corr_out << std::setprecision(16);
+        HDF5IO::TimeCorrelationData h5_data;
+        h5_data.times.reserve(time_data.size());
+        h5_data.correlation_real.reserve(time_data.size());
+        h5_data.correlation_imag.reserve(time_data.size());
         
-        // Write sorted data
         for (const auto& data_point : time_data) {
-            time_corr_out << std::get<0>(data_point) << " " 
-                         << std::get<1>(data_point) << " " 
-                         << std::get<2>(data_point) << std::endl;
+            h5_data.times.push_back(std::get<0>(data_point));
+            h5_data.correlation_real.push_back(std::get<1>(data_point));
+            h5_data.correlation_imag.push_back(std::get<2>(data_point));
         }
         
-        time_corr_out.close();
-        std::cout << "    Time correlation saved to " << time_corr_file << std::endl;
+        // Use sample=0 for ground state dynamics, beta=0 indicates ground state
+        HDF5IO::saveTimeCorrelation(h5_file, op_name, 0, 0.0, h5_data, label);
+        
+        std::cout << "    Time correlation saved to HDF5" << std::endl;
         std::cout << "    Time range: [" << std::get<0>(time_data.front()) << ", " 
                   << std::get<0>(time_data.back()) << "]" << std::endl;
     }

@@ -2042,6 +2042,432 @@ public:
             throw std::runtime_error("Failed to load array: " + std::string(e.getCDetailMsg()));
         }
     }
+    
+    // ============================================================================
+    // FTLM Sample Data I/O (replaces ftlm_samples/*.dat and dynamical_samples/*.txt)
+    // ============================================================================
+    
+    /**
+     * @brief Structure to hold FTLM thermodynamic sample data
+     */
+    struct FTLMThermodynamicSample {
+        std::vector<double> temperatures;
+        std::vector<double> energy;
+        std::vector<double> specific_heat;
+        std::vector<double> entropy;
+        std::vector<double> free_energy;
+    };
+    
+    /**
+     * @brief Structure to hold FTLM dynamical sample data (spectral function)
+     */
+    struct FTLMDynamicalSample {
+        std::vector<double> frequencies;
+        std::vector<double> spectral_real;
+        std::vector<double> spectral_imag;
+    };
+    
+    /**
+     * @brief Structure to hold FTLM static response sample data
+     */
+    struct FTLMStaticSample {
+        std::vector<double> temperatures;
+        std::vector<double> expectation;
+        std::vector<double> variance;
+    };
+    
+    /**
+     * @brief Ensure FTLM sample groups exist in HDF5 file
+     */
+    static void ensureFTLMSampleGroups(const std::string& filepath) {
+        try {
+            H5::H5File file(filepath, H5F_ACC_RDWR);
+            
+            if (!file.nameExists("/ftlm")) {
+                file.createGroup("/ftlm");
+            }
+            if (!file.nameExists("/ftlm/samples")) {
+                file.createGroup("/ftlm/samples");
+            }
+            if (!file.nameExists("/ftlm/samples/thermodynamic")) {
+                file.createGroup("/ftlm/samples/thermodynamic");
+            }
+            if (!file.nameExists("/ftlm/samples/dynamical")) {
+                file.createGroup("/ftlm/samples/dynamical");
+            }
+            if (!file.nameExists("/ftlm/samples/dynamical_correlation")) {
+                file.createGroup("/ftlm/samples/dynamical_correlation");
+            }
+            if (!file.nameExists("/ftlm/samples/static")) {
+                file.createGroup("/ftlm/samples/static");
+            }
+            
+            file.close();
+        } catch (H5::Exception& e) {
+            throw std::runtime_error("Failed to create FTLM sample groups: " + std::string(e.getCDetailMsg()));
+        }
+    }
+    
+    /**
+     * @brief Save FTLM thermodynamic sample to HDF5 (replaces ftlm_samples/sample_*.dat)
+     * 
+     * @param filepath Path to HDF5 file
+     * @param sample_index Sample index
+     * @param sample Sample data
+     */
+    static void saveFTLMThermodynamicSample(const std::string& filepath,
+                                            size_t sample_index,
+                                            const FTLMThermodynamicSample& sample) {
+        try {
+            H5::H5File file(filepath, H5F_ACC_RDWR);
+            
+            std::string sample_group = "/ftlm/samples/thermodynamic/sample_" + std::to_string(sample_index);
+            
+            // Create group if needed
+            if (!file.nameExists("/ftlm/samples/thermodynamic")) {
+                if (!file.nameExists("/ftlm/samples")) {
+                    if (!file.nameExists("/ftlm")) {
+                        file.createGroup("/ftlm");
+                    }
+                    file.createGroup("/ftlm/samples");
+                }
+                file.createGroup("/ftlm/samples/thermodynamic");
+            }
+            if (file.nameExists(sample_group)) {
+                // Delete existing group contents
+                file.unlink(sample_group);
+            }
+            file.createGroup(sample_group);
+            
+            // Helper to save dataset
+            auto saveDataset = [&](const std::string& name, const std::vector<double>& data) {
+                std::string path = sample_group + "/" + name;
+                hsize_t dims[1] = {data.size()};
+                H5::DataSpace dataspace(1, dims);
+                H5::DataSet dataset = file.createDataSet(path, H5::PredType::NATIVE_DOUBLE, dataspace);
+                dataset.write(data.data(), H5::PredType::NATIVE_DOUBLE);
+                dataset.close();
+            };
+            
+            saveDataset("temperatures", sample.temperatures);
+            saveDataset("energy", sample.energy);
+            saveDataset("specific_heat", sample.specific_heat);
+            saveDataset("entropy", sample.entropy);
+            saveDataset("free_energy", sample.free_energy);
+            
+            file.close();
+        } catch (H5::Exception& e) {
+            throw std::runtime_error("Failed to save FTLM thermodynamic sample: " + std::string(e.getCDetailMsg()));
+        }
+    }
+    
+    /**
+     * @brief Save FTLM dynamical sample to HDF5 (replaces dynamical_samples/sample_*.txt)
+     * 
+     * @param filepath Path to HDF5 file
+     * @param sample_index Sample index
+     * @param sample Sample data
+     * @param is_correlation If true, saves to dynamical_correlation group
+     */
+    static void saveFTLMDynamicalSample(const std::string& filepath,
+                                        size_t sample_index,
+                                        const FTLMDynamicalSample& sample,
+                                        bool is_correlation = false) {
+        try {
+            H5::H5File file(filepath, H5F_ACC_RDWR);
+            
+            std::string base_group = is_correlation ? "/ftlm/samples/dynamical_correlation" 
+                                                    : "/ftlm/samples/dynamical";
+            std::string sample_group = base_group + "/sample_" + std::to_string(sample_index);
+            
+            // Create groups if needed
+            if (!file.nameExists(base_group)) {
+                ensureFTLMSampleGroups(filepath);
+            }
+            if (file.nameExists(sample_group)) {
+                file.unlink(sample_group);
+            }
+            file.createGroup(sample_group);
+            
+            // Helper to save dataset
+            auto saveDataset = [&](const std::string& name, const std::vector<double>& data) {
+                std::string path = sample_group + "/" + name;
+                hsize_t dims[1] = {data.size()};
+                H5::DataSpace dataspace(1, dims);
+                H5::DataSet dataset = file.createDataSet(path, H5::PredType::NATIVE_DOUBLE, dataspace);
+                dataset.write(data.data(), H5::PredType::NATIVE_DOUBLE);
+                dataset.close();
+            };
+            
+            saveDataset("frequencies", sample.frequencies);
+            saveDataset("spectral_real", sample.spectral_real);
+            saveDataset("spectral_imag", sample.spectral_imag);
+            
+            file.close();
+        } catch (H5::Exception& e) {
+            throw std::runtime_error("Failed to save FTLM dynamical sample: " + std::string(e.getCDetailMsg()));
+        }
+    }
+    
+    /**
+     * @brief Save FTLM static response sample to HDF5 (replaces static_samples/sample_*.txt)
+     * 
+     * @param filepath Path to HDF5 file
+     * @param sample_index Sample index
+     * @param sample Sample data
+     * @param operator_name Name of the operator (optional, for labeling)
+     */
+    static void saveFTLMStaticSample(const std::string& filepath,
+                                     size_t sample_index,
+                                     const FTLMStaticSample& sample,
+                                     const std::string& operator_name = "") {
+        try {
+            H5::H5File file(filepath, H5F_ACC_RDWR);
+            
+            std::string base_group = "/ftlm/samples/static";
+            std::string sample_group = base_group + "/sample_" + std::to_string(sample_index);
+            
+            // Create groups if needed
+            if (!file.nameExists(base_group)) {
+                ensureFTLMSampleGroups(filepath);
+            }
+            if (file.nameExists(sample_group)) {
+                file.unlink(sample_group);
+            }
+            file.createGroup(sample_group);
+            
+            // Helper to save dataset
+            auto saveDataset = [&](const std::string& name, const std::vector<double>& data) {
+                std::string path = sample_group + "/" + name;
+                hsize_t dims[1] = {data.size()};
+                H5::DataSpace dataspace(1, dims);
+                H5::DataSet dataset = file.createDataSet(path, H5::PredType::NATIVE_DOUBLE, dataspace);
+                dataset.write(data.data(), H5::PredType::NATIVE_DOUBLE);
+                dataset.close();
+            };
+            
+            saveDataset("temperatures", sample.temperatures);
+            saveDataset("expectation", sample.expectation);
+            saveDataset("variance", sample.variance);
+            
+            // Add operator name as attribute if provided
+            if (!operator_name.empty()) {
+                H5::Group group = file.openGroup(sample_group);
+                H5::DataSpace attr_space(H5S_SCALAR);
+                H5::StrType str_type(H5::PredType::C_S1, 64);
+                H5::Attribute attr = group.createAttribute("operator", str_type, attr_space);
+                attr.write(str_type, operator_name.c_str());
+                attr.close();
+                group.close();
+            }
+            
+            file.close();
+        } catch (H5::Exception& e) {
+            throw std::runtime_error("Failed to save FTLM static sample: " + std::string(e.getCDetailMsg()));
+        }
+    }
+    
+    // ============================================================================
+    // Time Correlation I/O (replaces time_corr_*.dat files)
+    // ============================================================================
+    
+    /**
+     * @brief Structure to hold time correlation data
+     */
+    struct TimeCorrelationData {
+        std::vector<double> times;
+        std::vector<double> correlation_real;
+        std::vector<double> correlation_imag;
+    };
+    
+    /**
+     * @brief Ensure time correlation groups exist in HDF5 file
+     */
+    static void ensureTimeCorrelationGroups(const std::string& filepath) {
+        try {
+            H5::H5File file(filepath, H5F_ACC_RDWR);
+            
+            if (!file.nameExists("/dynamical")) {
+                file.createGroup("/dynamical");
+            }
+            if (!file.nameExists("/dynamical/time_correlations")) {
+                file.createGroup("/dynamical/time_correlations");
+            }
+            
+            file.close();
+        } catch (H5::Exception& e) {
+            throw std::runtime_error("Failed to create time correlation groups: " + std::string(e.getCDetailMsg()));
+        }
+    }
+    
+    /**
+     * @brief Save time correlation data to HDF5 (replaces time_corr_*.dat files)
+     * 
+     * @param filepath Path to HDF5 file
+     * @param operator_name Operator name (e.g., "Sz_Sz", "Sp_Sm")
+     * @param sample_index Sample index
+     * @param beta Inverse temperature
+     * @param data Time correlation data
+     * @param label Additional label (e.g., "ground_state", "thermal")
+     */
+    static void saveTimeCorrelation(const std::string& filepath,
+                                    const std::string& operator_name,
+                                    size_t sample_index,
+                                    double beta,
+                                    const TimeCorrelationData& data,
+                                    const std::string& label = "") {
+        try {
+            H5::H5File file(filepath, H5F_ACC_RDWR);
+            
+            // Ensure base groups exist
+            if (!file.nameExists("/dynamical/time_correlations")) {
+                ensureTimeCorrelationGroups(filepath);
+            }
+            
+            // Create dataset name: /dynamical/time_correlations/operator_sample_beta_label
+            std::stringstream ss;
+            ss << "/dynamical/time_correlations/" << operator_name 
+               << "_sample" << sample_index
+               << "_beta" << std::fixed << std::setprecision(4) << beta;
+            if (!label.empty()) {
+                ss << "_" << label;
+            }
+            std::string group_path = ss.str();
+            
+            // Remove existing if present
+            if (file.nameExists(group_path)) {
+                file.unlink(group_path);
+            }
+            file.createGroup(group_path);
+            
+            // Helper to save dataset
+            auto saveDataset = [&](const std::string& name, const std::vector<double>& arr) {
+                std::string path = group_path + "/" + name;
+                hsize_t dims[1] = {arr.size()};
+                H5::DataSpace dataspace(1, dims);
+                H5::DataSet dataset = file.createDataSet(path, H5::PredType::NATIVE_DOUBLE, dataspace);
+                dataset.write(arr.data(), H5::PredType::NATIVE_DOUBLE);
+                dataset.close();
+            };
+            
+            saveDataset("times", data.times);
+            saveDataset("correlation_real", data.correlation_real);
+            saveDataset("correlation_imag", data.correlation_imag);
+            
+            // Add metadata as attributes
+            H5::Group group = file.openGroup(group_path);
+            H5::DataSpace attr_space(H5S_SCALAR);
+            
+            // Beta
+            H5::Attribute beta_attr = group.createAttribute("beta", H5::PredType::NATIVE_DOUBLE, attr_space);
+            beta_attr.write(H5::PredType::NATIVE_DOUBLE, &beta);
+            beta_attr.close();
+            
+            // Sample index
+            uint64_t sample = sample_index;
+            H5::Attribute sample_attr = group.createAttribute("sample_index", H5::PredType::NATIVE_UINT64, attr_space);
+            sample_attr.write(H5::PredType::NATIVE_UINT64, &sample);
+            sample_attr.close();
+            
+            // Operator name
+            H5::StrType str_type(H5::PredType::C_S1, 64);
+            H5::Attribute op_attr = group.createAttribute("operator", str_type, attr_space);
+            op_attr.write(str_type, operator_name.c_str());
+            op_attr.close();
+            
+            // Label
+            if (!label.empty()) {
+                H5::Attribute label_attr = group.createAttribute("label", str_type, attr_space);
+                label_attr.write(str_type, label.c_str());
+                label_attr.close();
+            }
+            
+            group.close();
+            file.close();
+            
+            std::cout << "Saved time correlation to HDF5: " << group_path << std::endl;
+        } catch (H5::Exception& e) {
+            throw std::runtime_error("Failed to save time correlation: " + std::string(e.getCDetailMsg()));
+        }
+    }
+    
+    /**
+     * @brief Load time correlation data from HDF5
+     * 
+     * @param filepath Path to HDF5 file
+     * @param group_path Full path to the time correlation group
+     * @param data Output time correlation data
+     * @return true if successful, false otherwise
+     */
+    static bool loadTimeCorrelation(const std::string& filepath,
+                                    const std::string& group_path,
+                                    TimeCorrelationData& data) {
+        try {
+            H5::H5File file(filepath, H5F_ACC_RDONLY);
+            
+            if (!file.nameExists(group_path)) {
+                file.close();
+                return false;
+            }
+            
+            // Helper to load dataset
+            auto loadDataset = [&](const std::string& name) -> std::vector<double> {
+                std::string path = group_path + "/" + name;
+                H5::DataSet dataset = file.openDataSet(path);
+                H5::DataSpace dataspace = dataset.getSpace();
+                hsize_t dims[1];
+                dataspace.getSimpleExtentDims(dims);
+                std::vector<double> arr(dims[0]);
+                dataset.read(arr.data(), H5::PredType::NATIVE_DOUBLE);
+                dataset.close();
+                return arr;
+            };
+            
+            data.times = loadDataset("times");
+            data.correlation_real = loadDataset("correlation_real");
+            data.correlation_imag = loadDataset("correlation_imag");
+            
+            file.close();
+            return true;
+        } catch (H5::Exception& e) {
+            return false;
+        }
+    }
+    
+    /**
+     * @brief List all time correlation datasets in an HDF5 file
+     * 
+     * @param filepath Path to HDF5 file
+     * @return Vector of group paths for each time correlation dataset
+     */
+    static std::vector<std::string> listTimeCorrelations(const std::string& filepath) {
+        std::vector<std::string> correlations;
+        
+        try {
+            H5::H5File file(filepath, H5F_ACC_RDONLY);
+            
+            std::string base_path = "/dynamical/time_correlations";
+            if (!file.nameExists(base_path)) {
+                file.close();
+                return correlations;
+            }
+            
+            H5::Group group = file.openGroup(base_path);
+            hsize_t num_objs = group.getNumObjs();
+            
+            for (hsize_t i = 0; i < num_objs; ++i) {
+                std::string name = group.getObjnameByIdx(i);
+                correlations.push_back(base_path + "/" + name);
+            }
+            
+            group.close();
+            file.close();
+        } catch (H5::Exception& e) {
+            std::cerr << "Warning: HDF5 error listing time correlations: " << e.getDetailMsg() << std::endl;
+        }
+        
+        return correlations;
+    }
 };
 
 #endif // HDF5_IO_H

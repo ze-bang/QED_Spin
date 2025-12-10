@@ -335,25 +335,22 @@ FTLMResults finite_temperature_lanczos(
         );
         sample_data.push_back(sample_thermo);
         
-        // Save intermediate data if requested
+        // Save intermediate data if requested (to HDF5)
         if (params.store_intermediate && !output_dir.empty()) {
-            std::string sample_file = output_dir + "/ftlm_samples/sample_" + std::to_string(sample) + ".dat";
-            std::ofstream f(sample_file);
-            if (f.is_open()) {
-                f << "# Temperature  Energy  Specific_Heat  Entropy  Free_Energy\n";
-                for (size_t t = 0; t < temperatures.size(); t++) {
-                    f << std::scientific << std::setprecision(12)
-                      << temperatures[t] << " "
-                      << sample_thermo.energy[t] << " "
-                      << sample_thermo.specific_heat[t] << " "
-                      << sample_thermo.entropy[t] << " "
-                      << sample_thermo.free_energy[t] << "\n";
-                }
-                f.close();
-                std::cout << "Saved FTLM sample " << sample << " to " << sample_file << std::endl;
-            } else {
-                std::cerr << "Error: Could not save FTLM sample to " << sample_file << std::endl;
+            std::string h5_file = output_dir + "/ed_results.h5";
+            if (!HDF5IO::fileExists(h5_file)) {
+                HDF5IO::createOrOpenFile(output_dir);
             }
+            
+            HDF5IO::FTLMThermodynamicSample h5_sample;
+            h5_sample.temperatures = temperatures;
+            h5_sample.energy = sample_thermo.energy;
+            h5_sample.specific_heat = sample_thermo.specific_heat;
+            h5_sample.entropy = sample_thermo.entropy;
+            h5_sample.free_energy = sample_thermo.free_energy;
+            
+            HDF5IO::saveFTLMThermodynamicSample(h5_file, sample, h5_sample);
+            std::cout << "Saved FTLM sample " << sample << " to HDF5" << std::endl;
         }
     }
     
@@ -989,19 +986,19 @@ DynamicalResponseResults compute_dynamical_response_thermal(
         
         sample_spectra.push_back(sample_spectrum);
         
-        // Save intermediate data if requested
+        // Save intermediate data if requested (to HDF5)
         if (params.store_intermediate && !output_dir.empty()) {
-            std::string sample_file = output_dir + "/dynamical_samples/sample_" + std::to_string(sample) + ".txt";
-            std::ofstream f(sample_file);
-            if (f.is_open()) {
-                f << "# Frequency  Spectral_Function\n";
-                for (int i = 0; i < num_omega_bins; i++) {
-                    f << std::scientific << std::setprecision(12)
-                      << results.frequencies[i] << " "
-                      << sample_spectrum[i] << "\n";
-                }
-                f.close();
+            std::string h5_file = output_dir + "/ed_results.h5";
+            if (!HDF5IO::fileExists(h5_file)) {
+                HDF5IO::createOrOpenFile(output_dir);
             }
+            
+            HDF5IO::FTLMDynamicalSample h5_sample;
+            h5_sample.frequencies = results.frequencies;
+            h5_sample.spectral_real = sample_spectrum;
+            h5_sample.spectral_imag = std::vector<double>(sample_spectrum.size(), 0.0);  // Real for self-correlation
+            
+            HDF5IO::saveFTLMDynamicalSample(h5_file, sample, h5_sample, false);
         }
     }
     
@@ -1280,20 +1277,19 @@ DynamicalResponseResults compute_dynamical_correlation(
         sample_spectra_real.push_back(sample_spectrum_real);
         sample_spectra_imag.push_back(sample_spectrum_imag);
         
-        // Save intermediate data if requested
+        // Save intermediate data if requested (to HDF5)
         if (params.store_intermediate && !output_dir.empty()) {
-            std::string sample_file = output_dir + "/dynamical_correlation_samples/sample_" + std::to_string(sample) + ".txt";
-            std::ofstream f(sample_file);
-            if (f.is_open()) {
-                f << "# Frequency  Re[S(ω)]  Im[S(ω)]\n";
-                for (int i = 0; i < num_omega_bins; i++) {
-                    f << std::scientific << std::setprecision(12)
-                      << results.frequencies[i] << " "
-                      << sample_spectrum_real[i] << " "
-                      << sample_spectrum_imag[i] << "\n";
-                }
-                f.close();
+            std::string h5_file = output_dir + "/ed_results.h5";
+            if (!HDF5IO::fileExists(h5_file)) {
+                HDF5IO::createOrOpenFile(output_dir);
             }
+            
+            HDF5IO::FTLMDynamicalSample h5_sample;
+            h5_sample.frequencies = results.frequencies;
+            h5_sample.spectral_real = sample_spectrum_real;
+            h5_sample.spectral_imag = sample_spectrum_imag;
+            
+            HDF5IO::saveFTLMDynamicalSample(h5_file, sample, h5_sample, true);  // is_correlation=true
         }
     }
     
@@ -1721,20 +1717,19 @@ StaticResponseResults compute_thermal_expectation_value(
             }
         }
         
-        // Save intermediate data if requested
+        // Save intermediate data if requested (to HDF5)
         if (params.store_intermediate && !output_dir.empty()) {
-            std::string sample_file = output_dir + "/static_samples/sample_" + std::to_string(sample) + ".txt";
-            std::ofstream f(sample_file);
-            if (f.is_open()) {
-                f << "# Temperature  Expectation  Variance\n";
-                for (int t = 0; t < num_temp_bins; t++) {
-                    f << std::scientific << std::setprecision(12)
-                      << results.temperatures[t] << " "
-                      << sample_expectations[sample][t] << " "
-                      << sample_variances[sample][t] << "\n";
-                }
-                f.close();
+            std::string h5_file = output_dir + "/ed_results.h5";
+            if (!HDF5IO::fileExists(h5_file)) {
+                HDF5IO::createOrOpenFile(output_dir);
             }
+            
+            HDF5IO::FTLMStaticSample h5_sample;
+            h5_sample.temperatures = results.temperatures;
+            h5_sample.expectation = sample_expectations[sample];
+            h5_sample.variance = sample_variances[sample];
+            
+            HDF5IO::saveFTLMStaticSample(h5_file, sample, h5_sample);
         }
     }
     

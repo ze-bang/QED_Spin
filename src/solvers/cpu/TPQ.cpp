@@ -217,27 +217,26 @@ void computeDynamicCorrelationsKrylov(
         std::sort(time_data.begin(), time_data.end(), 
                   [](const auto& a, const auto& b) { return std::get<0>(a) < std::get<0>(b); });
         
-        // Write sorted data to file
-        std::string time_corr_file = dir + "/time_corr_rand" + std::to_string(sample) + "_" 
-                             + op_name + "_beta=" + std::to_string(inv_temp) + ".dat";
-        
-        std::ofstream time_corr_out(time_corr_file);
-        if (!time_corr_out.is_open()) {
-            std::cerr << "Error: Could not open file " << time_corr_file << " for writing" << std::endl;
-            continue;
+        // Save to HDF5
+        std::string h5_file = dir + "/ed_results.h5";
+        if (!HDF5IO::fileExists(h5_file)) {
+            HDF5IO::createOrOpenFile(dir);
         }
         
-        time_corr_out << "# t time_correlation_real time_correlation_imag" << std::endl;
-        time_corr_out << std::setprecision(16);
+        HDF5IO::TimeCorrelationData h5_data;
+        h5_data.times.reserve(time_data.size());
+        h5_data.correlation_real.reserve(time_data.size());
+        h5_data.correlation_imag.reserve(time_data.size());
         
         for (const auto& data_point : time_data) {
-            time_corr_out << std::get<0>(data_point) << " " 
-                         << std::get<1>(data_point) << " " 
-                         << std::get<2>(data_point) << std::endl;
+            h5_data.times.push_back(std::get<0>(data_point));
+            h5_data.correlation_real.push_back(std::get<1>(data_point));
+            h5_data.correlation_imag.push_back(std::get<2>(data_point));
         }
         
-        time_corr_out.close();
-        std::cout << "    Time correlation saved to " << time_corr_file << std::endl;
+        HDF5IO::saveTimeCorrelation(h5_file, op_name, sample, inv_temp, h5_data, "tpq");
+        
+        std::cout << "    Time correlation saved to HDF5" << std::endl;
         std::cout << "    Time range: [" << std::get<0>(time_data.front()) << ", " 
                   << std::get<0>(time_data.back()) << "]" << std::endl;
     }
@@ -349,18 +348,7 @@ void computeObservableDynamics_U_t(
         std::cout << "  Processing observable " << (op_idx+1) << "/" << observables_1.size() 
                   << " (" << observable_names[op_idx] << ")..." << std::endl;
         
-        // Open output file for streaming results
-        std::string time_corr_file = dir + "/time_corr_rand" + std::to_string(sample) + "_" 
-                                   + observable_names[op_idx] + "_beta=" + std::to_string(inv_temp) + ".dat";
-        std::ofstream time_corr_out(time_corr_file);
-        if (!time_corr_out.is_open()) {
-            std::cerr << "Error: Could not open file " << time_corr_file << " for writing" << std::endl;
-            continue;
-        }
-        time_corr_out << "# t time_correlation_real time_correlation_imag" << std::endl;
-        time_corr_out << std::setprecision(16);
-        
-        // Temporary storage for this observable (will be sorted before writing)
+        // Open output file for streaming results - will collect and save to HDF5 at end
         std::vector<std::tuple<double, double, double>> time_data;
         time_data.reserve(2 * num_steps - 1);
         
@@ -446,19 +434,30 @@ void computeObservableDynamics_U_t(
             }
         }
         
-        // ===== STREAM SORTED OUTPUT =====
-        // Sort by time and write to file
+        // ===== SAVE TO HDF5 =====
+        // Sort by time and save to HDF5
         std::sort(time_data.begin(), time_data.end(), 
                   [](const auto& a, const auto& b) { return std::get<0>(a) < std::get<0>(b); });
         
-        for (const auto& data_point : time_data) {
-            time_corr_out << std::get<0>(data_point) << " " 
-                         << std::get<1>(data_point) << " " 
-                         << std::get<2>(data_point) << std::endl;
+        std::string h5_file = dir + "/ed_results.h5";
+        if (!HDF5IO::fileExists(h5_file)) {
+            HDF5IO::createOrOpenFile(dir);
         }
         
-        time_corr_out.close();
-        std::cout << "    Time correlation saved to " << time_corr_file << std::endl;
+        HDF5IO::TimeCorrelationData h5_data;
+        h5_data.times.reserve(time_data.size());
+        h5_data.correlation_real.reserve(time_data.size());
+        h5_data.correlation_imag.reserve(time_data.size());
+        
+        for (const auto& data_point : time_data) {
+            h5_data.times.push_back(std::get<0>(data_point));
+            h5_data.correlation_real.push_back(std::get<1>(data_point));
+            h5_data.correlation_imag.push_back(std::get<2>(data_point));
+        }
+        
+        HDF5IO::saveTimeCorrelation(h5_file, observable_names[op_idx], sample, inv_temp, h5_data, "tpq_streaming");
+        
+        std::cout << "    Time correlation saved to HDF5" << std::endl;
         std::cout << "    Time range: [" << std::get<0>(time_data.front()) << ", " 
                   << std::get<0>(time_data.back()) << "]" << std::endl;
         

@@ -1,5 +1,6 @@
 // gpu_ftlm.cu - GPU-accelerated Finite Temperature Lanczos Method
 #include <ed/gpu/gpu_ftlm.cuh>
+#include <ed/core/hdf5_io.h>  // For HDF5 output
 
 #ifdef WITH_CUDA
 
@@ -1303,21 +1304,19 @@ GPUFTLMSolver::computeDynamicalCorrelation(
         sample_spectra_real.push_back(sample_spectrum_real);
         sample_spectra_imag.push_back(sample_spectrum_imag);
         
-        // Save intermediate data if requested
+        // Save intermediate data if requested (to HDF5)
         if (store_intermediate && !output_dir.empty()) {
-            std::string sample_file = output_dir + "/dynamical_correlation_samples/sample_" + 
-                                     std::to_string(sample) + ".txt";
-            std::ofstream f(sample_file);
-            if (f.is_open()) {
-                f << "# Frequency  Re[S(ω)]  Im[S(ω)]\n";
-                f << std::scientific << std::setprecision(12);
-                for (int i = 0; i < num_omega_bins; i++) {
-                    f << frequencies[i] << " "
-                      << sample_spectrum_real[i] << " "
-                      << sample_spectrum_imag[i] << "\n";
-                }
-                f.close();
+            std::string h5_file = output_dir + "/ed_results.h5";
+            if (!HDF5IO::fileExists(h5_file)) {
+                HDF5IO::createOrOpenFile(output_dir);
             }
+            
+            HDF5IO::FTLMDynamicalSample h5_sample;
+            h5_sample.frequencies = frequencies;
+            h5_sample.spectral_real = sample_spectrum_real;
+            h5_sample.spectral_imag = sample_spectrum_imag;
+            
+            HDF5IO::saveFTLMDynamicalSample(h5_file, sample, h5_sample, true);  // is_correlation=true
         }
     }
     
@@ -1559,21 +1558,19 @@ GPUFTLMSolver::computeThermalExpectation(
             }
         }
         
-        // Save intermediate data if requested
+        // Save intermediate data if requested (to HDF5)
         if (store_intermediate && !output_dir.empty()) {
-            std::string sample_file = output_dir + "/static_samples/sample_" +
-                                     std::to_string(sample) + ".txt";
-            std::ofstream f(sample_file);
-            if (f.is_open()) {
-                f << "# Temperature  Expectation  Variance\n";
-                f << std::scientific << std::setprecision(12);
-                for (int t = 0; t < num_temp_bins; t++) {
-                    f << temperatures[t] << " "
-                      << sample_expectations[sample][t] << " "
-                      << sample_variances[sample][t] << "\n";
-                }
-                f.close();
+            std::string h5_file = output_dir + "/ed_results.h5";
+            if (!HDF5IO::fileExists(h5_file)) {
+                HDF5IO::createOrOpenFile(output_dir);
             }
+            
+            HDF5IO::FTLMStaticSample h5_sample;
+            h5_sample.temperatures = temperatures;
+            h5_sample.expectation = sample_expectations[sample];
+            h5_sample.variance = sample_variances[sample];
+            
+            HDF5IO::saveFTLMStaticSample(h5_file, sample, h5_sample);
         }
     }
     

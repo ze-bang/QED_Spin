@@ -1,5 +1,6 @@
 #include <ed/gpu/gpu_dynamics.cuh>
 #include <ed/gpu/gpu_operator.cuh>
+#include <ed/core/hdf5_io.h>  // For HDF5 output
 #include <iostream>
 #include <fstream>
 #include <iomanip>
@@ -256,19 +257,11 @@ void GPUDynamicsSolver::computeKrylovCorrelations(
         cudaMemcpy(d_evolved_state_, d_state_, N_ * sizeof(cuDoubleComplex), cudaMemcpyDeviceToDevice);
         cudaMemcpy(d_evolved_O1_state_, d_O1_state_, N_ * sizeof(cuDoubleComplex), cudaMemcpyDeviceToDevice);
         
-        // Open output file
-        std::string output_file = dir + "/time_corr_rand" + std::to_string(sample) + "_" 
-                                + op_name + "_beta=" + std::to_string(inv_temp) + ".dat";
-        
-        std::ofstream out(output_file);
-        if (!out.is_open()) {
-            std::cerr << "GPU Error: Could not open " << output_file << std::endl;
-            continue;
-        }
-        
-        out << "# t time_correlation_real time_correlation_imag" << std::endl;
-        out << std::setprecision(16);
-        out << 0.0 << " " << initial_corr.real() << " " << initial_corr.imag() << std::endl;
+        // Collect time correlation data
+        HDF5IO::TimeCorrelationData h5_data;
+        h5_data.times.push_back(0.0);
+        h5_data.correlation_real.push_back(initial_corr.real());
+        h5_data.correlation_imag.push_back(initial_corr.imag());
         
         // Time evolution loop
         auto evol_start = std::chrono::high_resolution_clock::now();
@@ -287,17 +280,19 @@ void GPUDynamicsSolver::computeKrylovCorrelations(
             Complex corr_t = dotProductGPU(d_O2_temp_, d_evolved_O1_state_);
             
             double t = step * dt;
-            out << t << " " << corr_t.real() << " " << corr_t.imag() << std::endl;
-            
-            if (step % 100 == 0) {
-                out.flush();
-            }
+            h5_data.times.push_back(t);
+            h5_data.correlation_real.push_back(corr_t.real());
+            h5_data.correlation_imag.push_back(corr_t.imag());
         }
         auto evol_end = std::chrono::high_resolution_clock::now();
         stats_.evolution_time += std::chrono::duration<double>(evol_end - evol_start).count();
         
-        out.close();
-        std::cout << "    Saved to " << output_file << std::endl;
+        // Save to HDF5
+        std::string h5_file = dir + "/ed_results.h5";
+        if (!HDF5IO::fileExists(h5_file)) {
+            HDF5IO::createOrOpenFile(dir);
+        }
+        HDF5IO::saveTimeCorrelation(h5_file, op_name, sample, inv_temp, h5_data, "krylov");
     }
     
     auto total_end = std::chrono::high_resolution_clock::now();
@@ -360,19 +355,11 @@ void GPUDynamicsSolver::computeTaylorCorrelations(
         h_evolved_state = h_state;
         h_evolved_O1_state = h_O1_state;
         
-        // Open output file
-        std::string output_file = dir + "/time_corr_rand" + std::to_string(sample) + "_" 
-                                + op_name + "_beta=" + std::to_string(inv_temp) + ".dat";
-        
-        std::ofstream out(output_file);
-        if (!out.is_open()) {
-            std::cerr << "GPU Error: Could not open " << output_file << std::endl;
-            continue;
-        }
-        
-        out << "# t time_correlation_real time_correlation_imag" << std::endl;
-        out << std::setprecision(16);
-        out << 0.0 << " " << initial_corr.real() << " " << initial_corr.imag() << std::endl;
+        // Collect time correlation data
+        HDF5IO::TimeCorrelationData h5_data;
+        h5_data.times.push_back(0.0);
+        h5_data.correlation_real.push_back(initial_corr.real());
+        h5_data.correlation_imag.push_back(initial_corr.imag());
         
         // Time evolution loop (on CPU using provided U_t)
         auto evol_start = std::chrono::high_resolution_clock::now();
@@ -394,17 +381,19 @@ void GPUDynamicsSolver::computeTaylorCorrelations(
             Complex corr_t = dotProductGPU(d_O2_temp_, d_evolved_O1_state_);
             
             double t = step * dt;
-            out << t << " " << corr_t.real() << " " << corr_t.imag() << std::endl;
-            
-            if (step % 100 == 0) {
-                out.flush();
-            }
+            h5_data.times.push_back(t);
+            h5_data.correlation_real.push_back(corr_t.real());
+            h5_data.correlation_imag.push_back(corr_t.imag());
         }
         auto evol_end = std::chrono::high_resolution_clock::now();
         stats_.evolution_time += std::chrono::duration<double>(evol_end - evol_start).count();
         
-        out.close();
-        std::cout << "    Saved to " << output_file << std::endl;
+        // Save to HDF5
+        std::string h5_file = dir + "/ed_results.h5";
+        if (!HDF5IO::fileExists(h5_file)) {
+            HDF5IO::createOrOpenFile(dir);
+        }
+        HDF5IO::saveTimeCorrelation(h5_file, op_name, sample, inv_temp, h5_data, "taylor");
     }
     
     auto total_end = std::chrono::high_resolution_clock::now();
