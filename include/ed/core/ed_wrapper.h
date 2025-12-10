@@ -2124,6 +2124,7 @@ inline EDResults exact_diagonalization_fixed_sz(
     bool is_gpu_method = (method == DiagonalizationMethod::DAVIDSON_GPU ||
                           method == DiagonalizationMethod::LOBPCG_GPU ||
                           method == DiagonalizationMethod::LANCZOS_GPU ||
+                          method == DiagonalizationMethod::LANCZOS_GPU_FIXED_SZ ||
                           method == DiagonalizationMethod::mTPQ_GPU ||
                           method == DiagonalizationMethod::cTPQ_GPU ||
                           method == DiagonalizationMethod::FTLM_GPU_FIXED_SZ);
@@ -2227,7 +2228,7 @@ inline EDResults exact_diagonalization_fixed_sz(
                 eigenvalues,
                 params.output_dir,
                 params.compute_eigenvectors);
-        } else if (method == DiagonalizationMethod::LANCZOS_GPU) {
+        } else if (method == DiagonalizationMethod::LANCZOS_GPU || method == DiagonalizationMethod::LANCZOS_GPU_FIXED_SZ) {
             GPUEDWrapper::runGPULanczosFixedSz(
                 gpu_op_handle, n_up,
                 params.max_iterations,
@@ -2529,11 +2530,11 @@ EDResults exact_diagonalization_from_files(
                 hilbert_space_dim,
                 params.temp_max,
                 params.num_samples,
-                params.num_measure_freq,
+                params.num_measure_freq(),
                 eigenvalues,
                 params.output_dir,
-                params.delta_tau,
-                params.num_order
+                params.delta_tau(),
+                params.num_order()
             );
             
             results.eigenvalues = eigenvalues;

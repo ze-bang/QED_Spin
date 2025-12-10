@@ -63,13 +63,14 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 # Set CUDA standard if CUDA is enabled
 if(WITH_CUDA)
-    set(CMAKE_CUDA_STANDARD 14)
+    set(CMAKE_CUDA_STANDARD 17)
     set(CMAKE_CUDA_STANDARD_REQUIRED ON)
     set(CMAKE_CUDA_ARCHITECTURES "native")
     
     # Add CUDA compiler flags to handle C++ standard library compatibility
     set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} --expt-relaxed-constexpr")
     set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -Xcompiler -fPIC")
+    set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -std=c++17")
     
     # Separate host and device compilation to avoid C++17 issues
     set(CMAKE_CUDA_SEPARABLE_COMPILATION ON)

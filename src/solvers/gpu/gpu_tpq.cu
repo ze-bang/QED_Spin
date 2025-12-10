@@ -503,7 +503,6 @@ void GPUTPQSolver::runMicrocanonicalTPQ(
     
     // Calculate dimension entropy S = log2(N)
     double D_S = std::log2(static_cast<double>(N_));
-    double D_S = std::log2(static_cast<double>(N_));
     
     // Define measurement temperatures (similar to CPU version)
     const int num_temp_points = 20;

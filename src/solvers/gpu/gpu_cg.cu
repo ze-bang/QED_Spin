@@ -361,7 +361,7 @@ void GPUIterativeSolver::runDavidson(
                 }
                 
                 // Use unified HDF5 save function
-                HDF5IO::saveDiagonalizationResults(dir, eigenvalues, cpu_eigenvectors, true);
+                HDF5IO::saveDiagonalizationResults(dir, eigenvalues, cpu_eigenvectors, "GPU_DAVIDSON");
                 std::cout << "GPU Davidson: Saved " << num_eigenvalues << " eigenvalues and " 
                           << num_eigenvalues << " eigenvectors to " << dir << "/eigenvectors/ed_results.h5" << std::endl;
             }
