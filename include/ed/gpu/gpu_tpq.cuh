@@ -118,8 +118,9 @@ private:
     double computeNorm();
     std::pair<double, double> computeEnergyAndVariance();
     void imaginaryTimeEvolve(double delta_beta, int taylor_order);
-    void writeTPQData(const std::string& filename, double inv_temp, 
-                     double energy, double variance, double norm, int step);
+    void writeTPQDataHDF5(const std::string& h5_file, size_t sample,
+                          double inv_temp, double energy, double variance, 
+                          double doublon, uint64_t step);
     bool saveTPQState(const std::string& filename);
     bool saveTPQState(const std::string& filename, class GPUFixedSzOperator* fixed_sz_op);
     bool loadTPQState(const std::string& filename);

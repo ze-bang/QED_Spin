@@ -11,6 +11,7 @@
 #include <fstream>
 #include <map>
 #include <algorithm>
+#include <filesystem>
 #include <ed/core/thermal_types.h>
 
 using Complex = std::complex<double>;
@@ -126,15 +127,32 @@ public:
     
     /**
      * @brief Check if HDF5 file exists and is valid
+     * Uses filesystem check first to avoid HDF5 error messages when file doesn't exist
      */
     static bool fileExists(const std::string& filepath) {
+        // First check if file exists on filesystem to avoid HDF5 error output
+        if (!std::filesystem::exists(filepath)) {
+            return false;
+        }
+        
+        // Temporarily disable HDF5 error printing
+        H5E_auto2_t old_func;
+        void* old_client_data;
+        H5Eget_auto2(H5E_DEFAULT, &old_func, &old_client_data);
+        H5Eset_auto2(H5E_DEFAULT, NULL, NULL);
+        
+        bool result = false;
         try {
             H5::H5File file(filepath, H5F_ACC_RDONLY);
             file.close();
-            return true;
+            result = true;
         } catch (H5::Exception& e) {
-            return false;
+            result = false;
         }
+        
+        // Re-enable error printing
+        H5Eset_auto2(H5E_DEFAULT, old_func, old_client_data);
+        return result;
     }
     
     // ============================================================================

@@ -744,28 +744,54 @@ void compute_dynamical_response_workflow(const EDConfig& config) {
             }
         }
         
-        // Method 3: minimum energy from SS_rand0.dat
+        // Method 3: minimum energy from HDF5 TPQ data or SS_rand0.dat
         if (!found_ground_state) {
-            std::string ss_file = config.workflow.output_dir + "/SS_rand0.dat";
-            std::ifstream infile_ss(ss_file);
-            if (infile_ss.is_open()) {
-                std::string line;
-                double min_energy = std::numeric_limits<double>::max();
-                bool first_entry_skipped = false;
-                
-                while (std::getline(infile_ss, line)) {
-                    if (line.empty() || line[0] == '#') continue;
-                    std::istringstream iss(line);
-                    double inv_temp, energy;
-                    if (iss >> inv_temp >> energy) {
-                        if (!first_entry_skipped) { first_entry_skipped = true; continue; }
-                        if (energy < min_energy) min_energy = energy;
+            std::string h5_file = config.workflow.output_dir + "/ed_results.h5";
+            
+            // Try HDF5 first
+            if (HDF5IO::fileExists(h5_file)) {
+                try {
+                    auto points = HDF5IO::loadTPQThermodynamics(h5_file, 0);
+                    if (!points.empty()) {
+                        double min_energy = std::numeric_limits<double>::max();
+                        for (size_t i = 1; i < points.size(); ++i) {  // Skip first entry
+                            if (points[i].energy < min_energy) {
+                                min_energy = points[i].energy;
+                            }
+                        }
+                        if (min_energy < std::numeric_limits<double>::max()) {
+                            ground_state_energy = min_energy;
+                            found_ground_state = true;
+                        }
                     }
+                } catch (const std::exception& e) {
+                    // Fall back to text file
                 }
-                infile_ss.close();
-                if (min_energy < std::numeric_limits<double>::max()) {
-                    ground_state_energy = min_energy;
-                    found_ground_state = true;
+            }
+            
+            // Fall back to SS_rand0.dat for backwards compatibility
+            if (!found_ground_state) {
+                std::string ss_file = config.workflow.output_dir + "/SS_rand0.dat";
+                std::ifstream infile_ss(ss_file);
+                if (infile_ss.is_open()) {
+                    std::string line;
+                    double min_energy = std::numeric_limits<double>::max();
+                    bool first_entry_skipped = false;
+                    
+                    while (std::getline(infile_ss, line)) {
+                        if (line.empty() || line[0] == '#') continue;
+                        std::istringstream iss(line);
+                        double inv_temp, energy;
+                        if (iss >> inv_temp >> energy) {
+                            if (!first_entry_skipped) { first_entry_skipped = true; continue; }
+                            if (energy < min_energy) min_energy = energy;
+                        }
+                    }
+                    infile_ss.close();
+                    if (min_energy < std::numeric_limits<double>::max()) {
+                        ground_state_energy = min_energy;
+                        found_ground_state = true;
+                    }
                 }
             }
         }

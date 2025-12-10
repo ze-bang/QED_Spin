@@ -1,6 +1,7 @@
 #include <ed/gpu/gpu_tpq.cuh>
 #include <ed/gpu/gpu_operator.cuh>
 #include <ed/core/system_utils.h>
+#include <ed/core/hdf5_io.h>
 #include <iostream>
 #include <fstream>
 #include <iomanip>
@@ -219,31 +220,23 @@ void GPUTPQSolver::imaginaryTimeEvolve(double delta_beta, int taylor_order) {
     normalizeState();
 }
 
-void GPUTPQSolver::writeTPQData(const std::string& filename, double inv_temp, 
-                                 double energy, double variance, double norm, int step) {
-    std::ofstream file;
-    
-    // Check if file exists to determine if we need to write header
-    std::ifstream check_file(filename);
-    bool file_exists = check_file.good();
-    check_file.close();
-    
-    if (!file_exists) {
-        file.open(filename, std::ios::out);
-        file << "# inv_temp energy variance norm doublon step" << std::endl;
-    } else {
-        file.open(filename, std::ios::app);
+void GPUTPQSolver::writeTPQDataHDF5(const std::string& h5_file, size_t sample,
+                                    double inv_temp, double energy, double variance, 
+                                    double doublon, uint64_t step) {
+    // Write to HDF5 only (text file output removed - data already in HDF5)
+    if (!h5_file.empty() && HDF5IO::fileExists(h5_file)) {
+        try {
+            HDF5IO::TPQThermodynamicPoint point;
+            point.beta = inv_temp;
+            point.energy = energy;
+            point.variance = variance;
+            point.doublon = doublon;
+            point.step = step;
+            HDF5IO::appendTPQThermodynamics(h5_file, sample, point);
+        } catch (const std::exception& e) {
+            std::cerr << "Warning: Failed to write TPQ thermodynamics to HDF5: " << e.what() << std::endl;
+        }
     }
-    
-    // Write data in CPU-compatible format: inv_temp energy variance 0.0 0.0 step
-    file << std::setprecision(16) << inv_temp << " " 
-         << energy << " " 
-         << variance << " " 
-         << 0.0 << " "      // doublon (not used in GPU version)
-         << 0.0 << " "      // reserved field
-         << step << std::endl;
-    
-    file.close();
 }
 
 bool GPUTPQSolver::saveTPQState(const std::string& filename) {
@@ -389,44 +382,68 @@ std::string GPUTPQSolver::findLowestEnergyTPQState(const std::string& dir, int s
     
     beta_out = max_beta;
     
-    // If step was not in filename (legacy format), look it up from SS_rand file
+    // If step was not in filename (legacy format), look it up from HDF5 or SS_rand file
     if (best_step == -1) {
-        std::string ss_file = dir + "/SS_rand" + std::to_string(best_sample) + ".dat";
-        std::ifstream ss_stream(ss_file);
+        std::string h5_file = dir + "/ed_results.h5";
+        bool found_step = false;
         
-        if (!ss_stream.is_open()) {
-            std::cerr << "Warning: Could not open SS_rand file: " << ss_file << std::endl;
-            step_out = -1;
-            return best_file;
-        }
-        
-        // Find the step corresponding to this beta
-        // Format: inv_temp energy variance norm doublon step
-        double closest_beta_diff = 1e10;
-        int closest_step = -1;
-        
-        std::string line;
-        std::getline(ss_stream, line); // Skip header
-        
-        while (std::getline(ss_stream, line)) {
-            if (line.empty() || line[0] == '#') continue;
-            
-            std::istringstream iss(line);
-            double inv_temp, energy, variance, norm, doublon;
-            int step;
-            
-            // Format: inv_temp energy variance norm doublon step
-            if (iss >> inv_temp >> energy >> variance >> norm >> doublon >> step) {
-                double beta_diff = std::abs(inv_temp - max_beta);
-                if (beta_diff < closest_beta_diff) {
-                    closest_beta_diff = beta_diff;
-                    closest_step = step;
+        // Try HDF5 first
+        if (HDF5IO::fileExists(h5_file)) {
+            try {
+                auto points = HDF5IO::loadTPQThermodynamics(h5_file, best_sample);
+                double closest_beta_diff = 1e10;
+                for (const auto& point : points) {
+                    double beta_diff = std::abs(point.beta - max_beta);
+                    if (beta_diff < closest_beta_diff) {
+                        closest_beta_diff = beta_diff;
+                        best_step = point.step;
+                        found_step = true;
+                    }
                 }
+            } catch (const std::exception& e) {
+                // Fall back to text file
             }
         }
         
-        ss_stream.close();
-        best_step = closest_step;
+        // Fall back to SS_rand file if HDF5 lookup failed
+        if (!found_step) {
+            std::string ss_file = dir + "/SS_rand" + std::to_string(best_sample) + ".dat";
+            std::ifstream ss_stream(ss_file);
+            
+            if (!ss_stream.is_open()) {
+                std::cerr << "Warning: Could not find step info in HDF5 or SS_rand file" << std::endl;
+                step_out = -1;
+                return best_file;
+            }
+            
+            // Find the step corresponding to this beta
+            // Format: inv_temp energy variance norm doublon step
+            double closest_beta_diff = 1e10;
+            int closest_step = -1;
+            
+            std::string line;
+            std::getline(ss_stream, line); // Skip header
+            
+            while (std::getline(ss_stream, line)) {
+                if (line.empty() || line[0] == '#') continue;
+                
+                std::istringstream iss(line);
+                double inv_temp, energy, variance, norm, doublon;
+                int step;
+                
+                // Format: inv_temp energy variance norm doublon step
+                if (iss >> inv_temp >> energy >> variance >> norm >> doublon >> step) {
+                    double beta_diff = std::abs(inv_temp - max_beta);
+                    if (beta_diff < closest_beta_diff) {
+                        closest_beta_diff = beta_diff;
+                        closest_step = step;
+                    }
+                }
+            }
+            
+            ss_stream.close();
+            best_step = closest_step;
+        }
     }
     
     step_out = best_step;
@@ -473,7 +490,19 @@ void GPUTPQSolver::runMicrocanonicalTPQ(
     
     eigenvalues.clear();
     
+    // Initialize HDF5 file for TPQ data
+    std::string h5_file = dir + "/ed_results.h5";
+    try {
+        if (!HDF5IO::fileExists(h5_file)) {
+            HDF5IO::createOrOpenFile(dir, "ed_results.h5");
+        }
+    } catch (const std::exception& e) {
+        std::cerr << "Warning: Could not initialize HDF5 TPQ storage: " << e.what() << std::endl;
+        h5_file = "";  // Disable HDF5 writing
+    }
+    
     // Calculate dimension entropy S = log2(N)
+    double D_S = std::log2(static_cast<double>(N_));
     double D_S = std::log2(static_cast<double>(N_));
     
     // Define measurement temperatures (similar to CPU version)
@@ -588,9 +617,6 @@ void GPUTPQSolver::runMicrocanonicalTPQ(
             cuDoubleComplex scale = make_cuDoubleComplex(1.0 / first_norm, 0.0);
             cublasZscal(cublas_handle_, N_, &scale, d_state_, 1);
             
-            // Output file for this sample
-            std::string sample_file = dir + "/SS_rand" + std::to_string(sample) + ".dat";
-            
             // Initial measurements (step 1) - for internal use only
             // Step 1 data is unphysical (not yet thermalized), so we don't write it
             std::pair<double, double> energy_var_pair = computeEnergyAndVariance();
@@ -606,8 +632,14 @@ void GPUTPQSolver::runMicrocanonicalTPQ(
             start_step = 2;
         }
         
-        // Output file for this sample
-        std::string sample_file = dir + "/SS_rand" + std::to_string(sample) + ".dat";
+        // Initialize HDF5 sample group
+        if (!h5_file.empty()) {
+            try {
+                HDF5IO::ensureTPQSampleGroup(h5_file, sample);
+            } catch (const std::exception& e) {
+                std::cerr << "Warning: Could not initialize HDF5 sample group: " << e.what() << std::endl;
+            }
+        }
         
         // Determine final step: if continuing, run for additional max_iter iterations
         int final_step = loaded_from_file ? (start_step - 1 + max_iter) : max_iter;
@@ -685,8 +717,8 @@ void GPUTPQSolver::runMicrocanonicalTPQ(
                     }
                 }
                 
-                // Write data (always write when we compute energy)
-                writeTPQData(sample_file, inv_temp, E, var, current_norm, step);
+                // Write data (always write when we compute energy) - to HDF5
+                writeTPQDataHDF5(h5_file, sample, inv_temp, E, var, 0.0, step);
                 
                 if (step % (temp_interval * 10) == 0 || step == final_step) {
                     std::cout << "Step " << step << ": E = " << E 
@@ -756,6 +788,17 @@ void GPUTPQSolver::runCanonicalTPQ(
     
     energies.clear();
     
+    // Initialize HDF5 file for TPQ data
+    std::string h5_file = dir + "/ed_results.h5";
+    try {
+        if (!HDF5IO::fileExists(h5_file)) {
+            HDF5IO::createOrOpenFile(dir, "ed_results.h5");
+        }
+    } catch (const std::exception& e) {
+        std::cerr << "Warning: Could not initialize HDF5 TPQ storage: " << e.what() << std::endl;
+        h5_file = "";  // Disable HDF5 writing
+    }
+    
     int num_steps = static_cast<int>(beta_max / delta_beta);
     
     // Define measurement temperatures (similar to microcanonical version)
@@ -776,15 +819,21 @@ void GPUTPQSolver::runCanonicalTPQ(
         // Generate random initial state
         generateRandomState(98765 + sample * 43210);
         
-        // Output file (use SS_rand naming convention for consistency)
-        std::string sample_file = dir + "/SS_rand" + std::to_string(sample) + ".dat";
+        // Initialize HDF5 sample group
+        if (!h5_file.empty()) {
+            try {
+                HDF5IO::ensureTPQSampleGroup(h5_file, sample);
+            } catch (const std::exception& e) {
+                std::cerr << "Warning: Could not initialize HDF5 sample group: " << e.what() << std::endl;
+            }
+        }
         
         // Initial measurements at beta=0
         std::pair<double, double> energy_var_pair = computeEnergyAndVariance();
         double energy = energy_var_pair.first;
         double variance = energy_var_pair.second;
         double norm = computeNorm();
-        writeTPQData(sample_file, 0.0, energy, variance, norm, 0);
+        writeTPQDataHDF5(h5_file, sample, 0.0, energy, variance, 0.0, 0);
         
         // Imaginary time evolution
         for (int step = 1; step <= num_steps; ++step) {
@@ -824,7 +873,7 @@ void GPUTPQSolver::runCanonicalTPQ(
                 double var = E_var_pair.second;
                 norm = computeNorm();
                 
-                writeTPQData(sample_file, beta, E, var, norm, step);
+                writeTPQDataHDF5(h5_file, sample, beta, E, var, 0.0, step);
                 
                 // Save state periodically
                 if (step % (temp_interval * 5) == 0) {

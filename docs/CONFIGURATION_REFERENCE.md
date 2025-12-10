@@ -974,7 +974,7 @@ The HDF5 output file contains all results in a structured format:
 
 ```
 ed_results.h5
-├── eigenvalues/
+├── eigendata/
 │   └── eigenvalues          # Array of eigenvalues
 ├── thermodynamics/
 │   ├── temperatures         # Temperature array
@@ -983,6 +983,7 @@ ed_results.h5
 │   ├── entropies           # S vs T
 │   └── free_energies       # F vs T
 ├── dynamical/
+│   ├── samples/            # Per-sample dynamical data (FTLM/TPQ)
 │   └── <operator_name>/
 │       ├── frequencies      # Frequency array
 │       ├── spectral_real   # Re[S(ω)]
@@ -991,17 +992,111 @@ ed_results.h5
 │       ├── error_imag      # Im[Error]
 │       ├── total_samples   # Number of samples (attribute)
 │       └── temperature     # Temperature (attribute)
-└── correlations/
-    └── <operator_name>/
-        ├── temperatures     # Temperature array
-        ├── expectation      # ⟨O⟩ vs T
-        ├── expectation_error # Error in ⟨O⟩
-        ├── variance         # Var(O) vs T
-        ├── variance_error   # Error in Var
-        ├── susceptibility   # χ vs T
-        ├── susceptibility_error # Error in χ
-        └── total_samples    # Number of samples (attribute)
+├── correlations/
+│   └── <operator_name>/
+│       ├── temperatures     # Temperature array
+│       ├── expectation      # ⟨O⟩ vs T
+│       ├── expectation_error # Error in ⟨O⟩
+│       ├── variance         # Var(O) vs T
+│       ├── variance_error   # Error in Var
+│       ├── susceptibility   # χ vs T
+│       ├── susceptibility_error # Error in χ
+│       └── total_samples    # Number of samples (attribute)
+├── tpq/                     # TPQ-specific data
+│   ├── averaged/           # Averaged thermodynamics across samples
+│   └── samples/
+│       └── sample_<N>/
+│           ├── thermodynamics  # [beta, energy, variance, doublon, step] per step
+│           └── norm            # [beta, norm, first_norm, step] per step
+└── ftlm/                    # FTLM-specific data
+    ├── averaged/           # Averaged results across samples
+    └── samples/            # Per-sample FTLM data
 ```
+
+### TPQ Data Structure
+
+The TPQ (Thermal Pure Quantum) method stores per-sample thermodynamic trajectories:
+
+| Dataset | Shape | Description |
+|---------|-------|-------------|
+| `tpq/samples/sample_N/thermodynamics` | (steps, 5) | Columns: β (inv. temp), energy, variance, doublon, step |
+| `tpq/samples/sample_N/norm` | (steps, 4) | Columns: β (inv. temp), norm, first_norm, step |
+
+The thermodynamic data provides the full temperature evolution from the TPQ simulation, enabling:
+- Energy vs inverse temperature (β = 1/T)
+- Specific heat via C_v = β² × (⟨H²⟩ - ⟨H⟩²)
+- Entropy reconstruction
+
+---
+
+## TPQ_DSSF Output Structure
+
+The `TPQ_DSSF` executable computes dynamical spin structure factors S(q,ω) at finite temperature using TPQ states. Output is organized in a directory structure:
+
+```
+<hamiltonian_dir>/structure_factor_results/
+├── beta_<value>/                    # One directory per temperature
+│   ├── spin_configuration.txt       # Spin configuration ⟨Sᵢ⟩
+│   ├── spin_correlation.txt         # Real-space correlations ⟨SᵢSⱼ⟩
+│   ├── sublattice_correlation.txt   # Sublattice-resolved correlations
+│   ├── total_sums.txt              # Sum rules and normalization
+│   └── <operator_type>/             # Directory per operator type
+│       └── <operator>_spectral_sample_<N>_beta_<value>.txt
+│
+├── beta_inf/                        # Ground state (T=0) results
+│   └── <operator_type>/
+│       └── <operator>_spectral_sample_<N>_beta_inf.txt
+│
+├── processed_data/                  # Post-processed averaged results
+│   └── ...
+│
+└── plots/                           # Generated plots (if enabled)
+    └── ...
+```
+
+### Spectral Output File Format
+
+Each spectral file (`*_spectral_*.txt`) contains:
+```
+# omega    Re[S(q,ω)]    Im[S(q,ω)]    Re[error]    Im[error]
+-10.0      0.00123       0.00045       0.00001      0.00001
+-9.95      0.00134       0.00048       0.00001      0.00001
+...
+```
+
+### Operator Types
+
+| Type | Description | Output Names |
+|------|-------------|--------------|
+| `sum` | S^α(q) S^β(-q) | `SzSz`, `SpSm`, `SmSp`, `SpSp`, `SmSm`, `SpSz`, `SmSz`, `SzSp`, `SzSm` |
+| `sublattice` | Sublattice-resolved operators | `SzSz_sub_i_j`, etc. |
+| `transverse` | Transverse (neutron-like) channels | `SF_Q_<idx>`, `NSF_Q_<idx>` |
+| `exponential` | e^{iq·r} weighted operators | `exp_*` |
+
+### TPQ_DSSF Usage
+
+```bash
+# Calculate DSSF from existing TPQ states
+./TPQ_DSSF <hamiltonian_dir> [options]
+
+# Key options:
+#   --beta=<value>         Target inverse temperature (default: auto-detect from states)
+#   --omega_min=<value>    Minimum frequency (default: -10)
+#   --omega_max=<value>    Maximum frequency (default: 10)
+#   --num_omega=<N>        Number of frequency points (default: 401)
+#   --eta=<value>          Lorentzian broadening (default: 0.1)
+#   --q_file=<path>        File with q-points to calculate
+#   --operator=<type>      Operator type: sum, sublattice, transverse, exponential
+#   --method=<name>        Calculation method: krylov (default), taylor
+#   --krylov_dim=<N>       Krylov dimension for continued fraction (default: 200)
+```
+
+The TPQ_DSSF workflow:
+1. Loads TPQ states from a previous mTPQ/cTPQ calculation (from HDF5 or legacy .dat files)
+2. Constructs momentum-space spin operators S^α(q) for specified q-points
+3. Computes dynamical correlations ⟨S^α(q,t) S^β(-q,0)⟩ using continued fraction expansion
+4. Fourier transforms to frequency domain to obtain S(q,ω)
+5. Outputs results for all spin channels (SF and NSF for neutron scattering)
 
 ---
 

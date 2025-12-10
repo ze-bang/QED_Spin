@@ -102,10 +102,24 @@ void writeTPQData(const std::string& filename, double inv_temp, double energy,
                  double variance, double norm, uint64_t step);
 
 /**
- * Read TPQ data from file
+ * Read TPQ data from text file (legacy support)
  */
 bool readTPQData(const std::string& filename, uint64_t step, double& energy, 
                 double& temp, double& specificHeat);
+
+/**
+ * Read TPQ data from HDF5 file
+ * 
+ * @param h5_file Path to HDF5 file
+ * @param sample Sample index
+ * @param step TPQ step to retrieve
+ * @param energy Output: energy value
+ * @param temp Output: temperature value
+ * @param specificHeat Output: specific heat value
+ * @return True if successful
+ */
+bool readTPQDataHDF5(const std::string& h5_file, size_t sample, uint64_t step, 
+                     double& energy, double& temp, double& specificHeat);
 
 /**
  * Save the current TPQ state to a file

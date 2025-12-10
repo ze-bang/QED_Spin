@@ -127,41 +127,69 @@ double read_ground_state_energy(const std::string& directory) {
         infile_txt.close();
     }
     
-    // Method 3: Try finding minimum energy in SS_rand0.dat (TPQ output)
-    std::string ss_file = directory + "/output/SS_rand0.dat";
-    std::ifstream infile_ss(ss_file);
-    if (infile_ss.is_open()) {
-        std::string line;
-        double min_energy = std::numeric_limits<double>::max();
-        bool found_energy = false;
-        bool first_entry_skipped = false;
-        
-        while (std::getline(infile_ss, line)) {
-            // Skip comment lines and empty lines
-            if (line.empty() || line[0] == '#') continue;
-            
-            std::istringstream iss(line);
-            double inv_temp, energy;
-            
-            // Read first two columns: inv_temp and energy
-            if (iss >> inv_temp >> energy) {
-                // Skip the first data entry (initial random state)
-                if (!first_entry_skipped) {
-                    first_entry_skipped = true;
-                    continue;
+    // Method 3: Try finding minimum energy from HDF5 TPQ data or SS_rand0.dat
+    std::string h5_file = directory + "/output/ed_results.h5";
+    bool found_tpq_energy = false;
+    
+    // Try HDF5 first
+    if (HDF5IO::fileExists(h5_file)) {
+        try {
+            auto points = HDF5IO::loadTPQThermodynamics(h5_file, 0);
+            if (!points.empty()) {
+                double min_energy = std::numeric_limits<double>::max();
+                for (size_t i = 1; i < points.size(); ++i) {  // Skip first entry
+                    if (points[i].energy < min_energy) {
+                        min_energy = points[i].energy;
+                    }
                 }
-                
-                if (energy < min_energy) {
-                    min_energy = energy;
-                    found_energy = true;
+                if (min_energy < std::numeric_limits<double>::max()) {
+                    candidate_energies.push_back(min_energy);
+                    sources.push_back("ed_results.h5 (TPQ trajectory)");
+                    found_tpq_energy = true;
                 }
             }
+        } catch (const std::exception& e) {
+            // Fall back to text file
         }
-        infile_ss.close();
-        
-        if (found_energy) {
-            candidate_energies.push_back(min_energy);
-            sources.push_back("SS_rand0.dat (TPQ trajectory)");
+    }
+    
+    // Fall back to SS_rand0.dat for backwards compatibility
+    if (!found_tpq_energy) {
+        std::string ss_file = directory + "/output/SS_rand0.dat";
+        std::ifstream infile_ss(ss_file);
+        if (infile_ss.is_open()) {
+            std::string line;
+            double min_energy = std::numeric_limits<double>::max();
+            bool found_energy = false;
+            bool first_entry_skipped = false;
+            
+            while (std::getline(infile_ss, line)) {
+                // Skip comment lines and empty lines
+                if (line.empty() || line[0] == '#') continue;
+                
+                std::istringstream iss(line);
+                double inv_temp, energy;
+                
+                // Read first two columns: inv_temp and energy
+                if (iss >> inv_temp >> energy) {
+                    // Skip the first data entry (initial random state)
+                    if (!first_entry_skipped) {
+                        first_entry_skipped = true;
+                        continue;
+                    }
+                    
+                    if (energy < min_energy) {
+                        min_energy = energy;
+                        found_energy = true;
+                    }
+                }
+            }
+            infile_ss.close();
+            
+            if (found_energy) {
+                candidate_energies.push_back(min_energy);
+                sources.push_back("SS_rand0.dat (TPQ trajectory)");
+            }
         }
     }
     
@@ -351,14 +379,26 @@ bool load_eigenvector_from_hdf5(ComplexVector& state, const std::string& h5_path
         
         // Eigenvectors are stored as complex numbers (2 doubles per element)
         size_t num_elements = dims[0];
+        
+        // Create compound datatype for complex numbers matching HDF5IO format
+        // HDF5IO uses member names "real" and "imag"
+        H5::CompType complex_type(2 * sizeof(double));
+        complex_type.insertMember("real", 0, H5::PredType::NATIVE_DOUBLE);
+        complex_type.insertMember("imag", sizeof(double), H5::PredType::NATIVE_DOUBLE);
+        
+        struct ComplexPair {
+            double real;
+            double imag;
+        };
+        
+        std::vector<ComplexPair> data(num_elements);
+        dataset.read(data.data(), complex_type);
+        
         state.resize(num_elements);
+        for (size_t i = 0; i < num_elements; ++i) {
+            state[i] = Complex(data[i].real, data[i].imag);
+        }
         
-        // Read complex data
-        H5::CompType complex_type(sizeof(Complex));
-        complex_type.insertMember("r", 0, H5::PredType::NATIVE_DOUBLE);
-        complex_type.insertMember("i", sizeof(double), H5::PredType::NATIVE_DOUBLE);
-        
-        dataset.read(state.data(), complex_type);
         dataset.close();
         file.close();
         

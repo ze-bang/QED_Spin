@@ -4,13 +4,22 @@ Calculate Quantum Fisher Information (QFI) from pre-computed spectral function f
 This script works with frequency-domain spectral data that has already been computed,
 rather than performing FFT from time-domain correlation data.
 
-Expected file format: {species}_spectral_sample_{N}_beta_{beta}.txt
-Example: SxSx_q_Qx0_Qy0_Qz0_spectral_sample_0_beta_inf.txt
+Supports two data sources:
+1. HDF5 files (preferred): ed_results.h5 with /dynamical/<operator_name>/ groups
+2. Text files (legacy): {species}_spectral_sample_{N}_beta_{beta}.txt
 
-File structure:
-# Header lines (ignored)
-frequency  spectral_function  error
-...
+HDF5 structure:
+    /dynamical/<operator_name>/
+        frequencies     - array of omega values
+        spectral_real   - Re[S(q,ω)]
+        spectral_imag   - Im[S(q,ω)]
+        error_real      - error in Re[S(q,ω)]
+        error_imag      - error in Im[S(q,ω)]
+
+Text file format:
+    # Header lines (ignored)
+    omega  Re[S(q,ω)]  Im[S(q,ω)]  Re[error]  Im[error]
+    ...
 """
 
 import os
@@ -22,6 +31,14 @@ import matplotlib.pyplot as plt
 from collections import defaultdict
 from scipy.signal import find_peaks, peak_prominences
 from scipy.interpolate import interp1d
+
+# Try to import h5py, but make it optional
+try:
+    import h5py
+    HAS_H5PY = True
+except ImportError:
+    HAS_H5PY = False
+    print("Warning: h5py not available, HDF5 reading disabled")
 
 # Try to import mpi4py, but make it optional
 try:
@@ -35,6 +52,107 @@ if hasattr(np, 'trapezoid'):
     np_trapz = np.trapezoid
 else:
     np_trapz = np.trapz
+
+
+# ==============================================================================
+# HDF5 Support Functions
+# ==============================================================================
+
+def load_spectral_from_hdf5(h5_path, dataset_name):
+    """
+    Load spectral function data from HDF5 file.
+    
+    Parameters:
+    h5_path: Path to ed_results.h5 file
+    dataset_name: Name of the dataset in /dynamical/ group
+    
+    Returns: (omega_array, spectral_function_array) or (None, None)
+    """
+    if not HAS_H5PY:
+        return None, None
+    
+    try:
+        with h5py.File(h5_path, 'r') as f:
+            if 'dynamical' not in f:
+                return None, None
+            
+            dyn_group = f['dynamical']
+            if dataset_name not in dyn_group:
+                return None, None
+            
+            ds = dyn_group[dataset_name]
+            omega = ds['frequencies'][:]
+            spectral = ds['spectral_real'][:]
+            
+            return omega, spectral
+            
+    except Exception as e:
+        print(f"Error loading HDF5 {h5_path}/{dataset_name}: {e}")
+        return None, None
+
+
+def list_spectral_datasets_hdf5(h5_path):
+    """
+    List all spectral datasets available in an HDF5 file.
+    
+    Parameters:
+    h5_path: Path to ed_results.h5 file
+    
+    Returns: List of (dataset_name, species, beta, sample_idx) tuples
+    """
+    if not HAS_H5PY:
+        return []
+    
+    datasets = []
+    try:
+        with h5py.File(h5_path, 'r') as f:
+            if 'dynamical' not in f:
+                return []
+            
+            dyn_group = f['dynamical']
+            for name in dyn_group.keys():
+                if name == 'samples':
+                    continue
+                
+                # Parse dataset name: {species}_spectral_sample_{N}_beta_{beta}
+                species, beta, sample_idx = parse_spectral_dataset_name(name)
+                if species is not None:
+                    datasets.append((name, species, beta, sample_idx))
+                    
+    except Exception as e:
+        print(f"Error reading HDF5 {h5_path}: {e}")
+    
+    return datasets
+
+
+def parse_spectral_dataset_name(name):
+    """
+    Parse HDF5 dataset name to extract species, beta, and sample index.
+    
+    Format: {species}_spectral_sample_{N}_beta_{beta}
+    (Same as text file but without .txt extension)
+    
+    Returns: (species, beta, sample_idx) or (None, None, None)
+    """
+    # Match pattern: anything_spectral_sample{N}_beta_{beta}
+    m = re.match(r'^(.+?)_spectral_sample_(\d+)_beta_([0-9.+-eE]+|inf|infty)$', 
+                 name, re.IGNORECASE)
+    if not m:
+        return None, None, None
+    
+    species = m.group(1)
+    sample_idx = int(m.group(2))
+    beta_token = m.group(3)
+    
+    if beta_token.lower() in ("inf", "infty"):
+        beta_val = np.inf
+    else:
+        try:
+            beta_val = float(beta_token)
+        except ValueError:
+            return None, None, None
+    
+    return species, beta_val, sample_idx
 
 
 def parse_spectral_filename(filename):
@@ -70,10 +188,26 @@ def parse_spectral_filename(filename):
 
 def load_spectral_file(filepath):
     """
-    Load spectral function data from file.
+    Load spectral function data from file or HDF5.
+    
+    Supports two formats:
+    1. Text file path: /path/to/file.txt
+    2. HDF5 reference: HDF5:/path/to/ed_results.h5:dataset_name
     
     Returns: (omega_array, spectral_function_array)
     """
+    # Check if this is an HDF5 reference
+    if filepath.startswith('HDF5:'):
+        # Parse HDF5 reference: HDF5:<h5_path>:<dataset_name>
+        parts = filepath[5:].split(':', 1)  # Remove HDF5: prefix and split
+        if len(parts) == 2:
+            h5_path, dataset_name = parts
+            return load_spectral_from_hdf5(h5_path, dataset_name)
+        else:
+            print(f"Invalid HDF5 reference format: {filepath}")
+            return None, None
+    
+    # Load from text file
     try:
         # Load data, skipping comment lines
         data = np.loadtxt(filepath, comments='#')
@@ -214,7 +348,14 @@ def parse_QFI_data_from_spectral(structure_factor_dir, beta_tol=1e-2):
 
 def _collect_spectral_files(structure_factor_dir, species_data, species_names, 
                             beta_bins, beta_bin_values, beta_tol):
-    """Collect and organize all spectral data files by species and beta values."""
+    """Collect and organize all spectral data from HDF5 and text files.
+    
+    Data sources (merged, HDF5 preferred for duplicates):
+    1. HDF5 files: ed_results.h5 in operator subdirectories with /dynamical/ group
+    2. Text files: *_spectral_sample*_beta_*.txt
+    
+    When the same species/sample/beta is found in both HDF5 and text, HDF5 is used.
+    """
     
     beta_dirs = glob.glob(os.path.join(structure_factor_dir, 'beta_*'))
     print(f"Found {len(beta_dirs)} beta directories")
@@ -234,13 +375,39 @@ def _collect_spectral_files(structure_factor_dir, species_data, species_names,
         
         for op_subdir in operator_subdirs:
             op_name = os.path.basename(op_subdir)
-            spectral_files = glob.glob(os.path.join(op_subdir, '*_spectral_sample*_beta_*.txt'))
+            h5_count = 0
+            txt_count = 0
             
-            print(f"  {op_name}: found {len(spectral_files)} spectral files")
+            # Track what we've found in HDF5 to avoid duplicates
+            h5_species_samples = set()  # (species, sample_idx, beta) tuples
+            
+            # Try HDF5 first (preferred)
+            h5_path = os.path.join(op_subdir, 'ed_results.h5')
+            if HAS_H5PY and os.path.exists(h5_path):
+                datasets = list_spectral_datasets_hdf5(h5_path)
+                for dataset_name, species, file_beta, sample_idx in datasets:
+                    # Create HDF5 reference path
+                    ref_path = f"HDF5:{h5_path}:{dataset_name}"
+                    
+                    # Use beta from dataset name (more reliable than directory name)
+                    beta_bin_idx = _assign_beta_bin(file_beta, beta_bins, beta_tol)
+                    beta_bin_values[beta_bin_idx].append(file_beta)
+                    
+                    species_data[species][beta_bin_idx].append(ref_path)
+                    species_names.add(species)
+                    h5_species_samples.add((species, sample_idx, file_beta))
+                    h5_count += 1
+            
+            # Also check text files for any data not in HDF5
+            spectral_files = glob.glob(os.path.join(op_subdir, '*_spectral_sample*_beta_*.txt'))
             
             for fpath in spectral_files:
                 species, file_beta, sample_idx = parse_spectral_filename(fpath)
                 if species is None:
+                    continue
+                
+                # Skip if already found in HDF5
+                if (species, sample_idx, file_beta) in h5_species_samples:
                     continue
                 
                 # Use beta from filename (more reliable than directory name)
@@ -249,6 +416,15 @@ def _collect_spectral_files(structure_factor_dir, species_data, species_names,
                 
                 species_data[species][beta_bin_idx].append(fpath)
                 species_names.add(species)
+                txt_count += 1
+            
+            # Print summary
+            if h5_count > 0 and txt_count > 0:
+                print(f"  {op_name}: {h5_count} from HDF5 + {txt_count} from text files")
+            elif h5_count > 0:
+                print(f"  {op_name}: found {h5_count} spectral datasets in HDF5")
+            elif txt_count > 0:
+                print(f"  {op_name}: found {txt_count} spectral text files")
 
 
 def _extract_beta_from_dirname(beta_dir):
@@ -541,7 +717,7 @@ def load_processed_qfi_data(data_dir, param_pattern='Jpm'):
     subdirs = sorted(glob.glob(os.path.join(data_dir, f'{param_pattern}=*')))
     print(f"Found {len(subdirs)} {param_pattern} subdirectories")
     
-    param_regex = re.compile(f'{param_pattern}=([-]?[\d\.]+)')
+    param_regex = re.compile(rf'{param_pattern}=([-]?[\d\.]+)')
     
     for subdir in subdirs:
         param_match = param_regex.search(os.path.basename(subdir))
@@ -638,7 +814,7 @@ def parse_QFI_across_parameter(data_dir, param_pattern='Jpm'):
     
     # Each process handles its assigned subdirectories
     local_param_qfi_data = {}
-    param_regex = re.compile(f'{param_pattern}=([-]?[\d\.]+)')
+    param_regex = re.compile(rf'{param_pattern}=([-]?[\d\.]+)')
     
     for subdir in local_subdirs:
         param_match = param_regex.search(os.path.basename(subdir))

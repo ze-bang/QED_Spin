@@ -835,15 +835,7 @@ void writeTPQData(const std::string& filename, double inv_temp, double energy,
 void writeTPQDataHDF5(const std::string& text_file, const std::string& h5_file,
                       size_t sample, double inv_temp, double energy, 
                       double variance, double doublon, uint64_t step) {
-    // Write to text file (backwards compatible)
-    std::ofstream file(text_file, std::ios::app);
-    if (file.is_open()) {
-        file << std::setprecision(16) << inv_temp << " " << energy << " " 
-             << variance << " " << 0.0 << " " << doublon << " " << step << std::endl;
-        file.close();
-    }
-    
-    // Write to HDF5 if file exists
+    // Write to HDF5 only (text file output removed - data already in HDF5)
     if (!h5_file.empty() && HDF5IO::fileExists(h5_file)) {
         try {
             HDF5IO::TPQThermodynamicPoint point;
@@ -854,7 +846,6 @@ void writeTPQDataHDF5(const std::string& text_file, const std::string& h5_file,
             point.step = step;
             HDF5IO::appendTPQThermodynamics(h5_file, sample, point);
         } catch (const std::exception& e) {
-            // Silently fail HDF5 writing - text file is still written
             std::cerr << "Warning: Failed to write TPQ thermodynamics to HDF5: " << e.what() << std::endl;
         }
     }
@@ -874,15 +865,7 @@ void writeTPQDataHDF5(const std::string& text_file, const std::string& h5_file,
 void writeTPQNormHDF5(const std::string& text_file, const std::string& h5_file,
                       size_t sample, double inv_temp, double norm, 
                       double first_norm, uint64_t step) {
-    // Write to text file (backwards compatible)
-    std::ofstream file(text_file, std::ios::app);
-    if (file.is_open()) {
-        file << std::setprecision(16) << inv_temp << " " 
-             << norm << " " << first_norm << " " << step << std::endl;
-        file.close();
-    }
-    
-    // Write to HDF5 if file exists
+    // Write to HDF5 only (text file output removed - data already in HDF5)
     if (!h5_file.empty() && HDF5IO::fileExists(h5_file)) {
         try {
             HDF5IO::TPQNormPoint point;
@@ -898,7 +881,7 @@ void writeTPQNormHDF5(const std::string& text_file, const std::string& h5_file,
 }
 
 /**
- * Read TPQ data from file
+ * Read TPQ data from text file (legacy support)
  */
 bool readTPQData(const std::string& filename, uint64_t step, double& energy, 
                 double& temp, double& specificHeat) {
@@ -931,6 +914,40 @@ bool readTPQData(const std::string& filename, uint64_t step, double& energy,
     return false;
 }
 
+/**
+ * Read TPQ data from HDF5 file
+ * 
+ * @param h5_file Path to HDF5 file
+ * @param sample Sample index
+ * @param step TPQ step to retrieve
+ * @param energy Output: energy value
+ * @param temp Output: temperature value
+ * @param specificHeat Output: specific heat value
+ * @return True if successful
+ */
+bool readTPQDataHDF5(const std::string& h5_file, size_t sample, uint64_t step, 
+                     double& energy, double& temp, double& specificHeat) {
+    if (!HDF5IO::fileExists(h5_file)) {
+        return false;
+    }
+    
+    try {
+        auto points = HDF5IO::loadTPQThermodynamics(h5_file, sample);
+        for (const auto& point : points) {
+            if (point.step == step) {
+                energy = point.energy;
+                temp = 1.0 / point.beta;
+                double var = point.variance;
+                specificHeat = (var - energy * energy) * (point.beta * point.beta);
+                return true;
+            }
+        }
+    } catch (const std::exception& e) {
+        std::cerr << "Warning: Could not read TPQ data from HDF5: " << e.what() << std::endl;
+    }
+    
+    return false;
+}
 
 
 /**
@@ -1487,15 +1504,9 @@ std::tuple<std::string, std::string, std::string, std::vector<std::string>, std:
         spin_corr_files.push_back(filename);
     }
     
-    // Initialize output files - only create SS and norm files always
-    // Fluctuation and spin correlation files are only created when measure_sz is enabled
+    // Initialize output files - only fluctuation and correlation files are created
+    // SS_rand and norm_rand data is stored in HDF5 only
     {
-        std::ofstream ss_out(ss_file);
-        ss_out << "# inv_temp energy variance num doublon step" << std::endl;
-        
-        std::ofstream norm_out(norm_file);
-        norm_out << "# inv_temp norm first_norm step" << std::endl;
-        
         // Only create fluctuation and correlation files if measurements are enabled
         if (measure_sz) {
             std::ofstream flct_out(flct_file);
@@ -1586,12 +1597,19 @@ void calculate_spectrum_from_tpq(
 ) {
     std::cout << "Calculating spectrum from TPQ state..." << std::endl;
     
-    // Read TPQ data
+    // Read TPQ data - try HDF5 first, fall back to text file
+    std::string h5_file = tpq_dir + "/ed_results.h5";
     std::string ss_file = tpq_dir + "/SS_rand" + std::to_string(tpq_sample) + ".dat";
     double energy, temp, specificHeat;
     
-    if (!readTPQData(ss_file, tpq_step, energy, temp, specificHeat)) {
-        std::cerr << "Error: Could not read TPQ data from " << ss_file << std::endl;
+    bool data_read = readTPQDataHDF5(h5_file, tpq_sample, tpq_step, energy, temp, specificHeat);
+    if (!data_read) {
+        // Fall back to text file for backwards compatibility
+        data_read = readTPQData(ss_file, tpq_step, energy, temp, specificHeat);
+    }
+    
+    if (!data_read) {
+        std::cerr << "Error: Could not read TPQ data from HDF5 or text file" << std::endl;
         return;
     }
     
