@@ -404,8 +404,9 @@ EDConfig EDConfig::fromCommandLine(uint64_t argc, char* argv[]) {
             else if (arg.find("--tpq_continue_sample=") == 0) config.thermal.tpq_continue_sample = std::stoi(parse_value("--tpq_continue_sample="));
             else if (arg.find("--continue_beta=") == 0) config.thermal.tpq_continue_beta = std::stod(parse_value("--continue_beta="));
             else if (arg.find("--tpq_continue_beta=") == 0) config.thermal.tpq_continue_beta = std::stod(parse_value("--tpq_continue_beta="));
-            else if (arg == "--calc_observables") config.observable.calculate = true;
-            else if (arg == "--measure_spin") config.observable.measure_spin = true;
+            // TPQ observable options (new names + deprecated aliases)
+            else if (arg == "--save-thermal-states" || arg == "--calc_observables") config.observable.save_thermal_states = true;
+            else if (arg == "--compute-spin-correlations" || arg == "--measure_spin") config.observable.compute_spin_correlations = true;
             else if (arg == "--standard") config.workflow.run_standard = true;
             else if (arg == "--symmetrized") config.workflow.run_symmetrized = true;
             else if (arg == "--streaming-symmetry") config.workflow.run_streaming_symmetry = true;
@@ -666,8 +667,8 @@ void EDConfig::print(std::ostream& out) const {
     if (workflow.run_symmetrized) out << "  - Running symmetrized diagonalization\n";
     if (workflow.run_streaming_symmetry) out << "  - Running streaming symmetry diagonalization (memory-efficient)\n";
     if (workflow.compute_thermo) out << "  - Computing thermodynamics\n";
-    if (observable.calculate) out << "  - Calculating observables\n";
-    if (observable.measure_spin) out << "  - Measuring spin expectations\n";
+    if (observable.save_thermal_states) out << "  - Saving TPQ states at target temperatures\n";
+    if (observable.compute_spin_correlations) out << "  - Computing spin correlations ⟨Si⟩ and ⟨Si·Sj⟩\n";
     
     out << "========================================\n";
 }
@@ -1028,8 +1029,8 @@ std::string getMethodParameterInfo(DiagonalizationMethod method) {
             info << "  --temp_min=<T>        Minimum temperature (default: 1e-3)\n";
             info << "  --temp_max=<T>        Maximum temperature (default: 20.0)\n";
             info << "  --temp_bins=<n>       Number of temperature points (default: 100)\n";
-            info << "  --calc_observables    Calculate thermal expectation values\n";
-            info << "  --measure_spin        Measure spin correlations\n";
+            info << "  --save-thermal-states Save TPQ states at target β values (for TPQ_DSSF)\n";
+            info << "  --compute-spin-correlations  Compute ⟨Si⟩ and ⟨Si·Sj⟩ correlations\n";
             info << "\nBest for: Thermal properties at finite temperature\n";
             break;
             
@@ -1042,8 +1043,8 @@ std::string getMethodParameterInfo(DiagonalizationMethod method) {
             info << "  --temp_min=<T>        Minimum temperature (default: 1e-3)\n";
             info << "  --temp_max=<T>        Maximum temperature (default: 20.0)\n";
             info << "  --temp_bins=<n>       Number of temperature points (default: 100)\n";
-            info << "  --calc_observables    Calculate thermal expectation values\n";
-            info << "  --measure_spin        Measure spin correlations\n";
+            info << "  --save-thermal-states Save TPQ states at target β values (for TPQ_DSSF)\n";
+            info << "  --compute-spin-correlations  Compute ⟨Si⟩ and ⟨Si·Sj⟩ correlations\n";
             info << "\nBest for: Canonical ensemble thermal properties\n";
             break;
             

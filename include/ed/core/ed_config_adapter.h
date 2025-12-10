@@ -70,9 +70,9 @@ inline EDParameters toEDParameters(const EDConfig& config) {
     params.hybrid_crossover = config.thermal.hybrid_crossover;
     params.hybrid_auto_crossover = config.thermal.hybrid_auto_crossover;
     
-    // Observable
-    params.calc_observables = config.observable.calculate;
-    params.measure_spin = config.observable.measure_spin;
+    // Observable (TPQ thermal state and spin correlation options)
+    params.save_thermal_states = config.observable.save_thermal_states;
+    params.compute_spin_correlations = config.observable.compute_spin_correlations;
     params.observables = config.observable.operators;
     params.observable_names = config.observable.names;
     params.omega_min = config.observable.omega_min;
@@ -159,9 +159,9 @@ inline EDConfig fromEDParameters(const EDParameters& params, DiagonalizationMeth
     config.thermal.use_hybrid_method = params.use_hybrid_method;
     config.thermal.hybrid_crossover = params.hybrid_crossover;
     
-    // Observable
-    config.observable.calculate = params.calc_observables;
-    config.observable.measure_spin = params.measure_spin;
+    // Observable (TPQ thermal state and spin correlation options)
+    config.observable.save_thermal_states = params.save_thermal_states;
+    config.observable.compute_spin_correlations = params.compute_spin_correlations;
     config.observable.operators = params.observables;
     config.observable.names = params.observable_names;
     config.observable.omega_min = params.omega_min;

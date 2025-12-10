@@ -121,8 +121,14 @@ struct ThermalConfig {
  * @brief Observable calculation parameters
  */
 struct ObservableConfig {
-    bool calculate = false;
-    bool measure_spin = false;
+    // TPQ-specific observable options
+    // save_thermal_states: Save TPQ states at target temperatures for post-processing (e.g., TPQ_DSSF)
+    // compute_spin_correlations: Compute spin expectation values (Sx,Sy,Sz) and two-point correlations
+    bool save_thermal_states = false;   // Save TPQ states at target β values
+    bool compute_spin_correlations = false;  // Compute ⟨Si⟩ and ⟨Si·Sj⟩ correlations
+    
+    // Note: Legacy aliases "calculate" and "measure_spin" are supported in config file parsing
+    // via ed_config.cpp, but not as struct members (to allow proper copy/move semantics)
     
     // Spectral functions
     double omega_min = -10.0;
@@ -306,8 +312,12 @@ public:
     EDConfig& tempBins(uint64_t n) { thermal.num_temp_bins = n; return *this; }
     
     // Observable
-    EDConfig& calcObservables(bool b = true) { observable.calculate = b; return *this; }
-    EDConfig& measureSpin(bool b = true) { observable.measure_spin = b; return *this; }
+    EDConfig& calcObservables(bool b = true) { observable.save_thermal_states = b; return *this; }
+    EDConfig& measureSpin(bool b = true) { observable.compute_spin_correlations = b; return *this; }
+    
+    // New fluent methods with descriptive names
+    EDConfig& saveThermalStates(bool b = true) { observable.save_thermal_states = b; return *this; }
+    EDConfig& computeSpinCorrelations(bool b = true) { observable.compute_spin_correlations = b; return *this; }
     
     // System
     EDConfig& numSites(uint64_t n) { system.num_sites = n; return *this; }

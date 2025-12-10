@@ -2109,9 +2109,13 @@ void print_help(const char* prog_name) {
     std::cout << "  --thermo                Compute thermodynamic properties\n";
     std::cout << "  --dynamical-response    Compute dynamical response (spectral functions)\n";
     std::cout << "  --static-response       Compute static response (thermal expectation values)\n";
-    std::cout << "  --ground-state-dssf     Compute T=0 DSSF using continued fraction (optimal for 32-site ED)\n";
-    std::cout << "  --calc_observables      Calculate custom observables\n";
-    std::cout << "  --measure_spin          Measure spin expectations\n\n";
+    std::cout << "  --ground-state-dssf     Compute T=0 DSSF using continued fraction (optimal for 32-site ED)\n\n";
+    
+    std::cout << "TPQ Observable Options:\n";
+    std::cout << "  --save-thermal-states   Save TPQ states at target temperatures (for TPQ_DSSF post-processing)\n";
+    std::cout << "  --compute-spin-correlations  Compute ⟨Si⟩ and ⟨Si·Sj⟩ correlations during TPQ evolution\n";
+    std::cout << "  --calc_observables      (deprecated) Alias for --save-thermal-states\n";
+    std::cout << "  --measure_spin          (deprecated) Alias for --compute-spin-correlations\n\n";
     
     std::cout << "Thermal Options (for mTPQ/cTPQ/FULL):\n";
     std::cout << "  --samples=<n>           Number of TPQ samples\n";

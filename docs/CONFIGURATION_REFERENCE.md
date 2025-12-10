@@ -726,8 +726,8 @@ All methods are specified via `--method=<METHOD>` (case-insensitive). Use `--met
 
 | Method Flag | Description | Key Parameters | Best For |
 |-------------|-------------|----------------|----------|
-| `mTPQ` | Microcanonical Thermal Pure Quantum states | `--samples`, `--temp_min/max/bins`, `--large_value`, `--calc_observables`, `--measure_spin` | Thermodynamics, large systems |
-| `cTPQ` | Canonical Thermal Pure Quantum states | `--samples`, `--num_order`, `--delta_tau`, `--temp_*` | Canonical ensemble properties |
+| `mTPQ` | Microcanonical Thermal Pure Quantum states | `--samples`, `--temp_min/max/bins`, `--large_value`, `--save-thermal-states`, `--compute-spin-correlations` | Thermodynamics, large systems |
+| `cTPQ` | Canonical Thermal Pure Quantum states | `--samples`, `--num_order`, `--delta_tau`, `--temp_*`, `--save-thermal-states`, `--compute-spin-correlations` | Canonical ensemble properties |
 | `mTPQ_MPI` | MPI-parallel mTPQ | Same as mTPQ (requires MPI build) | Parallel TPQ sampling |
 | `mTPQ_CUDA` | CUDA-accelerated mTPQ | Same as mTPQ (requires CUDA build) | GPU-accelerated TPQ |
 | `FTLM` | Finite Temperature Lanczos Method | `--samples`, `--ftlm-krylov`, `--ftlm-full-reorth`, `--ftlm-seed`, `--ftlm-store-samples`, `--ftlm-no-error-bars` | General finite-T thermodynamics |

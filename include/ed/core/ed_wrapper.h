@@ -246,8 +246,15 @@ struct EDParameters {
     float spin_length = 0.5;       // Spin length
     uint64_t sublattice_size = 1;       // Size of the sublattice
     
-    bool calc_observables = false; // Calculate custom observables
-    bool measure_spin = false;     // Measure spins
+    // ========== TPQ Observable Parameters ==========
+    // save_thermal_states: Save TPQ states at target temperatures for post-processing (e.g., TPQ_DSSF)
+    // compute_spin_correlations: Compute spin expectation values (Sx,Sy,Sz) and correlations at each measurement
+    bool save_thermal_states = false;   // Save TPQ states at target β values
+    bool compute_spin_correlations = false;  // Compute ⟨Si⟩ and ⟨Si·Sj⟩ correlations
+    
+    // Deprecated aliases (for backwards compatibility)
+    bool& calc_observables = save_thermal_states;
+    bool& measure_spin = compute_spin_correlations;
     
     // ========== Fixed-Sz Parameters ==========
     mutable class FixedSzOperator* fixed_sz_op = nullptr;  // If using fixed-Sz, pointer to operator for embedding

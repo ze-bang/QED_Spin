@@ -187,7 +187,8 @@ Hamiltonians, then derives thermodynamic properties and response functions.
 | `--thermo` | Compute thermodynamics from spectrum |
 | `--dynamical-response` | Compute dynamical correlation functions |
 | `--static-response` | Compute static susceptibilities |
-| `--measure_spin` | Measure spin expectation values |
+| `--save-thermal-states` | Save TPQ states at target β for post-processing |
+| `--compute-spin-correlations` | Compute ⟨Si⟩ and ⟨Si·Sj⟩ during TPQ |
 
 #### Thermal Options
 
@@ -388,7 +389,7 @@ python3 nlce.py --max_order=4 --skip_cluster_gen --skip_ham_prep \
 | `--parallel` | Enable parallel execution | Off |
 | `--num_cores` | CPU cores for parallel | All available |
 | `--symmetrized` | Use symmetry reduction | Off |
-| `--measure_spin` | Measure ⟨S⟩ values | Off |
+| `--compute-spin-correlations` | Compute ⟨S⟩ correlations | Off |
 | `--skip_cluster_gen` | Skip cluster generation | Off |
 | `--skip_ham_prep` | Skip Hamiltonian prep | Off |
 | `--skip_ed` | Skip ED calculations | Off |
