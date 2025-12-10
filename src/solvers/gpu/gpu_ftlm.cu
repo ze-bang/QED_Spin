@@ -95,10 +95,19 @@ GPUFTLMSolver::GPUFTLMSolver(GPUOperator* op, int N, int krylov_dim, double tole
     : op_(op), N_(N), krylov_dim_(krylov_dim), tolerance_(tolerance),
       d_v_current_(nullptr), d_v_prev_(nullptr), d_w_(nullptr), d_temp_(nullptr),
       d_lanczos_basis_(nullptr), num_stored_vectors_(0), store_basis_(false),
+      compute_stream_(nullptr), transfer_stream_(nullptr), streams_initialized_(false),
       gpu_memory_allocated_(false) {
     
     // Initialize cuBLAS
     CUBLAS_CHECK(cublasCreate(&cublas_handle_));
+    
+    // Initialize CUDA streams for pipelining
+    CUDA_CHECK(cudaStreamCreate(&compute_stream_));
+    CUDA_CHECK(cudaStreamCreate(&transfer_stream_));
+    streams_initialized_ = true;
+    
+    // Set cuBLAS to use compute stream
+    CUBLAS_CHECK(cublasSetStream(cublas_handle_, compute_stream_));
     
     // Initialize stats
     stats_.total_time = 0.0;
@@ -115,10 +124,17 @@ GPUFTLMSolver::GPUFTLMSolver(GPUOperator* op, int N, int krylov_dim, double tole
     std::cout << "  Hilbert space dimension: " << N_ << "\n";
     std::cout << "  Krylov dimension: " << krylov_dim_ << "\n";
     std::cout << "  Tolerance: " << tolerance_ << "\n";
+    std::cout << "  CUDA streams: enabled (compute + transfer)\n";
 }
 
 GPUFTLMSolver::~GPUFTLMSolver() {
     freeMemory();
+    
+    // Destroy CUDA streams
+    if (streams_initialized_) {
+        cudaStreamDestroy(compute_stream_);
+        cudaStreamDestroy(transfer_stream_);
+    }
     
     if (cublas_handle_) {
         cublasDestroy(cublas_handle_);

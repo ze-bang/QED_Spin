@@ -47,7 +47,8 @@ __global__ void scaleVector(cuDoubleComplex* state, double scale, int N) {
 // Constructor
 GPUTPQSolver::GPUTPQSolver(GPUOperator* gpu_op, int N)
     : gpu_op_(gpu_op), N_(N), d_state_(nullptr), d_temp_(nullptr), 
-      d_h_state_(nullptr), d_real_scratch_(nullptr) {
+      d_h_state_(nullptr), d_real_scratch_(nullptr),
+      compute_stream_(nullptr), transfer_stream_(nullptr), streams_initialized_(false) {
     
     // Create cuBLAS handle
     cublasStatus_t stat = cublasCreate(&cublas_handle_);
@@ -63,6 +64,15 @@ GPUTPQSolver::GPUTPQSolver(GPUOperator* gpu_op, int N)
         throw std::runtime_error("cuRAND init failed");
     }
     
+    // Initialize CUDA streams for pipelining
+    cudaError_t stream_err1 = cudaStreamCreate(&compute_stream_);
+    cudaError_t stream_err2 = cudaStreamCreate(&transfer_stream_);
+    if (stream_err1 == cudaSuccess && stream_err2 == cudaSuccess) {
+        streams_initialized_ = true;
+        // Set cuBLAS to use compute stream
+        cublasSetStream(cublas_handle_, compute_stream_);
+    }
+    
     allocateMemory();
     
     // Initialize stats
@@ -76,6 +86,13 @@ GPUTPQSolver::GPUTPQSolver(GPUOperator* gpu_op, int N)
 // Destructor
 GPUTPQSolver::~GPUTPQSolver() {
     freeMemory();
+    
+    // Destroy CUDA streams
+    if (streams_initialized_) {
+        cudaStreamDestroy(compute_stream_);
+        cudaStreamDestroy(transfer_stream_);
+    }
+    
     cublasDestroy(cublas_handle_);
     curandDestroyGenerator(curand_gen_);
 }
@@ -131,21 +148,12 @@ void GPUTPQSolver::normalizeState() {
 }
 
 double GPUTPQSolver::computeNorm() {
-    // Compute ||state||^2
-    int blockSize = 256;
-    int numBlocks = (N_ + blockSize - 1) / blockSize;
-    computeNormSquared<<<numBlocks, blockSize>>>(d_state_, d_real_scratch_, N_);
-    
-    // Sum reduction using cuBLAS
-    double norm_squared = 0.0;
-    double* h_scratch = new double[N_];
-    cudaMemcpy(h_scratch, d_real_scratch_, N_ * sizeof(double), cudaMemcpyDeviceToHost);
-    for (int i = 0; i < N_; ++i) {
-        norm_squared += h_scratch[i];
-    }
-    delete[] h_scratch;
-    
-    return std::sqrt(norm_squared);
+    // OPTIMIZED: Use cuBLAS Zdotc for efficient GPU-side norm computation
+    // This avoids the expensive host-to-device copy and CPU reduction
+    // that was previously causing a performance bottleneck
+    cuDoubleComplex result;
+    cublasZdotc(cublas_handle_, N_, d_state_, 1, d_state_, 1, &result);
+    return std::sqrt(cuCreal(result));
 }
 
 std::pair<double, double> GPUTPQSolver::computeEnergyAndVariance() {
@@ -181,7 +189,7 @@ void GPUTPQSolver::imaginaryTimeEvolve(double delta_beta, int taylor_order) {
     // Implement e^{-delta_beta * H} |state> using Taylor expansion
     // |new_state> = sum_{k=0}^{n_max} (-delta_beta)^k / k! * H^k |state>
     
-    // Copy state to temp
+    // Copy state to temp (will hold H^k |state> during iteration)
     cudaMemcpy(d_temp_, d_state_, N_ * sizeof(cuDoubleComplex), cudaMemcpyDeviceToDevice);
     
     // Zero out state (will accumulate series)
@@ -189,16 +197,20 @@ void GPUTPQSolver::imaginaryTimeEvolve(double delta_beta, int taylor_order) {
     
     // Add zeroth term: |state>
     cuDoubleComplex alpha = make_cuDoubleComplex(1.0, 0.0);
-    cuDoubleComplex beta_blas = make_cuDoubleComplex(1.0, 0.0);
     cublasZaxpy(cublas_handle_, N_, &alpha, d_temp_, 1, d_state_, 1);
     
-    // Taylor series
+    // Taylor series with optimized ping-pong buffer strategy
+    // Avoids redundant cudaMemcpy by swapping pointers
     double factorial = 1.0;
     double power = 1.0;
     
+    // Use d_temp_ and d_h_state_ as ping-pong buffers
+    cuDoubleComplex* d_current = d_temp_;    // H^{k-1} |state>
+    cuDoubleComplex* d_next = d_h_state_;    // Will hold H^k |state>
+    
     for (int k = 1; k <= taylor_order; ++k) {
-        // H^k term: d_h_state_ = H * d_temp_
-        gpu_op_->matVecGPU(d_temp_, d_h_state_, N_);
+        // H^k term: d_next = H * d_current
+        gpu_op_->matVecGPU(d_current, d_next, N_);
         
         // Update coefficients
         factorial *= k;
@@ -207,12 +219,13 @@ void GPUTPQSolver::imaginaryTimeEvolve(double delta_beta, int taylor_order) {
         
         // Add contribution: |state> += coeff * H^k |state>
         cuDoubleComplex alpha_k = make_cuDoubleComplex(coeff, 0.0);
-        cublasZaxpy(cublas_handle_, N_, &alpha_k, d_h_state_, 1, d_state_, 1);
+        cublasZaxpy(cublas_handle_, N_, &alpha_k, d_next, 1, d_state_, 1);
         
-        // Prepare for next iteration: d_temp_ = H^k |state>
-        cudaMemcpy(d_temp_, d_h_state_, N_ * sizeof(cuDoubleComplex), cudaMemcpyDeviceToDevice);
+        // OPTIMIZED: Swap pointers instead of copying memory
+        // This avoids the expensive cudaMemcpy(d_temp_, d_h_state_, ...)
+        std::swap(d_current, d_next);
         
-        // Check for convergence
+        // Check for convergence (early termination)
         if (std::abs(coeff) < 1e-14) break;
     }
     

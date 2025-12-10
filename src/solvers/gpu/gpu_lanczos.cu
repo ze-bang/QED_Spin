@@ -68,6 +68,92 @@ __global__ void vectorAxpyKernel(const cuDoubleComplex* x, cuDoubleComplex* y,
     y[idx] = cuCadd(y[idx], ax);
 }
 
+/**
+ * @brief Batched modified Gram-Schmidt orthogonalization kernel
+ * 
+ * Computes multiple dot products in parallel and accumulates the
+ * orthogonalization corrections. Each block handles one basis vector.
+ * Uses shared memory for efficient reduction within each block.
+ * 
+ * @param basis Array of basis vector pointers
+ * @param target Vector to orthogonalize (modified in-place)
+ * @param overlaps Output array for computed overlaps (size = num_vecs)
+ * @param num_vecs Number of basis vectors to orthogonalize against
+ * @param N Vector dimension
+ */
+__global__ void batchedDotProductKernel(const cuDoubleComplex* const* basis,
+                                        const cuDoubleComplex* target,
+                                        cuDoubleComplex* overlaps,
+                                        int num_vecs, int N) {
+    extern __shared__ double shared[];
+    double* shared_real = shared;
+    double* shared_imag = shared + blockDim.x;
+    
+    int vec_idx = blockIdx.x;  // Each block handles one basis vector
+    if (vec_idx >= num_vecs) return;
+    
+    const cuDoubleComplex* basis_vec = basis[vec_idx];
+    
+    // Each thread computes partial sum over its assigned elements
+    double sum_real = 0.0;
+    double sum_imag = 0.0;
+    
+    for (int i = threadIdx.x; i < N; i += blockDim.x) {
+        cuDoubleComplex b = basis_vec[i];
+        cuDoubleComplex t = target[i];
+        
+        // Compute conjugate(b) * t
+        double b_real = cuCreal(b);
+        double b_imag = cuCimag(b);
+        double t_real = cuCreal(t);
+        double t_imag = cuCimag(t);
+        
+        sum_real += b_real * t_real + b_imag * t_imag;  // Re(conj(b) * t)
+        sum_imag += b_real * t_imag - b_imag * t_real;  // Im(conj(b) * t)
+    }
+    
+    shared_real[threadIdx.x] = sum_real;
+    shared_imag[threadIdx.x] = sum_imag;
+    __syncthreads();
+    
+    // Parallel reduction
+    for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
+        if (threadIdx.x < stride) {
+            shared_real[threadIdx.x] += shared_real[threadIdx.x + stride];
+            shared_imag[threadIdx.x] += shared_imag[threadIdx.x + stride];
+        }
+        __syncthreads();
+    }
+    
+    // Thread 0 writes result
+    if (threadIdx.x == 0) {
+        overlaps[vec_idx] = make_cuDoubleComplex(shared_real[0], shared_imag[0]);
+    }
+}
+
+/**
+ * @brief Apply orthogonalization corrections in batched manner
+ * 
+ * target = target - sum_i(overlaps[i] * basis[i])
+ */
+__global__ void batchedOrthogonalizeKernel(cuDoubleComplex* const* basis,
+                                          cuDoubleComplex* target,
+                                          const cuDoubleComplex* overlaps,
+                                          int num_vecs, int N) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= N) return;
+    
+    cuDoubleComplex correction = make_cuDoubleComplex(0.0, 0.0);
+    
+    for (int v = 0; v < num_vecs; ++v) {
+        cuDoubleComplex overlap = overlaps[v];
+        cuDoubleComplex basis_val = basis[v][idx];
+        correction = cuCadd(correction, cuCmul(overlap, basis_val));
+    }
+    
+    target[idx] = cuCsub(target[idx], correction);
+}
+
 } // namespace GPULanczosKernels
 
 // ============================================================================
@@ -224,8 +310,8 @@ void GPULanczos::vectorAxpy(const cuDoubleComplex* d_x, cuDoubleComplex* d_y,
                             &alpha, d_x, 1, d_y, 1));
 }
 
-// FIXED: Local reorthogonalization with threshold-based selective reorthogonalization
-// This matches the fixed CPU implementation
+// IMPROVED: Local reorthogonalization with batched operations for better GPU utilization
+// Uses batched kernel when num_check >= 4 for better performance
 void GPULanczos::orthogonalize(cuDoubleComplex* d_vec, int iter, 
                                std::vector<std::vector<double>>& omega,
                                const std::vector<double>& alpha,
@@ -237,34 +323,87 @@ void GPULanczos::orthogonalize(cuDoubleComplex* d_vec, int iter,
     CUDA_CHECK(cudaEventRecord(start));
     
     if (num_stored_vectors_ > 0 && iter > 0) {
-        // FIXED: Use simple local reorthogonalization against recent vectors
-        // This is much more efficient and numerically stable than the buggy Parlett-Simon
-        
         // Determine how many recent vectors to reorthogonalize against
-        // For GPU, we can afford to check more vectors since they're all in VRAM
         int num_check = std::min(iter, std::min(10, num_stored_vectors_));
         
-        int num_reorthed = 0;
+        // Use batched approach when there are enough vectors (better GPU utilization)
+        const int BATCH_THRESHOLD = 4;
         
-        // Reorthogonalize against the most recent vectors (most likely to lose orthogonality)
-        // Use modulo indexing for circular buffer when iter >= num_stored_vectors_
-        for (int i = std::max(0, iter - num_check); i < iter; ++i) {
-            // Use modulo for circular buffer indexing
-            int buffer_idx = i % num_stored_vectors_;
-            std::complex<double> dot = vectorDot(d_lanczos_vectors_[buffer_idx], d_vec);
-            double overlap_magnitude = std::abs(dot);
+        if (num_check >= BATCH_THRESHOLD) {
+            // BATCHED ORTHOGONALIZATION: More efficient for multiple vectors
             
-            // Only reorthogonalize if overlap is significant
-            if (overlap_magnitude > ortho_threshold) {
-                cuDoubleComplex neg_dot = make_cuDoubleComplex(-dot.real(), -dot.imag());
-                vectorAxpy(d_lanczos_vectors_[buffer_idx], d_vec, neg_dot);
-                num_reorthed++;
+            // Allocate device memory for batch pointers and overlaps
+            cuDoubleComplex** d_basis_ptrs = nullptr;
+            cuDoubleComplex* d_overlaps = nullptr;
+            CUDA_CHECK(cudaMalloc(&d_basis_ptrs, num_check * sizeof(cuDoubleComplex*)));
+            CUDA_CHECK(cudaMalloc(&d_overlaps, num_check * sizeof(cuDoubleComplex)));
+            
+            // Collect pointers to the basis vectors we want to orthogonalize against
+            std::vector<cuDoubleComplex*> h_basis_ptrs(num_check);
+            for (int i = 0; i < num_check; ++i) {
+                int src_idx = std::max(0, iter - num_check) + i;
+                int buffer_idx = src_idx % num_stored_vectors_;
+                h_basis_ptrs[i] = d_lanczos_vectors_[buffer_idx];
             }
-        }
-        
-        if (num_reorthed > 0) {
-            stats_.selective_reorth_count++;
-            stats_.total_reorth_ops += num_reorthed;
+            CUDA_CHECK(cudaMemcpy(d_basis_ptrs, h_basis_ptrs.data(), 
+                                 num_check * sizeof(cuDoubleComplex*), cudaMemcpyHostToDevice));
+            
+            // Launch batched dot product kernel
+            // Each block handles one basis vector
+            int threads_per_block = 256;
+            size_t shared_mem = 2 * threads_per_block * sizeof(double);
+            GPULanczosKernels::batchedDotProductKernel<<<num_check, threads_per_block, shared_mem>>>(
+                d_basis_ptrs, d_vec, d_overlaps, num_check, dimension_);
+            CUDA_CHECK(cudaGetLastError());
+            
+            // Copy overlaps back to host to check threshold
+            std::vector<cuDoubleComplex> h_overlaps(num_check);
+            CUDA_CHECK(cudaMemcpy(h_overlaps.data(), d_overlaps, 
+                                 num_check * sizeof(cuDoubleComplex), cudaMemcpyDeviceToHost));
+            
+            // Count significant overlaps and apply corrections
+            int num_reorthed = 0;
+            for (int i = 0; i < num_check; ++i) {
+                double overlap_mag = sqrt(cuCreal(h_overlaps[i]) * cuCreal(h_overlaps[i]) + 
+                                         cuCimag(h_overlaps[i]) * cuCimag(h_overlaps[i]));
+                if (overlap_mag > ortho_threshold) {
+                    // Apply correction: vec -= overlap * basis[i]
+                    cuDoubleComplex neg_overlap = make_cuDoubleComplex(-cuCreal(h_overlaps[i]), 
+                                                                       -cuCimag(h_overlaps[i]));
+                    vectorAxpy(h_basis_ptrs[i], d_vec, neg_overlap);
+                    num_reorthed++;
+                }
+            }
+            
+            if (num_reorthed > 0) {
+                stats_.selective_reorth_count++;
+                stats_.total_reorth_ops += num_reorthed;
+            }
+            
+            // Cleanup
+            cudaFree(d_basis_ptrs);
+            cudaFree(d_overlaps);
+            
+        } else {
+            // SEQUENTIAL APPROACH: More efficient for small number of vectors
+            int num_reorthed = 0;
+            
+            for (int i = std::max(0, iter - num_check); i < iter; ++i) {
+                int buffer_idx = i % num_stored_vectors_;
+                std::complex<double> dot = vectorDot(d_lanczos_vectors_[buffer_idx], d_vec);
+                double overlap_magnitude = std::abs(dot);
+                
+                if (overlap_magnitude > ortho_threshold) {
+                    cuDoubleComplex neg_dot = make_cuDoubleComplex(-dot.real(), -dot.imag());
+                    vectorAxpy(d_lanczos_vectors_[buffer_idx], d_vec, neg_dot);
+                    num_reorthed++;
+                }
+            }
+            
+            if (num_reorthed > 0) {
+                stats_.selective_reorth_count++;
+                stats_.total_reorth_ops += num_reorthed;
+            }
         }
     }
     

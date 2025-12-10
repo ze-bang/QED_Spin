@@ -151,6 +151,25 @@ __global__ void vectorScaleKernel(cuDoubleComplex* vec, double scale, int N);
 __global__ void vectorAxpyKernel(const cuDoubleComplex* x, cuDoubleComplex* y,
                                 cuDoubleComplex alpha, int N);
 
+/**
+ * @brief Batched dot product kernel for efficient orthogonalization
+ * 
+ * Computes multiple inner products in parallel using one block per vector.
+ * More efficient than sequential cuBLAS calls for multiple vectors.
+ */
+__global__ void batchedDotProductKernel(const cuDoubleComplex* const* basis,
+                                        const cuDoubleComplex* target,
+                                        cuDoubleComplex* overlaps,
+                                        int num_vecs, int N);
+
+/**
+ * @brief Batched orthogonalization correction kernel
+ */
+__global__ void batchedOrthogonalizeKernel(cuDoubleComplex* const* basis,
+                                          cuDoubleComplex* target,
+                                          const cuDoubleComplex* overlaps,
+                                          int num_vecs, int N);
+
 } // namespace GPULanczosKernels
 
 #endif // WITH_CUDA

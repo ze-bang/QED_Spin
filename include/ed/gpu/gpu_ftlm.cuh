@@ -311,6 +311,11 @@ private:
     // cuBLAS handle
     cublasHandle_t cublas_handle_;
     
+    // CUDA streams for pipelining
+    cudaStream_t compute_stream_;    // Main computation stream
+    cudaStream_t transfer_stream_;   // Data transfer stream
+    bool streams_initialized_;
+    
     // Performance statistics
     Stats stats_;
     

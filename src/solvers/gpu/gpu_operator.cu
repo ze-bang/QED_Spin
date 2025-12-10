@@ -149,6 +149,13 @@ void GPUOperator::loadThreeBodyFile(const std::string& filename) {
     
     std::cout << "GPU: Loaded " << three_body_data_.size() << " three-body terms from " 
               << filename << std::endl;
+    
+    // Warn user that 3-body terms are not yet GPU-accelerated
+    if (!three_body_data_.empty()) {
+        std::cerr << "WARNING: Three-body terms loaded but GPU kernel not yet implemented.\n";
+        std::cerr << "         These terms will be IGNORED in GPU calculations.\n";
+        std::cerr << "         Consider using CPU solvers for Hamiltonians with 3-body interactions.\n";
+    }
 }
 
 void GPUOperator::copyThreeBodyDataToDevice() {
@@ -161,6 +168,17 @@ void GPUOperator::copyThreeBodyDataToDevice() {
                             cudaMemcpyHostToDevice));
         
         std::cout << "GPU: Copied " << num_three_body_ << " three-body operations to device\n";
+        
+        // WARNING: Three-body terms are stored but NOT yet supported in GPU kernels
+        std::cerr << "\n";
+        std::cerr << "╔══════════════════════════════════════════════════════════════════════════╗\n";
+        std::cerr << "║  WARNING: THREE-BODY TERMS NOT YET IMPLEMENTED IN GPU KERNELS           ║\n";
+        std::cerr << "╠══════════════════════════════════════════════════════════════════════════╣\n";
+        std::cerr << "║  " << num_three_body_ << " three-body terms loaded but will be IGNORED during GPU computation.  ║\n";
+        std::cerr << "║  For Hamiltonians with three-body interactions, use CPU solvers instead.║\n";
+        std::cerr << "║  GPU three-body kernel implementation is planned for a future release.  ║\n";
+        std::cerr << "╚══════════════════════════════════════════════════════════════════════════╝\n";
+        std::cerr << "\n";
     }
 }
 

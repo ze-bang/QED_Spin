@@ -107,6 +107,11 @@ private:
     cuDoubleComplex* d_h_state_;
     double* d_real_scratch_;
     
+    // CUDA streams for pipelining
+    cudaStream_t compute_stream_;    // Main computation stream
+    cudaStream_t transfer_stream_;   // Data transfer stream
+    bool streams_initialized_;
+    
     // Statistics
     TPQStats stats_;
     
