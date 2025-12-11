@@ -12,6 +12,9 @@
 #include <iomanip> // added for std::setprecision and std::fixed
 #include <algorithm> // for std::sort, std::max_element, std::min_element
 #include <numeric> // for std::accumulate
+#include <mutex>   // for thread-safe HDF5 access
+#include <thread>  // for sleep_for in HDF5 retry
+#include <chrono>  // for milliseconds
 #include <ed/core/construct_ham.h>
 #include <ed/core/hdf5_io.h>
 #include <ed/solvers/TPQ.h>
@@ -29,6 +32,398 @@
 using Complex = std::complex<double>;
 using ComplexVector = std::vector<Complex>;
 namespace fs = std::filesystem;
+
+// Global mutex for thread-safe HDF5 writes (HDF5 is not thread-safe by default)
+static std::mutex g_hdf5_mutex;
+
+/**
+ * @brief Helper function to open HDF5 file with retries for MPI-safe access
+ * HDF5 file locking can cause issues with multiple MPI processes.
+ * This function retries opening the file with a small delay.
+ */
+H5::H5File openHDF5WithRetry(const std::string& h5_path, unsigned int flags, int max_retries = 50, int delay_ms = 50) {
+    for (int attempt = 0; attempt < max_retries; ++attempt) {
+        try {
+            // Disable error printing temporarily
+            H5::Exception::dontPrint();
+            return H5::H5File(h5_path, flags);
+        } catch (H5::FileIException& e) {
+            // File locked, wait and retry
+            std::this_thread::sleep_for(std::chrono::milliseconds(delay_ms));
+        }
+    }
+    // Final attempt - let it throw if it fails
+    return H5::H5File(h5_path, flags);
+}
+
+// ============================================================================
+// Unified DSSF HDF5 Output Management
+// ============================================================================
+// 
+// HDF5 File Structure for TPQ_DSSF:
+//   dssf_results.h5
+//   ├── /metadata
+//   │   ├── num_sites [attr]
+//   │   ├── spin_length [attr]
+//   │   ├── method [attr]
+//   │   ├── operator_type [attr]
+//   │   ├── omega_min, omega_max, num_omega_bins [attr]
+//   │   └── broadening [attr]
+//   ├── /momentum_points
+//   │   └── q_vectors [dataset: Nx3 array]
+//   ├── /spectral
+//   │   ├── frequencies [dataset: 1D array, shared across all]
+//   │   └── /<operator_name>
+//   │       └── /beta_<value> or /T_<value>
+//   │           ├── sample_<idx>
+//   │           │   ├── real [dataset]
+//   │           │   ├── imag [dataset]
+//   │           │   ├── error_real [dataset]
+//   │           │   └── error_imag [dataset]
+//   │           └── averaged (optional)
+//   │               ├── real [dataset]
+//   │               └── imag [dataset]
+//   ├── /static
+//   │   └── /<operator_name>
+//   │       ├── temperatures [dataset]
+//   │       ├── expectation [dataset]
+//   │       ├── variance [dataset]
+//   │       └── susceptibility [dataset]
+//   └── /correlations (for spin_correlation/spin_configuration)
+//       └── ...
+// ============================================================================
+
+/**
+ * @brief Initialize the unified DSSF HDF5 file with proper structure
+ */
+std::string initDSSFHDF5File(const std::string& output_dir, 
+                              int num_sites, float spin_length,
+                              const std::string& method, 
+                              const std::string& operator_type,
+                              double omega_min, double omega_max, 
+                              int num_omega_bins, double broadening,
+                              const std::vector<std::vector<double>>& momentum_points) {
+    std::string h5_path = output_dir + "/dssf_results.h5";
+    
+    try {
+        // Create file (truncate if exists)
+        H5::H5File file(h5_path, H5F_ACC_TRUNC);
+        
+        // Create group structure
+        file.createGroup("/metadata");
+        file.createGroup("/momentum_points");
+        file.createGroup("/spectral");
+        file.createGroup("/static");
+        file.createGroup("/correlations");
+        
+        // Save metadata as attributes
+        H5::Group meta = file.openGroup("/metadata");
+        H5::DataSpace scalar_space(H5S_SCALAR);
+        
+        // Integer attributes
+        H5::Attribute attr_sites = meta.createAttribute("num_sites", H5::PredType::NATIVE_INT, scalar_space);
+        attr_sites.write(H5::PredType::NATIVE_INT, &num_sites);
+        
+        H5::Attribute attr_spin = meta.createAttribute("spin_length", H5::PredType::NATIVE_FLOAT, scalar_space);
+        attr_spin.write(H5::PredType::NATIVE_FLOAT, &spin_length);
+        
+        H5::Attribute attr_omega_min = meta.createAttribute("omega_min", H5::PredType::NATIVE_DOUBLE, scalar_space);
+        attr_omega_min.write(H5::PredType::NATIVE_DOUBLE, &omega_min);
+        
+        H5::Attribute attr_omega_max = meta.createAttribute("omega_max", H5::PredType::NATIVE_DOUBLE, scalar_space);
+        attr_omega_max.write(H5::PredType::NATIVE_DOUBLE, &omega_max);
+        
+        H5::Attribute attr_nbins = meta.createAttribute("num_omega_bins", H5::PredType::NATIVE_INT, scalar_space);
+        attr_nbins.write(H5::PredType::NATIVE_INT, &num_omega_bins);
+        
+        H5::Attribute attr_broad = meta.createAttribute("broadening", H5::PredType::NATIVE_DOUBLE, scalar_space);
+        attr_broad.write(H5::PredType::NATIVE_DOUBLE, &broadening);
+        
+        // String attributes
+        H5::StrType str_type(H5::PredType::C_S1, H5T_VARIABLE);
+        H5::Attribute attr_method = meta.createAttribute("method", str_type, scalar_space);
+        attr_method.write(str_type, method);
+        
+        H5::Attribute attr_optype = meta.createAttribute("operator_type", str_type, scalar_space);
+        attr_optype.write(str_type, operator_type);
+        
+        meta.close();
+        
+        // Save momentum points as 2D dataset
+        if (!momentum_points.empty()) {
+            size_t n_q = momentum_points.size();
+            hsize_t dims[2] = {n_q, 3};
+            H5::DataSpace q_space(2, dims);
+            
+            // Flatten to contiguous array
+            std::vector<double> q_data(n_q * 3);
+            for (size_t i = 0; i < n_q; ++i) {
+                q_data[i*3 + 0] = momentum_points[i][0];
+                q_data[i*3 + 1] = momentum_points[i][1];
+                q_data[i*3 + 2] = momentum_points[i][2];
+            }
+            
+            H5::DataSet q_dataset = file.createDataSet("/momentum_points/q_vectors",
+                                                       H5::PredType::NATIVE_DOUBLE, q_space);
+            q_dataset.write(q_data.data(), H5::PredType::NATIVE_DOUBLE);
+            q_dataset.close();
+        }
+        
+        file.close();
+        std::cout << "Created unified DSSF HDF5 file: " << h5_path << std::endl;
+        
+    } catch (H5::Exception& e) {
+        throw std::runtime_error("Failed to create DSSF HDF5 file: " + std::string(e.getCDetailMsg()));
+    }
+    
+    return h5_path;
+}
+
+/**
+ * @brief Save dynamical spectral function to unified HDF5 file
+ * 
+ * @param h5_path Path to the unified HDF5 file
+ * @param operator_name Name of the operator (e.g., "Sz_Sz_q_Qx0.5_Qy0_Qz0")
+ * @param beta Inverse temperature (use INFINITY for ground state)
+ * @param sample_idx Sample index
+ * @param frequencies Frequency grid
+ * @param spectral_real Real part of spectral function
+ * @param spectral_imag Imaginary part of spectral function
+ * @param error_real Error in real part
+ * @param error_imag Error in imaginary part
+ * @param temperature Temperature (optional, for thermal methods)
+ */
+void saveDSSFSpectralToHDF5(
+    const std::string& h5_path,
+    const std::string& operator_name,
+    double beta,
+    int sample_idx,
+    const std::vector<double>& frequencies,
+    const std::vector<double>& spectral_real,
+    const std::vector<double>& spectral_imag,
+    const std::vector<double>& error_real,
+    const std::vector<double>& error_imag,
+    double temperature = -1.0
+) {
+    std::lock_guard<std::mutex> lock(g_hdf5_mutex);
+    
+    try {
+        // Use retry-based file opening for MPI safety
+        H5::H5File file = openHDF5WithRetry(h5_path, H5F_ACC_RDWR);
+        
+        // Save frequencies once (shared across all operators)
+        if (!file.nameExists("/spectral/frequencies")) {
+            hsize_t dims[1] = {frequencies.size()};
+            H5::DataSpace freq_space(1, dims);
+            H5::DataSet freq_dataset = file.createDataSet("/spectral/frequencies",
+                                                          H5::PredType::NATIVE_DOUBLE, freq_space);
+            freq_dataset.write(frequencies.data(), H5::PredType::NATIVE_DOUBLE);
+            freq_dataset.close();
+        }
+        
+        // Create operator group if needed
+        std::string op_path = "/spectral/" + operator_name;
+        if (!file.nameExists(op_path)) {
+            file.createGroup(op_path);
+        }
+        
+        // Create beta/temperature group
+        std::stringstream param_ss;
+        if (temperature > 0) {
+            param_ss << "T_" << std::fixed << std::setprecision(6) << temperature;
+        } else if (std::isinf(beta)) {
+            param_ss << "ground_state";
+        } else {
+            param_ss << "beta_" << std::fixed << std::setprecision(6) << beta;
+        }
+        std::string param_path = op_path + "/" + param_ss.str();
+        if (!file.nameExists(param_path)) {
+            file.createGroup(param_path);
+        }
+        
+        // Create sample group
+        std::string sample_path = param_path + "/sample_" + std::to_string(sample_idx);
+        if (!file.nameExists(sample_path)) {
+            file.createGroup(sample_path);
+        }
+        
+        // Helper to save dataset
+        auto saveDataset = [&](const std::string& name, const std::vector<double>& data) {
+            if (data.empty()) return;
+            std::string dataset_path = sample_path + "/" + name;
+            if (file.nameExists(dataset_path)) {
+                file.unlink(dataset_path);
+            }
+            hsize_t dims[1] = {data.size()};
+            H5::DataSpace dspace(1, dims);
+            H5::DataSet dset = file.createDataSet(dataset_path, H5::PredType::NATIVE_DOUBLE, dspace);
+            dset.write(data.data(), H5::PredType::NATIVE_DOUBLE);
+            dset.close();
+        };
+        
+        saveDataset("real", spectral_real);
+        saveDataset("imag", spectral_imag);
+        saveDataset("error_real", error_real);
+        saveDataset("error_imag", error_imag);
+        
+        // Add metadata attributes to sample group
+        H5::Group sample_grp = file.openGroup(sample_path);
+        H5::DataSpace scalar_space(H5S_SCALAR);
+        
+        if (!sample_grp.attrExists("beta")) {
+            H5::Attribute beta_attr = sample_grp.createAttribute("beta", H5::PredType::NATIVE_DOUBLE, scalar_space);
+            beta_attr.write(H5::PredType::NATIVE_DOUBLE, &beta);
+        }
+        if (temperature > 0 && !sample_grp.attrExists("temperature")) {
+            H5::Attribute temp_attr = sample_grp.createAttribute("temperature", H5::PredType::NATIVE_DOUBLE, scalar_space);
+            temp_attr.write(H5::PredType::NATIVE_DOUBLE, &temperature);
+        }
+        
+        sample_grp.close();
+        file.close();
+        
+    } catch (H5::Exception& e) {
+        std::cerr << "Warning: Failed to save DSSF spectral to HDF5: " << e.getCDetailMsg() << std::endl;
+    }
+}
+
+/**
+ * @brief Save static structure factor to unified HDF5 file
+ */
+void saveDSSFStaticToHDF5(
+    const std::string& h5_path,
+    const std::string& operator_name,
+    int sample_idx,
+    const std::vector<double>& temperatures,
+    const std::vector<double>& expectation,
+    const std::vector<double>& expectation_error,
+    const std::vector<double>& variance,
+    const std::vector<double>& variance_error,
+    const std::vector<double>& susceptibility,
+    const std::vector<double>& susceptibility_error
+) {
+    std::lock_guard<std::mutex> lock(g_hdf5_mutex);
+    
+    try {
+        // Use retry-based file opening for MPI safety  
+        H5::H5File file = openHDF5WithRetry(h5_path, H5F_ACC_RDWR);
+        
+        // Create operator group if needed
+        std::string op_path = "/static/" + operator_name;
+        if (!file.nameExists(op_path)) {
+            file.createGroup(op_path);
+        }
+        
+        // Create sample group
+        std::string sample_path = op_path + "/sample_" + std::to_string(sample_idx);
+        if (!file.nameExists(sample_path)) {
+            file.createGroup(sample_path);
+        }
+        
+        // Helper to save dataset
+        auto saveDataset = [&](const std::string& name, const std::vector<double>& data) {
+            if (data.empty()) return;
+            std::string dataset_path = sample_path + "/" + name;
+            if (file.nameExists(dataset_path)) {
+                file.unlink(dataset_path);
+            }
+            hsize_t dims[1] = {data.size()};
+            H5::DataSpace dspace(1, dims);
+            H5::DataSet dset = file.createDataSet(dataset_path, H5::PredType::NATIVE_DOUBLE, dspace);
+            dset.write(data.data(), H5::PredType::NATIVE_DOUBLE);
+            dset.close();
+        };
+        
+        saveDataset("temperatures", temperatures);
+        saveDataset("expectation", expectation);
+        saveDataset("expectation_error", expectation_error);
+        saveDataset("variance", variance);
+        saveDataset("variance_error", variance_error);
+        saveDataset("susceptibility", susceptibility);
+        saveDataset("susceptibility_error", susceptibility_error);
+        
+        file.close();
+        
+    } catch (H5::Exception& e) {
+        std::cerr << "Warning: Failed to save DSSF static to HDF5: " << e.getCDetailMsg() << std::endl;
+    }
+}
+
+/**
+ * @brief Save spin correlation data to unified HDF5 file
+ */
+void saveDSSFCorrelationToHDF5(
+    const std::string& h5_path,
+    double beta,
+    int sample_idx,
+    const std::vector<std::vector<Complex>>& spin_plus_minus,
+    const std::vector<std::vector<Complex>>& spin_z_z
+) {
+    std::lock_guard<std::mutex> lock(g_hdf5_mutex);
+    
+    try {
+        // Use retry-based file opening for MPI safety
+        H5::H5File file = openHDF5WithRetry(h5_path, H5F_ACC_RDWR);
+        
+        // Create beta group
+        std::stringstream param_ss;
+        if (std::isinf(beta)) {
+            param_ss << "ground_state";
+        } else {
+            param_ss << "beta_" << std::fixed << std::setprecision(6) << beta;
+        }
+        std::string corr_path = "/correlations/" + param_ss.str();
+        if (!file.nameExists(corr_path)) {
+            file.createGroup(corr_path);
+        }
+        
+        std::string sample_path = corr_path + "/sample_" + std::to_string(sample_idx);
+        if (!file.nameExists(sample_path)) {
+            file.createGroup(sample_path);
+        }
+        
+        size_t n = spin_plus_minus.size();
+        if (n == 0) {
+            file.close();
+            return;
+        }
+        
+        // Save as flattened 2D arrays (real and imag separately)
+        hsize_t dims[2] = {n, n};
+        H5::DataSpace matrix_space(2, dims);
+        
+        // Flatten matrices
+        std::vector<double> pm_real(n*n), pm_imag(n*n);
+        std::vector<double> zz_real(n*n), zz_imag(n*n);
+        
+        for (size_t i = 0; i < n; ++i) {
+            for (size_t j = 0; j < n; ++j) {
+                pm_real[i*n + j] = spin_plus_minus[i][j].real();
+                pm_imag[i*n + j] = spin_plus_minus[i][j].imag();
+                zz_real[i*n + j] = spin_z_z[i][j].real();
+                zz_imag[i*n + j] = spin_z_z[i][j].imag();
+            }
+        }
+        
+        auto saveMatrix = [&](const std::string& name, const std::vector<double>& data) {
+            std::string path = sample_path + "/" + name;
+            if (file.nameExists(path)) file.unlink(path);
+            H5::DataSet dset = file.createDataSet(path, H5::PredType::NATIVE_DOUBLE, matrix_space);
+            dset.write(data.data(), H5::PredType::NATIVE_DOUBLE);
+            dset.close();
+        };
+        
+        saveMatrix("S_plus_minus_real", pm_real);
+        saveMatrix("S_plus_minus_imag", pm_imag);
+        saveMatrix("S_z_z_real", zz_real);
+        saveMatrix("S_z_z_imag", zz_imag);
+        
+        file.close();
+        
+    } catch (H5::Exception& e) {
+        std::cerr << "Warning: Failed to save DSSF correlation to HDF5: " << e.getCDetailMsg() << std::endl;
+    }
+}
 
 
 // Helper function to read num_sites from positions.dat file
@@ -1101,8 +1496,29 @@ int main(int argc, char* argv[]) {
     
     // Pre-compute time evolution operator and transverse bases if needed
     std::string output_base_dir = directory + "/structure_factor_results";
+    std::string unified_h5_path;  // Path to unified DSSF HDF5 file
+    
     if (rank == 0) {
         ensureDirectoryExists(output_base_dir);
+        
+        // Initialize unified HDF5 file for all DSSF results
+        unified_h5_path = initDSSFHDF5File(
+            output_base_dir, num_sites, spin_length,
+            method, operator_type,
+            omega_min, omega_max, num_omega_bins, broadening,
+            momentum_points
+        );
+        std::cout << "Unified DSSF results will be saved to: " << unified_h5_path << std::endl;
+    }
+    
+    // Broadcast unified HDF5 path to all processes
+    {
+        int path_len = unified_h5_path.size();
+        MPI_Bcast(&path_len, 1, MPI_INT, 0, MPI_COMM_WORLD);
+        if (rank != 0) {
+            unified_h5_path.resize(path_len);
+        }
+        MPI_Bcast(unified_h5_path.data(), path_len, MPI_CHAR, 0, MPI_COMM_WORLD);
     }
     
     // Synchronize all processes
@@ -1558,14 +1974,18 @@ int main(int argc, char* argv[]) {
             return false;
         }
         
-        ensureDirectoryExists(output_dir);
+        // Note: output_dir is defined earlier in the lambda for legacy methods
         
         // Special methods that don't follow (operators) × (method) structure
         if (method == "spin_correlation") {
+            ensureDirectoryExists(output_dir);
             printSpinCorrelation(tpq_state, num_sites, spin_length, output_dir, unit_cell_size);
+            // TODO: Also save to unified HDF5 via saveDSSFCorrelationToHDF5
             return true;
         } else if (method == "spin_configuration") {
+            ensureDirectoryExists(output_dir);
             printSpinConfiguration(tpq_state, num_sites, spin_length, output_dir);
+            // TODO: Also save to unified HDF5
             return true;
         }
         
@@ -1787,17 +2207,21 @@ int main(int argc, char* argv[]) {
         }
         
         // STEP 2: Apply time evolution method to the constructed operators
-        ensureDirectoryExists(method_dir);
+        // Note: taylor and krylov methods still use file-based output (legacy)
+        // All other methods use unified HDF5 output
         
         try {
             // CPU implementation
             if (method == "taylor") {
+                // Legacy file-based output for taylor method
+                ensureDirectoryExists(method_dir);
                 computeObservableDynamics_U_t(
                     U_t, tpq_state, obs_1, obs_2, obs_names, N,
                     method_dir, sample_index, beta, t_end_opt, dt_opt
                 );
             } else if (method == "krylov") {
-                // Use Krylov method with Operator objects directly
+                // Legacy file-based output for krylov method
+                ensureDirectoryExists(method_dir);
                 int krylov_dim = krylov_dim_or_nmax;
                 
                 computeDynamicCorrelationsKrylov(
@@ -1860,16 +2284,21 @@ int main(int argc, char* argv[]) {
                                 results.spectral_error_imag.resize(frequencies.size(), 0.0);
                                 results.total_samples = 1;
                                 
-                                // Save results
-                                std::stringstream filename_ss;
-                                filename_ss << method_dir << "/" << obs_names[i] 
-                                            << "_spectral_sample_" << sample_index 
-                                            << "_beta_" << beta << ".txt";
-                                
-                                save_dynamical_response_results(results, filename_ss.str());
+                                // Save results to unified HDF5 file
+                                saveDSSFSpectralToHDF5(
+                                    unified_h5_path,
+                                    obs_names[i],
+                                    beta,
+                                    sample_index,
+                                    results.frequencies,
+                                    results.spectral_function,
+                                    results.spectral_function_imag,
+                                    results.spectral_error,
+                                    results.spectral_error_imag
+                                );
                                 
                                 if (rank == 0) {
-                                    std::cout << "  Saved GPU spectral function: " << filename_ss.str() << std::endl;
+                                    std::cout << "  Saved GPU spectral to HDF5: " << obs_names[i] << std::endl;
                                 }
                                 
                                 // Cleanup device memory
@@ -1905,16 +2334,21 @@ int main(int argc, char* argv[]) {
                                 omega_min, omega_max, num_omega_bins, 0.0, ground_state_energy
                             );
                             
-                            // Save results
-                            std::stringstream filename_ss;
-                            filename_ss << method_dir << "/" << obs_names[i] 
-                                        << "_spectral_sample_" << sample_index 
-                                        << "_beta_" << beta << ".txt";
-                            
-                            save_dynamical_response_results(results, filename_ss.str());
+                            // Save results to unified HDF5 file
+                            saveDSSFSpectralToHDF5(
+                                unified_h5_path,
+                                obs_names[i],
+                                beta,
+                                sample_index,
+                                results.frequencies,
+                                results.spectral_function,
+                                results.spectral_function_imag,
+                                results.spectral_error,
+                                results.spectral_error_imag
+                            );
                             
                             if (rank == 0) {
-                                std::cout << "  Saved spectral function: " << filename_ss.str() << std::endl;
+                                std::cout << "  Saved spectral to HDF5: " << obs_names[i] << std::endl;
                             }
                         }
                     }
@@ -2017,16 +2451,22 @@ int main(int argc, char* argv[]) {
                                     results.spectral_error_imag.resize(frequencies.size(), 0.0);
                                     results.total_samples = 1;
                                     
-                                    // Save results
-                                    std::stringstream filename_ss;
-                                    filename_ss << method_dir << "/" << obs_names[i] 
-                                                << "_spectral_thermal_sample_" << sample_index 
-                                                << "_T_" << temperature << ".txt";
-                                    
-                                    save_dynamical_response_results(results, filename_ss.str());
+                                    // Save results to unified HDF5 file
+                                    saveDSSFSpectralToHDF5(
+                                        unified_h5_path,
+                                        obs_names[i],
+                                        1.0/temperature,  // beta
+                                        sample_index,
+                                        results.frequencies,
+                                        results.spectral_function,
+                                        results.spectral_function_imag,
+                                        results.spectral_error,
+                                        results.spectral_error_imag,
+                                        temperature
+                                    );
                                     
                                     if (rank == 0) {
-                                        std::cout << "    Saved GPU thermal spectral: " << filename_ss.str() << std::endl;
+                                        std::cout << "    Saved GPU thermal spectral to HDF5: " << obs_names[i] << std::endl;
                                     }
                                 }
                                 
@@ -2081,19 +2521,24 @@ int main(int argc, char* argv[]) {
                                 temperatures, ground_state_energy
                             );
                             
-                            // Save results for each temperature
+                            // Save results for each temperature to unified HDF5 file
                             for (const auto& [temperature, results] : results_map) {
-                                std::stringstream filename_ss;
-                                filename_ss << method_dir << "/" << obs_names[i] 
-                                            << "_spectral_thermal_sample_" << sample_index 
-                                            << "_beta_" << std::fixed << std::setprecision(6) << (1.0/temperature)
-                                            << "_T_" << temperature << "_nsamples_1.txt";
-                                
-                                save_dynamical_response_results(results, filename_ss.str());
+                                saveDSSFSpectralToHDF5(
+                                    unified_h5_path,
+                                    obs_names[i],
+                                    1.0/temperature,  // beta
+                                    sample_index,
+                                    results.frequencies,
+                                    results.spectral_function,
+                                    results.spectral_function_imag,
+                                    results.spectral_error,
+                                    results.spectral_error_imag,
+                                    temperature
+                                );
                             
                                 if (rank == 0) {
-                                    std::cout << "  Saved thermal spectral function: " << filename_ss.str() << std::endl;
-                                    std::cout << "    Temperature: " << temperature << ", Beta: " << (1.0/temperature) << std::endl;
+                                    std::cout << "  Saved thermal spectral to HDF5: " << obs_names[i] 
+                                              << " T=" << temperature << std::endl;
                                 }
                             }
                             
@@ -2168,21 +2613,27 @@ int main(int argc, char* argv[]) {
                         auto results_map = compute_dynamical_correlation_multi_sample_multi_temperature(
                             H, O1_func, O2_func, N, params,
                             omega_min, omega_max, num_omega_bins, 
-                            temperatures, ground_state_energy, method_dir
+                            temperatures, ground_state_energy, output_base_dir
                         );
                         
-                        // Save results for each temperature
+                        // Save results for each temperature to unified HDF5 file
                         for (const auto& [temperature, results] : results_map) {
-                            std::stringstream filename_ss;
-                            filename_ss << method_dir << "/" << obs_names[i] 
-                                        << "_ftlm_thermal_sample_" << sample_index 
-                                        << "_T_" << std::fixed << std::setprecision(4) << temperature 
-                                        << "_nsamples_" << num_samples << ".txt";
-                            
-                            save_dynamical_response_results(results, filename_ss.str());
+                            saveDSSFSpectralToHDF5(
+                                unified_h5_path,
+                                obs_names[i],
+                                1.0/temperature,  // beta
+                                sample_index,
+                                results.frequencies,
+                                results.spectral_function,
+                                results.spectral_function_imag,
+                                results.spectral_error,
+                                results.spectral_error_imag,
+                                temperature
+                            );
                         
                             if (rank == 0) {
-                                std::cout << "  Saved FTLM thermal spectral: " << filename_ss.str() << std::endl;
+                                std::cout << "  Saved FTLM thermal spectral to HDF5: " << obs_names[i] 
+                                          << " T=" << temperature << std::endl;
                             }
                         }
                     }
@@ -2243,19 +2694,25 @@ int main(int argc, char* argv[]) {
                         // Compute static response function
                         auto results = compute_static_response(
                             H, O1_func, O2_func, N, params,
-                            temp_min_static, temp_max_static, num_temp_bins, method_dir
+                            temp_min_static, temp_max_static, num_temp_bins, output_base_dir
                         );
                         
-                        // Save results
-                        std::stringstream filename_ss;
-                        filename_ss << method_dir << "/" << obs_names[i] 
-                                    << "_static_sample_" << sample_index 
-                                    << "_nsamples_" << num_samples << ".txt";
-                        
-                        save_static_response_results(results, filename_ss.str());
+                        // Save results to unified HDF5 file
+                        saveDSSFStaticToHDF5(
+                            unified_h5_path,
+                            obs_names[i],
+                            sample_index,
+                            results.temperatures,
+                            results.expectation,
+                            results.expectation_error,
+                            results.variance,
+                            results.variance_error,
+                            results.susceptibility,
+                            results.susceptibility_error
+                        );
                         
                         if (rank == 0) {
-                            std::cout << "  Saved static structure factor: " << filename_ss.str() << std::endl;
+                            std::cout << "  Saved static structure factor to HDF5: " << obs_names[i] << std::endl;
                         }
                     }
                     
@@ -2320,15 +2777,21 @@ int main(int argc, char* argv[]) {
                             H, O1_func, O2_func, ground_state, gs_energy, N, gs_params
                         );
                         
-                        // Save results
-                        std::stringstream filename_ss;
-                        filename_ss << method_dir << "/" << obs_names[i] 
-                                    << "_ground_state_dssf_sample_" << sample_index << ".txt";
-                        
-                        save_dynamical_response_results(results, filename_ss.str());
+                        // Save results to unified HDF5 file
+                        saveDSSFSpectralToHDF5(
+                            unified_h5_path,
+                            obs_names[i],
+                            std::numeric_limits<double>::infinity(),  // beta=infinity for ground state
+                            sample_index,
+                            results.frequencies,
+                            results.spectral_function,
+                            results.spectral_function_imag,
+                            results.spectral_error,
+                            results.spectral_error_imag
+                        );
                         
                         if (rank == 0) {
-                            std::cout << "  Saved ground state DSSF: " << filename_ss.str() << std::endl;
+                            std::cout << "  Saved ground state DSSF to HDF5: " << obs_names[i] << std::endl;
                         }
                     }
                     
@@ -2476,7 +2939,7 @@ int main(int argc, char* argv[]) {
         std::cout << "Processing complete!" << std::endl;
         std::cout << "========================================" << std::endl;
         std::cout << "Processed " << total_processed_count << "/" << num_tasks << " tasks successfully." << std::endl;
-        std::cout << "Results saved in: " << output_base_dir << std::endl;
+        std::cout << "All results saved to unified HDF5 file: " << unified_h5_path << std::endl;
         
         // Print timing statistics
         std::cout << "\nTiming statistics:" << std::endl;
