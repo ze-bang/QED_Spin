@@ -880,8 +880,10 @@ void lanczos_selective_reorth(std::function<void(const Complex*, Complex*, int)>
     
     // Write eigenvalues and eigenvectors to files
     std::string evec_dir = (dir.empty() ? "./eigenvectors" : dir + "/eigenvectors");
-    std::string cmd_mkdir = "mkdir -p " + evec_dir;
-    safe_system_call(cmd_mkdir);
+    if (eigenvectors) {
+        std::string cmd_mkdir = "mkdir -p " + evec_dir;
+        safe_system_call(cmd_mkdir);
+    }
 
     // Solve the tridiagonal eigenvalue problem
     uint64_t info = solve_tridiagonal_matrix(alpha, beta, m, exct, eigenvalues, temp_dir, evec_dir, eigenvectors, N);
@@ -1086,8 +1088,10 @@ void lanczos(std::function<void(const Complex*, Complex*, int)> H, uint64_t N, u
     
     // Write eigenvalues and eigenvectors to files
     std::string evec_dir = (dir.empty() ? "./eigenvectors" : dir + "/eigenvectors");
-    std::string cmd_mkdir = "mkdir -p " + evec_dir;
-    safe_system_call(cmd_mkdir);
+    if (eigenvectors) {
+        std::string cmd_mkdir = "mkdir -p " + evec_dir;
+        safe_system_call(cmd_mkdir);
+    }
 
     // Solve the tridiagonal eigenvalue problem
     uint64_t info = solve_tridiagonal_matrix(alpha, beta, m, exct, eigenvalues, temp_dir, evec_dir, eigenvectors, N);
@@ -1126,7 +1130,9 @@ void block_lanczos(std::function<void(const Complex*, Complex*, int)> H, uint64_
     const std::string temp_dir = (dir.empty() ? "./block_lanczos_basis" : dir + "/block_lanczos_basis");
     const std::string evec_dir = (dir.empty() ? "./eigenvectors" : dir + "/eigenvectors");
     safe_system_call("mkdir -p " + temp_dir);
-    safe_system_call("mkdir -p " + evec_dir);
+    if (compute_eigenvectors) {
+        safe_system_call("mkdir -p " + evec_dir);
+    }
 
     // ===== Initialize random starting block with QR =====
     std::mt19937 gen(std::random_device{}());
@@ -1465,7 +1471,9 @@ void chebyshev_filtered_lanczos(std::function<void(const Complex*, Complex*, int
     const std::string evec_dir = (dir.empty() ? "./eigenvectors" : dir + "/eigenvectors");
     
     safe_system_call("mkdir -p " + temp_dir);
-    safe_system_call("mkdir -p " + evec_dir);
+    if (compute_eigenvectors) {
+        safe_system_call("mkdir -p " + evec_dir);
+    }
     
     // ===== Step 1: Estimate spectral bounds if not provided =====
     double lambda_min, lambda_max;
@@ -1851,7 +1859,9 @@ void shift_invert_lanczos(std::function<void(const Complex*, Complex*, int)> H, 
     std::string result_dir = (dir.empty() ? "./eigenvectors" : dir + "/eigenvectors");
     
     safe_system_call("mkdir -p " + temp_dir);
-    safe_system_call("mkdir -p " + result_dir);
+    if (compute_eigenvectors) {
+        safe_system_call("mkdir -p " + result_dir);
+    }
     
     // Parameters for iterative solver (CG/GMRES)
     const uint64_t max_cg_iter = 100;
@@ -2799,7 +2809,9 @@ void implicitly_restarted_lanczos(std::function<void(const Complex*, Complex*, i
     const std::string evec_dir = (dir.empty() ? "./eigenvectors" : dir + "/eigenvectors");
     
     safe_system_call("mkdir -p " + temp_dir);
-    safe_system_call("mkdir -p " + evec_dir);
+    if (compute_eigenvectors) {
+        safe_system_call("mkdir -p " + evec_dir);
+    }
     
     // ===== Parameters =====
     const uint64_t k = num_eigs;                          // Target number of eigenvalues
@@ -3187,7 +3199,9 @@ void thick_restart_lanczos(std::function<void(const Complex*, Complex*, int)> H,
     
     safe_system_call("mkdir -p " + temp_dir);
     safe_system_call("mkdir -p " + locked_dir);
-    safe_system_call("mkdir -p " + evec_dir);
+    if (compute_eigenvectors) {
+        safe_system_call("mkdir -p " + evec_dir);
+    }
     
     // ===== Parameters =====
     const uint64_t k = num_eigs;                          // Target number of eigenvalues

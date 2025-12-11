@@ -103,6 +103,9 @@ void GPUFixedSzOperator::matVecFixedSz(const cuDoubleComplex* d_x, cuDoubleCompl
                 d_transform_data_, num_transforms_, fixed_sz_dim_, n_sites_, spin_l_);
         } else {
             // State-parallel kernel (better for small T)
+            // Zero output vector (required for atomic accumulation since we scatter writes)
+            CUDA_CHECK(cudaMemset(d_y, 0, fixed_sz_dim_ * sizeof(cuDoubleComplex)));
+            
             size_t shared_mem_size = std::min(num_transforms_, 4096) * sizeof(GPUTransformData);
             
             GPUKernels::matVecFixedSzKernelOptimized<<<num_blocks, BLOCK_SIZE, shared_mem_size>>>(

@@ -293,6 +293,31 @@ bool GPUTPQSolver::saveTPQState(const std::string& filename, GPUFixedSzOperator*
     return true;
 }
 
+bool GPUTPQSolver::saveTPQStateHDF5(const std::string& dir, size_t sample, double beta, GPUFixedSzOperator* fixed_sz_op) {
+    try {
+        // Copy state from GPU to host
+        std::vector<std::complex<double>> h_state(N_);
+        cudaMemcpy(h_state.data(), d_state_, N_ * sizeof(cuDoubleComplex), cudaMemcpyDeviceToHost);
+        
+        std::string hdf5_path = HDF5IO::createOrOpenFile(dir, "ed_results.h5");
+        
+        // Transform to full basis if using fixed-Sz
+        if (fixed_sz_op != nullptr) {
+            std::vector<std::complex<double>> full_state = fixed_sz_op->embedToFull(h_state);
+            HDF5IO::saveTPQState(hdf5_path, sample, beta, full_state);
+            std::cout << "  [GPU Fixed-Sz] Transformed state from dim " << N_ 
+                      << " to full space dim " << full_state.size() << " before saving to HDF5" << std::endl;
+        } else {
+            HDF5IO::saveTPQState(hdf5_path, sample, beta, h_state);
+        }
+        
+        return true;
+    } catch (const std::exception& e) {
+        std::cerr << "Error saving GPU TPQ state to HDF5: " << e.what() << std::endl;
+        return false;
+    }
+}
+
 bool GPUTPQSolver::loadTPQState(const std::string& filename) {
     std::ifstream file(filename, std::ios::binary);
     if (!file.is_open()) {
@@ -738,14 +763,11 @@ void GPUTPQSolver::runMicrocanonicalTPQ(
                               << ", β = " << inv_temp << std::endl;
                 }
                 
-                // Save TPQ state at target temperatures (with accurate inv_temp)
+                // Save TPQ state at target temperatures (with accurate inv_temp) to HDF5
                 if (actually_at_target) {
                     std::cout << "  *** Saving TPQ state at β = " << inv_temp 
                               << " (target: " << measure_inv_temp[target_temp_idx] << ") ***" << std::endl;
-                    std::string state_file = dir + "/tpq_state_" + std::to_string(sample) + 
-                                           "_beta=" + std::to_string(inv_temp) + 
-                                           "_step=" + std::to_string(step) + ".dat";
-                    saveTPQState(state_file, fixed_sz_op);
+                    saveTPQStateHDF5(dir, sample, inv_temp, fixed_sz_op);
                     temp_measured[target_temp_idx] = true;
                 }
             }
@@ -887,21 +909,11 @@ void GPUTPQSolver::runCanonicalTPQ(
                 
                 writeTPQDataHDF5(h5_file, sample, beta, E, var, 0.0, step);
                 
-                // Save state periodically
-                if (step % (temp_interval * 5) == 0) {
-                    std::string state_file = dir + "/ctpq_state_" + std::to_string(sample) + 
-                                           "_beta=" + std::to_string(beta) + ".dat";
-                    saveTPQState(state_file, fixed_sz_op);
-                }
-                
-                // Save TPQ state at target temperatures
+                // Save TPQ state at target temperatures to HDF5
                 if (should_measure_observables && target_temp_idx >= 0) {
                     std::cout << "  *** Saving TPQ state at β = " << beta 
                               << " (target: " << measure_inv_temp[target_temp_idx] << ") ***" << std::endl;
-                    std::string state_file = dir + "/tpq_state_" + std::to_string(sample) + 
-                                           "_beta=" + std::to_string(beta) + 
-                                           "_step=" + std::to_string(step) + ".dat";
-                    saveTPQState(state_file, fixed_sz_op);
+                    saveTPQStateHDF5(dir, sample, beta, fixed_sz_op);
                     temp_measured[target_temp_idx] = true;
                 }
             }

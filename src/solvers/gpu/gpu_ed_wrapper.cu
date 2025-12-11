@@ -200,7 +200,8 @@ void* GPUEDWrapper::createGPUOperatorFromFiles(
             }
             
             // Add directly to transform_data_ - no char conversion!
-            gpu_op->addTwoBodyTerm(Op_i, indx_i, Op_j, indx_j, std::complex<double>(E, 0.0));
+            // IMPORTANT: Use both real (E) and imaginary (F) parts of the coefficient
+            gpu_op->addTwoBodyTerm(Op_i, indx_i, Op_j, indx_j, std::complex<double>(E, F));
             num_interactions++;
             
             lineCount++;
@@ -237,7 +238,8 @@ void* GPUEDWrapper::createGPUOperatorFromFiles(
             // Only process if coupling is non-zero
             if (std::abs(E) > 1e-12 || std::abs(F) > 1e-12) {
                 // Add directly to transform_data_ - no char conversion!
-                gpu_op->addOneBodyTerm(Op, indx, std::complex<double>(E, 0.0));
+                // IMPORTANT: Use both real (E) and imaginary (F) parts of the coefficient
+                gpu_op->addOneBodyTerm(Op, indx, std::complex<double>(E, F));
                 num_single_site++;
             }
             
@@ -358,11 +360,23 @@ void GPUEDWrapper::runGPULanczos(void* gpu_op_handle,
     std::vector<std::vector<std::complex<double>>> eigvecs;
     lanczos.run(num_eigs, eigenvalues, eigvecs, eigenvectors);
     
-    // Save eigenvectors using unified HDF5 function
-    if (eigenvectors && !dir.empty() && !eigvecs.empty()) {
-        HDF5IO::saveDiagonalizationResults(dir, eigenvalues, eigvecs, "GPU_LANCZOS");
-        std::cout << "GPU Lanczos: Saved " << eigenvalues.size() << " eigenvalues and " 
-                  << eigvecs.size() << " eigenvectors to " << dir << "/eigenvectors/ed_results.h5" << std::endl;
+    // Save results to HDF5
+    if (!dir.empty()) {
+        if (eigenvectors && !eigvecs.empty()) {
+            // Save both eigenvalues and eigenvectors
+            HDF5IO::saveDiagonalizationResults(dir, eigenvalues, eigvecs, "GPU_LANCZOS");
+            std::cout << "GPU Lanczos: Saved " << eigenvalues.size() << " eigenvalues and " 
+                      << eigvecs.size() << " eigenvectors to " << dir << "/eigenvectors/ed_results.h5" << std::endl;
+        } else {
+            // Save eigenvalues only
+            try {
+                std::string hdf5_file = HDF5IO::createOrOpenFile(dir);
+                HDF5IO::saveEigenvalues(hdf5_file, eigenvalues);
+                std::cout << "GPU Lanczos: Saved " << eigenvalues.size() << " eigenvalues to " << hdf5_file << std::endl;
+            } catch (const std::exception& e) {
+                std::cerr << "Warning: Failed to save eigenvalues to HDF5: " << e.what() << std::endl;
+            }
+        }
     }
     
     // Print statistics
@@ -407,11 +421,23 @@ void GPUEDWrapper::runGPULanczosFixedSz(void* gpu_op_handle,
     std::vector<std::vector<std::complex<double>>> eigvecs;
     lanczos.run(num_eigs, eigenvalues, eigvecs, eigenvectors);
     
-    // Save eigenvectors using unified HDF5 function
-    if (eigenvectors && !dir.empty() && !eigvecs.empty()) {
-        HDF5IO::saveDiagonalizationResults(dir, eigenvalues, eigvecs, "GPU_LANCZOS_FIXED_SZ");
-        std::cout << "GPU Lanczos Fixed Sz: Saved " << eigenvalues.size() << " eigenvalues and " 
-                  << eigvecs.size() << " eigenvectors to " << dir << "/eigenvectors/ed_results.h5" << std::endl;
+    // Save results to HDF5
+    if (!dir.empty()) {
+        if (eigenvectors && !eigvecs.empty()) {
+            // Save both eigenvalues and eigenvectors
+            HDF5IO::saveDiagonalizationResults(dir, eigenvalues, eigvecs, "GPU_LANCZOS_FIXED_SZ");
+            std::cout << "GPU Lanczos Fixed Sz: Saved " << eigenvalues.size() << " eigenvalues and " 
+                      << eigvecs.size() << " eigenvectors to " << dir << "/eigenvectors/ed_results.h5" << std::endl;
+        } else {
+            // Save eigenvalues only
+            try {
+                std::string hdf5_file = HDF5IO::createOrOpenFile(dir);
+                HDF5IO::saveEigenvalues(hdf5_file, eigenvalues);
+                std::cout << "GPU Lanczos Fixed Sz: Saved " << eigenvalues.size() << " eigenvalues to " << hdf5_file << std::endl;
+            } catch (const std::exception& e) {
+                std::cerr << "Warning: Failed to save eigenvalues to HDF5: " << e.what() << std::endl;
+            }
+        }
     }
     
     // Print statistics

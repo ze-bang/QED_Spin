@@ -121,14 +121,16 @@ __global__ void matVecTransformParallel(const cuDoubleComplex* x, cuDoubleComple
         }
     }
     
-    // Coalesced read and atomic accumulation
+    // CORRECT: Read from input state, write to output (new_state)
+    // Transform encodes: state -> new_state, so H[new_state, state] = factor
+    // y[new_state] += factor * x[state]
     if (valid && new_state < N) {
-        cuDoubleComplex x_val = __ldg(&x[new_state]);
+        cuDoubleComplex x_val = __ldg(&x[state_idx]);
         cuDoubleComplex contrib = cuCmul(factor, x_val);
         
         // Atomic add for complex numbers (separate real/imaginary)
-        atomicAddDouble(&y[state_idx].x, cuCreal(contrib));
-        atomicAddDouble(&y[state_idx].y, cuCimag(contrib));
+        atomicAddDouble(&y[new_state].x, cuCreal(contrib));
+        atomicAddDouble(&y[new_state].y, cuCimag(contrib));
     }
 }
 
@@ -139,22 +141,22 @@ __global__ void matVecTransformParallel(const cuDoubleComplex* x, cuDoubleComple
  * 1. Read-only cache for random access to input vector (via __ldg)
  * 2. Shared memory for transform data (reduces global memory traffic)
  * 3. Direct evaluation without function pointers
- * 4. Warp-level optimizations where possible
+ * 4. Atomic writes to handle scatter pattern correctly
+ * 
+ * FIXED: Correctly implements y[new_state] += factor * x[state] 
+ * Transform encodes: state -> new_state, so H[new_state, state] = factor
  */
 __global__ void matVecKernelOptimized(cudaTextureObject_t tex_x_unused, cuDoubleComplex* y,
                                       int N, int n_sites, float spin_l,
                                       const GPUTransformData* transforms, int num_transforms,
                                       const cuDoubleComplex* x) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= N) return;
-    
-    uint64_t state = static_cast<uint64_t>(idx);
-    cuDoubleComplex result = make_cuDoubleComplex(0.0, 0.0);
     
     // Use shared memory for transforms if small enough
     extern __shared__ GPUTransformData s_transforms[];
     
-    // Load transforms into shared memory (coalesced)
+    // ALL threads in block participate in loading transforms into shared memory
+    // This must happen BEFORE the early return to avoid __syncthreads deadlock
     int num_loads = (num_transforms + blockDim.x - 1) / blockDim.x;
     for (int i = 0; i < num_loads; ++i) {
         int tidx = i * blockDim.x + threadIdx.x;
@@ -163,6 +165,14 @@ __global__ void matVecKernelOptimized(cudaTextureObject_t tex_x_unused, cuDouble
         }
     }
     __syncthreads();
+    
+    // Now threads with invalid state can exit
+    if (idx >= N) return;
+    
+    uint64_t state = static_cast<uint64_t>(idx);
+    
+    // Read input value once (coalesced read)
+    cuDoubleComplex x_val = __ldg(&x[idx]);
     
     // Process all transforms for this basis state
     const GPUTransformData* t_data = (num_transforms <= 4096) ? s_transforms : transforms;
@@ -174,7 +184,6 @@ __global__ void matVecKernelOptimized(cudaTextureObject_t tex_x_unused, cuDouble
         if (tdata.is_two_body) {
             // Two-body operator
             uint64_t bit1 = (state >> tdata.site_index) & 1;
-            // Note: bit2 calculated after first operator (as bit2_new)
             
             uint64_t new_state = state;
             cuDoubleComplex factor = tdata.coefficient;
@@ -212,11 +221,11 @@ __global__ void matVecKernelOptimized(cudaTextureObject_t tex_x_unused, cuDouble
                 }
             }
             
+            // CORRECT: Write to y[new_state], not y[state]
             if (valid && new_state < N) {
-                // Use __ldg for read-only cached load (L2/texture cache)
-                cuDoubleComplex x_complex = __ldg(&x[new_state]);
-                cuDoubleComplex contrib = cuCmul(factor, x_complex);
-                result = complex_add(result, contrib);
+                cuDoubleComplex contrib = cuCmul(factor, x_val);
+                atomicAddDouble(&y[new_state].x, cuCreal(contrib));
+                atomicAddDouble(&y[new_state].y, cuCimag(contrib));
             }
         } else {
             // One-body operator
@@ -238,17 +247,14 @@ __global__ void matVecKernelOptimized(cudaTextureObject_t tex_x_unused, cuDouble
                 }
             }
             
+            // CORRECT: Write to y[new_state], not y[state]
             if (valid && new_state < N) {
-                // Use __ldg for cached read
-                cuDoubleComplex x_complex = __ldg(&x[new_state]);
-                cuDoubleComplex contrib = cuCmul(factor, x_complex);
-                result = complex_add(result, contrib);
+                cuDoubleComplex contrib = cuCmul(factor, x_val);
+                atomicAddDouble(&y[new_state].x, cuCreal(contrib));
+                atomicAddDouble(&y[new_state].y, cuCimag(contrib));
             }
         }
     }
-    
-    // Write result
-    y[idx] = result;
 }
 
 /**
@@ -549,15 +555,17 @@ __global__ void matVecFixedSzTransformParallel(const cuDoubleComplex* x, cuDoubl
     }
     
     // Binary search and atomic accumulation
+    // CORRECT: Read from input state, write to output (new_state)
+    // Transform encodes: state -> new_state, so H[new_state, state] = factor
     if (valid) {
         int new_idx = lookupState(new_state, basis_states, N);
         if (new_idx >= 0) {
-            cuDoubleComplex x_val = __ldg(&x[new_idx]);
+            cuDoubleComplex x_val = __ldg(&x[state_idx]);
             cuDoubleComplex contrib = cuCmul(factor, x_val);
             
-            // Atomic add for complex numbers
-            atomicAddDouble(&y[state_idx].x, cuCreal(contrib));
-            atomicAddDouble(&y[state_idx].y, cuCimag(contrib));
+            // Atomic add for complex numbers - write to y[new_idx], not y[state_idx]
+            atomicAddDouble(&y[new_idx].x, cuCreal(contrib));
+            atomicAddDouble(&y[new_idx].y, cuCimag(contrib));
         }
     }
 }
@@ -567,16 +575,12 @@ __global__ void matVecFixedSzKernelOptimized(const cuDoubleComplex* x, cuDoubleC
                                              int N, int n_sites, float spin_l,
                                              const GPUTransformData* transforms, int num_transforms) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= N) return;
-    
-    // Get basis state for this index
-    uint64_t state = basis_states[idx];
-    cuDoubleComplex result = make_cuDoubleComplex(0.0, 0.0);
     
     // Use shared memory for transforms if small enough
     extern __shared__ GPUTransformData s_transforms[];
     
-    // Load transforms into shared memory (coalesced)
+    // ALL threads in block participate in loading transforms into shared memory
+    // This must happen BEFORE the early return to avoid __syncthreads deadlock
     int num_loads = (num_transforms + blockDim.x - 1) / blockDim.x;
     for (int i = 0; i < num_loads; ++i) {
         int tidx = i * blockDim.x + threadIdx.x;
@@ -585,6 +589,15 @@ __global__ void matVecFixedSzKernelOptimized(const cuDoubleComplex* x, cuDoubleC
         }
     }
     __syncthreads();
+    
+    // Now threads with invalid state can exit
+    if (idx >= N) return;
+    
+    // Get basis state for this index
+    uint64_t state = basis_states[idx];
+    
+    // Read input value once (coalesced read)
+    cuDoubleComplex x_val = __ldg(&x[idx]);
     
     // Process all transforms for this basis state
     const GPUTransformData* t_data = (num_transforms <= 4096) ? s_transforms : transforms;
@@ -596,7 +609,6 @@ __global__ void matVecFixedSzKernelOptimized(const cuDoubleComplex* x, cuDoubleC
         if (tdata.is_two_body) {
             // Two-body operator
             uint64_t bit1 = (state >> tdata.site_index) & 1;
-            // Note: bit2 calculated after first operator (as bit2_new)
             
             uint64_t new_state = state;
             cuDoubleComplex factor = tdata.coefficient;
@@ -629,13 +641,13 @@ __global__ void matVecFixedSzKernelOptimized(const cuDoubleComplex* x, cuDoubleC
                 }
             }
             
+            // CORRECT: Write to y[new_idx], read from x[idx]
             if (valid) {
-                // OPTIMIZED: Binary search for state index (warp-coherent)
                 int new_idx = lookupState(new_state, basis_states, N);
                 if (new_idx >= 0) {
-                    cuDoubleComplex x_complex = __ldg(&x[new_idx]);
-                    cuDoubleComplex contrib = cuCmul(factor, x_complex);
-                    result = complex_add(result, contrib);
+                    cuDoubleComplex contrib = cuCmul(factor, x_val);
+                    atomicAddDouble(&y[new_idx].x, cuCreal(contrib));
+                    atomicAddDouble(&y[new_idx].y, cuCimag(contrib));
                 }
             }
         } else {
@@ -656,20 +668,17 @@ __global__ void matVecFixedSzKernelOptimized(const cuDoubleComplex* x, cuDoubleC
                 }
             }
             
+            // CORRECT: Write to y[new_idx], read from x[idx]
             if (valid) {
-                // OPTIMIZED: Binary search
                 int new_idx = lookupState(new_state, basis_states, N);
                 if (new_idx >= 0) {
-                    cuDoubleComplex x_complex = __ldg(&x[new_idx]);
-                    cuDoubleComplex contrib = cuCmul(factor, x_complex);
-                    result = complex_add(result, contrib);
+                    cuDoubleComplex contrib = cuCmul(factor, x_val);
+                    atomicAddDouble(&y[new_idx].x, cuCreal(contrib));
+                    atomicAddDouble(&y[new_idx].y, cuCimag(contrib));
                 }
             }
         }
     }
-    
-    // Write result
-    y[idx] = result;
 }
 
 /**

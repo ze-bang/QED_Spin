@@ -1971,7 +1971,11 @@ void transform_and_save_sector_states(
     
     uint64_t full_dim = 1ULL << params.num_sites;
     std::string eigenvector_dir = params.output_dir + "/eigenvectors";
-    safe_system_call("mkdir -p " + eigenvector_dir);
+    
+    // Only create eigenvector directory if we're computing eigenvectors (not for TPQ)
+    if (params.compute_eigenvectors) {
+        safe_system_call("mkdir -p " + eigenvector_dir);
+    }
     
     // Calculate block_start_dim by summing dimensions of previous sectors
     uint64_t block_start_dim = 0;
@@ -2880,7 +2884,12 @@ EDResults exact_diagonalization_from_directory_symmetrized(
         // Transform eigenvectors/states if needed
         if (params.compute_eigenvectors || (is_tpq_method && is_target_block)) {
             std::string eigenvector_dir = params.output_dir + "/eigenvectors";
-            safe_system_call("mkdir -p " + eigenvector_dir);
+            
+            // Only create eigenvector directory if we're computing eigenvectors (not for TPQ)
+            if (params.compute_eigenvectors && method != DiagonalizationMethod::mTPQ && 
+                method != DiagonalizationMethod::mTPQ_CUDA && method != DiagonalizationMethod::cTPQ) {
+                safe_system_call("mkdir -p " + eigenvector_dir);
+            }
             
             if (is_tpq_method && is_target_block) {
                 ed_internal::transform_and_save_tpq_states(

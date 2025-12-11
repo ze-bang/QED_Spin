@@ -2368,10 +2368,8 @@ void canonical_tpq(
         std::cout << "==========================================\n";
         
         // Convert TPQ results to HDF5 format
-        // Note: canonical TPQ uses same SS_rand format, but output as cTPQ
-        std::filesystem::path tpq_path(dir);
-        std::filesystem::path output_dir = tpq_path.parent_path();
-        std::string h5_path = HDF5IO::createOrOpenFile(output_dir.string());
+        // dir IS the output directory, use it directly
+        std::string h5_path = HDF5IO::createOrOpenFile(dir);
         convert_tpq_to_unified_thermo(dir, h5_path);
     } else {
         // Clear energies on non-root ranks to save memory
@@ -2382,9 +2380,8 @@ void canonical_tpq(
     MPI_Barrier(MPI_COMM_WORLD);
     #else
     // Non-MPI: convert TPQ results to HDF5 format
-    std::filesystem::path tpq_path(dir);
-    std::filesystem::path output_dir = tpq_path.parent_path();
-    std::string h5_path = HDF5IO::createOrOpenFile(output_dir.string());
+    // dir IS the output directory, use it directly
+    std::string h5_path = HDF5IO::createOrOpenFile(dir);
     convert_tpq_to_unified_thermo(dir, h5_path);
     #endif
 }
@@ -2635,12 +2632,8 @@ void convert_tpq_to_unified_thermodynamics(
     double temp_max,
     uint64_t num_temp_points
 ) {
-    // Auto-generate output path to HDF5 file
-    // tpq_dir is typically output/tpq/ so we go up to output/
-    std::filesystem::path tpq_path(tpq_dir);
-    std::filesystem::path output_dir = tpq_path.parent_path();
-    
-    std::string h5_path = HDF5IO::createOrOpenFile(output_dir.string());
+    // tpq_dir IS the output directory, use it directly
+    std::string h5_path = HDF5IO::createOrOpenFile(tpq_dir);
     
     std::cout << "Converting TPQ results to HDF5..." << std::endl;
     std::cout << "  Input directory: " << tpq_dir << std::endl;

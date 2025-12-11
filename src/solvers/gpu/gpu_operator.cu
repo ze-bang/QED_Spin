@@ -455,6 +455,9 @@ void GPUOperator::matVecGPU(const cuDoubleComplex* d_x, cuDoubleComplex* d_y, in
             CUDA_CHECK(cudaGetLastError());
         } else {
             // State-parallel kernel (better for small T)
+            // Zero output vector (required for atomic accumulation since we scatter writes)
+            CUDA_CHECK(cudaMemset(d_y, 0, N * sizeof(cuDoubleComplex)));
+            
             int num_blocks = (N + BLOCK_SIZE - 1) / BLOCK_SIZE;
             num_blocks = std::min(num_blocks, MAX_BLOCKS);
             

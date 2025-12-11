@@ -128,6 +128,7 @@ private:
                           double doublon, uint64_t step);
     bool saveTPQState(const std::string& filename);
     bool saveTPQState(const std::string& filename, class GPUFixedSzOperator* fixed_sz_op);
+    bool saveTPQStateHDF5(const std::string& dir, size_t sample, double beta, class GPUFixedSzOperator* fixed_sz_op);
     bool loadTPQState(const std::string& filename);
     
     /**
