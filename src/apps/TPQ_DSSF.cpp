@@ -790,25 +790,20 @@ bool load_eigenvector_from_hdf5(ComplexVector& state, const std::string& h5_path
 
 // Helper function to find HDF5 file containing eigenvectors
 // Returns empty string if not found
+// Eigenvectors are stored at /eigendata/eigenvector_0 in ed_results.h5
 std::string find_eigenvector_hdf5(const std::string& directory) {
-    std::vector<std::string> h5_paths = {
-        directory + "/output/ed_results.h5",
-        directory + "/ed_results.h5",
-        directory + "/output/eigenvectors/ed_results.h5"  // Legacy path (deprecated)
-    };
+    std::string h5_path = directory + "/output/ed_results.h5";
     
-    for (const auto& path : h5_paths) {
-        if (std::filesystem::exists(path)) {
-            try {
-                H5::H5File file(path, H5F_ACC_RDONLY);
-                if (file.nameExists("/eigendata/eigenvector_0")) {
-                    file.close();
-                    return path;
-                }
+    if (std::filesystem::exists(h5_path)) {
+        try {
+            H5::H5File file(h5_path, H5F_ACC_RDONLY);
+            if (file.nameExists("/eigendata/eigenvector_0")) {
                 file.close();
-            } catch (...) {
-                // Continue to next path
+                return h5_path;
             }
+            file.close();
+        } catch (...) {
+            // File exists but couldn't be read
         }
     }
     return "";
@@ -838,9 +833,8 @@ int main(int argc, char* argv[]) {
             std::cerr << "\n" << std::string(80, '=') << std::endl;
             std::cerr << "OPTIONAL ARGUMENTS:" << std::endl;
             std::cerr << std::string(80, '=') << std::endl;
-            std::cerr << "  method (default: spectral): spectral | spectral_thermal | ftlm_thermal | static | ground_state" << std::endl;
+            std::cerr << "  method (default: spectral): spectral | ftlm_thermal | static | ground_state" << std::endl;
             std::cerr << "    - spectral: Frequency-domain spectral function S(ω) via Lanczos (single state)" << std::endl;
-            std::cerr << "    - spectral_thermal: Frequency-domain S(ω) from given state at multiple temperatures" << std::endl;
             std::cerr << "    - ftlm_thermal: TRUE thermal DSSF with random state sampling (FTLM multi-sample)" << std::endl;
             std::cerr << "    - static: Static structure factor ⟨O₁†O₂⟩ vs temperature (SSSF)" << std::endl;
             std::cerr << "    - ground_state: Ground state spectral function using continued fraction" << std::endl;
@@ -868,29 +862,22 @@ int main(int argc, char* argv[]) {
             std::cerr << "    - When n_up >= 0: restricts to fixed total Sz = n_up - n_down = n_up - (num_sites - n_up)" << std::endl;
             std::cerr << "    - Reduces Hilbert space dimension from 2^N to C(N, n_up)" << std::endl;
             std::cerr << "    - Example: for 16 sites with n_up=8, dimension reduces from 65536 to 12870" << std::endl;
-            std::cerr << "  T_min,T_max,T_steps (for spectral_thermal only): Temperature scan parameters" << std::endl;
+            std::cerr << "  T_min,T_max,T_steps (for ftlm_thermal/static): Temperature scan parameters" << std::endl;
             std::cerr << "    - Format: \"T_min,T_max,T_steps\" e.g., \"0.1,10.0,10\"" << std::endl;
             std::cerr << "    - T_min: Minimum temperature" << std::endl;
             std::cerr << "    - T_max: Maximum temperature" << std::endl;
             std::cerr << "    - T_steps: Number of temperature points (logarithmic spacing)" << std::endl;
-            std::cerr << "    - If not specified, uses temperature from TPQ state (T = 1/β)" << std::endl;
-            std::cerr << "    - When specified, computes S(ω,T) for each temperature in the range" << std::endl;
             std::cerr << "\n" << std::string(80, '=') << std::endl;
-            std::cerr << "SPECTRAL METHOD (method=spectral or method=spectral_thermal) DETAILS:" << std::endl;
+            std::cerr << "SPECTRAL METHOD (method=spectral) DETAILS:" << std::endl;
             std::cerr << std::string(80, '=') << std::endl;
             std::cerr << "The spectral methods compute the dynamical structure factor (DSF):" << std::endl;
             std::cerr << "  S(q,ω) = (1/π) × Im[⟨ψ|O₁†(q) G(ω) O₂(q)|ψ⟩]" << std::endl;
             std::cerr << "where G(ω) = 1/(ω - H + iη) is the Green's function." << std::endl;
-            std::cerr << "\nTwo variants available:" << std::endl;
-            std::cerr << "  1. spectral: Single-state calculation (for T=0 or specific TPQ states)" << std::endl;
-            std::cerr << "     - Uses the given state |ψ⟩ directly" << std::endl;
-            std::cerr << "     - Fastest option for ground state calculations" << std::endl;
-            std::cerr << "  2. spectral_thermal: Finite-temperature with thermal averaging" << std::endl;
-            std::cerr << "     - Uses FTLM with random sampling for thermal ensemble averaging" << std::endl;
-            std::cerr << "     - Computes S(q,ω,T) = Tr[ρ(T) O₁†(q) δ(ω-H) O₂(q)]" << std::endl;
-            std::cerr << "     - Number of samples: 40 (configurable in code)" << std::endl;
-            std::cerr << "     - Temperature: Can scan over T range or use TPQ state temperature" << std::endl;
-            std::cerr << "     - More accurate for finite temperature but slower" << std::endl;
+            std::cerr << "\nThis method computes:" << std::endl;
+            std::cerr << "  - Single-state calculation (for T=0 or specific TPQ states)" << std::endl;
+            std::cerr << "  - Uses the given state |ψ⟩ directly" << std::endl;
+            std::cerr << "  - Fastest option for ground state calculations" << std::endl;
+            std::cerr << "  - For finite-T, use ftlm_thermal instead" << std::endl;
             std::cerr << "\nParameters:" << std::endl;
             std::cerr << "  krylov_dim_or_nmax: Lanczos order (typical values: 30-100)" << std::endl;
             std::cerr << "    - Higher values = better convergence but more computational cost" << std::endl;
@@ -906,7 +893,6 @@ int main(int argc, char* argv[]) {
             std::cerr << "    - Typical values: 100-500 depending on energy scale" << std::endl;
             std::cerr << "\nOutput files:" << std::endl;
             std::cerr << "  - spectral method: <operator>_spectral_sample_<idx>_beta_<beta>.txt" << std::endl;
-            std::cerr << "  - spectral_thermal method: <operator>_spectral_thermal_sample_<idx>_beta_<beta>_T_<T>_nsamples_<N>.txt" << std::endl;
             std::cerr << "  - Columns: frequency(ω) | spectral_intensity S(ω) | error (if applicable)" << std::endl;
             std::cerr << "\n" << std::string(80, '=') << std::endl;
             std::cerr << "FTLM THERMAL METHOD (method=ftlm_thermal) DETAILS:" << std::endl;
@@ -943,23 +929,17 @@ int main(int argc, char* argv[]) {
             std::cerr << "   " << argv[0] << " ./data 50 \"2,2\"" << std::endl;
             std::cerr << "\n2. Spectral function with custom parameters:" << std::endl;
             std::cerr << "   " << argv[0] << " ./data 50 \"2,2\" spectral sum ladder \"-5,5,200,0.1\" 4 \"0,0,0;0,0,1\"" << std::endl;
-            std::cerr << "\n3. Thermal spectral function with FTLM averaging:" << std::endl;
-            std::cerr << "   " << argv[0] << " ./data 50 \"2,2\" spectral_thermal sum ladder \"-5,5,200,0.1\" 4 \"0,0,0;0,0,1\"" << std::endl;
-            std::cerr << "\n4. Transverse scattering with custom polarization:" << std::endl;
+            std::cerr << "\n3. Transverse scattering with custom polarization:" << std::endl;
             std::cerr << "   " << argv[0] << " ./data 40 \"2,2\" spectral transverse xyz \"-10,10,300,0.2\" 4 \"0,0,0\" \"1,0,0\"" << std::endl;
             std::cerr << "\n5. Experimental geometry with angle:" << std::endl;
             std::cerr << "   " << argv[0] << " ./data 50 \"2,2\" spectral experimental xyz \"-5,5,250,0.1\" 4 \"0,0,0\" \"0,0,0\" 0.785" << std::endl;
-            std::cerr << "\n6. Fixed-Sz sector calculation (Sz = 0 for 16 sites):" << std::endl;
+            std::cerr << "\n5. Fixed-Sz sector calculation (Sz = 0 for 16 sites):" << std::endl;
             std::cerr << "   " << argv[0] << " ./data 50 \"2,2\" spectral sum ladder \"-5,5,200,0.1\" 4 \"0,0,0\" \"0,0,0\" 0 0 8" << std::endl;
-            std::cerr << "\n7. Thermal spectral with fixed-Sz:" << std::endl;
-            std::cerr << "   " << argv[0] << " ./data 50 \"2,2\" spectral_thermal sum ladder \"-5,5,200,0.1\" 4 \"0,0,0\" \"0,0,0\" 0 0 8" << std::endl;
-            std::cerr << "\n8. Temperature scan with spectral_thermal:" << std::endl;
-            std::cerr << "   " << argv[0] << " ./data 50 \"2,2\" spectral_thermal sum ladder \"-5,5,200,0.1\" 4 \"0,0,0\" \"0,0,0\" 0 0 -1 \"0.1,10.0,10\"" << std::endl;
-            std::cerr << "\n9. TRUE finite-T DSSF with FTLM random sampling:" << std::endl;
+            std::cerr << "\n6. Finite-T DSSF with FTLM random sampling:" << std::endl;
             std::cerr << "   " << argv[0] << " ./data 50 \"2,2\" ftlm_thermal sum ladder \"-5,5,200,0.1\" 4 \"0,0,0\" \"0,0,0\" 0 0 -1 \"0.1,10.0,10\"" << std::endl;
-            std::cerr << "\n10. Static structure factor (SSSF) vs temperature:" << std::endl;
+            std::cerr << "\n7. Static structure factor (SSSF) vs temperature:" << std::endl;
             std::cerr << "   " << argv[0] << " ./data 50 \"2,2\" static sum ladder \"0,0,0,0\" 4 \"0,0,0\" \"0,0,0\" 0 0 -1 \"0.1,10.0,20\"" << std::endl;
-            std::cerr << "\n11. Ground state DSSF (T=0, requires eigenvector):" << std::endl;
+            std::cerr << "\n8. Ground state DSSF (T=0, requires eigenvector):" << std::endl;
             std::cerr << "   " << argv[0] << " ./data 100 \"2,2\" ground_state sum ladder \"-5,5,200,0.05\" 4 \"0,0,0;0,0,1\"" << std::endl;
         }
         MPI_Finalize();
@@ -1004,8 +984,8 @@ int main(int argc, char* argv[]) {
     if (argc >= 8) {
         std::string param_str = argv[7];
         
-        if (method == "spectral" || method == "spectral_thermal") {
-            // Parse omega_min,omega_max,num_omega_bins,broadening for spectral methods
+        if (method == "spectral") {
+            // Parse omega_min,omega_max,num_omega_bins,broadening for spectral method
             std::stringstream ss(param_str);
             std::string val;
             std::vector<std::string> tokens;
@@ -1193,8 +1173,8 @@ int main(int argc, char* argv[]) {
         }
     }
 
-    // Parse temperature scan parameters for spectral_thermal (optional)
-    double T_min = 1e-3;  // Negative means use TPQ state temperature
+    // Parse temperature scan parameters for ftlm_thermal/static (optional)
+    double T_min = 1e-3;
     double T_max = 1.0;
     int T_steps = 20;
     bool use_temperature_scan = true;
@@ -1375,7 +1355,7 @@ int main(int argc, char* argv[]) {
     // Read ground state energy for energy shift in spectral functions
     double ground_state_energy = 0.0;
     bool has_ground_state_energy = false;
-    if (method == "spectral" || method == "spectral_thermal") {
+    if (method == "spectral") {
         try {
             if (rank == 0) {
                 std::cout << "Reading ground state energy (minimum across all sources)..." << std::endl;
@@ -1524,6 +1504,29 @@ int main(int argc, char* argv[]) {
     if (rank == 0) {
         std::string tpq_directory = directory + "/output";
         
+        // Check if output directory exists (only critical for methods that need pre-computed states)
+        bool needs_precomputed_states = (method == "spectral" || method == "ground_state");
+        
+        if (!fs::exists(tpq_directory)) {
+            if (needs_precomputed_states) {
+                std::cerr << "\nError: Output directory does not exist: " << tpq_directory << std::endl;
+                std::cerr << "\nThe '" << method << "' method requires pre-computed quantum states." << std::endl;
+                std::cerr << "Please run one of the following first:" << std::endl;
+                std::cerr << "  1. TPQ calculation: ED --config <config_file> (with tpq_mode enabled)" << std::endl;
+                std::cerr << "  2. Exact diagonalization: ED --config <config_file> (with save_eigenvectors=true)" << std::endl;
+                std::cerr << "\nAlternatively, use 'ftlm_thermal' method which generates random states internally." << std::endl;
+                MPI_Abort(MPI_COMM_WORLD, 1);
+            } else {
+                // For ftlm_thermal/static, create a dummy entry so the task loop runs once
+                std::cout << "Output directory not found, but '" << method << "' generates states internally." << std::endl;
+                std::cout << "Creating dummy task entry for processing..." << std::endl;
+                tpq_files.push_back("INTERNAL_RANDOM_STATES");
+                sample_indices.push_back(0);
+                beta_strings.push_back("scan");
+                beta_values.push_back(0.0);
+            }
+        }
+        
         // First, check for TPQ states in unified HDF5 file
         std::string hdf5_path = tpq_directory + "/ed_results.h5";
         bool found_hdf5_tpq_states = false;
@@ -1557,54 +1560,51 @@ int main(int argc, char* argv[]) {
         if (!found_hdf5_tpq_states) {
             std::cout << "No TPQ states in HDF5, checking for legacy .dat files..." << std::endl;
             
-            for (const auto& entry : fs::directory_iterator(tpq_directory)) {
-                if (!entry.is_regular_file()) continue;
-                
-                std::string filename = entry.path().filename().string();
-                std::smatch match;
-                
-                if (std::regex_match(filename, match, state_pattern_new)) {
-                    tpq_files.push_back(entry.path().string());
-                    sample_indices.push_back(std::stoi(match[1]));
-                    beta_strings.push_back(match[2]);
-                    beta_values.push_back(std::stod(match[2]));
+            try {
+                for (const auto& entry : fs::directory_iterator(tpq_directory)) {
+                    if (!entry.is_regular_file()) continue;
+                    
+                    std::string filename = entry.path().filename().string();
+                    std::smatch match;
+                    
+                    if (std::regex_match(filename, match, state_pattern_new)) {
+                        tpq_files.push_back(entry.path().string());
+                        sample_indices.push_back(std::stoi(match[1]));
+                        beta_strings.push_back(match[2]);
+                        beta_values.push_back(std::stod(match[2]));
+                    }
                 }
+            } catch (const fs::filesystem_error& e) {
+                std::cerr << "Warning: Error reading directory " << tpq_directory << ": " << e.what() << std::endl;
             }
         }
 
-        // Optionally include zero-temperature ground-state eigenvector
-        // Priority: HDF5 > legacy .dat file
+        // Include zero-temperature ground-state eigenvector if available
+        // Eigenvectors are stored in HDF5 format at /eigendata/eigenvector_0
         std::string gs_hdf5_path = find_eigenvector_hdf5(directory);
-        const std::string gs_file_legacy = tpq_directory + "/eigenvector_0.dat";
-        const std::string gs_file_legacy_old = tpq_directory + "/eigenvectors/eigenvector_0.dat";  // Old legacy path
         
-        bool gs_found = false;
         if (!gs_hdf5_path.empty()) {
-            // Use special marker "HDF5:0" to indicate HDF5 eigenvector 0
+            // Use special marker "HDF5:<path>:0" to indicate HDF5 eigenvector 0
             tpq_files.push_back("HDF5:" + gs_hdf5_path + ":0");
             sample_indices.push_back(0); // use 0 as a conventional index for ground state
             beta_strings.push_back("inf");
             beta_values.push_back(std::numeric_limits<double>::infinity());
-            gs_found = true;
             std::cout << "Found ground state eigenvector in HDF5: " << gs_hdf5_path << std::endl;
-        } else if (fs::exists(gs_file_legacy)) {
-            tpq_files.push_back(gs_file_legacy);
-            sample_indices.push_back(0); // use 0 as a conventional index for ground state
-            beta_strings.push_back("inf");
-            beta_values.push_back(std::numeric_limits<double>::infinity());
-            gs_found = true;
-            std::cout << "Found ground state eigenvector in legacy format: " << gs_file_legacy << std::endl;
-        } else if (fs::exists(gs_file_legacy_old)) {
-            tpq_files.push_back(gs_file_legacy_old);
-            sample_indices.push_back(0); // use 0 as a conventional index for ground state
-            beta_strings.push_back("inf");
-            beta_values.push_back(std::numeric_limits<double>::infinity());
-            gs_found = true;
-            std::cout << "Found ground state eigenvector in old legacy format: " << gs_file_legacy_old << std::endl;
+        } else {
+            std::cout << "No ground state eigenvector found in " << tpq_directory << "/ed_results.h5" << std::endl;
         }
         
-        if (!gs_found) {
-            std::cout << "No ground state eigenvector found (checked HDF5 and legacy .dat)" << std::endl;
+        // For methods that don't need pre-computed states, add fallback dummy entry
+        if (tpq_files.empty()) {
+            bool needs_precomputed = (method == "spectral" || method == "ground_state" || 
+                                      method == "spin_correlation" || method == "spin_configuration");
+            if (!needs_precomputed) {
+                std::cout << "No state files found, but '" << method << "' generates states internally." << std::endl;
+                tpq_files.push_back("INTERNAL_RANDOM_STATES");
+                sample_indices.push_back(0);
+                beta_strings.push_back("scan");
+                beta_values.push_back(0.0);
+            }
         }
         
         std::cout << "Found " << tpq_files.size() << " state file(s) to process (including ground state if present)" << std::endl;
@@ -1615,12 +1615,43 @@ int main(int argc, char* argv[]) {
     int num_files = tpq_files.size();
     MPI_Bcast(&num_files, 1, MPI_INT, 0, MPI_COMM_WORLD);
     
-    if (num_files == 0) {
+    // Check for methods that need pre-computed states
+    bool needs_precomputed_states = (method == "spectral" || method == "ground_state");
+    
+    if (num_files == 0 && needs_precomputed_states) {
         if (rank == 0) {
-            std::cout << "No TPQ state files found." << std::endl;
+            std::cerr << "\n" << std::string(80, '=') << std::endl;
+            std::cerr << "ERROR: No quantum states found for '" << method << "' calculation!" << std::endl;
+            std::cerr << std::string(80, '=') << std::endl;
+            std::cerr << "\nSearched in: " << directory << "/output/ed_results.h5" << std::endl;
+            
+            if (method == "ground_state") {
+                std::cerr << "\nThe 'ground_state' method requires a pre-computed ground state eigenvector." << std::endl;
+                std::cerr << "\nExpected location: ed_results.h5 -> /eigendata/eigenvector_0" << std::endl;
+                std::cerr << "\nTo generate the ground state, run:" << std::endl;
+                std::cerr << "  ED --config <config> (with save_eigenvectors=true and num_eigenvectors>=1)" << std::endl;
+            } else {
+                std::cerr << "\nThe '" << method << "' method requires pre-computed states. None were found." << std::endl;
+                std::cerr << "\nExpected locations in ed_results.h5:" << std::endl;
+                std::cerr << "  - TPQ states: /tpq/states/* datasets" << std::endl;
+                std::cerr << "  - Eigenvector: /eigendata/eigenvector_0" << std::endl;
+                std::cerr << "\nTo generate states, run one of:" << std::endl;
+                std::cerr << "  1. TPQ calculation:  ED --config <config> (with tpq_mode=microcanonical or canonical)" << std::endl;
+                std::cerr << "  2. Diagonalization:  ED --config <config> (with save_eigenvectors=true)" << std::endl;
+            }
+            std::cerr << "\nAlternative: Use 'ftlm_thermal' method instead, which generates random" << std::endl;
+            std::cerr << "states internally and doesn't require pre-computed states." << std::endl;
+            std::cerr << std::string(80, '=') << std::endl;
         }
         MPI_Finalize();
-        return 0;
+        return 1;  // Return error code instead of 0
+    } else if (num_files == 0) {
+        // For ftlm_thermal/static, create dummy entry on all ranks
+        // (Already done on rank 0, but make vectors consistent)
+        if (rank == 0) {
+            std::cout << "Using internal random state generation for '" << method << "' method" << std::endl;
+        }
+        // Vectors already populated on rank 0 in earlier block
     }
     
     // Get file sizes for workload estimation (only rank 0)
@@ -1860,12 +1891,20 @@ int main(int argc, char* argv[]) {
         std::string filename = fs::path(file_path).filename().string();
         std::string output_dir = output_base_dir + "/beta_" + beta_str;
         
-        // Load state (or reuse from cache - TODO: implement caching for efficiency)
+        // Load state (or skip for methods that generate internal random states)
         ComplexVector tpq_state;
         bool loaded_ok = false;
+        bool needs_loaded_state = (method == "spectral" || method == "ground_state" || 
+                                   method == "spin_correlation" || method == "spin_configuration");
         
+        // For ftlm_thermal/static, we don't need to load a state
+        if (file_path == "INTERNAL_RANDOM_STATES") {
+            // Methods that generate their own random states internally
+            loaded_ok = true;
+            filename = "internal random states";
+        }
         // Check for TPQ state HDF5 marker format: "TPQ_HDF5:<path>:<dataset_name>"
-        if (file_path.rfind("TPQ_HDF5:", 0) == 0) {
+        else if (file_path.rfind("TPQ_HDF5:", 0) == 0) {
             // Parse TPQ_HDF5 marker: "TPQ_HDF5:<h5_path>:<dataset_name>"
             std::string marker = file_path.substr(9); // Remove "TPQ_HDF5:" prefix
             size_t first_colon = marker.find(':');
@@ -1891,15 +1930,13 @@ int main(int argc, char* argv[]) {
                 loaded_ok = load_eigenvector_from_hdf5(tpq_state, h5_path, eigenvector_idx);
                 filename = "eigenvector_" + std::to_string(eigenvector_idx) + " (HDF5)";
             }
-        } else if (filename.find("eigenvector") != std::string::npos) {
-            // Legacy binary .dat format
-            loaded_ok = load_raw_data(tpq_state, file_path, N64);
         } else {
-            // Legacy TPQ state file
+            // Legacy TPQ state file (.dat format)
             loaded_ok = load_tpq_state(tpq_state, file_path);
         }
         
-        if (!loaded_ok || (int)tpq_state.size() != N) {
+        // Validate state loading only for methods that need it
+        if (needs_loaded_state && (!loaded_ok || (int)tpq_state.size() != N)) {
             std::cerr << "Rank " << rank << " failed to load/validate state from " << filename << std::endl;
             return false;
         }
@@ -2261,202 +2298,6 @@ int main(int argc, char* argv[]) {
                             
                             if (rank == 0) {
                                 std::cout << "  Saved spectral to HDF5: " << obs_names[i] << std::endl;
-                            }
-                        }
-                    }
-                } else if (method == "spectral_thermal") {
-                    // Use spectral method with finite-temperature FTLM (thermal averaging)
-                    // This uses random sampling to compute thermal averages at finite temperature
-                    int krylov_dim = krylov_dim_or_nmax;
-                    int num_samples = 40;  // Number of random samples for FTLM thermal averaging
-                    unsigned int random_seed = state_idx * 1000 + momentum_idx * 100 + combo_idx;
-                    
-                    // Determine temperature(s) to compute
-                    std::vector<double> temperatures;
-                    
-                    if (use_temperature_scan) {
-                        // Use user-specified temperature range (log spacing)
-                        double log_T_min = std::log(T_min);
-                        double log_T_max = std::log(T_max);
-                        double log_step = (log_T_max - log_T_min) / std::max(1, T_steps - 1);
-                        
-                        for (int i = 0; i < T_steps; i++) {
-                            double log_T = log_T_min + i * log_step;
-                            temperatures.push_back(std::exp(log_T));
-                        }
-                        
-                        if (rank == 0) {
-                            std::cout << "  Computing for " << T_steps << " temperature points:" << std::endl;
-                            for (size_t i = 0; i < temperatures.size(); i++) {
-                                std::cout << "    T[" << i << "] = " << temperatures[i] << std::endl;
-                            }
-                        }
-                    } else {
-                        // Use temperature from TPQ state beta
-                        double temperature = 0.0;
-                        if (std::isfinite(beta) && beta > 1e-10) {
-                            temperature = 1.0 / beta;
-                        }
-                        temperatures.push_back(temperature);
-                        
-                        if (rank == 0) {
-                            std::cout << "  Using TPQ state temperature: T = " << temperature 
-                                      << " (β = " << beta << ")" << std::endl;
-                        }
-                    }
-                    
-                    // GPU/CPU thermal spectral calculation
-#ifdef WITH_CUDA
-                    if (use_gpu) {
-                        std::cout << "Using GPU-accelerated FTLM thermal spectral calculation..." << std::endl;
-                        
-                        // Convert CPU Hamiltonian to GPU
-                        GPUOperator gpu_ham(num_sites, spin_length);
-                        if (!convertOperatorToGPU(ham_op, gpu_ham)) {
-                            std::cerr << "Failed to convert Hamiltonian to GPU, falling back to CPU" << std::endl;
-                            use_gpu = false;
-                        } else {
-                            // Process each operator pair on GPU
-                            for (size_t i = 0; i < obs_1.size(); i++) {
-                                std::cout << "  Processing operator pair " << (i+1) << "/" << obs_1.size() 
-                                          << ": " << obs_names[i] << std::endl;
-                                
-                                // Convert observable operators to GPU
-                                GPUOperator gpu_obs1(num_sites, spin_length);
-                                GPUOperator gpu_obs2(num_sites, spin_length);
-                                
-                                if (!convertOperatorToGPU(obs_1[i], gpu_obs1) || 
-                                    !convertOperatorToGPU(obs_2[i], gpu_obs2)) {
-                                    std::cerr << "  Failed to convert operators to GPU, skipping..." << std::endl;
-                                    continue;
-                                }
-                                
-                                // Allocate device memory for TPQ state (reused for all temperatures)
-                                cuDoubleComplex* d_psi;
-                                cudaMalloc(&d_psi, N * sizeof(cuDoubleComplex));
-                                cudaMemcpy(d_psi, tpq_state.data(), N * sizeof(cuDoubleComplex), cudaMemcpyHostToDevice);
-                                
-                                // Call GPU wrapper for thermal spectral function
-                                // Note: Currently processes temperatures sequentially
-                                // TODO: Implement multi-temperature optimization on GPU
-                                for (double temperature : temperatures) {
-                                    std::cout << "    Computing at T = " << temperature << std::endl;
-                                    
-                                    auto [frequencies, S_real, S_imag] = GPUEDWrapper::runGPUDynamicalCorrelationState(
-                                        &gpu_ham, &gpu_obs1, &gpu_obs2,
-                                        d_psi,  // Device pointer to state
-                                        N,
-                                        krylov_dim,
-                                        omega_min, omega_max, num_omega_bins,
-                                        broadening,
-                                        temperature,
-                                        ground_state_energy
-                                    );
-                                    
-                                    // Package results
-                                    DynamicalResponseResults results;
-                                    results.frequencies = frequencies;
-                                    results.spectral_function = S_real;
-                                    results.spectral_function_imag = S_imag;
-                                    // Initialize error vectors to zero (single-state, no error bars)
-                                    results.spectral_error.resize(frequencies.size(), 0.0);
-                                    results.spectral_error_imag.resize(frequencies.size(), 0.0);
-                                    results.total_samples = 1;
-                                    
-                                    // Save results to unified HDF5 file
-                                    saveDSSFSpectralToHDF5(
-                                        unified_h5_path,
-                                        obs_names[i],
-                                        1.0/temperature,  // beta
-                                        sample_index,
-                                        results.frequencies,
-                                        results.spectral_function,
-                                        results.spectral_function_imag,
-                                        results.spectral_error,
-                                        results.spectral_error_imag,
-                                        temperature
-                                    );
-                                    
-                                    if (rank == 0) {
-                                        std::cout << "    Saved GPU thermal spectral to HDF5: " << obs_names[i] << std::endl;
-                                    }
-                                }
-                                
-                                // Cleanup device memory
-                                cudaFree(d_psi);
-                            }
-                        }
-                    }
-#endif
-                    
-                    if (!use_gpu) {
-                        // CPU thermal spectral calculation
-                        // Set up FTLM parameters for thermal averaging
-                        DynamicalResponseParameters params;
-                        params.krylov_dim = krylov_dim;
-                        params.broadening = broadening;
-                        params.tolerance = 1e-10;
-                        params.full_reorthogonalization = true;
-                        params.num_samples = num_samples;
-                        params.random_seed = random_seed;
-                        params.store_intermediate = false;
-                        
-                        if (rank == 0) {
-                            std::cout << "Observables to compute thermal spectral functions for:" << std::endl;
-                            std::cout << "  Number of operators: " << obs_1.size() << std::endl;
-                        }
-                        
-                        // Process each operator pair
-                        for (size_t i = 0; i < obs_1.size(); i++) {
-                            std::cout << "  Processing operator " << obs_names[i] << std::endl;
-                            // Create function wrappers for operators
-                            auto O1_func = [&obs_1, i](const Complex* in, Complex* out, int size) {
-                                obs_1[i].apply(in, out, size);
-                            };
-                            
-                            auto O2_func = [&obs_2, i](const Complex* in, Complex* out, int size) {
-                                obs_2[i].apply(in, out, size);
-                            };
-                            
-                            // OPTIMIZATION: Compute spectral function for ALL temperatures at once
-                            // This runs Lanczos ONCE and reuses the spectral decomposition for all temperatures
-                            // Much more efficient than running Lanczos separately for each temperature!
-                            if (rank == 0) {
-                                std::cout << "  *** OPTIMIZED MODE: Computing " << temperatures.size() 
-                                          << " temperature points with SINGLE Lanczos run ***" << std::endl;
-                            }
-                            
-                            // Use the optimized multi-temperature function
-                            auto results_map = compute_dynamical_correlation_state_multi_temperature(
-                                H, O1_func, O2_func, tpq_state, N, params,
-                                omega_min, omega_max, num_omega_bins, 
-                                temperatures, ground_state_energy
-                            );
-                            
-                            // Save results for each temperature to unified HDF5 file
-                            for (const auto& [temperature, results] : results_map) {
-                                saveDSSFSpectralToHDF5(
-                                    unified_h5_path,
-                                    obs_names[i],
-                                    1.0/temperature,  // beta
-                                    sample_index,
-                                    results.frequencies,
-                                    results.spectral_function,
-                                    results.spectral_function_imag,
-                                    results.spectral_error,
-                                    results.spectral_error_imag,
-                                    temperature
-                                );
-                            
-                                if (rank == 0) {
-                                    std::cout << "  Saved thermal spectral to HDF5: " << obs_names[i] 
-                                              << " T=" << temperature << std::endl;
-                                }
-                            }
-                            
-                            if (rank == 0) {
-                                std::cout << "  *** Optimization saved ~" << (temperatures.size() - 1) 
-                                          << " Lanczos iterations! ***" << std::endl;
                             }
                         }
                     }
