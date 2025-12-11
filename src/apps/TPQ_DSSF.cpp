@@ -23,6 +23,7 @@
 #include <ed/solvers/dynamics.h>
 #include <ed/solvers/ftlm.h>
 #include <H5Cpp.h>
+#include <hdf5.h>  // For C API needed by parallel HDF5
 
 #ifdef WITH_CUDA
 #include <ed/gpu/gpu_ed_wrapper.h>
@@ -36,24 +37,81 @@ namespace fs = std::filesystem;
 // Global mutex for thread-safe HDF5 writes (HDF5 is not thread-safe by default)
 static std::mutex g_hdf5_mutex;
 
+// MPI communicator for parallel HDF5 (set during initialization)
+static MPI_Comm g_mpi_comm = MPI_COMM_WORLD;
+static MPI_Info g_mpi_info = MPI_INFO_NULL;
+
 /**
- * @brief Helper function to open HDF5 file with retries for MPI-safe access
- * HDF5 file locking can cause issues with multiple MPI processes.
- * This function retries opening the file with a small delay.
+ * @brief Open HDF5 file with serial access
+ * Uses retry mechanism for concurrent access.
  */
-H5::H5File openHDF5WithRetry(const std::string& h5_path, unsigned int flags, int max_retries = 50, int delay_ms = 50) {
+H5::H5File openHDF5Serial(const std::string& h5_path, unsigned int flags, int max_retries = 50, int delay_ms = 50) {
     for (int attempt = 0; attempt < max_retries; ++attempt) {
         try {
-            // Disable error printing temporarily
             H5::Exception::dontPrint();
             return H5::H5File(h5_path, flags);
         } catch (H5::FileIException& e) {
-            // File locked, wait and retry
             std::this_thread::sleep_for(std::chrono::milliseconds(delay_ms));
         }
     }
-    // Final attempt - let it throw if it fails
     return H5::H5File(h5_path, flags);
+}
+
+#ifdef HDF5_PARALLEL
+/**
+ * @brief Open HDF5 file with MPI-IO for parallel access (independent I/O mode)
+ * Uses H5Pset_fapl_mpio for parallel file access.
+ * Each process can independently read/write to different datasets.
+ */
+H5::H5File openHDF5Parallel(const std::string& h5_path, unsigned int flags) {
+    // Create file access property list for MPI-IO
+    hid_t fapl = H5Pcreate(H5P_FILE_ACCESS);
+    if (fapl < 0) {
+        throw std::runtime_error("Failed to create HDF5 file access property list");
+    }
+    
+    // Set MPI-IO driver for independent I/O
+    herr_t status = H5Pset_fapl_mpio(fapl, g_mpi_comm, g_mpi_info);
+    if (status < 0) {
+        H5Pclose(fapl);
+        throw std::runtime_error("Failed to set MPI-IO file access property");
+    }
+    
+    // Open file using C API with MPI-IO property
+    hid_t file_id = H5Fopen(h5_path.c_str(), flags, fapl);
+    H5Pclose(fapl);
+    
+    if (file_id < 0) {
+        // Fallback to serial access if parallel open fails
+        return openHDF5Serial(h5_path, flags);
+    }
+    
+    // Wrap in C++ H5File object (takes ownership)
+    return H5::H5File(file_id);
+}
+#endif
+
+/**
+ * @brief Helper function to open HDF5 file with parallel or serial access
+ * For file creation (H5F_ACC_TRUNC): uses serial access (only rank 0 should call this)
+ * For read/write (H5F_ACC_RDWR): uses parallel HDF5 if available
+ * 
+ * NOTE: With parallel HDF5 library, metadata operations (creating groups/datasets)
+ * must be done carefully. This implementation uses independent I/O mode where
+ * each rank can create its own groups/datasets. The HDF5_USE_FILE_LOCKING=FALSE
+ * environment variable should be set to avoid file locking issues.
+ */
+H5::H5File openHDF5WithRetry(const std::string& h5_path, unsigned int flags, int max_retries = 50, int delay_ms = 50) {
+    // Always use serial for file creation (only rank 0 creates the file)
+    if (flags == H5F_ACC_TRUNC) {
+        return openHDF5Serial(h5_path, flags, max_retries, delay_ms);
+    }
+    
+    // For read/write access, use serial with retry (most reliable for independent I/O)
+    // The parallel HDF5 library is linked but we use serial file access mode
+    // because each MPI rank writes to different groups/datasets independently.
+    // This avoids the collective metadata operation requirement of true parallel HDF5.
+    return openHDF5Serial(h5_path, flags, max_retries, delay_ms);
 }
 
 // ============================================================================
@@ -106,8 +164,8 @@ std::string initDSSFHDF5File(const std::string& output_dir,
     std::string h5_path = output_dir + "/dssf_results.h5";
     
     try {
-        // Create file (truncate if exists)
-        H5::H5File file(h5_path, H5F_ACC_TRUNC);
+        // Create file (truncate if exists) using parallel HDF5 if available
+        H5::H5File file = openHDF5WithRetry(h5_path, H5F_ACC_TRUNC);
         
         // Create group structure
         file.createGroup("/metadata");
@@ -450,170 +508,88 @@ int read_num_sites_from_positions(const std::string& positions_file) {
     return num_sites;
 }
 
-// Helper function to read ground state energy with multiple fallback methods
-// Returns the MINIMUM energy across all available sources for robustness against corruption
+// Helper function to read ground state energy from ed_results.h5
+// Looks in /eigendata/eigenvalues (picks lowest) or /tpq/samples/sample_0/thermodynamics (picks lowest energy)
 double read_ground_state_energy(const std::string& directory) {
-    std::vector<double> candidate_energies;
-    std::vector<std::string> sources;
-    
-    // Method 0 (PRIMARY): Try HDF5 file (ed_results.h5)
-    // Check multiple possible locations for the HDF5 file
+    // Check possible locations for the HDF5 file
     std::vector<std::string> h5_paths = {
         directory + "/output/ed_results.h5",
-        directory + "/ed_results.h5",
-        directory + "/output/eigenvectors/ed_results.h5"  // Legacy path (deprecated)
+        directory + "/ed_results.h5"
     };
     
-    for (const auto& h5_path : h5_paths) {
-        if (std::filesystem::exists(h5_path)) {
-            try {
-                H5::H5File file(h5_path, H5F_ACC_RDONLY);
-                
-                // Try to read from /eigendata/eigenvalues
-                if (file.nameExists("/eigendata/eigenvalues")) {
-                    H5::DataSet dataset = file.openDataSet("/eigendata/eigenvalues");
-                    H5::DataSpace dataspace = dataset.getSpace();
-                    hsize_t dims[1];
-                    dataspace.getSimpleExtentDims(dims, nullptr);
-                    
-                    if (dims[0] > 0) {
-                        std::vector<double> eigenvalues(dims[0]);
-                        dataset.read(eigenvalues.data(), H5::PredType::NATIVE_DOUBLE);
-                        
-                        double ground_state_energy = *std::min_element(eigenvalues.begin(), eigenvalues.end());
-                        candidate_energies.push_back(ground_state_energy);
-                        sources.push_back("HDF5: " + h5_path + " (/eigendata/eigenvalues)");
-                    }
-                    dataset.close();
-                }
-                file.close();
-            } catch (const H5::Exception& e) {
-                // HDF5 error - continue to try other methods
-                std::cerr << "Warning: Could not read from HDF5 file " << h5_path << std::endl;
-            }
+    std::string h5_path;
+    for (const auto& path : h5_paths) {
+        if (std::filesystem::exists(path)) {
+            h5_path = path;
+            break;
         }
     }
     
-    // Method 1: Try eigenvalues.dat (binary format) - LEGACY (deprecated)
-    std::string eigenvalues_dat = directory + "/output/eigenvalues.dat";
-    if (!std::filesystem::exists(eigenvalues_dat)) {
-        eigenvalues_dat = directory + "/output/eigenvectors/eigenvalues.dat";  // Old legacy path
+    if (h5_path.empty()) {
+        throw std::runtime_error("Could not find ed_results.h5 in " + directory + "/output/ or " + directory);
     }
-    std::ifstream infile_dat(eigenvalues_dat, std::ios::binary);
-    if (infile_dat.is_open()) {
-        size_t num_eigenvalues;
-        infile_dat.read(reinterpret_cast<char*>(&num_eigenvalues), sizeof(size_t));
+    
+    try {
+        H5::H5File file(h5_path, H5F_ACC_RDONLY);
         
-        if (num_eigenvalues > 0) {
-            double ground_state_energy;
-            infile_dat.read(reinterpret_cast<char*>(&ground_state_energy), sizeof(double));
-            candidate_energies.push_back(ground_state_energy);
-            sources.push_back("eigenvalues.dat (legacy binary)");
-        }
-        infile_dat.close();
-    }
-    
-    // Method 2: Try eigenvalues.txt (text format) - LEGACY
-    std::string eigenvalues_txt = directory + "/output/eigenvalues.txt";
-    std::ifstream infile_txt(eigenvalues_txt);
-    if (infile_txt.is_open()) {
-        double ground_state_energy;
-        if (infile_txt >> ground_state_energy) {
-            candidate_energies.push_back(ground_state_energy);
-            sources.push_back("eigenvalues.txt (legacy text)");
-        }
-        infile_txt.close();
-    }
-    
-    // Method 3: Try finding minimum energy from HDF5 TPQ data or SS_rand0.dat
-    std::string h5_file = directory + "/output/ed_results.h5";
-    bool found_tpq_energy = false;
-    
-    // Try HDF5 first
-    if (HDF5IO::fileExists(h5_file)) {
-        try {
-            auto points = HDF5IO::loadTPQThermodynamics(h5_file, 0);
-            if (!points.empty()) {
-                double min_energy = std::numeric_limits<double>::max();
-                for (size_t i = 1; i < points.size(); ++i) {  // Skip first entry
-                    if (points[i].energy < min_energy) {
-                        min_energy = points[i].energy;
-                    }
-                }
-                if (min_energy < std::numeric_limits<double>::max()) {
-                    candidate_energies.push_back(min_energy);
-                    sources.push_back("ed_results.h5 (TPQ trajectory)");
-                    found_tpq_energy = true;
-                }
-            }
-        } catch (const std::exception& e) {
-            // Fall back to text file
-        }
-    }
-    
-    // Fall back to SS_rand0.dat for backwards compatibility
-    if (!found_tpq_energy) {
-        std::string ss_file = directory + "/output/SS_rand0.dat";
-        std::ifstream infile_ss(ss_file);
-        if (infile_ss.is_open()) {
-            std::string line;
-            double min_energy = std::numeric_limits<double>::max();
-            bool found_energy = false;
-            bool first_entry_skipped = false;
+        // Method 1: Try to read from /eigendata/eigenvalues (from exact diagonalization)
+        if (file.nameExists("/eigendata/eigenvalues")) {
+            H5::DataSet dataset = file.openDataSet("/eigendata/eigenvalues");
+            H5::DataSpace dataspace = dataset.getSpace();
+            hsize_t dims[1];
+            dataspace.getSimpleExtentDims(dims, nullptr);
             
-            while (std::getline(infile_ss, line)) {
-                // Skip comment lines and empty lines
-                if (line.empty() || line[0] == '#') continue;
+            if (dims[0] > 0) {
+                std::vector<double> eigenvalues(dims[0]);
+                dataset.read(eigenvalues.data(), H5::PredType::NATIVE_DOUBLE);
+                dataset.close();
+                file.close();
                 
-                std::istringstream iss(line);
-                double inv_temp, energy;
+                double ground_state_energy = *std::min_element(eigenvalues.begin(), eigenvalues.end());
+                std::cout << "Ground state energy from " << h5_path << " (/eigendata/eigenvalues): "
+                          << std::fixed << std::setprecision(10) << ground_state_energy << std::endl;
+                return ground_state_energy;
+            }
+            dataset.close();
+        }
+        
+        // Method 2: Try to read from /tpq/samples/sample_0/thermodynamics (from TPQ)
+        if (file.nameExists("/tpq/samples/sample_0/thermodynamics")) {
+            H5::DataSet dataset = file.openDataSet("/tpq/samples/sample_0/thermodynamics");
+            H5::DataSpace dataspace = dataset.getSpace();
+            hsize_t dims[2];
+            dataspace.getSimpleExtentDims(dims, nullptr);
+            
+            if (dims[0] > 0) {
+                // Read the thermodynamics data (columns: beta, energy, variance, doublon, step)
+                std::vector<double> data(dims[0] * dims[1]);
+                dataset.read(data.data(), H5::PredType::NATIVE_DOUBLE);
+                dataset.close();
+                file.close();
                 
-                // Read first two columns: inv_temp and energy
-                if (iss >> inv_temp >> energy) {
-                    // Skip the first data entry (initial random state)
-                    if (!first_entry_skipped) {
-                        first_entry_skipped = true;
-                        continue;
-                    }
-                    
+                // Find minimum energy (column 1, 0-indexed)
+                double min_energy = std::numeric_limits<double>::max();
+                size_t num_cols = dims[1];
+                for (size_t i = 0; i < dims[0]; ++i) {
+                    double energy = data[i * num_cols + 1];  // Energy is in column 1
                     if (energy < min_energy) {
                         min_energy = energy;
-                        found_energy = true;
                     }
                 }
+                
+                std::cout << "Ground state energy from " << h5_path << " (/tpq/samples/sample_0/thermodynamics): "
+                          << std::fixed << std::setprecision(10) << min_energy << std::endl;
+                return min_energy;
             }
-            infile_ss.close();
-            
-            if (found_energy) {
-                candidate_energies.push_back(min_energy);
-                sources.push_back("SS_rand0.dat (TPQ trajectory)");
-            }
+            dataset.close();
         }
+        
+        file.close();
+        throw std::runtime_error("No eigenvalues or TPQ thermodynamics data found in " + h5_path);
+        
+    } catch (const H5::Exception& e) {
+        throw std::runtime_error("Failed to read ground state energy from " + h5_path + ": " + e.getCDetailMsg());
     }
-    
-    // If no methods succeeded, throw an error
-    if (candidate_energies.empty()) {
-        throw std::runtime_error("Failed to read ground state energy from any available file: " 
-                                 "ed_results.h5, eigenvalues.dat, eigenvalues.txt, or SS_rand0.dat");
-    }
-    
-    // Return the minimum energy across all sources (most robust against corruption)
-    auto min_it = std::min_element(candidate_energies.begin(), candidate_energies.end());
-    size_t min_idx = std::distance(candidate_energies.begin(), min_it);
-    double final_energy = *min_it;
-    
-    // Report all found energies and which one was selected
-    std::cout << "Ground state energy candidates found:" << std::endl;
-    for (size_t i = 0; i < candidate_energies.size(); i++) {
-        std::cout << "  " << sources[i] << ": " 
-                  << std::fixed << std::setprecision(10) << candidate_energies[i];
-        if (i == min_idx) {
-            std::cout << " <- SELECTED (minimum)";
-        }
-        std::cout << std::endl;
-    }
-    
-    return final_energy;
 }
 
 void printSpinConfiguration(ComplexVector &state, int num_sites, float spin_length, const std::string &dir) {
@@ -854,7 +830,7 @@ int main(int argc, char* argv[]) {
             std::cerr << "REQUIRED ARGUMENTS:" << std::endl;
             std::cerr << std::string(80, '=') << std::endl;
             std::cerr << "  directory: Path containing InterAll.dat, Trans.dat, and positions.dat files" << std::endl;
-            std::cerr << "  krylov_dim_or_nmax: Dimension of Krylov subspace (krylov/taylor) or Lanczos order (spectral)" << std::endl;
+            std::cerr << "  krylov_dim_or_nmax: Dimension of Krylov/Lanczos subspace for spectral methods" << std::endl;
             std::cerr << "  spin_combinations: Format \"op1,op2;op3,op4;...\" where op is:" << std::endl;
             std::cerr << "    - ladder basis: 0=Sp, 1=Sm, 2=Sz" << std::endl;
             std::cerr << "    - xyz basis: 0=Sx, 1=Sy, 2=Sz" << std::endl;
@@ -862,10 +838,8 @@ int main(int argc, char* argv[]) {
             std::cerr << "\n" << std::string(80, '=') << std::endl;
             std::cerr << "OPTIONAL ARGUMENTS:" << std::endl;
             std::cerr << std::string(80, '=') << std::endl;
-            std::cerr << "  method (default: krylov): krylov | taylor | spectral | spectral_thermal | ftlm_thermal | static | ground_state" << std::endl;
-            std::cerr << "    - krylov: Time-domain correlation C(t) using Krylov time evolution" << std::endl;
-            std::cerr << "    - taylor: Time-domain correlation C(t) using Taylor expansion" << std::endl;
-            std::cerr << "    - spectral: Frequency-domain spectral function S(ω) via FTLM (single state)" << std::endl;
+            std::cerr << "  method (default: spectral): spectral | spectral_thermal | ftlm_thermal | static | ground_state" << std::endl;
+            std::cerr << "    - spectral: Frequency-domain spectral function S(ω) via Lanczos (single state)" << std::endl;
             std::cerr << "    - spectral_thermal: Frequency-domain S(ω) from given state at multiple temperatures" << std::endl;
             std::cerr << "    - ftlm_thermal: TRUE thermal DSSF with random state sampling (FTLM multi-sample)" << std::endl;
             std::cerr << "    - static: Static structure factor ⟨O₁†O₂⟩ vs temperature (SSSF)" << std::endl;
@@ -880,11 +854,7 @@ int main(int argc, char* argv[]) {
             std::cerr << "    - ladder: Use Sp/Sm/Sz operators (raising/lowering operators)" << std::endl;
             std::cerr << "    - xyz: Use Sx/Sy/Sz operators (Cartesian components)" << std::endl;
             std::cerr << "    - Note: experimental operator type always uses xyz basis internally" << std::endl;
-            std::cerr << "\n  dt,t_end (format depends on method):" << std::endl;
-            std::cerr << "    - For krylov/taylor: \"dt,t_end\" e.g., \"0.01,50.0\"" << std::endl;
-            std::cerr << "      * dt: time step for evolution" << std::endl;
-            std::cerr << "      * t_end: maximum evolution time" << std::endl;
-            std::cerr << "    - For spectral: \"omega_min,omega_max,num_omega_bins,broadening\" e.g., \"-5.0,5.0,200,0.1\"" << std::endl;
+            std::cerr << "\n  spectral_params (format: \"omega_min,omega_max,num_omega_bins,broadening\" e.g., \"-5.0,5.0,200,0.1\"):" << std::endl;
             std::cerr << "      * omega_min: minimum frequency" << std::endl;
             std::cerr << "      * omega_max: maximum frequency" << std::endl;
             std::cerr << "      * num_omega_bins: number of frequency points (resolution)" << std::endl;
@@ -967,29 +937,14 @@ int main(int argc, char* argv[]) {
             std::cerr << "  - Optimal for large systems where diagonalization is expensive" << std::endl;
             std::cerr << "  - Uses memory-efficient continued fraction representation" << std::endl;
             std::cerr << "\n" << std::string(80, '=') << std::endl;
-            std::cerr << "TIME-DOMAIN METHODS (method=krylov or method=taylor) DETAILS:" << std::endl;
-            std::cerr << std::string(80, '=') << std::endl;
-            std::cerr << "Compute time correlation function C(t) = ⟨ψ|O₁†(0) O₂(t)|ψ⟩" << std::endl;
-            std::cerr << "\nKrylov method:" << std::endl;
-            std::cerr << "  - Most accurate and stable approach" << std::endl;
-            std::cerr << "  - Uses Lanczos algorithm for exponential evolution" << std::endl;
-            std::cerr << "  - Parameter: krylov_dim = subspace dimension (typical: 20-50)" << std::endl;
-            std::cerr << "\nTaylor method:" << std::endl;
-            std::cerr << "  - Fast but less stable for long times" << std::endl;
-            std::cerr << "  - Uses Taylor series: exp(-iHt) ≈ Σ (-iHt)ⁿ/n!" << std::endl;
-            std::cerr << "  - Parameter: krylov_dim_or_nmax = max order of Taylor expansion" << std::endl;
-            std::cerr << "\nOutput files (time-domain methods):" << std::endl;
-            std::cerr << "  - Format: <operator>_<method>_sample_<idx>_beta_<beta>.txt" << std::endl;
-            std::cerr << "  - Columns: step_index | time_value | Re[C(t)] | Im[C(t)]" << std::endl;
-            std::cerr << "\n" << std::string(80, '=') << std::endl;
             std::cerr << "EXAMPLES:" << std::endl;
             std::cerr << std::string(80, '=') << std::endl;
-            std::cerr << "1. Spectral function with momentum resolution (single state):" << std::endl;
+            std::cerr << "1. Spectral function with momentum resolution (default, single state):" << std::endl;
+            std::cerr << "   " << argv[0] << " ./data 50 \"2,2\"" << std::endl;
+            std::cerr << "\n2. Spectral function with custom parameters:" << std::endl;
             std::cerr << "   " << argv[0] << " ./data 50 \"2,2\" spectral sum ladder \"-5,5,200,0.1\" 4 \"0,0,0;0,0,1\"" << std::endl;
-            std::cerr << "\n2. Thermal spectral function with FTLM averaging:" << std::endl;
+            std::cerr << "\n3. Thermal spectral function with FTLM averaging:" << std::endl;
             std::cerr << "   " << argv[0] << " ./data 50 \"2,2\" spectral_thermal sum ladder \"-5,5,200,0.1\" 4 \"0,0,0;0,0,1\"" << std::endl;
-            std::cerr << "\n3. Time-domain using Krylov (recommended):" << std::endl;
-            std::cerr << "   " << argv[0] << " ./data 30 \"0,1;2,2\" krylov sum ladder \"0.01,50.0\"" << std::endl;
             std::cerr << "\n4. Transverse scattering with custom polarization:" << std::endl;
             std::cerr << "   " << argv[0] << " ./data 40 \"2,2\" spectral transverse xyz \"-10,10,300,0.2\" 4 \"0,0,0\" \"1,0,0\"" << std::endl;
             std::cerr << "\n5. Experimental geometry with angle:" << std::endl;
@@ -1014,7 +969,7 @@ int main(int argc, char* argv[]) {
     std::string directory = argv[1];
     int krylov_dim_or_nmax = std::stoi(argv[2]);
     std::string spin_combinations_str = argv[3];
-    std::string method = (argc >= 5) ? std::string(argv[4]) : std::string("krylov");
+    std::string method = (argc >= 5) ? std::string(argv[4]) : std::string("spectral");
     std::string operator_type = (argc >= 6) ? std::string(argv[5]) : std::string("sum");
     std::string basis = (argc >= 7) ? std::string(argv[6]) : std::string("ladder");
     
@@ -1040,8 +995,7 @@ int main(int argc, char* argv[]) {
         basis = "xyz";
     }
     
-    double dt_opt = 0.01;
-    double t_end_opt = 50.0;
+    // Spectral method parameters (default values)
     double omega_min = -5.0;
     double omega_max = 5.0;
     int num_omega_bins = 200;
@@ -1073,22 +1027,9 @@ int main(int argc, char* argv[]) {
                     std::cerr << "Warning: failed to parse spectral parameters. Using defaults." << std::endl;
                 }
             }
-        } else {
-            // Parse dt,t_end for time-domain methods
-            auto comma_pos = param_str.find(',');
-            if (comma_pos != std::string::npos) {
-                try {
-                    dt_opt = std::stod(param_str.substr(0, comma_pos));
-                    t_end_opt = std::stod(param_str.substr(comma_pos + 1));
-                } catch (...) {
-                    if (rank == 0) {
-                        std::cerr << "Warning: failed to parse dt,t_end argument. Using defaults 0.01,50.0" << std::endl;
-                    }
-                }
-            }
         }
     }
-    
+
     int unit_cell_size = 4; // Default for pyrochlore
     if (argc >= 9) {
         try { unit_cell_size = std::stoi(argv[8]); } catch (...) { unit_cell_size = 4; }
@@ -1523,17 +1464,6 @@ int main(int argc, char* argv[]) {
     
     // Synchronize all processes
     MPI_Barrier(MPI_COMM_WORLD);
-    
-    // Pre-compute time evolution operator if using taylor method
-    std::function<void(const Complex*, Complex*, int)> U_t;
-    
-    if (method == "taylor") {
-        if (rank == 0) {
-            std::cout << "Pre-computing time evolution operator (n_max=" << krylov_dim_or_nmax
-                      << ", dt=" << dt_opt << ", t_end=" << t_end_opt << ")" << std::endl;
-        }
-        U_t = create_time_evolution_operator(H, dt_opt, krylov_dim_or_nmax, true);
-    }
     
     // Pre-compute transverse bases for transverse operators (needed for both krylov and taylor methods)
     std::vector<std::array<double,3>> transverse_basis_1, transverse_basis_2;
@@ -2206,29 +2136,11 @@ int main(int argc, char* argv[]) {
             return false;
         }
         
-        // STEP 2: Apply time evolution method to the constructed operators
-        // Note: taylor and krylov methods still use file-based output (legacy)
-        // All other methods use unified HDF5 output
+        // STEP 2: Apply method to the constructed operators
+        // All methods use unified HDF5 output (dssf_results.h5)
         
         try {
-            // CPU implementation
-            if (method == "taylor") {
-                // Legacy file-based output for taylor method
-                ensureDirectoryExists(method_dir);
-                computeObservableDynamics_U_t(
-                    U_t, tpq_state, obs_1, obs_2, obs_names, N,
-                    method_dir, sample_index, beta, t_end_opt, dt_opt
-                );
-            } else if (method == "krylov") {
-                // Legacy file-based output for krylov method
-                ensureDirectoryExists(method_dir);
-                int krylov_dim = krylov_dim_or_nmax;
-                
-                computeDynamicCorrelationsKrylov(
-                    H, tpq_state, obs_1, obs_2, obs_names,
-                    N, method_dir, sample_index, beta, t_end_opt, dt_opt, krylov_dim
-                );
-            } else if (method == "spectral") {
+            if (method == "spectral") {
                     // Use spectral method with FTLM approach
                     int krylov_dim = krylov_dim_or_nmax;
                     

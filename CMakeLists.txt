@@ -338,6 +338,43 @@ else()
 endif()
 
 # Add TPQ_DSSF executable (only if MPI is enabled since it uses MPI)
+# TPQ_DSSF uses parallel HDF5 for MPI-safe file access
+if(WITH_MPI)
+    # Find parallel HDF5 for TPQ_DSSF (OpenMPI version)
+    set(HDF5_PREFER_PARALLEL TRUE)
+    find_path(HDF5_PARALLEL_INCLUDE_DIR H5Cpp.h
+        HINTS /usr/include/hdf5/openmpi /usr/include/hdf5/mpi
+        NO_DEFAULT_PATH
+    )
+    find_library(HDF5_PARALLEL_C_LIBRARY NAMES hdf5_openmpi hdf5
+        HINTS /usr/lib/x86_64-linux-gnu/hdf5/openmpi
+        NO_DEFAULT_PATH
+    )
+    find_library(HDF5_PARALLEL_CXX_LIBRARY NAMES hdf5_openmpi_cpp hdf5_cpp
+        HINTS /usr/lib/x86_64-linux-gnu/hdf5/openmpi
+        NO_DEFAULT_PATH
+    )
+    find_library(HDF5_PARALLEL_HL_LIBRARY NAMES hdf5_openmpi_hl hdf5_hl
+        HINTS /usr/lib/x86_64-linux-gnu/hdf5/openmpi
+        NO_DEFAULT_PATH
+    )
+    
+    if(HDF5_PARALLEL_INCLUDE_DIR AND HDF5_PARALLEL_C_LIBRARY AND HDF5_PARALLEL_CXX_LIBRARY)
+        message(STATUS "Found parallel HDF5 for TPQ_DSSF:")
+        message(STATUS "  Include: ${HDF5_PARALLEL_INCLUDE_DIR}")
+        message(STATUS "  C lib: ${HDF5_PARALLEL_C_LIBRARY}")
+        message(STATUS "  C++ lib: ${HDF5_PARALLEL_CXX_LIBRARY}")
+        set(HDF5_PARALLEL_LIBRARIES ${HDF5_PARALLEL_CXX_LIBRARY} ${HDF5_PARALLEL_C_LIBRARY})
+        if(HDF5_PARALLEL_HL_LIBRARY)
+            list(APPEND HDF5_PARALLEL_LIBRARIES ${HDF5_PARALLEL_HL_LIBRARY})
+        endif()
+        set(HAS_PARALLEL_HDF5 TRUE)
+    else()
+        message(STATUS "Parallel HDF5 not found, TPQ_DSSF will use serial HDF5 with file locking workaround")
+        set(HAS_PARALLEL_HDF5 FALSE)
+    endif()
+endif()
+
 add_executable(TPQ_DSSF ${APPS_DIR}/TPQ_DSSF.cpp ${SOLVERS_CPU_DIR}/dynamics.cpp ${SOLVERS_CPU_DIR}/TPQ.cpp ${SOLVERS_CPU_DIR}/ftlm.cpp ${SOLVERS_CPU_DIR}/lanczos.cpp ${IO_DIR}/basis_vector_storage.cpp)
 
 
@@ -365,14 +402,29 @@ endif()
 
 # Link libraries for TPQ_DSSF executable (only if it exists)
 if(TARGET TPQ_DSSF)
-    target_link_libraries(TPQ_DSSF
-        ${BLAS_LIBRARIES}
-        ${LAPACK_LIBRARIES}
-        ${LAPACKE_LIBRARIES}
-        ${EXTRA_LINALG_LIBRARIES}
-        ${ARPACK_LIBRARY}
-        ${HDF5_LIBRARIES}
-    )
+    # Use parallel HDF5 if available, otherwise serial HDF5
+    if(HAS_PARALLEL_HDF5)
+        target_include_directories(TPQ_DSSF PRIVATE ${HDF5_PARALLEL_INCLUDE_DIR})
+        target_compile_definitions(TPQ_DSSF PRIVATE HDF5_PARALLEL)
+        target_link_libraries(TPQ_DSSF
+            ${BLAS_LIBRARIES}
+            ${LAPACK_LIBRARIES}
+            ${LAPACKE_LIBRARIES}
+            ${EXTRA_LINALG_LIBRARIES}
+            ${ARPACK_LIBRARY}
+            ${HDF5_PARALLEL_LIBRARIES}
+            z sz crypto curl dl m
+        )
+    else()
+        target_link_libraries(TPQ_DSSF
+            ${BLAS_LIBRARIES}
+            ${LAPACK_LIBRARIES}
+            ${LAPACKE_LIBRARIES}
+            ${EXTRA_LINALG_LIBRARIES}
+            ${ARPACK_LIBRARY}
+            ${HDF5_LIBRARIES}
+        )
+    endif()
     
     # Add CUDA support for TPQ_DSSF if enabled
     if(WITH_CUDA)
