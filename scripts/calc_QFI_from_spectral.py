@@ -1,20 +1,26 @@
 """
-Calculate Quantum Fisher Information (QFI) from pre-computed spectral function files.
+Calculate Quantum Fisher Information (QFI) from spectral function data.
 
-This script works with frequency-domain spectral data that has already been computed,
-rather than performing FFT from time-domain correlation data.
+This script supports both time-domain correlation data (performing FFT) and
+pre-computed frequency-domain spectral data.
 
 Supports two data sources:
-1. HDF5 files (preferred): ed_results.h5 with /dynamical/<operator_name>/ groups
+1. HDF5 files (preferred): ed_results.h5 with time_correlations data
 2. Text files (legacy): {species}_spectral_sample_{N}_beta_{beta}.txt
 
-HDF5 structure:
+New HDF5 structure (time-domain correlations):
+    /dynamical/time_correlations/<group_name>/
+        times            - array of time values
+        correlation_real - Re[C(t)]
+        correlation_imag - Im[C(t)]
+        Attributes: beta, sample_index, operator, label
+    Group naming: {operator}_sample{N}_beta{value}_tpq
+    Example: SzSz_q_Qx0_Qy0_Qz0_sample0_beta111.8182_tpq
+
+Legacy HDF5 structure (frequency-domain spectral):
     /dynamical/<operator_name>/
         frequencies     - array of omega values
         spectral_real   - Re[S(q,ω)]
-        spectral_imag   - Im[S(q,ω)]
-        error_real      - error in Re[S(q,ω)]
-        error_imag      - error in Im[S(q,ω)]
 
 Text file format:
     # Header lines (ignored)
@@ -55,16 +61,117 @@ else:
 
 
 # ==============================================================================
+# FFT and Spectral Function Utilities
+# ==============================================================================
+
+def time_to_spectral_fft(times, correlation_real, correlation_imag, 
+                          omega_max=10.0, n_omega=1000):
+    """
+    Convert time-domain correlation function to frequency-domain spectral function.
+    
+    Uses FFT to compute S(ω) from C(t):
+        S(ω) = ∫ C(t) e^{iωt} dt
+    
+    Parameters:
+    times: Array of time values
+    correlation_real: Re[C(t)]
+    correlation_imag: Im[C(t)]
+    omega_max: Maximum frequency for output
+    n_omega: Number of frequency points
+    
+    Returns: (omega_array, spectral_function_array)
+    """
+    # Construct complex correlation
+    correlation = correlation_real + 1j * correlation_imag
+    
+    # Compute FFT
+    dt = times[1] - times[0] if len(times) > 1 else 1.0
+    n = len(times)
+    
+    # Use numpy FFT
+    fft_vals = np.fft.fft(correlation) * dt
+    freqs = np.fft.fftfreq(n, dt) * 2 * np.pi  # Convert to angular frequency
+    
+    # Sort by frequency
+    sort_idx = np.argsort(freqs)
+    freqs = freqs[sort_idx]
+    fft_vals = fft_vals[sort_idx]
+    
+    # Interpolate to uniform omega grid if needed
+    omega = np.linspace(-omega_max, omega_max, n_omega)
+    
+    # Only keep frequencies within range
+    mask = (freqs >= -omega_max) & (freqs <= omega_max)
+    if np.sum(mask) > 2:
+        from scipy.interpolate import interp1d
+        interp_real = interp1d(freqs[mask], np.real(fft_vals[mask]), 
+                               kind='linear', fill_value=0.0, bounds_error=False)
+        spectral = interp_real(omega)
+    else:
+        spectral = np.real(fft_vals[:n_omega]) if len(fft_vals) >= n_omega else np.zeros(n_omega)
+        omega = freqs[:n_omega] if len(freqs) >= n_omega else np.linspace(-omega_max, omega_max, n_omega)
+    
+    return omega, spectral
+
+
+# ==============================================================================
 # HDF5 Support Functions
 # ==============================================================================
+
+def load_time_correlation_from_hdf5(h5_path, group_name):
+    """
+    Load time-domain correlation data from new HDF5 structure.
+    
+    Parameters:
+    h5_path: Path to ed_results.h5 file
+    group_name: Name of the group in /dynamical/time_correlations/
+    
+    Returns: (times, correlation_real, correlation_imag, beta) or (None, None, None, None)
+    """
+    if not HAS_H5PY:
+        return None, None, None, None
+    
+    try:
+        with h5py.File(h5_path, 'r') as f:
+            if 'dynamical' not in f:
+                return None, None, None, None
+            
+            dyn_group = f['dynamical']
+            
+            # Check for time_correlations subgroup
+            if 'time_correlations' not in dyn_group:
+                return None, None, None, None
+            
+            tc_group = dyn_group['time_correlations']
+            if group_name not in tc_group:
+                return None, None, None, None
+            
+            grp = tc_group[group_name]
+            times = grp['times'][:]
+            corr_real = grp['correlation_real'][:]
+            corr_imag = grp['correlation_imag'][:]
+            
+            # Get beta from attribute
+            beta = grp.attrs.get('beta', np.nan)
+            
+            return times, corr_real, corr_imag, beta
+            
+    except Exception as e:
+        print(f"Error loading HDF5 time correlation {h5_path}/{group_name}: {e}")
+        return None, None, None, None
+
 
 def load_spectral_from_hdf5(h5_path, dataset_name):
     """
     Load spectral function data from HDF5 file.
     
+    Supports two formats:
+    1. New: time_correlations groups (converts via FFT)
+    2. Legacy: direct spectral data with frequencies/spectral_real
+    
     Parameters:
     h5_path: Path to ed_results.h5 file
-    dataset_name: Name of the dataset in /dynamical/ group
+    dataset_name: Name of the dataset/group in /dynamical/ hierarchy
     
     Returns: (omega_array, spectral_function_array) or (None, None)
     """
@@ -77,14 +184,29 @@ def load_spectral_from_hdf5(h5_path, dataset_name):
                 return None, None
             
             dyn_group = f['dynamical']
-            if dataset_name not in dyn_group:
-                return None, None
             
-            ds = dyn_group[dataset_name]
-            omega = ds['frequencies'][:]
-            spectral = ds['spectral_real'][:]
+            # First, try new time_correlations format
+            if 'time_correlations' in dyn_group:
+                tc_group = dyn_group['time_correlations']
+                if dataset_name in tc_group:
+                    grp = tc_group[dataset_name]
+                    times = grp['times'][:]
+                    corr_real = grp['correlation_real'][:]
+                    corr_imag = grp['correlation_imag'][:]
+                    
+                    # Convert to spectral via FFT
+                    omega, spectral = time_to_spectral_fft(times, corr_real, corr_imag)
+                    return omega, spectral
             
-            return omega, spectral
+            # Fall back to legacy format: direct spectral data
+            if dataset_name in dyn_group:
+                ds = dyn_group[dataset_name]
+                if 'frequencies' in ds and 'spectral_real' in ds:
+                    omega = ds['frequencies'][:]
+                    spectral = ds['spectral_real'][:]
+                    return omega, spectral
+            
+            return None, None
             
     except Exception as e:
         print(f"Error loading HDF5 {h5_path}/{dataset_name}: {e}")
@@ -94,6 +216,8 @@ def load_spectral_from_hdf5(h5_path, dataset_name):
 def list_spectral_datasets_hdf5(h5_path):
     """
     List all spectral datasets available in an HDF5 file.
+    
+    Supports both new time_correlations format and legacy spectral format.
     
     Parameters:
     h5_path: Path to ed_results.h5 file
@@ -110,14 +234,29 @@ def list_spectral_datasets_hdf5(h5_path):
                 return []
             
             dyn_group = f['dynamical']
+            
+            # First check new time_correlations format
+            if 'time_correlations' in dyn_group:
+                tc_group = dyn_group['time_correlations']
+                for name in tc_group.keys():
+                    # Parse new format: {operator}_sample{N}_beta{value}_tpq
+                    species, beta, sample_idx = parse_time_correlation_name(name)
+                    if species is not None:
+                        datasets.append((name, species, beta, sample_idx))
+            
+            # Also check legacy format (direct children of dynamical)
             for name in dyn_group.keys():
-                if name == 'samples':
+                if name in ('samples', 'time_correlations'):
                     continue
                 
-                # Parse dataset name: {species}_spectral_sample_{N}_beta_{beta}
-                species, beta, sample_idx = parse_spectral_dataset_name(name)
-                if species is not None:
-                    datasets.append((name, species, beta, sample_idx))
+                # Check if this is a group with spectral data
+                if isinstance(dyn_group[name], h5py.Group):
+                    grp = dyn_group[name]
+                    if 'frequencies' in grp and 'spectral_real' in grp:
+                        # Parse legacy format: {species}_spectral_sample_{N}_beta_{beta}
+                        species, beta, sample_idx = parse_spectral_dataset_name(name)
+                        if species is not None:
+                            datasets.append((name, species, beta, sample_idx))
                     
     except Exception as e:
         print(f"Error reading HDF5 {h5_path}: {e}")
@@ -125,9 +264,39 @@ def list_spectral_datasets_hdf5(h5_path):
     return datasets
 
 
+def parse_time_correlation_name(name):
+    """
+    Parse new HDF5 time_correlations group name.
+    
+    Format: {operator}_sample{N}_beta{value}_tpq
+    Example: SzSz_q_Qx0_Qy0_Qz0_sample0_beta111.8182_tpq
+    
+    Returns: (species, beta, sample_idx) or (None, None, None)
+    """
+    # Match pattern: {operator}_sample{N}_beta{value}_tpq
+    m = re.match(r'^(.+?)_sample(\d+)_beta([0-9.+-eE]+|inf|infty)_tpq$', 
+                 name, re.IGNORECASE)
+    if not m:
+        return None, None, None
+    
+    species = m.group(1)
+    sample_idx = int(m.group(2))
+    beta_token = m.group(3)
+    
+    if beta_token.lower() in ("inf", "infty"):
+        beta_val = np.inf
+    else:
+        try:
+            beta_val = float(beta_token)
+        except ValueError:
+            return None, None, None
+    
+    return species, beta_val, sample_idx
+
+
 def parse_spectral_dataset_name(name):
     """
-    Parse HDF5 dataset name to extract species, beta, and sample index.
+    Parse legacy HDF5 dataset name to extract species, beta, and sample index.
     
     Format: {species}_spectral_sample_{N}_beta_{beta}
     (Same as text file but without .txt extension)
