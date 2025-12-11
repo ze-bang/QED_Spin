@@ -704,8 +704,8 @@ void compute_dynamical_response_workflow(const EDConfig& config) {
     params.broadening = config.dynamical.broadening;
     params.random_seed = config.dynamical.random_seed;
     
-    std::string output_subdir = config.workflow.output_dir + "/dynamical_response";
-    create_directory_mpi_safe(output_subdir);
+    // Ensure output directory exists
+    create_directory_mpi_safe(config.workflow.output_dir);
     
     std::cout << "Random states: " << params.num_samples << "\n";
     std::cout << "Krylov dimension: " << params.krylov_dim << "\n";
@@ -717,43 +717,23 @@ void compute_dynamical_response_workflow(const EDConfig& config) {
     bool found_ground_state = false;
     
     if (rank == 0) {
-        // Try to load ground state energy from existing files
-        // Method 1: eigenvalues.dat (binary format)
-        std::string eigenvalues_dat = config.workflow.output_dir + "/eigenvectors/eigenvalues.dat";
-        std::ifstream infile_dat(eigenvalues_dat, std::ios::binary);
+        std::string h5_file = config.workflow.output_dir + "/ed_results.h5";
         
-        if (infile_dat.is_open()) {
+        // Method 1: Try to load eigenvalues from HDF5
+        if (HDF5IO::fileExists(h5_file)) {
             try {
-                size_t num_eigenvalues;
-                infile_dat.read(reinterpret_cast<char*>(&num_eigenvalues), sizeof(size_t));
-                if (num_eigenvalues > 0) {
-                    infile_dat.read(reinterpret_cast<char*>(&ground_state_energy), sizeof(double));
+                auto eigenvalues = HDF5IO::loadEigenvalues(h5_file);
+                if (!eigenvalues.empty()) {
+                    ground_state_energy = eigenvalues[0];
                     found_ground_state = true;
+                    std::cout << "  Loaded ground state energy from HDF5 eigenvalues\n";
                 }
-                infile_dat.close();
             } catch (const std::exception& e) {
-                std::cerr << "Warning: Failed to read eigenvalues.dat: " << e.what() << "\n";
-            } catch (...) {
-                std::cerr << "Warning: Unknown error reading eigenvalues.dat\n";
+                // Continue to next method
             }
-        }
-        
-        // Method 2: eigenvalues.txt (text format)
-        if (!found_ground_state) {
-            std::string eigenvalues_txt = config.workflow.output_dir + "/eigenvalues.txt";
-            std::ifstream infile_txt(eigenvalues_txt);
-            if (infile_txt.is_open() && (infile_txt >> ground_state_energy)) {
-                found_ground_state = true;
-                infile_txt.close();
-            }
-        }
-        
-        // Method 3: minimum energy from HDF5 TPQ data or SS_rand0.dat
-        if (!found_ground_state) {
-            std::string h5_file = config.workflow.output_dir + "/ed_results.h5";
             
-            // Try HDF5 first
-            if (HDF5IO::fileExists(h5_file)) {
+            // Method 2: Try TPQ thermodynamics from HDF5
+            if (!found_ground_state) {
                 try {
                     auto points = HDF5IO::loadTPQThermodynamics(h5_file, 0);
                     if (!points.empty()) {
@@ -766,42 +746,18 @@ void compute_dynamical_response_workflow(const EDConfig& config) {
                         if (min_energy < std::numeric_limits<double>::max()) {
                             ground_state_energy = min_energy;
                             found_ground_state = true;
+                            std::cout << "  Loaded ground state energy from HDF5 TPQ data\n";
                         }
                     }
                 } catch (const std::exception& e) {
-                    // Fall back to text file
-                }
-            }
-            
-            // Fall back to SS_rand0.dat for backwards compatibility
-            if (!found_ground_state) {
-                std::string ss_file = config.workflow.output_dir + "/SS_rand0.dat";
-                std::ifstream infile_ss(ss_file);
-                if (infile_ss.is_open()) {
-                    std::string line;
-                    double min_energy = std::numeric_limits<double>::max();
-                    bool first_entry_skipped = false;
-                    
-                    while (std::getline(infile_ss, line)) {
-                        if (line.empty() || line[0] == '#') continue;
-                        std::istringstream iss(line);
-                        double inv_temp, energy;
-                        if (iss >> inv_temp >> energy) {
-                            if (!first_entry_skipped) { first_entry_skipped = true; continue; }
-                            if (energy < min_energy) min_energy = energy;
-                        }
-                    }
-                    infile_ss.close();
-                    if (min_energy < std::numeric_limits<double>::max()) {
-                        ground_state_energy = min_energy;
-                        found_ground_state = true;
-                    }
+                    // Continue to fallback
                 }
             }
         }
         
-        // Method 4 (fallback): Compute using Lanczos
+        // Method 3 (fallback): Compute using Lanczos
         if (!found_ground_state) {
+            std::cout << "  Computing ground state energy using Lanczos...\n";
             ComplexVector ground_state(N);
             ground_state_energy = find_ground_state_lanczos(
                 H_func, N, params.krylov_dim, params.tolerance,
@@ -809,6 +765,14 @@ void compute_dynamical_response_workflow(const EDConfig& config) {
                 ground_state
             );
             found_ground_state = true;
+            
+            // Save computed ground state energy to HDF5
+            try {
+                std::string h5_path = HDF5IO::createOrOpenFile(config.workflow.output_dir);
+                HDF5IO::saveEigenvalues(h5_path, {ground_state_energy});
+            } catch (...) {
+                // Ignore save errors
+            }
         }
         
         std::cout << "  Ground state energy: " << std::fixed << std::setprecision(10) 
@@ -1029,19 +993,23 @@ void compute_dynamical_response_workflow(const EDConfig& config) {
                     config.dynamical.omega_max,
                     config.dynamical.num_omega_points,
                     temperature,
-                    output_subdir,
+                    config.workflow.output_dir,
                     ground_state_energy
                 );
             }
             
-            // Save results
-            std::string output_file = output_subdir + "/" + names[op_idx];
+            // Save results to HDF5
+            std::string h5_file = HDF5IO::createOrOpenFile(config.workflow.output_dir);
+            std::string op_name = names[op_idx];
             if (config.dynamical.num_temp_bins > 1) {
-                output_file += "_T" + std::to_string(temperature);
+                op_name += "_T" + std::to_string(temperature);
             }
-            output_file += ".txt";
-            
-            save_dynamical_response_results(results, output_file);
+            HDF5IO::saveDynamicalResponseFull(
+                h5_file, op_name,
+                results.frequencies, results.spectral_function, results.spectral_function_imag,
+                results.spectral_error, results.spectral_error_imag,
+                results.total_samples, temperature
+            );
             
             return true;
         };
@@ -1175,20 +1143,24 @@ void compute_dynamical_response_workflow(const EDConfig& config) {
                         config.dynamical.num_omega_points,
                         temperatures,
                         ground_state_energy,
-                        output_subdir
+                        config.workflow.output_dir
                     );
                 }
             }
             
-            // Save results for all temperatures
+            // Save results for all temperatures to HDF5
+            std::string h5_file = HDF5IO::createOrOpenFile(config.workflow.output_dir);
             for (const auto& [temperature, results] : results_map) {
-                std::string output_file = output_subdir + "/" + names[op_idx];
+                std::string op_name = names[op_idx];
                 if (temperatures.size() > 1) {
-                    output_file += "_T" + std::to_string(temperature);
+                    op_name += "_T" + std::to_string(temperature);
                 }
-                output_file += ".txt";
-                
-                save_dynamical_response_results(results, output_file);
+                HDF5IO::saveDynamicalResponseFull(
+                    h5_file, op_name,
+                    results.frequencies, results.spectral_function, results.spectral_function_imag,
+                    results.spectral_error, results.spectral_error_imag,
+                    results.total_samples, temperature
+                );
             }
             
             return true;
@@ -1376,7 +1348,7 @@ void compute_dynamical_response_workflow(const EDConfig& config) {
                     config.dynamical.omega_max,
                     config.dynamical.num_omega_points,
                     temperature,
-                    output_subdir,
+                    config.workflow.output_dir,
                     ground_state_energy
                 );
             } else {
@@ -1388,19 +1360,23 @@ void compute_dynamical_response_workflow(const EDConfig& config) {
                     config.dynamical.omega_max,
                     config.dynamical.num_omega_points,
                     temperature,
-                    output_subdir
+                    config.workflow.output_dir
                 );
             }
             
-            // Save results for this temperature
-            std::string output_file = output_subdir + "/" + config.dynamical.output_prefix;
+            // Save results for this temperature to HDF5
+            std::string h5_file = HDF5IO::createOrOpenFile(config.workflow.output_dir);
+            std::string op_name = config.dynamical.output_prefix;
             if (config.dynamical.num_temp_bins > 1) {
-                output_file += "_T" + std::to_string(temperature);
+                op_name += "_T" + std::to_string(temperature);
             }
-            output_file += ".txt";
-            
-            save_dynamical_response_results(results, output_file);
-            std::cout << "Results saved to: " << output_file << "\n";
+            HDF5IO::saveDynamicalResponseFull(
+                h5_file, op_name,
+                results.frequencies, results.spectral_function, results.spectral_function_imag,
+                results.spectral_error, results.spectral_error_imag,
+                results.total_samples, temperature
+            );
+            std::cout << "Results saved to HDF5: " << h5_file << " (" << op_name << ")\n";
         }
     }
     
@@ -1468,8 +1444,8 @@ void compute_static_response_workflow(const EDConfig& config) {
     params.krylov_dim = config.static_resp.krylov_dim;
     params.random_seed = config.static_resp.random_seed;
     
-    std::string output_subdir = config.workflow.output_dir + "/static_response";
-    create_directory_mpi_safe(output_subdir);
+    // Ensure output directory exists
+    create_directory_mpi_safe(config.workflow.output_dir);
     
     std::cout << "Random states: " << params.num_samples << "\n";
     std::cout << "Krylov dimension: " << params.krylov_dim << "\n";
@@ -1653,13 +1629,19 @@ void compute_static_response_workflow(const EDConfig& config) {
                     config.static_resp.temp_min,
                     config.static_resp.temp_max,
                     config.static_resp.num_temp_points,
-                    output_subdir
+                    config.workflow.output_dir
                 );
             }
             
-            // Save results
-            std::string output_file = output_subdir + "/" + names[op_idx] + ".txt";
-            save_static_response_results(results, output_file);
+            // Save results to HDF5
+            std::string h5_file = HDF5IO::createOrOpenFile(config.workflow.output_dir);
+            HDF5IO::saveStaticResponse(
+                h5_file, names[op_idx],
+                results.temperatures, results.expectation, results.expectation_error,
+                results.variance, results.variance_error,
+                results.susceptibility, results.susceptibility_error,
+                results.total_samples
+            );
             
             return true;
         };
@@ -1800,7 +1782,7 @@ void compute_static_response_workflow(const EDConfig& config) {
                 config.static_resp.temp_min,
                 config.static_resp.temp_max,
                 config.static_resp.num_temp_points,
-                output_subdir
+                config.workflow.output_dir
             );
         } else if (!config.static_resp.operator2_file.empty()) {
             // Two different operators: ⟨O₁†O₂⟩
@@ -1818,7 +1800,7 @@ void compute_static_response_workflow(const EDConfig& config) {
                 config.static_resp.temp_min,
                 config.static_resp.temp_max,
                 config.static_resp.num_temp_points,
-                output_subdir
+                config.workflow.output_dir
             );
         } else {
             // Same operator: ⟨O†O⟩ (default two-point correlation)
@@ -1828,14 +1810,20 @@ void compute_static_response_workflow(const EDConfig& config) {
                 config.static_resp.temp_min,
                 config.static_resp.temp_max,
                 config.static_resp.num_temp_points,
-                output_subdir
+                config.workflow.output_dir
             );
         }
         
-        // Save results
-        std::string output_file = output_subdir + "/" + config.static_resp.output_prefix + ".txt";
-        save_static_response_results(results, output_file);
-        std::cout << "Static response saved to: " << output_file << "\n";
+        // Save results to HDF5
+        std::string h5_file = HDF5IO::createOrOpenFile(config.workflow.output_dir);
+        HDF5IO::saveStaticResponse(
+            h5_file, config.static_resp.output_prefix,
+            results.temperatures, results.expectation, results.expectation_error,
+            results.variance, results.variance_error,
+            results.susceptibility, results.susceptibility_error,
+            results.total_samples
+        );
+        std::cout << "Static response saved to HDF5: " << h5_file << "\n";
     }
 }
 
@@ -1911,9 +1899,8 @@ void compute_ground_state_dssf_workflow(const EDConfig& config) {
         ham.apply(in, out, dim);
     };
     
-    // Create output directory
-    std::string output_subdir = config.workflow.output_dir + "/ground_state_dssf";
-    create_directory_mpi_safe(output_subdir);
+    // Ensure output directory exists
+    create_directory_mpi_safe(config.workflow.output_dir);
     
     // Setup ground state DSSF parameters
     GroundStateDSSFParameters gs_params;
@@ -1977,40 +1964,32 @@ void compute_ground_state_dssf_workflow(const EDConfig& config) {
     ComplexVector ground_state(N);
     double ground_state_energy;
     
-    // Check if ground state is already saved
-    std::string gs_file = config.workflow.output_dir + "/eigenvectors/ground_state.dat";
-    std::ifstream gs_in(gs_file, std::ios::binary);
+    // Check if ground state is already saved in HDF5
+    std::string h5_file = config.workflow.output_dir + "/ed_results.h5";
     bool gs_loaded = false;
     
-    if (gs_in.is_open()) {
+    if (HDF5IO::fileExists(h5_file)) {
         try {
-            size_t saved_dim;
-            gs_in.read(reinterpret_cast<char*>(&saved_dim), sizeof(size_t));
-            gs_in.read(reinterpret_cast<char*>(&ground_state_energy), sizeof(double));
-            
-            if (saved_dim == N) {
-                gs_in.read(reinterpret_cast<char*>(ground_state.data()), N * sizeof(Complex));
-                gs_loaded = true;
-                if (rank == 0) {
-                    std::cout << "Loaded ground state from file: E0 = " << ground_state_energy << "\n";
-                }
-            } else {
-                if (rank == 0) {
-                    std::cerr << "Warning: Ground state dimension mismatch (file: " << saved_dim << ", expected: " << N << "), will recompute\n";
+            // Try to load eigenvalue (ground state energy)
+            auto eigenvalues = HDF5IO::loadEigenvalues(h5_file);
+            if (!eigenvalues.empty()) {
+                ground_state_energy = eigenvalues[0];
+                
+                // Try to load eigenvector (ground state)
+                auto gs_vec = HDF5IO::loadEigenvector(h5_file, 0);
+                if (gs_vec.size() == N) {
+                    std::copy(gs_vec.begin(), gs_vec.end(), ground_state.begin());
+                    gs_loaded = true;
+                    if (rank == 0) {
+                        std::cout << "Loaded ground state from HDF5: E0 = " << ground_state_energy << "\n";
+                    }
                 }
             }
         } catch (const std::exception& e) {
             if (rank == 0) {
-                std::cerr << "Warning: Failed to load ground state: " << e.what() << ", will recompute\n";
+                std::cout << "Could not load ground state from HDF5, will compute...\n";
             }
-            gs_loaded = false;
-        } catch (...) {
-            if (rank == 0) {
-                std::cerr << "Warning: Unknown error loading ground state, will recompute\n";
-            }
-            gs_loaded = false;
         }
-        gs_in.close();
     }
     
     if (!gs_loaded) {
@@ -2029,16 +2008,15 @@ void compute_ground_state_dssf_workflow(const EDConfig& config) {
         if (rank == 0) {
             std::cout << "Computed ground state: E0 = " << ground_state_energy << "\n";
             
-            // Save ground state for future use
-            safe_system_call("mkdir -p " + config.workflow.output_dir + "/eigenvectors");
-            std::ofstream gs_out(gs_file, std::ios::binary);
-            if (gs_out.is_open()) {
-                size_t dim = N;
-                gs_out.write(reinterpret_cast<const char*>(&dim), sizeof(size_t));
-                gs_out.write(reinterpret_cast<const char*>(&ground_state_energy), sizeof(double));
-                gs_out.write(reinterpret_cast<const char*>(ground_state.data()), N * sizeof(Complex));
-                gs_out.close();
-                std::cout << "Saved ground state to: " << gs_file << "\n";
+            // Save ground state to HDF5
+            try {
+                std::string h5_path = HDF5IO::createOrOpenFile(config.workflow.output_dir);
+                HDF5IO::saveEigenvalues(h5_path, {ground_state_energy});
+                std::vector<Complex> gs_vec(ground_state.begin(), ground_state.end());
+                HDF5IO::saveEigenvector(h5_path, 0, gs_vec);
+                std::cout << "Saved ground state to HDF5: " << h5_path << "\n";
+            } catch (const std::exception& e) {
+                std::cerr << "Warning: Failed to save ground state to HDF5: " << e.what() << "\n";
             }
         }
     }
@@ -2075,12 +2053,16 @@ void compute_ground_state_dssf_workflow(const EDConfig& config) {
             H_func_int, O1_func, O2_func, ground_state, ground_state_energy, N, gs_params
         );
         
-        // Save results to HDF5 only (consistent with FTLM dynamical response)
-        std::string output_file = output_subdir + "/" + names[op_idx] + ".h5";
-        
-        // Save to HDF5 using same function as FTLM
-        save_dynamical_response_results(results, output_file);
-        std::cout << "[Rank " << rank << "] Saved: " << output_file << "\n";
+        // Save results to unified HDF5 file
+        std::string h5_path = HDF5IO::createOrOpenFile(config.workflow.output_dir);
+        std::string op_name = "ground_state_dssf/" + names[op_idx];
+        HDF5IO::saveDynamicalResponseFull(
+            h5_path, op_name,
+            results.frequencies, results.spectral_function, results.spectral_function_imag,
+            results.spectral_error, results.spectral_error_imag,
+            1, 0.0  // T=0 ground state
+        );
+        std::cout << "[Rank " << rank << "] Saved to HDF5: " << op_name << "\n";
     }
     
     #ifdef WITH_MPI
@@ -2090,7 +2072,7 @@ void compute_ground_state_dssf_workflow(const EDConfig& config) {
     if (rank == 0) {
         std::cout << "\n==========================================\n";
         std::cout << "Ground State DSSF Complete\n";
-        std::cout << "Results saved to: " << output_subdir << "\n";
+        std::cout << "Results saved to: " << config.workflow.output_dir << "/ed_results.h5\n";
         std::cout << "==========================================\n";
     }
 }
@@ -2303,7 +2285,431 @@ void print_help(const char* prog_name) {
     std::cout << "  " << prog_name << " --method-info=mTPQ\n";
     std::cout << "  " << prog_name << " --method-info=DAVIDSON_GPU\n\n";
     
-    std::cout << "For more options, see documentation or generated config file.\n";
+    std::cout << "For more options, see documentation or generated config file.\n\n";
+    
+    std::cout << "================================================================================\n";
+    std::cout << "DSSF MODE (TPQ_DSSF-style interface)\n";
+    std::cout << "================================================================================\n";
+    std::cout << "For spectral function calculations with simpler command-line interface:\n\n";
+    std::cout << "  " << prog_name << " --dssf <directory> <krylov_dim> <spin_combinations> [options]\n\n";
+    std::cout << "  Required arguments:\n";
+    std::cout << "    <directory>          Path containing InterAll.dat, Trans.dat, positions.dat\n";
+    std::cout << "    <krylov_dim>         Krylov subspace dimension (30-100 typical)\n";
+    std::cout << "    <spin_combinations>  \"op1,op2;op3,op4\" (0=Sp/Sx, 1=Sm/Sy, 2=Sz)\n\n";
+    std::cout << "  DSSF-specific options:\n";
+    std::cout << "    --dssf-method=<m>    Method: spectral | ftlm_thermal | static | ground_state\n";
+    std::cout << "    --dssf-operator=<o>  Operator: sum | transverse | sublattice | experimental\n";
+    std::cout << "    --dssf-basis=<b>     Basis: ladder | xyz (default: ladder)\n";
+    std::cout << "    --dssf-omega=<min,max,bins,eta>  Frequency grid and broadening\n";
+    std::cout << "    --dssf-temps=<min,max,steps>     Temperature range (log spacing)\n";
+    std::cout << "    --dssf-momentum=<Qx,Qy,Qz;...>   Momentum points (in units of π)\n";
+    std::cout << "    --dssf-samples=<n>   Number of FTLM random samples (default: 40)\n\n";
+    std::cout << "  Examples:\n";
+    std::cout << "    # SzSz spectral function at Q=0\n";
+    std::cout << "    " << prog_name << " --dssf ./data 50 \"2,2\" --dssf-method=spectral\n\n";
+    std::cout << "    # Finite-T DSSF with FTLM averaging\n";
+    std::cout << "    " << prog_name << " --dssf ./data 50 \"2,2\" --dssf-method=ftlm_thermal \\\n";
+    std::cout << "                   --dssf-temps=0.1,10.0,20\n\n";
+    std::cout << "    # Static structure factor (SSSF)\n";
+    std::cout << "    " << prog_name << " --dssf ./data 50 \"2,2\" --dssf-method=static\n\n";
+    std::cout << "  Note: DSSF mode uses TPQ states from ed_results.h5 if available.\n";
+    std::cout << "        Run diagonalization/mTPQ first, then use --dssf for post-processing.\n";
+}
+
+// ============================================================================
+// DSSF MODE (TPQ_DSSF-style interface)
+// ============================================================================
+
+/**
+ * @brief Run DSSF mode with TPQ_DSSF-style arguments
+ * 
+ * This provides a simpler interface for spectral function calculations,
+ * using positional arguments like TPQ_DSSF.
+ */
+int run_dssf_mode(int argc, char* argv[]) {
+    int rank = 0, size = 1;
+    #ifdef WITH_MPI
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    MPI_Comm_size(MPI_COMM_WORLD, &size);
+    #endif
+    
+    // Find positional arguments after --dssf
+    int dssf_idx = -1;
+    for (int i = 1; i < argc; i++) {
+        if (std::string(argv[i]) == "--dssf") {
+            dssf_idx = i;
+            break;
+        }
+    }
+    
+    if (dssf_idx < 0 || dssf_idx + 3 >= argc) {
+        if (rank == 0) {
+            std::cerr << "DSSF mode requires: --dssf <directory> <krylov_dim> <spin_combinations>\n";
+            std::cerr << "Use --help for more information.\n";
+        }
+        return 1;
+    }
+    
+    // Parse positional arguments
+    std::string directory = argv[dssf_idx + 1];
+    int krylov_dim = std::stoi(argv[dssf_idx + 2]);
+    std::string spin_combinations_str = argv[dssf_idx + 3];
+    
+    // Parse optional arguments
+    std::string method = "spectral";
+    std::string operator_type = "sum";
+    std::string basis = "ladder";
+    double omega_min = -5.0, omega_max = 5.0;
+    int num_omega_bins = 200;
+    double broadening = 0.1;
+    double T_min = 0.1, T_max = 10.0;
+    int T_steps = 20;
+    bool use_temperature_scan = false;
+    std::string momentum_str = "0,0,0";
+    std::string polarization_str = "";
+    double theta = 0.0;
+    int num_samples = 40;
+    int n_up = -1;
+    bool use_fixed_sz = false;
+    int unit_cell_size = 4;
+    
+    for (int i = 1; i < argc; i++) {
+        std::string arg = argv[i];
+        
+        if (arg.find("--dssf-method=") == 0) {
+            method = arg.substr(14);
+        } else if (arg.find("--dssf-operator=") == 0) {
+            operator_type = arg.substr(16);
+        } else if (arg.find("--dssf-basis=") == 0) {
+            basis = arg.substr(13);
+        } else if (arg.find("--dssf-omega=") == 0) {
+            std::string omega_str = arg.substr(13);
+            std::stringstream ss(omega_str);
+            std::string val;
+            std::vector<double> vals;
+            while (std::getline(ss, val, ',')) {
+                vals.push_back(std::stod(val));
+            }
+            if (vals.size() >= 1) omega_min = vals[0];
+            if (vals.size() >= 2) omega_max = vals[1];
+            if (vals.size() >= 3) num_omega_bins = static_cast<int>(vals[2]);
+            if (vals.size() >= 4) broadening = vals[3];
+        } else if (arg.find("--dssf-temps=") == 0) {
+            std::string temps_str = arg.substr(13);
+            std::stringstream ss(temps_str);
+            std::string val;
+            std::vector<double> vals;
+            while (std::getline(ss, val, ',')) {
+                vals.push_back(std::stod(val));
+            }
+            if (vals.size() >= 1) T_min = vals[0];
+            if (vals.size() >= 2) T_max = vals[1];
+            if (vals.size() >= 3) T_steps = static_cast<int>(vals[2]);
+            use_temperature_scan = true;
+        } else if (arg.find("--dssf-momentum=") == 0) {
+            momentum_str = arg.substr(16);
+        } else if (arg.find("--dssf-polarization=") == 0) {
+            polarization_str = arg.substr(20);
+        } else if (arg.find("--dssf-theta=") == 0) {
+            theta = std::stod(arg.substr(13));
+        } else if (arg.find("--dssf-samples=") == 0) {
+            num_samples = std::stoi(arg.substr(15));
+        } else if (arg.find("--dssf-n-up=") == 0 || arg.find("--n-up=") == 0) {
+            std::string val = (arg.find("--dssf-n-up=") == 0) ? arg.substr(12) : arg.substr(7);
+            n_up = std::stoi(val);
+            use_fixed_sz = (n_up >= 0);
+        } else if (arg == "--fixed-sz") {
+            use_fixed_sz = true;
+        } else if (arg.find("--dssf-unit-cell=") == 0) {
+            unit_cell_size = std::stoi(arg.substr(17));
+        } else if (arg.find("--output=") == 0) {
+            // output directory can be specified
+        }
+    }
+    
+    // Read num_sites from positions.dat
+    std::string positions_file = directory + "/positions.dat";
+    int num_sites = 0;
+    {
+        std::ifstream file(positions_file);
+        if (!file.is_open()) {
+            if (rank == 0) {
+                std::cerr << "Error: Cannot open positions.dat at " << positions_file << "\n";
+            }
+            return 1;
+        }
+        std::string line;
+        while (std::getline(file, line)) {
+            if (!line.empty() && line[0] != '#') num_sites++;
+        }
+    }
+    
+    float spin_length = 0.5f;
+    
+    if (rank == 0) {
+        std::cout << "\n==========================================\n";
+        std::cout << "ED DSSF MODE (TPQ_DSSF-style interface)\n";
+        std::cout << "==========================================\n";
+        std::cout << "Directory: " << directory << "\n";
+        std::cout << "Sites: " << num_sites << ", Spin: " << spin_length << "\n";
+        std::cout << "Krylov dimension: " << krylov_dim << "\n";
+        std::cout << "Spin combinations: " << spin_combinations_str << "\n";
+        std::cout << "Method: " << method << "\n";
+        std::cout << "Operator type: " << operator_type << "\n";
+        std::cout << "Basis: " << basis << "\n";
+        if (method != "static") {
+            std::cout << "Omega range: [" << omega_min << ", " << omega_max << "]\n";
+            std::cout << "Omega bins: " << num_omega_bins << "\n";
+            std::cout << "Broadening: " << broadening << "\n";
+        }
+        if (use_temperature_scan) {
+            std::cout << "Temperature range: [" << T_min << ", " << T_max << "]\n";
+            std::cout << "Temperature steps: " << T_steps << "\n";
+        }
+        if (use_fixed_sz) {
+            std::cout << "Fixed-Sz sector: n_up = " << (n_up >= 0 ? std::to_string(n_up) : "N/2") << "\n";
+        }
+    }
+    
+    // Load Hamiltonian
+    Operator ham_op(num_sites, spin_length);
+    std::string interall_file = directory + "/InterAll.dat";
+    std::string trans_file = directory + "/Trans.dat";
+    std::string three_body_file = directory + "/ThreeBodyG.dat";
+    
+    if (!std::filesystem::exists(interall_file) || !std::filesystem::exists(trans_file)) {
+        if (rank == 0) {
+            std::cerr << "Error: Missing Hamiltonian files (InterAll.dat, Trans.dat)\n";
+        }
+        return 1;
+    }
+    
+    ham_op.loadFromInterAllFile(interall_file);
+    ham_op.loadFromFile(trans_file);
+    if (std::filesystem::exists(three_body_file)) {
+        ham_op.loadThreeBodyTerm(three_body_file);
+    }
+    
+    // Determine Hilbert space dimension
+    if (n_up < 0 && use_fixed_sz) {
+        n_up = num_sites / 2;
+    }
+    
+    uint64_t N;
+    if (use_fixed_sz) {
+        N = 1;
+        for (uint64_t i = 0; i < static_cast<uint64_t>(n_up); i++) {
+            N = N * (num_sites - i) / (i + 1);
+        }
+    } else {
+        N = 1ULL << num_sites;
+    }
+    
+    if (rank == 0) {
+        std::cout << "Hilbert space dimension: " << N << "\n";
+    }
+    
+    // Create Hamiltonian function wrapper
+    auto H = [&ham_op](const Complex* in, Complex* out, int size) {
+        ham_op.apply(in, out, size);
+    };
+    
+    // Read ground state energy for energy shift
+    double ground_state_energy = 0.0;
+    std::string h5_file = directory + "/output/ed_results.h5";
+    if (HDF5IO::fileExists(h5_file)) {
+        try {
+            auto eigenvalues = HDF5IO::loadEigenvalues(h5_file);
+            if (!eigenvalues.empty()) {
+                ground_state_energy = eigenvalues[0];
+                if (rank == 0) {
+                    std::cout << "Ground state energy: " << ground_state_energy << "\n";
+                }
+            }
+        } catch (...) {}
+    }
+    
+    // Parse operators
+    auto spin_combinations = parse_spin_combinations(spin_combinations_str);
+    auto momentum_points = parse_momentum_points(momentum_str);
+    auto polarization = polarization_str.empty() ? 
+        std::vector<double>{1.0/std::sqrt(2.0), -1.0/std::sqrt(2.0), 0.0} :
+        parse_polarization(polarization_str);
+    
+    // Construct operators
+    std::vector<Operator> obs_1, obs_2;
+    std::vector<std::string> obs_names;
+    
+    construct_operators_from_config(
+        operator_type, basis, spin_combinations, momentum_points,
+        polarization, theta, unit_cell_size, num_sites, spin_length,
+        use_fixed_sz, n_up, positions_file,
+        obs_1, obs_2, obs_names
+    );
+    
+    if (rank == 0) {
+        std::cout << "Number of operator pairs: " << obs_1.size() << "\n";
+    }
+    
+    // Create output directory
+    std::string output_dir = directory + "/output/dssf_" + method;
+    create_directory_mpi_safe(output_dir);
+    
+    // Generate temperature grid if needed
+    std::vector<double> temperatures;
+    if (use_temperature_scan || method == "ftlm_thermal" || method == "static") {
+        double log_T_min = std::log(T_min);
+        double log_T_max = std::log(T_max);
+        double log_step = (log_T_max - log_T_min) / std::max(1, T_steps - 1);
+        for (int i = 0; i < T_steps; i++) {
+            temperatures.push_back(std::exp(log_T_min + i * log_step));
+        }
+    }
+    
+    // Execute the requested method
+    if (method == "spectral") {
+        // Single-state spectral function
+        // Load ground state or TPQ state
+        ComplexVector state;
+        bool loaded = load_ground_state_from_file(directory + "/output", state, ground_state_energy, N);
+        
+        if (!loaded) {
+            if (rank == 0) {
+                std::cerr << "Error: Could not load state for spectral method\n";
+                std::cerr << "Run diagonalization first with --eigenvectors\n";
+            }
+            return 1;
+        }
+        
+        DynamicalResponseParameters params;
+        params.krylov_dim = krylov_dim;
+        params.broadening = broadening;
+        params.tolerance = 1e-10;
+        params.full_reorthogonalization = true;
+        
+        for (size_t i = 0; i < obs_1.size(); i++) {
+            auto O1 = [&obs_1, i](const Complex* in, Complex* out, int sz) { obs_1[i].apply(in, out, sz); };
+            auto O2 = [&obs_2, i](const Complex* in, Complex* out, int sz) { obs_2[i].apply(in, out, sz); };
+            
+            auto results = compute_dynamical_correlation_state(
+                H, O1, O2, state, N, params,
+                omega_min, omega_max, num_omega_bins, 0.0, ground_state_energy
+            );
+            
+            std::string filename = output_dir + "/" + obs_names[i] + "_spectral.txt";
+            save_dynamical_response_results(results, filename);
+            
+            if (rank == 0) {
+                std::cout << "Saved: " << filename << "\n";
+            }
+        }
+        
+    } else if (method == "ftlm_thermal") {
+        // TRUE FTLM thermal averaging
+        DynamicalResponseParameters params;
+        params.krylov_dim = krylov_dim;
+        params.broadening = broadening;
+        params.tolerance = 1e-10;
+        params.full_reorthogonalization = true;
+        params.num_samples = num_samples;
+        
+        for (size_t i = 0; i < obs_1.size(); i++) {
+            auto O1 = [&obs_1, i](const Complex* in, Complex* out, int sz) { obs_1[i].apply(in, out, sz); };
+            auto O2 = [&obs_2, i](const Complex* in, Complex* out, int sz) { obs_2[i].apply(in, out, sz); };
+            
+            auto results_map = compute_dynamical_correlation_multi_sample_multi_temperature(
+                H, O1, O2, N, params,
+                omega_min, omega_max, num_omega_bins,
+                temperatures, ground_state_energy, output_dir
+            );
+            
+            for (const auto& [T, results] : results_map) {
+                std::stringstream ss;
+                ss << output_dir << "/" << obs_names[i] << "_ftlm_T" << std::fixed << std::setprecision(4) << T << ".txt";
+                save_dynamical_response_results(results, ss.str());
+                
+                if (rank == 0) {
+                    std::cout << "Saved: " << ss.str() << "\n";
+                }
+            }
+        }
+        
+    } else if (method == "static") {
+        // Static structure factor
+        StaticResponseParameters params;
+        params.krylov_dim = krylov_dim;
+        params.tolerance = 1e-10;
+        params.full_reorthogonalization = true;
+        params.num_samples = num_samples;
+        params.compute_error_bars = true;
+        
+        for (size_t i = 0; i < obs_1.size(); i++) {
+            auto O1 = [&obs_1, i](const Complex* in, Complex* out, int sz) { obs_1[i].apply(in, out, sz); };
+            auto O2 = [&obs_2, i](const Complex* in, Complex* out, int sz) { obs_2[i].apply(in, out, sz); };
+            
+            auto results = compute_static_response(
+                H, O1, O2, N, params,
+                T_min, T_max, T_steps, output_dir
+            );
+            
+            std::string filename = output_dir + "/" + obs_names[i] + "_static.txt";
+            save_static_response_results(results, filename);
+            
+            if (rank == 0) {
+                std::cout << "Saved: " << filename << "\n";
+            }
+        }
+        
+    } else if (method == "ground_state") {
+        // Ground state DSSF using continued fraction
+        ComplexVector ground_state;
+        bool loaded = load_ground_state_from_file(directory + "/output", ground_state, ground_state_energy, N);
+        
+        if (!loaded) {
+            if (rank == 0) {
+                std::cerr << "Error: Could not load ground state for ground_state method\n";
+            }
+            return 1;
+        }
+        
+        GroundStateDSSFParameters gs_params;
+        gs_params.krylov_dim = krylov_dim;
+        gs_params.omega_min = omega_min;
+        gs_params.omega_max = omega_max;
+        gs_params.num_omega_points = num_omega_bins;
+        gs_params.broadening = broadening;
+        gs_params.tolerance = 1e-10;
+        
+        for (size_t i = 0; i < obs_1.size(); i++) {
+            auto O1 = [&obs_1, i](const Complex* in, Complex* out, int sz) { obs_1[i].apply(in, out, sz); };
+            auto O2 = [&obs_2, i](const Complex* in, Complex* out, int sz) { obs_2[i].apply(in, out, sz); };
+            
+            auto results = compute_ground_state_cross_correlation(
+                H, O1, O2, ground_state, ground_state_energy, N, gs_params
+            );
+            
+            std::string filename = output_dir + "/" + obs_names[i] + "_ground_state_dssf.txt";
+            save_dynamical_response_results(results, filename);
+            
+            if (rank == 0) {
+                std::cout << "Saved: " << filename << "\n";
+            }
+        }
+        
+    } else {
+        if (rank == 0) {
+            std::cerr << "Unknown DSSF method: " << method << "\n";
+            std::cerr << "Available methods: spectral, ftlm_thermal, static, ground_state\n";
+        }
+        return 1;
+    }
+    
+    if (rank == 0) {
+        std::cout << "\nDSSF calculation complete.\n";
+        std::cout << "Results saved in: " << output_dir << "\n";
+    }
+    
+    return 0;
 }
 
 // ============================================================================
@@ -2350,6 +2756,17 @@ int main(int argc, char* argv[]) {
     if (argc < 2) {
         print_help(argv[0]);
         return 1;
+    }
+    
+    // Check for DSSF mode (TPQ_DSSF-style interface)
+    for (int i = 1; i < argc; i++) {
+        if (std::string(argv[i]) == "--dssf") {
+            int result = run_dssf_mode(argc, argv);
+            #ifdef WITH_MPI
+            MPI_Finalize();
+            #endif
+            return result;
+        }
     }
     
     // Parse configuration

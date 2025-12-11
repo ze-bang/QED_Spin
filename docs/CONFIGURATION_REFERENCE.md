@@ -25,6 +25,9 @@ This document provides comprehensive documentation for all configuration options
    - [Output](#output-section)
 7. [Diagonalization Methods (Detailed)](#diagonalization-methods)
 8. [Examples](#examples)
+9. [TPQ_DSSF Executable](#tpq_dssf-output-structure)
+10. [ED DSSF Mode](#ed-dssf-mode)
+11. [Tips and Best Practices](#tips-and-best-practices)
 
 ---
 
@@ -64,6 +67,14 @@ Configuration is processed in order:
 ```bash
 ./ED ./my_hamiltonian_dir --config=configs/my_config.cfg --tolerance=1e-14
 ```
+
+### Mode 5: DSSF mode (TPQ_DSSF-style interface)
+```bash
+./ED --dssf <directory> <krylov_dim> <spin_combinations> [options]
+```
+
+This mode provides a simpler command-line interface for spectral function calculations,
+similar to the standalone TPQ_DSSF executable. See [ED DSSF Mode](#ed-dssf-mode) for details.
 
 ---
 
@@ -1076,20 +1087,77 @@ Each spectral file (`*_spectral_*.txt`) contains:
 ### TPQ_DSSF Usage
 
 ```bash
-# Calculate DSSF from existing TPQ states
-./TPQ_DSSF <hamiltonian_dir> [options]
+# Basic syntax
+./TPQ_DSSF <directory> <krylov_dim> <spin_combinations> [method] [operator_type] [basis] [params]
 
-# Key options:
-#   --beta=<value>         Target inverse temperature (default: auto-detect from states)
-#   --omega_min=<value>    Minimum frequency (default: -10)
-#   --omega_max=<value>    Maximum frequency (default: 10)
-#   --num_omega=<N>        Number of frequency points (default: 401)
-#   --eta=<value>          Lorentzian broadening (default: 0.1)
-#   --q_file=<path>        File with q-points to calculate
-#   --operator=<type>      Operator type: sum, sublattice, transverse, exponential
-#   --method=<name>        Calculation method: krylov (default), taylor
-#   --krylov_dim=<N>       Krylov dimension for continued fraction (default: 200)
+# Full syntax with all options
+./TPQ_DSSF <directory> <krylov_dim> <spin_combinations> [method] [operator_type] [basis] \
+           [params] [unit_cell_size] [momentum_points] [polarization] [theta] [use_gpu] \
+           [n_up] [T_range] [samples]
 ```
+
+### TPQ_DSSF Methods
+
+| Method | Description | Parameters Format |
+|--------|-------------|-------------------|
+| `krylov` | Time-domain C(t) using Krylov evolution | `"dt,t_end"` (e.g., `"0.01,50.0"`) |
+| `taylor` | Time-domain C(t) using Taylor expansion | `"dt,t_end"` (e.g., `"0.01,50.0"`) |
+| `spectral` | Frequency-domain S(ω) via continued fraction (single state) | `"omega_min,omega_max,bins,eta"` |
+| `spectral_thermal` | Frequency-domain with thermal averaging over TPQ states | `"omega_min,omega_max,bins,eta"` |
+| `ftlm_thermal` | FTLM with random sampling for finite-T S(ω) | `"omega_min,omega_max,bins,eta"` |
+| `static` | Static structure factor S(q) vs temperature (SSSF) | `"omega_min,omega_max,bins,eta"` (eta used for stability) |
+| `ground_state` | T=0 DSSF using continued fraction expansion | `"omega_min,omega_max,bins,eta"` |
+
+### TPQ_DSSF Operator Types
+
+| Type | Description |
+|------|-------------|
+| `sum` | Standard Fourier transform: S^α(q) = Σᵢ exp(iq·rᵢ) Sᵢ^α |
+| `transverse` | Project onto plane ⊥ to Q (neutron spin-flip channel) |
+| `sublattice` | Sublattice-resolved structure factors |
+| `experimental` | Custom rotation: cos(θ)Sz + sin(θ)Sx |
+| `transverse_experimental` | Combined transverse + rotation |
+
+### TPQ_DSSF Examples
+
+```bash
+# Example 1: Basic SzSz spectral function
+./TPQ_DSSF ./my_system 50 "2,2"
+
+# Example 2: Multiple correlations with specific frequency range
+./TPQ_DSSF ./my_system 100 "0,1;2,2" spectral sum ladder "-5.0,5.0,200,0.1"
+
+# Example 3: Transverse operator with polarization for neutron scattering
+./TPQ_DSSF ./my_system 80 "0,0;1,1;2,2" spectral transverse xyz \
+    "-5.0,5.0,200,0.05" 4 "0,0,0;0.5,0.5,0;1,0,0" "1,-1,0" 0.0 0 8
+
+# Example 4: FTLM thermal averaging with temperature scan
+./TPQ_DSSF ./my_system 50 "2,2" ftlm_thermal sum ladder \
+    "-5.0,5.0,200,0.1" 4 "0,0,0" "1,0,0" 0.0 0 8 "0.1,10.0,20" 40
+
+# Example 5: Static structure factor (SSSF)
+./TPQ_DSSF ./my_system 50 "0,0;1,1;2,2" static sum xyz \
+    "-5.0,5.0,200,0.1" 4 "0,0,0;0.5,0.5,0" "1,0,0" 0.0 0 8 "0.1,10.0,50" 40
+
+# Example 6: Ground state DSSF (T=0)
+./TPQ_DSSF ./my_system 100 "0,1;2,2" ground_state sum ladder \
+    "0.0,10.0,500,0.05" 4 "0,0,0;0.5,0.5,0.5"
+
+# Example 7: GPU-accelerated calculation
+./TPQ_DSSF ./my_system 100 "0,1;2,2" spectral sum ladder \
+    "-5.0,5.0,200,0.1" 4 "0,0,0" "1,0,0" 0.0 1 8
+```
+
+### TPQ_DSSF Parameter Formats
+
+| Parameter | Format | Example |
+|-----------|--------|---------|
+| `spin_combinations` | `"op1,op2;op3,op4;..."` | `"0,1;2,2"` (SpSm and SzSz in ladder basis) |
+| `time_params` (krylov/taylor) | `"dt,t_end"` | `"0.01,50.0"` |
+| `spectral_params` | `"ω_min,ω_max,bins,η"` | `"-5.0,5.0,200,0.1"` |
+| `momentum_points` | `"Qx,Qy,Qz;..."` (units of π) | `"0,0,0;0.5,0.5,0;1,0,0"` |
+| `polarization` | `"px,py,pz"` | `"1,-1,0"` |
+| `T_range` | `"T_min,T_max,steps"` | `"0.1,10.0,20"` |
 
 The TPQ_DSSF workflow:
 1. Loads TPQ states from a previous mTPQ/cTPQ calculation (from HDF5 or legacy .dat files)
@@ -1097,6 +1165,105 @@ The TPQ_DSSF workflow:
 3. Computes dynamical correlations ⟨S^α(q,t) S^β(-q,0)⟩ using continued fraction expansion
 4. Fourier transforms to frequency domain to obtain S(q,ω)
 5. Outputs results for all spin channels (SF and NSF for neutron scattering)
+
+---
+
+## ED DSSF Mode
+
+The ED executable includes a DSSF mode that provides a TPQ_DSSF-style command-line interface
+for spectral function calculations. This mode offers a simpler alternative to the config-file
+approach for spectral calculations.
+
+### DSSF Mode Syntax
+
+```bash
+./ED --dssf <directory> <krylov_dim> <spin_combinations> [options]
+```
+
+### Required Arguments
+
+| Argument | Description |
+|----------|-------------|
+| `<directory>` | Path to Hamiltonian directory (InterAll.dat, Trans.dat, positions.dat) |
+| `<krylov_dim>` | Krylov subspace dimension (typically 30-100) |
+| `<spin_combinations>` | Spin component pairs: `"op1,op2;op3,op4"` |
+
+### DSSF Mode Options
+
+| Option | Description | Default |
+|--------|-------------|---------|
+| `--dssf-method=<m>` | Calculation method | `spectral` |
+| `--dssf-operator=<o>` | Operator type | `sum` |
+| `--dssf-basis=<b>` | Spin basis | `ladder` |
+| `--dssf-omega=<min,max,bins,eta>` | Frequency grid | `-5.0,5.0,200,0.1` |
+| `--dssf-temps=<min,max,steps>` | Temperature range | `0.1,10.0,20` |
+| `--dssf-momentum=<Qx,Qy,Qz;...>` | Momentum points (units of π) | `0,0,0` |
+| `--dssf-samples=<n>` | FTLM random samples | `40` |
+| `--dssf-polarization=<px,py,pz>` | Polarization vector | `1,-1,0` |
+| `--dssf-theta=<θ>` | Rotation angle (radians) | `0.0` |
+| `--dssf-gpu` | Enable GPU acceleration | `false` |
+| `--dssf-sublattice=<n>` | Unit cell size | `4` |
+
+### DSSF Mode Methods
+
+| Method | Description |
+|--------|-------------|
+| `spectral` | Single-state S(ω) via continued fraction (uses ground state from ed_results.h5) |
+| `ftlm_thermal` | Finite-T S(ω,T) with FTLM random sampling |
+| `static` | Static structure factor S(q) vs T (SSSF) |
+| `ground_state` | T=0 DSSF using continued fraction |
+
+### DSSF Mode Examples
+
+```bash
+# Example 1: SzSz spectral function at Q=0
+./ED --dssf ./my_system 50 "2,2" --dssf-method=spectral
+
+# Example 2: Finite-T DSSF with FTLM averaging
+./ED --dssf ./my_system 50 "2,2" --dssf-method=ftlm_thermal \
+     --dssf-temps=0.1,10.0,20 --dssf-samples=40
+
+# Example 3: Static structure factor vs temperature
+./ED --dssf ./my_system 50 "0,0;1,1;2,2" --dssf-method=static \
+     --dssf-temps=0.01,5.0,50 --dssf-momentum="0,0,0;0.5,0.5,0;1,0,0"
+
+# Example 4: T=0 ground state DSSF
+./ED --dssf ./my_system 100 "0,1;2,2" --dssf-method=ground_state \
+     --dssf-omega=0.0,10.0,500,0.05
+
+# Example 5: Transverse operator for neutron scattering
+./ED --dssf ./my_system 80 "0,0;1,1;2,2" --dssf-operator=transverse \
+     --dssf-basis=xyz --dssf-polarization=1,-1,0
+
+# Example 6: Full workflow with GPU
+./ED --dssf ./my_system 100 "0,1;2,2" --dssf-method=ftlm_thermal \
+     --dssf-temps=0.1,5.0,30 --dssf-samples=50 --dssf-gpu
+```
+
+### DSSF Mode Workflow
+
+1. **Pre-requisite**: Run ED with diagonalization or mTPQ to generate `ed_results.h5`:
+   ```bash
+   ./ED ./my_system --method=LANCZOS --eigenvalues=1 --eigenvectors
+   ```
+
+2. **DSSF calculation**: Use `--dssf` mode for post-processing:
+   ```bash
+   ./ED --dssf ./my_system 50 "2,2" --dssf-method=spectral
+   ```
+
+3. **Results**: Output is saved to `<directory>/ed_results.h5` under the `dynamical/` or
+   `correlations/` groups depending on the method.
+
+### When to Use DSSF Mode vs Config Mode
+
+| Use Case | Recommended Mode |
+|----------|-----------------|
+| Quick spectral function calculation | DSSF mode |
+| Simple parameter sweeps | DSSF mode |
+| Complex multi-step workflows | Config mode |
+| Custom operator files | Config mode |
+| Integration with other ED calculations | Config mode |
 
 ---
 

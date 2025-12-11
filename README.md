@@ -15,17 +15,19 @@ acceleration and Numerical Linked Cluster Expansion (NLCE) workflows.
 4. [Exact Diagonalization Pipeline](#exact-diagonalization-pipeline)
    - [Solver Methods](#solver-methods)
    - [Command-Line Interface](#command-line-interface)
+   - [DSSF Mode](#dssf-mode-simplified-spectral-interface)
    - [Configuration Files](#configuration-files)
    - [Input File Formats](#input-file-formats)
    - [Output Files](#output-files)
-5. [NLCE Workflow](#nlce-workflow)
+5. [TPQ_DSSF Executable](#tpq_dssf-executable)
+6. [NLCE Workflow](#nlce-workflow)
    - [Overview](#nlce-overview)
    - [Running NLCE Calculations](#running-nlce-calculations)
    - [NLCE with FTLM](#nlce-with-ftlm)
    - [Analysis and Fitting](#analysis-and-fitting)
-6. [Advanced Topics](#advanced-topics)
-7. [Python Utilities](#python-utilities)
-8. [License](#license)
+7. [Advanced Topics](#advanced-topics)
+8. [Python Utilities](#python-utilities)
+9. [License](#license)
 
 ---
 
@@ -227,6 +229,34 @@ Hamiltonians, then derives thermodynamic properties and response functions.
 ./ED ./ham_dir --method=LANCZOS --symmetrized --eigenvalues=50
 ```
 
+### DSSF Mode (Simplified Spectral Interface)
+
+For spectral function calculations, ED supports a simplified command-line interface
+via the `--dssf` flag. This provides TPQ_DSSF-style argument parsing as an alternative
+to full configuration files.
+
+```bash
+# Basic syntax
+./ED --dssf <directory> <krylov_dim> <spin_combinations> [options]
+
+# Examples
+./ED --dssf ./ham_dir 50 "2,2" --dssf-method=spectral
+./ED --dssf ./ham_dir 50 "0,1;2,2" --dssf-method=ftlm_thermal --dssf-temps=0.1,10.0,20
+./ED --dssf ./ham_dir 50 "0,0;1,1;2,2" --dssf-method=static --dssf-temps=0.01,5.0,50
+```
+
+| Option | Description | Example |
+|--------|-------------|---------|
+| `--dssf-method=<m>` | Method: spectral, ftlm_thermal, static, ground_state | `spectral` |
+| `--dssf-operator=<o>` | Operator: sum, transverse, sublattice | `sum` |
+| `--dssf-basis=<b>` | Spin basis: ladder or xyz | `ladder` |
+| `--dssf-omega=<params>` | Frequency grid: min,max,bins,eta | `-5,5,200,0.1` |
+| `--dssf-temps=<params>` | Temperature range: min,max,steps | `0.1,10,20` |
+| `--dssf-momentum=<pts>` | Q-points in units of π | `0,0,0;0.5,0.5,0` |
+| `--dssf-samples=<n>` | FTLM random samples | `40` |
+
+See `./ED --help` for full DSSF mode documentation.
+
 ### Configuration Files
 
 Configuration files provide reproducible parameter sets:
@@ -306,6 +336,79 @@ output/
 │   └── eigenvector_*.dat
 └── results.h5                # HDF5 output (all data)
 ```
+
+---
+
+## TPQ_DSSF Executable
+
+The `TPQ_DSSF` executable is a standalone tool for computing dynamical and static
+spin structure factors. It provides a simpler command-line interface compared to
+the full ED configuration files.
+
+### Basic Syntax
+
+```bash
+./TPQ_DSSF <directory> <krylov_dim> <spin_combinations> [method] [operator] [basis] [params] ...
+```
+
+### Available Methods
+
+| Method | Description |
+|--------|-------------|
+| `krylov` | Time-domain C(t) using Krylov evolution |
+| `taylor` | Time-domain C(t) using Taylor expansion |
+| `spectral` | Frequency-domain S(ω) via continued fraction (single state) |
+| `spectral_thermal` | S(ω) with thermal averaging over TPQ states |
+| `ftlm_thermal` | FTLM with random sampling for finite-T S(ω,T) |
+| `static` | Static structure factor S(q) vs T (SSSF) |
+| `ground_state` | T=0 DSSF using continued fraction |
+
+### Operator Types
+
+| Type | Description |
+|------|-------------|
+| `sum` | Standard Fourier transform: S^α(q) = Σᵢ exp(iq·rᵢ) Sᵢ^α |
+| `transverse` | Project onto plane ⊥ to Q (neutron spin-flip channel) |
+| `sublattice` | Sublattice-resolved structure factors |
+| `experimental` | Custom rotation: cos(θ)Sz + sin(θ)Sx |
+| `transverse_experimental` | Combined transverse + rotation |
+
+### Example Commands
+
+```bash
+# Basic SzSz spectral function
+./TPQ_DSSF ./my_system 50 "2,2"
+
+# SpSm and SzSz with custom frequency range
+./TPQ_DSSF ./my_system 100 "0,1;2,2" spectral sum ladder "-5.0,5.0,200,0.1"
+
+# FTLM thermal averaging with temperature scan
+./TPQ_DSSF ./my_system 50 "2,2" ftlm_thermal sum ladder \
+    "-5.0,5.0,200,0.1" 4 "0,0,0" "1,0,0" 0.0 0 8 "0.1,10.0,20" 40
+
+# Static structure factor vs temperature
+./TPQ_DSSF ./my_system 50 "0,0;1,1;2,2" static sum xyz \
+    "-5.0,5.0,200,0.1" 4 "0,0,0;0.5,0.5,0" "1,0,0" 0.0 0 8 "0.1,10.0,50" 40
+
+# Ground state T=0 DSSF
+./TPQ_DSSF ./my_system 100 "0,1;2,2" ground_state sum ladder \
+    "0.0,10.0,500,0.05" 4 "0,0,0;0.5,0.5,0.5"
+
+# Transverse operator for neutron scattering
+./TPQ_DSSF ./my_system 80 "0,0;1,1;2,2" spectral transverse xyz \
+    "-5.0,5.0,200,0.05" 4 "0,0,0;0.5,0.5,0;1,0,0" "1,-1,0" 0.0 0 8
+```
+
+### Parameter Formats
+
+| Parameter | Format | Example |
+|-----------|--------|---------|
+| Spin combinations | `"op1,op2;op3,op4"` | `"0,1;2,2"` |
+| Spectral params | `"ω_min,ω_max,bins,η"` | `"-5.0,5.0,200,0.1"` |
+| Momentum points | `"Qx,Qy,Qz;..."` | `"0,0,0;0.5,0.5,0"` |
+| Temperature range | `"T_min,T_max,steps"` | `"0.1,10.0,20"` |
+
+Run `./TPQ_DSSF` without arguments for complete usage help.
 
 ---
 

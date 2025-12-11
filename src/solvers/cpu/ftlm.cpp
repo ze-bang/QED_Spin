@@ -3104,7 +3104,7 @@ DynamicalResponseResults compute_ground_state_cross_correlation(
 }
 
 /**
- * @brief Load ground state from eigenvector files
+ * @brief Load ground state from eigenvector files (HDF5 or legacy formats)
  */
 bool load_ground_state_from_file(
     const std::string& eigenvector_dir,
@@ -3114,18 +3114,53 @@ bool load_ground_state_from_file(
 ) {
     std::cout << "\n--- Loading ground state from " << eigenvector_dir << " ---\n";
     
-    // Try various file naming conventions
+    // Try HDF5 first (preferred format)
+    try {
+        std::string hdf5_file = eigenvector_dir + "/ed_results.h5";
+        std::ifstream test_file(hdf5_file);
+        if (test_file.good()) {
+            test_file.close();
+            
+            // Load eigenvalues
+            std::vector<double> eigenvalues = HDF5IO::loadEigenvalues(hdf5_file);
+            if (!eigenvalues.empty()) {
+                ground_state_energy = eigenvalues[0];
+                std::cout << "Loaded ground state energy from HDF5: " << ground_state_energy << std::endl;
+            }
+            
+            // Load eigenvector
+            std::vector<Complex> gs_vec = HDF5IO::loadEigenvector(hdf5_file, 0);
+            if (!gs_vec.empty()) {
+                if (expected_dim > 0 && gs_vec.size() != expected_dim) {
+                    std::cerr << "Warning: Dimension mismatch: HDF5 has " << gs_vec.size() 
+                              << ", expected " << expected_dim << std::endl;
+                } else {
+                    ground_state = std::move(gs_vec);
+                    
+                    // Normalize (should already be normalized, but just in case)
+                    double norm = cblas_dznrm2(ground_state.size(), ground_state.data(), 1);
+                    if (std::abs(norm - 1.0) > 1e-6) {
+                        std::cout << "Normalizing eigenvector (norm was " << norm << ")" << std::endl;
+                        Complex scale(1.0/norm, 0.0);
+                        cblas_zscal(ground_state.size(), &scale, ground_state.data(), 1);
+                    }
+                    std::cout << "Loaded ground state eigenvector from HDF5 (dim=" << ground_state.size() << ")" << std::endl;
+                    return true;
+                }
+            }
+        }
+    } catch (const std::exception& e) {
+        std::cout << "HDF5 load failed, trying legacy formats: " << e.what() << std::endl;
+    }
+    
+    // Legacy file naming conventions (fallback)
     std::vector<std::string> eigenvector_files = {
-        eigenvector_dir + "/eigenvectors/eigenvector_0.dat",
         eigenvector_dir + "/eigenvector_0.dat",
-        eigenvector_dir + "/eigenvectors/eigenvector_block0_0.dat",
         eigenvector_dir + "/eigenvector_block0_0.dat"
     };
     
     std::vector<std::string> eigenvalue_files = {
-        eigenvector_dir + "/eigenvectors/eigenvalues.dat",
         eigenvector_dir + "/eigenvalues.dat",
-        eigenvector_dir + "/eigenvectors/eigenvalues.txt",
         eigenvector_dir + "/eigenvalues.txt"
     };
     

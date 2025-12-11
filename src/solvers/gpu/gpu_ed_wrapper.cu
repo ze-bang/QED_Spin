@@ -366,7 +366,7 @@ void GPUEDWrapper::runGPULanczos(void* gpu_op_handle,
             // Save both eigenvalues and eigenvectors
             HDF5IO::saveDiagonalizationResults(dir, eigenvalues, eigvecs, "GPU_LANCZOS");
             std::cout << "GPU Lanczos: Saved " << eigenvalues.size() << " eigenvalues and " 
-                      << eigvecs.size() << " eigenvectors to " << dir << "/eigenvectors/ed_results.h5" << std::endl;
+                      << eigvecs.size() << " eigenvectors to " << dir << "/ed_results.h5" << std::endl;
         } else {
             // Save eigenvalues only
             try {
@@ -427,7 +427,7 @@ void GPUEDWrapper::runGPULanczosFixedSz(void* gpu_op_handle,
             // Save both eigenvalues and eigenvectors
             HDF5IO::saveDiagonalizationResults(dir, eigenvalues, eigvecs, "GPU_LANCZOS_FIXED_SZ");
             std::cout << "GPU Lanczos Fixed Sz: Saved " << eigenvalues.size() << " eigenvalues and " 
-                      << eigvecs.size() << " eigenvectors to " << dir << "/eigenvectors/ed_results.h5" << std::endl;
+                      << eigvecs.size() << " eigenvectors to " << dir << "/ed_results.h5" << std::endl;
         } else {
             // Save eigenvalues only
             try {

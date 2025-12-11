@@ -12,6 +12,7 @@
 #include <ed/solvers/ltlm.h>
 #include <ed/solvers/hybrid_thermal.h>
 #include <ed/core/construct_ham.h>
+#include <ed/core/hdf5_io.h>
 #include <ed/solvers/observables.h>
 #include <ed/core/ed_config.h>
 #include <ed/core/system_utils.h>
@@ -1623,10 +1624,15 @@ void transform_and_save_eigenvectors(
         // Normalize
         for (auto& val : transformed_eigenvector) val /= norm;
         
-        // Save
-        std::string transformed_file = main_output_dir + "/eigenvector_block" + 
-                                       std::to_string(block_idx) + "_" + std::to_string(eigen_idx) + ".dat";
-        save_tpq_state(transformed_eigenvector, transformed_file);
+        // Save to HDF5 (unified ed_results.h5)
+        try {
+            std::string hdf5_file = HDF5IO::createOrOpenFile(main_output_dir);
+            // Use block index + eigen index for unique eigenvector ID
+            size_t global_idx = block_idx * 1000 + eigen_idx;  // Simple encoding
+            HDF5IO::saveEigenvector(hdf5_file, global_idx, transformed_eigenvector);
+        } catch (const std::exception& e) {
+            std::cerr << "Warning: Failed to save eigenvector to HDF5: " << e.what() << std::endl;
+        }
     }
 }
 
@@ -1970,12 +1976,7 @@ void transform_and_save_sector_states(
     if (params.output_dir.empty()) return;
     
     uint64_t full_dim = 1ULL << params.num_sites;
-    std::string eigenvector_dir = params.output_dir + "/eigenvectors";
-    
-    // Only create eigenvector directory if we're computing eigenvectors (not for TPQ)
-    if (params.compute_eigenvectors) {
-        safe_system_call("mkdir -p " + eigenvector_dir);
-    }
+    // Eigenvectors are now saved directly to HDF5 in the output directory (ed_results.h5)
     
     // Calculate block_start_dim by summing dimensions of previous sectors
     uint64_t block_start_dim = 0;
@@ -2059,12 +2060,15 @@ void transform_and_save_sector_states(
                 sector_vec, hamiltonian, directory, sector.index, block_start_dim
             );
             
-            // Save
-            std::string out_path = eigenvector_dir + "/eigenvector_sector" + 
-                                   std::to_string(sector.index) + "_" + std::to_string(i) + ".dat";
-            std::ofstream outfile(out_path, std::ios::binary);
-            outfile.write(reinterpret_cast<const char*>(full_vec.data()), full_vec.size() * sizeof(Complex));
-            outfile.close();
+            // Save to HDF5 (unified ed_results.h5)
+            try {
+                std::string hdf5_file = HDF5IO::createOrOpenFile(params.output_dir);
+                // Use sector index + eigen index for unique eigenvector ID
+                size_t global_idx = sector.index * 1000 + i;  // Simple encoding
+                HDF5IO::saveEigenvector(hdf5_file, global_idx, full_vec);
+            } catch (const std::exception& e) {
+                std::cerr << "Warning: Failed to save eigenvector to HDF5: " << e.what() << std::endl;
+            }
         }
     }
 }
@@ -2307,27 +2311,26 @@ inline EDResults exact_diagonalization_fixed_sz(
     // Transform eigenvectors from fixed-Sz basis to full basis
     size_t n_eigs = results.eigenvalues.size();
     if (!params.output_dir.empty() && params.compute_eigenvectors && n_eigs > 0) {
-        // Transform eigenvectors if computed
-        for (size_t i = 0; i < n_eigs; ++i) {
-            std::string eigvec_file = params.output_dir + "/eigenvectors/eigenvector_" + std::to_string(i) + ".dat";
-            std::ifstream infile(eigvec_file, std::ios::binary);
+        // Transform eigenvectors if computed - load from HDF5, transform, save back
+        try {
+            std::string hdf5_file = HDF5IO::createOrOpenFile(params.output_dir);
             
-            if (infile.is_open()) {
-                // Read eigenvector in fixed-Sz basis
-                std::vector<Complex> fixed_sz_vec(fixed_sz_dim);
-                infile.read(reinterpret_cast<char*>(fixed_sz_vec.data()), fixed_sz_dim * sizeof(Complex));
-                infile.close();
+            for (size_t i = 0; i < n_eigs; ++i) {
+                // Load eigenvector from HDF5 (in fixed-Sz basis)
+                std::vector<Complex> fixed_sz_vec = HDF5IO::loadEigenvector(hdf5_file, i);
                 
-                // Transform to full basis
-                std::vector<Complex> full_vec = hamiltonian.embedToFull(fixed_sz_vec);
-                
-                // Overwrite file with full-space eigenvector
-                std::ofstream outfile(eigvec_file, std::ios::binary);
-                outfile.write(reinterpret_cast<const char*>(full_vec.data()), full_dim * sizeof(Complex));
-                outfile.close();
+                if (fixed_sz_vec.size() == fixed_sz_dim) {
+                    // Transform to full basis
+                    std::vector<Complex> full_vec = hamiltonian.embedToFull(fixed_sz_vec);
+                    
+                    // Save back to HDF5 with full-space eigenvector
+                    HDF5IO::saveEigenvector(hdf5_file, i, full_vec);
+                }
             }
+            std::cout << "Transformed " << n_eigs << " eigenvectors to full space" << std::endl;
+        } catch (const std::exception& e) {
+            std::cerr << "Warning: Failed to transform eigenvectors: " << e.what() << std::endl;
         }
-        std::cout << "Transformed " << n_eigs << " eigenvectors to full space" << std::endl;
     }
 
     return results;
@@ -2883,13 +2886,7 @@ EDResults exact_diagonalization_from_directory_symmetrized(
         
         // Transform eigenvectors/states if needed
         if (params.compute_eigenvectors || (is_tpq_method && is_target_block)) {
-            std::string eigenvector_dir = params.output_dir + "/eigenvectors";
-            
-            // Only create eigenvector directory if we're computing eigenvectors (not for TPQ)
-            if (params.compute_eigenvectors && method != DiagonalizationMethod::mTPQ && 
-                method != DiagonalizationMethod::mTPQ_CUDA && method != DiagonalizationMethod::cTPQ) {
-                safe_system_call("mkdir -p " + eigenvector_dir);
-            }
+            // Eigenvectors are now saved directly to HDF5 in the output directory (ed_results.h5)
             
             if (is_tpq_method && is_target_block) {
                 ed_internal::transform_and_save_tpq_states(

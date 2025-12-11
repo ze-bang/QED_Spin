@@ -65,8 +65,8 @@ double read_ground_state_energy(const std::string& directory) {
     // Check multiple possible locations for the HDF5 file
     std::vector<std::string> h5_paths = {
         directory + "/output/ed_results.h5",
-        directory + "/output/eigenvectors/ed_results.h5",
-        directory + "/ed_results.h5"
+        directory + "/ed_results.h5",
+        directory + "/output/eigenvectors/ed_results.h5"  // Legacy path (deprecated)
     };
     
     for (const auto& h5_path : h5_paths) {
@@ -99,8 +99,11 @@ double read_ground_state_energy(const std::string& directory) {
         }
     }
     
-    // Method 1: Try eigenvalues.dat (binary format) - LEGACY
-    std::string eigenvalues_dat = directory + "/output/eigenvectors/eigenvalues.dat";
+    // Method 1: Try eigenvalues.dat (binary format) - LEGACY (deprecated)
+    std::string eigenvalues_dat = directory + "/output/eigenvalues.dat";
+    if (!std::filesystem::exists(eigenvalues_dat)) {
+        eigenvalues_dat = directory + "/output/eigenvectors/eigenvalues.dat";  // Old legacy path
+    }
     std::ifstream infile_dat(eigenvalues_dat, std::ios::binary);
     if (infile_dat.is_open()) {
         size_t num_eigenvalues;
@@ -418,9 +421,9 @@ bool load_eigenvector_from_hdf5(ComplexVector& state, const std::string& h5_path
 // Returns empty string if not found
 std::string find_eigenvector_hdf5(const std::string& directory) {
     std::vector<std::string> h5_paths = {
-        directory + "/output/eigenvectors/ed_results.h5",
         directory + "/output/ed_results.h5",
-        directory + "/ed_results.h5"
+        directory + "/ed_results.h5",
+        directory + "/output/eigenvectors/ed_results.h5"  // Legacy path (deprecated)
     };
     
     for (const auto& path : h5_paths) {
@@ -464,11 +467,14 @@ int main(int argc, char* argv[]) {
             std::cerr << "\n" << std::string(80, '=') << std::endl;
             std::cerr << "OPTIONAL ARGUMENTS:" << std::endl;
             std::cerr << std::string(80, '=') << std::endl;
-            std::cerr << "  method (default: krylov): krylov | taylor | spectral | spectral_thermal" << std::endl;
+            std::cerr << "  method (default: krylov): krylov | taylor | spectral | spectral_thermal | ftlm_thermal | static | ground_state" << std::endl;
             std::cerr << "    - krylov: Time-domain correlation C(t) using Krylov time evolution" << std::endl;
             std::cerr << "    - taylor: Time-domain correlation C(t) using Taylor expansion" << std::endl;
             std::cerr << "    - spectral: Frequency-domain spectral function S(ω) via FTLM (single state)" << std::endl;
-            std::cerr << "    - spectral_thermal: Frequency-domain S(ω) with thermal averaging (FTLM random sampling)" << std::endl;
+            std::cerr << "    - spectral_thermal: Frequency-domain S(ω) from given state at multiple temperatures" << std::endl;
+            std::cerr << "    - ftlm_thermal: TRUE thermal DSSF with random state sampling (FTLM multi-sample)" << std::endl;
+            std::cerr << "    - static: Static structure factor ⟨O₁†O₂⟩ vs temperature (SSSF)" << std::endl;
+            std::cerr << "    - ground_state: Ground state spectral function using continued fraction" << std::endl;
             std::cerr << "\n  operator_type (default: sum): sum | transverse | sublattice | experimental | transverse_experimental" << std::endl;
             std::cerr << "    - sum: Standard momentum-resolved sum operators S^{op1}(Q) S^{op2}(-Q)" << std::endl;
             std::cerr << "    - transverse: Polarization-dependent operators for magnetic scattering" << std::endl;
@@ -538,6 +544,34 @@ int main(int argc, char* argv[]) {
             std::cerr << "  - spectral_thermal method: <operator>_spectral_thermal_sample_<idx>_beta_<beta>_T_<T>_nsamples_<N>.txt" << std::endl;
             std::cerr << "  - Columns: frequency(ω) | spectral_intensity S(ω) | error (if applicable)" << std::endl;
             std::cerr << "\n" << std::string(80, '=') << std::endl;
+            std::cerr << "FTLM THERMAL METHOD (method=ftlm_thermal) DETAILS:" << std::endl;
+            std::cerr << std::string(80, '=') << std::endl;
+            std::cerr << "True finite-temperature dynamical structure factor using FTLM random sampling:" << std::endl;
+            std::cerr << "  S(q,ω,T) = (1/Z) Tr[e^{-βH} O₁†(q) δ(ω-H+E₀) O₂(q)]" << std::endl;
+            std::cerr << "\nThis is the most accurate method for finite-temperature spectra:" << std::endl;
+            std::cerr << "  - Uses random state sampling with thermal averaging" << std::endl;
+            std::cerr << "  - Properly captures thermal population effects" << std::endl;
+            std::cerr << "  - Provides error bars from sample statistics" << std::endl;
+            std::cerr << "\nParameters:" << std::endl;
+            std::cerr << "  - Number of samples: 40 (for thermal averaging)" << std::endl;
+            std::cerr << "  - Computes for all temperatures in T_min,T_max,T_steps range" << std::endl;
+            std::cerr << "\n" << std::string(80, '=') << std::endl;
+            std::cerr << "STATIC METHOD (method=static) DETAILS - SSSF:" << std::endl;
+            std::cerr << std::string(80, '=') << std::endl;
+            std::cerr << "Static structure factor S(q) = ⟨O₁†(q) O₂(q)⟩ vs temperature:" << std::endl;
+            std::cerr << "  - Computes equal-time correlation ⟨O₁†O₂⟩(T)" << std::endl;
+            std::cerr << "  - Uses FTLM random sampling for thermal averaging" << std::endl;
+            std::cerr << "  - Also computes fluctuation/susceptibility χ = β⟨(O†O - ⟨O†O⟩)²⟩" << std::endl;
+            std::cerr << "\nOutput: Temperature | ⟨O₁†O₂⟩ | error | variance | χ" << std::endl;
+            std::cerr << "\n" << std::string(80, '=') << std::endl;
+            std::cerr << "GROUND STATE METHOD (method=ground_state) DETAILS:" << std::endl;
+            std::cerr << std::string(80, '=') << std::endl;
+            std::cerr << "Ground state (T=0) dynamical structure factor using continued fraction:" << std::endl;
+            std::cerr << "  S(q,ω) = ⟨GS|O₁†(q) δ(ω-H+E₀) O₂(q)|GS⟩" << std::endl;
+            std::cerr << "\n  - Requires pre-computed ground state eigenvector" << std::endl;
+            std::cerr << "  - Optimal for large systems where diagonalization is expensive" << std::endl;
+            std::cerr << "  - Uses memory-efficient continued fraction representation" << std::endl;
+            std::cerr << "\n" << std::string(80, '=') << std::endl;
             std::cerr << "TIME-DOMAIN METHODS (method=krylov or method=taylor) DETAILS:" << std::endl;
             std::cerr << std::string(80, '=') << std::endl;
             std::cerr << "Compute time correlation function C(t) = ⟨ψ|O₁†(0) O₂(t)|ψ⟩" << std::endl;
@@ -571,6 +605,12 @@ int main(int argc, char* argv[]) {
             std::cerr << "   " << argv[0] << " ./data 50 \"2,2\" spectral_thermal sum ladder \"-5,5,200,0.1\" 4 \"0,0,0\" \"0,0,0\" 0 0 8" << std::endl;
             std::cerr << "\n8. Temperature scan with spectral_thermal:" << std::endl;
             std::cerr << "   " << argv[0] << " ./data 50 \"2,2\" spectral_thermal sum ladder \"-5,5,200,0.1\" 4 \"0,0,0\" \"0,0,0\" 0 0 -1 \"0.1,10.0,10\"" << std::endl;
+            std::cerr << "\n9. TRUE finite-T DSSF with FTLM random sampling:" << std::endl;
+            std::cerr << "   " << argv[0] << " ./data 50 \"2,2\" ftlm_thermal sum ladder \"-5,5,200,0.1\" 4 \"0,0,0\" \"0,0,0\" 0 0 -1 \"0.1,10.0,10\"" << std::endl;
+            std::cerr << "\n10. Static structure factor (SSSF) vs temperature:" << std::endl;
+            std::cerr << "   " << argv[0] << " ./data 50 \"2,2\" static sum ladder \"0,0,0,0\" 4 \"0,0,0\" \"0,0,0\" 0 0 -1 \"0.1,10.0,20\"" << std::endl;
+            std::cerr << "\n11. Ground state DSSF (T=0, requires eigenvector):" << std::endl;
+            std::cerr << "   " << argv[0] << " ./data 100 \"2,2\" ground_state sum ladder \"-5,5,200,0.05\" 4 \"0,0,0;0,0,1\"" << std::endl;
         }
         MPI_Finalize();
         return 1;
@@ -1189,7 +1229,8 @@ int main(int argc, char* argv[]) {
         // Optionally include zero-temperature ground-state eigenvector
         // Priority: HDF5 > legacy .dat file
         std::string gs_hdf5_path = find_eigenvector_hdf5(directory);
-        const std::string gs_file_legacy = tpq_directory + "/eigenvectors/eigenvector_0.dat";
+        const std::string gs_file_legacy = tpq_directory + "/eigenvector_0.dat";
+        const std::string gs_file_legacy_old = tpq_directory + "/eigenvectors/eigenvector_0.dat";  // Old legacy path
         
         bool gs_found = false;
         if (!gs_hdf5_path.empty()) {
@@ -1207,6 +1248,13 @@ int main(int argc, char* argv[]) {
             beta_values.push_back(std::numeric_limits<double>::infinity());
             gs_found = true;
             std::cout << "Found ground state eigenvector in legacy format: " << gs_file_legacy << std::endl;
+        } else if (fs::exists(gs_file_legacy_old)) {
+            tpq_files.push_back(gs_file_legacy_old);
+            sample_indices.push_back(0); // use 0 as a conventional index for ground state
+            beta_strings.push_back("inf");
+            beta_values.push_back(std::numeric_limits<double>::infinity());
+            gs_found = true;
+            std::cout << "Found ground state eigenvector in old legacy format: " << gs_file_legacy_old << std::endl;
         }
         
         if (!gs_found) {
@@ -2055,6 +2103,235 @@ int main(int argc, char* argv[]) {
                             }
                         }
                     }
+                } else if (method == "ftlm_thermal") {
+                    // ============================================================
+                    // TRUE FTLM THERMAL DSSF: Random state sampling with thermal averaging
+                    // This is the most accurate method for finite-temperature spectra
+                    // ============================================================
+                    int krylov_dim = krylov_dim_or_nmax;
+                    int num_samples = 40;  // Number of random samples for FTLM thermal averaging
+                    unsigned int random_seed = state_idx * 1000 + momentum_idx * 100 + combo_idx;
+                    
+                    // Determine temperature(s) to compute
+                    std::vector<double> temperatures;
+                    
+                    if (use_temperature_scan) {
+                        // Use user-specified temperature range (log spacing)
+                        double log_T_min = std::log(T_min);
+                        double log_T_max = std::log(T_max);
+                        double log_step = (log_T_max - log_T_min) / std::max(1, T_steps - 1);
+                        
+                        for (int i = 0; i < T_steps; i++) {
+                            double log_T = log_T_min + i * log_step;
+                            temperatures.push_back(std::exp(log_T));
+                        }
+                    } else {
+                        // Default temperature range if not specified
+                        temperatures = {0.1, 0.2, 0.5, 1.0, 2.0, 5.0, 10.0};
+                    }
+                    
+                    if (rank == 0) {
+                        std::cout << "\n============================================" << std::endl;
+                        std::cout << "FTLM THERMAL DSSF: TRUE random state sampling" << std::endl;
+                        std::cout << "============================================" << std::endl;
+                        std::cout << "  Krylov dimension: " << krylov_dim << std::endl;
+                        std::cout << "  Number of random samples: " << num_samples << std::endl;
+                        std::cout << "  Temperature points: " << temperatures.size() << std::endl;
+                        std::cout << "  Frequency range: [" << omega_min << ", " << omega_max << "]" << std::endl;
+                        std::cout << "  Broadening: " << broadening << std::endl;
+                    }
+                    
+                    // Set up FTLM parameters
+                    DynamicalResponseParameters params;
+                    params.krylov_dim = krylov_dim;
+                    params.broadening = broadening;
+                    params.tolerance = 1e-10;
+                    params.full_reorthogonalization = true;
+                    params.num_samples = num_samples;
+                    params.random_seed = random_seed;
+                    params.store_intermediate = false;
+                    
+                    // Process each operator pair with TRUE multi-sample FTLM
+                    for (size_t i = 0; i < obs_1.size(); i++) {
+                        std::cout << "  Processing operator " << obs_names[i] << std::endl;
+                        
+                        // Create function wrappers for operators
+                        auto O1_func = [&obs_1, i](const Complex* in, Complex* out, int size) {
+                            obs_1[i].apply(in, out, size);
+                        };
+                        
+                        auto O2_func = [&obs_2, i](const Complex* in, Complex* out, int size) {
+                            obs_2[i].apply(in, out, size);
+                        };
+                        
+                        // Use TRUE multi-sample multi-temperature FTLM
+                        auto results_map = compute_dynamical_correlation_multi_sample_multi_temperature(
+                            H, O1_func, O2_func, N, params,
+                            omega_min, omega_max, num_omega_bins, 
+                            temperatures, ground_state_energy, method_dir
+                        );
+                        
+                        // Save results for each temperature
+                        for (const auto& [temperature, results] : results_map) {
+                            std::stringstream filename_ss;
+                            filename_ss << method_dir << "/" << obs_names[i] 
+                                        << "_ftlm_thermal_sample_" << sample_index 
+                                        << "_T_" << std::fixed << std::setprecision(4) << temperature 
+                                        << "_nsamples_" << num_samples << ".txt";
+                            
+                            save_dynamical_response_results(results, filename_ss.str());
+                        
+                            if (rank == 0) {
+                                std::cout << "  Saved FTLM thermal spectral: " << filename_ss.str() << std::endl;
+                            }
+                        }
+                    }
+                    
+                } else if (method == "static") {
+                    // ============================================================
+                    // STATIC STRUCTURE FACTOR: ⟨O₁†O₂⟩ vs temperature (SSSF)
+                    // ============================================================
+                    int krylov_dim = krylov_dim_or_nmax;
+                    int num_samples = 40;
+                    unsigned int random_seed = state_idx * 1000 + momentum_idx * 100 + combo_idx;
+                    
+                    // Determine temperature range
+                    double temp_min_static = T_min;
+                    double temp_max_static = T_max;
+                    int num_temp_bins = T_steps;
+                    
+                    if (!use_temperature_scan) {
+                        // Default temperature range
+                        temp_min_static = 0.1;
+                        temp_max_static = 10.0;
+                        num_temp_bins = 20;
+                    }
+                    
+                    if (rank == 0) {
+                        std::cout << "\n============================================" << std::endl;
+                        std::cout << "STATIC STRUCTURE FACTOR (SSSF)" << std::endl;
+                        std::cout << "============================================" << std::endl;
+                        std::cout << "  Krylov dimension: " << krylov_dim << std::endl;
+                        std::cout << "  Number of random samples: " << num_samples << std::endl;
+                        std::cout << "  Temperature range: [" << temp_min_static << ", " << temp_max_static << "]" << std::endl;
+                        std::cout << "  Temperature bins: " << num_temp_bins << std::endl;
+                    }
+                    
+                    // Set up static response parameters
+                    StaticResponseParameters params;
+                    params.krylov_dim = krylov_dim;
+                    params.tolerance = 1e-10;
+                    params.full_reorthogonalization = true;
+                    params.num_samples = num_samples;
+                    params.random_seed = random_seed;
+                    params.compute_error_bars = true;
+                    params.store_intermediate = false;
+                    
+                    // Process each operator pair
+                    for (size_t i = 0; i < obs_1.size(); i++) {
+                        std::cout << "  Processing operator " << obs_names[i] << std::endl;
+                        
+                        // Create function wrappers for operators
+                        auto O1_func = [&obs_1, i](const Complex* in, Complex* out, int size) {
+                            obs_1[i].apply(in, out, size);
+                        };
+                        
+                        auto O2_func = [&obs_2, i](const Complex* in, Complex* out, int size) {
+                            obs_2[i].apply(in, out, size);
+                        };
+                        
+                        // Compute static response function
+                        auto results = compute_static_response(
+                            H, O1_func, O2_func, N, params,
+                            temp_min_static, temp_max_static, num_temp_bins, method_dir
+                        );
+                        
+                        // Save results
+                        std::stringstream filename_ss;
+                        filename_ss << method_dir << "/" << obs_names[i] 
+                                    << "_static_sample_" << sample_index 
+                                    << "_nsamples_" << num_samples << ".txt";
+                        
+                        save_static_response_results(results, filename_ss.str());
+                        
+                        if (rank == 0) {
+                            std::cout << "  Saved static structure factor: " << filename_ss.str() << std::endl;
+                        }
+                    }
+                    
+                } else if (method == "ground_state") {
+                    // ============================================================
+                    // GROUND STATE DSSF: T=0 spectral function via continued fraction
+                    // ============================================================
+                    int krylov_dim = krylov_dim_or_nmax;
+                    
+                    if (rank == 0) {
+                        std::cout << "\n============================================" << std::endl;
+                        std::cout << "GROUND STATE DSSF (T=0)" << std::endl;
+                        std::cout << "============================================" << std::endl;
+                        std::cout << "  Krylov dimension: " << krylov_dim << std::endl;
+                        std::cout << "  Frequency range: [" << omega_min << ", " << omega_max << "]" << std::endl;
+                        std::cout << "  Broadening: " << broadening << std::endl;
+                    }
+                    
+                    // Load ground state from file
+                    ComplexVector ground_state;
+                    double gs_energy = ground_state_energy;
+                    
+                    bool loaded_gs = load_ground_state_from_file(
+                        directory + "/output", ground_state, gs_energy, N
+                    );
+                    
+                    if (!loaded_gs) {
+                        std::cerr << "Error: Could not load ground state for ground_state method" << std::endl;
+                        std::cerr << "  Run diagonalization first to compute ground state eigenvector" << std::endl;
+                        return false;
+                    }
+                    
+                    if (rank == 0) {
+                        std::cout << "  Ground state energy: " << gs_energy << std::endl;
+                        std::cout << "  Ground state dimension: " << ground_state.size() << std::endl;
+                    }
+                    
+                    // Set up ground state DSSF parameters
+                    GroundStateDSSFParameters gs_params;
+                    gs_params.krylov_dim = krylov_dim;
+                    gs_params.omega_min = omega_min;
+                    gs_params.omega_max = omega_max;
+                    gs_params.num_omega_points = num_omega_bins;
+                    gs_params.broadening = broadening;
+                    gs_params.tolerance = 1e-10;
+                    
+                    // Process each operator pair
+                    for (size_t i = 0; i < obs_1.size(); i++) {
+                        std::cout << "  Processing operator " << obs_names[i] << std::endl;
+                        
+                        // Create function wrappers for operators
+                        auto O1_func = [&obs_1, i](const Complex* in, Complex* out, int size) {
+                            obs_1[i].apply(in, out, size);
+                        };
+                        
+                        auto O2_func = [&obs_2, i](const Complex* in, Complex* out, int size) {
+                            obs_2[i].apply(in, out, size);
+                        };
+                        
+                        // Compute ground state cross-correlation DSSF
+                        auto results = compute_ground_state_cross_correlation(
+                            H, O1_func, O2_func, ground_state, gs_energy, N, gs_params
+                        );
+                        
+                        // Save results
+                        std::stringstream filename_ss;
+                        filename_ss << method_dir << "/" << obs_names[i] 
+                                    << "_ground_state_dssf_sample_" << sample_index << ".txt";
+                        
+                        save_dynamical_response_results(results, filename_ss.str());
+                        
+                        if (rank == 0) {
+                            std::cout << "  Saved ground state DSSF: " << filename_ss.str() << std::endl;
+                        }
+                    }
+                    
                 } else {
                     std::cerr << "Rank " << rank << " unknown method: " << method << std::endl;
                     return false;

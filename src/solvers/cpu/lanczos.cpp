@@ -498,14 +498,8 @@ int solve_tridiagonal_matrix(const std::vector<double>& alpha, const std::vector
             }
 
             // Save eigenvector using HDF5 in main output directory (unified ed_results.h5)
-            // Extract parent directory from evec_dir (remove /eigenvectors suffix if present)
             try {
-                std::string h5_dir = evec_dir;
-                size_t pos = h5_dir.rfind("/eigenvectors");
-                if (pos != std::string::npos) {
-                    h5_dir = h5_dir.substr(0, pos);
-                }
-                std::string hdf5_file = HDF5IO::createOrOpenFile(h5_dir);
+                std::string hdf5_file = HDF5IO::createOrOpenFile(evec_dir);
                 HDF5IO::saveEigenvector(hdf5_file, i, full_vector);
             } catch (const std::exception& e) {
                 std::cerr << "Warning: Failed to save eigenvector " << i << " to HDF5: " << e.what() << std::endl;
@@ -529,14 +523,8 @@ int solve_tridiagonal_matrix(const std::vector<double>& alpha, const std::vector
     std::copy(diag.begin(), diag.begin() + n_eigenvalues, eigenvalues.begin());
 
     // Save eigenvalues using HDF5 in main output directory (unified ed_results.h5)
-    // Extract parent directory from evec_dir (remove /eigenvectors suffix if present)
     try {
-        std::string h5_dir = evec_dir;
-        size_t pos = h5_dir.rfind("/eigenvectors");
-        if (pos != std::string::npos) {
-            h5_dir = h5_dir.substr(0, pos);
-        }
-        std::string hdf5_file = HDF5IO::createOrOpenFile(h5_dir);
+        std::string hdf5_file = HDF5IO::createOrOpenFile(evec_dir);
         HDF5IO::saveEigenvalues(hdf5_file, eigenvalues);
         std::cout << "Lanczos: Saved " << n_eigenvalues << " eigenvalues to HDF5" << std::endl;
     } catch (const std::exception& e) {
@@ -647,10 +635,8 @@ void lanczos_no_ortho(std::function<void(const Complex*, Complex*, int)> H, uint
     std::cout << "Lanczos: Constructing tridiagonal matrix" << std::endl;
     std::cout << "Lanczos: Solving tridiagonal matrix" << std::endl;
     
-    // Write eigenvalues and eigenvectors to files
-    std::string evec_dir = (dir.empty() ? "./eigenvectors" : dir + "/eigenvectors");
-    std::string cmd_mkdir = "mkdir -p " + evec_dir;
-    safe_system_call(cmd_mkdir);
+    // Use output directory for HDF5 storage (eigenvectors saved to ed_results.h5)
+    std::string evec_dir = (dir.empty() ? "." : dir);
 
     // Solve the tridiagonal eigenvalue problem
     uint64_t info = solve_tridiagonal_matrix(alpha, beta, m, exct, eigenvalues, temp_dir, evec_dir, eigenvectors, N);
@@ -878,12 +864,8 @@ void lanczos_selective_reorth(std::function<void(const Complex*, Complex*, int)>
     std::cout << "Lanczos: Constructing tridiagonal matrix" << std::endl;
     std::cout << "Lanczos: Solving tridiagonal matrix" << std::endl;
     
-    // Write eigenvalues and eigenvectors to files
-    std::string evec_dir = (dir.empty() ? "./eigenvectors" : dir + "/eigenvectors");
-    if (eigenvectors) {
-        std::string cmd_mkdir = "mkdir -p " + evec_dir;
-        safe_system_call(cmd_mkdir);
-    }
+    // Use output directory for HDF5 storage (eigenvectors saved to ed_results.h5)
+    std::string evec_dir = (dir.empty() ? "." : dir);
 
     // Solve the tridiagonal eigenvalue problem
     uint64_t info = solve_tridiagonal_matrix(alpha, beta, m, exct, eigenvalues, temp_dir, evec_dir, eigenvectors, N);
@@ -1086,12 +1068,8 @@ void lanczos(std::function<void(const Complex*, Complex*, int)> H, uint64_t N, u
               << (m > 0 ? (double)(m * (m + 1) / 2) / std::max(1UL, total_reorth_count) : 0.0) 
               << "x reorth savings" << std::endl;
     
-    // Write eigenvalues and eigenvectors to files
-    std::string evec_dir = (dir.empty() ? "./eigenvectors" : dir + "/eigenvectors");
-    if (eigenvectors) {
-        std::string cmd_mkdir = "mkdir -p " + evec_dir;
-        safe_system_call(cmd_mkdir);
-    }
+    // Use output directory for HDF5 storage (eigenvectors saved to ed_results.h5)
+    std::string evec_dir = (dir.empty() ? "." : dir);
 
     // Solve the tridiagonal eigenvalue problem
     uint64_t info = solve_tridiagonal_matrix(alpha, beta, m, exct, eigenvalues, temp_dir, evec_dir, eigenvectors, N);
@@ -1128,11 +1106,9 @@ void block_lanczos(std::function<void(const Complex*, Complex*, int)> H, uint64_
 
     // ===== Setup directories =====
     const std::string temp_dir = (dir.empty() ? "./block_lanczos_basis" : dir + "/block_lanczos_basis");
-    const std::string evec_dir = (dir.empty() ? "./eigenvectors" : dir + "/eigenvectors");
+    // Use output directory for HDF5 storage (eigenvectors saved to ed_results.h5)
+    const std::string evec_dir = (dir.empty() ? "." : dir);
     safe_system_call("mkdir -p " + temp_dir);
-    if (compute_eigenvectors) {
-        safe_system_call("mkdir -p " + evec_dir);
-    }
 
     // ===== Initialize random starting block with QR =====
     std::mt19937 gen(std::random_device{}());
@@ -1468,12 +1444,10 @@ void chebyshev_filtered_lanczos(std::function<void(const Complex*, Complex*, int
     
     // ===== Setup directories =====
     const std::string temp_dir = (dir.empty() ? "./chebyshev_lanczos_basis" : dir + "/chebyshev_lanczos_basis");
-    const std::string evec_dir = (dir.empty() ? "./eigenvectors" : dir + "/eigenvectors");
+    // Use output directory for HDF5 storage (eigenvectors saved to ed_results.h5)
+    const std::string evec_dir = (dir.empty() ? "." : dir);
     
     safe_system_call("mkdir -p " + temp_dir);
-    if (compute_eigenvectors) {
-        safe_system_call("mkdir -p " + evec_dir);
-    }
     
     // ===== Step 1: Estimate spectral bounds if not provided =====
     double lambda_min, lambda_max;
@@ -1856,12 +1830,10 @@ void shift_invert_lanczos(std::function<void(const Complex*, Complex*, int)> H, 
     
     // Create directories for output
     std::string temp_dir = (dir.empty() ? "./lanczos_basis_vectors" : dir+"/lanczos_basis_vectors");
-    std::string result_dir = (dir.empty() ? "./eigenvectors" : dir + "/eigenvectors");
+    // Use output directory for HDF5 storage (eigenvectors saved to ed_results.h5)
+    std::string result_dir = (dir.empty() ? "." : dir);
     
     safe_system_call("mkdir -p " + temp_dir);
-    if (compute_eigenvectors) {
-        safe_system_call("mkdir -p " + result_dir);
-    }
     
     // Parameters for iterative solver (CG/GMRES)
     const uint64_t max_cg_iter = 100;
@@ -2506,11 +2478,9 @@ void krylov_schur(std::function<void(const Complex*, Complex*, int)> H, uint64_t
     
     // Create directories for temporary files and output
     std::string temp_dir = (dir.empty() ? "./krylov_schur_temp" : dir + "/krylov_schur_temp");
-    std::string evec_dir = (dir.empty() ? "./eigenvectors" : dir + "/eigenvectors");
+    // Use output directory for HDF5 storage (eigenvectors saved to ed_results.h5)
+    std::string evec_dir = (dir.empty() ? "." : dir);
     
-    if (compute_eigenvectors) {
-        safe_system_call("mkdir -p " + evec_dir);
-    }
     safe_system_call("mkdir -p " + temp_dir);
 
     // Initialize random starting vector
@@ -2806,12 +2776,10 @@ void implicitly_restarted_lanczos(std::function<void(const Complex*, Complex*, i
     
     // ===== Setup directories =====
     const std::string temp_dir = (dir.empty() ? "./irl_basis_vectors" : dir + "/irl_basis_vectors");
-    const std::string evec_dir = (dir.empty() ? "./eigenvectors" : dir + "/eigenvectors");
+    // Use output directory for HDF5 storage (eigenvectors saved to ed_results.h5)
+    const std::string evec_dir = (dir.empty() ? "." : dir);
     
     safe_system_call("mkdir -p " + temp_dir);
-    if (compute_eigenvectors) {
-        safe_system_call("mkdir -p " + evec_dir);
-    }
     
     // ===== Parameters =====
     const uint64_t k = num_eigs;                          // Target number of eigenvalues
@@ -3195,13 +3163,11 @@ void thick_restart_lanczos(std::function<void(const Complex*, Complex*, int)> H,
     // ===== Setup directories =====
     const std::string temp_dir = (dir.empty() ? "./trl_basis_vectors" : dir + "/trl_basis_vectors");
     const std::string locked_dir = (dir.empty() ? "./trl_locked" : dir + "/trl_locked");
-    const std::string evec_dir = (dir.empty() ? "./eigenvectors" : dir + "/eigenvectors");
+    // Use output directory for HDF5 storage (eigenvectors saved to ed_results.h5)
+    const std::string evec_dir = (dir.empty() ? "." : dir);
     
     safe_system_call("mkdir -p " + temp_dir);
     safe_system_call("mkdir -p " + locked_dir);
-    if (compute_eigenvectors) {
-        safe_system_call("mkdir -p " + evec_dir);
-    }
     
     // ===== Parameters =====
     const uint64_t k = num_eigs;                          // Target number of eigenvalues
@@ -3768,10 +3734,8 @@ void optimal_spectrum_solver(std::function<void(const Complex*, Complex*, int)> 
     if (dir.empty()) {
         dir = ".";
     }
-    std::string evec_dir = dir + "/eigenvectors";
-    if (compute_eigenvectors) {
-        safe_system_call("mkdir -p " + evec_dir);
-    }
+    // Use output directory for HDF5 storage (eigenvectors saved to ed_results.h5)
+    std::string evec_dir = dir;
     
     // Step 1: Estimate spectral bounds and density
     std::cout << "Step 1: Estimating spectral bounds and density..." << std::endl;
@@ -3857,7 +3821,8 @@ void optimal_spectrum_solver(std::function<void(const Complex*, Complex*, int)> 
     
     // Step 3: Process each slice with appropriate method
     std::vector<double> all_eigenvalues;
-    std::vector<std::pair<double, std::string>> eigenvector_info; // (eigenvalue, filename)
+    // (eigenvalue, slice_dir, eigenvector_index) - eigenvectors stored in HDF5
+    std::vector<std::tuple<double, std::string, size_t>> eigenvector_info;
     
     for (size_t slice_idx = 0; slice_idx < slices.size(); slice_idx++) {
         double slice_lower = slices[slice_idx].first;
@@ -3989,29 +3954,33 @@ void optimal_spectrum_solver(std::function<void(const Complex*, Complex*, int)> 
                 
                 // Refine degenerate eigenvalue using higher precision
                 if (compute_eigenvectors) {
-                    // Load degenerate eigenvectors
+                    // Load degenerate eigenvectors from HDF5
                     std::vector<ComplexVector> degenerate_vectors;
-                    for (int j = 0; j < multiplicity; j++) {
-                        std::string evec_file = slice_dir + "/eigenvectors/eigenvector_" + 
-                                              std::to_string(i + j) + ".dat";
-                        std::ifstream infile(evec_file);
-                        if (infile) {
-                            ComplexVector vec(N);
-                            infile.read(reinterpret_cast<char*>(vec.data()), N * sizeof(Complex));
-                            degenerate_vectors.push_back(vec);
+                    try {
+                        std::string hdf5_file = HDF5IO::createOrOpenFile(slice_dir);
+                        for (int j = 0; j < multiplicity; j++) {
+                            std::vector<Complex> vec = HDF5IO::loadEigenvector(hdf5_file, i + j);
+                            if (vec.size() == N) {
+                                degenerate_vectors.push_back(vec);
+                            }
                         }
+                    } catch (const std::exception& e) {
+                        std::cerr << "Warning: Failed to load eigenvectors from HDF5: " << e.what() << std::endl;
                     }
                     
                     // Orthogonalize the degenerate subspace
-                    orthogonalize_degenerate_subspace(degenerate_vectors, current_eval, H, N);
-                    
-                    // Save orthogonalized vectors back
-                    for (int j = 0; j < multiplicity; j++) {
-                        std::string evec_file = slice_dir + "/eigenvectors/eigenvector_" + 
-                                              std::to_string(i + j) + ".dat";
-                        std::ofstream outfile(evec_file, std::ios::binary);
-                        outfile.write(reinterpret_cast<const char*>(degenerate_vectors[j].data()), 
-                                    N * sizeof(Complex));
+                    if (degenerate_vectors.size() == multiplicity) {
+                        orthogonalize_degenerate_subspace(degenerate_vectors, current_eval, H, N);
+                        
+                        // Save orthogonalized vectors back to HDF5
+                        try {
+                            std::string hdf5_file = HDF5IO::createOrOpenFile(slice_dir);
+                            for (int j = 0; j < multiplicity; j++) {
+                                HDF5IO::saveEigenvector(hdf5_file, i + j, degenerate_vectors[j]);
+                            }
+                        } catch (const std::exception& e) {
+                            std::cerr << "Warning: Failed to save eigenvectors to HDF5: " << e.what() << std::endl;
+                        }
                     }
                 }
                 
@@ -4026,16 +3995,14 @@ void optimal_spectrum_solver(std::function<void(const Complex*, Complex*, int)> 
                 for (int j = 0; j < multiplicity; j++) {
                     all_eigenvalues.push_back(avg_eval);
                     if (compute_eigenvectors) {
-                        eigenvector_info.push_back({avg_eval, 
-                            slice_dir + "/eigenvectors/eigenvector_" + std::to_string(i + j) + ".dat"});
+                        eigenvector_info.push_back(std::make_tuple(avg_eval, slice_dir, static_cast<size_t>(i + j)));
                     }
                 }
             } else {
                 // Non-degenerate eigenvalue
                 all_eigenvalues.push_back(current_eval);
                 if (compute_eigenvectors) {
-                    eigenvector_info.push_back({current_eval, 
-                        slice_dir + "/eigenvectors/eigenvector_" + std::to_string(i) + ".dat"});
+                    eigenvector_info.push_back(std::make_tuple(current_eval, slice_dir, static_cast<size_t>(i)));
                 }
             }
             
@@ -4079,22 +4046,29 @@ void optimal_spectrum_solver(std::function<void(const Complex*, Complex*, int)> 
     if (compute_eigenvectors && !eigenvector_info.empty()) {
         std::cout << "Reorganizing eigenvectors according to sorted eigenvalues..." << std::endl;
         
-        #pragma omp parallel for
+        // Create main output HDF5 file
+        std::string hdf5_file = HDF5IO::createOrOpenFile(evec_dir);
+        
         for (size_t i = 0; i < sort_indices.size(); i++) {
             size_t orig_idx = sort_indices[i];
             
-            // Read original eigenvector
-            std::ifstream infile(eigenvector_info[orig_idx].second);
-            if (!infile) continue;
+            // Extract slice directory and eigenvector index from tuple
+            const auto& info = eigenvector_info[orig_idx];
+            std::string src_slice_dir = std::get<1>(info);
+            size_t src_idx = std::get<2>(info);
             
-            ComplexVector vec(N);
-            infile.read(reinterpret_cast<char*>(vec.data()), N * sizeof(Complex));
-            infile.close();
-            
-            // Save to final location
-            std::string final_evec_file = evec_dir + "/eigenvector_" + std::to_string(i) + ".dat";
-            std::ofstream outfile(final_evec_file, std::ios::binary);
-            outfile.write(reinterpret_cast<const char*>(vec.data()), N * sizeof(Complex));
+            // Load eigenvector from slice HDF5
+            try {
+                std::string slice_hdf5 = HDF5IO::createOrOpenFile(src_slice_dir);
+                std::vector<Complex> vec = HDF5IO::loadEigenvector(slice_hdf5, src_idx);
+                
+                if (vec.size() == N) {
+                    // Save to final HDF5 with sorted index
+                    HDF5IO::saveEigenvector(hdf5_file, i, vec);
+                }
+            } catch (const std::exception& e) {
+                std::cerr << "Warning: Failed to reorganize eigenvector " << orig_idx << ": " << e.what() << std::endl;
+            }
         }
         
         // Clean up temporary slice directories
@@ -4104,15 +4078,13 @@ void optimal_spectrum_solver(std::function<void(const Complex*, Complex*, int)> 
         }
     }
     
-    // Save eigenvalues
-    std::string eval_file = evec_dir + "/eigenvalues.dat";
-    std::ofstream eval_outfile(eval_file, std::ios::binary);
-    if (eval_outfile) {
-        size_t n_evals = eigenvalues.size();
-        eval_outfile.write(reinterpret_cast<const char*>(&n_evals), sizeof(size_t));
-        eval_outfile.write(reinterpret_cast<const char*>(eigenvalues.data()), n_evals * sizeof(double));
-        eval_outfile.close();
-        std::cout << "Saved " << n_evals << " eigenvalues to " << eval_file << std::endl;
+    // Save eigenvalues to HDF5
+    try {
+        std::string hdf5_file = HDF5IO::createOrOpenFile(evec_dir);
+        HDF5IO::saveEigenvalues(hdf5_file, eigenvalues);
+        std::cout << "Saved " << eigenvalues.size() << " eigenvalues to HDF5" << std::endl;
+    } catch (const std::exception& e) {
+        std::cerr << "Warning: Failed to save eigenvalues to HDF5: " << e.what() << std::endl;
     }
     
     // Print summary statistics
