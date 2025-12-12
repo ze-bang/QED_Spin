@@ -2068,4 +2068,378 @@ GPUFTLMSolver::computeDynamicalCorrelationState(
     return std::make_tuple(frequencies, spectral_func_real, spectral_func_imag);
 }
 
+// ============================================================================
+// CORRECTED FTLM MULTI-SAMPLE MULTI-TEMPERATURE SPECTRAL FUNCTION
+// ============================================================================
+
+/**
+ * @brief Helper: Evaluate spectral function using continued fraction representation
+ * 
+ * Computes S(ω) = -Im[G(ω + iη)] / π where G is the continued fraction:
+ * G(z) = norm_sq / (z - α₀ - β₁²/(z - α₁ - β₂²/(z - α₂ - ...)))
+ * 
+ * Uses numerically stable bottom-up evaluation to avoid overflow.
+ */
+static std::vector<double> gpu_continued_fraction_spectral(
+    const std::vector<double>& alpha,
+    const std::vector<double>& beta,
+    const std::vector<double>& omega_grid,
+    double broadening,
+    double norm_sq
+) {
+    if (alpha.empty()) {
+        return std::vector<double>(omega_grid.size(), 0.0);
+    }
+    
+    size_t M = alpha.size();
+    size_t num_omega = omega_grid.size();
+    std::vector<double> spectral(num_omega, 0.0);
+    
+    // Evaluate over frequency points
+    for (size_t iw = 0; iw < num_omega; iw++) {
+        double omega = omega_grid[iw];
+        std::complex<double> z(omega, broadening);  // ω + iη
+        
+        // Evaluate continued fraction from bottom up (numerically stable)
+        std::complex<double> G(0.0, 0.0);
+        
+        // Bottom-up: start from n = M-1 down to n = 1
+        for (int n = M - 1; n >= 1; n--) {
+            double beta_n_sq = (n < (int)beta.size()) ? beta[n] * beta[n] : 0.0;
+            std::complex<double> denom = z - std::complex<double>(alpha[n], 0.0) - G;
+            
+            if (std::abs(denom) > 1e-300) {
+                G = std::complex<double>(beta_n_sq, 0.0) / denom;
+            } else {
+                G = std::complex<double>(0.0, 0.0);
+            }
+        }
+        
+        // Final step: G(z) = norm_sq / (z - α₀ - G)
+        std::complex<double> denom = z - std::complex<double>(alpha[0], 0.0) - G;
+        std::complex<double> G_final;
+        if (std::abs(denom) > 1e-300) {
+            G_final = std::complex<double>(norm_sq, 0.0) / denom;
+        } else {
+            G_final = std::complex<double>(0.0, 0.0);
+        }
+        
+        // Spectral function: S(ω) = -Im[G(ω + iη)] / π
+        spectral[iw] = -G_final.imag() / M_PI;
+    }
+    
+    return spectral;
+}
+
+std::map<double, std::tuple<std::vector<double>, std::vector<double>, std::vector<double>,
+                            std::vector<double>, std::vector<double>>>
+GPUFTLMSolver::computeDynamicalCorrelationMultiTemp(
+    int num_samples,
+    GPUOperator* op_O1,
+    GPUOperator* op_O2,
+    double omega_min,
+    double omega_max,
+    int num_omega_bins,
+    double broadening,
+    const std::vector<double>& temperatures,
+    double energy_shift,
+    unsigned int random_seed) {
+    
+    std::cout << "\n==========================================\n";
+    std::cout << "GPU FTLM SPECTRAL FUNCTION (CORRECT FORMULATION)\n";
+    std::cout << "==========================================\n";
+    std::cout << "Hilbert space dimension: " << N_ << "\n";
+    std::cout << "Krylov dimension: " << krylov_dim_ << "\n";
+    std::cout << "Samples: " << num_samples << "\n";
+    std::cout << "Temperatures: " << temperatures.size() << "\n";
+    std::cout << "Broadening: " << broadening << "\n";
+    std::cout << "==========================================\n";
+    std::cout << "\nUsing correct FTLM formulation:" << std::endl;
+    std::cout << "  S(ω,T) = (1/Z) × Σ_r Σ_i e^{-βε_i} |c_i|² S_i(ω)" << std::endl;
+    std::cout << "  where S_i(ω) is computed via continued fraction" << std::endl;
+    std::cout << "==========================================" << std::endl;
+    
+    // Generate frequency grid
+    std::vector<double> frequencies(num_omega_bins);
+    double omega_step = (omega_max - omega_min) / std::max(1, num_omega_bins - 1);
+    for (int i = 0; i < num_omega_bins; i++) {
+        frequencies[i] = omega_min + i * omega_step;
+    }
+    
+    // Initialize random seed
+    unsigned int seed = random_seed;
+    if (seed == 0) {
+        seed = std::chrono::system_clock::now().time_since_epoch().count();
+    }
+    
+    // Determine ground state energy if not provided
+    double E_gs = energy_shift;
+    if (std::abs(E_gs) < 1e-14) {
+        std::cout << "\nDetermining ground state energy from Lanczos...\n";
+        
+        // Generate a test random state and run Lanczos
+        initializeRandomVector(d_v_current_, seed);
+        
+        std::vector<double> alpha_test, beta_test;
+        int test_iters = std::min(krylov_dim_, 100);
+        buildLanczosTridiagonalFromVector(d_v_current_, false, 10, alpha_test, beta_test);
+        
+        std::vector<double> ritz_vals, weights;
+        diagonalizeTridiagonal(alpha_test, beta_test, ritz_vals, weights);
+        
+        if (!ritz_vals.empty()) {
+            E_gs = *std::min_element(ritz_vals.begin(), ritz_vals.end());
+            std::cout << "Ground state energy (estimated): " << E_gs << std::endl;
+        }
+    } else {
+        std::cout << "Using provided ground state energy: " << E_gs << std::endl;
+    }
+    
+    // For each temperature, accumulate spectral and partition function
+    std::map<double, std::vector<double>> accumulated_spectral;
+    std::map<double, double> accumulated_Z;
+    std::map<double, std::vector<std::vector<double>>> per_sample_spectral;
+    
+    for (double T : temperatures) {
+        accumulated_spectral[T] = std::vector<double>(num_omega_bins, 0.0);
+        accumulated_Z[T] = 0.0;
+        per_sample_spectral[T] = std::vector<std::vector<double>>();
+    }
+    
+    // How many Ritz states to use per sample
+    int max_ritz_states = std::min(krylov_dim_, 50);
+    
+    // Allocate device memory for operator applications
+    cuDoubleComplex* d_psi_i = nullptr;
+    cuDoubleComplex* d_phi_i = nullptr;
+    CUDA_CHECK(cudaMalloc(&d_psi_i, N_ * sizeof(cuDoubleComplex)));
+    CUDA_CHECK(cudaMalloc(&d_phi_i, N_ * sizeof(cuDoubleComplex)));
+    
+    // Loop over random samples
+    for (int sample_idx = 0; sample_idx < num_samples; sample_idx++) {
+        std::cout << "\n--- Sample " << (sample_idx + 1) << "/" << num_samples << " ---\n";
+        
+        unsigned int sample_seed = seed + sample_idx * 12345;
+        
+        // Generate random state |r⟩
+        initializeRandomVector(d_v_current_, sample_seed);
+        
+        // Step 1: Build Lanczos from |r⟩ to get approximate eigenstates
+        std::vector<double> alpha_H, beta_H;
+        cuDoubleComplex** d_lanczos_basis_H = nullptr;
+        
+        int H_iterations = buildLanczosTridiagonalWithBasis(
+            d_v_current_, false, 10, alpha_H, beta_H, &d_lanczos_basis_H
+        );
+        
+        int m_H = alpha_H.size();
+        std::cout << "  Hamiltonian Lanczos: " << m_H << " iterations\n";
+        
+        if (m_H == 0) {
+            std::cerr << "  Warning: Lanczos failed, skipping sample\n";
+            continue;
+        }
+        
+        // Diagonalize tridiagonal to get Ritz values and vectors
+        std::vector<double> ritz_values(m_H);
+        std::vector<double> evecs(m_H * m_H);
+        
+        std::vector<double> diag = alpha_H;
+        std::vector<double> offdiag(m_H - 1);
+        for (int i = 0; i < m_H - 1; i++) {
+            offdiag[i] = beta_H[i + 1];
+        }
+        
+        int info = LAPACKE_dstevd(LAPACK_COL_MAJOR, 'V', m_H,
+                                 diag.data(), offdiag.data(),
+                                 evecs.data(), m_H);
+        
+        if (info != 0) {
+            std::cerr << "  Warning: Diagonalization failed, skipping sample\n";
+            for (int i = 0; i < m_H; i++) {
+                cudaFree(d_lanczos_basis_H[i]);
+            }
+            delete[] d_lanczos_basis_H;
+            continue;
+        }
+        
+        for (int i = 0; i < m_H; i++) {
+            ritz_values[i] = diag[i];
+        }
+        
+        // Compute |c_i|² = |⟨ψ_i|r⟩|² = V[i,0]² (first Lanczos vector is |r⟩)
+        std::vector<double> c_sq(m_H);
+        for (int i = 0; i < m_H; i++) {
+            c_sq[i] = evecs[i * m_H + 0] * evecs[i * m_H + 0];
+        }
+        
+        // Find minimum energy for numerical stability
+        double E_min = *std::min_element(ritz_values.begin(), ritz_values.end());
+        
+        // Step 2: For each temperature, compute weighted spectral contributions
+        for (double T : temperatures) {
+            double beta = 1.0 / T;
+            
+            // Compute thermal weights and partition function contribution
+            std::vector<double> thermal_weights(m_H);
+            double Z_sample = 0.0;
+            for (int i = 0; i < m_H; i++) {
+                double boltzmann = std::exp(-beta * (ritz_values[i] - E_min));
+                thermal_weights[i] = c_sq[i] * boltzmann;
+                Z_sample += thermal_weights[i];
+            }
+            
+            accumulated_Z[T] += Z_sample;
+            
+            // For this sample, compute weighted spectral function
+            std::vector<double> sample_spectral(num_omega_bins, 0.0);
+            
+            // Select significant Ritz states
+            double weight_threshold = 1e-8 * Z_sample;
+            int n_significant = 0;
+            
+            for (int i = 0; i < std::min(m_H, max_ritz_states); i++) {
+                if (thermal_weights[i] < weight_threshold) continue;
+                n_significant++;
+                
+                // Construct approximate eigenstate |ψ_i⟩ = Σ_j V[i,j] |v_j⟩
+                CUDA_CHECK(cudaMemset(d_psi_i, 0, N_ * sizeof(cuDoubleComplex)));
+                
+                for (int j = 0; j < m_H; j++) {
+                    double coeff = evecs[i * m_H + j];
+                    cuDoubleComplex coeff_c = make_cuDoubleComplex(coeff, 0.0);
+                    vectorAxpy(d_lanczos_basis_H[j], d_psi_i, coeff_c);
+                }
+                
+                // Normalize (should already be normalized, but ensure)
+                double psi_norm = vectorNorm(d_psi_i);
+                if (psi_norm < 1e-14) continue;
+                vectorScale(d_psi_i, 1.0 / psi_norm);
+                
+                // Apply operator O2 to |ψ_i⟩: |φ_i⟩ = O₂|ψ_i⟩
+                if (op_O2 != nullptr) {
+                    op_O2->matVecGPU(d_psi_i, d_phi_i, N_);
+                } else {
+                    vectorCopy(d_psi_i, d_phi_i);
+                }
+                
+                double phi_norm = vectorNorm(d_phi_i);
+                double phi_norm_sq = phi_norm * phi_norm;
+                
+                if (phi_norm < 1e-14) continue;
+                
+                // Normalize for Lanczos
+                vectorScale(d_phi_i, 1.0 / phi_norm);
+                
+                // Build Lanczos from |φ_i⟩ for spectral function via continued fraction
+                std::vector<double> alpha_S, beta_S;
+                buildLanczosTridiagonalFromVector(d_phi_i, false, 10, alpha_S, beta_S);
+                
+                if (alpha_S.empty()) continue;
+                
+                // Shift energies by E_gs (ground state energy)
+                for (size_t k = 0; k < alpha_S.size(); k++) {
+                    alpha_S[k] -= E_gs;
+                }
+                
+                // Compute spectral function via continued fraction
+                std::vector<double> S_i = gpu_continued_fraction_spectral(
+                    alpha_S, beta_S, frequencies, broadening, phi_norm_sq
+                );
+                
+                // Add contribution weighted by thermal factor
+                for (int iw = 0; iw < num_omega_bins; iw++) {
+                    sample_spectral[iw] += thermal_weights[i] * S_i[iw];
+                    accumulated_spectral[T][iw] += thermal_weights[i] * S_i[iw];
+                }
+            }
+            
+            // Store sample contribution for error estimation
+            if (Z_sample > 1e-300) {
+                std::vector<double> normalized_sample(num_omega_bins);
+                for (int iw = 0; iw < num_omega_bins; iw++) {
+                    normalized_sample[iw] = sample_spectral[iw] / Z_sample;
+                }
+                per_sample_spectral[T].push_back(normalized_sample);
+            }
+            
+            if (T == temperatures[0]) {
+                std::cout << "  Processed " << n_significant << " significant Ritz states\n";
+            }
+        }
+        
+        // Free Lanczos basis for this sample
+        for (int i = 0; i < m_H; i++) {
+            cudaFree(d_lanczos_basis_H[i]);
+        }
+        delete[] d_lanczos_basis_H;
+    }
+    
+    // Free device memory
+    cudaFree(d_psi_i);
+    cudaFree(d_phi_i);
+    
+    // Compute final results
+    std::cout << "\n--- Computing final results ---\n";
+    
+    std::map<double, std::tuple<std::vector<double>, std::vector<double>, std::vector<double>,
+                                std::vector<double>, std::vector<double>>> results_map;
+    
+    for (double T : temperatures) {
+        std::vector<double> S_real(num_omega_bins, 0.0);
+        std::vector<double> S_imag(num_omega_bins, 0.0);  // Real formulation, imag is 0
+        std::vector<double> S_error(num_omega_bins, 0.0);
+        std::vector<double> S_error_imag(num_omega_bins, 0.0);
+        
+        double Z_total = accumulated_Z[T];
+        if (Z_total < 1e-300) {
+            std::cerr << "  Warning: Z ≈ 0 for T = " << T << std::endl;
+            results_map[T] = std::make_tuple(frequencies, S_real, S_imag, S_error, S_error_imag);
+            continue;
+        }
+        
+        // Compute spectral function: S(ω) = accumulated_spectral / Z_total
+        for (int iw = 0; iw < num_omega_bins; iw++) {
+            S_real[iw] = accumulated_spectral[T][iw] / Z_total;
+        }
+        
+        // Compute error estimate from per-sample data
+        size_t n_samples = per_sample_spectral[T].size();
+        if (n_samples > 1) {
+            // Compute mean
+            std::vector<double> mean(num_omega_bins, 0.0);
+            for (size_t s = 0; s < n_samples; s++) {
+                for (int iw = 0; iw < num_omega_bins; iw++) {
+                    mean[iw] += per_sample_spectral[T][s][iw];
+                }
+            }
+            for (int iw = 0; iw < num_omega_bins; iw++) {
+                mean[iw] /= n_samples;
+            }
+            
+            // Compute variance and standard error
+            for (size_t s = 0; s < n_samples; s++) {
+                for (int iw = 0; iw < num_omega_bins; iw++) {
+                    double diff = per_sample_spectral[T][s][iw] - mean[iw];
+                    S_error[iw] += diff * diff;
+                }
+            }
+            
+            double norm_factor = std::sqrt(static_cast<double>(n_samples * (n_samples - 1)));
+            for (int iw = 0; iw < num_omega_bins; iw++) {
+                S_error[iw] = std::sqrt(S_error[iw]) / norm_factor;
+            }
+        }
+        
+        std::cout << "  T = " << T << ": " << n_samples << " samples, Z = " << Z_total << std::endl;
+        results_map[T] = std::make_tuple(frequencies, S_real, S_imag, S_error, S_error_imag);
+    }
+    
+    std::cout << "\n==========================================\n";
+    std::cout << "GPU FTLM Spectral Function Complete\n";
+    std::cout << "==========================================\n";
+    
+    return results_map;
+}
+
 #endif // WITH_CUDA

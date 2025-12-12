@@ -1005,13 +1005,11 @@ GPUEDWrapper::runGPUDynamicalCorrelationMultiTemp(void* gpu_op_handle,
                                                  unsigned int random_seed,
                                                  double ground_state_energy) {
     std::cout << "\n==========================================" << std::endl;
-    std::cout << "GPU MULTI-SAMPLE MULTI-TEMPERATURE FTLM" << std::endl;
+    std::cout << "GPU MULTI-SAMPLE MULTI-TEMPERATURE FTLM (CORRECT)" << std::endl;
     std::cout << "==========================================" << std::endl;
     std::cout << "Samples: " << num_samples << std::endl;
     std::cout << "Temperatures: " << temperatures.size() << std::endl;
-    std::cout << "Running Lanczos " << num_samples << " times (once per sample)" << std::endl;
-    std::cout << "Then computing " << temperatures.size() << " temperatures from cached data" << std::endl;
-    std::cout << "Expected speedup: ~" << (temperatures.size() * 0.9) << "× vs standard approach" << std::endl;
+    std::cout << "Using correct FTLM formulation matching CPU implementation" << std::endl;
     std::cout << "==========================================" << std::endl;
     
     if (!gpu_op_handle || !gpu_obs1_handle || !gpu_obs2_handle) {
@@ -1026,188 +1024,29 @@ GPUEDWrapper::runGPUDynamicalCorrelationMultiTemp(void* gpu_op_handle,
     // Create GPU FTLM solver
     GPUFTLMSolver ftlm_solver(gpu_op, N, krylov_dim, 1e-10);
     
-    // Determine ground state energy if not provided
-    double E_shift = ground_state_energy;
-    if (std::abs(E_shift) < 1e-14) {
-        std::cout << "\nDetermining ground state energy from first sample...\n";
-        
-        // Generate random state on device
-        cuDoubleComplex* d_test_state;
-        cudaMalloc(&d_test_state, N * sizeof(cuDoubleComplex));
-        
-        // Initialize with random values
-        curandGenerator_t gen;
-        curandCreateGenerator(&gen, CURAND_RNG_PSEUDO_DEFAULT);
-        curandSetPseudoRandomGeneratorSeed(gen, random_seed > 0 ? random_seed : time(NULL));
-        
-        // Generate random complex numbers (real and imag parts separately)
-        curandGenerateUniformDouble(gen, reinterpret_cast<double*>(d_test_state), N * 2);
-        
-        // Normalize
-        cublasHandle_t cublas_handle;
-        cublasCreate(&cublas_handle);
-        double norm;
-        cublasDznrm2(cublas_handle, N, d_test_state, 1, &norm);
-        cuDoubleComplex scale = make_cuDoubleComplex(1.0/norm, 0.0);
-        cublasZscal(cublas_handle, N, &scale, d_test_state, 1);
-        
-        // Apply O2 to get |phi⟩ = O2|ψ⟩
-        cuDoubleComplex* d_phi;
-        cudaMalloc(&d_phi, N * sizeof(cuDoubleComplex));
-        gpu_obs2->matVecGPU(d_test_state, d_phi, N);
-        
-        // Run quick Lanczos to estimate ground state
-        std::vector<double> alpha, beta;
-        int quick_krylov = std::min(krylov_dim, 100);
-        
-        cuDoubleComplex* d_v = d_phi;  // Start from |phi⟩
-        cuDoubleComplex* d_v_next;
-        cudaMalloc(&d_v_next, N * sizeof(cuDoubleComplex));
-        
-        for (int j = 0; j < quick_krylov; ++j) {
-            // v_next = H * v
-            gpu_op->matVecGPU(d_v, d_v_next, N);
-            
-            // alpha[j] = <v|H|v>
-            cuDoubleComplex alpha_complex;
-            cublasZdotc(cublas_handle, N, d_v, 1, d_v_next, 1, &alpha_complex);
-            alpha.push_back(cuCreal(alpha_complex));
-            
-            // v_next = v_next - alpha[j] * v
-            cuDoubleComplex neg_alpha = make_cuDoubleComplex(-alpha.back(), 0.0);
-            cublasZaxpy(cublas_handle, N, &neg_alpha, d_v, 1, d_v_next, 1);
-            
-            // Orthogonalize against previous vector if available
-            if (j > 0 && beta.size() > 0) {
-                cuDoubleComplex neg_beta = make_cuDoubleComplex(-beta.back(), 0.0);
-                // Need previous v for this - simplified version
-            }
-            
-            // beta[j] = ||v_next||
-            double beta_val;
-            cublasDznrm2(cublas_handle, N, d_v_next, 1, &beta_val);
-            beta.push_back(beta_val);
-            
-            if (beta_val < 1e-10) break;
-            
-            // Normalize: v = v_next / beta[j]
-            cuDoubleComplex norm_scale = make_cuDoubleComplex(1.0/beta_val, 0.0);
-            cublasZscal(cublas_handle, N, &norm_scale, d_v_next, 1);
-            
-            // Swap pointers
-            std::swap(d_v, d_v_next);
-        }
-        
-        // Cleanup
-        cudaFree(d_test_state);
-        cudaFree(d_v_next);
-        cudaFree(d_phi);
-        curandDestroyGenerator(gen);
-        cublasDestroy(cublas_handle);
-        
-        // Find minimum eigenvalue of tridiagonal matrix
-        if (!alpha.empty()) {
-            E_shift = *std::min_element(alpha.begin(), alpha.end()) - 2.0 * (*std::max_element(beta.begin(), beta.end()));
-            std::cout << "Ground state energy (estimated): " << E_shift << std::endl;
-        }
-    }
+    // Call the CORRECT FTLM multi-temperature spectral function
+    auto full_results = ftlm_solver.computeDynamicalCorrelationMultiTemp(
+        num_samples,
+        gpu_obs1,
+        gpu_obs2,
+        omega_min,
+        omega_max,
+        num_omega_bins,
+        broadening,
+        temperatures,
+        ground_state_energy,
+        random_seed
+    );
     
-    // Storage for accumulated spectral data (on host)
-    std::vector<double> accumulated_eigenvalues;
-    std::vector<cuDoubleComplex> accumulated_weights;
-    std::vector<std::vector<cuDoubleComplex>> per_sample_weights;
-    
-    std::cout << "\n--- Processing " << num_samples << " random samples on GPU ---\n";
-    
-    // Loop over samples
-    curandGenerator_t main_gen;
-    curandCreateGenerator(&main_gen, CURAND_RNG_PSEUDO_DEFAULT);
-    curandSetPseudoRandomGeneratorSeed(main_gen, random_seed > 0 ? random_seed : time(NULL));
-    
-    cublasHandle_t cublas_handle;
-    cublasCreate(&cublas_handle);
-    
-    for (int sample_idx = 0; sample_idx < num_samples; ++sample_idx) {
-        std::cout << "\nSample " << (sample_idx + 1) << "/" << num_samples << ":\n";
-        
-        // Generate random state on device
-        cuDoubleComplex* d_state;
-        cudaMalloc(&d_state, N * sizeof(cuDoubleComplex));
-        curandGenerateUniformDouble(main_gen, reinterpret_cast<double*>(d_state), N * 2);
-        
-        // Normalize
-        double norm;
-        cublasDznrm2(cublas_handle, N, d_state, 1, &norm);
-        cuDoubleComplex scale = make_cuDoubleComplex(1.0/norm, 0.0);
-        cublasZscal(cublas_handle, N, &scale, d_state, 1);
-        
-        // Compute spectral data using GPU FTLM
-        auto sample_result = ftlm_solver.computeDynamicalCorrelation(
-            1, gpu_obs1, gpu_obs2, omega_min, omega_max, num_omega_bins,
-            broadening, temperatures[0], random_seed + sample_idx, E_shift
-        );
-        
-        cudaFree(d_state);
-        
-        // Extract spectral weights from first sample to get structure
-        // Note: This is simplified - actual implementation would cache Lanczos data
-        auto freqs = std::get<0>(sample_result);
-        auto S_real = std::get<1>(sample_result);
-        auto S_imag = std::get<2>(sample_result);
-        
-        if (sample_idx == 0) {
-            // Initialize from first sample
-            accumulated_eigenvalues = freqs;
-            accumulated_weights.resize(freqs.size(), make_cuDoubleComplex(0.0, 0.0));
-        }
-        
-        // Accumulate weights
-        for (size_t i = 0; i < accumulated_weights.size() && i < S_real.size(); ++i) {
-            accumulated_weights[i].x += S_real[i];
-            accumulated_weights[i].y += S_imag[i];
-        }
-        
-        std::cout << "  Accumulated spectral data from sample " << (sample_idx + 1) << std::endl;
-    }
-    
-    curandDestroyGenerator(main_gen);
-    cublasDestroy(cublas_handle);
-    
-    // Average the accumulated weights
-    if (num_samples > 0) {
-        double inv_num_samples = 1.0 / static_cast<double>(num_samples);
-        for (size_t i = 0; i < accumulated_weights.size(); ++i) {
-            accumulated_weights[i].x *= inv_num_samples;
-            accumulated_weights[i].y *= inv_num_samples;
-        }
-        std::cout << "\n--- Averaged spectral data over " << num_samples << " samples ---\n";
-    }
-    
-    // Now compute spectral functions for all temperatures
-    // This is simplified - full version would use cached Lanczos data
-    std::cout << "\n--- Computing spectral functions for " << temperatures.size() 
-              << " temperatures from cached data ---\n";
-    
+    // Convert to the expected return format (without errors for backward compatibility)
     std::map<double, std::tuple<std::vector<double>, std::vector<double>, std::vector<double>>> results;
     
-    for (double T : temperatures) {
-        std::vector<double> S_real(accumulated_eigenvalues.size());
-        std::vector<double> S_imag(accumulated_eigenvalues.size());
-        
-        // Apply temperature-dependent weighting
-        double beta = (T > 1e-10) ? (1.0 / T) : 1e10;
-        for (size_t i = 0; i < accumulated_eigenvalues.size(); ++i) {
-            double energy = accumulated_eigenvalues[i];
-            double thermal_weight = std::exp(-beta * energy);
-            S_real[i] = accumulated_weights[i].x * thermal_weight;
-            S_imag[i] = accumulated_weights[i].y * thermal_weight;
-        }
-        
-        results[T] = std::make_tuple(accumulated_eigenvalues, S_real, S_imag);
-        std::cout << "  Computed T = " << T << std::endl;
+    for (const auto& [T, data] : full_results) {
+        auto& [freqs, S_real, S_imag, err_real, err_imag] = data;
+        results[T] = std::make_tuple(freqs, S_real, S_imag);
     }
     
-    std::cout << "\nGPU multi-temperature computation complete!\n";
+    std::cout << "\nGPU multi-temperature FTLM complete!\n";
     return results;
 }
 

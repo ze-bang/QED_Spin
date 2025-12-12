@@ -9,6 +9,7 @@
 #include <vector>
 #include <complex>
 #include <functional>
+#include <map>
 #include <ed/gpu/gpu_operator.cuh>
 #include <ed/core/thermal_types.h>
 
@@ -290,6 +291,51 @@ public:
                                     double broadening,
                                     double temperature = 0.0,
                                     double energy_shift = 0.0);
+    
+    /**
+     * @brief CORRECTED FTLM multi-sample multi-temperature spectral function
+     * 
+     * GPU-accelerated version matching the CPU implementation:
+     * compute_dynamical_correlation_multi_sample_multi_temperature
+     * 
+     * For each random sample |r⟩:
+     *   1. Build Lanczos from |r⟩ to get Ritz states |ψᵢ⟩ and energies εᵢ
+     *   2. Compute overlaps |cᵢ|² = |⟨ψᵢ|r⟩|²
+     *   3. For each temperature T, compute thermal weights wᵢ = e^{-β(εᵢ - E_min)} |cᵢ|²
+     *   4. For significant Ritz states: apply O₂, build new Lanczos, use continued fraction
+     *   5. Accumulate: S(ω) += wᵢ × Sᵢ(ω) and Z += wᵢ
+     * 
+     * Final result: S(ω,T) = accumulated_spectral / Z
+     * 
+     * This is the CORRECT FTLM formulation where thermal weights affect which
+     * eigenstates contribute, and each eigenstate's spectral function is computed
+     * via the continued fraction method.
+     * 
+     * @param num_samples Number of random samples
+     * @param op_O1 GPU operator for O₁
+     * @param op_O2 GPU operator for O₂
+     * @param omega_min Minimum frequency
+     * @param omega_max Maximum frequency
+     * @param num_omega_bins Number of frequency points
+     * @param broadening Lorentzian broadening parameter
+     * @param temperatures Vector of temperature points
+     * @param energy_shift Ground state energy (0 = auto-detect)
+     * @param random_seed Random seed (0 = random)
+     * @return Map from temperature to (frequencies, S_real, S_imag, error_real, error_imag)
+     */
+    std::map<double, std::tuple<std::vector<double>, std::vector<double>, std::vector<double>,
+                                std::vector<double>, std::vector<double>>>
+    computeDynamicalCorrelationMultiTemp(
+        int num_samples,
+        GPUOperator* op_O1,
+        GPUOperator* op_O2,
+        double omega_min,
+        double omega_max,
+        int num_omega_bins,
+        double broadening,
+        const std::vector<double>& temperatures,
+        double energy_shift = 0.0,
+        unsigned int random_seed = 0);
     
 private:
     GPUOperator* op_;

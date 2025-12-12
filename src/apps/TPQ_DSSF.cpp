@@ -1114,23 +1114,35 @@ int main(int argc, char* argv[]) {
     // Parse GPU flag
     bool use_gpu = false;
     if (argc >= 13) {
-        try {
-            int gpu_flag = std::stoi(argv[12]);
-            use_gpu = (gpu_flag != 0);
-#ifndef ENABLE_GPU
-            if (use_gpu && rank == 0) {
-                std::cerr << "Warning: GPU requested but code not compiled with GPU support. Using CPU." << std::endl;
+        std::string gpu_arg = argv[12];
+        // Convert to lowercase for comparison
+        std::transform(gpu_arg.begin(), gpu_arg.end(), gpu_arg.begin(), ::tolower);
+        
+        if (gpu_arg == "true" || gpu_arg == "1" || gpu_arg == "yes" || gpu_arg == "on") {
+            use_gpu = true;
+        } else if (gpu_arg == "false" || gpu_arg == "0" || gpu_arg == "no" || gpu_arg == "off") {
+            use_gpu = false;
+        } else {
+            // Try parsing as integer
+            try {
+                int gpu_flag = std::stoi(gpu_arg);
+                use_gpu = (gpu_flag != 0);
+            } catch (...) {
+                if (rank == 0) {
+                    std::cerr << "Warning: Failed to parse GPU flag '" << argv[12] << "', using CPU" << std::endl;
+                }
                 use_gpu = false;
             }
-#endif
-            if (rank == 0 && use_gpu) {
-                std::cout << "GPU acceleration enabled for time evolution" << std::endl;
-            }
-        } catch (...) {
-            if (rank == 0) {
-                std::cerr << "Warning: Failed to parse GPU flag, using CPU" << std::endl;
-            }
+        }
+        
+#ifndef WITH_CUDA
+        if (use_gpu && rank == 0) {
+            std::cerr << "Warning: GPU requested but code not compiled with GPU support (WITH_CUDA). Using CPU." << std::endl;
             use_gpu = false;
+        }
+#endif
+        if (rank == 0 && use_gpu) {
+            std::cout << "GPU acceleration enabled" << std::endl;
         }
     }
 
@@ -2353,6 +2365,7 @@ int main(int argc, char* argv[]) {
                         std::cout << "  Temperature points: " << temperatures.size() << std::endl;
                         std::cout << "  Frequency range: [" << omega_min << ", " << omega_max << "]" << std::endl;
                         std::cout << "  Broadening: " << broadening << std::endl;
+                        std::cout << "  GPU acceleration: " << (use_gpu ? "enabled" : "disabled") << std::endl;
                     }
                     
                     // Set up FTLM parameters
@@ -2365,44 +2378,175 @@ int main(int argc, char* argv[]) {
                     params.random_seed = random_seed;
                     params.store_intermediate = false;
                     
-                    // Process each operator pair with TRUE multi-sample FTLM
-                    for (size_t i = 0; i < obs_1.size(); i++) {
-                        std::cout << "  Processing operator " << obs_names[i] << std::endl;
+#ifdef WITH_CUDA
+                    if (use_gpu) {
+                        // ============================================================
+                        // GPU-accelerated FTLM using CORRECT multi-temperature formulation
+                        // Uses computeDynamicalCorrelationMultiTemp which matches CPU algorithm
+                        // ============================================================
                         
-                        // Create function wrappers for operators
-                        auto O1_func = [&obs_1, i](const Complex* in, Complex* out, int size) {
-                            obs_1[i].apply(in, out, size);
-                        };
+                        if (rank == 0) {
+                            std::cout << "Using GPU-accelerated FTLM thermal spectral (CORRECT formulation)" << std::endl;
+                            std::cout << "  MPI ranks: " << size << std::endl;
+                            std::cout << "  Total samples: " << num_samples << std::endl;
+                            std::cout << "  Temperatures: " << temperatures.size() << std::endl;
+                        }
                         
-                        auto O2_func = [&obs_2, i](const Complex* in, Complex* out, int size) {
-                            obs_2[i].apply(in, out, size);
-                        };
+                        // Distribute samples across MPI ranks
+                        int samples_per_rank = num_samples / size;
+                        int remainder = num_samples % size;
+                        int my_samples = samples_per_rank + (rank < remainder ? 1 : 0);
+                        unsigned int my_seed = random_seed + rank * 10000;  // Different seed per rank
                         
-                        // Use TRUE multi-sample multi-temperature FTLM
-                        auto results_map = compute_dynamical_correlation_multi_sample_multi_temperature(
-                            H, O1_func, O2_func, N, params,
-                            omega_min, omega_max, num_omega_bins, 
-                            temperatures, ground_state_energy, output_base_dir
-                        );
+                        if (rank == 0) {
+                            std::cout << "  Samples per rank: ~" << samples_per_rank 
+                                      << " (some ranks +1 for remainder)" << std::endl;
+                        }
+                        std::cout << "  Rank " << rank << ": " << my_samples << " samples with seed " << my_seed << std::endl;
                         
-                        // Save results for each temperature to unified HDF5 file
-                        for (const auto& [temperature, results] : results_map) {
-                            saveDSSFSpectralToHDF5(
-                                unified_h5_path,
-                                obs_names[i],
-                                1.0/temperature,  // beta
-                                sample_index,
-                                results.frequencies,
-                                results.spectral_function,
-                                results.spectral_function_imag,
-                                results.spectral_error,
-                                results.spectral_error_imag,
-                                temperature
+                        // Convert CPU Hamiltonian to GPU
+                        GPUOperator gpu_ham(num_sites, spin_length);
+                        if (!convertOperatorToGPU(ham_op, gpu_ham)) {
+                            std::cerr << "Failed to convert Hamiltonian to GPU, falling back to CPU" << std::endl;
+                            use_gpu = false;
+                        } else {
+                            // Process each operator pair on GPU
+                            for (size_t i = 0; i < obs_1.size(); i++) {
+                                if (rank == 0) {
+                                    std::cout << "  Processing operator pair " << (i+1) << "/" << obs_1.size() 
+                                              << ": " << obs_names[i] << std::endl;
+                                }
+                                
+                                // Convert observable operators to GPU
+                                GPUOperator gpu_obs1(num_sites, spin_length);
+                                GPUOperator gpu_obs2(num_sites, spin_length);
+                                
+                                if (!convertOperatorToGPU(obs_1[i], gpu_obs1) || 
+                                    !convertOperatorToGPU(obs_2[i], gpu_obs2)) {
+                                    std::cerr << "  Failed to convert operators to GPU, skipping..." << std::endl;
+                                    continue;
+                                }
+                                
+                                // Use CORRECT multi-temperature FTLM (matches CPU implementation)
+                                // Each rank computes its share of samples with the full algorithm
+                                auto local_results = GPUEDWrapper::runGPUDynamicalCorrelationMultiTemp(
+                                    &gpu_ham, &gpu_obs1, &gpu_obs2,
+                                    N, my_samples, krylov_dim,
+                                    omega_min, omega_max, num_omega_bins,
+                                    broadening, temperatures,
+                                    my_seed,
+                                    ground_state_energy
+                                );
+                                
+                                // MPI reduction: average spectral functions from all ranks
+                                for (double T : temperatures) {
+                                    std::vector<double> global_real(num_omega_bins, 0.0);
+                                    std::vector<double> global_imag(num_omega_bins, 0.0);
+                                    std::vector<double> frequencies;
+                                    
+                                    // Get local results for this temperature
+                                    std::vector<double> local_real(num_omega_bins, 0.0);
+                                    std::vector<double> local_imag(num_omega_bins, 0.0);
+                                    
+                                    if (local_results.count(T) > 0) {
+                                        auto& [freqs, S_real, S_imag] = local_results[T];
+                                        frequencies = freqs;
+                                        // Weight by number of samples this rank processed
+                                        for (int j = 0; j < num_omega_bins && j < (int)S_real.size(); j++) {
+                                            local_real[j] = S_real[j] * my_samples;
+                                            local_imag[j] = S_imag[j] * my_samples;
+                                        }
+                                    }
+                                    
+                                    // Share frequencies (use the first non-empty one)
+                                    if (frequencies.empty() && local_results.size() > 0) {
+                                        auto it = local_results.begin();
+                                        frequencies = std::get<0>(it->second);
+                                    }
+                                    
+                                    MPI_Reduce(local_real.data(), global_real.data(), 
+                                               num_omega_bins, MPI_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD);
+                                    MPI_Reduce(local_imag.data(), global_imag.data(),
+                                               num_omega_bins, MPI_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD);
+                                    
+                                    // Normalize and save results (only rank 0)
+                                    if (rank == 0) {
+                                        // Normalize by total samples
+                                        for (int j = 0; j < num_omega_bins; j++) {
+                                            global_real[j] /= num_samples;
+                                            global_imag[j] /= num_samples;
+                                        }
+                                        
+                                        // Initialize error vectors to zero
+                                        std::vector<double> spectral_error(num_omega_bins, 0.0);
+                                        std::vector<double> spectral_error_imag(num_omega_bins, 0.0);
+                                        
+                                        saveDSSFSpectralToHDF5(
+                                            unified_h5_path,
+                                            obs_names[i],
+                                            1.0/T,  // beta
+                                            sample_index,
+                                            frequencies,
+                                            global_real,
+                                            global_imag,
+                                            spectral_error,
+                                            spectral_error_imag,
+                                            T
+                                        );
+                                        
+                                        std::cout << "  Saved GPU FTLM thermal spectral to HDF5: " << obs_names[i] 
+                                                  << " T=" << T << std::endl;
+                                    }
+                                }
+                                
+                                // Synchronize before next operator
+                                MPI_Barrier(MPI_COMM_WORLD);
+                            }
+                        }
+                    }
+#endif
+                    
+                    if (!use_gpu) {
+                        // CPU computation path
+                        // Process each operator pair with TRUE multi-sample FTLM
+                        for (size_t i = 0; i < obs_1.size(); i++) {
+                            std::cout << "  Processing operator " << obs_names[i] << std::endl;
+                            
+                            // Create function wrappers for operators
+                            auto O1_func = [&obs_1, i](const Complex* in, Complex* out, int size) {
+                                obs_1[i].apply(in, out, size);
+                            };
+                            
+                            auto O2_func = [&obs_2, i](const Complex* in, Complex* out, int size) {
+                                obs_2[i].apply(in, out, size);
+                            };
+                            
+                            // Use TRUE multi-sample multi-temperature FTLM
+                            auto results_map = compute_dynamical_correlation_multi_sample_multi_temperature(
+                                H, O1_func, O2_func, N, params,
+                                omega_min, omega_max, num_omega_bins, 
+                                temperatures, ground_state_energy, output_base_dir
                             );
-                        
-                            if (rank == 0) {
-                                std::cout << "  Saved FTLM thermal spectral to HDF5: " << obs_names[i] 
-                                          << " T=" << temperature << std::endl;
+                            
+                            // Save results for each temperature to unified HDF5 file
+                            for (const auto& [temperature, results] : results_map) {
+                                saveDSSFSpectralToHDF5(
+                                    unified_h5_path,
+                                    obs_names[i],
+                                    1.0/temperature,  // beta
+                                    sample_index,
+                                    results.frequencies,
+                                    results.spectral_function,
+                                    results.spectral_function_imag,
+                                    results.spectral_error,
+                                    results.spectral_error_imag,
+                                    temperature
+                                );
+                            
+                                if (rank == 0) {
+                                    std::cout << "  Saved FTLM thermal spectral to HDF5: " << obs_names[i] 
+                                              << " T=" << temperature << std::endl;
+                                }
                             }
                         }
                     }
@@ -2580,12 +2724,32 @@ int main(int argc, char* argv[]) {
     int local_processed_count = 0;
     double start_time = MPI_Wtime();
     
+    // Check if method uses internal MPI parallelization (all ranks must cooperate)
+    bool uses_collective_mpi = (method == "ftlm_thermal" || method == "static");
+    
     if (size == 1) {
         // Serial execution
         for (const auto& task : all_tasks) {
             if (process_task(task)) {
                 local_processed_count++;
             }
+        }
+    } else if (uses_collective_mpi) {
+        // Collective execution: ALL ranks process each task together
+        // The internal FTLM/static functions distribute samples across ranks
+        if (rank == 0) {
+            std::cout << "\n==========================================\n";
+            std::cout << "Collective MPI mode: All " << size << " ranks cooperating\n";
+            std::cout << "==========================================\n\n";
+        }
+        
+        for (const auto& task : all_tasks) {
+            // All ranks call process_task together - internal MPI distributes samples
+            if (process_task(task)) {
+                local_processed_count++;
+            }
+            // Synchronize after each task to ensure HDF5 writes complete
+            MPI_Barrier(MPI_COMM_WORLD);
         }
     } else {
         // Master-worker dynamic scheduling with rank 0 also processing tasks

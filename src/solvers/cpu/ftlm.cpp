@@ -8,6 +8,7 @@
 #include <iomanip>
 #include <numeric>
 #include <cstring>
+#include <mpi.h>
 
 /**
  * @brief Build Krylov subspace and extract tridiagonal matrix coefficients
@@ -2498,20 +2499,51 @@ std::map<double, DynamicalResponseResults> compute_dynamical_correlation_multi_s
         per_sample_spectral[T] = std::vector<std::vector<double>>();
     }
     
-    std::cout << "\n--- Processing " << params.num_samples << " random samples ---\n";
+    // MPI parallelization: distribute samples across ranks
+    int mpi_rank = 0, mpi_size = 1;
+    MPI_Comm_rank(MPI_COMM_WORLD, &mpi_rank);
+    MPI_Comm_size(MPI_COMM_WORLD, &mpi_size);
+    
+    // Calculate sample distribution for this rank
+    uint64_t samples_per_rank = params.num_samples / mpi_size;
+    uint64_t remainder = params.num_samples % mpi_size;
+    uint64_t start_sample = mpi_rank * samples_per_rank + std::min((uint64_t)mpi_rank, remainder);
+    uint64_t end_sample = start_sample + samples_per_rank + (mpi_rank < (int)remainder ? 1 : 0);
+    uint64_t local_num_samples = end_sample - start_sample;
+    
+    if (mpi_rank == 0) {
+        std::cout << "\n==========================================\n";
+        std::cout << "MPI-Parallel FTLM Spectral Function\n";
+        std::cout << "==========================================\n";
+        std::cout << "Total MPI ranks: " << mpi_size << "\n";
+        std::cout << "Total samples: " << params.num_samples << "\n";
+        std::cout << "Samples per rank: " << samples_per_rank << " (+ " << remainder << " remainder)\n";
+        std::cout << "==========================================\n";
+    }
+    
+    std::cout << "Rank " << mpi_rank << " processing samples [" 
+              << start_sample << ", " << end_sample << ")\n";
+    
+    // Synchronize before starting
+    MPI_Barrier(MPI_COMM_WORLD);
     
     // How many Ritz states to use per sample for spectral function
     // Using all states is expensive; use states with significant thermal weight
     uint64_t max_ritz_states = std::min(params.krylov_dim, (uint64_t)50);  // Limit for efficiency
     
-    // Loop over random samples
-    for (uint64_t sample_idx = 0; sample_idx < params.num_samples; sample_idx++) {
-        std::cout << "\n--- Sample " << (sample_idx + 1) << "/" << params.num_samples << " ---\n";
+    // Loop over random samples assigned to this rank
+    for (uint64_t sample_idx = start_sample; sample_idx < end_sample; sample_idx++) {
+        if (mpi_rank == 0 || mpi_size == 1) {
+            std::cout << "\n--- Sample " << (sample_idx + 1) << "/" << params.num_samples << " ---\n";
+        }
+        
+        // Seed RNG deterministically based on sample index (not rank) for reproducibility
+        std::mt19937 sample_gen(params.random_seed + sample_idx * 12345);
         
         // Generate random state |r⟩
         ComplexVector r_state(N);
         for (uint64_t i = 0; i < N; i++) {
-            r_state[i] = Complex(dist(gen), dist(gen));
+            r_state[i] = Complex(dist(sample_gen), dist(sample_gen));
         }
         double r_norm = cblas_dznrm2(N, r_state.data(), 1);
         Complex r_scale(1.0/r_norm, 0.0);
@@ -2651,8 +2683,37 @@ std::map<double, DynamicalResponseResults> compute_dynamical_correlation_multi_s
         }
     }
     
+    // MPI Reduce: gather accumulated results from all ranks
+    MPI_Barrier(MPI_COMM_WORLD);
+    
+    if (mpi_rank == 0) {
+        std::cout << "\n--- Gathering results from all MPI ranks ---\n";
+    }
+    
+    // Reduce accumulated_spectral and accumulated_Z across all ranks
+    for (double T : temperatures) {
+        std::vector<double> global_spectral(num_omega_bins, 0.0);
+        double global_Z = 0.0;
+        
+        MPI_Reduce(accumulated_spectral[T].data(), global_spectral.data(), 
+                   num_omega_bins, MPI_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD);
+        MPI_Reduce(&accumulated_Z[T], &global_Z, 1, MPI_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD);
+        
+        // Only rank 0 needs the final values
+        if (mpi_rank == 0) {
+            accumulated_spectral[T] = global_spectral;
+            accumulated_Z[T] = global_Z;
+        }
+    }
+    
+    // Gather total sample count for error estimation
+    uint64_t global_total_samples = 0;
+    MPI_Reduce(&local_num_samples, &global_total_samples, 1, MPI_UINT64_T, MPI_SUM, 0, MPI_COMM_WORLD);
+    
     // Compute final results: S(ω) = N × (Σ accumulated_spectral) / (Σ accumulated_Z)
-    std::cout << "\n--- Computing final results ---\n";
+    if (mpi_rank == 0) {
+        std::cout << "\n--- Computing final results ---\n";
+    }
     
     std::map<double, DynamicalResponseResults> results_map;
     
@@ -2661,7 +2722,7 @@ std::map<double, DynamicalResponseResults> compute_dynamical_correlation_multi_s
         results.frequencies = frequencies;
         results.omega_min = omega_min;
         results.omega_max = omega_max;
-        results.total_samples = per_sample_spectral[T].size();
+        results.total_samples = (mpi_rank == 0) ? global_total_samples : local_num_samples;
         
         results.spectral_function.resize(num_omega_bins, 0.0);
         results.spectral_function_imag.resize(num_omega_bins, 0.0);
@@ -2669,8 +2730,14 @@ std::map<double, DynamicalResponseResults> compute_dynamical_correlation_multi_s
         results.spectral_error_imag.resize(num_omega_bins, 0.0);
         
         double Z_total = accumulated_Z[T];
-        if (Z_total < 1e-300) {
+        if (mpi_rank == 0 && Z_total < 1e-300) {
             std::cerr << "  Warning: Z ≈ 0 for T = " << T << std::endl;
+            results_map[T] = results;
+            continue;
+        }
+        
+        // Only rank 0 computes final results
+        if (mpi_rank != 0) {
             results_map[T] = results;
             continue;
         }
@@ -2689,10 +2756,11 @@ std::map<double, DynamicalResponseResults> compute_dynamical_correlation_multi_s
             results.spectral_function[iw] = accumulated_spectral[T][iw] / Z_total;
         }
         
-        // Compute error estimate from per-sample variation
+        // Note: Error estimation with MPI requires gathering per-sample data from all ranks
+        // For now, skip detailed error estimation in MPI mode (use simpler estimate)
         uint64_t n_samples = per_sample_spectral[T].size();
-        if (n_samples > 1) {
-            // Compute mean of per-sample normalized spectra
+        if (n_samples > 1 && mpi_size == 1) {
+            // Compute mean of per-sample normalized spectra (serial only)
             std::vector<double> mean(num_omega_bins, 0.0);
             for (uint64_t s = 0; s < n_samples; s++) {
                 for (uint64_t iw = 0; iw < num_omega_bins; iw++) {
@@ -2717,13 +2785,15 @@ std::map<double, DynamicalResponseResults> compute_dynamical_correlation_multi_s
             }
         }
         
-        std::cout << "  T = " << T << ": " << n_samples << " samples, Z = " << Z_total << std::endl;
+        std::cout << "  T = " << T << ": " << global_total_samples << " samples, Z = " << Z_total << std::endl;
         results_map[T] = results;
     }
     
-    std::cout << "\n==========================================\n";
-    std::cout << "FTLM Spectral Function Complete\n";
-    std::cout << "==========================================" << std::endl;
+    if (mpi_rank == 0) {
+        std::cout << "\n==========================================\n";
+        std::cout << "FTLM Spectral Function Complete\n";
+        std::cout << "==========================================" << std::endl;
+    }
     
     return results_map;
 }
