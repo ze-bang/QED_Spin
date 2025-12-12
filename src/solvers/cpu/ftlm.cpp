@@ -2522,19 +2522,32 @@ std::map<double, DynamicalResponseResults> compute_dynamical_correlation_multi_s
     }
     
     std::cout << "Rank " << mpi_rank << " processing samples [" 
-              << start_sample << ", " << end_sample << ")\n";
+              << start_sample << ", " << end_sample << ") - " << local_num_samples << " samples\n";
     
     // Synchronize before starting
     MPI_Barrier(MPI_COMM_WORLD);
+    
+    if (mpi_rank == 0) {
+        std::cout << "\nStarting parallel sample processing across " << mpi_size << " ranks...\n";
+        std::cout << "(Only rank 0 output shown for clarity)\n" << std::endl;
+    }
     
     // How many Ritz states to use per sample for spectral function
     // Using all states is expensive; use states with significant thermal weight
     uint64_t max_ritz_states = std::min(params.krylov_dim, (uint64_t)50);  // Limit for efficiency
     
+    // Pre-allocate working vectors to avoid repeated allocations in inner loop
+    ComplexVector psi_work(N);  // For eigenstate construction
+    ComplexVector phi_work(N);  // For O|psi>
+    
+    double start_time = MPI_Wtime();
+    
     // Loop over random samples assigned to this rank
     for (uint64_t sample_idx = start_sample; sample_idx < end_sample; sample_idx++) {
-        if (mpi_rank == 0 || mpi_size == 1) {
-            std::cout << "\n--- Sample " << (sample_idx + 1) << "/" << params.num_samples << " ---\n";
+        if (mpi_rank == 0) {
+            uint64_t local_idx = sample_idx - start_sample + 1;
+            std::cout << "\n--- Rank 0: Sample " << local_idx << "/" << local_num_samples 
+                      << " (Global: " << (sample_idx + 1) << "/" << params.num_samples << ") ---\n";
         }
         
         // Seed RNG deterministically based on sample index (not rank) for reproducibility
@@ -2560,7 +2573,9 @@ std::map<double, DynamicalResponseResults> compute_dynamical_correlation_multi_s
         );
         
         uint64_t m_H = alpha_H.size();
-        std::cout << "  Hamiltonian Lanczos: " << m_H << " iterations\n";
+        if (mpi_rank == 0) {
+            std::cout << "  Hamiltonian Lanczos: " << m_H << " iterations\n";
+        }
         
         if (m_H == 0) {
             std::cerr << "  Warning: Lanczos failed, skipping sample\n";
@@ -2587,88 +2602,160 @@ std::map<double, DynamicalResponseResults> compute_dynamical_correlation_multi_s
         // Find minimum energy for numerical stability
         double E_min = *std::min_element(ritz_values.begin(), ritz_values.end());
         
-        // Step 2: For each temperature, compute weighted spectral contributions
+        if (mpi_rank == 0 && m_H > 0 && !ritz_values.empty()) {
+            std::cout << "  Ritz values range: [" << *std::min_element(ritz_values.begin(), ritz_values.end()) 
+                      << ", " << *std::max_element(ritz_values.begin(), ritz_values.end()) << "]\n";
+        }
+        
+        // ============================================================
+        // OPTIMIZATION: Precompute spectral functions for Ritz states
+        // The Lanczos expansion and continued fraction are temperature-
+        // independent, so we compute S_i(ω) once and reuse across all T
+        // ============================================================
+        
+        // Step 2a: Determine which Ritz states are significant for ANY temperature
+        // Use the highest temperature (smallest beta) for most inclusive threshold
+        double T_max_local = *std::max_element(temperatures.begin(), temperatures.end());
+        double beta_min = 1.0 / T_max_local;
+        
+        // Compute thermal weights at highest T to find potentially significant states
+        std::vector<double> max_weights(m_H);
+        double Z_max = 0.0;
+        for (uint64_t i = 0; i < m_H; i++) {
+            double boltzmann = std::exp(-beta_min * (ritz_values[i] - E_min));
+            max_weights[i] = c_sq[i] * boltzmann;
+            Z_max += max_weights[i];
+        }
+        
+        // Identify significant Ritz states (union across all temperatures)
+        double weight_threshold = 1e-10 * Z_max;  // Use looser threshold to catch all
+        std::vector<uint64_t> significant_states;
+        significant_states.reserve(max_ritz_states);
+        
+        for (uint64_t i = 0; i < std::min(m_H, max_ritz_states); i++) {
+            if (max_weights[i] >= weight_threshold || c_sq[i] > 1e-12) {
+                significant_states.push_back(i);
+            }
+        }
+        
+        if (mpi_rank == 0) {
+            std::cout << "  Identified " << significant_states.size() << " potentially significant Ritz states\n";
+        }
+        
+        // Step 2b: Precompute S_i(ω) for each significant Ritz state
+        // This is the expensive part - Lanczos + continued fraction per state
+        std::vector<std::vector<double>> precomputed_S_i(significant_states.size());
+        std::vector<double> precomputed_energies(significant_states.size());
+        std::vector<double> precomputed_c_sq(significant_states.size());
+        std::vector<bool> state_valid(significant_states.size(), false);
+        
+        // OpenMP parallelization over Ritz states (most expensive loop)
+        #pragma omp parallel for schedule(dynamic) 
+        for (size_t idx = 0; idx < significant_states.size(); idx++) {
+            uint64_t i = significant_states[idx];
+            
+            // Thread-local working vectors
+            ComplexVector psi_local(N, Complex(0.0, 0.0));
+            ComplexVector phi_local(N);
+            
+            // Construct approximate eigenstate |ψ_i⟩ = Σ_j V[i,j] |v_j⟩
+            for (uint64_t j = 0; j < m_H; j++) {
+                double coeff = evecs[i * m_H + j];
+                Complex coeff_c(coeff, 0.0);
+                cblas_zaxpy(N, &coeff_c, lanczos_vectors[j].data(), 1, psi_local.data(), 1);
+            }
+            
+            // Normalize
+            double psi_norm = cblas_dznrm2(N, psi_local.data(), 1);
+            if (psi_norm < 1e-14) continue;
+            Complex psi_scale(1.0/psi_norm, 0.0);
+            cblas_zscal(N, &psi_scale, psi_local.data(), 1);
+            
+            // Apply operator O2: |φ_i⟩ = O₂|ψ_i⟩
+            O2(psi_local.data(), phi_local.data(), N);
+            
+            double phi_norm = cblas_dznrm2(N, phi_local.data(), 1);
+            double phi_norm_sq = phi_norm * phi_norm;
+            
+            if (phi_norm < 1e-14) continue;
+            
+            // Normalize for Lanczos
+            Complex phi_scale(1.0/phi_norm, 0.0);
+            cblas_zscal(N, &phi_scale, phi_local.data(), 1);
+            
+            // Build Lanczos from |φ_i⟩
+            std::vector<double> alpha_S, beta_S;
+            build_lanczos_tridiagonal(
+                H, phi_local, N, params.krylov_dim, params.tolerance,
+                params.full_reorthogonalization, params.reorth_frequency,
+                alpha_S, beta_S
+            );
+            
+            if (alpha_S.empty()) continue;
+            
+            // Shift energies by E_gs
+            for (size_t k = 0; k < alpha_S.size(); k++) {
+                alpha_S[k] -= E_gs;
+            }
+            
+            // Compute spectral function via continued fraction (ONCE per state)
+            std::vector<double> S_i = continued_fraction_spectral_function(
+                alpha_S, beta_S, frequencies, params.broadening, phi_norm_sq
+            );
+            
+            // Store precomputed results (thread-safe since each idx is unique)
+            precomputed_S_i[idx] = std::move(S_i);
+            precomputed_energies[idx] = ritz_values[i];
+            precomputed_c_sq[idx] = c_sq[i];
+            state_valid[idx] = true;
+        }
+        
+        // Count valid states
+        uint64_t n_valid = 0;
+        for (size_t idx = 0; idx < significant_states.size(); idx++) {
+            if (state_valid[idx]) n_valid++;
+        }
+        if (mpi_rank == 0) {
+            std::cout << "  Precomputed spectral functions for " << n_valid << " Ritz states\n";
+        }
+        
+        // Step 3: For each temperature, apply thermal weights to precomputed spectra
+        // This is now O(num_temps × num_states × num_omega) - no Lanczos!
         for (double T : temperatures) {
             double beta = 1.0 / T;
             
-            // Compute thermal weights and partition function contribution
-            std::vector<double> thermal_weights(m_H);
+            // Compute partition function contribution for this sample
             double Z_sample = 0.0;
-            for (uint64_t i = 0; i < m_H; i++) {
-                double boltzmann = std::exp(-beta * (ritz_values[i] - E_min));
-                thermal_weights[i] = c_sq[i] * boltzmann;
-                Z_sample += thermal_weights[i];
+            for (size_t idx = 0; idx < significant_states.size(); idx++) {
+                if (!state_valid[idx]) continue;
+                double boltzmann = std::exp(-beta * (precomputed_energies[idx] - E_min));
+                Z_sample += precomputed_c_sq[idx] * boltzmann;
             }
             
             accumulated_Z[T] += Z_sample;
             
-            // For this sample, compute weighted spectral function
+            // Accumulate weighted spectral contributions
             std::vector<double> sample_spectral(num_omega_bins, 0.0);
             
-            // Select significant Ritz states (those with non-negligible thermal weight)
-            double weight_threshold = 1e-8 * Z_sample;
-            uint64_t n_significant = 0;
-            
-            for (uint64_t i = 0; i < std::min(m_H, max_ritz_states); i++) {
-                if (thermal_weights[i] < weight_threshold) continue;
-                n_significant++;
+            for (size_t idx = 0; idx < significant_states.size(); idx++) {
+                if (!state_valid[idx]) continue;
                 
-                // Construct approximate eigenstate |ψ_i⟩ = Σ_j V[i,j] |v_j⟩
-                ComplexVector psi_i(N, Complex(0.0, 0.0));
-                for (uint64_t j = 0; j < m_H; j++) {
-                    double coeff = evecs[i * m_H + j];
-                    Complex coeff_c(coeff, 0.0);
-                    cblas_zaxpy(N, &coeff_c, lanczos_vectors[j].data(), 1, psi_i.data(), 1);
-                }
+                double boltzmann = std::exp(-beta * (precomputed_energies[idx] - E_min));
+                double thermal_weight = precomputed_c_sq[idx] * boltzmann;
                 
-                // Normalize (should already be normalized, but just in case)
-                double psi_norm = cblas_dznrm2(N, psi_i.data(), 1);
-                if (psi_norm < 1e-14) continue;
-                Complex psi_scale(1.0/psi_norm, 0.0);
-                cblas_zscal(N, &psi_scale, psi_i.data(), 1);
+                // Skip if negligible for this temperature
+                if (thermal_weight < 1e-14 * Z_sample) continue;
                 
-                // Apply operator O2 to |ψ_i⟩: |φ_i⟩ = O₂|ψ_i⟩
-                ComplexVector phi_i(N);
-                O2(psi_i.data(), phi_i.data(), N);
-                
-                double phi_norm = cblas_dznrm2(N, phi_i.data(), 1);
-                double phi_norm_sq = phi_norm * phi_norm;
-                
-                if (phi_norm < 1e-14) continue;
-                
-                // Normalize for Lanczos
-                Complex phi_scale(1.0/phi_norm, 0.0);
-                cblas_zscal(N, &phi_scale, phi_i.data(), 1);
-                
-                // Build Lanczos from |φ_i⟩ for spectral function via continued fraction
-                std::vector<double> alpha_S, beta_S;
-                build_lanczos_tridiagonal(
-                    H, phi_i, N, params.krylov_dim, params.tolerance,
-                    params.full_reorthogonalization, params.reorth_frequency,
-                    alpha_S, beta_S
-                );
-                
-                if (alpha_S.empty()) continue;
-                
-                // Shift energies by E_gs (ground state energy)
-                for (size_t k = 0; k < alpha_S.size(); k++) {
-                    alpha_S[k] -= E_gs;
-                }
-                
-                // Compute spectral function via continued fraction
-                std::vector<double> S_i = continued_fraction_spectral_function(
-                    alpha_S, beta_S, frequencies, params.broadening, phi_norm_sq
-                );
-                
-                // Add contribution weighted by thermal factor
+                // Add contribution (vectorized)
+                const std::vector<double>& S_i = precomputed_S_i[idx];
                 for (uint64_t iw = 0; iw < num_omega_bins; iw++) {
-                    sample_spectral[iw] += thermal_weights[i] * S_i[iw];
-                    accumulated_spectral[T][iw] += thermal_weights[i] * S_i[iw];
+                    double contrib = thermal_weight * S_i[iw];
+                    sample_spectral[iw] += contrib;
+                    accumulated_spectral[T][iw] += contrib;
                 }
             }
             
             // Store sample contribution for error estimation
-            // Normalize by sample's Z contribution
             if (Z_sample > 1e-300) {
                 std::vector<double> normalized_sample(num_omega_bins);
                 for (uint64_t iw = 0; iw < num_omega_bins; iw++) {
@@ -2676,11 +2763,20 @@ std::map<double, DynamicalResponseResults> compute_dynamical_correlation_multi_s
                 }
                 per_sample_spectral[T].push_back(normalized_sample);
             }
-            
-            if (T == temperatures[0]) {
-                std::cout << "  Processed " << n_significant << " significant Ritz states\n";
-            }
         }
+        
+        if (mpi_rank == 0) {
+            std::cout << "  Applied thermal weights for " << temperatures.size() << " temperatures\n";
+        }
+    }
+    
+    // Report timing for this rank
+    double elapsed_time = MPI_Wtime() - start_time;
+    
+    if (mpi_rank == 0) {
+        std::cout << "\nRank 0 completed " << local_num_samples << " samples in " 
+                  << elapsed_time << " seconds (" << (elapsed_time / local_num_samples) 
+                  << " s/sample)\n";
     }
     
     // MPI Reduce: gather accumulated results from all ranks
@@ -2688,6 +2784,7 @@ std::map<double, DynamicalResponseResults> compute_dynamical_correlation_multi_s
     
     if (mpi_rank == 0) {
         std::cout << "\n--- Gathering results from all MPI ranks ---\n";
+        std::cout << "All ranks have completed their sample processing.\n";
     }
     
     // Reduce accumulated_spectral and accumulated_Z across all ranks

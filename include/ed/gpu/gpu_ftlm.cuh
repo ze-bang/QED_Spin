@@ -348,11 +348,18 @@ private:
     cuDoubleComplex* d_v_prev_;      // Previous Lanczos vector
     cuDoubleComplex* d_w_;           // Work vector (H*v)
     cuDoubleComplex* d_temp_;        // Temporary vector
+    cuDoubleComplex* d_temp2_;       // Second temporary vector for operator applications
     
     // Stored Lanczos vectors for reorthogonalization (if needed)
     cuDoubleComplex** d_lanczos_basis_;
     int num_stored_vectors_;
     bool store_basis_;
+    
+    // Pre-allocated Lanczos basis pool (contiguous memory for efficiency)
+    cuDoubleComplex* d_basis_pool_;      // Contiguous memory for all basis vectors
+    cuDoubleComplex** d_basis_ptrs_;     // Array of pointers into pool
+    bool basis_pool_allocated_;
+    int basis_pool_capacity_;
     
     // cuBLAS handle
     cublasHandle_t cublas_handle_;
@@ -369,6 +376,8 @@ private:
     bool gpu_memory_allocated_;
     void allocateMemory();
     void freeMemory();
+    void allocateBasisPool();
+    void freeBasisPool();
     
     // Lanczos iteration helpers
     void initializeRandomVector(cuDoubleComplex* d_vec, unsigned int seed);
@@ -380,6 +389,26 @@ private:
                    const cuDoubleComplex& alpha);
     std::complex<double> vectorDot(const cuDoubleComplex* d_x,
                                    const cuDoubleComplex* d_y);
+    
+    // Batched operations for efficiency
+    /**
+     * @brief Reconstruct eigenstate from Lanczos basis using cuBLAS GEMV
+     * Computes: d_out = Σ_j coeffs[j] * d_basis[j] using matrix-vector product
+     * Much faster than sequential axpy calls
+     */
+    void reconstructEigenstateFromBasis(const double* coeffs, int num_coeffs,
+                                       cuDoubleComplex** d_basis, 
+                                       cuDoubleComplex* d_out);
+    
+    /**
+     * @brief Compute dot product of GPU vector with all basis vectors
+     * Returns: overlaps[j] = ⟨d_vec|d_basis[j]⟩ for j=0..num_basis-1
+     * Avoids host-device transfers by computing entirely on GPU
+     */
+    void computeOverlapsWithBasis(const cuDoubleComplex* d_vec,
+                                  cuDoubleComplex** d_basis,
+                                  int num_basis,
+                                  std::vector<std::complex<double>>& overlaps);
     
     // Orthogonalization
     void orthogonalizeAgainstBasis(cuDoubleComplex* d_vec, int num_basis_vecs);

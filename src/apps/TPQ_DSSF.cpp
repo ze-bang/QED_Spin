@@ -817,9 +817,45 @@ int main(int argc, char* argv[]) {
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
     MPI_Comm_size(MPI_COMM_WORLD, &size);
     
-    if (argc < 4 || argc > 15) {
+    // Pre-process arguments to extract flags (--use_gpu, --help, etc.)
+    // These can appear anywhere in the command line
+    bool use_gpu = false;
+    bool show_help = false;
+    std::vector<char*> positional_args;
+    positional_args.push_back(argv[0]);  // Program name is always first
+    
+    for (int i = 1; i < argc; i++) {
+        std::string arg = argv[i];
+        if (arg == "--use_gpu" || arg == "--gpu" || arg == "-g") {
+            use_gpu = true;
+        } else if (arg == "--help" || arg == "-h") {
+            show_help = true;
+        } else if (arg.substr(0, 2) != "--") {
+            // Not a flag, treat as positional argument
+            positional_args.push_back(argv[i]);
+        } else {
+            // Unknown flag - treat as positional for backward compatibility
+            positional_args.push_back(argv[i]);
+        }
+    }
+    
+    // Update argc and argv to use filtered positional arguments
+    int pos_argc = positional_args.size();
+    char** pos_argv = positional_args.data();
+    
+#ifndef WITH_CUDA
+    if (use_gpu && rank == 0) {
+        std::cerr << "Warning: GPU requested but code not compiled with GPU support (WITH_CUDA). Using CPU." << std::endl;
+        use_gpu = false;
+    }
+#endif
+    
+    if (show_help || pos_argc < 4 || pos_argc > 14) {
         if (rank == 0) {
-            std::cerr << "Usage: " << argv[0] << " <directory> <krylov_dim_or_nmax> <spin_combinations> [method] [operator_type] [basis] [dt,t_end]/[omega_min,omega_max,omega_bins,broadening] [unit_cell_size] [momentum_points] [polarization] [theta] [use_gpu] [n_up] [T_min,T_max,T_steps]" << std::endl;
+            std::cerr << "Usage: " << pos_argv[0] << " <directory> <krylov_dim_or_nmax> <spin_combinations> [options...]" << std::endl;
+            std::cerr << "\nFLAGS (can appear anywhere):" << std::endl;
+            std::cerr << "  --use_gpu, --gpu, -g  Enable GPU acceleration (requires CUDA build)" << std::endl;
+            std::cerr << "  --help, -h            Show this help message" << std::endl;
             std::cerr << "\nNote: num_sites is automatically detected from positions.dat, spin_length is fixed at 0.5" << std::endl;
             std::cerr << "\n" << std::string(80, '=') << std::endl;
             std::cerr << "REQUIRED ARGUMENTS:" << std::endl;
@@ -857,7 +893,6 @@ int main(int argc, char* argv[]) {
             std::cerr << "  momentum_points (default: (0,0,0);(0,0,2π)): \"Qx1,Qy1,Qz1;Qx2,Qy2,Qz2;...\"" << std::endl;
             std::cerr << "  polarization (for transverse operators): \"px,py,pz\" normalized vector (default: (1/√2,-1/√2,0))" << std::endl;
             std::cerr << "  theta (for experimental operators): angle in radians (default: 0.0)" << std::endl;
-            std::cerr << "  use_gpu (optional): 1 for GPU acceleration, 0 for CPU only (default: 0)" << std::endl;
             std::cerr << "  n_up (optional): number of up spins for fixed-Sz sector (default: -1 = use full Hilbert space)" << std::endl;
             std::cerr << "    - When n_up >= 0: restricts to fixed total Sz = n_up - n_down = n_up - (num_sites - n_up)" << std::endl;
             std::cerr << "    - Reduces Hilbert space dimension from 2^N to C(N, n_up)" << std::endl;
@@ -926,32 +961,34 @@ int main(int argc, char* argv[]) {
             std::cerr << "EXAMPLES:" << std::endl;
             std::cerr << std::string(80, '=') << std::endl;
             std::cerr << "1. Spectral function with momentum resolution (default, single state):" << std::endl;
-            std::cerr << "   " << argv[0] << " ./data 50 \"2,2\"" << std::endl;
+            std::cerr << "   " << pos_argv[0] << " ./data 50 \"2,2\"" << std::endl;
             std::cerr << "\n2. Spectral function with custom parameters:" << std::endl;
-            std::cerr << "   " << argv[0] << " ./data 50 \"2,2\" spectral sum ladder \"-5,5,200,0.1\" 4 \"0,0,0;0,0,1\"" << std::endl;
+            std::cerr << "   " << pos_argv[0] << " ./data 50 \"2,2\" spectral sum ladder \"-5,5,200,0.1\" 4 \"0,0,0;0,0,1\"" << std::endl;
             std::cerr << "\n3. Transverse scattering with custom polarization:" << std::endl;
-            std::cerr << "   " << argv[0] << " ./data 40 \"2,2\" spectral transverse xyz \"-10,10,300,0.2\" 4 \"0,0,0\" \"1,0,0\"" << std::endl;
-            std::cerr << "\n5. Experimental geometry with angle:" << std::endl;
-            std::cerr << "   " << argv[0] << " ./data 50 \"2,2\" spectral experimental xyz \"-5,5,250,0.1\" 4 \"0,0,0\" \"0,0,0\" 0.785" << std::endl;
+            std::cerr << "   " << pos_argv[0] << " ./data 40 \"2,2\" spectral transverse xyz \"-10,10,300,0.2\" 4 \"0,0,0\" \"1,0,0\"" << std::endl;
+            std::cerr << "\n4. Experimental geometry with angle:" << std::endl;
+            std::cerr << "   " << pos_argv[0] << " ./data 50 \"2,2\" spectral experimental xyz \"-5,5,250,0.1\" 4 \"0,0,0\" \"0,0,0\" 0.785" << std::endl;
             std::cerr << "\n5. Fixed-Sz sector calculation (Sz = 0 for 16 sites):" << std::endl;
-            std::cerr << "   " << argv[0] << " ./data 50 \"2,2\" spectral sum ladder \"-5,5,200,0.1\" 4 \"0,0,0\" \"0,0,0\" 0 0 8" << std::endl;
-            std::cerr << "\n6. Finite-T DSSF with FTLM random sampling:" << std::endl;
-            std::cerr << "   " << argv[0] << " ./data 50 \"2,2\" ftlm_thermal sum ladder \"-5,5,200,0.1\" 4 \"0,0,0\" \"0,0,0\" 0 0 -1 \"0.1,10.0,10\"" << std::endl;
+            std::cerr << "   " << pos_argv[0] << " ./data 50 \"2,2\" spectral sum ladder \"-5,5,200,0.1\" 4 \"0,0,0\" \"0,0,0\" 0 8" << std::endl;
+            std::cerr << "\n6. Finite-T DSSF with FTLM random sampling (with GPU):" << std::endl;
+            std::cerr << "   " << pos_argv[0] << " ./data 50 \"2,2\" ftlm_thermal --use_gpu \"0.1,10.0,10\"" << std::endl;
             std::cerr << "\n7. Static structure factor (SSSF) vs temperature:" << std::endl;
-            std::cerr << "   " << argv[0] << " ./data 50 \"2,2\" static sum ladder \"0,0,0,0\" 4 \"0,0,0\" \"0,0,0\" 0 0 -1 \"0.1,10.0,20\"" << std::endl;
+            std::cerr << "   " << pos_argv[0] << " ./data 50 \"2,2\" static \"0.1,10.0,20\"" << std::endl;
             std::cerr << "\n8. Ground state DSSF (T=0, requires eigenvector):" << std::endl;
-            std::cerr << "   " << argv[0] << " ./data 100 \"2,2\" ground_state sum ladder \"-5,5,200,0.05\" 4 \"0,0,0;0,0,1\"" << std::endl;
+            std::cerr << "   " << pos_argv[0] << " ./data 100 \"2,2\" ground_state sum ladder \"-5,5,200,0.05\" 4 \"0,0,0;0,0,1\"" << std::endl;
+            std::cerr << "\n9. GPU-accelerated FTLM thermal DSSF:" << std::endl;
+            std::cerr << "   " << pos_argv[0] << " --use_gpu ./data 50 \"2,2\" ftlm_thermal" << std::endl;
         }
         MPI_Finalize();
         return 1;
     }
 
-    std::string directory = argv[1];
-    int krylov_dim_or_nmax = std::stoi(argv[2]);
-    std::string spin_combinations_str = argv[3];
-    std::string method = (argc >= 5) ? std::string(argv[4]) : std::string("spectral");
-    std::string operator_type = (argc >= 6) ? std::string(argv[5]) : std::string("sum");
-    std::string basis = (argc >= 7) ? std::string(argv[6]) : std::string("ladder");
+    std::string directory = pos_argv[1];
+    int krylov_dim_or_nmax = std::stoi(pos_argv[2]);
+    std::string spin_combinations_str = pos_argv[3];
+    std::string method = (pos_argc >= 5) ? std::string(pos_argv[4]) : std::string("spectral");
+    std::string operator_type = (pos_argc >= 6) ? std::string(pos_argv[5]) : std::string("sum");
+    std::string basis = (pos_argc >= 7) ? std::string(pos_argv[6]) : std::string("ladder");
     
     // Read num_sites from positions.dat and set spin_length to 0.5
     std::string positions_file = directory + "/positions.dat";
@@ -981,8 +1018,8 @@ int main(int argc, char* argv[]) {
     int num_omega_bins = 200;
     double broadening = 0.1;
     
-    if (argc >= 8) {
-        std::string param_str = argv[7];
+    if (pos_argc >= 8) {
+        std::string param_str = pos_argv[7];
         
         if (method == "spectral") {
             // Parse omega_min,omega_max,num_omega_bins,broadening for spectral method
@@ -1011,14 +1048,14 @@ int main(int argc, char* argv[]) {
     }
 
     int unit_cell_size = 4; // Default for pyrochlore
-    if (argc >= 9) {
-        try { unit_cell_size = std::stoi(argv[8]); } catch (...) { unit_cell_size = 4; }
+    if (pos_argc >= 9) {
+        try { unit_cell_size = std::stoi(pos_argv[8]); } catch (...) { unit_cell_size = 4; }
     }
 
     // Parse momentum points
     std::vector<std::vector<double>> momentum_points;
-    if (argc >= 10) {
-        std::string momentum_str = argv[9];
+    if (pos_argc >= 10) {
+        std::string momentum_str = pos_argv[9];
         std::stringstream mom_ss(momentum_str);
         std::string point_str;
         
@@ -1060,8 +1097,8 @@ int main(int argc, char* argv[]) {
 
     // Parse polarization vector for transverse operators
     std::vector<double> polarization = {1.0/std::sqrt(2.0), -1.0/std::sqrt(2.0), 0.0};
-    if (argc >= 11) {
-        std::string pol_str = argv[10];
+    if (pos_argc >= 11) {
+        std::string pol_str = pos_argv[10];
         std::stringstream pol_ss(pol_str);
         std::string coord_str;
         std::vector<double> pol_temp;
@@ -1096,9 +1133,9 @@ int main(int argc, char* argv[]) {
 
     // Parse theta for experimental operators
     double theta = 0.0;  // Default to 0
-    if (argc >= 12) {
+    if (pos_argc >= 12) {
         try {
-            theta = std::stod(argv[11]);
+            theta = std::stod(pos_argv[11]);
             theta *= M_PI;
             if (rank == 0) {
                 std::cout << "Using theta = " << theta << " radians" << std::endl;
@@ -1111,47 +1148,17 @@ int main(int argc, char* argv[]) {
         }
     }
 
-    // Parse GPU flag
-    bool use_gpu = false;
-    if (argc >= 13) {
-        std::string gpu_arg = argv[12];
-        // Convert to lowercase for comparison
-        std::transform(gpu_arg.begin(), gpu_arg.end(), gpu_arg.begin(), ::tolower);
-        
-        if (gpu_arg == "true" || gpu_arg == "1" || gpu_arg == "yes" || gpu_arg == "on") {
-            use_gpu = true;
-        } else if (gpu_arg == "false" || gpu_arg == "0" || gpu_arg == "no" || gpu_arg == "off") {
-            use_gpu = false;
-        } else {
-            // Try parsing as integer
-            try {
-                int gpu_flag = std::stoi(gpu_arg);
-                use_gpu = (gpu_flag != 0);
-            } catch (...) {
-                if (rank == 0) {
-                    std::cerr << "Warning: Failed to parse GPU flag '" << argv[12] << "', using CPU" << std::endl;
-                }
-                use_gpu = false;
-            }
-        }
-        
-#ifndef WITH_CUDA
-        if (use_gpu && rank == 0) {
-            std::cerr << "Warning: GPU requested but code not compiled with GPU support (WITH_CUDA). Using CPU." << std::endl;
-            use_gpu = false;
-        }
-#endif
-        if (rank == 0 && use_gpu) {
-            std::cout << "GPU acceleration enabled" << std::endl;
-        }
+    // Print GPU status (use_gpu was already set during flag pre-processing)
+    if (rank == 0 && use_gpu) {
+        std::cout << "GPU acceleration enabled" << std::endl;
     }
 
-    // Parse n_up for fixed-Sz sector (optional)
+    // Parse n_up for fixed-Sz sector (optional) - now at position 12
     int n_up = -1;  // Default: -1 means use full Hilbert space
     bool use_fixed_sz = false;
-    if (argc >= 14) {
+    if (pos_argc >= 13) {
         try {
-            n_up = std::stoi(argv[13]);
+            n_up = std::stoi(pos_argv[12]);
             if (n_up == -1) {
                 // Explicitly using full Hilbert space
                 use_fixed_sz = false;
@@ -1185,14 +1192,14 @@ int main(int argc, char* argv[]) {
         }
     }
 
-    // Parse temperature scan parameters for ftlm_thermal/static (optional)
+    // Parse temperature scan parameters for ftlm_thermal/static (optional) - now at position 13
     double T_min = 1e-3;
     double T_max = 1.0;
     int T_steps = 20;
     bool use_temperature_scan = true;
     
-    if (argc >= 15) {
-        std::string temp_str = argv[14];
+    if (pos_argc >= 14) {
+        std::string temp_str = pos_argv[13];
         std::stringstream temp_ss(temp_str);
         std::string val;
         std::vector<std::string> tokens;
@@ -1719,6 +1726,33 @@ int main(int argc, char* argv[]) {
     }
     MPI_Bcast(file_sizes.data(), num_files, MPI_UNSIGNED_LONG, 0, MPI_COMM_WORLD);
     
+    // ============================================================================
+    // TWO-LEVEL MPI PARALLELIZATION STRATEGY
+    // ============================================================================
+    // 
+    // There are two distinct parallelization strategies based on the method:
+    //
+    // 1. INDEPENDENT TASKS (method = "spectral", "ground_state", etc.):
+    //    - Task structure: (state × momentum × operator)
+    //    - Each task is INDEPENDENT and processes a single TPQ/ground state
+    //    - MPI uses master-worker pattern: different ranks work on different tasks
+    //    - NO internal MPI communication within a task
+    //    - Good for: many pre-computed states, parallelizes over states
+    //
+    // 2. COLLECTIVE TASKS (method = "ftlm_thermal", "static"):
+    //    - Task structure: (momentum × operator) only - NO state dimension!
+    //    - These methods generate random states INTERNALLY and compute ALL
+    //      temperatures at once per task
+    //    - MPI uses COLLECTIVE mode: ALL ranks process EACH task TOGETHER
+    //    - INTERNAL MPI parallelization: random Ritz samples distributed across ranks
+    //    - Each rank processes (num_samples / num_ranks) samples, then MPI_Reduce
+    //    - Good for: finite-temperature spectral functions from scratch
+    //
+    // Key insight: ftlm_thermal/static compute ALL temperatures in one call,
+    // so there's NO temperature parallelization at the task level. Temperature
+    // parallelization only applies to "spectral" method with pre-computed TPQ states.
+    // ============================================================================
+    
     // Build fine-grained task list following (operators) × (method) structure
     // Each task is (state_idx, momentum_idx, combo_idx, sublattice_i, sublattice_j)
     struct Task {
@@ -1814,9 +1848,25 @@ int main(int argc, char* argv[]) {
                         }
                     }
                 }
-                std::cout << "Parallelization: per-operator (" << all_tasks.size() << " tasks = "
-                          << num_files << " states × " << num_momentum << " momenta × "
-                          << num_combos << " combos)" << std::endl;
+                
+                // Different output message for collective vs independent methods
+                bool uses_collective = (method == "ftlm_thermal" || method == "static");
+                if (uses_collective) {
+                    // For ftlm_thermal/static: num_files=1 (dummy), so just momentum × combos
+                    std::cout << "\n==========================================\n";
+                    std::cout << "TASK GENERATION: COLLECTIVE MPI MODE\n";
+                    std::cout << "==========================================\n";
+                    std::cout << "Method: " << method << "\n";
+                    std::cout << "Tasks: " << all_tasks.size() << " = " 
+                              << num_momentum << " momenta × " << num_combos << " operators\n";
+                    std::cout << "NOTE: Each task computes ALL temperatures internally\n";
+                    std::cout << "NOTE: Random samples distributed across MPI ranks within each task\n";
+                    std::cout << "==========================================\n";
+                } else {
+                    std::cout << "Parallelization: per-operator (" << all_tasks.size() << " tasks = "
+                              << num_files << " states × " << num_momentum << " momenta × "
+                              << num_combos << " combos)" << std::endl;
+                }
             }
         }
         
@@ -2334,11 +2384,23 @@ int main(int argc, char* argv[]) {
                     // TRUE FTLM THERMAL DSSF: Random state sampling with thermal averaging
                     // This is the most accurate method for finite-temperature spectra
                     // ============================================================
+                    // 
+                    // MPI PARALLELIZATION (internal, within this task):
+                    //   - Total random samples = num_samples (e.g., 40)
+                    //   - Each MPI rank processes (num_samples / num_ranks) samples
+                    //   - Results aggregated via MPI_Reduce at the end
+                    //   - Temperature loop is NOT parallelized - all temps computed at once
+                    //
+                    // WHAT THIS COMPUTES:
+                    //   - For one (momentum, operator) pair, computes spectral function
+                    //     S(q, ω, T) for ALL temperatures in the temperature list
+                    //   - Uses Lanczos algorithm with random state sampling (FTLM)
+                    // ============================================================
                     int krylov_dim = krylov_dim_or_nmax;
                     int num_samples = 40;  // Number of random samples for FTLM thermal averaging
                     unsigned int random_seed = state_idx * 1000 + momentum_idx * 100 + combo_idx;
                     
-                    // Determine temperature(s) to compute
+                    // Determine temperature(s) to compute - ALL temps done in one call
                     std::vector<double> temperatures;
                     
                     if (use_temperature_scan) {
@@ -2362,7 +2424,8 @@ int main(int argc, char* argv[]) {
                         std::cout << "============================================" << std::endl;
                         std::cout << "  Krylov dimension: " << krylov_dim << std::endl;
                         std::cout << "  Number of random samples: " << num_samples << std::endl;
-                        std::cout << "  Temperature points: " << temperatures.size() << std::endl;
+                        std::cout << "  MPI ranks: " << size << " (samples/rank: " << (num_samples / size) << ")" << std::endl;
+                        std::cout << "  Temperature points: " << temperatures.size() << " (ALL computed in this task)" << std::endl;
                         std::cout << "  Frequency range: [" << omega_min << ", " << omega_max << "]" << std::endl;
                         std::cout << "  Broadening: " << broadening << std::endl;
                         std::cout << "  GPU acceleration: " << (use_gpu ? "enabled" : "disabled") << std::endl;
@@ -2724,7 +2787,26 @@ int main(int argc, char* argv[]) {
     int local_processed_count = 0;
     double start_time = MPI_Wtime();
     
-    // Check if method uses internal MPI parallelization (all ranks must cooperate)
+    // ============================================================================
+    // MPI EXECUTION MODE SELECTION
+    // ============================================================================
+    // 
+    // COLLECTIVE MODE (ftlm_thermal, static):
+    //   - ALL ranks call process_task() for EACH task TOGETHER
+    //   - Inside the task, random Ritz samples are distributed across ranks
+    //   - Each rank computes (num_samples / num_ranks) samples
+    //   - Results are aggregated via MPI_Reduce within the FTLM function
+    //   - Task-level parallelism: NONE (sequential over tasks)
+    //   - Sample-level parallelism: YES (MPI distributes random samples)
+    //
+    // INDEPENDENT MODE (spectral, ground_state, etc.):
+    //   - Master-worker pattern: rank 0 dispatches tasks to workers
+    //   - Each task processes a single pre-computed quantum state
+    //   - No MPI communication within a task
+    //   - Task-level parallelism: YES (different ranks work on different tasks)
+    //   - Sample-level parallelism: N/A (uses pre-computed states)
+    // ============================================================================
+    
     bool uses_collective_mpi = (method == "ftlm_thermal" || method == "static");
     
     if (size == 1) {
@@ -2735,11 +2817,16 @@ int main(int argc, char* argv[]) {
             }
         }
     } else if (uses_collective_mpi) {
-        // Collective execution: ALL ranks process each task together
-        // The internal FTLM/static functions distribute samples across ranks
+        // COLLECTIVE MODE: ALL ranks process each task together
+        // Internal FTLM/static functions distribute random samples across ranks
         if (rank == 0) {
             std::cout << "\n==========================================\n";
-            std::cout << "Collective MPI mode: All " << size << " ranks cooperating\n";
+            std::cout << "COLLECTIVE MPI MODE\n";
+            std::cout << "==========================================\n";
+            std::cout << "All " << size << " ranks cooperating on each task\n";
+            std::cout << "Random samples distributed: ~" << (40 / size) << " samples/rank\n";
+            std::cout << "Tasks (momentum × operator): " << num_tasks << "\n";
+            std::cout << "Note: ALL temperatures computed within each task\n";
             std::cout << "==========================================\n\n";
         }
         
