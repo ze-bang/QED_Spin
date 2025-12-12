@@ -2418,28 +2418,8 @@ bool convert_tpq_to_unified_thermo(
 ) {
     std::cout << "\n=== Converting TPQ data to unified thermodynamic format ===" << std::endl;
     
-    // Find all SS_rand files
-    std::vector<std::string> ss_files;
-    for (int sample = 0; sample < 1000; ++sample) {
-        std::string ss_file = tpq_dir + "/SS_rand" + std::to_string(sample) + ".dat";
-        std::ifstream test(ss_file);
-        if (test.is_open()) {
-            ss_files.push_back(ss_file);
-            test.close();
-        } else {
-            break;  // Assume files are numbered consecutively
-        }
-    }
-    
-    if (ss_files.empty()) {
-        std::cerr << "No SS_rand*.dat files found in " << tpq_dir << std::endl;
-        return false;
-    }
-    
-    std::cout << "Found " << ss_files.size() << " TPQ sample files" << std::endl;
-    
-    // Read all data from SS_rand files
-    // Format: inv_temp energy variance num doublon step
+    // Data is already written directly to HDF5 during TPQ calculation
+    // Read from HDF5 instead of legacy SS_rand*.dat text files
     struct TPQDataPoint {
         double beta;
         double energy;
@@ -2448,41 +2428,88 @@ bool convert_tpq_to_unified_thermo(
     
     std::vector<std::vector<TPQDataPoint>> all_sample_data;
     
-    for (const auto& ss_file : ss_files) {
-        std::ifstream file(ss_file);
-        if (!file.is_open()) continue;
+    // Try to read from HDF5 file first (preferred)
+    std::string h5_file = output_file;  // output_file is the HDF5 path
+    if (HDF5IO::fileExists(h5_file)) {
+        // Temporarily suppress HDF5 error messages (expected when checking for non-existent samples)
+        H5E_auto2_t old_func;
+        void* old_client_data;
+        H5Eget_auto2(H5E_DEFAULT, &old_func, &old_client_data);
+        H5Eset_auto2(H5E_DEFAULT, nullptr, nullptr);
         
-        std::vector<TPQDataPoint> sample_data;
-        std::string line;
-        
-        // Skip header
-        std::getline(file, line);
-        
-        while (std::getline(file, line)) {
-            if (line.empty() || line[0] == '#') continue;
+        // Find all available samples in HDF5
+        for (int sample = 0; sample < 1000; ++sample) {
+            auto points = HDF5IO::loadTPQThermodynamics(h5_file, sample);
+            if (points.empty()) {
+                break;  // No more samples
+            }
             
-            std::istringstream iss(line);
-            double beta, energy, variance, norm, doublon;
-            uint64_t step;
-            
-            if (iss >> beta >> energy >> variance >> norm >> doublon >> step) {
-                if (beta > 0 && std::isfinite(energy) && std::isfinite(variance)) {
-                    sample_data.push_back({beta, energy, variance});
+            std::vector<TPQDataPoint> sample_data;
+            for (const auto& pt : points) {
+                if (pt.beta > 0 && std::isfinite(pt.energy) && std::isfinite(pt.variance)) {
+                    sample_data.push_back({pt.beta, pt.energy, pt.variance});
                 }
+            }
+            
+            if (!sample_data.empty()) {
+                all_sample_data.push_back(sample_data);
             }
         }
         
-        if (!sample_data.empty()) {
-            all_sample_data.push_back(sample_data);
+        // Restore HDF5 error handling
+        H5Eset_auto2(H5E_DEFAULT, old_func, old_client_data);
+        
+        if (!all_sample_data.empty()) {
+            std::cout << "Read TPQ data from HDF5: " << all_sample_data.size() << " samples" << std::endl;
+        }
+    }
+    
+    // Fallback: try legacy SS_rand*.dat text files (for backward compatibility)
+    if (all_sample_data.empty()) {
+        std::cout << "Trying legacy SS_rand*.dat files..." << std::endl;
+        for (int sample = 0; sample < 1000; ++sample) {
+            std::string ss_file = tpq_dir + "/SS_rand" + std::to_string(sample) + ".dat";
+            std::ifstream file(ss_file);
+            if (!file.is_open()) {
+                break;  // Assume files are numbered consecutively
+            }
+            
+            std::vector<TPQDataPoint> sample_data;
+            std::string line;
+            
+            // Skip header
+            std::getline(file, line);
+            
+            while (std::getline(file, line)) {
+                if (line.empty() || line[0] == '#') continue;
+                
+                std::istringstream iss(line);
+                double beta, energy, variance, norm, doublon;
+                uint64_t step;
+                
+                if (iss >> beta >> energy >> variance >> norm >> doublon >> step) {
+                    if (beta > 0 && std::isfinite(energy) && std::isfinite(variance)) {
+                        sample_data.push_back({beta, energy, variance});
+                    }
+                }
+            }
+            
+            if (!sample_data.empty()) {
+                all_sample_data.push_back(sample_data);
+            }
+        }
+        
+        if (!all_sample_data.empty()) {
+            std::cout << "Read TPQ data from legacy text files: " << all_sample_data.size() << " samples" << std::endl;
         }
     }
     
     if (all_sample_data.empty()) {
-        std::cerr << "No valid data found in SS_rand files" << std::endl;
+        std::cerr << "No TPQ data found in HDF5 or SS_rand*.dat files in " << tpq_dir << std::endl;
         return false;
     }
     
-    std::cout << "Read data from " << all_sample_data.size() << " samples" << std::endl;
+    std::cout << "Processing " << all_sample_data.size() << " TPQ samples" << std::endl;
     
     // Create temperature grid (logarithmic spacing)
     std::vector<double> temperatures(num_temp_bins);

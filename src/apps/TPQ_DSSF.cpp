@@ -1507,7 +1507,20 @@ int main(int argc, char* argv[]) {
         // Check if output directory exists (only critical for methods that need pre-computed states)
         bool needs_precomputed_states = (method == "spectral" || method == "ground_state");
         
-        if (!fs::exists(tpq_directory)) {
+        // For ftlm_thermal/static, we generate random states internally - no need for pre-computed states
+        // This is MUCH faster since we only process once instead of per-state
+        bool uses_internal_random_states = (method == "ftlm_thermal" || method == "static");
+        
+        if (uses_internal_random_states) {
+            // For ftlm_thermal/static, create a single dummy entry so the task loop runs once
+            std::cout << "Method '" << method << "' uses internal random state generation." << std::endl;
+            std::cout << "Creating single task entry for processing..." << std::endl;
+            tpq_files.push_back("INTERNAL_RANDOM_STATES");
+            sample_indices.push_back(0);
+            beta_strings.push_back("scan");
+            beta_values.push_back(0.0);
+            // Skip loading pre-computed states - go straight to task distribution
+        } else if (!fs::exists(tpq_directory)) {
             if (needs_precomputed_states) {
                 std::cerr << "\nError: Output directory does not exist: " << tpq_directory << std::endl;
                 std::cerr << "\nThe '" << method << "' method requires pre-computed quantum states." << std::endl;
@@ -1517,7 +1530,7 @@ int main(int argc, char* argv[]) {
                 std::cerr << "\nAlternatively, use 'ftlm_thermal' method which generates random states internally." << std::endl;
                 MPI_Abort(MPI_COMM_WORLD, 1);
             } else {
-                // For ftlm_thermal/static, create a dummy entry so the task loop runs once
+                // Should not reach here, but handle gracefully
                 std::cout << "Output directory not found, but '" << method << "' generates states internally." << std::endl;
                 std::cout << "Creating dummy task entry for processing..." << std::endl;
                 tpq_files.push_back("INTERNAL_RANDOM_STATES");
@@ -1527,6 +1540,8 @@ int main(int argc, char* argv[]) {
             }
         }
         
+        // Only search for pre-computed states if method requires them
+        if (!uses_internal_random_states && tpq_files.empty()) {
         // First, check for TPQ states in unified HDF5 file
         std::string hdf5_path = tpq_directory + "/ed_results.h5";
         bool found_hdf5_tpq_states = false;
@@ -1606,6 +1621,7 @@ int main(int argc, char* argv[]) {
                 beta_values.push_back(0.0);
             }
         }
+        } // End of: if (!uses_internal_random_states && tpq_files.empty())
         
         std::cout << "Found " << tpq_files.size() << " state file(s) to process (including ground state if present)" << std::endl;
         std::cout << "Using " << size << " MPI processes" << std::endl;
