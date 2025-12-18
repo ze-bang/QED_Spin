@@ -112,10 +112,11 @@ def generate_kagome_cluster(dim1, dim2, use_pbc=False):
     ]
     
     # Third nearest neighbors (3NN): distance = 1.0, coordination = 6
-    # Directions: (1,0), (0,1), (1,-1) cover all 6 neighbors (negatives are implicit)
-    NN3_DIRECTIONS = [(+1, 0), (0, +1), (+1, -1)]
-    NN3_BONDS = [(sub, di, dj, sub) for sub in range(3) for di, dj in NN3_DIRECTIONS]
-    
+    NN3_BONDS = [
+        (0, +1, -1, 0), 
+        (1, 0, +1, 1), 
+        (2, +1,  0, 2), 
+    ]
     # ==========================================================================
     # Generate edges using the bond tables
     # Lists preserve bond multiplicity when PBC causes wrap-around overlaps
@@ -660,10 +661,22 @@ def plot_connectivity_by_site(vertices, edges, edges_2nn, edges_3nn, output_dir,
             ('3NN', nn3_list, edges_3nn, '3NN (d=1.0, coord=6)')
         ]):
             ax = axes2[col]
-            for v1, v2 in set(edges_list):
+            # Count bond multiplicities to visualize with varying thickness
+            from collections import Counter
+            bond_counts = Counter(edges_list)
+            for (v1, v2), count in bond_counts.items():
                 p1, p2 = np.array(vertices[v1]), np.array(vertices[v2])
+                # Make duplicate bonds thicker to show multiplicity
+                linewidth = 1.5 + (count - 1) * 1.0  # Base width + extra for duplicates
+                alpha = min(0.6 + (count - 1) * 0.15, 0.9)
                 ax.plot([p1[0], p2[0]], [p1[1], p2[1]], 
-                       color=bond_colors[neighbor_type], linewidth=1.5, alpha=0.6)
+                       color=bond_colors[neighbor_type], linewidth=linewidth, alpha=alpha)
+                # Add label for duplicate bonds
+                if count > 1:
+                    mid = (p1 + p2) / 2
+                    ax.annotate(f'×{count}', mid, fontsize=9, ha='center', va='center',
+                               bbox=dict(boxstyle='round,pad=0.3', facecolor='yellow', alpha=0.7),
+                               zorder=10)
             for v, pos in vertices.items():
                 pos = np.array(pos)
                 ax.scatter(pos[0], pos[1], s=100, c=sublattice_colors[sublattices[v]], 
@@ -671,7 +684,10 @@ def plot_connectivity_by_site(vertices, edges, edges_2nn, edges_3nn, output_dir,
                 ax.annotate(str(v), pos, fontsize=7, ha='center', va='center', 
                            bbox=dict(boxstyle='round,pad=0.1', facecolor='white', alpha=0.7))
             counts = [len(neighbor_list[v]) for v in vertices]
-            ax.set_title(f'{bond_label} ({min(counts)}-{max(counts)} per site)', fontsize=11)
+            unique_bonds = len(bond_counts)
+            total_bonds = len(edges_list)
+            ax.set_title(f'{bond_label} ({min(counts)}-{max(counts)} per site)\n{unique_bonds} unique, {total_bonds} total', 
+                        fontsize=11)
             ax.set_aspect('equal')
             ax.grid(True, alpha=0.3)
         
