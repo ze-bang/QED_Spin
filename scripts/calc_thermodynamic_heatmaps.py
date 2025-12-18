@@ -37,6 +37,7 @@ else:
 def parse_ss_file(filepath):
     """
     Parse SS_rand*.dat file and return thermodynamic data.
+    Skip the first entry which is typically noisy (smallest beta).
     
     Returns: (inv_temp, energy, variance) arrays
     """
@@ -44,6 +45,10 @@ def parse_ss_file(filepath):
         data = np.loadtxt(filepath, comments='#')
         if data.ndim == 1:
             data = data.reshape(1, -1)
+        
+        # Skip the first entry (index 0) which is the smallest beta and typically noisy
+        if len(data) > 1:
+            data = data[1:, :]
         
         inv_temp = data[:, 0]  # beta
         energy = data[:, 1]
@@ -120,8 +125,8 @@ def load_thermodynamic_data(data_dir, param_pattern='Jpm'):
             if beta is None:
                 continue
             
-            # Filter out invalid data (beta should be positive)
-            valid_mask = (beta > 0) & np.isfinite(energy) & np.isfinite(variance)
+            # Filter out invalid data (beta should be positive, variance should be positive)
+            valid_mask = (beta > 0) & np.isfinite(energy) & np.isfinite(variance) & (variance >= 0)
             beta = beta[valid_mask]
             energy = energy[valid_mask]
             variance = variance[valid_mask]
@@ -204,6 +209,10 @@ def create_thermodynamic_heatmaps(data_points, data_dir, param_pattern='Jpm'):
     ref_mask = np.isclose(param_vals, ref_param, rtol=1e-8, atol=1e-12)
     target_beta = np.unique(beta_vals[ref_mask])
     target_beta.sort()
+    
+    # Skip the first beta point (smallest beta) for plotting
+    if len(target_beta) > 1:
+        target_beta = target_beta[1:]
     
     print(f"Reference {param_pattern}={ref_param}, target beta grid size: {len(target_beta)}")
     
@@ -316,7 +325,7 @@ def _create_heatmap(param_vals, beta_vals, values,
     plt.figure(figsize=(12, 8))
     pcm = plt.pcolormesh(P, B, Z, shading='auto', cmap='viridis')
     plt.yscale('log')
-    plt.gca().invert_yaxis()  # large beta at bottom
+    plt.gca().invert_yaxis()  # Largest beta at bottom, smallest at top
     plt.xlabel(param_pattern)
     plt.ylabel('Inverse Temperature β')
     plt.title(f'{quantity_name} Heatmap')
@@ -335,7 +344,7 @@ def _create_heatmap(param_vals, beta_vals, values,
         plt.figure(figsize=(10, 8))
         pcm = plt.pcolormesh(PN, BN, Z_neg, shading='auto', cmap='viridis')
         plt.yscale('log')
-        plt.gca().invert_yaxis()  # large beta at bottom
+        plt.gca().invert_yaxis()  # Largest beta at bottom, smallest at top
         plt.xlabel(param_pattern)
         plt.ylabel('Inverse Temperature β')
         plt.title(f'{quantity_name} Heatmap ({param_pattern} < 0)')
@@ -353,7 +362,7 @@ def _create_heatmap(param_vals, beta_vals, values,
         plt.figure(figsize=(10, 8))
         pcm = plt.pcolormesh(PP, BP, Z_pos, shading='auto', cmap='viridis')
         plt.yscale('log')
-        plt.gca().invert_yaxis()  # large beta at bottom
+        plt.gca().invert_yaxis()  # Largest beta at bottom, smallest at top
         plt.xlabel(param_pattern)
         plt.ylabel('Inverse Temperature β')
         plt.title(f'{quantity_name} Heatmap ({param_pattern} ≥ 0)')
@@ -399,11 +408,14 @@ def _create_side_by_side_heatmap(param_neg, param_pos, target_beta, Z,
     pcm_neg = axL.pcolormesh(PN, BN, Z_neg, shading='auto', cmap='viridis', vmin=vmin, vmax=vmax)
     pcm_pos = axR.pcolormesh(PP, BP, Z_pos, shading='auto', cmap='viridis', vmin=vmin, vmax=vmax)
     
-    for ax in (axL, axR):
-        ax.set_yscale('log')
-        ax.invert_yaxis()  # large beta at bottom
-        ax.set_xlabel(param_pattern)
+    # Set log scale and invert y-axis for both plots
+    # This puts largest beta at bottom, smallest at top
+    axL.set_yscale('log')
+    axR.set_yscale('log')
+    axL.invert_yaxis()  # Since sharey=True, this inverts both axes
     
+    axL.set_xlabel(param_pattern)
+    axR.set_xlabel(param_pattern)
     axL.set_ylabel('Inverse Temperature β')
     axR.tick_params(labelleft=False)
     

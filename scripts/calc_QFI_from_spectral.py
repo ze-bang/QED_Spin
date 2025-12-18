@@ -1563,11 +1563,17 @@ def _create_fixed_beta_plots_param(species, target_beta, Z_neg, Z_pos, param_neg
 
 
 def _find_largest_valid_beta_index_param(Z, mask):
-    """Find the largest beta index with no NaN values."""
+    """Find the largest beta index with no NaN values, skipping the first (smallest) beta."""
     if Z is None or Z.size == 0 or mask is None or not np.any(mask):
         return None
     
     valid_idxs = np.where(mask)[0]
+    # Skip the first (smallest) beta entry
+    if valid_idxs.size > 1:
+        valid_idxs = valid_idxs[1:]
+    elif valid_idxs.size == 1:
+        return None  # Only one valid beta, skip it
+    
     return valid_idxs[-1] if valid_idxs.size > 0 else None
 
 
