@@ -264,6 +264,124 @@ def list_spectral_datasets_hdf5(h5_path):
     return datasets
 
 
+def load_spectral_from_dssf_hdf5(h5_path, operator_name, temperature_or_beta):
+    """
+    Load spectral function data from dssf_results.h5 file.
+    
+    Structure: /spectral/<operator_name>/<T_value or beta_value>/sample_<idx>/real,imag
+    
+    Parameters:
+    h5_path: Path to dssf_results.h5 file
+    operator_name: Name of operator (e.g., 'SzSz_q_Qx0_Qy0_Qz0')
+    temperature_or_beta: Temperature or beta group name (e.g., 'T_0.500000' or 'beta_8.93617')
+    
+    Returns: (omega_array, spectral_function_array, beta_value) or (None, None, None)
+    """
+    if not HAS_H5PY:
+        return None, None, None
+    
+    try:
+        with h5py.File(h5_path, 'r') as f:
+            # Get frequencies (shared across all operators)
+            if '/spectral/frequencies' not in f:
+                print(f"Warning: No frequencies dataset in {h5_path}")
+                return None, None, None
+            
+            frequencies = f['/spectral/frequencies'][:]
+            
+            # Construct path to spectral data
+            spectral_path = f'/spectral/{operator_name}/{temperature_or_beta}'
+            if spectral_path not in f:
+                print(f"Warning: Path {spectral_path} not found in {h5_path}")
+                return None, None, None
+            
+            group = f[spectral_path]
+            
+            # Collect all samples and average
+            all_spectral = []
+            sample_keys = [k for k in group.keys() if k.startswith('sample_')]
+            
+            for sample_key in sample_keys:
+                sample_group = group[sample_key]
+                real_part = sample_group['real'][:]
+                imag_part = sample_group['imag'][:] if 'imag' in sample_group else np.zeros_like(real_part)
+                
+                # Spectral function is the real part
+                all_spectral.append(real_part)
+            
+            if not all_spectral:
+                print(f"Warning: No samples found in {spectral_path}")
+                return None, None, None
+            
+            # Average over samples
+            spectral_avg = np.mean(all_spectral, axis=0)
+            
+            # Extract beta value from temperature/beta group name
+            beta = None
+            if temperature_or_beta.startswith('T_'):
+                T = float(temperature_or_beta.split('_')[1])
+                beta = 1.0 / T if T > 0 else np.inf
+            elif temperature_or_beta.startswith('beta_'):
+                beta_str = temperature_or_beta.split('_')[1]
+                beta = np.inf if beta_str.lower() in ('inf', 'infty') else float(beta_str)
+            
+            return frequencies, spectral_avg, beta
+            
+    except Exception as e:
+        print(f"Error loading from dssf_results.h5: {h5_path}, {operator_name}, {temperature_or_beta}: {e}")
+        return None, None, None
+
+
+def list_spectral_datasets_dssf_hdf5(h5_path):
+    """
+    List all spectral datasets available in a dssf_results.h5 file.
+    
+    Returns: List of (operator_name, temp_beta_group, beta_value, num_samples) tuples
+    """
+    if not HAS_H5PY:
+        return []
+    
+    datasets = []
+    try:
+        with h5py.File(h5_path, 'r') as f:
+            if '/spectral' not in f:
+                return []
+            
+            spectral_group = f['/spectral']
+            
+            for operator_name in spectral_group.keys():
+                if operator_name == 'frequencies':
+                    continue
+                
+                operator_group = spectral_group[operator_name]
+                if not isinstance(operator_group, h5py.Group):
+                    continue
+                
+                for temp_beta_group in operator_group.keys():
+                    tb_group = operator_group[temp_beta_group]
+                    if not isinstance(tb_group, h5py.Group):
+                        continue
+                    
+                    # Count samples
+                    num_samples = len([k for k in tb_group.keys() if k.startswith('sample_')])
+                    
+                    # Extract beta value
+                    beta = None
+                    if temp_beta_group.startswith('T_'):
+                        T = float(temp_beta_group.split('_')[1])
+                        beta = 1.0 / T if T > 0 else np.inf
+                    elif temp_beta_group.startswith('beta_'):
+                        beta_str = temp_beta_group.split('_')[1]
+                        beta = np.inf if beta_str.lower() in ('inf', 'infty') else float(beta_str)
+                    
+                    datasets.append((operator_name, temp_beta_group, beta, num_samples))
+    
+    except Exception as e:
+        print(f"Error listing dssf_results.h5: {h5_path}: {e}")
+    
+    return datasets
+
+
 def parse_time_correlation_name(name):
     """
     Parse new HDF5 time_correlations group name.
@@ -359,12 +477,25 @@ def load_spectral_file(filepath):
     """
     Load spectral function data from file or HDF5.
     
-    Supports two formats:
+    Supports three formats:
     1. Text file path: /path/to/file.txt
     2. HDF5 reference: HDF5:/path/to/ed_results.h5:dataset_name
+    3. DSSF HDF5 reference: DSSF_HDF5:/path/to/dssf_results.h5:operator_name:temp_beta_group
     
     Returns: (omega_array, spectral_function_array)
     """
+    # Check if this is a DSSF HDF5 reference
+    if filepath.startswith('DSSF_HDF5:'):
+        # Parse DSSF HDF5 reference: DSSF_HDF5:<h5_path>:<operator_name>:<temp_beta_group>
+        parts = filepath[10:].split(':', 2)  # Remove DSSF_HDF5: prefix and split
+        if len(parts) == 3:
+            h5_path, operator_name, temp_beta_group = parts
+            omega, spectral, beta = load_spectral_from_dssf_hdf5(h5_path, operator_name, temp_beta_group)
+            return omega, spectral
+        else:
+            print(f"Invalid DSSF HDF5 reference format: {filepath}")
+            return None, None
+    
     # Check if this is an HDF5 reference
     if filepath.startswith('HDF5:'):
         # Parse HDF5 reference: HDF5:<h5_path>:<dataset_name>
@@ -550,7 +681,7 @@ def _collect_spectral_files(structure_factor_dir, species_data, species_names,
             # Track what we've found in HDF5 to avoid duplicates
             h5_species_samples = set()  # (species, sample_idx, beta) tuples
             
-            # Try HDF5 first (preferred)
+            # Try ed_results.h5 first (preferred)
             h5_path = os.path.join(op_subdir, 'ed_results.h5')
             if HAS_H5PY and os.path.exists(h5_path):
                 datasets = list_spectral_datasets_hdf5(h5_path)
@@ -594,6 +725,32 @@ def _collect_spectral_files(structure_factor_dir, species_data, species_names,
                 print(f"  {op_name}: found {h5_count} spectral datasets in HDF5")
             elif txt_count > 0:
                 print(f"  {op_name}: found {txt_count} spectral text files")
+    
+    # Also scan for dssf_results.h5 files in the main structure_factor_results directory
+    # These files contain spectral data organized by operator and temperature/beta
+    dssf_h5_path = os.path.join(structure_factor_dir, 'dssf_results.h5')
+    if HAS_H5PY and os.path.exists(dssf_h5_path):
+        print(f"\nFound dssf_results.h5 file, processing...")
+        dssf_count = 0
+        datasets = list_spectral_datasets_dssf_hdf5(dssf_h5_path)
+        
+        for operator_name, temp_beta_group, beta_val, num_samples in datasets:
+            if beta_val is None:
+                continue
+            
+            # Create DSSF HDF5 reference path
+            ref_path = f"DSSF_HDF5:{dssf_h5_path}:{operator_name}:{temp_beta_group}"
+            
+            # Assign to beta bin
+            beta_bin_idx = _assign_beta_bin(beta_val, beta_bins, beta_tol)
+            beta_bin_values[beta_bin_idx].append(beta_val)
+            
+            # Use operator_name as species
+            species_data[operator_name][beta_bin_idx].append(ref_path)
+            species_names.add(operator_name)
+            dssf_count += 1
+        
+        print(f"  Loaded {dssf_count} spectral datasets from dssf_results.h5")
 
 
 def _extract_beta_from_dirname(beta_dir):
