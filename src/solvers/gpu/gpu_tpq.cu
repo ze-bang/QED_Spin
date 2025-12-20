@@ -572,6 +572,38 @@ void GPUTPQSolver::runMicrocanonicalTPQ(
     // Calculate dimension entropy S = log2(N)
     double D_S = std::log2(static_cast<double>(N_));
     
+    // MPI sample distribution - each rank processes only its share of samples
+    int start_sample = 0;
+    int end_sample = num_samples;
+    #ifdef WITH_MPI
+    int mpi_size = 1;
+    MPI_Comm_size(MPI_COMM_WORLD, &mpi_size);
+    
+    int samples_per_rank = num_samples / mpi_size;
+    int remainder = num_samples % mpi_size;
+    
+    // Ranks with index < remainder get one extra sample
+    start_sample = mpi_rank * samples_per_rank + std::min(mpi_rank, remainder);
+    end_sample = start_sample + samples_per_rank + (mpi_rank < remainder ? 1 : 0);
+    
+    if (mpi_rank == 0) {
+        std::cout << "\n==========================================\n";
+        std::cout << "MPI-Parallel GPU TPQ Calculation\n";
+        std::cout << "==========================================\n";
+        std::cout << "Total MPI ranks: " << mpi_size << "\n";
+        std::cout << "Total samples: " << num_samples << "\n";
+        std::cout << "Samples per rank: " << samples_per_rank << " (+ " << remainder << " remainder)\n";
+        std::cout << "==========================================\n";
+    }
+    
+    std::cout << "Rank " << mpi_rank << " processing samples [" 
+              << start_sample << ", " << end_sample << ")" << std::endl;
+    
+    MPI_Barrier(MPI_COMM_WORLD);
+    #else
+    int mpi_rank = 0;  // For non-MPI builds
+    #endif
+    
     // Define measurement temperatures (similar to CPU version)
     const int num_temp_points = 20;
     std::vector<double> measure_inv_temp(num_temp_points);
@@ -581,8 +613,9 @@ void GPUTPQSolver::runMicrocanonicalTPQ(
         measure_inv_temp[i] = std::pow(10.0, log_min + (log_max - log_min) * i / (num_temp_points - 1));
     }
     
-    for (int sample = 0; sample < num_samples; ++sample) {
-        std::cout << "\nSample " << sample + 1 << "/" << num_samples << std::endl;
+    for (int sample = start_sample; sample < end_sample; ++sample) {
+        std::cout << "\n[Rank " << mpi_rank << "] Sample " << sample << " of " << num_samples 
+                  << " (local: " << (sample - start_sample + 1) << " of " << (end_sample - start_sample) << ")" << std::endl;
         
         // Track which measurement temperatures have been saved
         std::vector<bool> temp_measured(num_temp_points, false);
@@ -880,6 +913,38 @@ void GPUTPQSolver::runCanonicalTPQ(
     
     int num_steps = static_cast<int>(beta_max / delta_beta);
     
+    // MPI sample distribution - each rank processes only its share of samples
+    int start_sample = 0;
+    int end_sample = num_samples;
+    #ifdef WITH_MPI
+    int mpi_size = 1;
+    MPI_Comm_size(MPI_COMM_WORLD, &mpi_size);
+    
+    int samples_per_rank = num_samples / mpi_size;
+    int remainder = num_samples % mpi_size;
+    
+    // Ranks with index < remainder get one extra sample
+    start_sample = mpi_rank * samples_per_rank + std::min(mpi_rank, remainder);
+    end_sample = start_sample + samples_per_rank + (mpi_rank < remainder ? 1 : 0);
+    
+    if (mpi_rank == 0) {
+        std::cout << "\n==========================================\n";
+        std::cout << "MPI-Parallel GPU Canonical TPQ Calculation\n";
+        std::cout << "==========================================\n";
+        std::cout << "Total MPI ranks: " << mpi_size << "\n";
+        std::cout << "Total samples: " << num_samples << "\n";
+        std::cout << "Samples per rank: " << samples_per_rank << " (+ " << remainder << " remainder)\n";
+        std::cout << "==========================================\n";
+    }
+    
+    std::cout << "Rank " << mpi_rank << " processing samples [" 
+              << start_sample << ", " << end_sample << ")" << std::endl;
+    
+    MPI_Barrier(MPI_COMM_WORLD);
+    #else
+    int mpi_rank = 0;  // For non-MPI builds
+    #endif
+    
     // Define measurement temperatures (similar to microcanonical version)
     const int num_temp_points = 20;
     std::vector<double> measure_inv_temp(num_temp_points);
@@ -889,8 +954,9 @@ void GPUTPQSolver::runCanonicalTPQ(
         measure_inv_temp[i] = std::pow(10.0, log_min + (log_max - log_min) * i / (num_temp_points - 1));
     }
     
-    for (int sample = 0; sample < num_samples; ++sample) {
-        std::cout << "\nSample " << sample + 1 << "/" << num_samples << std::endl;
+    for (int sample = start_sample; sample < end_sample; ++sample) {
+        std::cout << "\n[Rank " << mpi_rank << "] Sample " << sample << " of " << num_samples 
+                  << " (local: " << (sample - start_sample + 1) << " of " << (end_sample - start_sample) << ")" << std::endl;
         
         // Track which measurement temperatures have been saved
         std::vector<bool> temp_measured(num_temp_points, false);

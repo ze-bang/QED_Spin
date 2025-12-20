@@ -2275,6 +2275,21 @@ inline EDResults exact_diagonalization_fixed_sz(
         // No post-processing transformation needed
         if (method == DiagonalizationMethod::mTPQ_GPU || method == DiagonalizationMethod::cTPQ_GPU) {
             std::cout << "\nGPU TPQ states were automatically transformed to full Hilbert space during save." << std::endl;
+            
+            // MPI-safe HDF5 merge: merge per-rank files on rank 0
+#ifdef WITH_MPI
+            int mpi_size, mpi_rank;
+            MPI_Comm_size(MPI_COMM_WORLD, &mpi_size);
+            MPI_Comm_rank(MPI_COMM_WORLD, &mpi_rank);
+            
+            if (mpi_size > 1) {
+                MPI_Barrier(MPI_COMM_WORLD);  // Ensure all ranks have finished writing
+                if (mpi_rank == 0) {
+                    std::cout << "\nMerging per-rank HDF5 files..." << std::endl;
+                    HDF5IO::mergePerRankTPQFiles(params.output_dir, mpi_size, "ed_results.h5", true);
+                }
+            }
+#endif
         }
         
         // Cleanup
@@ -2518,6 +2533,21 @@ EDResults exact_diagonalization_from_files(
             results.eigenvalues = eigenvalues;
             GPUEDWrapper::destroyGPUOperator(gpu_op);
             
+            // MPI-safe HDF5 merge: merge per-rank files on rank 0
+#ifdef WITH_MPI
+            int mpi_size, mpi_rank;
+            MPI_Comm_size(MPI_COMM_WORLD, &mpi_size);
+            MPI_Comm_rank(MPI_COMM_WORLD, &mpi_rank);
+            
+            if (mpi_size > 1) {
+                MPI_Barrier(MPI_COMM_WORLD);  // Ensure all ranks have finished writing
+                if (mpi_rank == 0) {
+                    std::cout << "\nMerging per-rank HDF5 files..." << std::endl;
+                    HDF5IO::mergePerRankTPQFiles(params.output_dir, mpi_size, "ed_results.h5", true);
+                }
+            }
+#endif
+            
             std::cout << "GPU mTPQ completed successfully!" << std::endl;
             
         } else if (method == DiagonalizationMethod::cTPQ_GPU) {
@@ -2546,6 +2576,23 @@ EDResults exact_diagonalization_from_files(
             
             results.eigenvalues = eigenvalues;
             GPUEDWrapper::destroyGPUOperator(gpu_op);
+            
+            // MPI-safe HDF5 merge: merge per-rank files on rank 0
+#ifdef WITH_MPI
+            {
+                int mpi_size, mpi_rank;
+                MPI_Comm_size(MPI_COMM_WORLD, &mpi_size);
+                MPI_Comm_rank(MPI_COMM_WORLD, &mpi_rank);
+                
+                if (mpi_size > 1) {
+                    MPI_Barrier(MPI_COMM_WORLD);  // Ensure all ranks have finished writing
+                    if (mpi_rank == 0) {
+                        std::cout << "\nMerging per-rank HDF5 files..." << std::endl;
+                        HDF5IO::mergePerRankTPQFiles(params.output_dir, mpi_size, "ed_results.h5", true);
+                    }
+                }
+            }
+#endif
             
             std::cout << "GPU cTPQ completed successfully!" << std::endl;
             
