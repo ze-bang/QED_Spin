@@ -118,6 +118,12 @@ H5::H5File openHDF5WithRetry(const std::string& h5_path, unsigned int flags, int
 // Unified DSSF HDF5 Output Management
 // ============================================================================
 // 
+// MPI-Safe Strategy:
+// - In COLLECTIVE mode: Only rank 0 writes, so no locking issues
+// - In INDEPENDENT mode: Each rank writes to its own per-rank file
+//   (dssf_results_rank0.h5, dssf_results_rank1.h5, etc.)
+//   Rank 0 merges all files at the end
+//
 // HDF5 File Structure for TPQ_DSSF:
 //   dssf_results.h5
 //   ├── /metadata
@@ -150,6 +156,201 @@ H5::H5File openHDF5WithRetry(const std::string& h5_path, unsigned int flags, int
 //   └── /correlations (for spin_correlation/spin_configuration)
 //       └── ...
 // ============================================================================
+
+/**
+ * @brief Get per-rank DSSF HDF5 file path for MPI-safe writing
+ */
+std::string getPerRankDSSFPath(const std::string& output_dir, int rank) {
+    return output_dir + "/dssf_results_rank" + std::to_string(rank) + ".h5";
+}
+
+/**
+ * @brief Initialize per-rank DSSF HDF5 file structure
+ */
+std::string initPerRankDSSFFile(const std::string& output_dir, int rank,
+                                 int num_sites, float spin_length,
+                                 const std::string& method, 
+                                 const std::string& operator_type,
+                                 double omega_min, double omega_max, 
+                                 int num_omega_bins, double broadening,
+                                 const std::vector<std::vector<double>>& momentum_points) {
+    std::string h5_path = getPerRankDSSFPath(output_dir, rank);
+    
+    try {
+        H5::H5File file(h5_path, H5F_ACC_TRUNC);
+        
+        // Create group structure
+        file.createGroup("/metadata");
+        file.createGroup("/momentum_points");
+        file.createGroup("/spectral");
+        file.createGroup("/static");
+        file.createGroup("/correlations");
+        
+        // Save metadata as attributes
+        H5::Group meta = file.openGroup("/metadata");
+        H5::DataSpace scalar_space(H5S_SCALAR);
+        
+        H5::Attribute attr_sites = meta.createAttribute("num_sites", H5::PredType::NATIVE_INT, scalar_space);
+        attr_sites.write(H5::PredType::NATIVE_INT, &num_sites);
+        
+        H5::Attribute attr_spin = meta.createAttribute("spin_length", H5::PredType::NATIVE_FLOAT, scalar_space);
+        attr_spin.write(H5::PredType::NATIVE_FLOAT, &spin_length);
+        
+        H5::Attribute attr_omega_min = meta.createAttribute("omega_min", H5::PredType::NATIVE_DOUBLE, scalar_space);
+        attr_omega_min.write(H5::PredType::NATIVE_DOUBLE, &omega_min);
+        
+        H5::Attribute attr_omega_max = meta.createAttribute("omega_max", H5::PredType::NATIVE_DOUBLE, scalar_space);
+        attr_omega_max.write(H5::PredType::NATIVE_DOUBLE, &omega_max);
+        
+        H5::Attribute attr_nbins = meta.createAttribute("num_omega_bins", H5::PredType::NATIVE_INT, scalar_space);
+        attr_nbins.write(H5::PredType::NATIVE_INT, &num_omega_bins);
+        
+        H5::Attribute attr_broad = meta.createAttribute("broadening", H5::PredType::NATIVE_DOUBLE, scalar_space);
+        attr_broad.write(H5::PredType::NATIVE_DOUBLE, &broadening);
+        
+        H5::StrType str_type(H5::PredType::C_S1, H5T_VARIABLE);
+        H5::Attribute attr_method = meta.createAttribute("method", str_type, scalar_space);
+        attr_method.write(str_type, method);
+        
+        H5::Attribute attr_optype = meta.createAttribute("operator_type", str_type, scalar_space);
+        attr_optype.write(str_type, operator_type);
+        
+        meta.close();
+        file.close();
+        
+        std::cout << "  Rank " << rank << ": created per-rank DSSF file: " << h5_path << std::endl;
+    } catch (H5::Exception& e) {
+        throw std::runtime_error("Failed to create per-rank DSSF file: " + std::string(e.getCDetailMsg()));
+    }
+    
+    return h5_path;
+}
+
+/**
+ * @brief Merge per-rank DSSF HDF5 files into unified output
+ */
+bool mergePerRankDSSFFiles(const std::string& output_dir, int num_ranks) {
+    std::string output_path = output_dir + "/dssf_results.h5";
+    
+    std::cout << "\n==========================================\n";
+    std::cout << "Merging per-rank DSSF HDF5 files\n";
+    std::cout << "==========================================\n";
+    std::cout << "  Output: " << output_path << std::endl;
+    
+    int total_groups_merged = 0;
+    
+    for (int r = 0; r < num_ranks; ++r) {
+        std::string rank_file = getPerRankDSSFPath(output_dir, r);
+        
+        if (!fs::exists(rank_file)) {
+            std::cout << "  Rank " << r << ": file not found, skipping" << std::endl;
+            continue;
+        }
+        
+        try {
+            H5::H5File source(rank_file, H5F_ACC_RDONLY);
+            H5::H5File dest(output_path, H5F_ACC_RDWR);
+            
+            // Copy spectral groups
+            if (source.nameExists("/spectral")) {
+                H5::Group src_spectral = source.openGroup("/spectral");
+                
+                // Ensure destination group exists
+                if (!dest.nameExists("/spectral")) {
+                    dest.createGroup("/spectral");
+                }
+                
+                // Copy frequencies if not already in destination
+                if (source.nameExists("/spectral/frequencies") && 
+                    !dest.nameExists("/spectral/frequencies")) {
+                    H5Ocopy(source.getId(), "/spectral/frequencies",
+                           dest.getId(), "/spectral/frequencies",
+                           H5P_DEFAULT, H5P_DEFAULT);
+                }
+                
+                // Iterate through operator groups and copy them
+                hsize_t num_objs = src_spectral.getNumObjs();
+                for (hsize_t i = 0; i < num_objs; ++i) {
+                    std::string name = src_spectral.getObjnameByIdx(i);
+                    if (name == "frequencies") continue;  // Already handled
+                    
+                    std::string src_path = "/spectral/" + name;
+                    std::string dst_path = "/spectral/" + name;
+                    
+                    // Copy operator group (contains beta/T subgroups with samples)
+                    if (!dest.nameExists(dst_path)) {
+                        H5Ocopy(source.getId(), src_path.c_str(),
+                               dest.getId(), dst_path.c_str(),
+                               H5P_DEFAULT, H5P_DEFAULT);
+                        total_groups_merged++;
+                    } else {
+                        // Merge into existing group by copying subgroups
+                        H5::Group src_op = source.openGroup(src_path);
+                        hsize_t num_temp_groups = src_op.getNumObjs();
+                        for (hsize_t j = 0; j < num_temp_groups; ++j) {
+                            std::string temp_name = src_op.getObjnameByIdx(j);
+                            std::string src_temp_path = src_path + "/" + temp_name;
+                            std::string dst_temp_path = dst_path + "/" + temp_name;
+                            
+                            if (!dest.nameExists(dst_temp_path)) {
+                                H5Ocopy(source.getId(), src_temp_path.c_str(),
+                                       dest.getId(), dst_temp_path.c_str(),
+                                       H5P_DEFAULT, H5P_DEFAULT);
+                                total_groups_merged++;
+                            }
+                        }
+                        src_op.close();
+                    }
+                }
+                src_spectral.close();
+            }
+            
+            // Copy static groups similarly
+            if (source.nameExists("/static")) {
+                H5::Group src_static = source.openGroup("/static");
+                
+                if (!dest.nameExists("/static")) {
+                    dest.createGroup("/static");
+                }
+                
+                hsize_t num_objs = src_static.getNumObjs();
+                for (hsize_t i = 0; i < num_objs; ++i) {
+                    std::string name = src_static.getObjnameByIdx(i);
+                    std::string src_path = "/static/" + name;
+                    std::string dst_path = "/static/" + name;
+                    
+                    if (!dest.nameExists(dst_path)) {
+                        H5Ocopy(source.getId(), src_path.c_str(),
+                               dest.getId(), dst_path.c_str(),
+                               H5P_DEFAULT, H5P_DEFAULT);
+                        total_groups_merged++;
+                    }
+                }
+                src_static.close();
+            }
+            
+            source.close();
+            dest.close();
+            
+            // Delete temporary per-rank file
+            try {
+                fs::remove(rank_file);
+                std::cout << "  Rank " << r << ": merged and deleted" << std::endl;
+            } catch (...) {
+                std::cerr << "  Warning: Could not delete " << rank_file << std::endl;
+            }
+            
+        } catch (const std::exception& e) {
+            std::cerr << "  Error merging rank " << r << ": " << e.what() << std::endl;
+        }
+    }
+    
+    std::cout << "==========================================\n";
+    std::cout << "Merge complete: " << total_groups_merged << " groups merged\n";
+    std::cout << "==========================================\n";
+    
+    return true;
+}
 
 /**
  * @brief Initialize the unified DSSF HDF5 file with proper structure
@@ -1436,7 +1637,10 @@ int main(int argc, char* argv[]) {
     
     // Pre-compute time evolution operator and transverse bases if needed
     std::string output_base_dir = directory + "/structure_factor_results";
-    std::string unified_h5_path;  // Path to unified DSSF HDF5 file
+    std::string unified_h5_path;  // Path to unified DSSF HDF5 file (or per-rank file for INDEPENDENT mode)
+    
+    // Determine if we're in INDEPENDENT mode (need per-rank files)
+    bool uses_independent_mode = (method == "spectral" || method == "ground_state");
     
     if (rank == 0) {
         ensureDirectoryExists(output_base_dir);
@@ -1449,10 +1653,22 @@ int main(int argc, char* argv[]) {
             momentum_points
         );
         std::cout << "Unified DSSF results will be saved to: " << unified_h5_path << std::endl;
+        
+        if (uses_independent_mode && size > 1) {
+            std::cout << "INDEPENDENT mode: Each MPI rank will write to per-rank file, merged at end" << std::endl;
+        }
     }
     
-    // Broadcast unified HDF5 path to all processes
-    {
+    // For INDEPENDENT mode with MPI: each rank uses its own file to avoid file locking conflicts
+    if (uses_independent_mode && size > 1) {
+        unified_h5_path = initPerRankDSSFFile(
+            output_base_dir, rank, num_sites, spin_length,
+            method, operator_type,
+            omega_min, omega_max, num_omega_bins, broadening,
+            momentum_points
+        );
+    } else {
+        // Broadcast unified HDF5 path to all processes (COLLECTIVE mode)
         int path_len = unified_h5_path.size();
         MPI_Bcast(&path_len, 1, MPI_INT, 0, MPI_COMM_WORLD);
         if (rank != 0) {
@@ -2953,6 +3169,22 @@ int main(int argc, char* argv[]) {
     
     int total_processed_count;
     MPI_Reduce(&local_processed_count, &total_processed_count, 1, MPI_INT, MPI_SUM, 0, MPI_COMM_WORLD);
+    
+    // =======================================================================
+    // MPI-SAFE HDF5 MERGE: For INDEPENDENT mode, merge per-rank files
+    // =======================================================================
+    // In INDEPENDENT mode (spectral, ground_state), each MPI rank writes to 
+    // its own per-rank file (dssf_results_rank0.h5, etc.) to avoid HDF5 file 
+    // locking conflicts. Now we need to merge all per-rank files into the 
+    // unified output file on rank 0.
+    // =======================================================================
+    MPI_Barrier(MPI_COMM_WORLD);  // Ensure all ranks have finished writing
+    
+    if (uses_independent_mode && size > 1 && rank == 0) {
+        std::cout << "\nMerging per-rank DSSF HDF5 files..." << std::endl;
+        mergePerRankDSSFFiles(output_base_dir, size);
+        unified_h5_path = output_base_dir + "/dssf_results.h5";  // Update to merged file path
+    }
     
     if (rank == 0) {
         std::cout << "\n========================================" << std::endl;

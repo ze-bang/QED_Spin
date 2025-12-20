@@ -2468,6 +2468,202 @@ public:
         
         return correlations;
     }
+    
+    // ============================================================================
+    // MPI-Safe HDF5 I/O Functions
+    // ============================================================================
+    // Industry standard approach: each MPI rank writes to its own file, then
+    // rank 0 merges all per-rank files at the end.
+    
+    /**
+     * @brief Get MPI-safe filename for per-rank HDF5 file
+     * @param directory Base output directory
+     * @param rank MPI rank (0 for serial execution)
+     * @param filename Base filename (default: ed_results.h5)
+     * @return Full path to per-rank file (e.g., ed_results_rank0.h5)
+     */
+    static std::string getPerRankFilePath(const std::string& directory,
+                                          int rank,
+                                          const std::string& filename = "ed_results.h5") {
+        // Extract base name and extension
+        size_t dot_pos = filename.rfind('.');
+        std::string base = (dot_pos != std::string::npos) ? filename.substr(0, dot_pos) : filename;
+        std::string ext = (dot_pos != std::string::npos) ? filename.substr(dot_pos) : "";
+        
+        return directory + "/" + base + "_rank" + std::to_string(rank) + ext;
+    }
+    
+    /**
+     * @brief Create per-rank HDF5 file for MPI-safe writing
+     * @param directory Output directory
+     * @param rank MPI rank
+     * @param filename Base filename (default: ed_results.h5)
+     * @return Full path to created file
+     */
+    static std::string createPerRankFile(const std::string& directory,
+                                         int rank,
+                                         const std::string& filename = "ed_results.h5") {
+        std::string filepath = getPerRankFilePath(directory, rank, filename);
+        
+        try {
+            // Check if file already exists
+            if (fileExists(filepath)) {
+                return filepath;
+            }
+            
+            // Create new file with standard groups
+            H5::H5File file(filepath, H5F_ACC_TRUNC);
+            
+            // Create standard groups
+            file.createGroup("/eigendata");
+            file.createGroup("/thermodynamics");
+            file.createGroup("/correlations");
+            file.createGroup("/dynamical");
+            file.createGroup("/dynamical/samples");
+            file.createGroup("/ftlm");
+            file.createGroup("/ftlm/samples");
+            file.createGroup("/ftlm/averaged");
+            file.createGroup("/tpq");
+            file.createGroup("/tpq/samples");
+            file.createGroup("/tpq/averaged");
+            
+            file.close();
+            std::cout << "Created per-rank HDF5 file: " << filepath << std::endl;
+        } catch (H5::Exception& e) {
+            throw std::runtime_error("Failed to create per-rank HDF5 file: " + std::string(e.getCDetailMsg()));
+        }
+        
+        return filepath;
+    }
+    
+    /**
+     * @brief Merge TPQ data from per-rank HDF5 files into unified output
+     * 
+     * This is called by rank 0 after all MPI ranks complete their work.
+     * It reads TPQ samples from each rank's file and writes them to the
+     * final unified HDF5 file.
+     * 
+     * @param directory Output directory containing per-rank files
+     * @param num_ranks Total number of MPI ranks
+     * @param output_filename Name of final output file (default: ed_results.h5)
+     * @param delete_temp_files Whether to delete per-rank files after merging
+     * @return true if successful
+     */
+    static bool mergePerRankTPQFiles(const std::string& directory,
+                                     int num_ranks,
+                                     const std::string& output_filename = "ed_results.h5",
+                                     bool delete_temp_files = true) {
+        std::string output_path = directory + "/" + output_filename;
+        
+        try {
+            std::cout << "\n==========================================\n";
+            std::cout << "Merging per-rank HDF5 files\n";
+            std::cout << "==========================================\n";
+            std::cout << "  Output: " << output_path << std::endl;
+            std::cout << "  Ranks to merge: " << num_ranks << std::endl;
+            
+            // Create or open the output file
+            std::string final_path = createOrOpenFile(directory, output_filename);
+            
+            int total_samples_merged = 0;
+            
+            for (int rank = 0; rank < num_ranks; ++rank) {
+                std::string rank_file = getPerRankFilePath(directory, rank, output_filename);
+                
+                if (!fileExists(rank_file)) {
+                    std::cout << "  Rank " << rank << ": file not found, skipping" << std::endl;
+                    continue;
+                }
+                
+                std::cout << "  Merging rank " << rank << " from: " << rank_file << std::endl;
+                
+                // Copy TPQ sample data from rank file to output file
+                int samples_copied = copyTPQSamples(rank_file, final_path);
+                total_samples_merged += samples_copied;
+                
+                std::cout << "    Copied " << samples_copied << " samples" << std::endl;
+                
+                // Delete temporary file if requested
+                if (delete_temp_files) {
+                    try {
+                        std::filesystem::remove(rank_file);
+                        std::cout << "    Deleted temporary file" << std::endl;
+                    } catch (const std::exception& e) {
+                        std::cerr << "    Warning: Could not delete " << rank_file << ": " << e.what() << std::endl;
+                    }
+                }
+            }
+            
+            std::cout << "==========================================\n";
+            std::cout << "Merge complete: " << total_samples_merged << " total samples\n";
+            std::cout << "==========================================\n";
+            
+            return true;
+        } catch (const std::exception& e) {
+            std::cerr << "Error merging per-rank files: " << e.what() << std::endl;
+            return false;
+        }
+    }
+    
+    /**
+     * @brief Copy all TPQ samples from source file to destination file
+     * @param source_path Path to source HDF5 file
+     * @param dest_path Path to destination HDF5 file
+     * @return Number of samples copied
+     */
+    static int copyTPQSamples(const std::string& source_path, const std::string& dest_path) {
+        int samples_copied = 0;
+        
+        try {
+            H5::H5File source(source_path, H5F_ACC_RDONLY);
+            H5::H5File dest(dest_path, H5F_ACC_RDWR);
+            
+            // Check if TPQ samples group exists in source
+            if (!source.nameExists("/tpq/samples")) {
+                source.close();
+                dest.close();
+                return 0;
+            }
+            
+            // Ensure destination groups exist
+            if (!dest.nameExists("/tpq")) {
+                dest.createGroup("/tpq");
+            }
+            if (!dest.nameExists("/tpq/samples")) {
+                dest.createGroup("/tpq/samples");
+            }
+            
+            H5::Group src_samples = source.openGroup("/tpq/samples");
+            hsize_t num_samples = src_samples.getNumObjs();
+            
+            for (hsize_t i = 0; i < num_samples; ++i) {
+                std::string sample_name = src_samples.getObjnameByIdx(i);
+                std::string src_path = "/tpq/samples/" + sample_name;
+                std::string dst_path = "/tpq/samples/" + sample_name;
+                
+                // Skip if already exists in destination
+                if (dest.nameExists(dst_path)) {
+                    continue;
+                }
+                
+                // Copy the entire sample group using H5Ocopy
+                if (H5Ocopy(source.getId(), src_path.c_str(), 
+                           dest.getId(), dst_path.c_str(),
+                           H5P_DEFAULT, H5P_DEFAULT) >= 0) {
+                    samples_copied++;
+                }
+            }
+            
+            src_samples.close();
+            source.close();
+            dest.close();
+            
+        } catch (H5::Exception& e) {
+            std::cerr << "Warning: Error copying TPQ samples: " << e.getDetailMsg() << std::endl;
+        }
+        
+        return samples_copied;
+    }
 };
 
 #endif // HDF5_IO_H

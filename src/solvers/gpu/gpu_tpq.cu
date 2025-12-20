@@ -299,7 +299,22 @@ bool GPUTPQSolver::saveTPQStateHDF5(const std::string& dir, size_t sample, doubl
         std::vector<std::complex<double>> h_state(N_);
         cudaMemcpy(h_state.data(), d_state_, N_ * sizeof(cuDoubleComplex), cudaMemcpyDeviceToHost);
         
-        std::string hdf5_path = HDF5IO::createOrOpenFile(dir, "ed_results.h5");
+        // MPI-safe: determine the correct HDF5 file path
+        std::string hdf5_path;
+        #ifdef WITH_MPI
+        int mpi_rank = 0;
+        MPI_Comm_rank(MPI_COMM_WORLD, &mpi_rank);
+        hdf5_path = HDF5IO::getPerRankFilePath(dir, mpi_rank, "ed_results.h5");
+        // Ensure file exists
+        if (!HDF5IO::fileExists(hdf5_path)) {
+            HDF5IO::createPerRankFile(dir, mpi_rank, "ed_results.h5");
+        }
+        #else
+        hdf5_path = HDF5IO::createOrOpenFile(dir, "ed_results.h5");
+        #endif
+        
+        // Ensure sample group exists
+        HDF5IO::ensureTPQSampleGroup(hdf5_path, sample);
         
         // Transform to full basis if using fixed-Sz
         if (fixed_sz_op != nullptr) {
@@ -528,8 +543,22 @@ void GPUTPQSolver::runMicrocanonicalTPQ(
     
     eigenvalues.clear();
     
-    // Initialize HDF5 file for TPQ data
-    std::string h5_file = dir + "/ed_results.h5";
+    // Initialize MPI-safe HDF5 file for TPQ data
+    std::string h5_file;
+    #ifdef WITH_MPI
+    int mpi_rank = 0;
+    MPI_Comm_rank(MPI_COMM_WORLD, &mpi_rank);
+    h5_file = HDF5IO::getPerRankFilePath(dir, mpi_rank, "ed_results.h5");
+    try {
+        if (!HDF5IO::fileExists(h5_file)) {
+            HDF5IO::createPerRankFile(dir, mpi_rank, "ed_results.h5");
+        }
+    } catch (const std::exception& e) {
+        std::cerr << "Warning: Could not initialize HDF5 TPQ storage: " << e.what() << std::endl;
+        h5_file = "";  // Disable HDF5 writing
+    }
+    #else
+    h5_file = dir + "/ed_results.h5";
     try {
         if (!HDF5IO::fileExists(h5_file)) {
             HDF5IO::createOrOpenFile(dir, "ed_results.h5");
@@ -538,6 +567,7 @@ void GPUTPQSolver::runMicrocanonicalTPQ(
         std::cerr << "Warning: Could not initialize HDF5 TPQ storage: " << e.what() << std::endl;
         h5_file = "";  // Disable HDF5 writing
     }
+    #endif
     
     // Calculate dimension entropy S = log2(N)
     double D_S = std::log2(static_cast<double>(N_));
@@ -822,8 +852,22 @@ void GPUTPQSolver::runCanonicalTPQ(
     
     energies.clear();
     
-    // Initialize HDF5 file for TPQ data
-    std::string h5_file = dir + "/ed_results.h5";
+    // Initialize MPI-safe HDF5 file for TPQ data
+    std::string h5_file;
+    #ifdef WITH_MPI
+    int mpi_rank = 0;
+    MPI_Comm_rank(MPI_COMM_WORLD, &mpi_rank);
+    h5_file = HDF5IO::getPerRankFilePath(dir, mpi_rank, "ed_results.h5");
+    try {
+        if (!HDF5IO::fileExists(h5_file)) {
+            HDF5IO::createPerRankFile(dir, mpi_rank, "ed_results.h5");
+        }
+    } catch (const std::exception& e) {
+        std::cerr << "Warning: Could not initialize HDF5 TPQ storage: " << e.what() << std::endl;
+        h5_file = "";  // Disable HDF5 writing
+    }
+    #else
+    h5_file = dir + "/ed_results.h5";
     try {
         if (!HDF5IO::fileExists(h5_file)) {
             HDF5IO::createOrOpenFile(dir, "ed_results.h5");
@@ -832,6 +876,7 @@ void GPUTPQSolver::runCanonicalTPQ(
         std::cerr << "Warning: Could not initialize HDF5 TPQ storage: " << e.what() << std::endl;
         h5_file = "";  // Disable HDF5 writing
     }
+    #endif
     
     int num_steps = static_cast<int>(beta_max / delta_beta);
     

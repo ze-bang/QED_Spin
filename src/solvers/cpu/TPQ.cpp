@@ -986,6 +986,10 @@ bool save_tpq_state(const ComplexVector& tpq_state, const std::string& filename,
 /**
  * Save a TPQ state to the unified HDF5 file
  * 
+ * MPI-Safe Implementation:
+ * When running with MPI, each rank writes to its own HDF5 file to avoid
+ * file locking conflicts. The per-rank files are merged at the end.
+ * 
  * @param tpq_state TPQ state vector to save
  * @param dir Output directory (HDF5 file will be created at dir/ed_results.h5)
  * @param sample Sample index
@@ -996,7 +1000,22 @@ bool save_tpq_state(const ComplexVector& tpq_state, const std::string& filename,
 bool save_tpq_state_hdf5(const ComplexVector& tpq_state, const std::string& dir,
                          size_t sample, double beta, FixedSzOperator* fixed_sz_op = nullptr) {
     try {
-        std::string hdf5_path = HDF5IO::createOrOpenFile(dir, "ed_results.h5");
+        // MPI-safe: determine the correct HDF5 file path
+        std::string hdf5_path;
+        #ifdef WITH_MPI
+        int mpi_rank = 0;
+        MPI_Comm_rank(MPI_COMM_WORLD, &mpi_rank);
+        hdf5_path = HDF5IO::getPerRankFilePath(dir, mpi_rank, "ed_results.h5");
+        // Ensure file exists
+        if (!HDF5IO::fileExists(hdf5_path)) {
+            HDF5IO::createPerRankFile(dir, mpi_rank, "ed_results.h5");
+        }
+        #else
+        hdf5_path = HDF5IO::createOrOpenFile(dir, "ed_results.h5");
+        #endif
+        
+        // Ensure sample group exists
+        HDF5IO::ensureTPQSampleGroup(hdf5_path, sample);
         
         // Transform to full basis if using fixed-Sz
         if (fixed_sz_op != nullptr) {
@@ -1477,6 +1496,11 @@ bool find_lowest_energy_tpq_state(
 /**
  * Initialize TPQ output files with appropriate headers
  * 
+ * MPI-Safe Implementation:
+ * When running with MPI, each rank writes to its own HDF5 file to avoid
+ * file locking conflicts. Files are named ed_results_rankN.h5 and are
+ * merged by rank 0 at the end of computation.
+ * 
  * @param dir Directory for output files
  * @param sample Current sample index
  * @param sublattice_size Size of sublattice for measurements
@@ -1492,7 +1516,16 @@ std::tuple<std::string, std::string, std::string, std::vector<std::string>, std:
     std::string ss_file = dir + "/SS_rand" + std::to_string(sample) + ".dat";
     std::string norm_file = dir + "/norm_rand" + std::to_string(sample) + ".dat";
     std::string flct_file = dir + "/flct_rand" + std::to_string(sample) + ".dat";
-    std::string h5_file = dir + "/ed_results.h5";
+    
+    // MPI-safe HDF5 file naming: each rank gets its own file
+    std::string h5_file;
+    int mpi_rank = 0;
+    #ifdef WITH_MPI
+    MPI_Comm_rank(MPI_COMM_WORLD, &mpi_rank);
+    h5_file = HDF5IO::getPerRankFilePath(dir, mpi_rank, "ed_results.h5");
+    #else
+    h5_file = dir + "/ed_results.h5";
+    #endif
     
     // Create vector of spin correlation files
     std::vector<std::string> spin_corr_files;
@@ -1532,12 +1565,19 @@ std::tuple<std::string, std::string, std::string, std::vector<std::string>, std:
         }
     }
     
-    // Initialize HDF5 file and sample group
+    // Initialize HDF5 file and sample group (MPI-safe: per-rank file)
     try {
-        // Create or open HDF5 file
+        #ifdef WITH_MPI
+        // Create per-rank HDF5 file
+        if (!HDF5IO::fileExists(h5_file)) {
+            HDF5IO::createPerRankFile(dir, mpi_rank, "ed_results.h5");
+        }
+        #else
+        // Create or open single HDF5 file
         if (!HDF5IO::fileExists(h5_file)) {
             HDF5IO::createOrOpenFile(dir, "ed_results.h5");
         }
+        #endif
         HDF5IO::ensureTPQSampleGroup(h5_file, sample);
     } catch (const std::exception& e) {
         std::cerr << "Warning: Could not initialize HDF5 TPQ storage: " << e.what() << std::endl;
@@ -2082,6 +2122,9 @@ void microcanonical_tpq(
                 all_eigenvalues.data(), recvcounts.data(), displs.data(), 
                 MPI_DOUBLE, 0, MPI_COMM_WORLD);
     
+    // Barrier to ensure all ranks have finished writing their per-rank HDF5 files
+    MPI_Barrier(MPI_COMM_WORLD);
+    
     // Update eigenvalues on rank 0 with complete set
     if (rank == 0) {
         eigenvalues = std::move(all_eigenvalues);
@@ -2089,6 +2132,9 @@ void microcanonical_tpq(
         std::cout << "MPI TPQ Computation Complete\n";
         std::cout << "Collected " << eigenvalues.size() << " sample energies\n";
         std::cout << "==========================================\n";
+        
+        // Merge per-rank HDF5 files into unified output
+        HDF5IO::mergePerRankTPQFiles(dir, size, "ed_results.h5", true);
         
         // Convert TPQ results to unified thermodynamic format
         convert_tpq_to_unified_thermodynamics(dir, num_samples);
@@ -2359,6 +2405,9 @@ void canonical_tpq(
                 all_energies.data(), recvcounts.data(), displs.data(), 
                 MPI_DOUBLE, 0, MPI_COMM_WORLD);
     
+    // Barrier to ensure all ranks have finished writing their per-rank HDF5 files
+    MPI_Barrier(MPI_COMM_WORLD);
+    
     // Update energies on rank 0 with complete set
     if (rank == 0) {
         energies = std::move(all_energies);
@@ -2366,6 +2415,9 @@ void canonical_tpq(
         std::cout << "MPI Canonical TPQ Computation Complete\n";
         std::cout << "Collected " << energies.size() << " sample energies\n";
         std::cout << "==========================================\n";
+        
+        // Merge per-rank HDF5 files into unified output
+        HDF5IO::mergePerRankTPQFiles(dir, size, "ed_results.h5", true);
         
         // Convert TPQ results to HDF5 format
         // dir IS the output directory, use it directly
