@@ -1659,6 +1659,9 @@ int main(int argc, char* argv[]) {
         }
     }
     
+    // Ensure all ranks wait for rank 0 to create the output directory
+    MPI_Barrier(MPI_COMM_WORLD);
+    
     // For INDEPENDENT mode with MPI: each rank uses its own file to avoid file locking conflicts
     if (uses_independent_mode && size > 1) {
         unified_h5_path = initPerRankDSSFFile(
