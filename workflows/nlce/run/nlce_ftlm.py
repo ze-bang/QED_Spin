@@ -27,6 +27,12 @@ import multiprocessing
 import numpy as np
 from tqdm import tqdm
 
+try:
+    import h5py
+    HAS_H5PY = True
+except ImportError:
+    HAS_H5PY = False
+
 
 def setup_logging(log_file):
     """Set up logging to file and console"""
@@ -116,8 +122,19 @@ def run_ftlm_for_cluster(args):
         
     except subprocess.CalledProcessError as e:
         # Check if output exists despite error (crash during cleanup)
-        expected_output = os.path.join(cluster_ftlm_dir, 'output', 'thermo', 'ftlm_thermo.txt')
+        output_dir = os.path.join(cluster_ftlm_dir, 'output')
         
+        # Check for HDF5 output file (new format) - check both locations
+        h5_file = os.path.join(output_dir, 'thermo', 'ed_results.h5')
+        if not os.path.exists(h5_file):
+            h5_file = os.path.join(output_dir, 'ed_results.h5')
+        if os.path.exists(h5_file):
+            logging.warning(f"FTLM for cluster {cluster_id} crashed with exit code {e.returncode} "
+                          f"but HDF5 output file exists - treating as success")
+            return True
+        
+        # Check for legacy text file
+        expected_output = os.path.join(output_dir, 'thermo', 'ftlm_thermo.txt')
         if os.path.exists(expected_output):
             logging.warning(f"FTLM for cluster {cluster_id} crashed with exit code {e.returncode} "
                           f"but output file exists - treating as success")
@@ -384,92 +401,78 @@ Example usage:
             # Iterate through all clusters
             for cluster_id, order, _ in tqdm(clusters, desc="Plotting FTLM thermodynamic data"):
                 cluster_ftlm_dir = os.path.join(ftlm_dir, f'cluster_{cluster_id}_order_{order}')
+                output_dir = os.path.join(cluster_ftlm_dir, "output")
                 
-                # Check if FTLM thermodynamic data exists
-                ftlm_thermo_file = os.path.join(cluster_ftlm_dir, "output/thermo/ftlm_thermo.txt")
-                if not os.path.exists(ftlm_thermo_file):
+                thermo_data = None
+                
+                # Try HDF5 file first (new format) - check both locations
+                h5_file = os.path.join(output_dir, "thermo", "ed_results.h5")
+                if not os.path.exists(h5_file):
+                    h5_file = os.path.join(output_dir, "ed_results.h5")
+                if HAS_H5PY and os.path.exists(h5_file):
+                    try:
+                        with h5py.File(h5_file, 'r') as f:
+                            if '/ftlm/averaged' in f:
+                                ftlm_grp = f['/ftlm/averaged']
+                                if 'temperatures' in ftlm_grp:
+                                    thermo_data = {
+                                        'T': ftlm_grp['temperatures'][:],
+                                        'energy': ftlm_grp['energy'][:] if 'energy' in ftlm_grp else None,
+                                        'energy_err': ftlm_grp['energy_error'][:] if 'energy_error' in ftlm_grp else None,
+                                        'specific_heat': ftlm_grp['specific_heat'][:] if 'specific_heat' in ftlm_grp else None,
+                                        'specific_heat_err': ftlm_grp['specific_heat_error'][:] if 'specific_heat_error' in ftlm_grp else None,
+                                        'entropy': ftlm_grp['entropy'][:] if 'entropy' in ftlm_grp else None,
+                                        'entropy_err': ftlm_grp['entropy_error'][:] if 'entropy_error' in ftlm_grp else None,
+                                        'free_energy': ftlm_grp['free_energy'][:] if 'free_energy' in ftlm_grp else None,
+                                        'free_energy_err': ftlm_grp['free_energy_error'][:] if 'free_energy_error' in ftlm_grp else None
+                                    }
+                    except Exception as e:
+                        logging.warning(f"Error reading HDF5 for cluster {cluster_id}: {e}")
+                
+                # Fall back to legacy text file
+                if thermo_data is None:
+                    ftlm_thermo_file = os.path.join(output_dir, "thermo/ftlm_thermo.txt")
+                    if not os.path.exists(ftlm_thermo_file):
+                        logging.warning(f"No FTLM thermodynamic data found for cluster {cluster_id}")
+                        continue
+                    
+                    try:
+                        data = np.loadtxt(ftlm_thermo_file, comments='#')
+                        data = np.atleast_2d(data)
+                        thermo_data = {
+                            'T': data[:, 0],
+                            'energy': data[:, 1] if data.shape[1] > 1 else None,
+                            'energy_err': data[:, 2] if data.shape[1] > 2 else None,
+                            'specific_heat': data[:, 3] if data.shape[1] > 3 else None,
+                            'specific_heat_err': data[:, 4] if data.shape[1] > 4 else None,
+                            'entropy': data[:, 5] if data.shape[1] > 5 else None,
+                            'entropy_err': data[:, 6] if data.shape[1] > 6 else None,
+                            'free_energy': data[:, 7] if data.shape[1] > 7 else None,
+                            'free_energy_err': data[:, 8] if data.shape[1] > 8 else None
+                        }
+                    except Exception as e:
+                        logging.error(f"Error reading text file for cluster {cluster_id}: {e}")
+                        continue
+                
+                if thermo_data is None:
                     logging.warning(f"No FTLM thermodynamic data found for cluster {cluster_id}")
                     continue
                 
-                # Load FTLM thermodynamic data
                 try:
-                    # Parse header to determine columns
-                    columns = []
-                    with open(ftlm_thermo_file, 'r') as f:
-                        for line in f:
-                            if not line.startswith('#'):
-                                break
-                            stripped = line.lstrip('#').strip()
-                            if not stripped:
-                                continue
-                            # Try to parse column information
-                            if 'Column' in stripped:
-                                parts = stripped.split(':')
-                                if len(parts) >= 2:
-                                    col_num = int(parts[0].replace('Column', '').strip()) - 1
-                                    col_name = parts[1].strip()
-                                    while len(columns) <= col_num:
-                                        columns.append(None)
-                                    columns[col_num] = col_name
-                            else:
-                                # Try to extract column names directly
-                                tokens = stripped.split()
-                                if tokens:
-                                    columns = tokens
-                    
-                    if not columns:
-                        # Default expected columns for FTLM output
-                        columns = ['Temperature', 'Energy', 'Energy_Error', 'Specific_Heat', 
-                                 'Specific_Heat_Error', 'Entropy', 'Entropy_Error', 
-                                 'Free_Energy', 'Free_Energy_Error']
-                    
-                    # Load the data
-                    data = np.loadtxt(ftlm_thermo_file, comments='#')
-                    data = np.atleast_2d(data)
-                    
-                    # Find column indices (case-insensitive matching)
-                    def find_col(names):
-                        norm_cols = [c.lower().replace('_', ' ') if c else '' for c in columns]
-                        for name in names:
-                            norm_name = name.lower().replace('_', ' ')
-                            if norm_name in norm_cols:
-                                return norm_cols.index(norm_name)
-                        return None
-                    
-                    temp_idx = find_col(['temperature', 'temp', 't'])
-                    if temp_idx is None:
-                        temp_idx = 0
-                    
-                    energy_idx = find_col(['energy', 'internal energy'])
-                    energy_err_idx = find_col(['energy error', 'energy err'])
-                    
-                    spec_heat_idx = find_col(['specific heat', 'specificheat', 'c'])
-                    spec_heat_err_idx = find_col(['specific heat error', 'specific heat err'])
-                    
-                    entropy_idx = find_col(['entropy', 's'])
-                    entropy_err_idx = find_col(['entropy error', 'entropy err'])
-                    
-                    free_energy_idx = find_col(['free energy', 'freeenergy', 'f'])
-                    free_energy_err_idx = find_col(['free energy error', 'free energy err'])
-                    
-                    # Extract temperature
-                    T = data[:, temp_idx]
-                    
-                    # Sort by temperature
+                    T = thermo_data['T']
                     sort_idx = np.argsort(T)
                     T = T[sort_idx]
-                    sorted_data = data[sort_idx]
                     
                     # Create plots
                     fig, axs = plt.subplots(2, 2, figsize=(12, 10))
                     fig.suptitle(f"FTLM Thermodynamic Properties for Cluster {cluster_id} (Order {order})")
                     
                     # Plot energy
-                    if energy_idx is not None:
-                        y = sorted_data[:, energy_idx]
+                    if thermo_data['energy'] is not None:
+                        y = thermo_data['energy'][sort_idx]
                         axs[0, 0].plot(T, y, 'r-', label='Energy')
-                        if energy_err_idx is not None and energy_err_idx < sorted_data.shape[1]:
-                            err = sorted_data[:, energy_err_idx]
+                        if thermo_data['energy_err'] is not None:
+                            err = thermo_data['energy_err'][sort_idx]
                             axs[0, 0].fill_between(T, y-err, y+err, alpha=0.3, color='r')
                     axs[0, 0].set_xlabel("Temperature")
                     axs[0, 0].set_ylabel("Energy per site")
@@ -478,11 +481,11 @@ Example usage:
                     axs[0, 0].legend()
                     
                     # Plot specific heat
-                    if spec_heat_idx is not None:
-                        y = sorted_data[:, spec_heat_idx]
+                    if thermo_data['specific_heat'] is not None:
+                        y = thermo_data['specific_heat'][sort_idx]
                         axs[0, 1].plot(T, y, 'b-', label='Specific Heat')
-                        if spec_heat_err_idx is not None and spec_heat_err_idx < sorted_data.shape[1]:
-                            err = sorted_data[:, spec_heat_err_idx]
+                        if thermo_data['specific_heat_err'] is not None:
+                            err = thermo_data['specific_heat_err'][sort_idx]
                             axs[0, 1].fill_between(T, y-err, y+err, alpha=0.3, color='b')
                     axs[0, 1].set_xlabel("Temperature")
                     axs[0, 1].set_ylabel("Specific Heat")
@@ -491,11 +494,11 @@ Example usage:
                     axs[0, 1].legend()
                     
                     # Plot entropy
-                    if entropy_idx is not None:
-                        y = sorted_data[:, entropy_idx]
+                    if thermo_data['entropy'] is not None:
+                        y = thermo_data['entropy'][sort_idx]
                         axs[1, 0].plot(T, y, 'g-', label='Entropy')
-                        if entropy_err_idx is not None and entropy_err_idx < sorted_data.shape[1]:
-                            err = sorted_data[:, entropy_err_idx]
+                        if thermo_data['entropy_err'] is not None:
+                            err = thermo_data['entropy_err'][sort_idx]
                             axs[1, 0].fill_between(T, y-err, y+err, alpha=0.3, color='g')
                     axs[1, 0].set_xlabel("Temperature")
                     axs[1, 0].set_ylabel("Entropy per site")
@@ -504,11 +507,11 @@ Example usage:
                     axs[1, 0].legend()
                     
                     # Plot free energy
-                    if free_energy_idx is not None:
-                        y = sorted_data[:, free_energy_idx]
+                    if thermo_data['free_energy'] is not None:
+                        y = thermo_data['free_energy'][sort_idx]
                         axs[1, 1].plot(T, y, 'm-', label='Free Energy')
-                        if free_energy_err_idx is not None and free_energy_err_idx < sorted_data.shape[1]:
-                            err = sorted_data[:, free_energy_err_idx]
+                        if thermo_data['free_energy_err'] is not None:
+                            err = thermo_data['free_energy_err'][sort_idx]
                             axs[1, 1].fill_between(T, y-err, y+err, alpha=0.3, color='m')
                     axs[1, 1].set_xlabel("Temperature")
                     axs[1, 1].set_ylabel("Free Energy per site")

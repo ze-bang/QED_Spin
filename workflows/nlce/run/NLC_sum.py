@@ -15,6 +15,13 @@ Calculates thermodynamic properties of a lattice using cluster expansion.
 
 import matplotlib.pyplot as plt
 
+try:
+    import h5py
+    HAS_H5PY = True
+except ImportError:
+    HAS_H5PY = False
+    print("Warning: h5py not installed. HDF5 file reading will not be available.")
+
 class NLCExpansion:
     def __init__(self, cluster_dir, eigenvalue_dir, temp_min, temp_max, num_temps, measure_spin, SI_units=False):
         """
@@ -56,8 +63,9 @@ class NLCExpansion:
             multiplicity = None
             num_vertices = None
             for line in lines:
-                if line.startswith("# Multiplicity:"):
-                    multiplicity = float(line.split(":")[1].strip())
+                # Handle both "# Multiplicity:" and "# Multiplicity (lattice constant):"
+                if line.startswith("# Multiplicity") and ":" in line:
+                    multiplicity = float(line.split(":")[-1].strip())
                 elif line.startswith("# Number of vertices:"):
                     num_vertices = int(line.split(":")[1].strip())
                 
@@ -84,21 +92,34 @@ class NLCExpansion:
                 'sp': None   # Will be loaded later    
             }
     def read_eigenvalues(self):
-        """Read eigenvalues for each cluster from ED output files."""
+        """Read eigenvalues for each cluster from ED output files (HDF5 format)."""
         for cluster_id in self.clusters:
-            eigenvalue_file = os.path.join(
+            cluster_output_dir = os.path.join(
                 self.eigenvalue_dir, 
-                f"cluster_{cluster_id}_order_{self.clusters[cluster_id]['order']}/output/eigenvalues.txt"
+                f"cluster_{cluster_id}_order_{self.clusters[cluster_id]['order']}/output"
             )
             
-            if not os.path.exists(eigenvalue_file):
-                print(f"Warning: Eigenvalue file not found for cluster {cluster_id}")
+            # Try HDF5 file first (new format)
+            h5_file = os.path.join(cluster_output_dir, "ed_results.h5")
+            if HAS_H5PY and os.path.exists(h5_file):
+                try:
+                    with h5py.File(h5_file, 'r') as f:
+                        if '/eigendata/eigenvalues' in f:
+                            eigenvalues = f['/eigendata/eigenvalues'][:]
+                            self.clusters[cluster_id]['eigenvalues'] = np.array(eigenvalues)
+                            continue
+                except Exception as e:
+                    print(f"Warning: Error reading HDF5 file for cluster {cluster_id}: {e}")
+            
+            # Fall back to legacy text file format
+            eigenvalue_file = os.path.join(cluster_output_dir, "eigenvalues.txt")
+            if os.path.exists(eigenvalue_file):
+                with open(eigenvalue_file, 'r') as f:
+                    eigenvalues = [float(line.strip()) for line in f if line.strip()]
+                self.clusters[cluster_id]['eigenvalues'] = np.array(eigenvalues)
                 continue
-                
-            with open(eigenvalue_file, 'r') as f:
-                eigenvalues = [float(line.strip()) for line in f if line.strip()]
-                
-            self.clusters[cluster_id]['eigenvalues'] = np.array(eigenvalues)
+            
+            print(f"Warning: Eigenvalue data not found for cluster {cluster_id}")
     
     def get_subclusters(self, cluster_id):
         """
@@ -259,16 +280,23 @@ class NLCExpansion:
                     continue
                     
                 if line.startswith('Cluster'):
-                    # Parse cluster header: "Cluster X (Order Y, Multiplicity Z):"
-                    match = re.match(r'Cluster (\d+) \(Order (\d+)\):', line)
+                    # Parse cluster header: "Cluster X (Order Y, L(c) = ...):" or "Cluster X (Order Y):"
+                    match = re.match(r'Cluster (\d+) \(Order (\d+)', line)
                     if match:
                         current_cluster = int(match.group(1))
                         self.subcluster_info[current_cluster] = {'subclusters': {}}
                         
-                elif line.startswith('Subclusters:'):
+                elif 'No subclusters' in line:
+                    # This cluster has no subclusters
+                    continue
+                        
+                elif 'Subclusters:' in line:
+                    if current_cluster is None:
+                        print(f"Warning: Found Subclusters line without cluster header: {line}")
+                        continue
                     # Parse subclusters: "(1, 2), (3, 4), ..."
-                    subclusters_str = line.replace('  Subclusters:', '').strip()
-                    if subclusters_str == "No subclusters" or not subclusters_str:
+                    subclusters_str = line.split('Subclusters:')[-1].strip()
+                    if not subclusters_str:
                         continue
                         
                     # Extract all (id, multiplicity) pairs

@@ -4,15 +4,71 @@ Simple FTLM Data Analyzer and ASCII Plotter
 
 Works without matplotlib - provides text-based analysis and ASCII plots.
 For publication-quality plots, install matplotlib and use plot_ftlm.py
+
+Supports both HDF5 (ed_results.h5) and legacy text (ftlm_thermo.txt) formats.
 """
 
 import sys
 import os
 import argparse
 
+try:
+    import h5py
+    HAS_H5PY = True
+except ImportError:
+    HAS_H5PY = False
 
-def load_ftlm_data(filename):
-    """Load FTLM results from file."""
+
+def load_ftlm_from_h5(filename):
+    """Load FTLM results from HDF5 file."""
+    data = {
+        'temperature': [],
+        'energy': [],
+        'energy_error': [],
+        'specific_heat': [],
+        'specific_heat_error': [],
+        'entropy': [],
+        'entropy_error': [],
+        'free_energy': [],
+        'free_energy_error': [],
+        'num_samples': None
+    }
+    
+    if not HAS_H5PY:
+        return None
+    
+    try:
+        with h5py.File(filename, 'r') as f:
+            if '/ftlm/averaged' not in f:
+                return None
+            
+            ftlm_grp = f['/ftlm/averaged']
+            
+            if 'temperatures' not in ftlm_grp:
+                return None
+            
+            data['temperature'] = list(ftlm_grp['temperatures'][:])
+            data['energy'] = list(ftlm_grp['energy'][:]) if 'energy' in ftlm_grp else []
+            data['energy_error'] = list(ftlm_grp['energy_error'][:]) if 'energy_error' in ftlm_grp else []
+            data['specific_heat'] = list(ftlm_grp['specific_heat'][:]) if 'specific_heat' in ftlm_grp else []
+            data['specific_heat_error'] = list(ftlm_grp['specific_heat_error'][:]) if 'specific_heat_error' in ftlm_grp else []
+            data['entropy'] = list(ftlm_grp['entropy'][:]) if 'entropy' in ftlm_grp else []
+            data['entropy_error'] = list(ftlm_grp['entropy_error'][:]) if 'entropy_error' in ftlm_grp else []
+            data['free_energy'] = list(ftlm_grp['free_energy'][:]) if 'free_energy' in ftlm_grp else []
+            data['free_energy_error'] = list(ftlm_grp['free_energy_error'][:]) if 'free_energy_error' in ftlm_grp else []
+            
+            # Try to get sample count from attribute
+            if 'total_samples' in ftlm_grp.attrs:
+                data['num_samples'] = int(ftlm_grp.attrs['total_samples'])
+            
+            return data
+    except Exception as e:
+        print(f"Error reading HDF5: {e}", file=sys.stderr)
+        return None
+
+
+def load_ftlm_from_txt(filename):
+    """Load FTLM results from text file."""
     data = {
         'temperature': [],
         'energy': [],
@@ -56,6 +112,33 @@ def load_ftlm_data(filename):
     
     data['num_samples'] = num_samples
     return data
+
+
+def load_ftlm_data(filename):
+    """Load FTLM data from either HDF5 or text file."""
+    # Check if it's an HDF5 file
+    if filename.endswith('.h5') or filename.endswith('.hdf5'):
+        data = load_ftlm_from_h5(filename)
+        if data is not None and data['temperature']:
+            return data
+        print("Warning: Could not read FTLM data from HDF5, trying text format...", file=sys.stderr)
+    
+    # Check if it's a directory (look for ed_results.h5)
+    if os.path.isdir(filename):
+        h5_file = os.path.join(filename, 'ed_results.h5')
+        if os.path.exists(h5_file):
+            data = load_ftlm_from_h5(h5_file)
+            if data is not None and data['temperature']:
+                return data
+        # Fall back to text file
+        txt_file = os.path.join(filename, 'thermo', 'ftlm_thermo.txt')
+        if os.path.exists(txt_file):
+            return load_ftlm_from_txt(txt_file)
+        print(f"Error: No FTLM data found in directory {filename}", file=sys.stderr)
+        return None
+    
+    # Try text format
+    return load_ftlm_from_txt(filename)
 
 
 def ascii_plot(x, y, width=60, height=20, xlabel='X', ylabel='Y'):
@@ -167,7 +250,7 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter
     )
     
-    parser.add_argument('input', help='FTLM output file (ftlm_thermo.txt)')
+    parser.add_argument('input', help='FTLM output file (ed_results.h5 or ftlm_thermo.txt) or output directory')
     parser.add_argument('--plot', action='store_true',
                        help='Show ASCII plots')
     parser.add_argument('--no-stats', action='store_true',
@@ -176,15 +259,15 @@ def main():
     args = parser.parse_args()
     
     if not os.path.exists(args.input):
-        print(f"Error: File not found: {args.input}", file=sys.stderr)
+        print(f"Error: File or directory not found: {args.input}", file=sys.stderr)
         return 1
     
     # Load data
     print(f"Loading FTLM data from: {args.input}")
     data = load_ftlm_data(args.input)
     
-    if not data['temperature']:
-        print("Error: No data found in file", file=sys.stderr)
+    if data is None or not data['temperature']:
+        print("Error: No FTLM data found", file=sys.stderr)
         return 1
     
     # Print statistics

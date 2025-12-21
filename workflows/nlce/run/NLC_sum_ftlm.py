@@ -6,7 +6,7 @@ This script performs NLCE summation using thermodynamic data obtained from
 Finite Temperature Lanczos Method (FTLM) calculations on each cluster.
 
 Key differences from standard NLC_sum.py:
-- Reads FTLM output files (ftlm_thermo.txt) instead of eigenvalue files
+- Reads FTLM output files (ed_results.h5 or legacy ftlm_thermo.txt) instead of eigenvalue files
 - Handles error propagation from FTLM sampling uncertainties
 - Works with pre-computed thermodynamic quantities
 """
@@ -18,6 +18,13 @@ import re
 import argparse
 import numpy as np
 from collections import defaultdict
+
+try:
+    import h5py
+    HAS_H5PY = True
+except ImportError:
+    HAS_H5PY = False
+    print("Warning: h5py not installed. HDF5 file reading will not be available.")
 
 
 class NLCExpansionFTLM:
@@ -85,56 +92,35 @@ class NLCExpansionFTLM:
         
         print(f"Loaded {len(self.clusters)} clusters")
     
-    def read_ftlm_data(self):
-        """Read FTLM thermodynamic data for each cluster."""
-        print("\nReading FTLM data...")
-        
-        for cluster_id in self.clusters:
-            order = self.clusters[cluster_id]['order']
-            
-            # Construct path to FTLM output
-            ftlm_file = os.path.join(
-                self.ftlm_dir, 
-                f'cluster_{cluster_id}_order_{order}',
-                'output', 'thermo', 'ftlm_thermo.txt'
-            )
-            
-            if not os.path.exists(ftlm_file):
-                print(f"Warning: FTLM data not found for cluster {cluster_id}: {ftlm_file}")
-                self.clusters[cluster_id]['has_data'] = False
-                continue
-            
-            # Read FTLM output file
-            # Format: Temperature  Energy  E_error  Specific_Heat  C_error  Entropy  S_error  Free_Energy  F_error
-            try:
-                data = np.loadtxt(ftlm_file)
+    def _read_ftlm_from_hdf5(self, h5_file, cluster_id):
+        """Read FTLM data from HDF5 file."""
+        try:
+            with h5py.File(h5_file, 'r') as f:
+                # Check for FTLM averaged data
+                if '/ftlm/averaged' not in f:
+                    return None
                 
-                if data.shape[0] != len(self.temp_values):
-                    print(f"Warning: Temperature grid mismatch for cluster {cluster_id}")
-                    print(f"Expected {len(self.temp_values)} points, got {data.shape[0]}")
-                    # Interpolate to match expected grid
-                    from scipy.interpolate import interp1d
-                    
-                    temp_read = data[:, 0]
-                    energy = interp1d(temp_read, data[:, 1], kind='cubic', fill_value='extrapolate')(self.temp_values)
-                    energy_err = interp1d(temp_read, data[:, 2], kind='cubic', fill_value='extrapolate')(self.temp_values)
-                    spec_heat = interp1d(temp_read, data[:, 3], kind='cubic', fill_value='extrapolate')(self.temp_values)
-                    spec_heat_err = interp1d(temp_read, data[:, 4], kind='cubic', fill_value='extrapolate')(self.temp_values)
-                    entropy = interp1d(temp_read, data[:, 5], kind='cubic', fill_value='extrapolate')(self.temp_values)
-                    entropy_err = interp1d(temp_read, data[:, 6], kind='cubic', fill_value='extrapolate')(self.temp_values)
-                    free_energy = interp1d(temp_read, data[:, 7], kind='cubic', fill_value='extrapolate')(self.temp_values)
-                    free_energy_err = interp1d(temp_read, data[:, 8], kind='cubic', fill_value='extrapolate')(self.temp_values)
-                else:
-                    energy = data[:, 1]
-                    energy_err = data[:, 2]
-                    spec_heat = data[:, 3]
-                    spec_heat_err = data[:, 4]
-                    entropy = data[:, 5]
-                    entropy_err = data[:, 6]
-                    free_energy = data[:, 7]
-                    free_energy_err = data[:, 8]
+                ftlm_grp = f['/ftlm/averaged']
                 
-                self.clusters[cluster_id]['thermo_data'] = {
+                # Check required datasets exist
+                required = ['temperatures', 'energy', 'specific_heat', 'entropy', 'free_energy']
+                if not all(key in ftlm_grp for key in required):
+                    return None
+                
+                temps = ftlm_grp['temperatures'][:]
+                energy = ftlm_grp['energy'][:]
+                spec_heat = ftlm_grp['specific_heat'][:]
+                entropy = ftlm_grp['entropy'][:]
+                free_energy = ftlm_grp['free_energy'][:]
+                
+                # Get error bars if available
+                energy_err = ftlm_grp['energy_error'][:] if 'energy_error' in ftlm_grp else np.zeros_like(energy)
+                spec_heat_err = ftlm_grp['specific_heat_error'][:] if 'specific_heat_error' in ftlm_grp else np.zeros_like(spec_heat)
+                entropy_err = ftlm_grp['entropy_error'][:] if 'entropy_error' in ftlm_grp else np.zeros_like(entropy)
+                free_energy_err = ftlm_grp['free_energy_error'][:] if 'free_energy_error' in ftlm_grp else np.zeros_like(free_energy)
+                
+                return {
+                    'temperatures': temps,
                     'energy': energy,
                     'energy_error': energy_err,
                     'specific_heat': spec_heat,
@@ -144,13 +130,85 @@ class NLCExpansionFTLM:
                     'free_energy': free_energy,
                     'free_energy_error': free_energy_err
                 }
-                self.clusters[cluster_id]['has_data'] = True
-                
-                print(f"  Cluster {cluster_id} (order {order}): loaded {len(self.temp_values)} temperature points")
-                
-            except Exception as e:
-                print(f"Error reading FTLM data for cluster {cluster_id}: {e}")
+        except Exception as e:
+            print(f"Warning: Error reading HDF5 FTLM data for cluster {cluster_id}: {e}")
+            return None
+    
+    def _read_ftlm_from_txt(self, ftlm_file, cluster_id):
+        """Read FTLM data from legacy text file."""
+        try:
+            data = np.loadtxt(ftlm_file)
+            return {
+                'temperatures': data[:, 0],
+                'energy': data[:, 1],
+                'energy_error': data[:, 2],
+                'specific_heat': data[:, 3],
+                'specific_heat_error': data[:, 4],
+                'entropy': data[:, 5],
+                'entropy_error': data[:, 6],
+                'free_energy': data[:, 7],
+                'free_energy_error': data[:, 8]
+            }
+        except Exception as e:
+            print(f"Error reading FTLM text file for cluster {cluster_id}: {e}")
+            return None
+    
+    def read_ftlm_data(self):
+        """Read FTLM thermodynamic data for each cluster (HDF5 or legacy text format)."""
+        print("\nReading FTLM data...")
+        
+        for cluster_id in self.clusters:
+            order = self.clusters[cluster_id]['order']
+            cluster_output_dir = os.path.join(
+                self.ftlm_dir, 
+                f'cluster_{cluster_id}_order_{order}',
+                'output'
+            )
+            
+            data = None
+            
+            # Try HDF5 file first (new format) - check both possible locations
+            h5_file = os.path.join(cluster_output_dir, "thermo", "ed_results.h5")
+            if not os.path.exists(h5_file):
+                h5_file = os.path.join(cluster_output_dir, "ed_results.h5")
+            if HAS_H5PY and os.path.exists(h5_file):
+                data = self._read_ftlm_from_hdf5(h5_file, cluster_id)
+            
+            # Fall back to legacy text file format
+            if data is None:
+                ftlm_file = os.path.join(cluster_output_dir, 'thermo', 'ftlm_thermo.txt')
+                if os.path.exists(ftlm_file):
+                    data = self._read_ftlm_from_txt(ftlm_file, cluster_id)
+            
+            if data is None:
+                print(f"Warning: FTLM data not found for cluster {cluster_id}")
                 self.clusters[cluster_id]['has_data'] = False
+                continue
+            
+            # Interpolate if temperature grid doesn't match
+            temps = data['temperatures']
+            if len(temps) != len(self.temp_values) or not np.allclose(temps, self.temp_values, rtol=1e-3):
+                print(f"  Cluster {cluster_id}: interpolating from {len(temps)} to {len(self.temp_values)} temperature points")
+                from scipy.interpolate import interp1d
+                
+                for key in ['energy', 'energy_error', 'specific_heat', 'specific_heat_error',
+                           'entropy', 'entropy_error', 'free_energy', 'free_energy_error']:
+                    interp_func = interp1d(temps, data[key], kind='cubic', fill_value='extrapolate')
+                    data[key] = interp_func(self.temp_values)
+            
+            self.clusters[cluster_id]['thermo_data'] = {
+                'energy': data['energy'],
+                'energy_error': data['energy_error'],
+                'specific_heat': data['specific_heat'],
+                'specific_heat_error': data['specific_heat_error'],
+                'entropy': data['entropy'],
+                'entropy_error': data['entropy_error'],
+                'free_energy': data['free_energy'],
+                'free_energy_error': data['free_energy_error']
+            }
+            self.clusters[cluster_id]['has_data'] = True
+            
+            print(f"  Cluster {cluster_id} (order {order}): loaded {len(self.temp_values)} temperature points")
     
     def read_subcluster_info(self):
         """Read subcluster information from file."""
