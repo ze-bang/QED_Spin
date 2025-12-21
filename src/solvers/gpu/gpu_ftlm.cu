@@ -581,43 +581,41 @@ ThermodynamicData GPUFTLMSolver::computeThermodynamics(
         double T = temperatures[t];
         double beta = 1.0 / T;
         
-        // Compute partition function and averages
+        // Compute partition function and observables using shifted energies
+        // Z = Σ_i w_i * exp(-β * (E_i - E_min))
         double Z = 0.0;
         double E_avg = 0.0;
         double E2_avg = 0.0;
         
+        std::vector<double> boltzmann_factors(n_states);
+        
+        // Compute Boltzmann factors with shift
         for (int i = 0; i < n_states; i++) {
-            double E_shifted = ritz_values[i] - e_min;
-            double boltzmann = std::exp(-beta * E_shifted);
-            double w_boltz = weights[i] * boltzmann;
+            double shifted_energy = ritz_values[i] - e_min;
+            boltzmann_factors[i] = weights[i] * std::exp(-beta * shifted_energy);
+            Z += boltzmann_factors[i];
+        }
+        
+        // Normalize and compute expectations
+        if (Z > 1e-300) {
+            for (int i = 0; i < n_states; i++) {
+                double prob = boltzmann_factors[i] / Z;
+                E_avg += prob * ritz_values[i];
+                E2_avg += prob * ritz_values[i] * ritz_values[i];
+            }
             
-            Z += w_boltz;
-            E_avg += ritz_values[i] * w_boltz;
-            E2_avg += ritz_values[i] * ritz_values[i] * w_boltz;
+            // Thermodynamic quantities
+            thermo.energy[t] = E_avg;
+            thermo.specific_heat[t] = beta * beta * (E2_avg - E_avg * E_avg);
+            thermo.entropy[t] = beta * (E_avg - e_min) + std::log(Z);
+            thermo.free_energy[t] = e_min - T * std::log(Z);
+        } else {
+            // Very low temperature - use ground state
+            thermo.energy[t] = e_min;
+            thermo.specific_heat[t] = 0.0;
+            thermo.entropy[t] = 0.0;
+            thermo.free_energy[t] = e_min;
         }
-        
-        if (Z < 1e-100) {
-            std::cerr << "Warning: Partition function too small at T = " << T << "\n";
-            continue;
-        }
-        
-        // Normalize
-        E_avg /= Z;
-        E2_avg /= Z;
-        
-        // Compute thermodynamic quantities
-        thermo.energy[t] = E_avg;
-        
-        // Specific heat: C = β² * (⟨E²⟩ - ⟨E⟩²)
-        double variance = E2_avg - E_avg * E_avg;
-        thermo.specific_heat[t] = beta * beta * variance;
-        
-        // Entropy: S = β⟨E⟩ + ln(Z) + βE_min
-        double log_Z = std::log(Z) + beta * e_min;
-        thermo.entropy[t] = beta * E_avg + log_Z;
-        
-        // Free energy: F = -T * ln(Z) + E_min
-        thermo.free_energy[t] = -T * log_Z;
     }
     
     auto end_time = std::chrono::high_resolution_clock::now();
