@@ -6,6 +6,7 @@
 #include <cuda_runtime.h>
 #include <cuComplex.h>
 #include <cublas_v2.h>
+#include <cusolverDn.h>
 #include <curand.h>
 #include <vector>
 #include <complex>
@@ -377,10 +378,22 @@ private:
     // cuBLAS handle
     cublasHandle_t cublas_handle_;
     
+    // cuSOLVER handle for tridiagonal diagonalization
+    cusolverDnHandle_t cusolver_handle_;
+    bool cusolver_initialized_;
+    
     // cuRAND generator for efficient batch random number generation
     curandGenerator_t curand_gen_;
     double* d_random_buffer_;        // Buffer for batch random numbers
     bool curand_initialized_;
+    
+    // GPU buffers for thermodynamics computation
+    double* d_ritz_values_;          // Ritz eigenvalues on GPU
+    double* d_weights_;              // Eigenstate weights on GPU
+    double* d_temperatures_;         // Temperature grid on GPU
+    double* d_thermo_output_;        // Output buffer for thermodynamics (4 * n_temps)
+    int thermo_buffer_capacity_;     // Current capacity of thermo buffers
+    bool thermo_buffers_allocated_;
     
     // CUDA streams for pipelining
     cudaStream_t compute_stream_;    // Main computation stream
@@ -439,11 +452,28 @@ private:
                                std::vector<double>& alpha,
                                std::vector<double>& beta);
     
-    // Diagonalize tridiagonal matrix (on CPU)
+    // Diagonalize tridiagonal matrix (CPU with LAPACKE - fallback)
     void diagonalizeTridiagonal(const std::vector<double>& alpha,
                                const std::vector<double>& beta,
                                std::vector<double>& ritz_values,
                                std::vector<double>& weights);
+    
+    // Diagonalize tridiagonal matrix (GPU with cuSOLVER)
+    void diagonalizeTridiagonalGPU(const std::vector<double>& alpha,
+                                   const std::vector<double>& beta,
+                                   std::vector<double>& ritz_values,
+                                   std::vector<double>& weights);
+    
+    // Compute thermodynamics on GPU
+    void computeThermodynamicsGPU(const std::vector<double>& ritz_values,
+                                  const std::vector<double>& weights,
+                                  const std::vector<double>& temperatures,
+                                  double e_min,
+                                  ThermodynamicData& thermo);
+    
+    // Allocate/free thermodynamics buffers
+    void allocateThermodynamicsBuffers(int n_states, int n_temps);
+    void freeThermodynamicsBuffers();
 
     // Helper functions for spectral calculations
     /**
