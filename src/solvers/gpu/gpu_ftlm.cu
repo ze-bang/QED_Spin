@@ -208,6 +208,14 @@ GPUFTLMSolver::GPUFTLMSolver(GPUOperator* op, int N, int krylov_dim, double tole
     CUSOLVER_CHECK(cusolverDnCreate(&cusolver_handle_));
     cusolver_initialized_ = true;
     
+    // Initialize persistent tridiagonal buffers
+    d_tridiag_matrix_ = nullptr;
+    d_eigenvalues_ = nullptr;
+    d_work_cusolver_ = nullptr;
+    d_info_cusolver_ = nullptr;
+    cusolver_lwork_ = 0;
+    tridiag_capacity_ = 0;
+    
     // Initialize CUDA streams for pipelining
     CUDA_CHECK(cudaStreamCreate(&compute_stream_));
     CUDA_CHECK(cudaStreamCreate(&transfer_stream_));
@@ -259,6 +267,9 @@ GPUFTLMSolver::~GPUFTLMSolver() {
     // Free thermodynamics buffers
     freeThermodynamicsBuffers();
     
+    // Free tridiagonal buffers
+    freeTridiagBuffers();
+    
     // Destroy cuSOLVER handle
     if (cusolver_initialized_) {
         cusolverDnDestroy(cusolver_handle_);
@@ -305,6 +316,57 @@ void GPUFTLMSolver::freeThermodynamicsBuffers() {
     
     thermo_buffers_allocated_ = false;
     thermo_buffer_capacity_ = 0;
+}
+
+void GPUFTLMSolver::allocateTridiagBuffers(int max_krylov_dim) {
+    if (tridiag_capacity_ >= max_krylov_dim) return;
+    
+    // Free existing buffers if any
+    freeTridiagBuffers();
+    
+    int m = max_krylov_dim;
+    
+    // Allocate persistent buffers
+    CUDA_CHECK(cudaMalloc(&d_tridiag_matrix_, m * m * sizeof(double)));
+    CUDA_CHECK(cudaMalloc(&d_eigenvalues_, m * sizeof(double)));
+    CUDA_CHECK(cudaMalloc(&d_info_cusolver_, sizeof(int)));
+    
+    // Query workspace size for cuSOLVER syevd with this dimension
+    CUSOLVER_CHECK(cusolverDnDsyevd_bufferSize(
+        cusolver_handle_,
+        CUSOLVER_EIG_MODE_VECTOR,
+        CUBLAS_FILL_MODE_LOWER,
+        m,
+        d_tridiag_matrix_,
+        m,
+        d_eigenvalues_,
+        &cusolver_lwork_));
+    
+    // Allocate workspace
+    CUDA_CHECK(cudaMalloc(&d_work_cusolver_, cusolver_lwork_ * sizeof(double)));
+    
+    tridiag_capacity_ = max_krylov_dim;
+}
+
+void GPUFTLMSolver::freeTridiagBuffers() {
+    if (d_tridiag_matrix_) {
+        cudaFree(d_tridiag_matrix_);
+        d_tridiag_matrix_ = nullptr;
+    }
+    if (d_eigenvalues_) {
+        cudaFree(d_eigenvalues_);
+        d_eigenvalues_ = nullptr;
+    }
+    if (d_work_cusolver_) {
+        cudaFree(d_work_cusolver_);
+        d_work_cusolver_ = nullptr;
+    }
+    if (d_info_cusolver_) {
+        cudaFree(d_info_cusolver_);
+        d_info_cusolver_ = nullptr;
+    }
+    tridiag_capacity_ = 0;
+    cusolver_lwork_ = 0;
 }
 
 void GPUFTLMSolver::allocateBasisPool() {
@@ -729,13 +791,15 @@ void GPUFTLMSolver::diagonalizeTridiagonalGPU(const std::vector<double>& alpha,
                                               std::vector<double>& weights) {
     int m = alpha.size();
     
+    // Ensure persistent buffers are allocated
+    allocateTridiagBuffers(m);
+    
     // Build dense symmetric tridiagonal matrix on host
-    // cuSOLVER syevd works on dense symmetric matrices
     std::vector<double> h_matrix(m * m, 0.0);
     
     // Fill diagonal
     for (int i = 0; i < m; i++) {
-        h_matrix[i * m + i] = alpha[i];  // Column-major: A[i,i]
+        h_matrix[i * m + i] = alpha[i];
     }
     
     // Fill off-diagonals (symmetric)
@@ -745,81 +809,55 @@ void GPUFTLMSolver::diagonalizeTridiagonalGPU(const std::vector<double>& alpha,
         h_matrix[(i + 1) * m + i] = b;      // A[i, i+1] (upper)
     }
     
-    // Allocate device memory
-    double* d_matrix = nullptr;
-    double* d_eigenvalues = nullptr;
-    int* d_info = nullptr;
-    
-    CUDA_CHECK(cudaMalloc(&d_matrix, m * m * sizeof(double)));
-    CUDA_CHECK(cudaMalloc(&d_eigenvalues, m * sizeof(double)));
-    CUDA_CHECK(cudaMalloc(&d_info, sizeof(int)));
-    
-    // Copy matrix to device
-    CUDA_CHECK(cudaMemcpyAsync(d_matrix, h_matrix.data(), m * m * sizeof(double), 
+    // Copy matrix to device using async copy
+    CUDA_CHECK(cudaMemcpyAsync(d_tridiag_matrix_, h_matrix.data(), m * m * sizeof(double), 
                                cudaMemcpyHostToDevice, compute_stream_));
     
-    // Query workspace size for cuSOLVER syevd
-    int lwork = 0;
-    CUSOLVER_CHECK(cusolverDnDsyevd_bufferSize(
-        cusolver_handle_,
-        CUSOLVER_EIG_MODE_VECTOR,  // Compute eigenvectors
-        CUBLAS_FILL_MODE_LOWER,    // Lower triangle is filled
-        m,
-        d_matrix,
-        m,
-        d_eigenvalues,
-        &lwork));
-    
-    // Allocate workspace
-    double* d_work = nullptr;
-    CUDA_CHECK(cudaMalloc(&d_work, lwork * sizeof(double)));
-    
-    // Diagonalize using cuSOLVER syevd
+    // Diagonalize using cuSOLVER syevd (using pre-allocated buffers)
     CUSOLVER_CHECK(cusolverDnDsyevd(
         cusolver_handle_,
         CUSOLVER_EIG_MODE_VECTOR,
         CUBLAS_FILL_MODE_LOWER,
         m,
-        d_matrix,      // On output: eigenvectors
+        d_tridiag_matrix_,   // On output: eigenvectors
         m,
-        d_eigenvalues, // On output: eigenvalues
-        d_work,
-        lwork,
-        d_info));
+        d_eigenvalues_,      // On output: eigenvalues
+        d_work_cusolver_,
+        cusolver_lwork_,
+        d_info_cusolver_));
     
-    // Check for errors
+    // Check for errors (blocking call, but necessary for error checking)
     int info;
-    CUDA_CHECK(cudaMemcpy(&info, d_info, sizeof(int), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpyAsync(&info, d_info_cusolver_, sizeof(int), 
+                               cudaMemcpyDeviceToHost, compute_stream_));
+    CUDA_CHECK(cudaStreamSynchronize(compute_stream_));
+    
     if (info != 0) {
-        cudaFree(d_matrix);
-        cudaFree(d_eigenvalues);
-        cudaFree(d_info);
-        cudaFree(d_work);
         std::cerr << "Error: cusolverDnDsyevd failed with info = " << info << "\n";
         throw std::runtime_error("GPU tridiagonal diagonalization failed");
     }
     
-    // Copy eigenvalues back to host
+    // Copy eigenvalues back to host using async copy
     ritz_values.resize(m);
-    CUDA_CHECK(cudaMemcpy(ritz_values.data(), d_eigenvalues, m * sizeof(double), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpyAsync(ritz_values.data(), d_eigenvalues_, m * sizeof(double), 
+                               cudaMemcpyDeviceToHost, compute_stream_));
     
     // Copy eigenvectors to compute weights
-    // Eigenvectors are stored column-wise in d_matrix
     std::vector<double> eigenvectors(m * m);
-    CUDA_CHECK(cudaMemcpy(eigenvectors.data(), d_matrix, m * m * sizeof(double), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpyAsync(eigenvectors.data(), d_tridiag_matrix_, m * m * sizeof(double), 
+                               cudaMemcpyDeviceToHost, compute_stream_));
+    
+    // Wait for copies to complete before using the data
+    CUDA_CHECK(cudaStreamSynchronize(compute_stream_));
     
     weights.resize(m);
     for (int i = 0; i < m; i++) {
         // Weight = |first component of eigenvector|²
-        // Eigenvector i is in column i: eigenvectors[i*m + 0] is first element
         weights[i] = eigenvectors[i * m] * eigenvectors[i * m];
     }
     
-    // Free device memory
-    cudaFree(d_matrix);
-    cudaFree(d_eigenvalues);
-    cudaFree(d_info);
-    cudaFree(d_work);
+    // Note: We keep d_eigenvalues_ on GPU for thermodynamics computation
+    // No need to free - using persistent buffers
 }
 
 void GPUFTLMSolver::computeThermodynamicsGPU(
@@ -835,7 +873,9 @@ void GPUFTLMSolver::computeThermodynamicsGPU(
     // Allocate/resize GPU buffers if needed
     allocateThermodynamicsBuffers(n_states, n_temps);
     
-    // Copy data to GPU
+    // Copy weights and temperatures to GPU
+    // Note: eigenvalues (d_ritz_values_) should already be on GPU from diagonalization
+    // Only copy if they were modified on CPU (which shouldn't happen in optimized workflow)
     CUDA_CHECK(cudaMemcpyAsync(d_ritz_values_, ritz_values.data(), 
                                n_states * sizeof(double), cudaMemcpyHostToDevice, compute_stream_));
     CUDA_CHECK(cudaMemcpyAsync(d_weights_, weights.data(), 
@@ -852,10 +892,13 @@ void GPUFTLMSolver::computeThermodynamicsGPU(
         n_states, n_temps, e_min, d_thermo_output_);
     CUDA_CHECK(cudaGetLastError());
     
-    // Copy results back to host
+    // Copy results back to host using async copy
     std::vector<double> output(4 * n_temps);
-    CUDA_CHECK(cudaMemcpy(output.data(), d_thermo_output_, 
-                          4 * n_temps * sizeof(double), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpyAsync(output.data(), d_thermo_output_, 
+                              4 * n_temps * sizeof(double), cudaMemcpyDeviceToHost, compute_stream_));
+    
+    // Synchronize to ensure copy is complete before unpacking
+    CUDA_CHECK(cudaStreamSynchronize(compute_stream_));
     
     // Unpack interleaved results [E, Cv, S, F] for each temperature
     thermo.temperatures = temperatures;

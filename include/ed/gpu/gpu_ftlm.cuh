@@ -395,6 +395,14 @@ private:
     int thermo_buffer_capacity_;     // Current capacity of thermo buffers
     bool thermo_buffers_allocated_;
     
+    // Persistent buffers for eigenvalue decomposition (avoid repeated allocation)
+    double* d_tridiag_matrix_;       // Tridiagonal matrix for cuSOLVER
+    double* d_eigenvalues_;          // Eigenvalues from cuSOLVER
+    double* d_work_cusolver_;        // cuSOLVER workspace
+    int* d_info_cusolver_;           // cuSOLVER info output
+    int cusolver_lwork_;             // cuSOLVER workspace size
+    int tridiag_capacity_;           // Maximum Krylov dimension allocated
+    
     // CUDA streams for pipelining
     cudaStream_t compute_stream_;    // Main computation stream
     cudaStream_t transfer_stream_;   // Data transfer stream
@@ -474,6 +482,8 @@ private:
     // Allocate/free thermodynamics buffers
     void allocateThermodynamicsBuffers(int n_states, int n_temps);
     void freeThermodynamicsBuffers();
+    void allocateTridiagBuffers(int max_krylov_dim);
+    void freeTridiagBuffers();
 
     // Helper functions for spectral calculations
     /**
