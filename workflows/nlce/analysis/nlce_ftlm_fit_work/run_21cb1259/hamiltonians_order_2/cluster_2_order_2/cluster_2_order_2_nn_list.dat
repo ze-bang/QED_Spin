@@ -1,0 +1,10 @@
+# Nearest neighbor list for cluster: cluster_2_order_2
+# Format: site_id, number_of_neighbors, [neighbor_ids]
+
+344 3 351 370 489
+348 3 349 350 351
+349 3 348 350 351
+350 3 348 349 351
+351 6 344 348 349 350 370 489
+370 3 344 351 489
+489 3 344 351 370

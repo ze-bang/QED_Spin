@@ -1,0 +1,39 @@
+2025-12-21 06:35:18,632 - INFO - ================================================================================
+2025-12-21 06:35:18,633 - INFO - NLCE Workflow with FTLM
+2025-12-21 06:35:18,633 - INFO - ================================================================================
+2025-12-21 06:35:18,633 - INFO - Max order: 2
+2025-12-21 06:35:18,633 - INFO - FTLM samples: 2
+2025-12-21 06:35:18,633 - INFO - Krylov dimension: 50
+2025-12-21 06:35:18,633 - INFO - Temperature range: [0.1, 2.0]
+2025-12-21 06:35:18,633 - INFO - ================================================================================
+2025-12-21 06:35:18,636 - INFO - ================================================================================
+2025-12-21 06:35:18,636 - INFO - Step 1: Generating topologically distinct clusters
+2025-12-21 06:35:18,636 - INFO - ================================================================================
+2025-12-21 06:35:18,636 - INFO - Running command: python3 /home/pc_linux/exact_diagonalization_clean/exact_diagonalization_cpp/workflows/nlce/analysis/../run/../prep/generate_pyrochlore_clusters.py --max_order=2 --output_dir=./nlce_ftlm_fit_work/run_c09ec096/clusters_order_2 --subunit=site
+2025-12-21 06:35:19,166 - INFO - Cluster generation completed successfully.
+2025-12-21 06:35:19,166 - INFO - Found 2 clusters to process.
+2025-12-21 06:35:19,166 - INFO - ================================================================================
+2025-12-21 06:35:19,166 - INFO - Step 2: Preparing Hamiltonian parameters for each cluster
+2025-12-21 06:35:19,166 - INFO - ================================================================================
+2025-12-21 06:35:19,169 - INFO - Preparing Hamiltonian for cluster 1 (order 1)
+2025-12-21 06:35:19,734 - INFO - Preparing Hamiltonian for cluster 2 (order 2)
+2025-12-21 06:35:20,302 - INFO - ================================================================================
+2025-12-21 06:35:20,302 - INFO - Step 3: Running FTLM for each cluster
+2025-12-21 06:35:20,302 - INFO - ================================================================================
+2025-12-21 06:35:21,308 - INFO - FTLM completed for cluster 1
+2025-12-21 06:35:20,459 - INFO - FTLM completed for cluster 2
+2025-12-21 06:35:20,460 - INFO - FTLM completed for 2 of 2 clusters
+2025-12-21 06:35:20,460 - INFO - ================================================================================
+2025-12-21 06:35:20,460 - INFO - Step 3.5: Plotting FTLM thermodynamic data for each cluster
+2025-12-21 06:35:20,460 - INFO - ================================================================================
+2025-12-21 06:35:21,019 - INFO - FTLM thermodynamic plots created for cluster 1
+2025-12-21 06:35:21,403 - INFO - FTLM thermodynamic plots created for cluster 2
+2025-12-21 06:35:21,403 - INFO - ================================================================================
+2025-12-21 06:35:21,403 - INFO - Step 4: Performing NLCE summation
+2025-12-21 06:35:21,403 - INFO - ================================================================================
+2025-12-21 06:35:21,403 - INFO - Running command: python3 /home/pc_linux/exact_diagonalization_clean/exact_diagonalization_cpp/workflows/nlce/analysis/../run/NLC_sum_ftlm.py --cluster_dir=./nlce_ftlm_fit_work/run_c09ec096/clusters_order_2/cluster_info_order_2 --ftlm_dir=./nlce_ftlm_fit_work/run_c09ec096/ftlm_results_order_2 --output_dir=./nlce_ftlm_fit_work/run_c09ec096/nlc_results_order_2 --plot --temp_min=0.1 --temp_max=2.0 --temp_bins=20 --resummation=auto --SI_units
+2025-12-21 06:35:23,604 - INFO - NLCE summation completed successfully.
+2025-12-21 06:35:23,605 - INFO - ================================================================================
+2025-12-21 06:35:23,605 - INFO - NLCE FTLM workflow completed!
+2025-12-21 06:35:23,605 - INFO - Results are available in ./nlce_ftlm_fit_work/run_c09ec096
+2025-12-21 06:35:23,605 - INFO - ================================================================================
