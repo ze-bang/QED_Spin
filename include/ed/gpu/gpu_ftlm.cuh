@@ -6,6 +6,7 @@
 #include <cuda_runtime.h>
 #include <cuComplex.h>
 #include <cublas_v2.h>
+#include <curand.h>
 #include <vector>
 #include <complex>
 #include <functional>
@@ -23,6 +24,18 @@ void save_ftlm_results(const FTLMResults& results, const std::string& filename);
  * Implements FTLM on GPU for computing finite-temperature thermodynamic properties.
  * Uses Lanczos method to build Krylov subspace and extract thermal properties from
  * the microcanonical spectrum approximated by Ritz values.
+ * 
+ * GPU Optimizations:
+ * - Pre-allocated Lanczos basis pool for reduced memory allocation overhead
+ * - CUDA streams for overlapping computation and data transfer
+ * - Batch cuRAND generator for efficient random vector initialization
+ * - cuBLAS for optimized vector operations (norm, axpy, dot, copy)
+ * - Minimal synchronization points for better GPU utilization
+ * 
+ * Performance Notes:
+ * - For small Hilbert spaces (<1000), CPU may be faster due to GPU overhead
+ * - For large systems (>10000 dimensions), GPU provides significant speedup
+ * - Thermodynamics computed on CPU (small data, transfer overhead not worthwhile)
  */
 class GPUFTLMSolver {
 public:
@@ -363,6 +376,11 @@ private:
     
     // cuBLAS handle
     cublasHandle_t cublas_handle_;
+    
+    // cuRAND generator for efficient batch random number generation
+    curandGenerator_t curand_gen_;
+    double* d_random_buffer_;        // Buffer for batch random numbers
+    bool curand_initialized_;
     
     // CUDA streams for pipelining
     cudaStream_t compute_stream_;    // Main computation stream

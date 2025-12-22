@@ -59,6 +59,23 @@ __global__ void normalizeKernel(cuDoubleComplex* vec, int N, double norm) {
 }
 
 /**
+ * @brief Convert uniform random doubles [0,1] to complex vector in [-1,1]
+ * Input: random_buffer with 2*N doubles (alternating real, imag)
+ * Output: complex_vec with N complex numbers
+ */
+__global__ void convertRandomToComplexKernel(const double* random_buffer, 
+                                             cuDoubleComplex* complex_vec, int N) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    
+    if (idx < N) {
+        // Convert from [0,1] to [-1,1]
+        double real = 2.0 * random_buffer[2*idx] - 1.0;
+        double imag = 2.0 * random_buffer[2*idx + 1] - 1.0;
+        complex_vec[idx] = make_cuDoubleComplex(real, imag);
+    }
+}
+
+/**
  * @brief Vector AXPY: y = alpha*x + y
  */
 __global__ void axpyKernel(const cuDoubleComplex* x, cuDoubleComplex* y,
@@ -98,6 +115,7 @@ GPUFTLMSolver::GPUFTLMSolver(GPUOperator* op, int N, int krylov_dim, double tole
       d_lanczos_basis_(nullptr), num_stored_vectors_(0), store_basis_(false),
       d_basis_pool_(nullptr), d_basis_ptrs_(nullptr), 
       basis_pool_allocated_(false), basis_pool_capacity_(0),
+      d_random_buffer_(nullptr), curand_initialized_(false),
       compute_stream_(nullptr), transfer_stream_(nullptr), streams_initialized_(false),
       gpu_memory_allocated_(false) {
     
@@ -111,6 +129,13 @@ GPUFTLMSolver::GPUFTLMSolver(GPUOperator* op, int N, int krylov_dim, double tole
     
     // Set cuBLAS to use compute stream
     CUBLAS_CHECK(cublasSetStream(cublas_handle_, compute_stream_));
+    
+    // Initialize cuRAND generator for efficient batch random number generation
+    curandCreateGenerator(&curand_gen_, CURAND_RNG_PSEUDO_DEFAULT);
+    curandSetStream(curand_gen_, compute_stream_);
+    // Allocate buffer for 2*N random doubles (real and imaginary parts)
+    CUDA_CHECK(cudaMalloc(&d_random_buffer_, 2 * N_ * sizeof(double)));
+    curand_initialized_ = true;
     
     // Initialize stats
     stats_.total_time = 0.0;
@@ -137,6 +162,12 @@ GPUFTLMSolver::GPUFTLMSolver(GPUOperator* op, int N, int krylov_dim, double tole
 GPUFTLMSolver::~GPUFTLMSolver() {
     freeMemory();
     freeBasisPool();
+    
+    // Destroy cuRAND generator and free random buffer
+    if (curand_initialized_) {
+        curandDestroyGenerator(curand_gen_);
+        if (d_random_buffer_) cudaFree(d_random_buffer_);
+    }
     
     // Destroy CUDA streams
     if (streams_initialized_) {
@@ -222,24 +253,38 @@ void GPUFTLMSolver::freeMemory() {
     if (d_temp_) cudaFree(d_temp_);
     if (d_temp2_) cudaFree(d_temp2_);
     
-    // Free stored Lanczos basis if allocated
-    if (d_lanczos_basis_ && store_basis_) {
-        for (int i = 0; i < num_stored_vectors_; i++) {
-            if (d_lanczos_basis_[i]) cudaFree(d_lanczos_basis_[i]);
-        }
-        delete[] d_lanczos_basis_;
-    }
+    // Note: d_lanczos_basis_ now points to the pre-allocated pool (d_basis_ptrs_)
+    // The pool is freed separately by freeBasisPool(), not here.
+    // Just reset the pointer to avoid dangling reference.
+    d_lanczos_basis_ = nullptr;
     
     gpu_memory_allocated_ = false;
 }
 
 void GPUFTLMSolver::initializeRandomVector(cuDoubleComplex* d_vec, unsigned int seed) {
+    // Use batch cuRAND generator instead of per-thread initialization
+    // This is significantly faster as it avoids initializing curand state per thread
+    
+    // Set the seed for reproducibility
+    curandSetPseudoRandomGeneratorSeed(curand_gen_, seed);
+    
+    // Generate 2*N uniform doubles [0,1] in one batch call
+    // cuRAND is already configured to use compute_stream_
+    curandStatus_t status = curandGenerateUniformDouble(curand_gen_, d_random_buffer_, 2 * N_);
+    if (status != CURAND_STATUS_SUCCESS) {
+        std::cerr << "curandGenerateUniformDouble failed with status " << status << std::endl;
+        throw std::runtime_error("cuRAND generation failed");
+    }
+    
+    // Synchronize on stream before kernel uses the data
+    CUDA_CHECK(cudaStreamSynchronize(compute_stream_));
+    
+    // Convert to complex vector with values in [-1,1]
     int threads = 256;
     int blocks = (N_ + threads - 1) / threads;
-    
-    GPUFTLMKernels::initRandomVectorKernel<<<blocks, threads>>>(d_vec, N_, seed);
+    GPUFTLMKernels::convertRandomToComplexKernel<<<blocks, threads, 0, compute_stream_>>>(
+        d_random_buffer_, d_vec, N_);
     CUDA_CHECK(cudaGetLastError());
-    CUDA_CHECK(cudaDeviceSynchronize());
     
     // Normalize
     normalizeVector(d_vec);
@@ -262,9 +307,9 @@ void GPUFTLMSolver::normalizeVector(cuDoubleComplex* d_vec) {
     
     int threads = 256;
     int blocks = (N_ + threads - 1) / threads;
-    GPUFTLMKernels::normalizeKernel<<<blocks, threads>>>(d_vec, N_, norm);
+    GPUFTLMKernels::normalizeKernel<<<blocks, threads, 0, compute_stream_>>>(d_vec, N_, norm);
     CUDA_CHECK(cudaGetLastError());
-    CUDA_CHECK(cudaDeviceSynchronize());
+    // No synchronization needed - subsequent operations will sync via cuBLAS
 }
 
 void GPUFTLMSolver::vectorCopy(const cuDoubleComplex* src, cuDoubleComplex* dst) {
@@ -430,11 +475,12 @@ int GPUFTLMSolver::buildLanczosTridiagonal(unsigned int seed,
     // Setup for full reorthogonalization if requested
     store_basis_ = full_reorth || (reorth_freq > 0);
     if (store_basis_) {
-        // Allocate storage for basis vectors
-        d_lanczos_basis_ = new cuDoubleComplex*[krylov_dim_];
-        for (int i = 0; i < krylov_dim_; i++) {
-            CUDA_CHECK(cudaMalloc(&d_lanczos_basis_[i], N_ * sizeof(cuDoubleComplex)));
+        // Use pre-allocated basis pool instead of per-sample allocation
+        // This significantly reduces GPU memory allocation overhead
+        if (!basis_pool_allocated_) {
+            allocateBasisPool();
         }
+        d_lanczos_basis_ = d_basis_ptrs_;  // Point to pre-allocated pool
         num_stored_vectors_ = 0;
     }
     
