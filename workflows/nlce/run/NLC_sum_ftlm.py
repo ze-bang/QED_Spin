@@ -285,8 +285,19 @@ class NLCExpansionFTLM:
         
         return subclusters
     
-    def calculate_weights(self):
-        """Calculate weights for all clusters using the NLC principle."""
+    def calculate_weights(self, verbose=True):
+        """
+        Calculate weights for all clusters using the NLC principle.
+        
+        Weight formula: W(c) = P(c) - Σ_s Y_{c,s} * W(s)
+        where:
+          - P(c) = property of cluster c (e.g., energy from ED/FTLM)
+          - Y_{c,s} = multiplicity of subcluster s in cluster c
+          - W(s) = weight of subcluster s (calculated recursively)
+        
+        Args:
+            verbose: If True, print detailed weight calculation breakdown
+        """
         self.read_subcluster_info()
         
         # Sort clusters by order
@@ -310,11 +321,25 @@ class NLCExpansionFTLM:
             'free_energy': {}
         }
         
-        print("\nCalculating NLC weights...")
+        print("\n" + "="*100)
+        print("CALCULATING NLC WEIGHTS")
+        print("="*100)
+        print("Formula: W(c) = P(c) - Σ_s Y_{c,s} * W(s)")
+        print("  where P(c) = cluster property, Y_{c,s} = subcluster multiplicity, W(s) = subcluster weight")
+        print("="*100)
+        
+        # Pick representative temperature indices for verbose output
+        n_temps = len(self.temp_values)
+        T_indices = {
+            'low': max(0, n_temps // 10),
+            'mid': n_temps // 2,
+            'high': min(n_temps - 1, 9 * n_temps // 10)
+        }
         
         for cluster_id, order in sorted_clusters:
             if not self.clusters[cluster_id].get('has_data', False):
-                print(f"  Cluster {cluster_id} (order {order}): skipping (no data)")
+                if verbose:
+                    print(f"\n  Cluster {cluster_id} (order {order}): SKIPPED (no data)")
                 continue
             
             multiplicity = self.clusters[cluster_id]['multiplicity']
@@ -322,6 +347,24 @@ class NLCExpansionFTLM:
             
             # Get thermodynamic data for this cluster
             thermo = self.clusters[cluster_id]['thermo_data']
+            
+            if verbose:
+                print(f"\n{'─'*100}")
+                print(f"  CLUSTER {cluster_id} (order={order}, L={multiplicity:.4f})")
+                print(f"{'─'*100}")
+                print(f"    Subclusters: {dict(subclusters) if subclusters else 'None (base cluster)'}")
+                
+                # Show raw cluster properties P(c) for ALL quantities
+                print(f"\n    RAW CLUSTER PROPERTIES P(c) from FTLM:")
+                print(f"      {'T':>10s}  {'P(E)':>12s}  {'P(Cv)':>12s}  {'P(S)':>12s}  {'P(F)':>12s}")
+                print(f"      {'-'*66}")
+                for label, idx in T_indices.items():
+                    T = self.temp_values[idx]
+                    P_E = thermo['energy'][idx]
+                    P_Cv = thermo['specific_heat'][idx]
+                    P_S = thermo['entropy'][idx]
+                    P_F = thermo['free_energy'][idx]
+                    print(f"      {T:10.4f}  {P_E:+12.6f}  {P_Cv:+12.6f}  {P_S:+12.6f}  {P_F:+12.6f}")
             
             # For each quantity, weight = cluster_value - sum of (subcluster_multiplicity * subcluster_weight)
             # NOTE: We do NOT multiply by cluster multiplicity here - that happens in sum_nlc()
@@ -333,18 +376,44 @@ class NLCExpansionFTLM:
                 weight_value = cluster_value.copy()
                 weight_error_sq = cluster_error**2
                 
+                subcluster_contribution = np.zeros_like(cluster_value)
+                
                 # Subtract weighted contributions from subclusters
                 for sub_id, sub_mult in subclusters.items():
                     if sub_id in self.weights[quantity]:
-                        weight_value -= sub_mult * self.weights[quantity][sub_id]
+                        sub_contrib = sub_mult * self.weights[quantity][sub_id]
+                        weight_value -= sub_contrib
+                        subcluster_contribution += sub_contrib
                         # Add subcluster weight error in quadrature
                         weight_error_sq += (sub_mult * self.weight_errors[quantity][sub_id])**2
                 
                 self.weights[quantity][cluster_id] = weight_value
                 self.weight_errors[quantity][cluster_id] = np.sqrt(weight_error_sq)
             
-            print(f"  Cluster {cluster_id} (order {order}): multiplicity={multiplicity}, "
-                  f"{len(subclusters)} subclusters")
+            # Verbose output for ALL quantities (not just energy)
+            if verbose:
+                print(f"\n    WEIGHT CALCULATIONS W(c) = P(c) - Σ Y_cs × W(s):")
+                print(f"      {'T':>10s}  {'W(E)':>12s}  {'W(Cv)':>12s}  {'W(S)':>12s}  {'W(F)':>12s}")
+                print(f"      {'-'*66}")
+                for label, idx in T_indices.items():
+                    T = self.temp_values[idx]
+                    W_E = self.weights['energy'][cluster_id][idx]
+                    W_Cv = self.weights['specific_heat'][cluster_id][idx]
+                    W_S = self.weights['entropy'][cluster_id][idx]
+                    W_F = self.weights['free_energy'][cluster_id][idx]
+                    print(f"      {T:10.4f}  {W_E:+12.6f}  {W_Cv:+12.6f}  {W_S:+12.6f}  {W_F:+12.6f}")
+                
+                # Show contribution to final sum: L(c) * W(c)
+                print(f"\n    CONTRIBUTIONS L(c) × W(c) = {multiplicity:.4f} × W(c):")
+                print(f"      {'T':>10s}  {'L×W(E)':>12s}  {'L×W(Cv)':>12s}  {'L×W(S)':>12s}  {'L×W(F)':>12s}")
+                print(f"      {'-'*66}")
+                for label, idx in T_indices.items():
+                    T = self.temp_values[idx]
+                    LW_E = multiplicity * self.weights['energy'][cluster_id][idx]
+                    LW_Cv = multiplicity * self.weights['specific_heat'][cluster_id][idx]
+                    LW_S = multiplicity * self.weights['entropy'][cluster_id][idx]
+                    LW_F = multiplicity * self.weights['free_energy'][cluster_id][idx]
+                    print(f"      {T:10.4f}  {LW_E:+12.6f}  {LW_Cv:+12.6f}  {LW_S:+12.6f}  {LW_F:+12.6f}")
     
     def euler_resummation(self, partial_sums, l=3):
         """
@@ -415,6 +484,11 @@ class NLCExpansionFTLM:
         Implementation follows standard NLCE practice (arXiv:1207.3366):
         Build ε table recursively, use EVEN entries only (odds diverge).
         
+        CAUTION: Wynn can blow up for:
+          - Alternating series (use Euler instead)
+          - Strongly diverging series
+          - Series with ratio > 1
+        
         Args:
             sequence: Array of partial sums S_n at each order
             return_all_evens: If True, return all even ε entries for stability analysis
@@ -431,13 +505,22 @@ class NLCExpansionFTLM:
             return result, np.zeros_like(self.temp_values)
         
         # Guard threshold for near-singular denominators
-        eps_den = 1e-14
+        eps_den = 1e-12  # Increased from 1e-14 for better stability
+        
+        # Maximum allowed value to prevent blow-up
+        # Use the range of input sequence as reference
+        seq_arr = np.array(sequence)
+        seq_range = np.max(np.abs(seq_arr), axis=0) + 1e-10
+        max_allowed = 100 * seq_range  # Allow 100x the input range
         
         # Initialize
         eps_prev = np.zeros((n, len(self.temp_values)))  # ε_{-1}^{(n)}
         eps_curr = np.array(sequence)                     # ε_{0}^{(n)}
         
-        evens = [eps_curr[0].copy()]  # Collect ε_{2m}^{(lowest n)}
+        evens = []  # Collect ε_{2m}^{(lowest n)} - start empty, will collect ε₂, ε₄, ...
+        
+        # Track if we've had a blow-up
+        blow_up_detected = False
         
         # Iterative construction of ε table
         iteration = 0
@@ -450,13 +533,24 @@ class NLCExpansionFTLM:
                 denom = eps_curr[i+1] - eps_curr[i]
                 
                 # Handle near-singular denominators
-                mask = np.abs(denom) < eps_den
+                mask_small = np.abs(denom) < eps_den
                 
                 # Standard ε recursion: ε_{k+1}^{(n)} = ε_{k-1}^{(n+1)} + 1/(ε_k^{(n+1)} - ε_k^{(n)})
-                eps_next[i] = np.where(
-                    mask,
+                raw_result = np.where(
+                    mask_small,
                     eps_curr[i+1],  # Fallback: use neighbor
                     eps_prev[i+1] + 1.0 / denom
+                )
+                
+                # Clamp to prevent blow-up
+                mask_blowup = np.abs(raw_result) > max_allowed
+                if np.any(mask_blowup):
+                    blow_up_detected = True
+                
+                eps_next[i] = np.where(
+                    mask_blowup,
+                    eps_curr[i+1],  # Fall back to previous value
+                    raw_result
                 )
             
             # Check for complete breakdown (all entries invalid)
@@ -467,23 +561,62 @@ class NLCExpansionFTLM:
             eps_prev = eps_curr
             eps_curr = eps_next
             
-            # Store even entries (iteration 1 → ε_2, iteration 3 → ε_4, etc.)
-            if iteration % 2 == 1:  # Odd iterations produce even ε
-                evens.append(eps_curr[0].copy())
+            # Store even entries (iteration 2 → ε_2, iteration 4 → ε_4, etc.)
+            # Wynn table: ε₀ = S_n, iteration 1 → ε₁, iteration 2 → ε₂ (even), etc.
+            if iteration % 2 == 0:  # Even iterations produce even ε
+                # Only store if not blown up
+                candidate = eps_curr[0].copy()
+                if not np.any(np.abs(candidate) > max_allowed):
+                    evens.append(candidate)
         
         if return_all_evens:
             return evens
         
-        # Use last two even entries for central value ± error
-        if len(evens) >= 2:
+        # Select best ε value from the sequence of evens
+        # Strategy: find where the sequence stabilizes, then use that value
+        # Wynn ε can oscillate or blow up at higher orders for some series
+        if len(evens) >= 3:
+            # Look for the point where consecutive values are closest (most stable)
+            changes = [np.mean(np.abs(evens[i+1] - evens[i])) for i in range(len(evens)-1)]
+            
+            # Find index of minimum change (most stable point)
+            min_change_idx = np.argmin(changes)
+            
+            # Use the value after the minimum change as best estimate
+            best_idx = min_change_idx + 1
+            best = evens[best_idx]
+            error = np.abs(evens[best_idx] - evens[min_change_idx]) if best_idx > 0 else np.zeros_like(evens[0])
+            
+            # But if the last values are very close (converged), use them instead
+            if changes[-1] < changes[min_change_idx] * 1.5:
+                best = evens[-1]
+                error = np.abs(evens[-1] - evens[-2])
+                
+        elif len(evens) >= 2:
             best = evens[-1]
             error = np.abs(evens[-1] - evens[-2])
+            
+            # If error is larger than the value itself, Wynn has failed
+            # Fall back to last partial sum
+            mask_failed = error > 2 * np.abs(best)
+            if np.any(mask_failed):
+                best = np.where(mask_failed, sequence[-1], best)
+                error = np.where(mask_failed, np.abs(sequence[-1] - sequence[-2]) if len(sequence) > 1 else 0, error)
+                
         elif len(evens) == 1:
+            # Only one accelerated value, use it
             best = evens[0]
             error = np.abs(sequence[-1] - evens[0]) if len(sequence) > 0 else np.zeros_like(self.temp_values)
         else:
+            # No acceleration possible, fall back to direct
             best = sequence[-1] if len(sequence) > 0 else np.zeros_like(self.temp_values)
             error = np.abs(sequence[-1] - sequence[-2]) if len(sequence) > 1 else np.zeros_like(self.temp_values)
+        
+        # Final sanity check: if result is way outside input range, fall back
+        mask_insane = np.abs(best) > 10 * seq_range
+        if np.any(mask_insane):
+            best = np.where(mask_insane, sequence[-1], best)
+            error = np.where(mask_insane, np.abs(sequence[-1] - sequence[-2]) if len(sequence) > 1 else 0, error)
         
         return best, error
     
@@ -511,11 +644,17 @@ class NLCExpansionFTLM:
         
         eps_den = 1e-14
         
-        # Initialize θ table (similar structure to ε)
-        theta_prev = np.zeros((n, len(self.temp_values)))
-        theta_curr = np.array(sequence)
+        # Maximum allowed value to prevent blow-up (similar to Wynn)
+        seq_arr = np.array(sequence)
+        seq_range = np.max(np.abs(seq_arr), axis=0) + 1e-10
+        max_allowed = 100 * seq_range
         
-        evens = [theta_curr[0].copy()]
+        # Initialize θ table: θ₋₁⁽ⁿ⁾ = 0, θ₀⁽ⁿ⁾ = Sₙ
+        # Standard Brezinski form uses two-step recursion for θ₂ₖ₊₁ and θ₂ₖ₊₂
+        theta_prev = np.zeros((n, len(self.temp_values)))  # θ_{k-1}
+        theta_curr = np.array(sequence)                     # θ_0 = S_n
+        
+        evens = []  # θ₀ - start empty, will collect θ₂, θ₄, ...
         
         iteration = 0
         while theta_curr.shape[0] > 1:
@@ -524,15 +663,23 @@ class NLCExpansionFTLM:
             theta_next = np.zeros((n_curr - 1, len(self.temp_values)))
             
             for i in range(n_curr - 1):
-                # θ recursion: θ_{k+1}^{(n)} = θ_{k-1}^{(n+1)} + (n+1)/(θ_k^{(n+1)} - θ_k^{(n)})
+                # Standard θ recursion: θ_{k+1}^{(n)} = θ_{k-1}^{(n+1)} + 1/(θ_k^{(n+1)} - θ_k^{(n)})
+                # This is the same form as Wynn ε, but convergence properties differ
                 denom = theta_curr[i+1] - theta_curr[i]
-                mask = np.abs(denom) < eps_den
+                mask_small = np.abs(denom) < eps_den
                 
-                # The (n+1) factor differentiates θ from ε
-                theta_next[i] = np.where(
-                    mask,
+                raw_result = np.where(
+                    mask_small,
                     theta_curr[i+1],
-                    theta_prev[i+1] + (i + 1) / denom
+                    theta_prev[i+1] + 1.0 / denom
+                )
+                
+                # Clamp to prevent blow-up
+                mask_blowup = np.abs(raw_result) > max_allowed
+                theta_next[i] = np.where(
+                    mask_blowup,
+                    theta_curr[i+1],
+                    raw_result
                 )
             
             if np.all(np.isnan(theta_next)) or np.all(np.isinf(theta_next)):
@@ -541,8 +688,11 @@ class NLCExpansionFTLM:
             theta_prev = theta_curr
             theta_curr = theta_next
             
-            if iteration % 2 == 1:
-                evens.append(theta_curr[0].copy())
+            # Store even entries on even iterations (θ₂, θ₄, ...)
+            if iteration % 2 == 0:
+                candidate = theta_curr[0].copy()
+                if not np.any(np.abs(candidate) > max_allowed):
+                    evens.append(candidate)
         
         if return_all_evens:
             return evens
@@ -660,8 +810,9 @@ class NLCExpansionFTLM:
         Automatically select best resummation method using convergence analysis.
         
         Decision tree follows NLCE best practices:
+        - Strongly divergent → conservative (truncate)
         - Alternating tail → Euler (designed for this)
-        - Non-alternating, enough terms → Wynn ε (NLCE default)
+        - Non-alternating, enough terms, convergent → Wynn ε (NLCE default)
         - Unstable/noisy → try Brezinski θ
         - Converged → direct
         
@@ -675,10 +826,51 @@ class NLCExpansionFTLM:
         conv = self.analyze_convergence(partial_sums)
         n = conv['n_terms']
         
+        # Check for strongly divergent series
+        strongly_divergent = False
+        if conv['ratio_test'] is not None and conv['ratio_test'] > 1.5:
+            strongly_divergent = True
+        
         if verbose:
             ratio_str = f"{conv['ratio_test']:.3f}" if conv['ratio_test'] is not None else 'N/A'
-            print(f"    Convergence analysis: n={n}, converged={conv['converged']}, "
-                  f"alternating={conv['alternating_tail']}, ratio={ratio_str}")
+            print(f"\n    ===== CONVERGENCE ANALYSIS =====")
+            print(f"    Number of terms: {n}")
+            print(f"    Converged: {conv['converged']}")
+            print(f"    Oscillatory: {conv['oscillatory']}")
+            print(f"    Alternating tail: {conv['alternating_tail']}")
+            print(f"    Ratio test (avg): {ratio_str}")
+            print(f"    Monotonic: {conv['monotonic']}")
+            print(f"    Stable: {conv['stable']}")
+            if strongly_divergent:
+                print(f"    ⚠ STRONG DIVERGENCE DETECTED (ratio > 1.5)")
+            
+            # Temperature-dependent ratio analysis
+            if conv['ratio_test'] is not None and n > 2:
+                print(f"\n    Temperature-dependent convergence:")
+                temps = self.temp_values
+                increments = np.diff(np.array(partial_sums), axis=0)
+                if len(increments) > 1:
+                    last_ratios = np.abs(increments[-1]) / (np.abs(increments[-2]) + 1e-15)
+                    T_low_idx = len(temps) // 10
+                    T_mid_idx = len(temps) // 2
+                    T_high_idx = 9 * len(temps) // 10
+                    print(f"      T={temps[T_low_idx]:.4f}: ratio={np.mean(last_ratios[T_low_idx-2:T_low_idx+2]):.3f}")
+                    print(f"      T={temps[T_mid_idx]:.4f}: ratio={np.mean(last_ratios[T_mid_idx-2:T_mid_idx+2]):.3f}")
+                    print(f"      T={temps[T_high_idx]:.4f}: ratio={np.mean(last_ratios[T_high_idx-2:T_high_idx+2]):.3f}")
+                    
+                    # Warn about divergence
+                    divergent_mask = last_ratios > 0.9
+                    if np.any(divergent_mask):
+                        T_divergent = temps[divergent_mask]
+                        print(f"      ⚠ WARNING: Series diverging at T < {np.max(T_divergent):.4f}")
+                        print(f"                 {np.sum(divergent_mask)} of {len(temps)} temperature points show ratio > 0.9")
+            print(f"    =================================")
+        
+        # 0) Strong divergence → conservative (don't use Wynn, it will blow up!)
+        if strongly_divergent:
+            if verbose:
+                print(f"    → Using 'conservative' method due to strong divergence")
+            return 'conservative'
         
         # 1) Already converged and stable → direct
         if conv['converged'] and not conv['oscillatory'] and conv['ratio_test'] and conv['ratio_test'] < 0.3:
@@ -692,19 +884,23 @@ class NLCExpansionFTLM:
         if n <= 3:
             return 'direct'
         
-        # 4) Enough terms and not alternating → Wynn ε (NLCE workhorse)
+        # 4) Ratio > 1 but not strongly divergent → use conservative (Wynn unstable)
+        if conv['ratio_test'] is not None and conv['ratio_test'] > 1.0:
+            return 'conservative'
+        
+        # 5) Enough terms and not alternating → Wynn ε (NLCE workhorse)
         if n >= 5 and not conv['alternating_tail']:
             return 'wynn'
         
-        # 5) Oscillatory but not cleanly alternating → try Brezinski θ
+        # 6) Oscillatory but not cleanly alternating → try Brezinski θ
         if conv['oscillatory'] and n >= 5:
             return 'theta'
         
-        # 6) Moderate number of terms (4-5), try Euler
+        # 7) Moderate number of terms (4-5), try Euler
         if 4 <= n < 5:
             return 'euler'
         
-        # 7) Default: Wynn if enough terms, else direct
+        # 8) Default: Wynn if enough terms, else direct
         return 'wynn' if n >= 5 else 'direct'
     
     def apply_resummation(self, partial_sums, method='auto', l_euler=3):
@@ -802,6 +998,26 @@ class NLCExpansionFTLM:
             val, err = self.wynn_epsilon(partial_sums)
         elif method == 'theta':
             val, err = self.brezinski_theta(partial_sums)
+        elif method == 'conservative':
+            # Conservative method: truncate to lower order if last term is too large
+            # This avoids blowup from divergent series
+            if n >= 3:
+                # Check if last increment is growing (sign of divergence)
+                inc_last = np.abs(partial_sums[-1] - partial_sums[-2])
+                inc_prev = np.abs(partial_sums[-2] - partial_sums[-3])
+                
+                # If last increment is larger than previous, truncate
+                growing = inc_last > inc_prev
+                
+                # Use N-1 terms where growing, full N otherwise
+                val = np.where(growing, partial_sums[-2], partial_sums[-1])
+                err = np.where(growing, inc_prev, inc_last)
+                
+                if np.any(growing):
+                    print(f"  Conservative: truncated to N-1 for {np.sum(growing)} temp points")
+            else:
+                val = partial_sums[-1]
+                err = np.abs(partial_sums[-1] - partial_sums[-2]) if n > 1 else np.zeros_like(val)
         else:
             print(f"  Warning: Unknown method '{method}', using direct")
             val = partial_sums[-1]
@@ -1053,16 +1269,32 @@ class NLCExpansionFTLM:
             'pipeline_B_method': resum_E['method']
         }
     
-    def sum_nlc(self, resummation_method='auto', order_cutoff=None, use_robust_pipeline=False):
+    def sum_nlc(self, resummation_method='auto', order_cutoff=None, use_robust_pipeline=False, verbose=True):
         """
         Perform the NLC summation with resummation for series acceleration.
+        
+        The NLCE sum formula is:
+            P_NLCE = Σ_c L(c) × W(c)
+        where:
+            L(c) = lattice constant (multiplicity) of cluster c
+            W(c) = weight of cluster c = P(c) - Σ_s Y_{c,s} × W(s)
+        
+        For debugging convergence, we break this into partial sums by order:
+            S_n = Σ_{c: order(c) ≤ n} L(c) × W(c)
+        
+        The increment at order n is:
+            δ_n = S_n - S_{n-1} = Σ_{c: order(c) = n} L(c) × W(c)
+        
+        For a converging series, |δ_n| should decrease with n.
         
         Args:
             resummation_method: Method for series acceleration ('auto', 'direct', 'euler', 'wynn')
             order_cutoff: Maximum order to include in summation
+            use_robust_pipeline: Use two-pipeline approach for specific heat
+            verbose: If True, print detailed per-order contribution breakdown
             
         Returns:
-            Dictionary with summed properties and errors
+            Dictionary with summed properties and errors, plus order-by-order data
         """
         print("\n" + "="*80)
         print(f"Performing NLC Summation (resummation: {resummation_method})")
@@ -1127,6 +1359,245 @@ class NLCExpansionFTLM:
                     order_error_contributions[order][quantity]
                 )
         
+        # Store order-by-order data in results for later analysis
+        results['order_contributions'] = dict(order_contributions)
+        results['order_errors'] = dict(order_error_contributions)
+        
+        # ========================================================================
+        # PEDANTIC PER-ORDER CONTRIBUTION REPORT
+        # ========================================================================
+        if verbose:
+            print("\n" + "="*120)
+            print("DETAILED PER-ORDER CONTRIBUTION REPORT")
+            print("="*120)
+            print("Formula: Contribution(order n) = Σ_{c: order(c)=n} L(c) × W(c)")
+            print("         Partial sum S_n = Σ_{k=1}^n Contribution(order k)")
+            print("         Increment δ_n = S_n - S_{n-1} = Contribution(order n)")
+            print("="*120)
+        
+        # Pick representative temperature indices for verbose output
+        n_temps = len(self.temp_values)
+        T_indices = {
+            'low': max(0, n_temps // 10),
+            'mid': n_temps // 2,
+            'high': min(n_temps - 1, 9 * n_temps // 10)
+        }
+        
+        # Store temperature indices for reference
+        results['T_indices'] = {label: self.temp_values[idx] for label, idx in T_indices.items()}
+        
+        # Count clusters per order
+        clusters_per_order = defaultdict(list)
+        for cluster_id in self.clusters:
+            if self.clusters[cluster_id].get('has_data', False):
+                order = self.clusters[cluster_id]['order']
+                if order_cutoff is None or order <= order_cutoff:
+                    clusters_per_order[order].append(cluster_id)
+        
+        results['clusters_per_order'] = {k: len(v) for k, v in clusters_per_order.items()}
+        
+        max_order = max(order_contributions.keys()) if order_contributions else 0
+        results['max_order'] = max_order
+        
+        if verbose:
+            # Print per-order contributions for energy (most informative)
+            print(f"\n{'─'*120}")
+            print("ENERGY (E) contributions by order:")
+            print(f"{'─'*120}")
+            print(f"{'Order':>6s} | {'#Clusters':>9s} | {'T_low':>12s} | {'T_mid':>12s} | {'T_high':>12s} | "
+                  f"{'δ_n(low)':>12s} | {'δ_n(mid)':>12s} | {'δ_n(high)':>12s} | {'Converging?':>12s}")
+            print(f"{'─'*120}")
+        
+        prev_partial = {k: np.zeros_like(self.temp_values) for k in T_indices}
+        for n in range(1, max_order + 1):
+            if n not in order_contributions:
+                continue
+            
+            n_clusters = len(clusters_per_order[n])
+            contrib_n = order_contributions[n]['energy']
+            
+            # Compute partial sum up to order n
+            partial_sum = np.zeros_like(self.temp_values)
+            for order in range(1, n + 1):
+                if order in order_contributions:
+                    partial_sum += order_contributions[order]['energy']
+            
+            # Increments
+            row = [f"{n:6d}", f"{n_clusters:9d}"]
+            increments = {}
+            for label, idx in T_indices.items():
+                row.append(f"{partial_sum[idx]:+12.6f}")
+            for label, idx in T_indices.items():
+                delta = partial_sum[idx] - prev_partial[label][idx] if n > 1 else partial_sum[idx]
+                increments[label] = delta
+                row.append(f"{delta:+12.6f}")
+            
+            # Convergence check: |δ_n| < |δ_{n-1}|?
+            if n > 1:
+                # Check if magnitude is decreasing at mid temperature
+                mid_idx = T_indices['mid']
+                curr_mag = np.abs(increments['mid'])
+                prev_contrib = order_contributions.get(n-1, {}).get('energy', np.zeros_like(self.temp_values))
+                prev_mag = np.abs(prev_contrib[mid_idx]) if n > 1 else float('inf')
+                converging = "✓ YES" if curr_mag < prev_mag else "✗ NO"
+            else:
+                converging = "—"
+            row.append(f"{converging:>12s}")
+            
+            if verbose:
+                print(" | ".join(row))
+            
+            # Update prev_partial
+            for label, idx in T_indices.items():
+                prev_partial[label][idx] = partial_sum[idx]
+        
+        if verbose:
+            # Print per-order contributions for specific heat
+            print(f"\n{'─'*120}")
+            print("SPECIFIC HEAT (Cv) contributions by order:")
+            print(f"{'─'*120}")
+            print(f"{'Order':>6s} | {'S_n(low)':>12s} | {'S_n(mid)':>12s} | {'S_n(high)':>12s} | "
+                  f"{'δ_n(low)':>12s} | {'δ_n(mid)':>12s} | {'δ_n(high)':>12s} | {'|δ_n/S_n|':>12s}")
+            print(f"{'─'*120}")
+        
+        prev_Cv = {k: 0.0 for k in T_indices}
+        for n in range(1, max_order + 1):
+            if n not in order_contributions:
+                continue
+            
+            # Compute partial sum up to order n
+            partial_sum = np.zeros_like(self.temp_values)
+            for order in range(1, n + 1):
+                if order in order_contributions:
+                    partial_sum += order_contributions[order]['specific_heat']
+            
+            row = [f"{n:6d}"]
+            deltas = {}
+            for label, idx in T_indices.items():
+                row.append(f"{partial_sum[idx]:+12.6f}")
+            for label, idx in T_indices.items():
+                delta = partial_sum[idx] - prev_Cv[label] if n > 1 else partial_sum[idx]
+                deltas[label] = delta
+                row.append(f"{delta:+12.6f}")
+            
+            # Relative change at mid temperature
+            mid_idx = T_indices['mid']
+            rel_change = np.abs(deltas['mid']) / (np.abs(partial_sum[mid_idx]) + 1e-15)
+            row.append(f"{rel_change:12.4f}")
+            
+            if verbose:
+                print(" | ".join(row))
+            
+            for label, idx in T_indices.items():
+                prev_Cv[label] = partial_sum[idx]
+        
+        if verbose:
+            # Print entropy contributions
+            print(f"\n{'─'*120}")
+            print("ENTROPY (S) contributions by order:")
+            print(f"{'─'*120}")
+            print(f"{'Order':>6s} | {'S_n(low)':>12s} | {'S_n(mid)':>12s} | {'S_n(high)':>12s} | "
+                  f"{'δ_n(low)':>12s} | {'δ_n(mid)':>12s} | {'δ_n(high)':>12s}")
+            print(f"{'─'*120}")
+        
+        prev_S = {k: 0.0 for k in T_indices}
+        for n in range(1, max_order + 1):
+            if n not in order_contributions:
+                continue
+            
+            partial_sum = np.zeros_like(self.temp_values)
+            for order in range(1, n + 1):
+                if order in order_contributions:
+                    partial_sum += order_contributions[order]['entropy']
+            
+            row = [f"{n:6d}"]
+            for label, idx in T_indices.items():
+                row.append(f"{partial_sum[idx]:+12.6f}")
+            for label, idx in T_indices.items():
+                delta = partial_sum[idx] - prev_S[label] if n > 1 else partial_sum[idx]
+                row.append(f"{delta:+12.6f}")
+            
+            if verbose:
+                print(" | ".join(row))
+            
+            for label, idx in T_indices.items():
+                prev_S[label] = partial_sum[idx]
+        
+        # Convergence summary
+        if verbose:
+            print(f"\n{'='*120}")
+            print("CONVERGENCE SUMMARY")
+            print(f"{'='*120}")
+        
+        # Check convergence of increments and store results
+        convergence_info = {}
+        for quantity in ['energy', 'specific_heat', 'entropy']:
+            if max_order < 2:
+                continue
+            
+            # Get last 3 increments at mid temperature
+            mid_idx = T_indices['mid']
+            increments = []
+            prev = 0.0
+            for n in range(1, max_order + 1):
+                if n in order_contributions:
+                    curr = 0.0
+                    for o in range(1, n + 1):
+                        if o in order_contributions:
+                            curr += order_contributions[o][quantity][mid_idx]
+                    increments.append(curr - prev)
+                    prev = curr
+            
+            if len(increments) >= 2:
+                # Check if series is converging
+                last_inc = increments[-1]
+                second_last_inc = increments[-2]
+                ratio = np.abs(last_inc) / (np.abs(second_last_inc) + 1e-15)
+                
+                # Check for alternating behavior
+                if len(increments) >= 3:
+                    signs = np.sign(increments[-3:])
+                    alternating = signs[0] * signs[1] < 0 and signs[1] * signs[2] < 0
+                else:
+                    alternating = False
+                
+                # Determine convergence status
+                if ratio < 0.5:
+                    status = 'converging_well'
+                elif ratio < 1.0:
+                    status = 'converging_slowly'
+                else:
+                    status = 'diverging' if not alternating else 'oscillating'
+                
+                convergence_info[quantity] = {
+                    'last_increment': last_inc,
+                    'second_last_increment': second_last_inc,
+                    'ratio': ratio,
+                    'alternating': alternating,
+                    'status': status
+                }
+                
+                if verbose:
+                    print(f"\n  {quantity.upper()}:")
+                    print(f"    Last increment (δ_{max_order}):          {last_inc:+.6f}")
+                    print(f"    Second-last increment (δ_{max_order-1}): {second_last_inc:+.6f}")
+                    print(f"    Ratio |δ_{max_order}|/|δ_{max_order-1}|: {ratio:.4f}")
+                    print(f"    Alternating sign pattern: {'YES' if alternating else 'NO'}")
+                    
+                    if ratio < 0.5:
+                        print(f"    Status: ✓ CONVERGING WELL (ratio < 0.5)")
+                    elif ratio < 1.0:
+                        print(f"    Status: ⚠ CONVERGING SLOWLY (0.5 < ratio < 1.0)")
+                    else:
+                        print(f"    Status: ✗ DIVERGING or OSCILLATING (ratio > 1.0)")
+                        if alternating:
+                            print(f"             → Euler resummation recommended for alternating series")
+        
+        results['convergence_info'] = convergence_info
+        
+        if verbose:
+            print(f"\n{'='*120}")
+        
         # Build partial sums by order for resummation
         # Partial sum S_n = sum of all weights with order <= n
         max_order = max(order_contributions.keys()) if order_contributions else 0
@@ -1155,6 +1626,10 @@ class NLCExpansionFTLM:
             
             all_partial_sums[quantity] = partial_sums
             all_partial_errors[quantity] = partial_errors
+        
+        # Store partial sums for post-analysis
+        results['partial_sums'] = all_partial_sums
+        results['partial_errors'] = all_partial_errors
         
         # Use robust two-pipeline approach for specific heat if requested
         if use_robust_pipeline and len(all_partial_sums['energy']) > 0:
@@ -1231,14 +1706,15 @@ class NLCExpansionFTLM:
                     results[f'{quantity}_error'] = np.zeros_like(self.temp_values)
                     results[f'{quantity}_method'] = 'none'
         
-        # Print order-by-order contributions at a reference temperature
+        # Print detailed order-by-order contributions with change detection
         ref_temp_idx = len(self.temp_values) // 2
         ref_temp = self.temp_values[ref_temp_idx]
         
-        print(f"\nOrder-by-order contributions at T = {ref_temp:.4f}:")
-        print("-" * 80)
-        print(f"{'Order':<8} {'Energy':<15} {'Spec Heat':<15} {'Entropy':<15} {'Free Energy':<15}")
-        print("-" * 80)
+        print(f"\n" + "="*100)
+        print(f"ORDER-BY-ORDER ANALYSIS at T = {ref_temp:.4f}")
+        print("="*100)
+        print(f"{'Order':<8} {'Energy':<15} {'ΔE%':<12} {'Spec Heat':<15} {'ΔC%':<12} {'Entropy':<15} {'ΔS%':<12}")
+        print("-" * 100)
         
         cumulative = {
             'energy': 0.0,
@@ -1247,34 +1723,108 @@ class NLCExpansionFTLM:
             'free_energy': 0.0
         }
         
-        for order in sorted(order_contributions.keys()):
+        previous = {
+            'energy': 0.0,
+            'specific_heat': 0.0,
+            'entropy': 0.0,
+            'free_energy': 0.0
+        }
+        
+        sorted_orders = sorted(order_contributions.keys())
+        large_change_detected = False
+        
+        for i, order in enumerate(sorted_orders):
             contrib = order_contributions[order]
-            print(f"{order:<8} {contrib['energy'][ref_temp_idx]:<15.6e} "
-                  f"{contrib['specific_heat'][ref_temp_idx]:<15.6e} "
-                  f"{contrib['entropy'][ref_temp_idx]:<15.6e} "
-                  f"{contrib['free_energy'][ref_temp_idx]:<15.6e}")
             
+            # Calculate cumulative sum
             for quantity in ['energy', 'specific_heat', 'entropy', 'free_energy']:
                 cumulative[quantity] += contrib[quantity][ref_temp_idx]
+            
+            # Calculate percentage changes
+            if i > 0:
+                delta_E = ((cumulative['energy'] - previous['energy']) / (abs(previous['energy']) + 1e-15)) * 100
+                delta_C = ((cumulative['specific_heat'] - previous['specific_heat']) / (abs(previous['specific_heat']) + 1e-15)) * 100
+                delta_S = ((cumulative['entropy'] - previous['entropy']) / (abs(previous['entropy']) + 1e-15)) * 100
+            else:
+                delta_E = delta_C = delta_S = 0.0
+            
+            # Flag large changes
+            warning = ""
+            if abs(delta_E) > 20 or abs(delta_C) > 20 or abs(delta_S) > 20:
+                warning = "  ⚠ LARGE CHANGE"
+                large_change_detected = True
+            
+            print(f"{order:<8} {cumulative['energy']:<15.6e} {delta_E:<12.2f} "
+                  f"{cumulative['specific_heat']:<15.6e} {delta_C:<12.2f} "
+                  f"{cumulative['entropy']:<15.6e} {delta_S:<12.2f}{warning}")
+            
+            # Store previous for next iteration
+            for quantity in ['energy', 'specific_heat', 'entropy', 'free_energy']:
+                previous[quantity] = cumulative[quantity]
         
-        print("-" * 80)
-        print(f"{'Direct':<8} {cumulative['energy']:<15.6e} "
-              f"{cumulative['specific_heat']:<15.6e} "
-              f"{cumulative['entropy']:<15.6e} "
-              f"{cumulative['free_energy']:<15.6e}")
+        print("-" * 100)
+        print(f"{'Direct':<8} {cumulative['energy']:<15.6e} {'Final':<12} "
+              f"{cumulative['specific_heat']:<15.6e} {'Final':<12} "
+              f"{cumulative['entropy']:<15.6e} {'Final':<12}")
         
         if resummation_method != 'direct':
-            print(f"{'Resummed':<8} {results['energy'][ref_temp_idx]:<15.6e} "
-                  f"{results['specific_heat'][ref_temp_idx]:<15.6e} "
-                  f"{results['entropy'][ref_temp_idx]:<15.6e} "
-                  f"{results['free_energy'][ref_temp_idx]:<15.6e}")
+            resum_dE = ((results['energy'][ref_temp_idx] - cumulative['energy']) / (abs(cumulative['energy']) + 1e-15)) * 100
+            resum_dC = ((results['specific_heat'][ref_temp_idx] - cumulative['specific_heat']) / (abs(cumulative['specific_heat']) + 1e-15)) * 100
+            resum_dS = ((results['entropy'][ref_temp_idx] - cumulative['entropy']) / (abs(cumulative['entropy']) + 1e-15)) * 100
+            
+            print(f"{'Resummed':<8} {results['energy'][ref_temp_idx]:<15.6e} {resum_dE:<12.2f} "
+                  f"{results['specific_heat'][ref_temp_idx]:<15.6e} {resum_dC:<12.2f} "
+                  f"{results['entropy'][ref_temp_idx]:<15.6e} {resum_dS:<12.2f}")
         
-        print("="*80)
+        print("="*100)
+        
+        # Detailed diagnostics if large changes detected
+        if large_change_detected:
+            print("\n" + "!"*100)
+            print("LARGE CHANGES DETECTED BETWEEN ORDERS")
+            print("!"*100)
+            print("\nPossible causes:")
+            print("  1. New cluster topology appears at this order (expected)")
+            print("  2. Numerical instability in FTLM for larger clusters")
+            print("  3. Insufficient FTLM samples or Krylov dimension")
+            print("  4. Bug in cluster generation or Hamiltonian setup")
+            print("  5. Series entering divergent regime (check ratio test)")
+            print("\nRecommendations:")
+            print("  - Check individual cluster FTLM outputs for anomalies")
+            print("  - Increase --ftlm_samples and --krylov_dim")
+            print("  - Verify cluster generation at this order")
+            print("  - Run convergence radius analysis tool")
+            print("  - Compare with lower orders to isolate problematic clusters")
+            print("\nDetailed order contribution breakdown:")
+            print("-" * 100)
+            
+            # Show increment analysis
+            for i, order in enumerate(sorted_orders):
+                contrib = order_contributions[order]
+                print(f"\nOrder {order} contributions (increment from order {order}):")  
+                print(f"  Energy:       {contrib['energy'][ref_temp_idx]:.6e}")
+                print(f"  Spec Heat:    {contrib['specific_heat'][ref_temp_idx]:.6e}")
+                print(f"  Entropy:      {contrib['entropy'][ref_temp_idx]:.6e}")
+                print(f"  Free Energy:  {contrib['free_energy'][ref_temp_idx]:.6e}")
+                
+                # Check for anomalously large single-order contributions
+                if i > 0:
+                    prev_contrib = order_contributions[sorted_orders[i-1]]
+                    ratio_E = abs(contrib['energy'][ref_temp_idx]) / (abs(prev_contrib['energy'][ref_temp_idx]) + 1e-15)
+                    ratio_C = abs(contrib['specific_heat'][ref_temp_idx]) / (abs(prev_contrib['specific_heat'][ref_temp_idx]) + 1e-15)
+                    
+                    if ratio_E > 5 or ratio_C > 5:
+                        print(f"  ⚠ INCREMENT RATIO vs Order {sorted_orders[i-1]}: Energy={ratio_E:.2f}x, SpecHeat={ratio_C:.2f}x")
+                        print(f"     This order contributes significantly more than previous order!")
+            
+            print("\n" + "!"*100)
+        
+        print("="*100)
         
         return results
     
     def run(self, resummation_method='euler', order_cutoff=None, use_robust_pipeline=False, 
-            n_spins_per_unit=4):
+            n_spins_per_unit=4, verbose=True):
         """
         Run the complete NLC calculation.
         
@@ -1283,11 +1833,12 @@ class NLCExpansionFTLM:
             order_cutoff: Maximum order
             use_robust_pipeline: Use two-pipeline cross-validation for C(T)
             n_spins_per_unit: Spins per expansion unit (4 for pyrochlore tetrahedron)
+            verbose: Print detailed per-order contribution breakdown
         """
         self.read_clusters()
         self.read_ftlm_data()
-        self.calculate_weights()
-        results = self.sum_nlc(resummation_method, order_cutoff, use_robust_pipeline)
+        self.calculate_weights(verbose=verbose)
+        results = self.sum_nlc(resummation_method, order_cutoff, use_robust_pipeline, verbose=verbose)
         
         # Perform thermodynamic consistency checks
         if use_robust_pipeline:
@@ -1634,6 +2185,427 @@ class NLCExpansionFTLM:
                                f"{partial_sums[order]['free_energy'][i]:.12e}\n")
                 print(f"Partial sum data for order {order} saved to: {order_file}")
 
+    def plot_verbose_cluster_contributions(self, save_dir=None):
+        """
+        Create comprehensive verbose plots showing order-by-order contributions:
+        1. Raw cluster properties P(c) for each cluster
+        2. Cluster weights W(c) = P(c) - Σ Y_cs * W(s)
+        3. Weighted contributions L(c) * W(c) per cluster
+        4. Order-by-order increments δ_n = S_n - S_{n-1}
+        5. Cumulative partial sums S_n
+        
+        This provides detailed diagnostics for understanding NLCE convergence.
+        """
+        try:
+            import matplotlib.pyplot as plt
+            from matplotlib.gridspec import GridSpec
+        except ImportError:
+            print("Matplotlib not available. Skipping verbose plots.")
+            return
+        
+        print("\n" + "="*100)
+        print("GENERATING VERBOSE CLUSTER CONTRIBUTION PLOTS")
+        print("="*100)
+        
+        # Organize clusters by order
+        clusters_by_order = defaultdict(list)
+        for cluster_id, data in self.clusters.items():
+            if data.get('has_data', False):
+                clusters_by_order[data['order']].append(cluster_id)
+        
+        orders = sorted(clusters_by_order.keys())
+        if not orders:
+            print("No cluster data available for plotting.")
+            return
+        
+        max_order = max(orders)
+        temps = self.temp_values
+        
+        # Collect data for each cluster
+        cluster_data = {}
+        for order in orders:
+            for cluster_id in clusters_by_order[order]:
+                mult = self.clusters[cluster_id]['multiplicity']
+                thermo = self.clusters[cluster_id]['thermo_data']
+                
+                cluster_data[cluster_id] = {
+                    'order': order,
+                    'multiplicity': mult,
+                    'P': {q: thermo[q] for q in ['energy', 'specific_heat', 'entropy', 'free_energy']},
+                    'W': {q: self.weights[q].get(cluster_id, np.zeros_like(temps)) 
+                          for q in ['energy', 'specific_heat', 'entropy', 'free_energy']},
+                    'LW': {q: mult * self.weights[q].get(cluster_id, np.zeros_like(temps))
+                           for q in ['energy', 'specific_heat', 'entropy', 'free_energy']}
+                }
+        
+        # Compute order increments (sum of L*W for all clusters at that order)
+        order_increments = defaultdict(lambda: {q: np.zeros_like(temps) 
+                                                 for q in ['energy', 'specific_heat', 'entropy', 'free_energy']})
+        for cluster_id, data in cluster_data.items():
+            order = data['order']
+            for q in ['energy', 'specific_heat', 'entropy', 'free_energy']:
+                order_increments[order][q] += data['LW'][q]
+        
+        # Compute cumulative partial sums
+        partial_sums = defaultdict(lambda: {q: np.zeros_like(temps) 
+                                             for q in ['energy', 'specific_heat', 'entropy', 'free_energy']})
+        for n in orders:
+            for q in ['energy', 'specific_heat', 'entropy', 'free_energy']:
+                if n == 1:
+                    partial_sums[n][q] = order_increments[n][q].copy()
+                else:
+                    prev_order = max(o for o in orders if o < n)
+                    partial_sums[n][q] = partial_sums[prev_order][q] + order_increments[n][q]
+        
+        # Color scheme
+        n_clusters = len(cluster_data)
+        colors = plt.cm.tab20(np.linspace(0, 1, max(20, n_clusters)))
+        order_colors = plt.cm.viridis(np.linspace(0.1, 0.9, len(orders)))
+        
+        # ========================================================================
+        # FIGURE 1: Raw cluster properties P(c) by order
+        # ========================================================================
+        fig1, axes1 = plt.subplots(2, 2, figsize=(16, 12))
+        fig1.suptitle('Raw Cluster Properties P(c) - Before Weight Subtraction', 
+                      fontsize=16, fontweight='bold')
+        
+        quantities = ['energy', 'specific_heat', 'entropy', 'free_energy']
+        titles = ['Energy P(c)', 'Specific Heat P(c)', 'Entropy P(c)', 'Free Energy P(c)']
+        
+        for ax, quantity, title in zip(axes1.flat, quantities, titles):
+            color_idx = 0
+            for order in orders:
+                for cluster_id in clusters_by_order[order]:
+                    data = cluster_data[cluster_id]
+                    label = f"C{cluster_id} (n={order}, L={data['multiplicity']:.2f})"
+                    ax.plot(temps, data['P'][quantity], '-', color=colors[color_idx % len(colors)],
+                           linewidth=1.5, label=label, alpha=0.8)
+                    color_idx += 1
+            
+            ax.set_xlabel('Temperature')
+            ax.set_ylabel(quantity.replace('_', ' ').title())
+            ax.set_xscale('log')
+            ax.set_title(title)
+            ax.grid(True, alpha=0.3)
+            ax.legend(fontsize=7, loc='best', ncol=2)
+        
+        plt.tight_layout()
+        if save_dir:
+            path = os.path.join(save_dir, "nlc_verbose_raw_properties.png")
+            plt.savefig(path, dpi=300, bbox_inches='tight')
+            print(f"Saved: {path}")
+        plt.close()
+        
+        # ========================================================================
+        # FIGURE 2: Cluster weights W(c) = P(c) - Σ Y_cs * W(s)
+        # ========================================================================
+        fig2, axes2 = plt.subplots(2, 2, figsize=(16, 12))
+        fig2.suptitle('Cluster Weights W(c) = P(c) - Σ Y_{c,s} × W(s)', 
+                      fontsize=16, fontweight='bold')
+        
+        titles = ['Energy W(c)', 'Specific Heat W(c)', 'Entropy W(c)', 'Free Energy W(c)']
+        
+        for ax, quantity, title in zip(axes2.flat, quantities, titles):
+            color_idx = 0
+            for order in orders:
+                for cluster_id in clusters_by_order[order]:
+                    data = cluster_data[cluster_id]
+                    label = f"C{cluster_id} (n={order}, L={data['multiplicity']:.2f})"
+                    ax.plot(temps, data['W'][quantity], '-', color=colors[color_idx % len(colors)],
+                           linewidth=1.5, label=label, alpha=0.8)
+                    color_idx += 1
+            
+            ax.axhline(y=0, color='black', linestyle='--', linewidth=0.5, alpha=0.5)
+            ax.set_xlabel('Temperature')
+            ax.set_ylabel(quantity.replace('_', ' ').title())
+            ax.set_xscale('log')
+            ax.set_title(title)
+            ax.grid(True, alpha=0.3)
+            ax.legend(fontsize=7, loc='best', ncol=2)
+        
+        plt.tight_layout()
+        if save_dir:
+            path = os.path.join(save_dir, "nlc_verbose_weights.png")
+            plt.savefig(path, dpi=300, bbox_inches='tight')
+            print(f"Saved: {path}")
+        plt.close()
+        
+        # ========================================================================
+        # FIGURE 3: Weighted contributions L(c) × W(c) per cluster
+        # ========================================================================
+        fig3, axes3 = plt.subplots(2, 2, figsize=(16, 12))
+        fig3.suptitle('Weighted Contributions L(c) × W(c) to NLCE Sum', 
+                      fontsize=16, fontweight='bold')
+        
+        titles = ['Energy L×W', 'Specific Heat L×W', 'Entropy L×W', 'Free Energy L×W']
+        
+        for ax, quantity, title in zip(axes3.flat, quantities, titles):
+            color_idx = 0
+            for order in orders:
+                for cluster_id in clusters_by_order[order]:
+                    data = cluster_data[cluster_id]
+                    label = f"C{cluster_id} (n={order}, L={data['multiplicity']:.2f})"
+                    ax.plot(temps, data['LW'][quantity], '-', color=colors[color_idx % len(colors)],
+                           linewidth=1.5, label=label, alpha=0.8)
+                    color_idx += 1
+            
+            ax.axhline(y=0, color='black', linestyle='--', linewidth=0.5, alpha=0.5)
+            ax.set_xlabel('Temperature')
+            ax.set_ylabel(quantity.replace('_', ' ').title())
+            ax.set_xscale('log')
+            ax.set_title(title)
+            ax.grid(True, alpha=0.3)
+            ax.legend(fontsize=7, loc='best', ncol=2)
+        
+        plt.tight_layout()
+        if save_dir:
+            path = os.path.join(save_dir, "nlc_verbose_weighted_contributions.png")
+            plt.savefig(path, dpi=300, bbox_inches='tight')
+            print(f"Saved: {path}")
+        plt.close()
+        
+        # ========================================================================
+        # FIGURE 4: Order-by-order increments δ_n = Σ_{clusters at n} L(c)×W(c)
+        # ========================================================================
+        fig4, axes4 = plt.subplots(2, 2, figsize=(16, 12))
+        fig4.suptitle('Order-by-Order Increments δₙ = S_n - S_{n-1} = Σ_{order=n} L(c)×W(c)', 
+                      fontsize=16, fontweight='bold')
+        
+        titles = ['Energy δₙ', 'Specific Heat δₙ', 'Entropy δₙ', 'Free Energy δₙ']
+        
+        for ax, quantity, title in zip(axes4.flat, quantities, titles):
+            for idx, order in enumerate(orders):
+                label = f"Order {order}"
+                ax.plot(temps, order_increments[order][quantity], '-', 
+                       color=order_colors[idx], linewidth=2, label=label)
+            
+            ax.axhline(y=0, color='black', linestyle='--', linewidth=0.5, alpha=0.5)
+            ax.set_xlabel('Temperature')
+            ax.set_ylabel(f'Increment δₙ ({quantity.replace("_", " ")})')
+            ax.set_xscale('log')
+            ax.set_title(title)
+            ax.grid(True, alpha=0.3)
+            ax.legend(fontsize=10)
+        
+        plt.tight_layout()
+        if save_dir:
+            path = os.path.join(save_dir, "nlc_verbose_order_increments.png")
+            plt.savefig(path, dpi=300, bbox_inches='tight')
+            print(f"Saved: {path}")
+        plt.close()
+        
+        # ========================================================================
+        # FIGURE 5: Cumulative partial sums S_n
+        # ========================================================================
+        fig5, axes5 = plt.subplots(2, 2, figsize=(16, 12))
+        fig5.suptitle('Cumulative Partial Sums Sₙ = Σ_{k=1}^{n} δₖ', 
+                      fontsize=16, fontweight='bold')
+        
+        titles = ['Energy Sₙ', 'Specific Heat Sₙ', 'Entropy Sₙ', 'Free Energy Sₙ']
+        
+        for ax, quantity, title in zip(axes5.flat, quantities, titles):
+            for idx, order in enumerate(orders):
+                label = f"Order {order}"
+                ax.plot(temps, partial_sums[order][quantity], '-', 
+                       color=order_colors[idx], linewidth=2, label=label)
+            
+            ax.set_xlabel('Temperature')
+            ax.set_ylabel(f'Partial Sum Sₙ ({quantity.replace("_", " ")})')
+            ax.set_xscale('log')
+            ax.set_title(title)
+            ax.grid(True, alpha=0.3)
+            ax.legend(fontsize=10)
+        
+        plt.tight_layout()
+        if save_dir:
+            path = os.path.join(save_dir, "nlc_verbose_partial_sums.png")
+            plt.savefig(path, dpi=300, bbox_inches='tight')
+            print(f"Saved: {path}")
+        plt.close()
+        
+        # ========================================================================
+        # FIGURE 6: Comparison P(c) vs W(c) for each cluster (specific heat only)
+        # ========================================================================
+        n_clusters_total = sum(len(clusters_by_order[o]) for o in orders)
+        if n_clusters_total <= 12:
+            ncols = min(3, n_clusters_total)
+            nrows = (n_clusters_total + ncols - 1) // ncols
+            fig6, axes6 = plt.subplots(nrows, ncols, figsize=(6*ncols, 4*nrows))
+            fig6.suptitle('Comparison: Raw P(c) vs Weight W(c) for Specific Heat', 
+                          fontsize=16, fontweight='bold')
+            
+            if n_clusters_total == 1:
+                axes6 = np.array([axes6])
+            axes6_flat = axes6.flat if hasattr(axes6, 'flat') else [axes6]
+            
+            cluster_list = []
+            for order in orders:
+                cluster_list.extend(clusters_by_order[order])
+            
+            for ax, cluster_id in zip(axes6_flat, cluster_list):
+                data = cluster_data[cluster_id]
+                order = data['order']
+                mult = data['multiplicity']
+                
+                ax.plot(temps, data['P']['specific_heat'], 'b-', linewidth=2, 
+                       label=f'P(c) raw', alpha=0.8)
+                ax.plot(temps, data['W']['specific_heat'], 'r-', linewidth=2, 
+                       label=f'W(c) weight', alpha=0.8)
+                ax.plot(temps, data['LW']['specific_heat'], 'g--', linewidth=2, 
+                       label=f'L×W(c) contribution', alpha=0.8)
+                
+                ax.axhline(y=0, color='black', linestyle=':', linewidth=0.5, alpha=0.5)
+                ax.set_xlabel('Temperature')
+                ax.set_ylabel('Specific Heat')
+                ax.set_xscale('log')
+                ax.set_title(f'Cluster {cluster_id} (order={order}, L={mult:.2f})')
+                ax.grid(True, alpha=0.3)
+                ax.legend(fontsize=8)
+            
+            # Hide unused axes
+            for ax in list(axes6_flat)[n_clusters_total:]:
+                ax.set_visible(False)
+            
+            plt.tight_layout()
+            if save_dir:
+                path = os.path.join(save_dir, "nlc_verbose_P_vs_W_comparison.png")
+                plt.savefig(path, dpi=300, bbox_inches='tight')
+                print(f"Saved: {path}")
+            plt.close()
+        
+        # ========================================================================
+        # FIGURE 7: Stacked bar chart of contributions at representative temps
+        # ========================================================================
+        fig7, axes7 = plt.subplots(1, 3, figsize=(18, 6))
+        fig7.suptitle('Stacked Contributions by Order at Representative Temperatures', 
+                      fontsize=16, fontweight='bold')
+        
+        # Select representative temperatures
+        T_indices = [len(temps)//10, len(temps)//2, 9*len(temps)//10]
+        T_labels = ['Low T', 'Mid T', 'High T']
+        
+        for ax, T_idx, T_label in zip(axes7, T_indices, T_labels):
+            T_val = temps[T_idx]
+            
+            # Collect contributions for specific heat
+            order_vals = [order_increments[o]['specific_heat'][T_idx] for o in orders]
+            partial_sum_vals = [partial_sums[o]['specific_heat'][T_idx] for o in orders]
+            
+            x = np.arange(len(orders))
+            width = 0.35
+            
+            bars1 = ax.bar(x - width/2, order_vals, width, label='Increment δₙ', 
+                          color=order_colors, alpha=0.7)
+            bars2 = ax.bar(x + width/2, partial_sum_vals, width, label='Partial Sum Sₙ',
+                          color=order_colors, alpha=0.4, edgecolor='black', linewidth=1.5)
+            
+            ax.axhline(y=0, color='black', linestyle='-', linewidth=0.5)
+            ax.set_xlabel('Order')
+            ax.set_ylabel('Specific Heat')
+            ax.set_title(f'{T_label}: T = {T_val:.4f}')
+            ax.set_xticks(x)
+            ax.set_xticklabels([str(o) for o in orders])
+            ax.legend()
+            ax.grid(True, alpha=0.3, axis='y')
+            
+            # Add value labels on bars
+            for bar, val in zip(bars1, order_vals):
+                height = bar.get_height()
+                ax.annotate(f'{val:.3f}',
+                           xy=(bar.get_x() + bar.get_width()/2, height),
+                           xytext=(0, 3 if height >= 0 else -12),
+                           textcoords="offset points",
+                           ha='center', va='bottom' if height >= 0 else 'top',
+                           fontsize=7, rotation=45)
+        
+        plt.tight_layout()
+        if save_dir:
+            path = os.path.join(save_dir, "nlc_verbose_stacked_contributions.png")
+            plt.savefig(path, dpi=300, bbox_inches='tight')
+            print(f"Saved: {path}")
+        plt.close()
+        
+        # ========================================================================
+        # Save detailed numerical data to text file
+        # ========================================================================
+        if save_dir:
+            data_file = os.path.join(save_dir, "nlc_verbose_contribution_data.txt")
+            with open(data_file, 'w') as f:
+                f.write("="*120 + "\n")
+                f.write("VERBOSE NLCE CONTRIBUTION DATA\n")
+                f.write("="*120 + "\n\n")
+                
+                f.write("LEGEND:\n")
+                f.write("  P(c) = Raw cluster property from FTLM\n")
+                f.write("  W(c) = Weight = P(c) - Σ Y_{c,s} × W(s)\n")
+                f.write("  L(c) = Multiplicity (embeddings per site)\n")
+                f.write("  L×W  = Contribution to NLCE sum\n")
+                f.write("  δₙ   = Order increment = Σ_{clusters at order n} L×W\n")
+                f.write("  Sₙ   = Partial sum = Σ_{k=1}^{n} δₖ\n")
+                f.write("\n")
+                
+                # Cluster-by-cluster data
+                f.write("="*120 + "\n")
+                f.write("PER-CLUSTER DATA\n")
+                f.write("="*120 + "\n")
+                
+                for order in orders:
+                    f.write(f"\n--- ORDER {order} ---\n")
+                    for cluster_id in clusters_by_order[order]:
+                        data = cluster_data[cluster_id]
+                        f.write(f"\nCluster {cluster_id} (L = {data['multiplicity']:.6f}):\n")
+                        f.write(f"{'T':>12s}  {'P(E)':>14s}  {'W(E)':>14s}  {'L×W(E)':>14s}  "
+                               f"{'P(Cv)':>14s}  {'W(Cv)':>14s}  {'L×W(Cv)':>14s}\n")
+                        f.write("-"*110 + "\n")
+                        
+                        # Sample every 10th temperature
+                        for i in range(0, len(temps), max(1, len(temps)//10)):
+                            f.write(f"{temps[i]:12.6f}  "
+                                   f"{data['P']['energy'][i]:+14.6f}  "
+                                   f"{data['W']['energy'][i]:+14.6f}  "
+                                   f"{data['LW']['energy'][i]:+14.6f}  "
+                                   f"{data['P']['specific_heat'][i]:+14.6f}  "
+                                   f"{data['W']['specific_heat'][i]:+14.6f}  "
+                                   f"{data['LW']['specific_heat'][i]:+14.6f}\n")
+                
+                # Order-by-order increments
+                f.write("\n" + "="*120 + "\n")
+                f.write("ORDER-BY-ORDER INCREMENTS δₙ\n")
+                f.write("="*120 + "\n")
+                f.write(f"{'T':>12s}  " + "  ".join([f"{'δ'+str(o)+' E':>12s}" for o in orders]) + 
+                       "  " + "  ".join([f"{'δ'+str(o)+' Cv':>12s}" for o in orders]) + "\n")
+                f.write("-"*120 + "\n")
+                
+                for i in range(0, len(temps), max(1, len(temps)//20)):
+                    row = f"{temps[i]:12.6f}  "
+                    row += "  ".join([f"{order_increments[o]['energy'][i]:+12.6f}" for o in orders])
+                    row += "  "
+                    row += "  ".join([f"{order_increments[o]['specific_heat'][i]:+12.6f}" for o in orders])
+                    f.write(row + "\n")
+                
+                # Partial sums
+                f.write("\n" + "="*120 + "\n")
+                f.write("CUMULATIVE PARTIAL SUMS Sₙ\n")
+                f.write("="*120 + "\n")
+                f.write(f"{'T':>12s}  " + "  ".join([f"{'S'+str(o)+' E':>12s}" for o in orders]) + 
+                       "  " + "  ".join([f"{'S'+str(o)+' Cv':>12s}" for o in orders]) + "\n")
+                f.write("-"*120 + "\n")
+                
+                for i in range(0, len(temps), max(1, len(temps)//20)):
+                    row = f"{temps[i]:12.6f}  "
+                    row += "  ".join([f"{partial_sums[o]['energy'][i]:+12.6f}" for o in orders])
+                    row += "  "
+                    row += "  ".join([f"{partial_sums[o]['specific_heat'][i]:+12.6f}" for o in orders])
+                    f.write(row + "\n")
+                
+                f.write("\n" + "="*120 + "\n")
+            
+            print(f"Saved: {data_file}")
+        
+        print("="*100)
+        print("VERBOSE PLOTTING COMPLETE")
+        print("="*100)
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
@@ -1689,8 +2661,22 @@ Example usage:
     parser.add_argument('--n_spins_per_unit', type=int, default=4,
                        help='Spins per expansion unit for thermodynamic checks\n'
                             '(default: 4 for pyrochlore tetrahedron)')
+    parser.add_argument('--verbose', '-v', action='store_true', default=True,
+                       help='Enable detailed per-order contribution output (default: True)')
+    parser.add_argument('--quiet', '-q', action='store_true',
+                       help='Disable detailed per-order output (overrides --verbose)')
+    parser.add_argument('--verbose_plot', action='store_true',
+                       help='Generate comprehensive verbose plots showing:\n'
+                            '  - Raw cluster properties P(c)\n'
+                            '  - Cluster weights W(c)\n'
+                            '  - Weighted contributions L(c)*W(c)\n'
+                            '  - Order-by-order increments δₙ\n'
+                            '  - Cumulative partial sums Sₙ')
     
     args = parser.parse_args()
+    
+    # Handle verbose flag
+    verbose = args.verbose and not args.quiet
     
     # Create output directory
     os.makedirs(args.output_dir, exist_ok=True)
@@ -1708,7 +2694,7 @@ Example usage:
     # Load clusters and data first
     nlc.read_clusters()
     nlc.read_ftlm_data()
-    nlc.calculate_weights()
+    nlc.calculate_weights(verbose=verbose)
     
     # If comparison mode requested, do that first
     if args.compare_methods:
@@ -1759,7 +2745,8 @@ Example usage:
     results = nlc.sum_nlc(
         resummation_method=args.resummation, 
         order_cutoff=args.order_cutoff,
-        use_robust_pipeline=args.robust_pipeline
+        use_robust_pipeline=args.robust_pipeline,
+        verbose=verbose
     )
     
     # Perform thermodynamic consistency checks if robust pipeline was used
@@ -1823,6 +2810,10 @@ Example usage:
         
         # Plot order-by-order convergence
         nlc.plot_order_by_order_thermo(save_dir=args.output_dir)
+        
+        # Generate verbose cluster contribution plots if requested
+        if args.verbose_plot:
+            nlc.plot_verbose_cluster_contributions(save_dir=args.output_dir)
         
         # Plot specific heat with experimental data overlay if available
         exp_temp = None

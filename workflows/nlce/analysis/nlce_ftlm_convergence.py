@@ -26,9 +26,10 @@ import time
 import glob
 import logging
 import numpy as np
-from matplotlib.cm import get_cmap
-from tqdm import tqdm
+import matplotlib
 import matplotlib.pyplot as plt
+from matplotlib import cm
+from tqdm import tqdm
 
 
 def setup_logging(log_file):
@@ -55,7 +56,7 @@ def run_nlce_ftlm_for_order(order, args):
     nlce_ftlm_script = os.path.join(script_dir, '..', 'run', 'nlce_ftlm.py')
     
     cmd = [
-        'python3', 
+        sys.executable,  # Use the same Python interpreter as the current script
         nlce_ftlm_script,
         f'--max_order={order}',
         f'--base_dir={args.base_dir}/order_{order}',
@@ -87,9 +88,22 @@ def run_nlce_ftlm_for_order(order, args):
     if args.robust_pipeline:
         cmd.append('--robust_pipeline')
         cmd.append(f'--n_spins_per_unit={args.n_spins_per_unit}')
+    if args.use_gpu:
+        cmd.append('--use_gpu')
     
     # Add resummation method
     cmd.append(f'--resummation={args.resummation}')
+    
+    # Add verbose flag
+    verbose = args.verbose and not args.quiet
+    if verbose:
+        cmd.append('--verbose')
+    else:
+        cmd.append('--quiet')
+    
+    # Add verbose_plot flag
+    if args.verbose_plot:
+        cmd.append('--verbose_plot')
         
     # Add field direction if specified
     if args.field_dir:
@@ -359,9 +373,9 @@ Example usage:
     # FTLM parameters
     parser.add_argument('--ftlm_samples', type=int, default=80, 
                        help='Number of random samples for FTLM')
-    parser.add_argument('--krylov_dim', type=int, default=1000, 
+    parser.add_argument('--krylov_dim', type=int, default=400, 
                        help='Krylov subspace dimension for FTLM')
-    parser.add_argument('--temp_min', type=float, default=0.001, 
+    parser.add_argument('--temp_min', type=float, default=0.01, 
                        help='Minimum temperature')
     parser.add_argument('--temp_max', type=float, default=20.0, 
                        help='Maximum temperature')
@@ -371,7 +385,7 @@ Example usage:
     # NLCE parameters
     parser.add_argument('--order_cutoff', type=int, 
                        help='Maximum order for NLCE summation')
-    parser.add_argument('--resummation', type=str, default='euler',
+    parser.add_argument('--resummation', type=str, default='auto',
                        choices=['auto', 'direct', 'euler', 'wynn', 'theta', 'robust'],
                        help='Resummation method for series acceleration (default: auto)')
     
@@ -402,6 +416,16 @@ Example usage:
                        help='Use SI units for output')
     parser.add_argument('--plot_errors', action='store_true',
                        help='Plot error bars from FTLM sampling')
+    parser.add_argument('--use_gpu', action='store_true', 
+                       help='Use GPU-accelerated FTLM (requires CUDA)')
+    
+    # Verbose output
+    parser.add_argument('--verbose', '-v', action='store_true', default=True,
+                       help='Enable detailed per-order NLCE contribution output (default: True)')
+    parser.add_argument('--quiet', '-q', action='store_true',
+                       help='Disable detailed per-order output (overrides --verbose)')
+    parser.add_argument('--verbose_plot', action='store_true',
+                       help='Generate comprehensive verbose plots showing P(c), W(c), L*W(c), etc.')
     
     # Plot limits
     parser.add_argument('--energy_ymin', type=float, default=None, 
@@ -429,6 +453,8 @@ Example usage:
     # Set up logging
     log_file = os.path.join(args.base_dir, 'nlce_ftlm_convergence.log')
     setup_logging(log_file)
+    # Handle verbose flag
+    verbose = args.verbose and not args.quiet
     
     logging.info("="*80)
     logging.info(f"Starting NLCE-FTLM convergence analysis up to order {args.max_order}")
@@ -437,16 +463,46 @@ Example usage:
     logging.info(f"Krylov dimension: {args.krylov_dim}")
     logging.info(f"Temperature range: [{args.temp_min}, {args.temp_max}]")
     logging.info(f"Resummation method: {args.resummation}")
+    logging.info(f"Verbose output: {verbose}")
     if args.SI_units:
         logging.info("Using SI units (J/(K·mol) for C_v, S; J/mol for E, F)")
     logging.info("="*80)
     
+    # Create consolidated verbose output file
+    verbose_output_file = os.path.join(args.base_dir, 'nlce_verbose_all_orders.txt')
+    
     # Run NLCE-FTLM for each order unless skipped
     if not args.skip_calculations:
-        for order in range(args.start_order, args.max_order + 1):
-            success = run_nlce_ftlm_for_order(order, args)
-            if not success:
-                logging.warning(f"Failed to complete order {order}. Continuing with next order.")
+        with open(verbose_output_file, 'w') as verbose_log:
+            verbose_log.write("="*100 + "\n")
+            verbose_log.write(f"NLCE-FTLM CONVERGENCE ANALYSIS - VERBOSE OUTPUT\n")
+            verbose_log.write(f"Max order: {args.max_order}\n")
+            verbose_log.write(f"Resummation: {args.resummation}\n")
+            verbose_log.write("="*100 + "\n\n")
+            
+            for order in range(args.start_order, args.max_order + 1):
+                verbose_log.write("\n" + "#"*100 + "\n")
+                verbose_log.write(f"# ORDER {order}\n")
+                verbose_log.write("#"*100 + "\n\n")
+                verbose_log.flush()
+                
+                success = run_nlce_ftlm_for_order(order, args)
+                if not success:
+                    logging.warning(f"Failed to complete order {order}. Continuing with next order.")
+                    verbose_log.write(f"FAILED: Order {order}\n\n")
+                else:
+                    # Copy the verbose output from this order to the consolidated file
+                    order_verbose_file = os.path.join(
+                        args.base_dir, f'order_{order}', 
+                        f'nlc_results_order_{order}', 'nlc_verbose_output.txt'
+                    )
+                    if os.path.exists(order_verbose_file):
+                        with open(order_verbose_file, 'r') as f:
+                            verbose_log.write(f.read())
+                            verbose_log.write("\n")
+                    verbose_log.flush()
+        
+        logging.info(f"Consolidated verbose output saved to: {verbose_output_file}")
     else:
         logging.info("Skipping calculations, using existing results.")
     
@@ -456,6 +512,8 @@ Example usage:
     logging.info("="*80)
     logging.info("NLCE-FTLM convergence analysis completed!")
     logging.info(f"Results are available in {args.base_dir}")
+    if verbose:
+        logging.info(f"Verbose per-order output: {verbose_output_file}")
     logging.info("="*80)
 
 

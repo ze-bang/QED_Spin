@@ -64,7 +64,7 @@ def get_cluster_files(cluster_info_dir):
 
 def run_ftlm_for_cluster(args):
     """Run FTLM for a single cluster"""
-    cluster_id, order, ed_executable, ham_dir, ftlm_dir, ftlm_options, symmetrized = args
+    cluster_id, order, ed_executable, ham_dir, ftlm_dir, ftlm_options, symmetrized, use_gpu = args
     
     # Create output directory for FTLM results
     cluster_ftlm_dir = os.path.join(ftlm_dir, f'cluster_{cluster_id}_order_{order}')
@@ -93,10 +93,11 @@ def run_ftlm_for_cluster(args):
                 num_sites += 1
     
     # Build FTLM command
+    ftlm_method = 'FTLM_GPU' if use_gpu else 'FTLM'
     cmd = [
         ed_executable,
         ham_subdir,
-        '--method=FTLM_GPU',
+        f'--method={ftlm_method}',
         f'--output={cluster_ftlm_dir}/output',
         f'--num_sites={num_sites}',
         '--spin_length=0.5',
@@ -236,8 +237,19 @@ Example usage:
                        help='Use symmetrized Hamiltonian')
     parser.add_argument('--SI_units', action='store_true', 
                        help='Use SI units for output')
+    parser.add_argument('--use_gpu', action='store_true', 
+                       help='Use GPU-accelerated FTLM (requires CUDA)')
+    parser.add_argument('--verbose', '-v', action='store_true', default=True,
+                       help='Enable detailed per-order NLCE contribution output (default: True)')
+    parser.add_argument('--quiet', '-q', action='store_true',
+                       help='Disable detailed per-order output (overrides --verbose)')
+    parser.add_argument('--verbose_plot', action='store_true',
+                       help='Generate comprehensive verbose plots showing P(c), W(c), L*W(c), etc.')
     
     args = parser.parse_args()
+    
+    # Handle verbose flag
+    verbose = args.verbose and not args.quiet
     
     # Create base directory
     os.makedirs(args.base_dir, exist_ok=True)
@@ -272,11 +284,10 @@ Example usage:
         logging.info("="*80)
         
         cmd = [
-            'python3', 
+            sys.executable, 
             os.path.join(os.path.dirname(__file__), '..', 'prep', 'generate_pyrochlore_clusters.py'),
             f'--max_order={args.max_order}',
-            f'--output_dir={cluster_dir}',
-            '--subunit=site'  # Use site-based NLCE (L(c)=0.25 for single site)
+            f'--output_dir={cluster_dir}'
         ]
         
         logging.info(f"Running command: {' '.join(cmd)}")
@@ -317,7 +328,7 @@ Example usage:
             
             # Run helper_cluster.py (now in python/edlib/)
             cmd = [
-                'python3',
+                sys.executable,
                 os.path.join(os.path.dirname(__file__), '..', '..', '..', 'python', 'edlib', 'helper_cluster.py'),
                 str(args.Jxx),
                 str(args.Jyy),
@@ -361,7 +372,7 @@ Example usage:
         ftlm_tasks = []
         for cluster_id, order, _ in clusters:
             ftlm_tasks.append((cluster_id, order, args.ed_executable, ham_dir, 
-                             ftlm_dir, ftlm_options, args.symmetrized))
+                             ftlm_dir, ftlm_options, args.symmetrized, args.use_gpu))
         
         if args.parallel:
             logging.info(f"Running FTLM in parallel with {args.num_cores} cores")
@@ -542,7 +553,7 @@ Example usage:
         logging.info("="*80)
         
         nlc_params = [
-            'python3',
+            sys.executable,
             os.path.join(os.path.dirname(__file__), 'NLC_sum_ftlm.py'),
             f'--cluster_dir={cluster_info_dir}',
             f'--ftlm_dir={ftlm_dir}',
@@ -564,12 +575,35 @@ Example usage:
             nlc_params.append('--robust_pipeline')
             nlc_params.append(f'--n_spins_per_unit={args.n_spins_per_unit}')
         
+        # Add verbose flag
+        if verbose:
+            nlc_params.append('--verbose')
+        else:
+            nlc_params.append('--quiet')
+        
+        # Add verbose_plot flag
+        if args.verbose_plot:
+            nlc_params.append('--verbose_plot')
+        
         logging.info(f"Running command: {' '.join(nlc_params)}")
+        
+        # Run NLCE summation and capture output to file
+        nlc_verbose_log = os.path.join(nlc_dir, 'nlc_verbose_output.txt')
         try:
-            subprocess.run(nlc_params, check=True)
+            with open(nlc_verbose_log, 'w') as log_file:
+                result = subprocess.run(nlc_params, check=True, stdout=subprocess.PIPE, 
+                                        stderr=subprocess.STDOUT, text=True)
+                # Write to both log file and console
+                log_file.write(result.stdout)
+                if verbose:
+                    print(result.stdout)
             logging.info("NLCE summation completed successfully.")
+            logging.info(f"Verbose output saved to: {nlc_verbose_log}")
         except subprocess.CalledProcessError as e:
             logging.error(f"Error in NLCE summation: {e}")
+            if e.stdout:
+                with open(nlc_verbose_log, 'w') as log_file:
+                    log_file.write(e.stdout)
             sys.exit(1)
     else:
         logging.info("Skipping NLCE summation step.")

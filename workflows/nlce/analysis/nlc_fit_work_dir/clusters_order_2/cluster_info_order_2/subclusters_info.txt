@@ -1,9 +1,0 @@
-# Subclusters information for each topologically distinct cluster
-# Format: Cluster_ID, Order, Multiplicity, Subclusters[(ID, Count), ...]
-
-Cluster 1 (Order 1, L(c) = 0.500000000000):
-  No subclusters (order 1 cluster)
-
-Cluster 2 (Order 2, L(c) = 1.000000000000):
-  Subclusters: (1, 2)
-

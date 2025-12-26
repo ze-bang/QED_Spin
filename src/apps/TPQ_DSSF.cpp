@@ -2678,7 +2678,10 @@ int main(int argc, char* argv[]) {
                         int samples_per_rank = num_samples / size;
                         int remainder = num_samples % size;
                         int my_samples = samples_per_rank + (rank < remainder ? 1 : 0);
-                        unsigned int my_seed = random_seed + rank * 10000;  // Different seed per rank
+                        // Use the SAME seed formula as CPU to ensure identical results
+                        // Both CPU and GPU use: base_seed + sample_idx * 12345
+                        // For MPI: each rank processes different samples with the same base seed
+                        unsigned int my_seed = random_seed;  // Same base seed as CPU
                         
                         if (rank == 0) {
                             std::cout << "  Samples per rank: ~" << samples_per_rank 

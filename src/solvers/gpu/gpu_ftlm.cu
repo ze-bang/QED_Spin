@@ -1270,39 +1270,54 @@ void GPUFTLMSolver::computeSpectralFunction(
     int n_omega = frequencies.size();
     spectral_func.resize(n_omega, 0.0);
     
-    double e_min = *std::min_element(ritz_values.begin(), ritz_values.end());
-    double beta = (temperature > 1e-14) ? 1.0 / temperature : 0.0;
+    // Compute thermal weights if temperature > 0
+    std::vector<double> thermal_weights = weights;
     
-    // Compute partition function if needed
-    double Z = 0.0;
     if (temperature > 1e-14) {
+        double beta = 1.0 / temperature;
+        double e_min = *std::min_element(ritz_values.begin(), ritz_values.end());
+        
+        // Compute partition function with shifted energies
+        double Z = 0.0;
         for (int i = 0; i < n_states; i++) {
-            double e_shifted = ritz_values[i] - e_min;
-            Z += weights[i] * std::exp(-beta * e_shifted);
+            double shifted_energy = ritz_values[i] - e_min;
+            thermal_weights[i] = weights[i] * std::exp(-beta * shifted_energy);
+            Z += thermal_weights[i];
+        }
+        
+        // Normalize by partition function
+        if (Z > 1e-300) {
+            for (int i = 0; i < n_states; i++) {
+                thermal_weights[i] /= Z;
+            }
+        } else {
+            // Very low temperature - only ground state contributes
+            thermal_weights.assign(n_states, 0.0);
+            int gs_idx = std::distance(ritz_values.begin(),
+                                      std::min_element(ritz_values.begin(), ritz_values.end()));
+            thermal_weights[gs_idx] = weights[gs_idx];
+            // Normalize
+            double sum = 0.0;
+            for (double w : thermal_weights) sum += w;
+            if (sum > 0) {
+                for (double& w : thermal_weights) w /= sum;
+            }
         }
     }
     
     // Compute spectral function with Lorentzian broadening
+    // S(ω,T) = Σ_i w_i * exp(-βE_i)/Z * δ(ω - E_i)
+    // Using Lorentzian broadening: δ(ω - E) → (η/π) / ((ω - E)² + η²)
+    double norm_factor = broadening / M_PI;
+    
     for (int iw = 0; iw < n_omega; iw++) {
         double omega = frequencies[iw];
         double sum = 0.0;
         
         for (int i = 0; i < n_states; i++) {
-            double E = ritz_values[i];
-            double w = weights[i];
-            
-            // Apply thermal weighting if T > 0
-            if (temperature > 1e-14) {
-                double e_shifted = E - e_min;
-                double boltzmann = std::exp(-beta * e_shifted);
-                w *= boltzmann / Z;
-            }
-            
-            // Lorentzian: L(ω - E) = (η/π) / ((ω - E)² + η²)
-            double delta = omega - E;
-            double lorentzian = (broadening / M_PI) / (delta * delta + broadening * broadening);
-            
-            sum += w * lorentzian;
+            double delta = omega - ritz_values[i];
+            double lorentzian = norm_factor / (delta * delta + broadening * broadening);
+            sum += thermal_weights[i] * lorentzian;
         }
         
         spectral_func[iw] = sum;
@@ -2591,7 +2606,7 @@ GPUFTLMSolver::computeDynamicalCorrelationMultiTemp(
     std::cout << "Broadening: " << broadening << "\n";
     std::cout << "==========================================\n";
     std::cout << "\nUsing correct FTLM formulation:" << std::endl;
-    std::cout << "  S(ω,T) = (1/Z) × Σ_r Σ_i e^{-βε_i} |c_i|² S_i(ω)" << std::endl;
+    std::cout << "  S(ω,T) = (N/Z) × Σ_r Σ_i e^{-βε_i} |c_i|² S_i(ω)" << std::endl;
     std::cout << "  where S_i(ω) is computed via continued fraction" << std::endl;
     std::cout << "==========================================" << std::endl;
     

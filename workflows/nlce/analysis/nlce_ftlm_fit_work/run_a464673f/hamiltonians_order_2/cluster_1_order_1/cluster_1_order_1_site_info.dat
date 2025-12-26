@@ -1,7 +1,0 @@
-# Site information for cluster: cluster_1_order_1
-# site_id, matrix_index, sublattice_index, x, y, z
-
-0 0 0 0.125000 0.125000 0.125000
-1 1 1 0.125000 -0.125000 -0.125000
-2 2 2 -0.125000 0.125000 -0.125000
-3 3 3 -0.125000 -0.125000 0.125000

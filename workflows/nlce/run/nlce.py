@@ -244,9 +244,11 @@ def main():
         
         cmd = [
             'python3', 
-            os.path.join(os.path.dirname(__file__), '..', 'prep', 'generate_pyrochlore_clusters.py'),
+            os.path.join(os.path.dirname(__file__), '..', 'prep', 'generate_pyrochlore_clusters_analytical.py'),
             f'--max_order={args.max_order}',
-            f'--output_dir={cluster_dir}'
+            f'--output_dir={cluster_dir}',
+            '--subunit=site',
+            '--embedding_size=6'  # Torus size for computing ring/cycle multiplicities
         ]
         
         logging.info(f"Running command: {' '.join(cmd)}")
