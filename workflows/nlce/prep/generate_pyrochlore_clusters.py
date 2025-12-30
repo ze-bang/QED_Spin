@@ -344,9 +344,11 @@ def generate_clusters(tet_graph, max_order):
     Returns:
         distinct_clusters: List of cluster representatives (each is list of node IDs)
         multiplicities: List of multiplicities L_tet(c) per tetrahedron
+        all_mult_details: List of dicts with formula terms for each cluster
     """
     distinct_clusters = []
     multiplicities = []
+    all_mult_details = []  # Store formula details for all clusters
     N = tet_graph.number_of_nodes()
     nodes_sorted = sorted(tet_graph.nodes())
     
@@ -366,6 +368,15 @@ def generate_clusters(tet_graph, max_order):
             first_tet = nodes_sorted[0]
             distinct_clusters.append([first_tet])
             multiplicities.append(0.5)  # L_pyro = L_tet / 2 = 1/2
+            all_mult_details.append({
+                'raw_count': N,  # Every tetrahedron is an embedding
+                'N_tet': N,
+                'L_tet': 1.0,
+                'L_pyro': 0.5
+            })
+            print(f"  Found 1 distinct cluster of order 1")
+            print(f"  Multiplicity formula: L_pyro = |Emb(c→L)| / N_tet / 2 = raw_count / {N} / 2")
+            print(f"    Topology 1: L_pyro = {N} / {N} / 2 = 0.5000")
             continue
         
         # Hash buckets: signature -> list of (rep_nodes_frozenset, raw_embedding_count)
@@ -416,6 +427,7 @@ def generate_clusters(tet_graph, max_order):
         # Collect representatives and compute multiplicities
         reps = []
         mults = []
+        order_mult_details = []  # Store details for verbose output
         
         for sig_groups in buckets.values():
             for rep_nodes, raw_count in sig_groups:
@@ -424,14 +436,29 @@ def generate_clusters(tet_graph, max_order):
                 # L_tet(c) = raw_count / N (per tetrahedron)
                 # L_pyro(c) = L_tet / 2 (per pyrochlore site, since N_site = 2 * N_tet)
                 
+                L_tet = raw_count / N
+                L_pyro = L_tet / 2
+                
                 reps.append(sorted(rep_nodes))
-                mults.append(raw_count / N / 2)  # Divide by 2 for pyrochlore normalization
+                mults.append(L_pyro)
+                order_mult_details.append({
+                    'raw_count': raw_count,
+                    'N_tet': N,
+                    'L_tet': L_tet,
+                    'L_pyro': L_pyro
+                })
         
         distinct_clusters.extend(reps)
         multiplicities.extend(mults)
+        all_mult_details.extend(order_mult_details)
+        
+        # Print verbose multiplicity calculations
         print(f"  Found {len(reps)} distinct clusters of order {order}")
+        print(f"  Multiplicity formula: L_pyro = |Emb(c→L)| / N_tet / 2 = raw_count / {N} / 2")
+        for idx, details in enumerate(order_mult_details):
+            print(f"    Topology {idx+1}: L_pyro = {details['raw_count']} / {details['N_tet']} / 2 = {details['L_pyro']:.4f}")
     
-    return distinct_clusters, multiplicities
+    return distinct_clusters, multiplicities, all_mult_details
 
 
 def count_embeddings(source_graph, target_graph):
@@ -463,7 +490,7 @@ def count_embeddings(source_graph, target_graph):
     return count
 
 
-def compute_subcluster_multiplicities(cluster_nodes, subcluster_nodes, tet_graph):
+def compute_subcluster_multiplicities(cluster_nodes, subcluster_nodes, tet_graph, verbose=False):
     """
     Compute Y_cs = |Emb(s→c)| / |Aut(s)|
     
@@ -474,9 +501,11 @@ def compute_subcluster_multiplicities(cluster_nodes, subcluster_nodes, tet_graph
         cluster_nodes: Nodes of the larger cluster c
         subcluster_nodes: Nodes of the subcluster s  
         tet_graph: The full tetrahedron graph
+        verbose: If True, return detailed calculation info
     
     Returns:
-        Y_cs: subcluster multiplicity
+        If verbose: (Y_cs, details_dict)
+        Otherwise: Y_cs (subcluster multiplicity)
     """
     cluster_subgraph = tet_graph.subgraph(cluster_nodes).copy()
     subcluster_subgraph = tet_graph.subgraph(subcluster_nodes).copy()
@@ -488,7 +517,15 @@ def compute_subcluster_multiplicities(cluster_nodes, subcluster_nodes, tet_graph
     aut_s = compute_automorphism_count(tet_graph, subcluster_nodes)
     
     # Y_cs = |Emb(s→c)| / |Aut(s)|
-    return labeled_embeddings // aut_s
+    Y_cs = labeled_embeddings // aut_s
+    
+    if verbose:
+        return Y_cs, {
+            'Emb_s_to_c': labeled_embeddings,
+            'Aut_s': aut_s,
+            'Y_cs': Y_cs
+        }
+    return Y_cs
 
 
 def identify_subclusters(distinct_clusters, tet_graph):
@@ -576,6 +613,262 @@ def save_subclusters_info(subclusters_info, distinct_clusters, multiplicities, o
             else:
                 f.write("  No subclusters (order 1 cluster)\n")
             f.write("\n")
+
+
+def visualize_cluster_dual(tetrahedra, cluster, cluster_index, multiplicity, output_dir='.', 
+                           mult_details=None, subcluster_details=None):
+    """
+    Visualize a cluster showing both pyrochlore (site) and diamond (tetrahedron) 
+    representations side by side with correct crystallographic positions.
+    
+    Uses BFS to place tetrahedra starting from the first one, ensuring
+    connected clusters appear visually connected.
+    
+    In pyrochlore, tetrahedra alternate between "up" and "down" orientations.
+    Up tetrahedra have sites at +pyro_basis[i], down tetrahedra at -pyro_basis[i].
+    This ensures shared vertices coincide exactly.
+    
+    Args:
+        tetrahedra: List of tetrahedra from the lattice (used for topology only)
+        cluster: List of tetrahedron indices in this cluster
+        cluster_index: ID of the cluster
+        multiplicity: L value for the cluster
+        output_dir: Directory to save the plot
+        mult_details: Dictionary with 'raw_count', 'N_tet', 'L_tet', 'L_pyro' for formula display
+        subcluster_details: List of (sub_idx, Y_cs, Emb, Aut) tuples for subcluster formula display
+    """
+    # Build the cluster graph on tetrahedra (diamond lattice representation)
+    tet_graph = nx.Graph()
+    for i, tet_idx in enumerate(cluster):
+        tet_graph.add_node(i, tet_idx=tet_idx)
+    
+    # Connect tetrahedra that share vertices, track which vertex is shared
+    for i in range(len(cluster)):
+        for j in range(i+1, len(cluster)):
+            shared = set(tetrahedra[cluster[i]]) & set(tetrahedra[cluster[j]])
+            if shared:
+                # Find which basis index this corresponds to in each tetrahedron
+                shared_v = list(shared)[0]
+                basis_i = tetrahedra[cluster[i]].index(shared_v)
+                basis_j = tetrahedra[cluster[j]].index(shared_v)
+                tet_graph.add_edge(i, j, shared_vertex=shared_v, basis_i=basis_i, basis_j=basis_j)
+    
+    # Pyrochlore geometry:
+    # "Up" tetrahedra have sites at positions +pyro_basis relative to center
+    # "Down" tetrahedra have sites at positions -pyro_basis relative to center
+    # 
+    # When up-tet connects to down-tet via shared vertex at basis index k:
+    #   - From up:   center_up + pyro_basis[k]
+    #   - From down: center_down - pyro_basis[k]
+    #   These coincide when center_down = center_up + 2*pyro_basis[k]
+    #
+    # The pyro_basis vectors for a regular tetrahedron:
+    pyro_basis = np.array([
+        [ 0.125,  0.125,  0.125],   # vertex 0
+        [ 0.125, -0.125, -0.125],   # vertex 1
+        [-0.125,  0.125, -0.125],   # vertex 2
+        [-0.125, -0.125,  0.125]    # vertex 3
+    ])
+    
+    # Diamond neighbor displacement = 2 * pyro_basis
+    diamond_neighbors = 2.0 * pyro_basis
+    
+    # Place tetrahedra using BFS from first tetrahedron
+    # First tetrahedron is "up" (parity = +1), neighbors are "down" (parity = -1)
+    tet_positions = {}  # local_tet_idx -> 3D position of center
+    tet_parity = {}     # local_tet_idx -> +1 (up) or -1 (down)
+    
+    tet_positions[0] = np.array([0.0, 0.0, 0.0])
+    tet_parity[0] = 1  # First tetrahedron is "up"
+    
+    visited = {0}
+    queue = [0]
+    
+    while queue:
+        current = queue.pop(0)
+        current_pos = tet_positions[current]
+        current_par = tet_parity[current]
+        
+        for neighbor in tet_graph.neighbors(current):
+            if neighbor not in visited:
+                # Get the shared vertex info
+                edge_data = tet_graph.edges[current, neighbor]
+                # Which end of the edge is current?
+                # Edge stored with (i, j) where i < j
+                # basis_i corresponds to cluster index i, basis_j to j
+                if current < neighbor:
+                    basis_current = edge_data['basis_i']
+                else:
+                    basis_current = edge_data['basis_j']
+                
+                # Displacement from current to neighbor:
+                # If current is "up", neighbor is at center + 2*pyro_basis[k]
+                # If current is "down", neighbor is at center - 2*pyro_basis[k]
+                # (The sign of displacement depends on current's parity)
+                neighbor_pos = current_pos + current_par * diamond_neighbors[basis_current]
+                tet_positions[neighbor] = neighbor_pos
+                tet_parity[neighbor] = -current_par  # Flip parity
+                
+                visited.add(neighbor)
+                queue.append(neighbor)
+    
+    # Now compute pyrochlore site positions
+    # Up tetrahedra: sites at center + pyro_basis[i]
+    # Down tetrahedra: sites at center - pyro_basis[i]
+    site_graph = nx.Graph()
+    site_positions = {}
+    vertex_id_map = {}  # original_vertex_id -> new_sequential_id
+    next_id = 0
+    
+    # Track which vertices are shared (will average their positions)
+    vertex_to_positions = {}  # original_vertex -> list of computed positions
+    
+    for local_tet_idx, tet_idx in enumerate(cluster):
+        tet_center = tet_positions[local_tet_idx]
+        parity = tet_parity[local_tet_idx]
+        for basis_idx, vertex in enumerate(tetrahedra[tet_idx]):
+            # Apply parity: up = +pyro_basis, down = -pyro_basis
+            site_pos = tet_center + parity * pyro_basis[basis_idx]
+            
+            if vertex not in vertex_to_positions:
+                vertex_to_positions[vertex] = []
+            vertex_to_positions[vertex].append(site_pos)
+    
+    # Assign final positions (average for shared vertices - should be identical)
+    for vertex, positions in vertex_to_positions.items():
+        vertex_id_map[vertex] = next_id
+        site_positions[next_id] = np.mean(positions, axis=0)
+        site_graph.add_node(next_id)
+        next_id += 1
+    
+    # Add edges between sites in the same tetrahedron
+    for local_tet_idx, tet_idx in enumerate(cluster):
+        tet_vertices = tetrahedra[tet_idx]
+        for v1, v2 in itertools.combinations(tet_vertices, 2):
+            new_v1 = vertex_id_map[v1]
+            new_v2 = vertex_id_map[v2]
+            site_graph.add_edge(new_v1, new_v2)
+    
+    # Create figure with subplots - add extra row for formula if details provided
+    has_formulas = mult_details is not None or subcluster_details is not None
+    if has_formulas:
+        fig = plt.figure(figsize=(16, 10))
+        # Top row: 3D plots
+        ax1 = fig.add_subplot(221, projection='3d')
+        ax2 = fig.add_subplot(222, projection='3d')
+        # Bottom row: formula text
+        ax3 = fig.add_subplot(212)
+        ax3.axis('off')
+    else:
+        fig = plt.figure(figsize=(16, 7))
+        ax1 = fig.add_subplot(121, projection='3d')
+        ax2 = fig.add_subplot(122, projection='3d')
+    
+    # --- Left plot: Diamond (tetrahedron) representation ---
+    
+    # Draw tetrahedron nodes (centers)
+    tet_xs = [tet_positions[i][0] for i in range(len(cluster))]
+    tet_ys = [tet_positions[i][1] for i in range(len(cluster))]
+    tet_zs = [tet_positions[i][2] for i in range(len(cluster))]
+    ax1.scatter(tet_xs, tet_ys, tet_zs, c='blue', s=400, alpha=0.8, 
+                edgecolors='darkblue', linewidths=2)
+    
+    # Label tetrahedra
+    for i in range(len(cluster)):
+        ax1.text(tet_positions[i][0], tet_positions[i][1], tet_positions[i][2], 
+                f'T{i}', fontsize=10, ha='center', va='center', color='white', 
+                fontweight='bold')
+    
+    # Draw edges (connections between tetrahedra)
+    for i, j in tet_graph.edges():
+        ax1.plot([tet_positions[i][0], tet_positions[j][0]],
+                [tet_positions[i][1], tet_positions[j][1]],
+                [tet_positions[i][2], tet_positions[j][2]], 
+                'b-', lw=3, alpha=0.6)
+    
+    ax1.set_title(f'Diamond Lattice (Tetrahedra)\nCluster {cluster_index}, Order {len(cluster)}, L={multiplicity:.1f}',
+                  fontsize=12, fontweight='bold')
+    ax1.set_xlabel('X')
+    ax1.set_ylabel('Y')
+    ax1.set_zlabel('Z')
+    ax1.set_box_aspect([1,1,1])
+    
+    # --- Right plot: Pyrochlore (site) representation ---
+    
+    # Draw site nodes
+    site_xs = [site_positions[v][0] for v in site_graph.nodes()]
+    site_ys = [site_positions[v][1] for v in site_graph.nodes()]
+    site_zs = [site_positions[v][2] for v in site_graph.nodes()]
+    ax2.scatter(site_xs, site_ys, site_zs, c='red', s=80, alpha=0.9,
+                edgecolors='darkred', linewidths=1)
+    
+    # Draw edges (bonds within tetrahedra)
+    for u, v in site_graph.edges():
+        ax2.plot([site_positions[u][0], site_positions[v][0]],
+                [site_positions[u][1], site_positions[v][1]],
+                [site_positions[u][2], site_positions[v][2]], 
+                'k-', lw=1, alpha=0.4)
+    
+    # Draw semi-transparent tetrahedra faces using Poly3DCollection
+    from mpl_toolkits.mplot3d.art3d import Poly3DCollection
+    colors = plt.cm.tab10(np.linspace(0, 1, max(len(cluster), 10)))
+    for local_tet_idx, tet_idx in enumerate(cluster):
+        tet_vertices = [vertex_id_map[v] for v in tetrahedra[tet_idx]]
+        color = colors[local_tet_idx % len(colors)]
+        # Draw all 4 faces of the tetrahedron
+        verts = [site_positions[v] for v in tet_vertices]
+        faces = [[verts[0], verts[1], verts[2]],
+                 [verts[0], verts[1], verts[3]],
+                 [verts[0], verts[2], verts[3]],
+                 [verts[1], verts[2], verts[3]]]
+        poly = Poly3DCollection(faces, alpha=0.15, facecolor=color, 
+                                edgecolor=color, linewidth=0.5)
+        ax2.add_collection3d(poly)
+    
+    ax2.set_title(f'Pyrochlore Lattice (Sites)\n{len(site_graph.nodes())} sites, {len(site_graph.edges())} edges',
+                  fontsize=12, fontweight='bold')
+    ax2.set_xlabel('X')
+    ax2.set_ylabel('Y')
+    ax2.set_zlabel('Z')
+    ax2.set_box_aspect([1,1,1])
+    
+    # --- Bottom panel: Formula display ---
+    if has_formulas:
+        formula_lines = []
+        formula_lines.append(r"$\mathbf{Multiplicity\ Formulas}$")
+        formula_lines.append("")
+        
+        # Cluster multiplicity formula
+        if mult_details is not None:
+            formula_lines.append(r"$\mathbf{Cluster\ Multiplicity:}$")
+            formula_lines.append(r"$L_{pyro}(c) = \frac{|Emb(c \to L)|}{N_{tet}} \times \frac{1}{2} = \frac{%d}{%d} \times \frac{1}{2} = %.4f$" % 
+                               (mult_details['raw_count'], mult_details['N_tet'], mult_details['L_pyro']))
+            formula_lines.append("")
+        
+        # Subcluster multiplicities
+        if subcluster_details is not None and len(subcluster_details) > 0:
+            formula_lines.append(r"$\mathbf{Subcluster\ Multiplicities:}$")
+            formula_lines.append(r"$Y_{c,s} = \frac{|Emb(s \to c)|}{|Aut(s)|}$")
+            formula_lines.append("")
+            for sub_idx, Y_cs, Emb, Aut, sub_order in subcluster_details:
+                formula_lines.append(r"$Y_{c,%d} = \frac{%d}{%d} = %d$ (order %d subcluster)" % 
+                                   (sub_idx, Emb, Aut, Y_cs, sub_order))
+        
+        # Join and display
+        formula_text = '\n'.join(formula_lines)
+        ax3.text(0.5, 0.5, formula_text, transform=ax3.transAxes, 
+                fontsize=11, verticalalignment='center', horizontalalignment='center',
+                family='monospace', bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+    
+    plt.tight_layout()
+    
+    # Save figure
+    os.makedirs(output_dir, exist_ok=True)
+    filename = os.path.join(output_dir, f'cluster_{cluster_index}_order_{len(cluster)}_dual.png')
+    plt.savefig(filename, dpi=150, bbox_inches='tight')
+    plt.close()
+    
+    return filename
 
 
 def visualize_cluster(lattice, pos, tetrahedra, cluster, cluster_index):
@@ -717,7 +1010,7 @@ def main():
     print(f"Coordination: min={min_deg}, max={max_deg}, avg={avg_deg:.2f} (expected: 4 with PBC)")
     
     print(f"\nGenerating clusters up to order {max_order}...")
-    distinct_clusters, multiplicities = generate_clusters(tet_graph, max_order)
+    distinct_clusters, multiplicities, all_mult_details = generate_clusters(tet_graph, max_order)
     
     # Verify multiplicities against known values
     verify_multiplicities(distinct_clusters, multiplicities, tet_graph)
@@ -747,9 +1040,9 @@ def main():
     save_subclusters_info(subclusters_info, distinct_clusters, multiplicities, output_dir)
     print(f"Subclusters information saved to {output_dir}/subclusters_info.txt")
     
-    # Print Y_cs values
+    # Print Y_cs values with formula details
     print("\n" + "="*60)
-    print("SUBCLUSTER MULTIPLICITIES (Y_cs)")
+    print("SUBCLUSTER MULTIPLICITIES (Y_cs = |Emb(s→c)| / |Aut(s)|)")
     print("="*60)
     for i, cluster in enumerate(distinct_clusters):
         if len(cluster) == 1:
@@ -758,7 +1051,14 @@ def main():
         subclusters = subclusters_info.get(i, [])
         for sub_idx, count in subclusters:
             sub_order = len(distinct_clusters[sub_idx])
-            print(f"  Y_{{c,s{sub_idx+1}}} = {count} (subcluster of order {sub_order})")
+            subcluster_nodes = distinct_clusters[sub_idx]
+            
+            # Compute with verbose details
+            _, details = compute_subcluster_multiplicities(
+                cluster, subcluster_nodes, tet_graph, verbose=True
+            )
+            
+            print(f"  Y_{{c{i+1},s{sub_idx+1}}} = |Emb(s→c)| / |Aut(s)| = {details['Emb_s_to_c']} / {details['Aut_s']} = {count} (subcluster order {sub_order})")
     
     # Extract and save detailed information for each cluster
     print("\nExtracting and saving detailed cluster information...")
@@ -776,12 +1076,27 @@ def main():
     
     print(f"\nDetailed cluster information saved to {output_dir}/ directory")
     
-    # Visualize clusters if requested
+    # Visualize clusters if requested (default uses dual representation)
     if args.visualize:
-        print("\nVisualizing clusters...")
-        for i, cluster in enumerate(distinct_clusters):
-            visualize_cluster(lattice, pos, tetrahedra, cluster, i + 1)
-        print(f"Visualization images saved as cluster_*.png")
+        print("\nVisualizing clusters (dual representation: diamond + pyrochlore)...")
+        viz_dir = os.path.join(output_dir, 'cluster_visualizations')
+        for i, (cluster, multiplicity, mult_detail) in enumerate(zip(distinct_clusters, multiplicities, all_mult_details)):
+            # Gather subcluster details for this cluster
+            subcluster_detail_list = []
+            subclusters = subclusters_info.get(i, [])
+            for sub_idx, count in subclusters:
+                sub_order = len(distinct_clusters[sub_idx])
+                subcluster_nodes = distinct_clusters[sub_idx]
+                _, details = compute_subcluster_multiplicities(
+                    cluster, subcluster_nodes, tet_graph, verbose=True
+                )
+                subcluster_detail_list.append((sub_idx + 1, count, details['Emb_s_to_c'], details['Aut_s'], sub_order))
+            
+            filename = visualize_cluster_dual(tetrahedra, cluster, i + 1, multiplicity, viz_dir,
+                                             mult_details=mult_detail, 
+                                             subcluster_details=subcluster_detail_list if subcluster_detail_list else None)
+            print(f"  Created: {filename}")
+        print(f"Visualization images saved to {viz_dir}/")
     
     print("\n" + "="*60)
     print("SUMMARY")

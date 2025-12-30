@@ -11,6 +11,7 @@ Modules:
     helper_honeycomb_c3: C3-symmetric honeycomb helpers
     helper_honeycomb_c3_BCAO: C3-symmetric honeycomb for BCAO
     helper_kagome_bfg: Kagome lattice helpers
+    helper_kagome_bfg_hexcentric: Hexagon-centric Kagome lattice helpers
     helper_non_kramers: Non-Kramers doublet helpers
     helper_pyrochlore: Pyrochlore lattice helpers
     helper_pyrochlore_super: Supercell pyrochlore helpers

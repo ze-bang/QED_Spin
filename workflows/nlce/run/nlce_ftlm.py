@@ -287,7 +287,8 @@ Example usage:
             sys.executable, 
             os.path.join(os.path.dirname(__file__), '..', 'prep', 'generate_pyrochlore_clusters.py'),
             f'--max_order={args.max_order}',
-            f'--output_dir={cluster_dir}'
+            f'--output_dir={cluster_dir}',
+            '--visualize'  # Generate dual representation visualizations by default
         ]
         
         logging.info(f"Running command: {' '.join(cmd)}")

@@ -111,11 +111,17 @@ def generate_kagome_cluster(dim1, dim2, use_pbc=False):
         (2,  0, +1, 1), # Site 2 -- Site 1 at (0, +1)
     ]
     
-    # Third nearest neighbors (3NN): distance = 1.0, coordination = 6
+    # Third nearest neighbors (3NN): distance = 1.0, coordination = 2
+    # For BFG model, only the 3NN along "chains" through hexagon centers are relevant
+    # These connect same-sublattice sites in specific directions:
+    # - Sublattice 0: chain along (+1, -1) direction
+    # - Sublattice 1: chain along (0, +1) direction  
+    # - Sublattice 2: chain along (+1, 0) direction
+    # Each site has 2 such 3NN (one in each direction along the chain)
     NN3_BONDS = [
-        (0, +1, -1, 0), 
-        (1, 0, +1, 1), 
-        (2, +1,  0, 2), 
+        (0, +1, -1, 0),  # Site 0 -- Site 0 at (+1, -1)
+        (1,  0, +1, 1),  # Site 1 -- Site 1 at (0, +1)
+        (2, +1,  0, 2),  # Site 2 -- Site 2 at (+1, 0)
     ]
     # ==========================================================================
     # Generate edges using the bond tables

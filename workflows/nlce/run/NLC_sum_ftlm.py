@@ -479,144 +479,123 @@ class NLCExpansionFTLM:
     
     def wynn_epsilon(self, sequence, return_all_evens=False):
         """
-        Apply Wynn's epsilon algorithm for series acceleration.
+        Wynn's epsilon algorithm for series acceleration.
         
-        Implementation follows standard NLCE practice (arXiv:1207.3366):
-        Build ε table recursively, use EVEN entries only (odds diverge).
+        Standard implementation following Wynn (1956) and standard references.
+        Recurrence: ε_{k+1}^{(n)} = ε_{k-1}^{(n+1)} + 1/(ε_k^{(n+1)} - ε_k^{(n)})
         
-        CAUTION: Wynn can blow up for:
-          - Alternating series (use Euler instead)
-          - Strongly diverging series
-          - Series with ratio > 1
+        CRITICAL: Uses GLOBAL abort on instability - if Wynn fails at ANY temperature,
+        returns direct sum for ALL temperatures to avoid discontinuities.
         
         Args:
-            sequence: Array of partial sums S_n at each order
-            return_all_evens: If True, return all even ε entries for stability analysis
+            sequence: List of partial sums [S_0, S_1, ..., S_{N-1}]
+            return_all_evens: If True, return list of all even ε values
             
         Returns:
-            If return_all_evens: list of even ε entries (ε_0, ε_2, ε_4, ...)
-            Otherwise: tuple of (best_estimate, error_estimate)
+            If return_all_evens: list of [ε_2, ε_4, ...] 
+            Otherwise: (best_estimate, error_estimate)
         """
         n = len(sequence)
-        if n < 3:
-            result = sequence[-1] if n > 0 else np.zeros_like(self.temp_values)
-            if return_all_evens:
-                return [result]
-            return result, np.zeros_like(self.temp_values)
         
-        # Guard threshold for near-singular denominators
-        eps_den = 1e-12  # Increased from 1e-14 for better stability
+        # Need at least 5 terms for meaningful acceleration
+        if n < 5:
+            result = sequence[-1]
+            error = np.abs(sequence[-1] - sequence[-2]) if n > 1 else np.zeros_like(result)
+            return [result] if return_all_evens else (result, error)
         
-        # Maximum allowed value to prevent blow-up
-        # Use the range of input sequence as reference
         seq_arr = np.array(sequence)
-        seq_range = np.max(np.abs(seq_arr), axis=0) + 1e-10
-        max_allowed = 100 * seq_range  # Allow 100x the input range
+        n_temps = len(self.temp_values)
         
-        # Initialize
-        eps_prev = np.zeros((n, len(self.temp_values)))  # ε_{-1}^{(n)}
-        eps_curr = np.array(sequence)                     # ε_{0}^{(n)}
+        # Determine reasonable scale for blow-up detection
+        # Use max absolute value of partial sums, with safety factor
+        seq_scale = np.max(np.abs(seq_arr), axis=0) + 1e-10
+        max_reasonable = 100.0 * seq_scale  # Allow 100x the typical scale before aborting
         
-        evens = []  # Collect ε_{2m}^{(lowest n)} - start empty, will collect ε₂, ε₄, ...
+        # Initialize ε table
+        # Column k contains ε_k^{(0)}, ε_k^{(1)}, ..., ε_k^{(n-k-1)}
+        # Start with ε_{-1} = 0 and ε_0 = S_n
+        eps_table = []
+        eps_table.append(np.zeros((n, n_temps)))      # ε_{-1}^{(n)} = 0 for all n
+        eps_table.append(seq_arr.copy())               # ε_0^{(n)} = S_n
         
-        # Track if we've had a blow-up
-        blow_up_detected = False
+        evens = []
         
-        # Iterative construction of ε table
-        iteration = 0
-        while eps_curr.shape[0] > 1:
-            iteration += 1
-            n_curr = eps_curr.shape[0]
-            eps_next = np.zeros((n_curr - 1, len(self.temp_values)))
+        # Build ε table column by column (k = 1, 2, 3, ...)
+        for k in range(1, n):
+            prev_col = eps_table[k-1]  # ε_{k-1}, shape (n-k+1, n_temps)
+            curr_col = eps_table[k]    # ε_k, shape (n-k, n_temps)
             
-            for i in range(n_curr - 1):
-                denom = eps_curr[i+1] - eps_curr[i]
-                
-                # Handle near-singular denominators
-                mask_small = np.abs(denom) < eps_den
-                
-                # Standard ε recursion: ε_{k+1}^{(n)} = ε_{k-1}^{(n+1)} + 1/(ε_k^{(n+1)} - ε_k^{(n)})
-                raw_result = np.where(
-                    mask_small,
-                    eps_curr[i+1],  # Fallback: use neighbor
-                    eps_prev[i+1] + 1.0 / denom
-                )
-                
-                # Clamp to prevent blow-up
-                mask_blowup = np.abs(raw_result) > max_allowed
-                if np.any(mask_blowup):
-                    blow_up_detected = True
-                
-                eps_next[i] = np.where(
-                    mask_blowup,
-                    eps_curr[i+1],  # Fall back to previous value
-                    raw_result
-                )
-            
-            # Check for complete breakdown (all entries invalid)
-            if np.all(np.isnan(eps_next)) or np.all(np.isinf(eps_next)):
+            n_entries = curr_col.shape[0] - 1  # Number of rows minus 1
+            if n_entries <= 0:
                 break
             
-            # Update for next iteration
-            eps_prev = eps_curr
-            eps_curr = eps_next
+            next_col = np.zeros((n_entries, n_temps))
             
-            # Store even entries (iteration 2 → ε_2, iteration 4 → ε_4, etc.)
-            # Wynn table: ε₀ = S_n, iteration 1 → ε₁, iteration 2 → ε₂ (even), etc.
-            if iteration % 2 == 0:  # Even iterations produce even ε
-                # Only store if not blown up
-                candidate = eps_curr[0].copy()
-                if not np.any(np.abs(candidate) > max_allowed):
-                    evens.append(candidate)
-        
-        if return_all_evens:
-            return evens
-        
-        # Select best ε value from the sequence of evens
-        # Strategy: find where the sequence stabilizes, then use that value
-        # Wynn ε can oscillate or blow up at higher orders for some series
-        if len(evens) >= 3:
-            # Look for the point where consecutive values are closest (most stable)
-            changes = [np.mean(np.abs(evens[i+1] - evens[i])) for i in range(len(evens)-1)]
-            
-            # Find index of minimum change (most stable point)
-            min_change_idx = np.argmin(changes)
-            
-            # Use the value after the minimum change as best estimate
-            best_idx = min_change_idx + 1
-            best = evens[best_idx]
-            error = np.abs(evens[best_idx] - evens[min_change_idx]) if best_idx > 0 else np.zeros_like(evens[0])
-            
-            # But if the last values are very close (converged), use them instead
-            if changes[-1] < changes[min_change_idx] * 1.5:
-                best = evens[-1]
-                error = np.abs(evens[-1] - evens[-2])
+            # Compute ε_{k+1}^{(i)} for i = 0, ..., n_entries-1
+            for i in range(n_entries):
+                # ε_{k+1}^{(i)} = ε_{k-1}^{(i+1)} + 1/(ε_k^{(i+1)} - ε_k^{(i)})
+                denom = curr_col[i+1] - curr_col[i]
                 
-        elif len(evens) >= 2:
+                # Check for small denominators (indicates convergence or instability)
+                small_mask = np.abs(denom) < 1e-14
+                if np.all(small_mask):
+                    # All temperatures have zero denominator - algorithm has converged
+                    # Stop here and use the last even entry
+                    break
+                elif np.any(small_mask):
+                    # Some temperatures have issues - GLOBAL abort
+                    result = sequence[-1]
+                    error = np.abs(sequence[-1] - sequence[-2])
+                    return [result] if return_all_evens else (result, error)
+                
+                # Apply Wynn recursion
+                next_col[i] = prev_col[i+1] + 1.0 / denom
+                
+                # GLOBAL blow-up check: abort if ANY temperature produces unreasonable value
+                # Use scale-based threshold: if result is 10x larger than any partial sum, abort
+                if np.any(np.abs(next_col[i]) > max_reasonable):
+                    # Result blowing up relative to input scale - abort globally
+                    result = sequence[-1]
+                    error = np.abs(sequence[-1] - sequence[-2])
+                    return [result] if return_all_evens else (result, error)
+            
+            # If we broke out of the loop early, stop building table
+            if i < n_entries - 1:
+                break
+            
+            eps_table.append(next_col)
+            
+            # Store even columns (k=2 → ε_2, k=4 → ε_4, etc.)
+            if k % 2 == 0 and len(next_col) > 0:
+                evens.append(next_col[0].copy())  # Use ε_k^{(0)} as accelerated value
+        
+        # Return results
+        if return_all_evens:
+            return evens if len(evens) > 0 else [sequence[-1]]
+        
+        # Use highest-order even entry as best estimate
+        if len(evens) >= 2:
             best = evens[-1]
             error = np.abs(evens[-1] - evens[-2])
-            
-            # If error is larger than the value itself, Wynn has failed
-            # Fall back to last partial sum
-            mask_failed = error > 2 * np.abs(best)
-            if np.any(mask_failed):
-                best = np.where(mask_failed, sequence[-1], best)
-                error = np.where(mask_failed, np.abs(sequence[-1] - sequence[-2]) if len(sequence) > 1 else 0, error)
-                
         elif len(evens) == 1:
-            # Only one accelerated value, use it
             best = evens[0]
-            error = np.abs(sequence[-1] - evens[0]) if len(sequence) > 0 else np.zeros_like(self.temp_values)
+            error = np.abs(evens[0] - sequence[-1])
         else:
-            # No acceleration possible, fall back to direct
-            best = sequence[-1] if len(sequence) > 0 else np.zeros_like(self.temp_values)
-            error = np.abs(sequence[-1] - sequence[-2]) if len(sequence) > 1 else np.zeros_like(self.temp_values)
+            # No even entries computed - fall back to direct
+            best = sequence[-1]
+            error = np.abs(sequence[-1] - sequence[-2])
         
-        # Final sanity check: if result is way outside input range, fall back
-        mask_insane = np.abs(best) > 10 * seq_range
-        if np.any(mask_insane):
-            best = np.where(mask_insane, sequence[-1], best)
-            error = np.where(mask_insane, np.abs(sequence[-1] - sequence[-2]) if len(sequence) > 1 else 0, error)
+        # FINAL SANITY CHECK: If Wynn result is unreasonably large compared to input scale,
+        # abort and return direct sum. This catches cases where Wynn produces spikes.
+        # Use 5x threshold: if any temperature has |result| > 5 * max(|partial_sums|), abort
+        spike_mask = np.abs(best) > 5.0 * seq_scale
+        if np.any(spike_mask):
+            # Wynn produced spike - abort globally and warn
+            n_spikes = np.sum(spike_mask)
+            print(f"  ⚠ Wynn unstable at {n_spikes}/{n_temps} temperatures (spike detected)")
+            print(f"    → Falling back to direct sum (alternating series? Use --resummation=euler)")
+            best = sequence[-1]
+            error = np.abs(sequence[-1] - sequence[-2])
         
         return best, error
     
@@ -747,27 +726,39 @@ class NLCExpansionFTLM:
         # Look at last ~6 increments for sign flips
         if n >= 7:
             recent_increments = increments[-6:]
-            # Check if signs consistently alternate across all temperatures
-            signs = np.sign(np.mean(recent_increments, axis=1))
-            alternating_tail = np.all(signs[1:] * signs[:-1] < 0)
         elif n >= 3:
-            signs = np.sign(np.mean(increments, axis=1))
-            alternating_tail = np.all(signs[1:] * signs[:-1] < 0)
+            recent_increments = increments
+        else:
+            recent_increments = increments
+            
+        if n >= 3:
+            # Check if signs consistently alternate across temperatures
+            # We check if > 20% of temperatures show alternating behavior
+            signs = np.sign(recent_increments)
+            # product of consecutive signs: (n_recent-1, n_temps)
+            # If alternating, product should be -1.
+            is_alternating_per_temp = np.all(signs[1:] * signs[:-1] < 0, axis=0)
+            alternating_tail = np.mean(is_alternating_per_temp) > 0.2
         else:
             alternating_tail = False
         
         # 2) Convergence test (magnitudes decreasing)
         if n > 3:
-            recent_magnitudes = np.abs(np.mean(increments[-3:], axis=1))
-            converged = (recent_magnitudes[-1] <= recent_magnitudes[-2] and 
-                        recent_magnitudes[-2] <= recent_magnitudes[-3])
+            # Check if magnitude of increments is decreasing for > 50% of temps
+            recent_magnitudes = np.abs(increments[-3:])
+            is_converging_per_temp = (recent_magnitudes[-1] <= recent_magnitudes[-2]) & \
+                                     (recent_magnitudes[-2] <= recent_magnitudes[-3])
+            converged = np.mean(is_converging_per_temp) > 0.5
         else:
             converged = False
         
         # 3) Oscillatory (weaker than alternating)
         if n > 4:
-            signs = np.sign(np.mean(increments[-4:], axis=1))
-            oscillatory = np.sum(signs[1:] * signs[:-1] < 0) >= 2
+            signs = np.sign(increments[-4:])
+            # Count sign flips per temperature
+            flips_per_temp = np.sum(signs[1:] * signs[:-1] < 0, axis=0)
+            # If significant number of temps have >= 2 flips
+            oscillatory = np.mean(flips_per_temp >= 2) > 0.2
         else:
             oscillatory = False
         
@@ -775,14 +766,20 @@ class NLCExpansionFTLM:
         if n > 2:
             # |a_{n+1}| / |a_n|
             ratios = np.abs(increments[1:]) / (np.abs(increments[:-1]) + 1e-15)
-            # Average ratio over last few terms and over temperatures
-            avg_ratio = np.mean(ratios[-min(3, len(ratios)):])
+            # Average ratio over last few terms
+            avg_ratio_per_temp = np.mean(ratios[-min(3, len(ratios)):], axis=0)
+            # Use the WORST (max) ratio across temperatures to be conservative
+            # Take 90th percentile to avoid single point spikes but capture bad regions
+            avg_ratio = np.percentile(avg_ratio_per_temp, 90)
         else:
             avg_ratio = None
         
         # 5) Monotonicity (all increments same sign)
         if n > 2:
-            monotonic = np.all(np.sign(np.mean(increments, axis=1)) == np.sign(np.mean(increments[0], axis=0)))
+            # Check if > 80% of temps are monotonic
+            signs = np.sign(increments)
+            is_monotonic_per_temp = np.all(signs == signs[0:1], axis=0)
+            monotonic = np.mean(is_monotonic_per_temp) > 0.8
         else:
             monotonic = False
         
@@ -807,14 +804,13 @@ class NLCExpansionFTLM:
     
     def select_resummation_method(self, partial_sums, verbose=True):
         """
-        Automatically select best resummation method using convergence analysis.
+        Simple, clear resummation method selection.
         
-        Decision tree follows NLCE best practices:
-        - Strongly divergent → conservative (truncate)
-        - Alternating tail → Euler (designed for this)
-        - Non-alternating, enough terms, convergent → Wynn ε (NLCE default)
-        - Unstable/noisy → try Brezinski θ
-        - Converged → direct
+        Logic:
+        1. Alternating series → Euler (designed for this case)
+        2. Diverging series (ratio > 1) → Direct (no acceleration)
+        3. Converging series, enough terms → Wynn (NLCE standard)
+        4. Too few terms → Direct
         
         Args:
             partial_sums: List of partial sums [S_1, ..., S_N]
@@ -826,82 +822,41 @@ class NLCExpansionFTLM:
         conv = self.analyze_convergence(partial_sums)
         n = conv['n_terms']
         
-        # Check for strongly divergent series
-        strongly_divergent = False
-        if conv['ratio_test'] is not None and conv['ratio_test'] > 1.5:
-            strongly_divergent = True
-        
         if verbose:
             ratio_str = f"{conv['ratio_test']:.3f}" if conv['ratio_test'] is not None else 'N/A'
             print(f"\n    ===== CONVERGENCE ANALYSIS =====")
-            print(f"    Number of terms: {n}")
-            print(f"    Converged: {conv['converged']}")
-            print(f"    Oscillatory: {conv['oscillatory']}")
-            print(f"    Alternating tail: {conv['alternating_tail']}")
-            print(f"    Ratio test (avg): {ratio_str}")
-            print(f"    Monotonic: {conv['monotonic']}")
-            print(f"    Stable: {conv['stable']}")
-            if strongly_divergent:
-                print(f"    ⚠ STRONG DIVERGENCE DETECTED (ratio > 1.5)")
-            
-            # Temperature-dependent ratio analysis
-            if conv['ratio_test'] is not None and n > 2:
-                print(f"\n    Temperature-dependent convergence:")
-                temps = self.temp_values
-                increments = np.diff(np.array(partial_sums), axis=0)
-                if len(increments) > 1:
-                    last_ratios = np.abs(increments[-1]) / (np.abs(increments[-2]) + 1e-15)
-                    T_low_idx = len(temps) // 10
-                    T_mid_idx = len(temps) // 2
-                    T_high_idx = 9 * len(temps) // 10
-                    print(f"      T={temps[T_low_idx]:.4f}: ratio={np.mean(last_ratios[T_low_idx-2:T_low_idx+2]):.3f}")
-                    print(f"      T={temps[T_mid_idx]:.4f}: ratio={np.mean(last_ratios[T_mid_idx-2:T_mid_idx+2]):.3f}")
-                    print(f"      T={temps[T_high_idx]:.4f}: ratio={np.mean(last_ratios[T_high_idx-2:T_high_idx+2]):.3f}")
-                    
-                    # Warn about divergence
-                    divergent_mask = last_ratios > 0.9
-                    if np.any(divergent_mask):
-                        T_divergent = temps[divergent_mask]
-                        print(f"      ⚠ WARNING: Series diverging at T < {np.max(T_divergent):.4f}")
-                        print(f"                 {np.sum(divergent_mask)} of {len(temps)} temperature points show ratio > 0.9")
-            print(f"    =================================")
+            print(f"    Terms: {n}, Ratio: {ratio_str}, Alternating: {conv['alternating_tail']}")
         
-        # 0) Strong divergence → conservative (don't use Wynn, it will blow up!)
-        if strongly_divergent:
+        # Simple decision tree
+        
+        # 1) Too few terms → use what we have
+        if n <= 3:
             if verbose:
-                print(f"    → Using 'conservative' method due to strong divergence")
-            return 'conservative'
-        
-        # 1) Already converged and stable → direct
-        if conv['converged'] and not conv['oscillatory'] and conv['ratio_test'] and conv['ratio_test'] < 0.3:
+                print(f"    → Method: DIRECT (too few terms)")
             return 'direct'
         
-        # 2) Alternating tail detected → Euler (Tang–Khatami–Rigol recommendation)
+        # 2) Alternating → Euler (handles both converging and diverging alternating series)
         if conv['alternating_tail']:
+            if verbose:
+                print(f"    → Method: EULER (alternating series)")
             return 'euler'
         
-        # 3) Too few terms for non-linear methods
-        if n <= 3:
+        # 3) Diverging (ratio > 1) → no reliable acceleration, use highest order available
+        if conv['ratio_test'] is not None and conv['ratio_test'] > 1.0:
+            if verbose:
+                print(f"    → Method: DIRECT (diverging series, ratio={conv['ratio_test']:.2f} > 1)")
             return 'direct'
         
-        # 4) Ratio > 1 but not strongly divergent → use conservative (Wynn unstable)
-        if conv['ratio_test'] is not None and conv['ratio_test'] > 1.0:
-            return 'conservative'
-        
-        # 5) Enough terms and not alternating → Wynn ε (NLCE workhorse)
-        if n >= 5 and not conv['alternating_tail']:
+        # 4) Converging, enough terms → Wynn (standard NLCE accelerator)
+        if n >= 5:
+            if verbose:
+                print(f"    → Method: WYNN (converging series, N≥5)")
             return 'wynn'
         
-        # 6) Oscillatory but not cleanly alternating → try Brezinski θ
-        if conv['oscillatory'] and n >= 5:
-            return 'theta'
-        
-        # 7) Moderate number of terms (4-5), try Euler
-        if 4 <= n < 5:
-            return 'euler'
-        
-        # 8) Default: Wynn if enough terms, else direct
-        return 'wynn' if n >= 5 else 'direct'
+        # 5) Default: Euler (safest for N=4)
+        if verbose:
+            print(f"    → Method: EULER (default, N=4)")
+        return 'euler'
     
     def apply_resummation(self, partial_sums, method='auto', l_euler=3):
         """
@@ -939,40 +894,29 @@ class NLCExpansionFTLM:
             method = self.select_resummation_method(partial_sums, verbose=True)
         
         # "Robust" means: run multiple methods and check agreement
-        if method == 'robust' and n >= 5:
-            conv = self.analyze_convergence(partial_sums)
-            
+        if method == 'robust' and n >= 4:
             results = {}
             
-            # For alternating series: SKIP Wynn (it blows up), use Euler + theta
-            if conv['alternating_tail']:
-                euler_val, euler_err = self.euler_resummation(partial_sums, l=l_euler)
-                results['euler'] = (euler_val, euler_err)
-                
-                # Brezinski can handle alternating better than Wynn
-                theta_val, theta_err = self.brezinski_theta(partial_sums)
-                results['theta'] = (theta_val, theta_err)
-            else:
-                # For non-alternating: use Wynn + theta
+            # Always try Euler (safe for alternating and converging)
+            euler_val, euler_err = self.euler_resummation(partial_sums, l=l_euler)
+            results['euler'] = (euler_val, euler_err)
+            
+            # Try Wynn if we have enough terms
+            if n >= 5:
                 wynn_val, wynn_err = self.wynn_epsilon(partial_sums)
                 results['wynn'] = (wynn_val, wynn_err)
-                
-                theta_val, theta_err = self.brezinski_theta(partial_sums)
-                results['theta'] = (theta_val, theta_err)
             
             # Include direct sum
             direct = partial_sums[-1]
             results['direct'] = (direct, np.abs(partial_sums[-1] - partial_sums[-2]) if n > 1 else np.zeros_like(direct))
             
-            # Check agreement among methods
-            all_values = [v[0] for v in results.values()]
-            all_errors = [v[1] for v in results.values()]
-            
-            # Central value: average of the two main accelerators (excluding direct)
+            # Central value: average of accelerators
             accelerator_values = [v[0] for k, v in results.items() if k != 'direct']
             best_val = np.mean(accelerator_values, axis=0)
             
             # Error: spread among methods + individual errors
+            all_values = [v[0] for v in results.values()]
+            all_errors = [v[1] for v in results.values()]
             spread = np.std(all_values, axis=0)
             avg_method_error = np.mean(all_errors, axis=0)
             total_error = np.sqrt(spread**2 + avg_method_error**2)
@@ -996,28 +940,6 @@ class NLCExpansionFTLM:
             val, err = self.euler_resummation(partial_sums, l=l_euler)
         elif method == 'wynn':
             val, err = self.wynn_epsilon(partial_sums)
-        elif method == 'theta':
-            val, err = self.brezinski_theta(partial_sums)
-        elif method == 'conservative':
-            # Conservative method: truncate to lower order if last term is too large
-            # This avoids blowup from divergent series
-            if n >= 3:
-                # Check if last increment is growing (sign of divergence)
-                inc_last = np.abs(partial_sums[-1] - partial_sums[-2])
-                inc_prev = np.abs(partial_sums[-2] - partial_sums[-3])
-                
-                # If last increment is larger than previous, truncate
-                growing = inc_last > inc_prev
-                
-                # Use N-1 terms where growing, full N otherwise
-                val = np.where(growing, partial_sums[-2], partial_sums[-1])
-                err = np.where(growing, inc_prev, inc_last)
-                
-                if np.any(growing):
-                    print(f"  Conservative: truncated to N-1 for {np.sum(growing)} temp points")
-            else:
-                val = partial_sums[-1]
-                err = np.abs(partial_sums[-1] - partial_sums[-2]) if n > 1 else np.zeros_like(val)
         else:
             print(f"  Warning: Unknown method '{method}', using direct")
             val = partial_sums[-1]
@@ -2521,6 +2443,143 @@ class NLCExpansionFTLM:
         plt.tight_layout()
         if save_dir:
             path = os.path.join(save_dir, "nlc_verbose_stacked_contributions.png")
+            plt.savefig(path, dpi=300, bbox_inches='tight')
+            print(f"Saved: {path}")
+        plt.close()
+        
+        # ========================================================================
+        # FIGURE 8: Per-cluster contribution breakdown with formulas
+        # Shows L(c) × W(c) for each cluster separately with formula annotation
+        # ========================================================================
+        n_clusters_total = sum(len(clusters_by_order[o]) for o in orders)
+        ncols = min(4, n_clusters_total)
+        nrows = (n_clusters_total + ncols - 1) // ncols
+        
+        fig8, axes8 = plt.subplots(nrows, ncols, figsize=(5*ncols, 4*nrows))
+        fig8.suptitle('Per-Cluster Contribution Breakdown: L(c) × W(c)\nFormula: W(c) = P(c) - Σ Y_{c,s} × W(s)', 
+                      fontsize=14, fontweight='bold')
+        
+        if n_clusters_total == 1:
+            axes8 = np.array([axes8])
+        axes8_flat = axes8.flat if hasattr(axes8, 'flat') else [axes8]
+        
+        cluster_list = []
+        for order in orders:
+            cluster_list.extend(sorted(clusters_by_order[order]))
+        
+        for ax, cluster_id in zip(axes8_flat, cluster_list):
+            data = cluster_data[cluster_id]
+            order = data['order']
+            mult = data['multiplicity']
+            
+            # Get subcluster info for this cluster
+            subcluster_info = self.subcluster_info.get(cluster_id, {})
+            
+            # Plot the three curves
+            ax.plot(temps, data['P']['specific_heat'], 'b-', linewidth=1.5, 
+                   label=f'P(c)', alpha=0.7)
+            ax.plot(temps, data['W']['specific_heat'], 'r-', linewidth=1.5, 
+                   label=f'W(c)', alpha=0.7)
+            ax.plot(temps, data['LW']['specific_heat'], 'g-', linewidth=2.5, 
+                   label=f'L×W = {mult:.2f}×W', alpha=0.9)
+            
+            ax.axhline(y=0, color='black', linestyle=':', linewidth=0.5, alpha=0.5)
+            ax.set_xlabel('T', fontsize=9)
+            ax.set_ylabel('Cv contribution', fontsize=9)
+            ax.set_xscale('log')
+            ax.set_title(f'C{cluster_id}: order={order}, L={mult:.2f}', fontsize=10, fontweight='bold')
+            ax.grid(True, alpha=0.3)
+            ax.legend(fontsize=7, loc='best')
+            
+            # Add formula text box showing subcluster subtraction
+            if subcluster_info:
+                sub_str = ', '.join([f'Y_{{{s}}}={cnt}' for s, cnt in sorted(subcluster_info.items())])
+                formula_text = f'W = P - [{sub_str}]×W_s'
+            else:
+                formula_text = 'W = P (base cluster)'
+            
+            # Add text box with formula
+            ax.text(0.02, 0.98, formula_text, transform=ax.transAxes, fontsize=7,
+                   verticalalignment='top', horizontalalignment='left',
+                   bbox=dict(boxstyle='round,pad=0.3', facecolor='lightyellow', alpha=0.8))
+            
+            # Add value annotation at mid-temperature
+            mid_idx = len(temps) // 2
+            mid_T = temps[mid_idx]
+            LW_mid = data['LW']['specific_heat'][mid_idx]
+            ax.annotate(f'L×W={LW_mid:+.4f}', xy=(mid_T, LW_mid), 
+                       xytext=(5, 10), textcoords='offset points',
+                       fontsize=7, color='green',
+                       arrowprops=dict(arrowstyle='->', color='green', lw=0.5))
+        
+        # Hide unused axes
+        for ax in list(axes8_flat)[n_clusters_total:]:
+            ax.set_visible(False)
+        
+        plt.tight_layout()
+        if save_dir:
+            path = os.path.join(save_dir, "nlc_verbose_per_cluster_breakdown.png")
+            plt.savefig(path, dpi=300, bbox_inches='tight')
+            print(f"Saved: {path}")
+        plt.close()
+        
+        # ========================================================================
+        # FIGURE 9: Contribution magnitude comparison (sorted by |L×W| at mid-T)
+        # ========================================================================
+        mid_idx = len(temps) // 2
+        mid_T = temps[mid_idx]
+        
+        # Sort clusters by absolute contribution at mid-T
+        cluster_contrib = []
+        for cluster_id in cluster_list:
+            data = cluster_data[cluster_id]
+            LW_cv = data['LW']['specific_heat'][mid_idx]
+            cluster_contrib.append((cluster_id, data['order'], data['multiplicity'], LW_cv))
+        
+        cluster_contrib.sort(key=lambda x: abs(x[3]), reverse=True)
+        
+        fig9, (ax9a, ax9b) = plt.subplots(1, 2, figsize=(16, 6))
+        fig9.suptitle(f'Contribution Ranking at T = {mid_T:.4f}', fontsize=14, fontweight='bold')
+        
+        # Left: Bar chart of contributions
+        x_pos = np.arange(len(cluster_contrib))
+        bar_colors = ['red' if c[3] < 0 else 'blue' for c in cluster_contrib]
+        bars = ax9a.bar(x_pos, [c[3] for c in cluster_contrib], color=bar_colors, alpha=0.7)
+        ax9a.axhline(y=0, color='black', linestyle='-', linewidth=1)
+        ax9a.set_xlabel('Cluster (sorted by |L×W|)')
+        ax9a.set_ylabel('L × W contribution to Cv')
+        ax9a.set_title('Specific Heat Contributions (sorted by magnitude)')
+        ax9a.set_xticks(x_pos)
+        ax9a.set_xticklabels([f'C{c[0]}\n(n={c[1]})' for c in cluster_contrib], fontsize=8, rotation=45)
+        ax9a.grid(True, alpha=0.3, axis='y')
+        
+        # Add value labels
+        for bar, c in zip(bars, cluster_contrib):
+            height = bar.get_height()
+            ax9a.annotate(f'{height:+.4f}\nL={c[2]:.1f}',
+                         xy=(bar.get_x() + bar.get_width()/2, height),
+                         xytext=(0, 5 if height >= 0 else -20),
+                         textcoords="offset points",
+                         ha='center', va='bottom' if height >= 0 else 'top',
+                         fontsize=7)
+        
+        # Right: Cumulative contribution
+        cumsum = np.cumsum([c[3] for c in cluster_contrib])
+        ax9b.plot(x_pos, cumsum, 'bo-', linewidth=2, markersize=6)
+        ax9b.fill_between(x_pos, cumsum, alpha=0.3)
+        ax9b.axhline(y=cumsum[-1], color='red', linestyle='--', linewidth=1.5, 
+                    label=f'Total = {cumsum[-1]:.4f}')
+        ax9b.set_xlabel('Number of clusters included')
+        ax9b.set_ylabel('Cumulative Cv')
+        ax9b.set_title('Cumulative Sum (adding clusters by contribution magnitude)')
+        ax9b.set_xticks(x_pos)
+        ax9b.set_xticklabels([f'C{c[0]}' for c in cluster_contrib], fontsize=8, rotation=45)
+        ax9b.grid(True, alpha=0.3)
+        ax9b.legend(loc='best')
+        
+        plt.tight_layout()
+        if save_dir:
+            path = os.path.join(save_dir, "nlc_verbose_contribution_ranking.png")
             plt.savefig(path, dpi=300, bbox_inches='tight')
             print(f"Saved: {path}")
         plt.close()
