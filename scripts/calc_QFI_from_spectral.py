@@ -47,12 +47,14 @@ except ImportError:
     print("Warning: h5py not available, HDF5 reading disabled")
 
 # Try to import mpi4py, but make it optional
-try:
-    from mpi4py import MPI
-    HAS_MPI = True
-except ImportError:
-    HAS_MPI = False
+# try:
+#     from mpi4py import MPI
+#     HAS_MPI = True
+# except ImportError:
+#     HAS_MPI = False
 
+from mpi4py import MPI
+HAS_MPI = True
 # NumPy compatibility: use trapezoid (new) or trapz (old)
 if hasattr(np, 'trapezoid'):
     np_trapz = np.trapezoid
@@ -801,7 +803,7 @@ def _process_species_spectral(species, beta_groups, beta_bin_values,
         print(f"  Beta bin {beta_bin_idx} (β≈{beta_label}): {len(file_list)} files")
         
         # Load and average spectral data from all samples
-        mean_omega, mean_spectral = _load_and_average_spectral(file_list)
+        mean_omega, mean_spectral, individual_data = _load_and_average_spectral(file_list)
         
         if mean_omega is None:
             print(f"    Failed to load data")
@@ -809,6 +811,12 @@ def _process_species_spectral(species, beta_groups, beta_bin_values,
         
         # Calculate QFI from averaged spectral function
         qfi = calculate_qfi_from_spectral(mean_omega, mean_spectral, beta)
+        
+        # Calculate QFI for each individual sample
+        per_sample_qfi = []
+        for omega, spectral, fpath in individual_data:
+            sample_qfi = calculate_qfi_from_spectral(omega, spectral, beta)
+            per_sample_qfi.append((sample_qfi, fpath))
         
         # Find peaks in the spectral function
         peak_positions, peak_heights, peak_prominences = find_spectral_peaks(
@@ -821,13 +829,22 @@ def _process_species_spectral(species, beta_groups, beta_bin_values,
             'qfi': qfi,
             'peak_positions': peak_positions,
             'peak_heights': peak_heights,
-            'peak_prominences': peak_prominences
+            'peak_prominences': peak_prominences,
+            'per_sample_qfi': per_sample_qfi  # Add per-sample data
         }
         
         _save_species_results(species, beta, results, structure_factor_dir)
         
-        # Store for summary plots
+        # Store for summary plots (including per-sample data)
         all_species_qfi_data[species].append((beta, qfi))
+        
+        # Store per-sample QFI for parameter sweep heatmaps
+        for sample_qfi, fpath in per_sample_qfi:
+            # Extract sample index from filepath
+            sample_key = f"{species}_sample_{_extract_sample_idx(fpath)}"
+            if sample_key not in all_species_qfi_data:
+                all_species_qfi_data[sample_key] = []
+            all_species_qfi_data[sample_key].append((beta, sample_qfi))
         
         print(f"    QFI = {qfi:.4f}, Peaks at: {peak_positions}")
 
@@ -843,10 +860,15 @@ def _get_bin_beta(beta_vals):
 
 
 def _load_and_average_spectral(file_list):
-    """Load and average spectral data from multiple files."""
+    """Load and average spectral data from multiple files.
+    
+    Returns: (mean_omega, mean_spectral, list_of_individual_data)
+    where list_of_individual_data = [(omega, spectral, filepath), ...]
+    """
     
     all_omega = []
     all_spectral = []
+    individual_data = []  # Store individual sample data
     
     for fpath in file_list:
         omega, spectral = load_spectral_file(fpath)
@@ -857,9 +879,10 @@ def _load_and_average_spectral(file_list):
         
         all_omega.append(omega)
         all_spectral.append(spectral)
+        individual_data.append((omega, spectral, fpath))
     
     if not all_omega:
-        return None, None
+        return None, None, []
     
     # Check if all omega arrays are identical
     ref_omega = all_omega[0]
@@ -890,7 +913,23 @@ def _load_and_average_spectral(file_list):
         # Average the interpolated spectral functions
         mean_spectral = np.mean(interpolated_spectral, axis=0)
     
-    return mean_omega, mean_spectral
+    return mean_omega, mean_spectral, individual_data
+
+
+def _extract_sample_idx(filepath):
+    """Extract sample index from filepath or dataset name."""
+    # Handle HDF5 references
+    if filepath.startswith('HDF5:') or filepath.startswith('DSSF_HDF5:'):
+        # Extract from dataset name
+        m = re.search(r'sample[_]?(\d+)', filepath, re.IGNORECASE)
+        if m:
+            return int(m.group(1))
+    else:
+        # Extract from text filename
+        species, beta, sample_idx = parse_spectral_filename(filepath)
+        if sample_idx is not None:
+            return sample_idx
+    return 0  # Default if not found
 
 
 def _save_species_results(species, beta, results, structure_factor_dir):
@@ -912,6 +951,16 @@ def _save_species_results(species, beta, results, structure_factor_dir):
     with open(qfi_filename, 'w') as f:
         f.write(f"# QFI for {species} at beta={beta_label}\n")
         f.write(f"{results['qfi']:.10e}\n")
+    
+    # Save per-sample QFI values if available
+    if 'per_sample_qfi' in results and results['per_sample_qfi']:
+        per_sample_filename = os.path.join(outdir, f'qfi_per_sample_beta_{beta_label}.txt')
+        with open(per_sample_filename, 'w') as f:
+            f.write(f"# Per-sample QFI for {species} at beta={beta_label}\n")
+            f.write(f"# sample_index QFI filepath\n")
+            for i, (qfi_val, fpath) in enumerate(results['per_sample_qfi']):
+                sample_idx = _extract_sample_idx(fpath)
+                f.write(f"{sample_idx} {qfi_val:.10e} {fpath}\n")
     
     # Save peak information
     if results['peak_positions']:
@@ -1219,12 +1268,46 @@ def _plot_parameter_sweep_summary(data, data_dir, param_pattern):
     print(f"\n{'='*70}")
     print("Processing QFI heatmaps...")
     print(f"{'='*70}")
-    for species, data_points in species_data.items():
+    
+    # Separate base species from per-sample species
+    base_species = {k: v for k, v in species_data.items() if '_sample_' not in k}
+    sample_species = {k: v for k, v in species_data.items() if '_sample_' in k}
+    
+    # Plot base species (averaged) heatmaps
+    for species, data_points in base_species.items():
         if data_points:
             try:
                 _plot_parameter_beta_heatmap(species, data_points, plot_outdir, param_pattern)
             except Exception as e:
                 print(f"ERROR processing heatmap for {species}: {e}")
+                import traceback
+                traceback.print_exc()
+    
+    # Plot per-sample heatmaps for debugging
+    if sample_species:
+        print(f"\n{'='*70}")
+        print("Processing per-sample QFI heatmaps for debugging...")
+        print(f"{'='*70}")
+        sample_outdir = os.path.join(plot_outdir, 'per_sample_debug')
+        os.makedirs(sample_outdir, exist_ok=True)
+        
+        # Group samples by base species
+        samples_by_species = defaultdict(dict)
+        for species_key, data_points in sample_species.items():
+            # Extract base species and sample index
+            # Format: {base_species}_sample_{N}
+            match = re.match(r'^(.+?)_sample_(\d+)$', species_key)
+            if match:
+                base_species = match.group(1)
+                sample_idx = int(match.group(2))
+                samples_by_species[base_species][sample_idx] = data_points
+        
+        # Create subplot grids for each base species
+        for base_species, samples_dict in samples_by_species.items():
+            try:
+                _plot_all_samples_grid(base_species, samples_dict, sample_outdir, param_pattern)
+            except Exception as e:
+                print(f"ERROR processing per-sample grid for {base_species}: {e}")
                 import traceback
                 traceback.print_exc()
     
@@ -1299,6 +1382,139 @@ def _create_closeup_heatmap_param(species, target_beta, Z_pos, param_pos,
     np.savetxt(zoom_filename, out, header=header)
     
     print(f"  Created closeup heatmap for {param_pattern} range {param_range}")
+
+
+def _plot_all_samples_grid(base_species, samples_dict, plot_outdir, param_pattern):
+    """Create subplot grid showing all samples together for direct comparison.
+    
+    Parameters:
+    base_species: Base species name (without _sample_N suffix)
+    samples_dict: Dictionary mapping sample_idx -> data_points
+    plot_outdir: Output directory for plots
+    param_pattern: Parameter name
+    """
+    print(f"\nCreating per-sample comparison grid for: {base_species}")
+    print(f"Number of samples: {len(samples_dict)}")
+    
+    # Sort samples by index
+    sample_indices = sorted(samples_dict.keys())
+    n_samples = len(sample_indices)
+    
+    if n_samples == 0:
+        return
+    
+    # Calculate subplot grid layout (prefer square-ish)
+    n_cols = int(np.ceil(np.sqrt(n_samples)))
+    n_rows = int(np.ceil(n_samples / n_cols))
+    
+    # Prepare data for all samples
+    sample_grids = {}
+    vmin_global = np.inf
+    vmax_global = -np.inf
+    
+    for sample_idx in sample_indices:
+        data_points = samples_dict[sample_idx]
+        
+        # Convert to array
+        arr = np.array(data_points, dtype=float)
+        param_vals, beta_vals, qfi_vals = arr[:, 0], arr[:, 1], arr[:, 2]
+        
+        # Get beta grid
+        ref_target = np.median(param_vals)
+        target_beta = _get_beta_grid_param(param_vals, beta_vals, ref_target)
+        
+        if target_beta.size < 2:
+            print(f"  Sample {sample_idx}: Insufficient beta grid, skipping")
+            continue
+        
+        # Split parameters
+        param_neg, param_pos = _split_param_values(param_vals)
+        
+        # Interpolate to grid (focus on positive params for now)
+        Z_neg, Z_pos = _interpolate_to_grid_param(
+            param_vals, beta_vals, qfi_vals,
+            param_neg, param_pos, target_beta, param_pattern
+        )
+        
+        # Filter NaN rows
+        filtered_data = _filter_nan_rows_param(target_beta, Z_neg, Z_pos, True)
+        
+        # Store grid data
+        sample_grids[sample_idx] = {
+            'param_pos': param_pos,
+            'beta': filtered_data.get('beta_pos_f', target_beta),
+            'Z_pos': filtered_data.get('Z_pos_f', Z_pos),
+            'param_neg': param_neg,
+            'Z_neg': filtered_data.get('Z_neg_f', Z_neg)
+        }
+        
+        # Update global color limits
+        if Z_pos is not None:
+            vmin_global = min(vmin_global, np.nanmin(Z_pos))
+            vmax_global = max(vmax_global, np.nanmax(Z_pos))
+    
+    if not sample_grids:
+        print(f"  No valid grids for {base_species}")
+        return
+    
+    # Create subplot figure (positive parameters only)
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(5*n_cols, 4*n_rows),
+                             squeeze=False)
+    
+    for idx, sample_idx in enumerate(sample_indices):
+        if sample_idx not in sample_grids:
+            continue
+            
+        row = idx // n_cols
+        col = idx % n_cols
+        ax = axes[row, col]
+        
+        grid = sample_grids[sample_idx]
+        param_pos = grid['param_pos']
+        beta = grid['beta']
+        Z_pos = grid['Z_pos']
+        
+        if Z_pos is None or param_pos.size == 0:
+            ax.text(0.5, 0.5, f'Sample {sample_idx}\n(No data)',
+                   ha='center', va='center', transform=ax.transAxes)
+            ax.set_xticks([])
+            ax.set_yticks([])
+            continue
+        
+        # Create meshgrid and plot
+        P, B = np.meshgrid(param_pos, beta)
+        pcm = ax.pcolormesh(P, B, Z_pos, shading='auto', cmap='RdYlBu_r',
+                           vmin=vmin_global, vmax=vmax_global)
+        
+        ax.set_yscale('log')
+        ax.invert_yaxis()
+        ax.set_title(f'Sample {sample_idx}', fontsize=10)
+        
+        # Only show axis labels on edge subplots
+        if row == n_rows - 1:
+            ax.set_xlabel(param_pattern, fontsize=9)
+        if col == 0:
+            ax.set_ylabel('Beta (β)', fontsize=9)
+    
+    # Hide unused subplots
+    for idx in range(len(sample_indices), n_rows * n_cols):
+        row = idx // n_cols
+        col = idx % n_cols
+        axes[row, col].axis('off')
+    
+    # Add shared colorbar
+    fig.subplots_adjust(right=0.92, hspace=0.3, wspace=0.3)
+    cbar_ax = fig.add_axes([0.94, 0.15, 0.02, 0.7])
+    fig.colorbar(pcm, cax=cbar_ax, label='QFI')
+    
+    fig.suptitle(f'QFI Per-Sample Comparison: {base_species}', fontsize=14, y=0.98)
+    
+    # Save figure
+    fname = os.path.join(plot_outdir, f'qfi_per_sample_grid_{base_species}.png')
+    plt.savefig(fname, dpi=300, bbox_inches='tight')
+    plt.close()
+    
+    print(f"  Created per-sample grid with {len(sample_grids)} samples")
 
 
 def _plot_parameter_beta_heatmap(species, data_points, plot_outdir, param_pattern):
