@@ -2284,11 +2284,16 @@ inline EDResults exact_diagonalization_fixed_sz(
             
             if (mpi_size > 1) {
                 MPI_Barrier(MPI_COMM_WORLD);  // Ensure all ranks have finished writing
-                if (mpi_rank == 0) {
-                    std::cout << "\nMerging per-rank HDF5 files..." << std::endl;
-                    HDF5IO::mergePerRankTPQFiles(params.output_dir, mpi_size, "ed_results.h5", true);
-                }
             }
+            if (mpi_rank == 0) {
+                std::cout << "\nMerging per-rank HDF5 files..." << std::endl;
+                HDF5IO::mergePerRankTPQFiles(params.output_dir, mpi_size, "ed_results.h5", true);
+                // Convert TPQ results to unified thermodynamic format
+                convert_tpq_to_unified_thermodynamics(params.output_dir, params.num_samples);
+            }
+#else
+            // Non-MPI: convert TPQ results to unified thermodynamic format
+            convert_tpq_to_unified_thermodynamics(params.output_dir, params.num_samples);
 #endif
         }
         
@@ -2541,11 +2546,16 @@ EDResults exact_diagonalization_from_files(
             
             if (mpi_size > 1) {
                 MPI_Barrier(MPI_COMM_WORLD);  // Ensure all ranks have finished writing
-                if (mpi_rank == 0) {
-                    std::cout << "\nMerging per-rank HDF5 files..." << std::endl;
-                    HDF5IO::mergePerRankTPQFiles(params.output_dir, mpi_size, "ed_results.h5", true);
-                }
             }
+            if (mpi_rank == 0) {
+                std::cout << "\nMerging per-rank HDF5 files..." << std::endl;
+                HDF5IO::mergePerRankTPQFiles(params.output_dir, mpi_size, "ed_results.h5", true);
+                // Convert TPQ results to unified thermodynamic format
+                convert_tpq_to_unified_thermodynamics(params.output_dir, params.num_samples);
+            }
+#else
+            // Non-MPI: convert TPQ results to unified thermodynamic format
+            convert_tpq_to_unified_thermodynamics(params.output_dir, params.num_samples);
 #endif
             
             std::cout << "GPU mTPQ completed successfully!" << std::endl;
@@ -2586,12 +2596,17 @@ EDResults exact_diagonalization_from_files(
                 
                 if (mpi_size > 1) {
                     MPI_Barrier(MPI_COMM_WORLD);  // Ensure all ranks have finished writing
-                    if (mpi_rank == 0) {
-                        std::cout << "\nMerging per-rank HDF5 files..." << std::endl;
-                        HDF5IO::mergePerRankTPQFiles(params.output_dir, mpi_size, "ed_results.h5", true);
-                    }
+                }
+                if (mpi_rank == 0) {
+                    std::cout << "\nMerging per-rank HDF5 files..." << std::endl;
+                    HDF5IO::mergePerRankTPQFiles(params.output_dir, mpi_size, "ed_results.h5", true);
+                    // Convert TPQ results to unified thermodynamic format
+                    convert_tpq_to_unified_thermodynamics(params.output_dir, params.num_samples);
                 }
             }
+#else
+            // Non-MPI: convert TPQ results to unified thermodynamic format
+            convert_tpq_to_unified_thermodynamics(params.output_dir, params.num_samples);
 #endif
             
             std::cout << "GPU cTPQ completed successfully!" << std::endl;
