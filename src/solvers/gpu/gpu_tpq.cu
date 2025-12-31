@@ -363,6 +363,79 @@ bool GPUTPQSolver::loadTPQState(const std::string& filename) {
     return true;
 }
 
+bool GPUTPQSolver::loadTPQState(const std::string& filename, GPUFixedSzOperator* fixed_sz_op) {
+    std::ifstream file(filename, std::ios::binary);
+    if (!file.is_open()) {
+        std::cerr << "Error: Could not open TPQ state file: " << filename << std::endl;
+        return false;
+    }
+    
+    // Read size from file
+    size_t file_size;
+    file.read(reinterpret_cast<char*>(&file_size), sizeof(size_t));
+    
+    // If fixed_sz_op is provided, we expect full basis state and need to project
+    if (fixed_sz_op != nullptr) {
+        size_t full_dim = fixed_sz_op->getFullDim();
+        
+        if (file_size == full_dim) {
+            // State is in full basis - read and project to reduced basis
+            std::vector<std::complex<double>> full_state(full_dim);
+            file.read(reinterpret_cast<char*>(full_state.data()), full_dim * sizeof(std::complex<double>));
+            file.close();
+            
+            // Project from full to reduced basis
+            std::vector<std::complex<double>> reduced_state = fixed_sz_op->projectToReduced(full_state);
+            
+            if (reduced_state.size() != static_cast<size_t>(N_)) {
+                std::cerr << "Error: Projected state dimension mismatch. Expected " << N_ 
+                          << ", got " << reduced_state.size() << std::endl;
+                return false;
+            }
+            
+            // Copy to GPU
+            cudaMemcpy(d_state_, reduced_state.data(), N_ * sizeof(cuDoubleComplex), cudaMemcpyHostToDevice);
+            
+            std::cout << "Loaded TPQ state from: " << filename << std::endl;
+            std::cout << "  [GPU Fixed-Sz] Projected from full basis (dim=" << full_dim 
+                      << ") to reduced basis (dim=" << N_ << ")" << std::endl;
+            return true;
+        } else if (file_size == static_cast<size_t>(N_)) {
+            // State is already in reduced basis (legacy) - read directly
+            std::vector<std::complex<double>> h_state(N_);
+            file.read(reinterpret_cast<char*>(h_state.data()), N_ * sizeof(std::complex<double>));
+            file.close();
+            
+            cudaMemcpy(d_state_, h_state.data(), N_ * sizeof(cuDoubleComplex), cudaMemcpyHostToDevice);
+            
+            std::cout << "Loaded TPQ state (already in reduced basis) from: " << filename << std::endl;
+            return true;
+        } else {
+            std::cerr << "Error: TPQ state dimension mismatch. Expected " << full_dim 
+                      << " (full) or " << N_ << " (reduced), got " << file_size << std::endl;
+            file.close();
+            return false;
+        }
+    } else {
+        // No fixed_sz_op, expect state dimension to match N_
+        if (file_size != static_cast<size_t>(N_)) {
+            std::cerr << "Error: TPQ state dimension mismatch. Expected " << N_ 
+                      << ", got " << file_size << std::endl;
+            file.close();
+            return false;
+        }
+        
+        std::vector<std::complex<double>> h_state(N_);
+        file.read(reinterpret_cast<char*>(h_state.data()), N_ * sizeof(std::complex<double>));
+        file.close();
+        
+        cudaMemcpy(d_state_, h_state.data(), N_ * sizeof(cuDoubleComplex), cudaMemcpyHostToDevice);
+        
+        std::cout << "Loaded TPQ state from: " << filename << std::endl;
+        return true;
+    }
+}
+
 std::string GPUTPQSolver::findLowestEnergyTPQState(const std::string& dir, int sample, 
                                                    double& beta_out, int& step_out) {
     // Check if directory exists using POSIX API
@@ -668,7 +741,8 @@ void GPUTPQSolver::runMicrocanonicalTPQ(
             }
             
             // Try to load the state file if we found one
-            if (!state_file.empty() && loadTPQState(state_file)) {
+            // Use the overload that can project from full basis to reduced if needed
+            if (!state_file.empty() && loadTPQState(state_file, fixed_sz_op)) {
                 loaded_from_file = true;
                 start_step = found_step + 1;
                 inv_temp = found_beta;
@@ -831,6 +905,14 @@ void GPUTPQSolver::runMicrocanonicalTPQ(
                     std::cout << "  *** Saving TPQ state at β = " << inv_temp 
                               << " (target: " << measure_inv_temp[target_temp_idx] << ") ***" << std::endl;
                     saveTPQStateHDF5(dir, sample, inv_temp, fixed_sz_op);
+                    
+                    // Also save binary file for continue_quenching support
+                    // ALWAYS save in FULL basis for consistency
+                    std::string binary_state_file = dir + "/tpq_state_" + std::to_string(sample) 
+                                                  + "_beta=" + std::to_string(inv_temp) 
+                                                  + "_step=" + std::to_string(step) + ".dat";
+                    saveTPQState(binary_state_file, fixed_sz_op);  // With fixed_sz_op = save in full basis
+                    
                     temp_measured[target_temp_idx] = true;
                 }
             }
@@ -838,11 +920,20 @@ void GPUTPQSolver::runMicrocanonicalTPQ(
             stats_.iterations++;
         }
         
-        
-        // Save final energy
+        // Save final state as binary file for continue_quenching
+        // This allows resuming from the lowest temperature state
+        // ALWAYS save in FULL basis for consistency
         std::pair<double, double> final_pair = computeEnergyAndVariance();
         double final_energy = final_pair.first;
         double final_var = final_pair.second;
+        double final_inv_temp = (2.0 * final_step) / (large_value * D_S - final_energy);
+        
+        std::string final_state_file = dir + "/tpq_state_" + std::to_string(sample) 
+                                     + "_beta=" + std::to_string(final_inv_temp) 
+                                     + "_step=" + std::to_string(final_step) + ".dat";
+        saveTPQState(final_state_file, fixed_sz_op);  // With fixed_sz_op = save in full basis
+        std::cout << "Saved final TPQ state for continue_quenching: " << final_state_file << std::endl;
+        
         eigenvalues.push_back(final_energy);
         
         std::cout << "Final energy: " << final_energy << " (variance: " << final_var << ")" << std::endl;

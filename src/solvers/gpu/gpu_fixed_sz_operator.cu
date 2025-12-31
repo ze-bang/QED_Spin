@@ -198,4 +198,29 @@ std::vector<std::complex<double>> GPUFixedSzOperator::embedToFull(
     return full_vec;
 }
 
+std::vector<std::complex<double>> GPUFixedSzOperator::projectToReduced(
+    const std::vector<std::complex<double>>& full_vec) {
+    
+    uint64_t full_dim = 1ULL << n_sites_;
+    if (full_vec.size() != full_dim) {
+        throw std::invalid_argument("Input vector size mismatch with full Hilbert space dimension");
+    }
+    
+    // Copy basis states from GPU to host
+    std::vector<uint64_t> h_basis_states(fixed_sz_dim_);
+    CUDA_CHECK(cudaMemcpy(h_basis_states.data(), d_basis_states_, 
+                         fixed_sz_dim_ * sizeof(uint64_t), cudaMemcpyDeviceToHost));
+    
+    // Create reduced-space vector
+    std::vector<std::complex<double>> reduced_vec(fixed_sz_dim_);
+    
+    // Extract coefficients at fixed-Sz basis state positions
+    for (int i = 0; i < fixed_sz_dim_; ++i) {
+        uint64_t state = h_basis_states[i];
+        reduced_vec[i] = full_vec[state];
+    }
+    
+    return reduced_vec;
+}
+
 #endif // WITH_CUDA

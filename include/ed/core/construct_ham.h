@@ -1857,6 +1857,14 @@ public:
     // Get dimension of fixed Sz sector
     uint64_t getFixedSzDim() const { return fixed_sz_dim_; }
     
+    // Get dimension of full Hilbert space
+    uint64_t getFullDim() const { return 1ULL << n_bits_; }
+    
+    // Alias for projectToFixedSz for consistency with GPU version
+    std::vector<Complex> projectToReduced(const std::vector<Complex>& full_vec) const {
+        return projectToFixedSz(full_vec);
+    }
+    
     // Get basis states
     const std::vector<uint64_t>& getBasisStates() const { return basis_states_; }
     

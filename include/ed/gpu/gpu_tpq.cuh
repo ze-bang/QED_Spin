@@ -130,6 +130,7 @@ private:
     bool saveTPQState(const std::string& filename, class GPUFixedSzOperator* fixed_sz_op);
     bool saveTPQStateHDF5(const std::string& dir, size_t sample, double beta, class GPUFixedSzOperator* fixed_sz_op);
     bool loadTPQState(const std::string& filename);
+    bool loadTPQState(const std::string& filename, class GPUFixedSzOperator* fixed_sz_op);
     
     /**
      * @brief Find the TPQ state file with the highest beta (lowest energy)

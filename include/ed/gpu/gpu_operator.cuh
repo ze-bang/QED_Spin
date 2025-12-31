@@ -238,8 +238,14 @@ public:
     // Get basis dimension
     int getFixedSzDimension() const { return fixed_sz_dim_; }
     
+    // Get full Hilbert space dimension
+    size_t getFullDim() const { return 1ULL << n_sites_; }
+    
     // Transform vector from fixed-Sz basis to full Hilbert space
     std::vector<std::complex<double>> embedToFull(const std::vector<std::complex<double>>& fixed_sz_vec);
+    
+    // Project vector from full Hilbert space to fixed-Sz basis
+    std::vector<std::complex<double>> projectToReduced(const std::vector<std::complex<double>>& full_vec);
     
 private:
     int n_up_;

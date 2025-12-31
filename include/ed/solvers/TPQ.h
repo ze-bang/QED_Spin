@@ -142,6 +142,18 @@ bool save_tpq_state(const ComplexVector& tpq_state, const std::string& filename,
 bool load_tpq_state(ComplexVector& tpq_state, const std::string& filename);
 
 /**
+ * Load a TPQ state from a file with optional projection from full to reduced basis
+ * 
+ * @param tpq_state TPQ state vector to load into (will be in reduced basis if fixed_sz_op provided)
+ * @param filename Name of the file to load from
+ * @param fixed_sz_op Optional FixedSzOperator - if provided, projects from full to reduced basis
+ * @param expected_reduced_dim Expected dimension of reduced basis
+ * @return True if successful
+ */
+bool load_tpq_state(ComplexVector& tpq_state, const std::string& filename, 
+                    class FixedSzOperator* fixed_sz_op, uint64_t expected_reduced_dim);
+
+/**
  * Load eigenvector data from a raw binary file
  * 
  * @param tpq_state TPQ state vector to load into

@@ -1059,6 +1059,70 @@ bool load_tpq_state(ComplexVector& tpq_state, const std::string& filename) {
     return true;
 }
 
+/**
+ * Load a TPQ state from a file with optional projection from full to reduced basis
+ * 
+ * @param tpq_state TPQ state vector to load into (will be in reduced basis if fixed_sz_op provided)
+ * @param filename Name of the file to load from
+ * @param fixed_sz_op Optional FixedSzOperator - if provided, projects from full to reduced basis
+ * @param expected_reduced_dim Expected dimension of reduced basis
+ * @return True if successful
+ */
+bool load_tpq_state(ComplexVector& tpq_state, const std::string& filename, 
+                    FixedSzOperator* fixed_sz_op, uint64_t expected_reduced_dim) {
+    std::ifstream in(filename, std::ios::binary);
+    if (!in.is_open()) {
+        std::cerr << "Error: Could not open file " << filename << " for reading" << std::endl;
+        return false;
+    }
+    
+    size_t file_size;
+    in.read(reinterpret_cast<char*>(&file_size), sizeof(size_t));
+    
+    if (fixed_sz_op != nullptr) {
+        size_t full_dim = fixed_sz_op->getFullDim();
+        
+        if (file_size == full_dim) {
+            // State is in full basis - read and project to reduced basis
+            ComplexVector full_state(full_dim);
+            in.read(reinterpret_cast<char*>(full_state.data()), full_dim * sizeof(Complex));
+            in.close();
+            
+            // Project from full to reduced basis
+            tpq_state = fixed_sz_op->projectToReduced(full_state);
+            
+            if (tpq_state.size() != expected_reduced_dim) {
+                std::cerr << "Error: Projected state dimension mismatch. Expected " << expected_reduced_dim 
+                          << ", got " << tpq_state.size() << std::endl;
+                return false;
+            }
+            
+            std::cout << "  [Fixed-Sz] Projected from full basis (dim=" << full_dim 
+                      << ") to reduced basis (dim=" << tpq_state.size() << ")" << std::endl;
+            return true;
+        } else if (file_size == expected_reduced_dim) {
+            // State is already in reduced basis (legacy) - read directly
+            tpq_state.resize(expected_reduced_dim);
+            in.read(reinterpret_cast<char*>(tpq_state.data()), expected_reduced_dim * sizeof(Complex));
+            in.close();
+            
+            std::cout << "Loaded TPQ state (already in reduced basis) from: " << filename << std::endl;
+            return true;
+        } else {
+            std::cerr << "Error: TPQ state dimension mismatch. Expected " << full_dim 
+                      << " (full) or " << expected_reduced_dim << " (reduced), got " << file_size << std::endl;
+            in.close();
+            return false;
+        }
+    } else {
+        // No fixed_sz_op, just load as-is
+        tpq_state.resize(file_size);
+        in.read(reinterpret_cast<char*>(tpq_state.data()), file_size * sizeof(Complex));
+        in.close();
+        return true;
+    }
+}
+
 
 /**
  * Load eigenvector data from a raw binary file
@@ -1910,13 +1974,13 @@ void microcanonical_tpq(
             v0.resize(N);
             bool loaded = false;
             
-            // Try new format first
-            if (load_tpq_state(v0, state_file_new)) {
+            // Try new format first - use overload that can project from full to reduced
+            if (load_tpq_state(v0, state_file_new, fixed_sz_op, N)) {
                 std::cout << "Loaded state from: " << state_file_new << std::endl;
                 loaded = true;
             } 
             // Fall back to legacy format
-            else if (load_tpq_state(v0, state_file_legacy)) {
+            else if (load_tpq_state(v0, state_file_legacy, fixed_sz_op, N)) {
                 std::cout << "Loaded state from: " << state_file_legacy << std::endl;
                 loaded = true;
             }
@@ -2086,10 +2150,27 @@ void microcanonical_tpq(
                     if (compute_observables) {
                         // Save to unified HDF5 file
                         save_tpq_state_hdf5(v0, dir, sample, inv_temp, fixed_sz_op);
+                        
+                        // Also save binary file for continue_quenching support
+                        // ALWAYS save in FULL basis for consistency
+                        std::string binary_state_file = dir + "/tpq_state_" + std::to_string(sample) 
+                                                      + "_beta=" + std::to_string(inv_temp) 
+                                                      + "_step=" + std::to_string(step) + ".dat";
+                        save_tpq_state(v0, binary_state_file, fixed_sz_op);
                     }
                     temp_measured[target_temp_idx] = true;
                 }
             }
+        }
+        
+        // Save final state as binary file for continue_quenching
+        // ALWAYS save in FULL basis for consistency
+        if (!dir.empty()) {
+            std::string final_state_file = dir + "/tpq_state_" + std::to_string(sample) 
+                                         + "_beta=" + std::to_string(inv_temp) 
+                                         + "_step=" + std::to_string(step) + ".dat";
+            save_tpq_state(v0, final_state_file, fixed_sz_op);
+            std::cout << "Saved final TPQ state for continue_quenching: " << final_state_file << std::endl;
         }
         
         // Store final energy for this sample
