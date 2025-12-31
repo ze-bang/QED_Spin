@@ -5,6 +5,7 @@
 #ifdef WITH_CUDA
 
 #include <curand_kernel.h>
+#include <cusolverDn.h>
 #include <iostream>
 #include <cmath>
 #include <algorithm>
@@ -14,6 +15,15 @@
 #include <fstream>
 #include <iomanip>
 #include <numeric>
+
+// cuSOLVER error checking macro
+#define CUSOLVER_CHECK(call) do { \
+    cusolverStatus_t status = call; \
+    if (status != CUSOLVER_STATUS_SUCCESS) { \
+        std::cerr << "cuSOLVER error at " << __FILE__ << ":" << __LINE__ << " - status = " << status << std::endl; \
+        throw std::runtime_error("cuSOLVER call failed"); \
+    } \
+} while(0)
 
 // Error checking macros are already defined in kernel_config.h (included via gpu_operator.cuh)
 
@@ -59,6 +69,92 @@ __global__ void normalizeKernel(cuDoubleComplex* vec, int N, double norm) {
 }
 
 /**
+ * @brief Convert uniform random doubles [0,1] to complex vector in [-1,1]
+ * Input: random_buffer with 2*N doubles (alternating real, imag)
+ * Output: complex_vec with N complex numbers
+ */
+__global__ void convertRandomToComplexKernel(const double* random_buffer, 
+                                             cuDoubleComplex* complex_vec, int N) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    
+    if (idx < N) {
+        // Convert from [0,1] to [-1,1]
+        double real = 2.0 * random_buffer[2*idx] - 1.0;
+        double imag = 2.0 * random_buffer[2*idx + 1] - 1.0;
+        complex_vec[idx] = make_cuDoubleComplex(real, imag);
+    }
+}
+
+/**
+ * @brief GPU kernel for computing thermodynamic quantities
+ * 
+ * Each thread handles one temperature point.
+ * Computes partition function, energy, energy^2, then derives Cv, S, F.
+ * 
+ * @param ritz_values Array of Ritz eigenvalues (n_states)
+ * @param weights Array of eigenstate weights (n_states)
+ * @param temperatures Array of temperature points (n_temps)
+ * @param n_states Number of Ritz states
+ * @param n_temps Number of temperature points
+ * @param e_min Minimum energy for numerical stability
+ * @param output Output array: [energy, specific_heat, entropy, free_energy] * n_temps
+ */
+__global__ void computeThermodynamicsKernel(
+    const double* __restrict__ ritz_values,
+    const double* __restrict__ weights,
+    const double* __restrict__ temperatures,
+    int n_states,
+    int n_temps,
+    double e_min,
+    double* __restrict__ output)
+{
+    int t = blockIdx.x * blockDim.x + threadIdx.x;
+    
+    if (t < n_temps) {
+        double T = temperatures[t];
+        double beta = 1.0 / T;
+        
+        // Compute partition function and moments
+        double Z = 0.0;
+        double E_sum = 0.0;
+        double E2_sum = 0.0;
+        
+        for (int i = 0; i < n_states; i++) {
+            double shifted_energy = ritz_values[i] - e_min;
+            double boltzmann = weights[i] * exp(-beta * shifted_energy);
+            Z += boltzmann;
+            E_sum += boltzmann * ritz_values[i];
+            E2_sum += boltzmann * ritz_values[i] * ritz_values[i];
+        }
+        
+        // Compute thermodynamic quantities
+        double energy, specific_heat, entropy, free_energy;
+        
+        if (Z > 1e-300) {
+            double E_avg = E_sum / Z;
+            double E2_avg = E2_sum / Z;
+            
+            energy = E_avg;
+            specific_heat = beta * beta * (E2_avg - E_avg * E_avg);
+            entropy = beta * (E_avg - e_min) + log(Z);
+            free_energy = e_min - T * log(Z);
+        } else {
+            // Very low temperature - use ground state
+            energy = e_min;
+            specific_heat = 0.0;
+            entropy = 0.0;
+            free_energy = e_min;
+        }
+        
+        // Store results: interleaved [E, Cv, S, F] for each temperature
+        output[t * 4 + 0] = energy;
+        output[t * 4 + 1] = specific_heat;
+        output[t * 4 + 2] = entropy;
+        output[t * 4 + 3] = free_energy;
+    }
+}
+
+/**
  * @brief Vector AXPY: y = alpha*x + y
  */
 __global__ void axpyKernel(const cuDoubleComplex* x, cuDoubleComplex* y,
@@ -98,19 +194,43 @@ GPUFTLMSolver::GPUFTLMSolver(GPUOperator* op, int N, int krylov_dim, double tole
       d_lanczos_basis_(nullptr), num_stored_vectors_(0), store_basis_(false),
       d_basis_pool_(nullptr), d_basis_ptrs_(nullptr), 
       basis_pool_allocated_(false), basis_pool_capacity_(0),
+      cusolver_initialized_(false),
+      d_random_buffer_(nullptr), curand_initialized_(false),
+      d_ritz_values_(nullptr), d_weights_(nullptr), d_temperatures_(nullptr),
+      d_thermo_output_(nullptr), thermo_buffer_capacity_(0), thermo_buffers_allocated_(false),
       compute_stream_(nullptr), transfer_stream_(nullptr), streams_initialized_(false),
       gpu_memory_allocated_(false) {
     
     // Initialize cuBLAS
     CUBLAS_CHECK(cublasCreate(&cublas_handle_));
     
+    // Initialize cuSOLVER for tridiagonal diagonalization
+    CUSOLVER_CHECK(cusolverDnCreate(&cusolver_handle_));
+    cusolver_initialized_ = true;
+    
+    // Initialize persistent tridiagonal buffers
+    d_tridiag_matrix_ = nullptr;
+    d_eigenvalues_ = nullptr;
+    d_work_cusolver_ = nullptr;
+    d_info_cusolver_ = nullptr;
+    cusolver_lwork_ = 0;
+    tridiag_capacity_ = 0;
+    
     // Initialize CUDA streams for pipelining
     CUDA_CHECK(cudaStreamCreate(&compute_stream_));
     CUDA_CHECK(cudaStreamCreate(&transfer_stream_));
     streams_initialized_ = true;
     
-    // Set cuBLAS to use compute stream
+    // Set cuBLAS and cuSOLVER to use compute stream
     CUBLAS_CHECK(cublasSetStream(cublas_handle_, compute_stream_));
+    CUSOLVER_CHECK(cusolverDnSetStream(cusolver_handle_, compute_stream_));
+    
+    // Initialize cuRAND generator for efficient batch random number generation
+    curandCreateGenerator(&curand_gen_, CURAND_RNG_PSEUDO_DEFAULT);
+    curandSetStream(curand_gen_, compute_stream_);
+    // Allocate buffer for 2*N random doubles (real and imaginary parts)
+    CUDA_CHECK(cudaMalloc(&d_random_buffer_, 2 * N_ * sizeof(double)));
+    curand_initialized_ = true;
     
     // Initialize stats
     stats_.total_time = 0.0;
@@ -138,6 +258,23 @@ GPUFTLMSolver::~GPUFTLMSolver() {
     freeMemory();
     freeBasisPool();
     
+    // Destroy cuRAND generator and free random buffer
+    if (curand_initialized_) {
+        curandDestroyGenerator(curand_gen_);
+        if (d_random_buffer_) cudaFree(d_random_buffer_);
+    }
+    
+    // Free thermodynamics buffers
+    freeThermodynamicsBuffers();
+    
+    // Free tridiagonal buffers
+    freeTridiagBuffers();
+    
+    // Destroy cuSOLVER handle
+    if (cusolver_initialized_) {
+        cusolverDnDestroy(cusolver_handle_);
+    }
+    
     // Destroy CUDA streams
     if (streams_initialized_) {
         cudaStreamDestroy(compute_stream_);
@@ -147,6 +284,89 @@ GPUFTLMSolver::~GPUFTLMSolver() {
     if (cublas_handle_) {
         cublasDestroy(cublas_handle_);
     }
+}
+
+void GPUFTLMSolver::allocateThermodynamicsBuffers(int n_states, int n_temps) {
+    // Check if we need to reallocate
+    int required_capacity = std::max(n_states, n_temps);
+    if (thermo_buffers_allocated_ && thermo_buffer_capacity_ >= required_capacity) {
+        return;  // Existing buffers are sufficient
+    }
+    
+    // Free existing buffers
+    freeThermodynamicsBuffers();
+    
+    // Allocate new buffers
+    CUDA_CHECK(cudaMalloc(&d_ritz_values_, n_states * sizeof(double)));
+    CUDA_CHECK(cudaMalloc(&d_weights_, n_states * sizeof(double)));
+    CUDA_CHECK(cudaMalloc(&d_temperatures_, n_temps * sizeof(double)));
+    CUDA_CHECK(cudaMalloc(&d_thermo_output_, 4 * n_temps * sizeof(double)));  // E, Cv, S, F for each T
+    
+    thermo_buffer_capacity_ = required_capacity;
+    thermo_buffers_allocated_ = true;
+}
+
+void GPUFTLMSolver::freeThermodynamicsBuffers() {
+    if (!thermo_buffers_allocated_) return;
+    
+    if (d_ritz_values_) { cudaFree(d_ritz_values_); d_ritz_values_ = nullptr; }
+    if (d_weights_) { cudaFree(d_weights_); d_weights_ = nullptr; }
+    if (d_temperatures_) { cudaFree(d_temperatures_); d_temperatures_ = nullptr; }
+    if (d_thermo_output_) { cudaFree(d_thermo_output_); d_thermo_output_ = nullptr; }
+    
+    thermo_buffers_allocated_ = false;
+    thermo_buffer_capacity_ = 0;
+}
+
+void GPUFTLMSolver::allocateTridiagBuffers(int max_krylov_dim) {
+    if (tridiag_capacity_ >= max_krylov_dim) return;
+    
+    // Free existing buffers if any
+    freeTridiagBuffers();
+    
+    int m = max_krylov_dim;
+    
+    // Allocate persistent buffers
+    CUDA_CHECK(cudaMalloc(&d_tridiag_matrix_, m * m * sizeof(double)));
+    CUDA_CHECK(cudaMalloc(&d_eigenvalues_, m * sizeof(double)));
+    CUDA_CHECK(cudaMalloc(&d_info_cusolver_, sizeof(int)));
+    
+    // Query workspace size for cuSOLVER syevd with this dimension
+    CUSOLVER_CHECK(cusolverDnDsyevd_bufferSize(
+        cusolver_handle_,
+        CUSOLVER_EIG_MODE_VECTOR,
+        CUBLAS_FILL_MODE_LOWER,
+        m,
+        d_tridiag_matrix_,
+        m,
+        d_eigenvalues_,
+        &cusolver_lwork_));
+    
+    // Allocate workspace
+    CUDA_CHECK(cudaMalloc(&d_work_cusolver_, cusolver_lwork_ * sizeof(double)));
+    
+    tridiag_capacity_ = max_krylov_dim;
+}
+
+void GPUFTLMSolver::freeTridiagBuffers() {
+    if (d_tridiag_matrix_) {
+        cudaFree(d_tridiag_matrix_);
+        d_tridiag_matrix_ = nullptr;
+    }
+    if (d_eigenvalues_) {
+        cudaFree(d_eigenvalues_);
+        d_eigenvalues_ = nullptr;
+    }
+    if (d_work_cusolver_) {
+        cudaFree(d_work_cusolver_);
+        d_work_cusolver_ = nullptr;
+    }
+    if (d_info_cusolver_) {
+        cudaFree(d_info_cusolver_);
+        d_info_cusolver_ = nullptr;
+    }
+    tridiag_capacity_ = 0;
+    cusolver_lwork_ = 0;
 }
 
 void GPUFTLMSolver::allocateBasisPool() {
@@ -222,24 +442,38 @@ void GPUFTLMSolver::freeMemory() {
     if (d_temp_) cudaFree(d_temp_);
     if (d_temp2_) cudaFree(d_temp2_);
     
-    // Free stored Lanczos basis if allocated
-    if (d_lanczos_basis_ && store_basis_) {
-        for (int i = 0; i < num_stored_vectors_; i++) {
-            if (d_lanczos_basis_[i]) cudaFree(d_lanczos_basis_[i]);
-        }
-        delete[] d_lanczos_basis_;
-    }
+    // Note: d_lanczos_basis_ now points to the pre-allocated pool (d_basis_ptrs_)
+    // The pool is freed separately by freeBasisPool(), not here.
+    // Just reset the pointer to avoid dangling reference.
+    d_lanczos_basis_ = nullptr;
     
     gpu_memory_allocated_ = false;
 }
 
 void GPUFTLMSolver::initializeRandomVector(cuDoubleComplex* d_vec, unsigned int seed) {
+    // Use batch cuRAND generator instead of per-thread initialization
+    // This is significantly faster as it avoids initializing curand state per thread
+    
+    // Set the seed for reproducibility
+    curandSetPseudoRandomGeneratorSeed(curand_gen_, seed);
+    
+    // Generate 2*N uniform doubles [0,1] in one batch call
+    // cuRAND is already configured to use compute_stream_
+    curandStatus_t status = curandGenerateUniformDouble(curand_gen_, d_random_buffer_, 2 * N_);
+    if (status != CURAND_STATUS_SUCCESS) {
+        std::cerr << "curandGenerateUniformDouble failed with status " << status << std::endl;
+        throw std::runtime_error("cuRAND generation failed");
+    }
+    
+    // Synchronize on stream before kernel uses the data
+    CUDA_CHECK(cudaStreamSynchronize(compute_stream_));
+    
+    // Convert to complex vector with values in [-1,1]
     int threads = 256;
     int blocks = (N_ + threads - 1) / threads;
-    
-    GPUFTLMKernels::initRandomVectorKernel<<<blocks, threads>>>(d_vec, N_, seed);
+    GPUFTLMKernels::convertRandomToComplexKernel<<<blocks, threads, 0, compute_stream_>>>(
+        d_random_buffer_, d_vec, N_);
     CUDA_CHECK(cudaGetLastError());
-    CUDA_CHECK(cudaDeviceSynchronize());
     
     // Normalize
     normalizeVector(d_vec);
@@ -262,9 +496,9 @@ void GPUFTLMSolver::normalizeVector(cuDoubleComplex* d_vec) {
     
     int threads = 256;
     int blocks = (N_ + threads - 1) / threads;
-    GPUFTLMKernels::normalizeKernel<<<blocks, threads>>>(d_vec, N_, norm);
+    GPUFTLMKernels::normalizeKernel<<<blocks, threads, 0, compute_stream_>>>(d_vec, N_, norm);
     CUDA_CHECK(cudaGetLastError());
-    CUDA_CHECK(cudaDeviceSynchronize());
+    // No synchronization needed - subsequent operations will sync via cuBLAS
 }
 
 void GPUFTLMSolver::vectorCopy(const cuDoubleComplex* src, cuDoubleComplex* dst) {
@@ -430,11 +664,12 @@ int GPUFTLMSolver::buildLanczosTridiagonal(unsigned int seed,
     // Setup for full reorthogonalization if requested
     store_basis_ = full_reorth || (reorth_freq > 0);
     if (store_basis_) {
-        // Allocate storage for basis vectors
-        d_lanczos_basis_ = new cuDoubleComplex*[krylov_dim_];
-        for (int i = 0; i < krylov_dim_; i++) {
-            CUDA_CHECK(cudaMalloc(&d_lanczos_basis_[i], N_ * sizeof(cuDoubleComplex)));
+        // Use pre-allocated basis pool instead of per-sample allocation
+        // This significantly reduces GPU memory allocation overhead
+        if (!basis_pool_allocated_) {
+            allocateBasisPool();
         }
+        d_lanczos_basis_ = d_basis_ptrs_;  // Point to pre-allocated pool
         num_stored_vectors_ = 0;
     }
     
@@ -550,6 +785,136 @@ void GPUFTLMSolver::diagonalizeTridiagonal(const std::vector<double>& alpha,
     }
 }
 
+void GPUFTLMSolver::diagonalizeTridiagonalGPU(const std::vector<double>& alpha,
+                                              const std::vector<double>& beta,
+                                              std::vector<double>& ritz_values,
+                                              std::vector<double>& weights) {
+    int m = alpha.size();
+    
+    // Ensure persistent buffers are allocated
+    allocateTridiagBuffers(m);
+    
+    // Build dense symmetric tridiagonal matrix on host
+    std::vector<double> h_matrix(m * m, 0.0);
+    
+    // Fill diagonal
+    for (int i = 0; i < m; i++) {
+        h_matrix[i * m + i] = alpha[i];
+    }
+    
+    // Fill off-diagonals (symmetric)
+    for (int i = 0; i < m - 1; i++) {
+        double b = beta[i + 1];  // beta[0] is not used
+        h_matrix[i * m + (i + 1)] = b;      // A[i+1, i] (lower)
+        h_matrix[(i + 1) * m + i] = b;      // A[i, i+1] (upper)
+    }
+    
+    // Copy matrix to device using async copy
+    CUDA_CHECK(cudaMemcpyAsync(d_tridiag_matrix_, h_matrix.data(), m * m * sizeof(double), 
+                               cudaMemcpyHostToDevice, compute_stream_));
+    
+    // Diagonalize using cuSOLVER syevd (using pre-allocated buffers)
+    CUSOLVER_CHECK(cusolverDnDsyevd(
+        cusolver_handle_,
+        CUSOLVER_EIG_MODE_VECTOR,
+        CUBLAS_FILL_MODE_LOWER,
+        m,
+        d_tridiag_matrix_,   // On output: eigenvectors
+        m,
+        d_eigenvalues_,      // On output: eigenvalues
+        d_work_cusolver_,
+        cusolver_lwork_,
+        d_info_cusolver_));
+    
+    // Check for errors (blocking call, but necessary for error checking)
+    int info;
+    CUDA_CHECK(cudaMemcpyAsync(&info, d_info_cusolver_, sizeof(int), 
+                               cudaMemcpyDeviceToHost, compute_stream_));
+    CUDA_CHECK(cudaStreamSynchronize(compute_stream_));
+    
+    if (info != 0) {
+        std::cerr << "Error: cusolverDnDsyevd failed with info = " << info << "\n";
+        throw std::runtime_error("GPU tridiagonal diagonalization failed");
+    }
+    
+    // Copy eigenvalues back to host using async copy
+    ritz_values.resize(m);
+    CUDA_CHECK(cudaMemcpyAsync(ritz_values.data(), d_eigenvalues_, m * sizeof(double), 
+                               cudaMemcpyDeviceToHost, compute_stream_));
+    
+    // Copy eigenvectors to compute weights
+    std::vector<double> eigenvectors(m * m);
+    CUDA_CHECK(cudaMemcpyAsync(eigenvectors.data(), d_tridiag_matrix_, m * m * sizeof(double), 
+                               cudaMemcpyDeviceToHost, compute_stream_));
+    
+    // Wait for copies to complete before using the data
+    CUDA_CHECK(cudaStreamSynchronize(compute_stream_));
+    
+    weights.resize(m);
+    for (int i = 0; i < m; i++) {
+        // Weight = |first component of eigenvector|²
+        weights[i] = eigenvectors[i * m] * eigenvectors[i * m];
+    }
+    
+    // Note: We keep d_eigenvalues_ on GPU for thermodynamics computation
+    // No need to free - using persistent buffers
+}
+
+void GPUFTLMSolver::computeThermodynamicsGPU(
+    const std::vector<double>& ritz_values,
+    const std::vector<double>& weights,
+    const std::vector<double>& temperatures,
+    double e_min,
+    ThermodynamicData& thermo) {
+    
+    int n_states = ritz_values.size();
+    int n_temps = temperatures.size();
+    
+    // Allocate/resize GPU buffers if needed
+    allocateThermodynamicsBuffers(n_states, n_temps);
+    
+    // Copy weights and temperatures to GPU
+    // Note: eigenvalues (d_ritz_values_) should already be on GPU from diagonalization
+    // Only copy if they were modified on CPU (which shouldn't happen in optimized workflow)
+    CUDA_CHECK(cudaMemcpyAsync(d_ritz_values_, ritz_values.data(), 
+                               n_states * sizeof(double), cudaMemcpyHostToDevice, compute_stream_));
+    CUDA_CHECK(cudaMemcpyAsync(d_weights_, weights.data(), 
+                               n_states * sizeof(double), cudaMemcpyHostToDevice, compute_stream_));
+    CUDA_CHECK(cudaMemcpyAsync(d_temperatures_, temperatures.data(), 
+                               n_temps * sizeof(double), cudaMemcpyHostToDevice, compute_stream_));
+    
+    // Launch thermodynamics kernel - one thread per temperature
+    int threads = 256;
+    int blocks = (n_temps + threads - 1) / threads;
+    
+    GPUFTLMKernels::computeThermodynamicsKernel<<<blocks, threads, 0, compute_stream_>>>(
+        d_ritz_values_, d_weights_, d_temperatures_,
+        n_states, n_temps, e_min, d_thermo_output_);
+    CUDA_CHECK(cudaGetLastError());
+    
+    // Copy results back to host using async copy
+    std::vector<double> output(4 * n_temps);
+    CUDA_CHECK(cudaMemcpyAsync(output.data(), d_thermo_output_, 
+                              4 * n_temps * sizeof(double), cudaMemcpyDeviceToHost, compute_stream_));
+    
+    // Synchronize to ensure copy is complete before unpacking
+    CUDA_CHECK(cudaStreamSynchronize(compute_stream_));
+    
+    // Unpack interleaved results [E, Cv, S, F] for each temperature
+    thermo.temperatures = temperatures;
+    thermo.energy.resize(n_temps);
+    thermo.specific_heat.resize(n_temps);
+    thermo.entropy.resize(n_temps);
+    thermo.free_energy.resize(n_temps);
+    
+    for (int t = 0; t < n_temps; t++) {
+        thermo.energy[t] = output[t * 4 + 0];
+        thermo.specific_heat[t] = output[t * 4 + 1];
+        thermo.entropy[t] = output[t * 4 + 2];
+        thermo.free_energy[t] = output[t * 4 + 3];
+    }
+}
+
 ThermodynamicData GPUFTLMSolver::computeThermodynamics(
     const std::vector<double>& alpha,
     const std::vector<double>& beta,
@@ -557,68 +922,21 @@ ThermodynamicData GPUFTLMSolver::computeThermodynamics(
     
     auto start_time = std::chrono::high_resolution_clock::now();
     
-    // Diagonalize tridiagonal matrix
+    // Diagonalize tridiagonal matrix on GPU
     std::vector<double> ritz_values;
     std::vector<double> weights;
-    diagonalizeTridiagonal(alpha, beta, ritz_values, weights);
+    diagonalizeTridiagonalGPU(alpha, beta, ritz_values, weights);
     
-    int n_states = ritz_values.size();
     int n_temps = temperatures.size();
     
     // Initialize thermodynamic data
     ThermodynamicData thermo;
-    thermo.temperatures = temperatures;
-    thermo.energy.resize(n_temps, 0.0);
-    thermo.specific_heat.resize(n_temps, 0.0);
-    thermo.entropy.resize(n_temps, 0.0);
-    thermo.free_energy.resize(n_temps, 0.0);
     
     // Find minimum energy for numerical stability
     double e_min = *std::min_element(ritz_values.begin(), ritz_values.end());
     
-    // Compute thermodynamic quantities for each temperature
-    for (int t = 0; t < n_temps; t++) {
-        double T = temperatures[t];
-        double beta = 1.0 / T;
-        
-        // Compute partition function and averages
-        double Z = 0.0;
-        double E_avg = 0.0;
-        double E2_avg = 0.0;
-        
-        for (int i = 0; i < n_states; i++) {
-            double E_shifted = ritz_values[i] - e_min;
-            double boltzmann = std::exp(-beta * E_shifted);
-            double w_boltz = weights[i] * boltzmann;
-            
-            Z += w_boltz;
-            E_avg += ritz_values[i] * w_boltz;
-            E2_avg += ritz_values[i] * ritz_values[i] * w_boltz;
-        }
-        
-        if (Z < 1e-100) {
-            std::cerr << "Warning: Partition function too small at T = " << T << "\n";
-            continue;
-        }
-        
-        // Normalize
-        E_avg /= Z;
-        E2_avg /= Z;
-        
-        // Compute thermodynamic quantities
-        thermo.energy[t] = E_avg;
-        
-        // Specific heat: C = β² * (⟨E²⟩ - ⟨E⟩²)
-        double variance = E2_avg - E_avg * E_avg;
-        thermo.specific_heat[t] = beta * beta * variance;
-        
-        // Entropy: S = β⟨E⟩ + ln(Z) + βE_min
-        double log_Z = std::log(Z) + beta * e_min;
-        thermo.entropy[t] = beta * E_avg + log_Z;
-        
-        // Free energy: F = -T * ln(Z) + E_min
-        thermo.free_energy[t] = -T * log_Z;
-    }
+    // Compute thermodynamics on GPU
+    computeThermodynamicsGPU(ritz_values, weights, temperatures, e_min, thermo);
     
     auto end_time = std::chrono::high_resolution_clock::now();
     std::chrono::duration<double> elapsed = end_time - start_time;
@@ -952,39 +1270,54 @@ void GPUFTLMSolver::computeSpectralFunction(
     int n_omega = frequencies.size();
     spectral_func.resize(n_omega, 0.0);
     
-    double e_min = *std::min_element(ritz_values.begin(), ritz_values.end());
-    double beta = (temperature > 1e-14) ? 1.0 / temperature : 0.0;
+    // Compute thermal weights if temperature > 0
+    std::vector<double> thermal_weights = weights;
     
-    // Compute partition function if needed
-    double Z = 0.0;
     if (temperature > 1e-14) {
+        double beta = 1.0 / temperature;
+        double e_min = *std::min_element(ritz_values.begin(), ritz_values.end());
+        
+        // Compute partition function with shifted energies
+        double Z = 0.0;
         for (int i = 0; i < n_states; i++) {
-            double e_shifted = ritz_values[i] - e_min;
-            Z += weights[i] * std::exp(-beta * e_shifted);
+            double shifted_energy = ritz_values[i] - e_min;
+            thermal_weights[i] = weights[i] * std::exp(-beta * shifted_energy);
+            Z += thermal_weights[i];
+        }
+        
+        // Normalize by partition function
+        if (Z > 1e-300) {
+            for (int i = 0; i < n_states; i++) {
+                thermal_weights[i] /= Z;
+            }
+        } else {
+            // Very low temperature - only ground state contributes
+            thermal_weights.assign(n_states, 0.0);
+            int gs_idx = std::distance(ritz_values.begin(),
+                                      std::min_element(ritz_values.begin(), ritz_values.end()));
+            thermal_weights[gs_idx] = weights[gs_idx];
+            // Normalize
+            double sum = 0.0;
+            for (double w : thermal_weights) sum += w;
+            if (sum > 0) {
+                for (double& w : thermal_weights) w /= sum;
+            }
         }
     }
     
     // Compute spectral function with Lorentzian broadening
+    // S(ω,T) = Σ_i w_i * exp(-βE_i)/Z * δ(ω - E_i)
+    // Using Lorentzian broadening: δ(ω - E) → (η/π) / ((ω - E)² + η²)
+    double norm_factor = broadening / M_PI;
+    
     for (int iw = 0; iw < n_omega; iw++) {
         double omega = frequencies[iw];
         double sum = 0.0;
         
         for (int i = 0; i < n_states; i++) {
-            double E = ritz_values[i];
-            double w = weights[i];
-            
-            // Apply thermal weighting if T > 0
-            if (temperature > 1e-14) {
-                double e_shifted = E - e_min;
-                double boltzmann = std::exp(-beta * e_shifted);
-                w *= boltzmann / Z;
-            }
-            
-            // Lorentzian: L(ω - E) = (η/π) / ((ω - E)² + η²)
-            double delta = omega - E;
-            double lorentzian = (broadening / M_PI) / (delta * delta + broadening * broadening);
-            
-            sum += w * lorentzian;
+            double delta = omega - ritz_values[i];
+            double lorentzian = norm_factor / (delta * delta + broadening * broadening);
+            sum += thermal_weights[i] * lorentzian;
         }
         
         spectral_func[iw] = sum;
@@ -2273,7 +2606,7 @@ GPUFTLMSolver::computeDynamicalCorrelationMultiTemp(
     std::cout << "Broadening: " << broadening << "\n";
     std::cout << "==========================================\n";
     std::cout << "\nUsing correct FTLM formulation:" << std::endl;
-    std::cout << "  S(ω,T) = (1/Z) × Σ_r Σ_i e^{-βε_i} |c_i|² S_i(ω)" << std::endl;
+    std::cout << "  S(ω,T) = (N/Z) × Σ_r Σ_i e^{-βε_i} |c_i|² S_i(ω)" << std::endl;
     std::cout << "  where S_i(ω) is computed via continued fraction" << std::endl;
     std::cout << "==========================================" << std::endl;
     

@@ -173,6 +173,11 @@ def prepare_hamiltonian_parameters(cluster_filepath, output_dir, Jxx, Jyy, Jzz, 
     # Read cluster info
     vertices, edges, tetrahedra, node_mapping = read_cluster_file(cluster_filepath)
     
+    # If node_mapping is empty, create contiguous 0-based mapping
+    if not node_mapping:
+        sorted_vertices = sorted(vertices.keys())
+        node_mapping = {v: i for i, v in enumerate(sorted_vertices)}
+    
     # Create nearest neighbor lists
     nn_list, positions, sublattice_indices = create_nn_lists(edges, node_mapping, vertices)
     

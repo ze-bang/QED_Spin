@@ -62,8 +62,11 @@ def run_nlce_for_order(order, args):
         f'--temp_min={args.temp_min}',
         f'--temp_max={args.temp_max}',
         f'--temp_bins={args.temp_bins}',
-        '--symmetrized'
     ]
+    
+    # Add optional symmetrized flag
+    if args.symmetrized:
+        cmd.append('--symmetrized')
     
     # Add optional arguments
     if args.thermo:
@@ -309,6 +312,9 @@ def main():
     # Parallel processing
     parser.add_argument('--parallel', action='store_true', help='Run ED in parallel')
     parser.add_argument('--num_cores', type=int, default=None, help='Number of cores to use for parallel processing')
+    
+    # Symmetrization
+    parser.add_argument('--symmetrized', action='store_true', help='Use symmetrized diagonalization')
     
     # SI units
     parser.add_argument('--SI_units', action='store_true', help='Use SI units for output')

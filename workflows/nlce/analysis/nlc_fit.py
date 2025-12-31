@@ -233,10 +233,14 @@ def run_nlce(params, fixed_params, exp_temp, work_dir, h_field=None, temp_range=
         n_runs = fixed_params.get("random_field_n_runs", 10) if fit_random_transverse_field and random_transverse_field > 0 else 1
 
         # Base command for nlce.py
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        nlce_script = os.path.join(script_dir, '..', 'run', 'nlce.py')
+        cluster_gen_script = os.path.join(script_dir, '..', 'prep', 'generate_pyrochlore_clusters.py')
+        
         if fixed_params["ED_method"] == 'FULL' or fixed_params["ED_method"] == 'OSS':
             cmd = [
                 'python3', 
-                os.path.join(os.path.dirname(os.path.abspath(__file__)), 'nlce.py'),
+                nlce_script,
                 '--max_order', str(fixed_params["max_order"]),
                 '--Jxx', f'{Jxx:.12f}',
                 '--Jyy', f'{Jyy:.12f}',
@@ -257,7 +261,7 @@ def run_nlce(params, fixed_params, exp_temp, work_dir, h_field=None, temp_range=
         elif fixed_params["ED_method"] == 'mTPQ':
             cmd = [
                 'python3', 
-                os.path.join(os.path.dirname(os.path.abspath(__file__)), 'nlce.py'),
+                nlce_script,
                 '--max_order', str(fixed_params["max_order"]),
                 '--Jxx', str(Jxx),
                 '--Jyy', str(Jyy),
@@ -1395,9 +1399,11 @@ def main():
                 run_work_dir = os.path.join(work_dir, f'run_{run_idx}')
                 os.makedirs(run_work_dir, exist_ok=True)
                 
+                script_dir = os.path.dirname(os.path.abspath(__file__))
+                cluster_gen_script = os.path.join(script_dir, '..', 'prep', 'generate_pyrochlore_clusters.py')
                 cluster_gen_cmd = [
                     'python3',
-                    os.path.join(os.path.dirname(os.path.abspath(__file__)), 'generate_pyrochlore_clusters.py'),
+                    cluster_gen_script,
                     '--max_order', str(args.max_order),
                     '--output_dir', os.path.join(run_work_dir, f'clusters_order_{args.max_order}')
                 ]
@@ -1436,9 +1442,11 @@ def main():
         else:
             # Single run - generate clusters in main work directory
             logging.info(f"Generating pyrochlore clusters up to order {args.max_order}")
+            script_dir = os.path.dirname(os.path.abspath(__file__))
+            cluster_gen_script = os.path.join(script_dir, '..', 'prep', 'generate_pyrochlore_clusters.py')
             cluster_gen_cmd = [
                 'python3',
-                os.path.join(os.path.dirname(os.path.abspath(__file__)), 'generate_pyrochlore_clusters.py'),
+                cluster_gen_script,
                 '--max_order', str(args.max_order),
                 '--output_dir', os.path.join(work_dir, f'clusters_order_{args.max_order}'),
             ]

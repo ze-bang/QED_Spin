@@ -11,6 +11,12 @@ from tqdm import tqdm
 import numpy as np
 import traceback
 
+try:
+    import h5py
+    HAS_H5PY = True
+except ImportError:
+    HAS_H5PY = False
+
 #!/usr/bin/env python3
 """
 NLCE Workflow - Automates the entire NLCE calculation process for pyrochlore lattice.
@@ -137,15 +143,21 @@ def run_ed_for_cluster(args):
         if os.path.exists(expected_output_dir):
             output_files = os.listdir(expected_output_dir)
             
+            # Check for HDF5 output file (new format)
+            h5_file = os.path.join(expected_output_dir, 'ed_results.h5')
+            if os.path.exists(h5_file):
+                logging.warning(f"ED for cluster {cluster_id} crashed with exit code {e.returncode} but HDF5 output file exists - treating as success")
+                return True
+            
             if ed_options["thermo"]:
-                # For thermodynamic calculations, check for thermo directory
+                # For thermodynamic calculations, check for thermo directory (legacy)
                 thermo_dir = os.path.join(expected_output_dir, 'thermo')
                 if os.path.exists(thermo_dir) and os.listdir(thermo_dir):
                     logging.warning(f"ED for cluster {cluster_id} crashed with exit code {e.returncode} but thermodynamic output files exist - treating as success")
                     return True
             
             # For other methods, check for any meaningful output files
-            if output_files and any(f.endswith(('.dat', '.txt')) or os.path.isdir(os.path.join(expected_output_dir, f)) for f in output_files):
+            if output_files and any(f.endswith(('.dat', '.txt', '.h5')) or os.path.isdir(os.path.join(expected_output_dir, f)) for f in output_files):
                 logging.warning(f"ED for cluster {cluster_id} crashed with exit code {e.returncode} but output files exist - treating as success")
                 return True
         
@@ -232,9 +244,11 @@ def main():
         
         cmd = [
             'python3', 
-            os.path.join(os.path.dirname(__file__), '..', 'prep', 'generate_pyrochlore_clusters.py'),
+            os.path.join(os.path.dirname(__file__), '..', 'prep', 'generate_pyrochlore_clusters_analytical.py'),
             f'--max_order={args.max_order}',
-            f'--output_dir={cluster_dir}'
+            f'--output_dir={cluster_dir}',
+            '--subunit=site',
+            '--embedding_size=6'  # Torus size for computing ring/cycle multiplicities
         ]
         
         logging.info(f"Running command: {' '.join(cmd)}")
@@ -355,97 +369,101 @@ def main():
             # Iterate through all clusters
             for cluster_id, order, _ in tqdm(clusters, desc="Plotting thermodynamic data"):
                 cluster_ed_dir = os.path.join(ed_dir, f'cluster_{cluster_id}_order_{order}')
-
-                # Check if thermodynamic data exists (ED writes into output/thermo)
-                thermo_file = os.path.join(cluster_ed_dir, "output/thermo/thermo_data.txt")
-                if not os.path.exists(thermo_file):
+                output_dir = os.path.join(cluster_ed_dir, "output")
+                
+                # Try HDF5 file first (new format)
+                h5_file = os.path.join(output_dir, "ed_results.h5")
+                thermo_data = None
+                
+                if HAS_H5PY and os.path.exists(h5_file):
+                    try:
+                        with h5py.File(h5_file, 'r') as f:
+                            # Check for thermodynamics group
+                            if '/thermodynamics' in f:
+                                thermo_grp = f['/thermodynamics']
+                                if 'temperatures' in thermo_grp:
+                                    thermo_data = {
+                                        'T': thermo_grp['temperatures'][:],
+                                        'energy': thermo_grp['energy'][:] if 'energy' in thermo_grp else None,
+                                        'specific_heat': thermo_grp['specific_heat'][:] if 'specific_heat' in thermo_grp else None,
+                                        'entropy': thermo_grp['entropy'][:] if 'entropy' in thermo_grp else None,
+                                        'free_energy': thermo_grp['free_energy'][:] if 'free_energy' in thermo_grp else None
+                                    }
+                            # Also try FTLM averaged
+                            elif '/ftlm/averaged' in f:
+                                ftlm_grp = f['/ftlm/averaged']
+                                if 'temperatures' in ftlm_grp:
+                                    thermo_data = {
+                                        'T': ftlm_grp['temperatures'][:],
+                                        'energy': ftlm_grp['energy'][:] if 'energy' in ftlm_grp else None,
+                                        'specific_heat': ftlm_grp['specific_heat'][:] if 'specific_heat' in ftlm_grp else None,
+                                        'entropy': ftlm_grp['entropy'][:] if 'entropy' in ftlm_grp else None,
+                                        'free_energy': ftlm_grp['free_energy'][:] if 'free_energy' in ftlm_grp else None
+                                    }
+                    except Exception as e:
+                        logging.warning(f"Error reading HDF5 for cluster {cluster_id}: {e}")
+                
+                # Fall back to legacy text file
+                if thermo_data is None:
+                    thermo_file = os.path.join(output_dir, "thermo/thermo_data.txt")
+                    if not os.path.exists(thermo_file):
+                        logging.warning(f"No thermodynamic data found for cluster {cluster_id}")
+                        continue
+                    
+                    try:
+                        data = np.loadtxt(thermo_file, comments='#')
+                        data = np.atleast_2d(data)
+                        thermo_data = {
+                            'T': data[:, 0],
+                            'energy': data[:, 1] if data.shape[1] > 1 else None,
+                            'specific_heat': data[:, 2] if data.shape[1] > 2 else None,
+                            'entropy': data[:, 3] if data.shape[1] > 3 else None,
+                            'free_energy': data[:, 4] if data.shape[1] > 4 else None
+                        }
+                    except Exception as e:
+                        logging.error(f"Error reading text file for cluster {cluster_id}: {e}")
+                        continue
+                
+                if thermo_data is None:
                     logging.warning(f"No thermodynamic data found for cluster {cluster_id}")
                     continue
                 
-                # Load thermodynamic data
                 try:
-                    # Parse header to determine the available columns
-                    columns = []
-                    with open(thermo_file, 'r') as f:
-                        for line in f:
-                            if not line.startswith('#'):
-                                break
-                            stripped = line.lstrip('#').strip()
-                            if not stripped:
-                                continue
-                            if 'Column' in stripped:
-                                parts = stripped.split(':')
-                                if len(parts) >= 2:
-                                    col_num = int(parts[0].replace('Column', '').strip()) - 1
-                                    col_name = parts[1].strip()
-                                    while len(columns) <= col_num:
-                                        columns.append(None)
-                                    columns[col_num] = col_name
-                            else:
-                                tokens = stripped.split()
-                                if tokens:
-                                    columns = tokens
-
-                    if not columns:
-                        # Fall back to the expected ordering if the header is absent
-                        columns = ['Temperature', 'Energy', 'Specific Heat', 'Entropy', 'Free Energy']
-
-                    def _normalize(name):
-                        return name.strip().lower().replace('_', ' ')
-
-                    normalized_columns = [(_normalize(col) if col else None) for col in columns]
-
-                    def _get_index(candidates, default_idx):
-                        for candidate in candidates:
-                            norm_candidate = _normalize(candidate)
-                            if norm_candidate in normalized_columns:
-                                return normalized_columns.index(norm_candidate)
-                        return default_idx
-
-                    # Load the data
-                    data = np.loadtxt(thermo_file, comments='#')
-                    data = np.atleast_2d(data)
+                    T = thermo_data['T']
+                    sort_idx = np.argsort(T)
+                    T = T[sort_idx]
 
                     # Create plots
                     fig, axs = plt.subplots(2, 2, figsize=(12, 10))
                     fig.suptitle(f"Thermodynamic Properties for Cluster {cluster_id} (Order {order})")
 
-                    temp_idx = _get_index(['Temperature', 'Temp', 'T'], 0)
-                    energy_idx = _get_index(['Energy', 'Internal Energy'], 1 if data.shape[1] > 1 else 0)
-                    spec_heat_idx = _get_index(['Specific Heat', 'Specific_Heat', 'SpecificHeat'], 2 if data.shape[1] > 2 else min(energy_idx + 1, data.shape[1] - 1))
-                    entropy_idx = _get_index(['Entropy'], 3 if data.shape[1] > 3 else min(spec_heat_idx + 1, data.shape[1] - 1))
-                    free_energy_idx = _get_index(['Free Energy', 'Free_Energy', 'FreeEnergy'], 4 if data.shape[1] > 4 else min(entropy_idx + 1, data.shape[1] - 1))
-
-                    T = data[:, temp_idx]
-
-                    # Sort by temperature (ascending) for smoother plots
-                    sort_idx = np.argsort(T)
-                    T = T[sort_idx]
-                    sorted_data = data[sort_idx]
-
                     # Plot energy
-                    axs[0, 0].plot(T, sorted_data[:, energy_idx], 'r-')
+                    if thermo_data['energy'] is not None:
+                        axs[0, 0].plot(T, thermo_data['energy'][sort_idx], 'r-')
                     axs[0, 0].set_xlabel("Temperature")
                     axs[0, 0].set_ylabel("Energy")
                     axs[0, 0].set_xscale('log')
                     axs[0, 0].grid(True)
 
                     # Plot specific heat
-                    axs[0, 1].plot(T, sorted_data[:, spec_heat_idx], 'b-')
+                    if thermo_data['specific_heat'] is not None:
+                        axs[0, 1].plot(T, thermo_data['specific_heat'][sort_idx], 'b-')
                     axs[0, 1].set_xlabel("Temperature")
                     axs[0, 1].set_ylabel("Specific Heat")
                     axs[0, 1].set_xscale('log')
                     axs[0, 1].grid(True)
 
                     # Plot entropy
-                    axs[1, 0].plot(T, sorted_data[:, entropy_idx], 'g-')
+                    if thermo_data['entropy'] is not None:
+                        axs[1, 0].plot(T, thermo_data['entropy'][sort_idx], 'g-')
                     axs[1, 0].set_xlabel("Temperature")
                     axs[1, 0].set_ylabel("Entropy")
                     axs[1, 0].set_xscale('log')
                     axs[1, 0].grid(True)
 
                     # Plot free energy
-                    axs[1, 1].plot(T, sorted_data[:, free_energy_idx], 'm-')
+                    if thermo_data['free_energy'] is not None:
+                        axs[1, 1].plot(T, thermo_data['free_energy'][sort_idx], 'm-')
                     axs[1, 1].set_xlabel("Temperature")
                     axs[1, 1].set_ylabel("Free Energy")
                     axs[1, 1].set_xscale('log')
@@ -486,21 +504,46 @@ def main():
                 if not os.path.exists(output_dir):
                     logging.warning(f"No output directory found for cluster {cluster_id}")
                     continue
-                    
-                # Find all SS_rand*.dat files
-                ss_files = os.path.join(output_dir, "SS_rand0.dat")
                 
-                if not ss_files:
-                    logging.warning(f"No SS_rand*.dat files found for cluster {cluster_id}")
-                    continue
-                    
-                SS_data = np.loadtxt(ss_files, unpack=True, skiprows=2)
+                all_temps = None
+                all_energies = None
+                all_variances = None
+                
+                # Try HDF5 file first (new format)
+                h5_file = os.path.join(output_dir, "ed_results.h5")
+                if HAS_H5PY and os.path.exists(h5_file):
+                    try:
+                        with h5py.File(h5_file, 'r') as f:
+                            if '/tpq/averaged' in f and 'thermodynamics' in f['/tpq/averaged']:
+                                tpq_data = f['/tpq/averaged/thermodynamics'][:]
+                                # Format: beta, energy, variance, doublon, step
+                                betas = tpq_data[:, 0]
+                                all_temps = 1.0 / betas
+                                all_energies = tpq_data[:, 1]
+                                all_variances = tpq_data[:, 2] * betas**2
+                            elif '/tpq/samples/sample_0/thermodynamics' in f:
+                                # Read from first sample
+                                tpq_data = f['/tpq/samples/sample_0/thermodynamics'][:]
+                                betas = tpq_data[:, 0]
+                                all_temps = 1.0 / betas
+                                all_energies = tpq_data[:, 1]
+                                all_variances = tpq_data[:, 2] * betas**2
+                    except Exception as e:
+                        logging.warning(f"Error reading HDF5 TPQ data for cluster {cluster_id}: {e}")
+                
+                # Fall back to legacy text file format
+                if all_temps is None:
+                    ss_file = os.path.join(output_dir, "SS_rand0.dat")
+                    if not os.path.exists(ss_file):
+                        logging.warning(f"No TPQ data found for cluster {cluster_id}")
+                        continue
+                        
+                    SS_data = np.loadtxt(ss_file, unpack=True, skiprows=2)
+                    all_temps = 1.0 / SS_data[0]
+                    all_energies = SS_data[1] 
+                    all_variances = SS_data[2] * SS_data[0]**2
 
-                logging.info(f"Loaded data from {ss_files} for cluster {cluster_id}")   
-
-                all_temps = 1.0 / SS_data[0]
-                all_energies = SS_data[1] 
-                all_variances = SS_data[2] * SS_data[0]**2
+                logging.info(f"Loaded TPQ data for cluster {cluster_id}")   
 
                 fig, axs = plt.subplots(2, 1, figsize=(10, 8))
                 fig.suptitle(f"mTPQ Thermodynamic Properties for Cluster {cluster_id} (Order {order})")

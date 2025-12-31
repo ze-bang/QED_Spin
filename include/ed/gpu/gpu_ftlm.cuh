@@ -6,6 +6,8 @@
 #include <cuda_runtime.h>
 #include <cuComplex.h>
 #include <cublas_v2.h>
+#include <cusolverDn.h>
+#include <curand.h>
 #include <vector>
 #include <complex>
 #include <functional>
@@ -23,6 +25,18 @@ void save_ftlm_results(const FTLMResults& results, const std::string& filename);
  * Implements FTLM on GPU for computing finite-temperature thermodynamic properties.
  * Uses Lanczos method to build Krylov subspace and extract thermal properties from
  * the microcanonical spectrum approximated by Ritz values.
+ * 
+ * GPU Optimizations:
+ * - Pre-allocated Lanczos basis pool for reduced memory allocation overhead
+ * - CUDA streams for overlapping computation and data transfer
+ * - Batch cuRAND generator for efficient random vector initialization
+ * - cuBLAS for optimized vector operations (norm, axpy, dot, copy)
+ * - Minimal synchronization points for better GPU utilization
+ * 
+ * Performance Notes:
+ * - For small Hilbert spaces (<1000), CPU may be faster due to GPU overhead
+ * - For large systems (>10000 dimensions), GPU provides significant speedup
+ * - Thermodynamics computed on CPU (small data, transfer overhead not worthwhile)
  */
 class GPUFTLMSolver {
 public:
@@ -364,6 +378,31 @@ private:
     // cuBLAS handle
     cublasHandle_t cublas_handle_;
     
+    // cuSOLVER handle for tridiagonal diagonalization
+    cusolverDnHandle_t cusolver_handle_;
+    bool cusolver_initialized_;
+    
+    // cuRAND generator for efficient batch random number generation
+    curandGenerator_t curand_gen_;
+    double* d_random_buffer_;        // Buffer for batch random numbers
+    bool curand_initialized_;
+    
+    // GPU buffers for thermodynamics computation
+    double* d_ritz_values_;          // Ritz eigenvalues on GPU
+    double* d_weights_;              // Eigenstate weights on GPU
+    double* d_temperatures_;         // Temperature grid on GPU
+    double* d_thermo_output_;        // Output buffer for thermodynamics (4 * n_temps)
+    int thermo_buffer_capacity_;     // Current capacity of thermo buffers
+    bool thermo_buffers_allocated_;
+    
+    // Persistent buffers for eigenvalue decomposition (avoid repeated allocation)
+    double* d_tridiag_matrix_;       // Tridiagonal matrix for cuSOLVER
+    double* d_eigenvalues_;          // Eigenvalues from cuSOLVER
+    double* d_work_cusolver_;        // cuSOLVER workspace
+    int* d_info_cusolver_;           // cuSOLVER info output
+    int cusolver_lwork_;             // cuSOLVER workspace size
+    int tridiag_capacity_;           // Maximum Krylov dimension allocated
+    
     // CUDA streams for pipelining
     cudaStream_t compute_stream_;    // Main computation stream
     cudaStream_t transfer_stream_;   // Data transfer stream
@@ -421,11 +460,30 @@ private:
                                std::vector<double>& alpha,
                                std::vector<double>& beta);
     
-    // Diagonalize tridiagonal matrix (on CPU)
+    // Diagonalize tridiagonal matrix (CPU with LAPACKE - fallback)
     void diagonalizeTridiagonal(const std::vector<double>& alpha,
                                const std::vector<double>& beta,
                                std::vector<double>& ritz_values,
                                std::vector<double>& weights);
+    
+    // Diagonalize tridiagonal matrix (GPU with cuSOLVER)
+    void diagonalizeTridiagonalGPU(const std::vector<double>& alpha,
+                                   const std::vector<double>& beta,
+                                   std::vector<double>& ritz_values,
+                                   std::vector<double>& weights);
+    
+    // Compute thermodynamics on GPU
+    void computeThermodynamicsGPU(const std::vector<double>& ritz_values,
+                                  const std::vector<double>& weights,
+                                  const std::vector<double>& temperatures,
+                                  double e_min,
+                                  ThermodynamicData& thermo);
+    
+    // Allocate/free thermodynamics buffers
+    void allocateThermodynamicsBuffers(int n_states, int n_temps);
+    void freeThermodynamicsBuffers();
+    void allocateTridiagBuffers(int max_krylov_dim);
+    void freeTridiagBuffers();
 
     // Helper functions for spectral calculations
     /**

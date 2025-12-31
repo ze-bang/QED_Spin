@@ -122,9 +122,11 @@ def run_nlce_ftlm(params, fixed_params, exp_temp, work_dir, h_field=None, temp_r
     os.makedirs(run_dir, exist_ok=True)
     
     # Build NLCE-FTLM command
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    nlce_ftlm_script = os.path.join(script_dir, '..', 'run', 'nlce_ftlm.py')
     cmd = [
         'python3',
-        os.path.join(os.path.dirname(__file__), 'nlce_ftlm.py'),
+        nlce_ftlm_script,
         f'--max_order={fixed_params["max_order"]}',
         f'--base_dir={run_dir}',
         f'--Jxx={Jxx}',
