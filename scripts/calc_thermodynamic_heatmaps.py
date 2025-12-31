@@ -27,6 +27,13 @@ import matplotlib.pyplot as plt
 from collections import defaultdict
 from scipy.interpolate import interp1d
 
+try:
+    import h5py
+    HAS_H5PY = True
+except ImportError:
+    HAS_H5PY = False
+    print("Warning: h5py not available, will only read .dat files")
+
 # NumPy compatibility
 if hasattr(np, 'trapezoid'):
     np_trapz = np.trapezoid
@@ -60,6 +67,55 @@ def parse_ss_file(filepath):
         return None, None, None
 
 
+def parse_h5_file(filepath):
+    """
+    Parse ed_results.h5 file and return thermodynamic data from all TPQ samples.
+    
+    The HDF5 file structure is:
+    - tpq/samples/sample_*/thermodynamics: (N, 5) array with columns
+      [inv_temp, energy, variance, num_doublon, step]
+    
+    Returns: list of (inv_temp, energy, variance) tuples, one per sample
+    """
+    if not HAS_H5PY:
+        return []
+    
+    samples_data = []
+    try:
+        with h5py.File(filepath, 'r') as f:
+            # Check if tpq/samples exists
+            if 'tpq/samples' not in f:
+                print(f"  No tpq/samples group in {filepath}")
+                return []
+            
+            samples_group = f['tpq/samples']
+            
+            for sample_name in sorted(samples_group.keys()):
+                sample = samples_group[sample_name]
+                if 'thermodynamics' not in sample:
+                    continue
+                
+                data = sample['thermodynamics'][:]
+                if data.ndim == 1:
+                    data = data.reshape(1, -1)
+                
+                # Skip the first entry (index 0) which is the smallest beta and typically noisy
+                if len(data) > 1:
+                    data = data[1:, :]
+                
+                inv_temp = data[:, 0]  # beta
+                energy = data[:, 1]
+                variance = data[:, 2]
+                
+                samples_data.append((inv_temp, energy, variance))
+            
+    except Exception as e:
+        print(f"Error loading {filepath}: {e}")
+        return []
+    
+    return samples_data
+
+
 def compute_specific_heat(beta, variance):
     """
     Compute specific heat from variance.
@@ -70,7 +126,11 @@ def compute_specific_heat(beta, variance):
 
 def load_thermodynamic_data(data_dir, param_pattern='Jpm'):
     """
-    Load thermodynamic data from SS_rand*.dat files across parameter sweep.
+    Load thermodynamic data from ed_results.h5 or SS_rand*.dat files across parameter sweep.
+    
+    Supports two formats:
+    1. ed_results.h5 (HDF5 format, preferred) - reads from tpq/samples/sample_*/thermodynamics
+    2. SS_rand*.dat (text format, fallback)
     
     Parameters:
     data_dir: Root directory containing parameter subdirectories
@@ -100,45 +160,73 @@ def load_thermodynamic_data(data_dir, param_pattern='Jpm'):
             
         param_val = float(match.group(1))
         
-        # Find SS_rand*.dat files in output subdirectory
+        # Find data files in output subdirectory
         output_dir = os.path.join(subdir, 'output')
         if not os.path.isdir(output_dir):
             # Try looking directly in the subdir
             output_dir = subdir
-        
-        ss_files = glob.glob(os.path.join(output_dir, 'SS_rand*.dat'))
-        
-        if not ss_files:
-            print(f"  No SS_rand*.dat files found in {output_dir}")
-            continue
-        
-        print(f"  {param_pattern}={param_val}: Found {len(ss_files)} SS files")
         
         # Collect data from all random samples
         all_beta = []
         all_energy = []
         all_cv = []
         
-        for ss_file in ss_files:
-            beta, energy, variance = parse_ss_file(ss_file)
+        # First, try to load from HDF5 file (preferred format)
+        h5_file = os.path.join(output_dir, 'ed_results.h5')
+        if HAS_H5PY and os.path.isfile(h5_file):
+            samples_data = parse_h5_file(h5_file)
+            if samples_data:
+                print(f"  {param_pattern}={param_val}: Found HDF5 file with {len(samples_data)} samples")
+                
+                for beta, energy, variance in samples_data:
+                    if beta is None:
+                        continue
+                    
+                    # Filter out invalid data
+                    valid_mask = (beta > 0) & np.isfinite(energy) & np.isfinite(variance) & (variance >= 0)
+                    beta = beta[valid_mask]
+                    energy = energy[valid_mask]
+                    variance = variance[valid_mask]
+                    
+                    if len(beta) == 0:
+                        continue
+                    
+                    cv = compute_specific_heat(beta, variance)
+                    
+                    all_beta.append(beta)
+                    all_energy.append(energy)
+                    all_cv.append(cv)
+        
+        # Fall back to SS_rand*.dat files if no HDF5 data found
+        if not all_beta:
+            ss_files = glob.glob(os.path.join(output_dir, 'SS_rand*.dat'))
             
-            if beta is None:
+            if not ss_files:
+                print(f"  No data files (ed_results.h5 or SS_rand*.dat) found in {output_dir}")
                 continue
             
-            # Filter out invalid data (beta should be positive, variance should be positive)
-            valid_mask = (beta > 0) & np.isfinite(energy) & np.isfinite(variance) & (variance >= 0)
-            beta = beta[valid_mask]
-            energy = energy[valid_mask]
-            variance = variance[valid_mask]
+            print(f"  {param_pattern}={param_val}: Found {len(ss_files)} SS files")
             
-            if len(beta) == 0:
-                continue
-            
-            cv = compute_specific_heat(beta, variance)
-            
-            all_beta.append(beta)
-            all_energy.append(energy)
-            all_cv.append(cv)
+            for ss_file in ss_files:
+                beta, energy, variance = parse_ss_file(ss_file)
+                
+                if beta is None:
+                    continue
+                
+                # Filter out invalid data (beta should be positive, variance should be positive)
+                valid_mask = (beta > 0) & np.isfinite(energy) & np.isfinite(variance) & (variance >= 0)
+                beta = beta[valid_mask]
+                energy = energy[valid_mask]
+                variance = variance[valid_mask]
+                
+                if len(beta) == 0:
+                    continue
+                
+                cv = compute_specific_heat(beta, variance)
+                
+                all_beta.append(beta)
+                all_energy.append(energy)
+                all_cv.append(cv)
         
         if not all_beta:
             continue
