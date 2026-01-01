@@ -591,7 +591,8 @@ void GPUTPQSolver::runMicrocanonicalTPQ(
     GPUFixedSzOperator* fixed_sz_op,
     bool continue_quenching,
     int continue_sample,
-    double continue_beta
+    double continue_beta,
+    bool save_thermal_states
 ) {
     auto total_start = std::chrono::high_resolution_clock::now();
     
@@ -900,18 +901,19 @@ void GPUTPQSolver::runMicrocanonicalTPQ(
                               << ", β = " << inv_temp << std::endl;
                 }
                 
-                // Save TPQ state at target temperatures (with accurate inv_temp) to HDF5
+                // Save TPQ state at target temperatures (with accurate inv_temp) to HDF5 and optionally binary
                 if (actually_at_target) {
                     std::cout << "  *** Saving TPQ state at β = " << inv_temp 
                               << " (target: " << measure_inv_temp[target_temp_idx] << ") ***" << std::endl;
                     saveTPQStateHDF5(dir, sample, inv_temp, fixed_sz_op);
                     
-                    // Also save binary file for continue_quenching support
-                    // ALWAYS save in FULL basis for consistency
-                    std::string binary_state_file = dir + "/tpq_state_" + std::to_string(sample) 
-                                                  + "_beta=" + std::to_string(inv_temp) 
-                                                  + "_step=" + std::to_string(step) + ".dat";
-                    saveTPQState(binary_state_file, fixed_sz_op);  // With fixed_sz_op = save in full basis
+                    // Only save binary file if save_thermal_states is enabled (for continue_quenching support)
+                    if (save_thermal_states) {
+                        std::string binary_state_file = dir + "/tpq_state_" + std::to_string(sample) 
+                                                      + "_beta=" + std::to_string(inv_temp) 
+                                                      + "_step=" + std::to_string(step) + ".dat";
+                        saveTPQState(binary_state_file, fixed_sz_op);  // With fixed_sz_op = save in full basis
+                    }
                     
                     temp_measured[target_temp_idx] = true;
                 }
@@ -920,19 +922,20 @@ void GPUTPQSolver::runMicrocanonicalTPQ(
             stats_.iterations++;
         }
         
-        // Save final state as binary file for continue_quenching
-        // This allows resuming from the lowest temperature state
-        // ALWAYS save in FULL basis for consistency
+        // Compute final state metrics
         std::pair<double, double> final_pair = computeEnergyAndVariance();
         double final_energy = final_pair.first;
         double final_var = final_pair.second;
         double final_inv_temp = (2.0 * final_step) / (large_value * D_S - final_energy);
         
-        std::string final_state_file = dir + "/tpq_state_" + std::to_string(sample) 
-                                     + "_beta=" + std::to_string(final_inv_temp) 
-                                     + "_step=" + std::to_string(final_step) + ".dat";
-        saveTPQState(final_state_file, fixed_sz_op);  // With fixed_sz_op = save in full basis
-        std::cout << "Saved final TPQ state for continue_quenching: " << final_state_file << std::endl;
+        // Save final state as binary file for continue_quenching (only if save_thermal_states enabled)
+        if (save_thermal_states) {
+            std::string final_state_file = dir + "/tpq_state_" + std::to_string(sample) 
+                                         + "_beta=" + std::to_string(final_inv_temp) 
+                                         + "_step=" + std::to_string(final_step) + ".dat";
+            saveTPQState(final_state_file, fixed_sz_op);  // With fixed_sz_op = save in full basis
+            std::cout << "Saved final TPQ state for continue_quenching: " << final_state_file << std::endl;
+        }
         
         eigenvalues.push_back(final_energy);
         

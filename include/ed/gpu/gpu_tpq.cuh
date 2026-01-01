@@ -46,6 +46,7 @@ public:
      * @param continue_quenching If true, continue from saved state
      * @param continue_sample Sample index to continue from (0 = auto-detect)
      * @param continue_beta Beta value to continue from (0.0 = auto-detect)
+     * @param save_thermal_states If true, save binary state files at target temperatures
      */
     void runMicrocanonicalTPQ(
         int max_iter,
@@ -57,7 +58,8 @@ public:
         class GPUFixedSzOperator* fixed_sz_op = nullptr,
         bool continue_quenching = false,
         int continue_sample = 0,
-        double continue_beta = 0.0
+        double continue_beta = 0.0,
+        bool save_thermal_states = false
     );
     
     /**

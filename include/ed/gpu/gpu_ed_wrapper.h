@@ -73,7 +73,8 @@ public:
                                               double large_value = 1e5,
                                               bool continue_quenching = false,
                                               int continue_sample = 0,
-                                              double continue_beta = 0.0);
+                                              double continue_beta = 0.0,
+                                              bool save_thermal_states = false);
     
     /**
      * Run GPU TPQ for Fixed Sz sector (canonical)
@@ -164,7 +165,8 @@ public:
                                         double large_value = 1e5,
                                         bool continue_quenching = false,
                                         int continue_sample = 0,
-                                        double continue_beta = 0.0);
+                                        double continue_beta = 0.0,
+                                        bool save_thermal_states = false);
     
     /**
      * Run GPU-accelerated canonical TPQ

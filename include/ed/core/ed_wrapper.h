@@ -2256,7 +2256,8 @@ inline EDResults exact_diagonalization_fixed_sz(
                 params.tpq_energy_shift,
                 params.tpq_continue,
                 params.tpq_continue_sample,
-                params.tpq_continue_beta);
+                params.tpq_continue_beta,
+                params.save_thermal_states);
         } else if (method == DiagonalizationMethod::cTPQ_GPU) {
             GPUEDWrapper::runGPUCanonicalTPQFixedSz(
                 gpu_op_handle, n_up,
@@ -2532,7 +2533,8 @@ EDResults exact_diagonalization_from_files(
                 params.tpq_energy_shift,
                 params.tpq_continue,
                 params.tpq_continue_sample,
-                params.tpq_continue_beta
+                params.tpq_continue_beta,
+                params.save_thermal_states
             );
             
             results.eigenvalues = eigenvalues;

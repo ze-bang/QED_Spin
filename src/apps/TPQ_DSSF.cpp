@@ -2561,7 +2561,19 @@ int main(int argc, char* argv[]) {
                         params.krylov_dim = krylov_dim;
                         params.broadening = broadening;
                         params.tolerance = 1e-10;
-                        params.full_reorthogonalization = true;
+                        // MEMORY OPTIMIZATION: For large systems (>16M states = 24 bits), disable
+                        // all reorthogonalization to prevent storing krylov_dim basis vectors.
+                        // Each vector for 27 sites is ~2GB, storing 50 would be ~100GB!
+                        // The 3-term recurrence alone gives acceptable results for spectral functions.
+                        bool large_system = (N > (1ULL << 24));
+                        params.full_reorthogonalization = !large_system;
+                        params.reorth_frequency = large_system ? 0 : 10;  // 0 = no reorth, no basis storage
+                        if (large_system && rank == 0) {
+                            std::cout << "  *** MEMORY OPTIMIZATION ENABLED ***" << std::endl;
+                            std::cout << "  System size: " << N << " states (" << (N * 16.0 / (1024*1024*1024)) << " GB per vector)" << std::endl;
+                            std::cout << "  Disabled reorthogonalization to avoid storing " << krylov_dim << " basis vectors" << std::endl;
+                            std::cout << "  This saves ~" << (krylov_dim * N * 16.0 / (1024*1024*1024)) << " GB of memory" << std::endl;
+                        }
                         
                         // Process each operator pair
                         for (size_t i = 0; i < obs_1.size(); i++) {
@@ -2655,7 +2667,18 @@ int main(int argc, char* argv[]) {
                     params.krylov_dim = krylov_dim;
                     params.broadening = broadening;
                     params.tolerance = 1e-10;
-                    params.full_reorthogonalization = true;
+                    // MEMORY OPTIMIZATION: For large systems (>16M states), disable all
+                    // reorthogonalization. This prevents storing krylov_dim basis vectors
+                    // which would require ~100GB for 27 sites with krylov_dim=50.
+                    bool large_system = (N > (1ULL << 24));  // > 16M states
+                    params.full_reorthogonalization = !large_system;
+                    params.reorth_frequency = large_system ? 0 : 10;  // 0 = pure 3-term recurrence
+                    if (large_system && rank == 0) {
+                        std::cout << "  *** MEMORY OPTIMIZATION ENABLED ***" << std::endl;
+                        std::cout << "  System size: " << N << " states (" << (N * 16.0 / (1024*1024*1024)) << " GB per vector)" << std::endl;
+                        std::cout << "  Disabled reorthogonalization to avoid storing basis vectors" << std::endl;
+                        std::cout << "  Memory saved: ~" << (krylov_dim * N * 16.0 / (1024*1024*1024)) << " GB" << std::endl;
+                    }
                     params.num_samples = num_samples;
                     params.random_seed = random_seed;
                     params.store_intermediate = false;
@@ -2870,7 +2893,14 @@ int main(int argc, char* argv[]) {
                     StaticResponseParameters params;
                     params.krylov_dim = krylov_dim;
                     params.tolerance = 1e-10;
-                    params.full_reorthogonalization = true;
+                    // MEMORY OPTIMIZATION: For large systems (>16M states), disable ALL
+                    // reorthogonalization to prevent storing krylov_dim basis vectors.
+                    bool large_system = (N > (1ULL << 24));
+                    params.full_reorthogonalization = !large_system;
+                    params.reorth_frequency = large_system ? 0 : 10;  // 0 = no basis storage
+                    if (large_system && rank == 0) {
+                        std::cout << "  *** MEMORY OPTIMIZATION: Disabled reorthogonalization ***" << std::endl;
+                    }
                     params.num_samples = num_samples;
                     params.random_seed = random_seed;
                     params.compute_error_bars = true;

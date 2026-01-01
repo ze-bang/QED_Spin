@@ -2151,8 +2151,7 @@ void microcanonical_tpq(
                         // Save to unified HDF5 file
                         save_tpq_state_hdf5(v0, dir, sample, inv_temp, fixed_sz_op);
                         
-                        // Also save binary file for continue_quenching support
-                        // ALWAYS save in FULL basis for consistency
+                        // Also save binary file for continue_quenching support (only if computing observables)
                         std::string binary_state_file = dir + "/tpq_state_" + std::to_string(sample) 
                                                       + "_beta=" + std::to_string(inv_temp) 
                                                       + "_step=" + std::to_string(step) + ".dat";
@@ -2163,9 +2162,8 @@ void microcanonical_tpq(
             }
         }
         
-        // Save final state as binary file for continue_quenching
-        // ALWAYS save in FULL basis for consistency
-        if (!dir.empty()) {
+        // Save final state as binary file for continue_quenching (only if computing observables)
+        if (!dir.empty() && compute_observables) {
             std::string final_state_file = dir + "/tpq_state_" + std::to_string(sample) 
                                          + "_beta=" + std::to_string(inv_temp) 
                                          + "_step=" + std::to_string(step) + ".dat";

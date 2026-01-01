@@ -461,7 +461,8 @@ void GPUEDWrapper::runGPUMicrocanonicalTPQ(void* gpu_op_handle,
                                            double large_value,
                                            bool continue_quenching,
                                            int continue_sample,
-                                           double continue_beta) {
+                                           double continue_beta,
+                                           bool save_thermal_states) {
     if (!gpu_op_handle) {
         std::cerr << "Error: NULL GPU operator handle\n";
         return;
@@ -472,7 +473,8 @@ void GPUEDWrapper::runGPUMicrocanonicalTPQ(void* gpu_op_handle,
     
     tpq_solver.runMicrocanonicalTPQ(max_iter, num_samples, temp_interval,
                                     eigenvalues, dir, large_value, nullptr,
-                                    continue_quenching, continue_sample, continue_beta);
+                                    continue_quenching, continue_sample, continue_beta,
+                                    save_thermal_states);
 }
 
 void GPUEDWrapper::runGPUMicrocanonicalTPQFixedSz(void* gpu_op_handle,
@@ -484,7 +486,8 @@ void GPUEDWrapper::runGPUMicrocanonicalTPQFixedSz(void* gpu_op_handle,
                                                  double large_value,
                                                  bool continue_quenching,
                                                  int continue_sample,
-                                                 double continue_beta) {
+                                                 double continue_beta,
+                                                 bool save_thermal_states) {
     if (!gpu_op_handle) {
         std::cerr << "Error: NULL GPU operator handle\n";
         return;
@@ -505,7 +508,8 @@ void GPUEDWrapper::runGPUMicrocanonicalTPQFixedSz(void* gpu_op_handle,
     
     tpq_solver.runMicrocanonicalTPQ(max_iter, num_samples, temp_interval,
                                     eigenvalues, dir, large_value, gpu_op,
-                                    continue_quenching, continue_sample, continue_beta);
+                                    continue_quenching, continue_sample, continue_beta,
+                                    save_thermal_states);
     
     std::cout << "\nGPU Microcanonical TPQ Fixed Sz complete\n";
 }
@@ -1129,7 +1133,11 @@ void GPUEDWrapper::runGPUMicrocanonicalTPQFixedSz(void* gpu_op_handle,
                                                  int temp_interval,
                                                  std::vector<double>& eigenvalues,
                                                  std::string dir,
-                                                 double large_value) {}
+                                                 double large_value,
+                                                 bool continue_quenching,
+                                                 int continue_sample,
+                                                 double continue_beta,
+                                                 bool save_thermal_states) {}
 
 void GPUEDWrapper::runGPUCanonicalTPQFixedSz(void* gpu_op_handle,
                                             int n_up,
@@ -1152,7 +1160,11 @@ void GPUEDWrapper::runGPUMicrocanonicalTPQ(void* gpu_op_handle,
                                            int temp_interval,
                                            std::vector<double>& eigenvalues,
                                            std::string dir,
-                                           double large_value) {}
+                                           double large_value,
+                                           bool continue_quenching,
+                                           int continue_sample,
+                                           double continue_beta,
+                                           bool save_thermal_states) {}
 
 void GPUEDWrapper::runGPUCanonicalTPQ(void* gpu_op_handle,
                                       int N, double beta_max, int num_samples,
