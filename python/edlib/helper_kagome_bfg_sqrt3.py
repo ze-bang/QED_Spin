@@ -222,12 +222,11 @@ def generate_kagome_sqrt3_cluster(dim1, dim2, use_pbc=False):
     
     # ==========================================================================
     # Generate edges using the bond tables
-    # Use sets to avoid duplicate bonds (can happen with small clusters + PBC)
     # ==========================================================================
     
-    edges_set = set()
-    edges_2nn_set = set()
-    edges_3nn_set = set()
+    edges = []
+    edges_2nn = []
+    edges_3nn = []
     
     for i in range(dim1):
         for j in range(dim2):
@@ -236,26 +235,21 @@ def generate_kagome_sqrt3_cluster(dim1, dim2, use_pbc=False):
                 v_src = cell_to_vertex[(i, j, src_site)]
                 v_tgt = get_vertex_with_pbc(i + di, j + dj, tgt_site)
                 if v_tgt is not None and v_src != v_tgt:
-                    edges_set.add(tuple(sorted([v_src, v_tgt])))
+                    edges.append(tuple(sorted([v_src, v_tgt])))
             
             # Add 2NN bonds
             for src_site, di, dj, tgt_site in NN2_BONDS:
                 v_src = cell_to_vertex[(i, j, src_site)]
                 v_tgt = get_vertex_with_pbc(i + di, j + dj, tgt_site)
                 if v_tgt is not None and v_src != v_tgt:
-                    edges_2nn_set.add(tuple(sorted([v_src, v_tgt])))
+                    edges_2nn.append(tuple(sorted([v_src, v_tgt])))
             
             # Add 3NN bonds
             for src_site, di, dj, tgt_site in NN3_BONDS:
                 v_src = cell_to_vertex[(i, j, src_site)]
                 v_tgt = get_vertex_with_pbc(i + di, j + dj, tgt_site)
                 if v_tgt is not None and v_src != v_tgt:
-                    edges_3nn_set.add(tuple(sorted([v_src, v_tgt])))
-    
-    # Convert sets to lists
-    edges = list(edges_set)
-    edges_2nn = list(edges_2nn_set)
-    edges_3nn = list(edges_3nn_set)
+                    edges_3nn.append(tuple(sorted([v_src, v_tgt])))
     
     # Create node mapping
     node_mapping = {i: i for i in range(len(vertices))}
