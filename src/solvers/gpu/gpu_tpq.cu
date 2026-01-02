@@ -252,47 +252,6 @@ void GPUTPQSolver::writeTPQDataHDF5(const std::string& h5_file, size_t sample,
     }
 }
 
-bool GPUTPQSolver::saveTPQState(const std::string& filename) {
-    std::vector<std::complex<double>> h_state(N_);
-    cudaMemcpy(h_state.data(), d_state_, N_ * sizeof(cuDoubleComplex), cudaMemcpyDeviceToHost);
-    
-    std::ofstream file(filename, std::ios::binary);
-    if (!file.is_open()) return false;
-    
-    size_t size = N_;
-    file.write(reinterpret_cast<const char*>(&size), sizeof(size_t));
-    file.write(reinterpret_cast<const char*>(h_state.data()), N_ * sizeof(std::complex<double>));
-    file.close();
-    
-    return true;
-}
-
-bool GPUTPQSolver::saveTPQState(const std::string& filename, GPUFixedSzOperator* fixed_sz_op) {
-    // Copy state from GPU to host
-    std::vector<std::complex<double>> h_state(N_);
-    cudaMemcpy(h_state.data(), d_state_, N_ * sizeof(cuDoubleComplex), cudaMemcpyDeviceToHost);
-    
-    std::ofstream file(filename, std::ios::binary);
-    if (!file.is_open()) return false;
-    
-    // Transform to full basis if using fixed-Sz
-    if (fixed_sz_op != nullptr) {
-        std::vector<std::complex<double>> full_state = fixed_sz_op->embedToFull(h_state);
-        size_t full_size = full_state.size();
-        file.write(reinterpret_cast<const char*>(&full_size), sizeof(size_t));
-        file.write(reinterpret_cast<const char*>(full_state.data()), full_size * sizeof(std::complex<double>));
-        std::cout << "  [GPU Fixed-Sz] Transformed state from dim " << N_ 
-                  << " to full space dim " << full_size << " before saving" << std::endl;
-    } else {
-        size_t size = N_;
-        file.write(reinterpret_cast<const char*>(&size), sizeof(size_t));
-        file.write(reinterpret_cast<const char*>(h_state.data()), N_ * sizeof(std::complex<double>));
-    }
-    
-    file.close();
-    return true;
-}
-
 bool GPUTPQSolver::saveTPQStateHDF5(const std::string& dir, size_t sample, double beta, GPUFixedSzOperator* fixed_sz_op) {
     try {
         // Copy state from GPU to host
@@ -333,252 +292,122 @@ bool GPUTPQSolver::saveTPQStateHDF5(const std::string& dir, size_t sample, doubl
     }
 }
 
-bool GPUTPQSolver::loadTPQState(const std::string& filename) {
-    std::ifstream file(filename, std::ios::binary);
-    if (!file.is_open()) {
-        std::cerr << "Error: Could not open TPQ state file: " << filename << std::endl;
-        return false;
-    }
-    
-    // Read size
-    size_t size;
-    file.read(reinterpret_cast<char*>(&size), sizeof(size_t));
-    
-    if (size != static_cast<size_t>(N_)) {
-        std::cerr << "Error: TPQ state dimension mismatch. Expected " << N_ 
-                  << ", got " << size << std::endl;
-        file.close();
-        return false;
-    }
-    
-    // Read state to host
-    std::vector<std::complex<double>> h_state(N_);
-    file.read(reinterpret_cast<char*>(h_state.data()), N_ * sizeof(std::complex<double>));
-    file.close();
-    
-    // Copy to GPU
-    cudaMemcpy(d_state_, h_state.data(), N_ * sizeof(cuDoubleComplex), cudaMemcpyHostToDevice);
-    
-    std::cout << "Loaded TPQ state from: " << filename << std::endl;
-    return true;
-}
-
-bool GPUTPQSolver::loadTPQState(const std::string& filename, GPUFixedSzOperator* fixed_sz_op) {
-    std::ifstream file(filename, std::ios::binary);
-    if (!file.is_open()) {
-        std::cerr << "Error: Could not open TPQ state file: " << filename << std::endl;
-        return false;
-    }
-    
-    // Read size from file
-    size_t file_size;
-    file.read(reinterpret_cast<char*>(&file_size), sizeof(size_t));
-    
-    // If fixed_sz_op is provided, we expect full basis state and need to project
-    if (fixed_sz_op != nullptr) {
-        size_t full_dim = fixed_sz_op->getFullDim();
+bool GPUTPQSolver::loadTPQStateFromHDF5(const std::string& h5_file, 
+                                        const std::string& dataset_name,
+                                        GPUFixedSzOperator* fixed_sz_op) {
+    try {
+        std::vector<std::complex<double>> state;
+        if (!HDF5IO::loadTPQStateByName(h5_file, dataset_name, state)) {
+            std::cerr << "Error: Could not load TPQ state from HDF5: " << dataset_name << std::endl;
+            return false;
+        }
         
-        if (file_size == full_dim) {
-            // State is in full basis - read and project to reduced basis
-            std::vector<std::complex<double>> full_state(full_dim);
-            file.read(reinterpret_cast<char*>(full_state.data()), full_dim * sizeof(std::complex<double>));
-            file.close();
+        // If fixed_sz_op is provided and state is in full basis, project to reduced
+        if (fixed_sz_op != nullptr) {
+            size_t full_dim = fixed_sz_op->getFullDim();
             
-            // Project from full to reduced basis
-            std::vector<std::complex<double>> reduced_state = fixed_sz_op->projectToReduced(full_state);
-            
-            if (reduced_state.size() != static_cast<size_t>(N_)) {
-                std::cerr << "Error: Projected state dimension mismatch. Expected " << N_ 
-                          << ", got " << reduced_state.size() << std::endl;
+            if (state.size() == full_dim) {
+                // State is in full basis - project to reduced
+                std::vector<std::complex<double>> reduced_state = fixed_sz_op->projectToReduced(state);
+                
+                if (reduced_state.size() != static_cast<size_t>(N_)) {
+                    std::cerr << "Error: Projected state dimension mismatch. Expected " << N_ 
+                              << ", got " << reduced_state.size() << std::endl;
+                    return false;
+                }
+                
+                cudaMemcpy(d_state_, reduced_state.data(), N_ * sizeof(cuDoubleComplex), cudaMemcpyHostToDevice);
+                std::cout << "  [GPU Fixed-Sz] Projected from full basis (dim=" << full_dim 
+                          << ") to reduced basis (dim=" << N_ << ")" << std::endl;
+            } else if (state.size() == static_cast<size_t>(N_)) {
+                // Already in reduced basis
+                cudaMemcpy(d_state_, state.data(), N_ * sizeof(cuDoubleComplex), cudaMemcpyHostToDevice);
+            } else {
+                std::cerr << "Error: State dimension " << state.size() << " doesn't match expected dimensions" << std::endl;
                 return false;
             }
-            
-            // Copy to GPU
-            cudaMemcpy(d_state_, reduced_state.data(), N_ * sizeof(cuDoubleComplex), cudaMemcpyHostToDevice);
-            
-            std::cout << "Loaded TPQ state from: " << filename << std::endl;
-            std::cout << "  [GPU Fixed-Sz] Projected from full basis (dim=" << full_dim 
-                      << ") to reduced basis (dim=" << N_ << ")" << std::endl;
-            return true;
-        } else if (file_size == static_cast<size_t>(N_)) {
-            // State is already in reduced basis (legacy) - read directly
-            std::vector<std::complex<double>> h_state(N_);
-            file.read(reinterpret_cast<char*>(h_state.data()), N_ * sizeof(std::complex<double>));
-            file.close();
-            
-            cudaMemcpy(d_state_, h_state.data(), N_ * sizeof(cuDoubleComplex), cudaMemcpyHostToDevice);
-            
-            std::cout << "Loaded TPQ state (already in reduced basis) from: " << filename << std::endl;
-            return true;
         } else {
-            std::cerr << "Error: TPQ state dimension mismatch. Expected " << full_dim 
-                      << " (full) or " << N_ << " (reduced), got " << file_size << std::endl;
-            file.close();
-            return false;
-        }
-    } else {
-        // No fixed_sz_op, expect state dimension to match N_
-        if (file_size != static_cast<size_t>(N_)) {
-            std::cerr << "Error: TPQ state dimension mismatch. Expected " << N_ 
-                      << ", got " << file_size << std::endl;
-            file.close();
-            return false;
+            if (state.size() != static_cast<size_t>(N_)) {
+                std::cerr << "Error: State dimension mismatch. Expected " << N_ 
+                          << ", got " << state.size() << std::endl;
+                return false;
+            }
+            cudaMemcpy(d_state_, state.data(), N_ * sizeof(cuDoubleComplex), cudaMemcpyHostToDevice);
         }
         
-        std::vector<std::complex<double>> h_state(N_);
-        file.read(reinterpret_cast<char*>(h_state.data()), N_ * sizeof(std::complex<double>));
-        file.close();
-        
-        cudaMemcpy(d_state_, h_state.data(), N_ * sizeof(cuDoubleComplex), cudaMemcpyHostToDevice);
-        
-        std::cout << "Loaded TPQ state from: " << filename << std::endl;
+        std::cout << "Loaded TPQ state from HDF5: " << dataset_name << std::endl;
         return true;
+        
+    } catch (const std::exception& e) {
+        std::cerr << "Error loading TPQ state from HDF5: " << e.what() << std::endl;
+        return false;
     }
 }
 
+// Find the lowest energy (highest beta) TPQ state in HDF5
+HDF5IO::TPQStateInfo GPUTPQSolver::findLowestEnergyTPQStateHDF5(const std::string& dir, int sample_filter) {
+    std::string h5_file = dir + "/ed_results.h5";
+    
+    if (!HDF5IO::fileExists(h5_file)) {
+        std::cerr << "Error: HDF5 file not found: " << h5_file << std::endl;
+        return HDF5IO::TPQStateInfo{0, -1.0, ""};
+    }
+    
+    // List all TPQ states in the HDF5 file
+    auto states = HDF5IO::listTPQStates(h5_file, sample_filter);
+    
+    if (states.empty()) {
+        std::cerr << "Error: No TPQ states found in HDF5: " << h5_file << std::endl;
+        return HDF5IO::TPQStateInfo{0, -1.0, ""};
+    }
+    
+    // Find the state with highest beta (lowest energy)
+    HDF5IO::TPQStateInfo best_state = states[0];
+    for (const auto& state : states) {
+        if (state.beta > best_state.beta) {
+            best_state = state;
+        }
+    }
+    
+    std::cout << "Found lowest energy TPQ state in HDF5:" << std::endl;
+    std::cout << "  Sample: " << best_state.sample_index << std::endl;
+    std::cout << "  Beta: " << best_state.beta << std::endl;
+    
+    return best_state;
+}
+
+// Legacy function for backward compatibility - now uses HDF5
 std::string GPUTPQSolver::findLowestEnergyTPQState(const std::string& dir, int sample, 
                                                    double& beta_out, int& step_out) {
-    // Check if directory exists using POSIX API
-    DIR* directory = opendir(dir.c_str());
-    if (!directory) {
-        std::cerr << "Error: Directory does not exist: " << dir << std::endl;
-        return "";
+    auto state_info = findLowestEnergyTPQStateHDF5(dir, sample);
+    
+    if (state_info.beta < 0) {
+        return "";  // Not found
     }
     
-    // Pattern: tpq_state_{sample}_beta={beta}_step={step}.dat (new format with step)
-    // Also support legacy pattern: tpq_state_{sample}_beta={beta}.dat
-    std::regex state_pattern_new("tpq_state_([0-9]+)_beta=([0-9.]+)_step=([0-9]+)\\.dat");
-    std::regex state_pattern_legacy("tpq_state_([0-9]+)_beta=([0-9.]+)\\.dat");
+    beta_out = state_info.beta;
     
-    double max_beta = -1.0;
-    int best_sample = -1;
-    int best_step = -1;
-    std::string best_file = "";
-    
-    struct dirent* entry;
-    while ((entry = readdir(directory)) != nullptr) {
-        std::string filename = entry->d_name;
-        
-        // Skip if not a regular file (check using stat)
-        std::string filepath = dir + "/" + filename;
-        struct stat file_stat;
-        if (stat(filepath.c_str(), &file_stat) != 0 || !S_ISREG(file_stat.st_mode)) {
-            continue;
-        }
-        
-        std::smatch match;
-        int file_sample = -1;
-        double file_beta = -1.0;
-        int file_step = -1;
-        
-        // Try new format first
-        if (std::regex_match(filename, match, state_pattern_new)) {
-            file_sample = std::stoi(match[1].str());
-            file_beta = std::stod(match[2].str());
-            file_step = std::stoi(match[3].str());
-        } 
-        // Fall back to legacy format
-        else if (std::regex_match(filename, match, state_pattern_legacy)) {
-            file_sample = std::stoi(match[1].str());
-            file_beta = std::stod(match[2].str());
-            file_step = -1; // Will need to look up from SS_rand file
-        }
-        else {
-            continue;
-        }
-        
-        // If sample is specified (non-zero), only consider that sample
-        if (sample != 0 && file_sample != sample) continue;
-        
-        // Find the highest beta (lowest energy state)
-        if (file_beta > max_beta) {
-            max_beta = file_beta;
-            best_sample = file_sample;
-            best_step = file_step;
-            best_file = filepath;
-        }
-    }
-    
-    closedir(directory);
-    
-    if (best_file.empty()) {
-        std::cerr << "Error: No TPQ state files found in directory: " << dir << std::endl;
-        return "";
-    }
-    
-    beta_out = max_beta;
-    
-    // If step was not in filename (legacy format), look it up from HDF5 or SS_rand file
-    if (best_step == -1) {
-        std::string h5_file = dir + "/ed_results.h5";
-        bool found_step = false;
-        
-        // Try HDF5 first
-        if (HDF5IO::fileExists(h5_file)) {
-            try {
-                auto points = HDF5IO::loadTPQThermodynamics(h5_file, best_sample);
-                double closest_beta_diff = 1e10;
-                for (const auto& point : points) {
-                    double beta_diff = std::abs(point.beta - max_beta);
-                    if (beta_diff < closest_beta_diff) {
-                        closest_beta_diff = beta_diff;
-                        best_step = point.step;
-                        found_step = true;
-                    }
-                }
-            } catch (const std::exception& e) {
-                // Fall back to text file
+    // Look up step from thermodynamics data
+    std::string h5_file = dir + "/ed_results.h5";
+    step_out = -1;
+    try {
+        auto thermo = HDF5IO::loadTPQThermodynamics(h5_file, state_info.sample_index);
+        double closest_diff = 1e10;
+        for (const auto& point : thermo) {
+            double diff = std::abs(point.beta - state_info.beta);
+            if (diff < closest_diff) {
+                closest_diff = diff;
+                step_out = point.step;
             }
         }
-        
-        // Fall back to SS_rand file if HDF5 lookup failed
-        if (!found_step) {
-            std::string ss_file = dir + "/SS_rand" + std::to_string(best_sample) + ".dat";
-            std::ifstream ss_stream(ss_file);
-            
-            if (!ss_stream.is_open()) {
-                std::cerr << "Warning: Could not find step info in HDF5 or SS_rand file" << std::endl;
-                step_out = -1;
-                return best_file;
-            }
-            
-            // Find the step corresponding to this beta
-            // Format: inv_temp energy variance norm doublon step
-            double closest_beta_diff = 1e10;
-            int closest_step = -1;
-            
-            std::string line;
-            std::getline(ss_stream, line); // Skip header
-            
-            while (std::getline(ss_stream, line)) {
-                if (line.empty() || line[0] == '#') continue;
-                
-                std::istringstream iss(line);
-                double inv_temp, energy, variance, norm, doublon;
-                int step;
-                
-                // Format: inv_temp energy variance norm doublon step
-                if (iss >> inv_temp >> energy >> variance >> norm >> doublon >> step) {
-                    double beta_diff = std::abs(inv_temp - max_beta);
-                    if (beta_diff < closest_beta_diff) {
-                        closest_beta_diff = beta_diff;
-                        closest_step = step;
-                    }
-                }
-            }
-            
-            ss_stream.close();
-            best_step = closest_step;
-        }
+    } catch (...) {
+        // Step lookup failed, but we can still continue
     }
     
-    step_out = best_step;
+    std::cout << "  Step: " << step_out << std::endl;
     
-    std::cout << "Found TPQ state: sample=" << best_sample 
-              << ", beta=" << max_beta 
-              << ", step=" << step_out << std::endl;
-    
-    return best_file;
+    // Return HDF5 file path (not a .dat file) as indicator that HDF5 should be used
+    return h5_file;
 }
 
 void GPUTPQSolver::runMicrocanonicalTPQ(
@@ -703,67 +532,57 @@ void GPUTPQSolver::runMicrocanonicalTPQ(
         
         // Check if we should continue from a saved state (only for first sample)
         if (continue_quenching && sample == 0) {
-            double found_beta = 0.0;
-            int found_step = -1;
-            int found_sample = 0;
-            std::string state_file;
+            std::cout << "Continue-quenching: Looking for saved states in HDF5..." << std::endl;
             
-            if (continue_sample == 0) {
-                // Auto-detect lowest energy state (highest beta) from any sample
-                std::cout << "Auto-detecting lowest energy state (highest beta)..." << std::endl;
-                state_file = findLowestEnergyTPQState(dir, 0, found_beta, found_step);
-                
-                // Extract sample number from the state file name
-                if (!state_file.empty()) {
-                    size_t sample_pos = state_file.find("tpq_state_");
-                    if (sample_pos != std::string::npos) {
-                        size_t beta_pos = state_file.find("_beta=", sample_pos);
-                        if (beta_pos != std::string::npos) {
-                            std::string sample_str = state_file.substr(sample_pos + 10, beta_pos - (sample_pos + 10));
-                            found_sample = std::stoi(sample_str);
+            // Find the lowest energy (highest beta) state in HDF5 (merged file)
+            std::string merged_h5_file = dir + "/ed_results.h5";
+            int sample_filter = (continue_sample == 0) ? -1 : continue_sample;
+            auto state_info = findLowestEnergyTPQStateHDF5(dir, sample_filter);
+            
+            if (state_info.beta > 0 && !state_info.dataset_name.empty()) {
+                // Found a valid state - load it from HDF5 using the exact dataset name
+                // Note: Load from the merged file (ed_results.h5), not the per-rank file
+                if (loadTPQStateFromHDF5(merged_h5_file, state_info.dataset_name, fixed_sz_op)) {
+                    loaded_from_file = true;
+                    
+                    // Look up step from thermodynamics (also from merged file)
+                    int found_step = -1;
+                    try {
+                        auto thermo = HDF5IO::loadTPQThermodynamics(merged_h5_file, state_info.sample_index);
+                        double closest_diff = 1e10;
+                        for (const auto& point : thermo) {
+                            double diff = std::abs(point.beta - state_info.beta);
+                            if (diff < closest_diff) {
+                                closest_diff = diff;
+                                found_step = point.step;
+                            }
                         }
+                    } catch (...) {
+                        found_step = 1;  // Default if lookup fails
                     }
-                }
-                
-                if (state_file.empty()) {
-                    std::cout << "Warning: Could not find saved state to continue from. Falling back to normal TPQ (starting fresh)." << std::endl;
+                    
+                    start_step = found_step + 1;
+                    inv_temp = state_info.beta;
+                    
+                    // Compute energy and variance from loaded state
+                    std::pair<double, double> ev_pair = computeEnergyAndVariance();
+                    energy = ev_pair.first;
+                    variance = ev_pair.second;
+                    
+                    std::cout << "Resuming from HDF5:" << std::endl;
+                    std::cout << "  Original sample: " << state_info.sample_index << std::endl;
+                    std::cout << "  Continuing as sample: 0" << std::endl;
+                    std::cout << "  Beta: " << state_info.beta << std::endl;
+                    std::cout << "  Step: " << found_step << std::endl;
+                    std::cout << "  Will run " << max_iter << " additional iterations" << std::endl;
+                    std::cout << "  Target final step: " << (found_step + max_iter) << std::endl;
+                    std::cout << "Continuing from step " << found_step 
+                              << " (beta=" << state_info.beta << ", E=" << energy << ")" << std::endl;
+                } else {
+                    std::cout << "Warning: Could not load TPQ state from HDF5. Starting fresh." << std::endl;
                 }
             } else {
-                // Use specified sample
-                found_sample = continue_sample;
-                std::cout << "Continuing from sample " << continue_sample << std::endl;
-                
-                state_file = findLowestEnergyTPQState(dir, continue_sample, found_beta, found_step);
-                
-                if (state_file.empty()) {
-                    std::cout << "Warning: Could not find state file for sample " << continue_sample 
-                              << ". Falling back to normal TPQ (starting fresh)." << std::endl;
-                }
-            }
-            
-            // Try to load the state file if we found one
-            // Use the overload that can project from full basis to reduced if needed
-            if (!state_file.empty() && loadTPQState(state_file, fixed_sz_op)) {
-                loaded_from_file = true;
-                start_step = found_step + 1;
-                inv_temp = found_beta;
-                
-                // Compute energy and variance from loaded state
-                std::pair<double, double> ev_pair = computeEnergyAndVariance();
-                energy = ev_pair.first;
-                variance = ev_pair.second;
-                
-                std::cout << "Resuming from:" << std::endl;
-                std::cout << "  Original sample: " << found_sample << std::endl;
-                std::cout << "  Continuing as sample: 0 (output to SS_rand0.dat)" << std::endl;
-                std::cout << "  Beta: " << found_beta << std::endl;
-                std::cout << "  Step: " << found_step << std::endl;
-                std::cout << "  Will run " << max_iter << " additional iterations" << std::endl;
-                std::cout << "  Target final step: " << (found_step + max_iter) << std::endl;
-                std::cout << "Continuing from step " << found_step 
-                          << " (beta=" << found_beta << ", E=" << energy << ")" << std::endl;
-            } else if (!state_file.empty()) {
-                std::cout << "Warning: Could not load TPQ state. Falling back to normal TPQ (starting fresh)." << std::endl;
+                std::cout << "Warning: No TPQ states found in HDF5. Starting fresh." << std::endl;
             }
         }
         
@@ -901,19 +720,11 @@ void GPUTPQSolver::runMicrocanonicalTPQ(
                               << ", β = " << inv_temp << std::endl;
                 }
                 
-                // Save TPQ state at target temperatures (with accurate inv_temp) to HDF5 and optionally binary
+                // Save TPQ state at target temperatures (with accurate inv_temp) to HDF5
                 if (actually_at_target) {
                     std::cout << "  *** Saving TPQ state at β = " << inv_temp 
                               << " (target: " << measure_inv_temp[target_temp_idx] << ") ***" << std::endl;
                     saveTPQStateHDF5(dir, sample, inv_temp, fixed_sz_op);
-                    
-                    // Only save binary file if save_thermal_states is enabled (for continue_quenching support)
-                    if (save_thermal_states) {
-                        std::string binary_state_file = dir + "/tpq_state_" + std::to_string(sample) 
-                                                      + "_beta=" + std::to_string(inv_temp) 
-                                                      + "_step=" + std::to_string(step) + ".dat";
-                        saveTPQState(binary_state_file, fixed_sz_op);  // With fixed_sz_op = save in full basis
-                    }
                     
                     temp_measured[target_temp_idx] = true;
                 }
@@ -928,14 +739,9 @@ void GPUTPQSolver::runMicrocanonicalTPQ(
         double final_var = final_pair.second;
         double final_inv_temp = (2.0 * final_step) / (large_value * D_S - final_energy);
         
-        // Save final state as binary file for continue_quenching (only if save_thermal_states enabled)
-        if (save_thermal_states) {
-            std::string final_state_file = dir + "/tpq_state_" + std::to_string(sample) 
-                                         + "_beta=" + std::to_string(final_inv_temp) 
-                                         + "_step=" + std::to_string(final_step) + ".dat";
-            saveTPQState(final_state_file, fixed_sz_op);  // With fixed_sz_op = save in full basis
-            std::cout << "Saved final TPQ state for continue_quenching: " << final_state_file << std::endl;
-        }
+        // Always save final state to HDF5 for continue_quenching
+        saveTPQStateHDF5(dir, sample, final_inv_temp, fixed_sz_op);
+        std::cout << "Saved final TPQ state to HDF5: sample=" << sample << ", beta=" << final_inv_temp << std::endl;
         
         eigenvalues.push_back(final_energy);
         

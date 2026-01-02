@@ -2147,28 +2147,19 @@ void microcanonical_tpq(
                 if (actually_at_target) {
                     std::cout << "  *** Saving TPQ state at β = " << inv_temp 
                               << " (target: " << measure_inv_temp[target_temp_idx] << ") ***" << std::endl;
+                    // Save to unified HDF5 file (only if computing observables)
                     if (compute_observables) {
-                        // Save to unified HDF5 file
                         save_tpq_state_hdf5(v0, dir, sample, inv_temp, fixed_sz_op);
-                        
-                        // Also save binary file for continue_quenching support (only if computing observables)
-                        std::string binary_state_file = dir + "/tpq_state_" + std::to_string(sample) 
-                                                      + "_beta=" + std::to_string(inv_temp) 
-                                                      + "_step=" + std::to_string(step) + ".dat";
-                        save_tpq_state(v0, binary_state_file, fixed_sz_op);
                     }
                     temp_measured[target_temp_idx] = true;
                 }
             }
         }
         
-        // Save final state as binary file for continue_quenching (only if computing observables)
-        if (!dir.empty() && compute_observables) {
-            std::string final_state_file = dir + "/tpq_state_" + std::to_string(sample) 
-                                         + "_beta=" + std::to_string(inv_temp) 
-                                         + "_step=" + std::to_string(step) + ".dat";
-            save_tpq_state(v0, final_state_file, fixed_sz_op);
-            std::cout << "Saved final TPQ state for continue_quenching: " << final_state_file << std::endl;
+        // Always save final state to HDF5 for continue_quenching
+        if (!dir.empty()) {
+            save_tpq_state_hdf5(v0, dir, sample, inv_temp, fixed_sz_op);
+            std::cout << "Saved final TPQ state to HDF5: sample=" << sample << ", beta=" << inv_temp << std::endl;
         }
         
         // Store final energy for this sample

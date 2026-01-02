@@ -2727,76 +2727,131 @@ GPUFTLMSolver::computeDynamicalCorrelationMultiTemp(
         // Find minimum energy for numerical stability
         double E_min = *std::min_element(ritz_values.begin(), ritz_values.end());
         
-        // Step 2: For each temperature, compute weighted spectral contributions
+        // ============================================================
+        // OPTIMIZATION: Match CPU approach - precompute S_i(ω) ONCE
+        // for all significant states, then apply thermal weights
+        // ============================================================
+        
+        // Step 2a: Determine significant states using highest T (most inclusive)
+        double T_max_local = *std::max_element(temperatures.begin(), temperatures.end());
+        double beta_min = 1.0 / T_max_local;
+        
+        // Compute thermal weights at highest T to find potentially significant states
+        std::vector<double> max_weights(m_H);
+        double Z_max = 0.0;
+        for (int i = 0; i < m_H; i++) {
+            double boltzmann = std::exp(-beta_min * (ritz_values[i] - E_min));
+            max_weights[i] = c_sq[i] * boltzmann;
+            Z_max += max_weights[i];
+        }
+        
+        // Identify significant Ritz states (union across all temperatures)
+        double weight_threshold = 1e-10 * Z_max;  // Match CPU: looser threshold
+        std::vector<int> significant_states;
+        significant_states.reserve(max_ritz_states);
+        
+        for (int i = 0; i < std::min(m_H, max_ritz_states); i++) {
+            if (max_weights[i] >= weight_threshold || c_sq[i] > 1e-12) {
+                significant_states.push_back(i);
+            }
+        }
+        
+        std::cout << "  Identified " << significant_states.size() << " potentially significant Ritz states\n";
+        
+        // Step 2b: Precompute S_i(ω) for each significant Ritz state
+        std::vector<std::vector<double>> precomputed_S_i(significant_states.size());
+        std::vector<double> precomputed_energies(significant_states.size());
+        std::vector<double> precomputed_c_sq(significant_states.size());
+        std::vector<bool> state_valid(significant_states.size(), false);
+        
+        for (size_t idx = 0; idx < significant_states.size(); idx++) {
+            int i = significant_states[idx];
+            
+            // Construct eigenstate |ψ_i⟩ = Σ_j V[i,j] |v_j⟩
+            reconstructEigenstateFromBasis(&evecs[i * m_H], m_H, d_lanczos_basis_H, d_psi_i);
+            
+            // Normalize
+            double psi_norm = vectorNorm(d_psi_i);
+            if (psi_norm < 1e-14) continue;
+            vectorScale(d_psi_i, 1.0 / psi_norm);
+            
+            // Apply operator O2: |φ_i⟩ = O₂|ψ_i⟩
+            if (op_O2 != nullptr) {
+                op_O2->matVecGPU(d_psi_i, d_phi_i, N_);
+            } else {
+                vectorCopy(d_psi_i, d_phi_i);
+            }
+            
+            double phi_norm = vectorNorm(d_phi_i);
+            double phi_norm_sq = phi_norm * phi_norm;
+            
+            if (phi_norm < 1e-14) continue;
+            
+            // Normalize for Lanczos
+            vectorScale(d_phi_i, 1.0 / phi_norm);
+            
+            // Build Lanczos from |φ_i⟩
+            std::vector<double> alpha_S, beta_S;
+            buildLanczosTridiagonalFromVector(d_phi_i, false, 10, alpha_S, beta_S);
+            
+            if (alpha_S.empty()) continue;
+            
+            // Shift energies by E_gs
+            for (size_t k = 0; k < alpha_S.size(); k++) {
+                alpha_S[k] -= E_gs;
+            }
+            
+            // Compute spectral function via continued fraction (ONCE per state)
+            std::vector<double> S_i = gpu_continued_fraction_spectral(
+                alpha_S, beta_S, frequencies, broadening, phi_norm_sq
+            );
+            
+            // Store precomputed results
+            precomputed_S_i[idx] = std::move(S_i);
+            precomputed_energies[idx] = ritz_values[i];
+            precomputed_c_sq[idx] = c_sq[i];
+            state_valid[idx] = true;
+        }
+        
+        // Count valid states
+        int n_valid = 0;
+        for (size_t idx = 0; idx < significant_states.size(); idx++) {
+            if (state_valid[idx]) n_valid++;
+        }
+        std::cout << "  Precomputed spectral functions for " << n_valid << " Ritz states\n";
+        
+        // Step 3: For each temperature, apply thermal weights to precomputed spectra
         for (double T : temperatures) {
             double beta = 1.0 / T;
             
-            // Compute thermal weights and partition function contribution
-            std::vector<double> thermal_weights(m_H);
+            // Compute partition function contribution for this sample
             double Z_sample = 0.0;
-            for (int i = 0; i < m_H; i++) {
-                double boltzmann = std::exp(-beta * (ritz_values[i] - E_min));
-                thermal_weights[i] = c_sq[i] * boltzmann;
-                Z_sample += thermal_weights[i];
+            for (size_t idx = 0; idx < significant_states.size(); idx++) {
+                if (!state_valid[idx]) continue;
+                double boltzmann = std::exp(-beta * (precomputed_energies[idx] - E_min));
+                Z_sample += precomputed_c_sq[idx] * boltzmann;
             }
             
             accumulated_Z[T] += Z_sample;
             
-            // For this sample, compute weighted spectral function
+            // Accumulate weighted spectral contributions
             std::vector<double> sample_spectral(num_omega_bins, 0.0);
             
-            // Select significant Ritz states
-            double weight_threshold = 1e-8 * Z_sample;
-            int n_significant = 0;
-            
-            for (int i = 0; i < std::min(m_H, max_ritz_states); i++) {
-                if (thermal_weights[i] < weight_threshold) continue;
-                n_significant++;
+            for (size_t idx = 0; idx < significant_states.size(); idx++) {
+                if (!state_valid[idx]) continue;
                 
-                // OPTIMIZED: Construct eigenstate using batched operation
-                // |ψ_i⟩ = Σ_j V[i,j] |v_j⟩
-                reconstructEigenstateFromBasis(&evecs[i * m_H], m_H, d_lanczos_basis_H, d_psi_i);
+                double boltzmann = std::exp(-beta * (precomputed_energies[idx] - E_min));
+                double thermal_weight = precomputed_c_sq[idx] * boltzmann;
                 
-                // Normalize (should already be normalized, but ensure)
-                double psi_norm = vectorNorm(d_psi_i);
-                if (psi_norm < 1e-14) continue;
-                vectorScale(d_psi_i, 1.0 / psi_norm);
+                // Skip if negligible for this temperature
+                if (thermal_weight < 1e-14 * Z_sample) continue;
                 
-                // Apply operator O2 to |ψ_i⟩: |φ_i⟩ = O₂|ψ_i⟩
-                if (op_O2 != nullptr) {
-                    op_O2->matVecGPU(d_psi_i, d_phi_i, N_);
-                } else {
-                    vectorCopy(d_psi_i, d_phi_i);
-                }
-                
-                double phi_norm = vectorNorm(d_phi_i);
-                double phi_norm_sq = phi_norm * phi_norm;
-                
-                if (phi_norm < 1e-14) continue;
-                
-                // Normalize for Lanczos
-                vectorScale(d_phi_i, 1.0 / phi_norm);
-                
-                // Build Lanczos from |φ_i⟩ for spectral function via continued fraction
-                std::vector<double> alpha_S, beta_S;
-                buildLanczosTridiagonalFromVector(d_phi_i, false, 10, alpha_S, beta_S);
-                
-                if (alpha_S.empty()) continue;
-                
-                // Shift energies by E_gs (ground state energy)
-                for (size_t k = 0; k < alpha_S.size(); k++) {
-                    alpha_S[k] -= E_gs;
-                }
-                
-                // Compute spectral function via continued fraction
-                std::vector<double> S_i = gpu_continued_fraction_spectral(
-                    alpha_S, beta_S, frequencies, broadening, phi_norm_sq
-                );
-                
-                // Add contribution weighted by thermal factor
+                // Add contribution
+                const std::vector<double>& S_i = precomputed_S_i[idx];
                 for (int iw = 0; iw < num_omega_bins; iw++) {
-                    sample_spectral[iw] += thermal_weights[i] * S_i[iw];
-                    accumulated_spectral[T][iw] += thermal_weights[i] * S_i[iw];
+                    double contrib = thermal_weight * S_i[iw];
+                    sample_spectral[iw] += contrib;
+                    accumulated_spectral[T][iw] += contrib;
                 }
             }
             
@@ -2808,11 +2863,9 @@ GPUFTLMSolver::computeDynamicalCorrelationMultiTemp(
                 }
                 per_sample_spectral[T].push_back(normalized_sample);
             }
-            
-            if (T == temperatures[0]) {
-                std::cout << "  Processed " << n_significant << " significant Ritz states\n";
-            }
         }
+        
+        std::cout << "  Applied thermal weights for " << temperatures.size() << " temperatures\n";
         
         // Free Lanczos basis for this sample
         for (int i = 0; i < m_H; i++) {

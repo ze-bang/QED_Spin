@@ -10,6 +10,7 @@
 #include <complex>
 #include <string>
 #include <functional>
+#include "ed/core/hdf5_io.h"
 
 // Forward declarations
 class GPUOperator;
@@ -128,24 +129,31 @@ private:
     void writeTPQDataHDF5(const std::string& h5_file, size_t sample,
                           double inv_temp, double energy, double variance, 
                           double doublon, uint64_t step);
-    bool saveTPQState(const std::string& filename);
-    bool saveTPQState(const std::string& filename, class GPUFixedSzOperator* fixed_sz_op);
     bool saveTPQStateHDF5(const std::string& dir, size_t sample, double beta, class GPUFixedSzOperator* fixed_sz_op);
-    bool loadTPQState(const std::string& filename);
-    bool loadTPQState(const std::string& filename, class GPUFixedSzOperator* fixed_sz_op);
+    bool loadTPQStateFromHDF5(const std::string& h5_file, 
+                               const std::string& dataset_name,
+                               class GPUFixedSzOperator* fixed_sz_op);
     
     /**
-     * @brief Find the TPQ state file with the highest beta (lowest energy)
+     * @brief Find the TPQ state with highest beta (lowest energy) in HDF5
      * 
-     * Scans the output directory for saved TPQ state files matching the pattern
-     * tpq_state_{sample}_beta={beta}.dat and returns the file with the highest beta.
-     * Also looks up the corresponding step number from the SS_rand{sample}.dat file.
+     * Searches the HDF5 file for all stored TPQ states and returns info about
+     * the state with the highest beta value.
+     * 
+     * @param dir Output directory containing ed_results.h5
+     * @param sample_filter Sample index to filter (or -1 for all samples)
+     * @return TPQStateInfo struct with sample, beta, and dataset name
+     */
+    HDF5IO::TPQStateInfo findLowestEnergyTPQStateHDF5(const std::string& dir, int sample_filter);
+    
+    /**
+     * @brief Legacy function for backward compatibility - now uses HDF5
      * 
      * @param dir Output directory to search
      * @param sample Sample index (or 0 for auto-detect)
      * @param beta_out Output parameter for the beta value found
      * @param step_out Output parameter for the step number found
-     * @return Path to the state file, or empty string if none found
+     * @return Path to HDF5 file, or empty string if none found
      */
     std::string findLowestEnergyTPQState(const std::string& dir, int sample, 
                                         double& beta_out, int& step_out);

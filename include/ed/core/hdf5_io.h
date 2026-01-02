@@ -2638,19 +2638,49 @@ public:
             
             for (hsize_t i = 0; i < num_samples; ++i) {
                 std::string sample_name = src_samples.getObjnameByIdx(i);
-                std::string src_path = "/tpq/samples/" + sample_name;
-                std::string dst_path = "/tpq/samples/" + sample_name;
+                std::string src_sample_path = "/tpq/samples/" + sample_name;
+                std::string dst_sample_path = "/tpq/samples/" + sample_name;
                 
-                // Skip if already exists in destination
-                if (dest.nameExists(dst_path)) {
-                    continue;
-                }
-                
-                // Copy the entire sample group using H5Ocopy
-                if (H5Ocopy(source.getId(), src_path.c_str(), 
-                           dest.getId(), dst_path.c_str(),
-                           H5P_DEFAULT, H5P_DEFAULT) >= 0) {
-                    samples_copied++;
+                // If sample doesn't exist in destination, copy the entire group
+                if (!dest.nameExists(dst_sample_path)) {
+                    if (H5Ocopy(source.getId(), src_sample_path.c_str(), 
+                               dest.getId(), dst_sample_path.c_str(),
+                               H5P_DEFAULT, H5P_DEFAULT) >= 0) {
+                        samples_copied++;
+                    }
+                } else {
+                    // Sample exists - merge individual states from the source
+                    std::string src_states_path = src_sample_path + "/states";
+                    std::string dst_states_path = dst_sample_path + "/states";
+                    
+                    if (source.nameExists(src_states_path)) {
+                        // Ensure destination states group exists
+                        if (!dest.nameExists(dst_states_path)) {
+                            dest.createGroup(dst_states_path);
+                        }
+                        
+                        H5::Group src_states = source.openGroup(src_states_path);
+                        hsize_t num_states = src_states.getNumObjs();
+                        bool any_copied = false;
+                        
+                        for (hsize_t j = 0; j < num_states; ++j) {
+                            std::string state_name = src_states.getObjnameByIdx(j);
+                            std::string src_state_path = src_states_path + "/" + state_name;
+                            std::string dst_state_path = dst_states_path + "/" + state_name;
+                            
+                            // Only copy if this specific state doesn't exist
+                            if (!dest.nameExists(dst_state_path)) {
+                                if (H5Ocopy(source.getId(), src_state_path.c_str(),
+                                           dest.getId(), dst_state_path.c_str(),
+                                           H5P_DEFAULT, H5P_DEFAULT) >= 0) {
+                                    any_copied = true;
+                                }
+                            }
+                        }
+                        
+                        src_states.close();
+                        if (any_copied) samples_copied++;
+                    }
                 }
             }
             
