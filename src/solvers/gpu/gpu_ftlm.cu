@@ -1651,8 +1651,10 @@ GPUFTLMSolver::computeDynamicalCorrelation(
     // Allocate temporary device vectors for operator applications
     cuDoubleComplex* d_phi = nullptr;
     cuDoubleComplex* d_O1_psi = nullptr;
+    cuDoubleComplex* d_psi_copy = nullptr;  // Save random state for O1 application
     CUDA_CHECK(cudaMalloc(&d_phi, N_ * sizeof(cuDoubleComplex)));
     CUDA_CHECK(cudaMalloc(&d_O1_psi, N_ * sizeof(cuDoubleComplex)));
+    CUDA_CHECK(cudaMalloc(&d_psi_copy, N_ * sizeof(cuDoubleComplex)));
     
     // Loop over random samples
     for (int sample = 0; sample < num_samples; sample++) {
@@ -1662,6 +1664,9 @@ GPUFTLMSolver::computeDynamicalCorrelation(
         
         // Generate random initial state |ψ⟩
         initializeRandomVector(d_v_current_, sample_seed);
+        
+        // Save the random state before Lanczos (d_v_current_ will be overwritten)
+        vectorCopy(d_v_current_, d_psi_copy);
         
         // Apply operator O2: |φ⟩ = O₂|ψ⟩
         if (op_O2 != nullptr) {
@@ -1748,10 +1753,11 @@ GPUFTLMSolver::computeDynamicalCorrelation(
         
         // Compute complex weights ⟨ψ|O₁†|n⟩⟨n|O₂|ψ⟩
         // Apply O1 to original state: |O₁ψ⟩
+        // NOTE: Use d_psi_copy, NOT d_v_current_ which was modified by Lanczos!
         if (op_O1 != nullptr) {
-            op_O1->matVecGPU(d_v_current_, d_O1_psi, N_);
+            op_O1->matVecGPU(d_psi_copy, d_O1_psi, N_);
         } else {
-            vectorCopy(d_v_current_, d_O1_psi);
+            vectorCopy(d_psi_copy, d_O1_psi);
         }
         
         // OPTIMIZED: Compute all overlaps ⟨O₁ψ|vⱼ⟩ on GPU (avoiding O(m²) host transfers)
@@ -1859,6 +1865,11 @@ GPUFTLMSolver::computeDynamicalCorrelation(
     std::cout << "\n==========================================\n";
     std::cout << "GPU Dynamical Correlation Complete\n";
     std::cout << "==========================================\n";
+    
+    // Free temporary device memory
+    cudaFree(d_phi);
+    cudaFree(d_O1_psi);
+    cudaFree(d_psi_copy);
     
     return std::make_tuple(frequencies, avg_spec_real, avg_spec_imag, error_real, error_imag);
 }
@@ -2369,11 +2380,16 @@ GPUFTLMSolver::computeDynamicalCorrelationState(
         normalizeVector(d_v_current_);
     }
     
-    // Allocate temporary device vector
+    // Allocate temporary device vectors
     cuDoubleComplex* d_phi = nullptr;
     cuDoubleComplex* d_O1_psi = nullptr;
+    cuDoubleComplex* d_psi_copy = nullptr;  // Save original state for O1 application
     CUDA_CHECK(cudaMalloc(&d_phi, N_ * sizeof(cuDoubleComplex)));
     CUDA_CHECK(cudaMalloc(&d_O1_psi, N_ * sizeof(cuDoubleComplex)));
+    CUDA_CHECK(cudaMalloc(&d_psi_copy, N_ * sizeof(cuDoubleComplex)));
+    
+    // Save the normalized state before Lanczos (d_v_current_ will be overwritten)
+    vectorCopy(d_v_current_, d_psi_copy);
     
     // Apply operator O2: |φ⟩ = O₂|ψ⟩
     if (op_O2 != nullptr) {
@@ -2388,6 +2404,7 @@ GPUFTLMSolver::computeDynamicalCorrelationState(
         std::cerr << "  Error: O₂|ψ⟩ has zero norm\n";
         cudaFree(d_phi);
         cudaFree(d_O1_psi);
+        cudaFree(d_psi_copy);
         
         std::vector<double> zero_spec_real(num_omega_bins, 0.0);
         std::vector<double> zero_spec_imag(num_omega_bins, 0.0);
@@ -2436,6 +2453,7 @@ GPUFTLMSolver::computeDynamicalCorrelationState(
         delete[] d_lanczos_basis;
         cudaFree(d_phi);
         cudaFree(d_O1_psi);
+        cudaFree(d_psi_copy);
         
         std::vector<double> zero_spec_real(num_omega_bins, 0.0);
         std::vector<double> zero_spec_imag(num_omega_bins, 0.0);
@@ -2465,10 +2483,11 @@ GPUFTLMSolver::computeDynamicalCorrelationState(
     // Compute complex weights ⟨ψ|O₁†|n⟩⟨n|O₂|ψ⟩
     
     // Apply O1 to original state: |O₁ψ⟩
+    // NOTE: Use d_psi_copy, NOT d_v_current_ which was modified by Lanczos!
     if (op_O1 != nullptr) {
-        op_O1->matVecGPU(d_v_current_, d_O1_psi, N_);
+        op_O1->matVecGPU(d_psi_copy, d_O1_psi, N_);
     } else {
-        vectorCopy(d_v_current_, d_O1_psi);
+        vectorCopy(d_psi_copy, d_O1_psi);
     }
     
     // OPTIMIZED: Compute all overlaps ⟨O₁ψ|vⱼ⟩ on GPU (avoiding O(m²) host transfers)
@@ -2502,6 +2521,7 @@ GPUFTLMSolver::computeDynamicalCorrelationState(
     // Free temporary memory
     cudaFree(d_phi);
     cudaFree(d_O1_psi);
+    cudaFree(d_psi_copy);
     
     // Compute spectral function (both real and imaginary parts)
     std::vector<double> spectral_func_real, spectral_func_imag;
@@ -2633,7 +2653,7 @@ GPUFTLMSolver::computeDynamicalCorrelationMultiTemp(
         
         std::vector<double> alpha_test, beta_test;
         int test_iters = std::min(krylov_dim_, 100);
-        buildLanczosTridiagonalFromVector(d_v_current_, false, 10, alpha_test, beta_test);
+        buildLanczosTridiagonalFromVector(d_v_current_, false, test_iters, alpha_test, beta_test);
         
         std::vector<double> ritz_vals, weights;
         diagonalizeTridiagonal(alpha_test, beta_test, ritz_vals, weights);
@@ -2680,7 +2700,7 @@ GPUFTLMSolver::computeDynamicalCorrelationMultiTemp(
         cuDoubleComplex** d_lanczos_basis_H = nullptr;
         
         int H_iterations = buildLanczosTridiagonalWithBasis(
-            d_v_current_, false, 10, alpha_H, beta_H, &d_lanczos_basis_H
+            d_v_current_, false, krylov_dim_, alpha_H, beta_H, &d_lanczos_basis_H
         );
         
         int m_H = alpha_H.size();
@@ -2728,11 +2748,14 @@ GPUFTLMSolver::computeDynamicalCorrelationMultiTemp(
         double E_min = *std::min_element(ritz_values.begin(), ritz_values.end());
         
         // ============================================================
-        // OPTIMIZATION: Match CPU approach - precompute S_i(ω) ONCE
-        // for all significant states, then apply thermal weights
+        // OPTIMIZATION: Precompute spectral functions for Ritz states
+        // The Lanczos expansion and continued fraction are temperature-
+        // independent, so we compute S_i(ω) once and reuse across all T
+        // (Matching CPU implementation for efficiency)
         // ============================================================
         
-        // Step 2a: Determine significant states using highest T (most inclusive)
+        // Step 2a: Determine which Ritz states are significant for ANY temperature
+        // Use the highest temperature (smallest beta) for most inclusive threshold
         double T_max_local = *std::max_element(temperatures.begin(), temperatures.end());
         double beta_min = 1.0 / T_max_local;
         
@@ -2746,7 +2769,7 @@ GPUFTLMSolver::computeDynamicalCorrelationMultiTemp(
         }
         
         // Identify significant Ritz states (union across all temperatures)
-        double weight_threshold = 1e-10 * Z_max;  // Match CPU: looser threshold
+        double weight_threshold = 1e-10 * Z_max;  // Use looser threshold to catch all
         std::vector<int> significant_states;
         significant_states.reserve(max_ritz_states);
         
@@ -2764,10 +2787,11 @@ GPUFTLMSolver::computeDynamicalCorrelationMultiTemp(
         std::vector<double> precomputed_c_sq(significant_states.size());
         std::vector<bool> state_valid(significant_states.size(), false);
         
+        int n_valid = 0;
         for (size_t idx = 0; idx < significant_states.size(); idx++) {
             int i = significant_states[idx];
             
-            // Construct eigenstate |ψ_i⟩ = Σ_j V[i,j] |v_j⟩
+            // Construct approximate eigenstate |ψ_i⟩ = Σ_j V[i,j] |v_j⟩
             reconstructEigenstateFromBasis(&evecs[i * m_H], m_H, d_lanczos_basis_H, d_psi_i);
             
             // Normalize
@@ -2790,9 +2814,9 @@ GPUFTLMSolver::computeDynamicalCorrelationMultiTemp(
             // Normalize for Lanczos
             vectorScale(d_phi_i, 1.0 / phi_norm);
             
-            // Build Lanczos from |φ_i⟩
+            // Build Lanczos from |φ_i⟩ for spectral function via continued fraction
             std::vector<double> alpha_S, beta_S;
-            buildLanczosTridiagonalFromVector(d_phi_i, false, 10, alpha_S, beta_S);
+            buildLanczosTridiagonalFromVector(d_phi_i, false, krylov_dim_, alpha_S, beta_S);
             
             if (alpha_S.empty()) continue;
             
@@ -2801,57 +2825,45 @@ GPUFTLMSolver::computeDynamicalCorrelationMultiTemp(
                 alpha_S[k] -= E_gs;
             }
             
-            // Compute spectral function via continued fraction (ONCE per state)
-            std::vector<double> S_i = gpu_continued_fraction_spectral(
+            // Compute spectral function via continued fraction (temperature-independent)
+            precomputed_S_i[idx] = gpu_continued_fraction_spectral(
                 alpha_S, beta_S, frequencies, broadening, phi_norm_sq
             );
-            
-            // Store precomputed results
-            precomputed_S_i[idx] = std::move(S_i);
             precomputed_energies[idx] = ritz_values[i];
             precomputed_c_sq[idx] = c_sq[i];
             state_valid[idx] = true;
+            n_valid++;
         }
         
-        // Count valid states
-        int n_valid = 0;
-        for (size_t idx = 0; idx < significant_states.size(); idx++) {
-            if (state_valid[idx]) n_valid++;
-        }
         std::cout << "  Precomputed spectral functions for " << n_valid << " Ritz states\n";
         
-        // Step 3: For each temperature, apply thermal weights to precomputed spectra
+        // Step 3: Apply thermal weights for each temperature
         for (double T : temperatures) {
             double beta = 1.0 / T;
             
-            // Compute partition function contribution for this sample
+            // Compute thermal weights and partition function contribution
             double Z_sample = 0.0;
-            for (size_t idx = 0; idx < significant_states.size(); idx++) {
-                if (!state_valid[idx]) continue;
-                double boltzmann = std::exp(-beta * (precomputed_energies[idx] - E_min));
-                Z_sample += precomputed_c_sq[idx] * boltzmann;
+            for (int i = 0; i < m_H; i++) {
+                double boltzmann = std::exp(-beta * (ritz_values[i] - E_min));
+                Z_sample += c_sq[i] * boltzmann;
             }
             
             accumulated_Z[T] += Z_sample;
             
-            // Accumulate weighted spectral contributions
+            // For this sample, compute weighted spectral function
             std::vector<double> sample_spectral(num_omega_bins, 0.0);
             
             for (size_t idx = 0; idx < significant_states.size(); idx++) {
                 if (!state_valid[idx]) continue;
                 
+                // Compute thermal weight for this state
                 double boltzmann = std::exp(-beta * (precomputed_energies[idx] - E_min));
                 double thermal_weight = precomputed_c_sq[idx] * boltzmann;
                 
-                // Skip if negligible for this temperature
-                if (thermal_weight < 1e-14 * Z_sample) continue;
-                
-                // Add contribution
-                const std::vector<double>& S_i = precomputed_S_i[idx];
+                // Add contribution weighted by thermal factor
                 for (int iw = 0; iw < num_omega_bins; iw++) {
-                    double contrib = thermal_weight * S_i[iw];
-                    sample_spectral[iw] += contrib;
-                    accumulated_spectral[T][iw] += contrib;
+                    sample_spectral[iw] += thermal_weight * precomputed_S_i[idx][iw];
+                    accumulated_spectral[T][iw] += thermal_weight * precomputed_S_i[idx][iw];
                 }
             }
             
