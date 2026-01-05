@@ -183,6 +183,14 @@ ThermodynamicData compute_ftlm_thermodynamics(
 
 /**
  * @brief Average thermodynamic data across multiple samples with error estimation
+ * 
+ * NOTE: Energy and specific heat can be directly averaged since they are expectation values.
+ * However, entropy and free energy CANNOT be directly averaged because they involve ln(Z),
+ * and the samples have different reference energies e_min.
+ * 
+ * The fix: After averaging energy and specific heat, recompute entropy by integrating
+ * the specific heat: S(T) = ∫₀^T (C_v/T') dT'
+ * Then compute free energy as F = E - TS
  */
 void average_ftlm_samples(
     const std::vector<ThermodynamicData>& sample_data,
@@ -204,36 +212,64 @@ void average_ftlm_samples(
     results.entropy_error.resize(n_temps, 0.0);
     results.free_energy_error.resize(n_temps, 0.0);
     
-    // First pass: compute means
+    // First pass: compute means for energy and specific heat only
+    // (entropy and free_energy will be recomputed)
     for (int s = 0; s < n_samples; s++) {
         for (int t = 0; t < n_temps; t++) {
             results.thermo_data.energy[t] += sample_data[s].energy[t];
             results.thermo_data.specific_heat[t] += sample_data[s].specific_heat[t];
-            results.thermo_data.entropy[t] += sample_data[s].entropy[t];
-            results.thermo_data.free_energy[t] += sample_data[s].free_energy[t];
         }
     }
     
     for (int t = 0; t < n_temps; t++) {
         results.thermo_data.energy[t] /= n_samples;
         results.thermo_data.specific_heat[t] /= n_samples;
-        results.thermo_data.entropy[t] /= n_samples;
-        results.thermo_data.free_energy[t] /= n_samples;
     }
     
-    // Second pass: compute standard errors
+    // Recompute entropy by integrating specific heat
+    // S(T) = ∫₀^T (C_v/T') dT'
+    // Using trapezoidal rule on the logarithmically-spaced temperature grid
+    // Since T is log-spaced, the integral becomes: S = ∫ (C_v/T) dT = ∫ C_v d(ln T)
+    const auto& temps = results.thermo_data.temperatures;
+    const auto& Cv = results.thermo_data.specific_heat;
+    auto& S = results.thermo_data.entropy;
+    auto& F = results.thermo_data.free_energy;
+    auto& E = results.thermo_data.energy;
+    
+    // S(T=0) = 0 (assuming non-degenerate ground state)
+    S[0] = 0.0;
+    
+    // Integrate using trapezoidal rule: S(T_i) = S(T_{i-1}) + ∫_{T_{i-1}}^{T_i} (C_v/T) dT
+    for (int t = 1; t < n_temps; t++) {
+        double T_prev = temps[t-1];
+        double T_curr = temps[t];
+        
+        // For logarithmically spaced temperatures:
+        // ∫_{T1}^{T2} (C_v/T) dT ≈ (C_v(T1)/T1 + C_v(T2)/T2) / 2 * (T2 - T1)
+        // Or equivalently using log spacing:
+        // ∫ C_v d(ln T) ≈ (C_v1 + C_v2) / 2 * (ln T2 - ln T1)
+        double log_T_diff = std::log(T_curr) - std::log(T_prev);
+        double Cv_avg = (Cv[t-1] + Cv[t]) / 2.0;
+        
+        S[t] = S[t-1] + Cv_avg * log_T_diff;
+    }
+    
+    // Compute free energy from F = E - TS
+    for (int t = 0; t < n_temps; t++) {
+        double T = temps[t];
+        F[t] = E[t] - T * S[t];
+    }
+    
+    // Second pass: compute standard errors for energy and specific_heat only
+    // (entropy and free_energy errors are derived quantities)
     if (n_samples > 1) {
         for (int s = 0; s < n_samples; s++) {
             for (int t = 0; t < n_temps; t++) {
                 double diff_e = sample_data[s].energy[t] - results.thermo_data.energy[t];
                 double diff_c = sample_data[s].specific_heat[t] - results.thermo_data.specific_heat[t];
-                double diff_s = sample_data[s].entropy[t] - results.thermo_data.entropy[t];
-                double diff_f = sample_data[s].free_energy[t] - results.thermo_data.free_energy[t];
                 
                 results.energy_error[t] += diff_e * diff_e;
                 results.specific_heat_error[t] += diff_c * diff_c;
-                results.entropy_error[t] += diff_s * diff_s;
-                results.free_energy_error[t] += diff_f * diff_f;
             }
         }
         
@@ -242,8 +278,10 @@ void average_ftlm_samples(
         for (int t = 0; t < n_temps; t++) {
             results.energy_error[t] = std::sqrt(results.energy_error[t]) / norm;
             results.specific_heat_error[t] = std::sqrt(results.specific_heat_error[t]) / norm;
-            results.entropy_error[t] = std::sqrt(results.entropy_error[t]) / norm;
-            results.free_energy_error[t] = std::sqrt(results.free_energy_error[t]) / norm;
+            // Note: entropy and free_energy errors are set to 0 since they're derived from integrated quantities
+            // A proper error propagation would require more sophisticated treatment
+            results.entropy_error[t] = 0.0;
+            results.free_energy_error[t] = 0.0;
         }
     }
 }
