@@ -325,6 +325,77 @@ bool mergePerRankDSSFFiles(const std::string& output_dir, int num_ranks) {
                                dest.getId(), dst_path.c_str(),
                                H5P_DEFAULT, H5P_DEFAULT);
                         total_groups_merged++;
+                    } else {
+                        // Merge into existing operator group by copying sample subgroups
+                        H5::Group src_op = source.openGroup(src_path);
+                        hsize_t num_sample_groups = src_op.getNumObjs();
+                        for (hsize_t j = 0; j < num_sample_groups; ++j) {
+                            std::string sample_name = src_op.getObjnameByIdx(j);
+                            std::string src_sample_path = src_path + "/" + sample_name;
+                            std::string dst_sample_path = dst_path + "/" + sample_name;
+                            
+                            if (!dest.nameExists(dst_sample_path)) {
+                                // Sample doesn't exist, copy the whole sample group
+                                H5Ocopy(source.getId(), src_sample_path.c_str(),
+                                       dest.getId(), dst_sample_path.c_str(),
+                                       H5P_DEFAULT, H5P_DEFAULT);
+                                total_groups_merged++;
+                            } else {
+                                // Sample exists, need to merge datasets (append temperature data)
+                                // For SSSF, each sample contains: temperatures, expectation, variance, etc.
+                                // We need to concatenate the arrays from source into destination
+                                H5::Group src_sample = source.openGroup(src_sample_path);
+                                H5::Group dst_sample = dest.openGroup(dst_sample_path);
+                                
+                                // Get list of datasets to merge
+                                std::vector<std::string> datasets_to_merge = {
+                                    "temperatures", "expectation", "expectation_error",
+                                    "variance", "variance_error", "susceptibility", "susceptibility_error"
+                                };
+                                
+                                for (const auto& ds_name : datasets_to_merge) {
+                                    if (src_sample.nameExists(ds_name) && dst_sample.nameExists(ds_name)) {
+                                        // Read source data
+                                        H5::DataSet src_ds = src_sample.openDataSet(ds_name);
+                                        H5::DataSpace src_space = src_ds.getSpace();
+                                        hsize_t src_size;
+                                        src_space.getSimpleExtentDims(&src_size);
+                                        std::vector<double> src_data(src_size);
+                                        src_ds.read(src_data.data(), H5::PredType::NATIVE_DOUBLE);
+                                        src_ds.close();
+                                        
+                                        // Read destination data
+                                        H5::DataSet dst_ds = dst_sample.openDataSet(ds_name);
+                                        H5::DataSpace dst_space = dst_ds.getSpace();
+                                        hsize_t dst_size;
+                                        dst_space.getSimpleExtentDims(&dst_size);
+                                        std::vector<double> dst_data(dst_size);
+                                        dst_ds.read(dst_data.data(), H5::PredType::NATIVE_DOUBLE);
+                                        dst_ds.close();
+                                        
+                                        // Combine data
+                                        std::vector<double> combined_data;
+                                        combined_data.reserve(dst_size + src_size);
+                                        combined_data.insert(combined_data.end(), dst_data.begin(), dst_data.end());
+                                        combined_data.insert(combined_data.end(), src_data.begin(), src_data.end());
+                                        
+                                        // Delete old dataset and create new one with combined data
+                                        dst_sample.unlink(ds_name);
+                                        hsize_t combined_size = combined_data.size();
+                                        H5::DataSpace combined_space(1, &combined_size);
+                                        H5::DataSet new_ds = dst_sample.createDataSet(
+                                            ds_name, H5::PredType::NATIVE_DOUBLE, combined_space);
+                                        new_ds.write(combined_data.data(), H5::PredType::NATIVE_DOUBLE);
+                                        new_ds.close();
+                                    }
+                                }
+                                
+                                dst_sample.close();
+                                src_sample.close();
+                                total_groups_merged++;
+                            }
+                        }
+                        src_op.close();
                     }
                 }
                 src_static.close();
