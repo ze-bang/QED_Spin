@@ -15,6 +15,7 @@
 #include <mutex>   // for thread-safe HDF5 access
 #include <thread>  // for sleep_for in HDF5 retry
 #include <chrono>  // for milliseconds
+#include <map>     // for batch SSSF results
 #include <ed/core/construct_ham.h>
 #include <ed/core/hdf5_io.h>
 #include <ed/solvers/TPQ.h>
@@ -2985,6 +2986,11 @@ int main(int argc, char* argv[]) {
                     // SSSF: Static structure factor on pre-computed TPQ states
                     // Computes ⟨ψ|O₁†O₂|ψ⟩ for each loaded TPQ state
                     // ============================================================
+                    // OPTIMIZATIONS APPLIED:
+                    // 1. GPU acceleration (if --gpu flag and WITH_CUDA)
+                    // 2. O₁=O₂ detection: only apply operator once when identical
+                    // 3. OpenMP parallelization of inner product
+                    // ============================================================
                     
                     if (rank == 0) {
                         std::cout << "\n============================================" << std::endl;
@@ -2993,44 +2999,133 @@ int main(int argc, char* argv[]) {
                         std::cout << "  Beta: " << beta << std::endl;
                         std::cout << "  Sample index: " << sample_index << std::endl;
                         std::cout << "  Momentum: (" << Q[0] << ", " << Q[1] << ", " << Q[2] << ")" << std::endl;
+                        std::cout << "  GPU acceleration: " << (use_gpu ? "enabled" : "disabled") << std::endl;
                     }
                     
                     // Process each operator pair
                     for (size_t i = 0; i < obs_1.size(); i++) {
                         std::cout << "  Processing operator " << obs_names[i] << std::endl;
                         
-                        // Compute ⟨ψ|O₁†O₂|ψ⟩:
-                        // 1. |χ⟩ = O₂|ψ⟩
-                        // 2. |φ⟩ = O₁|ψ⟩
-                        // 3. Result = ⟨φ|χ⟩ = ⟨ψ|O₁†O₂|ψ⟩
-                        
-                        ComplexVector chi(N, Complex(0.0, 0.0));  // O₂|ψ⟩
-                        ComplexVector phi(N, Complex(0.0, 0.0));  // O₁|ψ⟩
-                        
-                        // Apply operators
-                        obs_2[i].apply(tpq_state.data(), chi.data(), N);
-                        obs_1[i].apply(tpq_state.data(), phi.data(), N);
-                        
-                        // Compute inner product ⟨φ|χ⟩ = Σ_j conj(φ_j) * χ_j
                         Complex expectation_value(0.0, 0.0);
-                        for (int j = 0; j < N; j++) {
-                            expectation_value += std::conj(phi[j]) * chi[j];
+                        
+                        // OPTIMIZATION: Check if O₁ and O₂ are the same operator
+                        // For sum operators with same spin_combination (e.g., "0,0" = SmSp),
+                        // obs_1[i] and obs_2[i] are constructed identically
+                        bool operators_identical = (op_type_1 == op_type_2);
+                        
+#ifdef WITH_CUDA
+                        if (use_gpu) {
+                            // GPU-accelerated SSSF computation
+                            // Convert operators to GPU
+                            GPUOperator gpu_obs1(num_sites, spin_length);
+                            GPUOperator gpu_obs2(num_sites, spin_length);
+                            
+                            bool gpu_ok = convertOperatorToGPU(obs_1[i], gpu_obs1);
+                            if (!operators_identical && gpu_ok) {
+                                gpu_ok = gpu_ok && convertOperatorToGPU(obs_2[i], gpu_obs2);
+                            }
+                            
+                            if (gpu_ok) {
+                                // Allocate device memory
+                                cuDoubleComplex* d_psi;
+                                cuDoubleComplex* d_chi;
+                                cuDoubleComplex* d_phi;
+                                cudaMalloc(&d_psi, N * sizeof(cuDoubleComplex));
+                                cudaMalloc(&d_chi, N * sizeof(cuDoubleComplex));
+                                if (!operators_identical) {
+                                    cudaMalloc(&d_phi, N * sizeof(cuDoubleComplex));
+                                }
+                                
+                                // Copy state to GPU
+                                cudaMemcpy(d_psi, tpq_state.data(), N * sizeof(cuDoubleComplex), cudaMemcpyHostToDevice);
+                                cudaMemset(d_chi, 0, N * sizeof(cuDoubleComplex));
+                                
+                                // Apply O₂ on GPU: chi = O₂|ψ⟩
+                                if (operators_identical) {
+                                    gpu_obs1.matVecGPU(d_psi, d_chi, N);
+                                } else {
+                                    gpu_obs2.matVecGPU(d_psi, d_chi, N);
+                                    cudaMemset(d_phi, 0, N * sizeof(cuDoubleComplex));
+                                    gpu_obs1.matVecGPU(d_psi, d_phi, N);
+                                }
+                                
+                                // Compute inner product using cuBLAS
+                                cublasHandle_t cublas_handle;
+                                cublasCreate(&cublas_handle);
+                                
+                                cuDoubleComplex result;
+                                if (operators_identical) {
+                                    // ⟨chi|chi⟩ = ||O|ψ⟩||²
+                                    cublasZdotc(cublas_handle, N, d_chi, 1, d_chi, 1, &result);
+                                } else {
+                                    // ⟨phi|chi⟩
+                                    cublasZdotc(cublas_handle, N, d_phi, 1, d_chi, 1, &result);
+                                }
+                                
+                                expectation_value = Complex(cuCreal(result), cuCimag(result));
+                                
+                                // Cleanup
+                                cublasDestroy(cublas_handle);
+                                cudaFree(d_psi);
+                                cudaFree(d_chi);
+                                if (!operators_identical) {
+                                    cudaFree(d_phi);
+                                }
+                            } else {
+                                std::cerr << "  GPU operator conversion failed, falling back to CPU" << std::endl;
+                                use_gpu = false;
+                            }
+                        }
+#endif
+                        
+                        if (!use_gpu) {
+                            // CPU computation with optimizations
+                            if (operators_identical) {
+                                // OPTIMIZATION: O₁ = O₂, only need to apply once
+                                // ⟨ψ|O†O|ψ⟩ = ||O|ψ⟩||²
+                                ComplexVector chi(N, Complex(0.0, 0.0));
+                                obs_1[i].apply(tpq_state.data(), chi.data(), N);
+                                
+                                // Compute ||chi||² with OpenMP
+                                double norm_sq = 0.0;
+                                #pragma omp parallel for reduction(+:norm_sq) if(N > 10000)
+                                for (int j = 0; j < N; j++) {
+                                    norm_sq += std::norm(chi[j]);
+                                }
+                                expectation_value = Complex(norm_sq, 0.0);
+                            } else {
+                                // O₁ ≠ O₂, need both applications
+                                ComplexVector chi(N, Complex(0.0, 0.0));  // O₂|ψ⟩
+                                ComplexVector phi(N, Complex(0.0, 0.0));  // O₁|ψ⟩
+                                
+                                // Apply operators
+                                obs_2[i].apply(tpq_state.data(), chi.data(), N);
+                                obs_1[i].apply(tpq_state.data(), phi.data(), N);
+                                
+                                // Compute inner product ⟨φ|χ⟩ with OpenMP
+                                double real_sum = 0.0, imag_sum = 0.0;
+                                #pragma omp parallel for reduction(+:real_sum,imag_sum) if(N > 10000)
+                                for (int j = 0; j < N; j++) {
+                                    Complex prod = std::conj(phi[j]) * chi[j];
+                                    real_sum += prod.real();
+                                    imag_sum += prod.imag();
+                                }
+                                expectation_value = Complex(real_sum, imag_sum);
+                            }
                         }
                         
                         // Temperature from beta (for output)
                         double temperature = (beta > 0) ? 1.0 / beta : std::numeric_limits<double>::infinity();
                         
-                        // Save to HDF5 as static structure factor
-                        // Use single-element vectors for compatibility with saveDSSFStaticToHDF5
+                        // Save to HDF5 (appending to existing data)
                         std::vector<double> temperatures_vec = {temperature};
                         std::vector<double> expectation_vec = {expectation_value.real()};
-                        std::vector<double> expectation_error_vec = {0.0};  // No error for single state
-                        std::vector<double> variance_vec = {0.0};  // Not computed for single state
+                        std::vector<double> expectation_error_vec = {0.0};
+                        std::vector<double> variance_vec = {0.0};
                         std::vector<double> variance_error_vec = {0.0};
-                        std::vector<double> susceptibility_vec = {0.0};  // Not computed for single state
+                        std::vector<double> susceptibility_vec = {0.0};
                         std::vector<double> susceptibility_error_vec = {0.0};
                         
-                        // Note: sample_index identifies which TPQ state was used
                         saveDSSFStaticToHDF5(
                             unified_h5_path,
                             obs_names[i],
@@ -3045,11 +3140,14 @@ int main(int argc, char* argv[]) {
                         );
                         
                         if (rank == 0) {
-                            std::cout << "  Saved SSSF to HDF5: " << obs_names[i] 
+                            std::cout << "  Saved SSSF: " << obs_names[i] 
                                       << " beta=" << beta 
                                       << " S(q)=" << expectation_value.real();
                             if (std::abs(expectation_value.imag()) > 1e-10) {
                                 std::cout << " + " << expectation_value.imag() << "i";
+                            }
+                            if (operators_identical) {
+                                std::cout << " [O₁=O₂ optimized]";
                             }
                             std::cout << std::endl;
                         }
