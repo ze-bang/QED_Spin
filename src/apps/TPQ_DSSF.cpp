@@ -627,6 +627,10 @@ void saveDSSFStaticToHDF5(
         
         file.close();
         
+        // MEMORY FIX: Force HDF5 to release internal caches
+        // The HDF5 library keeps metadata and data caches that grow over time
+        H5garbage_collect();
+        
     } catch (H5::Exception& e) {
         std::cerr << "Warning: Failed to save DSSF static to HDF5: " << e.getCDetailMsg() << std::endl;
     }
@@ -3139,6 +3143,10 @@ int main(int argc, char* argv[]) {
                             susceptibility_error_vec
                         );
                         
+                        // MEMORY FIX: Flush HDF5 library caches periodically to prevent memory accumulation
+                        // HDF5 library caches metadata and data chunks internally, which can grow unbounded
+                        H5garbage_collect();
+                        
                         if (rank == 0) {
                             std::cout << "  Saved SSSF: " << obs_names[i] 
                                       << " beta=" << beta 
@@ -3240,6 +3248,10 @@ int main(int argc, char* argv[]) {
             std::cerr << "Rank " << rank << " failed time evolution: " << e.what() << std::endl;
             return false;
         }
+        
+        // MEMORY FIX: Force cleanup of HDF5 internal caches after each task
+        // This prevents memory accumulation across tasks due to HDF5's internal caching
+        H5garbage_collect();
         
         return true;
     };
