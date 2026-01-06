@@ -1,14 +1,3 @@
-import os
-import sys
-import subprocess
-import argparse
-import time
-import glob
-import logging
-import numpy as np
-from matplotlib.cm import get_cmap
-from tqdm import tqdm
-
 #!/usr/bin/env python3
 """
 NLCE Convergence Analysis - Runs NLCE calculations with increasing order
@@ -22,7 +11,16 @@ It builds on the NLCE workflow in nlce.py to:
 3. Plot properties from all orders together to visualize convergence
 """
 
+import os
+import sys
+import subprocess
+import argparse
+import time
+import glob
+import logging
+import numpy as np
 import matplotlib.pyplot as plt
+from matplotlib.cm import get_cmap
 
 
 def setup_logging(log_file):
@@ -49,7 +47,7 @@ def run_nlce_for_order(order, args):
     nlce_script = os.path.join(script_dir, '..', 'run', 'nlce.py')
     
     cmd = [
-        'python3', 
+        sys.executable,  # Use the same Python interpreter as the current script
         nlce_script,
         f'--max_order={order}',
         f'--base_dir={args.base_dir}/order_{order}',
@@ -103,17 +101,28 @@ def collect_and_plot_results(max_order, args):
     os.makedirs(plot_dir, exist_ok=True)
     
     # Define thermodynamic properties to plot
-    properties = ['energy', 'specific_heat', 'entropy']
+    properties = ['energy', 'specific_heat', 'entropy', 'free_energy']
     property_files = {
         'energy': 'nlc_energy.txt',
         'specific_heat': 'nlc_specific_heat.txt',
-        'entropy': 'nlc_entropy.txt'
+        'entropy': 'nlc_entropy.txt',
+        'free_energy': 'nlc_free_energy.txt'
     }
-    property_labels = {
-        'energy': 'Energy per site',
-        'specific_heat': 'Specific Heat per site',
-        'entropy': 'Entropy per site'
-    }
+    
+    if args.SI_units:
+        property_labels = {
+            'energy': 'Energy per site (J/mol)',
+            'specific_heat': 'Specific Heat per site (J/(K·mol))',
+            'entropy': 'Entropy per site (J/(K·mol))',
+            'free_energy': 'Free Energy per site (J/mol)'
+        }
+    else:
+        property_labels = {
+            'energy': 'Energy per site',
+            'specific_heat': 'Specific Heat per site',
+            'entropy': 'Entropy per site',
+            'free_energy': 'Free Energy per site'
+        }
     
     # Get y-axis limits
     y_limits = {}
@@ -122,12 +131,15 @@ def collect_and_plot_results(max_order, args):
         y_max = getattr(args, f"{prop}_ymax", None)
         y_limits[prop] = (y_min, y_max)
     
-    # Initialize plot for each property
-    fig, axes = plt.subplots(2, 2, figsize=(15, 12))
+    # Initialize plot for each property (2x2 grid for 4 properties)
+    fig, axes = plt.subplots(2, 2, figsize=(16, 12))
     axes = axes.flatten()
     
     # Get colormap for different orders
     cmap = plt.get_cmap('viridis')
+    
+    # Check if we should plot errors
+    plot_errors = getattr(args, 'plot_errors', False)
     
     # Load data for each order and property
     data_by_order_prop = {}
@@ -150,61 +162,65 @@ def collect_and_plot_results(max_order, args):
     
     # Plot each property
     for i, prop in enumerate(properties):
-        if i < len(axes):  # Ensure we have enough axes
-            ax = axes[i]
-            ax.set_title(property_labels[prop])
-            ax.set_xlabel('Temperature')
-            ax.set_ylabel(property_labels[prop])
-            ax.set_xscale('log')
-            ax.grid(True)
-            
-            # Set y-axis limits if provided
-            y_min, y_max = y_limits[prop]
-            if y_min is not None and y_max is not None:
-                ax.set_ylim(y_min, y_max)
-            
-            for order in range(1, max_order + 1):
-                if order in data_by_order_prop and prop in data_by_order_prop[order]:
-                    data = data_by_order_prop[order][prop]
+        ax = axes[i]
+        ax.set_title(property_labels[prop], fontsize=12, fontweight='bold')
+        ax.set_xlabel('Temperature (K)' if args.SI_units else 'Temperature')
+        ax.set_ylabel(property_labels[prop])
+        ax.set_xscale('log')
+        ax.grid(True, alpha=0.3)
+        
+        # Set y-axis limits if provided
+        y_min, y_max = y_limits[prop]
+        if y_min is not None and y_max is not None:
+            ax.set_ylim(y_min, y_max)
+        
+        for order in range(1, max_order + 1):
+            if order in data_by_order_prop and prop in data_by_order_prop[order]:
+                data = data_by_order_prop[order][prop]
+                
+                # First column is temperature, second is the property value, third is error
+                temp = data[:, 0]
+                prop_data = data[:, 1]
+                prop_error = data[:, 2] if data.shape[1] > 2 else None
+                
+                # Apply temperature cutoff based on y domain if limits are provided
+                if y_min is not None and y_max is not None:
+                    # Find indices where data is within y limits
+                    valid_indices = np.where((prop_data >= y_min) & (prop_data <= y_max))[0]
                     
-                    # First column is temperature, second is the property value
-                    temp = data[:, 0]
-                    prop_data = data[:, 1]
-                    
-                    # Apply temperature cutoff based on y domain if limits are provided
-                    if y_min is not None and y_max is not None:
-                        # Find indices where data exceeds y limits
-                        valid_indices = np.where((prop_data < y_min) | (prop_data > y_max))[0]
+                    if len(valid_indices) > 0:
+                        # Find the minimum valid temperature
+                        sorted_temp_indices = np.argsort(temp)
+                        found_valid_temp = False
                         
-                        if len(valid_indices) > 0:
-                            # Find the minimum valid temperature
-                            # Sort temperatures in ascending order
-                            sorted_temp_indices = np.argsort(temp)
-                            found_valid_temp = False
+                        for idx in sorted_temp_indices:
+                            if idx in valid_indices:
+                                min_valid_temp = temp[idx]
+                                found_valid_temp = True
+                                break
+                        
+                        if not found_valid_temp:
+                            # No valid temperatures found, skip this data
+                            continue
                             
-                            # Sort temperatures in descending order instead of ascending
-                            sorted_temp_indices = np.argsort(temp)[::-1]
-                            found_valid_temp = False
-                            
-                            for idx in sorted_temp_indices:
-                                if idx in valid_indices:
-                                    min_valid_temp = temp[idx]
-                                    found_valid_temp = True
-                                    break
-                            
-                            if not found_valid_temp:
-                                # No valid temperatures found, skip this data
-                                continue
-                                
-                            # Filter data to only include temperatures >= min_valid_temp
-                            mask = temp >= min_valid_temp
-                            temp = temp[mask]
-                            prop_data = prop_data[mask]
-                    
-                    # Plot this order
-                    color = cmap(order / max_order)
+                        # Filter data to only include temperatures >= min_valid_temp
+                        mask = temp >= min_valid_temp
+                        temp = temp[mask]
+                        prop_data = prop_data[mask]
+                        if prop_error is not None:
+                            prop_error = prop_error[mask]
+                
+                # Plot this order with optional error bars
+                color = cmap(order / max_order)
+                
+                if prop_error is not None and plot_errors:
+                    ax.errorbar(temp, prop_data, yerr=prop_error, 
+                               fmt='-', color=color, alpha=0.7,
+                               label=f'Order {order}', linewidth=2,
+                               errorevery=max(1, len(temp)//20), capsize=3)
+                else:
                     ax.plot(temp, prop_data, '-', color=color, 
-                            label=f'Order {order}', linewidth=2)
+                            label=f'Order {order}', linewidth=2, alpha=0.8)
     
     # Add legend to each plot and adjust layout
     for ax in axes:
@@ -232,18 +248,18 @@ def collect_and_plot_results(max_order, args):
             if order in data_by_order_prop and prop in data_by_order_prop[order]:
                 data = data_by_order_prop[order][prop]
                 
-                # First column is temperature, second is the property value
+                # First column is temperature, second is the property value, third is error
                 temp = data[:, 0]
                 prop_data = data[:, 1]
+                prop_error = data[:, 2] if data.shape[1] > 2 else None
                 
                 # Apply temperature cutoff based on y domain if limits are provided
                 if y_min is not None and y_max is not None:
-                    # Find indices where data exceeds y limits
+                    # Find indices where data is within y limits
                     valid_indices = np.where((prop_data >= y_min) & (prop_data <= y_max))[0]
                     
                     if len(valid_indices) > 0:
                         # Find the minimum valid temperature
-                        # Sort temperatures in ascending order
                         sorted_temp_indices = np.argsort(temp)
                         found_valid_temp = False
                         
@@ -261,11 +277,20 @@ def collect_and_plot_results(max_order, args):
                         mask = temp >= min_valid_temp
                         temp = temp[mask]
                         prop_data = prop_data[mask]
+                        if prop_error is not None:
+                            prop_error = prop_error[mask]
                 
-                # Plot this order
+                # Plot this order with optional error bars
                 color = cmap(order / max_order)
-                plt.plot(temp, prop_data, '-', color=color, 
-                            label=f'Order {order}', linewidth=2)
+                
+                if prop_error is not None and plot_errors:
+                    plt.errorbar(temp, prop_data, yerr=prop_error, 
+                               fmt='-', color=color, alpha=0.7,
+                               label=f'Order {order}', linewidth=2,
+                               errorevery=max(1, len(temp)//20), capsize=3)
+                else:
+                    plt.plot(temp, prop_data, '-', color=color, 
+                            label=f'Order {order}', linewidth=2, alpha=0.8)
         
         plt.legend(loc='best')
         plt.tight_layout()
@@ -326,7 +351,11 @@ def main():
     parser.add_argument('--specific_heat_ymax', type=float, default=None, help='Y-axis maximum for specific heat plot')
     parser.add_argument('--entropy_ymin', type=float, default=0, help='Y-axis minimum for entropy plot')
     parser.add_argument('--entropy_ymax', type=float, default=None, help='Y-axis maximum for entropy plot')
-
+    parser.add_argument('--free_energy_ymin', type=float, default=None, help='Y-axis minimum for free energy plot')
+    parser.add_argument('--free_energy_ymax', type=float, default=None, help='Y-axis maximum for free energy plot')
+    
+    # Plotting options
+    parser.add_argument('--plot_errors', action='store_true', help='Plot error bars on convergence plots')
     
     args = parser.parse_args()
     

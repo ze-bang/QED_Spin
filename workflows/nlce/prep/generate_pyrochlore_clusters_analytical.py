@@ -401,13 +401,26 @@ def generate_clusters_canonical(tet_graph, max_order, verbose=False):
                         new_frontier = {x for x in new_frontier if x >= anchor}
                         stack.append((new_set, new_frontier))
         
-        # Add all distinct topologies from this order
+        # Collect clusters for this order
+        order_clusters = []
         for sig_list in buckets.values():
             for cluster_nodes in sig_list:
-                distinct_clusters.append(sorted(cluster_nodes))
+                order_clusters.append(sorted(cluster_nodes))
+        
+        # CRITICAL: Sort clusters deterministically to ensure consistent ID assignment
+        def cluster_sort_key(cluster_nodes):
+            # Create canonical graph representation: sorted edge list
+            subgraph = tet_graph.subgraph(cluster_nodes)
+            node_map = {n: i for i, n in enumerate(sorted(cluster_nodes))}
+            edges = sorted((node_map[u], node_map[v]) if node_map[u] < node_map[v] 
+                          else (node_map[v], node_map[u]) for u, v in subgraph.edges())
+            return tuple(edges)
+        
+        order_clusters.sort(key=cluster_sort_key)
+        distinct_clusters.extend(order_clusters)
         
         if verbose:
-            print(f"  Found {len([c for c in distinct_clusters if len(c) == order])} distinct topologies")
+            print(f"  Found {len(order_clusters)} distinct topologies")
     
     return distinct_clusters
 

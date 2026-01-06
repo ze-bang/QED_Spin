@@ -317,13 +317,66 @@ class NLCExpansion:
             return self.subcluster_info[cluster_id]['subclusters']
         
         # Fallback to simple heuristic based on order
+        # NOTE: This is a rough approximation and may miss same-order subclusters
+        # For accurate NLCE, always use explicit subcluster info from subclusters_info.txt
         subclusters = {}
         order = self.clusters[cluster_id]['order']
         for cid, data in self.clusters.items():
+            # Include all clusters of strictly lower order
+            # Same-order subclusters require explicit subcluster info
             if data['order'] < order:
                 subclusters[cid] = 1  # Assume multiplicity 1 as a fallback
                 
         return subclusters
+    
+    def _topological_sort_clusters(self):
+        """
+        Sort clusters in dependency order using topological sort.
+        
+        A cluster must be processed AFTER all its subclusters, regardless of order.
+        This handles cases where a cluster of order N contains subclusters of the same order N.
+        
+        Returns:
+            List of (cluster_id, order) tuples in processing order
+        """
+        # Build dependency graph
+        # deps[cluster_id] = set of subcluster IDs that must be processed first
+        deps = {}
+        for cluster_id in self.clusters:
+            subclusters = self.get_subclusters(cluster_id)
+            deps[cluster_id] = set(subclusters.keys())
+        
+        # Kahn's algorithm for topological sort
+        # Start with clusters that have no dependencies (order 1 clusters)
+        in_degree = {cid: len(d) for cid, d in deps.items()}
+        queue = [cid for cid, deg in in_degree.items() if deg == 0]
+        sorted_clusters = []
+        
+        while queue:
+            # Sort queue by order (prefer lower order first for consistency)
+            queue.sort(key=lambda cid: (self.clusters[cid]['order'], cid))
+            cluster_id = queue.pop(0)
+            order = self.clusters[cluster_id]['order']
+            sorted_clusters.append((cluster_id, order))
+            
+            # Remove this cluster from all dependents' requirements
+            for cid, dep_set in deps.items():
+                if cluster_id in dep_set:
+                    dep_set.remove(cluster_id)
+                    in_degree[cid] -= 1
+                    if in_degree[cid] == 0 and cid not in [x[0] for x in sorted_clusters] and cid not in queue:
+                        queue.append(cid)
+        
+        # Check for cycles (shouldn't happen in valid NLCE data)
+        if len(sorted_clusters) != len(self.clusters):
+            remaining = set(self.clusters.keys()) - set(x[0] for x in sorted_clusters)
+            print(f"WARNING: Dependency cycle detected! Remaining clusters: {remaining}")
+            print("Falling back to order-based sort for remaining clusters.")
+            # Add remaining clusters sorted by order
+            for cid in sorted(remaining, key=lambda c: (self.clusters[c]['order'], c)):
+                sorted_clusters.append((cid, self.clusters[cid]['order']))
+        
+        return sorted_clusters
     
 
     def print_subcluster_info(self):
@@ -357,11 +410,10 @@ class NLCExpansion:
 
         self.print_subcluster_info()
             
-        # Sort clusters by order
-        sorted_clusters = sorted(
-            [(cid, data['order']) for cid, data in self.clusters.items()], 
-            key=lambda x: x[1]
-        )
+        # Sort clusters in dependency order (handles same-order subclusters)
+        sorted_clusters = self._topological_sort_clusters()
+        
+        print(f"\nProcessing {len(sorted_clusters)} clusters in dependency order")
         
         # Initialize weights dictionary
         if self.measure_spin:
@@ -380,18 +432,34 @@ class NLCExpansion:
                 'entropy': {}   
             }
         
+        # Track which clusters have valid weights (all required subclusters available)
+        self.valid_weights = set()
+        
         # Calculate weights for each cluster
-        for cluster_id, _ in sorted_clusters:
+        for cluster_id, order in sorted_clusters:
             if self.clusters[cluster_id]['eigenvalues'] is None:
+                print(f"  Cluster {cluster_id} (order {order}): SKIPPED (no eigenvalues)")
+                continue
+            
+            # Get subclusters with their multiplicities
+            subclusters = self.get_subclusters(cluster_id)
+            
+            # Check if ALL required subclusters have valid weights
+            # This is CRITICAL for correct recursive weight calculation
+            missing_subclusters = []
+            for sub_id in subclusters.keys():
+                if sub_id not in self.valid_weights:
+                    missing_subclusters.append(sub_id)
+            
+            if missing_subclusters:
+                print(f"  Cluster {cluster_id} (order {order}): SKIPPED - missing weights for subclusters {missing_subclusters}")
+                print(f"    Cannot compute weight because W(c) = P(c) - Σ Y_cs × W(s) requires ALL subcluster weights")
                 continue
                 
             # Get thermodynamic quantities for this cluster
             quantities = self.calculate_thermodynamic_quantities(
                 self.clusters[cluster_id]['eigenvalues'],
             )
-
-            # Get subclusters with their multiplicities
-            subclusters = self.get_subclusters(cluster_id)
             
             # Calculate weights for energy and specific heat
             for prop in ['energy', 'specific_heat', 'entropy']:
@@ -403,6 +471,9 @@ class NLCExpansion:
                         property_value -= self.weights[prop][subcluster_id] * multiplicity
                 # Store the weight
                 self.weights[prop][cluster_id] = property_value
+
+            # Mark this cluster as having valid weights for thermodynamic properties
+            self.valid_weights.add(cluster_id)
 
 
             if self.measure_spin:

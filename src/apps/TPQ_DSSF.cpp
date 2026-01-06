@@ -579,18 +579,41 @@ void saveDSSFStaticToHDF5(
             file.createGroup(sample_path);
         }
         
-        // Helper to save dataset
+        // Helper to save or append dataset (for SSSF method which adds one T at a time)
         auto saveDataset = [&](const std::string& name, const std::vector<double>& data) {
             if (data.empty()) return;
             std::string dataset_path = sample_path + "/" + name;
+            
             if (file.nameExists(dataset_path)) {
+                // Read existing data and append new data
+                H5::DataSet existing_dset = file.openDataSet(dataset_path);
+                H5::DataSpace existing_space = existing_dset.getSpace();
+                hsize_t existing_size;
+                existing_space.getSimpleExtentDims(&existing_size);
+                
+                // Read existing data
+                std::vector<double> existing_data(existing_size);
+                existing_dset.read(existing_data.data(), H5::PredType::NATIVE_DOUBLE);
+                existing_dset.close();
+                
+                // Combine existing and new data
+                existing_data.insert(existing_data.end(), data.begin(), data.end());
+                
+                // Remove old dataset and create new with combined data
                 file.unlink(dataset_path);
+                hsize_t dims[1] = {existing_data.size()};
+                H5::DataSpace dspace(1, dims);
+                H5::DataSet dset = file.createDataSet(dataset_path, H5::PredType::NATIVE_DOUBLE, dspace);
+                dset.write(existing_data.data(), H5::PredType::NATIVE_DOUBLE);
+                dset.close();
+            } else {
+                // Create new dataset
+                hsize_t dims[1] = {data.size()};
+                H5::DataSpace dspace(1, dims);
+                H5::DataSet dset = file.createDataSet(dataset_path, H5::PredType::NATIVE_DOUBLE, dspace);
+                dset.write(data.data(), H5::PredType::NATIVE_DOUBLE);
+                dset.close();
             }
-            hsize_t dims[1] = {data.size()};
-            H5::DataSpace dspace(1, dims);
-            H5::DataSet dset = file.createDataSet(dataset_path, H5::PredType::NATIVE_DOUBLE, dspace);
-            dset.write(data.data(), H5::PredType::NATIVE_DOUBLE);
-            dset.close();
         };
         
         saveDataset("temperatures", temperatures);
@@ -1070,10 +1093,11 @@ int main(int argc, char* argv[]) {
             std::cerr << "\n" << std::string(80, '=') << std::endl;
             std::cerr << "OPTIONAL ARGUMENTS:" << std::endl;
             std::cerr << std::string(80, '=') << std::endl;
-            std::cerr << "  method (default: spectral): spectral | ftlm_thermal | static | ground_state" << std::endl;
+            std::cerr << "  method (default: spectral): spectral | ftlm_thermal | static | sssf | ground_state" << std::endl;
             std::cerr << "    - spectral: Frequency-domain spectral function S(ω) via Lanczos (single state)" << std::endl;
             std::cerr << "    - ftlm_thermal: TRUE thermal DSSF with random state sampling (FTLM multi-sample)" << std::endl;
-            std::cerr << "    - static: Static structure factor ⟨O₁†O₂⟩ vs temperature (SSSF)" << std::endl;
+            std::cerr << "    - static: Static structure factor ⟨O₁†O₂⟩ vs temperature using FTLM (random sampling)" << std::endl;
+            std::cerr << "    - sssf: Static structure factor ⟨O₁†O₂⟩ evaluated on pre-computed TPQ states" << std::endl;
             std::cerr << "    - ground_state: Ground state spectral function using continued fraction" << std::endl;
             std::cerr << "\n  operator_type (default: sum): sum | transverse | sublattice | experimental | transverse_experimental" << std::endl;
             std::cerr << "    - sum: Standard momentum-resolved sum operators S^{op1}(Q) S^{op2}(-Q)" << std::endl;
@@ -1143,13 +1167,22 @@ int main(int argc, char* argv[]) {
             std::cerr << "  - Number of samples: 40 (for thermal averaging)" << std::endl;
             std::cerr << "  - Computes for all temperatures in T_min,T_max,T_steps range" << std::endl;
             std::cerr << "\n" << std::string(80, '=') << std::endl;
-            std::cerr << "STATIC METHOD (method=static) DETAILS - SSSF:" << std::endl;
+            std::cerr << "STATIC METHOD (method=static) DETAILS - FTLM SSSF:" << std::endl;
             std::cerr << std::string(80, '=') << std::endl;
-            std::cerr << "Static structure factor S(q) = ⟨O₁†(q) O₂(q)⟩ vs temperature:" << std::endl;
+            std::cerr << "Static structure factor S(q) = ⟨O₁†(q) O₂(q)⟩ vs temperature (FTLM):" << std::endl;
             std::cerr << "  - Computes equal-time correlation ⟨O₁†O₂⟩(T)" << std::endl;
             std::cerr << "  - Uses FTLM random sampling for thermal averaging" << std::endl;
             std::cerr << "  - Also computes fluctuation/susceptibility χ = β⟨(O†O - ⟨O†O⟩)²⟩" << std::endl;
             std::cerr << "\nOutput: Temperature | ⟨O₁†O₂⟩ | error | variance | χ" << std::endl;
+            std::cerr << "\n" << std::string(80, '=') << std::endl;
+            std::cerr << "SSSF METHOD (method=sssf) DETAILS - TPQ SSSF:" << std::endl;
+            std::cerr << std::string(80, '=') << std::endl;
+            std::cerr << "Static structure factor S(q) = ⟨O₁†(q) O₂(q)⟩ using pre-computed states:" << std::endl;
+            std::cerr << "  - Computes equal-time correlation ⟨ψ|O₁†O₂|ψ⟩ for each TPQ state" << std::endl;
+            std::cerr << "  - Requires pre-computed TPQ states (from TPQ run)" << std::endl;
+            std::cerr << "  - Each state corresponds to a specific β (inverse temperature)" << std::endl;
+            std::cerr << "  - Similar to 'spectral' but computes static instead of dynamical response" << std::endl;
+            std::cerr << "\nOutput: For each (q, operator, beta): ⟨O₁†O₂⟩ expectation value" << std::endl;
             std::cerr << "\n" << std::string(80, '=') << std::endl;
             std::cerr << "GROUND STATE METHOD (method=ground_state) DETAILS:" << std::endl;
             std::cerr << std::string(80, '=') << std::endl;
@@ -1173,11 +1206,13 @@ int main(int argc, char* argv[]) {
             std::cerr << "   " << pos_argv[0] << " ./data 50 \"2,2\" spectral sum ladder \"-5,5,200,0.1\" 4 \"0,0,0\" \"0,0,0\" 0 8" << std::endl;
             std::cerr << "\n6. Finite-T DSSF with FTLM random sampling (with GPU):" << std::endl;
             std::cerr << "   " << pos_argv[0] << " ./data 50 \"2,2\" ftlm_thermal --use_gpu \"0.1,10.0,10\"" << std::endl;
-            std::cerr << "\n7. Static structure factor (SSSF) vs temperature:" << std::endl;
+            std::cerr << "\n7. Static structure factor via FTLM (random sampling) vs temperature:" << std::endl;
             std::cerr << "   " << pos_argv[0] << " ./data 50 \"2,2\" static \"0.1,10.0,20\"" << std::endl;
-            std::cerr << "\n8. Ground state DSSF (T=0, requires eigenvector):" << std::endl;
+            std::cerr << "\n8. Static structure factor on pre-computed TPQ states (sssf):" << std::endl;
+            std::cerr << "   " << pos_argv[0] << " ./data 50 \"2,2\" sssf sum ladder \"0,0,0\" 4 \"0,0,0;0,0,1\"" << std::endl;
+            std::cerr << "\n9. Ground state DSSF (T=0, requires eigenvector):" << std::endl;
             std::cerr << "   " << pos_argv[0] << " ./data 100 \"2,2\" ground_state sum ladder \"-5,5,200,0.05\" 4 \"0,0,0;0,0,1\"" << std::endl;
-            std::cerr << "\n9. GPU-accelerated FTLM thermal DSSF:" << std::endl;
+            std::cerr << "\n10. GPU-accelerated FTLM thermal DSSF:" << std::endl;
             std::cerr << "   " << pos_argv[0] << " --use_gpu ./data 50 \"2,2\" ftlm_thermal" << std::endl;
         }
         MPI_Finalize();
@@ -1640,7 +1675,7 @@ int main(int argc, char* argv[]) {
     std::string unified_h5_path;  // Path to unified DSSF HDF5 file (or per-rank file for INDEPENDENT mode)
     
     // Determine if we're in INDEPENDENT mode (need per-rank files)
-    bool uses_independent_mode = (method == "spectral" || method == "ground_state");
+    bool uses_independent_mode = (method == "spectral" || method == "ground_state" || method == "sssf");
     
     if (rank == 0) {
         ensureDirectoryExists(output_base_dir);
@@ -1870,7 +1905,7 @@ int main(int argc, char* argv[]) {
     MPI_Bcast(&num_files, 1, MPI_INT, 0, MPI_COMM_WORLD);
     
     // Check for methods that need pre-computed states
-    bool needs_precomputed_states = (method == "spectral" || method == "ground_state");
+    bool needs_precomputed_states = (method == "spectral" || method == "ground_state" || method == "sssf");
     
     if (num_files == 0 && needs_precomputed_states) {
         if (rank == 0) {
@@ -2192,7 +2227,8 @@ int main(int argc, char* argv[]) {
         ComplexVector tpq_state;
         bool loaded_ok = false;
         bool needs_loaded_state = (method == "spectral" || method == "ground_state" || 
-                                   method == "spin_correlation" || method == "spin_configuration");
+                                   method == "spin_correlation" || method == "spin_configuration" ||
+                                   method == "sssf");
         
         // For ftlm_thermal/static, we don't need to load a state
         if (file_path == "INTERNAL_RANDOM_STATES") {
@@ -2941,6 +2977,81 @@ int main(int argc, char* argv[]) {
                         
                         if (rank == 0) {
                             std::cout << "  Saved static structure factor to HDF5: " << obs_names[i] << std::endl;
+                        }
+                    }
+                    
+                } else if (method == "sssf") {
+                    // ============================================================
+                    // SSSF: Static structure factor on pre-computed TPQ states
+                    // Computes ⟨ψ|O₁†O₂|ψ⟩ for each loaded TPQ state
+                    // ============================================================
+                    
+                    if (rank == 0) {
+                        std::cout << "\n============================================" << std::endl;
+                        std::cout << "SSSF: Static Structure Factor on TPQ State" << std::endl;
+                        std::cout << "============================================" << std::endl;
+                        std::cout << "  Beta: " << beta << std::endl;
+                        std::cout << "  Sample index: " << sample_index << std::endl;
+                        std::cout << "  Momentum: (" << Q[0] << ", " << Q[1] << ", " << Q[2] << ")" << std::endl;
+                    }
+                    
+                    // Process each operator pair
+                    for (size_t i = 0; i < obs_1.size(); i++) {
+                        std::cout << "  Processing operator " << obs_names[i] << std::endl;
+                        
+                        // Compute ⟨ψ|O₁†O₂|ψ⟩:
+                        // 1. |χ⟩ = O₂|ψ⟩
+                        // 2. |φ⟩ = O₁|ψ⟩
+                        // 3. Result = ⟨φ|χ⟩ = ⟨ψ|O₁†O₂|ψ⟩
+                        
+                        ComplexVector chi(N, Complex(0.0, 0.0));  // O₂|ψ⟩
+                        ComplexVector phi(N, Complex(0.0, 0.0));  // O₁|ψ⟩
+                        
+                        // Apply operators
+                        obs_2[i].apply(tpq_state.data(), chi.data(), N);
+                        obs_1[i].apply(tpq_state.data(), phi.data(), N);
+                        
+                        // Compute inner product ⟨φ|χ⟩ = Σ_j conj(φ_j) * χ_j
+                        Complex expectation_value(0.0, 0.0);
+                        for (int j = 0; j < N; j++) {
+                            expectation_value += std::conj(phi[j]) * chi[j];
+                        }
+                        
+                        // Temperature from beta (for output)
+                        double temperature = (beta > 0) ? 1.0 / beta : std::numeric_limits<double>::infinity();
+                        
+                        // Save to HDF5 as static structure factor
+                        // Use single-element vectors for compatibility with saveDSSFStaticToHDF5
+                        std::vector<double> temperatures_vec = {temperature};
+                        std::vector<double> expectation_vec = {expectation_value.real()};
+                        std::vector<double> expectation_error_vec = {0.0};  // No error for single state
+                        std::vector<double> variance_vec = {0.0};  // Not computed for single state
+                        std::vector<double> variance_error_vec = {0.0};
+                        std::vector<double> susceptibility_vec = {0.0};  // Not computed for single state
+                        std::vector<double> susceptibility_error_vec = {0.0};
+                        
+                        // Note: sample_index identifies which TPQ state was used
+                        saveDSSFStaticToHDF5(
+                            unified_h5_path,
+                            obs_names[i],
+                            sample_index,
+                            temperatures_vec,
+                            expectation_vec,
+                            expectation_error_vec,
+                            variance_vec,
+                            variance_error_vec,
+                            susceptibility_vec,
+                            susceptibility_error_vec
+                        );
+                        
+                        if (rank == 0) {
+                            std::cout << "  Saved SSSF to HDF5: " << obs_names[i] 
+                                      << " beta=" << beta 
+                                      << " S(q)=" << expectation_value.real();
+                            if (std::abs(expectation_value.imag()) > 1e-10) {
+                                std::cout << " + " << expectation_value.imag() << "i";
+                            }
+                            std::cout << std::endl;
                         }
                     }
                     

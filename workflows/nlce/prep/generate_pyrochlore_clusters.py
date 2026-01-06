@@ -448,6 +448,26 @@ def generate_clusters(tet_graph, max_order):
                     'L_pyro': L_pyro
                 })
         
+        # CRITICAL: Sort clusters deterministically to ensure consistent ID assignment
+        # Sort by: (multiplicity descending, then by canonical graph representation)
+        # This ensures the same cluster always gets the same ID across different runs
+        def cluster_sort_key(idx):
+            rep = reps[idx]
+            mult = mults[idx]
+            # Create canonical graph representation: sorted edge list
+            subgraph = tet_graph.subgraph(rep)
+            # Map to canonical node labels
+            node_map = {n: i for i, n in enumerate(sorted(rep))}
+            edges = sorted((node_map[u], node_map[v]) if node_map[u] < node_map[v] 
+                          else (node_map[v], node_map[u]) for u, v in subgraph.edges())
+            # Sort by multiplicity (descending) then by edge tuple (for determinism)
+            return (-mult, tuple(edges))
+        
+        sorted_indices = sorted(range(len(reps)), key=cluster_sort_key)
+        reps = [reps[i] for i in sorted_indices]
+        mults = [mults[i] for i in sorted_indices]
+        order_mult_details = [order_mult_details[i] for i in sorted_indices]
+        
         distinct_clusters.extend(reps)
         multiplicities.extend(mults)
         all_mult_details.extend(order_mult_details)
