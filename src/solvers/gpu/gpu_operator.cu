@@ -218,13 +218,19 @@ size_t GPUOperator::estimateMemoryRequirement(int N) const {
     size_t vector_size = N * sizeof(cuDoubleComplex);
     size_t sparse_matrix_size = 0;
     
-    // Estimate non-zeros per row
-    int nnz_per_row = NNZ_PER_STATE_ESTIMATE;
-    size_t nnz_estimate = static_cast<size_t>(N) * nnz_per_row;
+    // Only estimate sparse matrix memory if we're going to build one
+    // For matrix-free operators (using transform_data_), we don't need sparse storage
+    bool use_matrix_free = (num_transforms_ > 0 || !transform_data_.empty());
     
-    sparse_matrix_size = (N + 1) * sizeof(int) +  // row pointers
-                        nnz_estimate * sizeof(int) +  // column indices
-                        nnz_estimate * sizeof(cuDoubleComplex);  // values
+    if (!use_matrix_free) {
+        // Estimate non-zeros per row for sparse matrix
+        int nnz_per_row = NNZ_PER_STATE_ESTIMATE;
+        size_t nnz_estimate = static_cast<size_t>(N) * nnz_per_row;
+        
+        sparse_matrix_size = (N + 1) * sizeof(int) +  // row pointers
+                            nnz_estimate * sizeof(int) +  // column indices
+                            nnz_estimate * sizeof(cuDoubleComplex);  // values
+    }
     
     size_t total = 3 * vector_size + sparse_matrix_size;
     
@@ -238,18 +244,44 @@ bool GPUOperator::allocateGPUMemory(int N) {
     
     size_t required_memory = estimateMemoryRequirement(N);
     
+    // Log the operation mode
+    bool use_matrix_free = (num_transforms_ > 0 || !transform_data_.empty());
+    std::cout << "GPU Operator mode: " << (use_matrix_free ? "matrix-free (transform_data)" : "sparse matrix") << std::endl;
+    std::cout << "Required memory: " << required_memory / (1024.0*1024.0*1024.0) << " GB" << std::endl;
+    std::cout << "Available GPU memory: " << available_gpu_memory_ / (1024.0*1024.0*1024.0) << " GB" << std::endl;
+    
     if (required_memory > available_gpu_memory_ * 0.9) {
-        std::cout << "Warning: Required memory (" << required_memory / (1024.0*1024.0*1024.0)
-                  << " GB) exceeds available GPU memory. Using chunked processing.\n";
+        std::cout << "Warning: Required memory exceeds 90% of available GPU memory. Using chunked processing.\n";
+        
+        // Calculate chunk size based on available memory (leave 20% headroom)
+        size_t usable_memory = static_cast<size_t>(available_gpu_memory_ * 0.8);
+        size_t memory_per_element = 3 * sizeof(cuDoubleComplex);  // 3 vectors
+        size_t max_chunk_by_memory = usable_memory / memory_per_element;
+        size_t chunk_size = std::min(max_chunk_by_memory, static_cast<size_t>(N));
+        
+        // Round down to power of 2 for better performance
+        size_t power_of_2_chunk = 1;
+        while (power_of_2_chunk * 2 <= chunk_size) {
+            power_of_2_chunk *= 2;
+        }
+        chunk_size = power_of_2_chunk;
+        
+        std::cout << "Adjusted chunk size: " << chunk_size << " states ("
+                  << (chunk_size * memory_per_element) / (1024.0*1024.0*1024.0) << " GB for vectors)\n";
+        
         setupChunks(N);
         
-        // Allocate memory for one chunk only
-        size_t chunk_size = chunks_[0].size;
-        CUDA_CHECK(cudaMalloc(&d_vector_in_, chunk_size * sizeof(cuDoubleComplex)));
-        CUDA_CHECK(cudaMalloc(&d_vector_out_, chunk_size * sizeof(cuDoubleComplex)));
-        CUDA_CHECK(cudaMalloc(&d_temp_, chunk_size * sizeof(cuDoubleComplex)));
+        // Override with memory-aware chunk size
+        if (!chunks_.empty()) {
+            chunks_[0].size = std::min(static_cast<size_t>(N), chunk_size);
+        }
         
-        stats_.memoryUsed = 3 * chunk_size * sizeof(cuDoubleComplex);
+        size_t actual_chunk_size = chunks_.empty() ? chunk_size : chunks_[0].size;
+        CUDA_CHECK(cudaMalloc(&d_vector_in_, actual_chunk_size * sizeof(cuDoubleComplex)));
+        CUDA_CHECK(cudaMalloc(&d_vector_out_, actual_chunk_size * sizeof(cuDoubleComplex)));
+        CUDA_CHECK(cudaMalloc(&d_temp_, actual_chunk_size * sizeof(cuDoubleComplex)));
+        
+        stats_.memoryUsed = 3 * actual_chunk_size * sizeof(cuDoubleComplex);
     } else {
         // Allocate full vectors
         CUDA_CHECK(cudaMalloc(&d_vector_in_, N * sizeof(cuDoubleComplex)));

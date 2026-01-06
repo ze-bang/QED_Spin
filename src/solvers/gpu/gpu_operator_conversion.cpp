@@ -73,14 +73,12 @@ bool convertOperatorToGPU(const Operator& cpu_op, GPUOperator& gpu_op) {
     // Copy transform data to GPU device memory
     gpu_op.copyTransformDataToDevice();
     
-    // Allocate GPU memory for state vectors
-    int N = gpu_op.getDimension();
-    if (!gpu_op.allocateGPUMemory(N)) {
-        std::cerr << "Error: Failed to allocate GPU memory" << std::endl;
-        return false;
-    }
+    // NOTE: We no longer allocate GPU state vectors here.
+    // The caller is responsible for allocating their own vectors if needed.
+    // This prevents double-allocation when the caller manages their own memory.
     
-    std::cout << "  GPU operator ready! (dimension: " << N << ")" << std::endl;
+    std::cout << "  GPU operator ready! (dimension: " << gpu_op.getDimension() << ")" << std::endl;
+    std::cout << "  NOTE: State vectors NOT allocated - caller manages memory" << std::endl;
     
     return true;
 }

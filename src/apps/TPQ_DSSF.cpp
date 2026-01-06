@@ -3019,67 +3019,89 @@ int main(int argc, char* argv[]) {
                         
 #ifdef WITH_CUDA
                         if (use_gpu) {
-                            // GPU-accelerated SSSF computation
-                            // Convert operators to GPU
-                            GPUOperator gpu_obs1(num_sites, spin_length);
-                            GPUOperator gpu_obs2(num_sites, spin_length);
+                            // Check GPU memory availability first
+                            size_t free_mem, total_mem;
+                            cudaMemGetInfo(&free_mem, &total_mem);
+                            size_t required_mem = (operators_identical ? 2 : 3) * N * sizeof(cuDoubleComplex);
                             
-                            bool gpu_ok = convertOperatorToGPU(obs_1[i], gpu_obs1);
-                            if (!operators_identical && gpu_ok) {
-                                gpu_ok = gpu_ok && convertOperatorToGPU(obs_2[i], gpu_obs2);
-                            }
-                            
-                            if (gpu_ok) {
-                                // Allocate device memory
-                                cuDoubleComplex* d_psi;
-                                cuDoubleComplex* d_chi;
-                                cuDoubleComplex* d_phi;
-                                cudaMalloc(&d_psi, N * sizeof(cuDoubleComplex));
-                                cudaMalloc(&d_chi, N * sizeof(cuDoubleComplex));
-                                if (!operators_identical) {
-                                    cudaMalloc(&d_phi, N * sizeof(cuDoubleComplex));
-                                }
-                                
-                                // Copy state to GPU
-                                cudaMemcpy(d_psi, tpq_state.data(), N * sizeof(cuDoubleComplex), cudaMemcpyHostToDevice);
-                                cudaMemset(d_chi, 0, N * sizeof(cuDoubleComplex));
-                                
-                                // Apply O₂ on GPU: chi = O₂|ψ⟩
-                                if (operators_identical) {
-                                    gpu_obs1.matVecGPU(d_psi, d_chi, N);
-                                } else {
-                                    gpu_obs2.matVecGPU(d_psi, d_chi, N);
-                                    cudaMemset(d_phi, 0, N * sizeof(cuDoubleComplex));
-                                    gpu_obs1.matVecGPU(d_psi, d_phi, N);
-                                }
-                                
-                                // Compute inner product using cuBLAS
-                                cublasHandle_t cublas_handle;
-                                cublasCreate(&cublas_handle);
-                                
-                                cuDoubleComplex result;
-                                if (operators_identical) {
-                                    // ⟨chi|chi⟩ = ||O|ψ⟩||²
-                                    cublasZdotc(cublas_handle, N, d_chi, 1, d_chi, 1, &result);
-                                } else {
-                                    // ⟨phi|chi⟩
-                                    cublasZdotc(cublas_handle, N, d_phi, 1, d_chi, 1, &result);
-                                }
-                                
-                                expectation_value = Complex(cuCreal(result), cuCimag(result));
-                                
-                                // Cleanup
-                                cublasDestroy(cublas_handle);
-                                cudaFree(d_psi);
-                                cudaFree(d_chi);
-                                if (!operators_identical) {
-                                    cudaFree(d_phi);
-                                }
-                            } else {
-                                std::cerr << "  GPU operator conversion failed, falling back to CPU" << std::endl;
+                            if (required_mem > free_mem * 0.9) {
+                                std::cerr << "  GPU memory insufficient for SSSF (need " 
+                                          << required_mem / (1024.0*1024.0*1024.0) << " GB, have "
+                                          << free_mem / (1024.0*1024.0*1024.0) << " GB free). Falling back to CPU." << std::endl;
                                 use_gpu = false;
-                            }
-                        }
+                            } else {
+                                // GPU-accelerated SSSF computation
+                                // Convert operators to GPU (only copies operator data, no state vector allocation)
+                                GPUOperator gpu_obs1(num_sites, spin_length);
+                                GPUOperator gpu_obs2(num_sites, spin_length);
+                                
+                                bool gpu_ok = convertOperatorToGPU(obs_1[i], gpu_obs1);
+                                if (!operators_identical && gpu_ok) {
+                                    gpu_ok = gpu_ok && convertOperatorToGPU(obs_2[i], gpu_obs2);
+                                }
+                                
+                                if (gpu_ok) {
+                                    // Allocate device memory with error checking
+                                    cuDoubleComplex* d_psi = nullptr;
+                                    cuDoubleComplex* d_chi = nullptr;
+                                    cuDoubleComplex* d_phi = nullptr;
+                                    
+                                    cudaError_t err1 = cudaMalloc(&d_psi, N * sizeof(cuDoubleComplex));
+                                    cudaError_t err2 = cudaMalloc(&d_chi, N * sizeof(cuDoubleComplex));
+                                    cudaError_t err3 = cudaSuccess;
+                                    if (!operators_identical) {
+                                        err3 = cudaMalloc(&d_phi, N * sizeof(cuDoubleComplex));
+                                    }
+                                    
+                                    if (err1 != cudaSuccess || err2 != cudaSuccess || err3 != cudaSuccess) {
+                                        std::cerr << "  GPU memory allocation failed. Falling back to CPU." << std::endl;
+                                        if (d_psi) cudaFree(d_psi);
+                                        if (d_chi) cudaFree(d_chi);
+                                        if (d_phi) cudaFree(d_phi);
+                                        use_gpu = false;
+                                    } else {
+                                        // Copy state to GPU
+                                        cudaMemcpy(d_psi, tpq_state.data(), N * sizeof(cuDoubleComplex), cudaMemcpyHostToDevice);
+                                        cudaMemset(d_chi, 0, N * sizeof(cuDoubleComplex));
+                                
+                                        // Apply O₂ on GPU: chi = O₂|ψ⟩
+                                        if (operators_identical) {
+                                            gpu_obs1.matVecGPU(d_psi, d_chi, N);
+                                        } else {
+                                            gpu_obs2.matVecGPU(d_psi, d_chi, N);
+                                            cudaMemset(d_phi, 0, N * sizeof(cuDoubleComplex));
+                                            gpu_obs1.matVecGPU(d_psi, d_phi, N);
+                                        }
+                                        
+                                        // Compute inner product using cuBLAS
+                                        cublasHandle_t cublas_handle;
+                                        cublasCreate(&cublas_handle);
+                                        
+                                        cuDoubleComplex result;
+                                        if (operators_identical) {
+                                            // ⟨chi|chi⟩ = ||O|ψ⟩||²
+                                            cublasZdotc(cublas_handle, N, d_chi, 1, d_chi, 1, &result);
+                                        } else {
+                                            // ⟨phi|chi⟩
+                                            cublasZdotc(cublas_handle, N, d_phi, 1, d_chi, 1, &result);
+                                        }
+                                        
+                                        expectation_value = Complex(cuCreal(result), cuCimag(result));
+                                        
+                                        // Cleanup
+                                        cublasDestroy(cublas_handle);
+                                        cudaFree(d_psi);
+                                        cudaFree(d_chi);
+                                        if (!operators_identical) {
+                                            cudaFree(d_phi);
+                                        }
+                                    }  // end cudaMalloc success
+                                } else {
+                                    std::cerr << "  GPU operator conversion failed, falling back to CPU" << std::endl;
+                                    use_gpu = false;
+                                }
+                            }  // end memory check success
+                        }  // end use_gpu
 #endif
                         
                         if (!use_gpu) {
