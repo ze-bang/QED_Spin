@@ -266,7 +266,7 @@ def list_spectral_datasets_hdf5(h5_path):
     return datasets
 
 
-def load_spectral_from_dssf_hdf5(h5_path, operator_name, temperature_or_beta):
+def load_spectral_from_dssf_hdf5(h5_path, operator_name, temperature_or_beta, sample_idx=None):
     """
     Load spectral function data from dssf_results.h5 file.
     
@@ -276,6 +276,7 @@ def load_spectral_from_dssf_hdf5(h5_path, operator_name, temperature_or_beta):
     h5_path: Path to dssf_results.h5 file
     operator_name: Name of operator (e.g., 'SzSz_q_Qx0_Qy0_Qz0')
     temperature_or_beta: Temperature or beta group name (e.g., 'T_0.500000' or 'beta_8.93617')
+    sample_idx: If provided, load only this specific sample. If None, average all samples.
     
     Returns: (omega_array, spectral_function_array, beta_value) or (None, None, None)
     """
@@ -299,24 +300,31 @@ def load_spectral_from_dssf_hdf5(h5_path, operator_name, temperature_or_beta):
             
             group = f[spectral_path]
             
-            # Collect all samples and average
-            all_spectral = []
-            sample_keys = [k for k in group.keys() if k.startswith('sample_')]
-            
-            for sample_key in sample_keys:
-                sample_group = group[sample_key]
-                real_part = sample_group['real'][:]
-                imag_part = sample_group['imag'][:] if 'imag' in sample_group else np.zeros_like(real_part)
+            # If sample_idx is provided, load only that sample
+            if sample_idx is not None:
+                sample_key = f'sample_{sample_idx}'
+                if sample_key not in group:
+                    print(f"Warning: {sample_key} not found in {spectral_path}")
+                    return None, None, None
                 
-                # Spectral function is the real part
-                all_spectral.append(real_part)
-            
-            if not all_spectral:
-                print(f"Warning: No samples found in {spectral_path}")
-                return None, None, None
-            
-            # Average over samples
-            spectral_avg = np.mean(all_spectral, axis=0)
+                sample_group = group[sample_key]
+                spectral = sample_group['real'][:]
+            else:
+                # Collect all samples and average
+                all_spectral = []
+                sample_keys = [k for k in group.keys() if k.startswith('sample_')]
+                
+                for sample_key in sample_keys:
+                    sample_group = group[sample_key]
+                    real_part = sample_group['real'][:]
+                    all_spectral.append(real_part)
+                
+                if not all_spectral:
+                    print(f"Warning: No samples found in {spectral_path}")
+                    return None, None, None
+                
+                # Average over samples (nanmean handles NaN values correctly)
+                spectral = np.nanmean(all_spectral, axis=0)
             
             # Extract beta value from temperature/beta group name
             beta = None
@@ -327,7 +335,7 @@ def load_spectral_from_dssf_hdf5(h5_path, operator_name, temperature_or_beta):
                 beta_str = temperature_or_beta.split('_')[1]
                 beta = np.inf if beta_str.lower() in ('inf', 'infty') else float(beta_str)
             
-            return frequencies, spectral_avg, beta
+            return frequencies, spectral, beta
             
     except Exception as e:
         print(f"Error loading from dssf_results.h5: {h5_path}, {operator_name}, {temperature_or_beta}: {e}")
@@ -338,7 +346,8 @@ def list_spectral_datasets_dssf_hdf5(h5_path):
     """
     List all spectral datasets available in a dssf_results.h5 file.
     
-    Returns: List of (operator_name, temp_beta_group, beta_value, num_samples) tuples
+    Returns: List of (operator_name, temp_beta_group, beta_value, sample_idx) tuples
+            Each individual sample is listed separately.
     """
     if not HAS_H5PY:
         return []
@@ -364,9 +373,6 @@ def list_spectral_datasets_dssf_hdf5(h5_path):
                     if not isinstance(tb_group, h5py.Group):
                         continue
                     
-                    # Count samples
-                    num_samples = len([k for k in tb_group.keys() if k.startswith('sample_')])
-                    
                     # Extract beta value
                     beta = None
                     if temp_beta_group.startswith('T_'):
@@ -376,7 +382,12 @@ def list_spectral_datasets_dssf_hdf5(h5_path):
                         beta_str = temp_beta_group.split('_')[1]
                         beta = np.inf if beta_str.lower() in ('inf', 'infty') else float(beta_str)
                     
-                    datasets.append((operator_name, temp_beta_group, beta, num_samples))
+                    # List each sample individually
+                    sample_keys = [k for k in tb_group.keys() if k.startswith('sample_')]
+                    for sample_key in sample_keys:
+                        # Extract sample index from 'sample_N'
+                        sample_idx = int(sample_key.split('_')[1])
+                        datasets.append((operator_name, temp_beta_group, beta, sample_idx))
     
     except Exception as e:
         print(f"Error listing dssf_results.h5: {h5_path}: {e}")
@@ -488,9 +499,15 @@ def load_spectral_file(filepath):
     """
     # Check if this is a DSSF HDF5 reference
     if filepath.startswith('DSSF_HDF5:'):
-        # Parse DSSF HDF5 reference: DSSF_HDF5:<h5_path>:<operator_name>:<temp_beta_group>
-        parts = filepath[10:].split(':', 2)  # Remove DSSF_HDF5: prefix and split
-        if len(parts) == 3:
+        # Parse DSSF HDF5 reference: DSSF_HDF5:<h5_path>:<operator_name>:<temp_beta_group>:<sample_idx>
+        parts = filepath[10:].split(':', 3)  # Remove DSSF_HDF5: prefix and split
+        if len(parts) == 4:
+            h5_path, operator_name, temp_beta_group, sample_idx_str = parts
+            sample_idx = int(sample_idx_str)
+            omega, spectral, beta = load_spectral_from_dssf_hdf5(h5_path, operator_name, temp_beta_group, sample_idx)
+            return omega, spectral
+        elif len(parts) == 3:
+            # Legacy format without sample_idx - average all samples
             h5_path, operator_name, temp_beta_group = parts
             omega, spectral, beta = load_spectral_from_dssf_hdf5(h5_path, operator_name, temp_beta_group)
             return omega, spectral
@@ -736,12 +753,12 @@ def _collect_spectral_files(structure_factor_dir, species_data, species_names,
         dssf_count = 0
         datasets = list_spectral_datasets_dssf_hdf5(dssf_h5_path)
         
-        for operator_name, temp_beta_group, beta_val, num_samples in datasets:
+        for operator_name, temp_beta_group, beta_val, sample_idx in datasets:
             if beta_val is None:
                 continue
             
-            # Create DSSF HDF5 reference path
-            ref_path = f"DSSF_HDF5:{dssf_h5_path}:{operator_name}:{temp_beta_group}"
+            # Create DSSF HDF5 reference path (now includes sample_idx)
+            ref_path = f"DSSF_HDF5:{dssf_h5_path}:{operator_name}:{temp_beta_group}:{sample_idx}"
             
             # Assign to beta bin
             beta_bin_idx = _assign_beta_bin(beta_val, beta_bins, beta_tol)
@@ -889,9 +906,9 @@ def _load_and_average_spectral(file_list):
     all_match = all(np.allclose(omega, ref_omega) for omega in all_omega)
     
     if all_match:
-        # Simple average if all omega arrays match
+        # Simple average if all omega arrays match (nanmean handles NaN correctly)
         mean_omega = ref_omega
-        mean_spectral = np.mean(all_spectral, axis=0)
+        mean_spectral = np.nanmean(all_spectral, axis=0)
     else:
         # Interpolate to common grid when omega arrays don't match
         print("    Warning: Omega arrays don't match across samples, interpolating to common grid")
@@ -910,16 +927,28 @@ def _load_and_average_spectral(file_list):
             f = interp1d(omega, spectral, kind='linear', bounds_error=False, fill_value=0.0)
             interpolated_spectral.append(f(mean_omega))
         
-        # Average the interpolated spectral functions
-        mean_spectral = np.mean(interpolated_spectral, axis=0)
+        # Average the interpolated spectral functions (nanmean handles NaN correctly)
+        mean_spectral = np.nanmean(interpolated_spectral, axis=0)
     
     return mean_omega, mean_spectral, individual_data
 
 
 def _extract_sample_idx(filepath):
     """Extract sample index from filepath or dataset name."""
-    # Handle HDF5 references
-    if filepath.startswith('HDF5:') or filepath.startswith('DSSF_HDF5:'):
+    # Handle DSSF HDF5 references: DSSF_HDF5:path:operator:beta_group:sample_idx
+    if filepath.startswith('DSSF_HDF5:'):
+        parts = filepath[10:].split(':')
+        if len(parts) >= 4:
+            try:
+                return int(parts[3])
+            except (ValueError, IndexError):
+                pass
+        # Fallback: try regex
+        m = re.search(r'sample[_]?(\d+)', filepath, re.IGNORECASE)
+        if m:
+            return int(m.group(1))
+    # Handle regular HDF5 references
+    elif filepath.startswith('HDF5:'):
         # Extract from dataset name
         m = re.search(r'sample[_]?(\d+)', filepath, re.IGNORECASE)
         if m:
@@ -1112,6 +1141,9 @@ def load_processed_qfi_data(data_dir, param_pattern='Jpm'):
         # Load QFI vs beta files
         qfi_files = glob.glob(os.path.join(plots_dir, 'qfi_vs_beta_*.dat'))
         
+        # Filter out per-sample files (only load averaged data)
+        qfi_files = [f for f in qfi_files if '_sample_' not in os.path.basename(f)]
+        
         for file_path in qfi_files:
             species = _extract_species_from_filename(file_path, 'qfi_vs_beta_*.dat')
             if not species:
@@ -1283,12 +1315,12 @@ def _plot_parameter_sweep_summary(data, data_dir, param_pattern):
                 import traceback
                 traceback.print_exc()
     
-    # Plot per-sample heatmaps for debugging
+    # Plot per-sample heatmaps
     if sample_species:
         print(f"\n{'='*70}")
-        print("Processing per-sample QFI heatmaps for debugging...")
+        print("Processing per-sample QFI heatmaps...")
         print(f"{'='*70}")
-        sample_outdir = os.path.join(plot_outdir, 'per_sample_debug')
+        sample_outdir = os.path.join(plot_outdir, 'per_sample')
         os.makedirs(sample_outdir, exist_ok=True)
         
         # Group samples by base species
@@ -1298,16 +1330,31 @@ def _plot_parameter_sweep_summary(data, data_dir, param_pattern):
             # Format: {base_species}_sample_{N}
             match = re.match(r'^(.+?)_sample_(\d+)$', species_key)
             if match:
-                base_species = match.group(1)
+                base_species_name = match.group(1)
                 sample_idx = int(match.group(2))
-                samples_by_species[base_species][sample_idx] = data_points
+                samples_by_species[base_species_name][sample_idx] = data_points
         
-        # Create subplot grids for each base species
-        for base_species, samples_dict in samples_by_species.items():
+        # Create individual heatmaps for each sample
+        for base_species_name, samples_dict in samples_by_species.items():
+            print(f"\nProcessing {len(samples_dict)} samples for {base_species_name}")
+            for sample_idx, data_points in sorted(samples_dict.items()):
+                sample_species_key = f"{base_species_name}_sample_{sample_idx}"
+                try:
+                    _plot_parameter_beta_heatmap(sample_species_key, data_points, 
+                                                 sample_outdir, param_pattern)
+                except Exception as e:
+                    print(f"ERROR processing heatmap for {sample_species_key}: {e}")
+                    import traceback
+                    traceback.print_exc()
+        
+        # Also create subplot grids for easy comparison
+        grid_outdir = os.path.join(plot_outdir, 'per_sample_grid')
+        os.makedirs(grid_outdir, exist_ok=True)
+        for base_species_name, samples_dict in samples_by_species.items():
             try:
-                _plot_all_samples_grid(base_species, samples_dict, sample_outdir, param_pattern)
+                _plot_all_samples_grid(base_species_name, samples_dict, grid_outdir, param_pattern)
             except Exception as e:
-                print(f"ERROR processing per-sample grid for {base_species}: {e}")
+                print(f"ERROR processing per-sample grid for {base_species_name}: {e}")
                 import traceback
                 traceback.print_exc()
     

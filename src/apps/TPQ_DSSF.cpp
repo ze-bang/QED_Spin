@@ -325,6 +325,77 @@ bool mergePerRankDSSFFiles(const std::string& output_dir, int num_ranks) {
                                dest.getId(), dst_path.c_str(),
                                H5P_DEFAULT, H5P_DEFAULT);
                         total_groups_merged++;
+                    } else {
+                        // Merge into existing operator group by copying sample subgroups
+                        H5::Group src_op = source.openGroup(src_path);
+                        hsize_t num_sample_groups = src_op.getNumObjs();
+                        for (hsize_t j = 0; j < num_sample_groups; ++j) {
+                            std::string sample_name = src_op.getObjnameByIdx(j);
+                            std::string src_sample_path = src_path + "/" + sample_name;
+                            std::string dst_sample_path = dst_path + "/" + sample_name;
+                            
+                            if (!dest.nameExists(dst_sample_path)) {
+                                // Sample doesn't exist, copy the whole sample group
+                                H5Ocopy(source.getId(), src_sample_path.c_str(),
+                                       dest.getId(), dst_sample_path.c_str(),
+                                       H5P_DEFAULT, H5P_DEFAULT);
+                                total_groups_merged++;
+                            } else {
+                                // Sample exists, need to merge datasets (append temperature data)
+                                // For SSSF, each sample contains: temperatures, expectation, variance, etc.
+                                // We need to concatenate the arrays from source into destination
+                                H5::Group src_sample = source.openGroup(src_sample_path);
+                                H5::Group dst_sample = dest.openGroup(dst_sample_path);
+                                
+                                // Get list of datasets to merge
+                                std::vector<std::string> datasets_to_merge = {
+                                    "temperatures", "expectation", "expectation_error",
+                                    "variance", "variance_error", "susceptibility", "susceptibility_error"
+                                };
+                                
+                                for (const auto& ds_name : datasets_to_merge) {
+                                    if (src_sample.nameExists(ds_name) && dst_sample.nameExists(ds_name)) {
+                                        // Read source data
+                                        H5::DataSet src_ds = src_sample.openDataSet(ds_name);
+                                        H5::DataSpace src_space = src_ds.getSpace();
+                                        hsize_t src_size;
+                                        src_space.getSimpleExtentDims(&src_size);
+                                        std::vector<double> src_data(src_size);
+                                        src_ds.read(src_data.data(), H5::PredType::NATIVE_DOUBLE);
+                                        src_ds.close();
+                                        
+                                        // Read destination data
+                                        H5::DataSet dst_ds = dst_sample.openDataSet(ds_name);
+                                        H5::DataSpace dst_space = dst_ds.getSpace();
+                                        hsize_t dst_size;
+                                        dst_space.getSimpleExtentDims(&dst_size);
+                                        std::vector<double> dst_data(dst_size);
+                                        dst_ds.read(dst_data.data(), H5::PredType::NATIVE_DOUBLE);
+                                        dst_ds.close();
+                                        
+                                        // Combine data
+                                        std::vector<double> combined_data;
+                                        combined_data.reserve(dst_size + src_size);
+                                        combined_data.insert(combined_data.end(), dst_data.begin(), dst_data.end());
+                                        combined_data.insert(combined_data.end(), src_data.begin(), src_data.end());
+                                        
+                                        // Delete old dataset and create new one with combined data
+                                        dst_sample.unlink(ds_name);
+                                        hsize_t combined_size = combined_data.size();
+                                        H5::DataSpace combined_space(1, &combined_size);
+                                        H5::DataSet new_ds = dst_sample.createDataSet(
+                                            ds_name, H5::PredType::NATIVE_DOUBLE, combined_space);
+                                        new_ds.write(combined_data.data(), H5::PredType::NATIVE_DOUBLE);
+                                        new_ds.close();
+                                    }
+                                }
+                                
+                                dst_sample.close();
+                                src_sample.close();
+                                total_groups_merged++;
+                            }
+                        }
+                        src_op.close();
                     }
                 }
                 src_static.close();
@@ -626,6 +697,10 @@ void saveDSSFStaticToHDF5(
         saveDataset("susceptibility_error", susceptibility_error);
         
         file.close();
+        
+        // MEMORY FIX: Force HDF5 to release internal caches
+        // The HDF5 library keeps metadata and data caches that grow over time
+        H5garbage_collect();
         
     } catch (H5::Exception& e) {
         std::cerr << "Warning: Failed to save DSSF static to HDF5: " << e.getCDetailMsg() << std::endl;
@@ -3015,67 +3090,89 @@ int main(int argc, char* argv[]) {
                         
 #ifdef WITH_CUDA
                         if (use_gpu) {
-                            // GPU-accelerated SSSF computation
-                            // Convert operators to GPU
-                            GPUOperator gpu_obs1(num_sites, spin_length);
-                            GPUOperator gpu_obs2(num_sites, spin_length);
+                            // Check GPU memory availability first
+                            size_t free_mem, total_mem;
+                            cudaMemGetInfo(&free_mem, &total_mem);
+                            size_t required_mem = (operators_identical ? 2 : 3) * N * sizeof(cuDoubleComplex);
                             
-                            bool gpu_ok = convertOperatorToGPU(obs_1[i], gpu_obs1);
-                            if (!operators_identical && gpu_ok) {
-                                gpu_ok = gpu_ok && convertOperatorToGPU(obs_2[i], gpu_obs2);
-                            }
-                            
-                            if (gpu_ok) {
-                                // Allocate device memory
-                                cuDoubleComplex* d_psi;
-                                cuDoubleComplex* d_chi;
-                                cuDoubleComplex* d_phi;
-                                cudaMalloc(&d_psi, N * sizeof(cuDoubleComplex));
-                                cudaMalloc(&d_chi, N * sizeof(cuDoubleComplex));
-                                if (!operators_identical) {
-                                    cudaMalloc(&d_phi, N * sizeof(cuDoubleComplex));
-                                }
-                                
-                                // Copy state to GPU
-                                cudaMemcpy(d_psi, tpq_state.data(), N * sizeof(cuDoubleComplex), cudaMemcpyHostToDevice);
-                                cudaMemset(d_chi, 0, N * sizeof(cuDoubleComplex));
-                                
-                                // Apply O₂ on GPU: chi = O₂|ψ⟩
-                                if (operators_identical) {
-                                    gpu_obs1.matVecGPU(d_psi, d_chi, N);
-                                } else {
-                                    gpu_obs2.matVecGPU(d_psi, d_chi, N);
-                                    cudaMemset(d_phi, 0, N * sizeof(cuDoubleComplex));
-                                    gpu_obs1.matVecGPU(d_psi, d_phi, N);
-                                }
-                                
-                                // Compute inner product using cuBLAS
-                                cublasHandle_t cublas_handle;
-                                cublasCreate(&cublas_handle);
-                                
-                                cuDoubleComplex result;
-                                if (operators_identical) {
-                                    // ⟨chi|chi⟩ = ||O|ψ⟩||²
-                                    cublasZdotc(cublas_handle, N, d_chi, 1, d_chi, 1, &result);
-                                } else {
-                                    // ⟨phi|chi⟩
-                                    cublasZdotc(cublas_handle, N, d_phi, 1, d_chi, 1, &result);
-                                }
-                                
-                                expectation_value = Complex(cuCreal(result), cuCimag(result));
-                                
-                                // Cleanup
-                                cublasDestroy(cublas_handle);
-                                cudaFree(d_psi);
-                                cudaFree(d_chi);
-                                if (!operators_identical) {
-                                    cudaFree(d_phi);
-                                }
-                            } else {
-                                std::cerr << "  GPU operator conversion failed, falling back to CPU" << std::endl;
+                            if (required_mem > free_mem * 0.9) {
+                                std::cerr << "  GPU memory insufficient for SSSF (need " 
+                                          << required_mem / (1024.0*1024.0*1024.0) << " GB, have "
+                                          << free_mem / (1024.0*1024.0*1024.0) << " GB free). Falling back to CPU." << std::endl;
                                 use_gpu = false;
-                            }
-                        }
+                            } else {
+                                // GPU-accelerated SSSF computation
+                                // Convert operators to GPU (only copies operator data, no state vector allocation)
+                                GPUOperator gpu_obs1(num_sites, spin_length);
+                                GPUOperator gpu_obs2(num_sites, spin_length);
+                                
+                                bool gpu_ok = convertOperatorToGPU(obs_1[i], gpu_obs1);
+                                if (!operators_identical && gpu_ok) {
+                                    gpu_ok = gpu_ok && convertOperatorToGPU(obs_2[i], gpu_obs2);
+                                }
+                                
+                                if (gpu_ok) {
+                                    // Allocate device memory with error checking
+                                    cuDoubleComplex* d_psi = nullptr;
+                                    cuDoubleComplex* d_chi = nullptr;
+                                    cuDoubleComplex* d_phi = nullptr;
+                                    
+                                    cudaError_t err1 = cudaMalloc(&d_psi, N * sizeof(cuDoubleComplex));
+                                    cudaError_t err2 = cudaMalloc(&d_chi, N * sizeof(cuDoubleComplex));
+                                    cudaError_t err3 = cudaSuccess;
+                                    if (!operators_identical) {
+                                        err3 = cudaMalloc(&d_phi, N * sizeof(cuDoubleComplex));
+                                    }
+                                    
+                                    if (err1 != cudaSuccess || err2 != cudaSuccess || err3 != cudaSuccess) {
+                                        std::cerr << "  GPU memory allocation failed. Falling back to CPU." << std::endl;
+                                        if (d_psi) cudaFree(d_psi);
+                                        if (d_chi) cudaFree(d_chi);
+                                        if (d_phi) cudaFree(d_phi);
+                                        use_gpu = false;
+                                    } else {
+                                        // Copy state to GPU
+                                        cudaMemcpy(d_psi, tpq_state.data(), N * sizeof(cuDoubleComplex), cudaMemcpyHostToDevice);
+                                        cudaMemset(d_chi, 0, N * sizeof(cuDoubleComplex));
+                                
+                                        // Apply O₂ on GPU: chi = O₂|ψ⟩
+                                        if (operators_identical) {
+                                            gpu_obs1.matVecGPU(d_psi, d_chi, N);
+                                        } else {
+                                            gpu_obs2.matVecGPU(d_psi, d_chi, N);
+                                            cudaMemset(d_phi, 0, N * sizeof(cuDoubleComplex));
+                                            gpu_obs1.matVecGPU(d_psi, d_phi, N);
+                                        }
+                                        
+                                        // Compute inner product using cuBLAS
+                                        cublasHandle_t cublas_handle;
+                                        cublasCreate(&cublas_handle);
+                                        
+                                        cuDoubleComplex result;
+                                        if (operators_identical) {
+                                            // ⟨chi|chi⟩ = ||O|ψ⟩||²
+                                            cublasZdotc(cublas_handle, N, d_chi, 1, d_chi, 1, &result);
+                                        } else {
+                                            // ⟨phi|chi⟩
+                                            cublasZdotc(cublas_handle, N, d_phi, 1, d_chi, 1, &result);
+                                        }
+                                        
+                                        expectation_value = Complex(cuCreal(result), cuCimag(result));
+                                        
+                                        // Cleanup
+                                        cublasDestroy(cublas_handle);
+                                        cudaFree(d_psi);
+                                        cudaFree(d_chi);
+                                        if (!operators_identical) {
+                                            cudaFree(d_phi);
+                                        }
+                                    }  // end cudaMalloc success
+                                } else {
+                                    std::cerr << "  GPU operator conversion failed, falling back to CPU" << std::endl;
+                                    use_gpu = false;
+                                }
+                            }  // end memory check success
+                        }  // end use_gpu
 #endif
                         
                         if (!use_gpu) {
@@ -3138,6 +3235,10 @@ int main(int argc, char* argv[]) {
                             susceptibility_vec,
                             susceptibility_error_vec
                         );
+                        
+                        // MEMORY FIX: Flush HDF5 library caches periodically to prevent memory accumulation
+                        // HDF5 library caches metadata and data chunks internally, which can grow unbounded
+                        H5garbage_collect();
                         
                         if (rank == 0) {
                             std::cout << "  Saved SSSF: " << obs_names[i] 
@@ -3240,6 +3341,10 @@ int main(int argc, char* argv[]) {
             std::cerr << "Rank " << rank << " failed time evolution: " << e.what() << std::endl;
             return false;
         }
+        
+        // MEMORY FIX: Force cleanup of HDF5 internal caches after each task
+        // This prevents memory accumulation across tasks due to HDF5's internal caching
+        H5garbage_collect();
         
         return true;
     };
