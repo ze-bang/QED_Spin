@@ -91,6 +91,11 @@ def run_nlce_ftlm_for_order(order, args):
     if args.use_gpu:
         cmd.append('--use_gpu')
     
+    # Add hybrid mode options
+    if args.hybrid_mode:
+        cmd.append('--hybrid_mode')
+        cmd.append(f'--hybrid_threshold={args.hybrid_threshold}')
+    
     # Add resummation method
     cmd.append(f'--resummation={args.resummation}')
     
@@ -371,12 +376,12 @@ Example usage:
                        help='Field direction (x,y,z)')
     
     # FTLM parameters
-    parser.add_argument('--ftlm_samples', type=int, default=80, 
-                       help='Number of random samples for FTLM')
-    parser.add_argument('--krylov_dim', type=int, default=400, 
-                       help='Krylov subspace dimension for FTLM')
-    parser.add_argument('--temp_min', type=float, default=0.01, 
-                       help='Minimum temperature')
+    parser.add_argument('--ftlm_samples', type=int, default=100, 
+                       help='Number of random samples for FTLM (higher = better statistics)')
+    parser.add_argument('--krylov_dim', type=int, default=500, 
+                       help='Krylov subspace dimension for FTLM (should be ~2x max cluster Hilbert space sqrt)')
+    parser.add_argument('--temp_min', type=float, default=0.001, 
+                       help='Minimum temperature (should match full ED for comparison)')
     parser.add_argument('--temp_max', type=float, default=20.0, 
                        help='Maximum temperature')
     parser.add_argument('--temp_bins', type=int, default=100, 
@@ -408,6 +413,13 @@ Example usage:
                        help='Use robust two-pipeline cross-validation for C(T)')
     parser.add_argument('--n_spins_per_unit', type=int, default=4,
                        help='Spins per expansion unit (default: 4 for pyrochlore tetrahedron)')
+    
+    # Hybrid mode options
+    parser.add_argument('--hybrid_mode', action='store_true',
+                       help='Use full ED for small clusters (<=10 sites), FTLM for larger. '
+                            'This improves accuracy for base clusters while maintaining efficiency.')
+    parser.add_argument('--hybrid_threshold', type=int, default=10,
+                       help='Maximum number of sites for full ED in hybrid mode (default: 10)')
     
     # Output options
     parser.add_argument('--symmetrized', action='store_true', 

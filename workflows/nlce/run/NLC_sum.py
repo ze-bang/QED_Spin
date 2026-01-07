@@ -760,6 +760,21 @@ class NLCExpansion:
         convergence = self.analyze_convergence(partial_sums)
         n = len(partial_sums)
         
+        # Count the actual number of distinct partial sums (non-zero increments)
+        # This is the true number of NLCE terms
+        # Note: partial_sums[0] is often 0 (order 0 placeholder), so we count non-zero increments
+        if len(partial_sums.shape) > 1:
+            increments = np.diff(partial_sums[:, 0])
+        else:
+            increments = np.diff(partial_sums)
+        actual_terms = np.sum(np.abs(increments) > 1e-15)  # Number of actual NLCE orders with contributions
+        
+        # For very few terms, resummation is unreliable - use direct summation
+        # Need at least 4 actual NLCE orders for reliable Shanks
+        if actual_terms <= 3:
+            print(f"  → Using DIRECT summation (only {actual_terms} NLCE orders)")
+            return 'direct'
+        
         # If already converged and not oscillatory, use direct sum
         if convergence['converged'] and not convergence['oscillatory']:
             return 'direct'
@@ -768,13 +783,13 @@ class NLCExpansion:
         if convergence['oscillatory']:
             return 'euler'
             
-        # For small number of terms, use Shanks
-        if n <= 5:
+        # For small number of terms (4-5), use Shanks
+        if actual_terms <= 5:
             return 'shanks'
 
         # For slowly converging series, try Wynn's epsilon
         if convergence['ratio_test'] is not None and convergence['ratio_test'] > 0.5:
-            if n >= 5:  # Wynn needs at least 5 terms for stability
+            if actual_terms >= 5:  # Wynn needs at least 5 terms for stability
                 return 'wynn'
             else:
                 return 'euler'

@@ -117,11 +117,21 @@ int build_lanczos_tridiagonal(
 
 /**
  * @brief Compute thermodynamic observables from a single FTLM sample
+ * 
+ * In FTLM, each sample approximates Tr[O exp(-βH)] / D where D is the Hilbert space dimension.
+ * The weights w_i from the Lanczos decomposition satisfy Σ w_i = 1, not D.
+ * 
+ * This function stores both the derived thermodynamic quantities and the raw partition
+ * function data (Z_sample, E_weighted, E2_weighted) needed for proper sample averaging.
+ * 
+ * For proper averaging: We must average Z_sample (not ln(Z_sample)) across samples
+ * because <ln Z> ≠ ln<Z> (Jensen's inequality).
  */
 ThermodynamicData compute_ftlm_thermodynamics(
     const std::vector<double>& ritz_values,
     const std::vector<double>& weights,
-    const std::vector<double>& temperatures
+    const std::vector<double>& temperatures,
+    uint64_t hilbert_dim
 ) {
     ThermodynamicData thermo;
     thermo.temperatures = temperatures;
@@ -134,41 +144,58 @@ ThermodynamicData compute_ftlm_thermodynamics(
     thermo.entropy.resize(n_temps);
     thermo.free_energy.resize(n_temps);
     
+    // Store raw data for proper averaging
+    thermo.Z_sample.resize(n_temps);
+    thermo.E_weighted.resize(n_temps);
+    thermo.E2_weighted.resize(n_temps);
+    
     // Find minimum energy for numerical stability
     double e_min = *std::min_element(ritz_values.begin(), ritz_values.end());
+    thermo.e_min = e_min;
+    
+    // ln(D) contribution to entropy - this is crucial for proper normalization
+    // If hilbert_dim = 0, skip this correction (backward compatibility)
+    double ln_D = (hilbert_dim > 0) ? std::log(static_cast<double>(hilbert_dim)) : 0.0;
     
     for (int t = 0; t < n_temps; t++) {
         double T = temperatures[t];
         double beta = 1.0 / T;
         
         // Compute partition function and observables using shifted energies
-        // Z = Σ_i w_i * exp(-β * (E_i - E_min))
-        double Z = 0.0;
-        double E_avg = 0.0;
-        double E2_avg = 0.0;
+        // Z_sample = Σ_i w_i * exp(-β * (E_i - E_min))
+        // This Z_sample approximates Tr[exp(-β(H-E_min))]/D
+        double Z_sample = 0.0;
+        double E_weighted_sum = 0.0;
+        double E2_weighted_sum = 0.0;
         
-        std::vector<double> boltzmann_factors(n_states);
-        
-        // Compute Boltzmann factors with shift
+        // Compute Boltzmann-weighted sums
         for (int i = 0; i < n_states; i++) {
             double shifted_energy = ritz_values[i] - e_min;
-            boltzmann_factors[i] = weights[i] * std::exp(-beta * shifted_energy);
-            Z += boltzmann_factors[i];
+            double boltz = weights[i] * std::exp(-beta * shifted_energy);
+            Z_sample += boltz;
+            E_weighted_sum += ritz_values[i] * boltz;
+            E2_weighted_sum += ritz_values[i] * ritz_values[i] * boltz;
         }
         
-        // Normalize and compute expectations
-        if (Z > 1e-300) {
-            for (int i = 0; i < n_states; i++) {
-                double prob = boltzmann_factors[i] / Z;
-                E_avg += prob * ritz_values[i];
-                E2_avg += prob * ritz_values[i] * ritz_values[i];
-            }
+        // Store raw values for averaging
+        thermo.Z_sample[t] = Z_sample;
+        thermo.E_weighted[t] = E_weighted_sum;
+        thermo.E2_weighted[t] = E2_weighted_sum;
+        
+        // Compute derived quantities for this sample
+        if (Z_sample > 1e-300) {
+            double E_avg = E_weighted_sum / Z_sample;
+            double E2_avg = E2_weighted_sum / Z_sample;
             
             // Thermodynamic quantities
             thermo.energy[t] = E_avg;
             thermo.specific_heat[t] = beta * beta * (E2_avg - E_avg * E_avg);
-            thermo.entropy[t] = beta * (E_avg - e_min) + std::log(Z);
-            thermo.free_energy[t] = e_min - T * std::log(Z);
+            
+            // Entropy: S = ln(Z_true) + β*E = ln(D) + ln(Z_sample) + β*(E - E_min)
+            thermo.entropy[t] = ln_D + std::log(Z_sample) + beta * (E_avg - e_min);
+            
+            // Free energy: F = E - T*S = -T*ln(Z_true) = E_min - T*ln(D) - T*ln(Z_sample)
+            thermo.free_energy[t] = e_min - T * ln_D - T * std::log(Z_sample);
         } else {
             // Very low temperature - use ground state
             thermo.energy[t] = e_min;
@@ -185,12 +212,31 @@ ThermodynamicData compute_ftlm_thermodynamics(
  * @brief Average thermodynamic data across multiple samples with error estimation
  * 
  * NOTE: Energy and specific heat can be directly averaged since they are expectation values.
- * However, entropy and free energy CANNOT be directly averaged because they involve ln(Z),
- * and the samples have different reference energies e_min.
  * 
- * The fix: After averaging energy and specific heat, recompute entropy by integrating
- * the specific heat: S(T) = ∫₀^T (C_v/T') dT'
- * Then compute free energy as F = E - TS
+ * For entropy and free energy, we use the individual sample values which correctly
+ * include the log(Z) contribution. Since each sample approximates the trace over the
+ * full Hilbert space, we can directly average them. The FTLM entropy formula
+ * S = β(E - e_min) + ln(Z) includes the proper normalization.
+ * 
+ * At high temperatures, this correctly approaches ln(D) where D is the Hilbert space 
+ * dimension. At low temperatures, the entropy reflects the ground state degeneracy 
+ * through the ln(Z) term.
+ */
+/**
+ * @brief Average FTLM samples using proper partition function averaging
+ * 
+ * CRITICAL: Due to Jensen's inequality, <ln(Z)> ≤ ln(<Z>).
+ * This causes a systematic bias when averaging entropy directly.
+ * 
+ * The correct approach is:
+ *   1. Average the partition functions: <Z_sample>
+ *   2. Average the weighted energy observables: <E_weighted>, <E2_weighted>
+ *   3. Compute thermodynamics from the averaged quantities
+ * 
+ * Since each sample uses the same e_min (Lanczos converges to the same ground state),
+ * we can average Z_sample directly.
+ * 
+ * The Hilbert space dimension D is extracted from the stored ln(D) in the entropy formula.
  */
 void average_ftlm_samples(
     const std::vector<ThermodynamicData>& sample_data,
@@ -212,76 +258,150 @@ void average_ftlm_samples(
     results.entropy_error.resize(n_temps, 0.0);
     results.free_energy_error.resize(n_temps, 0.0);
     
-    // First pass: compute means for energy and specific heat only
-    // (entropy and free_energy will be recomputed)
-    for (int s = 0; s < n_samples; s++) {
-        for (int t = 0; t < n_temps; t++) {
-            results.thermo_data.energy[t] += sample_data[s].energy[t];
-            results.thermo_data.specific_heat[t] += sample_data[s].specific_heat[t];
+    // Check if we have raw partition function data
+    bool have_Z_data = !sample_data[0].Z_sample.empty();
+    
+    if (have_Z_data) {
+        // Proper averaging: average Z_sample first, then compute S, F
+        
+        // Find global minimum energy across all samples
+        double e_min_global = sample_data[0].e_min;
+        for (int s = 1; s < n_samples; s++) {
+            e_min_global = std::min(e_min_global, sample_data[s].e_min);
         }
-    }
-    
-    for (int t = 0; t < n_temps; t++) {
-        results.thermo_data.energy[t] /= n_samples;
-        results.thermo_data.specific_heat[t] /= n_samples;
-    }
-    
-    // Recompute entropy by integrating specific heat
-    // S(T) = ∫₀^T (C_v/T') dT'
-    // Using trapezoidal rule on the logarithmically-spaced temperature grid
-    // Since T is log-spaced, the integral becomes: S = ∫ (C_v/T) dT = ∫ C_v d(ln T)
-    const auto& temps = results.thermo_data.temperatures;
-    const auto& Cv = results.thermo_data.specific_heat;
-    auto& S = results.thermo_data.entropy;
-    auto& F = results.thermo_data.free_energy;
-    auto& E = results.thermo_data.energy;
-    
-    // S(T=0) = 0 (assuming non-degenerate ground state)
-    S[0] = 0.0;
-    
-    // Integrate using trapezoidal rule: S(T_i) = S(T_{i-1}) + ∫_{T_{i-1}}^{T_i} (C_v/T) dT
-    for (int t = 1; t < n_temps; t++) {
-        double T_prev = temps[t-1];
-        double T_curr = temps[t];
         
-        // For logarithmically spaced temperatures:
-        // ∫_{T1}^{T2} (C_v/T) dT ≈ (C_v(T1)/T1 + C_v(T2)/T2) / 2 * (T2 - T1)
-        // Or equivalently using log spacing:
-        // ∫ C_v d(ln T) ≈ (C_v1 + C_v2) / 2 * (ln T2 - ln T1)
-        double log_T_diff = std::log(T_curr) - std::log(T_prev);
-        double Cv_avg = (Cv[t-1] + Cv[t]) / 2.0;
-        
-        S[t] = S[t-1] + Cv_avg * log_T_diff;
-    }
-    
-    // Compute free energy from F = E - TS
-    for (int t = 0; t < n_temps; t++) {
-        double T = temps[t];
-        F[t] = E[t] - T * S[t];
-    }
-    
-    // Second pass: compute standard errors for energy and specific_heat only
-    // (entropy and free_energy errors are derived quantities)
-    if (n_samples > 1) {
+        // Extract ln(D) from the first sample's entropy formula at highest T
+        // At high T: Z_sample → 1, E → <E>_uniform, β*(E-e_min) is small
+        // S = ln(D) + ln(Z_sample) + β*(E - e_min)
+        // So ln(D) = S - ln(Z_sample) - β*(E - e_min)
+        // We average ln(D) over all samples for robustness
+        double ln_D = 0.0;
+        int t_high = n_temps - 1;  // Highest temperature for smallest β*(E-e_min)
         for (int s = 0; s < n_samples; s++) {
-            for (int t = 0; t < n_temps; t++) {
-                double diff_e = sample_data[s].energy[t] - results.thermo_data.energy[t];
-                double diff_c = sample_data[s].specific_heat[t] - results.thermo_data.specific_heat[t];
+            double T = sample_data[s].temperatures[t_high];
+            double beta = 1.0 / T;
+            double S = sample_data[s].entropy[t_high];
+            double Z_s = sample_data[s].Z_sample[t_high];
+            double E_s = sample_data[s].energy[t_high];
+            double e_min_s = sample_data[s].e_min;
+            ln_D += S - std::log(Z_s) - beta * (E_s - e_min_s);
+        }
+        ln_D /= n_samples;
+        
+        // Average Z_sample, E_weighted, E2_weighted at each temperature
+        std::vector<double> Z_avg(n_temps, 0.0);
+        std::vector<double> E_weighted_avg(n_temps, 0.0);
+        std::vector<double> E2_weighted_avg(n_temps, 0.0);
+        
+        for (int t = 0; t < n_temps; t++) {
+            double T = sample_data[0].temperatures[t];
+            double beta = 1.0 / T;
+            
+            for (int s = 0; s < n_samples; s++) {
+                // Rescale Z_sample to common reference energy
+                double delta_e = sample_data[s].e_min - e_min_global;
+                double rescale = std::exp(-beta * delta_e);
                 
-                results.energy_error[t] += diff_e * diff_e;
-                results.specific_heat_error[t] += diff_c * diff_c;
+                Z_avg[t] += sample_data[s].Z_sample[t] * rescale;
+                E_weighted_avg[t] += sample_data[s].E_weighted[t] * rescale;
+                E2_weighted_avg[t] += sample_data[s].E2_weighted[t] * rescale;
+            }
+            
+            Z_avg[t] /= n_samples;
+            E_weighted_avg[t] /= n_samples;
+            E2_weighted_avg[t] /= n_samples;
+        }
+        
+        // Compute thermodynamics from averaged quantities
+        for (int t = 0; t < n_temps; t++) {
+            double T = sample_data[0].temperatures[t];
+            double beta = 1.0 / T;
+            
+            if (Z_avg[t] > 1e-300) {
+                double E_avg = E_weighted_avg[t] / Z_avg[t];
+                double E2_avg = E2_weighted_avg[t] / Z_avg[t];
+                
+                results.thermo_data.energy[t] = E_avg;
+                results.thermo_data.specific_heat[t] = beta * beta * (E2_avg - E_avg * E_avg);
+                
+                // S = ln(D) + ln(<Z_sample>) + β*(<E> - e_min_global)
+                results.thermo_data.entropy[t] = ln_D + std::log(Z_avg[t]) + beta * (E_avg - e_min_global);
+                
+                // F = e_min_global - T*ln(D) - T*ln(<Z_sample>)
+                results.thermo_data.free_energy[t] = e_min_global - T * ln_D - T * std::log(Z_avg[t]);
+            } else {
+                results.thermo_data.energy[t] = e_min_global;
+                results.thermo_data.specific_heat[t] = 0.0;
+                results.thermo_data.entropy[t] = 0.0;
+                results.thermo_data.free_energy[t] = e_min_global;
             }
         }
         
-        // Standard error = sqrt(variance / n_samples)
-        double norm = std::sqrt(static_cast<double>(n_samples * (n_samples - 1)));
+        // Compute errors from variance in the raw quantities
+        // Use jackknife-like variance estimation
+        if (n_samples > 1) {
+            for (int t = 0; t < n_temps; t++) {
+                double sum_sq_e = 0.0, sum_sq_c = 0.0, sum_sq_s = 0.0, sum_sq_f = 0.0;
+                
+                for (int s = 0; s < n_samples; s++) {
+                    double diff_e = sample_data[s].energy[t] - results.thermo_data.energy[t];
+                    double diff_c = sample_data[s].specific_heat[t] - results.thermo_data.specific_heat[t];
+                    double diff_s = sample_data[s].entropy[t] - results.thermo_data.entropy[t];
+                    double diff_f = sample_data[s].free_energy[t] - results.thermo_data.free_energy[t];
+                    
+                    sum_sq_e += diff_e * diff_e;
+                    sum_sq_c += diff_c * diff_c;
+                    sum_sq_s += diff_s * diff_s;
+                    sum_sq_f += diff_f * diff_f;
+                }
+                
+                double norm = std::sqrt(static_cast<double>(n_samples * (n_samples - 1)));
+                results.energy_error[t] = std::sqrt(sum_sq_e) / norm;
+                results.specific_heat_error[t] = std::sqrt(sum_sq_c) / norm;
+                results.entropy_error[t] = std::sqrt(sum_sq_s) / norm;
+                results.free_energy_error[t] = std::sqrt(sum_sq_f) / norm;
+            }
+        }
+    } else {
+        // Fallback: direct averaging (backward compatibility, but biased for S and F)
+        for (int s = 0; s < n_samples; s++) {
+            for (int t = 0; t < n_temps; t++) {
+                results.thermo_data.energy[t] += sample_data[s].energy[t];
+                results.thermo_data.specific_heat[t] += sample_data[s].specific_heat[t];
+                results.thermo_data.entropy[t] += sample_data[s].entropy[t];
+                results.thermo_data.free_energy[t] += sample_data[s].free_energy[t];
+            }
+        }
+        
         for (int t = 0; t < n_temps; t++) {
-            results.energy_error[t] = std::sqrt(results.energy_error[t]) / norm;
-            results.specific_heat_error[t] = std::sqrt(results.specific_heat_error[t]) / norm;
-            // Note: entropy and free_energy errors are set to 0 since they're derived from integrated quantities
-            // A proper error propagation would require more sophisticated treatment
-            results.entropy_error[t] = 0.0;
-            results.free_energy_error[t] = 0.0;
+            results.thermo_data.energy[t] /= n_samples;
+            results.thermo_data.specific_heat[t] /= n_samples;
+            results.thermo_data.entropy[t] /= n_samples;
+            results.thermo_data.free_energy[t] /= n_samples;
+        }
+        
+        if (n_samples > 1) {
+            for (int s = 0; s < n_samples; s++) {
+                for (int t = 0; t < n_temps; t++) {
+                    double diff_e = sample_data[s].energy[t] - results.thermo_data.energy[t];
+                    double diff_c = sample_data[s].specific_heat[t] - results.thermo_data.specific_heat[t];
+                    double diff_s = sample_data[s].entropy[t] - results.thermo_data.entropy[t];
+                    double diff_f = sample_data[s].free_energy[t] - results.thermo_data.free_energy[t];
+                    
+                    results.energy_error[t] += diff_e * diff_e;
+                    results.specific_heat_error[t] += diff_c * diff_c;
+                    results.entropy_error[t] += diff_s * diff_s;
+                    results.free_energy_error[t] += diff_f * diff_f;
+                }
+            }
+            
+            double norm = std::sqrt(static_cast<double>(n_samples * (n_samples - 1)));
+            for (int t = 0; t < n_temps; t++) {
+                results.energy_error[t] = std::sqrt(results.energy_error[t]) / norm;
+                results.specific_heat_error[t] = std::sqrt(results.specific_heat_error[t]) / norm;
+                results.entropy_error[t] = std::sqrt(results.entropy_error[t]) / norm;
+                results.free_energy_error[t] = std::sqrt(results.free_energy_error[t]) / norm;
+            }
         }
     }
 }
@@ -369,8 +489,9 @@ FTLMResults finite_temperature_lanczos(
         std::cout << "  Ground state estimate: " << ritz_values[0] << std::endl;
         
         // Compute thermodynamics for this sample
+        // Pass N (Hilbert space dimension) for proper entropy normalization
         ThermodynamicData sample_thermo = compute_ftlm_thermodynamics(
-            ritz_values, weights, temperatures
+            ritz_values, weights, temperatures, N
         );
         sample_data.push_back(sample_thermo);
         

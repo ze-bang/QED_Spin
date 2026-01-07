@@ -15,6 +15,14 @@ struct ThermodynamicData {
     std::vector<double> specific_heat;
     std::vector<double> entropy;
     std::vector<double> free_energy;
+    
+    // FTLM-specific: raw partition function data for proper averaging
+    // Z_sample[t] = Σ_i w_i * exp(-β_t * (E_i - e_min))
+    // These are needed to properly average across samples
+    std::vector<double> Z_sample;     // Partition function samples (for FTLM averaging)
+    std::vector<double> E_weighted;   // Σ_i w_i * E_i * exp(-β*(E_i - e_min)) for energy averaging
+    std::vector<double> E2_weighted;  // Σ_i w_i * E_i^2 * exp(-β*(E_i - e_min)) for Cv
+    double e_min = 0.0;               // Reference energy (ground state) for this sample
 };
 
 /**

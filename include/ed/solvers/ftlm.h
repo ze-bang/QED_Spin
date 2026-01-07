@@ -180,12 +180,14 @@ int build_lanczos_tridiagonal(
  * @param ritz_values Eigenvalues from tridiagonal diagonalization
  * @param weights Statistical weights (squared first component of eigenvectors)
  * @param temperatures Temperature points to evaluate
+ * @param hilbert_dim Hilbert space dimension (needed for proper entropy normalization)
  * @return ThermodynamicData structure with energy, entropy, specific heat, free energy
  */
 ThermodynamicData compute_ftlm_thermodynamics(
     const std::vector<double>& ritz_values,
     const std::vector<double>& weights,
-    const std::vector<double>& temperatures
+    const std::vector<double>& temperatures,
+    uint64_t hilbert_dim = 0
 );
 
 /**

@@ -93,45 +93,127 @@ class NLCExpansionFTLM:
         print(f"Loaded {len(self.clusters)} clusters")
     
     def _read_ftlm_from_hdf5(self, h5_file, cluster_id):
-        """Read FTLM data from HDF5 file."""
+        """
+        Read thermodynamic data from HDF5 file.
+        Supports both FTLM averaged data and full ED thermodynamic data.
+        """
         try:
             with h5py.File(h5_file, 'r') as f:
-                # Check for FTLM averaged data
-                if '/ftlm/averaged' not in f:
-                    return None
+                # First try FTLM averaged data
+                if '/ftlm/averaged' in f:
+                    ftlm_grp = f['/ftlm/averaged']
+                    
+                    # Check required datasets exist
+                    required = ['temperatures', 'energy', 'specific_heat', 'entropy', 'free_energy']
+                    if all(key in ftlm_grp for key in required):
+                        temps = ftlm_grp['temperatures'][:]
+                        energy = ftlm_grp['energy'][:]
+                        spec_heat = ftlm_grp['specific_heat'][:]
+                        entropy = ftlm_grp['entropy'][:]
+                        free_energy = ftlm_grp['free_energy'][:]
+                        
+                        # Get error bars if available
+                        energy_err = ftlm_grp['energy_error'][:] if 'energy_error' in ftlm_grp else np.zeros_like(energy)
+                        spec_heat_err = ftlm_grp['specific_heat_error'][:] if 'specific_heat_error' in ftlm_grp else np.zeros_like(spec_heat)
+                        entropy_err = ftlm_grp['entropy_error'][:] if 'entropy_error' in ftlm_grp else np.zeros_like(entropy)
+                        free_energy_err = ftlm_grp['free_energy_error'][:] if 'free_energy_error' in ftlm_grp else np.zeros_like(free_energy)
+                        
+                        return {
+                            'temperatures': temps,
+                            'energy': energy,
+                            'energy_error': energy_err,
+                            'specific_heat': spec_heat,
+                            'specific_heat_error': spec_heat_err,
+                            'entropy': entropy,
+                            'entropy_error': entropy_err,
+                            'free_energy': free_energy,
+                            'free_energy_error': free_energy_err
+                        }
                 
-                ftlm_grp = f['/ftlm/averaged']
+                # Fall back to full ED thermodynamic data format
+                if '/thermodynamics/energy' in f:
+                    thermo_grp = f['/thermodynamics']
+                    
+                    # Handle different storage formats:
+                    # Format 1: Datasets directly like /thermodynamics/energy, /thermodynamics/temperatures
+                    # Format 2: Nested like /thermodynamics/energy/values, /thermodynamics/energy/temperatures
+                    
+                    temps = None
+                    energy = None
+                    spec_heat = None
+                    entropy = None
+                    free_energy = None
+                    
+                    # Check if 'temperatures' is a dataset or group
+                    if 'temperatures' in thermo_grp:
+                        temps_item = thermo_grp['temperatures']
+                        if isinstance(temps_item, h5py.Dataset):
+                            temps = temps_item[:]
+                        else:
+                            temps = temps_item['values'][:] if 'values' in temps_item else None
+                    
+                    # Try 'energy/temperatures' as alternate location
+                    if temps is None and 'energy' in thermo_grp:
+                        energy_item = thermo_grp['energy']
+                        if isinstance(energy_item, h5py.Group) and 'temperatures' in energy_item:
+                            temps = energy_item['temperatures'][:]
+                    
+                    if temps is None:
+                        return None
+                    
+                    # Read each thermodynamic quantity (handle both direct datasets and nested groups)
+                    for name, var_name in [('energy', 'energy'), ('specific_heat', 'spec_heat'), 
+                                           ('entropy', 'entropy'), ('free_energy', 'free_energy')]:
+                        if name in thermo_grp:
+                            item = thermo_grp[name]
+                            if isinstance(item, h5py.Dataset):
+                                # Direct dataset format: /thermodynamics/energy
+                                locals()[var_name] = item[:]
+                            elif isinstance(item, h5py.Group) and 'values' in item:
+                                # Nested format: /thermodynamics/energy/values
+                                locals()[var_name] = item['values'][:]
+                    
+                    # Re-read into proper variables (locals() assignment doesn't work as expected)
+                    if 'energy' in thermo_grp:
+                        item = thermo_grp['energy']
+                        energy = item[:] if isinstance(item, h5py.Dataset) else item['values'][:] if 'values' in item else np.zeros_like(temps)
+                    else:
+                        energy = np.zeros_like(temps)
+                    
+                    if 'specific_heat' in thermo_grp:
+                        item = thermo_grp['specific_heat']
+                        spec_heat = item[:] if isinstance(item, h5py.Dataset) else item['values'][:] if 'values' in item else np.zeros_like(temps)
+                    else:
+                        spec_heat = np.zeros_like(temps)
+                    
+                    if 'entropy' in thermo_grp:
+                        item = thermo_grp['entropy']
+                        entropy = item[:] if isinstance(item, h5py.Dataset) else item['values'][:] if 'values' in item else np.zeros_like(temps)
+                    else:
+                        entropy = np.zeros_like(temps)
+                    
+                    if 'free_energy' in thermo_grp:
+                        item = thermo_grp['free_energy']
+                        free_energy = item[:] if isinstance(item, h5py.Dataset) else item['values'][:] if 'values' in item else np.zeros_like(temps)
+                    else:
+                        free_energy = np.zeros_like(temps)
+                    
+                    # Full ED has no statistical error - set to zero
+                    return {
+                        'temperatures': temps,
+                        'energy': energy,
+                        'energy_error': np.zeros_like(energy),
+                        'specific_heat': spec_heat,
+                        'specific_heat_error': np.zeros_like(spec_heat),
+                        'entropy': entropy,
+                        'entropy_error': np.zeros_like(entropy),
+                        'free_energy': free_energy,
+                        'free_energy_error': np.zeros_like(free_energy)
+                    }
                 
-                # Check required datasets exist
-                required = ['temperatures', 'energy', 'specific_heat', 'entropy', 'free_energy']
-                if not all(key in ftlm_grp for key in required):
-                    return None
-                
-                temps = ftlm_grp['temperatures'][:]
-                energy = ftlm_grp['energy'][:]
-                spec_heat = ftlm_grp['specific_heat'][:]
-                entropy = ftlm_grp['entropy'][:]
-                free_energy = ftlm_grp['free_energy'][:]
-                
-                # Get error bars if available
-                energy_err = ftlm_grp['energy_error'][:] if 'energy_error' in ftlm_grp else np.zeros_like(energy)
-                spec_heat_err = ftlm_grp['specific_heat_error'][:] if 'specific_heat_error' in ftlm_grp else np.zeros_like(spec_heat)
-                entropy_err = ftlm_grp['entropy_error'][:] if 'entropy_error' in ftlm_grp else np.zeros_like(entropy)
-                free_energy_err = ftlm_grp['free_energy_error'][:] if 'free_energy_error' in ftlm_grp else np.zeros_like(free_energy)
-                
-                return {
-                    'temperatures': temps,
-                    'energy': energy,
-                    'energy_error': energy_err,
-                    'specific_heat': spec_heat,
-                    'specific_heat_error': spec_heat_err,
-                    'entropy': entropy,
-                    'entropy_error': entropy_err,
-                    'free_energy': free_energy,
-                    'free_energy_error': free_energy_err
-                }
+                return None
         except Exception as e:
-            print(f"Warning: Error reading HDF5 FTLM data for cluster {cluster_id}: {e}")
+            print(f"Warning: Error reading HDF5 data for cluster {cluster_id}: {e}")
             return None
     
     def _read_ftlm_from_txt(self, ftlm_file, cluster_id):
@@ -1170,6 +1252,86 @@ class NLCExpansionFTLM:
         
         return checks
     
+    def recompute_entropy_from_specific_heat(self, results, verbose=True):
+        """
+        Recompute entropy by integrating specific heat.
+        
+        The key issue with NLCE is that entropy and free energy cannot be directly
+        summed because different clusters have different reference energies.
+        The physically correct approach is:
+        
+        1. Sum energy E(T) and specific heat C(T) using NLCE
+        2. Integrate specific heat to get entropy: S(T) = ∫₀^T (C_v/T') dT'
+        3. Compute free energy from F = E - TS
+        
+        This ensures thermodynamic consistency: dF/dT = -S
+        
+        Args:
+            results: Dictionary with 'temperatures', 'energy', 'specific_heat'
+            verbose: Print diagnostic info
+            
+        Returns:
+            Dictionary with updated 'entropy' and 'free_energy'
+        """
+        T = results['temperatures']
+        E = results['energy']
+        C = results['specific_heat']
+        n_temps = len(T)
+        
+        # Ensure specific heat is non-negative (can happen from numerical issues)
+        C_positive = np.maximum(C, 0.0)
+        
+        # Integrate specific heat: S(T) = ∫₀^T (C/T') dT'
+        # For logarithmically spaced T, use: ∫ C d(ln T) ≈ (C1 + C2)/2 * (ln T2 - ln T1)
+        S_integrated = np.zeros(n_temps)
+        S_integrated[0] = 0.0  # S(T→0) = 0 for non-degenerate ground state
+        
+        for i in range(1, n_temps):
+            T_prev = T[i-1]
+            T_curr = T[i]
+            log_T_diff = np.log(T_curr) - np.log(T_prev)
+            C_avg = (C_positive[i-1] + C_positive[i]) / 2.0
+            S_integrated[i] = S_integrated[i-1] + C_avg * log_T_diff
+        
+        # Compute free energy from F = E - TS
+        F_computed = E - T * S_integrated
+        
+        if verbose:
+            print("\n" + "="*80)
+            print("ENTROPY RECOMPUTATION FROM SPECIFIC HEAT")
+            print("="*80)
+            print("Method: S(T) = ∫₀^T (C_v/T') dT' using trapezoidal rule")
+            print(f"Temperature grid: {n_temps} points, T ∈ [{T[0]:.4e}, {T[-1]:.4e}]")
+            
+            # Compare with direct NLCE entropy (if available)
+            if 'entropy' in results and results['entropy'] is not None:
+                S_direct = results['entropy']
+                S_diff = S_integrated - S_direct
+                max_diff = np.max(np.abs(S_diff))
+                rel_diff_high_T = np.abs(S_integrated[-1] - S_direct[-1]) / (np.abs(S_direct[-1]) + 1e-15)
+                
+                print(f"\nComparison with direct NLCE entropy:")
+                print(f"  Max |S_integrated - S_direct| = {max_diff:.6f}")
+                print(f"  Relative difference at high T: {rel_diff_high_T*100:.2f}%")
+                
+                if max_diff > 0.1:
+                    print(f"  ⚠ Significant difference detected - using integrated entropy")
+                else:
+                    print(f"  ✓ Good agreement between methods")
+            
+            print(f"\nUpdated results:")
+            print(f"  S(T_max) = {S_integrated[-1]:.6f}")
+            print(f"  F(T_max) = {F_computed[-1]:.6f}")
+            print("="*80)
+        
+        # Update results
+        results['entropy'] = S_integrated
+        results['entropy_method'] = 'integrated_from_Cv'
+        results['free_energy'] = F_computed
+        results['free_energy_method'] = 'E_minus_TS'
+        
+        return results
+    
     def robust_specific_heat_pipeline(self, partial_sums_E, partial_sums_C, 
                                      resummation_method='robust', verbose=True):
         """
@@ -1821,7 +1983,7 @@ class NLCExpansionFTLM:
         return results
     
     def run(self, resummation_method='euler', order_cutoff=None, use_robust_pipeline=False, 
-            n_spins_per_unit=4, verbose=True):
+            n_spins_per_unit=4, verbose=True, recompute_entropy=True):
         """
         Run the complete NLC calculation.
         
@@ -1831,15 +1993,22 @@ class NLCExpansionFTLM:
             use_robust_pipeline: Use two-pipeline cross-validation for C(T)
             n_spins_per_unit: Spins per expansion unit (4 for pyrochlore tetrahedron)
             verbose: Print detailed per-order contribution breakdown
+            recompute_entropy: If True, recompute entropy from integrated specific heat
+                               (recommended for thermodynamic consistency)
         """
         self.read_clusters()
         self.read_ftlm_data()
         self.calculate_weights(verbose=verbose)
         results = self.sum_nlc(resummation_method, order_cutoff, use_robust_pipeline, verbose=verbose)
         
+        # Recompute entropy from specific heat for thermodynamic consistency
+        # This is the physically correct approach since direct NLCE summation of
+        # entropy has reference energy issues
+        if recompute_entropy:
+            results = self.recompute_entropy_from_specific_heat(results, verbose=verbose)
+        
         # Perform thermodynamic consistency checks
-        if use_robust_pipeline:
-            self.check_thermodynamic_consistency(results, n_spins_per_unit, verbose=True)
+        self.check_thermodynamic_consistency(results, n_spins_per_unit, verbose=verbose)
         
         return results
     

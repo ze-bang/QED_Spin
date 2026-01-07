@@ -62,6 +62,76 @@ def get_cluster_files(cluster_info_dir):
     return sorted(clusters)
 
 
+def run_full_ed_for_cluster(args):
+    """
+    Run FULL diagonalization for a small cluster.
+    Used in hybrid mode for small clusters (<=10 sites) to ensure maximum accuracy.
+    """
+    cluster_id, order, ed_executable, ham_dir, ftlm_dir, ftlm_options, symmetrized = args
+    
+    # Create output directory (same structure as FTLM for compatibility)
+    cluster_output_dir = os.path.join(ftlm_dir, f'cluster_{cluster_id}_order_{order}')
+    os.makedirs(cluster_output_dir, exist_ok=True)
+    
+    ham_subdir = os.path.join(ham_dir, f'cluster_{cluster_id}_order_{order}')
+    
+    if not os.path.exists(ham_subdir):
+        logging.warning(f"Hamiltonian directory not found for cluster {cluster_id}")
+        return False
+    
+    # Get number of sites
+    site_info_file = os.path.join(ham_subdir, "*_site_info.dat")
+    site_info_files = glob.glob(site_info_file)
+    
+    if not site_info_files:
+        logging.warning(f"Site info file not found for cluster {cluster_id}")
+        return False
+    
+    num_sites = 0
+    with open(site_info_files[0], 'r') as f:
+        for line in f:
+            if not line.startswith('#') and line.strip():
+                num_sites += 1
+    
+    # Build FULL ED command with thermodynamics
+    cmd = [
+        ed_executable,
+        ham_subdir,
+        '--method=FULL',
+        '--eigenvalues=FULL',
+        f'--output={cluster_output_dir}/output',
+        f'--num_sites={num_sites}',
+        '--spin_length=0.5',
+        '--thermo',
+        f'--temp_min={ftlm_options["temp_min"]}',
+        f'--temp_max={ftlm_options["temp_max"]}',
+        f'--temp_bins={ftlm_options["temp_bins"]}'
+    ]
+    
+    if symmetrized:
+        cmd.append('--symmetrized')
+    
+    try:
+        result = subprocess.run(cmd, check=True, capture_output=True, text=True)
+        logging.info(f"Full ED completed for cluster {cluster_id} (order {order}, {num_sites} sites)")
+        return True
+        
+    except subprocess.CalledProcessError as e:
+        # Check if output exists despite error
+        output_dir = os.path.join(cluster_output_dir, 'output')
+        h5_file = os.path.join(output_dir, 'ed_results.h5')
+        if os.path.exists(h5_file):
+            logging.warning(f"Full ED for cluster {cluster_id} crashed but output exists - treating as success")
+            return True
+        
+        logging.error(f"Error running Full ED for cluster {cluster_id}: {e}")
+        if e.stdout:
+            logging.error(f"Stdout: {e.stdout}")
+        if e.stderr:
+            logging.error(f"Stderr: {e.stderr}")
+        return False
+
+
 def run_ftlm_for_cluster(args):
     """Run FTLM for a single cluster"""
     cluster_id, order, ed_executable, ham_dir, ftlm_dir, ftlm_options, symmetrized, use_gpu = args
@@ -92,6 +162,17 @@ def run_ftlm_for_cluster(args):
             if not line.startswith('#') and line.strip():
                 num_sites += 1
     
+    # Compute adaptive Krylov dimension based on Hilbert space size
+    # Krylov dimension should be sufficient to capture low-energy spectrum
+    # Hilbert space dimension is 2^num_sites for spin-1/2
+    hilbert_dim = 2 ** num_sites
+    # Adaptive krylov: at least min(user_requested, hilbert_dim), 
+    # but scale up for small clusters to ensure accuracy
+    adaptive_krylov = min(ftlm_options["krylov_dim"], hilbert_dim)
+    # For very small clusters, use full diagonalization worth of Krylov vectors
+    if num_sites <= 8:  # Small clusters: ensure high accuracy
+        adaptive_krylov = min(hilbert_dim, max(adaptive_krylov, hilbert_dim // 2))
+    
     # Build FTLM command
     ftlm_method = 'FTLM_GPU' if use_gpu else 'FTLM'
     cmd = [
@@ -102,7 +183,7 @@ def run_ftlm_for_cluster(args):
         f'--num_sites={num_sites}',
         '--spin_length=0.5',
         f'--samples={ftlm_options["num_samples"]}',
-        f'--krylov_dim={ftlm_options["krylov_dim"]}',
+        f'--krylov_dim={adaptive_krylov}',
     ]
     
     if symmetrized:
@@ -192,12 +273,12 @@ Example usage:
                        help='Width of the random transverse field')
     
     # FTLM parameters
-    parser.add_argument('--ftlm_samples', type=int, default=40, 
-                       help='Number of random samples for FTLM')
-    parser.add_argument('--krylov_dim', type=int, default=150, 
-                       help='Krylov subspace dimension for FTLM')
+    parser.add_argument('--ftlm_samples', type=int, default=80, 
+                       help='Number of random samples for FTLM (higher = better statistics)')
+    parser.add_argument('--krylov_dim', type=int, default=300, 
+                       help='Krylov subspace dimension for FTLM (should be ~2x max cluster Hilbert space sqrt)')
     parser.add_argument('--temp_min', type=float, default=0.001, 
-                       help='Minimum temperature')
+                       help='Minimum temperature (should match full ED for comparison)')
     parser.add_argument('--temp_max', type=float, default=20.0, 
                        help='Maximum temperature')
     parser.add_argument('--temp_bins', type=int, default=100, 
@@ -219,6 +300,13 @@ Example usage:
                        help='Skip FTLM calculation step')
     parser.add_argument('--skip_nlc', action='store_true', 
                        help='Skip NLCE summation step')
+    
+    # Hybrid mode options
+    parser.add_argument('--hybrid_mode', action='store_true',
+                       help='Use full ED for small clusters (<=10 sites), FTLM for larger. '
+                            'This improves accuracy for base clusters while maintaining efficiency.')
+    parser.add_argument('--hybrid_threshold', type=int, default=10,
+                       help='Maximum number of sites for full ED in hybrid mode (default: 10)')
     
     # Parallel processing
     parser.add_argument('--parallel', action='store_true', 
@@ -369,31 +457,102 @@ Example usage:
             "temp_bins": args.temp_bins
         }
         
-        # Prepare arguments for each cluster
-        ftlm_tasks = []
-        for cluster_id, order, _ in clusters:
-            ftlm_tasks.append((cluster_id, order, args.ed_executable, ham_dir, 
-                             ftlm_dir, ftlm_options, args.symmetrized, args.use_gpu))
+        # Helper function to get number of sites for a cluster
+        def get_cluster_num_sites(cluster_id, order):
+            site_info_file = os.path.join(ham_dir, f'cluster_{cluster_id}_order_{order}', '*_site_info.dat')
+            site_info_files = glob.glob(site_info_file)
+            if not site_info_files:
+                return None
+            num_sites = 0
+            with open(site_info_files[0], 'r') as f:
+                for line in f:
+                    if not line.startswith('#') and line.strip():
+                        num_sites += 1
+            return num_sites
         
-        if args.parallel:
-            logging.info(f"Running FTLM in parallel with {args.num_cores} cores")
-            with multiprocessing.Pool(processes=args.num_cores) as pool:
-                results = list(tqdm(
-                    pool.imap(run_ftlm_for_cluster, ftlm_tasks),
-                    total=len(ftlm_tasks),
-                    desc="Running FTLM"
-                ))
+        # In hybrid mode, split clusters into full ED and FTLM groups
+        if args.hybrid_mode:
+            logging.info(f"Hybrid mode enabled: Full ED for clusters with <= {args.hybrid_threshold} sites")
+            full_ed_tasks = []
+            ftlm_tasks = []
             
-            success_count = sum(results)
-            logging.info(f"FTLM completed for {success_count} of {len(ftlm_tasks)} clusters")
+            for cluster_id, order, _ in clusters:
+                num_sites = get_cluster_num_sites(cluster_id, order)
+                if num_sites is not None and num_sites <= args.hybrid_threshold:
+                    full_ed_tasks.append((cluster_id, order, args.ed_executable, ham_dir, 
+                                         ftlm_dir, ftlm_options, args.symmetrized))
+                else:
+                    ftlm_tasks.append((cluster_id, order, args.ed_executable, ham_dir, 
+                                      ftlm_dir, ftlm_options, args.symmetrized, args.use_gpu))
+            
+            logging.info(f"  Full ED clusters: {len(full_ed_tasks)}")
+            logging.info(f"  FTLM clusters: {len(ftlm_tasks)}")
+            
+            # Run Full ED for small clusters
+            if full_ed_tasks:
+                logging.info("Running Full ED for small clusters...")
+                if args.parallel:
+                    with multiprocessing.Pool(processes=args.num_cores) as pool:
+                        ed_results = list(tqdm(
+                            pool.imap(run_full_ed_for_cluster, full_ed_tasks),
+                            total=len(full_ed_tasks),
+                            desc="Running Full ED"
+                        ))
+                else:
+                    ed_results = []
+                    for task in tqdm(full_ed_tasks, desc="Running Full ED"):
+                        ed_results.append(run_full_ed_for_cluster(task))
+                
+                ed_success = sum(ed_results)
+                logging.info(f"Full ED completed for {ed_success} of {len(full_ed_tasks)} clusters")
+            
+            # Run FTLM for large clusters
+            if ftlm_tasks:
+                logging.info("Running FTLM for large clusters...")
+                if args.parallel:
+                    with multiprocessing.Pool(processes=args.num_cores) as pool:
+                        ftlm_results = list(tqdm(
+                            pool.imap(run_ftlm_for_cluster, ftlm_tasks),
+                            total=len(ftlm_tasks),
+                            desc="Running FTLM"
+                        ))
+                else:
+                    ftlm_results = []
+                    for task in tqdm(ftlm_tasks, desc="Running FTLM"):
+                        ftlm_results.append(run_ftlm_for_cluster(task))
+                
+                ftlm_success = sum(ftlm_results)
+                logging.info(f"FTLM completed for {ftlm_success} of {len(ftlm_tasks)} clusters")
+            
+            success_count = (sum(ed_results) if full_ed_tasks else 0) + (sum(ftlm_results) if ftlm_tasks else 0)
+            logging.info(f"Total: {success_count} of {len(clusters)} clusters completed")
         else:
-            # Run sequentially
-            results = []
-            for task in tqdm(ftlm_tasks, desc="Running FTLM"):
-                results.append(run_ftlm_for_cluster(task))
+            # Original FTLM-only mode
+            # Prepare arguments for each cluster
+            ftlm_tasks = []
+            for cluster_id, order, _ in clusters:
+                ftlm_tasks.append((cluster_id, order, args.ed_executable, ham_dir, 
+                                 ftlm_dir, ftlm_options, args.symmetrized, args.use_gpu))
             
-            success_count = sum(results)
-            logging.info(f"FTLM completed for {success_count} of {len(ftlm_tasks)} clusters")
+            if args.parallel:
+                logging.info(f"Running FTLM in parallel with {args.num_cores} cores")
+                with multiprocessing.Pool(processes=args.num_cores) as pool:
+                    results = list(tqdm(
+                        pool.imap(run_ftlm_for_cluster, ftlm_tasks),
+                        total=len(ftlm_tasks),
+                        desc="Running FTLM"
+                    ))
+                
+                success_count = sum(results)
+                logging.info(f"FTLM completed for {success_count} of {len(ftlm_tasks)} clusters")
+            else:
+                # Run sequentially
+                results = []
+                for task in tqdm(ftlm_tasks, desc="Running FTLM"):
+                    results.append(run_ftlm_for_cluster(task))
+                
+                success_count = sum(results)
+                logging.info(f"FTLM completed for {success_count} of {len(ftlm_tasks)} clusters")
     else:
         logging.info("Skipping FTLM calculation step.")
     
