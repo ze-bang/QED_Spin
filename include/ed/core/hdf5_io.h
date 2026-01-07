@@ -1056,7 +1056,15 @@ public:
             
             std::string dataset_path = "/tpq/samples/sample_" + std::to_string(sample_index) + "/thermodynamics";
             
-            // Ensure group exists
+            // Ensure parent groups exist
+            if (!file.nameExists("/tpq")) {
+                file.createGroup("/tpq");
+            }
+            if (!file.nameExists("/tpq/samples")) {
+                file.createGroup("/tpq/samples");
+            }
+            
+            // Ensure sample group exists
             std::string sample_group = "/tpq/samples/sample_" + std::to_string(sample_index);
             if (!file.nameExists(sample_group)) {
                 file.createGroup(sample_group);
@@ -1130,7 +1138,15 @@ public:
             
             std::string dataset_path = "/tpq/samples/sample_" + std::to_string(sample_index) + "/norm";
             
-            // Ensure group exists
+            // Ensure parent groups exist
+            if (!file.nameExists("/tpq")) {
+                file.createGroup("/tpq");
+            }
+            if (!file.nameExists("/tpq/samples")) {
+                file.createGroup("/tpq/samples");
+            }
+            
+            // Ensure sample group exists
             std::string sample_group = "/tpq/samples/sample_" + std::to_string(sample_index);
             if (!file.nameExists(sample_group)) {
                 file.createGroup(sample_group);
@@ -2607,12 +2623,22 @@ public:
     
     /**
      * @brief Copy all TPQ samples from source file to destination file
+     * 
+     * For continue_quenching support, this function properly merges:
+     * - thermodynamics: Appends new rows (by step number) to existing data
+     * - norm: Appends new rows (by step number) to existing data
+     * - states: Copies new states (by beta value) that don't already exist
+     * 
      * @param source_path Path to source HDF5 file
      * @param dest_path Path to destination HDF5 file
-     * @return Number of samples copied
+     * @return Number of samples copied/merged
      */
     static int copyTPQSamples(const std::string& source_path, const std::string& dest_path) {
         int samples_copied = 0;
+        
+        // First pass: collect sample names and determine what needs merging
+        std::vector<std::string> sample_names;
+        std::vector<bool> sample_needs_merge;  // true if sample exists in dest and needs merging
         
         try {
             H5::H5File source(source_path, H5F_ACC_RDONLY);
@@ -2641,6 +2667,8 @@ public:
                 std::string src_sample_path = "/tpq/samples/" + sample_name;
                 std::string dst_sample_path = "/tpq/samples/" + sample_name;
                 
+                sample_names.push_back(sample_name);
+                
                 // If sample doesn't exist in destination, copy the entire group
                 if (!dest.nameExists(dst_sample_path)) {
                     if (H5Ocopy(source.getId(), src_sample_path.c_str(), 
@@ -2648,38 +2676,36 @@ public:
                                H5P_DEFAULT, H5P_DEFAULT) >= 0) {
                         samples_copied++;
                     }
+                    sample_needs_merge.push_back(false);  // Already fully copied
                 } else {
-                    // Sample exists - merge individual states from the source
+                    // Sample exists - need to merge
+                    sample_needs_merge.push_back(true);
+                    
+                    // Copy any states that don't exist yet (can be done with files open)
                     std::string src_states_path = src_sample_path + "/states";
                     std::string dst_states_path = dst_sample_path + "/states";
                     
                     if (source.nameExists(src_states_path)) {
-                        // Ensure destination states group exists
                         if (!dest.nameExists(dst_states_path)) {
                             dest.createGroup(dst_states_path);
                         }
                         
                         H5::Group src_states = source.openGroup(src_states_path);
                         hsize_t num_states = src_states.getNumObjs();
-                        bool any_copied = false;
                         
                         for (hsize_t j = 0; j < num_states; ++j) {
                             std::string state_name = src_states.getObjnameByIdx(j);
                             std::string src_state_path = src_states_path + "/" + state_name;
                             std::string dst_state_path = dst_states_path + "/" + state_name;
                             
-                            // Only copy if this specific state doesn't exist
                             if (!dest.nameExists(dst_state_path)) {
-                                if (H5Ocopy(source.getId(), src_state_path.c_str(),
-                                           dest.getId(), dst_state_path.c_str(),
-                                           H5P_DEFAULT, H5P_DEFAULT) >= 0) {
-                                    any_copied = true;
-                                }
+                                H5Ocopy(source.getId(), src_state_path.c_str(),
+                                       dest.getId(), dst_state_path.c_str(),
+                                       H5P_DEFAULT, H5P_DEFAULT);
                             }
                         }
                         
                         src_states.close();
-                        if (any_copied) samples_copied++;
                     }
                 }
             }
@@ -2689,7 +2715,97 @@ public:
             dest.close();
             
         } catch (H5::Exception& e) {
-            std::cerr << "Warning: Error copying TPQ samples: " << e.getDetailMsg() << std::endl;
+            std::cerr << "Warning: Error in first pass of TPQ merge: " << e.getDetailMsg() << std::endl;
+        }
+        
+        // Second pass: merge thermodynamics and norm data for samples that need it
+        // This is done separately to avoid issues with keeping files open
+        for (size_t i = 0; i < sample_names.size(); ++i) {
+            if (!sample_needs_merge[i]) continue;
+            
+            const std::string& sample_name = sample_names[i];
+            bool any_merged = false;
+            
+            // Extract sample index from sample_name (e.g., "sample_0" -> 0)
+            size_t sample_idx = 0;
+            size_t pos = sample_name.find('_');
+            if (pos != std::string::npos) {
+                try {
+                    sample_idx = std::stoul(sample_name.substr(pos + 1));
+                } catch (...) {
+                    continue;  // Skip if parsing fails
+                }
+            }
+            
+            // Merge thermodynamics data
+            try {
+                auto existing_thermo = loadTPQThermodynamics(dest_path, sample_idx);
+                auto new_thermo = loadTPQThermodynamics(source_path, sample_idx);
+                
+                if (!new_thermo.empty()) {
+                    // Find max step in existing data
+                    uint64_t max_existing_step = 0;
+                    for (const auto& pt : existing_thermo) {
+                        if (pt.step > max_existing_step) {
+                            max_existing_step = pt.step;
+                        }
+                    }
+                    
+                    // Append only new data points (step > max_existing_step)
+                    int appended = 0;
+                    for (const auto& pt : new_thermo) {
+                        if (pt.step > max_existing_step) {
+                            appendTPQThermodynamics(dest_path, sample_idx, pt);
+                            appended++;
+                        }
+                    }
+                    
+                    if (appended > 0) {
+                        any_merged = true;
+                        std::cout << "      Appended " << appended 
+                                  << " thermodynamics points to " << sample_name << std::endl;
+                    }
+                }
+            } catch (const std::exception& e) {
+                std::cerr << "Warning: Failed to merge thermodynamics for " << sample_name 
+                          << ": " << e.what() << std::endl;
+            }
+            
+            // Merge norm data
+            try {
+                auto existing_norm = loadTPQNorm(dest_path, sample_idx);
+                auto new_norm = loadTPQNorm(source_path, sample_idx);
+                
+                if (!new_norm.empty()) {
+                    // Find max step in existing data
+                    uint64_t max_existing_step = 0;
+                    for (const auto& pt : existing_norm) {
+                        if (pt.step > max_existing_step) {
+                            max_existing_step = pt.step;
+                        }
+                    }
+                    
+                    // Append only new data points
+                    int appended = 0;
+                    for (const auto& pt : new_norm) {
+                        if (pt.step > max_existing_step) {
+                            appendTPQNorm(dest_path, sample_idx, pt);
+                            appended++;
+                        }
+                    }
+                    
+                    if (appended > 0) {
+                        any_merged = true;
+                        std::cout << "      Appended " << appended 
+                                  << " norm points to " << sample_name << std::endl;
+                    }
+                }
+            } catch (const std::exception& e) {
+                std::cerr << "Warning: Failed to merge norm for " << sample_name 
+                          << ": " << e.what() << std::endl;
+            }
+            
+            if (any_merged) samples_copied++;
         }
         
         return samples_copied;
