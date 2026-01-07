@@ -1713,18 +1713,25 @@ int main(int argc, char* argv[]) {
         try {
             if (rank == 0) {
                 std::cout << "Reading ground state energy (minimum across all sources)..." << std::endl;
-            }
-            ground_state_energy = read_ground_state_energy(directory);
-            has_ground_state_energy = true;
-            if (rank == 0) {
+                ground_state_energy = read_ground_state_energy(directory);
+                has_ground_state_energy = true;
                 std::cout << "Final ground state energy (for spectral shift): " 
                           << std::fixed << std::setprecision(10) << ground_state_energy << std::endl;
             }
+            // Broadcast ground state energy to all ranks
+            MPI_Bcast(&ground_state_energy, 1, MPI_DOUBLE, 0, MPI_COMM_WORLD);
+            int has_gs_int = has_ground_state_energy ? 1 : 0;
+            MPI_Bcast(&has_gs_int, 1, MPI_INT, 0, MPI_COMM_WORLD);
+            has_ground_state_energy = (has_gs_int != 0);
         } catch (const std::exception& e) {
             if (rank == 0) {
                 std::cerr << "Warning: Could not read ground state energy: " << e.what() << std::endl;
                 std::cerr << "Proceeding without energy shift" << std::endl;
             }
+            // Ensure all ranks know it failed
+            MPI_Bcast(&ground_state_energy, 1, MPI_DOUBLE, 0, MPI_COMM_WORLD);
+            int has_gs_int = 0;
+            MPI_Bcast(&has_gs_int, 1, MPI_INT, 0, MPI_COMM_WORLD);
         }
     }
     
