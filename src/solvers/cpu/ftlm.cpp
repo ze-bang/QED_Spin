@@ -1686,6 +1686,131 @@ DynamicalResponseResults compute_dynamical_correlation_state(
 }
 
 /**
+ * @brief MEMORY-EFFICIENT spectral function via continued fraction (O1=O2 case)
+ * 
+ * This version DOES NOT store Lanczos basis vectors, making it suitable for
+ * very large Hilbert spaces (>16M states).
+ * 
+ * Memory: O(N) instead of O(krylov_dim × N)
+ */
+DynamicalResponseResults compute_dynamical_correlation_state_cf(
+    std::function<void(const Complex*, Complex*, int)> H,
+    std::function<void(const Complex*, Complex*, int)> O,
+    const ComplexVector& state,
+    uint64_t N,
+    const DynamicalResponseParameters& params,
+    double omega_min,
+    double omega_max,
+    uint64_t num_omega_bins,
+    double energy_shift
+) {
+    std::cout << "\n==========================================\n";
+    std::cout << "Spectral Function via Continued Fraction (Memory-Efficient)\n";
+    std::cout << "==========================================\n";
+    std::cout << "Hilbert space dimension: " << N << std::endl;
+    std::cout << "Krylov dimension: " << params.krylov_dim << std::endl;
+    std::cout << "Memory mode: NO BASIS STORAGE (O(N) memory)" << std::endl;
+    std::cout << "Frequency range: [" << omega_min << ", " << omega_max << "]" << std::endl;
+    std::cout << "Broadening: " << params.broadening << std::endl;
+    
+    DynamicalResponseResults results;
+    results.total_samples = 1;
+    
+    // Generate frequency grid
+    results.frequencies.resize(num_omega_bins);
+    double omega_step = (omega_max - omega_min) / std::max(uint64_t(1), num_omega_bins - 1);
+    for (size_t i = 0; i < num_omega_bins; i++) {
+        results.frequencies[i] = omega_min + i * omega_step;
+    }
+    
+    // Verify state is normalized
+    double state_norm = cblas_dznrm2(N, state.data(), 1);
+    if (std::abs(state_norm - 1.0) > 1e-10) {
+        std::cout << "  Warning: Input state norm = " << state_norm << " (expected 1.0)\n";
+    }
+    
+    ComplexVector psi = state;
+    Complex scale(1.0/state_norm, 0.0);
+    cblas_zscal(N, &scale, psi.data(), 1);
+    
+    // Apply operator O: |φ⟩ = O|ψ⟩
+    ComplexVector phi(N);
+    O(psi.data(), phi.data(), N);
+    
+    // Get norm of |φ⟩ = ||O|ψ⟩||
+    double phi_norm = cblas_dznrm2(N, phi.data(), 1);
+    double phi_norm_sq = phi_norm * phi_norm;
+    
+    if (phi_norm < 1e-14) {
+        std::cerr << "  Error: O|ψ⟩ has zero norm\n";
+        results.spectral_function.resize(num_omega_bins, 0.0);
+        results.spectral_function_imag.resize(num_omega_bins, 0.0);
+        results.spectral_error.resize(num_omega_bins, 0.0);
+        results.spectral_error_imag.resize(num_omega_bins, 0.0);
+        return results;
+    }
+    
+    std::cout << "  Norm of O|ψ⟩: " << phi_norm << std::endl;
+    std::cout << "  ||O|ψ⟩||² = " << phi_norm_sq << std::endl;
+    
+    // Normalize |φ⟩ for Lanczos
+    Complex phi_scale(1.0/phi_norm, 0.0);
+    cblas_zscal(N, &phi_scale, phi.data(), 1);
+    
+    // Build Lanczos tridiagonal WITHOUT storing basis vectors (memory-efficient!)
+    std::vector<double> alpha, beta;
+    uint64_t iterations = build_lanczos_tridiagonal(
+        H, phi, N, params.krylov_dim, params.tolerance,
+        false, 0,  // No reorthogonalization, no basis storage
+        alpha, beta
+    );
+    
+    uint64_t m = alpha.size();
+    std::cout << "  Lanczos iterations: " << m << std::endl;
+    
+    // Shift energies by ground state energy
+    double E_shift = energy_shift;
+    if (std::abs(E_shift) < 1e-14) {
+        // Auto-detect from tridiagonal minimum eigenvalue
+        std::vector<double> diag_copy = alpha;
+        std::vector<double> offdiag_copy(m > 1 ? m - 1 : 1);
+        for (size_t i = 0; i < m - 1; i++) {
+            offdiag_copy[i] = beta[i + 1];
+        }
+        int info = LAPACKE_dstevd(LAPACK_COL_MAJOR, 'N', m,
+                                 diag_copy.data(), offdiag_copy.data(),
+                                 nullptr, 1);
+        if (info == 0 && !diag_copy.empty()) {
+            E_shift = diag_copy[0];  // Smallest eigenvalue
+        }
+        std::cout << "  Ground state energy (auto-detected): " << E_shift << std::endl;
+    } else {
+        std::cout << "  Using provided ground state energy: " << E_shift << std::endl;
+    }
+    
+    // Shift alpha values
+    for (size_t i = 0; i < m; i++) {
+        alpha[i] -= E_shift;
+    }
+    
+    // Compute spectral function via continued fraction
+    results.spectral_function = continued_fraction_spectral_function(
+        alpha, beta, results.frequencies, params.broadening, phi_norm_sq
+    );
+    
+    // Imaginary part is zero for self-correlation
+    results.spectral_function_imag.resize(num_omega_bins, 0.0);
+    results.spectral_error.resize(num_omega_bins, 0.0);
+    results.spectral_error_imag.resize(num_omega_bins, 0.0);
+    
+    std::cout << "\n==========================================\n";
+    std::cout << "Continued Fraction Spectral Complete\n";
+    std::cout << "==========================================\n";
+    
+    return results;
+}
+
+/**
  * @brief Helper function to compute expectation values in Krylov basis
  */
 static void compute_krylov_expectation_values(

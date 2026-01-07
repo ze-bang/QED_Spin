@@ -2644,6 +2644,10 @@ int main(int argc, char* argv[]) {
                                 cudaMalloc(&d_psi, N * sizeof(cuDoubleComplex));
                                 cudaMemcpy(d_psi, tpq_state.data(), N * sizeof(cuDoubleComplex), cudaMemcpyHostToDevice);
                                 
+                                // Check if O1 == O2 based on spin operator types (enables memory optimization)
+                                // Pass as int: 1 = identical, 0 = not identical, -1 = auto-detect
+                                int operators_identical_flag = (op_type_1 == op_type_2) ? 1 : 0;
+                                
                                 // Call GPU wrapper for dynamical correlation on a single state
                                 auto [frequencies, S_real, S_imag] = GPUEDWrapper::runGPUDynamicalCorrelationState(
                                     &gpu_ham, &gpu_obs1, &gpu_obs2,
@@ -2653,7 +2657,8 @@ int main(int argc, char* argv[]) {
                                     omega_min, omega_max, num_omega_bins,
                                     broadening,
                                     0.0,  // temperature (not used for single-state)
-                                    ground_state_energy
+                                    ground_state_energy,
+                                    operators_identical_flag  // enables memory-efficient CF for large systems
                                 );
                                 
                                 // Package results
@@ -2713,20 +2718,40 @@ int main(int argc, char* argv[]) {
                         
                         // Process each operator pair
                         for (size_t i = 0; i < obs_1.size(); i++) {
-                            // Create function wrappers for operators
-                            auto O1_func = [&obs_1, i](const Complex* in, Complex* out, int size) {
-                                obs_1[i].apply(in, out, size);
-                            };
+                            // Check if operators are identical (can use memory-efficient continued fraction)
+                            bool operators_identical = (op_type_1 == op_type_2);
                             
-                            auto O2_func = [&obs_2, i](const Complex* in, Complex* out, int size) {
-                                obs_2[i].apply(in, out, size);
-                            };
+                            DynamicalResponseResults results;
                             
-                            // Compute spectral function
-                            auto results = compute_dynamical_correlation_state(
-                                H, O1_func, O2_func, tpq_state, N, params,
-                                omega_min, omega_max, num_omega_bins, 0.0, ground_state_energy
-                            );
+                            if (large_system && operators_identical) {
+                                // Use memory-efficient continued fraction for large systems with O1=O2
+                                if (rank == 0) {
+                                    std::cout << "  Using MEMORY-EFFICIENT continued fraction (O1=O2)" << std::endl;
+                                }
+                                
+                                auto O_func = [&obs_1, i](const Complex* in, Complex* out, int size) {
+                                    obs_1[i].apply(in, out, size);
+                                };
+                                
+                                results = compute_dynamical_correlation_state_cf(
+                                    H, O_func, tpq_state, N, params,
+                                    omega_min, omega_max, num_omega_bins, ground_state_energy
+                                );
+                            } else {
+                                // Standard path with basis storage (for O1≠O2 or small systems)
+                                auto O1_func = [&obs_1, i](const Complex* in, Complex* out, int size) {
+                                    obs_1[i].apply(in, out, size);
+                                };
+                                
+                                auto O2_func = [&obs_2, i](const Complex* in, Complex* out, int size) {
+                                    obs_2[i].apply(in, out, size);
+                                };
+                                
+                                results = compute_dynamical_correlation_state(
+                                    H, O1_func, O2_func, tpq_state, N, params,
+                                    omega_min, omega_max, num_omega_bins, 0.0, ground_state_energy
+                                );
+                            }
                             
                             // Save results to unified HDF5 file
                             saveDSSFSpectralToHDF5(
@@ -2973,21 +2998,22 @@ int main(int argc, char* argv[]) {
                             );
                             
                             // Save results for each temperature to unified HDF5 file
-                            for (const auto& [temperature, results] : results_map) {
-                                saveDSSFSpectralToHDF5(
-                                    unified_h5_path,
-                                    obs_names[i],
-                                    1.0/temperature,  // beta
-                                    sample_index,
-                                    results.frequencies,
-                                    results.spectral_function,
-                                    results.spectral_function_imag,
-                                    results.spectral_error,
-                                    results.spectral_error_imag,
-                                    temperature
-                                );
-                            
-                                if (rank == 0) {
+                            // Only rank 0 saves since results have been MPI_Reduced internally
+                            if (rank == 0) {
+                                for (const auto& [temperature, results] : results_map) {
+                                    saveDSSFSpectralToHDF5(
+                                        unified_h5_path,
+                                        obs_names[i],
+                                        1.0/temperature,  // beta
+                                        sample_index,
+                                        results.frequencies,
+                                        results.spectral_function,
+                                        results.spectral_function_imag,
+                                        results.spectral_error,
+                                        results.spectral_error_imag,
+                                        temperature
+                                    );
+                                
                                     std::cout << "  Saved FTLM thermal spectral to HDF5: " << obs_names[i] 
                                               << " T=" << temperature << std::endl;
                                 }
@@ -3062,20 +3088,21 @@ int main(int argc, char* argv[]) {
                         );
                         
                         // Save results to unified HDF5 file
-                        saveDSSFStaticToHDF5(
-                            unified_h5_path,
-                            obs_names[i],
-                            sample_index,
-                            results.temperatures,
-                            results.expectation,
-                            results.expectation_error,
-                            results.variance,
-                            results.variance_error,
-                            results.susceptibility,
-                            results.susceptibility_error
-                        );
-                        
+                        // Only rank 0 saves since results have been MPI_Reduced internally
                         if (rank == 0) {
+                            saveDSSFStaticToHDF5(
+                                unified_h5_path,
+                                obs_names[i],
+                                sample_index,
+                                results.temperatures,
+                                results.expectation,
+                                results.expectation_error,
+                                results.variance,
+                                results.variance_error,
+                                results.susceptibility,
+                                results.susceptibility_error
+                            );
+                            
                             std::cout << "  Saved static structure factor to HDF5: " << obs_names[i] << std::endl;
                         }
                     }

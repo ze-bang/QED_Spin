@@ -357,6 +357,7 @@ public:
      * @param broadening Lorentzian broadening parameter
      * @param temperature Temperature for thermal weighting (0 = none)
      * @param ground_state_energy Ground state energy for frequency shift (0 = auto-detect)
+     * @param operators_identical -1 = auto-detect via pointer comparison, 0 = false, 1 = true
      * @return tuple(frequencies, S_real, S_imag)
      */
     static std::tuple<std::vector<double>, std::vector<double>, std::vector<double>>
@@ -371,7 +372,8 @@ public:
                                    int num_omega_bins,
                                    double broadening,
                                    double temperature = 0.0,
-                                   double ground_state_energy = 0.0);
+                                   double ground_state_energy = 0.0,
+                                   int operators_identical = -1);
     
     /**
      * Run GPU-accelerated multi-temperature dynamical correlation (OPTIMIZED)

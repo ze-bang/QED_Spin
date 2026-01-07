@@ -424,6 +424,47 @@ DynamicalResponseResults compute_dynamical_correlation_state(
 );
 
 /**
+ * @brief MEMORY-EFFICIENT spectral function via continued fraction (O1=O2 case)
+ * 
+ * This version DOES NOT store Lanczos basis vectors, making it suitable for
+ * very large Hilbert spaces (>16M states) where storing krylov_dim vectors
+ * would require prohibitive memory (e.g., 100GB for 27 sites with krylov_dim=50).
+ * 
+ * LIMITATION: Only works when O1 = O2 (self-correlation).
+ * For O1 ≠ O2, use compute_dynamical_correlation_state which requires basis storage.
+ * 
+ * Algorithm:
+ * 1. Applies O to the given state: |φ⟩ = O|ψ⟩
+ * 2. Builds Lanczos tridiagonal WITHOUT storing basis vectors (3-term recurrence only)
+ * 3. Computes spectral function via continued fraction: G(z) = ||φ||²/(z-α₀-β₁²/...)
+ * 4. S(ω) = -Im[G(ω + iη)] / π
+ * 
+ * Memory: O(N) instead of O(krylov_dim × N)
+ * 
+ * @param H Hamiltonian matrix-vector product function
+ * @param O Operator for self-correlation (O₁ = O₂ = O)
+ * @param state Input quantum state |ψ⟩ (should be normalized)
+ * @param N Hilbert space dimension
+ * @param params Parameters for dynamical response calculation
+ * @param omega_min Minimum frequency
+ * @param omega_max Maximum frequency
+ * @param num_omega_bins Number of frequency points
+ * @param energy_shift Energy shift to apply (typically ground state energy, 0 = auto-detect from Krylov)
+ * @return DynamicalResponseResults containing S(ω) vs frequency
+ */
+DynamicalResponseResults compute_dynamical_correlation_state_cf(
+    std::function<void(const Complex*, Complex*, int)> H,
+    std::function<void(const Complex*, Complex*, int)> O,
+    const ComplexVector& state,
+    uint64_t N,
+    const DynamicalResponseParameters& params,
+    double omega_min,
+    double omega_max,
+    uint64_t num_omega_bins,
+    double energy_shift = 0.0
+);
+
+/**
  * @brief Save dynamical response results to file
  * 
  * @param results Dynamical response results to save

@@ -884,7 +884,8 @@ GPUEDWrapper::runGPUDynamicalCorrelationState(void* gpu_op_handle,
                                               int num_omega_bins,
                                               double broadening,
                                               double temperature,
-                                              double ground_state_energy) {
+                                              double ground_state_energy,
+                                              int operators_identical_flag) {
     if (!gpu_op_handle || !gpu_obs1_handle || !gpu_obs2_handle || !d_psi_state) {
         std::cerr << "Error: GPU handles or state is null\n";
         return {{}, {}, {}};
@@ -900,16 +901,24 @@ GPUEDWrapper::runGPUDynamicalCorrelationState(void* gpu_op_handle,
     // With krylov_dim=50, basis pool would need ~100GB
     bool large_system = (static_cast<uint64_t>(N) > (1ULL << 24));
     
-    // Check if operators are identical (can use memory-efficient continued fraction)
-    // Note: We compare pointers - if same operator is passed, use CF method
-    bool operators_identical = (gpu_obs1 == gpu_obs2);
+    // Determine if operators are identical:
+    // -1 = auto-detect via pointer comparison (fallback)
+    //  0 = explicitly not identical
+    //  1 = explicitly identical
+    bool ops_identical;
+    if (operators_identical_flag < 0) {
+        // Auto-detect: compare pointers (works if same GPUOperator object is passed)
+        ops_identical = (gpu_obs1 == gpu_obs2);
+    } else {
+        ops_identical = (operators_identical_flag != 0);
+    }
     
     if (large_system) {
         std::cout << "Large system detected (N=" << N << " > 16M states)\n";
         std::cout << "State vector size: " << (N * 16.0 / (1024*1024*1024)) << " GB\n";
         std::cout << "Basis pool would require: " << (krylov_dim * N * 16.0 / (1024*1024*1024)) << " GB\n";
         
-        if (operators_identical) {
+        if (ops_identical) {
             std::cout << "Using MEMORY-EFFICIENT continued fraction method (O1=O2)\n";
             
             // Create solver with explicit skip of basis pool allocation
@@ -1342,7 +1351,8 @@ GPUEDWrapper::runGPUDynamicalCorrelationState(void* gpu_op_handle,
                                               int num_omega_bins,
                                               double broadening,
                                               double temperature,
-                                              double ground_state_energy) {
+                                              double ground_state_energy,
+                                              int operators_identical) {
     std::cerr << "CUDA not available - cannot run GPU dynamical correlation state\n";
     return {{}, {}, {}};
 }
