@@ -46,8 +46,11 @@ public:
      * @param N Hilbert space dimension
      * @param krylov_dim Maximum Krylov subspace dimension
      * @param tolerance Convergence tolerance for Lanczos
+     * @param skip_basis_pool_alloc If true, skip pre-allocating the Lanczos basis pool
+     *                              (for large systems where memory is constrained)
      */
-    GPUFTLMSolver(GPUOperator* op, int N, int krylov_dim = 100, double tolerance = 1e-10);
+    GPUFTLMSolver(GPUOperator* op, int N, int krylov_dim = 100, double tolerance = 1e-10,
+                  bool skip_basis_pool_alloc = false);
     
     /**
      * @brief Destructor - cleanup GPU memory
@@ -305,6 +308,42 @@ public:
                                     double broadening,
                                     double temperature = 0.0,
                                     double energy_shift = 0.0);
+    
+    /**
+     * @brief MEMORY-EFFICIENT spectral function via continued fraction (O1=O2 case)
+     * 
+     * This version DOES NOT store Lanczos basis vectors, making it suitable for
+     * very large Hilbert spaces (>16M states) where storing krylov_dim vectors
+     * would require prohibitive memory (e.g., 100GB for 27 sites with krylov_dim=50).
+     * 
+     * LIMITATION: Only works when O1 = O2 (self-correlation).
+     * For O1 ≠ O2, use computeDynamicalCorrelationState which requires basis storage.
+     * 
+     * Algorithm:
+     * 1. Applies O to the given state: |φ⟩ = O|ψ⟩
+     * 2. Builds Lanczos tridiagonal WITHOUT storing basis vectors (3-term recurrence only)
+     * 3. Computes spectral function via continued fraction: G(z) = ||φ||²/(z-α₀-β₁²/...)
+     * 4. S(ω) = -Im[G(ω + iη)] / π
+     * 
+     * Memory: O(N) instead of O(krylov_dim × N)
+     * 
+     * @param d_psi Input quantum state on GPU (must be normalized)
+     * @param op_O GPU operator for O (self-correlation: O₁ = O₂ = O)
+     * @param omega_min Minimum frequency
+     * @param omega_max Maximum frequency
+     * @param num_omega_bins Number of frequency points
+     * @param broadening Lorentzian broadening parameter (η)
+     * @param energy_shift Ground state energy shift (0 = auto-detect from Krylov)
+     * @return Tuple of (frequencies, Re[S(ω)], Im[S(ω)])
+     */
+    std::tuple<std::vector<double>, std::vector<double>, std::vector<double>>
+    computeDynamicalCorrelationStateCF(const cuDoubleComplex* d_psi,
+                                       GPUOperator* op_O,
+                                       double omega_min,
+                                       double omega_max,
+                                       int num_omega_bins,
+                                       double broadening,
+                                       double energy_shift = 0.0);
     
     /**
      * @brief CORRECTED FTLM multi-sample multi-temperature spectral function

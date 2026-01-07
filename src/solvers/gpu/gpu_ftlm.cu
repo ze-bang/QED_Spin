@@ -187,7 +187,8 @@ __global__ void scaleKernel(cuDoubleComplex* x, double alpha, int N) {
 // GPUFTLMSolver Implementation
 // ============================================================================
 
-GPUFTLMSolver::GPUFTLMSolver(GPUOperator* op, int N, int krylov_dim, double tolerance)
+GPUFTLMSolver::GPUFTLMSolver(GPUOperator* op, int N, int krylov_dim, double tolerance,
+                             bool skip_basis_pool_alloc)
     : op_(op), N_(N), krylov_dim_(krylov_dim), tolerance_(tolerance),
       d_v_current_(nullptr), d_v_prev_(nullptr), d_w_(nullptr), d_temp_(nullptr),
       d_temp2_(nullptr),
@@ -198,6 +199,8 @@ GPUFTLMSolver::GPUFTLMSolver(GPUOperator* op, int N, int krylov_dim, double tole
       d_random_buffer_(nullptr), curand_initialized_(false),
       d_ritz_values_(nullptr), d_weights_(nullptr), d_temperatures_(nullptr),
       d_thermo_output_(nullptr), thermo_buffer_capacity_(0), thermo_buffers_allocated_(false),
+      d_tridiag_matrix_(nullptr), d_eigenvalues_(nullptr), d_work_cusolver_(nullptr),
+      d_info_cusolver_(nullptr), cusolver_lwork_(0), tridiag_capacity_(0),
       compute_stream_(nullptr), transfer_stream_(nullptr), streams_initialized_(false),
       gpu_memory_allocated_(false) {
     
@@ -243,15 +246,35 @@ GPUFTLMSolver::GPUFTLMSolver(GPUOperator* op, int N, int krylov_dim, double tole
     // Allocate GPU memory
     allocateMemory();
     
-    // Pre-allocate basis pool for efficiency
-    allocateBasisPool();
+    // Pre-allocate basis pool for efficiency (UNLESS explicitly skipped or too large)
+    // For very large systems (>16M states), basis pool would be prohibitive:
+    // E.g., 27 sites with krylov_dim=50: 50 × 134M × 16 bytes = 100 GB
+    size_t basis_pool_size = static_cast<size_t>(krylov_dim_) * N_ * sizeof(cuDoubleComplex);
+    size_t free_mem, total_mem;
+    cudaMemGetInfo(&free_mem, &total_mem);
+    
+    bool should_skip_basis_pool = skip_basis_pool_alloc || 
+                                   (basis_pool_size > free_mem * 0.5) ||
+                                   (N_ > (1 << 24));  // >16M states
+    
+    if (!should_skip_basis_pool) {
+        allocateBasisPool();
+        std::cout << "  Basis pool: pre-allocated (" << krylov_dim_ << " vectors, "
+                  << (basis_pool_size / (1024.0*1024.0*1024.0)) << " GB)\n";
+    } else {
+        std::cout << "  Basis pool: SKIPPED (large system or memory constraint)\n";
+        std::cout << "  System size: " << N_ << " states (" << (N_ * 16.0 / (1024*1024*1024)) << " GB per vector)\n";
+        std::cout << "  Would need: " << (basis_pool_size / (1024.0*1024.0*1024.0)) << " GB for basis pool\n";
+        std::cout << "  GPU memory: " << (free_mem / (1024.0*1024.0*1024.0)) << " GB free / "
+                  << (total_mem / (1024.0*1024.0*1024.0)) << " GB total\n";
+        std::cout << "  Use continued fraction (CF) methods for memory efficiency\n";
+    }
     
     std::cout << "GPU FTLM Solver initialized:\n";
     std::cout << "  Hilbert space dimension: " << N_ << "\n";
     std::cout << "  Krylov dimension: " << krylov_dim_ << "\n";
     std::cout << "  Tolerance: " << tolerance_ << "\n";
     std::cout << "  CUDA streams: enabled (compute + transfer)\n";
-    std::cout << "  Basis pool: pre-allocated (" << krylov_dim_ << " vectors)\n";
 }
 
 GPUFTLMSolver::~GPUFTLMSolver() {
@@ -2534,6 +2557,144 @@ GPUFTLMSolver::computeDynamicalCorrelationState(
     std::cout << "==========================================\n";
     
     return std::make_tuple(frequencies, spectral_func_real, spectral_func_imag);
+}
+
+// ============================================================================
+// MEMORY-EFFICIENT CONTINUED FRACTION SPECTRAL FUNCTION (NO BASIS STORAGE)
+// ============================================================================
+
+// Forward declaration of gpu_continued_fraction_spectral (defined later)
+static std::vector<double> gpu_continued_fraction_spectral(
+    const std::vector<double>& alpha,
+    const std::vector<double>& beta,
+    const std::vector<double>& omega_grid,
+    double broadening,
+    double norm_sq
+);
+
+/**
+ * @brief Memory-efficient spectral function via continued fraction (O1=O2 case)
+ * 
+ * This version DOES NOT store Lanczos basis vectors, making it suitable for
+ * very large Hilbert spaces (>16M states) where storing krylov_dim vectors
+ * would require prohibitive memory.
+ * 
+ * Memory: O(N) instead of O(krylov_dim × N)
+ */
+std::tuple<std::vector<double>, std::vector<double>, std::vector<double>>
+GPUFTLMSolver::computeDynamicalCorrelationStateCF(
+    const cuDoubleComplex* d_psi,
+    GPUOperator* op_O,
+    double omega_min,
+    double omega_max,
+    int num_omega_bins,
+    double broadening,
+    double energy_shift) {
+    
+    std::cout << "\n==========================================\n";
+    std::cout << "GPU Spectral Function via Continued Fraction (Memory-Efficient)\n";
+    std::cout << "==========================================\n";
+    std::cout << "Hilbert space dimension: " << N_ << "\n";
+    std::cout << "Krylov dimension: " << krylov_dim_ << "\n";
+    std::cout << "Memory mode: NO BASIS STORAGE (O(N) memory)\n";
+    std::cout << "Frequency range: [" << omega_min << ", " << omega_max << "]\n";
+    std::cout << "Broadening: " << broadening << "\n";
+    
+    // Generate frequency grid
+    std::vector<double> frequencies(num_omega_bins);
+    double omega_step = (omega_max - omega_min) / std::max(1, num_omega_bins - 1);
+    for (int i = 0; i < num_omega_bins; i++) {
+        frequencies[i] = omega_min + i * omega_step;
+    }
+    
+    // Verify state is normalized
+    double state_norm = vectorNorm(d_psi);
+    if (std::abs(state_norm - 1.0) > 1e-10) {
+        std::cout << "  Warning: Input state norm = " << state_norm << " (expected 1.0)\n";
+    }
+    
+    // Copy and normalize state
+    vectorCopy(d_psi, d_v_current_);
+    if (std::abs(state_norm - 1.0) > 1e-10) {
+        normalizeVector(d_v_current_);
+    }
+    
+    // Apply operator O: |φ⟩ = O|ψ⟩
+    cuDoubleComplex* d_phi = nullptr;
+    CUDA_CHECK(cudaMalloc(&d_phi, N_ * sizeof(cuDoubleComplex)));
+    
+    if (op_O != nullptr) {
+        op_O->matVecGPU(d_v_current_, d_phi, N_);
+    } else {
+        vectorCopy(d_v_current_, d_phi);
+    }
+    
+    // Get norm of |φ⟩ = ||O|ψ⟩||
+    double phi_norm = vectorNorm(d_phi);
+    double phi_norm_sq = phi_norm * phi_norm;
+    
+    if (phi_norm < 1e-14) {
+        std::cerr << "  Error: O|ψ⟩ has zero norm\n";
+        cudaFree(d_phi);
+        std::vector<double> zero_spec(num_omega_bins, 0.0);
+        return std::make_tuple(frequencies, zero_spec, zero_spec);
+    }
+    
+    std::cout << "  Norm of O|ψ⟩: " << phi_norm << "\n";
+    std::cout << "  ||O|ψ⟩||² = " << phi_norm_sq << "\n";
+    
+    // Normalize |φ⟩ for Lanczos
+    normalizeVector(d_phi);
+    
+    // Build Lanczos tridiagonal WITHOUT storing basis vectors (memory-efficient!)
+    // This uses pure 3-term recurrence: w = H*v - α*v - β*v_prev
+    std::vector<double> alpha, beta;
+    int iterations = buildLanczosTridiagonalFromVector(d_phi, false, 0, alpha, beta);
+    
+    cudaFree(d_phi);
+    
+    int m = alpha.size();
+    std::cout << "  Lanczos iterations: " << m << "\n";
+    
+    // Shift energies by ground state energy
+    double E_shift = energy_shift;
+    if (std::abs(E_shift) < 1e-14) {
+        // Auto-detect from Lanczos minimum
+        std::vector<double> diag_copy = alpha;
+        std::vector<double> offdiag_copy(m > 1 ? m - 1 : 1);
+        for (int i = 0; i < m - 1; i++) {
+            offdiag_copy[i] = beta[i + 1];
+        }
+        std::vector<double> eigenvalues(m);
+        int info = LAPACKE_dstevd(LAPACK_COL_MAJOR, 'N', m,
+                                 diag_copy.data(), offdiag_copy.data(),
+                                 nullptr, 1);
+        if (info == 0) {
+            E_shift = diag_copy[0];  // Smallest eigenvalue
+        }
+        std::cout << "  Ground state energy (auto-detected): " << E_shift << "\n";
+    } else {
+        std::cout << "  Using provided ground state energy: " << E_shift << "\n";
+    }
+    
+    // Shift alpha values (this shifts all eigenvalues)
+    for (int i = 0; i < m; i++) {
+        alpha[i] -= E_shift;
+    }
+    
+    // Compute spectral function via continued fraction on GPU
+    std::vector<double> spectral_real = gpu_continued_fraction_spectral(
+        alpha, beta, frequencies, broadening, phi_norm_sq
+    );
+    
+    // Imaginary part is zero for self-correlation (spectral function is real and positive)
+    std::vector<double> spectral_imag(num_omega_bins, 0.0);
+    
+    std::cout << "\n==========================================\n";
+    std::cout << "GPU Continued Fraction Spectral Complete\n";
+    std::cout << "==========================================\n";
+    
+    return std::make_tuple(frequencies, spectral_real, spectral_imag);
 }
 
 // ============================================================================

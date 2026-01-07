@@ -895,7 +895,39 @@ GPUEDWrapper::runGPUDynamicalCorrelationState(void* gpu_op_handle,
     GPUOperator* gpu_obs2 = static_cast<GPUOperator*>(gpu_obs2_handle);
     cuDoubleComplex* d_psi = static_cast<cuDoubleComplex*>(d_psi_state);
     
-    // Create GPU FTLM solver
+    // Check if this is a large system where basis storage is prohibitive
+    // For >16M states (24 bits), we need ~2GB per state vector
+    // With krylov_dim=50, basis pool would need ~100GB
+    bool large_system = (static_cast<uint64_t>(N) > (1ULL << 24));
+    
+    // Check if operators are identical (can use memory-efficient continued fraction)
+    // Note: We compare pointers - if same operator is passed, use CF method
+    bool operators_identical = (gpu_obs1 == gpu_obs2);
+    
+    if (large_system) {
+        std::cout << "Large system detected (N=" << N << " > 16M states)\n";
+        std::cout << "State vector size: " << (N * 16.0 / (1024*1024*1024)) << " GB\n";
+        std::cout << "Basis pool would require: " << (krylov_dim * N * 16.0 / (1024*1024*1024)) << " GB\n";
+        
+        if (operators_identical) {
+            std::cout << "Using MEMORY-EFFICIENT continued fraction method (O1=O2)\n";
+            
+            // Create solver with explicit skip of basis pool allocation
+            GPUFTLMSolver ftlm_solver(gpu_op, N, krylov_dim, 1e-10, true);  // skip_basis_pool = true
+            
+            // Use memory-efficient continued fraction
+            return ftlm_solver.computeDynamicalCorrelationStateCF(
+                d_psi, gpu_obs1, omega_min, omega_max,
+                num_omega_bins, broadening, ground_state_energy
+            );
+        } else {
+            std::cerr << "WARNING: Large system with O1 ≠ O2 requires basis storage!\n";
+            std::cerr << "This may cause GPU out-of-memory. Consider using CPU for O1 ≠ O2 case.\n";
+        }
+    }
+    
+    // Standard path with basis storage (for small systems or O1 ≠ O2)
+    // Create GPU FTLM solver (will auto-skip basis pool for very large systems)
     GPUFTLMSolver ftlm_solver(gpu_op, N, krylov_dim, 1e-10);
     
     // Compute dynamical correlation for specific state
@@ -1016,6 +1048,20 @@ GPUEDWrapper::runGPUDynamicalCorrelationMultiTemp(void* gpu_op_handle,
     std::cout << "Using correct FTLM formulation matching CPU implementation" << std::endl;
     std::cout << "==========================================" << std::endl;
     
+    // Check for large systems that may cause memory issues
+    bool large_system = (static_cast<uint64_t>(N) > (1ULL << 24));
+    if (large_system) {
+        std::cerr << "\n*** WARNING: LARGE SYSTEM DETECTED ***" << std::endl;
+        std::cerr << "N = " << N << " states (>" << (1 << 24) << ")" << std::endl;
+        std::cerr << "State vector size: " << (N * 16.0 / (1024*1024*1024)) << " GB" << std::endl;
+        std::cerr << "This method requires basis storage for eigenvector reconstruction." << std::endl;
+        std::cerr << "GPU memory may be insufficient. Consider:" << std::endl;
+        std::cerr << "  - Using 'spectral' method with O1=O2 (uses continued fraction)" << std::endl;
+        std::cerr << "  - Running on CPU with memory optimization" << std::endl;
+        std::cerr << "  - Reducing krylov_dim (currently: " << krylov_dim << ")" << std::endl;
+        std::cerr << "Continuing with potentially limited basis storage...\n" << std::endl;
+    }
+    
     if (!gpu_op_handle || !gpu_obs1_handle || !gpu_obs2_handle) {
         std::cerr << "Error: GPU operator handles are null\n";
         return {};
@@ -1025,7 +1071,7 @@ GPUEDWrapper::runGPUDynamicalCorrelationMultiTemp(void* gpu_op_handle,
     GPUOperator* gpu_obs1 = static_cast<GPUOperator*>(gpu_obs1_handle);
     GPUOperator* gpu_obs2 = static_cast<GPUOperator*>(gpu_obs2_handle);
     
-    // Create GPU FTLM solver
+    // Create GPU FTLM solver (constructor will auto-skip basis pool for large systems)
     GPUFTLMSolver ftlm_solver(gpu_op, N, krylov_dim, 1e-10);
     
     // Call the CORRECT FTLM multi-temperature spectral function
