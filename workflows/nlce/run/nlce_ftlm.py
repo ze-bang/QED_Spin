@@ -301,10 +301,13 @@ Example usage:
     parser.add_argument('--skip_nlc', action='store_true', 
                        help='Skip NLCE summation step')
     
-    # Hybrid mode options
-    parser.add_argument('--hybrid_mode', action='store_true',
+    # Hybrid mode options (enabled by default for accuracy)
+    parser.add_argument('--hybrid_mode', action='store_true', default=True,
                        help='Use full ED for small clusters (<=10 sites), FTLM for larger. '
-                            'This improves accuracy for base clusters while maintaining efficiency.')
+                            'This improves accuracy for base clusters while maintaining efficiency. '
+                            'Enabled by default. Use --no_hybrid_mode to disable.')
+    parser.add_argument('--no_hybrid_mode', action='store_true',
+                       help='Disable hybrid mode (use FTLM for all clusters)')
     parser.add_argument('--hybrid_threshold', type=int, default=10,
                        help='Maximum number of sites for full ED in hybrid mode (default: 10)')
     
@@ -335,6 +338,10 @@ Example usage:
                        help='Generate comprehensive verbose plots showing P(c), W(c), L*W(c), etc.')
     
     args = parser.parse_args()
+    
+    # Handle --no_hybrid_mode flag (overrides --hybrid_mode)
+    if args.no_hybrid_mode:
+        args.hybrid_mode = False
     
     # Handle verbose flag
     verbose = args.verbose and not args.quiet
