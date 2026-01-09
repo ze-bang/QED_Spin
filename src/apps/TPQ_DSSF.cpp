@@ -832,8 +832,18 @@ double read_ground_state_energy(const std::string& directory) {
     try {
         H5::H5File file(h5_path, H5F_ACC_RDONLY);
         
+        // Disable automatic error printing for existence checks
+        H5::Exception::dontPrint();
+        
         // Method 1: Try to read from /eigendata/eigenvalues (from exact diagonalization)
-        if (file.nameExists("/eigendata/eigenvalues")) {
+        bool has_eigendata = false;
+        try {
+            has_eigendata = file.nameExists("/eigendata") && file.nameExists("/eigendata/eigenvalues");
+        } catch (...) {
+            has_eigendata = false;
+        }
+        
+        if (has_eigendata) {
             H5::DataSet dataset = file.openDataSet("/eigendata/eigenvalues");
             H5::DataSpace dataspace = dataset.getSpace();
             hsize_t dims[1];
@@ -854,7 +864,17 @@ double read_ground_state_energy(const std::string& directory) {
         }
         
         // Method 2: Try to read from /tpq/samples/sample_0/thermodynamics (from TPQ)
-        if (file.nameExists("/tpq/samples/sample_0/thermodynamics")) {
+        bool has_tpq_thermo = false;
+        try {
+            has_tpq_thermo = file.nameExists("/tpq") && 
+                            file.nameExists("/tpq/samples") && 
+                            file.nameExists("/tpq/samples/sample_0") &&
+                            file.nameExists("/tpq/samples/sample_0/thermodynamics");
+        } catch (...) {
+            has_tpq_thermo = false;
+        }
+        
+        if (has_tpq_thermo) {
             H5::DataSet dataset = file.openDataSet("/tpq/samples/sample_0/thermodynamics");
             H5::DataSpace dataspace = dataset.getSpace();
             hsize_t dims[2];
