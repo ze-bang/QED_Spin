@@ -37,6 +37,8 @@ enum class DiagonalizationMethod {
     ARPACK_ADVANCED,
     LANCZOS_GPU,
     LANCZOS_GPU_FIXED_SZ,
+    BLOCK_LANCZOS_GPU,
+    BLOCK_LANCZOS_GPU_FIXED_SZ,
     DAVIDSON_GPU,
     LOBPCG_GPU,
     mTPQ_GPU,
@@ -851,6 +853,8 @@ std::optional<DiagonalizationMethod> parseMethod(const std::string& str) {
     // GPU methods
     if (lower == "lanczos_gpu") return DiagonalizationMethod::LANCZOS_GPU;
     if (lower == "lanczos_gpu_fixed_sz") return DiagonalizationMethod::LANCZOS_GPU_FIXED_SZ;
+    if (lower == "block_lanczos_gpu") return DiagonalizationMethod::BLOCK_LANCZOS_GPU;
+    if (lower == "block_lanczos_gpu_fixed_sz") return DiagonalizationMethod::BLOCK_LANCZOS_GPU_FIXED_SZ;
     if (lower == "davidson_gpu") return DiagonalizationMethod::DAVIDSON_GPU;
     if (lower == "lobpcg_gpu") return DiagonalizationMethod::LOBPCG_GPU;
     if (lower == "mtpq_gpu") return DiagonalizationMethod::mTPQ_GPU;
@@ -904,6 +908,8 @@ std::string methodToString(DiagonalizationMethod method) {
         // GPU methods
         case DiagonalizationMethod::LANCZOS_GPU: return "LANCZOS_GPU";
         case DiagonalizationMethod::LANCZOS_GPU_FIXED_SZ: return "LANCZOS_GPU_FIXED_SZ";
+        case DiagonalizationMethod::BLOCK_LANCZOS_GPU: return "BLOCK_LANCZOS_GPU";
+        case DiagonalizationMethod::BLOCK_LANCZOS_GPU_FIXED_SZ: return "BLOCK_LANCZOS_GPU_FIXED_SZ";
         case DiagonalizationMethod::DAVIDSON_GPU: return "DAVIDSON_GPU";
         case DiagonalizationMethod::LOBPCG_GPU: return "LOBPCG_GPU";
         case DiagonalizationMethod::mTPQ_GPU: return "mTPQ_GPU";

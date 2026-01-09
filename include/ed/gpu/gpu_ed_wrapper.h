@@ -51,6 +51,30 @@ public:
                                     bool eigenvectors = false);
     
     /**
+     * Run Block Lanczos algorithm on GPU
+     * Better for degenerate eigenvalues and improved convergence
+     */
+    static void runGPUBlockLanczos(void* gpu_op_handle,
+                                  int N, int max_iter, int num_eigs,
+                                  int block_size,
+                                  double tol,
+                                  std::vector<double>& eigenvalues,
+                                  std::string dir = "",
+                                  bool eigenvectors = false);
+    
+    /**
+     * Run GPU Block Lanczos for Fixed Sz sector
+     */
+    static void runGPUBlockLanczosFixedSz(void* gpu_op_handle,
+                                         int n_up,
+                                         int max_iter, int num_eigs,
+                                         int block_size,
+                                         double tol,
+                                         std::vector<double>& eigenvalues,
+                                         std::string dir = "",
+                                         bool eigenvectors = false);
+    
+    /**
      * Run GPU Davidson for Fixed Sz sector
      */
     static void runGPUDavidsonFixedSz(void* gpu_op_handle,

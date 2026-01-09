@@ -331,7 +331,12 @@ inline bool generate_automorphisms(const std::string& directory) {
     
     // Run the script
     std::cout << "Generating automorphisms..." << std::endl;
-    std::string cmd = "python3 \"" + finder_path + "\" --data_dir=\"" + directory + "\"";
+    
+    // Check for custom Python interpreter (environment variable ED_PYTHON)
+    const char* python_env = std::getenv("ED_PYTHON");
+    std::string python_cmd = (python_env && strlen(python_env) > 0) ? python_env : "python3";
+    
+    std::string cmd = python_cmd + " \"" + finder_path + "\" --data_dir=\"" + directory + "\"";
     std::cout << "Running: " << cmd << std::endl;
     
     if (!safe_system_call(cmd)) {

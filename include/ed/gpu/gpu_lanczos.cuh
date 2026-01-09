@@ -6,6 +6,7 @@
 #include <cuda_runtime.h>
 #include <cuComplex.h>
 #include <cublas_v2.h>
+#include <cusolverDn.h>
 #include <vector>
 #include <functional>
 #include <complex>
@@ -106,16 +107,74 @@ private:
 
 /**
  * GPU-accelerated Block Lanczos for finding multiple eigenvalues with degeneracies
+ * 
+ * Optimized for:
+ * - Degenerate eigenvalue problems where standard Lanczos may miss multiplicities
+ * - Better parallelism through block operations (BLAS-3 efficiency)
+ * - Improved convergence for clustered eigenvalues
+ * - Efficient GPU memory access patterns via column-major block storage
+ * 
+ * Architecture follows industry-standard patterns:
+ * - Uses cuBLAS batched/strided GEMM for block operations
+ * - cuSOLVER for QR factorization and band matrix diagonalization
+ * - Streaming for overlapped computation and transfer
+ * - Selective reorthogonalization with batched inner products
  */
 class GPUBlockLanczos {
 public:
+    /**
+     * @brief Construct GPU Block Lanczos solver
+     * @param op Pointer to GPU operator (Hamiltonian)
+     * @param max_iter Maximum number of block iterations
+     * @param block_size Number of vectors in each block (typically 4-16)
+     * @param tolerance Convergence tolerance for eigenvalues
+     */
     GPUBlockLanczos(GPUOperator* op, int max_iter, int block_size, double tolerance);
     ~GPUBlockLanczos();
     
+    /**
+     * @brief Run Block Lanczos to find lowest eigenvalues
+     * @param num_eigenvalues Number of eigenvalues to compute
+     * @param eigenvalues Output: computed eigenvalues
+     * @param eigenvectors Output: computed eigenvectors (if requested)
+     * @param compute_vectors Whether to compute eigenvectors
+     */
     void run(int num_eigenvalues,
             std::vector<double>& eigenvalues,
             std::vector<std::vector<std::complex<double>>>& eigenvectors,
             bool compute_vectors = false);
+    
+    /**
+     * @brief Run with custom starting block
+     * @param start_block Initial block of vectors (column-major, dimension × block_size)
+     */
+    void runWithStartBlock(const std::vector<std::complex<double>>& start_block,
+                          int num_eigenvalues,
+                          std::vector<double>& eigenvalues,
+                          std::vector<std::vector<std::complex<double>>>& eigenvectors,
+                          bool compute_vectors = false);
+    
+    // Performance statistics
+    struct Stats {
+        double total_time;
+        double matvec_time;
+        double ortho_time;
+        double qr_time;
+        double diag_time;
+        int block_iterations;
+        int total_matvecs;
+        double convergence_error;
+        uint64_t reorth_count;
+        size_t memory_used;
+    };
+    
+    Stats getStats() const { return stats_; }
+    
+    /**
+     * @brief Set reorthogonalization strategy
+     * @param strategy 0=none, 1=local (last few blocks), 2=periodic, 3=full
+     */
+    void setReorthStrategy(int strategy) { reorth_strategy_ = strategy; }
     
 private:
     GPUOperator* op_;
@@ -123,16 +182,150 @@ private:
     int block_size_;
     double tolerance_;
     int dimension_;
+    int reorth_strategy_;  // 0=none, 1=local, 2=periodic, 3=full
     
+    // CUDA handles
     cublasHandle_t cublas_handle_;
+    cusolverDnHandle_t cusolver_handle_;
+    cudaStream_t compute_stream_;
+    cudaStream_t transfer_stream_;
     
-    // Block vectors on GPU
-    cuDoubleComplex** d_block_vectors_;
+    // ========== GPU Memory - Block Storage (Column-Major) ==========
+    // Block vectors stored as contiguous column-major matrices for BLAS-3 efficiency
+    // V_j is stored at d_block_basis_[j] with layout: dimension_ × block_size_
     
+    cuDoubleComplex* d_V_current_;      // Current block V_j: dim × block_size
+    cuDoubleComplex* d_V_prev_;         // Previous block V_{j-1}: dim × block_size
+    cuDoubleComplex* d_W_;              // Work block H*V_j: dim × block_size
+    cuDoubleComplex* d_temp_block_;     // Temporary block: dim × block_size
+    
+    // Stored Lanczos blocks for reorthogonalization and Ritz vector computation
+    cuDoubleComplex** d_block_basis_;   // Array of pointers to stored blocks
+    int num_stored_blocks_;             // How many blocks we can store
+    int blocks_computed_;               // How many blocks have been computed
+    
+    // ========== Block Tridiagonal Matrix Coefficients ==========
+    // Block tridiagonal: T_jk = V_j^H * H * V_k
+    // Stored as: A_j (diagonal blocks), B_j (off-diagonal blocks)
+    // A_j = V_j^H * H * V_j (block_size × block_size, Hermitian)
+    // B_j = V_{j+1}^H * W_j = R_j from QR(W_j - V_j*A_j - V_{j-1}*B_{j-1}^H)
+    
+    std::vector<std::vector<std::complex<double>>> alpha_blocks_;  // Diagonal blocks A_j
+    std::vector<std::vector<std::complex<double>>> beta_blocks_;   // Off-diagonal blocks B_j
+    
+    // ========== cuSOLVER Workspace ==========
+    cuDoubleComplex* d_qr_work_;        // QR factorization workspace
+    cuDoubleComplex* d_tau_;            // Householder reflectors
+    int* d_info_;                       // cuSOLVER info
+    int qr_lwork_;                      // QR workspace size
+    
+    // ========== Overlap/Projection Matrices ==========
+    cuDoubleComplex* d_overlap_;        // block_size × block_size overlap matrix
+    cuDoubleComplex* d_projection_;     // For block orthogonalization
+    
+    // Statistics
+    Stats stats_;
+    
+    // ========== Memory Management ==========
     void allocateMemory();
     void freeMemory();
-    void orthogonalizeBlock(cuDoubleComplex** block, int size);
-    void qrFactorization(cuDoubleComplex** block, int size);
+    size_t estimateMemoryUsage() const;
+    
+    // ========== Initialization ==========
+    void initializeRandomBlock(cuDoubleComplex* d_block);
+    void orthonormalizeBlock(cuDoubleComplex* d_block);  // QR with column normalization
+    
+    // ========== Block Operations (BLAS-3 Optimized) ==========
+    
+    /**
+     * @brief Batched matrix-vector product: W = H * V (block version)
+     * Each column of V is multiplied by H independently
+     */
+    void blockMatVec(const cuDoubleComplex* d_V, cuDoubleComplex* d_W);
+    
+    /**
+     * @brief Compute block inner product: C = V^H * W
+     * Uses cuBLAS ZGEMM for BLAS-3 efficiency
+     * @param d_V First block (dim × block_size)
+     * @param d_W Second block (dim × block_size)
+     * @param d_C Output (block_size × block_size)
+     */
+    void blockInnerProduct(const cuDoubleComplex* d_V, const cuDoubleComplex* d_W,
+                          cuDoubleComplex* d_C);
+    
+    /**
+     * @brief Block AXPY: W = W - V * C
+     * Uses cuBLAS ZGEMM: W = W - V @ C where C is block_size × block_size
+     */
+    void blockAxpy(cuDoubleComplex* d_W, const cuDoubleComplex* d_V,
+                  const cuDoubleComplex* d_C, bool subtract = true);
+    
+    /**
+     * @brief QR factorization of block: V = Q * R
+     * Uses cuSOLVER for GPU-accelerated Householder QR
+     * @param d_block Input/Output: on exit contains Q
+     * @param d_R Output: upper triangular R (block_size × block_size)
+     * @return true if all columns are linearly independent
+     */
+    bool qrFactorization(cuDoubleComplex* d_block, cuDoubleComplex* d_R);
+    
+    /**
+     * @brief Block copy: dst = src
+     */
+    void blockCopy(const cuDoubleComplex* d_src, cuDoubleComplex* d_dst);
+    
+    /**
+     * @brief Check for deflation (near-zero columns after QR)
+     * @param d_R R factor from QR
+     * @param deflation_indices Output: indices of deflated columns
+     * @return Number of deflated vectors
+     */
+    int checkDeflation(const cuDoubleComplex* d_R, std::vector<int>& deflation_indices);
+    
+    // ========== Reorthogonalization ==========
+    
+    /**
+     * @brief Reorthogonalize current block against stored blocks
+     * Uses batched operations for efficiency when many blocks are stored
+     */
+    void reorthogonalizeBlock(cuDoubleComplex* d_block, int current_iter);
+    
+    /**
+     * @brief Full reorthogonalization against all stored blocks
+     * Uses streamed computation for large number of blocks
+     */
+    void fullReorthogonalization(cuDoubleComplex* d_block);
+    
+    // ========== Block Tridiagonal Solver ==========
+    
+    /**
+     * @brief Solve block tridiagonal eigenvalue problem
+     * Constructs full block tridiagonal matrix and solves with cuSOLVER
+     * @param num_blocks Number of block iterations completed
+     * @param num_eigs Number of eigenvalues to extract
+     * @param eigenvalues Output: eigenvalues
+     * @param tridiag_eigenvecs Output: eigenvectors in block tridiagonal basis
+     */
+    void solveBlockTridiagonal(int num_blocks, int num_eigs,
+                              std::vector<double>& eigenvalues,
+                              std::vector<std::vector<std::complex<double>>>& tridiag_eigenvecs);
+    
+    /**
+     * @brief Compute Ritz vectors from block tridiagonal eigenvectors
+     */
+    void computeBlockRitzVectors(
+        const std::vector<std::vector<std::complex<double>>>& tridiag_eigenvecs,
+        int num_vecs,
+        std::vector<std::vector<std::complex<double>>>& eigenvectors);
+    
+    // ========== Convergence Checking ==========
+    
+    /**
+     * @brief Check eigenvalue convergence using residual bounds
+     * Uses last block's contribution to estimate residuals
+     */
+    bool checkConvergence(int iter, const std::vector<double>& prev_eigenvalues,
+                         double& max_change);
 };
 
 // Kernel declarations for Lanczos helpers
@@ -169,6 +362,81 @@ __global__ void batchedOrthogonalizeKernel(cuDoubleComplex* const* basis,
                                           cuDoubleComplex* target,
                                           const cuDoubleComplex* overlaps,
                                           int num_vecs, int N);
+
+// ========== Block Lanczos Kernels ==========
+
+/**
+ * @brief Initialize random block with cuRAND
+ * Initializes a block of vectors (dim × block_size) with random complex values
+ * 
+ * @param block Output block (column-major, dim × block_size)
+ * @param dim Vector dimension
+ * @param block_size Number of columns
+ * @param seed Random seed
+ */
+__global__ void initRandomBlockKernel(cuDoubleComplex* block, int dim, int block_size,
+                                     unsigned long long seed);
+
+/**
+ * @brief Batched block inner product kernel
+ * Computes multiple V_i^H * W overlaps for block reorthogonalization
+ * 
+ * Each CUDA block handles one (block_basis, target_block) pair
+ * Output: overlap matrices of size block_size × block_size for each basis block
+ * 
+ * @param basis_blocks Array of pointers to stored blocks
+ * @param target_block Block to orthogonalize (dim × block_size)
+ * @param overlaps Output: array of overlap matrices (num_blocks × block_size × block_size)
+ * @param num_blocks Number of basis blocks
+ * @param dim Vector dimension
+ * @param block_size Block size
+ */
+__global__ void batchedBlockInnerProductKernel(const cuDoubleComplex* const* basis_blocks,
+                                               const cuDoubleComplex* target_block,
+                                               cuDoubleComplex* overlaps,
+                                               int num_blocks, int dim, int block_size);
+
+/**
+ * @brief Apply block orthogonalization corrections
+ * target = target - sum_i(basis[i] @ overlaps[i])
+ * Uses shared memory for overlap matrices
+ */
+__global__ void batchedBlockOrthogonalizeKernel(const cuDoubleComplex* const* basis_blocks,
+                                                cuDoubleComplex* target_block,
+                                                const cuDoubleComplex* overlaps,
+                                                int num_blocks, int dim, int block_size);
+
+/**
+ * @brief Column norm computation kernel
+ * Computes the 2-norm of each column in a block
+ * 
+ * @param block Input block (dim × block_size, column-major)
+ * @param norms Output: array of column norms (block_size)
+ * @param dim Vector dimension
+ * @param block_size Number of columns
+ */
+__global__ void columnNormsKernel(const cuDoubleComplex* block, double* norms,
+                                  int dim, int block_size);
+
+/**
+ * @brief Normalize columns of a block
+ * Each column is divided by its norm
+ */
+__global__ void normalizeColumnsKernel(cuDoubleComplex* block, const double* norms,
+                                       int dim, int block_size);
+
+/**
+ * @brief Check diagonal elements of R for deflation
+ * Counts how many diagonal elements are below threshold
+ * 
+ * @param R Upper triangular R from QR (block_size × block_size)
+ * @param threshold Deflation threshold
+ * @param block_size Matrix dimension
+ * @param deflation_flags Output: 1 if deflated, 0 otherwise
+ * @param num_deflated Output: total number of deflated columns
+ */
+__global__ void checkDeflationKernel(const cuDoubleComplex* R, double threshold,
+                                     int block_size, int* deflation_flags, int* num_deflated);
 
 } // namespace GPULanczosKernels
 

@@ -453,6 +453,120 @@ void GPUEDWrapper::runGPULanczosFixedSz(void* gpu_op_handle,
     std::cout << "  Throughput: " << op_stats.throughput << " GFLOPS\n";
 }
 
+void GPUEDWrapper::runGPUBlockLanczos(void* gpu_op_handle,
+                                     int N, int max_iter, int num_eigs,
+                                     int block_size,
+                                     double tol,
+                                     std::vector<double>& eigenvalues,
+                                     std::string dir,
+                                     bool eigenvectors) {
+    if (!gpu_op_handle) {
+        std::cerr << "Error: NULL GPU operator handle\n";
+        return;
+    }
+    
+    GPUOperator* gpu_op = static_cast<GPUOperator*>(gpu_op_handle);
+    
+    // Create GPU Block Lanczos solver
+    GPUBlockLanczos block_lanczos(gpu_op, max_iter, block_size, tol);
+    
+    // Run Block Lanczos
+    std::vector<std::vector<std::complex<double>>> eigvecs;
+    block_lanczos.run(num_eigs, eigenvalues, eigvecs, eigenvectors);
+    
+    // Save results to HDF5
+    if (!dir.empty()) {
+        if (eigenvectors && !eigvecs.empty()) {
+            HDF5IO::saveDiagonalizationResults(dir, eigenvalues, eigvecs, "GPU_BLOCK_LANCZOS");
+            std::cout << "GPU Block Lanczos: Saved " << eigenvalues.size() << " eigenvalues and " 
+                      << eigvecs.size() << " eigenvectors to " << dir << "/ed_results.h5" << std::endl;
+        } else {
+            try {
+                std::string hdf5_file = HDF5IO::createOrOpenFile(dir);
+                HDF5IO::saveEigenvalues(hdf5_file, eigenvalues);
+                std::cout << "GPU Block Lanczos: Saved " << eigenvalues.size() << " eigenvalues to " << hdf5_file << std::endl;
+            } catch (const std::exception& e) {
+                std::cerr << "Warning: Failed to save eigenvalues to HDF5: " << e.what() << std::endl;
+            }
+        }
+    }
+    
+    // Print statistics
+    auto stats = block_lanczos.getStats();
+    std::cout << "\nGPU Block Lanczos Statistics:\n";
+    std::cout << "  Total time: " << stats.total_time << " s\n";
+    std::cout << "  MatVec time: " << stats.matvec_time << " s (" << stats.total_matvecs << " matvecs)\n";
+    std::cout << "  Ortho time: " << stats.ortho_time << " s\n";
+    std::cout << "  QR time: " << stats.qr_time << " s\n";
+    std::cout << "  Diag time: " << stats.diag_time << " s\n";
+    std::cout << "  Block iterations: " << stats.block_iterations << "\n";
+    std::cout << "  Reorthogonalizations: " << stats.reorth_count << "\n";
+    
+    auto op_stats = gpu_op->getStats();
+    std::cout << "  Throughput: " << op_stats.throughput << " GFLOPS\n";
+}
+
+void GPUEDWrapper::runGPUBlockLanczosFixedSz(void* gpu_op_handle,
+                                            int n_up,
+                                            int max_iter, int num_eigs,
+                                            int block_size,
+                                            double tol,
+                                            std::vector<double>& eigenvalues,
+                                            std::string dir,
+                                            bool eigenvectors) {
+    if (!gpu_op_handle) {
+        std::cerr << "Error: NULL GPU operator handle\n";
+        return;
+    }
+    
+    // Cast to GPUFixedSzOperator
+    GPUFixedSzOperator* gpu_op = static_cast<GPUFixedSzOperator*>(gpu_op_handle);
+    int fixed_sz_dim = gpu_op->getFixedSzDimension();
+    
+    std::cout << "Running GPU Block Lanczos for fixed Sz sector (N_up=" << n_up 
+              << ", dim=" << fixed_sz_dim << ", block_size=" << block_size << ")\n";
+    
+    // Allocate GPU memory for vectors
+    gpu_op->allocateGPUMemory(fixed_sz_dim);
+    
+    // Create GPU Block Lanczos solver with fixed Sz operator
+    GPUBlockLanczos block_lanczos(gpu_op, max_iter, block_size, tol);
+    
+    // Run Block Lanczos
+    std::vector<std::vector<std::complex<double>>> eigvecs;
+    block_lanczos.run(num_eigs, eigenvalues, eigvecs, eigenvectors);
+    
+    // Save results to HDF5
+    if (!dir.empty()) {
+        if (eigenvectors && !eigvecs.empty()) {
+            HDF5IO::saveDiagonalizationResults(dir, eigenvalues, eigvecs, "GPU_BLOCK_LANCZOS_FIXED_SZ");
+            std::cout << "GPU Block Lanczos Fixed Sz: Saved " << eigenvalues.size() << " eigenvalues and " 
+                      << eigvecs.size() << " eigenvectors to " << dir << "/ed_results.h5" << std::endl;
+        } else {
+            try {
+                std::string hdf5_file = HDF5IO::createOrOpenFile(dir);
+                HDF5IO::saveEigenvalues(hdf5_file, eigenvalues);
+                std::cout << "GPU Block Lanczos Fixed Sz: Saved " << eigenvalues.size() << " eigenvalues to " << hdf5_file << std::endl;
+            } catch (const std::exception& e) {
+                std::cerr << "Warning: Failed to save eigenvalues to HDF5: " << e.what() << std::endl;
+            }
+        }
+    }
+    
+    // Print statistics
+    auto stats = block_lanczos.getStats();
+    std::cout << "\nGPU Block Lanczos Fixed Sz Statistics:\n";
+    std::cout << "  Total time: " << stats.total_time << " s\n";
+    std::cout << "  MatVec time: " << stats.matvec_time << " s (" << stats.total_matvecs << " matvecs)\n";
+    std::cout << "  Ortho time: " << stats.ortho_time << " s\n";
+    std::cout << "  QR time: " << stats.qr_time << " s\n";
+    std::cout << "  Diag time: " << stats.diag_time << " s\n";
+    std::cout << "  Block iterations: " << stats.block_iterations << "\n";
+    
+    auto op_stats = gpu_op->getStats();
+    std::cout << "  Throughput: " << op_stats.throughput << " GFLOPS\n";
+}
+
 void GPUEDWrapper::runGPUMicrocanonicalTPQ(void* gpu_op_handle,
                                            int N, int max_iter, int num_samples,
                                            int temp_interval,

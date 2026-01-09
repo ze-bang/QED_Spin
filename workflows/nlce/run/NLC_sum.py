@@ -39,10 +39,13 @@ class NLCExpansion:
         self.measure_spin = measure_spin  # Flag for measuring spin expectation values
         self.temp_values = np.logspace(np.log(temp_min)/np.log(10), np.log(temp_max)/np.log(10), num_temps)  # Default temperature range
 
-        
-
         self.clusters = {}  # Will store {cluster_id: {order, multiplicity, eigenvalues, etc.}}
         self.weights = {}   # Will store calculated weights for each cluster and property
+        
+        # Lanczos-boost tracking
+        self.truncated_clusters = {}  # {cluster_id: {num_eigenvalues, hilbert_dim, energy_cutoff}}
+        self.lanczos_boost_active = False
+        self.lanczos_boost_temp_max = None  # Maximum valid temperature for Lanczos-boosted results
         
     def read_clusters(self):
         """Read all cluster information from files in the cluster directory."""
@@ -92,12 +95,36 @@ class NLCExpansion:
                 'sp': None   # Will be loaded later    
             }
     def read_eigenvalues(self):
-        """Read eigenvalues for each cluster from ED output files (HDF5 format)."""
+        """Read eigenvalues for each cluster from ED output files (HDF5 format).
+        
+        Also detects Lanczos-boosted clusters with truncated spectra and tracks
+        their metadata for temperature validity estimation.
+        """
         for cluster_id in self.clusters:
-            cluster_output_dir = os.path.join(
+            cluster_base_dir = os.path.join(
                 self.eigenvalue_dir, 
-                f"cluster_{cluster_id}_order_{self.clusters[cluster_id]['order']}/output"
+                f"cluster_{cluster_id}_order_{self.clusters[cluster_id]['order']}"
             )
+            cluster_output_dir = os.path.join(cluster_base_dir, "output")
+            
+            # Check for Lanczos-boost metadata file
+            lanczos_boost_file = os.path.join(cluster_base_dir, "lanczos_boost_info.txt")
+            if os.path.exists(lanczos_boost_file):
+                self.lanczos_boost_active = True
+                metadata = {}
+                with open(lanczos_boost_file, 'r') as f:
+                    for line in f:
+                        if line.startswith('#') or ':' not in line:
+                            continue
+                        key, value = line.strip().split(':', 1)
+                        metadata[key.strip()] = value.strip()
+                
+                self.truncated_clusters[cluster_id] = {
+                    'num_eigenvalues': int(metadata.get('num_eigenvalues', 0)),
+                    'hilbert_dim': int(metadata.get('hilbert_dim', 0)),
+                    'order': int(metadata.get('order', 0)),
+                    'num_sites': int(metadata.get('num_sites', 0)),
+                }
             
             # Try HDF5 file first (new format)
             h5_file = os.path.join(cluster_output_dir, "ed_results.h5")
@@ -107,6 +134,12 @@ class NLCExpansion:
                         if '/eigendata/eigenvalues' in f:
                             eigenvalues = f['/eigendata/eigenvalues'][:]
                             self.clusters[cluster_id]['eigenvalues'] = np.array(eigenvalues)
+                            
+                            # For truncated clusters, calculate energy cutoff
+                            if cluster_id in self.truncated_clusters:
+                                E_min = np.min(eigenvalues)
+                                E_max = np.max(eigenvalues)
+                                self.truncated_clusters[cluster_id]['energy_cutoff'] = E_max - E_min
                             continue
                 except Exception as e:
                     print(f"Warning: Error reading HDF5 file for cluster {cluster_id}: {e}")
@@ -116,10 +149,61 @@ class NLCExpansion:
             if os.path.exists(eigenvalue_file):
                 with open(eigenvalue_file, 'r') as f:
                     eigenvalues = [float(line.strip()) for line in f if line.strip()]
-                self.clusters[cluster_id]['eigenvalues'] = np.array(eigenvalues)
+                eigenvalues = np.array(eigenvalues)
+                self.clusters[cluster_id]['eigenvalues'] = eigenvalues
+                
+                # For truncated clusters, calculate energy cutoff
+                if cluster_id in self.truncated_clusters:
+                    E_min = np.min(eigenvalues)
+                    E_max = np.max(eigenvalues)
+                    self.truncated_clusters[cluster_id]['energy_cutoff'] = E_max - E_min
                 continue
             
             print(f"Warning: Eigenvalue data not found for cluster {cluster_id}")
+        
+        # Estimate maximum valid temperature for Lanczos-boosted results
+        if self.lanczos_boost_active and self.truncated_clusters:
+            self._estimate_lanczos_boost_temp_validity()
+    
+    def _estimate_lanczos_boost_temp_validity(self):
+        """
+        Estimate the maximum valid temperature for Lanczos-boosted NLCE results.
+        
+        The truncation error is approximately:
+            error ≈ exp(-E_cutoff / T) × (remaining density of states)
+        
+        For T << E_cutoff/5, the error is negligible (< 1%).
+        We use the minimum energy cutoff across all truncated clusters.
+        """
+        energy_cutoffs = []
+        for cluster_id, info in self.truncated_clusters.items():
+            if 'energy_cutoff' in info and info['energy_cutoff'] > 0:
+                energy_cutoffs.append(info['energy_cutoff'])
+        
+        if energy_cutoffs:
+            # Use the minimum energy cutoff (most restrictive)
+            min_cutoff = min(energy_cutoffs)
+            # Conservative estimate: T_max ≈ E_cutoff / 5 for < 1% error
+            self.lanczos_boost_temp_max = min_cutoff / 5.0
+            
+            print(f"\n{'='*70}")
+            print(f"LANCZOS-BOOST MODE DETECTED")
+            print(f"{'='*70}")
+            print(f"  Truncated clusters: {len(self.truncated_clusters)}")
+            print(f"  Minimum energy cutoff: {min_cutoff:.4f}")
+            print(f"  Estimated valid temperature range: T < {self.lanczos_boost_temp_max:.4f}")
+            print(f"  (Results for T > {self.lanczos_boost_temp_max:.4f} may have significant errors)")
+            print(f"{'='*70}\n")
+            
+            # Detailed info for each truncated cluster
+            for cluster_id, info in sorted(self.truncated_clusters.items()):
+                num_eig = info.get('num_eigenvalues', '?')
+                dim = info.get('hilbert_dim', '?')
+                cutoff = info.get('energy_cutoff', 0)
+                fraction = num_eig / dim if isinstance(num_eig, int) and isinstance(dim, int) else '?'
+                print(f"  Cluster {cluster_id} (order {info.get('order', '?')}): "
+                      f"{num_eig}/{dim} eigenvalues ({fraction*100:.1f}%), "
+                      f"E_cutoff = {cutoff:.4f}")
     
     def get_subclusters(self, cluster_id):
         """
@@ -782,10 +866,6 @@ class NLCExpansion:
         # For oscillatory series, Euler works well
         if convergence['oscillatory']:
             return 'euler'
-            
-        # For small number of terms (4-5), use Shanks
-        if actual_terms <= 5:
-            return 'shanks'
 
         # For slowly converging series, try Wynn's epsilon
         if convergence['ratio_test'] is not None and convergence['ratio_test'] > 0.5:
@@ -829,6 +909,12 @@ class NLCExpansion:
         elif method == 'aitken':
             return self.aitken_delta2(partial_sums)
         elif method == 'pade':
+            # WARNING: Padé approximants are designed for power series in a variable x.
+            # NLCE partial sums are NOT power series coefficients - they are cumulative
+            # sums over cluster contributions. Using Padé here may give inconsistent results.
+            # Consider using 'euler', 'wynn', or 'shanks' instead.
+            print("WARNING: Padé method is not well-suited for NLCE summation. Results may be unreliable.")
+            print("         Consider using --resummation_method euler/wynn/shanks instead.")
             # For Padé, we need series coefficients, not partial sums
             # Convert partial sums to coefficients
             coeffs = np.diff(np.concatenate([[np.zeros_like(partial_sums[0])], partial_sums]), axis=0)
@@ -839,17 +925,39 @@ class NLCExpansion:
             print(f"Unknown method {method}, using direct summation")
             return partial_sums[-1]
     
-    def sum_nlc(self, resummation_method='auto', order_cutoff=None):
+    def sum_nlc(self, resummation_method='auto', order_cutoff=None, fix_negative_cv=False):
         """
         Perform the NLC summation with automatic resummation method selection.
+        
+        For Lanczos-boosted NLCE:
+        - At low T (< T_max_valid): use all orders including truncated clusters
+        - At high T (> T_max_valid): only use orders with full spectra
+        - This ensures resummation operates on valid data at all temperatures
         
         Args:
             resummation_method: Method for series acceleration ('auto', 'direct', 'euler', 'wynn', 'shanks', 'pade')
             order_cutoff: Maximum order to include in the summation
+            fix_negative_cv: If True, replace negative specific heat with derivative-based estimate.
+                            This is a workaround for resummation artifacts. Default False.
             
         Returns:
             Dictionary with summed properties
         """
+        
+        # Determine which orders have truncated (Lanczos-boosted) clusters
+        truncated_orders = set()
+        if self.lanczos_boost_active:
+            for cluster_id in self.truncated_clusters:
+                if cluster_id in self.clusters:
+                    truncated_orders.add(self.clusters[cluster_id]['order'])
+            
+            if truncated_orders:
+                max_full_order = min(truncated_orders) - 1
+                print(f"\nLanczos-boost temperature-adaptive summation:")
+                print(f"  - Orders with full spectrum: 1-{max_full_order}")
+                print(f"  - Orders with truncated spectrum: {sorted(truncated_orders)}")
+                print(f"  - Low-T (T < {self.lanczos_boost_temp_max:.4f}): use all orders")
+                print(f"  - High-T (T >= {self.lanczos_boost_temp_max:.4f}): use orders 1-{max_full_order} only")
 
         if self.measure_spin:
             # Initialize results for spin expectation values
@@ -877,49 +985,119 @@ class NLCExpansion:
                 
             print(f"Processing property: {prop}")
             
-            # Sum by order
-            sum_by_order = defaultdict(lambda: np.zeros_like(self.temp_values))
-            
-            for cluster_id, weight in self.weights[prop].items():
-                order = self.clusters[cluster_id]['order']
-                if order_cutoff is not None and order > order_cutoff:
-                    continue
+            # For Lanczos-boost: compute two sums and blend them
+            if self.lanczos_boost_active and truncated_orders and self.lanczos_boost_temp_max is not None:
+                # Sum by order, tracking full-spectrum vs truncated contributions separately
+                sum_by_order_full = defaultdict(lambda: np.zeros_like(self.temp_values))
+                sum_by_order_all = defaultdict(lambda: np.zeros_like(self.temp_values))
+                
+                for cluster_id, weight in self.weights[prop].items():
+                    order = self.clusters[cluster_id]['order']
+                    if order_cutoff is not None and order > order_cutoff:
+                        continue
                     
-                sum_by_order[order] += weight * self.clusters[cluster_id]['multiplicity']
-            
-            # Create array of partial sums
-            if sum_by_order:
-                max_order = max(sum_by_order.keys())
-                partial_sums = []
-                cumulative_sum = np.zeros_like(self.temp_values)
+                    contribution = weight * self.clusters[cluster_id]['multiplicity']
+                    sum_by_order_all[order] += contribution
+                    
+                    # Only include in full-spectrum sum if not a truncated cluster
+                    if cluster_id not in self.truncated_clusters:
+                        sum_by_order_full[order] += contribution
                 
-                for order in range(max_order + 1):
-                    if order in sum_by_order:
-                        cumulative_sum += sum_by_order[order]
-                    partial_sums.append(cumulative_sum.copy())
-                
-                partial_sums = np.array(partial_sums)
-                
-                # Apply resummation
-                results[prop] = self.apply_resummation(partial_sums, method=resummation_method)
+                # Compute partial sums for both
+                if sum_by_order_all:
+                    max_order = max(sum_by_order_all.keys())
+                    
+                    # Full-spectrum partial sums (valid all T)
+                    partial_sums_full = []
+                    cumsum_full = np.zeros_like(self.temp_values)
+                    
+                    # All-orders partial sums (valid low T only)
+                    partial_sums_all = []
+                    cumsum_all = np.zeros_like(self.temp_values)
+                    
+                    for order in range(max_order + 1):
+                        if order in sum_by_order_full:
+                            cumsum_full += sum_by_order_full[order]
+                        if order in sum_by_order_all:
+                            cumsum_all += sum_by_order_all[order]
+                        partial_sums_full.append(cumsum_full.copy())
+                        partial_sums_all.append(cumsum_all.copy())
+                    
+                    partial_sums_full = np.array(partial_sums_full)
+                    partial_sums_all = np.array(partial_sums_all)
+                    
+                    # Apply resummation to both
+                    result_full = self.apply_resummation(partial_sums_full, method=resummation_method)
+                    result_all = self.apply_resummation(partial_sums_all, method=resummation_method)
+                    
+                    # Blend: use all-orders for low T, full-spectrum for high T
+                    # Smooth transition around T_max_valid
+                    T_valid = self.lanczos_boost_temp_max
+                    transition_width = T_valid * 0.2  # 20% transition zone
+                    
+                    # Sigmoid blending: 0 at low T (use all), 1 at high T (use full only)
+                    blend_factor = 1.0 / (1.0 + np.exp(-(self.temp_values - T_valid) / transition_width))
+                    
+                    results[prop] = (1 - blend_factor) * result_all + blend_factor * result_full
+                    
+                    print(f"  Blended low-T (all orders) and high-T (full spectrum only) results")
+                else:
+                    print(f"Warning: No weights found for property {prop}")
+                    results[prop] = np.zeros_like(self.temp_values)
             else:
-                print(f"Warning: No weights found for property {prop}")
-                results[prop] = np.zeros_like(self.temp_values)
+                # Standard summation (no Lanczos-boost)
+                sum_by_order = defaultdict(lambda: np.zeros_like(self.temp_values))
+                
+                for cluster_id, weight in self.weights[prop].items():
+                    order = self.clusters[cluster_id]['order']
+                    if order_cutoff is not None and order > order_cutoff:
+                        continue
+                        
+                    sum_by_order[order] += weight * self.clusters[cluster_id]['multiplicity']
+                
+                # Create array of partial sums
+                if sum_by_order:
+                    max_order = max(sum_by_order.keys())
+                    partial_sums = []
+                    cumulative_sum = np.zeros_like(self.temp_values)
+                    
+                    for order in range(max_order + 1):
+                        if order in sum_by_order:
+                            cumulative_sum += sum_by_order[order]
+                        partial_sums.append(cumulative_sum.copy())
+                    
+                    partial_sums = np.array(partial_sums)
+                    
+                    # Apply resummation
+                    results[prop] = self.apply_resummation(partial_sums, method=resummation_method)
+                else:
+                    print(f"Warning: No weights found for property {prop}")
+                    results[prop] = np.zeros_like(self.temp_values)
         
-        # Special handling for specific heat - can also compute as derivative of energy
-        if 'energy' in results:
-            # Calculate specific heat as derivative of energy
-            energy_derivative = -np.gradient(results['energy'], self.temp_values) / (self.temp_values**2)
-            
-            # Use the maximum of the two methods to avoid negative specific heat
-            if 'specific_heat' in results:
-                results['specific_heat'] = np.maximum(results['specific_heat'], energy_derivative)
-            else:
-                results['specific_heat'] = np.maximum(energy_derivative, 0.0)
+        # Check for negative specific heat (indicates convergence issues)
+        if 'specific_heat' in results:
+            negative_cv_temps = self.temp_values[results['specific_heat'] < 0]
+            if len(negative_cv_temps) > 0:
+                print(f"WARNING: Negative specific heat detected at {len(negative_cv_temps)} temperature points.")
+                print(f"         Temperature range with Cv < 0: [{negative_cv_temps.min():.4e}, {negative_cv_temps.max():.4e}]")
+                print(f"         This indicates NLCE convergence issues. Consider:")
+                print(f"         1. Including more cluster orders (increase --order_cutoff)")
+                print(f"         2. Using a different resummation method")
+                print(f"         3. Using --fix_negative_cv flag to apply derivative-based fix")
+                
+                if fix_negative_cv and 'energy' in results:
+                    # Calculate specific heat as derivative of energy: Cv = -dE/dT / T^2 = d(βE)/dβ
+                    # More precisely: Cv = (1/T^2) * d<E>/dβ where β = 1/T
+                    energy_derivative = -np.gradient(results['energy'], self.temp_values) / (self.temp_values**2)
+                    
+                    # Replace negative Cv with derivative-based estimate
+                    mask = results['specific_heat'] < 0
+                    results['specific_heat'][mask] = np.maximum(energy_derivative[mask], 0.0)
+                    print(f"         Applied derivative-based fix to {np.sum(mask)} points.")
         
         return results
     
-    def run(self, resummation_method='auto', order_cutoff=None):
+    def run(self, resummation_method='auto', order_cutoff=None, fix_negative_cv=False):
         """Run the full NLC calculation."""
         print("Reading cluster information...")
         self.read_clusters()
@@ -931,7 +1109,21 @@ class NLCExpansion:
         self.calculate_weights()
         
         print("Performing NLC summation...")
-        results = self.sum_nlc(resummation_method, order_cutoff)
+        results = self.sum_nlc(resummation_method, order_cutoff, fix_negative_cv)
+        
+        # Add Lanczos-boost validity warning to results
+        if self.lanczos_boost_active and self.lanczos_boost_temp_max is not None:
+            results['lanczos_boost_temp_max'] = self.lanczos_boost_temp_max
+            results['truncated_clusters'] = list(self.truncated_clusters.keys())
+            
+            # Warn about temperatures beyond valid range
+            invalid_temps = self.temp_values[self.temp_values > self.lanczos_boost_temp_max]
+            if len(invalid_temps) > 0:
+                print(f"\n{'!'*70}")
+                print(f"WARNING: Lanczos-boost results may be inaccurate for T > {self.lanczos_boost_temp_max:.4f}")
+                print(f"         {len(invalid_temps)} of {len(self.temp_values)} temperature points are beyond valid range")
+                print(f"         Consider using full ED for accurate high-T results")
+                print(f"{'!'*70}\n")
 
         return results
     
@@ -1143,6 +1335,8 @@ if __name__ == "__main__":
     parser.add_argument('--measure_spin', action='store_true', help='Measure spin expectation values')
     parser.add_argument('--compare_methods', action='store_true', help='Compare different resummation methods')
     parser.add_argument('--save_comparison', action='store_true', help='Save comparison plots and data')
+    parser.add_argument('--fix_negative_cv', action='store_true', 
+                       help='Apply derivative-based fix for negative specific heat (convergence artifact workaround)')
     
     args = parser.parse_args()
     
@@ -1159,7 +1353,8 @@ if __name__ == "__main__":
         print("Note: --euler_resum flag is deprecated, use --resummation_method euler instead")
     
     # Run NLC calculation
-    results = nlc.run(resummation_method=resummation_method, order_cutoff=args.order_cutoff)
+    results = nlc.run(resummation_method=resummation_method, order_cutoff=args.order_cutoff, 
+                      fix_negative_cv=args.fix_negative_cv)
     
     # Compare methods if requested
     if args.compare_methods:

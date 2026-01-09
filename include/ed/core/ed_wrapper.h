@@ -142,6 +142,8 @@ enum class DiagonalizationMethod {
     // GPU methods
     LANCZOS_GPU,           // GPU-accelerated Lanczos (full Hilbert space)
     LANCZOS_GPU_FIXED_SZ,  // GPU-accelerated Lanczos (fixed Sz sector)
+    BLOCK_LANCZOS_GPU,     // GPU-accelerated Block Lanczos (full Hilbert space)
+    BLOCK_LANCZOS_GPU_FIXED_SZ,  // GPU-accelerated Block Lanczos (fixed Sz sector)
     DAVIDSON_GPU,          // GPU-accelerated Davidson method
     LOBPCG_GPU,            // GPU-accelerated LOBPCG method
     mTPQ_GPU,              // GPU-accelerated microcanonical TPQ
@@ -966,6 +968,8 @@ EDResults exact_diagonalization_core(
         case DiagonalizationMethod::LANCZOS_GPU_FIXED_SZ:
         case DiagonalizationMethod::DAVIDSON_GPU:
         case DiagonalizationMethod::LOBPCG_GPU:
+        case DiagonalizationMethod::BLOCK_LANCZOS_GPU:
+        case DiagonalizationMethod::BLOCK_LANCZOS_GPU_FIXED_SZ:
         case DiagonalizationMethod::mTPQ_GPU:
         case DiagonalizationMethod::cTPQ_GPU:
         case DiagonalizationMethod::FTLM_GPU:
@@ -1303,6 +1307,8 @@ EDResults diagonalize_symmetry_block(
 #ifdef WITH_CUDA
     if (method == DiagonalizationMethod::LANCZOS_GPU ||
         method == DiagonalizationMethod::LANCZOS_GPU_FIXED_SZ ||
+        method == DiagonalizationMethod::BLOCK_LANCZOS_GPU ||
+        method == DiagonalizationMethod::BLOCK_LANCZOS_GPU_FIXED_SZ ||
         method == DiagonalizationMethod::DAVIDSON_GPU ||
         method == DiagonalizationMethod::LOBPCG_GPU) {
         if (!GPUEDWrapper::isGPUAvailable()) {
@@ -1313,6 +1319,9 @@ EDResults diagonalize_symmetry_block(
                 method = DiagonalizationMethod::DAVIDSON;
             } else if (method == DiagonalizationMethod::LOBPCG_GPU) {
                 method = DiagonalizationMethod::LOBPCG;
+            } else if (method == DiagonalizationMethod::BLOCK_LANCZOS_GPU ||
+                       method == DiagonalizationMethod::BLOCK_LANCZOS_GPU_FIXED_SZ) {
+                method = DiagonalizationMethod::BLOCK_LANCZOS;
             } else {
                 method = DiagonalizationMethod::LANCZOS;
             }
@@ -1363,6 +1372,9 @@ EDResults diagonalize_symmetry_block(
                         method = DiagonalizationMethod::DAVIDSON;
                     } else if (method == DiagonalizationMethod::LOBPCG_GPU) {
                         method = DiagonalizationMethod::LOBPCG;
+                    } else if (method == DiagonalizationMethod::BLOCK_LANCZOS_GPU ||
+                               method == DiagonalizationMethod::BLOCK_LANCZOS_GPU_FIXED_SZ) {
+                        method = DiagonalizationMethod::BLOCK_LANCZOS;
                     } else {
                         method = DiagonalizationMethod::LANCZOS;
                     }
@@ -1386,6 +1398,19 @@ EDResults diagonalize_symmetry_block(
                             gpu_op, N,
                             std::min(params.num_eigenvalues, block_dim),
                             params.max_iterations,
+                            params.tolerance,
+                            eigenvalues,
+                            params.output_dir,
+                            params.compute_eigenvectors
+                        );
+                    } else if (method == DiagonalizationMethod::BLOCK_LANCZOS_GPU ||
+                               method == DiagonalizationMethod::BLOCK_LANCZOS_GPU_FIXED_SZ) {
+                        // GPU Block Lanczos
+                        GPUEDWrapper::runGPUBlockLanczos(
+                            gpu_op, N,
+                            params.max_iterations,
+                            std::min(params.num_eigenvalues, block_dim),
+                            params.block_size,
                             params.tolerance,
                             eigenvalues,
                             params.output_dir,
@@ -1419,6 +1444,9 @@ EDResults diagonalize_symmetry_block(
                     method = DiagonalizationMethod::DAVIDSON;
                 } else if (method == DiagonalizationMethod::LOBPCG_GPU) {
                     method = DiagonalizationMethod::LOBPCG;
+                } else if (method == DiagonalizationMethod::BLOCK_LANCZOS_GPU ||
+                           method == DiagonalizationMethod::BLOCK_LANCZOS_GPU_FIXED_SZ) {
+                    method = DiagonalizationMethod::BLOCK_LANCZOS;
                 } else {
                     method = DiagonalizationMethod::LANCZOS;
                 }
@@ -1435,6 +1463,8 @@ EDResults diagonalize_symmetry_block(
 #else
     if (method == DiagonalizationMethod::LANCZOS_GPU ||
         method == DiagonalizationMethod::LANCZOS_GPU_FIXED_SZ ||
+        method == DiagonalizationMethod::BLOCK_LANCZOS_GPU ||
+        method == DiagonalizationMethod::BLOCK_LANCZOS_GPU_FIXED_SZ ||
         method == DiagonalizationMethod::DAVIDSON_GPU ||
         method == DiagonalizationMethod::LOBPCG_GPU ||
         method == DiagonalizationMethod::mTPQ_GPU ||
@@ -1445,6 +1475,9 @@ EDResults diagonalize_symmetry_block(
             method = DiagonalizationMethod::DAVIDSON;
         } else if (method == DiagonalizationMethod::LOBPCG_GPU) {
             method = DiagonalizationMethod::LOBPCG;
+        } else if (method == DiagonalizationMethod::BLOCK_LANCZOS_GPU ||
+                   method == DiagonalizationMethod::BLOCK_LANCZOS_GPU_FIXED_SZ) {
+            method = DiagonalizationMethod::BLOCK_LANCZOS;
         } else {
             method = DiagonalizationMethod::LANCZOS;
         }
@@ -2223,6 +2256,8 @@ inline EDResults exact_diagonalization_fixed_sz(
                           method == DiagonalizationMethod::LOBPCG_GPU ||
                           method == DiagonalizationMethod::LANCZOS_GPU ||
                           method == DiagonalizationMethod::LANCZOS_GPU_FIXED_SZ ||
+                          method == DiagonalizationMethod::BLOCK_LANCZOS_GPU ||
+                          method == DiagonalizationMethod::BLOCK_LANCZOS_GPU_FIXED_SZ ||
                           method == DiagonalizationMethod::mTPQ_GPU ||
                           method == DiagonalizationMethod::cTPQ_GPU ||
                           method == DiagonalizationMethod::FTLM_GPU_FIXED_SZ);
@@ -2358,6 +2393,17 @@ inline EDResults exact_diagonalization_fixed_sz(
                 params.output_dir,
                 params.tpq_delta_beta,  // delta_beta
                 params.tpq_taylor_order);  // taylor_order
+        } else if (method == DiagonalizationMethod::BLOCK_LANCZOS_GPU || 
+                   method == DiagonalizationMethod::BLOCK_LANCZOS_GPU_FIXED_SZ) {
+            GPUEDWrapper::runGPUBlockLanczosFixedSz(
+                gpu_op_handle, n_up,
+                params.max_iterations,
+                params.num_eigenvalues,
+                params.block_size,
+                params.tolerance,
+                eigenvalues,
+                params.output_dir,
+                params.compute_eigenvectors);
         }
         
         results.eigenvalues = eigenvalues;
@@ -2483,6 +2529,8 @@ EDResults exact_diagonalization_from_files(
         method == DiagonalizationMethod::LANCZOS_GPU_FIXED_SZ ||
         method == DiagonalizationMethod::DAVIDSON_GPU ||
         method == DiagonalizationMethod::LOBPCG_GPU ||
+        method == DiagonalizationMethod::BLOCK_LANCZOS_GPU ||
+        method == DiagonalizationMethod::BLOCK_LANCZOS_GPU_FIXED_SZ ||
         method == DiagonalizationMethod::mTPQ_GPU ||
         method == DiagonalizationMethod::cTPQ_GPU ||
         method == DiagonalizationMethod::FTLM_GPU ||
@@ -2740,6 +2788,39 @@ EDResults exact_diagonalization_from_files(
             std::cerr << "Error: FTLM_GPU_FIXED_SZ file interface not yet implemented." << std::endl;
             std::cerr << "Please use the fixed_sz wrapper function directly." << std::endl;
             throw std::runtime_error("Fixed Sz GPU FTLM not yet integrated with file interface");
+        } else if (method == DiagonalizationMethod::BLOCK_LANCZOS_GPU) {
+            std::cout << "Running GPU Block Lanczos method..." << std::endl;
+            
+            void* gpu_op = GPUEDWrapper::createGPUOperatorFromFiles(
+                params.num_sites, interaction_file, single_site_file);
+            
+            if (!gpu_op) {
+                std::cerr << "Error: Failed to create GPU operator" << std::endl;
+                throw std::runtime_error("GPU operator creation failed");
+            }
+            
+            std::vector<double> eigenvalues;
+            GPUEDWrapper::runGPUBlockLanczos(
+                gpu_op,
+                hilbert_space_dim,
+                params.max_iterations,
+                params.num_eigenvalues,
+                params.block_size,
+                params.tolerance,
+                eigenvalues,
+                params.output_dir,
+                params.compute_eigenvectors
+            );
+            
+            results.eigenvalues = eigenvalues;
+            GPUEDWrapper::destroyGPUOperator(gpu_op);
+            
+            std::cout << "GPU Block Lanczos completed successfully!" << std::endl;
+            
+        } else if (method == DiagonalizationMethod::BLOCK_LANCZOS_GPU_FIXED_SZ) {
+            std::cerr << "Error: BLOCK_LANCZOS_GPU_FIXED_SZ file interface not yet implemented." << std::endl;
+            std::cerr << "Please use the fixed_sz wrapper function directly." << std::endl;
+            throw std::runtime_error("Fixed Sz GPU Block Lanczos not yet integrated with file interface");
         }
         
         return results;

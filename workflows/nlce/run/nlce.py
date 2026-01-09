@@ -66,10 +66,16 @@ def get_num_sites(file_path):
 def run_ed_for_cluster(args):
     """Run ED for a single cluster
     
-    Supports both full diagonalization and Lanczos-boosted mode.
-    In Lanczos-boosted mode, large clusters use partial diagonalization
-    to compute only the lowest eigenvalues, which is sufficient for
-    low-to-moderate temperature thermodynamics.
+    Uses --symm flag by default for automatic symmetry selection:
+    - Auto-selects between symmetrized and streaming-symmetry modes
+    - Exploits spatial symmetries to reduce Hilbert space dimension
+    
+    Method selection (automatic by default):
+    - FULL: For small clusters (dim <= 4096, i.e. <= 12 sites)
+    - BLOCK_LANCZOS: For larger clusters with degeneracies (Heisenberg models)
+    
+    Block size for BLOCK_LANCZOS should be at least as large as the expected
+    degeneracy to properly resolve degenerate eigenspaces.
     """
     cluster_id, order, ed_executable, ham_dir, ed_dir, ed_options, symmetrized = args
     
@@ -99,20 +105,18 @@ def run_ed_for_cluster(args):
             if not line.startswith('#') and line.strip():
                 num_sites += 1
     
-    # Determine if this cluster should use symmetrized full diagonalization
-    # (block-diagonalization by Sz sector enables handling larger clusters)
-    use_symmetrized_for_size = False
-    symmetrize_threshold = ed_options.get("symmetrize_threshold", 14)
+    # Calculate Hilbert space dimension for method selection
+    hilbert_dim = 2 ** num_sites
     
-    if ed_options.get("auto_symmetrize", False):
-        if num_sites > symmetrize_threshold:
-            use_symmetrized_for_size = True
-            hilbert_dim = 2 ** num_sites
-            logging.info(f"Cluster {cluster_id} ({num_sites} sites, dim={hilbert_dim}): "
-                        f"Using symmetrized full diagonalization (block-diagonal by Sz)")
-        else:
-            logging.info(f"Cluster {cluster_id} ({num_sites} sites): Using standard full diagonalization")
-
+    # Thresholds for method selection
+    full_ed_threshold = ed_options.get("full_ed_threshold", 12)  # Use FULL for <= 12 sites (dim <= 4096)
+    block_lanczos_block_size = ed_options.get("block_size", 8)  # Block size >= expected degeneracy
+    
+    # Determine method: FULL for small clusters, BLOCK_LANCZOS for larger ones
+    # For thermodynamics, we need ALL eigenvalues, so we use --symm which auto-selects
+    # the best symmetry-exploiting mode based on system size
+    use_block_lanczos = (num_sites > full_ed_threshold and ed_options.get("auto_method", True))
+    
     if ed_options["method"] == 'mTPQ':
         cmd = [
             ed_executable,
@@ -124,34 +128,45 @@ def run_ed_for_cluster(args):
             '--iterations=100000',
             '--large_value=100'
         ]
-    elif use_symmetrized_for_size:
-        # Symmetrized mode: block-diagonalize by Sz for large clusters
-        # This computes ALL eigenvalues but in much smaller blocks
+    elif use_block_lanczos:
+        # Large cluster: use BLOCK_LANCZOS for efficient full spectrum calculation
+        # Block size should be >= degeneracy (for Heisenberg, use at least 4-8)
+        logging.info(f"Cluster {cluster_id} ({num_sites} sites, dim={hilbert_dim}): "
+                    f"Using BLOCK_LANCZOS with --symm (block_size={block_lanczos_block_size})")
+        cmd = [
+            ed_executable,
+            ham_subdir,
+            '--method=BLOCK_LANCZOS',
+            '--eigenvalues=FULL',
+            f'--block_size={block_lanczos_block_size}',
+            f'--output={cluster_ed_dir}/output',
+            f'--num_sites={num_sites}',
+            '--spin_length=0.5',
+            '--symm',  # Auto-select best symmetry mode
+        ]
+    else:
+        # Small cluster: use FULL diagonalization with --symm
+        logging.info(f"Cluster {cluster_id} ({num_sites} sites, dim={hilbert_dim}): "
+                    f"Using FULL with --symm")
         cmd = [
             ed_executable,
             ham_subdir,
             '--method=FULL',
-            f'--eigenvalues=FULL',
+            '--eigenvalues=FULL',
             f'--output={cluster_ed_dir}/output',
             f'--num_sites={num_sites}',
             '--spin_length=0.5',
-            '--symmetrized',  # Critical: enables block-diagonalization by Sz
-        ]
-    elif ed_options["method"] == 'FULL' or ed_options["method"] == 'OSS':
-        cmd = [
-            ed_executable,
-            ham_subdir,
-            f'--method={ed_options["method"]}',
-            f'--eigenvalues=FULL',
-            f'--output={cluster_ed_dir}/output',
-            f'--num_sites={num_sites}',
-            '--spin_length=0.5'
+            '--symm',  # Auto-select best symmetry mode
         ]
 
     if ed_options["measure_spin"]:
         cmd.append('--measure_spin')
 
+    # If user explicitly requests --symmetrized, replace --symm with --symmetrized
     if symmetrized:
+        # Remove --symm and add --symmetrized instead
+        if '--symm' in cmd:
+            cmd.remove('--symm')
         cmd.append('--symmetrized')
     
     # Add thermodynamic parameters if required
@@ -163,8 +178,13 @@ def run_ed_for_cluster(args):
             f'--temp_bins={ed_options["temp_bins"]}'
         ])
     
+    # Set ED_PYTHON environment variable to use the same Python interpreter
+    # This ensures pynauty and other dependencies are found
+    env = os.environ.copy()
+    env['ED_PYTHON'] = sys.executable
+    
     try:
-        result = subprocess.run(cmd, check=True, capture_output=True)
+        result = subprocess.run(cmd, check=True, capture_output=True, env=env)
         return True
     except subprocess.CalledProcessError as e:
         # Check if the computation actually succeeded despite the error
@@ -202,6 +222,123 @@ def run_ed_for_cluster(args):
         logging.error(f"Stdout: {e.stdout.decode('utf-8')}")
         logging.error(f"Stderr: {e.stderr.decode('utf-8')}")
         return False
+
+
+def run_lb_ed_for_cluster(args):
+    """Run ED for a single cluster in Lanczos-Boosted NLCE mode.
+    
+    For Lanczos-Boosted NLCE (Bhattaram & Khatami):
+    - Small clusters (sites <= lb_site_threshold): Full ED with all eigenvalues
+    - Large clusters (sites > lb_site_threshold): Partial Lanczos with N_low eigenvalues
+    
+    This is deterministic (no stochastic noise like FTLM) and works well for 
+    low-to-intermediate temperatures where only low-energy states contribute
+    to thermodynamics.
+    
+    Key difference from run_ed_for_cluster: We request --compute_eigenvectors=true
+    so we can compute observables <n|A|n> for each eigenstate.
+    """
+    (cluster_id, order, ed_executable, ham_dir, ed_dir, lb_options) = args
+    
+    # Create output directory for ED results
+    cluster_ed_dir = os.path.join(ed_dir, f'cluster_{cluster_id}_order_{order}')
+    os.makedirs(cluster_ed_dir, exist_ok=True)
+    
+    # Set up ED command
+    ham_subdir = os.path.join(ham_dir, f'cluster_{cluster_id}_order_{order}')
+    
+    if not os.path.exists(ham_subdir):
+        logging.warning(f"[LB-NLCE] Hamiltonian directory not found for cluster {cluster_id}")
+        return False
+    
+    # Get number of sites from the input file
+    site_info_file = os.path.join(ham_subdir, f"*_site_info.dat")
+    site_info_files = glob.glob(site_info_file)
+    
+    if not site_info_files:
+        logging.warning(f"[LB-NLCE] Site info file not found for cluster {cluster_id}")
+        return False
+    
+    # Count lines in site info file to get number of sites (excluding header lines)
+    num_sites = 0
+    with open(site_info_files[0], 'r') as f:
+        for line in f:
+            if not line.startswith('#') and line.strip():
+                num_sites += 1
+    
+    # Calculate Hilbert space dimension
+    hilbert_dim = 2 ** num_sites
+    
+    # Decide method based on cluster size
+    lb_site_threshold = lb_options.get("lb_site_threshold", 12)
+    lb_n_eigenvalues = lb_options.get("lb_n_eigenvalues", 200)
+    
+    if num_sites <= lb_site_threshold:
+        # Small cluster: Full ED
+        n_eigs = "FULL"
+        method = "FULL"
+        logging.info(f"[LB-NLCE] Cluster {cluster_id} ({num_sites} sites, dim={hilbert_dim}): "
+                    f"Full ED (all eigenvalues)")
+    else:
+        # Large cluster: Partial Lanczos
+        # Ensure we don't request more eigenvalues than Hilbert space dimension
+        n_eigs = min(lb_n_eigenvalues, hilbert_dim)
+        method = "LANCZOS"
+        logging.info(f"[LB-NLCE] Cluster {cluster_id} ({num_sites} sites, dim={hilbert_dim}): "
+                    f"Partial Lanczos (N_low={n_eigs} eigenvalues)")
+    
+    # Build ED command - request eigenvalues with eigenvectors for observable computation
+    cmd = [
+        ed_executable,
+        ham_subdir,
+        f'--method={method}',
+        f'--eigenvalues={n_eigs}',
+        f'--output={cluster_ed_dir}/output',
+        f'--num_sites={num_sites}',
+        '--spin_length=0.5',
+        '--symm',  # Auto-select best symmetry mode
+        '--compute_eigenvectors',  # Needed for <n|O|n> in LB-NLCE
+    ]
+    
+    # Add thermodynamic parameters - we compute them in post-processing for LB-NLCE
+    # but still pass temp range for metadata
+    if lb_options.get("thermo", False):
+        cmd.extend([
+            '--thermo',
+            f'--temp_min={lb_options["temp_min"]}',
+            f'--temp_max={lb_options["temp_max"]}',
+            f'--temp_bins={lb_options["temp_bins"]}'
+        ])
+    
+    if lb_options.get("measure_spin", False):
+        cmd.append('--measure_spin')
+    
+    # Set ED_PYTHON environment variable
+    env = os.environ.copy()
+    env['ED_PYTHON'] = sys.executable
+    
+    try:
+        result = subprocess.run(cmd, check=True, capture_output=True, env=env)
+        return True
+    except subprocess.CalledProcessError as e:
+        # Check if computation succeeded despite exit error
+        expected_output_dir = os.path.join(cluster_ed_dir, 'output')
+        
+        if os.path.exists(expected_output_dir):
+            h5_file = os.path.join(expected_output_dir, 'ed_results.h5')
+            if os.path.exists(h5_file):
+                logging.warning(f"[LB-NLCE] ED for cluster {cluster_id} crashed but HDF5 output exists - treating as success")
+                return True
+        
+        if e.returncode == -11:
+            logging.error(f"[LB-NLCE] ED for cluster {cluster_id} crashed with SIGSEGV")
+        else:
+            logging.error(f"[LB-NLCE] Error running ED for cluster {cluster_id}: {e}")
+        
+        logging.error(f"Stdout: {e.stdout.decode('utf-8')}")
+        logging.error(f"Stderr: {e.stderr.decode('utf-8')}")
+        return False
+
 
 def main():
     # Parse command line arguments
@@ -243,36 +380,47 @@ def main():
     # SI units
     parser.add_argument('--SI_units', action='store_true', help='Use SI units for output')
 
-    parser.add_argument('--symmetrized', action='store_true', help='Use symmetrized Hamiltonian')
+    parser.add_argument('--symmetrized', action='store_true', 
+                       help='Legacy flag: force --symmetrized instead of --symm')
     parser.add_argument('--measure_spin', action='store_true', help='Measure spin expectation values')
 
     # Random transverse field
     parser.add_argument('--random_field_width', type=float, default=0, help='Width of the random transverse field')
 
-    # Automatic symmetrization for large clusters
-    # Block-diagonalization by Sz sector allows handling much larger Hilbert spaces
-    parser.add_argument('--auto_symmetrize', action='store_true',
-                       help='Automatically use symmetrized full ED for large clusters. '
-                            'This block-diagonalizes by Sz sector, enabling exact calculations '
-                            'for larger systems without stochastic noise.')
-    parser.add_argument('--symmetrize_threshold', type=int, default=14,
-                       help='Site threshold for switching to symmetrized mode (default: 14). '
-                            'Clusters with more sites use block-diagonalization by Sz.')
+    # Automatic method and symmetry selection (default behavior)
+    # Uses --symm flag which auto-selects between symmetrized and streaming-symmetry modes
+    parser.add_argument('--no_auto_method', action='store_true',
+                       help='Disable automatic method selection. By default, uses FULL for small '
+                            'clusters and BLOCK_LANCZOS for larger ones.')
+    parser.add_argument('--full_ed_threshold', type=int, default=12,
+                       help='Site threshold for FULL vs BLOCK_LANCZOS (default: 12). '
+                            'Clusters with more sites use BLOCK_LANCZOS.')
+    parser.add_argument('--block_size', type=int, default=8,
+                       help='Block size for BLOCK_LANCZOS (default: 8). '
+                            'Should be >= expected degeneracy (e.g., 4-8 for Heisenberg).')
     
-    # Legacy Lanczos-boosted options (deprecated - see notes below)
-    # NOTE: Standard Lanczos partial diagonalization doesn't work for finite-T thermodynamics
-    # because a single starting vector only samples one invariant subspace (Sz sector).
-    # The proper solution is symmetrized full ED which computes ALL eigenvalues exactly.
-    parser.add_argument('--lanczos_boosted', action='store_true',
-                       help='DEPRECATED: Use --auto_symmetrize instead. '
-                            'Lanczos partial diagonalization from a single starting vector '
-                            'finds only one Sz sector, giving incorrect finite-T thermodynamics.')
-    parser.add_argument('--lanczos_threshold', type=int, default=14,
-                       help='DEPRECATED: Use --symmetrize_threshold instead.')
-    parser.add_argument('--lanczos_eigenvalues', type=int, default=500,
-                       help='DEPRECATED: Not used with symmetrized mode.')
-    parser.add_argument('--lanczos_min_temp', type=float, default=None,
-                       help='DEPRECATED: Not needed with symmetrized mode (exact at all T).')
+    # ========== Lanczos-Boosted NLCE Parameters ==========
+    # Based on Bhattaram & Khatami method where large clusters use partial Lanczos
+    # with only low-lying eigenvalues, rather than full ED or stochastic FTLM.
+    parser.add_argument('--lanczos_boost', action='store_true',
+                       help='Enable Lanczos-boosted NLCE mode. Large clusters use partial '
+                            'Lanczos diagonalization (low-energy eigenstates only) instead '
+                            'of full ED. Deterministic and noise-free, ideal for low-to-'
+                            'intermediate temperatures.')
+    parser.add_argument('--lb_site_threshold', type=int, default=12,
+                       help='Site threshold for LB-NLCE (default: 12). Clusters with more '
+                            'sites use partial Lanczos. Clusters with <= sites use full ED.')
+    parser.add_argument('--lb_n_eigenvalues', type=int, default=200,
+                       help='Number of low-lying eigenvalues to compute for large clusters '
+                            'in LB-NLCE mode (default: 200). Should satisfy E_N - E_0 > 10*T_min '
+                            'for temperature accuracy.')
+    parser.add_argument('--lb_energy_window', type=float, default=None,
+                       help='Alternative to --lb_n_eigenvalues: specify an energy window above '
+                            'ground state. All eigenvalues with E - E_0 <= window are included. '
+                            'Suggested: 10 * T_max for good accuracy.')
+    parser.add_argument('--lb_check_convergence', action='store_true',
+                       help='For LB-NLCE, check convergence by comparing results with '
+                            'increasing numbers of eigenvalues.')
 
     args = parser.parse_args()
     
@@ -375,54 +523,87 @@ def main():
         logging.info("Step 3: Running Exact Diagonalization for each cluster")
         logging.info("="*80)
         
-        # Prepare ED options
-        ed_options = {
-            "method": args.method,
-            "thermo": args.thermo,
-            "temp_min": args.temp_min,
-            "temp_max": args.temp_max,
-            "temp_bins": args.temp_bins,
-            "measure_spin": args.measure_spin,
-            # Symmetrized mode options (for large clusters)
-            "auto_symmetrize": args.auto_symmetrize,
-            "symmetrize_threshold": args.symmetrize_threshold,
-        }
-        
-        # Handle deprecated lanczos_boosted flag
-        if args.lanczos_boosted:
-            logging.warning("--lanczos_boosted is deprecated! Standard Lanczos partial diagonalization "
-                          "doesn't work for finite-T thermodynamics (finds only one Sz sector).")
-            logging.warning("Automatically enabling --auto_symmetrize instead for correct results.")
-            ed_options["auto_symmetrize"] = True
-            ed_options["symmetrize_threshold"] = args.lanczos_threshold
-        
-        if ed_options["auto_symmetrize"]:
-            logging.info(f"Auto-symmetrize mode enabled:")
-            logging.info(f"  - Standard full ED for clusters with <= {ed_options['symmetrize_threshold']} sites")
-            logging.info(f"  - Symmetrized full ED (block-diagonal by Sz) for larger clusters")
-            logging.info(f"  - All eigenvalues computed exactly in each Sz sector")
-        
-        # Prepare arguments for each cluster
-        ed_tasks = []
-        for cluster_id, order, _ in clusters:
-            ed_tasks.append((cluster_id, order, args.ed_executable, ham_dir, ed_dir, ed_options, args.symmetrized))
-        
-        if args.parallel:
-            logging.info(f"Running ED in parallel with {args.num_cores} cores")
-            with multiprocessing.Pool(processes=args.num_cores) as pool:
-                results = list(tqdm(
-                    pool.imap(run_ed_for_cluster, ed_tasks),
-                    total=len(ed_tasks),
-                    desc="Running ED"
-                ))
+        if args.lanczos_boost:
+            # ========== Lanczos-Boosted NLCE Mode ==========
+            # Use partial Lanczos for large clusters (deterministic, no FTLM noise)
+            logging.info("Using Lanczos-Boosted NLCE mode (Bhattaram & Khatami)")
+            logging.info(f"  - Small clusters (<= {args.lb_site_threshold} sites): Full ED")
+            logging.info(f"  - Large clusters (> {args.lb_site_threshold} sites): Partial Lanczos ({args.lb_n_eigenvalues} eigenvalues)")
             
-            # Check results
-            success_count = sum(results)
-            logging.info(f"ED completed for {success_count} of {len(ed_tasks)} clusters")
+            lb_options = {
+                "lb_site_threshold": args.lb_site_threshold,
+                "lb_n_eigenvalues": args.lb_n_eigenvalues,
+                "lb_energy_window": args.lb_energy_window,
+                "thermo": args.thermo,
+                "temp_min": args.temp_min,
+                "temp_max": args.temp_max,
+                "temp_bins": args.temp_bins,
+                "measure_spin": args.measure_spin,
+            }
+            
+            # Prepare tasks for LB-NLCE
+            lb_ed_tasks = []
+            for cluster_id, order, _ in clusters:
+                lb_ed_tasks.append((cluster_id, order, args.ed_executable, ham_dir, ed_dir, lb_options))
+            
+            if args.parallel:
+                logging.info(f"Running LB-NLCE ED in parallel with {args.num_cores} cores")
+                with multiprocessing.Pool(processes=args.num_cores) as pool:
+                    results = list(tqdm(
+                        pool.imap(run_lb_ed_for_cluster, lb_ed_tasks),
+                        total=len(lb_ed_tasks),
+                        desc="Running LB-NLCE ED"
+                    ))
+                success_count = sum(results)
+                logging.info(f"LB-NLCE ED completed for {success_count} of {len(lb_ed_tasks)} clusters")
+            else:
+                for task in tqdm(lb_ed_tasks, desc="Running LB-NLCE ED"):
+                    run_lb_ed_for_cluster(task)
+        
         else:
-            # Run sequentially
-            for task in tqdm(ed_tasks, desc="Running ED"):
-                run_ed_for_cluster(task)
+            # ========== Standard NLCE Mode ==========
+            # Prepare ED options with automatic method and symmetry selection
+            ed_options = {
+                "method": args.method,
+                "thermo": args.thermo,
+                "temp_min": args.temp_min,
+                "temp_max": args.temp_max,
+                "temp_bins": args.temp_bins,
+                "measure_spin": args.measure_spin,
+                # Automatic method selection (FULL vs BLOCK_LANCZOS)
+                "auto_method": not args.no_auto_method,
+                "full_ed_threshold": args.full_ed_threshold,
+                "block_size": args.block_size,
+            }
+            
+            logging.info(f"NLCE ED Configuration:")
+            logging.info(f"  - Method selection: {'automatic' if ed_options['auto_method'] else 'manual (' + args.method + ')'}")
+            if ed_options['auto_method']:
+                logging.info(f"  - FULL for clusters with <= {args.full_ed_threshold} sites")
+                logging.info(f"  - BLOCK_LANCZOS (block_size={args.block_size}) for larger clusters")
+            logging.info(f"  - Symmetry: --symm (auto-select best mode)")
+            
+            # Prepare arguments for each cluster
+            ed_tasks = []
+            for cluster_id, order, _ in clusters:
+                ed_tasks.append((cluster_id, order, args.ed_executable, ham_dir, ed_dir, ed_options, args.symmetrized))
+            
+            if args.parallel:
+                logging.info(f"Running ED in parallel with {args.num_cores} cores")
+                with multiprocessing.Pool(processes=args.num_cores) as pool:
+                    results = list(tqdm(
+                        pool.imap(run_ed_for_cluster, ed_tasks),
+                        total=len(ed_tasks),
+                        desc="Running ED"
+                    ))
+                
+                # Check results
+                success_count = sum(results)
+                logging.info(f"ED completed for {success_count} of {len(ed_tasks)} clusters")
+            else:
+                # Run sequentially
+                for task in tqdm(ed_tasks, desc="Running ED"):
+                    run_ed_for_cluster(task)
     else:
         logging.info("Skipping Exact Diagonalization step.")
     
@@ -656,11 +837,27 @@ def main():
         logging.info("Step 4: Performing NLCE summation")
         logging.info("="*80)
         
-        if args.method == 'mTPQ':
+        if args.lanczos_boost:
+            # ========== Lanczos-Boosted NLCE Summation ==========
+            logging.info("Using Lanczos-Boosted NLCE summation (truncated thermodynamics)")
+            nlc_params = [
+                sys.executable,
+                os.path.join(os.path.dirname(__file__), 'NLC_sum_LB.py'),
+                f'--cluster_dir={cluster_info_dir}',
+                f'--eigenvalue_dir={ed_dir}',
+                f'--output_dir={nlc_dir}',
+                '--plot',
+                f'--temp_min={args.temp_min}',
+                f'--temp_max={args.temp_max}',
+                f'--temp_bins={args.temp_bins}',
+                f'--resummation_method=auto',
+                f'--lb_energy_tolerance=10.0',
+            ]
+        elif args.method == 'mTPQ':
             logging.info("Using mTPQ method for NLCE summation")
             # Add mTPQ specific parameters here if needed
             nlc_params = [
-                'python3',
+                sys.executable,  # Use the same Python interpreter
                 os.path.join(os.path.dirname(__file__), 'NLC_sum_TPQ.py'),
                 f'--cluster_dir={cluster_info_dir}',
                 f'--eigenvalue_dir={ed_dir}',
@@ -672,7 +869,7 @@ def main():
             ]
         else:
             nlc_params = [
-                'python3',
+                sys.executable,  # Use the same Python interpreter
                 os.path.join(os.path.dirname(__file__), 'NLC_sum.py'),
                 f'--cluster_dir={cluster_info_dir}',
                 f'--eigenvalue_dir={ed_dir}',
