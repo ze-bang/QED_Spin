@@ -83,6 +83,26 @@ def run_nlce_for_order(order, args):
         cmd.append('--no_auto_method')
     cmd.append(f'--full_ed_threshold={args.full_ed_threshold}')
     cmd.append(f'--block_size={args.block_size}')
+    
+    # GPU acceleration
+    if args.use_gpu:
+        cmd.append('--use_gpu')
+    
+    # Lanczos-boosted NLCE options
+    if args.lanczos_boost:
+        cmd.append('--lanczos_boost')
+        cmd.append(f'--lb_site_threshold={args.lb_site_threshold}')
+        cmd.append(f'--lb_n_eigenvalues={args.lb_n_eigenvalues}')
+        if args.lb_energy_window is not None:
+            cmd.append(f'--lb_energy_window={args.lb_energy_window}')
+        if args.lb_check_convergence:
+            cmd.append('--lb_check_convergence')
+    
+    # Additional options
+    if args.measure_spin:
+        cmd.append('--measure_spin')
+    if args.random_field_width != 0:
+        cmd.append(f'--random_field_width={args.random_field_width}')
         
     # Add field direction if specified
     if args.field_dir:
@@ -355,6 +375,29 @@ def main():
                        help='Site threshold for FULL vs BLOCK_LANCZOS (default: 12)')
     parser.add_argument('--block_size', type=int, default=8,
                        help='Block size for BLOCK_LANCZOS (default: 8, should be >= degeneracy)')
+    parser.add_argument('--use_gpu', action='store_true',
+                       help='Use GPU-accelerated BLOCK_LANCZOS for large clusters (requires CUDA). '
+                            'Falls back to CPU if GPU is not available.')
+    
+    # Lanczos-Boosted NLCE Parameters
+    parser.add_argument('--lanczos_boost', action='store_true',
+                       help='Enable Lanczos-boosted NLCE mode. Large clusters use partial '
+                            'Lanczos diagonalization (low-energy eigenstates only).')
+    parser.add_argument('--lb_site_threshold', type=int, default=12,
+                       help='Site threshold for LB-NLCE (default: 12)')
+    parser.add_argument('--lb_n_eigenvalues', type=int, default=200,
+                       help='Number of low-lying eigenvalues to compute for large clusters '
+                            'in LB-NLCE mode (default: 200)')
+    parser.add_argument('--lb_energy_window', type=float, default=None,
+                       help='Energy window above ground state for LB-NLCE')
+    parser.add_argument('--lb_check_convergence', action='store_true',
+                       help='Check LB-NLCE convergence with increasing eigenvalues')
+    
+    # Additional options
+    parser.add_argument('--measure_spin', action='store_true',
+                       help='Measure spin expectation values')
+    parser.add_argument('--random_field_width', type=float, default=0,
+                       help='Width of the random transverse field')
     
     # SI units
     parser.add_argument('--SI_units', action='store_true', help='Use SI units for output')
