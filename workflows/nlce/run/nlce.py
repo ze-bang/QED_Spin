@@ -17,6 +17,26 @@ try:
 except ImportError:
     HAS_H5PY = False
 
+
+def check_gpu_available():
+    """Check if GPU is available for CUDA operations.
+    
+    Returns:
+        bool: True if GPU is available, False otherwise
+    """
+    try:
+        result = subprocess.run(
+            ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
+            capture_output=True, text=True, check=True, timeout=5
+        )
+        gpu_names = result.stdout.strip().split("\n")
+        if gpu_names and gpu_names[0]:
+            return True
+        return False
+    except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired):
+        return False
+
+
 #!/usr/bin/env python3
 """
 NLCE Workflow - Automates the entire NLCE calculation process for pyrochlore lattice.
@@ -73,11 +93,12 @@ def run_ed_for_cluster(args):
     Method selection (automatic by default):
     - FULL: For small clusters (dim <= 4096, i.e. <= 12 sites)
     - BLOCK_LANCZOS: For larger clusters with degeneracies (Heisenberg models)
+    - BLOCK_LANCZOS_GPU: For larger clusters when GPU is available
     
     Block size for BLOCK_LANCZOS should be at least as large as the expected
     degeneracy to properly resolve degenerate eigenspaces.
     """
-    cluster_id, order, ed_executable, ham_dir, ed_dir, ed_options, symmetrized = args
+    cluster_id, order, ed_executable, ham_dir, ed_dir, ed_options, symmetrized, use_gpu = args
     
     # Create output directory for ED results
     cluster_ed_dir = os.path.join(ed_dir, f'cluster_{cluster_id}_order_{order}')
@@ -131,12 +152,15 @@ def run_ed_for_cluster(args):
     elif use_block_lanczos:
         # Large cluster: use BLOCK_LANCZOS for efficient full spectrum calculation
         # Block size should be >= degeneracy (for Heisenberg, use at least 4-8)
+        # Use GPU version if available for better performance
+        block_lanczos_method = 'BLOCK_LANCZOS_GPU' if use_gpu else 'BLOCK_LANCZOS'
+        gpu_indicator = ' (GPU)' if use_gpu else ' (CPU)'
         logging.info(f"Cluster {cluster_id} ({num_sites} sites, dim={hilbert_dim}): "
-                    f"Using BLOCK_LANCZOS with --symm (block_size={block_lanczos_block_size})")
+                    f"Using {block_lanczos_method} with --symm (block_size={block_lanczos_block_size}){gpu_indicator}")
         cmd = [
             ed_executable,
             ham_subdir,
-            '--method=BLOCK_LANCZOS',
+            f'--method={block_lanczos_method}',
             '--eigenvalues=FULL',
             f'--block_size={block_lanczos_block_size}',
             f'--output={cluster_ed_dir}/output',
@@ -398,6 +422,9 @@ def main():
     parser.add_argument('--block_size', type=int, default=8,
                        help='Block size for BLOCK_LANCZOS (default: 8). '
                             'Should be >= expected degeneracy (e.g., 4-8 for Heisenberg).')
+    parser.add_argument('--use_gpu', action='store_true',
+                       help='Use GPU-accelerated BLOCK_LANCZOS for large clusters (requires CUDA). '
+                            'Falls back to CPU if GPU is not available.')
     
     # ========== Lanczos-Boosted NLCE Parameters ==========
     # Based on Bhattaram & Khatami method where large clusters use partial Lanczos
@@ -576,17 +603,27 @@ def main():
                 "block_size": args.block_size,
             }
             
+            # Check GPU availability if --use_gpu is requested
+            use_gpu = False
+            if args.use_gpu:
+                use_gpu = check_gpu_available()
+                if use_gpu:
+                    logging.info("GPU detected - will use BLOCK_LANCZOS_GPU for large clusters")
+                else:
+                    logging.warning("GPU requested but not available - falling back to CPU BLOCK_LANCZOS")
+            
             logging.info(f"NLCE ED Configuration:")
             logging.info(f"  - Method selection: {'automatic' if ed_options['auto_method'] else 'manual (' + args.method + ')'}")
             if ed_options['auto_method']:
                 logging.info(f"  - FULL for clusters with <= {args.full_ed_threshold} sites")
-                logging.info(f"  - BLOCK_LANCZOS (block_size={args.block_size}) for larger clusters")
+                block_method = 'BLOCK_LANCZOS_GPU' if use_gpu else 'BLOCK_LANCZOS'
+                logging.info(f"  - {block_method} (block_size={args.block_size}) for larger clusters")
             logging.info(f"  - Symmetry: --symm (auto-select best mode)")
             
             # Prepare arguments for each cluster
             ed_tasks = []
             for cluster_id, order, _ in clusters:
-                ed_tasks.append((cluster_id, order, args.ed_executable, ham_dir, ed_dir, ed_options, args.symmetrized))
+                ed_tasks.append((cluster_id, order, args.ed_executable, ham_dir, ed_dir, ed_options, args.symmetrized, use_gpu))
             
             if args.parallel:
                 logging.info(f"Running ED in parallel with {args.num_cores} cores")
