@@ -97,6 +97,12 @@ public:
     // GPU-accelerated matrix-vector product
     virtual void matVecGPU(const cuDoubleComplex* d_x, cuDoubleComplex* d_y, int N);
     
+    // GPU-accelerated matrix-vector product with stream (for parallel block operations)
+    virtual void matVecGPUAsync(const cuDoubleComplex* d_x, cuDoubleComplex* d_y, int N, cudaStream_t stream);
+    
+    // Check if operator supports async matVec
+    virtual bool supportsAsyncMatVec() const { return true; }
+    
     // Set interaction parameters
     void setInteraction(int site1, int site2, char op1, char op2, double coupling);
     

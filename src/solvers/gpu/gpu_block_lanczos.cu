@@ -72,6 +72,77 @@ __global__ void initRandomBlockKernel(cuDoubleComplex* block, int dim, int block
 }
 
 /**
+ * @brief Extract upper triangular R matrix from QR result directly on GPU
+ * Avoids host-device memory transfers
+ */
+__global__ void extractUpperTriangularKernel(const cuDoubleComplex* qr_result, 
+                                              cuDoubleComplex* R,
+                                              int leading_dim, int block_size) {
+    int col = blockIdx.x;
+    int row = threadIdx.x;
+    
+    if (col >= block_size || row >= block_size) return;
+    
+    // R[row, col] = qr_result[row, col] if row <= col, else 0
+    if (row <= col) {
+        R[row + col * block_size] = qr_result[row + col * leading_dim];
+    } else {
+        R[row + col * block_size] = make_cuDoubleComplex(0.0, 0.0);
+    }
+}
+
+/**
+ * @brief Fused AXPY + norm computation to reduce kernel launch overhead
+ * W = W - alpha * V, then compute norm of each column
+ */
+__global__ void fusedAxpyNormKernel(cuDoubleComplex* W, const cuDoubleComplex* V,
+                                    const cuDoubleComplex* alpha_matrix,
+                                    double* norms,
+                                    int dim, int block_size) {
+    extern __shared__ double shared_sums[];
+    
+    int col = blockIdx.x;  // Which column
+    if (col >= block_size) return;
+    
+    double local_sum = 0.0;
+    
+    // Each thread handles multiple rows with stride
+    for (int row = threadIdx.x; row < dim; row += blockDim.x) {
+        // Compute: W[row, col] -= sum_k V[row, k] * alpha[k, col]
+        cuDoubleComplex correction = make_cuDoubleComplex(0.0, 0.0);
+        for (int k = 0; k < block_size; ++k) {
+            cuDoubleComplex v_val = V[row + k * dim];
+            cuDoubleComplex a_val = alpha_matrix[k + col * block_size];  // Column-major
+            correction = cuCadd(correction, cuCmul(v_val, a_val));
+        }
+        
+        cuDoubleComplex w_val = W[row + col * dim];
+        w_val = cuCsub(w_val, correction);
+        W[row + col * dim] = w_val;
+        
+        // Accumulate squared magnitude for norm
+        double re = cuCreal(w_val);
+        double im = cuCimag(w_val);
+        local_sum += re * re + im * im;
+    }
+    
+    shared_sums[threadIdx.x] = local_sum;
+    __syncthreads();
+    
+    // Parallel reduction for norm
+    for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
+        if (threadIdx.x < stride) {
+            shared_sums[threadIdx.x] += shared_sums[threadIdx.x + stride];
+        }
+        __syncthreads();
+    }
+    
+    if (threadIdx.x == 0) {
+        norms[col] = sqrt(shared_sums[0]);
+    }
+}
+
+/**
  * @brief Compute column norms using parallel reduction
  * Each block handles one column
  */
@@ -473,13 +544,32 @@ void GPUBlockLanczos::orthonormalizeBlock(cuDoubleComplex* d_block) {
 void GPUBlockLanczos::blockMatVec(const cuDoubleComplex* d_V, cuDoubleComplex* d_W) {
     auto start = std::chrono::high_resolution_clock::now();
     
-    // Apply Hamiltonian to each column of the block
-    // This is the primary computational bottleneck
-    for (int col = 0; col < block_size_; ++col) {
-        const cuDoubleComplex* v_col = d_V + col * dimension_;
-        cuDoubleComplex* w_col = d_W + col * dimension_;
-        
-        op_->matVecGPU(v_col, w_col, dimension_);
+    // Apply Hamiltonian to each column of the block in parallel using streams
+    // For large block sizes, use stream-based parallelism
+    // For small block sizes, sequential is often faster due to kernel launch overhead
+    
+    if (block_size_ >= 4 && op_->supportsAsyncMatVec()) {
+        // Use multiple streams for parallel matVec (if operator supports it)
+        // Create temporary streams for parallel execution
+        std::vector<cudaStream_t> streams(block_size_);
+        for (int col = 0; col < block_size_; ++col) {
+            cudaStreamCreate(&streams[col]);
+            const cuDoubleComplex* v_col = d_V + col * dimension_;
+            cuDoubleComplex* w_col = d_W + col * dimension_;
+            op_->matVecGPUAsync(v_col, w_col, dimension_, streams[col]);
+        }
+        // Synchronize all streams
+        for (int col = 0; col < block_size_; ++col) {
+            cudaStreamSynchronize(streams[col]);
+            cudaStreamDestroy(streams[col]);
+        }
+    } else {
+        // Sequential fallback (still efficient for moderate block sizes)
+        for (int col = 0; col < block_size_; ++col) {
+            const cuDoubleComplex* v_col = d_V + col * dimension_;
+            cuDoubleComplex* w_col = d_W + col * dimension_;
+            op_->matVecGPU(v_col, w_col, dimension_);
+        }
     }
     
     stats_.total_matvecs += block_size_;
@@ -545,7 +635,7 @@ bool GPUBlockLanczos::qrFactorization(cuDoubleComplex* d_block, cuDoubleComplex*
     // Copy block to temp for QR (QR overwrites input with Q and R combined)
     blockCopy(d_block, d_temp_block_);
     
-    // Perform QR factorization
+    // Perform QR factorization on GPU
     CUSOLVER_CHECK(cusolverDnZgeqrf(
         cusolver_handle_,
         dimension_, block_size_,
@@ -555,27 +645,13 @@ bool GPUBlockLanczos::qrFactorization(cuDoubleComplex* d_block, cuDoubleComplex*
         d_info_
     ));
     
-    // Extract R (upper triangular part of first block_size rows)
-    // R is stored in the upper triangle of d_temp_block_
-    std::vector<cuDoubleComplex> h_temp(dimension_ * block_size_);
-    CUDA_CHECK(cudaMemcpy(h_temp.data(), d_temp_block_, 
-                         dimension_ * block_size_ * sizeof(cuDoubleComplex),
-                         cudaMemcpyDeviceToHost));
+    // OPTIMIZATION: Extract R directly on GPU using fused kernel (no host transfer)
+    // R is the upper triangular part stored in the first block_size rows of d_temp_block_
+    GPULanczosKernels::extractUpperTriangularKernel<<<block_size_, block_size_, 0, compute_stream_>>>(
+        d_temp_block_, d_R, dimension_, block_size_
+    );
     
-    std::vector<cuDoubleComplex> h_R(block_size_ * block_size_);
-    for (int j = 0; j < block_size_; ++j) {
-        for (int i = 0; i <= j; ++i) {
-            h_R[i + j * block_size_] = h_temp[i + j * dimension_];
-        }
-        for (int i = j + 1; i < block_size_; ++i) {
-            h_R[i + j * block_size_] = make_cuDoubleComplex(0.0, 0.0);
-        }
-    }
-    CUDA_CHECK(cudaMemcpy(d_R, h_R.data(), 
-                         block_size_ * block_size_ * sizeof(cuDoubleComplex),
-                         cudaMemcpyHostToDevice));
-    
-    // Generate explicit Q
+    // Generate explicit Q (still in-place on d_temp_block_)
     CUSOLVER_CHECK(cusolverDnZungqr(
         cusolver_handle_,
         dimension_, block_size_, block_size_,
@@ -588,17 +664,27 @@ bool GPUBlockLanczos::qrFactorization(cuDoubleComplex* d_block, cuDoubleComplex*
     // Copy Q back to block
     blockCopy(d_temp_block_, d_block);
     
+    // OPTIMIZATION: Check deflation with minimal transfer (only block_size diagonals)
+    // Copy only diagonal elements for deflation check
+    std::vector<cuDoubleComplex> h_diag(block_size_);
+    for (int i = 0; i < block_size_; ++i) {
+        // Each diagonal is at offset i + i*block_size_ in column-major R
+        CUDA_CHECK(cudaMemcpyAsync(&h_diag[i], d_R + i + i * block_size_,
+                                   sizeof(cuDoubleComplex),
+                                   cudaMemcpyDeviceToHost, transfer_stream_));
+    }
+    
     CUDA_CHECK(cudaStreamSynchronize(compute_stream_));
+    CUDA_CHECK(cudaStreamSynchronize(transfer_stream_));
     
     auto end = std::chrono::high_resolution_clock::now();
     stats_.qr_time += std::chrono::duration<double>(end - start).count();
     
     // Check for deflation (rank deficiency)
-    // If any diagonal element of R is too small, we have deflation
     double min_diag = std::numeric_limits<double>::max();
     for (int i = 0; i < block_size_; ++i) {
-        cuDoubleComplex diag = h_R[i + i * block_size_];
-        double mag = sqrt(cuCreal(diag) * cuCreal(diag) + cuCimag(diag) * cuCimag(diag));
+        double mag = sqrt(cuCreal(h_diag[i]) * cuCreal(h_diag[i]) + 
+                         cuCimag(h_diag[i]) * cuCimag(h_diag[i]));
         min_diag = std::min(min_diag, mag);
     }
     

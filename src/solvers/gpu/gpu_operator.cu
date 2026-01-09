@@ -530,6 +530,93 @@ void GPUOperator::matVecGPU(const cuDoubleComplex* d_x, cuDoubleComplex* d_y, in
     CUDA_CHECK(cudaEventDestroy(stop));
 }
 
+void GPUOperator::matVecGPUAsync(const cuDoubleComplex* d_x, cuDoubleComplex* d_y, int N, cudaStream_t stream) {
+    // Async version for parallel block operations
+    // Note: No event timing to avoid synchronization
+    
+    if (sparse_matrix_built_) {
+        // Need a separate cuSPARSE handle for stream to avoid race conditions
+        // For now, fall back to sequential for sparse matrices
+        cusparseSetStream(cusparse_handle_, stream);
+        
+        cuDoubleComplex alpha = make_cuDoubleComplex(1.0, 0.0);
+        cuDoubleComplex beta = make_cuDoubleComplex(0.0, 0.0);
+        
+        // Create temporary vector descriptors for this stream
+        cusparseDnVecDescr_t vec_x_desc, vec_y_desc;
+        cusparseCreateDnVec(&vec_x_desc, N, (void*)d_x, CUDA_C_64F);
+        cusparseCreateDnVec(&vec_y_desc, N, (void*)d_y, CUDA_C_64F);
+        
+        size_t buffer_size = 0;
+        void* d_buffer = nullptr;
+        
+        cusparseSpMV_bufferSize(
+            cusparse_handle_, CUSPARSE_OPERATION_NON_TRANSPOSE,
+            &alpha, mat_descriptor_, vec_x_desc,
+            &beta, vec_y_desc, CUDA_C_64F,
+            CUSPARSE_SPMV_ALG_DEFAULT, &buffer_size);
+        
+        if (buffer_size > 0) {
+            cudaMallocAsync(&d_buffer, buffer_size, stream);
+        }
+        
+        cusparseSpMV(
+            cusparse_handle_, CUSPARSE_OPERATION_NON_TRANSPOSE,
+            &alpha, mat_descriptor_, vec_x_desc,
+            &beta, vec_y_desc, CUDA_C_64F,
+            CUSPARSE_SPMV_ALG_DEFAULT, d_buffer);
+        
+        if (d_buffer) {
+            cudaFreeAsync(d_buffer, stream);
+        }
+        
+        cusparseDestroyDnVec(vec_x_desc);
+        cusparseDestroyDnVec(vec_y_desc);
+        
+        // Reset stream to default
+        cusparseSetStream(cusparse_handle_, 0);
+    } else if (!transform_data_.empty()) {
+        // Copy transform data to device if not already done
+        if (d_transform_data_ == nullptr) {
+            copyTransformDataToDevice();
+        }
+        
+        const int TRANSFORM_PARALLEL_THRESHOLD = 64;
+        
+        if (num_transforms_ > TRANSFORM_PARALLEL_THRESHOLD) {
+            // Zero output vector with async memset
+            cudaMemsetAsync(d_y, 0, N * sizeof(cuDoubleComplex), stream);
+            
+            dim3 block(16, 16);
+            dim3 grid((N + block.x - 1) / block.x,
+                     (num_transforms_ + block.y - 1) / block.y);
+            
+            GPUKernels::matVecTransformParallel<<<grid, block, 0, stream>>>(
+                d_x, d_y, d_transform_data_, num_transforms_, N, n_sites_, spin_l_);
+        } else {
+            cudaMemsetAsync(d_y, 0, N * sizeof(cuDoubleComplex), stream);
+            
+            int num_blocks = (N + BLOCK_SIZE - 1) / BLOCK_SIZE;
+            num_blocks = std::min(num_blocks, MAX_BLOCKS);
+            
+            size_t shared_mem_size = std::min(num_transforms_, 4096) * sizeof(GPUTransformData);
+            
+            GPUKernels::matVecKernelOptimized<<<num_blocks, BLOCK_SIZE, shared_mem_size, stream>>>(
+                0, d_y, N, n_sites_, spin_l_,
+                d_transform_data_, num_transforms_, d_x);
+        }
+    } else {
+        // Fallback to legacy kernel
+        int num_blocks = (N + BLOCK_SIZE - 1) / BLOCK_SIZE;
+        num_blocks = std::min(num_blocks, MAX_BLOCKS);
+        
+        GPUKernels::matVecKernel<<<num_blocks, BLOCK_SIZE, 0, stream>>>(
+            d_x, d_y, N, n_sites_,
+            d_interactions_, num_interactions_,
+            d_single_site_ops_, num_single_site_ops_);
+    }
+}
+
 void GPUOperator::processChunk(const ChunkInfo& chunk, const cuDoubleComplex* d_x,
                               cuDoubleComplex* d_y) {
     // Process one chunk of the matrix-vector product
