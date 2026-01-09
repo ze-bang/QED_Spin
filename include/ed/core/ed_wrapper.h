@@ -419,6 +419,25 @@ namespace ed_internal {
         double large_value_override = 0.0
     );
     
+    /**
+     * @brief Matrix-free diagonalization using a custom apply function
+     * 
+     * This enables truly matrix-free diagonalization where the Hamiltonian
+     * is never explicitly stored. The apply_func computes H*v on-the-fly.
+     * 
+     * @param apply_func Function that computes out = H * in
+     * @param dim Dimension of the Hilbert space
+     * @param method Diagonalization method (LANCZOS recommended)
+     * @param params Diagonalization parameters
+     * @return EDResults with eigenvalues and optionally eigenvectors
+     */
+    EDResults diagonalize_matrix_free(
+        std::function<void(const Complex*, Complex*, uint64_t)> apply_func,
+        uint64_t dim,
+        DiagonalizationMethod method,
+        const EDParameters& params
+    );
+    
     void transform_and_save_tpq_states(
         const std::string& block_output_dir,
         const std::string& main_output_dir,
@@ -1455,6 +1474,38 @@ EDResults diagonalize_symmetry_block(
 }
 
 /**
+ * @brief Matrix-free diagonalization using a custom apply function
+ * 
+ * This enables truly matrix-free diagonalization where the Hamiltonian
+ * is never explicitly stored. The apply_func computes H*v on-the-fly.
+ * 
+ * Supports Lanczos and Davidson methods. ARPACK and FULL require matrix construction.
+ */
+EDResults diagonalize_matrix_free(
+    std::function<void(const Complex*, Complex*, uint64_t)> apply_func,
+    uint64_t dim,
+    DiagonalizationMethod method,
+    const EDParameters& params
+) {
+    // Validate method - only Lanczos and Davidson support matrix-free
+    if (method == DiagonalizationMethod::FULL) {
+        throw std::runtime_error("FULL diagonalization requires explicit matrix. Use LANCZOS for matrix-free.");
+    }
+    if (method == DiagonalizationMethod::ARPACK_SM ||
+        method == DiagonalizationMethod::ARPACK_LM) {
+        std::cerr << "Warning: ARPACK requires matrix construction. Falling back to LANCZOS." << std::endl;
+        method = DiagonalizationMethod::LANCZOS;
+    }
+    
+    // Wrap the apply function to match expected signature
+    auto apply_wrapper = [&apply_func](const Complex* in, Complex* out, int size) {
+        apply_func(in, out, static_cast<uint64_t>(size));
+    };
+    
+    return exact_diagonalization_core(apply_wrapper, dim, method, params);
+}
+
+/**
  * @brief Transform and save TPQ states from block to full basis
  */
 void transform_and_save_tpq_states(
@@ -1713,7 +1764,18 @@ GroundStateSectorInfo find_ground_state_sector(
 }
 
 /**
- * @brief Setup symmetrized basis (generate or load)
+ * @brief Setup symmetrized basis (generate or load with cache validation)
+ * 
+ * This function handles the symmetrized basis with proper cache management:
+ * 1. Checks if cached symmetry data is valid (matches current Hamiltonian)
+ * 2. If invalid or missing, regenerates from scratch
+ * 3. Marks cache as valid after successful generation
+ * 
+ * Cache invalidation triggers:
+ * - InterAll.dat modified
+ * - Trans.dat modified
+ * - automorphisms.json modified
+ * - symmetry_data.h5 missing or corrupted
  */
 void setup_symmetry_basis(
     const std::string& directory,
@@ -1728,21 +1790,30 @@ void setup_symmetry_basis(
     struct stat buffer;
     
     if (use_hdf5) {
-        // HDF5 workflow
-        bool hdf5_exists = HDF5SymmetryIO::fileExists(hdf5_file);
+        // HDF5 workflow with cache validation
+        bool cache_valid = is_symmetry_cache_valid(directory, "symmetry_data.h5");
         
-        if (!hdf5_exists) {
-            std::cout << "Symmetrized basis (HDF5) not found. Generating..." << std::endl;
+        if (!cache_valid) {
+            // Remove stale cache files to ensure clean regeneration
+            if (std::filesystem::exists(hdf5_file)) {
+                std::cout << "Removing stale symmetry cache..." << std::endl;
+                std::filesystem::remove(hdf5_file);
+            }
+            
+            std::cout << "Generating symmetrized basis (HDF5)..." << std::endl;
             hamiltonian.generateSymmetrizedBasisHDF5(directory);
             hamiltonian.buildAndSaveSymmetrizedBlocksHDF5(directory);
+            
+            // Mark cache as valid
+            mark_symmetry_cache_valid(directory, "symmetry_data.h5");
         } else {
-            std::cout << "Using existing symmetrized basis from HDF5: " << hdf5_file << std::endl;
+            std::cout << "Using cached symmetrized basis from: " << hdf5_file << std::endl;
             // Load block sizes from HDF5
             auto dims = HDF5SymmetryIO::loadSectorDimensions(hdf5_file);
             hamiltonian.symmetrized_block_ham_sizes.assign(dims.begin(), dims.end());
         }
     } else {
-        // Legacy text file workflow
+        // Legacy text file workflow (no cache validation - deprecated)
         bool sym_basis_exists = (stat(block_sizes_file.c_str(), &buffer) == 0);
         std::string first_block_file = sym_blocks_dir + "/block_0.dat";
         bool sym_blocks_exist = (stat(first_block_file.c_str(), &buffer) == 0);
@@ -1819,21 +1890,40 @@ std::vector<Complex> transform_sector_to_full(
 /**
  * @brief Setup Fixed-Sz symmetry basis (generate or load from HDF5)
  */
+/**
+ * @brief Setup fixed-Sz symmetrized basis (generate or load with cache validation)
+ * 
+ * This function handles the fixed-Sz symmetrized basis with proper cache management:
+ * 1. Checks if cached symmetry data is valid (matches current Hamiltonian)
+ * 2. If invalid or missing, regenerates from scratch
+ * 3. Marks cache as valid after successful generation
+ */
 bool setup_fixed_sz_symmetry_basis(
     const std::string& directory,
     FixedSzOperator& hamiltonian
 ) {
     std::string hdf5_file = directory + "/symmetry_data_fixed_sz.h5";
-    bool basis_exists = HDF5SymmetryIO::fileExists(hdf5_file);
     
-    if (!basis_exists) {
+    // Use cache validation instead of simple file existence check
+    bool cache_valid = is_symmetry_cache_valid(directory, "symmetry_data_fixed_sz.h5");
+    
+    if (!cache_valid) {
+        // Remove stale cache files to ensure clean regeneration
+        if (std::filesystem::exists(hdf5_file)) {
+            std::cout << "Removing stale fixed-Sz symmetry cache..." << std::endl;
+            std::filesystem::remove(hdf5_file);
+        }
+        
         std::cout << "\nGenerating symmetrized basis (Fixed Sz, HDF5)..." << std::endl;
         hamiltonian.generateSymmetrizedBasisFixedSzHDF5(directory);
         
         std::cout << "\nBuilding block-diagonal Hamiltonian (Fixed Sz, HDF5)..." << std::endl;
         hamiltonian.buildAndSaveSymmetrizedBlocksFixedSzHDF5(directory);
+        
+        // Mark cache as valid
+        mark_symmetry_cache_valid(directory, "symmetry_data_fixed_sz.h5");
     } else {
-        std::cout << "\nUsing existing symmetrized basis from: " << hdf5_file << std::endl;
+        std::cout << "\nUsing cached symmetrized basis from: " << hdf5_file << std::endl;
         
         // Load block sizes
         auto dims = HDF5SymmetryIO::loadSectorDimensions(hdf5_file);
@@ -2760,21 +2850,8 @@ EDResults exact_diagonalization_from_directory_symmetrized(
               << params.num_sites << ", method=" << static_cast<int>(method) << std::endl;
 
     // ========== Step 1: Generate or Load Automorphisms ==========
-    std::string automorphism_file = directory + "/automorphism_results/automorphisms.json";
-    struct stat automorphism_buffer;
-    bool automorphisms_exist = (stat(automorphism_file.c_str(), &automorphism_buffer) == 0);
-
-    if (!automorphisms_exist) {
-        std::string automorphism_finder_path = std::string(__FILE__);
-        automorphism_finder_path = automorphism_finder_path.substr(0, automorphism_finder_path.find_last_of("/\\"));
-        automorphism_finder_path += "/automorphism_finder.py";
-        std::string cmd = "python " + automorphism_finder_path + " --data_dir=\"" + directory + "\"";
-        std::cout << "Running automorphism finder: " << cmd << std::endl;
-        if (!safe_system_call(cmd)) {
-            std::cerr << "Warning: Automorphism finder failed" << std::endl;
-        }
-    } else {
-        std::cout << "Using existing automorphism results from: " << automorphism_file << std::endl;
+    if (!generate_automorphisms(directory)) {
+        std::cerr << "Warning: Automorphism generation failed, continuing anyway..." << std::endl;
     }
     
     // ========== Step 2: Load Hamiltonian ==========
@@ -3032,6 +3109,17 @@ EDResults exact_diagonalization_from_directory_symmetrized(
         results.eigenvalues[i] = all_eigen_info[i].value;
     }
     
+    // Save combined eigenvalues to HDF5
+    if (!params.output_dir.empty() && !results.eigenvalues.empty()) {
+        try {
+            std::string hdf5_file = HDF5IO::createOrOpenFile(params.output_dir);
+            HDF5IO::saveEigenvalues(hdf5_file, results.eigenvalues);
+            std::cout << "Saved " << results.eigenvalues.size() << " combined eigenvalues to " << hdf5_file << std::endl;
+        } catch (const std::exception& e) {
+            std::cerr << "Warning: Failed to save combined eigenvalues to HDF5: " << e.what() << std::endl;
+        }
+    }
+    
     // Create eigenvector mapping file
     if (params.compute_eigenvectors && !params.output_dir.empty()) {
         std::ofstream map_file(params.output_dir + "/eigenvector_mapping.txt");
@@ -3091,19 +3179,9 @@ inline EDResults exact_diagonalization_fixed_sz_symmetrized(
     std::cout << "========================================\n" << std::endl;
     
     // ========== Step 1: Ensure Automorphisms Exist ==========
-    std::string automorphism_file = directory + "/automorphism_results/automorphisms.json";
-    struct stat stat_buf;
-    
-    if (stat(automorphism_file.c_str(), &stat_buf) != 0) {
-        std::cout << "Generating automorphisms..." << std::endl;
-        std::string finder_path = std::string(__FILE__);
-        finder_path = finder_path.substr(0, finder_path.find_last_of("/\\"));
-        finder_path += "/automorphism_finder.py";
-        std::string cmd = "python3 " + finder_path + " --data_dir=\"" + directory + "\"";
-        if (!safe_system_call(cmd)) {
-            std::cerr << "Error: Automorphism generation failed" << std::endl;
-            return EDResults();
-        }
+    if (!generate_automorphisms(directory)) {
+        std::cerr << "Error: Automorphism generation failed" << std::endl;
+        return EDResults();
     }
     
     // ========== Step 2: Load Hamiltonian ==========
@@ -3115,6 +3193,7 @@ inline EDResults exact_diagonalization_fixed_sz_symmetrized(
     
     // Load three-body terms if available
     std::string three_body_path = directory + "/" + three_body_filename;
+    struct stat stat_buf;
     if (stat(three_body_path.c_str(), &stat_buf) == 0) {
         std::cout << "Loading three-body terms..." << std::endl;
         hamiltonian.loadThreeBodyTerm(three_body_path);
@@ -3314,6 +3393,17 @@ inline EDResults exact_diagonalization_fixed_sz_symmetrized(
                 map_file << i << " " << ev.value << " " << ev.sector_idx << " " << ev.eigen_idx
                         << " eigenvector_sector" << ev.sector_idx << "_" << ev.eigen_idx << ".dat\n";
             }
+        }
+    }
+    
+    // Save combined eigenvalues to HDF5
+    if (!params.output_dir.empty() && !results.eigenvalues.empty()) {
+        try {
+            std::string hdf5_file = HDF5IO::createOrOpenFile(params.output_dir);
+            HDF5IO::saveEigenvalues(hdf5_file, results.eigenvalues);
+            std::cout << "Saved " << results.eigenvalues.size() << " combined eigenvalues to " << hdf5_file << std::endl;
+        } catch (const std::exception& e) {
+            std::cerr << "Warning: Failed to save combined eigenvalues to HDF5: " << e.what() << std::endl;
         }
     }
     

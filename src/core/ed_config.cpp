@@ -410,6 +410,8 @@ EDConfig EDConfig::fromCommandLine(uint64_t argc, char* argv[]) {
             else if (arg == "--standard") config.workflow.run_standard = true;
             else if (arg == "--symmetrized") config.workflow.run_symmetrized = true;
             else if (arg == "--streaming-symmetry") config.workflow.run_streaming_symmetry = true;
+            else if (arg == "--symm") config.workflow.run_symm_auto = true;
+            else if (arg.find("--symm-threshold=") == 0) config.workflow.symm_streaming_threshold = std::stoull(parse_value("--symm-threshold="));
             else if (arg == "--thermo") config.workflow.compute_thermo = true;
             else if (arg == "--dynamical-response") config.workflow.compute_dynamical_response = true;
             else if (arg == "--static-response") config.workflow.compute_static_response = true;
@@ -533,16 +535,17 @@ EDConfig EDConfig::fromCommandLine(uint64_t argc, char* argv[]) {
                         !config.workflow.run_standard && 
                         !config.workflow.run_symmetrized && 
                         !config.workflow.run_streaming_symmetry &&
+                        !config.workflow.run_symm_auto &&
                         !config.workflow.compute_thermo;
     
     if (only_response && !config.workflow.skip_ed) {
-        std::cout << "Note: Only response calculations requested. Skipping diagonalization (use --standard/--symmetrized to override).\n";
+        std::cout << "Note: Only response calculations requested. Skipping diagonalization (use --standard/--symm to override).\n";
         config.workflow.skip_ed = true;
     }
     
     // Default to standard workflow if nothing specified (and skip_ed not set)
     if (!config.workflow.run_standard && !config.workflow.run_symmetrized && 
-        !config.workflow.run_streaming_symmetry && !config.workflow.skip_ed) {
+        !config.workflow.run_streaming_symmetry && !config.workflow.run_symm_auto && !config.workflow.skip_ed) {
         config.workflow.run_standard = true;
     }
     
@@ -758,6 +761,7 @@ void EDConfig::print(std::ostream& out) const {
     if (workflow.run_standard) out << "  - Running standard diagonalization\n";
     if (workflow.run_symmetrized) out << "  - Running symmetrized diagonalization\n";
     if (workflow.run_streaming_symmetry) out << "  - Running streaming symmetry diagonalization (memory-efficient)\n";
+    if (workflow.run_symm_auto) out << "  - Running symmetry-exploiting diagonalization (auto-select mode)\n";
     if (workflow.compute_thermo) out << "  - Computing thermodynamics\n";
     if (observable.save_thermal_states) out << "  - Saving TPQ states at target temperatures\n";
     if (observable.compute_spin_correlations) out << "  - Computing spin correlations ⟨Si⟩ and ⟨Si·Sj⟩\n";

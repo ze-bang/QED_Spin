@@ -993,7 +993,7 @@ void lanczos(std::function<void(const Complex*, Complex*, int)> H, uint64_t N, u
         
         // beta_{j+1} = ||w||
         norm = cblas_dznrm2(N, w.data(), 1);
-        beta.push_back(norm);
+        // Note: beta is pushed after the breakdown check below
         
         // Compute residual error for monitoring
         // Residual = ||H*v_j - alpha_j*v_j - beta_{j+1}*v_{j+1}|| / ||H*v_j||
@@ -1016,18 +1016,16 @@ void lanczos(std::function<void(const Complex*, Complex*, int)> H, uint64_t N, u
                      << "  |  residual = " << residual_error << std::defaultfloat << std::endl;
         }
         
-        // Check for breakdown
+        // Check for breakdown (invariant subspace found)
+        // For degenerate spectra, terminate cleanly - use FULL or BLOCK_LANCZOS for complete spectrum
         if (norm < tol) {
-            std::cout << "\n=== Lanczos Breakdown Detected ===" << std::endl;
-            std::cout << "Iteration: " << j + 1 << std::endl;
-            std::cout << "Beta = " << std::scientific << std::setprecision(4) << norm 
-                     << " < tolerance = " << tol << std::endl;
-            std::cout << "Residual error: " << residual_error << std::endl;
-            std::cout << "Invariant subspace found - exact diagonalization complete!" << std::defaultfloat << std::endl;
-            std::cout << "==================================\n" << std::endl;
+            std::cout << "Lanczos: Invariant subspace found at iteration " << j + 1 
+                     << " (beta=" << std::scientific << std::setprecision(2) << norm << ")" << std::endl;
+            std::cout << "         For complete spectrum of degenerate systems, use --method=FULL or BLOCK_LANCZOS" << std::defaultfloat << std::endl;
             max_iter = j + 1;
             break;
         }
+        beta.push_back(norm);
         
         // Check for numerical issues with residual
         if (j > 10 && residual_error > 0.9) {

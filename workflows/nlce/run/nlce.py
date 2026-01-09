@@ -64,7 +64,13 @@ def get_num_sites(file_path):
     return None
 
 def run_ed_for_cluster(args):
-    """Run ED for a single cluster"""
+    """Run ED for a single cluster
+    
+    Supports both full diagonalization and Lanczos-boosted mode.
+    In Lanczos-boosted mode, large clusters use partial diagonalization
+    to compute only the lowest eigenvalues, which is sufficient for
+    low-to-moderate temperature thermodynamics.
+    """
     cluster_id, order, ed_executable, ham_dir, ed_dir, ed_options, symmetrized = args
     
     # Create output directory for ED results
@@ -92,7 +98,20 @@ def run_ed_for_cluster(args):
         for line in f:
             if not line.startswith('#') and line.strip():
                 num_sites += 1
-
+    
+    # Determine if this cluster should use symmetrized full diagonalization
+    # (block-diagonalization by Sz sector enables handling larger clusters)
+    use_symmetrized_for_size = False
+    symmetrize_threshold = ed_options.get("symmetrize_threshold", 14)
+    
+    if ed_options.get("auto_symmetrize", False):
+        if num_sites > symmetrize_threshold:
+            use_symmetrized_for_size = True
+            hilbert_dim = 2 ** num_sites
+            logging.info(f"Cluster {cluster_id} ({num_sites} sites, dim={hilbert_dim}): "
+                        f"Using symmetrized full diagonalization (block-diagonal by Sz)")
+        else:
+            logging.info(f"Cluster {cluster_id} ({num_sites} sites): Using standard full diagonalization")
 
     if ed_options["method"] == 'mTPQ':
         cmd = [
@@ -104,6 +123,19 @@ def run_ed_for_cluster(args):
             '--spin_length=0.5',
             '--iterations=100000',
             '--large_value=100'
+        ]
+    elif use_symmetrized_for_size:
+        # Symmetrized mode: block-diagonalize by Sz for large clusters
+        # This computes ALL eigenvalues but in much smaller blocks
+        cmd = [
+            ed_executable,
+            ham_subdir,
+            '--method=FULL',
+            f'--eigenvalues=FULL',
+            f'--output={cluster_ed_dir}/output',
+            f'--num_sites={num_sites}',
+            '--spin_length=0.5',
+            '--symmetrized',  # Critical: enables block-diagonalization by Sz
         ]
     elif ed_options["method"] == 'FULL' or ed_options["method"] == 'OSS':
         cmd = [
@@ -217,6 +249,31 @@ def main():
     # Random transverse field
     parser.add_argument('--random_field_width', type=float, default=0, help='Width of the random transverse field')
 
+    # Automatic symmetrization for large clusters
+    # Block-diagonalization by Sz sector allows handling much larger Hilbert spaces
+    parser.add_argument('--auto_symmetrize', action='store_true',
+                       help='Automatically use symmetrized full ED for large clusters. '
+                            'This block-diagonalizes by Sz sector, enabling exact calculations '
+                            'for larger systems without stochastic noise.')
+    parser.add_argument('--symmetrize_threshold', type=int, default=14,
+                       help='Site threshold for switching to symmetrized mode (default: 14). '
+                            'Clusters with more sites use block-diagonalization by Sz.')
+    
+    # Legacy Lanczos-boosted options (deprecated - see notes below)
+    # NOTE: Standard Lanczos partial diagonalization doesn't work for finite-T thermodynamics
+    # because a single starting vector only samples one invariant subspace (Sz sector).
+    # The proper solution is symmetrized full ED which computes ALL eigenvalues exactly.
+    parser.add_argument('--lanczos_boosted', action='store_true',
+                       help='DEPRECATED: Use --auto_symmetrize instead. '
+                            'Lanczos partial diagonalization from a single starting vector '
+                            'finds only one Sz sector, giving incorrect finite-T thermodynamics.')
+    parser.add_argument('--lanczos_threshold', type=int, default=14,
+                       help='DEPRECATED: Use --symmetrize_threshold instead.')
+    parser.add_argument('--lanczos_eigenvalues', type=int, default=500,
+                       help='DEPRECATED: Not used with symmetrized mode.')
+    parser.add_argument('--lanczos_min_temp', type=float, default=None,
+                       help='DEPRECATED: Not needed with symmetrized mode (exact at all T).')
+
     args = parser.parse_args()
     
     # Create base directory
@@ -243,7 +300,7 @@ def main():
         logging.info("="*80)
         
         cmd = [
-            'python3', 
+            sys.executable,  # Use the same Python interpreter as the current script
             os.path.join(os.path.dirname(__file__), '..', 'prep', 'generate_pyrochlore_clusters.py'),
             f'--max_order={args.max_order}',
             f'--output_dir={cluster_dir}',
@@ -289,7 +346,7 @@ def main():
             
             # Run helper_cluster.py (now in python/edlib/)
             cmd = [
-                'python3',
+                sys.executable,  # Use the same Python interpreter as the current script
                 os.path.join(os.path.dirname(__file__), '..', '..', '..', 'python', 'edlib', 'helper_cluster.py'),
                 str(args.Jxx),
                 str(args.Jyy),
@@ -325,8 +382,25 @@ def main():
             "temp_min": args.temp_min,
             "temp_max": args.temp_max,
             "temp_bins": args.temp_bins,
-            "measure_spin": args.measure_spin
+            "measure_spin": args.measure_spin,
+            # Symmetrized mode options (for large clusters)
+            "auto_symmetrize": args.auto_symmetrize,
+            "symmetrize_threshold": args.symmetrize_threshold,
         }
+        
+        # Handle deprecated lanczos_boosted flag
+        if args.lanczos_boosted:
+            logging.warning("--lanczos_boosted is deprecated! Standard Lanczos partial diagonalization "
+                          "doesn't work for finite-T thermodynamics (finds only one Sz sector).")
+            logging.warning("Automatically enabling --auto_symmetrize instead for correct results.")
+            ed_options["auto_symmetrize"] = True
+            ed_options["symmetrize_threshold"] = args.lanczos_threshold
+        
+        if ed_options["auto_symmetrize"]:
+            logging.info(f"Auto-symmetrize mode enabled:")
+            logging.info(f"  - Standard full ED for clusters with <= {ed_options['symmetrize_threshold']} sites")
+            logging.info(f"  - Symmetrized full ED (block-diagonal by Sz) for larger clusters")
+            logging.info(f"  - All eigenvalues computed exactly in each Sz sector")
         
         # Prepare arguments for each cluster
         ed_tasks = []

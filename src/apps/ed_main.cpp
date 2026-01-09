@@ -2105,10 +2105,8 @@ void print_help(const char* prog_name) {
     std::cout << "  " << prog_name << " ./data --method=LANCZOS\n\n";
     std::cout << "  # Full spectrum with thermodynamics\n";
     std::cout << "  " << prog_name << " ./data --method=FULL --thermo\n\n";
-    std::cout << "  # Symmetrized calculation\n";
-    std::cout << "  " << prog_name << " ./data --symmetrized --eigenvalues=10\n\n";
-    std::cout << "  # Streaming symmetry (memory-efficient)\n";
-    std::cout << "  " << prog_name << " ./data --streaming-symmetry --eigenvalues=10\n\n";
+    std::cout << "  # Symmetry-exploiting calculation (auto-selects best mode)\n";
+    std::cout << "  " << prog_name << " ./data --symm --eigenvalues=10\n\n";
     std::cout << "  # Use config file\n";
     std::cout << "  " << prog_name << " --config=ed_config.txt\n\n";
     
@@ -2127,6 +2125,8 @@ void print_help(const char* prog_name) {
     
     std::cout << "Workflow Options:\n";
     std::cout << "  --standard              Run standard diagonalization\n";
+    std::cout << "  --symm                  Run symmetry-exploiting diagonalization (auto-selects best mode)\n";
+    std::cout << "  --symm-threshold=<n>    Hilbert dim threshold for streaming mode (default: 4096)\n";
     std::cout << "  --symmetrized           Run symmetrized diagonalization (exploits symmetries)\n";
     std::cout << "  --streaming-symmetry    Run streaming symmetry diagonalization (memory-efficient,\n";
     std::cout << "                          recommended for systems ≥12 sites)\n";
@@ -2792,6 +2792,37 @@ int main(int argc, char* argv[]) {
     EDResults standard_results, sym_results;
     
     try {
+        // Handle unified --symm flag: auto-select between symmetrized and streaming-symmetry
+        if (config.workflow.run_symm_auto && !config.workflow.skip_ed) {
+            // Calculate Hilbert space dimension for threshold decision
+            uint64_t hilbert_dim = 1ULL << config.system.num_sites;  // 2^N for spin-1/2
+            
+            bool use_streaming = (hilbert_dim >= config.workflow.symm_streaming_threshold);
+            
+            std::cout << "========================================\n";
+            std::cout << "  Auto-Symmetry Mode Selection\n";
+            std::cout << "  Hilbert space dimension: " << hilbert_dim << "\n";
+            std::cout << "  Threshold for streaming: " << config.workflow.symm_streaming_threshold << "\n";
+            std::cout << "  Selected: " << (use_streaming ? "streaming-symmetry" : "symmetrized") << "\n";
+            std::cout << "========================================\n\n";
+            
+            if (use_streaming) {
+                EDResults streaming_results = run_streaming_symmetry_workflow(config);
+                print_eigenvalue_summary(streaming_results.eigenvalues);
+                
+                if (config.workflow.compute_thermo && !streaming_results.eigenvalues.empty()) {
+                    compute_thermodynamics(streaming_results.eigenvalues, config);
+                }
+            } else {
+                sym_results = run_symmetrized_workflow(config);
+                print_eigenvalue_summary(sym_results.eigenvalues);
+                
+                if (config.workflow.compute_thermo && !sym_results.eigenvalues.empty()) {
+                    compute_thermodynamics(sym_results.eigenvalues, config);
+                }
+            }
+        }
+        
         if (config.workflow.run_standard && !config.workflow.skip_ed) {
             standard_results = run_standard_workflow(config);
             print_eigenvalue_summary(standard_results.eigenvalues);

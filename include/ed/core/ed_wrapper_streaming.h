@@ -56,22 +56,9 @@ inline EDResults exact_diagonalization_streaming_symmetry(
     std::cout << "========================================\n" << std::endl;
     
     // ========== Step 1: Generate or Load Automorphisms ==========
-    std::string automorphism_file = directory + "/automorphism_results/automorphisms.json";
-    struct stat automorphism_buffer;
-    bool automorphisms_exist = (stat(automorphism_file.c_str(), &automorphism_buffer) == 0);
-
-    if (!automorphisms_exist) {
-        std::cout << "Generating automorphisms..." << std::endl;
-        std::string automorphism_finder_path = std::string(__FILE__);
-        automorphism_finder_path = automorphism_finder_path.substr(0, automorphism_finder_path.find_last_of("/\\"));
-        automorphism_finder_path += "/automorphism_finder.py";
-        std::string cmd = "python3 " + automorphism_finder_path + " --data_dir=\"" + directory + "\"";
-        if (!safe_system_call(cmd)) {
-            std::cerr << "Warning: Automorphism finder failed" << std::endl;
-            return EDResults();
-        }
-    } else {
-        std::cout << "Using existing automorphisms from: " << automorphism_file << std::endl;
+    if (!generate_automorphisms(directory)) {
+        std::cerr << "Warning: Automorphism generation failed" << std::endl;
+        return EDResults();
     }
     
     // ========== Step 2: Load Hamiltonian ==========
@@ -188,6 +175,18 @@ inline EDResults exact_diagonalization_streaming_symmetry(
         results.eigenvectors_path = params.output_dir;
     }
     
+    // Save combined eigenvalues to HDF5
+    if (!params.output_dir.empty() && !results.eigenvalues.empty()) {
+        try {
+            std::string hdf5_file = HDF5IO::createOrOpenFile(params.output_dir);
+            HDF5IO::saveEigenvalues(hdf5_file, results.eigenvalues);
+            std::cout << "Saved " << results.eigenvalues.size() 
+                     << " combined eigenvalues to " << hdf5_file << std::endl;
+        } catch (const std::exception& e) {
+            std::cerr << "Warning: Failed to save combined eigenvalues: " << e.what() << std::endl;
+        }
+    }
+    
     // Save eigenvalue mapping
     if (!params.output_dir.empty()) {
         std::ofstream map_file(params.output_dir + "/eigenvalue_mapping.txt");
@@ -243,20 +242,9 @@ inline EDResults exact_diagonalization_streaming_symmetry_fixed_sz(
     std::cout << "========================================\n" << std::endl;
     
     // ========== Step 1: Generate or Load Automorphisms ==========
-    std::string automorphism_file = directory + "/automorphism_results/automorphisms.json";
-    struct stat automorphism_buffer;
-    bool automorphisms_exist = (stat(automorphism_file.c_str(), &automorphism_buffer) == 0);
-
-    if (!automorphisms_exist) {
-        std::cout << "Generating automorphisms..." << std::endl;
-        std::string automorphism_finder_path = std::string(__FILE__);
-        automorphism_finder_path = automorphism_finder_path.substr(0, automorphism_finder_path.find_last_of("/\\"));
-        automorphism_finder_path += "/automorphism_finder.py";
-        std::string cmd = "python3 " + automorphism_finder_path + " --data_dir=\"" + directory + "\"";
-        if (!safe_system_call(cmd)) {
-            std::cerr << "Warning: Automorphism finder failed" << std::endl;
-            return EDResults();
-        }
+    if (!generate_automorphisms(directory)) {
+        std::cerr << "Warning: Automorphism generation failed" << std::endl;
+        return EDResults();
     }
     
     // ========== Step 2: Load Hamiltonian ==========
@@ -362,6 +350,18 @@ inline EDResults exact_diagonalization_streaming_symmetry_fixed_sz(
     results.eigenvectors_computed = params.compute_eigenvectors;
     if (params.compute_eigenvectors) {
         results.eigenvectors_path = params.output_dir;
+    }
+    
+    // Save combined eigenvalues to HDF5
+    if (!params.output_dir.empty() && !results.eigenvalues.empty()) {
+        try {
+            std::string hdf5_file = HDF5IO::createOrOpenFile(params.output_dir);
+            HDF5IO::saveEigenvalues(hdf5_file, results.eigenvalues);
+            std::cout << "Saved " << results.eigenvalues.size() 
+                     << " combined eigenvalues to " << hdf5_file << std::endl;
+        } catch (const std::exception& e) {
+            std::cerr << "Warning: Failed to save combined eigenvalues: " << e.what() << std::endl;
+        }
     }
     
     std::cout << "\n========================================" << std::endl;

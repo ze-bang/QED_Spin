@@ -252,6 +252,8 @@ struct WorkflowConfig {
     bool run_standard = false;
     bool run_symmetrized = false;
     bool run_streaming_symmetry = false;  // New streaming symmetry mode
+    bool run_symm_auto = false;  // Unified --symm flag: auto-select between symmetrized and streaming
+    uint64_t symm_streaming_threshold = 4096;  // Hilbert dim threshold for switching to streaming
     bool compute_thermo = false;
     bool compute_dynamical_response = false;
     bool compute_static_response = false;
@@ -333,6 +335,8 @@ public:
     EDConfig& standard(bool b = true) { workflow.run_standard = b; return *this; }
     EDConfig& symmetrized(bool b = true) { workflow.run_symmetrized = b; return *this; }
     EDConfig& streamingSymmetry(bool b = true) { workflow.run_streaming_symmetry = b; return *this; }
+    EDConfig& symmAuto(bool b = true) { workflow.run_symm_auto = b; return *this; }
+    EDConfig& symmStreamingThreshold(uint64_t t) { workflow.symm_streaming_threshold = t; return *this; }
     EDConfig& thermo(bool b = true) { workflow.compute_thermo = b; return *this; }
     EDConfig& dynamicalResponse(bool b = true) { workflow.compute_dynamical_response = b; return *this; }
     EDConfig& staticResponse(bool b = true) { workflow.compute_static_response = b; return *this; }

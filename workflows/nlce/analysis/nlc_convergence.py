@@ -77,6 +77,17 @@ def run_nlce_for_order(order, args):
         cmd.append('--SI_units')
     if args.skip_cluster_gen:
         cmd.append('--skip_cluster_gen')
+    
+    # Add auto-symmetrize options (recommended for large clusters)
+    if args.auto_symmetrize:
+        cmd.append('--auto_symmetrize')
+        cmd.append(f'--symmetrize_threshold={args.symmetrize_threshold}')
+    
+    # Add deprecated Lanczos-boosted options (for backwards compatibility)
+    if args.lanczos_boosted:
+        cmd.append('--lanczos_boosted')
+        cmd.append(f'--lanczos_threshold={args.lanczos_threshold}')
+        # Note: lanczos_eigenvalues is no longer used
         
     # Add field direction if specified
     if args.field_dir:
@@ -340,6 +351,22 @@ def main():
     
     # Symmetrization
     parser.add_argument('--symmetrized', action='store_true', help='Use symmetrized diagonalization')
+    
+    # Auto-symmetrize mode (recommended for extending to higher orders)
+    parser.add_argument('--auto_symmetrize', action='store_true',
+                       help='Automatically use symmetrized full ED for large clusters. '
+                            'Block-diagonalizes by Sz sector for exact calculations on larger systems.')
+    parser.add_argument('--symmetrize_threshold', type=int, default=14,
+                       help='Site threshold for auto-symmetrize (default: 14)')
+    
+    # Deprecated Lanczos-boosted mode
+    parser.add_argument('--lanczos_boosted', action='store_true',
+                       help='DEPRECATED: Use --auto_symmetrize instead. '
+                            'Lanczos partial diagonalization gives incorrect finite-T results.')
+    parser.add_argument('--lanczos_threshold', type=int, default=14,
+                       help='DEPRECATED: Use --symmetrize_threshold instead')
+    parser.add_argument('--lanczos_eigenvalues', type=int, default=500,
+                       help='DEPRECATED: Not used with symmetrized mode')
     
     # SI units
     parser.add_argument('--SI_units', action='store_true', help='Use SI units for output')
