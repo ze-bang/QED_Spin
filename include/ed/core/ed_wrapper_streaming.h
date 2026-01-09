@@ -220,8 +220,32 @@ inline EDResults exact_diagonalization_streaming_symmetry(
  * Combines Sz conservation with spatial symmetries in streaming mode.
  * This is the most efficient approach for systems with both symmetries.
  * 
+ * MATHEMATICAL BACKGROUND:
+ * ========================
+ * The total Sz operator commutes with all lattice symmetry operators:
+ *   [S^z_total, P_g] = 0  for all permutations g in the automorphism group
+ * 
+ * This means we can simultaneously diagonalize:
+ *   1. The Hamiltonian H
+ *   2. The total Sz operator (eigenvalue: n_up - n_down)
+ *   3. The symmetry group representation (irrep labels)
+ * 
+ * SECTOR STRUCTURE:
+ * =================
+ * The Hilbert space decomposes as:
+ *   H = ⊕_{Sz} ⊕_{irrep} H_{Sz,irrep}
+ * 
+ * Not all (Sz, irrep) sectors are non-empty:
+ *   - Some irreps may have no states in a given Sz sector
+ *   - Empty sectors are automatically skipped
+ *   - The code counts and reports non-empty sectors
+ * 
+ * Example: For a 4-site chain with C4 symmetry and Sz=0:
+ *   - k=0 (trivial) sector: contains identity representation states
+ *   - k=π sector: may have states or be empty depending on n_up
+ * 
  * @param directory Directory containing Hamiltonian files
- * @param n_up Number of up spins (determines Sz sector)
+ * @param n_up Number of up spins (determines Sz sector: Sz = n_up - N/2 for spin-1/2)
  * @param method Diagonalization method
  * @param params Parameters for diagonalization
  * @param interaction_filename Name of interaction file
@@ -256,17 +280,40 @@ inline EDResults exact_diagonalization_streaming_symmetry_fixed_sz(
     hamiltonian.loadFromFile(single_site_file);
     hamiltonian.loadFromInterAllFile(interaction_file);
     
-    std::cout << "Fixed Sz dimension: " << hamiltonian.getFixedSzDim() << std::endl;
+    uint64_t fixed_sz_dim = hamiltonian.getFixedSzDim();
+    std::cout << "Fixed Sz dimension: " << fixed_sz_dim << std::endl;
     
     // ========== Step 3: Generate Symmetry Sectors (Streaming) ==========
     std::cout << "\nGenerating symmetry sectors (streaming mode, fixed Sz)..." << std::endl;
     hamiltonian.generateSymmetrySectorsStreamingFixedSz(directory);
     
     size_t num_sectors = hamiltonian.getNumSectors();
-    std::cout << "\nFound " << num_sectors << " symmetry sectors within fixed Sz" << std::endl;
     
-    if (num_sectors == 0) {
-        throw std::runtime_error("No symmetry sectors found in fixed Sz sector");
+    // Count non-empty sectors
+    size_t non_empty_sectors = 0;
+    uint64_t total_sym_dim = 0;
+    for (size_t i = 0; i < num_sectors; ++i) {
+        uint64_t dim = hamiltonian.getSectorDimension(i);
+        if (dim > 0) {
+            non_empty_sectors++;
+            total_sym_dim += dim;
+        }
+    }
+    
+    std::cout << "\n=== Fixed Sz × Symmetry Sector Statistics ===" << std::endl;
+    std::cout << "Total symmetry irreps: " << num_sectors << std::endl;
+    std::cout << "Non-empty sectors in Sz=" << (n_up - static_cast<int64_t>(params.num_sites)/2) 
+              << " (N_up=" << n_up << "): " << non_empty_sectors << std::endl;
+    std::cout << "Total symmetrized dimension: " << total_sym_dim << std::endl;
+    std::cout << "Dimension reduction: " << fixed_sz_dim << " -> " << total_sym_dim 
+              << " (" << std::fixed << std::setprecision(1) 
+              << (100.0 * (1.0 - double(total_sym_dim) / fixed_sz_dim)) << "% reduction)" 
+              << std::defaultfloat << std::endl;
+    
+    if (non_empty_sectors == 0) {
+        std::cerr << "Error: All symmetry sectors are empty in this Sz sector.\n";
+        std::cerr << "This can happen if the Sz value is incompatible with the symmetry irreps.\n";
+        throw std::runtime_error("No non-empty symmetry sectors found in fixed Sz sector");
     }
     
     // ========== Step 4: Diagonalize Each Sector ==========

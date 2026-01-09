@@ -140,16 +140,20 @@ enum class DiagonalizationMethod {
     ARPACK_ADVANCED,       // ARPACK advanced multi-attempt strategy
     
     // GPU methods
-    LANCZOS_GPU,           // GPU-accelerated Lanczos (full Hilbert space)
-    LANCZOS_GPU_FIXED_SZ,  // GPU-accelerated Lanczos (fixed Sz sector)
-    BLOCK_LANCZOS_GPU,     // GPU-accelerated Block Lanczos (full Hilbert space)
-    BLOCK_LANCZOS_GPU_FIXED_SZ,  // GPU-accelerated Block Lanczos (fixed Sz sector)
+    LANCZOS_GPU,           // GPU-accelerated Lanczos (use --fixed-sz for fixed Sz sector)
+    BLOCK_LANCZOS_GPU,     // GPU-accelerated Block Lanczos (use --fixed-sz for fixed Sz sector)
     DAVIDSON_GPU,          // GPU-accelerated Davidson method
     LOBPCG_GPU,            // GPU-accelerated LOBPCG method
     mTPQ_GPU,              // GPU-accelerated microcanonical TPQ
     cTPQ_GPU,              // GPU-accelerated canonical TPQ
-    FTLM_GPU,              // GPU-accelerated Finite Temperature Lanczos Method
-    FTLM_GPU_FIXED_SZ      // GPU-accelerated FTLM (fixed Sz sector)
+    FTLM_GPU,              // GPU-accelerated Finite Temperature Lanczos Method (use --fixed-sz for fixed Sz sector)
+    
+    // ========== DEPRECATED: Use base method + --fixed-sz flag instead ==========
+    // These are kept for backwards compatibility but will be removed in a future version.
+    // Example: Instead of LANCZOS_GPU_FIXED_SZ, use LANCZOS_GPU with --fixed-sz flag.
+    LANCZOS_GPU_FIXED_SZ [[deprecated("Use LANCZOS_GPU with --fixed-sz flag instead")]],
+    BLOCK_LANCZOS_GPU_FIXED_SZ [[deprecated("Use BLOCK_LANCZOS_GPU with --fixed-sz flag instead")]],
+    FTLM_GPU_FIXED_SZ [[deprecated("Use FTLM_GPU with --fixed-sz flag instead")]]
 };
 
 /**
@@ -307,6 +311,8 @@ struct EDParameters {
     bool measure_spin() const { return compute_spin_correlations; }
     
     // ========== Fixed-Sz Parameters ==========
+    bool use_fixed_sz = false;  // Whether to use fixed-Sz sector (conserve total Sz)
+    int64_t n_up = -1;  // Number of up spins (-1 = not set, will use num_sites/2)
     mutable class FixedSzOperator* fixed_sz_op = nullptr;  // If using fixed-Sz, pointer to operator for embedding
     
     // ========== ARPACK Advanced Options ==========
@@ -388,6 +394,113 @@ namespace ed_internal {
      */
     inline bool requires_sector_combination(DiagonalizationMethod method) {
         return is_ftlm_method(method);
+    }
+
+    // ========== Fixed-Sz Mode ==========
+    //
+    // Fixed-Sz mode restricts calculations to states with a fixed total Sz
+    // quantum number, significantly reducing the Hilbert space dimension.
+    //
+    // HOW TO USE:
+    //   Set `--fixed-sz` flag (or `use_fixed_sz = true` in config)
+    //   This works uniformly for ALL methods, both CPU and GPU.
+    //
+    // INTERNAL MECHANISM:
+    //   - For CPU methods: Uses FixedSzOperator instead of Operator
+    //   - For GPU methods: Uses GPUFixedSzOperator instead of GPUOperator
+    //   - The method enum stays the same (e.g., LANCZOS_GPU works with --fixed-sz)
+    //
+    // DEPRECATED _FIXED_SZ VARIANTS:
+    //   The enum values LANCZOS_GPU_FIXED_SZ, BLOCK_LANCZOS_GPU_FIXED_SZ, etc.
+    //   are deprecated. Use the base method with --fixed-sz flag instead.
+    //   They are kept for backwards compatibility and will normalize to the
+    //   base method with use_fixed_sz=true.
+    //
+    
+    /**
+     * @brief Check if method is a GPU method
+     */
+    inline bool is_gpu_method(DiagonalizationMethod method) {
+        return method == DiagonalizationMethod::LANCZOS_GPU ||
+               method == DiagonalizationMethod::LANCZOS_GPU_FIXED_SZ ||
+               method == DiagonalizationMethod::BLOCK_LANCZOS_GPU ||
+               method == DiagonalizationMethod::BLOCK_LANCZOS_GPU_FIXED_SZ ||
+               method == DiagonalizationMethod::DAVIDSON_GPU ||
+               method == DiagonalizationMethod::LOBPCG_GPU ||
+               method == DiagonalizationMethod::mTPQ_GPU ||
+               method == DiagonalizationMethod::cTPQ_GPU ||
+               method == DiagonalizationMethod::FTLM_GPU ||
+               method == DiagonalizationMethod::FTLM_GPU_FIXED_SZ;
+    }
+    
+    /**
+     * @brief Check if method is a deprecated _FIXED_SZ variant
+     * 
+     * These methods are deprecated. The --fixed-sz flag should be used instead.
+     */
+    inline bool is_deprecated_fixed_sz_method(DiagonalizationMethod method) {
+        return method == DiagonalizationMethod::LANCZOS_GPU_FIXED_SZ ||
+               method == DiagonalizationMethod::BLOCK_LANCZOS_GPU_FIXED_SZ ||
+               method == DiagonalizationMethod::FTLM_GPU_FIXED_SZ;
+    }
+    
+    /**
+     * @brief Get the base (non-deprecated) method from a _FIXED_SZ variant
+     * 
+     * Converts deprecated _FIXED_SZ methods to their base method.
+     * The use_fixed_sz flag should be set to true separately.
+     */
+    inline DiagonalizationMethod normalize_method(DiagonalizationMethod method) {
+        switch (method) {
+            case DiagonalizationMethod::LANCZOS_GPU_FIXED_SZ:
+                return DiagonalizationMethod::LANCZOS_GPU;
+            case DiagonalizationMethod::BLOCK_LANCZOS_GPU_FIXED_SZ:
+                return DiagonalizationMethod::BLOCK_LANCZOS_GPU;
+            case DiagonalizationMethod::FTLM_GPU_FIXED_SZ:
+                return DiagonalizationMethod::FTLM_GPU;
+            default:
+                return method;
+        }
+    }
+    
+    /**
+     * @brief Normalize method and update use_fixed_sz flag if needed
+     * 
+     * If a deprecated _FIXED_SZ method is used, converts to base method
+     * and sets use_fixed_sz to true. This provides backwards compatibility.
+     * 
+     * @param method The method enum (will be normalized in-place)
+     * @param use_fixed_sz The fixed-Sz flag (will be set to true if _FIXED_SZ method used)
+     */
+    inline void normalize_method_and_fixed_sz(DiagonalizationMethod& method, bool& use_fixed_sz) {
+        if (is_deprecated_fixed_sz_method(method)) {
+            std::cerr << "Warning: Using deprecated _FIXED_SZ method variant. "
+                      << "Use the base method with --fixed-sz flag instead.\n";
+            use_fixed_sz = true;  // Force fixed-Sz mode
+            method = normalize_method(method);  // Convert to base method
+        }
+    }
+    
+    /**
+     * @brief Check if method supports fixed-Sz operation
+     * 
+     * All methods support fixed-Sz via the appropriate operator class:
+     * - CPU methods: FixedSzOperator
+     * - GPU methods: GPUFixedSzOperator (for LANCZOS_GPU, BLOCK_LANCZOS_GPU, FTLM_GPU)
+     */
+    inline bool supports_fixed_sz(DiagonalizationMethod method) {
+        // Normalize first to handle deprecated variants
+        DiagonalizationMethod base = normalize_method(method);
+        
+        // All CPU methods support fixed-Sz
+        if (!is_gpu_method(base)) {
+            return true;
+        }
+        
+        // GPU methods that support fixed-Sz
+        return base == DiagonalizationMethod::LANCZOS_GPU ||
+               base == DiagonalizationMethod::BLOCK_LANCZOS_GPU ||
+               base == DiagonalizationMethod::FTLM_GPU;
     }
 
     // ========== Forward Declarations ==========
@@ -2523,20 +2636,40 @@ EDResults exact_diagonalization_from_files(
     std::cerr << "[DEBUG] exact_diagonalization_from_files: num_sites=" << params.num_sites 
               << ", method=" << static_cast<int>(method) << std::endl;
     
+    // ========== Fixed-Sz Normalization ==========
+    // Handle deprecated _FIXED_SZ method variants by normalizing to base method
+    // and setting the use_fixed_sz flag. The --fixed-sz flag is the single
+    // source of truth for fixed-Sz mode.
+    bool use_fixed_sz = params.use_fixed_sz;
+    ed_internal::normalize_method_and_fixed_sz(method, use_fixed_sz);
+    
+    // Check if method supports fixed-Sz when requested
+    if (use_fixed_sz && !ed_internal::supports_fixed_sz(method)) {
+        std::cerr << "Warning: Method does not support fixed-Sz mode. "
+                  << "Proceeding with full Hilbert space.\n";
+        use_fixed_sz = false;
+    }
+    
+    // Route to fixed-Sz function if use_fixed_sz is true
+    // This ensures all fixed-Sz GPU logic is handled in one place
+    if (use_fixed_sz) {
+        int64_t n_up = (params.n_up >= 0) ? params.n_up : params.num_sites / 2;
+        return exact_diagonalization_fixed_sz(
+            interaction_file,
+            single_site_file,
+            params.num_sites,
+            params.spin_length,
+            n_up,
+            method,
+            params
+        );
+    }
+    
     // Handle GPU methods separately (they don't need CPU Operator)
 #ifdef WITH_CUDA
-    if (method == DiagonalizationMethod::LANCZOS_GPU || 
-        method == DiagonalizationMethod::LANCZOS_GPU_FIXED_SZ ||
-        method == DiagonalizationMethod::DAVIDSON_GPU ||
-        method == DiagonalizationMethod::LOBPCG_GPU ||
-        method == DiagonalizationMethod::BLOCK_LANCZOS_GPU ||
-        method == DiagonalizationMethod::BLOCK_LANCZOS_GPU_FIXED_SZ ||
-        method == DiagonalizationMethod::mTPQ_GPU ||
-        method == DiagonalizationMethod::cTPQ_GPU ||
-        method == DiagonalizationMethod::FTLM_GPU ||
-        method == DiagonalizationMethod::FTLM_GPU_FIXED_SZ) {
+    if (ed_internal::is_gpu_method(method)) {
         
-        std::cout << "Running GPU-accelerated algorithm..." << std::endl;
+        std::cout << "Running GPU-accelerated algorithm (full Hilbert space)..." << std::endl;
         
         // Check if GPU is available
         if (!GPUEDWrapper::isGPUAvailable()) {
@@ -2556,7 +2689,7 @@ EDResults exact_diagonalization_from_files(
                 throw std::runtime_error("InterAll.dat file not found");
             }
             
-            // Create GPU operator from files
+            // Create GPU operator from files (full Hilbert space)
             void* gpu_op = GPUEDWrapper::createGPUOperatorFromFiles(
                 params.num_sites, interaction_file, single_site_file);
             
@@ -2587,8 +2720,9 @@ EDResults exact_diagonalization_from_files(
             std::cout << "GPU Lanczos completed successfully!" << std::endl;
             
         } else if (method == DiagonalizationMethod::LANCZOS_GPU_FIXED_SZ) {
-            std::cerr << "Error: LANCZOS_GPU_FIXED_SZ file interface not yet implemented." << std::endl;
-            std::cerr << "Please use GPU_FILE_TEST for now." << std::endl;
+            // Deprecated: Should have been normalized and routed to exact_diagonalization_fixed_sz
+            std::cerr << "Error: LANCZOS_GPU_FIXED_SZ should have been normalized. This is a bug.\n";
+            throw std::runtime_error("Internal error: deprecated method not normalized");
             throw std::runtime_error("Fixed Sz GPU method not yet integrated with file interface");
             
         } else if (method == DiagonalizationMethod::DAVIDSON_GPU) {
@@ -3224,16 +3358,34 @@ EDResults exact_diagonalization_from_directory_symmetrized(
  * Combines U(1) charge conservation (fixed Sz) with spatial lattice symmetries.
  * This provides maximal dimension reduction: 2^N → C(N,N_up) → C(N,N_up)/|G|
  * 
- * The workflow is:
- * 1. Generate/load automorphisms (spatial symmetries)
- * 2. Load Hamiltonian in fixed-Sz basis
- * 3. Generate/load symmetrized blocks within the fixed-Sz sector
- * 4. For TPQ: scan sectors to find ground state sector
- * 5. Diagonalize relevant sector(s)
- * 6. Transform results to full Hilbert space basis
+ * MATHEMATICAL BACKGROUND:
+ * ========================
+ * The Hilbert space has multiple conserved quantum numbers:
+ * 
+ * 1. Total Sz (U(1) symmetry):
+ *    - Eigenvalue: Sz = n_up - n_down = n_up - (N - n_up) = 2*n_up - N
+ *    - Dimension reduction: 2^N → C(N, n_up)
+ * 
+ * 2. Spatial symmetries (discrete group G):
+ *    - Automorphism group of the lattice (translations, rotations, reflections)
+ *    - Each irreducible representation (irrep) gives a sector
+ *    - Dimension reduction: C(N, n_up) → C(N, n_up) / |G| (approximately)
+ * 
+ * KEY PROPERTY: [S^z_total, P_g] = 0
+ * Lattice symmetries commute with Sz because permutations don't change spin values.
+ * This means we can use BOTH symmetries simultaneously.
+ * 
+ * SECTOR STRUCTURE:
+ * =================
+ * The fixed-Sz Hilbert space decomposes into symmetry sectors:
+ *   H_Sz = ⊕_{irrep} H_{Sz,irrep}
+ * 
+ * Important: Some irreps may have no states in a given Sz sector!
+ * - Example: For a 4-site chain, k=0 may be non-empty while k=π is empty
+ * - The code automatically skips empty sectors
  * 
  * @param directory Directory containing Hamiltonian files and automorphism data
- * @param n_up Number of up spins (determines Sz sector)
+ * @param n_up Number of up spins (determines Sz sector: Sz = 2*n_up - N for spin-1/2)
  * @param method Diagonalization method to use
  * @param params ED parameters (num_sites, spin_length, num_eigenvalues, etc.)
  * @param format Hamiltonian file format

@@ -79,6 +79,8 @@ inline EDParameters toEDParameters(const EDConfig& config) {
     params.num_sites = config.system.num_sites;
     params.spin_length = config.system.spin_length;
     params.sublattice_size = config.system.sublattice_size;
+    params.use_fixed_sz = config.system.use_fixed_sz;
+    params.n_up = config.system.n_up;
     
     // Output
     params.output_dir = config.workflow.output_dir;
@@ -168,6 +170,8 @@ inline EDConfig fromEDParameters(const EDParameters& params, DiagonalizationMeth
     config.system.num_sites = params.num_sites;
     config.system.spin_length = params.spin_length;
     config.system.sublattice_size = params.sublattice_size;
+    config.system.use_fixed_sz = params.use_fixed_sz;
+    config.system.n_up = params.n_up;
     
     // Output
     config.workflow.output_dir = params.output_dir;
