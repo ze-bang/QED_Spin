@@ -3369,6 +3369,14 @@ def plot_sq_heatmap(results: Dict, output_dir: str):
     s_q_bond = results['bond'].get('s_d_all', None)
     s_q_plaq = results['plaquette'].get('s_p_all', None)
     
+    # Convert complex arrays to real (take absolute value)
+    if isinstance(s_q_trans, np.ndarray) and np.iscomplexobj(s_q_trans):
+        s_q_trans = np.abs(s_q_trans)
+    if isinstance(s_q_bond, np.ndarray) and np.iscomplexobj(s_q_bond):
+        s_q_bond = np.abs(s_q_bond)
+    if isinstance(s_q_plaq, np.ndarray) and np.iscomplexobj(s_q_plaq):
+        s_q_plaq = np.abs(s_q_plaq)
+    
     # Count how many heatmaps we can make
     n_plots = sum([
         isinstance(s_q_trans, np.ndarray),
@@ -3403,11 +3411,11 @@ def plot_sq_heatmap(results: Dict, output_dir: str):
         ax = axes[ax_idx]
         # s_q_trans shape: (n_jpm, n_kpoints)
         # We want Jpm on x-axis, k-point index on y-axis
-        im = ax.pcolormesh(jpm, k_indices, s_q_trans.T, shading='nearest', cmap='hot')
-        plt.colorbar(im, ax=ax, label='S^{zz}(q)')
+        im = ax.pcolormesh(jpm, k_indices, np.real(s_q_trans.T), shading='nearest', cmap='hot')
+        plt.colorbar(im, ax=ax, label='|S^{zz}(q)|')
         ax.set_xlabel('Jpm', fontsize=12)
         ax.set_ylabel('k-point index', fontsize=12)
-        ax.set_title('Translation Order: S^{zz}(q) at all k-points', fontsize=13)
+        ax.set_title('Translation Order: |S^{zz}(q)| at all k-points', fontsize=13)
         ax.axvline(x=0, color='white', linestyle='--', alpha=0.7, linewidth=1)
         
         # Mark the maximum at each Jpm
@@ -3427,11 +3435,11 @@ def plot_sq_heatmap(results: Dict, output_dir: str):
     # Bond S_D(q) heatmap
     if isinstance(s_q_bond, np.ndarray):
         ax = axes[ax_idx]
-        im = ax.pcolormesh(jpm, k_indices, s_q_bond.T, shading='nearest', cmap='viridis')
-        plt.colorbar(im, ax=ax, label='S_D(q)')
+        im = ax.pcolormesh(jpm, k_indices, np.real(s_q_bond.T), shading='nearest', cmap='viridis')
+        plt.colorbar(im, ax=ax, label='|S_D(q)|')
         ax.set_xlabel('Jpm', fontsize=12)
         ax.set_ylabel('k-point index', fontsize=12)
-        ax.set_title('Bond Order: S_D(q) at all k-points', fontsize=13)
+        ax.set_title('Bond Order: |S_D(q)| at all k-points', fontsize=13)
         ax.axvline(x=0, color='white', linestyle='--', alpha=0.7, linewidth=1)
         
         q_max_idx = results['bond'].get('q_max_idx', [])
@@ -3449,11 +3457,11 @@ def plot_sq_heatmap(results: Dict, output_dir: str):
     # Plaquette S_P(q) heatmap
     if isinstance(s_q_plaq, np.ndarray):
         ax = axes[ax_idx]
-        im = ax.pcolormesh(jpm, k_indices, s_q_plaq.T, shading='nearest', cmap='plasma')
-        plt.colorbar(im, ax=ax, label='S_P(q)')
+        im = ax.pcolormesh(jpm, k_indices, np.real(s_q_plaq.T), shading='nearest', cmap='plasma')
+        plt.colorbar(im, ax=ax, label='|S_P(q)|')
         ax.set_xlabel('Jpm', fontsize=12)
         ax.set_ylabel('k-point index', fontsize=12)
-        ax.set_title('Plaquette Order: S_P(q) at all k-points', fontsize=13)
+        ax.set_title('Plaquette Order: |S_P(q)| at all k-points', fontsize=13)
         ax.axvline(x=0, color='white', linestyle='--', alpha=0.7, linewidth=1)
         
         q_max_idx = results['plaquette'].get('q_max_idx', [])
