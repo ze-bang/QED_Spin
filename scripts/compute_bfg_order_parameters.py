@@ -2991,10 +2991,28 @@ def save_scan_results(results: Dict, output_dir: str):
         f.create_dataset('jpm_values', data=results['jpm_values'])
         f.create_dataset('energies', data=results['energies'])
         
+        # Save k-points if available
+        if results.get('k_points') is not None:
+            f.create_dataset('k_points', data=results['k_points'])
+        
         for key in ['translation', 'nematic', 'stripe', 'bond', 'plaquette']:
             grp = f.create_group(key)
             for subkey, data in results[key].items():
-                grp.create_dataset(subkey, data=data)
+                # Skip data that can't be saved (lists with None, etc.)
+                if data is None:
+                    continue
+                if isinstance(data, list):
+                    # Check if it's a list of None values or mixed
+                    if all(x is None for x in data):
+                        continue
+                    # Try to convert to array, skip if it fails
+                    try:
+                        data = np.array(data)
+                    except (ValueError, TypeError):
+                        continue
+                
+                if isinstance(data, np.ndarray):
+                    grp.create_dataset(subkey, data=data)
         
         # Metadata
         meta = f.create_group('metadata')
@@ -3106,7 +3124,352 @@ def plot_jpm_scan_results(results: Dict, output_dir: str):
     plt.savefig(os.path.join(output_dir, 'order_parameters_combined.pdf'))
     plt.close()
     
+    # Figure 3: q_max_idx vs Jpm (phase transition indicator)
+    plot_qmax_vs_jpm(results, output_dir)
+    
+    # Figure 4: Phase diagram with color-coded regions
+    plot_phase_diagram(results, output_dir)
+    
+    # Figure 5: S(q) heatmap at all k-points vs Jpm
+    plot_sq_heatmap(results, output_dir)
+    
     print(f"Saved plots to {output_dir}")
+
+
+def plot_qmax_vs_jpm(results: Dict, output_dir: str):
+    """
+    Plot the index of the k-point with maximum S(q) vs Jpm.
+    
+    This serves as a phase transition indicator - jumps in q_max_idx 
+    indicate potential phase boundaries.
+    
+    Args:
+        results: Dictionary from scan_all_jpm_directories
+        output_dir: Directory to save plots
+    """
+    if not HAS_MATPLOTLIB:
+        return
+    
+    jpm = results['jpm_values']
+    k_points = results.get('k_points', None)
+    
+    fig, axes = plt.subplots(3, 1, figsize=(12, 12), sharex=True)
+    
+    # Translation S(q)
+    ax = axes[0]
+    q_max_trans = results['translation'].get('q_max_idx', [])
+    if q_max_trans and any(x is not None for x in q_max_trans):
+        q_max_trans_arr = [x if x is not None else -1 for x in q_max_trans]
+        ax.scatter(jpm, q_max_trans_arr, c=q_max_trans_arr, cmap='viridis', s=50, marker='o')
+        ax.plot(jpm, q_max_trans_arr, 'k-', alpha=0.3, linewidth=0.5)
+        ax.set_ylabel('q_max index', fontsize=11)
+        ax.set_title('Translation Order S^{zz}(q) - Maximum q-point', fontsize=12)
+        ax.grid(True, alpha=0.3)
+        ax.axvline(x=0, color='gray', linestyle='--', alpha=0.5)
+        
+        # Add k-point labels if available
+        if k_points is not None:
+            unique_idx = sorted(set(x for x in q_max_trans_arr if x >= 0))
+            for idx in unique_idx:
+                if idx < len(k_points):
+                    kx, ky = k_points[idx]
+                    ax.axhline(y=idx, color='gray', linestyle=':', alpha=0.2)
+                    ax.text(jpm.max() * 1.02, idx, f'({kx:.2f}, {ky:.2f})', 
+                           fontsize=8, va='center')
+    else:
+        ax.text(0.5, 0.5, 'No data', transform=ax.transAxes, ha='center')
+    
+    # Bond S_D(q)
+    ax = axes[1]
+    q_max_bond = results['bond'].get('q_max_idx', [])
+    if q_max_bond and any(x is not None for x in q_max_bond):
+        q_max_bond_arr = [x if x is not None else -1 for x in q_max_bond]
+        ax.scatter(jpm, q_max_bond_arr, c=q_max_bond_arr, cmap='plasma', s=50, marker='s')
+        ax.plot(jpm, q_max_bond_arr, 'k-', alpha=0.3, linewidth=0.5)
+        ax.set_ylabel('q_max index', fontsize=11)
+        ax.set_title('Bond Order S_D(q) - Maximum q-point', fontsize=12)
+        ax.grid(True, alpha=0.3)
+        ax.axvline(x=0, color='gray', linestyle='--', alpha=0.5)
+        
+        if k_points is not None:
+            unique_idx = sorted(set(x for x in q_max_bond_arr if x >= 0))
+            for idx in unique_idx:
+                if idx < len(k_points):
+                    kx, ky = k_points[idx]
+                    ax.axhline(y=idx, color='gray', linestyle=':', alpha=0.2)
+                    ax.text(jpm.max() * 1.02, idx, f'({kx:.2f}, {ky:.2f})', 
+                           fontsize=8, va='center')
+    else:
+        ax.text(0.5, 0.5, 'No data', transform=ax.transAxes, ha='center')
+    
+    # Plaquette S_P(q)
+    ax = axes[2]
+    q_max_plaq = results['plaquette'].get('q_max_idx', [])
+    if q_max_plaq and any(x is not None for x in q_max_plaq):
+        q_max_plaq_arr = [x if x is not None else -1 for x in q_max_plaq]
+        ax.scatter(jpm, q_max_plaq_arr, c=q_max_plaq_arr, cmap='cividis', s=50, marker='^')
+        ax.plot(jpm, q_max_plaq_arr, 'k-', alpha=0.3, linewidth=0.5)
+        ax.set_ylabel('q_max index', fontsize=11)
+        ax.set_title('Plaquette Order S_P(q) - Maximum q-point', fontsize=12)
+        ax.grid(True, alpha=0.3)
+        ax.axvline(x=0, color='gray', linestyle='--', alpha=0.5)
+        
+        if k_points is not None:
+            unique_idx = sorted(set(x for x in q_max_plaq_arr if x >= 0))
+            for idx in unique_idx:
+                if idx < len(k_points):
+                    kx, ky = k_points[idx]
+                    ax.axhline(y=idx, color='gray', linestyle=':', alpha=0.2)
+                    ax.text(jpm.max() * 1.02, idx, f'({kx:.2f}, {ky:.2f})', 
+                           fontsize=8, va='center')
+    else:
+        ax.text(0.5, 0.5, 'No data', transform=ax.transAxes, ha='center')
+    
+    axes[2].set_xlabel('Jpm', fontsize=12)
+    
+    plt.tight_layout()
+    plt.savefig(os.path.join(output_dir, 'qmax_vs_jpm.png'), dpi=150)
+    plt.savefig(os.path.join(output_dir, 'qmax_vs_jpm.pdf'))
+    plt.close()
+
+
+def plot_phase_diagram(results: Dict, output_dir: str):
+    """
+    Plot color-coded phase regions based on dominant order parameter.
+    
+    Each Jpm value is colored based on which order parameter is largest.
+    
+    Args:
+        results: Dictionary from scan_all_jpm_directories
+        output_dir: Directory to save plots
+    """
+    if not HAS_MATPLOTLIB:
+        return
+    
+    jpm = results['jpm_values']
+    
+    # Collect all order parameter values
+    order_params = {
+        'Translation': results['translation']['m_translation'],
+        'Nematic': results['nematic']['m_nematic'],
+        'Stripe': results['stripe']['m_stripe'],
+        'VBS': results['bond']['m_vbs'],
+        'Plaquette': results['plaquette']['m_plaquette'],
+    }
+    
+    # Define colors for each phase
+    phase_colors = {
+        'Translation': 'blue',
+        'Nematic': 'green',
+        'Stripe': 'red',
+        'VBS': 'magenta',
+        'Plaquette': 'cyan',
+        'None': 'gray'
+    }
+    
+    # Determine dominant phase at each Jpm
+    dominant_phase = []
+    for i in range(len(jpm)):
+        max_val = -np.inf
+        max_phase = 'None'
+        for name, vals in order_params.items():
+            if np.isnan(vals[i]):
+                continue
+            if vals[i] > max_val:
+                max_val = vals[i]
+                max_phase = name
+        dominant_phase.append(max_phase)
+    
+    # Create figure with two subplots
+    fig, axes = plt.subplots(2, 1, figsize=(14, 10), gridspec_kw={'height_ratios': [3, 1]})
+    
+    # Top plot: All order parameters with phase region shading
+    ax = axes[0]
+    
+    # Plot each order parameter
+    for name, vals in order_params.items():
+        ax.plot(jpm, vals, '-o', markersize=4, label=name, color=phase_colors[name])
+    
+    # Add vertical lines at phase boundaries
+    for i in range(1, len(dominant_phase)):
+        if dominant_phase[i] != dominant_phase[i-1]:
+            # Phase transition between Jpm[i-1] and Jpm[i]
+            jpm_boundary = (jpm[i-1] + jpm[i]) / 2
+            ax.axvline(x=jpm_boundary, color='black', linestyle='-', linewidth=2, alpha=0.7)
+    
+    ax.set_xlabel('Jpm', fontsize=12)
+    ax.set_ylabel('Order Parameter', fontsize=12)
+    ax.set_title('BFG Kagome Phase Diagram: Order Parameters vs Jpm', fontsize=14)
+    ax.axvline(x=0, color='gray', linestyle='--', alpha=0.5)
+    ax.axhline(y=0, color='gray', linestyle='-', alpha=0.3)
+    ax.grid(True, alpha=0.3)
+    ax.legend(loc='best', fontsize=10)
+    
+    # Bottom plot: Phase bar showing dominant phase
+    ax = axes[1]
+    
+    # Create colored bars for each Jpm region
+    if len(jpm) > 1:
+        for i in range(len(jpm)):
+            phase = dominant_phase[i]
+            color = phase_colors[phase]
+            
+            # Calculate bar width
+            if i == 0:
+                left = jpm[0] - (jpm[1] - jpm[0]) / 2
+                right = (jpm[0] + jpm[1]) / 2
+            elif i == len(jpm) - 1:
+                left = (jpm[i-1] + jpm[i]) / 2
+                right = jpm[i] + (jpm[i] - jpm[i-1]) / 2
+            else:
+                left = (jpm[i-1] + jpm[i]) / 2
+                right = (jpm[i] + jpm[i+1]) / 2
+            
+            ax.axvspan(left, right, color=color, alpha=0.7)
+    
+    ax.set_xlim(jpm.min() - 0.05 * (jpm.max() - jpm.min()), 
+                jpm.max() + 0.05 * (jpm.max() - jpm.min()))
+    ax.set_ylim(0, 1)
+    ax.set_yticks([])
+    ax.set_xlabel('Jpm', fontsize=12)
+    ax.set_ylabel('Dominant\nPhase', fontsize=10)
+    ax.axvline(x=0, color='gray', linestyle='--', alpha=0.5)
+    
+    # Add legend for phase colors
+    from matplotlib.patches import Patch
+    legend_elements = [Patch(facecolor=color, label=name, alpha=0.7) 
+                       for name, color in phase_colors.items() if name != 'None']
+    ax.legend(handles=legend_elements, loc='upper center', ncol=5, fontsize=9,
+              bbox_to_anchor=(0.5, -0.15))
+    
+    plt.tight_layout()
+    plt.savefig(os.path.join(output_dir, 'phase_diagram.png'), dpi=150, bbox_inches='tight')
+    plt.savefig(os.path.join(output_dir, 'phase_diagram.pdf'), bbox_inches='tight')
+    plt.close()
+
+
+def plot_sq_heatmap(results: Dict, output_dir: str):
+    """
+    Plot heatmap of S(q) at all k-points vs Jpm.
+    
+    Shows how spectral weight at each k-point evolves with Jpm.
+    
+    Args:
+        results: Dictionary from scan_all_jpm_directories
+        output_dir: Directory to save plots
+    """
+    if not HAS_MATPLOTLIB:
+        return
+    
+    jpm = results['jpm_values']
+    k_points = results.get('k_points', None)
+    
+    # Check if we have S(q) data for all k-points
+    s_q_trans = results['translation'].get('s_q_all', None)
+    s_q_bond = results['bond'].get('s_d_all', None)
+    s_q_plaq = results['plaquette'].get('s_p_all', None)
+    
+    # Count how many heatmaps we can make
+    n_plots = sum([
+        isinstance(s_q_trans, np.ndarray),
+        isinstance(s_q_bond, np.ndarray),
+        isinstance(s_q_plaq, np.ndarray)
+    ])
+    
+    if n_plots == 0:
+        print("  No S(q) data available for heatmap plots")
+        return
+    
+    # Determine k-point labels
+    if k_points is not None:
+        k_labels = [f'({k[0]:.2f}, {k[1]:.2f})' for k in k_points]
+        k_indices = np.arange(len(k_points))
+    else:
+        # Use generic labels
+        n_k = s_q_trans.shape[1] if isinstance(s_q_trans, np.ndarray) else \
+              s_q_bond.shape[1] if isinstance(s_q_bond, np.ndarray) else \
+              s_q_plaq.shape[1]
+        k_labels = [f'q_{i}' for i in range(n_k)]
+        k_indices = np.arange(n_k)
+    
+    fig, axes = plt.subplots(n_plots, 1, figsize=(14, 5 * n_plots))
+    if n_plots == 1:
+        axes = [axes]
+    
+    ax_idx = 0
+    
+    # Translation S(q) heatmap
+    if isinstance(s_q_trans, np.ndarray):
+        ax = axes[ax_idx]
+        # s_q_trans shape: (n_jpm, n_kpoints)
+        # We want Jpm on x-axis, k-point index on y-axis
+        im = ax.pcolormesh(jpm, k_indices, s_q_trans.T, shading='nearest', cmap='hot')
+        plt.colorbar(im, ax=ax, label='S^{zz}(q)')
+        ax.set_xlabel('Jpm', fontsize=12)
+        ax.set_ylabel('k-point index', fontsize=12)
+        ax.set_title('Translation Order: S^{zz}(q) at all k-points', fontsize=13)
+        ax.axvline(x=0, color='white', linestyle='--', alpha=0.7, linewidth=1)
+        
+        # Mark the maximum at each Jpm
+        q_max_idx = results['translation'].get('q_max_idx', [])
+        if q_max_idx and any(x is not None for x in q_max_idx):
+            for i, (j, qidx) in enumerate(zip(jpm, q_max_idx)):
+                if qidx is not None:
+                    ax.plot(j, qidx, 'w*', markersize=8, markeredgecolor='black', markeredgewidth=0.5)
+        
+        # Add k-point labels on right side
+        if len(k_labels) <= 20:
+            ax.set_yticks(k_indices)
+            ax.set_yticklabels(k_labels, fontsize=8)
+        
+        ax_idx += 1
+    
+    # Bond S_D(q) heatmap
+    if isinstance(s_q_bond, np.ndarray):
+        ax = axes[ax_idx]
+        im = ax.pcolormesh(jpm, k_indices, s_q_bond.T, shading='nearest', cmap='viridis')
+        plt.colorbar(im, ax=ax, label='S_D(q)')
+        ax.set_xlabel('Jpm', fontsize=12)
+        ax.set_ylabel('k-point index', fontsize=12)
+        ax.set_title('Bond Order: S_D(q) at all k-points', fontsize=13)
+        ax.axvline(x=0, color='white', linestyle='--', alpha=0.7, linewidth=1)
+        
+        q_max_idx = results['bond'].get('q_max_idx', [])
+        if q_max_idx and any(x is not None for x in q_max_idx):
+            for i, (j, qidx) in enumerate(zip(jpm, q_max_idx)):
+                if qidx is not None:
+                    ax.plot(j, qidx, 'w*', markersize=8, markeredgecolor='black', markeredgewidth=0.5)
+        
+        if len(k_labels) <= 20:
+            ax.set_yticks(k_indices)
+            ax.set_yticklabels(k_labels, fontsize=8)
+        
+        ax_idx += 1
+    
+    # Plaquette S_P(q) heatmap
+    if isinstance(s_q_plaq, np.ndarray):
+        ax = axes[ax_idx]
+        im = ax.pcolormesh(jpm, k_indices, s_q_plaq.T, shading='nearest', cmap='plasma')
+        plt.colorbar(im, ax=ax, label='S_P(q)')
+        ax.set_xlabel('Jpm', fontsize=12)
+        ax.set_ylabel('k-point index', fontsize=12)
+        ax.set_title('Plaquette Order: S_P(q) at all k-points', fontsize=13)
+        ax.axvline(x=0, color='white', linestyle='--', alpha=0.7, linewidth=1)
+        
+        q_max_idx = results['plaquette'].get('q_max_idx', [])
+        if q_max_idx and any(x is not None for x in q_max_idx):
+            for i, (j, qidx) in enumerate(zip(jpm, q_max_idx)):
+                if qidx is not None:
+                    ax.plot(j, qidx, 'w*', markersize=8, markeredgecolor='black', markeredgewidth=0.5)
+        
+        if len(k_labels) <= 20:
+            ax.set_yticks(k_indices)
+            ax.set_yticklabels(k_labels, fontsize=8)
+    
+    plt.tight_layout()
+    plt.savefig(os.path.join(output_dir, 'sq_heatmap.png'), dpi=150)
+    plt.savefig(os.path.join(output_dir, 'sq_heatmap.pdf'))
+    plt.close()
 
 
 def load_and_merge_individual_results(output_base: str) -> Dict:
