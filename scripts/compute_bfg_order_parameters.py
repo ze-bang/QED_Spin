@@ -1979,6 +1979,483 @@ def print_summary(results: Dict):
 
 
 # =============================================================================
+# Jpm Scan Functions (with MPI support)
+# =============================================================================
+
+# Try to import MPI
+try:
+    from mpi4py import MPI
+    HAS_MPI = True
+except ImportError:
+    HAS_MPI = False
+
+def extract_jpm_value(dirname: str) -> Optional[float]:
+    """Extract Jpm value from directory name like 'Jpm=0.1' or 'Jpm=-0.25'"""
+    import re
+    match = re.match(r'Jpm=(-?[\d.]+)', dirname)
+    if match:
+        return float(match.group(1))
+    return None
+
+
+def process_single_jpm(jpm_val: float, jpm_dir: str, args) -> Dict:
+    """
+    Process a single Jpm directory and return results.
+    
+    Returns:
+        Dictionary with results for this Jpm value
+    """
+    result = {
+        'jpm_val': jpm_val,
+        'success': False,
+        'energy': np.nan,
+        'translation': {'m_translation': np.nan, 's_zz_max': np.nan, 's_zz_q0': np.nan},
+        'nematic': {'m_nematic': np.nan, 'C6_breaking': np.nan},
+        'stripe': {'m_stripe': np.nan, 's_stripe_max': np.nan},
+        'bond': {'m_vbs': np.nan, 's_d_max': np.nan, 'D_mean': np.nan},
+        'plaquette': {'m_plaquette': np.nan, 's_p_max': np.nan, 's_p_q0': np.nan, 'resonance_strength': np.nan},
+    }
+    
+    # Find wavefunction file
+    wf_file = os.path.join(jpm_dir, 'output', 'ed_results.h5')
+    if not os.path.exists(wf_file):
+        print(f"  WARNING: Wavefunction file not found: {wf_file}")
+        return result
+    
+    try:
+        # Load cluster data
+        cluster = load_kagome_cluster(jpm_dir)
+        
+        # Load wavefunction
+        psi = load_wavefunction(wf_file, args.eigenvector_index)
+        
+        # Load energy
+        try:
+            E = load_eigenvalue(wf_file, args.eigenvector_index)
+        except:
+            E = np.nan
+        
+        result['energy'] = E
+        
+        # Compute order parameters
+        trans = compute_translation_order_parameter(psi, cluster, n_q_points=args.n_q_points)
+        if 'error' not in trans:
+            result['translation'] = {
+                'm_translation': trans.get('m_translation', np.nan),
+                's_zz_max': trans.get('s_zz_max', np.nan),
+                's_zz_q0': trans.get('s_zz_q0', np.nan)
+            }
+        
+        nem = compute_nematic_order(psi, cluster)
+        if 'error' not in nem:
+            result['nematic'] = {
+                'm_nematic': nem.get('m_nematic', np.nan),
+                'C6_breaking': nem.get('C6_breaking', np.nan)
+            }
+        
+        stripe = compute_stripe_structure_factor(psi, cluster)
+        if 'error' not in stripe:
+            result['stripe'] = {
+                'm_stripe': stripe.get('m_stripe', np.nan),
+                's_stripe_max': stripe.get('s_stripe_max', np.nan)
+            }
+        
+        bond = compute_bond_structure_factor(psi, cluster, n_q_points=args.n_q_points)
+        if 'error' not in bond:
+            result['bond'] = {
+                'm_vbs': bond.get('m_vbs', np.nan),
+                's_d_max': bond.get('s_d_max', np.nan),
+                'D_mean': bond.get('D_mean', np.nan)
+            }
+        
+        if not args.skip_plaquette:
+            plaq = compute_plaquette_order(psi, cluster, n_q_points=min(30, args.n_q_points))
+            if 'error' not in plaq:
+                result['plaquette'] = {
+                    'm_plaquette': plaq.get('m_plaquette', np.nan),
+                    's_p_max': plaq.get('s_p_max', np.nan),
+                    's_p_q0': plaq.get('s_p_q0', np.nan),
+                    'resonance_strength': plaq.get('resonance_strength', np.nan)
+                }
+        
+        result['success'] = True
+        
+    except Exception as e:
+        print(f"  ERROR processing Jpm = {jpm_val}: {e}")
+        import traceback
+        traceback.print_exc()
+    
+    return result
+
+
+def scan_all_jpm_directories(scan_dir: str, args) -> Dict:
+    """
+    Scan all Jpm=* subdirectories in the given directory and compute order parameters.
+    Uses MPI for parallelization if available.
+    
+    Args:
+        scan_dir: Path to directory containing Jpm=* subdirectories
+        args: Parsed arguments from argparse
+    
+    Returns:
+        Dictionary with aggregated results for all Jpm values
+    """
+    import glob
+    
+    # Setup MPI
+    if HAS_MPI:
+        comm = MPI.COMM_WORLD
+        rank = comm.Get_rank()
+        size = comm.Get_size()
+    else:
+        rank = 0
+        size = 1
+    
+    # Find all Jpm=* subdirectories (all ranks need this)
+    jpm_dirs = glob.glob(os.path.join(scan_dir, 'Jpm=*'))
+    
+    if not jpm_dirs:
+        if rank == 0:
+            print(f"ERROR: No Jpm=* subdirectories found in {scan_dir}")
+        return {}
+    
+    # Extract Jpm values and sort
+    jpm_data = []
+    for jpm_dir in jpm_dirs:
+        dirname = os.path.basename(jpm_dir)
+        jpm_val = extract_jpm_value(dirname)
+        if jpm_val is not None:
+            jpm_data.append((jpm_val, jpm_dir))
+    
+    jpm_data.sort(key=lambda x: x[0])
+    n_total = len(jpm_data)
+    
+    if rank == 0:
+        print(f"Found {n_total} Jpm directories in {scan_dir}")
+        print(f"Jpm range: {jpm_data[0][0]} to {jpm_data[-1][0]}")
+        if HAS_MPI:
+            print(f"Running with {size} MPI ranks")
+        print("="*70)
+    
+    # Distribute work across ranks
+    local_results = []
+    for idx, (jpm_val, jpm_dir) in enumerate(jpm_data):
+        if idx % size != rank:
+            continue
+        
+        print(f"[Rank {rank}] Processing Jpm = {jpm_val} ({idx+1}/{n_total})")
+        result = process_single_jpm(jpm_val, jpm_dir, args)
+        local_results.append(result)
+        
+        if result['success']:
+            print(f"  [Rank {rank}] Jpm={jpm_val}: E={result['energy']:.6f}, "
+                  f"m_trans={result['translation']['m_translation']:.4f}, "
+                  f"m_nem={result['nematic']['m_nematic']:.4f}")
+    
+    # Gather results from all ranks
+    if HAS_MPI:
+        all_local_results = comm.gather(local_results, root=0)
+        if rank == 0:
+            # Flatten the list of lists
+            gathered_results = []
+            for lr in all_local_results:
+                gathered_results.extend(lr)
+        else:
+            gathered_results = []
+    else:
+        gathered_results = local_results
+    
+    # Only rank 0 processes and returns the final results
+    if rank != 0:
+        return {}
+    
+    # Sort by Jpm value
+    gathered_results.sort(key=lambda x: x['jpm_val'])
+    
+    # Build final results dictionary
+    all_results = {
+        'jpm_values': [],
+        'energies': [],
+        'translation': {'m_translation': [], 's_zz_max': [], 's_zz_q0': []},
+        'nematic': {'m_nematic': [], 'C6_breaking': []},
+        'stripe': {'m_stripe': [], 's_stripe_max': []},
+        'bond': {'m_vbs': [], 's_d_max': [], 'D_mean': []},
+        'plaquette': {'m_plaquette': [], 's_p_max': [], 's_p_q0': [], 'resonance_strength': []},
+        'metadata': {
+            'scan_dir': scan_dir,
+            'n_jpm_points': len(gathered_results)
+        }
+    }
+    
+    for r in gathered_results:
+        all_results['jpm_values'].append(r['jpm_val'])
+        all_results['energies'].append(r['energy'])
+        
+        for key in ['translation', 'nematic', 'stripe', 'bond', 'plaquette']:
+            for subkey in all_results[key]:
+                all_results[key][subkey].append(r[key].get(subkey, np.nan))
+    
+    # Convert lists to numpy arrays
+    all_results['jpm_values'] = np.array(all_results['jpm_values'])
+    all_results['energies'] = np.array(all_results['energies'])
+    for key in ['translation', 'nematic', 'stripe', 'bond', 'plaquette']:
+        for subkey in all_results[key]:
+            all_results[key][subkey] = np.array(all_results[key][subkey])
+    
+    return all_results
+
+
+def save_scan_results(results: Dict, output_dir: str):
+    """Save scan results to HDF5 file"""
+    os.makedirs(output_dir, exist_ok=True)
+    filepath = os.path.join(output_dir, 'jpm_scan_results.h5')
+    
+    with h5py.File(filepath, 'w') as f:
+        f.create_dataset('jpm_values', data=results['jpm_values'])
+        f.create_dataset('energies', data=results['energies'])
+        
+        for key in ['translation', 'nematic', 'stripe', 'bond', 'plaquette']:
+            grp = f.create_group(key)
+            for subkey, data in results[key].items():
+                grp.create_dataset(subkey, data=data)
+        
+        # Metadata
+        meta = f.create_group('metadata')
+        for k, v in results['metadata'].items():
+            if isinstance(v, str):
+                meta.attrs[k] = v
+            else:
+                meta.attrs[k] = v
+    
+    print(f"Saved scan results to {filepath}")
+
+
+def plot_jpm_scan_results(results: Dict, output_dir: str):
+    """Generate plots of order parameters vs Jpm"""
+    if not HAS_MATPLOTLIB:
+        print("WARNING: matplotlib not available, skipping plots")
+        return
+    
+    os.makedirs(output_dir, exist_ok=True)
+    jpm = results['jpm_values']
+    
+    # Figure 1: All order parameters
+    fig, axes = plt.subplots(2, 3, figsize=(15, 10))
+    
+    # Energy
+    ax = axes[0, 0]
+    ax.plot(jpm, results['energies'], 'ko-', markersize=4)
+    ax.set_xlabel('Jpm')
+    ax.set_ylabel('Energy')
+    ax.set_title('Ground State Energy')
+    ax.axvline(x=0, color='gray', linestyle='--', alpha=0.5)
+    ax.grid(True, alpha=0.3)
+    
+    # Translation order
+    ax = axes[0, 1]
+    ax.plot(jpm, results['translation']['m_translation'], 'bo-', markersize=4, label='m_translation')
+    ax.set_xlabel('Jpm')
+    ax.set_ylabel('Order Parameter')
+    ax.set_title('Translation Order (Solid/CDW)')
+    ax.axvline(x=0, color='gray', linestyle='--', alpha=0.5)
+    ax.grid(True, alpha=0.3)
+    ax.legend()
+    
+    # Nematic order
+    ax = axes[0, 2]
+    ax.plot(jpm, results['nematic']['m_nematic'], 'go-', markersize=4, label='m_nematic')
+    ax.set_xlabel('Jpm')
+    ax.set_ylabel('Order Parameter')
+    ax.set_title('Nematic Order (C6 Breaking)')
+    ax.axvline(x=0, color='gray', linestyle='--', alpha=0.5)
+    ax.grid(True, alpha=0.3)
+    ax.legend()
+    
+    # Stripe order
+    ax = axes[1, 0]
+    ax.plot(jpm, results['stripe']['m_stripe'], 'ro-', markersize=4, label='m_stripe')
+    ax.set_xlabel('Jpm')
+    ax.set_ylabel('Order Parameter')
+    ax.set_title('Stripe Order')
+    ax.axvline(x=0, color='gray', linestyle='--', alpha=0.5)
+    ax.grid(True, alpha=0.3)
+    ax.legend()
+    
+    # VBS order
+    ax = axes[1, 1]
+    ax.plot(jpm, results['bond']['m_vbs'], 'mo-', markersize=4, label='m_vbs')
+    ax.set_xlabel('Jpm')
+    ax.set_ylabel('Order Parameter')
+    ax.set_title('VBS Order (Dimer)')
+    ax.axvline(x=0, color='gray', linestyle='--', alpha=0.5)
+    ax.grid(True, alpha=0.3)
+    ax.legend()
+    
+    # Plaquette order
+    ax = axes[1, 2]
+    ax.plot(jpm, results['plaquette']['m_plaquette'], 'co-', markersize=4, label='m_plaquette')
+    ax.plot(jpm, results['plaquette']['resonance_strength'], 'c^--', markersize=4, alpha=0.6, label='resonance')
+    ax.set_xlabel('Jpm')
+    ax.set_ylabel('Order Parameter')
+    ax.set_title('Plaquette/Bow-tie Order')
+    ax.axvline(x=0, color='gray', linestyle='--', alpha=0.5)
+    ax.grid(True, alpha=0.3)
+    ax.legend()
+    
+    plt.tight_layout()
+    plt.savefig(os.path.join(output_dir, 'order_parameters_vs_jpm.png'), dpi=150)
+    plt.savefig(os.path.join(output_dir, 'order_parameters_vs_jpm.pdf'))
+    plt.close()
+    
+    # Figure 2: Combined order parameters comparison
+    fig, ax = plt.subplots(figsize=(10, 6))
+    
+    ax.plot(jpm, results['translation']['m_translation'], 'b-o', markersize=5, label='Translation (CDW)')
+    ax.plot(jpm, results['nematic']['m_nematic'], 'g-s', markersize=5, label='Nematic')
+    ax.plot(jpm, results['stripe']['m_stripe'], 'r-^', markersize=5, label='Stripe')
+    ax.plot(jpm, results['bond']['m_vbs'], 'm-d', markersize=5, label='VBS')
+    ax.plot(jpm, results['plaquette']['m_plaquette'], 'c-v', markersize=5, label='Plaquette')
+    
+    ax.set_xlabel('Jpm', fontsize=12)
+    ax.set_ylabel('Order Parameter', fontsize=12)
+    ax.set_title('BFG Kagome: Order Parameters vs Jpm', fontsize=14)
+    ax.axvline(x=0, color='gray', linestyle='--', alpha=0.5)
+    ax.axhline(y=0, color='gray', linestyle='-', alpha=0.3)
+    ax.grid(True, alpha=0.3)
+    ax.legend(loc='best')
+    
+    plt.tight_layout()
+    plt.savefig(os.path.join(output_dir, 'order_parameters_combined.png'), dpi=150)
+    plt.savefig(os.path.join(output_dir, 'order_parameters_combined.pdf'))
+    plt.close()
+    
+    print(f"Saved plots to {output_dir}")
+
+
+def load_and_merge_individual_results(output_base: str) -> Dict:
+    """
+    Load individual Jpm results from subdirectories and merge them.
+    Used for --plot-only mode after parallel array jobs complete.
+    
+    Args:
+        output_base: Directory containing Jpm=* subdirectories with individual results
+    
+    Returns:
+        Merged results dictionary
+    """
+    import glob
+    import re
+    
+    # Find all Jpm subdirectories with results
+    jpm_dirs = glob.glob(os.path.join(output_base, 'Jpm=*'))
+    jpm_data = []
+    
+    for jpm_dir in jpm_dirs:
+        h5_file = os.path.join(jpm_dir, 'order_parameters.h5')
+        if os.path.exists(h5_file):
+            dirname = os.path.basename(jpm_dir)
+            jpm_val = extract_jpm_value(dirname)
+            if jpm_val is not None:
+                jpm_data.append((jpm_val, h5_file))
+    
+    jpm_data.sort(key=lambda x: x[0])
+    print(f"Found {len(jpm_data)} completed Jpm calculations")
+    
+    if len(jpm_data) == 0:
+        print("ERROR: No results found to merge")
+        return {}
+    
+    # Initialize storage
+    all_results = {
+        'jpm_values': [],
+        'energies': [],
+        'translation': {'m_translation': [], 's_zz_max': [], 's_zz_q0': []},
+        'nematic': {'m_nematic': [], 'C6_breaking': []},
+        'stripe': {'m_stripe': [], 's_stripe_max': []},
+        'bond': {'m_vbs': [], 's_d_max': [], 'D_mean': []},
+        'plaquette': {'m_plaquette': [], 's_p_max': [], 's_p_q0': [], 'resonance_strength': []},
+        'metadata': {
+            'output_base': output_base,
+            'n_jpm_points': len(jpm_data)
+        }
+    }
+    
+    # Read each result file
+    for jpm_val, h5_file in jpm_data:
+        print(f"  Reading Jpm={jpm_val}")
+        try:
+            with h5py.File(h5_file, 'r') as f:
+                all_results['jpm_values'].append(jpm_val)
+                
+                # Energy from metadata
+                if 'metadata' in f and 'energy' in f['metadata'].attrs:
+                    all_results['energies'].append(f['metadata'].attrs['energy'])
+                else:
+                    all_results['energies'].append(np.nan)
+                
+                # Translation
+                if 'translation' in f:
+                    grp = f['translation']
+                    all_results['translation']['m_translation'].append(grp.attrs.get('m_translation', np.nan))
+                    all_results['translation']['s_zz_max'].append(grp.attrs.get('s_zz_max', np.nan))
+                    all_results['translation']['s_zz_q0'].append(grp.attrs.get('s_zz_q0', np.nan))
+                else:
+                    for k in all_results['translation']:
+                        all_results['translation'][k].append(np.nan)
+                
+                # Nematic
+                if 'nematic' in f:
+                    grp = f['nematic']
+                    all_results['nematic']['m_nematic'].append(grp.attrs.get('m_nematic', np.nan))
+                    all_results['nematic']['C6_breaking'].append(grp.attrs.get('C6_breaking', np.nan))
+                else:
+                    for k in all_results['nematic']:
+                        all_results['nematic'][k].append(np.nan)
+                
+                # Stripe
+                if 'stripe' in f:
+                    grp = f['stripe']
+                    all_results['stripe']['m_stripe'].append(grp.attrs.get('m_stripe', np.nan))
+                    all_results['stripe']['s_stripe_max'].append(grp.attrs.get('s_stripe_max', np.nan))
+                else:
+                    for k in all_results['stripe']:
+                        all_results['stripe'][k].append(np.nan)
+                
+                # Bond/VBS
+                if 'bond' in f:
+                    grp = f['bond']
+                    all_results['bond']['m_vbs'].append(grp.attrs.get('m_vbs', np.nan))
+                    all_results['bond']['s_d_max'].append(grp.attrs.get('s_d_max', np.nan))
+                    all_results['bond']['D_mean'].append(grp.attrs.get('D_mean', np.nan))
+                else:
+                    for k in all_results['bond']:
+                        all_results['bond'][k].append(np.nan)
+                
+                # Plaquette
+                if 'plaquette' in f:
+                    grp = f['plaquette']
+                    all_results['plaquette']['m_plaquette'].append(grp.attrs.get('m_plaquette', np.nan))
+                    all_results['plaquette']['s_p_max'].append(grp.attrs.get('s_p_max', np.nan))
+                    all_results['plaquette']['s_p_q0'].append(grp.attrs.get('s_p_q0', np.nan))
+                    all_results['plaquette']['resonance_strength'].append(grp.attrs.get('resonance_strength', np.nan))
+                else:
+                    for k in all_results['plaquette']:
+                        all_results['plaquette'][k].append(np.nan)
+        except Exception as e:
+            print(f"    ERROR reading {h5_file}: {e}")
+            continue
+    
+    # Convert to arrays
+    all_results['jpm_values'] = np.array(all_results['jpm_values'])
+    all_results['energies'] = np.array(all_results['energies'])
+    for key in ['translation', 'nematic', 'stripe', 'bond', 'plaquette']:
+        for subkey in all_results[key]:
+            all_results[key][subkey] = np.array(all_results[key][subkey])
+    
+    return all_results
+
+
+# =============================================================================
 # Main Function
 # =============================================================================
 
@@ -1988,10 +2465,14 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__
     )
-    parser.add_argument('wavefunction_file', type=str,
+    parser.add_argument('wavefunction_file', type=str, nargs='?', default=None,
                         help='Path to HDF5 file containing eigenvectors')
-    parser.add_argument('cluster_dir', type=str,
+    parser.add_argument('cluster_dir', type=str, nargs='?', default=None,
                         help='Directory containing cluster data (positions.dat, NN lists, etc.)')
+    parser.add_argument('--scan-dir', type=str, default=None,
+                        help='Directory containing Jpm=* subdirectories to scan (e.g., BFG_scan_comprehensive_pbc_3x3_cpu_energy)')
+    parser.add_argument('--plot-only', type=str, default=None,
+                        help='Load individual results from Jpm subdirectories and generate plots (use after parallel jobs complete)')
     parser.add_argument('--eigenvector-index', '-i', type=int, default=0,
                         help='Index of eigenvector to analyze (default: 0 = ground state)')
     parser.add_argument('--output-dir', '-o', type=str, default='./bfg_order_params',
@@ -2006,6 +2487,69 @@ def main():
                         help='Only plot lattice geometry (no wavefunction analysis)')
     
     args = parser.parse_args()
+    
+    # Check if plot-only mode is requested
+    if args.plot_only is not None:
+        print("="*70)
+        print("BFG ORDER PARAMETER PLOT-ONLY MODE")
+        print("="*70)
+        print(f"Loading results from: {args.plot_only}")
+        
+        # Load and merge individual results
+        results = load_and_merge_individual_results(args.plot_only)
+        
+        if len(results.get('jpm_values', [])) == 0:
+            print("ERROR: No results found")
+            return {}
+        
+        # Save merged results
+        save_scan_results(results, args.plot_only)
+        
+        # Generate plots
+        plot_jpm_scan_results(results, args.plot_only)
+        
+        print("\n" + "="*70)
+        print("PLOT GENERATION COMPLETE")
+        print("="*70)
+        print(f"Processed {len(results['jpm_values'])} Jpm values")
+        print(f"Jpm range: {results['jpm_values'].min():.4f} to {results['jpm_values'].max():.4f}")
+        print(f"Results saved to: {args.plot_only}")
+        
+        return results
+    
+    # Check if scan mode is requested
+    if args.scan_dir is not None:
+        print("="*70)
+        print("BFG ORDER PARAMETER SCAN MODE")
+        print("="*70)
+        print(f"Scanning directory: {args.scan_dir}")
+        
+        # Run the scan
+        results = scan_all_jpm_directories(args.scan_dir, args)
+        
+        if len(results.get('jpm_values', [])) == 0:
+            print("ERROR: No results obtained from scan")
+            return {}
+        
+        # Save results
+        save_scan_results(results, args.output_dir)
+        
+        # Plot results
+        if not args.no_plots:
+            plot_jpm_scan_results(results, args.output_dir)
+        
+        print("\n" + "="*70)
+        print("SCAN COMPLETE")
+        print("="*70)
+        print(f"Processed {len(results['jpm_values'])} Jpm values")
+        print(f"Jpm range: {results['jpm_values'].min():.4f} to {results['jpm_values'].max():.4f}")
+        print(f"Results saved to: {args.output_dir}")
+        
+        return results
+    
+    # Original single-file mode
+    if args.wavefunction_file is None or args.cluster_dir is None:
+        parser.error("Either provide wavefunction_file and cluster_dir, or use --scan-dir")
     
     # Load cluster data
     print(f"Loading cluster data from {args.cluster_dir}...")
