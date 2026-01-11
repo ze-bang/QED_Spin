@@ -746,6 +746,318 @@ def compute_all_xy_bonds(psi: np.ndarray, cluster: Dict) -> Dict[Tuple[int, int]
     return bond_exp
 
 
+def plot_bond_expectation_map(
+    psi: np.ndarray, 
+    cluster: Dict, 
+    output_path: str = None,
+    title: str = None,
+    show_site_labels: bool = True,
+    colormap: str = 'RdBu_r'
+) -> Dict:
+    """
+    Plot bond expectation values in real space on the kagome lattice.
+    
+    Visualizes <S^+_i S^-_j + S^-_i S^+_j> for each NN bond.
+    Bond colors show the expectation value magnitude/sign.
+    Bond widths show the magnitude.
+    
+    Best used with OBC clusters for clear visualization.
+    
+    Args:
+        psi: Wavefunction
+        cluster: Cluster dictionary with positions, edges
+        output_path: Where to save the figure (optional)
+        title: Plot title (optional)
+        show_site_labels: Whether to show site index labels
+        colormap: Matplotlib colormap for bond coloring
+        
+    Returns:
+        Dictionary with bond expectation data
+    """
+    if not HAS_MATPLOTLIB:
+        print("WARNING: matplotlib not available, skipping bond map")
+        return {}
+    
+    from matplotlib.collections import LineCollection
+    from matplotlib.colors import Normalize
+    import matplotlib.cm as cm
+    
+    positions = cluster['positions']
+    edges = cluster.get('edges_nn', [])
+    n_sites = cluster['n_sites']
+    
+    # Compute all bond expectations
+    bond_exp = compute_all_xy_bonds(psi, cluster)
+    
+    # Get real parts for coloring (XY bonds are real for real wavefunctions)
+    bond_values = {b: np.real(bond_exp[b]) for b in bond_exp}
+    bond_magnitudes = {b: np.abs(bond_exp[b]) for b in bond_exp}
+    
+    # Statistics
+    values_list = list(bond_values.values())
+    mag_list = list(bond_magnitudes.values())
+    vmin, vmax = min(values_list), max(values_list)
+    
+    # Symmetric color scale around 0
+    v_abs_max = max(abs(vmin), abs(vmax))
+    if v_abs_max < 1e-10:
+        v_abs_max = 1.0
+    
+    # Create figure
+    fig, axes = plt.subplots(1, 2, figsize=(16, 8))
+    
+    # =========================================================================
+    # Left panel: Bond values with color (sign-sensitive)
+    # =========================================================================
+    ax = axes[0]
+    
+    # Draw bonds as colored lines
+    segments = []
+    colors = []
+    for (i, j) in edges:
+        ri, rj = positions[i], positions[j]
+        segments.append([(ri[0], ri[1]), (rj[0], rj[1])])
+        colors.append(bond_values[(i, j)])
+    
+    # Normalize colors symmetrically around 0
+    norm = Normalize(vmin=-v_abs_max, vmax=v_abs_max)
+    lc = LineCollection(segments, cmap=colormap, norm=norm, linewidths=3)
+    lc.set_array(np.array(colors))
+    ax.add_collection(lc)
+    
+    # Add colorbar
+    cbar = plt.colorbar(lc, ax=ax)
+    cbar.set_label(r'$\langle S^+_i S^-_j + S^-_i S^+_j \rangle$', fontsize=11)
+    
+    # Draw sites
+    x_coords = [positions[i][0] for i in range(n_sites)]
+    y_coords = [positions[i][1] for i in range(n_sites)]
+    ax.scatter(x_coords, y_coords, c='black', s=80, zorder=5)
+    
+    # Site labels
+    if show_site_labels and n_sites <= 60:
+        for i in range(n_sites):
+            ax.annotate(str(i), positions[i], fontsize=7, ha='center', va='center',
+                       color='white', fontweight='bold')
+    
+    ax.set_aspect('equal')
+    ax.set_xlabel('x', fontsize=12)
+    ax.set_ylabel('y', fontsize=12)
+    ax.set_title('XY Bond Expectations (signed)', fontsize=13)
+    
+    # Adjust limits with padding
+    x_min, x_max = min(x_coords), max(x_coords)
+    y_min, y_max = min(y_coords), max(y_coords)
+    padding = 0.5
+    ax.set_xlim(x_min - padding, x_max + padding)
+    ax.set_ylim(y_min - padding, y_max + padding)
+    
+    # =========================================================================
+    # Right panel: Bond magnitudes with width encoding
+    # =========================================================================
+    ax = axes[1]
+    
+    # Normalize magnitudes for line widths
+    max_mag = max(mag_list) if max(mag_list) > 1e-10 else 1.0
+    min_width, max_width = 1.0, 8.0
+    
+    # Draw bonds with width proportional to magnitude
+    for (i, j) in edges:
+        ri, rj = positions[i], positions[j]
+        mag = bond_magnitudes[(i, j)]
+        width = min_width + (max_width - min_width) * (mag / max_mag)
+        color = cm.viridis(mag / max_mag)
+        ax.plot([ri[0], rj[0]], [ri[1], rj[1]], color=color, linewidth=width, solid_capstyle='round')
+    
+    # Draw sites
+    ax.scatter(x_coords, y_coords, c='black', s=80, zorder=5)
+    
+    if show_site_labels and n_sites <= 60:
+        for i in range(n_sites):
+            ax.annotate(str(i), positions[i], fontsize=7, ha='center', va='center',
+                       color='white', fontweight='bold')
+    
+    # Add magnitude colorbar
+    sm = cm.ScalarMappable(cmap='viridis', norm=Normalize(vmin=0, vmax=max_mag))
+    sm.set_array([])
+    cbar = plt.colorbar(sm, ax=ax)
+    cbar.set_label(r'$|\langle S^+_i S^-_j + S^-_i S^+_j \rangle|$', fontsize=11)
+    
+    ax.set_aspect('equal')
+    ax.set_xlabel('x', fontsize=12)
+    ax.set_ylabel('y', fontsize=12)
+    ax.set_title('XY Bond Magnitudes (width ∝ |bond|)', fontsize=13)
+    ax.set_xlim(x_min - padding, x_max + padding)
+    ax.set_ylim(y_min - padding, y_max + padding)
+    
+    # Overall title
+    if title:
+        fig.suptitle(title, fontsize=14, y=1.02)
+    
+    plt.tight_layout()
+    
+    if output_path:
+        plt.savefig(output_path, dpi=150, bbox_inches='tight')
+        plt.savefig(output_path.replace('.png', '.pdf'), bbox_inches='tight')
+        print(f"  Saved bond map to {output_path}")
+    
+    plt.close()
+    
+    # Summary statistics
+    print(f"  Bond expectation statistics:")
+    print(f"    Range: [{min(values_list):.6f}, {max(values_list):.6f}]")
+    print(f"    Mean:  {np.mean(values_list):.6f}")
+    print(f"    Std:   {np.std(values_list):.6f}")
+    
+    return {
+        'bond_exp': bond_exp,
+        'bond_values': bond_values,
+        'bond_magnitudes': bond_magnitudes,
+        'mean': np.mean(values_list),
+        'std': np.std(values_list)
+    }
+
+
+def plot_bond_orientation_map(
+    psi: np.ndarray,
+    cluster: Dict,
+    output_path: str = None,
+    title: str = None
+) -> Dict:
+    """
+    Plot bond expectations colored by bond orientation (α = 0, 1, 2).
+    
+    This shows the stripe/nematic order visually - if bonds of one 
+    orientation are systematically stronger, it indicates C3 breaking.
+    
+    Args:
+        psi: Wavefunction
+        cluster: Cluster dictionary
+        output_path: Where to save the figure
+        title: Plot title
+        
+    Returns:
+        Dictionary with orientation-resolved bond data
+    """
+    if not HAS_MATPLOTLIB:
+        return {}
+    
+    positions = cluster['positions']
+    edges = cluster.get('edges_nn', [])
+    n_sites = cluster['n_sites']
+    
+    # Compute all bond expectations
+    bond_exp = compute_all_xy_bonds(psi, cluster)
+    
+    # Group by orientation
+    orientation_colors = ['#e41a1c', '#377eb8', '#4daf4a']  # Red, Blue, Green for α=0,1,2
+    orientation_names = ['α=0 (→)', 'α=1 (↗)', 'α=2 (↖)']
+    
+    bond_by_orientation = {0: [], 1: [], 2: []}
+    
+    for (i, j) in edges:
+        alpha = get_bond_orientation(cluster, i, j)
+        mag = np.abs(bond_exp[(i, j)])
+        bond_by_orientation[alpha].append(((i, j), mag))
+    
+    # Compute mean magnitude per orientation
+    mean_by_orientation = {}
+    for alpha in range(3):
+        if bond_by_orientation[alpha]:
+            mean_by_orientation[alpha] = np.mean([m for _, m in bond_by_orientation[alpha]])
+        else:
+            mean_by_orientation[alpha] = 0.0
+    
+    # Create figure
+    fig, axes = plt.subplots(1, 2, figsize=(16, 7))
+    
+    # =========================================================================
+    # Left panel: Bonds colored by orientation
+    # =========================================================================
+    ax = axes[0]
+    
+    max_mag = max(np.abs(bond_exp[b]) for b in bond_exp)
+    if max_mag < 1e-10:
+        max_mag = 1.0
+    
+    for alpha in range(3):
+        for (i, j), mag in bond_by_orientation[alpha]:
+            ri, rj = positions[i], positions[j]
+            width = 1.0 + 5.0 * (mag / max_mag)
+            ax.plot([ri[0], rj[0]], [ri[1], rj[1]], 
+                   color=orientation_colors[alpha], linewidth=width, 
+                   solid_capstyle='round', alpha=0.8)
+    
+    # Draw sites
+    x_coords = [positions[i][0] for i in range(n_sites)]
+    y_coords = [positions[i][1] for i in range(n_sites)]
+    ax.scatter(x_coords, y_coords, c='black', s=60, zorder=5)
+    
+    # Legend
+    from matplotlib.lines import Line2D
+    legend_elements = [Line2D([0], [0], color=orientation_colors[alpha], linewidth=4, 
+                              label=f'{orientation_names[alpha]}: ⟨|D|⟩={mean_by_orientation[alpha]:.4f}')
+                      for alpha in range(3)]
+    ax.legend(handles=legend_elements, loc='upper left', fontsize=10)
+    
+    ax.set_aspect('equal')
+    ax.set_xlabel('x', fontsize=12)
+    ax.set_ylabel('y', fontsize=12)
+    ax.set_title('Bonds by Orientation (width ∝ |D_bond|)', fontsize=13)
+    
+    # Adjust limits
+    x_min, x_max = min(x_coords), max(x_coords)
+    y_min, y_max = min(y_coords), max(y_coords)
+    padding = 0.5
+    ax.set_xlim(x_min - padding, x_max + padding)
+    ax.set_ylim(y_min - padding, y_max + padding)
+    
+    # =========================================================================
+    # Right panel: Bar chart of mean bond strength by orientation
+    # =========================================================================
+    ax = axes[1]
+    
+    orientations = [0, 1, 2]
+    means = [mean_by_orientation[alpha] for alpha in orientations]
+    
+    bars = ax.bar(orientations, means, color=orientation_colors, edgecolor='black', linewidth=1.5)
+    ax.set_xticks(orientations)
+    ax.set_xticklabels(orientation_names, fontsize=11)
+    ax.set_ylabel(r'Mean $|\langle S^+_i S^-_j + h.c. \rangle|$', fontsize=12)
+    ax.set_title('Bond Strength by Orientation', fontsize=13)
+    ax.grid(True, alpha=0.3, axis='y')
+    
+    # Add values on bars
+    for bar, val in zip(bars, means):
+        ax.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.005,
+               f'{val:.4f}', ha='center', va='bottom', fontsize=10)
+    
+    # Indicate anisotropy
+    if max(means) > 0:
+        anisotropy = (max(means) - min(means)) / np.mean(means)
+        ax.text(0.95, 0.95, f'Anisotropy: {anisotropy:.3f}', 
+               transform=ax.transAxes, ha='right', va='top', fontsize=11,
+               bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8))
+    
+    if title:
+        fig.suptitle(title, fontsize=14, y=1.02)
+    
+    plt.tight_layout()
+    
+    if output_path:
+        plt.savefig(output_path, dpi=150, bbox_inches='tight')
+        plt.savefig(output_path.replace('.png', '.pdf'), bbox_inches='tight')
+        print(f"  Saved orientation map to {output_path}")
+    
+    plt.close()
+    
+    return {
+        'bond_by_orientation': bond_by_orientation,
+        'mean_by_orientation': mean_by_orientation,
+        'anisotropy': (max(means) - min(means)) / np.mean(means) if np.mean(means) > 0 else 0
+    }
+
+
 def compute_bond_structure_factor(psi: np.ndarray, cluster: Dict, n_q_points: int = 50) -> Dict:
     """
     Compute bond/dimer structure factor.
@@ -2759,6 +3071,24 @@ def process_single_jpm(jpm_val: float, jpm_dir: str, args) -> Dict:
                     's_p_discrete': plaq.get('s_p_discrete', None)  # Full S_P(q) array
                 }
         
+        # Generate bond map plots if requested
+        if getattr(args, 'plot_bond_map', False):
+            output_dir = os.path.join(jpm_dir, 'output')
+            os.makedirs(output_dir, exist_ok=True)
+            
+            title = f"Jpm = {jpm_val:.4f}, E = {E:.4f}" if not np.isnan(E) else f"Jpm = {jpm_val:.4f}"
+            plot_bond_expectation_map(
+                psi, cluster,
+                output_path=os.path.join(output_dir, 'bond_expectation_map.png'),
+                title=title,
+                show_site_labels=(cluster['n_sites'] <= 48)
+            )
+            plot_bond_orientation_map(
+                psi, cluster,
+                output_path=os.path.join(output_dir, 'bond_orientation_map.png'),
+                title=title
+            )
+        
         result['success'] = True
         
     except Exception as e:
@@ -2846,6 +3176,7 @@ def scan_all_jpm_directories(scan_dir: str, args) -> Dict:
         'n_q_points': args.n_q_points,
         'skip_plaquette': args.skip_plaquette,
         'kpoints_file': kpoints_file,
+        'plot_bond_map': getattr(args, 'plot_bond_map', False),
     }
     
     # Prepare tasks
@@ -3638,6 +3969,8 @@ def main():
     parser.add_argument('--kpoints-file', type=str, default=None,
                         help='Path to lattice parameters file containing allowed k-points '
                              '(auto-detected from cluster_dir or scan-dir if not specified)')
+    parser.add_argument('--plot-bond-map', action='store_true',
+                        help='Generate real-space bond expectation map (best for OBC clusters)')
     
     args = parser.parse_args()
     
@@ -3805,6 +4138,21 @@ def main():
         
         print("\nGenerating spatially-resolved plots...")
         plot_all_spatial_order_parameters(results, cluster, args.output_dir)
+        
+        # Real-space bond map (best for OBC)
+        if args.plot_bond_map:
+            print("\nGenerating real-space bond expectation map...")
+            title = f"Bond Expectations (N={n_sites}, E={E:.4f})" if E is not None else f"Bond Expectations (N={n_sites})"
+            plot_bond_expectation_map(
+                psi, cluster, 
+                output_path=os.path.join(args.output_dir, 'bond_expectation_map.png'),
+                title=title
+            )
+            plot_bond_orientation_map(
+                psi, cluster,
+                output_path=os.path.join(args.output_dir, 'bond_orientation_map.png'),
+                title=title
+            )
     
     print(f"\nDone! Results saved to {args.output_dir}")
     
