@@ -62,6 +62,13 @@ else:
     np_trapz = np.trapz
 
 
+
+# ==============================================================================
+# Excluded parameter values (corrupted data)
+# ==============================================================================
+EXCLUDED_JPM_VALUES = [0.08, 0.10]  # These Jpm values appear to be corrupted
+QFI_SCALE_FACTOR = 27  # Multiply all QFI values by this factor
+
 # ==============================================================================
 # FFT and Spectral Function Utilities
 # ==============================================================================
@@ -827,12 +834,12 @@ def _process_species_spectral(species, beta_groups, beta_bin_values,
             continue
         
         # Calculate QFI from averaged spectral function
-        qfi = calculate_qfi_from_spectral(mean_omega, mean_spectral, beta)
+        qfi = calculate_qfi_from_spectral(mean_omega, mean_spectral, beta) * QFI_SCALE_FACTOR
         
         # Calculate QFI for each individual sample
         per_sample_qfi = []
         for omega, spectral, fpath in individual_data:
-            sample_qfi = calculate_qfi_from_spectral(omega, spectral, beta)
+            sample_qfi = calculate_qfi_from_spectral(omega, spectral, beta) * QFI_SCALE_FACTOR
             per_sample_qfi.append((sample_qfi, fpath))
         
         # Find peaks in the spectral function
@@ -1130,6 +1137,11 @@ def load_processed_qfi_data(data_dir, param_pattern='Jpm'):
         
         param_value = float(param_match.group(1))
         
+        
+        # Skip excluded Jpm values (corrupted data)
+        if param_pattern == "Jpm" and any(abs(param_value - excl) < 1e-6 for excl in EXCLUDED_JPM_VALUES):
+            print(f"  Skipping {param_pattern}={param_value} (marked as corrupted)")
+            continue
         # Look for processed data in plots directory
         plots_dir = os.path.join(subdir, 'structure_factor_results', 'plots')
         if not os.path.exists(plots_dir):
@@ -1159,7 +1171,7 @@ def load_processed_qfi_data(data_dir, param_pattern='Jpm'):
                     data = data.reshape(1, -1)
                 
                 for row in data:
-                    beta, qfi = row[0], row[1]
+                    beta, qfi = row[0], row[1] * QFI_SCALE_FACTOR
                     species_data[species].append((param_value, beta, qfi))
                 
                 print(f"  Loaded {len(data)} data points from {os.path.basename(file_path)}")
@@ -1230,6 +1242,11 @@ def parse_QFI_across_parameter(data_dir, param_pattern='Jpm'):
         
         param_value = float(param_match.group(1))
         print(f"[Rank {rank}] Processing {param_pattern}={param_value}")
+        
+        # Skip excluded Jpm values (corrupted data)
+        if param_pattern == "Jpm" and any(abs(param_value - excl) < 1e-6 for excl in EXCLUDED_JPM_VALUES):
+            print(f"[Rank {rank}] Skipping {param_pattern}={param_value} (marked as corrupted)")
+            continue
         
         sf_dir = os.path.join(subdir, 'structure_factor_results')
         if not os.path.exists(sf_dir):
