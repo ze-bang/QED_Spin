@@ -582,12 +582,25 @@ inline EDResults exact_diagonalization_disk_streaming(
             hamiltonian.applySymmetrized(sector_idx, in, out);
         };
         
-        // Diagonalize
+        // Diagonalize - FORCE CPU LANCZOS (GPU doesn't support matrix-free operations)
         EDParameters sector_params = params;
         sector_params.num_eigenvalues = std::min(params.num_eigenvalues, sector_dim);
         
+        // Override method to CPU Lanczos since disk-streaming uses matrix-free matvec
+        DiagonalizationMethod actual_method = DiagonalizationMethod::LANCZOS;
+        if (method == DiagonalizationMethod::LANCZOS || 
+            method == DiagonalizationMethod::DAVIDSON ||
+            method == DiagonalizationMethod::ARPACK_SM ||
+            method == DiagonalizationMethod::ARPACK_LM ||
+            method == DiagonalizationMethod::ARPACK_SHIFT_INVERT ||
+            method == DiagonalizationMethod::ARPACK_ADVANCED) {
+            actual_method = method;  // Use requested CPU method
+        } else {
+            std::cout << "  Note: Using CPU Lanczos (disk-streaming requires matrix-free ops)" << std::endl;
+        }
+        
         EDResults sector_results = exact_diagonalization_core(
-            matvec, sector_dim, method, sector_params
+            matvec, sector_dim, actual_method, sector_params
         );
         
         // Store eigenvalues (small, stays in memory)

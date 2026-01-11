@@ -617,17 +617,34 @@ EDResults run_streaming_symmetry_workflow(const EDConfig& config) {
  * This ultra-low-memory mode processes sectors one at a time,
  * storing sector data on disk. Suitable for very large Hilbert spaces
  * (>64M states) where standard streaming would OOM.
+ * 
+ * NOTE: GPU methods are NOT supported - this uses matrix-free operations
+ * which require CPU Lanczos. GPU methods will be automatically converted.
  */
 EDResults run_disk_streaming_workflow(const EDConfig& config) {
     auto params = ed_adapter::toEDParameters(config);
     params.output_dir = config.workflow.output_dir;
     create_directory_mpi_safe(params.output_dir);
     
+    // Warn about GPU method override
+    DiagonalizationMethod method = config.method;
+    if (method == DiagonalizationMethod::LANCZOS_GPU || 
+        method == DiagonalizationMethod::BLOCK_LANCZOS_GPU ||
+        method == DiagonalizationMethod::DAVIDSON_GPU ||
+        method == DiagonalizationMethod::LOBPCG_GPU ||
+        method == DiagonalizationMethod::mTPQ_GPU ||
+        method == DiagonalizationMethod::cTPQ_GPU ||
+        method == DiagonalizationMethod::FTLM_GPU) {
+        std::cout << "\n  WARNING: Disk-streaming mode uses matrix-free operations.\n";
+        std::cout << "           GPU methods are not supported - using CPU Lanczos instead.\n\n";
+        method = DiagonalizationMethod::LANCZOS;
+    }
+    
     auto start = std::chrono::high_resolution_clock::now();
     
     EDResults results = exact_diagonalization_disk_streaming(
         config.system.hamiltonian_dir,
-        config.method,
+        method,
         params
     );
     
