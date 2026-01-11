@@ -212,9 +212,9 @@ void GPULanczos::allocateMemory() {
     // Calculate how many vectors we can store
     int max_storable = static_cast<int>(available_for_storage / vec_size);
     
-    // For local reorthogonalization, we only need to store recent vectors
-    // Limit to min(max_iter, max_storable, 50) - we don't need more than 50 for local reorth
-    int target_storage = std::min({max_iter_, max_storable, 50});
+    // Store as many vectors as possible up to max_iter
+    // We need all Lanczos vectors to compute Ritz vectors (eigenvectors) at the end
+    int target_storage = std::min(max_iter_, max_storable);
     
     if (target_storage >= 10) {
         // Allocate array of pointers for Lanczos vectors

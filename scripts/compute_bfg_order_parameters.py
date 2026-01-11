@@ -751,57 +751,169 @@ def compute_nematic_order(psi: np.ndarray, cluster: Dict) -> Dict:
     }
 
 
+def compute_bond_bond_correlation(psi: np.ndarray, n_sites: int,
+                                   i1: int, j1: int, i2: int, j2: int) -> complex:
+    """
+    Compute the bond-bond correlation ⟨B_1 B_2⟩ where B = S^+_i S^-_j + S^-_i S^+_j.
+    
+    This is a 4-point correlation function:
+    ⟨(S^+_{i1} S^-_{j1} + S^-_{i1} S^+_{j1})(S^+_{i2} S^-_{j2} + S^-_{i2} S^+_{j2})⟩
+    
+    Expands to 4 terms, each of which flips spins on up to 4 sites.
+    
+    Args:
+        psi: Wavefunction (2^n_sites complex amplitudes)
+        n_sites: Number of sites
+        i1, j1: Sites of first bond
+        i2, j2: Sites of second bond
+        
+    Returns:
+        Complex expectation value
+    """
+    n_states = len(psi)
+    result = 0.0 + 0.0j
+    
+    sites = [i1, j1, i2, j2]
+    unique_sites = list(set(sites))
+    n_unique = len(unique_sites)
+    
+    for state in range(n_states):
+        if np.abs(psi[state]) < 1e-15:
+            continue
+            
+        # Get spin configuration at relevant sites
+        spins = {}
+        for s in unique_sites:
+            spins[s] = (state >> s) & 1  # 1=up, 0=down
+        
+        # Term 1: S^+_{i1} S^-_{j1} S^+_{i2} S^-_{j2}
+        # Requires: j1=up, i1=down, j2=up, i2=down
+        # After: j1=down, i1=up, j2=down, i2=up
+        if spins[j1] == 1 and spins[i1] == 0 and spins[j2] == 1 and spins[i2] == 0:
+            new_state = state
+            new_state = (new_state & ~(1 << j1))  # j1: up -> down
+            new_state = (new_state | (1 << i1))   # i1: down -> up
+            new_state = (new_state & ~(1 << j2))  # j2: up -> down
+            new_state = (new_state | (1 << i2))   # i2: down -> up
+            result += np.conj(psi[new_state]) * psi[state]
+        
+        # Term 2: S^+_{i1} S^-_{j1} S^-_{i2} S^+_{j2}
+        # Requires: j1=up, i1=down, i2=up, j2=down
+        # After: j1=down, i1=up, i2=down, j2=up
+        if spins[j1] == 1 and spins[i1] == 0 and spins[i2] == 1 and spins[j2] == 0:
+            new_state = state
+            new_state = (new_state & ~(1 << j1))  # j1: up -> down
+            new_state = (new_state | (1 << i1))   # i1: down -> up
+            new_state = (new_state & ~(1 << i2))  # i2: up -> down
+            new_state = (new_state | (1 << j2))   # j2: down -> up
+            result += np.conj(psi[new_state]) * psi[state]
+        
+        # Term 3: S^-_{i1} S^+_{j1} S^+_{i2} S^-_{j2}
+        # Requires: i1=up, j1=down, j2=up, i2=down
+        # After: i1=down, j1=up, j2=down, i2=up
+        if spins[i1] == 1 and spins[j1] == 0 and spins[j2] == 1 and spins[i2] == 0:
+            new_state = state
+            new_state = (new_state & ~(1 << i1))  # i1: up -> down
+            new_state = (new_state | (1 << j1))   # j1: down -> up
+            new_state = (new_state & ~(1 << j2))  # j2: up -> down
+            new_state = (new_state | (1 << i2))   # i2: down -> up
+            result += np.conj(psi[new_state]) * psi[state]
+        
+        # Term 4: S^-_{i1} S^+_{j1} S^-_{i2} S^+_{j2}
+        # Requires: i1=up, j1=down, i2=up, j2=down
+        # After: i1=down, j1=up, i2=down, j2=up
+        if spins[i1] == 1 and spins[j1] == 0 and spins[i2] == 1 and spins[j2] == 0:
+            new_state = state
+            new_state = (new_state & ~(1 << i1))  # i1: up -> down
+            new_state = (new_state | (1 << j1))   # j1: down -> up
+            new_state = (new_state & ~(1 << i2))  # i2: up -> down
+            new_state = (new_state | (1 << j2))   # j2: down -> up
+            result += np.conj(psi[new_state]) * psi[state]
+    
+    return result
+
+
 def compute_stripe_structure_factor(psi: np.ndarray, cluster: Dict) -> Dict:
     """
-    Compute stripe/nematic structure factor for loop model.
+    Compute stripe structure factor using bond-bond correlations.
     
-    In the BFG loop mapping, we define n_{i,α} = 1 if a "loop segment"
-    at site i points in direction α.
+    S_stripe = (1/N_b) Σ_{b1, b2} ⟨B_{b1} B_{b2}⟩ ω^{(α_{b2} - α_{b1})}
     
-    For the spin model, we approximate this using the XY bond energy
-    on bonds of each orientation connected to site i.
+    where:
+    - B_b = S^+_i S^-_j + S^-_i S^+_j is the XY bond operator on bond b = (i,j)
+    - α_b ∈ {0, 1, 2} is the orientation of bond b (0°, 60°, 120°)
+    - ω = exp(2πi/3)
+    - N_b is the number of bonds
     
-    S_stripe = (1/N) Σ_{i,j} Σ_{α,β} <n_{i,α} n_{j,β}> exp(2πi(β-α)/3)
+    This properly computes the bond-bond correlation ⟨B_{b1} B_{b2}⟩,
+    not the factorized product ⟨B_{b1}⟩⟨B_{b2}⟩.
     
-    m_stripe ≠ 0 implies rotation symmetry breaking
+    m_stripe ≠ 0 implies C_3 rotation symmetry breaking (stripe order)
     """
     n_sites = cluster['n_sites']
-    nn_list = cluster.get('nn_list', {})
+    edges = cluster.get('edges_nn', [])
     
-    # Compute "loop occupation" n_{i,α} as average XY bond strength on α-bonds from site i
-    n_i_alpha = np.zeros((n_sites, 3), dtype=complex)
+    if not edges:
+        # Fallback: build edges from nn_list
+        nn_list = cluster.get('nn_list', {})
+        edges_set = set()
+        for i, neighbors in nn_list.items():
+            for j in neighbors:
+                edge = (min(i, j), max(i, j))
+                edges_set.add(edge)
+        edges = list(edges_set)
     
-    for i in range(n_sites):
-        neighbors = nn_list.get(i, [])
-        for j in neighbors:
-            alpha = get_bond_orientation(cluster, i, j)
-            bond_exp = compute_xy_bond_expectation(psi, n_sites, i, j)
-            n_i_alpha[i, alpha] += np.abs(bond_exp)  # Use magnitude as "occupation"
+    n_bonds = len(edges)
+    if n_bonds == 0:
+        return {'S_stripe': 0.0, 'm_stripe': 0.0, 'bond_correlations': None}
     
-    # Normalize by number of bonds of each type per site
-    for i in range(n_sites):
-        for alpha in range(3):
-            if n_i_alpha[i, alpha] > 0:
-                n_i_alpha[i, alpha] /= 2  # Approximate normalization
+    # Get orientation for each bond
+    bond_orientations = {}
+    for (i, j) in edges:
+        bond_orientations[(i, j)] = get_bond_orientation(cluster, i, j)
     
-    # Compute stripe structure factor
+    # Compute bond-bond correlations with orientation phase
     omega = np.exp(2j * np.pi / 3)
     S_stripe = 0.0 + 0.0j
     
-    for i in range(n_sites):
-        for j in range(n_sites):
-            for alpha in range(3):
-                for beta in range(3):
-                    phase = omega**(beta - alpha)
-                    S_stripe += n_i_alpha[i, alpha] * np.conj(n_i_alpha[j, beta]) * phase
+    # Also store individual bond expectations for diagnostics
+    bond_expectations = {}
+    for (i, j) in edges:
+        bond_expectations[(i, j)] = compute_xy_bond_expectation(psi, n_sites, i, j)
     
-    S_stripe /= n_sites
-    m_stripe = np.sqrt(np.abs(S_stripe) / n_sites)
+    # Sum over all pairs of bonds
+    for b1_idx, (i1, j1) in enumerate(edges):
+        alpha1 = bond_orientations[(i1, j1)]
+        for b2_idx, (i2, j2) in enumerate(edges):
+            alpha2 = bond_orientations[(i2, j2)]
+            
+            # Compute ⟨B_{b1} B_{b2}⟩
+            corr = compute_bond_bond_correlation(psi, n_sites, i1, j1, i2, j2)
+            
+            # Apply orientation phase
+            phase = omega ** (alpha2 - alpha1)
+            S_stripe += corr * phase
+    
+    S_stripe /= n_bonds
+    m_stripe = np.sqrt(np.abs(S_stripe) / n_bonds)
+    
+    # Also compute per-orientation averages for diagnostics
+    O_bar = np.zeros(3, dtype=complex)
+    count = np.zeros(3)
+    for (i, j), exp_val in bond_expectations.items():
+        alpha = bond_orientations[(i, j)]
+        O_bar[alpha] += exp_val
+        count[alpha] += 1
+    for alpha in range(3):
+        if count[alpha] > 0:
+            O_bar[alpha] /= count[alpha]
     
     return {
-        'n_i_alpha': n_i_alpha,
         'S_stripe': S_stripe,
-        'm_stripe': m_stripe
+        'm_stripe': m_stripe,
+        'O_bar_by_orientation': O_bar,
+        'n_bonds': n_bonds,
+        'bond_expectations': bond_expectations
     }
 
 
