@@ -68,6 +68,15 @@ def get_bit(state: int, site: int) -> int:
 
 
 @jit(nopython=True)
+def set_bit(state: int, site: int, value: int) -> int:
+    """Set bit at site position to value (0 or 1)"""
+    if value == 1:
+        return state | (1 << site)
+    else:
+        return state & ~(1 << site)
+
+
+@jit(nopython=True)
 def flip_bit(state: int, site: int) -> int:
     """Flip bit at site position"""
     return state ^ (1 << site)
