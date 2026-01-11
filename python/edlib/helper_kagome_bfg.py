@@ -413,13 +413,25 @@ def prepare_hamiltonian_parameters(output_dir, nn_list, nn_list_2nn, nn_list_3nn
     interALL = []
     transfer = []
     
+    # Zeeman field components:
+    # H_Zeeman = -h * (sin(theta) * S^x + cos(theta) * S^z)
+    # where S^x = (S^+ + S^-)/2, so we need to add S^+ and S^- terms
+    h_z = h * np.cos(theta)   # Coefficient for S^z
+    h_x = h * np.sin(theta)   # Coefficient for S^x = (S^+ + S^-)/2
+    
     # Generate exchange interactions
     for site_id in sorted(nn_list.keys()):
         # Site index (for the Hamiltonian)
         i = site_id
         
-        # Zeeman term
-        transfer.append([2, node_mapping[i], -h, 0])  # Sz term
+        # Zeeman term: -h_z * S^z - h_x * (S^+ + S^-)/2
+        # Trans.dat format: [operator_type, site, real_coeff, imag_coeff]
+        # operator_type: 0=S^+, 1=S^-, 2=S^z
+        if np.abs(h_z) > 1e-15:
+            transfer.append([2, node_mapping[i], -h_z, 0])       # -h_z * S^z
+        if np.abs(h_x) > 1e-15:
+            transfer.append([0, node_mapping[i], -h_x/2, 0])     # -h_x/2 * S^+
+            transfer.append([1, node_mapping[i], -h_x/2, 0])     # -h_x/2 * S^-
         
         # Nearest neighbor interactions
         for neighbor_id in nn_list[site_id]:
