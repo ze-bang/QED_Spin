@@ -7,7 +7,7 @@ wavefunctions on the kagome lattice for the Balents-Fisher-Girvin (BFG) model.
 
 Order parameters computed:
 A) Translation symmetry breaking (solids / density waves)
-   1. Diagonal structure factor S^{zz}(q) - Bragg peaks indicate crystalline order
+   1. Off-diagonal structure factor S(q) = <S^+S^-> - Bragg peaks indicate crystalline order
 
 B) Rotational symmetry breaking (nematic / stripe orientation)
    2. Nematic order from bond-orientation anisotropy - C6 → C2 breaking
@@ -349,7 +349,7 @@ def load_eigenvalue(filepath: str, index: int = 0) -> float:
 # =============================================================================
 
 # -----------------------------------------------------------------------------
-# A) DIAGONAL STRUCTURE FACTOR S^{zz}(q) - Translation Symmetry Breaking
+# A) OFF-DIAGONAL STRUCTURE FACTOR S(q) = <S^+S^-> - Translation Symmetry Breaking
 # -----------------------------------------------------------------------------
 
 def compute_sz_expectation(psi: np.ndarray, n_sites: int) -> np.ndarray:
@@ -404,6 +404,62 @@ def compute_szsz_correlation(psi: np.ndarray, n_sites: int) -> np.ndarray:
     return szsz
 
 
+def compute_spsm_correlation(psi: np.ndarray, n_sites: int) -> np.ndarray:
+    """
+    Compute <S^+_i S^-_j> correlation matrix.
+    
+    Note: <S^+> = <S^-> = 0 in any state that conserves S^z_total,
+    so we don't need to compute the connected correlation.
+    
+    Args:
+        psi: Wavefunction in computational basis
+        n_sites: Number of sites
+    
+    Returns:
+        n_sites × n_sites array of <S^+_i S^-_j> values (complex)
+    """
+    dim = len(psi)
+    spsm = np.zeros((n_sites, n_sites), dtype=complex)
+    
+    for state in range(dim):
+        coeff = psi[state]
+        if np.abs(coeff) < 1e-15:
+            continue
+        
+        for i in range(n_sites):
+            for j in range(n_sites):
+                # S^+_i S^-_j: raise spin at i, lower spin at j
+                # For i != j: flip i up and j down
+                # For i == j: S^+_i S^-_i = (1/2 + S^z_i) only for spin down at i
+                
+                if i == j:
+                    # S^+_i S^-_i = |↑⟩⟨↓|·|↓⟩⟨↑| = |↑⟩⟨↑| on spin-down state
+                    # This equals (1/2 - S^z) for spin up, 0 for spin down
+                    # Wait, S^+ S^- = (1/2 + S^z) 
+                    # S^+ |↓⟩ = |↑⟩, S^- |↑⟩ = |↓⟩
+                    # S^+ S^- |↑⟩ = S^+ |↓⟩ = |↑⟩ → eigenvalue 1
+                    # S^+ S^- |↓⟩ = 0
+                    # So S^+ S^- = (1/2 + S^z) = n_up
+                    bit_i = get_bit(state, i)
+                    if bit_i == 1:  # spin up
+                        spsm[i, i] += np.abs(coeff)**2
+                else:
+                    # S^+_i S^-_j with i != j
+                    # Need spin down at i (to raise) and spin up at j (to lower)
+                    bit_i = get_bit(state, i)
+                    bit_j = get_bit(state, j)
+                    
+                    if bit_i == 0 and bit_j == 1:  # i down, j up
+                        # S^+_i |...0_i...⟩ = |...1_i...⟩
+                        # S^-_j |...1_j...⟩ = |...0_j...⟩
+                        new_state = set_bit(state, i, 1)
+                        new_state = set_bit(new_state, j, 0)
+                        # Matrix element: <new_state| S^+_i S^-_j |state> = 1
+                        spsm[i, j] += np.conj(psi[new_state]) * coeff
+    
+    return spsm
+
+
 def compute_diagonal_structure_factor(
     psi: np.ndarray,
     cluster: Dict,
@@ -454,13 +510,19 @@ def compute_translation_order_parameter(
     """
     Compute translation symmetry breaking order parameter.
     
+    Uses S^+ S^- correlations (off-diagonal structure factor):
+        S(q) = (1/N) Σ_{i,j} <S^+_i S^-_j> exp(iq·(r_i - r_j))
+    
+    Note: We use the raw <S^+_i S^-_j> without subtracting <S^+><S^->
+    since <S^+> = <S^-> = 0 in any S^z-conserving state.
+    
     Uses the discrete allowed k-points for the finite cluster if available,
     otherwise falls back to a dense q-grid for visualization.
     
-    m_trans = sqrt(S^{zz}(Q_max) / N)
+    m_trans = sqrt(S(Q_max) / N)
     
     Returns dict with:
-        - s_q: structure factor on 2D grid (for visualization)
+        - s_q_2d: structure factor on 2D grid (for visualization)
         - s_q_discrete: structure factor at allowed k-points
         - k_points: allowed k-point coordinates
         - m_trans: order parameter value
@@ -470,10 +532,13 @@ def compute_translation_order_parameter(
     b1, b2 = cluster['b1'], cluster['b2']
     positions = cluster['positions']
     
-    # Pre-compute correlations
+    # Pre-compute S^+ S^- correlations
+    # Note: <S^+> = <S^-> = 0 so no need for connected correlation
+    print(f"    Computing S^+ S^- correlation matrix ({n_sites}x{n_sites})...")
+    spsm = compute_spsm_correlation(psi, n_sites)
+    
+    # Also compute Sz for reference
     sz_exp = compute_sz_expectation(psi, n_sites)
-    szsz = compute_szsz_correlation(psi, n_sites)
-    szsz_connected = szsz - np.outer(sz_exp, sz_exp)
     
     # =========================================================================
     # Compute at discrete allowed k-points (for order parameter)
@@ -490,7 +555,7 @@ def compute_translation_order_parameter(
                 for j in range(n_sites):
                     r_j = positions[j]
                     phase = np.exp(1j * np.dot(q, r_i - r_j))
-                    s_q_discrete[ik] += szsz_connected[i, j] * phase
+                    s_q_discrete[ik] += spsm[i, j] * phase
             s_q_discrete[ik] /= n_sites
         
         # Find maximum over ALL k-points (including q=0)
@@ -503,7 +568,7 @@ def compute_translation_order_parameter(
         # Order parameter
         m_trans = np.sqrt(np.abs(s_q_max) / n_sites)
         
-        print(f"    S^{{zz}}(q) computed at {n_k} allowed k-points")
+        print(f"    S(q) [S^+S^-] computed at {n_k} allowed k-points")
         print(f"    Maximum at q = ({q_max[0]:.4f}, {q_max[1]:.4f}), S(q) = {s_q_max:.6f}")
     else:
         s_q_discrete = None
@@ -524,7 +589,7 @@ def compute_translation_order_parameter(
                 for j in range(n_sites):
                     r_j = positions[j]
                     phase = np.exp(1j * np.dot(q, r_i - r_j))
-                    s_q_2d[i1, i2] += szsz_connected[i, j] * phase
+                    s_q_2d[i1, i2] += spsm[i, j] * phase
             s_q_2d[i1, i2] /= n_sites
     
     # If no discrete k-points, find max from dense grid
@@ -534,6 +599,7 @@ def compute_translation_order_parameter(
         s_q_max = s_q_abs[max_idx]
         q_max = q1_vals[max_idx[0]] * b1 + q2_vals[max_idx[1]] * b2
         m_trans = np.sqrt(np.abs(s_q_max) / n_sites)
+        q_max_idx = None
     
     return {
         's_q_2d': s_q_2d,
@@ -546,7 +612,7 @@ def compute_translation_order_parameter(
         'q_max_idx': q_max_idx,
         's_q_max': s_q_max,
         'sz_exp': sz_exp,
-        'szsz': szsz
+        'spsm': spsm  # Store the correlation matrix
     }
 
 
@@ -2634,14 +2700,17 @@ def plot_observable_definitions(output_dir: str):
     # Create text content
     content = """
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-[A] DIAGONAL STRUCTURE FACTOR S^{zz}(q) — Translation Symmetry Breaking
+[A] OFF-DIAGONAL STRUCTURE FACTOR S(q) = ⟨S^+S^-⟩ — Translation Symmetry Breaking
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
     Definition:
-        S^{zz}(q) = (1/N) Σ_{i,j} exp[iq·(r_i - r_j)] ⟨S^z_i S^z_j⟩
+        S(q) = (1/N) Σ_{i,j} exp[iq·(r_i - r_j)] ⟨S^+_i S^-_j⟩
+        
+        Note: ⟨S^+⟩ = ⟨S^-⟩ = 0 in S^z-conserving states, so no connected
+        correlation is needed.
 
     Order Parameter:
-        m_trans = √(max_{q≠0} |S^{zz}(q)| / N)
+        m_trans = √(max_q |S(q)| / N)
 
     Physical Meaning:
         • Measures CRYSTALLINE / DENSITY WAVE order
@@ -2756,7 +2825,7 @@ def plot_structure_factors(results: Dict, output_dir: str):
     
     os.makedirs(output_dir, exist_ok=True)
     
-    # 1. Diagonal structure factor S^{zz}(q)
+    # 1. Off-diagonal structure factor S(q) = <S^+S^->
     if 'translation' in results and 's_q_2d' in results['translation']:
         data = results['translation']
         fig, ax = plt.subplots(figsize=(8, 6))
@@ -2766,9 +2835,9 @@ def plot_structure_factors(results: Dict, output_dir: str):
                        cmap='viridis', aspect='equal')
         ax.set_xlabel('q₁ (units of b₁)')
         ax.set_ylabel('q₂ (units of b₂)')
-        ax.set_title(f'S$^{{zz}}$(q) - Translation Order\nm_trans = {data["m_trans"]:.4f}')
-        plt.colorbar(im, ax=ax, label='|S$^{zz}$(q)|')
-        plt.savefig(os.path.join(output_dir, 'Szz_structure_factor.png'), dpi=150, bbox_inches='tight')
+        ax.set_title(f'S(q) [S$^+$S$^-$] - Translation Order\nm_trans = {data["m_trans"]:.4f}')
+        plt.colorbar(im, ax=ax, label='|S(q)|')
+        plt.savefig(os.path.join(output_dir, 'SpmSm_structure_factor.png'), dpi=150, bbox_inches='tight')
         plt.close()
     
     # 2. Bond/dimer structure factor
@@ -3494,7 +3563,7 @@ def plot_qmax_vs_jpm(results: Dict, output_dir: str):
         ax.scatter(jpm, q_max_trans_arr, c=q_max_trans_arr, cmap='viridis', s=50, marker='o')
         ax.plot(jpm, q_max_trans_arr, 'k-', alpha=0.3, linewidth=0.5)
         ax.set_ylabel('q_max index', fontsize=11)
-        ax.set_title('Translation Order S^{zz}(q) - Maximum q-point', fontsize=12)
+        ax.set_title('Translation Order S(q) [S^+S^-] - Maximum q-point', fontsize=12)
         ax.grid(True, alpha=0.3)
         ax.axvline(x=0, color='gray', linestyle='--', alpha=0.5)
         
@@ -3743,10 +3812,10 @@ def plot_sq_heatmap(results: Dict, output_dir: str):
         # s_q_trans shape: (n_jpm, n_kpoints)
         # We want Jpm on x-axis, k-point index on y-axis
         im = ax.pcolormesh(jpm, k_indices, np.real(s_q_trans.T), shading='nearest', cmap='hot')
-        plt.colorbar(im, ax=ax, label='|S^{zz}(q)|')
+        plt.colorbar(im, ax=ax, label='|S(q)|')
         ax.set_xlabel('Jpm', fontsize=12)
         ax.set_ylabel('k-point index', fontsize=12)
-        ax.set_title('Translation Order: |S^{zz}(q)| at all k-points', fontsize=13)
+        ax.set_title('Translation Order: |S(q)| [S^+S^-] at all k-points', fontsize=13)
         ax.axvline(x=0, color='white', linestyle='--', alpha=0.7, linewidth=1)
         
         # Mark the maximum at each Jpm
@@ -4095,7 +4164,7 @@ def main():
     print("-"*50)
     
     # A) Translation order
-    print("\n[1/5] Computing diagonal structure factor S^{zz}(q)...")
+    print("\n[1/5] Computing off-diagonal structure factor S(q) = <S^+S^->...")
     results['translation'] = compute_translation_order_parameter(
         psi, cluster, n_q_points=args.n_q_points)
     
