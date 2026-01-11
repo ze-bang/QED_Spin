@@ -3046,7 +3046,7 @@ def process_single_jpm(jpm_val: float, jpm_dir: str, args) -> Dict:
         'k_points': None,  # Store k-points array
         'translation': {
             'm_translation': np.nan, 
-            's_zz_max': np.nan, 
+            's_q_max': np.nan,  # Max of S(q) = <S^+S^->
             'q_max_idx': None,
             's_q_discrete': None  # Full S(q) at all k-points
         },
@@ -3099,7 +3099,7 @@ def process_single_jpm(jpm_val: float, jpm_dir: str, args) -> Dict:
         if 'error' not in trans:
             result['translation'] = {
                 'm_translation': trans.get('m_trans', np.nan),
-                's_zz_max': trans.get('s_q_max', np.nan),
+                's_q_max': trans.get('s_q_max', np.nan),  # Max of S(q) = <S^+S^->
                 'q_max_idx': trans.get('q_max_idx', None),
                 's_q_discrete': trans.get('s_q_discrete', None)  # Full S(q) array
             }
@@ -3288,8 +3288,7 @@ def scan_all_jpm_directories(scan_dir: str, args) -> Dict:
         'k_points': None,  # Will store shared k-points array
         'translation': {
             'm_translation': [], 
-            's_zz_max': [], 
-            's_zz_q0': [],
+            's_q_max': [],  # Max of S(q) = <S^+S^->
             'q_max_idx': [],
             's_q_all': []  # Full S(q) at all k-points for each Jpm
         },
@@ -3328,8 +3327,7 @@ def scan_all_jpm_directories(scan_dir: str, args) -> Dict:
         
         # Translation order
         all_results['translation']['m_translation'].append(r['translation'].get('m_translation', np.nan))
-        all_results['translation']['s_zz_max'].append(r['translation'].get('s_zz_max', np.nan))
-        all_results['translation']['s_zz_q0'].append(r['translation'].get('s_zz_q0', np.nan))
+        all_results['translation']['s_q_max'].append(r['translation'].get('s_q_max', np.nan))
         all_results['translation']['q_max_idx'].append(r['translation'].get('q_max_idx', None))
         all_results['translation']['s_q_all'].append(r['translation'].get('s_q_discrete', None))
         
@@ -3917,7 +3915,7 @@ def load_and_merge_individual_results(output_base: str) -> Dict:
     all_results = {
         'jpm_values': [],
         'energies': [],
-        'translation': {'m_translation': [], 's_zz_max': [], 's_zz_q0': []},
+        'translation': {'m_translation': [], 's_q_max': []},
         'nematic': {'m_nematic': [], 'C6_breaking': []},
         'stripe': {'m_stripe': [], 's_stripe_max': []},
         'bond': {'m_vbs': [], 's_d_max': [], 'D_mean': []},
@@ -3945,8 +3943,9 @@ def load_and_merge_individual_results(output_base: str) -> Dict:
                 if 'translation' in f:
                     grp = f['translation']
                     all_results['translation']['m_translation'].append(grp.attrs.get('m_translation', np.nan))
-                    all_results['translation']['s_zz_max'].append(grp.attrs.get('s_zz_max', np.nan))
-                    all_results['translation']['s_zz_q0'].append(grp.attrs.get('s_zz_q0', np.nan))
+                    # Try new key first, fall back to old key for backwards compatibility
+                    s_q_max = grp.attrs.get('s_q_max', grp.attrs.get('s_zz_max', np.nan))
+                    all_results['translation']['s_q_max'].append(s_q_max)
                 else:
                     for k in all_results['translation']:
                         all_results['translation'][k].append(np.nan)
