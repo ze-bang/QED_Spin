@@ -117,9 +117,13 @@ def apply_sm(state: int, site: int) -> Tuple[Optional[int], complex]:
 # Lattice Data Loading
 # =============================================================================
 
-def load_kagome_cluster(cluster_dir: str) -> Dict:
+def load_kagome_cluster(cluster_dir: str, kpoints_file: str = None) -> Dict:
     """
     Load kagome cluster data from helper_kagome_bfg.py output files.
+    
+    Args:
+        cluster_dir: Directory containing cluster data files
+        kpoints_file: Optional path to lattice parameters file with k-points
     
     Returns dict with:
         - n_sites: number of sites
@@ -132,6 +136,7 @@ def load_kagome_cluster(cluster_dir: str) -> Dict:
         - edges_2nn: list of (i, j) tuples for 2NN bonds
         - a1, a2: lattice vectors
         - b1, b2: reciprocal lattice vectors
+        - k_points: allowed momentum points (if available)
     """
     cluster = {}
     
@@ -191,7 +196,91 @@ def load_kagome_cluster(cluster_dir: str) -> Dict:
     cluster['b1'] = 2 * np.pi * np.array([cluster['a2'][1], -cluster['a2'][0]]) / det
     cluster['b2'] = 2 * np.pi * np.array([-cluster['a1'][1], cluster['a1'][0]]) / det
     
+    # Try to load allowed k-points from lattice parameters file
+    cluster['k_points'] = load_allowed_kpoints(cluster_dir, kpoints_file)
+    
     return cluster
+
+
+def load_allowed_kpoints(cluster_dir: str, kpoints_file: str = None) -> Optional[np.ndarray]:
+    """
+    Load allowed momentum points from the lattice parameters file.
+    
+    For a finite cluster, only discrete k-points are allowed by the
+    boundary conditions. This function reads them from the 
+    *_lattice_parameters.dat file.
+    
+    Search order:
+    1. Explicit kpoints_file if provided
+    2. cluster_dir
+    3. Parent directory of cluster_dir
+    
+    Returns:
+        Array of shape (n_k, 2) with (kx, ky) for each allowed k-point,
+        or None if file not found.
+    """
+    param_file = None
+    
+    # Option 1: Explicit file path
+    if kpoints_file and os.path.exists(kpoints_file):
+        param_file = kpoints_file
+    else:
+        # Option 2: Look in cluster_dir
+        if os.path.isdir(cluster_dir):
+            param_files = [f for f in os.listdir(cluster_dir) 
+                           if f.endswith('_lattice_parameters.dat')]
+            if param_files:
+                param_file = os.path.join(cluster_dir, param_files[0])
+        
+        # Option 3: Look in parent directory
+        if param_file is None:
+            parent_dir = os.path.dirname(os.path.abspath(cluster_dir))
+            if os.path.isdir(parent_dir):
+                param_files = [f for f in os.listdir(parent_dir) 
+                               if f.endswith('_lattice_parameters.dat')]
+                if param_files:
+                    param_file = os.path.join(parent_dir, param_files[0])
+    
+    if param_file is None:
+        return None
+    
+    k_points = []
+    in_kpoint_section = False
+    
+    with open(param_file, 'r') as f:
+        for line in f:
+            line = line.strip()
+            
+            # Detect start of k-point list (after "Format: k_index, n1, n2, kx, ky")
+            if 'k_index' in line and 'kx' in line and 'ky' in line:
+                in_kpoint_section = True
+                continue
+            
+            # End of k-point section (blank line or new section)
+            if in_kpoint_section and (line.startswith('#') or not line):
+                if line.startswith('# Total number'):
+                    continue  # Still in section
+                if not line:
+                    break  # End of section
+                continue
+            
+            if in_kpoint_section:
+                parts = line.split()
+                if len(parts) >= 5:
+                    try:
+                        kx = float(parts[3])
+                        ky = float(parts[4])
+                        k_points.append([kx, ky])
+                    except (ValueError, IndexError):
+                        pass
+    
+    if k_points:
+        k_points = np.array(k_points)
+        print(f"  Loaded {len(k_points)} allowed k-points from {param_files[0]}")
+        return k_points
+    else:
+        print("  Warning: Could not parse k-points from lattice parameters file")
+        return None
 
 
 def load_neighbor_list(filename: str) -> Dict[int, List[int]]:
@@ -365,29 +454,67 @@ def compute_translation_order_parameter(
     """
     Compute translation symmetry breaking order parameter.
     
+    Uses the discrete allowed k-points for the finite cluster if available,
+    otherwise falls back to a dense q-grid for visualization.
+    
     m_trans = sqrt(S^{zz}(Q_max) / N)
     
     Returns dict with:
-        - s_q: structure factor on 2D grid
-        - q_grid: q-point coordinates
+        - s_q: structure factor on 2D grid (for visualization)
+        - s_q_discrete: structure factor at allowed k-points
+        - k_points: allowed k-point coordinates
         - m_trans: order parameter value
         - q_max: wavevector with maximum S(q)
     """
     n_sites = cluster['n_sites']
     b1, b2 = cluster['b1'], cluster['b2']
-    
-    # Create q-grid in reciprocal space
-    q1_vals = np.linspace(-1, 1, n_q_points)
-    q2_vals = np.linspace(-1, 1, n_q_points)
-    
-    # 2D grid
-    s_q_2d = np.zeros((n_q_points, n_q_points), dtype=complex)
+    positions = cluster['positions']
     
     # Pre-compute correlations
     sz_exp = compute_sz_expectation(psi, n_sites)
     szsz = compute_szsz_correlation(psi, n_sites)
     szsz_connected = szsz - np.outer(sz_exp, sz_exp)
-    positions = cluster['positions']
+    
+    # =========================================================================
+    # Compute at discrete allowed k-points (for order parameter)
+    # =========================================================================
+    k_points = cluster.get('k_points', None)
+    
+    if k_points is not None:
+        n_k = len(k_points)
+        s_q_discrete = np.zeros(n_k, dtype=complex)
+        
+        for ik, q in enumerate(k_points):
+            for i in range(n_sites):
+                r_i = positions[i]
+                for j in range(n_sites):
+                    r_j = positions[j]
+                    phase = np.exp(1j * np.dot(q, r_i - r_j))
+                    s_q_discrete[ik] += szsz_connected[i, j] * phase
+            s_q_discrete[ik] /= n_sites
+        
+        # Find maximum over ALL k-points (including q=0)
+        s_q_abs_discrete = np.abs(s_q_discrete)
+        max_idx = np.argmax(s_q_abs_discrete)
+        s_q_max = s_q_abs_discrete[max_idx]
+        q_max = k_points[max_idx]
+        q_max_idx = max_idx
+        
+        # Order parameter
+        m_trans = np.sqrt(np.abs(s_q_max) / n_sites)
+        
+        print(f"    S^{{zz}}(q) computed at {n_k} allowed k-points")
+        print(f"    Maximum at q = ({q_max[0]:.4f}, {q_max[1]:.4f}), S(q) = {s_q_max:.6f}")
+    else:
+        s_q_discrete = None
+        q_max_idx = None
+    
+    # =========================================================================
+    # Also compute on dense grid (for visualization)
+    # =========================================================================
+    q1_vals = np.linspace(-1, 1, n_q_points)
+    q2_vals = np.linspace(-1, 1, n_q_points)
+    s_q_2d = np.zeros((n_q_points, n_q_points), dtype=complex)
     
     for i1, q1 in enumerate(q1_vals):
         for i2, q2 in enumerate(q2_vals):
@@ -400,26 +527,23 @@ def compute_translation_order_parameter(
                     s_q_2d[i1, i2] += szsz_connected[i, j] * phase
             s_q_2d[i1, i2] /= n_sites
     
-    # Find maximum (excluding q=0)
-    s_q_abs = np.abs(s_q_2d)
-    # Mask out q=0 region
-    center = n_q_points // 2
-    s_q_masked = s_q_abs.copy()
-    s_q_masked[center-2:center+3, center-2:center+3] = 0
-    
-    max_idx = np.unravel_index(np.argmax(s_q_masked), s_q_abs.shape)
-    s_q_max = s_q_abs[max_idx]
-    q_max = q1_vals[max_idx[0]] * b1 + q2_vals[max_idx[1]] * b2
-    
-    # Order parameter
-    m_trans = np.sqrt(np.abs(s_q_max) / n_sites)
+    # If no discrete k-points, find max from dense grid
+    if k_points is None:
+        s_q_abs = np.abs(s_q_2d)
+        max_idx = np.unravel_index(np.argmax(s_q_abs), s_q_abs.shape)
+        s_q_max = s_q_abs[max_idx]
+        q_max = q1_vals[max_idx[0]] * b1 + q2_vals[max_idx[1]] * b2
+        m_trans = np.sqrt(np.abs(s_q_max) / n_sites)
     
     return {
         's_q_2d': s_q_2d,
         'q1_vals': q1_vals,
         'q2_vals': q2_vals,
+        's_q_discrete': s_q_discrete,
+        'k_points': k_points,
         'm_trans': m_trans,
         'q_max': q_max,
+        'q_max_idx': q_max_idx,
         's_q_max': s_q_max,
         'sz_exp': sz_exp,
         'szsz': szsz
@@ -631,7 +755,7 @@ def compute_bond_structure_factor(psi: np.ndarray, cluster: Dict, n_q_points: in
     S_D(q) = (1/N_b) Σ_{b,b'} exp(iq·(r_b - r_{b'})) <δD_b δD_{b'}>
     where δD_b = D_b - <D>
     
-    Bragg peaks at q ≠ 0 indicate translation-breaking VBS
+    Uses discrete allowed k-points for the order parameter calculation.
     """
     edges = cluster.get('edges_nn', [])
     positions = cluster['positions']
@@ -655,7 +779,43 @@ def compute_bond_structure_factor(psi: np.ndarray, cluster: Dict, n_q_points: in
     # Connected bond correlations δD
     delta_D = {b: bond_exp[b] - D_mean for b in edges}
     
-    # Structure factor on q-grid
+    # =========================================================================
+    # Compute at discrete allowed k-points (for order parameter)
+    # =========================================================================
+    k_points = cluster.get('k_points', None)
+    
+    if k_points is not None:
+        n_k = len(k_points)
+        s_d_discrete = np.zeros(n_k, dtype=complex)
+        
+        for ik, q in enumerate(k_points):
+            for b in edges:
+                r_b = bond_centers[b]
+                for bp in edges:
+                    r_bp = bond_centers[bp]
+                    phase = np.exp(1j * np.dot(q, r_b - r_bp))
+                    s_d_discrete[ik] += delta_D[b] * np.conj(delta_D[bp]) * phase
+            s_d_discrete[ik] /= n_bonds
+        
+        # Find maximum over ALL k-points (including q=0)
+        s_d_abs_discrete = np.abs(s_d_discrete)
+        max_idx = np.argmax(s_d_abs_discrete)
+        s_d_max = s_d_abs_discrete[max_idx]
+        q_max = k_points[max_idx]
+        q_max_idx = max_idx
+        
+        # VBS order parameter
+        m_vbs = np.sqrt(np.abs(s_d_max) / n_bonds)
+        
+        print(f"    S_D(q) computed at {n_k} allowed k-points")
+        print(f"    Maximum at q = ({q_max[0]:.4f}, {q_max[1]:.4f}), S_D(q) = {s_d_max:.6f}")
+    else:
+        s_d_discrete = None
+        q_max_idx = None
+    
+    # =========================================================================
+    # Also compute on dense grid (for visualization)
+    # =========================================================================
     q1_vals = np.linspace(-1, 1, n_q_points)
     q2_vals = np.linspace(-1, 1, n_q_points)
     s_d_2d = np.zeros((n_q_points, n_q_points), dtype=complex)
@@ -671,25 +831,24 @@ def compute_bond_structure_factor(psi: np.ndarray, cluster: Dict, n_q_points: in
                     s_d_2d[i1, i2] += delta_D[b] * np.conj(delta_D[bp]) * phase
             s_d_2d[i1, i2] /= n_bonds
     
-    # Find maximum (excluding q=0)
-    s_d_abs = np.abs(s_d_2d)
-    center = n_q_points // 2
-    s_d_masked = s_d_abs.copy()
-    s_d_masked[center-2:center+3, center-2:center+3] = 0
-    
-    max_idx = np.unravel_index(np.argmax(s_d_masked), s_d_abs.shape)
-    s_d_max = s_d_abs[max_idx]
-    q_max = q1_vals[max_idx[0]] * b1 + q2_vals[max_idx[1]] * b2
-    
-    # VBS order parameter
-    m_vbs = np.sqrt(np.abs(s_d_max) / n_bonds)
+    # If no discrete k-points, find max from dense grid
+    if k_points is None:
+        s_d_abs = np.abs(s_d_2d)
+        max_idx = np.unravel_index(np.argmax(s_d_abs), s_d_abs.shape)
+        s_d_max = s_d_abs[max_idx]
+        q_max = q1_vals[max_idx[0]] * b1 + q2_vals[max_idx[1]] * b2
+        m_vbs = np.sqrt(np.abs(s_d_max) / n_bonds)
+        q_max_idx = None
     
     return {
         's_d_2d': s_d_2d,
         'q1_vals': q1_vals,
         'q2_vals': q2_vals,
+        's_d_discrete': s_d_discrete,
+        'k_points': k_points,
         'm_vbs': m_vbs,
         'q_max': q_max,
+        'q_max_idx': q_max_idx,
         's_d_max': s_d_max,
         'D_mean': D_mean,
         'bond_exp': bond_exp
@@ -739,12 +898,13 @@ def find_bowties(cluster: Dict) -> List[Tuple[int, int, int, int, int, np.ndarra
     Find all bow-tie plaquettes in the kagome lattice.
     
     A bow-tie consists of TWO NN triangles sharing exactly ONE vertex (corner).
-    This forms a 5-site structure:
+    This forms a 5-site structure::
     
-           s2                 s4
-          /  \\               /  \\
-        s1----s0----s3     or similar
-              (shared vertex)
+              s2
+             /  \\
+           s1----s0----s3     (s0 = shared vertex)
+                  \\    /
+                    s4
     
     The bow-tie has 5 sites total:
     - 1 shared center vertex (s0)
@@ -970,16 +1130,25 @@ def compute_plaquette_order(psi: np.ndarray, cluster: Dict, n_q_points: int = 30
     """
     Compute plaquette/bow-tie resonance order.
     
-    For a 5-site bowtie (2 triangles sharing a vertex), we compute triangle-based
-    order parameters on each constituent triangle.
+    For a 5-site bowtie (2 triangles sharing a vertex at s0)::
     
-    P_tri = <S^+_a S^-_b S^+_c + h.c.>  (3-site chiral term)
+              s2
+             /  \\
+           s1----s0----s3
+                  \\    /
+                    s4
+    
+    The ring-flip operator acts on the 4 OUTER corners (s1, s2, s3, s4),
+    EXCLUDING the shared center vertex (s0):
+    
+        P_bt = <S^+_{s1} S^-_{s2} S^+_{s3} S^-_{s4} + h.c.>
+    
+    This flips spins around the "bowtie ring": s1 → s2 → s3 → s4 → s1
     
     S_P(q) = (1/N_bt) Σ_{bt,bt'} exp(iq·(R_bt - R_{bt'})) <δP_bt δP_{bt'}>
     where δP_bt = P_bt - <P>
     
-    Bragg peaks in S_P(q) indicate plaquette/bond crystal.
-    Large isotropic S_P(q=0) indicates liquid-like resonance.
+    Uses discrete allowed k-points for the order parameter calculation.
     """
     n_sites = cluster['n_sites']
     b1, b2 = cluster['b1'], cluster['b2']
@@ -995,9 +1164,10 @@ def compute_plaquette_order(psi: np.ndarray, cluster: Dict, n_q_points: int = 30
         }
     
     print(f"  Found {n_plaquettes} bow-tie plaquettes (5-site, 2 triangles sharing corner)")
+    print(f"  Ring-flip on 4 outer corners: S^+_s1 S^-_s2 S^+_s3 S^-_s4 + h.c.")
     
     # Compute resonance expectation for each bow-tie
-    # For 5-site bowtie, compute sum of chiral terms on both triangles
+    # 4-spin ring flip on outer corners (s1, s2, s3, s4), excluding center s0
     P_r = {}
     centers = {}
     
@@ -1005,14 +1175,8 @@ def compute_plaquette_order(psi: np.ndarray, cluster: Dict, n_q_points: int = 30
         s0, s1, s2, s3, s4, center = bowtie
         key = (s0, s1, s2, s3, s4)
         
-        # Triangle 1: (s0, s1, s2) - compute 3-site resonance
-        # Triangle 2: (s0, s3, s4) - compute 3-site resonance
-        # Bowtie order = correlation between the two triangles
-        P_tri1 = compute_triangle_chiral(psi, n_sites, s0, s1, s2)
-        P_tri2 = compute_triangle_chiral(psi, n_sites, s0, s3, s4)
-        
-        # Bowtie order: product of chiral terms (resonance correlation)
-        P_r[key] = P_tri1 * np.conj(P_tri2) + np.conj(P_tri1) * P_tri2
+        # 4-spin ring flip on outer corners: S^+_s1 S^-_s2 S^+_s3 S^-_s4 + h.c.
+        P_r[key] = compute_bowtie_resonance(psi, n_sites, s1, s2, s3, s4)
         centers[key] = center
         
         if (idx + 1) % 10 == 0:
@@ -1024,13 +1188,53 @@ def compute_plaquette_order(psi: np.ndarray, cluster: Dict, n_q_points: int = 30
     
     # Connected plaquette correlations
     delta_P = {k: P_r[k] - P_mean for k in P_r}
+    plaquette_keys = list(P_r.keys())
     
-    # Structure factor on q-grid
+    # =========================================================================
+    # Compute at discrete allowed k-points (for order parameter)
+    # =========================================================================
+    k_points = cluster.get('k_points', None)
+    
+    if k_points is not None:
+        n_k = len(k_points)
+        s_p_discrete = np.zeros(n_k, dtype=complex)
+        
+        for ik, q in enumerate(k_points):
+            for r in plaquette_keys:
+                R_r = centers[r]
+                for rp in plaquette_keys:
+                    R_rp = centers[rp]
+                    phase = np.exp(1j * np.dot(q, R_r - R_rp))
+                    s_p_discrete[ik] += delta_P[r] * np.conj(delta_P[rp]) * phase
+            s_p_discrete[ik] /= n_plaquettes
+        
+        # Find maximum over ALL k-points (including q=0)
+        s_p_abs_discrete = np.abs(s_p_discrete)
+        max_idx = np.argmax(s_p_abs_discrete)
+        s_p_max = s_p_abs_discrete[max_idx]
+        q_max = k_points[max_idx]
+        q_max_idx = max_idx
+        
+        # Plaquette order parameter
+        m_plaquette = np.sqrt(np.abs(s_p_max) / n_plaquettes)
+        
+        # q=0 value for resonance strength
+        q0_idx = np.argmin(np.linalg.norm(k_points, axis=1))
+        s_p_q0 = s_p_abs_discrete[q0_idx]
+        
+        print(f"    S_P(q) computed at {n_k} allowed k-points")
+        print(f"    Maximum at q = ({q_max[0]:.4f}, {q_max[1]:.4f}), S_P(q) = {s_p_max:.6f}")
+    else:
+        s_p_discrete = None
+        q_max_idx = None
+        s_p_q0 = None
+    
+    # =========================================================================
+    # Also compute on dense grid (for visualization)
+    # =========================================================================
     q1_vals = np.linspace(-1, 1, n_q_points)
     q2_vals = np.linspace(-1, 1, n_q_points)
     s_p_2d = np.zeros((n_q_points, n_q_points), dtype=complex)
-    
-    plaquette_keys = list(P_r.keys())
     
     for i1, q1 in enumerate(q1_vals):
         for i2, q2 in enumerate(q2_vals):
@@ -1043,21 +1247,16 @@ def compute_plaquette_order(psi: np.ndarray, cluster: Dict, n_q_points: int = 30
                     s_p_2d[i1, i2] += delta_P[r] * np.conj(delta_P[rp]) * phase
             s_p_2d[i1, i2] /= n_plaquettes
     
-    # Order parameters
-    center_idx = n_q_points // 2
-    s_p_q0 = np.abs(s_p_2d[center_idx, center_idx])  # q=0 value (resonance strength)
-    
-    # Find maximum away from q=0
-    s_p_abs = np.abs(s_p_2d)
-    s_p_masked = s_p_abs.copy()
-    s_p_masked[center_idx-2:center_idx+3, center_idx-2:center_idx+3] = 0
-    
-    max_idx = np.unravel_index(np.argmax(s_p_masked), s_p_abs.shape)
-    s_p_max = s_p_abs[max_idx]
-    q_max = q1_vals[max_idx[0]] * b1 + q2_vals[max_idx[1]] * b2
-    
-    # Plaquette crystal order parameter
-    m_plaquette = np.sqrt(np.abs(s_p_max) / n_plaquettes)
+    # If no discrete k-points, find max from dense grid
+    if k_points is None:
+        s_p_abs = np.abs(s_p_2d)
+        max_idx = np.unravel_index(np.argmax(s_p_abs), s_p_abs.shape)
+        s_p_max = s_p_abs[max_idx]
+        q_max = q1_vals[max_idx[0]] * b1 + q2_vals[max_idx[1]] * b2
+        m_plaquette = np.sqrt(np.abs(s_p_max) / n_plaquettes)
+        center_idx = n_q_points // 2
+        s_p_q0 = np.abs(s_p_2d[center_idx, center_idx])
+        q_max_idx = None
     
     # Resonance strength (liquid-like)
     resonance_strength = np.mean([np.abs(P_r[k]) for k in P_r])
@@ -1066,8 +1265,11 @@ def compute_plaquette_order(psi: np.ndarray, cluster: Dict, n_q_points: int = 30
         's_p_2d': s_p_2d,
         'q1_vals': q1_vals,
         'q2_vals': q2_vals,
+        's_p_discrete': s_p_discrete,
+        'k_points': k_points,
         'm_plaquette': m_plaquette,
         'q_max': q_max,
+        'q_max_idx': q_max_idx,
         's_p_max': s_p_max,
         's_p_q0': s_p_q0,
         'P_mean': P_mean,
@@ -1412,8 +1614,8 @@ def plot_bowties_blowup(cluster: Dict, bowties: List, output_dir: str, P_r: Dict
     ax_schematic.set_ylim(-1, 1)
     ax_schematic.set_aspect('equal')
     ax_schematic.set_title('Bowtie Structure: 2 NN-Triangles Sharing 1 Corner\n'
-                           'Order: $\\langle\\chi_1 \\chi_2^* + \\chi_1^* \\chi_2\\rangle$ where '
-                           '$\\chi = S^+_a S^-_b S^+_c + h.c.$', 
+                           'Ring-flip on 4 OUTER corners: $S^+_{s1} S^-_{s2} S^+_{s3} S^-_{s4} + h.c.$\n'
+                           '(center vertex s0 is EXCLUDED)', 
                            fontsize=11, fontweight='bold')
     ax_schematic.axis('off')
     
@@ -1421,7 +1623,9 @@ def plot_bowties_blowup(cluster: Dict, bowties: List, output_dir: str, P_r: Dict
     legend_elements = [
         Line2D([0], [0], color='blue', lw=3, label='NN bond'),
         Line2D([0], [0], marker='o', color='w', markerfacecolor='red', markersize=10, 
-               label='Shared vertex'),
+               label='Shared vertex (excluded)'),
+        Line2D([0], [0], marker='o', color='w', markerfacecolor='white', 
+               markeredgecolor='black', markersize=10, label='Outer corners (ring-flip)'),
     ]
     ax_schematic.legend(handles=legend_elements, loc='upper right')
     
@@ -1781,12 +1985,456 @@ def plot_all_spatial_order_parameters(results: Dict, cluster: Dict, output_dir: 
         bowties = find_bowties(cluster)
         plot_bowties(cluster, bowties, output_dir, results['plaquette']['P_r'])
     
+    # Generate the comprehensive state visualization
+    print("  Generating comprehensive state visualization...")
+    plot_state_visualization(results, cluster, output_dir)
+    
     print(f"Spatial plots saved to {output_dir}")
+
+
+def plot_state_visualization(results: Dict, cluster: Dict, output_dir: str):
+    """
+    Generate a comprehensive visualization of the quantum state showing
+    all order parameters in a single, intuitive figure.
+    
+    This creates a multi-panel figure showing:
+    1. Local magnetization ⟨S^z_i⟩ on sites
+    2. Bond order (XY correlations) on NN bonds
+    3. Bowtie resonance values
+    4. Structure factors in k-space
+    5. Order parameter summary with phase interpretation
+    """
+    if not HAS_MATPLOTLIB:
+        return
+    
+    from matplotlib.patches import Patch, Circle
+    from matplotlib.lines import Line2D
+    from matplotlib.gridspec import GridSpec
+    import matplotlib.colors as mcolors
+    
+    os.makedirs(output_dir, exist_ok=True)
+    
+    positions = cluster['positions']
+    n_sites = cluster['n_sites']
+    edges_nn = cluster.get('edges_nn', [])
+    
+    # Extract coordinates
+    x_coords = np.array([positions[i][0] for i in range(n_sites)])
+    y_coords = np.array([positions[i][1] for i in range(n_sites)])
+    
+    # =========================================================================
+    # Create the main figure with GridSpec layout
+    # =========================================================================
+    fig = plt.figure(figsize=(20, 16))
+    gs = GridSpec(3, 4, figure=fig, hspace=0.3, wspace=0.3,
+                  height_ratios=[1.2, 1, 1])
+    
+    # =========================================================================
+    # Panel 1: Local ⟨S^z_i⟩ and bond order combined (top left, spans 2 cols)
+    # =========================================================================
+    ax1 = fig.add_subplot(gs[0, :2])
+    
+    # Get data
+    if 'translation' in results and 'sz_exp' in results['translation']:
+        sz_exp = results['translation']['sz_exp']
+    else:
+        sz_exp = np.zeros(n_sites)
+    
+    if 'bond' in results and 'bond_exp' in results['bond']:
+        bond_exp = results['bond']['bond_exp']
+    else:
+        bond_exp = {}
+    
+    # Plot bonds first (background)
+    if bond_exp:
+        bond_vals = np.array([np.real(bond_exp.get(b, 0)) for b in edges_nn])
+        bond_vmax = max(abs(np.min(bond_vals)), abs(np.max(bond_vals)), 0.1)
+        bond_norm = plt.Normalize(vmin=-bond_vmax, vmax=bond_vmax)
+        bond_cmap = plt.cm.PRGn
+        
+        for idx, (i, j) in enumerate(edges_nn):
+            r_i, r_j = positions[i], positions[j]
+            color = bond_cmap(bond_norm(bond_vals[idx]))
+            lw = 2 + 4 * abs(bond_vals[idx]) / bond_vmax  # Thicker = stronger
+            ax1.plot([r_i[0], r_j[0]], [r_i[1], r_j[1]], 
+                     color=color, lw=lw, zorder=2, solid_capstyle='round')
+    
+    # Plot sites colored by Sz
+    sz_vmax = max(abs(np.min(sz_exp)), abs(np.max(sz_exp)), 0.1)
+    scatter = ax1.scatter(x_coords, y_coords, c=sz_exp, s=350, cmap='RdBu_r',
+                          vmin=-sz_vmax, vmax=sz_vmax, edgecolors='black', 
+                          linewidth=1.5, zorder=5)
+    
+    # Add site labels
+    for i in range(n_sites):
+        val = sz_exp[i]
+        text_color = 'white' if abs(val) > sz_vmax * 0.4 else 'black'
+        ax1.annotate(f'{val:.2f}', (x_coords[i], y_coords[i]),
+                     fontsize=6, ha='center', va='center', zorder=6, color=text_color)
+    
+    ax1.set_aspect('equal')
+    ax1.set_xlabel('x')
+    ax1.set_ylabel('y')
+    ax1.set_title('Real-Space State Visualization\n'
+                  f'Sites: ⟨S$^z$⟩ (color), Bonds: XY order (width & color)',
+                  fontsize=12, fontweight='bold')
+    
+    cbar1 = plt.colorbar(scatter, ax=ax1, shrink=0.6, pad=0.02)
+    cbar1.set_label('⟨S$^z_i$⟩', fontsize=10)
+    
+    # =========================================================================
+    # Panel 2: Bowtie resonance map (top right, spans 2 cols)
+    # =========================================================================
+    ax2 = fig.add_subplot(gs[0, 2:])
+    
+    if 'plaquette' in results and 'P_r' in results['plaquette']:
+        P_r = results['plaquette']['P_r']
+        bowties = find_bowties(cluster)
+        
+        # Plot lattice in gray
+        for (i, j) in edges_nn:
+            r_i, r_j = positions[i], positions[j]
+            ax2.plot([r_i[0], r_j[0]], [r_i[1], r_j[1]], 
+                     'gray', lw=1, alpha=0.3, zorder=1)
+        
+        # Get resonance values
+        P_vals = []
+        centers = []
+        for bt in bowties:
+            s0, s1, s2, s3, s4, center = bt
+            key = (s0, s1, s2, s3, s4)
+            if key in P_r:
+                P_vals.append(np.real(P_r[key]))
+                centers.append(center)
+        
+        if P_vals:
+            P_vals = np.array(P_vals)
+            centers = np.array(centers)
+            
+            P_vmax = max(abs(np.min(P_vals)), abs(np.max(P_vals)), 0.1)
+            
+            scatter2 = ax2.scatter(centers[:, 0], centers[:, 1], c=P_vals, s=400,
+                                   cmap='coolwarm', vmin=-P_vmax, vmax=P_vmax,
+                                   edgecolors='black', linewidth=1, marker='h', zorder=5)
+            
+            cbar2 = plt.colorbar(scatter2, ax=ax2, shrink=0.6, pad=0.02)
+            cbar2.set_label('P$_{bt}$ resonance', fontsize=10)
+            
+            # Add mean resonance info
+            ax2.text(0.02, 0.98, f'⟨|P|⟩ = {np.mean(np.abs(P_vals)):.4f}\nσ(P) = {np.std(P_vals):.4f}',
+                     transform=ax2.transAxes, fontsize=10, va='top',
+                     bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
+    else:
+        ax2.text(0.5, 0.5, 'Plaquette data not available', transform=ax2.transAxes,
+                 ha='center', va='center', fontsize=14)
+    
+    ax2.scatter(x_coords, y_coords, c='lightgray', s=30, zorder=4, edgecolors='gray')
+    ax2.set_aspect('equal')
+    ax2.set_xlabel('x')
+    ax2.set_ylabel('y')
+    ax2.set_title('Bowtie Resonance Map\n'
+                  f'P$_{{bt}}$ = ⟨S$^+_{{s1}}$ S$^-_{{s2}}$ S$^+_{{s3}}$ S$^-_{{s4}}$ + h.c.⟩',
+                  fontsize=12, fontweight='bold')
+    
+    # =========================================================================
+    # Panel 3: S^zz(q) structure factor (middle left)
+    # =========================================================================
+    ax3 = fig.add_subplot(gs[1, 0])
+    
+    if 'translation' in results and 's_q_2d' in results['translation']:
+        data = results['translation']
+        extent = [data['q1_vals'][0], data['q1_vals'][-1],
+                  data['q2_vals'][0], data['q2_vals'][-1]]
+        im3 = ax3.imshow(np.abs(data['s_q_2d']).T, origin='lower', extent=extent,
+                         cmap='viridis', aspect='equal')
+        ax3.set_xlabel('q₁ (b₁)')
+        ax3.set_ylabel('q₂ (b₂)')
+        ax3.set_title(f'S$^{{zz}}$(q)\nm$_{{trans}}$ = {data["m_trans"]:.4f}', fontsize=10)
+        plt.colorbar(im3, ax=ax3, shrink=0.8)
+    
+    # =========================================================================
+    # Panel 4: S_D(q) bond structure factor (middle center-left)
+    # =========================================================================
+    ax4 = fig.add_subplot(gs[1, 1])
+    
+    if 'bond' in results and 's_d_2d' in results['bond']:
+        data = results['bond']
+        extent = [data['q1_vals'][0], data['q1_vals'][-1],
+                  data['q2_vals'][0], data['q2_vals'][-1]]
+        im4 = ax4.imshow(np.abs(data['s_d_2d']).T, origin='lower', extent=extent,
+                         cmap='plasma', aspect='equal')
+        ax4.set_xlabel('q₁ (b₁)')
+        ax4.set_ylabel('q₂ (b₂)')
+        ax4.set_title(f'S$_D$(q) - VBS\nm$_{{vbs}}$ = {data["m_vbs"]:.4f}', fontsize=10)
+        plt.colorbar(im4, ax=ax4, shrink=0.8)
+    
+    # =========================================================================
+    # Panel 5: S_P(q) plaquette structure factor (middle center-right)
+    # =========================================================================
+    ax5 = fig.add_subplot(gs[1, 2])
+    
+    if 'plaquette' in results and 's_p_2d' in results['plaquette']:
+        data = results['plaquette']
+        extent = [data['q1_vals'][0], data['q1_vals'][-1],
+                  data['q2_vals'][0], data['q2_vals'][-1]]
+        im5 = ax5.imshow(np.abs(data['s_p_2d']).T, origin='lower', extent=extent,
+                         cmap='inferno', aspect='equal')
+        ax5.set_xlabel('q₁ (b₁)')
+        ax5.set_ylabel('q₂ (b₂)')
+        ax5.set_title(f'S$_P$(q) - Plaquette\nm$_{{plaq}}$ = {data["m_plaquette"]:.4f}', fontsize=10)
+        plt.colorbar(im5, ax=ax5, shrink=0.8)
+    
+    # =========================================================================
+    # Panel 6: Order parameter summary bar chart (middle right)
+    # =========================================================================
+    ax6 = fig.add_subplot(gs[1, 3])
+    
+    # Collect order parameters
+    op_names = []
+    op_values = []
+    op_colors = []
+    
+    if 'translation' in results:
+        op_names.append('m_trans')
+        op_values.append(results['translation']['m_trans'])
+        op_colors.append('#2ecc71')  # Green
+    
+    if 'nematic' in results:
+        op_names.append('m_nem')
+        op_values.append(results['nematic']['m_nem'])
+        op_colors.append('#9b59b6')  # Purple
+    
+    if 'stripe' in results:
+        op_names.append('m_stripe')
+        op_values.append(results['stripe']['m_stripe'])
+        op_colors.append('#e74c3c')  # Red
+    
+    if 'bond' in results and 'm_vbs' in results['bond']:
+        op_names.append('m_vbs')
+        op_values.append(results['bond']['m_vbs'])
+        op_colors.append('#3498db')  # Blue
+    
+    if 'plaquette' in results and 'm_plaquette' in results['plaquette']:
+        op_names.append('m_plaq')
+        op_values.append(results['plaquette']['m_plaquette'])
+        op_colors.append('#f39c12')  # Orange
+        
+        op_names.append('⟨|P|⟩')
+        op_values.append(results['plaquette']['resonance_strength'])
+        op_colors.append('#e67e22')  # Dark orange
+    
+    if op_values:
+        bars = ax6.barh(op_names, op_values, color=op_colors, edgecolor='black')
+        ax6.set_xlabel('Order Parameter Value')
+        ax6.set_title('Order Parameter Summary', fontsize=10, fontweight='bold')
+        ax6.axvline(0.1, color='red', linestyle='--', alpha=0.5, label='Threshold (0.1)')
+        ax6.set_xlim(0, max(op_values) * 1.2 + 0.05)
+        
+        # Add value labels
+        for bar, val in zip(bars, op_values):
+            ax6.text(bar.get_width() + 0.01, bar.get_y() + bar.get_height()/2,
+                     f'{val:.4f}', va='center', fontsize=9)
+    
+    # =========================================================================
+    # Panel 7: Phase interpretation (bottom, spans all cols)
+    # =========================================================================
+    ax7 = fig.add_subplot(gs[2, :])
+    ax7.axis('off')
+    
+    # Determine dominant phase
+    phase_scores = {}
+    
+    if 'translation' in results:
+        phase_scores['MAGNETIC ORDER\n(AFM/FM/Spiral)'] = results['translation']['m_trans']
+    if 'nematic' in results:
+        phase_scores['NEMATIC\n(Bond-oriented liquid)'] = results['nematic']['m_nem']
+    if 'bond' in results and 'm_vbs' in results['bond']:
+        phase_scores['VBS\n(Valence bond solid)'] = results['bond']['m_vbs']
+    if 'plaquette' in results and 'm_plaquette' in results['plaquette']:
+        phase_scores['PLAQUETTE CRYSTAL\n(Ordered bowties)'] = results['plaquette']['m_plaquette']
+        
+        # Check for spin liquid signature
+        m_plaq = results['plaquette']['m_plaquette']
+        res_strength = results['plaquette']['resonance_strength']
+        if res_strength > 0.05 and m_plaq < 0.1:
+            phase_scores['SPIN LIQUID\n(Resonating phase)'] = res_strength
+    
+    # Sort by score
+    sorted_phases = sorted(phase_scores.items(), key=lambda x: x[1], reverse=True)
+    
+    # Create interpretation text
+    interpretation = "═" * 90 + "\n"
+    interpretation += "                              PHASE INTERPRETATION\n"
+    interpretation += "═" * 90 + "\n\n"
+    
+    if sorted_phases:
+        top_phase, top_score = sorted_phases[0]
+        
+        if top_score > 0.1:
+            interpretation += f"  DOMINANT PHASE:  {top_phase.replace(chr(10), ' ')}  (score = {top_score:.4f})\n\n"
+        else:
+            interpretation += f"  STATE:  QUANTUM DISORDERED / PARAMAGNETIC  (all order parameters < 0.1)\n\n"
+        
+        interpretation += "  Order Parameter Ranking:\n"
+        for i, (phase, score) in enumerate(sorted_phases):
+            status = "●" if score > 0.1 else "○"
+            interpretation += f"    {i+1}. {status} {phase.replace(chr(10), ' ')}: {score:.4f}\n"
+    
+    interpretation += "\n" + "─" * 90 + "\n"
+    interpretation += "  Legend:  ● = significant (> 0.1)    ○ = weak (< 0.1)\n"
+    interpretation += "─" * 90
+    
+    ax7.text(0.02, 0.95, interpretation, transform=ax7.transAxes,
+             fontsize=11, fontfamily='monospace', va='top',
+             bbox=dict(boxstyle='round', facecolor='lightyellow', alpha=0.9, edgecolor='gray'))
+    
+    # =========================================================================
+    # Save figure
+    # =========================================================================
+    plt.savefig(os.path.join(output_dir, 'state_visualization.png'), 
+                dpi=150, bbox_inches='tight')
+    plt.close()
+    
+    print(f"  State visualization saved to {os.path.join(output_dir, 'state_visualization.png')}")
 
 
 # =============================================================================
 # Structure Factor Visualization Functions
 # =============================================================================
+
+def plot_observable_definitions(output_dir: str):
+    """
+    Create a reference figure explaining all computed observables.
+    
+    This provides a visual summary of what each order parameter measures.
+    """
+    if not HAS_MATPLOTLIB:
+        return
+    
+    os.makedirs(output_dir, exist_ok=True)
+    
+    fig = plt.figure(figsize=(16, 20))
+    
+    # Title
+    fig.suptitle('BFG Kagome Order Parameters: Observable Definitions', 
+                 fontsize=16, fontweight='bold', y=0.98)
+    
+    # Create text content
+    content = """
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+[A] DIAGONAL STRUCTURE FACTOR S^{zz}(q) — Translation Symmetry Breaking
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+    Definition:
+        S^{zz}(q) = (1/N) Σ_{i,j} exp[iq·(r_i - r_j)] ⟨S^z_i S^z_j⟩
+
+    Order Parameter:
+        m_trans = √(max_{q≠0} |S^{zz}(q)| / N)
+
+    Physical Meaning:
+        • Measures CRYSTALLINE / DENSITY WAVE order
+        • Bragg peaks at q ≠ 0 indicate long-range magnetic order
+        • Peak positions reveal the ordering wavevector
+        • m_trans > 0.1 → significant translation symmetry breaking
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+[B] NEMATIC ORDER — Rotational Symmetry Breaking (C₆ → C₂)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+    Definition:
+        O_α = Σ_{⟨ij⟩∈α} ⟨S^+_i S^-_j + S^-_i S^+_j⟩   (α = 0°, 60°, 120°)
+        
+        ψ_nem = O_0 + ω O_1 + ω² O_2    where ω = exp(2πi/3)
+
+    Order Parameter:
+        m_nem = |ψ_nem| / Σ_α |O_α|
+
+    Physical Meaning:
+        • Measures BOND ORIENTATION ANISOTROPY
+        • Kagome has 3 bond directions at 0°, 60°, 120°
+        • ψ_nem ≠ 0 means bonds prefer certain directions
+        • Detects C₆ → C₂ rotational symmetry breaking
+        • m_nem > 0.1 → significant nematic order
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+[C] BOND/DIMER STRUCTURE FACTOR S_D(q) — VBS Order
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+    Definition:
+        D_{ij} = S^+_i S^-_j + S^-_i S^+_j    (XY bond energy)
+        
+        S_D(q) = (1/N_b) Σ_{b,b'} exp[iq·(R_b - R_{b'})] ⟨δD_b δD_{b'}⟩
+        
+        where δD_b = D_b - ⟨D⟩   (connected correlation)
+
+    Order Parameter:
+        m_vbs = √(max_{q≠0} |S_D(q)| / N_b)
+
+    Physical Meaning:
+        • Measures VALENCE BOND SOLID (VBS) order
+        • Bragg peaks indicate dimerization / bond crystallization
+        • Detects patterns like columnar VBS, plaquette VBS, etc.
+        • m_vbs > 0.1 → significant dimer order
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+[D] BOWTIE / PLAQUETTE ORDER — BFG Native Observable
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+    Bowtie Structure (5-site, 2 NN triangles sharing 1 corner):
+    
+              s2
+             /  \\
+           s1----s0----s3   ← s0 is shared vertex (EXCLUDED from ring-flip)
+                  \\    /
+                    s4
+
+    Definition:
+        The 4-spin ring-flip acts on the 4 OUTER corners (s1, s2, s3, s4),
+        EXCLUDING the shared center vertex (s0):
+        
+        P_bt = ⟨S^+_{s1} S^-_{s2} S^+_{s3} S^-_{s4} + h.c.⟩
+        
+        This resonates between |↑↓↑↓⟩ and |↓↑↓↑⟩ on the 4 outer sites.
+        
+        S_P(q) = (1/N_bt) Σ_{bt,bt'} exp[iq·(R_bt - R_{bt'})] ⟨δP_bt δP_{bt'}⟩
+
+    Order Parameters:
+        m_plaq = √(max_{q≠0} |S_P(q)| / N_bt)    (plaquette crystal)
+        ⟨|P|⟩  = mean resonance strength         (liquid indicator)
+
+    Physical Meaning:
+        • Bowtie = 2 NN triangles sharing exactly 1 vertex
+        • χ_tri measures 3-site ring exchange (chiral fluctuations)
+        • P_bt correlates the two triangles in a bowtie
+        • m_plaq > 0.1 → plaquette crystal order
+        • ⟨|P|⟩ large + m_plaq small → RESONATING liquid phase
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+PHASE IDENTIFICATION GUIDE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+    ┌─────────────────────────────────────────────────────────────────────┐
+    │  m_trans large  →  MAGNETIC ORDER (AFM, FM, spiral, etc.)          │
+    │  m_nem large    →  NEMATIC PHASE (bond-oriented liquid)            │
+    │  m_vbs large    →  VALENCE BOND SOLID (dimerized state)            │
+    │  m_plaq large   →  PLAQUETTE CRYSTAL (ordered bowties)             │
+    │  ⟨|P|⟩ large, m_plaq small  →  SPIN LIQUID (resonating phase)      │
+    │  All small      →  QUANTUM DISORDERED / PARAMAGNETIC               │
+    └─────────────────────────────────────────────────────────────────────┘
+    """
+    
+    ax = fig.add_subplot(111)
+    ax.axis('off')
+    ax.text(0.02, 0.98, content, transform=ax.transAxes,
+            fontsize=10, fontfamily='monospace',
+            verticalalignment='top', horizontalalignment='left')
+    
+    plt.savefig(os.path.join(output_dir, 'observable_definitions.png'), 
+                dpi=150, bbox_inches='tight', facecolor='white')
+    plt.close()
+    
+    print(f"Observable definitions saved to {output_dir}/observable_definitions.png")
+
 
 def plot_structure_factors(results: Dict, output_dir: str):
     """Plot all computed structure factors"""
@@ -1920,7 +2568,10 @@ def print_summary(results: Dict):
         print("\n[A] TRANSLATION SYMMETRY BREAKING (Diagonal Structure Factor)")
         print(f"    m_trans = {data['m_trans']:.6f}")
         print(f"    S^{{zz}}(Q_max) = {data['s_q_max']:.6f}")
-        print(f"    Q_max = ({data['q_max'][0]:.3f}, {data['q_max'][1]:.3f})")
+        q_max = data['q_max']
+        print(f"    Q_max = ({q_max[0]:.4f}, {q_max[1]:.4f})")
+        if data.get('q_max_idx') is not None:
+            print(f"    (k-point index = {data['q_max_idx']})")
         if data['m_trans'] > 0.1:
             print("    → SIGNIFICANT: Possible crystalline/density wave order")
         else:
@@ -1950,6 +2601,10 @@ def print_summary(results: Dict):
             print("\n[C] BOND/DIMER ORDER (VBS)")
             print(f"    m_vbs = {data['m_vbs']:.6f}")
             print(f"    S_D(Q_max) = {data['s_d_max']:.6f}")
+            q_max = data['q_max']
+            print(f"    Q_max = ({q_max[0]:.4f}, {q_max[1]:.4f})")
+            if data.get('q_max_idx') is not None:
+                print(f"    (k-point index = {data['q_max_idx']})")
             print(f"    <D> (mean XY bond) = {data['D_mean']:.6f}")
             if data['m_vbs'] > 0.1:
                 print("    → SIGNIFICANT: Valence bond solid order")
@@ -1962,7 +2617,12 @@ def print_summary(results: Dict):
             print("\n[D] PLAQUETTE/BOW-TIE RESONANCE ORDER (BFG Native)")
             print(f"    m_plaquette = {data['m_plaquette']:.6f}")
             print(f"    S_P(Q_max) = {data['s_p_max']:.6f}")
-            print(f"    S_P(q=0) = {data['s_p_q0']:.6f}")
+            q_max = data['q_max']
+            print(f"    Q_max = ({q_max[0]:.4f}, {q_max[1]:.4f})")
+            if data.get('q_max_idx') is not None:
+                print(f"    (k-point index = {data['q_max_idx']})")
+            if data.get('s_p_q0') is not None:
+                print(f"    S_P(q=0) = {data['s_p_q0']:.6f}")
             print(f"    <|P|> (resonance strength) = {data['resonance_strength']:.6f}")
             print(f"    Number of bow-ties = {data['n_plaquettes']}")
             
@@ -2002,11 +2662,30 @@ def process_single_jpm(jpm_val: float, jpm_dir: str, args) -> Dict:
         'jpm_val': jpm_val,
         'success': False,
         'energy': np.nan,
-        'translation': {'m_translation': np.nan, 's_zz_max': np.nan, 's_zz_q0': np.nan},
+        'k_points': None,  # Store k-points array
+        'translation': {
+            'm_translation': np.nan, 
+            's_zz_max': np.nan, 
+            'q_max_idx': None,
+            's_q_discrete': None  # Full S(q) at all k-points
+        },
         'nematic': {'m_nematic': np.nan, 'C6_breaking': np.nan},
         'stripe': {'m_stripe': np.nan, 's_stripe_max': np.nan},
-        'bond': {'m_vbs': np.nan, 's_d_max': np.nan, 'D_mean': np.nan},
-        'plaquette': {'m_plaquette': np.nan, 's_p_max': np.nan, 's_p_q0': np.nan, 'resonance_strength': np.nan},
+        'bond': {
+            'm_vbs': np.nan, 
+            's_d_max': np.nan, 
+            'D_mean': np.nan, 
+            'q_max_idx': None,
+            's_d_discrete': None  # Full S_D(q) at all k-points
+        },
+        'plaquette': {
+            'm_plaquette': np.nan, 
+            's_p_max': np.nan, 
+            's_p_q0': np.nan, 
+            'resonance_strength': np.nan, 
+            'q_max_idx': None,
+            's_p_discrete': None  # Full S_P(q) at all k-points
+        },
     }
     
     # Find wavefunction file
@@ -2016,8 +2695,12 @@ def process_single_jpm(jpm_val: float, jpm_dir: str, args) -> Dict:
         return result
     
     try:
-        # Load cluster data
-        cluster = load_kagome_cluster(jpm_dir)
+        # Load cluster data with optional kpoints_file from args
+        kpoints_file = getattr(args, 'kpoints_file', None)
+        cluster = load_kagome_cluster(jpm_dir, kpoints_file=kpoints_file)
+        
+        # Store k-points
+        result['k_points'] = cluster.get('k_points', None)
         
         # Load wavefunction
         psi = load_wavefunction(wf_file, args.eigenvector_index)
@@ -2034,16 +2717,17 @@ def process_single_jpm(jpm_val: float, jpm_dir: str, args) -> Dict:
         trans = compute_translation_order_parameter(psi, cluster, n_q_points=args.n_q_points)
         if 'error' not in trans:
             result['translation'] = {
-                'm_translation': trans.get('m_trans', np.nan),  # Note: function returns 'm_trans'
-                's_zz_max': trans.get('s_q_max', np.nan),       # Note: function returns 's_q_max'
-                's_zz_q0': trans.get('s_q_q0', np.nan)
+                'm_translation': trans.get('m_trans', np.nan),
+                's_zz_max': trans.get('s_q_max', np.nan),
+                'q_max_idx': trans.get('q_max_idx', None),
+                's_q_discrete': trans.get('s_q_discrete', None)  # Full S(q) array
             }
         
         nem = compute_nematic_order(psi, cluster)
         if 'error' not in nem:
             result['nematic'] = {
-                'm_nematic': nem.get('m_nem', np.nan),  # Note: function returns 'm_nem'
-                'C6_breaking': nem.get('anisotropy', np.nan)  # Use anisotropy as C6_breaking measure
+                'm_nematic': nem.get('m_nem', np.nan),
+                'C6_breaking': nem.get('anisotropy', np.nan)
             }
         
         stripe = compute_stripe_structure_factor(psi, cluster)
@@ -2058,7 +2742,9 @@ def process_single_jpm(jpm_val: float, jpm_dir: str, args) -> Dict:
             result['bond'] = {
                 'm_vbs': bond.get('m_vbs', np.nan),
                 's_d_max': bond.get('s_d_max', np.nan),
-                'D_mean': bond.get('D_mean', np.nan)
+                'D_mean': bond.get('D_mean', np.nan),
+                'q_max_idx': bond.get('q_max_idx', None),
+                's_d_discrete': bond.get('s_d_discrete', None)  # Full S_D(q) array
             }
         
         if not args.skip_plaquette:
@@ -2068,7 +2754,9 @@ def process_single_jpm(jpm_val: float, jpm_dir: str, args) -> Dict:
                     'm_plaquette': plaq.get('m_plaquette', np.nan),
                     's_p_max': plaq.get('s_p_max', np.nan),
                     's_p_q0': plaq.get('s_p_q0', np.nan),
-                    'resonance_strength': plaq.get('resonance_strength', np.nan)
+                    'resonance_strength': plaq.get('resonance_strength', np.nan),
+                    'q_max_idx': plaq.get('q_max_idx', None),
+                    's_p_discrete': plaq.get('s_p_discrete', None)  # Full S_P(q) array
                 }
         
         result['success'] = True
@@ -2134,8 +2822,20 @@ def scan_all_jpm_directories(scan_dir: str, args) -> Dict:
     if n_workers is None or n_workers <= 0:
         n_workers = min(cpu_count(), n_total, 8)  # Default to min of cpus, tasks, or 8
     
+    # Try to find kpoints file in scan_dir if not explicitly provided
+    kpoints_file = getattr(args, 'kpoints_file', None)
+    if kpoints_file is None:
+        # Look for lattice parameters file in scan_dir
+        param_files = [f for f in os.listdir(scan_dir) 
+                       if f.endswith('_lattice_parameters.dat')]
+        if param_files:
+            kpoints_file = os.path.join(scan_dir, param_files[0])
+            print(f"Found k-points file in scan directory: {param_files[0]}")
+    
     print(f"Found {n_total} Jpm directories in {scan_dir}")
     print(f"Jpm range: {jpm_data[0][0]} to {jpm_data[-1][0]}")
+    if kpoints_file:
+        print(f"Using k-points from: {kpoints_file}")
     print(f"Using {n_workers} parallel workers")
     print("="*70)
     sys.stdout.flush()
@@ -2145,6 +2845,7 @@ def scan_all_jpm_directories(scan_dir: str, args) -> Dict:
         'eigenvector_index': args.eigenvector_index,
         'n_q_points': args.n_q_points,
         'skip_plaquette': args.skip_plaquette,
+        'kpoints_file': kpoints_file,
     }
     
     # Prepare tasks
@@ -2184,31 +2885,99 @@ def scan_all_jpm_directories(scan_dir: str, args) -> Dict:
     all_results = {
         'jpm_values': [],
         'energies': [],
-        'translation': {'m_translation': [], 's_zz_max': [], 's_zz_q0': []},
+        'k_points': None,  # Will store shared k-points array
+        'translation': {
+            'm_translation': [], 
+            's_zz_max': [], 
+            's_zz_q0': [],
+            'q_max_idx': [],
+            's_q_all': []  # Full S(q) at all k-points for each Jpm
+        },
         'nematic': {'m_nematic': [], 'C6_breaking': []},
         'stripe': {'m_stripe': [], 's_stripe_max': []},
-        'bond': {'m_vbs': [], 's_d_max': [], 'D_mean': []},
-        'plaquette': {'m_plaquette': [], 's_p_max': [], 's_p_q0': [], 'resonance_strength': []},
+        'bond': {
+            'm_vbs': [], 
+            's_d_max': [], 
+            'D_mean': [],
+            'q_max_idx': [],
+            's_d_all': []  # Full S_D(q) at all k-points for each Jpm
+        },
+        'plaquette': {
+            'm_plaquette': [], 
+            's_p_max': [], 
+            's_p_q0': [], 
+            'resonance_strength': [],
+            'q_max_idx': [],
+            's_p_all': []  # Full S_P(q) at all k-points for each Jpm
+        },
         'metadata': {
             'scan_dir': scan_dir,
             'n_jpm_points': len(results_list)
         }
     }
     
+    # Get k-points from first successful result
+    for r in results_list:
+        if r.get('k_points') is not None:
+            all_results['k_points'] = r['k_points']
+            break
+    
     for r in results_list:
         all_results['jpm_values'].append(r['jpm_val'])
         all_results['energies'].append(r['energy'])
         
-        for key in ['translation', 'nematic', 'stripe', 'bond', 'plaquette']:
-            for subkey in all_results[key]:
-                all_results[key][subkey].append(r[key].get(subkey, np.nan))
+        # Translation order
+        all_results['translation']['m_translation'].append(r['translation'].get('m_translation', np.nan))
+        all_results['translation']['s_zz_max'].append(r['translation'].get('s_zz_max', np.nan))
+        all_results['translation']['s_zz_q0'].append(r['translation'].get('s_zz_q0', np.nan))
+        all_results['translation']['q_max_idx'].append(r['translation'].get('q_max_idx', None))
+        all_results['translation']['s_q_all'].append(r['translation'].get('s_q_discrete', None))
+        
+        # Nematic order
+        all_results['nematic']['m_nematic'].append(r['nematic'].get('m_nematic', np.nan))
+        all_results['nematic']['C6_breaking'].append(r['nematic'].get('C6_breaking', np.nan))
+        
+        # Stripe order
+        all_results['stripe']['m_stripe'].append(r['stripe'].get('m_stripe', np.nan))
+        all_results['stripe']['s_stripe_max'].append(r['stripe'].get('s_stripe_max', np.nan))
+        
+        # Bond order
+        all_results['bond']['m_vbs'].append(r['bond'].get('m_vbs', np.nan))
+        all_results['bond']['s_d_max'].append(r['bond'].get('s_d_max', np.nan))
+        all_results['bond']['D_mean'].append(r['bond'].get('D_mean', np.nan))
+        all_results['bond']['q_max_idx'].append(r['bond'].get('q_max_idx', None))
+        all_results['bond']['s_d_all'].append(r['bond'].get('s_d_discrete', None))
+        
+        # Plaquette order
+        all_results['plaquette']['m_plaquette'].append(r['plaquette'].get('m_plaquette', np.nan))
+        all_results['plaquette']['s_p_max'].append(r['plaquette'].get('s_p_max', np.nan))
+        all_results['plaquette']['s_p_q0'].append(r['plaquette'].get('s_p_q0', np.nan))
+        all_results['plaquette']['resonance_strength'].append(r['plaquette'].get('resonance_strength', np.nan))
+        all_results['plaquette']['q_max_idx'].append(r['plaquette'].get('q_max_idx', None))
+        all_results['plaquette']['s_p_all'].append(r['plaquette'].get('s_p_discrete', None))
     
     # Convert lists to numpy arrays
     all_results['jpm_values'] = np.array(all_results['jpm_values'])
     all_results['energies'] = np.array(all_results['energies'])
+    
+    # Convert scalar lists to arrays
     for key in ['translation', 'nematic', 'stripe', 'bond', 'plaquette']:
         for subkey in all_results[key]:
-            all_results[key][subkey] = np.array(all_results[key][subkey])
+            if subkey in ['q_max_idx', 's_q_all', 's_d_all', 's_p_all']:
+                # These stay as lists (may contain None or arrays of different shapes)
+                pass
+            else:
+                all_results[key][subkey] = np.array(all_results[key][subkey])
+    
+    # Convert S(q) arrays to 2D matrices if all are present
+    # Shape will be (n_jpm, n_kpoints)
+    for key, sq_name in [('translation', 's_q_all'), ('bond', 's_d_all'), ('plaquette', 's_p_all')]:
+        sq_list = all_results[key][sq_name]
+        if all(sq is not None for sq in sq_list):
+            try:
+                all_results[key][sq_name] = np.array(sq_list)  # (n_jpm, n_kpoints)
+            except ValueError:
+                pass  # Arrays have different shapes, keep as list
     
     return all_results
 
@@ -2495,6 +3264,9 @@ def main():
                         help='Skip generating plots')
     parser.add_argument('--geometry-only', action='store_true',
                         help='Only plot lattice geometry (no wavefunction analysis)')
+    parser.add_argument('--kpoints-file', type=str, default=None,
+                        help='Path to lattice parameters file containing allowed k-points '
+                             '(auto-detected from cluster_dir or scan-dir if not specified)')
     
     args = parser.parse_args()
     
@@ -2563,11 +3335,13 @@ def main():
     
     # Load cluster data
     print(f"Loading cluster data from {args.cluster_dir}...")
-    cluster = load_kagome_cluster(args.cluster_dir)
+    cluster = load_kagome_cluster(args.cluster_dir, kpoints_file=args.kpoints_file)
     print(f"  Loaded {cluster['n_sites']} sites")
     print(f"  NN bonds: {len(cluster.get('edges_nn', []))}")
     print(f"  2NN bonds: {len(cluster.get('edges_2nn', []))}")
     print(f"  3NN bonds: {len(cluster.get('edges_3nn', []))}")
+    if cluster.get('k_points') is not None:
+        print(f"  Allowed k-points: {len(cluster['k_points'])}")
     
     os.makedirs(args.output_dir, exist_ok=True)
     
@@ -2581,6 +3355,9 @@ def main():
         print(f"  Found {len(bowties)} bow-tie plaquettes")
         if len(bowties) > 0:
             plot_bowties(cluster, bowties, args.output_dir, P_r=None)
+        
+        # Also generate observable definitions
+        plot_observable_definitions(args.output_dir)
     
     # If geometry-only mode, stop here
     if args.geometry_only:
@@ -2649,6 +3426,9 @@ def main():
     
     # Generate plots
     if not args.no_plots:
+        print("\nGenerating observable definitions reference...")
+        plot_observable_definitions(args.output_dir)
+        
         print("\nGenerating structure factor plots...")
         plot_structure_factors(results, args.output_dir)
         
