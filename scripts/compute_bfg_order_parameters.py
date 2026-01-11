@@ -1979,15 +1979,8 @@ def print_summary(results: Dict):
 
 
 # =============================================================================
-# Jpm Scan Functions (with MPI support)
+# Jpm Scan Functions (with multiprocessing support)
 # =============================================================================
-
-# Try to import MPI
-try:
-    from mpi4py import MPI
-    HAS_MPI = True
-except ImportError:
-    HAS_MPI = False
 
 def extract_jpm_value(dirname: str) -> Optional[float]:
     """Extract Jpm value from directory name like 'Jpm=0.1' or 'Jpm=-0.25'"""
@@ -2041,23 +2034,23 @@ def process_single_jpm(jpm_val: float, jpm_dir: str, args) -> Dict:
         trans = compute_translation_order_parameter(psi, cluster, n_q_points=args.n_q_points)
         if 'error' not in trans:
             result['translation'] = {
-                'm_translation': trans.get('m_translation', np.nan),
-                's_zz_max': trans.get('s_zz_max', np.nan),
-                's_zz_q0': trans.get('s_zz_q0', np.nan)
+                'm_translation': trans.get('m_trans', np.nan),  # Note: function returns 'm_trans'
+                's_zz_max': trans.get('s_q_max', np.nan),       # Note: function returns 's_q_max'
+                's_zz_q0': trans.get('s_q_q0', np.nan)
             }
         
         nem = compute_nematic_order(psi, cluster)
         if 'error' not in nem:
             result['nematic'] = {
-                'm_nematic': nem.get('m_nematic', np.nan),
-                'C6_breaking': nem.get('C6_breaking', np.nan)
+                'm_nematic': nem.get('m_nem', np.nan),  # Note: function returns 'm_nem'
+                'C6_breaking': nem.get('anisotropy', np.nan)  # Use anisotropy as C6_breaking measure
             }
         
         stripe = compute_stripe_structure_factor(psi, cluster)
         if 'error' not in stripe:
             result['stripe'] = {
                 'm_stripe': stripe.get('m_stripe', np.nan),
-                's_stripe_max': stripe.get('s_stripe_max', np.nan)
+                's_stripe_max': np.abs(stripe.get('S_stripe', np.nan))  # Use S_stripe magnitude
             }
         
         bond = compute_bond_structure_factor(psi, cluster, n_q_points=args.n_q_points)
@@ -2088,10 +2081,24 @@ def process_single_jpm(jpm_val: float, jpm_dir: str, args) -> Dict:
     return result
 
 
+def _worker_wrapper(task):
+    """Wrapper for multiprocessing Pool - unpacks arguments"""
+    jpm_val, jpm_dir, args_dict = task
+    
+    # Convert args_dict back to namespace-like object
+    class Args:
+        pass
+    args = Args()
+    for k, v in args_dict.items():
+        setattr(args, k, v)
+    
+    return process_single_jpm(jpm_val, jpm_dir, args)
+
+
 def scan_all_jpm_directories(scan_dir: str, args) -> Dict:
     """
     Scan all Jpm=* subdirectories in the given directory and compute order parameters.
-    Uses MPI for parallelization if available.
+    Uses Python multiprocessing for parallelization.
     
     Args:
         scan_dir: Path to directory containing Jpm=* subdirectories
@@ -2101,22 +2108,14 @@ def scan_all_jpm_directories(scan_dir: str, args) -> Dict:
         Dictionary with aggregated results for all Jpm values
     """
     import glob
+    import sys
+    from multiprocessing import Pool, cpu_count
     
-    # Setup MPI
-    if HAS_MPI:
-        comm = MPI.COMM_WORLD
-        rank = comm.Get_rank()
-        size = comm.Get_size()
-    else:
-        rank = 0
-        size = 1
-    
-    # Find all Jpm=* subdirectories (all ranks need this)
+    # Find all Jpm=* subdirectories
     jpm_dirs = glob.glob(os.path.join(scan_dir, 'Jpm=*'))
     
     if not jpm_dirs:
-        if rank == 0:
-            print(f"ERROR: No Jpm=* subdirectories found in {scan_dir}")
+        print(f"ERROR: No Jpm=* subdirectories found in {scan_dir}")
         return {}
     
     # Extract Jpm values and sort
@@ -2130,47 +2129,56 @@ def scan_all_jpm_directories(scan_dir: str, args) -> Dict:
     jpm_data.sort(key=lambda x: x[0])
     n_total = len(jpm_data)
     
-    if rank == 0:
-        print(f"Found {n_total} Jpm directories in {scan_dir}")
-        print(f"Jpm range: {jpm_data[0][0]} to {jpm_data[-1][0]}")
-        if HAS_MPI:
-            print(f"Running with {size} MPI ranks")
-        print("="*70)
+    # Determine number of workers
+    n_workers = getattr(args, 'n_workers', None)
+    if n_workers is None or n_workers <= 0:
+        n_workers = min(cpu_count(), n_total, 8)  # Default to min of cpus, tasks, or 8
     
-    # Distribute work across ranks
-    local_results = []
-    for idx, (jpm_val, jpm_dir) in enumerate(jpm_data):
-        if idx % size != rank:
-            continue
-        
-        print(f"[Rank {rank}] Processing Jpm = {jpm_val} ({idx+1}/{n_total})")
-        result = process_single_jpm(jpm_val, jpm_dir, args)
-        local_results.append(result)
-        
-        if result['success']:
-            print(f"  [Rank {rank}] Jpm={jpm_val}: E={result['energy']:.6f}, "
-                  f"m_trans={result['translation']['m_translation']:.4f}, "
-                  f"m_nem={result['nematic']['m_nematic']:.4f}")
+    print(f"Found {n_total} Jpm directories in {scan_dir}")
+    print(f"Jpm range: {jpm_data[0][0]} to {jpm_data[-1][0]}")
+    print(f"Using {n_workers} parallel workers")
+    print("="*70)
+    sys.stdout.flush()
     
-    # Gather results from all ranks
-    if HAS_MPI:
-        all_local_results = comm.gather(local_results, root=0)
-        if rank == 0:
-            # Flatten the list of lists
-            gathered_results = []
-            for lr in all_local_results:
-                gathered_results.extend(lr)
-        else:
-            gathered_results = []
+    # Convert args to dict for pickling
+    args_dict = {
+        'eigenvector_index': args.eigenvector_index,
+        'n_q_points': args.n_q_points,
+        'skip_plaquette': args.skip_plaquette,
+    }
+    
+    # Prepare tasks
+    tasks = [(jpm_val, jpm_dir, args_dict) for jpm_val, jpm_dir in jpm_data]
+    
+    # Run in parallel
+    if n_workers > 1:
+        with Pool(processes=n_workers) as pool:
+            results_list = []
+            for idx, result in enumerate(pool.imap(_worker_wrapper, tasks)):
+                jpm_val = result['jpm_val']
+                if result['success']:
+                    print(f"[{idx+1}/{n_total}] Jpm={jpm_val}: E={result['energy']:.6f}, "
+                          f"m_trans={result['translation']['m_translation']:.4f}, "
+                          f"m_nem={result['nematic']['m_nematic']:.4f}", flush=True)
+                else:
+                    print(f"[{idx+1}/{n_total}] Jpm={jpm_val}: FAILED", flush=True)
+                results_list.append(result)
     else:
-        gathered_results = local_results
-    
-    # Only rank 0 processes and returns the final results
-    if rank != 0:
-        return {}
+        # Serial execution
+        results_list = []
+        for idx, (jpm_val, jpm_dir) in enumerate(jpm_data):
+            print(f"[{idx+1}/{n_total}] Processing Jpm = {jpm_val}", flush=True)
+            result = process_single_jpm(jpm_val, jpm_dir, args)
+            if result['success']:
+                print(f"  Jpm={jpm_val}: E={result['energy']:.6f}, "
+                      f"m_trans={result['translation']['m_translation']:.4f}, "
+                      f"m_nem={result['nematic']['m_nematic']:.4f}", flush=True)
+            else:
+                print(f"  Jpm={jpm_val}: FAILED", flush=True)
+            results_list.append(result)
     
     # Sort by Jpm value
-    gathered_results.sort(key=lambda x: x['jpm_val'])
+    results_list.sort(key=lambda x: x['jpm_val'])
     
     # Build final results dictionary
     all_results = {
@@ -2183,11 +2191,11 @@ def scan_all_jpm_directories(scan_dir: str, args) -> Dict:
         'plaquette': {'m_plaquette': [], 's_p_max': [], 's_p_q0': [], 'resonance_strength': []},
         'metadata': {
             'scan_dir': scan_dir,
-            'n_jpm_points': len(gathered_results)
+            'n_jpm_points': len(results_list)
         }
     }
     
-    for r in gathered_results:
+    for r in results_list:
         all_results['jpm_values'].append(r['jpm_val'])
         all_results['energies'].append(r['energy'])
         
@@ -2481,6 +2489,8 @@ def main():
                         help='Number of q-points for structure factor grids')
     parser.add_argument('--skip-plaquette', action='store_true',
                         help='Skip plaquette calculation (slow for large systems)')
+    parser.add_argument('--n-workers', '-w', type=int, default=4,
+                        help='Number of parallel workers for --scan-dir mode (default: 4)')
     parser.add_argument('--no-plots', action='store_true',
                         help='Skip generating plots')
     parser.add_argument('--geometry-only', action='store_true',
