@@ -252,8 +252,10 @@ struct WorkflowConfig {
     bool run_standard = false;
     bool run_symmetrized = false;
     bool run_streaming_symmetry = false;  // New streaming symmetry mode
+    bool run_disk_streaming = false;  // Ultra-low-memory disk-based streaming
     bool run_symm_auto = false;  // Unified --symm flag: auto-select between symmetrized and streaming
     uint64_t symm_streaming_threshold = 4096;  // Hilbert dim threshold for switching to streaming
+    uint64_t disk_streaming_threshold = 67108864;  // 2^26 threshold for disk-based mode (default: 64M states)
     bool compute_thermo = false;
     bool compute_dynamical_response = false;
     bool compute_static_response = false;

@@ -8,6 +8,7 @@
 #include <ed/core/ed_config_adapter.h>
 #include <ed/core/ed_wrapper.h>
 #include <ed/core/ed_wrapper_streaming.h>
+#include <ed/core/disk_streaming_symmetry.h>
 #include <ed/core/construct_ham.h>
 #include <ed/core/hdf5_io.h>
 #include <ed/solvers/ftlm.h>
@@ -606,6 +607,47 @@ EDResults run_streaming_symmetry_workflow(const EDConfig& config) {
     std::cout << "\n  Time: " << std::fixed << std::setprecision(2) << duration / 1000.0 << " s\n";
     
     // Eigenvalues are saved to HDF5 by the underlying diagonalization functions
+    
+    return results;
+}
+
+/**
+ * @brief Run disk-based streaming symmetry diagonalization workflow
+ * 
+ * This ultra-low-memory mode processes sectors one at a time,
+ * storing sector data on disk. Suitable for very large Hilbert spaces
+ * (>64M states) where standard streaming would OOM.
+ */
+EDResults run_disk_streaming_workflow(const EDConfig& config) {
+    auto params = ed_adapter::toEDParameters(config);
+    params.output_dir = config.workflow.output_dir;
+    create_directory_mpi_safe(params.output_dir);
+    
+    auto start = std::chrono::high_resolution_clock::now();
+    
+    EDResults results = exact_diagonalization_disk_streaming(
+        config.system.hamiltonian_dir,
+        config.method,
+        params
+    );
+    
+    auto end = std::chrono::high_resolution_clock::now();
+    auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
+    
+    // Print results summary
+    if (!results.eigenvalues.empty()) {
+        std::cout << "\n  Lowest eigenvalues:\n";
+        size_t show = std::min(results.eigenvalues.size(), (size_t)5);
+        for (size_t i = 0; i < show; i++) {
+            std::cout << "    E[" << i << "] = " << std::fixed << std::setprecision(10) 
+                      << results.eigenvalues[i] << "\n";
+        }
+        if (results.eigenvalues.size() > 5) {
+            std::cout << "    ... (" << (results.eigenvalues.size() - 5) << " more)\n";
+        }
+    }
+    
+    std::cout << "\n  Time: " << std::fixed << std::setprecision(2) << duration / 1000.0 << " s\n";
     
     return results;
 }
@@ -2127,9 +2169,12 @@ void print_help(const char* prog_name) {
     std::cout << "  --standard              Run standard diagonalization\n";
     std::cout << "  --symm                  Run symmetry-exploiting diagonalization (auto-selects best mode)\n";
     std::cout << "  --symm-threshold=<n>    Hilbert dim threshold for streaming mode (default: 4096)\n";
+    std::cout << "  --disk-threshold=<n>    Hilbert dim threshold for disk-streaming mode (default: 67108864)\n";
     std::cout << "  --symmetrized           Run symmetrized diagonalization (exploits symmetries)\n";
     std::cout << "  --streaming-symmetry    Run streaming symmetry diagonalization (memory-efficient,\n";
     std::cout << "                          recommended for systems ≥12 sites)\n";
+    std::cout << "  --disk-streaming        Run ultra-low-memory disk-based symmetry diagonalization\n";
+    std::cout << "                          (processes one sector at a time, uses disk cache)\n";
     std::cout << "  --thermo                Compute thermodynamic properties\n";
     std::cout << "  --dynamical-response    Compute dynamical response (spectral functions)\n";
     std::cout << "  --static-response       Compute static response (thermal expectation values)\n";
@@ -2792,21 +2837,34 @@ int main(int argc, char* argv[]) {
     EDResults standard_results, sym_results;
     
     try {
-        // Handle unified --symm flag: auto-select between symmetrized and streaming-symmetry
+        // Handle unified --symm flag: auto-select between symmetrized, streaming-symmetry, or disk-streaming
         if (config.workflow.run_symm_auto && !config.workflow.skip_ed) {
             // Calculate Hilbert space dimension for threshold decision
             uint64_t hilbert_dim = 1ULL << config.system.num_sites;  // 2^N for spin-1/2
             
+            bool use_disk_streaming = (hilbert_dim >= config.workflow.disk_streaming_threshold);
             bool use_streaming = (hilbert_dim >= config.workflow.symm_streaming_threshold);
             
             std::cout << "========================================\n";
             std::cout << "  Auto-Symmetry Mode Selection\n";
             std::cout << "  Hilbert space dimension: " << hilbert_dim << "\n";
             std::cout << "  Threshold for streaming: " << config.workflow.symm_streaming_threshold << "\n";
-            std::cout << "  Selected: " << (use_streaming ? "streaming-symmetry" : "symmetrized") << "\n";
+            std::cout << "  Threshold for disk-streaming: " << config.workflow.disk_streaming_threshold << "\n";
+            if (use_disk_streaming) {
+                std::cout << "  Selected: disk-streaming (ultra-low-memory)\n";
+            } else {
+                std::cout << "  Selected: " << (use_streaming ? "streaming-symmetry" : "symmetrized") << "\n";
+            }
             std::cout << "========================================\n\n";
             
-            if (use_streaming) {
+            if (use_disk_streaming) {
+                EDResults disk_results = run_disk_streaming_workflow(config);
+                print_eigenvalue_summary(disk_results.eigenvalues);
+                
+                if (config.workflow.compute_thermo && !disk_results.eigenvalues.empty()) {
+                    compute_thermodynamics(disk_results.eigenvalues, config);
+                }
+            } else if (use_streaming) {
                 EDResults streaming_results = run_streaming_symmetry_workflow(config);
                 print_eigenvalue_summary(streaming_results.eigenvalues);
                 
@@ -2847,6 +2905,15 @@ int main(int argc, char* argv[]) {
             
             if (config.workflow.compute_thermo && !streaming_results.eigenvalues.empty()) {
                 compute_thermodynamics(streaming_results.eigenvalues, config);
+            }
+        }
+        
+        if (config.workflow.run_disk_streaming && !config.workflow.skip_ed) {
+            EDResults disk_results = run_disk_streaming_workflow(config);
+            print_eigenvalue_summary(disk_results.eigenvalues);
+            
+            if (config.workflow.compute_thermo && !disk_results.eigenvalues.empty()) {
+                compute_thermodynamics(disk_results.eigenvalues, config);
             }
         }
         
