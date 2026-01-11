@@ -116,20 +116,23 @@ void GPUIterativeSolver::initializeRandomVectors(cuDoubleComplex* vectors, int n
 }
 
 void GPUIterativeSolver::gramSchmidt(cuDoubleComplex* vec, cuDoubleComplex* basis, int num_basis) {
-    cuDoubleComplex alpha = make_cuDoubleComplex(-1.0, 0.0);
-    cuDoubleComplex one = make_cuDoubleComplex(1.0, 0.0);
+    // Use iterative classical Gram-Schmidt (CGS with reorthogonalization)
+    // This is more numerically stable for large systems
+    const int max_reorth = 2;  // Typically 2 passes is sufficient
     
-    for (int i = 0; i < num_basis; ++i) {
-        // Compute <basis[i] | vec>
-        cuDoubleComplex proj;
-        cublasZdotc(cublas_handle_, N_,
-                    basis + i * N_, 1,
-                    vec, 1,
-                    &proj);
-        
-        // vec -= proj * basis[i]
-        cuDoubleComplex neg_proj = make_cuDoubleComplex(-cuCreal(proj), -cuCimag(proj));
-        cublasZaxpy(cublas_handle_, N_, &neg_proj, basis + i * N_, 1, vec, 1);
+    for (int reorth = 0; reorth < max_reorth; ++reorth) {
+        for (int i = 0; i < num_basis; ++i) {
+            // Compute <basis[i] | vec>
+            cuDoubleComplex proj;
+            cublasZdotc(cublas_handle_, N_,
+                        basis + i * N_, 1,
+                        vec, 1,
+                        &proj);
+            
+            // vec -= proj * basis[i]
+            cuDoubleComplex neg_proj = make_cuDoubleComplex(-cuCreal(proj), -cuCimag(proj));
+            cublasZaxpy(cublas_handle_, N_, &neg_proj, basis + i * N_, 1, vec, 1);
+        }
     }
     
     // Normalize vec
@@ -401,11 +404,10 @@ void GPUIterativeSolver::runDavidson(
                 cuDoubleComplex neg_lambda = make_cuDoubleComplex(-current_eigs[i], 0.0);
                 cublasZaxpy(cublas_handle_, N_, &neg_lambda, d_ritz_vecs + i * N_, 1, new_vec, 1);
                 
-                // Simple diagonal preconditioning: r / (lambda - diag(H))
-                // For now, skip preconditioning or use simple scaling
-                double scale = 1.0 / std::max(std::abs(current_eigs[i]), 0.1);
-                cuDoubleComplex scale_c = make_cuDoubleComplex(scale, 0.0);
-                cublasZscal(cublas_handle_, N_, &scale_c, new_vec, 1);
+                // Note: Without access to diagonal of H, we skip preconditioning
+                // and use the raw residual. This makes the method more like 
+                // subspace iteration but is still valid. For faster convergence,
+                // consider implementing Jacobi-Davidson with diagonal preconditioning.
                 
                 new_vecs++;
             }
@@ -438,8 +440,17 @@ void GPUIterativeSolver::runDavidson(
             if (valid_vecs > 0) {
                 subspace_dim += valid_vecs;
             } else {
-                // All new vectors were zero - likely converged
-                std::cout << "Warning: All new vectors became zero after orthogonalization!" << std::endl;
+                // All new vectors were zero after orthogonalization
+                // Check if this is true convergence or numerical breakdown
+                if (max_residual < tol) {
+                    std::cout << "Davidson converged: all residuals below tolerance." << std::endl;
+                } else {
+                    std::cout << "Warning: All new vectors became zero after orthogonalization!" << std::endl;
+                    std::cout << "  This may indicate numerical issues. Current max residual: " 
+                              << max_residual << " (tolerance: " << tol << ")" << std::endl;
+                    std::cout << "  Consider: 1) increasing max_subspace, 2) using a different solver, "
+                              << "or 3) checking for near-degeneracy in your system." << std::endl;
+                }
                 converged = true;
             }
         } else {
