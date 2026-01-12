@@ -1402,8 +1402,11 @@ OrderParameterResults compute_all_order_parameters(
 
 std::vector<OrderParameterResults> scan_jpm_directories(
     const std::string& scan_dir,
+    const std::string& output_dir,
     int n_workers,
-    bool skip_stripe
+    int n_q_grid,
+    bool skip_stripe,
+    bool save_full
 ) {
     // Find all Jpm=* directories
     std::vector<std::pair<double, std::string>> jpm_dirs;
@@ -1422,6 +1425,9 @@ std::vector<OrderParameterResults> scan_jpm_directories(
     std::sort(jpm_dirs.begin(), jpm_dirs.end());
     
     std::cout << "Found " << jpm_dirs.size() << " Jpm directories" << std::endl;
+    if (save_full) {
+        std::cout << "Full output mode: saving S(q) and S_D(q) 2D grids per directory" << std::endl;
+    }
     
     if (jpm_dirs.empty()) {
         return {};
@@ -1495,8 +1501,48 @@ std::vector<OrderParameterResults> scan_jpm_directories(
             // Load wavefunction
             auto psi = load_wavefunction(wf_file);
             
-            // Compute order parameters
-            auto results = compute_all_order_parameters(psi, cluster, jpm, skip_stripe);
+            OrderParameterResults results;
+            results.jpm = jpm;
+            
+            if (save_full) {
+                // Full computation with 2D grids
+                auto spsm_corr = compute_spsm_correlations(psi, cluster.n_sites);
+                auto sf_result = compute_spin_structure_factor(spsm_corr, cluster);
+                auto s_q_2d = compute_sq_2d_grid(spsm_corr, cluster, n_q_grid);
+                
+                auto bond_exp = compute_xy_bond_expectations(psi, cluster);
+                auto nem_result = compute_nematic_order(bond_exp, cluster);
+                auto vbs_result = compute_vbs_order(bond_exp, cluster, n_q_grid);
+                
+                StripeResult stripe_result;
+                if (!skip_stripe && cluster.edges_nn.size() <= 50) {
+                    stripe_result = compute_stripe_structure_factor(psi, cluster);
+                }
+                
+                auto plaq_result = compute_plaquette_order(psi, cluster);
+                
+                // Save full results to per-Jpm file
+                std::ostringstream oss;
+                oss << std::fixed << std::setprecision(4) << jpm;
+                std::string out_file = output_dir + "/order_params_Jpm=" + oss.str() + ".h5";
+                save_results(out_file, sf_result, nem_result, stripe_result, vbs_result,
+                            plaq_result, cluster, s_q_2d, n_q_grid);
+                
+                // Fill scalar results for summary
+                results.m_translation = sf_result.m_translation;
+                results.m_nematic = nem_result.m_nem;
+                results.anisotropy = nem_result.anisotropy;
+                results.m_vbs = vbs_result.m_vbs;
+                results.D_mean = vbs_result.D_mean;
+                results.m_stripe = stripe_result.m_stripe;
+                results.m_plaquette = plaq_result.m_plaquette;
+                results.resonance_strength = plaq_result.resonance_strength;
+                results.P_mean = plaq_result.P_mean;
+            } else {
+                // Quick scalar-only computation
+                results = compute_all_order_parameters(psi, cluster, jpm, skip_stripe);
+            }
+            
             all_results[i] = results;
             
             int done = ++completed;
@@ -1594,6 +1640,7 @@ void print_usage(const char* prog) {
               << "  --n-workers <n>      Number of parallel workers (default: 4)\n"
               << "  --n-q-grid <n>       2D q-grid size for visualization (default: 50)\n"
               << "  --skip-stripe        Skip stripe order computation (faster)\n"
+              << "  --save-full          Save full S(q), S_D(q) 2D grids per Jpm directory\n"
               << "\nComputes BFG order parameters from ground state wavefunction:\n"
               << "  1. S(q) - Spin structure factor (translation order)\n"
               << "  2. Nematic order - Bond orientation anisotropy (C6→C2)\n"
@@ -1615,6 +1662,7 @@ int main(int argc, char* argv[]) {
     int n_q_grid = 50;
     bool skip_stripe = false;
     bool scan_mode = false;
+    bool save_full = false;
     
     // Parse arguments
     for (int i = 1; i < argc; ++i) {
@@ -1630,6 +1678,8 @@ int main(int argc, char* argv[]) {
             n_q_grid = std::stoi(argv[++i]);
         } else if (arg == "--skip-stripe") {
             skip_stripe = true;
+        } else if (arg == "--save-full") {
+            save_full = true;
         } else if (arg == "-h" || arg == "--help") {
             print_usage(argv[0]);
             return 0;
@@ -1666,9 +1716,10 @@ int main(int argc, char* argv[]) {
                       << "Scan directory: " << scan_dir << "\n"
                       << "Output directory: " << output_dir << "\n"
                       << "Workers: " << n_workers << "\n"
+                      << "Save full: " << (save_full ? "yes (2D grids)" : "no (scalars only)") << "\n"
                       << "========================================" << std::endl;
             
-            auto results = scan_jpm_directories(scan_dir, n_workers, skip_stripe);
+            auto results = scan_jpm_directories(scan_dir, output_dir, n_workers, n_q_grid, skip_stripe, save_full);
             
             if (!results.empty()) {
                 std::string results_file = output_dir + "/scan_results.h5";
