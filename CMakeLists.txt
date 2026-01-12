@@ -378,6 +378,35 @@ endif()
 
 add_executable(TPQ_DSSF ${APPS_DIR}/TPQ_DSSF.cpp ${SOLVERS_CPU_DIR}/dynamics.cpp ${SOLVERS_CPU_DIR}/TPQ.cpp ${SOLVERS_CPU_DIR}/ftlm.cpp ${SOLVERS_CPU_DIR}/lanczos.cpp ${IO_DIR}/basis_vector_storage.cpp)
 
+# BFG Order Parameter computation (lightweight, HDF5 + OpenMP only)
+add_executable(compute_bfg_order_parameters ${APPS_DIR}/compute_bfg_order_parameters.cpp)
+target_link_libraries(compute_bfg_order_parameters ${HDF5_LIBRARIES})
+target_include_directories(compute_bfg_order_parameters PRIVATE ${HDF5_INCLUDE_DIRS})
+find_package(OpenMP)
+if(OpenMP_CXX_FOUND)
+    target_link_libraries(compute_bfg_order_parameters OpenMP::OpenMP_CXX)
+    target_compile_definitions(compute_bfg_order_parameters PRIVATE _OPENMP)
+endif()
+target_compile_options(compute_bfg_order_parameters PRIVATE -O3 -march=native -fopenmp)
+
+# BFG Order Parameter GPU version (CUDA accelerated)
+if(WITH_CUDA)
+    add_executable(compute_bfg_order_parameters_gpu ${APPS_DIR}/compute_bfg_order_parameters_gpu.cu)
+    target_link_libraries(compute_bfg_order_parameters_gpu 
+        CUDA::cudart
+        ${HDF5_LIBRARIES}
+    )
+    target_include_directories(compute_bfg_order_parameters_gpu PRIVATE ${HDF5_INCLUDE_DIRS})
+    if(OpenMP_CXX_FOUND)
+        target_link_libraries(compute_bfg_order_parameters_gpu OpenMP::OpenMP_CXX)
+        target_compile_definitions(compute_bfg_order_parameters_gpu PRIVATE _OPENMP)
+    endif()
+    set_target_properties(compute_bfg_order_parameters_gpu PROPERTIES
+        CUDA_SEPARABLE_COMPILATION ON
+        CUDA_ARCHITECTURES "native"
+    )
+endif()
+
 
 # Link libraries for new main
 target_link_libraries(ED
