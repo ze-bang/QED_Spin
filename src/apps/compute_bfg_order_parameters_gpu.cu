@@ -346,6 +346,8 @@ struct OrderParameterResults {
     double m_translation;
     double m_nematic;
     double m_stripe;
+    double m_vbs;             // VBS order parameter
+    double D_mean;            // Mean bond value
     double m_plaquette;
     double resonance_strength;
     double anisotropy;
@@ -773,6 +775,56 @@ OrderParameterResults compute_order_parameters_gpu(
     double min_mag = *std::min_element(mags.begin(), mags.end());
     results.anisotropy = (max_mag > 1e-10) ? (max_mag - min_mag) / max_mag : 0.0;
     
+    // Compute VBS order (bond dimer structure factor)
+    std::cout << "  Computing VBS order..." << std::flush;
+    start = std::chrono::high_resolution_clock::now();
+    
+    std::vector<std::pair<int, int>> edges(cluster.edges_nn.begin(), cluster.edges_nn.end());
+    int n_bonds = edges.size();
+    
+    // Compute bond centers
+    std::vector<std::array<double, 2>> bond_centers(n_bonds);
+    for (int b = 0; b < n_bonds; ++b) {
+        int i = edges[b].first, j = edges[b].second;
+        bond_centers[b][0] = 0.5 * (cluster.positions[i][0] + cluster.positions[j][0]);
+        bond_centers[b][1] = 0.5 * (cluster.positions[i][1] + cluster.positions[j][1]);
+    }
+    
+    // Mean bond value
+    double sum_bond = 0.0;
+    for (const auto& [edge, exp_val] : bond_exp) {
+        sum_bond += std::real(exp_val);
+    }
+    results.D_mean = sum_bond / n_bonds;
+    
+    // Connected bond correlations δD
+    std::vector<Complex> delta_D(n_bonds);
+    for (int b = 0; b < n_bonds; ++b) {
+        delta_D[b] = bond_exp.at(edges[b]) - results.D_mean;
+    }
+    
+    // S_D(q) at discrete k-points
+    double s_d_max = 0.0;
+    for (int ik = 0; ik < n_k; ++ik) {
+        const auto& q = cluster.k_points[ik];
+        Complex s_d = 0.0;
+        for (int b1 = 0; b1 < n_bonds; ++b1) {
+            for (int b2 = 0; b2 < n_bonds; ++b2) {
+                double dr_x = bond_centers[b1][0] - bond_centers[b2][0];
+                double dr_y = bond_centers[b1][1] - bond_centers[b2][1];
+                double phase_arg = q[0] * dr_x + q[1] * dr_y;
+                s_d += delta_D[b1] * std::conj(delta_D[b2]) * std::exp(I_CPU * phase_arg);
+            }
+        }
+        s_d /= static_cast<double>(n_bonds);
+        if (std::abs(s_d) > s_d_max) s_d_max = std::abs(s_d);
+    }
+    results.m_vbs = std::sqrt(s_d_max / n_bonds);
+    
+    end = std::chrono::high_resolution_clock::now();
+    duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
+    std::cout << " (" << duration.count() << " ms)" << std::endl;
+    
     // Compute stripe order (bond-bond correlations) - can be slow
     if (!skip_stripe && cluster.edges_nn.size() <= 50) {
         std::cout << "  Computing stripe order (GPU)..." << std::flush;
@@ -960,7 +1012,7 @@ std::vector<OrderParameterResults> scan_jpm_directories(
                 std::cout << "[" << done << "/" << jpm_dirs.size() << "] "
                           << "Jpm=" << std::fixed << std::setprecision(4) << jpm
                           << " | m_trans=" << std::setprecision(6) << results.m_translation
-                          << " | m_nem=" << results.m_nematic
+                          << " | m_vbs=" << results.m_vbs
                           << " | m_plaq=" << results.m_plaquette
                           << " | res=" << results.resonance_strength
                           << " (GPU " << gpu_id << ")" << std::endl;
@@ -989,12 +1041,15 @@ void save_scan_results(
         size_t n = results.size();
         std::vector<double> jpm_vals(n), m_trans(n), m_nem(n), m_stripe(n);
         std::vector<double> m_plaq(n), resonance(n), aniso(n), P_mean(n);
+        std::vector<double> m_vbs_vals(n), D_mean_vals(n);
         
         for (size_t i = 0; i < n; ++i) {
             jpm_vals[i] = results[i].jpm;
             m_trans[i] = results[i].m_translation;
             m_nem[i] = results[i].m_nematic;
             m_stripe[i] = results[i].m_stripe;
+            m_vbs_vals[i] = results[i].m_vbs;
+            D_mean_vals[i] = results[i].D_mean;
             m_plaq[i] = results[i].m_plaquette;
             resonance[i] = results[i].resonance_strength;
             aniso[i] = results[i].anisotropy;
@@ -1012,6 +1067,8 @@ void save_scan_results(
         write_dataset("m_translation", m_trans);
         write_dataset("m_nematic", m_nem);
         write_dataset("m_stripe", m_stripe);
+        write_dataset("m_vbs", m_vbs_vals);
+        write_dataset("D_mean", D_mean_vals);
         write_dataset("m_plaquette", m_plaq);
         write_dataset("resonance_strength", resonance);
         write_dataset("anisotropy", aniso);
@@ -1040,6 +1097,12 @@ void print_usage(const char* prog) {
               << "  --n-workers <n>      Number of parallel workers (default: num_gpus)\n"
               << "  --skip-stripe        Skip stripe order computation (faster)\n"
               << "  --eigenvector <i>    Index of eigenvector to analyze (default: 0)\n"
+              << "\nComputes BFG order parameters (GPU accelerated):\n"
+              << "  1. S(q) - Spin structure factor (translation order)\n"
+              << "  2. Nematic order - Bond orientation anisotropy (C6→C2)\n"
+              << "  3. Stripe order - Bond-bond correlations with C3 phase\n"
+              << "  4. VBS order - Valence bond solid (dimer structure factor)\n"
+              << "  5. Plaquette order - Bowtie ring-flip correlations\n"
               << std::endl;
 }
 
