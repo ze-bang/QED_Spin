@@ -445,6 +445,85 @@ std::vector<Complex> load_wavefunction(const std::string& filename) {
 }
 
 // -----------------------------------------------------------------------------
+// Load TPQ state from HDF5 (finds lowest temperature = highest beta)
+// -----------------------------------------------------------------------------
+
+std::pair<std::vector<Complex>, double> load_tpq_state(const std::string& filename, int sample_idx = 0) {
+    try {
+        H5::H5File file(filename, H5F_ACC_RDONLY);
+        
+        // Navigate to TPQ samples
+        std::string sample_path = "tpq/samples/sample_" + std::to_string(sample_idx) + "/states";
+        H5::Group states_group;
+        
+        try {
+            states_group = file.openGroup(sample_path);
+        } catch (...) {
+            throw std::runtime_error("TPQ states not found at: " + sample_path);
+        }
+        
+        // Find all beta_* datasets and determine highest beta (lowest T)
+        std::vector<std::pair<std::string, double>> beta_states;
+        hsize_t num_objs = states_group.getNumObjs();
+        
+        for (hsize_t i = 0; i < num_objs; ++i) {
+            std::string name = states_group.getObjnameByIdx(i);
+            if (name.substr(0, 5) == "beta_") {
+                try {
+                    double beta = std::stod(name.substr(5));
+                    beta_states.push_back({name, beta});
+                } catch (...) {
+                    continue;
+                }
+            }
+        }
+        
+        if (beta_states.empty()) {
+            throw std::runtime_error("No beta_* states found in TPQ data");
+        }
+        
+        // Sort by beta (ascending) and pick the highest (lowest temperature)
+        std::sort(beta_states.begin(), beta_states.end(), 
+                  [](const auto& a, const auto& b) { return a.second < b.second; });
+        
+        std::string best_state = beta_states.back().first;
+        double best_beta = beta_states.back().second;
+        double temperature = 1.0 / best_beta;
+        
+        std::cout << "Selected TPQ state: " << best_state 
+                  << " (beta=" << best_beta << ", T=" << temperature << ")" << std::endl;
+        
+        // Load the state
+        std::string dataset_path = sample_path + "/" + best_state;
+        H5::DataSet dataset = file.openDataSet(dataset_path);
+        
+        H5::DataSpace dataspace = dataset.getSpace();
+        int rank = dataspace.getSimpleExtentNdims();
+        std::vector<hsize_t> dims(rank);
+        dataspace.getSimpleExtentDims(dims.data());
+        
+        hsize_t total_size = 1;
+        for (int i = 0; i < rank; ++i) {
+            total_size *= dims[i];
+        }
+        
+        // Read complex data
+        H5::CompType complex_type(sizeof(Complex));
+        complex_type.insertMember("real", 0, H5::PredType::NATIVE_DOUBLE);
+        complex_type.insertMember("imag", sizeof(double), H5::PredType::NATIVE_DOUBLE);
+        
+        std::vector<Complex> psi(total_size);
+        dataset.read(psi.data(), complex_type);
+        
+        std::cout << "Loaded TPQ state: " << psi.size() << " amplitudes" << std::endl;
+        return {psi, temperature};
+        
+    } catch (H5::Exception& e) {
+        throw std::runtime_error("HDF5 error loading TPQ: " + std::string(e.getCDetailMsg()));
+    }
+}
+
+// -----------------------------------------------------------------------------
 // Compute S^+_i S^-_j correlation matrix
 // -----------------------------------------------------------------------------
 
@@ -1337,6 +1416,7 @@ void save_results(
 
 struct OrderParameterResults {
     double jpm;
+    double temperature = 0.0;  // For TPQ mode, T=0 for ground state
     double m_translation;
     double m_nematic;
     double m_stripe;
@@ -1406,7 +1486,8 @@ std::vector<OrderParameterResults> scan_jpm_directories(
     int n_workers,
     int n_q_grid,
     bool skip_stripe,
-    bool save_full
+    bool save_full,
+    bool use_tpq
 ) {
     // Find all Jpm=* directories
     std::vector<std::pair<double, std::string>> jpm_dirs;
@@ -1498,11 +1579,28 @@ std::vector<OrderParameterResults> scan_jpm_directories(
                 continue;
             }
             
-            // Load wavefunction
-            auto psi = load_wavefunction(wf_file);
+            // Load wavefunction (ground state or TPQ lowest temperature)
+            std::vector<Complex> psi;
+            double temperature = 0.0;
+            
+            if (use_tpq) {
+                try {
+                    auto [tpq_psi, T] = load_tpq_state(wf_file);
+                    psi = std::move(tpq_psi);
+                    temperature = T;
+                } catch (const std::exception& e) {
+                    std::lock_guard<std::mutex> lock(print_mutex);
+                    std::cerr << "TPQ load failed for " << dir << ": " << e.what() 
+                              << ", falling back to ground state" << std::endl;
+                    psi = load_wavefunction(wf_file);
+                }
+            } else {
+                psi = load_wavefunction(wf_file);
+            }
             
             OrderParameterResults results;
             results.jpm = jpm;
+            results.temperature = temperature;
             
             if (save_full) {
                 // Full computation with 2D grids
@@ -1541,6 +1639,7 @@ std::vector<OrderParameterResults> scan_jpm_directories(
             } else {
                 // Quick scalar-only computation
                 results = compute_all_order_parameters(psi, cluster, jpm, skip_stripe);
+                results.temperature = temperature;  // Preserve temperature from TPQ
             }
             
             all_results[i] = results;
@@ -1549,8 +1648,11 @@ std::vector<OrderParameterResults> scan_jpm_directories(
             {
                 std::lock_guard<std::mutex> lock(print_mutex);
                 std::cout << "[" << done << "/" << jpm_dirs.size() << "] "
-                          << "Jpm=" << std::fixed << std::setprecision(4) << jpm
-                          << " | m_trans=" << std::setprecision(6) << results.m_translation
+                          << "Jpm=" << std::fixed << std::setprecision(4) << jpm;
+                if (use_tpq) {
+                    std::cout << " T=" << std::setprecision(6) << results.temperature;
+                }
+                std::cout << " | m_trans=" << std::setprecision(6) << results.m_translation
                           << " | m_vbs=" << results.m_vbs
                           << " | m_plaq=" << results.m_plaquette
                           << " | res=" << results.resonance_strength
@@ -1609,13 +1711,15 @@ void save_scan_results(
         write_dataset("P_mean", P_mean);
         
         // Add VBS order parameters
-        std::vector<double> m_vbs_vals(n), D_mean_vals(n);
+        std::vector<double> m_vbs_vals(n), D_mean_vals(n), temperature_vals(n);
         for (size_t i = 0; i < n; ++i) {
             m_vbs_vals[i] = results[i].m_vbs;
             D_mean_vals[i] = results[i].D_mean;
+            temperature_vals[i] = results[i].temperature;
         }
         write_dataset("m_vbs", m_vbs_vals);
         write_dataset("D_mean", D_mean_vals);
+        write_dataset("temperature", temperature_vals);
         
         std::cout << "Scan results saved to: " << output_file << std::endl;
         
@@ -1641,7 +1745,8 @@ void print_usage(const char* prog) {
               << "  --n-q-grid <n>       2D q-grid size for visualization (default: 50)\n"
               << "  --skip-stripe        Skip stripe order computation (faster)\n"
               << "  --save-full          Save full S(q), S_D(q) 2D grids per Jpm directory\n"
-              << "\nComputes BFG order parameters from ground state wavefunction:\n"
+              << "  --tpq                Use TPQ states (lowest temperature) instead of ground state\n"
+              << "\nComputes BFG order parameters from ground state or TPQ wavefunction:\n"
               << "  1. S(q) - Spin structure factor (translation order)\n"
               << "  2. Nematic order - Bond orientation anisotropy (C6→C2)\n"
               << "  3. Stripe order - Bond-bond correlations with C3 phase\n"
@@ -1663,6 +1768,7 @@ int main(int argc, char* argv[]) {
     bool skip_stripe = false;
     bool scan_mode = false;
     bool save_full = false;
+    bool use_tpq = false;
     
     // Parse arguments
     for (int i = 1; i < argc; ++i) {
@@ -1680,6 +1786,8 @@ int main(int argc, char* argv[]) {
             skip_stripe = true;
         } else if (arg == "--save-full") {
             save_full = true;
+        } else if (arg == "--tpq") {
+            use_tpq = true;
         } else if (arg == "-h" || arg == "--help") {
             print_usage(argv[0]);
             return 0;
@@ -1716,10 +1824,11 @@ int main(int argc, char* argv[]) {
                       << "Scan directory: " << scan_dir << "\n"
                       << "Output directory: " << output_dir << "\n"
                       << "Workers: " << n_workers << "\n"
+                      << "Mode: " << (use_tpq ? "TPQ (lowest temperature)" : "Ground state") << "\n"
                       << "Save full: " << (save_full ? "yes (2D grids)" : "no (scalars only)") << "\n"
                       << "========================================" << std::endl;
             
-            auto results = scan_jpm_directories(scan_dir, output_dir, n_workers, n_q_grid, skip_stripe, save_full);
+            auto results = scan_jpm_directories(scan_dir, output_dir, n_workers, n_q_grid, skip_stripe, save_full, use_tpq);
             
             if (!results.empty()) {
                 std::string results_file = output_dir + "/scan_results.h5";
