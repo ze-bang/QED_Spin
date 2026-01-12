@@ -65,7 +65,28 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 if(WITH_CUDA)
     set(CMAKE_CUDA_STANDARD 17)
     set(CMAKE_CUDA_STANDARD_REQUIRED ON)
-    set(CMAKE_CUDA_ARCHITECTURES "native")
+    
+    # Set CUDA architectures - use native if GPU available, otherwise use common modern architectures
+    # Compute capability 6.0+ required for native double atomicAdd
+    include(CheckLanguage)
+    check_language(CUDA)
+    if(CMAKE_CUDA_COMPILER)
+        # Try native first, but provide fallback for headless compilation
+        execute_process(
+            COMMAND ${CMAKE_CUDA_COMPILER} --run --gpu-architecture=native -x cu -c /dev/null
+            RESULT_VARIABLE CUDA_NATIVE_CHECK_RESULT
+            OUTPUT_QUIET ERROR_QUIET
+        )
+        if(CUDA_NATIVE_CHECK_RESULT EQUAL 0)
+            set(CMAKE_CUDA_ARCHITECTURES "native")
+        else()
+            # Fallback: compile for common modern architectures (V100, A100, etc.)
+            set(CMAKE_CUDA_ARCHITECTURES "70;80;86;89;90")
+            message(STATUS "No GPU detected for native arch, using fallback: ${CMAKE_CUDA_ARCHITECTURES}")
+        endif()
+    else()
+        set(CMAKE_CUDA_ARCHITECTURES "70;80;86;89;90")
+    endif()
     
     # Add CUDA compiler flags to handle C++ standard library compatibility
     set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} --expt-relaxed-constexpr")
@@ -112,6 +133,18 @@ if(USE_AOCL_BLIS)
     message(STATUS "Configuring AMD AOCL-BLIS libraries")
 
     set(_AOCL_HINT_DIRS)
+    # Check for Compute Canada EasyBuild environment variables first
+    if(DEFINED ENV{EBROOTAOCLMINBLAS})
+        list(APPEND _AOCL_HINT_DIRS $ENV{EBROOTAOCLMINBLAS})
+        message(STATUS "  Found AOCL BLAS from EasyBuild: $ENV{EBROOTAOCLMINBLAS}")
+    endif()
+    if(DEFINED ENV{EBROOTAOCLMINLAPACK})
+        list(APPEND _AOCL_HINT_DIRS $ENV{EBROOTAOCLMINLAPACK})
+        message(STATUS "  Found AOCL LAPACK from EasyBuild: $ENV{EBROOTAOCLMINLAPACK}")
+    endif()
+    if(DEFINED ENV{EBROOTFLEXIBLAS})
+        list(APPEND _AOCL_HINT_DIRS $ENV{EBROOTFLEXIBLAS})
+    endif()
     if(DEFINED ENV{AOCL_ROOT})
         list(APPEND _AOCL_HINT_DIRS $ENV{AOCL_ROOT})
     endif()
@@ -150,6 +183,7 @@ if(USE_AOCL_BLIS)
         set(LAPACK_LIBRARIES ${AOCL_LAPACK_LIBRARY})
         set(LAPACKE_LIBRARIES ${AOCL_LAPACKE_LIBRARY})
         add_definitions(-DUSE_AOCL_BLIS)
+        # Look for OpenMP runtime - try AOCL's libomp first, then system OpenMP
         find_library(AOCL_OMP_LIBRARY NAMES omp
             HINTS ${_AOCL_HINT_DIRS}
             PATH_SUFFIXES "" lib lib64 lib/aocl/lib aocc/lib lib/llvm-18/lib
@@ -158,7 +192,14 @@ if(USE_AOCL_BLIS)
             list(APPEND EXTRA_LINALG_LIBRARIES ${AOCL_OMP_LIBRARY})
             message(STATUS "  AOCL OpenMP runtime: ${AOCL_OMP_LIBRARY}")
         else()
-            message(WARNING "AOCL-BLIS OpenMP runtime (libomp) not found; linking may fail. Set AOCL_ROOT if needed.")
+            # Fallback to GCC's OpenMP (libgomp) which works fine with AOCL BLIS-mt
+            find_package(OpenMP QUIET)
+            if(OpenMP_CXX_FOUND)
+                list(APPEND EXTRA_LINALG_LIBRARIES OpenMP::OpenMP_CXX)
+                message(STATUS "  Using system OpenMP (libgomp) for AOCL threading")
+            else()
+                message(STATUS "  Note: AOCL-BLIS multi-threaded library will use pthreads")
+            endif()
         endif()
         message(STATUS "  AOCL include dir: ${AOCL_INCLUDE_DIR}")
         message(STATUS "  AOCL BLIS library: ${AOCL_BLIS_LIBRARY}")
@@ -254,6 +295,17 @@ message(STATUS "HDF5 found: ${HDF5_VERSION}")
 message(STATUS "HDF5 include directories: ${HDF5_INCLUDE_DIRS}")
 message(STATUS "HDF5 libraries: ${HDF5_LIBRARIES}")
 add_definitions(${HDF5_DEFINITIONS})
+
+# Extract HDF5 include directories from imported target if variable is empty
+# (needed for modern HDF5 config mode with CUDA)
+if(TARGET hdf5_cpp-shared)
+    get_target_property(HDF5_CPP_INCLUDE_DIRS hdf5_cpp-shared INTERFACE_INCLUDE_DIRECTORIES)
+    if(HDF5_CPP_INCLUDE_DIRS)
+        list(APPEND HDF5_INCLUDE_DIRS ${HDF5_CPP_INCLUDE_DIRS})
+        list(REMOVE_DUPLICATES HDF5_INCLUDE_DIRS)
+        message(STATUS "HDF5 include directories (from target): ${HDF5_INCLUDE_DIRS}")
+    endif()
+endif()
 
 # CUDA setup
 if(WITH_CUDA)
@@ -392,18 +444,23 @@ target_compile_options(compute_bfg_order_parameters PRIVATE -O3 -march=native -f
 # BFG Order Parameter GPU version (CUDA accelerated)
 if(WITH_CUDA)
     add_executable(compute_bfg_order_parameters_gpu ${APPS_DIR}/compute_bfg_order_parameters_gpu.cu)
+    # Link HDF5 libraries - use the same libraries as the CPU version
     target_link_libraries(compute_bfg_order_parameters_gpu 
         CUDA::cudart
         ${HDF5_LIBRARIES}
     )
-    target_include_directories(compute_bfg_order_parameters_gpu PRIVATE ${HDF5_INCLUDE_DIRS})
+    # Explicitly add HDF5 include directories for CUDA compilation
+    # Use both target_include_directories and compile options to ensure nvcc gets them
+    target_include_directories(compute_bfg_order_parameters_gpu SYSTEM PRIVATE ${HDF5_INCLUDE_DIRS})
+    foreach(_hdf5_inc_dir ${HDF5_INCLUDE_DIRS})
+        target_compile_options(compute_bfg_order_parameters_gpu PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:-I${_hdf5_inc_dir}>)
+    endforeach()
     if(OpenMP_CXX_FOUND)
         target_link_libraries(compute_bfg_order_parameters_gpu OpenMP::OpenMP_CXX)
         target_compile_definitions(compute_bfg_order_parameters_gpu PRIVATE _OPENMP)
     endif()
     set_target_properties(compute_bfg_order_parameters_gpu PROPERTIES
         CUDA_SEPARABLE_COMPILATION ON
-        CUDA_ARCHITECTURES "native"
     )
 endif()
 
