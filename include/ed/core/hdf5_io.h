@@ -803,15 +803,22 @@ public:
     
     /**
      * @brief Save TPQ state vector
+     * 
+     * SAFE WRITING: By default, skips saving if state at this beta already exists.
+     * Use overwrite=true to replace existing state.
+     * 
      * @param filepath Path to HDF5 file
      * @param sample_index Sample index
      * @param beta Inverse temperature
      * @param state State vector
+     * @param overwrite If true, overwrite existing state; if false (default), skip if exists
+     * @return true if state was saved, false if skipped (already exists and overwrite=false)
      */
-    static void saveTPQState(const std::string& filepath,
+    static bool saveTPQState(const std::string& filepath,
                              size_t sample_index,
                              double beta,
-                             const std::vector<Complex>& state) {
+                             const std::vector<Complex>& state,
+                             bool overwrite = false) {
         try {
             H5::H5File file(filepath, H5F_ACC_RDWR);
             
@@ -832,6 +839,11 @@ public:
             std::string dataset_name = ss.str();
             
             if (file.nameExists(dataset_name)) {
+                if (!overwrite) {
+                    // Skip - state already exists
+                    file.close();
+                    return false;
+                }
                 file.unlink(dataset_name);
             }
             
@@ -876,6 +888,7 @@ public:
             
             dataset.close();
             file.close();
+            return true;
             
         } catch (H5::Exception& e) {
             throw std::runtime_error("Failed to save TPQ state: " + std::string(e.getCDetailMsg()));
@@ -1154,11 +1167,15 @@ public:
      * This function appends a single measurement point to the sample's thermodynamics dataset.
      * Data is stored as: [beta, energy, variance, doublon, step]
      * 
+     * SAFE WRITING: Skips writing if this step already exists in the dataset.
+     * This supports continue_quenching mode where runs may overlap.
+     * 
      * @param filepath Path to HDF5 file
      * @param sample_index Sample index (0, 1, 2, ...)
      * @param point Thermodynamic data point to append
+     * @return true if data was written, false if step already existed (skipped)
      */
-    static void appendTPQThermodynamics(const std::string& filepath,
+    static bool appendTPQThermodynamics(const std::string& filepath,
                                         size_t sample_index,
                                         const TPQThermodynamicPoint& point) {
         try {
@@ -1201,15 +1218,34 @@ public:
                                                          dataspace, plist);
                 dataset.write(row_data, H5::PredType::NATIVE_DOUBLE);
                 dataset.close();
+                file.close();
+                return true;
             } else {
-                // Append to existing dataset
+                // Check if step already exists before appending
                 H5::DataSet dataset = file.openDataSet(dataset_path);
                 H5::DataSpace filespace = dataset.getSpace();
                 
                 hsize_t dims[2];
                 filespace.getSimpleExtentDims(dims);
                 
-                // Extend dataset
+                // Read existing step values (column 4) to check for duplicates
+                if (dims[0] > 0) {
+                    std::vector<double> existing_data(dims[0] * num_cols);
+                    dataset.read(existing_data.data(), H5::PredType::NATIVE_DOUBLE);
+                    
+                    // Check if step already exists
+                    for (hsize_t i = 0; i < dims[0]; ++i) {
+                        uint64_t existing_step = static_cast<uint64_t>(existing_data[i * num_cols + 4]);
+                        if (existing_step == point.step) {
+                            // Step already exists, skip writing
+                            dataset.close();
+                            file.close();
+                            return false;
+                        }
+                    }
+                }
+                
+                // Extend dataset and append new row
                 hsize_t new_dims[2] = {dims[0] + 1, num_cols};
                 dataset.extend(new_dims);
                 
@@ -1223,9 +1259,9 @@ public:
                 H5::DataSpace memspace(2, count);
                 dataset.write(row_data, H5::PredType::NATIVE_DOUBLE, memspace, filespace);
                 dataset.close();
+                file.close();
+                return true;
             }
-            
-            file.close();
         } catch (H5::Exception& e) {
             throw std::runtime_error("Failed to append TPQ thermodynamics: " + std::string(e.getCDetailMsg()));
         }
@@ -1236,11 +1272,15 @@ public:
      * 
      * Data is stored as: [beta, norm, first_norm, step]
      * 
+     * SAFE WRITING: Skips writing if this step already exists in the dataset.
+     * This supports continue_quenching mode where runs may overlap.
+     * 
      * @param filepath Path to HDF5 file
      * @param sample_index Sample index
      * @param point Norm data point to append
+     * @return true if data was written, false if step already existed (skipped)
      */
-    static void appendTPQNorm(const std::string& filepath,
+    static bool appendTPQNorm(const std::string& filepath,
                               size_t sample_index,
                               const TPQNormPoint& point) {
         try {
@@ -1282,14 +1322,34 @@ public:
                                                          dataspace, plist);
                 dataset.write(row_data, H5::PredType::NATIVE_DOUBLE);
                 dataset.close();
+                file.close();
+                return true;
             } else {
-                // Append to existing dataset
+                // Check if step already exists before appending
                 H5::DataSet dataset = file.openDataSet(dataset_path);
                 H5::DataSpace filespace = dataset.getSpace();
                 
                 hsize_t dims[2];
                 filespace.getSimpleExtentDims(dims);
                 
+                // Read existing step values (column 3) to check for duplicates
+                if (dims[0] > 0) {
+                    std::vector<double> existing_data(dims[0] * num_cols);
+                    dataset.read(existing_data.data(), H5::PredType::NATIVE_DOUBLE);
+                    
+                    // Check if step already exists
+                    for (hsize_t i = 0; i < dims[0]; ++i) {
+                        uint64_t existing_step = static_cast<uint64_t>(existing_data[i * num_cols + 3]);
+                        if (existing_step == point.step) {
+                            // Step already exists, skip writing
+                            dataset.close();
+                            file.close();
+                            return false;
+                        }
+                    }
+                }
+                
+                // Extend and append
                 hsize_t new_dims[2] = {dims[0] + 1, num_cols};
                 dataset.extend(new_dims);
                 
@@ -1301,9 +1361,9 @@ public:
                 H5::DataSpace memspace(2, count);
                 dataset.write(row_data, H5::PredType::NATIVE_DOUBLE, memspace, filespace);
                 dataset.close();
+                file.close();
+                return true;
             }
-            
-            file.close();
         } catch (H5::Exception& e) {
             throw std::runtime_error("Failed to append TPQ norm: " + std::string(e.getCDetailMsg()));
         }
