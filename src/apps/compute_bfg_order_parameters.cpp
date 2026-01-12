@@ -79,24 +79,27 @@ inline uint64_t flip_bit(uint64_t state, int site) {
 // -----------------------------------------------------------------------------
 
 // S^+ raises spin: |↓⟩ → |↑⟩, |↑⟩ → 0
+// ED convention: bit=0 is UP (Sz=+1/2), bit=1 is DOWN (Sz=-1/2)
 inline std::pair<int64_t, double> apply_sp(uint64_t state, int site) {
-    if (get_bit(state, site) == 0) {  // spin down
-        return {static_cast<int64_t>(state | (1ULL << site)), 1.0};
+    if (get_bit(state, site) == 1) {  // spin down (bit=1 in ED convention)
+        return {static_cast<int64_t>(state & ~(1ULL << site)), 1.0};  // flip to 0 (up)
     }
     return {-1, 0.0};
 }
 
 // S^- lowers spin: |↑⟩ → |↓⟩, |↓⟩ → 0
+// ED convention: bit=0 is UP (Sz=+1/2), bit=1 is DOWN (Sz=-1/2)
 inline std::pair<int64_t, double> apply_sm(uint64_t state, int site) {
-    if (get_bit(state, site) == 1) {  // spin up
-        return {static_cast<int64_t>(state & ~(1ULL << site)), 1.0};
+    if (get_bit(state, site) == 0) {  // spin up (bit=0 in ED convention)
+        return {static_cast<int64_t>(state | (1ULL << site)), 1.0};  // flip to 1 (down)
     }
     return {-1, 0.0};
 }
 
 // S^z eigenvalue: |↑⟩ → +1/2, |↓⟩ → -1/2
+// ED convention: bit=0 is UP (Sz=+1/2), bit=1 is DOWN (Sz=-1/2)
 inline double sz_value(uint64_t state, int site) {
-    return get_bit(state, site) ? 0.5 : -0.5;
+    return get_bit(state, site) ? -0.5 : 0.5;
 }
 
 // -----------------------------------------------------------------------------
@@ -549,11 +552,24 @@ std::vector<std::vector<Complex>> compute_spsm_correlations(
             
             for (int i = 0; i < n_sites; ++i) {
                 for (int j = 0; j < n_sites; ++j) {
-                    // S^+_i S^-_j: need j=up, i=down
-                    // After: j=down, i=up
-                    if (get_bit(state, j) == 1 && get_bit(state, i) == 0) {
-                        uint64_t new_state = flip_bit(flip_bit(state, i), j);
-                        local_corr[i][j] += std::conj(psi[new_state]) * coeff;
+                    if (i == j) {
+                        // Diagonal term: S^+_i S^-_i = (1/2 + Sz_i) for spin-1/2
+                        // ⟨ψ|S^+_i S^-_i|ψ⟩ = Σ_state |ψ(state)|² × (1/2 + Sz_i(state))
+                        // For bit=0 (UP): Sz = +1/2, so S^+S^- = 1
+                        // For bit=1 (DOWN): Sz = -1/2, so S^+S^- = 0
+                        if (get_bit(state, i) == 0) {  // spin up
+                            local_corr[i][i] += std::norm(coeff);  // contributes 1
+                        }
+                        // bit=1 (down) contributes 0, so no else branch needed
+                    } else {
+                        // Off-diagonal: S^+_i S^-_j |state⟩ with i ≠ j
+                        // S^-_j acts first: needs site j to be UP (bit=0), flips to DOWN (bit=1)
+                        // S^+_i acts second: needs site i to be DOWN (bit=1), flips to UP (bit=0)
+                        // ED convention: bit=0 is UP, bit=1 is DOWN
+                        if (get_bit(state, j) == 0 && get_bit(state, i) == 1) {
+                            uint64_t new_state = flip_bit(flip_bit(state, i), j);
+                            local_corr[i][j] += std::conj(psi[new_state]) * coeff;
+                        }
                     }
                 }
             }
@@ -615,14 +631,15 @@ std::map<std::pair<int, int>, Complex> compute_xy_bond_expectations(
                 int i = edge_list[e].first;
                 int j = edge_list[e].second;
                 
-                // S^+_i S^-_j term
-                if (get_bit(state, j) == 1 && get_bit(state, i) == 0) {
+                // S^+_i S^-_j term: j must be UP (bit=0), i must be DOWN (bit=1)
+                // ED convention: bit=0 is UP, bit=1 is DOWN
+                if (get_bit(state, j) == 0 && get_bit(state, i) == 1) {
                     uint64_t new_state = flip_bit(flip_bit(state, i), j);
                     local_bonds[e] += std::conj(psi[new_state]) * coeff;
                 }
                 
-                // S^-_i S^+_j term
-                if (get_bit(state, i) == 1 && get_bit(state, j) == 0) {
+                // S^-_i S^+_j term: i must be UP (bit=0), j must be DOWN (bit=1)
+                if (get_bit(state, i) == 0 && get_bit(state, j) == 1) {
                     uint64_t new_state = flip_bit(flip_bit(state, i), j);
                     local_bonds[e] += std::conj(psi[new_state]) * coeff;
                 }
@@ -678,20 +695,22 @@ Complex compute_bond_bond_correlation(
             int s_j2 = get_bit(state, j2);
             
             // Term 1: S^+_{i1} S^-_{j1} S^+_{i2} S^-_{j2}
-            // Requires: j1=up, i1=down, j2=up, i2=down
-            if (s_j1 == 1 && s_i1 == 0 && s_j2 == 1 && s_i2 == 0) {
+            // S^-_j acts first (needs j=UP=0), S^+_i acts second (needs i=DOWN=1)
+            // ED convention: bit=0 is UP, bit=1 is DOWN
+            if (s_j1 == 0 && s_i1 == 1 && s_j2 == 0 && s_i2 == 1) {
                 uint64_t new_state = state;
-                new_state = flip_bit(new_state, j1);  // j1: up -> down
-                new_state = flip_bit(new_state, i1);  // i1: down -> up
-                new_state = flip_bit(new_state, j2);  // j2: up -> down
-                new_state = flip_bit(new_state, i2);  // i2: down -> up
+                new_state = flip_bit(new_state, j1);  // j1: up(0) -> down(1)
+                new_state = flip_bit(new_state, i1);  // i1: down(1) -> up(0)
+                new_state = flip_bit(new_state, j2);  // j2: up(0) -> down(1)
+                new_state = flip_bit(new_state, i2);  // i2: down(1) -> up(0)
                 Complex contrib = std::conj(psi[new_state]) * coeff;
                 local_real += contrib.real();
                 local_imag += contrib.imag();
             }
             
             // Term 2: S^+_{i1} S^-_{j1} S^-_{i2} S^+_{j2}
-            if (s_j1 == 1 && s_i1 == 0 && s_i2 == 1 && s_j2 == 0) {
+            // S^+S^-: j1=UP(0), i1=DOWN(1); S^-S^+: i2=UP(0), j2=DOWN(1)
+            if (s_j1 == 0 && s_i1 == 1 && s_i2 == 0 && s_j2 == 1) {
                 uint64_t new_state = state;
                 new_state = flip_bit(new_state, j1);
                 new_state = flip_bit(new_state, i1);
@@ -703,7 +722,8 @@ Complex compute_bond_bond_correlation(
             }
             
             // Term 3: S^-_{i1} S^+_{j1} S^+_{i2} S^-_{j2}
-            if (s_i1 == 1 && s_j1 == 0 && s_j2 == 1 && s_i2 == 0) {
+            // S^-S^+: i1=UP(0), j1=DOWN(1); S^+S^-: j2=UP(0), i2=DOWN(1)
+            if (s_i1 == 0 && s_j1 == 1 && s_j2 == 0 && s_i2 == 1) {
                 uint64_t new_state = state;
                 new_state = flip_bit(new_state, i1);
                 new_state = flip_bit(new_state, j1);
@@ -715,7 +735,8 @@ Complex compute_bond_bond_correlation(
             }
             
             // Term 4: S^-_{i1} S^+_{j1} S^-_{i2} S^+_{j2}
-            if (s_i1 == 1 && s_j1 == 0 && s_i2 == 1 && s_j2 == 0) {
+            // Both S^-S^+: i1=UP(0), j1=DOWN(1), i2=UP(0), j2=DOWN(1)
+            if (s_i1 == 0 && s_j1 == 1 && s_i2 == 0 && s_j2 == 1) {
                 uint64_t new_state = state;
                 new_state = flip_bit(new_state, i1);
                 new_state = flip_bit(new_state, j1);
@@ -761,16 +782,17 @@ Complex compute_bowtie_resonance(
             int b3 = get_bit(state, s3);
             int b4 = get_bit(state, s4);
             
-            // S^+_1 S^-_2 S^+_3 S^-_4: need s1=down, s2=up, s3=down, s4=up
-            if (b1 == 0 && b2 == 1 && b3 == 0 && b4 == 1) {
+            // S^+_1 S^-_2 S^+_3 S^-_4: need s1=DOWN(1), s2=UP(0), s3=DOWN(1), s4=UP(0)
+            // ED convention: bit=0 is UP, bit=1 is DOWN
+            if (b1 == 1 && b2 == 0 && b3 == 1 && b4 == 0) {
                 uint64_t new_state = flip_bit(flip_bit(flip_bit(flip_bit(state, s1), s2), s3), s4);
                 Complex contrib = std::conj(psi[new_state]) * coeff;
                 local_real += contrib.real();
                 local_imag += contrib.imag();
             }
             
-            // S^-_1 S^+_2 S^-_3 S^+_4: need s1=up, s2=down, s3=up, s4=down
-            if (b1 == 1 && b2 == 0 && b3 == 1 && b4 == 0) {
+            // S^-_1 S^+_2 S^-_3 S^+_4: need s1=UP(0), s2=DOWN(1), s3=UP(0), s4=DOWN(1)
+            if (b1 == 0 && b2 == 1 && b3 == 0 && b4 == 1) {
                 uint64_t new_state = flip_bit(flip_bit(flip_bit(flip_bit(state, s1), s2), s3), s4);
                 Complex contrib = std::conj(psi[new_state]) * coeff;
                 local_real += contrib.real();
@@ -817,8 +839,9 @@ StructureFactorResult compute_spin_structure_factor(
         
         for (int i = 0; i < n_sites; ++i) {
             for (int j = 0; j < n_sites; ++j) {
-                double dr_x = cluster.positions[i][0] - cluster.positions[j][0];
-                double dr_y = cluster.positions[i][1] - cluster.positions[j][1];
+                // Standard convention: S(q) = (1/N) Σᵢⱼ ⟨S⁺ᵢ S⁻ⱼ⟩ e^(iq·(Rⱼ-Rᵢ))
+                double dr_x = cluster.positions[j][0] - cluster.positions[i][0];
+                double dr_y = cluster.positions[j][1] - cluster.positions[i][1];
                 double phase_arg = q[0] * dr_x + q[1] * dr_y;
                 s_q += spsm_corr[i][j] * std::exp(I * phase_arg);
             }
@@ -1130,8 +1153,9 @@ std::vector<std::vector<Complex>> compute_sq_2d_grid(
             Complex s_q = 0.0;
             for (int i = 0; i < n_sites; ++i) {
                 for (int j = 0; j < n_sites; ++j) {
-                    double dr_x = cluster.positions[i][0] - cluster.positions[j][0];
-                    double dr_y = cluster.positions[i][1] - cluster.positions[j][1];
+                    // Standard convention: S(q) = (1/N) Σᵢⱼ ⟨S⁺ᵢ S⁻ⱼ⟩ e^(iq·(Rⱼ-Rᵢ))
+                    double dr_x = cluster.positions[j][0] - cluster.positions[i][0];
+                    double dr_y = cluster.positions[j][1] - cluster.positions[i][1];
                     double phase_arg = qx * dr_x + qy * dr_y;
                     s_q += spsm_corr[i][j] * std::exp(I * phase_arg);
                 }
