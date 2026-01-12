@@ -336,19 +336,25 @@ std::vector<Complex> load_wavefunction(const std::string& filename) {
     try {
         H5::H5File file(filename, H5F_ACC_RDONLY);
         
-        // Try different dataset names
-        std::vector<std::string> dataset_names = {
-            "eigenvector_0", "eigenvectors", "psi", "wavefunction", "ground_state"
+        // Try different dataset paths (including nested groups)
+        std::vector<std::string> dataset_paths = {
+            "eigendata/eigenvector_0",  // Common structure: /eigendata/eigenvector_0
+            "eigenvector_0", 
+            "eigendata/eigenvectors",
+            "eigenvectors", 
+            "psi", 
+            "wavefunction", 
+            "ground_state"
         };
         
         H5::DataSet dataset;
         bool found = false;
         
-        for (const auto& name : dataset_names) {
+        for (const auto& path : dataset_paths) {
             try {
-                dataset = file.openDataSet(name);
+                dataset = file.openDataSet(path);
                 found = true;
-                std::cout << "Found wavefunction in dataset: " << name << std::endl;
+                std::cout << "Found wavefunction in dataset: " << path << std::endl;
                 break;
             } catch (...) {
                 continue;
@@ -356,11 +362,22 @@ std::vector<Complex> load_wavefunction(const std::string& filename) {
         }
         
         if (!found) {
-            // List available datasets
-            std::cout << "Available datasets in file:" << std::endl;
+            // List available datasets/groups
+            std::cout << "Available objects in file:" << std::endl;
             hsize_t num_objs = file.getNumObjs();
             for (hsize_t i = 0; i < num_objs; ++i) {
-                std::cout << "  " << file.getObjnameByIdx(i) << std::endl;
+                std::string obj_name = file.getObjnameByIdx(i);
+                std::cout << "  " << obj_name;
+                // If it's a group, list its contents
+                try {
+                    H5::Group grp = file.openGroup(obj_name);
+                    std::cout << "/" << std::endl;
+                    for (hsize_t j = 0; j < grp.getNumObjs(); ++j) {
+                        std::cout << "    " << grp.getObjnameByIdx(j) << std::endl;
+                    }
+                } catch (...) {
+                    std::cout << std::endl;
+                }
             }
             throw std::runtime_error("Wavefunction dataset not found");
         }
@@ -381,22 +398,29 @@ std::vector<Complex> load_wavefunction(const std::string& filename) {
         
         std::vector<Complex> psi;
         if (is_complex) {
-            std::vector<double> buffer(total_size * 2);
-            // Read as compound type or raw doubles
+            // Read as compound type with "real" and "imag" fields
             H5::CompType complex_type(sizeof(Complex));
-            complex_type.insertMember("r", 0, H5::PredType::NATIVE_DOUBLE);
-            complex_type.insertMember("i", sizeof(double), H5::PredType::NATIVE_DOUBLE);
+            complex_type.insertMember("real", 0, H5::PredType::NATIVE_DOUBLE);
+            complex_type.insertMember("imag", sizeof(double), H5::PredType::NATIVE_DOUBLE);
             
+            psi.resize(total_size);
             try {
-                dataset.read(buffer.data(), H5::PredType::NATIVE_DOUBLE);
-                psi.resize(total_size);
-                for (hsize_t i = 0; i < total_size; ++i) {
-                    psi[i] = Complex(buffer[2 * i], buffer[2 * i + 1]);
-                }
-            } catch (...) {
-                // Try reading as compound
-                psi.resize(total_size);
                 dataset.read(psi.data(), complex_type);
+            } catch (...) {
+                // Try alternative field names "r" and "i"
+                H5::CompType complex_type_alt(sizeof(Complex));
+                complex_type_alt.insertMember("r", 0, H5::PredType::NATIVE_DOUBLE);
+                complex_type_alt.insertMember("i", sizeof(double), H5::PredType::NATIVE_DOUBLE);
+                try {
+                    dataset.read(psi.data(), complex_type_alt);
+                } catch (...) {
+                    // Fall back to reading as raw doubles
+                    std::vector<double> buffer(total_size * 2);
+                    dataset.read(buffer.data(), H5::PredType::NATIVE_DOUBLE);
+                    for (hsize_t i = 0; i < total_size; ++i) {
+                        psi[i] = Complex(buffer[2 * i], buffer[2 * i + 1]);
+                    }
+                }
             }
         } else {
             std::vector<double> real_data(total_size);
@@ -1173,17 +1197,38 @@ std::vector<OrderParameterResults> scan_jpm_directories(
         try {
             // Find wavefunction file
             std::string wf_file;
-            for (const auto& entry : fs::directory_iterator(dir)) {
-                std::string fname = entry.path().filename().string();
-                if (fname.find(".h5") != std::string::npos && 
-                    fname.find("eigenvector") != std::string::npos) {
-                    wf_file = entry.path().string();
-                    break;
+            
+            // First check output/ subdirectory for ed_results.h5
+            std::string output_subdir = dir + "/output";
+            if (fs::exists(output_subdir)) {
+                std::string ed_results = output_subdir + "/ed_results.h5";
+                if (fs::exists(ed_results)) {
+                    wf_file = ed_results;
+                } else {
+                    // Search for any .h5 file in output/
+                    for (const auto& entry : fs::directory_iterator(output_subdir)) {
+                        if (entry.path().extension() == ".h5") {
+                            wf_file = entry.path().string();
+                            break;
+                        }
+                    }
+                }
+            }
+            
+            // If not found in output/, try main directory
+            if (wf_file.empty()) {
+                for (const auto& entry : fs::directory_iterator(dir)) {
+                    std::string fname = entry.path().filename().string();
+                    if (fname.find(".h5") != std::string::npos && 
+                        fname.find("eigenvector") != std::string::npos) {
+                        wf_file = entry.path().string();
+                        break;
+                    }
                 }
             }
             
             if (wf_file.empty()) {
-                // Try other patterns
+                // Try other patterns in main directory
                 for (const auto& entry : fs::directory_iterator(dir)) {
                     if (entry.path().extension() == ".h5") {
                         wf_file = entry.path().string();
