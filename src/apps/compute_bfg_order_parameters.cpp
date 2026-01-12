@@ -79,24 +79,27 @@ inline uint64_t flip_bit(uint64_t state, int site) {
 // -----------------------------------------------------------------------------
 
 // S^+ raises spin: |↓⟩ → |↑⟩, |↑⟩ → 0
+// ED convention: bit=0 is UP (Sz=+1/2), bit=1 is DOWN (Sz=-1/2)
 inline std::pair<int64_t, double> apply_sp(uint64_t state, int site) {
-    if (get_bit(state, site) == 0) {  // spin down
-        return {static_cast<int64_t>(state | (1ULL << site)), 1.0};
+    if (get_bit(state, site) == 1) {  // spin down (bit=1 in ED convention)
+        return {static_cast<int64_t>(state & ~(1ULL << site)), 1.0};  // flip to 0 (up)
     }
     return {-1, 0.0};
 }
 
 // S^- lowers spin: |↑⟩ → |↓⟩, |↓⟩ → 0
+// ED convention: bit=0 is UP (Sz=+1/2), bit=1 is DOWN (Sz=-1/2)
 inline std::pair<int64_t, double> apply_sm(uint64_t state, int site) {
-    if (get_bit(state, site) == 1) {  // spin up
-        return {static_cast<int64_t>(state & ~(1ULL << site)), 1.0};
+    if (get_bit(state, site) == 0) {  // spin up (bit=0 in ED convention)
+        return {static_cast<int64_t>(state | (1ULL << site)), 1.0};  // flip to 1 (down)
     }
     return {-1, 0.0};
 }
 
 // S^z eigenvalue: |↑⟩ → +1/2, |↓⟩ → -1/2
+// ED convention: bit=0 is UP (Sz=+1/2), bit=1 is DOWN (Sz=-1/2)
 inline double sz_value(uint64_t state, int site) {
-    return get_bit(state, site) ? 0.5 : -0.5;
+    return get_bit(state, site) ? -0.5 : 0.5;
 }
 
 // -----------------------------------------------------------------------------
@@ -738,8 +741,9 @@ StructureFactorResult compute_spin_structure_factor(
         
         for (int i = 0; i < n_sites; ++i) {
             for (int j = 0; j < n_sites; ++j) {
-                double dr_x = cluster.positions[i][0] - cluster.positions[j][0];
-                double dr_y = cluster.positions[i][1] - cluster.positions[j][1];
+                // Standard convention: S(q) = (1/N) Σᵢⱼ ⟨S⁺ᵢ S⁻ⱼ⟩ e^(iq·(Rⱼ-Rᵢ))
+                double dr_x = cluster.positions[j][0] - cluster.positions[i][0];
+                double dr_y = cluster.positions[j][1] - cluster.positions[i][1];
                 double phase_arg = q[0] * dr_x + q[1] * dr_y;
                 s_q += spsm_corr[i][j] * std::exp(I * phase_arg);
             }
@@ -1051,8 +1055,9 @@ std::vector<std::vector<Complex>> compute_sq_2d_grid(
             Complex s_q = 0.0;
             for (int i = 0; i < n_sites; ++i) {
                 for (int j = 0; j < n_sites; ++j) {
-                    double dr_x = cluster.positions[i][0] - cluster.positions[j][0];
-                    double dr_y = cluster.positions[i][1] - cluster.positions[j][1];
+                    // Standard convention: S(q) = (1/N) Σᵢⱼ ⟨S⁺ᵢ S⁻ⱼ⟩ e^(iq·(Rⱼ-Rᵢ))
+                    double dr_x = cluster.positions[j][0] - cluster.positions[i][0];
+                    double dr_y = cluster.positions[j][1] - cluster.positions[i][1];
                     double phase_arg = qx * dr_x + qy * dr_y;
                     s_q += spsm_corr[i][j] * std::exp(I * phase_arg);
                 }

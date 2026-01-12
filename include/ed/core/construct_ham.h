@@ -3191,11 +3191,11 @@ public:
                 tdata_minus.is_two_body = false;
                 transform_data_.push_back(tdata_minus);
             } else if (op == 2) {
-                // Sz
+                // Sz - note: apply() already multiplies by spin_l_, so coefficient is just phase
                 TransformData tdata;
                 tdata.op_type = 2; // Sz
                 tdata.site_index = site;
-                tdata.coefficient = phase * Complex(spin_l, 0.0);
+                tdata.coefficient = phase;  // No spin_l factor here - apply() handles it
                 tdata.is_two_body = false;
                 transform_data_.push_back(tdata);
             }
@@ -3350,11 +3350,11 @@ public:
                 tdata_minus.is_two_body = false;
                 transform_data_.push_back(tdata_minus);
             } else if (op == 2) {
-                // Sz
+                // Sz - note: apply() already multiplies by spin_l_, so coefficient is just phase
                 TransformData tdata;
                 tdata.op_type = 2; // Sz
                 tdata.site_index = site;
-                tdata.coefficient = phase * Complex(spin_l, 0.0);
+                tdata.coefficient = phase;  // No spin_l factor here - apply() handles it
                 tdata.is_two_body = false;
                 transform_data_.push_back(tdata);
             }
@@ -3684,11 +3684,11 @@ public:
                 tdata_minus.is_two_body = false;
                 transform_data_.push_back(tdata_minus);
             } else if (op == 2) {
-                // Sz
+                // Sz - note: apply() already multiplies by spin_l_, so coefficient is just phase
                 TransformData tdata;
                 tdata.op_type = 2; // Sz
                 tdata.site_index = site;
-                tdata.coefficient = phase * Complex(spin_l, 0.0);
+                tdata.coefficient = phase;  // No spin_l factor here - apply() handles it
                 tdata.is_two_body = false;
                 transform_data_.push_back(tdata);
             }
@@ -3841,11 +3841,11 @@ public:
                 tdata_minus.is_two_body = false;
                 transform_data_.push_back(tdata_minus);
             } else if (op == 2) {
-                // Sz
+                // Sz - note: apply() already multiplies by spin_l_, so coefficient is just phase
                 TransformData tdata;
                 tdata.op_type = 2; // Sz
                 tdata.site_index = site;
-                tdata.coefficient = phase * Complex(spin_l, 0.0);
+                tdata.coefficient = phase;  // No spin_l factor here - apply() handles it
                 tdata.is_two_body = false;
                 transform_data_.push_back(tdata);
             }
