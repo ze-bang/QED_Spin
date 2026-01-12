@@ -161,6 +161,100 @@ H5::H5File openHDF5WithRetry(const std::string& h5_path, unsigned int flags, int
 // ============================================================================
 
 /**
+ * @brief Ensure a group exists in an HDF5 file (DSSF-specific helper)
+ * Creates nested groups as needed.
+ */
+void ensureDSSFGroupExists(H5::H5File& file, const std::string& group_path) {
+    if (group_path.empty() || group_path == "/") return;
+    
+    std::vector<std::string> components;
+    std::string current_path;
+    std::istringstream ss(group_path);
+    std::string component;
+    
+    while (std::getline(ss, component, '/')) {
+        if (!component.empty()) {
+            components.push_back(component);
+        }
+    }
+    
+    for (const auto& comp : components) {
+        current_path += "/" + comp;
+        if (!file.nameExists(current_path)) {
+            file.createGroup(current_path);
+        }
+    }
+}
+
+/**
+ * @brief Ensure standard DSSF groups exist in an HDF5 file
+ */
+void ensureDSSFStandardGroups(H5::H5File& file) {
+    const std::vector<std::string> dssf_groups = {
+        "/metadata",
+        "/momentum_points",
+        "/spectral",
+        "/static",
+        "/correlations"
+    };
+    
+    for (const auto& group : dssf_groups) {
+        ensureDSSFGroupExists(file, group);
+    }
+}
+
+/**
+ * @brief Set or update metadata attributes in DSSF HDF5 file
+ */
+void setDSSFMetadata(H5::H5File& file,
+                     int num_sites, float spin_length,
+                     const std::string& method,
+                     const std::string& operator_type,
+                     double omega_min, double omega_max,
+                     int num_omega_bins, double broadening) {
+    ensureDSSFGroupExists(file, "/metadata");
+    H5::Group meta = file.openGroup("/metadata");
+    H5::DataSpace scalar_space(H5S_SCALAR);
+    
+    // Helper to set/update attribute
+    auto setIntAttr = [&](const std::string& name, int value) {
+        if (meta.attrExists(name)) meta.removeAttr(name);
+        H5::Attribute attr = meta.createAttribute(name, H5::PredType::NATIVE_INT, scalar_space);
+        attr.write(H5::PredType::NATIVE_INT, &value);
+    };
+    
+    auto setFloatAttr = [&](const std::string& name, float value) {
+        if (meta.attrExists(name)) meta.removeAttr(name);
+        H5::Attribute attr = meta.createAttribute(name, H5::PredType::NATIVE_FLOAT, scalar_space);
+        attr.write(H5::PredType::NATIVE_FLOAT, &value);
+    };
+    
+    auto setDoubleAttr = [&](const std::string& name, double value) {
+        if (meta.attrExists(name)) meta.removeAttr(name);
+        H5::Attribute attr = meta.createAttribute(name, H5::PredType::NATIVE_DOUBLE, scalar_space);
+        attr.write(H5::PredType::NATIVE_DOUBLE, &value);
+    };
+    
+    auto setStringAttr = [&](const std::string& name, const std::string& value) {
+        if (meta.attrExists(name)) meta.removeAttr(name);
+        H5::StrType str_type(H5::PredType::C_S1, H5T_VARIABLE);
+        H5::Attribute attr = meta.createAttribute(name, str_type, scalar_space);
+        attr.write(str_type, value);
+    };
+    
+    setIntAttr("num_sites", num_sites);
+    setFloatAttr("spin_length", spin_length);
+    setDoubleAttr("omega_min", omega_min);
+    setDoubleAttr("omega_max", omega_max);
+    setIntAttr("num_omega_bins", num_omega_bins);
+    setDoubleAttr("broadening", broadening);
+    setStringAttr("method", method);
+    setStringAttr("operator_type", operator_type);
+    
+    meta.close();
+}
+
+/**
  * @brief Get per-rank DSSF HDF5 file path for MPI-safe writing
  */
 std::string getPerRankDSSFPath(const std::string& output_dir, int rank) {
@@ -168,7 +262,12 @@ std::string getPerRankDSSFPath(const std::string& output_dir, int rank) {
 }
 
 /**
- * @brief Initialize per-rank DSSF HDF5 file structure
+ * @brief Initialize per-rank DSSF HDF5 file structure (SAFE - preserves existing data)
+ * 
+ * SAFE WRITING PROTOCOL:
+ * - Opens existing file in read/write mode if it exists
+ * - Creates new file only if it doesn't exist
+ * - Never truncates existing data
  */
 std::string initPerRankDSSFFile(const std::string& output_dir, int rank,
                                  int num_sites, float spin_length,
@@ -180,50 +279,29 @@ std::string initPerRankDSSFFile(const std::string& output_dir, int rank,
     std::string h5_path = getPerRankDSSFPath(output_dir, rank);
     
     try {
-        H5::H5File file(h5_path, H5F_ACC_TRUNC);
+        bool file_existed = fs::exists(h5_path);
         
-        // Create group structure
-        file.createGroup("/metadata");
-        file.createGroup("/momentum_points");
-        file.createGroup("/spectral");
-        file.createGroup("/static");
-        file.createGroup("/correlations");
+        // SAFE: Open in read/write if exists, create only if new
+        H5::H5File file = file_existed 
+            ? H5::H5File(h5_path, H5F_ACC_RDWR)
+            : H5::H5File(h5_path, H5F_ACC_TRUNC);
         
-        // Save metadata as attributes
-        H5::Group meta = file.openGroup("/metadata");
-        H5::DataSpace scalar_space(H5S_SCALAR);
+        // Ensure standard groups exist
+        ensureDSSFStandardGroups(file);
         
-        H5::Attribute attr_sites = meta.createAttribute("num_sites", H5::PredType::NATIVE_INT, scalar_space);
-        attr_sites.write(H5::PredType::NATIVE_INT, &num_sites);
+        // Set/update metadata
+        setDSSFMetadata(file, num_sites, spin_length, method, operator_type,
+                        omega_min, omega_max, num_omega_bins, broadening);
         
-        H5::Attribute attr_spin = meta.createAttribute("spin_length", H5::PredType::NATIVE_FLOAT, scalar_space);
-        attr_spin.write(H5::PredType::NATIVE_FLOAT, &spin_length);
-        
-        H5::Attribute attr_omega_min = meta.createAttribute("omega_min", H5::PredType::NATIVE_DOUBLE, scalar_space);
-        attr_omega_min.write(H5::PredType::NATIVE_DOUBLE, &omega_min);
-        
-        H5::Attribute attr_omega_max = meta.createAttribute("omega_max", H5::PredType::NATIVE_DOUBLE, scalar_space);
-        attr_omega_max.write(H5::PredType::NATIVE_DOUBLE, &omega_max);
-        
-        H5::Attribute attr_nbins = meta.createAttribute("num_omega_bins", H5::PredType::NATIVE_INT, scalar_space);
-        attr_nbins.write(H5::PredType::NATIVE_INT, &num_omega_bins);
-        
-        H5::Attribute attr_broad = meta.createAttribute("broadening", H5::PredType::NATIVE_DOUBLE, scalar_space);
-        attr_broad.write(H5::PredType::NATIVE_DOUBLE, &broadening);
-        
-        H5::StrType str_type(H5::PredType::C_S1, H5T_VARIABLE);
-        H5::Attribute attr_method = meta.createAttribute("method", str_type, scalar_space);
-        attr_method.write(str_type, method);
-        
-        H5::Attribute attr_optype = meta.createAttribute("operator_type", str_type, scalar_space);
-        attr_optype.write(str_type, operator_type);
-        
-        meta.close();
         file.close();
         
-        std::cout << "  Rank " << rank << ": created per-rank DSSF file: " << h5_path << std::endl;
+        if (file_existed) {
+            std::cout << "  Rank " << rank << ": opened existing per-rank DSSF file: " << h5_path << std::endl;
+        } else {
+            std::cout << "  Rank " << rank << ": created per-rank DSSF file: " << h5_path << std::endl;
+        }
     } catch (H5::Exception& e) {
-        throw std::runtime_error("Failed to create per-rank DSSF file: " + std::string(e.getCDetailMsg()));
+        throw std::runtime_error("Failed to create/open per-rank DSSF file: " + std::string(e.getCDetailMsg()));
     }
     
     return h5_path;
@@ -427,7 +505,13 @@ bool mergePerRankDSSFFiles(const std::string& output_dir, int num_ranks) {
 }
 
 /**
- * @brief Initialize the unified DSSF HDF5 file with proper structure
+ * @brief Initialize the unified DSSF HDF5 file with proper structure (SAFE - preserves existing data)
+ * 
+ * SAFE WRITING PROTOCOL:
+ * - Opens existing file in read/write mode if it exists (preserves all existing data)
+ * - Creates new file only if it doesn't exist
+ * - Updates metadata attributes (doesn't overwrite existing spectral/static data)
+ * - Momentum points are only written if the dataset doesn't exist
  */
 std::string initDSSFHDF5File(const std::string& output_dir, 
                               int num_sites, float spin_length,
@@ -439,51 +523,22 @@ std::string initDSSFHDF5File(const std::string& output_dir,
     std::string h5_path = output_dir + "/dssf_results.h5";
     
     try {
-        // Create file (truncate if exists) using parallel HDF5 if available
-        H5::H5File file = openHDF5WithRetry(h5_path, H5F_ACC_TRUNC);
+        bool file_existed = fs::exists(h5_path);
         
-        // Create group structure
-        file.createGroup("/metadata");
-        file.createGroup("/momentum_points");
-        file.createGroup("/spectral");
-        file.createGroup("/static");
-        file.createGroup("/correlations");
+        // SAFE: Open in read/write if exists, create only if new
+        H5::H5File file = file_existed 
+            ? openHDF5WithRetry(h5_path, H5F_ACC_RDWR)
+            : openHDF5WithRetry(h5_path, H5F_ACC_TRUNC);
         
-        // Save metadata as attributes
-        H5::Group meta = file.openGroup("/metadata");
-        H5::DataSpace scalar_space(H5S_SCALAR);
+        // Ensure standard groups exist
+        ensureDSSFStandardGroups(file);
         
-        // Integer attributes
-        H5::Attribute attr_sites = meta.createAttribute("num_sites", H5::PredType::NATIVE_INT, scalar_space);
-        attr_sites.write(H5::PredType::NATIVE_INT, &num_sites);
+        // Set/update metadata (this is idempotent - updates existing attrs)
+        setDSSFMetadata(file, num_sites, spin_length, method, operator_type,
+                        omega_min, omega_max, num_omega_bins, broadening);
         
-        H5::Attribute attr_spin = meta.createAttribute("spin_length", H5::PredType::NATIVE_FLOAT, scalar_space);
-        attr_spin.write(H5::PredType::NATIVE_FLOAT, &spin_length);
-        
-        H5::Attribute attr_omega_min = meta.createAttribute("omega_min", H5::PredType::NATIVE_DOUBLE, scalar_space);
-        attr_omega_min.write(H5::PredType::NATIVE_DOUBLE, &omega_min);
-        
-        H5::Attribute attr_omega_max = meta.createAttribute("omega_max", H5::PredType::NATIVE_DOUBLE, scalar_space);
-        attr_omega_max.write(H5::PredType::NATIVE_DOUBLE, &omega_max);
-        
-        H5::Attribute attr_nbins = meta.createAttribute("num_omega_bins", H5::PredType::NATIVE_INT, scalar_space);
-        attr_nbins.write(H5::PredType::NATIVE_INT, &num_omega_bins);
-        
-        H5::Attribute attr_broad = meta.createAttribute("broadening", H5::PredType::NATIVE_DOUBLE, scalar_space);
-        attr_broad.write(H5::PredType::NATIVE_DOUBLE, &broadening);
-        
-        // String attributes
-        H5::StrType str_type(H5::PredType::C_S1, H5T_VARIABLE);
-        H5::Attribute attr_method = meta.createAttribute("method", str_type, scalar_space);
-        attr_method.write(str_type, method);
-        
-        H5::Attribute attr_optype = meta.createAttribute("operator_type", str_type, scalar_space);
-        attr_optype.write(str_type, operator_type);
-        
-        meta.close();
-        
-        // Save momentum points as 2D dataset
-        if (!momentum_points.empty()) {
+        // Save momentum points as 2D dataset (only if doesn't exist)
+        if (!momentum_points.empty() && !file.nameExists("/momentum_points/q_vectors")) {
             size_t n_q = momentum_points.size();
             hsize_t dims[2] = {n_q, 3};
             H5::DataSpace q_space(2, dims);
@@ -503,10 +558,15 @@ std::string initDSSFHDF5File(const std::string& output_dir,
         }
         
         file.close();
-        std::cout << "Created unified DSSF HDF5 file: " << h5_path << std::endl;
+        
+        if (file_existed) {
+            std::cout << "Opened existing unified DSSF HDF5 file: " << h5_path << std::endl;
+        } else {
+            std::cout << "Created unified DSSF HDF5 file: " << h5_path << std::endl;
+        }
         
     } catch (H5::Exception& e) {
-        throw std::runtime_error("Failed to create DSSF HDF5 file: " + std::string(e.getCDetailMsg()));
+        throw std::runtime_error("Failed to create/open DSSF HDF5 file: " + std::string(e.getCDetailMsg()));
     }
     
     return h5_path;

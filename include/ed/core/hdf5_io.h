@@ -9,6 +9,7 @@
 #include <stdexcept>
 #include <iomanip>
 #include <fstream>
+#include <sstream>
 #include <map>
 #include <algorithm>
 #include <filesystem>
@@ -81,11 +82,96 @@ class HDF5IO {
 public:
     
     // ============================================================================
-    // File Management
+    // File Management - Safe Writing Protocol
+    // ============================================================================
+    // 
+    // SAFE WRITING PROTOCOL:
+    // The HDF5 I/O system uses a safe writing protocol that:
+    // 1. Opens existing files in read/write mode (H5F_ACC_RDWR) - never truncates
+    // 2. Creates new files only if they don't exist
+    // 3. Ensures required groups exist without overwriting existing data
+    // 4. Uses segment-based writing where each run writes to its own segment
+    //    (e.g., different TPQ samples, different temperatures, different operators)
+    // 5. Existing segments from previous runs are preserved
+    //
+    // This allows:
+    // - Multiple runs to accumulate data in the same file
+    // - Restarting failed runs without losing previous data
+    // - Adding new TPQ samples to existing files
+    // - Computing different operators/temperatures incrementally
     // ============================================================================
     
     /**
-     * @brief Create or open an HDF5 file for results storage
+     * @brief Ensure a group exists in an HDF5 file, creating it only if needed
+     * 
+     * This is a safe operation that does not overwrite existing groups.
+     * It also handles nested paths by creating parent groups as needed.
+     * 
+     * @param file Reference to open HDF5 file
+     * @param group_path Full path to the group (e.g., "/tpq/samples/sample_0")
+     */
+    static void ensureGroupExists(H5::H5File& file, const std::string& group_path) {
+        if (group_path.empty() || group_path == "/") return;
+        
+        // Split path into components
+        std::vector<std::string> components;
+        std::string current_path;
+        std::istringstream ss(group_path);
+        std::string component;
+        
+        while (std::getline(ss, component, '/')) {
+            if (!component.empty()) {
+                components.push_back(component);
+            }
+        }
+        
+        // Create each component if it doesn't exist
+        for (const auto& comp : components) {
+            current_path += "/" + comp;
+            if (!file.nameExists(current_path)) {
+                file.createGroup(current_path);
+            }
+        }
+    }
+    
+    /**
+     * @brief Ensure standard ED result groups exist in an HDF5 file
+     * 
+     * Creates the standard group structure if groups don't already exist.
+     * This is safe to call on files with existing data.
+     * 
+     * @param file Reference to open HDF5 file
+     */
+    static void ensureStandardGroups(H5::H5File& file) {
+        // List of standard groups for ED results
+        const std::vector<std::string> standard_groups = {
+            "/eigendata",
+            "/thermodynamics",
+            "/correlations",
+            "/dynamical",
+            "/dynamical/samples",
+            "/ftlm",
+            "/ftlm/samples",
+            "/ftlm/averaged",
+            "/tpq",
+            "/tpq/samples",
+            "/tpq/averaged"
+        };
+        
+        for (const auto& group : standard_groups) {
+            ensureGroupExists(file, group);
+        }
+    }
+    
+    /**
+     * @brief Create or open an HDF5 file for results storage (SAFE - preserves existing data)
+     * 
+     * SAFE WRITING PROTOCOL:
+     * - If the file exists, opens it in read/write mode without truncating
+     * - If the file doesn't exist, creates a new file with standard groups
+     * - Always ensures standard groups exist (creates if missing)
+     * - NEVER overwrites or truncates existing data
+     * 
      * @param directory Directory to create/open the file in
      * @param filename Name of the HDF5 file (default: ed_results.h5)
      * @return Full path to the HDF5 file
@@ -95,31 +181,55 @@ public:
         std::string filepath = directory + "/" + filename;
         
         try {
-            // Try to open existing file
             if (fileExists(filepath)) {
+                // SAFE: Open existing file in read/write mode (preserves all existing data)
+                H5::H5File file(filepath, H5F_ACC_RDWR);
+                
+                // Ensure standard groups exist (creates only if missing)
+                ensureStandardGroups(file);
+                
+                file.close();
+                std::cout << "Opened existing HDF5 results file: " << filepath << std::endl;
                 return filepath;
             }
             
-            // Create new file
+            // Create new file only if it doesn't exist
             H5::H5File file(filepath, H5F_ACC_TRUNC);
             
             // Create standard groups
-            file.createGroup("/eigendata");
-            file.createGroup("/thermodynamics");
-            file.createGroup("/correlations");
-            file.createGroup("/dynamical");
-            file.createGroup("/dynamical/samples");
-            file.createGroup("/ftlm");
-            file.createGroup("/ftlm/samples");
-            file.createGroup("/ftlm/averaged");
-            file.createGroup("/tpq");
-            file.createGroup("/tpq/samples");   // Per-sample TPQ data (thermodynamics, norm, states)
-            file.createGroup("/tpq/averaged");  // Averaged thermodynamic results
+            ensureStandardGroups(file);
             
             file.close();
-            std::cout << "Created HDF5 results file: " << filepath << std::endl;
+            std::cout << "Created new HDF5 results file: " << filepath << std::endl;
         } catch (H5::Exception& e) {
             throw std::runtime_error("Failed to create/open HDF5 file: " + std::string(e.getCDetailMsg()));
+        }
+        
+        return filepath;
+    }
+    
+    /**
+     * @brief Force create a new HDF5 file (UNSAFE - truncates existing data)
+     * 
+     * WARNING: This function will DELETE all existing data in the file.
+     * Use only when you explicitly want to start fresh.
+     * 
+     * @param directory Directory to create the file in
+     * @param filename Name of the HDF5 file (default: ed_results.h5)
+     * @return Full path to the HDF5 file
+     */
+    static std::string forceCreateFile(const std::string& directory, 
+                                       const std::string& filename = "ed_results.h5") {
+        std::string filepath = directory + "/" + filename;
+        
+        try {
+            // Force truncate - WARNING: deletes existing data
+            H5::H5File file(filepath, H5F_ACC_TRUNC);
+            ensureStandardGroups(file);
+            file.close();
+            std::cout << "Created new HDF5 results file (truncated): " << filepath << std::endl;
+        } catch (H5::Exception& e) {
+            throw std::runtime_error("Failed to create HDF5 file: " + std::string(e.getCDetailMsg()));
         }
         
         return filepath;
@@ -2510,11 +2620,17 @@ public:
     }
     
     /**
-     * @brief Create per-rank HDF5 file for MPI-safe writing
+     * @brief Create or open per-rank HDF5 file for MPI-safe writing (SAFE)
+     * 
+     * SAFE WRITING PROTOCOL:
+     * - If file exists, opens in read/write mode (preserves existing data)
+     * - If file doesn't exist, creates new file with standard groups
+     * - Never truncates existing data
+     * 
      * @param directory Output directory
      * @param rank MPI rank
      * @param filename Base filename (default: ed_results.h5)
-     * @return Full path to created file
+     * @return Full path to created/opened file
      */
     static std::string createPerRankFile(const std::string& directory,
                                          int rank,
@@ -2522,31 +2638,23 @@ public:
         std::string filepath = getPerRankFilePath(directory, rank, filename);
         
         try {
-            // Check if file already exists
+            // SAFE: Check if file already exists
             if (fileExists(filepath)) {
+                // Open existing file in read/write mode (preserve existing data)
+                H5::H5File file(filepath, H5F_ACC_RDWR);
+                ensureStandardGroups(file);
+                file.close();
+                std::cout << "Opened existing per-rank HDF5 file: " << filepath << std::endl;
                 return filepath;
             }
             
-            // Create new file with standard groups
+            // Create new file only if it doesn't exist
             H5::H5File file(filepath, H5F_ACC_TRUNC);
-            
-            // Create standard groups
-            file.createGroup("/eigendata");
-            file.createGroup("/thermodynamics");
-            file.createGroup("/correlations");
-            file.createGroup("/dynamical");
-            file.createGroup("/dynamical/samples");
-            file.createGroup("/ftlm");
-            file.createGroup("/ftlm/samples");
-            file.createGroup("/ftlm/averaged");
-            file.createGroup("/tpq");
-            file.createGroup("/tpq/samples");
-            file.createGroup("/tpq/averaged");
-            
+            ensureStandardGroups(file);
             file.close();
             std::cout << "Created per-rank HDF5 file: " << filepath << std::endl;
         } catch (H5::Exception& e) {
-            throw std::runtime_error("Failed to create per-rank HDF5 file: " + std::string(e.getCDetailMsg()));
+            throw std::runtime_error("Failed to create/open per-rank HDF5 file: " + std::string(e.getCDetailMsg()));
         }
         
         return filepath;
