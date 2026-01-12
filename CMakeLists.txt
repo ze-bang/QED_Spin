@@ -374,9 +374,9 @@ if(WITH_MPI)
         message(STATUS "Parallel HDF5 not found, TPQ_DSSF will use serial HDF5 with file locking workaround")
         set(HAS_PARALLEL_HDF5 FALSE)
     endif()
-endif()
 
-add_executable(TPQ_DSSF ${APPS_DIR}/TPQ_DSSF.cpp ${SOLVERS_CPU_DIR}/dynamics.cpp ${SOLVERS_CPU_DIR}/TPQ.cpp ${SOLVERS_CPU_DIR}/ftlm.cpp ${SOLVERS_CPU_DIR}/lanczos.cpp ${IO_DIR}/basis_vector_storage.cpp)
+    add_executable(TPQ_DSSF ${APPS_DIR}/TPQ_DSSF.cpp ${SOLVERS_CPU_DIR}/dynamics.cpp ${SOLVERS_CPU_DIR}/TPQ.cpp ${SOLVERS_CPU_DIR}/ftlm.cpp ${SOLVERS_CPU_DIR}/lanczos.cpp ${IO_DIR}/basis_vector_storage.cpp)
+endif()
 
 # BFG Order Parameter computation (lightweight, HDF5 + OpenMP only)
 add_executable(compute_bfg_order_parameters ${APPS_DIR}/compute_bfg_order_parameters.cpp)

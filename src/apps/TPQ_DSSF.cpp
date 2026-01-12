@@ -20,7 +20,9 @@
 #include <ed/core/hdf5_io.h>
 #include <ed/solvers/TPQ.h>
 #include <ed/solvers/observables.h>
+#ifdef WITH_MPI
 #include <mpi.h>
+#endif
 #include <ed/solvers/dynamics.h>
 #include <ed/solvers/ftlm.h>
 #include <H5Cpp.h>

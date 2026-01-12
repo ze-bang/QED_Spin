@@ -8,7 +8,10 @@
 #include <iomanip>
 #include <numeric>
 #include <cstring>
+#include <chrono>
+#ifdef WITH_MPI
 #include <mpi.h>
+#endif
 
 /**
  * @brief Build Krylov subspace and extract tridiagonal matrix coefficients
@@ -2785,8 +2788,10 @@ std::map<double, DynamicalResponseResults> compute_dynamical_correlation_multi_s
     
     // MPI parallelization: distribute samples across ranks
     int mpi_rank = 0, mpi_size = 1;
+#ifdef WITH_MPI
     MPI_Comm_rank(MPI_COMM_WORLD, &mpi_rank);
     MPI_Comm_size(MPI_COMM_WORLD, &mpi_size);
+#endif
     
     // Calculate sample distribution for this rank
     uint64_t samples_per_rank = params.num_samples / mpi_size;
@@ -2797,14 +2802,19 @@ std::map<double, DynamicalResponseResults> compute_dynamical_correlation_multi_s
     
     if (mpi_rank == 0) {
         std::cout << "\n==========================================\n";
-        std::cout << "MPI-Parallel FTLM Spectral Function\n";
+        std::cout << "FTLM Spectral Function\n";
         std::cout << "==========================================\n";
+#ifdef WITH_MPI
         std::cout << "Total MPI ranks: " << mpi_size << "\n";
+#endif
         std::cout << "Total samples: " << params.num_samples << "\n";
+#ifdef WITH_MPI
         std::cout << "Samples per rank: " << samples_per_rank << " (+ " << remainder << " remainder)\n";
+#endif
         std::cout << "==========================================\n";
     }
     
+#ifdef WITH_MPI
     std::cout << "Rank " << mpi_rank << " processing samples [" 
               << start_sample << ", " << end_sample << ") - " << local_num_samples << " samples\n";
     
@@ -2815,6 +2825,7 @@ std::map<double, DynamicalResponseResults> compute_dynamical_correlation_multi_s
         std::cout << "\nStarting parallel sample processing across " << mpi_size << " ranks...\n";
         std::cout << "(Only rank 0 output shown for clarity)\n" << std::endl;
     }
+#endif
     
     // How many Ritz states to use per sample for spectral function
     // Using all states is expensive; use states with significant thermal weight
@@ -2824,7 +2835,11 @@ std::map<double, DynamicalResponseResults> compute_dynamical_correlation_multi_s
     ComplexVector psi_work(N);  // For eigenstate construction
     ComplexVector phi_work(N);  // For O|psi>
     
+#ifdef WITH_MPI
     double start_time = MPI_Wtime();
+#else
+    auto start_time = std::chrono::high_resolution_clock::now();
+#endif
     
     // Loop over random samples assigned to this rank
     for (uint64_t sample_idx = start_sample; sample_idx < end_sample; sample_idx++) {
@@ -3055,14 +3070,20 @@ std::map<double, DynamicalResponseResults> compute_dynamical_correlation_multi_s
     }
     
     // Report timing for this rank
+#ifdef WITH_MPI
     double elapsed_time = MPI_Wtime() - start_time;
+#else
+    auto end_time = std::chrono::high_resolution_clock::now();
+    double elapsed_time = std::chrono::duration<double>(end_time - start_time).count();
+#endif
     
     if (mpi_rank == 0) {
-        std::cout << "\nRank 0 completed " << local_num_samples << " samples in " 
+        std::cout << "\nCompleted " << local_num_samples << " samples in " 
                   << elapsed_time << " seconds (" << (elapsed_time / local_num_samples) 
                   << " s/sample)\n";
     }
     
+#ifdef WITH_MPI
     // MPI Reduce: gather accumulated results from all ranks
     MPI_Barrier(MPI_COMM_WORLD);
     
@@ -3090,6 +3111,9 @@ std::map<double, DynamicalResponseResults> compute_dynamical_correlation_multi_s
     // Gather total sample count for error estimation
     uint64_t global_total_samples = 0;
     MPI_Reduce(&local_num_samples, &global_total_samples, 1, MPI_UINT64_T, MPI_SUM, 0, MPI_COMM_WORLD);
+#else
+    uint64_t global_total_samples = local_num_samples;
+#endif
     
     // Compute final results: S(ω) = N × (Σ accumulated_spectral) / (Σ accumulated_Z)
     if (mpi_rank == 0) {
