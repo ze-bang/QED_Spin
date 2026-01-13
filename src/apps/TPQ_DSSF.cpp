@@ -1426,8 +1426,8 @@ int main(int argc, char* argv[]) {
     if (pos_argc >= 8) {
         std::string param_str = pos_argv[7];
         
-        if (method == "spectral") {
-            // Parse omega_min,omega_max,num_omega_bins,broadening for spectral method
+        if (method == "spectral" || method == "continued_fraction") {
+            // Parse omega_min,omega_max,num_omega_bins,broadening for spectral/continued_fraction method
             std::stringstream ss(param_str);
             std::string val;
             std::vector<std::string> tokens;
@@ -1441,12 +1441,12 @@ int main(int argc, char* argv[]) {
                 if (tokens.size() >= 3) num_omega_bins = std::stoi(tokens[2]);
                 if (tokens.size() >= 4) broadening = std::stod(tokens[3]);
                 if (rank == 0) {
-                    std::cout << "Spectral method parameters: omega=[" << omega_min << "," << omega_max 
+                    std::cout << method << " method parameters: omega=[" << omega_min << "," << omega_max 
                               << "], bins=" << num_omega_bins << ", broadening=" << broadening << std::endl;
                 }
             } catch (...) {
                 if (rank == 0) {
-                    std::cerr << "Warning: failed to parse spectral parameters. Using defaults." << std::endl;
+                    std::cerr << "Warning: failed to parse " << method << " parameters. Using defaults." << std::endl;
                 }
             }
         }
