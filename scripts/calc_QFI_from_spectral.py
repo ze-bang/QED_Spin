@@ -1500,6 +1500,10 @@ def _plot_all_samples_grid(base_species, samples_dict, plot_outdir, param_patter
             param_neg, param_pos, target_beta, param_pattern
         )
         
+        
+        # Fill NaN values at highest beta (lowest temperature) by interpolating across Jpm
+        Z_neg = _fill_nan_at_highest_beta(Z_neg, param_neg, param_pattern, target_beta)
+        Z_pos = _fill_nan_at_highest_beta(Z_pos, param_pos, param_pattern, target_beta)
         # Filter NaN rows
         filtered_data = _filter_nan_rows_param(target_beta, Z_neg, Z_pos, True)
         
@@ -1616,6 +1620,10 @@ def _plot_parameter_beta_heatmap(species, data_points, plot_outdir, param_patter
         param_neg, param_pos, target_beta, param_pattern
     )
     
+    
+    # Fill NaN values at highest beta (lowest temperature) by interpolating across Jpm
+    Z_neg = _fill_nan_at_highest_beta(Z_neg, param_neg, param_pattern, target_beta)
+    Z_pos = _fill_nan_at_highest_beta(Z_pos, param_pos, param_pattern, target_beta)
     if Z_neg is not None:
         print(f"Z_neg shape: {Z_neg.shape}, NaN count: {np.isnan(Z_neg).sum()}")
     if Z_pos is not None:
@@ -1633,6 +1641,10 @@ def _plot_parameter_beta_heatmap(species, data_points, plot_outdir, param_patter
     # Save filtered grids
     _save_filtered_grids_param(species, filtered_data, param_neg, param_pos, 
                                plot_outdir, param_pattern)
+    
+    # Save gridded data as points format (binned data)
+    _save_gridded_points_param(species, target_beta, param_neg, param_pos,
+                               Z_neg, Z_pos, plot_outdir, param_pattern)
     
     # Create plots
     try:
@@ -1688,6 +1700,7 @@ def _get_beta_grid_param(param_vals, beta_vals, ref_target):
     if target_beta.size < 2:
         target_beta = np.unique(beta_vals[beta_vals > 0])
         target_beta.sort()
+    
     
     return target_beta
 
@@ -1748,6 +1761,71 @@ def _interpolate_to_grid_param(param_vals, beta_vals, values, param_neg, param_p
     return Z_neg, Z_pos
 
 
+
+
+
+
+
+
+
+def _fill_nan_at_highest_beta(Z, params, param_pattern, target_beta=None):
+    """
+    Fill all NaN values by linear interpolation along the temperature (beta) axis
+    at fixed parameter values.
+    
+    Parameters:
+    Z: 2D array of shape (n_beta, n_params) - QFI values
+    params: 1D array of parameter values (e.g., Jpm values)
+    param_pattern: Parameter name for logging
+    target_beta: 1D array of beta values (temperature axis)
+    
+    Returns:
+    Z with all NaN values filled by interpolation along temperature axis
+    """
+    if Z is None or Z.size == 0:
+        return Z
+    
+    if target_beta is None:
+        target_beta = np.arange(Z.shape[0])
+    
+    from scipy.interpolate import interp1d
+    
+    Z_filled = Z.copy()
+    total_filled = 0
+    
+    # Process each column (each Jpm value)
+    for col_idx in range(Z.shape[1]):
+        col = Z_filled[:, col_idx].copy()
+        
+        nan_mask = np.isnan(col)
+        if not np.any(nan_mask):
+            continue
+        
+        valid_mask = ~nan_mask
+        n_valid = np.sum(valid_mask)
+        
+        if n_valid < 2:
+            continue
+        
+        valid_betas = target_beta[valid_mask]
+        valid_values = col[valid_mask]
+        
+        # Linear interpolation with extrapolation
+        f = interp1d(valid_betas, valid_values, kind="linear",
+                     bounds_error=False, fill_value="extrapolate")
+        
+        nan_betas = target_beta[nan_mask]
+        filled_values = f(nan_betas)
+        
+        Z_filled[nan_mask, col_idx] = filled_values
+        total_filled += np.sum(nan_mask)
+    
+    if total_filled > 0:
+        print(f"  Filled {total_filled} NaN values by linear interpolation along beta")
+    
+    return Z_filled
+
+
 def _filter_nan_rows_param(target_beta, Z_neg, Z_pos, naive=False):
     """Filter out rows containing NaN values."""
     result = {}
@@ -1803,6 +1881,42 @@ def _save_filtered_grids_param(species, filtered_data, param_neg, param_pos, plo
         _save_grid_data_param(plot_outdir, f'qfi_grid_pos_filtered_{species}',
                              filtered_data['beta_pos_f'], param_pos, filtered_data['Z_pos_f'], param_pattern)
 
+
+
+
+def _save_gridded_points_param(species, target_beta, param_neg, param_pos,
+                               Z_neg, Z_pos, plot_outdir, param_pattern):
+    """
+    Save gridded (binned) data in points format: param, beta, qfi.
+    This uses the interpolated grid data rather than raw ungridded points.
+    """
+    points = []
+    
+    # Add negative param data
+    if Z_neg is not None and param_neg.size > 0:
+        for j, p in enumerate(param_neg):
+            for i, b in enumerate(target_beta):
+                qfi = Z_neg[i, j]
+                if np.isfinite(qfi):
+                    points.append((p, b, qfi))
+    
+    # Add positive param data
+    if Z_pos is not None and param_pos.size > 0:
+        for j, p in enumerate(param_pos):
+            for i, b in enumerate(target_beta):
+                qfi = Z_pos[i, j]
+                if np.isfinite(qfi):
+                    points.append((p, b, qfi))
+    
+    if points:
+        arr = np.array(points, dtype=float)
+        # Sort by param, then by beta
+        arr = arr[np.lexsort((arr[:, 1], arr[:, 0]))]
+        np.savetxt(
+            os.path.join(plot_outdir, f'qfi_points_gridded_{species}.dat'),
+            arr, header=f'{param_pattern} beta qfi'
+        )
+        print(f"  Saved {len(points)} gridded points for {species}")
 
 def _save_grid_data_param(plot_outdir, base_name, beta, param, Z, param_pattern):
     """Save grid data in both npz and text formats."""
