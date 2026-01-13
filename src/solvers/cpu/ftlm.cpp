@@ -3433,6 +3433,29 @@ DynamicalResponseResults compute_ground_state_dssf(
     std::cout << "  ||O|0⟩||² = " << phi_norm_sq << std::endl;
     std::cout << "  Ratio: " << integral / phi_norm_sq << " (should be ≈ 1.0)" << std::endl;
     
+    // RENORMALIZATION: Enforce sum rule by rescaling spectral function
+    // This corrects for spectral weight loss due to finite Krylov dimension
+    if (integral > 1e-14) {
+        double renorm_factor = phi_norm_sq / integral;
+        std::cout << "  Renormalization factor: " << renorm_factor << std::endl;
+        
+        // Apply renormalization to ensure ∫ S(ω) dω = ||O|0⟩||²
+        for (size_t i = 0; i < params.num_omega_points; i++) {
+            results.spectral_function[i] *= renorm_factor;
+        }
+        
+        // Recompute integral to verify
+        double integral_renorm = 0.0;
+        for (size_t i = 1; i < params.num_omega_points; i++) {
+            double dw = results.frequencies[i] - results.frequencies[i-1];
+            integral_renorm += 0.5 * (results.spectral_function[i] + results.spectral_function[i-1]) * dw;
+        }
+        std::cout << "  After renormalization: ∫ S(ω) dω = " << integral_renorm << std::endl;
+        std::cout << "  New ratio: " << integral_renorm / phi_norm_sq << std::endl;
+    } else {
+        std::cout << "  Warning: Integral too small, skipping renormalization" << std::endl;
+    }
+    
     auto end_time = std::chrono::high_resolution_clock::now();
     double total_time = std::chrono::duration<double>(end_time - start_time).count();
     
