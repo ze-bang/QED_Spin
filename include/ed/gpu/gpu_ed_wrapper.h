@@ -398,6 +398,38 @@ public:
                                    double temperature = 0.0,
                                    double ground_state_energy = 0.0,
                                    int operators_identical = -1);
+
+    /**
+     * Run GPU-accelerated continued fraction dynamical correlation for a given state
+     * Memory-efficient version that uses continued fraction expansion instead of eigendecomposition
+     * Only works for self-correlation (O₁ = O₂)
+     * 
+     * Computes S(ω) = -Im[G(ω+iη)]/π via continued fraction:
+     *   G(z) = ||O|ψ⟩||² / (z - α₀ - β₁²/(z - α₁ - ...))
+     * 
+     * @param gpu_op_handle GPU Hamiltonian operator handle
+     * @param gpu_obs_handle GPU observable operator handle (O₁ = O₂ = O)
+     * @param d_psi_state Device pointer to initial state |ψ> (must be on GPU, normalized)
+     * @param N Hilbert space dimension
+     * @param krylov_dim Lanczos order
+     * @param omega_min Minimum frequency
+     * @param omega_max Maximum frequency
+     * @param num_omega_bins Number of frequency points
+     * @param broadening Lorentzian broadening parameter
+     * @param ground_state_energy Ground state energy for frequency shift (0 = auto-detect)
+     * @return tuple(frequencies, S_real, S_imag)
+     */
+    static std::tuple<std::vector<double>, std::vector<double>, std::vector<double>>
+    runGPUDynamicalCorrelationStateCF(void* gpu_op_handle,
+                                      void* gpu_obs_handle,
+                                      void* d_psi_state,
+                                      int N,
+                                      int krylov_dim,
+                                      double omega_min,
+                                      double omega_max,
+                                      int num_omega_bins,
+                                      double broadening,
+                                      double ground_state_energy = 0.0);
     
     /**
      * Run GPU-accelerated multi-temperature dynamical correlation (OPTIMIZED)
