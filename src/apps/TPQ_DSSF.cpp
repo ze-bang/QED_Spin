@@ -3180,10 +3180,12 @@ int main(int argc, char* argv[]) {
                         
                         Complex expectation_value(0.0, 0.0);
                         
-                        // OPTIMIZATION: Check if O₁ and O₂ are the same operator
-                        // For sum operators with same spin_combination (e.g., "0,0" = SmSp),
-                        // obs_1[i] and obs_2[i] are constructed identically
-                        bool operators_identical = (op_type_1 == op_type_2);
+                        // CRITICAL BUG FIX: The O₁=O₂ optimization is INCORRECT for SSSF!
+                        // Even when O₁ and O₂ are constructed identically, we compute ⟨ψ|O₁† O₂|ψ⟩,
+                        // NOT ||O₁|ψ⟩||² = ⟨ψ|O₁† O₁|ψ⟩. These are different!
+                        // For "0,0" (both S⁺): ⟨ψ|(S⁺)† S⁺|ψ⟩ = ⟨ψ|S⁻ S⁺|ψ⟩ ≠ ||S⁺|ψ⟩||²
+                        // Therefore, always use the full calculation for SSSF.
+                        bool operators_identical = false;  // Disabled: optimization is mathematically incorrect
                         
 #ifdef WITH_CUDA
                         if (use_gpu) {
@@ -3343,9 +3345,6 @@ int main(int argc, char* argv[]) {
                                       << " S(q)=" << expectation_value.real();
                             if (std::abs(expectation_value.imag()) > 1e-10) {
                                 std::cout << " + " << expectation_value.imag() << "i";
-                            }
-                            if (operators_identical) {
-                                std::cout << " [O₁=O₂ optimized]";
                             }
                             std::cout << std::endl;
                         }
