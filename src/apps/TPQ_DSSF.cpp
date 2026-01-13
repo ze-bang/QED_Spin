@@ -1251,13 +1251,13 @@ int main(int argc, char* argv[]) {
             std::cerr << "\n" << std::string(80, '=') << std::endl;
             std::cerr << "OPTIONAL ARGUMENTS:" << std::endl;
             std::cerr << std::string(80, '=') << std::endl;
-            std::cerr << "  method (default: spectral): spectral | ftlm_thermal | static | sssf | ground_state | continued_fraction" << std::endl;
-            std::cerr << "    - spectral: Frequency-domain spectral function S(ω) via Lanczos eigendecomposition (single state)" << std::endl;
+            std::cerr << "  method (default: spectral): spectral | ftlm_thermal | static | sssf | continued_fraction" << std::endl;
+            std::cerr << "    - spectral: Frequency-domain spectral function S(ω) via Lanczos eigendecomposition" << std::endl;
+            std::cerr << "                Supports cross-correlations (O₁ ≠ O₂). Uses eigendecomposition for FTLM." << std::endl;
             std::cerr << "    - ftlm_thermal: TRUE thermal DSSF with random state sampling (FTLM multi-sample)" << std::endl;
             std::cerr << "    - static: Static structure factor ⟨O₁†O₂⟩ vs temperature using FTLM (random sampling)" << std::endl;
             std::cerr << "    - sssf: Static structure factor ⟨O₁†O₂⟩ evaluated on pre-computed TPQ states" << std::endl;
-            std::cerr << "    - ground_state: Ground state spectral function using continued fraction" << std::endl;
-            std::cerr << "    - continued_fraction: TRUE continued fraction on TPQ states (O₁=O₂ only, O(M) per ω)" << std::endl;
+            std::cerr << "    - continued_fraction: Memory-efficient continued fraction (O₁=O₂ only, O(M) per ω)" << std::endl;
             std::cerr << "\n  operator_type (default: sum): sum | transverse | sublattice | experimental | transverse_experimental" << std::endl;
             std::cerr << "    - sum: Standard momentum-resolved sum operators S^{op1}(Q) S^{op2}(-Q)" << std::endl;
             std::cerr << "    - transverse: Polarization-dependent operators for magnetic scattering" << std::endl;
@@ -1343,33 +1343,21 @@ int main(int argc, char* argv[]) {
             std::cerr << "  - Similar to 'spectral' but computes static instead of dynamical response" << std::endl;
             std::cerr << "\nOutput: For each (q, operator, beta): ⟨O₁†O₂⟩ expectation value" << std::endl;
             std::cerr << "\n" << std::string(80, '=') << std::endl;
-            std::cerr << "GROUND STATE METHOD (method=ground_state) DETAILS:" << std::endl;
-            std::cerr << std::string(80, '=') << std::endl;
-            std::cerr << "Ground state (T=0) dynamical structure factor using continued fraction:" << std::endl;
-            std::cerr << "  S(q,ω) = ⟨GS|O₁†(q) δ(ω-H+E₀) O₂(q)|GS⟩" << std::endl;
-            std::cerr << "\n  - Requires pre-computed ground state eigenvector" << std::endl;
-            std::cerr << "  - Optimal for large systems where diagonalization is expensive" << std::endl;
-            std::cerr << "  - Uses memory-efficient continued fraction representation" << std::endl;
-            std::cerr << "\n" << std::string(80, '=') << std::endl;
             std::cerr << "CONTINUED FRACTION METHOD (method=continued_fraction) DETAILS:" << std::endl;
             std::cerr << std::string(80, '=') << std::endl;
-            std::cerr << "TRUE continued fraction representation for single-state spectral functions:" << std::endl;
+            std::cerr << "Memory-efficient continued fraction for single-state spectral functions:" << std::endl;
             std::cerr << "  G(z) = ||O|ψ⟩||² / (z - α₀ - β₁²/(z - α₁ - β₂²/(z - α₂ - ...)))" << std::endl;
             std::cerr << "  S(ω) = -(1/π) × Im[G(ω + iη)]" << std::endl;
             std::cerr << "\nKey differences from 'spectral' method:" << std::endl;
-            std::cerr << "  - Uses continued fraction evaluation: O(M) per frequency point" << std::endl;
-            std::cerr << "  - 'spectral' uses eigendecomposition: O(M³) one-time cost, then O(M) per ω" << std::endl;
-            std::cerr << "  - continued_fraction is more memory-efficient (no eigenvector storage)" << std::endl;
+            std::cerr << "  - continued_fraction: O(M) memory, uses 3-term recurrence without storing basis" << std::endl;
+            std::cerr << "  - spectral: O(M×N) memory, stores Lanczos basis for eigendecomposition" << std::endl;
+            std::cerr << "  - spectral supports cross-correlations (O₁ ≠ O₂), continued_fraction does NOT" << std::endl;
             std::cerr << "\nLIMITATION: Only works for self-correlations (O₁ = O₂)!" << std::endl;
             std::cerr << "  - Valid: \"0,0\", \"1,1\", \"2,2\" (S+S+, S-S-, SzSz)" << std::endl;
             std::cerr << "  - Invalid: \"0,1\", \"0,2\", etc. (use 'spectral' for cross-correlations)" << std::endl;
-            std::cerr << "\nIMPORTANT for finite-temperature (TPQ states):" << std::endl;
-            std::cerr << "  - At high T (low β), continued_fraction gives different results than spectral" << std::endl;
-            std::cerr << "  - At low T (high β → ground state), methods converge" << std::endl;
-            std::cerr << "  - For thermal averaging, use 'spectral' or 'ftlm_thermal'" << std::endl;
             std::cerr << "\nWhen to use:" << std::endl;
-            std::cerr << "  - Ground state or near-ground-state calculations (β > 50)" << std::endl;
-            std::cerr << "  - Very large Krylov dimensions where eigendecomp memory is limiting" << std::endl;
+            std::cerr << "  - Large systems where eigendecomposition memory is prohibitive (>16M states)" << std::endl;
+            std::cerr << "  - Self-correlation calculations only (O₁ = O₂)" << std::endl;
             std::cerr << "\n" << std::string(80, '=') << std::endl;
             std::cerr << "EXAMPLES:" << std::endl;
             std::cerr << std::string(80, '=') << std::endl;
@@ -1377,23 +1365,23 @@ int main(int argc, char* argv[]) {
             std::cerr << "   " << pos_argv[0] << " ./data 50 \"2,2\"" << std::endl;
             std::cerr << "\n2. Spectral function with custom parameters:" << std::endl;
             std::cerr << "   " << pos_argv[0] << " ./data 50 \"2,2\" spectral sum ladder \"-5,5,200,0.1\" 4 \"0,0,0;0,0,1\"" << std::endl;
-            std::cerr << "\n3. Transverse scattering with custom polarization:" << std::endl;
+            std::cerr << "\n3. Cross-correlation spectral (O₁ ≠ O₂):" << std::endl;
+            std::cerr << "   " << pos_argv[0] << " ./data 50 \"0,1\" spectral sum ladder \"-5,5,200,0.1\" 4 \"0,0,0\"" << std::endl;
+            std::cerr << "\n4. Transverse scattering with custom polarization:" << std::endl;
             std::cerr << "   " << pos_argv[0] << " ./data 40 \"2,2\" spectral transverse xyz \"-10,10,300,0.2\" 4 \"0,0,0\" \"1,0,0\"" << std::endl;
-            std::cerr << "\n4. Experimental geometry with angle:" << std::endl;
+            std::cerr << "\n5. Experimental geometry with angle:" << std::endl;
             std::cerr << "   " << pos_argv[0] << " ./data 50 \"2,2\" spectral experimental xyz \"-5,5,250,0.1\" 4 \"0,0,0\" \"0,0,0\" 0.785" << std::endl;
-            std::cerr << "\n5. Fixed-Sz sector calculation (Sz = 0 for 16 sites):" << std::endl;
+            std::cerr << "\n6. Fixed-Sz sector calculation (Sz = 0 for 16 sites):" << std::endl;
             std::cerr << "   " << pos_argv[0] << " ./data 50 \"2,2\" spectral sum ladder \"-5,5,200,0.1\" 4 \"0,0,0\" \"0,0,0\" 0 8" << std::endl;
-            std::cerr << "\n6. Finite-T DSSF with FTLM random sampling (with GPU):" << std::endl;
+            std::cerr << "\n7. Finite-T DSSF with FTLM random sampling (with GPU):" << std::endl;
             std::cerr << "   " << pos_argv[0] << " ./data 50 \"2,2\" ftlm_thermal --use_gpu \"0.1,10.0,10\"" << std::endl;
-            std::cerr << "\n7. Static structure factor via FTLM (random sampling) vs temperature:" << std::endl;
+            std::cerr << "\n8. Static structure factor via FTLM (random sampling) vs temperature:" << std::endl;
             std::cerr << "   " << pos_argv[0] << " ./data 50 \"2,2\" static \"0.1,10.0,20\"" << std::endl;
-            std::cerr << "\n8. Static structure factor on pre-computed TPQ states (sssf):" << std::endl;
+            std::cerr << "\n9. Static structure factor on pre-computed TPQ states (sssf):" << std::endl;
             std::cerr << "   " << pos_argv[0] << " ./data 50 \"2,2\" sssf sum ladder \"0,0,0\" 4 \"0,0,0;0,0,1\"" << std::endl;
-            std::cerr << "\n9. Ground state DSSF (T=0, requires eigenvector):" << std::endl;
-            std::cerr << "   " << pos_argv[0] << " ./data 100 \"2,2\" ground_state sum ladder \"-5,5,200,0.05\" 4 \"0,0,0;0,0,1\"" << std::endl;
             std::cerr << "\n10. GPU-accelerated FTLM thermal DSSF:" << std::endl;
             std::cerr << "   " << pos_argv[0] << " --use_gpu ./data 50 \"2,2\" ftlm_thermal" << std::endl;
-            std::cerr << "\n11. Continued fraction DSSF on TPQ states (finite-T with continued fraction):" << std::endl;
+            std::cerr << "\n11. Continued fraction DSSF (memory-efficient, O₁=O₂ only):" << std::endl;
             std::cerr << "   " << pos_argv[0] << " ./data 100 \"2,2\" continued_fraction sum ladder \"-5,5,200,0.05\" 4 \"0,0,0;0,0,1\"" << std::endl;
         }
         MPI_Finalize();
@@ -1863,7 +1851,7 @@ int main(int argc, char* argv[]) {
     std::string unified_h5_path;  // Path to unified DSSF HDF5 file (or per-rank file for INDEPENDENT mode)
     
     // Determine if we're in INDEPENDENT mode (need per-rank files)
-    bool uses_independent_mode = (method == "spectral" || method == "ground_state" || method == "sssf" || method == "continued_fraction");
+    bool uses_independent_mode = (method == "spectral" || method == "sssf" || method == "continued_fraction");
     
     if (rank == 0) {
         ensureDirectoryExists(output_base_dir);
@@ -1966,7 +1954,7 @@ int main(int argc, char* argv[]) {
         std::string tpq_directory = directory + "/output";
         
         // Check if output directory exists (only critical for methods that need pre-computed states)
-        bool needs_precomputed_states = (method == "spectral" || method == "ground_state" || method == "continued_fraction");
+        bool needs_precomputed_states = (method == "spectral" || method == "continued_fraction");
         
         // For ftlm_thermal/static, we generate random states internally - no need for pre-computed states
         // This is MUCH faster since we only process once instead of per-state
@@ -2072,7 +2060,7 @@ int main(int argc, char* argv[]) {
         
         // For methods that don't need pre-computed states, add fallback dummy entry
         if (tpq_files.empty()) {
-            bool needs_precomputed = (method == "spectral" || method == "ground_state" || 
+            bool needs_precomputed = (method == "spectral" || 
                                       method == "spin_correlation" || method == "spin_configuration" ||
                                       method == "sssf" || method == "continued_fraction");
             if (!needs_precomputed) {
@@ -2094,7 +2082,7 @@ int main(int argc, char* argv[]) {
     MPI_Bcast(&num_files, 1, MPI_INT, 0, MPI_COMM_WORLD);
     
     // Check for methods that need pre-computed states
-    bool needs_precomputed_states = (method == "spectral" || method == "ground_state" || method == "sssf" || method == "continued_fraction");
+    bool needs_precomputed_states = (method == "spectral" || method == "sssf" || method == "continued_fraction");
 
     if (num_files == 0 && needs_precomputed_states) {
         if (rank == 0) {
@@ -2102,21 +2090,13 @@ int main(int argc, char* argv[]) {
             std::cerr << "ERROR: No quantum states found for '" << method << "' calculation!" << std::endl;
             std::cerr << std::string(80, '=') << std::endl;
             std::cerr << "\nSearched in: " << directory << "/output/ed_results.h5" << std::endl;
-            
-            if (method == "ground_state") {
-                std::cerr << "\nThe 'ground_state' method requires a pre-computed ground state eigenvector." << std::endl;
-                std::cerr << "\nExpected location: ed_results.h5 -> /eigendata/eigenvector_0" << std::endl;
-                std::cerr << "\nTo generate the ground state, run:" << std::endl;
-                std::cerr << "  ED --config <config> (with save_eigenvectors=true and num_eigenvectors>=1)" << std::endl;
-            } else {
-                std::cerr << "\nThe '" << method << "' method requires pre-computed states. None were found." << std::endl;
-                std::cerr << "\nExpected locations in ed_results.h5:" << std::endl;
-                std::cerr << "  - TPQ states: /tpq/states/* datasets" << std::endl;
-                std::cerr << "  - Eigenvector: /eigendata/eigenvector_0" << std::endl;
-                std::cerr << "\nTo generate states, run one of:" << std::endl;
-                std::cerr << "  1. TPQ calculation:  ED --config <config> (with tpq_mode=microcanonical or canonical)" << std::endl;
-                std::cerr << "  2. Diagonalization:  ED --config <config> (with save_eigenvectors=true)" << std::endl;
-            }
+            std::cerr << "\nThe '" << method << "' method requires pre-computed states. None were found." << std::endl;
+            std::cerr << "\nExpected locations in ed_results.h5:" << std::endl;
+            std::cerr << "  - TPQ states: /tpq/states/* datasets" << std::endl;
+            std::cerr << "  - Eigenvector: /eigendata/eigenvector_0" << std::endl;
+            std::cerr << "\nTo generate states, run one of:" << std::endl;
+            std::cerr << "  1. TPQ calculation:  ED --config <config> (with tpq_mode=microcanonical or canonical)" << std::endl;
+            std::cerr << "  2. Diagonalization:  ED --config <config> (with save_eigenvectors=true)" << std::endl;
             std::cerr << "\nAlternative: Use 'ftlm_thermal' method instead, which generates random" << std::endl;
             std::cerr << "states internally and doesn't require pre-computed states." << std::endl;
             std::cerr << std::string(80, '=') << std::endl;
@@ -2415,7 +2395,7 @@ int main(int argc, char* argv[]) {
         // Load state (or skip for methods that generate internal random states)
         ComplexVector tpq_state;
         bool loaded_ok = false;
-        bool needs_loaded_state = (method == "spectral" || method == "ground_state" || 
+        bool needs_loaded_state = (method == "spectral" || 
                                    method == "spin_correlation" || method == "spin_configuration" ||
                                    method == "sssf" || method == "continued_fraction");
         
@@ -2785,62 +2765,39 @@ int main(int argc, char* argv[]) {
 #endif
                     
                     if (!use_gpu) {
-                        // CPU spectral calculation
-                        // Set up FTLM parameters
+                        // CPU spectral calculation using eigendecomposition (FTLM approach)
+                        // NOTE: spectral method ALWAYS uses eigendecomposition.
+                        // For memory-efficient continued fraction, use method=continued_fraction explicitly.
                         DynamicalResponseParameters params;
                         params.krylov_dim = krylov_dim;
                         params.broadening = broadening;
                         params.tolerance = 1e-10;
-                        // MEMORY OPTIMIZATION: For large systems (>16M states = 24 bits), disable
-                        // all reorthogonalization to prevent storing krylov_dim basis vectors.
-                        // Each vector for 27 sites is ~2GB, storing 50 would be ~100GB!
-                        // The 3-term recurrence alone gives acceptable results for spectral functions.
+                        // For large systems, we still need basis storage for eigendecomposition
+                        // but can reduce reorthogonalization frequency
                         bool large_system = (N > (1ULL << 24));
                         params.full_reorthogonalization = !large_system;
-                        params.reorth_frequency = large_system ? 0 : 10;  // 0 = no reorth, no basis storage
+                        params.reorth_frequency = large_system ? 5 : 10;
                         if (large_system && rank == 0) {
-                            std::cout << "  *** MEMORY OPTIMIZATION ENABLED ***" << std::endl;
+                            std::cout << "  *** LARGE SYSTEM: Reduced reorthogonalization ***" << std::endl;
                             std::cout << "  System size: " << N << " states (" << (N * 16.0 / (1024*1024*1024)) << " GB per vector)" << std::endl;
-                            std::cout << "  Disabled reorthogonalization to avoid storing " << krylov_dim << " basis vectors" << std::endl;
-                            std::cout << "  This saves ~" << (krylov_dim * N * 16.0 / (1024*1024*1024)) << " GB of memory" << std::endl;
+                            std::cout << "  NOTE: For memory-efficient computation, use method=continued_fraction" << std::endl;
                         }
                         
-                        // Process each operator pair
+                        // Process each operator pair using eigendecomposition
                         for (size_t i = 0; i < obs_1.size(); i++) {
-                            // Check if operators are identical (can use memory-efficient continued fraction)
-                            bool operators_identical = (op_type_1 == op_type_2);
+                            auto O1_func = [&obs_1, i](const Complex* in, Complex* out, int size) {
+                                obs_1[i].apply(in, out, size);
+                            };
                             
-                            DynamicalResponseResults results;
+                            auto O2_func = [&obs_2, i](const Complex* in, Complex* out, int size) {
+                                obs_2[i].apply(in, out, size);
+                            };
                             
-                            if (large_system && operators_identical) {
-                                // Use memory-efficient continued fraction for large systems with O1=O2
-                                if (rank == 0) {
-                                    std::cout << "  Using MEMORY-EFFICIENT continued fraction (O1=O2)" << std::endl;
-                                }
-                                
-                                auto O_func = [&obs_1, i](const Complex* in, Complex* out, int size) {
-                                    obs_1[i].apply(in, out, size);
-                                };
-                                
-                                results = compute_dynamical_correlation_state_cf(
-                                    H, O_func, tpq_state, N, params,
-                                    omega_min, omega_max, num_omega_bins, ground_state_energy
-                                );
-                            } else {
-                                // Standard path with basis storage (for O1≠O2 or small systems)
-                                auto O1_func = [&obs_1, i](const Complex* in, Complex* out, int size) {
-                                    obs_1[i].apply(in, out, size);
-                                };
-                                
-                                auto O2_func = [&obs_2, i](const Complex* in, Complex* out, int size) {
-                                    obs_2[i].apply(in, out, size);
-                                };
-                                
-                                results = compute_dynamical_correlation_state(
-                                    H, O1_func, O2_func, tpq_state, N, params,
-                                    omega_min, omega_max, num_omega_bins, 0.0, ground_state_energy
-                                );
-                            }
+                            // Always use eigendecomposition-based spectral function
+                            DynamicalResponseResults results = compute_dynamical_correlation_state(
+                                H, O1_func, O2_func, tpq_state, N, params,
+                                omega_min, omega_max, num_omega_bins, 0.0, ground_state_energy
+                            );
                             
                             // Save results to unified HDF5 file
                             saveDSSFSpectralToHDF5(
@@ -3436,136 +3393,132 @@ int main(int argc, char* argv[]) {
                         std::cout << "  Frequency range: [" << omega_min << ", " << omega_max << "]" << std::endl;
                         std::cout << "  Broadening: " << broadening << std::endl;
                         std::cout << "  Method: Continued fraction (O(" << krylov_dim << ") per ω point)" << std::endl;
+                        std::cout << "  GPU: " << (use_gpu ? "enabled" : "disabled") << std::endl;
                         if (beta < 50) {
                             std::cout << "  WARNING: At high T (low β), results may differ from spectral method" << std::endl;
                             std::cout << "           For thermal averaging, use spectral or ftlm_thermal instead" << std::endl;
                         }
                     }
                     
-                    // Set up ground state DSSF parameters with continued fraction enabled
-                    GroundStateDSSFParameters cf_params;
-                    cf_params.krylov_dim = krylov_dim;
-                    cf_params.omega_min = omega_min;
-                    cf_params.omega_max = omega_max;
-                    cf_params.num_omega_points = num_omega_bins;
-                    cf_params.broadening = broadening;
-                    cf_params.tolerance = 1e-10;
-                    cf_params.use_continued_fraction = true;  // TRUE continued fraction!
-                    // Reorthogonalization settings
-                    bool large_system = (N > (1ULL << 24));
-                    cf_params.full_reorthogonalization = !large_system;
-                    cf_params.reorth_frequency = large_system ? 0 : 10;
-                    
-                    // Process each operator pair (since O₁ = O₂, only use one)
-                    for (size_t i = 0; i < obs_1.size(); i++) {
-                        std::cout << "  Processing operator " << obs_names[i] << std::endl;
+#ifdef WITH_CUDA
+                    if (use_gpu) {
+                        std::cout << "Using GPU-accelerated continued fraction calculation..." << std::endl;
                         
-                        // Create function wrapper for single operator (O₁ = O₂)
-                        auto O_func = [&obs_1, i](const Complex* in, Complex* out, int size) {
-                            obs_1[i].apply(in, out, size);
-                        };
-                        
-                        // Use compute_ground_state_dssf which computes:
-                        //   S(ω) = ||O|ψ⟩||² × (-Im[G(ω+iη)]/π)
-                        // where G is the continued fraction of the Lanczos tridiagonal
-                        auto results = compute_ground_state_dssf(
-                            H, O_func, tpq_state, ground_state_energy, N, cf_params
-                        );
-                        
-                        // Save results to unified HDF5 file
-                        saveDSSFSpectralToHDF5(
-                            unified_h5_path,
-                            obs_names[i],
-                            beta,  // Use the TPQ state's beta (finite temperature)
-                            sample_index,
-                            results.frequencies,
-                            results.spectral_function,
-                            results.spectral_function_imag,
-                            results.spectral_error,
-                            results.spectral_error_imag
-                        );
-                        
-                        if (rank == 0) {
-                            std::cout << "  Saved continued fraction DSSF to HDF5: " << obs_names[i] << std::endl;
+                        // Convert CPU Hamiltonian to GPU
+                        GPUOperator gpu_ham(num_sites, spin_length);
+                        if (!convertOperatorToGPU(ham_op, gpu_ham)) {
+                            std::cerr << "Failed to convert Hamiltonian to GPU, falling back to CPU" << std::endl;
+                            use_gpu = false;
+                        } else {
+                            // Process each operator (O₁ = O₂ for continued fraction)
+                            for (size_t i = 0; i < obs_1.size(); i++) {
+                                std::cout << "  Processing operator " << obs_names[i] << std::endl;
+                                
+                                // Convert observable operator to GPU
+                                GPUOperator gpu_obs(num_sites, spin_length);
+                                if (!convertOperatorToGPU(obs_1[i], gpu_obs)) {
+                                    std::cerr << "  Failed to convert operator to GPU, skipping..." << std::endl;
+                                    continue;
+                                }
+                                
+                                // Allocate device memory for TPQ state
+                                cuDoubleComplex* d_psi;
+                                cudaMalloc(&d_psi, N * sizeof(cuDoubleComplex));
+                                cudaMemcpy(d_psi, tpq_state.data(), N * sizeof(cuDoubleComplex), cudaMemcpyHostToDevice);
+                                
+                                // Call GPU continued fraction wrapper
+                                auto [frequencies, S_real, S_imag] = GPUEDWrapper::runGPUDynamicalCorrelationStateCF(
+                                    &gpu_ham,
+                                    &gpu_obs,
+                                    d_psi,
+                                    N,
+                                    krylov_dim,
+                                    omega_min, omega_max, num_omega_bins,
+                                    broadening,
+                                    ground_state_energy
+                                );
+                                
+                                // Package results
+                                DynamicalResponseResults results;
+                                results.frequencies = frequencies;
+                                results.spectral_function = S_real;
+                                results.spectral_function_imag = S_imag;
+                                results.spectral_error.resize(frequencies.size(), 0.0);
+                                results.spectral_error_imag.resize(frequencies.size(), 0.0);
+                                results.total_samples = 1;
+                                
+                                // Save results to unified HDF5 file
+                                saveDSSFSpectralToHDF5(
+                                    unified_h5_path,
+                                    obs_names[i],
+                                    beta,
+                                    sample_index,
+                                    results.frequencies,
+                                    results.spectral_function,
+                                    results.spectral_function_imag,
+                                    results.spectral_error,
+                                    results.spectral_error_imag
+                                );
+                                
+                                if (rank == 0) {
+                                    std::cout << "  Saved GPU continued fraction DSSF to HDF5: " << obs_names[i] << std::endl;
+                                }
+                                
+                                // Cleanup device memory
+                                cudaFree(d_psi);
+                            }
                         }
                     }
+#endif
                     
-                } else if (method == "ground_state") {
-                    // ============================================================
-                    // GROUND STATE DSSF: T=0 spectral function via continued fraction
-                    // ============================================================
-                    int krylov_dim = krylov_dim_or_nmax;
-                    
-                    if (rank == 0) {
-                        std::cout << "\n============================================" << std::endl;
-                        std::cout << "GROUND STATE DSSF (T=0)" << std::endl;
-                        std::cout << "============================================" << std::endl;
-                        std::cout << "  Krylov dimension: " << krylov_dim << std::endl;
-                        std::cout << "  Frequency range: [" << omega_min << ", " << omega_max << "]" << std::endl;
-                        std::cout << "  Broadening: " << broadening << std::endl;
-                    }
-                    
-                    // Load ground state from file
-                    ComplexVector ground_state;
-                    double gs_energy = ground_state_energy;
-                    
-                    bool loaded_gs = load_ground_state_from_file(
-                        directory + "/output", ground_state, gs_energy, N
-                    );
-                    
-                    if (!loaded_gs) {
-                        std::cerr << "Error: Could not load ground state for ground_state method" << std::endl;
-                        std::cerr << "  Run diagonalization first to compute ground state eigenvector" << std::endl;
-                        return false;
-                    }
-                    
-                    if (rank == 0) {
-                        std::cout << "  Ground state energy: " << gs_energy << std::endl;
-                        std::cout << "  Ground state dimension: " << ground_state.size() << std::endl;
-                    }
-                    
-                    // Set up ground state DSSF parameters
-                    GroundStateDSSFParameters gs_params;
-                    gs_params.krylov_dim = krylov_dim;
-                    gs_params.omega_min = omega_min;
-                    gs_params.omega_max = omega_max;
-                    gs_params.num_omega_points = num_omega_bins;
-                    gs_params.broadening = broadening;
-                    gs_params.tolerance = 1e-10;
-                    
-                    // Process each operator pair
-                    for (size_t i = 0; i < obs_1.size(); i++) {
-                        std::cout << "  Processing operator " << obs_names[i] << std::endl;
+                    if (!use_gpu) {
+                        // CPU continued fraction calculation
+                        // Set up ground state DSSF parameters with continued fraction enabled
+                        GroundStateDSSFParameters cf_params;
+                        cf_params.krylov_dim = krylov_dim;
+                        cf_params.omega_min = omega_min;
+                        cf_params.omega_max = omega_max;
+                        cf_params.num_omega_points = num_omega_bins;
+                        cf_params.broadening = broadening;
+                        cf_params.tolerance = 1e-10;
+                        cf_params.use_continued_fraction = true;  // TRUE continued fraction!
+                        // Reorthogonalization settings
+                        bool large_system = (N > (1ULL << 24));
+                        cf_params.full_reorthogonalization = !large_system;
+                        cf_params.reorth_frequency = large_system ? 0 : 10;
                         
-                        // Create function wrappers for operators
-                        auto O1_func = [&obs_1, i](const Complex* in, Complex* out, int size) {
-                            obs_1[i].apply(in, out, size);
-                        };
-                        
-                        auto O2_func = [&obs_2, i](const Complex* in, Complex* out, int size) {
-                            obs_2[i].apply(in, out, size);
-                        };
-                        
-                        // Compute ground state cross-correlation DSSF
-                        auto results = compute_ground_state_cross_correlation(
-                            H, O1_func, O2_func, ground_state, gs_energy, N, gs_params
-                        );
-                        
-                        // Save results to unified HDF5 file
-                        saveDSSFSpectralToHDF5(
-                            unified_h5_path,
-                            obs_names[i],
-                            std::numeric_limits<double>::infinity(),  // beta=infinity for ground state
-                            sample_index,
-                            results.frequencies,
-                            results.spectral_function,
-                            results.spectral_function_imag,
-                            results.spectral_error,
-                            results.spectral_error_imag
-                        );
-                        
-                        if (rank == 0) {
-                            std::cout << "  Saved ground state DSSF to HDF5: " << obs_names[i] << std::endl;
+                        // Process each operator pair (since O₁ = O₂, only use one)
+                        for (size_t i = 0; i < obs_1.size(); i++) {
+                            std::cout << "  Processing operator " << obs_names[i] << std::endl;
+                            
+                            // Create function wrapper for single operator (O₁ = O₂)
+                            auto O_func = [&obs_1, i](const Complex* in, Complex* out, int size) {
+                                obs_1[i].apply(in, out, size);
+                            };
+                            
+                            // Use compute_ground_state_dssf which computes:
+                            //   S(ω) = ||O|ψ⟩||² × (-Im[G(ω+iη)]/π)
+                            // where G is the continued fraction of the Lanczos tridiagonal
+                            auto results = compute_ground_state_dssf(
+                                H, O_func, tpq_state, ground_state_energy, N, cf_params
+                            );
+                            
+                            // Save results to unified HDF5 file
+                            saveDSSFSpectralToHDF5(
+                                unified_h5_path,
+                                obs_names[i],
+                                beta,  // Use the TPQ state's beta (finite temperature)
+                                sample_index,
+                                results.frequencies,
+                                results.spectral_function,
+                                results.spectral_function_imag,
+                                results.spectral_error,
+                                results.spectral_error_imag
+                            );
+                            
+                            if (rank == 0) {
+                                std::cout << "  Saved continued fraction DSSF to HDF5: " << obs_names[i] << std::endl;
+                            }
                         }
                     }
                     
