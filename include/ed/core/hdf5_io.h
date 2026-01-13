@@ -1228,9 +1228,9 @@ public:
                 hsize_t dims[2];
                 filespace.getSimpleExtentDims(dims);
                 
-                // Read existing step values (column 4) to check for duplicates
+                // Read existing data
+                std::vector<double> existing_data(dims[0] * num_cols);
                 if (dims[0] > 0) {
-                    std::vector<double> existing_data(dims[0] * num_cols);
                     dataset.read(existing_data.data(), H5::PredType::NATIVE_DOUBLE);
                     
                     // Check if step already exists
@@ -1245,22 +1245,74 @@ public:
                     }
                 }
                 
-                // Extend dataset and append new row
-                hsize_t new_dims[2] = {dims[0] + 1, num_cols};
-                dataset.extend(new_dims);
+                // Check if dataset is chunked (extensible)
+                H5::DSetCreatPropList cplist = dataset.getCreatePlist();
+                bool is_chunked = (cplist.getLayout() == H5D_CHUNKED);
                 
-                // Select hyperslab for the new row
-                filespace = dataset.getSpace();
-                hsize_t offset[2] = {dims[0], 0};
-                hsize_t count[2] = {1, num_cols};
-                filespace.selectHyperslab(H5S_SELECT_SET, count, offset);
-                
-                // Write the new row
-                H5::DataSpace memspace(2, count);
-                dataset.write(row_data, H5::PredType::NATIVE_DOUBLE, memspace, filespace);
-                dataset.close();
-                file.close();
-                return true;
+                if (is_chunked) {
+                    // Extend dataset and append new row
+                    hsize_t new_dims[2] = {dims[0] + 1, num_cols};
+                    dataset.extend(new_dims);
+                    
+                    // Select hyperslab for the new row
+                    filespace = dataset.getSpace();
+                    hsize_t offset[2] = {dims[0], 0};
+                    hsize_t count[2] = {1, num_cols};
+                    filespace.selectHyperslab(H5S_SELECT_SET, count, offset);
+                    
+                    // Write the new row
+                    H5::DataSpace memspace(2, count);
+                    dataset.write(row_data, H5::PredType::NATIVE_DOUBLE, memspace, filespace);
+                    dataset.close();
+                    file.close();
+                    return true;
+                } else {
+                    // Dataset is not chunked (legacy contiguous storage)
+                    // Need to recreate it with chunking enabled
+                    dataset.close();
+                    
+                    // Read any existing column attribute
+                    std::string columns_attr = "beta,energy,variance,doublon,step";
+                    
+                    // Delete the old dataset
+                    file.unlink(dataset_path);
+                    
+                    // Create new chunked dataset with existing + new data
+                    hsize_t new_rows = dims[0] + 1;
+                    hsize_t new_dims[2] = {new_rows, num_cols};
+                    hsize_t maxdims[2] = {H5S_UNLIMITED, num_cols};
+                    H5::DataSpace new_dataspace(2, new_dims, maxdims);
+                    
+                    H5::DSetCreatPropList plist;
+                    hsize_t chunk_dims[2] = {100, num_cols};
+                    plist.setChunk(2, chunk_dims);
+                    plist.setDeflate(6);
+                    
+                    H5::DataSet new_dataset = file.createDataSet(dataset_path, 
+                                                                  H5::PredType::NATIVE_DOUBLE, 
+                                                                  new_dataspace, plist);
+                    
+                    // Append new row to existing data
+                    existing_data.resize(new_rows * num_cols);
+                    existing_data[dims[0] * num_cols + 0] = row_data[0];
+                    existing_data[dims[0] * num_cols + 1] = row_data[1];
+                    existing_data[dims[0] * num_cols + 2] = row_data[2];
+                    existing_data[dims[0] * num_cols + 3] = row_data[3];
+                    existing_data[dims[0] * num_cols + 4] = row_data[4];
+                    
+                    new_dataset.write(existing_data.data(), H5::PredType::NATIVE_DOUBLE);
+                    
+                    // Add column labels as attribute
+                    H5::DataSpace attr_space(H5S_SCALAR);
+                    H5::StrType str_type(H5::PredType::C_S1, 64);
+                    H5::Attribute attr = new_dataset.createAttribute("columns", str_type, attr_space);
+                    attr.write(str_type, columns_attr.c_str());
+                    attr.close();
+                    
+                    new_dataset.close();
+                    file.close();
+                    return true;
+                }
             }
         } catch (H5::Exception& e) {
             throw std::runtime_error("Failed to append TPQ thermodynamics: " + std::string(e.getCDetailMsg()));
@@ -1332,9 +1384,9 @@ public:
                 hsize_t dims[2];
                 filespace.getSimpleExtentDims(dims);
                 
-                // Read existing step values (column 3) to check for duplicates
+                // Read existing data
+                std::vector<double> existing_data(dims[0] * num_cols);
                 if (dims[0] > 0) {
-                    std::vector<double> existing_data(dims[0] * num_cols);
                     dataset.read(existing_data.data(), H5::PredType::NATIVE_DOUBLE);
                     
                     // Check if step already exists
@@ -1349,20 +1401,70 @@ public:
                     }
                 }
                 
-                // Extend and append
-                hsize_t new_dims[2] = {dims[0] + 1, num_cols};
-                dataset.extend(new_dims);
+                // Check if dataset is chunked (extensible)
+                H5::DSetCreatPropList cplist = dataset.getCreatePlist();
+                bool is_chunked = (cplist.getLayout() == H5D_CHUNKED);
                 
-                filespace = dataset.getSpace();
-                hsize_t offset[2] = {dims[0], 0};
-                hsize_t count[2] = {1, num_cols};
-                filespace.selectHyperslab(H5S_SELECT_SET, count, offset);
-                
-                H5::DataSpace memspace(2, count);
-                dataset.write(row_data, H5::PredType::NATIVE_DOUBLE, memspace, filespace);
-                dataset.close();
-                file.close();
-                return true;
+                if (is_chunked) {
+                    // Extend and append
+                    hsize_t new_dims[2] = {dims[0] + 1, num_cols};
+                    dataset.extend(new_dims);
+                    
+                    filespace = dataset.getSpace();
+                    hsize_t offset[2] = {dims[0], 0};
+                    hsize_t count[2] = {1, num_cols};
+                    filespace.selectHyperslab(H5S_SELECT_SET, count, offset);
+                    
+                    H5::DataSpace memspace(2, count);
+                    dataset.write(row_data, H5::PredType::NATIVE_DOUBLE, memspace, filespace);
+                    dataset.close();
+                    file.close();
+                    return true;
+                } else {
+                    // Dataset is not chunked (legacy contiguous storage)
+                    // Need to recreate it with chunking enabled
+                    dataset.close();
+                    
+                    std::string columns_attr = "beta,norm,first_norm,step";
+                    
+                    // Delete the old dataset
+                    file.unlink(dataset_path);
+                    
+                    // Create new chunked dataset with existing + new data
+                    hsize_t new_rows = dims[0] + 1;
+                    hsize_t new_dims[2] = {new_rows, num_cols};
+                    hsize_t maxdims[2] = {H5S_UNLIMITED, num_cols};
+                    H5::DataSpace new_dataspace(2, new_dims, maxdims);
+                    
+                    H5::DSetCreatPropList plist;
+                    hsize_t chunk_dims[2] = {100, num_cols};
+                    plist.setChunk(2, chunk_dims);
+                    plist.setDeflate(6);
+                    
+                    H5::DataSet new_dataset = file.createDataSet(dataset_path, 
+                                                                  H5::PredType::NATIVE_DOUBLE, 
+                                                                  new_dataspace, plist);
+                    
+                    // Append new row to existing data
+                    existing_data.resize(new_rows * num_cols);
+                    existing_data[dims[0] * num_cols + 0] = row_data[0];
+                    existing_data[dims[0] * num_cols + 1] = row_data[1];
+                    existing_data[dims[0] * num_cols + 2] = row_data[2];
+                    existing_data[dims[0] * num_cols + 3] = row_data[3];
+                    
+                    new_dataset.write(existing_data.data(), H5::PredType::NATIVE_DOUBLE);
+                    
+                    // Add column labels as attribute
+                    H5::DataSpace attr_space(H5S_SCALAR);
+                    H5::StrType str_type(H5::PredType::C_S1, 64);
+                    H5::Attribute attr = new_dataset.createAttribute("columns", str_type, attr_space);
+                    attr.write(str_type, columns_attr.c_str());
+                    attr.close();
+                    
+                    new_dataset.close();
+                    file.close();
+                    return true;
+                }
             }
         } catch (H5::Exception& e) {
             throw std::runtime_error("Failed to append TPQ norm: " + std::string(e.getCDetailMsg()));
@@ -1413,11 +1515,14 @@ public:
                 data[i * num_cols + 4] = static_cast<double>(points[i].step);
             }
             
-            // Create dataset
+            // Create chunked extensible dataset (allows later appending)
             hsize_t dims[2] = {num_rows, num_cols};
-            H5::DataSpace dataspace(2, dims);
+            hsize_t maxdims[2] = {H5S_UNLIMITED, num_cols};
+            H5::DataSpace dataspace(2, dims, maxdims);
             
             H5::DSetCreatPropList plist;
+            hsize_t chunk_dims[2] = {100, num_cols};  // Chunk by 100 rows
+            plist.setChunk(2, chunk_dims);
             plist.setDeflate(6);
             
             H5::DataSet dataset = file.createDataSet(dataset_path, 
@@ -1484,11 +1589,14 @@ public:
                 data[i * num_cols + 3] = static_cast<double>(points[i].step);
             }
             
-            // Create dataset
+            // Create chunked extensible dataset (allows later appending)
             hsize_t dims[2] = {num_rows, num_cols};
-            H5::DataSpace dataspace(2, dims);
+            hsize_t maxdims[2] = {H5S_UNLIMITED, num_cols};
+            H5::DataSpace dataspace(2, dims, maxdims);
             
             H5::DSetCreatPropList plist;
+            hsize_t chunk_dims[2] = {100, num_cols};  // Chunk by 100 rows
+            plist.setChunk(2, chunk_dims);
             plist.setDeflate(6);
             
             H5::DataSet dataset = file.createDataSet(dataset_path, 
