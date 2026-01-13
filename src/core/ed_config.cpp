@@ -8,6 +8,8 @@
 // Temporary forward declaration to avoid including ed_wrapper.h here
 // The actual enum is defined in ed_wrapper.h
 // ============================================================================
+// NOTE: This enum MUST stay in sync with the one in ed_wrapper.h!
+// The order of values is critical for proper method dispatch.
 enum class DiagonalizationMethod {
     LANCZOS,
     LANCZOS_SELECTIVE,
@@ -35,15 +37,17 @@ enum class DiagonalizationMethod {
     ARPACK_LM,
     ARPACK_SHIFT_INVERT,
     ARPACK_ADVANCED,
+    // GPU methods - order must match ed_wrapper.h
     LANCZOS_GPU,
-    LANCZOS_GPU_FIXED_SZ,
     BLOCK_LANCZOS_GPU,
-    BLOCK_LANCZOS_GPU_FIXED_SZ,
     DAVIDSON_GPU,
     LOBPCG_GPU,
     mTPQ_GPU,
     cTPQ_GPU,
     FTLM_GPU,
+    // Deprecated methods (kept for backwards compatibility)
+    LANCZOS_GPU_FIXED_SZ,
+    BLOCK_LANCZOS_GPU_FIXED_SZ,
     FTLM_GPU_FIXED_SZ
 };
 
