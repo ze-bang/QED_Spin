@@ -46,6 +46,10 @@
 #include <omp.h>
 #endif
 
+#ifdef USE_MPI
+#include <mpi.h>
+#endif
+
 #include <H5Cpp.h>
 
 namespace fs = std::filesystem;
@@ -1802,7 +1806,14 @@ std::vector<OrderParameterResults> scan_jpm_directories(
     bool save_full,
     bool use_tpq
 ) {
-    // Find all Jpm=* directories
+    // Get MPI rank and size
+    int mpi_rank = 0, mpi_size = 1;
+#ifdef USE_MPI
+    MPI_Comm_rank(MPI_COMM_WORLD, &mpi_rank);
+    MPI_Comm_size(MPI_COMM_WORLD, &mpi_size);
+#endif
+    
+    // Find all Jpm=* directories (all ranks do this)
     std::vector<std::pair<double, std::string>> jpm_dirs;
     std::regex jpm_regex("Jpm=([+-]?[0-9]*\\.?[0-9]+)");
     
@@ -1818,9 +1829,14 @@ std::vector<OrderParameterResults> scan_jpm_directories(
     
     std::sort(jpm_dirs.begin(), jpm_dirs.end());
     
-    std::cout << "Found " << jpm_dirs.size() << " Jpm directories" << std::endl;
-    if (save_full) {
-        std::cout << "Full output mode: saving S(q) and S_D(q) 2D grids per directory" << std::endl;
+    if (mpi_rank == 0) {
+        std::cout << "Found " << jpm_dirs.size() << " Jpm directories" << std::endl;
+#ifdef USE_MPI
+        std::cout << "MPI enabled: " << mpi_size << " processes" << std::endl;
+#endif
+        if (save_full) {
+            std::cout << "Full output mode: saving S(q) and S_D(q) 2D grids per directory" << std::endl;
+        }
     }
     
     if (jpm_dirs.empty()) {
@@ -1829,16 +1845,25 @@ std::vector<OrderParameterResults> scan_jpm_directories(
     
     // Load cluster from first directory
     Cluster cluster = load_cluster(jpm_dirs[0].second);
-    std::cout << "Cluster: " << cluster.n_sites << " sites, " 
-              << cluster.edges_nn.size() << " bonds" << std::endl;
+    if (mpi_rank == 0) {
+        std::cout << "Cluster: " << cluster.n_sites << " sites, " 
+                  << cluster.edges_nn.size() << " bonds" << std::endl;
+    }
     
-    // Process directories
+    // Process directories - each MPI rank processes a subset
     std::vector<OrderParameterResults> all_results(jpm_dirs.size());
     std::mutex print_mutex;
     std::atomic<int> completed(0);
     
+    // Distribute work: rank processes indices where (i % mpi_size == mpi_rank)
     #pragma omp parallel for schedule(dynamic) num_threads(n_workers)
     for (size_t i = 0; i < jpm_dirs.size(); ++i) {
+        // MPI work distribution: only process if this index belongs to this rank
+#ifdef USE_MPI
+        if (static_cast<int>(i % mpi_size) != mpi_rank) {
+            continue;
+        }
+#endif
         double jpm = jpm_dirs[i].first;
         const std::string& dir = jpm_dirs[i].second;
         
@@ -1965,6 +1990,9 @@ std::vector<OrderParameterResults> scan_jpm_directories(
             int done = ++completed;
             {
                 std::lock_guard<std::mutex> lock(print_mutex);
+#ifdef USE_MPI
+                std::cout << "[Rank " << mpi_rank << "] ";
+#endif
                 std::cout << "[" << done << "/" << jpm_dirs.size() << "] "
                           << "Jpm=" << std::fixed << std::setprecision(4) << jpm;
                 if (use_tpq) {
@@ -1979,9 +2007,108 @@ std::vector<OrderParameterResults> scan_jpm_directories(
             
         } catch (const std::exception& e) {
             std::lock_guard<std::mutex> lock(print_mutex);
+#ifdef USE_MPI
+            std::cerr << "[Rank " << mpi_rank << "] ";
+#endif
             std::cerr << "Error processing " << dir << ": " << e.what() << std::endl;
         }
     }
+    
+#ifdef USE_MPI
+    // Gather results from all ranks to rank 0
+    if (mpi_rank == 0) {
+        std::cout << "\nGathering results from all MPI ranks..." << std::endl;
+    }
+    
+    // Create a flat buffer for MPI communication (just the scalar values)
+    std::vector<double> local_buffer;
+    std::vector<int> local_indices;
+    
+    for (size_t i = 0; i < jpm_dirs.size(); ++i) {
+        if (static_cast<int>(i % mpi_size) == mpi_rank && all_results[i].jpm != 0.0) {
+            local_indices.push_back(i);
+            local_buffer.push_back(all_results[i].jpm);
+            local_buffer.push_back(all_results[i].temperature);
+            local_buffer.push_back(all_results[i].m_translation);
+            local_buffer.push_back(all_results[i].m_nematic);
+            local_buffer.push_back(all_results[i].m_nematic_spsm);
+            local_buffer.push_back(all_results[i].m_nematic_szsz);
+            local_buffer.push_back(all_results[i].m_nematic_heisenberg);
+            local_buffer.push_back(all_results[i].m_vbs);
+            local_buffer.push_back(all_results[i].m_vbs_xy);
+            local_buffer.push_back(all_results[i].m_vbs_heis);
+            local_buffer.push_back(all_results[i].anisotropy);
+            local_buffer.push_back(all_results[i].D_mean);
+            local_buffer.push_back(all_results[i].D_mean_xy);
+            local_buffer.push_back(all_results[i].D_mean_heis);
+        }
+    }
+    
+    // Gather all results to rank 0
+    std::vector<int> recv_counts(mpi_size);
+    int local_count = local_buffer.size();
+    MPI_Gather(&local_count, 1, MPI_INT, recv_counts.data(), 1, MPI_INT, 0, MPI_COMM_WORLD);
+    
+    std::vector<int> displs;
+    std::vector<double> recv_buffer;
+    if (mpi_rank == 0) {
+        displs.resize(mpi_size);
+        int total = 0;
+        for (int i = 0; i < mpi_size; ++i) {
+            displs[i] = total;
+            total += recv_counts[i];
+        }
+        recv_buffer.resize(total);
+    }
+    
+    MPI_Gatherv(local_buffer.data(), local_count, MPI_DOUBLE,
+                recv_buffer.data(), recv_counts.data(), displs.data(), MPI_DOUBLE,
+                0, MPI_COMM_WORLD);
+    
+    // Gather indices
+    std::vector<int> all_indices;
+    std::vector<int> index_counts(mpi_size);
+    int local_idx_count = local_indices.size();
+    MPI_Gather(&local_idx_count, 1, MPI_INT, index_counts.data(), 1, MPI_INT, 0, MPI_COMM_WORLD);
+    
+    std::vector<int> idx_displs;
+    if (mpi_rank == 0) {
+        idx_displs.resize(mpi_size);
+        int total = 0;
+        for (int i = 0; i < mpi_size; ++i) {
+            idx_displs[i] = total;
+            total += index_counts[i];
+        }
+        all_indices.resize(total);
+    }
+    
+    MPI_Gatherv(local_indices.data(), local_idx_count, MPI_INT,
+                all_indices.data(), index_counts.data(), idx_displs.data(), MPI_INT,
+                0, MPI_COMM_WORLD);
+    
+    // Rank 0 unpacks the results
+    if (mpi_rank == 0) {
+        const int vals_per_result = 14;
+        for (size_t i = 0; i < all_indices.size(); ++i) {
+            int idx = all_indices[i];
+            size_t offset = i * vals_per_result;
+            all_results[idx].jpm = recv_buffer[offset + 0];
+            all_results[idx].temperature = recv_buffer[offset + 1];
+            all_results[idx].m_translation = recv_buffer[offset + 2];
+            all_results[idx].m_nematic = recv_buffer[offset + 3];
+            all_results[idx].m_nematic_spsm = recv_buffer[offset + 4];
+            all_results[idx].m_nematic_szsz = recv_buffer[offset + 5];
+            all_results[idx].m_nematic_heisenberg = recv_buffer[offset + 6];
+            all_results[idx].m_vbs = recv_buffer[offset + 7];
+            all_results[idx].m_vbs_xy = recv_buffer[offset + 8];
+            all_results[idx].m_vbs_heis = recv_buffer[offset + 9];
+            all_results[idx].anisotropy = recv_buffer[offset + 10];
+            all_results[idx].D_mean = recv_buffer[offset + 11];
+            all_results[idx].D_mean_xy = recv_buffer[offset + 12];
+            all_results[idx].D_mean_heis = recv_buffer[offset + 13];
+        }
+    }
+#endif
     
     return all_results;
 }
@@ -2085,8 +2212,21 @@ void print_usage(const char* prog) {
 }
 
 int main(int argc, char* argv[]) {
+#ifdef USE_MPI
+    MPI_Init(&argc, &argv);
+    int mpi_rank = 0;
+    MPI_Comm_rank(MPI_COMM_WORLD, &mpi_rank);
+#else
+    int mpi_rank = 0;
+#endif
+    
     if (argc < 2) {
-        print_usage(argv[0]);
+        if (mpi_rank == 0) {
+            print_usage(argv[0]);
+        }
+#ifdef USE_MPI
+        MPI_Finalize();
+#endif
         return 1;
     }
     
@@ -2115,7 +2255,12 @@ int main(int argc, char* argv[]) {
         } else if (arg == "--tpq") {
             use_tpq = true;
         } else if (arg == "-h" || arg == "--help") {
-            print_usage(argv[0]);
+            if (mpi_rank == 0) {
+                print_usage(argv[0]);
+            }
+#ifdef USE_MPI
+            MPI_Finalize();
+#endif
             return 0;
         } else if (wf_file.empty()) {
             wf_file = arg;
@@ -2127,7 +2272,9 @@ int main(int argc, char* argv[]) {
     }
     
     #ifdef _OPENMP
-    std::cout << "OpenMP enabled with " << omp_get_max_threads() << " max threads" << std::endl;
+    if (mpi_rank == 0) {
+        std::cout << "OpenMP enabled with " << omp_get_max_threads() << " max threads" << std::endl;
+    }
     #endif
     
     auto total_start = std::chrono::high_resolution_clock::now();
@@ -2136,35 +2283,59 @@ int main(int argc, char* argv[]) {
         if (scan_mode) {
             // Scan directory mode
             if (scan_dir.empty()) {
-                std::cerr << "Error: --scan-dir required in scan mode" << std::endl;
+                if (mpi_rank == 0) {
+                    std::cerr << "Error: --scan-dir required in scan mode" << std::endl;
+                }
+#ifdef USE_MPI
+                MPI_Finalize();
+#endif
                 return 1;
             }
             if (output_dir.empty()) {
                 output_dir = scan_dir + "/order_parameter_results";
             }
-            fs::create_directories(output_dir);
             
-            std::cout << "========================================\n"
-                      << "BFG ORDER PARAMETER SCAN (CPU)\n"
-                      << "========================================\n"
-                      << "Scan directory: " << scan_dir << "\n"
-                      << "Output directory: " << output_dir << "\n"
-                      << "Workers: " << n_workers << "\n"
-                      << "Mode: " << (use_tpq ? "TPQ (lowest temperature)" : "Ground state") << "\n"
-                      << "Save full: " << (save_full ? "yes (2D grids)" : "no (scalars only)") << "\n"
-                      << "========================================" << std::endl;
+            // Only rank 0 creates output directory
+            if (mpi_rank == 0) {
+                fs::create_directories(output_dir);
+                
+                std::cout << "========================================\n"
+                          << "BFG ORDER PARAMETER SCAN (CPU)\n"
+                          << "========================================\n"
+                          << "Scan directory: " << scan_dir << "\n"
+                          << "Output directory: " << output_dir << "\n"
+                          << "Workers: " << n_workers << "\n"
+                          << "Mode: " << (use_tpq ? "TPQ (lowest temperature)" : "Ground state") << "\n"
+                          << "Save full: " << (save_full ? "yes (2D grids)" : "no (scalars only)") << "\n"
+                          << "========================================" << std::endl;
+            }
+            
+#ifdef USE_MPI
+            MPI_Barrier(MPI_COMM_WORLD);  // Wait for directory creation
+#endif
             
             auto results = scan_jpm_directories(scan_dir, output_dir, n_workers, n_q_grid, save_full, use_tpq);
             
-            if (!results.empty()) {
+            // Only rank 0 saves the combined results
+            if (mpi_rank == 0 && !results.empty()) {
                 std::string results_file = output_dir + "/scan_results.h5";
                 save_scan_results(results, results_file);
             }
             
         } else {
-            // Single file mode
+            // Single file mode - only run on rank 0
+#ifdef USE_MPI
+            if (mpi_rank != 0) {
+                MPI_Finalize();
+                return 0;  // Other ranks exit
+            }
+#endif
+            
             if (wf_file.empty() || cluster_dir.empty()) {
                 print_usage(argv[0]);
+#ifdef USE_MPI
+                MPI_Finalize();
+#endif
                 return 1;
             }
             
@@ -2250,13 +2421,24 @@ int main(int argc, char* argv[]) {
         }
         
     } catch (const std::exception& e) {
-        std::cerr << "Error: " << e.what() << std::endl;
+        if (mpi_rank == 0) {
+            std::cerr << "Error: " << e.what() << std::endl;
+        }
+#ifdef USE_MPI
+        MPI_Finalize();
+#endif
         return 1;
     }
     
     auto total_end = std::chrono::high_resolution_clock::now();
     auto total_duration = std::chrono::duration_cast<std::chrono::seconds>(total_end - total_start);
-    std::cout << "\nTotal runtime: " << total_duration.count() << " seconds" << std::endl;
+    if (mpi_rank == 0) {
+        std::cout << "\nTotal runtime: " << total_duration.count() << " seconds" << std::endl;
+    }
+    
+#ifdef USE_MPI
+    MPI_Finalize();
+#endif
     
     return 0;
 }
