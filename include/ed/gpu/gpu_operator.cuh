@@ -41,6 +41,69 @@ struct GPUTransformData {
     }
 };
 
+// ============================================================================
+// Branch-free separated transform storage (v2 optimization)
+// Matches CPU implementation - eliminates warp divergence in hot loops
+// ============================================================================
+
+/** One-body diagonal (Sz only) - no bit flips, just multiply */
+struct GPUDiagonalOneBody {
+    uint32_t site_index;
+    cuDoubleComplex coefficient;
+    
+    __host__ __device__ GPUDiagonalOneBody() : site_index(0) {
+        coefficient = make_cuDoubleComplex(0.0, 0.0);
+    }
+};
+
+/** One-body off-diagonal (S+ or S-) - flips one bit */
+struct GPUOffDiagonalOneBody {
+    uint32_t site_index;
+    uint8_t op_type;  // 0=S+, 1=S-
+    cuDoubleComplex coefficient;
+    
+    __host__ __device__ GPUOffDiagonalOneBody() : site_index(0), op_type(0) {
+        coefficient = make_cuDoubleComplex(0.0, 0.0);
+    }
+};
+
+/** Two-body purely diagonal (Sz_i Sz_j) - no bit flips */
+struct GPUDiagonalTwoBody {
+    uint32_t site_index_1;
+    uint32_t site_index_2;
+    cuDoubleComplex coefficient;
+    
+    __host__ __device__ GPUDiagonalTwoBody() : site_index_1(0), site_index_2(0) {
+        coefficient = make_cuDoubleComplex(0.0, 0.0);
+    }
+};
+
+/** Two-body mixed (one Sz, one S+/S-) - flips one bit */
+struct GPUMixedTwoBody {
+    uint32_t sz_site;        // Site with Sz operator
+    uint32_t flip_site;      // Site with S+/S- operator
+    uint8_t flip_op_type;    // 0=S+, 1=S-
+    cuDoubleComplex coefficient;
+    
+    __host__ __device__ GPUMixedTwoBody() : sz_site(0), flip_site(0), flip_op_type(0) {
+        coefficient = make_cuDoubleComplex(0.0, 0.0);
+    }
+};
+
+/** Two-body off-diagonal (S+_i S-_j or S-_i S+_j) - flips two bits */
+struct GPUOffDiagonalTwoBody {
+    uint32_t site_index_1;
+    uint32_t site_index_2;
+    uint8_t op_type_1;  // 0=S+, 1=S-
+    uint8_t op_type_2;  // 0=S+, 1=S-
+    cuDoubleComplex coefficient;
+    
+    __host__ __device__ GPUOffDiagonalTwoBody() 
+        : site_index_1(0), site_index_2(0), op_type_1(0), op_type_2(0) {
+        coefficient = make_cuDoubleComplex(0.0, 0.0);
+    }
+};
+
 /**
  * Three-body transform data structure
  * For interactions like S^α_i S^β_j S^γ_k
@@ -149,6 +212,37 @@ protected:
     std::vector<GPUThreeBodyTransformData> three_body_data_;  // Host storage
     GPUThreeBodyTransformData* d_three_body_data_;            // Device storage
     int num_three_body_;
+    
+    // ========================================================================
+    // Branch-free separated storage (v2 optimization)
+    // Eliminates warp divergence in kernels - each kernel processes uniform ops
+    // ========================================================================
+    std::vector<GPUDiagonalOneBody> diag_one_body_;      // Sz terms
+    std::vector<GPUOffDiagonalOneBody> offdiag_one_body_; // S+/S- terms
+    std::vector<GPUDiagonalTwoBody> diag_two_body_;      // Sz_i Sz_j terms
+    std::vector<GPUMixedTwoBody> mixed_two_body_;        // Sz * S+/S- terms
+    std::vector<GPUOffDiagonalTwoBody> offdiag_two_body_; // S+/S- * S+/S- terms
+    
+    // Device pointers for separated storage
+    GPUDiagonalOneBody* d_diag_one_body_ = nullptr;
+    GPUOffDiagonalOneBody* d_offdiag_one_body_ = nullptr;
+    GPUDiagonalTwoBody* d_diag_two_body_ = nullptr;
+    GPUMixedTwoBody* d_mixed_two_body_ = nullptr;
+    GPUOffDiagonalTwoBody* d_offdiag_two_body_ = nullptr;
+    
+    // Counts for separated transforms
+    size_t num_diag_one_body_ = 0;
+    size_t num_offdiag_one_body_ = 0;
+    size_t num_diag_two_body_ = 0;
+    size_t num_mixed_two_body_ = 0;
+    size_t num_offdiag_two_body_ = 0;
+    
+    bool transforms_separated_ = false;
+    bool separated_on_device_ = false;
+    
+    // Separate transforms by type (call before kernel launch)
+    void separateTransformsByType();
+    void copySeparatedTransformsToDevice();
     
     // Legacy interaction storage (deprecated, kept for compatibility)
     struct Interaction {
@@ -318,6 +412,48 @@ __global__ void buildHashTableKernel(const uint64_t* basis_states, void* hash_ta
 
 // State lookup kernel
 __device__ int lookupState(uint64_t state, const void* hash_table, int hash_size);
+
+// ============================================================================
+// BRANCH-FREE KERNELS (v2 optimization)
+// Each kernel handles one operator type - no warp divergence
+// ============================================================================
+
+// Full Hilbert space branch-free kernels
+__global__ void matVecDiagonalOneBody(const cuDoubleComplex* x, cuDoubleComplex* y,
+                                      const GPUDiagonalOneBody* transforms,
+                                      int num_transforms, int N, float spin_l);
+
+__global__ void matVecOffDiagonalOneBody(const cuDoubleComplex* x, cuDoubleComplex* y,
+                                         const GPUOffDiagonalOneBody* transforms,
+                                         int num_transforms, int N);
+
+__global__ void matVecDiagonalTwoBody(const cuDoubleComplex* x, cuDoubleComplex* y,
+                                      const GPUDiagonalTwoBody* transforms,
+                                      int num_transforms, int N, float spin_l);
+
+__global__ void matVecMixedTwoBody(const cuDoubleComplex* x, cuDoubleComplex* y,
+                                   const GPUMixedTwoBody* transforms,
+                                   int num_transforms, int N, float spin_l);
+
+__global__ void matVecOffDiagonalTwoBody(const cuDoubleComplex* x, cuDoubleComplex* y,
+                                         const GPUOffDiagonalTwoBody* transforms,
+                                         int num_transforms, int N);
+
+// Fixed-Sz branch-free kernels (with binary search for state lookup)
+__global__ void matVecFixedSzDiagonalOneBody(const cuDoubleComplex* x, cuDoubleComplex* y,
+                                             const uint64_t* basis_states,
+                                             const GPUDiagonalOneBody* transforms,
+                                             int num_transforms, int N, float spin_l);
+
+__global__ void matVecFixedSzDiagonalTwoBody(const cuDoubleComplex* x, cuDoubleComplex* y,
+                                             const uint64_t* basis_states,
+                                             const GPUDiagonalTwoBody* transforms,
+                                             int num_transforms, int N, float spin_l);
+
+__global__ void matVecFixedSzOffDiagonalTwoBody(const cuDoubleComplex* x, cuDoubleComplex* y,
+                                                const uint64_t* basis_states,
+                                                const GPUOffDiagonalTwoBody* transforms,
+                                                int num_transforms, int N);
 
 } // namespace GPUKernels
 

@@ -756,6 +756,253 @@ __global__ void matVecFixedSzKernel(const cuDoubleComplex* x, cuDoubleComplex* y
     y[idx] = result;
 }
 
+// ============================================================================
+// BRANCH-FREE KERNELS (v2 optimization)
+// Each kernel handles one operator type - eliminates warp divergence
+// All threads in a warp execute the same instructions (no if/else on op_type)
+// ============================================================================
+
+/**
+ * One-body diagonal kernel (Sz only)
+ * All threads do the same operation: multiply by spin eigenvalue
+ * Writes to y[state] = y[input] (diagonal, no state lookup needed)
+ */
+__global__ void matVecDiagonalOneBody(const cuDoubleComplex* x, cuDoubleComplex* y,
+                                      const GPUDiagonalOneBody* transforms,
+                                      int num_transforms, int N, float spin_l) {
+    int state_idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int transform_idx = blockIdx.y * blockDim.y + threadIdx.y;
+    
+    if (state_idx >= N || transform_idx >= num_transforms) return;
+    
+    uint64_t state = static_cast<uint64_t>(state_idx);
+    const GPUDiagonalOneBody& t = transforms[transform_idx];
+    
+    // Sz eigenvalue: +spin_l for |0⟩, -spin_l for |1⟩
+    uint64_t bit = (state >> t.site_index) & 1;
+    double sign = spin_l * ((bit == 0) ? 1.0 : -1.0);
+    
+    cuDoubleComplex contrib = complex_scale(t.coefficient, sign);
+    contrib = cuCmul(contrib, __ldg(&x[state_idx]));
+    
+    // Diagonal: output index = input index
+    atomicAddDouble(&y[state_idx].x, cuCreal(contrib));
+    atomicAddDouble(&y[state_idx].y, cuCimag(contrib));
+}
+
+/**
+ * One-body off-diagonal kernel (S+ or S-)
+ * All threads flip one bit (same operation, different sites)
+ */
+__global__ void matVecOffDiagonalOneBody(const cuDoubleComplex* x, cuDoubleComplex* y,
+                                         const GPUOffDiagonalOneBody* transforms,
+                                         int num_transforms, int N) {
+    int state_idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int transform_idx = blockIdx.y * blockDim.y + threadIdx.y;
+    
+    if (state_idx >= N || transform_idx >= num_transforms) return;
+    
+    uint64_t state = static_cast<uint64_t>(state_idx);
+    const GPUOffDiagonalOneBody& t = transforms[transform_idx];
+    
+    uint64_t bit = (state >> t.site_index) & 1;
+    
+    // S+ acts on |1⟩ (bit=1, op_type=0), S- acts on |0⟩ (bit=0, op_type=1)
+    if (bit != t.op_type) {
+        uint64_t new_state = state ^ (1ULL << t.site_index);
+        
+        if (new_state < N) {
+            cuDoubleComplex contrib = cuCmul(t.coefficient, __ldg(&x[state_idx]));
+            atomicAddDouble(&y[new_state].x, cuCreal(contrib));
+            atomicAddDouble(&y[new_state].y, cuCimag(contrib));
+        }
+    }
+}
+
+/**
+ * Two-body diagonal kernel (Sz_i Sz_j)
+ * All threads compute product of two spin eigenvalues
+ */
+__global__ void matVecDiagonalTwoBody(const cuDoubleComplex* x, cuDoubleComplex* y,
+                                      const GPUDiagonalTwoBody* transforms,
+                                      int num_transforms, int N, float spin_l) {
+    int state_idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int transform_idx = blockIdx.y * blockDim.y + threadIdx.y;
+    
+    if (state_idx >= N || transform_idx >= num_transforms) return;
+    
+    uint64_t state = static_cast<uint64_t>(state_idx);
+    const GPUDiagonalTwoBody& t = transforms[transform_idx];
+    
+    uint64_t bit1 = (state >> t.site_index_1) & 1;
+    uint64_t bit2 = (state >> t.site_index_2) & 1;
+    
+    double sign1 = (bit1 == 0) ? 1.0 : -1.0;
+    double sign2 = (bit2 == 0) ? 1.0 : -1.0;
+    double factor = spin_l * spin_l * sign1 * sign2;
+    
+    cuDoubleComplex contrib = complex_scale(t.coefficient, factor);
+    contrib = cuCmul(contrib, __ldg(&x[state_idx]));
+    
+    // Diagonal: output index = input index
+    atomicAddDouble(&y[state_idx].x, cuCreal(contrib));
+    atomicAddDouble(&y[state_idx].y, cuCimag(contrib));
+}
+
+/**
+ * Two-body mixed kernel (Sz * S+/S-)
+ * All threads compute Sz eigenvalue and flip one bit
+ */
+__global__ void matVecMixedTwoBody(const cuDoubleComplex* x, cuDoubleComplex* y,
+                                   const GPUMixedTwoBody* transforms,
+                                   int num_transforms, int N, float spin_l) {
+    int state_idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int transform_idx = blockIdx.y * blockDim.y + threadIdx.y;
+    
+    if (state_idx >= N || transform_idx >= num_transforms) return;
+    
+    uint64_t state = static_cast<uint64_t>(state_idx);
+    const GPUMixedTwoBody& t = transforms[transform_idx];
+    
+    uint64_t flip_bit = (state >> t.flip_site) & 1;
+    
+    if (flip_bit != t.flip_op_type) {
+        uint64_t sz_bit = (state >> t.sz_site) & 1;
+        double sz_sign = spin_l * ((sz_bit == 0) ? 1.0 : -1.0);
+        
+        uint64_t new_state = state ^ (1ULL << t.flip_site);
+        
+        if (new_state < N) {
+            cuDoubleComplex contrib = complex_scale(t.coefficient, sz_sign);
+            contrib = cuCmul(contrib, __ldg(&x[state_idx]));
+            atomicAddDouble(&y[new_state].x, cuCreal(contrib));
+            atomicAddDouble(&y[new_state].y, cuCimag(contrib));
+        }
+    }
+}
+
+/**
+ * Two-body off-diagonal kernel (S+/S- * S+/S-)
+ * All threads flip two bits
+ */
+__global__ void matVecOffDiagonalTwoBody(const cuDoubleComplex* x, cuDoubleComplex* y,
+                                         const GPUOffDiagonalTwoBody* transforms,
+                                         int num_transforms, int N) {
+    int state_idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int transform_idx = blockIdx.y * blockDim.y + threadIdx.y;
+    
+    if (state_idx >= N || transform_idx >= num_transforms) return;
+    
+    uint64_t state = static_cast<uint64_t>(state_idx);
+    const GPUOffDiagonalTwoBody& t = transforms[transform_idx];
+    
+    uint64_t bit1 = (state >> t.site_index_1) & 1;
+    uint64_t bit2 = (state >> t.site_index_2) & 1;
+    
+    if (bit1 != t.op_type_1 && bit2 != t.op_type_2) {
+        uint64_t new_state = state ^ (1ULL << t.site_index_1) ^ (1ULL << t.site_index_2);
+        
+        if (new_state < N) {
+            cuDoubleComplex contrib = cuCmul(t.coefficient, __ldg(&x[state_idx]));
+            atomicAddDouble(&y[new_state].x, cuCreal(contrib));
+            atomicAddDouble(&y[new_state].y, cuCimag(contrib));
+        }
+    }
+}
+
+// ============================================================================
+// Fixed-Sz Branch-Free Kernels
+// ============================================================================
+
+/**
+ * Fixed-Sz one-body diagonal kernel
+ * Diagonal terms stay in same sector - output index = input index
+ */
+__global__ void matVecFixedSzDiagonalOneBody(const cuDoubleComplex* x, cuDoubleComplex* y,
+                                             const uint64_t* basis_states,
+                                             const GPUDiagonalOneBody* transforms,
+                                             int num_transforms, int N, float spin_l) {
+    int state_idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int transform_idx = blockIdx.y * blockDim.y + threadIdx.y;
+    
+    if (state_idx >= N || transform_idx >= num_transforms) return;
+    
+    uint64_t state = basis_states[state_idx];
+    const GPUDiagonalOneBody& t = transforms[transform_idx];
+    
+    uint64_t bit = (state >> t.site_index) & 1;
+    double sign = spin_l * ((bit == 0) ? 1.0 : -1.0);
+    
+    cuDoubleComplex contrib = complex_scale(t.coefficient, sign);
+    contrib = cuCmul(contrib, __ldg(&x[state_idx]));
+    
+    // Diagonal in fixed-Sz: index unchanged
+    atomicAddDouble(&y[state_idx].x, cuCreal(contrib));
+    atomicAddDouble(&y[state_idx].y, cuCimag(contrib));
+}
+
+/**
+ * Fixed-Sz two-body diagonal kernel
+ */
+__global__ void matVecFixedSzDiagonalTwoBody(const cuDoubleComplex* x, cuDoubleComplex* y,
+                                             const uint64_t* basis_states,
+                                             const GPUDiagonalTwoBody* transforms,
+                                             int num_transforms, int N, float spin_l) {
+    int state_idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int transform_idx = blockIdx.y * blockDim.y + threadIdx.y;
+    
+    if (state_idx >= N || transform_idx >= num_transforms) return;
+    
+    uint64_t state = basis_states[state_idx];
+    const GPUDiagonalTwoBody& t = transforms[transform_idx];
+    
+    uint64_t bit1 = (state >> t.site_index_1) & 1;
+    uint64_t bit2 = (state >> t.site_index_2) & 1;
+    
+    double sign1 = (bit1 == 0) ? 1.0 : -1.0;
+    double sign2 = (bit2 == 0) ? 1.0 : -1.0;
+    double factor = spin_l * spin_l * sign1 * sign2;
+    
+    cuDoubleComplex contrib = complex_scale(t.coefficient, factor);
+    contrib = cuCmul(contrib, __ldg(&x[state_idx]));
+    
+    atomicAddDouble(&y[state_idx].x, cuCreal(contrib));
+    atomicAddDouble(&y[state_idx].y, cuCimag(contrib));
+}
+
+/**
+ * Fixed-Sz two-body off-diagonal kernel (S+S- or S-S+ conserves Sz)
+ * Uses binary search to find output index
+ */
+__global__ void matVecFixedSzOffDiagonalTwoBody(const cuDoubleComplex* x, cuDoubleComplex* y,
+                                                const uint64_t* basis_states,
+                                                const GPUOffDiagonalTwoBody* transforms,
+                                                int num_transforms, int N) {
+    int state_idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int transform_idx = blockIdx.y * blockDim.y + threadIdx.y;
+    
+    if (state_idx >= N || transform_idx >= num_transforms) return;
+    
+    uint64_t state = basis_states[state_idx];
+    const GPUOffDiagonalTwoBody& t = transforms[transform_idx];
+    
+    uint64_t bit1 = (state >> t.site_index_1) & 1;
+    uint64_t bit2 = (state >> t.site_index_2) & 1;
+    
+    if (bit1 != t.op_type_1 && bit2 != t.op_type_2) {
+        uint64_t new_state = state ^ (1ULL << t.site_index_1) ^ (1ULL << t.site_index_2);
+        
+        // Binary search for new_state in basis
+        int new_idx = lookupState(new_state, basis_states, N);
+        
+        if (new_idx >= 0) {
+            cuDoubleComplex contrib = cuCmul(t.coefficient, __ldg(&x[state_idx]));
+            atomicAddDouble(&y[new_idx].x, cuCreal(contrib));
+            atomicAddDouble(&y[new_idx].y, cuCimag(contrib));
+        }
+    }
+}
+
 } // namespace GPUKernels
 
 #endif // WITH_CUDA
