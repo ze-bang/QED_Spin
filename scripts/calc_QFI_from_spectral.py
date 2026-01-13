@@ -94,13 +94,13 @@ ENABLE_INTENSITY_SCALING = False  # Set to False to disable intensity scaling
 # - 1.0: Standard rescaling (just match reference width)
 # - >1.0: More aggressive compression (recommended: 1.5-2.0 for high-T corrections)
 # The effective scaling is: scale_factor^aggressive_factor
-SPECTRAL_RESCALE_AGGRESSIVE_FACTOR = 1.5  # Base factor (used at intermediate temps)
+SPECTRAL_RESCALE_AGGRESSIVE_FACTOR = 1  # Base factor (used at intermediate temps)
 
 # Temperature-dependent rescaling: interpolates between these values based on beta
 # At low T (high beta): use AGGRESSIVE_FACTOR_LOW_T
 # At high T (low beta): use AGGRESSIVE_FACTOR_HIGH_T
 AGGRESSIVE_FACTOR_LOW_T = 1.0   # At lowest temperature (highest beta)
-AGGRESSIVE_FACTOR_HIGH_T = 2.5  # At highest temperature (lowest beta) - more aggressive
+AGGRESSIVE_FACTOR_HIGH_T = 1.0  # At highest temperature (lowest beta) - more aggressive
 
 # Beta thresholds for temperature-dependent rescaling
 # Below this beta (high T), use maximum aggressive factor
