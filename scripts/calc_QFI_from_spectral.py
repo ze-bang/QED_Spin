@@ -79,6 +79,40 @@ QFI_SCALE_FACTOR = 27  # Multiply all QFI values by this factor
 ENABLE_SPECTRAL_RESCALING = True  # Set to False to disable rescaling
 
 # ==============================================================================
+# Spectral Intensity Scaling Configuration
+# ==============================================================================
+# Enable spectral intensity scaling to ensure the integral of the spectral
+# function matches the static structure factor at each temperature.
+# The static structure factor is read from sssf_*_expectation.txt files.
+ENABLE_INTENSITY_SCALING = True  # Set to False to disable intensity scaling
+
+# ==============================================================================
+# Aggressive Rescaling Configuration
+# ==============================================================================
+# At high temperatures, the Lanczos-induced spectral broadening is more severe.
+# This factor controls how aggressively to compress the spectrum.
+# - 1.0: Standard rescaling (just match reference width)
+# - >1.0: More aggressive compression (recommended: 1.5-2.0 for high-T corrections)
+# The effective scaling is: scale_factor^aggressive_factor
+SPECTRAL_RESCALE_AGGRESSIVE_FACTOR = 1.5  # Base factor (used at intermediate temps)
+
+# Temperature-dependent rescaling: interpolates between these values based on beta
+# At low T (high beta): use AGGRESSIVE_FACTOR_LOW_T
+# At high T (low beta): use AGGRESSIVE_FACTOR_HIGH_T
+AGGRESSIVE_FACTOR_LOW_T = 1.0   # At lowest temperature (highest beta)
+AGGRESSIVE_FACTOR_HIGH_T = 2.5  # At highest temperature (lowest beta) - more aggressive
+
+# Beta thresholds for temperature-dependent rescaling
+# Below this beta (high T), use maximum aggressive factor
+BETA_THRESHOLD_HIGH_T = 5.0
+# Above this beta (low T), use minimum aggressive factor  
+BETA_THRESHOLD_LOW_T = 50.0
+
+# Use moment-based width (standard deviation) instead of threshold-based width
+# Moment-based is more robust to noise and numerical artifacts
+USE_MOMENT_BASED_WIDTH = True
+
+# ==============================================================================
 # FFT and Spectral Function Utilities
 # ==============================================================================
 
@@ -664,8 +698,128 @@ def determine_spectral_width(omega, spectral_function, threshold_fraction=0.01):
     return omega_min, omega_max, center, width
 
 
+def determine_spectral_moments(omega, spectral_function):
+    """
+    Determine spectral moments (mean and standard deviation) from a spectral function.
+    
+    This provides a more robust measure of spectral width than threshold-based methods.
+    
+    Parameters:
+    omega: Frequency array
+    spectral_function: Spectral function values
+    
+    Returns:
+    (center, std_width) - spectral center (first moment) and standard deviation (sqrt of second central moment)
+    """
+    # Focus on positive frequencies
+    pos_mask = omega > 0
+    omega_pos = omega[pos_mask]
+    spec_pos = spectral_function[pos_mask]
+    
+    if len(spec_pos) == 0:
+        return None, None
+    
+    # Normalize spectral function to act as a probability distribution
+    total_weight = np_trapz(spec_pos, omega_pos)
+    if total_weight <= 0:
+        return None, None
+    
+    # First moment (mean frequency)
+    center = np_trapz(omega_pos * spec_pos, omega_pos) / total_weight
+    
+    # Second central moment (variance)
+    variance = np_trapz((omega_pos - center)**2 * spec_pos, omega_pos) / total_weight
+    std_width = np.sqrt(variance) if variance > 0 else 0.0
+    
+    return center, std_width
+
+
+def get_temperature_dependent_aggressive_factor(beta, ref_beta=None):
+    """
+    Compute temperature-dependent aggressive rescaling factor.
+    
+    At high temperatures (low beta), use more aggressive rescaling.
+    At low temperatures (high beta), use less aggressive rescaling.
+    
+    Parameters:
+    beta: Current inverse temperature
+    ref_beta: Reference beta (highest beta / lowest temperature)
+    
+    Returns:
+    aggressive_factor: Value between AGGRESSIVE_FACTOR_LOW_T and AGGRESSIVE_FACTOR_HIGH_T
+    """
+    if np.isinf(beta):
+        return AGGRESSIVE_FACTOR_LOW_T
+    
+    # Linear interpolation in log(beta) space between thresholds
+    if beta <= BETA_THRESHOLD_HIGH_T:
+        # Very high temperature - maximum aggression
+        return AGGRESSIVE_FACTOR_HIGH_T
+    elif beta >= BETA_THRESHOLD_LOW_T:
+        # Very low temperature - minimum aggression
+        return AGGRESSIVE_FACTOR_LOW_T
+    else:
+        # Interpolate in log space
+        log_beta = np.log(beta)
+        log_low = np.log(BETA_THRESHOLD_HIGH_T)
+        log_high = np.log(BETA_THRESHOLD_LOW_T)
+        
+        # Linear interpolation: high_T factor at low beta, low_T factor at high beta
+        t = (log_beta - log_low) / (log_high - log_low)
+        factor = AGGRESSIVE_FACTOR_HIGH_T + t * (AGGRESSIVE_FACTOR_LOW_T - AGGRESSIVE_FACTOR_HIGH_T)
+        
+        return factor
+
+
+def interpolate_nan_values(omega, spectral_function):
+    """
+    Interpolate NaN values in the spectral function.
+    
+    Uses linear interpolation to fill in NaN values.
+    
+    Parameters:
+    omega: Frequency array
+    spectral_function: Spectral function values (may contain NaN)
+    
+    Returns:
+    spectral_function with NaN values interpolated
+    """
+    if not np.any(np.isnan(spectral_function)):
+        return spectral_function
+    
+    # Find valid (non-NaN) indices
+    valid_mask = ~np.isnan(spectral_function)
+    
+    if not np.any(valid_mask):
+        # All NaN - can't interpolate
+        print("    Warning: All spectral values are NaN, returning zeros")
+        return np.zeros_like(spectral_function)
+    
+    if np.all(valid_mask):
+        # No NaN values
+        return spectral_function
+    
+    # Interpolate
+    result = spectral_function.copy()
+    valid_omega = omega[valid_mask]
+    valid_spec = spectral_function[valid_mask]
+    
+    f = interp1d(valid_omega, valid_spec, kind='linear', bounds_error=False, 
+                 fill_value=(valid_spec[0], valid_spec[-1]))
+    
+    nan_mask = np.isnan(result)
+    result[nan_mask] = f(omega[nan_mask])
+    
+    n_interpolated = np.sum(nan_mask)
+    if n_interpolated > 0:
+        print(f"    Interpolated {n_interpolated} NaN values in spectral function")
+    
+    return result
+
+
 def rescale_spectrum_to_reference(omega, spectral_function, ref_center, ref_width,
-                                   current_center=None, current_width=None):
+                                   current_center=None, current_width=None,
+                                   use_moments=True, aggressive_factor=1.0):
     """
     Rescale a spectral function to match a reference spectral width.
     
@@ -679,13 +833,18 @@ def rescale_spectrum_to_reference(omega, spectral_function, ref_center, ref_widt
     ref_width: Reference spectral width (from lowest temperature)
     current_center: Current spectral center (if None, computed from data)
     current_width: Current spectral width (if None, computed from data)
+    use_moments: If True, use moment-based width (more robust); if False, use threshold-based
+    aggressive_factor: Additional scaling factor to apply (>1 makes rescaling more aggressive)
     
     Returns:
     (rescaled_omega, rescaled_spectral) - new omega grid and interpolated spectral values
     """
     # Determine current spectral characteristics if not provided
     if current_center is None or current_width is None:
-        _, _, current_center, current_width = determine_spectral_width(omega, spectral_function)
+        if use_moments:
+            current_center, current_width = determine_spectral_moments(omega, spectral_function)
+        else:
+            _, _, current_center, current_width = determine_spectral_width(omega, spectral_function)
     
     if current_center is None or current_width is None or current_width == 0:
         print("    Warning: Could not determine spectral width, skipping rescaling")
@@ -695,8 +854,10 @@ def rescale_spectrum_to_reference(omega, spectral_function, ref_center, ref_widt
         print("    Warning: Reference width is invalid, skipping rescaling")
         return omega, spectral_function
     
-    # Calculate the scaling factor
-    scale_factor = ref_width / current_width
+    # Calculate the scaling factor with aggressive correction
+    # If aggressive_factor > 1, the spectrum will be compressed more aggressively
+    base_scale_factor = ref_width / current_width
+    scale_factor = base_scale_factor ** aggressive_factor
     
     # Apply the rescaling: shift to center, scale, shift back to reference center
     # omega_new = ref_center + (omega - current_center) * scale_factor
@@ -718,6 +879,69 @@ def rescale_spectrum_to_reference(omega, spectral_function, ref_center, ref_widt
     
     # The rescaled spectrum is on the original omega grid
     return omega, rescaled_spectral
+
+
+def get_reference_spectral_moments_from_files(file_list_by_beta):
+    """
+    Determine the reference spectral moments from the lowest temperature (highest beta) data.
+    
+    Uses moment-based width (standard deviation) which is more robust than threshold-based.
+    
+    Parameters:
+    file_list_by_beta: Dictionary mapping beta_bin_idx -> list of file paths
+    
+    Returns:
+    (ref_center, ref_std_width, ref_beta) - reference values from the lowest temperature
+    """
+    # Find the highest beta (lowest temperature)
+    max_beta = -np.inf
+    max_beta_bin = None
+    
+    for beta_bin_idx, file_list in file_list_by_beta.items():
+        if file_list:
+            first_file = file_list[0]
+            # Try to extract beta from filename
+            if first_file.startswith('DSSF_HDF5:'):
+                parts = first_file[10:].split(':')
+                if len(parts) >= 3:
+                    beta_group = parts[2]
+                    beta_match = re.search(r'beta_([0-9.+-eE]+|inf)', beta_group)
+                    if beta_match:
+                        beta_str = beta_match.group(1)
+                        beta = np.inf if beta_str.lower() == 'inf' else float(beta_str)
+                        if beta > max_beta:
+                            max_beta = beta
+                            max_beta_bin = beta_bin_idx
+            else:
+                parsed = parse_spectral_filename(first_file) or parse_spectral_dataset_name(first_file.split(':')[-1] if 'HDF5:' in first_file else first_file)
+                if parsed and parsed[1] is not None:
+                    beta = parsed[1]
+                    if beta > max_beta:
+                        max_beta = beta
+                        max_beta_bin = beta_bin_idx
+    
+    if max_beta_bin is None:
+        print("    Warning: Could not find highest beta bin for reference width")
+        return None, None, None
+    
+    # Load data from highest beta bin
+    file_list = file_list_by_beta[max_beta_bin]
+    mean_omega, mean_spectral, _ = _load_and_average_spectral(file_list)
+    
+    if mean_omega is None:
+        print("    Warning: Could not load spectral data for reference width")
+        return None, None, None
+    
+    # Determine spectral moments (more robust than threshold-based width)
+    ref_center, ref_std_width = determine_spectral_moments(mean_omega, mean_spectral)
+    
+    if ref_center is None:
+        print("    Warning: Could not determine spectral moments from reference data")
+        return None, None, None
+    
+    print(f"    Reference spectral moments from β={max_beta:.4g}: center={ref_center:.4f}, std_width={ref_std_width:.4f}")
+    
+    return ref_center, ref_std_width, max_beta
 
 
 def get_reference_spectral_width_from_files(file_list_by_beta):
@@ -785,6 +1009,208 @@ def get_reference_spectral_width_from_files(file_list_by_beta):
     return ref_center, ref_width, max_beta
 
 
+# ==============================================================================
+# Static Structure Factor Loading and Intensity Scaling
+# ==============================================================================
+
+def load_static_structure_factor(sssf_dir, operator_name):
+    """
+    Load static structure factor data from sssf_*_expectation.txt files.
+    
+    File format:
+    # Header lines starting with #
+    # Columns: Jpm  Temperature  expectation
+    
+    Parameters:
+    sssf_dir: Directory containing sssf_*_expectation.txt files (typically sssf_heatmaps/)
+    operator_name: Operator name to match (e.g., 'SzSz_q_Qx0_Qy0_Qz0')
+    
+    Returns:
+    Dictionary mapping (Jpm, Temperature) -> static_structure_factor value
+    or None if file not found
+    """
+    # Map spectral operator names to SSSF operator names
+    # Spectral files use SzSz, but SSSF might use different conventions
+    sssf_operator = operator_name
+    
+    # Try different possible filename patterns
+    possible_files = [
+        os.path.join(sssf_dir, f'sssf_{sssf_operator}_expectation.txt'),
+        os.path.join(sssf_dir, f'sssf_{sssf_operator.replace("SzSz", "SzSz")}_expectation.txt'),
+    ]
+    
+    # Also try with SmSp/SpSm mappings (S+S- = 2*S_transverse)
+    if 'SzSz' in operator_name:
+        base_q = operator_name.replace('SzSz_q_', '')
+        possible_files.extend([
+            os.path.join(sssf_dir, f'sssf_SzSz_q_{base_q}_expectation.txt'),
+        ])
+    
+    sssf_file = None
+    for f in possible_files:
+        if os.path.exists(f):
+            sssf_file = f
+            break
+    
+    if sssf_file is None:
+        return None
+    
+    # Parse the file
+    sssf_data = {}
+    try:
+        with open(sssf_file, 'r') as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith('#'):
+                    continue
+                
+                parts = line.split()
+                if len(parts) >= 3:
+                    try:
+                        jpm = float(parts[0])
+                        temp = float(parts[1])
+                        expectation = float(parts[2])
+                        sssf_data[(jpm, temp)] = expectation
+                    except ValueError:
+                        continue
+        
+        print(f"    Loaded {len(sssf_data)} static structure factor values from {os.path.basename(sssf_file)}")
+        return sssf_data
+        
+    except Exception as e:
+        print(f"    Warning: Error loading SSSF file {sssf_file}: {e}")
+        return None
+
+
+def find_closest_sssf_value(sssf_data, target_jpm, target_beta, jpm_tol=1e-4, temp_tol=0.05):
+    """
+    Find the closest static structure factor value for given Jpm and beta.
+    
+    Parameters:
+    sssf_data: Dictionary mapping (Jpm, Temperature) -> SSSF value
+    target_jpm: Target Jpm value (can be None for single-parameter runs)
+    target_beta: Target inverse temperature
+    jpm_tol: Tolerance for Jpm matching
+    temp_tol: Relative tolerance for temperature matching
+    
+    Returns:
+    (sssf_value, matched_temp) or (None, None) if no match found
+    """
+    if sssf_data is None or len(sssf_data) == 0:
+        return None, None
+    
+    target_temp = 1.0 / target_beta if not np.isinf(target_beta) else 0.0
+    
+    best_match = None
+    best_dist = np.inf
+    
+    for (jpm, temp), value in sssf_data.items():
+        # Check Jpm match (if target_jpm is provided)
+        if target_jpm is not None:
+            if abs(jpm - target_jpm) > jpm_tol:
+                continue
+        
+        # Check temperature match
+        if np.isinf(target_beta):
+            # For T=0 (beta=inf), look for smallest temperature
+            temp_dist = temp
+        else:
+            # Relative temperature distance
+            temp_dist = abs(temp - target_temp) / max(target_temp, 1e-6)
+        
+        if temp_dist < best_dist:
+            best_dist = temp_dist
+            best_match = (value, temp)
+    
+    # Check if match is within tolerance
+    if best_match is not None:
+        if np.isinf(target_beta):
+            # Accept if temperature is reasonably small
+            if best_match[1] < 0.1:  # T < 0.1 is close enough to T=0
+                return best_match
+        elif best_dist < temp_tol:
+            return best_match
+    
+    return None, None
+
+
+def compute_spectral_integral(omega, spectral_function):
+    """
+    Compute the integral of the spectral function over all frequencies.
+    
+    This should equal the static structure factor:
+    ∫ S(ω) dω = <O†O> (static structure factor)
+    
+    Parameters:
+    omega: Frequency array
+    spectral_function: Spectral function values
+    
+    Returns:
+    Integral value
+    """
+    return np_trapz(spectral_function, omega)
+
+
+def scale_spectral_to_sssf(omega, spectral_function, target_sssf):
+    """
+    Scale spectral function intensity so its integral matches the target static structure factor.
+    
+    Parameters:
+    omega: Frequency array
+    spectral_function: Spectral function values
+    target_sssf: Target static structure factor value
+    
+    Returns:
+    (scaled_spectral_function, scale_factor)
+    """
+    current_integral = compute_spectral_integral(omega, spectral_function)
+    
+    if current_integral <= 0 or not np.isfinite(current_integral):
+        print(f"    Warning: Invalid spectral integral ({current_integral}), skipping intensity scaling")
+        return spectral_function, 1.0
+    
+    if target_sssf <= 0 or not np.isfinite(target_sssf):
+        print(f"    Warning: Invalid target SSSF ({target_sssf}), skipping intensity scaling")
+        return spectral_function, 1.0
+    
+    scale_factor = target_sssf / current_integral
+    scaled_spectral = spectral_function * scale_factor
+    
+    return scaled_spectral, scale_factor
+
+
+def get_sssf_data_for_species(structure_factor_dir, species, param_value=None):
+    """
+    Load static structure factor data for a given species.
+    
+    Searches in common locations for sssf_*_expectation.txt files.
+    
+    Parameters:
+    structure_factor_dir: Base directory for structure factor results
+    species: Species/operator name (e.g., 'SzSz_q_Qx0_Qy0_Qz0')
+    param_value: Parameter value (e.g., Jpm) for parameter sweep runs
+    
+    Returns:
+    Dictionary mapping (Jpm, Temperature) -> SSSF value, or None
+    """
+    # Try different possible locations for SSSF files
+    possible_dirs = [
+        os.path.join(structure_factor_dir, '..', 'sssf_heatmaps'),
+        os.path.join(structure_factor_dir, 'sssf_heatmaps'),
+        os.path.join(structure_factor_dir, '..', '..', 'sssf_heatmaps'),
+        structure_factor_dir,
+    ]
+    
+    for sssf_dir in possible_dirs:
+        sssf_dir = os.path.normpath(sssf_dir)
+        if os.path.exists(sssf_dir):
+            sssf_data = load_static_structure_factor(sssf_dir, species)
+            if sssf_data is not None and len(sssf_data) > 0:
+                return sssf_data
+    
+    return None
+
+
 def calculate_qfi_from_spectral(omega, spectral_function, beta):
     """
     Calculate quantum Fisher information from spectral function.
@@ -816,7 +1242,7 @@ def calculate_qfi_from_spectral(omega, spectral_function, beta):
     return qfi
 
 
-def parse_QFI_data_from_spectral(structure_factor_dir, beta_tol=1e-2):
+def parse_QFI_data_from_spectral(structure_factor_dir, beta_tol=1e-2, param_value=None):
     """
     Parse QFI data from pre-computed spectral function files.
     
@@ -829,6 +1255,7 @@ def parse_QFI_data_from_spectral(structure_factor_dir, beta_tol=1e-2):
     Parameters:
     structure_factor_dir: Directory containing beta_* subdirectories
     beta_tol: Tolerance for grouping beta values
+    param_value: Optional parameter value (e.g., Jpm) for intensity scaling lookup
     """
     
     # Initialize data structures
@@ -850,7 +1277,8 @@ def parse_QFI_data_from_spectral(structure_factor_dir, beta_tol=1e-2):
     for species, beta_groups in species_data.items():
         print(f"\nProcessing species: {species}")
         _process_species_spectral(species, beta_groups, beta_bin_values, 
-                                  structure_factor_dir, all_species_qfi_data)
+                                  structure_factor_dir, all_species_qfi_data,
+                                  param_value=param_value)
     
     # Step 3: Generate summary plots
     _create_summary_plots(all_species_qfi_data, structure_factor_dir)
@@ -1004,25 +1432,50 @@ def _assign_beta_bin(beta_val, bins, tol):
 
 
 def _process_species_spectral(species, beta_groups, beta_bin_values, 
-                              structure_factor_dir, all_species_qfi_data):
+                              structure_factor_dir, all_species_qfi_data,
+                              param_value=None):
     """Process all spectral data for a single species across different beta values.
     
     Uses spectral width rescaling to correct for insufficient Lanczos space at high temperatures.
     The lowest temperature (highest beta) spectrum is used as reference for the correct spectral width.
+    
+    Also applies intensity scaling to match the static structure factor at each temperature.
+    
+    Parameters:
+    species: Species/operator name
+    beta_groups: Dictionary mapping beta_bin_idx -> list of file paths
+    beta_bin_values: Dictionary mapping beta_bin_idx -> list of beta values
+    structure_factor_dir: Directory containing spectral data
+    all_species_qfi_data: Output dictionary to store QFI results
+    param_value: Optional parameter value (e.g., Jpm) for SSSF lookup
     """
     
     # First, determine the reference spectral width from the lowest temperature data
     # Only if rescaling is enabled
     if ENABLE_SPECTRAL_RESCALING:
-        ref_center, ref_width, ref_beta = get_reference_spectral_width_from_files(beta_groups)
+        # Use moment-based width if configured (more robust)
+        if USE_MOMENT_BASED_WIDTH:
+            ref_center, ref_width, ref_beta = get_reference_spectral_moments_from_files(beta_groups)
+        else:
+            ref_center, ref_width, ref_beta = get_reference_spectral_width_from_files(beta_groups)
         
         if ref_center is not None:
-            print(f"  Using spectral width rescaling (reference from β={ref_beta:.4g})")
+            print(f"  Using temperature-dependent spectral width rescaling (reference from β={ref_beta:.4g})")
+            print(f"  Aggressive factors: {AGGRESSIVE_FACTOR_LOW_T:.2f} (low T) to {AGGRESSIVE_FACTOR_HIGH_T:.2f} (high T)")
         else:
             print(f"  Warning: No reference spectral width available, proceeding without rescaling")
     else:
         ref_center, ref_width, ref_beta = None, None, None
         print(f"  Spectral width rescaling is disabled")
+    
+    # Load static structure factor data for intensity scaling
+    sssf_data = None
+    if ENABLE_INTENSITY_SCALING:
+        sssf_data = get_sssf_data_for_species(structure_factor_dir, species, param_value)
+        if sssf_data is not None:
+            print(f"  Using intensity scaling from static structure factor data")
+        else:
+            print(f"  Warning: No static structure factor data found, proceeding without intensity scaling")
     
     for beta_bin_idx, file_list in beta_groups.items():
         beta = _get_bin_beta(beta_bin_values[beta_bin_idx])
@@ -1037,28 +1490,64 @@ def _process_species_spectral(species, beta_groups, beta_bin_values,
             print(f"    Failed to load data")
             continue
         
+        # Interpolate NaN values in the spectral data
+        mean_spectral = interpolate_nan_values(mean_omega, mean_spectral)
+        
+        # Also interpolate individual sample data
+        interpolated_individual_data = []
+        for omega, spectral, fpath in individual_data:
+            interp_spec = interpolate_nan_values(omega, spectral)
+            interpolated_individual_data.append((omega, interp_spec, fpath))
+        individual_data = interpolated_individual_data
+        
         # Apply spectral width rescaling if reference is available
         # Skip rescaling for the reference beta itself (or very close to it)
         if ref_center is not None and ref_width is not None:
             if not (np.isinf(beta) and np.isinf(ref_beta)) and abs(beta - ref_beta) > 1e-3 * ref_beta:
-                # Rescale the averaged spectrum
+                # Get temperature-dependent aggressive factor
+                temp_aggressive_factor = get_temperature_dependent_aggressive_factor(beta, ref_beta)
+                
+                # Rescale the averaged spectrum with temperature-dependent aggressive factor
                 _, rescaled_spectral = rescale_spectrum_to_reference(
-                    mean_omega, mean_spectral, ref_center, ref_width)
+                    mean_omega, mean_spectral, ref_center, ref_width,
+                    use_moments=USE_MOMENT_BASED_WIDTH, 
+                    aggressive_factor=temp_aggressive_factor)
                 
                 # Also rescale individual sample data
                 rescaled_individual_data = []
                 for omega, spectral, fpath in individual_data:
                     _, rescaled_spec = rescale_spectrum_to_reference(
-                        omega, spectral, ref_center, ref_width)
+                        omega, spectral, ref_center, ref_width,
+                        use_moments=USE_MOMENT_BASED_WIDTH,
+                        aggressive_factor=temp_aggressive_factor)
                     rescaled_individual_data.append((omega, rescaled_spec, fpath))
                 
-                print(f"    Applied spectral rescaling to match reference width")
+                print(f"    Applied spectral rescaling (aggressive_factor={temp_aggressive_factor:.2f})")
             else:
                 rescaled_spectral = mean_spectral
                 rescaled_individual_data = individual_data
         else:
             rescaled_spectral = mean_spectral
             rescaled_individual_data = individual_data
+        
+        # Apply intensity scaling to match static structure factor
+        if sssf_data is not None and ENABLE_INTENSITY_SCALING:
+            target_sssf, matched_temp = find_closest_sssf_value(sssf_data, param_value, beta)
+            if target_sssf is not None:
+                # Scale the averaged spectrum
+                rescaled_spectral, scale_factor = scale_spectral_to_sssf(
+                    mean_omega, rescaled_spectral, target_sssf)
+                
+                # Also scale individual sample data
+                scaled_individual_data = []
+                for omega, spectral, fpath in rescaled_individual_data:
+                    scaled_spec, _ = scale_spectral_to_sssf(omega, spectral, target_sssf)
+                    scaled_individual_data.append((omega, scaled_spec, fpath))
+                rescaled_individual_data = scaled_individual_data
+                
+                print(f"    Applied intensity scaling (factor={scale_factor:.4f}) to match SSSF at T={matched_temp:.4g}")
+            else:
+                print(f"    Warning: No matching SSSF value for β={beta_label}")
         
         # Calculate QFI from (rescaled) averaged spectral function
         qfi = calculate_qfi_from_spectral(mean_omega, rescaled_spectral, beta) * QFI_SCALE_FACTOR
@@ -1480,7 +1969,7 @@ def parse_QFI_across_parameter(data_dir, param_pattern='Jpm'):
             print(f"  Warning: No structure_factor_results directory")
             continue
         
-        qfi_data = parse_QFI_data_from_spectral(sf_dir)
+        qfi_data = parse_QFI_data_from_spectral(sf_dir, param_value=param_value)
         
         if qfi_data:
             local_param_qfi_data[param_value] = qfi_data
@@ -2266,6 +2755,10 @@ if __name__ == "__main__":
                        help='Skip spectral processing and load existing processed QFI data')
     parser.add_argument('--no-rescale', action='store_true',
                        help='Disable spectral width rescaling (default: rescaling enabled)')
+    parser.add_argument('--no-intensity-scale', action='store_true',
+                       help='Disable intensity scaling to match static structure factor (default: enabled)')
+    parser.add_argument('--aggressive-factor', type=float, default=1.5,
+                       help='Aggressive rescaling factor (>1 for stronger high-T corrections, default: 1.5)')
     
     args = parser.parse_args()
     
@@ -2275,7 +2768,16 @@ if __name__ == "__main__":
         print("Spectral width rescaling is DISABLED")
     else:
         ENABLE_SPECTRAL_RESCALING = True
-        print("Spectral width rescaling is ENABLED (use --no-rescale to disable)")
+        SPECTRAL_RESCALE_AGGRESSIVE_FACTOR = args.aggressive_factor
+        print(f"Spectral width rescaling is ENABLED (aggressive_factor={args.aggressive_factor})")
+    
+    # Set global intensity scaling flag based on command-line argument
+    if args.no_intensity_scale:
+        ENABLE_INTENSITY_SCALING = False
+        print("Intensity scaling is DISABLED")
+    else:
+        ENABLE_INTENSITY_SCALING = True
+        print("Intensity scaling is ENABLED (use --no-intensity-scale to disable)")
     
     if args.skip_processing:
         # Load already processed data mode
