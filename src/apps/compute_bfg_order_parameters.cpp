@@ -1729,9 +1729,16 @@ struct OrderParameterResults {
     double temperature = 0.0;  // For TPQ mode, T=0 for ground state
     double m_translation;
     double m_nematic;
-    double m_vbs;
+    double m_nematic_spsm;
+    double m_nematic_szsz;
+    double m_nematic_heisenberg;
+    double m_vbs;           // XY VBS (for backward compatibility)
+    double m_vbs_xy;        // XY VBS (explicit)
+    double m_vbs_heis;      // Heisenberg VBS
     double anisotropy;
-    double D_mean;
+    double D_mean;          // XY dimer mean (backward compat)
+    double D_mean_xy;
+    double D_mean_heis;
 };
 
 // -----------------------------------------------------------------------------
@@ -1755,18 +1762,30 @@ OrderParameterResults compute_all_order_parameters(
     
     // Bond expectations
     auto xy_bond_exp = compute_xy_bond_expectations(psi, cluster);
+    auto spsm_bond_exp = compute_spsm_bond_expectations(psi, cluster);
     auto szsz_bond_exp = compute_szsz_bond_expectations(psi, cluster);
     auto heisenberg_bond_exp = compute_heisenberg_bond_expectations(szsz_bond_exp, xy_bond_exp);
     
-    // Nematic
-    auto nem_result = compute_nematic_order(xy_bond_exp, cluster);
+    // Nematic (all variants)
+    auto nem_result = compute_nematic_order(xy_bond_exp, cluster, "xy");
+    auto nem_spsm_result = compute_nematic_order(spsm_bond_exp, cluster, "spsm");
+    auto nem_szsz_result = compute_nematic_order_real(szsz_bond_exp, cluster, "szsz");
+    auto nem_heis_result = compute_nematic_order_real(heisenberg_bond_exp, cluster, "heisenberg");
+    
     results.m_nematic = nem_result.m_nem;
     results.anisotropy = nem_result.anisotropy;
+    results.m_nematic_spsm = nem_spsm_result.m_nem;
+    results.m_nematic_szsz = nem_szsz_result.m_nem;
+    results.m_nematic_heisenberg = nem_heis_result.m_nem;
     
-    // VBS order (proper 4-site correlations)
+    // VBS order (proper 4-site correlations, both XY and Heisenberg)
     auto vbs_result = compute_vbs_order(psi, xy_bond_exp, heisenberg_bond_exp, cluster);
     results.m_vbs = vbs_result.m_vbs_xy;
+    results.m_vbs_xy = vbs_result.m_vbs_xy;
+    results.m_vbs_heis = vbs_result.m_vbs_heis;
     results.D_mean = vbs_result.D_mean_xy;
+    results.D_mean_xy = vbs_result.D_mean_xy;
+    results.D_mean_heis = vbs_result.D_mean_heis;
     
     return results;
 }
@@ -1925,9 +1944,16 @@ std::vector<OrderParameterResults> scan_jpm_directories(
                 // Fill scalar results for summary
                 results.m_translation = sf_result.m_translation;
                 results.m_nematic = nem_result.m_nem;
+                results.m_nematic_spsm = nem_spsm_result.m_nem;
+                results.m_nematic_szsz = nem_szsz_result.m_nem;
+                results.m_nematic_heisenberg = nem_heisenberg_result.m_nem;
                 results.anisotropy = nem_result.anisotropy;
                 results.m_vbs = vbs_result.m_vbs_xy;
+                results.m_vbs_xy = vbs_result.m_vbs_xy;
+                results.m_vbs_heis = vbs_result.m_vbs_heis;
                 results.D_mean = vbs_result.D_mean_xy;
+                results.D_mean_xy = vbs_result.D_mean_xy;
+                results.D_mean_heis = vbs_result.D_mean_heis;
             } else {
                 // Quick scalar-only computation
                 results = compute_all_order_parameters(psi, cluster, jpm);
@@ -1946,7 +1972,8 @@ std::vector<OrderParameterResults> scan_jpm_directories(
                 }
                 std::cout << " | m_trans=" << std::setprecision(6) << results.m_translation
                           << " | m_nem=" << results.m_nematic
-                          << " | m_vbs=" << results.m_vbs
+                          << " | m_vbs_xy=" << results.m_vbs_xy
+                          << " | m_vbs_heis=" << results.m_vbs_heis
                           << std::endl;
             }
             
@@ -1971,17 +1998,30 @@ void save_scan_results(
         H5::H5File file(output_file, H5F_ACC_TRUNC);
         
         size_t n = results.size();
-        std::vector<double> jpm_vals(n), m_trans(n), m_nem(n), aniso(n);
-        std::vector<double> m_vbs_vals(n), D_mean_vals(n), temperature_vals(n);
+        std::vector<double> jpm_vals(n), temperature_vals(n);
+        std::vector<double> m_trans(n);
+        std::vector<double> m_nem(n), m_nem_spsm(n), m_nem_szsz(n), m_nem_heis(n), aniso(n);
+        std::vector<double> m_vbs_vals(n), m_vbs_xy_vals(n), m_vbs_heis_vals(n);
+        std::vector<double> D_mean_vals(n), D_mean_xy_vals(n), D_mean_heis_vals(n);
         
         for (size_t i = 0; i < n; ++i) {
             jpm_vals[i] = results[i].jpm;
-            m_trans[i] = results[i].m_translation;
-            m_nem[i] = results[i].m_nematic;
-            aniso[i] = results[i].anisotropy;
-            m_vbs_vals[i] = results[i].m_vbs;
-            D_mean_vals[i] = results[i].D_mean;
             temperature_vals[i] = results[i].temperature;
+            m_trans[i] = results[i].m_translation;
+            
+            m_nem[i] = results[i].m_nematic;
+            m_nem_spsm[i] = results[i].m_nematic_spsm;
+            m_nem_szsz[i] = results[i].m_nematic_szsz;
+            m_nem_heis[i] = results[i].m_nematic_heisenberg;
+            aniso[i] = results[i].anisotropy;
+            
+            m_vbs_vals[i] = results[i].m_vbs;
+            m_vbs_xy_vals[i] = results[i].m_vbs_xy;
+            m_vbs_heis_vals[i] = results[i].m_vbs_heis;
+            
+            D_mean_vals[i] = results[i].D_mean;
+            D_mean_xy_vals[i] = results[i].D_mean_xy;
+            D_mean_heis_vals[i] = results[i].D_mean_heis;
         }
         
         auto write_dataset = [&](const std::string& name, const std::vector<double>& data) {
@@ -1992,12 +2032,23 @@ void save_scan_results(
         };
         
         write_dataset("jpm_values", jpm_vals);
-        write_dataset("m_translation", m_trans);
-        write_dataset("m_nematic", m_nem);
-        write_dataset("anisotropy", aniso);
-        write_dataset("m_vbs", m_vbs_vals);
-        write_dataset("D_mean", D_mean_vals);
         write_dataset("temperature", temperature_vals);
+        write_dataset("m_translation", m_trans);
+        
+        // Nematic order (all variants)
+        write_dataset("m_nematic", m_nem);
+        write_dataset("m_nematic_spsm", m_nem_spsm);
+        write_dataset("m_nematic_szsz", m_nem_szsz);
+        write_dataset("m_nematic_heisenberg", m_nem_heis);
+        write_dataset("anisotropy", aniso);
+        
+        // VBS order (both XY and Heisenberg)
+        write_dataset("m_vbs", m_vbs_vals);
+        write_dataset("m_vbs_xy", m_vbs_xy_vals);
+        write_dataset("m_vbs_heis", m_vbs_heis_vals);
+        write_dataset("D_mean", D_mean_vals);
+        write_dataset("D_mean_xy", D_mean_xy_vals);
+        write_dataset("D_mean_heis", D_mean_heis_vals);
         
         std::cout << "Scan results saved to: " << output_file << std::endl;
         
@@ -2021,13 +2072,15 @@ void print_usage(const char* prog) {
               << "  --output-dir <dir>   Output directory for results\n"
               << "  --n-workers <n>      Number of parallel workers (default: 4)\n"
               << "  --n-q-grid <n>       2D q-grid size for visualization (default: 50)\n"
-              << "  --save-full          Save full S(q), S_D(q) 2D grids per Jpm directory\n"
+              << "  --save-full          Save full S(q), S_D(q) 2D grids and bond-resolved data per Jpm\n"
               << "  --tpq                Use TPQ states (lowest temperature) instead of ground state\n"
               << "\nComputes BFG order parameters from ground state or TPQ wavefunction:\n"
               << "  1. S(q) - Spin structure factor (translation order)\n"
               << "  2. Nematic order - Bond orientation anisotropy (C3 breaking)\n"
               << "     - Variants: XY, S+S-, SzSz, Heisenberg\n"
               << "  3. VBS order - Valence bond solid with proper 4-site dimer correlations\n"
+              << "     - Variants: XY dimer (S+S- + S-S+), Heisenberg dimer (S·S)\n"
+              << "     - Bond-resolved: full dimer-dimer correlation matrices\n"
               << std::endl;
 }
 
