@@ -721,7 +721,8 @@ void GPUTPQSolver::runMicrocanonicalTPQ(
                 }
                 
                 // Save TPQ state at target temperatures (with accurate inv_temp) to HDF5
-                if (actually_at_target) {
+                // Only save if save_thermal_states flag is enabled
+                if (actually_at_target && save_thermal_states) {
                     std::cout << "  *** Saving TPQ state at β = " << inv_temp 
                               << " (target: " << measure_inv_temp[target_temp_idx] << ") ***" << std::endl;
                     saveTPQStateHDF5(dir, sample, inv_temp, fixed_sz_op);
@@ -739,9 +740,11 @@ void GPUTPQSolver::runMicrocanonicalTPQ(
         double final_var = final_pair.second;
         double final_inv_temp = (2.0 * final_step) / (large_value * D_S - final_energy);
         
-        // Always save final state to HDF5 for continue_quenching
-        saveTPQStateHDF5(dir, sample, final_inv_temp, fixed_sz_op);
-        std::cout << "Saved final TPQ state to HDF5: sample=" << sample << ", beta=" << final_inv_temp << std::endl;
+        // Save final state to HDF5 only if save_thermal_states is enabled
+        if (save_thermal_states) {
+            saveTPQStateHDF5(dir, sample, final_inv_temp, fixed_sz_op);
+            std::cout << "Saved final TPQ state to HDF5: sample=" << sample << ", beta=" << final_inv_temp << std::endl;
+        }
         
         eigenvalues.push_back(final_energy);
         

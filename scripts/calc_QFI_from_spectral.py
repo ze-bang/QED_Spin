@@ -70,6 +70,15 @@ EXCLUDED_JPM_VALUES = [0.08, 0.10]  # These Jpm values appear to be corrupted
 QFI_SCALE_FACTOR = 27  # Multiply all QFI values by this factor
 
 # ==============================================================================
+# Spectral Width Rescaling Configuration
+# ==============================================================================
+# Enable spectral width rescaling to correct for insufficient Lanczos space
+# at high temperatures. When enabled, the lowest temperature spectrum is used
+# as reference for the correct spectral width, and all other spectra are
+# rescaled to match this width before QFI calculation.
+ENABLE_SPECTRAL_RESCALING = True  # Set to False to disable rescaling
+
+# ==============================================================================
 # FFT and Spectral Function Utilities
 # ==============================================================================
 
@@ -598,6 +607,184 @@ def find_spectral_peaks(omega, spectral_function, min_prominence=0.1,
     return peak_positions.tolist(), peak_heights.tolist(), prominences.tolist()
 
 
+# ==============================================================================
+# Spectral Width Rescaling Functions
+# ==============================================================================
+
+def determine_spectral_width(omega, spectral_function, threshold_fraction=0.01):
+    """
+    Determine the effective spectral width from a spectral function.
+    
+    The spectral width is defined as the frequency range where the spectral
+    function exceeds a threshold (fraction of maximum value).
+    
+    Parameters:
+    omega: Frequency array
+    spectral_function: Spectral function values
+    threshold_fraction: Fraction of max value to use as threshold (default: 1%)
+    
+    Returns:
+    (omega_min, omega_max, center, width) - boundaries and characteristics of spectral support
+    """
+    # Focus on positive frequencies for spectral width determination
+    pos_mask = omega > 0
+    omega_pos = omega[pos_mask]
+    spec_pos = spectral_function[pos_mask]
+    
+    if len(spec_pos) == 0:
+        return None, None, None, None
+    
+    # Find the threshold
+    max_val = np.max(spec_pos)
+    if max_val <= 0:
+        return None, None, None, None
+    
+    threshold = threshold_fraction * max_val
+    
+    # Find indices where spectral function exceeds threshold
+    above_threshold = spec_pos > threshold
+    
+    if not np.any(above_threshold):
+        return None, None, None, None
+    
+    # Find the first and last indices above threshold
+    indices = np.where(above_threshold)[0]
+    omega_min = omega_pos[indices[0]]
+    omega_max = omega_pos[indices[-1]]
+    
+    # Calculate spectral center of mass (first moment)
+    total_weight = np_trapz(spec_pos, omega_pos)
+    if total_weight > 0:
+        center = np_trapz(omega_pos * spec_pos, omega_pos) / total_weight
+    else:
+        center = (omega_min + omega_max) / 2
+    
+    width = omega_max - omega_min
+    
+    return omega_min, omega_max, center, width
+
+
+def rescale_spectrum_to_reference(omega, spectral_function, ref_center, ref_width,
+                                   current_center=None, current_width=None):
+    """
+    Rescale a spectral function to match a reference spectral width.
+    
+    This applies a linear rescaling of the frequency axis such that the
+    spectrum's center and width match the reference.
+    
+    Parameters:
+    omega: Frequency array of the spectrum to rescale
+    spectral_function: Spectral function values
+    ref_center: Reference spectral center (from lowest temperature)
+    ref_width: Reference spectral width (from lowest temperature)
+    current_center: Current spectral center (if None, computed from data)
+    current_width: Current spectral width (if None, computed from data)
+    
+    Returns:
+    (rescaled_omega, rescaled_spectral) - new omega grid and interpolated spectral values
+    """
+    # Determine current spectral characteristics if not provided
+    if current_center is None or current_width is None:
+        _, _, current_center, current_width = determine_spectral_width(omega, spectral_function)
+    
+    if current_center is None or current_width is None or current_width == 0:
+        print("    Warning: Could not determine spectral width, skipping rescaling")
+        return omega, spectral_function
+    
+    if ref_width is None or ref_width == 0:
+        print("    Warning: Reference width is invalid, skipping rescaling")
+        return omega, spectral_function
+    
+    # Calculate the scaling factor
+    scale_factor = ref_width / current_width
+    
+    # Apply the rescaling: shift to center, scale, shift back to reference center
+    # omega_new = ref_center + (omega - current_center) * scale_factor
+    # But we want to keep the original omega grid and interpolate the spectral values
+    
+    # Create the inverse mapping: for each point on original grid, 
+    # find where it maps from in the rescaled spectrum
+    # original_omega -> rescaled_omega: omega_r = ref_center + (omega - current_center) * scale_factor
+    # We want spectral at original omega, so we need to sample from the rescaled function
+    # S_new(omega) = S_old(omega_old) where omega = ref_center + (omega_old - current_center) * scale_factor
+    # => omega_old = current_center + (omega - ref_center) / scale_factor
+    
+    # For each omega in the original grid, find the corresponding omega_old
+    omega_old = current_center + (omega - ref_center) / scale_factor
+    
+    # Interpolate the original spectrum at these new positions
+    f = interp1d(omega, spectral_function, kind='linear', bounds_error=False, fill_value=0.0)
+    rescaled_spectral = f(omega_old)
+    
+    # The rescaled spectrum is on the original omega grid
+    return omega, rescaled_spectral
+
+
+def get_reference_spectral_width_from_files(file_list_by_beta):
+    """
+    Determine the reference spectral width from the lowest temperature (highest beta) data.
+    
+    Parameters:
+    file_list_by_beta: Dictionary mapping beta_bin_idx -> list of file paths
+    
+    Returns:
+    (ref_center, ref_width, ref_beta) - reference values from the lowest temperature
+    """
+    # Find the highest beta (lowest temperature)
+    max_beta = -np.inf
+    max_beta_bin = None
+    
+    for beta_bin_idx, file_list in file_list_by_beta.items():
+        # We need to determine the actual beta value for this bin
+        # This is a bit tricky since we don't have direct access to beta values here
+        # We'll load the first file and parse its beta
+        if file_list:
+            first_file = file_list[0]
+            # Try to extract beta from filename
+            if first_file.startswith('DSSF_HDF5:'):
+                parts = first_file[10:].split(':')
+                if len(parts) >= 3:
+                    beta_group = parts[2]  # e.g., 'beta_8.93617' or 'T_0.5'
+                    beta_match = re.search(r'beta_([0-9.+-eE]+|inf)', beta_group)
+                    if beta_match:
+                        beta_str = beta_match.group(1)
+                        beta = np.inf if beta_str.lower() == 'inf' else float(beta_str)
+                        if beta > max_beta:
+                            max_beta = beta
+                            max_beta_bin = beta_bin_idx
+            else:
+                # Try parsing from filename
+                parsed = parse_spectral_filename(first_file) or parse_spectral_dataset_name(first_file.split(':')[-1] if 'HDF5:' in first_file else first_file)
+                if parsed and parsed[1] is not None:
+                    beta = parsed[1]
+                    if beta > max_beta:
+                        max_beta = beta
+                        max_beta_bin = beta_bin_idx
+    
+    if max_beta_bin is None:
+        print("    Warning: Could not find highest beta bin for reference width")
+        return None, None, None
+    
+    # Load data from highest beta bin
+    file_list = file_list_by_beta[max_beta_bin]
+    mean_omega, mean_spectral, _ = _load_and_average_spectral(file_list)
+    
+    if mean_omega is None:
+        print("    Warning: Could not load spectral data for reference width")
+        return None, None, None
+    
+    # Determine spectral width
+    _, _, ref_center, ref_width = determine_spectral_width(mean_omega, mean_spectral)
+    
+    if ref_center is None:
+        print("    Warning: Could not determine spectral width from reference data")
+        return None, None, None
+    
+    print(f"    Reference spectral width from β={max_beta:.4g}: center={ref_center:.4f}, width={ref_width:.4f}")
+    
+    return ref_center, ref_width, max_beta
+
+
 def calculate_qfi_from_spectral(omega, spectral_function, beta):
     """
     Calculate quantum Fisher information from spectral function.
@@ -818,7 +1005,24 @@ def _assign_beta_bin(beta_val, bins, tol):
 
 def _process_species_spectral(species, beta_groups, beta_bin_values, 
                               structure_factor_dir, all_species_qfi_data):
-    """Process all spectral data for a single species across different beta values."""
+    """Process all spectral data for a single species across different beta values.
+    
+    Uses spectral width rescaling to correct for insufficient Lanczos space at high temperatures.
+    The lowest temperature (highest beta) spectrum is used as reference for the correct spectral width.
+    """
+    
+    # First, determine the reference spectral width from the lowest temperature data
+    # Only if rescaling is enabled
+    if ENABLE_SPECTRAL_RESCALING:
+        ref_center, ref_width, ref_beta = get_reference_spectral_width_from_files(beta_groups)
+        
+        if ref_center is not None:
+            print(f"  Using spectral width rescaling (reference from β={ref_beta:.4g})")
+        else:
+            print(f"  Warning: No reference spectral width available, proceeding without rescaling")
+    else:
+        ref_center, ref_width, ref_beta = None, None, None
+        print(f"  Spectral width rescaling is disabled")
     
     for beta_bin_idx, file_list in beta_groups.items():
         beta = _get_bin_beta(beta_bin_values[beta_bin_idx])
@@ -833,12 +1037,35 @@ def _process_species_spectral(species, beta_groups, beta_bin_values,
             print(f"    Failed to load data")
             continue
         
-        # Calculate QFI from averaged spectral function
-        qfi = calculate_qfi_from_spectral(mean_omega, mean_spectral, beta) * QFI_SCALE_FACTOR
+        # Apply spectral width rescaling if reference is available
+        # Skip rescaling for the reference beta itself (or very close to it)
+        if ref_center is not None and ref_width is not None:
+            if not (np.isinf(beta) and np.isinf(ref_beta)) and abs(beta - ref_beta) > 1e-3 * ref_beta:
+                # Rescale the averaged spectrum
+                _, rescaled_spectral = rescale_spectrum_to_reference(
+                    mean_omega, mean_spectral, ref_center, ref_width)
+                
+                # Also rescale individual sample data
+                rescaled_individual_data = []
+                for omega, spectral, fpath in individual_data:
+                    _, rescaled_spec = rescale_spectrum_to_reference(
+                        omega, spectral, ref_center, ref_width)
+                    rescaled_individual_data.append((omega, rescaled_spec, fpath))
+                
+                print(f"    Applied spectral rescaling to match reference width")
+            else:
+                rescaled_spectral = mean_spectral
+                rescaled_individual_data = individual_data
+        else:
+            rescaled_spectral = mean_spectral
+            rescaled_individual_data = individual_data
+        
+        # Calculate QFI from (rescaled) averaged spectral function
+        qfi = calculate_qfi_from_spectral(mean_omega, rescaled_spectral, beta) * QFI_SCALE_FACTOR
         
         # Calculate QFI for each individual sample
         per_sample_qfi = []
-        for omega, spectral, fpath in individual_data:
+        for omega, spectral, fpath in rescaled_individual_data:
             sample_qfi = calculate_qfi_from_spectral(omega, spectral, beta) * QFI_SCALE_FACTOR
             per_sample_qfi.append((sample_qfi, fpath))
         
@@ -2151,8 +2378,18 @@ if __name__ == "__main__":
                        help='Parameter name for sweep analysis (e.g., Jpm, h, J)')
     parser.add_argument('--skip-processing', action='store_true',
                        help='Skip spectral processing and load existing processed QFI data')
+    parser.add_argument('--no-rescale', action='store_true',
+                       help='Disable spectral width rescaling (default: rescaling enabled)')
     
     args = parser.parse_args()
+    
+    # Set global rescaling flag based on command-line argument
+    if args.no_rescale:
+        ENABLE_SPECTRAL_RESCALING = False
+        print("Spectral width rescaling is DISABLED")
+    else:
+        ENABLE_SPECTRAL_RESCALING = True
+        print("Spectral width rescaling is ENABLED (use --no-rescale to disable)")
     
     if args.skip_processing:
         # Load already processed data mode

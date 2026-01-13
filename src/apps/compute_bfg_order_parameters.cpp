@@ -3,11 +3,16 @@
  * @brief Fast C++ computation of BFG order parameters from wavefunctions
  * 
  * Computes:
- * 1. S(q) - Spin structure factor using S^+S^- correlations
- * 2. Nematic order - Bond orientation anisotropy
- * 3. Stripe structure factor - Bond-bond correlations with orientation phase
- * 4. VBS dimer order - Bond correlations in momentum space
+ * 1. S(q) - Spin structure factor using S^+S^- correlations at ALL k-points + 2D grid
+ * 2. Nematic order - Bond orientation anisotropy (C6 → C2 breaking)
+ * 3. Stripe structure factor - Bond-bond correlations with orientation phase  
+ * 4. VBS (Valence Bond Solid) order - S_D(q) bond dimer structure factor
  * 5. Plaquette/bowtie resonance - Ring-flip correlations
+ * 
+ * Output includes:
+ * - Order parameters at special k-points (Γ, K, M, etc.)
+ * - Full 2D structure factor grids for visualization
+ * - Detailed HDF5 output compatible with Python plotting
  * 
  * Usage:
  *   ./compute_bfg_order_parameters <wavefunction.h5> <cluster_dir> [output.h5]
@@ -74,24 +79,27 @@ inline uint64_t flip_bit(uint64_t state, int site) {
 // -----------------------------------------------------------------------------
 
 // S^+ raises spin: |↓⟩ → |↑⟩, |↑⟩ → 0
+// ED convention: bit=0 is UP (Sz=+1/2), bit=1 is DOWN (Sz=-1/2)
 inline std::pair<int64_t, double> apply_sp(uint64_t state, int site) {
-    if (get_bit(state, site) == 0) {  // spin down
-        return {static_cast<int64_t>(state | (1ULL << site)), 1.0};
+    if (get_bit(state, site) == 1) {  // spin down (bit=1 in ED convention)
+        return {static_cast<int64_t>(state & ~(1ULL << site)), 1.0};  // flip to 0 (up)
     }
     return {-1, 0.0};
 }
 
 // S^- lowers spin: |↑⟩ → |↓⟩, |↓⟩ → 0
+// ED convention: bit=0 is UP (Sz=+1/2), bit=1 is DOWN (Sz=-1/2)
 inline std::pair<int64_t, double> apply_sm(uint64_t state, int site) {
-    if (get_bit(state, site) == 1) {  // spin up
-        return {static_cast<int64_t>(state & ~(1ULL << site)), 1.0};
+    if (get_bit(state, site) == 0) {  // spin up (bit=0 in ED convention)
+        return {static_cast<int64_t>(state | (1ULL << site)), 1.0};  // flip to 1 (down)
     }
     return {-1, 0.0};
 }
 
 // S^z eigenvalue: |↑⟩ → +1/2, |↓⟩ → -1/2
+// ED convention: bit=0 is UP (Sz=+1/2), bit=1 is DOWN (Sz=-1/2)
 inline double sz_value(uint64_t state, int site) {
-    return get_bit(state, site) ? 0.5 : -0.5;
+    return get_bit(state, site) ? -0.5 : 0.5;
 }
 
 // -----------------------------------------------------------------------------
@@ -336,19 +344,25 @@ std::vector<Complex> load_wavefunction(const std::string& filename) {
     try {
         H5::H5File file(filename, H5F_ACC_RDONLY);
         
-        // Try different dataset names
-        std::vector<std::string> dataset_names = {
-            "eigenvector_0", "eigenvectors", "psi", "wavefunction", "ground_state"
+        // Try different dataset paths (including nested groups)
+        std::vector<std::string> dataset_paths = {
+            "eigendata/eigenvector_0",  // Common structure: /eigendata/eigenvector_0
+            "eigenvector_0", 
+            "eigendata/eigenvectors",
+            "eigenvectors", 
+            "psi", 
+            "wavefunction", 
+            "ground_state"
         };
         
         H5::DataSet dataset;
         bool found = false;
         
-        for (const auto& name : dataset_names) {
+        for (const auto& path : dataset_paths) {
             try {
-                dataset = file.openDataSet(name);
+                dataset = file.openDataSet(path);
                 found = true;
-                std::cout << "Found wavefunction in dataset: " << name << std::endl;
+                std::cout << "Found wavefunction in dataset: " << path << std::endl;
                 break;
             } catch (...) {
                 continue;
@@ -356,11 +370,22 @@ std::vector<Complex> load_wavefunction(const std::string& filename) {
         }
         
         if (!found) {
-            // List available datasets
-            std::cout << "Available datasets in file:" << std::endl;
+            // List available datasets/groups
+            std::cout << "Available objects in file:" << std::endl;
             hsize_t num_objs = file.getNumObjs();
             for (hsize_t i = 0; i < num_objs; ++i) {
-                std::cout << "  " << file.getObjnameByIdx(i) << std::endl;
+                std::string obj_name = file.getObjnameByIdx(i);
+                std::cout << "  " << obj_name;
+                // If it's a group, list its contents
+                try {
+                    H5::Group grp = file.openGroup(obj_name);
+                    std::cout << "/" << std::endl;
+                    for (hsize_t j = 0; j < grp.getNumObjs(); ++j) {
+                        std::cout << "    " << grp.getObjnameByIdx(j) << std::endl;
+                    }
+                } catch (...) {
+                    std::cout << std::endl;
+                }
             }
             throw std::runtime_error("Wavefunction dataset not found");
         }
@@ -381,22 +406,29 @@ std::vector<Complex> load_wavefunction(const std::string& filename) {
         
         std::vector<Complex> psi;
         if (is_complex) {
-            std::vector<double> buffer(total_size * 2);
-            // Read as compound type or raw doubles
+            // Read as compound type with "real" and "imag" fields
             H5::CompType complex_type(sizeof(Complex));
-            complex_type.insertMember("r", 0, H5::PredType::NATIVE_DOUBLE);
-            complex_type.insertMember("i", sizeof(double), H5::PredType::NATIVE_DOUBLE);
+            complex_type.insertMember("real", 0, H5::PredType::NATIVE_DOUBLE);
+            complex_type.insertMember("imag", sizeof(double), H5::PredType::NATIVE_DOUBLE);
             
+            psi.resize(total_size);
             try {
-                dataset.read(buffer.data(), H5::PredType::NATIVE_DOUBLE);
-                psi.resize(total_size);
-                for (hsize_t i = 0; i < total_size; ++i) {
-                    psi[i] = Complex(buffer[2 * i], buffer[2 * i + 1]);
-                }
-            } catch (...) {
-                // Try reading as compound
-                psi.resize(total_size);
                 dataset.read(psi.data(), complex_type);
+            } catch (...) {
+                // Try alternative field names "r" and "i"
+                H5::CompType complex_type_alt(sizeof(Complex));
+                complex_type_alt.insertMember("r", 0, H5::PredType::NATIVE_DOUBLE);
+                complex_type_alt.insertMember("i", sizeof(double), H5::PredType::NATIVE_DOUBLE);
+                try {
+                    dataset.read(psi.data(), complex_type_alt);
+                } catch (...) {
+                    // Fall back to reading as raw doubles
+                    std::vector<double> buffer(total_size * 2);
+                    dataset.read(buffer.data(), H5::PredType::NATIVE_DOUBLE);
+                    for (hsize_t i = 0; i < total_size; ++i) {
+                        psi[i] = Complex(buffer[2 * i], buffer[2 * i + 1]);
+                    }
+                }
             }
         } else {
             std::vector<double> real_data(total_size);
@@ -412,6 +444,85 @@ std::vector<Complex> load_wavefunction(const std::string& filename) {
         
     } catch (H5::Exception& e) {
         throw std::runtime_error("HDF5 error: " + std::string(e.getCDetailMsg()));
+    }
+}
+
+// -----------------------------------------------------------------------------
+// Load TPQ state from HDF5 (finds lowest temperature = highest beta)
+// -----------------------------------------------------------------------------
+
+std::pair<std::vector<Complex>, double> load_tpq_state(const std::string& filename, int sample_idx = 0) {
+    try {
+        H5::H5File file(filename, H5F_ACC_RDONLY);
+        
+        // Navigate to TPQ samples
+        std::string sample_path = "tpq/samples/sample_" + std::to_string(sample_idx) + "/states";
+        H5::Group states_group;
+        
+        try {
+            states_group = file.openGroup(sample_path);
+        } catch (...) {
+            throw std::runtime_error("TPQ states not found at: " + sample_path);
+        }
+        
+        // Find all beta_* datasets and determine highest beta (lowest T)
+        std::vector<std::pair<std::string, double>> beta_states;
+        hsize_t num_objs = states_group.getNumObjs();
+        
+        for (hsize_t i = 0; i < num_objs; ++i) {
+            std::string name = states_group.getObjnameByIdx(i);
+            if (name.substr(0, 5) == "beta_") {
+                try {
+                    double beta = std::stod(name.substr(5));
+                    beta_states.push_back({name, beta});
+                } catch (...) {
+                    continue;
+                }
+            }
+        }
+        
+        if (beta_states.empty()) {
+            throw std::runtime_error("No beta_* states found in TPQ data");
+        }
+        
+        // Sort by beta (ascending) and pick the highest (lowest temperature)
+        std::sort(beta_states.begin(), beta_states.end(), 
+                  [](const auto& a, const auto& b) { return a.second < b.second; });
+        
+        std::string best_state = beta_states.back().first;
+        double best_beta = beta_states.back().second;
+        double temperature = 1.0 / best_beta;
+        
+        std::cout << "Selected TPQ state: " << best_state 
+                  << " (beta=" << best_beta << ", T=" << temperature << ")" << std::endl;
+        
+        // Load the state
+        std::string dataset_path = sample_path + "/" + best_state;
+        H5::DataSet dataset = file.openDataSet(dataset_path);
+        
+        H5::DataSpace dataspace = dataset.getSpace();
+        int rank = dataspace.getSimpleExtentNdims();
+        std::vector<hsize_t> dims(rank);
+        dataspace.getSimpleExtentDims(dims.data());
+        
+        hsize_t total_size = 1;
+        for (int i = 0; i < rank; ++i) {
+            total_size *= dims[i];
+        }
+        
+        // Read complex data
+        H5::CompType complex_type(sizeof(Complex));
+        complex_type.insertMember("real", 0, H5::PredType::NATIVE_DOUBLE);
+        complex_type.insertMember("imag", sizeof(double), H5::PredType::NATIVE_DOUBLE);
+        
+        std::vector<Complex> psi(total_size);
+        dataset.read(psi.data(), complex_type);
+        
+        std::cout << "Loaded TPQ state: " << psi.size() << " amplitudes" << std::endl;
+        return {psi, temperature};
+        
+    } catch (H5::Exception& e) {
+        throw std::runtime_error("HDF5 error loading TPQ: " + std::string(e.getCDetailMsg()));
     }
 }
 
@@ -441,11 +552,24 @@ std::vector<std::vector<Complex>> compute_spsm_correlations(
             
             for (int i = 0; i < n_sites; ++i) {
                 for (int j = 0; j < n_sites; ++j) {
-                    // S^+_i S^-_j: need j=up, i=down
-                    // After: j=down, i=up
-                    if (get_bit(state, j) == 1 && get_bit(state, i) == 0) {
-                        uint64_t new_state = flip_bit(flip_bit(state, i), j);
-                        local_corr[i][j] += std::conj(psi[new_state]) * coeff;
+                    if (i == j) {
+                        // Diagonal term: S^+_i S^-_i = (1/2 + Sz_i) for spin-1/2
+                        // ⟨ψ|S^+_i S^-_i|ψ⟩ = Σ_state |ψ(state)|² × (1/2 + Sz_i(state))
+                        // For bit=0 (UP): Sz = +1/2, so S^+S^- = 1
+                        // For bit=1 (DOWN): Sz = -1/2, so S^+S^- = 0
+                        if (get_bit(state, i) == 0) {  // spin up
+                            local_corr[i][i] += std::norm(coeff);  // contributes 1
+                        }
+                        // bit=1 (down) contributes 0, so no else branch needed
+                    } else {
+                        // Off-diagonal: S^+_i S^-_j |state⟩ with i ≠ j
+                        // S^-_j acts first: needs site j to be UP (bit=0), flips to DOWN (bit=1)
+                        // S^+_i acts second: needs site i to be DOWN (bit=1), flips to UP (bit=0)
+                        // ED convention: bit=0 is UP, bit=1 is DOWN
+                        if (get_bit(state, j) == 0 && get_bit(state, i) == 1) {
+                            uint64_t new_state = flip_bit(flip_bit(state, i), j);
+                            local_corr[i][j] += std::conj(psi[new_state]) * coeff;
+                        }
                     }
                 }
             }
@@ -507,14 +631,15 @@ std::map<std::pair<int, int>, Complex> compute_xy_bond_expectations(
                 int i = edge_list[e].first;
                 int j = edge_list[e].second;
                 
-                // S^+_i S^-_j term
-                if (get_bit(state, j) == 1 && get_bit(state, i) == 0) {
+                // S^+_i S^-_j term: j must be UP (bit=0), i must be DOWN (bit=1)
+                // ED convention: bit=0 is UP, bit=1 is DOWN
+                if (get_bit(state, j) == 0 && get_bit(state, i) == 1) {
                     uint64_t new_state = flip_bit(flip_bit(state, i), j);
                     local_bonds[e] += std::conj(psi[new_state]) * coeff;
                 }
                 
-                // S^-_i S^+_j term
-                if (get_bit(state, i) == 1 && get_bit(state, j) == 0) {
+                // S^-_i S^+_j term: i must be UP (bit=0), j must be DOWN (bit=1)
+                if (get_bit(state, i) == 0 && get_bit(state, j) == 1) {
                     uint64_t new_state = flip_bit(flip_bit(state, i), j);
                     local_bonds[e] += std::conj(psi[new_state]) * coeff;
                 }
@@ -570,20 +695,22 @@ Complex compute_bond_bond_correlation(
             int s_j2 = get_bit(state, j2);
             
             // Term 1: S^+_{i1} S^-_{j1} S^+_{i2} S^-_{j2}
-            // Requires: j1=up, i1=down, j2=up, i2=down
-            if (s_j1 == 1 && s_i1 == 0 && s_j2 == 1 && s_i2 == 0) {
+            // S^-_j acts first (needs j=UP=0), S^+_i acts second (needs i=DOWN=1)
+            // ED convention: bit=0 is UP, bit=1 is DOWN
+            if (s_j1 == 0 && s_i1 == 1 && s_j2 == 0 && s_i2 == 1) {
                 uint64_t new_state = state;
-                new_state = flip_bit(new_state, j1);  // j1: up -> down
-                new_state = flip_bit(new_state, i1);  // i1: down -> up
-                new_state = flip_bit(new_state, j2);  // j2: up -> down
-                new_state = flip_bit(new_state, i2);  // i2: down -> up
+                new_state = flip_bit(new_state, j1);  // j1: up(0) -> down(1)
+                new_state = flip_bit(new_state, i1);  // i1: down(1) -> up(0)
+                new_state = flip_bit(new_state, j2);  // j2: up(0) -> down(1)
+                new_state = flip_bit(new_state, i2);  // i2: down(1) -> up(0)
                 Complex contrib = std::conj(psi[new_state]) * coeff;
                 local_real += contrib.real();
                 local_imag += contrib.imag();
             }
             
             // Term 2: S^+_{i1} S^-_{j1} S^-_{i2} S^+_{j2}
-            if (s_j1 == 1 && s_i1 == 0 && s_i2 == 1 && s_j2 == 0) {
+            // S^+S^-: j1=UP(0), i1=DOWN(1); S^-S^+: i2=UP(0), j2=DOWN(1)
+            if (s_j1 == 0 && s_i1 == 1 && s_i2 == 0 && s_j2 == 1) {
                 uint64_t new_state = state;
                 new_state = flip_bit(new_state, j1);
                 new_state = flip_bit(new_state, i1);
@@ -595,7 +722,8 @@ Complex compute_bond_bond_correlation(
             }
             
             // Term 3: S^-_{i1} S^+_{j1} S^+_{i2} S^-_{j2}
-            if (s_i1 == 1 && s_j1 == 0 && s_j2 == 1 && s_i2 == 0) {
+            // S^-S^+: i1=UP(0), j1=DOWN(1); S^+S^-: j2=UP(0), i2=DOWN(1)
+            if (s_i1 == 0 && s_j1 == 1 && s_j2 == 0 && s_i2 == 1) {
                 uint64_t new_state = state;
                 new_state = flip_bit(new_state, i1);
                 new_state = flip_bit(new_state, j1);
@@ -607,7 +735,8 @@ Complex compute_bond_bond_correlation(
             }
             
             // Term 4: S^-_{i1} S^+_{j1} S^-_{i2} S^+_{j2}
-            if (s_i1 == 1 && s_j1 == 0 && s_i2 == 1 && s_j2 == 0) {
+            // Both S^-S^+: i1=UP(0), j1=DOWN(1), i2=UP(0), j2=DOWN(1)
+            if (s_i1 == 0 && s_j1 == 1 && s_i2 == 0 && s_j2 == 1) {
                 uint64_t new_state = state;
                 new_state = flip_bit(new_state, i1);
                 new_state = flip_bit(new_state, j1);
@@ -653,16 +782,17 @@ Complex compute_bowtie_resonance(
             int b3 = get_bit(state, s3);
             int b4 = get_bit(state, s4);
             
-            // S^+_1 S^-_2 S^+_3 S^-_4: need s1=down, s2=up, s3=down, s4=up
-            if (b1 == 0 && b2 == 1 && b3 == 0 && b4 == 1) {
+            // S^+_1 S^-_2 S^+_3 S^-_4: need s1=DOWN(1), s2=UP(0), s3=DOWN(1), s4=UP(0)
+            // ED convention: bit=0 is UP, bit=1 is DOWN
+            if (b1 == 1 && b2 == 0 && b3 == 1 && b4 == 0) {
                 uint64_t new_state = flip_bit(flip_bit(flip_bit(flip_bit(state, s1), s2), s3), s4);
                 Complex contrib = std::conj(psi[new_state]) * coeff;
                 local_real += contrib.real();
                 local_imag += contrib.imag();
             }
             
-            // S^-_1 S^+_2 S^-_3 S^+_4: need s1=up, s2=down, s3=up, s4=down
-            if (b1 == 1 && b2 == 0 && b3 == 1 && b4 == 0) {
+            // S^-_1 S^+_2 S^-_3 S^+_4: need s1=UP(0), s2=DOWN(1), s3=UP(0), s4=DOWN(1)
+            if (b1 == 0 && b2 == 1 && b3 == 0 && b4 == 1) {
                 uint64_t new_state = flip_bit(flip_bit(flip_bit(flip_bit(state, s1), s2), s3), s4);
                 Complex contrib = std::conj(psi[new_state]) * coeff;
                 local_real += contrib.real();
@@ -709,8 +839,9 @@ StructureFactorResult compute_spin_structure_factor(
         
         for (int i = 0; i < n_sites; ++i) {
             for (int j = 0; j < n_sites; ++j) {
-                double dr_x = cluster.positions[i][0] - cluster.positions[j][0];
-                double dr_y = cluster.positions[i][1] - cluster.positions[j][1];
+                // Standard convention: S(q) = (1/N) Σᵢⱼ ⟨S⁺ᵢ S⁻ⱼ⟩ e^(iq·(Rⱼ-Rᵢ))
+                double dr_x = cluster.positions[j][0] - cluster.positions[i][0];
+                double dr_y = cluster.positions[j][1] - cluster.positions[i][1];
                 double phase_arg = q[0] * dr_x + q[1] * dr_y;
                 s_q += spsm_corr[i][j] * std::exp(I * phase_arg);
             }
@@ -869,6 +1000,178 @@ StripeResult compute_stripe_structure_factor(
 }
 
 // -----------------------------------------------------------------------------
+// Compute VBS (Valence Bond Solid) order - Bond dimer structure factor
+// S_D(q) = (1/N_b) Σ_{b,b'} exp(iq·(r_b - r_{b'})) <δD_b δD_{b'}>
+// where δD_b = D_b - <D> and D_b = S^+_i S^-_j + h.c.
+// -----------------------------------------------------------------------------
+
+struct VBSResult {
+    std::vector<Complex> S_d;          // S_D(q) at each k-point
+    std::vector<std::vector<Complex>> S_d_2d;  // 2D grid for visualization
+    int q_max_idx;
+    Complex s_d_max;
+    std::array<double, 2> q_max;
+    double m_vbs;
+    double D_mean;                      // Mean bond value
+    int n_q_grid;                       // Size of 2D grid
+};
+
+VBSResult compute_vbs_order(
+    const std::map<std::pair<int, int>, Complex>& bond_exp,
+    const Cluster& cluster,
+    int n_q_grid = 50
+) {
+    VBSResult result;
+    result.n_q_grid = n_q_grid;
+    int n_bonds = cluster.edges_nn.size();
+    int n_k = cluster.k_points.size();
+    
+    if (n_bonds == 0) {
+        result.m_vbs = 0.0;
+        return result;
+    }
+    
+    std::cout << "Computing VBS order (bond dimer structure factor)..." << std::flush;
+    auto start = std::chrono::high_resolution_clock::now();
+    
+    // Compute bond centers
+    std::vector<std::pair<int, int>> edges(cluster.edges_nn.begin(), cluster.edges_nn.end());
+    std::vector<std::array<double, 2>> bond_centers(n_bonds);
+    
+    for (int b = 0; b < n_bonds; ++b) {
+        int i = edges[b].first;
+        int j = edges[b].second;
+        bond_centers[b][0] = 0.5 * (cluster.positions[i][0] + cluster.positions[j][0]);
+        bond_centers[b][1] = 0.5 * (cluster.positions[i][1] + cluster.positions[j][1]);
+    }
+    
+    // Mean bond value
+    double sum_real = 0.0;
+    for (int b = 0; b < n_bonds; ++b) {
+        sum_real += std::real(bond_exp.at(edges[b]));
+    }
+    result.D_mean = sum_real / n_bonds;
+    
+    // Connected bond correlations δD
+    std::vector<Complex> delta_D(n_bonds);
+    for (int b = 0; b < n_bonds; ++b) {
+        delta_D[b] = bond_exp.at(edges[b]) - result.D_mean;
+    }
+    
+    // =========================================================================
+    // Compute S_D(q) at discrete allowed k-points
+    // =========================================================================
+    result.S_d.resize(n_k, 0.0);
+    
+    #pragma omp parallel for
+    for (int ik = 0; ik < n_k; ++ik) {
+        const auto& q = cluster.k_points[ik];
+        Complex s_d = 0.0;
+        
+        for (int b1 = 0; b1 < n_bonds; ++b1) {
+            for (int b2 = 0; b2 < n_bonds; ++b2) {
+                double dr_x = bond_centers[b1][0] - bond_centers[b2][0];
+                double dr_y = bond_centers[b1][1] - bond_centers[b2][1];
+                double phase_arg = q[0] * dr_x + q[1] * dr_y;
+                s_d += delta_D[b1] * std::conj(delta_D[b2]) * std::exp(I * phase_arg);
+            }
+        }
+        result.S_d[ik] = s_d / static_cast<double>(n_bonds);
+    }
+    
+    // Find maximum
+    double max_val = 0.0;
+    for (int ik = 0; ik < n_k; ++ik) {
+        double val = std::abs(result.S_d[ik]);
+        if (val > max_val) {
+            max_val = val;
+            result.q_max_idx = ik;
+            result.s_d_max = result.S_d[ik];
+            result.q_max = cluster.k_points[ik];
+        }
+    }
+    result.m_vbs = std::sqrt(max_val / n_bonds);
+    
+    // =========================================================================
+    // Also compute on dense 2D grid for visualization
+    // =========================================================================
+    result.S_d_2d.resize(n_q_grid, std::vector<Complex>(n_q_grid, 0.0));
+    
+    #pragma omp parallel for collapse(2)
+    for (int i1 = 0; i1 < n_q_grid; ++i1) {
+        for (int i2 = 0; i2 < n_q_grid; ++i2) {
+            double q1 = -1.0 + 2.0 * i1 / (n_q_grid - 1);
+            double q2 = -1.0 + 2.0 * i2 / (n_q_grid - 1);
+            double qx = q1 * cluster.b1[0] + q2 * cluster.b2[0];
+            double qy = q1 * cluster.b1[1] + q2 * cluster.b2[1];
+            
+            Complex s_d = 0.0;
+            for (int b1 = 0; b1 < n_bonds; ++b1) {
+                for (int b2 = 0; b2 < n_bonds; ++b2) {
+                    double dr_x = bond_centers[b1][0] - bond_centers[b2][0];
+                    double dr_y = bond_centers[b1][1] - bond_centers[b2][1];
+                    double phase_arg = qx * dr_x + qy * dr_y;
+                    s_d += delta_D[b1] * std::conj(delta_D[b2]) * std::exp(I * phase_arg);
+                }
+            }
+            result.S_d_2d[i1][i2] = s_d / static_cast<double>(n_bonds);
+        }
+    }
+    
+    auto end = std::chrono::high_resolution_clock::now();
+    auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
+    std::cout << " done (" << duration.count() << " ms)" << std::endl;
+    std::cout << "  VBS order: m_vbs = " << result.m_vbs 
+              << " at q = (" << result.q_max[0] << ", " << result.q_max[1] << ")" << std::endl;
+    
+    return result;
+}
+
+// -----------------------------------------------------------------------------
+// Compute 2D S(q) grid for visualization
+// -----------------------------------------------------------------------------
+
+std::vector<std::vector<Complex>> compute_sq_2d_grid(
+    const std::vector<std::vector<Complex>>& spsm_corr,
+    const Cluster& cluster,
+    int n_q_grid = 50
+) {
+    int n_sites = cluster.n_sites;
+    std::vector<std::vector<Complex>> s_q_2d(n_q_grid, std::vector<Complex>(n_q_grid, 0.0));
+    
+    std::cout << "Computing S(q) on " << n_q_grid << "x" << n_q_grid << " grid..." << std::flush;
+    auto start = std::chrono::high_resolution_clock::now();
+    
+    #pragma omp parallel for collapse(2)
+    for (int i1 = 0; i1 < n_q_grid; ++i1) {
+        for (int i2 = 0; i2 < n_q_grid; ++i2) {
+            double q1 = -1.0 + 2.0 * i1 / (n_q_grid - 1);
+            double q2 = -1.0 + 2.0 * i2 / (n_q_grid - 1);
+            double qx = q1 * cluster.b1[0] + q2 * cluster.b2[0];
+            double qy = q1 * cluster.b1[1] + q2 * cluster.b2[1];
+            
+            Complex s_q = 0.0;
+            for (int i = 0; i < n_sites; ++i) {
+                for (int j = 0; j < n_sites; ++j) {
+                    // Standard convention: S(q) = (1/N) Σᵢⱼ ⟨S⁺ᵢ S⁻ⱼ⟩ e^(iq·(Rⱼ-Rᵢ))
+                    double dr_x = cluster.positions[j][0] - cluster.positions[i][0];
+                    double dr_y = cluster.positions[j][1] - cluster.positions[i][1];
+                    double phase_arg = qx * dr_x + qy * dr_y;
+                    s_q += spsm_corr[i][j] * std::exp(I * phase_arg);
+                }
+            }
+            s_q_2d[i1][i2] = s_q / static_cast<double>(n_sites);
+        }
+    }
+    
+    auto end = std::chrono::high_resolution_clock::now();
+    auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
+    std::cout << " done (" << duration.count() << " ms)" << std::endl;
+    
+    return s_q_2d;
+}
+
+// -----------------------------------------------------------------------------
 // Compute plaquette/bowtie order
 // -----------------------------------------------------------------------------
 
@@ -964,7 +1267,7 @@ PlaquetteResult compute_plaquette_order(
 }
 
 // -----------------------------------------------------------------------------
-// Save results to HDF5
+// Save results to HDF5 (full version with 2D grids and VBS)
 // -----------------------------------------------------------------------------
 
 void save_results(
@@ -972,8 +1275,11 @@ void save_results(
     const StructureFactorResult& sf,
     const NematicResult& nem,
     const StripeResult& stripe,
+    const VBSResult& vbs,
     const PlaquetteResult& plaq,
-    const Cluster& cluster
+    const Cluster& cluster,
+    const std::vector<std::vector<Complex>>& s_q_2d,
+    int n_q_grid
 ) {
     try {
         H5::H5File file(filename, H5F_ACC_TRUNC);
@@ -983,12 +1289,49 @@ void save_results(
         complex_type.insertMember("r", 0, H5::PredType::NATIVE_DOUBLE);
         complex_type.insertMember("i", sizeof(double), H5::PredType::NATIVE_DOUBLE);
         
-        // Save structure factor S(q)
+        // Save structure factor S(q) at k-points
         {
             hsize_t dims[1] = {sf.s_q.size()};
             H5::DataSpace dataspace(1, dims);
             H5::DataSet dataset = file.createDataSet("S_q", complex_type, dataspace);
             dataset.write(sf.s_q.data(), complex_type);
+        }
+        
+        // Save 2D S(q) grid for visualization
+        if (!s_q_2d.empty()) {
+            hsize_t dims[2] = {static_cast<hsize_t>(n_q_grid), static_cast<hsize_t>(n_q_grid)};
+            H5::DataSpace dataspace(2, dims);
+            H5::DataSet dataset = file.createDataSet("S_q_2d", complex_type, dataspace);
+            // Flatten for HDF5
+            std::vector<Complex> flat(n_q_grid * n_q_grid);
+            for (int i = 0; i < n_q_grid; ++i) {
+                for (int j = 0; j < n_q_grid; ++j) {
+                    flat[i * n_q_grid + j] = s_q_2d[i][j];
+                }
+            }
+            dataset.write(flat.data(), complex_type);
+        }
+        
+        // Save VBS S_D(q) at k-points
+        if (!vbs.S_d.empty()) {
+            hsize_t dims[1] = {vbs.S_d.size()};
+            H5::DataSpace dataspace(1, dims);
+            H5::DataSet dataset = file.createDataSet("S_D_q", complex_type, dataspace);
+            dataset.write(vbs.S_d.data(), complex_type);
+        }
+        
+        // Save 2D S_D(q) grid for VBS visualization
+        if (!vbs.S_d_2d.empty()) {
+            hsize_t dims[2] = {static_cast<hsize_t>(vbs.n_q_grid), static_cast<hsize_t>(vbs.n_q_grid)};
+            H5::DataSpace dataspace(2, dims);
+            H5::DataSet dataset = file.createDataSet("S_D_q_2d", complex_type, dataspace);
+            std::vector<Complex> flat(vbs.n_q_grid * vbs.n_q_grid);
+            for (int i = 0; i < vbs.n_q_grid; ++i) {
+                for (int j = 0; j < vbs.n_q_grid; ++j) {
+                    flat[i * vbs.n_q_grid + j] = vbs.S_d_2d[i][j];
+                }
+            }
+            dataset.write(flat.data(), complex_type);
         }
         
         // Save k-points
@@ -1002,6 +1345,18 @@ void save_results(
                 k_flat[2 * i + 1] = cluster.k_points[i][1];
             }
             dataset.write(k_flat.data(), H5::PredType::NATIVE_DOUBLE);
+        }
+        
+        // Save q-grid parameters for 2D visualization
+        {
+            std::vector<double> q_vals(n_q_grid);
+            for (int i = 0; i < n_q_grid; ++i) {
+                q_vals[i] = -1.0 + 2.0 * i / (n_q_grid - 1);
+            }
+            hsize_t dims[1] = {static_cast<hsize_t>(n_q_grid)};
+            H5::DataSpace dataspace(1, dims);
+            H5::DataSet dataset = file.createDataSet("q_grid_vals", H5::PredType::NATIVE_DOUBLE, dataspace);
+            dataset.write(q_vals.data(), H5::PredType::NATIVE_DOUBLE);
         }
         
         // Save scalar results as attributes
@@ -1020,26 +1375,40 @@ void save_results(
                 attr.write(H5::PredType::NATIVE_INT, &val);
             };
             
+            // Translation order
             write_scalar("m_translation", sf.m_translation);
             write_scalar("s_q_max", std::abs(sf.s_q_max));
             write_int("q_max_idx", sf.q_max_idx);
             write_scalar("q_max_x", sf.q_max[0]);
             write_scalar("q_max_y", sf.q_max[1]);
             
+            // Nematic order
             write_scalar("m_nematic", nem.m_nem);
             write_scalar("nematic_anisotropy", nem.anisotropy);
             
+            // Stripe order
             write_scalar("m_stripe", stripe.m_stripe);
             write_scalar("S_stripe_abs", std::abs(stripe.S_stripe));
             
+            // VBS order
+            write_scalar("m_vbs", vbs.m_vbs);
+            write_scalar("D_mean", vbs.D_mean);
+            write_scalar("s_d_max", std::abs(vbs.s_d_max));
+            write_int("vbs_q_max_idx", vbs.q_max_idx);
+            write_scalar("vbs_q_max_x", vbs.q_max[0]);
+            write_scalar("vbs_q_max_y", vbs.q_max[1]);
+            
+            // Plaquette order
             write_scalar("m_plaquette", plaq.m_plaquette);
             write_scalar("P_mean", plaq.P_mean);
             write_scalar("resonance_strength", plaq.resonance_strength);
             write_int("plaquette_q_max_idx", plaq.q_max_idx);
             
+            // Cluster info
             write_int("n_sites", cluster.n_sites);
             write_int("n_bonds", static_cast<int>(cluster.edges_nn.size()));
             write_int("n_bowties", static_cast<int>(cluster.bowties.size()));
+            write_int("n_q_grid", n_q_grid);
         }
         
         // Save plaquette resonances
@@ -1071,13 +1440,16 @@ void save_results(
 
 struct OrderParameterResults {
     double jpm;
+    double temperature = 0.0;  // For TPQ mode, T=0 for ground state
     double m_translation;
     double m_nematic;
     double m_stripe;
+    double m_vbs;
     double m_plaquette;
     double resonance_strength;
     double anisotropy;
     double P_mean;
+    double D_mean;
 };
 
 // -----------------------------------------------------------------------------
@@ -1106,6 +1478,11 @@ OrderParameterResults compute_all_order_parameters(
     results.m_nematic = nem_result.m_nem;
     results.anisotropy = nem_result.anisotropy;
     
+    // VBS order
+    auto vbs_result = compute_vbs_order(bond_exp, cluster);
+    results.m_vbs = vbs_result.m_vbs;
+    results.D_mean = vbs_result.D_mean;
+    
     // Stripe (can be slow)
     if (!skip_stripe && cluster.edges_nn.size() <= 50) {
         auto stripe_result = compute_stripe_structure_factor(psi, cluster);
@@ -1129,8 +1506,12 @@ OrderParameterResults compute_all_order_parameters(
 
 std::vector<OrderParameterResults> scan_jpm_directories(
     const std::string& scan_dir,
+    const std::string& output_dir,
     int n_workers,
-    bool skip_stripe
+    int n_q_grid,
+    bool skip_stripe,
+    bool save_full,
+    bool use_tpq
 ) {
     // Find all Jpm=* directories
     std::vector<std::pair<double, std::string>> jpm_dirs;
@@ -1149,6 +1530,9 @@ std::vector<OrderParameterResults> scan_jpm_directories(
     std::sort(jpm_dirs.begin(), jpm_dirs.end());
     
     std::cout << "Found " << jpm_dirs.size() << " Jpm directories" << std::endl;
+    if (save_full) {
+        std::cout << "Full output mode: saving S(q) and S_D(q) 2D grids per directory" << std::endl;
+    }
     
     if (jpm_dirs.empty()) {
         return {};
@@ -1173,17 +1557,38 @@ std::vector<OrderParameterResults> scan_jpm_directories(
         try {
             // Find wavefunction file
             std::string wf_file;
-            for (const auto& entry : fs::directory_iterator(dir)) {
-                std::string fname = entry.path().filename().string();
-                if (fname.find(".h5") != std::string::npos && 
-                    fname.find("eigenvector") != std::string::npos) {
-                    wf_file = entry.path().string();
-                    break;
+            
+            // First check output/ subdirectory for ed_results.h5
+            std::string output_subdir = dir + "/output";
+            if (fs::exists(output_subdir)) {
+                std::string ed_results = output_subdir + "/ed_results.h5";
+                if (fs::exists(ed_results)) {
+                    wf_file = ed_results;
+                } else {
+                    // Search for any .h5 file in output/
+                    for (const auto& entry : fs::directory_iterator(output_subdir)) {
+                        if (entry.path().extension() == ".h5") {
+                            wf_file = entry.path().string();
+                            break;
+                        }
+                    }
+                }
+            }
+            
+            // If not found in output/, try main directory
+            if (wf_file.empty()) {
+                for (const auto& entry : fs::directory_iterator(dir)) {
+                    std::string fname = entry.path().filename().string();
+                    if (fname.find(".h5") != std::string::npos && 
+                        fname.find("eigenvector") != std::string::npos) {
+                        wf_file = entry.path().string();
+                        break;
+                    }
                 }
             }
             
             if (wf_file.empty()) {
-                // Try other patterns
+                // Try other patterns in main directory
                 for (const auto& entry : fs::directory_iterator(dir)) {
                     if (entry.path().extension() == ".h5") {
                         wf_file = entry.path().string();
@@ -1198,20 +1603,81 @@ std::vector<OrderParameterResults> scan_jpm_directories(
                 continue;
             }
             
-            // Load wavefunction
-            auto psi = load_wavefunction(wf_file);
+            // Load wavefunction (ground state or TPQ lowest temperature)
+            std::vector<Complex> psi;
+            double temperature = 0.0;
             
-            // Compute order parameters
-            auto results = compute_all_order_parameters(psi, cluster, jpm, skip_stripe);
+            if (use_tpq) {
+                try {
+                    auto [tpq_psi, T] = load_tpq_state(wf_file);
+                    psi = std::move(tpq_psi);
+                    temperature = T;
+                } catch (const std::exception& e) {
+                    std::lock_guard<std::mutex> lock(print_mutex);
+                    std::cerr << "TPQ load failed for " << dir << ": " << e.what() 
+                              << ", falling back to ground state" << std::endl;
+                    psi = load_wavefunction(wf_file);
+                }
+            } else {
+                psi = load_wavefunction(wf_file);
+            }
+            
+            OrderParameterResults results;
+            results.jpm = jpm;
+            results.temperature = temperature;
+            
+            if (save_full) {
+                // Full computation with 2D grids
+                auto spsm_corr = compute_spsm_correlations(psi, cluster.n_sites);
+                auto sf_result = compute_spin_structure_factor(spsm_corr, cluster);
+                auto s_q_2d = compute_sq_2d_grid(spsm_corr, cluster, n_q_grid);
+                
+                auto bond_exp = compute_xy_bond_expectations(psi, cluster);
+                auto nem_result = compute_nematic_order(bond_exp, cluster);
+                auto vbs_result = compute_vbs_order(bond_exp, cluster, n_q_grid);
+                
+                StripeResult stripe_result;
+                if (!skip_stripe && cluster.edges_nn.size() <= 50) {
+                    stripe_result = compute_stripe_structure_factor(psi, cluster);
+                }
+                
+                auto plaq_result = compute_plaquette_order(psi, cluster);
+                
+                // Save full results to per-Jpm file
+                std::ostringstream oss;
+                oss << std::fixed << std::setprecision(4) << jpm;
+                std::string out_file = output_dir + "/order_params_Jpm=" + oss.str() + ".h5";
+                save_results(out_file, sf_result, nem_result, stripe_result, vbs_result,
+                            plaq_result, cluster, s_q_2d, n_q_grid);
+                
+                // Fill scalar results for summary
+                results.m_translation = sf_result.m_translation;
+                results.m_nematic = nem_result.m_nem;
+                results.anisotropy = nem_result.anisotropy;
+                results.m_vbs = vbs_result.m_vbs;
+                results.D_mean = vbs_result.D_mean;
+                results.m_stripe = stripe_result.m_stripe;
+                results.m_plaquette = plaq_result.m_plaquette;
+                results.resonance_strength = plaq_result.resonance_strength;
+                results.P_mean = plaq_result.P_mean;
+            } else {
+                // Quick scalar-only computation
+                results = compute_all_order_parameters(psi, cluster, jpm, skip_stripe);
+                results.temperature = temperature;  // Preserve temperature from TPQ
+            }
+            
             all_results[i] = results;
             
             int done = ++completed;
             {
                 std::lock_guard<std::mutex> lock(print_mutex);
                 std::cout << "[" << done << "/" << jpm_dirs.size() << "] "
-                          << "Jpm=" << std::fixed << std::setprecision(4) << jpm
-                          << " | m_trans=" << std::setprecision(6) << results.m_translation
-                          << " | m_nem=" << results.m_nematic
+                          << "Jpm=" << std::fixed << std::setprecision(4) << jpm;
+                if (use_tpq) {
+                    std::cout << " T=" << std::setprecision(6) << results.temperature;
+                }
+                std::cout << " | m_trans=" << std::setprecision(6) << results.m_translation
+                          << " | m_vbs=" << results.m_vbs
                           << " | m_plaq=" << results.m_plaquette
                           << " | res=" << results.resonance_strength
                           << std::endl;
@@ -1268,6 +1734,17 @@ void save_scan_results(
         write_dataset("anisotropy", aniso);
         write_dataset("P_mean", P_mean);
         
+        // Add VBS order parameters
+        std::vector<double> m_vbs_vals(n), D_mean_vals(n), temperature_vals(n);
+        for (size_t i = 0; i < n; ++i) {
+            m_vbs_vals[i] = results[i].m_vbs;
+            D_mean_vals[i] = results[i].D_mean;
+            temperature_vals[i] = results[i].temperature;
+        }
+        write_dataset("m_vbs", m_vbs_vals);
+        write_dataset("D_mean", D_mean_vals);
+        write_dataset("temperature", temperature_vals);
+        
         std::cout << "Scan results saved to: " << output_file << std::endl;
         
     } catch (H5::Exception& e) {
@@ -1289,12 +1766,16 @@ void print_usage(const char* prog) {
               << "  --scan-dir <dir>     Directory containing Jpm=* subdirectories\n"
               << "  --output-dir <dir>   Output directory for results\n"
               << "  --n-workers <n>      Number of parallel workers (default: 4)\n"
+              << "  --n-q-grid <n>       2D q-grid size for visualization (default: 50)\n"
               << "  --skip-stripe        Skip stripe order computation (faster)\n"
-              << "\nComputes BFG order parameters from ground state wavefunction:\n"
+              << "  --save-full          Save full S(q), S_D(q) 2D grids per Jpm directory\n"
+              << "  --tpq                Use TPQ states (lowest temperature) instead of ground state\n"
+              << "\nComputes BFG order parameters from ground state or TPQ wavefunction:\n"
               << "  1. S(q) - Spin structure factor (translation order)\n"
-              << "  2. Nematic order - Bond orientation anisotropy\n"
+              << "  2. Nematic order - Bond orientation anisotropy (C6→C2)\n"
               << "  3. Stripe order - Bond-bond correlations with C3 phase\n"
-              << "  4. Plaquette order - Bowtie ring-flip correlations\n"
+              << "  4. VBS order - Valence bond solid (dimer structure factor)\n"
+              << "  5. Plaquette order - Bowtie ring-flip correlations\n"
               << std::endl;
 }
 
@@ -1307,8 +1788,11 @@ int main(int argc, char* argv[]) {
     std::string scan_dir, output_dir;
     std::string wf_file, cluster_dir, output_file = "bfg_order_parameters.h5";
     int n_workers = 4;
+    int n_q_grid = 50;
     bool skip_stripe = false;
     bool scan_mode = false;
+    bool save_full = false;
+    bool use_tpq = false;
     
     // Parse arguments
     for (int i = 1; i < argc; ++i) {
@@ -1320,8 +1804,14 @@ int main(int argc, char* argv[]) {
             output_dir = argv[++i];
         } else if (arg == "--n-workers" && i + 1 < argc) {
             n_workers = std::stoi(argv[++i]);
+        } else if (arg == "--n-q-grid" && i + 1 < argc) {
+            n_q_grid = std::stoi(argv[++i]);
         } else if (arg == "--skip-stripe") {
             skip_stripe = true;
+        } else if (arg == "--save-full") {
+            save_full = true;
+        } else if (arg == "--tpq") {
+            use_tpq = true;
         } else if (arg == "-h" || arg == "--help") {
             print_usage(argv[0]);
             return 0;
@@ -1358,9 +1848,11 @@ int main(int argc, char* argv[]) {
                       << "Scan directory: " << scan_dir << "\n"
                       << "Output directory: " << output_dir << "\n"
                       << "Workers: " << n_workers << "\n"
+                      << "Mode: " << (use_tpq ? "TPQ (lowest temperature)" : "Ground state") << "\n"
+                      << "Save full: " << (save_full ? "yes (2D grids)" : "no (scalars only)") << "\n"
                       << "========================================" << std::endl;
             
-            auto results = scan_jpm_directories(scan_dir, n_workers, skip_stripe);
+            auto results = scan_jpm_directories(scan_dir, output_dir, n_workers, n_q_grid, skip_stripe, save_full, use_tpq);
             
             if (!results.empty()) {
                 std::string results_file = output_dir + "/scan_results.h5";
@@ -1391,21 +1883,31 @@ int main(int argc, char* argv[]) {
             // Compute correlations
             auto spsm_corr = compute_spsm_correlations(psi, cluster.n_sites);
             
-            // Compute order parameters
+            // Compute S(q) at k-points
             auto sf_result = compute_spin_structure_factor(spsm_corr, cluster);
             
+            // Compute 2D S(q) grid for visualization
+            auto s_q_2d = compute_sq_2d_grid(spsm_corr, cluster, n_q_grid);
+            
+            // Compute bond expectations for nematic and VBS
             auto bond_exp = compute_xy_bond_expectations(psi, cluster);
             auto nem_result = compute_nematic_order(bond_exp, cluster);
             
+            // VBS order (with 2D grid)
+            auto vbs_result = compute_vbs_order(bond_exp, cluster, n_q_grid);
+            
+            // Stripe order (slower)
             StripeResult stripe_result;
             if (!skip_stripe) {
                 stripe_result = compute_stripe_structure_factor(psi, cluster);
             }
             
+            // Plaquette order
             auto plaq_result = compute_plaquette_order(psi, cluster);
             
-            // Save results
-            save_results(output_file, sf_result, nem_result, stripe_result, plaq_result, cluster);
+            // Save results with full 2D grids
+            save_results(output_file, sf_result, nem_result, stripe_result, vbs_result, 
+                        plaq_result, cluster, s_q_2d, n_q_grid);
             
             // Print summary
             std::cout << "\n========== ORDER PARAMETER SUMMARY ==========" << std::endl;
@@ -1414,6 +1916,8 @@ int main(int argc, char* argv[]) {
                       << " at q = (" << sf_result.q_max[0] << ", " << sf_result.q_max[1] << ")" << std::endl;
             std::cout << "Nematic order:      m = " << nem_result.m_nem 
                       << ", anisotropy = " << nem_result.anisotropy << std::endl;
+            std::cout << "VBS order:          m = " << vbs_result.m_vbs 
+                      << " at q = (" << vbs_result.q_max[0] << ", " << vbs_result.q_max[1] << ")" << std::endl;
             if (!skip_stripe) {
                 std::cout << "Stripe order:       m = " << stripe_result.m_stripe << std::endl;
             }
