@@ -67,7 +67,7 @@ else:
 # Excluded parameter values (corrupted data)
 # ==============================================================================
 EXCLUDED_JPM_VALUES = [0.08, 0.10]  # These Jpm values appear to be corrupted
-QFI_SCALE_FACTOR = 27  # Multiply all QFI values by this factor
+QFI_SCALE_FACTOR = 1  # Multiply all QFI values by this factor
 
 # ==============================================================================
 # Spectral Width Rescaling Configuration
@@ -76,7 +76,7 @@ QFI_SCALE_FACTOR = 27  # Multiply all QFI values by this factor
 # at high temperatures. When enabled, the lowest temperature spectrum is used
 # as reference for the correct spectral width, and all other spectra are
 # rescaled to match this width before QFI calculation.
-ENABLE_SPECTRAL_RESCALING = True  # Set to False to disable rescaling
+ENABLE_SPECTRAL_RESCALING = False  # Set to False to disable rescaling
 
 # ==============================================================================
 # Spectral Intensity Scaling Configuration
@@ -84,7 +84,7 @@ ENABLE_SPECTRAL_RESCALING = True  # Set to False to disable rescaling
 # Enable spectral intensity scaling to ensure the integral of the spectral
 # function matches the static structure factor at each temperature.
 # The static structure factor is read from sssf_*_expectation.txt files.
-ENABLE_INTENSITY_SCALING = True  # Set to False to disable intensity scaling
+ENABLE_INTENSITY_SCALING = False  # Set to False to disable intensity scaling
 
 # ==============================================================================
 # Aggressive Rescaling Configuration
@@ -108,9 +108,15 @@ BETA_THRESHOLD_HIGH_T = 5.0
 # Above this beta (low T), use minimum aggressive factor  
 BETA_THRESHOLD_LOW_T = 50.0
 
+# ==============================================================================
+# NaN Interpolation Configuration
+# ==============================================================================
+# Enable interpolation of NaN values in spectral data
+ENABLE_NAN_INTERPOLATION = False  # Set to False to disable NaN interpolation
+
 # Use moment-based width (standard deviation) instead of threshold-based width
 # Moment-based is more robust to noise and numerical artifacts
-USE_MOMENT_BASED_WIDTH = True
+USE_MOMENT_BASED_WIDTH = False
 
 # ==============================================================================
 # FFT and Spectral Function Utilities
@@ -1490,15 +1496,16 @@ def _process_species_spectral(species, beta_groups, beta_bin_values,
             print(f"    Failed to load data")
             continue
         
-        # Interpolate NaN values in the spectral data
-        mean_spectral = interpolate_nan_values(mean_omega, mean_spectral)
-        
-        # Also interpolate individual sample data
-        interpolated_individual_data = []
-        for omega, spectral, fpath in individual_data:
-            interp_spec = interpolate_nan_values(omega, spectral)
-            interpolated_individual_data.append((omega, interp_spec, fpath))
-        individual_data = interpolated_individual_data
+        # Interpolate NaN values in the spectral data (if enabled)
+        if ENABLE_NAN_INTERPOLATION:
+            mean_spectral = interpolate_nan_values(mean_omega, mean_spectral)
+            
+            # Also interpolate individual sample data
+            interpolated_individual_data = []
+            for omega, spectral, fpath in individual_data:
+                interp_spec = interpolate_nan_values(omega, spectral)
+                interpolated_individual_data.append((omega, interp_spec, fpath))
+            individual_data = interpolated_individual_data
         
         # Apply spectral width rescaling if reference is available
         # Skip rescaling for the reference beta itself (or very close to it)
@@ -2867,6 +2874,8 @@ if __name__ == "__main__":
                        help='Parameter name for sweep analysis (e.g., Jpm, h, J)')
     parser.add_argument('--skip-processing', action='store_true',
                        help='Skip spectral processing and load existing processed QFI data')
+    parser.add_argument('--clean', action='store_true',
+                       help='Clean mode: disable all spectral corrections (rescaling, intensity scaling, NaN interpolation)')
     parser.add_argument('--no-rescale', action='store_true',
                        help='Disable spectral width rescaling (default: rescaling enabled)')
     parser.add_argument('--no-intensity-scale', action='store_true',
@@ -2876,22 +2885,34 @@ if __name__ == "__main__":
     
     args = parser.parse_args()
     
-    # Set global rescaling flag based on command-line argument
-    if args.no_rescale:
+    # Clean mode: disable all corrections
+    if args.clean:
         ENABLE_SPECTRAL_RESCALING = False
-        print("Spectral width rescaling is DISABLED")
-    else:
-        ENABLE_SPECTRAL_RESCALING = True
-        SPECTRAL_RESCALE_AGGRESSIVE_FACTOR = args.aggressive_factor
-        print(f"Spectral width rescaling is ENABLED (aggressive_factor={args.aggressive_factor})")
-    
-    # Set global intensity scaling flag based on command-line argument
-    if args.no_intensity_scale:
         ENABLE_INTENSITY_SCALING = False
-        print("Intensity scaling is DISABLED")
+        ENABLE_NAN_INTERPOLATION = False
+        print("=" * 60)
+        print("CLEAN MODE: All spectral corrections DISABLED")
+        print("  - No spectral width rescaling")
+        print("  - No intensity scaling") 
+        print("  - No NaN interpolation")
+        print("=" * 60)
     else:
-        ENABLE_INTENSITY_SCALING = True
-        print("Intensity scaling is ENABLED (use --no-intensity-scale to disable)")
+        # Set global rescaling flag based on command-line argument
+        if args.no_rescale:
+            ENABLE_SPECTRAL_RESCALING = False
+            print("Spectral width rescaling is DISABLED")
+        else:
+            ENABLE_SPECTRAL_RESCALING = True
+            SPECTRAL_RESCALE_AGGRESSIVE_FACTOR = args.aggressive_factor
+            print(f"Spectral width rescaling is ENABLED (aggressive_factor={args.aggressive_factor})")
+        
+        # Set global intensity scaling flag based on command-line argument
+        if args.no_intensity_scale:
+            ENABLE_INTENSITY_SCALING = False
+            print("Intensity scaling is DISABLED")
+        else:
+            ENABLE_INTENSITY_SCALING = True
+            print("Intensity scaling is ENABLED (use --no-intensity-scale to disable)")
     
     if args.skip_processing:
         # Load already processed data mode
