@@ -836,6 +836,119 @@ Complex compute_dimer_dimer_correlation(
 }
 
 // -----------------------------------------------------------------------------
+// Compute Heisenberg dimer-dimer correlation ⟨(S_i·S_j)(S_k·S_l)⟩
+// This is a proper 4-site correlation for Heisenberg VBS order
+// S·S = SzSz + (1/2)(S+S- + S-S+)
+// -----------------------------------------------------------------------------
+
+double compute_heisenberg_dimer_dimer_correlation(
+    const std::vector<Complex>& psi,
+    int i1, int j1, int i2, int j2
+) {
+    uint64_t n_states = psi.size();
+    double result = 0.0;
+    
+    #pragma omp parallel reduction(+:result)
+    {
+        double local_result = 0.0;
+        
+        #pragma omp for schedule(dynamic, 1024)
+        for (uint64_t state = 0; state < n_states; ++state) {
+            Complex coeff = psi[state];
+            double prob = std::norm(coeff);
+            if (prob < 1e-30) continue;
+            
+            int s_i1 = get_bit(state, i1);
+            int s_j1 = get_bit(state, j1);
+            int s_i2 = get_bit(state, i2);
+            int s_j2 = get_bit(state, j2);
+            
+            // Sz values: bit=0 -> +1/2, bit=1 -> -1/2
+            double sz_i1 = s_i1 ? -0.5 : 0.5;
+            double sz_j1 = s_j1 ? -0.5 : 0.5;
+            double sz_i2 = s_i2 ? -0.5 : 0.5;
+            double sz_j2 = s_j2 ? -0.5 : 0.5;
+            
+            // ========================================================
+            // (S_i1·S_j1)(S_i2·S_j2) expansion:
+            // = (SzSz + 1/2(S+S- + S-S+))_bond1 × (SzSz + 1/2(S+S- + S-S+))_bond2
+            // 
+            // Diagonal terms (SzSz)×(SzSz):
+            double szsz_1 = sz_i1 * sz_j1;
+            double szsz_2 = sz_i2 * sz_j2;
+            local_result += prob * szsz_1 * szsz_2;
+            
+            // Cross terms (SzSz)×(1/2 XY) and (1/2 XY)×(SzSz):
+            // These require off-diagonal matrix elements on one bond only
+            
+            // (SzSz)_1 × (1/2)(S+S- + S-S+)_2:
+            // S+_i2 S-_j2: need i2=DOWN(1), j2=UP(0)
+            if (s_i2 == 1 && s_j2 == 0) {
+                uint64_t new_state = flip_bit(flip_bit(state, i2), j2);
+                Complex contrib = std::conj(psi[new_state]) * coeff;
+                local_result += 0.5 * szsz_1 * contrib.real();
+            }
+            // S-_i2 S+_j2: need i2=UP(0), j2=DOWN(1)
+            if (s_i2 == 0 && s_j2 == 1) {
+                uint64_t new_state = flip_bit(flip_bit(state, i2), j2);
+                Complex contrib = std::conj(psi[new_state]) * coeff;
+                local_result += 0.5 * szsz_1 * contrib.real();
+            }
+            
+            // (1/2)(S+S- + S-S+)_1 × (SzSz)_2:
+            // S+_i1 S-_j1: need i1=DOWN(1), j1=UP(0)
+            if (s_i1 == 1 && s_j1 == 0) {
+                uint64_t new_state = flip_bit(flip_bit(state, i1), j1);
+                Complex contrib = std::conj(psi[new_state]) * coeff;
+                local_result += 0.5 * szsz_2 * contrib.real();
+            }
+            // S-_i1 S+_j1: need i1=UP(0), j1=DOWN(1)
+            if (s_i1 == 0 && s_j1 == 1) {
+                uint64_t new_state = flip_bit(flip_bit(state, i1), j1);
+                Complex contrib = std::conj(psi[new_state]) * coeff;
+                local_result += 0.5 * szsz_2 * contrib.real();
+            }
+            
+            // (1/4)(XY)_1 × (XY)_2 terms:
+            // These are 4-spin off-diagonal terms, similar to XY dimer-dimer
+            // Factor is 1/4 from (1/2)×(1/2) prefactors
+            
+            // Term: S+_i1 S-_j1 S+_i2 S-_j2 (need i1=1,j1=0,i2=1,j2=0)
+            if (s_i1 == 1 && s_j1 == 0 && s_i2 == 1 && s_j2 == 0) {
+                uint64_t new_state = flip_bit(flip_bit(flip_bit(flip_bit(state, i1), j1), i2), j2);
+                Complex contrib = std::conj(psi[new_state]) * coeff;
+                local_result += 0.25 * contrib.real();
+            }
+            
+            // Term: S+_i1 S-_j1 S-_i2 S+_j2 (need i1=1,j1=0,i2=0,j2=1)
+            if (s_i1 == 1 && s_j1 == 0 && s_i2 == 0 && s_j2 == 1) {
+                uint64_t new_state = flip_bit(flip_bit(flip_bit(flip_bit(state, i1), j1), i2), j2);
+                Complex contrib = std::conj(psi[new_state]) * coeff;
+                local_result += 0.25 * contrib.real();
+            }
+            
+            // Term: S-_i1 S+_j1 S+_i2 S-_j2 (need i1=0,j1=1,i2=1,j2=0)
+            if (s_i1 == 0 && s_j1 == 1 && s_i2 == 1 && s_j2 == 0) {
+                uint64_t new_state = flip_bit(flip_bit(flip_bit(flip_bit(state, i1), j1), i2), j2);
+                Complex contrib = std::conj(psi[new_state]) * coeff;
+                local_result += 0.25 * contrib.real();
+            }
+            
+            // Term: S-_i1 S+_j1 S-_i2 S+_j2 (need i1=0,j1=1,i2=0,j2=1)
+            if (s_i1 == 0 && s_j1 == 1 && s_i2 == 0 && s_j2 == 1) {
+                uint64_t new_state = flip_bit(flip_bit(flip_bit(flip_bit(state, i1), j1), i2), j2);
+                Complex contrib = std::conj(psi[new_state]) * coeff;
+                local_result += 0.25 * contrib.real();
+            }
+        }
+        
+        result += local_result;
+    }
+    
+    return result;
+}
+
+// -----------------------------------------------------------------------------
 // Compute spin structure factor S(q)
 // -----------------------------------------------------------------------------
 
@@ -969,47 +1082,77 @@ NematicResult compute_nematic_order_real(
 // Compute VBS (Valence Bond Solid) order with PROPER 4-site correlations
 // S_D(q) = (1/N_b) Σ_{b,b'} exp(iq·(r_b - r_{b'})) ⟨δD_b δD_{b'}⟩_connected
 // where D_b = S^+_i S^-_j + S^-_i S^+_j (XY dimer operator)
+//    or D_b = S_i · S_j = SzSz + (1/2)(S+S- + S-S+) (Heisenberg dimer)
 // 
 // The connected correlator is: ⟨D_b D_{b'}⟩ - ⟨D_b⟩⟨D_{b'}⟩
 // This requires computing ACTUAL 4-site spin correlations!
 // -----------------------------------------------------------------------------
 
 struct VBSResult {
-    std::vector<Complex> S_d;          // S_D(q) at each k-point
-    std::vector<std::vector<Complex>> S_d_2d;  // 2D grid for visualization
-    int q_max_idx;
-    Complex s_d_max;
-    std::array<double, 2> q_max;
-    double m_vbs;
-    double D_mean;                      // Mean bond value
+    // XY dimer VBS
+    std::vector<Complex> S_d_xy;          // S_D(q) at each k-point (XY dimers)
+    std::vector<std::vector<Complex>> S_d_xy_2d;  // 2D grid for visualization
+    std::vector<std::vector<Complex>> dimer_corr_xy;  // Raw ⟨D_b D_b'⟩ matrix (bond-resolved)
+    std::vector<std::vector<Complex>> connected_corr_xy;  // Connected ⟨δD_b δD_b'⟩
+    int q_max_idx_xy;
+    Complex s_d_max_xy;
+    std::array<double, 2> q_max_xy;
+    double m_vbs_xy;
+    double D_mean_xy;                      // Mean XY bond value
+    
+    // Heisenberg dimer VBS
+    std::vector<double> S_d_heis;           // S_D(q) at each k-point (Heisenberg dimers)
+    std::vector<std::vector<double>> S_d_heis_2d;  // 2D grid for visualization
+    std::vector<std::vector<double>> dimer_corr_heis;  // Raw ⟨(S·S)_b (S·S)_b'⟩ matrix
+    std::vector<std::vector<double>> connected_corr_heis;  // Connected correlator
+    int q_max_idx_heis;
+    double s_d_max_heis;
+    std::array<double, 2> q_max_heis;
+    double m_vbs_heis;
+    double D_mean_heis;                     // Mean Heisenberg bond value
+    
     int n_q_grid;                       // Size of 2D grid
+    int n_bonds;                        // Number of bonds
+    
+    // Backward compatible accessors (default to XY)
+    const std::vector<Complex>& S_d() const { return S_d_xy; }
+    const std::vector<std::vector<Complex>>& S_d_2d() const { return S_d_xy_2d; }
+    int q_max_idx() const { return q_max_idx_xy; }
+    Complex s_d_max() const { return s_d_max_xy; }
+    std::array<double, 2> q_max() const { return q_max_xy; }
+    double m_vbs() const { return m_vbs_xy; }
+    double D_mean() const { return D_mean_xy; }
 };
 
 VBSResult compute_vbs_order(
     const std::vector<Complex>& psi,
     const std::map<std::pair<int, int>, Complex>& xy_bond_exp,
+    const std::map<std::pair<int, int>, double>& heisenberg_bond_exp,
     const Cluster& cluster,
     int n_q_grid = 50
 ) {
     VBSResult result;
     result.n_q_grid = n_q_grid;
     int n_bonds = cluster.edges_nn.size();
+    result.n_bonds = n_bonds;
     int n_k = cluster.k_points.size();
     
     if (n_bonds == 0) {
-        result.m_vbs = 0.0;
+        result.m_vbs_xy = 0.0;
+        result.m_vbs_heis = 0.0;
         return result;
     }
     
     std::cout << "Computing VBS order with proper 4-site correlations..." << std::endl;
     std::cout << "  Computing " << n_bonds << " x " << n_bonds << " = " 
-              << n_bonds * n_bonds << " dimer-dimer correlations..." << std::flush;
+              << n_bonds * n_bonds << " dimer-dimer correlations (XY + Heisenberg)..." << std::endl;
     auto start = std::chrono::high_resolution_clock::now();
     
-    // Compute bond centers
+    // Convert edges to vector for indexed access
     std::vector<std::pair<int, int>> edges(cluster.edges_nn.begin(), cluster.edges_nn.end());
-    std::vector<std::array<double, 2>> bond_centers(n_bonds);
     
+    // Compute bond centers
+    std::vector<std::array<double, 2>> bond_centers(n_bonds);
     for (int b = 0; b < n_bonds; ++b) {
         int i = edges[b].first;
         int j = edges[b].second;
@@ -1017,20 +1160,24 @@ VBSResult compute_vbs_order(
         bond_centers[b][1] = 0.5 * (cluster.positions[i][1] + cluster.positions[j][1]);
     }
     
-    // Mean bond value ⟨D⟩
-    double sum_real = 0.0;
+    // =========================================================================
+    // Mean bond values ⟨D⟩
+    // =========================================================================
+    double sum_xy = 0.0, sum_heis = 0.0;
     for (int b = 0; b < n_bonds; ++b) {
-        sum_real += std::real(xy_bond_exp.at(edges[b]));
+        sum_xy += std::real(xy_bond_exp.at(edges[b]));
+        sum_heis += heisenberg_bond_exp.at(edges[b]);
     }
-    result.D_mean = sum_real / n_bonds;
+    result.D_mean_xy = sum_xy / n_bonds;
+    result.D_mean_heis = sum_heis / n_bonds;
     
     // =========================================================================
-    // Compute full dimer-dimer correlation matrix ⟨D_b D_{b'}⟩ using 4-site ops
+    // Compute full dimer-dimer correlation matrices ⟨D_b D_{b'}⟩ using 4-site ops
     // This is O(N_bonds^2 * Hilbert_dim) - can be slow for large systems
     // =========================================================================
-    std::vector<std::vector<Complex>> dimer_corr(n_bonds, std::vector<Complex>(n_bonds, 0.0));
+    result.dimer_corr_xy.resize(n_bonds, std::vector<Complex>(n_bonds, 0.0));
+    result.dimer_corr_heis.resize(n_bonds, std::vector<double>(n_bonds, 0.0));
     
-    // Progress tracking
     std::atomic<int> completed(0);
     
     #pragma omp parallel for schedule(dynamic)
@@ -1042,8 +1189,11 @@ VBSResult compute_vbs_order(
             int i2 = edges[b2].first;
             int j2 = edges[b2].second;
             
-            // Compute ⟨D_b1 D_b2⟩ = ⟨(S⁺ᵢ₁S⁻ⱼ₁ + S⁻ᵢ₁S⁺ⱼ₁)(S⁺ᵢ₂S⁻ⱼ₂ + S⁻ᵢ₂S⁺ⱼ₂)⟩
-            dimer_corr[b1][b2] = compute_dimer_dimer_correlation(psi, i1, j1, i2, j2);
+            // Compute XY dimer-dimer: ⟨(S⁺ᵢ₁S⁻ⱼ₁ + S⁻ᵢ₁S⁺ⱼ₁)(S⁺ᵢ₂S⁻ⱼ₂ + S⁻ᵢ₂S⁺ⱼ₂)⟩
+            result.dimer_corr_xy[b1][b2] = compute_dimer_dimer_correlation(psi, i1, j1, i2, j2);
+            
+            // Compute Heisenberg dimer-dimer: ⟨(S·S)_b1 (S·S)_b2⟩
+            result.dimer_corr_heis[b1][b2] = compute_heisenberg_dimer_dimer_correlation(psi, i1, j1, i2, j2);
         }
         
         int done = ++completed;
@@ -1060,58 +1210,80 @@ VBSResult compute_vbs_order(
     // =========================================================================
     // Compute connected correlations: ⟨δD_b δD_{b'}⟩ = ⟨D_b D_{b'}⟩ - ⟨D_b⟩⟨D_{b'}⟩
     // =========================================================================
-    std::vector<std::vector<Complex>> connected_corr(n_bonds, std::vector<Complex>(n_bonds, 0.0));
+    result.connected_corr_xy.resize(n_bonds, std::vector<Complex>(n_bonds, 0.0));
+    result.connected_corr_heis.resize(n_bonds, std::vector<double>(n_bonds, 0.0));
     
     for (int b1 = 0; b1 < n_bonds; ++b1) {
-        Complex D_b1 = xy_bond_exp.at(edges[b1]);
+        Complex D_xy_b1 = xy_bond_exp.at(edges[b1]);
+        double D_heis_b1 = heisenberg_bond_exp.at(edges[b1]);
+        
         for (int b2 = 0; b2 < n_bonds; ++b2) {
-            Complex D_b2 = xy_bond_exp.at(edges[b2]);
-            connected_corr[b1][b2] = dimer_corr[b1][b2] - D_b1 * std::conj(D_b2);
+            Complex D_xy_b2 = xy_bond_exp.at(edges[b2]);
+            double D_heis_b2 = heisenberg_bond_exp.at(edges[b2]);
+            
+            result.connected_corr_xy[b1][b2] = result.dimer_corr_xy[b1][b2] - D_xy_b1 * std::conj(D_xy_b2);
+            result.connected_corr_heis[b1][b2] = result.dimer_corr_heis[b1][b2] - D_heis_b1 * D_heis_b2;
         }
     }
     
     // =========================================================================
-    // Compute S_D(q) at discrete allowed k-points
+    // Compute S_D(q) at discrete allowed k-points (both XY and Heisenberg)
     // =========================================================================
-    result.S_d.resize(n_k, 0.0);
+    result.S_d_xy.resize(n_k, 0.0);
+    result.S_d_heis.resize(n_k, 0.0);
     
     std::cout << "  Computing S_D(q) at " << n_k << " k-points..." << std::flush;
     
     #pragma omp parallel for
     for (int ik = 0; ik < n_k; ++ik) {
         const auto& q = cluster.k_points[ik];
-        Complex s_d = 0.0;
+        Complex s_d_xy = 0.0;
+        double s_d_heis = 0.0;
         
         for (int b1 = 0; b1 < n_bonds; ++b1) {
             for (int b2 = 0; b2 < n_bonds; ++b2) {
                 double dr_x = bond_centers[b1][0] - bond_centers[b2][0];
                 double dr_y = bond_centers[b1][1] - bond_centers[b2][1];
                 double phase_arg = q[0] * dr_x + q[1] * dr_y;
-                s_d += connected_corr[b1][b2] * std::exp(I * phase_arg);
+                Complex phase = std::exp(I * phase_arg);
+                
+                s_d_xy += result.connected_corr_xy[b1][b2] * phase;
+                s_d_heis += result.connected_corr_heis[b1][b2] * phase.real();
             }
         }
-        result.S_d[ik] = s_d / static_cast<double>(n_bonds);
+        result.S_d_xy[ik] = s_d_xy / static_cast<double>(n_bonds);
+        result.S_d_heis[ik] = s_d_heis / n_bonds;
     }
     
-    // Find maximum
-    double max_val = 0.0;
+    // Find maxima
+    double max_val_xy = 0.0, max_val_heis = 0.0;
     for (int ik = 0; ik < n_k; ++ik) {
-        double val = std::abs(result.S_d[ik]);
-        if (val > max_val) {
-            max_val = val;
-            result.q_max_idx = ik;
-            result.s_d_max = result.S_d[ik];
-            result.q_max = cluster.k_points[ik];
+        double val_xy = std::abs(result.S_d_xy[ik]);
+        if (val_xy > max_val_xy) {
+            max_val_xy = val_xy;
+            result.q_max_idx_xy = ik;
+            result.s_d_max_xy = result.S_d_xy[ik];
+            result.q_max_xy = cluster.k_points[ik];
+        }
+        
+        double val_heis = std::abs(result.S_d_heis[ik]);
+        if (val_heis > max_val_heis) {
+            max_val_heis = val_heis;
+            result.q_max_idx_heis = ik;
+            result.s_d_max_heis = result.S_d_heis[ik];
+            result.q_max_heis = cluster.k_points[ik];
         }
     }
-    result.m_vbs = std::sqrt(max_val / n_bonds);
+    result.m_vbs_xy = std::sqrt(max_val_xy / n_bonds);
+    result.m_vbs_heis = std::sqrt(max_val_heis / n_bonds);
     
     std::cout << " done" << std::endl;
     
     // =========================================================================
     // Also compute on dense 2D grid for visualization
     // =========================================================================
-    result.S_d_2d.resize(n_q_grid, std::vector<Complex>(n_q_grid, 0.0));
+    result.S_d_xy_2d.resize(n_q_grid, std::vector<Complex>(n_q_grid, 0.0));
+    result.S_d_heis_2d.resize(n_q_grid, std::vector<double>(n_q_grid, 0.0));
     
     std::cout << "  Computing S_D(q) on " << n_q_grid << "x" << n_q_grid << " grid..." << std::flush;
     
@@ -1123,24 +1295,31 @@ VBSResult compute_vbs_order(
             double qx = q1 * cluster.b1[0] + q2 * cluster.b2[0];
             double qy = q1 * cluster.b1[1] + q2 * cluster.b2[1];
             
-            Complex s_d = 0.0;
+            Complex s_d_xy = 0.0;
+            double s_d_heis = 0.0;
             for (int b1 = 0; b1 < n_bonds; ++b1) {
                 for (int b2 = 0; b2 < n_bonds; ++b2) {
                     double dr_x = bond_centers[b1][0] - bond_centers[b2][0];
                     double dr_y = bond_centers[b1][1] - bond_centers[b2][1];
                     double phase_arg = qx * dr_x + qy * dr_y;
-                    s_d += connected_corr[b1][b2] * std::exp(I * phase_arg);
+                    Complex phase = std::exp(I * phase_arg);
+                    
+                    s_d_xy += result.connected_corr_xy[b1][b2] * phase;
+                    s_d_heis += result.connected_corr_heis[b1][b2] * phase.real();
                 }
             }
-            result.S_d_2d[i1][i2] = s_d / static_cast<double>(n_bonds);
+            result.S_d_xy_2d[i1][i2] = s_d_xy / static_cast<double>(n_bonds);
+            result.S_d_heis_2d[i1][i2] = s_d_heis / n_bonds;
         }
     }
     
     auto end = std::chrono::high_resolution_clock::now();
     auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
     std::cout << " done" << std::endl;
-    std::cout << "  VBS order: m_vbs = " << result.m_vbs 
-              << " at q = (" << result.q_max[0] << ", " << result.q_max[1] << ")"
+    std::cout << "  VBS order (XY):         m_vbs = " << result.m_vbs_xy 
+              << " at q = (" << result.q_max_xy[0] << ", " << result.q_max_xy[1] << ")" << std::endl;
+    std::cout << "  VBS order (Heisenberg): m_vbs = " << result.m_vbs_heis
+              << " at q = (" << result.q_max_heis[0] << ", " << result.q_max_heis[1] << ")"
               << " [" << duration.count() << " ms]" << std::endl;
     
     return result;
@@ -1241,26 +1420,111 @@ void save_results(
             dataset.write(flat.data(), complex_type);
         }
         
-        // Save VBS S_D(q) at k-points
-        if (!vbs.S_d.empty()) {
-            hsize_t dims[1] = {vbs.S_d.size()};
+        // Save VBS S_D(q) at k-points (XY)
+        if (!vbs.S_d_xy.empty()) {
+            hsize_t dims[1] = {vbs.S_d_xy.size()};
             H5::DataSpace dataspace(1, dims);
-            H5::DataSet dataset = file.createDataSet("S_D_q", complex_type, dataspace);
-            dataset.write(vbs.S_d.data(), complex_type);
+            H5::DataSet dataset = file.createDataSet("S_D_q_xy", complex_type, dataspace);
+            dataset.write(vbs.S_d_xy.data(), complex_type);
         }
         
-        // Save 2D S_D(q) grid for VBS visualization
-        if (!vbs.S_d_2d.empty()) {
+        // Save VBS S_D(q) at k-points (Heisenberg)
+        if (!vbs.S_d_heis.empty()) {
+            hsize_t dims[1] = {vbs.S_d_heis.size()};
+            H5::DataSpace dataspace(1, dims);
+            H5::DataSet dataset = file.createDataSet("S_D_q_heis", H5::PredType::NATIVE_DOUBLE, dataspace);
+            dataset.write(vbs.S_d_heis.data(), H5::PredType::NATIVE_DOUBLE);
+        }
+        
+        // Save 2D S_D(q) grid for VBS visualization (XY)
+        if (!vbs.S_d_xy_2d.empty()) {
             hsize_t dims[2] = {static_cast<hsize_t>(vbs.n_q_grid), static_cast<hsize_t>(vbs.n_q_grid)};
             H5::DataSpace dataspace(2, dims);
-            H5::DataSet dataset = file.createDataSet("S_D_q_2d", complex_type, dataspace);
+            H5::DataSet dataset = file.createDataSet("S_D_q_xy_2d", complex_type, dataspace);
             std::vector<Complex> flat(vbs.n_q_grid * vbs.n_q_grid);
             for (int i = 0; i < vbs.n_q_grid; ++i) {
                 for (int j = 0; j < vbs.n_q_grid; ++j) {
-                    flat[i * vbs.n_q_grid + j] = vbs.S_d_2d[i][j];
+                    flat[i * vbs.n_q_grid + j] = vbs.S_d_xy_2d[i][j];
                 }
             }
             dataset.write(flat.data(), complex_type);
+        }
+        
+        // Save 2D S_D(q) grid for VBS visualization (Heisenberg)
+        if (!vbs.S_d_heis_2d.empty()) {
+            hsize_t dims[2] = {static_cast<hsize_t>(vbs.n_q_grid), static_cast<hsize_t>(vbs.n_q_grid)};
+            H5::DataSpace dataspace(2, dims);
+            H5::DataSet dataset = file.createDataSet("S_D_q_heis_2d", H5::PredType::NATIVE_DOUBLE, dataspace);
+            std::vector<double> flat(vbs.n_q_grid * vbs.n_q_grid);
+            for (int i = 0; i < vbs.n_q_grid; ++i) {
+                for (int j = 0; j < vbs.n_q_grid; ++j) {
+                    flat[i * vbs.n_q_grid + j] = vbs.S_d_heis_2d[i][j];
+                }
+            }
+            dataset.write(flat.data(), H5::PredType::NATIVE_DOUBLE);
+        }
+        
+        // Save bond-resolved dimer correlation matrices
+        if (!vbs.dimer_corr_xy.empty()) {
+            int nb = vbs.n_bonds;
+            
+            // XY dimer-dimer correlation matrix ⟨D_b D_b'⟩
+            {
+                hsize_t dims[2] = {static_cast<hsize_t>(nb), static_cast<hsize_t>(nb)};
+                H5::DataSpace dataspace(2, dims);
+                H5::DataSet dataset = file.createDataSet("dimer_corr_xy", complex_type, dataspace);
+                std::vector<Complex> flat(nb * nb);
+                for (int i = 0; i < nb; ++i) {
+                    for (int j = 0; j < nb; ++j) {
+                        flat[i * nb + j] = vbs.dimer_corr_xy[i][j];
+                    }
+                }
+                dataset.write(flat.data(), complex_type);
+            }
+            
+            // XY connected correlation matrix ⟨δD_b δD_b'⟩
+            {
+                hsize_t dims[2] = {static_cast<hsize_t>(nb), static_cast<hsize_t>(nb)};
+                H5::DataSpace dataspace(2, dims);
+                H5::DataSet dataset = file.createDataSet("connected_corr_xy", complex_type, dataspace);
+                std::vector<Complex> flat(nb * nb);
+                for (int i = 0; i < nb; ++i) {
+                    for (int j = 0; j < nb; ++j) {
+                        flat[i * nb + j] = vbs.connected_corr_xy[i][j];
+                    }
+                }
+                dataset.write(flat.data(), complex_type);
+            }
+            
+            // Heisenberg dimer-dimer correlation matrix ⟨(S·S)_b (S·S)_b'⟩
+            {
+                hsize_t dims[2] = {static_cast<hsize_t>(nb), static_cast<hsize_t>(nb)};
+                H5::DataSpace dataspace(2, dims);
+                H5::DataSet dataset = file.createDataSet("dimer_corr_heis", H5::PredType::NATIVE_DOUBLE, dataspace);
+                std::vector<double> flat(nb * nb);
+                for (int i = 0; i < nb; ++i) {
+                    for (int j = 0; j < nb; ++j) {
+                        flat[i * nb + j] = vbs.dimer_corr_heis[i][j];
+                    }
+                }
+                dataset.write(flat.data(), H5::PredType::NATIVE_DOUBLE);
+            }
+            
+            // Heisenberg connected correlation matrix
+            {
+                hsize_t dims[2] = {static_cast<hsize_t>(nb), static_cast<hsize_t>(nb)};
+                H5::DataSpace dataspace(2, dims);
+                H5::DataSet dataset = file.createDataSet("connected_corr_heis", H5::PredType::NATIVE_DOUBLE, dataspace);
+                std::vector<double> flat(nb * nb);
+                for (int i = 0; i < nb; ++i) {
+                    for (int j = 0; j < nb; ++j) {
+                        flat[i * nb + j] = vbs.connected_corr_heis[i][j];
+                    }
+                }
+                dataset.write(flat.data(), H5::PredType::NATIVE_DOUBLE);
+            }
+            
+            std::cout << "Saved bond-resolved dimer correlations: " << nb << " x " << nb << " matrices" << std::endl;
         }
         
         // Save k-points
@@ -1325,12 +1589,25 @@ void save_results(
             write_scalar("nematic_anisotropy_heisenberg", nem_heisenberg.anisotropy);
             
             // VBS order (proper 4-site correlations)
-            write_scalar("m_vbs", vbs.m_vbs);
-            write_scalar("D_mean", vbs.D_mean);
-            write_scalar("s_d_max", std::abs(vbs.s_d_max));
-            write_int("vbs_q_max_idx", vbs.q_max_idx);
-            write_scalar("vbs_q_max_x", vbs.q_max[0]);
-            write_scalar("vbs_q_max_y", vbs.q_max[1]);
+            // XY dimer VBS
+            write_scalar("m_vbs_xy", vbs.m_vbs_xy);
+            write_scalar("D_mean_xy", vbs.D_mean_xy);
+            write_scalar("s_d_max_xy", std::abs(vbs.s_d_max_xy));
+            write_int("vbs_q_max_idx_xy", vbs.q_max_idx_xy);
+            write_scalar("vbs_q_max_x_xy", vbs.q_max_xy[0]);
+            write_scalar("vbs_q_max_y_xy", vbs.q_max_xy[1]);
+            
+            // Heisenberg dimer VBS
+            write_scalar("m_vbs_heis", vbs.m_vbs_heis);
+            write_scalar("D_mean_heis", vbs.D_mean_heis);
+            write_scalar("s_d_max_heis", std::abs(vbs.s_d_max_heis));
+            write_int("vbs_q_max_idx_heis", vbs.q_max_idx_heis);
+            write_scalar("vbs_q_max_x_heis", vbs.q_max_heis[0]);
+            write_scalar("vbs_q_max_y_heis", vbs.q_max_heis[1]);
+            
+            // Backward compatibility (default to XY)
+            write_scalar("m_vbs", vbs.m_vbs_xy);
+            write_scalar("D_mean", vbs.D_mean_xy);
             
             // Cluster info
             write_int("n_sites", cluster.n_sites);
@@ -1478,6 +1755,8 @@ OrderParameterResults compute_all_order_parameters(
     
     // Bond expectations
     auto xy_bond_exp = compute_xy_bond_expectations(psi, cluster);
+    auto szsz_bond_exp = compute_szsz_bond_expectations(psi, cluster);
+    auto heisenberg_bond_exp = compute_heisenberg_bond_expectations(szsz_bond_exp, xy_bond_exp);
     
     // Nematic
     auto nem_result = compute_nematic_order(xy_bond_exp, cluster);
@@ -1485,9 +1764,9 @@ OrderParameterResults compute_all_order_parameters(
     results.anisotropy = nem_result.anisotropy;
     
     // VBS order (proper 4-site correlations)
-    auto vbs_result = compute_vbs_order(psi, xy_bond_exp, cluster);
-    results.m_vbs = vbs_result.m_vbs;
-    results.D_mean = vbs_result.D_mean;
+    auto vbs_result = compute_vbs_order(psi, xy_bond_exp, heisenberg_bond_exp, cluster);
+    results.m_vbs = vbs_result.m_vbs_xy;
+    results.D_mean = vbs_result.D_mean_xy;
     
     return results;
 }
@@ -1632,7 +1911,7 @@ std::vector<OrderParameterResults> scan_jpm_directories(
                 auto nem_szsz_result = compute_nematic_order_real(szsz_bond_exp, cluster, "szsz");
                 auto nem_heisenberg_result = compute_nematic_order_real(heisenberg_bond_exp, cluster, "heisenberg");
                 
-                auto vbs_result = compute_vbs_order(psi, xy_bond_exp, cluster, n_q_grid);
+                auto vbs_result = compute_vbs_order(psi, xy_bond_exp, heisenberg_bond_exp, cluster, n_q_grid);
                 
                 // Save full results to per-Jpm file
                 std::ostringstream oss;
@@ -1647,8 +1926,8 @@ std::vector<OrderParameterResults> scan_jpm_directories(
                 results.m_translation = sf_result.m_translation;
                 results.m_nematic = nem_result.m_nem;
                 results.anisotropy = nem_result.anisotropy;
-                results.m_vbs = vbs_result.m_vbs;
-                results.D_mean = vbs_result.D_mean;
+                results.m_vbs = vbs_result.m_vbs_xy;
+                results.D_mean = vbs_result.D_mean_xy;
             } else {
                 // Quick scalar-only computation
                 results = compute_all_order_parameters(psi, cluster, jpm);
@@ -1889,7 +2168,7 @@ int main(int argc, char* argv[]) {
             auto nem_result = nem_xy_result;
             
             // VBS order with proper 4-site correlations (with 2D grid)
-            auto vbs_result = compute_vbs_order(psi, xy_bond_exp, cluster, n_q_grid);
+            auto vbs_result = compute_vbs_order(psi, xy_bond_exp, heisenberg_bond_exp, cluster, n_q_grid);
             
             // Save results with full 2D grids and bond data
             save_results(output_file, sf_result, nem_result, nem_spsm_result, nem_szsz_result, 
@@ -1910,8 +2189,10 @@ int main(int argc, char* argv[]) {
                       << ", anisotropy = " << nem_szsz_result.anisotropy << std::endl;
             std::cout << "Nematic order (Heisenberg): m = " << nem_heisenberg_result.m_nem 
                       << ", anisotropy = " << nem_heisenberg_result.anisotropy << std::endl;
-            std::cout << "VBS order (4-site): m = " << vbs_result.m_vbs 
-                      << " at q = (" << vbs_result.q_max[0] << ", " << vbs_result.q_max[1] << ")" << std::endl;
+            std::cout << "VBS order (XY, 4-site):         m = " << vbs_result.m_vbs_xy 
+                      << " at q = (" << vbs_result.q_max_xy[0] << ", " << vbs_result.q_max_xy[1] << ")" << std::endl;
+            std::cout << "VBS order (Heisenberg, 4-site): m = " << vbs_result.m_vbs_heis 
+                      << " at q = (" << vbs_result.q_max_heis[0] << ", " << vbs_result.q_max_heis[1] << ")" << std::endl;
             std::cout << "==============================================" << std::endl;
         }
         
