@@ -204,6 +204,63 @@ void ensureDSSFStandardGroups(H5::H5File& file) {
 }
 
 /**
+ * @brief Clear all contents of a group (for overwriting previous results)
+ * 
+ * This function deletes all objects (datasets, groups, etc.) inside a group
+ * but preserves the group itself. Used to overwrite previous results on a new run.
+ */
+void clearDSSFGroup(H5::H5File& file, const std::string& group_path) {
+    if (!file.nameExists(group_path)) return;
+    
+    try {
+        H5::Group group = file.openGroup(group_path);
+        
+        // Get number of objects in group
+        hsize_t num_objs = group.getNumObjs();
+        
+        // Collect names first (can't delete while iterating)
+        std::vector<std::string> obj_names;
+        for (hsize_t i = 0; i < num_objs; i++) {
+            obj_names.push_back(group.getObjnameByIdx(i));
+        }
+        group.close();
+        
+        // Delete each object
+        for (const auto& name : obj_names) {
+            std::string obj_path = group_path + "/" + name;
+            file.unlink(obj_path);
+        }
+    } catch (H5::Exception& e) {
+        std::cerr << "Warning: Failed to clear group " << group_path << ": " << e.getCDetailMsg() << std::endl;
+    }
+}
+
+/**
+ * @brief Clear a specific sample group in the static results (for SSSF method)
+ * 
+ * This is called once at the start of a new SSSF run to ensure previous results
+ * are overwritten, while still allowing append behavior within the run.
+ */
+void clearStaticSampleGroup(const std::string& h5_path, const std::string& operator_name, int sample_idx) {
+    std::lock_guard<std::mutex> lock(g_hdf5_mutex);
+    
+    try {
+        if (!fs::exists(h5_path)) return;
+        
+        H5::H5File file = openHDF5WithRetry(h5_path, H5F_ACC_RDWR);
+        std::string sample_path = "/static/" + operator_name + "/sample_" + std::to_string(sample_idx);
+        
+        if (file.nameExists(sample_path)) {
+            clearDSSFGroup(file, sample_path);
+        }
+        
+        file.close();
+    } catch (H5::Exception& e) {
+        std::cerr << "Warning: Failed to clear sample group: " << e.getCDetailMsg() << std::endl;
+    }
+}
+
+/**
  * @brief Set or update metadata attributes in DSSF HDF5 file
  */
 void setDSSFMetadata(H5::H5File& file,
@@ -288,6 +345,11 @@ std::string initPerRankDSSFFile(const std::string& output_dir, int rank,
         
         // Ensure standard groups exist
         ensureDSSFStandardGroups(file);
+        
+        // OVERWRITE BEHAVIOR for SSSF method (same as initDSSFHDF5File)
+        if (method == "sssf") {
+            clearDSSFGroup(file, "/static");
+        }
         
         // Set/update metadata
         setDSSFMetadata(file, num_sites, spin_length, method, operator_type,
@@ -533,6 +595,14 @@ std::string initDSSFHDF5File(const std::string& output_dir,
         // Ensure standard groups exist
         ensureDSSFStandardGroups(file);
         
+        // OVERWRITE BEHAVIOR for methods that use append mode within a run:
+        // - sssf: Uses append mode to accumulate data from multiple betas in the same sample
+        //   To ensure cross-run overwrite, we clear /static/ at initialization
+        // - Other methods (spectral, etc.): Use per-dataset overwrite, no group clearing needed
+        if (method == "sssf") {
+            clearDSSFGroup(file, "/static");
+        }
+        
         // Set/update metadata (this is idempotent - updates existing attrs)
         setDSSFMetadata(file, num_sites, spin_length, method, operator_type,
                         omega_min, omega_max, num_omega_bins, broadening);
@@ -682,6 +752,9 @@ void saveDSSFSpectralToHDF5(
 
 /**
  * @brief Save static structure factor to unified HDF5 file
+ * 
+ * @param append If true, append to existing data (for SSSF method which adds one T at a time).
+ *               If false (default), overwrite existing data (consistent with saveDSSFSpectralToHDF5).
  */
 void saveDSSFStaticToHDF5(
     const std::string& h5_path,
@@ -693,7 +766,8 @@ void saveDSSFStaticToHDF5(
     const std::vector<double>& variance,
     const std::vector<double>& variance_error,
     const std::vector<double>& susceptibility,
-    const std::vector<double>& susceptibility_error
+    const std::vector<double>& susceptibility_error,
+    bool append = false
 ) {
     std::lock_guard<std::mutex> lock(g_hdf5_mutex);
     
@@ -713,33 +787,44 @@ void saveDSSFStaticToHDF5(
             file.createGroup(sample_path);
         }
         
-        // Helper to save or append dataset (for SSSF method which adds one T at a time)
+        // Helper to save dataset
+        // - append=false (default): Overwrite existing data
+        // - append=true: Append to existing data (for SSSF method)
         auto saveDataset = [&](const std::string& name, const std::vector<double>& data) {
             if (data.empty()) return;
             std::string dataset_path = sample_path + "/" + name;
             
             if (file.nameExists(dataset_path)) {
-                // Read existing data and append new data
-                H5::DataSet existing_dset = file.openDataSet(dataset_path);
-                H5::DataSpace existing_space = existing_dset.getSpace();
-                hsize_t existing_size;
-                existing_space.getSimpleExtentDims(&existing_size);
-                
-                // Read existing data
-                std::vector<double> existing_data(existing_size);
-                existing_dset.read(existing_data.data(), H5::PredType::NATIVE_DOUBLE);
-                existing_dset.close();
-                
-                // Combine existing and new data
-                existing_data.insert(existing_data.end(), data.begin(), data.end());
-                
-                // Remove old dataset and create new with combined data
-                file.unlink(dataset_path);
-                hsize_t dims[1] = {existing_data.size()};
-                H5::DataSpace dspace(1, dims);
-                H5::DataSet dset = file.createDataSet(dataset_path, H5::PredType::NATIVE_DOUBLE, dspace);
-                dset.write(existing_data.data(), H5::PredType::NATIVE_DOUBLE);
-                dset.close();
+                if (append) {
+                    // Read existing data and append new data
+                    H5::DataSet existing_dset = file.openDataSet(dataset_path);
+                    H5::DataSpace existing_space = existing_dset.getSpace();
+                    hsize_t existing_size;
+                    existing_space.getSimpleExtentDims(&existing_size);
+                    
+                    std::vector<double> existing_data(existing_size);
+                    existing_dset.read(existing_data.data(), H5::PredType::NATIVE_DOUBLE);
+                    existing_dset.close();
+                    
+                    // Combine existing and new data
+                    existing_data.insert(existing_data.end(), data.begin(), data.end());
+                    
+                    // Remove old dataset and create new with combined data
+                    file.unlink(dataset_path);
+                    hsize_t dims[1] = {existing_data.size()};
+                    H5::DataSpace dspace(1, dims);
+                    H5::DataSet dset = file.createDataSet(dataset_path, H5::PredType::NATIVE_DOUBLE, dspace);
+                    dset.write(existing_data.data(), H5::PredType::NATIVE_DOUBLE);
+                    dset.close();
+                } else {
+                    // Overwrite: delete existing dataset
+                    file.unlink(dataset_path);
+                    hsize_t dims[1] = {data.size()};
+                    H5::DataSpace dspace(1, dims);
+                    H5::DataSet dset = file.createDataSet(dataset_path, H5::PredType::NATIVE_DOUBLE, dspace);
+                    dset.write(data.data(), H5::PredType::NATIVE_DOUBLE);
+                    dset.close();
+                }
             } else {
                 // Create new dataset
                 hsize_t dims[1] = {data.size()};
@@ -3313,7 +3398,8 @@ int main(int argc, char* argv[]) {
                         // Temperature from beta (for output)
                         double temperature = (beta > 0) ? 1.0 / beta : std::numeric_limits<double>::infinity();
                         
-                        // Save to HDF5 (appending to existing data)
+                        // Save to HDF5 (appending to existing data within this run)
+                        // Note: /static/ group was cleared at init for cross-run overwrite
                         std::vector<double> temperatures_vec = {temperature};
                         std::vector<double> expectation_vec = {expectation_value.real()};
                         std::vector<double> expectation_error_vec = {0.0};
@@ -3332,7 +3418,8 @@ int main(int argc, char* argv[]) {
                             variance_vec,
                             variance_error_vec,
                             susceptibility_vec,
-                            susceptibility_error_vec
+                            susceptibility_error_vec,
+                            true  // append=true for SSSF (accumulate betas within a run)
                         );
                         
                         // MEMORY FIX: Flush HDF5 library caches periodically to prevent memory accumulation

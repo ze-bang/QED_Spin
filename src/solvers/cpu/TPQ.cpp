@@ -1430,8 +1430,10 @@ ComplexVector get_tpq_state_at_temperature(
 
 /**
  * Find the lowest energy state from saved TPQ state files
- * Searches through tpq_state_*_beta=*_step=*.dat (or legacy tpq_state_*_beta=*.dat) files 
- * to find the highest beta (lowest energy)
+ * Searches through:
+ *   1. HDF5 file (ed_results.h5) for /tpq/samples/sample_N/states/beta_X datasets
+ *   2. Binary .dat files: tpq_state_N_beta=X_step=Y.dat (or legacy tpq_state_N_beta=X.dat)
+ * Returns the state with highest beta (lowest energy)
  */
 bool find_lowest_energy_tpq_state(
     const std::string& tpq_dir,
@@ -1452,6 +1454,59 @@ bool find_lowest_energy_tpq_state(
         std::cerr << "Error: Directory " << tpq_dir << " does not exist" << std::endl;
         return false;
     }
+    
+    // ===========================================================================
+    // First, search HDF5 file for saved TPQ states (preferred modern format)
+    // ===========================================================================
+    std::string h5_file = tpq_dir + "/ed_results.h5";
+    if (fs::exists(h5_file)) {
+        std::cout << "  Checking HDF5 file: " << h5_file << std::endl;
+        
+        try {
+            auto hdf5_states = HDF5IO::listTPQStates(h5_file, -1);  // -1 = all samples
+            
+            for (const auto& state : hdf5_states) {
+                if (state.beta > max_beta) {
+                    max_beta = state.beta;
+                    out_sample = state.sample_index;
+                    out_beta = state.beta;
+                    out_step = 0;  // Step not stored with HDF5 states, will look up from thermodynamics
+                    found = true;
+                }
+            }
+            
+            if (found) {
+                // Try to find the step number from thermodynamics data
+                auto thermo_data = HDF5IO::loadTPQThermodynamics(h5_file, out_sample);
+                if (!thermo_data.empty()) {
+                    // Find the step with closest beta
+                    double min_diff = std::numeric_limits<double>::max();
+                    for (const auto& pt : thermo_data) {
+                        double diff = std::abs(pt.beta - out_beta);
+                        if (diff < min_diff) {
+                            min_diff = diff;
+                            out_step = pt.step;
+                        }
+                    }
+                }
+                
+                std::cout << "Found state in HDF5 (highest beta):" << std::endl;
+                std::cout << "  Sample: " << out_sample << std::endl;
+                std::cout << "  Beta: " << out_beta << std::endl;
+                std::cout << "  Step: " << out_step << std::endl;
+                std::cout << "  Dataset: " << "HDF5:" << h5_file << ":/tpq/samples/sample_" 
+                          << out_sample << "/states/beta_" << out_beta << std::endl;
+                return true;
+            }
+        } catch (const std::exception& e) {
+            std::cout << "  Warning: Could not read HDF5 states: " << e.what() << std::endl;
+        }
+    }
+    
+    // ===========================================================================
+    // Fall back to binary .dat files (legacy format)
+    // ===========================================================================
+    std::cout << "  Checking binary .dat files..." << std::endl;
     
     // Regex to match tpq_state_i_beta=*_step=*.dat files (new format with step)
     std::regex state_pattern_new("tpq_state_([0-9]+)_beta=([0-9.]+)_step=([0-9]+)\\.dat");
@@ -1964,31 +2019,63 @@ void microcanonical_tpq(
         if (is_continuing && sample == 0) {
             std::cout << "Loading saved state to continue quenching..." << std::endl;
             
-            // Construct state file path - try new format first, then fall back to legacy
-            std::string state_file_new = dir + "/tpq_state_" + std::to_string(original_sample) 
-                                       + "_beta=" + std::to_string(resume_beta) 
-                                       + "_step=" + std::to_string(resume_step) + ".dat";
-            std::string state_file_legacy = dir + "/tpq_state_" + std::to_string(original_sample) 
-                                          + "_beta=" + std::to_string(resume_beta) + ".dat";
-            
             v0.resize(N);
             bool loaded = false;
             
-            // Try new format first - use overload that can project from full to reduced
-            if (load_tpq_state(v0, state_file_new, fixed_sz_op, N)) {
-                std::cout << "Loaded state from: " << state_file_new << std::endl;
-                loaded = true;
-            } 
-            // Fall back to legacy format
-            else if (load_tpq_state(v0, state_file_legacy, fixed_sz_op, N)) {
-                std::cout << "Loaded state from: " << state_file_legacy << std::endl;
-                loaded = true;
+            // ===========================================================================
+            // First, try to load from HDF5 (preferred modern format)
+            // ===========================================================================
+            std::string h5_file = dir + "/ed_results.h5";
+            if (std::filesystem::exists(h5_file)) {
+                std::cout << "  Trying HDF5 file: " << h5_file << std::endl;
+                
+                std::vector<Complex> hdf5_state;
+                if (HDF5IO::loadTPQState(h5_file, original_sample, resume_beta, hdf5_state)) {
+                    if (hdf5_state.size() == N) {
+                        v0 = std::move(hdf5_state);
+                        std::cout << "  Loaded state from HDF5: sample=" << original_sample 
+                                  << ", beta=" << resume_beta << std::endl;
+                        loaded = true;
+                    } else if (fixed_sz_op && hdf5_state.size() > N) {
+                        // State is from full space, need to project to reduced space
+                        std::cout << "  Projecting state from full space (" << hdf5_state.size() 
+                                  << ") to reduced space (" << N << ")..." << std::endl;
+                        v0 = fixed_sz_op->projectToReduced(hdf5_state);
+                        loaded = true;
+                    } else {
+                        std::cout << "  Warning: HDF5 state size mismatch (" << hdf5_state.size() 
+                                  << " vs " << N << ")" << std::endl;
+                    }
+                }
+            }
+            
+            // ===========================================================================
+            // Fall back to binary .dat files (legacy format)
+            // ===========================================================================
+            if (!loaded) {
+                // Construct state file path - try new format first, then fall back to legacy
+                std::string state_file_new = dir + "/tpq_state_" + std::to_string(original_sample) 
+                                           + "_beta=" + std::to_string(resume_beta) 
+                                           + "_step=" + std::to_string(resume_step) + ".dat";
+                std::string state_file_legacy = dir + "/tpq_state_" + std::to_string(original_sample) 
+                                              + "_beta=" + std::to_string(resume_beta) + ".dat";
+                
+                // Try new format first - use overload that can project from full to reduced
+                if (load_tpq_state(v0, state_file_new, fixed_sz_op, N)) {
+                    std::cout << "  Loaded state from binary: " << state_file_new << std::endl;
+                    loaded = true;
+                } 
+                // Fall back to legacy format
+                else if (load_tpq_state(v0, state_file_legacy, fixed_sz_op, N)) {
+                    std::cout << "  Loaded state from binary: " << state_file_legacy << std::endl;
+                    loaded = true;
+                }
             }
             
             if (!loaded) {
-                std::cerr << "Error: Could not load TPQ state from either format" << std::endl;
-                std::cerr << "  Tried: " << state_file_new << std::endl;
-                std::cerr << "  Tried: " << state_file_legacy << std::endl;
+                std::cerr << "Error: Could not load TPQ state from HDF5 or binary files" << std::endl;
+                std::cerr << "  Tried HDF5: " << h5_file << " (sample=" << original_sample 
+                          << ", beta=" << resume_beta << ")" << std::endl;
                 std::cerr << "Starting fresh for this sample." << std::endl;
                 goto fresh_start;
             }
