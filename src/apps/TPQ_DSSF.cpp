@@ -3341,6 +3341,7 @@ int main(int argc, char* argv[]) {
                                             cublasZdotc(cublas_handle, N, d_phi, 1, d_chi, 1, &result);
                                         }
                                         
+                                        std::cerr << "  [GPU DEBUG] ⟨O₁ψ|O₂ψ⟩ = " << cuCreal(result) << " + " << cuCimag(result) << "i" << std::endl;
                                         expectation_value = Complex(cuCreal(result), cuCimag(result));
                                         
                                         // Cleanup

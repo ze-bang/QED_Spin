@@ -145,18 +145,18 @@ __global__ void matVecTransformParallel(const cuDoubleComplex* x, cuDoubleComple
  * 
  * FIXED: Correctly implements y[new_state] += factor * x[state] 
  * Transform encodes: state -> new_state, so H[new_state, state] = factor
+ * 
+ * Uses grid-stride loop to handle arrays larger than max grid size.
  */
 __global__ void matVecKernelOptimized(cudaTextureObject_t tex_x_unused, cuDoubleComplex* y,
                                       int N, int n_sites, float spin_l,
                                       const GPUTransformData* transforms, int num_transforms,
                                       const cuDoubleComplex* x) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    
     // Use shared memory for transforms if small enough
     extern __shared__ GPUTransformData s_transforms[];
     
     // ALL threads in block participate in loading transforms into shared memory
-    // This must happen BEFORE the early return to avoid __syncthreads deadlock
+    // This must happen BEFORE any early returns to avoid __syncthreads deadlock
     int num_loads = (num_transforms + blockDim.x - 1) / blockDim.x;
     for (int i = 0; i < num_loads; ++i) {
         int tidx = i * blockDim.x + threadIdx.x;
@@ -166,95 +166,97 @@ __global__ void matVecKernelOptimized(cudaTextureObject_t tex_x_unused, cuDouble
     }
     __syncthreads();
     
-    // Now threads with invalid state can exit
-    if (idx >= N) return;
+    // Grid-stride loop to handle arrays larger than max grid size
+    int grid_stride = blockDim.x * gridDim.x;
     
-    uint64_t state = static_cast<uint64_t>(idx);
-    
-    // Read input value once (coalesced read)
-    cuDoubleComplex x_val = __ldg(&x[idx]);
-    
-    // Process all transforms for this basis state
-    const GPUTransformData* t_data = (num_transforms <= 4096) ? s_transforms : transforms;
-    
-    #pragma unroll 4
-    for (int t = 0; t < num_transforms; ++t) {
-        const GPUTransformData& tdata = t_data[t];
+    for (int idx = blockIdx.x * blockDim.x + threadIdx.x; idx < N; idx += grid_stride) {
+        uint64_t state = static_cast<uint64_t>(idx);
         
-        if (tdata.is_two_body) {
-            // Two-body operator
-            uint64_t bit1 = (state >> tdata.site_index) & 1;
+        // Read input value once (coalesced read)
+        cuDoubleComplex x_val = __ldg(&x[idx]);
+        
+        // Process all transforms for this basis state
+        const GPUTransformData* t_data = (num_transforms <= 4096) ? s_transforms : transforms;
+        
+        #pragma unroll 4
+        for (int t = 0; t < num_transforms; ++t) {
+            const GPUTransformData& tdata = t_data[t];
             
-            uint64_t new_state = state;
-            cuDoubleComplex factor = tdata.coefficient;
-            bool valid = true;
-            
-            // Apply first operator
-            if (tdata.op_type == 2) {
-                // Sz operator
-                double sign = spin_l * ((bit1 == 0) ? 1.0 : -1.0);
-                factor = complex_scale(factor, sign);
-            } else {
-                // S+ or S- operator
-                if (bit1 != tdata.op_type) {
-                    new_state ^= (1ULL << tdata.site_index);
-                } else {
-                    valid = false;
-                }
-            }
-            
-            if (valid) {
-                // Apply second operator (update bit2 if first op flipped site 2)
-                uint64_t bit2_new = (new_state >> tdata.site_index_2) & 1;
+            if (tdata.is_two_body) {
+                // Two-body operator
+                uint64_t bit1 = (state >> tdata.site_index) & 1;
                 
-                if (tdata.op_type_2 == 2) {
+                uint64_t new_state = state;
+                cuDoubleComplex factor = tdata.coefficient;
+                bool valid = true;
+                
+                // Apply first operator
+                if (tdata.op_type == 2) {
                     // Sz operator
-                    double sign = spin_l * ((bit2_new == 0) ? 1.0 : -1.0);
+                    double sign = spin_l * ((bit1 == 0) ? 1.0 : -1.0);
                     factor = complex_scale(factor, sign);
                 } else {
                     // S+ or S- operator
-                    if (bit2_new != tdata.op_type_2) {
-                        new_state ^= (1ULL << tdata.site_index_2);
+                    if (bit1 != tdata.op_type) {
+                        new_state ^= (1ULL << tdata.site_index);
                     } else {
                         valid = false;
                     }
                 }
-            }
-            
-            // CORRECT: Write to y[new_state], not y[state]
-            if (valid && new_state < N) {
-                cuDoubleComplex contrib = cuCmul(factor, x_val);
-                atomicAddDouble(&y[new_state].x, cuCreal(contrib));
-                atomicAddDouble(&y[new_state].y, cuCimag(contrib));
-            }
-        } else {
-            // One-body operator
-            uint64_t bit = (state >> tdata.site_index) & 1;
-            uint64_t new_state = state;
-            cuDoubleComplex factor = tdata.coefficient;
-            bool valid = true;
-            
-            if (tdata.op_type == 2) {
-                // Sz operator: diagonal
-                double sign = spin_l * ((bit == 0) ? 1.0 : -1.0);
-                factor = complex_scale(factor, sign);
+                
+                if (valid) {
+                    // Apply second operator (update bit2 if first op flipped site 2)
+                    uint64_t bit2_new = (new_state >> tdata.site_index_2) & 1;
+                    
+                    if (tdata.op_type_2 == 2) {
+                        // Sz operator
+                        double sign = spin_l * ((bit2_new == 0) ? 1.0 : -1.0);
+                        factor = complex_scale(factor, sign);
+                    } else {
+                        // S+ or S- operator
+                        if (bit2_new != tdata.op_type_2) {
+                            new_state ^= (1ULL << tdata.site_index_2);
+                        } else {
+                            valid = false;
+                        }
+                    }
+                }
+                
+                // CORRECT: Write to y[new_state], not y[state]
+                if (valid && new_state < N) {
+                    cuDoubleComplex contrib = cuCmul(factor, x_val);
+                    atomicAddDouble(&y[new_state].x, cuCreal(contrib));
+                    atomicAddDouble(&y[new_state].y, cuCimag(contrib));
+                }
             } else {
-                // S+ or S- operator: off-diagonal
-                if (bit != tdata.op_type) {
-                    new_state ^= (1ULL << tdata.site_index);
+                // One-body operator
+                uint64_t bit = (state >> tdata.site_index) & 1;
+                uint64_t new_state = state;
+                cuDoubleComplex factor = tdata.coefficient;
+                bool valid = true;
+                
+                if (tdata.op_type == 2) {
+                    // Sz operator: diagonal
+                    double sign = spin_l * ((bit == 0) ? 1.0 : -1.0);
+                    factor = complex_scale(factor, sign);
                 } else {
-                    valid = false;
+                    // S+ or S- operator: off-diagonal
+                    if (bit != tdata.op_type) {
+                        new_state ^= (1ULL << tdata.site_index);
+                    } else {
+                        valid = false;
+                    }
+                }
+                
+                // CORRECT: Write to y[new_state], not y[state]
+                if (valid && new_state < N) {
+                    cuDoubleComplex contrib = cuCmul(factor, x_val);
+                    atomicAddDouble(&y[new_state].x, cuCreal(contrib));
+                    atomicAddDouble(&y[new_state].y, cuCimag(contrib));
                 }
             }
-            
-            // CORRECT: Write to y[new_state], not y[state]
-            if (valid && new_state < N) {
-                cuDoubleComplex contrib = cuCmul(factor, x_val);
-                atomicAddDouble(&y[new_state].x, cuCreal(contrib));
-                atomicAddDouble(&y[new_state].y, cuCimag(contrib));
-            }
         }
-    }
+    }  // end grid-stride loop
 }
 
 /**
