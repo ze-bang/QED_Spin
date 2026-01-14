@@ -125,6 +125,56 @@ struct Cluster {
     // Derived: bond orientations (0, 1, 2)
     std::map<std::pair<int, int>, int> bond_orientation;
     
+    // Unit cell representation for PBC-correct displacements
+    // Each site i has: position[i] = R_{cell} + delta_{sublattice}
+    // where R_{cell} = cell_coords[i][0] * a1 + cell_coords[i][1] * a2
+    std::vector<std::array<int, 2>> cell_coords;     // (n1, n2) unit cell indices
+    std::vector<std::array<double, 2>> sublattice_offsets;  // delta_alpha within unit cell
+    int sites_per_cell = 3;  // For kagome
+    
+    // Compute minimum-image displacement from site i to site j
+    // Returns the actual displacement vector accounting for PBC
+    std::array<double, 2> minimum_image_displacement(int i, int j) const {
+        if (n_cells_x <= 0 || n_cells_y <= 0 || cell_coords.empty()) {
+            // Fallback: direct subtraction (old behavior, may be wrong for PBC)
+            return {positions[j][0] - positions[i][0], positions[j][1] - positions[i][1]};
+        }
+        
+        // Get unit cell coordinates
+        int n1_i = cell_coords[i][0], n2_i = cell_coords[i][1];
+        int n1_j = cell_coords[j][0], n2_j = cell_coords[j][1];
+        int sub_i = sublattice[i], sub_j = sublattice[j];
+        
+        // Compute cell displacement with minimum image convention
+        int dn1 = n1_j - n1_i;
+        int dn2 = n2_j - n2_i;
+        
+        // Apply minimum image: shift to range [-N/2, N/2)
+        if (dn1 > n_cells_x / 2) dn1 -= n_cells_x;
+        else if (dn1 < -n_cells_x / 2) dn1 += n_cells_x;
+        if (dn2 > n_cells_y / 2) dn2 -= n_cells_y;
+        else if (dn2 < -n_cells_y / 2) dn2 += n_cells_y;
+        
+        // For odd dimensions, need to handle the boundary case
+        // e.g., for N=3: -1, 0, 1 are the valid range
+        // dn=2 should map to -1, dn=-2 should map to 1
+        if (n_cells_x % 2 == 1 && dn1 == (n_cells_x + 1) / 2) dn1 = -(n_cells_x - 1) / 2;
+        if (n_cells_y % 2 == 1 && dn2 == (n_cells_y + 1) / 2) dn2 = -(n_cells_y - 1) / 2;
+        
+        // Displacement = dn1*a1 + dn2*a2 + (delta_j - delta_i)
+        double dx = dn1 * a1[0] + dn2 * a2[0] + sublattice_offsets[sub_j][0] - sublattice_offsets[sub_i][0];
+        double dy = dn1 * a1[1] + dn2 * a2[1] + sublattice_offsets[sub_j][1] - sublattice_offsets[sub_i][1];
+        
+        return {dx, dy};
+    }
+    
+    // Compute bond center position using minimum-image convention
+    // For bond (i,j), returns: r_i + displacement(i,j)/2
+    // This gives the correct midpoint even for PBC-crossing bonds
+    std::array<double, 2> bond_center_pbc(int i, int j) const {
+        auto dr = minimum_image_displacement(i, j);
+        return {positions[i][0] + 0.5 * dr[0], positions[i][1] + 0.5 * dr[1]};
+    }
 };
 
 // -----------------------------------------------------------------------------
@@ -392,6 +442,71 @@ Cluster load_cluster(const std::string& cluster_dir) {
         }
         cluster.bond_orientation[{i, j}] = orientation;
         cluster.bond_orientation[{j, i}] = orientation;
+    }
+    
+    // =========================================================================
+    // Compute unit cell coordinates for PBC-correct minimum-image displacements
+    // Each site is represented as: r = n1*a1 + n2*a2 + delta_sublattice
+    // =========================================================================
+    cluster.sites_per_cell = 3;  // Kagome lattice
+    
+    // Standard kagome sublattice offsets (within unit cell)
+    cluster.sublattice_offsets = {
+        {0.0, 0.0},                        // Sublattice 0
+        {0.5, 0.0},                        // Sublattice 1
+        {0.25, std::sqrt(3.0) / 4.0}       // Sublattice 2
+    };
+    
+    // Infer grid dimensions if not already set
+    if (cluster.n_cells_x <= 0 || cluster.n_cells_y <= 0) {
+        int n_cells = cluster.n_sites / cluster.sites_per_cell;
+        // Try to factorize (prefer square or close to square)
+        int dim = static_cast<int>(std::sqrt(n_cells) + 0.5);
+        if (dim * dim == n_cells) {
+            cluster.n_cells_x = dim;
+            cluster.n_cells_y = dim;
+        } else {
+            // Try common non-square: 3x2, 4x3, etc.
+            for (int d1 = dim + 1; d1 >= 1; --d1) {
+                if (n_cells % d1 == 0) {
+                    int d2 = n_cells / d1;
+                    cluster.n_cells_x = d1;
+                    cluster.n_cells_y = d2;
+                    break;
+                }
+            }
+        }
+    }
+    
+    // Compute unit cell coordinates for each site
+    // Method: solve r = n1*a1 + n2*a2 + delta for (n1, n2)
+    // Since we know sublattice, we can subtract delta first, then solve for n1, n2
+    cluster.cell_coords.resize(cluster.n_sites);
+    
+    double det = cluster.a1[0] * cluster.a2[1] - cluster.a1[1] * cluster.a2[0];
+    if (std::abs(det) > 1e-10) {
+        for (int site = 0; site < cluster.n_sites; ++site) {
+            int sub = cluster.sublattice[site];
+            // Position relative to sublattice offset
+            double rx = cluster.positions[site][0] - cluster.sublattice_offsets[sub][0];
+            double ry = cluster.positions[site][1] - cluster.sublattice_offsets[sub][1];
+            
+            // Solve: rx = n1*a1[0] + n2*a2[0], ry = n1*a1[1] + n2*a2[1]
+            // n1 = (rx*a2[1] - ry*a2[0]) / det
+            // n2 = (ry*a1[0] - rx*a1[1]) / det
+            double n1_f = (rx * cluster.a2[1] - ry * cluster.a2[0]) / det;
+            double n2_f = (ry * cluster.a1[0] - rx * cluster.a1[1]) / det;
+            
+            // Round to nearest integer (should be exact for valid lattice)
+            int n1 = static_cast<int>(std::round(n1_f));
+            int n2 = static_cast<int>(std::round(n2_f));
+            
+            cluster.cell_coords[site] = {n1, n2};
+        }
+        std::cout << "  Computed unit cell coordinates for PBC-correct displacements" << std::endl;
+        std::cout << "  Grid: " << cluster.n_cells_x << " x " << cluster.n_cells_y << " unit cells" << std::endl;
+    } else {
+        std::cout << "  Warning: Could not compute unit cell coordinates (det=0)" << std::endl;
     }
     
     std::cout << "Loaded cluster: " << cluster.n_sites << " sites, "
@@ -1113,9 +1228,9 @@ StructureFactorResult compute_spin_structure_factor(
             for (int j = 0; j < n_sites; ++j) {
                 // S(q) = (1/N) Σᵢⱼ ⟨S⁻ᵢ S⁺ⱼ⟩ e^(iq·(Rⱼ-Rᵢ))
                 // Matches TPQ_DSSF "0,0": ⟨(S⁺(q))† S⁺(q)⟩ = ⟨S⁻(-q) S⁺(q)⟩
-                double dr_x = cluster.positions[j][0] - cluster.positions[i][0];
-                double dr_y = cluster.positions[j][1] - cluster.positions[i][1];
-                double phase_arg = q[0] * dr_x + q[1] * dr_y;
+                // Use minimum-image displacement for PBC-correct phases
+                auto dr = cluster.minimum_image_displacement(i, j);
+                double phase_arg = q[0] * dr[0] + q[1] * dr[1];
                 s_q += smsp_corr[i][j] * std::exp(I * phase_arg);
             }
         }
@@ -1282,13 +1397,13 @@ VBSResult compute_vbs_order(
     // Convert edges to vector for indexed access
     std::vector<std::pair<int, int>> edges(cluster.edges_nn.begin(), cluster.edges_nn.end());
     
-    // Compute bond centers
+    // Compute bond centers using PBC-correct minimum-image convention
+    // For bonds crossing periodic boundaries, this gives the correct midpoint
     std::vector<std::array<double, 2>> bond_centers(n_bonds);
     for (int b = 0; b < n_bonds; ++b) {
         int i = edges[b].first;
         int j = edges[b].second;
-        bond_centers[b][0] = 0.5 * (cluster.positions[i][0] + cluster.positions[j][0]);
-        bond_centers[b][1] = 0.5 * (cluster.positions[i][1] + cluster.positions[j][1]);
+        bond_centers[b] = cluster.bond_center_pbc(i, j);
     }
     
     // =========================================================================
@@ -1359,9 +1474,43 @@ VBSResult compute_vbs_order(
     
     // =========================================================================
     // Compute S_D(q) at discrete allowed k-points (both XY and Heisenberg)
+    // For bond-bond displacements, we use the minimum-image convention:
+    // dr = r_{b1} - r_{b2} with PBC wrapping applied to the supercell
     // =========================================================================
     result.S_d_xy.resize(n_k, 0.0);
     result.S_d_heis.resize(n_k, 0.0);
+    
+    // Compute supercell vectors for minimum-image wrapping of bond centers
+    double L1_x = cluster.n_cells_x * cluster.a1[0] + 0 * cluster.a2[0];
+    double L1_y = cluster.n_cells_x * cluster.a1[1] + 0 * cluster.a2[1];
+    double L2_x = 0 * cluster.a1[0] + cluster.n_cells_y * cluster.a2[0];
+    double L2_y = 0 * cluster.a1[1] + cluster.n_cells_y * cluster.a2[1];
+    
+    // Minimum-image displacement for bond centers
+    auto min_image_bond_disp = [&](int b1, int b2) -> std::array<double, 2> {
+        double dr_x = bond_centers[b1][0] - bond_centers[b2][0];
+        double dr_y = bond_centers[b1][1] - bond_centers[b2][1];
+        
+        if (cluster.n_cells_x <= 0 || cluster.n_cells_y <= 0) {
+            return {dr_x, dr_y};  // Fallback: no PBC correction
+        }
+        
+        // Express displacement in fractional coordinates of the supercell
+        double det = L1_x * L2_y - L1_y * L2_x;
+        if (std::abs(det) < 1e-10) {
+            return {dr_x, dr_y};  // Degenerate lattice
+        }
+        
+        double f1 = (dr_x * L2_y - dr_y * L2_x) / det;
+        double f2 = (dr_y * L1_x - dr_x * L1_y) / det;
+        
+        // Wrap to [-0.5, 0.5)
+        f1 -= std::round(f1);
+        f2 -= std::round(f2);
+        
+        // Convert back to Cartesian
+        return {f1 * L1_x + f2 * L2_x, f1 * L1_y + f2 * L2_y};
+    };
     
     std::cout << "  Computing S_D(q) at " << n_k << " k-points..." << std::flush;
     
@@ -1373,9 +1522,8 @@ VBSResult compute_vbs_order(
         
         for (int b1 = 0; b1 < n_bonds; ++b1) {
             for (int b2 = 0; b2 < n_bonds; ++b2) {
-                double dr_x = bond_centers[b1][0] - bond_centers[b2][0];
-                double dr_y = bond_centers[b1][1] - bond_centers[b2][1];
-                double phase_arg = q[0] * dr_x + q[1] * dr_y;
+                auto dr = min_image_bond_disp(b1, b2);
+                double phase_arg = q[0] * dr[0] + q[1] * dr[1];
                 Complex phase = std::exp(I * phase_arg);
                 
                 s_d_xy += result.connected_corr_xy[b1][b2] * phase;
@@ -1430,9 +1578,9 @@ VBSResult compute_vbs_order(
             double s_d_heis = 0.0;
             for (int b1 = 0; b1 < n_bonds; ++b1) {
                 for (int b2 = 0; b2 < n_bonds; ++b2) {
-                    double dr_x = bond_centers[b1][0] - bond_centers[b2][0];
-                    double dr_y = bond_centers[b1][1] - bond_centers[b2][1];
-                    double phase_arg = qx * dr_x + qy * dr_y;
+                    // Use minimum-image displacement for PBC-correct phases
+                    auto dr = min_image_bond_disp(b1, b2);
+                    double phase_arg = qx * dr[0] + qy * dr[1];
                     Complex phase = std::exp(I * phase_arg);
                     
                     s_d_xy += result.connected_corr_xy[b1][b2] * phase;
@@ -1484,9 +1632,9 @@ std::vector<std::vector<Complex>> compute_sq_2d_grid(
                 for (int j = 0; j < n_sites; ++j) {
                     // S(q) = (1/N) Σᵢⱼ ⟨S⁻ᵢ S⁺ⱼ⟩ e^(iq·(Rⱼ-Rᵢ))
                     // Matches TPQ_DSSF "0,0" convention
-                    double dr_x = cluster.positions[j][0] - cluster.positions[i][0];
-                    double dr_y = cluster.positions[j][1] - cluster.positions[i][1];
-                    double phase_arg = qx * dr_x + qy * dr_y;
+                    // Use minimum-image displacement for PBC-correct phases
+                    auto dr = cluster.minimum_image_displacement(i, j);
+                    double phase_arg = qx * dr[0] + qy * dr[1];
                     s_q += smsp_corr[i][j] * std::exp(I * phase_arg);
                 }
             }
