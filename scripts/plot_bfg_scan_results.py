@@ -1132,7 +1132,7 @@ def find_per_jpm_files(scan_dir):
 
 
 def plot_bond_lattice(positions, edges, bond_values, ax, title='', cmap='viridis', 
-                      vmin=0.0, vmax=0.25, orientations=None, show_sites=True,
+                      vmin=None, vmax=None, orientations=None, show_sites=True,
                       use_absolute=True):
     """
     Plot bond values on the lattice as colored lines.
@@ -1150,7 +1150,7 @@ def plot_bond_lattice(positions, edges, bond_values, ax, title='', cmap='viridis
     cmap : str or colormap
         Default 'viridis' for absolute values (sequential colormap)
     vmin, vmax : float
-        Color scale limits. Default 0 to 0.25 (theoretical bounds for spin-1/2)
+        Color scale limits. If None, determined from data.
     orientations : array (n_bonds,), optional
         Bond orientations (0, 1, 2) for marker style
     show_sites : bool
@@ -1173,7 +1173,13 @@ def plot_bond_lattice(positions, edges, bond_values, ax, title='', cmap='viridis
         p2 = positions[j]
         segments.append([p1, p2])
     
-    # Create colored line collection with fixed theoretical bounds
+    # Set color limits from data if not provided
+    if vmin is None:
+        vmin = np.min(bond_values)
+    if vmax is None:
+        vmax = np.max(bond_values)
+    
+    # Create colored line collection
     norm = Normalize(vmin=vmin, vmax=vmax)
     lc = LineCollection(segments, cmap=cmap, norm=norm, linewidths=3)
     lc.set_array(bond_values)
@@ -1235,8 +1241,7 @@ def plot_bonds_for_jpm(jpm, h5_file, output_dir, title_prefix=""):
         # Plot absolute value of S+S- (includes both real and imag contributions)
         spsm_abs = np.abs(spsm)
         plot_bond_lattice(positions, edges, spsm_abs, axes[ax_idx],
-                          title=r'$|\langle S^+_i S^-_j \rangle|$', cmap='viridis',
-                          vmin=0.0, vmax=0.5)  # max for S+S- is 0.5 for spin-1/2
+                          title=r'$|\langle S^+_i S^-_j \rangle|$', cmap='viridis')
         ax_idx += 1
         
         # Skip the imaginary part panel since we're using absolute values
@@ -1245,14 +1250,12 @@ def plot_bonds_for_jpm(jpm, h5_file, output_dir, title_prefix=""):
     
     if 'szsz' in bond_data:
         plot_bond_lattice(positions, edges, bond_data['szsz'], axes[ax_idx],
-                          title=r'$|\langle S^z_i S^z_j \rangle|$', cmap='viridis',
-                          vmin=0.0, vmax=0.25)  # max for SzSz is 0.25 for spin-1/2
+                          title=r'$|\langle S^z_i S^z_j \rangle|$', cmap='viridis')
         ax_idx += 1
     
     if 'heisenberg' in bond_data:
         plot_bond_lattice(positions, edges, bond_data['heisenberg'], axes[ax_idx],
-                          title=r'$|\langle \mathbf{S}_i \cdot \mathbf{S}_j \rangle|$', cmap='viridis',
-                          vmin=0.0, vmax=0.75)  # max for S·S is 0.75 for spin-1/2
+                          title=r'$|\langle \mathbf{S}_i \cdot \mathbf{S}_j \rangle|$', cmap='viridis')
         ax_idx += 1
     
     # Hide unused axes
