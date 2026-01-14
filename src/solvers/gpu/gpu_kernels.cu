@@ -295,11 +295,19 @@ __global__ void matVecKernel(const cuDoubleComplex* x, cuDoubleComplex* y,
                              const void* interactions_ptr, int num_interactions,
                              const void* single_site_ops_ptr, int num_single_site_ops) {
     
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= N) return;
+    // Cast void pointers to appropriate types (moved outside loop)
+    typedef struct {int site1, site2; char op1, op2; double coupling;} Interaction;
+    typedef struct {int site; char op; double coupling;} SingleSiteOp;
     
-    // Current basis state (represented as integer)
-    uint64_t state = static_cast<uint64_t>(idx);
+    const Interaction* interactions = static_cast<const Interaction*>(interactions_ptr);
+    const SingleSiteOp* single_site_ops = static_cast<const SingleSiteOp*>(single_site_ops_ptr);
+    
+    // Grid-stride loop to handle arrays larger than max grid size
+    int grid_stride = blockDim.x * gridDim.x;
+    
+    for (int idx = blockIdx.x * blockDim.x + threadIdx.x; idx < N; idx += grid_stride) {
+        // Current basis state (represented as integer)
+        uint64_t state = static_cast<uint64_t>(idx);
     
     // Accumulator for this row of H
     cuDoubleComplex result = make_cuDoubleComplex(0.0, 0.0);
@@ -363,6 +371,7 @@ __global__ void matVecKernel(const cuDoubleComplex* x, cuDoubleComplex* y,
     
     // Write result
     y[idx] = result;
+    }  // end grid-stride loop
 }
 
 /**
@@ -576,13 +585,11 @@ __global__ void matVecFixedSzKernelOptimized(const cuDoubleComplex* x, cuDoubleC
                                              const uint64_t* basis_states,
                                              int N, int n_sites, float spin_l,
                                              const GPUTransformData* transforms, int num_transforms) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    
     // Use shared memory for transforms if small enough
     extern __shared__ GPUTransformData s_transforms[];
     
     // ALL threads in block participate in loading transforms into shared memory
-    // This must happen BEFORE the early return to avoid __syncthreads deadlock
+    // This must happen BEFORE any early returns to avoid __syncthreads deadlock
     int num_loads = (num_transforms + blockDim.x - 1) / blockDim.x;
     for (int i = 0; i < num_loads; ++i) {
         int tidx = i * blockDim.x + threadIdx.x;
@@ -592,11 +599,12 @@ __global__ void matVecFixedSzKernelOptimized(const cuDoubleComplex* x, cuDoubleC
     }
     __syncthreads();
     
-    // Now threads with invalid state can exit
-    if (idx >= N) return;
+    // Grid-stride loop to handle arrays larger than max grid size
+    int grid_stride = blockDim.x * gridDim.x;
     
-    // Get basis state for this index
-    uint64_t state = basis_states[idx];
+    for (int idx = blockIdx.x * blockDim.x + threadIdx.x; idx < N; idx += grid_stride) {
+        // Get basis state for this index
+        uint64_t state = basis_states[idx];
     
     // Read input value once (coalesced read)
     cuDoubleComplex x_val = __ldg(&x[idx]);
@@ -681,6 +689,7 @@ __global__ void matVecFixedSzKernelOptimized(const cuDoubleComplex* x, cuDoubleC
             }
         }
     }
+    }  // end grid-stride loop
 }
 
 /**
@@ -694,19 +703,20 @@ __global__ void matVecFixedSzKernel(const cuDoubleComplex* x, cuDoubleComplex* y
                                     const void* interactions_ptr, int num_interactions,
                                     const void* single_site_ops_ptr, int num_single_site_ops) {
     
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= N) return;
-    
-    // Get basis state for this index
-    uint64_t state = basis_states[idx];
-    
-    cuDoubleComplex result = make_cuDoubleComplex(0.0, 0.0);
-    
     typedef struct {int site1, site2; char op1, op2; double coupling;} Interaction;
     typedef struct {int site; char op; double coupling;} SingleSiteOp;
     
     const Interaction* interactions = static_cast<const Interaction*>(interactions_ptr);
     const SingleSiteOp* single_site_ops = static_cast<const SingleSiteOp*>(single_site_ops_ptr);
+    
+    // Grid-stride loop to handle arrays larger than max grid size
+    int grid_stride = blockDim.x * gridDim.x;
+    
+    for (int idx = blockIdx.x * blockDim.x + threadIdx.x; idx < N; idx += grid_stride) {
+        // Get basis state for this index
+        uint64_t state = basis_states[idx];
+        
+        cuDoubleComplex result = make_cuDoubleComplex(0.0, 0.0);
     
     // Apply two-site interactions
     for (int i = 0; i < num_interactions; ++i) {
@@ -756,6 +766,7 @@ __global__ void matVecFixedSzKernel(const cuDoubleComplex* x, cuDoubleComplex* y
     }
     
     y[idx] = result;
+    }  // end grid-stride loop
 }
 
 // ============================================================================
