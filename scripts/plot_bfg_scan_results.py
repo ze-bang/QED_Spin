@@ -5,11 +5,16 @@ Plot BFG order parameter scan results from compute_bfg_order_parameters --scan-d
 Usage:
     python plot_bfg_scan_results.py <scan_results.h5> [output_dir]
     python plot_bfg_scan_results.py --scan-dir <dir>  # auto-find scan_results.h5
+    python plot_bfg_scan_results.py --scan-dir <dir> --plot-bonds  # include bond visualizations
 
 Reads the scan_results.h5 file and produces plots of all order parameters vs Jpm:
   - Translation order (m_translation)
   - Nematic order (XY, S+S-, SzSz, Heisenberg)
   - VBS order (XY dimer, Heisenberg dimer)
+
+With --plot-bonds, also reads per-Jpm HDF5 files to visualize:
+  - Spatially resolved bond expectations (S+S-, SzSz, Heisenberg S·S)
+  - Bond orientation visualization for nematic analysis
 """
 
 import numpy as np
@@ -18,6 +23,11 @@ import h5py
 import argparse
 import os
 from pathlib import Path
+import glob
+import re
+from matplotlib.collections import LineCollection
+from matplotlib.colors import Normalize
+import matplotlib.cm as cm
 
 
 def load_scan_results(h5_file):
@@ -363,6 +373,408 @@ def plot_temperature_dependence(data, output_dir, title_prefix=""):
     plt.close()
 
 
+def load_bond_data(h5_file):
+    """Load spatially resolved bond data from per-Jpm HDF5 file"""
+    bond_data = {}
+    with h5py.File(h5_file, 'r') as f:
+        if 'bonds' not in f:
+            return None
+        
+        bonds = f['bonds']
+        bond_data['positions'] = bonds['positions'][:]
+        bond_data['edges'] = bonds['edges'][:]
+        
+        if 'spsm' in bonds:
+            spsm = bonds['spsm'][:]
+            # Handle structured array (complex stored as compound type)
+            if spsm.dtype.names and 'r' in spsm.dtype.names:
+                bond_data['spsm'] = spsm['r'] + 1j * spsm['i']
+            else:
+                bond_data['spsm'] = spsm
+        
+        if 'szsz' in bonds:
+            bond_data['szsz'] = bonds['szsz'][:]
+        
+        if 'heisenberg' in bonds:
+            bond_data['heisenberg'] = bonds['heisenberg'][:]
+        
+        if 'orientation' in bonds:
+            bond_data['orientation'] = bonds['orientation'][:]
+        
+        # Get Jpm from attribute if available
+        if 'jpm' in f.attrs:
+            bond_data['jpm'] = f.attrs['jpm']
+    
+    return bond_data
+
+
+def find_per_jpm_files(scan_dir):
+    """Find all order_params_Jpm=*.h5 files in order_parameter_results/"""
+    result_dir = Path(scan_dir) / 'order_parameter_results'
+    if not result_dir.exists():
+        result_dir = Path(scan_dir)
+    
+    pattern = str(result_dir / 'order_params_Jpm=*.h5')
+    files = glob.glob(pattern)
+    
+    # Extract Jpm values and sort
+    jpm_files = []
+    for f in files:
+        match = re.search(r'Jpm=([+-]?[0-9]*\.?[0-9]+)', f)
+        if match:
+            jpm = float(match.group(1))
+            jpm_files.append((jpm, f))
+    
+    jpm_files.sort(key=lambda x: x[0])
+    return jpm_files
+
+
+def plot_bond_lattice(positions, edges, bond_values, ax, title='', cmap='coolwarm', 
+                      vmin=None, vmax=None, orientations=None, show_sites=True):
+    """
+    Plot bond values on the lattice as colored lines.
+    
+    Parameters:
+    -----------
+    positions : array (n_sites, 2)
+        Site positions
+    edges : array (n_bonds, 2)
+        Edge list (pairs of site indices)
+    bond_values : array (n_bonds,)
+        Values to plot on each bond (real part if complex)
+    ax : matplotlib axis
+    title : str
+    cmap : str or colormap
+    vmin, vmax : float
+        Color scale limits
+    orientations : array (n_bonds,), optional
+        Bond orientations (0, 1, 2) for marker style
+    show_sites : bool
+        Whether to show site positions
+    """
+    # Take real part if complex
+    if np.iscomplexobj(bond_values):
+        bond_values = np.real(bond_values)
+    
+    # Create line segments
+    segments = []
+    for e, (i, j) in enumerate(edges):
+        p1 = positions[i]
+        p2 = positions[j]
+        segments.append([p1, p2])
+    
+    # Set color limits
+    if vmin is None:
+        vmin = np.min(bond_values)
+    if vmax is None:
+        vmax = np.max(bond_values)
+    
+    # Handle symmetric colormap
+    if vmin < 0 and vmax > 0:
+        vlim = max(abs(vmin), abs(vmax))
+        vmin, vmax = -vlim, vlim
+    
+    # Create colored line collection
+    norm = Normalize(vmin=vmin, vmax=vmax)
+    lc = LineCollection(segments, cmap=cmap, norm=norm, linewidths=3)
+    lc.set_array(bond_values)
+    ax.add_collection(lc)
+    
+    # Add colorbar
+    cbar = plt.colorbar(lc, ax=ax, shrink=0.7)
+    
+    # Plot sites
+    if show_sites:
+        ax.scatter(positions[:, 0], positions[:, 1], c='black', s=30, zorder=5)
+    
+    ax.set_xlim(positions[:, 0].min() - 0.5, positions[:, 0].max() + 0.5)
+    ax.set_ylim(positions[:, 1].min() - 0.5, positions[:, 1].max() + 0.5)
+    ax.set_aspect('equal')
+    ax.set_title(title)
+    
+    return lc, cbar
+
+
+def plot_bonds_for_jpm(jpm, h5_file, output_dir, title_prefix=""):
+    """Plot all spatially resolved bond expectations for a single Jpm value"""
+    
+    bond_data = load_bond_data(h5_file)
+    if bond_data is None:
+        print(f"  No bond data in {h5_file}")
+        return
+    
+    positions = bond_data['positions']
+    edges = bond_data['edges']
+    
+    # Create multi-panel figure
+    n_panels = 0
+    if 'spsm' in bond_data:
+        n_panels += 2  # real and imag
+    if 'szsz' in bond_data:
+        n_panels += 1
+    if 'heisenberg' in bond_data:
+        n_panels += 1
+    
+    if n_panels == 0:
+        return
+    
+    n_cols = min(n_panels, 3)
+    n_rows = (n_panels + n_cols - 1) // n_cols
+    
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(5 * n_cols, 4 * n_rows))
+    if n_panels == 1:
+        axes = [axes]
+    else:
+        axes = axes.flatten() if n_panels > 1 else [axes]
+    
+    fig.suptitle(f'{title_prefix}Bond Expectations at $J_{{\\pm}}$ = {jpm:.4f}', fontsize=14)
+    
+    ax_idx = 0
+    
+    if 'spsm' in bond_data:
+        spsm = bond_data['spsm']
+        # Real part
+        plot_bond_lattice(positions, edges, np.real(spsm), axes[ax_idx],
+                          title=r'Re$\langle S^+_i S^-_j \rangle$', cmap='coolwarm')
+        ax_idx += 1
+        
+        # Imaginary part (often zero or very small)
+        if np.max(np.abs(np.imag(spsm))) > 1e-10:
+            plot_bond_lattice(positions, edges, np.imag(spsm), axes[ax_idx],
+                              title=r'Im$\langle S^+_i S^-_j \rangle$', cmap='coolwarm')
+        else:
+            axes[ax_idx].set_visible(False)
+        ax_idx += 1
+    
+    if 'szsz' in bond_data:
+        plot_bond_lattice(positions, edges, bond_data['szsz'], axes[ax_idx],
+                          title=r'$\langle S^z_i S^z_j \rangle$', cmap='coolwarm')
+        ax_idx += 1
+    
+    if 'heisenberg' in bond_data:
+        plot_bond_lattice(positions, edges, bond_data['heisenberg'], axes[ax_idx],
+                          title=r'$\langle \mathbf{S}_i \cdot \mathbf{S}_j \rangle$', cmap='coolwarm')
+        ax_idx += 1
+    
+    # Hide unused axes
+    for i in range(ax_idx, len(axes)):
+        axes[i].set_visible(False)
+    
+    plt.tight_layout()
+    
+    jpm_str = f"{jpm:+.4f}".replace('+', 'p').replace('-', 'm').replace('.', 'p')
+    fname = f'{output_dir}/bonds_Jpm_{jpm_str}.png'
+    plt.savefig(fname, dpi=150, bbox_inches='tight')
+    print(f"  Saved: {fname}")
+    plt.close()
+
+
+def plot_bond_orientation_by_type(jpm, h5_file, output_dir, title_prefix=""):
+    """
+    Plot bonds colored by orientation (0, 1, 2) with mean value per orientation.
+    This helps visualize nematic (C3-breaking) order.
+    """
+    bond_data = load_bond_data(h5_file)
+    if bond_data is None or 'orientation' not in bond_data:
+        return
+    
+    positions = bond_data['positions']
+    edges = bond_data['edges']
+    orientations = bond_data['orientation']
+    
+    # Colors for orientations
+    orient_colors = ['#e41a1c', '#377eb8', '#4daf4a']  # red, blue, green
+    orient_labels = ['Type 0', 'Type 1', 'Type 2']
+    
+    fig, axes = plt.subplots(1, 3, figsize=(15, 4))
+    fig.suptitle(f'{title_prefix}Bond Expectations by Orientation at $J_{{\\pm}}$ = {jpm:.4f}', fontsize=14)
+    
+    for ax, (key, label) in zip(axes, [('spsm', r'$\langle S^+S^- \rangle$'),
+                                        ('szsz', r'$\langle S^zS^z \rangle$'),
+                                        ('heisenberg', r'$\langle \mathbf{S} \cdot \mathbf{S} \rangle$')]):
+        if key not in bond_data:
+            ax.set_visible(False)
+            continue
+        
+        vals = bond_data[key]
+        if np.iscomplexobj(vals):
+            vals = np.real(vals)
+        
+        # Plot each orientation type separately
+        for otype in [0, 1, 2]:
+            mask = orientations == otype
+            if not np.any(mask):
+                continue
+            
+            # Create segments for this orientation
+            segments = []
+            values = []
+            for e, (i, j) in enumerate(edges):
+                if mask[e]:
+                    segments.append([positions[i], positions[j]])
+                    values.append(vals[e])
+            
+            if len(segments) > 0:
+                mean_val = np.mean(values)
+                lc = LineCollection(segments, colors=orient_colors[otype], linewidths=3,
+                                    label=f'{orient_labels[otype]}: mean={mean_val:.4f}')
+                ax.add_collection(lc)
+        
+        ax.scatter(positions[:, 0], positions[:, 1], c='black', s=30, zorder=5)
+        ax.set_xlim(positions[:, 0].min() - 0.5, positions[:, 0].max() + 0.5)
+        ax.set_ylim(positions[:, 1].min() - 0.5, positions[:, 1].max() + 0.5)
+        ax.set_aspect('equal')
+        ax.set_title(label)
+        ax.legend(loc='upper right', fontsize=8)
+    
+    plt.tight_layout()
+    
+    jpm_str = f"{jpm:+.4f}".replace('+', 'p').replace('-', 'm').replace('.', 'p')
+    fname = f'{output_dir}/bond_orientations_Jpm_{jpm_str}.png'
+    plt.savefig(fname, dpi=150, bbox_inches='tight')
+    print(f"  Saved: {fname}")
+    plt.close()
+
+
+def plot_bond_evolution(jpm_files, output_dir, title_prefix=""):
+    """
+    Plot evolution of mean bond values per orientation across Jpm values.
+    Shows how nematic order develops.
+    """
+    jpm_vals = []
+    means_by_type = {'spsm': [[], [], []], 'szsz': [[], [], []], 'heisenberg': [[], [], []]}
+    
+    for jpm, h5_file in jpm_files:
+        bond_data = load_bond_data(h5_file)
+        if bond_data is None or 'orientation' not in bond_data:
+            continue
+        
+        jpm_vals.append(jpm)
+        orientations = bond_data['orientation']
+        
+        for key in ['spsm', 'szsz', 'heisenberg']:
+            if key not in bond_data:
+                for otype in [0, 1, 2]:
+                    means_by_type[key][otype].append(np.nan)
+                continue
+            
+            vals = bond_data[key]
+            if np.iscomplexobj(vals):
+                vals = np.real(vals)
+            
+            for otype in [0, 1, 2]:
+                mask = orientations == otype
+                if np.any(mask):
+                    means_by_type[key][otype].append(np.mean(vals[mask]))
+                else:
+                    means_by_type[key][otype].append(np.nan)
+    
+    if len(jpm_vals) == 0:
+        return
+    
+    jpm_vals = np.array(jpm_vals)
+    orient_colors = ['#e41a1c', '#377eb8', '#4daf4a']
+    orient_labels = ['Type 0', 'Type 1', 'Type 2']
+    
+    fig, axes = plt.subplots(1, 3, figsize=(15, 4))
+    fig.suptitle(f'{title_prefix}Bond Expectation Evolution by Orientation', fontsize=14)
+    
+    for ax, (key, ylabel) in zip(axes, [('spsm', r'$\langle S^+S^- \rangle$'),
+                                         ('szsz', r'$\langle S^zS^z \rangle$'),
+                                         ('heisenberg', r'$\langle \mathbf{S} \cdot \mathbf{S} \rangle$')]):
+        for otype in [0, 1, 2]:
+            vals = np.array(means_by_type[key][otype])
+            if np.all(np.isnan(vals)):
+                continue
+            ax.plot(jpm_vals, vals, 'o-', color=orient_colors[otype], 
+                    label=orient_labels[otype], markersize=5)
+        
+        ax.set_xlabel(r'$J_{\pm}$')
+        ax.set_ylabel(ylabel)
+        ax.legend()
+        ax.grid(True, alpha=0.3)
+    
+    plt.tight_layout()
+    plt.savefig(f'{output_dir}/bond_evolution_by_orientation.png', dpi=150, bbox_inches='tight')
+    plt.savefig(f'{output_dir}/bond_evolution_by_orientation.pdf', bbox_inches='tight')
+    print(f"Saved: {output_dir}/bond_evolution_by_orientation.png")
+    plt.close()
+    
+    # Also plot the anisotropy (max - min across orientations)
+    fig, axes = plt.subplots(1, 3, figsize=(15, 4))
+    fig.suptitle(f'{title_prefix}Bond Anisotropy (C3 Breaking Measure)', fontsize=14)
+    
+    for ax, (key, ylabel) in zip(axes, [('spsm', r'$\Delta \langle S^+S^- \rangle$'),
+                                         ('szsz', r'$\Delta \langle S^zS^z \rangle$'),
+                                         ('heisenberg', r'$\Delta \langle \mathbf{S} \cdot \mathbf{S} \rangle$')]):
+        all_means = np.array([means_by_type[key][o] for o in [0, 1, 2]])  # (3, n_jpm)
+        if np.all(np.isnan(all_means)):
+            ax.set_visible(False)
+            continue
+        
+        anisotropy = np.nanmax(all_means, axis=0) - np.nanmin(all_means, axis=0)
+        ax.plot(jpm_vals, anisotropy, 'o-', color='purple', markersize=5)
+        ax.fill_between(jpm_vals, 0, anisotropy, alpha=0.3, color='purple')
+        
+        ax.set_xlabel(r'$J_{\pm}$')
+        ax.set_ylabel(ylabel)
+        ax.grid(True, alpha=0.3)
+        ax.set_ylim(bottom=0)
+    
+    plt.tight_layout()
+    plt.savefig(f'{output_dir}/bond_anisotropy.png', dpi=150, bbox_inches='tight')
+    plt.savefig(f'{output_dir}/bond_anisotropy.pdf', bbox_inches='tight')
+    print(f"Saved: {output_dir}/bond_anisotropy.png")
+    plt.close()
+
+
+def plot_all_bonds(scan_dir, output_dir, title_prefix="", select_jpm=None):
+    """
+    Plot spatially resolved bond data from per-Jpm HDF5 files.
+    
+    Parameters:
+    -----------
+    scan_dir : str
+        Directory containing the scan
+    output_dir : str  
+        Output directory for plots
+    title_prefix : str
+        Title prefix for plots
+    select_jpm : list of float, optional
+        Only plot these specific Jpm values. If None, plot all.
+    """
+    jpm_files = find_per_jpm_files(scan_dir)
+    
+    if not jpm_files:
+        print("No per-Jpm HDF5 files found with bond data")
+        return
+    
+    print(f"Found {len(jpm_files)} per-Jpm files with potential bond data")
+    
+    bond_dir = Path(output_dir) / 'bonds'
+    os.makedirs(bond_dir, exist_ok=True)
+    
+    # Filter to selected Jpm values if specified
+    if select_jpm is not None:
+        selected = []
+        for target in select_jpm:
+            # Find closest match
+            closest = min(jpm_files, key=lambda x: abs(x[0] - target))
+            if abs(closest[0] - target) < 0.01:
+                selected.append(closest)
+        jpm_files = selected
+    
+    # Plot individual Jpm files
+    for jpm, h5_file in jpm_files:
+        plot_bonds_for_jpm(jpm, h5_file, bond_dir, title_prefix)
+        plot_bond_orientation_by_type(jpm, h5_file, bond_dir, title_prefix)
+    
+    # Plot evolution across Jpm
+    all_jpm_files = find_per_jpm_files(scan_dir)  # Use all for evolution plot
+    if len(all_jpm_files) > 1:
+        plot_bond_evolution(all_jpm_files, output_dir, title_prefix)
+
+
 def main():
     parser = argparse.ArgumentParser(
         description='Plot BFG order parameter scan results',
@@ -376,21 +788,30 @@ def main():
                         help='Scan directory (will look for order_parameter_results/scan_results.h5)')
     parser.add_argument('--title', '-t', type=str, default='',
                         help='Title prefix for plots')
+    parser.add_argument('--plot-bonds', '-b', action='store_true',
+                        help='Plot spatially resolved bond expectations from per-Jpm HDF5 files')
+    parser.add_argument('--select-jpm', type=float, nargs='+', default=None,
+                        help='Only plot bond data for these specific Jpm values')
     
     args = parser.parse_args()
     
     # Find input file
+    scan_dir = None
     if args.scan_dir:
+        scan_dir = args.scan_dir
         h5_file = Path(args.scan_dir) / 'order_parameter_results' / 'scan_results.h5'
         if not h5_file.exists():
             h5_file = Path(args.scan_dir) / 'scan_results.h5'
     elif args.input:
         h5_file = Path(args.input)
+        scan_dir = h5_file.parent.parent if 'order_parameter_results' in str(h5_file) else h5_file.parent
     else:
         # Try current directory
         h5_file = Path('scan_results.h5')
+        scan_dir = Path('.')
         if not h5_file.exists():
             h5_file = Path('order_parameter_results/scan_results.h5')
+            scan_dir = Path('.')
     
     if not h5_file.exists():
         print(f"Error: Cannot find scan_results.h5")
@@ -398,6 +819,7 @@ def main():
         print("\nUsage:")
         print("  python plot_bfg_scan_results.py <scan_results.h5>")
         print("  python plot_bfg_scan_results.py --scan-dir <dir>")
+        print("  python plot_bfg_scan_results.py --scan-dir <dir> --plot-bonds")
         return 1
     
     # Determine output directory
@@ -416,6 +838,11 @@ def main():
     
     plot_all_order_parameters(data, output_dir, title_prefix)
     plot_temperature_dependence(data, output_dir, title_prefix)
+    
+    # Plot spatially resolved bond data if requested
+    if args.plot_bonds and scan_dir:
+        print("\nPlotting spatially resolved bond expectations...")
+        plot_all_bonds(scan_dir, output_dir, title_prefix, args.select_jpm)
     
     return 0
 
