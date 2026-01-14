@@ -75,12 +75,14 @@ def plot_all_order_parameters(data, output_dir, title_prefix=""):
         'heisenberg': '#ff7f0e',
         'vbs_xy': '#17becf',
         'vbs_heis': '#e377c2',
+        'plaquette': '#8c564b',
+        'chiral': '#bcbd22',
     }
     
     # =========================================================================
-    # Figure 1: Overview - All order parameters
+    # Figure 1: Overview - All order parameters (expanded to include plaquette)
     # =========================================================================
-    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+    fig, axes = plt.subplots(2, 3, figsize=(18, 10))
     fig.suptitle(f'{title_prefix}BFG Order Parameters vs $J_{{\\pm}}$', fontsize=14)
     
     # Panel 1: Translation order
@@ -145,6 +147,37 @@ def plot_all_order_parameters(data, output_dir, title_prefix=""):
     ax.set_xlabel('$J_{\\pm}$')
     ax.set_ylabel('Mean Dimer Value')
     ax.set_title('Average Bond Expectations')
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+    
+    # Panel 5: Plaquette/Bowtie order
+    ax = axes[0, 2]
+    if 'm_plaquette' in sorted_data:
+        ax.plot(jpm, sorted_data['m_plaquette'], 'o-', color=colors['plaquette'], 
+                label='$m_{plaq}$ (bowtie)', markersize=4)
+    if 'chi_mean' in sorted_data:
+        ax2 = ax.twinx()
+        ax2.plot(jpm, sorted_data['chi_mean'], 's-', color=colors['chiral'], 
+                label='$\\langle \\chi \\rangle$ (chiral)', markersize=4, alpha=0.7)
+        ax2.set_ylabel('Triangle Chiral $\\langle \\chi \\rangle$', color=colors['chiral'])
+        ax2.tick_params(axis='y', labelcolor=colors['chiral'])
+    ax.set_xlabel('$J_{\\pm}$')
+    ax.set_ylabel('$m_{plaquette}$', color=colors['plaquette'])
+    ax.tick_params(axis='y', labelcolor=colors['plaquette'])
+    ax.set_title('Plaquette Order (8-site Bowtie)')
+    ax.grid(True, alpha=0.3)
+    
+    # Panel 6: Plaquette raw values
+    ax = axes[1, 2]
+    if 'P_mean' in sorted_data:
+        ax.plot(jpm, sorted_data['P_mean'], 'o-', color=colors['plaquette'], 
+                label='$\\langle P \\rangle$ (resonance)', markersize=4)
+    if 'resonance_strength' in sorted_data:
+        ax.plot(jpm, sorted_data['resonance_strength'], 's-', color=colors['chiral'], 
+                label='$|P|$ (strength)', markersize=4)
+    ax.set_xlabel('$J_{\\pm}$')
+    ax.set_ylabel('Plaquette Values')
+    ax.set_title('Bowtie Resonance Expectations')
     ax.legend()
     ax.grid(True, alpha=0.3)
     
@@ -247,6 +280,54 @@ def plot_all_order_parameters(data, output_dir, title_prefix=""):
     plt.close()
     
     # =========================================================================
+    # Figure 3b: Plaquette/Bowtie order comparison
+    # =========================================================================
+    if 'm_plaquette' in sorted_data:
+        fig, axes = plt.subplots(1, 3, figsize=(15, 5))
+        fig.suptitle(f'{title_prefix}Plaquette Order (8-site Bowtie Resonance)', fontsize=14)
+        
+        # Left: Plaquette order parameter
+        ax = axes[0]
+        ax.plot(jpm, sorted_data['m_plaquette'], 'o-', color=colors['plaquette'], 
+                label='$m_{plaq}$', markersize=5)
+        ax.set_xlabel('$J_{\\pm}$')
+        ax.set_ylabel('$m_{plaquette}$')
+        ax.set_title('Plaquette Order Parameter')
+        ax.legend()
+        ax.grid(True, alpha=0.3)
+        
+        # Middle: Raw resonance values
+        ax = axes[1]
+        if 'P_mean' in sorted_data:
+            ax.plot(jpm, sorted_data['P_mean'], 'o-', color=colors['plaquette'], 
+                    label='$\\langle P \\rangle$ (resonance)', markersize=5)
+        if 'resonance_strength' in sorted_data:
+            ax.plot(jpm, sorted_data['resonance_strength'], 's-', color=colors['chiral'], 
+                    label='$\\langle |P| \\rangle$ (strength)', markersize=5)
+        ax.set_xlabel('$J_{\\pm}$')
+        ax.set_ylabel('Bowtie Resonance')
+        ax.set_title('Ring-Flip Expectations ($S^+S^-S^+S^- + h.c.$)')
+        ax.legend()
+        ax.grid(True, alpha=0.3)
+        
+        # Right: Chiral order
+        ax = axes[2]
+        if 'chi_mean' in sorted_data:
+            ax.plot(jpm, sorted_data['chi_mean'], 'o-', color=colors['chiral'], 
+                    label='$\\langle \\chi \\rangle$', markersize=5)
+        ax.set_xlabel('$J_{\\pm}$')
+        ax.set_ylabel('Triangle Chiral')
+        ax.set_title('Scalar Spin Chirality $(S_1 \\times S_2) \\cdot S_3$')
+        ax.legend()
+        ax.grid(True, alpha=0.3)
+        ax.axhline(y=0, color='k', linestyle='--', alpha=0.3)
+        
+        plt.tight_layout()
+        plt.savefig(f'{output_dir}/plaquette_comparison.png', dpi=150, bbox_inches='tight')
+        print(f"Saved: {output_dir}/plaquette_comparison.png")
+        plt.close()
+    
+    # =========================================================================
     # Figure 4: Combined phase diagram style
     # =========================================================================
     fig, ax = plt.subplots(figsize=(10, 6))
@@ -275,6 +356,11 @@ def plot_all_order_parameters(data, output_dir, title_prefix=""):
         ax.plot(jpm, normalize(sorted_data['m_vbs_heis']), ':', 
                 color=colors['vbs_heis'], linewidth=2, label='VBS (Heis)')
     
+    if 'm_plaquette' in sorted_data:
+        ax.plot(jpm, normalize(sorted_data['m_plaquette']), '-', 
+                color=colors['plaquette'], linewidth=2, marker='s', markersize=4, 
+                label='Plaquette')
+    
     ax.set_xlabel('$J_{\\pm}$', fontsize=12)
     ax.set_ylabel('Normalized Order Parameter', fontsize=12)
     ax.set_title(f'{title_prefix}Phase Diagram Overview', fontsize=14)
@@ -297,6 +383,10 @@ def plot_all_order_parameters(data, output_dir, title_prefix=""):
         ('m_nematic_heisenberg', '$m_{nematic}$ (Heis)', 'Nematic Order (Heisenberg)', colors['heisenberg']),
         ('m_vbs_xy', '$m_{VBS}$ (XY)', 'VBS Order (XY Dimer)', colors['vbs_xy']),
         ('m_vbs_heis', '$m_{VBS}$ (Heis)', 'VBS Order (Heisenberg Dimer)', colors['vbs_heis']),
+        ('m_plaquette', '$m_{plaq}$', 'Plaquette Order (Bowtie)', colors['plaquette']),
+        ('chi_mean', '$\\langle \\chi \\rangle$', 'Triangle Chiral Order', colors['chiral']),
+        ('P_mean', '$\\langle P \\rangle$', 'Bowtie Resonance Mean', colors['plaquette']),
+        ('resonance_strength', '$\\langle |P| \\rangle$', 'Resonance Strength', colors['chiral']),
     ]:
         if key in sorted_data:
             fig, ax = plt.subplots(figsize=(6, 4))
@@ -305,6 +395,9 @@ def plot_all_order_parameters(data, output_dir, title_prefix=""):
             ax.set_ylabel(ylabel, fontsize=12)
             ax.set_title(f'{title_prefix}{title}', fontsize=12)
             ax.grid(True, alpha=0.3)
+            # Add zero line for chiral order
+            if key == 'chi_mean':
+                ax.axhline(y=0, color='k', linestyle='--', alpha=0.3)
             plt.tight_layout()
             fname = key.replace('m_', '')
             plt.savefig(f'{output_dir}/{fname}.png', dpi=150, bbox_inches='tight')
@@ -443,6 +536,33 @@ def load_structure_factor_data(h5_file):
         # Load VBS S_D(q) at discrete k-points (Heisenberg)
         if 'S_D_q_heis' in f:
             sf_data['S_D_q_heis'] = f['S_D_q_heis'][:]
+        
+        # Load orientation-resolved VBS structure factors S_D^{αβ}(q)
+        # Shape: (n_k, 6) where 6 = (00, 01, 02, 11, 12, 22)
+        if 'S_D_q_xy_oriented' in f:
+            data = f['S_D_q_xy_oriented'][:]
+            if data.dtype.names and 'r' in data.dtype.names:
+                sf_data['S_D_q_xy_oriented'] = data['r'] + 1j * data['i']
+            else:
+                sf_data['S_D_q_xy_oriented'] = data
+        
+        if 'S_D_q_heis_oriented' in f:
+            sf_data['S_D_q_heis_oriented'] = f['S_D_q_heis_oriented'][:]
+        
+        if 'n_bonds_per_orientation' in f:
+            sf_data['n_bonds_per_orientation'] = f['n_bonds_per_orientation'][:]
+        
+        # Load plaquette data from subgroup
+        if 'plaquette_order' in f:
+            plaq_grp = f['plaquette_order']
+            for key in ['S_p_2d', 'S_p_oriented', 'n_plaquettes_per_orientation',
+                        'orientations', 'm_plaquette', 'P_mean', 'resonance_strength', 'chi_mean']:
+                if key in plaq_grp:
+                    data = plaq_grp[key][:]
+                    if data.dtype.names and 'r' in data.dtype.names:
+                        sf_data[f'plaq_{key}'] = data['r'] + 1j * data['i']
+                    else:
+                        sf_data[f'plaq_{key}'] = data
         
         # Load scalar attributes
         attrs = f.attrs
@@ -767,6 +887,86 @@ def plot_structure_factors_for_jpm(jpm, h5_file, output_dir, title_prefix=""):
         
         jpm_str = f"{jpm:+.4f}".replace('+', 'p').replace('-', 'm').replace('.', 'p')
         fname = f'{output_dir}/structure_factors_2d_Jpm_{jpm_str}.png'
+        plt.savefig(fname, dpi=150, bbox_inches='tight')
+        print(f"  Saved: {fname}")
+        plt.close()
+    
+    # =========================================================================
+    # Figure 3: Orientation-resolved VBS structure factors S_D^{αβ}(q)
+    # =========================================================================
+    has_xy_oriented = 'S_D_q_xy_oriented' in sf_data
+    has_heis_oriented = 'S_D_q_heis_oriented' in sf_data
+    
+    if has_xy_oriented or has_heis_oriented:
+        # Orientation labels: 0=(0,0), 1=(0,1), 2=(0,2), 3=(1,1), 4=(1,2), 5=(2,2)
+        orient_labels = ['(0,0)', '(0,1)', '(0,2)', '(1,1)', '(1,2)', '(2,2)']
+        orient_names = ['α=β=0', 'α=0,β=1', 'α=0,β=2', 'α=β=1', 'α=1,β=2', 'α=β=2']
+        
+        # Plot XY orientation-resolved
+        if has_xy_oriented:
+            fig, axes = plt.subplots(2, 3, figsize=(15, 10))
+            axes = axes.flatten()
+            fig.suptitle(f'{title_prefix}Orientation-Resolved $S_D^{{\\alpha\\beta}}(q)$ (XY) at $J_{{\\pm}}$ = {jpm:.4f}', fontsize=14)
+            
+            s_oriented = sf_data['S_D_q_xy_oriented']
+            for c in range(6):
+                sc = plot_sq_on_reciprocal_lattice(
+                    axes[c], s_oriented[:, c], k_points,
+                    title=f'$S_D^{{{orient_labels[c]}}}(\\mathbf{{k}})$',
+                    cmap='viridis', label=f'|$S_D^{{\\alpha\\beta}}$|'
+                )
+            
+            plt.tight_layout()
+            jpm_str = f"{jpm:+.4f}".replace('+', 'p').replace('-', 'm').replace('.', 'p')
+            fname = f'{output_dir}/VBS_oriented_xy_Jpm_{jpm_str}.png'
+            plt.savefig(fname, dpi=150, bbox_inches='tight')
+            print(f"  Saved: {fname}")
+            plt.close()
+        
+        # Plot Heisenberg orientation-resolved
+        if has_heis_oriented:
+            fig, axes = plt.subplots(2, 3, figsize=(15, 10))
+            axes = axes.flatten()
+            fig.suptitle(f'{title_prefix}Orientation-Resolved $S_D^{{\\alpha\\beta}}(q)$ (Heis) at $J_{{\\pm}}$ = {jpm:.4f}', fontsize=14)
+            
+            s_oriented = sf_data['S_D_q_heis_oriented']
+            for c in range(6):
+                sc = plot_sq_on_reciprocal_lattice(
+                    axes[c], s_oriented[:, c], k_points,
+                    title=f'$S_D^{{{orient_labels[c]}}}(\\mathbf{{k}})$',
+                    cmap='plasma', label=f'|$S_D^{{\\alpha\\beta}}$|'
+                )
+            
+            plt.tight_layout()
+            jpm_str = f"{jpm:+.4f}".replace('+', 'p').replace('-', 'm').replace('.', 'p')
+            fname = f'{output_dir}/VBS_oriented_heis_Jpm_{jpm_str}.png'
+            plt.savefig(fname, dpi=150, bbox_inches='tight')
+            print(f"  Saved: {fname}")
+            plt.close()
+    
+    # =========================================================================
+    # Figure 4: Plaquette/Bowtie orientation-resolved structure factor S_P^{αβ}(q)
+    # =========================================================================
+    has_plaq_oriented = 'plaq_S_p_oriented' in sf_data
+    
+    if has_plaq_oriented:
+        orient_labels = ['(0,0)', '(0,1)', '(0,2)', '(1,1)', '(1,2)', '(2,2)']
+        
+        fig, axes = plt.subplots(2, 3, figsize=(15, 10))
+        axes = axes.flatten()
+        fig.suptitle(f'{title_prefix}Orientation-Resolved $S_P^{{\\alpha\\beta}}(q)$ (Bowtie) at $J_{{\\pm}}$ = {jpm:.4f}', fontsize=14)
+        
+        s_oriented = sf_data['plaq_S_p_oriented']
+        for c in range(6):
+            sc = plot_sq_on_reciprocal_lattice(
+                axes[c], s_oriented[:, c], k_points,
+                title=f'$S_P^{{{orient_labels[c]}}}(\\mathbf{{k}})$',
+                cmap='cividis', label=f'|$S_P^{{\\alpha\\beta}}$|'
+            )
+        
+        plt.tight_layout()
+        jpm_str = f"{jpm:+.4f}".replace('+', 'p').replace('-', 'm').replace('.', 'p')
+        fname = f'{output_dir}/plaquette_oriented_Jpm_{jpm_str}.png'
         plt.savefig(fname, dpi=150, bbox_inches='tight')
         print(f"  Saved: {fname}")
         plt.close()
