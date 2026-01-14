@@ -388,6 +388,9 @@ def load_structure_factor_data(h5_file):
     - S_D_q_heis_2d: 2D VBS dimer structure factor (Heisenberg)
     - q_grid_vals: q-grid values
     - k_points: special k-points
+    - S_q: Structure factor at discrete k-points
+    - S_D_q_xy: VBS dimer SF at discrete k-points (XY)
+    - S_D_q_heis: VBS dimer SF at discrete k-points (Heisenberg)
     - Various scalar attributes
     """
     sf_data = {}
@@ -421,13 +424,25 @@ def load_structure_factor_data(h5_file):
         if 'k_points' in f:
             sf_data['k_points'] = f['k_points'][:]
         
-        # Load S(q) at k-points
+        # Load S(q) at discrete k-points
         if 'S_q' in f:
             data = f['S_q'][:]
             if data.dtype.names and 'r' in data.dtype.names:
                 sf_data['S_q'] = data['r'] + 1j * data['i']
             else:
                 sf_data['S_q'] = data
+        
+        # Load VBS S_D(q) at discrete k-points (XY)
+        if 'S_D_q_xy' in f:
+            data = f['S_D_q_xy'][:]
+            if data.dtype.names and 'r' in data.dtype.names:
+                sf_data['S_D_q_xy'] = data['r'] + 1j * data['i']
+            else:
+                sf_data['S_D_q_xy'] = data
+        
+        # Load VBS S_D(q) at discrete k-points (Heisenberg)
+        if 'S_D_q_heis' in f:
+            sf_data['S_D_q_heis'] = f['S_D_q_heis'][:]
         
         # Load scalar attributes
         attrs = f.attrs
@@ -438,6 +453,115 @@ def load_structure_factor_data(h5_file):
                 sf_data[key] = attrs[key]
     
     return sf_data if sf_data else None
+
+
+# =============================================================================
+# Kagome reciprocal lattice helper functions
+# =============================================================================
+
+def get_kagome_reciprocal_lattice():
+    """Return the kagome lattice reciprocal lattice vectors and high-symmetry points."""
+    # Real-space lattice vectors (from lattice_parameters.dat)
+    a1 = np.array([1.0, 0.0])
+    a2 = np.array([0.5, np.sqrt(3)/2])  # 0.866025
+    
+    # Reciprocal lattice vectors: b_i = 2*pi * (a_j x z) / (a1 x a2)
+    # For 2D: b1 = 2*pi/det * (a2y, -a2x) rotated, b2 = 2*pi/det * (-a1y, a1x)
+    det = a1[0]*a2[1] - a1[1]*a2[0]  # = sqrt(3)/2
+    b1 = 2 * np.pi / det * np.array([a2[1], -a2[0]])   # (6.283185, -3.627599)
+    b2 = 2 * np.pi / det * np.array([-a1[1], a1[0]])   # (0, 7.255197)
+    
+    # High-symmetry points
+    Gamma = np.array([0.0, 0.0])
+    # K point: (2/3)*b1 + (1/3)*b2 or permutations
+    K = (2/3)*b1 + (1/3)*b2   # ~ (2.094395, 1.209200)
+    # M point: (1/2)*b1
+    M = 0.5*b1                # ~ (3.141593, -1.813799)
+    
+    return b1, b2, {'Gamma': Gamma, 'K': K, 'M': M}
+
+
+def get_brillouin_zone_hexagon():
+    """Return vertices of the first Brillouin zone (hexagonal) for kagome lattice."""
+    b1, b2, _ = get_kagome_reciprocal_lattice()
+    
+    # BZ vertices are at combinations of ±b1/2 ± b2/2 ± (b1+b2)/2
+    # For kagome (hexagonal BZ), the vertices are:
+    # K points at (2/3 b1 + 1/3 b2), (1/3 b1 + 2/3 b2), etc.
+    vertices = []
+    for i in range(6):
+        angle = i * np.pi / 3
+        # K points are at distance |b1|/sqrt(3) from Gamma
+        r = np.linalg.norm(b1) / np.sqrt(3)
+        # Rotate from first K point
+        theta0 = np.arctan2((2/3*b1 + 1/3*b2)[1], (2/3*b1 + 1/3*b2)[0])
+        vertices.append([r * np.cos(theta0 + angle), r * np.sin(theta0 + angle)])
+    vertices.append(vertices[0])  # Close the hexagon
+    return np.array(vertices)
+
+
+def plot_sq_on_reciprocal_lattice(ax, sq_data, k_points, title, cmap='hot', 
+                                   label=r'$|S(\mathbf{q})|$', marker_size=800):
+    """
+    Plot structure factor at discrete k-points on kagome reciprocal lattice (no interpolation).
+    
+    Parameters:
+    -----------
+    ax : matplotlib axis
+    sq_data : array
+        Structure factor values at k-points
+    k_points : array (N, 2)
+        k-point coordinates
+    title : str
+    cmap : str or colormap
+    label : str
+        Colorbar label
+    marker_size : int
+        Size of hexagonal markers
+    """
+    b1, b2, high_sym = get_kagome_reciprocal_lattice()
+    
+    # Get structure factor magnitude
+    sq = np.abs(sq_data).flatten()
+    
+    # k_points should be (N, 2) array of actual k-point coordinates
+    if k_points.ndim == 1:
+        # Assume it's flattened, try to reshape
+        k_points = k_points.reshape(-1, 2)
+    
+    # Use original k-points (no folding)
+    kx = k_points[:, 0]
+    ky = k_points[:, 1]
+    
+    # Plot using scatter for discrete points (no interpolation)
+    # Use hexagonal markers
+    sc = ax.scatter(kx, ky, c=sq, cmap=cmap, s=marker_size, marker='h', 
+                    edgecolors='black', linewidths=1.5)
+    plt.colorbar(sc, ax=ax, label=label, shrink=0.8)
+    
+    # Add Brillouin zone boundary
+    bz = get_brillouin_zone_hexagon()
+    ax.plot(bz[:, 0], bz[:, 1], 'k-', linewidth=2, alpha=0.9)
+    
+    # Mark high-symmetry points with labels
+    offset = 0.4
+    ax.text(high_sym['Gamma'][0], high_sym['Gamma'][1] - offset, r'$\Gamma$', 
+            ha='center', va='top', color='black', fontsize=11, fontweight='bold')
+    ax.text(high_sym['K'][0] + offset, high_sym['K'][1], r'$K$',
+            ha='left', va='center', color='black', fontsize=11, fontweight='bold')
+    ax.text(high_sym['M'][0] + offset, high_sym['M'][1], r'$M$',
+            ha='left', va='center', color='black', fontsize=11, fontweight='bold')
+    
+    ax.set_xlabel(r'$k_x$', fontsize=11)
+    ax.set_ylabel(r'$k_y$', fontsize=11)
+    ax.set_aspect('equal')
+    ax.set_title(title, fontsize=12)
+    
+    # Set axis limits to show all k-points
+    ax.set_xlim(-1, 5.5)
+    ax.set_ylim(-3.5, 5.5)
+    
+    return sc
 
 
 def plot_structure_factor_2d(sf_2d, q_vals, ax, title='', cmap='hot', 
@@ -503,86 +627,146 @@ def plot_structure_factor_2d(sf_2d, q_vals, ax, title='', cmap='hot',
 def plot_structure_factors_for_jpm(jpm, h5_file, output_dir, title_prefix=""):
     """
     Plot all structure factors in momentum space for a single Jpm value.
-    Creates a multi-panel figure showing S(q) and S_D(q).
+    Creates a multi-panel figure showing S(q) and S_D(q) on kagome reciprocal lattice.
     """
     sf_data = load_structure_factor_data(h5_file)
     if sf_data is None:
         print(f"  No structure factor data found in {h5_file}")
         return
     
-    # Check what data is available
-    has_sq = 'S_q_2d' in sf_data
-    has_sd_xy = 'S_D_q_xy_2d' in sf_data
-    has_sd_heis = 'S_D_q_heis_2d' in sf_data
-    
-    n_panels = sum([has_sq, has_sd_xy, has_sd_heis])
-    if n_panels == 0:
-        print(f"  No 2D structure factor grids found for Jpm={jpm}")
-        return
-    
-    q_vals = sf_data.get('q_grid_vals', None)
-    if q_vals is None:
-        # Default grid
-        n_q = sf_data['S_q_2d'].shape[0] if has_sq else 50
-        q_vals = np.linspace(-1, 1, n_q)
-    
+    # Get k-points (discrete allowed momenta for finite cluster)
     k_points = sf_data.get('k_points', None)
+    if k_points is None:
+        # Fallback: generate k-points from lattice parameters
+        b1, b2, _ = get_kagome_reciprocal_lattice()
+        N = 3  # Assume 3x3 cluster
+        k_points = []
+        for n1 in range(N):
+            for n2 in range(N):
+                k = (n1/N) * b1 + (n2/N) * b2
+                k_points.append(k)
+        k_points = np.array(k_points)
+    elif k_points.ndim == 1:
+        k_points = k_points.reshape(-1, 2)
     
-    # Create figure
-    fig, axes = plt.subplots(1, n_panels, figsize=(5 * n_panels, 4.5))
-    if n_panels == 1:
-        axes = [axes]
+    # Check what data is available for discrete k-points
+    has_sq = 'S_q' in sf_data
+    has_sd_xy = 'S_D_q_xy' in sf_data
+    has_sd_heis = 'S_D_q_heis' in sf_data
     
-    fig.suptitle(f'{title_prefix}Structure Factors at $J_{{\\pm}}$ = {jpm:.4f}', fontsize=14)
+    # Fallback to 2D grids if discrete not available
+    has_sq_2d = 'S_q_2d' in sf_data
+    has_sd_xy_2d = 'S_D_q_xy_2d' in sf_data
+    has_sd_heis_2d = 'S_D_q_heis_2d' in sf_data
     
-    ax_idx = 0
+    # Count panels for discrete k-point plots
+    n_panels_discrete = sum([has_sq, has_sd_xy, has_sd_heis])
+    n_panels_2d = sum([has_sq_2d, has_sd_xy_2d, has_sd_heis_2d])
     
-    # Plot S(q)
-    if has_sq:
-        q_max = None
-        if 'q_max_x' in sf_data and 'q_max_y' in sf_data:
-            q_max = (sf_data['q_max_x'], sf_data['q_max_y'])
+    # =========================================================================
+    # Figure 1: Discrete k-points on kagome reciprocal lattice
+    # =========================================================================
+    if n_panels_discrete > 0:
+        fig, axes = plt.subplots(1, n_panels_discrete, figsize=(5.5 * n_panels_discrete, 5))
+        if n_panels_discrete == 1:
+            axes = [axes]
         
-        plot_structure_factor_2d(
-            sf_data['S_q_2d'], q_vals, axes[ax_idx],
-            title=r'Spin Structure Factor $S(\mathbf{q})$',
-            cmap='hot', k_points=k_points, q_max=q_max
-        )
-        ax_idx += 1
-    
-    # Plot S_D(q) XY
-    if has_sd_xy:
-        q_max = None
-        if 'vbs_q_max_x_xy' in sf_data and 'vbs_q_max_y_xy' in sf_data:
-            q_max = (sf_data['vbs_q_max_x_xy'], sf_data['vbs_q_max_y_xy'])
+        fig.suptitle(f'{title_prefix}Structure Factors at $J_{{\\pm}}$ = {jpm:.4f}', fontsize=14)
         
-        plot_structure_factor_2d(
-            sf_data['S_D_q_xy_2d'], q_vals, axes[ax_idx],
-            title=r'VBS Dimer SF $S_D(\mathbf{q})$ (XY)',
-            cmap='viridis', k_points=k_points, q_max=q_max
-        )
-        ax_idx += 1
-    
-    # Plot S_D(q) Heisenberg
-    if has_sd_heis:
-        q_max = None
-        if 'vbs_q_max_x_heis' in sf_data and 'vbs_q_max_y_heis' in sf_data:
-            q_max = (sf_data['vbs_q_max_x_heis'], sf_data['vbs_q_max_y_heis'])
+        ax_idx = 0
         
-        plot_structure_factor_2d(
-            sf_data['S_D_q_heis_2d'], q_vals, axes[ax_idx],
-            title=r'VBS Dimer SF $S_D(\mathbf{q})$ (Heisenberg)',
-            cmap='plasma', k_points=k_points, q_max=q_max
-        )
-        ax_idx += 1
+        # Plot S(k) at discrete k-points
+        if has_sq:
+            plot_sq_on_reciprocal_lattice(
+                axes[ax_idx], sf_data['S_q'], k_points,
+                title=r'Spin Structure Factor $S(\mathbf{k})$',
+                cmap='hot', label=r'$|S(\mathbf{k})|$'
+            )
+            ax_idx += 1
+        
+        # Plot S_D(k) XY at discrete k-points
+        if has_sd_xy:
+            plot_sq_on_reciprocal_lattice(
+                axes[ax_idx], sf_data['S_D_q_xy'], k_points,
+                title=r'VBS Dimer SF $S_D(\mathbf{k})$ (XY)',
+                cmap='viridis', label=r'$|S_D(\mathbf{k})|$'
+            )
+            ax_idx += 1
+        
+        # Plot S_D(k) Heisenberg at discrete k-points
+        if has_sd_heis:
+            plot_sq_on_reciprocal_lattice(
+                axes[ax_idx], sf_data['S_D_q_heis'], k_points,
+                title=r'VBS Dimer SF $S_D(\mathbf{k})$ (Heis)',
+                cmap='plasma', label=r'$|S_D(\mathbf{k})|$'
+            )
+            ax_idx += 1
+        
+        plt.tight_layout()
+        
+        jpm_str = f"{jpm:+.4f}".replace('+', 'p').replace('-', 'm').replace('.', 'p')
+        fname = f'{output_dir}/structure_factors_Jpm_{jpm_str}.png'
+        plt.savefig(fname, dpi=150, bbox_inches='tight')
+        print(f"  Saved: {fname}")
+        plt.close()
     
-    plt.tight_layout()
-    
-    jpm_str = f"{jpm:+.4f}".replace('+', 'p').replace('-', 'm').replace('.', 'p')
-    fname = f'{output_dir}/structure_factors_Jpm_{jpm_str}.png'
-    plt.savefig(fname, dpi=150, bbox_inches='tight')
-    print(f"  Saved: {fname}")
-    plt.close()
+    # =========================================================================
+    # Figure 2: 2D heatmaps (if available and no discrete data)
+    # =========================================================================
+    if n_panels_2d > 0 and n_panels_discrete == 0:
+        q_vals = sf_data.get('q_grid_vals', None)
+        if q_vals is None:
+            n_q = sf_data['S_q_2d'].shape[0] if has_sq_2d else 50
+            q_vals = np.linspace(-1, 1, n_q)
+        
+        fig, axes = plt.subplots(1, n_panels_2d, figsize=(5 * n_panels_2d, 4.5))
+        if n_panels_2d == 1:
+            axes = [axes]
+        
+        fig.suptitle(f'{title_prefix}Structure Factors at $J_{{\\pm}}$ = {jpm:.4f}', fontsize=14)
+        
+        ax_idx = 0
+        
+        if has_sq_2d:
+            q_max = None
+            if 'q_max_x' in sf_data and 'q_max_y' in sf_data:
+                q_max = (sf_data['q_max_x'], sf_data['q_max_y'])
+            plot_structure_factor_2d(
+                sf_data['S_q_2d'], q_vals, axes[ax_idx],
+                title=r'Spin Structure Factor $S(\mathbf{q})$',
+                cmap='hot', k_points=k_points, q_max=q_max
+            )
+            ax_idx += 1
+        
+        if has_sd_xy_2d:
+            q_max = None
+            if 'vbs_q_max_x_xy' in sf_data and 'vbs_q_max_y_xy' in sf_data:
+                q_max = (sf_data['vbs_q_max_x_xy'], sf_data['vbs_q_max_y_xy'])
+            plot_structure_factor_2d(
+                sf_data['S_D_q_xy_2d'], q_vals, axes[ax_idx],
+                title=r'VBS Dimer SF $S_D(\mathbf{q})$ (XY)',
+                cmap='viridis', k_points=k_points, q_max=q_max
+            )
+            ax_idx += 1
+        
+        if has_sd_heis_2d:
+            q_max = None
+            if 'vbs_q_max_x_heis' in sf_data and 'vbs_q_max_y_heis' in sf_data:
+                q_max = (sf_data['vbs_q_max_x_heis'], sf_data['vbs_q_max_y_heis'])
+            plot_structure_factor_2d(
+                sf_data['S_D_q_heis_2d'], q_vals, axes[ax_idx],
+                title=r'VBS Dimer SF $S_D(\mathbf{q})$ (Heis)',
+                cmap='plasma', k_points=k_points, q_max=q_max
+            )
+            ax_idx += 1
+        
+        plt.tight_layout()
+        
+        jpm_str = f"{jpm:+.4f}".replace('+', 'p').replace('-', 'm').replace('.', 'p')
+        fname = f'{output_dir}/structure_factors_2d_Jpm_{jpm_str}.png'
+        plt.savefig(fname, dpi=150, bbox_inches='tight')
+        print(f"  Saved: {fname}")
+        plt.close()
 
 
 def plot_sq_evolution(jpm_files, output_dir, title_prefix=""):
@@ -678,18 +862,37 @@ def plot_sq_evolution(jpm_files, output_dir, title_prefix=""):
     ax.legend()
     ax.grid(True, alpha=0.3)
     
-    # Panel 4: q_max trajectory in BZ
+    # Panel 4: q_max trajectory in BZ with Brillouin zone boundary
     ax = axes[1, 1]
+    
+    # Add Brillouin zone boundary
+    bz = get_brillouin_zone_hexagon()
+    ax.plot(bz[:, 0], bz[:, 1], 'k-', linewidth=2, alpha=0.9)
+    
+    # Mark high-symmetry points
+    _, _, high_sym = get_kagome_reciprocal_lattice()
+    offset = 0.3
+    ax.plot(high_sym['Gamma'][0], high_sym['Gamma'][1], 'ko', markersize=8)
+    ax.text(high_sym['Gamma'][0], high_sym['Gamma'][1] - offset, r'$\Gamma$', 
+            ha='center', va='top', color='black', fontsize=10, fontweight='bold')
+    ax.plot(high_sym['K'][0], high_sym['K'][1], 'ko', markersize=8)
+    ax.text(high_sym['K'][0] + offset, high_sym['K'][1], r'$K$',
+            ha='left', va='center', color='black', fontsize=10, fontweight='bold')
+    ax.plot(high_sym['M'][0], high_sym['M'][1], 'ko', markersize=8)
+    ax.text(high_sym['M'][0] + offset, high_sym['M'][1], r'$M$',
+            ha='left', va='center', color='black', fontsize=10, fontweight='bold')
+    
+    # Plot trajectory
     sc = ax.scatter(sq_max_positions[:, 0], sq_max_positions[:, 1], 
-                    c=jpm_vals, cmap='coolwarm', s=50, edgecolors='black', linewidths=0.5)
-    plt.colorbar(sc, ax=ax, label=r'$J_{\pm}$')
+                    c=jpm_vals, cmap='coolwarm', s=80, edgecolors='black', 
+                    linewidths=1, zorder=5)
+    plt.colorbar(sc, ax=ax, label=r'$J_{\pm}$', shrink=0.8)
     ax.set_xlabel(r'$q_x^*$')
     ax.set_ylabel(r'$q_y^*$')
     ax.set_title('Trajectory of S(q) Maximum in BZ')
     ax.set_aspect('equal')
-    ax.axhline(0, color='gray', lw=0.5, ls='--')
-    ax.axvline(0, color='gray', lw=0.5, ls='--')
-    ax.grid(True, alpha=0.3)
+    ax.set_xlim(-1, 5.5)
+    ax.set_ylim(-3.5, 5.5)
     
     plt.tight_layout()
     plt.savefig(f'{output_dir}/structure_factor_evolution.png', dpi=150, bbox_inches='tight')
@@ -697,7 +900,7 @@ def plot_sq_evolution(jpm_files, output_dir, title_prefix=""):
     print(f"Saved: {output_dir}/structure_factor_evolution.png")
     plt.close()
     
-    # Figure 2: Grid of S(q) for selected Jpm values
+    # Figure 2: Grid of S(q) for selected Jpm values on kagome reciprocal lattice
     n_jpm = len(jpm_files)
     if n_jpm >= 4:
         # Select evenly spaced Jpm values
@@ -707,28 +910,43 @@ def plot_sq_evolution(jpm_files, output_dir, title_prefix=""):
         n_cols = min(3, len(selected_files))
         n_rows = (len(selected_files) + n_cols - 1) // n_cols
         
-        fig, axes = plt.subplots(n_rows, n_cols, figsize=(5 * n_cols, 4.5 * n_rows))
+        fig, axes = plt.subplots(n_rows, n_cols, figsize=(6 * n_cols, 5 * n_rows))
         axes = np.atleast_2d(axes).flatten() if n_rows * n_cols > 1 else [axes]
         
-        fig.suptitle(f'{title_prefix}Spin Structure Factor $S(\\mathbf{{q}})$ Evolution', fontsize=14)
+        fig.suptitle(f'{title_prefix}Spin Structure Factor $S(\\mathbf{{k}})$ on Kagome Reciprocal Lattice', fontsize=14)
         
         for ax_idx, (jpm, h5_file) in enumerate(selected_files):
             sf_data = load_structure_factor_data(h5_file)
-            if sf_data is None or 'S_q_2d' not in sf_data:
+            if sf_data is None:
                 axes[ax_idx].set_visible(False)
                 continue
             
-            q_vals = sf_data.get('q_grid_vals', np.linspace(-1, 1, sf_data['S_q_2d'].shape[0]))
-            
-            q_max = None
-            if 'q_max_x' in sf_data and 'q_max_y' in sf_data:
-                q_max = (sf_data['q_max_x'], sf_data['q_max_y'])
-            
-            plot_structure_factor_2d(
-                sf_data['S_q_2d'], q_vals, axes[ax_idx],
-                title=f'$J_{{\\pm}}$ = {jpm:.3f}',
-                cmap='hot', q_max=q_max
-            )
+            # Prefer discrete k-point data
+            if 'S_q' in sf_data and 'k_points' in sf_data:
+                k_points = sf_data['k_points']
+                if k_points.ndim == 1:
+                    k_points = k_points.reshape(-1, 2)
+                
+                plot_sq_on_reciprocal_lattice(
+                    axes[ax_idx], sf_data['S_q'], k_points,
+                    title=f'$J_{{\\pm}}$ = {jpm:.3f}',
+                    cmap='hot', label=r'$|S(\mathbf{k})|$',
+                    marker_size=600
+                )
+            elif 'S_q_2d' in sf_data:
+                # Fallback to 2D grid
+                q_vals = sf_data.get('q_grid_vals', np.linspace(-1, 1, sf_data['S_q_2d'].shape[0]))
+                q_max = None
+                if 'q_max_x' in sf_data and 'q_max_y' in sf_data:
+                    q_max = (sf_data['q_max_x'], sf_data['q_max_y'])
+                
+                plot_structure_factor_2d(
+                    sf_data['S_q_2d'], q_vals, axes[ax_idx],
+                    title=f'$J_{{\\pm}}$ = {jpm:.3f}',
+                    cmap='hot', q_max=q_max
+                )
+            else:
+                axes[ax_idx].set_visible(False)
         
         # Hide unused axes
         for i in range(len(selected_files), len(axes)):
@@ -737,6 +955,64 @@ def plot_sq_evolution(jpm_files, output_dir, title_prefix=""):
         plt.tight_layout()
         plt.savefig(f'{output_dir}/sq_grid_evolution.png', dpi=150, bbox_inches='tight')
         print(f"Saved: {output_dir}/sq_grid_evolution.png")
+        plt.close()
+    
+    # Figure 3: Grid of S_D(q) for selected Jpm values on kagome reciprocal lattice
+    if n_jpm >= 4:
+        indices = np.linspace(0, n_jpm - 1, min(6, n_jpm), dtype=int)
+        selected_files = [jpm_files[i] for i in indices]
+        
+        n_cols = min(3, len(selected_files))
+        n_rows = (len(selected_files) + n_cols - 1) // n_cols
+        
+        fig, axes = plt.subplots(n_rows, n_cols, figsize=(6 * n_cols, 5 * n_rows))
+        axes = np.atleast_2d(axes).flatten() if n_rows * n_cols > 1 else [axes]
+        
+        fig.suptitle(f'{title_prefix}VBS Dimer Structure Factor $S_D(\\mathbf{{k}})$ on Kagome Reciprocal Lattice', fontsize=14)
+        
+        has_any_sd = False
+        for ax_idx, (jpm, h5_file) in enumerate(selected_files):
+            sf_data = load_structure_factor_data(h5_file)
+            if sf_data is None:
+                axes[ax_idx].set_visible(False)
+                continue
+            
+            # Prefer discrete k-point data (XY dimer)
+            if 'S_D_q_xy' in sf_data and 'k_points' in sf_data:
+                k_points = sf_data['k_points']
+                if k_points.ndim == 1:
+                    k_points = k_points.reshape(-1, 2)
+                
+                plot_sq_on_reciprocal_lattice(
+                    axes[ax_idx], sf_data['S_D_q_xy'], k_points,
+                    title=f'$J_{{\\pm}}$ = {jpm:.3f}',
+                    cmap='viridis', label=r'$|S_D(\mathbf{k})|$',
+                    marker_size=600
+                )
+                has_any_sd = True
+            elif 'S_D_q_heis' in sf_data and 'k_points' in sf_data:
+                k_points = sf_data['k_points']
+                if k_points.ndim == 1:
+                    k_points = k_points.reshape(-1, 2)
+                
+                plot_sq_on_reciprocal_lattice(
+                    axes[ax_idx], sf_data['S_D_q_heis'], k_points,
+                    title=f'$J_{{\\pm}}$ = {jpm:.3f}',
+                    cmap='viridis', label=r'$|S_D(\mathbf{k})|$',
+                    marker_size=600
+                )
+                has_any_sd = True
+            else:
+                axes[ax_idx].set_visible(False)
+        
+        # Hide unused axes
+        for i in range(len(selected_files), len(axes)):
+            axes[i].set_visible(False)
+        
+        if has_any_sd:
+            plt.tight_layout()
+            plt.savefig(f'{output_dir}/sd_grid_evolution.png', dpi=150, bbox_inches='tight')
+            print(f"Saved: {output_dir}/sd_grid_evolution.png")
         plt.close()
 
 
