@@ -1131,8 +1131,9 @@ def find_per_jpm_files(scan_dir):
     return jpm_files
 
 
-def plot_bond_lattice(positions, edges, bond_values, ax, title='', cmap='coolwarm', 
-                      vmin=None, vmax=None, orientations=None, show_sites=True):
+def plot_bond_lattice(positions, edges, bond_values, ax, title='', cmap='viridis', 
+                      vmin=0.0, vmax=0.25, orientations=None, show_sites=True,
+                      use_absolute=True):
     """
     Plot bond values on the lattice as colored lines.
     
@@ -1147,16 +1148,23 @@ def plot_bond_lattice(positions, edges, bond_values, ax, title='', cmap='coolwar
     ax : matplotlib axis
     title : str
     cmap : str or colormap
+        Default 'viridis' for absolute values (sequential colormap)
     vmin, vmax : float
-        Color scale limits
+        Color scale limits. Default 0 to 0.25 (theoretical bounds for spin-1/2)
     orientations : array (n_bonds,), optional
         Bond orientations (0, 1, 2) for marker style
     show_sites : bool
         Whether to show site positions
+    use_absolute : bool
+        If True, plot absolute values of bond strengths
     """
     # Take real part if complex
     if np.iscomplexobj(bond_values):
         bond_values = np.real(bond_values)
+    
+    # Use absolute values to show bond strength
+    if use_absolute:
+        bond_values = np.abs(bond_values)
     
     # Create line segments
     segments = []
@@ -1165,18 +1173,7 @@ def plot_bond_lattice(positions, edges, bond_values, ax, title='', cmap='coolwar
         p2 = positions[j]
         segments.append([p1, p2])
     
-    # Set color limits
-    if vmin is None:
-        vmin = np.min(bond_values)
-    if vmax is None:
-        vmax = np.max(bond_values)
-    
-    # Handle symmetric colormap
-    if vmin < 0 and vmax > 0:
-        vlim = max(abs(vmin), abs(vmax))
-        vmin, vmax = -vlim, vlim
-    
-    # Create colored line collection
+    # Create colored line collection with fixed theoretical bounds
     norm = Normalize(vmin=vmin, vmax=vmax)
     lc = LineCollection(segments, cmap=cmap, norm=norm, linewidths=3)
     lc.set_array(bond_values)
@@ -1235,27 +1232,27 @@ def plot_bonds_for_jpm(jpm, h5_file, output_dir, title_prefix=""):
     
     if 'spsm' in bond_data:
         spsm = bond_data['spsm']
-        # Real part
-        plot_bond_lattice(positions, edges, np.real(spsm), axes[ax_idx],
-                          title=r'Re$\langle S^+_i S^-_j \rangle$', cmap='coolwarm')
+        # Plot absolute value of S+S- (includes both real and imag contributions)
+        spsm_abs = np.abs(spsm)
+        plot_bond_lattice(positions, edges, spsm_abs, axes[ax_idx],
+                          title=r'$|\langle S^+_i S^-_j \rangle|$', cmap='viridis',
+                          vmin=0.0, vmax=0.5)  # max for S+S- is 0.5 for spin-1/2
         ax_idx += 1
         
-        # Imaginary part (often zero or very small)
-        if np.max(np.abs(np.imag(spsm))) > 1e-10:
-            plot_bond_lattice(positions, edges, np.imag(spsm), axes[ax_idx],
-                              title=r'Im$\langle S^+_i S^-_j \rangle$', cmap='coolwarm')
-        else:
-            axes[ax_idx].set_visible(False)
+        # Skip the imaginary part panel since we're using absolute values
+        axes[ax_idx].set_visible(False)
         ax_idx += 1
     
     if 'szsz' in bond_data:
         plot_bond_lattice(positions, edges, bond_data['szsz'], axes[ax_idx],
-                          title=r'$\langle S^z_i S^z_j \rangle$', cmap='coolwarm')
+                          title=r'$|\langle S^z_i S^z_j \rangle|$', cmap='viridis',
+                          vmin=0.0, vmax=0.25)  # max for SzSz is 0.25 for spin-1/2
         ax_idx += 1
     
     if 'heisenberg' in bond_data:
         plot_bond_lattice(positions, edges, bond_data['heisenberg'], axes[ax_idx],
-                          title=r'$\langle \mathbf{S}_i \cdot \mathbf{S}_j \rangle$', cmap='coolwarm')
+                          title=r'$|\langle \mathbf{S}_i \cdot \mathbf{S}_j \rangle|$', cmap='viridis',
+                          vmin=0.0, vmax=0.75)  # max for S·S is 0.75 for spin-1/2
         ax_idx += 1
     
     # Hide unused axes
