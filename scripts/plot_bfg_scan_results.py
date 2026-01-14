@@ -557,9 +557,12 @@ def plot_sq_on_reciprocal_lattice(ax, sq_data, k_points, title, cmap='hot',
     ax.set_aspect('equal')
     ax.set_title(title, fontsize=12)
     
-    # Set axis limits to show all k-points
-    ax.set_xlim(-1, 5.5)
-    ax.set_ylim(-3.5, 5.5)
+    # Set axis limits to show all k-points with padding
+    kx_min, kx_max = kx.min(), kx.max()
+    ky_min, ky_max = ky.min(), ky.max()
+    padding = 1.0
+    ax.set_xlim(min(-1, kx_min - padding), max(7, kx_max + padding))
+    ax.set_ylim(min(-4, ky_min - padding), max(6, ky_max + padding))
     
     return sc
 
@@ -891,8 +894,18 @@ def plot_sq_evolution(jpm_files, output_dir, title_prefix=""):
     ax.set_ylabel(r'$q_y^*$')
     ax.set_title('Trajectory of S(q) Maximum in BZ')
     ax.set_aspect('equal')
-    ax.set_xlim(-1, 5.5)
-    ax.set_ylim(-3.5, 5.5)
+    
+    # Set limits to contain all points with padding
+    valid_mask = ~np.isnan(sq_max_positions[:, 0])
+    if np.any(valid_mask):
+        qx_min, qx_max = sq_max_positions[valid_mask, 0].min(), sq_max_positions[valid_mask, 0].max()
+        qy_min, qy_max = sq_max_positions[valid_mask, 1].min(), sq_max_positions[valid_mask, 1].max()
+        padding = 1.0
+        ax.set_xlim(min(-1, qx_min - padding), max(7, qx_max + padding))
+        ax.set_ylim(min(-4, qy_min - padding), max(6, qy_max + padding))
+    else:
+        ax.set_xlim(-1, 7)
+        ax.set_ylim(-4, 6)
     
     plt.tight_layout()
     plt.savefig(f'{output_dir}/structure_factor_evolution.png', dpi=150, bbox_inches='tight')
