@@ -992,6 +992,239 @@ std::map<std::pair<int, int>, double> compute_heisenberg_bond_expectations(
 }
 
 // -----------------------------------------------------------------------------
+// Apply Fourier-transformed XY dimer operator: D_α(q)|ψ⟩ = Σ_{b∈α} exp(iq·r_b) D_b|ψ⟩
+// where D_b = S⁺ᵢS⁻ⱼ + S⁻ᵢS⁺ⱼ
+// This is O(N_bonds * Hilbert) instead of O(N_bonds² * Hilbert) for pairwise correlations
+// -----------------------------------------------------------------------------
+
+std::vector<Complex> apply_dimer_fourier(
+    const std::vector<Complex>& psi,
+    const std::vector<std::pair<int, int>>& bonds,  // Bonds in this orientation
+    const std::vector<std::array<double, 2>>& bond_centers,
+    const std::array<double, 2>& q
+) {
+    uint64_t n_states = psi.size();
+    std::vector<Complex> result(n_states, 0.0);
+    int n_bonds = bonds.size();
+    
+    // Precompute phases
+    std::vector<Complex> phases(n_bonds);
+    for (int b = 0; b < n_bonds; ++b) {
+        double phase_arg = q[0] * bond_centers[b][0] + q[1] * bond_centers[b][1];
+        phases[b] = std::exp(I * phase_arg);
+    }
+    
+    #pragma omp parallel
+    {
+        std::vector<Complex> local_result(n_states, 0.0);
+        
+        #pragma omp for schedule(dynamic, 1024)
+        for (uint64_t state = 0; state < n_states; ++state) {
+            Complex coeff = psi[state];
+            if (std::abs(coeff) < 1e-15) continue;
+            
+            for (int b = 0; b < n_bonds; ++b) {
+                int i = bonds[b].first;
+                int j = bonds[b].second;
+                int s_i = get_bit(state, i);
+                int s_j = get_bit(state, j);
+                Complex phase = phases[b];
+                
+                // S⁺ᵢS⁻ⱼ: needs i=DOWN(1), j=UP(0)
+                if (s_i == 1 && s_j == 0) {
+                    uint64_t new_state = flip_bit(flip_bit(state, i), j);
+                    local_result[new_state] += phase * coeff;
+                }
+                
+                // S⁻ᵢS⁺ⱼ: needs i=UP(0), j=DOWN(1)
+                if (s_i == 0 && s_j == 1) {
+                    uint64_t new_state = flip_bit(flip_bit(state, i), j);
+                    local_result[new_state] += phase * coeff;
+                }
+            }
+        }
+        
+        #pragma omp critical
+        {
+            for (uint64_t s = 0; s < n_states; ++s) {
+                result[s] += local_result[s];
+            }
+        }
+    }
+    
+    return result;
+}
+
+// -----------------------------------------------------------------------------
+// Apply Fourier-transformed Heisenberg dimer operator: D_α(q)|ψ⟩
+// D_b = S_i·S_j = SzSz + (1/2)(S⁺S⁻ + S⁻S⁺)
+// For structure factor we need the fluctuation part, so we apply the full operator
+// and subtract the mean later.
+// Returns {D(q)|ψ⟩, ⟨D(q)⟩} where D(q) = Σ_b exp(iq·r_b) D_b
+// -----------------------------------------------------------------------------
+
+std::pair<std::vector<Complex>, Complex> apply_heisenberg_dimer_fourier(
+    const std::vector<Complex>& psi,
+    const std::vector<std::pair<int, int>>& bonds,
+    const std::vector<std::array<double, 2>>& bond_centers,
+    const std::array<double, 2>& q
+) {
+    uint64_t n_states = psi.size();
+    std::vector<Complex> result(n_states, 0.0);
+    int n_bonds = bonds.size();
+    
+    // Precompute phases
+    std::vector<Complex> phases(n_bonds);
+    for (int b = 0; b < n_bonds; ++b) {
+        double phase_arg = q[0] * bond_centers[b][0] + q[1] * bond_centers[b][1];
+        phases[b] = std::exp(I * phase_arg);
+    }
+    
+    double expect_real = 0.0, expect_imag = 0.0;
+    
+    #pragma omp parallel reduction(+:expect_real, expect_imag)
+    {
+        std::vector<Complex> local_result(n_states, 0.0);
+        double local_expect_real = 0.0, local_expect_imag = 0.0;
+        
+        #pragma omp for schedule(dynamic, 1024)
+        for (uint64_t state = 0; state < n_states; ++state) {
+            Complex coeff = psi[state];
+            if (std::abs(coeff) < 1e-15) continue;
+            
+            for (int b = 0; b < n_bonds; ++b) {
+                int i = bonds[b].first;
+                int j = bonds[b].second;
+                int s_i = get_bit(state, i);
+                int s_j = get_bit(state, j);
+                Complex phase = phases[b];
+                
+                // SzSz term: diagonal, contributes (s_i - 0.5)(s_j - 0.5) = ±0.25
+                double sz_i = s_i ? -0.5 : 0.5;  // bit=0 is UP (+0.5)
+                double sz_j = s_j ? -0.5 : 0.5;
+                double szsz = sz_i * sz_j;
+                
+                // Diagonal contribution to D(q)|ψ⟩
+                local_result[state] += phase * szsz * coeff;
+                
+                // Contribution to ⟨D(q)⟩
+                Complex contrib = phase * szsz * std::norm(coeff);
+                local_expect_real += contrib.real();
+                local_expect_imag += contrib.imag();
+                
+                // (1/2) S⁺ᵢS⁻ⱼ: needs i=DOWN(1), j=UP(0)
+                if (s_i == 1 && s_j == 0) {
+                    uint64_t new_state = flip_bit(flip_bit(state, i), j);
+                    local_result[new_state] += 0.5 * phase * coeff;
+                }
+                
+                // (1/2) S⁻ᵢS⁺ⱼ: needs i=UP(0), j=DOWN(1)
+                if (s_i == 0 && s_j == 1) {
+                    uint64_t new_state = flip_bit(flip_bit(state, i), j);
+                    local_result[new_state] += 0.5 * phase * coeff;
+                }
+            }
+        }
+        
+        expect_real += local_expect_real;
+        expect_imag += local_expect_imag;
+        
+        #pragma omp critical
+        {
+            for (uint64_t s = 0; s < n_states; ++s) {
+                result[s] += local_result[s];
+            }
+        }
+    }
+    
+    // Add off-diagonal contributions to expectation value
+    Complex expect(expect_real, expect_imag);
+    for (uint64_t s = 0; s < n_states; ++s) {
+        expect += std::conj(psi[s]) * result[s] - std::conj(psi[s]) * psi[s] * Complex(expect_real, expect_imag) / std::norm(psi[s]);
+    }
+    // Actually simpler: ⟨D(q)⟩ = ⟨ψ|D(q)|ψ⟩
+    expect = Complex(0, 0);
+    for (uint64_t s = 0; s < n_states; ++s) {
+        expect += std::conj(psi[s]) * result[s];
+    }
+    
+    return {result, expect};
+}
+
+// -----------------------------------------------------------------------------
+// Apply Fourier-transformed bowtie resonance operator: P_α(q)|ψ⟩
+// P_bt = S⁺₁S⁻₂S⁺₃S⁻₄ + S⁻₁S⁺₂S⁻₃S⁺₄ (4-spin ring flip on outer corners)
+// -----------------------------------------------------------------------------
+
+struct BowtieData {
+    int s1, s2, s3, s4;  // Outer corner sites
+    std::array<double, 2> center;
+};
+
+std::vector<Complex> apply_bowtie_fourier(
+    const std::vector<Complex>& psi,
+    const std::vector<BowtieData>& bowties,  // Bowties in this orientation
+    const std::array<double, 2>& q
+) {
+    uint64_t n_states = psi.size();
+    std::vector<Complex> result(n_states, 0.0);
+    int n_bowties = bowties.size();
+    
+    // Precompute phases
+    std::vector<Complex> phases(n_bowties);
+    for (int p = 0; p < n_bowties; ++p) {
+        double phase_arg = q[0] * bowties[p].center[0] + q[1] * bowties[p].center[1];
+        phases[p] = std::exp(I * phase_arg);
+    }
+    
+    #pragma omp parallel
+    {
+        std::vector<Complex> local_result(n_states, 0.0);
+        
+        #pragma omp for schedule(dynamic, 1024)
+        for (uint64_t state = 0; state < n_states; ++state) {
+            Complex coeff = psi[state];
+            if (std::abs(coeff) < 1e-15) continue;
+            
+            for (int p = 0; p < n_bowties; ++p) {
+                int s1 = bowties[p].s1;
+                int s2 = bowties[p].s2;
+                int s3 = bowties[p].s3;
+                int s4 = bowties[p].s4;
+                
+                int b1 = get_bit(state, s1);
+                int b2 = get_bit(state, s2);
+                int b3 = get_bit(state, s3);
+                int b4 = get_bit(state, s4);
+                
+                Complex phase = phases[p];
+                
+                // S⁺₁S⁻₂S⁺₃S⁻₄: needs s1=DOWN(1), s2=UP(0), s3=DOWN(1), s4=UP(0)
+                if (b1 == 1 && b2 == 0 && b3 == 1 && b4 == 0) {
+                    uint64_t new_state = flip_bit(flip_bit(flip_bit(flip_bit(state, s1), s2), s3), s4);
+                    local_result[new_state] += phase * coeff;
+                }
+                
+                // S⁻₁S⁺₂S⁻₃S⁺₄: needs s1=UP(0), s2=DOWN(1), s3=UP(0), s4=DOWN(1)
+                if (b1 == 0 && b2 == 1 && b3 == 0 && b4 == 1) {
+                    uint64_t new_state = flip_bit(flip_bit(flip_bit(flip_bit(state, s1), s2), s3), s4);
+                    local_result[new_state] += phase * coeff;
+                }
+            }
+        }
+        
+        #pragma omp critical
+        {
+            for (uint64_t s = 0; s < n_states; ++s) {
+                result[s] += local_result[s];
+            }
+        }
+    }
+    
+    return result;
+}
+
+// -----------------------------------------------------------------------------
 // Compute dimer-dimer correlation ⟨D_b1 D_b2⟩ for proper VBS order
 // D = S^+_i S^-_j + S^-_i S^+_j (XY dimer operator)
 // This is a 4-site spin correlation
@@ -1357,6 +1590,13 @@ struct VBSResult {
     double m_vbs_heis;
     double D_mean_heis;                     // Mean Heisenberg bond value
     
+    // Orientation-resolved structure factors (3x3 matrix per q, stored as 6 independent components)
+    // Index mapping: 0=(0,0), 1=(0,1), 2=(0,2), 3=(1,1), 4=(1,2), 5=(2,2)
+    // S_D^{αβ}(q) = (1/N_b) Σ_{b∈α, b'∈β} exp(iq·(r_b - r_{b'})) ⟨δD_b δD_{b'}⟩
+    std::vector<std::array<Complex, 6>> S_d_xy_oriented;  // [n_k][6] XY orientation-resolved
+    std::vector<std::array<double, 6>> S_d_heis_oriented;  // [n_k][6] Heisenberg orientation-resolved
+    std::array<int, 3> n_bonds_per_orientation;  // Number of bonds per orientation
+    
     int n_q_grid;                       // Size of 2D grid
     int n_bonds;                        // Number of bonds
     
@@ -1389,26 +1629,44 @@ VBSResult compute_vbs_order(
         return result;
     }
     
-    std::cout << "Computing VBS order with proper 4-site correlations..." << std::endl;
-    std::cout << "  Computing " << n_bonds << " x " << n_bonds << " = " 
-              << n_bonds * n_bonds << " dimer-dimer correlations (XY + Heisenberg)..." << std::endl;
+    std::cout << "Computing VBS order using efficient Fourier-space method..." << std::endl;
     auto start = std::chrono::high_resolution_clock::now();
     
     // Convert edges to vector for indexed access
     std::vector<std::pair<int, int>> edges(cluster.edges_nn.begin(), cluster.edges_nn.end());
     
-    // Compute bond centers using PBC-correct minimum-image convention
-    // For bonds crossing periodic boundaries, this gives the correct midpoint
-    std::vector<std::array<double, 2>> bond_centers(n_bonds);
+    // Group bonds by orientation and compute bond centers
+    std::array<std::vector<std::pair<int, int>>, 3> edges_by_orient;
+    std::array<std::vector<std::array<double, 2>>, 3> centers_by_orient;
+    std::vector<std::array<double, 2>> all_bond_centers(n_bonds);
+    
     for (int b = 0; b < n_bonds; ++b) {
         int i = edges[b].first;
         int j = edges[b].second;
-        bond_centers[b] = cluster.bond_center_pbc(i, j);
+        auto center = cluster.bond_center_pbc(i, j);
+        all_bond_centers[b] = center;
+        
+        int orient = cluster.bond_orientation.at(edges[b]);
+        edges_by_orient[orient].push_back(edges[b]);
+        centers_by_orient[orient].push_back(center);
     }
     
+    result.n_bonds_per_orientation = {
+        static_cast<int>(edges_by_orient[0].size()),
+        static_cast<int>(edges_by_orient[1].size()),
+        static_cast<int>(edges_by_orient[2].size())
+    };
+    
+    std::cout << "  Bonds per orientation: " << result.n_bonds_per_orientation[0] << ", "
+              << result.n_bonds_per_orientation[1] << ", "
+              << result.n_bonds_per_orientation[2] << std::endl;
+    
     // =========================================================================
-    // Mean bond values ⟨D⟩
+    // Mean bond values ⟨D_α⟩ for each orientation
     // =========================================================================
+    std::array<Complex, 3> D_mean_xy_orient = {};
+    std::array<double, 3> D_mean_heis_orient = {};
+    
     double sum_xy = 0.0, sum_heis = 0.0;
     for (int b = 0; b < n_bonds; ++b) {
         sum_xy += std::real(xy_bond_exp.at(edges[b]));
@@ -1417,122 +1675,159 @@ VBSResult compute_vbs_order(
     result.D_mean_xy = sum_xy / n_bonds;
     result.D_mean_heis = sum_heis / n_bonds;
     
-    // =========================================================================
-    // Compute full dimer-dimer correlation matrices ⟨D_b D_{b'}⟩ using 4-site ops
-    // This is O(N_bonds^2 * Hilbert_dim) - can be slow for large systems
-    // =========================================================================
-    result.dimer_corr_xy.resize(n_bonds, std::vector<Complex>(n_bonds, 0.0));
-    result.dimer_corr_heis.resize(n_bonds, std::vector<double>(n_bonds, 0.0));
+    for (int alpha = 0; alpha < 3; ++alpha) {
+        Complex sum_a = 0.0;
+        double sum_h = 0.0;
+        for (const auto& edge : edges_by_orient[alpha]) {
+            sum_a += xy_bond_exp.at(edge);
+            sum_h += heisenberg_bond_exp.at(edge);
+        }
+        if (!edges_by_orient[alpha].empty()) {
+            D_mean_xy_orient[alpha] = sum_a / static_cast<double>(edges_by_orient[alpha].size());
+            D_mean_heis_orient[alpha] = sum_h / edges_by_orient[alpha].size();
+        }
+    }
     
-    std::atomic<int> completed(0);
+    // =========================================================================
+    // Efficient Fourier-space computation of S_D^{αβ}(q):
+    // D_α(q)|ψ⟩ = Σ_{b∈α} exp(iq·r_b) D_b|ψ⟩
+    // S_D^{αβ}(q) = (1/√(N_α N_β)) [⟨D_α(q)ψ|D_β(q)ψ⟩ - ⟨D_α(q)⟩*⟨D_β(q)⟩]
+    //
+    // This is O(3 * n_k * N_bonds * Hilbert) instead of O(N_bonds² * Hilbert)
+    // =========================================================================
     
-    #pragma omp parallel for schedule(dynamic)
-    for (int b1 = 0; b1 < n_bonds; ++b1) {
-        int i1 = edges[b1].first;
-        int j1 = edges[b1].second;
+    result.S_d_xy.resize(n_k, 0.0);
+    result.S_d_heis.resize(n_k, 0.0);
+    result.S_d_xy_oriented.resize(n_k);
+    result.S_d_heis_oriented.resize(n_k);
+    
+    // Map from (α, β) pair to index in the 6-element array
+    auto orient_pair_idx = [](int alpha, int beta) -> int {
+        if (alpha > beta) std::swap(alpha, beta);
+        if (alpha == 0) return beta;
+        if (alpha == 1) return 2 + beta;
+        return 5;
+    };
+    
+    std::cout << "  Computing S_D(q) at " << n_k << " k-points using Fourier method..." << std::flush;
+    
+    for (int ik = 0; ik < n_k; ++ik) {
+        const auto& q = cluster.k_points[ik];
+        std::array<double, 2> neg_q = {-q[0], -q[1]};
         
-        for (int b2 = 0; b2 < n_bonds; ++b2) {
-            int i2 = edges[b2].first;
-            int j2 = edges[b2].second;
-            
-            // Compute XY dimer-dimer: ⟨(S⁺ᵢ₁S⁻ⱼ₁ + S⁻ᵢ₁S⁺ⱼ₁)(S⁺ᵢ₂S⁻ⱼ₂ + S⁻ᵢ₂S⁺ⱼ₂)⟩
-            result.dimer_corr_xy[b1][b2] = compute_dimer_dimer_correlation(psi, i1, j1, i2, j2);
-            
-            // Compute Heisenberg dimer-dimer: ⟨(S·S)_b1 (S·S)_b2⟩
-            result.dimer_corr_heis[b1][b2] = compute_heisenberg_dimer_dimer_correlation(psi, i1, j1, i2, j2);
+        // Apply D_α(q)|ψ⟩ for each orientation (XY dimer)
+        std::array<std::vector<Complex>, 3> D_q_psi_xy;
+        std::array<Complex, 3> D_q_expect_xy = {};
+        
+        for (int alpha = 0; alpha < 3; ++alpha) {
+            if (edges_by_orient[alpha].empty()) {
+                D_q_psi_xy[alpha].resize(psi.size(), 0.0);
+                continue;
+            }
+            D_q_psi_xy[alpha] = apply_dimer_fourier(psi, edges_by_orient[alpha], 
+                                                    centers_by_orient[alpha], q);
+            // ⟨D_α(q)⟩ = Σ_b exp(iq·r_b) ⟨D_b⟩
+            for (size_t b = 0; b < edges_by_orient[alpha].size(); ++b) {
+                double phase_arg = q[0] * centers_by_orient[alpha][b][0] + 
+                                   q[1] * centers_by_orient[alpha][b][1];
+                D_q_expect_xy[alpha] += std::exp(I * phase_arg) * 
+                                        xy_bond_exp.at(edges_by_orient[alpha][b]);
+            }
         }
         
-        int done = ++completed;
-        if (done % 5 == 0 || done == n_bonds) {
-            #pragma omp critical
-            {
-                std::cout << "\r  Computing dimer-dimer correlations: " 
-                          << done << "/" << n_bonds << " bonds..." << std::flush;
+        // Compute S_D^{αβ}(q) for all orientation pairs
+        std::array<Complex, 6> s_d_xy_orient = {};
+        Complex s_d_total = 0.0;
+        
+        for (int alpha = 0; alpha < 3; ++alpha) {
+            for (int beta = alpha; beta < 3; ++beta) {
+                int idx = orient_pair_idx(alpha, beta);
+                int N_a = result.n_bonds_per_orientation[alpha];
+                int N_b = result.n_bonds_per_orientation[beta];
+                
+                if (N_a == 0 || N_b == 0) continue;
+                
+                // ⟨D_α(q)ψ|D_β(q)ψ⟩
+                Complex overlap = 0.0;
+                for (size_t s = 0; s < psi.size(); ++s) {
+                    overlap += std::conj(D_q_psi_xy[alpha][s]) * D_q_psi_xy[beta][s];
+                }
+                
+                // Connected: subtract ⟨D_α(q)⟩*⟨D_β(q)⟩
+                Complex connected = overlap - std::conj(D_q_expect_xy[alpha]) * D_q_expect_xy[beta];
+                
+                // Normalize by sqrt(N_α * N_β)
+                double norm = std::sqrt(static_cast<double>(N_a) * N_b);
+                s_d_xy_orient[idx] = connected / norm;
+                
+                // Contribution to total (accounting for symmetry α↔β)
+                if (alpha == beta) {
+                    s_d_total += connected;
+                } else {
+                    s_d_total += 2.0 * connected;  // α,β and β,α
+                }
             }
+        }
+        
+        result.S_d_xy_oriented[ik] = s_d_xy_orient;
+        result.S_d_xy[ik] = s_d_total / static_cast<double>(n_bonds);
+        
+        // For Heisenberg, use the Heisenberg dimer Fourier transform
+        auto [D_q_psi_heis_all, D_q_expect_heis_all] = apply_heisenberg_dimer_fourier(
+            psi, edges, all_bond_centers, q);
+        
+        // For orientation-resolved Heisenberg, we need separate applications
+        std::array<double, 6> s_d_heis_orient = {};
+        double s_d_heis_total = 0.0;
+        
+        // Compute per-orientation Heisenberg structure factors
+        std::array<std::vector<Complex>, 3> D_q_psi_heis;
+        std::array<Complex, 3> D_q_expect_heis = {};
+        
+        for (int alpha = 0; alpha < 3; ++alpha) {
+            if (edges_by_orient[alpha].empty()) {
+                D_q_psi_heis[alpha].resize(psi.size(), 0.0);
+                continue;
+            }
+            auto [dpsi, dexp] = apply_heisenberg_dimer_fourier(
+                psi, edges_by_orient[alpha], centers_by_orient[alpha], q);
+            D_q_psi_heis[alpha] = std::move(dpsi);
+            D_q_expect_heis[alpha] = dexp;
+        }
+        
+        for (int alpha = 0; alpha < 3; ++alpha) {
+            for (int beta = alpha; beta < 3; ++beta) {
+                int idx = orient_pair_idx(alpha, beta);
+                int N_a = result.n_bonds_per_orientation[alpha];
+                int N_b = result.n_bonds_per_orientation[beta];
+                
+                if (N_a == 0 || N_b == 0) continue;
+                
+                Complex overlap = 0.0;
+                for (size_t s = 0; s < psi.size(); ++s) {
+                    overlap += std::conj(D_q_psi_heis[alpha][s]) * D_q_psi_heis[beta][s];
+                }
+                
+                Complex connected = overlap - std::conj(D_q_expect_heis[alpha]) * D_q_expect_heis[beta];
+                double norm = std::sqrt(static_cast<double>(N_a) * N_b);
+                s_d_heis_orient[idx] = connected.real() / norm;
+                
+                if (alpha == beta) {
+                    s_d_heis_total += connected.real();
+                } else {
+                    s_d_heis_total += 2.0 * connected.real();
+                }
+            }
+        }
+        
+        result.S_d_heis_oriented[ik] = s_d_heis_orient;
+        result.S_d_heis[ik] = s_d_heis_total / n_bonds;
+        
+        if ((ik + 1) % 10 == 0 || ik == n_k - 1) {
+            std::cout << "\r  Computing S_D(q): " << (ik + 1) << "/" << n_k << " k-points..." << std::flush;
         }
     }
     std::cout << " done" << std::endl;
-    
-    // =========================================================================
-    // Compute connected correlations: ⟨δD_b δD_{b'}⟩ = ⟨D_b D_{b'}⟩ - ⟨D_b⟩⟨D_{b'}⟩
-    // =========================================================================
-    result.connected_corr_xy.resize(n_bonds, std::vector<Complex>(n_bonds, 0.0));
-    result.connected_corr_heis.resize(n_bonds, std::vector<double>(n_bonds, 0.0));
-    
-    for (int b1 = 0; b1 < n_bonds; ++b1) {
-        Complex D_xy_b1 = xy_bond_exp.at(edges[b1]);
-        double D_heis_b1 = heisenberg_bond_exp.at(edges[b1]);
-        
-        for (int b2 = 0; b2 < n_bonds; ++b2) {
-            Complex D_xy_b2 = xy_bond_exp.at(edges[b2]);
-            double D_heis_b2 = heisenberg_bond_exp.at(edges[b2]);
-            
-            result.connected_corr_xy[b1][b2] = result.dimer_corr_xy[b1][b2] - D_xy_b1 * std::conj(D_xy_b2);
-            result.connected_corr_heis[b1][b2] = result.dimer_corr_heis[b1][b2] - D_heis_b1 * D_heis_b2;
-        }
-    }
-    
-    // =========================================================================
-    // Compute S_D(q) at discrete allowed k-points (both XY and Heisenberg)
-    // For bond-bond displacements, we use the minimum-image convention:
-    // dr = r_{b1} - r_{b2} with PBC wrapping applied to the supercell
-    // =========================================================================
-    result.S_d_xy.resize(n_k, 0.0);
-    result.S_d_heis.resize(n_k, 0.0);
-    
-    // Compute supercell vectors for minimum-image wrapping of bond centers
-    double L1_x = cluster.n_cells_x * cluster.a1[0] + 0 * cluster.a2[0];
-    double L1_y = cluster.n_cells_x * cluster.a1[1] + 0 * cluster.a2[1];
-    double L2_x = 0 * cluster.a1[0] + cluster.n_cells_y * cluster.a2[0];
-    double L2_y = 0 * cluster.a1[1] + cluster.n_cells_y * cluster.a2[1];
-    
-    // Minimum-image displacement for bond centers
-    auto min_image_bond_disp = [&](int b1, int b2) -> std::array<double, 2> {
-        double dr_x = bond_centers[b1][0] - bond_centers[b2][0];
-        double dr_y = bond_centers[b1][1] - bond_centers[b2][1];
-        
-        if (cluster.n_cells_x <= 0 || cluster.n_cells_y <= 0) {
-            return {dr_x, dr_y};  // Fallback: no PBC correction
-        }
-        
-        // Express displacement in fractional coordinates of the supercell
-        double det = L1_x * L2_y - L1_y * L2_x;
-        if (std::abs(det) < 1e-10) {
-            return {dr_x, dr_y};  // Degenerate lattice
-        }
-        
-        double f1 = (dr_x * L2_y - dr_y * L2_x) / det;
-        double f2 = (dr_y * L1_x - dr_x * L1_y) / det;
-        
-        // Wrap to [-0.5, 0.5)
-        f1 -= std::round(f1);
-        f2 -= std::round(f2);
-        
-        // Convert back to Cartesian
-        return {f1 * L1_x + f2 * L2_x, f1 * L1_y + f2 * L2_y};
-    };
-    
-    std::cout << "  Computing S_D(q) at " << n_k << " k-points..." << std::flush;
-    
-    #pragma omp parallel for
-    for (int ik = 0; ik < n_k; ++ik) {
-        const auto& q = cluster.k_points[ik];
-        Complex s_d_xy = 0.0;
-        double s_d_heis = 0.0;
-        
-        for (int b1 = 0; b1 < n_bonds; ++b1) {
-            for (int b2 = 0; b2 < n_bonds; ++b2) {
-                auto dr = min_image_bond_disp(b1, b2);
-                double phase_arg = q[0] * dr[0] + q[1] * dr[1];
-                Complex phase = std::exp(I * phase_arg);
-                
-                s_d_xy += result.connected_corr_xy[b1][b2] * phase;
-                s_d_heis += result.connected_corr_heis[b1][b2] * phase.real();
-            }
-        }
-        result.S_d_xy[ik] = s_d_xy / static_cast<double>(n_bonds);
-        result.S_d_heis[ik] = s_d_heis / n_bonds;
-    }
     
     // Find maxima
     double max_val_xy = 0.0, max_val_heis = 0.0;
@@ -1556,39 +1851,48 @@ VBSResult compute_vbs_order(
     result.m_vbs_xy = std::sqrt(max_val_xy / n_bonds);
     result.m_vbs_heis = std::sqrt(max_val_heis / n_bonds);
     
-    std::cout << " done" << std::endl;
-    
     // =========================================================================
-    // Also compute on dense 2D grid for visualization
+    // Also compute on dense 2D grid for visualization (total S_D only)
     // =========================================================================
     result.S_d_xy_2d.resize(n_q_grid, std::vector<Complex>(n_q_grid, 0.0));
     result.S_d_heis_2d.resize(n_q_grid, std::vector<double>(n_q_grid, 0.0));
     
     std::cout << "  Computing S_D(q) on " << n_q_grid << "x" << n_q_grid << " grid..." << std::flush;
     
-    #pragma omp parallel for collapse(2)
+    // For 2D grid, use total bonds (not orientation-resolved for speed)
     for (int i1 = 0; i1 < n_q_grid; ++i1) {
         for (int i2 = 0; i2 < n_q_grid; ++i2) {
             double q1 = -1.0 + 2.0 * i1 / (n_q_grid - 1);
             double q2 = -1.0 + 2.0 * i2 / (n_q_grid - 1);
-            double qx = q1 * cluster.b1[0] + q2 * cluster.b2[0];
-            double qy = q1 * cluster.b1[1] + q2 * cluster.b2[1];
+            std::array<double, 2> qvec = {
+                q1 * cluster.b1[0] + q2 * cluster.b2[0],
+                q1 * cluster.b1[1] + q2 * cluster.b2[1]
+            };
             
-            Complex s_d_xy = 0.0;
-            double s_d_heis = 0.0;
-            for (int b1 = 0; b1 < n_bonds; ++b1) {
-                for (int b2 = 0; b2 < n_bonds; ++b2) {
-                    // Use minimum-image displacement for PBC-correct phases
-                    auto dr = min_image_bond_disp(b1, b2);
-                    double phase_arg = qx * dr[0] + qy * dr[1];
-                    Complex phase = std::exp(I * phase_arg);
-                    
-                    s_d_xy += result.connected_corr_xy[b1][b2] * phase;
-                    s_d_heis += result.connected_corr_heis[b1][b2] * phase.real();
-                }
+            // XY
+            auto D_q_psi = apply_dimer_fourier(psi, edges, all_bond_centers, qvec);
+            Complex D_q_expect = 0.0;
+            for (int b = 0; b < n_bonds; ++b) {
+                double phase_arg = qvec[0] * all_bond_centers[b][0] + qvec[1] * all_bond_centers[b][1];
+                D_q_expect += std::exp(I * phase_arg) * xy_bond_exp.at(edges[b]);
             }
-            result.S_d_xy_2d[i1][i2] = s_d_xy / static_cast<double>(n_bonds);
-            result.S_d_heis_2d[i1][i2] = s_d_heis / n_bonds;
+            Complex overlap = 0.0;
+            for (size_t s = 0; s < psi.size(); ++s) {
+                overlap += std::conj(D_q_psi[s]) * D_q_psi[s];
+            }
+            result.S_d_xy_2d[i1][i2] = (overlap - std::norm(D_q_expect)) / static_cast<double>(n_bonds);
+            
+            // Heisenberg
+            auto [D_q_psi_h, D_q_expect_h] = apply_heisenberg_dimer_fourier(psi, edges, all_bond_centers, qvec);
+            Complex overlap_h = 0.0;
+            for (size_t s = 0; s < psi.size(); ++s) {
+                overlap_h += std::conj(D_q_psi_h[s]) * D_q_psi_h[s];
+            }
+            result.S_d_heis_2d[i1][i2] = (overlap_h - std::norm(D_q_expect_h)).real() / n_bonds;
+        }
+        
+        if ((i1 + 1) % 10 == 0 || i1 == n_q_grid - 1) {
+            std::cout << "\r  Computing S_D(q) 2D grid: " << (i1 + 1) << "/" << n_q_grid << " rows..." << std::flush;
         }
     }
     
@@ -1599,6 +1903,540 @@ VBSResult compute_vbs_order(
               << " at q = (" << result.q_max_xy[0] << ", " << result.q_max_xy[1] << ")" << std::endl;
     std::cout << "  VBS order (Heisenberg): m_vbs = " << result.m_vbs_heis
               << " at q = (" << result.q_max_heis[0] << ", " << result.q_max_heis[1] << ")"
+              << " [" << duration.count() << " ms]" << std::endl;
+    
+    return result;
+}
+
+// -----------------------------------------------------------------------------
+// Find all NN triangles in the kagome lattice
+// A triangle is 3 sites where all pairs are NN connected.
+// Returns list of (s1, s2, s3) tuples with s1 < s2 < s3.
+// -----------------------------------------------------------------------------
+
+std::vector<std::array<int, 3>> find_triangles(const Cluster& cluster) {
+    std::vector<std::array<int, 3>> triangles;
+    
+    // Build NN adjacency set
+    std::vector<std::set<int>> nn_adj(cluster.n_sites);
+    for (const auto& [i, j] : cluster.edges_nn) {
+        nn_adj[i].insert(j);
+        nn_adj[j].insert(i);
+    }
+    
+    // For each site, look for triangles where it's the smallest index
+    for (int s1 = 0; s1 < cluster.n_sites; ++s1) {
+        std::vector<int> neighbors;
+        for (int n : nn_adj[s1]) {
+            if (n > s1) neighbors.push_back(n);
+        }
+        
+        // Check all pairs of neighbors > s1
+        for (size_t i = 0; i < neighbors.size(); ++i) {
+            int s2 = neighbors[i];
+            for (size_t k = i + 1; k < neighbors.size(); ++k) {
+                int s3 = neighbors[k];
+                // Check if s2-s3 are also NN
+                if (nn_adj[s2].count(s3)) {
+                    triangles.push_back({s1, s2, s3});
+                }
+            }
+        }
+    }
+    
+    return triangles;
+}
+
+// -----------------------------------------------------------------------------
+// Bowtie structure: two triangles sharing exactly one vertex
+// -----------------------------------------------------------------------------
+
+struct Bowtie {
+    int s0;  // Shared center vertex
+    int s1, s2;  // Triangle 1 outer vertices
+    int s3, s4;  // Triangle 2 outer vertices
+    std::array<double, 2> center;  // Center position for Fourier transform
+    int orientation;  // Orientation based on sublattice of center vertex (0, 1, or 2)
+};
+
+// Find all bowties in the kagome lattice
+std::vector<Bowtie> find_bowties(const Cluster& cluster) {
+    std::vector<Bowtie> bowties;
+    
+    // Find all triangles
+    auto triangles = find_triangles(cluster);
+    
+    // Build index: which triangles contain each vertex
+    std::vector<std::vector<int>> vertex_to_triangles(cluster.n_sites);
+    for (int idx = 0; idx < static_cast<int>(triangles.size()); ++idx) {
+        const auto& tri = triangles[idx];
+        vertex_to_triangles[tri[0]].push_back(idx);
+        vertex_to_triangles[tri[1]].push_back(idx);
+        vertex_to_triangles[tri[2]].push_back(idx);
+    }
+    
+    // Track found bowties to avoid duplicates
+    std::set<std::tuple<int, int, int, int, int>> found_set;
+    
+    // For each vertex, find all pairs of triangles sharing ONLY that vertex
+    for (int shared_vertex = 0; shared_vertex < cluster.n_sites; ++shared_vertex) {
+        const auto& tri_indices = vertex_to_triangles[shared_vertex];
+        if (tri_indices.size() < 2) continue;
+        
+        // Check all pairs of triangles at this vertex
+        for (size_t i = 0; i < tri_indices.size(); ++i) {
+            for (size_t j = i + 1; j < tri_indices.size(); ++j) {
+                const auto& t1 = triangles[tri_indices[i]];
+                const auto& t2 = triangles[tri_indices[j]];
+                
+                // Get the other two vertices of each triangle
+                std::vector<int> other1, other2;
+                for (int v : {t1[0], t1[1], t1[2]}) {
+                    if (v != shared_vertex) other1.push_back(v);
+                }
+                for (int v : {t2[0], t2[1], t2[2]}) {
+                    if (v != shared_vertex) other2.push_back(v);
+                }
+                
+                // Check that triangles share ONLY the shared_vertex (no edge sharing)
+                std::set<int> set1(other1.begin(), other1.end());
+                std::set<int> set2(other2.begin(), other2.end());
+                std::vector<int> intersection;
+                std::set_intersection(set1.begin(), set1.end(), 
+                                      set2.begin(), set2.end(),
+                                      std::back_inserter(intersection));
+                if (!intersection.empty()) continue;  // They share more than one vertex
+                
+                // This is a valid bowtie
+                int s0 = shared_vertex;
+                int s1 = other1[0], s2 = other1[1];
+                int s3 = other2[0], s4 = other2[1];
+                
+                // Create canonical key to avoid duplicates
+                // Sort each triangle's other vertices, then sort triangles
+                if (s1 > s2) std::swap(s1, s2);
+                if (s3 > s4) std::swap(s3, s4);
+                if (std::make_pair(s1, s2) > std::make_pair(s3, s4)) {
+                    std::swap(s1, s3);
+                    std::swap(s2, s4);
+                }
+                
+                auto key = std::make_tuple(s0, s1, s2, s3, s4);
+                if (found_set.count(key)) continue;
+                found_set.insert(key);
+                
+                // Center position (mean of all 5 sites)
+                std::array<double, 2> center = {0.0, 0.0};
+                for (int site : {s0, s1, s2, s3, s4}) {
+                    center[0] += cluster.positions[site][0];
+                    center[1] += cluster.positions[site][1];
+                }
+                center[0] /= 5.0;
+                center[1] /= 5.0;
+                
+                // Orientation based on sublattice of center vertex
+                int orientation = cluster.sublattice[s0];
+                
+                bowties.push_back({s0, s1, s2, s3, s4, center, orientation});
+            }
+        }
+    }
+    
+    return bowties;
+}
+
+// -----------------------------------------------------------------------------
+// Compute bowtie ring-flip expectation:
+// P_r = ⟨S⁺₁S⁻₂S⁺₃S⁻₄ + h.c.⟩
+// Acts on the 4 OUTER corners (s1, s2, s3, s4), EXCLUDING center s0
+// -----------------------------------------------------------------------------
+
+Complex compute_bowtie_resonance(
+    const std::vector<Complex>& psi,
+    int s1, int s2, int s3, int s4
+) {
+    uint64_t n_states = psi.size();
+    double result_real = 0.0;
+    double result_imag = 0.0;
+    
+    #pragma omp parallel reduction(+:result_real,result_imag)
+    {
+        double local_real = 0.0;
+        double local_imag = 0.0;
+        
+        #pragma omp for schedule(dynamic, 1024)
+        for (uint64_t state = 0; state < n_states; ++state) {
+            Complex coeff = psi[state];
+            if (std::abs(coeff) < 1e-15) continue;
+            
+            // S⁺_s1 S⁻_s2 S⁺_s3 S⁻_s4 term
+            // Requires: bit(s1)=1 (down), bit(s2)=0 (up), bit(s3)=1 (down), bit(s4)=0 (up)
+            int b1 = get_bit(state, s1);
+            int b2 = get_bit(state, s2);
+            int b3 = get_bit(state, s3);
+            int b4 = get_bit(state, s4);
+            
+            // S+ raises: needs spin down (bit=1), S- lowers: needs spin up (bit=0)
+            if (b1 == 1 && b2 == 0 && b3 == 1 && b4 == 0) {
+                // All operators succeed with coefficient 1 each
+                uint64_t new_state = flip_bit(flip_bit(flip_bit(flip_bit(state, s1), s2), s3), s4);
+                Complex contrib = std::conj(psi[new_state]) * coeff;
+                local_real += contrib.real();
+                local_imag += contrib.imag();
+            }
+            
+            // Hermitian conjugate: S⁻_s1 S⁺_s2 S⁻_s3 S⁺_s4
+            // Requires: bit(s1)=0, bit(s2)=1, bit(s3)=0, bit(s4)=1
+            if (b1 == 0 && b2 == 1 && b3 == 0 && b4 == 1) {
+                uint64_t new_state = flip_bit(flip_bit(flip_bit(flip_bit(state, s1), s2), s3), s4);
+                Complex contrib = std::conj(psi[new_state]) * coeff;
+                local_real += contrib.real();
+                local_imag += contrib.imag();
+            }
+        }
+        
+        result_real += local_real;
+        result_imag += local_imag;
+    }
+    
+    return Complex(result_real, result_imag);
+}
+
+// -----------------------------------------------------------------------------
+// Compute triangle chiral/resonance expectation:
+// χ = ⟨S⁺₁S⁻₂S⁺₃ + S⁻₁S⁺₂S⁻₃⟩
+// Measures 3-site ring exchange around a triangle
+// -----------------------------------------------------------------------------
+
+Complex compute_triangle_chiral(
+    const std::vector<Complex>& psi,
+    int s1, int s2, int s3
+) {
+    uint64_t n_states = psi.size();
+    double result_real = 0.0;
+    double result_imag = 0.0;
+    
+    #pragma omp parallel reduction(+:result_real,result_imag)
+    {
+        double local_real = 0.0;
+        double local_imag = 0.0;
+        
+        #pragma omp for schedule(dynamic, 1024)
+        for (uint64_t state = 0; state < n_states; ++state) {
+            Complex coeff = psi[state];
+            if (std::abs(coeff) < 1e-15) continue;
+            
+            int b1 = get_bit(state, s1);
+            int b2 = get_bit(state, s2);
+            int b3 = get_bit(state, s3);
+            
+            // S⁺_s1 S⁻_s2 S⁺_s3: needs b1=1, b2=0, b3=1
+            if (b1 == 1 && b2 == 0 && b3 == 1) {
+                uint64_t new_state = flip_bit(flip_bit(flip_bit(state, s1), s2), s3);
+                Complex contrib = std::conj(psi[new_state]) * coeff;
+                local_real += contrib.real();
+                local_imag += contrib.imag();
+            }
+            
+            // S⁻_s1 S⁺_s2 S⁻_s3: needs b1=0, b2=1, b3=0
+            if (b1 == 0 && b2 == 1 && b3 == 0) {
+                uint64_t new_state = flip_bit(flip_bit(flip_bit(state, s1), s2), s3);
+                Complex contrib = std::conj(psi[new_state]) * coeff;
+                local_real += contrib.real();
+                local_imag += contrib.imag();
+            }
+        }
+        
+        result_real += local_real;
+        result_imag += local_imag;
+    }
+    
+    return Complex(result_real, result_imag);
+}
+
+// -----------------------------------------------------------------------------
+// Plaquette order parameter result structure
+// -----------------------------------------------------------------------------
+
+struct PlaquetteResult {
+    // Bowtie resonance order
+    std::vector<Complex> S_p;           // S_P(q) at each k-point
+    std::vector<std::vector<Complex>> S_p_2d;  // 2D grid for visualization
+    int q_max_idx;
+    Complex s_p_max;
+    std::array<double, 2> q_max;
+    double m_plaquette;                 // Order parameter sqrt(S_P(q_max)/N_bt)
+    
+    // Orientation-resolved structure factors (3x3 matrix per q, stored as 6 independent components)
+    // Index mapping: 0=(0,0), 1=(0,1), 2=(0,2), 3=(1,1), 4=(1,2), 5=(2,2)
+    // S_P^{αβ}(q) = (1/N_bt) Σ_{bt∈α, bt'∈β} exp(iq·(r_bt - r_{bt'})) ⟨δP_bt δP_{bt'}⟩
+    std::vector<std::array<Complex, 6>> S_p_oriented;  // [n_k][6] orientation-resolved
+    std::array<int, 3> n_plaquettes_per_orientation;   // Number of bowties per orientation
+    
+    // Raw plaquette data
+    int n_plaquettes;
+    double P_mean;                      // Mean bowtie resonance
+    double resonance_strength;          // Mean |P_bt|
+    std::vector<Complex> P_r;           // Individual bowtie resonances
+    std::vector<std::array<double, 2>> centers;  // Bowtie centers
+    std::vector<int> orientations;      // Orientation of each bowtie (sublattice of center)
+    
+    // Triangle chiral order
+    int n_triangles;
+    double chi_mean;                    // Mean triangle chiral
+    std::vector<Complex> chi_r;         // Individual triangle chirals
+};
+
+// -----------------------------------------------------------------------------
+// Compute plaquette/bowtie resonance order
+// S_P(q) = (1/N_bt) Σ_{bt,bt'} exp(iq·(R_bt - R_{bt'})) ⟨δP_bt δP_{bt'}⟩
+// where δP_bt = P_bt - ⟨P⟩
+// -----------------------------------------------------------------------------
+
+PlaquetteResult compute_plaquette_order(
+    const std::vector<Complex>& psi,
+    const Cluster& cluster,
+    int n_q_grid = 50
+) {
+    PlaquetteResult result;
+    int n_k = cluster.k_points.size();
+    
+    std::cout << "Computing plaquette/bowtie resonance order using efficient Fourier method..." << std::endl;
+    auto start = std::chrono::high_resolution_clock::now();
+    
+    // Find all triangles (for chiral order)
+    auto triangles = find_triangles(cluster);
+    result.n_triangles = triangles.size();
+    std::cout << "  Found " << result.n_triangles << " triangular plaquettes" << std::endl;
+    
+    // Find all bowties (for resonance order)
+    auto bowties = find_bowties(cluster);
+    result.n_plaquettes = bowties.size();
+    std::cout << "  Found " << result.n_plaquettes << " bowtie plaquettes (5-site, 2 triangles sharing corner)" << std::endl;
+    
+    if (result.n_plaquettes == 0) {
+        result.m_plaquette = 0.0;
+        result.P_mean = 0.0;
+        result.resonance_strength = 0.0;
+        return result;
+    }
+    
+    // Group bowties by orientation and prepare BowtieData for Fourier transform
+    std::array<std::vector<BowtieData>, 3> bowties_by_orient;
+    std::vector<BowtieData> all_bowties(result.n_plaquettes);
+    
+    result.P_r.resize(result.n_plaquettes);
+    result.centers.resize(result.n_plaquettes);
+    result.orientations.resize(result.n_plaquettes);
+    
+    for (int idx = 0; idx < result.n_plaquettes; ++idx) {
+        const auto& bt = bowties[idx];
+        all_bowties[idx] = {bt.s1, bt.s2, bt.s3, bt.s4, bt.center};
+        result.centers[idx] = bt.center;
+        result.orientations[idx] = bt.orientation;
+        bowties_by_orient[bt.orientation].push_back(all_bowties[idx]);
+    }
+    
+    result.n_plaquettes_per_orientation = {
+        static_cast<int>(bowties_by_orient[0].size()),
+        static_cast<int>(bowties_by_orient[1].size()),
+        static_cast<int>(bowties_by_orient[2].size())
+    };
+    
+    std::cout << "  Bowties per orientation: " << result.n_plaquettes_per_orientation[0] << ", "
+              << result.n_plaquettes_per_orientation[1] << ", "
+              << result.n_plaquettes_per_orientation[2] << std::endl;
+    
+    // Compute single-plaquette expectations ⟨P_bt⟩ for each bowtie (needed for means)
+    std::cout << "  Computing individual bowtie expectations..." << std::flush;
+    
+    #pragma omp parallel for schedule(dynamic)
+    for (int idx = 0; idx < result.n_plaquettes; ++idx) {
+        const auto& bt = bowties[idx];
+        result.P_r[idx] = compute_bowtie_resonance(psi, bt.s1, bt.s2, bt.s3, bt.s4);
+    }
+    std::cout << " done" << std::endl;
+    
+    // Mean plaquette value and resonance strength per orientation
+    std::array<Complex, 3> P_mean_orient = {};
+    double sum_P = 0.0, sum_abs_P = 0.0;
+    
+    for (int idx = 0; idx < result.n_plaquettes; ++idx) {
+        sum_P += result.P_r[idx].real();
+        sum_abs_P += std::abs(result.P_r[idx]);
+        P_mean_orient[result.orientations[idx]] += result.P_r[idx];
+    }
+    result.P_mean = sum_P / result.n_plaquettes;
+    result.resonance_strength = sum_abs_P / result.n_plaquettes;
+    
+    for (int alpha = 0; alpha < 3; ++alpha) {
+        if (result.n_plaquettes_per_orientation[alpha] > 0) {
+            P_mean_orient[alpha] /= static_cast<double>(result.n_plaquettes_per_orientation[alpha]);
+        }
+    }
+    
+    // =========================================================================
+    // Efficient Fourier-space computation of S_P^{αβ}(q):
+    // P_α(q)|ψ⟩ = Σ_{p∈α} exp(iq·r_p) P_p|ψ⟩
+    // S_P^{αβ}(q) = (1/√(N_α N_β)) [⟨P_α(q)ψ|P_β(q)ψ⟩ - ⟨P_α(q)⟩*⟨P_β(q)⟩]
+    // =========================================================================
+    
+    result.S_p.resize(n_k, 0.0);
+    result.S_p_oriented.resize(n_k);
+    
+    auto orient_pair_idx = [](int alpha, int beta) -> int {
+        if (alpha > beta) std::swap(alpha, beta);
+        if (alpha == 0) return beta;
+        if (alpha == 1) return 2 + beta;
+        return 5;
+    };
+    
+    std::cout << "  Computing S_P(q) at " << n_k << " k-points using Fourier method..." << std::flush;
+    
+    for (int ik = 0; ik < n_k; ++ik) {
+        const auto& q = cluster.k_points[ik];
+        
+        // Apply P_α(q)|ψ⟩ for each orientation
+        std::array<std::vector<Complex>, 3> P_q_psi;
+        std::array<Complex, 3> P_q_expect = {};
+        
+        for (int alpha = 0; alpha < 3; ++alpha) {
+            if (bowties_by_orient[alpha].empty()) {
+                P_q_psi[alpha].resize(psi.size(), 0.0);
+                continue;
+            }
+            P_q_psi[alpha] = apply_bowtie_fourier(psi, bowties_by_orient[alpha], q);
+            
+            // ⟨P_α(q)⟩ = Σ_p exp(iq·r_p) ⟨P_p⟩
+            int local_idx = 0;
+            for (int p = 0; p < result.n_plaquettes; ++p) {
+                if (result.orientations[p] == alpha) {
+                    double phase_arg = q[0] * result.centers[p][0] + q[1] * result.centers[p][1];
+                    P_q_expect[alpha] += std::exp(I * phase_arg) * result.P_r[p];
+                }
+            }
+        }
+        
+        // Compute S_P^{αβ}(q) for all orientation pairs
+        std::array<Complex, 6> s_p_orient = {};
+        Complex s_p_total = 0.0;
+        
+        for (int alpha = 0; alpha < 3; ++alpha) {
+            for (int beta = alpha; beta < 3; ++beta) {
+                int idx = orient_pair_idx(alpha, beta);
+                int N_a = result.n_plaquettes_per_orientation[alpha];
+                int N_b = result.n_plaquettes_per_orientation[beta];
+                
+                if (N_a == 0 || N_b == 0) continue;
+                
+                // ⟨P_α(q)ψ|P_β(q)ψ⟩
+                Complex overlap = 0.0;
+                for (size_t s = 0; s < psi.size(); ++s) {
+                    overlap += std::conj(P_q_psi[alpha][s]) * P_q_psi[beta][s];
+                }
+                
+                // Connected: subtract ⟨P_α(q)⟩*⟨P_β(q)⟩
+                Complex connected = overlap - std::conj(P_q_expect[alpha]) * P_q_expect[beta];
+                
+                // Normalize by sqrt(N_α * N_β)
+                double norm = std::sqrt(static_cast<double>(N_a) * N_b);
+                s_p_orient[idx] = connected / norm;
+                
+                // Contribution to total
+                if (alpha == beta) {
+                    s_p_total += connected;
+                } else {
+                    s_p_total += 2.0 * connected;
+                }
+            }
+        }
+        
+        result.S_p_oriented[ik] = s_p_orient;
+        result.S_p[ik] = s_p_total / static_cast<double>(result.n_plaquettes);
+        
+        if ((ik + 1) % 10 == 0 || ik == n_k - 1) {
+            std::cout << "\r  Computing S_P(q): " << (ik + 1) << "/" << n_k << " k-points..." << std::flush;
+        }
+    }
+    std::cout << " done" << std::endl;
+    
+    // Find maximum
+    double max_val = 0.0;
+    for (int ik = 0; ik < n_k; ++ik) {
+        double val = std::abs(result.S_p[ik]);
+        if (val > max_val) {
+            max_val = val;
+            result.q_max_idx = ik;
+            result.s_p_max = result.S_p[ik];
+            result.q_max = cluster.k_points[ik];
+        }
+    }
+    result.m_plaquette = std::sqrt(max_val / result.n_plaquettes);
+    
+    // =========================================================================
+    // Also compute on dense 2D grid for visualization
+    // =========================================================================
+    result.S_p_2d.resize(n_q_grid, std::vector<Complex>(n_q_grid, 0.0));
+    
+    std::cout << "  Computing S_P(q) on " << n_q_grid << "x" << n_q_grid << " grid..." << std::flush;
+    
+    for (int i1 = 0; i1 < n_q_grid; ++i1) {
+        for (int i2 = 0; i2 < n_q_grid; ++i2) {
+            double q1 = -1.0 + 2.0 * i1 / (n_q_grid - 1);
+            double q2 = -1.0 + 2.0 * i2 / (n_q_grid - 1);
+            std::array<double, 2> qvec = {
+                q1 * cluster.b1[0] + q2 * cluster.b2[0],
+                q1 * cluster.b1[1] + q2 * cluster.b2[1]
+            };
+            
+            auto P_q_psi = apply_bowtie_fourier(psi, all_bowties, qvec);
+            Complex P_q_expect = 0.0;
+            for (int p = 0; p < result.n_plaquettes; ++p) {
+                double phase_arg = qvec[0] * result.centers[p][0] + qvec[1] * result.centers[p][1];
+                P_q_expect += std::exp(I * phase_arg) * result.P_r[p];
+            }
+            
+            Complex overlap = 0.0;
+            for (size_t s = 0; s < psi.size(); ++s) {
+                overlap += std::conj(P_q_psi[s]) * P_q_psi[s];
+            }
+            result.S_p_2d[i1][i2] = (overlap - std::norm(P_q_expect)) / static_cast<double>(result.n_plaquettes);
+        }
+        
+        if ((i1 + 1) % 10 == 0 || i1 == n_q_grid - 1) {
+            std::cout << "\r  Computing S_P(q) 2D grid: " << (i1 + 1) << "/" << n_q_grid << " rows..." << std::flush;
+        }
+    }
+    
+    // =========================================================================
+    // Compute triangle chiral order
+    // =========================================================================
+    result.chi_r.resize(result.n_triangles);
+    
+    std::cout << " done" << std::endl;
+    std::cout << "  Computing triangle chiral expectations..." << std::flush;
+    
+    #pragma omp parallel for schedule(dynamic)
+    for (int idx = 0; idx < result.n_triangles; ++idx) {
+        const auto& tri = triangles[idx];
+        result.chi_r[idx] = compute_triangle_chiral(psi, tri[0], tri[1], tri[2]);
+    }
+    
+    double sum_chi = 0.0;
+    for (int idx = 0; idx < result.n_triangles; ++idx) {
+        sum_chi += result.chi_r[idx].real();
+    }
+    result.chi_mean = sum_chi / result.n_triangles;
+    
+    auto end = std::chrono::high_resolution_clock::now();
+    auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
+    
+    std::cout << " done" << std::endl;
+    std::cout << "  Plaquette order: m_plaquette = " << result.m_plaquette 
+              << " at q = (" << result.q_max[0] << ", " << result.q_max[1] << ")" << std::endl;
+    std::cout << "  Mean resonance: <P> = " << result.P_mean 
+              << ", strength = " << result.resonance_strength << std::endl;
+    std::cout << "  Triangle chiral: <χ> = " << result.chi_mean
               << " [" << duration.count() << " ms]" << std::endl;
     
     return result;
@@ -1661,6 +2499,7 @@ void save_results(
     const NematicResult& nem_szsz,
     const NematicResult& nem_heisenberg,
     const VBSResult& vbs,
+    const PlaquetteResult& plaq,
     const Cluster& cluster,
     const std::vector<std::vector<Complex>>& s_q_2d,
     int n_q_grid,
@@ -1741,6 +2580,50 @@ void save_results(
                 }
             }
             dataset.write(flat.data(), H5::PredType::NATIVE_DOUBLE);
+        }
+        
+        // Save orientation-resolved S_D^{αβ}(q) - 6 unique components per k-point
+        // Index: 0=(0,0), 1=(0,1), 2=(0,2), 3=(1,1), 4=(1,2), 5=(2,2)
+        if (!vbs.S_d_xy_oriented.empty()) {
+            int n_k = vbs.S_d_xy_oriented.size();
+            
+            // XY orientation-resolved
+            {
+                std::vector<Complex> flat_data(n_k * 6);
+                for (int ik = 0; ik < n_k; ++ik) {
+                    for (int c = 0; c < 6; ++c) {
+                        flat_data[ik * 6 + c] = vbs.S_d_xy_oriented[ik][c];
+                    }
+                }
+                hsize_t dims[2] = {static_cast<hsize_t>(n_k), 6};
+                H5::DataSpace dataspace(2, dims);
+                H5::DataSet dataset = file.createDataSet("S_D_q_xy_oriented", complex_type, dataspace);
+                dataset.write(flat_data.data(), complex_type);
+            }
+            
+            // Heisenberg orientation-resolved
+            {
+                std::vector<double> flat_data(n_k * 6);
+                for (int ik = 0; ik < n_k; ++ik) {
+                    for (int c = 0; c < 6; ++c) {
+                        flat_data[ik * 6 + c] = vbs.S_d_heis_oriented[ik][c];
+                    }
+                }
+                hsize_t dims[2] = {static_cast<hsize_t>(n_k), 6};
+                H5::DataSpace dataspace(2, dims);
+                H5::DataSet dataset = file.createDataSet("S_D_q_heis_oriented", H5::PredType::NATIVE_DOUBLE, dataspace);
+                dataset.write(flat_data.data(), H5::PredType::NATIVE_DOUBLE);
+            }
+            
+            // n_bonds_per_orientation
+            {
+                hsize_t dims[1] = {3};
+                H5::DataSpace dataspace(1, dims);
+                H5::DataSet dataset = file.createDataSet("n_bonds_per_orientation", H5::PredType::NATIVE_INT, dataspace);
+                dataset.write(vbs.n_bonds_per_orientation.data(), H5::PredType::NATIVE_INT);
+            }
+            
+            std::cout << "  Orientation-resolved S_D^{αβ}(q) saved: " << n_k << " x 6" << std::endl;
         }
         
         // Save bond-resolved dimer correlation matrices
@@ -1992,6 +2875,134 @@ void save_results(
             std::cout << "  <S·S>_avg  = " << heis_sum / n_bonds << std::endl;
         }
         
+        // =========================================================================
+        // Save plaquette/bowtie resonance data
+        // =========================================================================
+        if (plaq.n_plaquettes > 0) {
+            H5::Group plaq_group = file.createGroup("/plaquette");
+            
+            // Scalars
+            {
+                hsize_t dims[1] = {1};
+                H5::DataSpace dataspace(1, dims);
+                
+                H5::DataSet ds = plaq_group.createDataSet("m_plaquette", H5::PredType::NATIVE_DOUBLE, dataspace);
+                ds.write(&plaq.m_plaquette, H5::PredType::NATIVE_DOUBLE);
+                
+                ds = plaq_group.createDataSet("P_mean", H5::PredType::NATIVE_DOUBLE, dataspace);
+                ds.write(&plaq.P_mean, H5::PredType::NATIVE_DOUBLE);
+                
+                ds = plaq_group.createDataSet("resonance_strength", H5::PredType::NATIVE_DOUBLE, dataspace);
+                ds.write(&plaq.resonance_strength, H5::PredType::NATIVE_DOUBLE);
+                
+                ds = plaq_group.createDataSet("chi_mean", H5::PredType::NATIVE_DOUBLE, dataspace);
+                ds.write(&plaq.chi_mean, H5::PredType::NATIVE_DOUBLE);
+                
+                ds = plaq_group.createDataSet("n_plaquettes", H5::PredType::NATIVE_INT, dataspace);
+                ds.write(&plaq.n_plaquettes, H5::PredType::NATIVE_INT);
+                
+                ds = plaq_group.createDataSet("n_triangles", H5::PredType::NATIVE_INT, dataspace);
+                ds.write(&plaq.n_triangles, H5::PredType::NATIVE_INT);
+            }
+            
+            // q_max
+            {
+                hsize_t dims[1] = {2};
+                H5::DataSpace dataspace(1, dims);
+                H5::DataSet ds = plaq_group.createDataSet("q_max", H5::PredType::NATIVE_DOUBLE, dataspace);
+                ds.write(plaq.q_max.data(), H5::PredType::NATIVE_DOUBLE);
+            }
+            
+            // S_P(q) at k-points
+            if (!plaq.S_p.empty()) {
+                hsize_t dims[1] = {plaq.S_p.size()};
+                H5::DataSpace dataspace(1, dims);
+                H5::DataSet ds = plaq_group.createDataSet("S_p", complex_type, dataspace);
+                ds.write(plaq.S_p.data(), complex_type);
+            }
+            
+            // S_P(q) 2D grid
+            if (!plaq.S_p_2d.empty()) {
+                int grid_size = plaq.S_p_2d.size();
+                std::vector<Complex> flat_data(grid_size * grid_size);
+                for (int i = 0; i < grid_size; ++i) {
+                    for (int j = 0; j < grid_size; ++j) {
+                        flat_data[i * grid_size + j] = plaq.S_p_2d[i][j];
+                    }
+                }
+                hsize_t dims[2] = {static_cast<hsize_t>(grid_size), static_cast<hsize_t>(grid_size)};
+                H5::DataSpace dataspace(2, dims);
+                H5::DataSet ds = plaq_group.createDataSet("S_p_2d", complex_type, dataspace);
+                ds.write(flat_data.data(), complex_type);
+            }
+            
+            // Orientation-resolved S_P^{αβ}(q) - 6 unique components per k-point
+            // Index: 0=(0,0), 1=(0,1), 2=(0,2), 3=(1,1), 4=(1,2), 5=(2,2)
+            if (!plaq.S_p_oriented.empty()) {
+                int n_k = plaq.S_p_oriented.size();
+                std::vector<Complex> flat_data(n_k * 6);
+                for (int ik = 0; ik < n_k; ++ik) {
+                    for (int c = 0; c < 6; ++c) {
+                        flat_data[ik * 6 + c] = plaq.S_p_oriented[ik][c];
+                    }
+                }
+                hsize_t dims[2] = {static_cast<hsize_t>(n_k), 6};
+                H5::DataSpace dataspace(2, dims);
+                H5::DataSet ds = plaq_group.createDataSet("S_p_oriented", complex_type, dataspace);
+                ds.write(flat_data.data(), complex_type);
+                
+                // Also save n_plaquettes_per_orientation
+                hsize_t dims3[1] = {3};
+                H5::DataSpace ds3(1, dims3);
+                H5::DataSet orient_ds = plaq_group.createDataSet("n_plaquettes_per_orientation", H5::PredType::NATIVE_INT, ds3);
+                orient_ds.write(plaq.n_plaquettes_per_orientation.data(), H5::PredType::NATIVE_INT);
+                
+                std::cout << "  Orientation-resolved S_P^{αβ}(q) saved: " << n_k << " x 6" << std::endl;
+            }
+            
+            // Plaquette orientations
+            if (!plaq.orientations.empty()) {
+                hsize_t dims[1] = {plaq.orientations.size()};
+                H5::DataSpace dataspace(1, dims);
+                H5::DataSet ds = plaq_group.createDataSet("orientations", H5::PredType::NATIVE_INT, dataspace);
+                ds.write(plaq.orientations.data(), H5::PredType::NATIVE_INT);
+            }
+            
+            // Individual plaquette resonances
+            if (!plaq.P_r.empty()) {
+                hsize_t dims[1] = {plaq.P_r.size()};
+                H5::DataSpace dataspace(1, dims);
+                H5::DataSet ds = plaq_group.createDataSet("P_r", complex_type, dataspace);
+                ds.write(plaq.P_r.data(), complex_type);
+            }
+            
+            // Plaquette centers
+            if (!plaq.centers.empty()) {
+                std::vector<double> flat_centers(plaq.centers.size() * 2);
+                for (size_t i = 0; i < plaq.centers.size(); ++i) {
+                    flat_centers[2*i] = plaq.centers[i][0];
+                    flat_centers[2*i + 1] = plaq.centers[i][1];
+                }
+                hsize_t dims[2] = {plaq.centers.size(), 2};
+                H5::DataSpace dataspace(2, dims);
+                H5::DataSet ds = plaq_group.createDataSet("centers", H5::PredType::NATIVE_DOUBLE, dataspace);
+                ds.write(flat_centers.data(), H5::PredType::NATIVE_DOUBLE);
+            }
+            
+            // Triangle chiral expectations
+            if (!plaq.chi_r.empty()) {
+                hsize_t dims[1] = {plaq.chi_r.size()};
+                H5::DataSpace dataspace(1, dims);
+                H5::DataSet ds = plaq_group.createDataSet("chi_r", complex_type, dataspace);
+                ds.write(plaq.chi_r.data(), complex_type);
+            }
+            
+            std::cout << "Plaquette data saved:" << std::endl;
+            std::cout << "  n_plaquettes = " << plaq.n_plaquettes << std::endl;
+            std::cout << "  n_triangles = " << plaq.n_triangles << std::endl;
+            std::cout << "  m_plaquette = " << plaq.m_plaquette << std::endl;
+        }
+        
         std::cout << "Results saved to: " << filename << std::endl;
         
     } catch (H5::Exception& e) {
@@ -2018,6 +3029,13 @@ struct OrderParameterResults {
     double D_mean;          // XY dimer mean (backward compat)
     double D_mean_xy;
     double D_mean_heis;
+    // Plaquette/bowtie resonance order
+    double m_plaquette;
+    double P_mean;           // Mean bowtie resonance
+    double resonance_strength;  // Mean |P_bt|
+    double chi_mean;         // Mean triangle chiral
+    int n_plaquettes;
+    int n_triangles;
 };
 
 // -----------------------------------------------------------------------------
@@ -2065,6 +3083,15 @@ OrderParameterResults compute_all_order_parameters(
     results.D_mean = vbs_result.D_mean_xy;
     results.D_mean_xy = vbs_result.D_mean_xy;
     results.D_mean_heis = vbs_result.D_mean_heis;
+    
+    // Plaquette/bowtie resonance order
+    auto plaq_result = compute_plaquette_order(psi, cluster);
+    results.m_plaquette = plaq_result.m_plaquette;
+    results.P_mean = plaq_result.P_mean;
+    results.resonance_strength = plaq_result.resonance_strength;
+    results.chi_mean = plaq_result.chi_mean;
+    results.n_plaquettes = plaq_result.n_plaquettes;
+    results.n_triangles = plaq_result.n_triangles;
     
     return results;
 }
@@ -2231,13 +3258,14 @@ std::vector<OrderParameterResults> scan_jpm_directories(
                 auto nem_heisenberg_result = compute_nematic_order_real(heisenberg_bond_exp, cluster, "heisenberg");
                 
                 auto vbs_result = compute_vbs_order(psi, xy_bond_exp, heisenberg_bond_exp, cluster, n_q_grid);
+                auto plaq_result = compute_plaquette_order(psi, cluster, n_q_grid);
                 
                 // Save full results to per-Jpm file
                 std::ostringstream oss;
                 oss << std::fixed << std::setprecision(4) << jpm;
                 std::string out_file = output_dir + "/order_params_Jpm=" + oss.str() + ".h5";
                 save_results(out_file, sf_result, nem_result, nem_spsm_result, nem_szsz_result,
-                            nem_heisenberg_result, vbs_result,
+                            nem_heisenberg_result, vbs_result, plaq_result,
                             cluster, s_q_2d, n_q_grid,
                             spsm_bond_exp, szsz_bond_exp, heisenberg_bond_exp);
                 
@@ -2252,6 +3280,14 @@ std::vector<OrderParameterResults> scan_jpm_directories(
                 results.m_vbs_xy = vbs_result.m_vbs_xy;
                 results.m_vbs_heis = vbs_result.m_vbs_heis;
                 results.D_mean = vbs_result.D_mean_xy;
+                results.D_mean_xy = vbs_result.D_mean_xy;
+                results.D_mean_heis = vbs_result.D_mean_heis;
+                results.m_plaquette = plaq_result.m_plaquette;
+                results.P_mean = plaq_result.P_mean;
+                results.resonance_strength = plaq_result.resonance_strength;
+                results.chi_mean = plaq_result.chi_mean;
+                results.n_plaquettes = plaq_result.n_plaquettes;
+                results.n_triangles = plaq_result.n_triangles;
                 results.D_mean_xy = vbs_result.D_mean_xy;
                 results.D_mean_heis = vbs_result.D_mean_heis;
             } else {
@@ -2405,6 +3441,8 @@ void save_scan_results(
         std::vector<double> m_nem(n), m_nem_spsm(n), m_nem_szsz(n), m_nem_heis(n), aniso(n);
         std::vector<double> m_vbs_vals(n), m_vbs_xy_vals(n), m_vbs_heis_vals(n);
         std::vector<double> D_mean_vals(n), D_mean_xy_vals(n), D_mean_heis_vals(n);
+        std::vector<double> m_plaq(n), P_mean_vals(n), res_strength(n), chi_mean_vals(n);
+        std::vector<int> n_plaq(n), n_tri(n);
         
         for (size_t i = 0; i < n; ++i) {
             jpm_vals[i] = results[i].jpm;
@@ -2424,6 +3462,13 @@ void save_scan_results(
             D_mean_vals[i] = results[i].D_mean;
             D_mean_xy_vals[i] = results[i].D_mean_xy;
             D_mean_heis_vals[i] = results[i].D_mean_heis;
+            
+            m_plaq[i] = results[i].m_plaquette;
+            P_mean_vals[i] = results[i].P_mean;
+            res_strength[i] = results[i].resonance_strength;
+            chi_mean_vals[i] = results[i].chi_mean;
+            n_plaq[i] = results[i].n_plaquettes;
+            n_tri[i] = results[i].n_triangles;
         }
         
         auto write_dataset = [&](const std::string& name, const std::vector<double>& data) {
@@ -2431,6 +3476,13 @@ void save_scan_results(
             H5::DataSpace dataspace(1, dims);
             H5::DataSet dataset = file.createDataSet(name, H5::PredType::NATIVE_DOUBLE, dataspace);
             dataset.write(data.data(), H5::PredType::NATIVE_DOUBLE);
+        };
+        
+        auto write_dataset_int = [&](const std::string& name, const std::vector<int>& data) {
+            hsize_t dims[1] = {data.size()};
+            H5::DataSpace dataspace(1, dims);
+            H5::DataSet dataset = file.createDataSet(name, H5::PredType::NATIVE_INT, dataspace);
+            dataset.write(data.data(), H5::PredType::NATIVE_INT);
         };
         
         write_dataset("jpm_values", jpm_vals);
@@ -2451,6 +3503,14 @@ void save_scan_results(
         write_dataset("D_mean", D_mean_vals);
         write_dataset("D_mean_xy", D_mean_xy_vals);
         write_dataset("D_mean_heis", D_mean_heis_vals);
+        
+        // Plaquette/bowtie resonance order
+        write_dataset("m_plaquette", m_plaq);
+        write_dataset("P_mean", P_mean_vals);
+        write_dataset("resonance_strength", res_strength);
+        write_dataset("chi_mean", chi_mean_vals);
+        write_dataset_int("n_plaquettes", n_plaq);
+        write_dataset_int("n_triangles", n_tri);
         
         std::cout << "Scan results saved to: " << output_file << std::endl;
         
@@ -2474,7 +3534,7 @@ void print_usage(const char* prog) {
               << "  --output-dir <dir>   Output directory for results\n"
               << "  --n-workers <n>      Number of parallel workers (default: 4)\n"
               << "  --n-q-grid <n>       2D q-grid size for visualization (default: 50)\n"
-              << "  --save-full          Save full S(q), S_D(q) 2D grids and bond-resolved data per Jpm\n"
+              << "  --save-full          Save full S(q), S_D(q), S_P(q) 2D grids and bond-resolved data per Jpm\n"
               << "  --tpq                Use TPQ states (lowest temperature) instead of ground state\n"
               << "\nComputes BFG order parameters from ground state or TPQ wavefunction:\n"
               << "  1. S(q) - Spin structure factor (translation order)\n"
@@ -2483,6 +3543,9 @@ void print_usage(const char* prog) {
               << "  3. VBS order - Valence bond solid with proper 4-site dimer correlations\n"
               << "     - Variants: XY dimer (S+S- + S-S+), Heisenberg dimer (S·S)\n"
               << "     - Bond-resolved: full dimer-dimer correlation matrices\n"
+              << "  4. Plaquette/bowtie resonance order - BFG-native 4-spin ring flip\n"
+              << "     - S_P(q) structure factor for bowtie plaquettes\n"
+              << "     - Triangle chiral order\n"
               << std::endl;
 }
 
@@ -2669,9 +3732,12 @@ int main(int argc, char* argv[]) {
             // VBS order with proper 4-site correlations (with 2D grid)
             auto vbs_result = compute_vbs_order(psi, xy_bond_exp, heisenberg_bond_exp, cluster, n_q_grid);
             
+            // Plaquette/bowtie resonance order
+            auto plaq_result = compute_plaquette_order(psi, cluster, n_q_grid);
+            
             // Save results with full 2D grids and bond data
             save_results(output_file, sf_result, nem_result, nem_spsm_result, nem_szsz_result, 
-                        nem_heisenberg_result, vbs_result, 
+                        nem_heisenberg_result, vbs_result, plaq_result,
                         cluster, s_q_2d, n_q_grid,
                         spsm_bond_exp, szsz_bond_exp, heisenberg_bond_exp);
             
@@ -2692,6 +3758,11 @@ int main(int argc, char* argv[]) {
                       << " at q = (" << vbs_result.q_max_xy[0] << ", " << vbs_result.q_max_xy[1] << ")" << std::endl;
             std::cout << "VBS order (Heisenberg, 4-site): m = " << vbs_result.m_vbs_heis 
                       << " at q = (" << vbs_result.q_max_heis[0] << ", " << vbs_result.q_max_heis[1] << ")" << std::endl;
+            std::cout << "Plaquette order (bowtie):   m = " << plaq_result.m_plaquette 
+                      << " at q = (" << plaq_result.q_max[0] << ", " << plaq_result.q_max[1] << ")" << std::endl;
+            std::cout << "  Resonance: <P> = " << plaq_result.P_mean 
+                      << ", strength = " << plaq_result.resonance_strength << std::endl;
+            std::cout << "  Triangle chiral: <χ> = " << plaq_result.chi_mean << std::endl;
             std::cout << "==============================================" << std::endl;
         }
         
