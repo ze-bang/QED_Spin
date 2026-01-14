@@ -120,6 +120,7 @@ struct Cluster {
     std::array<double, 2> a1, a2;  // lattice vectors
     std::array<double, 2> b1, b2;  // reciprocal vectors
     std::vector<std::array<double, 2>> k_points;
+    int n_cells_x = 0, n_cells_y = 0;  // Grid dimensions (e.g., 3x3 or 2x3)
     
     // Derived: bond orientations (0, 1, 2)
     std::map<std::pair<int, int>, int> bond_orientation;
@@ -138,7 +139,7 @@ Cluster load_cluster(const std::string& cluster_dir) {
     for (const auto& suffix : {"_lattice_parameters.dat", "_pbc_lattice_parameters.dat", "_obc_lattice_parameters.dat"}) {
         std::string pattern = cluster_dir + "/*" + suffix;
         // Simple approach: try to open common names
-        for (const auto& prefix : {"kagome_bfg_2x2", "kagome_bfg_3x3", "kagome_bfg_4x4", "kagome_bfg_3x2"}) {
+        for (const auto& prefix : {"kagome_bfg_2x2", "kagome_bfg_3x3", "kagome_bfg_4x4", "kagome_bfg_3x2", "kagome_bfg_2x3", "pyrochlore_super_1x1x1_pbc_kramer"}) {
             std::string test_file = cluster_dir + "/" + prefix + suffix;
             std::ifstream test(test_file);
             if (test.good()) {
@@ -147,6 +148,122 @@ Cluster load_cluster(const std::string& cluster_dir) {
             }
         }
         if (!lattice_file.empty()) break;
+    }
+    
+    // Load lattice parameters (if found)
+    if (!lattice_file.empty()) {
+        std::cout << "Loading lattice parameters from: " << lattice_file << std::endl;
+        std::ifstream lat_in(lattice_file);
+        std::string line;
+        bool reading_unit_vectors = false;
+        bool reading_reciprocal_vectors = false;
+        bool reading_kpoints = false;
+        int vector_count = 0;
+        
+        while (std::getline(lat_in, line)) {
+            if (line.empty() || line[0] == '#') {
+                // Check for section headers
+                if (line.find("# Unit cell lattice vectors") != std::string::npos) {
+                    reading_unit_vectors = true;
+                    reading_reciprocal_vectors = false;
+                    reading_kpoints = false;
+                    vector_count = 0;
+                } else if (line.find("# Reciprocal lattice vectors") != std::string::npos) {
+                    reading_unit_vectors = false;
+                    reading_reciprocal_vectors = true;
+                    reading_kpoints = false;
+                    vector_count = 0;
+                } else if (line.find("# Format: k_index") != std::string::npos || 
+                           line.find("# Allowed momentum points") != std::string::npos) {
+                    reading_unit_vectors = false;
+                    reading_reciprocal_vectors = false;
+                    reading_kpoints = true;
+                } else if (line.find("# Unit cells:") != std::string::npos) {
+                    // Parse grid dimensions: "# Unit cells: 3 x 3" or "# Unit cells: 2 x 3"
+                    std::regex grid_regex(R"(#\s*Unit cells:\s*(\d+)\s*x\s*(\d+))");
+                    std::smatch match;
+                    if (std::regex_search(line, match, grid_regex)) {
+                        cluster.n_cells_x = std::stoi(match[1]);
+                        cluster.n_cells_y = std::stoi(match[2]);
+                    }
+                }
+                continue;
+            }
+            
+            std::istringstream iss(line);
+            if (reading_unit_vectors && vector_count < 2) {
+                int idx;
+                double x, y;
+                if (iss >> idx >> x >> y) {
+                    if (idx == 0) {
+                        cluster.a1 = {x, y};
+                    } else if (idx == 1) {
+                        cluster.a2 = {x, y};
+                    }
+                    vector_count++;
+                }
+            } else if (reading_reciprocal_vectors && vector_count < 2) {
+                int idx;
+                double kx, ky;
+                if (iss >> idx >> kx >> ky) {
+                    if (idx == 0) {
+                        cluster.b1 = {kx, ky};
+                    } else if (idx == 1) {
+                        cluster.b2 = {kx, ky};
+                    }
+                    vector_count++;
+                }
+            } else if (reading_kpoints) {
+                int k_idx, n1, n2;
+                double kx, ky;
+                if (iss >> k_idx >> n1 >> n2 >> kx >> ky) {
+                    cluster.k_points.push_back({kx, ky});
+                }
+            }
+        }
+        
+        std::cout << "  Lattice vectors: a1=(" << cluster.a1[0] << "," << cluster.a1[1] << "), "
+                  << "a2=(" << cluster.a2[0] << "," << cluster.a2[1] << ")" << std::endl;
+        std::cout << "  Reciprocal vectors: b1=(" << cluster.b1[0] << "," << cluster.b1[1] << "), "
+                  << "b2=(" << cluster.b2[0] << "," << cluster.b2[1] << ")" << std::endl;
+        std::cout << "  Read " << cluster.k_points.size() << " k-points from lattice file" << std::endl;
+        
+        // Override with extended grid: k = (n1/dim_x)b1 + (n2/dim_y)b2
+        // Use grid dimensions from file if available
+        if (cluster.n_cells_x > 0 && cluster.n_cells_y > 0) {
+            cluster.k_points.clear();
+            int n_max_x = cluster.n_cells_x + 1;  // Extended range: 0 to n_cells_x
+            int n_max_y = cluster.n_cells_y + 1;  // Extended range: 0 to n_cells_y
+            for (int n1 = 0; n1 < n_max_x; ++n1) {
+                for (int n2 = 0; n2 < n_max_y; ++n2) {
+                    double kx = (static_cast<double>(n1) / cluster.n_cells_x) * cluster.b1[0] + 
+                                (static_cast<double>(n2) / cluster.n_cells_y) * cluster.b2[0];
+                    double ky = (static_cast<double>(n1) / cluster.n_cells_x) * cluster.b1[1] + 
+                                (static_cast<double>(n2) / cluster.n_cells_y) * cluster.b2[1];
+                    cluster.k_points.push_back({kx, ky});
+                }
+            }
+            std::cout << "  Grid dimensions: " << cluster.n_cells_x << "x" << cluster.n_cells_y << std::endl;
+            std::cout << "  Extended to " << cluster.k_points.size() << " k-points: n1=0.." << (n_max_x-1) 
+                      << ", n2=0.." << (n_max_y-1) << std::endl;
+        } else {
+            // Fallback: infer from site count
+            std::cout << "  Warning: Grid dimensions not found in file, using fallback" << std::endl;
+            int n_cells = cluster.n_sites / 3;
+            int dim = static_cast<int>(std::sqrt(n_cells) + 0.5);
+            int n_max = 4;
+            cluster.k_points.clear();
+            for (int n1 = 0; n1 < n_max; ++n1) {
+                for (int n2 = 0; n2 < n_max; ++n2) {
+                    double kx = (static_cast<double>(n1) / dim) * cluster.b1[0] + 
+                                (static_cast<double>(n2) / dim) * cluster.b2[0];
+                    double ky = (static_cast<double>(n1) / dim) * cluster.b1[1] + 
+                                (static_cast<double>(n2) / dim) * cluster.b2[1];
+                    cluster.k_points.push_back({kx, ky});
+                }
+            }
+            std::cout << "  Extended to " << cluster.k_points.size() << " k-points: (n1,n2)/" << dim << " where n1,n2=0.." << (n_max-1) << std::endl;
+        }
     }
     
     // Load positions
@@ -224,27 +341,37 @@ Cluster load_cluster(const std::string& cluster_dir) {
         }
     }
     
-    // Set lattice vectors (kagome)
-    cluster.a1 = {1.0, 0.0};
-    cluster.a2 = {0.5, std::sqrt(3.0) / 2.0};
+    // Fallback: If lattice vectors not loaded, use default kagome values
+    if (cluster.a1[0] == 0.0 && cluster.a1[1] == 0.0) {
+        std::cout << "Warning: Using default kagome lattice vectors (not loaded from file)" << std::endl;
+        cluster.a1 = {1.0, 0.0};
+        cluster.a2 = {0.5, std::sqrt(3.0) / 2.0};
+    }
     
-    // Reciprocal vectors
-    double det = cluster.a1[0] * cluster.a2[1] - cluster.a1[1] * cluster.a2[0];
-    cluster.b1 = {2.0 * PI * cluster.a2[1] / det, -2.0 * PI * cluster.a2[0] / det};
-    cluster.b2 = {-2.0 * PI * cluster.a1[1] / det, 2.0 * PI * cluster.a1[0] / det};
+    // Fallback: If reciprocal vectors not loaded, compute them
+    if (cluster.b1[0] == 0.0 && cluster.b1[1] == 0.0) {
+        std::cout << "Warning: Computing reciprocal vectors (not loaded from file)" << std::endl;
+        double det = cluster.a1[0] * cluster.a2[1] - cluster.a1[1] * cluster.a2[0];
+        cluster.b1 = {2.0 * PI * cluster.a2[1] / det, -2.0 * PI * cluster.a2[0] / det};
+        cluster.b2 = {-2.0 * PI * cluster.a1[1] / det, 2.0 * PI * cluster.a1[0] / det};
+    }
     
-    // Generate k-points (assume square grid based on site count)
-    int n_cells = cluster.n_sites / 3;
-    int dim = static_cast<int>(std::sqrt(n_cells) + 0.5);
-    if (dim * dim != n_cells) dim = n_cells;  // Non-square
-    
-    for (int n1 = 0; n1 < dim; ++n1) {
-        for (int n2 = 0; n2 < dim; ++n2) {
-            double kx = (static_cast<double>(n1) / dim) * cluster.b1[0] + 
-                        (static_cast<double>(n2) / dim) * cluster.b2[0];
-            double ky = (static_cast<double>(n1) / dim) * cluster.b1[1] + 
-                        (static_cast<double>(n2) / dim) * cluster.b2[1];
-            cluster.k_points.push_back({kx, ky});
+    // Fallback: If k-points not loaded, generate them
+    if (cluster.k_points.empty()) {
+        std::cout << "Warning: Generating k-points grid (not loaded from file)" << std::endl;
+        // Assume square grid based on site count
+        int n_cells = cluster.n_sites / 3;
+        int dim = static_cast<int>(std::sqrt(n_cells) + 0.5);
+        if (dim * dim != n_cells) dim = n_cells;  // Non-square
+        
+        for (int n1 = 0; n1 < dim; ++n1) {
+            for (int n2 = 0; n2 < dim; ++n2) {
+                double kx = (static_cast<double>(n1) / dim) * cluster.b1[0] + 
+                            (static_cast<double>(n2) / dim) * cluster.b2[0];
+                double ky = (static_cast<double>(n1) / dim) * cluster.b1[1] + 
+                            (static_cast<double>(n2) / dim) * cluster.b2[1];
+                cluster.k_points.push_back({kx, ky});
+            }
         }
     }
     
