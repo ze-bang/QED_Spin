@@ -29,6 +29,7 @@
 #include <array>
 #include <complex>
 #include <cmath>
+#include <limits>
 #include <string>
 #include <map>
 #include <set>
@@ -3482,7 +3483,7 @@ void save_results(
 // -----------------------------------------------------------------------------
 
 struct OrderParameterResults {
-    double jpm;
+    double jpm = std::numeric_limits<double>::quiet_NaN();  // NaN indicates not processed
     double temperature = 0.0;  // For TPQ mode, T=0 for ground state
     double m_translation;
     double m_nematic;
@@ -3503,6 +3504,8 @@ struct OrderParameterResults {
     double chi_mean;         // Mean triangle chiral
     int n_plaquettes;
     int n_triangles;
+    
+    bool is_valid() const { return !std::isnan(jpm); }
 };
 
 // -----------------------------------------------------------------------------
@@ -3814,7 +3817,7 @@ std::vector<OrderParameterResults> scan_jpm_directories(
     std::vector<int> local_indices;
     
     for (size_t i = 0; i < jpm_dirs.size(); ++i) {
-        if (static_cast<int>(i % mpi_size) == mpi_rank && all_results[i].jpm != 0.0) {
+        if (static_cast<int>(i % mpi_size) == mpi_rank && all_results[i].is_valid()) {
             local_indices.push_back(i);
             local_buffer.push_back(all_results[i].jpm);
             local_buffer.push_back(all_results[i].temperature);
