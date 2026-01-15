@@ -16,6 +16,7 @@
 #include <thread>  // for sleep_for in HDF5 retry
 #include <chrono>  // for milliseconds
 #include <map>     // for batch SSSF results
+#include <unordered_set> // for operator group tracking
 #include <ed/core/construct_ham.h>
 #include <ed/core/hdf5_io.h>
 #include <ed/solvers/TPQ.h>
@@ -260,6 +261,106 @@ void clearStaticSampleGroup(const std::string& h5_path, const std::string& opera
     }
 }
 
+// ============================================================================
+// OPERATOR-SPECIFIC CLEARING MECHANISM
+// ============================================================================
+// Tracks which operator groups have been cleared in the current run.
+// This allows overwriting specific operators (e.g., SmSp_q_Qx0_Qy0_Qz0) while
+// preserving other operators in the same HDF5 file.
+// ============================================================================
+
+// Thread-safe tracking of cleared operator groups for the current run
+// Format: "{h5_path}:{group_path}" -> cleared
+static std::unordered_set<std::string> g_cleared_operator_groups;
+static std::mutex g_cleared_operators_mutex;
+
+/**
+ * @brief Reset the cleared operator tracking (call at start of a new computation run)
+ */
+void resetClearedOperatorTracking() {
+    std::lock_guard<std::mutex> lock(g_cleared_operators_mutex);
+    g_cleared_operator_groups.clear();
+}
+
+/**
+ * @brief Check if operator group should be cleared and mark it as handled
+ * 
+ * This is the first part of the nuanced overwrite behavior:
+ * - Returns true if the group hasn't been processed this run (needs clearing)
+ * - Returns false if already processed (skip clearing)
+ * 
+ * @param h5_path Path to the HDF5 file
+ * @param group_path Path to the operator group (e.g., "/spectral/SmSp_q_Qx0_Qy0_Qz0")
+ * @return true if group should be cleared, false if already handled
+ */
+bool shouldClearOperatorGroup(const std::string& h5_path, const std::string& group_path) {
+    std::string key = h5_path + ":" + group_path;
+    
+    std::lock_guard<std::mutex> lock(g_cleared_operators_mutex);
+    if (g_cleared_operator_groups.count(key) > 0) {
+        // Already handled this run, skip
+        return false;
+    }
+    // Mark as handled (even if it doesn't exist, to avoid repeated checks)
+    g_cleared_operator_groups.insert(key);
+    return true;
+}
+
+/**
+ * @brief Clear a specific operator group in an already-open file
+ * 
+ * This is the internal helper that does the actual clearing.
+ * MUST be called with the file already open and while holding g_hdf5_mutex.
+ * 
+ * @param file The already-open HDF5 file
+ * @param group_path Path to the operator group (e.g., "/spectral/SmSp_q_Qx0_Qy0_Qz0")
+ * @return true if group was cleared, false if it doesn't exist
+ */
+bool clearOperatorGroupInFile(H5::H5File& file, const std::string& group_path) {
+    try {
+        if (file.nameExists(group_path)) {
+            // Clear the operator group to overwrite previous results
+            clearDSSFGroup(file, group_path);
+            return true;
+        }
+    } catch (H5::Exception& e) {
+        std::cerr << "Warning: Failed to clear operator group " << group_path << ": " << e.getCDetailMsg() << std::endl;
+    }
+    return false;
+}
+
+/**
+ * @brief Clear a specific operator group if not already cleared in this run (standalone version)
+ * 
+ * This is the standalone version that opens the file itself.
+ * Use this when NOT already inside a save function.
+ * 
+ * @param h5_path Path to the HDF5 file
+ * @param group_path Path to the operator group (e.g., "/spectral/SmSp_q_Qx0_Qy0_Qz0")
+ * @return true if group was cleared, false if already cleared or doesn't exist
+ */
+bool clearOperatorGroupOnce(const std::string& h5_path, const std::string& group_path) {
+    if (!shouldClearOperatorGroup(h5_path, group_path)) {
+        return false;
+    }
+    
+    // Now clear the group if it exists (outside the tracking mutex, inside HDF5 mutex)
+    std::lock_guard<std::mutex> hdf5_lock(g_hdf5_mutex);
+    
+    try {
+        if (!fs::exists(h5_path)) return false;
+        
+        H5::H5File file = openHDF5WithRetry(h5_path, H5F_ACC_RDWR);
+        bool cleared = clearOperatorGroupInFile(file, group_path);
+        file.close();
+        return cleared;
+    } catch (H5::Exception& e) {
+        std::cerr << "Warning: Failed to clear operator group " << group_path << ": " << e.getCDetailMsg() << std::endl;
+    }
+    
+    return false;
+}
+
 /**
  * @brief Set or update metadata attributes in DSSF HDF5 file
  */
@@ -346,10 +447,11 @@ std::string initPerRankDSSFFile(const std::string& output_dir, int rank,
         // Ensure standard groups exist
         ensureDSSFStandardGroups(file);
         
-        // OVERWRITE BEHAVIOR for SSSF method (same as initDSSFHDF5File)
-        if (method == "sssf") {
-            clearDSSFGroup(file, "/static");
-        }
+        // OVERWRITE BEHAVIOR: Operator-specific clearing
+        // - We NO LONGER clear entire /static or /spectral groups
+        // - Each operator group is cleared on first write (via clearOperatorGroupOnce)
+        // - Reset the operator tracking for this new run
+        resetClearedOperatorTracking();
         
         // Set/update metadata
         setDSSFMetadata(file, num_sites, spin_length, method, operator_type,
@@ -595,13 +697,14 @@ std::string initDSSFHDF5File(const std::string& output_dir,
         // Ensure standard groups exist
         ensureDSSFStandardGroups(file);
         
-        // OVERWRITE BEHAVIOR for methods that use append mode within a run:
-        // - sssf: Uses append mode to accumulate data from multiple betas in the same sample
-        //   To ensure cross-run overwrite, we clear /static/ at initialization
-        // - Other methods (spectral, etc.): Use per-dataset overwrite, no group clearing needed
-        if (method == "sssf") {
-            clearDSSFGroup(file, "/static");
-        }
+        // OVERWRITE BEHAVIOR: Operator-specific clearing
+        // - We NO LONGER clear entire /static or /spectral groups at initialization
+        // - Instead, each operator group is cleared on first write (via clearOperatorGroupOnce)
+        // - This preserves other operators in the file while allowing overwrite of specific ones
+        // - The clearing happens in saveDSSFSpectralToHDF5 and saveDSSFStaticToHDF5
+        
+        // Reset the operator tracking for this new run
+        resetClearedOperatorTracking();
         
         // Set/update metadata (this is idempotent - updates existing attrs)
         setDSSFMetadata(file, num_sites, spin_length, method, operator_type,
@@ -668,6 +771,10 @@ void saveDSSFSpectralToHDF5(
     const std::vector<double>& error_imag,
     double temperature = -1.0
 ) {
+    // Check if we need to clear this operator group (first write in this run)
+    std::string op_path = "/spectral/" + operator_name;
+    bool should_clear = shouldClearOperatorGroup(h5_path, op_path);
+    
     std::lock_guard<std::mutex> lock(g_hdf5_mutex);
     
     try {
@@ -684,8 +791,15 @@ void saveDSSFSpectralToHDF5(
             freq_dataset.close();
         }
         
+        // NUANCED OVERWRITE BEHAVIOR:
+        // - If this is the first write to this operator group in this run, clear it first
+        // - This overwrites previous run's data for THIS operator only
+        // - Other operators in the file are preserved
+        if (should_clear) {
+            clearOperatorGroupInFile(file, op_path);
+        }
+        
         // Create operator group if needed
-        std::string op_path = "/spectral/" + operator_name;
         if (!file.nameExists(op_path)) {
             file.createGroup(op_path);
         }
@@ -755,6 +869,12 @@ void saveDSSFSpectralToHDF5(
  * 
  * @param append If true, append to existing data (for SSSF method which adds one T at a time).
  *               If false (default), overwrite existing data (consistent with saveDSSFSpectralToHDF5).
+ * 
+ * NUANCED OVERWRITE BEHAVIOR:
+ * - On first write to a specific operator (e.g., SmSp_q_Qx0_Qy0_Qz0) in this run,
+ *   the operator group is cleared to overwrite previous run's data
+ * - Subsequent writes to the same operator within this run use append behavior (if append=true)
+ * - Other operators in the file are preserved
  */
 void saveDSSFStaticToHDF5(
     const std::string& h5_path,
@@ -769,14 +889,25 @@ void saveDSSFStaticToHDF5(
     const std::vector<double>& susceptibility_error,
     bool append = false
 ) {
+    // Check if we need to clear this operator group (first write in this run)
+    std::string op_path = "/static/" + operator_name;
+    bool should_clear = shouldClearOperatorGroup(h5_path, op_path);
+    
     std::lock_guard<std::mutex> lock(g_hdf5_mutex);
     
     try {
         // Use retry-based file opening for MPI safety  
         H5::H5File file = openHDF5WithRetry(h5_path, H5F_ACC_RDWR);
         
+        // NUANCED OVERWRITE BEHAVIOR:
+        // - If this is the first write to this operator group in this run, clear it first
+        // - This overwrites previous run's data for THIS operator only
+        // - Other operators in the file are preserved
+        if (should_clear) {
+            clearOperatorGroupInFile(file, op_path);
+        }
+        
         // Create operator group if needed
-        std::string op_path = "/static/" + operator_name;
         if (!file.nameExists(op_path)) {
             file.createGroup(op_path);
         }
