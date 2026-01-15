@@ -362,6 +362,71 @@ bool clearOperatorGroupOnce(const std::string& h5_path, const std::string& group
 }
 
 /**
+ * @brief Check if operator data already exists in the HDF5 file
+ * 
+ * For --skip-existing mode: returns true if the operator group exists and has data.
+ * This allows skipping calculations for operators that were already computed.
+ * 
+ * @param h5_path Path to the HDF5 file
+ * @param operator_name Operator name (e.g., "SmSp_q_Qx0_Qy0_Qz0")
+ * @param method Method type: "spectral", "continued_fraction", "static", "sssf", etc.
+ * @return true if data exists for this operator
+ */
+bool operatorDataExists(const std::string& h5_path, 
+                        const std::string& operator_name,
+                        const std::string& method) {
+    // Check if file exists
+    if (!fs::exists(h5_path)) {
+        return false;
+    }
+    
+    std::lock_guard<std::mutex> lock(g_hdf5_mutex);
+    
+    try {
+        H5::H5File file(h5_path, H5F_ACC_RDONLY);
+        
+        // Determine the group path based on method
+        std::string group_path;
+        if (method == "spectral" || method == "continued_fraction" || method == "ftlm_thermal") {
+            group_path = "/spectral/" + operator_name;
+        } else if (method == "static" || method == "sssf") {
+            group_path = "/static/" + operator_name;
+        } else {
+            // Unknown method - check both
+            if (file.nameExists("/spectral/" + operator_name)) {
+                file.close();
+                return true;
+            }
+            if (file.nameExists("/static/" + operator_name)) {
+                file.close();
+                return true;
+            }
+            file.close();
+            return false;
+        }
+        
+        // Check if the operator group exists
+        if (!file.nameExists(group_path)) {
+            file.close();
+            return false;
+        }
+        
+        // Check if the group has any children (actual data)
+        H5::Group grp = file.openGroup(group_path);
+        hsize_t num_objs = grp.getNumObjs();
+        grp.close();
+        file.close();
+        
+        // Consider data exists if there's at least one child
+        return num_objs > 0;
+        
+    } catch (H5::Exception& e) {
+        // File exists but can't be read - assume no data
+        return false;
+    }
+}
+
+/**
  * @brief Set or update metadata attributes in DSSF HDF5 file
  */
 void setDSSFMetadata(H5::H5File& file,
@@ -1415,10 +1480,11 @@ int main(int argc, char* argv[]) {
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
     MPI_Comm_size(MPI_COMM_WORLD, &size);
     
-    // Pre-process arguments to extract flags (--use_gpu, --help, etc.)
+    // Pre-process arguments to extract flags (--use_gpu, --help, --skip-existing, etc.)
     // These can appear anywhere in the command line
     bool use_gpu = false;
     bool show_help = false;
+    bool skip_existing = false;
     std::vector<char*> positional_args;
     positional_args.push_back(argv[0]);  // Program name is always first
     
@@ -1428,6 +1494,8 @@ int main(int argc, char* argv[]) {
             use_gpu = true;
         } else if (arg == "--help" || arg == "-h") {
             show_help = true;
+        } else if (arg == "--skip-existing" || arg == "--skip" || arg == "--resume") {
+            skip_existing = true;
         } else if (arg.substr(0, 2) != "--") {
             // Not a flag, treat as positional argument
             positional_args.push_back(argv[i]);
@@ -1452,8 +1520,9 @@ int main(int argc, char* argv[]) {
         if (rank == 0) {
             std::cerr << "Usage: " << pos_argv[0] << " <directory> <krylov_dim_or_nmax> <spin_combinations> [options...]" << std::endl;
             std::cerr << "\nFLAGS (can appear anywhere):" << std::endl;
-            std::cerr << "  --use_gpu, --gpu, -g  Enable GPU acceleration (requires CUDA build)" << std::endl;
-            std::cerr << "  --help, -h            Show this help message" << std::endl;
+            std::cerr << "  --use_gpu, --gpu, -g       Enable GPU acceleration (requires CUDA build)" << std::endl;
+            std::cerr << "  --skip-existing, --resume  Skip operators that already have data in HDF5 file" << std::endl;
+            std::cerr << "  --help, -h                 Show this help message" << std::endl;
             std::cerr << "\nNote: num_sites is automatically detected from positions.dat, spin_length is fixed at 0.5" << std::endl;
             std::cerr << "\n" << std::string(80, '=') << std::endl;
             std::cerr << "REQUIRED ARGUMENTS:" << std::endl;
@@ -2080,6 +2149,10 @@ int main(int argc, char* argv[]) {
             momentum_points
         );
         std::cout << "Unified DSSF results will be saved to: " << unified_h5_path << std::endl;
+        
+        if (skip_existing) {
+            std::cout << "Mode: --skip-existing enabled (will skip operators with existing data)" << std::endl;
+        }
         
         if (uses_independent_mode && size > 1) {
             std::cout << "INDEPENDENT mode: Each MPI rank will write to per-rank file, merged at end" << std::endl;
@@ -2893,6 +2966,25 @@ int main(int argc, char* argv[]) {
         
         // STEP 2: Apply method to the constructed operators
         // All methods use unified HDF5 output (dssf_results.h5)
+        
+        // --skip-existing: Check if all operators already have data in HDF5
+        if (skip_existing && !obs_names.empty()) {
+            bool all_exist = true;
+            for (const auto& op_name : obs_names) {
+                if (!operatorDataExists(unified_h5_path, op_name, method)) {
+                    all_exist = false;
+                    break;
+                }
+            }
+            if (all_exist) {
+                if (rank == 0) {
+                    std::cout << "  Skipping (data exists): " << obs_names[0];
+                    if (obs_names.size() > 1) std::cout << " (and " << obs_names.size() - 1 << " more)";
+                    std::cout << std::endl;
+                }
+                return true;  // Skip this task - already computed
+            }
+        }
         
         try {
             if (method == "spectral") {

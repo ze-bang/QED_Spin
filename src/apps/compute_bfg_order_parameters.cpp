@@ -993,19 +993,25 @@ std::map<std::pair<int, int>, double> compute_heisenberg_bond_expectations(
 
 // -----------------------------------------------------------------------------
 // Memory-efficient structure factor computation
-// Computes ⟨ψ|D†(q₁)D(q₂)|ψ⟩ directly without materializing O(Hilbert) vectors
+// Computes ⟨ψ|D†(q)D(q)|ψ⟩ directly without materializing O(Hilbert) vectors
 // This avoids the O(n_threads * n_states) memory explosion
+//
+// Strategy: Use ⟨D†D⟩ = ||D|ψ⟩||² which we compute via:
+//   ||D|ψ⟩||² = Σ_s |[D|ψ⟩]_s|² = Σ_s |Σ_b exp(iq·r_b) [D_b|ψ⟩]_s|²
+// 
+// For each state s, we accumulate contributions from all bonds b where D_b 
+// maps some state s' to s, then square the result.
 // -----------------------------------------------------------------------------
 
 struct DimerSFResult {
-    Complex overlap;      // ⟨D(q₁)ψ|D(q₂)ψ⟩
-    Complex expect_q1;    // ⟨D(q₁)⟩
-    Complex expect_q2;    // ⟨D(q₂)⟩
+    Complex overlap;      // ⟨D(q)ψ|D(q)ψ⟩ = ||D(q)|ψ⟩||²
+    Complex expect_q1;    // ⟨D(q)⟩
+    Complex expect_q2;    // ⟨D(q)⟩ (same as expect_q1 for q1=q2)
 };
 
 // Compute dimer structure factor directly: S_D(q) = ⟨D†(q)D(q)⟩ - |⟨D(q)⟩|²
 // For XY dimer operator D_b = S⁺ᵢS⁻ⱼ + S⁻ᵢS⁺ⱼ
-// This is O(N_bonds * Hilbert) time and O(1) extra memory per thread
+// Complexity: O(N_bonds * Hilbert) time, O(Hilbert) memory for accumulation
 DimerSFResult compute_dimer_sf_direct(
     const std::vector<Complex>& psi,
     const std::vector<std::pair<int, int>>& bonds,
@@ -1022,167 +1028,69 @@ DimerSFResult compute_dimer_sf_direct(
         phases[b] = std::exp(I * phase_arg);
     }
     
-    double overlap_real = 0.0, overlap_imag = 0.0;
+    // Compute D(q)|ψ⟩ using atomic updates (like apply_dimer_fourier but accumulate norm)
+    std::vector<double> result_real(n_states, 0.0);
+    std::vector<double> result_imag(n_states, 0.0);
+    
     double expect_real = 0.0, expect_imag = 0.0;
     
-    // Key insight: ⟨D(q)ψ|D(q)ψ⟩ = Σ_{b,b'} exp(i(q·r_{b'} - q·r_b)) × ⟨ψ|D_b D_{b'}|ψ⟩
-    // where D_b D_{b'} is a 4-spin operator (or 2-spin if b = b')
-    // We compute this by iterating over |ψ⟩ once, collecting all contributions
-    
-    #pragma omp parallel reduction(+:overlap_real, overlap_imag, expect_real, expect_imag)
-    {
-        #pragma omp for schedule(dynamic, 1024)
-        for (uint64_t state = 0; state < n_states; ++state) {
-            Complex coeff = psi[state];
-            double prob = std::norm(coeff);
-            if (prob < 1e-30) continue;
+    #pragma omp parallel for schedule(dynamic, 1024) reduction(+:expect_real, expect_imag)
+    for (uint64_t state = 0; state < n_states; ++state) {
+        Complex coeff = psi[state];
+        if (std::abs(coeff) < 1e-15) continue;
+        
+        for (int b = 0; b < n_bonds; ++b) {
+            int i = bonds[b].first;
+            int j = bonds[b].second;
+            int s_i = get_bit(state, i);
+            int s_j = get_bit(state, j);
+            Complex phase = phases[b];
             
-            // For each pair of bonds (b, b'), compute contribution to ⟨D_b† D_{b'}⟩
-            // D_b = S⁺ᵢS⁻ⱼ + S⁻ᵢS⁺ⱼ (XY dimer)
+            // S⁺ᵢS⁻ⱼ: needs i=DOWN(1), j=UP(0)
+            if (s_i == 1 && s_j == 0) {
+                uint64_t new_state = flip_bit(flip_bit(state, i), j);
+                Complex val = phase * coeff;
+                #pragma omp atomic
+                result_real[new_state] += val.real();
+                #pragma omp atomic
+                result_imag[new_state] += val.imag();
+                
+                // Contribution to expectation: ⟨new_state|D_b|state⟩ * ψ*(new_state) * ψ(state)
+                Complex exp_contrib = std::conj(psi[new_state]) * coeff * phase;
+                expect_real += exp_contrib.real();
+                expect_imag += exp_contrib.imag();
+            }
             
-            for (int b1 = 0; b1 < n_bonds; ++b1) {
-                int i1 = bonds[b1].first, j1 = bonds[b1].second;
-                int si1 = get_bit(state, i1), sj1 = get_bit(state, j1);
-                Complex phase1_conj = std::conj(phases[b1]);
+            // S⁻ᵢS⁺ⱼ: needs i=UP(0), j=DOWN(1)
+            if (s_i == 0 && s_j == 1) {
+                uint64_t new_state = flip_bit(flip_bit(state, i), j);
+                Complex val = phase * coeff;
+                #pragma omp atomic
+                result_real[new_state] += val.real();
+                #pragma omp atomic
+                result_imag[new_state] += val.imag();
                 
-                for (int b2 = 0; b2 < n_bonds; ++b2) {
-                    int i2 = bonds[b2].first, j2 = bonds[b2].second;
-                    int si2 = get_bit(state, i2), sj2 = get_bit(state, j2);
-                    Complex phase2 = phases[b2];
-                    Complex phase_factor = phase1_conj * phase2;
-                    
-                    // Compute ⟨ψ|D_b1 D_b2|ψ⟩ contribution from |state⟩
-                    // D_b1 D_b2 has 4 terms each (S⁺S⁻ or S⁻S⁺) × (S⁺S⁻ or S⁻S⁺)
-                    // Need to check if b1 and b2 share sites (special handling)
-                    
-                    bool share = (i1 == i2 || i1 == j2 || j1 == i2 || j1 == j2);
-                    
-                    if (!share) {
-                        // Independent bonds: 4 terms
-                        // Term 1: (S⁺_{i1}S⁻_{j1})(S⁺_{i2}S⁻_{j2})
-                        if (sj1 == 0 && si1 == 1 && sj2 == 0 && si2 == 1) {
-                            uint64_t ns = flip_bit(flip_bit(flip_bit(flip_bit(state, i1), j1), i2), j2);
-                            Complex c = std::conj(psi[ns]) * coeff * phase_factor;
-                            overlap_real += c.real(); overlap_imag += c.imag();
-                        }
-                        // Term 2: (S⁺_{i1}S⁻_{j1})(S⁻_{i2}S⁺_{j2})
-                        if (sj1 == 0 && si1 == 1 && si2 == 0 && sj2 == 1) {
-                            uint64_t ns = flip_bit(flip_bit(flip_bit(flip_bit(state, i1), j1), i2), j2);
-                            Complex c = std::conj(psi[ns]) * coeff * phase_factor;
-                            overlap_real += c.real(); overlap_imag += c.imag();
-                        }
-                        // Term 3: (S⁻_{i1}S⁺_{j1})(S⁺_{i2}S⁻_{j2})
-                        if (si1 == 0 && sj1 == 1 && sj2 == 0 && si2 == 1) {
-                            uint64_t ns = flip_bit(flip_bit(flip_bit(flip_bit(state, i1), j1), i2), j2);
-                            Complex c = std::conj(psi[ns]) * coeff * phase_factor;
-                            overlap_real += c.real(); overlap_imag += c.imag();
-                        }
-                        // Term 4: (S⁻_{i1}S⁺_{j1})(S⁻_{i2}S⁺_{j2})
-                        if (si1 == 0 && sj1 == 1 && si2 == 0 && sj2 == 1) {
-                            uint64_t ns = flip_bit(flip_bit(flip_bit(flip_bit(state, i1), j1), i2), j2);
-                            Complex c = std::conj(psi[ns]) * coeff * phase_factor;
-                            overlap_real += c.real(); overlap_imag += c.imag();
-                        }
-                    } else if (b1 == b2) {
-                        // Same bond: D_b D_b = (S⁺S⁻ + S⁻S⁺)² 
-                        // = S⁺S⁻S⁺S⁻ + S⁺S⁻S⁻S⁺ + S⁻S⁺S⁺S⁻ + S⁻S⁺S⁻S⁺
-                        // Acting on same sites, this simplifies based on current state
-                        // Diagonal contributions (same in/out state)
-                        if ((si1 == 1 && sj1 == 0) || (si1 == 0 && sj1 == 1)) {
-                            // D_b|state⟩ = |flipped⟩, D_b|flipped⟩ = |state⟩
-                            // So D_b D_b|state⟩ = |state⟩
-                            Complex c = prob * phase_factor;
-                            overlap_real += c.real(); overlap_imag += c.imag();
-                        }
-                    } else {
-                        // Overlapping but different bonds - careful handling
-                        // This is more complex; for now use the general approach
-                        // by checking each of the 4 operator combinations
-                        std::array<int, 4> sites = {i1, j1, i2, j2};
-                        std::set<int> unique_sites(sites.begin(), sites.end());
-                        
-                        // Build the 4 terms explicitly
-                        // Term 1: S⁺_{i1}S⁻_{j1}S⁺_{i2}S⁻_{j2}
-                        {
-                            uint64_t s = state;
-                            bool valid = true;
-                            // Apply operators right to left: S⁻_{j2}, S⁺_{i2}, S⁻_{j1}, S⁺_{i1}
-                            if (get_bit(s, j2) == 0) { s = flip_bit(s, j2); } else valid = false;
-                            if (valid && get_bit(s, i2) == 1) { s = flip_bit(s, i2); } else valid = false;
-                            if (valid && get_bit(s, j1) == 0) { s = flip_bit(s, j1); } else valid = false;
-                            if (valid && get_bit(s, i1) == 1) { s = flip_bit(s, i1); } else valid = false;
-                            if (valid) {
-                                Complex c = std::conj(psi[s]) * coeff * phase_factor;
-                                overlap_real += c.real(); overlap_imag += c.imag();
-                            }
-                        }
-                        // Term 2: S⁺_{i1}S⁻_{j1}S⁻_{i2}S⁺_{j2}
-                        {
-                            uint64_t s = state;
-                            bool valid = true;
-                            if (get_bit(s, j2) == 1) { s = flip_bit(s, j2); } else valid = false;
-                            if (valid && get_bit(s, i2) == 0) { s = flip_bit(s, i2); } else valid = false;
-                            if (valid && get_bit(s, j1) == 0) { s = flip_bit(s, j1); } else valid = false;
-                            if (valid && get_bit(s, i1) == 1) { s = flip_bit(s, i1); } else valid = false;
-                            if (valid) {
-                                Complex c = std::conj(psi[s]) * coeff * phase_factor;
-                                overlap_real += c.real(); overlap_imag += c.imag();
-                            }
-                        }
-                        // Term 3: S⁻_{i1}S⁺_{j1}S⁺_{i2}S⁻_{j2}
-                        {
-                            uint64_t s = state;
-                            bool valid = true;
-                            if (get_bit(s, j2) == 0) { s = flip_bit(s, j2); } else valid = false;
-                            if (valid && get_bit(s, i2) == 1) { s = flip_bit(s, i2); } else valid = false;
-                            if (valid && get_bit(s, j1) == 1) { s = flip_bit(s, j1); } else valid = false;
-                            if (valid && get_bit(s, i1) == 0) { s = flip_bit(s, i1); } else valid = false;
-                            if (valid) {
-                                Complex c = std::conj(psi[s]) * coeff * phase_factor;
-                                overlap_real += c.real(); overlap_imag += c.imag();
-                            }
-                        }
-                        // Term 4: S⁻_{i1}S⁺_{j1}S⁻_{i2}S⁺_{j2}
-                        {
-                            uint64_t s = state;
-                            bool valid = true;
-                            if (get_bit(s, j2) == 1) { s = flip_bit(s, j2); } else valid = false;
-                            if (valid && get_bit(s, i2) == 0) { s = flip_bit(s, i2); } else valid = false;
-                            if (valid && get_bit(s, j1) == 1) { s = flip_bit(s, j1); } else valid = false;
-                            if (valid && get_bit(s, i1) == 0) { s = flip_bit(s, i1); } else valid = false;
-                            if (valid) {
-                                Complex c = std::conj(psi[s]) * coeff * phase_factor;
-                                overlap_real += c.real(); overlap_imag += c.imag();
-                            }
-                        }
-                    }
-                }
-                
-                // Expectation value ⟨D(q)⟩: diagonal terms only from D_b|state⟩ → flipped
-                // D_b|state⟩ = |new_state⟩ iff state has appropriate spins
-                if (sj1 == 0 && si1 == 1) {
-                    // S⁺_{i1}S⁻_{j1} term
-                    uint64_t ns = flip_bit(flip_bit(state, i1), j1);
-                    Complex c = std::conj(psi[ns]) * coeff * phases[b1];
-                    expect_real += c.real(); expect_imag += c.imag();
-                }
-                if (si1 == 0 && sj1 == 1) {
-                    // S⁻_{i1}S⁺_{j1} term
-                    uint64_t ns = flip_bit(flip_bit(state, i1), j1);
-                    Complex c = std::conj(psi[ns]) * coeff * phases[b1];
-                    expect_real += c.real(); expect_imag += c.imag();
-                }
+                Complex exp_contrib = std::conj(psi[new_state]) * coeff * phase;
+                expect_real += exp_contrib.real();
+                expect_imag += exp_contrib.imag();
             }
         }
     }
     
-    return {Complex(overlap_real, overlap_imag), 
-            Complex(expect_real, expect_imag), 
-            Complex(expect_real, expect_imag)};  // q1 = q2 case
+    // Compute ||D(q)|ψ⟩||² = Σ_s |result_s|²
+    double overlap_val = 0.0;
+    #pragma omp parallel for reduction(+:overlap_val) schedule(static)
+    for (uint64_t s = 0; s < n_states; ++s) {
+        overlap_val += result_real[s] * result_real[s] + result_imag[s] * result_imag[s];
+    }
+    
+    Complex expect(expect_real, expect_imag);
+    return {Complex(overlap_val, 0.0), expect, expect};
 }
 
 // Memory-efficient Heisenberg dimer structure factor
 // D_b = S_i·S_j = SzSz + (1/2)(S⁺S⁻ + S⁻S⁺)
+// Uses the same strategy: compute D(q)|ψ⟩ with atomics, then ||D(q)|ψ⟩||²
 DimerSFResult compute_heisenberg_sf_direct(
     const std::vector<Complex>& psi,
     const std::vector<std::pair<int, int>>& bonds,
@@ -1198,129 +1106,79 @@ DimerSFResult compute_heisenberg_sf_direct(
         phases[b] = std::exp(I * phase_arg);
     }
     
-    double overlap_real = 0.0, overlap_imag = 0.0;
+    // Compute D(q)|ψ⟩ using atomic updates
+    // D_b = SzSz + 0.5*(S⁺S⁻ + S⁻S⁺)
+    std::vector<double> result_real(n_states, 0.0);
+    std::vector<double> result_imag(n_states, 0.0);
+    
     double expect_real = 0.0, expect_imag = 0.0;
     
-    #pragma omp parallel reduction(+:overlap_real, overlap_imag, expect_real, expect_imag)
-    {
-        #pragma omp for schedule(dynamic, 1024)
-        for (uint64_t state = 0; state < n_states; ++state) {
-            Complex coeff = psi[state];
-            double prob = std::norm(coeff);
-            if (prob < 1e-30) continue;
+    #pragma omp parallel for schedule(dynamic, 1024) reduction(+:expect_real, expect_imag)
+    for (uint64_t state = 0; state < n_states; ++state) {
+        Complex coeff = psi[state];
+        if (std::abs(coeff) < 1e-15) continue;
+        
+        for (int b = 0; b < n_bonds; ++b) {
+            int i = bonds[b].first;
+            int j = bonds[b].second;
+            int s_i = get_bit(state, i);
+            int s_j = get_bit(state, j);
+            Complex phase = phases[b];
             
-            for (int b1 = 0; b1 < n_bonds; ++b1) {
-                int i1 = bonds[b1].first, j1 = bonds[b1].second;
-                double sz_i1 = get_bit(state, i1) ? -0.5 : 0.5;
-                double sz_j1 = get_bit(state, j1) ? -0.5 : 0.5;
-                double szsz1 = sz_i1 * sz_j1;
-                Complex phase1_conj = std::conj(phases[b1]);
+            // SzSz part (diagonal): contributes to result[state]
+            double sz_i = s_i ? -0.5 : 0.5;
+            double sz_j = s_j ? -0.5 : 0.5;
+            Complex szsz_contrib = phase * coeff * sz_i * sz_j;
+            #pragma omp atomic
+            result_real[state] += szsz_contrib.real();
+            #pragma omp atomic
+            result_imag[state] += szsz_contrib.imag();
+            
+            // SzSz expectation contribution
+            Complex exp_szsz = std::conj(psi[state]) * coeff * phase * sz_i * sz_j;
+            expect_real += exp_szsz.real();
+            expect_imag += exp_szsz.imag();
+            
+            // XY part (off-diagonal with factor 0.5)
+            // S⁺ᵢS⁻ⱼ: needs i=DOWN(1), j=UP(0)
+            if (s_i == 1 && s_j == 0) {
+                uint64_t new_state = flip_bit(flip_bit(state, i), j);
+                Complex val = phase * coeff * 0.5;
+                #pragma omp atomic
+                result_real[new_state] += val.real();
+                #pragma omp atomic
+                result_imag[new_state] += val.imag();
                 
-                // Expectation: ⟨D(q)⟩ diagonal part (SzSz)
-                Complex exp_contrib = phases[b1] * szsz1 * prob;
+                Complex exp_contrib = std::conj(psi[new_state]) * coeff * phase * 0.5;
                 expect_real += exp_contrib.real();
                 expect_imag += exp_contrib.imag();
+            }
+            
+            // S⁻ᵢS⁺ⱼ: needs i=UP(0), j=DOWN(1)
+            if (s_i == 0 && s_j == 1) {
+                uint64_t new_state = flip_bit(flip_bit(state, i), j);
+                Complex val = phase * coeff * 0.5;
+                #pragma omp atomic
+                result_real[new_state] += val.real();
+                #pragma omp atomic
+                result_imag[new_state] += val.imag();
                 
-                // XY part of expectation
-                int si1 = get_bit(state, i1), sj1 = get_bit(state, j1);
-                if (sj1 == 0 && si1 == 1) {
-                    uint64_t ns = flip_bit(flip_bit(state, i1), j1);
-                    Complex c = std::conj(psi[ns]) * coeff * phases[b1] * 0.5;
-                    expect_real += c.real(); expect_imag += c.imag();
-                }
-                if (si1 == 0 && sj1 == 1) {
-                    uint64_t ns = flip_bit(flip_bit(state, i1), j1);
-                    Complex c = std::conj(psi[ns]) * coeff * phases[b1] * 0.5;
-                    expect_real += c.real(); expect_imag += c.imag();
-                }
-                
-                for (int b2 = 0; b2 < n_bonds; ++b2) {
-                    int i2 = bonds[b2].first, j2 = bonds[b2].second;
-                    double sz_i2 = get_bit(state, i2) ? -0.5 : 0.5;
-                    double sz_j2 = get_bit(state, j2) ? -0.5 : 0.5;
-                    double szsz2 = sz_i2 * sz_j2;
-                    Complex phase2 = phases[b2];
-                    Complex phase_factor = phase1_conj * phase2;
-                    
-                    // SzSz × SzSz diagonal contribution
-                    Complex diag_contrib = phase_factor * szsz1 * szsz2 * prob;
-                    overlap_real += diag_contrib.real();
-                    overlap_imag += diag_contrib.imag();
-                    
-                    // Mixed and XY×XY terms need more careful handling
-                    // For simplicity, compute key terms
-                    bool share = (i1 == i2 || i1 == j2 || j1 == i2 || j1 == j2);
-                    int si2 = get_bit(state, i2), sj2 = get_bit(state, j2);
-                    
-                    if (!share) {
-                        // SzSz × XY terms (where XY on b2)
-                        if (sj2 == 0 && si2 == 1) {
-                            uint64_t ns = flip_bit(flip_bit(state, i2), j2);
-                            Complex c = std::conj(psi[ns]) * coeff * phase_factor * szsz1 * 0.5;
-                            overlap_real += c.real(); overlap_imag += c.imag();
-                        }
-                        if (si2 == 0 && sj2 == 1) {
-                            uint64_t ns = flip_bit(flip_bit(state, i2), j2);
-                            Complex c = std::conj(psi[ns]) * coeff * phase_factor * szsz1 * 0.5;
-                            overlap_real += c.real(); overlap_imag += c.imag();
-                        }
-                        
-                        // XY × SzSz terms (where XY on b1)
-                        if (sj1 == 0 && si1 == 1) {
-                            uint64_t ns = flip_bit(flip_bit(state, i1), j1);
-                            double sz_ns_i2 = get_bit(ns, i2) ? -0.5 : 0.5;
-                            double sz_ns_j2 = get_bit(ns, j2) ? -0.5 : 0.5;
-                            Complex c = std::conj(psi[ns]) * coeff * phase_factor * sz_ns_i2 * sz_ns_j2 * 0.5;
-                            overlap_real += c.real(); overlap_imag += c.imag();
-                        }
-                        if (si1 == 0 && sj1 == 1) {
-                            uint64_t ns = flip_bit(flip_bit(state, i1), j1);
-                            double sz_ns_i2 = get_bit(ns, i2) ? -0.5 : 0.5;
-                            double sz_ns_j2 = get_bit(ns, j2) ? -0.5 : 0.5;
-                            Complex c = std::conj(psi[ns]) * coeff * phase_factor * sz_ns_i2 * sz_ns_j2 * 0.5;
-                            overlap_real += c.real(); overlap_imag += c.imag();
-                        }
-                        
-                        // XY × XY terms (4 combinations)
-                        // (S⁺S⁻)_{b1} × (S⁺S⁻)_{b2}
-                        if (sj1 == 0 && si1 == 1 && sj2 == 0 && si2 == 1) {
-                            uint64_t ns = flip_bit(flip_bit(flip_bit(flip_bit(state, i1), j1), i2), j2);
-                            Complex c = std::conj(psi[ns]) * coeff * phase_factor * 0.25;
-                            overlap_real += c.real(); overlap_imag += c.imag();
-                        }
-                        if (sj1 == 0 && si1 == 1 && si2 == 0 && sj2 == 1) {
-                            uint64_t ns = flip_bit(flip_bit(flip_bit(flip_bit(state, i1), j1), i2), j2);
-                            Complex c = std::conj(psi[ns]) * coeff * phase_factor * 0.25;
-                            overlap_real += c.real(); overlap_imag += c.imag();
-                        }
-                        if (si1 == 0 && sj1 == 1 && sj2 == 0 && si2 == 1) {
-                            uint64_t ns = flip_bit(flip_bit(flip_bit(flip_bit(state, i1), j1), i2), j2);
-                            Complex c = std::conj(psi[ns]) * coeff * phase_factor * 0.25;
-                            overlap_real += c.real(); overlap_imag += c.imag();
-                        }
-                        if (si1 == 0 && sj1 == 1 && si2 == 0 && sj2 == 1) {
-                            uint64_t ns = flip_bit(flip_bit(flip_bit(flip_bit(state, i1), j1), i2), j2);
-                            Complex c = std::conj(psi[ns]) * coeff * phase_factor * 0.25;
-                            overlap_real += c.real(); overlap_imag += c.imag();
-                        }
-                    } else if (b1 == b2) {
-                        // Same bond: D_b² terms
-                        // XY part: already diagonal if flippable
-                        if ((si1 == 1 && sj1 == 0) || (si1 == 0 && sj1 == 1)) {
-                            Complex c = prob * phase_factor * 0.25;  // (1/2)² × 1
-                            overlap_real += c.real(); overlap_imag += c.imag();
-                        }
-                        // Cross SzSz × XY terms average out for same bond
-                    }
-                    // Overlapping different bonds: more complex, skip for now
-                }
+                Complex exp_contrib = std::conj(psi[new_state]) * coeff * phase * 0.5;
+                expect_real += exp_contrib.real();
+                expect_imag += exp_contrib.imag();
             }
         }
     }
     
-    return {Complex(overlap_real, overlap_imag),
-            Complex(expect_real, expect_imag),
-            Complex(expect_real, expect_imag)};
+    // Compute ||D(q)|ψ⟩||² = Σ_s |result_s|²
+    double overlap_val = 0.0;
+    #pragma omp parallel for reduction(+:overlap_val) schedule(static)
+    for (uint64_t s = 0; s < n_states; ++s) {
+        overlap_val += result_real[s] * result_real[s] + result_imag[s] * result_imag[s];
+    }
+    
+    Complex expect(expect_real, expect_imag);
+    return {Complex(overlap_val, 0.0), expect, expect};
 }
 
 // Flag to enable memory-efficient mode (controlled by system memory check)
@@ -1411,7 +1269,8 @@ std::vector<Complex> apply_dimer_fourier(
             }
         }
         
-        // Combine real and imaginary parts
+        // Combine real and imaginary parts (parallelized)
+        #pragma omp parallel for schedule(static)
         for (uint64_t s = 0; s < n_states; ++s) {
             result[s] = Complex(result_real[s], result_imag[s]);
         }
@@ -1540,6 +1399,8 @@ std::pair<std::vector<Complex>, Complex> apply_heisenberg_dimer_fourier(
             }
         }
         
+        // Combine real and imaginary parts (parallelized)
+        #pragma omp parallel for schedule(static)
         for (uint64_t s = 0; s < n_states; ++s) {
             result[s] = Complex(result_real[s], result_imag[s]);
         }
@@ -1681,6 +1542,8 @@ std::vector<Complex> apply_bowtie_fourier(
             }
         }
         
+        // Combine real and imaginary parts (parallelized)
+        #pragma omp parallel for schedule(static)
         for (uint64_t s = 0; s < n_states; ++s) {
             result[s] = Complex(result_real[s], result_imag[s]);
         }
