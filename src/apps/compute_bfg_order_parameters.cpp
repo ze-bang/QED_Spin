@@ -628,6 +628,102 @@ std::vector<Complex> load_wavefunction(const std::string& filename) {
 }
 
 // -----------------------------------------------------------------------------
+// Load ALL TPQ states from HDF5 (all temperatures/betas)
+// Returns vector of (wavefunction, temperature, beta) tuples sorted by temperature (ascending)
+// -----------------------------------------------------------------------------
+
+struct TPQState {
+    std::vector<Complex> psi;
+    double temperature;
+    double beta;
+};
+
+std::vector<TPQState> load_all_tpq_states(const std::string& filename, int sample_idx = 0) {
+    std::vector<TPQState> states;
+    
+    try {
+        H5::H5File file(filename, H5F_ACC_RDONLY);
+        
+        // Navigate to TPQ samples
+        std::string sample_path = "tpq/samples/sample_" + std::to_string(sample_idx) + "/states";
+        H5::Group states_group;
+        
+        try {
+            states_group = file.openGroup(sample_path);
+        } catch (...) {
+            throw std::runtime_error("TPQ states not found at: " + sample_path);
+        }
+        
+        // Find all beta_* datasets
+        std::vector<std::pair<std::string, double>> beta_datasets;
+        hsize_t num_objs = states_group.getNumObjs();
+        
+        for (hsize_t i = 0; i < num_objs; ++i) {
+            std::string name = states_group.getObjnameByIdx(i);
+            if (name.substr(0, 5) == "beta_") {
+                try {
+                    double beta = std::stod(name.substr(5));
+                    beta_datasets.push_back({name, beta});
+                } catch (...) {
+                    continue;
+                }
+            }
+        }
+        
+        if (beta_datasets.empty()) {
+            throw std::runtime_error("No beta_* states found in TPQ data");
+        }
+        
+        // Sort by beta (ascending = temperature descending)
+        std::sort(beta_datasets.begin(), beta_datasets.end(), 
+                  [](const auto& a, const auto& b) { return a.second < b.second; });
+        
+        std::cout << "Loading " << beta_datasets.size() << " TPQ states from sample " 
+                  << sample_idx << "..." << std::endl;
+        
+        // Create complex type for reading
+        H5::CompType complex_type(sizeof(Complex));
+        complex_type.insertMember("real", 0, H5::PredType::NATIVE_DOUBLE);
+        complex_type.insertMember("imag", sizeof(double), H5::PredType::NATIVE_DOUBLE);
+        
+        for (const auto& [name, beta] : beta_datasets) {
+            std::string dataset_path = sample_path + "/" + name;
+            H5::DataSet dataset = file.openDataSet(dataset_path);
+            
+            H5::DataSpace dataspace = dataset.getSpace();
+            int rank = dataspace.getSimpleExtentNdims();
+            std::vector<hsize_t> dims(rank);
+            dataspace.getSimpleExtentDims(dims.data());
+            
+            hsize_t total_size = 1;
+            for (int i = 0; i < rank; ++i) {
+                total_size *= dims[i];
+            }
+            
+            TPQState state;
+            state.beta = beta;
+            state.temperature = 1.0 / beta;
+            state.psi.resize(total_size);
+            dataset.read(state.psi.data(), complex_type);
+            
+            states.push_back(std::move(state));
+        }
+        
+        // Sort by temperature (ascending = low T to high T)
+        std::sort(states.begin(), states.end(),
+                  [](const TPQState& a, const TPQState& b) { return a.temperature < b.temperature; });
+        
+        std::cout << "Loaded " << states.size() << " TPQ states, T range: [" 
+                  << states.front().temperature << ", " << states.back().temperature << "]" << std::endl;
+        
+        return states;
+        
+    } catch (H5::Exception& e) {
+        throw std::runtime_error("HDF5 error loading TPQ: " + std::string(e.getCDetailMsg()));
+    }
+}
+
+// -----------------------------------------------------------------------------
 // Load TPQ state from HDF5 (finds lowest temperature = highest beta)
 // -----------------------------------------------------------------------------
 
@@ -752,6 +848,58 @@ std::vector<std::vector<Complex>> compute_smsp_correlations(
                             local_corr[i][j] += std::conj(psi[new_state]) * coeff;
                         }
                     }
+                }
+            }
+        }
+        
+        // Reduce
+        #pragma omp critical
+        {
+            for (int i = 0; i < n_sites; ++i) {
+                for (int j = 0; j < n_sites; ++j) {
+                    corr[i][j] += local_corr[i][j];
+                }
+            }
+        }
+    }
+    
+    auto end = std::chrono::high_resolution_clock::now();
+    auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
+    std::cout << " done (" << duration.count() << " ms)" << std::endl;
+    
+    return corr;
+}
+
+// -----------------------------------------------------------------------------
+// Compute S^z_i S^z_j correlation matrix (site-to-site, not just bonds)
+// This is needed for the full spin structure factor
+// -----------------------------------------------------------------------------
+
+std::vector<std::vector<double>> compute_szsz_correlations(
+    const std::vector<Complex>& psi, 
+    int n_sites
+) {
+    uint64_t n_states = psi.size();
+    std::vector<std::vector<double>> corr(n_sites, std::vector<double>(n_sites, 0.0));
+    
+    std::cout << "Computing S^z S^z correlations..." << std::flush;
+    auto start = std::chrono::high_resolution_clock::now();
+    
+    #pragma omp parallel
+    {
+        // Thread-local storage
+        std::vector<std::vector<double>> local_corr(n_sites, std::vector<double>(n_sites, 0.0));
+        
+        #pragma omp for schedule(dynamic, 1024)
+        for (uint64_t state = 0; state < n_states; ++state) {
+            double prob = std::norm(psi[state]);
+            if (prob < 1e-30) continue;
+            
+            for (int i = 0; i < n_sites; ++i) {
+                double sz_i = sz_value(state, i);  // ±0.5
+                for (int j = 0; j < n_sites; ++j) {
+                    double sz_j = sz_value(state, j);
+                    local_corr[i][j] += prob * sz_i * sz_j;
                 }
             }
         }
@@ -1803,10 +1951,16 @@ double compute_heisenberg_dimer_dimer_correlation(
 
 // -----------------------------------------------------------------------------
 // Compute spin structure factor S(q)
+// Full Heisenberg: S(q) = Σ_ij e^(iq·r_ij) ⟨S_i · S_j⟩
+// where S_i · S_j = S^z_i S^z_j + (1/2)(S^+_i S^-_j + S^-_i S^+_j)
+//                 = S^z_i S^z_j + (1/2)(S^-_i S^+_j + S^+_i S^-_j)  [using S^-S^+ = (S^+S^-)^†]
+// Note: ⟨S^+_i S^-_j⟩ = ⟨S^-_j S^+_i⟩* so we compute from smsp_corr[j][i]*
 // -----------------------------------------------------------------------------
 
 struct StructureFactorResult {
-    std::vector<Complex> s_q;  // S(q) at each k-point
+    std::vector<Complex> s_q;       // Full S(q) = SzSz + (1/2)(S+S- + S-S+) at each k-point
+    std::vector<Complex> s_q_smsp;  // S^-S^+ only component
+    std::vector<Complex> s_q_szsz;  // S^zS^z only component
     int q_max_idx;
     Complex s_q_max;
     std::array<double, 2> q_max;
@@ -1815,6 +1969,7 @@ struct StructureFactorResult {
 
 StructureFactorResult compute_spin_structure_factor(
     const std::vector<std::vector<Complex>>& smsp_corr,
+    const std::vector<std::vector<double>>& szsz_corr,
     const Cluster& cluster
 ) {
     StructureFactorResult result;
@@ -1822,26 +1977,43 @@ StructureFactorResult compute_spin_structure_factor(
     int n_sites = cluster.n_sites;
     
     result.s_q.resize(n_k, 0.0);
+    result.s_q_smsp.resize(n_k, 0.0);
+    result.s_q_szsz.resize(n_k, 0.0);
     
-    std::cout << "Computing S(q) at " << n_k << " k-points..." << std::flush;
+    std::cout << "Computing S(q) at " << n_k << " k-points (full Heisenberg)..." << std::flush;
     auto start = std::chrono::high_resolution_clock::now();
     
     #pragma omp parallel for
     for (int ik = 0; ik < n_k; ++ik) {
         const auto& q = cluster.k_points[ik];
-        Complex s_q = 0.0;
+        Complex s_q_smsp = 0.0;
+        double s_q_szsz = 0.0;
         
         for (int i = 0; i < n_sites; ++i) {
             for (int j = 0; j < n_sites; ++j) {
-                // S(q) = (1/N) Σᵢⱼ ⟨S⁻ᵢ S⁺ⱼ⟩ e^(iq·(Rⱼ-Rᵢ))
-                // Matches TPQ_DSSF "0,0": ⟨(S⁺(q))† S⁺(q)⟩ = ⟨S⁻(-q) S⁺(q)⟩
                 // Use minimum-image displacement for PBC-correct phases
                 auto dr = cluster.minimum_image_displacement(i, j);
                 double phase_arg = q[0] * dr[0] + q[1] * dr[1];
-                s_q += smsp_corr[i][j] * std::exp(I * phase_arg);
+                Complex phase = std::exp(I * phase_arg);
+                
+                // S^-_i S^+_j contribution
+                s_q_smsp += smsp_corr[i][j] * phase;
+                
+                // S^z_i S^z_j contribution
+                s_q_szsz += szsz_corr[i][j] * std::real(phase);
             }
         }
-        result.s_q[ik] = s_q / static_cast<double>(n_sites);
+        
+        // Full S(q) = SzSz + (1/2)(S-S+ + S+S-)
+        // Note: ⟨S^+_i S^-_j⟩ = ⟨S^-_j S^+_i⟩* = smsp_corr[j][i]*
+        // But for structure factor with e^(iq·r_ij), this contributes smsp_corr[j][i]* · e^(iq·r_ij)
+        // The sum over (i,j) with smsp_corr[j][i]* e^(iq·r_ij) equals conj(Σ smsp_corr[j][i] e^(-iq·r_ij))
+        // = conj(s_q_smsp) for real lattices with inversion symmetry
+        // So XY contribution = (1/2)(s_q_smsp + conj(s_q_smsp)) = real(s_q_smsp)
+        // Full S(q) = SzSz + real(S-S+) which is real
+        result.s_q_smsp[ik] = s_q_smsp / static_cast<double>(n_sites);
+        result.s_q_szsz[ik] = s_q_szsz / static_cast<double>(n_sites);
+        result.s_q[ik] = result.s_q_szsz[ik] + std::real(result.s_q_smsp[ik]);
     }
     
     // Find maximum
@@ -2912,17 +3084,29 @@ PlaquetteResult compute_plaquette_order(
 
 // -----------------------------------------------------------------------------
 // Compute 2D S(q) grid for visualization
+// Returns: {full S(q), S-S+ component, SzSz component}
+// Full S(q) = SzSz + real(S-S+) for Heisenberg
 // -----------------------------------------------------------------------------
 
-std::vector<std::vector<Complex>> compute_sq_2d_grid(
+struct Sq2DGridResult {
+    std::vector<std::vector<Complex>> s_q_2d;       // Full Heisenberg S(q)
+    std::vector<std::vector<Complex>> s_q_smsp_2d;  // S^-S^+ component only
+    std::vector<std::vector<double>> s_q_szsz_2d;   // S^zS^z component only
+};
+
+Sq2DGridResult compute_sq_2d_grid(
     const std::vector<std::vector<Complex>>& smsp_corr,
+    const std::vector<std::vector<double>>& szsz_corr,
     const Cluster& cluster,
     int n_q_grid = 50
 ) {
     int n_sites = cluster.n_sites;
-    std::vector<std::vector<Complex>> s_q_2d(n_q_grid, std::vector<Complex>(n_q_grid, 0.0));
+    Sq2DGridResult result;
+    result.s_q_2d.resize(n_q_grid, std::vector<Complex>(n_q_grid, 0.0));
+    result.s_q_smsp_2d.resize(n_q_grid, std::vector<Complex>(n_q_grid, 0.0));
+    result.s_q_szsz_2d.resize(n_q_grid, std::vector<double>(n_q_grid, 0.0));
     
-    std::cout << "Computing S(q) on " << n_q_grid << "x" << n_q_grid << " grid..." << std::flush;
+    std::cout << "Computing S(q) on " << n_q_grid << "x" << n_q_grid << " grid (full Heisenberg)..." << std::flush;
     auto start = std::chrono::high_resolution_clock::now();
     
     #pragma omp parallel for collapse(2)
@@ -2933,18 +3117,26 @@ std::vector<std::vector<Complex>> compute_sq_2d_grid(
             double qx = q1 * cluster.b1[0] + q2 * cluster.b2[0];
             double qy = q1 * cluster.b1[1] + q2 * cluster.b2[1];
             
-            Complex s_q = 0.0;
+            Complex s_q_smsp = 0.0;
+            double s_q_szsz = 0.0;
             for (int i = 0; i < n_sites; ++i) {
                 for (int j = 0; j < n_sites; ++j) {
-                    // S(q) = (1/N) Σᵢⱼ ⟨S⁻ᵢ S⁺ⱼ⟩ e^(iq·(Rⱼ-Rᵢ))
-                    // Matches TPQ_DSSF "0,0" convention
                     // Use minimum-image displacement for PBC-correct phases
                     auto dr = cluster.minimum_image_displacement(i, j);
                     double phase_arg = qx * dr[0] + qy * dr[1];
-                    s_q += smsp_corr[i][j] * std::exp(I * phase_arg);
+                    Complex phase = std::exp(I * phase_arg);
+                    
+                    // S^-S^+ contribution
+                    s_q_smsp += smsp_corr[i][j] * phase;
+                    
+                    // S^zS^z contribution
+                    s_q_szsz += szsz_corr[i][j] * std::real(phase);
                 }
             }
-            s_q_2d[i1][i2] = s_q / static_cast<double>(n_sites);
+            result.s_q_smsp_2d[i1][i2] = s_q_smsp / static_cast<double>(n_sites);
+            result.s_q_szsz_2d[i1][i2] = s_q_szsz / static_cast<double>(n_sites);
+            // Full S(q) = SzSz + real(S-S+)
+            result.s_q_2d[i1][i2] = result.s_q_szsz_2d[i1][i2] + std::real(result.s_q_smsp_2d[i1][i2]);
         }
     }
     
@@ -2952,7 +3144,7 @@ std::vector<std::vector<Complex>> compute_sq_2d_grid(
     auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
     std::cout << " done (" << duration.count() << " ms)" << std::endl;
     
-    return s_q_2d;
+    return result;
 }
 
 // -----------------------------------------------------------------------------
@@ -2969,7 +3161,7 @@ void save_results(
     const VBSResult& vbs,
     const PlaquetteResult& plaq,
     const Cluster& cluster,
-    const std::vector<std::vector<Complex>>& s_q_2d,
+    const Sq2DGridResult& s_q_2d,
     int n_q_grid,
     const std::map<std::pair<int, int>, Complex>& spsm_bonds = {},
     const std::map<std::pair<int, int>, double>& szsz_bonds = {},
@@ -2983,7 +3175,7 @@ void save_results(
         complex_type.insertMember("r", 0, H5::PredType::NATIVE_DOUBLE);
         complex_type.insertMember("i", sizeof(double), H5::PredType::NATIVE_DOUBLE);
         
-        // Save structure factor S(q) at k-points
+        // Save structure factor S(q) at k-points (full Heisenberg)
         {
             hsize_t dims[1] = {sf.s_q.size()};
             H5::DataSpace dataspace(1, dims);
@@ -2991,8 +3183,25 @@ void save_results(
             dataset.write(sf.s_q.data(), complex_type);
         }
         
-        // Save 2D S(q) grid for visualization
-        if (!s_q_2d.empty()) {
+        // Save S^-S^+ component at k-points
+        if (!sf.s_q_smsp.empty()) {
+            hsize_t dims[1] = {sf.s_q_smsp.size()};
+            H5::DataSpace dataspace(1, dims);
+            H5::DataSet dataset = file.createDataSet("S_q_smsp", complex_type, dataspace);
+            dataset.write(sf.s_q_smsp.data(), complex_type);
+        }
+        
+        // Save S^zS^z component at k-points
+        if (!sf.s_q_szsz.empty()) {
+            hsize_t dims[1] = {sf.s_q_szsz.size()};
+            H5::DataSpace dataspace(1, dims);
+            // s_q_szsz is stored as Complex but is actually real
+            H5::DataSet dataset = file.createDataSet("S_q_szsz", complex_type, dataspace);
+            dataset.write(sf.s_q_szsz.data(), complex_type);
+        }
+        
+        // Save 2D S(q) grid for visualization (full Heisenberg)
+        if (!s_q_2d.s_q_2d.empty()) {
             hsize_t dims[2] = {static_cast<hsize_t>(n_q_grid), static_cast<hsize_t>(n_q_grid)};
             H5::DataSpace dataspace(2, dims);
             H5::DataSet dataset = file.createDataSet("S_q_2d", complex_type, dataspace);
@@ -3000,10 +3209,38 @@ void save_results(
             std::vector<Complex> flat(n_q_grid * n_q_grid);
             for (int i = 0; i < n_q_grid; ++i) {
                 for (int j = 0; j < n_q_grid; ++j) {
-                    flat[i * n_q_grid + j] = s_q_2d[i][j];
+                    flat[i * n_q_grid + j] = s_q_2d.s_q_2d[i][j];
                 }
             }
             dataset.write(flat.data(), complex_type);
+        }
+        
+        // Save 2D S^-S^+ component grid
+        if (!s_q_2d.s_q_smsp_2d.empty()) {
+            hsize_t dims[2] = {static_cast<hsize_t>(n_q_grid), static_cast<hsize_t>(n_q_grid)};
+            H5::DataSpace dataspace(2, dims);
+            H5::DataSet dataset = file.createDataSet("S_q_smsp_2d", complex_type, dataspace);
+            std::vector<Complex> flat(n_q_grid * n_q_grid);
+            for (int i = 0; i < n_q_grid; ++i) {
+                for (int j = 0; j < n_q_grid; ++j) {
+                    flat[i * n_q_grid + j] = s_q_2d.s_q_smsp_2d[i][j];
+                }
+            }
+            dataset.write(flat.data(), complex_type);
+        }
+        
+        // Save 2D S^zS^z component grid
+        if (!s_q_2d.s_q_szsz_2d.empty()) {
+            hsize_t dims[2] = {static_cast<hsize_t>(n_q_grid), static_cast<hsize_t>(n_q_grid)};
+            H5::DataSpace dataspace(2, dims);
+            H5::DataSet dataset = file.createDataSet("S_q_szsz_2d", H5::PredType::NATIVE_DOUBLE, dataspace);
+            std::vector<double> flat(n_q_grid * n_q_grid);
+            for (int i = 0; i < n_q_grid; ++i) {
+                for (int j = 0; j < n_q_grid; ++j) {
+                    flat[i * n_q_grid + j] = s_q_2d.s_q_szsz_2d[i][j];
+                }
+            }
+            dataset.write(flat.data(), H5::PredType::NATIVE_DOUBLE);
         }
         
         // Save VBS S_D(q) at k-points (XY)
@@ -3522,9 +3759,10 @@ OrderParameterResults compute_all_order_parameters(
     
     // Compute correlations
     auto smsp_corr = compute_smsp_correlations(psi, cluster.n_sites);
+    auto szsz_corr = compute_szsz_correlations(psi, cluster.n_sites);
 
-    // Structure factor
-    auto sf_result = compute_spin_structure_factor(smsp_corr, cluster);
+    // Structure factor (full Heisenberg)
+    auto sf_result = compute_spin_structure_factor(smsp_corr, szsz_corr, cluster);
     results.m_translation = sf_result.m_translation;
     
     // Bond expectations
@@ -3567,6 +3805,127 @@ OrderParameterResults compute_all_order_parameters(
 }
 
 // -----------------------------------------------------------------------------
+// Process all temperatures for a single Jpm directory (for tpq_all_temps mode)
+// Returns a vector of results, one per temperature
+// -----------------------------------------------------------------------------
+
+std::vector<OrderParameterResults> process_all_temperatures(
+    const std::string& wf_file,
+    const Cluster& cluster,
+    double jpm,
+    int n_q_grid,
+    bool save_full
+) {
+    std::vector<OrderParameterResults> results_list;
+    
+    // Load all TPQ states (all temperatures)
+    auto tpq_states = load_all_tpq_states(wf_file);
+    
+    if (tpq_states.empty()) {
+        std::cerr << "No TPQ states found in " << wf_file << std::endl;
+        return results_list;
+    }
+    
+    std::cout << "  Processing " << tpq_states.size() << " temperatures for Jpm=" << jpm << std::endl;
+    
+    // Process each temperature (using quick scalar computation; full mode not yet implemented for T-scan)
+    (void)n_q_grid;
+    (void)save_full;
+    
+    for (size_t t_idx = 0; t_idx < tpq_states.size(); ++t_idx) {
+        const auto& tpq_state = tpq_states[t_idx];
+        
+        OrderParameterResults results = compute_all_order_parameters(tpq_state.psi, cluster, jpm);
+        results.temperature = tpq_state.temperature;
+        
+        results_list.push_back(results);
+    }
+    
+    return results_list;
+}
+
+// -----------------------------------------------------------------------------
+// Save temperature-dependent results for a single Jpm to HDF5
+// -----------------------------------------------------------------------------
+
+void save_temperature_scan_results(
+    const std::vector<OrderParameterResults>& results,
+    const std::string& output_file,
+    double jpm
+) {
+    if (results.empty()) return;
+    
+    try {
+        H5::H5File file(output_file, H5F_ACC_TRUNC);
+        
+        size_t n = results.size();
+        
+        std::vector<double> temperatures(n), m_trans(n), m_nem(n), m_nem_spsm(n);
+        std::vector<double> m_nem_szsz(n), m_nem_heis(n), aniso(n);
+        std::vector<double> m_vbs_vals(n), m_vbs_xy_vals(n), m_vbs_heis_vals(n);
+        std::vector<double> D_mean_vals(n), D_mean_xy_vals(n), D_mean_heis_vals(n);
+        std::vector<double> m_plaq(n), P_mean_vals(n), res_strength(n), chi_mean_vals(n);
+        
+        for (size_t i = 0; i < n; ++i) {
+            temperatures[i] = results[i].temperature;
+            m_trans[i] = results[i].m_translation;
+            m_nem[i] = results[i].m_nematic;
+            m_nem_spsm[i] = results[i].m_nematic_spsm;
+            m_nem_szsz[i] = results[i].m_nematic_szsz;
+            m_nem_heis[i] = results[i].m_nematic_heisenberg;
+            aniso[i] = results[i].anisotropy;
+            m_vbs_vals[i] = results[i].m_vbs;
+            m_vbs_xy_vals[i] = results[i].m_vbs_xy;
+            m_vbs_heis_vals[i] = results[i].m_vbs_heis;
+            D_mean_vals[i] = results[i].D_mean;
+            D_mean_xy_vals[i] = results[i].D_mean_xy;
+            D_mean_heis_vals[i] = results[i].D_mean_heis;
+            m_plaq[i] = results[i].m_plaquette;
+            P_mean_vals[i] = results[i].P_mean;
+            res_strength[i] = results[i].resonance_strength;
+            chi_mean_vals[i] = results[i].chi_mean;
+        }
+        
+        auto write_dataset = [&](const std::string& name, const std::vector<double>& data) {
+            hsize_t dims[1] = {data.size()};
+            H5::DataSpace dataspace(1, dims);
+            H5::DataSet dataset = file.createDataSet(name, H5::PredType::NATIVE_DOUBLE, dataspace);
+            dataset.write(data.data(), H5::PredType::NATIVE_DOUBLE);
+        };
+        
+        // Store Jpm as attribute
+        {
+            H5::DataSpace attr_space(H5S_SCALAR);
+            H5::Attribute attr = file.createAttribute("jpm", H5::PredType::NATIVE_DOUBLE, attr_space);
+            attr.write(H5::PredType::NATIVE_DOUBLE, &jpm);
+        }
+        
+        write_dataset("temperature", temperatures);
+        write_dataset("m_translation", m_trans);
+        write_dataset("m_nematic", m_nem);
+        write_dataset("m_nematic_spsm", m_nem_spsm);
+        write_dataset("m_nematic_szsz", m_nem_szsz);
+        write_dataset("m_nematic_heisenberg", m_nem_heis);
+        write_dataset("anisotropy", aniso);
+        write_dataset("m_vbs", m_vbs_vals);
+        write_dataset("m_vbs_xy", m_vbs_xy_vals);
+        write_dataset("m_vbs_heis", m_vbs_heis_vals);
+        write_dataset("D_mean", D_mean_vals);
+        write_dataset("D_mean_xy", D_mean_xy_vals);
+        write_dataset("D_mean_heis", D_mean_heis_vals);
+        write_dataset("m_plaquette", m_plaq);
+        write_dataset("P_mean", P_mean_vals);
+        write_dataset("resonance_strength", res_strength);
+        write_dataset("chi_mean", chi_mean_vals);
+        
+        std::cout << "  Saved T-scan results to: " << output_file << std::endl;
+        
+    } catch (H5::Exception& e) {
+        throw std::runtime_error("HDF5 write error: " + std::string(e.getCDetailMsg()));
+    }
+}
+
+// -----------------------------------------------------------------------------
 // Scan directory mode
 // -----------------------------------------------------------------------------
 
@@ -3576,7 +3935,8 @@ std::vector<OrderParameterResults> scan_jpm_directories(
     int n_workers,
     int n_q_grid,
     bool save_full,
-    bool use_tpq
+    bool use_tpq,
+    bool tpq_all_temps = false
 ) {
     // Get MPI rank and size
     int mpi_rank = 0, mpi_size = 1;
@@ -3608,6 +3968,9 @@ std::vector<OrderParameterResults> scan_jpm_directories(
 #endif
         if (save_full) {
             std::cout << "Full output mode: saving S(q) and S_D(q) 2D grids per directory" << std::endl;
+        }
+        if (tpq_all_temps) {
+            std::cout << "TPQ all-temps mode: processing ALL temperatures for each Jpm" << std::endl;
         }
     }
     
@@ -3688,6 +4051,44 @@ std::vector<OrderParameterResults> scan_jpm_directories(
                 continue;
             }
             
+            // ============================================================
+            // TPQ ALL TEMPERATURES MODE: process all beta values and save
+            // per-Jpm temperature-dependent results
+            // ============================================================
+            if (tpq_all_temps) {
+                auto temp_results = process_all_temperatures(wf_file, cluster, jpm, n_q_grid, save_full);
+                
+                if (temp_results.empty()) {
+                    std::lock_guard<std::mutex> lock(print_mutex);
+                    std::cerr << "No TPQ states found in " << wf_file << std::endl;
+                    continue;
+                }
+                
+                // Save per-Jpm temperature scan file
+                std::ostringstream oss;
+                oss << std::fixed << std::setprecision(4) << jpm;
+                std::string out_file = output_dir + "/order_params_Jpm=" + oss.str() + "_T_scan.h5";
+                save_temperature_scan_results(temp_results, out_file, jpm);
+                
+                // Use lowest temperature result for summary
+                all_results[i] = temp_results.back();  // Sorted by T descending, so last is lowest
+                
+                int done = ++completed;
+                {
+                    std::lock_guard<std::mutex> lock(print_mutex);
+#ifdef USE_MPI
+                    std::cout << "[Rank " << mpi_rank << "] ";
+#endif
+                    std::cout << "[" << done << "/" << jpm_dirs.size() << "] "
+                              << "Jpm=" << std::fixed << std::setprecision(4) << jpm
+                              << " | " << temp_results.size() << " temperatures processed"
+                              << " | T_range=[" << temp_results.back().temperature 
+                              << ", " << temp_results.front().temperature << "]"
+                              << std::endl;
+                }
+                continue;  // Skip the normal single-temperature processing
+            }
+            
             // Load wavefunction (ground state or TPQ lowest temperature)
             std::vector<Complex> psi;
             double temperature = 0.0;
@@ -3725,8 +4126,9 @@ std::vector<OrderParameterResults> scan_jpm_directories(
             if (save_full) {
                 // Full computation with 2D grids
                 auto smsp_corr = compute_smsp_correlations(psi, cluster.n_sites);
-                auto sf_result = compute_spin_structure_factor(smsp_corr, cluster);
-                auto s_q_2d = compute_sq_2d_grid(smsp_corr, cluster, n_q_grid);
+                auto szsz_corr = compute_szsz_correlations(psi, cluster.n_sites);
+                auto sf_result = compute_spin_structure_factor(smsp_corr, szsz_corr, cluster);
+                auto s_q_2d = compute_sq_2d_grid(smsp_corr, szsz_corr, cluster, n_q_grid);
                 
                 auto xy_bond_exp = compute_xy_bond_expectations(psi, cluster);
                 auto spsm_bond_exp = compute_spsm_bond_expectations(psi, cluster);
@@ -4017,6 +4419,7 @@ void print_usage(const char* prog) {
               << "  --n-q-grid <n>       2D q-grid size for visualization (default: 50)\n"
               << "  --save-full          Save full S(q), S_D(q), S_P(q) 2D grids and bond-resolved data per Jpm\n"
               << "  --tpq                Use TPQ states (lowest temperature) instead of ground state\n"
+              << "  --tpq-all-temps      Process ALL temperatures from TPQ data (creates T-dependent output)\n"
               << "\nComputes BFG order parameters from ground state or TPQ wavefunction:\n"
               << "  1. S(q) - Spin structure factor (translation order)\n"
               << "  2. Nematic order - Bond orientation anisotropy (C3 breaking)\n"
@@ -4056,6 +4459,7 @@ int main(int argc, char* argv[]) {
     bool scan_mode = false;
     bool save_full = false;
     bool use_tpq = false;
+    bool tpq_all_temps = false;
     
     // Parse arguments
     for (int i = 1; i < argc; ++i) {
@@ -4073,6 +4477,9 @@ int main(int argc, char* argv[]) {
             save_full = true;
         } else if (arg == "--tpq") {
             use_tpq = true;
+        } else if (arg == "--tpq-all-temps") {
+            use_tpq = true;
+            tpq_all_temps = true;
         } else if (arg == "-h" || arg == "--help") {
             if (mpi_rank == 0) {
                 print_usage(argv[0]);
@@ -4118,13 +4525,22 @@ int main(int argc, char* argv[]) {
             if (mpi_rank == 0) {
                 fs::create_directories(output_dir);
                 
+                std::string mode_str;
+                if (tpq_all_temps) {
+                    mode_str = "TPQ (all temperatures)";
+                } else if (use_tpq) {
+                    mode_str = "TPQ (lowest temperature)";
+                } else {
+                    mode_str = "Ground state";
+                }
+                
                 std::cout << "========================================\n"
                           << "BFG ORDER PARAMETER SCAN (CPU)\n"
                           << "========================================\n"
                           << "Scan directory: " << scan_dir << "\n"
                           << "Output directory: " << output_dir << "\n"
                           << "Workers: " << n_workers << "\n"
-                          << "Mode: " << (use_tpq ? "TPQ (lowest temperature)" : "Ground state") << "\n"
+                          << "Mode: " << mode_str << "\n"
                           << "Save full: " << (save_full ? "yes (2D grids)" : "no (scalars only)") << "\n"
                           << "========================================" << std::endl;
             }
@@ -4133,7 +4549,7 @@ int main(int argc, char* argv[]) {
             MPI_Barrier(MPI_COMM_WORLD);  // Wait for directory creation
 #endif
             
-            auto results = scan_jpm_directories(scan_dir, output_dir, n_workers, n_q_grid, save_full, use_tpq);
+            auto results = scan_jpm_directories(scan_dir, output_dir, n_workers, n_q_grid, save_full, use_tpq, tpq_all_temps);
             
             // Only rank 0 saves the combined results
             if (mpi_rank == 0 && !results.empty()) {
@@ -4189,12 +4605,13 @@ int main(int argc, char* argv[]) {
             
             // Compute correlations
             auto smsp_corr = compute_smsp_correlations(psi, cluster.n_sites);
+            auto szsz_corr = compute_szsz_correlations(psi, cluster.n_sites);
             
-            // Compute S(q) at k-points
-            auto sf_result = compute_spin_structure_factor(smsp_corr, cluster);
+            // Compute S(q) at k-points (full Heisenberg = SzSz + (1/2)(S+S- + S-S+))
+            auto sf_result = compute_spin_structure_factor(smsp_corr, szsz_corr, cluster);
             
             // Compute 2D S(q) grid for visualization
-            auto s_q_2d = compute_sq_2d_grid(smsp_corr, cluster, n_q_grid);
+            auto s_q_2d = compute_sq_2d_grid(smsp_corr, szsz_corr, cluster, n_q_grid);
             
             // Compute bond expectations for nematic and VBS
             auto xy_bond_exp = compute_xy_bond_expectations(psi, cluster);
