@@ -73,7 +73,16 @@ class NLCExpansionTriangular:
             
             for line in lines:
                 if line.startswith("# Multiplicity") and ":" in line:
-                    multiplicity = float(line.split(":")[-1].strip())
+                    mult_str = line.split(":")[-1].strip()
+                    # Handle formats like "1/3 = 0.333333" or just "0.333333"
+                    if "=" in mult_str:
+                        mult_str = mult_str.split("=")[-1].strip()
+                    # Handle fractional format like "1/3"
+                    if "/" in mult_str:
+                        parts = mult_str.split("/")
+                        multiplicity = float(parts[0]) / float(parts[1])
+                    else:
+                        multiplicity = float(mult_str)
                 elif line.startswith("# Number of vertices:"):
                     num_vertices = int(line.split(":")[1].strip())
                 

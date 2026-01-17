@@ -21,6 +21,11 @@
 #include <algorithm>
 #include <memory>  // For std::unique_ptr
 
+// ScaLAPACK support for distributed diagonalization
+#ifdef WITH_SCALAPACK
+#include <ed/solvers/scalapack_diag.h>
+#endif
+
 // GPU support
 #ifdef WITH_CUDA
 #include <ed/gpu/gpu_ed_wrapper.h>
@@ -123,6 +128,10 @@ enum class DiagonalizationMethod {
     THICK_RESTART_LANCZOS,     // Thick restart Lanczos algorithm with locking
     FULL,                  // Full diagonalization
     OSS,                   // Optimal spectrum solver
+    
+    // Distributed/Parallel methods
+    SCALAPACK,             // ScaLAPACK distributed diagonalization
+    SCALAPACK_MIXED,       // ScaLAPACK with mixed precision (single+refinement)
     
     // Thermal methods
     mTPQ,                  // Microcanonical Thermal Pure Quantum states
@@ -314,6 +323,16 @@ struct EDParameters {
     bool use_fixed_sz = false;  // Whether to use fixed-Sz sector (conserve total Sz)
     int64_t n_up = -1;  // Number of up spins (-1 = not set, will use num_sites/2)
     mutable class FixedSzOperator* fixed_sz_op = nullptr;  // If using fixed-Sz, pointer to operator for embedding
+    
+    // ========== ScaLAPACK Distributed Diagonalization Options ==========
+    // Used when method == SCALAPACK or SCALAPACK_MIXED
+    int scalapack_nprow = 0;                    // Process grid rows (0 = auto)
+    int scalapack_npcol = 0;                    // Process grid cols (0 = auto)
+    int scalapack_block_size = 64;              // Distribution block size
+    bool scalapack_mixed_precision = true;      // Use single precision + refinement
+    double scalapack_refinement_tol = 1e-12;    // Refinement convergence tolerance
+    int scalapack_max_refinement_iter = 5;      // Maximum refinement iterations
+    bool scalapack_verbose = true;              // Print progress information
     
     // ========== ARPACK Advanced Options ==========
     // Used when method == ARPACK_ADVANCED
@@ -742,7 +761,41 @@ EDResults exact_diagonalization_core(
             full_diagonalization(H, hilbert_space_dim, params.num_eigenvalues, results.eigenvalues, 
                                  params.output_dir, params.compute_eigenvectors);
             break;
-
+        
+        case DiagonalizationMethod::SCALAPACK:
+        case DiagonalizationMethod::SCALAPACK_MIXED:
+#ifdef WITH_SCALAPACK
+            {
+                ScaLAPACKConfig scalapack_config;
+                scalapack_config.nprow = params.scalapack_nprow;
+                scalapack_config.npcol = params.scalapack_npcol;
+                scalapack_config.mb = params.scalapack_block_size;
+                scalapack_config.nb = params.scalapack_block_size;
+                scalapack_config.use_mixed_precision = (method == DiagonalizationMethod::SCALAPACK_MIXED) 
+                                                       || params.scalapack_mixed_precision;
+                scalapack_config.refinement_tol = params.scalapack_refinement_tol;
+                scalapack_config.max_refinement_iter = params.scalapack_max_refinement_iter;
+                scalapack_config.compute_eigenvectors = params.compute_eigenvectors;
+                scalapack_config.num_eigenvalues = params.num_eigenvalues;
+                scalapack_config.output_dir = params.output_dir;
+                scalapack_config.verbose = params.scalapack_verbose;
+                
+                ScaLAPACKResults scalapack_results = scalapack_diagonalization(H, hilbert_space_dim, scalapack_config);
+                results.eigenvalues = std::move(scalapack_results.eigenvalues);
+                
+                std::cout << "ScaLAPACK completed in " << scalapack_results.total_time << " s" << std::endl;
+                std::cout << "  Matrix construction: " << scalapack_results.construction_time << " s" << std::endl;
+                std::cout << "  Diagonalization: " << scalapack_results.diagonalization_time << " s" << std::endl;
+                if (scalapack_config.use_mixed_precision) {
+                    std::cout << "  Refinement: " << scalapack_results.refinement_time << " s" << std::endl;
+                    std::cout << "  Max residual: " << scalapack_results.max_residual << std::endl;
+                }
+            }
+#else
+            std::cerr << "Error: ScaLAPACK not available. Build with -DWITH_MPI=ON -DWITH_SCALAPACK=ON" << std::endl;
+            throw std::runtime_error("ScaLAPACK not available");
+#endif
+            break;
 
         case DiagonalizationMethod::LANCZOS:
             lanczos(H, hilbert_space_dim, params.max_iterations, params.num_eigenvalues, 

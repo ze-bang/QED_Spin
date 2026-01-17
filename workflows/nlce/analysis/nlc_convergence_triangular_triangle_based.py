@@ -29,12 +29,12 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 
 
-def run_nlce_order(order, base_dir, model_params, workspace_root):
+def run_nlce_order(order, base_dir, model_params, workspace_root, visualize=False):
     """Run NLCE for a specific order."""
     order_dir = os.path.join(base_dir, f'order_{order}')
     
-    # Build command
-    nlce_script = os.path.join(script_dir, '..', 'run', 'nlce_triangular_triangle_based.py')
+    # Build command - use nlce_triangular.py (triangle-based is now the default)
+    nlce_script = os.path.join(script_dir, '..', 'run', 'nlce_triangular.py')
     
     cmd = [
         sys.executable,
@@ -42,10 +42,15 @@ def run_nlce_order(order, base_dir, model_params, workspace_root):
         '--max_order', str(order),
         '--base_dir', order_dir,
         '--model', model_params['model'],
+        '--thermo',  # Enable thermodynamic calculation
         '--temp_min', str(model_params['temp_min']),
         '--temp_max', str(model_params['temp_max']),
         '--temp_bins', str(model_params['temp_bins']),
+        # triangle-based is now the default, no flag needed
     ]
+    
+    if visualize:
+        cmd.append('--visualize')
     
     # Add model-specific parameters
     if model_params['model'] == 'heisenberg':
@@ -69,20 +74,55 @@ def run_nlce_order(order, base_dir, model_params, workspace_root):
     return order_dir
 
 
-def load_nlce_results(order_dir):
+def load_nlce_results(order_dir, order):
     """Load NLCE results from a completed calculation."""
-    results_file = os.path.join(order_dir, 'nlce_results', 'nlce_thermodynamics.txt')
+    # Results are stored in nlc_results_order_{order} subdirectory
+    nlc_dir = os.path.join(order_dir, f'nlc_results_order_{order}')
     
-    if not os.path.exists(results_file):
+    # Try different possible filenames
+    possible_files = [
+        os.path.join(nlc_dir, 'nlc_energy.txt'),
+        os.path.join(order_dir, 'nlce_results', 'nlce_thermodynamics.txt'),
+    ]
+    
+    results_file = None
+    for f in possible_files:
+        if os.path.exists(f):
+            results_file = f
+            break
+    
+    if results_file is None:
         return None
     
-    data = np.loadtxt(results_file)
-    return {
-        'temperature': data[:, 0],
-        'energy': data[:, 1],
-        'specific_heat': data[:, 2],
-        'entropy': data[:, 3] if data.shape[1] > 3 else None
-    }
+    try:
+        data = np.loadtxt(results_file, comments='#')
+        
+        # Try to load other thermodynamic files
+        result = {
+            'temperature': data[:, 0],
+            'energy': data[:, 1] if data.shape[1] > 1 else None,
+        }
+        
+        # Load specific heat
+        cv_file = os.path.join(nlc_dir, 'nlc_specific_heat.txt')
+        if os.path.exists(cv_file):
+            cv_data = np.loadtxt(cv_file, comments='#')
+            result['specific_heat'] = cv_data[:, 1]
+        else:
+            result['specific_heat'] = data[:, 2] if data.shape[1] > 2 else None
+        
+        # Load entropy
+        entropy_file = os.path.join(nlc_dir, 'nlc_entropy.txt')
+        if os.path.exists(entropy_file):
+            entropy_data = np.loadtxt(entropy_file, comments='#')
+            result['entropy'] = entropy_data[:, 1]
+        else:
+            result['entropy'] = data[:, 3] if data.shape[1] > 3 else None
+        
+        return result
+    except Exception as e:
+        print(f"Error loading results from {results_file}: {e}")
+        return None
 
 
 def plot_convergence(results_by_order, output_dir, model_name):
@@ -229,6 +269,8 @@ def main():
     # Control
     parser.add_argument('--skip_calculations', action='store_true',
                        help='Skip calculations, only plot existing results')
+    parser.add_argument('--visualize', action='store_true',
+                       help='Generate cluster visualizations')
     
     args = parser.parse_args()
     
@@ -267,14 +309,15 @@ def main():
     # Run NLCE for each order
     if not args.skip_calculations:
         for order in range(1, args.max_order + 1):
-            order_dir = run_nlce_order(order, args.output_dir, model_params, workspace_root)
+            order_dir = run_nlce_order(order, args.output_dir, model_params, 
+                                        workspace_root, visualize=args.visualize)
             if order_dir:
-                results_by_order[order] = load_nlce_results(order_dir)
+                results_by_order[order] = load_nlce_results(order_dir, order)
     else:
         # Load existing results
         for order in range(1, args.max_order + 1):
             order_dir = os.path.join(args.output_dir, f'order_{order}')
-            results_by_order[order] = load_nlce_results(order_dir)
+            results_by_order[order] = load_nlce_results(order_dir, order)
     
     # Plot convergence
     model_name = {

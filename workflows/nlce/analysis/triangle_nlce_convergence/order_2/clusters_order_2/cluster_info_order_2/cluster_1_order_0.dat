@@ -1,0 +1,16 @@
+# Triangle-based NLCE Cluster
+# Cluster ID: 1
+# Order: 0 (single site seed)
+# Multiplicity: 1
+# Number of vertices: 1
+# Number of edges: 0
+# Number of triangles: 0
+# Lattice type: triangular (triangle-based)
+
+# Vertices (index, x, y, z):
+0, 0.000000, 0.000000, 0.000000
+
+# Edges (vertex1, vertex2):
+
+# Adjacency Matrix:
+0

@@ -1,0 +1,50 @@
+# Triangle-based NLCE Cluster
+# Cluster ID: 7
+# Order (number of triangles): 4
+# Multiplicity: 9 = 9.000000
+# Number of vertices: 9
+# Number of edges: 12
+# Number of triangles: 4
+# Lattice type: triangular (triangle-based)
+
+# Vertices (index, x, y, z):
+0, -1.611111, 0.288675, 0.000000
+1, -1.111111, 1.154701, 0.000000
+2, -0.611111, 0.288675, 0.000000
+3, -1.111111, -0.577350, 0.000000
+4, 0.388889, 0.288675, 0.000000
+5, -0.111111, -0.577350, 0.000000
+6, 1.388889, 0.288675, 0.000000
+7, 0.888889, -0.577350, 0.000000
+8, 1.888889, -0.577350, 0.000000
+
+# Edges (vertex1, vertex2):
+0, 1
+0, 2
+7, 8
+4, 7
+5, 7
+2, 5
+3, 5
+4, 5
+2, 3
+1, 2
+6, 8
+6, 7
+
+# Adjacency Matrix:
+0 1 1 0 0 0 0 0 0
+1 0 1 0 0 0 0 0 0
+1 1 0 1 0 1 0 0 0
+0 0 1 0 0 1 0 0 0
+0 0 0 0 0 1 0 1 0
+0 0 1 1 1 0 0 1 0
+0 0 0 0 0 0 0 1 1
+0 0 0 0 1 1 1 0 1
+0 0 0 0 0 0 1 1 0
+
+# Triangles (vertex indices in local numbering):
+0, 2, 1
+3, 5, 2
+5, 7, 4
+7, 8, 6

@@ -328,6 +328,56 @@ if(WITH_MPI)
     find_package(MPI REQUIRED)
     include_directories(SYSTEM ${MPI_CXX_INCLUDE_PATH})
     add_definitions(-DWITH_MPI)
+    
+    # ScaLAPACK for distributed diagonalization
+    option(WITH_SCALAPACK "Build with ScaLAPACK support for distributed diagonalization" ON)
+    if(WITH_SCALAPACK)
+        # Try to find ScaLAPACK
+        # Check for vendor-specific ScaLAPACK first
+        set(SCALAPACK_LIBRARIES "")
+        
+        if(WITH_MKL)
+            # Intel MKL includes ScaLAPACK
+            find_library(MKL_SCALAPACK_LIBRARY NAMES mkl_scalapack_lp64 mkl_scalapack_ilp64
+                HINTS 
+                    /opt/intel/oneapi/mkl/latest/lib/intel64
+                    /opt/intel/mkl/lib/intel64
+                    $ENV{MKLROOT}/lib/intel64
+            )
+            find_library(MKL_BLACS_LIBRARY NAMES mkl_blacs_openmpi_lp64 mkl_blacs_intelmpi_lp64 mkl_blacs_lp64
+                HINTS 
+                    /opt/intel/oneapi/mkl/latest/lib/intel64
+                    /opt/intel/mkl/lib/intel64
+                    $ENV{MKLROOT}/lib/intel64
+            )
+            if(MKL_SCALAPACK_LIBRARY AND MKL_BLACS_LIBRARY)
+                set(SCALAPACK_LIBRARIES ${MKL_SCALAPACK_LIBRARY} ${MKL_BLACS_LIBRARY})
+                message(STATUS "Using MKL ScaLAPACK: ${MKL_SCALAPACK_LIBRARY}")
+                message(STATUS "Using MKL BLACS: ${MKL_BLACS_LIBRARY}")
+            endif()
+        endif()
+        
+        # Try generic ScaLAPACK if MKL not found
+        if(NOT SCALAPACK_LIBRARIES)
+            find_library(SCALAPACK_LIBRARY NAMES scalapack scalapack-openmpi)
+            find_library(BLACS_LIBRARY NAMES blacs blacs-openmpi blacsF77init-openmpi blacsCinit-openmpi)
+            
+            if(SCALAPACK_LIBRARY)
+                set(SCALAPACK_LIBRARIES ${SCALAPACK_LIBRARY})
+                if(BLACS_LIBRARY)
+                    list(APPEND SCALAPACK_LIBRARIES ${BLACS_LIBRARY})
+                endif()
+                message(STATUS "Using ScaLAPACK: ${SCALAPACK_LIBRARY}")
+            else()
+                message(STATUS "ScaLAPACK not found - distributed diagonalization will not be available")
+                set(WITH_SCALAPACK OFF)
+            endif()
+        endif()
+        
+        if(WITH_SCALAPACK AND SCALAPACK_LIBRARIES)
+            add_definitions(-DWITH_SCALAPACK)
+        endif()
+    endif()
 endif()
 
 # New elegant main sources - organized layout
@@ -345,6 +395,11 @@ set(SOURCES
     ${SOLVERS_CPU_DIR}/hybrid_thermal.cpp
     ${IO_DIR}/basis_vector_storage.cpp
 )
+
+# Add ScaLAPACK sources if available
+if(WITH_SCALAPACK AND SCALAPACK_LIBRARIES)
+    list(APPEND SOURCES ${SOLVERS_CPU_DIR}/scalapack_diag.cpp)
+endif()
 
 # Header-only sources that should be included in compilation
 set(HEADER_SOURCES
@@ -474,6 +529,11 @@ target_link_libraries(ED
     ${ARPACK_LIBRARY}
     ${HDF5_LIBRARIES}
 )
+
+# Add ScaLAPACK libraries if available
+if(WITH_SCALAPACK AND SCALAPACK_LIBRARIES)
+    target_link_libraries(ED ${SCALAPACK_LIBRARIES})
+endif()
 
 # Add CUDA libraries to ED if CUDA is enabled
 if(WITH_CUDA)

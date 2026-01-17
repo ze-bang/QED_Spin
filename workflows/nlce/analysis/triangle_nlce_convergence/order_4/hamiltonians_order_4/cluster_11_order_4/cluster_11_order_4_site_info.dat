@@ -1,0 +1,13 @@
+# Site information for triangular lattice cluster: cluster_11_order_4
+# site_id, matrix_index, sublattice_index, x, y, z
+# (sublattice_index is always 0 for triangular lattice)
+
+0 0 0 -1.000000 0.577350 0.000000
+1 1 0 -0.500000 1.443376 0.000000
+2 2 0 0.000000 0.577350 0.000000
+3 3 0 -1.000000 -1.154701 0.000000
+4 4 0 -0.500000 -0.288675 0.000000
+5 5 0 1.000000 0.577350 0.000000
+6 6 0 0.000000 -1.154701 0.000000
+7 7 0 0.500000 -0.288675 0.000000
+8 8 0 1.500000 -0.288675 0.000000

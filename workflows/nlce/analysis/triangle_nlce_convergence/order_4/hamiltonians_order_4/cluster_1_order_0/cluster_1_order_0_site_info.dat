@@ -1,0 +1,5 @@
+# Site information for triangular lattice cluster: cluster_1_order_0
+# site_id, matrix_index, sublattice_index, x, y, z
+# (sublattice_index is always 0 for triangular lattice)
+
+0 0 0 0.000000 0.000000 0.000000

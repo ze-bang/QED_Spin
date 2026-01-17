@@ -26,6 +26,10 @@ enum class DiagonalizationMethod {
     THICK_RESTART_LANCZOS,
     FULL,
     OSS,
+    // Distributed/Parallel methods
+    SCALAPACK,
+    SCALAPACK_MIXED,
+    // Thermal methods
     mTPQ,
     mTPQ_MPI,
     cTPQ,
@@ -841,6 +845,10 @@ std::optional<DiagonalizationMethod> parseMethod(const std::string& str) {
     if (lower == "full") return DiagonalizationMethod::FULL;
     if (lower == "oss") return DiagonalizationMethod::OSS;
     
+    // Distributed/Parallel methods
+    if (lower == "scalapack") return DiagonalizationMethod::SCALAPACK;
+    if (lower == "scalapack_mixed") return DiagonalizationMethod::SCALAPACK_MIXED;
+    
     // Thermal methods
     if (lower == "mtpq") return DiagonalizationMethod::mTPQ;
     if (lower == "mtpq_mpi") return DiagonalizationMethod::mTPQ_MPI;
@@ -895,6 +903,10 @@ std::string methodToString(DiagonalizationMethod method) {
         // Full diagonalization
         case DiagonalizationMethod::FULL: return "FULL";
         case DiagonalizationMethod::OSS: return "OSS";
+        
+        // Distributed/Parallel methods
+        case DiagonalizationMethod::SCALAPACK: return "SCALAPACK";
+        case DiagonalizationMethod::SCALAPACK_MIXED: return "SCALAPACK_MIXED";
         
         // Thermal methods
         case DiagonalizationMethod::mTPQ: return "mTPQ";

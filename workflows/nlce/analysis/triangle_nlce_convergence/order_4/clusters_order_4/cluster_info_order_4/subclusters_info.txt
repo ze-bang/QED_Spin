@@ -1,0 +1,36 @@
+# Subclusters information for triangle-based NLCE
+# Format: Cluster_ID, Order, Multiplicity, Subclusters[(ID, Count), ...]
+
+Cluster 1 (Order 0, Sites=1, Bonds=0, L=1):
+  No subclusters
+
+Cluster 2 (Order 1, Sites=3, Bonds=3, L=1/3):
+  No subclusters
+
+Cluster 3 (Order 2, Sites=5, Bonds=6, L=1):
+  Subclusters: (2, 2)
+
+Cluster 4 (Order 3, Sites=7, Bonds=9, L=3):
+  Subclusters: (2, 3), (3, 2)
+
+Cluster 5 (Order 3, Sites=7, Bonds=9, L=1/3):
+  Subclusters: (2, 3), (3, 3)
+
+Cluster 6 (Order 3, Sites=6, Bonds=9, L=1/3):
+  Subclusters: (2, 3), (3, 3)
+
+Cluster 7 (Order 4, Sites=9, Bonds=12, L=9):
+  Subclusters: (2, 4), (3, 3), (4, 2)
+
+Cluster 8 (Order 4, Sites=9, Bonds=12, L=2):
+  Subclusters: (2, 4), (3, 4), (4, 2), (5, 1)
+
+Cluster 9 (Order 4, Sites=8, Bonds=12, L=2):
+  Subclusters: (2, 4), (3, 4), (4, 2), (6, 1)
+
+Cluster 10 (Order 4, Sites=8, Bonds=12, L=1):
+  Subclusters: (2, 4), (3, 5), (4, 2), (5, 1), (6, 1)
+
+Cluster 11 (Order 4, Sites=9, Bonds=12, L=2/3):
+  Subclusters: (2, 4), (3, 3), (4, 3)
+

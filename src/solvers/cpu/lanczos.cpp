@@ -2223,12 +2223,27 @@ void full_diagonalization(std::function<void(const Complex*, Complex*, int)> H, 
     
     if (N <= DENSE_THRESHOLD) {
         // For smaller matrices, use dense approach with MKL for best performance
-        std::cout << "Using dense diagonalization with MKL" << std::endl;
+        std::cout << "Using dense diagonalization with MKL/LAPACK" << std::endl;
         
-        // Check memory requirements
+        // Check memory requirements - estimate total needed including workspace
         size_t matrix_size = static_cast<size_t>(N) * N;
-        size_t bytes_needed = matrix_size * sizeof(Complex);
-        std::cout << "Matrix requires " << bytes_needed / (1024.0 * 1024.0 * 1024.0) << " GB of memory" << std::endl;
+        size_t bytes_for_matrix = matrix_size * sizeof(Complex);
+        size_t bytes_for_eigenvalues = N * sizeof(double);
+        
+        // Determine if we can use memory-efficient partial eigenvalue computation
+        uint64_t actual_num_eigs = std::min(num_eigs, N);
+        bool use_partial_solver = (actual_num_eigs < N / 2) && (N > 1000);  // Use zheevr for subset
+        
+        if (use_partial_solver && compute_eigenvectors) {
+            // zheevr needs: matrix + num_eigs eigenvectors + workspace
+            size_t bytes_for_evecs = static_cast<size_t>(actual_num_eigs) * N * sizeof(Complex);
+            std::cout << "Matrix requires " << bytes_for_matrix / (1024.0 * 1024.0 * 1024.0) << " GB" << std::endl;
+            std::cout << "Eigenvectors require " << bytes_for_evecs / (1024.0 * 1024.0 * 1024.0) << " GB" << std::endl;
+            std::cout << "Using memory-efficient partial eigensolver (zheevr) for " << actual_num_eigs << "/" << N << " eigenvalues" << std::endl;
+        } else {
+            // Full solver - eigenvectors overwrite the matrix (no extra allocation needed)
+            std::cout << "Matrix requires " << bytes_for_matrix / (1024.0 * 1024.0 * 1024.0) << " GB of memory" << std::endl;
+        }
         
         // Allocate memory for dense matrix with error checking
         std::vector<Complex> dense_matrix;
@@ -2280,59 +2295,118 @@ void full_diagonalization(std::function<void(const Complex*, Complex*, int)> H, 
             }
         }
         std::cout << "Dense matrix constructed" << std::endl;
-        // Allocate arrays for eigenvalues and eigenvectors
+        
+        // Allocate array for eigenvalues
         std::vector<double> evals(N);
-        std::vector<Complex> evecs;
+        lapack_int info;
         
-        // Call LAPACKE to perform eigendecomposition
-        uint64_t info;
-        if (compute_eigenvectors) {
-            evecs.resize(N*N);
-            // Call LAPACKE_zheev to compute eigenvalues and eigenvectors
-            info = LAPACKE_zheev(LAPACK_COL_MAJOR, 'V', 'U', N,
-                                reinterpret_cast<lapack_complex_double*>(dense_matrix.data()),
-                                N, evals.data());
-                                
-            // Copy eigenvectors from dense_matrix to evecs
-            std::copy(dense_matrix.begin(), dense_matrix.end(), evecs.begin());
-        } else {
-            // Only compute eigenvalues
-            info = LAPACKE_zheev(LAPACK_COL_MAJOR, 'N', 'U', N,
-                                reinterpret_cast<lapack_complex_double*>(dense_matrix.data()),
-                                N, evals.data());
-        }
-
-
-        if (info != 0) {
-            std::cerr << "LAPACKE_zheev failed with error code " << info << std::endl;
-            return;
-        }
-        
-        std::cout << "Eigenvalue decomposition completed" << std::endl;
-
-        // Extract requested number of eigenvalues
-        uint64_t actual_num_eigs = std::min(num_eigs, N);
-        eigenvalues.resize(actual_num_eigs);
-        for (int i = 0; i < actual_num_eigs; i++) {
-            eigenvalues[i] = evals[i];
-        }
-        
-        // Save results using unified HDF5 function
-        if (compute_eigenvectors && !dir.empty()) {
-            std::cout << "Saving " << actual_num_eigs << " eigenvectors to disk..." << std::endl;
+        if (use_partial_solver) {
+            // ===== Memory-efficient partial eigenvalue computation using zheevr =====
+            // zheevr uses the Relatively Robust Representations (RRR) algorithm
+            // and can compute a subset of eigenvalues much more efficiently
             
-            // Convert evecs to vector of vectors format
-            std::vector<std::vector<Complex>> eigenvector_list(actual_num_eigs);
-            for (int i = 0; i < actual_num_eigs; i++) {
-                eigenvector_list[i].resize(N);
-                for (int j = 0; j < N; j++) {
-                    eigenvector_list[i][j] = evecs[i * N + j];
-                }
+            std::vector<Complex> evecs_partial;
+            if (compute_eigenvectors) {
+                evecs_partial.resize(static_cast<size_t>(actual_num_eigs) * N);
             }
             
-            HDF5IO::saveDiagonalizationResults(dir, eigenvalues, eigenvector_list, "Full Diagonalization");
-        } else if (!dir.empty()) {
-            HDF5IO::saveDiagonalizationResults(dir, eigenvalues, {}, "Full Diagonalization");
+            lapack_int m_found;  // Number of eigenvalues found
+            std::vector<lapack_int> isuppz(2 * actual_num_eigs);  // Support of eigenvectors
+            
+            // Compute smallest actual_num_eigs eigenvalues (indices 1 to actual_num_eigs in Fortran 1-based)
+            info = LAPACKE_zheevr(LAPACK_COL_MAJOR, 
+                                  compute_eigenvectors ? 'V' : 'N',  // Compute eigenvectors?
+                                  'I',                               // Compute eigenvalues by index range
+                                  'U',                               // Upper triangular
+                                  N,                                 // Matrix dimension
+                                  reinterpret_cast<lapack_complex_double*>(dense_matrix.data()),
+                                  N,                                 // Leading dimension
+                                  0.0, 0.0,                          // VL, VU (unused when range='I')
+                                  1, actual_num_eigs,                // IL, IU: eigenvalue indices (1-based)
+                                  LAPACKE_dlamch('S'),               // Abstol
+                                  &m_found,                          // Output: number found
+                                  evals.data(),                      // Output: eigenvalues
+                                  compute_eigenvectors ? reinterpret_cast<lapack_complex_double*>(evecs_partial.data()) : nullptr,
+                                  N,                                 // Leading dimension of Z
+                                  isuppz.data());                    // Support array
+            
+            if (info != 0) {
+                std::cerr << "LAPACKE_zheevr failed with error code " << info << std::endl;
+                return;
+            }
+            
+            std::cout << "Partial eigenvalue decomposition completed (" << m_found << " eigenvalues found)" << std::endl;
+            
+            // Extract eigenvalues
+            eigenvalues.resize(m_found);
+            for (lapack_int i = 0; i < m_found; i++) {
+                eigenvalues[i] = evals[i];
+            }
+            
+            // Save results using unified HDF5 function
+            if (compute_eigenvectors && !dir.empty()) {
+                std::cout << "Saving " << m_found << " eigenvectors to disk..." << std::endl;
+                
+                // Convert to vector of vectors format - read directly from evecs_partial
+                std::vector<std::vector<Complex>> eigenvector_list(m_found);
+                for (lapack_int i = 0; i < m_found; i++) {
+                    eigenvector_list[i].resize(N);
+                    // Eigenvectors are stored column-major in evecs_partial
+                    for (size_t j = 0; j < N; j++) {
+                        eigenvector_list[i][j] = evecs_partial[static_cast<size_t>(i) * N + j];
+                    }
+                }
+                
+                HDF5IO::saveDiagonalizationResults(dir, eigenvalues, eigenvector_list, "Full Diagonalization (partial)");
+            } else if (!dir.empty()) {
+                HDF5IO::saveDiagonalizationResults(dir, eigenvalues, {}, "Full Diagonalization (partial)");
+            }
+        } else {
+            // ===== Full eigenvalue computation using zheevd (divide-and-conquer) =====
+            // zheevd is typically 2-4x faster than zheev for large matrices
+            // Note: eigenvectors overwrite dense_matrix, so no extra allocation needed!
+            
+            info = LAPACKE_zheevd(LAPACK_COL_MAJOR, 
+                                  compute_eigenvectors ? 'V' : 'N', 
+                                  'U', 
+                                  N,
+                                  reinterpret_cast<lapack_complex_double*>(dense_matrix.data()),
+                                  N, 
+                                  evals.data());
+            
+            if (info != 0) {
+                std::cerr << "LAPACKE_zheevd failed with error code " << info << std::endl;
+                return;
+            }
+            
+            std::cout << "Eigenvalue decomposition completed (divide-and-conquer)" << std::endl;
+
+            // Extract requested number of eigenvalues
+            eigenvalues.resize(actual_num_eigs);
+            for (size_t i = 0; i < actual_num_eigs; i++) {
+                eigenvalues[i] = evals[i];
+            }
+            
+            // Save results using unified HDF5 function
+            // Note: eigenvectors are now stored IN dense_matrix (column-major)
+            if (compute_eigenvectors && !dir.empty()) {
+                std::cout << "Saving " << actual_num_eigs << " eigenvectors to disk..." << std::endl;
+                
+                // Convert dense_matrix (which now contains eigenvectors) to vector of vectors format
+                // No intermediate copy needed - read directly from dense_matrix
+                std::vector<std::vector<Complex>> eigenvector_list(actual_num_eigs);
+                for (size_t i = 0; i < actual_num_eigs; i++) {
+                    eigenvector_list[i].resize(N);
+                    // Eigenvectors are stored column-major: evec[i] is at dense_matrix[i*N:(i+1)*N]
+                    for (size_t j = 0; j < N; j++) {
+                        eigenvector_list[i][j] = dense_matrix[i * N + j];
+                    }
+                }
+                
+                HDF5IO::saveDiagonalizationResults(dir, eigenvalues, eigenvector_list, "Full Diagonalization");
+            } else if (!dir.empty()) {
+                HDF5IO::saveDiagonalizationResults(dir, eigenvalues, {}, "Full Diagonalization");
+            }
         }
     } 
     else {

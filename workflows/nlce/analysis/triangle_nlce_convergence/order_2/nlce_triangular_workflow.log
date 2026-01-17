@@ -1,0 +1,27 @@
+2026-01-17 17:30:47,523 - INFO - Using TRIANGLE-BASED NLCE (order = number of triangles)
+2026-01-17 17:30:47,523 - INFO -   Reference cluster counts: 1,1,3,5,12,35,98,299,... (OEIS A007854)
+2026-01-17 17:30:47,524 - INFO - ================================================================================
+2026-01-17 17:30:47,524 - INFO - Step 1: Generating triangle-based NLCE clusters (order = triangles)
+2026-01-17 17:30:47,524 - INFO - ================================================================================
+2026-01-17 17:30:47,524 - INFO - Running command: /home/pc_linux/ClassicalSpin_Cpp/pystandard/bin/python3 /home/pc_linux/exact_diagonalization_clean/exact_diagonalization_cpp/workflows/nlce/analysis/../run/../prep/generate_triangle_nlce_clusters.py --max_order=2 --output_dir=./triangle_nlce_convergence/order_2/clusters_order_2 --no_visualize
+2026-01-17 17:30:47,913 - INFO - Cluster generation completed successfully.
+2026-01-17 17:30:47,913 - INFO - Found 3 clusters to process.
+2026-01-17 17:30:47,913 - INFO - ================================================================================
+2026-01-17 17:30:47,913 - INFO - Step 2: Preparing Hamiltonian parameters for each cluster
+2026-01-17 17:30:47,913 - INFO - Model: heisenberg, J1=1.0, J2=0.0, h=0.0
+2026-01-17 17:30:47,913 - INFO - ================================================================================
+2026-01-17 17:30:48,137 - INFO - ================================================================================
+2026-01-17 17:30:48,137 - INFO - Step 3: Running Exact Diagonalization for each cluster
+2026-01-17 17:30:48,137 - INFO - ================================================================================
+2026-01-17 17:30:48,138 - INFO - Cluster 1 (1 sites, dim=2): Using FULL
+2026-01-17 17:30:48,629 - INFO - Cluster 2 (3 sites, dim=8): Using FULL
+2026-01-17 17:30:49,100 - INFO - Cluster 3 (5 sites, dim=32): Using FULL
+2026-01-17 17:30:49,569 - INFO - ================================================================================
+2026-01-17 17:30:49,570 - INFO - Step 4: Performing NLCE Summation
+2026-01-17 17:30:49,570 - INFO - ================================================================================
+2026-01-17 17:30:49,570 - INFO - Running command: /home/pc_linux/ClassicalSpin_Cpp/pystandard/bin/python3 /home/pc_linux/exact_diagonalization_clean/exact_diagonalization_cpp/workflows/nlce/analysis/../run/NLC_sum_triangular.py --cluster_dir=./triangle_nlce_convergence/order_2/clusters_order_2/cluster_info_order_2 --eigenvalue_dir=./triangle_nlce_convergence/order_2/ed_results_order_2 --output_dir=./triangle_nlce_convergence/order_2/nlc_results_order_2 --temp_min=0.1 --temp_max=10.0 --temp_bins=100 --max_order=2 --resummation=euler
+2026-01-17 17:30:50,656 - INFO - NLCE summation completed successfully.
+2026-01-17 17:30:50,656 - INFO - ================================================================================
+2026-01-17 17:30:50,656 - INFO - NLCE workflow completed!
+2026-01-17 17:30:50,656 - INFO - Results saved to: ./triangle_nlce_convergence/order_2
+2026-01-17 17:30:50,656 - INFO - ================================================================================

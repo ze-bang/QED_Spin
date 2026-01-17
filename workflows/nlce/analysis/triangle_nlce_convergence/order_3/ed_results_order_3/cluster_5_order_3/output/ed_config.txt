@@ -1,0 +1,21 @@
+# ED Configuration
+# Generated configuration file
+
+[Diagonalization]
+method = FULL
+num_eigenvalues = 128
+max_iterations = 10000
+tolerance = 1e-10
+compute_eigenvectors = false
+
+[System]
+num_sites = 7
+spin_length = 0.5
+hamiltonian_dir = ./triangle_nlce_convergence/order_3/hamiltonians_order_3/cluster_5_order_3
+
+[Workflow]
+output_dir = ./triangle_nlce_convergence/order_3/ed_results_order_3/cluster_5_order_3/output
+run_standard = true
+run_symmetrized = false
+run_streaming_symmetry = false
+compute_thermo = true

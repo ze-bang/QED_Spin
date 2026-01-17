@@ -7,6 +7,11 @@ This script orchestrates the full Numerical Linked Cluster Expansion workflow:
 2. Prepare Hamiltonian parameters for each cluster (J1-J2 Heisenberg, XXZ, etc.)
 3. Run Exact Diagonalization for each cluster to compute spectrum
 4. Perform NLCE summation to obtain thermodynamic properties
+
+Supports two NLCE expansion schemes:
+- Site-based NLCE (default): Order = number of sites
+- Triangle-based NLCE (--triangle_based): Order = number of triangles
+  This gives far fewer clusters at each order, useful for frustrated systems
 """
 
 import os
@@ -21,6 +26,11 @@ import logging
 from tqdm import tqdm
 import numpy as np
 import traceback
+
+# Compute workspace root from script location
+_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+_WORKSPACE_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(_SCRIPT_DIR)))
+_DEFAULT_ED_PATH = os.path.join(_WORKSPACE_ROOT, 'build', 'ED')
 
 try:
     import h5py
@@ -212,7 +222,8 @@ def main():
     # Parameters for the entire workflow
     parser.add_argument('--max_order', type=int, required=True, help='Maximum order of clusters to generate')
     parser.add_argument('--base_dir', type=str, default='./nlce_triangular_results', help='Base directory for all results')
-    parser.add_argument('--ed_executable', type=str, default='../../../build/ED', help='Path to the ED executable')
+    parser.add_argument('--ed_executable', type=str, default=_DEFAULT_ED_PATH, 
+                        help='Path to the ED executable')
     
     # Model parameters for triangular lattice
     parser.add_argument('--J1', type=float, default=1.0, help='Nearest-neighbor exchange coupling')
@@ -271,6 +282,11 @@ def main():
                        help='Use GPU-accelerated BLOCK_LANCZOS for large clusters')
     
     parser.add_argument('--visualize', action='store_true', help='Generate cluster visualizations')
+    
+    # NLCE expansion type (triangle-based is the default)
+    parser.add_argument('--site_based', action='store_true', 
+                       help='Use site-based NLCE (order = number of sites). '
+                            'Default is triangle-based which gives fewer clusters.')
 
     args = parser.parse_args()
     
@@ -280,6 +296,13 @@ def main():
     # Set up logging
     log_file = os.path.join(args.base_dir, 'nlce_triangular_workflow.log')
     setup_logging(log_file)
+    
+    # Log expansion type (triangle-based is the default)
+    if args.site_based:
+        logging.info("Using SITE-BASED NLCE (order = number of sites)")
+    else:
+        logging.info("Using TRIANGLE-BASED NLCE (order = number of triangles)")
+        logging.info("  Reference cluster counts: 1,1,3,5,12,35,98,299,... (OEIS A007854)")
     
     # Define directory structure
     cluster_dir = os.path.join(args.base_dir, f'clusters_order_{args.max_order}')
@@ -294,18 +317,36 @@ def main():
     # Step 1: Generate clusters
     if not args.skip_cluster_gen:
         logging.info("="*80)
-        logging.info("Step 1: Generating topologically distinct triangular lattice clusters")
+        if args.site_based:
+            logging.info("Step 1: Generating site-based NLCE clusters (order = sites)")
+        else:
+            logging.info("Step 1: Generating triangle-based NLCE clusters (order = triangles)")
         logging.info("="*80)
         
-        cmd = [
-            sys.executable,
-            os.path.join(os.path.dirname(__file__), '..', 'prep', 'generate_triangular_clusters.py'),
-            f'--max_order={args.max_order}',
-            f'--output_dir={cluster_dir}',
-        ]
-        
-        if args.visualize:
-            cmd.append('--visualize')
+        if args.site_based:
+            # Use site-based cluster generator
+            cmd = [
+                sys.executable,
+                os.path.join(os.path.dirname(__file__), '..', 'prep', 'generate_triangular_clusters.py'),
+                f'--max_order={args.max_order}',
+                f'--output_dir={cluster_dir}',
+            ]
+            
+            if args.visualize:
+                cmd.append('--visualize')
+        else:
+            # Use triangle-based cluster generator (default)
+            cmd = [
+                sys.executable,
+                os.path.join(os.path.dirname(__file__), '..', 'prep', 'generate_triangle_nlce_clusters.py'),
+                f'--max_order={args.max_order}',
+                f'--output_dir={cluster_dir}',
+            ]
+            
+            if args.visualize:
+                cmd.append('--visualize')
+            else:
+                cmd.append('--no_visualize')
         
         logging.info(f"Running command: {' '.join(cmd)}")
         try:

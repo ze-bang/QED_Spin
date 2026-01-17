@@ -1,0 +1,8 @@
+# Nearest neighbor list for triangular lattice cluster: cluster_3_order_2
+# Format: site_id, number_of_neighbors, [neighbor_ids]
+
+0 2 1 2
+1 4 0 2 3 4
+2 2 0 1
+3 2 1 4
+4 2 1 3
