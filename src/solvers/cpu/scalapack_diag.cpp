@@ -17,13 +17,79 @@
 #include <mpi.h>
 #endif
 
+// Use MKL ScaLAPACK header if available
+#ifdef WITH_MKL
+#include <mkl_scalapack.h>
+#include <mkl_blacs.h>
+#define SCALAPACK_INT MKL_INT
+
+// MKL BLACS uses lowercase blacs_* instead of standard Cblacs_* C interface.
+// Provide inline wrappers to unify the interface.
+inline void Cblacs_pinfo(int* mypnum, int* nprocs) {
+    MKL_INT mp = *mypnum, np = *nprocs;
+    blacs_pinfo(&mp, &np);
+    *mypnum = static_cast<int>(mp);
+    *nprocs = static_cast<int>(np);
+}
+inline void Cblacs_get(int context, int request, int* value) {
+    MKL_INT ctx = context, req = request, val = *value;
+    blacs_get(&ctx, &req, &val);
+    *value = static_cast<int>(val);
+}
+inline void Cblacs_gridinit(int* context, const char* order, int nprow, int npcol) {
+    MKL_INT ctx = *context, npr = nprow, npc = npcol;
+    blacs_gridinit(&ctx, order, &npr, &npc);
+    *context = static_cast<int>(ctx);
+}
+inline void Cblacs_gridinfo(int context, int* nprow, int* npcol, int* myrow, int* mycol) {
+    MKL_INT ctx = context, npr, npc, myr, myc;
+    blacs_gridinfo(&ctx, &npr, &npc, &myr, &myc);
+    *nprow = static_cast<int>(npr);
+    *npcol = static_cast<int>(npc);
+    *myrow = static_cast<int>(myr);
+    *mycol = static_cast<int>(myc);
+}
+inline void Cblacs_gridexit(int context) {
+    MKL_INT ctx = context;
+    blacs_gridexit(&ctx);
+}
+inline void Cblacs_exit(int doneflag) {
+    MKL_INT df = doneflag;
+    blacs_exit(&df);
+}
+inline void Cblacs_barrier(int context, const char* scope) {
+    MKL_INT ctx = context;
+    blacs_barrier(&ctx, scope);
+}
+#else
+#define SCALAPACK_INT int
+// Define MKL-compatible complex types for ScaLAPACK when MKL is not available.
+// Check for MKL types header guard to avoid conflict with system headers that
+// might use MKL (e.g., when system liblapack/cblas.h points to MKL).
+#ifndef _MKL_TYPES_H_
+#ifndef MKL_Complex8
+typedef struct {
+    float real;
+    float imag;
+} MKL_Complex8;
+#endif
+#ifndef MKL_Complex16
+typedef struct {
+    double real;
+    double imag;
+} MKL_Complex16;
+#endif
+#endif  // _MKL_TYPES_H_
+#endif  // WITH_MKL
+
 // ============================================================================
 // SCALAPACK/BLACS EXTERNAL DECLARATIONS
 // ============================================================================
 
-// BLACS routines (C interface)
+#ifndef WITH_MKL
+// When not using MKL, we need to declare BLACS and ScaLAPACK routines ourselves
 extern "C" {
-    // BLACS grid setup
+    // BLACS grid setup (C interface)
     void Cblacs_pinfo(int* mypnum, int* nprocs);
     void Cblacs_get(int context, int request, int* value);
     void Cblacs_gridinit(int* context, const char* order, int nprow, int npcol);
@@ -38,6 +104,11 @@ extern "C" {
     
     // Number of local rows/cols
     int numroc_(const int* n, const int* nb, const int* iproc, const int* isrcproc, const int* nprocs);
+    
+    // ScaLAPACK eigensolvers (Standard Fortran interface)
+    // Note: Modern gfortran and most ScaLAPACK builds use implicit string length handling
+    // or place hidden lengths at the very end. Testing shows Ubuntu's ScaLAPACK works
+    // without explicitly passing hidden string lengths from C/C++.
     
     // Double complex Hermitian eigensolver (divide-and-conquer)
     void pzheevd_(const char* jobz, const char* uplo, const int* n,
@@ -78,6 +149,7 @@ extern "C" {
                    void* b, const int* ib, const int* jb, const int* descb,
                    const int* context);
 }
+#endif // !WITH_MKL
 
 // ============================================================================
 // GLOBAL STATE FOR BLACS
@@ -503,10 +575,8 @@ ScaLAPACKResults scalapack_diagonalization(
     if (config.use_mixed_precision) {
         // Allocate local portion in single precision
         std::vector<ComplexFloat> local_A(static_cast<size_t>(local_rows) * local_cols);
-        std::vector<ComplexFloat> local_Z;
-        if (config.compute_eigenvectors) {
-            local_Z.resize(static_cast<size_t>(local_rows) * local_cols);
-        }
+        // Note: pcheevd always computes eigenvectors (divide-and-conquer limitation)
+        std::vector<ComplexFloat> local_Z(static_cast<size_t>(local_rows) * local_cols);
         
         if (g_mypnum == 0 && config.verbose) {
             size_t mem_per_proc = local_A.size() * sizeof(ComplexFloat);
@@ -534,49 +604,84 @@ ScaLAPACKResults scalapack_diagonalization(
         eigenvalues_single.resize(N);
         
         // Workspace query
-        int lwork = -1, lrwork = -1, liwork = -1;
+        SCALAPACK_INT lwork = -1, lrwork = -1, liwork = -1;
         ComplexFloat work_query;
         float rwork_query;
-        int iwork_query;
-        int one = 1;
+        SCALAPACK_INT iwork_query;
+        SCALAPACK_INT one = 1;
+        SCALAPACK_INT n_int = static_cast<SCALAPACK_INT>(n);
         
-        char jobz = config.compute_eigenvectors ? 'V' : 'N';
-        char uplo = 'U';
+        // Note: pcheevd does NOT support jobz='N' (eigenvalues only) in many implementations!
+        // Always use 'V' to avoid "illegal value" errors.
+        char jobz_str[2] = {'V', '\0'};
+        char uplo_str[2] = {'U', '\0'};
+        SCALAPACK_INT info_int = 0;
         
-        pcheevd_(&jobz, &uplo, &n,
-                 local_A.data(), &one, &one, desc_A,
+        // Cast local arrays to MKL types
+#ifdef WITH_MKL
+        MKL_Complex8* local_A_ptr = reinterpret_cast<MKL_Complex8*>(local_A.data());
+        MKL_Complex8* local_Z_ptr = reinterpret_cast<MKL_Complex8*>(local_Z.data());
+        
+        pcheevd_(jobz_str, uplo_str, &n_int,
+                 local_A_ptr, &one, &one, desc_A,
                  eigenvalues_single.data(),
-                 local_Z.data(), &one, &one, desc_A,
+                 local_Z_ptr, &one, &one, desc_A,
+                 reinterpret_cast<MKL_Complex8*>(&work_query), &lwork,
+                 &rwork_query, &lrwork,
+                 &iwork_query, &liwork,
+                 &info_int);
+#else
+        ComplexFloat* local_A_ptr = local_A.data();
+        ComplexFloat* local_Z_ptr = local_Z.data();
+        
+        // Standard Fortran call - no hidden string lengths needed for system ScaLAPACK
+        pcheevd_(jobz_str, uplo_str, &n_int,
+                 local_A_ptr, &one, &one, desc_A,
+                 eigenvalues_single.data(),
+                 local_Z_ptr, &one, &one, desc_A,
                  &work_query, &lwork,
                  &rwork_query, &lrwork,
                  &iwork_query, &liwork,
-                 &info);
+                 &info_int);
+#endif
         
-        if (info != 0) {
-            std::cerr << "pcheevd workspace query failed: info=" << info << std::endl;
+        if (info_int != 0) {
+            std::cerr << "pcheevd workspace query failed: info=" << info_int << std::endl;
             return results;
         }
         
-        lwork = static_cast<int>(work_query.real()) + 1;
-        lrwork = static_cast<int>(rwork_query) + 1;
+        lwork = static_cast<SCALAPACK_INT>(work_query.real()) + 1;
+        lrwork = static_cast<SCALAPACK_INT>(rwork_query) + 1;
         liwork = iwork_query + 1;
         
         std::vector<ComplexFloat> work(lwork);
         std::vector<float> rwork(lrwork);
-        std::vector<int> iwork(liwork);
+        std::vector<SCALAPACK_INT> iwork(liwork);
         
         // Actual computation
-        pcheevd_(&jobz, &uplo, &n,
-                 local_A.data(), &one, &one, desc_A,
+#ifdef WITH_MKL
+        pcheevd_(jobz_str, uplo_str, &n_int,
+                 local_A_ptr, &one, &one, desc_A,
                  eigenvalues_single.data(),
-                 local_Z.data(), &one, &one, desc_A,
+                 local_Z_ptr, &one, &one, desc_A,
+                 reinterpret_cast<MKL_Complex8*>(work.data()), &lwork,
+                 rwork.data(), &lrwork,
+                 iwork.data(), &liwork,
+                 &info_int);
+#else
+        // Standard Fortran call - no hidden string lengths needed for system ScaLAPACK
+        pcheevd_(jobz_str, uplo_str, &n_int,
+                 local_A_ptr, &one, &one, desc_A,
+                 eigenvalues_single.data(),
+                 local_Z_ptr, &one, &one, desc_A,
                  work.data(), &lwork,
                  rwork.data(), &lrwork,
                  iwork.data(), &liwork,
-                 &info);
+                 &info_int);
+#endif
         
-        if (info != 0) {
-            std::cerr << "pcheevd failed: info=" << info << std::endl;
+        if (info_int != 0) {
+            std::cerr << "pcheevd failed: info=" << info_int << std::endl;
             return results;
         }
         
@@ -671,10 +776,9 @@ ScaLAPACKResults scalapack_diagonalization(
     } else {
         // Double precision path
         std::vector<Complex> local_A(static_cast<size_t>(local_rows) * local_cols);
-        std::vector<Complex> local_Z;
-        if (config.compute_eigenvectors) {
-            local_Z.resize(static_cast<size_t>(local_rows) * local_cols);
-        }
+        // Note: pzheevd always computes eigenvectors (divide-and-conquer limitation),
+        // so we must always allocate local_Z even if we don't need the eigenvectors.
+        std::vector<Complex> local_Z(static_cast<size_t>(local_rows) * local_cols);
         
         if (g_mypnum == 0 && config.verbose) {
             size_t mem_per_proc = local_A.size() * sizeof(Complex);
@@ -696,48 +800,85 @@ ScaLAPACKResults scalapack_diagonalization(
         auto diag_start = std::chrono::high_resolution_clock::now();
         
         // Workspace query
-        int lwork = -1, lrwork = -1, liwork = -1;
+        SCALAPACK_INT lwork = -1, lrwork = -1, liwork = -1;
         Complex work_query;
         double rwork_query;
-        int iwork_query;
-        int one = 1;
+        SCALAPACK_INT iwork_query;
+        SCALAPACK_INT one = 1;
+        SCALAPACK_INT n_int = static_cast<SCALAPACK_INT>(n);
+        SCALAPACK_INT info_int = 0;
         
-        char jobz = config.compute_eigenvectors ? 'V' : 'N';
-        char uplo = 'U';
+        // Note: pzheevd does NOT support jobz='N' (eigenvalues only) in many implementations!
+        // The divide-and-conquer algorithm requires computing eigenvectors.
+        // Always use 'V' and ignore the vectors if not needed.
+        char jobz_str[2] = {'V', '\0'};  // Always compute vectors (pzheevd limitation)
+        char uplo_str[2] = {'U', '\0'};
         
-        pzheevd_(&jobz, &uplo, &n,
+        if (!config.compute_eigenvectors && g_mypnum == 0 && config.verbose) {
+            std::cout << "Note: pzheevd always computes eigenvectors (divide-and-conquer limitation)" << std::endl;
+        }
+        
+#ifdef WITH_MKL
+        // Use MKL types for complex arrays
+        MKL_Complex16* local_A_ptr = reinterpret_cast<MKL_Complex16*>(local_A.data());
+        MKL_Complex16* local_Z_ptr = reinterpret_cast<MKL_Complex16*>(local_Z.data());
+        
+        pzheevd_(jobz_str, uplo_str, &n_int,
+                 local_A_ptr, &one, &one, desc_A,
+                 eigenvalues_double.data(),
+                 local_Z_ptr, &one, &one, desc_A,
+                 reinterpret_cast<MKL_Complex16*>(&work_query), &lwork,
+                 &rwork_query, &lrwork,
+                 &iwork_query, &liwork,
+                 &info_int);
+#else
+        // Standard Fortran call - no hidden string lengths needed for system ScaLAPACK
+        pzheevd_(jobz_str, uplo_str, &n_int,
                  local_A.data(), &one, &one, desc_A,
                  eigenvalues_double.data(),
                  local_Z.data(), &one, &one, desc_A,
                  &work_query, &lwork,
                  &rwork_query, &lrwork,
                  &iwork_query, &liwork,
-                 &info);
+                 &info_int);
+#endif
         
-        if (info != 0) {
-            std::cerr << "pzheevd workspace query failed: info=" << info << std::endl;
+        if (info_int != 0) {
+            std::cerr << "pzheevd workspace query failed: info=" << info_int << std::endl;
             return results;
         }
         
-        lwork = static_cast<int>(work_query.real()) + 1;
-        lrwork = static_cast<int>(rwork_query) + 1;
+        lwork = static_cast<SCALAPACK_INT>(work_query.real()) + 1;
+        lrwork = static_cast<SCALAPACK_INT>(rwork_query) + 1;
         liwork = iwork_query + 1;
         
         std::vector<Complex> work(lwork);
         std::vector<double> rwork(lrwork);
-        std::vector<int> iwork(liwork);
+        std::vector<SCALAPACK_INT> iwork(liwork);
         
-        pzheevd_(&jobz, &uplo, &n,
+#ifdef WITH_MKL
+        pzheevd_(jobz_str, uplo_str, &n_int,
+                 local_A_ptr, &one, &one, desc_A,
+                 eigenvalues_double.data(),
+                 local_Z_ptr, &one, &one, desc_A,
+                 reinterpret_cast<MKL_Complex16*>(work.data()), &lwork,
+                 rwork.data(), &lrwork,
+                 iwork.data(), &liwork,
+                 &info_int);
+#else
+        // Standard Fortran call - no hidden string lengths needed for system ScaLAPACK
+        pzheevd_(jobz_str, uplo_str, &n_int,
                  local_A.data(), &one, &one, desc_A,
                  eigenvalues_double.data(),
                  local_Z.data(), &one, &one, desc_A,
                  work.data(), &lwork,
                  rwork.data(), &lrwork,
                  iwork.data(), &liwork,
-                 &info);
+                 &info_int);
+#endif
         
-        if (info != 0) {
-            std::cerr << "pzheevd failed: info=" << info << std::endl;
+        if (info_int != 0) {
+            std::cerr << "pzheevd failed: info=" << info_int << std::endl;
             return results;
         }
         

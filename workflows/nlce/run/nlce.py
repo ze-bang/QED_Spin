@@ -90,13 +90,9 @@ def run_ed_for_cluster(args):
     - Auto-selects between symmetrized and streaming-symmetry modes
     - Exploits spatial symmetries to reduce Hilbert space dimension
     
-    Method selection (automatic by default):
-    - FULL: For small clusters (dim <= 4096, i.e. <= 12 sites)
-    - BLOCK_LANCZOS: For larger clusters with degeneracies (Heisenberg models)
-    - BLOCK_LANCZOS_GPU: For larger clusters when GPU is available
-    
-    Block size for BLOCK_LANCZOS should be at least as large as the expected
-    degeneracy to properly resolve degenerate eigenspaces.
+    Method selection based on system size:
+    - FULL: For small clusters (< scalapack_threshold sites)
+    - SCALAPACK_MIXED: For large clusters (distributed diagonalization with mixed precision)
     """
     cluster_id, order, ed_executable, ham_dir, ed_dir, ed_options, symmetrized, use_gpu = args
     
@@ -126,52 +122,29 @@ def run_ed_for_cluster(args):
             if not line.startswith('#') and line.strip():
                 num_sites += 1
     
-    # Calculate Hilbert space dimension for method selection
+    # Calculate Hilbert space dimension
     hilbert_dim = 2 ** num_sites
     
-    # Thresholds for method selection
-    full_ed_threshold = ed_options.get("full_ed_threshold", 12)  # Use FULL for <= 12 sites (dim <= 4096)
-    block_lanczos_block_size = ed_options.get("block_size", 8)  # Block size >= expected degeneracy
+    # Threshold for switching to ScaLAPACK (distributed diagonalization)
+    scalapack_threshold = ed_options.get("scalapack_threshold", 16)  # Default: 16 sites (dim=65536)
+    use_scalapack = (num_sites >= scalapack_threshold and ed_options.get("use_scalapack", True))
     
-    # Determine method: FULL for small clusters, BLOCK_LANCZOS for larger ones
-    # For thermodynamics, we need ALL eigenvalues, so we use --symm which auto-selects
-    # the best symmetry-exploiting mode based on system size
-    use_block_lanczos = (num_sites > full_ed_threshold and ed_options.get("auto_method", True))
-    
-    if ed_options["method"] == 'mTPQ':
+    if use_scalapack:
+        # Large cluster: use ScaLAPACK with mixed precision for efficient distributed diagonalization
+        logging.info(f"Cluster {cluster_id} ({num_sites} sites, dim={hilbert_dim}): Using SCALAPACK_MIXED diagonalization")
         cmd = [
             ed_executable,
             ham_subdir,
-            f'--method={ed_options["method"]}',
-            f'--output={cluster_ed_dir}/output',
-            f'--num_sites={num_sites}',
-            '--spin_length=0.5',
-            '--iterations=100000',
-            '--large_value=100'
-        ]
-    elif use_block_lanczos:
-        # Large cluster: use BLOCK_LANCZOS for efficient full spectrum calculation
-        # Block size should be >= degeneracy (for Heisenberg, use at least 4-8)
-        # Use GPU version if available for better performance
-        block_lanczos_method = 'BLOCK_LANCZOS_GPU' if use_gpu else 'BLOCK_LANCZOS'
-        gpu_indicator = ' (GPU)' if use_gpu else ' (CPU)'
-        logging.info(f"Cluster {cluster_id} ({num_sites} sites, dim={hilbert_dim}): "
-                    f"Using {block_lanczos_method} with --symm (block_size={block_lanczos_block_size}){gpu_indicator}")
-        cmd = [
-            ed_executable,
-            ham_subdir,
-            f'--method={block_lanczos_method}',
+            '--method=SCALAPACK_MIXED',
             '--eigenvalues=FULL',
-            f'--block_size={block_lanczos_block_size}',
             f'--output={cluster_ed_dir}/output',
             f'--num_sites={num_sites}',
             '--spin_length=0.5',
             '--symm',  # Auto-select best symmetry mode
         ]
     else:
-        # Small cluster: use FULL diagonalization with --symm
-        logging.info(f"Cluster {cluster_id} ({num_sites} sites, dim={hilbert_dim}): "
-                    f"Using FULL with --symm")
+        # Small cluster: use standard FULL diagonalization
+        logging.info(f"Cluster {cluster_id} ({num_sites} sites, dim={hilbert_dim}): Using FULL diagonalization")
         cmd = [
             ed_executable,
             ham_subdir,
@@ -411,20 +384,22 @@ def main():
     # Random transverse field
     parser.add_argument('--random_field_width', type=float, default=0, help='Width of the random transverse field')
 
-    # Automatic method and symmetry selection (default behavior)
-    # Uses --symm flag which auto-selects between symmetrized and streaming-symmetry modes
+    # ScaLAPACK distributed diagonalization for large clusters
+    parser.add_argument('--scalapack_threshold', type=int, default=16,
+                       help='Site threshold for switching to ScaLAPACK (default: 16). '
+                            'Clusters with >= sites use SCALAPACK_MIXED for distributed diagonalization.')
+    parser.add_argument('--no_scalapack', action='store_true',
+                       help='Disable ScaLAPACK - always use standard FULL diagonalization.')
+    
+    # Legacy arguments kept for backwards compatibility
     parser.add_argument('--no_auto_method', action='store_true',
-                       help='Disable automatic method selection. By default, uses FULL for small '
-                            'clusters and BLOCK_LANCZOS for larger ones.')
+                       help='(Ignored) Legacy argument.')
     parser.add_argument('--full_ed_threshold', type=int, default=12,
-                       help='Site threshold for FULL vs BLOCK_LANCZOS (default: 12). '
-                            'Clusters with more sites use BLOCK_LANCZOS.')
+                       help='(Ignored) Legacy argument - use --scalapack_threshold instead.')
     parser.add_argument('--block_size', type=int, default=8,
-                       help='Block size for BLOCK_LANCZOS (default: 8). '
-                            'Should be >= expected degeneracy (e.g., 4-8 for Heisenberg).')
+                       help='(Ignored) Legacy argument.')
     parser.add_argument('--use_gpu', action='store_true',
-                       help='Use GPU-accelerated BLOCK_LANCZOS for large clusters (requires CUDA). '
-                            'Falls back to CPU if GPU is not available.')
+                       help='(Ignored) Legacy argument.')
     
     # ========== Lanczos-Boosted NLCE Parameters ==========
     # Based on Bhattaram & Khatami method where large clusters use partial Lanczos
@@ -589,35 +564,26 @@ def main():
         
         else:
             # ========== Standard NLCE Mode ==========
-            # Prepare ED options with automatic method and symmetry selection
+            # Prepare ED options with ScaLAPACK for large clusters
             ed_options = {
-                "method": args.method,
+                "method": "FULL",
                 "thermo": args.thermo,
                 "temp_min": args.temp_min,
                 "temp_max": args.temp_max,
                 "temp_bins": args.temp_bins,
                 "measure_spin": args.measure_spin,
-                # Automatic method selection (FULL vs BLOCK_LANCZOS)
-                "auto_method": not args.no_auto_method,
-                "full_ed_threshold": args.full_ed_threshold,
-                "block_size": args.block_size,
+                "scalapack_threshold": args.scalapack_threshold,
+                "use_scalapack": not args.no_scalapack,
             }
             
-            # Check GPU availability if --use_gpu is requested
-            use_gpu = False
-            if args.use_gpu:
-                use_gpu = check_gpu_available()
-                if use_gpu:
-                    logging.info("GPU detected - will use BLOCK_LANCZOS_GPU for large clusters")
-                else:
-                    logging.warning("GPU requested but not available - falling back to CPU BLOCK_LANCZOS")
+            use_gpu = False  # GPU not used for FULL/ScaLAPACK diagonalization
             
             logging.info(f"NLCE ED Configuration:")
-            logging.info(f"  - Method selection: {'automatic' if ed_options['auto_method'] else 'manual (' + args.method + ')'}")
-            if ed_options['auto_method']:
-                logging.info(f"  - FULL for clusters with <= {args.full_ed_threshold} sites")
-                block_method = 'BLOCK_LANCZOS_GPU' if use_gpu else 'BLOCK_LANCZOS'
-                logging.info(f"  - {block_method} (block_size={args.block_size}) for larger clusters")
+            if not args.no_scalapack:
+                logging.info(f"  - Small clusters (< {args.scalapack_threshold} sites): FULL diagonalization")
+                logging.info(f"  - Large clusters (>= {args.scalapack_threshold} sites): SCALAPACK_MIXED (distributed)")
+            else:
+                logging.info(f"  - Method: FULL diagonalization (ScaLAPACK disabled)")
             logging.info(f"  - Symmetry: --symm (auto-select best mode)")
             
             # Prepare arguments for each cluster

@@ -368,16 +368,22 @@ def main():
     parser.add_argument('--symmetrized', action='store_true', 
                        help='Legacy: force symmetrized mode (now handled automatically)')
     
-    # Automatic method and symmetry selection (default behavior)
+    # ScaLAPACK distributed diagonalization for large clusters
+    parser.add_argument('--scalapack_threshold', type=int, default=16,
+                       help='Site threshold for switching to ScaLAPACK (default: 16). '
+                            'Clusters with >= sites use SCALAPACK_MIXED for distributed diagonalization.')
+    parser.add_argument('--no_scalapack', action='store_true',
+                       help='Disable ScaLAPACK - always use standard FULL diagonalization.')
+    
+    # Legacy arguments kept for backwards compatibility
     parser.add_argument('--no_auto_method', action='store_true',
-                       help='Disable automatic method selection')
+                       help='(Ignored) Legacy argument.')
     parser.add_argument('--full_ed_threshold', type=int, default=12,
-                       help='Site threshold for FULL vs BLOCK_LANCZOS (default: 12)')
+                       help='(Ignored) Legacy argument - use --scalapack_threshold instead.')
     parser.add_argument('--block_size', type=int, default=8,
-                       help='Block size for BLOCK_LANCZOS (default: 8, should be >= degeneracy)')
+                       help='(Ignored) Legacy argument.')
     parser.add_argument('--use_gpu', action='store_true',
-                       help='Use GPU-accelerated BLOCK_LANCZOS for large clusters (requires CUDA). '
-                            'Falls back to CPU if GPU is not available.')
+                       help='(Ignored) Legacy argument.')
     
     # Lanczos-Boosted NLCE Parameters
     parser.add_argument('--lanczos_boost', action='store_true',

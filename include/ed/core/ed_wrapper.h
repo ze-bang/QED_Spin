@@ -771,8 +771,8 @@ EDResults exact_diagonalization_core(
                 scalapack_config.npcol = params.scalapack_npcol;
                 scalapack_config.mb = params.scalapack_block_size;
                 scalapack_config.nb = params.scalapack_block_size;
-                scalapack_config.use_mixed_precision = (method == DiagonalizationMethod::SCALAPACK_MIXED) 
-                                                       || params.scalapack_mixed_precision;
+                // SCALAPACK uses double precision, SCALAPACK_MIXED uses single with refinement
+                scalapack_config.use_mixed_precision = (method == DiagonalizationMethod::SCALAPACK_MIXED);
                 scalapack_config.refinement_tol = params.scalapack_refinement_tol;
                 scalapack_config.max_refinement_iter = params.scalapack_max_refinement_iter;
                 scalapack_config.compute_eigenvectors = params.compute_eigenvectors;

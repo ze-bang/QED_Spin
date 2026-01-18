@@ -146,6 +146,7 @@ Hamiltonians, then derives thermodynamic properties and response functions.
 | `LANCZOS` | Iterative ground state | Ground state + few excited |
 | `ARPACK` | Sparse eigenvalue solver | Multiple eigenvalues |
 | `ARPACK_ADVANCED` | ARPACK with auto-tuning | Difficult convergence |
+| `SCALAPACK` | Distributed full diag. (MPI) | Large full diag. on clusters |
 | `FTLM` | Finite-Temperature Lanczos | Thermodynamics (moderate T) |
 | `LTLM` | Low-Temperature Lanczos | Thermodynamics (low T) |
 | `HYBRID` | LTLM (low T) + FTLM (high T) | Full temperature range |
@@ -154,6 +155,45 @@ Hamiltonians, then derives thermodynamic properties and response functions.
 | `OSS` | Optimal Spectrum Solver | All eigenvalues |
 | `FTLM_GPU` | GPU-accelerated FTLM | Large systems with GPU |
 | `LANCZOS_GPU` | GPU-accelerated Lanczos | Large ground state calcs |
+
+#### ScaLAPACK Distributed Diagonalization
+
+The `SCALAPACK` method enables distributed-memory full diagonalization using MPI.
+This is useful for systems too large for single-node FULL diagonalization but where
+you need all or many eigenvalues.
+
+**Requirements:**
+- MPI (OpenMPI, MPICH, or Intel MPI)
+- ScaLAPACK library
+- Compatible BLAS/LAPACK backend
+
+**Build:**
+```bash
+cmake -DWITH_MPI=ON -DWITH_SCALAPACK=ON ..
+```
+
+**Run:**
+```bash
+mpirun -np 8 ./ED config.cfg  # Uses 8 MPI processes
+```
+
+**Known compatibility issues:**
+
+| BLAS/LAPACK Backend | ScaLAPACK Source | Status |
+|---------------------|------------------|--------|
+| Intel MKL | MKL ScaLAPACK | ✅ Works (with Intel MPI) |
+| Intel MKL | MKL ScaLAPACK | ⚠️ May crash (with OpenMPI) |
+| OpenBLAS | System ScaLAPACK | ✅ Works |
+| Intel MKL | System ScaLAPACK | ❌ ABI mismatch |
+| AOCL BLIS | System ScaLAPACK | ❌ Symbol conflicts |
+
+**Recommendation:** For MKL users, either:
+1. Use Intel MPI instead of OpenMPI
+2. Switch system alternatives to OpenBLAS:
+   ```bash
+   sudo update-alternatives --config liblapack.so.3-x86_64-linux-gnu
+   # Select the OpenBLAS option
+   ```
 
 ### Command-Line Interface
 

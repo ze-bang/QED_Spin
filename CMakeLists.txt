@@ -1,5 +1,34 @@
 cmake_minimum_required(VERSION 3.18)
 
+# =============================================================================
+# BLAS/LAPACK BACKEND CONFIGURATION
+# =============================================================================
+# This project supports multiple BLAS/LAPACK backends. To avoid ABI conflicts,
+# we define coherent "library profiles" that ensure all components are compatible.
+#
+# Available profiles (set via -DBLAS_PROFILE=<profile>):
+#   AUTO      - Auto-detect best available (default)
+#   FLEXIBLAS - FlexiBLAS wrapper (recommended for HPC clusters)
+#   MKL       - Intel MKL (full stack including ScaLAPACK)
+#   AOCL      - AMD AOCL (BLIS + libflame)
+#   OPENBLAS  - OpenBLAS
+#   GENERIC   - System BLAS/LAPACK (reference implementation)
+#
+# ScaLAPACK compatibility matrix:
+#   MKL profile      -> MKL ScaLAPACK (requires Intel MPI or compatible OpenMPI)
+#   FLEXIBLAS        -> System ScaLAPACK (FlexiBLAS backend at runtime)
+#   OPENBLAS/GENERIC -> System ScaLAPACK (built against same LAPACK)
+#   AOCL             -> ScaLAPACK disabled (ABI conflicts with system ScaLAPACK)
+# =============================================================================
+
+set(BLAS_PROFILE "AUTO" CACHE STRING "BLAS/LAPACK library profile (AUTO, FLEXIBLAS, MKL, AOCL, OPENBLAS, GENERIC)")
+set_property(CACHE BLAS_PROFILE PROPERTY STRINGS AUTO FLEXIBLAS MKL AOCL OPENBLAS GENERIC)
+
+# Optional custom ScaLAPACK root (for AOCL or custom builds)
+set(SCALAPACK_ROOT "" CACHE PATH "Root path to a custom ScaLAPACK installation")
+# Optional custom LAPACKE root (to avoid system BLAS/LAPACK alternatives)
+set(LAPACKE_ROOT "" CACHE PATH "Root path to a custom LAPACKE installation")
+
 # Detect host CPU vendor to pick optimized BLAS/LAPACK defaults
 set(CPU_VENDOR "Unknown")
 if(EXISTS "/proc/cpuinfo")
@@ -12,41 +41,69 @@ if(EXISTS "/proc/cpuinfo")
 endif()
 message(STATUS "Detected CPU vendor: ${CPU_VENDOR}")
 
+# Legacy option compatibility - map old options to BLAS_PROFILE
+if(DEFINED USE_AOCL_BLIS AND USE_AOCL_BLIS AND BLAS_PROFILE STREQUAL "AUTO")
+    set(BLAS_PROFILE "AOCL")
+endif()
+if(DEFINED WITH_MKL AND WITH_MKL AND BLAS_PROFILE STREQUAL "AUTO")
+    set(BLAS_PROFILE "MKL")
+endif()
+if(DEFINED USE_FLEXIBLAS AND USE_FLEXIBLAS AND BLAS_PROFILE STREQUAL "AUTO")
+    set(BLAS_PROFILE "FLEXIBLAS")
+endif()
+
 set(DEFAULT_WITH_CUDA ON)
 set(DEFAULT_WITH_MPI ON)
-set(DEFAULT_WITH_MKL ON)
-set(DEFAULT_USE_ONEMKL ON)
-set(DEFAULT_USE_AOCL_BLIS OFF)
 
-if(CPU_VENDOR STREQUAL "AMD")
-    set(DEFAULT_WITH_MKL OFF)
-    set(DEFAULT_USE_ONEMKL OFF)
-    set(DEFAULT_USE_AOCL_BLIS ON)
-elseif(CPU_VENDOR STREQUAL "Intel")
-    # keep MKL defaults
-else()
-    # Unknown vendor: keep generic defaults (MKL optional, AOCL disabled)
+# Set defaults based on CPU vendor (only if AUTO)
+if(BLAS_PROFILE STREQUAL "AUTO")
+    if(CPU_VENDOR STREQUAL "AMD")
+        # Check if AOCL is installed
+        if(EXISTS "/opt/AMD/aocl" OR DEFINED ENV{AOCL_ROOT} OR DEFINED ENV{EBROOTAOCLMINBLAS})
+            set(BLAS_PROFILE "AOCL")
+        elseif(DEFINED ENV{EBROOTFLEXIBLAS} OR DEFINED ENV{FLEXIBLAS_ROOT})
+            set(BLAS_PROFILE "FLEXIBLAS")
+        else()
+            set(BLAS_PROFILE "OPENBLAS")
+        endif()
+    elseif(CPU_VENDOR STREQUAL "Intel")
+        if(EXISTS "/opt/intel/oneapi/mkl" OR DEFINED ENV{MKLROOT})
+            set(BLAS_PROFILE "MKL")
+        elseif(DEFINED ENV{EBROOTFLEXIBLAS})
+            set(BLAS_PROFILE "FLEXIBLAS")
+        else()
+            set(BLAS_PROFILE "OPENBLAS")
+        endif()
+    else()
+        # Unknown vendor - try FlexiBLAS, then OpenBLAS
+        if(DEFINED ENV{EBROOTFLEXIBLAS} OR DEFINED ENV{FLEXIBLAS_ROOT})
+            set(BLAS_PROFILE "FLEXIBLAS")
+        else()
+            set(BLAS_PROFILE "OPENBLAS")
+        endif()
+    endif()
+endif()
+
+message(STATUS "BLAS/LAPACK profile: ${BLAS_PROFILE}")
+
+# Derive legacy flags from BLAS_PROFILE for compatibility
+set(WITH_MKL OFF)
+set(USE_ONEMKL OFF)
+set(USE_AOCL_BLIS OFF)
+set(USE_FLEXIBLAS OFF)
+
+if(BLAS_PROFILE STREQUAL "MKL")
+    set(WITH_MKL ON)
+    set(USE_ONEMKL ON)
+elseif(BLAS_PROFILE STREQUAL "AOCL")
+    set(USE_AOCL_BLIS ON)
+elseif(BLAS_PROFILE STREQUAL "FLEXIBLAS")
+    set(USE_FLEXIBLAS ON)
 endif()
 
 # Options (define before project)
 option(WITH_CUDA "Build with CUDA support" ${DEFAULT_WITH_CUDA})
 option(WITH_MPI "Build with MPI support" ${DEFAULT_WITH_MPI})
-option(WITH_MKL "Build with Intel MKL support" ${DEFAULT_WITH_MKL})
-option(USE_ONEMKL "Use Intel oneMKL instead of traditional MKL" ${DEFAULT_USE_ONEMKL})
-option(USE_AOCL_BLIS "Use AMD AOCL-BLIS optimized BLAS/LAPACK" ${DEFAULT_USE_AOCL_BLIS})
-
-if(USE_AOCL_BLIS AND WITH_MKL)
-    message(STATUS "AOCL-BLIS requested; disabling MKL to avoid conflicting BLAS backends")
-    set(WITH_MKL OFF)
-endif()
-
-if(USE_AOCL_BLIS)
-    set(USE_ONEMKL OFF)
-endif()
-
-if(NOT WITH_MKL)
-    set(USE_ONEMKL OFF)
-endif()
 
 # Set languages based on options
 if(WITH_CUDA)
@@ -123,161 +180,466 @@ include_directories(${SOLVERS_CPU_DIR})
 include_directories(${SOLVERS_GPU_DIR})
 include_directories(${IO_DIR})
 
-# Configure BLAS/LAPACK backends
+# =============================================================================
+# BLAS/LAPACK LIBRARY CONFIGURATION
+# =============================================================================
+# Configure based on selected BLAS_PROFILE
+
 set(BLAS_LIBRARIES "")
 set(LAPACK_LIBRARIES "")
 set(LAPACKE_LIBRARIES "")
 set(EXTRA_LINALG_LIBRARIES "")
+set(BLAS_VENDOR "Unknown")
+set(SCALAPACK_COMPATIBLE ON)  # Whether ScaLAPACK can be safely used
 
-if(USE_AOCL_BLIS)
-    message(STATUS "Configuring AMD AOCL-BLIS libraries")
-
-    set(_AOCL_HINT_DIRS)
-    # Check for Compute Canada EasyBuild environment variables first
-    if(DEFINED ENV{EBROOTAOCLMINBLAS})
-        list(APPEND _AOCL_HINT_DIRS $ENV{EBROOTAOCLMINBLAS})
-        message(STATUS "  Found AOCL BLAS from EasyBuild: $ENV{EBROOTAOCLMINBLAS}")
-    endif()
-    if(DEFINED ENV{EBROOTAOCLMINLAPACK})
-        list(APPEND _AOCL_HINT_DIRS $ENV{EBROOTAOCLMINLAPACK})
-        message(STATUS "  Found AOCL LAPACK from EasyBuild: $ENV{EBROOTAOCLMINLAPACK}")
-    endif()
+# -----------------------------------------------------------------------------
+# Profile: FLEXIBLAS - Runtime-switchable BLAS (ideal for HPC clusters)
+# -----------------------------------------------------------------------------
+if(BLAS_PROFILE STREQUAL "FLEXIBLAS")
+    message(STATUS "Configuring FlexiBLAS (runtime-switchable BLAS)")
+    
+    set(_FLEXIBLAS_HINT_DIRS)
     if(DEFINED ENV{EBROOTFLEXIBLAS})
-        list(APPEND _AOCL_HINT_DIRS $ENV{EBROOTFLEXIBLAS})
+        list(APPEND _FLEXIBLAS_HINT_DIRS $ENV{EBROOTFLEXIBLAS})
     endif()
+    if(DEFINED ENV{FLEXIBLAS_ROOT})
+        list(APPEND _FLEXIBLAS_HINT_DIRS $ENV{FLEXIBLAS_ROOT})
+    endif()
+    list(APPEND _FLEXIBLAS_HINT_DIRS /usr /usr/local)
+    
+    find_library(FLEXIBLAS_LIBRARY NAMES flexiblas
+        HINTS ${_FLEXIBLAS_HINT_DIRS}
+        PATH_SUFFIXES lib lib64
+    )
+    
+    find_path(FLEXIBLAS_INCLUDE_DIR flexiblas/cblas.h cblas.h
+        HINTS ${_FLEXIBLAS_HINT_DIRS}
+        PATH_SUFFIXES include include/flexiblas
+    )
+    
+    if(FLEXIBLAS_LIBRARY)
+        set(BLAS_LIBRARIES ${FLEXIBLAS_LIBRARY})
+        set(LAPACK_LIBRARIES ${FLEXIBLAS_LIBRARY})
+        set(LAPACKE_LIBRARIES ${FLEXIBLAS_LIBRARY})
+        if(FLEXIBLAS_INCLUDE_DIR)
+            include_directories(SYSTEM ${FLEXIBLAS_INCLUDE_DIR})
+        endif()
+        add_definitions(-DUSE_FLEXIBLAS)
+        set(BLAS_VENDOR "FlexiBLAS")
+        message(STATUS "  FlexiBLAS library: ${FLEXIBLAS_LIBRARY}")
+        message(STATUS "  Runtime backend selection: Set FLEXIBLAS=<backend> environment variable")
+        message(STATUS "    Available backends: OpenBLAS, BLIS, MKL, ATLAS, NETLIB")
+    else()
+        message(WARNING "FlexiBLAS not found, falling back to OPENBLAS profile")
+        set(BLAS_PROFILE "OPENBLAS")
+    endif()
+endif()
+
+# -----------------------------------------------------------------------------
+# Profile: MKL - Intel Math Kernel Library (full stack)
+# -----------------------------------------------------------------------------
+if(BLAS_PROFILE STREQUAL "MKL")
+    message(STATUS "Configuring Intel MKL")
+    
+    # Find MKL
+    set(_MKL_HINT_DIRS
+        /opt/intel/oneapi/mkl/latest
+        /opt/intel/oneapi/mkl/2025.1
+        /opt/intel/mkl
+        $ENV{MKLROOT}
+    )
+    
+    find_path(MKL_INCLUDE_DIR mkl.h
+        HINTS ${_MKL_HINT_DIRS}
+        PATH_SUFFIXES include
+    )
+    
+    find_library(MKL_CORE NAMES mkl_core
+        HINTS ${_MKL_HINT_DIRS}
+        PATH_SUFFIXES lib lib/intel64
+    )
+    
+    find_library(MKL_INTEL_LP64 NAMES mkl_intel_lp64
+        HINTS ${_MKL_HINT_DIRS}
+        PATH_SUFFIXES lib lib/intel64
+    )
+    
+    find_library(MKL_INTEL_THREAD NAMES mkl_intel_thread
+        HINTS ${_MKL_HINT_DIRS}
+        PATH_SUFFIXES lib lib/intel64
+    )
+    
+    find_library(IOMP5_LIBRARY NAMES iomp5
+        HINTS ${_MKL_HINT_DIRS} /opt/intel/oneapi/compiler/latest/lib
+        PATH_SUFFIXES lib lib/intel64 ../compiler/lib/intel64
+    )
+    
+    if(MKL_INCLUDE_DIR AND MKL_CORE AND MKL_INTEL_LP64 AND MKL_INTEL_THREAD)
+        include_directories(SYSTEM ${MKL_INCLUDE_DIR})
+        set(BLAS_LIBRARIES ${MKL_INTEL_LP64} ${MKL_INTEL_THREAD} ${MKL_CORE})
+        set(LAPACK_LIBRARIES ${BLAS_LIBRARIES})
+        set(LAPACKE_LIBRARIES ${BLAS_LIBRARIES})
+        if(IOMP5_LIBRARY)
+            list(APPEND EXTRA_LINALG_LIBRARIES ${IOMP5_LIBRARY})
+        endif()
+        list(APPEND EXTRA_LINALG_LIBRARIES pthread m dl)
+        add_definitions(-DWITH_MKL)
+        set(BLAS_VENDOR "Intel MKL")
+        set(WITH_MKL ON)
+        message(STATUS "  MKL include: ${MKL_INCLUDE_DIR}")
+        message(STATUS "  MKL libraries: ${BLAS_LIBRARIES}")
+    else()
+        message(WARNING "MKL not found, falling back to OPENBLAS profile")
+        set(BLAS_PROFILE "OPENBLAS")
+        set(WITH_MKL OFF)
+    endif()
+endif()
+
+# -----------------------------------------------------------------------------
+# Profile: AOCL - Full AMD AOCL stack (BLIS + libflame + AOCL-ScaLAPACK)
+# Uses AOCC Fortran runtime for full compatibility with AOCL ScaLAPACK
+# Requires: AOCC compiler installed (/opt/AMD/aocc-compiler-*)
+# -----------------------------------------------------------------------------
+if(BLAS_PROFILE STREQUAL "AOCL")
+    message(STATUS "Configuring full AMD AOCL stack (BLIS + libflame + ScaLAPACK)")
+    
+    set(_AOCL_HINT_DIRS)
     if(DEFINED ENV{AOCL_ROOT})
         list(APPEND _AOCL_HINT_DIRS $ENV{AOCL_ROOT})
     endif()
     list(APPEND _AOCL_HINT_DIRS
-        /opt/AMD/aocl
-        /opt/AMD/aocl/aocl-linux-x86_64
-        /opt/AMD/aocl/aocl-linux-aocc-5.0.0
         /opt/AMD/aocl/aocl-linux-aocc-5.0.0/aocc
+        /opt/AMD/aocl/aocl-linux-x86_64
+        /opt/AMD/aocl
         /opt/aocl
-        /usr/lib/aocl
     )
-
+    
+    # Find AOCC compiler runtime (required for AOCL ScaLAPACK)
+    set(_AOCC_HINT_DIRS
+        /opt/AMD/aocc-compiler-5.0.0
+        /opt/AMD/aocc-compiler-4.2.0
+        /opt/AMD/aocc-compiler-4.1.0
+        /opt/AMD/aocc-compiler-4.0.0
+    )
+    find_path(AOCC_LIB_DIR libflang.so
+        HINTS ${_AOCC_HINT_DIRS}
+        PATH_SUFFIXES lib lib64
+    )
+    
     find_path(AOCL_INCLUDE_DIR cblas.h
         HINTS ${_AOCL_HINT_DIRS}
-        PATH_SUFFIXES include include/aocl include/amd-blis include/blis include/BLIS
+        PATH_SUFFIXES include include/blis
     )
-
+    
     find_library(AOCL_BLIS_LIBRARY NAMES blis-mt blis
         HINTS ${_AOCL_HINT_DIRS}
-        PATH_SUFFIXES lib lib64 lib/aocl/lib
+        PATH_SUFFIXES lib lib64
     )
-
-    find_library(AOCL_LAPACK_LIBRARY NAMES aoclflapack flame lapack
+    
+    find_library(AOCL_LAPACK_LIBRARY NAMES flame
         HINTS ${_AOCL_HINT_DIRS}
-        PATH_SUFFIXES lib lib64 lib/aocl/lib
+        PATH_SUFFIXES lib lib64
     )
-
-    find_library(AOCL_LAPACKE_LIBRARY NAMES lapacke
+    
+    find_library(AOCL_SCALAPACK_LIBRARY NAMES scalapack
         HINTS ${_AOCL_HINT_DIRS}
-        PATH_SUFFIXES lib lib64 lib/aocl/lib
+        PATH_SUFFIXES lib lib64
     )
-
-    if(AOCL_INCLUDE_DIR AND AOCL_BLIS_LIBRARY AND AOCL_LAPACK_LIBRARY AND AOCL_LAPACKE_LIBRARY)
+    
+    if(AOCL_INCLUDE_DIR AND AOCL_BLIS_LIBRARY AND AOCL_LAPACK_LIBRARY AND AOCL_SCALAPACK_LIBRARY AND AOCC_LIB_DIR)
         include_directories(SYSTEM ${AOCL_INCLUDE_DIR})
         set(BLAS_LIBRARIES ${AOCL_BLIS_LIBRARY})
         set(LAPACK_LIBRARIES ${AOCL_LAPACK_LIBRARY})
-        set(LAPACKE_LIBRARIES ${AOCL_LAPACKE_LIBRARY})
+        set(LAPACKE_LIBRARIES ${AOCL_LAPACK_LIBRARY})  # libflame includes LAPACKE
+        set(SCALAPACK_LIBRARIES ${AOCL_SCALAPACK_LIBRARY})
+        
+        # Get AOCL lib directory
+        get_filename_component(AOCL_LIB_DIR ${AOCL_BLIS_LIBRARY} DIRECTORY)
+        
+        # RPATH setup: AOCC runtime first (for libflang, libflangrti, libpgmath)
+        # then AOCL libs, then libomp
+        list(APPEND CMAKE_BUILD_RPATH ${AOCC_LIB_DIR})
+        list(APPEND CMAKE_BUILD_RPATH ${AOCL_LIB_DIR})
+        list(APPEND CMAKE_INSTALL_RPATH ${AOCC_LIB_DIR})
+        list(APPEND CMAKE_INSTALL_RPATH ${AOCL_LIB_DIR})
+        set(CMAKE_BUILD_WITH_INSTALL_RPATH TRUE)
+        
+        # Use DT_RPATH for indirect dependency resolution
+        set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -Wl,--disable-new-dtags")
+        
+        # Find libomp for AOCL
+        if(EXISTS "/usr/lib/llvm-18/lib/libomp.so")
+            list(APPEND CMAKE_BUILD_RPATH /usr/lib/llvm-18/lib)
+            list(APPEND CMAKE_INSTALL_RPATH /usr/lib/llvm-18/lib)
+        endif()
+        
+        list(APPEND EXTRA_LINALG_LIBRARIES pthread m)
+        
         add_definitions(-DUSE_AOCL_BLIS)
-        # Look for OpenMP runtime - try AOCL's libomp first, then system OpenMP
-        find_library(AOCL_OMP_LIBRARY NAMES omp
-            HINTS ${_AOCL_HINT_DIRS}
-            PATH_SUFFIXES "" lib lib64 lib/aocl/lib aocc/lib lib/llvm-18/lib
-        )
-        if(AOCL_OMP_LIBRARY)
-            list(APPEND EXTRA_LINALG_LIBRARIES ${AOCL_OMP_LIBRARY})
-            message(STATUS "  AOCL OpenMP runtime: ${AOCL_OMP_LIBRARY}")
-        else()
-            # Fallback to GCC's OpenMP (libgomp) which works fine with AOCL BLIS-mt
-            find_package(OpenMP QUIET)
-            if(OpenMP_CXX_FOUND)
-                list(APPEND EXTRA_LINALG_LIBRARIES OpenMP::OpenMP_CXX)
-                message(STATUS "  Using system OpenMP (libgomp) for AOCL threading")
-            else()
-                message(STATUS "  Note: AOCL-BLIS multi-threaded library will use pthreads")
-            endif()
+        add_definitions(-DWITH_SCALAPACK)
+        set(USE_AOCL_BLIS ON)
+        set(BLAS_VENDOR "AMD AOCL (full stack)")
+        set(SCALAPACK_COMPATIBLE ON)
+        set(WITH_SCALAPACK ON)
+        
+        message(STATUS "  AOCL include: ${AOCL_INCLUDE_DIR}")
+        message(STATUS "  AOCL BLIS: ${AOCL_BLIS_LIBRARY}")
+        message(STATUS "  AOCL libflame: ${AOCL_LAPACK_LIBRARY}")
+        message(STATUS "  AOCL ScaLAPACK: ${AOCL_SCALAPACK_LIBRARY}")
+        message(STATUS "  AOCC runtime: ${AOCC_LIB_DIR}")
+        message(STATUS "  RPATH: ${AOCC_LIB_DIR}:${AOCL_LIB_DIR}")
+    elseif(AOCL_INCLUDE_DIR AND AOCL_BLIS_LIBRARY AND AOCL_LAPACK_LIBRARY AND NOT AOCC_LIB_DIR)
+        message(WARNING "AOCC compiler not found - AOCL ScaLAPACK requires AOCC runtime")
+        message(WARNING "Install AOCC: https://www.amd.com/en/developer/aocc.html")
+        message(WARNING "Falling back to AOCL without ScaLAPACK")
+        
+        include_directories(SYSTEM ${AOCL_INCLUDE_DIR})
+        set(BLAS_LIBRARIES ${AOCL_BLIS_LIBRARY})
+        set(LAPACK_LIBRARIES ${AOCL_LAPACK_LIBRARY})
+        set(LAPACKE_LIBRARIES ${AOCL_LAPACK_LIBRARY})
+        
+        get_filename_component(AOCL_LIB_DIR ${AOCL_BLIS_LIBRARY} DIRECTORY)
+        list(APPEND CMAKE_BUILD_RPATH ${AOCL_LIB_DIR})
+        list(APPEND CMAKE_INSTALL_RPATH ${AOCL_LIB_DIR})
+        set(CMAKE_BUILD_WITH_INSTALL_RPATH TRUE)
+        
+        if(EXISTS "/usr/lib/llvm-18/lib/libomp.so")
+            list(APPEND CMAKE_BUILD_RPATH /usr/lib/llvm-18/lib)
+            list(APPEND CMAKE_INSTALL_RPATH /usr/lib/llvm-18/lib)
         endif()
-        message(STATUS "  AOCL include dir: ${AOCL_INCLUDE_DIR}")
-        message(STATUS "  AOCL BLIS library: ${AOCL_BLIS_LIBRARY}")
-        message(STATUS "  AOCL LAPACK library: ${AOCL_LAPACK_LIBRARY}")
-        message(STATUS "  AOCL LAPACKE library: ${AOCL_LAPACKE_LIBRARY}")
+        
+        list(APPEND EXTRA_LINALG_LIBRARIES pthread m)
+        add_definitions(-DUSE_AOCL_BLIS)
+        set(USE_AOCL_BLIS ON)
+        set(BLAS_VENDOR "AMD AOCL (no ScaLAPACK)")
+        set(SCALAPACK_COMPATIBLE OFF)
     else()
-        message(FATAL_ERROR "AOCL-BLIS requested but required components were not found. Set AOCL_ROOT to your AOCL installation path or disable USE_AOCL_BLIS.")
-    endif()
-else()
-    find_package(BLAS REQUIRED)
-    find_package(LAPACK REQUIRED)
-
-    if(WITH_MKL)
-        if(USE_ONEMKL)
-            # Use oneMKL from oneAPI
-            find_package(MKL CONFIG QUIET)
-            if(MKL_FOUND)
-                message(STATUS "Using Intel oneMKL from: ${MKLROOT}")
-            else()
-                message(STATUS "Intel oneMKL not found, falling back to traditional MKL detection")
-                set(USE_ONEMKL OFF)
-            endif()
-        endif()
-
-        if(NOT USE_ONEMKL)
-            # Use traditional MKL - add include directories
-            find_path(MKL_INCLUDE_DIR mkl.h
-                HINTS
-                    /usr/include/mkl
-                    /opt/intel/mkl/include
-                    /opt/intel/oneapi/mkl/latest/include
-                    /opt/intel/compilers_and_libraries/linux/mkl/include
-                PATH_SUFFIXES mkl
-            )
-
-            if(MKL_INCLUDE_DIR)
-                include_directories(SYSTEM ${MKL_INCLUDE_DIR})
-                message(STATUS "Found MKL headers at: ${MKL_INCLUDE_DIR}")
-            else()
-                message(WARNING "MKL headers not found, disabling MKL support")
-                set(WITH_MKL OFF)
-                set(USE_ONEMKL OFF)
-            endif()
-        endif()
-
-        if(WITH_MKL)
-            add_definitions(-DWITH_MKL)
-        endif()
-    endif()
-
-    message(STATUS "BLAS library: ${BLAS_LIBRARIES}")
-    message(STATUS "LAPACK library: ${LAPACK_LIBRARIES}")
-
-    if(BLAS_LIBRARIES MATCHES "mkl")
-        message(STATUS "BLAS/LAPACK vendor: Intel MKL")
-    elseif(BLAS_LIBRARIES MATCHES "openblas")
-        message(STATUS "BLAS vendor: OpenBLAS")
-    elseif(BLAS_LIBRARIES MATCHES "atlas")
-        message(STATUS "BLAS vendor: ATLAS")
-    elseif(BLAS_LIBRARIES MATCHES "Accelerate")
-        message(STATUS "BLAS/LAPACK vendor: Apple Accelerate Framework")
-    elseif(BLAS_LIBRARIES MATCHES "FlexiBLAS")
-        message(STATUS "BLAS vendor: FlexiBLAS")
-    else()
-        message(STATUS "BLAS/LAPACK vendor: Unknown/Generic")
-    endif()
-
-    find_package(LAPACKE QUIET)
-    if(NOT LAPACKE_FOUND)
-        # Try to find it manually
-        find_library(LAPACKE_LIBRARY NAMES lapacke)
-        if(LAPACKE_LIBRARY)
-            set(LAPACKE_LIBRARIES ${LAPACKE_LIBRARY})
-        else()
-            message(FATAL_ERROR "LAPACKE library not found")
-        endif()
+        message(WARNING "AOCL not found, falling back to OPENBLAS profile")
+        set(BLAS_PROFILE "OPENBLAS")
+        set(USE_AOCL_BLIS OFF)
     endif()
 endif()
+
+# -----------------------------------------------------------------------------
+# Profile: AOCL_BLIS - AMD BLIS for BLAS + Reference LAPACK
+# This profile is ScaLAPACK-compatible (all gfortran ABI)
+# Use with custom ScaLAPACK built against BLIS + reference LAPACK
+# -----------------------------------------------------------------------------
+if(BLAS_PROFILE STREQUAL "AOCL_BLIS")
+    message(STATUS "Configuring AMD BLIS + Reference LAPACK (ScaLAPACK-compatible)")
+    
+    set(_AOCL_HINT_DIRS)
+    if(DEFINED ENV{AOCL_ROOT})
+        list(APPEND _AOCL_HINT_DIRS $ENV{AOCL_ROOT})
+    endif()
+    list(APPEND _AOCL_HINT_DIRS
+        /opt/AMD/aocl/aocl-linux-aocc-5.0.0/aocc
+        /opt/AMD/aocl/aocl-linux-x86_64
+        /opt/AMD/aocl
+        /opt/aocl
+    )
+    
+    find_path(AOCL_INCLUDE_DIR cblas.h
+        HINTS ${_AOCL_HINT_DIRS}
+        PATH_SUFFIXES include include/blis
+    )
+    
+    find_library(AOCL_BLIS_LIBRARY NAMES blis-mt blis
+        HINTS ${_AOCL_HINT_DIRS}
+        PATH_SUFFIXES lib lib64
+    )
+    
+    # Find reference LAPACK (gfortran-compiled, no Fortran runtime conflicts)
+    find_library(REFLAPACK_LIBRARY NAMES lapack
+        PATHS 
+            /usr/lib/x86_64-linux-gnu/lapack
+            /usr/lib/lapack
+        NO_DEFAULT_PATH
+    )
+
+    # Default LAPACKE_ROOT to local reference build if present
+    if(NOT LAPACKE_ROOT AND EXISTS "/home/pc_linux/exact_diagonalization_clean/lapacke_ref/install")
+        set(LAPACKE_ROOT "/home/pc_linux/exact_diagonalization_clean/lapacke_ref/install")
+    endif()
+    
+    if(AOCL_INCLUDE_DIR AND AOCL_BLIS_LIBRARY AND REFLAPACK_LIBRARY)
+        include_directories(SYSTEM ${AOCL_INCLUDE_DIR})
+        set(BLAS_LIBRARIES ${AOCL_BLIS_LIBRARY})
+        set(LAPACK_LIBRARIES ${REFLAPACK_LIBRARY})
+        
+        # Reference LAPACK may depend on BLAS - ensure linking order
+        list(APPEND LAPACK_LIBRARIES ${AOCL_BLIS_LIBRARY})
+        
+        # Set RPATH to ensure BLIS is found at runtime
+        get_filename_component(AOCL_LIB_DIR ${AOCL_BLIS_LIBRARY} DIRECTORY)
+        list(APPEND CMAKE_BUILD_RPATH ${AOCL_LIB_DIR})
+        list(APPEND CMAKE_INSTALL_RPATH ${AOCL_LIB_DIR})
+        set(CMAKE_BUILD_WITH_INSTALL_RPATH TRUE)
+
+        # BLAS shim to override system libblas (avoids MKL alternatives via liblapacke)
+        set(BLAS_SHIM_DIR "/home/pc_linux/exact_diagonalization_clean/blas_shim")
+        if(EXISTS "${BLAS_SHIM_DIR}/libblas.so.3")
+            list(PREPEND CMAKE_BUILD_RPATH ${BLAS_SHIM_DIR})
+            list(PREPEND CMAKE_INSTALL_RPATH ${BLAS_SHIM_DIR})
+            message(STATUS "  Added BLAS shim RPATH (prepend): ${BLAS_SHIM_DIR}")
+        endif()
+
+        # AOCL BLIS depends on libomp
+        if(EXISTS "/usr/lib/llvm-18/lib/libomp.so")
+            list(APPEND CMAKE_BUILD_RPATH /usr/lib/llvm-18/lib)
+            list(APPEND CMAKE_INSTALL_RPATH /usr/lib/llvm-18/lib)
+            message(STATUS "  Added libomp RPATH: /usr/lib/llvm-18/lib")
+        endif()
+
+        # Use DT_RPATH instead of DT_RUNPATH so indirect deps (liblapacke -> libblas)
+        # honor the shim path without requiring LD_LIBRARY_PATH
+        set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -Wl,--disable-new-dtags")
+        
+        # LAPACKE from custom root if provided (avoids system BLAS/LAPACK alternatives)
+        if(LAPACKE_ROOT)
+            find_library(LAPACKE_LIBRARY NAMES lapacke
+                HINTS ${LAPACKE_ROOT}/lib ${LAPACKE_ROOT}/lib64
+                NO_DEFAULT_PATH
+            )
+            if(LAPACKE_LIBRARY)
+                set(LAPACKE_LIBRARIES ${LAPACKE_LIBRARY})
+                get_filename_component(LAPACKE_LIB_DIR ${LAPACKE_LIBRARY} DIRECTORY)
+                list(PREPEND CMAKE_BUILD_RPATH ${LAPACKE_LIB_DIR})
+                list(PREPEND CMAKE_INSTALL_RPATH ${LAPACKE_LIB_DIR})
+                set(CMAKE_BUILD_WITH_INSTALL_RPATH TRUE)
+                message(STATUS "  LAPACKE from: ${LAPACKE_LIBRARY}")
+                message(STATUS "  Added RPATH (prepend): ${LAPACKE_LIB_DIR}")
+            else()
+                message(WARNING "LAPACKE_ROOT is set but liblapacke not found; falling back to system LAPACKE")
+            endif()
+        endif()
+        if(NOT LAPACKE_LIBRARIES)
+            find_library(LAPACKE_LIBRARY NAMES lapacke)
+            if(LAPACKE_LIBRARY)
+                set(LAPACKE_LIBRARIES ${LAPACKE_LIBRARY})
+            else()
+                set(LAPACKE_LIBRARIES ${REFLAPACK_LIBRARY})
+            endif()
+        endif()
+        
+        find_package(OpenMP QUIET)
+        if(OpenMP_CXX_FOUND)
+            list(APPEND EXTRA_LINALG_LIBRARIES OpenMP::OpenMP_CXX)
+        endif()
+        list(APPEND EXTRA_LINALG_LIBRARIES pthread m gfortran)
+        
+        add_definitions(-DUSE_AOCL_BLIS)
+        set(USE_AOCL_BLIS ON)
+        set(BLAS_VENDOR "AMD BLIS + Reference LAPACK")
+        set(SCALAPACK_COMPATIBLE ON)  # Compatible with gfortran-compiled ScaLAPACK
+        
+        message(STATUS "  AOCL BLIS: ${AOCL_BLIS_LIBRARY}")
+        message(STATUS "  Reference LAPACK: ${REFLAPACK_LIBRARY}")
+        message(STATUS "  Added RPATH: ${AOCL_LIB_DIR}")
+        message(STATUS "  ScaLAPACK: Compatible (use -DSCALAPACK_ROOT=... for custom build)")
+    else()
+        if(NOT AOCL_BLIS_LIBRARY)
+            message(WARNING "AOCL BLIS not found")
+        endif()
+        if(NOT REFLAPACK_LIBRARY)
+            message(WARNING "Reference LAPACK not found at /usr/lib/x86_64-linux-gnu/lapack")
+        endif()
+        message(WARNING "Falling back to OPENBLAS profile")
+        set(BLAS_PROFILE "OPENBLAS")
+        set(USE_AOCL_BLIS OFF)
+    endif()
+endif()
+
+# -----------------------------------------------------------------------------
+# Profile: OPENBLAS - OpenBLAS (good default for most systems)
+# -----------------------------------------------------------------------------
+if(BLAS_PROFILE STREQUAL "OPENBLAS")
+    message(STATUS "Configuring OpenBLAS")
+    
+    # Try to find OpenBLAS specifically to avoid MKL masquerading as system BLAS
+    find_library(OPENBLAS_LIBRARY NAMES openblas openblasp
+        PATHS 
+            /usr/lib/x86_64-linux-gnu/openblas-pthread
+            /usr/lib/x86_64-linux-gnu/openblas-openmp
+            /usr/lib/x86_64-linux-gnu/openblas-serial
+            /usr/lib/openblas
+        NO_DEFAULT_PATH
+    )
+    
+    if(NOT OPENBLAS_LIBRARY)
+        # Fall back to CMake's FindBLAS but check it's not MKL
+        find_package(BLAS QUIET)
+        if(BLAS_FOUND)
+            # Check if this is actually MKL in disguise
+            string(FIND "${BLAS_LIBRARIES}" "mkl" _MKL_CHECK)
+            if(_MKL_CHECK GREATER -1)
+                message(STATUS "  System BLAS is MKL (via alternatives), looking for explicit OpenBLAS...")
+                find_library(OPENBLAS_LIBRARY NAMES openblas)
+            else()
+                set(OPENBLAS_LIBRARY ${BLAS_LIBRARIES})
+            endif()
+        endif()
+    endif()
+    
+    if(OPENBLAS_LIBRARY)
+        set(BLAS_LIBRARIES ${OPENBLAS_LIBRARY})
+        # OpenBLAS includes LAPACK
+        set(LAPACK_LIBRARIES ${OPENBLAS_LIBRARY})
+        
+        # Find LAPACKE (might be separate or integrated)
+        find_library(LAPACKE_LIB NAMES lapacke
+            PATHS /usr/lib/x86_64-linux-gnu
+        )
+        if(LAPACKE_LIB)
+            set(LAPACKE_LIBRARIES ${LAPACKE_LIB})
+        else()
+            set(LAPACKE_LIBRARIES ${OPENBLAS_LIBRARY})
+        endif()
+        
+        set(BLAS_VENDOR "OpenBLAS")
+        message(STATUS "  OpenBLAS library: ${OPENBLAS_LIBRARY}")
+    else()
+        message(STATUS "  OpenBLAS not found, falling back to GENERIC")
+        set(BLAS_PROFILE "GENERIC")
+    endif()
+endif()
+
+# -----------------------------------------------------------------------------
+# Profile: GENERIC - System BLAS/LAPACK (reference or whatever is default)
+# -----------------------------------------------------------------------------
+if(BLAS_PROFILE STREQUAL "GENERIC")
+    message(STATUS "Configuring generic system BLAS/LAPACK")
+    
+    find_package(BLAS REQUIRED)
+    find_package(LAPACK REQUIRED)
+    
+    set(BLAS_LIBRARIES ${BLAS_LIBRARIES})
+    set(LAPACK_LIBRARIES ${LAPACK_LIBRARIES})
+    
+    # Try to find LAPACKE
+    find_library(LAPACKE_LIB NAMES lapacke)
+    if(LAPACKE_LIB)
+        set(LAPACKE_LIBRARIES ${LAPACKE_LIB})
+    else()
+        set(LAPACKE_LIBRARIES ${LAPACK_LIBRARIES})
+    endif()
+    
+    set(BLAS_VENDOR "Generic")
+    message(STATUS "  BLAS: ${BLAS_LIBRARIES}")
+    message(STATUS "  LAPACK: ${LAPACK_LIBRARIES}")
+    
+    # Check if system LAPACK is actually MKL (affects ScaLAPACK compatibility)
+    string(FIND "${LAPACK_LIBRARIES}" "mkl" _MKL_CHECK)
+    if(_MKL_CHECK GREATER -1)
+        message(STATUS "  Note: System LAPACK points to MKL")
+        message(STATUS "        This may cause issues with system ScaLAPACK")
+        message(STATUS "        Consider: sudo update-alternatives --config liblapack.so.3-x86_64-linux-gnu")
+    endif()
+endif()
+
+message(STATUS "BLAS/LAPACK vendor: ${BLAS_VENDOR}")
+message(STATUS "BLAS library: ${BLAS_LIBRARIES}")
+message(STATUS "LAPACK library: ${LAPACK_LIBRARIES}")
 
 # Find Eigen3
 find_package(Eigen3 REQUIRED)
@@ -329,36 +691,103 @@ if(WITH_MPI)
     include_directories(SYSTEM ${MPI_CXX_INCLUDE_PATH})
     add_definitions(-DWITH_MPI)
     
+    # Check MPI implementation for ScaLAPACK compatibility
+    if(MPI_CXX_LIBRARY_VERSION_STRING MATCHES "Intel" OR MPI_C_COMPILER MATCHES "mpiicpc")
+        set(MPI_IS_INTEL TRUE)
+        message(STATUS "Detected Intel MPI")
+    elseif(MPI_CXX_LIBRARY_VERSION_STRING MATCHES "Open MPI" OR MPI_C_COMPILER MATCHES "mpicc")
+        set(MPI_IS_OPENMPI TRUE)
+        message(STATUS "Detected OpenMPI")
+    elseif(MPI_CXX_LIBRARY_VERSION_STRING MATCHES "MPICH")
+        set(MPI_IS_MPICH TRUE)
+        message(STATUS "Detected MPICH")
+    endif()
+    
     # ScaLAPACK for distributed diagonalization
     option(WITH_SCALAPACK "Build with ScaLAPACK support for distributed diagonalization" ON)
     if(WITH_SCALAPACK)
-        # Try to find ScaLAPACK
-        # Check for vendor-specific ScaLAPACK first
-        set(SCALAPACK_LIBRARIES "")
-        
-        if(WITH_MKL)
-            # Intel MKL includes ScaLAPACK
-            find_library(MKL_SCALAPACK_LIBRARY NAMES mkl_scalapack_lp64 mkl_scalapack_ilp64
-                HINTS 
-                    /opt/intel/oneapi/mkl/latest/lib/intel64
-                    /opt/intel/mkl/lib/intel64
-                    $ENV{MKLROOT}/lib/intel64
+        # Custom ScaLAPACK override (e.g., AOCL-linked ScaLAPACK)
+        if(SCALAPACK_ROOT)
+            find_library(SCALAPACK_LIBRARY NAMES scalapack scalapack-openmpi
+                HINTS ${SCALAPACK_ROOT}/lib ${SCALAPACK_ROOT}/lib64
+                NO_DEFAULT_PATH  # Don't fall back to system ScaLAPACK
             )
-            find_library(MKL_BLACS_LIBRARY NAMES mkl_blacs_openmpi_lp64 mkl_blacs_intelmpi_lp64 mkl_blacs_lp64
-                HINTS 
-                    /opt/intel/oneapi/mkl/latest/lib/intel64
-                    /opt/intel/mkl/lib/intel64
-                    $ENV{MKLROOT}/lib/intel64
+            find_library(BLACS_LIBRARY NAMES blacs blacs-openmpi blacsF77init-openmpi blacsCinit-openmpi
+                HINTS ${SCALAPACK_ROOT}/lib ${SCALAPACK_ROOT}/lib64
+                NO_DEFAULT_PATH
             )
-            if(MKL_SCALAPACK_LIBRARY AND MKL_BLACS_LIBRARY)
-                set(SCALAPACK_LIBRARIES ${MKL_SCALAPACK_LIBRARY} ${MKL_BLACS_LIBRARY})
-                message(STATUS "Using MKL ScaLAPACK: ${MKL_SCALAPACK_LIBRARY}")
-                message(STATUS "Using MKL BLACS: ${MKL_BLACS_LIBRARY}")
+            if(SCALAPACK_LIBRARY)
+                set(SCALAPACK_LIBRARIES ${SCALAPACK_LIBRARY})
+                if(BLACS_LIBRARY)
+                    list(APPEND SCALAPACK_LIBRARIES ${BLACS_LIBRARY})
+                endif()
+                set(SCALAPACK_COMPATIBLE ON)
+                message(STATUS "Using custom ScaLAPACK from SCALAPACK_ROOT: ${SCALAPACK_LIBRARY}")
+                
+                # Set RPATH to ensure custom ScaLAPACK is found at runtime
+                # PREPEND to ensure it's searched BEFORE BLAS directory (which may have incompatible ScaLAPACK)
+                get_filename_component(SCALAPACK_LIB_DIR ${SCALAPACK_LIBRARY} DIRECTORY)
+                list(PREPEND CMAKE_BUILD_RPATH ${SCALAPACK_LIB_DIR})
+                list(PREPEND CMAKE_INSTALL_RPATH ${SCALAPACK_LIB_DIR})
+                set(CMAKE_BUILD_WITH_INSTALL_RPATH TRUE)
+                message(STATUS "  Added RPATH (prepend): ${SCALAPACK_LIB_DIR}")
+            else()
+                message(WARNING "SCALAPACK_ROOT is set but no ScaLAPACK library was found in ${SCALAPACK_ROOT}")
             endif()
         endif()
-        
-        # Try generic ScaLAPACK if MKL not found
+
+        # Check profile-based ScaLAPACK compatibility
+        if(NOT SCALAPACK_COMPATIBLE AND NOT SCALAPACK_LIBRARIES)
+            message(WARNING "ScaLAPACK disabled: ${BLAS_PROFILE} profile indicates incompatible configuration")
+            message(WARNING "Common causes:")
+            message(WARNING "  - AOCL with system ScaLAPACK linked to MKL")
+            message(WARNING "  - MKL ScaLAPACK with OpenMPI (ABI mismatch)")
+            message(WARNING "Solutions: Use OPENBLAS profile, or Intel MPI with MKL profile")
+            set(WITH_SCALAPACK OFF)
+        endif()
+    endif()
+    
+    if(WITH_SCALAPACK)
         if(NOT SCALAPACK_LIBRARIES)
+            set(SCALAPACK_LIBRARIES "")
+        endif()
+        
+        # Profile-specific ScaLAPACK detection
+        if(NOT SCALAPACK_LIBRARIES AND BLAS_PROFILE STREQUAL "MKL")
+            # MKL ScaLAPACK - prefer Intel MPI BLACS, warn about OpenMPI
+            find_library(MKL_SCALAPACK_LIBRARY NAMES mkl_scalapack_lp64
+                HINTS $ENV{MKLROOT}/lib/intel64 $ENV{MKLROOT}/lib
+                /opt/intel/oneapi/mkl/latest/lib/intel64
+                /opt/intel/oneapi/mkl/latest/lib
+            )
+            
+            # Select BLACS based on MPI implementation
+            if(MPI_IS_INTEL)
+                find_library(MKL_BLACS_LIBRARY NAMES mkl_blacs_intelmpi_lp64
+                    HINTS $ENV{MKLROOT}/lib/intel64 $ENV{MKLROOT}/lib
+                    /opt/intel/oneapi/mkl/latest/lib/intel64
+                )
+                if(MKL_SCALAPACK_LIBRARY AND MKL_BLACS_LIBRARY)
+                    set(SCALAPACK_LIBRARIES ${MKL_SCALAPACK_LIBRARY} ${MKL_BLACS_LIBRARY})
+                    message(STATUS "MKL ScaLAPACK with Intel MPI BLACS: ${MKL_SCALAPACK_LIBRARY}")
+                endif()
+            elseif(MPI_IS_OPENMPI)
+                # OpenMPI with MKL ScaLAPACK has known ABI issues
+                message(WARNING "MKL ScaLAPACK with OpenMPI has known compatibility issues.")
+                message(WARNING "Runtime crashes in BLACS grid setup are common.")
+                message(WARNING "Recommendation: Use Intel MPI, or OPENBLAS profile with system ScaLAPACK.")
+                # Still try to find it, but warn user
+                find_library(MKL_BLACS_LIBRARY NAMES mkl_blacs_openmpi_lp64
+                    HINTS $ENV{MKLROOT}/lib/intel64 $ENV{MKLROOT}/lib
+                    /opt/intel/oneapi/mkl/latest/lib/intel64
+                )
+                if(MKL_SCALAPACK_LIBRARY AND MKL_BLACS_LIBRARY)
+                    set(SCALAPACK_LIBRARIES ${MKL_SCALAPACK_LIBRARY} ${MKL_BLACS_LIBRARY})
+                    message(STATUS "MKL ScaLAPACK (OpenMPI - may be unstable): ${MKL_SCALAPACK_LIBRARY}")
+                endif()
+            endif()
+        elseif(NOT SCALAPACK_LIBRARIES)
+            # Generic/OpenBLAS/FlexiBLAS - use system ScaLAPACK
             find_library(SCALAPACK_LIBRARY NAMES scalapack scalapack-openmpi)
             find_library(BLACS_LIBRARY NAMES blacs blacs-openmpi blacsF77init-openmpi blacsCinit-openmpi)
             
@@ -367,14 +796,14 @@ if(WITH_MPI)
                 if(BLACS_LIBRARY)
                     list(APPEND SCALAPACK_LIBRARIES ${BLACS_LIBRARY})
                 endif()
-                message(STATUS "Using ScaLAPACK: ${SCALAPACK_LIBRARY}")
-            else()
-                message(STATUS "ScaLAPACK not found - distributed diagonalization will not be available")
-                set(WITH_SCALAPACK OFF)
+                message(STATUS "Using system ScaLAPACK: ${SCALAPACK_LIBRARY}")
             endif()
         endif()
         
-        if(WITH_SCALAPACK AND SCALAPACK_LIBRARIES)
+        if(NOT SCALAPACK_LIBRARIES)
+            message(STATUS "ScaLAPACK not found - distributed diagonalization will not be available")
+            set(WITH_SCALAPACK OFF)
+        else()
             add_definitions(-DWITH_SCALAPACK)
         endif()
     endif()
@@ -521,6 +950,12 @@ endif()
 
 
 # Link libraries for new main
+# ScaLAPACK must come FIRST so its RPATH is searched before BLAS's directory
+# (which may contain an incompatible ScaLAPACK)
+if(WITH_SCALAPACK AND SCALAPACK_LIBRARIES)
+    target_link_libraries(ED ${SCALAPACK_LIBRARIES})
+endif()
+
 target_link_libraries(ED
     ${BLAS_LIBRARIES}
     ${LAPACK_LIBRARIES}
@@ -529,11 +964,6 @@ target_link_libraries(ED
     ${ARPACK_LIBRARY}
     ${HDF5_LIBRARIES}
 )
-
-# Add ScaLAPACK libraries if available
-if(WITH_SCALAPACK AND SCALAPACK_LIBRARIES)
-    target_link_libraries(ED ${SCALAPACK_LIBRARIES})
-endif()
 
 # Add CUDA libraries to ED if CUDA is enabled
 if(WITH_CUDA)
@@ -738,6 +1168,19 @@ message(STATUS "")
 message(STATUS "=== Performance Configuration Summary ===")
 message(STATUS "  Compiler: ${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_VERSION}")
 message(STATUS "  Build Type: ${CMAKE_BUILD_TYPE}")
+message(STATUS "  BLAS Profile: ${BLAS_PROFILE}")
+if(BLAS_LIBRARIES)
+    message(STATUS "  BLAS Libraries: ${BLAS_LIBRARIES}")
+endif()
+if(LAPACK_LIBRARIES)
+    message(STATUS "  LAPACK Libraries: ${LAPACK_LIBRARIES}")
+endif()
+if(WITH_SCALAPACK AND SCALAPACK_LIBRARIES)
+    message(STATUS "  ScaLAPACK Libraries: ${SCALAPACK_LIBRARIES}")
+    message(STATUS "  ScaLAPACK Compatible: ${SCALAPACK_COMPATIBLE}")
+elseif(WITH_MPI)
+    message(STATUS "  ScaLAPACK: DISABLED")
+endif()
 message(STATUS "  Aggressive Optimizations: ${ENABLE_AGGRESSIVE_OPTS}")
 message(STATUS "  Profile-Guided Optimization: ${ENABLE_PROFILE_GUIDED_OPTS}")
 message(STATUS "  Native Architecture: ${ENABLE_NATIVE_ARCH}")

@@ -2257,41 +2257,39 @@ void full_diagonalization(std::function<void(const Complex*, Complex*, int)> H, 
         std::cout << "Constructing dense matrix..." << std::endl;
 
         // Construct full matrix from operator function with progress reporting
+        // NOTE: We use sequential loop here because H may internally use OpenMP.
+        // Nested parallelism causes thread-safety issues with some BLAS/LAPACK backends.
         const uint64_t chunk_size = std::max(static_cast<uint64_t>(1), N / 100);  // Report progress every 1%
         
-        #pragma omp parallel for schedule(dynamic, chunk_size)
-        for (int j = 0; j < N; j++) {
-            // Create unit vector e_j (thread-local)
+        for (uint64_t j = 0; j < N; j++) {
+            // Create unit vector e_j
             std::vector<Complex> unit_vec(N, Complex(0.0, 0.0));
             unit_vec[j] = Complex(1.0, 0.0);
             
-            // Compute H * e_j to get column j (thread-local)
+            // Compute H * e_j to get column j
             std::vector<Complex> col_j(N);
             H(unit_vec.data(), col_j.data(), N);
             
             // Store column in dense matrix (use column-major order for LAPACK)
-            for (int i = 0; i < N; i++) {
-                dense_matrix[static_cast<size_t>(j)*N + i] = col_j[i];
+            for (uint64_t i = 0; i < N; i++) {
+                dense_matrix[j*N + i] = col_j[i];
             }
             
             // Progress reporting with ASCII progress bar
             if (j % chunk_size == 0 || j == N-1) {
-                #pragma omp critical
-                {
-                    double percentage = 100.0 * j / N;
-                    uint64_t barWidth = 50;
-                    uint64_t pos = barWidth * j / N;
-                    
-                    std::cout << "\rProgress: [";
-                    for (int k = 0; k < barWidth; ++k) {
-                        if (k < pos) std::cout << "=";
-                        else if (k == pos) std::cout << ">";
-                        else std::cout << " ";
-                    }
-                    std::cout << "] " << std::fixed << std::setprecision(1) << percentage << "%" << std::flush;
-                    
-                    if (j == N-1) std::cout << std::endl;
+                double percentage = 100.0 * j / N;
+                uint64_t barWidth = 50;
+                uint64_t pos = barWidth * j / N;
+                
+                std::cout << "\rProgress: [";
+                for (uint64_t k = 0; k < barWidth; ++k) {
+                    if (k < pos) std::cout << "=";
+                    else if (k == pos) std::cout << ">";
+                    else std::cout << " ";
                 }
+                std::cout << "] " << std::fixed << std::setprecision(1) << percentage << "%" << std::flush;
+                
+                if (j == N-1) std::cout << std::endl;
             }
         }
         std::cout << "Dense matrix constructed" << std::endl;

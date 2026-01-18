@@ -712,18 +712,24 @@ def main():
     parser.add_argument('--parallel', action='store_true', help='Run ED in parallel')
     parser.add_argument('--num_cores', type=int, default=None, help='Number of cores to use for parallel processing')
     
-    # Automatic method and symmetry selection (default behavior)
-    parser.add_argument('--no_auto_method', action='store_true',
-                       help='Disable automatic method selection')
-    parser.add_argument('--full_ed_threshold', type=int, default=14,
-                       help='Site threshold for FULL vs BLOCK_LANCZOS (default: 14)')
-    parser.add_argument('--block_size', type=int, default=8,
-                       help='Block size for BLOCK_LANCZOS (default: 8, should be >= degeneracy)')
+    # ScaLAPACK distributed diagonalization for large clusters
+    parser.add_argument('--scalapack_threshold', type=int, default=16,
+                       help='Site threshold for switching to ScaLAPACK (default: 16). '
+                            'Clusters with >= sites use SCALAPACK_MIXED for distributed diagonalization.')
+    parser.add_argument('--no_scalapack', action='store_true',
+                       help='Disable ScaLAPACK - always use standard FULL diagonalization.')
     parser.add_argument('--symm_threshold', type=int, default=13,
-                       help='Site threshold for using --symm flag (default: 13, only use symm for >13 sites)')
+                       help='Site threshold for using --symm flag (default: 13)')
+    
+    # Legacy arguments kept for backwards compatibility
+    parser.add_argument('--no_auto_method', action='store_true',
+                       help='(Ignored) Legacy argument.')
+    parser.add_argument('--full_ed_threshold', type=int, default=14,
+                       help='(Ignored) Legacy argument - use --scalapack_threshold instead.')
+    parser.add_argument('--block_size', type=int, default=8,
+                       help='(Ignored) Legacy argument.')
     parser.add_argument('--use_gpu', action='store_true',
-                       help='Use GPU-accelerated BLOCK_LANCZOS for large clusters (requires CUDA). '
-                            'Falls back to CPU if GPU is not available.')
+                       help='(Ignored) Legacy argument.')
     
     # Additional options
     parser.add_argument('--measure_spin', action='store_true',
