@@ -9,6 +9,7 @@
 #include <ed/core/ed_wrapper.h>
 #include <ed/core/ed_wrapper_streaming.h>
 #include <ed/core/disk_streaming_symmetry.h>
+#include <ed/core/ed_wrapper_chunked.h>
 #include <ed/core/construct_ham.h>
 #include <ed/core/hdf5_io.h>
 #include <ed/solvers/ftlm.h>
@@ -647,6 +648,79 @@ EDResults run_disk_streaming_workflow(const EDConfig& config) {
         method,
         params
     );
+    
+    auto end = std::chrono::high_resolution_clock::now();
+    auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
+    
+    // Print results summary
+    if (!results.eigenvalues.empty()) {
+        std::cout << "\n  Lowest eigenvalues:\n";
+        size_t show = std::min(results.eigenvalues.size(), (size_t)5);
+        for (size_t i = 0; i < show; i++) {
+            std::cout << "    E[" << i << "] = " << std::fixed << std::setprecision(10) 
+                      << results.eigenvalues[i] << "\n";
+        }
+        if (results.eigenvalues.size() > 5) {
+            std::cout << "    ... (" << (results.eigenvalues.size() - 5) << " more)\n";
+        }
+    }
+    
+    std::cout << "\n  Time: " << std::fixed << std::setprecision(2) << duration / 1000.0 << " s\n";
+    
+    return results;
+}
+
+/**
+ * @brief Run ultra-low-memory chunked symmetry diagonalization workflow
+ * 
+ * This mode uses a two-pass algorithm to minimize memory during basis construction:
+ * 1. Discover orbit representatives without caching (O(1) memory per state)
+ * 2. Build sectors one at a time from the orbit representatives
+ * 
+ * Use this when standard streaming modes run out of memory during the
+ * symmetry sector building phase.
+ * 
+ * NOTE: This trades speed for memory efficiency - it's slower than standard
+ * streaming because it doesn't use orbit lookup caching.
+ */
+EDResults run_chunked_symmetry_workflow(const EDConfig& config) {
+    auto params = ed_adapter::toEDParameters(config);
+    params.output_dir = config.workflow.output_dir;
+    create_directory_mpi_safe(params.output_dir);
+    
+    // Warn about GPU method override
+    DiagonalizationMethod method = config.method;
+    if (method == DiagonalizationMethod::LANCZOS_GPU || 
+        method == DiagonalizationMethod::BLOCK_LANCZOS_GPU ||
+        method == DiagonalizationMethod::DAVIDSON_GPU ||
+        method == DiagonalizationMethod::LOBPCG_GPU ||
+        method == DiagonalizationMethod::mTPQ_GPU ||
+        method == DiagonalizationMethod::cTPQ_GPU ||
+        method == DiagonalizationMethod::FTLM_GPU) {
+        std::cout << "\n  WARNING: Chunked-symmetry mode uses matrix-free operations.\n";
+        std::cout << "           GPU methods are not supported - using CPU Lanczos instead.\n\n";
+        method = DiagonalizationMethod::LANCZOS;
+    }
+    
+    auto start = std::chrono::high_resolution_clock::now();
+    
+    EDResults results;
+    
+    if (config.system.use_fixed_sz) {
+        int64_t n_up = (config.system.n_up >= 0) ? config.system.n_up : config.system.num_sites / 2;
+        results = exact_diagonalization_chunked_symmetry_fixed_sz(
+            config.system.hamiltonian_dir,
+            n_up,
+            method,
+            params
+        );
+    } else {
+        results = exact_diagonalization_chunked_symmetry(
+            config.system.hamiltonian_dir,
+            method,
+            params
+        );
+    }
     
     auto end = std::chrono::high_resolution_clock::now();
     auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
@@ -2854,27 +2928,38 @@ int main(int argc, char* argv[]) {
     EDResults standard_results, sym_results;
     
     try {
-        // Handle unified --symm flag: auto-select between symmetrized, streaming-symmetry, or disk-streaming
+        // Handle unified --symm flag: auto-select between symmetrized, streaming-symmetry, disk-streaming, or chunked
         if (config.workflow.run_symm_auto && !config.workflow.skip_ed) {
             // Calculate Hilbert space dimension for threshold decision
             uint64_t hilbert_dim = 1ULL << config.system.num_sites;  // 2^N for spin-1/2
             
-            bool use_disk_streaming = (hilbert_dim >= config.workflow.disk_streaming_threshold);
-            bool use_streaming = (hilbert_dim >= config.workflow.symm_streaming_threshold);
+            bool use_chunked = (hilbert_dim >= config.workflow.chunked_symm_threshold);
+            bool use_disk_streaming = !use_chunked && (hilbert_dim >= config.workflow.disk_streaming_threshold);
+            bool use_streaming = !use_chunked && !use_disk_streaming && (hilbert_dim >= config.workflow.symm_streaming_threshold);
             
             std::cout << "========================================\n";
             std::cout << "  Auto-Symmetry Mode Selection\n";
             std::cout << "  Hilbert space dimension: " << hilbert_dim << "\n";
             std::cout << "  Threshold for streaming: " << config.workflow.symm_streaming_threshold << "\n";
             std::cout << "  Threshold for disk-streaming: " << config.workflow.disk_streaming_threshold << "\n";
-            if (use_disk_streaming) {
+            std::cout << "  Threshold for chunked: " << config.workflow.chunked_symm_threshold << "\n";
+            if (use_chunked) {
+                std::cout << "  Selected: chunked-symmetry (ultra-low-memory basis construction)\n";
+            } else if (use_disk_streaming) {
                 std::cout << "  Selected: disk-streaming (ultra-low-memory)\n";
             } else {
                 std::cout << "  Selected: " << (use_streaming ? "streaming-symmetry" : "symmetrized") << "\n";
             }
             std::cout << "========================================\n\n";
             
-            if (use_disk_streaming) {
+            if (use_chunked) {
+                EDResults chunked_results = run_chunked_symmetry_workflow(config);
+                print_eigenvalue_summary(chunked_results.eigenvalues);
+                
+                if (config.workflow.compute_thermo && !chunked_results.eigenvalues.empty()) {
+                    compute_thermodynamics(chunked_results.eigenvalues, config);
+                }
+            } else if (use_disk_streaming) {
                 EDResults disk_results = run_disk_streaming_workflow(config);
                 print_eigenvalue_summary(disk_results.eigenvalues);
                 
@@ -2931,6 +3016,15 @@ int main(int argc, char* argv[]) {
             
             if (config.workflow.compute_thermo && !disk_results.eigenvalues.empty()) {
                 compute_thermodynamics(disk_results.eigenvalues, config);
+            }
+        }
+        
+        if (config.workflow.run_chunked_symmetry && !config.workflow.skip_ed) {
+            EDResults chunked_results = run_chunked_symmetry_workflow(config);
+            print_eigenvalue_summary(chunked_results.eigenvalues);
+            
+            if (config.workflow.compute_thermo && !chunked_results.eigenvalues.empty()) {
+                compute_thermodynamics(chunked_results.eigenvalues, config);
             }
         }
         

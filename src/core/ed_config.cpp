@@ -421,9 +421,11 @@ EDConfig EDConfig::fromCommandLine(uint64_t argc, char* argv[]) {
             else if (arg == "--symmetrized") config.workflow.run_symmetrized = true;
             else if (arg == "--streaming-symmetry") config.workflow.run_streaming_symmetry = true;
             else if (arg == "--disk-streaming") config.workflow.run_disk_streaming = true;
+            else if (arg == "--chunked-symm") config.workflow.run_chunked_symmetry = true;
             else if (arg == "--symm") config.workflow.run_symm_auto = true;
             else if (arg.find("--symm-threshold=") == 0) config.workflow.symm_streaming_threshold = std::stoull(parse_value("--symm-threshold="));
             else if (arg.find("--disk-threshold=") == 0) config.workflow.disk_streaming_threshold = std::stoull(parse_value("--disk-threshold="));
+            else if (arg.find("--chunked-threshold=") == 0) config.workflow.chunked_symm_threshold = std::stoull(parse_value("--chunked-threshold="));
             else if (arg == "--thermo") config.workflow.compute_thermo = true;
             else if (arg == "--dynamical-response") config.workflow.compute_dynamical_response = true;
             else if (arg == "--static-response") config.workflow.compute_static_response = true;

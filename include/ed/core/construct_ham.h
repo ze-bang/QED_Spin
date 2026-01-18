@@ -587,6 +587,11 @@ public:
     std::vector<int> symmetrized_block_ham_sizes;
     SymmetryGroupInfo symmetry_info;
     
+    // Accessor methods for protected members
+    uint64_t getNumBits() const { return n_bits_; }
+    float getSpin() const { return spin_l_; }
+    const std::vector<TransformData>& getTransformData() const { return transform_data_; }
+    
     // Constructor
     Operator(uint64_t n_bits, float spin_l) : n_bits_(n_bits), spin_l_(spin_l), matrixBuilt_(false) {}
     
