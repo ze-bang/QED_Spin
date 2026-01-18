@@ -165,6 +165,118 @@ enum class DiagonalizationMethod {
     FTLM_GPU_FIXED_SZ [[deprecated("Use FTLM_GPU with --fixed-sz flag instead")]]
 };
 
+// ============================================================================
+// FEATURE AVAILABILITY CHECKS
+// ============================================================================
+
+/**
+ * @brief Check if ScaLAPACK support was compiled in
+ * @return true if WITH_SCALAPACK was defined at compile time
+ */
+inline bool is_scalapack_compiled() {
+#ifdef WITH_SCALAPACK
+    return true;
+#else
+    return false;
+#endif
+}
+
+/**
+ * @brief Check if CUDA/GPU support was compiled in
+ * @return true if WITH_CUDA was defined at compile time
+ */
+inline bool is_cuda_compiled() {
+#ifdef WITH_CUDA
+    return true;
+#else
+    return false;
+#endif
+}
+
+/**
+ * @brief Get fallback method when requested method is unavailable
+ * 
+ * Provides graceful degradation when optional features aren't compiled in:
+ * - ScaLAPACK methods -> FULL (dense diagonalization)
+ * - GPU methods -> CPU equivalent
+ * 
+ * @param method The originally requested method
+ * @param verbose Print warning message about fallback
+ * @return The method to actually use (may be same as input)
+ */
+inline DiagonalizationMethod get_fallback_method(DiagonalizationMethod method, bool verbose = true) {
+    DiagonalizationMethod fallback = method;
+    const char* reason = nullptr;
+    
+    // Check ScaLAPACK methods
+    if (method == DiagonalizationMethod::SCALAPACK || 
+        method == DiagonalizationMethod::SCALAPACK_MIXED) {
+        if (!is_scalapack_compiled()) {
+            fallback = DiagonalizationMethod::FULL;
+            reason = "ScaLAPACK not compiled (build with -DWITH_MPI=ON and ScaLAPACK-compatible BLAS)";
+        }
+    }
+    
+    // Check GPU methods
+    if (!is_cuda_compiled()) {
+        switch (method) {
+            case DiagonalizationMethod::LANCZOS_GPU:
+            case DiagonalizationMethod::LANCZOS_GPU_FIXED_SZ:
+                fallback = DiagonalizationMethod::LANCZOS;
+                reason = "CUDA not compiled (build with -DWITH_CUDA=ON)";
+                break;
+            case DiagonalizationMethod::BLOCK_LANCZOS_GPU:
+            case DiagonalizationMethod::BLOCK_LANCZOS_GPU_FIXED_SZ:
+                fallback = DiagonalizationMethod::BLOCK_LANCZOS;
+                reason = "CUDA not compiled (build with -DWITH_CUDA=ON)";
+                break;
+            case DiagonalizationMethod::DAVIDSON_GPU:
+                fallback = DiagonalizationMethod::DAVIDSON;
+                reason = "CUDA not compiled (build with -DWITH_CUDA=ON)";
+                break;
+            case DiagonalizationMethod::LOBPCG_GPU:
+                fallback = DiagonalizationMethod::LOBPCG;
+                reason = "CUDA not compiled (build with -DWITH_CUDA=ON)";
+                break;
+            case DiagonalizationMethod::mTPQ_GPU:
+                fallback = DiagonalizationMethod::mTPQ;
+                reason = "CUDA not compiled (build with -DWITH_CUDA=ON)";
+                break;
+            case DiagonalizationMethod::cTPQ_GPU:
+                fallback = DiagonalizationMethod::cTPQ;
+                reason = "CUDA not compiled (build with -DWITH_CUDA=ON)";
+                break;
+            case DiagonalizationMethod::FTLM_GPU:
+            case DiagonalizationMethod::FTLM_GPU_FIXED_SZ:
+                fallback = DiagonalizationMethod::FTLM;
+                reason = "CUDA not compiled (build with -DWITH_CUDA=ON)";
+                break;
+            default:
+                break;
+        }
+    }
+    
+    // Print warning if method changed
+    if (verbose && fallback != method && reason != nullptr) {
+        std::cerr << "Warning: " << reason << "\n";
+        std::cerr << "         Falling back to ";
+        switch (fallback) {
+            case DiagonalizationMethod::FULL: std::cerr << "FULL"; break;
+            case DiagonalizationMethod::LANCZOS: std::cerr << "LANCZOS"; break;
+            case DiagonalizationMethod::BLOCK_LANCZOS: std::cerr << "BLOCK_LANCZOS"; break;
+            case DiagonalizationMethod::DAVIDSON: std::cerr << "DAVIDSON"; break;
+            case DiagonalizationMethod::LOBPCG: std::cerr << "LOBPCG"; break;
+            case DiagonalizationMethod::mTPQ: std::cerr << "mTPQ"; break;
+            case DiagonalizationMethod::cTPQ: std::cerr << "cTPQ"; break;
+            case DiagonalizationMethod::FTLM: std::cerr << "FTLM"; break;
+            default: std::cerr << "alternative method"; break;
+        }
+        std::cerr << " instead.\n\n";
+    }
+    
+    return fallback;
+}
+
 /**
  * @brief Structure to hold exact diagonalization results
  */
@@ -792,8 +904,11 @@ EDResults exact_diagonalization_core(
                 }
             }
 #else
-            std::cerr << "Error: ScaLAPACK not available. Build with -DWITH_MPI=ON -DWITH_SCALAPACK=ON" << std::endl;
-            throw std::runtime_error("ScaLAPACK not available");
+            // Graceful fallback to FULL diagonalization when ScaLAPACK is not available
+            std::cerr << "Warning: ScaLAPACK not available (build with -DWITH_MPI=ON and ScaLAPACK-compatible BLAS)\n";
+            std::cerr << "         Falling back to FULL diagonalization instead.\n\n";
+            full_diagonalization(H, hilbert_space_dim, params.num_eigenvalues, results.eigenvalues, 
+                                 params.output_dir, params.compute_eigenvectors);
 #endif
             break;
 
