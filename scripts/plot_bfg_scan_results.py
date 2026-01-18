@@ -471,24 +471,360 @@ def plot_temperature_dependence(data, output_dir, title_prefix=""):
     plt.close()
 
 
+# =============================================================================
+# Temperature Scan Plotting (for --tpq-all-temps mode)
+# =============================================================================
+
+def find_temperature_scan_files(scan_dir):
+    """Find all per-Jpm temperature scan HDF5 files"""
+    scan_dir = Path(scan_dir)
+    results_dir = scan_dir / 'order_parameter_results'
+    if not results_dir.exists():
+        results_dir = scan_dir
+    
+    pattern = results_dir / 'order_params_Jpm=*_T_scan.h5'
+    files = list(glob.glob(str(pattern)))
+    
+    # Extract Jpm values and sort
+    jpm_files = []
+    for f in files:
+        match = re.search(r'Jpm=(-?[\d.]+)_T_scan\.h5', f)
+        if match:
+            jpm = float(match.group(1))
+            jpm_files.append((jpm, f))
+    
+    jpm_files.sort(key=lambda x: x[0])
+    return jpm_files
+
+
+def load_temperature_scan_data(h5_file):
+    """Load temperature scan data from per-Jpm T_scan HDF5 file"""
+    data = {}
+    with h5py.File(h5_file, 'r') as f:
+        # Load Jpm from attribute
+        if 'jpm' in f.attrs:
+            data['jpm'] = f.attrs['jpm']
+        
+        # Load all datasets
+        for key in f.keys():
+            data[key] = f[key][:]
+    
+    return data
+
+
+def plot_single_jpm_temperature_scan(jpm, data, output_dir, title_prefix=""):
+    """Plot order parameters vs temperature for a single Jpm value"""
+    
+    temp = data.get('temperature', [])
+    if len(temp) == 0:
+        return
+    
+    # Sort by temperature
+    sort_idx = np.argsort(temp)
+    temp = temp[sort_idx]
+    
+    os.makedirs(output_dir, exist_ok=True)
+    
+    # Color scheme
+    colors = {
+        'translation': '#1f77b4',
+        'xy': '#2ca02c',
+        'spsm': '#9467bd',
+        'szsz': '#d62728',
+        'heisenberg': '#ff7f0e',
+        'vbs_xy': '#17becf',
+        'vbs_heis': '#e377c2',
+    }
+    
+    fig, axes = plt.subplots(2, 2, figsize=(12, 10))
+    fig.suptitle(f'{title_prefix}Order Parameters vs Temperature at $J_{{\\pm}}={jpm:.4f}$', fontsize=14)
+    
+    # Panel 1: Translation order
+    ax = axes[0, 0]
+    if 'm_translation' in data:
+        y = data['m_translation'][sort_idx]
+        ax.plot(temp, y, 'o-', color=colors['translation'], markersize=4)
+    ax.set_xlabel('Temperature $T$')
+    ax.set_ylabel('$m_{translation}$')
+    ax.set_title('Translation Order')
+    ax.grid(True, alpha=0.3)
+    
+    # Panel 2: Nematic orders
+    ax = axes[0, 1]
+    if 'm_nematic' in data:
+        ax.plot(temp, data['m_nematic'][sort_idx], 'o-', color=colors['xy'], 
+                label='XY', markersize=4)
+    if 'm_nematic_spsm' in data:
+        ax.plot(temp, data['m_nematic_spsm'][sort_idx], 's-', color=colors['spsm'], 
+                label='S+S-', markersize=4)
+    if 'm_nematic_szsz' in data:
+        ax.plot(temp, data['m_nematic_szsz'][sort_idx], '^-', color=colors['szsz'], 
+                label='SzSz', markersize=4)
+    if 'm_nematic_heisenberg' in data:
+        ax.plot(temp, data['m_nematic_heisenberg'][sort_idx], 'D-', color=colors['heisenberg'], 
+                label='Heisenberg', markersize=4)
+    ax.set_xlabel('Temperature $T$')
+    ax.set_ylabel('$m_{nematic}$')
+    ax.set_title('Nematic Order')
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+    
+    # Panel 3: VBS order
+    ax = axes[1, 0]
+    if 'm_vbs_xy' in data:
+        ax.plot(temp, data['m_vbs_xy'][sort_idx], 'o-', color=colors['vbs_xy'], 
+                label='XY', markersize=4)
+    if 'm_vbs_heis' in data:
+        ax.plot(temp, data['m_vbs_heis'][sort_idx], 's-', color=colors['vbs_heis'], 
+                label='Heisenberg', markersize=4)
+    ax.set_xlabel('Temperature $T$')
+    ax.set_ylabel('$m_{VBS}$')
+    ax.set_title('VBS Order')
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+    
+    # Panel 4: Plaquette order
+    ax = axes[1, 1]
+    if 'm_plaquette' in data:
+        ax.plot(temp, data['m_plaquette'][sort_idx], 'o-', color='#8c564b', markersize=4)
+    ax.set_xlabel('Temperature $T$')
+    ax.set_ylabel('$m_{plaquette}$')
+    ax.set_title('Plaquette Order')
+    ax.grid(True, alpha=0.3)
+    
+    plt.tight_layout()
+    plt.savefig(f'{output_dir}/temp_scan_Jpm={jpm:.4f}.png', dpi=150, bbox_inches='tight')
+    print(f"Saved: {output_dir}/temp_scan_Jpm={jpm:.4f}.png")
+    plt.close()
+
+
+def plot_temperature_phase_diagram(jpm_files, output_dir, title_prefix=""):
+    """
+    Create a temperature-Jpm phase diagram heatmap combining all T_scan files.
+    """
+    
+    if not jpm_files:
+        print("No temperature scan files found")
+        return
+    
+    # Collect all data
+    all_jpm = []
+    all_temp = []
+    all_m_trans = []
+    all_m_nem = []
+    all_m_vbs_xy = []
+    all_m_vbs_heis = []
+    
+    for jpm, h5_file in jpm_files:
+        data = load_temperature_scan_data(h5_file)
+        temp = data.get('temperature', [])
+        n = len(temp)
+        if n == 0:
+            continue
+        
+        all_jpm.extend([jpm] * n)
+        all_temp.extend(temp)
+        all_m_trans.extend(data.get('m_translation', np.zeros(n)))
+        all_m_nem.extend(data.get('m_nematic', np.zeros(n)))
+        all_m_vbs_xy.extend(data.get('m_vbs_xy', np.zeros(n)))
+        all_m_vbs_heis.extend(data.get('m_vbs_heis', np.zeros(n)))
+    
+    if len(all_jpm) == 0:
+        print("No temperature scan data found")
+        return
+    
+    all_jpm = np.array(all_jpm)
+    all_temp = np.array(all_temp)
+    all_m_trans = np.array(all_m_trans)
+    all_m_nem = np.array(all_m_nem)
+    all_m_vbs_xy = np.array(all_m_vbs_xy)
+    all_m_vbs_heis = np.array(all_m_vbs_heis)
+    
+    os.makedirs(output_dir, exist_ok=True)
+    
+    # Create scatter-based phase diagram
+    fig, axes = plt.subplots(2, 2, figsize=(14, 12))
+    fig.suptitle(f'{title_prefix}Temperature-$J_{{\\pm}}$ Phase Diagram', fontsize=14)
+    
+    # Panel 1: m_translation
+    ax = axes[0, 0]
+    sc = ax.scatter(all_jpm, all_temp, c=all_m_trans, cmap='coolwarm', s=20, edgecolors='none')
+    ax.set_xlabel('$J_{\\pm}$')
+    ax.set_ylabel('Temperature $T$')
+    ax.set_title('$m_{translation}$')
+    plt.colorbar(sc, ax=ax)
+    
+    # Panel 2: m_nematic
+    ax = axes[0, 1]
+    sc = ax.scatter(all_jpm, all_temp, c=all_m_nem, cmap='coolwarm', s=20, edgecolors='none')
+    ax.set_xlabel('$J_{\\pm}$')
+    ax.set_ylabel('Temperature $T$')
+    ax.set_title('$m_{nematic}$ (XY)')
+    plt.colorbar(sc, ax=ax)
+    
+    # Panel 3: m_vbs_xy
+    ax = axes[1, 0]
+    sc = ax.scatter(all_jpm, all_temp, c=all_m_vbs_xy, cmap='coolwarm', s=20, edgecolors='none')
+    ax.set_xlabel('$J_{\\pm}$')
+    ax.set_ylabel('Temperature $T$')
+    ax.set_title('$m_{VBS}$ (XY)')
+    plt.colorbar(sc, ax=ax)
+    
+    # Panel 4: m_vbs_heis
+    ax = axes[1, 1]
+    sc = ax.scatter(all_jpm, all_temp, c=all_m_vbs_heis, cmap='coolwarm', s=20, edgecolors='none')
+    ax.set_xlabel('$J_{\\pm}$')
+    ax.set_ylabel('Temperature $T$')
+    ax.set_title('$m_{VBS}$ (Heisenberg)')
+    plt.colorbar(sc, ax=ax)
+    
+    plt.tight_layout()
+    plt.savefig(f'{output_dir}/temperature_phase_diagram.png', dpi=150, bbox_inches='tight')
+    print(f"Saved: {output_dir}/temperature_phase_diagram.png")
+    plt.close()
+    
+    # Also create individual line plots comparing different Jpm
+    _plot_temperature_comparison(jpm_files, output_dir, title_prefix)
+
+
+def _plot_temperature_comparison(jpm_files, output_dir, title_prefix=""):
+    """Plot order parameters vs T with different lines for each Jpm"""
+    
+    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+    fig.suptitle(f'{title_prefix}Order Parameters vs Temperature', fontsize=14)
+    
+    # Select a subset of Jpm values to plot (at most 10)
+    n_files = len(jpm_files)
+    if n_files > 10:
+        indices = np.linspace(0, n_files-1, 10, dtype=int)
+        selected = [jpm_files[i] for i in indices]
+    else:
+        selected = jpm_files
+    
+    cmap = plt.cm.viridis
+    jpm_vals = [x[0] for x in selected]
+    norm = plt.Normalize(vmin=min(jpm_vals), vmax=max(jpm_vals))
+    
+    for jpm, h5_file in selected:
+        data = load_temperature_scan_data(h5_file)
+        temp = data.get('temperature', [])
+        if len(temp) == 0:
+            continue
+        
+        sort_idx = np.argsort(temp)
+        temp = temp[sort_idx]
+        color = cmap(norm(jpm))
+        
+        # Translation order
+        if 'm_translation' in data:
+            axes[0, 0].plot(temp, data['m_translation'][sort_idx], '-', 
+                           color=color, label=f'{jpm:.3f}')
+        
+        # Nematic (Heisenberg)
+        if 'm_nematic_heisenberg' in data:
+            axes[0, 1].plot(temp, data['m_nematic_heisenberg'][sort_idx], '-', color=color)
+        elif 'm_nematic' in data:
+            axes[0, 1].plot(temp, data['m_nematic'][sort_idx], '-', color=color)
+        
+        # VBS XY
+        if 'm_vbs_xy' in data:
+            axes[1, 0].plot(temp, data['m_vbs_xy'][sort_idx], '-', color=color)
+        
+        # VBS Heisenberg
+        if 'm_vbs_heis' in data:
+            axes[1, 1].plot(temp, data['m_vbs_heis'][sort_idx], '-', color=color)
+    
+    axes[0, 0].set_xlabel('Temperature $T$')
+    axes[0, 0].set_ylabel('$m_{translation}$')
+    axes[0, 0].set_title('Translation Order')
+    axes[0, 0].grid(True, alpha=0.3)
+    axes[0, 0].legend(title='$J_{\\pm}$', fontsize='small', ncol=2)
+    
+    axes[0, 1].set_xlabel('Temperature $T$')
+    axes[0, 1].set_ylabel('$m_{nematic}$')
+    axes[0, 1].set_title('Nematic Order (Heisenberg)')
+    axes[0, 1].grid(True, alpha=0.3)
+    
+    axes[1, 0].set_xlabel('Temperature $T$')
+    axes[1, 0].set_ylabel('$m_{VBS}$')
+    axes[1, 0].set_title('VBS Order (XY)')
+    axes[1, 0].grid(True, alpha=0.3)
+    
+    axes[1, 1].set_xlabel('Temperature $T$')
+    axes[1, 1].set_ylabel('$m_{VBS}$')
+    axes[1, 1].set_title('VBS Order (Heisenberg)')
+    axes[1, 1].grid(True, alpha=0.3)
+    
+    # Add colorbar
+    sm = plt.cm.ScalarMappable(cmap=cmap, norm=norm)
+    sm.set_array([])
+    cbar = fig.colorbar(sm, ax=axes.ravel().tolist(), shrink=0.6)
+    cbar.set_label('$J_{\\pm}$')
+    
+    plt.tight_layout()
+    plt.savefig(f'{output_dir}/temperature_comparison.png', dpi=150, bbox_inches='tight')
+    print(f"Saved: {output_dir}/temperature_comparison.png")
+    plt.close()
+
+
+def plot_all_temperature_scans(scan_dir, output_dir, title_prefix="", select_jpm=None):
+    """Plot all temperature scan data from --tpq-all-temps mode"""
+    
+    jpm_files = find_temperature_scan_files(scan_dir)
+    
+    if not jpm_files:
+        print("No temperature scan files found (looking for order_params_Jpm=*_T_scan.h5)")
+        return
+    
+    print(f"Found {len(jpm_files)} temperature scan files")
+    
+    os.makedirs(output_dir, exist_ok=True)
+    
+    # Filter to selected Jpm if specified
+    if select_jpm is not None:
+        filtered = []
+        for jpm, f in jpm_files:
+            if any(np.isclose(jpm, sel, atol=1e-4) for sel in select_jpm):
+                filtered.append((jpm, f))
+        jpm_files_to_plot = filtered
+        print(f"Filtering to {len(jpm_files_to_plot)} selected Jpm values")
+    else:
+        jpm_files_to_plot = jpm_files
+    
+    # Plot individual Jpm temperature scans
+    for jpm, h5_file in jpm_files_to_plot:
+        try:
+            data = load_temperature_scan_data(h5_file)
+            plot_single_jpm_temperature_scan(jpm, data, output_dir, title_prefix)
+        except Exception as e:
+            print(f"Error plotting Jpm={jpm}: {e}")
+    
+    # Create combined phase diagram using all files
+    plot_temperature_phase_diagram(jpm_files, output_dir, title_prefix)
+
+
 def load_structure_factor_data(h5_file):
     """
     Load structure factor data from per-Jpm HDF5 file.
     
     Returns dict with:
-    - S_q_2d: 2D spin structure factor S(q)
+    - S_q_2d: 2D spin structure factor S(q) (full Heisenberg)
+    - S_q_smsp_2d: 2D S^-S^+ component
+    - S_q_szsz_2d: 2D S^zS^z component
     - S_D_q_xy_2d: 2D VBS dimer structure factor (XY)
     - S_D_q_heis_2d: 2D VBS dimer structure factor (Heisenberg)
     - q_grid_vals: q-grid values
     - k_points: special k-points
-    - S_q: Structure factor at discrete k-points
+    - S_q: Structure factor at discrete k-points (full Heisenberg)
+    - S_q_smsp: S^-S^+ component at k-points
+    - S_q_szsz: S^zS^z component at k-points  
     - S_D_q_xy: VBS dimer SF at discrete k-points (XY)
     - S_D_q_heis: VBS dimer SF at discrete k-points (Heisenberg)
     - Various scalar attributes
     """
     sf_data = {}
     with h5py.File(h5_file, 'r') as f:
-        # Load 2D S(q) grid
+        # Load 2D S(q) grid (full Heisenberg)
         if 'S_q_2d' in f:
             data = f['S_q_2d'][:]
             # Handle complex type stored as compound
@@ -496,6 +832,18 @@ def load_structure_factor_data(h5_file):
                 sf_data['S_q_2d'] = data['r'] + 1j * data['i']
             else:
                 sf_data['S_q_2d'] = data
+        
+        # Load 2D S^-S^+ component grid
+        if 'S_q_smsp_2d' in f:
+            data = f['S_q_smsp_2d'][:]
+            if data.dtype.names and 'r' in data.dtype.names:
+                sf_data['S_q_smsp_2d'] = data['r'] + 1j * data['i']
+            else:
+                sf_data['S_q_smsp_2d'] = data
+        
+        # Load 2D S^zS^z component grid
+        if 'S_q_szsz_2d' in f:
+            sf_data['S_q_szsz_2d'] = f['S_q_szsz_2d'][:]
         
         # Load VBS S_D(q) 2D grid (XY)
         if 'S_D_q_xy_2d' in f:
@@ -517,13 +865,29 @@ def load_structure_factor_data(h5_file):
         if 'k_points' in f:
             sf_data['k_points'] = f['k_points'][:]
         
-        # Load S(q) at discrete k-points
+        # Load S(q) at discrete k-points (full Heisenberg)
         if 'S_q' in f:
             data = f['S_q'][:]
             if data.dtype.names and 'r' in data.dtype.names:
                 sf_data['S_q'] = data['r'] + 1j * data['i']
             else:
                 sf_data['S_q'] = data
+        
+        # Load S^-S^+ component at discrete k-points
+        if 'S_q_smsp' in f:
+            data = f['S_q_smsp'][:]
+            if data.dtype.names and 'r' in data.dtype.names:
+                sf_data['S_q_smsp'] = data['r'] + 1j * data['i']
+            else:
+                sf_data['S_q_smsp'] = data
+        
+        # Load S^zS^z component at discrete k-points
+        if 'S_q_szsz' in f:
+            data = f['S_q_szsz'][:]
+            if data.dtype.names and 'r' in data.dtype.names:
+                sf_data['S_q_szsz'] = data['r'] + 1j * data['i']
+            else:
+                sf_data['S_q_szsz'] = data
         
         # Load VBS S_D(q) at discrete k-points (XY)
         if 'S_D_q_xy' in f:
@@ -751,6 +1115,7 @@ def plot_structure_factors_for_jpm(jpm, h5_file, output_dir, title_prefix=""):
     """
     Plot all structure factors in momentum space for a single Jpm value.
     Creates a multi-panel figure showing S(q) and S_D(q) on kagome reciprocal lattice.
+    Also creates a figure showing the SzSz and S-S+ components of S(q).
     """
     sf_data = load_structure_factor_data(h5_file)
     if sf_data is None:
@@ -774,20 +1139,26 @@ def plot_structure_factors_for_jpm(jpm, h5_file, output_dir, title_prefix=""):
     
     # Check what data is available for discrete k-points
     has_sq = 'S_q' in sf_data
+    has_sq_smsp = 'S_q_smsp' in sf_data
+    has_sq_szsz = 'S_q_szsz' in sf_data
     has_sd_xy = 'S_D_q_xy' in sf_data
     has_sd_heis = 'S_D_q_heis' in sf_data
     
     # Fallback to 2D grids if discrete not available
     has_sq_2d = 'S_q_2d' in sf_data
+    has_sq_smsp_2d = 'S_q_smsp_2d' in sf_data
+    has_sq_szsz_2d = 'S_q_szsz_2d' in sf_data
     has_sd_xy_2d = 'S_D_q_xy_2d' in sf_data
     has_sd_heis_2d = 'S_D_q_heis_2d' in sf_data
     
-    # Count panels for discrete k-point plots
+    # Count panels for discrete k-point plots (main SF figure)
     n_panels_discrete = sum([has_sq, has_sd_xy, has_sd_heis])
     n_panels_2d = sum([has_sq_2d, has_sd_xy_2d, has_sd_heis_2d])
     
+    jpm_str = f"{jpm:+.4f}".replace('+', 'p').replace('-', 'm').replace('.', 'p')
+    
     # =========================================================================
-    # Figure 1: Discrete k-points on kagome reciprocal lattice
+    # Figure 1: Discrete k-points on kagome reciprocal lattice (main SFs)
     # =========================================================================
     if n_panels_discrete > 0:
         fig, axes = plt.subplots(1, n_panels_discrete, figsize=(5.5 * n_panels_discrete, 5))
@@ -798,11 +1169,11 @@ def plot_structure_factors_for_jpm(jpm, h5_file, output_dir, title_prefix=""):
         
         ax_idx = 0
         
-        # Plot S(k) at discrete k-points
+        # Plot S(k) at discrete k-points (full Heisenberg)
         if has_sq:
             plot_sq_on_reciprocal_lattice(
                 axes[ax_idx], sf_data['S_q'], k_points,
-                title=r'Spin Structure Factor $S(\mathbf{k})$',
+                title=r'Spin SF $S(\mathbf{k})$ (full)',
                 cmap='hot', label=r'$|S(\mathbf{k})|$'
             )
             ax_idx += 1
@@ -827,8 +1198,54 @@ def plot_structure_factors_for_jpm(jpm, h5_file, output_dir, title_prefix=""):
         
         plt.tight_layout()
         
-        jpm_str = f"{jpm:+.4f}".replace('+', 'p').replace('-', 'm').replace('.', 'p')
         fname = f'{output_dir}/structure_factors_Jpm_{jpm_str}.png'
+        plt.savefig(fname, dpi=150, bbox_inches='tight')
+        print(f"  Saved: {fname}")
+        plt.close()
+    
+    # =========================================================================
+    # Figure 1b: S(q) components (SzSz, S-S+, full) at discrete k-points
+    # =========================================================================
+    n_panels_components = sum([has_sq, has_sq_smsp, has_sq_szsz])
+    if n_panels_components >= 2:  # Only plot if we have multiple components
+        fig, axes = plt.subplots(1, n_panels_components, figsize=(5.5 * n_panels_components, 5))
+        if n_panels_components == 1:
+            axes = [axes]
+        
+        fig.suptitle(f'{title_prefix}Spin SF Components at $J_{{\\pm}}$ = {jpm:.4f}', fontsize=14)
+        
+        ax_idx = 0
+        
+        # Plot S^zS^z component
+        if has_sq_szsz:
+            plot_sq_on_reciprocal_lattice(
+                axes[ax_idx], sf_data['S_q_szsz'], k_points,
+                title=r'$S^zS^z$ component',
+                cmap='Blues', label=r'$|S_{zz}(\mathbf{k})|$'
+            )
+            ax_idx += 1
+        
+        # Plot S^-S^+ component  
+        if has_sq_smsp:
+            plot_sq_on_reciprocal_lattice(
+                axes[ax_idx], sf_data['S_q_smsp'], k_points,
+                title=r'$S^-S^+$ component',
+                cmap='Oranges', label=r'$|S_{-+}(\mathbf{k})|$'
+            )
+            ax_idx += 1
+        
+        # Plot full Heisenberg S(k)
+        if has_sq:
+            plot_sq_on_reciprocal_lattice(
+                axes[ax_idx], sf_data['S_q'], k_points,
+                title=r'Full $S(\mathbf{k}) = S_{zz} + \mathrm{Re}(S_{-+})$',
+                cmap='hot', label=r'$|S(\mathbf{k})|$'
+            )
+            ax_idx += 1
+        
+        plt.tight_layout()
+        
+        fname = f'{output_dir}/spin_sf_components_Jpm_{jpm_str}.png'
         plt.savefig(fname, dpi=150, bbox_inches='tight')
         print(f"  Saved: {fname}")
         plt.close()
@@ -885,88 +1302,59 @@ def plot_structure_factors_for_jpm(jpm, h5_file, output_dir, title_prefix=""):
         
         plt.tight_layout()
         
-        jpm_str = f"{jpm:+.4f}".replace('+', 'p').replace('-', 'm').replace('.', 'p')
         fname = f'{output_dir}/structure_factors_2d_Jpm_{jpm_str}.png'
         plt.savefig(fname, dpi=150, bbox_inches='tight')
         print(f"  Saved: {fname}")
         plt.close()
     
     # =========================================================================
-    # Figure 3: Orientation-resolved VBS structure factors S_D^{αβ}(q)
+    # Figure 2b: 2D heatmaps of S(q) components (SzSz, S-S+, full)
     # =========================================================================
-    has_xy_oriented = 'S_D_q_xy_oriented' in sf_data
-    has_heis_oriented = 'S_D_q_heis_oriented' in sf_data
-    
-    if has_xy_oriented or has_heis_oriented:
-        # Orientation labels: 0=(0,0), 1=(0,1), 2=(0,2), 3=(1,1), 4=(1,2), 5=(2,2)
-        orient_labels = ['(0,0)', '(0,1)', '(0,2)', '(1,1)', '(1,2)', '(2,2)']
-        orient_names = ['α=β=0', 'α=0,β=1', 'α=0,β=2', 'α=β=1', 'α=1,β=2', 'α=β=2']
+    n_panels_components_2d = sum([has_sq_2d, has_sq_smsp_2d, has_sq_szsz_2d])
+    if n_panels_components_2d >= 2:  # Only plot if we have multiple components
+        q_vals = sf_data.get('q_grid_vals', None)
+        if q_vals is None:
+            n_q = sf_data['S_q_2d'].shape[0] if has_sq_2d else 50
+            q_vals = np.linspace(-1, 1, n_q)
         
-        # Plot XY orientation-resolved
-        if has_xy_oriented:
-            fig, axes = plt.subplots(2, 3, figsize=(15, 10))
-            axes = axes.flatten()
-            fig.suptitle(f'{title_prefix}Orientation-Resolved $S_D^{{\\alpha\\beta}}(q)$ (XY) at $J_{{\\pm}}$ = {jpm:.4f}', fontsize=14)
-            
-            s_oriented = sf_data['S_D_q_xy_oriented']
-            for c in range(6):
-                sc = plot_sq_on_reciprocal_lattice(
-                    axes[c], s_oriented[:, c], k_points,
-                    title=f'$S_D^{{{orient_labels[c]}}}(\\mathbf{{k}})$',
-                    cmap='viridis', label=f'|$S_D^{{\\alpha\\beta}}$|'
-                )
-            
-            plt.tight_layout()
-            jpm_str = f"{jpm:+.4f}".replace('+', 'p').replace('-', 'm').replace('.', 'p')
-            fname = f'{output_dir}/VBS_oriented_xy_Jpm_{jpm_str}.png'
-            plt.savefig(fname, dpi=150, bbox_inches='tight')
-            print(f"  Saved: {fname}")
-            plt.close()
+        fig, axes = plt.subplots(1, n_panels_components_2d, figsize=(5 * n_panels_components_2d, 4.5))
+        if n_panels_components_2d == 1:
+            axes = [axes]
         
-        # Plot Heisenberg orientation-resolved
-        if has_heis_oriented:
-            fig, axes = plt.subplots(2, 3, figsize=(15, 10))
-            axes = axes.flatten()
-            fig.suptitle(f'{title_prefix}Orientation-Resolved $S_D^{{\\alpha\\beta}}(q)$ (Heis) at $J_{{\\pm}}$ = {jpm:.4f}', fontsize=14)
-            
-            s_oriented = sf_data['S_D_q_heis_oriented']
-            for c in range(6):
-                sc = plot_sq_on_reciprocal_lattice(
-                    axes[c], s_oriented[:, c], k_points,
-                    title=f'$S_D^{{{orient_labels[c]}}}(\\mathbf{{k}})$',
-                    cmap='plasma', label=f'|$S_D^{{\\alpha\\beta}}$|'
-                )
-            
-            plt.tight_layout()
-            jpm_str = f"{jpm:+.4f}".replace('+', 'p').replace('-', 'm').replace('.', 'p')
-            fname = f'{output_dir}/VBS_oriented_heis_Jpm_{jpm_str}.png'
-            plt.savefig(fname, dpi=150, bbox_inches='tight')
-            print(f"  Saved: {fname}")
-            plt.close()
-    
-    # =========================================================================
-    # Figure 4: Plaquette/Bowtie orientation-resolved structure factor S_P^{αβ}(q)
-    # =========================================================================
-    has_plaq_oriented = 'plaq_S_p_oriented' in sf_data
-    
-    if has_plaq_oriented:
-        orient_labels = ['(0,0)', '(0,1)', '(0,2)', '(1,1)', '(1,2)', '(2,2)']
+        fig.suptitle(f'{title_prefix}Spin SF Components at $J_{{\\pm}}$ = {jpm:.4f}', fontsize=14)
         
-        fig, axes = plt.subplots(2, 3, figsize=(15, 10))
-        axes = axes.flatten()
-        fig.suptitle(f'{title_prefix}Orientation-Resolved $S_P^{{\\alpha\\beta}}(q)$ (Bowtie) at $J_{{\\pm}}$ = {jpm:.4f}', fontsize=14)
+        ax_idx = 0
         
-        s_oriented = sf_data['plaq_S_p_oriented']
-        for c in range(6):
-            sc = plot_sq_on_reciprocal_lattice(
-                axes[c], s_oriented[:, c], k_points,
-                title=f'$S_P^{{{orient_labels[c]}}}(\\mathbf{{k}})$',
-                cmap='cividis', label=f'|$S_P^{{\\alpha\\beta}}$|'
+        if has_sq_szsz_2d:
+            plot_structure_factor_2d(
+                sf_data['S_q_szsz_2d'], q_vals, axes[ax_idx],
+                title=r'$S^zS^z$ component',
+                cmap='Blues', k_points=k_points
             )
+            ax_idx += 1
+        
+        if has_sq_smsp_2d:
+            plot_structure_factor_2d(
+                sf_data['S_q_smsp_2d'], q_vals, axes[ax_idx],
+                title=r'$S^-S^+$ component',
+                cmap='Oranges', k_points=k_points
+            )
+            ax_idx += 1
+        
+        if has_sq_2d:
+            q_max = None
+            if 'q_max_x' in sf_data and 'q_max_y' in sf_data:
+                q_max = (sf_data['q_max_x'], sf_data['q_max_y'])
+            plot_structure_factor_2d(
+                sf_data['S_q_2d'], q_vals, axes[ax_idx],
+                title=r'Full $S(\mathbf{q})$',
+                cmap='hot', k_points=k_points, q_max=q_max
+            )
+            ax_idx += 1
         
         plt.tight_layout()
-        jpm_str = f"{jpm:+.4f}".replace('+', 'p').replace('-', 'm').replace('.', 'p')
-        fname = f'{output_dir}/plaquette_oriented_Jpm_{jpm_str}.png'
+        
+        fname = f'{output_dir}/spin_sf_components_2d_Jpm_{jpm_str}.png'
         plt.savefig(fname, dpi=150, bbox_inches='tight')
         print(f"  Saved: {fname}")
         plt.close()
@@ -1694,6 +2082,8 @@ def main():
                         help='Plot spatially resolved bond expectations from per-Jpm HDF5 files')
     parser.add_argument('--plot-sq', '-s', action='store_true',
                         help='Plot structure factors S(q) and S_D(q) in momentum space')
+    parser.add_argument('--plot-temp-scan', '-T', action='store_true',
+                        help='Plot temperature-dependent order parameters from --tpq-all-temps mode')
     parser.add_argument('--select-jpm', type=float, nargs='+', default=None,
                         help='Only plot bond/structure factor data for these specific Jpm values')
     
@@ -1742,6 +2132,12 @@ def main():
     
     plot_all_order_parameters(data, output_dir, title_prefix)
     plot_temperature_dependence(data, output_dir, title_prefix)
+    
+    # Plot temperature scan data if requested (from --tpq-all-temps mode)
+    if args.plot_temp_scan and scan_dir:
+        print("\nPlotting temperature scan data...")
+        temp_scan_dir = Path(output_dir) / 'temperature_scans'
+        plot_all_temperature_scans(scan_dir, temp_scan_dir, title_prefix, args.select_jpm)
     
     # Plot spatially resolved bond data if requested
     if args.plot_bonds and scan_dir:

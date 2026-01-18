@@ -162,11 +162,16 @@ public:
     /**
      * @brief Generate all sectors, saving each to disk immediately
      * 
-     * Memory usage during generation: O(single_sector_size)
+     * TWO-PASS ALGORITHM (cache-free, low memory):
+     * Pass 1: Discover unique orbit representatives without caching
+     * Pass 2: Build sectors from orbit representatives and save to disk
+     * 
+     * Memory usage during generation: O(num_orbits) instead of O(2^N)
      * After generation: O(1) - all data on disk
      */
     void generateSectorsToDisk(const std::string& dir) {
         std::cout << "\n=== Generating Sectors (Disk-Based Low-Memory Mode) ===" << std::endl;
+        std::cout << "Using two-pass cache-free algorithm for minimal memory usage" << std::endl;
         
         // Create cache directory
         disk_cache_dir_ = dir + "/sector_cache";
@@ -176,9 +181,45 @@ public:
         symmetry_info.loadFromDirectory(dir);
         
         const size_t dim = 1ULL << n_bits_;
+        const size_t group_size = symmetry_info.max_clique.size();
         num_sectors_ = symmetry_info.sectors.size();
         sector_dimensions_.resize(num_sectors_, 0);
         symmetrized_block_ham_sizes.resize(num_sectors_, 0);
+        
+        // ========== PASS 1: Discover orbit representatives (NO CACHING) ==========
+        std::cout << "\n--- Pass 1: Discovering orbit representatives ---" << std::endl;
+        std::cout << "Hilbert space dimension: " << dim << std::endl;
+        std::cout << "Expected reduction factor: ~" << group_size << "x" << std::endl;
+        
+        std::vector<uint64_t> orbit_reps;
+        orbit_reps.reserve(dim / group_size + 1000);
+        
+        uint64_t progress_interval = std::max(dim / 100, 1UL);
+        
+        for (uint64_t basis = 0; basis < dim; ++basis) {
+            // Compute orbit representative WITHOUT caching
+            uint64_t orbit_rep = computeOrbitRepNocache(basis);
+            
+            // Only keep if this IS the representative
+            if (basis == orbit_rep) {
+                orbit_reps.push_back(orbit_rep);
+            }
+            
+            // Progress reporting
+            if ((basis + 1) % progress_interval == 0 || basis == dim - 1) {
+                std::cout << "\rProgress: " << std::fixed << std::setprecision(1)
+                          << (100.0 * (basis + 1) / dim) << "%   " << std::flush;
+            }
+        }
+        std::cout << std::endl;
+        
+        std::cout << "Found " << orbit_reps.size() << " unique orbit representatives" << std::endl;
+        std::cout << "Memory for orbit reps: " 
+                  << (orbit_reps.size() * sizeof(uint64_t)) / (1024.0 * 1024.0)
+                  << " MB" << std::endl;
+        
+        // ========== PASS 2: Build sectors from orbit representatives ==========
+        std::cout << "\n--- Pass 2: Building sectors ---" << std::endl;
         
         size_t total_orbit_elements = 0;
         size_t total_basis_states = 0;
@@ -199,27 +240,16 @@ public:
             sector.quantum_numbers = sector_meta.quantum_numbers;
             sector.phase_factors = sector_meta.phase_factors;
             
-            // Find all orbit representatives for this sector
-            std::unordered_set<uint64_t> processed_orbits;
-            
-            for (uint64_t basis = 0; basis < dim; ++basis) {
-                // Get orbit representative
-                uint64_t orbit_rep = getOrbitRepresentative(basis);
-                
-                // Skip if already processed
-                if (processed_orbits.count(orbit_rep)) continue;
-                
-                // Compute orbit elements and coefficients for this sector
+            // For each orbit representative, check if it belongs to this sector
+            for (uint64_t orbit_rep : orbit_reps) {
                 std::vector<uint64_t> orbit_elements;
                 std::vector<Complex> orbit_coefficients;
                 double norm_sq = 0.0;
                 
-                computeOrbitData(basis, sector.phase_factors, 
+                computeOrbitData(orbit_rep, sector.phase_factors, 
                                 orbit_elements, orbit_coefficients, norm_sq);
                 
                 if (norm_sq > 1e-10) {
-                    processed_orbits.insert(orbit_rep);
-                    
                     SymBasisState state(orbit_rep, sector.quantum_numbers, std::sqrt(norm_sq));
                     state.orbit_elements = std::move(orbit_elements);
                     state.orbit_coefficients = std::move(orbit_coefficients);
@@ -245,8 +275,9 @@ public:
             // CLEAR MEMORY - sector goes out of scope and is deallocated
         }
         
-        // Clear orbit cache to free memory
-        state_to_orbit_cache_.clear();
+        // Clear orbit reps to free memory
+        orbit_reps.clear();
+        orbit_reps.shrink_to_fit();
         
         // Save metadata
         std::ofstream meta_file(disk_cache_dir_ + "/metadata.txt");
@@ -264,8 +295,8 @@ public:
         std::cout << "Cache directory: " << disk_cache_dir_ << std::endl;
         
         // Estimate memory savings
-        size_t full_memory_mb = (total_basis_states * 27 * (8 + 16)) / (1024 * 1024);  // orbit elements + coeffs
-        size_t disk_memory_mb = (max_sector_dim * 27 * (8 + 16)) / (1024 * 1024);
+        size_t full_memory_mb = (total_basis_states * group_size * (8 + 16)) / (1024 * 1024);
+        size_t disk_memory_mb = (max_sector_dim * group_size * (8 + 16)) / (1024 * 1024);
         std::cout << "\nMemory comparison:" << std::endl;
         std::cout << "  All sectors in RAM: ~" << full_memory_mb << " MB" << std::endl;
         std::cout << "  Disk-based (one sector): ~" << disk_memory_mb << " MB" << std::endl;
@@ -390,6 +421,21 @@ private:
         return rep;
     }
     
+    /**
+     * @brief Compute orbit representative WITHOUT caching (cache-free, O(|G|) time, O(1) memory)
+     * 
+     * This is essential for large systems where storing the cache would exceed memory.
+     * Each state's orbit representative is computed on-the-fly in O(|G|) time.
+     */
+    uint64_t computeOrbitRepNocache(uint64_t basis) const {
+        uint64_t rep = basis;
+        for (const auto& perm : symmetry_info.max_clique) {
+            uint64_t permuted = applyPermutation(basis, perm);
+            if (permuted < rep) rep = permuted;
+        }
+        return rep;
+    }
+    
     void computeOrbitData(uint64_t basis, const std::vector<Complex>& phase_factors,
                          std::vector<uint64_t>& orbit_elements,
                          std::vector<Complex>& orbit_coefficients,
@@ -423,6 +469,9 @@ private:
                 norm_sq += std::norm(coeff);
             }
         }
+        
+        // Critical: normalize by group size (same as streaming_symmetry.h)
+        norm_sq /= symmetry_info.max_clique.size();
     }
     
     void applyHamiltonianTerms(uint64_t s, Complex prefactor, double group_norm,

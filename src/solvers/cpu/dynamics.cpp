@@ -2,6 +2,7 @@
 
 #include <ed/solvers/dynamics.h>
 #include <ed/core/hdf5_io.h>  // For HDF5 output
+#include <ed/core/blas_lapack_wrapper.h>  // For LAPACKE interface
 
 // ============================================================================
 // TIME EVOLUTION METHODS
@@ -216,20 +217,17 @@ void time_evolve_krylov(
         alpha[effective_dim-1] = alpha_complex.real();
     }
     
-    // Diagonalize tridiagonal matrix using LAPACK (faster than Eigen for small matrices)
+    // Diagonalize tridiagonal matrix using LAPACKE C interface (portable across MKL/AOCL)
     std::vector<double> eigenvalues = alpha;
     std::vector<double> eigenvectors_data(effective_dim * effective_dim);
     std::vector<double> offdiag(beta.begin(), beta.begin() + effective_dim - 1);
-    std::vector<double> work(std::max(static_cast<uint64_t>(1), 2 * effective_dim - 2));
     
-    char jobz = 'V';
-    int32_t n = static_cast<int32_t>(effective_dim);
-    int32_t ldz = static_cast<int32_t>(effective_dim);
-    int32_t info = 0;
+    lapack_int n = static_cast<lapack_int>(effective_dim);
+    lapack_int ldz = static_cast<lapack_int>(effective_dim);
     
-    // Call LAPACK dstev (AOCL version requires string length as last parameter)
-    dstev_(&jobz, &n, eigenvalues.data(), offdiag.data(), 
-           eigenvectors_data.data(), &ldz, work.data(), &info, 1);
+    // Use LAPACKE C interface for portability across different BLAS backends
+    lapack_int info = LAPACKE_dstev(LAPACK_COL_MAJOR, 'V', n, eigenvalues.data(), 
+                                     offdiag.data(), eigenvectors_data.data(), ldz);
     
     if (info != 0) {
         std::cerr << "Warning: Krylov eigendecomposition failed with info=" << info << std::endl;
