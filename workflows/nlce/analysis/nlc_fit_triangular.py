@@ -122,18 +122,31 @@ def run_nlce_triangular(params, fixed_params, exp_temp, work_dir, h_field=None, 
         temp_range: Override temperature range
     
     Returns:
-        calc_temp, calc_spec_heat arrays
+        calc_temp, calc_spec_heat arrays (in SI units J/(mol·K) if SI_units=True)
     """
     model = fixed_params.get("model", "heisenberg")
     
     # Extract parameters based on model type
+    # If fit_J_kelvin is enabled, the last model parameter is J_kelvin
+    fit_J_kelvin = fixed_params.get("fit_J_kelvin", False)
+    
     if model == 'anisotropic':
-        n_model_params = 4
-        Jzz, Jpm, Jpmpm, Jzpm = params[:4]
+        if fit_J_kelvin:
+            n_model_params = 5
+            Jzz, Jpm, Jpmpm, Jzpm, J_kelvin = params[:5]
+        else:
+            n_model_params = 4
+            Jzz, Jpm, Jpmpm, Jzpm = params[:4]
+            J_kelvin = fixed_params.get("J_kelvin", None)
         J1, J2 = 1.0, 0.0  # Not used for anisotropic
     else:
-        n_model_params = 2
-        J1, J2 = params[:2]
+        if fit_J_kelvin:
+            n_model_params = 3
+            J1, J2, J_kelvin = params[:3]
+        else:
+            n_model_params = 2
+            J1, J2 = params[:2]
+            J_kelvin = fixed_params.get("J_kelvin", None)
         Jzz, Jpm, Jpmpm, Jzpm = None, None, None, None
     
     h_value = h_field if h_field is not None else fixed_params.get("h", 0.0)
@@ -173,6 +186,17 @@ def run_nlce_triangular(params, fixed_params, exp_temp, work_dir, h_field=None, 
     
     if fixed_params.get("skip_cluster_gen", True):
         cmd.append('--skip_cluster_gen')
+    
+    # SI units for comparison with experimental data (J/(mol·K))
+    if fixed_params.get("SI_units", True):
+        cmd.append('--SI_units')
+    
+    # Temperature conversion to Kelvin
+    # Use fitted J_kelvin if available, otherwise use fixed value
+    if J_kelvin is not None and J_kelvin > 0:
+        cmd.append(f'--J_kelvin={J_kelvin:.12f}')
+    elif fixed_params.get("J_kelvin") is not None:
+        cmd.append(f'--J_kelvin={fixed_params["J_kelvin"]}')
     
     if not fixed_params.get("skip_ham_prep", False):
         # Clean up old results
@@ -232,9 +256,16 @@ def calc_chi_squared(params, fixed_params, exp_datasets, work_dir):
     n_datasets = len(exp_datasets)
     fit_broadening = fixed_params.get("fit_broadening", False)
     model = fixed_params.get("model", "heisenberg")
+    save_snapshots = fixed_params.get("save_snapshots", False)
+    snapshot_dir = fixed_params.get("snapshot_dir", work_dir)
+    iteration_counter = fixed_params.get("iteration_counter", [0])
     
-    # Determine number of model parameters
-    n_model_params = 4 if model == 'anisotropic' else 2
+    # Determine number of model parameters (including J_kelvin if fitted)
+    fit_J_kelvin = fixed_params.get("fit_J_kelvin", False)
+    if model == 'anisotropic':
+        n_model_params = 5 if fit_J_kelvin else 4
+    else:
+        n_model_params = 3 if fit_J_kelvin else 2
     
     if fit_broadening:
         model_params = params[:n_model_params]
@@ -242,6 +273,12 @@ def calc_chi_squared(params, fixed_params, exp_datasets, work_dir):
     else:
         model_params = params[:n_model_params]
         sigmas = [0.0] * n_datasets
+    
+    all_calc_temps = []
+    all_calc_heats = []
+    all_exp_temps = []
+    all_exp_heats = []
+    all_interp_heats = []
     
     for i, dataset in enumerate(exp_datasets):
         exp_temp = dataset['temp']
@@ -266,8 +303,14 @@ def calc_chi_squared(params, fixed_params, exp_datasets, work_dir):
             total_chi_squared += 1e10 * weight
             continue
         
+        all_calc_temps.append(calc_temp)
+        all_calc_heats.append(calc_spec_heat)
+        all_exp_temps.append(exp_temp)
+        all_exp_heats.append(exp_spec_heat)
+        
         # Interpolate to experimental temperatures
         interp_spec_heat = interpolate_calc_data(calc_temp, calc_spec_heat, exp_temp)
+        all_interp_heats.append(interp_spec_heat)
         
         # Apply broadening if fitting
         if fit_broadening and sigmas[i] > 0:
@@ -288,13 +331,43 @@ def calc_chi_squared(params, fixed_params, exp_datasets, work_dir):
         chi_sq = np.sum(diff**2) * weight
         total_chi_squared += chi_sq
     
+    # Save snapshot for debugging
+    if save_snapshots:
+        iteration_counter[0] += 1
+        iter_num = iteration_counter[0]
+        snapshot_file = os.path.join(snapshot_dir, f'snapshot_iter_{iter_num:04d}.txt')
+        with open(snapshot_file, 'w') as f:
+            f.write(f"# Iteration {iter_num}\n")
+            f.write(f"# Chi-squared: {total_chi_squared:.6f}\n")
+            if model == 'anisotropic':
+                f.write(f"# Jzz={params[0]:.6f}, Jpm={params[1]:.6f}, Jpmpm={params[2]:.6f}, Jzpm={params[3]:.6f}\n")
+                if fit_J_kelvin:
+                    f.write(f"# J_kelvin={params[4]:.6f}\n")
+            else:
+                f.write(f"# J1={params[0]:.6f}, J2={params[1]:.6f}\n")
+            f.write("#\n# Calculated specific heat:\n")
+            f.write("# T(K)  C_calc(J/mol/K)\n")
+            if len(all_calc_temps) > 0:
+                for T, C in zip(all_calc_temps[0], all_calc_heats[0]):
+                    f.write(f"{T:.6e} {C:.6e}\n")
+            f.write("#\n# Experimental vs Interpolated:\n")
+            f.write("# T_exp  C_exp  C_interp  diff\n")
+            if len(all_exp_temps) > 0:
+                for T, C_exp, C_int in zip(all_exp_temps[0], all_exp_heats[0], all_interp_heats[0]):
+                    f.write(f"{T:.6e} {C_exp:.6e} {C_int:.6e} {C_exp-C_int:.6e}\n")
+    
     # Log progress with appropriate parameter names
     model = fixed_params.get("model", "heisenberg")
     if model == 'anisotropic':
-        logging.info(f"Parameters: Jzz={params[0]:.4f}, Jpm={params[1]:.4f}, "
-                    f"Jpmpm={params[2]:.4f}, Jzpm={params[3]:.4f}, Chi²={total_chi_squared:.4f}")
+        log_msg = f"Jzz={params[0]:.4f}, Jpm={params[1]:.4f}, Jpmpm={params[2]:.4f}, Jzpm={params[3]:.4f}"
+        if fit_J_kelvin:
+            log_msg += f", J_kelvin={params[4]:.4f}"
+        logging.info(f"Parameters: {log_msg}, Chi²={total_chi_squared:.4f}")
     else:
-        logging.info(f"Parameters: J1={params[0]:.4f}, J2={params[1]:.4f}, Chi²={total_chi_squared:.4f}")
+        log_msg = f"J1={params[0]:.4f}, J2={params[1]:.4f}"
+        if fit_J_kelvin:
+            log_msg += f", J_kelvin={params[2]:.4f}"
+        logging.info(f"Parameters: {log_msg}, Chi²={total_chi_squared:.4f}")
     
     return total_chi_squared
 
@@ -341,8 +414,14 @@ def plot_results(exp_datasets, fixed_params, best_params, work_dir, output_dir):
     else:
         title_str = f'Triangular Lattice Fit: J1={best_params[0]:.3f}, J2={best_params[1]:.3f}'
     
-    plt.xlabel('Temperature (J₁)')
-    plt.ylabel('Specific Heat')
+    # Set labels based on SI units setting
+    use_SI_units = fixed_params.get("SI_units", True)
+    if use_SI_units:
+        plt.xlabel('Temperature (K)')
+        plt.ylabel('Specific Heat (J/(mol·K))')
+    else:
+        plt.xlabel('Temperature (J₁)')
+        plt.ylabel('Specific Heat')
     plt.title(title_str)
     plt.xscale('log')
     plt.grid(True, alpha=0.3)
@@ -432,7 +511,7 @@ def main():
     parser.add_argument('--Jzpm_max', type=float, default=0.5, help='Max Jzpm')
     
     # NLCE parameters
-    parser.add_argument('--max_order', type=int, default=4, help='Maximum NLCE order')
+    parser.add_argument('--max_order', type=int, default=5, help='Maximum NLCE order (default: 5 for triangular lattice)')
     parser.add_argument('--h', type=float, default=0.0, help='Magnetic field')
     parser.add_argument('--field_dir', type=float, nargs=3, default=[0, 0, 1],
                        help='Field direction')
@@ -447,6 +526,24 @@ def main():
     parser.add_argument('--skip_cluster_gen', action='store_true')
     parser.add_argument('--skip_ham_prep', action='store_true')
     
+    # SI units (default: True for comparison with experimental data)
+    parser.add_argument('--SI_units', action='store_true', default=True,
+                       help='Use SI units (J/(mol·K)) for specific heat output (default: True)')
+    parser.add_argument('--no_SI_units', action='store_true',
+                       help='Disable SI units (use natural units instead)')
+    parser.add_argument('--J_kelvin', type=float, default=None,
+                       help='Exchange coupling J in Kelvin. If set, temperatures are '
+                            'converted to Kelvin for direct comparison with experimental data.')
+    parser.add_argument('--fit_J_kelvin', action='store_true',
+                       help='Fit J_kelvin as a free parameter (recommended for comparing with '
+                            'experimental data when the energy scale is unknown).')
+    parser.add_argument('--J_kelvin_min', type=float, default=0.01,
+                       help='Minimum J_kelvin for fitting (default: 0.01 K)')
+    parser.add_argument('--J_kelvin_max', type=float, default=10.0,
+                       help='Maximum J_kelvin for fitting (default: 10.0 K)')
+    parser.add_argument('--initial_J_kelvin', type=float, default=1.0,
+                       help='Initial J_kelvin for fitting (default: 1.0 K)')
+    
     # Optimization
     parser.add_argument('--method', type=str, default='multi_start',
                        choices=['multi_start', 'differential_evolution', 'dual_annealing'])
@@ -455,6 +552,10 @@ def main():
     
     # Optional fitting parameters
     parser.add_argument('--fit_broadening', action='store_true')
+    
+    # Debug snapshots
+    parser.add_argument('--save_snapshots', action='store_true',
+                       help='Save diagnostic snapshots at each iteration for debugging')
     
     args = parser.parse_args()
     
@@ -486,6 +587,15 @@ def main():
         logging.error("Must provide --exp_data or --exp_config")
         sys.exit(1)
     
+    # Determine SI_units setting (--no_SI_units overrides default True)
+    use_SI_units = args.SI_units and not args.no_SI_units
+    
+    # Set up snapshot directory if saving snapshots
+    snapshot_dir = os.path.join(args.output_dir, 'snapshots')
+    if args.save_snapshots:
+        os.makedirs(snapshot_dir, exist_ok=True)
+        logging.info(f"Saving diagnostic snapshots to: {snapshot_dir}")
+    
     # Fixed parameters
     fixed_params = {
         "max_order": args.max_order,
@@ -499,7 +609,13 @@ def main():
         "skip_cluster_gen": args.skip_cluster_gen,
         "skip_ham_prep": args.skip_ham_prep,
         "fit_broadening": args.fit_broadening,
-        "n_datasets": len(exp_datasets)
+        "n_datasets": len(exp_datasets),
+        "SI_units": use_SI_units,
+        "J_kelvin": args.J_kelvin,
+        "fit_J_kelvin": args.fit_J_kelvin,
+        "save_snapshots": args.save_snapshots,
+        "snapshot_dir": snapshot_dir,
+        "iteration_counter": [0]  # Mutable list to track iteration count
     }
     
     # Generate clusters first if needed
@@ -525,14 +641,32 @@ def main():
             (args.Jzpm_min, args.Jzpm_max)
         ]
         initial_params = [args.initial_Jzz, args.initial_Jpm, args.initial_Jpmpm, args.initial_Jzpm]
-        logging.info(f"Fitting anisotropic model: Jzz, Jpm, Jpmpm, Jzpm")
+        param_names = "Jzz, Jpm, Jpmpm, Jzpm"
+        
+        # Add J_kelvin as fitting parameter if requested
+        if args.fit_J_kelvin:
+            bounds.append((args.J_kelvin_min, args.J_kelvin_max))
+            initial_params.append(args.initial_J_kelvin)
+            param_names += ", J_kelvin"
+        
+        logging.info(f"Fitting anisotropic model: {param_names}")
         logging.info(f"Initial: Jzz={args.initial_Jzz}, Jpm={args.initial_Jpm}, "
-                    f"Jpmpm={args.initial_Jpmpm}, Jzpm={args.initial_Jzpm}")
+                    f"Jpmpm={args.initial_Jpmpm}, Jzpm={args.initial_Jzpm}" +
+                    (f", J_kelvin={args.initial_J_kelvin}" if args.fit_J_kelvin else ""))
     else:
         bounds = [(args.J1_min, args.J1_max), (args.J2_min, args.J2_max)]
         initial_params = [args.initial_J1, args.initial_J2]
-        logging.info(f"Fitting {args.model} model: J1, J2")
-        logging.info(f"Initial: J1={args.initial_J1}, J2={args.initial_J2}")
+        param_names = "J1, J2"
+        
+        # Add J_kelvin as fitting parameter if requested
+        if args.fit_J_kelvin:
+            bounds.append((args.J_kelvin_min, args.J_kelvin_max))
+            initial_params.append(args.initial_J_kelvin)
+            param_names += ", J_kelvin"
+        
+        logging.info(f"Fitting {args.model} model: {param_names}")
+        logging.info(f"Initial: J1={args.initial_J1}, J2={args.initial_J2}" +
+                    (f", J_kelvin={args.initial_J_kelvin}" if args.fit_J_kelvin else ""))
     
     if args.fit_broadening:
         for _ in exp_datasets:
@@ -595,6 +729,9 @@ def main():
             'chi_squared': float(best_chi_sq),
             'fixed_params': fixed_params
         }
+        if args.fit_J_kelvin:
+            logging.info(f"Best J_kelvin: {best_params[4]:.6f} K")
+            results_dict['best_params']['J_kelvin'] = float(best_params[4])
     else:
         logging.info(f"Best J1: {best_params[0]:.6f}")
         logging.info(f"Best J2: {best_params[1]:.6f}")
@@ -606,6 +743,9 @@ def main():
             'chi_squared': float(best_chi_sq),
             'fixed_params': fixed_params
         }
+        if args.fit_J_kelvin:
+            logging.info(f"Best J_kelvin: {best_params[2]:.6f} K")
+            results_dict['best_params']['J_kelvin'] = float(best_params[2])
     
     logging.info(f"Best chi-squared: {best_chi_sq:.6f}")
     logging.info("="*80)
