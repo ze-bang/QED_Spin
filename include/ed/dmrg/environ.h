@@ -39,6 +39,10 @@
 #include <ed/dmrg/mps.h>
 #include <ed/dmrg/mpo.h>
 
+#ifdef _OPENMP
+#include <omp.h>
+#endif
+
 namespace dmrg {
 
 /**
@@ -125,15 +129,10 @@ private:
 /**
  * @brief Update left environment by adding one site
  * 
- * TODO: Implement this!
+ * OPTIMIZED: Uses staged contractions to reduce complexity from
+ * O(χ⁴d²w²) to O(χ³dw + χ²d²w²).
  * 
  *   L_new(a', w', a) = Σ_{w,b',b} L(b', w, b) * A*(b', σ, a') * W(w, σ', σ, w') * A(b, σ', a)
- * 
- * Where:
- *   - L is the old left environment with shape (χ_bra_old, w_old, χ_ket_old)
- *   - A is the MPS tensor at the current site with shape (χ_old, d, χ_new)
- *   - W is the MPO tensor at the current site with shape (w_old, d, d, w_new)
- *   - L_new has shape (χ_bra_new, w_new, χ_ket_new)
  * 
  * Diagram:
  *   
@@ -169,25 +168,78 @@ inline Environment update_left_environment(
     
     Environment L_new(chi_new_bra, w_new, chi_new_ket);
     
+    // =========================================================================
+    // OPTIMIZED: Staged contractions
+    // =========================================================================
+    //
     // L_new(a', w', a) = Σ_{b',w,b,σ,σ'} L(b',w,b) * conj(A(b',σ',a')) * W(w,σ',σ,w') * A(b,σ,a)
-    // 
-    // Using explicit loops for clarity (can be optimized with tensor contractions)
+    //
+    // Stage 1: T1(b, σ, a) = A(b, σ, a)  [just the ket tensor, no contraction needed]
+    //
+    // Stage 2: T2(b', w, σ, a) = Σ_b L(b', w, b) * A(b, σ, a)
+    //          Cost: O(χ_old² * χ_new * w * d)
+    //
+    // Stage 3: T3(b', w', σ', a) = Σ_{w,σ} T2(b', w, σ, a) * W(w, σ', σ, w')
+    //          Cost: O(χ_old * χ_new * w² * d²)
+    //
+    // Stage 4: L_new(a', w', a) = Σ_{b',σ'} conj(A(b', σ', a')) * T3(b', w', σ', a)
+    //          Cost: O(χ_old * χ_new² * w * d)
+    // =========================================================================
+    
+    // Stage 2: T2(b', w, σ, a) = Σ_b L(b', w, b) * A(b, σ, a)
+    std::vector<Complex> T2(chi_old_bra * w_old * d * chi_new_ket, Complex(0.0, 0.0));
+    
+    for (size_t bp = 0; bp < chi_old_bra; ++bp) {
+        for (size_t w = 0; w < w_old; ++w) {
+            for (size_t s = 0; s < d; ++s) {
+                for (size_t a = 0; a < chi_new_ket; ++a) {
+                    Complex sum(0.0, 0.0);
+                    for (size_t b = 0; b < chi_old_ket; ++b) {
+                        sum += L_old(bp, w, b) * A(b, s, a);
+                    }
+                    // T2[bp, w, s, a]
+                    size_t idx = bp + w*chi_old_bra + s*chi_old_bra*w_old + a*chi_old_bra*w_old*d;
+                    T2[idx] = sum;
+                }
+            }
+        }
+    }
+    
+    // Stage 3: T3(b', w', σ', a) = Σ_{w,σ} T2(b', w, σ, a) * W(w, σ', σ, w')
+    std::vector<Complex> T3(chi_old_bra * w_new * d * chi_new_ket, Complex(0.0, 0.0));
+    
+    for (size_t bp = 0; bp < chi_old_bra; ++bp) {
+        for (size_t a = 0; a < chi_new_ket; ++a) {
+            for (size_t w = 0; w < w_old; ++w) {
+                for (size_t s = 0; s < d; ++s) {
+                    size_t idx_T2 = bp + w*chi_old_bra + s*chi_old_bra*w_old + a*chi_old_bra*w_old*d;
+                    Complex T2_val = T2[idx_T2];
+                    
+                    for (size_t wp = 0; wp < w_new; ++wp) {
+                        for (size_t sp = 0; sp < d; ++sp) {
+                            // T3[bp, wp, sp, a]
+                            size_t idx_T3 = bp + wp*chi_old_bra + sp*chi_old_bra*w_new + a*chi_old_bra*w_new*d;
+                            T3[idx_T3] += T2_val * W(w, sp, s, wp);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    // Free T2 memory
+    T2.clear();
+    T2.shrink_to_fit();
+    
+    // Stage 4: L_new(a', w', a) = Σ_{b',σ'} conj(A(b', σ', a')) * T3(b', w', σ', a)
     for (size_t ap = 0; ap < chi_new_bra; ++ap) {
         for (size_t wp = 0; wp < w_new; ++wp) {
             for (size_t a = 0; a < chi_new_ket; ++a) {
                 Complex sum(0.0, 0.0);
                 for (size_t bp = 0; bp < chi_old_bra; ++bp) {
-                    for (size_t w = 0; w < w_old; ++w) {
-                        for (size_t b = 0; b < chi_old_ket; ++b) {
-                            for (size_t sp = 0; sp < d; ++sp) {      // σ' (bra physical)
-                                for (size_t s = 0; s < d; ++s) {     // σ (ket physical)
-                                    sum += L_old(bp, w, b) 
-                                         * std::conj(A(bp, sp, ap))
-                                         * W(w, sp, s, wp)
-                                         * A(b, s, a);
-                                }
-                            }
-                        }
+                    for (size_t sp = 0; sp < d; ++sp) {
+                        size_t idx_T3 = bp + wp*chi_old_bra + sp*chi_old_bra*w_new + a*chi_old_bra*w_new*d;
+                        sum += std::conj(A(bp, sp, ap)) * T3[idx_T3];
                     }
                 }
                 L_new(ap, wp, a) = sum;
@@ -201,9 +253,8 @@ inline Environment update_left_environment(
 /**
  * @brief Update right environment by adding one site
  * 
- * TODO: Implement this!
- * 
- * Similar to left environment but contracts from the right.
+ * OPTIMIZED: Uses staged contractions to reduce complexity from
+ * O(χ⁴d²w²) to O(χ³dw + χ²d²w²).
  * 
  *   R_new(a', w, a) = Σ_{w',b',b} A*(a', σ, b') * W(w, σ', σ, w') * A(a, σ', b) * R(b', w', b)
  * 
@@ -235,23 +286,80 @@ inline Environment update_right_environment(
     
     Environment R_new(chi_new_bra, w_new, chi_new_ket);
     
+    // =========================================================================
+    // OPTIMIZED: Staged contractions
+    // =========================================================================
+    //
     // R_new(a', w, a) = Σ_{b',w',b,σ,σ'} conj(A(a',σ',b')) * W(w,σ',σ,w') * A(a,σ,b) * R(b',w',b)
+    //
+    // Stage 1: T1(σ, b, b') = Σ_{w'} R(b', w', b) [contract with A later]
+    //          Actually: T1(a, σ, b') = Σ_b A(a, σ, b) * Σ_{w'} ... need reorder
+    //
+    // Better ordering:
+    // Stage 2: T2(a, σ, w', b') = Σ_b A(a, σ, b) * R(b', w', b)
+    //          Cost: O(χ_new * d * w * χ_old² )
+    //
+    // Stage 3: T3(a, σ', w, b') = Σ_{σ,w'} T2(a, σ, w', b') * W(w, σ', σ, w')
+    //          Cost: O(χ_new * χ_old * d² * w²)
+    //
+    // Stage 4: R_new(a', w, a) = Σ_{σ',b'} conj(A(a', σ', b')) * T3(a, σ', w, b')
+    //          Cost: O(χ_new² * χ_old * w * d)
+    // =========================================================================
+    
+    // Stage 2: T2(a, σ, w', b') = Σ_b A(a, σ, b) * R(b', w', b)
+    std::vector<Complex> T2(chi_new_ket * d * w_old * chi_old_bra, Complex(0.0, 0.0));
+    
+    for (size_t a = 0; a < chi_new_ket; ++a) {
+        for (size_t s = 0; s < d; ++s) {
+            for (size_t wp = 0; wp < w_old; ++wp) {
+                for (size_t bp = 0; bp < chi_old_bra; ++bp) {
+                    Complex sum(0.0, 0.0);
+                    for (size_t b = 0; b < chi_old_ket; ++b) {
+                        sum += A(a, s, b) * R_old(bp, wp, b);
+                    }
+                    // T2[a, s, wp, bp]
+                    size_t idx = a + s*chi_new_ket + wp*chi_new_ket*d + bp*chi_new_ket*d*w_old;
+                    T2[idx] = sum;
+                }
+            }
+        }
+    }
+    
+    // Stage 3: T3(a, σ', w, b') = Σ_{σ,w'} T2(a, σ, w', b') * W(w, σ', σ, w')
+    std::vector<Complex> T3(chi_new_ket * d * w_new * chi_old_bra, Complex(0.0, 0.0));
+    
+    for (size_t a = 0; a < chi_new_ket; ++a) {
+        for (size_t bp = 0; bp < chi_old_bra; ++bp) {
+            for (size_t s = 0; s < d; ++s) {
+                for (size_t wp = 0; wp < w_old; ++wp) {
+                    size_t idx_T2 = a + s*chi_new_ket + wp*chi_new_ket*d + bp*chi_new_ket*d*w_old;
+                    Complex T2_val = T2[idx_T2];
+                    
+                    for (size_t w = 0; w < w_new; ++w) {
+                        for (size_t sp = 0; sp < d; ++sp) {
+                            // T3[a, sp, w, bp]
+                            size_t idx_T3 = a + sp*chi_new_ket + w*chi_new_ket*d + bp*chi_new_ket*d*w_new;
+                            T3[idx_T3] += T2_val * W(w, sp, s, wp);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    // Free T2 memory
+    T2.clear();
+    T2.shrink_to_fit();
+    
+    // Stage 4: R_new(a', w, a) = Σ_{σ',b'} conj(A(a', σ', b')) * T3(a, σ', w, b')
     for (size_t ap = 0; ap < chi_new_bra; ++ap) {
         for (size_t w = 0; w < w_new; ++w) {
             for (size_t a = 0; a < chi_new_ket; ++a) {
                 Complex sum(0.0, 0.0);
-                for (size_t bp = 0; bp < chi_old_bra; ++bp) {
-                    for (size_t wp = 0; wp < w_old; ++wp) {
-                        for (size_t b = 0; b < chi_old_ket; ++b) {
-                            for (size_t sp = 0; sp < d; ++sp) {      // σ' (bra)
-                                for (size_t s = 0; s < d; ++s) {     // σ (ket)
-                                    sum += std::conj(A(ap, sp, bp))
-                                         * W(w, sp, s, wp)
-                                         * A(a, s, b)
-                                         * R_old(bp, wp, b);
-                                }
-                            }
-                        }
+                for (size_t sp = 0; sp < d; ++sp) {
+                    for (size_t bp = 0; bp < chi_old_bra; ++bp) {
+                        size_t idx_T3 = a + sp*chi_new_ket + w*chi_new_ket*d + bp*chi_new_ket*d*w_new;
+                        sum += std::conj(A(ap, sp, bp)) * T3[idx_T3];
                     }
                 }
                 R_new(ap, w, a) = sum;
@@ -388,6 +496,7 @@ inline void apply_effective_hamiltonian(
     // T1(a, s1, s2, w_r, b') = Σ_b θ(a, s1, s2, b) * R(b', w_r, b)
     std::vector<Complex> T1(chi_L * d * d * w_R * chi_R, Complex(0.0, 0.0));
     
+    #pragma omp parallel for collapse(3) schedule(static)
     for (size_t a = 0; a < chi_L; ++a) {
         for (size_t s1 = 0; s1 < d; ++s1) {
             for (size_t s2 = 0; s2 < d; ++s2) {
@@ -411,6 +520,7 @@ inline void apply_effective_hamiltonian(
     // T2(a, s1, w_m, s2', b') = Σ_{s2,w_r} T1(a, s1, s2, w_r, b') * W_R(w_m, s2', s2, w_r)
     std::vector<Complex> T2(chi_L * d * w_M * d * chi_R, Complex(0.0, 0.0));
     
+    #pragma omp parallel for collapse(3) schedule(static)
     for (size_t a = 0; a < chi_L; ++a) {
         for (size_t s1 = 0; s1 < d; ++s1) {
             for (size_t bp = 0; bp < chi_R; ++bp) {
@@ -423,7 +533,11 @@ inline void apply_effective_hamiltonian(
                             for (size_t s2p = 0; s2p < d; ++s2p) {
                                 // T2[a, s1, w_m, s2p, bp]
                                 size_t idx_T2 = a + s1*chi_L + w_m*chi_L*d + s2p*chi_L*d*w_M + bp*chi_L*d*w_M*d;
-                                T2[idx_T2] += T1_val * W_right(w_m, s2p, s2, w_r);
+                                Complex val = T1_val * W_right(w_m, s2p, s2, w_r);
+                                #pragma omp atomic
+                                reinterpret_cast<double*>(&T2[idx_T2])[0] += std::real(val);
+                                #pragma omp atomic
+                                reinterpret_cast<double*>(&T2[idx_T2])[1] += std::imag(val);
                             }
                         }
                     }
@@ -440,6 +554,7 @@ inline void apply_effective_hamiltonian(
     // T3(a, w_l, s1', s2', b') = Σ_{s1,w_m} T2(a, s1, w_m, s2', b') * W_L(w_l, s1', s1, w_m)
     std::vector<Complex> T3(chi_L * w_L * d * d * chi_R, Complex(0.0, 0.0));
     
+    #pragma omp parallel for collapse(3) schedule(static)
     for (size_t a = 0; a < chi_L; ++a) {
         for (size_t bp = 0; bp < chi_R; ++bp) {
             for (size_t s2p = 0; s2p < d; ++s2p) {
@@ -452,7 +567,10 @@ inline void apply_effective_hamiltonian(
                             for (size_t s1p = 0; s1p < d; ++s1p) {
                                 // T3[a, w_l, s1p, s2p, bp]
                                 size_t idx_T3 = a + w_l*chi_L + s1p*chi_L*w_L + s2p*chi_L*w_L*d + bp*chi_L*w_L*d*d;
-                                T3[idx_T3] += T2_val * W_left(w_l, s1p, s1, w_m);
+                                #pragma omp atomic
+                                reinterpret_cast<double*>(&T3[idx_T3])[0] += std::real(T2_val * W_left(w_l, s1p, s1, w_m));
+                                #pragma omp atomic
+                                reinterpret_cast<double*>(&T3[idx_T3])[1] += std::imag(T2_val * W_left(w_l, s1p, s1, w_m));
                             }
                         }
                     }
@@ -467,6 +585,7 @@ inline void apply_effective_hamiltonian(
     
     // Stage 4: Contract T3 with L
     // θ_out(a', s1', s2', b') = Σ_{a,w_l} L(a', w_l, a) * T3(a, w_l, s1', s2', b')
+    #pragma omp parallel for collapse(2) schedule(static)
     for (size_t ap = 0; ap < chi_L; ++ap) {
         for (size_t s1p = 0; s1p < d; ++s1p) {
             for (size_t s2p = 0; s2p < d; ++s2p) {
