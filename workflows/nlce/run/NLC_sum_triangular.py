@@ -28,23 +28,32 @@ class NLCExpansionTriangular:
     """NLCE calculator for triangular lattice."""
     
     def __init__(self, cluster_dir, eigenvalue_dir, temp_min, temp_max, num_temps, 
-                 measure_spin=False, SI_units=False):
+                 measure_spin=False, SI_units=False, J_kelvin=None):
         """
         Initialize the NLC expansion calculator for triangular lattice.
         
         Args:
             cluster_dir: Directory containing cluster information files
             eigenvalue_dir: Directory containing eigenvalue files from ED calculations
-            temp_min: Minimum temperature
-            temp_max: Maximum temperature
+            temp_min: Minimum temperature (in units of J if J_kelvin not set, else in Kelvin)
+            temp_max: Maximum temperature (in units of J if J_kelvin not set, else in Kelvin)
             num_temps: Number of temperature points
             measure_spin: Whether to compute spin expectation values
-            SI_units: Use SI units for output
+            SI_units: Convert specific heat/entropy to SI units (J/(mol·K))
+            J_kelvin: Exchange coupling in Kelvin. If set, temperatures are in Kelvin.
+                      If None, temperatures remain in natural units (T/J).
+                      
+        SI Unit Conversion:
+            - Specific heat: C_SI = R × C where R = 8.314 J/(mol·K)
+            - Entropy: S_SI = R × S  
+            - Energy: E_SI = R × T × E (if J_kelvin set)
+            - Temperature: T_K = T × J_kelvin (if J_kelvin set)
         """
         self.cluster_dir = cluster_dir
         self.eigenvalue_dir = eigenvalue_dir
         
         self.SI = SI_units
+        self.J_kelvin = J_kelvin  # Exchange coupling in Kelvin for T conversion
         self.measure_spin = measure_spin
         self.temp_values = np.logspace(np.log10(temp_min), np.log10(temp_max), num_temps)
         
@@ -245,10 +254,18 @@ class NLCExpansionTriangular:
             entropy = np.log(Z_shifted) + (energy - ground_state_energy) / temp
             
             if self.SI:
-                kB_NA = 6.02214076e23 * 1.380649e-23
-                specific_heat *= kB_NA
-                entropy *= kB_NA
-                energy *= kB_NA
+                # Gas constant R = NA * kB = 8.314462618 J/(mol·K)
+                R = 6.02214076e23 * 1.380649e-23  # ≈ 8.314 J/(mol·K)
+                # Specific heat per mole: C_SI [J/(mol·K)] = R × C [dimensionless]
+                specific_heat *= R
+                # Entropy per mole: S_SI [J/(mol·K)] = R × S [dimensionless]
+                entropy *= R
+                # Energy per mole: E_SI [J/mol] = R × J_kelvin × E [dimensionless]
+                # Note: If J_kelvin is set, energy is converted; otherwise stays in natural units
+                if self.J_kelvin is not None:
+                    energy *= R * self.J_kelvin
+                else:
+                    energy *= R  # Energy in units of R*J
                 
             results['energy'][i] = energy
             results['specific_heat'][i] = specific_heat 
@@ -477,58 +494,97 @@ class NLCExpansionTriangular:
         """Save NLCE results to files."""
         os.makedirs(output_dir, exist_ok=True)
         
+        # Temperature array: convert to Kelvin if J_kelvin is set
+        if self.J_kelvin is not None:
+            temp_output = self.temp_values * self.J_kelvin
+            temp_unit = 'K'
+        else:
+            temp_output = self.temp_values
+            temp_unit = 'J' if not self.SI else 'J'
+        
+        # Units for thermodynamic quantities
+        if self.SI:
+            cv_unit = 'J/(mol*K)'
+            s_unit = 'J/(mol*K)'
+            e_unit = 'J/mol' if self.J_kelvin else 'R*J'
+        else:
+            cv_unit = 'kB'
+            s_unit = 'kB'
+            e_unit = 'J'
+        
         # Save specific heat
         output_file = os.path.join(output_dir, 'nlc_specific_heat.txt')
-        data = np.column_stack([self.temp_values, results['specific_heat']])
-        np.savetxt(output_file, data, header='Temperature  Specific_Heat', comments='# ')
+        data = np.column_stack([temp_output, results['specific_heat']])
+        header = f'Temperature({temp_unit})  Specific_Heat({cv_unit})'
+        np.savetxt(output_file, data, header=header, comments='# ')
         print(f"Specific heat saved to {output_file}")
         
         # Save energy
         output_file = os.path.join(output_dir, 'nlc_energy.txt')
-        data = np.column_stack([self.temp_values, results['energy']])
-        np.savetxt(output_file, data, header='Temperature  Energy', comments='# ')
+        data = np.column_stack([temp_output, results['energy']])
+        header = f'Temperature({temp_unit})  Energy({e_unit})'
+        np.savetxt(output_file, data, header=header, comments='# ')
         print(f"Energy saved to {output_file}")
         
         # Save entropy
         output_file = os.path.join(output_dir, 'nlc_entropy.txt')
-        data = np.column_stack([self.temp_values, results['entropy']])
-        np.savetxt(output_file, data, header='Temperature  Entropy', comments='# ')
+        data = np.column_stack([temp_output, results['entropy']])
+        header = f'Temperature({temp_unit})  Entropy({s_unit})'
+        np.savetxt(output_file, data, header=header, comments='# ')
         print(f"Entropy saved to {output_file}")
         
         # Save order-by-order results for convergence analysis
         for prop in ['specific_heat', 'energy', 'entropy']:
             output_file = os.path.join(output_dir, f'nlc_{prop}_by_order.txt')
-            header = 'Temperature  ' + '  '.join([f'Order_{i+1}' for i in range(len(self.partial_sums[prop]))])
-            data = np.column_stack([self.temp_values] + [self.partial_sums[prop][i] for i in range(len(self.partial_sums[prop]))])
+            header = f'Temperature({temp_unit})  ' + '  '.join([f'Order_{i+1}' for i in range(len(self.partial_sums[prop]))])
+            data = np.column_stack([temp_output] + [self.partial_sums[prop][i] for i in range(len(self.partial_sums[prop]))])
             np.savetxt(output_file, data, header=header, comments='# ')
     
     def plot_results(self, results, output_dir, max_order):
         """Plot NLCE results."""
         os.makedirs(output_dir, exist_ok=True)
         
+        # Temperature array and units
+        if self.J_kelvin is not None:
+            temp_plot = self.temp_values * self.J_kelvin
+            temp_label = 'Temperature (K)'
+        else:
+            temp_plot = self.temp_values
+            temp_label = 'Temperature (J₁)'
+        
+        # Units for thermodynamic quantities
+        if self.SI:
+            cv_label = 'Specific Heat (J/(mol·K))'
+            s_label = 'Entropy (J/(mol·K))'
+            e_label = 'Energy (J/mol)' if self.J_kelvin else 'Energy (R·J)'
+        else:
+            cv_label = 'Specific Heat (kв)'
+            s_label = 'Entropy (kв)'
+            e_label = 'Energy (J₁)'
+        
         fig, axes = plt.subplots(2, 2, figsize=(12, 10))
         
         # Specific heat
         ax = axes[0, 0]
-        ax.semilogx(self.temp_values, results['specific_heat'], 'b-', lw=2)
-        ax.set_xlabel('Temperature (J₁)')
-        ax.set_ylabel('Specific Heat (kB)')
+        ax.semilogx(temp_plot, results['specific_heat'], 'b-', lw=2)
+        ax.set_xlabel(temp_label)
+        ax.set_ylabel(cv_label)
         ax.set_title(f'Specific Heat (NLCE order {max_order})')
         ax.grid(True, alpha=0.3)
         
         # Energy
         ax = axes[0, 1]
-        ax.semilogx(self.temp_values, results['energy'], 'r-', lw=2)
-        ax.set_xlabel('Temperature (J₁)')
-        ax.set_ylabel('Energy (J₁)')
+        ax.semilogx(temp_plot, results['energy'], 'r-', lw=2)
+        ax.set_xlabel(temp_label)
+        ax.set_ylabel(e_label)
         ax.set_title(f'Energy (NLCE order {max_order})')
         ax.grid(True, alpha=0.3)
         
         # Entropy
         ax = axes[1, 0]
-        ax.semilogx(self.temp_values, results['entropy'], 'g-', lw=2)
-        ax.set_xlabel('Temperature (J₁)')
-        ax.set_ylabel('Entropy (kB)')
+        ax.semilogx(temp_plot, results['entropy'], 'g-', lw=2)
+        ax.set_xlabel(temp_label)
+        ax.set_ylabel(s_label)
         ax.set_title(f'Entropy (NLCE order {max_order})')
         ax.grid(True, alpha=0.3)
         
@@ -536,9 +592,9 @@ class NLCExpansionTriangular:
         ax = axes[1, 1]
         colors = plt.cm.viridis(np.linspace(0, 1, len(self.partial_sums['specific_heat'])))
         for i, ps in enumerate(self.partial_sums['specific_heat']):
-            ax.semilogx(self.temp_values, ps, color=colors[i], lw=1.5, label=f'Order {i+1}')
-        ax.set_xlabel('Temperature (J₁)')
-        ax.set_ylabel('Specific Heat (kB)')
+            ax.semilogx(temp_plot, ps, color=colors[i], lw=1.5, label=f'Order {i+1}')
+        ax.set_xlabel(temp_label)
+        ax.set_ylabel(cv_label)
         ax.set_title('Order-by-order Convergence')
         ax.legend(loc='best', fontsize=8)
         ax.grid(True, alpha=0.3)
@@ -568,7 +624,12 @@ def main():
     parser.add_argument('--measure_spin', action='store_true',
                        help='Compute spin expectation values')
     parser.add_argument('--SI_units', action='store_true',
-                       help='Use SI units')
+                       help='Convert to SI units: specific heat in J/(mol·K). '
+                            'Temperature remains in units of J unless --J_kelvin is set.')
+    parser.add_argument('--J_kelvin', type=float, default=None,
+                       help='Exchange coupling J in Kelvin. If set, temperatures are '
+                            'converted to Kelvin: T_K = T × J_kelvin. '
+                            'Required for direct comparison with experimental data.')
     parser.add_argument('--resummation', type=str, default='none',
                        choices=['none', 'euler', 'wynn'],
                        help='Resummation method (none, euler, or wynn)')
@@ -579,6 +640,15 @@ def main():
     print("NLCE Summation for Triangular Lattice")
     print("="*80)
     
+    if args.SI_units:
+        print(f"\nSI units enabled: Specific heat in J/(mol·K)")
+        if args.J_kelvin:
+            print(f"Exchange coupling J = {args.J_kelvin} K")
+            print(f"Temperature output will be in Kelvin")
+        else:
+            print(f"Temperature remains in natural units (T/J)")
+            print(f"  Tip: Use --J_kelvin to convert temperature to Kelvin")
+    
     # Initialize calculator
     nlc = NLCExpansionTriangular(
         cluster_dir=args.cluster_dir,
@@ -587,7 +657,8 @@ def main():
         temp_max=args.temp_max,
         num_temps=args.temp_bins,
         measure_spin=args.measure_spin,
-        SI_units=args.SI_units
+        SI_units=args.SI_units,
+        J_kelvin=args.J_kelvin
     )
     
     # Read data
