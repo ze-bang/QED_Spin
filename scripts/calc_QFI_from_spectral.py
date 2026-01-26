@@ -37,6 +37,7 @@ import matplotlib.pyplot as plt
 from collections import defaultdict
 from scipy.signal import find_peaks, peak_prominences
 from scipy.interpolate import interp1d
+from scipy.ndimage import gaussian_filter1d
 
 # Try to import h5py, but make it optional
 try:
@@ -61,12 +62,13 @@ if hasattr(np, 'trapezoid'):
 else:
     np_trapz = np.trapz
 
-
+ENABLE_BETA_EXTENSION = True
+EXTENDED_BETA_MAX = 1000.0  # Maximum beta for extended calculations
 
 # ==============================================================================
 # Excluded parameter values (corrupted data)
 # ==============================================================================
-EXCLUDED_JPM_VALUES = [0.08, 0.10]  # These Jpm values appear to be corrupted
+EXCLUDED_JPM_VALUES = [-0.425, -0.35, -0.3, 0.08]  # These Jpm values appear to be corrupted
 QFI_SCALE_FACTOR = 1  # Multiply all QFI values by this factor
 
 # ==============================================================================
@@ -112,11 +114,49 @@ BETA_THRESHOLD_LOW_T = 50.0
 # NaN Interpolation Configuration
 # ==============================================================================
 # Enable interpolation of NaN values in spectral data
-ENABLE_NAN_INTERPOLATION = False  # Set to False to disable NaN interpolation
+ENABLE_NAN_INTERPOLATION = True  # Set to False to disable NaN interpolation
 
 # Use moment-based width (standard deviation) instead of threshold-based width
 # Moment-based is more robust to noise and numerical artifacts
 USE_MOMENT_BASED_WIDTH = False
+
+# ==============================================================================
+# Post-hoc Spectral Smoothing Configuration
+# ==============================================================================
+# Enable Gaussian smoothing of spectral function to reduce noise.
+# This is useful when the original Lanczos broadening was too small,
+# resulting in noisy spectral functions.
+ENABLE_SPECTRAL_SMOOTHING = True  # Set to True to enable smoothing
+
+# Gaussian smoothing width (sigma) in units of omega.
+# Typical values: 0.01-0.1 depending on the frequency resolution.
+# Larger values = more smoothing but may smear out real features.
+SPECTRAL_SMOOTHING_SIGMA = 0.015
+
+# ==============================================================================
+# High-Beta Spectral Weight Normalization Configuration
+# ==============================================================================
+# At very high beta (low temperature), numerical instabilities in the Lanczos
+# calculation can cause loss of spectral weight. This option enables normalization
+# of high-beta spectral functions to match a reference spectral integral from
+# a more reliable (lower) beta value.
+ENABLE_HIGH_BETA_NORMALIZATION = False  # Set to True to enable normalization
+
+# Beta threshold above which normalization is applied.
+# Spectral functions with beta > this value will be normalized.
+HIGH_BETA_NORMALIZATION_THRESHOLD = 250.0
+
+# ==============================================================================
+# High-Beta QFI Monotonicity Enforcement
+# ==============================================================================
+# At very high beta (low temperature), numerical instabilities can cause QFI to
+# artificially decrease. This option enforces that QFI is monotonically non-decreasing
+# with increasing beta (decreasing temperature) above a threshold.
+ENABLE_HIGH_BETA_QFI_FLOOR = False  # Set to True to enable QFI floor enforcement
+
+# Beta threshold above which QFI floor is enforced
+# For beta > this value, QFI will be at least as large as the max QFI seen at lower beta
+HIGH_BETA_QFI_FLOOR_THRESHOLD = 230.0
 
 # ==============================================================================
 # FFT and Spectral Function Utilities
@@ -379,8 +419,13 @@ def load_spectral_from_dssf_hdf5(h5_path, operator_name, temperature_or_beta, sa
                     print(f"Warning: No samples found in {spectral_path}")
                     return None, None, None
                 
-                # Average over samples (nanmean handles NaN values correctly)
-                spectral = np.nanmean(all_spectral, axis=0)
+                # Average over samples
+                if ENABLE_NAN_INTERPOLATION:
+                    # nanmean handles NaN by ignoring them
+                    spectral = np.nanmean(all_spectral, axis=0)
+                else:
+                    # Regular mean propagates NaN values
+                    spectral = np.mean(all_spectral, axis=0)
             
             # Extract beta value from temperature/beta group name
             beta = None
@@ -603,16 +648,17 @@ def load_spectral_file(filepath):
 
 
 def find_spectral_peaks(omega, spectral_function, min_prominence=0.1, 
-                       min_height=None, omega_range=(0, 6)):
+                       min_height=None, omega_range=(0, 6), find_all_peaks=False):
     """
     Find peak positions in spectral function data.
     
     Parameters:
     omega: Frequency array
     spectral_function: Spectral function values
-    min_prominence: Minimum prominence for peak detection
-    min_height: Minimum height for peak detection (if None, uses 10% of max)
+    min_prominence: Minimum prominence for peak detection (use very small value like 1e-10 to capture all finite peaks)
+    min_height: Minimum height for peak detection (if None, disabled to capture all peaks)
     omega_range: Frequency range to search for peaks (min_freq, max_freq)
+    find_all_peaks: If True, find ALL local maxima (derivative=0, convexity=down) without filtering
     
     Returns:
     peak_positions: List of peak frequencies
@@ -627,12 +673,29 @@ def find_spectral_peaks(omega, spectral_function, min_prominence=0.1,
     if len(spec_filtered) == 0:
         return [], [], []
     
-    # Set minimum height if not provided
-    if min_height is None:
-        min_height = 0.1 * np.max(spec_filtered)
+    if find_all_peaks:
+        # Find ALL local maxima using derivative and convexity criteria
+        peaks = find_all_local_maxima(spec_filtered)
+    else:
+        # Use minimal filtering to capture all finite peaks
+        # Set very small prominence to capture any peak with finite prominence
+        effective_prominence = min_prominence if min_prominence is not None else 1e-10
+        
+        # Disable height filter if min_height is None (capture all peaks regardless of height)
+        if min_height is None:
+            peaks, properties = find_peaks(spec_filtered, prominence=effective_prominence)
+        else:
+            peaks, properties = find_peaks(spec_filtered, height=min_height, prominence=effective_prominence)
     
-    # Find peaks
-    peaks, properties = find_peaks(spec_filtered, height=min_height, prominence=min_prominence)
+    # Check if the first point (omega=0 boundary) is a local maximum
+    # scipy.find_peaks doesn't detect boundary points, so check manually
+    peaks = list(peaks)
+    if len(spec_filtered) >= 2 and spec_filtered[0] > spec_filtered[1]:
+        # First point is higher than second - it's a boundary maximum
+        if 0 not in peaks:
+            peaks.insert(0, 0)
+    
+    peaks = np.array(peaks)
     
     if len(peaks) == 0:
         return [], [], []
@@ -645,6 +708,64 @@ def find_spectral_peaks(omega, spectral_function, min_prominence=0.1,
     prominences, _, _ = peak_prominences(spec_filtered, peaks)
     
     return peak_positions.tolist(), peak_heights.tolist(), prominences.tolist()
+
+
+def find_all_local_maxima(data):
+    """
+    Find ALL local maxima in a 1D array using derivative and convexity criteria.
+    
+    A local maximum is defined as a point where:
+    1. The first derivative changes from positive to negative (or is zero)
+    2. The second derivative is negative (concave down)
+    
+    Parameters:
+    data: 1D numpy array
+    
+    Returns:
+    peaks: Array of indices where local maxima occur
+    """
+    if len(data) < 3:
+        return np.array([], dtype=int)
+    
+    # Compute first derivative (forward difference)
+    d1 = np.diff(data)
+    
+    # Compute second derivative (central difference approximation)
+    d2 = np.diff(data, n=2)
+    
+    # Find points where first derivative changes sign from positive to negative
+    # This means d1[i] >= 0 and d1[i+1] <= 0, which corresponds to a peak at index i+1
+    sign_change = (d1[:-1] >= 0) & (d1[1:] <= 0)
+    
+    # Also check that second derivative is negative (concave down) at these points
+    # d2 is computed at indices 1 to len(data)-2 relative to original array
+    # sign_change is at indices 0 to len(data)-3
+    # We need to align them: sign_change[i] corresponds to peak at original index i+1
+    # d2[i] is the second derivative at original index i+1
+    
+    # Require concave down (negative second derivative) with some tolerance for numerical noise
+    concave_down = d2 < 0
+    
+    # Combine conditions
+    is_peak = sign_change & concave_down
+    
+    # Convert to peak indices in original array
+    # sign_change[i] being True means peak at index i+1
+    peak_indices = np.where(is_peak)[0] + 1
+    
+    # Also check boundary condition: ensure peaks are actual local maxima
+    # by verifying they are higher than their immediate neighbors
+    valid_peaks = []
+    for idx in peak_indices:
+        if idx > 0 and idx < len(data) - 1:
+            if data[idx] >= data[idx-1] and data[idx] >= data[idx+1]:
+                valid_peaks.append(idx)
+        elif idx == 0 and len(data) > 1 and data[idx] >= data[idx+1]:
+            valid_peaks.append(idx)
+        elif idx == len(data) - 1 and len(data) > 1 and data[idx] >= data[idx-1]:
+            valid_peaks.append(idx)
+    
+    return np.array(valid_peaks, dtype=int)
 
 
 # ==============================================================================
@@ -823,6 +944,44 @@ def interpolate_nan_values(omega, spectral_function):
     return result
 
 
+def smooth_spectral_function(omega, spectral_function, sigma=None):
+    """
+    Apply Gaussian smoothing to a spectral function.
+    
+    This is useful for reducing noise in spectral functions when the original
+    Lanczos broadening was too small.
+    
+    Parameters:
+    omega: Frequency array
+    spectral_function: Spectral function values
+    sigma: Gaussian smoothing width in units of omega (if None, uses SPECTRAL_SMOOTHING_SIGMA)
+    
+    Returns:
+    Smoothed spectral function
+    """
+    if sigma is None:
+        sigma = SPECTRAL_SMOOTHING_SIGMA
+    
+    if sigma <= 0:
+        return spectral_function
+    
+    # Convert sigma from omega units to index units
+    # Assumes uniform omega grid
+    if len(omega) < 2:
+        return spectral_function
+    
+    d_omega = omega[1] - omega[0]
+    if d_omega <= 0:
+        return spectral_function
+    
+    sigma_idx = sigma / d_omega
+    
+    # Apply Gaussian filter
+    smoothed = gaussian_filter1d(spectral_function, sigma=sigma_idx, mode='nearest')
+    
+    return smoothed
+
+
 def rescale_spectrum_to_reference(omega, spectral_function, ref_center, ref_width,
                                    current_center=None, current_width=None,
                                    use_moments=True, aggressive_factor=1.0):
@@ -885,6 +1044,103 @@ def rescale_spectrum_to_reference(omega, spectral_function, ref_center, ref_widt
     
     # The rescaled spectrum is on the original omega grid
     return omega, rescaled_spectral
+
+
+def get_reference_spectral_integral(file_list_by_beta, beta_threshold=None):
+    """
+    Find the maximum spectral integral from beta values below a threshold.
+    
+    This is used for high-beta normalization where numerical instabilities
+    can cause loss of spectral weight. The maximum integral from reliable
+    (lower) beta values is used as the reference.
+    
+    Parameters:
+    file_list_by_beta: Dictionary mapping beta_bin_idx -> list of file paths
+    beta_threshold: Only consider beta values below this threshold (default: HIGH_BETA_NORMALIZATION_THRESHOLD)
+    
+    Returns:
+    (ref_integral, ref_beta) - reference spectral integral and the beta it came from
+    """
+    if beta_threshold is None:
+        beta_threshold = HIGH_BETA_NORMALIZATION_THRESHOLD
+    
+    max_integral = -np.inf
+    max_integral_beta = None
+    
+    for beta_bin_idx, file_list in file_list_by_beta.items():
+        if not file_list:
+            continue
+            
+        # Get beta value for this bin
+        first_file = file_list[0]
+        beta = None
+        
+        if first_file.startswith('DSSF_HDF5:'):
+            parts = first_file[10:].split(':')
+            if len(parts) >= 3:
+                beta_group = parts[2]
+                beta_match = re.search(r'beta_([0-9.+-eE]+|inf)', beta_group)
+                if beta_match:
+                    beta_str = beta_match.group(1)
+                    beta = np.inf if beta_str.lower() == 'inf' else float(beta_str)
+        else:
+            parsed = parse_spectral_filename(first_file) or parse_spectral_dataset_name(
+                first_file.split(':')[-1] if 'HDF5:' in first_file else first_file)
+            if parsed and parsed[1] is not None:
+                beta = parsed[1]
+        
+        if beta is None:
+            continue
+            
+        # Skip beta values above threshold (these are the ones we want to normalize)
+        if not np.isinf(beta) and beta > beta_threshold:
+            continue
+        
+        # Load and compute spectral integral
+        mean_omega, mean_spectral, _ = _load_and_average_spectral(file_list)
+        if mean_omega is None:
+            continue
+        
+        # Compute integral over positive frequencies
+        pos_mask = mean_omega > 0
+        if not np.any(pos_mask):
+            continue
+        integral = np_trapz(mean_spectral[pos_mask], mean_omega[pos_mask])
+        
+        if integral > max_integral:
+            max_integral = integral
+            max_integral_beta = beta
+    
+    if max_integral_beta is None:
+        return None, None
+    
+    return max_integral, max_integral_beta
+
+
+def normalize_spectral_to_reference(omega, spectral_function, ref_integral, current_integral=None):
+    """
+    Normalize a spectral function to match a reference spectral integral.
+    
+    Parameters:
+    omega: Frequency array
+    spectral_function: Spectral function values
+    ref_integral: Reference spectral integral to match
+    current_integral: Current integral (if None, computed from data)
+    
+    Returns:
+    (normalized_spectral, scale_factor) - normalized spectral function and the scale factor used
+    """
+    if current_integral is None:
+        pos_mask = omega > 0
+        if not np.any(pos_mask):
+            return spectral_function, 1.0
+        current_integral = np_trapz(spectral_function[pos_mask], omega[pos_mask])
+    
+    if current_integral <= 0 or ref_integral <= 0:
+        return spectral_function, 1.0
+    
+    scale_factor = ref_integral / current_integral
+    return spectral_function * scale_factor, scale_factor
 
 
 def get_reference_spectral_moments_from_files(file_list_by_beta):
@@ -1483,6 +1739,17 @@ def _process_species_spectral(species, beta_groups, beta_bin_values,
         else:
             print(f"  Warning: No static structure factor data found, proceeding without intensity scaling")
     
+    # Get reference spectral integral for high-beta normalization
+    ref_spectral_integral = None
+    ref_integral_beta = None
+    if ENABLE_HIGH_BETA_NORMALIZATION:
+        ref_spectral_integral, ref_integral_beta = get_reference_spectral_integral(
+            beta_groups, HIGH_BETA_NORMALIZATION_THRESHOLD)
+        if ref_spectral_integral is not None:
+            print(f"  Using high-beta normalization (reference integral={ref_spectral_integral:.4f} from β={ref_integral_beta:.4g})")
+        else:
+            print(f"  Warning: Could not determine reference spectral integral for high-beta normalization")
+    
     for beta_bin_idx, file_list in beta_groups.items():
         beta = _get_bin_beta(beta_bin_values[beta_bin_idx])
         beta_label = 'inf' if np.isinf(beta) else f'{beta:.6g}'
@@ -1506,6 +1773,18 @@ def _process_species_spectral(species, beta_groups, beta_bin_values,
                 interp_spec = interpolate_nan_values(omega, spectral)
                 interpolated_individual_data.append((omega, interp_spec, fpath))
             individual_data = interpolated_individual_data
+        
+        # Apply Gaussian smoothing to reduce noise (if enabled)
+        if ENABLE_SPECTRAL_SMOOTHING:
+            mean_spectral = smooth_spectral_function(mean_omega, mean_spectral)
+            
+            # Also smooth individual sample data
+            smoothed_individual_data = []
+            for omega, spectral, fpath in individual_data:
+                smooth_spec = smooth_spectral_function(omega, spectral)
+                smoothed_individual_data.append((omega, smooth_spec, fpath))
+            individual_data = smoothed_individual_data
+            print(f"    Applied Gaussian smoothing (σ={SPECTRAL_SMOOTHING_SIGMA})")
         
         # Apply spectral width rescaling if reference is available
         # Skip rescaling for the reference beta itself (or very close to it)
@@ -1556,6 +1835,25 @@ def _process_species_spectral(species, beta_groups, beta_bin_values,
             else:
                 print(f"    Warning: No matching SSSF value for β={beta_label}")
         
+        # Apply high-beta spectral weight normalization if enabled
+        # This corrects for numerical instabilities that cause loss of spectral weight at very low temperatures
+        if ENABLE_HIGH_BETA_NORMALIZATION and ref_spectral_integral is not None:
+            # Only apply to beta values above the threshold
+            if not np.isinf(beta) and beta > HIGH_BETA_NORMALIZATION_THRESHOLD:
+                # Normalize the averaged spectrum
+                rescaled_spectral, norm_factor = normalize_spectral_to_reference(
+                    mean_omega, rescaled_spectral, ref_spectral_integral)
+                
+                # Also normalize individual sample data
+                normalized_individual_data = []
+                for omega, spectral, fpath in rescaled_individual_data:
+                    norm_spec, _ = normalize_spectral_to_reference(
+                        omega, spectral, ref_spectral_integral)
+                    normalized_individual_data.append((omega, norm_spec, fpath))
+                rescaled_individual_data = normalized_individual_data
+                
+                print(f"    Applied high-beta normalization (factor={norm_factor:.4f})")
+        
         # Calculate QFI from (rescaled) averaged spectral function
         qfi = calculate_qfi_from_spectral(mean_omega, rescaled_spectral, beta) * QFI_SCALE_FACTOR
         
@@ -1565,9 +1863,10 @@ def _process_species_spectral(species, beta_groups, beta_bin_values,
             sample_qfi = calculate_qfi_from_spectral(omega, spectral, beta) * QFI_SCALE_FACTOR
             per_sample_qfi.append((sample_qfi, fpath))
         
-        # Find peaks in the spectral function
+        # Find ALL peaks in the spectral function (including weak ones)
+        # Using very small prominence (1e-10) to capture all finite peaks
         peak_positions, peak_heights, peak_prominences = find_spectral_peaks(
-            mean_omega, mean_spectral, min_prominence=0.1, omega_range=(0, 6))
+            mean_omega, mean_spectral, min_prominence=1e-10, min_height=None, omega_range=(0, 6))
         
         # Save results
         results = {
@@ -1594,6 +1893,120 @@ def _process_species_spectral(species, beta_groups, beta_bin_values,
             all_species_qfi_data[sample_key].append((beta, sample_qfi))
         
         print(f"    QFI = {qfi:.4f}, Peaks at: {peak_positions}")
+    
+    # Apply high-beta QFI floor enforcement if enabled
+    # This ensures QFI doesn't artificially decrease at very low temperatures
+    if ENABLE_HIGH_BETA_QFI_FLOOR:
+        _apply_qfi_floor(species, all_species_qfi_data, HIGH_BETA_QFI_FLOOR_THRESHOLD)
+
+
+def _apply_qfi_floor(species, all_species_qfi_data, beta_threshold):
+    """
+    Enforce QFI floor for high beta values.
+    
+    For beta > threshold, QFI is set to at least the maximum QFI seen at beta <= threshold.
+    This corrects for numerical instabilities that cause artificial QFI decrease at low T.
+    """
+    if species not in all_species_qfi_data:
+        return
+    
+    qfi_list = all_species_qfi_data[species]
+    if not qfi_list:
+        return
+    
+    # Sort by beta (ascending)
+    sorted_data = sorted(qfi_list, key=lambda x: (np.inf if np.isinf(x[0]) else x[0]))
+    
+    # Find max QFI at or below threshold
+    max_qfi_below_threshold = 0.0
+    for beta, qfi in sorted_data:
+        if not np.isinf(beta) and beta <= beta_threshold:
+            max_qfi_below_threshold = max(max_qfi_below_threshold, qfi)
+    
+    if max_qfi_below_threshold <= 0:
+        # No reference found, use max of first half
+        n = len(sorted_data)
+        for beta, qfi in sorted_data[:n//2 + 1]:
+            max_qfi_below_threshold = max(max_qfi_below_threshold, qfi)
+    
+    # Apply floor to high-beta values
+    corrected_list = []
+    corrections_made = 0
+    for beta, qfi in sorted_data:
+        if not np.isinf(beta) and beta > beta_threshold:
+            if qfi < max_qfi_below_threshold:
+                corrected_list.append((beta, max_qfi_below_threshold))
+                corrections_made += 1
+            else:
+                corrected_list.append((beta, qfi))
+                # Update floor for subsequent points
+                max_qfi_below_threshold = max(max_qfi_below_threshold, qfi)
+        else:
+            corrected_list.append((beta, qfi))
+    
+    # Replace the data
+    all_species_qfi_data[species] = corrected_list
+    
+    if corrections_made > 0:
+        print(f"  Applied QFI floor for {species}: {corrections_made} points corrected to floor={max_qfi_below_threshold:.4f}")
+
+
+def _apply_qfi_floor_per_param(data_points, beta_threshold):
+    """
+    Apply QFI floor per parameter value (e.g., per Jpm).
+    
+    For each unique parameter value, ensures QFI is monotonically non-decreasing
+    with increasing beta (decreasing temperature) ONLY for beta > threshold.
+    Below threshold, QFI values are kept as-is.
+    
+    Parameters:
+    data_points: List of (param_value, beta, qfi) tuples
+    beta_threshold: Only enforce monotonicity for beta > this value
+    
+    Returns:
+    Corrected list of (param_value, beta, qfi) tuples
+    """
+    if not data_points:
+        return data_points
+    
+    # Group by parameter value
+    param_groups = defaultdict(list)
+    for param_val, beta, qfi in data_points:
+        param_groups[param_val].append((beta, qfi))
+    
+    # Apply monotonicity within each parameter group
+    corrected_points = []
+    total_corrections = 0
+    
+    for param_val, beta_qfi_list in param_groups.items():
+        # Sort by beta (ascending: low beta = high T first)
+        sorted_data = sorted(beta_qfi_list, key=lambda x: (np.inf if np.isinf(x[0]) else x[0]))
+        
+        # Find the QFI at the last beta point at or below threshold
+        # This becomes the starting floor for higher beta values
+        running_max = 0.0
+        for beta, qfi in sorted_data:
+            if not np.isinf(beta) and beta <= beta_threshold:
+                running_max = qfi  # Keep updating to get the last one (highest beta <= threshold)
+        
+        # Apply: below threshold keep as-is, above threshold enforce monotonicity
+        for beta, qfi in sorted_data:
+            if np.isinf(beta) or beta <= beta_threshold:
+                # Below threshold: keep original value
+                corrected_points.append((param_val, beta, qfi))
+            else:
+                # Above threshold: enforce monotonicity
+                if qfi < running_max:
+                    corrected_points.append((param_val, beta, running_max))
+                    total_corrections += 1
+                else:
+                    corrected_points.append((param_val, beta, qfi))
+                    running_max = qfi
+    
+    if total_corrections > 0:
+        print(f"  Applied per-parameter QFI floor: {total_corrections} points corrected (threshold β={beta_threshold})")
+    
+    return corrected_points
 
 
 def _get_bin_beta(beta_vals):
@@ -1636,9 +2049,14 @@ def _load_and_average_spectral(file_list):
     all_match = all(np.allclose(omega, ref_omega) for omega in all_omega)
     
     if all_match:
-        # Simple average if all omega arrays match (nanmean handles NaN correctly)
+        # Simple average if all omega arrays match
         mean_omega = ref_omega
-        mean_spectral = np.nanmean(all_spectral, axis=0)
+        if ENABLE_NAN_INTERPOLATION:
+            # nanmean handles NaN by ignoring them
+            mean_spectral = np.nanmean(all_spectral, axis=0)
+        else:
+            # Regular mean propagates NaN values
+            mean_spectral = np.mean(all_spectral, axis=0)
     else:
         # Interpolate to common grid when omega arrays don't match
         print("    Warning: Omega arrays don't match across samples, interpolating to common grid")
@@ -1657,8 +2075,13 @@ def _load_and_average_spectral(file_list):
             f = interp1d(omega, spectral, kind='linear', bounds_error=False, fill_value=0.0)
             interpolated_spectral.append(f(mean_omega))
         
-        # Average the interpolated spectral functions (nanmean handles NaN correctly)
-        mean_spectral = np.nanmean(interpolated_spectral, axis=0)
+        # Average the interpolated spectral functions
+        if ENABLE_NAN_INTERPOLATION:
+            # nanmean handles NaN by ignoring them
+            mean_spectral = np.nanmean(interpolated_spectral, axis=0)
+        else:
+            # Regular mean propagates NaN values
+            mean_spectral = np.mean(interpolated_spectral, axis=0)
     
     return mean_omega, mean_spectral, individual_data
 
@@ -1756,7 +2179,7 @@ def _plot_spectral_function(species, beta, results, outdir):
     
     plt.xlabel('Frequency ω')
     plt.ylabel('Spectral Function S(ω)')
-    plt.xlim(-3, 6)
+    plt.xlim(-1, 1)
     plt.title(f'Spectral Function for {species} at Beta≈{beta_label}')
     plt.grid(True)
     plt.legend()
@@ -2049,7 +2472,8 @@ def _plot_parameter_sweep_summary(data, data_dir, param_pattern):
     for species, data_points in base_species.items():
         if data_points:
             try:
-                _plot_parameter_beta_heatmap(species, data_points, plot_outdir, param_pattern)
+                _plot_parameter_beta_heatmap(species, data_points, plot_outdir, param_pattern, 
+                                             data_dir=data_dir)
             except Exception as e:
                 print(f"ERROR processing heatmap for {species}: {e}")
                 import traceback
@@ -2081,7 +2505,7 @@ def _plot_parameter_sweep_summary(data, data_dir, param_pattern):
                 sample_species_key = f"{base_species_name}_sample_{sample_idx}"
                 try:
                     _plot_parameter_beta_heatmap(sample_species_key, data_points, 
-                                                 sample_outdir, param_pattern)
+                                                 sample_outdir, param_pattern, data_dir=data_dir)
                 except Exception as e:
                     print(f"ERROR processing heatmap for {sample_species_key}: {e}")
                     import traceback
@@ -2225,8 +2649,9 @@ def _plot_all_samples_grid(base_species, samples_dict, plot_outdir, param_patter
         
         
         # Fill NaN values at highest beta (lowest temperature) by interpolating across Jpm
-        Z_neg = _fill_nan_at_highest_beta(Z_neg, param_neg, param_pattern, target_beta)
-        Z_pos = _fill_nan_at_highest_beta(Z_pos, param_pos, param_pattern, target_beta)
+        if ENABLE_NAN_INTERPOLATION:
+            Z_neg = _fill_nan_at_highest_beta(Z_neg, param_neg, param_pattern, target_beta)
+            Z_pos = _fill_nan_at_highest_beta(Z_pos, param_pos, param_pattern, target_beta)
         # Filter NaN rows
         filtered_data = _filter_nan_rows_param(target_beta, Z_neg, Z_pos, True)
         
@@ -2308,12 +2733,55 @@ def _plot_all_samples_grid(base_species, samples_dict, plot_outdir, param_patter
     print(f"  Created per-sample grid with {len(sample_grids)} samples")
 
 
-def _plot_parameter_beta_heatmap(species, data_points, plot_outdir, param_pattern):
-    """Create heatmap of QFI vs parameter and beta with comprehensive error checking."""
+def _plot_parameter_beta_heatmap(species, data_points, plot_outdir, param_pattern, data_dir=None):
+    """Create heatmap of QFI vs parameter and beta with comprehensive error checking.
+    
+    Parameters:
+    species: Species name
+    data_points: List of (param_value, beta, qfi) tuples
+    plot_outdir: Output directory for plots
+    param_pattern: Parameter name pattern (e.g., 'Jpm')
+    data_dir: Root data directory containing parameter subdirectories (for peak data loading)
+    """
     
     print(f"\n{'='*60}")
     print(f"Processing heatmap for species: {species}")
     print(f"Number of data points: {len(data_points)}")
+    
+    # Load peak data if data_dir is provided
+    peak_data = None
+    if data_dir is not None:
+        peak_data = _load_peak_data_for_param_sweep(data_dir, species, param_pattern)
+        if peak_data:
+            print(f"  Loaded {len(peak_data)} lowest peak positions for overlay")
+            # Save peak data to file
+            _save_peak_data(peak_data, plot_outdir, species, param_pattern)
+        else:
+            print(f"  No peak data found for species {species}")
+    
+    # Apply per-parameter QFI floor to correct for numerical instabilities at high beta
+    if ENABLE_HIGH_BETA_QFI_FLOOR:
+        data_points = _apply_qfi_floor_per_param(data_points, HIGH_BETA_QFI_FLOOR_THRESHOLD)
+    
+    # Remove last row (highest beta) if beta extension is enabled
+    if ENABLE_BETA_EXTENSION:
+        # Group by param and find max beta for each
+        from collections import defaultdict
+        param_max_beta = defaultdict(float)
+        for p, b, q in data_points:
+            if not np.isinf(b):
+                param_max_beta[p] = max(param_max_beta[p], b)
+        
+        # Remove points at the max beta for each param
+        filtered_points = []
+        removed_count = 0
+        for p, b, q in data_points:
+            if not np.isinf(b) and abs(b - param_max_beta[p]) < 1e-6:
+                removed_count += 1
+                continue
+            filtered_points.append((p, b, q))
+        data_points = filtered_points
+        print(f"  Removed {removed_count} points at highest beta for extension")
     
     # Convert to array
     arr = np.array(data_points, dtype=float)
@@ -2326,6 +2794,18 @@ def _plot_parameter_beta_heatmap(species, data_points, plot_outdir, param_patter
     # Get beta grid - use reference value near middle of param range
     ref_target = np.median(param_vals)
     target_beta = _get_beta_grid_param(param_vals, beta_vals, ref_target)
+    
+    # Extend beta grid to EXTENDED_BETA_MAX if enabled
+    if ENABLE_BETA_EXTENSION:
+        max_existing = target_beta.max() if len(target_beta) > 0 else 0
+        if max_existing < EXTENDED_BETA_MAX:
+            # Add extended beta points (log-spaced from max to EXTENDED_BETA_MAX)
+            n_extend = 5
+            extended_betas = np.logspace(np.log10(max_existing * 1.2), np.log10(EXTENDED_BETA_MAX), n_extend)
+            target_beta = np.concatenate([target_beta, extended_betas])
+            target_beta = np.unique(target_beta)
+            target_beta.sort()
+            print(f"  Extended beta grid to {EXTENDED_BETA_MAX}, new size: {len(target_beta)}")
     if target_beta.size < 2:
         print(f"WARNING: Insufficient beta grid size ({target_beta.size}). Skipping species.")
         return
@@ -2345,8 +2825,9 @@ def _plot_parameter_beta_heatmap(species, data_points, plot_outdir, param_patter
     
     
     # Fill NaN values at highest beta (lowest temperature) by interpolating across Jpm
-    Z_neg = _fill_nan_at_highest_beta(Z_neg, param_neg, param_pattern, target_beta)
-    Z_pos = _fill_nan_at_highest_beta(Z_pos, param_pos, param_pattern, target_beta)
+    if ENABLE_NAN_INTERPOLATION:
+        Z_neg = _fill_nan_at_highest_beta(Z_neg, param_neg, param_pattern, target_beta)
+        Z_pos = _fill_nan_at_highest_beta(Z_pos, param_pos, param_pattern, target_beta)
     if Z_neg is not None:
         print(f"Z_neg shape: {Z_neg.shape}, NaN count: {np.isnan(Z_neg).sum()}")
     if Z_pos is not None:
@@ -2372,7 +2853,7 @@ def _plot_parameter_beta_heatmap(species, data_points, plot_outdir, param_patter
     # Create plots
     try:
         _create_heatmap_plots_param(species, filtered_data, param_neg, param_pos, 
-                                    plot_outdir, param_pattern)
+                                    plot_outdir, param_pattern, peak_data=peak_data)
         print(f"Successfully created heatmap plots for {species}")
     except Exception as e:
         print(f"ERROR creating heatmap plots for {species}: {e}")
@@ -2466,8 +2947,19 @@ def _interpolate_to_grid_param(param_vals, beta_vals, values, param_neg, param_p
             print(f"[DEBUG] {param_pattern}={p:.3f}: Insufficient unique beta values ({bu.size}), returning NaN")
             return np.full_like(target_beta, np.nan, dtype=float)
         
-        f = interp1d(bu, v_mean, kind='linear', bounds_error=False, fill_value=np.nan)
+        # Use extrapolation: fill values beyond data range with the edge values
+        # This extends QFI to higher beta using the last known value
+        last_value = v_mean[-1]  # Value at highest beta in data
+        f = interp1d(bu, v_mean, kind='linear', bounds_error=False, fill_value=(v_mean[0], last_value))
         result = f(target_beta)
+        
+        # For extended beta values, use the last known QFI (monotonicity)
+        if ENABLE_BETA_EXTENSION:
+            max_data_beta = bu.max()
+            for i, tb in enumerate(target_beta):
+                if tb > max_data_beta:
+                    result[i] = last_value
+        
         nan_count = np.isnan(result).sum()
         if nan_count > 0:
             print(f"[DEBUG] {param_pattern}={p:.3f}: Interpolation produced {nan_count} NaN values out of {len(result)}")
@@ -2654,13 +3146,33 @@ def _save_grid_data_param(plot_outdir, base_name, beta, param, Z, param_pattern)
                out, header=header)
 
 
-def _create_heatmap_plots_param(species, filtered_data, param_neg, param_pos, plot_outdir, param_pattern):
-    """Create heatmap plots for the species."""
+def _create_heatmap_plots_param(species, filtered_data, param_neg, param_pos, plot_outdir, param_pattern,
+                                peak_data=None):
+    """Create heatmap plots for the species with optional peak position overlay.
+    
+    Parameters:
+    peak_data: Species-specific peak data for gap curve overlay
+    
+    The gap curve label depends on species type:
+    - SzSz species: labeled as "Vison gap"
+    - SmSp species: labeled as "Spinon gap"
+    """
     
     # Get color scale limits
     vmin, vmax = _get_color_limits_param(filtered_data)
     if vmin is None:
         return
+    
+    # Determine gap label and color based on species type
+    if species.startswith('SzSz'):
+        gap_label = 'Vison gap (β=1/|ω|)'
+        gap_color = 'cyan'
+    elif species.startswith('SmSp'):
+        gap_label = 'Spinon gap (β=1/|ω|)'
+        gap_color = 'magenta'
+    else:
+        gap_label = 'Gap (β=1/|ω|)'
+        gap_color = 'lime'
     
     # Plot negative parameter heatmap
     if 'Z_neg_f' in filtered_data:
@@ -2669,7 +3181,10 @@ def _create_heatmap_plots_param(species, filtered_data, param_neg, param_pos, pl
             vmin, vmax, 
             f'QFI Heatmap ({param_pattern}<0) for {species}',
             os.path.join(plot_outdir, f'qfi_heatmap_neg_{species}.png'),
-            param_pattern
+            param_pattern,
+            peak_data=peak_data,
+            gap_label=gap_label,
+            gap_color=gap_color
         )
     
     # Plot positive parameter heatmap
@@ -2679,14 +3194,20 @@ def _create_heatmap_plots_param(species, filtered_data, param_neg, param_pos, pl
             vmin, vmax,
             f'QFI Heatmap ({param_pattern}>0) for {species}',
             os.path.join(plot_outdir, f'qfi_heatmap_pos_{species}.png'),
-            param_pattern
+            param_pattern,
+            peak_data=peak_data,
+            gap_label=gap_label,
+            gap_color=gap_color
         )
     
     # Plot side-by-side view
     if 'Z_neg_f' in filtered_data and 'Z_pos_f' in filtered_data:
         _plot_side_by_side_heatmap_param(
             species, filtered_data, param_neg, param_pos,
-            vmin, vmax, plot_outdir, param_pattern
+            vmin, vmax, plot_outdir, param_pattern,
+            peak_data=peak_data,
+            gap_label=gap_label,
+            gap_color=gap_color
         )
 
 
@@ -2706,36 +3227,290 @@ def _get_color_limits_param(filtered_data):
     return vmin, vmax
 
 
-def _plot_single_heatmap_param(param, beta, Z, vmin, vmax, title, filename, param_pattern):
-    """Create a single heatmap plot."""
+def _load_peak_data_for_param_sweep(data_dir, species, param_pattern='Jpm'):
+    """
+    Load lowest peak positions from processed_data directories across parameter sweep.
+    
+    Returns:
+    peak_data: List of (param_value, lowest_peak_frequency) tuples
+    """
+    peak_data = []
+    
+    # Find all subdirectories matching the pattern
+    subdirs = sorted(glob.glob(os.path.join(data_dir, f'{param_pattern}=*')))
+    param_regex = re.compile(rf'{param_pattern}=([-]?[\d\.]+)')
+    
+    for subdir in subdirs:
+        param_match = param_regex.search(os.path.basename(subdir))
+        if not param_match:
+            continue
+        
+        param_value = float(param_match.group(1))
+        
+        # Look for processed data in processed_data/<species> directory
+        processed_dir = os.path.join(subdir, 'structure_factor_results', 'processed_data', species)
+        if not os.path.exists(processed_dir):
+            continue
+        
+        # Find all peak files for this species
+        peak_files = glob.glob(os.path.join(processed_dir, 'peaks_beta_*.dat'))
+        
+        # Collect lowest peak frequency across all beta values
+        lowest_peaks_by_beta = []
+        for peak_file in peak_files:
+            try:
+                # Extract beta from filename
+                beta_match = re.search(r'peaks_beta_([0-9.]+|inf)\.dat', os.path.basename(peak_file))
+                if not beta_match:
+                    continue
+                beta_str = beta_match.group(1)
+                if beta_str == 'inf':
+                    beta_val = np.inf
+                else:
+                    beta_val = float(beta_str)
+                
+                # Load peak data: frequency, height, prominence
+                data = np.loadtxt(peak_file)
+                if data.size == 0:
+                    continue
+                if data.ndim == 1:
+                    data = data.reshape(1, -1)
+                
+                # Get the lowest frequency peak (first column is frequency)
+                # Use absolute value to handle negative frequencies
+                # Include peaks at exactly omega=0 (these will be plotted at lowest temperature)
+                frequencies = np.abs(data[:, 0])
+                valid_freqs = frequencies[frequencies >= 0]  # Include all peaks including omega=0
+                if len(valid_freqs) == 0:
+                    continue
+                lowest_peak = np.min(valid_freqs)
+                lowest_peaks_by_beta.append((beta_val, lowest_peak))
+                
+            except Exception as e:
+                continue
+        
+        # Use the lowest peak from the lowest temperature (highest beta, excluding inf)
+        if lowest_peaks_by_beta:
+            # Filter out inf beta
+            finite_peaks = [(b, p) for b, p in lowest_peaks_by_beta if not np.isinf(b)]
+            if finite_peaks:
+                # Sort by beta (descending) and take the lowest peak from highest beta
+                finite_peaks.sort(key=lambda x: -x[0])
+                _, lowest_peak = finite_peaks[0]
+                peak_data.append((param_value, lowest_peak))
+    
+    return peak_data
+
+
+def _load_global_gap_data(data_dir, operator_type, param_pattern='Jpm'):
+    """
+    Load global gap data by finding the minimum peak position across all momentum points
+    for a given operator type (SzSz or SmSp).
+    
+    For SzSz: finds the minimum across all SzSz_q_Qx*_Qy*_Qz* species (vison gap)
+    For SmSp: finds the minimum across all SmSp_q_Qx*_Qy*_Qz* species (spinon gap)
+    
+    Parameters:
+    data_dir: Root data directory containing parameter subdirectories
+    operator_type: 'SzSz' or 'SmSp'
+    param_pattern: Parameter name pattern (e.g., 'Jpm')
+    
+    Returns:
+    global_gap_data: List of (param_value, min_peak_frequency) tuples
+    """
+    # First, find all species matching the operator type pattern
+    # We need to scan the processed_data directories to find all momentum point variants
+    subdirs = sorted(glob.glob(os.path.join(data_dir, f'{param_pattern}=*')))
+    
+    if not subdirs:
+        return []
+    
+    # Use the first subdir to discover all species of this operator type
+    first_subdir = subdirs[0]
+    processed_base = os.path.join(first_subdir, 'structure_factor_results', 'processed_data')
+    
+    if not os.path.exists(processed_base):
+        return []
+    
+    # Find all species directories matching the operator type
+    # Pattern: {operator_type}_q_Qx*_Qy*_Qz*
+    matching_species = []
+    for species_dir in os.listdir(processed_base):
+        if species_dir.startswith(f'{operator_type}_q_'):
+            matching_species.append(species_dir)
+    
+    if not matching_species:
+        print(f"  No species found matching operator type: {operator_type}")
+        return []
+    
+    print(f"  Found {len(matching_species)} momentum points for {operator_type}: {matching_species[:3]}...")
+    
+    # Load peak data for each matching species
+    all_species_peaks = {}
+    for species in matching_species:
+        peak_data = _load_peak_data_for_param_sweep(data_dir, species, param_pattern)
+        if peak_data:
+            all_species_peaks[species] = dict(peak_data)  # Convert to dict for easy lookup
+    
+    if not all_species_peaks:
+        return []
+    
+    # Get all parameter values
+    all_params = set()
+    for species_peaks in all_species_peaks.values():
+        all_params.update(species_peaks.keys())
+    
+    # For each parameter value, find the minimum peak across all species
+    global_gap_data = []
+    for param_value in sorted(all_params):
+        min_peak = float('inf')
+        for species, species_peaks in all_species_peaks.items():
+            if param_value in species_peaks:
+                peak = species_peaks[param_value]
+                if peak < min_peak:
+                    min_peak = peak
+        
+        if min_peak < float('inf'):
+            global_gap_data.append((param_value, min_peak))
+    
+    return global_gap_data
+
+
+def _save_peak_data(peak_data, plot_outdir, species, param_pattern):
+    """
+    Save lowest peak position data to a file.
+    
+    Parameters:
+    peak_data: List of (param_value, peak_frequency) tuples
+    plot_outdir: Output directory for the file
+    species: Species name
+    param_pattern: Parameter name pattern (e.g., 'Jpm')
+    """
+    if not peak_data:
+        return
+    
+    # Sort by parameter value
+    sorted_data = sorted(peak_data, key=lambda x: x[0])
+    
+    # Create output array with param, frequency, and beta (=1/|frequency|)
+    # Use absolute value of frequency for beta calculation to handle negative frequencies
+    output = []
+    for param_val, freq in sorted_data:
+        abs_freq = np.abs(freq)
+        beta = 1.0 / abs_freq if abs_freq > 0 else np.inf
+        output.append([param_val, freq, beta])
+    
+    output_arr = np.array(output)
+    
+    # Save to file
+    filename = os.path.join(plot_outdir, f'lowest_peak_positions_{species}.dat')
+    header = f'{param_pattern} frequency beta(=1/|frequency|)'
+    np.savetxt(filename, output_arr, header=header, fmt='%.8f')
+    print(f"  Saved peak positions to {filename}")
+
+
+def _overlay_peak_line_on_heatmap(ax, peak_data, param_range, color='lime', linewidth=2, label='Lowest peak (β=1/|ω|)', max_beta=1000.0):
+    """
+    Overlay the lowest peak position line on a heatmap.
+    
+    The line is plotted at beta = 1/|omega_peak| for each parameter value.
+    Uses absolute value of frequency to handle negative frequency peaks.
+    Peaks at omega=0 are plotted at the lowest temperature (highest beta).
+    
+    Parameters:
+    ax: Matplotlib axis object
+    peak_data: List of (param_value, peak_frequency) tuples
+    param_range: Tuple of (param_min, param_max) for filtering
+    color: Line color
+    linewidth: Line width
+    label: Legend label
+    max_beta: Maximum beta value to use for omega=0 peaks (default: 1000.0)
+    """
+    if not peak_data:
+        return
+    
+    # Filter peak data to parameter range
+    # Accept both positive and negative frequencies (use abs for beta calculation)
+    filtered_peaks = [(p, freq) for p, freq in peak_data 
+                      if param_range[0] <= p <= param_range[1]]
+    
+    if not filtered_peaks:
+        return
+    
+    # Sort by parameter value
+    filtered_peaks.sort(key=lambda x: x[0])
+    
+    # Convert to arrays
+    params = np.array([p for p, _ in filtered_peaks])
+    frequencies = np.array([freq for _, freq in filtered_peaks])
+    
+    # Calculate beta = 1/|omega| (use absolute value for negative frequencies)
+    # For omega=0, use max_beta (lowest temperature on plot)
+    abs_freqs = np.abs(frequencies)
+    betas = np.where(abs_freqs > 0, 1.0 / abs_freqs, max_beta)
+    
+    # Plot the line
+    ax.plot(params, betas, color=color, linewidth=linewidth, linestyle='-', 
+            marker='o', markersize=4, label=label, zorder=10)
+    
+    print(f"  Overlaid peak line: {len(params)} points, param range [{params.min():.3f}, {params.max():.3f}], "
+          f"frequency range [{frequencies.min():.3f}, {frequencies.max():.3f}], "
+          f"beta range [{betas.min():.3f}, {betas.max():.3f}]")
+
+
+def _plot_single_heatmap_param(param, beta, Z, vmin, vmax, title, filename, param_pattern, 
+                               peak_data=None, gap_label='Gap (β=1/|ω|)', gap_color='lime'):
+    """Create a single heatmap plot with optional peak position overlay.
+    
+    Parameters:
+    peak_data: Species-specific peak data
+    gap_label: Label for the gap curve
+    gap_color: Color for the gap curve
+    """
     print(f"[DEBUG] plot_single_heatmap: param shape={param.shape}, beta shape={beta.shape}, Z shape={Z.shape}")
     print(f"[DEBUG] vmin={vmin:.6f}, vmax={vmax:.6f}")
     
     P, B = np.meshgrid(param, beta)
     print(f"[DEBUG] Meshgrid P shape={P.shape}, B shape={B.shape}")
     
-    plt.figure(figsize=(12, 8))
+    fig, ax = plt.subplots(figsize=(12, 8))
     try:
-        plt.pcolormesh(P, B, Z, shading='auto', cmap='RdYlBu_r', vmin=vmin, vmax=vmax)
-        plt.yscale('log')
-        plt.gca().invert_yaxis()  # large beta at bottom
-        plt.xlabel(param_pattern)
-        plt.ylabel('Beta (β)')
-        plt.title(title)
-        plt.colorbar(label='QFI')
-        plt.savefig(filename, dpi=300, bbox_inches='tight')
+        mesh = ax.pcolormesh(P, B, Z, shading='auto', cmap='RdYlBu_r', vmin=vmin, vmax=vmax)
+        ax.set_yscale('log')
+        ax.invert_yaxis()  # large beta at bottom
+        ax.set_xlabel(param_pattern)
+        ax.set_ylabel('Beta (β)')
+        ax.set_title(title)
+        fig.colorbar(mesh, ax=ax, label='QFI')
+        
+        param_range = (param.min(), param.max())
+        
+        # Overlay species-specific gap curve if provided
+        if peak_data:
+            _overlay_peak_line_on_heatmap(ax, peak_data, param_range,
+                                          color=gap_color, linewidth=2.5, label=gap_label)
+            ax.legend(loc='upper right')
+        
+        fig.savefig(filename, dpi=300, bbox_inches='tight')
         print(f"[DEBUG] Successfully saved heatmap to {filename}")
     except Exception as e:
         print(f"[ERROR] Failed to create heatmap: {e}")
         import traceback
         traceback.print_exc()
     finally:
-        plt.close()
+        plt.close(fig)
 
 
 def _plot_side_by_side_heatmap_param(species, filtered_data, param_neg, param_pos, 
-                                     vmin, vmax, plot_outdir, param_pattern):
-    """Create side-by-side heatmap plot."""
+                                     vmin, vmax, plot_outdir, param_pattern, peak_data=None,
+                                     gap_label='Gap (β=1/|ω|)', gap_color='lime'):
+    """Create side-by-side heatmap plot with optional peak position overlay.
+    
+    Parameters:
+    peak_data: Species-specific peak data
+    gap_label: Label for the gap curve
+    gap_color: Color for the gap curve
+    """
     
     beta_neg_f = filtered_data['beta_neg_f']
     beta_pos_f = filtered_data['beta_pos_f']
@@ -2763,6 +3538,17 @@ def _plot_side_by_side_heatmap_param(species, filtered_data, param_neg, param_po
     axL.pcolormesh(PN, BN, Z_neg_f, shading='auto', cmap='RdYlBu_r', vmin=vmin, vmax=vmax)
     axR.pcolormesh(PP, BP, Z_pos_f, shading='auto', cmap='RdYlBu_r', vmin=vmin, vmax=vmax)
     
+    # Define parameter ranges
+    param_range_neg = (param_neg.min(), param_neg.max())
+    param_range_pos = (param_pos.min(), param_pos.max())
+    
+    # Overlay species-specific gap curve if provided
+    if peak_data:
+        _overlay_peak_line_on_heatmap(axL, peak_data, param_range_neg,
+                                      color=gap_color, linewidth=2.5, label=gap_label)
+        _overlay_peak_line_on_heatmap(axR, peak_data, param_range_pos,
+                                      color=gap_color, linewidth=2.5, label=gap_label)
+    
     # Format axes
     for ax in (axL, axR):
         ax.set_yscale('log')
@@ -2776,6 +3562,22 @@ def _plot_side_by_side_heatmap_param(species, filtered_data, param_neg, param_po
     fig.subplots_adjust(wspace=0.0)
     cbar = fig.colorbar(axL.collections[0], ax=[axL, axR], location='right', pad=0.02)
     cbar.set_label('QFI')
+    
+    # Add legend for gap lines (use left axis handles, avoid duplicates)
+    if peak_data:
+        handles, labels = axL.get_legend_handles_labels()
+        if handles:
+            # Remove duplicates while preserving order
+            seen = set()
+            unique_handles = []
+            unique_labels = []
+            for h, l in zip(handles, labels):
+                if l not in seen:
+                    seen.add(l)
+                    unique_handles.append(h)
+                    unique_labels.append(l)
+            fig.legend(unique_handles, unique_labels, loc='upper center', 
+                      bbox_to_anchor=(0.5, 0.02), ncol=len(unique_handles))
     
     fig.suptitle(f'QFI Heatmap ({param_pattern}<0 | {param_pattern}>0) for {species}')
     fig.savefig(os.path.join(plot_outdir, f'qfi_heatmap_side_by_side_{species}.png'),
