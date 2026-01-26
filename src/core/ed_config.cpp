@@ -189,10 +189,11 @@ EDConfig EDConfig::fromFile(const std::string& filename) {
             else if (current_section == "tpq") {
                 if (key == "num_samples") config.thermal.num_samples = std::stoi(value);
                 // New names (preferred)
+                else if (key == "tpq_max_steps" || key == "max_steps") config.thermal.tpq_max_steps = std::stoi(value);
                 else if (key == "taylor_order") config.thermal.tpq_taylor_order = std::stoi(value);
-                else if (key == "measurement_interval") config.thermal.tpq_measurement_interval = std::stoi(value);
+                else if (key == "tpq_measurement_interval" || key == "measurement_interval") config.thermal.tpq_measurement_interval = std::stoi(value);
                 else if (key == "delta_beta") config.thermal.tpq_delta_beta = std::stod(value);
-                else if (key == "energy_shift") config.thermal.tpq_energy_shift = std::stod(value);
+                else if (key == "tpq_energy_shift" || key == "energy_shift") config.thermal.tpq_energy_shift = std::stod(value);
                 // Legacy names (for backwards compatibility)
                 else if (key == "num_order") config.thermal.tpq_taylor_order = std::stoi(value);
                 else if (key == "measure_freq") config.thermal.tpq_measurement_interval = std::stoi(value);
