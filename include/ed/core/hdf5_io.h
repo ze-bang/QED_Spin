@@ -1162,6 +1162,181 @@ public:
     }
     
     /**
+     * @brief Truncate and rewrite TPQ thermodynamics dataset
+     * 
+     * Used during continue_quenching merge when the new data overlaps with existing data.
+     * Deletes the existing dataset and recreates it with kept_data + new_data.
+     * 
+     * @param filepath Path to HDF5 file
+     * @param sample_index Sample index
+     * @param kept_data Existing data points to keep (steps before resume point)
+     * @param new_data New data points to append (from the continued run)
+     */
+    static void truncateAndRewriteTPQThermodynamics(const std::string& filepath,
+                                                     size_t sample_index,
+                                                     const std::vector<TPQThermodynamicPoint>& kept_data,
+                                                     const std::vector<TPQThermodynamicPoint>& new_data) {
+        try {
+            H5::H5File file(filepath, H5F_ACC_RDWR);
+            
+            std::string dataset_path = "/tpq/samples/sample_" + std::to_string(sample_index) + "/thermodynamics";
+            
+            // Delete the existing dataset if it exists
+            if (file.nameExists(dataset_path)) {
+                file.unlink(dataset_path);
+            }
+            
+            // Combine kept and new data
+            size_t total_rows = kept_data.size() + new_data.size();
+            if (total_rows == 0) {
+                file.close();
+                return;
+            }
+            
+            const hsize_t num_cols = 5;
+            hsize_t dims[2] = {total_rows, num_cols};
+            hsize_t maxdims[2] = {H5S_UNLIMITED, num_cols};
+            H5::DataSpace dataspace(2, dims, maxdims);
+            
+            // Create chunked dataset
+            H5::DSetCreatPropList plist;
+            hsize_t chunk_dims[2] = {100, num_cols};
+            plist.setChunk(2, chunk_dims);
+            plist.setDeflate(6);
+            
+            H5::DataSet dataset = file.createDataSet(dataset_path, 
+                                                      H5::PredType::NATIVE_DOUBLE, 
+                                                      dataspace, plist);
+            
+            // Prepare combined data
+            std::vector<double> combined_data(total_rows * num_cols);
+            size_t row = 0;
+            
+            // Add kept data
+            for (const auto& pt : kept_data) {
+                combined_data[row * num_cols + 0] = pt.beta;
+                combined_data[row * num_cols + 1] = pt.energy;
+                combined_data[row * num_cols + 2] = pt.variance;
+                combined_data[row * num_cols + 3] = pt.doublon;
+                combined_data[row * num_cols + 4] = static_cast<double>(pt.step);
+                row++;
+            }
+            
+            // Add new data
+            for (const auto& pt : new_data) {
+                combined_data[row * num_cols + 0] = pt.beta;
+                combined_data[row * num_cols + 1] = pt.energy;
+                combined_data[row * num_cols + 2] = pt.variance;
+                combined_data[row * num_cols + 3] = pt.doublon;
+                combined_data[row * num_cols + 4] = static_cast<double>(pt.step);
+                row++;
+            }
+            
+            // Write all data
+            dataset.write(combined_data.data(), H5::PredType::NATIVE_DOUBLE);
+            
+            // Add column labels
+            std::string columns_attr = "beta,energy,variance,doublon,step";
+            H5::DataSpace attr_space(H5S_SCALAR);
+            H5::StrType str_type(H5::PredType::C_S1, 64);
+            H5::Attribute attr = dataset.createAttribute("columns", str_type, attr_space);
+            attr.write(str_type, columns_attr.c_str());
+            attr.close();
+            
+            dataset.close();
+            file.close();
+        } catch (H5::Exception& e) {
+            throw std::runtime_error("Failed to truncate/rewrite TPQ thermodynamics: " + std::string(e.getCDetailMsg()));
+        }
+    }
+    
+    /**
+     * @brief Truncate and rewrite TPQ norm dataset
+     * 
+     * Used during continue_quenching merge when the new data overlaps with existing data.
+     * 
+     * @param filepath Path to HDF5 file
+     * @param sample_index Sample index
+     * @param kept_data Existing data points to keep
+     * @param new_data New data points to append
+     */
+    static void truncateAndRewriteTPQNorm(const std::string& filepath,
+                                           size_t sample_index,
+                                           const std::vector<TPQNormPoint>& kept_data,
+                                           const std::vector<TPQNormPoint>& new_data) {
+        try {
+            H5::H5File file(filepath, H5F_ACC_RDWR);
+            
+            std::string dataset_path = "/tpq/samples/sample_" + std::to_string(sample_index) + "/norm";
+            
+            // Delete the existing dataset if it exists
+            if (file.nameExists(dataset_path)) {
+                file.unlink(dataset_path);
+            }
+            
+            // Combine kept and new data
+            size_t total_rows = kept_data.size() + new_data.size();
+            if (total_rows == 0) {
+                file.close();
+                return;
+            }
+            
+            const hsize_t num_cols = 4;
+            hsize_t dims[2] = {total_rows, num_cols};
+            hsize_t maxdims[2] = {H5S_UNLIMITED, num_cols};
+            H5::DataSpace dataspace(2, dims, maxdims);
+            
+            // Create chunked dataset
+            H5::DSetCreatPropList plist;
+            hsize_t chunk_dims[2] = {100, num_cols};
+            plist.setChunk(2, chunk_dims);
+            plist.setDeflate(6);
+            
+            H5::DataSet dataset = file.createDataSet(dataset_path, 
+                                                      H5::PredType::NATIVE_DOUBLE, 
+                                                      dataspace, plist);
+            
+            // Prepare combined data
+            std::vector<double> combined_data(total_rows * num_cols);
+            size_t row = 0;
+            
+            // Add kept data
+            for (const auto& pt : kept_data) {
+                combined_data[row * num_cols + 0] = pt.beta;
+                combined_data[row * num_cols + 1] = pt.norm;
+                combined_data[row * num_cols + 2] = pt.first_norm;
+                combined_data[row * num_cols + 3] = static_cast<double>(pt.step);
+                row++;
+            }
+            
+            // Add new data
+            for (const auto& pt : new_data) {
+                combined_data[row * num_cols + 0] = pt.beta;
+                combined_data[row * num_cols + 1] = pt.norm;
+                combined_data[row * num_cols + 2] = pt.first_norm;
+                combined_data[row * num_cols + 3] = static_cast<double>(pt.step);
+                row++;
+            }
+            
+            // Write all data
+            dataset.write(combined_data.data(), H5::PredType::NATIVE_DOUBLE);
+            
+            // Add column labels
+            std::string columns_attr = "beta,norm,first_norm,step";
+            H5::DataSpace attr_space(H5S_SCALAR);
+            H5::StrType str_type(H5::PredType::C_S1, 64);
+            H5::Attribute attr = dataset.createAttribute("columns", str_type, attr_space);
+            attr.write(str_type, columns_attr.c_str());
+            attr.close();
+            
+            dataset.close();
+            file.close();
+        } catch (H5::Exception& e) {
+            throw std::runtime_error("Failed to truncate/rewrite TPQ norm: " + std::string(e.getCDetailMsg()));
+        }
+    }
+
+    /**
      * @brief Append TPQ thermodynamic data point to HDF5 (replaces SS_rand*.dat writing)
      * 
      * This function appends a single measurement point to the sample's thermodynamics dataset.
@@ -3019,6 +3194,14 @@ public:
                 auto new_thermo = loadTPQThermodynamics(source_path, sample_idx);
                 
                 if (!new_thermo.empty()) {
+                    // Find min step in new data (this is the resume_step in continue_quenching)
+                    uint64_t min_new_step = UINT64_MAX;
+                    for (const auto& pt : new_thermo) {
+                        if (pt.step < min_new_step) {
+                            min_new_step = pt.step;
+                        }
+                    }
+                    
                     // Find max step in existing data
                     uint64_t max_existing_step = 0;
                     for (const auto& pt : existing_thermo) {
@@ -3027,12 +3210,36 @@ public:
                         }
                     }
                     
-                    // Append only new data points (step > max_existing_step)
                     int appended = 0;
-                    for (const auto& pt : new_thermo) {
-                        if (pt.step > max_existing_step) {
-                            appendTPQThermodynamics(dest_path, sample_idx, pt);
-                            appended++;
+                    
+                    // Check if there's overlap - this happens when continue_quenching
+                    // resumed from a saved state that was before the last measurement
+                    if (min_new_step <= max_existing_step && !existing_thermo.empty()) {
+                        // Need to truncate existing data and replace with new data
+                        // Keep only existing data with step < min_new_step
+                        std::cout << "      Detected overlap: new data starts at step " << min_new_step 
+                                  << ", existing ends at step " << max_existing_step << std::endl;
+                        std::cout << "      Truncating existing data to step < " << min_new_step 
+                                  << " and appending new data" << std::endl;
+                        
+                        // Filter existing data to keep only steps before the resume point
+                        std::vector<TPQThermodynamicPoint> kept_data;
+                        for (const auto& pt : existing_thermo) {
+                            if (pt.step < min_new_step) {
+                                kept_data.push_back(pt);
+                            }
+                        }
+                        
+                        // Rewrite the dataset: delete and recreate with kept + new data
+                        truncateAndRewriteTPQThermodynamics(dest_path, sample_idx, kept_data, new_thermo);
+                        appended = new_thermo.size();
+                    } else {
+                        // No overlap - simple append (step > max_existing_step)
+                        for (const auto& pt : new_thermo) {
+                            if (pt.step > max_existing_step) {
+                                appendTPQThermodynamics(dest_path, sample_idx, pt);
+                                appended++;
+                            }
                         }
                     }
                     
@@ -3053,6 +3260,14 @@ public:
                 auto new_norm = loadTPQNorm(source_path, sample_idx);
                 
                 if (!new_norm.empty()) {
+                    // Find min step in new data
+                    uint64_t min_new_step = UINT64_MAX;
+                    for (const auto& pt : new_norm) {
+                        if (pt.step < min_new_step) {
+                            min_new_step = pt.step;
+                        }
+                    }
+                    
                     // Find max step in existing data
                     uint64_t max_existing_step = 0;
                     for (const auto& pt : existing_norm) {
@@ -3061,12 +3276,27 @@ public:
                         }
                     }
                     
-                    // Append only new data points
                     int appended = 0;
-                    for (const auto& pt : new_norm) {
-                        if (pt.step > max_existing_step) {
-                            appendTPQNorm(dest_path, sample_idx, pt);
-                            appended++;
+                    
+                    // Check if there's overlap
+                    if (min_new_step <= max_existing_step && !existing_norm.empty()) {
+                        // Truncate and rewrite
+                        std::vector<TPQNormPoint> kept_data;
+                        for (const auto& pt : existing_norm) {
+                            if (pt.step < min_new_step) {
+                                kept_data.push_back(pt);
+                            }
+                        }
+                        
+                        truncateAndRewriteTPQNorm(dest_path, sample_idx, kept_data, new_norm);
+                        appended = new_norm.size();
+                    } else {
+                        // No overlap - simple append
+                        for (const auto& pt : new_norm) {
+                            if (pt.step > max_existing_step) {
+                                appendTPQNorm(dest_path, sample_idx, pt);
+                                appended++;
+                            }
                         }
                     }
                     
