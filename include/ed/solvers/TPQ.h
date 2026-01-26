@@ -260,6 +260,7 @@ std::tuple<std::string, std::string, std::string, std::vector<std::string>> init
  * @param continue_quenching If true, continue from a saved state instead of starting fresh
  * @param continue_sample Sample number to continue from (0 = auto-detect lowest energy)
  * @param continue_beta Beta value to continue from (0.0 = use saved beta from state file)
+ * @param target_beta Target inverse temperature at which to stop iteration (default 1000.0)
  */
 void microcanonical_tpq(
     std::function<void(const Complex*, Complex*, int)> H,
@@ -286,7 +287,8 @@ void microcanonical_tpq(
     class FixedSzOperator* fixed_sz_op = nullptr,
     bool continue_quenching = false,
     uint64_t continue_sample = 0,
-    double continue_beta = 0.0
+    double continue_beta = 0.0,
+    double target_beta = 1000.0
 );
 
 // Canonical TPQ using imaginary-time propagation e^{-βH} |r>

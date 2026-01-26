@@ -202,6 +202,7 @@ EDConfig EDConfig::fromFile(const std::string& filename) {
                 else if (key == "continue_quenching" || key == "tpq_continue") config.thermal.tpq_continue = parse_bool(value);
                 else if (key == "continue_sample" || key == "tpq_continue_sample") config.thermal.tpq_continue_sample = std::stoi(value);
                 else if (key == "continue_beta" || key == "tpq_continue_beta") config.thermal.tpq_continue_beta = std::stod(value);
+                else if (key == "target_beta" || key == "tpq_target_beta") config.thermal.tpq_target_beta = std::stod(value);
             }
             // ========== [DynamicalResponse] section ==========
             else if (current_section == "dynamicalresponse") {
@@ -414,6 +415,8 @@ EDConfig EDConfig::fromCommandLine(uint64_t argc, char* argv[]) {
             else if (arg.find("--tpq_continue_sample=") == 0) config.thermal.tpq_continue_sample = std::stoi(parse_value("--tpq_continue_sample="));
             else if (arg.find("--continue_beta=") == 0) config.thermal.tpq_continue_beta = std::stod(parse_value("--continue_beta="));
             else if (arg.find("--tpq_continue_beta=") == 0) config.thermal.tpq_continue_beta = std::stod(parse_value("--tpq_continue_beta="));
+            else if (arg.find("--target_beta=") == 0) config.thermal.tpq_target_beta = std::stod(parse_value("--target_beta="));
+            else if (arg.find("--tpq_target_beta=") == 0) config.thermal.tpq_target_beta = std::stod(parse_value("--tpq_target_beta="));
             // TPQ observable options (new names + deprecated aliases)
             else if (arg == "--save-thermal-states" || arg == "--calc_observables") config.observable.save_thermal_states = true;
             else if (arg == "--compute-spin-correlations" || arg == "--measure_spin") config.observable.compute_spin_correlations = true;

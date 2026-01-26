@@ -1824,6 +1824,7 @@ void calculate_spectrum_from_tpq(
  * @param dir Output directory
  * @param compute_spectrum Whether to compute spectrum
  * @param fixed_sz_op Optional FixedSzOperator - if provided, transforms states to full basis before saving
+ * @param target_beta Target inverse temperature at which to stop iteration (default 1000.0)
  */
 void microcanonical_tpq(
     std::function<void(const Complex*, Complex*, int)> H,
@@ -1850,7 +1851,8 @@ void microcanonical_tpq(
     FixedSzOperator* fixed_sz_op,
     bool continue_quenching,
     uint64_t continue_sample,
-    double continue_beta
+    double continue_beta,
+    double target_beta
 ) {
     #ifdef WITH_MPI
     int rank = 0, size = 1;
@@ -1934,6 +1936,7 @@ void microcanonical_tpq(
     std::cout << "Setting LargeValue: " << LargeValue << std::endl;
 
     std::cout << "Setting LargeValue: " << LargeValue << std::endl;
+    std::cout << "Target beta: " << target_beta << std::endl;
     
     // Handle continue-quenching mode
     bool is_continuing = false;
@@ -2239,6 +2242,15 @@ void microcanonical_tpq(
                         save_tpq_state_hdf5(v0, dir, sample, inv_temp, fixed_sz_op);
                     }
                     temp_measured[target_temp_idx] = true;
+                }
+                
+                // Check if we've reached the target beta - early termination
+                // Note: This is different from continue_quenching - target_beta is a stopping condition
+                // regardless of whether we're continuing from a previous run or starting fresh
+                if (inv_temp >= target_beta) {
+                    std::cout << "  *** Reached target beta " << target_beta 
+                              << " (current β = " << inv_temp << ") - stopping iteration ***" << std::endl;
+                    break;  // Exit the main TPQ loop for this sample
                 }
             }
         }

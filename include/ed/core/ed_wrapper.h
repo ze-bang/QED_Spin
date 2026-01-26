@@ -331,6 +331,7 @@ struct EDParameters {
     bool tpq_continue = false;             // Continue quenching from saved state
     uint64_t tpq_continue_sample = 0;      // Sample to continue from (0 = auto-detect)
     double tpq_continue_beta = 0.0;        // Beta to continue from (0.0 = use saved)
+    double tpq_target_beta = 1000.0;       // Target beta at which to stop iteration (default 1000)
     
     // ========== DEPRECATED PARAMETER ACCESSORS ==========
     // These provide backwards compatibility for legacy code using old parameter names.
@@ -379,6 +380,11 @@ struct EDParameters {
     double& continue_beta() { return tpq_continue_beta; }
     [[deprecated("Use tpq_continue_beta instead")]]
     double continue_beta() const { return tpq_continue_beta; }
+    
+    [[deprecated("Use tpq_target_beta instead")]]
+    double& target_beta() { return tpq_target_beta; }
+    [[deprecated("Use tpq_target_beta instead")]]
+    double target_beta() const { return tpq_target_beta; }
     
     // ========== FTLM-Specific Parameters ==========
     uint64_t ftlm_krylov_dim = 100;     // Krylov subspace dimension per sample
@@ -1000,7 +1006,8 @@ EDResults exact_diagonalization_core(
                             params.fixed_sz_op,
                             params.tpq_continue,
                             params.tpq_continue_sample,
-                            params.tpq_continue_beta); 
+                            params.tpq_continue_beta,
+                            params.tpq_target_beta); 
             break;
 
         case DiagonalizationMethod::cTPQ:
@@ -2663,7 +2670,8 @@ inline EDResults exact_diagonalization_fixed_sz(
                 params.tpq_continue,
                 params.tpq_continue_sample,
                 params.tpq_continue_beta,
-                params.save_thermal_states);
+                params.save_thermal_states,
+                params.tpq_target_beta);
         } else if (method == DiagonalizationMethod::cTPQ_GPU) {
             GPUEDWrapper::runGPUCanonicalTPQFixedSz(
                 gpu_op_handle, n_up,
@@ -2974,7 +2982,8 @@ EDResults exact_diagonalization_from_files(
                 params.tpq_continue,
                 params.tpq_continue_sample,
                 params.tpq_continue_beta,
-                params.save_thermal_states
+                params.save_thermal_states,
+                params.tpq_target_beta
             );
             
             results.eigenvalues = eigenvalues;

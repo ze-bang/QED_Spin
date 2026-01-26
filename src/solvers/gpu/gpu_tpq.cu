@@ -421,7 +421,8 @@ void GPUTPQSolver::runMicrocanonicalTPQ(
     bool continue_quenching,
     int continue_sample,
     double continue_beta,
-    bool save_thermal_states
+    bool save_thermal_states,
+    double target_beta
 ) {
     auto total_start = std::chrono::high_resolution_clock::now();
     
@@ -430,6 +431,7 @@ void GPUTPQSolver::runMicrocanonicalTPQ(
     std::cout << "Number of samples: " << num_samples << std::endl;
     std::cout << "Max iterations: " << max_iter << std::endl;
     std::cout << "Large value (energy shift): " << large_value << std::endl;
+    std::cout << "Target beta: " << target_beta << std::endl;
     std::cout << "Algorithm: Power method on (L-H) to find ground state" << std::endl;
     
     if (continue_quenching) {
@@ -728,6 +730,15 @@ void GPUTPQSolver::runMicrocanonicalTPQ(
                     saveTPQStateHDF5(dir, sample, inv_temp, fixed_sz_op);
                     
                     temp_measured[target_temp_idx] = true;
+                }
+                
+                // Check if we've reached the target beta - early termination
+                // Note: This is different from continue_quenching - target_beta is a stopping condition
+                // regardless of whether we're continuing from a previous run or starting fresh
+                if (inv_temp >= target_beta) {
+                    std::cout << "  *** Reached target beta " << target_beta 
+                              << " (current β = " << inv_temp << ") - stopping iteration ***" << std::endl;
+                    break;  // Exit the main TPQ loop for this sample
                 }
             }
             

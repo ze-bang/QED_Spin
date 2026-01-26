@@ -76,6 +76,7 @@ struct ThermalConfig {
     bool tpq_continue = false;             // Continue quenching from saved state
     uint64_t tpq_continue_sample = 0;      // Sample to continue from (0 = auto-detect)
     double tpq_continue_beta = 0.0;        // Beta to continue from (0.0 = use saved)
+    double tpq_target_beta = 1000.0;       // Target beta at which to stop iteration (default 1000)
     
     // ========== FTLM-specific parameters ==========
     uint64_t ftlm_krylov_dim = 100;    // Krylov subspace dimension per sample
@@ -106,6 +107,7 @@ struct ThermalConfig {
     bool get_continue_quenching() const { return tpq_continue; }
     uint64_t get_continue_sample() const { return tpq_continue_sample; }
     double get_continue_beta() const { return tpq_continue_beta; }
+    double get_target_beta() const { return tpq_target_beta; }
     
     // Setter methods for backwards compatibility
     void set_num_order(uint64_t v) { tpq_taylor_order = v; }
@@ -115,6 +117,7 @@ struct ThermalConfig {
     void set_continue_quenching(bool v) { tpq_continue = v; }
     void set_continue_sample(uint64_t v) { tpq_continue_sample = v; }
     void set_continue_beta(double v) { tpq_continue_beta = v; }
+    void set_target_beta(double v) { tpq_target_beta = v; }
 };
 
 /**

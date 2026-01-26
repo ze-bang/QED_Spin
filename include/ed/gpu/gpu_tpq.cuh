@@ -48,6 +48,7 @@ public:
      * @param continue_sample Sample index to continue from (0 = auto-detect)
      * @param continue_beta Beta value to continue from (0.0 = auto-detect)
      * @param save_thermal_states If true, save binary state files at target temperatures
+     * @param target_beta Target inverse temperature at which to stop iteration (default 1000.0)
      */
     void runMicrocanonicalTPQ(
         int max_iter,
@@ -60,7 +61,8 @@ public:
         bool continue_quenching = false,
         int continue_sample = 0,
         double continue_beta = 0.0,
-        bool save_thermal_states = false
+        bool save_thermal_states = false,
+        double target_beta = 1000.0
     );
     
     /**
