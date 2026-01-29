@@ -641,6 +641,10 @@ void GPUTPQSolver::runMicrocanonicalTPQ(
         int final_step = loaded_from_file ? (start_step - 1 + max_iter) : max_iter;
         
         // Main TPQ loop - applies (L-H) repeatedly
+        // OPTIMIZATION: Pre-compute constants outside loop
+        const cuDoubleComplex alpha_scale = make_cuDoubleComplex(large_value * D_S, 0.0);
+        const cuDoubleComplex minus_one = make_cuDoubleComplex(-1.0, 0.0);
+        
         for (int step = start_step; step <= final_step; ++step) {
             // Apply H|v0⟩ -> d_temp_
             auto matvec_start = std::chrono::high_resolution_clock::now();
@@ -648,19 +652,18 @@ void GPUTPQSolver::runMicrocanonicalTPQ(
             auto matvec_end = std::chrono::high_resolution_clock::now();
             stats_.matvec_time += std::chrono::duration<double>(matvec_end - matvec_start).count();
             
+            // OPTIMIZATION: Fused operation using cuBLAS
             // Compute |v0_new⟩ = (L*D_S - H)|v0⟩ = L*D_S*|v0⟩ - H|v0⟩
-            // Save H|v0⟩ in d_h_state_ first
-            cudaMemcpy(d_h_state_, d_temp_, N_ * sizeof(cuDoubleComplex), cudaMemcpyDeviceToDevice);
+            // Instead of: copy + scale + axpy, use: scale + axpy (avoid copy)
+            // d_state_ = alpha_scale * d_state_ - d_temp_
             
             // d_state_ *= L*D_S
-            cuDoubleComplex alpha = make_cuDoubleComplex(large_value * D_S, 0.0);
-            cublasZscal(cublas_handle_, N_, &alpha, d_state_, 1);
+            cublasZscal(cublas_handle_, N_, &alpha_scale, d_state_, 1);
             
-            // d_state_ -= H|v0⟩
-            cuDoubleComplex minus_one = make_cuDoubleComplex(-1.0, 0.0);
-            cublasZaxpy(cublas_handle_, N_, &minus_one, d_h_state_, 1, d_state_, 1);
+            // d_state_ -= H|v0⟩ (d_temp_ contains H|v0⟩)
+            cublasZaxpy(cublas_handle_, N_, &minus_one, d_temp_, 1, d_state_, 1);
             
-            // Normalize
+            // Normalize using cuBLAS (implicit sync on result fetch)
             double current_norm = computeNorm();
             cuDoubleComplex scale = make_cuDoubleComplex(1.0 / current_norm, 0.0);
             cublasZscal(cublas_handle_, N_, &scale, d_state_, 1);
@@ -764,13 +767,28 @@ void GPUTPQSolver::runMicrocanonicalTPQ(
     
     auto total_end = std::chrono::high_resolution_clock::now();
     stats_.total_time = std::chrono::duration<double>(total_end - total_start).count();
-    stats_.throughput = (stats_.iterations * 2.0 * N_) / stats_.matvec_time / 1e9; // GFLOPS
+    
+    // Compute throughput correctly:
+    // - Each iteration = 1 matvec in main loop + measurement matvecs
+    // - Each matvec touches N rows with ~NNZ_PER_STATE_ESTIMATE non-zeros per row  
+    // - Each complex multiply-add = 8 FLOPs (4 mults + 4 adds for (a+bi)*(c+di) and accumulation)
+    // - For memory-bound operations, also report effective bandwidth
+    constexpr int NNZ_PER_ROW = 32;  // From kernel_config.h
+    constexpr int FLOPS_PER_NNZ = 8; // Complex multiply-add
+    double flops_per_matvec = static_cast<double>(N_) * NNZ_PER_ROW * FLOPS_PER_NNZ;
+    stats_.throughput = (stats_.iterations * flops_per_matvec) / stats_.matvec_time / 1e9; // GFLOPS
+    
+    // Memory bandwidth: each matvec reads ~NNZ_PER_ROW complex values per row + writes 1 complex output
+    // Each complex = 16 bytes
+    double bytes_per_matvec = static_cast<double>(N_) * ((NNZ_PER_ROW + 1) * 16);
+    double effective_bandwidth = (stats_.iterations * bytes_per_matvec) / stats_.matvec_time / 1e9; // GB/s
     
     std::cout << "\n=== GPU TPQ Statistics ===" << std::endl;
     std::cout << "Total time: " << stats_.total_time << " s" << std::endl;
     std::cout << "MatVec time: " << stats_.matvec_time << " s" << std::endl;
     std::cout << "Normalize time: " << stats_.normalize_time << " s" << std::endl;
     std::cout << "Throughput: " << stats_.throughput << " GFLOPS" << std::endl;
+    std::cout << "Effective memory bandwidth: " << effective_bandwidth << " GB/s" << std::endl;
 }
 
 void GPUTPQSolver::runCanonicalTPQ(

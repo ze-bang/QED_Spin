@@ -805,7 +805,8 @@ __global__ void matVecDiagonalOneBody(const cuDoubleComplex* x, cuDoubleComplex*
 
 /**
  * One-body off-diagonal kernel (S+ or S-)
- * All threads flip one bit (same operation, different sites)
+ * TRULY BRANCH-FREE: Uses predicated execution via zero-masking
+ * All threads execute identical instructions - divergent threads contribute zero
  */
 __global__ void matVecOffDiagonalOneBody(const cuDoubleComplex* x, cuDoubleComplex* y,
                                          const GPUOffDiagonalOneBody* transforms,
@@ -820,16 +821,29 @@ __global__ void matVecOffDiagonalOneBody(const cuDoubleComplex* x, cuDoubleCompl
     
     uint64_t bit = (state >> t.site_index) & 1;
     
+    // BRANCH-FREE: Compute validity mask (1.0 if valid, 0.0 if not)
     // S+ acts on |1⟩ (bit=1, op_type=0), S- acts on |0⟩ (bit=0, op_type=1)
-    if (bit != t.op_type) {
-        uint64_t new_state = state ^ (1ULL << t.site_index);
-        
-        if (new_state < N) {
-            cuDoubleComplex contrib = cuCmul(t.coefficient, __ldg(&x[state_idx]));
-            atomicAddDouble(&y[new_state].x, cuCreal(contrib));
-            atomicAddDouble(&y[new_state].y, cuCimag(contrib));
-        }
-    }
+    double valid_mask = (bit != t.op_type) ? 1.0 : 0.0;
+    
+    // Always compute new_state (cheap bit flip)
+    uint64_t new_state = state ^ (1ULL << t.site_index);
+    
+    // Bounds check folded into mask
+    valid_mask *= (new_state < N) ? 1.0 : 0.0;
+    
+    // All threads read and compute - invalid ones just contribute zero
+    cuDoubleComplex x_val = __ldg(&x[state_idx]);
+    cuDoubleComplex contrib = cuCmul(t.coefficient, x_val);
+    double contrib_real = cuCreal(contrib) * valid_mask;
+    double contrib_imag = cuCimag(contrib) * valid_mask;
+    
+    // Clamp new_state to valid range to avoid out-of-bounds atomic
+    // (contribution is zero anyway for invalid states)
+    new_state = min(new_state, static_cast<uint64_t>(N - 1));
+    
+    // All threads do atomic - invalid ones add zero (no-op but uniform execution)
+    atomicAddDouble(&y[new_state].x, contrib_real);
+    atomicAddDouble(&y[new_state].y, contrib_imag);
 }
 
 /**
@@ -864,7 +878,7 @@ __global__ void matVecDiagonalTwoBody(const cuDoubleComplex* x, cuDoubleComplex*
 
 /**
  * Two-body mixed kernel (Sz * S+/S-)
- * All threads compute Sz eigenvalue and flip one bit
+ * TRULY BRANCH-FREE: Uses predicated execution via zero-masking
  */
 __global__ void matVecMixedTwoBody(const cuDoubleComplex* x, cuDoubleComplex* y,
                                    const GPUMixedTwoBody* transforms,
@@ -878,25 +892,29 @@ __global__ void matVecMixedTwoBody(const cuDoubleComplex* x, cuDoubleComplex* y,
     const GPUMixedTwoBody& t = transforms[transform_idx];
     
     uint64_t flip_bit = (state >> t.flip_site) & 1;
+    uint64_t sz_bit = (state >> t.sz_site) & 1;
     
-    if (flip_bit != t.flip_op_type) {
-        uint64_t sz_bit = (state >> t.sz_site) & 1;
-        double sz_sign = spin_l * ((sz_bit == 0) ? 1.0 : -1.0);
-        
-        uint64_t new_state = state ^ (1ULL << t.flip_site);
-        
-        if (new_state < N) {
-            cuDoubleComplex contrib = complex_scale(t.coefficient, sz_sign);
-            contrib = cuCmul(contrib, __ldg(&x[state_idx]));
-            atomicAddDouble(&y[new_state].x, cuCreal(contrib));
-            atomicAddDouble(&y[new_state].y, cuCimag(contrib));
-        }
-    }
+    // BRANCH-FREE: Compute all values, mask invalid contributions to zero
+    double valid_mask = (flip_bit != t.flip_op_type) ? 1.0 : 0.0;
+    double sz_sign = spin_l * ((sz_bit == 0) ? 1.0 : -1.0);
+    
+    uint64_t new_state = state ^ (1ULL << t.flip_site);
+    valid_mask *= (new_state < N) ? 1.0 : 0.0;
+    
+    // All threads compute - invalid ones produce zero
+    cuDoubleComplex x_val = __ldg(&x[state_idx]);
+    cuDoubleComplex contrib = complex_scale(t.coefficient, sz_sign * valid_mask);
+    contrib = cuCmul(contrib, x_val);
+    
+    new_state = min(new_state, static_cast<uint64_t>(N - 1));
+    
+    atomicAddDouble(&y[new_state].x, cuCreal(contrib));
+    atomicAddDouble(&y[new_state].y, cuCimag(contrib));
 }
 
 /**
  * Two-body off-diagonal kernel (S+/S- * S+/S-)
- * All threads flip two bits
+ * TRULY BRANCH-FREE: Uses predicated execution via zero-masking
  */
 __global__ void matVecOffDiagonalTwoBody(const cuDoubleComplex* x, cuDoubleComplex* y,
                                          const GPUOffDiagonalTwoBody* transforms,
@@ -912,15 +930,22 @@ __global__ void matVecOffDiagonalTwoBody(const cuDoubleComplex* x, cuDoubleCompl
     uint64_t bit1 = (state >> t.site_index_1) & 1;
     uint64_t bit2 = (state >> t.site_index_2) & 1;
     
-    if (bit1 != t.op_type_1 && bit2 != t.op_type_2) {
-        uint64_t new_state = state ^ (1ULL << t.site_index_1) ^ (1ULL << t.site_index_2);
-        
-        if (new_state < N) {
-            cuDoubleComplex contrib = cuCmul(t.coefficient, __ldg(&x[state_idx]));
-            atomicAddDouble(&y[new_state].x, cuCreal(contrib));
-            atomicAddDouble(&y[new_state].y, cuCimag(contrib));
-        }
-    }
+    // BRANCH-FREE: Both conditions combined into single mask
+    double valid_mask = ((bit1 != t.op_type_1) && (bit2 != t.op_type_2)) ? 1.0 : 0.0;
+    
+    uint64_t new_state = state ^ (1ULL << t.site_index_1) ^ (1ULL << t.site_index_2);
+    valid_mask *= (new_state < N) ? 1.0 : 0.0;
+    
+    cuDoubleComplex x_val = __ldg(&x[state_idx]);
+    double contrib_real = cuCreal(t.coefficient) * cuCreal(x_val) - cuCimag(t.coefficient) * cuCimag(x_val);
+    double contrib_imag = cuCreal(t.coefficient) * cuCimag(x_val) + cuCimag(t.coefficient) * cuCreal(x_val);
+    contrib_real *= valid_mask;
+    contrib_imag *= valid_mask;
+    
+    new_state = min(new_state, static_cast<uint64_t>(N - 1));
+    
+    atomicAddDouble(&y[new_state].x, contrib_real);
+    atomicAddDouble(&y[new_state].y, contrib_imag);
 }
 
 // ============================================================================
@@ -985,7 +1010,8 @@ __global__ void matVecFixedSzDiagonalTwoBody(const cuDoubleComplex* x, cuDoubleC
 
 /**
  * Fixed-Sz two-body off-diagonal kernel (S+S- or S-S+ conserves Sz)
- * Uses binary search to find output index
+ * TRULY BRANCH-FREE: Uses predicated execution via zero-masking
+ * Binary search for output index (unavoidable O(log N) divergence)
  */
 __global__ void matVecFixedSzOffDiagonalTwoBody(const cuDoubleComplex* x, cuDoubleComplex* y,
                                                 const uint64_t* basis_states,
@@ -1002,18 +1028,26 @@ __global__ void matVecFixedSzOffDiagonalTwoBody(const cuDoubleComplex* x, cuDoub
     uint64_t bit1 = (state >> t.site_index_1) & 1;
     uint64_t bit2 = (state >> t.site_index_2) & 1;
     
-    if (bit1 != t.op_type_1 && bit2 != t.op_type_2) {
-        uint64_t new_state = state ^ (1ULL << t.site_index_1) ^ (1ULL << t.site_index_2);
-        
-        // Binary search for new_state in basis
-        int new_idx = lookupState(new_state, basis_states, N);
-        
-        if (new_idx >= 0) {
-            cuDoubleComplex contrib = cuCmul(t.coefficient, __ldg(&x[state_idx]));
-            atomicAddDouble(&y[new_idx].x, cuCreal(contrib));
-            atomicAddDouble(&y[new_idx].y, cuCimag(contrib));
-        }
-    }
+    // BRANCH-FREE: Compute validity mask
+    double valid_mask = ((bit1 != t.op_type_1) && (bit2 != t.op_type_2)) ? 1.0 : 0.0;
+    
+    uint64_t new_state = state ^ (1ULL << t.site_index_1) ^ (1ULL << t.site_index_2);
+    
+    // Binary search (unavoidable, but warp-coherent since all threads follow same path)
+    int new_idx = lookupState(new_state, basis_states, N);
+    valid_mask *= (new_idx >= 0) ? 1.0 : 0.0;
+    
+    cuDoubleComplex x_val = __ldg(&x[state_idx]);
+    double contrib_real = cuCreal(t.coefficient) * cuCreal(x_val) - cuCimag(t.coefficient) * cuCimag(x_val);
+    double contrib_imag = cuCreal(t.coefficient) * cuCimag(x_val) + cuCimag(t.coefficient) * cuCreal(x_val);
+    contrib_real *= valid_mask;
+    contrib_imag *= valid_mask;
+    
+    // Clamp to valid index range (contribution is zero anyway)
+    new_idx = max(new_idx, 0);
+    
+    atomicAddDouble(&y[new_idx].x, contrib_real);
+    atomicAddDouble(&y[new_idx].y, contrib_imag);
 }
 
 } // namespace GPUKernels

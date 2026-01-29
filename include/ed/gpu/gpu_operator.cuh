@@ -292,6 +292,15 @@ protected:
     bool sparse_matrix_built_;
     size_t available_gpu_memory_;
     
+    // OPTIMIZATION: Pre-allocated CUDA events (avoid create/destroy per matVec)
+    cudaEvent_t timing_start_;
+    cudaEvent_t timing_stop_;
+    bool events_initialized_ = false;
+    
+    // OPTIMIZATION: Pre-allocated sparse buffer (avoid malloc/free per matVec)
+    void* d_spmv_buffer_ = nullptr;
+    size_t spmv_buffer_size_ = 0;
+    
     // Performance stats
     PerformanceStats stats_;
     

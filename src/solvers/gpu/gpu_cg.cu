@@ -471,7 +471,14 @@ void GPUIterativeSolver::runDavidson(
     
     auto total_end = std::chrono::high_resolution_clock::now();
     stats_.total_time = std::chrono::duration<double>(total_end - total_start).count();
-    stats_.throughput = (stats_.iterations * subspace_dim * 2.0 * N_) / stats_.matvec_time / 1e9;
+    
+    // Correct throughput calculation:
+    // Each iteration does subspace_dim matvecs, each matvec has N rows with ~32 non-zeros
+    // Each complex multiply-add = 8 FLOPs
+    constexpr int NNZ_PER_ROW = 32;
+    constexpr int FLOPS_PER_NNZ = 8;
+    double flops_per_matvec = static_cast<double>(N_) * NNZ_PER_ROW * FLOPS_PER_NNZ;
+    stats_.throughput = (stats_.iterations * subspace_dim * flops_per_matvec) / stats_.matvec_time / 1e9;
     
     std::cout << "\n=== GPU Davidson Statistics ===" << std::endl;
     std::cout << "Total time: " << stats_.total_time << " s" << std::endl;

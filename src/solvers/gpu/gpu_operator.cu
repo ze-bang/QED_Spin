@@ -26,7 +26,8 @@ GPUOperator::GPUOperator(int n_sites, float spin_l)
       d_transform_data_(nullptr), num_transforms_(0), 
       d_three_body_data_(nullptr), num_three_body_(0),
       tex_input_vector_(0),
-      gpu_memory_allocated_(false), sparse_matrix_built_(false) {
+      gpu_memory_allocated_(false), sparse_matrix_built_(false),
+      events_initialized_(false), d_spmv_buffer_(nullptr), spmv_buffer_size_(0) {
     
     if (n_sites > MAX_SITES) {
         throw std::runtime_error("Number of sites exceeds maximum supported (" 
@@ -47,6 +48,11 @@ GPUOperator::GPUOperator(int n_sites, float spin_l)
     initializeCUSPARSE();
     initializeCUBLAS();
     
+    // OPTIMIZATION: Pre-allocate CUDA events for timing (avoid create/destroy per matVec)
+    CUDA_CHECK(cudaEventCreate(&timing_start_));
+    CUDA_CHECK(cudaEventCreate(&timing_stop_));
+    events_initialized_ = true;
+    
     // Initialize stats
     stats_.matVecTime = 0.0;
     stats_.memoryUsed = 0.0;
@@ -57,6 +63,17 @@ GPUOperator::GPUOperator(int n_sites, float spin_l)
 GPUOperator::~GPUOperator() {
     destroyTextureObject();
     freeGPUMemory();
+    
+    // Clean up pre-allocated CUDA events
+    if (events_initialized_) {
+        cudaEventDestroy(timing_start_);
+        cudaEventDestroy(timing_stop_);
+    }
+    
+    // Clean up pre-allocated sparse buffer
+    if (d_spmv_buffer_) {
+        cudaFree(d_spmv_buffer_);
+    }
     
     if (cusparse_handle_) {
         cusparseDestroy(cusparse_handle_);
@@ -575,10 +592,8 @@ void GPUOperator::matVec(const std::complex<double>* x, std::complex<double>* y,
 }
 
 void GPUOperator::matVecGPU(const cuDoubleComplex* d_x, cuDoubleComplex* d_y, int N) {
-    cudaEvent_t start, stop;
-    CUDA_CHECK(cudaEventCreate(&start));
-    CUDA_CHECK(cudaEventCreate(&stop));
-    CUDA_CHECK(cudaEventRecord(start));
+    // OPTIMIZATION: Use pre-allocated events instead of create/destroy per call
+    CUDA_CHECK(cudaEventRecord(timing_start_));
     
     if (sparse_matrix_built_) {
         // Use cuSPARSE for sparse matrix-vector product
@@ -589,28 +604,24 @@ void GPUOperator::matVecGPU(const cuDoubleComplex* d_x, cuDoubleComplex* d_y, in
         CUSPARSE_CHECK(cusparseDnVecSetValues(vec_x_descriptor_, (void*)d_x));
         CUSPARSE_CHECK(cusparseDnVecSetValues(vec_y_descriptor_, (void*)d_y));
         
-        size_t buffer_size = 0;
-        void* d_buffer = nullptr;
-        
-        CUSPARSE_CHECK(cusparseSpMV_bufferSize(
-            cusparse_handle_, CUSPARSE_OPERATION_NON_TRANSPOSE,
-            &alpha, mat_descriptor_, vec_x_descriptor_,
-            &beta, vec_y_descriptor_, CUDA_C_64F,
-            CUSPARSE_SPMV_ALG_DEFAULT, &buffer_size));
-        
-        if (buffer_size > 0) {
-            CUDA_CHECK(cudaMalloc(&d_buffer, buffer_size));
+        // OPTIMIZATION: Pre-allocate buffer on first use, reuse afterwards
+        if (spmv_buffer_size_ == 0) {
+            CUSPARSE_CHECK(cusparseSpMV_bufferSize(
+                cusparse_handle_, CUSPARSE_OPERATION_NON_TRANSPOSE,
+                &alpha, mat_descriptor_, vec_x_descriptor_,
+                &beta, vec_y_descriptor_, CUDA_C_64F,
+                CUSPARSE_SPMV_ALG_DEFAULT, &spmv_buffer_size_));
+            
+            if (spmv_buffer_size_ > 0) {
+                CUDA_CHECK(cudaMalloc(&d_spmv_buffer_, spmv_buffer_size_));
+            }
         }
         
         CUSPARSE_CHECK(cusparseSpMV(
             cusparse_handle_, CUSPARSE_OPERATION_NON_TRANSPOSE,
             &alpha, mat_descriptor_, vec_x_descriptor_,
             &beta, vec_y_descriptor_, CUDA_C_64F,
-            CUSPARSE_SPMV_ALG_DEFAULT, d_buffer));
-        
-        if (d_buffer) {
-            cudaFree(d_buffer);
-        }
+            CUSPARSE_SPMV_ALG_DEFAULT, d_spmv_buffer_));
     } else if (!transform_data_.empty()) {
         // Copy transform data to device if not already done
         if (d_transform_data_ == nullptr) {
@@ -728,19 +739,17 @@ void GPUOperator::matVecGPU(const cuDoubleComplex* d_x, cuDoubleComplex* d_y, in
         CUDA_CHECK(cudaGetLastError());
     }
     
-    CUDA_CHECK(cudaEventRecord(stop));
-    CUDA_CHECK(cudaEventSynchronize(stop));
+    // OPTIMIZATION: Use pre-allocated events
+    CUDA_CHECK(cudaEventRecord(timing_stop_));
+    CUDA_CHECK(cudaEventSynchronize(timing_stop_));
     
     float milliseconds = 0;
-    CUDA_CHECK(cudaEventElapsedTime(&milliseconds, start, stop));
+    CUDA_CHECK(cudaEventElapsedTime(&milliseconds, timing_start_, timing_stop_));
     stats_.matVecTime = milliseconds / 1000.0;
     
     // Estimate throughput (rough estimate)
     double flops = static_cast<double>(N) * NNZ_PER_STATE_ESTIMATE * 8; // multiply-add per element
     stats_.throughput = flops / (stats_.matVecTime * 1e9);
-    
-    CUDA_CHECK(cudaEventDestroy(start));
-    CUDA_CHECK(cudaEventDestroy(stop));
 }
 
 void GPUOperator::matVecGPUAsync(const cuDoubleComplex* d_x, cuDoubleComplex* d_y, int N, cudaStream_t stream) {
