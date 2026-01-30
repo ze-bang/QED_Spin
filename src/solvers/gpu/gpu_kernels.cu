@@ -1050,6 +1050,196 @@ __global__ void matVecFixedSzOffDiagonalTwoBody(const cuDoubleComplex* x, cuDoub
     atomicAddDouble(&y[new_idx].y, contrib_imag);
 }
 
+// ============================================================================
+// WARP-REDUCTION (GATHER) KERNELS - Strategy 3
+// 
+// Each warp computes ONE complete output element by gathering from all inputs.
+// This ELIMINATES atomic contention by design:
+// - Multiple warps can READ same x[i] (reads don't conflict)
+// - Each warp WRITES to unique y[j] (no write conflicts within kernel)
+// - Warp shuffle reduction: O(log 32) = 5 steps, zero atomics within warp
+//
+// Trade-off: Scattered reads instead of scattered writes
+//           (Reads are cheaper than atomic RMW operations!)
+// ============================================================================
+
+/**
+ * WARP-REDUCTION: Fused kernel for all transform types
+ * 
+ * Each warp computes the COMPLETE output for one state.
+ * Zero atomics within the kernel - single direct write per output.
+ * 
+ * Grid: ((N + WARPS_PER_BLOCK - 1) / WARPS_PER_BLOCK) blocks
+ * Block: WARPS_PER_BLOCK * 32 threads
+ */
+__global__ void matVecWarpReductionFused(
+    const cuDoubleComplex* __restrict__ x,
+    cuDoubleComplex* __restrict__ y,
+    // Diagonal transforms
+    const GPUDiagonalOneBody* __restrict__ diag1, int num_diag1,
+    const GPUDiagonalTwoBody* __restrict__ diag2, int num_diag2,
+    // Off-diagonal transforms  
+    const GPUOffDiagonalOneBody* __restrict__ offdiag1, int num_offdiag1,
+    const GPUMixedTwoBody* __restrict__ mixed2, int num_mixed2,
+    const GPUOffDiagonalTwoBody* __restrict__ offdiag2, int num_offdiag2,
+    int N, float spin_l
+) {
+    // Warp and lane identification
+    const int lane_id = threadIdx.x & 31;  // threadIdx.x % 32
+    const int warp_id_in_block = threadIdx.x >> 5;  // threadIdx.x / 32
+    const int warps_per_block = blockDim.x >> 5;
+    const int global_warp_id = blockIdx.x * warps_per_block + warp_id_in_block;
+    
+    // Each warp handles one output index
+    const int out_idx = global_warp_id;
+    if (out_idx >= N) return;
+    
+    const uint64_t out_state = static_cast<uint64_t>(out_idx);
+    
+    // Read x[out_idx] once for diagonal terms (input = output)
+    cuDoubleComplex x_self = __ldg(&x[out_idx]);
+    
+    // Accumulator for this output (each lane has partial sum)
+    double sum_real = 0.0;
+    double sum_imag = 0.0;
+    
+    // ===== DIAGONAL ONE-BODY (Sz) =====
+    // Input = output, just multiply by eigenvalue
+    for (int t = lane_id; t < num_diag1; t += 32) {
+        const GPUDiagonalOneBody& tr = diag1[t];
+        uint64_t bit = (out_state >> tr.site_index) & 1;
+        double eigenvalue = spin_l * ((bit == 0) ? 1.0 : -1.0);
+        
+        // contrib = eigenvalue * coefficient * x_self
+        double c_real = cuCreal(tr.coefficient);
+        double c_imag = cuCimag(tr.coefficient);
+        double x_real = cuCreal(x_self);
+        double x_imag = cuCimag(x_self);
+        
+        sum_real += eigenvalue * (c_real * x_real - c_imag * x_imag);
+        sum_imag += eigenvalue * (c_real * x_imag + c_imag * x_real);
+    }
+    
+    // ===== DIAGONAL TWO-BODY (Sz Sz) =====
+    for (int t = lane_id; t < num_diag2; t += 32) {
+        const GPUDiagonalTwoBody& tr = diag2[t];
+        uint64_t bit1 = (out_state >> tr.site_index_1) & 1;
+        uint64_t bit2 = (out_state >> tr.site_index_2) & 1;
+        double sign1 = (bit1 == 0) ? 1.0 : -1.0;
+        double sign2 = (bit2 == 0) ? 1.0 : -1.0;
+        double eigenvalue = spin_l * spin_l * sign1 * sign2;
+        
+        double c_real = cuCreal(tr.coefficient);
+        double c_imag = cuCimag(tr.coefficient);
+        double x_real = cuCreal(x_self);
+        double x_imag = cuCimag(x_self);
+        
+        sum_real += eigenvalue * (c_real * x_real - c_imag * x_imag);
+        sum_imag += eigenvalue * (c_real * x_imag + c_imag * x_real);
+    }
+    
+    // ===== OFF-DIAGONAL ONE-BODY (S+, S-) =====
+    // GATHER: For output j, find input i = j XOR mask that maps to j
+    for (int t = lane_id; t < num_offdiag1; t += 32) {
+        const GPUOffDiagonalOneBody& tr = offdiag1[t];
+        
+        // Compute input state that would produce this output
+        uint64_t flip_mask = 1ULL << tr.site_index;
+        uint64_t in_state = out_state ^ flip_mask;
+        
+        // Selection rule (inverted for gather direction):
+        // S+ (op_type=0) flips 1→0, so input must have bit=1
+        // S- (op_type=1) flips 0→1, so input must have bit=0
+        // The INPUT bit must be (1 - op_type)
+        uint64_t in_bit = (in_state >> tr.site_index) & 1;
+        
+        // Valid if: input bit matches requirement AND in bounds
+        bool valid = (in_bit == (1u - tr.op_type)) && (in_state < static_cast<uint64_t>(N));
+        
+        if (valid) {
+            cuDoubleComplex x_in = __ldg(&x[in_state]);
+            double c_real = cuCreal(tr.coefficient);
+            double c_imag = cuCimag(tr.coefficient);
+            double x_real = cuCreal(x_in);
+            double x_imag = cuCimag(x_in);
+            
+            sum_real += c_real * x_real - c_imag * x_imag;
+            sum_imag += c_real * x_imag + c_imag * x_real;
+        }
+    }
+    
+    // ===== MIXED TWO-BODY (Sz * S+/S-) =====
+    for (int t = lane_id; t < num_mixed2; t += 32) {
+        const GPUMixedTwoBody& tr = mixed2[t];
+        
+        // Only the flip_site changes between input and output
+        uint64_t flip_mask = 1ULL << tr.flip_site;
+        uint64_t in_state = out_state ^ flip_mask;
+        
+        // Selection rule for the flip operator
+        uint64_t in_flip_bit = (in_state >> tr.flip_site) & 1;
+        bool valid = (in_flip_bit == (1u - tr.flip_op_type)) && (in_state < static_cast<uint64_t>(N));
+        
+        if (valid) {
+            // Sz eigenvalue at sz_site (evaluated on OUTPUT state, after the flip)
+            uint64_t out_sz_bit = (out_state >> tr.sz_site) & 1;
+            double sz_eigenvalue = spin_l * ((out_sz_bit == 0) ? 1.0 : -1.0);
+            
+            cuDoubleComplex x_in = __ldg(&x[in_state]);
+            double c_real = cuCreal(tr.coefficient);
+            double c_imag = cuCimag(tr.coefficient);
+            double x_real = cuCreal(x_in);
+            double x_imag = cuCimag(x_in);
+            
+            sum_real += sz_eigenvalue * (c_real * x_real - c_imag * x_imag);
+            sum_imag += sz_eigenvalue * (c_real * x_imag + c_imag * x_real);
+        }
+    }
+    
+    // ===== OFF-DIAGONAL TWO-BODY (S+ S-, S- S+) =====
+    for (int t = lane_id; t < num_offdiag2; t += 32) {
+        const GPUOffDiagonalTwoBody& tr = offdiag2[t];
+        
+        // Both sites flip
+        uint64_t flip_mask = (1ULL << tr.site_index_1) | (1ULL << tr.site_index_2);
+        uint64_t in_state = out_state ^ flip_mask;
+        
+        // Selection rules for both operators
+        uint64_t in_bit1 = (in_state >> tr.site_index_1) & 1;
+        uint64_t in_bit2 = (in_state >> tr.site_index_2) & 1;
+        
+        bool valid = (in_bit1 == (1u - tr.op_type_1)) && 
+                     (in_bit2 == (1u - tr.op_type_2)) &&
+                     (in_state < static_cast<uint64_t>(N));
+        
+        if (valid) {
+            cuDoubleComplex x_in = __ldg(&x[in_state]);
+            double c_real = cuCreal(tr.coefficient);
+            double c_imag = cuCimag(tr.coefficient);
+            double x_real = cuCreal(x_in);
+            double x_imag = cuCimag(x_in);
+            
+            sum_real += c_real * x_real - c_imag * x_imag;
+            sum_imag += c_real * x_imag + c_imag * x_real;
+        }
+    }
+    
+    // ===== WARP-LEVEL REDUCTION =====
+    // Sum all 32 lanes' partial results using shuffle
+    // This is O(log 32) = 5 steps with NO atomics
+    #pragma unroll
+    for (int offset = 16; offset > 0; offset >>= 1) {
+        sum_real += __shfl_down_sync(0xffffffff, sum_real, offset);
+        sum_imag += __shfl_down_sync(0xffffffff, sum_imag, offset);
+    }
+    
+    // ===== SINGLE WRITE (NO ATOMIC!) =====
+    // Only lane 0 writes the final accumulated result
+    if (lane_id == 0) {
+        y[out_idx] = make_cuDoubleComplex(sum_real, sum_imag);
+    }
+}
+
 } // namespace GPUKernels
 
 #endif // WITH_CUDA

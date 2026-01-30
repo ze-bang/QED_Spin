@@ -628,17 +628,45 @@ void GPUOperator::matVecGPU(const cuDoubleComplex* d_x, cuDoubleComplex* d_y, in
             copyTransformDataToDevice();
         }
         
-        // V2 OPTIMIZATION: Use branch-free kernels with separated transforms
-        // This eliminates warp divergence by having each kernel handle uniform operations
-        const int BRANCH_FREE_THRESHOLD = 128;  // Use branch-free for larger transform counts
-        const bool USE_BRANCH_FREE = (num_transforms_ >= BRANCH_FREE_THRESHOLD);
+        // V3 OPTIMIZATION: Warp-reduction (gather) kernels
+        // Each warp computes ONE complete output - eliminates atomic contention
+        // NOTE: Only beneficial when N is large enough to saturate GPU AND
+        // atomic contention is the actual bottleneck. For small systems, 
+        // the gather overhead exceeds atomic penalty.
+        const int WARP_REDUCTION_THRESHOLD = 1024;   // Use gather when T >= 1024 (lots of atomics)
+        const int BRANCH_FREE_THRESHOLD = 128;     // Separate kernels when T >= 128
         
-        if (USE_BRANCH_FREE) {
-            // Ensure transforms are separated and copied to device
-            if (!separated_on_device_) {
-                copySeparatedTransformsToDevice();
-            }
+        // Ensure transforms are separated and copied to device
+        if (!separated_on_device_) {
+            copySeparatedTransformsToDevice();
+        }
+        
+        if (num_transforms_ >= WARP_REDUCTION_THRESHOLD) {
+            // V3: WARP-REDUCTION (GATHER) KERNEL
+            // Each warp computes one complete output element
+            // Benefits: Zero atomics, no write contention, cache-friendly reads
             
+            // Configuration: 8 warps per block = 256 threads
+            constexpr int WARPS_PER_BLOCK = 8;
+            constexpr int THREADS_PER_BLOCK = WARPS_PER_BLOCK * 32;
+            int num_blocks = (N + WARPS_PER_BLOCK - 1) / WARPS_PER_BLOCK;
+            
+            // Single fused kernel - no atomics at all!
+            GPUKernels::matVecWarpReductionFused<<<num_blocks, THREADS_PER_BLOCK>>>(
+                d_x, d_y,
+                d_diag_one_body_, num_diag_one_body_,
+                d_diag_two_body_, num_diag_two_body_,
+                d_offdiag_one_body_, num_offdiag_one_body_,
+                d_mixed_two_body_, num_mixed_two_body_,
+                d_offdiag_two_body_, num_offdiag_two_body_,
+                N, spin_l_);
+            
+            CUDA_CHECK(cudaGetLastError());
+            
+        } else if (num_transforms_ >= BRANCH_FREE_THRESHOLD) {
+            // V2: Branch-free separated kernels (scatter pattern)
+            // Use when T is moderate (32-63) - benefits from no warp divergence
+            // but warp-reduction overhead not worth it
             // Zero output vector (required for atomic accumulation)
             CUDA_CHECK(cudaMemset(d_y, 0, N * sizeof(cuDoubleComplex)));
             
@@ -689,42 +717,21 @@ void GPUOperator::matVecGPU(const cuDoubleComplex* d_x, cuDoubleComplex* d_y, in
             
             CUDA_CHECK(cudaGetLastError());
         } else {
-            // Auto-select kernel based on parallelism potential
-            // Transform-parallel benefits from high T (more parallel work)
-            // Threshold: Use transform-parallel when T > 64 for maximum GPU utilization
-            const int TRANSFORM_PARALLEL_THRESHOLD = 64;
+            // Small T: Use simple state-parallel kernel with shared memory
+            // Zero output vector (required for atomic accumulation since we scatter writes)
+            CUDA_CHECK(cudaMemset(d_y, 0, N * sizeof(cuDoubleComplex)));
             
-            if (num_transforms_ > TRANSFORM_PARALLEL_THRESHOLD) {
-                // GPU-NATIVE: Transform-parallel kernel (2D parallelism)
-                // Zero output vector (required for atomic accumulation)
-                CUDA_CHECK(cudaMemset(d_y, 0, N * sizeof(cuDoubleComplex)));
-                
-                // 2D grid: (N/16, T/16) with 16×16 blocks
-                dim3 block(16, 16);  // 256 threads per block
-                dim3 grid((N + block.x - 1) / block.x,
-                         (num_transforms_ + block.y - 1) / block.y);
-                
-                GPUKernels::matVecTransformParallel<<<grid, block>>>(
-                    d_x, d_y, d_transform_data_, num_transforms_, N, n_sites_, spin_l_);
-                
-                CUDA_CHECK(cudaGetLastError());
-            } else {
-                // State-parallel kernel (better for small T)
-                // Zero output vector (required for atomic accumulation since we scatter writes)
-                CUDA_CHECK(cudaMemset(d_y, 0, N * sizeof(cuDoubleComplex)));
-                
-                int num_blocks = (N + BLOCK_SIZE - 1) / BLOCK_SIZE;
-                num_blocks = std::min(num_blocks, MAX_BLOCKS);
-                
-                // Calculate shared memory size
-                size_t shared_mem_size = std::min(num_transforms_, 4096) * sizeof(GPUTransformData);
-                
-                GPUKernels::matVecKernelOptimized<<<num_blocks, BLOCK_SIZE, shared_mem_size>>>(
-                    0, d_y, N, n_sites_, spin_l_,
-                    d_transform_data_, num_transforms_, d_x);
-                
-                CUDA_CHECK(cudaGetLastError());
-            }
+            int num_blocks = (N + BLOCK_SIZE - 1) / BLOCK_SIZE;
+            num_blocks = std::min(num_blocks, MAX_BLOCKS);
+            
+            // Calculate shared memory size
+            size_t shared_mem_size = std::min(num_transforms_, 4096) * sizeof(GPUTransformData);
+            
+            GPUKernels::matVecKernelOptimized<<<num_blocks, BLOCK_SIZE, shared_mem_size>>>(
+                0, d_y, N, n_sites_, spin_l_,
+                d_transform_data_, num_transforms_, d_x);
+            
+            CUDA_CHECK(cudaGetLastError());
         }
     } else {
         // Fallback to legacy kernel

@@ -464,6 +464,21 @@ __global__ void matVecFixedSzOffDiagonalTwoBody(const cuDoubleComplex* x, cuDoub
                                                 const GPUOffDiagonalTwoBody* transforms,
                                                 int num_transforms, int N);
 
+// ============================================================================
+// WARP-REDUCTION (GATHER) KERNEL - Atomic-free output
+// Each warp computes one output element by gathering contributions from all inputs
+// ============================================================================
+
+__global__ void matVecWarpReductionFused(
+    const cuDoubleComplex* __restrict__ x,
+    cuDoubleComplex* __restrict__ y,
+    const GPUDiagonalOneBody* diag1, int num_diag1,
+    const GPUDiagonalTwoBody* diag2, int num_diag2,
+    const GPUOffDiagonalOneBody* offdiag1, int num_offdiag1,
+    const GPUMixedTwoBody* mixed2, int num_mixed2,
+    const GPUOffDiagonalTwoBody* offdiag2, int num_offdiag2,
+    int N, float spin_l);
+
 } // namespace GPUKernels
 
 // ============================================================================
