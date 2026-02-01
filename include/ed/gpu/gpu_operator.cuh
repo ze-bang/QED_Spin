@@ -240,6 +240,34 @@ protected:
     bool transforms_separated_ = false;
     bool separated_on_device_ = false;
     
+    // ========================================================================
+    // Kernel pathway selection (cached to avoid branch overhead per matVec)
+    // ========================================================================
+    enum class KernelPathway {
+        UNINITIALIZED = 0,     // Not yet selected
+        CUSPARSE,              // Use cuSPARSE (pre-built sparse matrix)
+        WARP_REDUCTION,        // Gather pattern, no atomics (T >= 1024, N >= 8192)
+        BRANCH_FREE_SCATTER,   // Separated kernels with atomics (T >= 64)
+        SHARED_MEMORY,         // State-parallel with shared mem (T < 64)
+        LEGACY                 // Fallback legacy kernel
+    };
+    
+    KernelPathway selected_pathway_ = KernelPathway::UNINITIALIZED;
+    int cached_N_ = 0;  // Dimension for which pathway was selected
+    
+    // Launch configuration (cached to avoid recomputation)
+    struct LaunchConfig {
+        int num_blocks = 0;
+        int threads_per_block = 0;
+        size_t shared_mem_size = 0;
+        dim3 grid_2d = dim3(0,0,0);
+        dim3 block_2d = dim3(0,0,0);
+    };
+    LaunchConfig launch_config_;
+    
+    // Select optimal kernel pathway based on problem characteristics
+    void selectKernelPathway(int N);
+    
     // Separate transforms by type (call before kernel launch)
     void separateTransformsByType();
     void copySeparatedTransformsToDevice();

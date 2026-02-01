@@ -628,31 +628,22 @@ void GPUOperator::matVecGPU(const cuDoubleComplex* d_x, cuDoubleComplex* d_y, in
             copyTransformDataToDevice();
         }
         
-        // V3 OPTIMIZATION: Warp-reduction (gather) kernels
-        // Each warp computes ONE complete output - eliminates atomic contention
-        // NOTE: Only beneficial when N is large enough to saturate GPU AND
-        // atomic contention is the actual bottleneck. For small systems, 
-        // the gather overhead exceeds atomic penalty.
-        const int WARP_REDUCTION_THRESHOLD = 1024;   // Use gather when T >= 1024 (lots of atomics)
-        const int BRANCH_FREE_THRESHOLD = 128;     // Separate kernels when T >= 128
+        // Select kernel pathway once and cache it
+        if (selected_pathway_ == KernelPathway::UNINITIALIZED || cached_N_ != N) {
+            selectKernelPathway(N);
+        }
         
-        // Ensure transforms are separated and copied to device
-        if (!separated_on_device_) {
+        // Ensure transforms are separated and copied to device (for non-legacy paths)
+        if (selected_pathway_ != KernelPathway::SHARED_MEMORY && 
+            selected_pathway_ != KernelPathway::LEGACY && !separated_on_device_) {
             copySeparatedTransformsToDevice();
         }
         
-        if (num_transforms_ >= WARP_REDUCTION_THRESHOLD) {
-            // V3: WARP-REDUCTION (GATHER) KERNEL
-            // Each warp computes one complete output element
-            // Benefits: Zero atomics, no write contention, cache-friendly reads
-            
-            // Configuration: 8 warps per block = 256 threads
-            constexpr int WARPS_PER_BLOCK = 8;
-            constexpr int THREADS_PER_BLOCK = WARPS_PER_BLOCK * 32;
-            int num_blocks = (N + WARPS_PER_BLOCK - 1) / WARPS_PER_BLOCK;
-            
-            // Single fused kernel - no atomics at all!
-            GPUKernels::matVecWarpReductionFused<<<num_blocks, THREADS_PER_BLOCK>>>(
+        // Execute selected pathway (no branching within hot path)
+        switch (selected_pathway_) {
+        case KernelPathway::WARP_REDUCTION: {
+            // V3: WARP-REDUCTION (GATHER) KERNEL - no atomics
+            GPUKernels::matVecWarpReductionFused<<<launch_config_.num_blocks, launch_config_.threads_per_block>>>(
                 d_x, d_y,
                 d_diag_one_body_, num_diag_one_body_,
                 d_diag_two_body_, num_diag_two_body_,
@@ -660,78 +651,62 @@ void GPUOperator::matVecGPU(const cuDoubleComplex* d_x, cuDoubleComplex* d_y, in
                 d_mixed_two_body_, num_mixed_two_body_,
                 d_offdiag_two_body_, num_offdiag_two_body_,
                 N, spin_l_);
-            
             CUDA_CHECK(cudaGetLastError());
-            
-        } else if (num_transforms_ >= BRANCH_FREE_THRESHOLD) {
-            // V2: Branch-free separated kernels (scatter pattern)
-            // Use when T is moderate (32-63) - benefits from no warp divergence
-            // but warp-reduction overhead not worth it
-            // Zero output vector (required for atomic accumulation)
+            break;
+        }
+        
+        case KernelPathway::BRANCH_FREE_SCATTER: {
+            // V2: Branch-free separated kernels with atomics
             CUDA_CHECK(cudaMemset(d_y, 0, N * sizeof(cuDoubleComplex)));
             
-            // Calculate grid dimensions for 2D parallelism (N × T)
-            dim3 block(16, 16);  // 256 threads per block
-            
-            // Launch separate kernel for each transform type - no warp divergence!
-            
-            // 1. Diagonal one-body (Sz) - O(N × T_diag1) parallel, no atomics needed
+            // Launch separate kernel for each transform type
             if (num_diag_one_body_ > 0) {
-                dim3 grid((N + block.x - 1) / block.x,
-                         (num_diag_one_body_ + block.y - 1) / block.y);
-                GPUKernels::matVecDiagonalOneBody<<<grid, block>>>(
+                dim3 grid((N + 15) / 16, (num_diag_one_body_ + 15) / 16);
+                GPUKernels::matVecDiagonalOneBody<<<grid, launch_config_.block_2d>>>(
                     d_x, d_y, d_diag_one_body_, num_diag_one_body_, N, spin_l_);
             }
-            
-            // 2. Off-diagonal one-body (S+/S-) - requires atomics for output
             if (num_offdiag_one_body_ > 0) {
-                dim3 grid((N + block.x - 1) / block.x,
-                         (num_offdiag_one_body_ + block.y - 1) / block.y);
-                GPUKernels::matVecOffDiagonalOneBody<<<grid, block>>>(
+                dim3 grid((N + 15) / 16, (num_offdiag_one_body_ + 15) / 16);
+                GPUKernels::matVecOffDiagonalOneBody<<<grid, launch_config_.block_2d>>>(
                     d_x, d_y, d_offdiag_one_body_, num_offdiag_one_body_, N);
             }
-            
-            // 3. Diagonal two-body (Sz*Sz) - O(N × T_diag2), accumulates to diagonal
             if (num_diag_two_body_ > 0) {
-                dim3 grid((N + block.x - 1) / block.x,
-                         (num_diag_two_body_ + block.y - 1) / block.y);
-                GPUKernels::matVecDiagonalTwoBody<<<grid, block>>>(
+                dim3 grid((N + 15) / 16, (num_diag_two_body_ + 15) / 16);
+                GPUKernels::matVecDiagonalTwoBody<<<grid, launch_config_.block_2d>>>(
                     d_x, d_y, d_diag_two_body_, num_diag_two_body_, N, spin_l_);
             }
-            
-            // 4. Mixed two-body (Sz * S+/S-) - requires atomics
             if (num_mixed_two_body_ > 0) {
-                dim3 grid((N + block.x - 1) / block.x,
-                         (num_mixed_two_body_ + block.y - 1) / block.y);
-                GPUKernels::matVecMixedTwoBody<<<grid, block>>>(
+                dim3 grid((N + 15) / 16, (num_mixed_two_body_ + 15) / 16);
+                GPUKernels::matVecMixedTwoBody<<<grid, launch_config_.block_2d>>>(
                     d_x, d_y, d_mixed_two_body_, num_mixed_two_body_, N, spin_l_);
             }
-            
-            // 5. Off-diagonal two-body (S+/S- * S+/S-) - requires atomics
             if (num_offdiag_two_body_ > 0) {
-                dim3 grid((N + block.x - 1) / block.x,
-                         (num_offdiag_two_body_ + block.y - 1) / block.y);
-                GPUKernels::matVecOffDiagonalTwoBody<<<grid, block>>>(
+                dim3 grid((N + 15) / 16, (num_offdiag_two_body_ + 15) / 16);
+                GPUKernels::matVecOffDiagonalTwoBody<<<grid, launch_config_.block_2d>>>(
                     d_x, d_y, d_offdiag_two_body_, num_offdiag_two_body_, N);
             }
-            
             CUDA_CHECK(cudaGetLastError());
-        } else {
-            // Small T: Use simple state-parallel kernel with shared memory
-            // Zero output vector (required for atomic accumulation since we scatter writes)
+            break;
+        }
+        
+        case KernelPathway::SHARED_MEMORY: {
+            // V1: Shared memory kernel
             CUDA_CHECK(cudaMemset(d_y, 0, N * sizeof(cuDoubleComplex)));
-            
-            int num_blocks = (N + BLOCK_SIZE - 1) / BLOCK_SIZE;
-            num_blocks = std::min(num_blocks, MAX_BLOCKS);
-            
-            // Calculate shared memory size
-            size_t shared_mem_size = std::min(num_transforms_, 4096) * sizeof(GPUTransformData);
-            
-            GPUKernels::matVecKernelOptimized<<<num_blocks, BLOCK_SIZE, shared_mem_size>>>(
+            GPUKernels::matVecKernelOptimized<<<launch_config_.num_blocks, launch_config_.threads_per_block, launch_config_.shared_mem_size>>>(
                 0, d_y, N, n_sites_, spin_l_,
                 d_transform_data_, num_transforms_, d_x);
-            
             CUDA_CHECK(cudaGetLastError());
+            break;
+        }
+        
+        default:
+            // Should not reach here if selectKernelPathway was called
+            CUDA_CHECK(cudaMemset(d_y, 0, N * sizeof(cuDoubleComplex)));
+            GPUKernels::matVecKernelOptimized<<<launch_config_.num_blocks, launch_config_.threads_per_block, launch_config_.shared_mem_size>>>(
+                0, d_y, N, n_sites_, spin_l_,
+                d_transform_data_, num_transforms_, d_x);
+            CUDA_CHECK(cudaGetLastError());
+            break;
         }
     } else {
         // Fallback to legacy kernel
@@ -757,6 +732,86 @@ void GPUOperator::matVecGPU(const cuDoubleComplex* d_x, cuDoubleComplex* d_y, in
     // Estimate throughput (rough estimate)
     double flops = static_cast<double>(N) * NNZ_PER_STATE_ESTIMATE * 8; // multiply-add per element
     stats_.throughput = flops / (stats_.matVecTime * 1e9);
+}
+
+void GPUOperator::selectKernelPathway(int N) {
+    /**
+     * Kernel Selection Criteria:
+     * 
+     * 1. WARP_REDUCTION (gather pattern):
+     *    - Benefits: Zero atomic contention, direct memory writes
+     *    - Overhead: Must compute inverse transforms, warp shuffle reductions
+     *    - Use when: T >= 1024 AND N >= 8192
+     *    - Reason: Warp overhead only worth it with massive atomic contention
+     * 
+     * 2. BRANCH_FREE_SCATTER (scatter pattern):
+     *    - Benefits: No warp divergence, parallel over states × transforms
+     *    - Overhead: Atomics for off-diagonal terms
+     *    - Use when: T >= 64 (enough to saturate warps)
+     * 
+     * 3. SHARED_MEMORY (legacy optimized):
+     *    - Benefits: Coalesced access, shared memory caching of transforms
+     *    - Overhead: Warp divergence for mixed transform types
+     *    - Use when: T < 64 (warp divergence less costly)
+     */
+    
+    cached_N_ = N;
+    
+    // Thresholds tuned from empirical testing
+    constexpr int WARP_REDUCTION_T_THRESHOLD = 1024;  // High T needed for atomic contention
+    constexpr int WARP_REDUCTION_N_THRESHOLD = 8192;  // Enough warps to amortize overhead
+    constexpr int BRANCH_FREE_THRESHOLD = 64;
+    
+    // Calculate off-diagonal ratio (indicator of atomic contention severity)
+    int total_transforms = num_transforms_;
+    int offdiag_count = num_offdiag_one_body_ + num_offdiag_two_body_ + num_mixed_two_body_;
+    float offdiag_ratio = (total_transforms > 0) ? 
+        static_cast<float>(offdiag_count) / total_transforms : 0.0f;
+    
+    // Selection logic
+    if (total_transforms >= WARP_REDUCTION_T_THRESHOLD && 
+        N >= WARP_REDUCTION_N_THRESHOLD &&
+        offdiag_ratio > 0.3f) {
+        // Heavy atomic contention expected - use gather pattern
+        selected_pathway_ = KernelPathway::WARP_REDUCTION;
+        
+        // Cache launch config for warp reduction
+        constexpr int WARPS_PER_BLOCK = 8;
+        launch_config_.threads_per_block = WARPS_PER_BLOCK * 32;
+        launch_config_.num_blocks = (N + WARPS_PER_BLOCK - 1) / WARPS_PER_BLOCK;
+        launch_config_.shared_mem_size = 0;
+        launch_config_.block_2d = dim3(16, 16);
+        
+        std::cout << "Selected WARP_REDUCTION pathway: T=" << total_transforms 
+                  << ", N=" << N << ", offdiag_ratio=" << offdiag_ratio << std::endl;
+                  
+    } else if (total_transforms >= BRANCH_FREE_THRESHOLD) {
+        // Moderate T - use branch-free scatter kernels
+        selected_pathway_ = KernelPathway::BRANCH_FREE_SCATTER;
+        
+        // Cache launch config for branch-free scatter
+        launch_config_.threads_per_block = BLOCK_SIZE;
+        launch_config_.num_blocks = std::min((N + BLOCK_SIZE - 1) / BLOCK_SIZE, MAX_BLOCKS);
+        launch_config_.shared_mem_size = 0;
+        launch_config_.block_2d = dim3(16, 16);
+        
+        std::cout << "Selected BRANCH_FREE_SCATTER pathway: T=" << total_transforms 
+                  << ", N=" << N << std::endl;
+                  
+    } else {
+        // Small T - use shared memory kernel
+        selected_pathway_ = KernelPathway::SHARED_MEMORY;
+        
+        // Cache launch config for shared memory
+        launch_config_.threads_per_block = BLOCK_SIZE;
+        launch_config_.num_blocks = std::min((N + BLOCK_SIZE - 1) / BLOCK_SIZE, MAX_BLOCKS);
+        launch_config_.shared_mem_size = std::min(total_transforms, 4096) * 
+                                          static_cast<int>(sizeof(GPUTransformData));
+        launch_config_.block_2d = dim3(16, 16);
+        
+        std::cout << "Selected SHARED_MEMORY pathway: T=" << total_transforms 
+                  << ", N=" << N << std::endl;
+    }
 }
 
 void GPUOperator::matVecGPUAsync(const cuDoubleComplex* d_x, cuDoubleComplex* d_y, int N, cudaStream_t stream) {
