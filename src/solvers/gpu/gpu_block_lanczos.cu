@@ -433,12 +433,25 @@ void GPUBlockLanczos::allocateMemory() {
     CUDA_CHECK(cudaMalloc(&d_tau_, block_size_ * sizeof(cuDoubleComplex)));
     CUDA_CHECK(cudaMalloc(&d_info_, sizeof(int)));
     
+    // Query workspace for both Zgeqrf and Zungqr, use the larger of the two
+    int geqrf_lwork = 0, ungqr_lwork = 0;
+    
     CUSOLVER_CHECK(cusolverDnZgeqrf_bufferSize(
         cusolver_handle_,
         dimension_, block_size_,
         d_V_current_, dimension_,
-        &qr_lwork_
+        &geqrf_lwork
     ));
+    
+    CUSOLVER_CHECK(cusolverDnZungqr_bufferSize(
+        cusolver_handle_,
+        dimension_, block_size_, block_size_,
+        d_V_current_, dimension_,
+        d_tau_,
+        &ungqr_lwork
+    ));
+    
+    qr_lwork_ = std::max(geqrf_lwork, ungqr_lwork);
     
     CUDA_CHECK(cudaMalloc(&d_qr_work_, qr_lwork_ * sizeof(cuDoubleComplex)));
     
