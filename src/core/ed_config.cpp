@@ -46,6 +46,7 @@ enum class DiagonalizationMethod {
     BLOCK_LANCZOS_GPU,
     DAVIDSON_GPU,
     LOBPCG_GPU,
+    KRYLOV_SCHUR_GPU,
     mTPQ_GPU,
     cTPQ_GPU,
     FTLM_GPU,
@@ -877,6 +878,7 @@ std::optional<DiagonalizationMethod> parseMethod(const std::string& str) {
     if (lower == "block_lanczos_gpu_fixed_sz") return DiagonalizationMethod::BLOCK_LANCZOS_GPU_FIXED_SZ;
     if (lower == "davidson_gpu") return DiagonalizationMethod::DAVIDSON_GPU;
     if (lower == "lobpcg_gpu") return DiagonalizationMethod::LOBPCG_GPU;
+    if (lower == "krylov_schur_gpu") return DiagonalizationMethod::KRYLOV_SCHUR_GPU;
     if (lower == "mtpq_gpu") return DiagonalizationMethod::mTPQ_GPU;
     if (lower == "ctpq_gpu") return DiagonalizationMethod::cTPQ_GPU;
     if (lower == "ftlm_gpu") return DiagonalizationMethod::FTLM_GPU;
@@ -936,6 +938,7 @@ std::string methodToString(DiagonalizationMethod method) {
         case DiagonalizationMethod::BLOCK_LANCZOS_GPU_FIXED_SZ: return "BLOCK_LANCZOS_GPU_FIXED_SZ";
         case DiagonalizationMethod::DAVIDSON_GPU: return "DAVIDSON_GPU";
         case DiagonalizationMethod::LOBPCG_GPU: return "LOBPCG_GPU";
+        case DiagonalizationMethod::KRYLOV_SCHUR_GPU: return "KRYLOV_SCHUR_GPU";
         case DiagonalizationMethod::mTPQ_GPU: return "mTPQ_GPU";
         case DiagonalizationMethod::cTPQ_GPU: return "cTPQ_GPU";
         case DiagonalizationMethod::FTLM_GPU: return "FTLM_GPU";
@@ -1338,6 +1341,27 @@ std::string getMethodParameterInfo(DiagonalizationMethod method) {
             info << "Note: LOBPCG_GPU has been retired due to numerical stability issues.\n";
             info << "      It now redirects to DAVIDSON_GPU which provides superior accuracy.\n";
             info << "      Please use DAVIDSON_GPU directly for new projects.\n";
+            break;
+            
+        case DiagonalizationMethod::KRYLOV_SCHUR_GPU:
+            info << "GPU-accelerated Krylov-Schur algorithm (requires CUDA build).\n\n";
+            info << "Restarted eigenvalue solver using Krylov-Schur decomposition.\n";
+            info << "Optimal for computing many eigenvalues with implicit restarts.\n";
+            info << "All operations performed on GPU with cuBLAS/cuSOLVER.\n\n";
+            info << "Requires: CUDA-enabled build\n";
+            info << "Configurable Parameters:\n";
+            info << "  --eigenvalues=<n>     Number of eigenvalues to compute (default: 1)\n";
+            info << "  --iterations=<n>      Maximum Krylov subspace size (default: 10000)\n";
+            info << "  --tolerance=<tol>     Convergence tolerance (default: 1e-10)\n";
+            info << "  --eigenvectors        Compute and save eigenvectors\n";
+            info << "  --fixed-sz            Use fixed Sz sector (recommended)\n";
+            info << "  --n_up=<n>            Number of up spins for fixed Sz\n\n";
+            info << "GPU Optimizations:\n";
+            info << "  - All Krylov vectors stored on GPU (no disk I/O)\n";
+            info << "  - Batched orthogonalization via cuBLAS GEMV\n";
+            info << "  - cuSOLVER for projected eigenvalue problem\n";
+            info << "  - cuBLAS GEMM for efficient basis update during restart\n\n";
+            info << "Best for: Computing many eigenvalues, systems requiring restarts\n";
             break;
             
         case DiagonalizationMethod::mTPQ_GPU:

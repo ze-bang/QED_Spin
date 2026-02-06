@@ -153,6 +153,7 @@ enum class DiagonalizationMethod {
     BLOCK_LANCZOS_GPU,     // GPU-accelerated Block Lanczos (use --fixed-sz for fixed Sz sector)
     DAVIDSON_GPU,          // GPU-accelerated Davidson method
     LOBPCG_GPU,            // GPU-accelerated LOBPCG method
+    KRYLOV_SCHUR_GPU,      // GPU-accelerated Krylov-Schur algorithm
     mTPQ_GPU,              // GPU-accelerated microcanonical TPQ
     cTPQ_GPU,              // GPU-accelerated canonical TPQ
     FTLM_GPU,              // GPU-accelerated Finite Temperature Lanczos Method (use --fixed-sz for fixed Sz sector)
@@ -236,6 +237,10 @@ inline DiagonalizationMethod get_fallback_method(DiagonalizationMethod method, b
                 break;
             case DiagonalizationMethod::LOBPCG_GPU:
                 fallback = DiagonalizationMethod::LOBPCG;
+                reason = "CUDA not compiled (build with -DWITH_CUDA=ON)";
+                break;
+            case DiagonalizationMethod::KRYLOV_SCHUR_GPU:
+                fallback = DiagonalizationMethod::KRYLOV_SCHUR;
                 reason = "CUDA not compiled (build with -DWITH_CUDA=ON)";
                 break;
             case DiagonalizationMethod::mTPQ_GPU:
@@ -564,6 +569,7 @@ namespace ed_internal {
                method == DiagonalizationMethod::BLOCK_LANCZOS_GPU_FIXED_SZ ||
                method == DiagonalizationMethod::DAVIDSON_GPU ||
                method == DiagonalizationMethod::LOBPCG_GPU ||
+               method == DiagonalizationMethod::KRYLOV_SCHUR_GPU ||
                method == DiagonalizationMethod::mTPQ_GPU ||
                method == DiagonalizationMethod::cTPQ_GPU ||
                method == DiagonalizationMethod::FTLM_GPU ||
@@ -1256,6 +1262,7 @@ EDResults exact_diagonalization_core(
         case DiagonalizationMethod::LANCZOS_GPU_FIXED_SZ:
         case DiagonalizationMethod::DAVIDSON_GPU:
         case DiagonalizationMethod::LOBPCG_GPU:
+        case DiagonalizationMethod::KRYLOV_SCHUR_GPU:
         case DiagonalizationMethod::BLOCK_LANCZOS_GPU:
         case DiagonalizationMethod::BLOCK_LANCZOS_GPU_FIXED_SZ:
         case DiagonalizationMethod::mTPQ_GPU:
@@ -1598,7 +1605,8 @@ EDResults diagonalize_symmetry_block(
         method == DiagonalizationMethod::BLOCK_LANCZOS_GPU ||
         method == DiagonalizationMethod::BLOCK_LANCZOS_GPU_FIXED_SZ ||
         method == DiagonalizationMethod::DAVIDSON_GPU ||
-        method == DiagonalizationMethod::LOBPCG_GPU) {
+        method == DiagonalizationMethod::LOBPCG_GPU ||
+        method == DiagonalizationMethod::KRYLOV_SCHUR_GPU) {
         if (!GPUEDWrapper::isGPUAvailable()) {
             std::cerr << "Warning: No CUDA-capable GPU found. Falling back to CPU for this block (dim="
                       << block_dim << ").\n";
@@ -1607,6 +1615,8 @@ EDResults diagonalize_symmetry_block(
                 method = DiagonalizationMethod::DAVIDSON;
             } else if (method == DiagonalizationMethod::LOBPCG_GPU) {
                 method = DiagonalizationMethod::LOBPCG;
+            } else if (method == DiagonalizationMethod::KRYLOV_SCHUR_GPU) {
+                method = DiagonalizationMethod::KRYLOV_SCHUR;
             } else if (method == DiagonalizationMethod::BLOCK_LANCZOS_GPU ||
                        method == DiagonalizationMethod::BLOCK_LANCZOS_GPU_FIXED_SZ) {
                 method = DiagonalizationMethod::BLOCK_LANCZOS;
@@ -1660,6 +1670,8 @@ EDResults diagonalize_symmetry_block(
                         method = DiagonalizationMethod::DAVIDSON;
                     } else if (method == DiagonalizationMethod::LOBPCG_GPU) {
                         method = DiagonalizationMethod::LOBPCG;
+                    } else if (method == DiagonalizationMethod::KRYLOV_SCHUR_GPU) {
+                        method = DiagonalizationMethod::KRYLOV_SCHUR;
                     } else if (method == DiagonalizationMethod::BLOCK_LANCZOS_GPU ||
                                method == DiagonalizationMethod::BLOCK_LANCZOS_GPU_FIXED_SZ) {
                         method = DiagonalizationMethod::BLOCK_LANCZOS;
@@ -1683,6 +1695,16 @@ EDResults diagonalize_symmetry_block(
                         );
                     } else if (method == DiagonalizationMethod::LOBPCG_GPU) {
                         GPUEDWrapper::runGPULOBPCG(
+                            gpu_op, N,
+                            std::min(params.num_eigenvalues, block_dim),
+                            params.max_iterations,
+                            params.tolerance,
+                            eigenvalues,
+                            params.output_dir,
+                            params.compute_eigenvectors
+                        );
+                    } else if (method == DiagonalizationMethod::KRYLOV_SCHUR_GPU) {
+                        GPUEDWrapper::runGPUKrylovSchur(
                             gpu_op, N,
                             std::min(params.num_eigenvalues, block_dim),
                             params.max_iterations,
@@ -1732,6 +1754,8 @@ EDResults diagonalize_symmetry_block(
                     method = DiagonalizationMethod::DAVIDSON;
                 } else if (method == DiagonalizationMethod::LOBPCG_GPU) {
                     method = DiagonalizationMethod::LOBPCG;
+                } else if (method == DiagonalizationMethod::KRYLOV_SCHUR_GPU) {
+                    method = DiagonalizationMethod::KRYLOV_SCHUR;
                 } else if (method == DiagonalizationMethod::BLOCK_LANCZOS_GPU ||
                            method == DiagonalizationMethod::BLOCK_LANCZOS_GPU_FIXED_SZ) {
                     method = DiagonalizationMethod::BLOCK_LANCZOS;
@@ -1755,6 +1779,7 @@ EDResults diagonalize_symmetry_block(
         method == DiagonalizationMethod::BLOCK_LANCZOS_GPU_FIXED_SZ ||
         method == DiagonalizationMethod::DAVIDSON_GPU ||
         method == DiagonalizationMethod::LOBPCG_GPU ||
+        method == DiagonalizationMethod::KRYLOV_SCHUR_GPU ||
         method == DiagonalizationMethod::mTPQ_GPU ||
         method == DiagonalizationMethod::cTPQ_GPU) {
         std::cerr << "Warning: GPU methods requested but CUDA not available.\n";
@@ -1763,6 +1788,8 @@ EDResults diagonalize_symmetry_block(
             method = DiagonalizationMethod::DAVIDSON;
         } else if (method == DiagonalizationMethod::LOBPCG_GPU) {
             method = DiagonalizationMethod::LOBPCG;
+        } else if (method == DiagonalizationMethod::KRYLOV_SCHUR_GPU) {
+            method = DiagonalizationMethod::KRYLOV_SCHUR;
         } else if (method == DiagonalizationMethod::BLOCK_LANCZOS_GPU ||
                    method == DiagonalizationMethod::BLOCK_LANCZOS_GPU_FIXED_SZ) {
             method = DiagonalizationMethod::BLOCK_LANCZOS;
@@ -2542,6 +2569,7 @@ inline EDResults exact_diagonalization_fixed_sz(
     // Check if GPU method requested
     bool is_gpu_method = (method == DiagonalizationMethod::DAVIDSON_GPU ||
                           method == DiagonalizationMethod::LOBPCG_GPU ||
+                          method == DiagonalizationMethod::KRYLOV_SCHUR_GPU ||
                           method == DiagonalizationMethod::LANCZOS_GPU ||
                           method == DiagonalizationMethod::LANCZOS_GPU_FIXED_SZ ||
                           method == DiagonalizationMethod::BLOCK_LANCZOS_GPU ||
@@ -2689,6 +2717,15 @@ inline EDResults exact_diagonalization_fixed_sz(
                 params.max_iterations,
                 params.num_eigenvalues,
                 params.block_size,
+                params.tolerance,
+                eigenvalues,
+                params.output_dir,
+                params.compute_eigenvectors);
+        } else if (method == DiagonalizationMethod::KRYLOV_SCHUR_GPU) {
+            GPUEDWrapper::runGPUKrylovSchurFixedSz(
+                gpu_op_handle, n_up,
+                params.max_iterations,
+                params.num_eigenvalues,
                 params.tolerance,
                 eigenvalues,
                 params.output_dir,
@@ -3132,6 +3169,33 @@ EDResults exact_diagonalization_from_files(
             std::cerr << "Error: BLOCK_LANCZOS_GPU_FIXED_SZ file interface not yet implemented." << std::endl;
             std::cerr << "Please use the fixed_sz wrapper function directly." << std::endl;
             throw std::runtime_error("Fixed Sz GPU Block Lanczos not yet integrated with file interface");
+        } else if (method == DiagonalizationMethod::KRYLOV_SCHUR_GPU) {
+            std::cout << "Running GPU Krylov-Schur method..." << std::endl;
+            
+            void* gpu_op = GPUEDWrapper::createGPUOperatorFromFiles(
+                params.num_sites, interaction_file, single_site_file);
+            
+            if (!gpu_op) {
+                std::cerr << "Error: Failed to create GPU operator" << std::endl;
+                throw std::runtime_error("GPU operator creation failed");
+            }
+            
+            std::vector<double> eigenvalues;
+            GPUEDWrapper::runGPUKrylovSchur(
+                gpu_op,
+                hilbert_space_dim,
+                params.num_eigenvalues,
+                params.max_iterations,
+                params.tolerance,
+                eigenvalues,
+                params.output_dir,
+                params.compute_eigenvectors
+            );
+            
+            results.eigenvalues = eigenvalues;
+            GPUEDWrapper::destroyGPUOperator(gpu_op);
+            
+            std::cout << "GPU Krylov-Schur completed successfully!" << std::endl;
         }
         
         return results;

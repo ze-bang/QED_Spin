@@ -765,6 +765,93 @@ void GPUEDWrapper::runGPULOBPCGFixedSz(void* gpu_op_handle,
                          tol, eigenvalues, dir, compute_eigenvectors);
 }
 
+void GPUEDWrapper::runGPUKrylovSchur(void* gpu_op_handle,
+                                    int N, int num_eigenvalues, int max_iter,
+                                    double tol,
+                                    std::vector<double>& eigenvalues,
+                                    std::string dir,
+                                    bool compute_eigenvectors) {
+    if (!gpu_op_handle) {
+        std::cerr << "Error: NULL GPU operator handle\n";
+        return;
+    }
+    
+    GPUOperator* gpu_op = static_cast<GPUOperator*>(gpu_op_handle);
+    
+    std::cout << "\n========================================\n";
+    std::cout << "GPU Krylov-Schur Algorithm\n";
+    std::cout << "========================================\n";
+    std::cout << "  Dimension: " << N << "\n";
+    std::cout << "  Target eigenvalues: " << num_eigenvalues << "\n";
+    std::cout << "  Max Krylov size: " << max_iter << "\n";
+    std::cout << "  Tolerance: " << tol << "\n\n";
+    
+    // Create and run GPU Krylov-Schur solver
+    GPUKrylovSchur solver(gpu_op, max_iter, tol);
+    
+    std::vector<std::vector<std::complex<double>>> eigenvectors;
+    solver.run(num_eigenvalues, eigenvalues, eigenvectors, compute_eigenvectors);
+    
+    // Save results if directory specified
+    if (!dir.empty() && !eigenvalues.empty()) {
+        try {
+            HDF5IO::saveDiagonalizationResults(dir, eigenvalues, eigenvectors, "GPU-Krylov-Schur");
+            std::cout << "Saved results to " << dir << "/ed_results.h5\n";
+        } catch (const std::exception& e) {
+            std::cerr << "Warning: Failed to save results: " << e.what() << "\n";
+        }
+    }
+    
+    std::cout << "\nGPU Krylov-Schur complete\n";
+}
+
+void GPUEDWrapper::runGPUKrylovSchurFixedSz(void* gpu_op_handle,
+                                           int n_up,
+                                           int num_eigenvalues, int max_iter,
+                                           double tol,
+                                           std::vector<double>& eigenvalues,
+                                           std::string dir,
+                                           bool compute_eigenvectors) {
+    if (!gpu_op_handle) {
+        std::cerr << "Error: NULL GPU operator handle\n";
+        return;
+    }
+    
+    // Cast to GPUFixedSzOperator
+    GPUFixedSzOperator* gpu_op = static_cast<GPUFixedSzOperator*>(gpu_op_handle);
+    int fixed_sz_dim = gpu_op->getFixedSzDimension();
+    
+    std::cout << "\n========================================\n";
+    std::cout << "GPU Krylov-Schur (Fixed Sz)\n";
+    std::cout << "========================================\n";
+    std::cout << "  N_up: " << n_up << "\n";
+    std::cout << "  Dimension: " << fixed_sz_dim << "\n";
+    std::cout << "  Target eigenvalues: " << num_eigenvalues << "\n";
+    std::cout << "  Max Krylov size: " << max_iter << "\n";
+    std::cout << "  Tolerance: " << tol << "\n\n";
+    
+    // Allocate GPU memory for vectors
+    gpu_op->allocateGPUMemory(fixed_sz_dim);
+    
+    // Create and run GPU Krylov-Schur solver
+    GPUKrylovSchur solver(gpu_op, max_iter, tol);
+    
+    std::vector<std::vector<std::complex<double>>> eigenvectors;
+    solver.run(num_eigenvalues, eigenvalues, eigenvectors, compute_eigenvectors);
+    
+    // Save results if directory specified
+    if (!dir.empty() && !eigenvalues.empty()) {
+        try {
+            HDF5IO::saveDiagonalizationResults(dir, eigenvalues, eigenvectors, "GPU-Krylov-Schur-FixedSz");
+            std::cout << "Saved results to " << dir << "/ed_results.h5\n";
+        } catch (const std::exception& e) {
+            std::cerr << "Warning: Failed to save results: " << e.what() << "\n";
+        }
+    }
+    
+    std::cout << "\nGPU Krylov-Schur Fixed Sz complete\n";
+}
+
 void GPUEDWrapper::runGPUFTLM(void* gpu_op_handle,
                              int N,
                              int krylov_dim,

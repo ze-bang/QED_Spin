@@ -328,6 +328,188 @@ private:
                          double& max_change);
 };
 
+/**
+ * GPU-accelerated Krylov-Schur algorithm for restarted eigenvalue computation
+ * 
+ * Krylov-Schur is a restarted variant of Arnoldi/Lanczos that maintains
+ * a partial Schur decomposition and can efficiently restart the iteration.
+ * 
+ * GPU Architecture Optimizations:
+ * - All Arnoldi/Krylov vectors stored on GPU (no disk I/O)
+ * - Batched orthogonalization using custom CUDA kernels
+ * - cuSOLVER for small projected eigenvalue problem
+ * - cuBLAS ZGEMM for efficient basis update V_new = V * Q
+ * - Memory-efficient: adapts to available GPU memory
+ * 
+ * Advantages over standard Lanczos:
+ * - Implicit restart maintains orthogonality
+ * - Better for computing many eigenvalues
+ * - Can target interior eigenvalues with shift-invert
+ */
+class GPUKrylovSchur {
+public:
+    /**
+     * @brief Construct GPU Krylov-Schur solver
+     * @param op Pointer to GPU operator (Hamiltonian)
+     * @param max_iter Maximum Krylov subspace size per restart cycle
+     * @param tolerance Convergence tolerance for eigenvalues
+     */
+    GPUKrylovSchur(GPUOperator* op, int max_iter, double tolerance);
+    ~GPUKrylovSchur();
+    
+    /**
+     * @brief Run Krylov-Schur to find lowest eigenvalues
+     * @param num_eigenvalues Number of eigenvalues to compute
+     * @param eigenvalues Output: computed eigenvalues (sorted ascending)
+     * @param eigenvectors Output: computed eigenvectors (if requested)
+     * @param compute_vectors Whether to compute eigenvectors
+     */
+    void run(int num_eigenvalues,
+            std::vector<double>& eigenvalues,
+            std::vector<std::vector<std::complex<double>>>& eigenvectors,
+            bool compute_vectors = false);
+    
+    // Performance statistics
+    struct Stats {
+        double total_time;       // Total wall time
+        double matvec_time;      // Time in matrix-vector products
+        double ortho_time;       // Time in orthogonalization
+        double schur_time;       // Time solving projected eigenproblem
+        double restart_time;     // Time in restart operations
+        int outer_iterations;    // Number of restart cycles
+        int total_arnoldi_steps; // Total Arnoldi iterations
+        int converged_eigs;      // Number of converged eigenvalues
+        double final_residual;   // Maximum residual at convergence
+        size_t memory_used;      // GPU memory used in bytes
+    };
+    
+    Stats getStats() const { return stats_; }
+    
+    /**
+     * @brief Set maximum outer iterations (restart cycles)
+     */
+    void setMaxOuterIterations(int max_outer) { max_outer_iter_ = max_outer; }
+    
+private:
+    GPUOperator* op_;
+    int max_iter_;         // Maximum Krylov subspace size
+    double tolerance_;
+    int dimension_;        // Hilbert space dimension N
+    int max_outer_iter_;   // Maximum restart cycles
+    
+    // CUDA handles
+    cublasHandle_t cublas_handle_;
+    cusolverDnHandle_t cusolver_handle_;
+    
+    // ========== GPU Memory ==========
+    // Arnoldi/Krylov basis vectors V = [v_0, v_1, ..., v_{m-1}]
+    // Stored as single contiguous array: dimension_ × max_krylov_size
+    cuDoubleComplex* d_V_;           // Krylov basis (dim × m)
+    int max_krylov_size_;            // How many vectors we can store
+    
+    cuDoubleComplex* d_w_;           // Work vector for H*v
+    cuDoubleComplex* d_temp_;        // Temporary vector
+    
+    // Projected Hessenberg/tridiagonal matrix H_m
+    // For Hermitian case, this is tridiagonal
+    cuDoubleComplex* d_H_projected_; // m × m projected matrix on GPU
+    
+    // Workspace for cuSOLVER eigendecomposition
+    cuDoubleComplex* d_evecs_;       // Eigenvectors of projected matrix
+    double* d_evals_;                // Eigenvalues of projected matrix
+    cuDoubleComplex* d_work_;        // cuSOLVER workspace
+    int* d_info_;                    // cuSOLVER info
+    int work_size_;                  // Workspace size
+    
+    // Host-side Hessenberg matrix (for easier manipulation)
+    std::vector<std::complex<double>> h_H_projected_;
+    
+    // Statistics
+    Stats stats_;
+    
+    // ========== Memory Management ==========
+    void allocateMemory(int num_eigenvalues);
+    void freeMemory();
+    
+    // ========== Core Operations ==========
+    
+    /**
+     * @brief Initialize random starting vector and normalize
+     */
+    void initializeRandomVector(cuDoubleComplex* d_vec);
+    
+    /**
+     * @brief Arnoldi iteration: expand Krylov subspace from j_start to m
+     * @param j_start Starting index (0 for first iteration, k after restart)
+     * @param m Target subspace size
+     * @return Actual subspace size achieved (may be < m if breakdown)
+     */
+    int arnoldiIteration(int j_start, int m);
+    
+    /**
+     * @brief Orthogonalize w against columns 0..j of V using Modified Gram-Schmidt
+     * Updates H_projected[0:j+1, j] with the overlaps
+     * @param j Current column index
+     * @return The norm ||w|| after orthogonalization (beta_{j+1})
+     */
+    double orthogonalizeAgainstBasis(int j);
+    
+    /**
+     * @brief Solve eigenvalue problem for projected matrix
+     * @param m Current subspace size
+     * @param eigenvalues_m Output: eigenvalues (sorted)
+     * @param eigenvectors_m Output: eigenvectors (column-major m×m)
+     * @return true if successful
+     */
+    bool solveProjectedEigenproblem(int m, std::vector<double>& eigenvalues_m);
+    
+    /**
+     * @brief Check convergence of Ritz pairs
+     * @param m Current subspace size
+     * @param k Number of desired eigenvalues
+     * @param beta_m The beta value at position m (residual scale)
+     * @return Number of converged eigenvalues
+     */
+    int checkConvergence(int m, int k, double beta_m);
+    
+    /**
+     * @brief Perform Krylov-Schur restart
+     * Updates V and H_projected to keep only k converged Ritz vectors
+     * @param m Current subspace size
+     * @param k Number of vectors to keep
+     * @return The new beta value for continuing
+     */
+    double performRestart(int m, int k);
+    
+    /**
+     * @brief Compute full eigenvectors from Ritz vectors
+     * eigenvector[i] = V * y_i where y_i is the i-th Ritz vector
+     */
+    void computeEigenvectors(int m, int num_eigs,
+                            std::vector<std::vector<std::complex<double>>>& eigenvectors);
+    
+    // ========== Vector Operations (use cuBLAS) ==========
+    double vectorNorm(const cuDoubleComplex* d_vec);
+    void normalizeVector(cuDoubleComplex* d_vec);
+    void vectorCopy(const cuDoubleComplex* src, cuDoubleComplex* dst);
+    void vectorScale(cuDoubleComplex* d_vec, double scale);
+    void vectorAxpy(const cuDoubleComplex* d_x, cuDoubleComplex* d_y,
+                   const cuDoubleComplex& alpha);
+    std::complex<double> vectorDot(const cuDoubleComplex* d_x,
+                                   const cuDoubleComplex* d_y);
+    
+    /**
+     * @brief Get pointer to j-th Krylov vector in the basis
+     */
+    cuDoubleComplex* getKrylovVector(int j) {
+        return d_V_ + static_cast<size_t>(j) * dimension_;
+    }
+    
+    const cuDoubleComplex* getKrylovVector(int j) const {
+        return d_V_ + static_cast<size_t>(j) * dimension_;
+    }
+};
+
 // Kernel declarations for Lanczos helpers
 namespace GPULanczosKernels {
 
