@@ -2724,8 +2724,8 @@ inline EDResults exact_diagonalization_fixed_sz(
         } else if (method == DiagonalizationMethod::KRYLOV_SCHUR_GPU) {
             GPUEDWrapper::runGPUKrylovSchurFixedSz(
                 gpu_op_handle, n_up,
-                params.max_iterations,
                 params.num_eigenvalues,
+                params.max_iterations,
                 params.tolerance,
                 eigenvalues,
                 params.output_dir,
