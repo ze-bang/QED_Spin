@@ -86,8 +86,9 @@ GPUKrylovSchur::~GPUKrylovSchur() {
 
 void GPUKrylovSchur::allocateMemory(int num_eigenvalues) {
     // Determine optimal Krylov subspace size
-    // m = min(2*k + 20, max_iter) where k = num_eigenvalues
-    int m = std::min(2 * num_eigenvalues + 20, max_iter_);
+    // Use larger subspace for better convergence: m = max(4*k + 40, 100)
+    // This gives better convergence especially for systems with clustered eigenvalues
+    int m = std::min(std::max(4 * num_eigenvalues + 40, 100), max_iter_);
     
     // Check available GPU memory
     size_t free_mem, total_mem;
@@ -327,8 +328,10 @@ int GPUKrylovSchur::arnoldiIteration(int j_start, int m) {
         // Orthogonalize and get beta
         double beta = orthogonalizeAgainstBasis(j);
         
-        // Store beta in Hessenberg matrix
-        h_H_projected_[(j + 1) + j * max_krylov_size_] = std::complex<double>(beta, 0.0);
+        // Store beta in Hessenberg matrix - only if j+1 < max_krylov_size_ to avoid out-of-bounds
+        if (j + 1 < max_krylov_size_) {
+            h_H_projected_[(j + 1) + j * max_krylov_size_] = std::complex<double>(beta, 0.0);
+        }
         
         // Check for breakdown
         if (beta < tolerance_) {
