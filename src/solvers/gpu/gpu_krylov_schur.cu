@@ -129,7 +129,9 @@ void GPUKrylovSchur::allocateMemory(int num_eigenvalues) {
     
     // Allocate work vectors
     CUDA_CHECK(cudaMalloc(&d_w_, vec_size));
-    CUDA_CHECK(cudaMalloc(&d_temp_, vec_size));
+    // d_temp_ needs to hold at least max_krylov_size_ elements for GEMV output in orthogonalization
+    size_t temp_size = std::max(vec_size, static_cast<size_t>(max_krylov_size_) * sizeof(cuDoubleComplex));
+    CUDA_CHECK(cudaMalloc(&d_temp_, temp_size));
     
     // Allocate projected Hessenberg matrix
     CUDA_CHECK(cudaMalloc(&d_H_projected_, static_cast<size_t>(max_krylov_size_) * max_krylov_size_ * sizeof(cuDoubleComplex)));
@@ -490,7 +492,13 @@ double GPUKrylovSchur::performRestart(int m, int k) {
                          m * sizeof(double), cudaMemcpyDeviceToHost));
     
     // Get beta_m (the last subdiagonal element)
-    double beta_m = std::abs(h_H_projected_[m + (m - 1) * max_krylov_size_]);
+    // Note: beta_m is at position (m-1, m-2) for an m-dimensional subspace
+    // The Hessenberg matrix H has H[j+1,j] = beta after step j
+    // So after m-1 steps, the last beta is at H[m-1, m-2] if m >= 2
+    double beta_m = 0.0;
+    if (m >= 2) {
+        beta_m = std::abs(h_H_projected_[(m - 1) + (m - 2) * max_krylov_size_]);
+    }
     
     // Clear and rebuild Hessenberg for restart
     std::fill(h_H_projected_.begin(), h_H_projected_.end(), std::complex<double>(0.0, 0.0));
@@ -614,7 +622,11 @@ void GPUKrylovSchur::run(int num_eigenvalues,
         }
         
         // Get beta_m for residual estimation
-        double beta_m = std::abs(h_H_projected_[actual_m + (actual_m - 1) * max_krylov_size_]);
+        // beta_m is the last subdiagonal element, at H[actual_m-1, actual_m-2] for actual_m >= 2
+        double beta_m = 0.0;
+        if (actual_m >= 2) {
+            beta_m = std::abs(h_H_projected_[(actual_m - 1) + (actual_m - 2) * max_krylov_size_]);
+        }
         
         // Check convergence
         int num_converged = checkConvergence(actual_m, k, beta_m);
