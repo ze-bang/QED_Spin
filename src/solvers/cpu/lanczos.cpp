@@ -2849,14 +2849,18 @@ void block_krylov_schur(std::function<void(const Complex*, Complex*, int)> H, ui
     uint64_t p = std::min(block_size, N);  // Block size
     uint64_t k = std::min(num_eigs, N);    // Target eigenvalues
     
-    // Subspace size: at least 2*k for good convergence
-    uint64_t m = std::min(std::max(2*k + p, 4*p), std::min(max_iter, N));
+    // Subspace size: use larger subspace for reliable convergence
+    // At least 4*k + p, but can use full dimension for small systems
+    uint64_t m = std::min(std::max(4*k + p, 6*p), std::min(max_iter, N));
     m = std::min(m, N);
+    // For small dimensions, use the full space
+    if (N <= 100) m = N;
     
     std::cout << "  Subspace size: " << m << std::endl;
     
-    // Random initialization
-    std::mt19937 gen(42);
+    // Random initialization with non-fixed seed for better convergence
+    std::random_device rd;
+    std::mt19937 gen(rd());
     std::uniform_real_distribution<double> dist(-1.0, 1.0);
     
     // V holds all Krylov vectors (N × m, column-major)

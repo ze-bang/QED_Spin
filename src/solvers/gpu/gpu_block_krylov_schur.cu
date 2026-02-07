@@ -569,9 +569,12 @@ void GPUBlockKrylovSchur::run(int num_eigenvalues,
     int p = std::min(block_size_, static_cast<int>(dimension_));
     int k = std::min(num_eigenvalues, static_cast<int>(dimension_));
     
-    // Subspace size: at least 2*k for good convergence
-    int m = std::min(std::max(2*k + p, 4*p), std::min(max_iter_, static_cast<int>(dimension_)));
+    // Subspace size: use larger subspace for better convergence
+    // At least 4*k or 6*p, whichever is larger, capped at dimension and max_iter
+    int m = std::min(std::max(4*k + p, 6*p), std::min(max_iter_, static_cast<int>(dimension_)));
     m = std::min(m, static_cast<int>(dimension_));
+    // For small dimensions, use the full space for guaranteed convergence
+    if (dimension_ <= 100) m = dimension_;
     
     std::cout << "  Subspace size: " << m << "\n";
     
@@ -584,10 +587,11 @@ void GPUBlockKrylovSchur::run(int num_eigenvalues,
     cuDoubleComplex* d_Hv;
     CUDA_CHECK(cudaMalloc(&d_Hv, dimension_ * sizeof(cuDoubleComplex)));
     
-    // Initialize first p vectors randomly
+    // Initialize first p vectors randomly with non-fixed seed for better convergence
     int first_block = std::min(p, m);
     std::vector<std::complex<double>> h_init(static_cast<size_t>(dimension_) * first_block);
-    std::mt19937 gen(42);
+    std::random_device rd;
+    std::mt19937 gen(rd());
     std::uniform_real_distribution<double> dist(-1.0, 1.0);
     for (int j = 0; j < first_block; j++) {
         for (int i = 0; i < dimension_; i++) {
