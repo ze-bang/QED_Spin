@@ -1074,6 +1074,7 @@ public:
         for (uint64_t i = 0; i < 3; ++i) std::getline(file, line);
         
         uint64_t lineCount = 0;
+        uint64_t max_site_found = 0;  // Track maximum site index for validation
         while (std::getline(file, line) && lineCount < numLines) {
             std::istringstream lineStream(line);
             uint64_t Op_i, indx_i, Op_j, indx_j;
@@ -1082,6 +1083,17 @@ public:
             if (!(lineStream >> Op_i >> indx_i >> Op_j >> indx_j >> E >> F)) continue;
             Complex coeff(E, F);
             if (std::abs(coeff) < 1e-15) continue;
+
+            // Track maximum site index for validation
+            max_site_found = std::max(max_site_found, std::max(indx_i, indx_j));
+            
+            // Validate site indices are within bounds
+            if (indx_i >= n_bits_ || indx_j >= n_bits_) {
+                throw std::runtime_error(
+                    "Site index out of bounds in " + filename + ": found site " + 
+                    std::to_string(std::max(indx_i, indx_j)) + " but num_sites=" + 
+                    std::to_string(n_bits_) + ". Check --num_sites parameter matches Hamiltonian file.");
+            }
 
             // Add to optimized storage
             TransformData tdata;

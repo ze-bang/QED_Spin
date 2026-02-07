@@ -896,6 +896,7 @@ if(WITH_CUDA)
         ${SOLVERS_GPU_DIR}/gpu_lanczos.cu
         ${SOLVERS_GPU_DIR}/gpu_block_lanczos.cu
         ${SOLVERS_GPU_DIR}/gpu_krylov_schur.cu
+        ${SOLVERS_GPU_DIR}/gpu_block_krylov_schur.cu
         ${SOLVERS_GPU_DIR}/gpu_ed_wrapper.cu
         ${SOLVERS_GPU_DIR}/gpu_tpq.cu
         ${SOLVERS_GPU_DIR}/gpu_cg.cu
@@ -1067,6 +1068,7 @@ if(TARGET TPQ_DSSF)
             ${SOLVERS_GPU_DIR}/gpu_lanczos.cu
             ${SOLVERS_GPU_DIR}/gpu_block_lanczos.cu
             ${SOLVERS_GPU_DIR}/gpu_krylov_schur.cu
+            ${SOLVERS_GPU_DIR}/gpu_block_krylov_schur.cu
             ${SOLVERS_GPU_DIR}/gpu_tpq.cu
             ${SOLVERS_GPU_DIR}/gpu_cg.cu
             ${SOLVERS_GPU_DIR}/gpu_ftlm.cu

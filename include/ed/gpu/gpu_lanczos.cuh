@@ -510,6 +510,107 @@ private:
     }
 };
 
+/**
+ * GPU-accelerated Block Krylov-Schur algorithm for finding multiple eigenvalues
+ * 
+ * Combines the benefits of block methods (handling degeneracies, BLAS-3 efficiency)
+ * with Krylov-Schur's robust restart mechanism.
+ * 
+ * Key features:
+ * - Block Arnoldi iteration builds subspace with multiple vectors per step
+ * - Schur decomposition for implicit restarts
+ * - Efficient for degenerate or clustered eigenvalues
+ * - Uses cuBLAS GEMM for block operations
+ * - cuSOLVER for QR and eigenvalue problems
+ */
+class GPUBlockKrylovSchur {
+public:
+    GPUBlockKrylovSchur(GPUOperator* op, int max_iter, int block_size, double tolerance);
+    ~GPUBlockKrylovSchur();
+    
+    void run(int num_eigenvalues,
+            std::vector<double>& eigenvalues,
+            std::vector<std::vector<std::complex<double>>>& eigenvectors,
+            bool compute_vectors = false);
+    
+    struct Stats {
+        double total_time;
+        double matvec_time;
+        double ortho_time;
+        double qr_time;
+        double schur_time;
+        double restart_time;
+        int outer_iterations;
+        int total_block_steps;
+        int converged_eigs;
+        double final_residual;
+        size_t memory_used;
+    };
+    
+    Stats getStats() const { return stats_; }
+    
+private:
+    GPUOperator* op_;
+    int max_iter_;
+    int block_size_;
+    double tolerance_;
+    int dimension_;
+    int max_outer_iter_;
+    int max_num_blocks_;
+    
+    // CUDA handles
+    cublasHandle_t cublas_handle_;
+    cusolverDnHandle_t cusolver_handle_;
+    
+    // GPU memory for block Krylov basis (dimension × num_blocks × block_size)
+    cuDoubleComplex* d_V_;          // Block Krylov basis (column-major blocks)
+    cuDoubleComplex* d_W_;          // Work block (dimension × block_size)
+    cuDoubleComplex* d_temp_;       // Temporary block
+    
+    // Block tridiagonal matrix components
+    cuDoubleComplex* d_A_blocks_;   // Diagonal blocks (block_size × block_size each)
+    cuDoubleComplex* d_B_blocks_;   // Off-diagonal blocks
+    std::vector<std::complex<double>> h_A_blocks_;
+    std::vector<std::complex<double>> h_B_blocks_;
+    
+    // For eigendecomposition of block tridiagonal
+    cuDoubleComplex* d_T_dense_;    // Dense block tridiagonal matrix
+    cuDoubleComplex* d_evecs_;
+    double* d_evals_;
+    cuDoubleComplex* d_work_;
+    int* d_info_;
+    int work_size_;
+    
+    // QR factorization workspace
+    cuDoubleComplex* d_tau_;
+    cuDoubleComplex* d_qr_work_;
+    int qr_work_size_;
+    
+    Stats stats_;
+    
+    void allocateMemory(int num_eigenvalues);
+    void freeMemory();
+    
+    void initializeRandomBlock(cuDoubleComplex* d_block);
+    void orthonormalizeBlock(cuDoubleComplex* d_block);
+    
+    cuDoubleComplex* getBlock(int block_idx) {
+        return d_V_ + static_cast<size_t>(block_idx) * block_size_ * dimension_;
+    }
+    
+    void blockMatVec(const cuDoubleComplex* d_V_block, cuDoubleComplex* d_W_block);
+    void computeBlockOverlap(const cuDoubleComplex* d_V1, const cuDoubleComplex* d_V2,
+                            cuDoubleComplex* d_overlap);
+    void orthogonalizeBlockAgainstBasis(int num_blocks, cuDoubleComplex* d_target);
+    
+    int blockArnoldiIteration(int start_block, int max_blocks);
+    bool solveBlockTridiagonalEigenproblem(int num_blocks, std::vector<double>& eigenvalues);
+    int checkConvergence(int num_blocks, int num_desired);
+    void performRestart(int num_blocks, int num_keep);
+    void computeEigenvectors(int num_blocks, int num_eigs,
+                            std::vector<std::vector<std::complex<double>>>& eigenvectors);
+};
+
 // Kernel declarations for Lanczos helpers
 namespace GPULanczosKernels {
 

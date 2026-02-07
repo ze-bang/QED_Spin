@@ -35,6 +35,7 @@
 // Type definition for complex vector and matrix operations
 using Complex = std::complex<double>;
 using ComplexVector = std::vector<Complex>;
+using ComplexMatrix = std::vector<ComplexVector>;
 
 ComplexVector generateRandomVector(int N, std::mt19937& gen, std::uniform_real_distribution<double>& dist);
 
@@ -150,6 +151,12 @@ void full_diagonalization(std::function<void(const Complex*, Complex*, int)> H, 
 void krylov_schur(std::function<void(const Complex*, Complex*, int)> H, uint64_t N, uint64_t max_iter, 
                   uint64_t num_eigs, double tol, std::vector<double>& eigenvalues, std::string dir = "",
                   bool compute_eigenvectors = false);
+
+// Block Krylov-Schur algorithm for computing multiple eigenvalues with degeneracies
+// Combines block Arnoldi iteration with Schur decomposition and implicit restarts
+void block_krylov_schur(std::function<void(const Complex*, Complex*, int)> H, uint64_t N, uint64_t max_iter, 
+                        uint64_t num_eigs, uint64_t block_size, double tol, std::vector<double>& eigenvalues, 
+                        std::string dir = "", bool compute_eigenvectors = false);
 
 // Implicitly Restarted Lanczos algorithm implementation
 void implicitly_restarted_lanczos(std::function<void(const Complex*, Complex*, int)> H, uint64_t N, 

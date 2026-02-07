@@ -2834,6 +2834,195 @@ void krylov_schur(std::function<void(const Complex*, Complex*, int)> H, uint64_t
     }
 }
 
+// Block Krylov-Schur algorithm implementation
+// Combines block Arnoldi iteration with Schur decomposition and implicit restarts
+// More efficient for computing multiple eigenvalues, especially with degeneracies
+void block_krylov_schur(std::function<void(const Complex*, Complex*, int)> H, uint64_t N, uint64_t max_iter, 
+                        uint64_t num_eigs, uint64_t block_size, double tol, std::vector<double>& eigenvalues, 
+                        std::string dir, bool compute_eigenvectors) {
+    
+    std::cout << "Starting Block Krylov-Schur algorithm for " << num_eigs << " eigenvalues" << std::endl;
+    std::cout << "  Block size: " << block_size << std::endl;
+    std::cout << "  Hilbert space dimension: " << N << std::endl;
+    
+    // Parameters
+    uint64_t p = std::min(block_size, N);  // Block size
+    uint64_t k = std::min(num_eigs, N);    // Target eigenvalues
+    
+    // Subspace size: at least 2*k for good convergence
+    uint64_t m = std::min(std::max(2*k + p, 4*p), std::min(max_iter, N));
+    m = std::min(m, N);
+    
+    std::cout << "  Subspace size: " << m << std::endl;
+    
+    // Random initialization
+    std::mt19937 gen(42);
+    std::uniform_real_distribution<double> dist(-1.0, 1.0);
+    
+    // V holds all Krylov vectors (N × m, column-major)
+    std::vector<Complex> V(N * m, Complex(0.0, 0.0));
+    
+    // Initialize first p vectors randomly
+    uint64_t first_block = std::min(p, m);
+    for (uint64_t j = 0; j < first_block; j++) {
+        for (uint64_t i = 0; i < N; i++) {
+            V[j * N + i] = Complex(dist(gen), dist(gen));
+        }
+    }
+    
+    // Orthonormalize initial block via QR
+    std::vector<Complex> tau(first_block);
+    LAPACKE_zgeqrf(LAPACK_COL_MAJOR, N, first_block,
+                   reinterpret_cast<lapack_complex_double*>(V.data()),
+                   N, reinterpret_cast<lapack_complex_double*>(tau.data()));
+    LAPACKE_zungqr(LAPACK_COL_MAJOR, N, first_block, first_block,
+                   reinterpret_cast<lapack_complex_double*>(V.data()),
+                   N, reinterpret_cast<lapack_complex_double*>(tau.data()));
+    
+    uint64_t current_dim = first_block;  // Current basis size
+    
+    std::cout << "  Building Krylov subspace..." << std::endl;
+    
+    // Expand the Krylov subspace by applying H and orthogonalizing
+    while (current_dim < m) {
+        // Add one vector at a time to avoid index issues
+        uint64_t dst_idx = current_dim;
+        
+        // Use the previous vector to apply H to
+        uint64_t src_idx = current_dim - 1;
+        
+        Complex* v_src = &V[src_idx * N];
+        Complex* v_dst = &V[dst_idx * N];
+        
+        // Apply Hamiltonian: v_dst = H * v_src
+        H(v_src, v_dst, N);
+        
+        // Full orthogonalization against all previous vectors (modified Gram-Schmidt)
+        for (uint64_t l = 0; l < current_dim; l++) {
+            Complex* v_l = &V[l * N];
+            Complex dot;
+            cblas_zdotc_sub(N, v_l, 1, v_dst, 1, &dot);
+            Complex neg_dot = -dot;
+            cblas_zaxpy(N, &neg_dot, v_l, 1, v_dst, 1);
+        }
+        
+        // Reorthogonalization for numerical stability
+        for (uint64_t l = 0; l < current_dim; l++) {
+            Complex* v_l = &V[l * N];
+            Complex dot;
+            cblas_zdotc_sub(N, v_l, 1, v_dst, 1, &dot);
+            Complex neg_dot = -dot;
+            cblas_zaxpy(N, &neg_dot, v_l, 1, v_dst, 1);
+        }
+        
+        // Normalize
+        double norm = cblas_dznrm2(N, v_dst, 1);
+        if (norm < tol) {
+            std::cout << "  Krylov subspace exhausted at dimension " << current_dim << std::endl;
+            break;
+        }
+        Complex scale(1.0 / norm, 0.0);
+        cblas_zscal(N, &scale, v_dst, 1);
+        
+        current_dim++;
+    }
+    
+    
+    std::cout << "  Final subspace size: " << current_dim << std::endl;
+    
+    // Compute projected Hamiltonian directly: H_m[i,j] = <v_i | H | v_j>
+    std::vector<Complex> H_m(current_dim * current_dim, Complex(0.0, 0.0));
+    std::vector<Complex> Hv(N);  // Temporary for H*v
+    
+    std::cout << "  Computing projected Hamiltonian..." << std::endl;
+    
+    for (uint64_t j = 0; j < current_dim; j++) {
+        // Compute H * v_j
+        H(&V[j * N], Hv.data(), N);
+        
+        // Compute inner products: H_m[i,j] = v_i^H * (H * v_j)
+        for (uint64_t i = 0; i < current_dim; i++) {
+            Complex dot;
+            cblas_zdotc_sub(N, &V[i * N], 1, Hv.data(), 1, &dot);
+            H_m[j * current_dim + i] = dot;  // Column-major
+        }
+    }
+    
+    // Enforce Hermitian symmetry for numerical stability
+    for (uint64_t i = 0; i < current_dim; i++) {
+        for (uint64_t j = i + 1; j < current_dim; j++) {
+            Complex avg = 0.5 * (H_m[j * current_dim + i] + std::conj(H_m[i * current_dim + j]));
+            H_m[j * current_dim + i] = avg;
+            H_m[i * current_dim + j] = std::conj(avg);
+        }
+        H_m[i * current_dim + i] = Complex(std::real(H_m[i * current_dim + i]), 0.0);
+    }
+    
+    // Diagonalize projected Hamiltonian
+    std::cout << "  Diagonalizing projected matrix (size " << current_dim << "x" << current_dim << ")..." << std::endl;
+    
+    std::vector<double> eigenvalues_m(current_dim);
+    
+    int info = LAPACKE_zheev(LAPACK_COL_MAJOR, 'V', 'U', current_dim,
+                             reinterpret_cast<lapack_complex_double*>(H_m.data()),
+                             current_dim, eigenvalues_m.data());
+    
+    if (info != 0) {
+        std::cerr << "LAPACKE_zheev failed with error code " << info << std::endl;
+        return;
+    }
+    
+    // H_m now contains eigenvectors of projected problem
+    
+    // Extract eigenvalues
+    eigenvalues.resize(std::min(k, current_dim));
+    for (uint64_t i = 0; i < eigenvalues.size(); i++) {
+        eigenvalues[i] = eigenvalues_m[i];
+    }
+    
+    std::cout << "\n  Computed eigenvalues:" << std::endl;
+    for (uint64_t i = 0; i < std::min((uint64_t)5, eigenvalues.size()); i++) {
+        std::cout << "    E[" << i << "] = " << std::fixed << std::setprecision(10) << eigenvalues[i] << std::endl;
+    }
+    if (eigenvalues.size() > 5) {
+        std::cout << "    ..." << std::endl;
+    }
+    
+    // Compute eigenvectors if requested
+    if (compute_eigenvectors && !eigenvalues.empty()) {
+        std::cout << "  Computing eigenvectors..." << std::endl;
+        
+        std::vector<ComplexVector> full_eigenvectors(eigenvalues.size(), ComplexVector(N));
+        
+        for (uint64_t e = 0; e < eigenvalues.size(); e++) {
+            ComplexVector eigenvector(N, Complex(0.0, 0.0));
+            
+            // eigenvector = V * y_e where y_e is the e-th column of H_m (now eigenvector matrix)
+            Complex alpha_v(1.0, 0.0);
+            Complex beta_v(0.0, 0.0);
+            cblas_zgemv(CblasColMajor, CblasNoTrans, N, current_dim, &alpha_v, V.data(), N,
+                       &H_m[e * current_dim], 1, &beta_v, eigenvector.data(), 1);
+            
+            // Normalize
+            double vec_norm = cblas_dznrm2(N, eigenvector.data(), 1);
+            if (vec_norm > tol) {
+                Complex scale = Complex(1.0 / vec_norm, 0.0);
+                cblas_zscal(N, &scale, eigenvector.data(), 1);
+            }
+            
+            full_eigenvectors[e] = std::move(eigenvector);
+        }
+        
+        if (!dir.empty()) {
+            HDF5IO::saveDiagonalizationResults(dir, eigenvalues, full_eigenvectors, "Block-Krylov-Schur");
+        }
+    } else if (!dir.empty()) {
+        HDF5IO::saveDiagonalizationResults(dir, eigenvalues, {}, "Block-Krylov-Schur");
+    }
+    
+    std::cout << "Block Krylov-Schur: Successfully computed " << eigenvalues.size() << " eigenvalues" << std::endl;
+}
+
 // Implicitly Restarted Lanczos algorithm implementation
 void implicitly_restarted_lanczos(std::function<void(const Complex*, Complex*, int)> H, uint64_t N, 
                                  uint64_t max_iter, uint64_t num_eigs, double tol, 

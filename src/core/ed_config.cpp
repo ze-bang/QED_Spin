@@ -22,6 +22,7 @@ enum class DiagonalizationMethod {
     BICG,
     LOBPCG,
     KRYLOV_SCHUR,
+    BLOCK_KRYLOV_SCHUR,
     IMPLICIT_RESTART_LANCZOS,
     THICK_RESTART_LANCZOS,
     FULL,
@@ -47,6 +48,7 @@ enum class DiagonalizationMethod {
     DAVIDSON_GPU,
     LOBPCG_GPU,
     KRYLOV_SCHUR_GPU,
+    BLOCK_KRYLOV_SCHUR_GPU,
     mTPQ_GPU,
     cTPQ_GPU,
     FTLM_GPU,
@@ -838,6 +840,7 @@ std::optional<DiagonalizationMethod> parseMethod(const std::string& str) {
     if (lower == "shift_invert") return DiagonalizationMethod::SHIFT_INVERT;
     if (lower == "shift_invert_robust") return DiagonalizationMethod::SHIFT_INVERT_ROBUST;
     if (lower == "krylov_schur") return DiagonalizationMethod::KRYLOV_SCHUR;
+    if (lower == "block_krylov_schur") return DiagonalizationMethod::BLOCK_KRYLOV_SCHUR;
     if (lower == "irl") return DiagonalizationMethod::IMPLICIT_RESTART_LANCZOS;
     if (lower == "trlan") return DiagonalizationMethod::THICK_RESTART_LANCZOS;
     
@@ -879,6 +882,7 @@ std::optional<DiagonalizationMethod> parseMethod(const std::string& str) {
     if (lower == "davidson_gpu") return DiagonalizationMethod::DAVIDSON_GPU;
     if (lower == "lobpcg_gpu") return DiagonalizationMethod::LOBPCG_GPU;
     if (lower == "krylov_schur_gpu") return DiagonalizationMethod::KRYLOV_SCHUR_GPU;
+    if (lower == "block_krylov_schur_gpu") return DiagonalizationMethod::BLOCK_KRYLOV_SCHUR_GPU;
     if (lower == "mtpq_gpu") return DiagonalizationMethod::mTPQ_GPU;
     if (lower == "ctpq_gpu") return DiagonalizationMethod::cTPQ_GPU;
     if (lower == "ftlm_gpu") return DiagonalizationMethod::FTLM_GPU;
@@ -898,6 +902,7 @@ std::string methodToString(DiagonalizationMethod method) {
         case DiagonalizationMethod::SHIFT_INVERT: return "SHIFT_INVERT";
         case DiagonalizationMethod::SHIFT_INVERT_ROBUST: return "SHIFT_INVERT_ROBUST";
         case DiagonalizationMethod::KRYLOV_SCHUR: return "KRYLOV_SCHUR";
+        case DiagonalizationMethod::BLOCK_KRYLOV_SCHUR: return "BLOCK_KRYLOV_SCHUR";
         case DiagonalizationMethod::IMPLICIT_RESTART_LANCZOS: return "IMPLICIT_RESTART_LANCZOS";
         case DiagonalizationMethod::THICK_RESTART_LANCZOS: return "THICK_RESTART_LANCZOS";
         
@@ -939,6 +944,7 @@ std::string methodToString(DiagonalizationMethod method) {
         case DiagonalizationMethod::DAVIDSON_GPU: return "DAVIDSON_GPU";
         case DiagonalizationMethod::LOBPCG_GPU: return "LOBPCG_GPU";
         case DiagonalizationMethod::KRYLOV_SCHUR_GPU: return "KRYLOV_SCHUR_GPU";
+        case DiagonalizationMethod::BLOCK_KRYLOV_SCHUR_GPU: return "BLOCK_KRYLOV_SCHUR_GPU";
         case DiagonalizationMethod::mTPQ_GPU: return "mTPQ_GPU";
         case DiagonalizationMethod::cTPQ_GPU: return "cTPQ_GPU";
         case DiagonalizationMethod::FTLM_GPU: return "FTLM_GPU";
@@ -1076,6 +1082,19 @@ std::string getMethodParameterInfo(DiagonalizationMethod method) {
             info << "  --tolerance=<tol>     Convergence tolerance (default: 1e-10)\n";
             info << "  --eigenvectors        Compute and save eigenvectors\n";
             info << "\nBest for: Large-scale problems requiring multiple restarts\n";
+            break;
+            
+        case DiagonalizationMethod::BLOCK_KRYLOV_SCHUR:
+            info << "Block Krylov-Schur method (block Arnoldi with Schur restarts).\n\n";
+            info << "Processes multiple vectors per iteration using BLAS-3 GEMM.\n";
+            info << "Better for degenerate/clustered eigenvalues than standard Krylov-Schur.\n\n";
+            info << "Configurable Parameters:\n";
+            info << "  --eigenvalues=<n>     Number of eigenvalues to compute (default: 1)\n";
+            info << "  --block_size=<n>      Block size (default: 4)\n";
+            info << "  --iterations=<n>      Maximum block iterations (default: 1000)\n";
+            info << "  --tolerance=<tol>     Convergence tolerance (default: 1e-10)\n";
+            info << "  --eigenvectors        Compute and save eigenvectors\n";
+            info << "\nBest for: Degenerate eigenvalues, modern CPUs with BLAS-3 optimization\n";
             break;
             
         case DiagonalizationMethod::IMPLICIT_RESTART_LANCZOS:
@@ -1362,6 +1381,27 @@ std::string getMethodParameterInfo(DiagonalizationMethod method) {
             info << "  - cuSOLVER for projected eigenvalue problem\n";
             info << "  - cuBLAS GEMM for efficient basis update during restart\n\n";
             info << "Best for: Computing many eigenvalues, systems requiring restarts\n";
+            break;
+            
+        case DiagonalizationMethod::BLOCK_KRYLOV_SCHUR_GPU:
+            info << "GPU-accelerated Block Krylov-Schur algorithm (requires CUDA build).\n\n";
+            info << "Block variant of Krylov-Schur using BLAS-3 operations (GEMM).\n";
+            info << "Better for degenerate/clustered eigenvalues than standard Krylov-Schur.\n";
+            info << "All operations performed on GPU with cuBLAS/cuSOLVER.\n\n";
+            info << "Requires: CUDA-enabled build\n";
+            info << "Configurable Parameters:\n";
+            info << "  --eigenvalues=<n>     Number of eigenvalues to compute (default: 1)\n";
+            info << "  --block_size=<n>      Block size (default: 4)\n";
+            info << "  --iterations=<n>      Maximum block iterations (default: 1000)\n";
+            info << "  --tolerance=<tol>     Convergence tolerance (default: 1e-10)\n";
+            info << "  --eigenvectors        Compute and save eigenvectors\n";
+            info << "  --fixed-sz            Use fixed Sz sector (recommended)\n";
+            info << "  --n_up=<n>            Number of up spins for fixed Sz\n\n";
+            info << "GPU Optimizations:\n";
+            info << "  - Block vectors stored on GPU\n";
+            info << "  - cuBLAS GEMM for block orthogonalization\n";
+            info << "  - cuSOLVER for block eigenvalue problem\n\n";
+            info << "Best for: Degenerate eigenvalues, clustered spectra, GPU acceleration\n";
             break;
             
         case DiagonalizationMethod::mTPQ_GPU:

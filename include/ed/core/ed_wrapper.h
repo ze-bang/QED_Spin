@@ -124,6 +124,7 @@ enum class DiagonalizationMethod {
     BICG,                  // Biconjugate gradient
     LOBPCG,                // Locally optimal block preconditioned conjugate gradient
     KRYLOV_SCHUR,          // Krylov-Schur algorithm
+    BLOCK_KRYLOV_SCHUR,    // Block Krylov-Schur algorithm for degenerate eigenvalues
     IMPLICIT_RESTART_LANCZOS,  // Implicitly restarted Lanczos algorithm
     THICK_RESTART_LANCZOS,     // Thick restart Lanczos algorithm with locking
     FULL,                  // Full diagonalization
@@ -154,6 +155,7 @@ enum class DiagonalizationMethod {
     DAVIDSON_GPU,          // GPU-accelerated Davidson method
     LOBPCG_GPU,            // GPU-accelerated LOBPCG method
     KRYLOV_SCHUR_GPU,      // GPU-accelerated Krylov-Schur algorithm
+    BLOCK_KRYLOV_SCHUR_GPU,// GPU-accelerated Block Krylov-Schur algorithm
     mTPQ_GPU,              // GPU-accelerated microcanonical TPQ
     cTPQ_GPU,              // GPU-accelerated canonical TPQ
     FTLM_GPU,              // GPU-accelerated Finite Temperature Lanczos Method (use --fixed-sz for fixed Sz sector)
@@ -570,6 +572,7 @@ namespace ed_internal {
                method == DiagonalizationMethod::DAVIDSON_GPU ||
                method == DiagonalizationMethod::LOBPCG_GPU ||
                method == DiagonalizationMethod::KRYLOV_SCHUR_GPU ||
+               method == DiagonalizationMethod::BLOCK_KRYLOV_SCHUR_GPU ||
                method == DiagonalizationMethod::mTPQ_GPU ||
                method == DiagonalizationMethod::cTPQ_GPU ||
                method == DiagonalizationMethod::FTLM_GPU ||
@@ -975,6 +978,13 @@ EDResults exact_diagonalization_core(
                        params.compute_eigenvectors);
             break;
             
+        case DiagonalizationMethod::BLOCK_KRYLOV_SCHUR:
+            block_krylov_schur(H, hilbert_space_dim, params.max_iterations,
+                              params.num_eigenvalues, params.block_size, params.tolerance,
+                              results.eigenvalues, params.output_dir,
+                              params.compute_eigenvectors);
+            break;
+            
         case DiagonalizationMethod::IMPLICIT_RESTART_LANCZOS:
             implicitly_restarted_lanczos(H, hilbert_space_dim, params.max_iterations, 
                                        params.num_eigenvalues, params.tolerance, 
@@ -1263,6 +1273,7 @@ EDResults exact_diagonalization_core(
         case DiagonalizationMethod::DAVIDSON_GPU:
         case DiagonalizationMethod::LOBPCG_GPU:
         case DiagonalizationMethod::KRYLOV_SCHUR_GPU:
+        case DiagonalizationMethod::BLOCK_KRYLOV_SCHUR_GPU:
         case DiagonalizationMethod::BLOCK_LANCZOS_GPU:
         case DiagonalizationMethod::BLOCK_LANCZOS_GPU_FIXED_SZ:
         case DiagonalizationMethod::mTPQ_GPU:
@@ -1713,6 +1724,17 @@ EDResults diagonalize_symmetry_block(
                             params.output_dir,
                             params.compute_eigenvectors
                         );
+                    } else if (method == DiagonalizationMethod::BLOCK_KRYLOV_SCHUR_GPU) {
+                        GPUEDWrapper::runGPUBlockKrylovSchur(
+                            gpu_op, N,
+                            std::min(params.num_eigenvalues, block_dim),
+                            params.max_iterations,
+                            params.block_size,
+                            params.tolerance,
+                            eigenvalues,
+                            params.output_dir,
+                            params.compute_eigenvectors
+                        );
                     } else if (method == DiagonalizationMethod::BLOCK_LANCZOS_GPU ||
                                method == DiagonalizationMethod::BLOCK_LANCZOS_GPU_FIXED_SZ) {
                         // GPU Block Lanczos
@@ -1756,6 +1778,8 @@ EDResults diagonalize_symmetry_block(
                     method = DiagonalizationMethod::LOBPCG;
                 } else if (method == DiagonalizationMethod::KRYLOV_SCHUR_GPU) {
                     method = DiagonalizationMethod::KRYLOV_SCHUR;
+                } else if (method == DiagonalizationMethod::BLOCK_KRYLOV_SCHUR_GPU) {
+                    method = DiagonalizationMethod::BLOCK_KRYLOV_SCHUR;
                 } else if (method == DiagonalizationMethod::BLOCK_LANCZOS_GPU ||
                            method == DiagonalizationMethod::BLOCK_LANCZOS_GPU_FIXED_SZ) {
                     method = DiagonalizationMethod::BLOCK_LANCZOS;
@@ -1780,6 +1804,7 @@ EDResults diagonalize_symmetry_block(
         method == DiagonalizationMethod::DAVIDSON_GPU ||
         method == DiagonalizationMethod::LOBPCG_GPU ||
         method == DiagonalizationMethod::KRYLOV_SCHUR_GPU ||
+        method == DiagonalizationMethod::BLOCK_KRYLOV_SCHUR_GPU ||
         method == DiagonalizationMethod::mTPQ_GPU ||
         method == DiagonalizationMethod::cTPQ_GPU) {
         std::cerr << "Warning: GPU methods requested but CUDA not available.\n";
@@ -1790,6 +1815,8 @@ EDResults diagonalize_symmetry_block(
             method = DiagonalizationMethod::LOBPCG;
         } else if (method == DiagonalizationMethod::KRYLOV_SCHUR_GPU) {
             method = DiagonalizationMethod::KRYLOV_SCHUR;
+        } else if (method == DiagonalizationMethod::BLOCK_KRYLOV_SCHUR_GPU) {
+            method = DiagonalizationMethod::BLOCK_KRYLOV_SCHUR;
         } else if (method == DiagonalizationMethod::BLOCK_LANCZOS_GPU ||
                    method == DiagonalizationMethod::BLOCK_LANCZOS_GPU_FIXED_SZ) {
             method = DiagonalizationMethod::BLOCK_LANCZOS;
@@ -2570,6 +2597,7 @@ inline EDResults exact_diagonalization_fixed_sz(
     bool is_gpu_method = (method == DiagonalizationMethod::DAVIDSON_GPU ||
                           method == DiagonalizationMethod::LOBPCG_GPU ||
                           method == DiagonalizationMethod::KRYLOV_SCHUR_GPU ||
+                          method == DiagonalizationMethod::BLOCK_KRYLOV_SCHUR_GPU ||
                           method == DiagonalizationMethod::LANCZOS_GPU ||
                           method == DiagonalizationMethod::LANCZOS_GPU_FIXED_SZ ||
                           method == DiagonalizationMethod::BLOCK_LANCZOS_GPU ||
@@ -2726,6 +2754,16 @@ inline EDResults exact_diagonalization_fixed_sz(
                 gpu_op_handle, n_up,
                 params.num_eigenvalues,
                 params.max_iterations,
+                params.tolerance,
+                eigenvalues,
+                params.output_dir,
+                params.compute_eigenvectors);
+        } else if (method == DiagonalizationMethod::BLOCK_KRYLOV_SCHUR_GPU) {
+            GPUEDWrapper::runGPUBlockKrylovSchurFixedSz(
+                gpu_op_handle, n_up,
+                params.num_eigenvalues,
+                params.max_iterations,
+                params.block_size,
                 params.tolerance,
                 eigenvalues,
                 params.output_dir,
@@ -3196,6 +3234,34 @@ EDResults exact_diagonalization_from_files(
             GPUEDWrapper::destroyGPUOperator(gpu_op);
             
             std::cout << "GPU Krylov-Schur completed successfully!" << std::endl;
+        } else if (method == DiagonalizationMethod::BLOCK_KRYLOV_SCHUR_GPU) {
+            std::cout << "Running GPU Block Krylov-Schur method..." << std::endl;
+            
+            void* gpu_op = GPUEDWrapper::createGPUOperatorFromFiles(
+                params.num_sites, interaction_file, single_site_file);
+            
+            if (!gpu_op) {
+                std::cerr << "Error: Failed to create GPU operator" << std::endl;
+                throw std::runtime_error("GPU operator creation failed");
+            }
+            
+            std::vector<double> eigenvalues;
+            GPUEDWrapper::runGPUBlockKrylovSchur(
+                gpu_op,
+                hilbert_space_dim,
+                params.num_eigenvalues,
+                params.max_iterations,
+                params.block_size,
+                params.tolerance,
+                eigenvalues,
+                params.output_dir,
+                params.compute_eigenvectors
+            );
+            
+            results.eigenvalues = eigenvalues;
+            GPUEDWrapper::destroyGPUOperator(gpu_op);
+            
+            std::cout << "GPU Block Krylov-Schur completed successfully!" << std::endl;
         }
         
         return results;

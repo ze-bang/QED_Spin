@@ -247,6 +247,36 @@ public:
                                         bool compute_eigenvectors = false);
     
     /**
+     * Run GPU-accelerated Block Krylov-Schur method
+     * @param gpu_op_handle Pointer to GPU operator
+     * @param N Hilbert space dimension
+     * @param num_eigenvalues Number of eigenvalues to compute
+     * @param max_iter Maximum iterations
+     * @param block_size Block size (number of vectors per block)
+     * @param tol Convergence tolerance
+     * @param eigenvalues Output eigenvalues
+     * @param dir Output directory for results
+     * @param compute_eigenvectors Whether to compute and save eigenvectors
+     */
+    static void runGPUBlockKrylovSchur(void* gpu_op_handle,
+                                       int N, int num_eigenvalues, int max_iter,
+                                       int block_size, double tol,
+                                       std::vector<double>& eigenvalues,
+                                       std::string dir = "",
+                                       bool compute_eigenvectors = false);
+    
+    /**
+     * Run GPU-accelerated Block Krylov-Schur for Fixed Sz sector
+     */
+    static void runGPUBlockKrylovSchurFixedSz(void* gpu_op_handle,
+                                              int n_up,
+                                              int num_eigenvalues, int max_iter,
+                                              int block_size, double tol,
+                                              std::vector<double>& eigenvalues,
+                                              std::string dir = "",
+                                              bool compute_eigenvectors = false);
+    
+    /**
      * Run GPU-accelerated LOBPCG method
      * @deprecated This method now redirects to Davidson GPU for better stability
      */
