@@ -421,6 +421,11 @@ private:
     int* d_info_;                    // cuSOLVER info
     int work_size_;                  // Workspace size
     
+    // Pre-allocated restart buffers (to avoid OOM during restart)
+    cuDoubleComplex* d_V_restart_;   // Buffer for new Ritz vectors during restart
+    cuDoubleComplex* d_Q_k_;         // Buffer for eigenvector submatrix during restart
+    int restart_buffer_k_;           // Size of restart buffers (num eigenvalues)
+    
     // Host-side Hessenberg matrix (for easier manipulation)
     std::vector<std::complex<double>> h_H_projected_;
     

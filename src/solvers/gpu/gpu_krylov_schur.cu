@@ -50,6 +50,7 @@ GPUKrylovSchur::GPUKrylovSchur(GPUOperator* op, int max_iter, double tolerance)
       d_V_(nullptr), d_w_(nullptr), d_temp_(nullptr),
       d_H_projected_(nullptr), d_evecs_(nullptr), d_evals_(nullptr),
       d_work_(nullptr), d_info_(nullptr), work_size_(0),
+      d_V_restart_(nullptr), d_Q_k_(nullptr), restart_buffer_k_(0),
       max_krylov_size_(0) {
     
     dimension_ = op_->getDimension();
@@ -107,8 +108,11 @@ void GPUKrylovSchur::allocateMemory(int num_eigenvalues) {
     size_t evec_mem = static_cast<size_t>(m) * m * sizeof(cuDoubleComplex);  // eigenvectors
     size_t eval_mem = static_cast<size_t>(m) * sizeof(double);  // eigenvalues
     size_t solver_overhead = 10 * 1024 * 1024;  // 10 MB for cuSOLVER workspace
+    // Restart buffers: d_V_restart_ (dim × k) + d_Q_k_ (k × m)
+    size_t restart_mem = static_cast<size_t>(num_eigenvalues) * vec_size + 
+                         static_cast<size_t>(num_eigenvalues) * m * sizeof(cuDoubleComplex);
     
-    size_t total_needed = krylov_mem + work_mem + proj_mem + evec_mem + eval_mem + solver_overhead;
+    size_t total_needed = krylov_mem + work_mem + proj_mem + evec_mem + eval_mem + solver_overhead + restart_mem;
     
     // Reserve 20% of free memory for safety
     size_t usable_mem = static_cast<size_t>(free_mem * 0.8);
@@ -164,11 +168,18 @@ void GPUKrylovSchur::allocateMemory(int num_eigenvalues) {
     work_size_ = lwork;
     CUDA_CHECK(cudaMalloc(&d_work_, work_size_ * sizeof(cuDoubleComplex)));
     
+    // Pre-allocate restart buffers to avoid OOM during restart
+    restart_buffer_k_ = num_eigenvalues;
+    CUDA_CHECK(cudaMalloc(&d_V_restart_, static_cast<size_t>(dimension_) * restart_buffer_k_ * sizeof(cuDoubleComplex)));
+    CUDA_CHECK(cudaMalloc(&d_Q_k_, static_cast<size_t>(restart_buffer_k_) * max_krylov_size_ * sizeof(cuDoubleComplex)));
+    
     stats_.memory_used = static_cast<size_t>(dimension_) * max_krylov_size_ * sizeof(cuDoubleComplex) +
                         3 * vec_size +
                         2 * static_cast<size_t>(max_krylov_size_) * max_krylov_size_ * sizeof(cuDoubleComplex) +
                         static_cast<size_t>(max_krylov_size_) * sizeof(double) +
-                        work_size_ * sizeof(cuDoubleComplex);
+                        work_size_ * sizeof(cuDoubleComplex) +
+                        static_cast<size_t>(dimension_) * restart_buffer_k_ * sizeof(cuDoubleComplex) +
+                        static_cast<size_t>(restart_buffer_k_) * max_krylov_size_ * sizeof(cuDoubleComplex);
 }
 
 void GPUKrylovSchur::freeMemory() {
@@ -180,6 +191,8 @@ void GPUKrylovSchur::freeMemory() {
     if (d_evals_) { cudaFree(d_evals_); d_evals_ = nullptr; }
     if (d_work_) { cudaFree(d_work_); d_work_ = nullptr; }
     if (d_info_) { cudaFree(d_info_); d_info_ = nullptr; }
+    if (d_V_restart_) { cudaFree(d_V_restart_); d_V_restart_ = nullptr; }
+    if (d_Q_k_) { cudaFree(d_Q_k_); d_Q_k_ = nullptr; }
 }
 
 void GPUKrylovSchur::initializeRandomVector(cuDoubleComplex* d_vec) {
@@ -450,22 +463,20 @@ double GPUKrylovSchur::performRestart(int m, int k) {
     // Compute new basis: V_new[:, 0:k] = V_old * Q[:, 0:k]
     // These are the Ritz vectors for the k smallest eigenvalues
     
-    // Copy Q[:, 0:k] to device
-    cuDoubleComplex* d_Q_k;
-    CUDA_CHECK(cudaMalloc(&d_Q_k, static_cast<size_t>(k) * m * sizeof(cuDoubleComplex)));
+    // Use pre-allocated restart buffers instead of dynamic allocation
+    // This avoids OOM errors during restart when GPU memory is fragmented
     
+    // Copy Q[:, 0:k] to pre-allocated device buffer
     std::vector<cuDoubleComplex> Q_k(static_cast<size_t>(k) * m);
     for (int j = 0; j < k; j++) {
         for (int i = 0; i < m; i++) {
             Q_k[i + j * m] = h_evecs[i + j * m];
         }
     }
-    CUDA_CHECK(cudaMemcpy(d_Q_k, Q_k.data(), 
+    CUDA_CHECK(cudaMemcpy(d_Q_k_, Q_k.data(), 
                          static_cast<size_t>(k) * m * sizeof(cuDoubleComplex), cudaMemcpyHostToDevice));
     
-    // Allocate temporary for new basis
-    cuDoubleComplex* d_V_new;
-    CUDA_CHECK(cudaMalloc(&d_V_new, static_cast<size_t>(dimension_) * k * sizeof(cuDoubleComplex)));
+    // Use pre-allocated buffer for new basis (d_V_restart_ has size dimension_ * restart_buffer_k_)
     
     // V_new[:, 0:k] = V_old * Q[:, 0:k]
     cuDoubleComplex alpha = make_cuDoubleComplex(1.0, 0.0);
@@ -475,17 +486,16 @@ double GPUKrylovSchur::performRestart(int m, int k) {
                             dimension_, k, m,
                             &alpha,
                             d_V_, dimension_,
-                            d_Q_k, m,
+                            d_Q_k_, m,
                             &beta,
-                            d_V_new, dimension_));
+                            d_V_restart_, dimension_));
     
     // Copy new Ritz vectors back to d_V_
-    CUDA_CHECK(cudaMemcpy(d_V_, d_V_new, 
+    CUDA_CHECK(cudaMemcpy(d_V_, d_V_restart_, 
                          static_cast<size_t>(dimension_) * k * sizeof(cuDoubleComplex),
                          cudaMemcpyDeviceToDevice));
     
-    cudaFree(d_Q_k);
-    cudaFree(d_V_new);
+    // No need to free - using pre-allocated buffers
     
     // Reorthonormalize the new basis vectors (crucial for numerical stability)
     for (int i = 0; i < k; i++) {
