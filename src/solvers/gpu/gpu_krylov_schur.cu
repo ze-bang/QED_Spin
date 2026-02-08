@@ -86,9 +86,12 @@ GPUKrylovSchur::~GPUKrylovSchur() {
 
 void GPUKrylovSchur::allocateMemory(int num_eigenvalues) {
     // Determine optimal Krylov subspace size
-    // Use larger subspace for better convergence: m = max(4*k + 40, 100)
-    // This gives better convergence especially for systems with clustered eigenvalues
-    int m = std::min(std::max(4 * num_eigenvalues + 40, 100), max_iter_);
+    // For reliable convergence without restart issues, use much larger subspace
+    // Target: 6*k + 60 for good convergence, or at least 200 for large systems
+    int m = std::min(std::max(6 * num_eigenvalues + 60, 200), max_iter_);
+    
+    // For very large Hilbert spaces, we may need even more
+    // But cap it based on available memory
     
     // Check available GPU memory
     size_t free_mem, total_mem;
@@ -429,103 +432,125 @@ int GPUKrylovSchur::checkConvergence(int m, int k, double beta_m) {
 double GPUKrylovSchur::performRestart(int m, int k) {
     auto restart_start = std::chrono::high_resolution_clock::now();
     
-    // Krylov-Schur restart:
-    // 1. Reorder Schur form so wanted eigenvalues come first
-    //    (For Hermitian case with sorted eigenvalues, already done)
-    // 2. Update basis: V_new = V_old * Q where Q contains the eigenvectors
-    // 3. Update Hessenberg: H_new = Q^H * H * Q (diagonal for Hermitian)
+    // Thick restart for Hermitian matrices:
+    // 1. Keep the k Ritz vectors corresponding to wanted eigenvalues
+    // 2. Orthogonalize the residual against them
+    // 3. Continue Arnoldi from the new starting point
     
-    // Get eigenvectors from device
+    // Get eigenvectors from device (columns of Q)
     std::vector<cuDoubleComplex> h_evecs(m * m);
     CUDA_CHECK(cudaMemcpy(h_evecs.data(), d_evecs_, 
                          m * m * sizeof(cuDoubleComplex), cudaMemcpyDeviceToHost));
     
-    // Step 1: Compute V_new[:, 0:k+1] = V_old * Q[:, 0:k+1]
-    // Use cuBLAS GEMM: C = alpha * A * B + beta * C
-    // A = V_old (dim × m), B = Q[:, 0:k+1] (m × (k+1)), C = V_new (dim × (k+1))
-    
-    // First, copy Q[:, 0:k+1] to device
-    std::vector<cuDoubleComplex> Q_subset((k + 1) * m);
-    for (int j = 0; j <= k; j++) {
-        for (int i = 0; i < m; i++) {
-            Q_subset[i + j * m] = h_evecs[i + j * m];
-        }
-    }
-    
-    cuDoubleComplex* d_Q_subset;
-    CUDA_CHECK(cudaMalloc(&d_Q_subset, (k + 1) * m * sizeof(cuDoubleComplex)));
-    CUDA_CHECK(cudaMemcpy(d_Q_subset, Q_subset.data(), 
-                         (k + 1) * m * sizeof(cuDoubleComplex), cudaMemcpyHostToDevice));
-    
-    // Allocate temporary for new basis
-    cuDoubleComplex* d_V_new;
-    CUDA_CHECK(cudaMalloc(&d_V_new, static_cast<size_t>(dimension_) * (k + 1) * sizeof(cuDoubleComplex)));
-    
-    // V_new = V_old * Q_subset
-    cuDoubleComplex alpha = make_cuDoubleComplex(1.0, 0.0);
-    cuDoubleComplex beta = make_cuDoubleComplex(0.0, 0.0);
-    
-    CUBLAS_CHECK(cublasZgemm(cublas_handle_, CUBLAS_OP_N, CUBLAS_OP_N,
-                            dimension_, k + 1, m,  // m, n, k
-                            &alpha,
-                            d_V_, dimension_,       // A, lda
-                            d_Q_subset, m,          // B, ldb
-                            &beta,
-                            d_V_new, dimension_));  // C, ldc
-    
-    // Copy back to d_V_
-    CUDA_CHECK(cudaMemcpy(d_V_, d_V_new, 
-                         static_cast<size_t>(dimension_) * (k + 1) * sizeof(cuDoubleComplex),
-                         cudaMemcpyDeviceToDevice));
-    
-    // Cleanup temporary
-    cudaFree(d_Q_subset);
-    cudaFree(d_V_new);
-    
-    // Normalize the new basis vectors (they should be normalized, but for safety)
-    for (int i = 0; i <= k; i++) {
-        normalizeVector(getKrylovVector(i));
-    }
-    
-    // Step 2: Update Hessenberg matrix
-    // For Hermitian case, H_new = diag(eigenvalues[0:k]) with residual row
     // Get eigenvalues
     std::vector<double> eigenvalues_m(m);
     CUDA_CHECK(cudaMemcpy(eigenvalues_m.data(), d_evals_, 
                          m * sizeof(double), cudaMemcpyDeviceToHost));
     
-    // Get beta_m (the last subdiagonal element)
-    // Note: beta_m is at position (m-1, m-2) for an m-dimensional subspace
-    // The Hessenberg matrix H has H[j+1,j] = beta after step j
-    // So after m-1 steps, the last beta is at H[m-1, m-2] if m >= 2
-    double beta_m = 0.0;
-    if (m >= 2) {
-        beta_m = std::abs(h_H_projected_[(m - 1) + (m - 2) * max_krylov_size_]);
+    // Compute new basis: V_new[:, 0:k] = V_old * Q[:, 0:k]
+    // These are the Ritz vectors for the k smallest eigenvalues
+    
+    // Copy Q[:, 0:k] to device
+    cuDoubleComplex* d_Q_k;
+    CUDA_CHECK(cudaMalloc(&d_Q_k, static_cast<size_t>(k) * m * sizeof(cuDoubleComplex)));
+    
+    std::vector<cuDoubleComplex> Q_k(static_cast<size_t>(k) * m);
+    for (int j = 0; j < k; j++) {
+        for (int i = 0; i < m; i++) {
+            Q_k[i + j * m] = h_evecs[i + j * m];
+        }
+    }
+    CUDA_CHECK(cudaMemcpy(d_Q_k, Q_k.data(), 
+                         static_cast<size_t>(k) * m * sizeof(cuDoubleComplex), cudaMemcpyHostToDevice));
+    
+    // Allocate temporary for new basis
+    cuDoubleComplex* d_V_new;
+    CUDA_CHECK(cudaMalloc(&d_V_new, static_cast<size_t>(dimension_) * k * sizeof(cuDoubleComplex)));
+    
+    // V_new[:, 0:k] = V_old * Q[:, 0:k]
+    cuDoubleComplex alpha = make_cuDoubleComplex(1.0, 0.0);
+    cuDoubleComplex beta = make_cuDoubleComplex(0.0, 0.0);
+    
+    CUBLAS_CHECK(cublasZgemm(cublas_handle_, CUBLAS_OP_N, CUBLAS_OP_N,
+                            dimension_, k, m,
+                            &alpha,
+                            d_V_, dimension_,
+                            d_Q_k, m,
+                            &beta,
+                            d_V_new, dimension_));
+    
+    // Copy new Ritz vectors back to d_V_
+    CUDA_CHECK(cudaMemcpy(d_V_, d_V_new, 
+                         static_cast<size_t>(dimension_) * k * sizeof(cuDoubleComplex),
+                         cudaMemcpyDeviceToDevice));
+    
+    cudaFree(d_Q_k);
+    cudaFree(d_V_new);
+    
+    // Reorthonormalize the new basis vectors (crucial for numerical stability)
+    for (int i = 0; i < k; i++) {
+        cuDoubleComplex* v_i = getKrylovVector(i);
+        
+        // Orthogonalize against previous vectors
+        for (int j = 0; j < i; j++) {
+            cuDoubleComplex* v_j = getKrylovVector(j);
+            cuDoubleComplex dot;
+            CUBLAS_CHECK(cublasZdotc(cublas_handle_, dimension_, v_j, 1, v_i, 1, &dot));
+            cuDoubleComplex neg_dot = make_cuDoubleComplex(-cuCreal(dot), -cuCimag(dot));
+            CUBLAS_CHECK(cublasZaxpy(cublas_handle_, dimension_, &neg_dot, v_j, 1, v_i, 1));
+        }
+        
+        // Normalize
+        normalizeVector(v_i);
     }
     
-    // Clear and rebuild Hessenberg for restart
+    // Clear Hessenberg and set diagonal to eigenvalues
     std::fill(h_H_projected_.begin(), h_H_projected_.end(), std::complex<double>(0.0, 0.0));
     
-    // Diagonal: eigenvalues
     for (int i = 0; i < k; i++) {
         h_H_projected_[i + i * max_krylov_size_] = std::complex<double>(eigenvalues_m[i], 0.0);
     }
     
-    // Residual row (row k)
-    for (int j = 0; j < k; j++) {
-        // H_new[k, j] = beta_m * Q[m-1, j]
-        std::complex<double> q_last(cuCreal(h_evecs[(m - 1) + j * m]), 
-                                    cuCimag(h_evecs[(m - 1) + j * m]));
-        h_H_projected_[k + j * max_krylov_size_] = beta_m * q_last;
+    // For thick restart, we need to compute the residual and continue Arnoldi
+    // The residual is: r = H * v_{k-1} - eigenvalue_{k-1} * v_{k-1}
+    // But for simplicity, we'll just continue Arnoldi from the last Ritz vector
+    
+    // Apply H to the last Ritz vector to get starting point for continuation
+    cuDoubleComplex* v_last = getKrylovVector(k - 1);
+    op_->matVecGPU(v_last, d_w_, dimension_);
+    
+    // Orthogonalize against all kept vectors
+    for (int i = 0; i < k; i++) {
+        cuDoubleComplex* v_i = getKrylovVector(i);
+        cuDoubleComplex dot;
+        CUBLAS_CHECK(cublasZdotc(cublas_handle_, dimension_, v_i, 1, d_w_, 1, &dot));
+        
+        // Store in Hessenberg (this is H[i, k-1])
+        h_H_projected_[i + (k - 1) * max_krylov_size_] = std::complex<double>(cuCreal(dot), cuCimag(dot));
+        
+        cuDoubleComplex neg_dot = make_cuDoubleComplex(-cuCreal(dot), -cuCimag(dot));
+        CUBLAS_CHECK(cublasZaxpy(cublas_handle_, dimension_, &neg_dot, v_i, 1, d_w_, 1));
+    }
+    
+    // Compute beta = ||residual||
+    double beta_val = vectorNorm(d_w_);
+    
+    // Store as v_k (the starting vector for continuing Arnoldi)
+    if (beta_val > tolerance_) {
+        cuDoubleComplex scale = make_cuDoubleComplex(1.0 / beta_val, 0.0);
+        CUBLAS_CHECK(cublasZscal(cublas_handle_, dimension_, &scale, d_w_, 1));
+        vectorCopy(d_w_, getKrylovVector(k));
+        
+        // Store beta in Hessenberg
+        if (k < max_krylov_size_) {
+            h_H_projected_[k + (k - 1) * max_krylov_size_] = std::complex<double>(beta_val, 0.0);
+        }
     }
     
     auto restart_end = std::chrono::high_resolution_clock::now();
     stats_.restart_time += std::chrono::duration<double>(restart_end - restart_start).count();
     
-    // Return the new beta for continuing Arnoldi
-    // This is the norm of the residual vector, which we get from the updated v_{k}
-    // Actually, for proper continuation, we need to compute this from the restart state
-    return beta_m;
+    return beta_val;
 }
 
 void GPUKrylovSchur::computeEigenvectors(int m, int num_eigs,
