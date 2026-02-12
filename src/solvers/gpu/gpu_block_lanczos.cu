@@ -331,7 +331,7 @@ __global__ void checkDeflationKernel(const cuDoubleComplex* R, double threshold,
 
 GPUBlockLanczos::GPUBlockLanczos(GPUOperator* op, int max_iter, int block_size, double tolerance)
     : op_(op), max_iter_(max_iter), block_size_(block_size), tolerance_(tolerance),
-      reorth_strategy_(3),  // Default: full reorthogonalization for reliability
+      reorth_strategy_(2),  // Default: periodic full reorthogonalization (good balance of cost/reliability)
       d_V_current_(nullptr), d_V_prev_(nullptr), d_W_(nullptr), d_temp_block_(nullptr),
       d_block_basis_(nullptr), num_stored_blocks_(0), blocks_computed_(0),
       d_qr_work_(nullptr), d_tau_(nullptr), d_info_(nullptr), qr_lwork_(0),
@@ -463,9 +463,9 @@ void GPUBlockLanczos::allocateMemory() {
     size_t available_for_storage = static_cast<size_t>(free_mem * 0.7) - working_mem;
     int max_storable = static_cast<int>(available_for_storage / block_vec_size);
     
-    // Store enough blocks for full reorthogonalization
-    // Full reorth requires access to all previous blocks; cap at 500 to balance memory
-    num_stored_blocks_ = std::min({max_iter_, max_storable, 500});
+    // Store blocks for reorthogonalization and Ritz vector computation
+    // Cap at max_iter (we never need more) and available GPU memory
+    num_stored_blocks_ = std::min(max_iter_, max_storable);
     
     if (num_stored_blocks_ >= 5) {
         d_block_basis_ = new cuDoubleComplex*[num_stored_blocks_];
@@ -738,27 +738,45 @@ void GPUBlockLanczos::reorthogonalizeBlock(cuDoubleComplex* d_block, int current
     
     auto start = std::chrono::high_resolution_clock::now();
     
-    // Determine range of blocks to reorthogonalize against
-    // Include V_m (current_iter) in addition to V_0..V_{m-1}
+    // Number of stored blocks available (including V_m at position current_iter)
     int num_blocks_avail = std::min(current_iter + 1, num_stored_blocks_);
-    int num_check;
+    if (num_blocks_avail <= 0) return;
     
-    if (reorth_strategy_ == 3) {  // Full reorthogonalization
-        num_check = num_blocks_avail;
-    } else if (reorth_strategy_ == 2 && current_iter % 5 == 0) {  // Periodic full reorth
-        num_check = num_blocks_avail;
+    // Decide whether to do a full or local pass this iteration
+    const int periodic_interval = 3;  // Full reorth every 3 block iterations
+    const int local_window = 5;       // Local reorth window size
+    
+    bool do_full_pass;
+    if (reorth_strategy_ == 3) {
+        do_full_pass = true;   // Always full
+    } else if (reorth_strategy_ == 2) {
+        do_full_pass = (current_iter % periodic_interval == 0);  // Periodic
+    } else if (reorth_strategy_ == 1) {
+        do_full_pass = false;  // Always local only
     } else {
-        num_check = std::min(num_blocks_avail, std::min(5, num_stored_blocks_));  // Local: last 5 blocks
+        // strategy 0: no reorthogonalization
+        auto end = std::chrono::high_resolution_clock::now();
+        stats_.ortho_time += std::chrono::duration<double>(end - start).count();
+        return;
     }
     
-    if (num_check <= 0) return;
+    int k_start, k_end;
+    int num_cgs_passes;
     
-    int k_start = std::max(0, (current_iter + 1) - num_check);
-    int k_end = current_iter + 1;  // exclusive, includes V_m
+    if (do_full_pass) {
+        // Full pass: reorthogonalize against all stored blocks with double CGS
+        k_start = std::max(0, (current_iter + 1) - num_blocks_avail);
+        k_end = current_iter + 1;
+        num_cgs_passes = 2;  // CGS-2 for full passes (critical for correctness)
+    } else {
+        // Local pass: reorthogonalize against recent blocks only, single CGS
+        int local_count = std::min(num_blocks_avail, local_window);
+        k_start = std::max(0, (current_iter + 1) - local_count);
+        k_end = current_iter + 1;
+        num_cgs_passes = 1;  // Single CGS sufficient between full passes
+    }
     
-    // Double Classical Gram-Schmidt (CGS-2) for numerical stability
-    // Two passes are required to guarantee orthogonality to machine precision
-    for (int pass = 0; pass < 2; ++pass) {
+    for (int pass = 0; pass < num_cgs_passes; ++pass) {
         for (int k = k_start; k < k_end; ++k) {
             int buffer_idx = k % num_stored_blocks_;
             

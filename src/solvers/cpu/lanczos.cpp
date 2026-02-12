@@ -1236,21 +1236,56 @@ void block_lanczos(std::function<void(const Complex*, Complex*, int)> H, uint64_
                         &one, W.data(), N);
         }
 
-        // Reorthogonalize W against V_curr (and V_prev if needed)
-        cblas_zgemm(CblasColMajor, CblasConjTrans, CblasNoTrans,
-                    b, b, N, &one, V_curr.data(), N, W.data(), N,
-                    &zero, correction.data(), b);
-        cblas_zgemm(CblasColMajor, CblasNoTrans, CblasNoTrans,
-                    N, b, b, &neg_one, V_curr.data(), N, correction.data(), b,
-                    &one, W.data(), N);
-
-        if (iter > 0) {
-            cblas_zgemm(CblasColMajor, CblasConjTrans, CblasNoTrans,
-                        b, b, N, &one, V_prev.data(), N, W.data(), N,
-                        &zero, correction.data(), b);
-            cblas_zgemm(CblasColMajor, CblasNoTrans, CblasNoTrans,
-                        N, b, b, &neg_one, V_prev.data(), N, correction.data(), b,
-                        &one, W.data(), N);
+        // Reorthogonalize W using periodic full + local strategy:
+        //   Every iteration:  local CGS against V_curr and V_prev (in-memory, cheap)
+        //   Every K iterations: full CGS-2 against ALL stored blocks (disk I/O, expensive)
+        // This prevents orthogonality loss at O(m/K) disk cost instead of O(m).
+        {
+            const int periodic_interval = 3;  // Full disk-based reorth every 3 iterations
+            
+            if (iter % periodic_interval == 0 && iter > 0) {
+                // ---- Periodic full reorth: double CGS against all blocks via disk ----
+                std::vector<Complex> V_block(N * b);
+                for (int cgs_pass = 0; cgs_pass < 2; ++cgs_pass) {
+                    for (int prev_blk = 0; prev_blk <= iter; ++prev_blk) {
+                        const Complex* V_ptr;
+                        if (prev_blk == iter) {
+                            V_ptr = V_curr.data();
+                        } else {
+                            for (int col = 0; col < b; ++col) {
+                                uint64_t basis_id = prev_blk * b + col;
+                                ComplexVector bv = read_basis_vector(temp_dir, basis_id, N);
+                                for (int row = 0; row < N; ++row) {
+                                    V_block[row + col * N] = bv[row];
+                                }
+                            }
+                            V_ptr = V_block.data();
+                        }
+                        cblas_zgemm(CblasColMajor, CblasConjTrans, CblasNoTrans,
+                                    b, b, N, &one, V_ptr, N, W.data(), N,
+                                    &zero, correction.data(), b);
+                        cblas_zgemm(CblasColMajor, CblasNoTrans, CblasNoTrans,
+                                    N, b, b, &neg_one, V_ptr, N, correction.data(), b,
+                                    &one, W.data(), N);
+                    }
+                }
+            } else {
+                // ---- Local reorth: single CGS against V_curr and V_prev (in-memory) ----
+                cblas_zgemm(CblasColMajor, CblasConjTrans, CblasNoTrans,
+                            b, b, N, &one, V_curr.data(), N, W.data(), N,
+                            &zero, correction.data(), b);
+                cblas_zgemm(CblasColMajor, CblasNoTrans, CblasNoTrans,
+                            N, b, b, &neg_one, V_curr.data(), N, correction.data(), b,
+                            &one, W.data(), N);
+                if (iter > 0) {
+                    cblas_zgemm(CblasColMajor, CblasConjTrans, CblasNoTrans,
+                                b, b, N, &one, V_prev.data(), N, W.data(), N,
+                                &zero, correction.data(), b);
+                    cblas_zgemm(CblasColMajor, CblasNoTrans, CblasNoTrans,
+                                N, b, b, &neg_one, V_prev.data(), N, correction.data(), b,
+                                &one, W.data(), N);
+                }
+            }
         }
 
         // Store alpha and beta blocks
