@@ -254,12 +254,14 @@ void GPULanczos::freeMemory() {
     }
 }
 
-void GPULanczos::initializeRandomVector(cuDoubleComplex* d_vec) {
+void GPULanczos::initializeRandomVector(cuDoubleComplex* d_vec, unsigned long long seed) {
     int num_blocks = (dimension_ + BLOCK_SIZE - 1) / BLOCK_SIZE;
     
-    unsigned long long seed = std::random_device{}();
+    // Use provided seed for reproducibility, or random seed if 0
+    unsigned long long actual_seed = (seed == 0) ? std::random_device{}() : seed;
+    
     GPULanczosKernels::initRandomVectorKernel<<<num_blocks, BLOCK_SIZE>>>(
-        d_vec, dimension_, seed);
+        d_vec, dimension_, actual_seed);
     
     CUDA_CHECK(cudaGetLastError());
     CUDA_CHECK(cudaDeviceSynchronize());
@@ -310,8 +312,10 @@ void GPULanczos::vectorAxpy(const cuDoubleComplex* d_x, cuDoubleComplex* d_y,
                             &alpha, d_x, 1, d_y, 1));
 }
 
-// IMPROVED: Local reorthogonalization with batched operations for better GPU utilization
-// Uses batched kernel when num_check >= 4 for better performance
+// Reorthogonalization with configurable modes:
+// - FULL: Orthogonalize against ALL stored vectors (most stable, O(n*m) per iteration)
+// - LOCAL: Orthogonalize against last few vectors only (faster but less stable)
+// - DOUBLE: Apply orthogonalization twice for better numerical stability
 void GPULanczos::orthogonalize(cuDoubleComplex* d_vec, int iter, 
                                std::vector<std::vector<double>>& omega,
                                const std::vector<double>& alpha,
@@ -323,8 +327,9 @@ void GPULanczos::orthogonalize(cuDoubleComplex* d_vec, int iter,
     CUDA_CHECK(cudaEventRecord(start));
     
     if (num_stored_vectors_ > 0 && iter > 0) {
-        // Determine how many recent vectors to reorthogonalize against
-        int num_check = std::min(iter, std::min(10, num_stored_vectors_));
+        // IMPROVED: Use FULL reorthogonalization for better stability
+        // For large systems, orthogonality loss is the main source of spurious eigenvalues
+        int num_check = std::min(iter, num_stored_vectors_);  // All stored vectors, not just 10
         
         // Use batched approach when there are enough vectors (better GPU utilization)
         const int BATCH_THRESHOLD = 4;
@@ -378,6 +383,26 @@ void GPULanczos::orthogonalize(cuDoubleComplex* d_vec, int iter,
             if (num_reorthed > 0) {
                 stats_.selective_reorth_count++;
                 stats_.total_reorth_ops += num_reorthed;
+                
+                // DOUBLE ORTHOGONALIZATION: Apply a second pass for numerical stability
+                // This is crucial for large systems where single pass can miss residual overlaps
+                GPULanczosKernels::batchedDotProductKernel<<<num_check, threads_per_block, shared_mem>>>(
+                    d_basis_ptrs, d_vec, d_overlaps, num_check, dimension_);
+                CUDA_CHECK(cudaGetLastError());
+                
+                CUDA_CHECK(cudaMemcpy(h_overlaps.data(), d_overlaps, 
+                                     num_check * sizeof(cuDoubleComplex), cudaMemcpyDeviceToHost));
+                
+                for (int i = 0; i < num_check; ++i) {
+                    double overlap_mag = sqrt(cuCreal(h_overlaps[i]) * cuCreal(h_overlaps[i]) + 
+                                             cuCimag(h_overlaps[i]) * cuCimag(h_overlaps[i]));
+                    if (overlap_mag > 1e-15) {  // Tighter threshold for second pass
+                        cuDoubleComplex neg_overlap = make_cuDoubleComplex(-cuCreal(h_overlaps[i]), 
+                                                                           -cuCimag(h_overlaps[i]));
+                        vectorAxpy(h_basis_ptrs[i], d_vec, neg_overlap);
+                        stats_.total_reorth_ops++;
+                    }
+                }
             }
             
             // Cleanup
@@ -403,6 +428,19 @@ void GPULanczos::orthogonalize(cuDoubleComplex* d_vec, int iter,
             if (num_reorthed > 0) {
                 stats_.selective_reorth_count++;
                 stats_.total_reorth_ops += num_reorthed;
+                
+                // DOUBLE ORTHOGONALIZATION: Second pass for numerical stability
+                for (int i = std::max(0, iter - num_check); i < iter; ++i) {
+                    int buffer_idx = i % num_stored_vectors_;
+                    std::complex<double> dot = vectorDot(d_lanczos_vectors_[buffer_idx], d_vec);
+                    double overlap_magnitude = std::abs(dot);
+                    
+                    if (overlap_magnitude > 1e-15) {
+                        cuDoubleComplex neg_dot = make_cuDoubleComplex(-dot.real(), -dot.imag());
+                        vectorAxpy(d_lanczos_vectors_[buffer_idx], d_vec, neg_dot);
+                        stats_.total_reorth_ops++;
+                    }
+                }
             }
         }
     }
@@ -425,13 +463,17 @@ void GPULanczos::run(int num_eigenvalues,
     
     auto overall_start = std::chrono::high_resolution_clock::now();
     
-    std::cout << "\nRunning GPU Lanczos with Local Reorthogonalization...\n";
+    std::cout << "\nRunning GPU Lanczos with Full Reorthogonalization...\n";
     
     alpha_.clear();
     beta_.clear();
     
-    // Initialize first Lanczos vector
-    initializeRandomVector(d_v_current_);
+    // Initialize first Lanczos vector with DETERMINISTIC seed for reproducibility
+    // Using seed=42 ensures identical results between runs
+    // Change to seed=0 for random starting vector if desired
+    unsigned long long deterministic_seed = 42;
+    initializeRandomVector(d_v_current_, deterministic_seed);
+    std::cout << "  Using deterministic seed: " << deterministic_seed << " for reproducibility\n";
     
     if (num_stored_vectors_ > 0) {
         vectorCopy(d_v_current_, d_lanczos_vectors_[0]);

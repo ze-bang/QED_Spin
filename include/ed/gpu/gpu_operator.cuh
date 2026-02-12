@@ -368,6 +368,11 @@ public:
     // Override base class methods to use fixed Sz
     void matVecGPU(const cuDoubleComplex* d_x, cuDoubleComplex* d_y, int N) override;
     void matVec(const std::complex<double>* x, std::complex<double>* y, int N) override;
+    void matVecGPUAsync(const cuDoubleComplex* d_x, cuDoubleComplex* d_y, int N, cudaStream_t stream) override;
+
+    // Fixed-Sz kernels use shared basis table and atomic accumulation,
+    // so concurrent multi-stream execution is not safe.
+    bool supportsAsyncMatVec() const override { return false; }
     
     // Build basis states on GPU
     void buildBasisOnGPU();

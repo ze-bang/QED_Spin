@@ -76,7 +76,7 @@ private:
     // Helper functions
     void allocateMemory();
     void freeMemory();
-    void initializeRandomVector(cuDoubleComplex* d_vec);
+    void initializeRandomVector(cuDoubleComplex* d_vec, unsigned long long seed = 0);
     
     // Adaptive selective reorthogonalization (Parlett-Simon)
     void orthogonalize(cuDoubleComplex* d_vec, int iter,
@@ -326,6 +326,15 @@ private:
      */
     bool checkConvergence(int iter, const std::vector<double>& prev_eigenvalues,
                          double& max_change);
+    
+    /**
+     * @brief Compute residual norm ||H*v - E*v|| / ||v|| for the ground state
+     * Used to validate convergence after the Lanczos iteration completes.
+     * A large residual indicates the algorithm converged to a wrong eigenvalue.
+     * @param eigenvalue The eigenvalue to check
+     * @return Relative residual norm
+     */
+    double computeResidualNorm(double eigenvalue);
 };
 
 /**
@@ -440,8 +449,10 @@ private:
     
     /**
      * @brief Initialize random starting vector and normalize
+     * @param d_vec Vector to initialize
+     * @param seed Random seed (0 = random, nonzero = deterministic)
      */
-    void initializeRandomVector(cuDoubleComplex* d_vec);
+    void initializeRandomVector(cuDoubleComplex* d_vec, unsigned long long seed = 0);
     
     /**
      * @brief Arnoldi iteration: expand Krylov subspace from j_start to m

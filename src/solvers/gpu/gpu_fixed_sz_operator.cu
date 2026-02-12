@@ -150,6 +150,17 @@ void GPUFixedSzOperator::matVecGPU(const cuDoubleComplex* d_x, cuDoubleComplex* 
     matVecFixedSz(d_x, d_y);
 }
 
+// Override async matVec - fall back to synchronous fixed-Sz version
+// The fixed-Sz kernels use shared d_basis_states_ and atomic accumulation,
+// making concurrent multi-stream execution unsafe.
+void GPUFixedSzOperator::matVecGPUAsync(const cuDoubleComplex* d_x, cuDoubleComplex* d_y, int N, cudaStream_t stream) {
+    (void)stream;  // Cannot safely use custom stream with fixed-Sz kernels
+    if (N != fixed_sz_dim_) {
+        throw std::runtime_error("GPUFixedSzOperator::matVecGPUAsync: dimension mismatch");
+    }
+    matVecFixedSz(d_x, d_y);
+}
+
 // Override host-side matVec to use fixed Sz version
 void GPUFixedSzOperator::matVec(const std::complex<double>* x, std::complex<double>* y, int N) {
     if (N != fixed_sz_dim_) {

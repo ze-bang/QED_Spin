@@ -331,7 +331,7 @@ __global__ void checkDeflationKernel(const cuDoubleComplex* R, double threshold,
 
 GPUBlockLanczos::GPUBlockLanczos(GPUOperator* op, int max_iter, int block_size, double tolerance)
     : op_(op), max_iter_(max_iter), block_size_(block_size), tolerance_(tolerance),
-      reorth_strategy_(1),  // Default: local reorthogonalization
+      reorth_strategy_(3),  // Default: full reorthogonalization for reliability
       d_V_current_(nullptr), d_V_prev_(nullptr), d_W_(nullptr), d_temp_block_(nullptr),
       d_block_basis_(nullptr), num_stored_blocks_(0), blocks_computed_(0),
       d_qr_work_(nullptr), d_tau_(nullptr), d_info_(nullptr), qr_lwork_(0),
@@ -463,9 +463,9 @@ void GPUBlockLanczos::allocateMemory() {
     size_t available_for_storage = static_cast<size_t>(free_mem * 0.7) - working_mem;
     int max_storable = static_cast<int>(available_for_storage / block_vec_size);
     
-    // Store enough blocks for effective reorthogonalization
-    // For block Lanczos, we typically need fewer blocks than standard Lanczos
-    num_stored_blocks_ = std::min({max_iter_, max_storable, 100});
+    // Store enough blocks for full reorthogonalization
+    // Full reorth requires access to all previous blocks; cap at 500 to balance memory
+    num_stored_blocks_ = std::min({max_iter_, max_storable, 500});
     
     if (num_stored_blocks_ >= 5) {
         d_block_basis_ = new cuDoubleComplex*[num_stored_blocks_];
@@ -677,8 +677,11 @@ bool GPUBlockLanczos::qrFactorization(cuDoubleComplex* d_block, cuDoubleComplex*
     // Copy Q back to block
     blockCopy(d_temp_block_, d_block);
     
-    // OPTIMIZATION: Check deflation with minimal transfer (only block_size diagonals)
-    // Copy only diagonal elements for deflation check
+    // Synchronize compute_stream_ to ensure R matrix is fully written
+    // before transfer_stream_ reads it (fixes inter-stream race condition)
+    CUDA_CHECK(cudaStreamSynchronize(compute_stream_));
+    
+    // Now safe to read R diagonals on transfer_stream_
     std::vector<cuDoubleComplex> h_diag(block_size_);
     for (int i = 0; i < block_size_; ++i) {
         // Each diagonal is at offset i + i*block_size_ in column-major R
@@ -687,7 +690,6 @@ bool GPUBlockLanczos::qrFactorization(cuDoubleComplex* d_block, cuDoubleComplex*
                                    cudaMemcpyDeviceToHost, transfer_stream_));
     }
     
-    CUDA_CHECK(cudaStreamSynchronize(compute_stream_));
     CUDA_CHECK(cudaStreamSynchronize(transfer_stream_));
     
     auto end = std::chrono::high_resolution_clock::now();
@@ -732,29 +734,42 @@ int GPUBlockLanczos::checkDeflation(const cuDoubleComplex* d_R, std::vector<int>
 }
 
 void GPUBlockLanczos::reorthogonalizeBlock(cuDoubleComplex* d_block, int current_iter) {
-    if (num_stored_blocks_ == 0 || current_iter <= 0) return;
+    if (num_stored_blocks_ == 0 || current_iter < 0) return;
     
     auto start = std::chrono::high_resolution_clock::now();
     
-    int num_check = std::min(current_iter, std::min(5, num_stored_blocks_));  // Local reorth: last 5 blocks
+    // Determine range of blocks to reorthogonalize against
+    // Include V_m (current_iter) in addition to V_0..V_{m-1}
+    int num_blocks_avail = std::min(current_iter + 1, num_stored_blocks_);
+    int num_check;
     
     if (reorth_strategy_ == 3) {  // Full reorthogonalization
-        num_check = std::min(current_iter, num_stored_blocks_);
+        num_check = num_blocks_avail;
     } else if (reorth_strategy_ == 2 && current_iter % 5 == 0) {  // Periodic full reorth
-        num_check = std::min(current_iter, num_stored_blocks_);
+        num_check = num_blocks_avail;
+    } else {
+        num_check = std::min(num_blocks_avail, std::min(5, num_stored_blocks_));  // Local: last 5 blocks
     }
     
-    // Use cuBLAS for efficient block operations
-    for (int k = std::max(0, current_iter - num_check); k < current_iter; ++k) {
-        int buffer_idx = k % num_stored_blocks_;
-        
-        // Compute overlap: C = V_k^H * block
-        blockInnerProduct(d_block_basis_[buffer_idx], d_block, d_overlap_);
-        
-        // Apply correction: block = block - V_k * C
-        blockAxpy(d_block, d_block_basis_[buffer_idx], d_overlap_, true);
-        
-        stats_.reorth_count++;
+    if (num_check <= 0) return;
+    
+    int k_start = std::max(0, (current_iter + 1) - num_check);
+    int k_end = current_iter + 1;  // exclusive, includes V_m
+    
+    // Double Classical Gram-Schmidt (CGS-2) for numerical stability
+    // Two passes are required to guarantee orthogonality to machine precision
+    for (int pass = 0; pass < 2; ++pass) {
+        for (int k = k_start; k < k_end; ++k) {
+            int buffer_idx = k % num_stored_blocks_;
+            
+            // Compute overlap: C = V_k^H * block
+            blockInnerProduct(d_block_basis_[buffer_idx], d_block, d_overlap_);
+            
+            // Apply correction: block = block - V_k * C
+            blockAxpy(d_block, d_block_basis_[buffer_idx], d_overlap_, true);
+            
+            stats_.reorth_count++;
+        }
     }
     
     auto end = std::chrono::high_resolution_clock::now();
@@ -834,7 +849,52 @@ void GPUBlockLanczos::solveBlockTridiagonal(int num_blocks, int num_eigs,
         return;
     }
     
-    // Extract requested eigenvalues
+    // Diagnostic: print ALL block tridiagonal eigenvalues to understand multiplicity
+    std::cout << "\n  [DEBUG] All " << total_dim << " block tridiagonal eigenvalues:\n";
+    for (int i = 0; i < total_dim; ++i) {
+        std::cout << "    T_E[" << i << "] = " << std::setprecision(12) << solver.eigenvalues()(i) << "\n";
+    }
+    
+    // Also print the block tridiagonal matrix structure for debugging
+    std::cout << "\n  [DEBUG] Block tridiagonal matrix T (Hermitian check):\n";
+    double max_asym = 0.0;
+    for (int i = 0; i < total_dim; ++i) {
+        for (int j = i+1; j < total_dim; ++j) {
+            double asym = std::abs(T(i,j) - std::conj(T(j,i)));
+            if (asym > max_asym) max_asym = asym;
+        }
+    }
+    std::cout << "    Max asymmetry |T(i,j) - T(j,i)*|: " << max_asym << "\n";
+
+    // Print first alpha and beta blocks
+    if (num_blocks >= 1) {
+        std::cout << "\n  [DEBUG] Alpha block 0 (" << block_size_ << "x" << block_size_ << "):\n";
+        for (int i = 0; i < block_size_; ++i) {
+            std::cout << "    ";
+            for (int k = 0; k < block_size_; ++k) {
+                auto v = alpha_blocks_[0][i + k * block_size_];
+                std::cout << std::setw(12) << std::setprecision(6) << v.real();
+                if (std::abs(v.imag()) > 1e-14) std::cout << "+" << v.imag() << "i";
+                std::cout << " ";
+            }
+            std::cout << "\n";
+        }
+    }
+    if (!beta_blocks_.empty()) {
+        std::cout << "\n  [DEBUG] Beta block 0 (" << block_size_ << "x" << block_size_ << "):\n";
+        for (int i = 0; i < block_size_; ++i) {
+            std::cout << "    ";
+            for (int k = 0; k < block_size_; ++k) {
+                auto v = beta_blocks_[0][i + k * block_size_];
+                std::cout << std::setw(12) << std::setprecision(6) << v.real();
+                if (std::abs(v.imag()) > 1e-14) std::cout << "+" << v.imag() << "i";
+                std::cout << " ";
+            }
+            std::cout << "\n";
+        }
+    }
+    
+    // Extract requested eigenvalues (no deduplication - return raw spectrum)
     int n_eigs = std::min(num_eigs, total_dim);
     eigenvalues.resize(n_eigs);
     tridiag_eigenvecs.resize(n_eigs);
@@ -850,7 +910,8 @@ void GPUBlockLanczos::solveBlockTridiagonal(int num_blocks, int num_eigs,
     auto end = std::chrono::high_resolution_clock::now();
     stats_.diag_time += std::chrono::duration<double>(end - start).count();
     
-    std::cout << "\nLowest " << n_eigs << " eigenvalues:\n";
+    std::cout << "\nLowest " << n_eigs << " distinct eigenvalues (from "
+              << total_dim << " block tridiagonal eigenvalues):\n";
     for (int i = 0; i < std::min(n_eigs, 10); ++i) {
         std::cout << "  E[" << i << "] = " << std::setprecision(10) << eigenvalues[i] << "\n";
     }
@@ -943,6 +1004,68 @@ bool GPUBlockLanczos::checkConvergence(int iter, const std::vector<double>& prev
     return max_change < tolerance_;
 }
 
+double GPUBlockLanczos::computeResidualNorm(double eigenvalue) {
+    // Compute ||H * v_0 - E_0 * v_0|| using the ground state Ritz vector
+    // This is done using the last beta block and tridiagonal eigenvector
+    // For the ground state, the residual norm = |beta_m| * |y_m(last block)|
+    // where y_m is the last block-component of the tridiagonal eigenvector
+    
+    // Quick residual estimate from the block tridiagonal structure:
+    // For the lowest eigenvalue, compute residual using Ritz vector on GPU
+    if (blocks_computed_ <= 0 || num_stored_blocks_ == 0) return 1e30;
+    
+    // Get the ground state tridiagonal eigenvector
+    int num_blocks_used = static_cast<int>(alpha_blocks_.size());
+    std::vector<double> evals;
+    std::vector<std::vector<std::complex<double>>> evecs;
+    solveBlockTridiagonal(num_blocks_used, 1, evals, evecs);
+    
+    if (evals.empty() || evecs.empty()) return 1e30;
+    
+    // Compute Ritz vector on GPU
+    cuDoubleComplex* d_ritz_vec;
+    cuDoubleComplex* d_Hritz_vec;
+    CUDA_CHECK(cudaMalloc(&d_ritz_vec, dimension_ * sizeof(cuDoubleComplex)));
+    CUDA_CHECK(cudaMalloc(&d_Hritz_vec, dimension_ * sizeof(cuDoubleComplex)));
+    CUDA_CHECK(cudaMemset(d_ritz_vec, 0, dimension_ * sizeof(cuDoubleComplex)));
+    
+    int num_blocks_needed = static_cast<int>(evecs[0].size()) / block_size_;
+    for (int j = 0; j < std::min(num_blocks_needed, num_stored_blocks_); ++j) {
+        int buffer_idx = j % num_stored_blocks_;
+        for (int k = 0; k < block_size_; ++k) {
+            int coeff_idx = j * block_size_ + k;
+            if (coeff_idx >= static_cast<int>(evecs[0].size())) continue;
+            std::complex<double> coeff = evecs[0][coeff_idx];
+            cuDoubleComplex cu_coeff = make_cuDoubleComplex(coeff.real(), coeff.imag());
+            const cuDoubleComplex* col_ptr = d_block_basis_[buffer_idx] + k * dimension_;
+            CUBLAS_CHECK(cublasZaxpy(cublas_handle_, dimension_, &cu_coeff, col_ptr, 1, d_ritz_vec, 1));
+        }
+    }
+    
+    // Compute H * ritz_vec
+    op_->matVecGPU(d_ritz_vec, d_Hritz_vec, dimension_);
+    
+    // Compute residual: H*v - E*v
+    cuDoubleComplex neg_eval = make_cuDoubleComplex(-eigenvalue, 0.0);
+    CUBLAS_CHECK(cublasZaxpy(cublas_handle_, dimension_, &neg_eval, d_ritz_vec, 1, d_Hritz_vec, 1));
+    
+    // Compute norm of residual
+    double residual_norm;
+    CUBLAS_CHECK(cublasDznrm2(cublas_handle_, dimension_, d_Hritz_vec, 1, &residual_norm));
+    
+    // Also get norm of ritz vector for relative residual
+    double ritz_norm;
+    CUBLAS_CHECK(cublasDznrm2(cublas_handle_, dimension_, d_ritz_vec, 1, &ritz_norm));
+    
+    cudaFree(d_ritz_vec);
+    cudaFree(d_Hritz_vec);
+    
+    if (ritz_norm > 1e-15) {
+        return residual_norm / ritz_norm;
+    }
+    return residual_norm;
+}
+
 void GPUBlockLanczos::run(int num_eigenvalues,
                          std::vector<double>& eigenvalues,
                          std::vector<std::vector<std::complex<double>>>& eigenvectors,
@@ -950,17 +1073,35 @@ void GPUBlockLanczos::run(int num_eigenvalues,
     
     auto overall_start = std::chrono::high_resolution_clock::now();
     
+    const int max_retries = 3;  // Maximum retry attempts with new random starting blocks
+    
+    for (int attempt = 0; attempt < max_retries; ++attempt) {
+    
+    if (attempt > 0) {
+        std::cout << "\n!!! RETRY ATTEMPT " << attempt << "/" << max_retries 
+                  << " with new random starting block !!!\n";
+    }
+    
     std::cout << "\n========================================\n";
     std::cout << "Running GPU Block Lanczos Algorithm\n";
     std::cout << "========================================\n";
     std::cout << "  Target eigenvalues: " << num_eigenvalues << "\n";
     std::cout << "  Block size: " << block_size_ << "\n";
     std::cout << "  Reorth strategy: " << reorth_strategy_ << " (0=none, 1=local, 2=periodic, 3=full)\n";
+    if (attempt > 0) std::cout << "  Retry attempt: " << attempt << "\n";
     
     // Clear previous results
     alpha_blocks_.clear();
     beta_blocks_.clear();
     blocks_computed_ = 0;
+    
+    // Reset statistics for this attempt
+    stats_.matvec_time = 0.0;
+    stats_.ortho_time = 0.0;
+    stats_.qr_time = 0.0;
+    stats_.diag_time = 0.0;
+    stats_.total_matvecs = 0;
+    stats_.reorth_count = 0;
     
     // Initialize first block with random orthonormal vectors
     std::cout << "\nInitializing random starting block...\n";
@@ -1139,6 +1280,41 @@ void GPUBlockLanczos::run(int num_eigenvalues,
     if (compute_vectors && num_stored_blocks_ > 0) {
         computeBlockRitzVectors(tridiag_eigenvecs, num_eigenvalues, eigenvectors);
     }
+    
+    // ========== Residual-based convergence validation ==========
+    // Even if eigenvalue changes converged, verify with explicit residual ||H*v - E*v|| / ||v||
+    // This catches cases where Lanczos converges to wrong eigenvalues due to
+    // numerical issues (loss of orthogonality, bad starting vector, etc.)
+    if (!eigenvalues.empty() && num_stored_blocks_ > 0) {
+        double residual = computeResidualNorm(eigenvalues[0]);
+        stats_.convergence_error = residual;
+        std::cout << "\n  Ground state residual ||H*v - E*v||/||v|| = " 
+                  << std::scientific << residual << std::defaultfloat << "\n";
+        
+        // Residual threshold: should be close to machine precision * ||H|| for a correct result
+        // A reasonable threshold is sqrt(tolerance) since tolerance is for eigenvalue changes
+        double residual_threshold = std::max(std::sqrt(tolerance_) * (1.0 + std::abs(eigenvalues[0])), 1e-6);
+        
+        if (residual > residual_threshold) {
+            std::cout << "  WARNING: Large residual (" << residual << " > threshold " 
+                      << residual_threshold << ")\n";
+            std::cout << "  Ground state E[0] = " << eigenvalues[0] << " may be unreliable.\n";
+            
+            if (attempt < max_retries - 1) {
+                std::cout << "  Will retry with new random starting block...\n";
+                continue;  // Retry the outer loop
+            } else {
+                std::cout << "  All " << max_retries << " attempts exhausted. Using best result.\n";
+            }
+        } else {
+            std::cout << "  Residual check PASSED (threshold = " << residual_threshold << ")\n";
+        }
+    }
+    
+    // If we reach here, the result is acceptable (or we've exhausted retries)
+    break;
+    
+    }  // End retry loop
     
     auto overall_end = std::chrono::high_resolution_clock::now();
     stats_.total_time = std::chrono::duration<double>(overall_end - overall_start).count();

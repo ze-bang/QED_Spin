@@ -195,11 +195,12 @@ void GPUKrylovSchur::freeMemory() {
     if (d_Q_k_) { cudaFree(d_Q_k_); d_Q_k_ = nullptr; }
 }
 
-void GPUKrylovSchur::initializeRandomVector(cuDoubleComplex* d_vec) {
+void GPUKrylovSchur::initializeRandomVector(cuDoubleComplex* d_vec, unsigned long long seed) {
     int num_blocks = (dimension_ + BLOCK_SIZE - 1) / BLOCK_SIZE;
-    unsigned long long seed = std::random_device{}();
+    // Use provided seed for reproducibility, or random seed if 0
+    unsigned long long actual_seed = (seed == 0) ? std::random_device{}() : seed;
     GPULanczosKernels::initRandomVectorKernel<<<num_blocks, BLOCK_SIZE>>>(
-        d_vec, dimension_, seed);
+        d_vec, dimension_, actual_seed);
     CUDA_CHECK(cudaGetLastError());
     CUDA_CHECK(cudaDeviceSynchronize());
     normalizeVector(d_vec);
@@ -670,9 +671,11 @@ void GPUKrylovSchur::run(int num_eigenvalues,
         int num_converged = checkConvergence(actual_m, k, beta_m);
         std::cout << "  " << num_converged << " / " << k << " eigenvalues converged\n";
         
-        if (num_converged >= k || outer_iter == max_outer_iter_ - 1) {
+        stats_.converged_eigs = num_converged;
+        
+        if (num_converged >= k) {
+            // All requested eigenvalues converged
             converged = true;
-            stats_.converged_eigs = num_converged;
             
             // Extract converged eigenvalues
             eigenvalues.resize(k);
@@ -681,6 +684,25 @@ void GPUKrylovSchur::run(int num_eigenvalues,
             }
             
             // Compute eigenvectors if requested
+            if (compute_vectors) {
+                computeEigenvectors(actual_m, k, eigenvectors);
+            }
+            
+            break;
+        }
+        
+        // Check if we've hit max iterations (but didn't converge)
+        if (outer_iter == max_outer_iter_ - 1) {
+            std::cout << "\n  WARNING: Max iterations reached without full convergence!\n";
+            std::cout << "  Only " << num_converged << " / " << k << " eigenvalues converged.\n";
+            std::cout << "  Consider: increasing Krylov size, loosening tolerance, or using symmetries.\n\n";
+            
+            // Still extract best estimates (unconverged)
+            eigenvalues.resize(k);
+            for (int i = 0; i < k; i++) {
+                eigenvalues[i] = eigenvalues_m[i];
+            }
+            
             if (compute_vectors) {
                 computeEigenvectors(actual_m, k, eigenvectors);
             }
