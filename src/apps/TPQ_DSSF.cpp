@@ -1553,11 +1553,14 @@ int main(int argc, char* argv[]) {
             std::cerr << "    - ladder: Use Sp/Sm/Sz operators (raising/lowering operators)" << std::endl;
             std::cerr << "    - xyz: Use Sx/Sy/Sz operators (Cartesian components)" << std::endl;
             std::cerr << "    - Note: experimental operator type always uses xyz basis internally" << std::endl;
-            std::cerr << "\n  spectral_params (format: \"omega_min,omega_max,num_omega_bins,broadening\" e.g., \"-5.0,5.0,200,0.1\"):" << std::endl;
+            std::cerr << "\n  spectral_params (format: \"omega_min,omega_max,num_omega_bins[,broadening]\" e.g., \"-5.0,5.0,200,0.1\"):" << std::endl;
             std::cerr << "      * omega_min: minimum frequency" << std::endl;
             std::cerr << "      * omega_max: maximum frequency" << std::endl;
             std::cerr << "      * num_omega_bins: number of frequency points (resolution)" << std::endl;
-            std::cerr << "      * broadening: Lorentzian broadening parameter (eta)" << std::endl;
+            std::cerr << "      * broadening: Lorentzian broadening parameter eta (optional)" << std::endl;
+            std::cerr << "        If omitted or set to 0/negative, auto-broadening is used:" << std::endl;
+            std::cerr << "          eta = max(2*dw, (omega_max-omega_min)/krylov_dim, 0.01)" << std::endl;
+            std::cerr << "        where dw = (omega_max-omega_min)/num_omega_bins" << std::endl;
             std::cerr << "\n  unit_cell_size (for sublattice operators): number of sublattices (default: 4)" << std::endl;
             std::cerr << "  momentum_points (default: (0,0,0);(0,0,2π)): \"Qx1,Qy1,Qz1;Qx2,Qy2,Qz2;...\"" << std::endl;
             std::cerr << "  polarization (for transverse operators): \"px,py,pz\" normalized vector (default: (1/√2,-1/√2,0))" << std::endl;
@@ -1706,7 +1709,8 @@ int main(int argc, char* argv[]) {
     double omega_min = -5.0;
     double omega_max = 5.0;
     int num_omega_bins = 200;
-    double broadening = 0.1;
+    double broadening = -1.0;  // Negative means auto-broadening
+    bool auto_broadening = true;
     
     if (pos_argc >= 8) {
         std::string param_str = pos_argv[7];
@@ -1724,10 +1728,11 @@ int main(int argc, char* argv[]) {
                 if (tokens.size() >= 1) omega_min = std::stod(tokens[0]);
                 if (tokens.size() >= 2) omega_max = std::stod(tokens[1]);
                 if (tokens.size() >= 3) num_omega_bins = std::stoi(tokens[2]);
-                if (tokens.size() >= 4) broadening = std::stod(tokens[3]);
-                if (rank == 0) {
-                    std::cout << method << " method parameters: omega=[" << omega_min << "," << omega_max 
-                              << "], bins=" << num_omega_bins << ", broadening=" << broadening << std::endl;
+                if (tokens.size() >= 4) {
+                    broadening = std::stod(tokens[3]);
+                    if (broadening > 0) {
+                        auto_broadening = false;
+                    }
                 }
             } catch (...) {
                 if (rank == 0) {
@@ -1735,6 +1740,28 @@ int main(int argc, char* argv[]) {
                 }
             }
         }
+    }
+    
+    // Auto-broadening: compute smart default based on frequency spacing and krylov_dim
+    if (auto_broadening && (method == "spectral" || method == "continued_fraction")) {
+        double dw = (omega_max - omega_min) / num_omega_bins;
+        double bandwidth_estimate = omega_max - omega_min;  // Conservative estimate
+        double eta_resolution = bandwidth_estimate / krylov_dim_or_nmax;  // Lanczos resolution limit
+        double eta_sampling = 2.0 * dw;  // Nyquist-like: at least 2 points per peak
+        
+        broadening = std::max({eta_resolution, eta_sampling, 0.01});
+        
+        if (rank == 0) {
+            std::cout << "Auto-broadening: eta=" << broadening << " (dw=" << dw 
+                      << ", krylov_limit=" << eta_resolution 
+                      << ", sampling_limit=" << eta_sampling << ")" << std::endl;
+        }
+    }
+    
+    if (rank == 0 && (method == "spectral" || method == "continued_fraction")) {
+        std::cout << method << " method parameters: omega=[" << omega_min << "," << omega_max 
+                  << "], bins=" << num_omega_bins << ", broadening=" << broadening 
+                  << (auto_broadening ? " (auto)" : "") << std::endl;
     }
 
     int unit_cell_size = 4; // Default for pyrochlore
