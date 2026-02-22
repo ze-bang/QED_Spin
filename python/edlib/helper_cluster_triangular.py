@@ -269,7 +269,8 @@ def write_cluster_nn_list(output_dir, cluster_name, nn_list, positions, node_map
 
 def prepare_hamiltonian_parameters(cluster_filepath, output_dir, J1, J2=0.0, Jz_ratio=1.0, 
                                     h=0.0, field_dir=(0, 0, 1), model='heisenberg',
-                                    Jzz=None, Jpm=None, Jpmpm=None, Jzpm=None):
+                                    Jzz=None, Jpm=None, Jpmpm=None, Jzpm=None,
+                                    g_ab=2.0, g_c=2.0):
     """
     Prepare Hamiltonian parameters for exact diagonalization of triangular lattice.
     
@@ -289,13 +290,15 @@ def prepare_hamiltonian_parameters(cluster_filepath, output_dir, J1, J2=0.0, Jz_
         J1: Nearest-neighbor exchange coupling (for heisenberg/xxz/kitaev)
         J2: Next-nearest-neighbor exchange coupling (default 0)
         Jz_ratio: Sz-Sz coupling ratio for XXZ model (Jz = J * Jz_ratio)
-        h: Magnetic field strength
+        h: Magnetic field strength (in Tesla when using physical units)
         field_dir: Field direction (3-vector), default is (0, 0, 1) for out-of-plane
         model: Model type ('heisenberg', 'xxz', 'kitaev', 'anisotropic')
         Jzz: S^z S^z coupling for anisotropic model
         Jpm: S^+ S^- + S^- S^+ coupling for anisotropic model (J_±)
         Jpmpm: S^+ S^+ + S^- S^- coupling for anisotropic model (J_±±)
         Jzpm: S^z (S^+ - S^-) coupling for anisotropic model (J_z±)
+        g_ab: In-plane g-factor for anisotropic Zeeman (default: 2.0)
+        g_c: Out-of-plane (c-axis) g-factor for anisotropic Zeeman (default: 2.0)
     """
     # Extract cluster name from filepath
     cluster_name = os.path.basename(cluster_filepath).split('.')[0]
@@ -326,11 +329,12 @@ def prepare_hamiltonian_parameters(cluster_filepath, output_dir, J1, J2=0.0, Jz_
     for site_id in sorted(nn_list.keys()):
         i = site_id
         
-        # Zeeman term (field along z by default for 2D system)
-        # For triangular lattice, Sz is the out-of-plane component
-        hz = h * field_dir[2]  # z-component of field
-        hx = h * field_dir[0]  # x-component (in-plane)
-        hy = h * field_dir[1]  # y-component (in-plane)
+        # Zeeman term: H_Z = -μ_B Σ_i [g_ab (B_x S^x + B_y S^y) + g_c B_z S^z]
+        # h already absorbs μ_B if in appropriate units;
+        # g_ab, g_c provide the anisotropic g-tensor weighting
+        hz = h * field_dir[2] * g_c   # out-of-plane component
+        hx = h * field_dir[0] * g_ab  # in-plane x-component
+        hy = h * field_dir[1] * g_ab  # in-plane y-component
         
         # Sz term: -h_z * Sz
         if abs(hz) > 1e-10:
@@ -588,6 +592,12 @@ if __name__ == "__main__":
     parser.add_argument('--Jpmpm', type=float, default=None, help='J_±± for anisotropic model')
     parser.add_argument('--Jzpm', type=float, default=None, help='J_z± for anisotropic model')
     
+    # Anisotropic g-tensor
+    parser.add_argument('--g_ab', type=float, default=2.0,
+                       help='In-plane g-factor for Zeeman term (default: 2.0)')
+    parser.add_argument('--g_c', type=float, default=2.0,
+                       help='Out-of-plane (c-axis) g-factor for Zeeman term (default: 2.0)')
+    
     args = parser.parse_args()
     
     field_dir = tuple(args.field_dir)
@@ -595,5 +605,6 @@ if __name__ == "__main__":
     prepare_hamiltonian_parameters(
         args.cluster_file, args.output_dir, args.J1, args.J2, 
         Jz_ratio=args.Jz_ratio, h=args.h, field_dir=field_dir, model=args.model,
-        Jzz=args.Jzz, Jpm=args.Jpm, Jpmpm=args.Jpmpm, Jzpm=args.Jzpm
+        Jzz=args.Jzz, Jpm=args.Jpm, Jpmpm=args.Jpmpm, Jzpm=args.Jzpm,
+        g_ab=args.g_ab, g_c=args.g_c
     )

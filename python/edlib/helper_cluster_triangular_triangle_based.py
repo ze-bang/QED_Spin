@@ -65,16 +65,22 @@ def get_anisotropic_phase(direction_idx):
         raise ValueError(f"Unknown direction: {direction_idx}")
 
 
-def prepare_heisenberg_j1j2(cluster_data, J1=1.0, J2=0.0):
+def prepare_heisenberg_j1j2(cluster_data, J1=1.0, J2=0.0, h=0.0, h_direction=(0, 0, 1),
+                            g_ab=2.0, g_c=2.0):
     """
     Prepare J1-J2 Heisenberg model parameters.
     
     H = J1 * sum_{<ij>} S_i · S_j + J2 * sum_{<<ij>>} S_i · S_j
+      - μ_B sum_i [g_ab (B_x S^x + B_y S^y) + g_c B_z S^z]
     
     Args:
         cluster_data: Cluster JSON data
         J1: Nearest-neighbor exchange (default: 1.0)
         J2: Next-nearest neighbor exchange (default: 0.0)
+        h: Magnetic field strength
+        h_direction: Field direction (normalized internally)
+        g_ab: In-plane g-factor (default: 2.0)
+        g_c: Out-of-plane g-factor (default: 2.0)
         
     Returns:
         Dictionary with Hamiltonian parameters for ED
@@ -95,20 +101,32 @@ def prepare_heisenberg_j1j2(cluster_data, J1=1.0, J2=0.0):
             'Jzz': J1
         })
     
+    # Normalize field direction
+    h_dir = np.array(h_direction, dtype=float)
+    h_dir = h_dir / np.linalg.norm(h_dir) if np.linalg.norm(h_dir) > 0 else np.array([0, 0, 1])
+    
+    # Build Zeeman single-site terms
+    zeeman_terms = _build_zeeman_terms(n_sites, h, h_dir, g_ab, g_c)
+    
     return {
         'n_sites': n_sites,
         'interactions': interactions,
+        'zeeman_terms': zeeman_terms,
+        'h': h,
+        'h_direction': h_dir.tolist(),
         'model': 'heisenberg_j1j2',
         'J1': J1,
         'J2': J2
     }
 
 
-def prepare_xxz_model(cluster_data, Jxy=1.0, Jz=1.0, h=0.0, h_direction=(0, 0, 1)):
+def prepare_xxz_model(cluster_data, Jxy=1.0, Jz=1.0, h=0.0, h_direction=(0, 0, 1),
+                      g_ab=2.0, g_c=2.0):
     """
     Prepare XXZ model parameters.
     
-    H = sum_{<ij>} [Jxy (S_i^x S_j^x + S_i^y S_j^y) + Jz S_i^z S_j^z] - h sum_i S_i · n
+    H = sum_{<ij>} [Jxy (S_i^x S_j^x + S_i^y S_j^y) + Jz S_i^z S_j^z]
+      - μ_B sum_i [g_ab (B_x S^x + B_y S^y) + g_c B_z S^z]
     
     Args:
         cluster_data: Cluster JSON data
@@ -116,6 +134,8 @@ def prepare_xxz_model(cluster_data, Jxy=1.0, Jz=1.0, h=0.0, h_direction=(0, 0, 1
         Jz: Z coupling strength
         h: Magnetic field strength
         h_direction: Field direction (normalized internally)
+        g_ab: In-plane g-factor (default: 2.0)
+        g_c: Out-of-plane g-factor (default: 2.0)
         
     Returns:
         Dictionary with Hamiltonian parameters for ED
@@ -137,9 +157,13 @@ def prepare_xxz_model(cluster_data, Jxy=1.0, Jz=1.0, h=0.0, h_direction=(0, 0, 1
     h_dir = np.array(h_direction, dtype=float)
     h_dir = h_dir / np.linalg.norm(h_dir) if np.linalg.norm(h_dir) > 0 else np.array([0, 0, 1])
     
+    # Build Zeeman single-site terms
+    zeeman_terms = _build_zeeman_terms(n_sites, h, h_dir, g_ab, g_c)
+    
     return {
         'n_sites': n_sites,
         'interactions': interactions,
+        'zeeman_terms': zeeman_terms,
         'h': h,
         'h_direction': h_dir.tolist(),
         'model': 'xxz',
@@ -149,7 +173,8 @@ def prepare_xxz_model(cluster_data, Jxy=1.0, Jz=1.0, h=0.0, h_direction=(0, 0, 1
 
 
 def prepare_anisotropic_exchange(cluster_data, Jzz=1.0, Jpm=0.0, Jpmpm=0.0, Jzpm=0.0, 
-                                  h=0.0, h_direction=(0, 0, 1)):
+                                  h=0.0, h_direction=(0, 0, 1),
+                                  g_ab=2.0, g_c=2.0):
     """
     Prepare anisotropic exchange model (YbMgGaO4-type) parameters.
     
@@ -158,6 +183,7 @@ def prepare_anisotropic_exchange(cluster_data, Jzz=1.0, Jpm=0.0, Jpmpm=0.0, Jzpm
                     + J_±± (γ_α S_i^+ S_j^+ + γ_α* S_i^- S_j^-)
                     - i J_z±/2 ((γ_α* S_i^+ - γ_α S_i^-) S_j^z 
                                + S_i^z (γ_α* S_j^+ - γ_α S_j^-))]
+      - μ_B Σ_i [g_ab (B_x S^x + B_y S^y) + g_c B_z S^z]
     
     where γ_α = e^{iφ̃_α} with phases:
       φ̃_0 = 0       for bonds along a1 direction
@@ -180,6 +206,8 @@ def prepare_anisotropic_exchange(cluster_data, Jzz=1.0, Jpm=0.0, Jpmpm=0.0, Jzpm
         Jzpm: Mixed S^z S^± coupling (= J_z±)
         h: Magnetic field strength
         h_direction: Field direction
+        g_ab: In-plane g-factor (default: 2.0)
+        g_c: Out-of-plane g-factor (default: 2.0)
         
     Returns:
         Dictionary with Hamiltonian parameters for ED
@@ -234,9 +262,13 @@ def prepare_anisotropic_exchange(cluster_data, Jzz=1.0, Jpm=0.0, Jpmpm=0.0, Jzpm
     h_dir = np.array(h_direction, dtype=float)
     h_dir = h_dir / np.linalg.norm(h_dir) if np.linalg.norm(h_dir) > 0 else np.array([0, 0, 1])
     
+    # Build Zeeman single-site terms
+    zeeman_terms = _build_zeeman_terms(n_sites, h, h_dir, g_ab, g_c)
+    
     return {
         'n_sites': n_sites,
         'interactions': interactions,
+        'zeeman_terms': zeeman_terms,
         'h': h,
         'h_direction': h_dir.tolist(),
         'model': 'anisotropic_exchange',
@@ -245,6 +277,34 @@ def prepare_anisotropic_exchange(cluster_data, Jzz=1.0, Jpm=0.0, Jpmpm=0.0, Jzpm
         'Jpmpm': Jpmpm,
         'Jzpm': Jzpm
     }
+
+
+def _build_zeeman_terms(n_sites, h, h_dir, g_ab, g_c):
+    """
+    Build Zeeman single-site terms for the anisotropic g-tensor.
+    
+    H_Z = -μ_B Σ_i [g_ab (B_x S_i^x + B_y S_i^y) + g_c B_z S_i^z]
+    
+    Returns list of dicts with keys: site, Sx_coeff, Sy_coeff, Sz_coeff
+    (all real; sign convention: H_Z = Σ_i [hx Sx + hy Sy + hz Sz])
+    """
+    if abs(h) < 1e-15:
+        return []
+    
+    # Effective field components with g-tensor
+    hx = -h * h_dir[0] * g_ab   # -μ_B g_ab B_x
+    hy = -h * h_dir[1] * g_ab   # -μ_B g_ab B_y
+    hz = -h * h_dir[2] * g_c    # -μ_B g_c  B_z
+    
+    terms = []
+    for site in range(n_sites):
+        terms.append({
+            'site': site,
+            'hx': hx,
+            'hy': hy,
+            'hz': hz
+        })
+    return terms
 
 
 def write_ed_config(ham_params, output_path, cluster_data, 
@@ -307,6 +367,19 @@ def write_ed_config(ham_params, output_path, cluster_data,
         lines.append(f"h = {h}")
         lines.append(f"h_direction = {h_dir[0]}, {h_dir[1]}, {h_dir[2]}")
     
+    # Zeeman single-site terms (anisotropic g-tensor)
+    zeeman_terms = ham_params.get('zeeman_terms', [])
+    if zeeman_terms:
+        lines.append("")
+        lines.append("# Zeeman terms (anisotropic g-tensor)")
+        lines.append(f"# H_Z = sum_i [hx*Sx + hy*Sy + hz*Sz]")
+        for zt in zeeman_terms:
+            site = zt['site']
+            hx = zt['hx']
+            hy = zt['hy']
+            hz = zt['hz']
+            lines.append(f"zeeman{site} = {site}, {hx}, {hy}, {hz}")
+    
     # Write the file
     os.makedirs(os.path.dirname(output_path) if os.path.dirname(output_path) else '.', exist_ok=True)
     with open(output_path, 'w') as f:
@@ -330,16 +403,23 @@ def prepare_cluster_for_ed(cluster_json_path, output_dir, model='heisenberg', **
     """
     cluster_data = load_cluster_json(cluster_json_path)
     
+    _g_ab = model_params.get('g_ab', 2.0)
+    _g_c = model_params.get('g_c', 2.0)
+    
     if model == 'heisenberg' or model == 'heisenberg_j1j2':
         ham_params = prepare_heisenberg_j1j2(cluster_data, 
                                               J1=model_params.get('J1', 1.0),
-                                              J2=model_params.get('J2', 0.0))
+                                              J2=model_params.get('J2', 0.0),
+                                              h=model_params.get('h', 0.0),
+                                              h_direction=model_params.get('h_direction', (0, 0, 1)),
+                                              g_ab=_g_ab, g_c=_g_c)
     elif model == 'xxz':
         ham_params = prepare_xxz_model(cluster_data,
                                         Jxy=model_params.get('Jxy', 1.0),
                                         Jz=model_params.get('Jz', 1.0),
                                         h=model_params.get('h', 0.0),
-                                        h_direction=model_params.get('h_direction', (0, 0, 1)))
+                                        h_direction=model_params.get('h_direction', (0, 0, 1)),
+                                        g_ab=_g_ab, g_c=_g_c)
     elif model == 'anisotropic':
         ham_params = prepare_anisotropic_exchange(cluster_data,
                                                    Jzz=model_params.get('Jzz', 1.0),
@@ -347,7 +427,8 @@ def prepare_cluster_for_ed(cluster_json_path, output_dir, model='heisenberg', **
                                                    Jpmpm=model_params.get('Jpmpm', 0.0),
                                                    Jzpm=model_params.get('Jzpm', 0.0),
                                                    h=model_params.get('h', 0.0),
-                                                   h_direction=model_params.get('h_direction', (0, 0, 1)))
+                                                   h_direction=model_params.get('h_direction', (0, 0, 1)),
+                                                   g_ab=_g_ab, g_c=_g_c)
     else:
         raise ValueError(f"Unknown model: {model}")
     

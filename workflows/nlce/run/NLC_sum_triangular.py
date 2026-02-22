@@ -28,32 +28,33 @@ class NLCExpansionTriangular:
     """NLCE calculator for triangular lattice."""
     
     def __init__(self, cluster_dir, eigenvalue_dir, temp_min, temp_max, num_temps, 
-                 measure_spin=False, SI_units=False, J_kelvin=None):
+                 measure_spin=False, SI_units=False):
         """
         Initialize the NLC expansion calculator for triangular lattice.
+        
+        All quantities are in Kelvin:
+            - Hamiltonian couplings (and hence eigenvalues) must be in Kelvin
+            - Temperatures are in Kelvin
+            - Energy output is in Kelvin (or J/mol if SI)
         
         Args:
             cluster_dir: Directory containing cluster information files
             eigenvalue_dir: Directory containing eigenvalue files from ED calculations
-            temp_min: Minimum temperature (in units of J if J_kelvin not set, else in Kelvin)
-            temp_max: Maximum temperature (in units of J if J_kelvin not set, else in Kelvin)
+            temp_min: Minimum temperature in Kelvin
+            temp_max: Maximum temperature in Kelvin
             num_temps: Number of temperature points
             measure_spin: Whether to compute spin expectation values
-            SI_units: Convert specific heat/entropy to SI units (J/(mol·K))
-            J_kelvin: Exchange coupling in Kelvin. If set, temperatures are in Kelvin.
-                      If None, temperatures remain in natural units (T/J).
+            SI_units: Convert to SI units (J/(mol·K) for C and S, J/mol for E)
                       
         SI Unit Conversion:
             - Specific heat: C_SI = R × C where R = 8.314 J/(mol·K)
             - Entropy: S_SI = R × S  
-            - Energy: E_SI = R × T × E (if J_kelvin set)
-            - Temperature: T_K = T × J_kelvin (if J_kelvin set)
+            - Energy: E_SI = R × E [J/mol] (E in Kelvin)
         """
         self.cluster_dir = cluster_dir
         self.eigenvalue_dir = eigenvalue_dir
         
         self.SI = SI_units
-        self.J_kelvin = J_kelvin  # Exchange coupling in Kelvin for T conversion
         self.measure_spin = measure_spin
         self.temp_values = np.logspace(np.log10(temp_min), np.log10(temp_max), num_temps)
         
@@ -260,12 +261,8 @@ class NLCExpansionTriangular:
                 specific_heat *= R
                 # Entropy per mole: S_SI [J/(mol·K)] = R × S [dimensionless]
                 entropy *= R
-                # Energy per mole: E_SI [J/mol] = R × J_kelvin × E [dimensionless]
-                # Note: If J_kelvin is set, energy is converted; otherwise stays in natural units
-                if self.J_kelvin is not None:
-                    energy *= R * self.J_kelvin
-                else:
-                    energy *= R  # Energy in units of R*J
+                # Energy per mole: E_SI [J/mol] = R × E_K (E in Kelvin)
+                energy *= R
                 
             results['energy'][i] = energy
             results['specific_heat'][i] = specific_heat 
@@ -494,23 +491,18 @@ class NLCExpansionTriangular:
         """Save NLCE results to files."""
         os.makedirs(output_dir, exist_ok=True)
         
-        # Temperature array: convert to Kelvin if J_kelvin is set
-        if self.J_kelvin is not None:
-            temp_output = self.temp_values * self.J_kelvin
-            temp_unit = 'K'
-        else:
-            temp_output = self.temp_values
-            temp_unit = 'J' if not self.SI else 'J'
+        temp_output = self.temp_values
+        temp_unit = 'K'
         
         # Units for thermodynamic quantities
         if self.SI:
             cv_unit = 'J/(mol*K)'
             s_unit = 'J/(mol*K)'
-            e_unit = 'J/mol' if self.J_kelvin else 'R*J'
+            e_unit = 'J/mol'
         else:
             cv_unit = 'kB'
             s_unit = 'kB'
-            e_unit = 'J'
+            e_unit = 'K'
         
         # Save specific heat
         output_file = os.path.join(output_dir, 'nlc_specific_heat.txt')
@@ -544,23 +536,18 @@ class NLCExpansionTriangular:
         """Plot NLCE results."""
         os.makedirs(output_dir, exist_ok=True)
         
-        # Temperature array and units
-        if self.J_kelvin is not None:
-            temp_plot = self.temp_values * self.J_kelvin
-            temp_label = 'Temperature (K)'
-        else:
-            temp_plot = self.temp_values
-            temp_label = 'Temperature (J₁)'
+        temp_plot = self.temp_values
+        temp_label = 'Temperature (K)'
         
         # Units for thermodynamic quantities
         if self.SI:
             cv_label = 'Specific Heat (J/(mol·K))'
             s_label = 'Entropy (J/(mol·K))'
-            e_label = 'Energy (J/mol)' if self.J_kelvin else 'Energy (R·J)'
+            e_label = 'Energy (J/mol)'
         else:
-            cv_label = 'Specific Heat (kв)'
-            s_label = 'Entropy (kв)'
-            e_label = 'Energy (J₁)'
+            cv_label = 'Specific Heat (k_B)'
+            s_label = 'Entropy (k_B)'
+            e_label = 'Energy (K)'
         
         fig, axes = plt.subplots(2, 2, figsize=(12, 10))
         
@@ -624,12 +611,7 @@ def main():
     parser.add_argument('--measure_spin', action='store_true',
                        help='Compute spin expectation values')
     parser.add_argument('--SI_units', action='store_true',
-                       help='Convert to SI units: specific heat in J/(mol·K). '
-                            'Temperature remains in units of J unless --J_kelvin is set.')
-    parser.add_argument('--J_kelvin', type=float, default=None,
-                       help='Exchange coupling J in Kelvin. If set, temperatures are '
-                            'converted to Kelvin: T_K = T × J_kelvin. '
-                            'Required for direct comparison with experimental data.')
+                       help='Convert to SI units: C,S in J/(mol·K), E in J/mol.')
     parser.add_argument('--resummation', type=str, default='none',
                        choices=['none', 'euler', 'wynn'],
                        help='Resummation method (none, euler, or wynn)')
@@ -640,14 +622,9 @@ def main():
     print("NLCE Summation for Triangular Lattice")
     print("="*80)
     
+    print(f"\nAll quantities in Kelvin (eigenvalues and temperatures must be in K)")
     if args.SI_units:
-        print(f"\nSI units enabled: Specific heat in J/(mol·K)")
-        if args.J_kelvin:
-            print(f"Exchange coupling J = {args.J_kelvin} K")
-            print(f"Temperature output will be in Kelvin")
-        else:
-            print(f"Temperature remains in natural units (T/J)")
-            print(f"  Tip: Use --J_kelvin to convert temperature to Kelvin")
+        print(f"SI units enabled: C, S in J/(mol·K), E in J/mol")
     
     # Initialize calculator
     nlc = NLCExpansionTriangular(
@@ -657,8 +634,7 @@ def main():
         temp_max=args.temp_max,
         num_temps=args.temp_bins,
         measure_spin=args.measure_spin,
-        SI_units=args.SI_units,
-        J_kelvin=args.J_kelvin
+        SI_units=args.SI_units
     )
     
     # Read data

@@ -240,6 +240,12 @@ def main():
     parser.add_argument('--Jpmpm', type=float, default=None, help='J_±± for anisotropic model')
     parser.add_argument('--Jzpm', type=float, default=None, help='J_z± for anisotropic model')
     
+    # Anisotropic g-tensor for Zeeman term
+    parser.add_argument('--g_ab', type=float, default=2.0,
+                       help='In-plane g-factor for Zeeman coupling (default: 2.0)')
+    parser.add_argument('--g_c', type=float, default=2.0,
+                       help='Out-of-plane (c-axis) g-factor for Zeeman coupling (default: 2.0)')
+    
     # ED parameters
     parser.add_argument('--method', type=str, default='FULL', help='Diagonalization method')
     parser.add_argument('--thermo', action='store_true', help='Compute thermodynamic properties')
@@ -423,6 +429,10 @@ def main():
                 cmd.extend(['--Jpmpm', str(args.Jpmpm)])
             if args.Jzpm is not None:
                 cmd.extend(['--Jzpm', str(args.Jzpm)])
+            
+            # g-tensor parameters
+            cmd.extend(['--g_ab', str(args.g_ab)])
+            cmd.extend(['--g_c', str(args.g_c)])
             
             try:
                 subprocess.run(cmd, check=True, capture_output=True)

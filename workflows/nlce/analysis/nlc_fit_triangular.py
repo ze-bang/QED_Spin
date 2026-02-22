@@ -33,6 +33,7 @@ from scipy.optimize import minimize, differential_evolution, dual_annealing
 from scipy.stats import qmc
 from scipy.interpolate import interp1d
 from scipy.ndimage import gaussian_filter1d
+import time
 
 
 class NumpyJSONEncoder(json.JSONEncoder):
@@ -47,6 +48,92 @@ class NumpyJSONEncoder(json.JSONEncoder):
         elif isinstance(obj, np.ndarray):
             return obj.tolist()
         return super().default(obj)
+
+
+class CostLandscapeLogger:
+    """Accumulates every (params, chi²) evaluation and DE population state for
+    cost-function landscape analysis and optimizer checkpointing.
+
+    Usage:
+        logger = CostLandscapeLogger(param_names, output_dir)
+        # inside objective: logger.log_evaluation(params, chi2)
+        # as DE callback:  callback=logger.de_callback
+        # at end:          logger.save()
+    """
+
+    def __init__(self, param_names, output_dir, flush_interval=100):
+        self.param_names = list(param_names)
+        self.output_dir = output_dir
+        self.flush_interval = flush_interval
+        self._evals = []          # list of [*params, chi2]
+        self._gen_best = []       # list of [gen, chi2_best, *xk]
+        self._start_time = time.time()
+        self._timestamps = []     # wall-clock seconds since start per eval
+        self._generation = 0
+
+    # ---- called every objective evaluation ----
+    def log_evaluation(self, params, chi2):
+        self._evals.append(list(params) + [float(chi2)])
+        self._timestamps.append(time.time() - self._start_time)
+        if len(self._evals) % self.flush_interval == 0:
+            self._flush()
+
+    # ---- DE callback (called once per generation) ----
+    def de_callback(self, xk, convergence=0.0):
+        self._generation += 1
+        best_chi2 = float(self._evals[-1][-1]) if self._evals else np.nan
+        # xk is current best; find its chi2 from recent evals
+        for row in reversed(self._evals):
+            if np.allclose(row[:-1], xk, atol=1e-12):
+                best_chi2 = row[-1]
+                break
+        self._gen_best.append([self._generation, best_chi2, convergence]
+                              + list(xk))
+        logging.info(f"DE generation {self._generation}: best χ²={best_chi2:.6f}, "
+                     f"convergence={convergence:.6e}")
+        self._flush()  # save after every generation
+
+    # ---- periodic flush ----
+    def _flush(self):
+        self._save_npz(os.path.join(self.output_dir, 'cost_landscape.npz'))
+
+    # ---- final save ----
+    def save(self):
+        npz_path = self._save_npz(os.path.join(self.output_dir,
+                                                'cost_landscape.npz'))
+        csv_path = self._save_csv(os.path.join(self.output_dir,
+                                                'cost_landscape.csv'))
+        logging.info(f"Cost landscape saved: {npz_path} ({len(self._evals)} evaluations)")
+        logging.info(f"Cost landscape CSV:   {csv_path}")
+
+    def _save_npz(self, path):
+        evals = np.array(self._evals) if self._evals else np.empty((0,))
+        timestamps = np.array(self._timestamps)
+        gen_best = np.array(self._gen_best) if self._gen_best else np.empty((0,))
+        np.savez_compressed(path,
+                            evaluations=evals,
+                            timestamps=timestamps,
+                            gen_best=gen_best,
+                            param_names=np.array(self.param_names))
+        return path
+
+    def _save_csv(self, path):
+        header = ','.join(self.param_names + ['chi_squared', 'wall_time_s'])
+        evals = np.array(self._evals) if self._evals else np.empty((0,))
+        timestamps = np.array(self._timestamps)
+        if evals.size == 0:
+            with open(path, 'w') as f:
+                f.write(header + '\n')
+        else:
+            data = np.column_stack([evals, timestamps])
+            np.savetxt(path, data, delimiter=',', header=header, comments='')
+        return path
+
+    @staticmethod
+    def load(path):
+        """Load a saved landscape for post-hoc analysis."""
+        d = np.load(path, allow_pickle=True)
+        return {k: d[k] for k in d.files}
 
 
 def setup_logging(log_file):
@@ -107,7 +194,7 @@ def apply_gaussian_broadening(temp, spec_heat, sigma, broadening_type='linear'):
     return broadened
 
 
-def run_nlce_triangular(params, fixed_params, exp_temp, work_dir, h_field=None, temp_range=None):
+def run_nlce_triangular(params, fixed_params, exp_temp, work_dir, h_field=None, temp_range=None, field_dir=None):
     """
     Run triangular lattice NLCE with the given parameters.
     
@@ -120,6 +207,7 @@ def run_nlce_triangular(params, fixed_params, exp_temp, work_dir, h_field=None, 
         work_dir: Working directory for NLCE calculations
         h_field: Override magnetic field strength
         temp_range: Override temperature range
+        field_dir: Override field direction (default: from fixed_params)
     
     Returns:
         calc_temp, calc_spec_heat arrays (in SI units J/(mol·K) if SI_units=True)
@@ -150,7 +238,8 @@ def run_nlce_triangular(params, fixed_params, exp_temp, work_dir, h_field=None, 
         Jzz, Jpm, Jpmpm, Jzpm = None, None, None, None
     
     h_value = h_field if h_field is not None else fixed_params.get("h", 0.0)
-    field_dir = fixed_params["field_dir"]
+    if field_dir is None:
+        field_dir = fixed_params["field_dir"]
     
     temp_min = temp_range.get('temp_min', fixed_params["temp_min"]) if temp_range else fixed_params["temp_min"]
     temp_max = temp_range.get('temp_max', fixed_params["temp_max"]) if temp_range else fixed_params["temp_max"]
@@ -160,7 +249,7 @@ def run_nlce_triangular(params, fixed_params, exp_temp, work_dir, h_field=None, 
     nlce_script = os.path.join(script_dir, '..', 'run', 'nlce_triangular.py')
     
     cmd = [
-        'python3',
+        sys.executable,
         nlce_script,
         '--max_order', str(fixed_params["max_order"]),
         '--h', f'{h_value:.12f}',
@@ -171,7 +260,9 @@ def run_nlce_triangular(params, fixed_params, exp_temp, work_dir, h_field=None, 
         '--temp_bins', str(fixed_params["temp_bins"]),
         '--model', model,
         '--thermo',
-        '--base_dir', work_dir
+        '--base_dir', work_dir,
+        '--g_ab', f'{fixed_params.get("g_ab", 2.0):.12f}',
+        '--g_c', f'{fixed_params.get("g_c", 2.0):.12f}'
     ]
     
     # Add model-specific parameters
@@ -284,6 +375,7 @@ def calc_chi_squared(params, fixed_params, exp_datasets, work_dir):
         exp_temp = dataset['temp']
         exp_spec_heat = dataset['spec_heat']
         h_field = dataset.get('h', 0.0)
+        ds_field_dir = dataset.get('field_dir', None)
         weight = dataset.get('weight', 1.0)
         
         # Get temperature range for this dataset
@@ -296,7 +388,8 @@ def calc_chi_squared(params, fixed_params, exp_datasets, work_dir):
         # Run NLCE
         calc_temp, calc_spec_heat = run_nlce_triangular(
             model_params, fixed_params, exp_temp, work_dir, 
-            h_field=h_field, temp_range=temp_range if temp_range else None
+            h_field=h_field, temp_range=temp_range if temp_range else None,
+            field_dir=ds_field_dir
         )
         
         if calc_temp is None:
@@ -369,6 +462,11 @@ def calc_chi_squared(params, fixed_params, exp_datasets, work_dir):
             log_msg += f", J_kelvin={params[2]:.4f}"
         logging.info(f"Parameters: {log_msg}, Chi²={total_chi_squared:.4f}")
     
+    # Log to cost landscape accumulator if present
+    landscape_logger = fixed_params.get("landscape_logger", None)
+    if landscape_logger is not None:
+        landscape_logger.log_evaluation(params, total_chi_squared)
+    
     return total_chi_squared
 
 
@@ -378,12 +476,18 @@ def plot_results(exp_datasets, fixed_params, best_params, work_dir, output_dir):
     
     colors = plt.cm.tab10(np.linspace(0, 1, len(exp_datasets)))
     model = fixed_params.get("model", "heisenberg")
-    n_model_params = 4 if model == 'anisotropic' else 2
+    fit_J_kelvin = fixed_params.get("fit_J_kelvin", False)
+    if model == 'anisotropic':
+        n_model_params = 5 if fit_J_kelvin else 4
+    else:
+        n_model_params = 3 if fit_J_kelvin else 2
     
     for i, (dataset, color) in enumerate(zip(exp_datasets, colors)):
         exp_temp = dataset['temp']
         exp_spec_heat = dataset['spec_heat']
         h_field = dataset.get('h', 0.0)
+        ds_field_dir = dataset.get('field_dir', None)
+        label_str = dataset.get('label', f'h={h_field:.3f}')
         
         # Get temperature range
         temp_range = {}
@@ -395,17 +499,18 @@ def plot_results(exp_datasets, fixed_params, best_params, work_dir, output_dir):
         # Run NLCE with best parameters
         calc_temp, calc_spec_heat = run_nlce_triangular(
             best_params[:n_model_params], fixed_params, exp_temp, work_dir,
-            h_field=h_field, temp_range=temp_range if temp_range else None
+            h_field=h_field, temp_range=temp_range if temp_range else None,
+            field_dir=ds_field_dir
         )
         
         # Plot experimental data
         plt.scatter(exp_temp, exp_spec_heat, c=[color], s=30, alpha=0.7, 
-                   label=f'Exp (h={h_field})')
+                   label=f'Exp ({label_str})')
         
         # Plot calculated data
         if calc_temp is not None:
             plt.plot(calc_temp, calc_spec_heat, c=color, lw=2, 
-                    label=f'NLCE (h={h_field})')
+                    label=f'NLCE ({label_str})')
     
     if model == 'anisotropic':
         title_str = (f'Triangular Lattice Fit (Anisotropic): '
@@ -526,6 +631,12 @@ def main():
     parser.add_argument('--skip_cluster_gen', action='store_true')
     parser.add_argument('--skip_ham_prep', action='store_true')
     
+    # Anisotropic g-tensor for Zeeman coupling
+    parser.add_argument('--g_ab', type=float, default=2.0,
+                       help='In-plane g-factor (default: 2.0; NdMgAl11O19 magnetization: 1.54)')
+    parser.add_argument('--g_c', type=float, default=2.0,
+                       help='Out-of-plane g-factor (default: 2.0; NdMgAl11O19 magnetization: 3.75)')
+    
     # SI units (default: True for comparison with experimental data)
     parser.add_argument('--SI_units', action='store_true', default=True,
                        help='Use SI units (J/(mol·K)) for specific heat output (default: True)')
@@ -556,6 +667,13 @@ def main():
     # Debug snapshots
     parser.add_argument('--save_snapshots', action='store_true',
                        help='Save diagnostic snapshots at each iteration for debugging')
+    
+    # Cost landscape logging
+    parser.add_argument('--save_landscape', action='store_true', default=True,
+                       help='Save cost function landscape (all evaluations) to .npz and .csv '
+                            '(default: True)')
+    parser.add_argument('--no_save_landscape', action='store_true',
+                       help='Disable cost landscape saving')
     
     args = parser.parse_args()
     
@@ -613,6 +731,8 @@ def main():
         "SI_units": use_SI_units,
         "J_kelvin": args.J_kelvin,
         "fit_J_kelvin": args.fit_J_kelvin,
+        "g_ab": args.g_ab,
+        "g_c": args.g_c,
         "save_snapshots": args.save_snapshots,
         "snapshot_dir": snapshot_dir,
         "iteration_counter": [0]  # Mutable list to track iteration count
@@ -624,7 +744,7 @@ def main():
         script_dir = os.path.dirname(os.path.abspath(__file__))
         cluster_gen_script = os.path.join(script_dir, '..', 'prep', 'generate_triangular_clusters.py')
         cluster_gen_cmd = [
-            'python3',
+            sys.executable,
             cluster_gen_script,
             '--max_order', str(args.max_order),
             '--output_dir', os.path.join(args.work_dir, f'clusters_order_{args.max_order}')
@@ -673,6 +793,20 @@ def main():
             bounds.append((0.0, 1.0))
             initial_params.append(0.1)
     
+    # Set up cost landscape logger
+    save_landscape = args.save_landscape and not args.no_save_landscape
+    landscape_logger = None
+    if save_landscape:
+        landscape_param_names = [p.strip() for p in param_names.split(',')]
+        landscape_logger = CostLandscapeLogger(
+            param_names=landscape_param_names,
+            output_dir=args.output_dir,
+            flush_interval=50
+        )
+        fixed_params["landscape_logger"] = landscape_logger
+        logging.info("Cost landscape logging enabled — "
+                     "evaluations will be saved to cost_landscape.npz/csv")
+    
     # Run optimization
     logging.info("Starting optimization...")
     
@@ -687,13 +821,18 @@ def main():
             options={'maxiter': args.max_iter}
         )
     elif args.method == 'differential_evolution':
-        result = differential_evolution(
-            calc_chi_squared,
-            bounds,
+        de_kwargs = dict(
             args=(fixed_params, exp_datasets, args.work_dir),
             maxiter=args.max_iter,
             seed=42,
             disp=True
+        )
+        if landscape_logger is not None:
+            de_kwargs['callback'] = landscape_logger.de_callback
+        result = differential_evolution(
+            calc_chi_squared,
+            bounds,
+            **de_kwargs
         )
     elif args.method == 'dual_annealing':
         result = dual_annealing(
@@ -749,6 +888,15 @@ def main():
     
     logging.info(f"Best chi-squared: {best_chi_sq:.6f}")
     logging.info("="*80)
+    
+    # Save cost landscape data
+    if landscape_logger is not None:
+        landscape_logger.save()
+    
+    # Remove non-serializable objects from fixed_params for JSON output
+    serializable_fixed_params = {k: v for k, v in fixed_params.items()
+                                  if k not in ('landscape_logger',)}
+    results_dict['fixed_params'] = serializable_fixed_params
     
     # Save results
     with open(os.path.join(args.output_dir, 'fit_results.json'), 'w') as f:
