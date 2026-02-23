@@ -2698,6 +2698,252 @@ inline EDResults exact_diagonalization_all_sz_sectors(
 }
 
 // ============================================================================
+// GPU FULL DIAGONALIZATION VIA Sz SECTOR SPLITTING
+// ============================================================================
+
+/**
+ * @brief GPU full diagonalization by splitting into Sz sectors
+ * 
+ * GPU equivalent of exact_diagonalization_all_sz_sectors(). Instead of building
+ * a CPU sparse matrix per sector, this function:
+ * 1. Parses interaction files once into vectors
+ * 2. Loops over all Sz sectors (n_up = 0, 1, ..., num_sites)
+ * 3. Creates a GPUFixedSzOperator per sector
+ * 4. Calls gpuFullDiagonalization (builds dense H via matVec, cuSOLVER zheevd)
+ * 5. Collects and sorts all eigenvalues
+ * 6. Saves the merged result to HDF5
+ * 
+ * Same memory advantage as CPU sector splitting - the largest sector is C(N,N/2).
+ * Each sector's GPU operator is created and destroyed independently, so only one
+ * sector's dense matrix is in GPU memory at a time.
+ * 
+ * @param interaction_file Path to interaction file (InterAll.dat)
+ * @param single_site_file Path to single-site file (Trans.dat)
+ * @param num_sites Number of spin sites
+ * @param spin_length Spin length (usually 0.5)
+ * @param params Parameters for diagonalization
+ * @return EDResults containing ALL eigenvalues from ALL sectors, sorted
+ */
+#ifdef WITH_CUDA
+inline EDResults exact_diagonalization_all_sz_sectors_gpu(
+    const std::string& interaction_file,
+    const std::string& single_site_file,
+    uint64_t num_sites,
+    float spin_length,
+    const EDParameters& params
+) {
+    EDResults results;
+    
+    uint64_t full_dim = 1ULL << num_sites;
+    uint64_t num_sectors = num_sites + 1;  // n_up = 0, 1, ..., num_sites
+    
+    std::cout << "\n" << std::string(80, '=') << std::endl;
+    std::cout << "GPU FULL DIAGONALIZATION VIA Sz SECTOR SPLITTING" << std::endl;
+    std::cout << std::string(80, '=') << std::endl;
+    std::cout << "Full Hilbert space dimension: " << full_dim << std::endl;
+    std::cout << "Number of Sz sectors: " << num_sectors << std::endl;
+    
+    // Pre-compute sector dimensions using binomial coefficients
+    auto binomial = [](uint64_t n, uint64_t k) -> uint64_t {
+        if (k > n - k) k = n - k;
+        uint64_t result = 1;
+        for (uint64_t i = 0; i < k; ++i) {
+            result *= (n - i);
+            result /= (i + 1);
+        }
+        return result;
+    };
+    
+    std::vector<uint64_t> sector_dims(num_sectors);
+    uint64_t largest_sector_dim = 0;
+    for (uint64_t n_up = 0; n_up <= num_sites; ++n_up) {
+        sector_dims[n_up] = binomial(num_sites, n_up);
+        if (sector_dims[n_up] > largest_sector_dim) {
+            largest_sector_dim = sector_dims[n_up];
+        }
+    }
+    
+    std::cout << "Largest sector dimension: " << largest_sector_dim 
+              << " (reduction: " << std::fixed << std::setprecision(1) 
+              << (double)full_dim / largest_sector_dim << "x)" 
+              << std::defaultfloat << std::endl;
+    std::cout << "Memory for full dense matrix:    " 
+              << (double)full_dim * full_dim * 16.0 / (1024.0*1024.0*1024.0)
+              << " GB" << std::endl;
+    std::cout << "Memory for largest sector:       " 
+              << (double)largest_sector_dim * largest_sector_dim * 16.0 / (1024.0*1024.0*1024.0)
+              << " GB" << std::endl;
+    
+    // Parse interaction files ONCE into vectors for reuse across sectors
+    std::vector<std::tuple<int, int, char, char, double>> gpu_interactions;
+    std::vector<std::tuple<int, char, double>> gpu_single_site_ops;
+    
+    {
+        std::ifstream inter_file(interaction_file);
+        if (inter_file.is_open()) {
+            std::string line;
+            std::getline(inter_file, line);
+            std::getline(inter_file, line);
+            std::istringstream iss(line);
+            uint64_t numLines;
+            std::string m;
+            iss >> m >> numLines;
+            for (uint64_t i = 0; i < 3; ++i) std::getline(inter_file, line);
+            
+            auto mapOp = [](uint64_t op) -> char {
+                if (op == 0) return '+';
+                if (op == 1) return '-';
+                return 'z';
+            };
+            
+            uint64_t lineCount = 0;
+            while (std::getline(inter_file, line) && lineCount < numLines) {
+                std::istringstream lineStream(line);
+                uint64_t Op_i, indx_i, Op_j, indx_j;
+                double E, F;
+                if (!(lineStream >> Op_i >> indx_i >> Op_j >> indx_j >> E >> F)) { lineCount++; continue; }
+                gpu_interactions.push_back(std::make_tuple(indx_i, indx_j, mapOp(Op_i), mapOp(Op_j), E));
+                lineCount++;
+            }
+        }
+        
+        if (!single_site_file.empty()) {
+            std::ifstream ss_file(single_site_file);
+            if (ss_file.is_open()) {
+                std::string line;
+                std::getline(ss_file, line);
+                std::getline(ss_file, line);
+                std::istringstream iss(line);
+                uint64_t numLines;
+                std::string m;
+                iss >> m >> numLines;
+                for (uint64_t i = 0; i < 3; ++i) std::getline(ss_file, line);
+                
+                auto mapOp = [](uint64_t op) -> char {
+                    if (op == 0) return '+';
+                    if (op == 1) return '-';
+                    return 'z';
+                };
+                
+                uint64_t lineCount = 0;
+                while (std::getline(ss_file, line) && lineCount < numLines) {
+                    std::istringstream lineStream(line);
+                    uint64_t Op_i, indx_i;
+                    double E, F;
+                    if (!(lineStream >> Op_i >> indx_i >> E >> F)) { lineCount++; continue; }
+                    gpu_single_site_ops.push_back(std::make_tuple(indx_i, mapOp(Op_i), E));
+                    lineCount++;
+                }
+            }
+        }
+    }
+    
+    std::cout << "Loaded " << gpu_interactions.size() << " interactions, "
+              << gpu_single_site_ops.size() << " single-site terms" << std::endl;
+    
+    // Collect all eigenvalues from all sectors
+    std::vector<double> all_eigenvalues;
+    all_eigenvalues.reserve(full_dim);
+    
+    auto total_start = std::chrono::high_resolution_clock::now();
+    
+    for (uint64_t n_up = 0; n_up <= num_sites; ++n_up) {
+        uint64_t dim = sector_dims[n_up];
+        double sz_value = spin_length * num_sites - n_up;
+        
+        std::cout << "\n--- Sector " << n_up + 1 << "/" << num_sectors 
+                  << ": n_up=" << n_up << ", Sz=" << sz_value
+                  << ", dim=" << dim << " ---" << std::endl;
+        
+        if (dim == 0) {
+            std::cout << "  Empty sector, skipping." << std::endl;
+            continue;
+        }
+        
+        auto sector_start = std::chrono::high_resolution_clock::now();
+        
+        // Create GPU Fixed Sz operator for this sector
+        void* gpu_op_handle = GPUEDWrapper::createGPUFixedSzOperatorDirect(
+            num_sites, n_up, spin_length,
+            gpu_interactions, gpu_single_site_ops);
+        
+        if (!gpu_op_handle) {
+            std::cerr << "  Error: Failed to create GPU operator for sector n_up=" << n_up << std::endl;
+            continue;
+        }
+        
+        // Run GPU full diag on this sector (no HDF5 save per sector)
+        std::vector<double> sector_eigenvalues;
+        GPUEDWrapper::runGPUFullDiag(
+            gpu_op_handle,
+            static_cast<int>(dim),
+            static_cast<int>(dim),  // Get ALL eigenvalues in each sector
+            sector_eigenvalues,
+            "",   // Empty dir = don't save per-sector HDF5
+            false // No eigenvectors needed for thermodynamics
+        );
+        
+        // Destroy GPU operator for this sector (frees GPU memory)
+        GPUEDWrapper::destroyGPUOperator(gpu_op_handle);
+        
+        // Append eigenvalues
+        all_eigenvalues.insert(all_eigenvalues.end(), 
+                                sector_eigenvalues.begin(), sector_eigenvalues.end());
+        
+        auto sector_end = std::chrono::high_resolution_clock::now();
+        double sector_time = std::chrono::duration<double>(sector_end - sector_start).count();
+        
+        if (!sector_eigenvalues.empty()) {
+            std::cout << "  GPU diag: " << std::fixed << std::setprecision(2) 
+                      << sector_time << " s, " << sector_eigenvalues.size() << " eigenvalues"
+                      << " [" << sector_eigenvalues.front() << ", " << sector_eigenvalues.back() << "]" 
+                      << std::defaultfloat << std::endl;
+        }
+    }
+    
+    auto total_end = std::chrono::high_resolution_clock::now();
+    double total_time = std::chrono::duration<double>(total_end - total_start).count();
+    
+    // Sort all eigenvalues globally
+    std::sort(all_eigenvalues.begin(), all_eigenvalues.end());
+    
+    // Store results
+    if (params.num_eigenvalues > 0 && static_cast<size_t>(params.num_eigenvalues) < all_eigenvalues.size()) {
+        results.eigenvalues.assign(all_eigenvalues.begin(), 
+                                   all_eigenvalues.begin() + params.num_eigenvalues);
+    } else {
+        results.eigenvalues = std::move(all_eigenvalues);
+    }
+    
+    std::cout << "\n" << std::string(80, '=') << std::endl;
+    std::cout << "GPU Sz-SPLIT FULL DIAG COMPLETE" << std::endl;
+    std::cout << "Total eigenvalues: " << results.eigenvalues.size() << std::endl;
+    std::cout << "Total wall time: " << std::fixed << std::setprecision(2) << total_time << " s" << std::endl;
+    if (!results.eigenvalues.empty()) {
+        std::cout << "Ground state energy: " << results.eigenvalues[0] << std::endl;
+    }
+    std::cout << std::string(80, '=') << std::endl;
+    
+    // Save results to HDF5
+    if (!params.output_dir.empty()) {
+        safe_system_call("mkdir -p " + params.output_dir);
+        
+        try {
+            std::string hdf5_file = HDF5IO::createOrOpenFile(params.output_dir);
+            HDF5IO::saveEigenvalues(hdf5_file, results.eigenvalues);
+            std::cout << "Saved " << results.eigenvalues.size() 
+                      << " eigenvalues to " << hdf5_file << std::endl;
+        } catch (const std::exception& e) {
+            std::cerr << "Warning: Failed to save to HDF5: " << e.what() << std::endl;
+        }
+    }
+    
+    return results;
+}
+#endif // WITH_CUDA
+
+
+// ============================================================================
 // FIXED SZ EXACT DIAGONALIZATION
 // ============================================================================
 
@@ -3114,6 +3360,33 @@ EDResults exact_diagonalization_from_files(
             );
         }
     }
+    
+    // ========== GPU FULL_GPU Sz-Sector Split ==========
+    // Same auto-detection for GPU full diag: split into Sz sectors on GPU
+#ifdef WITH_CUDA
+    if (method == DiagonalizationMethod::FULL_GPU) {
+        bool use_sz_split = params.full_sz_split;
+        
+        if (!use_sz_split) {
+            bool sz_conserved = hamiltonian_conserves_sz(interaction_file, single_site_file);
+            if (sz_conserved) {
+                std::cout << "[Auto] Hamiltonian conserves Sz — enabling GPU sector splitting for full diag" << std::endl;
+                use_sz_split = true;
+            }
+        }
+        
+        if (use_sz_split) {
+            std::cout << "Using GPU Sz-sector splitting for full diagonalization" << std::endl;
+            return exact_diagonalization_all_sz_sectors_gpu(
+                interaction_file,
+                single_site_file,
+                params.num_sites,
+                params.spin_length,
+                params
+            );
+        }
+    }
+#endif
     
     // Handle GPU methods separately (they don't need CPU Operator)
 #ifdef WITH_CUDA
