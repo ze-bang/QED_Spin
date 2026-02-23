@@ -245,8 +245,8 @@ def main():
     parser.add_argument('--h', type=float, default=0.0, help='Magnetic field strength')
     parser.add_argument('--field_dir', type=float, nargs=3, default=[0, 0, 1], 
                        help='Field direction (x,y,z), default is out-of-plane')
-    parser.add_argument('--model', type=str, default='heisenberg', 
-                       choices=['heisenberg', 'xxz', 'kitaev', 'anisotropic'],
+    parser.add_argument('--model', type=str, default='xxz_j1j2', 
+                       choices=['xxz_j1j2', 'kitaev', 'anisotropic'],
                        help='Spin model type')
     
     # Anisotropic exchange model parameters (YbMgGaO4-type)

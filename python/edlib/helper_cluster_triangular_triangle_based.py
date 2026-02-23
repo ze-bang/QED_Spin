@@ -65,18 +65,26 @@ def get_anisotropic_phase(direction_idx):
         raise ValueError(f"Unknown direction: {direction_idx}")
 
 
-def prepare_heisenberg_j1j2(cluster_data, J1=1.0, J2=0.0, h=0.0, h_direction=(0, 0, 1),
-                            g_ab=2.0, g_c=2.0):
+def prepare_xxz_j1j2(cluster_data, J1=1.0, J2=0.0, Jz_ratio=1.0, h=0.0, h_direction=(0, 0, 1),
+                     g_ab=2.0, g_c=2.0):
     """
-    Prepare J1-J2 Heisenberg model parameters.
+    Prepare XXZ J1-J2 model parameters (unified model).
     
-    H = J1 * sum_{<ij>} S_i · S_j + J2 * sum_{<<ij>>} S_i · S_j
+    H = sum_{<ij>} [Jxy*(Sx_i Sx_j + Sy_i Sy_j) + J1*Sz_i Sz_j]
+      + J2 * sum_{<<ij>>} S_i · S_j
       - μ_B sum_i [g_ab (B_x S^x + B_y S^y) + g_c B_z S^z]
+    
+    where Jxy = J1 * Jz_ratio.  Jz_ratio=1 gives isotropic Heisenberg.
+    J2 is always isotropic Heisenberg.
+    
+    This subsumes both the pure Heisenberg (Jz_ratio=1) and XXZ cases.
     
     Args:
         cluster_data: Cluster JSON data
         J1: Nearest-neighbor exchange (default: 1.0)
-        J2: Next-nearest neighbor exchange (default: 0.0)
+        J2: Next-nearest neighbor exchange, isotropic (default: 0.0)
+        Jz_ratio: Jxy/Jz ratio (default: 1.0 = isotropic Heisenberg)
+                  Convention: Jz = J1, Jxy = J1 * Jz_ratio
         h: Magnetic field strength
         h_direction: Field direction (normalized internally)
         g_ab: In-plane g-factor (default: 2.0)
@@ -88,61 +96,9 @@ def prepare_heisenberg_j1j2(cluster_data, J1=1.0, J2=0.0, h=0.0, h_direction=(0,
     n_sites = cluster_data['n_sites']
     bonds = cluster_data['bonds']
     
-    # For J1-J2, we only have nearest-neighbor bonds in the cluster
-    # (J2 would require second-neighbor bonds, which need to be computed separately)
+    Jxy = J1 * Jz_ratio
     
-    interactions = []
-    for i, j in bonds:
-        interactions.append({
-            'site1': i,
-            'site2': j,
-            'Jxx': J1,
-            'Jyy': J1,
-            'Jzz': J1
-        })
-    
-    # Normalize field direction
-    h_dir = np.array(h_direction, dtype=float)
-    h_dir = h_dir / np.linalg.norm(h_dir) if np.linalg.norm(h_dir) > 0 else np.array([0, 0, 1])
-    
-    # Build Zeeman single-site terms
-    zeeman_terms = _build_zeeman_terms(n_sites, h, h_dir, g_ab, g_c)
-    
-    return {
-        'n_sites': n_sites,
-        'interactions': interactions,
-        'zeeman_terms': zeeman_terms,
-        'h': h,
-        'h_direction': h_dir.tolist(),
-        'model': 'heisenberg_j1j2',
-        'J1': J1,
-        'J2': J2
-    }
-
-
-def prepare_xxz_model(cluster_data, Jxy=1.0, Jz=1.0, h=0.0, h_direction=(0, 0, 1),
-                      g_ab=2.0, g_c=2.0):
-    """
-    Prepare XXZ model parameters.
-    
-    H = sum_{<ij>} [Jxy (S_i^x S_j^x + S_i^y S_j^y) + Jz S_i^z S_j^z]
-      - μ_B sum_i [g_ab (B_x S^x + B_y S^y) + g_c B_z S^z]
-    
-    Args:
-        cluster_data: Cluster JSON data
-        Jxy: XY coupling strength
-        Jz: Z coupling strength
-        h: Magnetic field strength
-        h_direction: Field direction (normalized internally)
-        g_ab: In-plane g-factor (default: 2.0)
-        g_c: Out-of-plane g-factor (default: 2.0)
-        
-    Returns:
-        Dictionary with Hamiltonian parameters for ED
-    """
-    n_sites = cluster_data['n_sites']
-    bonds = cluster_data['bonds']
-    
+    # NN bonds: XXZ with Jz=J1, Jxy=J1*Jz_ratio
     interactions = []
     for i, j in bonds:
         interactions.append({
@@ -150,8 +106,11 @@ def prepare_xxz_model(cluster_data, Jxy=1.0, Jz=1.0, h=0.0, h_direction=(0, 0, 1
             'site2': j,
             'Jxx': Jxy,
             'Jyy': Jxy,
-            'Jzz': Jz
+            'Jzz': J1
         })
+    
+    # TODO: NNN (J2) bonds need second-neighbor bond list from cluster data.
+    # When available, add isotropic J2 interactions here.
     
     # Normalize field direction
     h_dir = np.array(h_direction, dtype=float)
@@ -166,9 +125,10 @@ def prepare_xxz_model(cluster_data, Jxy=1.0, Jz=1.0, h=0.0, h_direction=(0, 0, 1
         'zeeman_terms': zeeman_terms,
         'h': h,
         'h_direction': h_dir.tolist(),
-        'model': 'xxz',
-        'Jxy': Jxy,
-        'Jz': Jz
+        'model': 'xxz_j1j2',
+        'J1': J1,
+        'J2': J2,
+        'Jz_ratio': Jz_ratio
     }
 
 
@@ -388,14 +348,14 @@ def write_ed_config(ham_params, output_path, cluster_data,
     return output_path
 
 
-def prepare_cluster_for_ed(cluster_json_path, output_dir, model='heisenberg', **model_params):
+def prepare_cluster_for_ed(cluster_json_path, output_dir, model='xxz_j1j2', **model_params):
     """
     Prepare a cluster for ED calculation.
     
     Args:
         cluster_json_path: Path to cluster JSON file
         output_dir: Directory to write ED input files
-        model: Model type ('heisenberg', 'xxz', 'anisotropic')
+        model: Model type ('xxz_j1j2', 'anisotropic')
         **model_params: Model-specific parameters
         
     Returns:
@@ -406,20 +366,14 @@ def prepare_cluster_for_ed(cluster_json_path, output_dir, model='heisenberg', **
     _g_ab = model_params.get('g_ab', 2.0)
     _g_c = model_params.get('g_c', 2.0)
     
-    if model == 'heisenberg' or model == 'heisenberg_j1j2':
-        ham_params = prepare_heisenberg_j1j2(cluster_data, 
-                                              J1=model_params.get('J1', 1.0),
-                                              J2=model_params.get('J2', 0.0),
-                                              h=model_params.get('h', 0.0),
-                                              h_direction=model_params.get('h_direction', (0, 0, 1)),
-                                              g_ab=_g_ab, g_c=_g_c)
-    elif model == 'xxz':
-        ham_params = prepare_xxz_model(cluster_data,
-                                        Jxy=model_params.get('Jxy', 1.0),
-                                        Jz=model_params.get('Jz', 1.0),
-                                        h=model_params.get('h', 0.0),
-                                        h_direction=model_params.get('h_direction', (0, 0, 1)),
-                                        g_ab=_g_ab, g_c=_g_c)
+    if model == 'xxz_j1j2':
+        ham_params = prepare_xxz_j1j2(cluster_data, 
+                                       J1=model_params.get('J1', 1.0),
+                                       J2=model_params.get('J2', 0.0),
+                                       Jz_ratio=model_params.get('Jz_ratio', 1.0),
+                                       h=model_params.get('h', 0.0),
+                                       h_direction=model_params.get('h_direction', (0, 0, 1)),
+                                       g_ab=_g_ab, g_c=_g_c)
     elif model == 'anisotropic':
         ham_params = prepare_anisotropic_exchange(cluster_data,
                                                    Jzz=model_params.get('Jzz', 1.0),
@@ -489,8 +443,14 @@ if __name__ == '__main__':
         'weight': 1
     }
     
-    print("Testing Heisenberg model:")
-    ham = prepare_heisenberg_j1j2(test_cluster, J1=1.0)
+    print("Testing XXZ J1-J2 model (isotropic, Jz_ratio=1):")
+    ham = prepare_xxz_j1j2(test_cluster, J1=1.0)
+    for inter in ham['interactions']:
+        print(f"  Bond {inter['site1']}-{inter['site2']}: "
+              f"Jxx={inter['Jxx']}, Jyy={inter['Jyy']}, Jzz={inter['Jzz']}")
+    
+    print("\nTesting XXZ J1-J2 model (anisotropic, Jz_ratio=0.5):")
+    ham = prepare_xxz_j1j2(test_cluster, J1=1.0, Jz_ratio=0.5)
     for inter in ham['interactions']:
         print(f"  Bond {inter['site1']}-{inter['site2']}: "
               f"Jxx={inter['Jxx']}, Jyy={inter['Jyy']}, Jzz={inter['Jzz']}")

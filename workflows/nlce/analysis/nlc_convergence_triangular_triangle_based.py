@@ -53,11 +53,10 @@ def run_nlce_order(order, base_dir, model_params, workspace_root, visualize=Fals
         cmd.append('--visualize')
     
     # Add model-specific parameters
-    if model_params['model'] == 'heisenberg':
+    if model_params['model'] == 'xxz_j1j2':
         cmd.extend(['--J1', str(model_params.get('J1', 1.0))])
-    elif model_params['model'] == 'xxz':
-        cmd.extend(['--Jxy', str(model_params.get('Jxy', 1.0))])
-        cmd.extend(['--Jz', str(model_params.get('Jz', 1.0))])
+        cmd.extend(['--J2', str(model_params.get('J2', 0.0))])
+        cmd.extend(['--Jz_ratio', str(model_params.get('Jz_ratio', 1.0))])
     elif model_params['model'] == 'anisotropic':
         cmd.extend(['--Jzz', str(model_params.get('Jzz', 1.0))])
         cmd.extend(['--Jpm', str(model_params.get('Jpm', 0.0))])
@@ -247,12 +246,12 @@ def main():
                        help='Output directory')
     
     # Model parameters
-    parser.add_argument('--model', type=str, default='heisenberg',
-                       choices=['heisenberg', 'xxz', 'anisotropic'],
+    parser.add_argument('--model', type=str, default='xxz_j1j2',
+                       choices=['xxz_j1j2', 'anisotropic'],
                        help='Model type')
-    parser.add_argument('--J1', type=float, default=1.0, help='J1 coupling (Heisenberg)')
-    parser.add_argument('--Jxy', type=float, default=1.0, help='Jxy (XXZ)')
-    parser.add_argument('--Jz', type=float, default=1.0, help='Jz (XXZ)')
+    parser.add_argument('--J1', type=float, default=1.0, help='J1 coupling')
+    parser.add_argument('--J2', type=float, default=0.0, help='J2 NNN coupling')
+    parser.add_argument('--Jz_ratio', type=float, default=1.0, help='Jxy/Jz ratio (Jxy=Jz_ratio*J1, Jz=J1)')
     parser.add_argument('--Jzz', type=float, default=1.0, help='Jzz (anisotropic)')
     parser.add_argument('--Jpm', type=float, default=0.0, help='J± (anisotropic)')
     parser.add_argument('--Jpmpm', type=float, default=0.0, help='J±± (anisotropic)')
@@ -293,8 +292,8 @@ def main():
     model_params = {
         'model': args.model,
         'J1': args.J1,
-        'Jxy': args.Jxy,
-        'Jz': args.Jz,
+        'J2': args.J2,
+        'Jz_ratio': args.Jz_ratio,
         'Jzz': args.Jzz,
         'Jpm': args.Jpm,
         'Jpmpm': args.Jpmpm,
@@ -321,8 +320,7 @@ def main():
     
     # Plot convergence
     model_name = {
-        'heisenberg': f'Heisenberg (J={args.J1})',
-        'xxz': f'XXZ (Jxy={args.Jxy}, Jz={args.Jz})',
+        'xxz_j1j2': f'XXZ J1-J2 (J1={args.J1}, J2={args.J2}, Jz_ratio={args.Jz_ratio})',
         'anisotropic': f'Anisotropic (Jzz={args.Jzz}, J±={args.Jpm})'
     }[args.model]
     

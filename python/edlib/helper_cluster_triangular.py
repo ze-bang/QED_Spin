@@ -268,15 +268,14 @@ def write_cluster_nn_list(output_dir, cluster_name, nn_list, positions, node_map
 
 
 def prepare_hamiltonian_parameters(cluster_filepath, output_dir, J1, J2=0.0, Jz_ratio=1.0, 
-                                    h=0.0, field_dir=(0, 0, 1), model='heisenberg',
+                                    h=0.0, field_dir=(0, 0, 1), model='xxz_j1j2',
                                     Jzz=None, Jpm=None, Jpmpm=None, Jzpm=None,
                                     g_ab=2.0, g_c=2.0):
     """
     Prepare Hamiltonian parameters for exact diagonalization of triangular lattice.
     
     Supports several models:
-    - 'heisenberg': Isotropic J1-J2 Heisenberg model
-    - 'xxz': XXZ model with anisotropy Jz_ratio
+    - 'xxz_j1j2': XXZ J1-J2 model (Jz=J1, Jxy=J1*Jz_ratio; isotropic when Jz_ratio=1)
     - 'kitaev': Kitaev-Heisenberg model with bond-dependent interactions
     - 'anisotropic': Bond-dependent anisotropic exchange (YbMgGaO4-type):
       H = Σ_{⟨ij⟩} [J_zz S_i^z S_j^z + J_± (S_i^+ S_j^- + S_i^- S_j^+)
@@ -287,12 +286,12 @@ def prepare_hamiltonian_parameters(cluster_filepath, output_dir, J1, J2=0.0, Jz_
     Args:
         cluster_filepath: Path to the cluster file
         output_dir: Directory to write output files
-        J1: Nearest-neighbor exchange coupling (for heisenberg/xxz/kitaev)
+        J1: Nearest-neighbor exchange coupling
         J2: Next-nearest-neighbor exchange coupling (default 0)
         Jz_ratio: Jxy/Jz coupling ratio for XXZ model (Jxy = J1 * Jz_ratio, Jz = J1)
         h: Magnetic field strength (in Tesla when using physical units)
         field_dir: Field direction (3-vector), default is (0, 0, 1) for out-of-plane
-        model: Model type ('heisenberg', 'xxz', 'kitaev', 'anisotropic')
+        model: Model type ('xxz_j1j2', 'kitaev', 'anisotropic')
         Jzz: S^z S^z coupling for anisotropic model
         Jpm: S^+ S^- + S^- S^+ coupling for anisotropic model (J_±)
         Jpmpm: S^+ S^+ + S^- S^- coupling for anisotropic model (J_±±)
@@ -355,17 +354,9 @@ def prepare_hamiltonian_parameters(cluster_filepath, output_dir, J1, J2=0.0, Jz_
             if site_id < neighbor_id:
                 j = neighbor_id
                 
-                if model == 'heisenberg':
-                    # Isotropic Heisenberg: H = J1 * S_i · S_j
-                    # = J1 * (Sx_i Sx_j + Sy_i Sy_j + Sz_i Sz_j)
-                    # = J1 * (0.5*(S+_i S-_j + S-_i S+_j) + Sz_i Sz_j)
-                    interALL.append([2, node_mapping[i], 2, node_mapping[j], J1, 0])     # Sz-Sz
-                    interALL.append([0, node_mapping[i], 1, node_mapping[j], 0.5*J1, 0]) # S+-S-
-                    interALL.append([1, node_mapping[i], 0, node_mapping[j], 0.5*J1, 0]) # S--S+
-                    
-                elif model == 'xxz':
-                    # XXZ model: H = Jxy * (Sx_i Sx_j + Sy_i Sy_j) + J1 * Sz_i Sz_j
-                    # where Jxy = Jz_ratio * J1  (Jz_ratio = Jxy/Jz)
+                if model == 'xxz_j1j2':
+                    # XXZ J1-J2 model: H = Jxy*(Sx_i Sx_j + Sy_i Sy_j) + Jz*Sz_i Sz_j
+                    # where Jz = J1, Jxy = J1 * Jz_ratio  (Jz_ratio=1 → isotropic Heisenberg)
                     Jxy = J1 * Jz_ratio
                     interALL.append([2, node_mapping[i], 2, node_mapping[j], J1, 0])       # Sz-Sz = J1
                     interALL.append([0, node_mapping[i], 1, node_mapping[j], 0.5*Jxy, 0]) # S+-S- = Jxy/2
@@ -466,7 +457,7 @@ def prepare_hamiltonian_parameters(cluster_filepath, output_dir, J1, J2=0.0, Jz_
         
         for i, j in nnn_pairs:
             if i in node_mapping and j in node_mapping:
-                # Isotropic J2 Heisenberg coupling
+                # Isotropic J2 Heisenberg coupling (J2 is always isotropic)
                 interALL.append([2, node_mapping[i], 2, node_mapping[j], J2, 0])
                 interALL.append([0, node_mapping[i], 1, node_mapping[j], 0.5*J2, 0])
                 interALL.append([1, node_mapping[i], 0, node_mapping[j], 0.5*J2, 0])
@@ -576,14 +567,14 @@ if __name__ == "__main__":
     import argparse
     
     parser = argparse.ArgumentParser(description='Prepare Hamiltonian parameters for triangular lattice ED')
-    parser.add_argument('--J1', type=float, default=1.0, help='Nearest-neighbor exchange (for heisenberg/xxz/kitaev)')
+    parser.add_argument('--J1', type=float, default=1.0, help='Nearest-neighbor exchange')
     parser.add_argument('--J2', type=float, default=0.0, help='NNN exchange or Kitaev coupling')
     parser.add_argument('--h', type=float, default=0.0, help='Magnetic field strength')
     parser.add_argument('--field_dir', type=float, nargs=3, default=[0, 0, 1], help='Field direction (x, y, z)')
     parser.add_argument('--output_dir', type=str, required=True, help='Output directory')
     parser.add_argument('--cluster_file', type=str, required=True, help='Path to cluster file')
-    parser.add_argument('--model', type=str, default='heisenberg', 
-                       choices=['heisenberg', 'xxz', 'kitaev', 'anisotropic'],
+    parser.add_argument('--model', type=str, default='xxz_j1j2', 
+                       choices=['xxz_j1j2', 'kitaev', 'anisotropic'],
                        help='Model type')
     parser.add_argument('--Jz_ratio', type=float, default=1.0, help='Jxy/Jz ratio for XXZ model (Jxy = Jz_ratio * J1, Jz = J1)')
     

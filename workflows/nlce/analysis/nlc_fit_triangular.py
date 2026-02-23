@@ -200,7 +200,7 @@ def run_nlce_triangular(params, fixed_params, exp_temp, work_dir, h_field=None, 
     
     Args:
         params: Parameter array depending on model type:
-                - heisenberg/xxz/kitaev: [J1, J2, ...]
+                - xxz_j1j2/kitaev: [J1, J2, ...]
                 - anisotropic: [Jzz, Jpm, Jpmpm, Jzpm, ...]
         fixed_params: Dictionary of fixed parameters
         exp_temp: Experimental temperature array
@@ -212,7 +212,7 @@ def run_nlce_triangular(params, fixed_params, exp_temp, work_dir, h_field=None, 
     Returns:
         calc_temp, calc_spec_heat arrays (in SI units J/(mol·K) if SI_units=True)
     """
-    model = fixed_params.get("model", "heisenberg")
+    model = fixed_params.get("model", "xxz_j1j2")
     
     # Extract parameters based on model type
     # If fit_J_kelvin is enabled, the last model parameter is J_kelvin
@@ -405,7 +405,7 @@ def calc_chi_squared(params, fixed_params, exp_datasets, work_dir):
     
     n_datasets = len(exp_datasets)
     fit_broadening = fixed_params.get("fit_broadening", False)
-    model = fixed_params.get("model", "heisenberg")
+    model = fixed_params.get("model", "xxz_j1j2")
     save_snapshots = fixed_params.get("save_snapshots", False)
     snapshot_dir = fixed_params.get("snapshot_dir", work_dir)
     iteration_counter = fixed_params.get("iteration_counter", [0])
@@ -552,7 +552,7 @@ def calc_chi_squared(params, fixed_params, exp_datasets, work_dir):
                     f.write(f"{T:.6e} {C_exp:.6e} {C_int:.6e} {C_exp-C_int:.6e}\n")
     
     # Log progress with appropriate parameter names
-    model = fixed_params.get("model", "heisenberg")
+    model = fixed_params.get("model", "xxz_j1j2")
     if model == 'anisotropic':
         log_msg = f"Jzz={params[0]:.4f}, Jpm={params[1]:.4f}, Jpmpm={params[2]:.4f}, Jzpm={params[3]:.4f}"
         if fit_J_kelvin:
@@ -581,7 +581,7 @@ def plot_results(exp_datasets, fixed_params, best_params, work_dir, output_dir):
     plt.figure(figsize=(12, 8))
     
     colors = plt.cm.tab10(np.linspace(0, 1, len(exp_datasets)))
-    model = fixed_params.get("model", "heisenberg")
+    model = fixed_params.get("model", "xxz_j1j2")
     fit_J_kelvin = fixed_params.get("fit_J_kelvin", False)
     fit_Jz_ratio = fixed_params.get("fit_Jz_ratio", False)
     if model == 'anisotropic':
@@ -748,7 +748,7 @@ def main():
     parser.add_argument('--J2_min', type=float, default=-1.0, help='Min J2')
     parser.add_argument('--J2_max', type=float, default=1.0, help='Max J2')
     
-    # XXZ anisotropy ratio Jxy/Jz (for heisenberg/xxz/kitaev models)
+    # XXZ anisotropy ratio Jxy/Jz (for xxz_j1j2 model)
     # Convention: Jz = J1 (fixed), Jxy = Jz_ratio * J1
     parser.add_argument('--fit_Jz_ratio', action='store_true',
                        help='Fit Jxy/Jz ratio as a free parameter (adds Jz_ratio to fit params). '
@@ -783,8 +783,8 @@ def main():
     parser.add_argument('--temp_bins', type=int, default=100, help='Temperature bins')
     parser.add_argument('--temp_min', type=float, default=0.01, help='Min temperature')
     parser.add_argument('--temp_max', type=float, default=10.0, help='Max temperature')
-    parser.add_argument('--model', type=str, default='heisenberg',
-                       choices=['heisenberg', 'xxz', 'kitaev', 'anisotropic'],
+    parser.add_argument('--model', type=str, default='xxz_j1j2',
+                       choices=['xxz_j1j2', 'kitaev', 'anisotropic'],
                        help='Spin model type')
     
     # Skip flags
