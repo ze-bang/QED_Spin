@@ -136,13 +136,28 @@ def run_ed_for_cluster(args):
     symm_threshold = ed_options.get("symm_threshold", 13)
     use_symm = (num_sites > symm_threshold)
     
+    # Check if a specific ED method was requested (e.g. FULL_GPU)
+    requested_method = ed_options.get("method", "FULL").upper()
+    
     # Threshold for switching to ScaLAPACK (distributed diagonalization)
     scalapack_threshold = ed_options.get("scalapack_threshold", 16)
     use_scalapack = (num_sites >= scalapack_threshold and ed_options.get("use_scalapack", True))
     
     symm_indicator = ' with --symm' if use_symm else ''
     
-    if use_scalapack:
+    if requested_method == 'FULL_GPU':
+        # GPU full diagonalization requested explicitly
+        logging.info(f"Cluster {cluster_id} ({num_sites} sites, dim={hilbert_dim}): Using FULL_GPU diagonalization{symm_indicator}")
+        cmd = [
+            ed_executable,
+            ham_subdir,
+            '--method=FULL_GPU',
+            '--eigenvalues=FULL',
+            f'--output={cluster_ed_dir}/output',
+            f'--num_sites={num_sites}',
+            '--spin_length=0.5',
+        ]
+    elif use_scalapack:
         # Large cluster: use ScaLAPACK with mixed precision for efficient distributed diagonalization
         logging.info(f"Cluster {cluster_id} ({num_sites} sites, dim={hilbert_dim}): Using SCALAPACK_MIXED{symm_indicator}")
         cmd = [
@@ -461,10 +476,12 @@ def main():
             "use_scalapack": not args.no_scalapack,
         }
         
-        use_gpu = False  # GPU not used for FULL/ScaLAPACK diagonalization
+        use_gpu = (args.method.upper() == 'FULL_GPU')  # GPU used only for FULL_GPU method
         
         logging.info(f"NLCE ED Configuration:")
-        if not args.no_scalapack:
+        if args.method.upper() == 'FULL_GPU':
+            logging.info(f"  - Method: FULL_GPU (GPU-accelerated dense diagonalization)")
+        elif not args.no_scalapack:
             logging.info(f"  - Small clusters (< {args.scalapack_threshold} sites): FULL diagonalization")
             logging.info(f"  - Large clusters (>= {args.scalapack_threshold} sites): SCALAPACK_MIXED (distributed)")
         else:

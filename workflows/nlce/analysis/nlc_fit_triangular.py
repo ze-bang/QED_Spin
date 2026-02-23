@@ -259,6 +259,7 @@ def run_nlce_triangular(params, fixed_params, exp_temp, work_dir, h_field=None, 
         '--temp_max', f'{temp_max:.8f}',
         '--temp_bins', str(fixed_params["temp_bins"]),
         '--model', model,
+        '--method', fixed_params.get("ed_method", "FULL"),
         '--thermo',
         '--base_dir', work_dir,
         '--g_ab', f'{fixed_params.get("g_ab", 2.0):.12f}',
@@ -782,6 +783,9 @@ def main():
     # Optimization
     parser.add_argument('--method', type=str, default='multi_start',
                        choices=['multi_start', 'differential_evolution', 'dual_annealing'])
+    parser.add_argument('--ed_method', type=str, default='FULL',
+                       help='ED solver method passed to the NLCE runner '
+                            '(FULL, FULL_GPU, SCALAPACK_MIXED, etc. Default: FULL)')
     parser.add_argument('--n_starts', type=int, default=20, help='Number of random starts')
     parser.add_argument('--max_iter', type=int, default=1000, help='Max iterations')
     
@@ -900,6 +904,7 @@ def main():
         "max_parallel_fields": args.max_parallel_fields,
         "parallel_ed": args.parallel_ed,
         "ed_num_cores": _ed_cores,
+        "ed_method": args.ed_method,
     }
     
     # Generate clusters first if needed
