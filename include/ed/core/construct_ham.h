@@ -66,7 +66,14 @@ inline uint64_t popcount(uint64_t x) {
  */
 inline std::vector<uint64_t> generateFixedSzBasis(uint64_t n_bits, int64_t n_up) {
     std::vector<uint64_t> basis;
-    if (n_up > n_bits) return basis;
+    if (n_up < 0 || static_cast<uint64_t>(n_up) > n_bits) return basis;
+    
+    // Special case: n_up=0 has exactly one basis state (all spins down)
+    // Gosper's hack divides by (state & -state) which is 0 when state=0
+    if (n_up == 0) {
+        basis.push_back(0);
+        return basis;
+    }
     
     // Start with lowest n_up bits set
     uint64_t state = (1ULL << n_up) - 1;

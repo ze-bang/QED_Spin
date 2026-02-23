@@ -19,6 +19,7 @@
 #include <sys/stat.h>
 #include <filesystem>
 #include <algorithm>
+#include <chrono>
 #include <memory>  // For std::unique_ptr
 
 // ScaLAPACK support for distributed diagonalization
@@ -448,6 +449,7 @@ struct EDParameters {
     bool use_fixed_sz = false;  // Whether to use fixed-Sz sector (conserve total Sz)
     int64_t n_up = -1;  // Number of up spins (-1 = not set, will use num_sites/2)
     mutable class FixedSzOperator* fixed_sz_op = nullptr;  // If using fixed-Sz, pointer to operator for embedding
+    bool full_sz_split = false;  // Loop over ALL Sz sectors for full diag (automatic block-diagonal speedup)
     
     // ========== ScaLAPACK Distributed Diagonalization Options ==========
     // Used when method == SCALAPACK or SCALAPACK_MIXED
@@ -2541,6 +2543,284 @@ void transform_and_save_sector_states(
 } // namespace ed_internal
 
 // ============================================================================
+// Sz CONSERVATION CHECKER
+// ============================================================================
+
+/**
+ * @brief Check if a Hamiltonian conserves total Sz by scanning its term files.
+ *
+ * For spin-1/2 in the ladder basis (0=S+, 1=S-, 2=Sz):
+ *   - Two-body (InterAll.dat): Sz is conserved iff every (Op_i, Op_j) pair is
+ *     one of (0,1), (1,0), or (2,2)  — i.e. S+S-, S-S+, SzSz.
+ *   - Single-site (Trans.dat):  Sz is conserved iff every Op is 2 (Sz).
+ *     An on-site S+ or S- (transverse field) breaks conservation.
+ *
+ * @return true if the Hamiltonian conserves total Sz
+ */
+inline bool hamiltonian_conserves_sz(const std::string& interaction_file,
+                                     const std::string& single_site_file) {
+    // --- Check two-body terms (InterAll.dat) ---
+    if (!interaction_file.empty()) {
+        std::ifstream file(interaction_file);
+        if (file.is_open()) {
+            std::string line;
+            // Skip header: 3 separator/num lines + 3 more lines (matches loadFromInterAllFile)
+            for (int i = 0; i < 5; ++i) std::getline(file, line);
+
+            while (std::getline(file, line)) {
+                std::istringstream iss(line);
+                uint64_t op_i, site_i, op_j, site_j;
+                double re, im;
+                if (!(iss >> op_i >> site_i >> op_j >> site_j >> re >> im)) continue;
+                if (std::abs(re) < 1e-15 && std::abs(im) < 1e-15) continue;
+
+                // Allowed Sz-conserving pairs: (S+,S-)=(0,1), (S-,S+)=(1,0), (Sz,Sz)=(2,2)
+                bool ok = (op_i == 0 && op_j == 1) ||
+                          (op_i == 1 && op_j == 0) ||
+                          (op_i == 2 && op_j == 2);
+                if (!ok) {
+                    std::cout << "[Sz check] Non-conserving two-body term: Op("
+                              << op_i << "," << op_j << ") on sites ("
+                              << site_i << "," << site_j << ") with coeff ("
+                              << re << "," << im << ")" << std::endl;
+                    return false;
+                }
+            }
+        }
+    }
+
+    // --- Check single-site terms (Trans.dat) ---
+    if (!single_site_file.empty()) {
+        std::ifstream file(single_site_file);
+        if (file.is_open()) {
+            std::string line;
+            // Skip header (matches loadFromFile): 1 separator + "num N" + 3 separator lines
+            for (int i = 0; i < 5; ++i) std::getline(file, line);
+
+            while (std::getline(file, line)) {
+                std::istringstream iss(line);
+                uint64_t op, site;
+                double re, im;
+                if (!(iss >> op >> site >> re >> im)) continue;
+                if (std::abs(re) < 1e-15 && std::abs(im) < 1e-15) continue;
+
+                // Only Sz (op=2) preserves total Sz
+                if (op != 2) {
+                    std::cout << "[Sz check] Non-conserving single-site term: Op("
+                              << op << ") on site " << site << " with coeff ("
+                              << re << "," << im << ")" << std::endl;
+                    return false;
+                }
+            }
+        }
+    }
+
+    return true;
+}
+
+// ============================================================================
+// FULL DIAGONALIZATION VIA Sz SECTOR SPLITTING
+// ============================================================================
+
+/**
+ * @brief Full diagonalization by splitting into Sz sectors
+ * 
+ * Instead of diagonalizing the full 2^N Hilbert space at once, this function:
+ * 1. Loops over all Sz sectors (n_up = 0, 1, ..., num_sites)
+ * 2. Builds a FixedSzOperator per sector
+ * 3. Constructs the dense Hamiltonian using the sparse-to-dense conversion
+ *    (via buildFixedSzMatrix() + toDense()), which is far more efficient than
+ *    N column-by-column SpMV applications
+ * 4. Diagonalizes each sector independently with LAPACKE_zheevd
+ * 5. Collects and sorts all eigenvalues
+ * 6. Saves the merged result as a single HDF5 file (transparent to downstream code)
+ * 
+ * Memory advantage: The largest sector has dimension C(N, N/2), e.g.:
+ *   N=15: 2^15 = 32768 -> C(15,7) = 6435  (5.1x reduction, 26x less memory)
+ *   N=17: 2^17 = 131072 -> C(17,8) = 24310 (5.4x reduction, 29x less memory)
+ *   N=19: 2^19 = 524288 -> C(19,9) = 92378 (5.7x reduction, 32x less memory)
+ * 
+ * IMPORTANT: This assumes Sz is a good quantum number (total Sz commutes with H).
+ * Models that break Sz conservation (e.g., anisotropic J±±, Jz±, in-plane field)
+ * will produce INCORRECT results. The caller must verify Sz conservation.
+ * 
+ * @param interaction_file Path to interaction file (InterAll.dat)
+ * @param single_site_file Path to single-site file (Trans.dat)
+ * @param num_sites Number of spin sites
+ * @param spin_length Spin length (usually 0.5)
+ * @param params Parameters for diagonalization
+ * @return EDResults containing ALL eigenvalues from ALL sectors, sorted
+ */
+inline EDResults exact_diagonalization_all_sz_sectors(
+    const std::string& interaction_file,
+    const std::string& single_site_file,
+    uint64_t num_sites,
+    float spin_length,
+    const EDParameters& params
+) {
+    EDResults results;
+    
+    uint64_t full_dim = 1ULL << num_sites;
+    uint64_t num_sectors = num_sites + 1;  // n_up = 0, 1, ..., num_sites
+    
+    std::cout << "\n" << std::string(80, '=') << std::endl;
+    std::cout << "FULL DIAGONALIZATION VIA Sz SECTOR SPLITTING" << std::endl;
+    std::cout << std::string(80, '=') << std::endl;
+    std::cout << "Full Hilbert space dimension: " << full_dim << std::endl;
+    std::cout << "Number of Sz sectors: " << num_sectors << std::endl;
+    
+    // Pre-compute sector dimensions for progress reporting
+    std::vector<uint64_t> sector_dims(num_sectors);
+    uint64_t largest_sector_dim = 0;
+    uint64_t total_sector_dim = 0;
+    for (uint64_t n_up = 0; n_up <= num_sites; ++n_up) {
+        auto basis = generateFixedSzBasis(num_sites, n_up);
+        sector_dims[n_up] = basis.size();
+        total_sector_dim += sector_dims[n_up];
+        if (sector_dims[n_up] > largest_sector_dim) {
+            largest_sector_dim = sector_dims[n_up];
+        }
+    }
+    
+    std::cout << "Largest sector dimension: " << largest_sector_dim 
+              << " (reduction: " << std::fixed << std::setprecision(1) 
+              << (double)full_dim / largest_sector_dim << "x)" 
+              << std::defaultfloat << std::endl;
+    std::cout << "Memory for full matrix:    " 
+              << (double)full_dim * full_dim * sizeof(Complex) / (1024.0*1024.0*1024.0)
+              << " GB" << std::endl;
+    std::cout << "Memory for largest sector: " 
+              << (double)largest_sector_dim * largest_sector_dim * sizeof(Complex) / (1024.0*1024.0*1024.0)
+              << " GB" << std::endl;
+    
+    // Collect all eigenvalues from all sectors
+    std::vector<double> all_eigenvalues;
+    all_eigenvalues.reserve(full_dim);
+    
+    auto total_start = std::chrono::high_resolution_clock::now();
+    
+    for (uint64_t n_up = 0; n_up <= num_sites; ++n_up) {
+        uint64_t dim = sector_dims[n_up];
+        double sz_value = spin_length * num_sites - n_up;
+        
+        std::cout << "\n--- Sector " << n_up + 1 << "/" << num_sectors 
+                  << ": n_up=" << n_up << ", Sz=" << sz_value
+                  << ", dim=" << dim << " ---" << std::endl;
+        
+        if (dim == 0) {
+            std::cout << "  Empty sector, skipping." << std::endl;
+            continue;
+        }
+        
+        auto sector_start = std::chrono::high_resolution_clock::now();
+        
+        // Create FixedSzOperator for this sector
+        FixedSzOperator op(num_sites, spin_length, n_up);
+        
+        // Load Hamiltonian terms
+        if (!single_site_file.empty()) {
+            std::ifstream file(single_site_file);
+            if (file.is_open()) {
+                op.loadFromFile(single_site_file);
+            }
+        }
+        if (!interaction_file.empty()) {
+            std::ifstream file(interaction_file);
+            if (file.is_open()) {
+                op.loadFromInterAllFile(interaction_file);
+            }
+        }
+        
+        // Build the sparse matrix, then convert to dense for LAPACK
+        // This is O(nnz) — much faster than dim SpMV calls which is O(dim * nnz)
+        op.buildFixedSzMatrix();
+        auto sparse_matrix = op.getFixedSzMatrix();
+        
+        // Convert sparse -> dense (column-major for LAPACK)
+        Eigen::MatrixXcd dense = Eigen::MatrixXcd(sparse_matrix);
+        
+        // Eigenvalue array
+        std::vector<double> evals(dim);
+        
+        // Call LAPACKE_zheevd (divide-and-conquer) — eigenvalues only, no eigenvectors needed
+        lapack_int info = LAPACKE_zheevd(
+            LAPACK_COL_MAJOR,
+            params.compute_eigenvectors ? 'V' : 'N',   // Eigenvalues only for NLCE thermodynamics
+            'U',                         // Upper triangle
+            dim,                         // Matrix dimension
+            reinterpret_cast<lapack_complex_double*>(dense.data()),
+            dim,                         // Leading dimension
+            evals.data()                 // Output eigenvalues
+        );
+        
+        if (info != 0) {
+            std::cerr << "  LAPACKE_zheevd failed for sector n_up=" << n_up 
+                      << " with error code " << info << std::endl;
+            continue;
+        }
+        
+        // Append eigenvalues to the combined list
+        all_eigenvalues.insert(all_eigenvalues.end(), evals.begin(), evals.end());
+        
+        auto sector_end = std::chrono::high_resolution_clock::now();
+        double sector_time = std::chrono::duration<double>(sector_end - sector_start).count();
+        
+        std::cout << "  Diagonalized in " << std::fixed << std::setprecision(2) 
+                  << sector_time << " s, found " << dim << " eigenvalues"
+                  << " [" << evals.front() << ", " << evals.back() << "]" << std::endl;
+    }
+    
+    auto total_end = std::chrono::high_resolution_clock::now();
+    double total_time = std::chrono::duration<double>(total_end - total_start).count();
+    
+    // Sort all eigenvalues globally
+    std::sort(all_eigenvalues.begin(), all_eigenvalues.end());
+    
+    // Store results
+    if (params.num_eigenvalues > 0 && params.num_eigenvalues < all_eigenvalues.size()) {
+        results.eigenvalues.assign(all_eigenvalues.begin(), 
+                                   all_eigenvalues.begin() + params.num_eigenvalues);
+    } else {
+        results.eigenvalues = std::move(all_eigenvalues);
+    }
+    
+    std::cout << "\n" << std::string(80, '=') << std::endl;
+    std::cout << "Sz-SPLIT FULL DIAG COMPLETE" << std::endl;
+    std::cout << "Total eigenvalues: " << results.eigenvalues.size() << std::endl;
+    std::cout << "Total wall time: " << std::fixed << std::setprecision(2) << total_time << " s" << std::endl;
+    if (!results.eigenvalues.empty()) {
+        std::cout << "Ground state energy: " << results.eigenvalues[0] << std::endl;
+    }
+    std::cout << std::string(80, '=') << std::endl;
+    
+    // Save results to HDF5
+    if (!params.output_dir.empty()) {
+        safe_system_call("mkdir -p " + params.output_dir);
+        
+        try {
+            std::string hdf5_file = HDF5IO::createOrOpenFile(params.output_dir);
+            HDF5IO::saveEigenvalues(hdf5_file, results.eigenvalues);
+            std::cout << "Saved " << results.eigenvalues.size() 
+                      << " eigenvalues to " << hdf5_file << std::endl;
+        } catch (const std::exception& e) {
+            std::cerr << "Warning: Failed to save to HDF5: " << e.what() << std::endl;
+            // Fallback to text file
+            std::string txt_file = params.output_dir + "/eigenvalues.txt";
+            std::ofstream ofs(txt_file);
+            if (ofs.is_open()) {
+                ofs << std::setprecision(15);
+                for (double ev : results.eigenvalues) {
+                    ofs << ev << "\n";
+                }
+                std::cout << "Saved eigenvalues to " << txt_file << std::endl;
+            }
+        }
+    }
+    
+    return results;
+}
+
+// ============================================================================
 // FIXED SZ EXACT DIAGONALIZATION
 // ============================================================================
 
@@ -2914,6 +3194,39 @@ EDResults exact_diagonalization_from_files(
             method,
             params
         );
+    }
+    
+    // ========== Full Sz-Sector Split ==========
+    // Auto-enable Sz sector splitting for FULL diag when the Hamiltonian
+    // conserves total Sz.  This is always beneficial: it reduces the largest
+    // dense block from 2^N to C(N,N/2) (e.g. 29x less memory at N=17).
+    // The flag --full-sz-split can force it on (caller takes responsibility)
+    // or it is auto-detected by scanning InterAll.dat / Trans.dat.
+    if (method == DiagonalizationMethod::FULL || 
+        method == DiagonalizationMethod::SCALAPACK ||
+        method == DiagonalizationMethod::SCALAPACK_MIXED) {
+        
+        bool use_sz_split = params.full_sz_split;  // Explicitly requested?
+        
+        if (!use_sz_split) {
+            // Auto-detect: check if Hamiltonian conserves Sz
+            bool sz_conserved = hamiltonian_conserves_sz(interaction_file, single_site_file);
+            if (sz_conserved) {
+                std::cout << "[Auto] Hamiltonian conserves Sz — enabling sector splitting for full diag" << std::endl;
+                use_sz_split = true;
+            }
+        }
+        
+        if (use_sz_split) {
+            std::cout << "Using Sz-sector splitting for full diagonalization" << std::endl;
+            return exact_diagonalization_all_sz_sectors(
+                interaction_file,
+                single_site_file,
+                params.num_sites,
+                params.spin_length,
+                params
+            );
+        }
     }
     
     // Handle GPU methods separately (they don't need CPU Operator)

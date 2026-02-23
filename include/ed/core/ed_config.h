@@ -219,6 +219,7 @@ struct SystemConfig {
     // Fixed Sz mode
     bool use_fixed_sz = false;
     int64_t n_up = -1;  // Number of up spins (-1 = not set, will use num_sites/2)
+    bool full_sz_split = false;  // When true with FULL method, loop over all Sz sectors
     
     std::string hamiltonian_dir = "";
     std::string interaction_file = "InterAll.dat";

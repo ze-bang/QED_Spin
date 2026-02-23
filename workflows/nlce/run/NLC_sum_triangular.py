@@ -28,7 +28,7 @@ class NLCExpansionTriangular:
     """NLCE calculator for triangular lattice."""
     
     def __init__(self, cluster_dir, eigenvalue_dir, temp_min, temp_max, num_temps, 
-                 measure_spin=False, SI_units=False):
+                 measure_spin=False, SI_units=False, J_kelvin=None):
         """
         Initialize the NLC expansion calculator for triangular lattice.
         
@@ -40,11 +40,13 @@ class NLCExpansionTriangular:
         Args:
             cluster_dir: Directory containing cluster information files
             eigenvalue_dir: Directory containing eigenvalue files from ED calculations
-            temp_min: Minimum temperature in Kelvin
-            temp_max: Maximum temperature in Kelvin
+            temp_min: Minimum temperature (internal units, may be T_K/J_kelvin)
+            temp_max: Maximum temperature (internal units, may be T_K/J_kelvin)
             num_temps: Number of temperature points
             measure_spin: Whether to compute spin expectation values
             SI_units: Convert to SI units (J/(mol·K) for C and S, J/mol for E)
+            J_kelvin: If set, eigenvalues are in units of J and temps are T/J_kelvin.
+                      Output temperatures will be converted back to Kelvin.
                       
         SI Unit Conversion:
             - Specific heat: C_SI = R × C where R = 8.314 J/(mol·K)
@@ -56,6 +58,7 @@ class NLCExpansionTriangular:
         
         self.SI = SI_units
         self.measure_spin = measure_spin
+        self.J_kelvin = J_kelvin
         self.temp_values = np.logspace(np.log10(temp_min), np.log10(temp_max), num_temps)
         
         self.clusters = {}
@@ -491,7 +494,11 @@ class NLCExpansionTriangular:
         """Save NLCE results to files."""
         os.makedirs(output_dir, exist_ok=True)
         
-        temp_output = self.temp_values
+        # Convert internal temperatures back to Kelvin for output
+        if self.J_kelvin is not None and self.J_kelvin > 0:
+            temp_output = self.temp_values * self.J_kelvin
+        else:
+            temp_output = self.temp_values
         temp_unit = 'K'
         
         # Units for thermodynamic quantities
@@ -536,7 +543,11 @@ class NLCExpansionTriangular:
         """Plot NLCE results."""
         os.makedirs(output_dir, exist_ok=True)
         
-        temp_plot = self.temp_values
+        # Convert internal temperatures back to Kelvin for plotting
+        if self.J_kelvin is not None and self.J_kelvin > 0:
+            temp_plot = self.temp_values * self.J_kelvin
+        else:
+            temp_plot = self.temp_values
         temp_label = 'Temperature (K)'
         
         # Units for thermodynamic quantities
@@ -615,6 +626,12 @@ def main():
     parser.add_argument('--resummation', type=str, default='none',
                        choices=['none', 'euler', 'wynn'],
                        help='Resummation method (none, euler, or wynn)')
+    parser.add_argument('--J_kelvin', type=float, default=None,
+                       help='Exchange coupling J in Kelvin. When set, eigenvalues '
+                            'are assumed in units of J and temperatures in Kelvin. '
+                            'The code converts T_J = T_K / J_kelvin before computing '
+                            'the partition function, so that e^{-E/T_J} is dimensionless. '
+                            'Output temperatures remain in Kelvin.')
     
     args = parser.parse_args()
     
@@ -622,7 +639,19 @@ def main():
     print("NLCE Summation for Triangular Lattice")
     print("="*80)
     
-    print(f"\nAll quantities in Kelvin (eigenvalues and temperatures must be in K)")
+    if args.J_kelvin is not None and args.J_kelvin > 0:
+        print(f"\nJ_kelvin = {args.J_kelvin} K")
+        print(f"  Eigenvalues are in units of J (dimensionless).")
+        print(f"  Internal temperatures converted: T_J = T_K / J_kelvin")
+        print(f"  Output temperatures remain in Kelvin.")
+        # Convert temperature range from Kelvin to units of J for the partition function
+        internal_temp_min = args.temp_min / args.J_kelvin
+        internal_temp_max = args.temp_max / args.J_kelvin
+    else:
+        print(f"\nAll quantities in Kelvin (eigenvalues and temperatures must be in K)")
+        internal_temp_min = args.temp_min
+        internal_temp_max = args.temp_max
+    
     if args.SI_units:
         print(f"SI units enabled: C, S in J/(mol·K), E in J/mol")
     
@@ -630,11 +659,12 @@ def main():
     nlc = NLCExpansionTriangular(
         cluster_dir=args.cluster_dir,
         eigenvalue_dir=args.eigenvalue_dir,
-        temp_min=args.temp_min,
-        temp_max=args.temp_max,
+        temp_min=internal_temp_min,
+        temp_max=internal_temp_max,
         num_temps=args.temp_bins,
         measure_spin=args.measure_spin,
-        SI_units=args.SI_units
+        SI_units=args.SI_units,
+        J_kelvin=args.J_kelvin
     )
     
     # Read data

@@ -121,6 +121,7 @@ EDConfig EDConfig::fromFile(const std::string& filename) {
                 else if (key == "num_sites") config.system.num_sites = std::stoi(value);
                 else if (key == "spin_length") config.system.spin_length = std::stof(value);
                 else if (key == "use_fixed_sz") config.system.use_fixed_sz = parse_bool(value);
+                else if (key == "full_sz_split") config.system.full_sz_split = parse_bool(value);
                 else if (key == "n_up") config.system.n_up = std::stoi(value);
                 else if (key == "sublattice_size") config.system.sublattice_size = std::stoi(value);
                 else if (key == "interaction_file") config.system.interaction_file = value;
@@ -299,6 +300,7 @@ EDConfig EDConfig::fromFile(const std::string& filename) {
                 else if (key == "spin_length") config.system.spin_length = std::stof(value);
                 else if (key == "hamiltonian_dir") config.system.hamiltonian_dir = value;
                 else if (key == "use_fixed_sz") config.system.use_fixed_sz = parse_bool(value);
+                else if (key == "full_sz_split") config.system.full_sz_split = parse_bool(value);
                 else if (key == "n_up") config.system.n_up = std::stoi(value);
                 else if (key == "output_dir") config.workflow.output_dir = value;
                 else if (key == "num_samples") config.thermal.num_samples = std::stoi(value);
@@ -396,6 +398,7 @@ EDConfig EDConfig::fromCommandLine(uint64_t argc, char* argv[]) {
             else if (arg.find("--num_sites=") == 0) config.system.num_sites = std::stoi(parse_value("--num_sites="));
             else if (arg.find("--spin_length=") == 0) config.system.spin_length = std::stof(parse_value("--spin_length="));
             else if (arg == "--fixed-sz") config.system.use_fixed_sz = true;
+            else if (arg == "--full-sz-split") config.system.full_sz_split = true;
             else if (arg.find("--n-up=") == 0) config.system.n_up = std::stoi(parse_value("--n-up="));
             else if (arg.find("--output=") == 0) config.workflow.output_dir = parse_value("--output=");
             else if (arg.find("--samples=") == 0) config.thermal.num_samples = std::stoi(parse_value("--samples="));

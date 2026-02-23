@@ -289,6 +289,13 @@ def run_nlce_triangular(params, fixed_params, exp_temp, work_dir, h_field=None, 
     elif fixed_params.get("J_kelvin") is not None:
         cmd.append(f'--J_kelvin={fixed_params["J_kelvin"]}')
     
+    # Parallel ED across clusters within this NLCE run
+    if fixed_params.get("parallel_ed", False):
+        cmd.append('--parallel')
+        ed_cores = fixed_params.get("ed_num_cores", 0)
+        if ed_cores > 0:
+            cmd.extend(['--num_cores', str(ed_cores)])
+    
     if not fixed_params.get("skip_ham_prep", False):
         # Clean up old results
         ed_dir = os.path.join(work_dir, f'ed_results_order_{fixed_params["max_order"]}')
@@ -340,6 +347,45 @@ def interpolate_calc_data(calc_temp, calc_spec_heat, exp_temp):
     return interp_spec_heat
 
 
+def _ensure_field_work_dir(work_dir, field_idx, max_order):
+    """Create per-field work directory with symlinked shared cluster directory.
+    
+    Each field value needs its own work directory to avoid conflicts in
+    Hamiltonian/ED/NLC result files when running in parallel.
+    The cluster directory is shared (read-only) via symlink.
+    """
+    field_dir_path = os.path.join(work_dir, f'field_{field_idx}')
+    os.makedirs(field_dir_path, exist_ok=True)
+    
+    # Symlink shared cluster directory so nlce_triangular.py finds it
+    src_cluster = os.path.abspath(
+        os.path.join(work_dir, f'clusters_order_{max_order}'))
+    dst_cluster = os.path.join(field_dir_path, f'clusters_order_{max_order}')
+    
+    if os.path.exists(src_cluster) and not os.path.exists(dst_cluster):
+        try:
+            os.symlink(src_cluster, dst_cluster)
+        except OSError:
+            shutil.copytree(src_cluster, dst_cluster)
+    
+    return field_dir_path
+
+
+def _compute_single_field(args_tuple):
+    """Worker function: run NLCE for one field value.
+    
+    Designed to be called from ThreadPoolExecutor or sequentially.
+    Returns (field_idx, calc_temp, calc_spec_heat).
+    """
+    field_idx, model_params, fixed_params, exp_temp, field_work_dir, \
+        h_field, temp_range, field_dir = args_tuple
+    calc_temp, calc_spec_heat = run_nlce_triangular(
+        model_params, fixed_params, exp_temp, field_work_dir,
+        h_field=h_field, temp_range=temp_range, field_dir=field_dir
+    )
+    return field_idx, calc_temp, calc_spec_heat
+
+
 def calc_chi_squared(params, fixed_params, exp_datasets, work_dir):
     """Calculate chi-squared between experimental and calculated specific heat"""
     total_chi_squared = 0.0
@@ -371,26 +417,67 @@ def calc_chi_squared(params, fixed_params, exp_datasets, work_dir):
     all_exp_heats = []
     all_interp_heats = []
     
+    # --- Phase 1: Run NLCE for all field values (parallel or sequential) ---
+    parallel_fields = fixed_params.get("parallel_fields", False)
+    max_workers = fixed_params.get("max_parallel_fields", 0)
+    if max_workers <= 0:
+        max_workers = n_datasets
+    
+    # Build task list for all datasets
+    tasks = []
     for i, dataset in enumerate(exp_datasets):
-        exp_temp = dataset['temp']
-        exp_spec_heat = dataset['spec_heat']
         h_field = dataset.get('h', 0.0)
         ds_field_dir = dataset.get('field_dir', None)
-        weight = dataset.get('weight', 1.0)
-        
-        # Get temperature range for this dataset
         temp_range = {}
         if 'temp_min' in dataset:
             temp_range['temp_min'] = dataset['temp_min']
         if 'temp_max' in dataset:
             temp_range['temp_max'] = dataset['temp_max']
         
-        # Run NLCE
-        calc_temp, calc_spec_heat = run_nlce_triangular(
-            model_params, fixed_params, exp_temp, work_dir, 
-            h_field=h_field, temp_range=temp_range if temp_range else None,
-            field_dir=ds_field_dir
-        )
+        # Each field gets its own work directory when running in parallel
+        if parallel_fields and n_datasets > 1:
+            field_work = _ensure_field_work_dir(
+                work_dir, i, fixed_params["max_order"])
+        else:
+            field_work = work_dir
+        
+        tasks.append((
+            i, model_params, fixed_params, dataset['temp'],
+            field_work, h_field,
+            temp_range if temp_range else None, ds_field_dir
+        ))
+    
+    # Execute: parallel or sequential
+    field_results = {}  # idx -> (calc_temp, calc_spec_heat)
+    if parallel_fields and n_datasets > 1:
+        n_workers = min(max_workers, n_datasets)
+        logging.debug(f"Running {n_datasets} field values in parallel "
+                      f"({n_workers} workers)")
+        with ThreadPoolExecutor(max_workers=n_workers) as executor:
+            futures = {
+                executor.submit(_compute_single_field, task): task[0]
+                for task in tasks
+            }
+            for future in as_completed(futures):
+                idx = futures[future]
+                try:
+                    _, ct, cs = future.result()
+                    field_results[idx] = (ct, cs)
+                except Exception as exc:
+                    logging.error(f"Field {idx} NLCE failed: {exc}")
+                    field_results[idx] = (None, None)
+    else:
+        for task in tasks:
+            idx, ct, cs = _compute_single_field(task)
+            field_results[idx] = (ct, cs)
+    
+    # --- Phase 2: Compute chi-squared from collected results ---
+    for i, dataset in enumerate(exp_datasets):
+        exp_temp = dataset['temp']
+        exp_spec_heat = dataset['spec_heat']
+        weight = dataset.get('weight', 1.0)
+        
+        calc_temp, calc_spec_heat = field_results[i]
         
         if calc_temp is None:
             total_chi_squared += 1e10 * weight
@@ -482,26 +569,63 @@ def plot_results(exp_datasets, fixed_params, best_params, work_dir, output_dir):
     else:
         n_model_params = 3 if fit_J_kelvin else 2
     
-    for i, (dataset, color) in enumerate(zip(exp_datasets, colors)):
-        exp_temp = dataset['temp']
-        exp_spec_heat = dataset['spec_heat']
+    # Use parallel fields for final plot if enabled
+    n_datasets = len(exp_datasets)
+    parallel_fields = fixed_params.get("parallel_fields", False)
+    
+    # Build and run all NLCE tasks
+    tasks = []
+    for i, dataset in enumerate(exp_datasets):
         h_field = dataset.get('h', 0.0)
         ds_field_dir = dataset.get('field_dir', None)
-        label_str = dataset.get('label', f'h={h_field:.3f}')
-        
-        # Get temperature range
         temp_range = {}
         if 'temp_min' in dataset:
             temp_range['temp_min'] = dataset['temp_min']
         if 'temp_max' in dataset:
             temp_range['temp_max'] = dataset['temp_max']
         
-        # Run NLCE with best parameters
-        calc_temp, calc_spec_heat = run_nlce_triangular(
-            best_params[:n_model_params], fixed_params, exp_temp, work_dir,
-            h_field=h_field, temp_range=temp_range if temp_range else None,
-            field_dir=ds_field_dir
-        )
+        if parallel_fields and n_datasets > 1:
+            field_work = _ensure_field_work_dir(
+                work_dir, i, fixed_params["max_order"])
+        else:
+            field_work = work_dir
+        
+        tasks.append((
+            i, best_params[:n_model_params], fixed_params, dataset['temp'],
+            field_work, h_field,
+            temp_range if temp_range else None, ds_field_dir
+        ))
+    
+    # Execute in parallel or sequentially
+    plot_results_map = {}
+    if parallel_fields and n_datasets > 1:
+        max_workers = fixed_params.get("max_parallel_fields", 0)
+        if max_workers <= 0:
+            max_workers = n_datasets
+        with ThreadPoolExecutor(max_workers=min(max_workers, n_datasets)) as executor:
+            futures = {
+                executor.submit(_compute_single_field, task): task[0]
+                for task in tasks
+            }
+            for future in as_completed(futures):
+                idx = futures[future]
+                try:
+                    _, ct, cs = future.result()
+                    plot_results_map[idx] = (ct, cs)
+                except Exception:
+                    plot_results_map[idx] = (None, None)
+    else:
+        for task in tasks:
+            idx, ct, cs = _compute_single_field(task)
+            plot_results_map[idx] = (ct, cs)
+    
+    for i, (dataset, color) in enumerate(zip(exp_datasets, colors)):
+        exp_temp = dataset['temp']
+        exp_spec_heat = dataset['spec_heat']
+        h_field = dataset.get('h', 0.0)
+        label_str = dataset.get('label', f'h={h_field:.3f}')
+        
+        calc_temp, calc_spec_heat = plot_results_map[i]
         
         # Plot experimental data
         plt.scatter(exp_temp, exp_spec_heat, c=[color], s=30, alpha=0.7, 
@@ -668,6 +792,21 @@ def main():
     parser.add_argument('--save_snapshots', action='store_true',
                        help='Save diagnostic snapshots at each iteration for debugging')
     
+    # Parallelism
+    parser.add_argument('--parallel_fields', action='store_true',
+                       help='Run NLCE for different field values in parallel. '
+                            'Each field gets its own work directory to avoid conflicts. '
+                            'Gives up to N× speedup for N field values.')
+    parser.add_argument('--max_parallel_fields', type=int, default=0,
+                       help='Max number of field values to compute simultaneously '
+                            '(0 = number of datasets, i.e. all in parallel)')
+    parser.add_argument('--parallel_ed', action='store_true',
+                       help='Also parallelize ED across clusters within each NLCE run. '
+                            'Combines with --parallel_fields for two-level parallelism.')
+    parser.add_argument('--ed_num_cores', type=int, default=0,
+                       help='Number of CPU cores for parallel ED per field value '
+                            '(0 = auto: total_cores / num_parallel_fields)')
+    
     # Cost landscape logging
     parser.add_argument('--save_landscape', action='store_true', default=True,
                        help='Save cost function landscape (all evaluations) to .npz and .csv '
@@ -714,6 +853,27 @@ def main():
         os.makedirs(snapshot_dir, exist_ok=True)
         logging.info(f"Saving diagnostic snapshots to: {snapshot_dir}")
     
+    # Compute ED core allocation for parallel execution
+    import multiprocessing as _mp
+    _total_cores = _mp.cpu_count()
+    _n_fields = len(exp_datasets)
+    if args.ed_num_cores > 0:
+        _ed_cores = args.ed_num_cores
+    elif args.parallel_fields and args.parallel_ed and _n_fields > 1:
+        # Split cores across parallel fields
+        _n_parallel = min(args.max_parallel_fields or _n_fields, _n_fields)
+        _ed_cores = max(1, _total_cores // _n_parallel)
+    elif args.parallel_ed:
+        _ed_cores = _total_cores
+    else:
+        _ed_cores = 0
+    
+    if args.parallel_fields:
+        logging.info(f"Parallel fields enabled: up to "
+                     f"{args.max_parallel_fields or _n_fields} field values simultaneously")
+    if args.parallel_ed:
+        logging.info(f"Parallel ED enabled: {_ed_cores} cores per field")
+    
     # Fixed parameters
     fixed_params = {
         "max_order": args.max_order,
@@ -735,7 +895,11 @@ def main():
         "g_c": args.g_c,
         "save_snapshots": args.save_snapshots,
         "snapshot_dir": snapshot_dir,
-        "iteration_counter": [0]  # Mutable list to track iteration count
+        "iteration_counter": [0],  # Mutable list to track iteration count
+        "parallel_fields": args.parallel_fields,
+        "max_parallel_fields": args.max_parallel_fields,
+        "parallel_ed": args.parallel_ed,
+        "ed_num_cores": _ed_cores,
     }
     
     # Generate clusters first if needed
