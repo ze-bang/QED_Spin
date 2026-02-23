@@ -215,37 +215,19 @@ def run_nlce_triangular(params, fixed_params, exp_temp, work_dir, h_field=None, 
     model = fixed_params.get("model", "xxz_j1j2")
     
     # Extract parameters based on model type
-    # If fit_J_kelvin is enabled, the last model parameter is J_kelvin
-    fit_J_kelvin = fixed_params.get("fit_J_kelvin", False)
-    
     if model == 'anisotropic':
-        if fit_J_kelvin:
-            n_model_params = 5
-            Jzz, Jpm, Jpmpm, Jzpm, J_kelvin = params[:5]
-        else:
-            n_model_params = 4
-            Jzz, Jpm, Jpmpm, Jzpm = params[:4]
-            J_kelvin = fixed_params.get("J_kelvin", None)
+        n_model_params = 4
+        Jzz, Jpm, Jpmpm, Jzpm = params[:4]
         J1, J2 = 1.0, 0.0  # Not used for anisotropic
     else:
         fit_Jz_ratio = fixed_params.get("fit_Jz_ratio", False)
         if fit_Jz_ratio:
-            if fit_J_kelvin:
-                n_model_params = 4
-                J1, J2, Jz_ratio, J_kelvin = params[:4]
-            else:
-                n_model_params = 3
-                J1, J2, Jz_ratio = params[:3]
-                J_kelvin = fixed_params.get("J_kelvin", None)
+            n_model_params = 3
+            J1, J2, Jz_ratio = params[:3]
         else:
             Jz_ratio = fixed_params.get("Jz_ratio", 1.0)
-            if fit_J_kelvin:
-                n_model_params = 3
-                J1, J2, J_kelvin = params[:3]
-            else:
-                n_model_params = 2
-                J1, J2 = params[:2]
-                J_kelvin = fixed_params.get("J_kelvin", None)
+            n_model_params = 2
+            J1, J2 = params[:2]
         Jzz, Jpm, Jpmpm, Jzpm = None, None, None, None
     
     h_value = h_field if h_field is not None else fixed_params.get("h", 0.0)
@@ -294,13 +276,6 @@ def run_nlce_triangular(params, fixed_params, exp_temp, work_dir, h_field=None, 
     # SI units for comparison with experimental data (J/(mol·K))
     if fixed_params.get("SI_units", True):
         cmd.append('--SI_units')
-    
-    # Temperature conversion to Kelvin
-    # Use fitted J_kelvin if available, otherwise use fixed value
-    if J_kelvin is not None and J_kelvin > 0:
-        cmd.append(f'--J_kelvin={J_kelvin:.12f}')
-    elif fixed_params.get("J_kelvin") is not None:
-        cmd.append(f'--J_kelvin={fixed_params["J_kelvin"]}')
     
     # Parallel ED across clusters within this NLCE run
     if fixed_params.get("parallel_ed", False):
@@ -410,14 +385,12 @@ def calc_chi_squared(params, fixed_params, exp_datasets, work_dir):
     snapshot_dir = fixed_params.get("snapshot_dir", work_dir)
     iteration_counter = fixed_params.get("iteration_counter", [0])
     
-    # Determine number of model parameters (including J_kelvin if fitted)
-    fit_J_kelvin = fixed_params.get("fit_J_kelvin", False)
+    # Determine number of model parameters
     fit_Jz_ratio = fixed_params.get("fit_Jz_ratio", False)
     if model == 'anisotropic':
-        n_model_params = 5 if fit_J_kelvin else 4
+        n_model_params = 4
     else:
-        base = 3 if fit_Jz_ratio else 2
-        n_model_params = base + (1 if fit_J_kelvin else 0)
+        n_model_params = 3 if fit_Jz_ratio else 2
     
     if fit_broadening:
         model_params = params[:n_model_params]
@@ -536,8 +509,6 @@ def calc_chi_squared(params, fixed_params, exp_datasets, work_dir):
             f.write(f"# Chi-squared: {total_chi_squared:.6f}\n")
             if model == 'anisotropic':
                 f.write(f"# Jzz={params[0]:.6f}, Jpm={params[1]:.6f}, Jpmpm={params[2]:.6f}, Jzpm={params[3]:.6f}\n")
-                if fit_J_kelvin:
-                    f.write(f"# J_kelvin={params[4]:.6f}\n")
             else:
                 f.write(f"# J1={params[0]:.6f}, J2={params[1]:.6f}\n")
             f.write("#\n# Calculated specific heat:\n")
@@ -555,17 +526,11 @@ def calc_chi_squared(params, fixed_params, exp_datasets, work_dir):
     model = fixed_params.get("model", "xxz_j1j2")
     if model == 'anisotropic':
         log_msg = f"Jzz={params[0]:.4f}, Jpm={params[1]:.4f}, Jpmpm={params[2]:.4f}, Jzpm={params[3]:.4f}"
-        if fit_J_kelvin:
-            log_msg += f", J_kelvin={params[4]:.4f}"
         logging.info(f"Parameters: {log_msg}, Chi²={total_chi_squared:.4f}")
     else:
         log_msg = f"J1={params[0]:.4f}, J2={params[1]:.4f}"
-        idx = 2
         if fit_Jz_ratio:
-            log_msg += f", Jz_ratio={params[idx]:.4f}"
-            idx += 1
-        if fit_J_kelvin:
-            log_msg += f", J_kelvin={params[idx]:.4f}"
+            log_msg += f", Jz_ratio={params[2]:.4f}"
         logging.info(f"Parameters: {log_msg}, Chi²={total_chi_squared:.4f}")
     
     # Log to cost landscape accumulator if present
@@ -582,13 +547,11 @@ def plot_results(exp_datasets, fixed_params, best_params, work_dir, output_dir):
     
     colors = plt.cm.tab10(np.linspace(0, 1, len(exp_datasets)))
     model = fixed_params.get("model", "xxz_j1j2")
-    fit_J_kelvin = fixed_params.get("fit_J_kelvin", False)
     fit_Jz_ratio = fixed_params.get("fit_Jz_ratio", False)
     if model == 'anisotropic':
-        n_model_params = 5 if fit_J_kelvin else 4
+        n_model_params = 4
     else:
-        base = 3 if fit_Jz_ratio else 2
-        n_model_params = base + (1 if fit_J_kelvin else 0)
+        n_model_params = 3 if fit_Jz_ratio else 2
     
     # Use parallel fields for final plot if enabled
     n_datasets = len(exp_datasets)
@@ -743,10 +706,10 @@ def main():
     # Initial guess and bounds
     parser.add_argument('--initial_J1', type=float, default=1.0, help='Initial J1')
     parser.add_argument('--initial_J2', type=float, default=0.0, help='Initial J2')
-    parser.add_argument('--J1_min', type=float, default=-3.0, help='Min J1')
-    parser.add_argument('--J1_max', type=float, default=3.0, help='Max J1')
-    parser.add_argument('--J2_min', type=float, default=-1.0, help='Min J2')
-    parser.add_argument('--J2_max', type=float, default=1.0, help='Max J2')
+    parser.add_argument('--J1_min', type=float, default=-5.0, help='Min J1')
+    parser.add_argument('--J1_max', type=float, default=5.0, help='Max J1')
+    parser.add_argument('--J2_min', type=float, default=-5.0, help='Min J2')
+    parser.add_argument('--J2_max', type=float, default=5.0, help='Max J2')
     
     # XXZ anisotropy ratio Jxy/Jz (for xxz_j1j2 model)
     # Convention: Jz = J1 (fixed), Jxy = Jz_ratio * J1
@@ -762,18 +725,18 @@ def main():
     parser.add_argument('--Jz_ratio_max', type=float, default=1.0, help='Max Jz_ratio for fitting')
     
     # Anisotropic model initial values and bounds
-    parser.add_argument('--initial_Jzz', type=float, default=0.5, help='Initial Jzz')
-    parser.add_argument('--initial_Jpm', type=float, default=0.25, help='Initial Jpm')
-    parser.add_argument('--initial_Jpmpm', type=float, default=0.05, help='Initial Jpmpm')
-    parser.add_argument('--initial_Jzpm', type=float, default=0.1, help='Initial Jzpm')
-    parser.add_argument('--Jzz_min', type=float, default=-1.0, help='Min Jzz')
-    parser.add_argument('--Jzz_max', type=float, default=1.0, help='Max Jzz')
-    parser.add_argument('--Jpm_min', type=float, default=-1.0, help='Min Jpm')
-    parser.add_argument('--Jpm_max', type=float, default=1.0, help='Max Jpm')
-    parser.add_argument('--Jpmpm_min', type=float, default=-0.5, help='Min Jpmpm')
-    parser.add_argument('--Jpmpm_max', type=float, default=0.5, help='Max Jpmpm')
-    parser.add_argument('--Jzpm_min', type=float, default=-0.5, help='Min Jzpm')
-    parser.add_argument('--Jzpm_max', type=float, default=0.5, help='Max Jzpm')
+    parser.add_argument('--initial_Jzz', type=float, default=2, help='Initial Jzz')
+    parser.add_argument('--initial_Jpm', type=float, default=1, help='Initial Jpm')
+    parser.add_argument('--initial_Jpmpm', type=float, default=1, help='Initial Jpmpm')
+    parser.add_argument('--initial_Jzpm', type=float, default=1, help='Initial Jzpm')
+    parser.add_argument('--Jzz_min', type=float, default=-5.0, help='Min Jzz')
+    parser.add_argument('--Jzz_max', type=float, default=5.0, help='Max Jzz')
+    parser.add_argument('--Jpm_min', type=float, default=-5.0, help='Min Jpm')
+    parser.add_argument('--Jpm_max', type=float, default=5.0, help='Max Jpm')
+    parser.add_argument('--Jpmpm_min', type=float, default=-5.0, help='Min Jpmpm')
+    parser.add_argument('--Jpmpm_max', type=float, default=5.0, help='Max Jpmpm')
+    parser.add_argument('--Jzpm_min', type=float, default=-5.0, help='Min Jzpm')
+    parser.add_argument('--Jzpm_max', type=float, default=5.0, help='Max Jzpm')
     
     # NLCE parameters
     parser.add_argument('--max_order', type=int, default=5, help='Maximum NLCE order (default: 5 for triangular lattice)')
@@ -802,18 +765,6 @@ def main():
                        help='Use SI units (J/(mol·K)) for specific heat output (default: True)')
     parser.add_argument('--no_SI_units', action='store_true',
                        help='Disable SI units (use natural units instead)')
-    parser.add_argument('--J_kelvin', type=float, default=None,
-                       help='Exchange coupling J in Kelvin. If set, temperatures are '
-                            'converted to Kelvin for direct comparison with experimental data.')
-    parser.add_argument('--fit_J_kelvin', action='store_true',
-                       help='Fit J_kelvin as a free parameter (recommended for comparing with '
-                            'experimental data when the energy scale is unknown).')
-    parser.add_argument('--J_kelvin_min', type=float, default=0.01,
-                       help='Minimum J_kelvin for fitting (default: 0.01 K)')
-    parser.add_argument('--J_kelvin_max', type=float, default=10.0,
-                       help='Maximum J_kelvin for fitting (default: 10.0 K)')
-    parser.add_argument('--initial_J_kelvin', type=float, default=1.0,
-                       help='Initial J_kelvin for fitting (default: 1.0 K)')
     
     # Optimization
     parser.add_argument('--method', type=str, default='multi_start',
@@ -928,8 +879,6 @@ def main():
         "fit_broadening": args.fit_broadening,
         "n_datasets": len(exp_datasets),
         "SI_units": use_SI_units,
-        "J_kelvin": args.J_kelvin,
-        "fit_J_kelvin": args.fit_J_kelvin,
         "g_ab": args.g_ab,
         "g_c": args.g_c,
         "save_snapshots": args.save_snapshots,
@@ -969,16 +918,9 @@ def main():
         initial_params = [args.initial_Jzz, args.initial_Jpm, args.initial_Jpmpm, args.initial_Jzpm]
         param_names = "Jzz, Jpm, Jpmpm, Jzpm"
         
-        # Add J_kelvin as fitting parameter if requested
-        if args.fit_J_kelvin:
-            bounds.append((args.J_kelvin_min, args.J_kelvin_max))
-            initial_params.append(args.initial_J_kelvin)
-            param_names += ", J_kelvin"
-        
         logging.info(f"Fitting anisotropic model: {param_names}")
         logging.info(f"Initial: Jzz={args.initial_Jzz}, Jpm={args.initial_Jpm}, "
-                    f"Jpmpm={args.initial_Jpmpm}, Jzpm={args.initial_Jzpm}" +
-                    (f", J_kelvin={args.initial_J_kelvin}" if args.fit_J_kelvin else ""))
+                    f"Jpmpm={args.initial_Jpmpm}, Jzpm={args.initial_Jzpm}")
     else:
         bounds = [(args.J1_min, args.J1_max), (args.J2_min, args.J2_max)]
         initial_params = [args.initial_J1, args.initial_J2]
@@ -990,16 +932,9 @@ def main():
             initial_params.append(args.Jz_ratio)
             param_names += ", Jz_ratio"
         
-        # Add J_kelvin as fitting parameter if requested
-        if args.fit_J_kelvin:
-            bounds.append((args.J_kelvin_min, args.J_kelvin_max))
-            initial_params.append(args.initial_J_kelvin)
-            param_names += ", J_kelvin"
-        
         logging.info(f"Fitting {args.model} model: {param_names}")
         logging.info(f"Initial: J1={args.initial_J1}, J2={args.initial_J2}" +
-                    (f", Jz_ratio={args.Jz_ratio}" if args.fit_Jz_ratio else "") +
-                    (f", J_kelvin={args.initial_J_kelvin}" if args.fit_J_kelvin else ""))
+                    (f", Jz_ratio={args.Jz_ratio}" if args.fit_Jz_ratio else ""))
     
     if args.fit_broadening:
         for _ in exp_datasets:
@@ -1081,9 +1016,6 @@ def main():
             'chi_squared': float(best_chi_sq),
             'fixed_params': fixed_params
         }
-        if args.fit_J_kelvin:
-            logging.info(f"Best J_kelvin: {best_params[4]:.6f} K")
-            results_dict['best_params']['J_kelvin'] = float(best_params[4])
     else:
         logging.info(f"Best J1: {best_params[0]:.6f}")
         logging.info(f"Best J2: {best_params[1]:.6f}")
@@ -1095,9 +1027,6 @@ def main():
             'chi_squared': float(best_chi_sq),
             'fixed_params': fixed_params
         }
-        if args.fit_J_kelvin:
-            logging.info(f"Best J_kelvin: {best_params[2]:.6f} K")
-            results_dict['best_params']['J_kelvin'] = float(best_params[2])
     
     logging.info(f"Best chi-squared: {best_chi_sq:.6f}")
     logging.info("="*80)

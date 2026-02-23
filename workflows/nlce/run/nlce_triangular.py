@@ -286,12 +286,7 @@ def main():
     
     # SI units
     parser.add_argument('--SI_units', action='store_true', 
-                       help='Convert to SI units: specific heat in J/(mol·K). '
-                            'Temperature remains in units of J unless --J_kelvin is set.')
-    parser.add_argument('--J_kelvin', type=float, default=None,
-                       help='Exchange coupling J in Kelvin. If set with --SI_units, '
-                            'temperatures are converted to Kelvin: T_K = T × J_kelvin. '
-                            'Required for direct comparison with experimental data in Kelvin.')
+                       help='Convert to SI units: specific heat in J/(mol·K).')
     parser.add_argument('--measure_spin', action='store_true', help='Measure spin expectation values')
 
     # ScaLAPACK distributed diagonalization for large clusters
@@ -536,9 +531,6 @@ def main():
         
         if args.SI_units:
             cmd.append('--SI_units')
-        
-        if args.J_kelvin is not None:
-            cmd.append(f'--J_kelvin={args.J_kelvin}')
         
         logging.info(f"Running command: {' '.join(cmd)}")
         try:
