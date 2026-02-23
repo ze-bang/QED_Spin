@@ -289,7 +289,7 @@ def prepare_hamiltonian_parameters(cluster_filepath, output_dir, J1, J2=0.0, Jz_
         output_dir: Directory to write output files
         J1: Nearest-neighbor exchange coupling (for heisenberg/xxz/kitaev)
         J2: Next-nearest-neighbor exchange coupling (default 0)
-        Jz_ratio: Sz-Sz coupling ratio for XXZ model (Jz = J * Jz_ratio)
+        Jz_ratio: Jxy/Jz coupling ratio for XXZ model (Jxy = J1 * Jz_ratio, Jz = J1)
         h: Magnetic field strength (in Tesla when using physical units)
         field_dir: Field direction (3-vector), default is (0, 0, 1) for out-of-plane
         model: Model type ('heisenberg', 'xxz', 'kitaev', 'anisotropic')
@@ -364,11 +364,12 @@ def prepare_hamiltonian_parameters(cluster_filepath, output_dir, J1, J2=0.0, Jz_
                     interALL.append([1, node_mapping[i], 0, node_mapping[j], 0.5*J1, 0]) # S--S+
                     
                 elif model == 'xxz':
-                    # XXZ model: H = J1 * (Sx_i Sx_j + Sy_i Sy_j) + Jz * Sz_i Sz_j
-                    Jz = J1 * Jz_ratio
-                    interALL.append([2, node_mapping[i], 2, node_mapping[j], Jz, 0])     # Sz-Sz
-                    interALL.append([0, node_mapping[i], 1, node_mapping[j], 0.5*J1, 0]) # S+-S-
-                    interALL.append([1, node_mapping[i], 0, node_mapping[j], 0.5*J1, 0]) # S--S+
+                    # XXZ model: H = Jxy * (Sx_i Sx_j + Sy_i Sy_j) + J1 * Sz_i Sz_j
+                    # where Jxy = Jz_ratio * J1  (Jz_ratio = Jxy/Jz)
+                    Jxy = J1 * Jz_ratio
+                    interALL.append([2, node_mapping[i], 2, node_mapping[j], J1, 0])       # Sz-Sz = J1
+                    interALL.append([0, node_mapping[i], 1, node_mapping[j], 0.5*Jxy, 0]) # S+-S- = Jxy/2
+                    interALL.append([1, node_mapping[i], 0, node_mapping[j], 0.5*Jxy, 0]) # S--S+ = Jxy/2
                     
                 elif model == 'kitaev':
                     # Kitaev-Heisenberg on triangular lattice
@@ -584,7 +585,7 @@ if __name__ == "__main__":
     parser.add_argument('--model', type=str, default='heisenberg', 
                        choices=['heisenberg', 'xxz', 'kitaev', 'anisotropic'],
                        help='Model type')
-    parser.add_argument('--Jz_ratio', type=float, default=1.0, help='Jz/J ratio for XXZ model')
+    parser.add_argument('--Jz_ratio', type=float, default=1.0, help='Jxy/Jz ratio for XXZ model (Jxy = Jz_ratio * J1, Jz = J1)')
     
     # Anisotropic model parameters
     parser.add_argument('--Jzz', type=float, default=None, help='J_zz for anisotropic model')
