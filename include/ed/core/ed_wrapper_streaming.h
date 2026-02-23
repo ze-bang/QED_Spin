@@ -4,6 +4,10 @@
 #include <ed/core/ed_wrapper.h>
 #include <ed/core/streaming_symmetry.h>
 
+#ifdef WITH_CUDA
+#include <ed/gpu/gpu_ed_wrapper.h>
+#endif
+
 /**
  * @file ed_wrapper_streaming.h
  * @brief Streaming symmetry-adapted exact diagonalization wrapper
@@ -23,6 +27,139 @@
 // ============================================================================
 // STREAMING SYMMETRY ED FUNCTIONS
 // ============================================================================
+
+#ifdef WITH_CUDA
+namespace ed_streaming_internal {
+
+/**
+ * @brief Extract flattened orbit data from a symmetry sector for GPU transfer
+ *
+ * Converts the per-basis-state orbit data (vector-of-vectors) into CSR-like
+ * flattened arrays suitable for GPU upload.
+ */
+inline void extractOrbitData(
+    const SymmetrySector& sector,
+    std::vector<uint64_t>& orbit_elements,
+    std::vector<std::complex<double>>& orbit_coefficients,
+    std::vector<int>& orbit_offsets,
+    std::vector<double>& orbit_norms
+) {
+    size_t num_basis = sector.basis_states.size();
+    orbit_offsets.resize(num_basis + 1);
+    orbit_norms.resize(num_basis);
+
+    // First pass: compute offsets
+    orbit_offsets[0] = 0;
+    for (size_t j = 0; j < num_basis; ++j) {
+        orbit_offsets[j + 1] = orbit_offsets[j] +
+            static_cast<int>(sector.basis_states[j].orbit_elements.size());
+    }
+
+    size_t total_elements = orbit_offsets[num_basis];
+    orbit_elements.resize(total_elements);
+    orbit_coefficients.resize(total_elements);
+
+    // Second pass: flatten
+    for (size_t j = 0; j < num_basis; ++j) {
+        const auto& bs = sector.basis_states[j];
+        orbit_norms[j] = bs.norm;
+        int offset = orbit_offsets[j];
+        for (size_t e = 0; e < bs.orbit_elements.size(); ++e) {
+            orbit_elements[offset + e] = bs.orbit_elements[e];
+            orbit_coefficients[offset + e] = bs.orbit_coefficients[e];
+        }
+    }
+}
+
+/**
+ * @brief Dispatch GPU solver for a symmetrized sector
+ *
+ * Creates a GPUSymmetrizedOperator for the sector, runs the appropriate
+ * GPU solver, and collects eigenvalues.
+ */
+inline EDResults dispatchGPUSymmetrizedSector(
+    DiagonalizationMethod method,
+    const EDParameters& params,
+    int n_sites, float spin_l,
+    uint64_t sector_dim,
+    const SymmetrySector& sector,
+    int group_size,
+    const std::string& interall_file,
+    const std::string& trans_file
+) {
+    // Extract orbit data
+    std::vector<uint64_t> orbit_elements;
+    std::vector<std::complex<double>> orbit_coefficients;
+    std::vector<int> orbit_offsets;
+    std::vector<double> orbit_norms;
+    extractOrbitData(sector, orbit_elements, orbit_coefficients, orbit_offsets, orbit_norms);
+
+    // Create GPU operator
+    void* gpu_op = GPUEDWrapper::createGPUSymmetrizedOperator(
+        n_sites, spin_l, static_cast<int>(sector_dim),
+        orbit_elements, orbit_coefficients, orbit_offsets, orbit_norms,
+        group_size, interall_file, trans_file
+    );
+
+    if (!gpu_op) {
+        throw std::runtime_error("Failed to create GPU symmetrized operator");
+    }
+
+    std::vector<double> eigenvalues;
+    int num_eigs = static_cast<int>(std::min(params.num_eigenvalues, sector_dim));
+
+    // Dispatch to appropriate GPU solver
+    // Note: all symmetrized methods use the full-space kernel variants since
+    // the symmetrized operator already handles the projection internally.
+    if (method == DiagonalizationMethod::LANCZOS_GPU ||
+        method == DiagonalizationMethod::LANCZOS_GPU_FIXED_SZ) {
+        GPUEDWrapper::runGPULanczos(
+            gpu_op, static_cast<int>(sector_dim),
+            params.max_iterations, num_eigs, params.tolerance,
+            eigenvalues, params.output_dir, params.compute_eigenvectors);
+    } else if (method == DiagonalizationMethod::BLOCK_LANCZOS_GPU ||
+               method == DiagonalizationMethod::BLOCK_LANCZOS_GPU_FIXED_SZ) {
+        GPUEDWrapper::runGPUBlockLanczos(
+            gpu_op, static_cast<int>(sector_dim),
+            params.max_iterations, num_eigs, params.block_size,
+            params.tolerance, eigenvalues, params.output_dir,
+            params.compute_eigenvectors);
+    } else if (method == DiagonalizationMethod::DAVIDSON_GPU) {
+        GPUEDWrapper::runGPUDavidson(
+            gpu_op, static_cast<int>(sector_dim),
+            num_eigs, params.max_iterations, params.max_subspace,
+            params.tolerance, eigenvalues, params.output_dir,
+            params.compute_eigenvectors);
+    } else if (method == DiagonalizationMethod::KRYLOV_SCHUR_GPU) {
+        GPUEDWrapper::runGPUKrylovSchur(
+            gpu_op, static_cast<int>(sector_dim),
+            params.max_iterations, num_eigs, params.tolerance,
+            eigenvalues, params.output_dir, params.compute_eigenvectors);
+    } else if (method == DiagonalizationMethod::BLOCK_KRYLOV_SCHUR_GPU) {
+        GPUEDWrapper::runGPUBlockKrylovSchur(
+            gpu_op, static_cast<int>(sector_dim),
+            params.max_iterations, num_eigs, params.block_size,
+            params.tolerance, eigenvalues, params.output_dir,
+            params.compute_eigenvectors);
+    } else if (method == DiagonalizationMethod::FULL_GPU) {
+        GPUEDWrapper::runGPUFullDiag(
+            gpu_op, static_cast<int>(sector_dim),
+            num_eigs, eigenvalues, params.output_dir,
+            params.compute_eigenvectors);
+    } else {
+        GPUEDWrapper::destroyGPUOperator(gpu_op);
+        throw std::runtime_error("Unsupported GPU method for symmetrized diagonalization: use Lanczos, Block Lanczos, Davidson, or Krylov-Schur GPU variants");
+    }
+
+    GPUEDWrapper::destroyGPUOperator(gpu_op);
+
+    EDResults results;
+    results.eigenvalues = eigenvalues;
+    return results;
+}
+
+} // namespace ed_streaming_internal
+#endif // WITH_CUDA
 
 /**
  * @brief Exact diagonalization using streaming symmetry (no disk storage)
@@ -97,6 +234,19 @@ inline EDResults exact_diagonalization_streaming_symmetry(
         bool operator<(const EigenInfo& other) const { return value < other.value; }
     };
     std::vector<EigenInfo> all_eigen_info;
+
+#ifdef WITH_CUDA
+    bool use_gpu = ed_internal::is_gpu_method(method);
+    int group_size = 0;
+    if (use_gpu) {
+        if (!GPUEDWrapper::isGPUAvailable()) {
+            throw std::runtime_error("GPU method requested but no CUDA-capable GPU found");
+        }
+        GPUEDWrapper::printGPUInfo();
+        group_size = static_cast<int>(hamiltonian.symmetry_info.max_clique.size());
+        std::cout << "Using GPU symmetrized matvec (group_size=" << group_size << ")" << std::endl;
+    }
+#endif
     
     for (size_t sector_idx = 0; sector_idx < num_sectors; ++sector_idx) {
         uint64_t sector_dim = hamiltonian.getSectorDimension(sector_idx);
@@ -115,28 +265,45 @@ inline EDResults exact_diagonalization_streaming_symmetry(
             if (i < sector.quantum_numbers.size() - 1) std::cout << ",";
         }
         std::cout << "])" << std::endl;
-        
-        // Create matrix-free operator for this sector
-        auto matvec = [&hamiltonian, sector_idx](const Complex* in, Complex* out, int size) {
-            hamiltonian.applySymmetrized(sector_idx, in, out);
-        };
-        
-        // Configure parameters for this sector
-        EDParameters sector_params = params;
-        sector_params.num_eigenvalues = std::min(params.num_eigenvalues, sector_dim);
-        
-        if (params.compute_eigenvectors && !params.output_dir.empty()) {
-            sector_params.output_dir = params.output_dir + "/sector_" + std::to_string(sector_idx);
-            safe_system_call("mkdir -p " + sector_params.output_dir);
+
+        EDResults sector_results;
+
+#ifdef WITH_CUDA
+        if (use_gpu) {
+            // GPU dispatch: create symmetrized operator per sector
+            EDParameters sector_params = params;
+            sector_params.num_eigenvalues = std::min(params.num_eigenvalues, sector_dim);
+            if (params.compute_eigenvectors && !params.output_dir.empty()) {
+                sector_params.output_dir = params.output_dir + "/sector_" + std::to_string(sector_idx);
+                safe_system_call("mkdir -p " + sector_params.output_dir);
+            }
+            std::cout << "  GPU diagonalizing with " << sector_params.num_eigenvalues 
+                      << " eigenvalues..." << std::endl;
+            sector_results = ed_streaming_internal::dispatchGPUSymmetrizedSector(
+                method, sector_params,
+                params.num_sites, params.spin_length,
+                sector_dim, sector, group_size,
+                interaction_file, single_site_file
+            );
+        } else
+#endif
+        {
+            // CPU dispatch: matrix-free operator
+            auto matvec = [&hamiltonian, sector_idx](const Complex* in, Complex* out, int size) {
+                hamiltonian.applySymmetrized(sector_idx, in, out);
+            };
+            EDParameters sector_params = params;
+            sector_params.num_eigenvalues = std::min(params.num_eigenvalues, sector_dim);
+            if (params.compute_eigenvectors && !params.output_dir.empty()) {
+                sector_params.output_dir = params.output_dir + "/sector_" + std::to_string(sector_idx);
+                safe_system_call("mkdir -p " + sector_params.output_dir);
+            }
+            std::cout << "  Diagonalizing with " << sector_params.num_eigenvalues 
+                      << " eigenvalues..." << std::endl;
+            sector_results = exact_diagonalization_core(
+                matvec, sector_dim, method, sector_params
+            );
         }
-        
-        // Diagonalize this sector
-        std::cout << "  Diagonalizing with " << sector_params.num_eigenvalues 
-                  << " eigenvalues..." << std::endl;
-        
-        EDResults sector_results = exact_diagonalization_core(
-            matvec, sector_dim, method, sector_params
-        );
         
         // Store eigenvalue info
         for (size_t i = 0; i < sector_results.eigenvalues.size(); ++i) {
@@ -326,6 +493,20 @@ inline EDResults exact_diagonalization_streaming_symmetry_fixed_sz(
         bool operator<(const EigenInfo& other) const { return value < other.value; }
     };
     std::vector<EigenInfo> all_eigen_info;
+
+#ifdef WITH_CUDA
+    bool use_gpu = ed_internal::is_gpu_method(method);
+    int group_size = 0;
+    if (use_gpu) {
+        if (!GPUEDWrapper::isGPUAvailable()) {
+            throw std::runtime_error("GPU method requested but no CUDA-capable GPU found");
+        }
+        GPUEDWrapper::printGPUInfo();
+        group_size = static_cast<int>(hamiltonian.symmetry_info.max_clique.size());
+        std::cout << "Using GPU symmetrized matvec (group_size=" << group_size 
+                  << ", fixed Sz, N_up=" << n_up << ")" << std::endl;
+    }
+#endif
     
     for (size_t sector_idx = 0; sector_idx < num_sectors; ++sector_idx) {
         uint64_t sector_dim = hamiltonian.getSectorDimension(sector_idx);
@@ -344,26 +525,43 @@ inline EDResults exact_diagonalization_streaming_symmetry_fixed_sz(
             if (i < sector.quantum_numbers.size() - 1) std::cout << ",";
         }
         std::cout << "])" << std::endl;
-        
-        // Create matrix-free operator
-        auto matvec = [&hamiltonian, sector_idx](const Complex* in, Complex* out, int size) {
-            hamiltonian.applySymmetrizedFixedSz(sector_idx, in, out);
-        };
-        
-        // Configure parameters
-        EDParameters sector_params = params;
-        sector_params.num_eigenvalues = std::min(params.num_eigenvalues, sector_dim);
-        
-        if (params.compute_eigenvectors && !params.output_dir.empty()) {
-            sector_params.output_dir = params.output_dir + "/sector_" + std::to_string(sector_idx);
-            safe_system_call("mkdir -p " + sector_params.output_dir);
+
+        EDResults sector_results;
+
+#ifdef WITH_CUDA
+        if (use_gpu) {
+            // GPU dispatch: create symmetrized operator per sector
+            EDParameters sector_params = params;
+            sector_params.num_eigenvalues = std::min(params.num_eigenvalues, sector_dim);
+            if (params.compute_eigenvectors && !params.output_dir.empty()) {
+                sector_params.output_dir = params.output_dir + "/sector_" + std::to_string(sector_idx);
+                safe_system_call("mkdir -p " + sector_params.output_dir);
+            }
+            std::cout << "  GPU diagonalizing..." << std::endl;
+            sector_results = ed_streaming_internal::dispatchGPUSymmetrizedSector(
+                method, sector_params,
+                params.num_sites, params.spin_length,
+                sector_dim, sector, group_size,
+                interaction_file, single_site_file
+            );
+        } else
+#endif
+        {
+            // CPU dispatch: matrix-free operator
+            auto matvec = [&hamiltonian, sector_idx](const Complex* in, Complex* out, int size) {
+                hamiltonian.applySymmetrizedFixedSz(sector_idx, in, out);
+            };
+            EDParameters sector_params = params;
+            sector_params.num_eigenvalues = std::min(params.num_eigenvalues, sector_dim);
+            if (params.compute_eigenvectors && !params.output_dir.empty()) {
+                sector_params.output_dir = params.output_dir + "/sector_" + std::to_string(sector_idx);
+                safe_system_call("mkdir -p " + sector_params.output_dir);
+            }
+            std::cout << "  Diagonalizing..." << std::endl;
+            sector_results = exact_diagonalization_core(
+                matvec, sector_dim, method, sector_params
+            );
         }
-        
-        // Diagonalize
-        std::cout << "  Diagonalizing..." << std::endl;
-        EDResults sector_results = exact_diagonalization_core(
-            matvec, sector_dim, method, sector_params
-        );
         
         // Store results
         for (size_t i = 0; i < sector_results.eigenvalues.size(); ++i) {

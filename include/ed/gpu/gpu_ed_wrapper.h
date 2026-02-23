@@ -10,6 +10,7 @@ class Operator;
 #include <string>
 #include <tuple>
 #include <map>
+#include <cstdint>
 
 // Forward declarations only - don't include CUDA headers in this header
 // They will be included in the .cu implementation file
@@ -144,16 +145,6 @@ public:
                                            const std::string& interall_file,
                                            const std::string& trans_file);
 
-    /**
-     * Create GPU operator from CSR arrays (host-side)
-     * row_ptr size = N+1, col_ind size = nnz, values size = nnz
-     */
-    static void* createGPUOperatorFromCSR(int n_sites,
-                                         int N,
-                                         const std::vector<int>& row_ptr,
-                                         const std::vector<int>& col_ind,
-                                         const std::vector<std::complex<double>>& values);
-    
     /**
      * Clean up GPU resources
      */
@@ -585,6 +576,52 @@ public:
                            int num_temp_bins,
                            unsigned int random_seed = 0);
     
+    /**
+     * Create GPU Symmetrized operator for a single symmetry sector
+     * 
+     * @param n_sites Number of lattice sites
+     * @param spin_l Spin quantum number (default 0.5)
+     * @param sector_dim Number of symmetrized basis states in this sector
+     * @param orbit_elements Flattened orbit elements (all orbits concatenated)
+     * @param orbit_coefficients Matching complex coefficients
+     * @param orbit_offsets CSR-style offsets into orbit arrays per basis state
+     * @param orbit_norms Normalization factor for each basis state
+     * @param group_size |G|, the order of the symmetry group
+     * @param interall_file Path to InterAll.dat
+     * @param trans_file Path to Trans.dat
+     * @return Opaque handle to GPUSymmetrizedOperator (caller must destroyGPUOperator)
+     */
+    static void* createGPUSymmetrizedOperator(
+        int n_sites, float spin_l,
+        int sector_dim,
+        const std::vector<uint64_t>& orbit_elements,
+        const std::vector<std::complex<double>>& orbit_coefficients,
+        const std::vector<int>& orbit_offsets,
+        const std::vector<double>& orbit_norms,
+        int group_size,
+        const std::string& interall_file,
+        const std::string& trans_file);
+
+    /**
+     * Run full (dense) diagonalization on GPU using cuSOLVER zheevd
+     * 
+     * Builds the dense Hamiltonian matrix on GPU column-by-column via matvec,
+     * then computes ALL eigenvalues (and optionally eigenvectors) using the
+     * divide-and-conquer algorithm.
+     *
+     * @param gpu_op_handle Opaque handle to GPUOperator (any subclass)
+     * @param N Hilbert space dimension (or sector dimension)
+     * @param num_eigenvalues Number of lowest eigenvalues to return (0 = all)
+     * @param eigenvalues Output vector of eigenvalues
+     * @param dir Output directory for HDF5 results (empty = no save)
+     * @param compute_eigenvectors Whether to compute and save eigenvectors
+     */
+    static void runGPUFullDiag(void* gpu_op_handle,
+                               int N, int num_eigenvalues,
+                               std::vector<double>& eigenvalues,
+                               std::string dir = "",
+                               bool compute_eigenvectors = true);
+
 private:
     static int getGPUCount();
     static size_t getAvailableGPUMemory(int device = 0);

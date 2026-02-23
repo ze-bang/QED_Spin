@@ -38,103 +38,6 @@ __device__ __forceinline__ double atomicAddDouble(double* address, double val) {
 namespace GPUKernels {
 
 /**
- * GPU-NATIVE: Transform-parallel matrix-vector product
- * 
- * Key GPU-native optimizations:
- * 1. 2D parallelism: N × T threads (one per state-transform pair)
- * 2. Atomic accumulation: Hardware-optimized on modern GPUs
- * 3. Maximum memory bandwidth utilization (80-95% vs 20-40%)
- * 4. Coalesced reads: All threads read contiguous x[] elements
- * 5. Expected 5-10× speedup over sequential-transform approach
- * 
- * Grid: ((N+15)/16, (num_transforms+15)/16)
- * Block: (16, 16) = 256 threads
- * 
- * Each thread computes ONE (state, transform) contribution and atomically adds to y[idx].
- */
-__global__ void matVecTransformParallel(const cuDoubleComplex* x, cuDoubleComplex* y,
-                                        const GPUTransformData* transforms,
-                                        int num_transforms, int N, int n_sites, float spin_l) {
-    // 2D thread mapping
-    int state_idx = blockIdx.x * blockDim.x + threadIdx.x;
-    int transform_idx = blockIdx.y * blockDim.y + threadIdx.y;
-    
-    if (state_idx >= N || transform_idx >= num_transforms) return;
-    
-    uint64_t state = static_cast<uint64_t>(state_idx);
-    const GPUTransformData& tdata = transforms[transform_idx];
-    
-    cuDoubleComplex factor = tdata.coefficient;
-    uint64_t new_state = state;
-    bool valid = true;
-    
-    if (tdata.is_two_body) {
-        // Two-body operator
-        uint64_t bit1 = (state >> tdata.site_index) & 1;
-        
-        // Apply first operator
-        if (tdata.op_type == 2) {
-            // Sz operator
-            double sign = spin_l * ((bit1 == 0) ? 1.0 : -1.0);
-            factor = complex_scale(factor, sign);
-        } else {
-            // S+ or S- operator
-            if (bit1 != tdata.op_type) {
-                new_state ^= (1ULL << tdata.site_index);
-            } else {
-                valid = false;
-            }
-        }
-        
-        if (valid) {
-            // Apply second operator
-            uint64_t bit2_new = (new_state >> tdata.site_index_2) & 1;
-            
-            if (tdata.op_type_2 == 2) {
-                // Sz operator
-                double sign = spin_l * ((bit2_new == 0) ? 1.0 : -1.0);
-                factor = complex_scale(factor, sign);
-            } else {
-                // S+ or S- operator
-                if (bit2_new != tdata.op_type_2) {
-                    new_state ^= (1ULL << tdata.site_index_2);
-                } else {
-                    valid = false;
-                }
-            }
-        }
-    } else {
-        // One-body operator
-        uint64_t bit = (state >> tdata.site_index) & 1;
-        
-        if (tdata.op_type == 2) {
-            // Sz operator: diagonal
-            double sign = spin_l * ((bit == 0) ? 1.0 : -1.0);
-            factor = complex_scale(factor, sign);
-        } else {
-            // S+ or S- operator: off-diagonal
-            if (bit != tdata.op_type) {
-                new_state ^= (1ULL << tdata.site_index);
-            } else {
-                valid = false;
-            }
-        }
-    }
-    
-    // CORRECT: Read from input state, write to output (new_state)
-    // Transform encodes: state -> new_state, so H[new_state, state] = factor
-    // y[new_state] += factor * x[state]
-    if (valid && new_state < N) {
-        cuDoubleComplex x_val = __ldg(&x[state_idx]);
-        cuDoubleComplex contrib = cuCmul(factor, x_val);
-        
-        // Atomic add for complex numbers (separate real/imaginary)
-        atomicAddDouble(&y[new_state].x, cuCreal(contrib));
-        atomicAddDouble(&y[new_state].y, cuCimag(contrib));
-    }
-}
-
-/**
  * OPTIMIZED: Matrix-vector product using Structure-of-Arrays
  * 
  * Key optimizations:
@@ -260,145 +163,6 @@ __global__ void matVecKernelOptimized(cudaTextureObject_t tex_x_unused, cuDouble
 }
 
 /**
- * Helper device function to apply a single operator to a state (legacy)
- */
-__device__ void applyOperator(uint64_t state, int site, char op,
-                             uint64_t& new_state, cuDoubleComplex& amplitude) {
-    switch(op) {
-        case '+':  // S+
-            apply_sp(state, site, new_state, amplitude);
-            break;
-        case '-':  // S-
-            apply_sm(state, site, new_state, amplitude);
-            break;
-        case 'z':  // Sz
-            apply_sz(state, site, new_state, amplitude);
-            break;
-        case 'x':  // Sx
-            apply_sx(state, site, new_state, amplitude);
-            break;
-        case 'y':  // Sy
-            apply_sy(state, site, new_state, amplitude);
-            break;
-        default:
-            new_state = state;
-            amplitude = make_cuDoubleComplex(0.0, 0.0);
-    }
-}
-
-/**
- * Main matrix-vector product kernel
- * Computes y = H * x on-the-fly without storing the matrix
- */
-__global__ void matVecKernel(const cuDoubleComplex* x, cuDoubleComplex* y,
-                             int N, int n_sites,
-                             const void* interactions_ptr, int num_interactions,
-                             const void* single_site_ops_ptr, int num_single_site_ops) {
-    
-    // Cast void pointers to appropriate types (moved outside loop)
-    typedef struct {int site1, site2; char op1, op2; double coupling;} Interaction;
-    typedef struct {int site; char op; double coupling;} SingleSiteOp;
-    
-    const Interaction* interactions = static_cast<const Interaction*>(interactions_ptr);
-    const SingleSiteOp* single_site_ops = static_cast<const SingleSiteOp*>(single_site_ops_ptr);
-    
-    // Grid-stride loop to handle arrays larger than max grid size
-    int grid_stride = blockDim.x * gridDim.x;
-    
-    for (int idx = blockIdx.x * blockDim.x + threadIdx.x; idx < N; idx += grid_stride) {
-        // Current basis state (represented as integer)
-        uint64_t state = static_cast<uint64_t>(idx);
-    
-    // Accumulator for this row of H
-    cuDoubleComplex result = make_cuDoubleComplex(0.0, 0.0);
-    
-    // Cast void pointers to appropriate types
-    typedef struct {int site1, site2; char op1, op2; double coupling;} Interaction;
-    typedef struct {int site; char op; double coupling;} SingleSiteOp;
-    
-    const Interaction* interactions = static_cast<const Interaction*>(interactions_ptr);
-    const SingleSiteOp* single_site_ops = static_cast<const SingleSiteOp*>(single_site_ops_ptr);
-    
-    // Apply two-site interactions
-    for (int i = 0; i < num_interactions; ++i) {
-        const Interaction& inter = interactions[i];
-        
-        // Apply first operator
-        uint64_t temp_state1;
-        cuDoubleComplex amp1;
-        applyOperator(state, inter.site1, inter.op1, temp_state1, amp1);
-        
-        if (cuCreal(amp1) == 0.0 && cuCimag(amp1) == 0.0) continue;
-        
-        // Apply second operator
-        uint64_t final_state;
-        cuDoubleComplex amp2;
-        applyOperator(temp_state1, inter.site2, inter.op2, final_state, amp2);
-        
-        if (cuCreal(amp2) == 0.0 && cuCimag(amp2) == 0.0) continue;
-        
-        // Total amplitude
-        cuDoubleComplex total_amp = cuCmul(amp1, amp2);
-        total_amp = make_cuDoubleComplex(
-            cuCreal(total_amp) * inter.coupling,
-            cuCimag(total_amp) * inter.coupling
-        );
-        
-        // Add contribution: result += total_amp * x[final_state]
-        if (final_state < N) {
-            cuDoubleComplex contrib = cuCmul(total_amp, x[final_state]);
-            result = complex_add(result, contrib);
-        }
-    }
-    
-    // Apply single-site operators
-    for (int i = 0; i < num_single_site_ops; ++i) {
-        const SingleSiteOp& op = single_site_ops[i];
-        
-        uint64_t new_state;
-        cuDoubleComplex amp;
-        applyOperator(state, op.site, op.op, new_state, amp);
-        
-        if (cuCreal(amp) == 0.0 && cuCimag(amp) == 0.0) continue;
-        
-        cuDoubleComplex scaled_amp = complex_scale(amp, op.coupling);
-        
-        if (new_state < N) {
-            cuDoubleComplex contrib = cuCmul(scaled_amp, x[new_state]);
-            result = complex_add(result, contrib);
-        }
-    }
-    
-    // Write result
-    y[idx] = result;
-    }  // end grid-stride loop
-}
-
-/**
- * Sparse matrix-vector product kernel (CSR format)
- */
-__global__ void sparseMatVecKernel(const int* row_ptr, const int* col_ind,
-                                   const cuDoubleComplex* values,
-                                   const cuDoubleComplex* x, cuDoubleComplex* y,
-                                   int N) {
-    int row = blockIdx.x * blockDim.x + threadIdx.x;
-    if (row >= N) return;
-    
-    cuDoubleComplex sum = make_cuDoubleComplex(0.0, 0.0);
-    int row_start = row_ptr[row];
-    int row_end = row_ptr[row + 1];
-    
-    for (int i = row_start; i < row_end; ++i) {
-        int col = col_ind[i];
-        cuDoubleComplex val = values[i];
-        cuDoubleComplex x_val = x[col];
-        sum = complex_add(sum, cuCmul(val, x_val));
-    }
-    
-    y[row] = sum;
-}
-
-/**
  * Generate basis states for fixed Sz sector using parallel Gosper's hack
  */
 __global__ void generateFixedSzBasisKernel(uint64_t* basis_states, int n_bits, int n_up,
@@ -416,41 +180,6 @@ __global__ void generateFixedSzBasisKernel(uint64_t* basis_states, int n_bits, i
     }
     
     basis_states[idx] = state;
-}
-
-/**
- * Build hash table for fast state lookup
- * Uses open addressing with linear probing
- */
-__global__ void buildHashTableKernel(const uint64_t* basis_states, void* hash_table_ptr,
-                                    int hash_size, int num_states) {
-    typedef struct {uint64_t state; int index;} HashEntry;
-    HashEntry* hash_table = static_cast<HashEntry*>(hash_table_ptr);
-    
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= num_states) return;
-    
-    uint64_t state = basis_states[idx];
-    
-    // Hash function: simple modulo
-    int hash = state % hash_size;
-    
-    // Linear probing to find empty slot
-    while (true) {
-        uint64_t old = atomicCAS(
-            (unsigned long long*)&hash_table[hash].state,
-            0ULL, state
-        );
-        
-        if (old == 0ULL || old == state) {
-            // Successfully inserted or already present
-            hash_table[hash].index = idx;
-            break;
-        }
-        
-        // Try next slot
-        hash = (hash + 1) % hash_size;
-    }
 }
 
 /**
@@ -689,83 +418,6 @@ __global__ void matVecFixedSzKernelOptimized(const cuDoubleComplex* x, cuDoubleC
             }
         }
     }
-    }  // end grid-stride loop
-}
-
-/**
- * LEGACY: Matrix-vector product kernel for fixed Sz sector
- * Uses binary search instead of hash table for better warp coherence
- */
-__global__ void matVecFixedSzKernel(const cuDoubleComplex* x, cuDoubleComplex* y,
-                                    const uint64_t* basis_states,
-                                    const void* unused_hash_table, int unused_hash_size,
-                                    int N, int n_sites,
-                                    const void* interactions_ptr, int num_interactions,
-                                    const void* single_site_ops_ptr, int num_single_site_ops) {
-    
-    typedef struct {int site1, site2; char op1, op2; double coupling;} Interaction;
-    typedef struct {int site; char op; double coupling;} SingleSiteOp;
-    
-    const Interaction* interactions = static_cast<const Interaction*>(interactions_ptr);
-    const SingleSiteOp* single_site_ops = static_cast<const SingleSiteOp*>(single_site_ops_ptr);
-    
-    // Grid-stride loop to handle arrays larger than max grid size
-    int grid_stride = blockDim.x * gridDim.x;
-    
-    for (int idx = blockIdx.x * blockDim.x + threadIdx.x; idx < N; idx += grid_stride) {
-        // Get basis state for this index
-        uint64_t state = basis_states[idx];
-        
-        cuDoubleComplex result = make_cuDoubleComplex(0.0, 0.0);
-    
-    // Apply two-site interactions
-    for (int i = 0; i < num_interactions; ++i) {
-        const Interaction& inter = interactions[i];
-        
-        uint64_t temp_state1;
-        cuDoubleComplex amp1;
-        applyOperator(state, inter.site1, inter.op1, temp_state1, amp1);
-        
-        if (cuCreal(amp1) == 0.0 && cuCimag(amp1) == 0.0) continue;
-        
-        uint64_t final_state;
-        cuDoubleComplex amp2;
-        applyOperator(temp_state1, inter.site2, inter.op2, final_state, amp2);
-        
-        if (cuCreal(amp2) == 0.0 && cuCimag(amp2) == 0.0) continue;
-        
-        cuDoubleComplex total_amp = cuCmul(amp1, amp2);
-        total_amp = complex_scale(total_amp, inter.coupling);
-        
-        // OPTIMIZED: Binary search instead of hash table (reduces warp divergence)
-        int final_idx = lookupState(final_state, basis_states, N);
-        if (final_idx >= 0) {
-            cuDoubleComplex contrib = cuCmul(total_amp, x[final_idx]);
-            result = complex_add(result, contrib);
-        }
-    }
-    
-    // Apply single-site operators
-    for (int i = 0; i < num_single_site_ops; ++i) {
-        const SingleSiteOp& op = single_site_ops[i];
-        
-        uint64_t new_state;
-        cuDoubleComplex amp;
-        applyOperator(state, op.site, op.op, new_state, amp);
-        
-        if (cuCreal(amp) == 0.0 && cuCimag(amp) == 0.0) continue;
-        
-        cuDoubleComplex scaled_amp = complex_scale(amp, op.coupling);
-        
-        // OPTIMIZED: Binary search
-        int new_idx = lookupState(new_state, basis_states, N);
-        if (new_idx >= 0) {
-            cuDoubleComplex contrib = cuCmul(scaled_amp, x[new_idx]);
-            result = complex_add(result, contrib);
-        }
-    }
-    
-    y[idx] = result;
     }  // end grid-stride loop
 }
 
@@ -1238,6 +890,184 @@ __global__ void matVecWarpReductionFused(
     if (lane_id == 0) {
         y[out_idx] = make_cuDoubleComplex(sum_real, sum_imag);
     }
+}
+
+// ============================================================================
+// SYMMETRIZED MATVEC KERNEL
+// ============================================================================
+
+/**
+ * @brief Hash table lookup using open addressing with linear probing
+ *
+ * Returns -1 if key not found (state outside this sector).
+ */
+__device__ __forceinline__ int hashLookup(
+    uint64_t key,
+    const GPUHashEntry* table,
+    int table_size,
+    cuDoubleComplex* out_projection)
+{
+    // Fibonacci hashing for good distribution
+    uint64_t hash = key * 11400714819323198485ULL;  // golden ratio * 2^64
+    int idx = static_cast<int>(hash % static_cast<uint64_t>(table_size));
+    
+    // Linear probing (max table_size probes for safety)
+    for (int probe = 0; probe < table_size; ++probe) {
+        const GPUHashEntry& entry = table[idx];
+        if (entry.key == key) {
+            *out_projection = entry.projection;
+            return entry.value;
+        }
+        if (entry.key == UINT64_MAX) {
+            return -1;  // Empty slot — key doesn't exist
+        }
+        idx = (idx + 1) % table_size;
+    }
+    return -1;  // Table full (shouldn't happen with proper sizing)
+}
+
+/**
+ * @brief Binary search to find which basis state j owns global orbit index idx
+ *
+ * orbit_offsets[j] <= idx < orbit_offsets[j+1]
+ * Returns j.  orbit_offsets has sector_dim+1 entries.
+ */
+__device__ __forceinline__ int findBasisState(
+    int global_orbit_idx,
+    const int* orbit_offsets,
+    int sector_dim)
+{
+    int lo = 0, hi = sector_dim;
+    while (lo < hi) {
+        int mid = (lo + hi) / 2;
+        if (orbit_offsets[mid + 1] <= global_orbit_idx) {
+            lo = mid + 1;
+        } else {
+            hi = mid;
+        }
+    }
+    return lo;
+}
+
+/**
+ * @brief Symmetrized matvec kernel — scatter pattern with hash-table projection
+ *
+ * 2D grid: x-dim over total_orbit_elements, y-dim over transforms.
+ *
+ * For each (orbit_element_idx, transform_idx):
+ *   1. Find j = basis state owning this orbit element
+ *   2. Load s = orbit_elements[idx], α = orbit_coefficients[idx], c_j = x[j]
+ *   3. Apply transform to s → s', h
+ *   4. Hash lookup s' → (k, projection_factor)
+ *   5. Atomically accumulate weighted * h * projection_factor into y[k]
+ *
+ * Memory: O(sector_dim) for output only; all orbit/hash data read-only.
+ */
+__global__ void matVecSymmetrized(
+    const cuDoubleComplex* __restrict__ x,
+    cuDoubleComplex* __restrict__ y,
+    const uint64_t* orbit_elements,
+    const cuDoubleComplex* orbit_coefficients,
+    const int* orbit_offsets,
+    const double* orbit_norms,
+    int sector_dim,
+    const GPUTransformData* transforms, int num_transforms,
+    const GPUHashEntry* hash_table, int hash_table_size,
+    int n_sites, float spin_l,
+    int total_orbit_elements)
+{
+    // 2D index: x = orbit element, y = transform
+    int oe_idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int t_idx  = blockIdx.y * blockDim.y + threadIdx.y;
+    
+    if (oe_idx >= total_orbit_elements || t_idx >= num_transforms) return;
+    
+    // 1. Find which basis state j owns this orbit element
+    int j = findBasisState(oe_idx, orbit_offsets, sector_dim);
+    
+    // 2. Load data
+    cuDoubleComplex c_j = __ldg(&x[j]);
+    // Skip zero input
+    if (cuCreal(c_j) == 0.0 && cuCimag(c_j) == 0.0) return;
+    
+    uint64_t s = orbit_elements[oe_idx];
+    cuDoubleComplex alpha_s = orbit_coefficients[oe_idx];
+    double norm_j = orbit_norms[j];
+    
+    // weighted = c_j * α_s / norm_j
+    cuDoubleComplex weighted = cuCdiv(cuCmul(c_j, alpha_s), make_cuDoubleComplex(norm_j, 0.0));
+    
+    // 3. Apply transform t to state s
+    const GPUTransformData& t = transforms[t_idx];
+    uint64_t s_prime = s;
+    cuDoubleComplex h_element = t.coefficient;
+    bool valid = true;
+    
+    if (!t.is_two_body) {
+        // One-body operator
+        if (t.op_type == 2) {
+            // Sz: diagonal
+            double sign = ((s >> t.site_index) & 1) ? -1.0 : 1.0;
+            h_element = cuCmul(h_element, make_cuDoubleComplex(spin_l * sign, 0.0));
+        } else {
+            // S+ or S-: flip bit
+            uint64_t bit = (s >> t.site_index) & 1;
+            if (bit != t.op_type) {
+                s_prime ^= (1ULL << t.site_index);
+            } else {
+                valid = false;
+            }
+        }
+    } else {
+        // Two-body operator
+        uint64_t bit_i = (s >> t.site_index) & 1;
+        uint64_t bit_j = (s >> t.site_index_2) & 1;
+        
+        if (t.op_type == 2 && t.op_type_2 == 2) {
+            // Sz_i Sz_j: diagonal
+            double sign_i = bit_i ? -1.0 : 1.0;
+            double sign_j = bit_j ? -1.0 : 1.0;
+            h_element = cuCmul(h_element, make_cuDoubleComplex(spin_l * spin_l * sign_i * sign_j, 0.0));
+        } else {
+            if (t.op_type != 2) {
+                if (bit_i != t.op_type) {
+                    s_prime ^= (1ULL << t.site_index);
+                } else {
+                    valid = false;
+                }
+            } else {
+                double sign_i = bit_i ? -1.0 : 1.0;
+                h_element = cuCmul(h_element, make_cuDoubleComplex(spin_l * sign_i, 0.0));
+            }
+            
+            if (valid && t.op_type_2 != 2) {
+                uint64_t new_bit_j = (s_prime >> t.site_index_2) & 1;
+                if (new_bit_j != t.op_type_2) {
+                    s_prime ^= (1ULL << t.site_index_2);
+                } else {
+                    valid = false;
+                }
+            } else if (valid) {
+                uint64_t new_bit_j = (s_prime >> t.site_index_2) & 1;
+                double sign_j = new_bit_j ? -1.0 : 1.0;
+                h_element = cuCmul(h_element, make_cuDoubleComplex(spin_l * sign_j, 0.0));
+            }
+        }
+    }
+    
+    if (!valid) return;
+    
+    // 4. Hash table lookup: s' → (k, projection_factor)
+    cuDoubleComplex projection;
+    int k = hashLookup(s_prime, hash_table, hash_table_size, &projection);
+    if (k < 0) return;  // s' not in this sector
+    
+    // 5. Accumulate: y[k] += weighted * h_element * projection
+    cuDoubleComplex contrib = cuCmul(cuCmul(weighted, h_element), projection);
+    
+    // Atomic add to real and imaginary parts
+    atomicAddDouble(&((double*)&y[k])[0], cuCreal(contrib));
+    atomicAddDouble(&((double*)&y[k])[1], cuCimag(contrib));
 }
 
 } // namespace GPUKernels

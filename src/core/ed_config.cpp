@@ -52,6 +52,7 @@ enum class DiagonalizationMethod {
     mTPQ_GPU,
     cTPQ_GPU,
     FTLM_GPU,
+    FULL_GPU,
     // Deprecated methods (kept for backwards compatibility)
     LANCZOS_GPU_FIXED_SZ,
     BLOCK_LANCZOS_GPU_FIXED_SZ,
@@ -890,6 +891,7 @@ std::optional<DiagonalizationMethod> parseMethod(const std::string& str) {
     if (lower == "ctpq_gpu") return DiagonalizationMethod::cTPQ_GPU;
     if (lower == "ftlm_gpu") return DiagonalizationMethod::FTLM_GPU;
     if (lower == "ftlm_gpu_fixed_sz") return DiagonalizationMethod::FTLM_GPU_FIXED_SZ;
+    if (lower == "full_gpu") return DiagonalizationMethod::FULL_GPU;
     std::cerr << "Warning: Unknown method '" << str << "', using LANCZOS\n";
     return std::nullopt;
 }
@@ -952,6 +954,7 @@ std::string methodToString(DiagonalizationMethod method) {
         case DiagonalizationMethod::cTPQ_GPU: return "cTPQ_GPU";
         case DiagonalizationMethod::FTLM_GPU: return "FTLM_GPU";
         case DiagonalizationMethod::FTLM_GPU_FIXED_SZ: return "FTLM_GPU_FIXED_SZ";
+        case DiagonalizationMethod::FULL_GPU: return "FULL_GPU";
         
         default: return "UNKNOWN";
     }

@@ -79,7 +79,7 @@ void GPUFixedSzOperator::matVecFixedSz(const cuDoubleComplex* d_x, cuDoubleCompl
     int num_blocks = (fixed_sz_dim_ + BLOCK_SIZE - 1) / BLOCK_SIZE;
     num_blocks = std::min(num_blocks, MAX_BLOCKS);
     
-    if (num_transforms_ > 0) {
+    if (!transform_data_.empty()) {
         // Copy transform data to device if not already done
         if (d_transform_data_ == nullptr) {
             copyTransformDataToDevice();
@@ -114,14 +114,9 @@ void GPUFixedSzOperator::matVecFixedSz(const cuDoubleComplex* d_x, cuDoubleCompl
                 d_transform_data_, num_transforms_);
         }
     } else {
-        // Fallback to legacy kernel
-        GPUKernels::matVecFixedSzKernel<<<num_blocks, BLOCK_SIZE>>>(
-            d_x, d_y,
-            d_basis_states_,
-            nullptr, 0,  // Hash table unused (binary search instead)
-            fixed_sz_dim_, n_sites_,
-            d_interactions_, num_interactions_,
-            d_single_site_ops_, num_single_site_ops_);
+        // No transform data - error (transform data is always required)
+        std::cerr << "Error: GPUFixedSzOperator::matVecFixedSz called with no transform data" << std::endl;
+        CUDA_CHECK(cudaMemset(d_y, 0, fixed_sz_dim_ * sizeof(cuDoubleComplex)));
     }
     
     CUDA_CHECK(cudaGetLastError());
