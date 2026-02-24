@@ -219,6 +219,12 @@ def run_nlce_triangular(params, fixed_params, exp_temp, work_dir, h_field=None, 
         n_model_params = 4
         Jzz, Jpm, Jpmpm, Jzpm = params[:4]
         J1, J2 = 1.0, 0.0  # Not used for anisotropic
+        Gamma, Gamma_prime = None, None
+    elif model == 'kitaev':
+        n_model_params = 4
+        J_H, J_K, Gamma, Gamma_prime = params[:4]
+        J1, J2 = J_H, J_K  # Map to J1/J2 for NLCE runner
+        Jzz, Jpm, Jpmpm, Jzpm = None, None, None, None
     else:
         fit_Jz_ratio = fixed_params.get("fit_Jz_ratio", False)
         if fit_Jz_ratio:
@@ -229,6 +235,7 @@ def run_nlce_triangular(params, fixed_params, exp_temp, work_dir, h_field=None, 
             n_model_params = 2
             J1, J2 = params[:2]
         Jzz, Jpm, Jpmpm, Jzpm = None, None, None, None
+        Gamma, Gamma_prime = None, None
     
     h_value = h_field if h_field is not None else fixed_params.get("h", 0.0)
     if field_dir is None:
@@ -265,6 +272,13 @@ def run_nlce_triangular(params, fixed_params, exp_temp, work_dir, h_field=None, 
         cmd.extend(['--Jpm', f'{Jpm:.12f}'])
         cmd.extend(['--Jpmpm', f'{Jpmpm:.12f}'])
         cmd.extend(['--Jzpm', f'{Jzpm:.12f}'])
+    elif model == 'kitaev':
+        cmd.extend(['--J1', f'{J1:.12f}'])
+        cmd.extend(['--J2', f'{J2:.12f}'])
+        if Gamma is not None:
+            cmd.extend(['--Gamma', f'{Gamma:.12f}'])
+        if Gamma_prime is not None:
+            cmd.extend(['--Gamma_prime', f'{Gamma_prime:.12f}'])
     else:
         cmd.extend(['--J1', f'{J1:.12f}'])
         cmd.extend(['--J2', f'{J2:.12f}'])
@@ -387,7 +401,7 @@ def calc_chi_squared(params, fixed_params, exp_datasets, work_dir):
     
     # Determine number of model parameters
     fit_Jz_ratio = fixed_params.get("fit_Jz_ratio", False)
-    if model == 'anisotropic':
+    if model in ('anisotropic', 'kitaev'):
         n_model_params = 4
     else:
         n_model_params = 3 if fit_Jz_ratio else 2
@@ -509,6 +523,8 @@ def calc_chi_squared(params, fixed_params, exp_datasets, work_dir):
             f.write(f"# Chi-squared: {total_chi_squared:.6f}\n")
             if model == 'anisotropic':
                 f.write(f"# Jzz={params[0]:.6f}, Jpm={params[1]:.6f}, Jpmpm={params[2]:.6f}, Jzpm={params[3]:.6f}\n")
+            elif model == 'kitaev':
+                f.write(f"# J={params[0]:.6f}, K={params[1]:.6f}, Gamma={params[2]:.6f}, Gamma'={params[3]:.6f}\n")
             else:
                 f.write(f"# J1={params[0]:.6f}, J2={params[1]:.6f}\n")
             f.write("#\n# Calculated specific heat:\n")
@@ -526,6 +542,9 @@ def calc_chi_squared(params, fixed_params, exp_datasets, work_dir):
     model = fixed_params.get("model", "xxz_j1j2")
     if model == 'anisotropic':
         log_msg = f"Jzz={params[0]:.4f}, Jpm={params[1]:.4f}, Jpmpm={params[2]:.4f}, Jzpm={params[3]:.4f}"
+        logging.info(f"Parameters: {log_msg}, Chi²={total_chi_squared:.4f}")
+    elif model == 'kitaev':
+        log_msg = f"J={params[0]:.4f}, K={params[1]:.4f}, Γ={params[2]:.4f}, Γ'={params[3]:.4f}"
         logging.info(f"Parameters: {log_msg}, Chi²={total_chi_squared:.4f}")
     else:
         log_msg = f"J1={params[0]:.4f}, J2={params[1]:.4f}"
@@ -548,7 +567,7 @@ def plot_results(exp_datasets, fixed_params, best_params, work_dir, output_dir):
     colors = plt.cm.tab10(np.linspace(0, 1, len(exp_datasets)))
     model = fixed_params.get("model", "xxz_j1j2")
     fit_Jz_ratio = fixed_params.get("fit_Jz_ratio", False)
-    if model == 'anisotropic':
+    if model in ('anisotropic', 'kitaev'):
         n_model_params = 4
     else:
         n_model_params = 3 if fit_Jz_ratio else 2
@@ -624,6 +643,10 @@ def plot_results(exp_datasets, fixed_params, best_params, work_dir, output_dir):
         title_str = (f'Triangular Lattice Fit (Anisotropic): '
                     f'Jzz={best_params[0]:.3f}, Jpm={best_params[1]:.3f}, '
                     f'Jpmpm={best_params[2]:.3f}, Jzpm={best_params[3]:.3f}')
+    elif model == 'kitaev':
+        title_str = (f'Triangular Lattice Fit (JK\u0393\u0393\'): '
+                    f'J={best_params[0]:.3f}, K={best_params[1]:.3f}, '
+                    f'\u0393={best_params[2]:.3f}, \u0393\'={best_params[3]:.3f}')
     else:
         title_str = f'Triangular Lattice Fit: J1={best_params[0]:.3f}, J2={best_params[1]:.3f}'
         if fit_Jz_ratio:
@@ -737,6 +760,20 @@ def main():
     parser.add_argument('--Jpmpm_max', type=float, default=5.0, help='Max Jpmpm')
     parser.add_argument('--Jzpm_min', type=float, default=-5.0, help='Min Jzpm')
     parser.add_argument('--Jzpm_max', type=float, default=5.0, help='Max Jzpm')
+    
+    # JKΓΓ' (Kitaev) model initial values and bounds
+    parser.add_argument('--initial_J_H', type=float, default=0.0, help='Initial Heisenberg coupling J')
+    parser.add_argument('--initial_J_K', type=float, default=1.0, help='Initial Kitaev coupling K')
+    parser.add_argument('--initial_Gamma', type=float, default=0.0, help='Initial Γ coupling')
+    parser.add_argument('--initial_Gamma_prime', type=float, default=0.0, help="Initial Γ' coupling")
+    parser.add_argument('--J_H_min', type=float, default=-5.0, help='Min J (Heisenberg)')
+    parser.add_argument('--J_H_max', type=float, default=5.0, help='Max J (Heisenberg)')
+    parser.add_argument('--J_K_min', type=float, default=-5.0, help='Min K (Kitaev)')
+    parser.add_argument('--J_K_max', type=float, default=5.0, help='Max K (Kitaev)')
+    parser.add_argument('--Gamma_min', type=float, default=-5.0, help='Min Γ')
+    parser.add_argument('--Gamma_max', type=float, default=5.0, help='Max Γ')
+    parser.add_argument('--Gamma_prime_min', type=float, default=-5.0, help="Min Γ'")
+    parser.add_argument('--Gamma_prime_max', type=float, default=5.0, help="Max Γ'")
     
     # NLCE parameters
     parser.add_argument('--max_order', type=int, default=5, help='Maximum NLCE order (default: 5 for triangular lattice)')
@@ -921,6 +958,19 @@ def main():
         logging.info(f"Fitting anisotropic model: {param_names}")
         logging.info(f"Initial: Jzz={args.initial_Jzz}, Jpm={args.initial_Jpm}, "
                     f"Jpmpm={args.initial_Jpmpm}, Jzpm={args.initial_Jzpm}")
+    elif args.model == 'kitaev':
+        bounds = [
+            (args.J_H_min, args.J_H_max),
+            (args.J_K_min, args.J_K_max),
+            (args.Gamma_min, args.Gamma_max),
+            (args.Gamma_prime_min, args.Gamma_prime_max)
+        ]
+        initial_params = [args.initial_J_H, args.initial_J_K, args.initial_Gamma, args.initial_Gamma_prime]
+        param_names = "J, K, Gamma, Gamma_prime"
+        
+        logging.info(f"Fitting JKΓΓ' (Kitaev) model: {param_names}")
+        logging.info(f"Initial: J={args.initial_J_H}, K={args.initial_J_K}, "
+                    f"Γ={args.initial_Gamma}, Γ'={args.initial_Gamma_prime}")
     else:
         bounds = [(args.J1_min, args.J1_max), (args.J2_min, args.J2_max)]
         initial_params = [args.initial_J1, args.initial_J2]
@@ -1012,6 +1062,21 @@ def main():
                 'Jpm': float(best_params[1]),
                 'Jpmpm': float(best_params[2]),
                 'Jzpm': float(best_params[3])
+            },
+            'chi_squared': float(best_chi_sq),
+            'fixed_params': fixed_params
+        }
+    elif args.model == 'kitaev':
+        logging.info(f"Best J (Heisenberg): {best_params[0]:.6f}")
+        logging.info(f"Best K (Kitaev): {best_params[1]:.6f}")
+        logging.info(f"Best Γ: {best_params[2]:.6f}")
+        logging.info(f"Best Γ': {best_params[3]:.6f}")
+        results_dict = {
+            'best_params': {
+                'J': float(best_params[0]),
+                'K': float(best_params[1]),
+                'Gamma': float(best_params[2]),
+                'Gamma_prime': float(best_params[3])
             },
             'chi_squared': float(best_chi_sq),
             'fixed_params': fixed_params

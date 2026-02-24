@@ -255,6 +255,10 @@ def main():
     parser.add_argument('--Jpmpm', type=float, default=None, help='J_±± for anisotropic model')
     parser.add_argument('--Jzpm', type=float, default=None, help='J_z± for anisotropic model')
     
+    # JKΓΓ' (Kitaev) model parameters
+    parser.add_argument('--Gamma', type=float, default=None, help='Γ off-diagonal symmetric exchange for kitaev model')
+    parser.add_argument('--Gamma_prime', type=float, default=None, help="Γ' off-diagonal exchange for kitaev model")
+    
     # Anisotropic g-tensor for Zeeman term
     parser.add_argument('--g_ab', type=float, default=2.0,
                        help='In-plane g-factor for Zeeman coupling (default: 2.0)')
@@ -405,6 +409,8 @@ def main():
         logging.info("Step 2: Preparing Hamiltonian parameters for each cluster")
         if args.model == 'anisotropic':
             logging.info(f"Model: {args.model}, Jzz={args.Jzz}, Jpm={args.Jpm}, Jpmpm={args.Jpmpm}, Jzpm={args.Jzpm}, h={args.h}")
+        elif args.model == 'kitaev':
+            logging.info(f"Model: {args.model}, J={args.J1}, K={args.J2}, Γ={args.Gamma}, Γ'={args.Gamma_prime}, h={args.h}")
         else:
             logging.info(f"Model: {args.model}, J1={args.J1}, J2={args.J2}, h={args.h}")
         logging.info("="*80)
@@ -439,6 +445,12 @@ def main():
                 cmd.extend(['--Jpmpm', str(args.Jpmpm)])
             if args.Jzpm is not None:
                 cmd.extend(['--Jzpm', str(args.Jzpm)])
+            
+            # Add JKΓΓ' (Kitaev) model parameters if specified
+            if args.Gamma is not None:
+                cmd.extend(['--Gamma', str(args.Gamma)])
+            if args.Gamma_prime is not None:
+                cmd.extend(['--Gamma_prime', str(args.Gamma_prime)])
             
             # g-tensor parameters
             cmd.extend(['--g_ab', str(args.g_ab)])
