@@ -341,8 +341,10 @@ def main():
     ed_dir = os.path.join(args.base_dir, f'ed_results_order_{args.max_order}')
     nlc_dir = os.path.join(args.base_dir, f'nlc_results_order_{args.max_order}')
     
-    # Create directories
+    # Create directories (skip if already exists as symlink or dir)
     for directory in [cluster_dir, ham_dir, ed_dir, nlc_dir]:
+        if os.path.islink(directory) or os.path.isdir(directory):
+            continue
         os.makedirs(directory, exist_ok=True)
     
     # Step 1: Generate clusters

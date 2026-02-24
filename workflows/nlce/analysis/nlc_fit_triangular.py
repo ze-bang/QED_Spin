@@ -364,7 +364,7 @@ def _ensure_field_work_dir(work_dir, field_idx, max_order):
         os.path.join(work_dir, f'clusters_order_{max_order}'))
     dst_cluster = os.path.join(field_dir_path, f'clusters_order_{max_order}')
     
-    if os.path.exists(src_cluster) and not os.path.exists(dst_cluster):
+    if os.path.exists(src_cluster) and not os.path.lexists(dst_cluster):
         try:
             os.symlink(src_cluster, dst_cluster)
         except OSError:
