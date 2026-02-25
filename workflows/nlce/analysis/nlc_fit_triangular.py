@@ -33,6 +33,13 @@ from scipy.optimize import minimize, differential_evolution, dual_annealing
 from scipy.stats import qmc
 from scipy.interpolate import interp1d
 from scipy.ndimage import gaussian_filter1d
+try:
+    from skopt import gp_minimize
+    from skopt.space import Real
+    from skopt.callbacks import CheckpointSaver
+    HAS_SKOPT = True
+except ImportError:
+    HAS_SKOPT = False
 import time
 
 
@@ -92,6 +99,19 @@ class CostLandscapeLogger:
         logging.info(f"DE generation {self._generation}: best χ²={best_chi2:.6f}, "
                      f"convergence={convergence:.6e}")
         self._flush()  # save after every generation
+
+    # ---- Bayesian optimization callback (called after each evaluation) ----
+    def bo_callback(self, opt_result):
+        """scikit-optimize callback; opt_result is a partial OptimizeResult."""
+        n = len(opt_result.func_vals)
+        best_idx = int(np.argmin(opt_result.func_vals))
+        best_chi2 = opt_result.func_vals[best_idx]
+        best_x = opt_result.x_iters[best_idx]
+        self._generation = n
+        self._gen_best.append([n, best_chi2, 0.0] + list(best_x))
+        logging.info(f"BO iteration {n}: current χ²={opt_result.func_vals[-1]:.6f}, "
+                     f"best χ²={best_chi2:.6f}")
+        self._flush()
 
     # ---- periodic flush ----
     def _flush(self):
@@ -805,12 +825,31 @@ def main():
     
     # Optimization
     parser.add_argument('--method', type=str, default='multi_start',
-                       choices=['multi_start', 'differential_evolution', 'dual_annealing'])
+                       choices=['multi_start', 'differential_evolution',
+                                'dual_annealing', 'bayesian'])
     parser.add_argument('--ed_method', type=str, default='FULL',
                        help='ED solver method passed to the NLCE runner '
                             '(FULL, FULL_GPU, SCALAPACK_MIXED, etc. Default: FULL)')
     parser.add_argument('--n_starts', type=int, default=20, help='Number of random starts')
     parser.add_argument('--max_iter', type=int, default=1000, help='Max iterations')
+
+    # Bayesian optimization settings
+    parser.add_argument('--n_initial', type=int, default=20,
+                       help='Number of initial random points for Bayesian optimization '
+                            '(default: 20). These are evaluated before the GP model '
+                            'starts guiding the search.')
+    parser.add_argument('--acq_func', type=str, default='EI',
+                       choices=['EI', 'LCB', 'PI', 'gp_hedge'],
+                       help='Acquisition function for Bayesian optimization. '
+                            'EI=Expected Improvement, LCB=Lower Confidence Bound, '
+                            'PI=Probability of Improvement, '
+                            'gp_hedge=auto-select (default: EI)')
+    parser.add_argument('--xi', type=float, default=0.01,
+                       help='Exploration-exploitation trade-off for EI/PI '
+                            'acquisition (default: 0.01). Larger values explore more.')
+    parser.add_argument('--kappa', type=float, default=1.96,
+                       help='Exploration parameter for LCB acquisition '
+                            '(default: 1.96). Larger values explore more.')
     
     # Optional fitting parameters
     parser.add_argument('--fit_broadening', action='store_true')
@@ -1040,6 +1079,56 @@ def main():
             maxiter=args.max_iter,
             seed=42
         )
+    elif args.method == 'bayesian':
+        if not HAS_SKOPT:
+            logging.error("scikit-optimize is required for Bayesian optimization. "
+                          "Install it with: pip install scikit-optimize")
+            sys.exit(1)
+        # Build skopt search space from bounds
+        dimensions = [Real(lo, hi, name=name.strip())
+                      for (lo, hi), name in zip(bounds,
+                                                 param_names.split(','))]
+        n_calls = args.max_iter
+        n_initial_points = min(args.n_initial, n_calls)
+        acq_kwargs = {}
+        if args.acq_func in ('EI', 'PI'):
+            acq_kwargs['xi'] = args.xi
+        elif args.acq_func == 'LCB':
+            acq_kwargs['kappa'] = args.kappa
+
+        bo_callbacks = []
+        if landscape_logger is not None:
+            bo_callbacks.append(landscape_logger.bo_callback)
+
+        # Wrap objective: skopt passes a list, not np.array, and
+        # does not support extra args — use a closure.
+        def _bo_objective(x):
+            return calc_chi_squared(np.array(x), fixed_params,
+                                    exp_datasets, args.work_dir)
+
+        logging.info(f"Bayesian optimization: {n_calls} calls "
+                     f"({n_initial_points} initial random, "
+                     f"acq_func={args.acq_func})")
+        bo_result = gp_minimize(
+            _bo_objective,
+            dimensions,
+            n_calls=n_calls,
+            n_initial_points=n_initial_points,
+            acq_func=args.acq_func,
+            acq_func_kwargs=acq_kwargs,
+            random_state=42,
+            verbose=True,
+            callback=bo_callbacks if bo_callbacks else None,
+        )
+        # Wrap into a scipy-like result for downstream code
+        class _BOResult:
+            pass
+        result = _BOResult()
+        result.x = np.array(bo_result.x)
+        result.fun = bo_result.fun
+        result.nfev = len(bo_result.func_vals)
+        logging.info(f"BO finished: {result.nfev} evaluations, "
+                     f"best χ²={result.fun:.6f}")
     
     if result is None:
         logging.error("Optimization failed!")
