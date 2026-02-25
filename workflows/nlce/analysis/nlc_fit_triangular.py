@@ -1090,11 +1090,12 @@ def main():
                                                  param_names.split(','))]
         n_calls = args.max_iter
         n_initial_points = min(args.n_initial, n_calls)
-        acq_kwargs = {}
+        # xi/kappa are top-level kwargs in skopt's gp_minimize
+        extra_kwargs = {}
         if args.acq_func in ('EI', 'PI'):
-            acq_kwargs['xi'] = args.xi
+            extra_kwargs['xi'] = args.xi
         elif args.acq_func == 'LCB':
-            acq_kwargs['kappa'] = args.kappa
+            extra_kwargs['kappa'] = args.kappa
 
         bo_callbacks = []
         if landscape_logger is not None:
@@ -1115,10 +1116,10 @@ def main():
             n_calls=n_calls,
             n_initial_points=n_initial_points,
             acq_func=args.acq_func,
-            acq_func_kwargs=acq_kwargs,
             random_state=42,
             verbose=True,
             callback=bo_callbacks if bo_callbacks else None,
+            **extra_kwargs,
         )
         # Wrap into a scipy-like result for downstream code
         class _BOResult:
