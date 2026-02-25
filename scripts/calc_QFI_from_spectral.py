@@ -68,7 +68,7 @@ EXTENDED_BETA_MAX = 1000.0  # Maximum beta for extended calculations
 # ==============================================================================
 # Excluded parameter values (corrupted data)
 # ==============================================================================
-EXCLUDED_JPM_VALUES = [-0.425, -0.35, -0.3, 0.08]  # These Jpm values appear to be corrupted
+EXCLUDED_JPM_VALUES = []  # These Jpm values appear to be corrupted
 QFI_SCALE_FACTOR = 1  # Multiply all QFI values by this factor
 
 # ==============================================================================
@@ -131,7 +131,7 @@ ENABLE_SPECTRAL_SMOOTHING = True  # Set to True to enable smoothing
 # Gaussian smoothing width (sigma) in units of omega.
 # Typical values: 0.01-0.1 depending on the frequency resolution.
 # Larger values = more smoothing but may smear out real features.
-SPECTRAL_SMOOTHING_SIGMA = 0.015
+SPECTRAL_SMOOTHING_SIGMA = 0.01
 
 # ==============================================================================
 # High-Beta Spectral Weight Normalization Configuration
@@ -426,6 +426,11 @@ def load_spectral_from_dssf_hdf5(h5_path, operator_name, temperature_or_beta, sa
                 else:
                     # Regular mean propagates NaN values
                     spectral = np.mean(all_spectral, axis=0)
+            
+            # Handle mismatch between frequencies array and spectral data
+            # (can happen if frequencies was saved by a previous run with different n_omega)
+            if len(frequencies) != len(spectral):
+                frequencies = np.linspace(frequencies[0], frequencies[-1], len(spectral))
             
             # Extract beta value from temperature/beta group name
             beta = None
@@ -1674,7 +1679,12 @@ def _extract_beta_from_dirname(beta_dir):
 
 
 def _assign_beta_bin(beta_val, bins, tol):
-    """Assign beta value to tolerance-based bin."""
+    """Assign beta value to tolerance-based bin.
+    
+    Uses RELATIVE tolerance: two values are binned together if
+    |beta_val - center| / max(|center|, 1) < tol.
+    Default tol=0.01 means 1% relative tolerance.
+    """
     # Group infinities together
     if np.isinf(beta_val):
         for i, c in enumerate(bins):
@@ -1683,9 +1693,9 @@ def _assign_beta_bin(beta_val, bins, tol):
         bins.append(beta_val)
         return len(bins) - 1
         
-    # Check existing bins
+    # Check existing bins using relative tolerance
     for i, c in enumerate(bins):
-        if not np.isinf(c) and abs(beta_val - c) < tol:
+        if not np.isinf(c) and abs(beta_val - c) / max(abs(c), 1.0) < tol:
             return i
             
     # Create new bin
@@ -1868,11 +1878,40 @@ def _process_species_spectral(species, beta_groups, beta_bin_values,
         peak_positions, peak_heights, peak_prominences = find_spectral_peaks(
             mean_omega, mean_spectral, min_prominence=1e-10, min_height=None, omega_range=(0, 6))
         
+        # Compute QFI standard deviation across samples
+        qfi_values = [sq for sq, _ in per_sample_qfi]
+        qfi_std = np.std(qfi_values) if len(qfi_values) > 1 else 0.0
+        qfi_sem = qfi_std / np.sqrt(len(qfi_values)) if len(qfi_values) > 1 else 0.0
+        
+        # Compute spectral function SEM across individual samples
+        n_samples = len(rescaled_individual_data)
+        if n_samples > 1:
+            # Collect all individual spectral arrays (already on same omega grid)
+            all_sample_specs = []
+            for omega_s, spec_s, _ in rescaled_individual_data:
+                # Interpolate to mean_omega grid if needed
+                if len(omega_s) == len(mean_omega) and np.allclose(omega_s, mean_omega):
+                    all_sample_specs.append(spec_s)
+                else:
+                    f_interp = interp1d(omega_s, spec_s, kind='linear', bounds_error=False, fill_value=0.0)
+                    all_sample_specs.append(f_interp(mean_omega))
+            all_sample_specs = np.array(all_sample_specs)
+            spectral_std = np.nanstd(all_sample_specs, axis=0)
+            spectral_sem = spectral_std / np.sqrt(n_samples)
+        else:
+            spectral_std = np.zeros_like(mean_spectral)
+            spectral_sem = np.zeros_like(mean_spectral)
+        
         # Save results
         results = {
             'omega': mean_omega,
             'spectral_function': mean_spectral,
+            'spectral_std': spectral_std,
+            'spectral_sem': spectral_sem,
+            'n_samples': n_samples,
             'qfi': qfi,
+            'qfi_std': qfi_std,
+            'qfi_sem': qfi_sem,
             'peak_positions': peak_positions,
             'peak_heights': peak_heights,
             'peak_prominences': peak_prominences,
@@ -1881,8 +1920,8 @@ def _process_species_spectral(species, beta_groups, beta_bin_values,
         
         _save_species_results(species, beta, results, structure_factor_dir)
         
-        # Store for summary plots (including per-sample data)
-        all_species_qfi_data[species].append((beta, qfi))
+        # Store for summary plots (including per-sample data and error)
+        all_species_qfi_data[species].append((beta, qfi, qfi_std, qfi_sem))
         
         # Store per-sample QFI for parameter sweep heatmaps
         for sample_qfi, fpath in per_sample_qfi:
@@ -1892,7 +1931,7 @@ def _process_species_spectral(species, beta_groups, beta_bin_values,
                 all_species_qfi_data[sample_key] = []
             all_species_qfi_data[sample_key].append((beta, sample_qfi))
         
-        print(f"    QFI = {qfi:.4f}, Peaks at: {peak_positions}")
+        print(f"    QFI = {qfi:.4f} ± {qfi_sem:.4f} (SEM, {len(qfi_values)} samples), Peaks at: {peak_positions}")
     
     # Apply high-beta QFI floor enforcement if enabled
     # This ensures QFI doesn't artificially decrease at very low temperatures
@@ -1919,30 +1958,33 @@ def _apply_qfi_floor(species, all_species_qfi_data, beta_threshold):
     
     # Find max QFI at or below threshold
     max_qfi_below_threshold = 0.0
-    for beta, qfi in sorted_data:
+    for entry in sorted_data:
+        beta, qfi = entry[0], entry[1]
         if not np.isinf(beta) and beta <= beta_threshold:
             max_qfi_below_threshold = max(max_qfi_below_threshold, qfi)
     
     if max_qfi_below_threshold <= 0:
         # No reference found, use max of first half
         n = len(sorted_data)
-        for beta, qfi in sorted_data[:n//2 + 1]:
-            max_qfi_below_threshold = max(max_qfi_below_threshold, qfi)
+        for entry in sorted_data[:n//2 + 1]:
+            max_qfi_below_threshold = max(max_qfi_below_threshold, entry[1])
     
     # Apply floor to high-beta values
     corrected_list = []
     corrections_made = 0
-    for beta, qfi in sorted_data:
+    for entry in sorted_data:
+        beta, qfi = entry[0], entry[1]
+        rest = entry[2:] if len(entry) > 2 else ()
         if not np.isinf(beta) and beta > beta_threshold:
             if qfi < max_qfi_below_threshold:
-                corrected_list.append((beta, max_qfi_below_threshold))
+                corrected_list.append((beta, max_qfi_below_threshold) + rest)
                 corrections_made += 1
             else:
-                corrected_list.append((beta, qfi))
+                corrected_list.append(entry)
                 # Update floor for subsequent points
                 max_qfi_below_threshold = max(max_qfi_below_threshold, qfi)
         else:
-            corrected_list.append((beta, qfi))
+            corrected_list.append(entry)
     
     # Replace the data
     all_species_qfi_data[species] = corrected_list
@@ -2044,9 +2086,10 @@ def _load_and_average_spectral(file_list):
     if not all_omega:
         return None, None, []
     
-    # Check if all omega arrays are identical
+    # Check if all omega arrays are identical (same length and values)
     ref_omega = all_omega[0]
-    all_match = all(np.allclose(omega, ref_omega) for omega in all_omega)
+    all_match = all(len(omega) == len(ref_omega) and np.allclose(omega, ref_omega) 
+                    for omega in all_omega)
     
     if all_match:
         # Simple average if all omega arrays match
@@ -2071,9 +2114,14 @@ def _load_and_average_spectral(file_list):
         
         # Interpolate each spectral function to the common grid
         interpolated_spectral = []
-        for omega, spectral in zip(all_omega, all_spectral):
+        interpolated_individual_data = []
+        for i, (omega, spectral) in enumerate(zip(all_omega, all_spectral)):
             f = interp1d(omega, spectral, kind='linear', bounds_error=False, fill_value=0.0)
-            interpolated_spectral.append(f(mean_omega))
+            interp_spec = f(mean_omega)
+            interpolated_spectral.append(interp_spec)
+            # Update individual_data with interpolated values on common grid
+            interpolated_individual_data.append((mean_omega, interp_spec, individual_data[i][2]))
+        individual_data = interpolated_individual_data
         
         # Average the interpolated spectral functions
         if ENABLE_NAN_INTERPOLATION:
@@ -2123,16 +2171,27 @@ def _save_species_results(species, beta, results, structure_factor_dir):
     
     beta_label = 'inf' if np.isinf(beta) else f'{beta:.6g}'
     
-    # Save spectral data
-    data_out = np.column_stack((results['omega'], results['spectral_function']))
-    data_filename = os.path.join(outdir, f'spectral_averaged_beta_{beta_label}.dat')
-    np.savetxt(data_filename, data_out, header='frequency spectral_function')
+    # Save spectral data (with per-sample error if available)
+    spec_sem = results.get('spectral_sem', None)
+    if spec_sem is not None:
+        data_out = np.column_stack((results['omega'], results['spectral_function'],
+                                    results.get('spectral_std', np.zeros_like(results['spectral_function'])),
+                                    spec_sem))
+        data_filename = os.path.join(outdir, f'spectral_averaged_beta_{beta_label}.dat')
+        np.savetxt(data_filename, data_out, header='frequency spectral_function std sem')
+    else:
+        data_out = np.column_stack((results['omega'], results['spectral_function']))
+        data_filename = os.path.join(outdir, f'spectral_averaged_beta_{beta_label}.dat')
+        np.savetxt(data_filename, data_out, header='frequency spectral_function')
     
     # Save QFI value
     qfi_filename = os.path.join(outdir, f'qfi_beta_{beta_label}.txt')
     with open(qfi_filename, 'w') as f:
         f.write(f"# QFI for {species} at beta={beta_label}\n")
-        f.write(f"{results['qfi']:.10e}\n")
+        qfi_std = results.get('qfi_std', 0.0)
+        qfi_sem = results.get('qfi_sem', 0.0)
+        f.write(f"# QFI  std  sem\n")
+        f.write(f"{results['qfi']:.10e} {qfi_std:.10e} {qfi_sem:.10e}\n")
     
     # Save per-sample QFI values if available
     if 'per_sample_qfi' in results and results['per_sample_qfi']:
@@ -2160,27 +2219,43 @@ def _save_species_results(species, beta, results, structure_factor_dir):
 
 
 def _plot_spectral_function(species, beta, results, outdir):
-    """Plot spectral function with peaks marked."""
+    """Plot spectral function with peaks marked and per-sample error band."""
     
     plt.figure(figsize=(10, 6))
     
     beta_label = 'inf' if np.isinf(beta) else f'{beta:.6g}'
+    qfi_sem = results.get('qfi_sem', 0.0)
+    n_samples = results.get('n_samples', 0)
     
-    # Plot spectral function
-    plt.scatter(results['omega'], results['spectral_function'], 
-                label=f'Spectral function (Beta≈{beta_label}, QFI={results["qfi"]:.4f})', 
-                alpha=0.7, s=20)
+    # Build QFI label with error
+    if qfi_sem > 0:
+        qfi_label = f'QFI={results["qfi"]:.4f}±{qfi_sem:.4f} ({n_samples} samples)'
+    else:
+        qfi_label = f'QFI={results["qfi"]:.4f}'
+    
+    omega = results['omega']
+    mean_spec = results['spectral_function']
+    spec_sem = results.get('spectral_sem', None)
+    
+    # Plot mean spectral function as line
+    plt.plot(omega, mean_spec, 'b-', linewidth=1.0,
+             label=f'Mean S(ω) (β≈{beta_label}, {qfi_label})')
+    
+    # Plot shaded SEM error band
+    if spec_sem is not None and np.any(spec_sem > 0):
+        plt.fill_between(omega, mean_spec - spec_sem, mean_spec + spec_sem,
+                         alpha=0.3, color='blue', label='±SEM')
     
     # Mark peaks
     if results['peak_positions']:
         plt.scatter(results['peak_positions'], results['peak_heights'],
-                   color='red', marker='x', s=100, linewidths=2,
+                   color='red', marker='x', s=100, linewidths=2, zorder=5,
                    label=f'Peaks (N={len(results["peak_positions"])})')
     
     plt.xlabel('Frequency ω')
     plt.ylabel('Spectral Function S(ω)')
-    plt.xlim(-1, 1)
-    plt.title(f'Spectral Function for {species} at Beta≈{beta_label}')
+    plt.xlim(-1, 6)
+    plt.title(f'Spectral Function for {species} at β≈{beta_label}')
     plt.grid(True)
     plt.legend()
     
@@ -2200,23 +2275,38 @@ def _create_summary_plots(all_species_qfi_data, structure_factor_dir):
 
 
 def _plot_qfi_vs_beta(species, qfi_data, plot_outdir):
-    """Plot QFI vs beta for a species."""
+    """Plot QFI vs beta for a species, with error bars if available."""
     
     # Sort data
     qfi_data.sort(key=lambda x: (np.inf if np.isinf(x[0]) else x[0]))
-    qfi_beta_array = np.array(qfi_data, dtype=float)
+    
+    # Handle both old (beta, qfi) and new (beta, qfi, std, sem) formats
+    has_errors = len(qfi_data[0]) >= 4
+    if has_errors:
+        qfi_beta_array = np.array([(b, q, s, se) for b, q, s, se in qfi_data], dtype=float)
+    else:
+        qfi_beta_array = np.array(qfi_data, dtype=float)
     
     # Save data
     data_filename = os.path.join(plot_outdir, f'qfi_vs_beta_{species}.dat')
-    np.savetxt(data_filename, qfi_beta_array, header='beta qfi')
+    if has_errors:
+        np.savetxt(data_filename, qfi_beta_array, header='beta qfi std sem')
+    else:
+        np.savetxt(data_filename, qfi_beta_array, header='beta qfi')
     
     # Create plot
     plt.figure(figsize=(10, 6))
     
     finite_mask = np.isfinite(qfi_beta_array[:, 0])
     if np.any(finite_mask):
-        plt.plot(qfi_beta_array[finite_mask, 0], qfi_beta_array[finite_mask, 1], 
-                'o-', label='Finite β')
+        betas_f = qfi_beta_array[finite_mask, 0]
+        qfis_f = qfi_beta_array[finite_mask, 1]
+        if has_errors:
+            sems_f = qfi_beta_array[finite_mask, 3]
+            plt.errorbar(betas_f, qfis_f, yerr=sems_f,
+                         fmt='o-', capsize=3, label='Finite β (±SEM)')
+        else:
+            plt.plot(betas_f, qfis_f, 'o-', label='Finite β')
     
     # Handle β=∞ points
     if np.any(~finite_mask):
@@ -2444,12 +2534,32 @@ def _plot_parameter_sweep_summary(data, data_dir, param_pattern):
     
     # Check if data is already organized by species or needs to be organized
     if data and isinstance(next(iter(data.values())), dict):
-        # merged_data format: {param_value: {species: [(beta, qfi), ...]}}
+        # merged_data format: {param_value: {species: [(beta, qfi, ...), ...]}}
         species_data = defaultdict(list)
         for param_value, qfi_dict in data.items():
             for species, qfi_list in qfi_dict.items():
-                for beta, qfi in qfi_list:
+                for entry in qfi_list:
+                    beta = entry[0]
+                    qfi = entry[1]
                     species_data[species].append((param_value, beta, qfi))
+        
+        # Re-bin betas across all parameter values so that near-identical
+        # temperatures (slightly different bin averages from different Jpm
+        # values) map to the same grid point.
+        for species in species_data:
+            all_betas = np.array([b for _, b, _ in species_data[species]])
+            finite_betas = all_betas[np.isfinite(all_betas)]
+            if len(finite_betas) > 0:
+                canonical = _merge_close_betas(np.unique(finite_betas), rel_tol=0.02)
+                rebinned = []
+                for pv, b, q in species_data[species]:
+                    if np.isfinite(b):
+                        # Snap to nearest canonical beta
+                        idx = np.argmin(np.abs(canonical - b))
+                        rebinned.append((pv, canonical[idx], q))
+                    else:
+                        rebinned.append((pv, b, q))
+                species_data[species] = rebinned
     else:
         # Already organized by species: {species: [(param_value, beta, qfi), ...]}
         species_data = data
@@ -2885,6 +2995,32 @@ def _plot_parameter_beta_heatmap(species, data_points, plot_outdir, param_patter
     print(f"{'='*60}\n")
 
 
+def _merge_close_betas(beta_array, rel_tol=0.02):
+    """Merge beta values that are within rel_tol relative tolerance.
+    
+    Returns a deduplicated array where near-identical betas are averaged.
+    This handles the case where different Jpm values produce slightly
+    different bin-averaged betas for the same nominal temperature.
+    """
+    if len(beta_array) < 2:
+        return beta_array
+    
+    sorted_b = np.sort(beta_array)
+    merged = []
+    current_group = [sorted_b[0]]
+    
+    for i in range(1, len(sorted_b)):
+        center = np.mean(current_group)
+        if abs(sorted_b[i] - center) / max(abs(center), 1.0) < rel_tol:
+            current_group.append(sorted_b[i])
+        else:
+            merged.append(np.mean(current_group))
+            current_group = [sorted_b[i]]
+    merged.append(np.mean(current_group))
+    
+    return np.array(merged)
+
+
 def _get_beta_grid_param(param_vals, beta_vals, ref_target):
     """Create beta grid based on reference parameter value."""
     unique_param = np.unique(param_vals)
@@ -2905,6 +3041,9 @@ def _get_beta_grid_param(param_vals, beta_vals, ref_target):
         target_beta = np.unique(beta_vals[beta_vals > 0])
         target_beta.sort()
     
+    # Merge near-identical beta values (from slightly different bin averages
+    # across different parameter values)
+    target_beta = _merge_close_betas(target_beta, rel_tol=0.02)
     
     return target_beta
 
