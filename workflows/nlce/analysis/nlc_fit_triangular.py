@@ -1053,7 +1053,7 @@ def main():
             initial_params,
             bounds,
             n_starts=args.n_starts,
-            method='L-BFGS-B',
+            method='COBYLA',
             args=(fixed_params, exp_datasets, args.work_dir),
             options={'maxiter': args.max_iter}
         )
