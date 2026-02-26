@@ -245,6 +245,10 @@ def filter_hamiltonian_automorphisms(automorphisms, edges):
     term (type1, site1, type2, site2, weight), the mapped term
     (type1, σ(site1), type2, σ(site2), weight) also exists in the Hamiltonian.
     
+    Since operators on different sites commute, O_a(i) O_b(j) = O_b(j) O_a(i),
+    so the reversed ordering (type2, σ(site2), type1, σ(site1), weight) is also 
+    accepted as a match.
+    
     Args:
         automorphisms: List of permutations (each is a list of site indices)
         edges: List of edge dictionaries from read_interall_file
@@ -263,10 +267,13 @@ def filter_hamiltonian_automorphisms(automorphisms, edges):
     for sigma in automorphisms:
         is_valid = True
         for edge in edges:
-            mapped_key = (edge['type1'], sigma[edge['vertex1']], 
-                         edge['type2'], sigma[edge['vertex2']],
-                         _round_tuple(edge['weight']))
-            if mapped_key not in ham_terms:
+            w = _round_tuple(edge['weight'])
+            sv1 = sigma[edge['vertex1']]
+            sv2 = sigma[edge['vertex2']]
+            mapped_key = (edge['type1'], sv1, edge['type2'], sv2, w)
+            # Also check reversed site order (operators on different sites commute)
+            reversed_key = (edge['type2'], sv2, edge['type1'], sv1, w)
+            if mapped_key not in ham_terms and reversed_key not in ham_terms:
                 is_valid = False
                 break
         if is_valid:
