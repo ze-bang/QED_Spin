@@ -441,6 +441,8 @@ EDConfig EDConfig::fromCommandLine(uint64_t argc, char* argv[]) {
             else if (arg == "--dynamical-response") config.workflow.compute_dynamical_response = true;
             else if (arg == "--static-response") config.workflow.compute_static_response = true;
             else if (arg == "--ground-state-dssf") config.workflow.compute_ground_state_dssf = true;
+            else if (arg == "--precompute-basis") config.workflow.precompute_basis_only = true;
+            else if (arg.find("--basis-cache-dir=") == 0) config.workflow.basis_cache_dir = parse_value("--basis-cache-dir=");
             else if (arg == "--skip_ED") config.workflow.skip_ed = true;
             else if (arg.find("--sublattice_size=") == 0) config.system.sublattice_size = std::stoi(parse_value("--sublattice_size="));
             else if (arg.find("--omega_min=") == 0) config.observable.omega_min = std::stod(parse_value("--omega_min="));

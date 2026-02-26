@@ -850,6 +850,22 @@ def main():
     parser.add_argument('--kappa', type=float, default=1.96,
                        help='Exploration parameter for LCB acquisition '
                             '(default: 1.96). Larger values explore more.')
+    parser.add_argument('--bo_log_transform', action='store_true',
+                       help='Use log(chi²) as the BO objective. Compresses the '
+                            'dynamic range so the GP surrogate fits much better '
+                            'when chi² spans orders of magnitude.')
+    parser.add_argument('--bo_noise', type=str, default='gaussian',
+                       choices=['gaussian', '0'],
+                       help='GP noise model: "gaussian" lets the GP estimate '
+                            'observation noise (recommended for NLCE truncation '
+                            'noise); "0" assumes noise-free (default: gaussian)')
+    parser.add_argument('--bo_inject_x0', action='store_true', default=True,
+                       help='Inject the user-supplied initial guess as the first '
+                            'evaluation point instead of pure random init '
+                            '(default: True)')
+    parser.add_argument('--no_bo_inject_x0', action='store_false',
+                       dest='bo_inject_x0',
+                       help='Disable initial-guess injection')
     
     # Optional fitting parameters
     parser.add_argument('--fit_broadening', action='store_true')
@@ -1097,25 +1113,48 @@ def main():
         elif args.acq_func == 'LCB':
             extra_kwargs['kappa'] = args.kappa
 
+        # GP noise model
+        bo_noise = args.bo_noise
+        if bo_noise == '0':
+            bo_noise = 1e-10  # effectively noiseless
+        extra_kwargs['noise'] = bo_noise
+
         bo_callbacks = []
         if landscape_logger is not None:
             bo_callbacks.append(landscape_logger.bo_callback)
 
-        # Wrap objective: skopt passes a list, not np.array, and
-        # does not support extra args — use a closure.
+        # Inject user-supplied initial guess as x0 so the GP has a
+        # strong anchor near the expected optimum instead of relying
+        # entirely on random initialization.
+        x0_list = None
+        if args.bo_inject_x0:
+            x0_list = [list(initial_params)]
+            logging.info(f"Injecting initial guess as x0: {initial_params}")
+
+        # Optionally log-transform the objective so the GP surrogate
+        # models log(χ²) instead of raw χ². This compresses the
+        # huge dynamic range (e.g. 20k–3.6M) into ~3–15, giving the
+        # GP a much easier function to fit and dramatically improving
+        # acquisition quality.
+        use_log = args.bo_log_transform
+
         def _bo_objective(x):
-            return calc_chi_squared(np.array(x), fixed_params,
+            chi2 = calc_chi_squared(np.array(x), fixed_params,
                                     exp_datasets, args.work_dir)
+            return float(np.log(chi2)) if use_log else chi2
 
         logging.info(f"Bayesian optimization: {n_calls} calls "
                      f"({n_initial_points} initial random, "
-                     f"acq_func={args.acq_func})")
+                     f"acq_func={args.acq_func})"
+                     + (" [log-transformed objective]" if use_log else "")
+                     + f" noise={bo_noise}")
         bo_result = gp_minimize(
             _bo_objective,
             dimensions,
             n_calls=n_calls,
             n_initial_points=n_initial_points,
             acq_func=args.acq_func,
+            x0=x0_list,
             random_state=42,
             verbose=True,
             callback=bo_callbacks if bo_callbacks else None,
@@ -1126,7 +1165,8 @@ def main():
             pass
         result = _BOResult()
         result.x = np.array(bo_result.x)
-        result.fun = bo_result.fun
+        # Convert back from log space if needed
+        result.fun = float(np.exp(bo_result.fun)) if use_log else bo_result.fun
         result.nfev = len(bo_result.func_vals)
         logging.info(f"BO finished: {result.nfev} evaluations, "
                      f"best χ²={result.fun:.6f}")

@@ -267,6 +267,8 @@ struct WorkflowConfig {
     bool compute_static_response = false;
     bool compute_ground_state_dssf = false;  // Ground state dynamical structure factor (continued fraction)
     bool skip_ed = false;
+    bool precompute_basis_only = false;   // Only generate orbit basis and cache to HDF5, skip Lanczos
+    std::string basis_cache_dir = "";      // Directory for cached orbit basis ("" = auto = hamiltonian_dir/basis_cache)
     std::string output_dir = "output";
     std::string eigenvector_dir = "";  // Directory with pre-computed eigenvectors (for ground state DSSF)
 };
@@ -349,6 +351,8 @@ public:
     EDConfig& dynamicalResponse(bool b = true) { workflow.compute_dynamical_response = b; return *this; }
     EDConfig& staticResponse(bool b = true) { workflow.compute_static_response = b; return *this; }
     EDConfig& groundStateDSSF(bool b = true) { workflow.compute_ground_state_dssf = b; return *this; }
+    EDConfig& precomputeBasis(bool b = true) { workflow.precompute_basis_only = b; return *this; }
+    EDConfig& basisCacheDir(const std::string& dir) { workflow.basis_cache_dir = dir; return *this; }
     EDConfig& outputDir(const std::string& dir) { workflow.output_dir = dir; return *this; }
     EDConfig& eigenvectorDir(const std::string& dir) { workflow.eigenvector_dir = dir; return *this; }
     

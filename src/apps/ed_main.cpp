@@ -508,8 +508,20 @@ EDResults run_standard_workflow(const EDConfig& config) {
 
 /**
  * @brief Run symmetrized diagonalization workflow
+ *
+ * Delegates to the streaming symmetry path which handles both CPU and GPU
+ * uniformly.  The streaming approach never materialises explicit block
+ * matrices — it keeps the per-sector orbit data in memory so the GPU
+ * symmetrized matvec kernel can use it directly.  On the CPU side the
+ * same matrix-free operator is wrapped in a lambda and forwarded to the
+ * standard solver dispatch (Lanczos, Block Lanczos, Davidson, etc.).
  */
-EDResults run_symmetrized_workflow(const EDConfig& config) {
+EDResults run_symmetrized_workflow(const EDConfig& config);
+
+/**
+ * @brief Run streaming symmetry diagonalization workflow
+ */
+EDResults run_streaming_symmetry_workflow(const EDConfig& config) {
     auto params = ed_adapter::toEDParameters(config);
     params.output_dir = config.workflow.output_dir;
     create_directory_mpi_safe(params.output_dir);
@@ -518,23 +530,27 @@ EDResults run_symmetrized_workflow(const EDConfig& config) {
     
     EDResults results;
     
-    // Check if fixed Sz mode is enabled
     if (config.system.use_fixed_sz) {
         int64_t n_up = (config.system.n_up >= 0) ? config.system.n_up : config.system.num_sites / 2;
-        
-        results = exact_diagonalization_fixed_sz_symmetrized(
+        results = exact_diagonalization_streaming_symmetry_fixed_sz(
             config.system.hamiltonian_dir,
             n_up,
             config.method,
             params,
-            HamiltonianFileFormat::STANDARD
+            "InterAll.dat",
+            "Trans.dat",
+            config.workflow.basis_cache_dir,
+            config.workflow.precompute_basis_only
         );
     } else {
-        results = exact_diagonalization_from_directory_symmetrized(
+        results = exact_diagonalization_streaming_symmetry(
             config.system.hamiltonian_dir,
             config.method,
             params,
-            HamiltonianFileFormat::STANDARD
+            "InterAll.dat",
+            "Trans.dat",
+            config.workflow.basis_cache_dir,
+            config.workflow.precompute_basis_only
         );
     }
     
@@ -562,54 +578,10 @@ EDResults run_symmetrized_workflow(const EDConfig& config) {
 }
 
 /**
- * @brief Run streaming symmetry diagonalization workflow
+ * @brief Run symmetrized diagonalization workflow (definition)
  */
-EDResults run_streaming_symmetry_workflow(const EDConfig& config) {
-    auto params = ed_adapter::toEDParameters(config);
-    params.output_dir = config.workflow.output_dir;
-    create_directory_mpi_safe(params.output_dir);
-    
-    auto start = std::chrono::high_resolution_clock::now();
-    
-    EDResults results;
-    
-    if (config.system.use_fixed_sz) {
-        int64_t n_up = (config.system.n_up >= 0) ? config.system.n_up : config.system.num_sites / 2;
-        results = exact_diagonalization_streaming_symmetry_fixed_sz(
-            config.system.hamiltonian_dir,
-            n_up,
-            config.method,
-            params
-        );
-    } else {
-        results = exact_diagonalization_streaming_symmetry(
-            config.system.hamiltonian_dir,
-            config.method,
-            params
-        );
-    }
-    
-    auto end = std::chrono::high_resolution_clock::now();
-    auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
-    
-    // Print results summary
-    if (!results.eigenvalues.empty()) {
-        std::cout << "\n  Lowest eigenvalues:\n";
-        size_t show = std::min(results.eigenvalues.size(), (size_t)5);
-        for (size_t i = 0; i < show; i++) {
-            std::cout << "    E[" << i << "] = " << std::fixed << std::setprecision(10) 
-                      << results.eigenvalues[i] << "\n";
-        }
-        if (results.eigenvalues.size() > 5) {
-            std::cout << "    ... (" << (results.eigenvalues.size() - 5) << " more)\n";
-        }
-    }
-    
-    std::cout << "\n  Time: " << std::fixed << std::setprecision(2) << duration / 1000.0 << " s\n";
-    
-    // Eigenvalues are saved to HDF5 by the underlying diagonalization functions
-    
-    return results;
+EDResults run_symmetrized_workflow(const EDConfig& config) {
+    return run_streaming_symmetry_workflow(config);
 }
 
 /**
@@ -2929,6 +2901,21 @@ int main(int argc, char* argv[]) {
     EDResults standard_results, sym_results;
     
     try {
+        // Handle --precompute-basis: generate orbit basis and cache, then exit
+        if (config.workflow.precompute_basis_only) {
+            std::cout << "\n========================================\n";
+            std::cout << "  Precompute Basis Mode\n";
+            std::cout << "========================================\n\n";
+            // Force streaming-symmetry path with precompute flag
+            run_streaming_symmetry_workflow(config);
+            std::cout << "\nBasis precomputation complete. Use --basis-cache-dir="
+                      << (config.workflow.basis_cache_dir.empty() 
+                          ? config.system.hamiltonian_dir + "/basis_cache" 
+                          : config.workflow.basis_cache_dir)
+                      << " on subsequent runs to skip sector generation.\n";
+            return 0;
+        }
+
         // Handle unified --symm flag: auto-select between symmetrized, streaming-symmetry, disk-streaming, or chunked
         if (config.workflow.run_symm_auto && !config.workflow.skip_ed) {
             // Calculate Hilbert space dimension for threshold decision

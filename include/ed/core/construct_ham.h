@@ -2786,6 +2786,10 @@ public:
             auto dims = HDF5SymmetryIO::loadSectorDimensions(hdf5_file);
             symmetrized_block_ham_sizes.assign(dims.begin(), dims.end());
         }
+        
+        // Pre-separate transforms before entering the parallel region to avoid
+        // a data race when multiple OMP threads call apply() simultaneously.
+        separateTransformsByType();
                 
         uint64_t block_start = 0;
         

@@ -339,6 +339,16 @@ GPUBlockLanczos::GPUBlockLanczos(GPUOperator* op, int max_iter, int block_size, 
     
     dimension_ = op_->getDimension();
     
+    // Cap max iterations to prevent over-iterating small sectors.
+    // When block_size * num_iterations >= dimension, the Krylov subspace
+    // spans the full Hilbert space and spurious Ritz values appear.
+    // Use floor division so total Lanczos vectors never exceed dimension.
+    int max_meaningful = dimension_ / block_size_;
+    if (max_meaningful < 1) max_meaningful = 1;
+    if (max_iter_ > max_meaningful) {
+        max_iter_ = max_meaningful;
+    }
+    
     std::cout << "\n========================================\n";
     std::cout << "Initializing GPU Block Lanczos\n";
     std::cout << "========================================\n";

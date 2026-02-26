@@ -186,7 +186,9 @@ inline EDResults exact_diagonalization_streaming_symmetry(
     DiagonalizationMethod method = DiagonalizationMethod::LANCZOS,
     const EDParameters& params = EDParameters(),
     const std::string& interaction_filename = "InterAll.dat",
-    const std::string& single_site_filename = "Trans.dat"
+    const std::string& single_site_filename = "Trans.dat",
+    const std::string& basis_cache_dir = "",
+    bool precompute_basis_only = false
 ) {
     std::cout << "\n========================================" << std::endl;
     std::cout << "  Streaming Symmetry Exact Diagonalization" << std::endl;
@@ -199,17 +201,59 @@ inline EDResults exact_diagonalization_streaming_symmetry(
     }
     
     // ========== Step 2: Load Hamiltonian ==========
-    std::cout << "\nLoading Hamiltonian..." << std::endl;
     std::string interaction_file = directory + "/" + interaction_filename;
     std::string single_site_file = directory + "/" + single_site_filename;
     
     StreamingSymmetryOperator hamiltonian(params.num_sites, params.spin_length);
-    hamiltonian.loadFromFile(single_site_file);
-    hamiltonian.loadFromInterAllFile(interaction_file);
+
+    if (!precompute_basis_only) {
+        std::cout << "\nLoading Hamiltonian..." << std::endl;
+        hamiltonian.loadFromFile(single_site_file);
+        hamiltonian.loadFromInterAllFile(interaction_file);
+    } else {
+        // Only need operator metadata (n_bits_, etc.) for basis generation
+        std::cout << "\nLoading operator metadata (precompute mode)..." << std::endl;
+        hamiltonian.loadFromFile(single_site_file);
+    }
     
-    // ========== Step 3: Generate Symmetry Sectors (Streaming) ==========
-    std::cout << "\nGenerating symmetry sectors (streaming mode)..." << std::endl;
-    hamiltonian.generateSymmetrySectorsStreaming(directory);
+    // ========== Step 3: Generate or Load Symmetry Sectors ==========
+    std::string effective_cache_dir = basis_cache_dir;
+    if (effective_cache_dir.empty() && precompute_basis_only) {
+        effective_cache_dir = directory + "/basis_cache";
+    }
+
+    bool loaded_from_cache = false;
+    if (!effective_cache_dir.empty()) {
+        if (!precompute_basis_only) {
+            std::cout << "\nChecking for cached orbit basis in "
+                      << effective_cache_dir << "..." << std::endl;
+            hamiltonian.symmetry_info.loadFromDirectory(directory);
+            loaded_from_cache = hamiltonian.loadOrbitBasisHDF5(effective_cache_dir);
+            if (loaded_from_cache) {
+                std::cout << "*** Orbit basis loaded from cache — "
+                          << "skipping sector generation ***" << std::endl;
+            }
+        }
+    }
+
+    if (!loaded_from_cache) {
+        std::cout << "\nGenerating symmetry sectors (streaming mode)..." << std::endl;
+        hamiltonian.generateSymmetrySectorsStreaming(directory);
+
+        // Save to cache if a cache dir is specified
+        if (!effective_cache_dir.empty()) {
+            hamiltonian.saveOrbitBasisHDF5(effective_cache_dir);
+        }
+    }
+
+    // If precompute-only, we're done
+    if (precompute_basis_only) {
+        std::cout << "\n========================================" << std::endl;
+        std::cout << "  Precompute Basis Complete (full-space)" << std::endl;
+        std::cout << "  Cached to: " << effective_cache_dir << std::endl;
+        std::cout << "========================================\n" << std::endl;
+        return EDResults();
+    }
     
     size_t num_sectors = hamiltonian.getNumSectors();
     std::cout << "\nFound " << num_sectors << " symmetry sectors" << std::endl;
@@ -417,6 +461,8 @@ inline EDResults exact_diagonalization_streaming_symmetry(
  * @param params Parameters for diagonalization
  * @param interaction_filename Name of interaction file
  * @param single_site_filename Name of single-site file
+ * @param basis_cache_dir If non-empty, cache orbit basis to/from this directory
+ * @param precompute_basis_only If true, generate & cache orbit basis then return (skip Lanczos)
  * @return EDResults containing eigenvalues and metadata
  */
 inline EDResults exact_diagonalization_streaming_symmetry_fixed_sz(
@@ -425,11 +471,17 @@ inline EDResults exact_diagonalization_streaming_symmetry_fixed_sz(
     DiagonalizationMethod method = DiagonalizationMethod::LANCZOS,
     const EDParameters& params = EDParameters(),
     const std::string& interaction_filename = "InterAll.dat",
-    const std::string& single_site_filename = "Trans.dat"
+    const std::string& single_site_filename = "Trans.dat",
+    const std::string& basis_cache_dir = "",
+    bool precompute_basis_only = false
 ) {
     std::cout << "\n========================================" << std::endl;
     std::cout << "  Streaming Symmetry ED (Fixed Sz)" << std::endl;
     std::cout << "  Sz sector: N_up = " << n_up << std::endl;
+    if (!basis_cache_dir.empty())
+        std::cout << "  Basis cache: " << basis_cache_dir << std::endl;
+    if (precompute_basis_only)
+        std::cout << "  Mode: PRECOMPUTE BASIS ONLY" << std::endl;
     std::cout << "========================================\n" << std::endl;
     
     // ========== Step 1: Generate or Load Automorphisms ==========
@@ -438,21 +490,68 @@ inline EDResults exact_diagonalization_streaming_symmetry_fixed_sz(
         return EDResults();
     }
     
-    // ========== Step 2: Load Hamiltonian ==========
-    std::cout << "\nLoading Hamiltonian..." << std::endl;
+    // ========== Step 2: Construct operator and load Hamiltonian ==========
     std::string interaction_file = directory + "/" + interaction_filename;
     std::string single_site_file = directory + "/" + single_site_filename;
     
     FixedSzStreamingSymmetryOperator hamiltonian(params.num_sites, params.spin_length, n_up);
-    hamiltonian.loadFromFile(single_site_file);
-    hamiltonian.loadFromInterAllFile(interaction_file);
+
+    // Hamiltonian (InterAll.dat + Trans.dat) is only needed for the Lanczos solve,
+    // not for orbit basis construction.  Load it unless we're only precomputing.
+    if (!precompute_basis_only) {
+        std::cout << "\nLoading Hamiltonian..." << std::endl;
+        hamiltonian.loadFromFile(single_site_file);
+        hamiltonian.loadFromInterAllFile(interaction_file);
+    } else {
+        // Trans.dat contains single-site terms AND symmetry transforms.
+        // We need to load it for operator metadata (n_bits_, basis_states_).
+        // loadFromFile populates basis_states_ which is needed for sector generation.
+        std::cout << "\nLoading operator metadata (precompute mode)..." << std::endl;
+        hamiltonian.loadFromFile(single_site_file);
+    }
     
     uint64_t fixed_sz_dim = hamiltonian.getFixedSzDim();
     std::cout << "Fixed Sz dimension: " << fixed_sz_dim << std::endl;
     
-    // ========== Step 3: Generate Symmetry Sectors (Streaming) ==========
-    std::cout << "\nGenerating symmetry sectors (streaming mode, fixed Sz)..." << std::endl;
-    hamiltonian.generateSymmetrySectorsStreamingFixedSz(directory);
+    // ========== Step 3: Generate or Load Symmetry Sectors ==========
+    // Determine effective cache directory
+    std::string effective_cache_dir = basis_cache_dir;
+    if (effective_cache_dir.empty() && precompute_basis_only) {
+        effective_cache_dir = directory + "/basis_cache";
+    }
+
+    bool loaded_from_cache = false;
+    if (!effective_cache_dir.empty()) {
+        // Try loading from cache first (unless we're explicitly precomputing)
+        if (!precompute_basis_only) {
+            std::cout << "\nChecking for cached orbit basis in " << effective_cache_dir << "..." << std::endl;
+            // Load symmetry info so the operator can verify group_size
+            hamiltonian.symmetry_info.loadFromDirectory(directory);
+            loaded_from_cache = hamiltonian.loadOrbitBasisHDF5(effective_cache_dir);
+            if (loaded_from_cache) {
+                std::cout << "*** Orbit basis loaded from cache — skipping sector generation ***" << std::endl;
+            }
+        }
+    }
+
+    if (!loaded_from_cache) {
+        std::cout << "\nGenerating symmetry sectors (streaming mode, fixed Sz)..." << std::endl;
+        hamiltonian.generateSymmetrySectorsStreamingFixedSz(directory);
+
+        // Save to cache if a cache dir is specified
+        if (!effective_cache_dir.empty()) {
+            hamiltonian.saveOrbitBasisHDF5(effective_cache_dir);
+        }
+    }
+
+    // If precompute-only, we're done
+    if (precompute_basis_only) {
+        std::cout << "\n========================================" << std::endl;
+        std::cout << "  Precompute Basis Complete" << std::endl;
+        std::cout << "  Cached to: " << effective_cache_dir << std::endl;
+        std::cout << "========================================\n" << std::endl;
+        return EDResults();
+    }
     
     size_t num_sectors = hamiltonian.getNumSectors();
     
