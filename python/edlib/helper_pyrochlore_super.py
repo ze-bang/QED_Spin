@@ -497,12 +497,15 @@ def generate_three_spin_terms(nn_list, node_mapping, three_spin_coeff, sublattic
 
 def write_three_spin_terms(output_dir, three_spin_terms, file_name):
     """
-    Write three-spin interaction terms to a file.
+    Write three-spin interaction terms to a file (skipping zero-coupling terms).
     
     Format matches the ThreeBodyG.dat format:
     op1 site1 op2 site2 op3 site3 real_coeff imag_coeff
     """
-    num_terms = len(three_spin_terms)
+    # Filter out zero-coupling terms
+    nonzero_terms = [term for term in three_spin_terms
+                     if abs(term[6]) > 1e-15 or abs(term[7]) > 1e-15]
+    num_terms = len(nonzero_terms)
     
     with open(f"{output_dir}/{file_name}", 'w') as f:
         f.write("===================\n")
@@ -511,15 +514,16 @@ def write_three_spin_terms(output_dir, three_spin_terms, file_name):
         f.write("===================\n")
         f.write("===================\n")
         
-        for term in three_spin_terms:
+        _s = lambda v: 0.0 if abs(v) < 1e-15 else float(v)
+        for term in nonzero_terms:
             f.write(f" {int(term[0]):8d} " \
                    f" {int(term[1]):8d}   " \
                    f" {int(term[2]):8d}   " \
                    f" {int(term[3]):8d}   " \
                    f" {int(term[4]):8d}   " \
                    f" {int(term[5]):8d}   " \
-                   f" {term[6]:8f}   " \
-                   f" {term[7]:8f}   " \
+                   f" {_s(term[6]):8f}   " \
+                   f" {_s(term[7]):8f}   " \
                    f"\n")
 
 def prepare_hamiltonian_parameters(output_dir, non_kramer, nn_list, positions, sublattice_indices, 
@@ -612,8 +616,11 @@ def prepare_hamiltonian_parameters(output_dir, non_kramer, nn_list, positions, s
             write_two_body_correlations(output_dir, i, j, max_site, f"two_body_correlations{opname[i]}{opname[j]}.dat")
 
 def write_interALL(output_dir, interALL, file_name):
-    """Write interaction parameters to a file"""
-    num_param = len(interALL)
+    """Write interaction parameters to a file (skipping zero-coupling terms)"""
+    _s = lambda v: 0.0 if abs(v) < 1e-15 else float(v)
+    nonzero = [i for i in range(len(interALL))
+               if abs(interALL[i,4]) > 1e-15 or abs(interALL[i,5]) > 1e-15]
+    num_param = len(nonzero)
     with open(f"{output_dir}/{file_name}", 'w') as f:
         f.write("===================\n")
         f.write(f"num {num_param:8d}\n")
@@ -621,18 +628,21 @@ def write_interALL(output_dir, interALL, file_name):
         f.write("===================\n")
         f.write("===================\n")
         
-        for i in range(num_param):
+        for i in nonzero:
             f.write(f" {int(interALL[i,0]):8d} " \
                    f" {int(interALL[i,1]):8d}   " \
                    f" {int(interALL[i,2]):8d}   " \
                    f" {int(interALL[i,3]):8d}   " \
-                   f" {interALL[i,4]:8f}   " \
-                   f" {interALL[i,5]:8f}   " \
+                   f" {_s(interALL[i,4]):8f}   " \
+                   f" {_s(interALL[i,5]):8f}   " \
                    f"\n")
 
 def write_transfer(output_dir, transfer, file_name):
-    """Write transfer (field) parameters to a file"""
-    num_param = len(transfer)
+    """Write transfer (field) parameters to a file (skipping zero-coupling terms)"""
+    _s = lambda v: 0.0 if abs(v) < 1e-15 else float(v)
+    nonzero = [i for i in range(len(transfer))
+               if abs(transfer[i,2]) > 1e-15 or abs(transfer[i,3]) > 1e-15]
+    num_param = len(nonzero)
     with open(f"{output_dir}/{file_name}", 'w') as f:
         f.write("===================\n")
         f.write(f"num {num_param:8d}\n")
@@ -640,11 +650,11 @@ def write_transfer(output_dir, transfer, file_name):
         f.write("===================\n")
         f.write("===================\n")
         
-        for i in range(num_param):
+        for i in nonzero:
             f.write(f" {int(transfer[i,0]):8d} " \
                    f" {int(transfer[i,1]):8d}   " \
-                   f" {transfer[i,2]:8f}   " \
-                   f" {transfer[i,3]:8f}" \
+                   f" {_s(transfer[i,2]):8f}   " \
+                   f" {_s(transfer[i,3]):8f}" \
                    f"\n")
 
 def write_one_body_correlations(output_dir, Op, N, file_name):
@@ -858,7 +868,10 @@ def write_counter_term(output_dir, chains, Jxx, Jyy, Jzz, counterterm_coeff=1.0,
         # Second line: 1 site_i 0 site_j 1 site_i 0 site_j (S- S+ S- S+)
         counter_terms.append([1, chain[0], 0, chain[1], 1, chain[2], 0, chain[3], coeff, 0])
 
-    num_terms = len(counter_terms)
+    # Filter out zero-coupling counter terms
+    nonzero_terms = [term for term in counter_terms
+                     if abs(term[8]) > 1e-15 or abs(term[9]) > 1e-15]
+    num_terms = len(nonzero_terms)
     
     with open(f"{output_dir}/{file_name}", 'w') as f:
         f.write("===================\n")
@@ -867,7 +880,8 @@ def write_counter_term(output_dir, chains, Jxx, Jyy, Jzz, counterterm_coeff=1.0,
         f.write("===================\n")
         f.write("===================\n")
         
-        for term in counter_terms:
+        _s = lambda v: 0.0 if abs(v) < 1e-15 else float(v)
+        for term in nonzero_terms:
             f.write(f" {int(term[0]):8d} " \
                    f" {int(term[1]):8d}   " \
                    f" {int(term[2]):8d}   " \
@@ -876,8 +890,8 @@ def write_counter_term(output_dir, chains, Jxx, Jyy, Jzz, counterterm_coeff=1.0,
                    f" {int(term[5]):8d}   " \
                    f" {int(term[6]):8d}   " \
                    f" {int(term[7]):8d}   " \
-                   f" {term[8]:8f}   " \
-                   f" {term[9]:8f}   " \
+                   f" {_s(term[8]):8f}   " \
+                   f" {_s(term[9]):8f}   " \
                    f"\n")
 
 def plot_counter_term_chains(vertices, edges, chains, output_dir, cluster_name, sublattice_indices=None):

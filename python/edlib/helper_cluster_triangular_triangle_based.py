@@ -309,12 +309,17 @@ def write_ed_config(ham_params, output_path, cluster_data,
         site2 = inter['site2']
         
         # Write coupling matrix elements
-        Jxx = inter.get('Jxx', 0.0)
-        Jyy = inter.get('Jyy', 0.0)
-        Jzz = inter.get('Jzz', 0.0)
-        Jxy = inter.get('Jxy', 0.0)
-        Jxz = inter.get('Jxz', 0.0)
-        Jyz = inter.get('Jyz', 0.0)
+        _s = lambda v: 0.0 if abs(v) < 1e-15 else float(v)
+        Jxx = _s(inter.get('Jxx', 0.0))
+        Jyy = _s(inter.get('Jyy', 0.0))
+        Jzz = _s(inter.get('Jzz', 0.0))
+        Jxy = _s(inter.get('Jxy', 0.0))
+        Jxz = _s(inter.get('Jxz', 0.0))
+        Jyz = _s(inter.get('Jyz', 0.0))
+        
+        # Skip interactions where all couplings are zero
+        if Jxx == 0.0 and Jyy == 0.0 and Jzz == 0.0 and Jxy == 0.0 and Jxz == 0.0 and Jyz == 0.0:
+            continue
         
         lines.append(f"interaction{idx} = {site1}, {site2}, {Jxx}, {Jyy}, {Jzz}, {Jxy}, {Jxz}, {Jyz}")
     
@@ -335,9 +340,13 @@ def write_ed_config(ham_params, output_path, cluster_data,
         lines.append(f"# H_Z = sum_i [hx*Sx + hy*Sy + hz*Sz]")
         for zt in zeeman_terms:
             site = zt['site']
-            hx = zt['hx']
-            hy = zt['hy']
-            hz = zt['hz']
+            _s = lambda v: 0.0 if abs(v) < 1e-15 else float(v)
+            hx = _s(zt['hx'])
+            hy = _s(zt['hy'])
+            hz = _s(zt['hz'])
+            # Skip zeeman terms where all components are zero
+            if hx == 0.0 and hy == 0.0 and hz == 0.0:
+                continue
             lines.append(f"zeeman{site} = {site}, {hx}, {hy}, {hz}")
     
     # Write the file
