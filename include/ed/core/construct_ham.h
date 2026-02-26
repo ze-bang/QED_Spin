@@ -159,6 +159,7 @@ struct SymmetryGroupInfo {
         loadMinimalGenerators(auto_dir);
         loadSectorMetadata(auto_dir);
         computePowerRepresentation();
+        filterInvalidSectors();
         
         std::cout << "Loaded symmetry group information:" << std::endl;
         std::cout << "  Number of generators: " << num_generators << std::endl;
@@ -376,6 +377,124 @@ private:
         }
         
         std::cout << "Computed power representation for all automorphisms" << std::endl;
+    }
+    
+    /**
+     * Filter out invalid symmetry sectors (phantom irreps).
+     * 
+     * When generators have non-trivial algebraic relations (i.e., the naive
+     * product of orders exceeds |G|), some quantum number combinations produce
+     * characters that are not group homomorphisms. These "phantom" sectors
+     * must be removed.
+     * 
+     * The valid quantum numbers q are those satisfying: for every relation
+     * r = (r_0,...,r_{k-1}) in the relation subgroup K (where 
+     * g_0^{r_0} * ... * g_{k-1}^{r_{k-1}} = identity), we have
+     * sum_k q_k * r_k / o_k is an integer.
+     */
+    void filterInvalidSectors() {
+        // Quick check: if #sectors <= |G|, likely already correct
+        if (sectors.size() <= max_clique.size()) return;
+        
+        uint64_t num_gen = generators.size();
+        if (num_gen == 0) return;
+        
+        // Compute product of orders
+        uint64_t product_orders = 1;
+        for (int o : generator_orders) product_orders *= o;
+        
+        // Safety limit for enumeration
+        if (product_orders > 100000) {
+            std::cerr << "WARNING: Product of generator orders (" << product_orders 
+                      << ") too large for relation detection. Skipping sector filter." << std::endl;
+            return;
+        }
+        
+        uint64_t n = generators[0].size();
+        std::vector<int> identity(n);
+        for (uint64_t i = 0; i < n; ++i) identity[i] = i;
+        
+        auto compose = [n](const std::vector<int>& a, const std::vector<int>& b) {
+            std::vector<int> result(n);
+            for (uint64_t i = 0; i < n; ++i) result[i] = a[b[i]];
+            return result;
+        };
+        
+        auto powerPerm = [&](const std::vector<int>& perm, int p) {
+            std::vector<int> result = identity;
+            for (int i = 0; i < p; ++i) result = compose(perm, result);
+            return result;
+        };
+        
+        // Find relations: tuples (r_0,...,r_{k-1}) where g_0^{r_0}*...*g_{k-1}^{r_{k-1}} = identity
+        std::vector<std::vector<int>> relations;
+        std::vector<int> r(num_gen, 0);
+        
+        while (true) {
+            // Skip the all-zeros tuple
+            bool all_zero = true;
+            for (uint64_t i = 0; i < num_gen; ++i) {
+                if (r[i] != 0) { all_zero = false; break; }
+            }
+            
+            if (!all_zero) {
+                std::vector<int> result = identity;
+                for (uint64_t k = 0; k < num_gen; ++k) {
+                    result = compose(result, powerPerm(generators[k], r[k]));
+                }
+                if (result == identity) {
+                    relations.push_back(r);
+                }
+            }
+            
+            // Increment r (odometer)
+            int carry = 1;
+            for (int k = (int)num_gen - 1; k >= 0 && carry; --k) {
+                r[k] += carry;
+                if (r[k] >= generator_orders[k]) {
+                    r[k] = 0;
+                    carry = 1;
+                } else {
+                    carry = 0;
+                }
+            }
+            if (carry) break;  // overflow = done
+        }
+        
+        if (relations.empty()) return;
+        
+        std::cout << "Found " << relations.size() << " generator relation(s) "
+                  << "(|K| = " << (relations.size() + 1) << ")" << std::endl;
+        
+        // Filter sectors: keep those where sum_k q_k*r_k/o_k is integer for all relations
+        std::vector<SectorMetadata> valid_sectors;
+        for (const auto& sector : sectors) {
+            bool valid = true;
+            for (const auto& rel : relations) {
+                double s = 0.0;
+                for (uint64_t k = 0; k < num_gen; ++k) {
+                    s += (double)sector.quantum_numbers[k] * rel[k] / generator_orders[k];
+                }
+                if (std::abs(s - std::round(s)) > 1e-10) {
+                    valid = false;
+                    break;
+                }
+            }
+            if (valid) valid_sectors.push_back(sector);
+        }
+        
+        if (valid_sectors.size() < sectors.size()) {
+            std::cout << "Filtered " << (sectors.size() - valid_sectors.size())
+                      << " invalid sectors (phantom irreps from generator relations)" << std::endl;
+            std::cout << "Valid sectors: " << valid_sectors.size() 
+                      << " (group size: " << max_clique.size() << ")" << std::endl;
+            
+            // Re-number sector IDs
+            for (uint64_t i = 0; i < valid_sectors.size(); ++i) {
+                valid_sectors[i].sector_id = i;
+            }
+            sectors = valid_sectors;
+        }
     }
     
     std::vector<int> representAsGeneratorPowers(const std::vector<int>& automorphism) {

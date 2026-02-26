@@ -684,7 +684,7 @@ void GPULanczos::run(int num_eigenvalues,
     solveTridiagonal(m, num_eigenvalues, eigenvalues, tridiag_eigenvecs);
     
     // Compute Ritz vectors if requested
-    if (compute_vectors && num_stored_vectors_ > 0) {
+    if (compute_vectors && num_stored_vectors_ > 0 && !eigenvalues.empty() && !tridiag_eigenvecs.empty()) {
         computeRitzVectors(tridiag_eigenvecs, num_eigenvalues, eigenvectors);
     }
     

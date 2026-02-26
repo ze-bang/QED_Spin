@@ -357,6 +357,31 @@ inline EDResults exact_diagonalization_streaming_symmetry(
                 static_cast<uint64_t>(i)
             });
         }
+
+        // Expand eigenvectors from symmetrized basis → full 2^N computational basis
+        if (params.compute_eigenvectors && !sector_results.eigenvalues.empty()
+            && !params.output_dir.empty()) {
+            std::string sector_out = params.output_dir + "/sector_" + std::to_string(sector_idx);
+            std::string sector_hdf5 = HDF5IO::createOrOpenFile(sector_out);
+            for (size_t i = 0; i < sector_results.eigenvalues.size(); ++i) {
+                try {
+                    auto sym_vec = HDF5IO::loadEigenvector(sector_hdf5, i);
+                    auto full_vec = hamiltonian.expandToComputationalBasis(
+                        sector_idx, sym_vec);
+
+                    std::string main_hdf5 = HDF5IO::createOrOpenFile(params.output_dir);
+                    // Encode (sector, eigen_idx) into a unique global ID
+                    size_t global_id = sector_idx * 10000 + i;
+                    HDF5IO::saveEigenvector(main_hdf5, global_id, full_vec);
+                } catch (const std::exception& e) {
+                    std::cerr << "  Warning: Could not expand eigenvector " << i
+                              << " from sector " << sector_idx << ": "
+                              << e.what() << std::endl;
+                }
+            }
+            std::cout << "  Expanded " << sector_results.eigenvalues.size()
+                      << " eigenvectors to full basis" << std::endl;
+        }
         
         std::cout << "  Found " << sector_results.eigenvalues.size() << " eigenvalues" << std::endl;
         if (!sector_results.eigenvalues.empty()) {
@@ -402,11 +427,20 @@ inline EDResults exact_diagonalization_streaming_symmetry(
     if (!params.output_dir.empty()) {
         std::ofstream map_file(params.output_dir + "/eigenvalue_mapping.txt");
         if (map_file.is_open()) {
-            map_file << "# Global_Index Eigenvalue Sector_Index Sector_Eigenvalue_Index\n";
+            map_file << "# Global_Index Eigenvalue Sector_Index Sector_Eigenvalue_Index";
+            if (params.compute_eigenvectors) {
+                map_file << " Eigenvector_Dataset";
+            }
+            map_file << "\n";
             for (size_t i = 0; i < all_eigen_info.size(); ++i) {
                 const auto& info = all_eigen_info[i];
-                map_file << i << " " << info.value << " " 
-                        << info.sector_idx << " " << info.eigen_idx << "\n";
+                map_file << i << " " << std::setprecision(15) << info.value << " " 
+                        << info.sector_idx << " " << info.eigen_idx;
+                if (params.compute_eigenvectors) {
+                    size_t global_id = info.sector_idx * 10000 + info.eigen_idx;
+                    map_file << " eigenvector_" << global_id;
+                }
+                map_file << "\n";
             }
             map_file.close();
             std::cout << "Saved eigenvalue mapping to " 
@@ -670,6 +704,30 @@ inline EDResults exact_diagonalization_streaming_symmetry_fixed_sz(
                 static_cast<uint64_t>(i)
             });
         }
+
+        // Expand eigenvectors from symmetrized basis → full 2^N computational basis
+        if (params.compute_eigenvectors && !sector_results.eigenvalues.empty()
+            && !params.output_dir.empty()) {
+            std::string sector_out = params.output_dir + "/sector_" + std::to_string(sector_idx);
+            std::string sector_hdf5 = HDF5IO::createOrOpenFile(sector_out);
+            for (size_t i = 0; i < sector_results.eigenvalues.size(); ++i) {
+                try {
+                    auto sym_vec = HDF5IO::loadEigenvector(sector_hdf5, i);
+                    auto full_vec = hamiltonian.expandToComputationalBasis(
+                        sector_idx, sym_vec);
+
+                    std::string main_hdf5 = HDF5IO::createOrOpenFile(params.output_dir);
+                    size_t global_id = sector_idx * 10000 + i;
+                    HDF5IO::saveEigenvector(main_hdf5, global_id, full_vec);
+                } catch (const std::exception& e) {
+                    std::cerr << "  Warning: Could not expand eigenvector " << i
+                              << " from sector " << sector_idx << ": "
+                              << e.what() << std::endl;
+                }
+            }
+            std::cout << "  Expanded " << sector_results.eigenvalues.size()
+                      << " eigenvectors to full basis" << std::endl;
+        }
         
         std::cout << "  Found " << sector_results.eigenvalues.size() << " eigenvalues" << std::endl;
         if (!sector_results.eigenvalues.empty()) {
@@ -705,6 +763,31 @@ inline EDResults exact_diagonalization_streaming_symmetry_fixed_sz(
                      << " combined eigenvalues to " << hdf5_file << std::endl;
         } catch (const std::exception& e) {
             std::cerr << "Warning: Failed to save combined eigenvalues: " << e.what() << std::endl;
+        }
+    }
+    
+    // Save eigenvalue mapping (fixed-Sz)
+    if (!params.output_dir.empty()) {
+        std::ofstream map_file(params.output_dir + "/eigenvalue_mapping.txt");
+        if (map_file.is_open()) {
+            map_file << "# Global_Index Eigenvalue Sector_Index Sector_Eigenvalue_Index";
+            if (params.compute_eigenvectors) {
+                map_file << " Eigenvector_Dataset";
+            }
+            map_file << "\n";
+            for (size_t i = 0; i < all_eigen_info.size(); ++i) {
+                const auto& info = all_eigen_info[i];
+                map_file << i << " " << std::setprecision(15) << info.value << " "
+                        << info.sector_idx << " " << info.eigen_idx;
+                if (params.compute_eigenvectors) {
+                    size_t global_id = info.sector_idx * 10000 + info.eigen_idx;
+                    map_file << " eigenvector_" << global_id;
+                }
+                map_file << "\n";
+            }
+            map_file.close();
+            std::cout << "Saved eigenvalue mapping to "
+                     << params.output_dir << "/eigenvalue_mapping.txt" << std::endl;
         }
     }
     

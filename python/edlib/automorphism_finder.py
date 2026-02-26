@@ -142,7 +142,12 @@ def compute_vertex_colors(vertex_weights, edges, decimals=8, wl_iterations=10):
     return vertex_colors
 
 def construct_colored_graph(vertex_weights, edges):
-    """Construct a colored undirected graph for pynauty with robust vertex indexing.
+    """Construct a colored undirected graph for pynauty with edge-type subdivision.
+    
+    Uses the subdivision trick for edge-colored graphs: for each pair (i,j) of 
+    interacting sites, an auxiliary vertex is inserted whose color encodes the 
+    bond type (the full set of coupling terms on that bond). This ensures that 
+    nauty's automorphisms can only map bonds of the same type to each other.
     
     Returns:
         tuple: (graph, vertex_colors, idx_to_vid, vid_to_idx)
@@ -151,40 +156,123 @@ def construct_colored_graph(vertex_weights, edges):
             - idx_to_vid: list mapping nauty index -> original vertex_id
             - vid_to_idx: dict mapping original vertex_id -> nauty index
     """
-    # Compute WL-refined vertex colors
+    # Compute WL-refined vertex colors for original vertices
     vertex_colors = compute_vertex_colors(vertex_weights, edges)
 
-    # Build stable vertex index mapping 0..n-1
+    # Build stable vertex index mapping for original vertices (0..n-1)
     all_vertices = sorted(vertex_colors.keys())
     vid_to_idx = {v: i for i, v in enumerate(all_vertices)}
-    idx_to_vid = all_vertices  # This is a list: idx_to_vid[i] gives original vertex_id
-    n = len(all_vertices)
+    idx_to_vid = list(all_vertices)
+    n_original = len(all_vertices)
 
-    # Build adjacency dictionary in terms of contiguous indices
-    adjacency_dict = {i: [] for i in range(n)}
+    # --- Compute bond signatures ---
+    # Group edges by ordered pair (min_vertex, max_vertex)
+    from collections import defaultdict as _dd
+    bond_terms = _dd(list)
     for edge in edges:
         v1, v2 = edge['vertex1'], edge['vertex2']
         if v1 == v2:
             continue
         if v1 not in vid_to_idx or v2 not in vid_to_idx:
             continue
-        i, j = vid_to_idx[v1], vid_to_idx[v2]
-        # Avoid parallel edges at nauty level; WL already encoded multiplicity/labels into vertex colors
-        if j not in adjacency_dict[i]:
-            adjacency_dict[i].append(j)
-        if i not in adjacency_dict[j]:
-            adjacency_dict[j].append(i)
-
-    # Create vertex coloring as list of sets of indices
-    color_to_vertices = defaultdict(list)
+        # Store canonical direction info: which vertex is 'left' vs 'right'
+        lo, hi = min(v1, v2), max(v1, v2)
+        # Encode direction relative to canonical order
+        if v1 == lo:
+            term = (edge['type1'], edge['type2'], 
+                    _round_tuple(edge['weight']))
+        else:
+            term = (edge['type2'], edge['type1'], 
+                    _round_tuple(edge['weight']))
+        bond_terms[(lo, hi)].append(term)
+    
+    # Create canonical bond signature for each pair
+    bond_pairs = sorted(bond_terms.keys())
+    bond_signatures = {}
+    for pair in bond_pairs:
+        sig = tuple(sorted(bond_terms[pair]))
+        bond_signatures[pair] = sig
+    
+    # Assign colors to unique bond signatures
+    unique_sigs = sorted(set(bond_signatures.values()))
+    sig_to_color = {sig: i for i, sig in enumerate(unique_sigs)}
+    
+    n_bonds = len(bond_pairs)
+    n_total = n_original + n_bonds  # original vertices + auxiliary vertices
+    
+    print(f"  Edge-colored graph: {n_original} vertices + {n_bonds} auxiliary bond vertices")
+    print(f"  Unique bond types: {len(unique_sigs)}")
+    
+    # Build adjacency for expanded graph
+    adjacency_dict = {i: [] for i in range(n_total)}
+    
+    for bond_idx, (lo, hi) in enumerate(bond_pairs):
+        aux_idx = n_original + bond_idx  # index of auxiliary vertex
+        i, j = vid_to_idx[lo], vid_to_idx[hi]
+        # Connect both endpoints to the auxiliary vertex
+        adjacency_dict[i].append(aux_idx)
+        adjacency_dict[aux_idx].append(i)
+        adjacency_dict[j].append(aux_idx)
+        adjacency_dict[aux_idx].append(j)
+    
+    # Build vertex coloring
+    # Original vertices: color from WL
+    # Auxiliary vertices: color based on bond signature (offset by max vertex color + 1)
+    max_vertex_color = max(vertex_colors.values()) + 1 if vertex_colors else 0
+    
+    color_to_vertices = _dd(list)
     for v, c in vertex_colors.items():
         color_to_vertices[c].append(vid_to_idx[v])
-
-    coloring = [set(sorted(ids)) for _, ids in sorted(color_to_vertices.items(), key=lambda kv: kv[0])]
-
-    # Create pynauty graph (ensure keys are 0..n-1)
-    g = Graph(n, directed=False, adjacency_dict=adjacency_dict, vertex_coloring=coloring)
+    
+    for bond_idx, pair in enumerate(bond_pairs):
+        aux_idx = n_original + bond_idx
+        bond_color = max_vertex_color + sig_to_color[bond_signatures[pair]]
+        color_to_vertices[bond_color].append(aux_idx)
+    
+    coloring = [set(sorted(ids)) for _, ids in 
+                sorted(color_to_vertices.items(), key=lambda kv: kv[0])]
+    
+    # Create pynauty graph
+    g = Graph(n_total, directed=False, adjacency_dict=adjacency_dict, 
+              vertex_coloring=coloring)
     return g, vertex_colors, idx_to_vid, vid_to_idx
+
+
+def filter_hamiltonian_automorphisms(automorphisms, edges):
+    """Filter automorphisms to keep only those that preserve the Hamiltonian.
+    
+    An automorphism σ is a valid Hamiltonian symmetry iff for every interaction 
+    term (type1, site1, type2, site2, weight), the mapped term
+    (type1, σ(site1), type2, σ(site2), weight) also exists in the Hamiltonian.
+    
+    Args:
+        automorphisms: List of permutations (each is a list of site indices)
+        edges: List of edge dictionaries from read_interall_file
+    
+    Returns:
+        List of valid automorphisms
+    """
+    # Build lookup of all Hamiltonian terms as a set
+    ham_terms = set()
+    for edge in edges:
+        key = (edge['type1'], edge['vertex1'], edge['type2'], edge['vertex2'],
+               _round_tuple(edge['weight']))
+        ham_terms.add(key)
+    
+    valid = []
+    for sigma in automorphisms:
+        is_valid = True
+        for edge in edges:
+            mapped_key = (edge['type1'], sigma[edge['vertex1']], 
+                         edge['type2'], sigma[edge['vertex2']],
+                         _round_tuple(edge['weight']))
+            if mapped_key not in ham_terms:
+                is_valid = False
+                break
+        if is_valid:
+            valid.append(sigma)
+    
+    return valid
 
 
 class AutomorphismCliqueAnalyzer:
@@ -642,18 +730,38 @@ def main():
     
     finder = AutomorphismFinder()
     
-    # Generate all automorphisms from generators (these use nauty indices 0..n-1)
-    n_vertices = len(vertex_colors)
-    all_automorphisms_nauty = finder.generate_all_automorphisms(aut_group[0], n_vertices)
+    # Generate all automorphisms from generators
+    # The graph has n_original + n_auxiliary vertices (subdivision trick)
+    n_original = len(vertex_colors)
+    n_total = graph.number_of_vertices
+    print(f"\nGenerating all automorphisms (expanded graph has {n_total} vertices)...")
+    all_automorphisms_nauty = finder.generate_all_automorphisms(aut_group[0], n_total)
     
-    # Convert automorphisms from nauty indices to original vertex IDs
+    # Extract original-vertex permutations from expanded graph automorphisms
+    # Each expanded automorphism maps original vertices to original vertices
+    # (auxiliary vertices can only map to auxiliary vertices of the same color)
+    seen = set()
     all_automorphisms = []
     for perm_nauty in all_automorphisms_nauty:
-        # perm_nauty[i] = j means nauty index i maps to nauty index j
-        # We want: original_vid[i] maps to original_vid[j]
-        # So: perm_original[vid] = idx_to_vid[perm_nauty[vid_to_idx[vid]]]
+        # Extract just the original vertex portion (first n_original indices)
         perm_original = [idx_to_vid[perm_nauty[vid_to_idx[vid]]] for vid in idx_to_vid]
-        all_automorphisms.append(perm_original)
+        key = tuple(perm_original)
+        if key not in seen:
+            seen.add(key)
+            all_automorphisms.append(perm_original)
+    
+    print(f"Found {len(all_automorphisms)} unique graph automorphisms (projected to original vertices)")
+    
+    # Post-filter: verify each automorphism actually commutes with the Hamiltonian
+    # This is a safety check — the subdivision trick should already give correct results
+    all_automorphisms_pre_filter = len(all_automorphisms)
+    all_automorphisms = filter_hamiltonian_automorphisms(all_automorphisms, edges)
+    
+    if len(all_automorphisms) < all_automorphisms_pre_filter:
+        n_removed = all_automorphisms_pre_filter - len(all_automorphisms)
+        print(f"WARNING: Removed {n_removed} automorphisms that don't commute with Hamiltonian")
+        print(f"  This may indicate edge-type encoding issues in the graph construction")
+    print(f"Valid Hamiltonian automorphisms: {len(all_automorphisms)}")
     
     # Save all automorphisms to JSON (now with correct vertex IDs)
     automorphisms_file = os.path.join(output_dir, "automorphisms.json")
@@ -709,7 +817,7 @@ def main():
     print(f"Saved minimal generators to {generators_file}")
 
     # Generate sector metadata for symmetry sectors
-    sector_metadata = generate_sector_metadata(generators)
+    sector_metadata = generate_sector_metadata(generators, max_clique)
     sector_metadata_file = os.path.join(output_dir, "sector_metadata.json")
     with open(sector_metadata_file, 'w') as f:
         json.dump(sector_metadata, f, indent=2)
@@ -717,15 +825,70 @@ def main():
     print(f"Number of symmetry sectors: {len(sector_metadata['sectors'])}")
 
 
-def generate_sector_metadata(generators):
+def _find_relation_subgroup(generators, group_elements):
+    """
+    Find the relation subgroup K of the generator presentation.
+    
+    The generators g_0, ..., g_{k-1} with orders o_0, ..., o_{k-1} define a 
+    surjective homomorphism phi: Z_{o_0} x ... x Z_{o_{k-1}} -> G via
+    phi(a_0,...,a_{k-1}) = g_0^{a_0} * ... * g_{k-1}^{a_{k-1}}.
+    
+    K = ker(phi) is the relation subgroup. A quantum number tuple q is a valid
+    irrep label iff the character chi_q is trivial on K, i.e.,
+    sum_k q_k * r_k / o_k is an integer for every relation r in K.
+    
+    Returns:
+        List of tuples representing elements of K (excluding identity if trivial)
+    """
+    gen_perms = [g['permutation'] for g in generators]
+    gen_orders = [g['order'] for g in generators]
+    num_gen = len(generators)
+    n_sites = len(gen_perms[0])
+    identity = list(range(n_sites))
+    
+    def compose_perm(a, b):
+        return [a[b[i]] for i in range(n_sites)]
+    
+    def power_perm(perm, power):
+        result = list(range(n_sites))
+        for _ in range(power):
+            result = compose_perm(perm, result)
+        return result
+    
+    # Enumerate all tuples in Z_{o_0} x ... x Z_{o_{k-1}} and find those
+    # that map to the identity permutation
+    import itertools
+    K = []
+    ranges = [range(o) for o in gen_orders]
+    for r in itertools.product(*ranges):
+        if all(ri == 0 for ri in r):
+            continue  # skip identity, always in K
+        # Compute g_0^{r_0} * g_1^{r_1} * ... * g_{k-1}^{r_{k-1}}
+        result = list(identity)
+        for k in range(num_gen):
+            gk_pow = power_perm(gen_perms[k], r[k])
+            result = compose_perm(result, gk_pow)
+        if result == identity:
+            K.append(r)
+    
+    return K
+
+
+def generate_sector_metadata(generators, group_elements=None):
     """
     Generate metadata for all symmetry sectors (irreducible representations).
     
     For abelian groups, each sector is characterized by quantum numbers corresponding
     to the eigenvalues of the symmetry operators (generators).
     
+    When generators are not algebraically independent (i.e., there exist non-trivial
+    relations among them), the naive product of orders overcounts the number of irreps.
+    We detect such relations and filter to keep only valid irrep labels.
+    
     Args:
         generators: List of generator info dictionaries with 'permutation' and 'order'
+        group_elements: List of group element permutations (max_clique). If provided,
+                        enables relation detection and sector filtering.
         
     Returns:
         Dictionary with sector metadata including quantum numbers and phase factors
@@ -747,46 +910,84 @@ def generate_sector_metadata(generators):
     # Extract generator orders
     generator_orders = [gen['order'] for gen in generators]
     num_generators = len(generator_orders)
+    product_of_orders = 1
+    for o in generator_orders:
+        product_of_orders *= o
     
     print(f"\nGenerating sector metadata for abelian group:")
     print(f"  Generators: {num_generators}")
     print(f"  Orders: {generator_orders}")
+    print(f"  Product of orders: {product_of_orders}")
     
-    # For abelian groups, quantum numbers range from 0 to order-1 for each generator
-    # Each sector corresponds to a unique combination of quantum numbers
-    sectors = []
-    sector_id = 0
+    # Detect relations among generators if group elements are provided
+    relation_subgroup = []
+    if group_elements is not None:
+        group_size = len(group_elements)
+        print(f"  Group size |G|: {group_size}")
+        if product_of_orders != group_size:
+            print(f"  WARNING: Product of orders ({product_of_orders}) != |G| ({group_size})")
+            print(f"  Generators have non-trivial relations. Finding relation subgroup K...")
+            relation_subgroup = _find_relation_subgroup(generators, group_elements)
+            print(f"  |K| = {len(relation_subgroup) + 1} (including identity)")
+            for r in relation_subgroup:
+                parts = []
+                for k in range(num_generators):
+                    if r[k] != 0:
+                        if r[k] == 1:
+                            parts.append(f"g{k}")
+                        else:
+                            parts.append(f"g{k}^{r[k]}")
+                print(f"    Relation: {' * '.join(parts)} = e  {list(r)}")
+        else:
+            print(f"  Generators are independent (product of orders = |G|)")
     
     # Generate all possible quantum number combinations
+    all_sectors = []
+    
     def generate_quantum_numbers(idx, current_qn):
-        nonlocal sector_id
-        
         if idx == num_generators:
-            # Compute phase factors for each generator for this sector
-            # phase_k = exp(2πi * quantum_number_k / order_k)
-            # The C++ code will compose these based on power representation
-            phase_factors = []
-            for j in range(num_generators):
-                phase_angle = 2.0 * np.pi * current_qn[j] / generator_orders[j]
-                # Store as complex number: real and imaginary parts
-                phase_factors.append({
-                    "real": np.cos(phase_angle),
-                    "imag": np.sin(phase_angle)
-                })
-            
-            sectors.append({
-                "sector_id": sector_id,
-                "quantum_numbers": list(current_qn),
-                "phase_factors": phase_factors
-            })
-            sector_id += 1
+            all_sectors.append(list(current_qn))
             return
-        
-        # Try all quantum numbers for current generator
         for qn in range(generator_orders[idx]):
             generate_quantum_numbers(idx + 1, current_qn + [qn])
     
     generate_quantum_numbers(0, [])
+    
+    # Filter to valid sectors if there are relations
+    if relation_subgroup:
+        valid_qns = []
+        for qn in all_sectors:
+            is_valid = True
+            for r in relation_subgroup:
+                # Check: sum_k q_k * r_k / o_k must be an integer
+                s = sum(qn[k] * r[k] / generator_orders[k] for k in range(num_generators))
+                if abs(s - round(s)) > 1e-10:
+                    is_valid = False
+                    break
+            if is_valid:
+                valid_qns.append(qn)
+        
+        n_removed = len(all_sectors) - len(valid_qns)
+        print(f"  Filtered {n_removed} invalid sectors (phantom irreps)")
+        print(f"  Valid sectors: {len(valid_qns)}")
+        all_sectors = valid_qns
+    
+    # Build sector metadata with phase factors
+    sectors = []
+    for sector_id, qn in enumerate(all_sectors):
+        phase_factors = []
+        for j in range(num_generators):
+            phase_angle = 2.0 * np.pi * qn[j] / generator_orders[j]
+            phase_factors.append({
+                "real": float(np.cos(phase_angle)),
+                "imag": float(np.sin(phase_angle))
+            })
+        
+        sectors.append({
+            "sector_id": sector_id,
+            "quantum_numbers": qn,
+            "phase_factors": phase_factors
+        })
     
     print(f"  Total sectors: {len(sectors)}")
     

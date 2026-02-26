@@ -810,6 +810,55 @@ public:
     }
 
     // ===================== End HDF5 orbit basis caching =====================
+
+    // ===================== Eigenvector expansion ============================
+
+    /**
+     * @brief Expand a symmetrized-sector eigenvector to the full 2^N computational basis.
+     *
+     * Given an eigenvector c = (c_0, c_1, ..., c_{D-1}) in the symmetrized
+     * sector basis (D = sector dimension), the full-basis vector is:
+     *   |ψ⟩ = Σ_j c_j |φ_j⟩ = Σ_j c_j (1/N_j) Σ_k α_{jk} |s_{jk}⟩
+     * where orbit_elements = {s_{jk}}, orbit_coefficients = {α_{jk}}, norm = N_j.
+     *
+     * @param sector_idx  Index of the symmetry sector
+     * @param sym_vec     Eigenvector in the symmetrized sector basis
+     * @return Vector of length 2^N in computational basis
+     */
+    std::vector<Complex> expandToComputationalBasis(
+        size_t sector_idx,
+        const std::vector<Complex>& sym_vec
+    ) const {
+        if (sector_idx >= sectors_.size()) {
+            throw std::runtime_error("Invalid sector index");
+        }
+        const auto& sector = sectors_[sector_idx];
+        size_t sector_dim = sector.basis_states.size();
+        if (sym_vec.size() != sector_dim) {
+            throw std::runtime_error(
+                "Eigenvector size (" + std::to_string(sym_vec.size())
+                + ") != sector dimension (" + std::to_string(sector_dim) + ")");
+        }
+
+        uint64_t full_dim = 1ULL << n_bits_;
+        std::vector<Complex> full_vec(full_dim, Complex(0.0, 0.0));
+
+        const double group_norm = 1.0 / std::sqrt(
+            static_cast<double>(symmetry_info.max_clique.size()));
+
+        for (size_t j = 0; j < sector_dim; ++j) {
+            if (std::abs(sym_vec[j]) < 1e-15) continue;
+            const auto& bs = sector.basis_states[j];
+            Complex weight = sym_vec[j] * group_norm / bs.norm;
+            for (size_t k = 0; k < bs.orbit_elements.size(); ++k) {
+                uint64_t s = bs.orbit_elements[k];
+                full_vec[s] += weight * bs.orbit_coefficients[k];
+            }
+        }
+        return full_vec;
+    }
+
+    // ===================== End eigenvector expansion =========================
     
 private:
     /**
@@ -1961,6 +2010,104 @@ public:
             return false;
         }
     }
+
+    // ===================== Eigenvector expansion ============================
+
+    /**
+     * @brief Expand a symmetrized-sector eigenvector to the fixed-Sz computational basis.
+     *
+     * Returns a vector of length C(N, n_up) indexed by position in basis_states_.
+     * For embedding into the full 2^N Hilbert space, call embedToFull() afterwards.
+     *
+     * @param sector_idx  Index of the symmetry sector
+     * @param sym_vec     Eigenvector in the symmetrized sector basis
+     * @return Vector of length C(N, n_up) in fixed-Sz basis
+     */
+    std::vector<Complex> expandToFixedSzBasis(
+        size_t sector_idx,
+        const std::vector<Complex>& sym_vec
+    ) const {
+        if (sector_idx >= sectors_.size()) {
+            throw std::runtime_error("Invalid sector index");
+        }
+        const auto& sector = sectors_[sector_idx];
+        size_t sector_dim = sector.basis_states.size();
+        if (sym_vec.size() != sector_dim) {
+            throw std::runtime_error(
+                "Eigenvector size (" + std::to_string(sym_vec.size())
+                + ") != sector dimension (" + std::to_string(sector_dim) + ")");
+        }
+
+        // Build reverse lookup: computational state → index in basis_states_
+        std::unordered_map<uint64_t, size_t> state_to_idx;
+        state_to_idx.reserve(basis_states_.size());
+        for (size_t i = 0; i < basis_states_.size(); ++i) {
+            state_to_idx[basis_states_[i]] = i;
+        }
+
+        const double group_norm = 1.0 / std::sqrt(
+            static_cast<double>(symmetry_info.max_clique.size()));
+
+        std::vector<Complex> fixed_sz_vec(basis_states_.size(), Complex(0.0, 0.0));
+
+        for (size_t j = 0; j < sector_dim; ++j) {
+            if (std::abs(sym_vec[j]) < 1e-15) continue;
+            const auto& bs = sector.basis_states[j];
+            Complex weight = sym_vec[j] * group_norm / bs.norm;
+            for (size_t k = 0; k < bs.orbit_elements.size(); ++k) {
+                uint64_t s = bs.orbit_elements[k];
+                auto it = state_to_idx.find(s);
+                if (it != state_to_idx.end()) {
+                    fixed_sz_vec[it->second] += weight * bs.orbit_coefficients[k];
+                }
+            }
+        }
+        return fixed_sz_vec;
+    }
+
+    /**
+     * @brief Expand a symmetrized-sector eigenvector to the full 2^N computational basis.
+     *
+     * Combines expandToFixedSzBasis() + embedToFull() in one call.
+     *
+     * @param sector_idx  Index of the symmetry sector
+     * @param sym_vec     Eigenvector in the symmetrized sector basis
+     * @return Vector of length 2^N in computational basis
+     */
+    std::vector<Complex> expandToComputationalBasis(
+        size_t sector_idx,
+        const std::vector<Complex>& sym_vec
+    ) const {
+        if (sector_idx >= sectors_.size()) {
+            throw std::runtime_error("Invalid sector index");
+        }
+        const auto& sector = sectors_[sector_idx];
+        size_t sector_dim = sector.basis_states.size();
+        if (sym_vec.size() != sector_dim) {
+            throw std::runtime_error(
+                "Eigenvector size (" + std::to_string(sym_vec.size())
+                + ") != sector dimension (" + std::to_string(sector_dim) + ")");
+        }
+
+        uint64_t full_dim = 1ULL << n_bits_;
+        std::vector<Complex> full_vec(full_dim, Complex(0.0, 0.0));
+
+        const double group_norm = 1.0 / std::sqrt(
+            static_cast<double>(symmetry_info.max_clique.size()));
+
+        for (size_t j = 0; j < sector_dim; ++j) {
+            if (std::abs(sym_vec[j]) < 1e-15) continue;
+            const auto& bs = sector.basis_states[j];
+            Complex weight = sym_vec[j] * group_norm / bs.norm;
+            for (size_t k = 0; k < bs.orbit_elements.size(); ++k) {
+                uint64_t s = bs.orbit_elements[k];
+                full_vec[s] += weight * bs.orbit_coefficients[k];
+            }
+        }
+        return full_vec;
+    }
+
+    // ===================== End eigenvector expansion =========================
     
 private:
     /**
