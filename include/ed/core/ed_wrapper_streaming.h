@@ -395,11 +395,6 @@ inline EDResults exact_diagonalization_streaming_symmetry(
     
     std::sort(all_eigen_info.begin(), all_eigen_info.end());
     
-    // Limit to requested number of eigenvalues
-    if (all_eigen_info.size() > params.num_eigenvalues) {
-        all_eigen_info.resize(params.num_eigenvalues);
-    }
-    
     EDResults results;
     results.eigenvalues.resize(all_eigen_info.size());
     for (size_t i = 0; i < all_eigen_info.size(); ++i) {
@@ -738,10 +733,6 @@ inline EDResults exact_diagonalization_streaming_symmetry_fixed_sz(
     
     // ========== Step 5: Collect Results ==========
     std::sort(all_eigen_info.begin(), all_eigen_info.end());
-    
-    if (all_eigen_info.size() > params.num_eigenvalues) {
-        all_eigen_info.resize(params.num_eigenvalues);
-    }
     
     EDResults results;
     results.eigenvalues.resize(all_eigen_info.size());
