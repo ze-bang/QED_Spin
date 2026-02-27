@@ -877,50 +877,7 @@ void GPUBlockLanczos::solveBlockTridiagonal(int num_blocks, int num_eigs,
         return;
     }
     
-    // Diagnostic: print ALL block tridiagonal eigenvalues to understand multiplicity
-    std::cout << "\n  [DEBUG] All " << total_dim << " block tridiagonal eigenvalues:\n";
-    for (int i = 0; i < total_dim; ++i) {
-        std::cout << "    T_E[" << i << "] = " << std::setprecision(12) << solver.eigenvalues()(i) << "\n";
-    }
-    
-    // Also print the block tridiagonal matrix structure for debugging
-    std::cout << "\n  [DEBUG] Block tridiagonal matrix T (Hermitian check):\n";
-    double max_asym = 0.0;
-    for (int i = 0; i < total_dim; ++i) {
-        for (int j = i+1; j < total_dim; ++j) {
-            double asym = std::abs(T(i,j) - std::conj(T(j,i)));
-            if (asym > max_asym) max_asym = asym;
-        }
-    }
-    std::cout << "    Max asymmetry |T(i,j) - T(j,i)*|: " << max_asym << "\n";
 
-    // Print first alpha and beta blocks
-    if (num_blocks >= 1) {
-        std::cout << "\n  [DEBUG] Alpha block 0 (" << block_size_ << "x" << block_size_ << "):\n";
-        for (int i = 0; i < block_size_; ++i) {
-            std::cout << "    ";
-            for (int k = 0; k < block_size_; ++k) {
-                auto v = alpha_blocks_[0][i + k * block_size_];
-                std::cout << std::setw(12) << std::setprecision(6) << v.real();
-                if (std::abs(v.imag()) > 1e-14) std::cout << "+" << v.imag() << "i";
-                std::cout << " ";
-            }
-            std::cout << "\n";
-        }
-    }
-    if (!beta_blocks_.empty()) {
-        std::cout << "\n  [DEBUG] Beta block 0 (" << block_size_ << "x" << block_size_ << "):\n";
-        for (int i = 0; i < block_size_; ++i) {
-            std::cout << "    ";
-            for (int k = 0; k < block_size_; ++k) {
-                auto v = beta_blocks_[0][i + k * block_size_];
-                std::cout << std::setw(12) << std::setprecision(6) << v.real();
-                if (std::abs(v.imag()) > 1e-14) std::cout << "+" << v.imag() << "i";
-                std::cout << " ";
-            }
-            std::cout << "\n";
-        }
-    }
     
     // Extract requested eigenvalues (no deduplication - return raw spectrum)
     int n_eigs = std::min(num_eigs, total_dim);
