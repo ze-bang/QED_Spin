@@ -438,6 +438,92 @@ def get_lattice_constant_triangular(order, cluster_data):
     return 2.0 / n_triangles if n_triangles > 0 else 1.0
 
 
+def visualize_bond_types(cluster_data, output_path='triangle_bond_types.png', annotate_bonds=True):
+    """
+    Visualize bond direction types for a triangle-based cluster.
+
+    Args:
+        cluster_data: Cluster JSON data with sites, bonds, and optional bond_directions
+        output_path: Path to save the figure
+        annotate_bonds: Whether to label bonds with index and direction
+
+    Returns:
+        Saved output path, or None if matplotlib is unavailable
+    """
+    try:
+        import matplotlib.pyplot as plt
+        from matplotlib.lines import Line2D
+    except ImportError:
+        print("Warning: matplotlib not installed, skipping bond type visualization")
+        return None
+
+    bonds = cluster_data.get('bonds', [])
+    if not bonds:
+        raise ValueError("cluster_data has no bonds to visualize")
+
+    n_sites = cluster_data.get('n_sites', 0)
+    bond_directions = cluster_data.get('bond_directions', [0] * len(bonds))
+    if len(bond_directions) < len(bonds):
+        bond_directions = list(bond_directions) + [0] * (len(bonds) - len(bond_directions))
+
+    if 'positions' in cluster_data and len(cluster_data['positions']) == n_sites:
+        positions = np.array(cluster_data['positions'], dtype=float)
+    elif 'sites' in cluster_data and len(cluster_data['sites']) == n_sites:
+        lattice_sites = np.array(cluster_data['sites'], dtype=float)
+        positions = np.outer(lattice_sites[:, 0], A1) + np.outer(lattice_sites[:, 1], A2)
+    else:
+        raise ValueError("cluster_data requires either 'positions' or 'sites' with length n_sites")
+
+    direction_colors = {0: 'tab:blue', 1: 'tab:orange', 2: 'tab:green'}
+    direction_labels = {
+        0: 'dir 0: a1, phi=0',
+        1: 'dir 1: a2, phi=-2pi/3',
+        2: 'dir 2: a2-a1, phi=+2pi/3'
+    }
+
+    fig, ax = plt.subplots(figsize=(7.5, 6.5))
+
+    for bond_idx, (i, j) in enumerate(bonds):
+        d = int(bond_directions[bond_idx])
+        color = direction_colors.get(d, 'tab:red')
+        p1 = positions[i]
+        p2 = positions[j]
+        ax.plot([p1[0], p2[0]], [p1[1], p2[1]], color=color, linewidth=2.5, alpha=0.9, zorder=1)
+
+        if annotate_bonds:
+            midpoint = 0.5 * (p1 + p2)
+            ax.text(midpoint[0], midpoint[1], f"b{bond_idx}:d{d}", fontsize=8,
+                    ha='center', va='center',
+                    bbox={'boxstyle': 'round,pad=0.2', 'facecolor': 'white', 'alpha': 0.8, 'edgecolor': 'none'},
+                    zorder=3)
+
+    ax.scatter(positions[:, 0], positions[:, 1], s=100, c='black', zorder=2)
+    for site_idx, pos in enumerate(positions):
+        ax.text(pos[0], pos[1], f"{site_idx}", fontsize=9, color='white',
+                ha='center', va='center', zorder=4)
+
+    handles = [
+        Line2D([0], [0], color=direction_colors[0], linewidth=2.5, label=direction_labels[0]),
+        Line2D([0], [0], color=direction_colors[1], linewidth=2.5, label=direction_labels[1]),
+        Line2D([0], [0], color=direction_colors[2], linewidth=2.5, label=direction_labels[2]),
+    ]
+
+    ax.legend(handles=handles, loc='best', frameon=True)
+    ax.set_title('Triangle-based cluster bond types')
+    ax.set_xlabel('x')
+    ax.set_ylabel('y')
+    ax.set_aspect('equal')
+    ax.grid(True, alpha=0.25)
+    plt.tight_layout()
+
+    out_dir = os.path.dirname(output_path)
+    if out_dir:
+        os.makedirs(out_dir, exist_ok=True)
+    fig.savefig(output_path, dpi=200, bbox_inches='tight')
+    plt.close(fig)
+    return output_path
+
+
 if __name__ == '__main__':
     # Test with a sample cluster
     test_cluster = {
@@ -471,3 +557,7 @@ if __name__ == '__main__':
               f"γ={inter['gamma_re']:.3f}+{inter['gamma_im']:.3f}i")
         print(f"    Jxx={inter['Jxx']:.4f}, Jyy={inter['Jyy']:.4f}, Jzz={inter['Jzz']:.4f}")
         print(f"    Jxy={inter['Jxy']:.4f}, Jxz={inter['Jxz']:.4f}, Jyz={inter['Jyz']:.4f}")
+
+    plot_path = visualize_bond_types(test_cluster, output_path='triangle_bond_types_test.png')
+    if plot_path is not None:
+        print(f"\nBond-type plot saved to: {plot_path}")
