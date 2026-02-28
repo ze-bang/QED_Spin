@@ -3,6 +3,7 @@
 
 #include <ed/core/ed_wrapper.h>
 #include <ed/core/streaming_symmetry.h>
+#include <set>
 
 #ifdef WITH_CUDA
 #include <ed/gpu/gpu_ed_wrapper.h>
@@ -271,6 +272,21 @@ inline EDResults exact_diagonalization_streaming_symmetry(
     // ========== Step 4: Diagonalize Each Sector ==========
     std::cout << "\n========== Diagonalizing Sectors ==========\n" << std::endl;
     
+    // Build set of selected sectors for filtering
+    std::set<size_t> sector_filter;
+    if (!params.selected_sectors.empty()) {
+        for (int s : params.selected_sectors) {
+            if (s >= 0 && static_cast<size_t>(s) < num_sectors) {
+                sector_filter.insert(static_cast<size_t>(s));
+            } else {
+                std::cerr << "Warning: --sectors value " << s 
+                          << " out of range [0, " << num_sectors << "), ignoring" << std::endl;
+            }
+        }
+        std::cout << "Sector filter active: running " << sector_filter.size() 
+                  << " of " << num_sectors << " sectors" << std::endl;
+    }
+    
     struct EigenInfo {
         double value;
         uint64_t sector_idx;
@@ -293,6 +309,11 @@ inline EDResults exact_diagonalization_streaming_symmetry(
 #endif
     
     for (size_t sector_idx = 0; sector_idx < num_sectors; ++sector_idx) {
+        // Skip sectors not in the filter (if filter is active)
+        if (!sector_filter.empty() && sector_filter.find(sector_idx) == sector_filter.end()) {
+            continue;
+        }
+        
         uint64_t sector_dim = hamiltonian.getSectorDimension(sector_idx);
         
         if (sector_dim == 0) {
@@ -614,6 +635,21 @@ inline EDResults exact_diagonalization_streaming_symmetry_fixed_sz(
     // ========== Step 4: Diagonalize Each Sector ==========
     std::cout << "\n========== Diagonalizing Sectors ==========\n" << std::endl;
     
+    // Build set of selected sectors for filtering
+    std::set<size_t> sector_filter;
+    if (!params.selected_sectors.empty()) {
+        for (int s : params.selected_sectors) {
+            if (s >= 0 && static_cast<size_t>(s) < num_sectors) {
+                sector_filter.insert(static_cast<size_t>(s));
+            } else {
+                std::cerr << "Warning: --sectors value " << s 
+                          << " out of range [0, " << num_sectors << "), ignoring" << std::endl;
+            }
+        }
+        std::cout << "Sector filter active: running " << sector_filter.size() 
+                  << " of " << num_sectors << " sectors" << std::endl;
+    }
+    
     struct EigenInfo {
         double value;
         uint64_t sector_idx;
@@ -637,6 +673,11 @@ inline EDResults exact_diagonalization_streaming_symmetry_fixed_sz(
 #endif
     
     for (size_t sector_idx = 0; sector_idx < num_sectors; ++sector_idx) {
+        // Skip sectors not in the filter (if filter is active)
+        if (!sector_filter.empty() && sector_filter.find(sector_idx) == sector_filter.end()) {
+            continue;
+        }
+        
         uint64_t sector_dim = hamiltonian.getSectorDimension(sector_idx);
         
         if (sector_dim == 0) {

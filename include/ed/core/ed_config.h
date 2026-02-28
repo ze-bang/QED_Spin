@@ -271,6 +271,7 @@ struct WorkflowConfig {
     std::string basis_cache_dir = "";      // Directory for cached orbit basis ("" = auto = hamiltonian_dir/basis_cache)
     std::string output_dir = "output";
     std::string eigenvector_dir = "";  // Directory with pre-computed eigenvectors (for ground state DSSF)
+    std::vector<int> selected_sectors;  // If non-empty, only diagonalize these sector indices (0-based)
 };
 
 // ============================================================================
@@ -355,6 +356,7 @@ public:
     EDConfig& basisCacheDir(const std::string& dir) { workflow.basis_cache_dir = dir; return *this; }
     EDConfig& outputDir(const std::string& dir) { workflow.output_dir = dir; return *this; }
     EDConfig& eigenvectorDir(const std::string& dir) { workflow.eigenvector_dir = dir; return *this; }
+    EDConfig& sectors(const std::vector<int>& s) { workflow.selected_sectors = s; return *this; }
     
     // ========== Configuration Loading ==========
     

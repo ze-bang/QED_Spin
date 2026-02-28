@@ -428,6 +428,7 @@ struct EDParameters {
     uint64_t num_sites = 0;             // Number of sites in the system
     float spin_length = 0.5;       // Spin length
     uint64_t sublattice_size = 1;       // Size of the sublattice
+    std::vector<int> selected_sectors;  // If non-empty, only diagonalize these sector indices (0-based)
     
     // ========== TPQ Observable Parameters ==========
     // save_thermal_states: Save TPQ states at target temperatures for post-processing (e.g., TPQ_DSSF)

@@ -87,6 +87,9 @@ inline EDParameters toEDParameters(const EDConfig& config) {
     // Output
     params.output_dir = config.workflow.output_dir;
     
+    // Sector selection
+    params.selected_sectors = config.workflow.selected_sectors;
+    
     // ARPACK
     params.arpack_advanced_verbose = config.arpack.verbose;
     params.arpack_which = config.arpack.which;
