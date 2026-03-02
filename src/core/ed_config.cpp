@@ -3,6 +3,7 @@
 // This is at the end of the file to avoid including it globally
 #include <algorithm>
 #include <cctype>
+#include <sstream>
 
 // ============================================================================
 // Temporary forward declaration to avoid including ed_wrapper.h here
@@ -22,6 +23,7 @@ enum class DiagonalizationMethod {
     BICG,
     LOBPCG,
     KRYLOV_SCHUR,
+    BLOCK_KRYLOV_SCHUR,
     IMPLICIT_RESTART_LANCZOS,
     THICK_RESTART_LANCZOS,
     FULL,
@@ -46,9 +48,12 @@ enum class DiagonalizationMethod {
     BLOCK_LANCZOS_GPU,
     DAVIDSON_GPU,
     LOBPCG_GPU,
+    KRYLOV_SCHUR_GPU,
+    BLOCK_KRYLOV_SCHUR_GPU,
     mTPQ_GPU,
     cTPQ_GPU,
     FTLM_GPU,
+    FULL_GPU,
     // Deprecated methods (kept for backwards compatibility)
     LANCZOS_GPU_FIXED_SZ,
     BLOCK_LANCZOS_GPU_FIXED_SZ,
@@ -118,6 +123,7 @@ EDConfig EDConfig::fromFile(const std::string& filename) {
                 else if (key == "num_sites") config.system.num_sites = std::stoi(value);
                 else if (key == "spin_length") config.system.spin_length = std::stof(value);
                 else if (key == "use_fixed_sz") config.system.use_fixed_sz = parse_bool(value);
+                else if (key == "full_sz_split") config.system.full_sz_split = parse_bool(value);
                 else if (key == "n_up") config.system.n_up = std::stoi(value);
                 else if (key == "sublattice_size") config.system.sublattice_size = std::stoi(value);
                 else if (key == "interaction_file") config.system.interaction_file = value;
@@ -151,8 +157,9 @@ EDConfig EDConfig::fromFile(const std::string& filename) {
             // ========== [Workflow] section ==========
             else if (current_section == "workflow") {
                 if (key == "run_standard") config.workflow.run_standard = parse_bool(value);
-                else if (key == "run_symmetrized") config.workflow.run_symmetrized = parse_bool(value);
-                else if (key == "run_streaming_symmetry") config.workflow.run_streaming_symmetry = parse_bool(value);
+                else if (key == "run_symmetrized") config.workflow.run_symm_auto = parse_bool(value);  // Legacy alias
+                else if (key == "run_streaming_symmetry") config.workflow.run_symm_auto = parse_bool(value);  // Legacy alias
+                else if (key == "run_symm") config.workflow.run_symm_auto = parse_bool(value);
                 else if (key == "compute_thermo") config.workflow.compute_thermo = parse_bool(value);
                 else if (key == "compute_dynamical_response") config.workflow.compute_dynamical_response = parse_bool(value);
                 else if (key == "compute_static_response") config.workflow.compute_static_response = parse_bool(value);
@@ -296,6 +303,7 @@ EDConfig EDConfig::fromFile(const std::string& filename) {
                 else if (key == "spin_length") config.system.spin_length = std::stof(value);
                 else if (key == "hamiltonian_dir") config.system.hamiltonian_dir = value;
                 else if (key == "use_fixed_sz") config.system.use_fixed_sz = parse_bool(value);
+                else if (key == "full_sz_split") config.system.full_sz_split = parse_bool(value);
                 else if (key == "n_up") config.system.n_up = std::stoi(value);
                 else if (key == "output_dir") config.workflow.output_dir = value;
                 else if (key == "num_samples") config.thermal.num_samples = std::stoi(value);
@@ -303,8 +311,9 @@ EDConfig EDConfig::fromFile(const std::string& filename) {
                 else if (key == "temp_max") config.thermal.temp_max = std::stod(value);
                 else if (key == "temp_bins") config.thermal.num_temp_bins = std::stoi(value);
                 else if (key == "run_standard") config.workflow.run_standard = parse_bool(value);
-                else if (key == "run_symmetrized") config.workflow.run_symmetrized = parse_bool(value);
-                else if (key == "run_streaming_symmetry") config.workflow.run_streaming_symmetry = parse_bool(value);
+                else if (key == "run_symmetrized") config.workflow.run_symm_auto = parse_bool(value);  // Legacy alias
+                else if (key == "run_streaming_symmetry") config.workflow.run_symm_auto = parse_bool(value);  // Legacy alias
+                else if (key == "run_symm") config.workflow.run_symm_auto = parse_bool(value);
                 else if (key == "compute_thermo") config.workflow.compute_thermo = parse_bool(value);
                 else if (key == "compute_dynamical_response") config.workflow.compute_dynamical_response = parse_bool(value);
                 else if (key == "compute_static_response") config.workflow.compute_static_response = parse_bool(value);
@@ -393,6 +402,7 @@ EDConfig EDConfig::fromCommandLine(uint64_t argc, char* argv[]) {
             else if (arg.find("--num_sites=") == 0) config.system.num_sites = std::stoi(parse_value("--num_sites="));
             else if (arg.find("--spin_length=") == 0) config.system.spin_length = std::stof(parse_value("--spin_length="));
             else if (arg == "--fixed-sz") config.system.use_fixed_sz = true;
+            else if (arg == "--full-sz-split") config.system.full_sz_split = true;
             else if (arg.find("--n-up=") == 0) config.system.n_up = std::stoi(parse_value("--n-up="));
             else if (arg.find("--output=") == 0) config.workflow.output_dir = parse_value("--output=");
             else if (arg.find("--samples=") == 0) config.thermal.num_samples = std::stoi(parse_value("--samples="));
@@ -422,18 +432,28 @@ EDConfig EDConfig::fromCommandLine(uint64_t argc, char* argv[]) {
             else if (arg == "--save-thermal-states" || arg == "--calc_observables") config.observable.save_thermal_states = true;
             else if (arg == "--compute-spin-correlations" || arg == "--measure_spin") config.observable.compute_spin_correlations = true;
             else if (arg == "--standard") config.workflow.run_standard = true;
-            else if (arg == "--symmetrized") config.workflow.run_symmetrized = true;
-            else if (arg == "--streaming-symmetry") config.workflow.run_streaming_symmetry = true;
+            else if (arg == "--symmetrized") config.workflow.run_symm_auto = true;  // Alias for --symm
+            else if (arg == "--streaming-symmetry") config.workflow.run_symm_auto = true;  // Alias for --symm
             else if (arg == "--disk-streaming") config.workflow.run_disk_streaming = true;
             else if (arg == "--chunked-symm") config.workflow.run_chunked_symmetry = true;
             else if (arg == "--symm") config.workflow.run_symm_auto = true;
-            else if (arg.find("--symm-threshold=") == 0) config.workflow.symm_streaming_threshold = std::stoull(parse_value("--symm-threshold="));
             else if (arg.find("--disk-threshold=") == 0) config.workflow.disk_streaming_threshold = std::stoull(parse_value("--disk-threshold="));
             else if (arg.find("--chunked-threshold=") == 0) config.workflow.chunked_symm_threshold = std::stoull(parse_value("--chunked-threshold="));
             else if (arg == "--thermo") config.workflow.compute_thermo = true;
             else if (arg == "--dynamical-response") config.workflow.compute_dynamical_response = true;
             else if (arg == "--static-response") config.workflow.compute_static_response = true;
             else if (arg == "--ground-state-dssf") config.workflow.compute_ground_state_dssf = true;
+            else if (arg == "--precompute-basis") config.workflow.precompute_basis_only = true;
+            else if (arg.find("--basis-cache-dir=") == 0) config.workflow.basis_cache_dir = parse_value("--basis-cache-dir=");
+            else if (arg.find("--sectors=") == 0) {
+                std::string sectors_str = parse_value("--sectors=");
+                std::istringstream ss(sectors_str);
+                std::string token;
+                config.workflow.selected_sectors.clear();
+                while (std::getline(ss, token, ',')) {
+                    config.workflow.selected_sectors.push_back(std::stoi(token));
+                }
+            }
             else if (arg == "--skip_ED") config.workflow.skip_ed = true;
             else if (arg.find("--sublattice_size=") == 0) config.system.sublattice_size = std::stoi(parse_value("--sublattice_size="));
             else if (arg.find("--omega_min=") == 0) config.observable.omega_min = std::stod(parse_value("--omega_min="));
@@ -551,8 +571,6 @@ EDConfig EDConfig::fromCommandLine(uint64_t argc, char* argv[]) {
                           config.workflow.compute_static_response ||
                           config.workflow.compute_ground_state_dssf) &&
                         !config.workflow.run_standard && 
-                        !config.workflow.run_symmetrized && 
-                        !config.workflow.run_streaming_symmetry &&
                         !config.workflow.run_symm_auto &&
                         !config.workflow.compute_thermo;
     
@@ -562,8 +580,7 @@ EDConfig EDConfig::fromCommandLine(uint64_t argc, char* argv[]) {
     }
     
     // Default to standard workflow if nothing specified (and skip_ed not set)
-    if (!config.workflow.run_standard && !config.workflow.run_symmetrized && 
-        !config.workflow.run_streaming_symmetry && !config.workflow.run_symm_auto && !config.workflow.skip_ed) {
+    if (!config.workflow.run_standard && !config.workflow.run_symm_auto && !config.workflow.skip_ed) {
         config.workflow.run_standard = true;
     }
     
@@ -588,8 +605,7 @@ EDConfig& EDConfig::merge(const EDConfig& other) {
     
     // Merge workflow
     if (other.workflow.run_standard) workflow.run_standard = true;
-    if (other.workflow.run_symmetrized) workflow.run_symmetrized = true;
-    if (other.workflow.run_streaming_symmetry) workflow.run_streaming_symmetry = true;
+    if (other.workflow.run_symm_auto) workflow.run_symm_auto = true;
     if (other.workflow.compute_thermo) workflow.compute_thermo = true;
     if (!other.workflow.output_dir.empty()) workflow.output_dir = other.workflow.output_dir;
     
@@ -733,8 +749,7 @@ void EDConfig::save(const std::string& filename) const {
     file << "[Workflow]\n";
     file << "output_dir = " << workflow.output_dir << "\n";
     file << "run_standard = " << (workflow.run_standard ? "true" : "false") << "\n";
-    file << "run_symmetrized = " << (workflow.run_symmetrized ? "true" : "false") << "\n";
-    file << "run_streaming_symmetry = " << (workflow.run_streaming_symmetry ? "true" : "false") << "\n";
+    file << "run_symm = " << (workflow.run_symm_auto ? "true" : "false") << "\n";
     file << "compute_thermo = " << (workflow.compute_thermo ? "true" : "false") << "\n";
 }
 
@@ -777,8 +792,6 @@ void EDConfig::print(std::ostream& out) const {
     out << "Output: " << workflow.output_dir << "\n";
     
     if (workflow.run_standard) out << "  - Running standard diagonalization\n";
-    if (workflow.run_symmetrized) out << "  - Running symmetrized diagonalization\n";
-    if (workflow.run_streaming_symmetry) out << "  - Running streaming symmetry diagonalization (memory-efficient)\n";
     if (workflow.run_symm_auto) out << "  - Running symmetry-exploiting diagonalization (auto-select mode)\n";
     if (workflow.compute_thermo) out << "  - Computing thermodynamics\n";
     if (observable.save_thermal_states) out << "  - Saving TPQ states at target temperatures\n";
@@ -837,6 +850,7 @@ std::optional<DiagonalizationMethod> parseMethod(const std::string& str) {
     if (lower == "shift_invert") return DiagonalizationMethod::SHIFT_INVERT;
     if (lower == "shift_invert_robust") return DiagonalizationMethod::SHIFT_INVERT_ROBUST;
     if (lower == "krylov_schur") return DiagonalizationMethod::KRYLOV_SCHUR;
+    if (lower == "block_krylov_schur") return DiagonalizationMethod::BLOCK_KRYLOV_SCHUR;
     if (lower == "irl") return DiagonalizationMethod::IMPLICIT_RESTART_LANCZOS;
     if (lower == "trlan") return DiagonalizationMethod::THICK_RESTART_LANCZOS;
     
@@ -877,10 +891,13 @@ std::optional<DiagonalizationMethod> parseMethod(const std::string& str) {
     if (lower == "block_lanczos_gpu_fixed_sz") return DiagonalizationMethod::BLOCK_LANCZOS_GPU_FIXED_SZ;
     if (lower == "davidson_gpu") return DiagonalizationMethod::DAVIDSON_GPU;
     if (lower == "lobpcg_gpu") return DiagonalizationMethod::LOBPCG_GPU;
+    if (lower == "krylov_schur_gpu") return DiagonalizationMethod::KRYLOV_SCHUR_GPU;
+    if (lower == "block_krylov_schur_gpu") return DiagonalizationMethod::BLOCK_KRYLOV_SCHUR_GPU;
     if (lower == "mtpq_gpu") return DiagonalizationMethod::mTPQ_GPU;
     if (lower == "ctpq_gpu") return DiagonalizationMethod::cTPQ_GPU;
     if (lower == "ftlm_gpu") return DiagonalizationMethod::FTLM_GPU;
     if (lower == "ftlm_gpu_fixed_sz") return DiagonalizationMethod::FTLM_GPU_FIXED_SZ;
+    if (lower == "full_gpu") return DiagonalizationMethod::FULL_GPU;
     std::cerr << "Warning: Unknown method '" << str << "', using LANCZOS\n";
     return std::nullopt;
 }
@@ -896,6 +913,7 @@ std::string methodToString(DiagonalizationMethod method) {
         case DiagonalizationMethod::SHIFT_INVERT: return "SHIFT_INVERT";
         case DiagonalizationMethod::SHIFT_INVERT_ROBUST: return "SHIFT_INVERT_ROBUST";
         case DiagonalizationMethod::KRYLOV_SCHUR: return "KRYLOV_SCHUR";
+        case DiagonalizationMethod::BLOCK_KRYLOV_SCHUR: return "BLOCK_KRYLOV_SCHUR";
         case DiagonalizationMethod::IMPLICIT_RESTART_LANCZOS: return "IMPLICIT_RESTART_LANCZOS";
         case DiagonalizationMethod::THICK_RESTART_LANCZOS: return "THICK_RESTART_LANCZOS";
         
@@ -936,10 +954,13 @@ std::string methodToString(DiagonalizationMethod method) {
         case DiagonalizationMethod::BLOCK_LANCZOS_GPU_FIXED_SZ: return "BLOCK_LANCZOS_GPU_FIXED_SZ";
         case DiagonalizationMethod::DAVIDSON_GPU: return "DAVIDSON_GPU";
         case DiagonalizationMethod::LOBPCG_GPU: return "LOBPCG_GPU";
+        case DiagonalizationMethod::KRYLOV_SCHUR_GPU: return "KRYLOV_SCHUR_GPU";
+        case DiagonalizationMethod::BLOCK_KRYLOV_SCHUR_GPU: return "BLOCK_KRYLOV_SCHUR_GPU";
         case DiagonalizationMethod::mTPQ_GPU: return "mTPQ_GPU";
         case DiagonalizationMethod::cTPQ_GPU: return "cTPQ_GPU";
         case DiagonalizationMethod::FTLM_GPU: return "FTLM_GPU";
         case DiagonalizationMethod::FTLM_GPU_FIXED_SZ: return "FTLM_GPU_FIXED_SZ";
+        case DiagonalizationMethod::FULL_GPU: return "FULL_GPU";
         
         default: return "UNKNOWN";
     }
@@ -1073,6 +1094,19 @@ std::string getMethodParameterInfo(DiagonalizationMethod method) {
             info << "  --tolerance=<tol>     Convergence tolerance (default: 1e-10)\n";
             info << "  --eigenvectors        Compute and save eigenvectors\n";
             info << "\nBest for: Large-scale problems requiring multiple restarts\n";
+            break;
+            
+        case DiagonalizationMethod::BLOCK_KRYLOV_SCHUR:
+            info << "Block Krylov-Schur method (block Arnoldi with Schur restarts).\n\n";
+            info << "Processes multiple vectors per iteration using BLAS-3 GEMM.\n";
+            info << "Better for degenerate/clustered eigenvalues than standard Krylov-Schur.\n\n";
+            info << "Configurable Parameters:\n";
+            info << "  --eigenvalues=<n>     Number of eigenvalues to compute (default: 1)\n";
+            info << "  --block_size=<n>      Block size (default: 4)\n";
+            info << "  --iterations=<n>      Maximum block iterations (default: 1000)\n";
+            info << "  --tolerance=<tol>     Convergence tolerance (default: 1e-10)\n";
+            info << "  --eigenvectors        Compute and save eigenvectors\n";
+            info << "\nBest for: Degenerate eigenvalues, modern CPUs with BLAS-3 optimization\n";
             break;
             
         case DiagonalizationMethod::IMPLICIT_RESTART_LANCZOS:
@@ -1338,6 +1372,48 @@ std::string getMethodParameterInfo(DiagonalizationMethod method) {
             info << "Note: LOBPCG_GPU has been retired due to numerical stability issues.\n";
             info << "      It now redirects to DAVIDSON_GPU which provides superior accuracy.\n";
             info << "      Please use DAVIDSON_GPU directly for new projects.\n";
+            break;
+            
+        case DiagonalizationMethod::KRYLOV_SCHUR_GPU:
+            info << "GPU-accelerated Krylov-Schur algorithm (requires CUDA build).\n\n";
+            info << "Restarted eigenvalue solver using Krylov-Schur decomposition.\n";
+            info << "Optimal for computing many eigenvalues with implicit restarts.\n";
+            info << "All operations performed on GPU with cuBLAS/cuSOLVER.\n\n";
+            info << "Requires: CUDA-enabled build\n";
+            info << "Configurable Parameters:\n";
+            info << "  --eigenvalues=<n>     Number of eigenvalues to compute (default: 1)\n";
+            info << "  --iterations=<n>      Maximum Krylov subspace size (default: 10000)\n";
+            info << "  --tolerance=<tol>     Convergence tolerance (default: 1e-10)\n";
+            info << "  --eigenvectors        Compute and save eigenvectors\n";
+            info << "  --fixed-sz            Use fixed Sz sector (recommended)\n";
+            info << "  --n_up=<n>            Number of up spins for fixed Sz\n\n";
+            info << "GPU Optimizations:\n";
+            info << "  - All Krylov vectors stored on GPU (no disk I/O)\n";
+            info << "  - Batched orthogonalization via cuBLAS GEMV\n";
+            info << "  - cuSOLVER for projected eigenvalue problem\n";
+            info << "  - cuBLAS GEMM for efficient basis update during restart\n\n";
+            info << "Best for: Computing many eigenvalues, systems requiring restarts\n";
+            break;
+            
+        case DiagonalizationMethod::BLOCK_KRYLOV_SCHUR_GPU:
+            info << "GPU-accelerated Block Krylov-Schur algorithm (requires CUDA build).\n\n";
+            info << "Block variant of Krylov-Schur using BLAS-3 operations (GEMM).\n";
+            info << "Better for degenerate/clustered eigenvalues than standard Krylov-Schur.\n";
+            info << "All operations performed on GPU with cuBLAS/cuSOLVER.\n\n";
+            info << "Requires: CUDA-enabled build\n";
+            info << "Configurable Parameters:\n";
+            info << "  --eigenvalues=<n>     Number of eigenvalues to compute (default: 1)\n";
+            info << "  --block_size=<n>      Block size (default: 4)\n";
+            info << "  --iterations=<n>      Maximum block iterations (default: 1000)\n";
+            info << "  --tolerance=<tol>     Convergence tolerance (default: 1e-10)\n";
+            info << "  --eigenvectors        Compute and save eigenvectors\n";
+            info << "  --fixed-sz            Use fixed Sz sector (recommended)\n";
+            info << "  --n_up=<n>            Number of up spins for fixed Sz\n\n";
+            info << "GPU Optimizations:\n";
+            info << "  - Block vectors stored on GPU\n";
+            info << "  - cuBLAS GEMM for block orthogonalization\n";
+            info << "  - cuSOLVER for block eigenvalue problem\n\n";
+            info << "Best for: Degenerate eigenvalues, clustered spectra, GPU acceleration\n";
             break;
             
         case DiagonalizationMethod::mTPQ_GPU:

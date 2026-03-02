@@ -5,7 +5,6 @@
 
 #include <cuda_runtime.h>
 #include <cuComplex.h>
-#include <cusparse.h>
 #include <cublas_v2.h>
 #include <vector>
 #include <complex>
@@ -166,16 +165,9 @@ public:
     // Check if operator supports async matVec
     virtual bool supportsAsyncMatVec() const { return true; }
     
-    // Set interaction parameters
+    // Legacy char-based interface (wraps addOneBodyTerm/addTwoBodyTerm)
     void setInteraction(int site1, int site2, char op1, char op2, double coupling);
-    
-    // Set single-site operator
     void setSingleSite(int site, char op, double coupling);
-    
-    // Load CSR arrays (host) into GPUOperator and construct cuSPARSE descriptors
-    bool loadCSR(int N, const std::vector<int>& row_ptr,
-                 const std::vector<int>& col_ind,
-                 const std::vector<std::complex<double>>& values);
     
     // Get dimension
     int getDimension() const { return dimension_; }
@@ -245,11 +237,9 @@ protected:
     // ========================================================================
     enum class KernelPathway {
         UNINITIALIZED = 0,     // Not yet selected
-        CUSPARSE,              // Use cuSPARSE (pre-built sparse matrix)
         WARP_REDUCTION,        // Gather pattern, no atomics (T >= 1024, N >= 8192)
         BRANCH_FREE_SCATTER,   // Separated kernels with atomics (T >= 64)
-        SHARED_MEMORY,         // State-parallel with shared mem (T < 64)
-        LEGACY                 // Fallback legacy kernel
+        SHARED_MEMORY          // State-parallel with shared mem (T < 64)
     };
     
     KernelPathway selected_pathway_ = KernelPathway::UNINITIALIZED;
@@ -272,52 +262,15 @@ protected:
     void separateTransformsByType();
     void copySeparatedTransformsToDevice();
     
-    // Legacy interaction storage (deprecated, kept for compatibility)
-    struct Interaction {
-        int site1, site2;
-        char op1, op2;
-        double coupling;
-    };
-    
-    struct SingleSiteOp {
-        int site;
-        char op;
-        double coupling;
-    };
-    
-    std::vector<Interaction> interactions_;
-    std::vector<SingleSiteOp> single_site_ops_;
-    
     // GPU memory pointers
     cuDoubleComplex* d_vector_in_;
     cuDoubleComplex* d_vector_out_;
-    cuDoubleComplex* d_temp_;
     
-    // Texture object for optimized random access to input vector
-    cudaTextureObject_t tex_input_vector_;
-    
-    // Sparse matrix storage (CSR format)
-    int* d_csr_row_ptr_;
-    int* d_csr_col_ind_;
-    cuDoubleComplex* d_csr_values_;
-    size_t nnz_;
-    
-    // cuSPARSE and cuBLAS handles
-    cusparseHandle_t cusparse_handle_;
+    // cuBLAS handle
     cublasHandle_t cublas_handle_;
-    cusparseSpMatDescr_t mat_descriptor_;
-    cusparseDnVecDescr_t vec_x_descriptor_;
-    cusparseDnVecDescr_t vec_y_descriptor_;
-    
-    // Device interaction data
-    Interaction* d_interactions_;
-    SingleSiteOp* d_single_site_ops_;
-    int num_interactions_;
-    int num_single_site_ops_;
     
     // Memory management
     bool gpu_memory_allocated_;
-    bool sparse_matrix_built_;
     size_t available_gpu_memory_;
     
     // OPTIMIZATION: Pre-allocated CUDA events (avoid create/destroy per matVec)
@@ -325,31 +278,10 @@ protected:
     cudaEvent_t timing_stop_;
     bool events_initialized_ = false;
     
-    // OPTIMIZATION: Pre-allocated sparse buffer (avoid malloc/free per matVec)
-    void* d_spmv_buffer_ = nullptr;
-    size_t spmv_buffer_size_ = 0;
-    
     // Performance stats
     PerformanceStats stats_;
     
-    // Chunked processing for large systems
-    struct ChunkInfo {
-        uint64_t start_state;
-        uint64_t end_state;
-        int start_idx;
-        int size;
-    };
-    
-    std::vector<ChunkInfo> chunks_;
-    void setupChunks(int N);
-    void processChunk(const ChunkInfo& chunk, const cuDoubleComplex* d_x, 
-                     cuDoubleComplex* d_y);
-    
     // Helper functions
-    void copyInteractionsToDevice();
-    void createTextureObject(cuDoubleComplex* d_data, int size);
-    void destroyTextureObject();
-    void initializeCUSPARSE();
     void initializeCUBLAS();
 };
 
@@ -368,6 +300,11 @@ public:
     // Override base class methods to use fixed Sz
     void matVecGPU(const cuDoubleComplex* d_x, cuDoubleComplex* d_y, int N) override;
     void matVec(const std::complex<double>* x, std::complex<double>* y, int N) override;
+    void matVecGPUAsync(const cuDoubleComplex* d_x, cuDoubleComplex* d_y, int N, cudaStream_t stream) override;
+
+    // Fixed-Sz kernels use shared basis table and atomic accumulation,
+    // so concurrent multi-stream execution is not safe.
+    bool supportsAsyncMatVec() const override { return false; }
     
     // Build basis states on GPU
     void buildBasisOnGPU();
@@ -395,29 +332,11 @@ private:
 // CUDA kernel declarations
 namespace GPUKernels {
 
-// GPU-NATIVE: Transform-parallel kernel (maximum GPU utilization)
-// Launches N×T threads where each computes one (state,transform) contribution
-__global__ void matVecTransformParallel(const cuDoubleComplex* x, cuDoubleComplex* y,
-                                        const GPUTransformData* transforms,
-                                        int num_transforms, int N, int n_sites, float spin_l);
-
-// OPTIMIZED: State-parallel kernel with shared memory
+// State-parallel kernel with shared memory (used for small T)
 __global__ void matVecKernelOptimized(cudaTextureObject_t tex_x_unused, cuDoubleComplex* y,
                                       int N, int n_sites, float spin_l,
                                       const GPUTransformData* transforms, int num_transforms,
                                       const cuDoubleComplex* x);
-
-// Legacy: Matrix-vector product kernel (on-the-fly computation)
-__global__ void matVecKernel(const cuDoubleComplex* x, cuDoubleComplex* y,
-                             int N, int n_sites,
-                             const void* interactions, int num_interactions,
-                             const void* single_site_ops, int num_single_site_ops);
-
-// Sparse matrix-vector product (uses cuSPARSE internally)
-__global__ void sparseMatVecKernel(const int* row_ptr, const int* col_ind,
-                                   const cuDoubleComplex* values,
-                                   const cuDoubleComplex* x, cuDoubleComplex* y,
-                                   int N);
 
 // OPTIMIZED: Fixed-Sz matrix-vector product using Structure-of-Arrays
 // GPU-NATIVE: Transform-parallel Fixed-Sz kernel
@@ -431,24 +350,12 @@ __global__ void matVecFixedSzKernelOptimized(const cuDoubleComplex* x, cuDoubleC
                                              int N, int n_sites, float spin_l,
                                              const GPUTransformData* transforms, int num_transforms);
 
-// Legacy: Fixed Sz matrix-vector product kernel
-__global__ void matVecFixedSzKernel(const cuDoubleComplex* x, cuDoubleComplex* y,
-                                    const uint64_t* basis_states,
-                                    const void* hash_table, int hash_size,
-                                    int N, int n_sites,
-                                    const void* interactions, int num_interactions,
-                                    const void* single_site_ops, int num_single_site_ops);
-
 // Basis generation kernel for fixed Sz
 __global__ void generateFixedSzBasisKernel(uint64_t* basis_states, int n_bits, int n_up,
                                           uint64_t start_state, int num_states);
 
-// Hash table construction kernel
-__global__ void buildHashTableKernel(const uint64_t* basis_states, void* hash_table,
-                                    int hash_size, int num_states);
-
-// State lookup kernel
-__device__ int lookupState(uint64_t state, const void* hash_table, int hash_size);
+// State lookup (binary search)
+__device__ int lookupState(uint64_t state, const void* basis_states_ptr, int num_states);
 
 // ============================================================================
 // BRANCH-FREE KERNELS (v2 optimization)
@@ -506,6 +413,139 @@ __global__ void matVecWarpReductionFused(
     const GPUMixedTwoBody* mixed2, int num_mixed2,
     const GPUOffDiagonalTwoBody* offdiag2, int num_offdiag2,
     int N, float spin_l);
+
+} // namespace GPUKernels
+
+// ============================================================================
+// GPU Symmetrized Operator — matrix-free H*v in symmetry-projected sectors
+// ============================================================================
+
+/**
+ * @brief Open-addressing hash table entry for state → basis index lookup
+ *
+ * Each computational basis state s that belongs to some symmetrized basis
+ * state |φ_k⟩ is stored with:
+ *   key   = s  (computational state, EMPTY_KEY = UINT64_MAX means vacant)
+ *   value = k  (symmetrized basis index in sector)
+ *   projection_factor = conj(β_s) * group_norm / norm_k
+ *     where β_s is the orbit coefficient of s in |φ_k⟩
+ *
+ * Pre-computing the projection factor avoids per-lookup division/conjugation.
+ */
+struct GPUHashEntry {
+    uint64_t key;                    // Computational basis state (UINT64_MAX = empty)
+    int32_t  value;                  // Symmetrized basis index
+    cuDoubleComplex projection;      // conj(coeff) * group_norm / norm
+    
+    __host__ __device__ GPUHashEntry()
+        : key(UINT64_MAX), value(-1) {
+        projection = make_cuDoubleComplex(0.0, 0.0);
+    }
+};
+
+/**
+ * @brief GPU-accelerated operator for symmetry-projected sectors
+ *
+ * Implements the streaming symmetrized matvec on GPU:
+ *   out[k] += Σ_j c_j Σ_{s∈orbit_j} (α_s/norm_j) Σ_t h(s,s') · proj(s',k)
+ *
+ * Data stored on device:
+ *   - orbit_elements[orbit_offsets[j]..orbit_offsets[j+1]] = states in orbit j
+ *   - orbit_coefficients[..] = α_s coefficients
+ *   - orbit_norms[j] = normalization of |φ_j⟩
+ *   - hash_table[] = open-addressing lookup: state → (basis_idx, projection_factor)
+ *   - transform_data_/separated storage from GPUOperator base
+ *
+ * Parallelize over (j, orbit_idx) pairs via 2D grid; scatter to out[k] with atomics.
+ */
+class GPUSymmetrizedOperator : public GPUOperator {
+public:
+    GPUSymmetrizedOperator(int n_sites, float spin_l = 0.5f);
+    ~GPUSymmetrizedOperator();
+    
+    /**
+     * @brief Set up sector data from CPU-side orbit information
+     *
+     * @param sector_dim       Number of symmetrized basis states in this sector
+     * @param orbit_elements   Flattened orbit elements (all orbits concatenated)
+     * @param orbit_coefficients Matching complex coefficients
+     * @param orbit_offsets    CSR-style offsets: orbit_offsets[j] = start of orbit j
+     * @param orbit_norms      Normalization factor for each basis state
+     * @param group_size       |G|, the order of the symmetry group
+     */
+    void setSectorData(
+        int sector_dim,
+        const std::vector<uint64_t>& orbit_elements,
+        const std::vector<std::complex<double>>& orbit_coefficients,
+        const std::vector<int>& orbit_offsets,
+        const std::vector<double>& orbit_norms,
+        int group_size);
+    
+    // Override matvec for symmetrized operation
+    void matVecGPU(const cuDoubleComplex* d_x, cuDoubleComplex* d_y, int N) override;
+    void matVecGPUAsync(const cuDoubleComplex* d_x, cuDoubleComplex* d_y, int N, cudaStream_t stream) override;
+    void matVec(const std::complex<double>* x, std::complex<double>* y, int N) override;
+    
+    // Fixed-Sz kernels use shared basis table and atomic accumulation
+    bool supportsAsyncMatVec() const override { return false; }
+    
+    int getSectorDimension() const { return sector_dim_; }
+    
+private:
+    // Build the GPU open-addressing hash table
+    void buildHashTable();
+    
+    // Copy orbit data to device
+    void copyOrbitDataToDevice();
+    
+    // Sector properties
+    int sector_dim_ = 0;
+    int group_size_ = 1;
+    int total_orbit_elements_ = 0;
+    
+    // Host-side orbit data
+    std::vector<uint64_t> h_orbit_elements_;
+    std::vector<std::complex<double>> h_orbit_coefficients_;
+    std::vector<int> h_orbit_offsets_;
+    std::vector<double> h_orbit_norms_;
+    
+    // Device-side orbit data (CSR layout)
+    uint64_t*        d_orbit_elements_    = nullptr;
+    cuDoubleComplex* d_orbit_coefficients_ = nullptr;
+    int*             d_orbit_offsets_     = nullptr;
+    double*          d_orbit_norms_       = nullptr;
+    
+    // Device-side hash table for state → (basis_idx, projection_factor)
+    GPUHashEntry*    d_hash_table_        = nullptr;
+    int              hash_table_size_     = 0;
+    
+    bool             sector_data_on_device_ = false;
+};
+
+// ============================================================================
+// Symmetrized matvec kernel declarations
+// ============================================================================
+namespace GPUKernels {
+
+/**
+ * @brief Symmetrized matvec kernel — scatter pattern
+ *
+ * 2D grid: x-dim = orbit elements across all basis states, y-dim = transforms.
+ * Each thread applies one transform to one orbit element, then looks up the
+ * result in the hash table and atomically accumulates into the output.
+ */
+__global__ void matVecSymmetrized(
+    const cuDoubleComplex* __restrict__ x,
+    cuDoubleComplex* __restrict__ y,
+    const uint64_t* orbit_elements,
+    const cuDoubleComplex* orbit_coefficients,
+    const int* orbit_offsets,
+    const double* orbit_norms,
+    int sector_dim,
+    const GPUTransformData* transforms, int num_transforms,
+    const GPUHashEntry* hash_table, int hash_table_size,
+    int n_sites, float spin_l,
+    int total_orbit_elements);
 
 } // namespace GPUKernels
 

@@ -219,6 +219,7 @@ struct SystemConfig {
     // Fixed Sz mode
     bool use_fixed_sz = false;
     int64_t n_up = -1;  // Number of up spins (-1 = not set, will use num_sites/2)
+    bool full_sz_split = false;  // When true with FULL method, loop over all Sz sectors
     
     std::string hamiltonian_dir = "";
     std::string interaction_file = "InterAll.dat";
@@ -253,21 +254,21 @@ struct ArpackConfig {
  */
 struct WorkflowConfig {
     bool run_standard = false;
-    bool run_symmetrized = false;
-    bool run_streaming_symmetry = false;  // New streaming symmetry mode
-    bool run_disk_streaming = false;  // Ultra-low-memory disk-based streaming
-    bool run_chunked_symmetry = false;  // Ultra-low-memory chunked basis construction
-    bool run_symm_auto = false;  // Unified --symm flag: auto-select between symmetrized and streaming
-    uint64_t symm_streaming_threshold = 4096;  // Hilbert dim threshold for switching to streaming
+    bool run_symm_auto = false;  // Unified --symm flag: auto-select between streaming, disk-streaming, or chunked
     uint64_t disk_streaming_threshold = 67108864;  // 2^26 threshold for disk-based mode (default: 64M states)
     uint64_t chunked_symm_threshold = 268435456;  // 2^28 threshold for chunked mode (default: 256M states)
+    bool run_disk_streaming = false;  // Ultra-low-memory disk-based streaming (expert override)
+    bool run_chunked_symmetry = false;  // Ultra-low-memory chunked basis construction (expert override)
     bool compute_thermo = false;
     bool compute_dynamical_response = false;
     bool compute_static_response = false;
     bool compute_ground_state_dssf = false;  // Ground state dynamical structure factor (continued fraction)
     bool skip_ed = false;
+    bool precompute_basis_only = false;   // Only generate orbit basis and cache to HDF5, skip Lanczos
+    std::string basis_cache_dir = "";      // Directory for cached orbit basis ("" = auto = hamiltonian_dir/basis_cache)
     std::string output_dir = "output";
     std::string eigenvector_dir = "";  // Directory with pre-computed eigenvectors (for ground state DSSF)
+    std::vector<int> selected_sectors;  // If non-empty, only diagonalize these sector indices (0-based)
 };
 
 // ============================================================================
@@ -340,16 +341,19 @@ public:
     
     // Workflow
     EDConfig& standard(bool b = true) { workflow.run_standard = b; return *this; }
-    EDConfig& symmetrized(bool b = true) { workflow.run_symmetrized = b; return *this; }
-    EDConfig& streamingSymmetry(bool b = true) { workflow.run_streaming_symmetry = b; return *this; }
-    EDConfig& symmAuto(bool b = true) { workflow.run_symm_auto = b; return *this; }
-    EDConfig& symmStreamingThreshold(uint64_t t) { workflow.symm_streaming_threshold = t; return *this; }
+    EDConfig& symm(bool b = true) { workflow.run_symm_auto = b; return *this; }
+    EDConfig& symmAuto(bool b = true) { workflow.run_symm_auto = b; return *this; }  // Alias
+    EDConfig& diskStreaming(bool b = true) { workflow.run_disk_streaming = b; return *this; }
+    EDConfig& chunkedSymm(bool b = true) { workflow.run_chunked_symmetry = b; return *this; }
     EDConfig& thermo(bool b = true) { workflow.compute_thermo = b; return *this; }
     EDConfig& dynamicalResponse(bool b = true) { workflow.compute_dynamical_response = b; return *this; }
     EDConfig& staticResponse(bool b = true) { workflow.compute_static_response = b; return *this; }
     EDConfig& groundStateDSSF(bool b = true) { workflow.compute_ground_state_dssf = b; return *this; }
+    EDConfig& precomputeBasis(bool b = true) { workflow.precompute_basis_only = b; return *this; }
+    EDConfig& basisCacheDir(const std::string& dir) { workflow.basis_cache_dir = dir; return *this; }
     EDConfig& outputDir(const std::string& dir) { workflow.output_dir = dir; return *this; }
     EDConfig& eigenvectorDir(const std::string& dir) { workflow.eigenvector_dir = dir; return *this; }
+    EDConfig& sectors(const std::vector<int>& s) { workflow.selected_sectors = s; return *this; }
     
     // ========== Configuration Loading ==========
     

@@ -33,6 +33,14 @@ from scipy.optimize import minimize, differential_evolution, dual_annealing
 from scipy.stats import qmc
 from scipy.interpolate import interp1d
 from scipy.ndimage import gaussian_filter1d
+try:
+    from skopt import gp_minimize
+    from skopt.space import Real
+    from skopt.callbacks import CheckpointSaver
+    HAS_SKOPT = True
+except ImportError:
+    HAS_SKOPT = False
+import time
 
 
 class NumpyJSONEncoder(json.JSONEncoder):
@@ -47,6 +55,105 @@ class NumpyJSONEncoder(json.JSONEncoder):
         elif isinstance(obj, np.ndarray):
             return obj.tolist()
         return super().default(obj)
+
+
+class CostLandscapeLogger:
+    """Accumulates every (params, chi²) evaluation and DE population state for
+    cost-function landscape analysis and optimizer checkpointing.
+
+    Usage:
+        logger = CostLandscapeLogger(param_names, output_dir)
+        # inside objective: logger.log_evaluation(params, chi2)
+        # as DE callback:  callback=logger.de_callback
+        # at end:          logger.save()
+    """
+
+    def __init__(self, param_names, output_dir, flush_interval=100):
+        self.param_names = list(param_names)
+        self.output_dir = output_dir
+        self.flush_interval = flush_interval
+        self._evals = []          # list of [*params, chi2]
+        self._gen_best = []       # list of [gen, chi2_best, *xk]
+        self._start_time = time.time()
+        self._timestamps = []     # wall-clock seconds since start per eval
+        self._generation = 0
+
+    # ---- called every objective evaluation ----
+    def log_evaluation(self, params, chi2):
+        self._evals.append(list(params) + [float(chi2)])
+        self._timestamps.append(time.time() - self._start_time)
+        if len(self._evals) % self.flush_interval == 0:
+            self._flush()
+
+    # ---- DE callback (called once per generation) ----
+    def de_callback(self, xk, convergence=0.0):
+        self._generation += 1
+        best_chi2 = float(self._evals[-1][-1]) if self._evals else np.nan
+        # xk is current best; find its chi2 from recent evals
+        for row in reversed(self._evals):
+            if np.allclose(row[:-1], xk, atol=1e-12):
+                best_chi2 = row[-1]
+                break
+        self._gen_best.append([self._generation, best_chi2, convergence]
+                              + list(xk))
+        logging.info(f"DE generation {self._generation}: best χ²={best_chi2:.6f}, "
+                     f"convergence={convergence:.6e}")
+        self._flush()  # save after every generation
+
+    # ---- Bayesian optimization callback (called after each evaluation) ----
+    def bo_callback(self, opt_result):
+        """scikit-optimize callback; opt_result is a partial OptimizeResult."""
+        n = len(opt_result.func_vals)
+        best_idx = int(np.argmin(opt_result.func_vals))
+        best_chi2 = opt_result.func_vals[best_idx]
+        best_x = opt_result.x_iters[best_idx]
+        self._generation = n
+        self._gen_best.append([n, best_chi2, 0.0] + list(best_x))
+        logging.info(f"BO iteration {n}: current χ²={opt_result.func_vals[-1]:.6f}, "
+                     f"best χ²={best_chi2:.6f}")
+        self._flush()
+
+    # ---- periodic flush ----
+    def _flush(self):
+        self._save_npz(os.path.join(self.output_dir, 'cost_landscape.npz'))
+
+    # ---- final save ----
+    def save(self):
+        npz_path = self._save_npz(os.path.join(self.output_dir,
+                                                'cost_landscape.npz'))
+        csv_path = self._save_csv(os.path.join(self.output_dir,
+                                                'cost_landscape.csv'))
+        logging.info(f"Cost landscape saved: {npz_path} ({len(self._evals)} evaluations)")
+        logging.info(f"Cost landscape CSV:   {csv_path}")
+
+    def _save_npz(self, path):
+        evals = np.array(self._evals) if self._evals else np.empty((0,))
+        timestamps = np.array(self._timestamps)
+        gen_best = np.array(self._gen_best) if self._gen_best else np.empty((0,))
+        np.savez_compressed(path,
+                            evaluations=evals,
+                            timestamps=timestamps,
+                            gen_best=gen_best,
+                            param_names=np.array(self.param_names))
+        return path
+
+    def _save_csv(self, path):
+        header = ','.join(self.param_names + ['chi_squared', 'wall_time_s'])
+        evals = np.array(self._evals) if self._evals else np.empty((0,))
+        timestamps = np.array(self._timestamps)
+        if evals.size == 0:
+            with open(path, 'w') as f:
+                f.write(header + '\n')
+        else:
+            data = np.column_stack([evals, timestamps])
+            np.savetxt(path, data, delimiter=',', header=header, comments='')
+        return path
+
+    @staticmethod
+    def load(path):
+        """Load a saved landscape for post-hoc analysis."""
+        d = np.load(path, allow_pickle=True)
+        return {k: d[k] for k in d.files}
 
 
 def setup_logging(log_file):
@@ -107,50 +214,52 @@ def apply_gaussian_broadening(temp, spec_heat, sigma, broadening_type='linear'):
     return broadened
 
 
-def run_nlce_triangular(params, fixed_params, exp_temp, work_dir, h_field=None, temp_range=None):
+def run_nlce_triangular(params, fixed_params, exp_temp, work_dir, h_field=None, temp_range=None, field_dir=None):
     """
     Run triangular lattice NLCE with the given parameters.
     
     Args:
         params: Parameter array depending on model type:
-                - heisenberg/xxz/kitaev: [J1, J2, ...]
+                - xxz_j1j2/kitaev: [J1, J2, ...]
                 - anisotropic: [Jzz, Jpm, Jpmpm, Jzpm, ...]
         fixed_params: Dictionary of fixed parameters
         exp_temp: Experimental temperature array
         work_dir: Working directory for NLCE calculations
         h_field: Override magnetic field strength
         temp_range: Override temperature range
+        field_dir: Override field direction (default: from fixed_params)
     
     Returns:
         calc_temp, calc_spec_heat arrays (in SI units J/(mol·K) if SI_units=True)
     """
-    model = fixed_params.get("model", "heisenberg")
+    model = fixed_params.get("model", "xxz_j1j2")
     
     # Extract parameters based on model type
-    # If fit_J_kelvin is enabled, the last model parameter is J_kelvin
-    fit_J_kelvin = fixed_params.get("fit_J_kelvin", False)
-    
     if model == 'anisotropic':
-        if fit_J_kelvin:
-            n_model_params = 5
-            Jzz, Jpm, Jpmpm, Jzpm, J_kelvin = params[:5]
-        else:
-            n_model_params = 4
-            Jzz, Jpm, Jpmpm, Jzpm = params[:4]
-            J_kelvin = fixed_params.get("J_kelvin", None)
+        n_model_params = 4
+        Jzz, Jpm, Jpmpm, Jzpm = params[:4]
         J1, J2 = 1.0, 0.0  # Not used for anisotropic
+        Gamma, Gamma_prime = None, None
+    elif model == 'kitaev':
+        n_model_params = 4
+        J_H, J_K, Gamma, Gamma_prime = params[:4]
+        J1, J2 = J_H, J_K  # Map to J1/J2 for NLCE runner
+        Jzz, Jpm, Jpmpm, Jzpm = None, None, None, None
     else:
-        if fit_J_kelvin:
+        fit_Jz_ratio = fixed_params.get("fit_Jz_ratio", False)
+        if fit_Jz_ratio:
             n_model_params = 3
-            J1, J2, J_kelvin = params[:3]
+            J1, J2, Jz_ratio = params[:3]
         else:
+            Jz_ratio = fixed_params.get("Jz_ratio", 1.0)
             n_model_params = 2
             J1, J2 = params[:2]
-            J_kelvin = fixed_params.get("J_kelvin", None)
         Jzz, Jpm, Jpmpm, Jzpm = None, None, None, None
+        Gamma, Gamma_prime = None, None
     
     h_value = h_field if h_field is not None else fixed_params.get("h", 0.0)
-    field_dir = fixed_params["field_dir"]
+    if field_dir is None:
+        field_dir = fixed_params["field_dir"]
     
     temp_min = temp_range.get('temp_min', fixed_params["temp_min"]) if temp_range else fixed_params["temp_min"]
     temp_max = temp_range.get('temp_max', fixed_params["temp_max"]) if temp_range else fixed_params["temp_max"]
@@ -160,7 +269,7 @@ def run_nlce_triangular(params, fixed_params, exp_temp, work_dir, h_field=None, 
     nlce_script = os.path.join(script_dir, '..', 'run', 'nlce_triangular.py')
     
     cmd = [
-        'python3',
+        sys.executable,
         nlce_script,
         '--max_order', str(fixed_params["max_order"]),
         '--h', f'{h_value:.12f}',
@@ -170,8 +279,11 @@ def run_nlce_triangular(params, fixed_params, exp_temp, work_dir, h_field=None, 
         '--temp_max', f'{temp_max:.8f}',
         '--temp_bins', str(fixed_params["temp_bins"]),
         '--model', model,
+        '--method', fixed_params.get("ed_method", "FULL"),
         '--thermo',
-        '--base_dir', work_dir
+        '--base_dir', work_dir,
+        '--g_ab', f'{fixed_params.get("g_ab", 2.0):.12f}',
+        '--g_c', f'{fixed_params.get("g_c", 2.0):.12f}'
     ]
     
     # Add model-specific parameters
@@ -180,9 +292,17 @@ def run_nlce_triangular(params, fixed_params, exp_temp, work_dir, h_field=None, 
         cmd.extend(['--Jpm', f'{Jpm:.12f}'])
         cmd.extend(['--Jpmpm', f'{Jpmpm:.12f}'])
         cmd.extend(['--Jzpm', f'{Jzpm:.12f}'])
+    elif model == 'kitaev':
+        cmd.extend(['--J1', f'{J1:.12f}'])
+        cmd.extend(['--J2', f'{J2:.12f}'])
+        if Gamma is not None:
+            cmd.extend(['--Gamma', f'{Gamma:.12f}'])
+        if Gamma_prime is not None:
+            cmd.extend(['--Gamma_prime', f'{Gamma_prime:.12f}'])
     else:
         cmd.extend(['--J1', f'{J1:.12f}'])
         cmd.extend(['--J2', f'{J2:.12f}'])
+        cmd.extend(['--Jz_ratio', f'{Jz_ratio:.12f}'])
     
     if fixed_params.get("skip_cluster_gen", True):
         cmd.append('--skip_cluster_gen')
@@ -191,12 +311,12 @@ def run_nlce_triangular(params, fixed_params, exp_temp, work_dir, h_field=None, 
     if fixed_params.get("SI_units", True):
         cmd.append('--SI_units')
     
-    # Temperature conversion to Kelvin
-    # Use fitted J_kelvin if available, otherwise use fixed value
-    if J_kelvin is not None and J_kelvin > 0:
-        cmd.append(f'--J_kelvin={J_kelvin:.12f}')
-    elif fixed_params.get("J_kelvin") is not None:
-        cmd.append(f'--J_kelvin={fixed_params["J_kelvin"]}')
+    # Parallel ED across clusters within this NLCE run
+    if fixed_params.get("parallel_ed", False):
+        cmd.append('--parallel')
+        ed_cores = fixed_params.get("ed_num_cores", 0)
+        if ed_cores > 0:
+            cmd.extend(['--num_cores', str(ed_cores)])
     
     if not fixed_params.get("skip_ham_prep", False):
         # Clean up old results
@@ -249,23 +369,62 @@ def interpolate_calc_data(calc_temp, calc_spec_heat, exp_temp):
     return interp_spec_heat
 
 
+def _ensure_field_work_dir(work_dir, field_idx, max_order):
+    """Create per-field work directory with symlinked shared cluster directory.
+    
+    Each field value needs its own work directory to avoid conflicts in
+    Hamiltonian/ED/NLC result files when running in parallel.
+    The cluster directory is shared (read-only) via symlink.
+    """
+    field_dir_path = os.path.join(work_dir, f'field_{field_idx}')
+    os.makedirs(field_dir_path, exist_ok=True)
+    
+    # Symlink shared cluster directory so nlce_triangular.py finds it
+    src_cluster = os.path.abspath(
+        os.path.join(work_dir, f'clusters_order_{max_order}'))
+    dst_cluster = os.path.join(field_dir_path, f'clusters_order_{max_order}')
+    
+    if os.path.exists(src_cluster) and not os.path.lexists(dst_cluster):
+        try:
+            os.symlink(src_cluster, dst_cluster)
+        except OSError:
+            shutil.copytree(src_cluster, dst_cluster)
+    
+    return field_dir_path
+
+
+def _compute_single_field(args_tuple):
+    """Worker function: run NLCE for one field value.
+    
+    Designed to be called from ThreadPoolExecutor or sequentially.
+    Returns (field_idx, calc_temp, calc_spec_heat).
+    """
+    field_idx, model_params, fixed_params, exp_temp, field_work_dir, \
+        h_field, temp_range, field_dir = args_tuple
+    calc_temp, calc_spec_heat = run_nlce_triangular(
+        model_params, fixed_params, exp_temp, field_work_dir,
+        h_field=h_field, temp_range=temp_range, field_dir=field_dir
+    )
+    return field_idx, calc_temp, calc_spec_heat
+
+
 def calc_chi_squared(params, fixed_params, exp_datasets, work_dir):
     """Calculate chi-squared between experimental and calculated specific heat"""
     total_chi_squared = 0.0
     
     n_datasets = len(exp_datasets)
     fit_broadening = fixed_params.get("fit_broadening", False)
-    model = fixed_params.get("model", "heisenberg")
+    model = fixed_params.get("model", "xxz_j1j2")
     save_snapshots = fixed_params.get("save_snapshots", False)
     snapshot_dir = fixed_params.get("snapshot_dir", work_dir)
     iteration_counter = fixed_params.get("iteration_counter", [0])
     
-    # Determine number of model parameters (including J_kelvin if fitted)
-    fit_J_kelvin = fixed_params.get("fit_J_kelvin", False)
-    if model == 'anisotropic':
-        n_model_params = 5 if fit_J_kelvin else 4
+    # Determine number of model parameters
+    fit_Jz_ratio = fixed_params.get("fit_Jz_ratio", False)
+    if model in ('anisotropic', 'kitaev'):
+        n_model_params = 4
     else:
-        n_model_params = 3 if fit_J_kelvin else 2
+        n_model_params = 3 if fit_Jz_ratio else 2
     
     if fit_broadening:
         model_params = params[:n_model_params]
@@ -280,24 +439,67 @@ def calc_chi_squared(params, fixed_params, exp_datasets, work_dir):
     all_exp_heats = []
     all_interp_heats = []
     
+    # --- Phase 1: Run NLCE for all field values (parallel or sequential) ---
+    parallel_fields = fixed_params.get("parallel_fields", False)
+    max_workers = fixed_params.get("max_parallel_fields", 0)
+    if max_workers <= 0:
+        max_workers = n_datasets
+    
+    # Build task list for all datasets
+    tasks = []
     for i, dataset in enumerate(exp_datasets):
-        exp_temp = dataset['temp']
-        exp_spec_heat = dataset['spec_heat']
         h_field = dataset.get('h', 0.0)
-        weight = dataset.get('weight', 1.0)
-        
-        # Get temperature range for this dataset
+        ds_field_dir = dataset.get('field_dir', None)
         temp_range = {}
         if 'temp_min' in dataset:
             temp_range['temp_min'] = dataset['temp_min']
         if 'temp_max' in dataset:
             temp_range['temp_max'] = dataset['temp_max']
         
-        # Run NLCE
-        calc_temp, calc_spec_heat = run_nlce_triangular(
-            model_params, fixed_params, exp_temp, work_dir, 
-            h_field=h_field, temp_range=temp_range if temp_range else None
-        )
+        # Each field gets its own work directory when running in parallel
+        if parallel_fields and n_datasets > 1:
+            field_work = _ensure_field_work_dir(
+                work_dir, i, fixed_params["max_order"])
+        else:
+            field_work = work_dir
+        
+        tasks.append((
+            i, model_params, fixed_params, dataset['temp'],
+            field_work, h_field,
+            temp_range if temp_range else None, ds_field_dir
+        ))
+    
+    # Execute: parallel or sequential
+    field_results = {}  # idx -> (calc_temp, calc_spec_heat)
+    if parallel_fields and n_datasets > 1:
+        n_workers = min(max_workers, n_datasets)
+        logging.debug(f"Running {n_datasets} field values in parallel "
+                      f"({n_workers} workers)")
+        with ThreadPoolExecutor(max_workers=n_workers) as executor:
+            futures = {
+                executor.submit(_compute_single_field, task): task[0]
+                for task in tasks
+            }
+            for future in as_completed(futures):
+                idx = futures[future]
+                try:
+                    _, ct, cs = future.result()
+                    field_results[idx] = (ct, cs)
+                except Exception as exc:
+                    logging.error(f"Field {idx} NLCE failed: {exc}")
+                    field_results[idx] = (None, None)
+    else:
+        for task in tasks:
+            idx, ct, cs = _compute_single_field(task)
+            field_results[idx] = (ct, cs)
+    
+    # --- Phase 2: Compute chi-squared from collected results ---
+    for i, dataset in enumerate(exp_datasets):
+        exp_temp = dataset['temp']
+        exp_spec_heat = dataset['spec_heat']
+        weight = dataset.get('weight', 1.0)
+        
+        calc_temp, calc_spec_heat = field_results[i]
         
         if calc_temp is None:
             total_chi_squared += 1e10 * weight
@@ -341,8 +543,8 @@ def calc_chi_squared(params, fixed_params, exp_datasets, work_dir):
             f.write(f"# Chi-squared: {total_chi_squared:.6f}\n")
             if model == 'anisotropic':
                 f.write(f"# Jzz={params[0]:.6f}, Jpm={params[1]:.6f}, Jpmpm={params[2]:.6f}, Jzpm={params[3]:.6f}\n")
-                if fit_J_kelvin:
-                    f.write(f"# J_kelvin={params[4]:.6f}\n")
+            elif model == 'kitaev':
+                f.write(f"# J={params[0]:.6f}, K={params[1]:.6f}, Gamma={params[2]:.6f}, Gamma'={params[3]:.6f}\n")
             else:
                 f.write(f"# J1={params[0]:.6f}, J2={params[1]:.6f}\n")
             f.write("#\n# Calculated specific heat:\n")
@@ -357,17 +559,23 @@ def calc_chi_squared(params, fixed_params, exp_datasets, work_dir):
                     f.write(f"{T:.6e} {C_exp:.6e} {C_int:.6e} {C_exp-C_int:.6e}\n")
     
     # Log progress with appropriate parameter names
-    model = fixed_params.get("model", "heisenberg")
+    model = fixed_params.get("model", "xxz_j1j2")
     if model == 'anisotropic':
         log_msg = f"Jzz={params[0]:.4f}, Jpm={params[1]:.4f}, Jpmpm={params[2]:.4f}, Jzpm={params[3]:.4f}"
-        if fit_J_kelvin:
-            log_msg += f", J_kelvin={params[4]:.4f}"
+        logging.info(f"Parameters: {log_msg}, Chi²={total_chi_squared:.4f}")
+    elif model == 'kitaev':
+        log_msg = f"J={params[0]:.4f}, K={params[1]:.4f}, Γ={params[2]:.4f}, Γ'={params[3]:.4f}"
         logging.info(f"Parameters: {log_msg}, Chi²={total_chi_squared:.4f}")
     else:
         log_msg = f"J1={params[0]:.4f}, J2={params[1]:.4f}"
-        if fit_J_kelvin:
-            log_msg += f", J_kelvin={params[2]:.4f}"
+        if fit_Jz_ratio:
+            log_msg += f", Jz_ratio={params[2]:.4f}"
         logging.info(f"Parameters: {log_msg}, Chi²={total_chi_squared:.4f}")
+    
+    # Log to cost landscape accumulator if present
+    landscape_logger = fixed_params.get("landscape_logger", None)
+    if landscape_logger is not None:
+        landscape_logger.log_evaluation(params, total_chi_squared)
     
     return total_chi_squared
 
@@ -377,42 +585,92 @@ def plot_results(exp_datasets, fixed_params, best_params, work_dir, output_dir):
     plt.figure(figsize=(12, 8))
     
     colors = plt.cm.tab10(np.linspace(0, 1, len(exp_datasets)))
-    model = fixed_params.get("model", "heisenberg")
-    n_model_params = 4 if model == 'anisotropic' else 2
+    model = fixed_params.get("model", "xxz_j1j2")
+    fit_Jz_ratio = fixed_params.get("fit_Jz_ratio", False)
+    if model in ('anisotropic', 'kitaev'):
+        n_model_params = 4
+    else:
+        n_model_params = 3 if fit_Jz_ratio else 2
     
-    for i, (dataset, color) in enumerate(zip(exp_datasets, colors)):
-        exp_temp = dataset['temp']
-        exp_spec_heat = dataset['spec_heat']
+    # Use parallel fields for final plot if enabled
+    n_datasets = len(exp_datasets)
+    parallel_fields = fixed_params.get("parallel_fields", False)
+    
+    # Build and run all NLCE tasks
+    tasks = []
+    for i, dataset in enumerate(exp_datasets):
         h_field = dataset.get('h', 0.0)
-        
-        # Get temperature range
+        ds_field_dir = dataset.get('field_dir', None)
         temp_range = {}
         if 'temp_min' in dataset:
             temp_range['temp_min'] = dataset['temp_min']
         if 'temp_max' in dataset:
             temp_range['temp_max'] = dataset['temp_max']
         
-        # Run NLCE with best parameters
-        calc_temp, calc_spec_heat = run_nlce_triangular(
-            best_params[:n_model_params], fixed_params, exp_temp, work_dir,
-            h_field=h_field, temp_range=temp_range if temp_range else None
-        )
+        if parallel_fields and n_datasets > 1:
+            field_work = _ensure_field_work_dir(
+                work_dir, i, fixed_params["max_order"])
+        else:
+            field_work = work_dir
+        
+        tasks.append((
+            i, best_params[:n_model_params], fixed_params, dataset['temp'],
+            field_work, h_field,
+            temp_range if temp_range else None, ds_field_dir
+        ))
+    
+    # Execute in parallel or sequentially
+    plot_results_map = {}
+    if parallel_fields and n_datasets > 1:
+        max_workers = fixed_params.get("max_parallel_fields", 0)
+        if max_workers <= 0:
+            max_workers = n_datasets
+        with ThreadPoolExecutor(max_workers=min(max_workers, n_datasets)) as executor:
+            futures = {
+                executor.submit(_compute_single_field, task): task[0]
+                for task in tasks
+            }
+            for future in as_completed(futures):
+                idx = futures[future]
+                try:
+                    _, ct, cs = future.result()
+                    plot_results_map[idx] = (ct, cs)
+                except Exception:
+                    plot_results_map[idx] = (None, None)
+    else:
+        for task in tasks:
+            idx, ct, cs = _compute_single_field(task)
+            plot_results_map[idx] = (ct, cs)
+    
+    for i, (dataset, color) in enumerate(zip(exp_datasets, colors)):
+        exp_temp = dataset['temp']
+        exp_spec_heat = dataset['spec_heat']
+        h_field = dataset.get('h', 0.0)
+        label_str = dataset.get('label', f'h={h_field:.3f}')
+        
+        calc_temp, calc_spec_heat = plot_results_map[i]
         
         # Plot experimental data
         plt.scatter(exp_temp, exp_spec_heat, c=[color], s=30, alpha=0.7, 
-                   label=f'Exp (h={h_field})')
+                   label=f'Exp ({label_str})')
         
         # Plot calculated data
         if calc_temp is not None:
             plt.plot(calc_temp, calc_spec_heat, c=color, lw=2, 
-                    label=f'NLCE (h={h_field})')
+                    label=f'NLCE ({label_str})')
     
     if model == 'anisotropic':
         title_str = (f'Triangular Lattice Fit (Anisotropic): '
                     f'Jzz={best_params[0]:.3f}, Jpm={best_params[1]:.3f}, '
                     f'Jpmpm={best_params[2]:.3f}, Jzpm={best_params[3]:.3f}')
+    elif model == 'kitaev':
+        title_str = (f'Triangular Lattice Fit (JK\u0393\u0393\'): '
+                    f'J={best_params[0]:.3f}, K={best_params[1]:.3f}, '
+                    f'\u0393={best_params[2]:.3f}, \u0393\'={best_params[3]:.3f}')
     else:
         title_str = f'Triangular Lattice Fit: J1={best_params[0]:.3f}, J2={best_params[1]:.3f}'
+        if fit_Jz_ratio:
+            title_str += f', Jxy/Jz={best_params[2]:.3f}'
     
     # Set labels based on SI units setting
     use_SI_units = fixed_params.get("SI_units", True)
@@ -491,24 +749,51 @@ def main():
     # Initial guess and bounds
     parser.add_argument('--initial_J1', type=float, default=1.0, help='Initial J1')
     parser.add_argument('--initial_J2', type=float, default=0.0, help='Initial J2')
-    parser.add_argument('--J1_min', type=float, default=-3.0, help='Min J1')
-    parser.add_argument('--J1_max', type=float, default=3.0, help='Max J1')
-    parser.add_argument('--J2_min', type=float, default=-1.0, help='Min J2')
-    parser.add_argument('--J2_max', type=float, default=1.0, help='Max J2')
+    parser.add_argument('--J1_min', type=float, default=-5.0, help='Min J1')
+    parser.add_argument('--J1_max', type=float, default=5.0, help='Max J1')
+    parser.add_argument('--J2_min', type=float, default=-5.0, help='Min J2')
+    parser.add_argument('--J2_max', type=float, default=5.0, help='Max J2')
+    
+    # XXZ anisotropy ratio Jxy/Jz (for xxz_j1j2 model)
+    # Convention: Jz = J1 (fixed), Jxy = Jz_ratio * J1
+    parser.add_argument('--fit_Jz_ratio', action='store_true',
+                       help='Fit Jxy/Jz ratio as a free parameter (adds Jz_ratio to fit params). '
+                            'Convention: Jz=J1, Jxy=Jz_ratio*J1. '
+                            'When not set, Jz_ratio is fixed at --Jz_ratio value.')
+    parser.add_argument('--Jz_ratio', type=float, default=1.0,
+                       help='Jxy/Jz ratio (default: 1.0 = isotropic Heisenberg). '
+                            'Convention: Jz=J1, Jxy=Jz_ratio*J1. '
+                            'Used as initial guess when --fit_Jz_ratio is set.')
+    parser.add_argument('--Jz_ratio_min', type=float, default=0.0, help='Min Jz_ratio for fitting')
+    parser.add_argument('--Jz_ratio_max', type=float, default=1.0, help='Max Jz_ratio for fitting')
     
     # Anisotropic model initial values and bounds
-    parser.add_argument('--initial_Jzz', type=float, default=0.5, help='Initial Jzz')
-    parser.add_argument('--initial_Jpm', type=float, default=0.25, help='Initial Jpm')
-    parser.add_argument('--initial_Jpmpm', type=float, default=0.05, help='Initial Jpmpm')
-    parser.add_argument('--initial_Jzpm', type=float, default=0.1, help='Initial Jzpm')
-    parser.add_argument('--Jzz_min', type=float, default=-1.0, help='Min Jzz')
-    parser.add_argument('--Jzz_max', type=float, default=1.0, help='Max Jzz')
-    parser.add_argument('--Jpm_min', type=float, default=-1.0, help='Min Jpm')
-    parser.add_argument('--Jpm_max', type=float, default=1.0, help='Max Jpm')
-    parser.add_argument('--Jpmpm_min', type=float, default=-0.5, help='Min Jpmpm')
-    parser.add_argument('--Jpmpm_max', type=float, default=0.5, help='Max Jpmpm')
-    parser.add_argument('--Jzpm_min', type=float, default=-0.5, help='Min Jzpm')
-    parser.add_argument('--Jzpm_max', type=float, default=0.5, help='Max Jzpm')
+    parser.add_argument('--initial_Jzz', type=float, default=2, help='Initial Jzz')
+    parser.add_argument('--initial_Jpm', type=float, default=1, help='Initial Jpm')
+    parser.add_argument('--initial_Jpmpm', type=float, default=1, help='Initial Jpmpm')
+    parser.add_argument('--initial_Jzpm', type=float, default=1, help='Initial Jzpm')
+    parser.add_argument('--Jzz_min', type=float, default=-5.0, help='Min Jzz')
+    parser.add_argument('--Jzz_max', type=float, default=5.0, help='Max Jzz')
+    parser.add_argument('--Jpm_min', type=float, default=-5.0, help='Min Jpm')
+    parser.add_argument('--Jpm_max', type=float, default=5.0, help='Max Jpm')
+    parser.add_argument('--Jpmpm_min', type=float, default=-5.0, help='Min Jpmpm')
+    parser.add_argument('--Jpmpm_max', type=float, default=5.0, help='Max Jpmpm')
+    parser.add_argument('--Jzpm_min', type=float, default=-5.0, help='Min Jzpm')
+    parser.add_argument('--Jzpm_max', type=float, default=5.0, help='Max Jzpm')
+    
+    # JKΓΓ' (Kitaev) model initial values and bounds
+    parser.add_argument('--initial_J_H', type=float, default=0.0, help='Initial Heisenberg coupling J')
+    parser.add_argument('--initial_J_K', type=float, default=1.0, help='Initial Kitaev coupling K')
+    parser.add_argument('--initial_Gamma', type=float, default=0.0, help='Initial Γ coupling')
+    parser.add_argument('--initial_Gamma_prime', type=float, default=0.0, help="Initial Γ' coupling")
+    parser.add_argument('--J_H_min', type=float, default=-5.0, help='Min J (Heisenberg)')
+    parser.add_argument('--J_H_max', type=float, default=5.0, help='Max J (Heisenberg)')
+    parser.add_argument('--J_K_min', type=float, default=-5.0, help='Min K (Kitaev)')
+    parser.add_argument('--J_K_max', type=float, default=5.0, help='Max K (Kitaev)')
+    parser.add_argument('--Gamma_min', type=float, default=-5.0, help='Min Γ')
+    parser.add_argument('--Gamma_max', type=float, default=5.0, help='Max Γ')
+    parser.add_argument('--Gamma_prime_min', type=float, default=-5.0, help="Min Γ'")
+    parser.add_argument('--Gamma_prime_max', type=float, default=5.0, help="Max Γ'")
     
     # NLCE parameters
     parser.add_argument('--max_order', type=int, default=5, help='Maximum NLCE order (default: 5 for triangular lattice)')
@@ -518,37 +803,69 @@ def main():
     parser.add_argument('--temp_bins', type=int, default=100, help='Temperature bins')
     parser.add_argument('--temp_min', type=float, default=0.01, help='Min temperature')
     parser.add_argument('--temp_max', type=float, default=10.0, help='Max temperature')
-    parser.add_argument('--model', type=str, default='heisenberg',
-                       choices=['heisenberg', 'xxz', 'kitaev', 'anisotropic'],
+    parser.add_argument('--model', type=str, default='xxz_j1j2',
+                       choices=['xxz_j1j2', 'kitaev', 'anisotropic'],
                        help='Spin model type')
     
     # Skip flags
     parser.add_argument('--skip_cluster_gen', action='store_true')
     parser.add_argument('--skip_ham_prep', action='store_true')
     
+    # Anisotropic g-tensor for Zeeman coupling
+    parser.add_argument('--g_ab', type=float, default=2.0,
+                       help='In-plane g-factor (default: 2.0; NdMgAl11O19 magnetization: 1.54)')
+    parser.add_argument('--g_c', type=float, default=2.0,
+                       help='Out-of-plane g-factor (default: 2.0; NdMgAl11O19 magnetization: 3.75)')
+    
     # SI units (default: True for comparison with experimental data)
     parser.add_argument('--SI_units', action='store_true', default=True,
                        help='Use SI units (J/(mol·K)) for specific heat output (default: True)')
     parser.add_argument('--no_SI_units', action='store_true',
                        help='Disable SI units (use natural units instead)')
-    parser.add_argument('--J_kelvin', type=float, default=None,
-                       help='Exchange coupling J in Kelvin. If set, temperatures are '
-                            'converted to Kelvin for direct comparison with experimental data.')
-    parser.add_argument('--fit_J_kelvin', action='store_true',
-                       help='Fit J_kelvin as a free parameter (recommended for comparing with '
-                            'experimental data when the energy scale is unknown).')
-    parser.add_argument('--J_kelvin_min', type=float, default=0.01,
-                       help='Minimum J_kelvin for fitting (default: 0.01 K)')
-    parser.add_argument('--J_kelvin_max', type=float, default=10.0,
-                       help='Maximum J_kelvin for fitting (default: 10.0 K)')
-    parser.add_argument('--initial_J_kelvin', type=float, default=1.0,
-                       help='Initial J_kelvin for fitting (default: 1.0 K)')
     
     # Optimization
     parser.add_argument('--method', type=str, default='multi_start',
-                       choices=['multi_start', 'differential_evolution', 'dual_annealing'])
+                       choices=['multi_start', 'differential_evolution',
+                                'dual_annealing', 'bayesian'])
+    parser.add_argument('--ed_method', type=str, default='FULL',
+                       help='ED solver method passed to the NLCE runner '
+                            '(FULL, FULL_GPU, SCALAPACK_MIXED, etc. Default: FULL)')
     parser.add_argument('--n_starts', type=int, default=20, help='Number of random starts')
     parser.add_argument('--max_iter', type=int, default=1000, help='Max iterations')
+
+    # Bayesian optimization settings
+    parser.add_argument('--n_initial', type=int, default=20,
+                       help='Number of initial random points for Bayesian optimization '
+                            '(default: 20). These are evaluated before the GP model '
+                            'starts guiding the search.')
+    parser.add_argument('--acq_func', type=str, default='EI',
+                       choices=['EI', 'LCB', 'PI', 'gp_hedge'],
+                       help='Acquisition function for Bayesian optimization. '
+                            'EI=Expected Improvement, LCB=Lower Confidence Bound, '
+                            'PI=Probability of Improvement, '
+                            'gp_hedge=auto-select (default: EI)')
+    parser.add_argument('--xi', type=float, default=0.01,
+                       help='Exploration-exploitation trade-off for EI/PI '
+                            'acquisition (default: 0.01). Larger values explore more.')
+    parser.add_argument('--kappa', type=float, default=1.96,
+                       help='Exploration parameter for LCB acquisition '
+                            '(default: 1.96). Larger values explore more.')
+    parser.add_argument('--bo_log_transform', action='store_true',
+                       help='Use log(chi²) as the BO objective. Compresses the '
+                            'dynamic range so the GP surrogate fits much better '
+                            'when chi² spans orders of magnitude.')
+    parser.add_argument('--bo_noise', type=str, default='gaussian',
+                       choices=['gaussian', '0'],
+                       help='GP noise model: "gaussian" lets the GP estimate '
+                            'observation noise (recommended for NLCE truncation '
+                            'noise); "0" assumes noise-free (default: gaussian)')
+    parser.add_argument('--bo_inject_x0', action='store_true', default=True,
+                       help='Inject the user-supplied initial guess as the first '
+                            'evaluation point instead of pure random init '
+                            '(default: True)')
+    parser.add_argument('--no_bo_inject_x0', action='store_false',
+                       dest='bo_inject_x0',
+                       help='Disable initial-guess injection')
     
     # Optional fitting parameters
     parser.add_argument('--fit_broadening', action='store_true')
@@ -556,6 +873,28 @@ def main():
     # Debug snapshots
     parser.add_argument('--save_snapshots', action='store_true',
                        help='Save diagnostic snapshots at each iteration for debugging')
+    
+    # Parallelism
+    parser.add_argument('--parallel_fields', action='store_true',
+                       help='Run NLCE for different field values in parallel. '
+                            'Each field gets its own work directory to avoid conflicts. '
+                            'Gives up to N× speedup for N field values.')
+    parser.add_argument('--max_parallel_fields', type=int, default=0,
+                       help='Max number of field values to compute simultaneously '
+                            '(0 = number of datasets, i.e. all in parallel)')
+    parser.add_argument('--parallel_ed', action='store_true',
+                       help='Also parallelize ED across clusters within each NLCE run. '
+                            'Combines with --parallel_fields for two-level parallelism.')
+    parser.add_argument('--ed_num_cores', type=int, default=0,
+                       help='Number of CPU cores for parallel ED per field value '
+                            '(0 = auto: total_cores / num_parallel_fields)')
+    
+    # Cost landscape logging
+    parser.add_argument('--save_landscape', action='store_true', default=True,
+                       help='Save cost function landscape (all evaluations) to .npz and .csv '
+                            '(default: True)')
+    parser.add_argument('--no_save_landscape', action='store_true',
+                       help='Disable cost landscape saving')
     
     args = parser.parse_args()
     
@@ -596,6 +935,27 @@ def main():
         os.makedirs(snapshot_dir, exist_ok=True)
         logging.info(f"Saving diagnostic snapshots to: {snapshot_dir}")
     
+    # Compute ED core allocation for parallel execution
+    import multiprocessing as _mp
+    _total_cores = _mp.cpu_count()
+    _n_fields = len(exp_datasets)
+    if args.ed_num_cores > 0:
+        _ed_cores = args.ed_num_cores
+    elif args.parallel_fields and args.parallel_ed and _n_fields > 1:
+        # Split cores across parallel fields
+        _n_parallel = min(args.max_parallel_fields or _n_fields, _n_fields)
+        _ed_cores = max(1, _total_cores // _n_parallel)
+    elif args.parallel_ed:
+        _ed_cores = _total_cores
+    else:
+        _ed_cores = 0
+    
+    if args.parallel_fields:
+        logging.info(f"Parallel fields enabled: up to "
+                     f"{args.max_parallel_fields or _n_fields} field values simultaneously")
+    if args.parallel_ed:
+        logging.info(f"Parallel ED enabled: {_ed_cores} cores per field")
+    
     # Fixed parameters
     fixed_params = {
         "max_order": args.max_order,
@@ -611,11 +971,18 @@ def main():
         "fit_broadening": args.fit_broadening,
         "n_datasets": len(exp_datasets),
         "SI_units": use_SI_units,
-        "J_kelvin": args.J_kelvin,
-        "fit_J_kelvin": args.fit_J_kelvin,
+        "g_ab": args.g_ab,
+        "g_c": args.g_c,
         "save_snapshots": args.save_snapshots,
         "snapshot_dir": snapshot_dir,
-        "iteration_counter": [0]  # Mutable list to track iteration count
+        "iteration_counter": [0],  # Mutable list to track iteration count
+        "parallel_fields": args.parallel_fields,
+        "max_parallel_fields": args.max_parallel_fields,
+        "parallel_ed": args.parallel_ed,
+        "ed_num_cores": _ed_cores,
+        "ed_method": args.ed_method,
+        "fit_Jz_ratio": args.fit_Jz_ratio,
+        "Jz_ratio": args.Jz_ratio,
     }
     
     # Generate clusters first if needed
@@ -624,7 +991,7 @@ def main():
         script_dir = os.path.dirname(os.path.abspath(__file__))
         cluster_gen_script = os.path.join(script_dir, '..', 'prep', 'generate_triangular_clusters.py')
         cluster_gen_cmd = [
-            'python3',
+            sys.executable,
             cluster_gen_script,
             '--max_order', str(args.max_order),
             '--output_dir', os.path.join(args.work_dir, f'clusters_order_{args.max_order}')
@@ -643,35 +1010,55 @@ def main():
         initial_params = [args.initial_Jzz, args.initial_Jpm, args.initial_Jpmpm, args.initial_Jzpm]
         param_names = "Jzz, Jpm, Jpmpm, Jzpm"
         
-        # Add J_kelvin as fitting parameter if requested
-        if args.fit_J_kelvin:
-            bounds.append((args.J_kelvin_min, args.J_kelvin_max))
-            initial_params.append(args.initial_J_kelvin)
-            param_names += ", J_kelvin"
-        
         logging.info(f"Fitting anisotropic model: {param_names}")
         logging.info(f"Initial: Jzz={args.initial_Jzz}, Jpm={args.initial_Jpm}, "
-                    f"Jpmpm={args.initial_Jpmpm}, Jzpm={args.initial_Jzpm}" +
-                    (f", J_kelvin={args.initial_J_kelvin}" if args.fit_J_kelvin else ""))
+                    f"Jpmpm={args.initial_Jpmpm}, Jzpm={args.initial_Jzpm}")
+    elif args.model == 'kitaev':
+        bounds = [
+            (args.J_H_min, args.J_H_max),
+            (args.J_K_min, args.J_K_max),
+            (args.Gamma_min, args.Gamma_max),
+            (args.Gamma_prime_min, args.Gamma_prime_max)
+        ]
+        initial_params = [args.initial_J_H, args.initial_J_K, args.initial_Gamma, args.initial_Gamma_prime]
+        param_names = "J, K, Gamma, Gamma_prime"
+        
+        logging.info(f"Fitting JKΓΓ' (Kitaev) model: {param_names}")
+        logging.info(f"Initial: J={args.initial_J_H}, K={args.initial_J_K}, "
+                    f"Γ={args.initial_Gamma}, Γ'={args.initial_Gamma_prime}")
     else:
         bounds = [(args.J1_min, args.J1_max), (args.J2_min, args.J2_max)]
         initial_params = [args.initial_J1, args.initial_J2]
         param_names = "J1, J2"
         
-        # Add J_kelvin as fitting parameter if requested
-        if args.fit_J_kelvin:
-            bounds.append((args.J_kelvin_min, args.J_kelvin_max))
-            initial_params.append(args.initial_J_kelvin)
-            param_names += ", J_kelvin"
+        # Add Jz_ratio as fitting parameter if requested
+        if args.fit_Jz_ratio:
+            bounds.append((args.Jz_ratio_min, args.Jz_ratio_max))
+            initial_params.append(args.Jz_ratio)
+            param_names += ", Jz_ratio"
         
         logging.info(f"Fitting {args.model} model: {param_names}")
         logging.info(f"Initial: J1={args.initial_J1}, J2={args.initial_J2}" +
-                    (f", J_kelvin={args.initial_J_kelvin}" if args.fit_J_kelvin else ""))
+                    (f", Jz_ratio={args.Jz_ratio}" if args.fit_Jz_ratio else ""))
     
     if args.fit_broadening:
         for _ in exp_datasets:
             bounds.append((0.0, 1.0))
             initial_params.append(0.1)
+    
+    # Set up cost landscape logger
+    save_landscape = args.save_landscape and not args.no_save_landscape
+    landscape_logger = None
+    if save_landscape:
+        landscape_param_names = [p.strip() for p in param_names.split(',')]
+        landscape_logger = CostLandscapeLogger(
+            param_names=landscape_param_names,
+            output_dir=args.output_dir,
+            flush_interval=50
+        )
+        fixed_params["landscape_logger"] = landscape_logger
+        logging.info("Cost landscape logging enabled — "
+                     "evaluations will be saved to cost_landscape.npz/csv")
     
     # Run optimization
     logging.info("Starting optimization...")
@@ -682,18 +1069,23 @@ def main():
             initial_params,
             bounds,
             n_starts=args.n_starts,
-            method='L-BFGS-B',
+            method='COBYLA',
             args=(fixed_params, exp_datasets, args.work_dir),
             options={'maxiter': args.max_iter}
         )
     elif args.method == 'differential_evolution':
-        result = differential_evolution(
-            calc_chi_squared,
-            bounds,
+        de_kwargs = dict(
             args=(fixed_params, exp_datasets, args.work_dir),
             maxiter=args.max_iter,
             seed=42,
             disp=True
+        )
+        if landscape_logger is not None:
+            de_kwargs['callback'] = landscape_logger.de_callback
+        result = differential_evolution(
+            calc_chi_squared,
+            bounds,
+            **de_kwargs
         )
     elif args.method == 'dual_annealing':
         result = dual_annealing(
@@ -703,6 +1095,81 @@ def main():
             maxiter=args.max_iter,
             seed=42
         )
+    elif args.method == 'bayesian':
+        if not HAS_SKOPT:
+            logging.error("scikit-optimize is required for Bayesian optimization. "
+                          "Install it with: pip install scikit-optimize")
+            sys.exit(1)
+        # Build skopt search space from bounds
+        dimensions = [Real(lo, hi, name=name.strip())
+                      for (lo, hi), name in zip(bounds,
+                                                 param_names.split(','))]
+        n_calls = args.max_iter
+        n_initial_points = min(args.n_initial, n_calls)
+        # xi/kappa are top-level kwargs in skopt's gp_minimize
+        extra_kwargs = {}
+        if args.acq_func in ('EI', 'PI'):
+            extra_kwargs['xi'] = args.xi
+        elif args.acq_func == 'LCB':
+            extra_kwargs['kappa'] = args.kappa
+
+        # GP noise model
+        bo_noise = args.bo_noise
+        if bo_noise == '0':
+            bo_noise = 1e-10  # effectively noiseless
+        extra_kwargs['noise'] = bo_noise
+
+        bo_callbacks = []
+        if landscape_logger is not None:
+            bo_callbacks.append(landscape_logger.bo_callback)
+
+        # Inject user-supplied initial guess as x0 so the GP has a
+        # strong anchor near the expected optimum instead of relying
+        # entirely on random initialization.
+        x0_list = None
+        if args.bo_inject_x0:
+            x0_list = [list(initial_params)]
+            logging.info(f"Injecting initial guess as x0: {initial_params}")
+
+        # Optionally log-transform the objective so the GP surrogate
+        # models log(χ²) instead of raw χ². This compresses the
+        # huge dynamic range (e.g. 20k–3.6M) into ~3–15, giving the
+        # GP a much easier function to fit and dramatically improving
+        # acquisition quality.
+        use_log = args.bo_log_transform
+
+        def _bo_objective(x):
+            chi2 = calc_chi_squared(np.array(x), fixed_params,
+                                    exp_datasets, args.work_dir)
+            return float(np.log(chi2)) if use_log else chi2
+
+        logging.info(f"Bayesian optimization: {n_calls} calls "
+                     f"({n_initial_points} initial random, "
+                     f"acq_func={args.acq_func})"
+                     + (" [log-transformed objective]" if use_log else "")
+                     + f" noise={bo_noise}")
+        bo_result = gp_minimize(
+            _bo_objective,
+            dimensions,
+            n_calls=n_calls,
+            n_initial_points=n_initial_points,
+            acq_func=args.acq_func,
+            x0=x0_list,
+            random_state=42,
+            verbose=True,
+            callback=bo_callbacks if bo_callbacks else None,
+            **extra_kwargs,
+        )
+        # Wrap into a scipy-like result for downstream code
+        class _BOResult:
+            pass
+        result = _BOResult()
+        result.x = np.array(bo_result.x)
+        # Convert back from log space if needed
+        result.fun = float(np.exp(bo_result.fun)) if use_log else bo_result.fun
+        result.nfev = len(bo_result.func_vals)
+        logging.info(f"BO finished: {result.nfev} evaluations, "
+                     f"best χ²={result.fun:.6f}")
     
     if result is None:
         logging.error("Optimization failed!")
@@ -729,9 +1196,21 @@ def main():
             'chi_squared': float(best_chi_sq),
             'fixed_params': fixed_params
         }
-        if args.fit_J_kelvin:
-            logging.info(f"Best J_kelvin: {best_params[4]:.6f} K")
-            results_dict['best_params']['J_kelvin'] = float(best_params[4])
+    elif args.model == 'kitaev':
+        logging.info(f"Best J (Heisenberg): {best_params[0]:.6f}")
+        logging.info(f"Best K (Kitaev): {best_params[1]:.6f}")
+        logging.info(f"Best Γ: {best_params[2]:.6f}")
+        logging.info(f"Best Γ': {best_params[3]:.6f}")
+        results_dict = {
+            'best_params': {
+                'J': float(best_params[0]),
+                'K': float(best_params[1]),
+                'Gamma': float(best_params[2]),
+                'Gamma_prime': float(best_params[3])
+            },
+            'chi_squared': float(best_chi_sq),
+            'fixed_params': fixed_params
+        }
     else:
         logging.info(f"Best J1: {best_params[0]:.6f}")
         logging.info(f"Best J2: {best_params[1]:.6f}")
@@ -743,12 +1222,18 @@ def main():
             'chi_squared': float(best_chi_sq),
             'fixed_params': fixed_params
         }
-        if args.fit_J_kelvin:
-            logging.info(f"Best J_kelvin: {best_params[2]:.6f} K")
-            results_dict['best_params']['J_kelvin'] = float(best_params[2])
     
     logging.info(f"Best chi-squared: {best_chi_sq:.6f}")
     logging.info("="*80)
+    
+    # Save cost landscape data
+    if landscape_logger is not None:
+        landscape_logger.save()
+    
+    # Remove non-serializable objects from fixed_params for JSON output
+    serializable_fixed_params = {k: v for k, v in fixed_params.items()
+                                  if k not in ('landscape_logger',)}
+    results_dict['fixed_params'] = serializable_fixed_params
     
     # Save results
     with open(os.path.join(args.output_dir, 'fit_results.json'), 'w') as f:

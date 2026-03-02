@@ -204,35 +204,43 @@ def Zeeman(h, hx, hy, hz):
     ])
 
 def write_interALL(interALL, output_dir, file_name):
-    num_param = len(interALL)
+    _s = lambda v: 0.0 if abs(v) < 1e-15 else float(v)
+    # Filter out zero-coupling terms
+    nonzero = [i for i in range(len(interALL))
+               if abs(interALL[i,4]) > 1e-15 or abs(interALL[i,5]) > 1e-15]
+    num_param = len(nonzero)
     with open(output_dir+file_name, 'wt') as f:
         f.write("===================\n")
         f.write(f"num {num_param:8d}\n")
         f.write("===================\n")
         f.write("===================\n")
         f.write("===================\n")
-        for i in range(num_param):
+        for i in nonzero:
             f.write(f" {int(interALL[i,0]):8d} " \
                   + f" {int(interALL[i,1]):8d}   " \
                   + f" {int(interALL[i,2]):8d}   " \
                   + f" {int(interALL[i,3]):8d}   " \
-                  + f" {interALL[i,4]:8f}   " \
-                  + f" {interALL[i,5]:8f}   " \
+                  + f" {_s(interALL[i,4]):8f}   " \
+                  + f" {_s(interALL[i,5]):8f}   " \
                   + "\n")
 
 def write_transfer(transfer, output_dir, file_name):
-    num_param = len(transfer)
+    _s = lambda v: 0.0 if abs(v) < 1e-15 else float(v)
+    # Filter out zero-coupling terms
+    nonzero = [i for i in range(len(transfer))
+               if abs(transfer[i,2]) > 1e-15 or abs(transfer[i,3]) > 1e-15]
+    num_param = len(nonzero)
     with open(output_dir+file_name, 'wt') as f:
         f.write("===================\n")
         f.write(f"num {num_param:8d}\n")
         f.write("===================\n")
         f.write("===================\n")
         f.write("===================\n")
-        for i in range(num_param):
+        for i in nonzero:
             f.write(f" {int(transfer[i,0]):8d} " \
                   + f" {int(transfer[i,1]):8d}   " \
-                  + f" {transfer[i,2]:8f}   " \
-                  + f" {transfer[i,3]:8f}" \
+                  + f" {_s(transfer[i,2]):8f}   " \
+                  + f" {_s(transfer[i,3]):8f}" \
                   + "\n")
 
 def write_site_positions(output_dir, dim1, dim2):

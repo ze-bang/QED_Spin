@@ -157,6 +157,12 @@ H5::H5File openHDF5WithRetry(const std::string& h5_path, unsigned int flags, int
 //   │       ├── expectation [dataset]
 //   │       ├── variance [dataset]
 //   │       └── susceptibility [dataset]
+//   ├── /single_expectation
+//   │   └── /<operator_name>
+//   │       └── /sample_<idx>
+//   │           ├── temperatures [dataset]
+//   │           ├── expectation_real [dataset]
+//   │           └── expectation_imag [dataset]
 //   └── /correlations (for spin_correlation/spin_configuration)
 //       └── ...
 // ============================================================================
@@ -196,6 +202,7 @@ void ensureDSSFStandardGroups(H5::H5File& file) {
         "/momentum_points",
         "/spectral",
         "/static",
+        "/single_expectation",
         "/correlations"
     };
     
@@ -391,6 +398,8 @@ bool operatorDataExists(const std::string& h5_path,
             group_path = "/spectral/" + operator_name;
         } else if (method == "static" || method == "sssf") {
             group_path = "/static/" + operator_name;
+        } else if (method == "single_expectation") {
+            group_path = "/single_expectation/" + operator_name;
         } else {
             // Unknown method - check both
             if (file.nameExists("/spectral/" + operator_name)) {
@@ -398,6 +407,10 @@ bool operatorDataExists(const std::string& h5_path,
                 return true;
             }
             if (file.nameExists("/static/" + operator_name)) {
+                file.close();
+                return true;
+            }
+            if (file.nameExists("/single_expectation/" + operator_name)) {
                 file.close();
                 return true;
             }
@@ -708,6 +721,90 @@ bool mergePerRankDSSFFiles(const std::string& output_dir, int num_ranks) {
                     }
                 }
                 src_static.close();
+            }
+
+            // Copy single expectation groups similarly
+            if (source.nameExists("/single_expectation")) {
+                H5::Group src_single = source.openGroup("/single_expectation");
+
+                if (!dest.nameExists("/single_expectation")) {
+                    dest.createGroup("/single_expectation");
+                }
+
+                hsize_t num_objs = src_single.getNumObjs();
+                for (hsize_t i = 0; i < num_objs; ++i) {
+                    std::string name = src_single.getObjnameByIdx(i);
+                    std::string src_path = "/single_expectation/" + name;
+                    std::string dst_path = "/single_expectation/" + name;
+
+                    if (!dest.nameExists(dst_path)) {
+                        H5Ocopy(source.getId(), src_path.c_str(),
+                               dest.getId(), dst_path.c_str(),
+                               H5P_DEFAULT, H5P_DEFAULT);
+                        total_groups_merged++;
+                    } else {
+                        H5::Group src_op = source.openGroup(src_path);
+                        hsize_t num_sample_groups = src_op.getNumObjs();
+                        for (hsize_t j = 0; j < num_sample_groups; ++j) {
+                            std::string sample_name = src_op.getObjnameByIdx(j);
+                            std::string src_sample_path = src_path + "/" + sample_name;
+                            std::string dst_sample_path = dst_path + "/" + sample_name;
+
+                            if (!dest.nameExists(dst_sample_path)) {
+                                H5Ocopy(source.getId(), src_sample_path.c_str(),
+                                       dest.getId(), dst_sample_path.c_str(),
+                                       H5P_DEFAULT, H5P_DEFAULT);
+                                total_groups_merged++;
+                            } else {
+                                H5::Group src_sample = source.openGroup(src_sample_path);
+                                H5::Group dst_sample = dest.openGroup(dst_sample_path);
+
+                                std::vector<std::string> datasets_to_merge = {
+                                    "temperatures", "expectation_real", "expectation_imag"
+                                };
+
+                                for (const auto& ds_name : datasets_to_merge) {
+                                    if (src_sample.nameExists(ds_name) && dst_sample.nameExists(ds_name)) {
+                                        H5::DataSet src_ds = src_sample.openDataSet(ds_name);
+                                        H5::DataSpace src_space = src_ds.getSpace();
+                                        hsize_t src_size;
+                                        src_space.getSimpleExtentDims(&src_size);
+                                        std::vector<double> src_data(src_size);
+                                        src_ds.read(src_data.data(), H5::PredType::NATIVE_DOUBLE);
+                                        src_ds.close();
+
+                                        H5::DataSet dst_ds = dst_sample.openDataSet(ds_name);
+                                        H5::DataSpace dst_space = dst_ds.getSpace();
+                                        hsize_t dst_size;
+                                        dst_space.getSimpleExtentDims(&dst_size);
+                                        std::vector<double> dst_data(dst_size);
+                                        dst_ds.read(dst_data.data(), H5::PredType::NATIVE_DOUBLE);
+                                        dst_ds.close();
+
+                                        std::vector<double> combined_data;
+                                        combined_data.reserve(dst_size + src_size);
+                                        combined_data.insert(combined_data.end(), dst_data.begin(), dst_data.end());
+                                        combined_data.insert(combined_data.end(), src_data.begin(), src_data.end());
+
+                                        dst_sample.unlink(ds_name);
+                                        hsize_t combined_size = combined_data.size();
+                                        H5::DataSpace combined_space(1, &combined_size);
+                                        H5::DataSet new_ds = dst_sample.createDataSet(
+                                            ds_name, H5::PredType::NATIVE_DOUBLE, combined_space);
+                                        new_ds.write(combined_data.data(), H5::PredType::NATIVE_DOUBLE);
+                                        new_ds.close();
+                                    }
+                                }
+
+                                dst_sample.close();
+                                src_sample.close();
+                                total_groups_merged++;
+                            }
+                        }
+                        src_op.close();
+                    }
+                }
+                src_single.close();
             }
             
             source.close();
@@ -1047,6 +1144,97 @@ void saveDSSFStaticToHDF5(
         
     } catch (H5::Exception& e) {
         std::cerr << "Warning: Failed to save DSSF static to HDF5: " << e.getCDetailMsg() << std::endl;
+    }
+}
+
+/**
+ * @brief Save single-operator expectation values <O> to unified HDF5 file
+ *
+ * Data layout:
+ *   /single_expectation/<operator_name>/sample_<idx>/
+ *     temperatures [1D]
+ *     expectation_real [1D]
+ *     expectation_imag [1D]
+ */
+void saveDSSFSingleExpectationToHDF5(
+    const std::string& h5_path,
+    const std::string& operator_name,
+    int sample_idx,
+    const std::vector<double>& temperatures,
+    const std::vector<double>& expectation_real,
+    const std::vector<double>& expectation_imag,
+    bool append = false
+) {
+    std::string op_path = "/single_expectation/" + operator_name;
+    bool should_clear = shouldClearOperatorGroup(h5_path, op_path);
+
+    std::lock_guard<std::mutex> lock(g_hdf5_mutex);
+
+    try {
+        H5::H5File file = openHDF5WithRetry(h5_path, H5F_ACC_RDWR);
+
+        if (should_clear) {
+            clearOperatorGroupInFile(file, op_path);
+        }
+
+        if (!file.nameExists(op_path)) {
+            file.createGroup(op_path);
+        }
+
+        std::string sample_path = op_path + "/sample_" + std::to_string(sample_idx);
+        if (!file.nameExists(sample_path)) {
+            file.createGroup(sample_path);
+        }
+
+        auto saveDataset = [&](const std::string& name, const std::vector<double>& data) {
+            if (data.empty()) return;
+            std::string dataset_path = sample_path + "/" + name;
+
+            if (file.nameExists(dataset_path)) {
+                if (append) {
+                    H5::DataSet existing_dset = file.openDataSet(dataset_path);
+                    H5::DataSpace existing_space = existing_dset.getSpace();
+                    hsize_t existing_size;
+                    existing_space.getSimpleExtentDims(&existing_size);
+
+                    std::vector<double> existing_data(existing_size);
+                    existing_dset.read(existing_data.data(), H5::PredType::NATIVE_DOUBLE);
+                    existing_dset.close();
+
+                    existing_data.insert(existing_data.end(), data.begin(), data.end());
+
+                    file.unlink(dataset_path);
+                    hsize_t dims[1] = {existing_data.size()};
+                    H5::DataSpace dspace(1, dims);
+                    H5::DataSet dset = file.createDataSet(dataset_path, H5::PredType::NATIVE_DOUBLE, dspace);
+                    dset.write(existing_data.data(), H5::PredType::NATIVE_DOUBLE);
+                    dset.close();
+                } else {
+                    file.unlink(dataset_path);
+                    hsize_t dims[1] = {data.size()};
+                    H5::DataSpace dspace(1, dims);
+                    H5::DataSet dset = file.createDataSet(dataset_path, H5::PredType::NATIVE_DOUBLE, dspace);
+                    dset.write(data.data(), H5::PredType::NATIVE_DOUBLE);
+                    dset.close();
+                }
+            } else {
+                hsize_t dims[1] = {data.size()};
+                H5::DataSpace dspace(1, dims);
+                H5::DataSet dset = file.createDataSet(dataset_path, H5::PredType::NATIVE_DOUBLE, dspace);
+                dset.write(data.data(), H5::PredType::NATIVE_DOUBLE);
+                dset.close();
+            }
+        };
+
+        saveDataset("temperatures", temperatures);
+        saveDataset("expectation_real", expectation_real);
+        saveDataset("expectation_imag", expectation_imag);
+
+        file.close();
+        H5garbage_collect();
+
+    } catch (H5::Exception& e) {
+        std::cerr << "Warning: Failed to save single expectation to HDF5: " << e.getCDetailMsg() << std::endl;
     }
 }
 
@@ -1529,20 +1717,26 @@ int main(int argc, char* argv[]) {
             std::cerr << std::string(80, '=') << std::endl;
             std::cerr << "  directory: Path containing InterAll.dat, Trans.dat, and positions.dat files" << std::endl;
             std::cerr << "  krylov_dim_or_nmax: Dimension of Krylov/Lanczos subspace for spectral methods" << std::endl;
-            std::cerr << "  spin_combinations: Format \"op1,op2;op3,op4;...\" where op is:" << std::endl;
+            std::cerr << "  spin_combinations: Operator specification string" << std::endl;
+            std::cerr << "    - For pair methods (spectral/ftlm_thermal/static/sssf/continued_fraction):" << std::endl;
+            std::cerr << "      format \"op1,op2;op3,op4;...\"" << std::endl;
+            std::cerr << "    - For single_expectation method:" << std::endl;
+            std::cerr << "      format \"op1;op2;op3;...\" (single operator index per entry)" << std::endl;
             std::cerr << "    - ladder basis: 0=Sp, 1=Sm, 2=Sz" << std::endl;
             std::cerr << "    - xyz basis: 0=Sx, 1=Sy, 2=Sz" << std::endl;
             std::cerr << "    - Example: \"0,1;2,2\" for SpSm/SxSy, SzSz combinations" << std::endl;
+            std::cerr << "    - Example (single_expectation): \"0;1;2\" for <Sp>, <Sm>, <Sz>" << std::endl;
             std::cerr << "\n" << std::string(80, '=') << std::endl;
             std::cerr << "OPTIONAL ARGUMENTS:" << std::endl;
             std::cerr << std::string(80, '=') << std::endl;
-            std::cerr << "  method (default: spectral): spectral | ftlm_thermal | static | sssf | continued_fraction" << std::endl;
+            std::cerr << "  method (default: spectral): spectral | ftlm_thermal | static | sssf | continued_fraction | single_expectation" << std::endl;
             std::cerr << "    - spectral: Frequency-domain spectral function S(ω) via Lanczos eigendecomposition" << std::endl;
             std::cerr << "                Supports cross-correlations (O₁ ≠ O₂). Uses eigendecomposition for FTLM." << std::endl;
             std::cerr << "    - ftlm_thermal: TRUE thermal DSSF with random state sampling (FTLM multi-sample)" << std::endl;
             std::cerr << "    - static: Static structure factor ⟨O₁†O₂⟩ vs temperature using FTLM (random sampling)" << std::endl;
             std::cerr << "    - sssf: Static structure factor ⟨O₁†O₂⟩ evaluated on pre-computed TPQ states" << std::endl;
             std::cerr << "    - continued_fraction: Memory-efficient continued fraction (O₁=O₂ only, O(M) per ω)" << std::endl;
+            std::cerr << "    - single_expectation: Single-operator expectation value ⟨O⟩ on pre-computed states" << std::endl;
             std::cerr << "\n  operator_type (default: sum): sum | transverse | sublattice | experimental | transverse_experimental" << std::endl;
             std::cerr << "    - sum: Standard momentum-resolved sum operators S^{op1}(Q) S^{op2}(-Q)" << std::endl;
             std::cerr << "    - transverse: Polarization-dependent operators for magnetic scattering" << std::endl;
@@ -1553,11 +1747,14 @@ int main(int argc, char* argv[]) {
             std::cerr << "    - ladder: Use Sp/Sm/Sz operators (raising/lowering operators)" << std::endl;
             std::cerr << "    - xyz: Use Sx/Sy/Sz operators (Cartesian components)" << std::endl;
             std::cerr << "    - Note: experimental operator type always uses xyz basis internally" << std::endl;
-            std::cerr << "\n  spectral_params (format: \"omega_min,omega_max,num_omega_bins,broadening\" e.g., \"-5.0,5.0,200,0.1\"):" << std::endl;
+            std::cerr << "\n  spectral_params (format: \"omega_min,omega_max,num_omega_bins[,broadening]\" e.g., \"-5.0,5.0,200,0.1\"):" << std::endl;
             std::cerr << "      * omega_min: minimum frequency" << std::endl;
             std::cerr << "      * omega_max: maximum frequency" << std::endl;
             std::cerr << "      * num_omega_bins: number of frequency points (resolution)" << std::endl;
-            std::cerr << "      * broadening: Lorentzian broadening parameter (eta)" << std::endl;
+            std::cerr << "      * broadening: Lorentzian broadening parameter eta (optional)" << std::endl;
+            std::cerr << "        If omitted or set to 0/negative, auto-broadening is used:" << std::endl;
+            std::cerr << "          eta = max(2*dw, (omega_max-omega_min)/krylov_dim, 0.01)" << std::endl;
+            std::cerr << "        where dw = (omega_max-omega_min)/num_omega_bins" << std::endl;
             std::cerr << "\n  unit_cell_size (for sublattice operators): number of sublattices (default: 4)" << std::endl;
             std::cerr << "  momentum_points (default: (0,0,0);(0,0,2π)): \"Qx1,Qy1,Qz1;Qx2,Qy2,Qz2;...\"" << std::endl;
             std::cerr << "  polarization (for transverse operators): \"px,py,pz\" normalized vector (default: (1/√2,-1/√2,0))" << std::endl;
@@ -1668,6 +1865,8 @@ int main(int argc, char* argv[]) {
             std::cerr << "   " << pos_argv[0] << " --use_gpu ./data 50 \"2,2\" ftlm_thermal" << std::endl;
             std::cerr << "\n11. Continued fraction DSSF (memory-efficient, O₁=O₂ only):" << std::endl;
             std::cerr << "   " << pos_argv[0] << " ./data 100 \"2,2\" continued_fraction sum ladder \"-5,5,200,0.05\" 4 \"0,0,0;0,0,1\"" << std::endl;
+            std::cerr << "\n12. Single-operator expectation values <O> on TPQ states:" << std::endl;
+            std::cerr << "   " << pos_argv[0] << " ./data 50 \"0;1;2\" single_expectation sum ladder \"-5,5,200,0.1\" 4 \"0,0,0;0,0,1\"" << std::endl;
         }
         MPI_Finalize();
         return 1;
@@ -1706,7 +1905,8 @@ int main(int argc, char* argv[]) {
     double omega_min = -5.0;
     double omega_max = 5.0;
     int num_omega_bins = 200;
-    double broadening = 0.1;
+    double broadening = -1.0;  // Negative means auto-broadening
+    bool auto_broadening = true;
     
     if (pos_argc >= 8) {
         std::string param_str = pos_argv[7];
@@ -1724,10 +1924,11 @@ int main(int argc, char* argv[]) {
                 if (tokens.size() >= 1) omega_min = std::stod(tokens[0]);
                 if (tokens.size() >= 2) omega_max = std::stod(tokens[1]);
                 if (tokens.size() >= 3) num_omega_bins = std::stoi(tokens[2]);
-                if (tokens.size() >= 4) broadening = std::stod(tokens[3]);
-                if (rank == 0) {
-                    std::cout << method << " method parameters: omega=[" << omega_min << "," << omega_max 
-                              << "], bins=" << num_omega_bins << ", broadening=" << broadening << std::endl;
+                if (tokens.size() >= 4) {
+                    broadening = std::stod(tokens[3]);
+                    if (broadening > 0) {
+                        auto_broadening = false;
+                    }
                 }
             } catch (...) {
                 if (rank == 0) {
@@ -1735,6 +1936,28 @@ int main(int argc, char* argv[]) {
                 }
             }
         }
+    }
+    
+    // Auto-broadening: compute smart default based on frequency spacing and krylov_dim
+    if (auto_broadening && (method == "spectral" || method == "continued_fraction")) {
+        double dw = (omega_max - omega_min) / num_omega_bins;
+        double bandwidth_estimate = omega_max - omega_min;  // Conservative estimate
+        double eta_resolution = bandwidth_estimate / krylov_dim_or_nmax;  // Lanczos resolution limit
+        double eta_sampling = 2.0 * dw;  // Nyquist-like: at least 2 points per peak
+        
+        broadening = std::max({eta_resolution, eta_sampling, 0.01});
+        
+        if (rank == 0) {
+            std::cout << "Auto-broadening: eta=" << broadening << " (dw=" << dw 
+                      << ", krylov_limit=" << eta_resolution 
+                      << ", sampling_limit=" << eta_sampling << ")" << std::endl;
+        }
+    }
+    
+    if (rank == 0 && (method == "spectral" || method == "continued_fraction")) {
+        std::cout << method << " method parameters: omega=[" << omega_min << "," << omega_max 
+                  << "], bins=" << num_omega_bins << ", broadening=" << broadening 
+                  << (auto_broadening ? " (auto)" : "") << std::endl;
     }
 
     int unit_cell_size = 4; // Default for pyrochlore
@@ -1932,32 +2155,49 @@ int main(int argc, char* argv[]) {
         }
     }
 
-    // Parse spin combinations
+    bool single_expectation_mode = (method == "single_expectation");
+
+    // Parse spin combinations (pair mode) or single operators (single_expectation mode)
     std::vector<std::pair<int, int>> spin_combinations;
     std::stringstream ss(spin_combinations_str);
     std::string pair_str;
     
     while (std::getline(ss, pair_str, ';')) {
-        std::stringstream pair_ss(pair_str);
-        std::string op1_str, op2_str;
-        
-        if (std::getline(pair_ss, op1_str, ',') && std::getline(pair_ss, op2_str)) {
-            try {
-                int op1 = std::stoi(op1_str);
-                int op2 = std::stoi(op2_str);
-                
-                if (op1 >= 0 && op1 <= 2 && op2 >= 0 && op2 <= 2) {
-                    spin_combinations.push_back({op1, op2});
-                } else {
-                    if (rank == 0) {
-                        std::cerr << "Warning: Invalid spin operator " << op1 << "," << op2 
+        if (pair_str.empty()) continue;
+
+        try {
+            if (single_expectation_mode) {
+                // single_expectation format: "op1;op2;..."
+                int op = std::stoi(pair_str);
+                if (op >= 0 && op <= 2) {
+                    spin_combinations.push_back({op, op});  // second entry is ignored in single mode
+                } else if (rank == 0) {
+                    std::cerr << "Warning: Invalid spin operator " << op
+                              << ". Operator must be 0, 1, or 2." << std::endl;
+                }
+            } else {
+                // pair mode format: "op1,op2;..."
+                std::stringstream pair_ss(pair_str);
+                std::string op1_str, op2_str;
+
+                if (std::getline(pair_ss, op1_str, ',') && std::getline(pair_ss, op2_str)) {
+                    int op1 = std::stoi(op1_str);
+                    int op2 = std::stoi(op2_str);
+
+                    if (op1 >= 0 && op1 <= 2 && op2 >= 0 && op2 <= 2) {
+                        spin_combinations.push_back({op1, op2});
+                    } else if (rank == 0) {
+                        std::cerr << "Warning: Invalid spin operator " << op1 << "," << op2
                                   << ". Operators must be 0, 1, or 2." << std::endl;
                     }
+                } else if (rank == 0) {
+                    std::cerr << "Warning: Failed to parse spin combination (expected op1,op2): "
+                              << pair_str << std::endl;
                 }
-            } catch (const std::exception& e) {
-                if (rank == 0) {
-                    std::cerr << "Warning: Failed to parse spin combination: " << pair_str << std::endl;
-                }
+            }
+        } catch (const std::exception&) {
+            if (rank == 0) {
+                std::cerr << "Warning: Failed to parse operator specification: " << pair_str << std::endl;
             }
         }
     }
@@ -2005,12 +2245,17 @@ int main(int argc, char* argv[]) {
         int first = pair.first;
         int second = pair.second;
         
-        if (!use_xyz_basis) {
+        if (!use_xyz_basis && !single_expectation_mode) {
             // For ladder basis: Convert 0->1(Sp), 1->0(Sm) for first operator
             first = first == 2 ? 2 : 1 - first;
         }
         // For XYZ basis, use operators as-is (0=Sx, 1=Sy, 2=Sz)
-        std::string combined_name = std::string(spin_combination_name(first)) + std::string(spin_combination_name(second));
+        std::string combined_name;
+        if (single_expectation_mode) {
+            combined_name = std::string(spin_combination_name(first));
+        } else {
+            combined_name = std::string(spin_combination_name(first)) + std::string(spin_combination_name(second));
+        }
         char* name = new char[combined_name.size() + 1];
         std::strcpy(name, combined_name.c_str());
         spin_combination_names.push_back(name);
@@ -2136,7 +2381,7 @@ int main(int argc, char* argv[]) {
     std::string unified_h5_path;  // Path to unified DSSF HDF5 file (or per-rank file for INDEPENDENT mode)
     
     // Determine if we're in INDEPENDENT mode (need per-rank files)
-    bool uses_independent_mode = (method == "spectral" || method == "sssf" || method == "continued_fraction");
+    bool uses_independent_mode = (method == "spectral" || method == "sssf" || method == "continued_fraction" || method == "single_expectation");
     
     if (rank == 0) {
         ensureDirectoryExists(output_base_dir);
@@ -2243,7 +2488,7 @@ int main(int argc, char* argv[]) {
         std::string tpq_directory = directory + "/output";
         
         // Check if output directory exists (only critical for methods that need pre-computed states)
-        bool needs_precomputed_states = (method == "spectral" || method == "continued_fraction");
+        bool needs_precomputed_states = (method == "spectral" || method == "continued_fraction" || method == "sssf" || method == "single_expectation");
         
         // For ftlm_thermal/static, we generate random states internally - no need for pre-computed states
         // This is MUCH faster since we only process once instead of per-state
@@ -2351,7 +2596,7 @@ int main(int argc, char* argv[]) {
         if (tpq_files.empty()) {
             bool needs_precomputed = (method == "spectral" || 
                                       method == "spin_correlation" || method == "spin_configuration" ||
-                                      method == "sssf" || method == "continued_fraction");
+                                      method == "sssf" || method == "continued_fraction" || method == "single_expectation");
             if (!needs_precomputed) {
                 std::cout << "No state files found, but '" << method << "' generates states internally." << std::endl;
                 tpq_files.push_back("INTERNAL_RANDOM_STATES");
@@ -2371,7 +2616,7 @@ int main(int argc, char* argv[]) {
     MPI_Bcast(&num_files, 1, MPI_INT, 0, MPI_COMM_WORLD);
     
     // Check for methods that need pre-computed states
-    bool needs_precomputed_states = (method == "spectral" || method == "sssf" || method == "continued_fraction");
+    bool needs_precomputed_states = (method == "spectral" || method == "sssf" || method == "continued_fraction" || method == "single_expectation");
 
     if (num_files == 0 && needs_precomputed_states) {
         if (rank == 0) {
@@ -2492,23 +2737,40 @@ int main(int argc, char* argv[]) {
             // For krylov and taylor methods: parallelize based on operator type
             if (operator_type == "sublattice") {
                 // Sublattice operators: parallelize across (state, momentum, combo, sublattice pairs)
-                // Only compute upper triangle: sublattice_i <= sublattice_j (symmetry)
-                int num_sublattice_pairs = unit_cell_size * (unit_cell_size + 1) / 2;
-                for (int s = 0; s < num_files; s++) {
-                    for (int q = 0; q < num_momentum; q++) {
-                        for (int c = 0; c < num_combos; c++) {
-                            for (int sub_i = 0; sub_i < unit_cell_size; sub_i++) {
-                                for (int sub_j = sub_i; sub_j < unit_cell_size; sub_j++) {
-                                    size_t task_weight = file_sizes[s] / (num_momentum * num_combos * num_sublattice_pairs);
-                                    all_tasks.push_back({s, q, c, sub_i, sub_j, task_weight});
+                if (method == "single_expectation") {
+                    // For <O>, use one sublattice index only
+                    for (int s = 0; s < num_files; s++) {
+                        for (int q = 0; q < num_momentum; q++) {
+                            for (int c = 0; c < num_combos; c++) {
+                                for (int sub_i = 0; sub_i < unit_cell_size; sub_i++) {
+                                    size_t task_weight = file_sizes[s] / (num_momentum * num_combos * unit_cell_size);
+                                    all_tasks.push_back({s, q, c, sub_i, -1, task_weight});
                                 }
                             }
                         }
                     }
+                    std::cout << "Parallelization: per-sublattice-operator (" << all_tasks.size() << " tasks = "
+                              << num_files << " states × " << num_momentum << " momenta × "
+                              << num_combos << " combos × " << unit_cell_size << " sublattices)" << std::endl;
+                } else {
+                    // Only compute upper triangle: sublattice_i <= sublattice_j (symmetry)
+                    int num_sublattice_pairs = unit_cell_size * (unit_cell_size + 1) / 2;
+                    for (int s = 0; s < num_files; s++) {
+                        for (int q = 0; q < num_momentum; q++) {
+                            for (int c = 0; c < num_combos; c++) {
+                                for (int sub_i = 0; sub_i < unit_cell_size; sub_i++) {
+                                    for (int sub_j = sub_i; sub_j < unit_cell_size; sub_j++) {
+                                        size_t task_weight = file_sizes[s] / (num_momentum * num_combos * num_sublattice_pairs);
+                                        all_tasks.push_back({s, q, c, sub_i, sub_j, task_weight});
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    std::cout << "Parallelization: per-sublattice-pair (upper triangle, " << all_tasks.size() << " tasks = "
+                              << num_files << " states × " << num_momentum << " momenta × "
+                              << num_combos << " combos × " << num_sublattice_pairs << " unique sublattice pairs)" << std::endl;
                 }
-                std::cout << "Parallelization: per-sublattice-pair (upper triangle, " << all_tasks.size() << " tasks = "
-                          << num_files << " states × " << num_momentum << " momenta × "
-                          << num_combos << " combos × " << num_sublattice_pairs << " unique sublattice pairs)" << std::endl;
             } else if (operator_type == "transverse") {
                 // Transverse operators: create 2 tasks per (state, momentum, combo) for SF/NSF
                 for (int s = 0; s < num_files; s++) {
@@ -2686,7 +2948,7 @@ int main(int argc, char* argv[]) {
         bool loaded_ok = false;
         bool needs_loaded_state = (method == "spectral" || 
                                    method == "spin_correlation" || method == "spin_configuration" ||
-                                   method == "sssf" || method == "continued_fraction");
+                                   method == "sssf" || method == "continued_fraction" || method == "single_expectation");
         
         // For ftlm_thermal/static, we don't need to load a state
         if (file_path == "INTERNAL_RANDOM_STATES") {
@@ -2777,27 +3039,35 @@ int main(int argc, char* argv[]) {
                     // Fixed-Sz operators
                     if (use_xyz_basis) {
                         FixedSzSumOperatorXYZ sum_op_1(num_sites, spin_length, n_up, op_type_1, momentum_points[momentum_idx], positions_file);
-                        FixedSzSumOperatorXYZ sum_op_2(num_sites, spin_length, n_up, op_type_2, momentum_points[momentum_idx], positions_file);
                         obs_1.push_back(Operator(sum_op_1));
-                        obs_2.push_back(Operator(sum_op_2));
+                        if (method != "single_expectation") {
+                            FixedSzSumOperatorXYZ sum_op_2(num_sites, spin_length, n_up, op_type_2, momentum_points[momentum_idx], positions_file);
+                            obs_2.push_back(Operator(sum_op_2));
+                        }
                     } else {
                         FixedSzSumOperator sum_op_1(num_sites, spin_length, n_up, op_type_1, momentum_points[momentum_idx], positions_file);
-                        FixedSzSumOperator sum_op_2(num_sites, spin_length, n_up, op_type_2, momentum_points[momentum_idx], positions_file);
                         obs_1.push_back(Operator(sum_op_1));
-                        obs_2.push_back(Operator(sum_op_2));
+                        if (method != "single_expectation") {
+                            FixedSzSumOperator sum_op_2(num_sites, spin_length, n_up, op_type_2, momentum_points[momentum_idx], positions_file);
+                            obs_2.push_back(Operator(sum_op_2));
+                        }
                     }
                 } else {
                     // Full Hilbert space operators
                     if (use_xyz_basis) {
                         SumOperatorXYZ sum_op_1(num_sites, spin_length, op_type_1, momentum_points[momentum_idx], positions_file);
-                        SumOperatorXYZ sum_op_2(num_sites, spin_length, op_type_2, momentum_points[momentum_idx], positions_file);
                         obs_1.push_back(Operator(sum_op_1));
-                        obs_2.push_back(Operator(sum_op_2));
+                        if (method != "single_expectation") {
+                            SumOperatorXYZ sum_op_2(num_sites, spin_length, op_type_2, momentum_points[momentum_idx], positions_file);
+                            obs_2.push_back(Operator(sum_op_2));
+                        }
                     } else {
                         SumOperator sum_op_1(num_sites, spin_length, op_type_1, momentum_points[momentum_idx], positions_file);
-                        SumOperator sum_op_2(num_sites, spin_length, op_type_2, momentum_points[momentum_idx], positions_file);
                         obs_1.push_back(Operator(sum_op_1));
-                        obs_2.push_back(Operator(sum_op_2));
+                        if (method != "single_expectation") {
+                            SumOperator sum_op_2(num_sites, spin_length, op_type_2, momentum_points[momentum_idx], positions_file);
+                            obs_2.push_back(Operator(sum_op_2));
+                        }
                     }
                 }
                 
@@ -2870,8 +3140,13 @@ int main(int argc, char* argv[]) {
             } else if (operator_type == "sublattice") {
                 // Sublattice-resolved operators
                 std::stringstream name_ss;
-                name_ss << base_name << "_q_Qx" << Q[0] << "_Qy" << Q[1] << "_Qz" << Q[2]
-                        << "_sub" << sublattice_i << "_sub" << sublattice_j;
+                if (method == "single_expectation") {
+                    name_ss << base_name << "_q_Qx" << Q[0] << "_Qy" << Q[1] << "_Qz" << Q[2]
+                            << "_sub" << sublattice_i;
+                } else {
+                    name_ss << base_name << "_q_Qx" << Q[0] << "_Qy" << Q[1] << "_Qz" << Q[2]
+                            << "_sub" << sublattice_i << "_sub" << sublattice_j;
+                }
                 obs_names.push_back(name_ss.str());
                 
                 std::vector<double> Q_vec = {Q[0], Q[1], Q[2]};
@@ -2879,17 +3154,21 @@ int main(int argc, char* argv[]) {
                 if (use_fixed_sz) {
                     // Fixed-Sz sublattice operators
                     FixedSzSublatticeOperator sub_op_1(sublattice_i, unit_cell_size, num_sites, spin_length, n_up, op_type_1, Q_vec, positions_file);
-                    FixedSzSublatticeOperator sub_op_2(sublattice_j, unit_cell_size, num_sites, spin_length, n_up, op_type_2, Q_vec, positions_file);
                     
                     obs_1.push_back(Operator(sub_op_1));
-                    obs_2.push_back(Operator(sub_op_2));
+                    if (method != "single_expectation") {
+                        FixedSzSublatticeOperator sub_op_2(sublattice_j, unit_cell_size, num_sites, spin_length, n_up, op_type_2, Q_vec, positions_file);
+                        obs_2.push_back(Operator(sub_op_2));
+                    }
                 } else {
                     // Full Hilbert space sublattice operators
                     SublatticeOperator sub_op_1(sublattice_i, unit_cell_size, num_sites, spin_length, op_type_1, Q_vec, positions_file);
-                    SublatticeOperator sub_op_2(sublattice_j, unit_cell_size, num_sites, spin_length, op_type_2, Q_vec, positions_file);
                     
                     obs_1.push_back(Operator(sub_op_1));
-                    obs_2.push_back(Operator(sub_op_2));
+                    if (method != "single_expectation") {
+                        SublatticeOperator sub_op_2(sublattice_j, unit_cell_size, num_sites, spin_length, op_type_2, Q_vec, positions_file);
+                        obs_2.push_back(Operator(sub_op_2));
+                    }
                 }
                 
             } else if (operator_type == "experimental") {
@@ -2901,17 +3180,21 @@ int main(int argc, char* argv[]) {
                 if (use_fixed_sz) {
                     // Fixed-Sz experimental operators
                     FixedSzExperimentalOperator exp_op_1(num_sites, spin_length, n_up, theta, momentum_points[momentum_idx], positions_file);
-                    FixedSzExperimentalOperator exp_op_2(num_sites, spin_length, n_up, theta, momentum_points[momentum_idx], positions_file);
                     
                     obs_1.push_back(Operator(exp_op_1));
-                    obs_2.push_back(Operator(exp_op_2));
+                    if (method != "single_expectation") {
+                        FixedSzExperimentalOperator exp_op_2(num_sites, spin_length, n_up, theta, momentum_points[momentum_idx], positions_file);
+                        obs_2.push_back(Operator(exp_op_2));
+                    }
                 } else {
                     // Full Hilbert space experimental operators
                     ExperimentalOperator exp_op_1(num_sites, spin_length, theta, momentum_points[momentum_idx], positions_file);
-                    ExperimentalOperator exp_op_2(num_sites, spin_length, theta, momentum_points[momentum_idx], positions_file);
                     
                     obs_1.push_back(Operator(exp_op_1));
-                    obs_2.push_back(Operator(exp_op_2));
+                    if (method != "single_expectation") {
+                        ExperimentalOperator exp_op_2(num_sites, spin_length, theta, momentum_points[momentum_idx], positions_file);
+                        obs_2.push_back(Operator(exp_op_2));
+                    }
                 }
                 
             } else if (operator_type == "transverse_experimental") {
@@ -3661,6 +3944,55 @@ int main(int argc, char* argv[]) {
                         }
                     }
                     
+                } else if (method == "single_expectation") {
+                    // ============================================================
+                    // SINGLE EXPECTATION: <O> for each specified single operator
+                    // ============================================================
+                    for (size_t i = 0; i < obs_1.size(); i++) {
+                        std::cout << "  Processing single operator " << obs_names[i] << std::endl;
+
+                        ComplexVector op_state(N, Complex(0.0, 0.0));
+                        obs_1[i].apply(tpq_state.data(), op_state.data(), N);
+
+                        double real_sum = 0.0;
+                        double imag_sum = 0.0;
+                        #pragma omp parallel for reduction(+:real_sum,imag_sum) if(N > 10000)
+                        for (int j = 0; j < N; j++) {
+                            Complex prod = std::conj(tpq_state[j]) * op_state[j];
+                            real_sum += prod.real();
+                            imag_sum += prod.imag();
+                        }
+
+                        Complex expectation_value(real_sum, imag_sum);
+                        double temperature = (beta > 0) ? 1.0 / beta : std::numeric_limits<double>::infinity();
+
+                        std::vector<double> temperatures_vec = {temperature};
+                        std::vector<double> expectation_real_vec = {expectation_value.real()};
+                        std::vector<double> expectation_imag_vec = {expectation_value.imag()};
+
+                        saveDSSFSingleExpectationToHDF5(
+                            unified_h5_path,
+                            obs_names[i],
+                            sample_index,
+                            temperatures_vec,
+                            expectation_real_vec,
+                            expectation_imag_vec,
+                            true
+                        );
+
+                        H5garbage_collect();
+
+                        if (rank == 0) {
+                            std::cout << "  Saved <O>: " << obs_names[i]
+                                      << " beta=" << beta
+                                      << " <O>=" << expectation_value.real();
+                            if (std::abs(expectation_value.imag()) > 1e-10) {
+                                std::cout << " + " << expectation_value.imag() << "i";
+                            }
+                            std::cout << std::endl;
+                        }
+                    }
+
                 } else if (method == "continued_fraction") {
                     // ============================================================
                     // CONTINUED FRACTION DSSF on a single state

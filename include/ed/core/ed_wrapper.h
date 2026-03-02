@@ -19,6 +19,7 @@
 #include <sys/stat.h>
 #include <filesystem>
 #include <algorithm>
+#include <chrono>
 #include <memory>  // For std::unique_ptr
 
 // ScaLAPACK support for distributed diagonalization
@@ -124,6 +125,7 @@ enum class DiagonalizationMethod {
     BICG,                  // Biconjugate gradient
     LOBPCG,                // Locally optimal block preconditioned conjugate gradient
     KRYLOV_SCHUR,          // Krylov-Schur algorithm
+    BLOCK_KRYLOV_SCHUR,    // Block Krylov-Schur algorithm for degenerate eigenvalues
     IMPLICIT_RESTART_LANCZOS,  // Implicitly restarted Lanczos algorithm
     THICK_RESTART_LANCZOS,     // Thick restart Lanczos algorithm with locking
     FULL,                  // Full diagonalization
@@ -153,9 +155,12 @@ enum class DiagonalizationMethod {
     BLOCK_LANCZOS_GPU,     // GPU-accelerated Block Lanczos (use --fixed-sz for fixed Sz sector)
     DAVIDSON_GPU,          // GPU-accelerated Davidson method
     LOBPCG_GPU,            // GPU-accelerated LOBPCG method
+    KRYLOV_SCHUR_GPU,      // GPU-accelerated Krylov-Schur algorithm
+    BLOCK_KRYLOV_SCHUR_GPU,// GPU-accelerated Block Krylov-Schur algorithm
     mTPQ_GPU,              // GPU-accelerated microcanonical TPQ
     cTPQ_GPU,              // GPU-accelerated canonical TPQ
     FTLM_GPU,              // GPU-accelerated Finite Temperature Lanczos Method (use --fixed-sz for fixed Sz sector)
+    FULL_GPU,              // GPU-accelerated full diagonalization (cuSOLVER dense eigensolver)
     
     // ========== DEPRECATED: Use base method + --fixed-sz flag instead ==========
     // These are kept for backwards compatibility but will be removed in a future version.
@@ -236,6 +241,10 @@ inline DiagonalizationMethod get_fallback_method(DiagonalizationMethod method, b
                 break;
             case DiagonalizationMethod::LOBPCG_GPU:
                 fallback = DiagonalizationMethod::LOBPCG;
+                reason = "CUDA not compiled (build with -DWITH_CUDA=ON)";
+                break;
+            case DiagonalizationMethod::KRYLOV_SCHUR_GPU:
+                fallback = DiagonalizationMethod::KRYLOV_SCHUR;
                 reason = "CUDA not compiled (build with -DWITH_CUDA=ON)";
                 break;
             case DiagonalizationMethod::mTPQ_GPU:
@@ -419,6 +428,7 @@ struct EDParameters {
     uint64_t num_sites = 0;             // Number of sites in the system
     float spin_length = 0.5;       // Spin length
     uint64_t sublattice_size = 1;       // Size of the sublattice
+    std::vector<int> selected_sectors;  // If non-empty, only diagonalize these sector indices (0-based)
     
     // ========== TPQ Observable Parameters ==========
     // save_thermal_states: Save TPQ states at target temperatures for post-processing (e.g., TPQ_DSSF)
@@ -441,6 +451,7 @@ struct EDParameters {
     bool use_fixed_sz = false;  // Whether to use fixed-Sz sector (conserve total Sz)
     int64_t n_up = -1;  // Number of up spins (-1 = not set, will use num_sites/2)
     mutable class FixedSzOperator* fixed_sz_op = nullptr;  // If using fixed-Sz, pointer to operator for embedding
+    bool full_sz_split = false;  // Loop over ALL Sz sectors for full diag (automatic block-diagonal speedup)
     
     // ========== ScaLAPACK Distributed Diagonalization Options ==========
     // Used when method == SCALAPACK or SCALAPACK_MIXED
@@ -564,10 +575,13 @@ namespace ed_internal {
                method == DiagonalizationMethod::BLOCK_LANCZOS_GPU_FIXED_SZ ||
                method == DiagonalizationMethod::DAVIDSON_GPU ||
                method == DiagonalizationMethod::LOBPCG_GPU ||
+               method == DiagonalizationMethod::KRYLOV_SCHUR_GPU ||
+               method == DiagonalizationMethod::BLOCK_KRYLOV_SCHUR_GPU ||
                method == DiagonalizationMethod::mTPQ_GPU ||
                method == DiagonalizationMethod::cTPQ_GPU ||
                method == DiagonalizationMethod::FTLM_GPU ||
-               method == DiagonalizationMethod::FTLM_GPU_FIXED_SZ;
+               method == DiagonalizationMethod::FTLM_GPU_FIXED_SZ ||
+               method == DiagonalizationMethod::FULL_GPU;
     }
     
     /**
@@ -637,7 +651,14 @@ namespace ed_internal {
         // GPU methods that support fixed-Sz
         return base == DiagonalizationMethod::LANCZOS_GPU ||
                base == DiagonalizationMethod::BLOCK_LANCZOS_GPU ||
-               base == DiagonalizationMethod::FTLM_GPU;
+               base == DiagonalizationMethod::FTLM_GPU ||
+               base == DiagonalizationMethod::DAVIDSON_GPU ||
+               base == DiagonalizationMethod::LOBPCG_GPU ||
+               base == DiagonalizationMethod::KRYLOV_SCHUR_GPU ||
+               base == DiagonalizationMethod::BLOCK_KRYLOV_SCHUR_GPU ||
+               base == DiagonalizationMethod::mTPQ_GPU ||
+               base == DiagonalizationMethod::cTPQ_GPU ||
+               base == DiagonalizationMethod::FULL_GPU;
     }
 
     // ========== Forward Declarations ==========
@@ -969,6 +990,13 @@ EDResults exact_diagonalization_core(
                        params.compute_eigenvectors);
             break;
             
+        case DiagonalizationMethod::BLOCK_KRYLOV_SCHUR:
+            block_krylov_schur(H, hilbert_space_dim, params.max_iterations,
+                              params.num_eigenvalues, params.block_size, params.tolerance,
+                              results.eigenvalues, params.output_dir,
+                              params.compute_eigenvectors);
+            break;
+            
         case DiagonalizationMethod::IMPLICIT_RESTART_LANCZOS:
             implicitly_restarted_lanczos(H, hilbert_space_dim, params.max_iterations, 
                                        params.num_eigenvalues, params.tolerance, 
@@ -1256,6 +1284,8 @@ EDResults exact_diagonalization_core(
         case DiagonalizationMethod::LANCZOS_GPU_FIXED_SZ:
         case DiagonalizationMethod::DAVIDSON_GPU:
         case DiagonalizationMethod::LOBPCG_GPU:
+        case DiagonalizationMethod::KRYLOV_SCHUR_GPU:
+        case DiagonalizationMethod::BLOCK_KRYLOV_SCHUR_GPU:
         case DiagonalizationMethod::BLOCK_LANCZOS_GPU:
         case DiagonalizationMethod::BLOCK_LANCZOS_GPU_FIXED_SZ:
         case DiagonalizationMethod::mTPQ_GPU:
@@ -1598,7 +1628,8 @@ EDResults diagonalize_symmetry_block(
         method == DiagonalizationMethod::BLOCK_LANCZOS_GPU ||
         method == DiagonalizationMethod::BLOCK_LANCZOS_GPU_FIXED_SZ ||
         method == DiagonalizationMethod::DAVIDSON_GPU ||
-        method == DiagonalizationMethod::LOBPCG_GPU) {
+        method == DiagonalizationMethod::LOBPCG_GPU ||
+        method == DiagonalizationMethod::KRYLOV_SCHUR_GPU) {
         if (!GPUEDWrapper::isGPUAvailable()) {
             std::cerr << "Warning: No CUDA-capable GPU found. Falling back to CPU for this block (dim="
                       << block_dim << ").\n";
@@ -1607,6 +1638,8 @@ EDResults diagonalize_symmetry_block(
                 method = DiagonalizationMethod::DAVIDSON;
             } else if (method == DiagonalizationMethod::LOBPCG_GPU) {
                 method = DiagonalizationMethod::LOBPCG;
+            } else if (method == DiagonalizationMethod::KRYLOV_SCHUR_GPU) {
+                method = DiagonalizationMethod::KRYLOV_SCHUR;
             } else if (method == DiagonalizationMethod::BLOCK_LANCZOS_GPU ||
                        method == DiagonalizationMethod::BLOCK_LANCZOS_GPU_FIXED_SZ) {
                 method = DiagonalizationMethod::BLOCK_LANCZOS;
@@ -1614,130 +1647,25 @@ EDResults diagonalize_symmetry_block(
                 method = DiagonalizationMethod::LANCZOS;
             }
         } else {
-            // Convert Eigen sparse matrix (which may be column-major) to
-            // row-major CSR arrays expected by the GPU upload path.
-            try {
-                uint64_t N = block_dim;
-                uint64_t nnz = static_cast<int>(block_matrix.nonZeros());
-
-                std::vector<std::vector<std::pair<int, std::complex<double>>>> rows(N);
-                rows.assign(N, {});
-
-                for (uint64_t k = 0; k < block_matrix.outerSize(); ++k) {
-                    for (Eigen::SparseMatrix<Complex>::InnerIterator it(block_matrix, k); it; ++it) {
-                        uint64_t r = it.row();
-                        uint64_t c = it.col();
-                        std::complex<double> v = it.value();
-                        if (r < 0 || r >= N || c < 0 || c >= N) continue;
-                        rows[r].emplace_back(c, v);
-                    }
-                }
-
-                std::vector<int> row_ptr(N + 1, 0);
-                std::vector<int> col_ind; col_ind.reserve(nnz);
-                std::vector<std::complex<double>> values; values.reserve(nnz);
-
-                uint64_t counter = 0;
-                for (uint64_t i = 0; i < N; ++i) {
-                    row_ptr[i] = counter;
-                    // Optionally, keep columns sorted for cuSPARSE efficiency
-                    auto &row = rows[i];
-                    if (row.size() > 1) std::sort(row.begin(), row.end(), [](const auto &a, const auto &b){ return a.first < b.first; });
-                    for (const auto &p : row) {
-                        col_ind.push_back(p.first);
-                        values.push_back(p.second);
-                        ++counter;
-                    }
-                }
-                row_ptr[N] = counter;
-
-                // Create GPU operator and run appropriate method
-                void* gpu_op = GPUEDWrapper::createGPUOperatorFromCSR(params.num_sites, N, row_ptr, col_ind, values);
-                if (!gpu_op) {
-                    std::cerr << "Warning: Failed to create GPU operator from CSR. Falling back to CPU for this block (dim="
-                              << block_dim << ").\n";
-                    if (method == DiagonalizationMethod::DAVIDSON_GPU) {
-                        method = DiagonalizationMethod::DAVIDSON;
-                    } else if (method == DiagonalizationMethod::LOBPCG_GPU) {
-                        method = DiagonalizationMethod::LOBPCG;
-                    } else if (method == DiagonalizationMethod::BLOCK_LANCZOS_GPU ||
-                               method == DiagonalizationMethod::BLOCK_LANCZOS_GPU_FIXED_SZ) {
-                        method = DiagonalizationMethod::BLOCK_LANCZOS;
-                    } else {
-                        method = DiagonalizationMethod::LANCZOS;
-                    }
-                } else {
-                    std::vector<double> eigenvalues;
-                    GPUEDWrapper::printGPUInfo();
-                    
-                    if (method == DiagonalizationMethod::DAVIDSON_GPU) {
-                        GPUEDWrapper::runGPUDavidson(
-                            gpu_op, N,
-                            std::min(params.num_eigenvalues, block_dim),
-                            params.max_iterations,
-                            params.max_subspace,
-                            params.tolerance,
-                            eigenvalues,
-                            params.output_dir,
-                            params.compute_eigenvectors
-                        );
-                    } else if (method == DiagonalizationMethod::LOBPCG_GPU) {
-                        GPUEDWrapper::runGPULOBPCG(
-                            gpu_op, N,
-                            std::min(params.num_eigenvalues, block_dim),
-                            params.max_iterations,
-                            params.tolerance,
-                            eigenvalues,
-                            params.output_dir,
-                            params.compute_eigenvectors
-                        );
-                    } else if (method == DiagonalizationMethod::BLOCK_LANCZOS_GPU ||
-                               method == DiagonalizationMethod::BLOCK_LANCZOS_GPU_FIXED_SZ) {
-                        // GPU Block Lanczos
-                        GPUEDWrapper::runGPUBlockLanczos(
-                            gpu_op, N,
-                            params.max_iterations,
-                            std::min(params.num_eigenvalues, block_dim),
-                            params.block_size,
-                            params.tolerance,
-                            eigenvalues,
-                            params.output_dir,
-                            params.compute_eigenvectors
-                        );
-                    } else {
-                        // LANCZOS_GPU or LANCZOS_GPU_FIXED_SZ
-                        GPUEDWrapper::runGPULanczos(
-                            gpu_op, N,
-                            params.max_iterations,
-                            std::min(params.num_eigenvalues, block_dim),
-                            params.tolerance,
-                            eigenvalues,
-                            params.output_dir,
-                            params.compute_eigenvectors
-                        );
-                    }
-
-                    // Fill results and clean up
-                    EDResults results;
-                    results.eigenvectors_computed = params.compute_eigenvectors;
-                    results.eigenvalues = eigenvalues;
-                    GPUEDWrapper::destroyGPUOperator(gpu_op);
-
-                    return results;
-                }
-            } catch (const std::exception &e) {
-                std::cerr << "Warning: Exception during GPU dispatch for symmetry block: " << e.what()
-                          << "\nFalling back to CPU for this block (dim=" << block_dim << ").\n";
-                if (method == DiagonalizationMethod::DAVIDSON_GPU) {
-                    method = DiagonalizationMethod::DAVIDSON;
-                } else if (method == DiagonalizationMethod::LOBPCG_GPU) {
-                    method = DiagonalizationMethod::LOBPCG;
-                } else if (method == DiagonalizationMethod::BLOCK_LANCZOS_GPU ||
-                           method == DiagonalizationMethod::BLOCK_LANCZOS_GPU_FIXED_SZ) {
-                    method = DiagonalizationMethod::BLOCK_LANCZOS;
-                } else {
-                    method = DiagonalizationMethod::LANCZOS;
-                }
+            // The explicit block construction path pre-builds Eigen sparse matrices,
+            // which doesn't carry the orbit data needed for GPU symmetrized matvec.
+            // Use --symmetrized-streaming mode for GPU-accelerated symmetrized ED.
+            std::cerr << "Warning: GPU symmetry-projected dispatch requires streaming mode. "
+                      << "Use --symmetrized-streaming for GPU support. "
+                      << "Falling back to CPU for this block (dim=" << block_dim << ").\n";
+            if (method == DiagonalizationMethod::DAVIDSON_GPU) {
+                method = DiagonalizationMethod::DAVIDSON;
+            } else if (method == DiagonalizationMethod::LOBPCG_GPU) {
+                method = DiagonalizationMethod::LOBPCG;
+            } else if (method == DiagonalizationMethod::KRYLOV_SCHUR_GPU) {
+                method = DiagonalizationMethod::KRYLOV_SCHUR;
+            } else if (method == DiagonalizationMethod::BLOCK_KRYLOV_SCHUR_GPU) {
+                method = DiagonalizationMethod::BLOCK_KRYLOV_SCHUR;
+            } else if (method == DiagonalizationMethod::BLOCK_LANCZOS_GPU ||
+                       method == DiagonalizationMethod::BLOCK_LANCZOS_GPU_FIXED_SZ) {
+                method = DiagonalizationMethod::BLOCK_LANCZOS;
+            } else {
+                method = DiagonalizationMethod::LANCZOS;
             }
         }
     }
@@ -1755,6 +1683,8 @@ EDResults diagonalize_symmetry_block(
         method == DiagonalizationMethod::BLOCK_LANCZOS_GPU_FIXED_SZ ||
         method == DiagonalizationMethod::DAVIDSON_GPU ||
         method == DiagonalizationMethod::LOBPCG_GPU ||
+        method == DiagonalizationMethod::KRYLOV_SCHUR_GPU ||
+        method == DiagonalizationMethod::BLOCK_KRYLOV_SCHUR_GPU ||
         method == DiagonalizationMethod::mTPQ_GPU ||
         method == DiagonalizationMethod::cTPQ_GPU) {
         std::cerr << "Warning: GPU methods requested but CUDA not available.\n";
@@ -1763,6 +1693,10 @@ EDResults diagonalize_symmetry_block(
             method = DiagonalizationMethod::DAVIDSON;
         } else if (method == DiagonalizationMethod::LOBPCG_GPU) {
             method = DiagonalizationMethod::LOBPCG;
+        } else if (method == DiagonalizationMethod::KRYLOV_SCHUR_GPU) {
+            method = DiagonalizationMethod::KRYLOV_SCHUR;
+        } else if (method == DiagonalizationMethod::BLOCK_KRYLOV_SCHUR_GPU) {
+            method = DiagonalizationMethod::BLOCK_KRYLOV_SCHUR;
         } else if (method == DiagonalizationMethod::BLOCK_LANCZOS_GPU ||
                    method == DiagonalizationMethod::BLOCK_LANCZOS_GPU_FIXED_SZ) {
             method = DiagonalizationMethod::BLOCK_LANCZOS;
@@ -2487,6 +2421,530 @@ void transform_and_save_sector_states(
 } // namespace ed_internal
 
 // ============================================================================
+// Sz CONSERVATION CHECKER
+// ============================================================================
+
+/**
+ * @brief Check if a Hamiltonian conserves total Sz by scanning its term files.
+ *
+ * For spin-1/2 in the ladder basis (0=S+, 1=S-, 2=Sz):
+ *   - Two-body (InterAll.dat): Sz is conserved iff every (Op_i, Op_j) pair is
+ *     one of (0,1), (1,0), or (2,2)  — i.e. S+S-, S-S+, SzSz.
+ *   - Single-site (Trans.dat):  Sz is conserved iff every Op is 2 (Sz).
+ *     An on-site S+ or S- (transverse field) breaks conservation.
+ *
+ * @return true if the Hamiltonian conserves total Sz
+ */
+inline bool hamiltonian_conserves_sz(const std::string& interaction_file,
+                                     const std::string& single_site_file) {
+    // --- Check two-body terms (InterAll.dat) ---
+    if (!interaction_file.empty()) {
+        std::ifstream file(interaction_file);
+        if (file.is_open()) {
+            std::string line;
+            // Skip header: 3 separator/num lines + 3 more lines (matches loadFromInterAllFile)
+            for (int i = 0; i < 5; ++i) std::getline(file, line);
+
+            while (std::getline(file, line)) {
+                std::istringstream iss(line);
+                uint64_t op_i, site_i, op_j, site_j;
+                double re, im;
+                if (!(iss >> op_i >> site_i >> op_j >> site_j >> re >> im)) continue;
+                if (std::abs(re) < 1e-15 && std::abs(im) < 1e-15) continue;
+
+                // Allowed Sz-conserving pairs: (S+,S-)=(0,1), (S-,S+)=(1,0), (Sz,Sz)=(2,2)
+                bool ok = (op_i == 0 && op_j == 1) ||
+                          (op_i == 1 && op_j == 0) ||
+                          (op_i == 2 && op_j == 2);
+                if (!ok) {
+                    std::cout << "[Sz check] Non-conserving two-body term: Op("
+                              << op_i << "," << op_j << ") on sites ("
+                              << site_i << "," << site_j << ") with coeff ("
+                              << re << "," << im << ")" << std::endl;
+                    return false;
+                }
+            }
+        }
+    }
+
+    // --- Check single-site terms (Trans.dat) ---
+    if (!single_site_file.empty()) {
+        std::ifstream file(single_site_file);
+        if (file.is_open()) {
+            std::string line;
+            // Skip header (matches loadFromFile): 1 separator + "num N" + 3 separator lines
+            for (int i = 0; i < 5; ++i) std::getline(file, line);
+
+            while (std::getline(file, line)) {
+                std::istringstream iss(line);
+                uint64_t op, site;
+                double re, im;
+                if (!(iss >> op >> site >> re >> im)) continue;
+                if (std::abs(re) < 1e-15 && std::abs(im) < 1e-15) continue;
+
+                // Only Sz (op=2) preserves total Sz
+                if (op != 2) {
+                    std::cout << "[Sz check] Non-conserving single-site term: Op("
+                              << op << ") on site " << site << " with coeff ("
+                              << re << "," << im << ")" << std::endl;
+                    return false;
+                }
+            }
+        }
+    }
+
+    return true;
+}
+
+// ============================================================================
+// FULL DIAGONALIZATION VIA Sz SECTOR SPLITTING
+// ============================================================================
+
+/**
+ * @brief Full diagonalization by splitting into Sz sectors
+ * 
+ * Instead of diagonalizing the full 2^N Hilbert space at once, this function:
+ * 1. Loops over all Sz sectors (n_up = 0, 1, ..., num_sites)
+ * 2. Builds a FixedSzOperator per sector
+ * 3. Constructs the dense Hamiltonian using the sparse-to-dense conversion
+ *    (via buildFixedSzMatrix() + toDense()), which is far more efficient than
+ *    N column-by-column SpMV applications
+ * 4. Diagonalizes each sector independently with LAPACKE_zheevd
+ * 5. Collects and sorts all eigenvalues
+ * 6. Saves the merged result as a single HDF5 file (transparent to downstream code)
+ * 
+ * Memory advantage: The largest sector has dimension C(N, N/2), e.g.:
+ *   N=15: 2^15 = 32768 -> C(15,7) = 6435  (5.1x reduction, 26x less memory)
+ *   N=17: 2^17 = 131072 -> C(17,8) = 24310 (5.4x reduction, 29x less memory)
+ *   N=19: 2^19 = 524288 -> C(19,9) = 92378 (5.7x reduction, 32x less memory)
+ * 
+ * IMPORTANT: This assumes Sz is a good quantum number (total Sz commutes with H).
+ * Models that break Sz conservation (e.g., anisotropic J±±, Jz±, in-plane field)
+ * will produce INCORRECT results. The caller must verify Sz conservation.
+ * 
+ * @param interaction_file Path to interaction file (InterAll.dat)
+ * @param single_site_file Path to single-site file (Trans.dat)
+ * @param num_sites Number of spin sites
+ * @param spin_length Spin length (usually 0.5)
+ * @param params Parameters for diagonalization
+ * @return EDResults containing ALL eigenvalues from ALL sectors, sorted
+ */
+inline EDResults exact_diagonalization_all_sz_sectors(
+    const std::string& interaction_file,
+    const std::string& single_site_file,
+    uint64_t num_sites,
+    float spin_length,
+    const EDParameters& params
+) {
+    EDResults results;
+    
+    uint64_t full_dim = 1ULL << num_sites;
+    uint64_t num_sectors = num_sites + 1;  // n_up = 0, 1, ..., num_sites
+    
+    std::cout << "\n" << std::string(80, '=') << std::endl;
+    std::cout << "FULL DIAGONALIZATION VIA Sz SECTOR SPLITTING" << std::endl;
+    std::cout << std::string(80, '=') << std::endl;
+    std::cout << "Full Hilbert space dimension: " << full_dim << std::endl;
+    std::cout << "Number of Sz sectors: " << num_sectors << std::endl;
+    
+    // Pre-compute sector dimensions for progress reporting
+    std::vector<uint64_t> sector_dims(num_sectors);
+    uint64_t largest_sector_dim = 0;
+    uint64_t total_sector_dim = 0;
+    for (uint64_t n_up = 0; n_up <= num_sites; ++n_up) {
+        auto basis = generateFixedSzBasis(num_sites, n_up);
+        sector_dims[n_up] = basis.size();
+        total_sector_dim += sector_dims[n_up];
+        if (sector_dims[n_up] > largest_sector_dim) {
+            largest_sector_dim = sector_dims[n_up];
+        }
+    }
+    
+    std::cout << "Largest sector dimension: " << largest_sector_dim 
+              << " (reduction: " << std::fixed << std::setprecision(1) 
+              << (double)full_dim / largest_sector_dim << "x)" 
+              << std::defaultfloat << std::endl;
+    std::cout << "Memory for full matrix:    " 
+              << (double)full_dim * full_dim * sizeof(Complex) / (1024.0*1024.0*1024.0)
+              << " GB" << std::endl;
+    std::cout << "Memory for largest sector: " 
+              << (double)largest_sector_dim * largest_sector_dim * sizeof(Complex) / (1024.0*1024.0*1024.0)
+              << " GB" << std::endl;
+    
+    // Collect all eigenvalues from all sectors
+    std::vector<double> all_eigenvalues;
+    all_eigenvalues.reserve(full_dim);
+    
+    auto total_start = std::chrono::high_resolution_clock::now();
+    
+    for (uint64_t n_up = 0; n_up <= num_sites; ++n_up) {
+        uint64_t dim = sector_dims[n_up];
+        double sz_value = spin_length * num_sites - n_up;
+        
+        std::cout << "\n--- Sector " << n_up + 1 << "/" << num_sectors 
+                  << ": n_up=" << n_up << ", Sz=" << sz_value
+                  << ", dim=" << dim << " ---" << std::endl;
+        
+        if (dim == 0) {
+            std::cout << "  Empty sector, skipping." << std::endl;
+            continue;
+        }
+        
+        auto sector_start = std::chrono::high_resolution_clock::now();
+        
+        // Create FixedSzOperator for this sector
+        FixedSzOperator op(num_sites, spin_length, n_up);
+        
+        // Load Hamiltonian terms
+        if (!single_site_file.empty()) {
+            std::ifstream file(single_site_file);
+            if (file.is_open()) {
+                op.loadFromFile(single_site_file);
+            }
+        }
+        if (!interaction_file.empty()) {
+            std::ifstream file(interaction_file);
+            if (file.is_open()) {
+                op.loadFromInterAllFile(interaction_file);
+            }
+        }
+        
+        // Build the sparse matrix, then convert to dense for LAPACK
+        // This is O(nnz) — much faster than dim SpMV calls which is O(dim * nnz)
+        op.buildFixedSzMatrix();
+        auto sparse_matrix = op.getFixedSzMatrix();
+        
+        // Convert sparse -> dense (column-major for LAPACK)
+        Eigen::MatrixXcd dense = Eigen::MatrixXcd(sparse_matrix);
+        
+        // Eigenvalue array
+        std::vector<double> evals(dim);
+        
+        // Call LAPACKE_zheevd (divide-and-conquer) — eigenvalues only, no eigenvectors needed
+        lapack_int info = LAPACKE_zheevd(
+            LAPACK_COL_MAJOR,
+            params.compute_eigenvectors ? 'V' : 'N',   // Eigenvalues only for NLCE thermodynamics
+            'U',                         // Upper triangle
+            dim,                         // Matrix dimension
+            reinterpret_cast<lapack_complex_double*>(dense.data()),
+            dim,                         // Leading dimension
+            evals.data()                 // Output eigenvalues
+        );
+        
+        if (info != 0) {
+            std::cerr << "  LAPACKE_zheevd failed for sector n_up=" << n_up 
+                      << " with error code " << info << std::endl;
+            continue;
+        }
+        
+        // Append eigenvalues to the combined list
+        all_eigenvalues.insert(all_eigenvalues.end(), evals.begin(), evals.end());
+        
+        auto sector_end = std::chrono::high_resolution_clock::now();
+        double sector_time = std::chrono::duration<double>(sector_end - sector_start).count();
+        
+        std::cout << "  Diagonalized in " << std::fixed << std::setprecision(2) 
+                  << sector_time << " s, found " << dim << " eigenvalues"
+                  << " [" << evals.front() << ", " << evals.back() << "]" << std::endl;
+    }
+    
+    auto total_end = std::chrono::high_resolution_clock::now();
+    double total_time = std::chrono::duration<double>(total_end - total_start).count();
+    
+    // Sort all eigenvalues globally
+    std::sort(all_eigenvalues.begin(), all_eigenvalues.end());
+    
+    // Store results
+    if (params.num_eigenvalues > 0 && params.num_eigenvalues < all_eigenvalues.size()) {
+        results.eigenvalues.assign(all_eigenvalues.begin(), 
+                                   all_eigenvalues.begin() + params.num_eigenvalues);
+    } else {
+        results.eigenvalues = std::move(all_eigenvalues);
+    }
+    
+    std::cout << "\n" << std::string(80, '=') << std::endl;
+    std::cout << "Sz-SPLIT FULL DIAG COMPLETE" << std::endl;
+    std::cout << "Total eigenvalues: " << results.eigenvalues.size() << std::endl;
+    std::cout << "Total wall time: " << std::fixed << std::setprecision(2) << total_time << " s" << std::endl;
+    if (!results.eigenvalues.empty()) {
+        std::cout << "Ground state energy: " << results.eigenvalues[0] << std::endl;
+    }
+    std::cout << std::string(80, '=') << std::endl;
+    
+    // Save results to HDF5
+    if (!params.output_dir.empty()) {
+        safe_system_call("mkdir -p " + params.output_dir);
+        
+        try {
+            std::string hdf5_file = HDF5IO::createOrOpenFile(params.output_dir);
+            HDF5IO::saveEigenvalues(hdf5_file, results.eigenvalues);
+            std::cout << "Saved " << results.eigenvalues.size() 
+                      << " eigenvalues to " << hdf5_file << std::endl;
+        } catch (const std::exception& e) {
+            std::cerr << "Warning: Failed to save to HDF5: " << e.what() << std::endl;
+            // Fallback to text file
+            std::string txt_file = params.output_dir + "/eigenvalues.txt";
+            std::ofstream ofs(txt_file);
+            if (ofs.is_open()) {
+                ofs << std::setprecision(15);
+                for (double ev : results.eigenvalues) {
+                    ofs << ev << "\n";
+                }
+                std::cout << "Saved eigenvalues to " << txt_file << std::endl;
+            }
+        }
+    }
+    
+    return results;
+}
+
+// ============================================================================
+// GPU FULL DIAGONALIZATION VIA Sz SECTOR SPLITTING
+// ============================================================================
+
+/**
+ * @brief GPU full diagonalization by splitting into Sz sectors
+ * 
+ * GPU equivalent of exact_diagonalization_all_sz_sectors(). Instead of building
+ * a CPU sparse matrix per sector, this function:
+ * 1. Parses interaction files once into vectors
+ * 2. Loops over all Sz sectors (n_up = 0, 1, ..., num_sites)
+ * 3. Creates a GPUFixedSzOperator per sector
+ * 4. Calls gpuFullDiagonalization (builds dense H via matVec, cuSOLVER zheevd)
+ * 5. Collects and sorts all eigenvalues
+ * 6. Saves the merged result to HDF5
+ * 
+ * Same memory advantage as CPU sector splitting - the largest sector is C(N,N/2).
+ * Each sector's GPU operator is created and destroyed independently, so only one
+ * sector's dense matrix is in GPU memory at a time.
+ * 
+ * @param interaction_file Path to interaction file (InterAll.dat)
+ * @param single_site_file Path to single-site file (Trans.dat)
+ * @param num_sites Number of spin sites
+ * @param spin_length Spin length (usually 0.5)
+ * @param params Parameters for diagonalization
+ * @return EDResults containing ALL eigenvalues from ALL sectors, sorted
+ */
+#ifdef WITH_CUDA
+inline EDResults exact_diagonalization_all_sz_sectors_gpu(
+    const std::string& interaction_file,
+    const std::string& single_site_file,
+    uint64_t num_sites,
+    float spin_length,
+    const EDParameters& params
+) {
+    EDResults results;
+    
+    uint64_t full_dim = 1ULL << num_sites;
+    uint64_t num_sectors = num_sites + 1;  // n_up = 0, 1, ..., num_sites
+    
+    std::cout << "\n" << std::string(80, '=') << std::endl;
+    std::cout << "GPU FULL DIAGONALIZATION VIA Sz SECTOR SPLITTING" << std::endl;
+    std::cout << std::string(80, '=') << std::endl;
+    std::cout << "Full Hilbert space dimension: " << full_dim << std::endl;
+    std::cout << "Number of Sz sectors: " << num_sectors << std::endl;
+    
+    // Pre-compute sector dimensions using binomial coefficients
+    auto binomial = [](uint64_t n, uint64_t k) -> uint64_t {
+        if (k > n - k) k = n - k;
+        uint64_t result = 1;
+        for (uint64_t i = 0; i < k; ++i) {
+            result *= (n - i);
+            result /= (i + 1);
+        }
+        return result;
+    };
+    
+    std::vector<uint64_t> sector_dims(num_sectors);
+    uint64_t largest_sector_dim = 0;
+    for (uint64_t n_up = 0; n_up <= num_sites; ++n_up) {
+        sector_dims[n_up] = binomial(num_sites, n_up);
+        if (sector_dims[n_up] > largest_sector_dim) {
+            largest_sector_dim = sector_dims[n_up];
+        }
+    }
+    
+    std::cout << "Largest sector dimension: " << largest_sector_dim 
+              << " (reduction: " << std::fixed << std::setprecision(1) 
+              << (double)full_dim / largest_sector_dim << "x)" 
+              << std::defaultfloat << std::endl;
+    std::cout << "Memory for full dense matrix:    " 
+              << (double)full_dim * full_dim * 16.0 / (1024.0*1024.0*1024.0)
+              << " GB" << std::endl;
+    std::cout << "Memory for largest sector:       " 
+              << (double)largest_sector_dim * largest_sector_dim * 16.0 / (1024.0*1024.0*1024.0)
+              << " GB" << std::endl;
+    
+    // Parse interaction files ONCE into vectors for reuse across sectors
+    std::vector<std::tuple<int, int, char, char, double>> gpu_interactions;
+    std::vector<std::tuple<int, char, double>> gpu_single_site_ops;
+    
+    {
+        std::ifstream inter_file(interaction_file);
+        if (inter_file.is_open()) {
+            std::string line;
+            std::getline(inter_file, line);
+            std::getline(inter_file, line);
+            std::istringstream iss(line);
+            uint64_t numLines;
+            std::string m;
+            iss >> m >> numLines;
+            for (uint64_t i = 0; i < 3; ++i) std::getline(inter_file, line);
+            
+            auto mapOp = [](uint64_t op) -> char {
+                if (op == 0) return '+';
+                if (op == 1) return '-';
+                return 'z';
+            };
+            
+            uint64_t lineCount = 0;
+            while (std::getline(inter_file, line) && lineCount < numLines) {
+                std::istringstream lineStream(line);
+                uint64_t Op_i, indx_i, Op_j, indx_j;
+                double E, F;
+                if (!(lineStream >> Op_i >> indx_i >> Op_j >> indx_j >> E >> F)) { lineCount++; continue; }
+                gpu_interactions.push_back(std::make_tuple(indx_i, indx_j, mapOp(Op_i), mapOp(Op_j), E));
+                lineCount++;
+            }
+        }
+        
+        if (!single_site_file.empty()) {
+            std::ifstream ss_file(single_site_file);
+            if (ss_file.is_open()) {
+                std::string line;
+                std::getline(ss_file, line);
+                std::getline(ss_file, line);
+                std::istringstream iss(line);
+                uint64_t numLines;
+                std::string m;
+                iss >> m >> numLines;
+                for (uint64_t i = 0; i < 3; ++i) std::getline(ss_file, line);
+                
+                auto mapOp = [](uint64_t op) -> char {
+                    if (op == 0) return '+';
+                    if (op == 1) return '-';
+                    return 'z';
+                };
+                
+                uint64_t lineCount = 0;
+                while (std::getline(ss_file, line) && lineCount < numLines) {
+                    std::istringstream lineStream(line);
+                    uint64_t Op_i, indx_i;
+                    double E, F;
+                    if (!(lineStream >> Op_i >> indx_i >> E >> F)) { lineCount++; continue; }
+                    gpu_single_site_ops.push_back(std::make_tuple(indx_i, mapOp(Op_i), E));
+                    lineCount++;
+                }
+            }
+        }
+    }
+    
+    std::cout << "Loaded " << gpu_interactions.size() << " interactions, "
+              << gpu_single_site_ops.size() << " single-site terms" << std::endl;
+    
+    // Collect all eigenvalues from all sectors
+    std::vector<double> all_eigenvalues;
+    all_eigenvalues.reserve(full_dim);
+    
+    auto total_start = std::chrono::high_resolution_clock::now();
+    
+    for (uint64_t n_up = 0; n_up <= num_sites; ++n_up) {
+        uint64_t dim = sector_dims[n_up];
+        double sz_value = spin_length * num_sites - n_up;
+        
+        std::cout << "\n--- Sector " << n_up + 1 << "/" << num_sectors 
+                  << ": n_up=" << n_up << ", Sz=" << sz_value
+                  << ", dim=" << dim << " ---" << std::endl;
+        
+        if (dim == 0) {
+            std::cout << "  Empty sector, skipping." << std::endl;
+            continue;
+        }
+        
+        auto sector_start = std::chrono::high_resolution_clock::now();
+        
+        // Create GPU Fixed Sz operator for this sector
+        void* gpu_op_handle = GPUEDWrapper::createGPUFixedSzOperatorDirect(
+            num_sites, n_up, spin_length,
+            gpu_interactions, gpu_single_site_ops);
+        
+        if (!gpu_op_handle) {
+            std::cerr << "  Error: Failed to create GPU operator for sector n_up=" << n_up << std::endl;
+            continue;
+        }
+        
+        // Run GPU full diag on this sector (no HDF5 save per sector)
+        std::vector<double> sector_eigenvalues;
+        GPUEDWrapper::runGPUFullDiag(
+            gpu_op_handle,
+            static_cast<int>(dim),
+            static_cast<int>(dim),  // Get ALL eigenvalues in each sector
+            sector_eigenvalues,
+            "",   // Empty dir = don't save per-sector HDF5
+            false // No eigenvectors needed for thermodynamics
+        );
+        
+        // Destroy GPU operator for this sector (frees GPU memory)
+        GPUEDWrapper::destroyGPUOperator(gpu_op_handle);
+        
+        // Append eigenvalues
+        all_eigenvalues.insert(all_eigenvalues.end(), 
+                                sector_eigenvalues.begin(), sector_eigenvalues.end());
+        
+        auto sector_end = std::chrono::high_resolution_clock::now();
+        double sector_time = std::chrono::duration<double>(sector_end - sector_start).count();
+        
+        if (!sector_eigenvalues.empty()) {
+            std::cout << "  GPU diag: " << std::fixed << std::setprecision(2) 
+                      << sector_time << " s, " << sector_eigenvalues.size() << " eigenvalues"
+                      << " [" << sector_eigenvalues.front() << ", " << sector_eigenvalues.back() << "]" 
+                      << std::defaultfloat << std::endl;
+        }
+    }
+    
+    auto total_end = std::chrono::high_resolution_clock::now();
+    double total_time = std::chrono::duration<double>(total_end - total_start).count();
+    
+    // Sort all eigenvalues globally
+    std::sort(all_eigenvalues.begin(), all_eigenvalues.end());
+    
+    // Store results
+    if (params.num_eigenvalues > 0 && static_cast<size_t>(params.num_eigenvalues) < all_eigenvalues.size()) {
+        results.eigenvalues.assign(all_eigenvalues.begin(), 
+                                   all_eigenvalues.begin() + params.num_eigenvalues);
+    } else {
+        results.eigenvalues = std::move(all_eigenvalues);
+    }
+    
+    std::cout << "\n" << std::string(80, '=') << std::endl;
+    std::cout << "GPU Sz-SPLIT FULL DIAG COMPLETE" << std::endl;
+    std::cout << "Total eigenvalues: " << results.eigenvalues.size() << std::endl;
+    std::cout << "Total wall time: " << std::fixed << std::setprecision(2) << total_time << " s" << std::endl;
+    if (!results.eigenvalues.empty()) {
+        std::cout << "Ground state energy: " << results.eigenvalues[0] << std::endl;
+    }
+    std::cout << std::string(80, '=') << std::endl;
+    
+    // Save results to HDF5
+    if (!params.output_dir.empty()) {
+        safe_system_call("mkdir -p " + params.output_dir);
+        
+        try {
+            std::string hdf5_file = HDF5IO::createOrOpenFile(params.output_dir);
+            HDF5IO::saveEigenvalues(hdf5_file, results.eigenvalues);
+            std::cout << "Saved " << results.eigenvalues.size() 
+                      << " eigenvalues to " << hdf5_file << std::endl;
+        } catch (const std::exception& e) {
+            std::cerr << "Warning: Failed to save to HDF5: " << e.what() << std::endl;
+        }
+    }
+    
+    return results;
+}
+#endif // WITH_CUDA
+
+
+// ============================================================================
 // FIXED SZ EXACT DIAGONALIZATION
 // ============================================================================
 
@@ -2542,13 +3000,16 @@ inline EDResults exact_diagonalization_fixed_sz(
     // Check if GPU method requested
     bool is_gpu_method = (method == DiagonalizationMethod::DAVIDSON_GPU ||
                           method == DiagonalizationMethod::LOBPCG_GPU ||
+                          method == DiagonalizationMethod::KRYLOV_SCHUR_GPU ||
+                          method == DiagonalizationMethod::BLOCK_KRYLOV_SCHUR_GPU ||
                           method == DiagonalizationMethod::LANCZOS_GPU ||
                           method == DiagonalizationMethod::LANCZOS_GPU_FIXED_SZ ||
                           method == DiagonalizationMethod::BLOCK_LANCZOS_GPU ||
                           method == DiagonalizationMethod::BLOCK_LANCZOS_GPU_FIXED_SZ ||
                           method == DiagonalizationMethod::mTPQ_GPU ||
                           method == DiagonalizationMethod::cTPQ_GPU ||
-                          method == DiagonalizationMethod::FTLM_GPU_FIXED_SZ);
+                          method == DiagonalizationMethod::FTLM_GPU_FIXED_SZ ||
+                          method == DiagonalizationMethod::FULL_GPU);
     
     EDResults results;
     
@@ -2690,6 +3151,33 @@ inline EDResults exact_diagonalization_fixed_sz(
                 params.num_eigenvalues,
                 params.block_size,
                 params.tolerance,
+                eigenvalues,
+                params.output_dir,
+                params.compute_eigenvectors);
+        } else if (method == DiagonalizationMethod::KRYLOV_SCHUR_GPU) {
+            GPUEDWrapper::runGPUKrylovSchurFixedSz(
+                gpu_op_handle, n_up,
+                params.num_eigenvalues,
+                params.max_iterations,
+                params.tolerance,
+                eigenvalues,
+                params.output_dir,
+                params.compute_eigenvectors);
+        } else if (method == DiagonalizationMethod::BLOCK_KRYLOV_SCHUR_GPU) {
+            GPUEDWrapper::runGPUBlockKrylovSchurFixedSz(
+                gpu_op_handle, n_up,
+                params.num_eigenvalues,
+                params.max_iterations,
+                params.block_size,
+                params.tolerance,
+                eigenvalues,
+                params.output_dir,
+                params.compute_eigenvectors);
+        } else if (method == DiagonalizationMethod::FULL_GPU) {
+            GPUEDWrapper::runGPUFullDiag(
+                gpu_op_handle,
+                fixed_sz_dim,
+                params.num_eigenvalues,
                 eigenvalues,
                 params.output_dir,
                 params.compute_eigenvectors);
@@ -2840,6 +3328,66 @@ EDResults exact_diagonalization_from_files(
             params
         );
     }
+    
+    // ========== Full Sz-Sector Split ==========
+    // Auto-enable Sz sector splitting for FULL diag when the Hamiltonian
+    // conserves total Sz.  This is always beneficial: it reduces the largest
+    // dense block from 2^N to C(N,N/2) (e.g. 29x less memory at N=17).
+    // The flag --full-sz-split can force it on (caller takes responsibility)
+    // or it is auto-detected by scanning InterAll.dat / Trans.dat.
+    if (method == DiagonalizationMethod::FULL || 
+        method == DiagonalizationMethod::SCALAPACK ||
+        method == DiagonalizationMethod::SCALAPACK_MIXED) {
+        
+        bool use_sz_split = params.full_sz_split;  // Explicitly requested?
+        
+        if (!use_sz_split) {
+            // Auto-detect: check if Hamiltonian conserves Sz
+            bool sz_conserved = hamiltonian_conserves_sz(interaction_file, single_site_file);
+            if (sz_conserved) {
+                std::cout << "[Auto] Hamiltonian conserves Sz — enabling sector splitting for full diag" << std::endl;
+                use_sz_split = true;
+            }
+        }
+        
+        if (use_sz_split) {
+            std::cout << "Using Sz-sector splitting for full diagonalization" << std::endl;
+            return exact_diagonalization_all_sz_sectors(
+                interaction_file,
+                single_site_file,
+                params.num_sites,
+                params.spin_length,
+                params
+            );
+        }
+    }
+    
+    // ========== GPU FULL_GPU Sz-Sector Split ==========
+    // Same auto-detection for GPU full diag: split into Sz sectors on GPU
+#ifdef WITH_CUDA
+    if (method == DiagonalizationMethod::FULL_GPU) {
+        bool use_sz_split = params.full_sz_split;
+        
+        if (!use_sz_split) {
+            bool sz_conserved = hamiltonian_conserves_sz(interaction_file, single_site_file);
+            if (sz_conserved) {
+                std::cout << "[Auto] Hamiltonian conserves Sz — enabling GPU sector splitting for full diag" << std::endl;
+                use_sz_split = true;
+            }
+        }
+        
+        if (use_sz_split) {
+            std::cout << "Using GPU Sz-sector splitting for full diagonalization" << std::endl;
+            return exact_diagonalization_all_sz_sectors_gpu(
+                interaction_file,
+                single_site_file,
+                params.num_sites,
+                params.spin_length,
+                params
+            );
+        }
+    }
+#endif
     
     // Handle GPU methods separately (they don't need CPU Operator)
 #ifdef WITH_CUDA
@@ -3132,6 +3680,86 @@ EDResults exact_diagonalization_from_files(
             std::cerr << "Error: BLOCK_LANCZOS_GPU_FIXED_SZ file interface not yet implemented." << std::endl;
             std::cerr << "Please use the fixed_sz wrapper function directly." << std::endl;
             throw std::runtime_error("Fixed Sz GPU Block Lanczos not yet integrated with file interface");
+        } else if (method == DiagonalizationMethod::KRYLOV_SCHUR_GPU) {
+            std::cout << "Running GPU Krylov-Schur method..." << std::endl;
+            
+            void* gpu_op = GPUEDWrapper::createGPUOperatorFromFiles(
+                params.num_sites, interaction_file, single_site_file);
+            
+            if (!gpu_op) {
+                std::cerr << "Error: Failed to create GPU operator" << std::endl;
+                throw std::runtime_error("GPU operator creation failed");
+            }
+            
+            std::vector<double> eigenvalues;
+            GPUEDWrapper::runGPUKrylovSchur(
+                gpu_op,
+                hilbert_space_dim,
+                params.num_eigenvalues,
+                params.max_iterations,
+                params.tolerance,
+                eigenvalues,
+                params.output_dir,
+                params.compute_eigenvectors
+            );
+            
+            results.eigenvalues = eigenvalues;
+            GPUEDWrapper::destroyGPUOperator(gpu_op);
+            
+            std::cout << "GPU Krylov-Schur completed successfully!" << std::endl;
+        } else if (method == DiagonalizationMethod::BLOCK_KRYLOV_SCHUR_GPU) {
+            std::cout << "Running GPU Block Krylov-Schur method..." << std::endl;
+            
+            void* gpu_op = GPUEDWrapper::createGPUOperatorFromFiles(
+                params.num_sites, interaction_file, single_site_file);
+            
+            if (!gpu_op) {
+                std::cerr << "Error: Failed to create GPU operator" << std::endl;
+                throw std::runtime_error("GPU operator creation failed");
+            }
+            
+            std::vector<double> eigenvalues;
+            GPUEDWrapper::runGPUBlockKrylovSchur(
+                gpu_op,
+                hilbert_space_dim,
+                params.num_eigenvalues,
+                params.max_iterations,
+                params.block_size,
+                params.tolerance,
+                eigenvalues,
+                params.output_dir,
+                params.compute_eigenvectors
+            );
+            
+            results.eigenvalues = eigenvalues;
+            GPUEDWrapper::destroyGPUOperator(gpu_op);
+            
+            std::cout << "GPU Block Krylov-Schur completed successfully!" << std::endl;
+        } else if (method == DiagonalizationMethod::FULL_GPU) {
+            std::cout << "Running GPU full diagonalization (cuSOLVER zheevd)..." << std::endl;
+            
+            void* gpu_op = GPUEDWrapper::createGPUOperatorFromFiles(
+                params.num_sites, interaction_file, single_site_file);
+            
+            if (!gpu_op) {
+                std::cerr << "Error: Failed to create GPU operator" << std::endl;
+                throw std::runtime_error("GPU operator creation failed");
+            }
+            
+            std::vector<double> eigenvalues;
+            GPUEDWrapper::runGPUFullDiag(
+                gpu_op,
+                hilbert_space_dim,
+                params.num_eigenvalues,
+                eigenvalues,
+                params.output_dir,
+                params.compute_eigenvectors
+            );
+            
+            results.eigenvalues = eigenvalues;
+            GPUEDWrapper::destroyGPUOperator(gpu_op);
+            
+            std::cout << "GPU full diagonalization completed successfully!" << std::endl;
         }
         
         return results;

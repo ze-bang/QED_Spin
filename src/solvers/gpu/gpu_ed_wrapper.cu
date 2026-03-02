@@ -20,6 +20,13 @@
 #include <ed/gpu/gpu_cg.cuh>
 #include <ed/gpu/gpu_ftlm.cuh>
 
+// Forward declaration from gpu_full_diag.cu
+extern void gpuFullDiagonalization(
+    GPUOperator* gpu_op, int N, int num_eigs,
+    std::vector<double>& eigenvalues,
+    std::vector<std::vector<std::complex<double>>>& eigenvectors,
+    bool compute_eigenvectors);
+
 bool GPUEDWrapper::isGPUAvailable() {
     int device_count = 0;
     cudaError_t error = cudaGetDeviceCount(&device_count);
@@ -260,6 +267,103 @@ void* GPUEDWrapper::createGPUOperatorFromFiles(
     return static_cast<void*>(gpu_op);
 }
 
+void* GPUEDWrapper::createGPUSymmetrizedOperator(
+    int n_sites, float spin_l,
+    int sector_dim,
+    const std::vector<uint64_t>& orbit_elements,
+    const std::vector<std::complex<double>>& orbit_coefficients,
+    const std::vector<int>& orbit_offsets,
+    const std::vector<double>& orbit_norms,
+    int group_size,
+    const std::string& interall_file,
+    const std::string& trans_file)
+{
+    std::cout << "Creating GPU Symmetrized Operator for sector dim=" << sector_dim << "\n";
+    
+    GPUSymmetrizedOperator* gpu_op = new GPUSymmetrizedOperator(n_sites, spin_l);
+    
+    // Load Hamiltonian terms from files (same as regular GPU operator)
+    int num_interactions = 0;
+    int num_single_site = 0;
+    
+    // Load InterAll.dat (two-site interactions)
+    std::ifstream interall(interall_file);
+    if (!interall.is_open()) {
+        std::cerr << "Warning: Could not open " << interall_file << "\n";
+    } else {
+        std::string line;
+        std::getline(interall, line);  // Skip header
+        std::getline(interall, line);  // Read num line
+        
+        std::istringstream iss(line);
+        int numLines;
+        std::string m;
+        iss >> m >> numLines;
+        
+        for (int i = 0; i < 3; ++i) std::getline(interall, line);  // Skip separators
+        
+        int lineCount = 0;
+        while (std::getline(interall, line) && lineCount < numLines) {
+            std::istringstream lineStream(line);
+            int Op_i, indx_i, Op_j, indx_j;
+            double E, F;
+            
+            if (!(lineStream >> Op_i >> indx_i >> Op_j >> indx_j >> E >> F)) { lineCount++; continue; }
+            if (std::abs(E) < 1e-12 && std::abs(F) < 1e-12) { lineCount++; continue; }
+            if (Op_i < 0 || Op_i > 2 || Op_j < 0 || Op_j > 2) { lineCount++; continue; }
+            
+            gpu_op->addTwoBodyTerm(Op_i, indx_i, Op_j, indx_j, std::complex<double>(E, F));
+            num_interactions++;
+            lineCount++;
+        }
+        interall.close();
+    }
+    
+    // Load Trans.dat (single-site terms)
+    std::ifstream trans(trans_file);
+    if (!trans.is_open()) {
+        std::cerr << "Warning: Could not open " << trans_file << "\n";
+    } else {
+        std::string line;
+        std::getline(trans, line);
+        std::getline(trans, line);
+        
+        std::istringstream iss(line);
+        int numLines;
+        std::string m;
+        iss >> m >> numLines;
+        
+        for (int i = 0; i < 3; ++i) std::getline(trans, line);
+        
+        int lineCount = 0;
+        while (std::getline(trans, line) && lineCount < numLines) {
+            std::istringstream lineStream(line);
+            int Op, indx;
+            double E, F;
+            
+            if (!(lineStream >> Op >> indx >> E >> F)) { lineCount++; continue; }
+            if (std::abs(E) > 1e-12 || std::abs(F) > 1e-12) {
+                gpu_op->addOneBodyTerm(Op, indx, std::complex<double>(E, F));
+                num_single_site++;
+            }
+            lineCount++;
+        }
+        trans.close();
+    }
+    
+    std::cout << "  Loaded " << num_interactions << " interactions, "
+              << num_single_site << " single-site terms\n";
+    
+    // Set sector orbit data (copies to GPU, builds hash table)
+    gpu_op->setSectorData(sector_dim, orbit_elements, orbit_coefficients,
+                          orbit_offsets, orbit_norms, group_size);
+    
+    // Allocate GPU memory for input/output vectors
+    gpu_op->allocateGPUMemory(sector_dim);
+    
+    return static_cast<void*>(gpu_op);
+}
+
 void* GPUEDWrapper::createGPUFixedSzOperatorDirect(
     int n_sites, int n_up, float spin_l,
     const std::vector<std::tuple<int, int, char, char, double>>& interactions,
@@ -291,28 +395,6 @@ void* GPUEDWrapper::createGPUFixedSzOperatorDirect(
     std::cout << "GPU Fixed Sz Operator created successfully\n";
     std::cout << "  Fixed Sz dimension: " << gpu_op->getFixedSzDimension() << "\n";
     
-    return static_cast<void*>(gpu_op);
-}
-
-void* GPUEDWrapper::createGPUOperatorFromCSR(int n_sites,
-                                            int N,
-                                            const std::vector<int>& row_ptr,
-                                            const std::vector<int>& col_ind,
-                                            const std::vector<std::complex<double>>& values) {
-    // Create GPUOperator and upload CSR arrays
-    GPUOperator* gpu_op = new GPUOperator(n_sites);
-
-    // Allocate GPU vectors (input/output) for size N
-    gpu_op->allocateGPUMemory(N);
-
-    // Convert and upload CSR
-    bool ok = gpu_op->loadCSR(N, row_ptr, col_ind, values);
-    if (!ok) {
-        std::cerr << "Error: Failed to load CSR into GPUOperator" << std::endl;
-        delete gpu_op;
-        return nullptr;
-    }
-
     return static_cast<void*>(gpu_op);
 }
 
@@ -350,8 +432,7 @@ void GPUEDWrapper::runGPULanczos(void* gpu_op_handle,
     GPUOperator* gpu_op = static_cast<GPUOperator*>(gpu_op_handle);
     
     // Note: Do NOT call allocateGPUMemory here if already allocated
-    // (it was already done in createGPUOperatorFromCSR or createGPUOperatorFromFiles)
-    // Calling it again would clear the CSR data for symmetrized blocks
+    // (it was already done in createGPUOperatorFromFiles or similar)
     
     // Create GPU Lanczos solver
     GPULanczos lanczos(gpu_op, max_iter, tol);
@@ -763,6 +844,182 @@ void GPUEDWrapper::runGPULOBPCGFixedSz(void* gpu_op_handle,
     
     runGPUDavidsonFixedSz(gpu_op_handle, n_up, num_eigenvalues, max_iter, max_subspace,
                          tol, eigenvalues, dir, compute_eigenvectors);
+}
+
+void GPUEDWrapper::runGPUKrylovSchur(void* gpu_op_handle,
+                                    int N, int num_eigenvalues, int max_iter,
+                                    double tol,
+                                    std::vector<double>& eigenvalues,
+                                    std::string dir,
+                                    bool compute_eigenvectors) {
+    if (!gpu_op_handle) {
+        std::cerr << "Error: NULL GPU operator handle\n";
+        return;
+    }
+    
+    GPUOperator* gpu_op = static_cast<GPUOperator*>(gpu_op_handle);
+    
+    std::cout << "\n========================================\n";
+    std::cout << "GPU Krylov-Schur Algorithm\n";
+    std::cout << "========================================\n";
+    std::cout << "  Dimension: " << N << "\n";
+    std::cout << "  Target eigenvalues: " << num_eigenvalues << "\n";
+    std::cout << "  Max Krylov size: " << max_iter << "\n";
+    std::cout << "  Tolerance: " << tol << "\n\n";
+    
+    // Create and run GPU Krylov-Schur solver
+    GPUKrylovSchur solver(gpu_op, max_iter, tol);
+    
+    std::vector<std::vector<std::complex<double>>> eigenvectors;
+    solver.run(num_eigenvalues, eigenvalues, eigenvectors, compute_eigenvectors);
+    
+    // Save results if directory specified
+    if (!dir.empty() && !eigenvalues.empty()) {
+        try {
+            HDF5IO::saveDiagonalizationResults(dir, eigenvalues, eigenvectors, "GPU-Krylov-Schur");
+            std::cout << "Saved results to " << dir << "/ed_results.h5\n";
+        } catch (const std::exception& e) {
+            std::cerr << "Warning: Failed to save results: " << e.what() << "\n";
+        }
+    }
+    
+    std::cout << "\nGPU Krylov-Schur complete\n";
+}
+
+void GPUEDWrapper::runGPUKrylovSchurFixedSz(void* gpu_op_handle,
+                                           int n_up,
+                                           int num_eigenvalues, int max_iter,
+                                           double tol,
+                                           std::vector<double>& eigenvalues,
+                                           std::string dir,
+                                           bool compute_eigenvectors) {
+    if (!gpu_op_handle) {
+        std::cerr << "Error: NULL GPU operator handle\n";
+        return;
+    }
+    
+    // Cast to GPUFixedSzOperator
+    GPUFixedSzOperator* gpu_op = static_cast<GPUFixedSzOperator*>(gpu_op_handle);
+    int fixed_sz_dim = gpu_op->getFixedSzDimension();
+    
+    std::cout << "\n========================================\n";
+    std::cout << "GPU Krylov-Schur (Fixed Sz)\n";
+    std::cout << "========================================\n";
+    std::cout << "  N_up: " << n_up << "\n";
+    std::cout << "  Dimension: " << fixed_sz_dim << "\n";
+    std::cout << "  Target eigenvalues: " << num_eigenvalues << "\n";
+    std::cout << "  Max Krylov size: " << max_iter << "\n";
+    std::cout << "  Tolerance: " << tol << "\n\n";
+    
+    // Allocate GPU memory for vectors
+    gpu_op->allocateGPUMemory(fixed_sz_dim);
+    
+    // Create and run GPU Krylov-Schur solver
+    GPUKrylovSchur solver(gpu_op, max_iter, tol);
+    
+    std::vector<std::vector<std::complex<double>>> eigenvectors;
+    solver.run(num_eigenvalues, eigenvalues, eigenvectors, compute_eigenvectors);
+    
+    // Save results if directory specified
+    if (!dir.empty() && !eigenvalues.empty()) {
+        try {
+            HDF5IO::saveDiagonalizationResults(dir, eigenvalues, eigenvectors, "GPU-Krylov-Schur-FixedSz");
+            std::cout << "Saved results to " << dir << "/ed_results.h5\n";
+        } catch (const std::exception& e) {
+            std::cerr << "Warning: Failed to save results: " << e.what() << "\n";
+        }
+    }
+    
+    std::cout << "\nGPU Krylov-Schur Fixed Sz complete\n";
+}
+
+void GPUEDWrapper::runGPUBlockKrylovSchur(void* gpu_op_handle,
+                                          int N, int num_eigenvalues, int max_iter,
+                                          int block_size, double tol,
+                                          std::vector<double>& eigenvalues,
+                                          std::string dir,
+                                          bool compute_eigenvectors) {
+    if (!gpu_op_handle) {
+        std::cerr << "Error: NULL GPU operator handle\n";
+        return;
+    }
+    
+    GPUOperator* gpu_op = static_cast<GPUOperator*>(gpu_op_handle);
+    
+    std::cout << "\n========================================\n";
+    std::cout << "GPU Block Krylov-Schur Algorithm\n";
+    std::cout << "========================================\n";
+    std::cout << "  Dimension: " << N << "\n";
+    std::cout << "  Target eigenvalues: " << num_eigenvalues << "\n";
+    std::cout << "  Block size: " << block_size << "\n";
+    std::cout << "  Max blocks: " << max_iter << "\n";
+    std::cout << "  Tolerance: " << tol << "\n\n";
+    
+    // Create and run GPU Block Krylov-Schur solver
+    GPUBlockKrylovSchur solver(gpu_op, max_iter, block_size, tol);
+    
+    std::vector<std::vector<std::complex<double>>> eigenvectors;
+    solver.run(num_eigenvalues, eigenvalues, eigenvectors, compute_eigenvectors);
+    
+    // Save results if directory specified
+    if (!dir.empty() && !eigenvalues.empty()) {
+        try {
+            HDF5IO::saveDiagonalizationResults(dir, eigenvalues, eigenvectors, "GPU-Block-Krylov-Schur");
+            std::cout << "Saved results to " << dir << "/ed_results.h5\n";
+        } catch (const std::exception& e) {
+            std::cerr << "Warning: Failed to save results: " << e.what() << "\n";
+        }
+    }
+    
+    std::cout << "\nGPU Block Krylov-Schur complete\n";
+}
+
+void GPUEDWrapper::runGPUBlockKrylovSchurFixedSz(void* gpu_op_handle,
+                                                  int n_up,
+                                                  int num_eigenvalues, int max_iter,
+                                                  int block_size, double tol,
+                                                  std::vector<double>& eigenvalues,
+                                                  std::string dir,
+                                                  bool compute_eigenvectors) {
+    if (!gpu_op_handle) {
+        std::cerr << "Error: NULL GPU operator handle\n";
+        return;
+    }
+    
+    // Cast to GPUFixedSzOperator
+    GPUFixedSzOperator* gpu_op = static_cast<GPUFixedSzOperator*>(gpu_op_handle);
+    int fixed_sz_dim = gpu_op->getFixedSzDimension();
+    
+    std::cout << "\n========================================\n";
+    std::cout << "GPU Block Krylov-Schur (Fixed Sz)\n";
+    std::cout << "========================================\n";
+    std::cout << "  N_up: " << n_up << "\n";
+    std::cout << "  Dimension: " << fixed_sz_dim << "\n";
+    std::cout << "  Target eigenvalues: " << num_eigenvalues << "\n";
+    std::cout << "  Block size: " << block_size << "\n";
+    std::cout << "  Max blocks: " << max_iter << "\n";
+    std::cout << "  Tolerance: " << tol << "\n\n";
+    
+    // Allocate GPU memory for vectors
+    gpu_op->allocateGPUMemory(fixed_sz_dim);
+    
+    // Create and run GPU Block Krylov-Schur solver
+    GPUBlockKrylovSchur solver(gpu_op, max_iter, block_size, tol);
+    
+    std::vector<std::vector<std::complex<double>>> eigenvectors;
+    solver.run(num_eigenvalues, eigenvalues, eigenvectors, compute_eigenvectors);
+    
+    // Save results if directory specified
+    if (!dir.empty() && !eigenvalues.empty()) {
+        try {
+            HDF5IO::saveDiagonalizationResults(dir, eigenvalues, eigenvectors, "GPU-Block-Krylov-Schur-FixedSz");
+            std::cout << "Saved results to " << dir << "/ed_results.h5\n";
+        } catch (const std::exception& e) {
+            std::cerr << "Warning: Failed to save results: " << e.what() << "\n";
+        }
+    }
+    
+    std::cout << "\nGPU Block Krylov-Schur Fixed Sz complete\n";
 }
 
 void GPUEDWrapper::runGPUFTLM(void* gpu_op_handle,
@@ -1236,6 +1493,42 @@ GPUEDWrapper::runGPUDynamicalCorrelationMultiTemp(void* gpu_op_handle,
     return results;
 }
 
+void GPUEDWrapper::runGPUFullDiag(void* gpu_op_handle,
+                                  int N, int num_eigenvalues,
+                                  std::vector<double>& eigenvalues,
+                                  std::string dir,
+                                  bool compute_eigenvectors) {
+    if (!gpu_op_handle) {
+        std::cerr << "Error: NULL GPU operator handle\n";
+        return;
+    }
+
+    GPUOperator* gpu_op = static_cast<GPUOperator*>(gpu_op_handle);
+
+    std::vector<std::vector<std::complex<double>>> eigvecs;
+    gpuFullDiagonalization(gpu_op, N,
+                           num_eigenvalues > 0 ? num_eigenvalues : N,
+                           eigenvalues, eigvecs, compute_eigenvectors);
+
+    // Save results to HDF5
+    if (!dir.empty()) {
+        if (compute_eigenvectors && !eigvecs.empty()) {
+            HDF5IO::saveDiagonalizationResults(dir, eigenvalues, eigvecs, "GPU_FULL");
+            std::cout << "GPU Full Diag: Saved " << eigenvalues.size() << " eigenvalues and "
+                      << eigvecs.size() << " eigenvectors to " << dir << "/ed_results.h5" << std::endl;
+        } else {
+            try {
+                std::string hdf5_file = HDF5IO::createOrOpenFile(dir);
+                HDF5IO::saveEigenvalues(hdf5_file, eigenvalues);
+                std::cout << "GPU Full Diag: Saved " << eigenvalues.size()
+                          << " eigenvalues to " << hdf5_file << std::endl;
+            } catch (const std::exception& e) {
+                std::cerr << "Warning: Failed to save eigenvalues to HDF5: " << e.what() << std::endl;
+            }
+        }
+    }
+}
+
 bool GPUEDWrapper::createGPUOperatorFromCPU(const Operator& cpu_op,
                                            void** gpu_op_handle,
                                            int n_sites) {
@@ -1268,14 +1561,6 @@ void* GPUEDWrapper::createGPUOperatorFromFiles(
     int n_sites,
     const std::string& interall_file,
     const std::string& trans_file) {
-    return nullptr;
-}
-
-void* GPUEDWrapper::createGPUOperatorFromCSR(int n_sites,
-                                            int N,
-                                            const std::vector<int>& row_ptr,
-                                            const std::vector<int>& col_ind,
-                                            const std::vector<std::complex<double>>& values) {
     return nullptr;
 }
 
@@ -1539,6 +1824,14 @@ bool GPUEDWrapper::createGPUOperatorFromCPU(const Operator& cpu_op,
                                            void** gpu_op_handle,
                                            int n_sites) {
     return false;
+}
+
+void GPUEDWrapper::runGPUFullDiag(void* gpu_op_handle,
+                                  int N, int num_eigenvalues,
+                                  std::vector<double>& eigenvalues,
+                                  std::string dir,
+                                  bool compute_eigenvectors) {
+    std::cerr << "CUDA not available - cannot run GPU full diag\n";
 }
 
 #endif // WITH_CUDA

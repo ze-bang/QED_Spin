@@ -136,13 +136,28 @@ def run_ed_for_cluster(args):
     symm_threshold = ed_options.get("symm_threshold", 13)
     use_symm = (num_sites > symm_threshold)
     
+    # Check if a specific ED method was requested (e.g. FULL_GPU)
+    requested_method = ed_options.get("method", "FULL").upper()
+    
     # Threshold for switching to ScaLAPACK (distributed diagonalization)
     scalapack_threshold = ed_options.get("scalapack_threshold", 16)
     use_scalapack = (num_sites >= scalapack_threshold and ed_options.get("use_scalapack", True))
     
     symm_indicator = ' with --symm' if use_symm else ''
     
-    if use_scalapack:
+    if requested_method == 'FULL_GPU':
+        # GPU full diagonalization requested explicitly
+        logging.info(f"Cluster {cluster_id} ({num_sites} sites, dim={hilbert_dim}): Using FULL_GPU diagonalization{symm_indicator}")
+        cmd = [
+            ed_executable,
+            ham_subdir,
+            '--method=FULL_GPU',
+            '--eigenvalues=FULL',
+            f'--output={cluster_ed_dir}/output',
+            f'--num_sites={num_sites}',
+            '--spin_length=0.5',
+        ]
+    elif use_scalapack:
         # Large cluster: use ScaLAPACK with mixed precision for efficient distributed diagonalization
         logging.info(f"Cluster {cluster_id} ({num_sites} sites, dim={hilbert_dim}): Using SCALAPACK_MIXED{symm_indicator}")
         cmd = [
@@ -230,8 +245,8 @@ def main():
     parser.add_argument('--h', type=float, default=0.0, help='Magnetic field strength')
     parser.add_argument('--field_dir', type=float, nargs=3, default=[0, 0, 1], 
                        help='Field direction (x,y,z), default is out-of-plane')
-    parser.add_argument('--model', type=str, default='heisenberg', 
-                       choices=['heisenberg', 'xxz', 'kitaev', 'anisotropic'],
+    parser.add_argument('--model', type=str, default='xxz_j1j2', 
+                       choices=['xxz_j1j2', 'kitaev', 'anisotropic'],
                        help='Spin model type')
     
     # Anisotropic exchange model parameters (YbMgGaO4-type)
@@ -239,6 +254,16 @@ def main():
     parser.add_argument('--Jpm', type=float, default=None, help='J_± for anisotropic model')
     parser.add_argument('--Jpmpm', type=float, default=None, help='J_±± for anisotropic model')
     parser.add_argument('--Jzpm', type=float, default=None, help='J_z± for anisotropic model')
+    
+    # JKΓΓ' (Kitaev) model parameters
+    parser.add_argument('--Gamma', type=float, default=None, help='Γ off-diagonal symmetric exchange for kitaev model')
+    parser.add_argument('--Gamma_prime', type=float, default=None, help="Γ' off-diagonal exchange for kitaev model")
+    
+    # Anisotropic g-tensor for Zeeman term
+    parser.add_argument('--g_ab', type=float, default=2.0,
+                       help='In-plane g-factor for Zeeman coupling (default: 2.0)')
+    parser.add_argument('--g_c', type=float, default=2.0,
+                       help='Out-of-plane (c-axis) g-factor for Zeeman coupling (default: 2.0)')
     
     # ED parameters
     parser.add_argument('--method', type=str, default='FULL', help='Diagonalization method')
@@ -265,12 +290,7 @@ def main():
     
     # SI units
     parser.add_argument('--SI_units', action='store_true', 
-                       help='Convert to SI units: specific heat in J/(mol·K). '
-                            'Temperature remains in units of J unless --J_kelvin is set.')
-    parser.add_argument('--J_kelvin', type=float, default=None,
-                       help='Exchange coupling J in Kelvin. If set with --SI_units, '
-                            'temperatures are converted to Kelvin: T_K = T × J_kelvin. '
-                            'Required for direct comparison with experimental data in Kelvin.')
+                       help='Convert to SI units: specific heat in J/(mol·K).')
     parser.add_argument('--measure_spin', action='store_true', help='Measure spin expectation values')
 
     # ScaLAPACK distributed diagonalization for large clusters
@@ -321,8 +341,10 @@ def main():
     ed_dir = os.path.join(args.base_dir, f'ed_results_order_{args.max_order}')
     nlc_dir = os.path.join(args.base_dir, f'nlc_results_order_{args.max_order}')
     
-    # Create directories
+    # Create directories (skip if already exists as symlink or dir)
     for directory in [cluster_dir, ham_dir, ed_dir, nlc_dir]:
+        if os.path.islink(directory) or os.path.isdir(directory):
+            continue
         os.makedirs(directory, exist_ok=True)
     
     # Step 1: Generate clusters
@@ -389,6 +411,8 @@ def main():
         logging.info("Step 2: Preparing Hamiltonian parameters for each cluster")
         if args.model == 'anisotropic':
             logging.info(f"Model: {args.model}, Jzz={args.Jzz}, Jpm={args.Jpm}, Jpmpm={args.Jpmpm}, Jzpm={args.Jzpm}, h={args.h}")
+        elif args.model == 'kitaev':
+            logging.info(f"Model: {args.model}, J={args.J1}, K={args.J2}, Γ={args.Gamma}, Γ'={args.Gamma_prime}, h={args.h}")
         else:
             logging.info(f"Model: {args.model}, J1={args.J1}, J2={args.J2}, h={args.h}")
         logging.info("="*80)
@@ -424,6 +448,16 @@ def main():
             if args.Jzpm is not None:
                 cmd.extend(['--Jzpm', str(args.Jzpm)])
             
+            # Add JKΓΓ' (Kitaev) model parameters if specified
+            if args.Gamma is not None:
+                cmd.extend(['--Gamma', str(args.Gamma)])
+            if args.Gamma_prime is not None:
+                cmd.extend(['--Gamma_prime', str(args.Gamma_prime)])
+            
+            # g-tensor parameters
+            cmd.extend(['--g_ab', str(args.g_ab)])
+            cmd.extend(['--g_c', str(args.g_c)])
+            
             try:
                 subprocess.run(cmd, check=True, capture_output=True)
             except subprocess.CalledProcessError as e:
@@ -451,10 +485,12 @@ def main():
             "use_scalapack": not args.no_scalapack,
         }
         
-        use_gpu = False  # GPU not used for FULL/ScaLAPACK diagonalization
+        use_gpu = (args.method.upper() == 'FULL_GPU')  # GPU used only for FULL_GPU method
         
         logging.info(f"NLCE ED Configuration:")
-        if not args.no_scalapack:
+        if args.method.upper() == 'FULL_GPU':
+            logging.info(f"  - Method: FULL_GPU (GPU-accelerated dense diagonalization)")
+        elif not args.no_scalapack:
             logging.info(f"  - Small clusters (< {args.scalapack_threshold} sites): FULL diagonalization")
             logging.info(f"  - Large clusters (>= {args.scalapack_threshold} sites): SCALAPACK_MIXED (distributed)")
         else:
@@ -509,9 +545,6 @@ def main():
         
         if args.SI_units:
             cmd.append('--SI_units')
-        
-        if args.J_kelvin is not None:
-            cmd.append(f'--J_kelvin={args.J_kelvin}')
         
         logging.info(f"Running command: {' '.join(cmd)}")
         try:

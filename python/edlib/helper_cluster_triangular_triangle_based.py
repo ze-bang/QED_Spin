@@ -65,57 +65,30 @@ def get_anisotropic_phase(direction_idx):
         raise ValueError(f"Unknown direction: {direction_idx}")
 
 
-def prepare_heisenberg_j1j2(cluster_data, J1=1.0, J2=0.0):
+def prepare_xxz_j1j2(cluster_data, J1=1.0, J2=0.0, Jz_ratio=1.0, h=0.0, h_direction=(0, 0, 1),
+                     g_ab=2.0, g_c=2.0):
     """
-    Prepare J1-J2 Heisenberg model parameters.
+    Prepare XXZ J1-J2 model parameters (unified model).
     
-    H = J1 * sum_{<ij>} S_i · S_j + J2 * sum_{<<ij>>} S_i · S_j
+    H = sum_{<ij>} [Jxy*(Sx_i Sx_j + Sy_i Sy_j) + J1*Sz_i Sz_j]
+      + J2 * sum_{<<ij>>} S_i · S_j
+      - μ_B sum_i [g_ab (B_x S^x + B_y S^y) + g_c B_z S^z]
+    
+    where Jxy = J1 * Jz_ratio.  Jz_ratio=1 gives isotropic Heisenberg.
+    J2 is always isotropic Heisenberg.
+    
+    This subsumes both the pure Heisenberg (Jz_ratio=1) and XXZ cases.
     
     Args:
         cluster_data: Cluster JSON data
         J1: Nearest-neighbor exchange (default: 1.0)
-        J2: Next-nearest neighbor exchange (default: 0.0)
-        
-    Returns:
-        Dictionary with Hamiltonian parameters for ED
-    """
-    n_sites = cluster_data['n_sites']
-    bonds = cluster_data['bonds']
-    
-    # For J1-J2, we only have nearest-neighbor bonds in the cluster
-    # (J2 would require second-neighbor bonds, which need to be computed separately)
-    
-    interactions = []
-    for i, j in bonds:
-        interactions.append({
-            'site1': i,
-            'site2': j,
-            'Jxx': J1,
-            'Jyy': J1,
-            'Jzz': J1
-        })
-    
-    return {
-        'n_sites': n_sites,
-        'interactions': interactions,
-        'model': 'heisenberg_j1j2',
-        'J1': J1,
-        'J2': J2
-    }
-
-
-def prepare_xxz_model(cluster_data, Jxy=1.0, Jz=1.0, h=0.0, h_direction=(0, 0, 1)):
-    """
-    Prepare XXZ model parameters.
-    
-    H = sum_{<ij>} [Jxy (S_i^x S_j^x + S_i^y S_j^y) + Jz S_i^z S_j^z] - h sum_i S_i · n
-    
-    Args:
-        cluster_data: Cluster JSON data
-        Jxy: XY coupling strength
-        Jz: Z coupling strength
+        J2: Next-nearest neighbor exchange, isotropic (default: 0.0)
+        Jz_ratio: Jxy/Jz ratio (default: 1.0 = isotropic Heisenberg)
+                  Convention: Jz = J1, Jxy = J1 * Jz_ratio
         h: Magnetic field strength
         h_direction: Field direction (normalized internally)
+        g_ab: In-plane g-factor (default: 2.0)
+        g_c: Out-of-plane g-factor (default: 2.0)
         
     Returns:
         Dictionary with Hamiltonian parameters for ED
@@ -123,6 +96,9 @@ def prepare_xxz_model(cluster_data, Jxy=1.0, Jz=1.0, h=0.0, h_direction=(0, 0, 1
     n_sites = cluster_data['n_sites']
     bonds = cluster_data['bonds']
     
+    Jxy = J1 * Jz_ratio
+    
+    # NN bonds: XXZ with Jz=J1, Jxy=J1*Jz_ratio
     interactions = []
     for i, j in bonds:
         interactions.append({
@@ -130,26 +106,35 @@ def prepare_xxz_model(cluster_data, Jxy=1.0, Jz=1.0, h=0.0, h_direction=(0, 0, 1
             'site2': j,
             'Jxx': Jxy,
             'Jyy': Jxy,
-            'Jzz': Jz
+            'Jzz': J1
         })
+    
+    # TODO: NNN (J2) bonds need second-neighbor bond list from cluster data.
+    # When available, add isotropic J2 interactions here.
     
     # Normalize field direction
     h_dir = np.array(h_direction, dtype=float)
     h_dir = h_dir / np.linalg.norm(h_dir) if np.linalg.norm(h_dir) > 0 else np.array([0, 0, 1])
     
+    # Build Zeeman single-site terms
+    zeeman_terms = _build_zeeman_terms(n_sites, h, h_dir, g_ab, g_c)
+    
     return {
         'n_sites': n_sites,
         'interactions': interactions,
+        'zeeman_terms': zeeman_terms,
         'h': h,
         'h_direction': h_dir.tolist(),
-        'model': 'xxz',
-        'Jxy': Jxy,
-        'Jz': Jz
+        'model': 'xxz_j1j2',
+        'J1': J1,
+        'J2': J2,
+        'Jz_ratio': Jz_ratio
     }
 
 
 def prepare_anisotropic_exchange(cluster_data, Jzz=1.0, Jpm=0.0, Jpmpm=0.0, Jzpm=0.0, 
-                                  h=0.0, h_direction=(0, 0, 1)):
+                                  h=0.0, h_direction=(0, 0, 1),
+                                  g_ab=2.0, g_c=2.0):
     """
     Prepare anisotropic exchange model (YbMgGaO4-type) parameters.
     
@@ -158,6 +143,7 @@ def prepare_anisotropic_exchange(cluster_data, Jzz=1.0, Jpm=0.0, Jpmpm=0.0, Jzpm
                     + J_±± (γ_α S_i^+ S_j^+ + γ_α* S_i^- S_j^-)
                     - i J_z±/2 ((γ_α* S_i^+ - γ_α S_i^-) S_j^z 
                                + S_i^z (γ_α* S_j^+ - γ_α S_j^-))]
+      - μ_B Σ_i [g_ab (B_x S^x + B_y S^y) + g_c B_z S^z]
     
     where γ_α = e^{iφ̃_α} with phases:
       φ̃_0 = 0       for bonds along a1 direction
@@ -180,6 +166,8 @@ def prepare_anisotropic_exchange(cluster_data, Jzz=1.0, Jpm=0.0, Jpmpm=0.0, Jzpm
         Jzpm: Mixed S^z S^± coupling (= J_z±)
         h: Magnetic field strength
         h_direction: Field direction
+        g_ab: In-plane g-factor (default: 2.0)
+        g_c: Out-of-plane g-factor (default: 2.0)
         
     Returns:
         Dictionary with Hamiltonian parameters for ED
@@ -234,9 +222,13 @@ def prepare_anisotropic_exchange(cluster_data, Jzz=1.0, Jpm=0.0, Jpmpm=0.0, Jzpm
     h_dir = np.array(h_direction, dtype=float)
     h_dir = h_dir / np.linalg.norm(h_dir) if np.linalg.norm(h_dir) > 0 else np.array([0, 0, 1])
     
+    # Build Zeeman single-site terms
+    zeeman_terms = _build_zeeman_terms(n_sites, h, h_dir, g_ab, g_c)
+    
     return {
         'n_sites': n_sites,
         'interactions': interactions,
+        'zeeman_terms': zeeman_terms,
         'h': h,
         'h_direction': h_dir.tolist(),
         'model': 'anisotropic_exchange',
@@ -245,6 +237,34 @@ def prepare_anisotropic_exchange(cluster_data, Jzz=1.0, Jpm=0.0, Jpmpm=0.0, Jzpm
         'Jpmpm': Jpmpm,
         'Jzpm': Jzpm
     }
+
+
+def _build_zeeman_terms(n_sites, h, h_dir, g_ab, g_c):
+    """
+    Build Zeeman single-site terms for the anisotropic g-tensor.
+    
+    H_Z = -μ_B Σ_i [g_ab (B_x S_i^x + B_y S_i^y) + g_c B_z S_i^z]
+    
+    Returns list of dicts with keys: site, Sx_coeff, Sy_coeff, Sz_coeff
+    (all real; sign convention: H_Z = Σ_i [hx Sx + hy Sy + hz Sz])
+    """
+    if abs(h) < 1e-15:
+        return []
+    
+    # Effective field components with g-tensor
+    hx = -h * h_dir[0] * g_ab   # -μ_B g_ab B_x
+    hy = -h * h_dir[1] * g_ab   # -μ_B g_ab B_y
+    hz = -h * h_dir[2] * g_c    # -μ_B g_c  B_z
+    
+    terms = []
+    for site in range(n_sites):
+        terms.append({
+            'site': site,
+            'hx': hx,
+            'hy': hy,
+            'hz': hz
+        })
+    return terms
 
 
 def write_ed_config(ham_params, output_path, cluster_data, 
@@ -289,12 +309,17 @@ def write_ed_config(ham_params, output_path, cluster_data,
         site2 = inter['site2']
         
         # Write coupling matrix elements
-        Jxx = inter.get('Jxx', 0.0)
-        Jyy = inter.get('Jyy', 0.0)
-        Jzz = inter.get('Jzz', 0.0)
-        Jxy = inter.get('Jxy', 0.0)
-        Jxz = inter.get('Jxz', 0.0)
-        Jyz = inter.get('Jyz', 0.0)
+        _s = lambda v: 0.0 if abs(v) < 1e-15 else float(v)
+        Jxx = _s(inter.get('Jxx', 0.0))
+        Jyy = _s(inter.get('Jyy', 0.0))
+        Jzz = _s(inter.get('Jzz', 0.0))
+        Jxy = _s(inter.get('Jxy', 0.0))
+        Jxz = _s(inter.get('Jxz', 0.0))
+        Jyz = _s(inter.get('Jyz', 0.0))
+        
+        # Skip interactions where all couplings are zero
+        if Jxx == 0.0 and Jyy == 0.0 and Jzz == 0.0 and Jxy == 0.0 and Jxz == 0.0 and Jyz == 0.0:
+            continue
         
         lines.append(f"interaction{idx} = {site1}, {site2}, {Jxx}, {Jyy}, {Jzz}, {Jxy}, {Jxz}, {Jyz}")
     
@@ -307,6 +332,23 @@ def write_ed_config(ham_params, output_path, cluster_data,
         lines.append(f"h = {h}")
         lines.append(f"h_direction = {h_dir[0]}, {h_dir[1]}, {h_dir[2]}")
     
+    # Zeeman single-site terms (anisotropic g-tensor)
+    zeeman_terms = ham_params.get('zeeman_terms', [])
+    if zeeman_terms:
+        lines.append("")
+        lines.append("# Zeeman terms (anisotropic g-tensor)")
+        lines.append(f"# H_Z = sum_i [hx*Sx + hy*Sy + hz*Sz]")
+        for zt in zeeman_terms:
+            site = zt['site']
+            _s = lambda v: 0.0 if abs(v) < 1e-15 else float(v)
+            hx = _s(zt['hx'])
+            hy = _s(zt['hy'])
+            hz = _s(zt['hz'])
+            # Skip zeeman terms where all components are zero
+            if hx == 0.0 and hy == 0.0 and hz == 0.0:
+                continue
+            lines.append(f"zeeman{site} = {site}, {hx}, {hy}, {hz}")
+    
     # Write the file
     os.makedirs(os.path.dirname(output_path) if os.path.dirname(output_path) else '.', exist_ok=True)
     with open(output_path, 'w') as f:
@@ -315,14 +357,14 @@ def write_ed_config(ham_params, output_path, cluster_data,
     return output_path
 
 
-def prepare_cluster_for_ed(cluster_json_path, output_dir, model='heisenberg', **model_params):
+def prepare_cluster_for_ed(cluster_json_path, output_dir, model='xxz_j1j2', **model_params):
     """
     Prepare a cluster for ED calculation.
     
     Args:
         cluster_json_path: Path to cluster JSON file
         output_dir: Directory to write ED input files
-        model: Model type ('heisenberg', 'xxz', 'anisotropic')
+        model: Model type ('xxz_j1j2', 'anisotropic')
         **model_params: Model-specific parameters
         
     Returns:
@@ -330,16 +372,17 @@ def prepare_cluster_for_ed(cluster_json_path, output_dir, model='heisenberg', **
     """
     cluster_data = load_cluster_json(cluster_json_path)
     
-    if model == 'heisenberg' or model == 'heisenberg_j1j2':
-        ham_params = prepare_heisenberg_j1j2(cluster_data, 
-                                              J1=model_params.get('J1', 1.0),
-                                              J2=model_params.get('J2', 0.0))
-    elif model == 'xxz':
-        ham_params = prepare_xxz_model(cluster_data,
-                                        Jxy=model_params.get('Jxy', 1.0),
-                                        Jz=model_params.get('Jz', 1.0),
-                                        h=model_params.get('h', 0.0),
-                                        h_direction=model_params.get('h_direction', (0, 0, 1)))
+    _g_ab = model_params.get('g_ab', 2.0)
+    _g_c = model_params.get('g_c', 2.0)
+    
+    if model == 'xxz_j1j2':
+        ham_params = prepare_xxz_j1j2(cluster_data, 
+                                       J1=model_params.get('J1', 1.0),
+                                       J2=model_params.get('J2', 0.0),
+                                       Jz_ratio=model_params.get('Jz_ratio', 1.0),
+                                       h=model_params.get('h', 0.0),
+                                       h_direction=model_params.get('h_direction', (0, 0, 1)),
+                                       g_ab=_g_ab, g_c=_g_c)
     elif model == 'anisotropic':
         ham_params = prepare_anisotropic_exchange(cluster_data,
                                                    Jzz=model_params.get('Jzz', 1.0),
@@ -347,7 +390,8 @@ def prepare_cluster_for_ed(cluster_json_path, output_dir, model='heisenberg', **
                                                    Jpmpm=model_params.get('Jpmpm', 0.0),
                                                    Jzpm=model_params.get('Jzpm', 0.0),
                                                    h=model_params.get('h', 0.0),
-                                                   h_direction=model_params.get('h_direction', (0, 0, 1)))
+                                                   h_direction=model_params.get('h_direction', (0, 0, 1)),
+                                                   g_ab=_g_ab, g_c=_g_c)
     else:
         raise ValueError(f"Unknown model: {model}")
     
@@ -394,6 +438,92 @@ def get_lattice_constant_triangular(order, cluster_data):
     return 2.0 / n_triangles if n_triangles > 0 else 1.0
 
 
+def visualize_bond_types(cluster_data, output_path='triangle_bond_types.png', annotate_bonds=True):
+    """
+    Visualize bond direction types for a triangle-based cluster.
+
+    Args:
+        cluster_data: Cluster JSON data with sites, bonds, and optional bond_directions
+        output_path: Path to save the figure
+        annotate_bonds: Whether to label bonds with index and direction
+
+    Returns:
+        Saved output path, or None if matplotlib is unavailable
+    """
+    try:
+        import matplotlib.pyplot as plt
+        from matplotlib.lines import Line2D
+    except ImportError:
+        print("Warning: matplotlib not installed, skipping bond type visualization")
+        return None
+
+    bonds = cluster_data.get('bonds', [])
+    if not bonds:
+        raise ValueError("cluster_data has no bonds to visualize")
+
+    n_sites = cluster_data.get('n_sites', 0)
+    bond_directions = cluster_data.get('bond_directions', [0] * len(bonds))
+    if len(bond_directions) < len(bonds):
+        bond_directions = list(bond_directions) + [0] * (len(bonds) - len(bond_directions))
+
+    if 'positions' in cluster_data and len(cluster_data['positions']) == n_sites:
+        positions = np.array(cluster_data['positions'], dtype=float)
+    elif 'sites' in cluster_data and len(cluster_data['sites']) == n_sites:
+        lattice_sites = np.array(cluster_data['sites'], dtype=float)
+        positions = np.outer(lattice_sites[:, 0], A1) + np.outer(lattice_sites[:, 1], A2)
+    else:
+        raise ValueError("cluster_data requires either 'positions' or 'sites' with length n_sites")
+
+    direction_colors = {0: 'tab:blue', 1: 'tab:orange', 2: 'tab:green'}
+    direction_labels = {
+        0: 'dir 0: a1, phi=0',
+        1: 'dir 1: a2, phi=-2pi/3',
+        2: 'dir 2: a2-a1, phi=+2pi/3'
+    }
+
+    fig, ax = plt.subplots(figsize=(7.5, 6.5))
+
+    for bond_idx, (i, j) in enumerate(bonds):
+        d = int(bond_directions[bond_idx])
+        color = direction_colors.get(d, 'tab:red')
+        p1 = positions[i]
+        p2 = positions[j]
+        ax.plot([p1[0], p2[0]], [p1[1], p2[1]], color=color, linewidth=2.5, alpha=0.9, zorder=1)
+
+        if annotate_bonds:
+            midpoint = 0.5 * (p1 + p2)
+            ax.text(midpoint[0], midpoint[1], f"b{bond_idx}:d{d}", fontsize=8,
+                    ha='center', va='center',
+                    bbox={'boxstyle': 'round,pad=0.2', 'facecolor': 'white', 'alpha': 0.8, 'edgecolor': 'none'},
+                    zorder=3)
+
+    ax.scatter(positions[:, 0], positions[:, 1], s=100, c='black', zorder=2)
+    for site_idx, pos in enumerate(positions):
+        ax.text(pos[0], pos[1], f"{site_idx}", fontsize=9, color='white',
+                ha='center', va='center', zorder=4)
+
+    handles = [
+        Line2D([0], [0], color=direction_colors[0], linewidth=2.5, label=direction_labels[0]),
+        Line2D([0], [0], color=direction_colors[1], linewidth=2.5, label=direction_labels[1]),
+        Line2D([0], [0], color=direction_colors[2], linewidth=2.5, label=direction_labels[2]),
+    ]
+
+    ax.legend(handles=handles, loc='best', frameon=True)
+    ax.set_title('Triangle-based cluster bond types')
+    ax.set_xlabel('x')
+    ax.set_ylabel('y')
+    ax.set_aspect('equal')
+    ax.grid(True, alpha=0.25)
+    plt.tight_layout()
+
+    out_dir = os.path.dirname(output_path)
+    if out_dir:
+        os.makedirs(out_dir, exist_ok=True)
+    fig.savefig(output_path, dpi=200, bbox_inches='tight')
+    plt.close(fig)
+    return output_path
+
+
 if __name__ == '__main__':
     # Test with a sample cluster
     test_cluster = {
@@ -408,8 +538,14 @@ if __name__ == '__main__':
         'weight': 1
     }
     
-    print("Testing Heisenberg model:")
-    ham = prepare_heisenberg_j1j2(test_cluster, J1=1.0)
+    print("Testing XXZ J1-J2 model (isotropic, Jz_ratio=1):")
+    ham = prepare_xxz_j1j2(test_cluster, J1=1.0)
+    for inter in ham['interactions']:
+        print(f"  Bond {inter['site1']}-{inter['site2']}: "
+              f"Jxx={inter['Jxx']}, Jyy={inter['Jyy']}, Jzz={inter['Jzz']}")
+    
+    print("\nTesting XXZ J1-J2 model (anisotropic, Jz_ratio=0.5):")
+    ham = prepare_xxz_j1j2(test_cluster, J1=1.0, Jz_ratio=0.5)
     for inter in ham['interactions']:
         print(f"  Bond {inter['site1']}-{inter['site2']}: "
               f"Jxx={inter['Jxx']}, Jyy={inter['Jyy']}, Jzz={inter['Jzz']}")
@@ -421,3 +557,7 @@ if __name__ == '__main__':
               f"γ={inter['gamma_re']:.3f}+{inter['gamma_im']:.3f}i")
         print(f"    Jxx={inter['Jxx']:.4f}, Jyy={inter['Jyy']:.4f}, Jzz={inter['Jzz']:.4f}")
         print(f"    Jxy={inter['Jxy']:.4f}, Jxz={inter['Jxz']:.4f}, Jyz={inter['Jyz']:.4f}")
+
+    plot_path = visualize_bond_types(test_cluster, output_path='triangle_bond_types_test.png')
+    if plot_path is not None:
+        print(f"\nBond-type plot saved to: {plot_path}")

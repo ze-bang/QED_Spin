@@ -590,8 +590,11 @@ def prepare_hamiltonian_parameters(output_dir, nn_list, nn_list_2nn, nn_list_3nn
 
 
 def write_interALL(output_dir, interALL, file_name):
-    """Write interaction parameters to a file"""
-    num_param = len(interALL)
+    """Write interaction parameters to a file (skipping zero-coupling terms)"""
+    _s = lambda v: 0.0 if abs(v) < 1e-15 else float(v)
+    nonzero = [i for i in range(len(interALL))
+               if abs(interALL[i,4]) > 1e-15 or abs(interALL[i,5]) > 1e-15]
+    num_param = len(nonzero)
     with open(f"{output_dir}/{file_name}", 'w') as f:
         f.write("===================\n")
         f.write(f"num {num_param:8d}\n")
@@ -599,19 +602,22 @@ def write_interALL(output_dir, interALL, file_name):
         f.write("===================\n")
         f.write("===================\n")
         
-        for i in range(num_param):
+        for i in nonzero:
             f.write(f" {int(interALL[i,0]):8d} " \
                    f" {int(interALL[i,1]):8d}   " \
                    f" {int(interALL[i,2]):8d}   " \
                    f" {int(interALL[i,3]):8d}   " \
-                   f" {interALL[i,4]:8f}   " \
-                   f" {interALL[i,5]:8f}   " \
+                   f" {_s(interALL[i,4]):8f}   " \
+                   f" {_s(interALL[i,5]):8f}   " \
                    f"\n")
 
 
 def write_transfer(output_dir, transfer, file_name):
-    """Write transfer (field) parameters to a file"""
-    num_param = len(transfer)
+    """Write transfer (field) parameters to a file (skipping zero-coupling terms)"""
+    _s = lambda v: 0.0 if abs(v) < 1e-15 else float(v)
+    nonzero = [i for i in range(len(transfer))
+               if abs(transfer[i,2]) > 1e-15 or abs(transfer[i,3]) > 1e-15]
+    num_param = len(nonzero)
     with open(f"{output_dir}/{file_name}", 'w') as f:
         f.write("===================\n")
         f.write(f"num {num_param:8d}\n")
@@ -619,11 +625,11 @@ def write_transfer(output_dir, transfer, file_name):
         f.write("===================\n")
         f.write("===================\n")
         
-        for i in range(num_param):
+        for i in nonzero:
             f.write(f" {int(transfer[i,0]):8d} " \
                    f" {int(transfer[i,1]):8d}   " \
-                   f" {transfer[i,2]:8f}   " \
-                   f" {transfer[i,3]:8f}" \
+                   f" {_s(transfer[i,2]):8f}   " \
+                   f" {_s(transfer[i,3]):8f}" \
                    f"\n")
 
 

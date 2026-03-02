@@ -295,7 +295,7 @@ def write_cluster_nn_list(output_dir, cluster_name, nn_list, positions, sublatti
         for i, vector in enumerate(basis):
             f.write(f"{i} {vector[0]:.6f} {vector[1]:.6f} {vector[2]:.6f}\n")
 
-def prepare_hamiltonian_parameters(output_dir, non_kramer, nn_list, positions, sublattice_indices, node_mapping, Jxx, Jyy, Jzz, h, field_dir):
+def prepare_hamiltonian_parameters(output_dir, non_kramer, nn_list, positions, sublattice_indices, node_mapping, Jxx, Jyy, Jzz, h, field_dir, bias_field=0.0, transverse_bias_field=0.0):
     """
     Prepare Hamiltonian parameters for exact diagonalization
     
@@ -308,6 +308,8 @@ def prepare_hamiltonian_parameters(output_dir, non_kramer, nn_list, positions, s
         Jxx, Jyy, Jzz: Exchange couplings
         h: Field strength
         field_dir: Field direction (3-vector)
+        bias_field: Uniform local-frame Sz bias (-bias_field * Sz_i on each site)
+        transverse_bias_field: Uniform local-frame Sx bias (-transverse_bias_field * Sx_i on each site)
     """
     # Prepare Hamiltonian parameters
     Jpm = -(Jxx+Jyy)/4
@@ -344,6 +346,15 @@ def prepare_hamiltonian_parameters(output_dir, non_kramer, nn_list, positions, s
         sub_idx = sublattice_indices[site_id]
         local_field = h * np.dot(field_dir, z_local[sub_idx])
         transfer.append([2, node_mapping[i], -local_field, 0])
+        
+        # Uniform local-frame bias field (favours spin-up along local z)
+        if abs(bias_field) > 1e-15:
+            transfer.append([2, node_mapping[i], -bias_field, 0])
+        
+        # Uniform local-frame transverse bias field (Sx = (S+ + S-)/2)
+        if abs(transverse_bias_field) > 1e-15:
+            transfer.append([0, node_mapping[i], -transverse_bias_field/2, 0])  # S+ part
+            transfer.append([1, node_mapping[i], -transverse_bias_field/2, 0])  # S- part
         
         # Exchange interactions
         for neighbor_id in nn_list[site_id]:
@@ -391,8 +402,11 @@ def prepare_hamiltonian_parameters(output_dir, non_kramer, nn_list, positions, s
     write_spin_operators(output_dir, 2, [0, 0, 4*np.pi], "observables_Sz_Gammp.dat", max_site, positions)
 
 def write_interALL(output_dir, interALL, file_name):
-    """Write interaction parameters to a file"""
-    num_param = len(interALL)
+    """Write interaction parameters to a file (skipping zero-coupling terms)"""
+    _s = lambda v: 0.0 if abs(v) < 1e-15 else float(v)
+    nonzero = [i for i in range(len(interALL))
+               if abs(interALL[i,4]) > 1e-15 or abs(interALL[i,5]) > 1e-15]
+    num_param = len(nonzero)
     with open(f"{output_dir}/{file_name}", 'w') as f:
         f.write("===================\n")
         f.write(f"num {num_param:8d}\n")
@@ -400,18 +414,21 @@ def write_interALL(output_dir, interALL, file_name):
         f.write("===================\n")
         f.write("===================\n")
         
-        for i in range(num_param):
+        for i in nonzero:
             f.write(f" {int(interALL[i,0]):8d} " \
                    f" {int(interALL[i,1]):8d}   " \
                    f" {int(interALL[i,2]):8d}   " \
                    f" {int(interALL[i,3]):8d}   " \
-                   f" {interALL[i,4]:8f}   " \
-                   f" {interALL[i,5]:8f}   " \
+                   f" {_s(interALL[i,4]):8f}   " \
+                   f" {_s(interALL[i,5]):8f}   " \
                    f"\n")
 
 def write_transfer(output_dir, transfer, file_name):
-    """Write transfer (field) parameters to a file"""
-    num_param = len(transfer)
+    """Write transfer (field) parameters to a file (skipping zero-coupling terms)"""
+    _s = lambda v: 0.0 if abs(v) < 1e-15 else float(v)
+    nonzero = [i for i in range(len(transfer))
+               if abs(transfer[i,2]) > 1e-15 or abs(transfer[i,3]) > 1e-15]
+    num_param = len(nonzero)
     with open(f"{output_dir}/{file_name}", 'w') as f:
         f.write("===================\n")
         f.write(f"num {num_param:8d}\n")
@@ -419,11 +436,11 @@ def write_transfer(output_dir, transfer, file_name):
         f.write("===================\n")
         f.write("===================\n")
         
-        for i in range(num_param):
+        for i in nonzero:
             f.write(f" {int(transfer[i,0]):8d} " \
                    f" {int(transfer[i,1]):8d}   " \
-                   f" {transfer[i,2]:8f}   " \
-                   f" {transfer[i,3]:8f}" \
+                   f" {_s(transfer[i,2]):8f}   " \
+                   f" {_s(transfer[i,3]):8f}" \
                    f"\n")
 
 def write_one_body_correlations(output_dir, Op, N, file_name):
@@ -547,7 +564,7 @@ def plot_cluster(vertices, edges, output_dir, cluster_name, sublattice_indices=N
 def main():
     """Main function to process command line arguments and run the program"""
     if len(sys.argv) < 13:
-        print("Usage: python helper_pyrochlore.py Jxx Jyy Jzz h fieldx fieldy fieldz output_dir dim1 dim2 dim3 pbc")
+        print("Usage: python helper_pyrochlore.py Jxx Jyy Jzz h fieldx fieldy fieldz output_dir dim1 dim2 dim3 pbc [non_kramer] [bias_field] [transverse_bias_field]")
         sys.exit(1)
     
     # Parse command line arguments
@@ -563,6 +580,8 @@ def main():
     use_pbc = bool(int(sys.argv[12]))
 
     non_kramer = bool(int(sys.argv[13])) if len(sys.argv) > 13 else False
+    bias_field = float(sys.argv[14]) if len(sys.argv) > 14 else 0.0  # Uniform local-frame Sz bias
+    transverse_bias_field = float(sys.argv[15]) if len(sys.argv) > 15 else 0.0  # Uniform local-frame Sx bias
     # Ensure output directory exists
     if not os.path.isdir(output_dir):
         os.makedirs(output_dir)
@@ -582,7 +601,7 @@ def main():
     write_cluster_nn_list(output_dir, cluster_name, nn_list, positions, sublattice_indices, node_mapping)
     
     # Prepare Hamiltonian parameters
-    prepare_hamiltonian_parameters(output_dir, non_kramer, nn_list, positions, sublattice_indices, node_mapping, Jxx, Jyy, Jzz, h, field_dir)
+    prepare_hamiltonian_parameters(output_dir, non_kramer, nn_list, positions, sublattice_indices, node_mapping, Jxx, Jyy, Jzz, h, field_dir, bias_field, transverse_bias_field)
 
     # Plot cluster
     plot_cluster(vertices, edges, output_dir, cluster_name, sublattice_indices)

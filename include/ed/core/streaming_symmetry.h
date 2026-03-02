@@ -110,14 +110,58 @@ public:
         symmetry_info.loadFromDirectory(dir);
         
         const size_t dim = 1ULL << n_bits_;
-        sectors_.resize(symmetry_info.sectors.size());
-        symmetrized_block_ham_sizes.assign(symmetry_info.sectors.size(), 0);
-        state_to_sector_basis_.resize(symmetry_info.sectors.size());
+        const size_t num_sectors = symmetry_info.sectors.size();
+        sectors_.resize(num_sectors);
+        symmetrized_block_ham_sizes.assign(num_sectors, 0);
+        state_to_sector_basis_.resize(num_sectors);
         
+        // =====================================================================
+        // PASS 1 (parallelizable): Identify unique orbit representatives
+        // =====================================================================
+        std::cout << "Pass 1: Identifying unique orbits (" << dim
+                  << " states, group size " << symmetry_info.max_clique.size()
+                  << ")..." << std::flush;
+        
+        auto pass1_start = std::chrono::high_resolution_clock::now();
+        
+        std::vector<uint64_t> orbit_reps(dim);
+        
+        #pragma omp parallel for schedule(static)
+        for (size_t i = 0; i < dim; ++i) {
+            uint64_t basis = static_cast<uint64_t>(i);
+            uint64_t rep = basis;
+            for (const auto& perm : symmetry_info.max_clique) {
+                uint64_t permuted = applyPermutation(basis, perm);
+                if (permuted < rep) rep = permuted;
+            }
+            orbit_reps[i] = rep;
+        }
+        
+        std::unordered_set<uint64_t> seen_reps;
+        std::vector<uint64_t> unique_orbit_reps;
+        unique_orbit_reps.reserve(dim / symmetry_info.max_clique.size() + 1);
+        for (size_t i = 0; i < dim; ++i) {
+            if (seen_reps.insert(orbit_reps[i]).second) {
+                unique_orbit_reps.push_back(orbit_reps[i]);
+            }
+        }
+        
+        auto pass1_end = std::chrono::high_resolution_clock::now();
+        double pass1_ms = std::chrono::duration<double, std::milli>(pass1_end - pass1_start).count();
+        std::cout << " found " << unique_orbit_reps.size() << " unique orbits"
+                  << " (" << std::fixed << std::setprecision(1) << pass1_ms << " ms)" << std::endl;
+        
+        // =====================================================================
+        // PASS 2 (parallelizable): Compute orbit data per sector
+        // =====================================================================
+        std::cout << "Pass 2: Computing orbit data for " << num_sectors
+                  << " sectors..." << std::endl;
+        
+        auto pass2_start = std::chrono::high_resolution_clock::now();
+        const size_t num_orbits = unique_orbit_reps.size();
         size_t total_orbit_elements = 0;
         
-        // Process each sector
-        for (size_t sector_idx = 0; sector_idx < symmetry_info.sectors.size(); ++sector_idx) {
+        for (size_t sector_idx = 0; sector_idx < num_sectors; ++sector_idx) {
             const auto& sector_meta = symmetry_info.sectors[sector_idx];
             auto& sector = sectors_[sector_idx];
             
@@ -125,50 +169,63 @@ public:
             sector.quantum_numbers = sector_meta.quantum_numbers;
             sector.phase_factors = sector_meta.phase_factors;
             
-            std::cout << "\nProcessing sector " << (sector_idx + 1) << "/"
-                      << symmetry_info.sectors.size() << " (QN: ";
-            for (auto qn : sector.quantum_numbers) std::cout << qn << " ";
-            std::cout << ")" << std::flush;
-            
-            // Find all orbit representatives for this sector
-            std::unordered_set<uint64_t> processed_orbits;
-            
-            for (uint64_t basis = 0; basis < dim; ++basis) {
-                // Get orbit representative
-                uint64_t orbit_rep = getOrbitRepresentativeFast(basis);
-                
-                // Skip if already processed
-                if (processed_orbits.count(orbit_rep)) continue;
-                
-                // Compute orbit elements and coefficients for this sector
+            struct OrbitResult {
+                uint64_t orbit_rep;
                 std::vector<uint64_t> orbit_elements;
                 std::vector<Complex> orbit_coefficients;
+                double norm;
+            };
+            
+            std::vector<OrbitResult> valid_orbits(num_orbits);
+            std::vector<bool> orbit_valid(num_orbits, false);
+            
+            #pragma omp parallel for schedule(dynamic, 64)
+            for (size_t oi = 0; oi < num_orbits; ++oi) {
+                uint64_t rep = unique_orbit_reps[oi];
+                std::vector<uint64_t> elements;
+                std::vector<Complex> coefficients;
                 double norm_sq = 0.0;
                 
-                computeOrbitData(basis, sector.phase_factors, 
-                                orbit_elements, orbit_coefficients, norm_sq);
+                computeOrbitData(rep, sector.phase_factors,
+                                 elements, coefficients, norm_sq);
                 
                 if (norm_sq > 1e-10) {
-                    processed_orbits.insert(orbit_rep);
-                    
-                    SymBasisState state(orbit_rep, sector.quantum_numbers, std::sqrt(norm_sq));
-                    state.orbit_elements = std::move(orbit_elements);
-                    state.orbit_coefficients = std::move(orbit_coefficients);
-                    
-                    // Build lookup: each orbit element maps to this basis state
-                    size_t basis_idx = sector.basis_states.size();
-                    for (uint64_t elem : state.orbit_elements) {
-                        state_to_sector_basis_[sector_idx][elem] = basis_idx;
-                    }
-                    
-                    total_orbit_elements += state.orbit_elements.size();
-                    sector.basis_states.push_back(std::move(state));
+                    valid_orbits[oi].orbit_rep = rep;
+                    valid_orbits[oi].orbit_elements = std::move(elements);
+                    valid_orbits[oi].orbit_coefficients = std::move(coefficients);
+                    valid_orbits[oi].norm = std::sqrt(norm_sq);
+                    orbit_valid[oi] = true;
                 }
             }
             
+            for (size_t oi = 0; oi < num_orbits; ++oi) {
+                if (!orbit_valid[oi]) continue;
+                
+                auto& orb = valid_orbits[oi];
+                SymBasisState state(orb.orbit_rep, sector.quantum_numbers, orb.norm);
+                state.orbit_elements = std::move(orb.orbit_elements);
+                state.orbit_coefficients = std::move(orb.orbit_coefficients);
+                
+                size_t basis_idx = sector.basis_states.size();
+                for (uint64_t elem : state.orbit_elements) {
+                    state_to_sector_basis_[sector_idx][elem] = basis_idx;
+                }
+                
+                total_orbit_elements += state.orbit_elements.size();
+                sector.basis_states.push_back(std::move(state));
+            }
+            
             symmetrized_block_ham_sizes[sector_idx] = sector.basis_states.size();
-            std::cout << " -> " << sector.basis_states.size() << " basis states" << std::endl;
+            
+            if (sector_idx % std::max(size_t(1), num_sectors / 20) == 0 ||
+                sector_idx == num_sectors - 1) {
+                std::cout << "  Sector " << (sector_idx + 1) << "/" << num_sectors
+                          << " -> " << sector.basis_states.size() << " basis states" << std::endl;
+            }
         }
+        
+        auto pass2_end = std::chrono::high_resolution_clock::now();
+        double pass2_ms = std::chrono::duration<double, std::milli>(pass2_end - pass2_start).count();
         
         size_t total_basis = 0;
         for (const auto& sector : sectors_) {
@@ -179,6 +236,8 @@ public:
         std::cout << "Total sectors: " << sectors_.size() << std::endl;
         std::cout << "Total symmetrized basis: " << total_basis << std::endl;
         std::cout << "Total orbit elements stored: " << total_orbit_elements << std::endl;
+        std::cout << "Pass 1 time: " << std::fixed << std::setprecision(1) << pass1_ms << " ms" << std::endl;
+        std::cout << "Pass 2 time: " << std::fixed << std::setprecision(1) << pass2_ms << " ms" << std::endl;
         std::cout << "Memory saved vs full expansion: " 
                   << std::fixed << std::setprecision(1)
                   << (100.0 * (1.0 - double(total_orbit_elements) / (total_basis * dim)))
@@ -372,6 +431,434 @@ public:
         
         std::cout << "Loaded sector metadata for " << sectors_.size() << " sectors" << std::endl;
     }
+
+    // ===================== HDF5 orbit basis caching (full Hilbert space) =====
+
+    /**
+     * @brief Build the cache file path for the full-space (no Sz conservation) case.
+     */
+    static std::string getOrbitCachePath(const std::string& cache_dir,
+                                          uint64_t n_sites) {
+        return cache_dir + "/orbit_basis_N" + std::to_string(n_sites)
+               + "_fullspace.h5";
+    }
+
+    /**
+     * @brief Check whether an orbit cache file already exists.
+     */
+    static bool orbitCacheExists(const std::string& cache_dir,
+                                  uint64_t n_sites) {
+        std::string path = getOrbitCachePath(cache_dir, n_sites);
+        std::ifstream f(path);
+        return f.good();
+    }
+
+    /**
+     * @brief Save full orbit basis to HDF5 for later reuse (full-space variant).
+     *
+     * HDF5 layout identical to the fixed-Sz version but without n_up attribute.
+     */
+    void saveOrbitBasisHDF5(const std::string& cache_dir) const {
+        safe_system_call("mkdir -p " + cache_dir);
+        std::string filepath = getOrbitCachePath(cache_dir, n_bits_);
+
+        std::cout << "\n=== Saving orbit basis cache (full-space) to "
+                  << filepath << " ===" << std::endl;
+
+        try {
+            H5::H5File file(filepath, H5F_ACC_TRUNC);
+            file.createGroup("/orbit_basis");
+
+            // --- Metadata attributes ---
+            {
+                H5::DataSpace scalar(H5S_SCALAR);
+                auto grp = file.openGroup("/orbit_basis");
+
+                uint64_t ns = n_bits_;
+                auto a1 = grp.createAttribute("n_sites",
+                    H5::PredType::NATIVE_UINT64, scalar);
+                a1.write(H5::PredType::NATIVE_UINT64, &ns);
+
+                uint64_t nsec = sectors_.size();
+                auto a2 = grp.createAttribute("num_sectors",
+                    H5::PredType::NATIVE_UINT64, scalar);
+                a2.write(H5::PredType::NATIVE_UINT64, &nsec);
+
+                uint64_t gsz = symmetry_info.max_clique.size();
+                auto a3 = grp.createAttribute("group_size",
+                    H5::PredType::NATIVE_UINT64, scalar);
+                a3.write(H5::PredType::NATIVE_UINT64, &gsz);
+            }
+
+            // --- Per-sector data ---
+            for (size_t si = 0; si < sectors_.size(); ++si) {
+                const auto& sector = sectors_[si];
+                std::string grp_name = "/orbit_basis/sector_"
+                                       + std::to_string(si);
+                file.createGroup(grp_name);
+                auto grp = file.openGroup(grp_name);
+
+                // Sector attributes
+                {
+                    H5::DataSpace scalar(H5S_SCALAR);
+                    uint64_t sid = sector.sector_id;
+                    auto a = grp.createAttribute("sector_id",
+                        H5::PredType::NATIVE_UINT64, scalar);
+                    a.write(H5::PredType::NATIVE_UINT64, &sid);
+
+                    uint64_t nb = sector.basis_states.size();
+                    auto a2 = grp.createAttribute("num_basis",
+                        H5::PredType::NATIVE_UINT64, scalar);
+                    a2.write(H5::PredType::NATIVE_UINT64, &nb);
+                }
+
+                // Quantum numbers
+                if (!sector.quantum_numbers.empty()) {
+                    hsize_t dims[1] = {sector.quantum_numbers.size()};
+                    H5::DataSpace ds(1, dims);
+                    auto dset = grp.createDataSet("quantum_numbers",
+                        H5::PredType::NATIVE_INT, ds);
+                    dset.write(sector.quantum_numbers.data(),
+                               H5::PredType::NATIVE_INT);
+                }
+
+                // Phase factors (complex → separate real/imag)
+                if (!sector.phase_factors.empty()) {
+                    std::vector<double> pf_real(sector.phase_factors.size());
+                    std::vector<double> pf_imag(sector.phase_factors.size());
+                    for (size_t k = 0; k < sector.phase_factors.size(); ++k) {
+                        pf_real[k] = sector.phase_factors[k].real();
+                        pf_imag[k] = sector.phase_factors[k].imag();
+                    }
+                    hsize_t dims[1] = {sector.phase_factors.size()};
+                    H5::DataSpace ds(1, dims);
+                    auto d1 = grp.createDataSet("phase_factors_real",
+                        H5::PredType::NATIVE_DOUBLE, ds);
+                    d1.write(pf_real.data(), H5::PredType::NATIVE_DOUBLE);
+                    auto d2 = grp.createDataSet("phase_factors_imag",
+                        H5::PredType::NATIVE_DOUBLE, ds);
+                    d2.write(pf_imag.data(), H5::PredType::NATIVE_DOUBLE);
+                }
+
+                // --- CSR orbit data ---
+                size_t num_basis = sector.basis_states.size();
+                std::vector<int> offsets(num_basis + 1);
+                std::vector<double> norms(num_basis);
+                offsets[0] = 0;
+                for (size_t j = 0; j < num_basis; ++j) {
+                    offsets[j + 1] = offsets[j]
+                        + static_cast<int>(
+                              sector.basis_states[j].orbit_elements.size());
+                    norms[j] = sector.basis_states[j].norm;
+                }
+                size_t total_elems = offsets[num_basis];
+
+                std::vector<uint64_t> flat_elements(total_elems);
+                std::vector<double>   flat_coeff_real(total_elems);
+                std::vector<double>   flat_coeff_imag(total_elems);
+                for (size_t j = 0; j < num_basis; ++j) {
+                    const auto& bs = sector.basis_states[j];
+                    int off = offsets[j];
+                    for (size_t e = 0; e < bs.orbit_elements.size(); ++e) {
+                        flat_elements[off + e]   = bs.orbit_elements[e];
+                        flat_coeff_real[off + e]  = bs.orbit_coefficients[e].real();
+                        flat_coeff_imag[off + e]  = bs.orbit_coefficients[e].imag();
+                    }
+                }
+
+                // Write offsets
+                {
+                    hsize_t dims[1] = {static_cast<hsize_t>(num_basis + 1)};
+                    H5::DataSpace ds(1, dims);
+                    auto d = grp.createDataSet("orbit_offsets",
+                        H5::PredType::NATIVE_INT, ds);
+                    d.write(offsets.data(), H5::PredType::NATIVE_INT);
+                }
+                // Write norms
+                {
+                    hsize_t dims[1] = {static_cast<hsize_t>(num_basis)};
+                    H5::DataSpace ds(1, dims);
+                    auto d = grp.createDataSet("orbit_norms",
+                        H5::PredType::NATIVE_DOUBLE, ds);
+                    d.write(norms.data(), H5::PredType::NATIVE_DOUBLE);
+                }
+                // Write orbit elements
+                if (total_elems > 0) {
+                    hsize_t dims[1] = {static_cast<hsize_t>(total_elems)};
+                    H5::DataSpace ds(1, dims);
+                    auto d = grp.createDataSet("orbit_elements",
+                        H5::PredType::NATIVE_UINT64, ds);
+                    d.write(flat_elements.data(), H5::PredType::NATIVE_UINT64);
+                }
+                // Write orbit coefficients
+                if (total_elems > 0) {
+                    hsize_t dims[1] = {static_cast<hsize_t>(total_elems)};
+                    H5::DataSpace ds(1, dims);
+                    auto d1 = grp.createDataSet("orbit_coefficients_real",
+                        H5::PredType::NATIVE_DOUBLE, ds);
+                    d1.write(flat_coeff_real.data(), H5::PredType::NATIVE_DOUBLE);
+                    auto d2 = grp.createDataSet("orbit_coefficients_imag",
+                        H5::PredType::NATIVE_DOUBLE, ds);
+                    d2.write(flat_coeff_imag.data(), H5::PredType::NATIVE_DOUBLE);
+                }
+
+                grp.close();
+            }
+
+            file.close();
+
+            size_t total_basis = 0, total_orbit = 0;
+            for (const auto& s : sectors_) {
+                total_basis += s.basis_states.size();
+                for (const auto& bs : s.basis_states)
+                    total_orbit += bs.orbit_elements.size();
+            }
+            std::cout << "Cached " << sectors_.size() << " sectors, "
+                      << total_basis << " basis states, "
+                      << total_orbit << " orbit elements" << std::endl;
+            std::cout << "=== Orbit basis cache saved ===" << std::endl;
+
+        } catch (H5::Exception& e) {
+            throw std::runtime_error(
+                "Failed to save orbit basis cache: "
+                + std::string(e.getCDetailMsg()));
+        }
+    }
+
+    /**
+     * @brief Load orbit basis from HDF5 cache (full-space variant).
+     *
+     * Restores sectors_, state_to_sector_basis_, and symmetrized_block_ham_sizes.
+     * @return true on success, false if cache not found / mismatch.
+     */
+    bool loadOrbitBasisHDF5(const std::string& cache_dir) {
+        std::string filepath = getOrbitCachePath(cache_dir, n_bits_);
+
+        {
+            std::ifstream f(filepath);
+            if (!f.good()) return false;
+        }
+
+        std::cout << "\n=== Loading orbit basis cache (full-space) from "
+                  << filepath << " ===" << std::endl;
+
+        try {
+            H5::H5File file(filepath, H5F_ACC_RDONLY);
+            auto root = file.openGroup("/orbit_basis");
+
+            // Verify metadata
+            uint64_t cached_n_sites, cached_num_sectors, cached_group_size;
+            root.openAttribute("n_sites").read(
+                H5::PredType::NATIVE_UINT64, &cached_n_sites);
+            root.openAttribute("num_sectors").read(
+                H5::PredType::NATIVE_UINT64, &cached_num_sectors);
+            root.openAttribute("group_size").read(
+                H5::PredType::NATIVE_UINT64, &cached_group_size);
+
+            if (cached_n_sites != n_bits_) {
+                std::cerr << "Cache mismatch: n_sites " << cached_n_sites
+                          << " vs " << n_bits_ << std::endl;
+                return false;
+            }
+            if (cached_group_size != symmetry_info.max_clique.size()) {
+                std::cerr << "Cache mismatch: group_size " << cached_group_size
+                          << " vs " << symmetry_info.max_clique.size()
+                          << std::endl;
+                return false;
+            }
+
+            // Allocate sector storage
+            sectors_.resize(cached_num_sectors);
+            symmetrized_block_ham_sizes.assign(cached_num_sectors, 0);
+            state_to_sector_basis_.resize(cached_num_sectors);
+
+            size_t total_orbit_elements = 0;
+
+            for (size_t si = 0; si < cached_num_sectors; ++si) {
+                std::string grp_name = "/orbit_basis/sector_"
+                                       + std::to_string(si);
+                auto grp = file.openGroup(grp_name);
+                auto& sector = sectors_[si];
+
+                // Sector attributes
+                uint64_t sid, nb;
+                grp.openAttribute("sector_id").read(
+                    H5::PredType::NATIVE_UINT64, &sid);
+                grp.openAttribute("num_basis").read(
+                    H5::PredType::NATIVE_UINT64, &nb);
+                sector.sector_id = sid;
+
+                // Quantum numbers
+                {
+                    auto dset = grp.openDataSet("quantum_numbers");
+                    auto space = dset.getSpace();
+                    hsize_t dims[1];
+                    space.getSimpleExtentDims(dims);
+                    sector.quantum_numbers.resize(dims[0]);
+                    dset.read(sector.quantum_numbers.data(),
+                              H5::PredType::NATIVE_INT);
+                }
+
+                // Phase factors
+                {
+                    auto d1 = grp.openDataSet("phase_factors_real");
+                    auto d2 = grp.openDataSet("phase_factors_imag");
+                    auto space = d1.getSpace();
+                    hsize_t dims[1];
+                    space.getSimpleExtentDims(dims);
+                    std::vector<double> pf_real(dims[0]), pf_imag(dims[0]);
+                    d1.read(pf_real.data(), H5::PredType::NATIVE_DOUBLE);
+                    d2.read(pf_imag.data(), H5::PredType::NATIVE_DOUBLE);
+                    sector.phase_factors.resize(dims[0]);
+                    for (size_t k = 0; k < dims[0]; ++k) {
+                        sector.phase_factors[k] =
+                            Complex(pf_real[k], pf_imag[k]);
+                    }
+                }
+
+                // CSR orbit data
+                std::vector<int> offsets;
+                std::vector<double> norms;
+                {
+                    auto dset = grp.openDataSet("orbit_offsets");
+                    auto space = dset.getSpace();
+                    hsize_t dims[1];
+                    space.getSimpleExtentDims(dims);
+                    offsets.resize(dims[0]);
+                    dset.read(offsets.data(), H5::PredType::NATIVE_INT);
+                }
+                {
+                    auto dset = grp.openDataSet("orbit_norms");
+                    auto space = dset.getSpace();
+                    hsize_t dims[1];
+                    space.getSimpleExtentDims(dims);
+                    norms.resize(dims[0]);
+                    dset.read(norms.data(), H5::PredType::NATIVE_DOUBLE);
+                }
+
+                size_t total_elems = (offsets.size() > 1)
+                                         ? offsets.back() : 0;
+                std::vector<uint64_t> flat_elements;
+                std::vector<double> flat_coeff_real, flat_coeff_imag;
+                if (total_elems > 0) {
+                    flat_elements.resize(total_elems);
+                    flat_coeff_real.resize(total_elems);
+                    flat_coeff_imag.resize(total_elems);
+                    grp.openDataSet("orbit_elements")
+                        .read(flat_elements.data(),
+                              H5::PredType::NATIVE_UINT64);
+                    grp.openDataSet("orbit_coefficients_real")
+                        .read(flat_coeff_real.data(),
+                              H5::PredType::NATIVE_DOUBLE);
+                    grp.openDataSet("orbit_coefficients_imag")
+                        .read(flat_coeff_imag.data(),
+                              H5::PredType::NATIVE_DOUBLE);
+                }
+
+                // Reconstruct SymBasisState objects and lookup table
+                sector.basis_states.resize(nb);
+                for (size_t j = 0; j < nb; ++j) {
+                    auto& bs = sector.basis_states[j];
+                    bs.quantum_numbers = sector.quantum_numbers;
+                    bs.norm = norms[j];
+                    int off = offsets[j];
+                    int len = offsets[j + 1] - off;
+                    bs.orbit_elements.resize(len);
+                    bs.orbit_coefficients.resize(len);
+                    for (int e = 0; e < len; ++e) {
+                        bs.orbit_elements[e]    = flat_elements[off + e];
+                        bs.orbit_coefficients[e] =
+                            Complex(flat_coeff_real[off + e],
+                                    flat_coeff_imag[off + e]);
+                    }
+                    // orbit_rep = minimum element
+                    bs.orbit_rep = bs.orbit_elements.empty()
+                                       ? 0 : bs.orbit_elements[0];
+                    for (auto elem : bs.orbit_elements) {
+                        if (elem < bs.orbit_rep) bs.orbit_rep = elem;
+                    }
+
+                    // Rebuild lookup table
+                    for (uint64_t elem : bs.orbit_elements) {
+                        state_to_sector_basis_[si][elem] = j;
+                    }
+                    total_orbit_elements += len;
+                }
+
+                symmetrized_block_ham_sizes[si] = nb;
+                grp.close();
+            }
+
+            file.close();
+
+            size_t total_basis = 0;
+            for (const auto& s : sectors_)
+                total_basis += s.basis_states.size();
+
+            std::cout << "Loaded " << sectors_.size() << " sectors, "
+                      << total_basis << " basis states, "
+                      << total_orbit_elements << " orbit elements"
+                      << std::endl;
+            std::cout << "=== Orbit basis cache loaded ===" << std::endl;
+            return true;
+
+        } catch (H5::Exception& e) {
+            std::cerr << "Warning: Failed to load orbit basis cache: "
+                      << e.getCDetailMsg() << std::endl;
+            return false;
+        }
+    }
+
+    // ===================== End HDF5 orbit basis caching =====================
+
+    // ===================== Eigenvector expansion ============================
+
+    /**
+     * @brief Expand a symmetrized-sector eigenvector to the full 2^N computational basis.
+     *
+     * Given an eigenvector c = (c_0, c_1, ..., c_{D-1}) in the symmetrized
+     * sector basis (D = sector dimension), the full-basis vector is:
+     *   |ψ⟩ = Σ_j c_j |φ_j⟩ = Σ_j c_j (1/N_j) Σ_k α_{jk} |s_{jk}⟩
+     * where orbit_elements = {s_{jk}}, orbit_coefficients = {α_{jk}}, norm = N_j.
+     *
+     * @param sector_idx  Index of the symmetry sector
+     * @param sym_vec     Eigenvector in the symmetrized sector basis
+     * @return Vector of length 2^N in computational basis
+     */
+    std::vector<Complex> expandToComputationalBasis(
+        size_t sector_idx,
+        const std::vector<Complex>& sym_vec
+    ) const {
+        if (sector_idx >= sectors_.size()) {
+            throw std::runtime_error("Invalid sector index");
+        }
+        const auto& sector = sectors_[sector_idx];
+        size_t sector_dim = sector.basis_states.size();
+        if (sym_vec.size() != sector_dim) {
+            throw std::runtime_error(
+                "Eigenvector size (" + std::to_string(sym_vec.size())
+                + ") != sector dimension (" + std::to_string(sector_dim) + ")");
+        }
+
+        uint64_t full_dim = 1ULL << n_bits_;
+        std::vector<Complex> full_vec(full_dim, Complex(0.0, 0.0));
+
+        const double group_norm = 1.0 / std::sqrt(
+            static_cast<double>(symmetry_info.max_clique.size()));
+
+        for (size_t j = 0; j < sector_dim; ++j) {
+            if (std::abs(sym_vec[j]) < 1e-15) continue;
+            const auto& bs = sector.basis_states[j];
+            Complex weight = sym_vec[j] * group_norm / bs.norm;
+            for (size_t k = 0; k < bs.orbit_elements.size(); ++k) {
+                uint64_t s = bs.orbit_elements[k];
+                full_vec[s] += weight * bs.orbit_coefficients[k];
+            }
+        }
+        return full_vec;
+    }
+
+    // ===================== End eigenvector expansion =========================
     
 private:
     /**
@@ -906,14 +1393,67 @@ public:
         // Load symmetry information
         symmetry_info.loadFromDirectory(dir);
         
-        sectors_.resize(symmetry_info.sectors.size());
-        symmetrized_block_ham_sizes.assign(symmetry_info.sectors.size(), 0);
-        state_to_sector_basis_.resize(symmetry_info.sectors.size());
+        const size_t num_sectors = symmetry_info.sectors.size();
+        sectors_.resize(num_sectors);
+        symmetrized_block_ham_sizes.assign(num_sectors, 0);
+        state_to_sector_basis_.resize(num_sectors);
         
+        // =====================================================================
+        // PASS 1 (parallelizable): Identify unique orbit representatives
+        // This avoids re-scanning all basis states for every sector.
+        // =====================================================================
+        std::cout << "Pass 1: Identifying unique orbits (" << basis_states_.size()
+                  << " basis states, group size " << symmetry_info.max_clique.size()
+                  << ")..." << std::flush;
+        
+        auto pass1_start = std::chrono::high_resolution_clock::now();
+        
+        // Parallel orbit representative computation
+        const size_t num_basis = basis_states_.size();
+        std::vector<uint64_t> orbit_reps(num_basis);
+        
+        #pragma omp parallel for schedule(static)
+        for (size_t i = 0; i < num_basis; ++i) {
+            uint64_t basis = basis_states_[i];
+            uint64_t rep = basis;
+            for (const auto& perm : symmetry_info.max_clique) {
+                uint64_t permuted = applyPermutation(basis, perm);
+                if (state_to_index_.count(permuted) && permuted < rep) {
+                    rep = permuted;
+                }
+            }
+            orbit_reps[i] = rep;
+        }
+        
+        // Collect unique orbit representatives (sequential, fast)
+        std::unordered_set<uint64_t> seen_reps;
+        std::vector<uint64_t> unique_orbit_reps;
+        unique_orbit_reps.reserve(num_basis / symmetry_info.max_clique.size() + 1);
+        for (size_t i = 0; i < num_basis; ++i) {
+            if (seen_reps.insert(orbit_reps[i]).second) {
+                unique_orbit_reps.push_back(orbit_reps[i]);
+            }
+        }
+        
+        auto pass1_end = std::chrono::high_resolution_clock::now();
+        double pass1_ms = std::chrono::duration<double, std::milli>(pass1_end - pass1_start).count();
+        std::cout << " found " << unique_orbit_reps.size() << " unique orbits"
+                  << " (" << std::fixed << std::setprecision(1) << pass1_ms << " ms)" << std::endl;
+        
+        // =====================================================================
+        // PASS 2 (parallelizable): For each sector, compute orbit data for
+        // each unique orbit rep.  The orbit data (elements + coefficients) is
+        // phase-factor-dependent, so we must do this per sector.  However the
+        // inner loop over orbit reps is embarrassingly parallel.
+        // =====================================================================
+        std::cout << "Pass 2: Computing orbit data for " << num_sectors
+                  << " sectors..." << std::endl;
+        
+        auto pass2_start = std::chrono::high_resolution_clock::now();
+        const size_t num_orbits = unique_orbit_reps.size();
         size_t total_orbit_elements = 0;
         
-        // Process each sector
-        for (size_t sector_idx = 0; sector_idx < symmetry_info.sectors.size(); ++sector_idx) {
+        for (size_t sector_idx = 0; sector_idx < num_sectors; ++sector_idx) {
             const auto& sector_meta = symmetry_info.sectors[sector_idx];
             auto& sector = sectors_[sector_idx];
             
@@ -921,52 +1461,66 @@ public:
             sector.quantum_numbers = sector_meta.quantum_numbers;
             sector.phase_factors = sector_meta.phase_factors;
             
-            std::cout << "\nProcessing sector " << (sector_idx + 1) << "/"
-                      << symmetry_info.sectors.size() << " (QN: ";
-            for (auto qn : sector.quantum_numbers) std::cout << qn << " ";
-            std::cout << ")" << std::flush;
-            
-            // Find orbit representatives in fixed Sz sector
-            std::unordered_set<uint64_t> processed_orbits;
-            
-            for (size_t i = 0; i < basis_states_.size(); ++i) {
-                uint64_t basis = basis_states_[i];
-                
-                // Get orbit representative
-                uint64_t orbit_rep = getOrbitRepresentativeFixedSzFast(basis);
-                
-                // Skip if already processed
-                if (processed_orbits.count(orbit_rep)) continue;
-                
-                // Compute orbit elements and coefficients for this sector
+            // Parallel orbit data computation for this sector
+            // Each thread computes orbit data for a subset of orbit reps
+            struct OrbitResult {
+                uint64_t orbit_rep;
                 std::vector<uint64_t> orbit_elements;
                 std::vector<Complex> orbit_coefficients;
+                double norm;
+            };
+            
+            std::vector<OrbitResult> valid_orbits(num_orbits);
+            std::vector<bool> orbit_valid(num_orbits, false);
+            
+            #pragma omp parallel for schedule(dynamic, 64)
+            for (size_t oi = 0; oi < num_orbits; ++oi) {
+                uint64_t rep = unique_orbit_reps[oi];
+                std::vector<uint64_t> elements;
+                std::vector<Complex> coefficients;
                 double norm_sq = 0.0;
                 
-                computeOrbitDataFixedSz(basis, sector.phase_factors, 
-                                       orbit_elements, orbit_coefficients, norm_sq);
+                computeOrbitDataFixedSz(rep, sector.phase_factors,
+                                        elements, coefficients, norm_sq);
                 
                 if (norm_sq > 1e-10) {
-                    processed_orbits.insert(orbit_rep);
-                    
-                    SymBasisState state(orbit_rep, sector.quantum_numbers, std::sqrt(norm_sq));
-                    state.orbit_elements = std::move(orbit_elements);
-                    state.orbit_coefficients = std::move(orbit_coefficients);
-                    
-                    // Build lookup: each orbit element maps to this basis state
-                    size_t basis_idx = sector.basis_states.size();
-                    for (uint64_t elem : state.orbit_elements) {
-                        state_to_sector_basis_[sector_idx][elem] = basis_idx;
-                    }
-                    
-                    total_orbit_elements += state.orbit_elements.size();
-                    sector.basis_states.push_back(std::move(state));
+                    valid_orbits[oi].orbit_rep = rep;
+                    valid_orbits[oi].orbit_elements = std::move(elements);
+                    valid_orbits[oi].orbit_coefficients = std::move(coefficients);
+                    valid_orbits[oi].norm = std::sqrt(norm_sq);
+                    orbit_valid[oi] = true;
                 }
             }
             
+            // Sequential gathering of valid orbits into sector (maintains deterministic order)
+            for (size_t oi = 0; oi < num_orbits; ++oi) {
+                if (!orbit_valid[oi]) continue;
+                
+                auto& orb = valid_orbits[oi];
+                SymBasisState state(orb.orbit_rep, sector.quantum_numbers, orb.norm);
+                state.orbit_elements = std::move(orb.orbit_elements);
+                state.orbit_coefficients = std::move(orb.orbit_coefficients);
+                
+                size_t basis_idx = sector.basis_states.size();
+                for (uint64_t elem : state.orbit_elements) {
+                    state_to_sector_basis_[sector_idx][elem] = basis_idx;
+                }
+                
+                total_orbit_elements += state.orbit_elements.size();
+                sector.basis_states.push_back(std::move(state));
+            }
+            
             symmetrized_block_ham_sizes[sector_idx] = sector.basis_states.size();
-            std::cout << " -> " << sector.basis_states.size() << " basis states" << std::endl;
+            
+            if (sector_idx % std::max(size_t(1), num_sectors / 20) == 0 ||
+                sector_idx == num_sectors - 1) {
+                std::cout << "  Sector " << (sector_idx + 1) << "/" << num_sectors
+                          << " -> " << sector.basis_states.size() << " basis states" << std::endl;
+            }
         }
+        
+        auto pass2_end = std::chrono::high_resolution_clock::now();
+        double pass2_ms = std::chrono::duration<double, std::milli>(pass2_end - pass2_start).count();
         
         size_t total_basis = 0;
         for (const auto& sector : sectors_) {
@@ -977,6 +1531,8 @@ public:
         std::cout << "Total sectors: " << sectors_.size() << std::endl;
         std::cout << "Total symmetrized basis: " << total_basis << std::endl;
         std::cout << "Total orbit elements stored: " << total_orbit_elements << std::endl;
+        std::cout << "Pass 1 time: " << std::fixed << std::setprecision(1) << pass1_ms << " ms" << std::endl;
+        std::cout << "Pass 2 time: " << std::fixed << std::setprecision(1) << pass2_ms << " ms" << std::endl;
         std::cout << "Memory saved vs full expansion: " 
                   << std::fixed << std::setprecision(1)
                   << (100.0 * (1.0 - double(total_orbit_elements) / (total_basis * fixed_sz_dim_)))
@@ -1070,6 +1626,488 @@ public:
     uint64_t getSectorDimension(size_t sector_idx) const {
         return sectors_[sector_idx].basis_states.size();
     }
+
+    // ========================================================================
+    // Orbit Basis Caching (HDF5)
+    // ========================================================================
+
+    /**
+     * @brief Get the default cache file path for the current system
+     *
+     * The cache file encodes n_sites and n_up so it's unique per geometry+Sz.
+     */
+    static std::string getOrbitCachePath(const std::string& cache_dir,
+                                         uint64_t n_sites, int64_t n_up) {
+        return cache_dir + "/orbit_basis_N" + std::to_string(n_sites)
+               + "_nup" + std::to_string(n_up) + ".h5";
+    }
+
+    /**
+     * @brief Check whether a valid orbit basis cache exists
+     */
+    static bool orbitCacheExists(const std::string& cache_dir,
+                                  uint64_t n_sites, int64_t n_up) {
+        std::string path = getOrbitCachePath(cache_dir, n_sites, n_up);
+        std::ifstream f(path);
+        return f.good();
+    }
+
+    /**
+     * @brief Save full orbit basis to HDF5 for later reuse
+     *
+     * Stores per-sector CSR orbit data (elements, coefficients, offsets, norms)
+     * plus sector metadata (quantum numbers, phase factors, sector id).
+     * This data depends ONLY on the lattice geometry and Sz sector, NOT on
+     * the Hamiltonian couplings, so it can be reused across parameter sweeps.
+     *
+     * HDF5 layout:
+     *   /orbit_basis/
+     *     attrs: n_sites, n_up, num_sectors, group_size
+     *     /sector_<i>/
+     *       attrs: sector_id, num_basis
+     *       datasets: quantum_numbers, phase_factors_real, phase_factors_imag,
+     *                 orbit_offsets, orbit_norms, orbit_elements,
+     *                 orbit_coefficients_real, orbit_coefficients_imag
+     */
+    void saveOrbitBasisHDF5(const std::string& cache_dir) const {
+        safe_system_call("mkdir -p " + cache_dir);
+        std::string filepath = getOrbitCachePath(cache_dir, n_bits_, n_up_);
+
+        std::cout << "\n=== Saving orbit basis cache to " << filepath << " ===" << std::endl;
+
+        try {
+            H5::H5File file(filepath, H5F_ACC_TRUNC);
+
+            // Create root group
+            file.createGroup("/orbit_basis");
+
+            // --- Metadata attributes ---
+            {
+                H5::DataSpace scalar(H5S_SCALAR);
+                auto grp = file.openGroup("/orbit_basis");
+
+                uint64_t ns = n_bits_;
+                auto a1 = grp.createAttribute("n_sites", H5::PredType::NATIVE_UINT64, scalar);
+                a1.write(H5::PredType::NATIVE_UINT64, &ns);
+
+                int64_t nup = n_up_;
+                auto a2 = grp.createAttribute("n_up", H5::PredType::NATIVE_INT64, scalar);
+                a2.write(H5::PredType::NATIVE_INT64, &nup);
+
+                uint64_t nsec = sectors_.size();
+                auto a3 = grp.createAttribute("num_sectors", H5::PredType::NATIVE_UINT64, scalar);
+                a3.write(H5::PredType::NATIVE_UINT64, &nsec);
+
+                uint64_t gsz = symmetry_info.max_clique.size();
+                auto a4 = grp.createAttribute("group_size", H5::PredType::NATIVE_UINT64, scalar);
+                a4.write(H5::PredType::NATIVE_UINT64, &gsz);
+            }
+
+            // --- Per-sector data ---
+            for (size_t si = 0; si < sectors_.size(); ++si) {
+                const auto& sector = sectors_[si];
+                std::string grp_name = "/orbit_basis/sector_" + std::to_string(si);
+                file.createGroup(grp_name);
+                auto grp = file.openGroup(grp_name);
+
+                // Sector attributes
+                {
+                    H5::DataSpace scalar(H5S_SCALAR);
+                    uint64_t sid = sector.sector_id;
+                    auto a = grp.createAttribute("sector_id", H5::PredType::NATIVE_UINT64, scalar);
+                    a.write(H5::PredType::NATIVE_UINT64, &sid);
+
+                    uint64_t nb = sector.basis_states.size();
+                    auto a2 = grp.createAttribute("num_basis", H5::PredType::NATIVE_UINT64, scalar);
+                    a2.write(H5::PredType::NATIVE_UINT64, &nb);
+                }
+
+                // Quantum numbers
+                if (!sector.quantum_numbers.empty()) {
+                    hsize_t dims[1] = {sector.quantum_numbers.size()};
+                    H5::DataSpace ds(1, dims);
+                    auto dset = grp.createDataSet("quantum_numbers",
+                                                   H5::PredType::NATIVE_INT, ds);
+                    dset.write(sector.quantum_numbers.data(), H5::PredType::NATIVE_INT);
+                }
+
+                // Phase factors (complex → separate real/imag)
+                if (!sector.phase_factors.empty()) {
+                    std::vector<double> pf_real(sector.phase_factors.size());
+                    std::vector<double> pf_imag(sector.phase_factors.size());
+                    for (size_t k = 0; k < sector.phase_factors.size(); ++k) {
+                        pf_real[k] = sector.phase_factors[k].real();
+                        pf_imag[k] = sector.phase_factors[k].imag();
+                    }
+                    hsize_t dims[1] = {sector.phase_factors.size()};
+                    H5::DataSpace ds(1, dims);
+                    auto d1 = grp.createDataSet("phase_factors_real",
+                                                 H5::PredType::NATIVE_DOUBLE, ds);
+                    d1.write(pf_real.data(), H5::PredType::NATIVE_DOUBLE);
+                    auto d2 = grp.createDataSet("phase_factors_imag",
+                                                 H5::PredType::NATIVE_DOUBLE, ds);
+                    d2.write(pf_imag.data(), H5::PredType::NATIVE_DOUBLE);
+                }
+
+                // --- CSR orbit data (flattened exactly as extractOrbitData does) ---
+                size_t num_basis = sector.basis_states.size();
+                std::vector<int> offsets(num_basis + 1);
+                std::vector<double> norms(num_basis);
+                offsets[0] = 0;
+                for (size_t j = 0; j < num_basis; ++j) {
+                    offsets[j + 1] = offsets[j] +
+                        static_cast<int>(sector.basis_states[j].orbit_elements.size());
+                    norms[j] = sector.basis_states[j].norm;
+                }
+                size_t total_elems = offsets[num_basis];
+
+                std::vector<uint64_t> flat_elements(total_elems);
+                std::vector<double> flat_coeff_real(total_elems);
+                std::vector<double> flat_coeff_imag(total_elems);
+                for (size_t j = 0; j < num_basis; ++j) {
+                    const auto& bs = sector.basis_states[j];
+                    int off = offsets[j];
+                    for (size_t e = 0; e < bs.orbit_elements.size(); ++e) {
+                        flat_elements[off + e] = bs.orbit_elements[e];
+                        flat_coeff_real[off + e] = bs.orbit_coefficients[e].real();
+                        flat_coeff_imag[off + e] = bs.orbit_coefficients[e].imag();
+                    }
+                }
+
+                // Write offsets
+                {
+                    hsize_t dims[1] = {static_cast<hsize_t>(num_basis + 1)};
+                    H5::DataSpace ds(1, dims);
+                    auto d = grp.createDataSet("orbit_offsets",
+                                                H5::PredType::NATIVE_INT, ds);
+                    d.write(offsets.data(), H5::PredType::NATIVE_INT);
+                }
+                // Write norms
+                {
+                    hsize_t dims[1] = {static_cast<hsize_t>(num_basis)};
+                    H5::DataSpace ds(1, dims);
+                    auto d = grp.createDataSet("orbit_norms",
+                                                H5::PredType::NATIVE_DOUBLE, ds);
+                    d.write(norms.data(), H5::PredType::NATIVE_DOUBLE);
+                }
+                // Write orbit elements
+                if (total_elems > 0) {
+                    hsize_t dims[1] = {static_cast<hsize_t>(total_elems)};
+                    H5::DataSpace ds(1, dims);
+                    auto d = grp.createDataSet("orbit_elements",
+                                                H5::PredType::NATIVE_UINT64, ds);
+                    d.write(flat_elements.data(), H5::PredType::NATIVE_UINT64);
+                }
+                // Write orbit coefficients (real + imag)
+                if (total_elems > 0) {
+                    hsize_t dims[1] = {static_cast<hsize_t>(total_elems)};
+                    H5::DataSpace ds(1, dims);
+                    auto d1 = grp.createDataSet("orbit_coefficients_real",
+                                                 H5::PredType::NATIVE_DOUBLE, ds);
+                    d1.write(flat_coeff_real.data(), H5::PredType::NATIVE_DOUBLE);
+                    auto d2 = grp.createDataSet("orbit_coefficients_imag",
+                                                 H5::PredType::NATIVE_DOUBLE, ds);
+                    d2.write(flat_coeff_imag.data(), H5::PredType::NATIVE_DOUBLE);
+                }
+
+                grp.close();
+            }
+
+            file.close();
+
+            // Print summary
+            size_t total_basis = 0, total_orbit = 0;
+            for (const auto& s : sectors_) {
+                total_basis += s.basis_states.size();
+                for (const auto& bs : s.basis_states)
+                    total_orbit += bs.orbit_elements.size();
+            }
+            std::cout << "Cached " << sectors_.size() << " sectors, "
+                      << total_basis << " basis states, "
+                      << total_orbit << " orbit elements" << std::endl;
+            std::cout << "=== Orbit basis cache saved ===" << std::endl;
+
+        } catch (H5::Exception& e) {
+            throw std::runtime_error("Failed to save orbit basis cache: "
+                                     + std::string(e.getCDetailMsg()));
+        }
+    }
+
+    /**
+     * @brief Load orbit basis from HDF5 cache
+     *
+     * Restores sectors_, state_to_sector_basis_, and symmetrized_block_ham_sizes
+     * from a previously saved cache file.  The symmetry_info must already be
+     * loaded (via loadFromDirectory) so that phase_factors/quantum_numbers
+     * can be cross-checked, but the expensive orbit enumeration is skipped.
+     *
+     * @return true if loaded successfully, false if cache not found / mismatch
+     */
+    bool loadOrbitBasisHDF5(const std::string& cache_dir) {
+        std::string filepath = getOrbitCachePath(cache_dir, n_bits_, n_up_);
+
+        {
+            std::ifstream f(filepath);
+            if (!f.good()) return false;
+        }
+
+        std::cout << "\n=== Loading orbit basis cache from " << filepath << " ===" << std::endl;
+
+        try {
+            H5::H5File file(filepath, H5F_ACC_RDONLY);
+            auto root = file.openGroup("/orbit_basis");
+
+            // Verify metadata
+            uint64_t cached_n_sites, cached_num_sectors, cached_group_size;
+            int64_t cached_n_up;
+            root.openAttribute("n_sites").read(H5::PredType::NATIVE_UINT64, &cached_n_sites);
+            root.openAttribute("n_up").read(H5::PredType::NATIVE_INT64, &cached_n_up);
+            root.openAttribute("num_sectors").read(H5::PredType::NATIVE_UINT64, &cached_num_sectors);
+            root.openAttribute("group_size").read(H5::PredType::NATIVE_UINT64, &cached_group_size);
+
+            if (cached_n_sites != n_bits_) {
+                std::cerr << "Cache mismatch: n_sites " << cached_n_sites
+                          << " vs " << n_bits_ << std::endl;
+                return false;
+            }
+            if (cached_n_up != n_up_) {
+                std::cerr << "Cache mismatch: n_up " << cached_n_up
+                          << " vs " << n_up_ << std::endl;
+                return false;
+            }
+            if (cached_group_size != symmetry_info.max_clique.size()) {
+                std::cerr << "Cache mismatch: group_size " << cached_group_size
+                          << " vs " << symmetry_info.max_clique.size() << std::endl;
+                return false;
+            }
+
+            // Allocate sector storage
+            sectors_.resize(cached_num_sectors);
+            symmetrized_block_ham_sizes.assign(cached_num_sectors, 0);
+            state_to_sector_basis_.resize(cached_num_sectors);
+
+            size_t total_orbit_elements = 0;
+
+            for (size_t si = 0; si < cached_num_sectors; ++si) {
+                std::string grp_name = "/orbit_basis/sector_" + std::to_string(si);
+                auto grp = file.openGroup(grp_name);
+                auto& sector = sectors_[si];
+
+                // Sector attributes
+                uint64_t sid, nb;
+                grp.openAttribute("sector_id").read(H5::PredType::NATIVE_UINT64, &sid);
+                grp.openAttribute("num_basis").read(H5::PredType::NATIVE_UINT64, &nb);
+                sector.sector_id = sid;
+
+                // Quantum numbers
+                {
+                    auto dset = grp.openDataSet("quantum_numbers");
+                    auto space = dset.getSpace();
+                    hsize_t dims[1];
+                    space.getSimpleExtentDims(dims);
+                    sector.quantum_numbers.resize(dims[0]);
+                    dset.read(sector.quantum_numbers.data(), H5::PredType::NATIVE_INT);
+                }
+
+                // Phase factors
+                {
+                    auto d1 = grp.openDataSet("phase_factors_real");
+                    auto d2 = grp.openDataSet("phase_factors_imag");
+                    auto space = d1.getSpace();
+                    hsize_t dims[1];
+                    space.getSimpleExtentDims(dims);
+                    std::vector<double> pf_real(dims[0]), pf_imag(dims[0]);
+                    d1.read(pf_real.data(), H5::PredType::NATIVE_DOUBLE);
+                    d2.read(pf_imag.data(), H5::PredType::NATIVE_DOUBLE);
+                    sector.phase_factors.resize(dims[0]);
+                    for (size_t k = 0; k < dims[0]; ++k) {
+                        sector.phase_factors[k] = Complex(pf_real[k], pf_imag[k]);
+                    }
+                }
+
+                // CSR orbit data
+                std::vector<int> offsets;
+                std::vector<double> norms;
+                {
+                    auto dset = grp.openDataSet("orbit_offsets");
+                    auto space = dset.getSpace();
+                    hsize_t dims[1];
+                    space.getSimpleExtentDims(dims);
+                    offsets.resize(dims[0]);
+                    dset.read(offsets.data(), H5::PredType::NATIVE_INT);
+                }
+                {
+                    auto dset = grp.openDataSet("orbit_norms");
+                    auto space = dset.getSpace();
+                    hsize_t dims[1];
+                    space.getSimpleExtentDims(dims);
+                    norms.resize(dims[0]);
+                    dset.read(norms.data(), H5::PredType::NATIVE_DOUBLE);
+                }
+
+                size_t total_elems = (offsets.size() > 1) ? offsets.back() : 0;
+                std::vector<uint64_t> flat_elements;
+                std::vector<double> flat_coeff_real, flat_coeff_imag;
+                if (total_elems > 0) {
+                    flat_elements.resize(total_elems);
+                    flat_coeff_real.resize(total_elems);
+                    flat_coeff_imag.resize(total_elems);
+                    grp.openDataSet("orbit_elements")
+                        .read(flat_elements.data(), H5::PredType::NATIVE_UINT64);
+                    grp.openDataSet("orbit_coefficients_real")
+                        .read(flat_coeff_real.data(), H5::PredType::NATIVE_DOUBLE);
+                    grp.openDataSet("orbit_coefficients_imag")
+                        .read(flat_coeff_imag.data(), H5::PredType::NATIVE_DOUBLE);
+                }
+
+                // Reconstruct SymBasisState objects and lookup table
+                sector.basis_states.resize(nb);
+                for (size_t j = 0; j < nb; ++j) {
+                    auto& bs = sector.basis_states[j];
+                    bs.quantum_numbers = sector.quantum_numbers;
+                    bs.norm = norms[j];
+                    int off = offsets[j];
+                    int len = offsets[j + 1] - off;
+                    bs.orbit_elements.resize(len);
+                    bs.orbit_coefficients.resize(len);
+                    for (int e = 0; e < len; ++e) {
+                        bs.orbit_elements[e] = flat_elements[off + e];
+                        bs.orbit_coefficients[e] = Complex(flat_coeff_real[off + e],
+                                                            flat_coeff_imag[off + e]);
+                    }
+                    // orbit_rep = first element (smallest by convention)
+                    bs.orbit_rep = bs.orbit_elements.empty() ? 0 : bs.orbit_elements[0];
+                    // Find actual min for orbit_rep
+                    for (auto elem : bs.orbit_elements) {
+                        if (elem < bs.orbit_rep) bs.orbit_rep = elem;
+                    }
+
+                    // Rebuild lookup table
+                    for (uint64_t elem : bs.orbit_elements) {
+                        state_to_sector_basis_[si][elem] = j;
+                    }
+                    total_orbit_elements += len;
+                }
+
+                symmetrized_block_ham_sizes[si] = nb;
+                grp.close();
+            }
+
+            file.close();
+
+            size_t total_basis = 0;
+            for (const auto& s : sectors_) total_basis += s.basis_states.size();
+
+            std::cout << "Loaded " << sectors_.size() << " sectors, "
+                      << total_basis << " basis states, "
+                      << total_orbit_elements << " orbit elements" << std::endl;
+            std::cout << "=== Orbit basis cache loaded ===" << std::endl;
+            return true;
+
+        } catch (H5::Exception& e) {
+            std::cerr << "Warning: Failed to load orbit basis cache: "
+                      << e.getCDetailMsg() << std::endl;
+            return false;
+        }
+    }
+
+    // ===================== Eigenvector expansion ============================
+
+    /**
+     * @brief Expand a symmetrized-sector eigenvector to the fixed-Sz computational basis.
+     *
+     * Returns a vector of length C(N, n_up) indexed by position in basis_states_.
+     * For embedding into the full 2^N Hilbert space, call embedToFull() afterwards.
+     *
+     * @param sector_idx  Index of the symmetry sector
+     * @param sym_vec     Eigenvector in the symmetrized sector basis
+     * @return Vector of length C(N, n_up) in fixed-Sz basis
+     */
+    std::vector<Complex> expandToFixedSzBasis(
+        size_t sector_idx,
+        const std::vector<Complex>& sym_vec
+    ) const {
+        if (sector_idx >= sectors_.size()) {
+            throw std::runtime_error("Invalid sector index");
+        }
+        const auto& sector = sectors_[sector_idx];
+        size_t sector_dim = sector.basis_states.size();
+        if (sym_vec.size() != sector_dim) {
+            throw std::runtime_error(
+                "Eigenvector size (" + std::to_string(sym_vec.size())
+                + ") != sector dimension (" + std::to_string(sector_dim) + ")");
+        }
+
+        // Build reverse lookup: computational state → index in basis_states_
+        std::unordered_map<uint64_t, size_t> state_to_idx;
+        state_to_idx.reserve(basis_states_.size());
+        for (size_t i = 0; i < basis_states_.size(); ++i) {
+            state_to_idx[basis_states_[i]] = i;
+        }
+
+        const double group_norm = 1.0 / std::sqrt(
+            static_cast<double>(symmetry_info.max_clique.size()));
+
+        std::vector<Complex> fixed_sz_vec(basis_states_.size(), Complex(0.0, 0.0));
+
+        for (size_t j = 0; j < sector_dim; ++j) {
+            if (std::abs(sym_vec[j]) < 1e-15) continue;
+            const auto& bs = sector.basis_states[j];
+            Complex weight = sym_vec[j] * group_norm / bs.norm;
+            for (size_t k = 0; k < bs.orbit_elements.size(); ++k) {
+                uint64_t s = bs.orbit_elements[k];
+                auto it = state_to_idx.find(s);
+                if (it != state_to_idx.end()) {
+                    fixed_sz_vec[it->second] += weight * bs.orbit_coefficients[k];
+                }
+            }
+        }
+        return fixed_sz_vec;
+    }
+
+    /**
+     * @brief Expand a symmetrized-sector eigenvector to the full 2^N computational basis.
+     *
+     * Combines expandToFixedSzBasis() + embedToFull() in one call.
+     *
+     * @param sector_idx  Index of the symmetry sector
+     * @param sym_vec     Eigenvector in the symmetrized sector basis
+     * @return Vector of length 2^N in computational basis
+     */
+    std::vector<Complex> expandToComputationalBasis(
+        size_t sector_idx,
+        const std::vector<Complex>& sym_vec
+    ) const {
+        if (sector_idx >= sectors_.size()) {
+            throw std::runtime_error("Invalid sector index");
+        }
+        const auto& sector = sectors_[sector_idx];
+        size_t sector_dim = sector.basis_states.size();
+        if (sym_vec.size() != sector_dim) {
+            throw std::runtime_error(
+                "Eigenvector size (" + std::to_string(sym_vec.size())
+                + ") != sector dimension (" + std::to_string(sector_dim) + ")");
+        }
+
+        uint64_t full_dim = 1ULL << n_bits_;
+        std::vector<Complex> full_vec(full_dim, Complex(0.0, 0.0));
+
+        const double group_norm = 1.0 / std::sqrt(
+            static_cast<double>(symmetry_info.max_clique.size()));
+
+        for (size_t j = 0; j < sector_dim; ++j) {
+            if (std::abs(sym_vec[j]) < 1e-15) continue;
+            const auto& bs = sector.basis_states[j];
+            Complex weight = sym_vec[j] * group_norm / bs.norm;
+            for (size_t k = 0; k < bs.orbit_elements.size(); ++k) {
+                uint64_t s = bs.orbit_elements[k];
+                full_vec[s] += weight * bs.orbit_coefficients[k];
+            }
+        }
+        return full_vec;
+    }
+
+    // ===================== End eigenvector expansion =========================
     
 private:
     /**

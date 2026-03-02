@@ -82,9 +82,13 @@ inline EDParameters toEDParameters(const EDConfig& config) {
     params.sublattice_size = config.system.sublattice_size;
     params.use_fixed_sz = config.system.use_fixed_sz;
     params.n_up = config.system.n_up;
+    params.full_sz_split = config.system.full_sz_split;
     
     // Output
     params.output_dir = config.workflow.output_dir;
+    
+    // Sector selection
+    params.selected_sectors = config.workflow.selected_sectors;
     
     // ARPACK
     params.arpack_advanced_verbose = config.arpack.verbose;
@@ -174,6 +178,7 @@ inline EDConfig fromEDParameters(const EDParameters& params, DiagonalizationMeth
     config.system.sublattice_size = params.sublattice_size;
     config.system.use_fixed_sz = params.use_fixed_sz;
     config.system.n_up = params.n_up;
+    config.system.full_sz_split = params.full_sz_split;
     
     // Output
     config.workflow.output_dir = params.output_dir;

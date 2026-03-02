@@ -268,15 +268,21 @@ def write_cluster_nn_list(output_dir, cluster_name, nn_list, positions, node_map
 
 
 def prepare_hamiltonian_parameters(cluster_filepath, output_dir, J1, J2=0.0, Jz_ratio=1.0, 
-                                    h=0.0, field_dir=(0, 0, 1), model='heisenberg',
-                                    Jzz=None, Jpm=None, Jpmpm=None, Jzpm=None):
+                                    h=0.0, field_dir=(0, 0, 1), model='xxz_j1j2',
+                                    Jzz=None, Jpm=None, Jpmpm=None, Jzpm=None,
+                                    Gamma=None, Gamma_prime=None,
+                                    g_ab=2.0, g_c=2.0):
     """
     Prepare Hamiltonian parameters for exact diagonalization of triangular lattice.
     
     Supports several models:
-    - 'heisenberg': Isotropic J1-J2 Heisenberg model
-    - 'xxz': XXZ model with anisotropy Jz_ratio
-    - 'kitaev': Kitaev-Heisenberg model with bond-dependent interactions
+    - 'xxz_j1j2': XXZ J1-J2 model (Jz=J1, Jxy=J1*Jz_ratio; isotropic when Jz_ratio=1)
+    - 'kitaev': JKΓΓ' model on triangular lattice with bond-dependent interactions
+      H = Σ_{⟨ij⟩} [J S_i · S_j + K S^γ_i S^γ_j 
+                   + Γ (S^α_i S^β_j + S^β_i S^α_j)
+                   + Γ' (S^γ_i S^α_j + S^α_i S^γ_j + S^γ_i S^β_j + S^β_i S^γ_j)]
+      where γ ∈ {x, y, z} labels the bond type and (α, β) are the other two.
+      J = J1 (Heisenberg), K = J2 (Kitaev), Γ = Gamma, Γ' = Gamma_prime
     - 'anisotropic': Bond-dependent anisotropic exchange (YbMgGaO4-type):
       H = Σ_{⟨ij⟩} [J_zz S_i^z S_j^z + J_± (S_i^+ S_j^- + S_i^- S_j^+)
                    + J_±± (γ_ij S_i^+ S_j^+ + γ_ij* S_i^- S_j^-)
@@ -286,16 +292,20 @@ def prepare_hamiltonian_parameters(cluster_filepath, output_dir, J1, J2=0.0, Jz_
     Args:
         cluster_filepath: Path to the cluster file
         output_dir: Directory to write output files
-        J1: Nearest-neighbor exchange coupling (for heisenberg/xxz/kitaev)
-        J2: Next-nearest-neighbor exchange coupling (default 0)
-        Jz_ratio: Sz-Sz coupling ratio for XXZ model (Jz = J * Jz_ratio)
-        h: Magnetic field strength
+        J1: Nearest-neighbor exchange coupling (or J_Heisenberg for kitaev model)
+        J2: Next-nearest-neighbor exchange coupling (or J_Kitaev for kitaev model)
+        Jz_ratio: Jxy/Jz coupling ratio for XXZ model (Jxy = J1 * Jz_ratio, Jz = J1)
+        h: Magnetic field strength (in Tesla when using physical units)
         field_dir: Field direction (3-vector), default is (0, 0, 1) for out-of-plane
-        model: Model type ('heisenberg', 'xxz', 'kitaev', 'anisotropic')
+        model: Model type ('xxz_j1j2', 'kitaev', 'anisotropic')
         Jzz: S^z S^z coupling for anisotropic model
         Jpm: S^+ S^- + S^- S^+ coupling for anisotropic model (J_±)
         Jpmpm: S^+ S^+ + S^- S^- coupling for anisotropic model (J_±±)
         Jzpm: S^z (S^+ - S^-) coupling for anisotropic model (J_z±)
+        Gamma: Γ off-diagonal symmetric exchange for kitaev model (default: 0)
+        Gamma_prime: Γ' off-diagonal exchange for kitaev model (default: 0)
+        g_ab: In-plane g-factor for anisotropic Zeeman (default: 2.0)
+        g_c: Out-of-plane (c-axis) g-factor for anisotropic Zeeman (default: 2.0)
     """
     # Extract cluster name from filepath
     cluster_name = os.path.basename(cluster_filepath).split('.')[0]
@@ -326,11 +336,12 @@ def prepare_hamiltonian_parameters(cluster_filepath, output_dir, J1, J2=0.0, Jz_
     for site_id in sorted(nn_list.keys()):
         i = site_id
         
-        # Zeeman term (field along z by default for 2D system)
-        # For triangular lattice, Sz is the out-of-plane component
-        hz = h * field_dir[2]  # z-component of field
-        hx = h * field_dir[0]  # x-component (in-plane)
-        hy = h * field_dir[1]  # y-component (in-plane)
+        # Zeeman term: H_Z = -μ_B Σ_i [g_ab (B_x S^x + B_y S^y) + g_c B_z S^z]
+        # h already absorbs μ_B if in appropriate units;
+        # g_ab, g_c provide the anisotropic g-tensor weighting
+        hz = h * field_dir[2] * g_c   # out-of-plane component
+        hx = h * field_dir[0] * g_ab  # in-plane x-component
+        hy = h * field_dir[1] * g_ab  # in-plane y-component
         
         # Sz term: -h_z * Sz
         if abs(hz) > 1e-10:
@@ -351,51 +362,161 @@ def prepare_hamiltonian_parameters(cluster_filepath, output_dir, J1, J2=0.0, Jz_
             if site_id < neighbor_id:
                 j = neighbor_id
                 
-                if model == 'heisenberg':
-                    # Isotropic Heisenberg: H = J1 * S_i · S_j
-                    # = J1 * (Sx_i Sx_j + Sy_i Sy_j + Sz_i Sz_j)
-                    # = J1 * (0.5*(S+_i S-_j + S-_i S+_j) + Sz_i Sz_j)
-                    interALL.append([2, node_mapping[i], 2, node_mapping[j], J1, 0])     # Sz-Sz
-                    interALL.append([0, node_mapping[i], 1, node_mapping[j], 0.5*J1, 0]) # S+-S-
-                    interALL.append([1, node_mapping[i], 0, node_mapping[j], 0.5*J1, 0]) # S--S+
-                    
-                elif model == 'xxz':
-                    # XXZ model: H = J1 * (Sx_i Sx_j + Sy_i Sy_j) + Jz * Sz_i Sz_j
-                    Jz = J1 * Jz_ratio
-                    interALL.append([2, node_mapping[i], 2, node_mapping[j], Jz, 0])     # Sz-Sz
-                    interALL.append([0, node_mapping[i], 1, node_mapping[j], 0.5*J1, 0]) # S+-S-
-                    interALL.append([1, node_mapping[i], 0, node_mapping[j], 0.5*J1, 0]) # S--S+
+                if model == 'xxz_j1j2':
+                    # XXZ J1-J2 model: H = Jxy*(Sx_i Sx_j + Sy_i Sy_j) + Jz*Sz_i Sz_j
+                    # where Jz = J1, Jxy = J1 * Jz_ratio  (Jz_ratio=1 → isotropic Heisenberg)
+                    Jxy = J1 * Jz_ratio
+                    interALL.append([2, node_mapping[i], 2, node_mapping[j], J1, 0])       # Sz-Sz = J1
+                    interALL.append([0, node_mapping[i], 1, node_mapping[j], 0.5*Jxy, 0]) # S+-S- = Jxy/2
+                    interALL.append([1, node_mapping[i], 0, node_mapping[j], 0.5*Jxy, 0]) # S--S+ = Jxy/2
                     
                 elif model == 'kitaev':
-                    # Kitaev-Heisenberg on triangular lattice
-                    # Bond-dependent Ising interaction + isotropic Heisenberg
-                    # H = J_H * S_i · S_j + J_K * S^gamma_i S^gamma_j
-                    # where gamma depends on bond type (x, y, or z for different directions)
-                    J_H = J1  # Heisenberg part
-                    J_K = J2  # Kitaev part (repurposing J2 parameter)
+                    # ============================================================
+                    # JKΓΓ' model on triangular lattice
+                    # ============================================================
+                    # H = Σ_{⟨ij⟩} [J S_i · S_j + K S^γ_i S^γ_j
+                    #              + Γ (S^α_i S^β_j + S^β_i S^α_j)
+                    #              + Γ'(S^γ_i S^α_j + S^α_i S^γ_j
+                    #                 + S^γ_i S^β_j + S^β_i S^γ_j)]
+                    #
+                    # where γ ∈ {x,y,z} labels the bond type, (α,β) the other two.
+                    #
+                    # ---- Spin operators in S+/S- basis ----
+                    #   Sx = (S+ + S-)/2
+                    #   Sy = (S+ - S-)/(2i) = -i(S+ - S-)/2
+                    #   Sz = Sz
+                    #
+                    # ---- Bilinear products ----
+                    #   SxSx = (1/4)(S+S+ + S+S- + S-S+ + S-S-)
+                    #   SySy = (-1/4)(S+S+ - S+S- - S-S+ + S-S-)
+                    #        = (1/4)(-S+S+ + S+S- + S-S+ - S-S-)
+                    #   SxSy + SySx = (-i/2)(S+S+ - S-S-)
+                    #   SxSz + SzSx = (1/2)(S+Sz + S-Sz + SzS+ + SzS-)
+                    #   SySz + SzSy = (-i/2)(S+Sz - S-Sz + SzS+ - SzS-)
+                    #
+                    # ---- Collecting into [op_i, site_i, op_j, site_j, Re, Im] ----
+                    # where op: 0=S+, 1=S-, 2=Sz
+                    #
+                    # For each bond type we write the full exchange matrix
+                    #
+                    #        ⎛ J_xx  J_xy  J_xz ⎞
+                    #   J =  ⎜ J_yx  J_yy  J_yz ⎟
+                    #        ⎝ J_zx  J_zy  J_zz ⎠
+                    #
+                    # and convert H_bond = Σ_{μν} J_{μν} S^μ_i S^ν_j to S+/S- form.
+                    # The diagonal part (SxSx, SySy, SzSz) contributes:
+                    #   S+S+: (J_xx - J_yy)/4
+                    #   S+S-: (J_xx + J_yy)/4
+                    #   S-S+: (J_xx + J_yy)/4
+                    #   S-S-: (J_xx - J_yy)/4
+                    #   SzSz: J_zz
+                    #
+                    # Off-diagonal symmetric (J_xy, J_xz, J_yz) contributes:
+                    #   From J_xy(SxSy + SySx) = (-i J_xy/2)(S+S+ - S-S-)
+                    #     → S+S+: -i J_xy/2     S-S-: +i J_xy/2
+                    #
+                    #   From J_xz(SxSz + SzSx) = (J_xz/2)(S+Sz + S-Sz + SzS+ + SzS-)
+                    #     → S+Sz, S-Sz, SzS+, SzS-: all +J_xz/2 (real)
+                    #
+                    #   From J_yz(SySz + SzSy) = (-i J_yz/2)(S+Sz - S-Sz + SzS+ - SzS-)
+                    #     → S+Sz: -i J_yz/2   S-Sz: +i J_yz/2
+                    #       SzS+: -i J_yz/2   SzS-: +i J_yz/2
+                    #
+                    # Combining S+Sz = (J_xz - i J_yz)/2
+                    #           S-Sz = (J_xz + i J_yz)/2
+                    #           SzS+ = (J_xz - i J_yz)/2
+                    #           SzS- = (J_xz + i J_yz)/2
+                    #
+                    # Full result per bond:
+                    #   S+S+: (J_xx - J_yy)/4 - i J_xy/2
+                    #   S+S-: (J_xx + J_yy)/4
+                    #   S-S+: (J_xx + J_yy)/4
+                    #   S-S-: (J_xx - J_yy)/4 + i J_xy/2
+                    #   SzSz: J_zz
+                    #   S+Sz: (J_xz - i J_yz)/2
+                    #   S-Sz: (J_xz + i J_yz)/2
+                    #   SzS+: (J_xz - i J_yz)/2
+                    #   SzS-: (J_xz + i J_yz)/2
+                    # ============================================================
+                    
+                    J_H = J1   # Heisenberg = J
+                    J_K = J2   # Kitaev = K
+                    _G  = Gamma if Gamma is not None else 0.0        # Γ
+                    _Gp = Gamma_prime if Gamma_prime is not None else 0.0  # Γ'
                     
                     bond_type = get_bond_type(positions[i], positions[j])
+                    mi = node_mapping[i]
+                    mj = node_mapping[j]
                     
-                    # Heisenberg part
-                    interALL.append([2, node_mapping[i], 2, node_mapping[j], J_H, 0])
-                    interALL.append([0, node_mapping[i], 1, node_mapping[j], 0.5*J_H, 0])
-                    interALL.append([1, node_mapping[i], 0, node_mapping[j], 0.5*J_H, 0])
-                    
-                    # Kitaev part (bond-dependent)
-                    if bond_type == 0:  # x-bond: Sx Sx
-                        # Sx Sx = 0.25 * (S+ + S-)(S+ + S-) = 0.25 * (S+S+ + S+S- + S-S+ + S-S-)
-                        interALL.append([0, node_mapping[i], 0, node_mapping[j], 0.25*J_K, 0])
-                        interALL.append([0, node_mapping[i], 1, node_mapping[j], 0.25*J_K, 0])
-                        interALL.append([1, node_mapping[i], 0, node_mapping[j], 0.25*J_K, 0])
-                        interALL.append([1, node_mapping[i], 1, node_mapping[j], 0.25*J_K, 0])
-                    elif bond_type == 1:  # y-bond: Sy Sy
-                        # Sy Sy = -0.25 * (S+ - S-)(S+ - S-) = -0.25 * (S+S+ - S+S- - S-S+ + S-S-)
-                        interALL.append([0, node_mapping[i], 0, node_mapping[j], -0.25*J_K, 0])
-                        interALL.append([0, node_mapping[i], 1, node_mapping[j], 0.25*J_K, 0])
-                        interALL.append([1, node_mapping[i], 0, node_mapping[j], 0.25*J_K, 0])
-                        interALL.append([1, node_mapping[i], 1, node_mapping[j], -0.25*J_K, 0])
-                    else:  # z-bond: Sz Sz
-                        interALL.append([2, node_mapping[i], 2, node_mapping[j], J_K, 0])
+                    if bond_type == 0:
+                        # x-bond (γ=x, α=y, β=z)
+                        # J_xx = J+K,  J_yy = J,    J_zz = J
+                        # J_yz = Γ,    J_xy = Γ',   J_xz = Γ'
+                        #
+                        # S+S+: ((J+K) - J)/4 - iΓ'/2 = K/4 - iΓ'/2
+                        # S+S-: ((J+K) + J)/4 = (2J+K)/4
+                        # S-S+: (2J+K)/4
+                        # S-S-: K/4 + iΓ'/2
+                        # SzSz: J
+                        # S+Sz: (Γ' - iΓ)/2
+                        # S-Sz: (Γ' + iΓ)/2
+                        # SzS+: (Γ' - iΓ)/2
+                        # SzS-: (Γ' + iΓ)/2
+                        interALL.append([0, mi, 0, mj, J_K/4.0, -_Gp/2.0])               # S+S+
+                        interALL.append([0, mi, 1, mj, (2*J_H + J_K)/4.0, 0])            # S+S-
+                        interALL.append([1, mi, 0, mj, (2*J_H + J_K)/4.0, 0])            # S-S+
+                        interALL.append([1, mi, 1, mj, J_K/4.0, _Gp/2.0])                # S-S-
+                        interALL.append([2, mi, 2, mj, J_H, 0])                           # SzSz
+                        interALL.append([0, mi, 2, mj, _Gp/2.0, -_G/2.0])                # S+Sz
+                        interALL.append([1, mi, 2, mj, _Gp/2.0, _G/2.0])                 # S-Sz
+                        interALL.append([2, mi, 0, mj, _Gp/2.0, -_G/2.0])                # SzS+
+                        interALL.append([2, mi, 1, mj, _Gp/2.0, _G/2.0])                 # SzS-
+                    elif bond_type == 1:
+                        # y-bond (γ=y, α=x, β=z)
+                        # J_xx = J,    J_yy = J+K,  J_zz = J
+                        # J_xz = Γ,    J_xy = Γ',   J_yz = Γ'
+                        #
+                        # S+S+: (J - (J+K))/4 - iΓ'/2 = -K/4 - iΓ'/2
+                        # S+S-: (J + (J+K))/4 = (2J+K)/4
+                        # S-S+: (2J+K)/4
+                        # S-S-: -K/4 + iΓ'/2
+                        # SzSz: J
+                        # S+Sz: (Γ - iΓ')/2
+                        # S-Sz: (Γ + iΓ')/2
+                        # SzS+: (Γ - iΓ')/2
+                        # SzS-: (Γ + iΓ')/2
+                        interALL.append([0, mi, 0, mj, -J_K/4.0, -_Gp/2.0])              # S+S+
+                        interALL.append([0, mi, 1, mj, (2*J_H + J_K)/4.0, 0])            # S+S-
+                        interALL.append([1, mi, 0, mj, (2*J_H + J_K)/4.0, 0])            # S-S+
+                        interALL.append([1, mi, 1, mj, -J_K/4.0, _Gp/2.0])               # S-S-
+                        interALL.append([2, mi, 2, mj, J_H, 0])                           # SzSz
+                        interALL.append([0, mi, 2, mj, _G/2.0, -_Gp/2.0])                # S+Sz
+                        interALL.append([1, mi, 2, mj, _G/2.0, _Gp/2.0])                 # S-Sz
+                        interALL.append([2, mi, 0, mj, _G/2.0, -_Gp/2.0])                # SzS+
+                        interALL.append([2, mi, 1, mj, _G/2.0, _Gp/2.0])                 # SzS-
+                    else:
+                        # z-bond (γ=z, α=x, β=y)
+                        # J_xx = J,    J_yy = J,    J_zz = J+K
+                        # J_xy = Γ,    J_xz = Γ',   J_yz = Γ'
+                        #
+                        # S+S+: (J - J)/4 - iΓ/2 = -iΓ/2
+                        # S+S-: (J + J)/4 = J/2
+                        # S-S+: J/2
+                        # S-S-: +iΓ/2
+                        # SzSz: J+K
+                        # S+Sz: (Γ' - iΓ')/2
+                        # S-Sz: (Γ' + iΓ')/2
+                        # SzS+: (Γ' - iΓ')/2
+                        # SzS-: (Γ' + iΓ')/2
+                        interALL.append([0, mi, 0, mj, 0, -_G/2.0])                      # S+S+
+                        interALL.append([0, mi, 1, mj, J_H/2.0, 0])                      # S+S-
+                        interALL.append([1, mi, 0, mj, J_H/2.0, 0])                      # S-S+
+                        interALL.append([1, mi, 1, mj, 0, _G/2.0])                       # S-S-
+                        interALL.append([2, mi, 2, mj, J_H + J_K, 0])                    # SzSz
+                        interALL.append([0, mi, 2, mj, _Gp/2.0, -_Gp/2.0])              # S+Sz
+                        interALL.append([1, mi, 2, mj, _Gp/2.0, _Gp/2.0])               # S-Sz
+                        interALL.append([2, mi, 0, mj, _Gp/2.0, -_Gp/2.0])              # SzS+
+                        interALL.append([2, mi, 1, mj, _Gp/2.0, _Gp/2.0])               # SzS-
                 
                 elif model == 'anisotropic':
                     # Anisotropic exchange model (YbMgGaO4-type) with bond-dependent phases
@@ -461,7 +582,7 @@ def prepare_hamiltonian_parameters(cluster_filepath, output_dir, J1, J2=0.0, Jz_
         
         for i, j in nnn_pairs:
             if i in node_mapping and j in node_mapping:
-                # Isotropic J2 Heisenberg coupling
+                # Isotropic J2 Heisenberg coupling (J2 is always isotropic)
                 interALL.append([2, node_mapping[i], 2, node_mapping[j], J2, 0])
                 interALL.append([0, node_mapping[i], 1, node_mapping[j], 0.5*J2, 0])
                 interALL.append([1, node_mapping[i], 0, node_mapping[j], 0.5*J2, 0])
@@ -491,8 +612,11 @@ def prepare_hamiltonian_parameters(cluster_filepath, output_dir, J1, J2=0.0, Jz_
 
 
 def write_interALL(output_dir, interALL, file_name):
-    """Write interaction parameters to a file."""
-    num_param = len(interALL)
+    """Write interaction parameters to a file (skipping zero-coupling terms)."""
+    _s = lambda v: 0.0 if abs(v) < 1e-15 else float(v)
+    nonzero = [i for i in range(len(interALL))
+               if abs(interALL[i,4]) > 1e-15 or abs(interALL[i,5]) > 1e-15]
+    num_param = len(nonzero)
     with open(f"{output_dir}/{file_name}", 'w') as f:
         f.write("===================\n")
         f.write(f"num {num_param:8d}\n")
@@ -500,19 +624,22 @@ def write_interALL(output_dir, interALL, file_name):
         f.write("===================\n")
         f.write("===================\n")
         
-        for i in range(num_param):
+        for i in nonzero:
             f.write(f" {int(interALL[i,0]):8d} "
                    f" {int(interALL[i,1]):8d}   "
                    f" {int(interALL[i,2]):8d}   "
                    f" {int(interALL[i,3]):8d}   "
-                   f" {interALL[i,4]:8f}   "
-                   f" {interALL[i,5]:8f}   "
+                   f" {_s(interALL[i,4]):8f}   "
+                   f" {_s(interALL[i,5]):8f}   "
                    f"\n")
 
 
 def write_transfer(output_dir, transfer, file_name):
-    """Write transfer (field) parameters to a file."""
-    num_param = len(transfer)
+    """Write transfer (field) parameters to a file (skipping zero-coupling terms)."""
+    _s = lambda v: 0.0 if abs(v) < 1e-15 else float(v)
+    nonzero = [i for i in range(len(transfer))
+               if abs(transfer[i,2]) > 1e-15 or abs(transfer[i,3]) > 1e-15]
+    num_param = len(nonzero)
     with open(f"{output_dir}/{file_name}", 'w') as f:
         f.write("===================\n")
         f.write(f"num {num_param:8d}\n")
@@ -520,11 +647,11 @@ def write_transfer(output_dir, transfer, file_name):
         f.write("===================\n")
         f.write("===================\n")
         
-        for i in range(num_param):
+        for i in nonzero:
             f.write(f" {int(transfer[i,0]):8d} "
                    f" {int(transfer[i,1]):8d}   "
-                   f" {transfer[i,2]:8f}   "
-                   f" {transfer[i,3]:8f}"
+                   f" {_s(transfer[i,2]):8f}   "
+                   f" {_s(transfer[i,3]):8f}"
                    f"\n")
 
 
@@ -571,22 +698,32 @@ if __name__ == "__main__":
     import argparse
     
     parser = argparse.ArgumentParser(description='Prepare Hamiltonian parameters for triangular lattice ED')
-    parser.add_argument('--J1', type=float, default=1.0, help='Nearest-neighbor exchange (for heisenberg/xxz/kitaev)')
+    parser.add_argument('--J1', type=float, default=1.0, help='Nearest-neighbor exchange')
     parser.add_argument('--J2', type=float, default=0.0, help='NNN exchange or Kitaev coupling')
     parser.add_argument('--h', type=float, default=0.0, help='Magnetic field strength')
     parser.add_argument('--field_dir', type=float, nargs=3, default=[0, 0, 1], help='Field direction (x, y, z)')
     parser.add_argument('--output_dir', type=str, required=True, help='Output directory')
     parser.add_argument('--cluster_file', type=str, required=True, help='Path to cluster file')
-    parser.add_argument('--model', type=str, default='heisenberg', 
-                       choices=['heisenberg', 'xxz', 'kitaev', 'anisotropic'],
+    parser.add_argument('--model', type=str, default='xxz_j1j2', 
+                       choices=['xxz_j1j2', 'kitaev', 'anisotropic'],
                        help='Model type')
-    parser.add_argument('--Jz_ratio', type=float, default=1.0, help='Jz/J ratio for XXZ model')
+    parser.add_argument('--Jz_ratio', type=float, default=1.0, help='Jxy/Jz ratio for XXZ model (Jxy = Jz_ratio * J1, Jz = J1)')
     
     # Anisotropic model parameters
     parser.add_argument('--Jzz', type=float, default=None, help='J_zz for anisotropic model')
     parser.add_argument('--Jpm', type=float, default=None, help='J_± for anisotropic model')
     parser.add_argument('--Jpmpm', type=float, default=None, help='J_±± for anisotropic model')
     parser.add_argument('--Jzpm', type=float, default=None, help='J_z± for anisotropic model')
+    
+    # JKΓΓ' (Kitaev) model parameters
+    parser.add_argument('--Gamma', type=float, default=None, help='Γ off-diagonal symmetric exchange for kitaev model')
+    parser.add_argument('--Gamma_prime', type=float, default=None, help="Γ' off-diagonal exchange for kitaev model")
+    
+    # Anisotropic g-tensor
+    parser.add_argument('--g_ab', type=float, default=2.0,
+                       help='In-plane g-factor for Zeeman term (default: 2.0)')
+    parser.add_argument('--g_c', type=float, default=2.0,
+                       help='Out-of-plane (c-axis) g-factor for Zeeman term (default: 2.0)')
     
     args = parser.parse_args()
     
@@ -595,5 +732,7 @@ if __name__ == "__main__":
     prepare_hamiltonian_parameters(
         args.cluster_file, args.output_dir, args.J1, args.J2, 
         Jz_ratio=args.Jz_ratio, h=args.h, field_dir=field_dir, model=args.model,
-        Jzz=args.Jzz, Jpm=args.Jpm, Jpmpm=args.Jpmpm, Jzpm=args.Jzpm
+        Jzz=args.Jzz, Jpm=args.Jpm, Jpmpm=args.Jpmpm, Jzpm=args.Jzpm,
+        Gamma=args.Gamma, Gamma_prime=args.Gamma_prime,
+        g_ab=args.g_ab, g_c=args.g_c
     )

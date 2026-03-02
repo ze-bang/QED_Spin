@@ -19,15 +19,11 @@ using namespace GPUConfig;
 
 GPUOperator::GPUOperator(int n_sites, float spin_l)
     : n_sites_(n_sites), spin_l_(spin_l), dimension_(1 << n_sites),
-      d_vector_in_(nullptr), d_vector_out_(nullptr), d_temp_(nullptr),
-      d_csr_row_ptr_(nullptr), d_csr_col_ind_(nullptr), d_csr_values_(nullptr),
-      nnz_(0), d_interactions_(nullptr), d_single_site_ops_(nullptr),
-      num_interactions_(0), num_single_site_ops_(0),
+      d_vector_in_(nullptr), d_vector_out_(nullptr),
       d_transform_data_(nullptr), num_transforms_(0), 
       d_three_body_data_(nullptr), num_three_body_(0),
-      tex_input_vector_(0),
-      gpu_memory_allocated_(false), sparse_matrix_built_(false),
-      events_initialized_(false), d_spmv_buffer_(nullptr), spmv_buffer_size_(0) {
+      gpu_memory_allocated_(false),
+      events_initialized_(false) {
     
     if (n_sites > MAX_SITES) {
         throw std::runtime_error("Number of sites exceeds maximum supported (" 
@@ -45,7 +41,6 @@ GPUOperator::GPUOperator(int n_sites, float spin_l)
               << " GB\n";
     
     // Initialize CUDA libraries
-    initializeCUSPARSE();
     initializeCUBLAS();
     
     // OPTIMIZATION: Pre-allocate CUDA events for timing (avoid create/destroy per matVec)
@@ -61,7 +56,6 @@ GPUOperator::GPUOperator(int n_sites, float spin_l)
 }
 
 GPUOperator::~GPUOperator() {
-    destroyTextureObject();
     freeGPUMemory();
     
     // Clean up pre-allocated CUDA events
@@ -70,21 +64,9 @@ GPUOperator::~GPUOperator() {
         cudaEventDestroy(timing_stop_);
     }
     
-    // Clean up pre-allocated sparse buffer
-    if (d_spmv_buffer_) {
-        cudaFree(d_spmv_buffer_);
-    }
-    
-    if (cusparse_handle_) {
-        cusparseDestroy(cusparse_handle_);
-    }
     if (cublas_handle_) {
         cublasDestroy(cublas_handle_);
     }
-}
-
-void GPUOperator::initializeCUSPARSE() {
-    CUSPARSE_CHECK(cusparseCreate(&cusparse_handle_));
 }
 
 void GPUOperator::initializeCUBLAS() {
@@ -199,17 +181,12 @@ void GPUOperator::copyThreeBodyDataToDevice() {
     }
 }
 
-// Legacy methods (kept for compatibility with char-based interface)
-// FIXED: Now also populates transform_data_ for optimized kernels
 void GPUOperator::setInteraction(int site1, int site2, char op1, char op2, double coupling) {
-    interactions_.push_back({site1, site2, op1, op2, coupling});
-    
     // Map char operators to uint8_t: 0=S+, 1=S-, 2=Sz
-    // Kernel uses: 0=S+ (raises spin), 1=S- (lowers spin), 2=Sz (diagonal)
     auto mapOp = [](char c) -> uint8_t {
-        if (c == '+') return 0;  // S+ (raising operator)
-        if (c == '-') return 1;  // S- (lowering operator)
-        if (c == 'z' || c == 'Z') return 2;  // Sz (diagonal)
+        if (c == '+') return 0;
+        if (c == '-') return 1;
+        if (c == 'z' || c == 'Z') return 2;
         throw std::runtime_error(std::string("Invalid operator '") + c + "': must be '+', '-', or 'z'");
     };
     
@@ -217,14 +194,10 @@ void GPUOperator::setInteraction(int site1, int site2, char op1, char op2, doubl
 }
 
 void GPUOperator::setSingleSite(int site, char op, double coupling) {
-    single_site_ops_.push_back({site, op, coupling});
-    
-    // Map char operators to uint8_t: 0=S+, 1=S-, 2=Sz
-    // Kernel uses: 0=S+ (raises spin), 1=S- (lowers spin), 2=Sz (diagonal)
     auto mapOp = [](char c) -> uint8_t {
-        if (c == '+') return 0;  // S+ (raising operator)
-        if (c == '-') return 1;  // S- (lowering operator)
-        if (c == 'z' || c == 'Z') return 2;  // Sz (diagonal)
+        if (c == '+') return 0;
+        if (c == '-') return 1;
+        if (c == 'z' || c == 'Z') return 2;
         throw std::runtime_error(std::string("Invalid operator '") + c + "': must be '+', '-', or 'z'");
     };
     
@@ -232,26 +205,9 @@ void GPUOperator::setSingleSite(int site, char op, double coupling) {
 }
 
 size_t GPUOperator::estimateMemoryRequirement(int N) const {
+    // 2 vectors (input + output) for matrix-free operation
     size_t vector_size = N * sizeof(cuDoubleComplex);
-    size_t sparse_matrix_size = 0;
-    
-    // Only estimate sparse matrix memory if we're going to build one
-    // For matrix-free operators (using transform_data_), we don't need sparse storage
-    bool use_matrix_free = (num_transforms_ > 0 || !transform_data_.empty());
-    
-    if (!use_matrix_free) {
-        // Estimate non-zeros per row for sparse matrix
-        int nnz_per_row = NNZ_PER_STATE_ESTIMATE;
-        size_t nnz_estimate = static_cast<size_t>(N) * nnz_per_row;
-        
-        sparse_matrix_size = (N + 1) * sizeof(int) +  // row pointers
-                            nnz_estimate * sizeof(int) +  // column indices
-                            nnz_estimate * sizeof(cuDoubleComplex);  // values
-    }
-    
-    size_t total = 3 * vector_size + sparse_matrix_size;
-    
-    return total;
+    return 2 * vector_size;
 }
 
 bool GPUOperator::allocateGPUMemory(int N) {
@@ -261,56 +217,20 @@ bool GPUOperator::allocateGPUMemory(int N) {
     
     size_t required_memory = estimateMemoryRequirement(N);
     
-    // Log the operation mode
-    bool use_matrix_free = (num_transforms_ > 0 || !transform_data_.empty());
-    std::cout << "GPU Operator mode: " << (use_matrix_free ? "matrix-free (transform_data)" : "sparse matrix") << std::endl;
+    std::cout << "GPU Operator mode: matrix-free (transform_data)" << std::endl;
     std::cout << "Required memory: " << required_memory / (1024.0*1024.0*1024.0) << " GB" << std::endl;
     std::cout << "Available GPU memory: " << available_gpu_memory_ / (1024.0*1024.0*1024.0) << " GB" << std::endl;
     
     if (required_memory > available_gpu_memory_ * 0.9) {
-        std::cout << "Warning: Required memory exceeds 90% of available GPU memory. Using chunked processing.\n";
-        
-        // Calculate chunk size based on available memory (leave 20% headroom)
-        size_t usable_memory = static_cast<size_t>(available_gpu_memory_ * 0.8);
-        size_t memory_per_element = 3 * sizeof(cuDoubleComplex);  // 3 vectors
-        size_t max_chunk_by_memory = usable_memory / memory_per_element;
-        size_t chunk_size = std::min(max_chunk_by_memory, static_cast<size_t>(N));
-        
-        // Round down to power of 2 for better performance
-        size_t power_of_2_chunk = 1;
-        while (power_of_2_chunk * 2 <= chunk_size) {
-            power_of_2_chunk *= 2;
-        }
-        chunk_size = power_of_2_chunk;
-        
-        std::cout << "Adjusted chunk size: " << chunk_size << " states ("
-                  << (chunk_size * memory_per_element) / (1024.0*1024.0*1024.0) << " GB for vectors)\n";
-        
-        setupChunks(N);
-        
-        // Override with memory-aware chunk size
-        if (!chunks_.empty()) {
-            chunks_[0].size = std::min(static_cast<size_t>(N), chunk_size);
-        }
-        
-        size_t actual_chunk_size = chunks_.empty() ? chunk_size : chunks_[0].size;
-        CUDA_CHECK(cudaMalloc(&d_vector_in_, actual_chunk_size * sizeof(cuDoubleComplex)));
-        CUDA_CHECK(cudaMalloc(&d_vector_out_, actual_chunk_size * sizeof(cuDoubleComplex)));
-        CUDA_CHECK(cudaMalloc(&d_temp_, actual_chunk_size * sizeof(cuDoubleComplex)));
-        
-        stats_.memoryUsed = 3 * actual_chunk_size * sizeof(cuDoubleComplex);
-    } else {
-        // Allocate full vectors
-        CUDA_CHECK(cudaMalloc(&d_vector_in_, N * sizeof(cuDoubleComplex)));
-        CUDA_CHECK(cudaMalloc(&d_vector_out_, N * sizeof(cuDoubleComplex)));
-        CUDA_CHECK(cudaMalloc(&d_temp_, N * sizeof(cuDoubleComplex)));
-        
-        stats_.memoryUsed = 3 * N * sizeof(cuDoubleComplex);
+        std::cerr << "Error: Required memory (" << required_memory / (1024.0*1024.0*1024.0) 
+                  << " GB) exceeds available GPU memory.\n";
+        return false;
     }
     
-    // Copy interaction data to device
-    copyInteractionsToDevice();
+    CUDA_CHECK(cudaMalloc(&d_vector_in_, N * sizeof(cuDoubleComplex)));
+    CUDA_CHECK(cudaMalloc(&d_vector_out_, N * sizeof(cuDoubleComplex)));
     
+    stats_.memoryUsed = 2 * N * sizeof(cuDoubleComplex);
     gpu_memory_allocated_ = true;
     return true;
 }
@@ -456,12 +376,6 @@ void GPUOperator::copySeparatedTransformsToDevice() {
 void GPUOperator::freeGPUMemory() {
     if (d_vector_in_) cudaFree(d_vector_in_);
     if (d_vector_out_) cudaFree(d_vector_out_);
-    if (d_temp_) cudaFree(d_temp_);
-    if (d_csr_row_ptr_) cudaFree(d_csr_row_ptr_);
-    if (d_csr_col_ind_) cudaFree(d_csr_col_ind_);
-    if (d_csr_values_) cudaFree(d_csr_values_);
-    if (d_interactions_) cudaFree(d_interactions_);
-    if (d_single_site_ops_) cudaFree(d_single_site_ops_);
     if (d_transform_data_) cudaFree(d_transform_data_);
     if (d_three_body_data_) cudaFree(d_three_body_data_);
     
@@ -474,12 +388,6 @@ void GPUOperator::freeGPUMemory() {
     
     d_vector_in_ = nullptr;
     d_vector_out_ = nullptr;
-    d_temp_ = nullptr;
-    d_csr_row_ptr_ = nullptr;
-    d_csr_col_ind_ = nullptr;
-    d_csr_values_ = nullptr;
-    d_interactions_ = nullptr;
-    d_single_site_ops_ = nullptr;
     d_transform_data_ = nullptr;
     d_three_body_data_ = nullptr;
     d_diag_one_body_ = nullptr;
@@ -489,28 +397,7 @@ void GPUOperator::freeGPUMemory() {
     d_offdiag_two_body_ = nullptr;
     
     gpu_memory_allocated_ = false;
-    sparse_matrix_built_ = false;
     separated_on_device_ = false;
-}
-
-void GPUOperator::copyInteractionsToDevice() {
-    num_interactions_ = interactions_.size();
-    num_single_site_ops_ = single_site_ops_.size();
-    
-    if (num_interactions_ > 0) {
-        CUDA_CHECK(cudaMalloc(&d_interactions_, num_interactions_ * sizeof(Interaction)));
-        CUDA_CHECK(cudaMemcpy(d_interactions_, interactions_.data(),
-                            num_interactions_ * sizeof(Interaction),
-                            cudaMemcpyHostToDevice));
-    }
-    
-    if (num_single_site_ops_ > 0) {
-        CUDA_CHECK(cudaMalloc(&d_single_site_ops_, 
-                            num_single_site_ops_ * sizeof(SingleSiteOp)));
-        CUDA_CHECK(cudaMemcpy(d_single_site_ops_, single_site_ops_.data(),
-                            num_single_site_ops_ * sizeof(SingleSiteOp),
-                            cudaMemcpyHostToDevice));
-    }
 }
 
 void GPUOperator::copyTransformDataToDevice() {
@@ -524,54 +411,6 @@ void GPUOperator::copyTransformDataToDevice() {
         
         std::cout << "Copied " << num_transforms_ << " transform operations to GPU\n";
     }
-}
-
-void GPUOperator::createTextureObject(cuDoubleComplex* d_data, int size) {
-    if (tex_input_vector_ != 0) {
-        destroyTextureObject();
-    }
-    
-    // Create resource descriptor
-    cudaResourceDesc resDesc;
-    memset(&resDesc, 0, sizeof(resDesc));
-    resDesc.resType = cudaResourceTypeLinear;
-    resDesc.res.linear.devPtr = d_data;
-    resDesc.res.linear.desc = cudaCreateChannelDesc<double2>();
-    resDesc.res.linear.sizeInBytes = size * sizeof(cuDoubleComplex);
-    
-    // Create texture descriptor
-    cudaTextureDesc texDesc;
-    memset(&texDesc, 0, sizeof(texDesc));
-    texDesc.readMode = cudaReadModeElementType;
-    
-    // Create texture object
-    CUDA_CHECK(cudaCreateTextureObject(&tex_input_vector_, &resDesc, &texDesc, NULL));
-}
-
-void GPUOperator::destroyTextureObject() {
-    if (tex_input_vector_ != 0) {
-        cudaDestroyTextureObject(tex_input_vector_);
-        tex_input_vector_ = 0;
-    }
-}
-
-void GPUOperator::setupChunks(int N) {
-    chunks_.clear();
-    
-    size_t max_chunk_size = CHUNK_SIZE;
-    int num_chunks = (N + max_chunk_size - 1) / max_chunk_size;
-    
-    for (int i = 0; i < num_chunks; ++i) {
-        ChunkInfo chunk;
-        chunk.start_idx = i * max_chunk_size;
-        chunk.size = std::min(static_cast<size_t>(N - chunk.start_idx), max_chunk_size);
-        chunk.start_state = chunk.start_idx;
-        chunk.end_state = chunk.start_state + chunk.size;
-        chunks_.push_back(chunk);
-    }
-    
-    stats_.numChunks = num_chunks;
-    std::cout << "Using " << num_chunks << " chunks for processing\n";
 }
 
 void GPUOperator::matVec(const std::complex<double>* x, std::complex<double>* y, int N) {
@@ -595,34 +434,7 @@ void GPUOperator::matVecGPU(const cuDoubleComplex* d_x, cuDoubleComplex* d_y, in
     // OPTIMIZATION: Use pre-allocated events instead of create/destroy per call
     CUDA_CHECK(cudaEventRecord(timing_start_));
     
-    if (sparse_matrix_built_) {
-        // Use cuSPARSE for sparse matrix-vector product
-        cuDoubleComplex alpha = make_cuDoubleComplex(1.0, 0.0);
-        cuDoubleComplex beta = make_cuDoubleComplex(0.0, 0.0);
-        
-        // Update the dense vector descriptors with the provided pointers
-        CUSPARSE_CHECK(cusparseDnVecSetValues(vec_x_descriptor_, (void*)d_x));
-        CUSPARSE_CHECK(cusparseDnVecSetValues(vec_y_descriptor_, (void*)d_y));
-        
-        // OPTIMIZATION: Pre-allocate buffer on first use, reuse afterwards
-        if (spmv_buffer_size_ == 0) {
-            CUSPARSE_CHECK(cusparseSpMV_bufferSize(
-                cusparse_handle_, CUSPARSE_OPERATION_NON_TRANSPOSE,
-                &alpha, mat_descriptor_, vec_x_descriptor_,
-                &beta, vec_y_descriptor_, CUDA_C_64F,
-                CUSPARSE_SPMV_ALG_DEFAULT, &spmv_buffer_size_));
-            
-            if (spmv_buffer_size_ > 0) {
-                CUDA_CHECK(cudaMalloc(&d_spmv_buffer_, spmv_buffer_size_));
-            }
-        }
-        
-        CUSPARSE_CHECK(cusparseSpMV(
-            cusparse_handle_, CUSPARSE_OPERATION_NON_TRANSPOSE,
-            &alpha, mat_descriptor_, vec_x_descriptor_,
-            &beta, vec_y_descriptor_, CUDA_C_64F,
-            CUSPARSE_SPMV_ALG_DEFAULT, d_spmv_buffer_));
-    } else if (!transform_data_.empty()) {
+    if (!transform_data_.empty()) {
         // Copy transform data to device if not already done
         if (d_transform_data_ == nullptr) {
             copyTransformDataToDevice();
@@ -634,8 +446,7 @@ void GPUOperator::matVecGPU(const cuDoubleComplex* d_x, cuDoubleComplex* d_y, in
         }
         
         // Ensure transforms are separated and copied to device (for non-legacy paths)
-        if (selected_pathway_ != KernelPathway::SHARED_MEMORY && 
-            selected_pathway_ != KernelPathway::LEGACY && !separated_on_device_) {
+        if (selected_pathway_ != KernelPathway::SHARED_MEMORY && !separated_on_device_) {
             copySeparatedTransformsToDevice();
         }
         
@@ -709,16 +520,9 @@ void GPUOperator::matVecGPU(const cuDoubleComplex* d_x, cuDoubleComplex* d_y, in
             break;
         }
     } else {
-        // Fallback to legacy kernel
-        int num_blocks = (N + BLOCK_SIZE - 1) / BLOCK_SIZE;
-        num_blocks = std::min(num_blocks, MAX_BLOCKS);
-        
-        GPUKernels::matVecKernel<<<num_blocks, BLOCK_SIZE>>>(
-            d_x, d_y, N, n_sites_,
-            d_interactions_, num_interactions_,
-            d_single_site_ops_, num_single_site_ops_);
-        
-        CUDA_CHECK(cudaGetLastError());
+        // No transform data available - this shouldn't happen in normal operation
+        std::cerr << "Error: GPUOperator::matVecGPU called with no transform data" << std::endl;
+        CUDA_CHECK(cudaMemset(d_y, 0, N * sizeof(cuDoubleComplex)));
     }
     
     // OPTIMIZATION: Use pre-allocated events
@@ -815,197 +619,88 @@ void GPUOperator::selectKernelPathway(int N) {
 }
 
 void GPUOperator::matVecGPUAsync(const cuDoubleComplex* d_x, cuDoubleComplex* d_y, int N, cudaStream_t stream) {
-    // Async version for parallel block operations
+    // Async version for parallel block operations - uses same pathway selection as matVecGPU
     // Note: No event timing to avoid synchronization
     
-    if (sparse_matrix_built_) {
-        // Need a separate cuSPARSE handle for stream to avoid race conditions
-        // For now, fall back to sequential for sparse matrices
-        cusparseSetStream(cusparse_handle_, stream);
-        
-        cuDoubleComplex alpha = make_cuDoubleComplex(1.0, 0.0);
-        cuDoubleComplex beta = make_cuDoubleComplex(0.0, 0.0);
-        
-        // Create temporary vector descriptors for this stream
-        cusparseDnVecDescr_t vec_x_desc, vec_y_desc;
-        cusparseCreateDnVec(&vec_x_desc, N, (void*)d_x, CUDA_C_64F);
-        cusparseCreateDnVec(&vec_y_desc, N, (void*)d_y, CUDA_C_64F);
-        
-        size_t buffer_size = 0;
-        void* d_buffer = nullptr;
-        
-        cusparseSpMV_bufferSize(
-            cusparse_handle_, CUSPARSE_OPERATION_NON_TRANSPOSE,
-            &alpha, mat_descriptor_, vec_x_desc,
-            &beta, vec_y_desc, CUDA_C_64F,
-            CUSPARSE_SPMV_ALG_DEFAULT, &buffer_size);
-        
-        if (buffer_size > 0) {
-            cudaMallocAsync(&d_buffer, buffer_size, stream);
-        }
-        
-        cusparseSpMV(
-            cusparse_handle_, CUSPARSE_OPERATION_NON_TRANSPOSE,
-            &alpha, mat_descriptor_, vec_x_desc,
-            &beta, vec_y_desc, CUDA_C_64F,
-            CUSPARSE_SPMV_ALG_DEFAULT, d_buffer);
-        
-        if (d_buffer) {
-            cudaFreeAsync(d_buffer, stream);
-        }
-        
-        cusparseDestroyDnVec(vec_x_desc);
-        cusparseDestroyDnVec(vec_y_desc);
-        
-        // Reset stream to default
-        cusparseSetStream(cusparse_handle_, 0);
-    } else if (!transform_data_.empty()) {
+    if (!transform_data_.empty()) {
         // Copy transform data to device if not already done
         if (d_transform_data_ == nullptr) {
             copyTransformDataToDevice();
         }
         
-        // V2 OPTIMIZATION: Use branch-free kernels for larger transform counts
-        const int BRANCH_FREE_THRESHOLD = 128;
-        const bool USE_BRANCH_FREE = (num_transforms_ >= BRANCH_FREE_THRESHOLD);
+        // Select kernel pathway once and cache it (same as matVecGPU)
+        if (selected_pathway_ == KernelPathway::UNINITIALIZED || cached_N_ != N) {
+            selectKernelPathway(N);
+        }
         
-        if (USE_BRANCH_FREE) {
-            if (!separated_on_device_) {
-                copySeparatedTransformsToDevice();
-            }
-            
+        // Ensure separated transforms on device for non-SHARED_MEMORY paths
+        if (selected_pathway_ != KernelPathway::SHARED_MEMORY && !separated_on_device_) {
+            copySeparatedTransformsToDevice();
+        }
+        
+        switch (selected_pathway_) {
+        case KernelPathway::WARP_REDUCTION: {
+            GPUKernels::matVecWarpReductionFused<<<launch_config_.num_blocks, launch_config_.threads_per_block, 0, stream>>>(
+                d_x, d_y,
+                d_diag_one_body_, num_diag_one_body_,
+                d_diag_two_body_, num_diag_two_body_,
+                d_offdiag_one_body_, num_offdiag_one_body_,
+                d_mixed_two_body_, num_mixed_two_body_,
+                d_offdiag_two_body_, num_offdiag_two_body_,
+                N, spin_l_);
+            break;
+        }
+        
+        case KernelPathway::BRANCH_FREE_SCATTER: {
             cudaMemsetAsync(d_y, 0, N * sizeof(cuDoubleComplex), stream);
             
-            dim3 block(16, 16);
-            
-            // Launch separate kernels for each transform type
             if (num_diag_one_body_ > 0) {
-                dim3 grid((N + block.x - 1) / block.x,
-                         (num_diag_one_body_ + block.y - 1) / block.y);
-                GPUKernels::matVecDiagonalOneBody<<<grid, block, 0, stream>>>(
+                dim3 grid((N + 15) / 16, (num_diag_one_body_ + 15) / 16);
+                GPUKernels::matVecDiagonalOneBody<<<grid, launch_config_.block_2d, 0, stream>>>(
                     d_x, d_y, d_diag_one_body_, num_diag_one_body_, N, spin_l_);
             }
-            
             if (num_offdiag_one_body_ > 0) {
-                dim3 grid((N + block.x - 1) / block.x,
-                         (num_offdiag_one_body_ + block.y - 1) / block.y);
-                GPUKernels::matVecOffDiagonalOneBody<<<grid, block, 0, stream>>>(
+                dim3 grid((N + 15) / 16, (num_offdiag_one_body_ + 15) / 16);
+                GPUKernels::matVecOffDiagonalOneBody<<<grid, launch_config_.block_2d, 0, stream>>>(
                     d_x, d_y, d_offdiag_one_body_, num_offdiag_one_body_, N);
             }
-            
             if (num_diag_two_body_ > 0) {
-                dim3 grid((N + block.x - 1) / block.x,
-                         (num_diag_two_body_ + block.y - 1) / block.y);
-                GPUKernels::matVecDiagonalTwoBody<<<grid, block, 0, stream>>>(
+                dim3 grid((N + 15) / 16, (num_diag_two_body_ + 15) / 16);
+                GPUKernels::matVecDiagonalTwoBody<<<grid, launch_config_.block_2d, 0, stream>>>(
                     d_x, d_y, d_diag_two_body_, num_diag_two_body_, N, spin_l_);
             }
-            
             if (num_mixed_two_body_ > 0) {
-                dim3 grid((N + block.x - 1) / block.x,
-                         (num_mixed_two_body_ + block.y - 1) / block.y);
-                GPUKernels::matVecMixedTwoBody<<<grid, block, 0, stream>>>(
+                dim3 grid((N + 15) / 16, (num_mixed_two_body_ + 15) / 16);
+                GPUKernels::matVecMixedTwoBody<<<grid, launch_config_.block_2d, 0, stream>>>(
                     d_x, d_y, d_mixed_two_body_, num_mixed_two_body_, N, spin_l_);
             }
-            
             if (num_offdiag_two_body_ > 0) {
-                dim3 grid((N + block.x - 1) / block.x,
-                         (num_offdiag_two_body_ + block.y - 1) / block.y);
-                GPUKernels::matVecOffDiagonalTwoBody<<<grid, block, 0, stream>>>(
+                dim3 grid((N + 15) / 16, (num_offdiag_two_body_ + 15) / 16);
+                GPUKernels::matVecOffDiagonalTwoBody<<<grid, launch_config_.block_2d, 0, stream>>>(
                     d_x, d_y, d_offdiag_two_body_, num_offdiag_two_body_, N);
             }
-        } else {
-            const int TRANSFORM_PARALLEL_THRESHOLD = 64;
-            
-            if (num_transforms_ > TRANSFORM_PARALLEL_THRESHOLD) {
-                // Zero output vector with async memset
-                cudaMemsetAsync(d_y, 0, N * sizeof(cuDoubleComplex), stream);
-                
-                dim3 block(16, 16);
-                dim3 grid((N + block.x - 1) / block.x,
-                         (num_transforms_ + block.y - 1) / block.y);
-                
-                GPUKernels::matVecTransformParallel<<<grid, block, 0, stream>>>(
-                    d_x, d_y, d_transform_data_, num_transforms_, N, n_sites_, spin_l_);
-            } else {
-                cudaMemsetAsync(d_y, 0, N * sizeof(cuDoubleComplex), stream);
-                
-                int num_blocks = (N + BLOCK_SIZE - 1) / BLOCK_SIZE;
-                num_blocks = std::min(num_blocks, MAX_BLOCKS);
-                
-                size_t shared_mem_size = std::min(num_transforms_, 4096) * sizeof(GPUTransformData);
-                
-                GPUKernels::matVecKernelOptimized<<<num_blocks, BLOCK_SIZE, shared_mem_size, stream>>>(
-                    0, d_y, N, n_sites_, spin_l_,
-                    d_transform_data_, num_transforms_, d_x);
-            }
+            break;
+        }
+        
+        case KernelPathway::SHARED_MEMORY: {
+            cudaMemsetAsync(d_y, 0, N * sizeof(cuDoubleComplex), stream);
+            GPUKernels::matVecKernelOptimized<<<launch_config_.num_blocks, launch_config_.threads_per_block, launch_config_.shared_mem_size, stream>>>(
+                0, d_y, N, n_sites_, spin_l_,
+                d_transform_data_, num_transforms_, d_x);
+            break;
+        }
+        
+        default:
+            cudaMemsetAsync(d_y, 0, N * sizeof(cuDoubleComplex), stream);
+            GPUKernels::matVecKernelOptimized<<<launch_config_.num_blocks, launch_config_.threads_per_block, launch_config_.shared_mem_size, stream>>>(
+                0, d_y, N, n_sites_, spin_l_,
+                d_transform_data_, num_transforms_, d_x);
+            break;
         }
     } else {
-        // Fallback to legacy kernel
-        int num_blocks = (N + BLOCK_SIZE - 1) / BLOCK_SIZE;
-        num_blocks = std::min(num_blocks, MAX_BLOCKS);
-        
-        GPUKernels::matVecKernel<<<num_blocks, BLOCK_SIZE, 0, stream>>>(
-            d_x, d_y, N, n_sites_,
-            d_interactions_, num_interactions_,
-            d_single_site_ops_, num_single_site_ops_);
+        // No transform data available - this shouldn't happen in normal operation
+        cudaMemsetAsync(d_y, 0, N * sizeof(cuDoubleComplex), stream);
     }
-}
-
-void GPUOperator::processChunk(const ChunkInfo& chunk, const cuDoubleComplex* d_x,
-                              cuDoubleComplex* d_y) {
-    // Process one chunk of the matrix-vector product
-    int num_blocks = (chunk.size + BLOCK_SIZE - 1) / BLOCK_SIZE;
-    
-    GPUKernels::matVecKernel<<<num_blocks, BLOCK_SIZE>>>(
-        d_x + chunk.start_idx, d_y + chunk.start_idx,
-        chunk.size, n_sites_,
-        d_interactions_, num_interactions_,
-        d_single_site_ops_, num_single_site_ops_);
-    
-    CUDA_CHECK(cudaGetLastError());
-}
-
-bool GPUOperator::loadCSR(int N, const std::vector<int>& row_ptr,
-                         const std::vector<int>& col_ind,
-                         const std::vector<std::complex<double>>& values) {
-    if (row_ptr.size() != static_cast<size_t>(N + 1)) {
-        std::cerr << "loadCSR: row_ptr size mismatch\n";
-        return false;
-    }
-
-    size_t nnz = values.size();
-    nnz_ = nnz;
-
-    // Allocate device CSR arrays
-    CUDA_CHECK(cudaMalloc(&d_csr_row_ptr_, (N + 1) * sizeof(int)));
-    CUDA_CHECK(cudaMalloc(&d_csr_col_ind_, nnz_ * sizeof(int)));
-    CUDA_CHECK(cudaMalloc(&d_csr_values_, nnz_ * sizeof(cuDoubleComplex)));
-
-    // Copy row ptr and col ind
-    CUDA_CHECK(cudaMemcpy(d_csr_row_ptr_, row_ptr.data(), (N + 1) * sizeof(int), cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaMemcpy(d_csr_col_ind_, col_ind.data(), nnz_ * sizeof(int), cudaMemcpyHostToDevice));
-
-    // Convert values to cuDoubleComplex temporary buffer
-    std::vector<cuDoubleComplex> tmp(nnz_);
-    for (size_t i = 0; i < nnz_; ++i) {
-        tmp[i] = make_cuDoubleComplex(values[i].real(), values[i].imag());
-    }
-    CUDA_CHECK(cudaMemcpy(d_csr_values_, tmp.data(), nnz_ * sizeof(cuDoubleComplex), cudaMemcpyHostToDevice));
-
-    // Create cuSPARSE CSR matrix descriptor
-    cusparseIndexType_t idxType = CUSPARSE_INDEX_32I;
-    cusparseIndexBase_t idxBase = CUSPARSE_INDEX_BASE_ZERO;
-    CUSPARSE_CHECK(cusparseCreateCsr(&mat_descriptor_,
-                                    static_cast<int64_t>(N), static_cast<int64_t>(N), static_cast<int64_t>(nnz_),
-                                    d_csr_row_ptr_, d_csr_col_ind_, d_csr_values_,
-                                    idxType, idxType, idxBase, CUDA_C_64F));
-
-    // Create dense vector descriptors (d_vector_in_/out_ must be allocated)
-    CUSPARSE_CHECK(cusparseCreateDnVec(&vec_x_descriptor_, static_cast<int64_t>(N), reinterpret_cast<void*>(d_vector_in_), CUDA_C_64F));
-    CUSPARSE_CHECK(cusparseCreateDnVec(&vec_y_descriptor_, static_cast<int64_t>(N), reinterpret_cast<void*>(d_vector_out_), CUDA_C_64F));
-
-    sparse_matrix_built_ = true;
-    return true;
 }
 
 #endif // WITH_CUDA
