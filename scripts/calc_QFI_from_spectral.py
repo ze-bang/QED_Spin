@@ -126,12 +126,12 @@ USE_MOMENT_BASED_WIDTH = False
 # Enable Gaussian smoothing of spectral function to reduce noise.
 # This is useful when the original Lanczos broadening was too small,
 # resulting in noisy spectral functions.
-ENABLE_SPECTRAL_SMOOTHING = True  # Set to True to enable smoothing
+ENABLE_SPECTRAL_SMOOTHING = False  # Set to True to enable smoothing
 
 # Gaussian smoothing width (sigma) in units of omega.
 # Typical values: 0.01-0.1 depending on the frequency resolution.
 # Larger values = more smoothing but may smear out real features.
-SPECTRAL_SMOOTHING_SIGMA = 0.015
+SPECTRAL_SMOOTHING_SIGMA = 0.01
 
 # ==============================================================================
 # High-Beta Spectral Weight Normalization Configuration
