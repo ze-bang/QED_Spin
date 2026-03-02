@@ -527,12 +527,14 @@ def write_three_spin_terms(output_dir, three_spin_terms, file_name):
                    f"\n")
 
 def prepare_hamiltonian_parameters(output_dir, non_kramer, nn_list, positions, sublattice_indices, 
-                                  node_mapping, Jxx, Jyy, Jzz, h, theta, field_dir, three_spin_coeff=0.0):
+                                  node_mapping, Jxx, Jyy, Jzz, h, theta, field_dir, three_spin_coeff=0.0, bias_field=0.0, transverse_bias_field=0.0):
     """
     Prepare Hamiltonian parameters for exact diagonalization
     
     Args:
         three_spin_coeff: Coefficient for three-spin nearest neighbor terms
+        bias_field: Uniform local-frame Sz bias (-bias_field * Sz_i on each site)
+        transverse_bias_field: Uniform local-frame Sx bias (-transverse_bias_field * Sx_i on each site)
     """
     # Prepare Hamiltonian parameters
     Jpm = -(Jxx+Jyy)/4
@@ -567,12 +569,19 @@ def prepare_hamiltonian_parameters(output_dir, non_kramer, nn_list, positions, s
         
         # Zeeman term
         sub_idx = sublattice_indices[site_id]
-        # local_field = h * np.dot(field_dir, z_local[sub_idx])
-        # local_field_x = local_field * np.sin(theta)
-        # local_field_z = local_field * np.cos(theta)
-        # transfer.append([0, node_mapping[i], -local_field_x/2, 0])
-        # transfer.append([1, node_mapping[i], -local_field_x/2, 0])
-        transfer.append([2, node_mapping[i], -h, 0])  # Sz term
+        local_field = h * np.dot(field_dir, z_local[sub_idx])
+        local_field_x = local_field * np.sin(theta)
+        local_field_z = local_field * np.cos(theta)
+        transfer.append([0, node_mapping[i], -local_field_x/2, 0])
+        transfer.append([1, node_mapping[i], -local_field_x/2, 0])
+        transfer.append([2, node_mapping[i], -local_field_z, 0])  # Sz term
+        # Uniform local-frame bias field (favours spin-up along local z)
+        if abs(bias_field) > 1e-15:
+            transfer.append([2, node_mapping[i], -bias_field, 0])
+        # Uniform local-frame transverse bias field (Sx = (S+ + S-)/2)
+        if abs(transverse_bias_field) > 1e-15:
+            transfer.append([0, node_mapping[i], -transverse_bias_field/2, 0])  # S+ part
+            transfer.append([1, node_mapping[i], -transverse_bias_field/2, 0])  # S- part
         # Exchange interactions
         for neighbor_id in nn_list[site_id]:
             if site_id < neighbor_id:  # Only add each bond once
@@ -1214,7 +1223,7 @@ def plot_cluster(vertices, edges, output_dir, cluster_name, sublattice_indices=N
 def main():
     """Main function to process command line arguments and run the program"""
     if len(sys.argv) < 13:
-        print("Usage: python helper_pyrochlore_super.py Jxx Jyy Jzz h fieldx fieldy fieldz output_dir dim1 dim2 dim3 pbc [non_kramer] [theta] [counterterm_coeff] [three_spin_coeff]")
+        print("Usage: python helper_pyrochlore_super.py Jxx Jyy Jzz h fieldx fieldy fieldz output_dir dim1 dim2 dim3 pbc [non_kramer] [theta] [counterterm_coeff] [three_spin_coeff] [bias_field] [transverse_bias_field]")
         sys.exit(1)
     
     # Parse command line arguments
@@ -1233,6 +1242,8 @@ def main():
     theta = theta * np.pi
     counterterm_coeff = float(sys.argv[15]) if len(sys.argv) > 15 else 1.0  # Default counterterm_coeff=1.0 if not provided
     three_spin_coeff = float(sys.argv[16]) if len(sys.argv) > 16 else 0.0  # Default three_spin_coeff=0.0 if not provided
+    bias_field = float(sys.argv[17]) if len(sys.argv) > 17 else 0.0  # Uniform local-frame Sz bias
+    transverse_bias_field = float(sys.argv[18]) if len(sys.argv) > 18 else 0.0  # Uniform local-frame Sx bias
     # Ensure output directory exists
     if not os.path.isdir(output_dir):
         os.makedirs(output_dir)
@@ -1253,7 +1264,7 @@ def main():
     
     # Prepare Hamiltonian parameters
     prepare_hamiltonian_parameters(output_dir, non_kramer, nn_list, positions, sublattice_indices, 
-                                  node_mapping, Jxx, Jyy, Jzz, h, theta, field_dir, three_spin_coeff)
+                                  node_mapping, Jxx, Jyy, Jzz, h, theta, field_dir, three_spin_coeff, bias_field, transverse_bias_field)
 
     # Find and write counter term chains
     chains = find_counter_term_chains(vertices, nn_list, vertex_to_cell, dim1, dim2, dim3, use_pbc)

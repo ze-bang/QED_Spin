@@ -295,7 +295,7 @@ def write_cluster_nn_list(output_dir, cluster_name, nn_list, positions, sublatti
         for i, vector in enumerate(basis):
             f.write(f"{i} {vector[0]:.6f} {vector[1]:.6f} {vector[2]:.6f}\n")
 
-def prepare_hamiltonian_parameters(output_dir, non_kramer, nn_list, positions, sublattice_indices, node_mapping, Jxx, Jyy, Jzz, h, field_dir):
+def prepare_hamiltonian_parameters(output_dir, non_kramer, nn_list, positions, sublattice_indices, node_mapping, Jxx, Jyy, Jzz, h, field_dir, bias_field=0.0, transverse_bias_field=0.0):
     """
     Prepare Hamiltonian parameters for exact diagonalization
     
@@ -308,6 +308,8 @@ def prepare_hamiltonian_parameters(output_dir, non_kramer, nn_list, positions, s
         Jxx, Jyy, Jzz: Exchange couplings
         h: Field strength
         field_dir: Field direction (3-vector)
+        bias_field: Uniform local-frame Sz bias (-bias_field * Sz_i on each site)
+        transverse_bias_field: Uniform local-frame Sx bias (-transverse_bias_field * Sx_i on each site)
     """
     # Prepare Hamiltonian parameters
     Jpm = -(Jxx+Jyy)/4
@@ -344,6 +346,15 @@ def prepare_hamiltonian_parameters(output_dir, non_kramer, nn_list, positions, s
         sub_idx = sublattice_indices[site_id]
         local_field = h * np.dot(field_dir, z_local[sub_idx])
         transfer.append([2, node_mapping[i], -local_field, 0])
+        
+        # Uniform local-frame bias field (favours spin-up along local z)
+        if abs(bias_field) > 1e-15:
+            transfer.append([2, node_mapping[i], -bias_field, 0])
+        
+        # Uniform local-frame transverse bias field (Sx = (S+ + S-)/2)
+        if abs(transverse_bias_field) > 1e-15:
+            transfer.append([0, node_mapping[i], -transverse_bias_field/2, 0])  # S+ part
+            transfer.append([1, node_mapping[i], -transverse_bias_field/2, 0])  # S- part
         
         # Exchange interactions
         for neighbor_id in nn_list[site_id]:
@@ -553,7 +564,7 @@ def plot_cluster(vertices, edges, output_dir, cluster_name, sublattice_indices=N
 def main():
     """Main function to process command line arguments and run the program"""
     if len(sys.argv) < 13:
-        print("Usage: python helper_pyrochlore.py Jxx Jyy Jzz h fieldx fieldy fieldz output_dir dim1 dim2 dim3 pbc")
+        print("Usage: python helper_pyrochlore.py Jxx Jyy Jzz h fieldx fieldy fieldz output_dir dim1 dim2 dim3 pbc [non_kramer] [bias_field] [transverse_bias_field]")
         sys.exit(1)
     
     # Parse command line arguments
@@ -569,6 +580,8 @@ def main():
     use_pbc = bool(int(sys.argv[12]))
 
     non_kramer = bool(int(sys.argv[13])) if len(sys.argv) > 13 else False
+    bias_field = float(sys.argv[14]) if len(sys.argv) > 14 else 0.0  # Uniform local-frame Sz bias
+    transverse_bias_field = float(sys.argv[15]) if len(sys.argv) > 15 else 0.0  # Uniform local-frame Sx bias
     # Ensure output directory exists
     if not os.path.isdir(output_dir):
         os.makedirs(output_dir)
@@ -588,7 +601,7 @@ def main():
     write_cluster_nn_list(output_dir, cluster_name, nn_list, positions, sublattice_indices, node_mapping)
     
     # Prepare Hamiltonian parameters
-    prepare_hamiltonian_parameters(output_dir, non_kramer, nn_list, positions, sublattice_indices, node_mapping, Jxx, Jyy, Jzz, h, field_dir)
+    prepare_hamiltonian_parameters(output_dir, non_kramer, nn_list, positions, sublattice_indices, node_mapping, Jxx, Jyy, Jzz, h, field_dir, bias_field, transverse_bias_field)
 
     # Plot cluster
     plot_cluster(vertices, edges, output_dir, cluster_name, sublattice_indices)

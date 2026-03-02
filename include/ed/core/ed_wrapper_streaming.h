@@ -338,7 +338,7 @@ inline EDResults exact_diagonalization_streaming_symmetry(
             // GPU dispatch: create symmetrized operator per sector
             EDParameters sector_params = params;
             sector_params.num_eigenvalues = std::min(params.num_eigenvalues, sector_dim);
-            if (params.compute_eigenvectors && !params.output_dir.empty()) {
+            if (!params.output_dir.empty()) {
                 sector_params.output_dir = params.output_dir + "/sector_" + std::to_string(sector_idx);
                 safe_system_call("mkdir -p " + sector_params.output_dir);
             }
@@ -359,7 +359,7 @@ inline EDResults exact_diagonalization_streaming_symmetry(
             };
             EDParameters sector_params = params;
             sector_params.num_eigenvalues = std::min(params.num_eigenvalues, sector_dim);
-            if (params.compute_eigenvectors && !params.output_dir.empty()) {
+            if (!params.output_dir.empty()) {
                 sector_params.output_dir = params.output_dir + "/sector_" + std::to_string(sector_idx);
                 safe_system_call("mkdir -p " + sector_params.output_dir);
             }
@@ -377,6 +377,17 @@ inline EDResults exact_diagonalization_streaming_symmetry(
                 sector_idx, 
                 static_cast<uint64_t>(i)
             });
+        }
+
+        // Save per-sector eigenvalues to HDF5
+        if (!params.output_dir.empty() && !sector_results.eigenvalues.empty()) {
+            std::string sector_out = params.output_dir + "/sector_" + std::to_string(sector_idx);
+            try {
+                std::string sector_hdf5 = HDF5IO::createOrOpenFile(sector_out);
+                HDF5IO::saveEigenvalues(sector_hdf5, sector_results.eigenvalues);
+            } catch (const std::exception& e) {
+                std::cerr << "  Warning: Could not save sector eigenvalues: " << e.what() << std::endl;
+            }
         }
 
         // Expand eigenvectors from symmetrized basis → full 2^N computational basis
@@ -427,8 +438,8 @@ inline EDResults exact_diagonalization_streaming_symmetry(
         results.eigenvectors_path = params.output_dir;
     }
     
-    // Save combined eigenvalues to HDF5
-    if (!params.output_dir.empty() && !results.eigenvalues.empty()) {
+    // Save combined eigenvalues to HDF5 (only when not using sector filter)
+    if (!params.output_dir.empty() && !results.eigenvalues.empty() && sector_filter.empty()) {
         try {
             std::string hdf5_file = HDF5IO::createOrOpenFile(params.output_dir);
             HDF5IO::saveEigenvalues(hdf5_file, results.eigenvalues);
@@ -702,7 +713,7 @@ inline EDResults exact_diagonalization_streaming_symmetry_fixed_sz(
             // GPU dispatch: create symmetrized operator per sector
             EDParameters sector_params = params;
             sector_params.num_eigenvalues = std::min(params.num_eigenvalues, sector_dim);
-            if (params.compute_eigenvectors && !params.output_dir.empty()) {
+            if (!params.output_dir.empty()) {
                 sector_params.output_dir = params.output_dir + "/sector_" + std::to_string(sector_idx);
                 safe_system_call("mkdir -p " + sector_params.output_dir);
             }
@@ -722,7 +733,7 @@ inline EDResults exact_diagonalization_streaming_symmetry_fixed_sz(
             };
             EDParameters sector_params = params;
             sector_params.num_eigenvalues = std::min(params.num_eigenvalues, sector_dim);
-            if (params.compute_eigenvectors && !params.output_dir.empty()) {
+            if (!params.output_dir.empty()) {
                 sector_params.output_dir = params.output_dir + "/sector_" + std::to_string(sector_idx);
                 safe_system_call("mkdir -p " + sector_params.output_dir);
             }
@@ -739,6 +750,17 @@ inline EDResults exact_diagonalization_streaming_symmetry_fixed_sz(
                 sector_idx, 
                 static_cast<uint64_t>(i)
             });
+        }
+
+        // Save per-sector eigenvalues to HDF5
+        if (!params.output_dir.empty() && !sector_results.eigenvalues.empty()) {
+            std::string sector_out = params.output_dir + "/sector_" + std::to_string(sector_idx);
+            try {
+                std::string sector_hdf5 = HDF5IO::createOrOpenFile(sector_out);
+                HDF5IO::saveEigenvalues(sector_hdf5, sector_results.eigenvalues);
+            } catch (const std::exception& e) {
+                std::cerr << "  Warning: Could not save sector eigenvalues: " << e.what() << std::endl;
+            }
         }
 
         // Expand eigenvectors from symmetrized basis → full 2^N computational basis
@@ -786,8 +808,8 @@ inline EDResults exact_diagonalization_streaming_symmetry_fixed_sz(
         results.eigenvectors_path = params.output_dir;
     }
     
-    // Save combined eigenvalues to HDF5
-    if (!params.output_dir.empty() && !results.eigenvalues.empty()) {
+    // Save combined eigenvalues to HDF5 (only when not using sector filter)
+    if (!params.output_dir.empty() && !results.eigenvalues.empty() && sector_filter.empty()) {
         try {
             std::string hdf5_file = HDF5IO::createOrOpenFile(params.output_dir);
             HDF5IO::saveEigenvalues(hdf5_file, results.eigenvalues);

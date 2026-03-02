@@ -157,8 +157,9 @@ EDConfig EDConfig::fromFile(const std::string& filename) {
             // ========== [Workflow] section ==========
             else if (current_section == "workflow") {
                 if (key == "run_standard") config.workflow.run_standard = parse_bool(value);
-                else if (key == "run_symmetrized") config.workflow.run_symmetrized = parse_bool(value);
-                else if (key == "run_streaming_symmetry") config.workflow.run_streaming_symmetry = parse_bool(value);
+                else if (key == "run_symmetrized") config.workflow.run_symm_auto = parse_bool(value);  // Legacy alias
+                else if (key == "run_streaming_symmetry") config.workflow.run_symm_auto = parse_bool(value);  // Legacy alias
+                else if (key == "run_symm") config.workflow.run_symm_auto = parse_bool(value);
                 else if (key == "compute_thermo") config.workflow.compute_thermo = parse_bool(value);
                 else if (key == "compute_dynamical_response") config.workflow.compute_dynamical_response = parse_bool(value);
                 else if (key == "compute_static_response") config.workflow.compute_static_response = parse_bool(value);
@@ -310,8 +311,9 @@ EDConfig EDConfig::fromFile(const std::string& filename) {
                 else if (key == "temp_max") config.thermal.temp_max = std::stod(value);
                 else if (key == "temp_bins") config.thermal.num_temp_bins = std::stoi(value);
                 else if (key == "run_standard") config.workflow.run_standard = parse_bool(value);
-                else if (key == "run_symmetrized") config.workflow.run_symmetrized = parse_bool(value);
-                else if (key == "run_streaming_symmetry") config.workflow.run_streaming_symmetry = parse_bool(value);
+                else if (key == "run_symmetrized") config.workflow.run_symm_auto = parse_bool(value);  // Legacy alias
+                else if (key == "run_streaming_symmetry") config.workflow.run_symm_auto = parse_bool(value);  // Legacy alias
+                else if (key == "run_symm") config.workflow.run_symm_auto = parse_bool(value);
                 else if (key == "compute_thermo") config.workflow.compute_thermo = parse_bool(value);
                 else if (key == "compute_dynamical_response") config.workflow.compute_dynamical_response = parse_bool(value);
                 else if (key == "compute_static_response") config.workflow.compute_static_response = parse_bool(value);
@@ -430,12 +432,11 @@ EDConfig EDConfig::fromCommandLine(uint64_t argc, char* argv[]) {
             else if (arg == "--save-thermal-states" || arg == "--calc_observables") config.observable.save_thermal_states = true;
             else if (arg == "--compute-spin-correlations" || arg == "--measure_spin") config.observable.compute_spin_correlations = true;
             else if (arg == "--standard") config.workflow.run_standard = true;
-            else if (arg == "--symmetrized") config.workflow.run_symmetrized = true;
-            else if (arg == "--streaming-symmetry") config.workflow.run_streaming_symmetry = true;
+            else if (arg == "--symmetrized") config.workflow.run_symm_auto = true;  // Alias for --symm
+            else if (arg == "--streaming-symmetry") config.workflow.run_symm_auto = true;  // Alias for --symm
             else if (arg == "--disk-streaming") config.workflow.run_disk_streaming = true;
             else if (arg == "--chunked-symm") config.workflow.run_chunked_symmetry = true;
             else if (arg == "--symm") config.workflow.run_symm_auto = true;
-            else if (arg.find("--symm-threshold=") == 0) config.workflow.symm_streaming_threshold = std::stoull(parse_value("--symm-threshold="));
             else if (arg.find("--disk-threshold=") == 0) config.workflow.disk_streaming_threshold = std::stoull(parse_value("--disk-threshold="));
             else if (arg.find("--chunked-threshold=") == 0) config.workflow.chunked_symm_threshold = std::stoull(parse_value("--chunked-threshold="));
             else if (arg == "--thermo") config.workflow.compute_thermo = true;
@@ -570,8 +571,6 @@ EDConfig EDConfig::fromCommandLine(uint64_t argc, char* argv[]) {
                           config.workflow.compute_static_response ||
                           config.workflow.compute_ground_state_dssf) &&
                         !config.workflow.run_standard && 
-                        !config.workflow.run_symmetrized && 
-                        !config.workflow.run_streaming_symmetry &&
                         !config.workflow.run_symm_auto &&
                         !config.workflow.compute_thermo;
     
@@ -581,8 +580,7 @@ EDConfig EDConfig::fromCommandLine(uint64_t argc, char* argv[]) {
     }
     
     // Default to standard workflow if nothing specified (and skip_ed not set)
-    if (!config.workflow.run_standard && !config.workflow.run_symmetrized && 
-        !config.workflow.run_streaming_symmetry && !config.workflow.run_symm_auto && !config.workflow.skip_ed) {
+    if (!config.workflow.run_standard && !config.workflow.run_symm_auto && !config.workflow.skip_ed) {
         config.workflow.run_standard = true;
     }
     
@@ -607,8 +605,7 @@ EDConfig& EDConfig::merge(const EDConfig& other) {
     
     // Merge workflow
     if (other.workflow.run_standard) workflow.run_standard = true;
-    if (other.workflow.run_symmetrized) workflow.run_symmetrized = true;
-    if (other.workflow.run_streaming_symmetry) workflow.run_streaming_symmetry = true;
+    if (other.workflow.run_symm_auto) workflow.run_symm_auto = true;
     if (other.workflow.compute_thermo) workflow.compute_thermo = true;
     if (!other.workflow.output_dir.empty()) workflow.output_dir = other.workflow.output_dir;
     
@@ -752,8 +749,7 @@ void EDConfig::save(const std::string& filename) const {
     file << "[Workflow]\n";
     file << "output_dir = " << workflow.output_dir << "\n";
     file << "run_standard = " << (workflow.run_standard ? "true" : "false") << "\n";
-    file << "run_symmetrized = " << (workflow.run_symmetrized ? "true" : "false") << "\n";
-    file << "run_streaming_symmetry = " << (workflow.run_streaming_symmetry ? "true" : "false") << "\n";
+    file << "run_symm = " << (workflow.run_symm_auto ? "true" : "false") << "\n";
     file << "compute_thermo = " << (workflow.compute_thermo ? "true" : "false") << "\n";
 }
 
@@ -796,8 +792,6 @@ void EDConfig::print(std::ostream& out) const {
     out << "Output: " << workflow.output_dir << "\n";
     
     if (workflow.run_standard) out << "  - Running standard diagonalization\n";
-    if (workflow.run_symmetrized) out << "  - Running symmetrized diagonalization\n";
-    if (workflow.run_streaming_symmetry) out << "  - Running streaming symmetry diagonalization (memory-efficient)\n";
     if (workflow.run_symm_auto) out << "  - Running symmetry-exploiting diagonalization (auto-select mode)\n";
     if (workflow.compute_thermo) out << "  - Computing thermodynamics\n";
     if (observable.save_thermal_states) out << "  - Saving TPQ states at target temperatures\n";

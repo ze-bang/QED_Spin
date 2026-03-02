@@ -507,19 +507,14 @@ EDResults run_standard_workflow(const EDConfig& config) {
 }
 
 /**
- * @brief Run symmetrized diagonalization workflow
+ * @brief Run symmetry-exploiting diagonalization workflow
  *
- * Delegates to the streaming symmetry path which handles both CPU and GPU
+ * Uses streaming symmetry path which handles both CPU and GPU
  * uniformly.  The streaming approach never materialises explicit block
  * matrices — it keeps the per-sector orbit data in memory so the GPU
  * symmetrized matvec kernel can use it directly.  On the CPU side the
  * same matrix-free operator is wrapped in a lambda and forwarded to the
  * standard solver dispatch (Lanczos, Block Lanczos, Davidson, etc.).
- */
-EDResults run_symmetrized_workflow(const EDConfig& config);
-
-/**
- * @brief Run streaming symmetry diagonalization workflow
  */
 EDResults run_streaming_symmetry_workflow(const EDConfig& config) {
     auto params = ed_adapter::toEDParameters(config);
@@ -575,13 +570,6 @@ EDResults run_streaming_symmetry_workflow(const EDConfig& config) {
     // Eigenvalues are saved to HDF5 by the underlying diagonalization functions
     
     return results;
-}
-
-/**
- * @brief Run symmetrized diagonalization workflow (definition)
- */
-EDResults run_symmetrized_workflow(const EDConfig& config) {
-    return run_streaming_symmetry_workflow(config);
 }
 
 /**
@@ -2923,12 +2911,10 @@ int main(int argc, char* argv[]) {
             
             bool use_chunked = (hilbert_dim >= config.workflow.chunked_symm_threshold);
             bool use_disk_streaming = !use_chunked && (hilbert_dim >= config.workflow.disk_streaming_threshold);
-            bool use_streaming = !use_chunked && !use_disk_streaming && (hilbert_dim >= config.workflow.symm_streaming_threshold);
             
             std::cout << "========================================\n";
             std::cout << "  Auto-Symmetry Mode Selection\n";
             std::cout << "  Hilbert space dimension: " << hilbert_dim << "\n";
-            std::cout << "  Threshold for streaming: " << config.workflow.symm_streaming_threshold << "\n";
             std::cout << "  Threshold for disk-streaming: " << config.workflow.disk_streaming_threshold << "\n";
             std::cout << "  Threshold for chunked: " << config.workflow.chunked_symm_threshold << "\n";
             if (use_chunked) {
@@ -2936,7 +2922,7 @@ int main(int argc, char* argv[]) {
             } else if (use_disk_streaming) {
                 std::cout << "  Selected: disk-streaming (ultra-low-memory)\n";
             } else {
-                std::cout << "  Selected: " << (use_streaming ? "streaming-symmetry" : "symmetrized") << "\n";
+                std::cout << "  Selected: streaming-symmetry\n";
             }
             std::cout << "========================================\n\n";
             
@@ -2954,15 +2940,8 @@ int main(int argc, char* argv[]) {
                 if (config.workflow.compute_thermo && !disk_results.eigenvalues.empty()) {
                     compute_thermodynamics(disk_results.eigenvalues, config);
                 }
-            } else if (use_streaming) {
-                EDResults streaming_results = run_streaming_symmetry_workflow(config);
-                print_eigenvalue_summary(streaming_results.eigenvalues);
-                
-                if (config.workflow.compute_thermo && !streaming_results.eigenvalues.empty()) {
-                    compute_thermodynamics(streaming_results.eigenvalues, config);
-                }
             } else {
-                sym_results = run_symmetrized_workflow(config);
+                sym_results = run_streaming_symmetry_workflow(config);
                 print_eigenvalue_summary(sym_results.eigenvalues);
                 
                 if (config.workflow.compute_thermo && !sym_results.eigenvalues.empty()) {
@@ -2977,24 +2956,6 @@ int main(int argc, char* argv[]) {
             
             if (config.workflow.compute_thermo && !standard_results.eigenvalues.empty()) {
                 compute_thermodynamics(standard_results.eigenvalues, config);
-            }
-        }
-        
-        if (config.workflow.run_symmetrized && !config.workflow.skip_ed) {
-            sym_results = run_symmetrized_workflow(config);
-            print_eigenvalue_summary(sym_results.eigenvalues);
-            
-            if (config.workflow.compute_thermo && !sym_results.eigenvalues.empty()) {
-                compute_thermodynamics(sym_results.eigenvalues, config);
-            }
-        }
-        
-        if (config.workflow.run_streaming_symmetry && !config.workflow.skip_ed) {
-            EDResults streaming_results = run_streaming_symmetry_workflow(config);
-            print_eigenvalue_summary(streaming_results.eigenvalues);
-            
-            if (config.workflow.compute_thermo && !streaming_results.eigenvalues.empty()) {
-                compute_thermodynamics(streaming_results.eigenvalues, config);
             }
         }
         
@@ -3031,7 +2992,7 @@ int main(int argc, char* argv[]) {
         }
         
         // Compare results if both were run
-        if (config.workflow.run_standard && config.workflow.run_symmetrized) {
+        if (config.workflow.run_standard && config.workflow.run_symm_auto) {
             uint64_t n = std::min(standard_results.eigenvalues.size(), sym_results.eigenvalues.size());
             double max_diff = 0.0;
             for (int i = 0; i < n; i++) {
