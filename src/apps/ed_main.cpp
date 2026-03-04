@@ -2904,49 +2904,14 @@ int main(int argc, char* argv[]) {
             return 0;
         }
 
-        // Handle unified --symm flag: auto-select between symmetrized, streaming-symmetry, disk-streaming, or chunked
+        // Handle unified --symm flag: always use streaming-symmetry
+        // (supports GPU, basis caching, and works for all system sizes)
         if (config.workflow.run_symm_auto && !config.workflow.skip_ed) {
-            // Calculate Hilbert space dimension for threshold decision
-            uint64_t hilbert_dim = 1ULL << config.system.num_sites;  // 2^N for spin-1/2
+            sym_results = run_streaming_symmetry_workflow(config);
+            print_eigenvalue_summary(sym_results.eigenvalues);
             
-            bool use_chunked = (hilbert_dim >= config.workflow.chunked_symm_threshold);
-            bool use_disk_streaming = !use_chunked && (hilbert_dim >= config.workflow.disk_streaming_threshold);
-            
-            std::cout << "========================================\n";
-            std::cout << "  Auto-Symmetry Mode Selection\n";
-            std::cout << "  Hilbert space dimension: " << hilbert_dim << "\n";
-            std::cout << "  Threshold for disk-streaming: " << config.workflow.disk_streaming_threshold << "\n";
-            std::cout << "  Threshold for chunked: " << config.workflow.chunked_symm_threshold << "\n";
-            if (use_chunked) {
-                std::cout << "  Selected: chunked-symmetry (ultra-low-memory basis construction)\n";
-            } else if (use_disk_streaming) {
-                std::cout << "  Selected: disk-streaming (ultra-low-memory)\n";
-            } else {
-                std::cout << "  Selected: streaming-symmetry\n";
-            }
-            std::cout << "========================================\n\n";
-            
-            if (use_chunked) {
-                EDResults chunked_results = run_chunked_symmetry_workflow(config);
-                print_eigenvalue_summary(chunked_results.eigenvalues);
-                
-                if (config.workflow.compute_thermo && !chunked_results.eigenvalues.empty()) {
-                    compute_thermodynamics(chunked_results.eigenvalues, config);
-                }
-            } else if (use_disk_streaming) {
-                EDResults disk_results = run_disk_streaming_workflow(config);
-                print_eigenvalue_summary(disk_results.eigenvalues);
-                
-                if (config.workflow.compute_thermo && !disk_results.eigenvalues.empty()) {
-                    compute_thermodynamics(disk_results.eigenvalues, config);
-                }
-            } else {
-                sym_results = run_streaming_symmetry_workflow(config);
-                print_eigenvalue_summary(sym_results.eigenvalues);
-                
-                if (config.workflow.compute_thermo && !sym_results.eigenvalues.empty()) {
-                    compute_thermodynamics(sym_results.eigenvalues, config);
-                }
+            if (config.workflow.compute_thermo && !sym_results.eigenvalues.empty()) {
+                compute_thermodynamics(sym_results.eigenvalues, config);
             }
         }
         

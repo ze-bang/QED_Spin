@@ -185,6 +185,14 @@ def run_ed_for_cluster(args):
     if use_symm:
         cmd.append('--symm')
 
+    # Symmetrized diagonalization with pre-cached orbit basis
+    if ed_options.get("symmetrized", False):
+        cmd.append('--symmetrized')
+        # Point to the pre-cached orbit basis for this cluster
+        basis_cache = os.path.join(ham_subdir, 'basis_cache')
+        if os.path.isdir(basis_cache):
+            cmd.append(f'--basis-cache-dir={basis_cache}')
+
     if ed_options.get("measure_spin", False):
         cmd.append('--measure_spin')
     
@@ -302,6 +310,15 @@ def main():
     parser.add_argument('--symm_threshold', type=int, default=13,
                        help='Site threshold for using --symm flag (default: 13)')
     
+    # Symmetrized diagonalization with basis caching
+    parser.add_argument('--symmetrized', action='store_true',
+                       help='Use symmetrized diagonalization (exploits spatial automorphisms). '
+                            'Automatically precomputes and caches the orbit basis for all clusters '
+                            'before running ED, so the basis is reused across fitting iterations.')
+    parser.add_argument('--skip_basis_precompute', action='store_true',
+                       help='Skip orbit basis precomputation (assumes basis cache already exists). '
+                            'Only meaningful with --symmetrized.')
+
     # Legacy arguments kept for backwards compatibility
     parser.add_argument('--no_auto_method', action='store_true',
                        help='(Ignored) Legacy argument.')
@@ -467,6 +484,86 @@ def main():
     else:
         logging.info("Skipping Hamiltonian preparation step.")
     
+    # Step 2.5: Precompute symmetrized orbit basis for all clusters (if --symmetrized)
+    # The orbit basis depends only on the cluster geometry and the symmetry structure
+    # of the Hamiltonian (which operator types appear on which bonds), NOT on the
+    # numerical coupling values. So it can be cached once and reused across all
+    # fitting iterations as long as the model type stays the same.
+    if args.symmetrized and not args.skip_basis_precompute:
+        logging.info("="*80)
+        logging.info("Step 2.5: Precomputing orbit basis for symmetrized diagonalization")
+        logging.info("="*80)
+        
+        def _precompute_basis_for_cluster(task_args):
+            """Precompute orbit basis for a single cluster."""
+            cluster_id, order, ed_executable, ham_dir_local = task_args
+            ham_subdir = os.path.join(ham_dir_local, f'cluster_{cluster_id}_order_{order}')
+            if not os.path.exists(ham_subdir):
+                logging.warning(f"Hamiltonian dir not found for cluster {cluster_id}")
+                return False
+            
+            # Check if basis cache already exists
+            basis_cache = os.path.join(ham_subdir, 'basis_cache')
+            if os.path.isdir(basis_cache) and glob.glob(os.path.join(basis_cache, '*.h5')):
+                logging.debug(f"Basis cache already exists for cluster {cluster_id} — skipping")
+                return True
+            
+            # Count sites
+            site_info_files = glob.glob(os.path.join(ham_subdir, '*_site_info.dat'))
+            if not site_info_files:
+                logging.warning(f"Site info file not found for cluster {cluster_id}")
+                return False
+            num_sites = 0
+            with open(site_info_files[0], 'r') as f:
+                for line in f:
+                    if not line.startswith('#') and line.strip():
+                        num_sites += 1
+            
+            cmd = [
+                ed_executable,
+                ham_subdir,
+                '--precompute-basis',
+                f'--num_sites={num_sites}',
+                '--spin_length=0.5',
+            ]
+            
+            env = os.environ.copy()
+            env['ED_PYTHON'] = sys.executable
+            if num_sites <= 8:
+                env['OMP_NUM_THREADS'] = '1'
+            
+            try:
+                subprocess.run(cmd, check=True, capture_output=True, env=env)
+                return True
+            except subprocess.CalledProcessError as e:
+                logging.error(f"Basis precomputation failed for cluster {cluster_id}: {e}")
+                logging.error(f"Stderr: {e.stderr.decode('utf-8')}")
+                return False
+        
+        precompute_tasks = [
+            (cid, order, args.ed_executable, ham_dir)
+            for cid, order, _ in clusters
+        ]
+        
+        if args.parallel:
+            logging.info(f"Precomputing basis in parallel with {args.num_cores} cores")
+            with multiprocessing.Pool(processes=args.num_cores) as pool:
+                results = list(tqdm(
+                    pool.imap(_precompute_basis_for_cluster, precompute_tasks),
+                    total=len(precompute_tasks),
+                    desc="Precomputing basis"
+                ))
+            success_count = sum(results)
+            logging.info(f"Basis precomputed for {success_count}/{len(precompute_tasks)} clusters")
+        else:
+            for task in tqdm(precompute_tasks, desc="Precomputing basis"):
+                _precompute_basis_for_cluster(task)
+        
+        logging.info("Basis precomputation complete — cached to each cluster's basis_cache/ directory")
+    elif args.symmetrized and args.skip_basis_precompute:
+        logging.info("Skipping basis precomputation (--skip_basis_precompute). "
+                     "Assuming basis cache already exists.")
+    
     # Step 3: Run Exact Diagonalization for each cluster
     if not args.skip_ed:
         logging.info("="*80)
@@ -483,6 +580,7 @@ def main():
             "symm_threshold": args.symm_threshold,
             "scalapack_threshold": args.scalapack_threshold,
             "use_scalapack": not args.no_scalapack,
+            "symmetrized": args.symmetrized,
         }
         
         use_gpu = (args.method.upper() == 'FULL_GPU')  # GPU used only for FULL_GPU method
@@ -496,6 +594,8 @@ def main():
         else:
             logging.info(f"  - Method: FULL diagonalization (ScaLAPACK disabled)")
         logging.info(f"  - Symmetry: --symm for clusters with > {args.symm_threshold} sites")
+        if args.symmetrized:
+            logging.info(f"  - Symmetrized diagonalization: ENABLED (orbit basis cached)")
         
         # Prepare arguments for each cluster
         ed_tasks = []
