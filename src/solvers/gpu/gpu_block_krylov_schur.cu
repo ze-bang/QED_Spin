@@ -235,9 +235,9 @@ void GPUBlockKrylovSchur::computeBlockOverlap(const cuDoubleComplex* d_V1, const
 void GPUBlockKrylovSchur::orthogonalizeBlockAgainstBasis(int num_blocks, cuDoubleComplex* d_target) {
     auto start = std::chrono::high_resolution_clock::now();
     
-    // Allocate temporary overlap matrix
-    cuDoubleComplex* d_overlap;
-    CUDA_CHECK(cudaMalloc(&d_overlap, block_size_ * block_size_ * sizeof(cuDoubleComplex)));
+    // Reuse d_temp_ as overlap scratch (it's dim*block_size, we only need block_size^2)
+    // This avoids expensive cudaMalloc/cudaFree on every call which kills GPU performance
+    cuDoubleComplex* d_overlap = d_temp_;
     
     cuDoubleComplex alpha = make_cuDoubleComplex(-1.0, 0.0);
     cuDoubleComplex beta = make_cuDoubleComplex(1.0, 0.0);
@@ -275,7 +275,7 @@ void GPUBlockKrylovSchur::orthogonalizeBlockAgainstBasis(int num_blocks, cuDoubl
                                 d_target, dimension_));
     }
     
-    cudaFree(d_overlap);
+    // No cudaFree needed - d_overlap aliases pre-allocated d_temp_
     
     auto end = std::chrono::high_resolution_clock::now();
     stats_.ortho_time += std::chrono::duration<double>(end - start).count();
@@ -550,6 +550,12 @@ void GPUBlockKrylovSchur::computeEigenvectors(int num_blocks, int num_eigs,
     }
 }
 
+void GPUBlockKrylovSchur::performRestart(int num_blocks, int num_keep) {
+    // Thick restart is handled inline in run() using Ritz vector rotation.
+    // This method is kept for API compatibility with the block tridiagonal interface.
+    // See run() Phase 4 for the actual restart implementation.
+}
+
 void GPUBlockKrylovSchur::run(int num_eigenvalues,
                               std::vector<double>& eigenvalues,
                               std::vector<std::vector<std::complex<double>>>& eigenvectors,
@@ -558,277 +564,457 @@ void GPUBlockKrylovSchur::run(int num_eigenvalues,
     auto overall_start = std::chrono::high_resolution_clock::now();
     
     std::cout << "\n========================================\n";
-    std::cout << "GPU Block Krylov-Schur Algorithm (Direct Projection)\n";
+    std::cout << "GPU Block Krylov-Schur Algorithm\n";
     std::cout << "========================================\n";
     std::cout << "  Dimension: " << dimension_ << "\n";
     std::cout << "  Target eigenvalues: " << num_eigenvalues << "\n";
     std::cout << "  Block size: " << block_size_ << "\n";
     std::cout << "  Tolerance: " << tolerance_ << "\n\n";
     
-    // Parameters - match CPU implementation
-    int p = std::min(block_size_, static_cast<int>(dimension_));
     int k = std::min(num_eigenvalues, static_cast<int>(dimension_));
+    int p = std::min(block_size_, static_cast<int>(dimension_));
     
-    // Subspace size: use larger subspace for better convergence
-    // At least 4*k or 6*p, whichever is larger, capped at dimension and max_iter
-    int m = std::min(std::max(4*k + p, 6*p), std::min(max_iter_, static_cast<int>(dimension_)));
-    m = std::min(m, static_cast<int>(dimension_));
-    // For small dimensions, use the full space for guaranteed convergence
+    // Krylov subspace size: needs m > k for restart to work
+    // Rule: m ≈ max(4k + p, 6p, 200), capped at dimension and max_iter
+    int m = std::min(std::max({4*k + p, 6*p, 200}),
+                     std::min(max_iter_, static_cast<int>(dimension_)));
     if (dimension_ <= 100) m = dimension_;
+    if (m <= k) m = std::min(2 * k + 10, static_cast<int>(dimension_));
     
-    std::cout << "  Subspace size: " << m << "\n";
+    std::cout << "  Krylov subspace size: " << m << "\n";
+    std::cout << "  Max restart cycles: " << max_outer_iter_ << "\n";
     
-    // Allocate memory for Krylov basis V (dimension x m)
+    // ===================== ONE-TIME ALLOCATION =====================
+    // All GPU buffers pre-allocated here. No cudaMalloc in any loop.
+    
     cuDoubleComplex* d_V;
     CUDA_CHECK(cudaMalloc(&d_V, static_cast<size_t>(dimension_) * m * sizeof(cuDoubleComplex)));
     CUDA_CHECK(cudaMemset(d_V, 0, static_cast<size_t>(dimension_) * m * sizeof(cuDoubleComplex)));
     
-    // Allocate work vectors
     cuDoubleComplex* d_Hv;
     CUDA_CHECK(cudaMalloc(&d_Hv, dimension_ * sizeof(cuDoubleComplex)));
     
-    // Initialize first p vectors randomly with non-fixed seed for better convergence
-    int first_block = std::min(p, m);
-    std::vector<std::complex<double>> h_init(static_cast<size_t>(dimension_) * first_block);
-    std::random_device rd;
-    std::mt19937 gen(rd());
-    std::uniform_real_distribution<double> dist(-1.0, 1.0);
-    for (int j = 0; j < first_block; j++) {
-        for (int i = 0; i < dimension_; i++) {
-            h_init[j * dimension_ + i] = std::complex<double>(dist(gen), dist(gen));
-        }
-    }
-    CUDA_CHECK(cudaMemcpy(d_V, h_init.data(), 
-                         static_cast<size_t>(dimension_) * first_block * sizeof(cuDoubleComplex),
-                         cudaMemcpyHostToDevice));
+    cuDoubleComplex* d_h_overlaps;
+    CUDA_CHECK(cudaMalloc(&d_h_overlaps, m * sizeof(cuDoubleComplex)));
     
-    // QR factorization of initial block
+    cuDoubleComplex* d_V_restart;
+    CUDA_CHECK(cudaMalloc(&d_V_restart, static_cast<size_t>(dimension_) * k * sizeof(cuDoubleComplex)));
+    
+    cuDoubleComplex* d_H_proj;
+    CUDA_CHECK(cudaMalloc(&d_H_proj, static_cast<size_t>(m) * m * sizeof(cuDoubleComplex)));
+    
+    double* d_evals;
+    CUDA_CHECK(cudaMalloc(&d_evals, m * sizeof(double)));
+    
     cuDoubleComplex* d_tau;
-    CUDA_CHECK(cudaMalloc(&d_tau, first_block * sizeof(cuDoubleComplex)));
+    CUDA_CHECK(cudaMalloc(&d_tau, p * sizeof(cuDoubleComplex)));
     
-    int qr_lwork;
-    CUSOLVER_CHECK(cusolverDnZgeqrf_bufferSize(cusolver_handle_, dimension_, first_block,
-                                               d_V, dimension_, &qr_lwork));
-    cuDoubleComplex* d_qr_work;
-    CUDA_CHECK(cudaMalloc(&d_qr_work, qr_lwork * sizeof(cuDoubleComplex)));
     int* d_info;
     CUDA_CHECK(cudaMalloc(&d_info, sizeof(int)));
     
-    CUSOLVER_CHECK(cusolverDnZgeqrf(cusolver_handle_, dimension_, first_block,
-                                    d_V, dimension_, d_tau, d_qr_work, qr_lwork, d_info));
-    CUSOLVER_CHECK(cusolverDnZungqr(cusolver_handle_, dimension_, first_block, first_block,
-                                    d_V, dimension_, d_tau, d_qr_work, qr_lwork, d_info));
+    cuDoubleComplex* d_coefs;
+    CUDA_CHECK(cudaMalloc(&d_coefs, m * sizeof(cuDoubleComplex)));
     
-    int current_dim = first_block;
+    cuDoubleComplex* d_eigvec;
+    CUDA_CHECK(cudaMalloc(&d_eigvec, dimension_ * sizeof(cuDoubleComplex)));
     
-    std::cout << "  Building Krylov subspace..." << std::endl;
+    int qr_lwork;
+    CUSOLVER_CHECK(cusolverDnZgeqrf_bufferSize(cusolver_handle_, dimension_, p,
+                                               d_V, dimension_, &qr_lwork));
+    cuDoubleComplex* d_qr_work;
+    CUDA_CHECK(cudaMalloc(&d_qr_work, qr_lwork * sizeof(cuDoubleComplex)));
     
-    auto matvec_start = std::chrono::high_resolution_clock::now();
+    int eigsolve_lwork;
+    CUSOLVER_CHECK(cusolverDnZheevd_bufferSize(cusolver_handle_, CUSOLVER_EIG_MODE_VECTOR,
+                                               CUBLAS_FILL_MODE_UPPER, m,
+                                               d_H_proj, m, d_evals, &eigsolve_lwork));
+    cuDoubleComplex* d_eigsolve_work;
+    CUDA_CHECK(cudaMalloc(&d_eigsolve_work, eigsolve_lwork * sizeof(cuDoubleComplex)));
     
-    // Expand Krylov subspace one vector at a time (like CPU)
-    while (current_dim < m) {
-        cuDoubleComplex* v_src = d_V + (current_dim - 1) * dimension_;
-        cuDoubleComplex* v_dst = d_V + current_dim * dimension_;
-        
-        // Apply Hamiltonian
-        op_->matVecGPU(v_src, v_dst, dimension_);
-        stats_.total_block_steps++;
-        
-        // Full orthogonalization with two passes (modified Gram-Schmidt + reorthogonalization)
-        for (int pass = 0; pass < 2; pass++) {
-            for (int l = 0; l < current_dim; l++) {
-                cuDoubleComplex* v_l = d_V + l * dimension_;
-                cuDoubleComplex dot;
-                CUBLAS_CHECK(cublasZdotc(cublas_handle_, dimension_, v_l, 1, v_dst, 1, &dot));
-                cuDoubleComplex neg_dot = make_cuDoubleComplex(-cuCreal(dot), -cuCimag(dot));
-                CUBLAS_CHECK(cublasZaxpy(cublas_handle_, dimension_, &neg_dot, v_l, 1, v_dst, 1));
-            }
-        }
-        
-        // Normalize
-        double norm;
-        CUBLAS_CHECK(cublasDznrm2(cublas_handle_, dimension_, v_dst, 1, &norm));
-        if (norm < tolerance_) {
-            std::cout << "  Krylov subspace exhausted at dimension " << current_dim << "\n";
-            break;
-        }
-        cuDoubleComplex scale = make_cuDoubleComplex(1.0 / norm, 0.0);
-        CUBLAS_CHECK(cublasZscal(cublas_handle_, dimension_, &scale, v_dst, 1));
-        
-        current_dim++;
-    }
-    
-    auto matvec_end = std::chrono::high_resolution_clock::now();
-    stats_.matvec_time = std::chrono::duration<double>(matvec_end - matvec_start).count();
-    
-    std::cout << "  Final subspace size: " << current_dim << "\n";
-    std::cout << "  Computing projected Hamiltonian..." << std::endl;
-    
-    // Compute projected Hamiltonian directly: H_m[i,j] = <v_i | H | v_j>
-    std::vector<std::complex<double>> h_H_m(static_cast<size_t>(current_dim) * current_dim, 
+    // Host Hessenberg matrix (column-major, m × m)
+    std::vector<std::complex<double>> h_H_m(static_cast<size_t>(m) * m,
                                             std::complex<double>(0.0, 0.0));
     
-    auto proj_start = std::chrono::high_resolution_clock::now();
+    // ===================== INITIALIZATION =====================
+    // Generate p random orthonormal starting vectors via QR
+    int init_block = std::min(p, m);
+    {
+        std::vector<std::complex<double>> h_init(static_cast<size_t>(dimension_) * init_block);
+        std::random_device rd;
+        std::mt19937 gen(rd());
+        std::uniform_real_distribution<double> dist(-1.0, 1.0);
+        for (int j = 0; j < init_block; j++) {
+            for (int i = 0; i < dimension_; i++) {
+                h_init[j * dimension_ + i] = std::complex<double>(dist(gen), dist(gen));
+            }
+        }
+        CUDA_CHECK(cudaMemcpy(d_V, h_init.data(),
+                             static_cast<size_t>(dimension_) * init_block * sizeof(cuDoubleComplex),
+                             cudaMemcpyHostToDevice));
+        CUSOLVER_CHECK(cusolverDnZgeqrf(cusolver_handle_, dimension_, init_block,
+                                        d_V, dimension_, d_tau, d_qr_work, qr_lwork, d_info));
+        CUSOLVER_CHECK(cusolverDnZungqr(cusolver_handle_, dimension_, init_block, init_block,
+                                        d_V, dimension_, d_tau, d_qr_work, qr_lwork, d_info));
+    }
     
-    for (int j = 0; j < current_dim; j++) {
-        // Compute H * v_j
-        op_->matVecGPU(d_V + j * dimension_, d_Hv, dimension_);
-        
-        // Compute inner products: H_m[i,j] = v_i^H * (H * v_j)
-        for (int i = 0; i < current_dim; i++) {
+    // Compute projected H for initial block explicitly: h_H_m[i,j] = <v_i, H*v_j>
+    for (int j = 0; j < init_block; j++) {
+        op_->matVecGPU(d_V + static_cast<size_t>(j) * dimension_, d_Hv, dimension_);
+        stats_.total_block_steps++;
+        for (int i = 0; i <= j; i++) {
             cuDoubleComplex dot;
-            CUBLAS_CHECK(cublasZdotc(cublas_handle_, dimension_, d_V + i * dimension_, 1, d_Hv, 1, &dot));
-            h_H_m[j * current_dim + i] = std::complex<double>(cuCreal(dot), cuCimag(dot));  // Column-major
+            CUBLAS_CHECK(cublasZdotc(cublas_handle_, dimension_,
+                                    d_V + static_cast<size_t>(i) * dimension_, 1, d_Hv, 1, &dot));
+            h_H_m[i + static_cast<size_t>(j) * m] =
+                std::complex<double>(cuCreal(dot), cuCimag(dot));
+            if (i != j) {
+                h_H_m[j + static_cast<size_t>(i) * m] =
+                    std::conj(h_H_m[i + static_cast<size_t>(j) * m]);
+            }
         }
     }
     
-    // Enforce Hermitian symmetry for numerical stability
-    for (int i = 0; i < current_dim; i++) {
-        for (int j = i + 1; j < current_dim; j++) {
-            std::complex<double> avg = 0.5 * (h_H_m[j * current_dim + i] + std::conj(h_H_m[i * current_dim + j]));
-            h_H_m[j * current_dim + i] = avg;
-            h_H_m[i * current_dim + j] = std::conj(avg);
-        }
-        h_H_m[i * current_dim + i] = std::complex<double>(std::real(h_H_m[i * current_dim + i]), 0.0);
-    }
+    int current_dim = init_block;
+    bool converged = false;
+    std::vector<double> prev_eigenvalues;
     
-    auto proj_end = std::chrono::high_resolution_clock::now();
-    stats_.ortho_time = std::chrono::duration<double>(proj_end - proj_start).count();
-    
-    // Diagonalize projected Hamiltonian
-    std::cout << "  Diagonalizing projected matrix (size " << current_dim << "x" << current_dim << ")..." << std::endl;
-    
-    auto eigen_start = std::chrono::high_resolution_clock::now();
-    
-    // Allocate for eigensolve
-    cuDoubleComplex* d_H_m;
-    CUDA_CHECK(cudaMalloc(&d_H_m, static_cast<size_t>(current_dim) * current_dim * sizeof(cuDoubleComplex)));
-    CUDA_CHECK(cudaMemcpy(d_H_m, h_H_m.data(), 
-                         static_cast<size_t>(current_dim) * current_dim * sizeof(cuDoubleComplex),
-                         cudaMemcpyHostToDevice));
-    
-    double* d_evals;
-    CUDA_CHECK(cudaMalloc(&d_evals, current_dim * sizeof(double)));
-    
-    // Query workspace size
-    int lwork;
-    CUSOLVER_CHECK(cusolverDnZheevd_bufferSize(cusolver_handle_, CUSOLVER_EIG_MODE_VECTOR,
-                                               CUBLAS_FILL_MODE_UPPER, current_dim,
-                                               d_H_m, current_dim, d_evals, &lwork));
-    cuDoubleComplex* d_work;
-    CUDA_CHECK(cudaMalloc(&d_work, lwork * sizeof(cuDoubleComplex)));
-    
-    CUSOLVER_CHECK(cusolverDnZheevd(cusolver_handle_, CUSOLVER_EIG_MODE_VECTOR,
-                                    CUBLAS_FILL_MODE_UPPER, current_dim,
-                                    d_H_m, current_dim, d_evals, d_work, lwork, d_info));
-    
-    auto eigen_end = std::chrono::high_resolution_clock::now();
-    stats_.schur_time = std::chrono::duration<double>(eigen_end - eigen_start).count();
-    
-    // Copy eigenvalues back
-    std::vector<double> evals_all(current_dim);
-    CUDA_CHECK(cudaMemcpy(evals_all.data(), d_evals, current_dim * sizeof(double), cudaMemcpyDeviceToHost));
-    
-    // Extract requested eigenvalues
-    int num_eigs = std::min(k, current_dim);
-    eigenvalues.resize(num_eigs);
-    for (int i = 0; i < num_eigs; i++) {
-        eigenvalues[i] = evals_all[i];
-    }
-    
-    std::cout << "\n  Computed eigenvalues:" << std::endl;
-    for (int i = 0; i < std::min(5, num_eigs); i++) {
-        std::cout << "    E[" << i << "] = " << std::fixed << std::setprecision(10) << eigenvalues[i] << "\n";
-    }
-    if (num_eigs > 5) std::cout << "    ...\n";
-    
-    // Compute eigenvectors if requested
-    if (compute_vectors && num_eigs > 0) {
-        std::cout << "  Computing eigenvectors..." << std::endl;
+    // ===================== MAIN RESTART LOOP =====================
+    for (int outer = 0; outer < max_outer_iter_ && !converged; outer++) {
+        stats_.outer_iterations++;
+        std::cout << "  Krylov-Schur cycle " << outer + 1
+                  << " (starting dim = " << current_dim << ")\n";
         
-        // Get eigenvector coefficients from GPU (d_H_m now contains them)
-        std::vector<std::complex<double>> h_evec_coefs(static_cast<size_t>(current_dim) * current_dim);
-        CUDA_CHECK(cudaMemcpy(h_evec_coefs.data(), d_H_m,
+        // === Phase 1: Expand Krylov subspace via Arnoldi ===
+        // Uses batched GEMV for orthogonalization + DGKS criterion.
+        // Builds Hessenberg H_m incrementally (avoids redundant mat-vecs for projection).
+        auto matvec_start = std::chrono::high_resolution_clock::now();
+        
+        while (current_dim < m) {
+            cuDoubleComplex* v_src = d_V + static_cast<size_t>(current_dim - 1) * dimension_;
+            cuDoubleComplex* v_dst = d_V + static_cast<size_t>(current_dim) * dimension_;
+            
+            // w = H * v_{current_dim-1}
+            op_->matVecGPU(v_src, v_dst, dimension_);
+            stats_.total_block_steps++;
+            
+            // Norm before orthogonalization (for DGKS criterion)
+            double norm_before;
+            CUBLAS_CHECK(cublasDznrm2(cublas_handle_, dimension_, v_dst, 1, &norm_before));
+            
+            // --- Batched CGS pass 1: h = V^H * w, then w -= V * h ---
+            {
+                cuDoubleComplex alpha_cgs = make_cuDoubleComplex(1.0, 0.0);
+                cuDoubleComplex beta_cgs = make_cuDoubleComplex(0.0, 0.0);
+                
+                // h = V[:,0:current_dim]^H * w   (single GEMV instead of current_dim dot products)
+                CUBLAS_CHECK(cublasZgemv(cublas_handle_, CUBLAS_OP_C,
+                                        dimension_, current_dim,
+                                        &alpha_cgs, d_V, dimension_,
+                                        v_dst, 1,
+                                        &beta_cgs, d_h_overlaps, 1));
+                
+                // Store overlaps in Hessenberg column (current_dim - 1)
+                std::vector<cuDoubleComplex> h_tmp(current_dim);
+                CUDA_CHECK(cudaMemcpy(h_tmp.data(), d_h_overlaps,
+                                     current_dim * sizeof(cuDoubleComplex),
+                                     cudaMemcpyDeviceToHost));
+                for (int i = 0; i < current_dim; i++) {
+                    h_H_m[i + static_cast<size_t>(current_dim - 1) * m] =
+                        std::complex<double>(cuCreal(h_tmp[i]), cuCimag(h_tmp[i]));
+                }
+                
+                // w -= V * h
+                alpha_cgs = make_cuDoubleComplex(-1.0, 0.0);
+                beta_cgs = make_cuDoubleComplex(1.0, 0.0);
+                CUBLAS_CHECK(cublasZgemv(cublas_handle_, CUBLAS_OP_N,
+                                        dimension_, current_dim,
+                                        &alpha_cgs, d_V, dimension_,
+                                        d_h_overlaps, 1,
+                                        &beta_cgs, v_dst, 1));
+            }
+            
+            // --- DGKS criterion: second pass if norm dropped > 1/sqrt(2) ---
+            double norm_after;
+            CUBLAS_CHECK(cublasDznrm2(cublas_handle_, dimension_, v_dst, 1, &norm_after));
+            
+            static constexpr double DGKS_ETA = 0.7071067811865476;  // 1/sqrt(2)
+            if (norm_after < DGKS_ETA * norm_before) {
+                cuDoubleComplex alpha2 = make_cuDoubleComplex(1.0, 0.0);
+                cuDoubleComplex beta2 = make_cuDoubleComplex(0.0, 0.0);
+                
+                CUBLAS_CHECK(cublasZgemv(cublas_handle_, CUBLAS_OP_C,
+                                        dimension_, current_dim,
+                                        &alpha2, d_V, dimension_,
+                                        v_dst, 1,
+                                        &beta2, d_h_overlaps, 1));
+                
+                // Accumulate corrections into Hessenberg
+                std::vector<cuDoubleComplex> h_corr(current_dim);
+                CUDA_CHECK(cudaMemcpy(h_corr.data(), d_h_overlaps,
+                                     current_dim * sizeof(cuDoubleComplex),
+                                     cudaMemcpyDeviceToHost));
+                for (int i = 0; i < current_dim; i++) {
+                    h_H_m[i + static_cast<size_t>(current_dim - 1) * m] +=
+                        std::complex<double>(cuCreal(h_corr[i]), cuCimag(h_corr[i]));
+                }
+                
+                alpha2 = make_cuDoubleComplex(-1.0, 0.0);
+                beta2 = make_cuDoubleComplex(1.0, 0.0);
+                CUBLAS_CHECK(cublasZgemv(cublas_handle_, CUBLAS_OP_N,
+                                        dimension_, current_dim,
+                                        &alpha2, d_V, dimension_,
+                                        d_h_overlaps, 1,
+                                        &beta2, v_dst, 1));
+                
+                CUBLAS_CHECK(cublasDznrm2(cublas_handle_, dimension_, v_dst, 1, &norm_after));
+            }
+            
+            // Store beta (subdiagonal)
+            h_H_m[current_dim + static_cast<size_t>(current_dim - 1) * m] =
+                std::complex<double>(norm_after, 0.0);
+            
+            // Check for Krylov breakdown
+            if (norm_after < tolerance_) {
+                std::cout << "  Krylov breakdown at dim " << current_dim << "\n";
+                break;
+            }
+            
+            // Normalize new vector
+            cuDoubleComplex scale = make_cuDoubleComplex(1.0 / norm_after, 0.0);
+            CUBLAS_CHECK(cublasZscal(cublas_handle_, dimension_, &scale, v_dst, 1));
+            current_dim++;
+        }
+        
+        auto matvec_end = std::chrono::high_resolution_clock::now();
+        stats_.matvec_time += std::chrono::duration<double>(matvec_end - matvec_start).count();
+        
+        std::cout << "  Subspace size: " << current_dim << "\n";
+        
+        // === Phase 2: Solve projected eigenproblem ===
+        // Copy upper triangle of Hessenberg to lower to form Hermitian
+        // projected matrix.  The expansion uses CGS so upper-triangle entries
+        // are exact inner products <v_i, H*v_j>.  After a thick restart the
+        // lower triangle of the restart columns is zero, so averaging would
+        // halve the cross-block coupling.  Copy instead.
+        std::vector<double> evals_all(current_dim);
+        {
+            auto proj_start = std::chrono::high_resolution_clock::now();
+            
+            std::vector<cuDoubleComplex> h_proj(static_cast<size_t>(current_dim) * current_dim);
+            for (int i = 0; i < current_dim; i++) {
+                // Diagonal: force real
+                h_proj[i + i * current_dim] = make_cuDoubleComplex(
+                    h_H_m[i + static_cast<size_t>(i) * m].real(), 0.0);
+                for (int j = i + 1; j < current_dim; j++) {
+                    // Upper triangle entry: h_H_m(i, j) where i < j
+                    auto h_ij = h_H_m[i + static_cast<size_t>(j) * m];
+                    h_proj[i + j * current_dim] = make_cuDoubleComplex(h_ij.real(), h_ij.imag());
+                    h_proj[j + i * current_dim] = make_cuDoubleComplex(h_ij.real(), -h_ij.imag());
+                }
+            }
+            
+            CUDA_CHECK(cudaMemcpy(d_H_proj, h_proj.data(),
+                                 static_cast<size_t>(current_dim) * current_dim * sizeof(cuDoubleComplex),
+                                 cudaMemcpyHostToDevice));
+            
+            CUSOLVER_CHECK(cusolverDnZheevd(cusolver_handle_, CUSOLVER_EIG_MODE_VECTOR,
+                                            CUBLAS_FILL_MODE_UPPER, current_dim,
+                                            d_H_proj, current_dim, d_evals,
+                                            d_eigsolve_work, eigsolve_lwork, d_info));
+            
+            int info;
+            CUDA_CHECK(cudaMemcpy(&info, d_info, sizeof(int), cudaMemcpyDeviceToHost));
+            if (info != 0) {
+                std::cerr << "  cuSOLVER zheevd failed (info=" << info << ")\n";
+                break;
+            }
+            
+            CUDA_CHECK(cudaMemcpy(evals_all.data(), d_evals,
+                                 current_dim * sizeof(double), cudaMemcpyDeviceToHost));
+            
+            auto proj_end = std::chrono::high_resolution_clock::now();
+            stats_.schur_time += std::chrono::duration<double>(proj_end - proj_start).count();
+        }
+        
+        int num_eigs = std::min(k, current_dim);
+        eigenvalues.resize(num_eigs);
+        for (int i = 0; i < num_eigs; i++) eigenvalues[i] = evals_all[i];
+        
+        // === Phase 3: Check convergence ===
+        int num_converged = 0;
+        double max_change = 0.0;
+        if (!prev_eigenvalues.empty()) {
+            for (int i = 0; i < num_eigs && i < static_cast<int>(prev_eigenvalues.size()); i++) {
+                double change = std::abs(eigenvalues[i] - prev_eigenvalues[i]);
+                double s = std::max(1.0, std::abs(eigenvalues[i]));
+                double rel = change / s;
+                max_change = std::max(max_change, rel);
+                if (rel < tolerance_) num_converged++;
+            }
+            std::cout << "  Converged: " << num_converged << "/" << k
+                      << "  (max rel. change: " << std::scientific << max_change << ")\n";
+        }
+        
+        for (int i = 0; i < std::min(3, num_eigs); i++) {
+            std::cout << "    E[" << i << "] = " << std::fixed
+                      << std::setprecision(12) << eigenvalues[i] << "\n";
+        }
+        
+        if (current_dim >= dimension_ || num_converged >= k) {
+            converged = true;
+        }
+        prev_eigenvalues = eigenvalues;
+        
+        if (converged || outer == max_outer_iter_ - 1) {
+            if (!converged) {
+                std::cout << "\n  WARNING: Max restart cycles (" << max_outer_iter_
+                          << ") reached. " << num_converged << "/" << k << " converged.\n"
+                          << "  Consider: increasing max_iter, loosening tolerance, "
+                          << "or using symmetries.\n";
+            }
+            break;
+        }
+        
+        // === Phase 4: Thick restart ===
+        // Keep k Ritz vectors as new basis via V_new = V * Q[:,0:k], where
+        // Q = eigenvectors of the projected matrix (stored in d_H_proj after zheevd).
+        {
+            auto restart_start = std::chrono::high_resolution_clock::now();
+            std::cout << "  Thick restart: keeping " << k << " Ritz vectors\n";
+            
+            cuDoubleComplex gemm_alpha = make_cuDoubleComplex(1.0, 0.0);
+            cuDoubleComplex gemm_beta = make_cuDoubleComplex(0.0, 0.0);
+            
+            // V_new[:,0:k] = V * Q[:,0:k]
+            CUBLAS_CHECK(cublasZgemm(cublas_handle_, CUBLAS_OP_N, CUBLAS_OP_N,
+                                    dimension_, k, current_dim,
+                                    &gemm_alpha,
+                                    d_V, dimension_,
+                                    d_H_proj, current_dim,
+                                    &gemm_beta,
+                                    d_V_restart, dimension_));
+            
+            // Copy back to d_V[:,0:k]
+            CUDA_CHECK(cudaMemcpy(d_V, d_V_restart,
+                                 static_cast<size_t>(dimension_) * k * sizeof(cuDoubleComplex),
+                                 cudaMemcpyDeviceToDevice));
+            
+            // Reorthonormalize for numerical stability (CGS on k vectors)
+            for (int i = 0; i < k; i++) {
+                cuDoubleComplex* v_i = d_V + static_cast<size_t>(i) * dimension_;
+                for (int j = 0; j < i; j++) {
+                    cuDoubleComplex* v_j = d_V + static_cast<size_t>(j) * dimension_;
+                    cuDoubleComplex dot;
+                    CUBLAS_CHECK(cublasZdotc(cublas_handle_, dimension_, v_j, 1, v_i, 1, &dot));
+                    cuDoubleComplex neg = make_cuDoubleComplex(-cuCreal(dot), -cuCimag(dot));
+                    CUBLAS_CHECK(cublasZaxpy(cublas_handle_, dimension_, &neg, v_j, 1, v_i, 1));
+                }
+                double nrm;
+                CUBLAS_CHECK(cublasDznrm2(cublas_handle_, dimension_, v_i, 1, &nrm));
+                if (nrm > 1e-15) {
+                    cuDoubleComplex sc = make_cuDoubleComplex(1.0 / nrm, 0.0);
+                    CUBLAS_CHECK(cublasZscal(cublas_handle_, dimension_, &sc, v_i, 1));
+                }
+            }
+            
+            // Reset Hessenberg: diagonal = eigenvalues of kept pairs
+            std::fill(h_H_m.begin(), h_H_m.end(), std::complex<double>(0.0, 0.0));
+            for (int i = 0; i < k; i++) {
+                h_H_m[i + static_cast<size_t>(i) * m] =
+                    std::complex<double>(evals_all[i], 0.0);
+            }
+            current_dim = k;
+            
+            auto restart_end = std::chrono::high_resolution_clock::now();
+            stats_.restart_time += std::chrono::duration<double>(restart_end - restart_start).count();
+        }
+    }
+    
+    // ===================== EIGENVECTORS =====================
+    int num_eigs = std::min(k, static_cast<int>(eigenvalues.size()));
+    
+    if (compute_vectors && num_eigs > 0) {
+        std::cout << "  Computing eigenvectors...\n";
+        
+        std::vector<std::complex<double>> h_evec_coefs(
+            static_cast<size_t>(current_dim) * current_dim);
+        CUDA_CHECK(cudaMemcpy(h_evec_coefs.data(), d_H_proj,
                              static_cast<size_t>(current_dim) * current_dim * sizeof(cuDoubleComplex),
                              cudaMemcpyDeviceToHost));
         
         eigenvectors.resize(num_eigs);
-        
-        cuDoubleComplex* d_eigvec;
-        CUDA_CHECK(cudaMalloc(&d_eigvec, dimension_ * sizeof(cuDoubleComplex)));
+        std::vector<cuDoubleComplex> h_eigvec(dimension_);
         
         for (int e = 0; e < num_eigs; e++) {
-            // eigenvector = V * y_e
-            cuDoubleComplex* d_coefs;
-            CUDA_CHECK(cudaMalloc(&d_coefs, current_dim * sizeof(cuDoubleComplex)));
-            CUDA_CHECK(cudaMemcpy(d_coefs, &h_evec_coefs[e * current_dim],
-                                 current_dim * sizeof(cuDoubleComplex), cudaMemcpyHostToDevice));
+            CUDA_CHECK(cudaMemcpy(d_coefs,
+                                 &h_evec_coefs[static_cast<size_t>(e) * current_dim],
+                                 current_dim * sizeof(cuDoubleComplex),
+                                 cudaMemcpyHostToDevice));
             
-            cuDoubleComplex alpha = make_cuDoubleComplex(1.0, 0.0);
-            cuDoubleComplex beta = make_cuDoubleComplex(0.0, 0.0);
+            cuDoubleComplex alp = make_cuDoubleComplex(1.0, 0.0);
+            cuDoubleComplex bet = make_cuDoubleComplex(0.0, 0.0);
             CUBLAS_CHECK(cublasZgemv(cublas_handle_, CUBLAS_OP_N,
                                     dimension_, current_dim,
-                                    &alpha, d_V, dimension_,
+                                    &alp, d_V, dimension_,
                                     d_coefs, 1,
-                                    &beta, d_eigvec, 1));
+                                    &bet, d_eigvec, 1));
             
-            // Normalize
-            double norm;
-            CUBLAS_CHECK(cublasDznrm2(cublas_handle_, dimension_, d_eigvec, 1, &norm));
-            if (norm > tolerance_) {
-                cuDoubleComplex scale_v = make_cuDoubleComplex(1.0 / norm, 0.0);
-                CUBLAS_CHECK(cublasZscal(cublas_handle_, dimension_, &scale_v, d_eigvec, 1));
+            double nrm;
+            CUBLAS_CHECK(cublasDznrm2(cublas_handle_, dimension_, d_eigvec, 1, &nrm));
+            if (nrm > tolerance_) {
+                cuDoubleComplex sc = make_cuDoubleComplex(1.0 / nrm, 0.0);
+                CUBLAS_CHECK(cublasZscal(cublas_handle_, dimension_, &sc, d_eigvec, 1));
             }
             
-            // Copy to host
             eigenvectors[e].resize(dimension_);
-            std::vector<cuDoubleComplex> h_eigvec(dimension_);
-            CUDA_CHECK(cudaMemcpy(h_eigvec.data(), d_eigvec, dimension_ * sizeof(cuDoubleComplex), cudaMemcpyDeviceToHost));
+            CUDA_CHECK(cudaMemcpy(h_eigvec.data(), d_eigvec,
+                                 dimension_ * sizeof(cuDoubleComplex),
+                                 cudaMemcpyDeviceToHost));
             for (int i = 0; i < dimension_; i++) {
-                eigenvectors[e][i] = std::complex<double>(cuCreal(h_eigvec[i]), cuCimag(h_eigvec[i]));
+                eigenvectors[e][i] = std::complex<double>(
+                    cuCreal(h_eigvec[i]), cuCimag(h_eigvec[i]));
             }
-            
-            cudaFree(d_coefs);
         }
-        
-        cudaFree(d_eigvec);
     }
     
     auto overall_end = std::chrono::high_resolution_clock::now();
     stats_.total_time = std::chrono::duration<double>(overall_end - overall_start).count();
     
-    // Print results
+    // ===================== PRINT RESULTS =====================
     std::cout << "\n========================================\n";
     std::cout << "GPU Block Krylov-Schur Results\n";
     std::cout << "========================================\n";
-    std::cout << "Converged: YES\n";
-    std::cout << "Subspace dimension: " << current_dim << "\n";
-    std::cout << "\nTiming breakdown:\n";
+    std::cout << "Converged: " << (converged ? "YES" : "NO") << "\n";
+    std::cout << "Restart cycles: " << stats_.outer_iterations << "\n";
+    std::cout << "Total mat-vecs: " << stats_.total_block_steps << "\n";
+    std::cout << "Final subspace: " << current_dim << "\n";
+    std::cout << "\nTiming:\n";
     std::cout << "  Krylov expansion: " << stats_.matvec_time << " s\n";
-    std::cout << "  Projected H computation: " << stats_.ortho_time << " s\n";
     std::cout << "  Eigenproblem: " << stats_.schur_time << " s\n";
-    std::cout << "  Total time: " << stats_.total_time << " s\n";
-    
+    std::cout << "  Restart: " << stats_.restart_time << " s\n";
+    std::cout << "  Total: " << stats_.total_time << " s\n";
     std::cout << "\nLowest eigenvalues:\n";
-    int n_print = std::min(5, static_cast<int>(eigenvalues.size()));
-    for (int i = 0; i < n_print; i++) {
-        std::cout << "  E[" << i << "] = " << std::fixed << std::setprecision(10) 
+    for (int i = 0; i < std::min(5, static_cast<int>(eigenvalues.size())); i++) {
+        std::cout << "  E[" << i << "] = " << std::fixed << std::setprecision(10)
                   << eigenvalues[i] << "\n";
     }
-    if (eigenvalues.size() > 5) {
+    if (eigenvalues.size() > 5)
         std::cout << "  ... (" << eigenvalues.size() - 5 << " more)\n";
-    }
     std::cout << "========================================\n";
     
-    // Cleanup
+    // ===================== CLEANUP =====================
     cudaFree(d_V);
     cudaFree(d_Hv);
+    cudaFree(d_h_overlaps);
+    cudaFree(d_V_restart);
+    cudaFree(d_H_proj);
+    cudaFree(d_evals);
+    cudaFree(d_eigsolve_work);
     cudaFree(d_tau);
     cudaFree(d_qr_work);
     cudaFree(d_info);
-    cudaFree(d_H_m);
-    cudaFree(d_evals);
-    cudaFree(d_work);
+    cudaFree(d_coefs);
+    cudaFree(d_eigvec);
 }
 
 #endif // WITH_CUDA

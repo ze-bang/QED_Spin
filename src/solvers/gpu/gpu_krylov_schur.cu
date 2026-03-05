@@ -292,24 +292,53 @@ double GPUKrylovSchur::orthogonalizeAgainstBasis(int j) {
                             &beta,
                             d_w_, 1));
     
-    // Reorthogonalization pass for numerical stability
-    cuDoubleComplex h_correction;
+    // DGKS (Daniel-Gragg-Kaufman-Stewart) reorthogonalization criterion:
+    // If ||w_after|| < (1/sqrt(2)) * ||w_before||, significant cancellation occurred
+    // and a full second orthogonalization pass is needed for numerical stability.
+    // This is the standard approach used in SLEPc, ARPACK, and Spectra.
+    double w_norm_after_first = vectorNorm(d_w_);
+    
+    // Estimate pre-orthogonalization norm: ||w_before||^2 = ||w_after||^2 + ||h||^2
+    double h_norm_sq = 0.0;
     for (int i = 0; i <= j; i++) {
-        cuDoubleComplex* v_i = getKrylovVector(i);
-        CUBLAS_CHECK(cublasZdotc(cublas_handle_, dimension_, v_i, 1, d_w_, 1, &h_correction));
+        double re = cuCreal(h_overlaps[i]), im = cuCimag(h_overlaps[i]);
+        h_norm_sq += re * re + im * im;
+    }
+    double w_norm_before = std::sqrt(h_norm_sq + w_norm_after_first * w_norm_after_first);
+    
+    static constexpr double DGKS_THRESHOLD = 0.7071067811865476;  // 1/sqrt(2)
+    if (w_norm_after_first < DGKS_THRESHOLD * w_norm_before) {
+        // Full second orthogonalization pass using batched GEMV (efficient on GPU)
+        // h2 = V^H * w
+        alpha = make_cuDoubleComplex(1.0, 0.0);
+        beta = make_cuDoubleComplex(0.0, 0.0);
+        CUBLAS_CHECK(cublasZgemv(cublas_handle_, CUBLAS_OP_C,
+                                dimension_, j + 1,
+                                &alpha,
+                                d_V_, dimension_,
+                                d_w_, 1,
+                                &beta,
+                                d_temp_, 1));
         
-        double correction_mag = sqrt(cuCreal(h_correction) * cuCreal(h_correction) + 
-                                    cuCimag(h_correction) * cuCimag(h_correction));
-        
-        if (correction_mag > tolerance_) {
-            // Update Hessenberg entry
+        // Update Hessenberg entries with corrections
+        std::vector<cuDoubleComplex> h_corrections(j + 1);
+        CUDA_CHECK(cudaMemcpy(h_corrections.data(), d_temp_,
+                             (j + 1) * sizeof(cuDoubleComplex), cudaMemcpyDeviceToHost));
+        for (int i = 0; i <= j; i++) {
             h_H_projected_[i + j * max_krylov_size_] += std::complex<double>(
-                cuCreal(h_correction), cuCimag(h_correction));
-            
-            // w = w - h_correction * v_i
-            cuDoubleComplex neg_h = make_cuDoubleComplex(-cuCreal(h_correction), -cuCimag(h_correction));
-            CUBLAS_CHECK(cublasZaxpy(cublas_handle_, dimension_, &neg_h, v_i, 1, d_w_, 1));
+                cuCreal(h_corrections[i]), cuCimag(h_corrections[i]));
         }
+        
+        // w = w - V * h2
+        alpha = make_cuDoubleComplex(-1.0, 0.0);
+        beta = make_cuDoubleComplex(1.0, 0.0);
+        CUBLAS_CHECK(cublasZgemv(cublas_handle_, CUBLAS_OP_N,
+                                dimension_, j + 1,
+                                &alpha,
+                                d_V_, dimension_,
+                                d_temp_, 1,
+                                &beta,
+                                d_w_, 1));
     }
     
     // Compute beta = ||w||
@@ -377,6 +406,21 @@ bool GPUKrylovSchur::solveProjectedEigenproblem(int m, std::vector<double>& eige
         for (int j = 0; j < m; j++) {
             std::complex<double> val = h_H_projected_[i + j * max_krylov_size_];
             h_dense[i + j * m] = make_cuDoubleComplex(val.real(), val.imag());
+        }
+    }
+    
+    // Enforce Hermitian symmetry by copying the upper triangle to the lower.
+    // The expansion uses CGS so upper-triangle entries are the exact inner 
+    // products <v_i, H*v_j>.  After a thick restart, the lower triangle of 
+    // the restart columns is zero, so averaging would halve the cross-block 
+    // coupling.  Copy instead: H(j,i) = conj(H(i,j)).
+    for (int i = 0; i < m; i++) {
+        // Make diagonal strictly real
+        h_dense[i + i * m] = make_cuDoubleComplex(cuCreal(h_dense[i + i * m]), 0.0);
+        for (int j = i + 1; j < m; j++) {
+            cuDoubleComplex h_ij = h_dense[i + j * m];  // upper triangle: (i,j) with i<j
+            h_dense[i + j * m] = h_ij;
+            h_dense[j + i * m] = make_cuDoubleComplex(cuCreal(h_ij), -cuCimag(h_ij));
         }
     }
     
@@ -575,19 +619,22 @@ void GPUKrylovSchur::computeEigenvectors(int m, int num_eigs,
     
     eigenvectors.resize(num_eigs);
     
+    // Pre-allocate a single device buffer for Ritz coefficients (reused across eigenvectors)
+    cuDoubleComplex* d_ritz_vec;
+    CUDA_CHECK(cudaMalloc(&d_ritz_vec, m * sizeof(cuDoubleComplex)));
+    
+    // Pre-allocate host buffer for copying back eigenvectors
+    std::vector<cuDoubleComplex> h_eigvec(dimension_);
+    
     for (int i = 0; i < num_eigs; i++) {
         eigenvectors[i].resize(dimension_);
         
         // eigenvector[i] = V * y_i where y_i is the i-th Ritz vector
-        // Use cuBLAS GEMV: eigvec = V * y_i
-        
-        // Copy Ritz vector to device
-        cuDoubleComplex* d_ritz_vec;
-        CUDA_CHECK(cudaMalloc(&d_ritz_vec, m * sizeof(cuDoubleComplex)));
+        // Copy Ritz vector to pre-allocated device buffer
         CUDA_CHECK(cudaMemcpy(d_ritz_vec, &h_evecs[i * m], 
                              m * sizeof(cuDoubleComplex), cudaMemcpyHostToDevice));
         
-        // eigvec = V * y_i
+        // eigvec = V * y_i using cuBLAS GEMV
         cuDoubleComplex alpha = make_cuDoubleComplex(1.0, 0.0);
         cuDoubleComplex beta = make_cuDoubleComplex(0.0, 0.0);
         
@@ -603,16 +650,15 @@ void GPUKrylovSchur::computeEigenvectors(int m, int num_eigs,
         normalizeVector(d_temp_);
         
         // Copy to host
-        std::vector<cuDoubleComplex> h_eigvec(dimension_);
         CUDA_CHECK(cudaMemcpy(h_eigvec.data(), d_temp_, 
                              dimension_ * sizeof(cuDoubleComplex), cudaMemcpyDeviceToHost));
         
         for (int j = 0; j < dimension_; j++) {
             eigenvectors[i][j] = std::complex<double>(cuCreal(h_eigvec[j]), cuCimag(h_eigvec[j]));
         }
-        
-        cudaFree(d_ritz_vec);
     }
+    
+    cudaFree(d_ritz_vec);
     
     std::cout << "  Eigenvectors computed\n";
 }
