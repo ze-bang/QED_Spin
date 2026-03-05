@@ -943,6 +943,11 @@ void lanczos(std::function<void(const Complex*, Complex*, int)> H, uint64_t N, u
     uint64_t full_reorth_count = 0;
     uint64_t selective_reorth_count = 0;
     
+    // Eigenvalue convergence checking
+    std::vector<double> prev_eigenvalues;
+    const int check_convergence_interval = 10;  // Check every 10 iterations
+    bool eigenvalues_converged = false;
+    
     std::cout << "Lanczos: max_iter=" << max_iter << ", n_eig=" << exct 
               << ", tol=" << tol << std::endl;
     
@@ -1033,6 +1038,44 @@ void lanczos(std::function<void(const Complex*, Complex*, int)> H, uint64_t N, u
             std::cout << "Iteration " << j + 1 << ": residual = " << residual_error << std::endl;
             std::cout << "This may indicate loss of orthogonality or numerical issues." << std::endl;
             std::cout << "Consider using more aggressive reorthogonalization.\n" << std::endl;
+        }
+        
+        // Eigenvalue convergence check (every check_convergence_interval iterations)
+        if (j >= (int)exct && (j + 1) % check_convergence_interval == 0) {
+            // Solve the tridiagonal eigenproblem for the current Krylov space
+            uint64_t m_cur = alpha.size();
+            std::vector<double> diag_check = alpha;
+            std::vector<double> offdiag_check(m_cur - 1);
+            for (uint64_t ii = 0; ii < m_cur - 1; ii++) {
+                offdiag_check[ii] = beta[ii + 1];
+            }
+            // We only need eigenvalues, not eigenvectors — use 'N' mode
+            uint64_t info_check = LAPACKE_dstevd(LAPACK_COL_MAJOR, 'N', m_cur, 
+                                                  diag_check.data(), offdiag_check.data(), 
+                                                  nullptr, m_cur);
+            if (info_check == 0) {
+                // diag_check now contains sorted eigenvalues
+                uint64_t n_check = std::min(exct, m_cur);
+                std::vector<double> current_eigenvalues(diag_check.begin(), diag_check.begin() + n_check);
+                
+                if (!prev_eigenvalues.empty() && prev_eigenvalues.size() >= n_check) {
+                    double max_change = 0.0;
+                    for (uint64_t ii = 0; ii < n_check; ii++) {
+                        double change = std::abs(current_eigenvalues[ii] - prev_eigenvalues[ii]);
+                        max_change = std::max(max_change, change);
+                    }
+                    
+                    if (max_change < tol) {
+                        std::cout << "Lanczos: Eigenvalues converged at iteration " << j + 1 
+                                 << " (max change = " << std::scientific << std::setprecision(4) 
+                                 << max_change << " < tol = " << tol << ")" << std::defaultfloat << std::endl;
+                        eigenvalues_converged = true;
+                        max_iter = j + 1;
+                        break;
+                    }
+                }
+                prev_eigenvalues = current_eigenvalues;
+            }
         }
         
         // v_{j+1} = w / beta_{j+1}

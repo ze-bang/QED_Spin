@@ -318,13 +318,13 @@ def run_nlce_triangular(params, fixed_params, exp_temp, work_dir, h_field=None, 
         if ed_cores > 0:
             cmd.extend(['--num_cores', str(ed_cores)])
     
-    # Symmetrized diagonalization: pass flag to NLCE runner.
+    # Streaming-symmetry diagonalization: pass flag to NLCE runner.
     # The orbit basis is cached inside each cluster's ham dir (basis_cache/).
     # On the first iteration the basis is computed; subsequent iterations skip
     # precomputation because the HDF5 cache already exists (preserved during
     # Hamiltonian cleanup above).
-    if fixed_params.get("symmetrized", False):
-        cmd.append('--symmetrized')
+    if fixed_params.get("streaming_symmetry", False):
+        cmd.append('--streaming-symmetry')
     
     if not fixed_params.get("skip_ham_prep", False):
         # Clean up old results
@@ -333,7 +333,7 @@ def run_nlce_triangular(params, fixed_params, exp_temp, work_dir, h_field=None, 
             shutil.rmtree(ed_dir)
         ham_dir = os.path.join(work_dir, f'hamiltonians_order_{fixed_params["max_order"]}')
         if os.path.exists(ham_dir):
-            if fixed_params.get("symmetrized", False):
+            if fixed_params.get("streaming_symmetry", False):
                 # Preserve basis_cache/ subdirectories inside each cluster's ham dir
                 # (orbit basis only depends on geometry, not coupling values)
                 for entry in os.listdir(ham_dir):
@@ -855,8 +855,8 @@ def main():
     parser.add_argument('--ed_method', type=str, default='FULL',
                        help='ED solver method passed to the NLCE runner '
                             '(FULL, FULL_GPU, SCALAPACK_MIXED, etc. Default: FULL)')
-    parser.add_argument('--symmetrized', action='store_true',
-                       help='Use symmetrized diagonalization (exploits spatial automorphisms). '
+    parser.add_argument('--streaming-symmetry', action='store_true',
+                       help='Use streaming-symmetry diagonalization (exploits spatial automorphisms). '
                             'The orbit basis is precomputed once and cached, then reused '
                             'across all fitting iterations since it only depends on cluster '
                             'geometry and operator structure, not coupling values.')
@@ -1013,7 +1013,7 @@ def main():
         "ed_method": args.ed_method,
         "fit_Jz_ratio": args.fit_Jz_ratio,
         "Jz_ratio": args.Jz_ratio,
-        "symmetrized": args.symmetrized,
+        "streaming_symmetry": args.streaming_symmetry,
     }
     
     # Generate clusters first if needed
