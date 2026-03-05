@@ -264,6 +264,15 @@ def run_nlce_triangular(params, fixed_params, exp_temp, work_dir, h_field=None, 
     temp_min = temp_range.get('temp_min', fixed_params["temp_min"]) if temp_range else fixed_params["temp_min"]
     temp_max = temp_range.get('temp_max', fixed_params["temp_max"]) if temp_range else fixed_params["temp_max"]
     
+    # Write experimental temperature points to a file so the NLCE evaluates
+    # C(T) at exactly the measurement temperatures — no interpolation needed.
+    # Filter to [temp_min, temp_max] before writing.
+    temp_mask = (exp_temp >= temp_min) & (exp_temp <= temp_max)
+    filtered_temps = np.sort(exp_temp[temp_mask])
+    
+    temp_points_file = os.path.join(work_dir, 'temp_points.txt')
+    np.savetxt(temp_points_file, filtered_temps, fmt='%.12e')
+    
     # Build NLCE command for triangular lattice
     script_dir = os.path.dirname(os.path.abspath(__file__))
     nlce_script = os.path.join(script_dir, '..', 'run', 'nlce_triangular.py')
@@ -275,6 +284,7 @@ def run_nlce_triangular(params, fixed_params, exp_temp, work_dir, h_field=None, 
         '--h', f'{h_value:.12f}',
         '--ed_executable', str(fixed_params["ED_path"]),
         '--field_dir', f'{field_dir[0]:.12f}', f'{field_dir[1]:.12f}', f'{field_dir[2]:.12f}',
+        '--temp_points_file', temp_points_file,
         '--temp_min', f'{temp_min:.8f}',
         '--temp_max', f'{temp_max:.8f}',
         '--temp_bins', str(fixed_params["temp_bins"]),
@@ -535,15 +545,10 @@ def calc_chi_squared(params, fixed_params, exp_datasets, work_dir):
         all_exp_temps.append(exp_temp)
         all_exp_heats.append(exp_spec_heat)
         
-        # Interpolate to experimental temperatures
-        interp_spec_heat = interpolate_calc_data(calc_temp, calc_spec_heat, exp_temp)
-        all_interp_heats.append(interp_spec_heat)
-        
-        # Apply broadening if fitting
-        if fit_broadening and sigmas[i] > 0:
-            interp_spec_heat = apply_gaussian_broadening(exp_temp, interp_spec_heat, sigmas[i])
-        
-        # Filter by temperature range
+        # Match NLCE output to experimental temperatures.
+        # When --temp_points_file is used, the NLCE evaluates C(T) directly
+        # at the (filtered) experimental T values, so no interpolation needed.
+        # Check if grids match; fall back to interpolation if they don't.
         temp_mask = np.ones_like(exp_temp, dtype=bool)
         if 'temp_min' in dataset:
             temp_mask &= exp_temp >= dataset['temp_min']
@@ -553,8 +558,23 @@ def calc_chi_squared(params, fixed_params, exp_datasets, work_dir):
         if np.sum(temp_mask) == 0:
             continue
         
+        if len(calc_temp) == np.sum(temp_mask) and np.allclose(calc_temp, np.sort(exp_temp[temp_mask]), rtol=1e-8):
+            # Direct comparison — no interpolation
+            matched_spec_heat = calc_spec_heat[np.argsort(calc_temp)]
+            all_interp_heats.append(matched_spec_heat)
+        else:
+            # Fallback: interpolate (legacy path or mismatched grids)
+            interp_spec_heat = interpolate_calc_data(calc_temp, calc_spec_heat, exp_temp)
+            matched_spec_heat = interp_spec_heat[temp_mask]
+            all_interp_heats.append(interp_spec_heat)
+        
+        # Apply broadening if fitting
+        if fit_broadening and sigmas[i] > 0:
+            matched_spec_heat = apply_gaussian_broadening(
+                exp_temp[temp_mask], matched_spec_heat, sigmas[i])
+        
         # Calculate chi-squared
-        diff = (exp_spec_heat[temp_mask] - interp_spec_heat[temp_mask])
+        diff = (exp_spec_heat[temp_mask] - matched_spec_heat)
         chi_sq = np.sum(diff**2) * weight
         total_chi_squared += chi_sq
     
@@ -577,11 +597,20 @@ def calc_chi_squared(params, fixed_params, exp_datasets, work_dir):
             if len(all_calc_temps) > 0:
                 for T, C in zip(all_calc_temps[0], all_calc_heats[0]):
                     f.write(f"{T:.6e} {C:.6e}\n")
-            f.write("#\n# Experimental vs Interpolated:\n")
-            f.write("# T_exp  C_exp  C_interp  diff\n")
-            if len(all_exp_temps) > 0:
-                for T, C_exp, C_int in zip(all_exp_temps[0], all_exp_heats[0], all_interp_heats[0]):
-                    f.write(f"{T:.6e} {C_exp:.6e} {C_int:.6e} {C_exp-C_int:.6e}\n")
+            f.write("#\n# Experimental vs Calculated (at matched temperatures):\n")
+            f.write("# T_exp  C_exp  C_calc  diff\n")
+            if len(all_exp_temps) > 0 and len(all_interp_heats) > 0:
+                exp_t = all_exp_temps[0]
+                exp_c = all_exp_heats[0]
+                calc_c = all_interp_heats[0]
+                # Align arrays: calc_c may match a temp-masked subset
+                if len(calc_c) == len(exp_t):
+                    for T, C_exp, C_int in zip(exp_t, exp_c, calc_c):
+                        f.write(f"{T:.6e} {C_exp:.6e} {C_int:.6e} {C_exp-C_int:.6e}\n")
+                elif len(all_calc_temps) > 0:
+                    # Direct-match path: calc arrays correspond to NLCE output temps
+                    for T, C_int in zip(all_calc_temps[0], all_calc_heats[0]):
+                        f.write(f"{T:.6e} {'':10s} {C_int:.6e}\n")
     
     # Log progress with appropriate parameter names
     model = fixed_params.get("model", "xxz_j1j2")

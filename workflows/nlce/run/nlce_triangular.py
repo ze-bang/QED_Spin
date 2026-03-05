@@ -279,6 +279,9 @@ def main():
     parser.add_argument('--temp_min', type=float, default=0.1, help='Minimum temperature (default 0.1 - NLCE poorly converges at lower T for frustrated systems)')
     parser.add_argument('--temp_max', type=float, default=10.0, help='Maximum temperature')
     parser.add_argument('--temp_bins', type=int, default=100, help='Number of temperature bins')
+    parser.add_argument('--temp_points_file', type=str, default=None,
+                       help='File containing explicit temperature points (one per line, in Kelvin). '
+                            'Overrides --temp_min/--temp_max/--temp_bins for NLCE summation.')
     parser.add_argument('--resummation', type=str, default='euler', choices=['none', 'euler', 'wynn'],
                        help='Resummation method for series acceleration (euler or wynn recommended)')
     
@@ -633,12 +636,19 @@ def main():
             f'--cluster_dir={cluster_info_dir}',
             f'--eigenvalue_dir={ed_dir}',
             f'--output_dir={nlc_dir}',
-            f'--temp_min={args.temp_min}',
-            f'--temp_max={args.temp_max}',
-            f'--temp_bins={args.temp_bins}',
             f'--max_order={order_cutoff}',
             f'--resummation={args.resummation}',
         ]
+        
+        # Temperature grid: explicit file takes priority over min/max/bins
+        if args.temp_points_file:
+            cmd.append(f'--temp_points_file={args.temp_points_file}')
+        else:
+            cmd.extend([
+                f'--temp_min={args.temp_min}',
+                f'--temp_max={args.temp_max}',
+                f'--temp_bins={args.temp_bins}',
+            ])
         
         if args.measure_spin:
             cmd.append('--measure_spin')
