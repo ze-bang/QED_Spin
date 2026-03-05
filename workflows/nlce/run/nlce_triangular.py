@@ -488,10 +488,14 @@ def main():
         logging.info("Skipping Hamiltonian preparation step.")
     
     # Step 2.5: Precompute orbit basis for all clusters (if --streaming-symmetry)
-    # The orbit basis depends only on the cluster geometry and the symmetry structure
-    # of the Hamiltonian (which operator types appear on which bonds), NOT on the
-    # numerical coupling values. So it can be cached once and reused across all
-    # fitting iterations as long as the model type stays the same.
+    # The orbit basis depends on the cluster geometry AND on which operator types
+    # appear on each bond (encoded as edge labels by the automorphism finder).
+    # If a coupling is exactly zero, that bond type vanishes and the
+    # automorphism group may enlarge — producing a basis incompatible with
+    # nonzero values of that coupling.  When using the fitter, a dedicated
+    # basis-seeding pass with all-nonzero couplings should be run BEFORE the
+    # optimizer loop to ensure the cached basis is valid for all parameter
+    # combinations (see nlc_fit_triangular.py).
     if args.streaming_symmetry and not args.skip_basis_precompute:
         logging.info("="*80)
         logging.info("Step 2.5: Precomputing orbit basis for streaming-symmetry diagonalization")
