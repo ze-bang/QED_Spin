@@ -134,12 +134,12 @@ inline EDResults dispatchGPUSymmetrizedSector(
     } else if (method == DiagonalizationMethod::KRYLOV_SCHUR_GPU) {
         GPUEDWrapper::runGPUKrylovSchur(
             gpu_op, static_cast<int>(sector_dim),
-            params.max_iterations, num_eigs, params.tolerance,
+            num_eigs, params.max_iterations, params.tolerance,
             eigenvalues, params.output_dir, params.compute_eigenvectors);
     } else if (method == DiagonalizationMethod::BLOCK_KRYLOV_SCHUR_GPU) {
         GPUEDWrapper::runGPUBlockKrylovSchur(
             gpu_op, static_cast<int>(sector_dim),
-            params.max_iterations, num_eigs, params.block_size,
+            num_eigs, params.max_iterations, params.block_size,
             params.tolerance, eigenvalues, params.output_dir,
             params.compute_eigenvectors);
     } else if (method == DiagonalizationMethod::FULL_GPU) {

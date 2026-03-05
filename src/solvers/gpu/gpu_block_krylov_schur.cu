@@ -785,6 +785,24 @@ void GPUBlockKrylovSchur::run(int num_eigenvalues,
             current_dim++;
         }
         
+        // The Arnoldi loop above computes column (current_dim-1) of the projected
+        // matrix each iteration.  When it exits at current_dim == m, the last
+        // column (m-1) was never filled: we created V[m-1] but never computed
+        // h_H_m[i, m-1] = <V[i], H*V[m-1]>.  Fix that with one extra mat-vec.
+        if (current_dim == m) {
+            cuDoubleComplex* v_last = d_V + static_cast<size_t>(m - 1) * dimension_;
+            op_->matVecGPU(v_last, d_Hv, dimension_);
+            stats_.total_block_steps++;
+            for (int i = 0; i < m; i++) {
+                cuDoubleComplex dot;
+                CUBLAS_CHECK(cublasZdotc(cublas_handle_, dimension_,
+                                        d_V + static_cast<size_t>(i) * dimension_, 1,
+                                        d_Hv, 1, &dot));
+                h_H_m[i + static_cast<size_t>(m - 1) * m] =
+                    std::complex<double>(cuCreal(dot), cuCimag(dot));
+            }
+        }
+        
         auto matvec_end = std::chrono::high_resolution_clock::now();
         stats_.matvec_time += std::chrono::duration<double>(matvec_end - matvec_start).count();
         

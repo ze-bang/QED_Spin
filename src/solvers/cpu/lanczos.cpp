@@ -2728,9 +2728,15 @@ void krylov_schur(std::function<void(const Complex*, Complex*, int)> H, uint64_t
     cblas_zscal(N, &scale, v_current.data(), 1);
     
     // Krylov-Schur parameters
-    uint64_t m = std::min(2*num_eigs + 20, max_iter);  // Maximum Krylov subspace size
-    uint64_t k = num_eigs;                              // Number of desired eigenvalues
-    uint64_t p = std::min(num_eigs + 5, m - k);        // Number of shifts to apply
+    uint64_t k = std::min(num_eigs, N);                 // Number of desired eigenvalues (cannot exceed dimension)
+    uint64_t m = std::min(2*k + 20, max_iter);          // Maximum Krylov subspace size
+    m = std::min(m, N);                                 // Cannot exceed Hilbert space dimension
+    uint64_t p = std::min(k + 5, m > k ? m - k : (uint64_t)0);  // Number of extra vectors for restart
+    
+    // If the full dimension is small enough, just do full diag — no restarts needed
+    if (m <= k + 1) {
+        // Fall through: single Arnoldi pass will exhaust the space
+    }
     
     // Store the first basis vector
     write_basis_vector(temp_dir, 0, v_current, N);
@@ -2867,15 +2873,17 @@ void krylov_schur(std::function<void(const Complex*, Complex*, int)> H, uint64_t
         }
         
         // Step 3: Check convergence
-        std::vector<bool> converged_flags(k, false);
+        // k_eff = how many eigenvalues we can actually compute from this subspace
+        uint64_t k_eff = std::min(k, m);
+        std::vector<bool> converged_flags(k_eff, false);
         uint64_t num_converged = 0;
         
-        for (int i = 0; i < k; i++) {
+        for (uint64_t i = 0; i < k_eff; i++) {
             // Compute residual norm for each Ritz pair
             // For eigenvalue λ_i with eigenvector y_i, residual = ||H_m * y_i - λ_i * y_i|| * |β_m|
             // where β_m = H_m[m][m-1]
             
-            double beta_m = std::abs(H_m[m][m-1]);
+            double beta_m = (m < H_m.size()) ? std::abs(H_m[m][m-1]) : 0.0;
             
             // The last component of the i-th eigenvector gives the residual contribution
             // Column i in column-major: eigenvectors_m[row + i*m]
@@ -2887,14 +2895,14 @@ void krylov_schur(std::function<void(const Complex*, Complex*, int)> H, uint64_t
             }
         }
         
-        std::cout << "  " << num_converged << " eigenvalues converged out of " << k << std::endl;
+        std::cout << "  " << num_converged << " eigenvalues converged out of " << k_eff << std::endl;
         
-        if (num_converged >= k || iter == max_outer_iter - 1) {
+        if (num_converged >= k_eff || m <= k + 1 || iter == max_outer_iter - 1) {
             converged = true;
             
             // Extract converged eigenvalues
-            eigenvalues.resize(k);
-            for (int i = 0; i < k; i++) {
+            eigenvalues.resize(k_eff);
+            for (uint64_t i = 0; i < k_eff; i++) {
                 eigenvalues[i] = eigenvalues_m[i];
             }
             
@@ -2902,10 +2910,10 @@ void krylov_schur(std::function<void(const Complex*, Complex*, int)> H, uint64_t
             if (compute_eigenvectors) {
                 std::cout << "  Computing eigenvectors..." << std::endl;
                 
-                std::vector<ComplexVector> full_eigenvectors(k, ComplexVector(N));
+                std::vector<ComplexVector> full_eigenvectors(k_eff, ComplexVector(N));
                 
                 #pragma omp parallel for
-                for (int i = 0; i < k; i++) {
+                for (uint64_t i = 0; i < k_eff; i++) {
                     ComplexVector eigenvector(N, Complex(0.0, 0.0));
                     
                     // Form eigenvector as V_m * y_i

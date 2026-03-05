@@ -86,10 +86,14 @@ GPUKrylovSchur::~GPUKrylovSchur() {
 }
 
 void GPUKrylovSchur::allocateMemory(int num_eigenvalues) {
+    // Cap requested eigenvalues at dimension
+    num_eigenvalues = std::min(num_eigenvalues, dimension_);
+    
     // Determine optimal Krylov subspace size
-    // For reliable convergence without restart issues, use much larger subspace
     // Target: 6*k + 60 for good convergence, or at least 200 for large systems
+    // CRITICAL: cannot exceed Hilbert space dimension
     int m = std::min(std::max(6 * num_eigenvalues + 60, 200), max_iter_);
+    m = std::min(m, dimension_);  // Cannot exceed Hilbert space dimension
     
     // For very large Hilbert spaces, we may need even more
     // But cap it based on available memory
@@ -566,46 +570,17 @@ double GPUKrylovSchur::performRestart(int m, int k) {
         h_H_projected_[i + i * max_krylov_size_] = std::complex<double>(eigenvalues_m[i], 0.0);
     }
     
-    // For thick restart, we need to compute the residual and continue Arnoldi
-    // The residual is: r = H * v_{k-1} - eigenvalue_{k-1} * v_{k-1}
-    // But for simplicity, we'll just continue Arnoldi from the last Ritz vector
-    
-    // Apply H to the last Ritz vector to get starting point for continuation
-    cuDoubleComplex* v_last = getKrylovVector(k - 1);
-    op_->matVecGPU(v_last, d_w_, dimension_);
-    
-    // Orthogonalize against all kept vectors
-    for (int i = 0; i < k; i++) {
-        cuDoubleComplex* v_i = getKrylovVector(i);
-        cuDoubleComplex dot;
-        CUBLAS_CHECK(cublasZdotc(cublas_handle_, dimension_, v_i, 1, d_w_, 1, &dot));
-        
-        // Store in Hessenberg (this is H[i, k-1])
-        h_H_projected_[i + (k - 1) * max_krylov_size_] = std::complex<double>(cuCreal(dot), cuCimag(dot));
-        
-        cuDoubleComplex neg_dot = make_cuDoubleComplex(-cuCreal(dot), -cuCimag(dot));
-        CUBLAS_CHECK(cublasZaxpy(cublas_handle_, dimension_, &neg_dot, v_i, 1, d_w_, 1));
-    }
-    
-    // Compute beta = ||residual||
-    double beta_val = vectorNorm(d_w_);
-    
-    // Store as v_k (the starting vector for continuing Arnoldi)
-    if (beta_val > tolerance_) {
-        cuDoubleComplex scale = make_cuDoubleComplex(1.0 / beta_val, 0.0);
-        CUBLAS_CHECK(cublasZscal(cublas_handle_, dimension_, &scale, d_w_, 1));
-        vectorCopy(d_w_, getKrylovVector(k));
-        
-        // Store beta in Hessenberg
-        if (k < max_krylov_size_) {
-            h_H_projected_[k + (k - 1) * max_krylov_size_] = std::complex<double>(beta_val, 0.0);
-        }
-    }
+    // After restart, the Hessenberg has diagonal eigenvalues for columns 0..k-1.
+    // Column k-1 (the last restart column) needs correct overlaps, but computing
+    // them here with a sequential dot/subtract loop would give MGS coefficients
+    // instead of CGS.  Instead, we leave column k-1 with only the diagonal
+    // eigenvalue and let the Arnoldi loop start at j = k-1 to fill it correctly
+    // using its batched-GEMV CGS + DGKS reorthogonalization.
     
     auto restart_end = std::chrono::high_resolution_clock::now();
     stats_.restart_time += std::chrono::duration<double>(restart_end - restart_start).count();
     
-    return beta_val;
+    return 0.0;  // Return value unused; Arnoldi handles the continuation
 }
 
 void GPUKrylovSchur::computeEigenvectors(int m, int num_eigs,
@@ -680,8 +655,9 @@ void GPUKrylovSchur::run(int num_eigenvalues,
     // Allocate memory
     allocateMemory(num_eigenvalues);
     
-    int k = num_eigenvalues;  // Number of desired eigenvalues
-    int m = max_krylov_size_; // Maximum subspace size
+    // Cap k at Hilbert-space dimension and Krylov subspace size
+    int k = std::min(num_eigenvalues, dimension_);
+    int m = max_krylov_size_; // Already capped at dimension_ in allocateMemory
     
     // Initialize first Krylov vector
     initializeRandomVector(getKrylovVector(0));
@@ -693,16 +669,42 @@ void GPUKrylovSchur::run(int num_eigenvalues,
         stats_.outer_iterations++;
         std::cout << "Krylov-Schur: Outer iteration " << outer_iter + 1 << "\n";
         
-        // Determine starting point for Arnoldi
-        int j_start = (outer_iter == 0) ? 0 : k;
+        // Determine starting point for Arnoldi.
+        // After restart, start at k-1 (not k) so the Arnoldi loop recomputes
+        // column k-1 of the Hessenberg using proper batched-GEMV CGS.  The
+        // restart only sets diagonal eigenvalues; column k-1 needs correct
+        // off-diagonal overlaps that the sequential loop in performRestart
+        // cannot provide (it would give MGS coefficients).
+        int j_start = (outer_iter == 0) ? 0 : std::max(0, k - 1);
         
         // Arnoldi iteration to build/extend subspace
         actual_m = arnoldiIteration(j_start, m);
+        
+        // Effective number of eigenvalues we can extract
+        int k_eff = std::min(k, actual_m);
         
         // Solve projected eigenvalue problem
         std::vector<double> eigenvalues_m;
         if (!solveProjectedEigenproblem(actual_m, eigenvalues_m)) {
             std::cerr << "Failed to solve projected eigenvalue problem\n";
+            break;
+        }
+        
+        // If Krylov subspace exhausted the full Hilbert space (actual_m < m
+        // means breakdown, or m == dimension_ means we built the entire space),
+        // all eigenvalues from the projected problem are exact.
+        if (actual_m < m || m >= dimension_) {
+            std::cout << "  Full space solved (dim=" << actual_m 
+                      << "), all " << k_eff << " eigenvalues are exact.\n";
+            converged = true;
+            eigenvalues.resize(k_eff);
+            for (int i = 0; i < k_eff; i++) {
+                eigenvalues[i] = eigenvalues_m[i];
+            }
+            if (compute_vectors) {
+                computeEigenvectors(actual_m, k_eff, eigenvectors);
+            }
+            stats_.converged_eigs = k_eff;
             break;
         }
         
@@ -714,24 +716,24 @@ void GPUKrylovSchur::run(int num_eigenvalues,
         }
         
         // Check convergence
-        int num_converged = checkConvergence(actual_m, k, beta_m);
-        std::cout << "  " << num_converged << " / " << k << " eigenvalues converged\n";
+        int num_converged = checkConvergence(actual_m, k_eff, beta_m);
+        std::cout << "  " << num_converged << " / " << k_eff << " eigenvalues converged\n";
         
         stats_.converged_eigs = num_converged;
         
-        if (num_converged >= k) {
+        if (num_converged >= k_eff) {
             // All requested eigenvalues converged
             converged = true;
             
             // Extract converged eigenvalues
-            eigenvalues.resize(k);
-            for (int i = 0; i < k; i++) {
+            eigenvalues.resize(k_eff);
+            for (int i = 0; i < k_eff; i++) {
                 eigenvalues[i] = eigenvalues_m[i];
             }
             
             // Compute eigenvectors if requested
             if (compute_vectors) {
-                computeEigenvectors(actual_m, k, eigenvectors);
+                computeEigenvectors(actual_m, k_eff, eigenvectors);
             }
             
             break;
@@ -740,25 +742,39 @@ void GPUKrylovSchur::run(int num_eigenvalues,
         // Check if we've hit max iterations (but didn't converge)
         if (outer_iter == max_outer_iter_ - 1) {
             std::cout << "\n  WARNING: Max iterations reached without full convergence!\n";
-            std::cout << "  Only " << num_converged << " / " << k << " eigenvalues converged.\n";
+            std::cout << "  Only " << num_converged << " / " << k_eff << " eigenvalues converged.\n";
             std::cout << "  Consider: increasing Krylov size, loosening tolerance, or using symmetries.\n\n";
             
             // Still extract best estimates (unconverged)
-            eigenvalues.resize(k);
-            for (int i = 0; i < k; i++) {
+            eigenvalues.resize(k_eff);
+            for (int i = 0; i < k_eff; i++) {
                 eigenvalues[i] = eigenvalues_m[i];
             }
             
             if (compute_vectors) {
-                computeEigenvectors(actual_m, k, eigenvectors);
+                computeEigenvectors(actual_m, k_eff, eigenvectors);
             }
             
             break;
         }
         
-        // Perform Krylov-Schur restart
+        // Perform Krylov-Schur restart (only when actual_m > k_eff + 1)
+        if (actual_m <= k_eff + 1) {
+            std::cout << "  Subspace too small for restart, forcing convergence.\n";
+            converged = true;
+            eigenvalues.resize(k_eff);
+            for (int i = 0; i < k_eff; i++) {
+                eigenvalues[i] = eigenvalues_m[i];
+            }
+            if (compute_vectors) {
+                computeEigenvectors(actual_m, k_eff, eigenvectors);
+            }
+            stats_.converged_eigs = k_eff;
+            break;
+        }
+        
         std::cout << "  Performing restart...\n";
-        performRestart(actual_m, k);
+        performRestart(actual_m, k_eff);
     }
     
     auto overall_end = std::chrono::high_resolution_clock::now();
