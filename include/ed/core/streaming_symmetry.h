@@ -619,9 +619,9 @@ public:
             std::cout << "=== Orbit basis cache saved ===" << std::endl;
 
         } catch (H5::Exception& e) {
-            throw std::runtime_error(
-                "Failed to save orbit basis cache: "
-                + std::string(e.getCDetailMsg()));
+            std::cerr << "\nError: Failed to save orbit basis cache: "
+                      << e.getCDetailMsg() << std::endl;
+            // Non-fatal: sectors are already in memory, diagonalization can proceed
         }
     }
 
@@ -799,6 +799,28 @@ public:
                       << total_basis << " basis states, "
                       << total_orbit_elements << " orbit elements"
                       << std::endl;
+
+            // Validate: every non-empty sector must have orbit elements
+            for (size_t si = 0; si < sectors_.size(); ++si) {
+                const auto& sector = sectors_[si];
+                if (!sector.basis_states.empty()) {
+                    bool has_empty = false;
+                    for (const auto& bs : sector.basis_states) {
+                        if (bs.orbit_elements.empty()) { has_empty = true; break; }
+                    }
+                    if (has_empty) {
+                        std::cerr << "Warning: Sector " << si
+                                  << " has basis states with empty orbit data "
+                                  << "— cache may be corrupted, regenerating"
+                                  << std::endl;
+                        sectors_.clear();
+                        state_to_sector_basis_.clear();
+                        symmetrized_block_ham_sizes.clear();
+                        return false;
+                    }
+                }
+            }
+
             std::cout << "=== Orbit basis cache loaded ===" << std::endl;
             return true;
 
@@ -1828,8 +1850,9 @@ public:
             std::cout << "=== Orbit basis cache saved ===" << std::endl;
 
         } catch (H5::Exception& e) {
-            throw std::runtime_error("Failed to save orbit basis cache: "
-                                     + std::string(e.getCDetailMsg()));
+            std::cerr << "\nError: Failed to save orbit basis cache: "
+                      << e.getCDetailMsg() << std::endl;
+            // Non-fatal: sectors are already in memory, diagonalization can proceed
         }
     }
 
@@ -1996,11 +2019,35 @@ public:
             file.close();
 
             size_t total_basis = 0;
-            for (const auto& s : sectors_) total_basis += s.basis_states.size();
+            for (const auto& s : sectors_)
+                total_basis += s.basis_states.size();
 
             std::cout << "Loaded " << sectors_.size() << " sectors, "
                       << total_basis << " basis states, "
-                      << total_orbit_elements << " orbit elements" << std::endl;
+                      << total_orbit_elements << " orbit elements"
+                      << std::endl;
+
+            // Validate: every non-empty sector must have orbit elements
+            for (size_t si = 0; si < sectors_.size(); ++si) {
+                const auto& sector = sectors_[si];
+                if (!sector.basis_states.empty()) {
+                    bool has_empty = false;
+                    for (const auto& bs : sector.basis_states) {
+                        if (bs.orbit_elements.empty()) { has_empty = true; break; }
+                    }
+                    if (has_empty) {
+                        std::cerr << "Warning: Sector " << si
+                                  << " has basis states with empty orbit data "
+                                  << "— cache may be corrupted, regenerating"
+                                  << std::endl;
+                        sectors_.clear();
+                        state_to_sector_basis_.clear();
+                        symmetrized_block_ham_sizes.clear();
+                        return false;
+                    }
+                }
+            }
+
             std::cout << "=== Orbit basis cache loaded ===" << std::endl;
             return true;
 

@@ -207,6 +207,12 @@ void GPUSymmetrizedOperator::matVecGPU(
         return;
     }
     
+    if (total_orbit_elements_ == 0) {
+        std::cerr << "Error: No orbit elements loaded (sector may have empty orbit data)\n";
+        CUDA_CHECK(cudaMemset(d_y, 0, N * sizeof(cuDoubleComplex)));
+        return;
+    }
+    
     // Timing
     CUDA_CHECK(cudaEventRecord(timing_start_));
     
