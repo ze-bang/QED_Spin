@@ -442,23 +442,46 @@ class NLCExpansionTriangular:
         
         # Build subsequent columns
         # ε_{k+1}^{(i)} = ε_{k-1}^{(i+1)} + 1/(ε_k^{(i+1)} - ε_k^{(i)})
+        #
+        # Robust singularity handling:
+        #   1) Use a RELATIVE threshold (10%) to detect near-cancellation in
+        #      the denominator.  When |diff| < 0.1 * max(|ε_k^(n+1)|, |ε_k^(n)|)
+        #      the 1/diff term would produce a pole → fall back to previous column.
+        #   2) Cap the magnitude of the 1/diff correction so that no single
+        #      step can exceed 100× the partial-sum scale.
+        #   3) Post-process with iterative spike removal.
+        REL_TOL = 0.1    # 10% relative threshold for near-singular denominators
+        
+        # Reference scale: magnitude of the bare partial sums (for capping)
+        ps_scale = np.max(np.abs(np.array(partial_sums)))
+        ps_scale = max(ps_scale, 1e-30)
+        MAX_CORRECTION = 100.0 * ps_scale
+        
         for k in range(0, n - 1):
             for i in range(n - k - 1):
                 diff = epsilon[(k, i + 1)] - epsilon[(k, i)]
                 
-                # Handle numerical instability when diff is very small
-                # Use element-wise operations for arrays
                 if np.isscalar(diff):
-                    if np.abs(diff) < 1e-15:
+                    scale = max(np.abs(epsilon[(k, i + 1)]),
+                                np.abs(epsilon[(k, i)]), 1e-30)
+                    if np.abs(diff) < REL_TOL * scale:
                         epsilon[(k + 1, i)] = epsilon[(k - 1, i + 1)]
                     else:
-                        epsilon[(k + 1, i)] = epsilon[(k - 1, i + 1)] + 1.0 / diff
+                        correction = 1.0 / diff
+                        correction = np.clip(correction, -MAX_CORRECTION, MAX_CORRECTION)
+                        epsilon[(k + 1, i)] = epsilon[(k - 1, i + 1)] + correction
                 else:
-                    # Array case
+                    # Array case — element-wise robust threshold
                     result = epsilon[(k - 1, i + 1)].copy()
-                    mask = np.abs(diff) > 1e-15
+                    scale = np.maximum(np.abs(epsilon[(k, i + 1)]),
+                                       np.abs(epsilon[(k, i)]))
+                    scale = np.maximum(scale, 1e-30)
+                    mask = np.abs(diff) > REL_TOL * scale
                     if np.any(mask):
-                        result[mask] = result[mask] + 1.0 / diff[mask]
+                        correction = np.zeros_like(diff)
+                        correction[mask] = 1.0 / diff[mask]
+                        correction = np.clip(correction, -MAX_CORRECTION, MAX_CORRECTION)
+                        result[mask] = result[mask] + correction[mask]
                     epsilon[(k + 1, i)] = result
         
         # The best approximation is from even columns
@@ -467,9 +490,11 @@ class NLCExpansionTriangular:
         # Return the highest even column at row 0
         best_col = 2 * ((n - 1) // 2)
         if best_col >= 0 and (best_col, 0) in epsilon:
-            return epsilon[(best_col, 0)]
+            result = epsilon[(best_col, 0)]
         else:
-            return partial_sums[-1]
+            result = partial_sums[-1]
+        
+        return result
     
     def perform_resummed_summation(self, max_order=None, method='euler'):
         """Perform NLCE summation with resummation."""

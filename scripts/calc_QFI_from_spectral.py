@@ -159,6 +159,22 @@ ENABLE_HIGH_BETA_QFI_FLOOR = False  # Set to True to enable QFI floor enforcemen
 HIGH_BETA_QFI_FLOOR_THRESHOLD = 230.0
 
 # ==============================================================================
+# Connected Correlator (Bragg Peak Subtraction) Configuration
+# ==============================================================================
+# Enable subtraction of the disconnected (Bragg peak) contribution to compute
+# the connected dynamical structure factor for QFI.
+#
+# The full structure factor is:   S(q,ω) = S_c(q,ω) + |<S(q)>|^2 δ(ω)
+# The connected part is:          S_c(q,ω) = S(q,ω) - |<S(q)>|^2 δ(ω)
+#
+# In the QSI spin liquid phase, <S(q)> = 0, so this correction is negligible.
+# But in magnetically ordered phases, <S(q)> ≠ 0, and the broadened Bragg peak
+# at ω ≈ 0 contributes spuriously to QFI. This subtracts that contribution.
+#
+# Requires single_expectation data in dssf_results.h5 (from TPQ_DSSF single_expectation run).
+ENABLE_CONNECTED_CORRELATOR = True
+
+# ==============================================================================
 # FFT and Spectral Function Utilities
 # ==============================================================================
 
@@ -1478,6 +1494,309 @@ def get_sssf_data_for_species(structure_factor_dir, species, param_value=None):
     return None
 
 
+# ==============================================================================
+# Connected Correlator: Single Expectation & Bragg Peak Subtraction
+# ==============================================================================
+
+def _spectral_to_single_expectation_operator(species):
+    """Map a two-body spectral operator name to the corresponding single-body operator(s).
+    
+    Examples:
+        'SxSx_q_Qx0_Qy0_Qz0' -> ['Sx_q_Qx0_Qy0_Qz0']
+        'SzSz_q_Qx0_Qy0_Qz0' -> ['Sz_q_Qx0_Qy0_Qz0']
+        'SmSp_q_Qx0_Qy0_Qz0' -> ['Sx_q_Qx0_Qy0_Qz0']  (approximate, ignoring Sy)
+    
+    Returns list of (single_op_name, prefactor) tuples.
+    The disconnected contribution is:  sum_i  prefactor_i * |<single_op_i(q)>|^2
+    """
+    # Extract the two-body operator prefix and momentum part
+    # Pattern: AaBb_q_Q... where Aa and Bb are spin operators
+    m = re.match(r'^(S[a-z+\-])(S[a-z+\-])(_q_.+)$', species)
+    if not m:
+        return None
+    
+    op1, op2, q_part = m.group(1), m.group(2), m.group(3)
+    
+    if op1 == op2:
+        # SxSx, SzSz, etc: disconnected = |<Sx(q)>|^2
+        single_op = f"{op1}{q_part}"
+        return [(single_op, 1.0)]
+    elif (op1 == 'Sm' and op2 == 'Sp') or (op1 == 'S-' and op2 == 'S+'):
+        # S-S+ = (Sx-iSy)(Sx+iSy) -> disconnected = |<Sx>|^2 + |<Sy>|^2
+        # We only have Sx, approximate with |<Sx>|^2 (note: |<Sy>| is often similar)
+        single_op_x = f"Sx{q_part}"
+        return [(single_op_x, 1.0)]
+    elif (op1 == 'Sp' and op2 == 'Sm') or (op1 == 'S+' and op2 == 'S-'):
+        single_op_x = f"Sx{q_part}"
+        return [(single_op_x, 1.0)]
+    else:
+        # Cross-correlator (e.g., SxSz): disconnected = <Sx(q)>*<Sz(-q)>
+        # More complex, skip for now
+        return None
+
+
+def load_single_expectation_data(dssf_h5_path, operator_name):
+    """Load single-body expectation value <O(q)> from dssf_results.h5.
+    
+    Reads from /single_expectation/<operator_name>/sample_*/
+    Each sample has: temperatures, expectation_real, expectation_imag
+    
+    Returns:
+        dict mapping sample_idx -> {
+            'temperatures': array,
+            'expectation_real': array,
+            'expectation_imag': array,
+            'abs_sq': array  (|<O(q)>|^2 per temperature)
+        }
+        or None if data not found.
+    """
+    if not HAS_H5PY or not os.path.exists(dssf_h5_path):
+        return None
+    
+    try:
+        with h5py.File(dssf_h5_path, 'r') as f:
+            se_path = f'/single_expectation/{operator_name}'
+            if se_path not in f:
+                return None
+            
+            group = f[se_path]
+            result = {}
+            
+            for sample_key in group.keys():
+                sg = group[sample_key]
+                temps = sg['temperatures'][:]
+                er = sg['expectation_real'][:]
+                ei = sg['expectation_imag'][:]
+                abs_sq = er**2 + ei**2
+                
+                # Extract sample index
+                idx_match = re.search(r'(\d+)', sample_key)
+                sample_idx = int(idx_match.group(1)) if idx_match else 0
+                
+                result[sample_idx] = {
+                    'temperatures': temps,
+                    'expectation_real': er,
+                    'expectation_imag': ei,
+                    'abs_sq': abs_sq,
+                }
+            
+            return result if result else None
+    except Exception as e:
+        print(f"  Warning: Error loading single_expectation from {dssf_h5_path}: {e}")
+        return None
+
+
+def get_disconnected_abs_sq_at_beta(single_exp_data, beta, sample_idx=None):
+    """Get |<S(q)>|^2 at a specific beta (inverse temperature).
+    
+    Interpolates single_expectation data to the requested beta.
+    If sample_idx is specified, uses that sample; otherwise averages over all samples.
+    
+    Parameters:
+        single_exp_data: dict from load_single_expectation_data
+        beta: inverse temperature (float or inf)
+        sample_idx: optional specific sample index
+    
+    Returns:
+        |<S(q)>|^2 value (float), or 0.0 if data not available.
+    """
+    if single_exp_data is None:
+        return 0.0
+    
+    if sample_idx is not None and sample_idx in single_exp_data:
+        samples_to_use = {sample_idx: single_exp_data[sample_idx]}
+    else:
+        samples_to_use = single_exp_data
+    
+    abs_sq_values = []
+    for sidx, sdata in samples_to_use.items():
+        temps = sdata['temperatures']
+        abs_sq = sdata['abs_sq']
+        
+        if np.isinf(beta):
+            # Use lowest temperature point
+            min_T_idx = np.argmin(temps)
+            abs_sq_values.append(abs_sq[min_T_idx])
+        else:
+            T = 1.0 / beta
+            # Find closest temperature or interpolate
+            if T <= temps.min():
+                abs_sq_values.append(abs_sq[np.argmin(temps)])
+            elif T >= temps.max():
+                abs_sq_values.append(abs_sq[np.argmax(temps)])
+            else:
+                # Linear interpolation in temperature
+                sorted_idx = np.argsort(temps)
+                sorted_T = temps[sorted_idx]
+                sorted_abs_sq = abs_sq[sorted_idx]
+                interp_func = interp1d(sorted_T, sorted_abs_sq, kind='linear',
+                                       bounds_error=False, fill_value='extrapolate')
+                abs_sq_values.append(float(interp_func(T)))
+    
+    if not abs_sq_values:
+        return 0.0
+    
+    return float(np.mean(abs_sq_values))
+
+
+def subtract_bragg_peak_from_spectral(omega, spectral_function, abs_sq_Sq, broadening):
+    """Subtract the broadened Bragg peak (disconnected part) from the spectral function.
+    
+    The disconnected contribution to S(q,ω) is:
+        S_disc(q,ω) = |<S(q)>|^2 * δ_broadened(ω)
+    
+    With Lorentzian broadening η:
+        δ_broadened(ω) = (1/π) * η / (ω² + η²)
+    
+    The connected spectral function is:
+        S_c(q,ω) = S(q,ω) - S_disc(q,ω)
+    
+    Parameters:
+        omega: frequency array
+        spectral_function: S(q,ω) array
+        abs_sq_Sq: |<S(q)>|^2 value
+        broadening: Lorentzian broadening parameter η
+    
+    Returns:
+        connected_spectral: S_c(q,ω) array
+    """
+    if abs_sq_Sq <= 0 or broadening <= 0:
+        return spectral_function.copy()
+    
+    # Lorentzian broadened delta function
+    bragg_peak = abs_sq_Sq * (broadening / np.pi) / (omega**2 + broadening**2)
+    
+    connected = spectral_function - bragg_peak
+    
+    # Don't let the spectral function go negative (can happen with imperfect broadening model)
+    # Only zero out if the subtraction makes it negative near ω=0
+    # Keep any negative values far from ω=0 as they may be physical
+    near_zero_mask = np.abs(omega) < 10 * broadening
+    connected[near_zero_mask & (connected < 0)] = 0.0
+    
+    return connected
+
+
+def load_broadening_from_dssf(dssf_h5_path):
+    """Load the spectral broadening parameter from dssf_results.h5 metadata.
+    
+    If the broadening in the current file is invalid (e.g., -1.0 from a
+    single_expectation run), tries to find it from a sibling directory
+    (e.g., the corresponding non-_more_samples directory).
+    
+    Returns:
+        broadening (float) or None if not found.
+    """
+    if not HAS_H5PY or not os.path.exists(dssf_h5_path):
+        return None
+    
+    broadening = None
+    try:
+        with h5py.File(dssf_h5_path, 'r') as f:
+            if 'metadata' in f:
+                md = f['metadata']
+                if 'broadening' in md.attrs:
+                    val = float(md.attrs['broadening'])
+                    if val > 0:
+                        broadening = val
+    except Exception as e:
+        print(f"  Warning: Error reading broadening from {dssf_h5_path}: {e}")
+    
+    if broadening is not None:
+        return broadening
+    
+    # Broadening not found or invalid in current file. 
+    # Try sibling directory (e.g., strip _more_samples suffix).
+    parent_dir = os.path.dirname(os.path.dirname(dssf_h5_path))  # Jpm=X directory
+    scan_dir = os.path.dirname(parent_dir)  # QSI_scan_super_... directory
+    jpm_name = os.path.basename(parent_dir)  # Jpm=0.05
+    
+    # Try removing _more_samples suffix to find original directory
+    base_scan = scan_dir
+    for suffix in ['_more_samples', '_extra_samples', '_additional']:
+        if base_scan.endswith(suffix):
+            base_scan = base_scan[:-len(suffix)]
+            break
+    
+    if base_scan != scan_dir:
+        sibling_h5 = os.path.join(base_scan, jpm_name, 'structure_factor_results', 'dssf_results.h5')
+        if os.path.exists(sibling_h5):
+            try:
+                with h5py.File(sibling_h5, 'r') as f:
+                    if 'metadata' in f and 'broadening' in f['metadata'].attrs:
+                        val = float(f['metadata'].attrs['broadening'])
+                        if val > 0:
+                            return val
+            except Exception:
+                pass
+    
+    return None
+
+
+def load_all_single_expectation_for_species(structure_factor_dir, species):
+    """Load single_expectation data for a spectral species from dssf_results.h5.
+    
+    Maps the two-body operator name (e.g., 'SxSx_q_Qx0_Qy0_Qz0') to the
+    corresponding single-body operator(s) and loads their data.
+    
+    Also loads the broadening parameter from metadata.
+    
+    Parameters:
+        structure_factor_dir: path to structure_factor_results directory
+        species: two-body operator name (e.g., 'SxSx_q_Qx0_Qy0_Qz0')
+    
+    Returns:
+        (single_exp_data, broadening) tuple, or (None, None) if not available.
+        single_exp_data is a list of (single_exp_dict, prefactor) tuples.
+    """
+    dssf_h5_path = os.path.join(structure_factor_dir, 'dssf_results.h5')
+    
+    # Map two-body operator to single-body operator(s)
+    op_mapping = _spectral_to_single_expectation_operator(species)
+    if op_mapping is None:
+        return None, None
+    
+    # Load broadening
+    broadening = load_broadening_from_dssf(dssf_h5_path)
+    
+    # Load single expectation data for each mapped operator
+    loaded_data = []
+    for single_op, prefactor in op_mapping:
+        se_data = load_single_expectation_data(dssf_h5_path, single_op)
+        if se_data is not None:
+            loaded_data.append((se_data, prefactor))
+    
+    if not loaded_data:
+        return None, broadening
+    
+    return loaded_data, broadening
+
+
+def compute_total_disconnected_abs_sq(single_exp_list, beta, sample_idx=None):
+    """Compute total |<S(q)>|^2 disconnected contribution at a given beta.
+    
+    Sums over all single-body operators with their prefactors:
+        disconnected = sum_i  prefactor_i * |<O_i(q)>|^2
+    
+    Parameters:
+        single_exp_list: list of (single_exp_data, prefactor) from load_all_single_expectation_for_species
+        beta: inverse temperature
+        sample_idx: optional specific sample
+    
+    Returns:
+        total disconnected |<S(q)>|^2 (float)
+    """
+    if single_exp_list is None:
+        return 0.0
+    
+    total = 0.0
+    for se_data, prefactor in single_exp_list:
+        abs_sq = get_disconnected_abs_sq_at_beta(se_data, beta, sample_idx)
+        total += prefactor * abs_sq
+    
+    return total
+
+
 def calculate_qfi_from_spectral(omega, spectral_function, beta):
     """
     Calculate quantum Fisher information from spectral function.
@@ -1740,6 +2059,22 @@ def _process_species_spectral(species, beta_groups, beta_bin_values,
         ref_center, ref_width, ref_beta = None, None, None
         print(f"  Spectral width rescaling is disabled")
     
+    # Load single_expectation data for connected correlator (Bragg peak subtraction)
+    single_exp_data = None
+    bragg_broadening = None
+    if ENABLE_CONNECTED_CORRELATOR:
+        single_exp_data, bragg_broadening = load_all_single_expectation_for_species(
+            structure_factor_dir, species)
+        if single_exp_data is not None:
+            if bragg_broadening is not None:
+                print(f"  Using connected correlator (Bragg peak subtraction, η={bragg_broadening:.4f})")
+            else:
+                # Fallback broadening if not found in metadata
+                bragg_broadening = 0.022  # Default broadening
+                print(f"  Using connected correlator (Bragg peak subtraction, η={bragg_broadening:.4f} [default])")
+        else:
+            print(f"  Warning: No single_expectation data found for {species}, skipping Bragg subtraction")
+    
     # Load static structure factor data for intensity scaling
     sssf_data = None
     if ENABLE_INTENSITY_SCALING:
@@ -1864,6 +2199,35 @@ def _process_species_spectral(species, beta_groups, beta_bin_values,
                 
                 print(f"    Applied high-beta normalization (factor={norm_factor:.4f})")
         
+        # Subtract disconnected Bragg peak to get connected spectral function
+        if single_exp_data is not None and bragg_broadening is not None:
+            disconnected_abs_sq = compute_total_disconnected_abs_sq(single_exp_data, beta)
+            if disconnected_abs_sq > 1e-12:
+                rescaled_spectral = subtract_bragg_peak_from_spectral(
+                    mean_omega, rescaled_spectral, disconnected_abs_sq, bragg_broadening)
+                
+                # Also subtract from individual sample data
+                connected_individual_data = []
+                for omega, spectral, fpath in rescaled_individual_data:
+                    # Try to use per-sample single_expectation if available
+                    sample_idx_match = re.search(r'sample[_]?(\d+)', fpath)
+                    s_idx = int(sample_idx_match.group(1)) if sample_idx_match else None
+                    disc_sq = compute_total_disconnected_abs_sq(single_exp_data, beta, s_idx)
+                    conn_spec = subtract_bragg_peak_from_spectral(
+                        omega, spectral, disc_sq, bragg_broadening)
+                    connected_individual_data.append((omega, conn_spec, fpath))
+                rescaled_individual_data = connected_individual_data
+                
+                # Compute QFI contribution from just the Bragg peak (disconnected part)
+                bragg_lorentzian = disconnected_abs_sq * (bragg_broadening / np.pi) / (mean_omega**2 + bragg_broadening**2)
+                bragg_qfi = calculate_qfi_from_spectral(mean_omega, bragg_lorentzian, beta) * QFI_SCALE_FACTOR
+                
+                print(f"    Subtracted Bragg peak: |<S(q)>|^2 = {disconnected_abs_sq:.6e}, Bragg QFI = {bragg_qfi:.6e}")
+            else:
+                bragg_qfi = 0.0
+        else:
+            bragg_qfi = 0.0
+        
         # Calculate QFI from (rescaled) averaged spectral function
         qfi = calculate_qfi_from_spectral(mean_omega, rescaled_spectral, beta) * QFI_SCALE_FACTOR
         
@@ -1922,6 +2286,13 @@ def _process_species_spectral(species, beta_groups, beta_bin_values,
         
         # Store for summary plots (including per-sample data and error)
         all_species_qfi_data[species].append((beta, qfi, qfi_std, qfi_sem))
+        
+        # Store Bragg QFI (disconnected contribution) for diagnostic heatmap
+        if ENABLE_CONNECTED_CORRELATOR:
+            bragg_key = f"{species}_bragg_qfi"
+            if bragg_key not in all_species_qfi_data:
+                all_species_qfi_data[bragg_key] = []
+            all_species_qfi_data[bragg_key].append((beta, bragg_qfi, 0.0, 0.0))
         
         # Store per-sample QFI for parameter sweep heatmaps
         for sample_qfi, fpath in per_sample_qfi:
@@ -3823,6 +4194,8 @@ if __name__ == "__main__":
                        help='Disable intensity scaling to match static structure factor (default: enabled)')
     parser.add_argument('--aggressive-factor', type=float, default=1.5,
                        help='Aggressive rescaling factor (>1 for stronger high-T corrections, default: 1.5)')
+    parser.add_argument('--no-connected', action='store_true',
+                       help='Disable connected correlator (Bragg peak subtraction). By default, the disconnected part |<S(q)>|^2 is subtracted.')
     
     args = parser.parse_args()
     
@@ -3831,11 +4204,13 @@ if __name__ == "__main__":
         ENABLE_SPECTRAL_RESCALING = False
         ENABLE_INTENSITY_SCALING = False
         ENABLE_NAN_INTERPOLATION = False
+        ENABLE_CONNECTED_CORRELATOR = False
         print("=" * 60)
         print("CLEAN MODE: All spectral corrections DISABLED")
         print("  - No spectral width rescaling")
         print("  - No intensity scaling") 
         print("  - No NaN interpolation")
+        print("  - No connected correlator subtraction")
         print("=" * 60)
     else:
         # Set global rescaling flag based on command-line argument
@@ -3854,6 +4229,14 @@ if __name__ == "__main__":
         else:
             ENABLE_INTENSITY_SCALING = True
             print("Intensity scaling is ENABLED (use --no-intensity-scale to disable)")
+        
+        # Set global connected correlator flag
+        if args.no_connected:
+            ENABLE_CONNECTED_CORRELATOR = False
+            print("Connected correlator (Bragg subtraction) is DISABLED")
+        else:
+            ENABLE_CONNECTED_CORRELATOR = True
+            print("Connected correlator (Bragg subtraction) is ENABLED (use --no-connected to disable)")
     
     if args.skip_processing:
         # Load already processed data mode

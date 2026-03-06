@@ -241,8 +241,11 @@ inline EDResults exact_diagonalization_streaming_symmetry(
         std::cout << "\nGenerating symmetry sectors (streaming mode)..." << std::endl;
         hamiltonian.generateSymmetrySectorsStreaming(directory);
 
-        // Save to cache if a cache dir is specified
-        if (!effective_cache_dir.empty()) {
+        // Only save to cache in precompute mode — never during regular runs.
+        // A regular run may have a different symmetry group (e.g. Jpm=0
+        // enlarges the group) and overwriting the shared cache would corrupt
+        // it for all other concurrent tasks.
+        if (!effective_cache_dir.empty() && precompute_basis_only) {
             hamiltonian.saveOrbitBasisHDF5(effective_cache_dir);
         }
     }
@@ -599,8 +602,11 @@ inline EDResults exact_diagonalization_streaming_symmetry_fixed_sz(
         std::cout << "\nGenerating symmetry sectors (streaming mode, fixed Sz)..." << std::endl;
         hamiltonian.generateSymmetrySectorsStreamingFixedSz(directory);
 
-        // Save to cache if a cache dir is specified
-        if (!effective_cache_dir.empty()) {
+        // Only save to cache in precompute mode — never during regular runs.
+        // A regular run may have a different symmetry group (e.g. Jpm=0
+        // enlarges the group) and overwriting the shared cache would corrupt
+        // it for all other concurrent tasks.
+        if (!effective_cache_dir.empty() && precompute_basis_only) {
             hamiltonian.saveOrbitBasisHDF5(effective_cache_dir);
         }
     }
