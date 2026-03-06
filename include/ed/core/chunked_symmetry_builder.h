@@ -154,7 +154,12 @@ private:
     
 public:
     ChunkedSymmetryBuilder(uint64_t n_bits, float spin_l)
-        : n_bits_(n_bits), spin_l_(spin_l) {}
+        : n_bits_(n_bits), spin_l_(spin_l) {
+        if (n_bits >= 64) {
+            throw std::runtime_error("ChunkedSymmetryBuilder: n_bits = " + std::to_string(n_bits)
+                + " >= 64 is not supported");
+        }
+    }
     
     /**
      * @brief Pass 1: Discover all unique orbit representatives
@@ -644,7 +649,12 @@ private:
     
 public:
     DiskBasedChunkedSymmetryBuilder(uint64_t n_bits, float spin_l)
-        : n_bits_(n_bits), spin_l_(spin_l) {}
+        : n_bits_(n_bits), spin_l_(spin_l) {
+        if (n_bits >= 64) {
+            throw std::runtime_error("DiskBasedChunkedSymmetryBuilder: n_bits = " + std::to_string(n_bits)
+                + " >= 64 is not supported");
+        }
+    }
     
     /**
      * @brief Discover orbits using disk-based chunked algorithm

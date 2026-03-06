@@ -179,10 +179,31 @@ inline void invalidate_symmetry_cache(const std::string& directory,
 
 /**
  * @brief Execute a system command and check for errors
+ * 
+ * For "mkdir -p <dir>" commands, uses std::filesystem::create_directories()
+ * instead of std::system() to avoid shell injection risks.
+ * 
  * @param cmd Command to execute
  * @return true if command succeeded, false otherwise
  */
 inline bool safe_system_call(const std::string& cmd) {
+    // Intercept "mkdir -p <dir>" commands and use std::filesystem instead
+    if (cmd.substr(0, 9) == "mkdir -p ") {
+        std::string dir = cmd.substr(9);
+        // Trim whitespace
+        while (!dir.empty() && (dir.back() == ' ' || dir.back() == '\t')) dir.pop_back();
+        while (!dir.empty() && (dir.front() == ' ' || dir.front() == '\t')) dir.erase(dir.begin());
+        if (!dir.empty()) {
+            std::error_code ec;
+            std::filesystem::create_directories(dir, ec);
+            if (ec && !std::filesystem::exists(dir)) {
+                std::cerr << "Warning: Could not create directory " << dir 
+                          << ": " << ec.message() << std::endl;
+                return false;
+            }
+            return true;
+        }
+    }
     int result = std::system(cmd.c_str());
     if (result != 0) {
         std::cerr << "Warning: System command failed with code " << result << ": " << cmd << std::endl;

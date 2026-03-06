@@ -5,6 +5,7 @@
 #include <unordered_set>
 #include <algorithm>
 #include <numeric>
+#include <mutex>
 
 /**
  * @file streaming_symmetry.h
@@ -85,6 +86,7 @@ class StreamingSymmetryOperator : public Operator {
 private:
     std::vector<SymmetrySector> sectors_;
     mutable std::unordered_map<uint64_t, uint64_t> state_to_orbit_cache_;  // Cache for orbit lookups
+    mutable std::mutex orbit_cache_mutex_;  // Protects state_to_orbit_cache_ in const methods
     
     // Lookup table: computational_state -> (sector_idx, basis_idx_in_sector)
     // This enables O(1) projection of H-transformed states
@@ -92,7 +94,12 @@ private:
     
 public:
     StreamingSymmetryOperator(uint64_t n_bits, float spin_l) 
-        : Operator(n_bits, spin_l) {}
+        : Operator(n_bits, spin_l) {
+        if (n_bits >= 64) {
+            throw std::runtime_error("StreamingSymmetryOperator: n_bits = " + std::to_string(n_bits)
+                + " >= 64 is not supported (would cause undefined behavior in 1ULL << n_bits)");
+        }
+    }
     
     /**
      * @brief Generate symmetry sectors with orbit representatives (streaming version)
@@ -542,12 +549,12 @@ public:
 
                 // --- CSR orbit data ---
                 size_t num_basis = sector.basis_states.size();
-                std::vector<int> offsets(num_basis + 1);
+                std::vector<int64_t> offsets(num_basis + 1);
                 std::vector<double> norms(num_basis);
                 offsets[0] = 0;
                 for (size_t j = 0; j < num_basis; ++j) {
                     offsets[j + 1] = offsets[j]
-                        + static_cast<int>(
+                        + static_cast<int64_t>(
                               sector.basis_states[j].orbit_elements.size());
                     norms[j] = sector.basis_states[j].norm;
                 }
@@ -558,7 +565,7 @@ public:
                 std::vector<double>   flat_coeff_imag(total_elems);
                 for (size_t j = 0; j < num_basis; ++j) {
                     const auto& bs = sector.basis_states[j];
-                    int off = offsets[j];
+                    int64_t off = offsets[j];
                     for (size_t e = 0; e < bs.orbit_elements.size(); ++e) {
                         flat_elements[off + e]   = bs.orbit_elements[e];
                         flat_coeff_real[off + e]  = bs.orbit_coefficients[e].real();
@@ -571,8 +578,8 @@ public:
                     hsize_t dims[1] = {static_cast<hsize_t>(num_basis + 1)};
                     H5::DataSpace ds(1, dims);
                     auto d = grp.createDataSet("orbit_offsets",
-                        H5::PredType::NATIVE_INT, ds);
-                    d.write(offsets.data(), H5::PredType::NATIVE_INT);
+                        H5::PredType::NATIVE_INT64, ds);
+                    d.write(offsets.data(), H5::PredType::NATIVE_INT64);
                 }
                 // Write norms
                 {
@@ -717,7 +724,7 @@ public:
                 }
 
                 // CSR orbit data
-                std::vector<int> offsets;
+                std::vector<int64_t> offsets;
                 std::vector<double> norms;
                 {
                     auto dset = grp.openDataSet("orbit_offsets");
@@ -725,7 +732,7 @@ public:
                     hsize_t dims[1];
                     space.getSimpleExtentDims(dims);
                     offsets.resize(dims[0]);
-                    dset.read(offsets.data(), H5::PredType::NATIVE_INT);
+                    dset.read(offsets.data(), H5::PredType::NATIVE_INT64);
                 }
                 {
                     auto dset = grp.openDataSet("orbit_norms");
@@ -887,10 +894,13 @@ private:
      * @brief Fast orbit representative computation with caching
      */
     uint64_t getOrbitRepresentativeFast(uint64_t basis) const {
-        // Check cache first
-        auto it = state_to_orbit_cache_.find(basis);
-        if (it != state_to_orbit_cache_.end()) {
-            return it->second;
+        // Check cache first (thread-safe)
+        {
+            std::lock_guard<std::mutex> lock(orbit_cache_mutex_);
+            auto it = state_to_orbit_cache_.find(basis);
+            if (it != state_to_orbit_cache_.end()) {
+                return it->second;
+            }
         }
         
         // Compute orbit representative
@@ -900,8 +910,11 @@ private:
             if (permuted < rep) rep = permuted;
         }
         
-        // Cache result
-        state_to_orbit_cache_[basis] = rep;
+        // Cache result (thread-safe)
+        {
+            std::lock_guard<std::mutex> lock(orbit_cache_mutex_);
+            state_to_orbit_cache_[basis] = rep;
+        }
         
         return rep;
     }
@@ -1398,10 +1411,16 @@ private:
     mutable std::vector<std::unordered_map<uint64_t, size_t>> state_to_sector_basis_;
     
     mutable std::unordered_map<uint64_t, uint64_t> state_to_orbit_cache_;
+    mutable std::mutex orbit_cache_mutex_;  // Protects state_to_orbit_cache_ in const methods
     
 public:
     FixedSzStreamingSymmetryOperator(uint64_t n_bits, float spin_l, int64_t n_up)
-        : FixedSzOperator(n_bits, spin_l, n_up) {}
+        : FixedSzOperator(n_bits, spin_l, n_up) {
+        if (n_bits >= 64) {
+            throw std::runtime_error("FixedSzStreamingSymmetryOperator: n_bits = " + std::to_string(n_bits)
+                + " >= 64 is not supported (would cause undefined behavior in 1ULL << n_bits)");
+        }
+    }
     
     /**
      * @brief Generate symmetry sectors with pre-computed orbit data (optimized)
@@ -1773,12 +1792,12 @@ public:
 
                 // --- CSR orbit data (flattened exactly as extractOrbitData does) ---
                 size_t num_basis = sector.basis_states.size();
-                std::vector<int> offsets(num_basis + 1);
+                std::vector<int64_t> offsets(num_basis + 1);
                 std::vector<double> norms(num_basis);
                 offsets[0] = 0;
                 for (size_t j = 0; j < num_basis; ++j) {
                     offsets[j + 1] = offsets[j] +
-                        static_cast<int>(sector.basis_states[j].orbit_elements.size());
+                        static_cast<int64_t>(sector.basis_states[j].orbit_elements.size());
                     norms[j] = sector.basis_states[j].norm;
                 }
                 size_t total_elems = offsets[num_basis];
@@ -1788,7 +1807,7 @@ public:
                 std::vector<double> flat_coeff_imag(total_elems);
                 for (size_t j = 0; j < num_basis; ++j) {
                     const auto& bs = sector.basis_states[j];
-                    int off = offsets[j];
+                    int64_t off = offsets[j];
                     for (size_t e = 0; e < bs.orbit_elements.size(); ++e) {
                         flat_elements[off + e] = bs.orbit_elements[e];
                         flat_coeff_real[off + e] = bs.orbit_coefficients[e].real();
@@ -1801,8 +1820,8 @@ public:
                     hsize_t dims[1] = {static_cast<hsize_t>(num_basis + 1)};
                     H5::DataSpace ds(1, dims);
                     auto d = grp.createDataSet("orbit_offsets",
-                                                H5::PredType::NATIVE_INT, ds);
-                    d.write(offsets.data(), H5::PredType::NATIVE_INT);
+                                                H5::PredType::NATIVE_INT64, ds);
+                    d.write(offsets.data(), H5::PredType::NATIVE_INT64);
                 }
                 // Write norms
                 {
@@ -1949,7 +1968,7 @@ public:
                 }
 
                 // CSR orbit data
-                std::vector<int> offsets;
+                std::vector<int64_t> offsets;
                 std::vector<double> norms;
                 {
                     auto dset = grp.openDataSet("orbit_offsets");
@@ -1957,7 +1976,7 @@ public:
                     hsize_t dims[1];
                     space.getSimpleExtentDims(dims);
                     offsets.resize(dims[0]);
-                    dset.read(offsets.data(), H5::PredType::NATIVE_INT);
+                    dset.read(offsets.data(), H5::PredType::NATIVE_INT64);
                 }
                 {
                     auto dset = grp.openDataSet("orbit_norms");
@@ -2249,12 +2268,88 @@ private:
             // Accumulate: out[k] += weighted_coeff * h * conj(β_{s'}) / norm_k
             local_out[k] += weighted_coeff * h_element * std::conj(beta_s_prime) * group_norm / state_k.norm;
         }
+
+        // Apply three-body terms from three_body_data_
+        // (Mirrors the full-space applyHamiltonianTermsFullSpace logic)
+        for (const auto& tdata : three_body_data_) {
+            uint64_t s_prime = s;
+            Complex h_element = tdata.coefficient;
+            bool valid = true;
+
+            // Apply first operator
+            if (tdata.op_type_1 == 2) {
+                uint64_t bit = (s_prime >> tdata.site_index_1) & 1;
+                double sign = bit ? -1.0 : 1.0;
+                h_element *= spin_l_ * sign;
+            } else {
+                uint64_t bit = (s_prime >> tdata.site_index_1) & 1;
+                if (bit != tdata.op_type_1) {
+                    s_prime ^= (1ULL << tdata.site_index_1);
+                } else {
+                    valid = false;
+                }
+            }
+
+            // Apply second operator
+            if (valid) {
+                if (tdata.op_type_2 == 2) {
+                    uint64_t bit = (s_prime >> tdata.site_index_2) & 1;
+                    double sign = bit ? -1.0 : 1.0;
+                    h_element *= spin_l_ * sign;
+                } else {
+                    uint64_t bit = (s_prime >> tdata.site_index_2) & 1;
+                    if (bit != tdata.op_type_2) {
+                        s_prime ^= (1ULL << tdata.site_index_2);
+                    } else {
+                        valid = false;
+                    }
+                }
+            }
+
+            // Apply third operator
+            if (valid) {
+                if (tdata.op_type_3 == 2) {
+                    uint64_t bit = (s_prime >> tdata.site_index_3) & 1;
+                    double sign = bit ? -1.0 : 1.0;
+                    h_element *= spin_l_ * sign;
+                } else {
+                    uint64_t bit = (s_prime >> tdata.site_index_3) & 1;
+                    if (bit != tdata.op_type_3) {
+                        s_prime ^= (1ULL << tdata.site_index_3);
+                    } else {
+                        valid = false;
+                    }
+                }
+            }
+
+            if (!valid) continue;
+
+            // Check if s_prime is in this sector (via lookup)
+            auto it = lookup.find(s_prime);
+            if (it == lookup.end()) continue;
+
+            size_t k = it->second;
+            const auto& state_k = sector.basis_states[k];
+
+            Complex beta_s_prime(0.0, 0.0);
+            for (size_t orbit_idx = 0; orbit_idx < state_k.orbit_elements.size(); ++orbit_idx) {
+                if (state_k.orbit_elements[orbit_idx] == s_prime) {
+                    beta_s_prime = state_k.orbit_coefficients[orbit_idx];
+                    break;
+                }
+            }
+
+            local_out[k] += weighted_coeff * h_element * std::conj(beta_s_prime) * group_norm / state_k.norm;
+        }
     }
     
     uint64_t getOrbitRepresentativeFixedSzFast(uint64_t basis) const {
-        auto it = state_to_orbit_cache_.find(basis);
-        if (it != state_to_orbit_cache_.end()) {
-            return it->second;
+        {
+            std::lock_guard<std::mutex> lock(orbit_cache_mutex_);
+            auto it = state_to_orbit_cache_.find(basis);
+            if (it != state_to_orbit_cache_.end()) {
+                return it->second;
+            }
         }
         
         uint64_t rep = basis;
@@ -2265,7 +2360,10 @@ private:
             }
         }
         
-        state_to_orbit_cache_[basis] = rep;
+        {
+            std::lock_guard<std::mutex> lock(orbit_cache_mutex_);
+            state_to_orbit_cache_[basis] = rep;
+        }
         return rep;
     }
     

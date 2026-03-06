@@ -66,6 +66,10 @@ inline uint64_t popcount(uint64_t x) {
  */
 inline std::vector<uint64_t> generateFixedSzBasis(uint64_t n_bits, int64_t n_up) {
     std::vector<uint64_t> basis;
+    if (n_bits >= 64) {
+        throw std::runtime_error("generateFixedSzBasis: n_bits = " + std::to_string(n_bits)
+            + " >= 64 is not supported");
+    }
     if (n_up < 0 || static_cast<uint64_t>(n_up) > n_bits) return basis;
     
     // Special case: n_up=0 has exactly one basis state (all spins down)
@@ -702,7 +706,7 @@ public:
     std::vector<OffDiagonalTwoBody> offdiag_two_body_;
     
     // Legacy transform type (kept for buildSparseMatrix and XYZ operators)
-    using TransformFunction = std::function<std::pair<int, Complex>(uint64_t)>;
+    using TransformFunction = std::function<std::pair<int64_t, Complex>(uint64_t)>;
     
     void addTransform(TransformFunction transform) {
         transforms_.push_back(transform);
@@ -719,7 +723,12 @@ public:
     const std::vector<TransformData>& getTransformData() const { return transform_data_; }
     
     // Constructor
-    Operator(uint64_t n_bits, float spin_l) : n_bits_(n_bits), spin_l_(spin_l), matrixBuilt_(false) {}
+    Operator(uint64_t n_bits, float spin_l) : n_bits_(n_bits), spin_l_(spin_l), matrixBuilt_(false) {
+        if (n_bits >= 64) {
+            throw std::runtime_error("Operator: n_bits = " + std::to_string(n_bits)
+                + " >= 64 is not supported (would cause undefined behavior in 1ULL << n_bits)");
+        }
+    }
     
     // Assignment operator
     Operator& operator=(const Operator& other) {
@@ -1122,12 +1131,21 @@ public:
         uint64_t dim = 1ULL << n_bits_;
         sparseMatrix_.resize(dim, dim);
         
+        // Warn if transform_data_ has entries (optimized path) but transforms_ is empty (legacy path)
+        // buildSparseMatrix only processes the legacy transforms_ vector. If operators were loaded
+        // via the optimized path (loadFromFile, loadFromInterAllFile, etc.), use apply() instead.
+        if (!transform_data_.empty() && transforms_.empty()) {
+            std::cerr << "WARNING: buildSparseMatrix() called but operator data is in optimized "
+                      << "transform_data_ storage (size=" << transform_data_.size() << "). "
+                      << "The sparse matrix will be incomplete. Use apply() for matrix-free operation.\n";
+        }
+        
         std::vector<Eigen::Triplet<Complex>> triplets;
         for (uint64_t i = 0; i < dim; ++i) {
             for (const auto& transform : transforms_) {
                 auto [j, scalar] = transform(i);
-                if (j >= 0 && j < dim) {
-                    triplets.emplace_back(j, i, scalar);
+                if (j >= 0 && static_cast<uint64_t>(j) < dim) {
+                    triplets.emplace_back(static_cast<int>(j), static_cast<int>(i), scalar);
                 }
             }
         }
@@ -1170,6 +1188,12 @@ public:
             if (!(lineStream >> Op >> indx >> E >> F)) continue;
             Complex coeff(E, F);
             if (std::abs(coeff) < 1e-15) continue;
+            
+            // Validate site index
+            if (indx >= n_bits_) {
+                throw std::runtime_error("Trans.dat: site index " + std::to_string(indx) +
+                    " >= num_sites " + std::to_string(n_bits_) + " at line " + std::to_string(lineCount + 1));
+            }
             
             // Add to optimized storage
             TransformData tdata;
@@ -1568,20 +1592,21 @@ public:
             std::cout << " [computing]" << std::flush;
             std::vector<std::vector<Eigen::Triplet<Complex>>> thread_triplets(block_size);
             
+            // Ensure transforms are separated before parallel region to avoid data races
+            separateTransformsByType();
+            
             // FIX: Disable nested parallelism to avoid CPU stalls
+            // Set max active levels BEFORE the parallel region to avoid data races
+            int old_max_levels = omp_get_max_active_levels();
+            omp_set_max_active_levels(1);
+            
             #pragma omp parallel for schedule(dynamic, 1) if(block_size > 4)
             for (uint64_t col = 0; col < block_size; ++col) {
                 const auto& basis_col = basis_vectors[col];
                 
-                // CRITICAL FIX: Disable OpenMP nesting inside parallel region
-                int old_max_levels = omp_get_max_active_levels();
-                omp_set_max_active_levels(1);
-                
                 // Apply Hamiltonian: H|ψ_j⟩ (matrix-free, but single-threaded in this context)
                 std::vector<Complex> H_psi_j(dim);
                 apply(basis_col.data(), H_psi_j.data(), dim);
-                
-                omp_set_max_active_levels(old_max_levels);
                 
                 // Compute matrix elements with all rows (row-wise)
                 // OPTIMIZATION 3: Use conjugate symmetry for Hermitian operators
@@ -1605,6 +1630,9 @@ public:
                     }
                 }
             }
+            
+            // Restore max active levels after parallel region
+            omp_set_max_active_levels(old_max_levels);
             
             // OPTIMIZATION 4: Merge triplets efficiently
             std::vector<Eigen::Triplet<Complex>> triplets;
@@ -2034,7 +2062,13 @@ private:
         // OPTIMIZATION 2: Parallel computation with Hermitian symmetry
         std::vector<std::vector<Eigen::Triplet<Complex>>> thread_triplets(block_size);
         
-        // FIX: Sequential application of H (avoid nested parallelism), parallel only over columns
+        // Ensure transforms are separated before parallel region to avoid data races
+        separateTransformsByType();
+        
+        // FIX: Disable nested parallelism BEFORE the parallel region to avoid data races
+        int old_max_levels = omp_get_max_active_levels();
+        omp_set_max_active_levels(1);
+        
         #pragma omp parallel for schedule(dynamic, 1) if(block_size > 4)
         for (uint64_t col = 0; col < block_size; ++col) {
             const auto& basis_col = basis_vectors[col];
@@ -2042,13 +2076,7 @@ private:
             // Apply Hamiltonian using matrix-free method (apply() already optimized)
             std::vector<Complex> h_basis_col(dim);
             
-            // CRITICAL FIX: Disable nested OpenMP inside apply() by limiting active levels to 1
-            int old_max_levels = omp_get_max_active_levels();
-            omp_set_max_active_levels(1);
-            
             apply(basis_col.data(), h_basis_col.data(), dim);
-            
-            omp_set_max_active_levels(old_max_levels);
             
             // Compute matrix elements (use Hermitian symmetry)
             for (uint64_t row = 0; row <= col; ++row) {  // Only lower triangle + diagonal
@@ -2069,6 +2097,9 @@ private:
                 }
             }
         }
+        
+        // Restore max active levels after parallel region
+        omp_set_max_active_levels(old_max_levels);
         
         // Merge triplets
         std::vector<Eigen::Triplet<Complex>> triplets;
@@ -3202,7 +3233,7 @@ protected:
         std::ofstream file(filename, std::ios::binary);
         
         uint64_t dim = fixed_sz_dim_;
-        file.write(reinterpret_cast<const char*>(&dim), sizeof(int));
+        file.write(reinterpret_cast<const char*>(&dim), sizeof(uint64_t));
         file.write(reinterpret_cast<const char*>(vec.data()), dim * sizeof(Complex));
     }
     
@@ -3268,19 +3299,19 @@ private:
         // OPTIMIZATION 2: Parallel computation with Hermitian symmetry
         std::vector<std::vector<Eigen::Triplet<Complex>>> thread_triplets(block_size);
         
-        // FIX: Disable nested parallelism to avoid CPU stalls
+        // Ensure transforms are separated before parallel region to avoid data races
+        separateTransformsByType();
+        
+        // FIX: Disable nested parallelism BEFORE the parallel region to avoid data races
+        int old_max_levels = omp_get_max_active_levels();
+        omp_set_max_active_levels(1);
+        
         #pragma omp parallel for schedule(dynamic, 1) if(block_size > 4)
         for (uint64_t col = 0; col < block_size; ++col) {
-            // CRITICAL FIX: Disable OpenMP nesting inside parallel region
-            int old_max_levels = omp_get_max_active_levels();
-            omp_set_max_active_levels(1);
-            
             // Apply Hamiltonian: H|ψ_j⟩
             const auto& basis_col = basis_vectors[col];
             std::vector<Complex> H_psi_j(fixed_sz_dim_);
             apply(basis_col.data(), H_psi_j.data(), fixed_sz_dim_);
-            
-            omp_set_max_active_levels(old_max_levels);
             
             // Compute matrix elements (use Hermitian symmetry)
             for (uint64_t row = 0; row <= col; ++row) {  // Only lower triangle + diagonal
@@ -3302,6 +3333,9 @@ private:
                 }
             }
         }
+        
+        // Restore max active levels after parallel region
+        omp_set_max_active_levels(old_max_levels);
         
         // Merge triplets
         std::vector<Eigen::Triplet<Complex>> triplets;
@@ -3358,9 +3392,8 @@ private:
             throw std::runtime_error("Cannot open basis vector file: " + filename);
         }
         
-        int dim_int;
-        file.read(reinterpret_cast<char*>(&dim_int), sizeof(int));
-        uint64_t dim = dim_int;
+        uint64_t dim;
+        file.read(reinterpret_cast<char*>(&dim), sizeof(uint64_t));
         
         std::vector<Complex> vec(dim);
         file.read(reinterpret_cast<char*>(vec.data()), dim * sizeof(Complex));
@@ -3758,7 +3791,7 @@ public:
             
             // Sx contribution = (S+ + S-) / 2
             addTransform([=](uint64_t basis) -> std::pair<int, Complex> {
-                uint64_t flipped = basis ^ (1 << site);
+                uint64_t flipped = basis ^ (1ULL << site);
                 return {flipped, phase * Complex(sin_theta * 0.5, 0.0)};
             });
         }
@@ -3815,7 +3848,7 @@ public:
             
             // Sx contribution
             addTransform([=](uint64_t basis) -> std::pair<int, Complex> {
-                uint64_t flipped = basis ^ (1 << site);
+                uint64_t flipped = basis ^ (1ULL << site);
                 return {flipped, phase * Complex(sin_theta * 0.5, 0.0)};
             });
         }
@@ -3849,7 +3882,7 @@ public:
                     return {basis, Complex(spin_l * pow(-1, (basis >> site_j) & 1), 0.0)};
                 } else {
                     if (((basis >> site_j) & 1) != op) {
-                        uint64_t flipped = basis ^ (1 << site_j);
+                        uint64_t flipped = basis ^ (1ULL << site_j);
                         return {flipped, Complex(1.0, 0.0)};
                     }
                 }
@@ -3858,7 +3891,7 @@ public:
         } else {
             // Sx or Sy
             addTransform([=](uint64_t basis) -> std::pair<int, Complex> {
-                uint64_t flipped = basis ^ (1 << site_j);
+                uint64_t flipped = basis ^ (1ULL << site_j);
                 if (op == 3) {
                     // Sx = (S+ + S-) / 2
                     return {flipped, Complex(0.5, 0.0)};
@@ -3904,7 +3937,7 @@ public:
             
             if (op_i != 2) {
                 if (bit_i != op_i) {
-                    new_basis ^= (1 << site_i);
+                    new_basis ^= (1ULL << site_i);
                 } else {
                     valid = false;
                 }
@@ -3915,7 +3948,7 @@ public:
             if (valid && op_j != 2) {
                 uint64_t new_bit_j = (new_basis >> site_j) & 1;
                 if (new_bit_j != op_j) {
-                    new_basis ^= (1 << site_j);
+                    new_basis ^= (1ULL << site_j);
                 } else {
                     valid = false;
                 }
@@ -4248,7 +4281,7 @@ public:
             
             // Sx contribution = (S+ + S-) / 2
             addTransform([=](uint64_t basis) -> std::pair<int, Complex> {
-                uint64_t flipped = basis ^ (1 << site);
+                uint64_t flipped = basis ^ (1ULL << site);
                 return {flipped, phase * Complex(sin_theta * 0.5, 0.0)};
             });
         }
@@ -4304,7 +4337,7 @@ public:
             
             // Sx contribution
             addTransform([=](uint64_t basis) -> std::pair<int, Complex> {
-                uint64_t flipped = basis ^ (1 << site);
+                uint64_t flipped = basis ^ (1ULL << site);
                 return {flipped, phase * Complex(sin_theta * 0.5, 0.0)};
             });
         }

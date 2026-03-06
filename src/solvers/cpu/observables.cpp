@@ -10,13 +10,17 @@ ThermodynamicData calculate_thermodynamics_from_spectrum(
 ) {
     ThermodynamicData results;
     
+    if (eigenvalues.empty()) {
+        return results;
+    }
+    
     // Generate logarithmically spaced temperature points
     results.temperatures.resize(num_points);
     const double log_T_min = std::log(T_min);
     const double log_T_max = std::log(T_max);
-    const double log_T_step = (log_T_max - log_T_min) / (num_points - 1);
+    const double log_T_step = (num_points > 1) ? (log_T_max - log_T_min) / (num_points - 1) : 0.0;
     
-    for (int i = 0; i < num_points; i++) {
+    for (uint64_t i = 0; i < num_points; i++) {
         results.temperatures[i] = std::exp(log_T_min + i * log_T_step);
     }
     
@@ -30,7 +34,7 @@ ThermodynamicData calculate_thermodynamics_from_spectrum(
     double E0 = *std::min_element(eigenvalues.begin(), eigenvalues.end());
     
     // For each temperature
-    for (int i = 0; i < num_points; i++) {
+    for (uint64_t i = 0; i < num_points; i++) {
         double T = results.temperatures[i];
         double beta = 1.0 / T;
         

@@ -24,8 +24,8 @@ extern "C" {
  * Hermitian), compute the lowest eigenvalues and the corresponding coefficient 
  * vectors in the original basis.
  * 
- * @param h_sub_data  Row-major complex data for H_sub [nsub * nsub]
- * @param s_sub_data  Row-major complex data for S_sub [nsub * nsub]
+ * @param h_sub_data  Column-major interleaved real/imag complex data for H_sub [2 * nsub * nsub]
+ * @param s_sub_data  Column-major interleaved real/imag complex data for S_sub [2 * nsub * nsub]
  * @param nsub        Dimension of the subspace
  * @param block_size  Number of eigenvalues/eigenvectors to extract
  * @param out_eigenvalues  Output: eigenvalues [block_size]

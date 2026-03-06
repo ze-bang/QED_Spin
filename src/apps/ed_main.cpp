@@ -3,6 +3,7 @@
 #include <iomanip>
 #include <sstream>
 #include <cmath>
+#include <limits>
 #include <filesystem>
 #include <ed/core/ed_config.h>
 #include <ed/core/ed_config_adapter.h>
@@ -777,13 +778,24 @@ void compute_dynamical_response_workflow(const EDConfig& config) {
     if (!config.system.three_body_file.empty()) {
         std::string three_body_file = config.system.hamiltonian_dir + "/" + config.system.three_body_file;
         if (std::filesystem::exists(three_body_file)) {
-            std::cout << "Loading three-body terms from: " << three_body_file << "\n";
+            if (rank == 0) std::cout << "Loading three-body terms from: " << three_body_file << "\n";
             ham.loadThreeBodyTerm(three_body_file);
         }
     }
     
     // Hilbert space dimension
-    uint64_t N = 1ULL << config.system.num_sites;
+    uint64_t N;
+    if (config.system.use_fixed_sz) {
+        // Use binomial coefficient C(num_sites, n_up) for fixed-Sz sector
+        int64_t n_up_dim = (config.system.n_up >= 0) ? config.system.n_up : config.system.num_sites / 2;
+        N = 1;
+        for (int64_t i = 0; i < n_up_dim; i++) {
+            N = N * (config.system.num_sites - i) / (i + 1);
+        }
+        if (rank == 0) std::cout << "Fixed-Sz dynamical response: dim=" << N << " (n_up=" << n_up_dim << ")\n";
+    } else {
+        N = 1ULL << config.system.num_sites;
+    }
     
     // Create function wrapper for Hamiltonian
     auto H_func = [&ham](const Complex* in, Complex* out, uint64_t dim) {
@@ -800,10 +812,12 @@ void compute_dynamical_response_workflow(const EDConfig& config) {
     // Ensure output directory exists
     create_directory_mpi_safe(config.workflow.output_dir);
     
-    std::cout << "Random states: " << params.num_samples << "\n";
-    std::cout << "Krylov dimension: " << params.krylov_dim << "\n";
-    std::cout << "Temperature range: [" << config.dynamical.temp_min << ", " << config.dynamical.temp_max << "]\n";
-    std::cout << "Temperature bins: " << config.dynamical.num_temp_bins << "\n";
+    if (rank == 0) {
+        std::cout << "Random states: " << params.num_samples << "\n";
+        std::cout << "Krylov dimension: " << params.krylov_dim << "\n";
+        std::cout << "Temperature range: [" << config.dynamical.temp_min << ", " << config.dynamical.temp_max << "]\n";
+        std::cout << "Temperature bins: " << config.dynamical.num_temp_bins << "\n";
+    }
     
     // Find ground state energy for proper energy shifting
     double ground_state_energy = 0.0;
@@ -1274,9 +1288,17 @@ void compute_dynamical_response_workflow(const EDConfig& config) {
                 int next_task = 0;
                 
                 // Send initial tasks to all workers
+                int first_idle_worker = size;  // track workers that got no task
                 for (int r = 1; r < size && next_task < num_tasks; r++) {
                     MPI_Send(&next_task, 1, MPI_INT, r, TASK_TAG, MPI_COMM_WORLD);
                     next_task++;
+                    first_idle_worker = r + 1;
+                }
+                
+                // Send STOP_TAG to workers that didn't get any task
+                for (int r = first_idle_worker; r < size; r++) {
+                    int dummy = -1;
+                    MPI_Send(&dummy, 1, MPI_INT, r, STOP_TAG, MPI_COMM_WORLD);
                 }
                 
                 // Process tasks on rank 0 while managing other workers
@@ -1400,7 +1422,7 @@ void compute_dynamical_response_workflow(const EDConfig& config) {
         // ============================================================
         // Legacy file-based operator loading
         // ============================================================
-        std::cout << "\nUsing legacy file-based operator loading\n";
+        if (rank == 0) std::cout << "\nUsing legacy file-based operator loading\n";
         
         if (config.dynamical.operator_file.empty()) {
             std::cerr << "Error: --dyn-operator=<file> is required for dynamical response\n";
@@ -1469,13 +1491,15 @@ void compute_dynamical_response_workflow(const EDConfig& config) {
                 results.spectral_error, results.spectral_error_imag,
                 results.total_samples, temperature
             );
-            std::cout << "Results saved to HDF5: " << h5_file << " (" << op_name << ")\n";
+            if (rank == 0) std::cout << "Results saved to HDF5: " << h5_file << " (" << op_name << ")\n";
         }
     }
     
-    std::cout << "\nDynamical response complete.\n";
-    std::cout << "Frequency range: [" << config.dynamical.omega_min << ", " << config.dynamical.omega_max << "]\n";
-    std::cout << "Number of points: " << config.dynamical.num_omega_points << "\n";
+    if (rank == 0) {
+        std::cout << "\nDynamical response complete.\n";
+        std::cout << "Frequency range: [" << config.dynamical.omega_min << ", " << config.dynamical.omega_max << "]\n";
+        std::cout << "Number of points: " << config.dynamical.num_omega_points << "\n";
+    }
 }
 
 /**
@@ -1518,13 +1542,24 @@ void compute_static_response_workflow(const EDConfig& config) {
     if (!config.system.three_body_file.empty()) {
         std::string three_body_file = config.system.hamiltonian_dir + "/" + config.system.three_body_file;
         if (std::filesystem::exists(three_body_file)) {
-            std::cout << "Loading three-body terms from: " << three_body_file << "\n";
+            if (rank == 0) std::cout << "Loading three-body terms from: " << three_body_file << "\n";
             ham.loadThreeBodyTerm(three_body_file);
         }
     }
     
     // Hilbert space dimension
-    uint64_t N = 1ULL << config.system.num_sites;
+    uint64_t N;
+    if (config.system.use_fixed_sz) {
+        // Use binomial coefficient C(num_sites, n_up) for fixed-Sz sector
+        int64_t n_up_dim = (config.system.n_up >= 0) ? config.system.n_up : config.system.num_sites / 2;
+        N = 1;
+        for (int64_t i = 0; i < n_up_dim; i++) {
+            N = N * (config.system.num_sites - i) / (i + 1);
+        }
+        if (rank == 0) std::cout << "Fixed-Sz static response: dim=" << N << " (n_up=" << n_up_dim << ")\n";
+    } else {
+        N = 1ULL << config.system.num_sites;
+    }
     
     // Create function wrapper for Hamiltonian
     auto H_func = [&ham](const Complex* in, Complex* out, uint64_t dim) {
@@ -1540,18 +1575,22 @@ void compute_static_response_workflow(const EDConfig& config) {
     // Ensure output directory exists
     create_directory_mpi_safe(config.workflow.output_dir);
     
-    std::cout << "Random states: " << params.num_samples << "\n";
-    std::cout << "Krylov dimension: " << params.krylov_dim << "\n";
-    std::cout << "Temperature range: [" << config.static_resp.temp_min << ", " << config.static_resp.temp_max << "]\n";
+    if (rank == 0) {
+        std::cout << "Random states: " << params.num_samples << "\n";
+        std::cout << "Krylov dimension: " << params.krylov_dim << "\n";
+        std::cout << "Temperature range: [" << config.static_resp.temp_min << ", " << config.static_resp.temp_max << "]\n";
+    }
     
     if (use_config_operators) {
         // ============================================================
         // Configuration-based operator construction (like TPQ_DSSF)
         // ============================================================
-        std::cout << "\nUsing configuration-based operator construction\n";
-        std::cout << "  Operator type: " << config.static_resp.operator_type << "\n";
-        std::cout << "  Basis: " << config.static_resp.basis << "\n";
-        std::cout << "  Spin combinations: " << config.static_resp.spin_combinations << "\n";
+        if (rank == 0) {
+            std::cout << "\nUsing configuration-based operator construction\n";
+            std::cout << "  Operator type: " << config.static_resp.operator_type << "\n";
+            std::cout << "  Basis: " << config.static_resp.basis << "\n";
+            std::cout << "  Spin combinations: " << config.static_resp.spin_combinations << "\n";
+        }
         
         // Parse configuration
         auto spin_combinations = parse_spin_combinations(config.static_resp.spin_combinations);
@@ -1754,9 +1793,17 @@ void compute_static_response_workflow(const EDConfig& config) {
                 int next_task = 0;
                 
                 // Send initial tasks to all workers
+                int first_idle_worker = size;  // track workers that got no task
                 for (int r = 1; r < size && next_task < num_tasks; r++) {
                     MPI_Send(&next_task, 1, MPI_INT, r, TASK_TAG, MPI_COMM_WORLD);
                     next_task++;
+                    first_idle_worker = r + 1;
+                }
+                
+                // Send STOP_TAG to workers that didn't get any task
+                for (int r = first_idle_worker; r < size; r++) {
+                    int dummy = -1;
+                    MPI_Send(&dummy, 1, MPI_INT, r, STOP_TAG, MPI_COMM_WORLD);
                 }
                 
                 // Process tasks on rank 0 while managing other workers
@@ -1849,7 +1896,7 @@ void compute_static_response_workflow(const EDConfig& config) {
         // ============================================================
         // Legacy file-based operator loading
         // ============================================================
-        std::cout << "\nUsing legacy file-based operator loading\n";
+        if (rank == 0) std::cout << "\nUsing legacy file-based operator loading\n";
         
         if (config.static_resp.operator_file.empty()) {
             std::cerr << "Error: --static-operator=<file> is required for static response\n";
@@ -2052,6 +2099,17 @@ void compute_ground_state_dssf_workflow(const EDConfig& config) {
     // Find ground state using Lanczos
     if (rank == 0) {
         std::cout << "\n--- Finding ground state ---\n";
+    }
+    
+    // Validate dimension fits in int for solver function signatures
+    if (N > static_cast<uint64_t>(std::numeric_limits<int>::max())) {
+        if (rank == 0) {
+            std::cerr << "Error: Hilbert space dimension " << N
+                      << " exceeds INT_MAX. The current solver API uses int for "
+                      << "dimension parameters. Use fixed-Sz or symmetry reduction."
+                      << std::endl;
+        }
+        return;
     }
     
     ComplexVector ground_state(N);
@@ -2606,6 +2664,15 @@ int run_dssf_mode(int argc, char* argv[]) {
         std::cout << "Hilbert space dimension: " << N << "\n";
     }
     
+    // Guard against dimension overflow in int-based solver API
+    if (N > static_cast<uint64_t>(std::numeric_limits<int>::max())) {
+        if (rank == 0) {
+            std::cerr << "Error: Hilbert space dimension " << N
+                      << " exceeds INT_MAX for solver API." << std::endl;
+        }
+        return 1;
+    }
+    
     // Create Hamiltonian function wrapper
     auto H = [&ham_op](const Complex* in, Complex* out, int size) {
         ham_op.apply(in, out, size);
@@ -2832,6 +2899,9 @@ int main(int argc, char* argv[]) {
         std::string arg = argv[i];
         if (arg == "--help" || arg == "-h") {
             print_help(argv[0]);
+            #ifdef WITH_MPI
+            MPI_Finalize();
+            #endif
             return 0;
         }
         
@@ -2844,14 +2914,23 @@ int main(int argc, char* argv[]) {
             } else {
                 std::cerr << "Error: Unknown method '" << method_name << "'\n";
                 std::cerr << "Use --help to see available methods.\n";
+                #ifdef WITH_MPI
+                MPI_Finalize();
+                #endif
                 return 1;
             }
+            #ifdef WITH_MPI
+            MPI_Finalize();
+            #endif
             return 0;
         }
     }
     
     if (argc < 2) {
         print_help(argv[0]);
+        #ifdef WITH_MPI
+        MPI_Finalize();
+        #endif
         return 1;
     }
     
@@ -2873,17 +2952,20 @@ int main(int argc, char* argv[]) {
     // Validate
     if (!config.validate()) {
         std::cerr << "\nConfiguration validation failed. Use --help for usage.\n";
+        #ifdef WITH_MPI
+        MPI_Finalize();
+        #endif
         return 1;
     }
     
     // Print configuration summary
     config.print();
     
+    // Create output directory first (needed for config.save)
+    create_directory_mpi_safe(config.workflow.output_dir);
+    
     // Save configuration for reproducibility
     config.save(config.workflow.output_dir + "/ed_config.txt");
-    
-    // Create output directory
-    create_directory_mpi_safe(config.workflow.output_dir);
     
     // Execute workflows
     EDResults standard_results, sym_results;
@@ -2901,6 +2983,9 @@ int main(int argc, char* argv[]) {
                           ? config.system.hamiltonian_dir + "/basis_cache" 
                           : config.workflow.basis_cache_dir)
                       << " on subsequent runs to skip sector generation.\n";
+            #ifdef WITH_MPI
+            MPI_Finalize();
+            #endif
             return 0;
         }
 

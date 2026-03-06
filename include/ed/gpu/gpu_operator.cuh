@@ -137,8 +137,8 @@ public:
     // Constructor
     GPUOperator(int n_sites, float spin_l = 0.5f);
     
-    // Destructor
-    ~GPUOperator();
+    // Destructor - virtual for correct polymorphic deletion
+    virtual ~GPUOperator();
     
     // OPTIMIZED: Direct data population (no std::function overhead)
     void addOneBodyTerm(uint8_t op_type, uint32_t site, const std::complex<double>& coeff);
@@ -170,7 +170,7 @@ public:
     void setSingleSite(int site, char op, double coupling);
     
     // Get dimension
-    int getDimension() const { return dimension_; }
+    int64_t getDimension() const { return dimension_; }
     
     // Memory management
     size_t estimateMemoryRequirement(int N) const;
@@ -193,7 +193,7 @@ public:
 protected:
     int n_sites_;
     float spin_l_;
-    int dimension_;
+    int64_t dimension_;  // int64_t to support > 2^31 states; GPU kernels still use int N per call
     
     // OPTIMIZED: Structure-of-Arrays storage
     std::vector<GPUTransformData> transform_data_;  // Host storage

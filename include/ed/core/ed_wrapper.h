@@ -72,7 +72,7 @@ inline std::vector<Complex> operator- (const std::vector<Complex>& a, const std:
 /**
  * @brief In-place addition operator for complex vectors
  */
-inline std::vector<Complex> operator+= (std::vector<Complex>& a, const std::vector<Complex>& b) {
+inline std::vector<Complex>& operator+= (std::vector<Complex>& a, const std::vector<Complex>& b) {
     if (a.size() != b.size()) {
         throw std::invalid_argument("Vectors must be of the same size for addition.");
     }
@@ -85,7 +85,7 @@ inline std::vector<Complex> operator+= (std::vector<Complex>& a, const std::vect
 /**
  * @brief In-place subtraction operator for complex vectors
  */
-inline std::vector<Complex> operator-= (std::vector<Complex>& a, const std::vector<Complex>& b) {
+inline std::vector<Complex>& operator-= (std::vector<Complex>& a, const std::vector<Complex>& b) {
     if (a.size() != b.size()) {
         throw std::invalid_argument("Vectors must be of the same size for subtraction.");
     }

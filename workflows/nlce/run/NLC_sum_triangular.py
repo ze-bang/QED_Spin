@@ -200,6 +200,15 @@ class NLCExpansionTriangular:
             return self.subcluster_info[cluster_id]['subclusters']
         
         # Fallback to order-based heuristic
+        # WARNING: This is mathematically wrong for most cluster topologies.
+        # Correct subcluster embeddings should come from subclusters_info.txt.
+        import warnings
+        warnings.warn(
+            f"Cluster {cluster_id}: using order-based subcluster heuristic (fallback). "
+            f"This likely produces incorrect NLCE weights. "
+            f"Ensure subclusters_info.txt is generated correctly.",
+            RuntimeWarning
+        )
         subclusters = {}
         order = self.clusters[cluster_id]['order']
         for cid, data in self.clusters.items():
@@ -240,6 +249,24 @@ class NLCExpansionTriangular:
     
     def calculate_thermodynamic_quantities(self, eigenvalues):
         """Calculate thermodynamic quantities from eigenvalues."""
+        # Validate eigenvalues
+        if eigenvalues is None or len(eigenvalues) == 0:
+            print("  WARNING: Empty eigenvalue array, returning zeros")
+            return {
+                'energy': np.zeros_like(self.temp_values),
+                'specific_heat': np.zeros_like(self.temp_values),
+                'entropy': np.zeros_like(self.temp_values)
+            }
+        if not np.all(np.isfinite(eigenvalues)):
+            print(f"  WARNING: {np.sum(~np.isfinite(eigenvalues))} non-finite eigenvalues detected, filtering")
+            eigenvalues = eigenvalues[np.isfinite(eigenvalues)]
+            if len(eigenvalues) == 0:
+                return {
+                    'energy': np.zeros_like(self.temp_values),
+                    'specific_heat': np.zeros_like(self.temp_values),
+                    'entropy': np.zeros_like(self.temp_values)
+                }
+
         results = {
             'energy': np.zeros_like(self.temp_values),
             'specific_heat': np.zeros_like(self.temp_values),
@@ -718,9 +745,9 @@ def main():
     
     # Perform summation
     print(f"\nPerforming NLCE summation up to order {max_order}...")
-    if args.resummation == 'euler':
-        print("Using Euler resummation")
-        results = nlc.perform_resummed_summation(max_order, method='euler')
+    if args.resummation in ('euler', 'wynn'):
+        print(f"Using {args.resummation} resummation")
+        results = nlc.perform_resummed_summation(max_order, method=args.resummation)
     else:
         results = nlc.perform_summation(max_order)
     

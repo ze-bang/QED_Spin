@@ -590,7 +590,10 @@ EDConfig EDConfig::fromCommandLine(uint64_t argc, char* argv[]) {
 EDConfig& EDConfig::merge(const EDConfig& other) {
     // Simple merge: other overrides this where values differ from defaults
     // This is a simplified version - could be more sophisticated
-    method = other.method;
+    // Only override method if it was explicitly changed from default (LANCZOS)
+    if (other.method != DiagonalizationMethod::LANCZOS) {
+        method = other.method;
+    }
     
     // Merge diag
     if (other.diag.num_eigenvalues != 1) diag.num_eigenvalues = other.diag.num_eigenvalues;
@@ -619,8 +622,8 @@ bool EDConfig::validate(std::ostream& err) const {
     if (system.num_sites == 0) {
         err << "Error: num_sites must be specified or auto-detected\n";
         valid = false;
-    } else if (system.num_sites > 64) {
-        err << "Error: num_sites must be <= 64 (Hilbert space would overflow uint64_t)\n";
+    } else if (system.num_sites >= 64) {
+        err << "Error: num_sites must be < 64 (bit-shift 1ULL << num_sites would overflow)\n";
         valid = false;
     }
     
@@ -643,7 +646,7 @@ bool EDConfig::validate(std::ostream& err) const {
     }
     
     // ========== Diagonalization validation ==========
-    if (diag.num_eigenvalues < 1) {
+    if (diag.num_eigenvalues == 0) {
         err << "Error: num_eigenvalues must be >= 1\n";
         valid = false;
     }
@@ -809,6 +812,7 @@ bool EDConfig::autoDetectNumSites() {
     }
     
     uint64_t max_site_id = 0;
+    bool found_site = false;
     std::string line;
     
     while (std::getline(file, line)) {
@@ -818,10 +822,11 @@ bool EDConfig::autoDetectNumSites() {
         uint64_t site_id;
         if (iss >> site_id) {
             max_site_id = std::max(max_site_id, site_id);
+            found_site = true;
         }
     }
     
-    if (max_site_id >= 0) {
+    if (found_site) {
         system.num_sites = max_site_id + 1;
         std::cout << "Auto-detected num_sites = " << system.num_sites << " from positions.dat\n";
         return true;

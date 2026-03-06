@@ -418,10 +418,11 @@ public:
         if (output_dir.empty()) return;
         
         // Create output directory if needed (for .dat files and HDF5)
-        std::string cmd = "mkdir -p " + output_dir;
-        int result = system(cmd.c_str());
-        if (result != 0) {
-            std::cerr << "Warning: Could not create directory " << output_dir << std::endl;
+        std::error_code ec;
+        std::filesystem::create_directories(output_dir, ec);
+        if (ec) {
+            std::cerr << "Warning: Could not create directory " << output_dir 
+                      << ": " << ec.message() << std::endl;
         }
         
         // Create/open HDF5 file in main output directory (unified ed_results.h5)

@@ -2200,27 +2200,31 @@ StaticResponseResults compute_static_response(
         std::vector<double> sample_exp(num_temp_bins);
         std::vector<double> sample_var(num_temp_bins);
         
+        // Shift energies by e_min to prevent Boltzmann factor overflow at low T
+        double e_min = *std::min_element(ritz_values.begin(),
+                                         ritz_values.begin() + m);
+        
         for (int t = 0; t < num_temp_bins; t++) {
             double T = results.temperatures[t];
             double beta = 1.0 / T;
             
-            // Compute partition function
+            // Compute partition function (with energy shift for numerical stability)
             double Z = 0.0;
             for (int i = 0; i < m; i++) {
-                Z += weights[i] * std::exp(-beta * ritz_values[i]);
+                Z += weights[i] * std::exp(-beta * (ritz_values[i] - e_min));
             }
             
             // Compute ⟨O₁†O₂⟩
             double expectation = 0.0;
             for (int i = 0; i < m; i++) {
-                double boltzmann = std::exp(-beta * ritz_values[i]);
+                double boltzmann = std::exp(-beta * (ritz_values[i] - e_min));
                 expectation += weights[i] * correlation_values[i] * boltzmann / Z;
             }
             
             // Compute ⟨(O₁†O₂)²⟩ for variance
             double expectation_squared = 0.0;
             for (int i = 0; i < m; i++) {
-                double boltzmann = std::exp(-beta * ritz_values[i]);
+                double boltzmann = std::exp(-beta * (ritz_values[i] - e_min));
                 expectation_squared += weights[i] * correlation_values[i] * correlation_values[i] * boltzmann / Z;
             }
             

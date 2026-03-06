@@ -106,6 +106,12 @@ inline EDResults dispatchGPUSymmetrizedSector(
         throw std::runtime_error("Failed to create GPU symmetrized operator");
     }
 
+    // RAII guard: ensure GPU operator is destroyed even if solver throws
+    struct GPUOpGuard {
+        void* op;
+        ~GPUOpGuard() { if (op) GPUEDWrapper::destroyGPUOperator(op); }
+    } gpu_op_guard{gpu_op};
+
     std::vector<double> eigenvalues;
     int num_eigs = static_cast<int>(std::min(params.num_eigenvalues, sector_dim));
 
@@ -148,11 +154,10 @@ inline EDResults dispatchGPUSymmetrizedSector(
             num_eigs, eigenvalues, params.output_dir,
             params.compute_eigenvectors);
     } else {
-        GPUEDWrapper::destroyGPUOperator(gpu_op);
         throw std::runtime_error("Unsupported GPU method for symmetrized diagonalization: use Lanczos, Block Lanczos, Davidson, or Krylov-Schur GPU variants");
     }
 
-    GPUEDWrapper::destroyGPUOperator(gpu_op);
+    // gpu_op_guard destructor handles cleanup
 
     EDResults results;
     results.eigenvalues = eigenvalues;
@@ -406,7 +411,8 @@ inline EDResults exact_diagonalization_streaming_symmetry(
 
                     std::string main_hdf5 = HDF5IO::createOrOpenFile(params.output_dir);
                     // Encode (sector, eigen_idx) into a unique global ID
-                    size_t global_id = sector_idx * 10000 + i;
+                    // Use large multiplier to avoid collision with sectors having > 10K eigenvalues
+                    size_t global_id = static_cast<size_t>(sector_idx) * 1000000ULL + i;
                     HDF5IO::saveEigenvector(main_hdf5, global_id, full_vec);
                 } catch (const std::exception& e) {
                     std::cerr << "  Warning: Could not expand eigenvector " << i
@@ -467,7 +473,7 @@ inline EDResults exact_diagonalization_streaming_symmetry(
                 map_file << i << " " << std::setprecision(15) << info.value << " " 
                         << info.sector_idx << " " << info.eigen_idx;
                 if (params.compute_eigenvectors) {
-                    size_t global_id = info.sector_idx * 10000 + info.eigen_idx;
+                    size_t global_id = static_cast<size_t>(info.sector_idx) * 1000000ULL + info.eigen_idx;
                     map_file << " eigenvector_" << global_id;
                 }
                 map_file << "\n";
@@ -781,7 +787,7 @@ inline EDResults exact_diagonalization_streaming_symmetry_fixed_sz(
                         sector_idx, sym_vec);
 
                     std::string main_hdf5 = HDF5IO::createOrOpenFile(params.output_dir);
-                    size_t global_id = sector_idx * 10000 + i;
+                    size_t global_id = static_cast<size_t>(sector_idx) * 1000000ULL + i;
                     HDF5IO::saveEigenvector(main_hdf5, global_id, full_vec);
                 } catch (const std::exception& e) {
                     std::cerr << "  Warning: Could not expand eigenvector " << i
@@ -840,7 +846,7 @@ inline EDResults exact_diagonalization_streaming_symmetry_fixed_sz(
                 map_file << i << " " << std::setprecision(15) << info.value << " "
                         << info.sector_idx << " " << info.eigen_idx;
                 if (params.compute_eigenvectors) {
-                    size_t global_id = info.sector_idx * 10000 + info.eigen_idx;
+                    size_t global_id = static_cast<size_t>(info.sector_idx) * 1000000ULL + info.eigen_idx;
                     map_file << " eigenvector_" << global_id;
                 }
                 map_file << "\n";

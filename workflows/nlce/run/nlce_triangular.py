@@ -215,8 +215,14 @@ def run_ed_for_cluster(args):
         env['OMP_NUM_THREADS'] = '1'
     
     try:
-        result = subprocess.run(cmd, check=True, capture_output=True, env=env)
+        # Timeout: 1 hour per cluster by default; prevents infinite hangs
+        ed_timeout = int(os.environ.get('NLCE_ED_TIMEOUT', 3600))
+        result = subprocess.run(cmd, check=True, capture_output=True, env=env,
+                                timeout=ed_timeout)
         return True
+    except subprocess.TimeoutExpired:
+        logging.error(f"ED for cluster {cluster_id} timed out after {ed_timeout}s")
+        return False
     except subprocess.CalledProcessError as e:
         # Check if the computation actually succeeded despite the error
         expected_output_dir = os.path.join(cluster_ed_dir, 'output')
@@ -224,8 +230,22 @@ def run_ed_for_cluster(args):
         if os.path.exists(expected_output_dir):
             h5_file = os.path.join(expected_output_dir, 'ed_results.h5')
             if os.path.exists(h5_file):
-                logging.warning(f"ED for cluster {cluster_id} crashed but HDF5 output exists - treating as success")
-                return True
+                # Validate HDF5 file integrity before treating as success
+                try:
+                    import h5py
+                    with h5py.File(h5_file, 'r') as f:
+                        # Check that eigenvalues dataset exists and has data
+                        if 'eigenvalues' not in f:
+                            logging.error(f"HDF5 for cluster {cluster_id} missing 'eigenvalues' dataset")
+                            return False
+                        if f['eigenvalues'].shape[0] == 0:
+                            logging.error(f"HDF5 for cluster {cluster_id} has empty eigenvalues")
+                            return False
+                    logging.warning(f"ED for cluster {cluster_id} crashed but HDF5 output verified - treating as success")
+                    return True
+                except Exception as h5_err:
+                    logging.error(f"HDF5 for cluster {cluster_id} is corrupt: {h5_err}")
+                    return False
         
         if e.returncode == -11:
             logging.error(f"ED for cluster {cluster_id} crashed with SIGSEGV")

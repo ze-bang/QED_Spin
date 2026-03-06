@@ -38,8 +38,8 @@ struct FTLMResults {
     std::vector<double> specific_heat_error; // Standard error in specific heat
     std::vector<double> entropy_error;       // Standard error in entropy
     std::vector<double> free_energy_error;   // Standard error in free energy
-    double ground_state_estimate;            // Best estimate of ground state energy
-    uint64_t total_samples;                  // Number of samples used
+    double ground_state_estimate = 0.0;     // Best estimate of ground state energy
+    uint64_t total_samples = 0;              // Number of samples used
 };
 
 #endif // THERMAL_TYPES_H

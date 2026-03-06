@@ -48,6 +48,12 @@ ComplexVector generateOrthogonalVector(int N, const std::vector<ComplexVector>& 
 // Helper function to refine a single eigenvector with CG
 void refine_eigenvector_with_cg(std::function<void(const Complex*, Complex*, int)> H,
                                ComplexVector& v, double& lambda, uint64_t N, double tol) {
+    // WARNING: CG on (H - λI) is only guaranteed to converge when λ is the
+    // smallest eigenvalue (making H - λI positive semi-definite). For interior
+    // eigenvalues the operator is indefinite and CG may diverge.
+    // A safer alternative would be MINRES, but CG often works in practice
+    // because the starting vector is already close to the eigenvector.
+    
     // Normalize initial vector
     double norm = cblas_dznrm2(N, v.data(), 1);
     Complex scale = Complex(1.0/norm, 0.0);
@@ -71,6 +77,7 @@ void refine_eigenvector_with_cg(std::function<void(const Complex*, Complex*, int
     const double cg_tol = tol * 0.1;
     double res_norm = cblas_dznrm2(N, r.data(), 1);
     
+    double prev_res_norm = res_norm;
     for (int iter = 0; iter < max_cg_iter && res_norm > cg_tol; iter++) {
         // Apply (H - λI) to p
         H(p.data(), Hp.data(), N);
@@ -80,6 +87,15 @@ void refine_eigenvector_with_cg(std::function<void(const Complex*, Complex*, int
         Complex r_dot_r, p_dot_Hp;
         cblas_zdotc_sub(N, r.data(), 1, r.data(), 1, &r_dot_r);
         cblas_zdotc_sub(N, p.data(), 1, Hp.data(), 1, &p_dot_Hp);
+        
+        // Detect indefinite operator: p·(H-λI)p should be positive for PSD
+        if (std::real(p_dot_Hp) <= 0.0) {
+            std::cerr << "Warning: CG refinement detected indefinite operator "
+                      << "(H - λI) at iteration " << iter
+                      << ". Stopping early — eigenvector may not be fully refined."
+                      << std::endl;
+            break;
+        }
         
         Complex alpha = r_dot_r / p_dot_Hp;
         
@@ -95,6 +111,15 @@ void refine_eigenvector_with_cg(std::function<void(const Complex*, Complex*, int
         
         // Check convergence
         res_norm = cblas_dznrm2(N, r.data(), 1);
+        
+        // Detect divergence
+        if (res_norm > 10.0 * prev_res_norm) {
+            std::cerr << "Warning: CG refinement diverging (residual grew "
+                      << res_norm / prev_res_norm << "x). Stopping early."
+                      << std::endl;
+            break;
+        }
+        prev_res_norm = res_norm;
         
         // β = (r_new·r_new) / (r_old·r_old)
         cblas_zdotc_sub(N, r.data(), 1, r.data(), 1, &r_dot_r);
@@ -364,6 +389,14 @@ int build_lanczos_tridiagonal_with_basis(
                     cblas_zdotc_sub(N, (*basis_vectors)[k].data(), 1, w.data(), 1, &overlap);
                     Complex neg_overlap = -overlap;
                     cblas_zaxpy(N, &neg_overlap, (*basis_vectors)[k].data(), 1, w.data(), 1);
+                }
+            } else {
+                // Cannot reorthogonalize without stored basis vectors
+                if (j == 0) {
+                    std::cerr << "Warning: full_reorthogonalization requested but "
+                              << "basis_vectors == nullptr. Reorthogonalization "
+                              << "will be silently skipped — eigenvalues may have "
+                              << "spurious duplicates." << std::endl;
                 }
             }
         } else if (reorth_freq > 0 && (j + 1) % reorth_freq == 0) {
