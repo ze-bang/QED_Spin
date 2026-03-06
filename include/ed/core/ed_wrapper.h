@@ -247,6 +247,14 @@ inline DiagonalizationMethod get_fallback_method(DiagonalizationMethod method, b
                 fallback = DiagonalizationMethod::KRYLOV_SCHUR;
                 reason = "CUDA not compiled (build with -DWITH_CUDA=ON)";
                 break;
+            case DiagonalizationMethod::BLOCK_KRYLOV_SCHUR_GPU:
+                fallback = DiagonalizationMethod::BLOCK_KRYLOV_SCHUR;
+                reason = "CUDA not compiled (build with -DWITH_CUDA=ON)";
+                break;
+            case DiagonalizationMethod::FULL_GPU:
+                fallback = DiagonalizationMethod::FULL;
+                reason = "CUDA not compiled (build with -DWITH_CUDA=ON)";
+                break;
             case DiagonalizationMethod::mTPQ_GPU:
                 fallback = DiagonalizationMethod::mTPQ;
                 reason = "CUDA not compiled (build with -DWITH_CUDA=ON)";
@@ -275,6 +283,8 @@ inline DiagonalizationMethod get_fallback_method(DiagonalizationMethod method, b
             case DiagonalizationMethod::BLOCK_LANCZOS: std::cerr << "BLOCK_LANCZOS"; break;
             case DiagonalizationMethod::DAVIDSON: std::cerr << "DAVIDSON"; break;
             case DiagonalizationMethod::LOBPCG: std::cerr << "LOBPCG"; break;
+            case DiagonalizationMethod::KRYLOV_SCHUR: std::cerr << "KRYLOV_SCHUR"; break;
+            case DiagonalizationMethod::BLOCK_KRYLOV_SCHUR: std::cerr << "BLOCK_KRYLOV_SCHUR"; break;
             case DiagonalizationMethod::mTPQ: std::cerr << "mTPQ"; break;
             case DiagonalizationMethod::cTPQ: std::cerr << "cTPQ"; break;
             case DiagonalizationMethod::FTLM: std::cerr << "FTLM"; break;
@@ -3103,12 +3113,21 @@ inline EDResults exact_diagonalization_fixed_sz(
         // Run appropriate GPU method
         std::vector<double> eigenvalues;
         
-        if (method == DiagonalizationMethod::DAVIDSON_GPU || method == DiagonalizationMethod::LOBPCG_GPU) {
+        if (method == DiagonalizationMethod::DAVIDSON_GPU) {
             GPUEDWrapper::runGPUDavidsonFixedSz(
                 gpu_op_handle, n_up,
                 params.num_eigenvalues,
                 params.max_iterations,
                 params.max_subspace,
+                params.tolerance,
+                eigenvalues,
+                params.output_dir,
+                params.compute_eigenvectors);
+        } else if (method == DiagonalizationMethod::LOBPCG_GPU) {
+            GPUEDWrapper::runGPULOBPCGFixedSz(
+                gpu_op_handle, n_up,
+                params.num_eigenvalues,
+                params.max_iterations,
                 params.tolerance,
                 eigenvalues,
                 params.output_dir,

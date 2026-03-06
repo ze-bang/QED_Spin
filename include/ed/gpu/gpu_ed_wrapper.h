@@ -269,7 +269,6 @@ public:
     
     /**
      * Run GPU-accelerated LOBPCG method
-     * @deprecated This method now redirects to Davidson GPU for better stability
      */
     static void runGPULOBPCG(void* gpu_op_handle,
                             int N, int num_eigenvalues, int max_iter,
@@ -280,7 +279,6 @@ public:
     
     /**
      * Run GPU-accelerated LOBPCG method for Fixed Sz sector
-     * @deprecated This method now redirects to Davidson GPU for better stability
      */
     static void runGPULOBPCGFixedSz(void* gpu_op_handle,
                                    int n_up,

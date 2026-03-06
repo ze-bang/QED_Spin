@@ -819,14 +819,26 @@ void GPUEDWrapper::runGPULOBPCG(void* gpu_op_handle,
                                 std::vector<double>& eigenvalues,
                                 std::string dir,
                                 bool compute_eigenvectors) {
-    // LOBPCG_GPU is retired - redirect to Davidson GPU which is more robust
-    std::cout << "Note: LOBPCG_GPU is deprecated. Using Davidson GPU instead.\n";
+    if (!gpu_op_handle) {
+        std::cerr << "Error: NULL GPU operator handle\n";
+        return;
+    }
     
-    // Use a reasonable max_subspace for Davidson (typically 2-3x num_eigenvalues)
-    int max_subspace = std::max(50, 3 * num_eigenvalues);
+    GPUOperator* gpu_op = static_cast<GPUOperator*>(gpu_op_handle);
     
-    runGPUDavidson(gpu_op_handle, N, num_eigenvalues, max_iter, max_subspace,
-                   tol, eigenvalues, dir, compute_eigenvectors);
+    std::cout << "\n========================================\n";
+    std::cout << "GPU LOBPCG Algorithm\n";
+    std::cout << "========================================\n";
+    std::cout << "  Dimension: " << N << "\n";
+    std::cout << "  Target eigenvalues: " << num_eigenvalues << "\n";
+    std::cout << "  Max iterations: " << max_iter << "\n";
+    std::cout << "  Tolerance: " << tol << "\n\n";
+    
+    GPUIterativeSolver solver(gpu_op, N);
+    solver.runLOBPCG(num_eigenvalues, max_iter, tol,
+                     eigenvalues, dir, compute_eigenvectors);
+    
+    std::cout << "\nGPU LOBPCG complete\n";
 }
 
 void GPUEDWrapper::runGPULOBPCGFixedSz(void* gpu_op_handle,
@@ -836,14 +848,27 @@ void GPUEDWrapper::runGPULOBPCGFixedSz(void* gpu_op_handle,
                                       std::vector<double>& eigenvalues,
                                       std::string dir,
                                       bool compute_eigenvectors) {
-    // LOBPCG_GPU is retired - redirect to Davidson GPU which is more robust
-    std::cout << "Note: LOBPCG_GPU Fixed Sz is deprecated. Using Davidson GPU Fixed Sz instead.\n";
+    if (!gpu_op_handle) {
+        std::cerr << "Error: NULL GPU operator handle\n";
+        return;
+    }
     
-    // Use a reasonable max_subspace for Davidson (typically 2-3x num_eigenvalues)
-    int max_subspace = std::max(50, 3 * num_eigenvalues);
+    GPUFixedSzOperator* gpu_op = static_cast<GPUFixedSzOperator*>(gpu_op_handle);
+    int N = gpu_op->getDimension();
     
-    runGPUDavidsonFixedSz(gpu_op_handle, n_up, num_eigenvalues, max_iter, max_subspace,
-                         tol, eigenvalues, dir, compute_eigenvectors);
+    std::cout << "\n========================================\n";
+    std::cout << "GPU LOBPCG Algorithm (Fixed Sz, n_up=" << n_up << ")\n";
+    std::cout << "========================================\n";
+    std::cout << "  Dimension: " << N << "\n";
+    std::cout << "  Target eigenvalues: " << num_eigenvalues << "\n";
+    std::cout << "  Max iterations: " << max_iter << "\n";
+    std::cout << "  Tolerance: " << tol << "\n\n";
+    
+    GPUIterativeSolver solver(gpu_op, N);
+    solver.runLOBPCG(num_eigenvalues, max_iter, tol,
+                     eigenvalues, dir, compute_eigenvectors);
+    
+    std::cout << "\nGPU LOBPCG Fixed Sz complete\n";
 }
 
 void GPUEDWrapper::runGPUKrylovSchur(void* gpu_op_handle,

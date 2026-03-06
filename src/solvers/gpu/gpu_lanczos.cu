@@ -167,6 +167,21 @@ GPULanczos::GPULanczos(GPUOperator* op, int max_iter, double tolerance)
     
     dimension_ = op_->getDimension();
     
+    // Cap max iterations well below the Hilbert space dimension.
+    // When iterations approach the dimension, the Krylov subspace nearly spans
+    // the full space. On GPU, floating-point non-determinism in
+    // reorthogonalization can cause beta values to grow exponentially rather
+    // than decaying to zero, corrupting the tridiagonal matrix.
+    // Capping at 80% of dimension provides a safety margin while still
+    // allowing the eigenvalue convergence check to trigger.
+    int safe_max = std::max(1, (int)(0.8 * dimension_));
+    if (max_iter_ > safe_max) {
+        std::cout << "  Note: capping iterations from " << max_iter_ 
+                 << " to " << safe_max << " (80% of dim=" << dimension_ 
+                 << ") to prevent GPU numerical instability\n";
+        max_iter_ = safe_max;
+    }
+    
     std::cout << "Initializing GPU Lanczos\n";
     std::cout << "  Dimension: " << dimension_ << "\n";
     std::cout << "  Max iterations: " << max_iter_ << "\n";
@@ -489,8 +504,9 @@ void GPULanczos::run(int num_eigenvalues,
     
     // For eigenvalue convergence checking
     std::vector<double> prev_eigenvalues;
-    int check_convergence_interval = 10;  // Check every 10 iterations
+    int check_convergence_interval = 5;  // Check every 5 iterations (more frequent for early detection)
     bool eigenvalues_converged = false;
+    double prev_max_change = std::numeric_limits<double>::max();
     
     // Local reorthogonalization parameters
     const double eps = 2.22e-16; // Machine epsilon
@@ -508,6 +524,9 @@ void GPULanczos::run(int num_eigenvalues,
     }
     
     int m = 0;  // Number of iterations performed
+    int good_m = 0;  // Last known-good iteration count for tridiagonal solve
+    double max_beta = 0.0;  // Track maximum beta for relative breakdown detection
+    double early_max_beta = 0.0;  // Track max beta from first 20 iterations
     
     for (m = 0; m < max_iter_; ++m) {
         // w = H * v_current
@@ -536,6 +555,8 @@ void GPULanczos::run(int num_eigenvalues,
         // beta[m] = ||w||
         double beta = vectorNorm(d_w_);
         beta_.push_back(beta);
+        max_beta = std::max(max_beta, beta);
+        if (m < 20) early_max_beta = std::max(early_max_beta, beta);
         
         // Compute residual error for monitoring
         // Residual = ||H*v_j - alpha_j*v_j - beta_{j+1}*v_{j+1}|| / ||H*v_j||
@@ -557,12 +578,23 @@ void GPULanczos::run(int num_eigenvalues,
         
         // ========== Breakdown Conditions ==========
         
-        // 1. Beta breakdown: If beta is too small, Lanczos basis is complete
-        if (beta < tolerance_) {
+        // 1. Beta breakdown: absolute or relative
+        // Absolute: beta < tolerance (invariant subspace found)
+        // Relative: beta < max_beta * eps_rel (Krylov space nearly exhausted)
+        // The relative check prevents numerical instability from dividing by
+        // near-zero betas when the Krylov space is almost fully spanned.
+        double relative_threshold = max_beta * 1e-8;
+        double effective_tolerance = std::max(tolerance_, relative_threshold);
+        
+        if (beta < effective_tolerance) {
             std::cout << "\n  === GPU Lanczos Breakdown Detected ===" << std::endl;
             std::cout << "  Iteration: " << m+1 << std::endl;
             std::cout << "  Beta = " << std::scientific << std::setprecision(4) << beta 
-                     << " < tolerance = " << tolerance_ << std::endl;
+                     << " < effective tolerance = " << effective_tolerance;
+            if (relative_threshold > tolerance_) {
+                std::cout << " (relative: max_beta=" << max_beta << " * 1e-8)";
+            }
+            std::cout << std::endl;
             std::cout << "  Residual error: " << residual_error << std::endl;
             std::cout << "  Invariant subspace found - exact diagonalization complete!" << std::defaultfloat << std::endl;
             std::cout << "  ========================================\n" << std::endl;
@@ -570,13 +602,45 @@ void GPULanczos::run(int num_eigenvalues,
             break;
         }
         
-        // 2. Near-breakdown: Warn if beta is getting dangerously small
-        if (beta < 100.0 * tolerance_ && beta >= tolerance_) {
+        // 2. Beta explosion: if beta grows by more than 1e6× from the previous
+        // iteration in the second half of the run, numerical breakdown has occurred.
+        // This catches the failure mode where near-zero beta normalization
+        // amplifies GPU floating-point noise, producing garbage Krylov vectors.
+        // Only checked in the second half of iterations to avoid false positives
+        // from normal Lanczos beta fluctuations in the early/middle phase.
+        if (m > max_iter_ / 2 && beta > 1e6 * beta_[m-1]) {
+            std::cout << "\n  === GPU Lanczos Numerical Breakdown ===" << std::endl;
+            std::cout << "  Iteration: " << m+1 << std::endl;
+            std::cout << "  Beta jumped from " << std::scientific << std::setprecision(4) 
+                     << beta_[m-1] << " to " << beta 
+                     << " (ratio: " << std::fixed << std::setprecision(0) << beta / beta_[m-1] << "x)" << std::endl;
+            std::cout << "  Krylov space exhausted - stopping to prevent instability." << std::defaultfloat << std::endl;
+            std::cout << "  ========================================\n" << std::endl;
+            m++;
+            break;
+        }
+        
+        // 2b. Beta growth beyond early range: if beta exceeds 10× the maximum
+        // from the first 20 iterations, Krylov space exhaustion has begun and
+        // the tridiagonal entries are becoming unreliable.
+        if (m >= 20 && early_max_beta > 0 && beta > 10.0 * early_max_beta) {
+            std::cout << "\n  === GPU Lanczos Beta Growth Breakdown ===" << std::endl;
+            std::cout << "  Iteration: " << m+1 << std::endl;
+            std::cout << "  Beta = " << std::scientific << std::setprecision(4) << beta 
+                     << " exceeds 10× early max beta = " << early_max_beta << std::endl;
+            std::cout << "  Krylov space exhausted - stopping to prevent instability." << std::defaultfloat << std::endl;
+            std::cout << "  ========================================\n" << std::endl;
+            m++;
+            break;
+        }
+        
+        // 3. Near-breakdown: Warn if beta is getting dangerously small
+        if (beta < 100.0 * effective_tolerance && beta >= effective_tolerance) {
             std::cout << "  Warning: Near-breakdown at iteration " << m+1 
                      << " (beta = " << std::scientific << beta << ")" << std::defaultfloat << "\n";
         }
         
-        // 3. Check for numerical issues with residual
+        // 4. Check for numerical issues with residual
         if (m > 10 && residual_error > 0.9) {
             std::cout << "\n  !!! WARNING: High residual error detected !!!" << std::endl;
             std::cout << "  Iteration " << m+1 << ": residual = " << residual_error << std::endl;
@@ -588,8 +652,17 @@ void GPULanczos::run(int num_eigenvalues,
             }
         }
         
-        // 4. Eigenvalue convergence check (every check_convergence_interval iterations)
-        if (m >= num_eigenvalues && (m + 1) % check_convergence_interval == 0) {
+        // 5. Eigenvalue convergence check (frequent after initial phase)
+        // Check every 5 iterations early on, every iteration after half of max_iter
+        bool should_check_convergence = false;
+        if (m >= num_eigenvalues) {
+            if (m >= max_iter_ / 2) {
+                should_check_convergence = true;  // Every iteration in second half
+            } else {
+                should_check_convergence = ((m + 1) % check_convergence_interval == 0);
+            }
+        }
+        if (should_check_convergence) {
             // Solve tridiagonal problem with current Krylov space
             std::vector<double> current_eigenvalues;
             std::vector<std::vector<double>> temp_eigenvecs;
@@ -602,6 +675,32 @@ void GPULanczos::run(int num_eigenvalues,
                     double change = std::abs(current_eigenvalues[i] - prev_eigenvalues[i]);
                     max_change = std::max(max_change, change);
                 }
+                
+                // Divergence detection: if eigenvalues were nearly converged
+                // (prev_max_change was small) but now suddenly shifted significantly,
+                // the tridiagonal matrix has been corrupted by loss of orthogonality.
+                // Stop immediately and use the tridiagonal from the previous check point.
+                // Conditions: (1) past initial convergence phase,
+                // (2) large absolute change, (3) previously near-converged,
+                // (4) change grew by 10× or more.
+                if (m > 20 && max_change > 0.1 
+                    && prev_max_change < 1e-3 
+                    && max_change > 10.0 * prev_max_change) {
+                    std::cout << "\n  === GPU Lanczos Eigenvalue Divergence Detected ===" << std::endl;
+                    std::cout << "  Iteration: " << m+1 << std::endl;
+                    std::cout << "  Eigenvalue change = " << std::scientific << max_change 
+                             << " (prev = " << prev_max_change << ")" << std::endl;
+                    std::cout << "  Using tridiagonal from iteration " << (m + 1 - check_convergence_interval) 
+                             << " for final eigenvalues." << std::defaultfloat << std::endl;
+                    std::cout << "  ================================================\n" << std::endl;
+                    // Use the previous good checkpoint for the final tridiagonal solve
+                    good_m = m + 1 - check_convergence_interval;
+                    eigenvalues_converged = true;
+                    m++;
+                    break;
+                }
+                
+                prev_max_change = max_change;
                 
                 if (max_change < tolerance_) {
                     std::cout << "  Eigenvalues converged at iteration " << m+1 
@@ -645,6 +744,11 @@ void GPULanczos::run(int num_eigenvalues,
     
     stats_.iterations = m;
     
+    // Use the last known-good iteration count for the final tridiagonal solve.
+    // If divergence was detected, good_m was set to the pre-divergence checkpoint.
+    // Otherwise, use all computed iterations.
+    if (good_m == 0) good_m = m;
+    
     // Print completion message with reason for termination
     std::cout << "\nGPU Lanczos algorithm completed after " << m << " iterations\n";
     if (m >= max_iter_) {
@@ -679,9 +783,9 @@ void GPULanczos::run(int num_eigenvalues,
     std::cout << "  Total matvec time: " << stats_.matvec_time << " s\n";
     std::cout << "  Total ortho time: " << stats_.ortho_time << " s\n";
     
-    // Solve tridiagonal eigenvalue problem
+    // Solve tridiagonal eigenvalue problem using good_m iterations
     std::vector<std::vector<double>> tridiag_eigenvecs;
-    solveTridiagonal(m, num_eigenvalues, eigenvalues, tridiag_eigenvecs);
+    solveTridiagonal(good_m, num_eigenvalues, eigenvalues, tridiag_eigenvecs);
     
     // Compute Ritz vectors if requested
     if (compute_vectors && num_stored_vectors_ > 0 && !eigenvalues.empty() && !tridiag_eigenvecs.empty()) {

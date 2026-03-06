@@ -2368,7 +2368,7 @@ void print_help(const char* prog_name) {
     std::cout << "    LANCZOS_GPU            GPU-accelerated Lanczos\n";
     std::cout << "    LANCZOS_GPU_FIXED_SZ   GPU Lanczos for fixed Sz sector\n";
     std::cout << "    DAVIDSON_GPU           GPU-accelerated Davidson method (recommended)\n";
-    std::cout << "    LOBPCG_GPU             [DEPRECATED] Redirects to DAVIDSON_GPU\n";
+    std::cout << "    LOBPCG_GPU             GPU-accelerated LOBPCG method\n";
     std::cout << "    FTLM_GPU               GPU-accelerated Finite Temperature Lanczos\n";
     std::cout << "    FTLM_GPU_FIXED_SZ      GPU FTLM for fixed Sz sector\n";
     std::cout << "    mTPQ_GPU               GPU-accelerated microcanonical TPQ\n";

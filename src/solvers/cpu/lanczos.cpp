@@ -3559,131 +3559,51 @@ void implicitly_restarted_lanczos(std::function<void(const Complex*, Complex*, i
         // Store Ritz values for next iteration comparison
         prev_ritz_values = ritz_values;
         
-        // ===== Phase 4: Implicit QR with shifts (restart mechanism) =====
+        // ===== Phase 4+5: Explicit Ritz-vector restart =====
+        // The implicit QR restart (Sorensen's method) requires a correct bulge-chase
+        // QR step on the symmetric tridiagonal matrix. Instead, we use an explicit
+        // restart with the best Ritz vectors, which is equivalent to thick-restart
+        // Lanczos and has comparable convergence properties.
         if (outer_iter < max_outer_iter - 1) {
-            std::cout << "Applying implicit restart with " << p << " shifts..." << std::endl;
+            std::cout << "Restarting with " << k << " best Ritz vectors..." << std::endl;
             
-            // Select shifts: unwanted Ritz values (largest magnitude)
-            std::vector<double> shifts;
-            for (int i = k; i < std::min(k + p, actual_m); ++i) {
-                shifts.push_back(ritz_values[i]);
-            }
-            
-            if (shifts.empty()) {
-                std::cout << "Warning: No shifts available, using standard restart" << std::endl;
-                // Standard restart: keep k best Ritz vectors
-                shifts.push_back(ritz_values[k] + 0.1);  // Small perturbation
-            }
-            
-            std::cout << "Applying " << shifts.size() << " shifts" << std::endl;
-            
-            // Apply shifts using QR factorization
-            // We apply shifts sequentially: (T - sigma_i * I) for each shift sigma_i
-            
-            std::vector<double> Q_full(actual_m * actual_m);
-            // Initialize Q as identity
-            for (int i = 0; i < actual_m; ++i) {
-                Q_full[i + i * actual_m] = 1.0;
-            }
-            
-            std::vector<double> T_work_diag = T_diag;
-            std::vector<double> T_work_offdiag = T_offdiag;
-            
-            for (double sigma : shifts) {
-                // Apply shift: T_shifted = T - sigma * I
-                std::vector<double> T_shifted_diag(actual_m);
-                for (int i = 0; i < actual_m; ++i) {
-                    T_shifted_diag[i] = T_work_diag[i] - sigma;
-                }
-                
-                // Apply Givens rotations to compute QR of shifted matrix
-                std::vector<double> cs(actual_m - 1);  // Cosines
-                std::vector<double> sn(actual_m - 1);  // Sines
-                
-                for (int i = 0; i < actual_m - 1; ++i) {
-                    // Compute Givens rotation for elements (i, i) and (i+1, i)
-                    double a = T_shifted_diag[i];
-                    double b = T_work_offdiag[i];
-                    
-                    double r = std::sqrt(a * a + b * b);
-                    if (r < breakdown_tol) {
-                        cs[i] = 1.0;
-                        sn[i] = 0.0;
-                    } else {
-                        cs[i] = a / r;
-                        sn[i] = b / r;
-                    }
-                    
-                    // Apply rotation to diagonal elements
-                    double d_i = T_shifted_diag[i];
-                    double d_ip1 = T_shifted_diag[i + 1];
-                    double od_i = (i > 0) ? T_work_offdiag[i - 1] : 0.0;
-                    double od_ip1 = T_work_offdiag[i];
-                    
-                    T_shifted_diag[i] = cs[i] * d_i + sn[i] * od_ip1;
-                    T_shifted_diag[i + 1] = cs[i] * d_ip1 - sn[i] * od_ip1;
-                    
-                    if (i > 0) {
-                        T_work_offdiag[i - 1] = cs[i] * od_i;
-                    }
-                    if (i < actual_m - 2) {
-                        double od_next = T_work_offdiag[i + 1];
-                        T_work_offdiag[i] = -sn[i] * d_i + cs[i] * od_ip1;
-                        T_work_offdiag[i + 1] = cs[i] * od_next;
-                    } else if (i == actual_m - 2) {
-                        T_work_offdiag[i] = -sn[i] * d_i + cs[i] * od_ip1;
-                    }
-                }
-                
-                // Apply Givens rotations to Q matrix (accumulate transformations)
-                for (int i = 0; i < actual_m - 1; ++i) {
-                    for (int j = 0; j < actual_m; ++j) {
-                        double q_i = Q_full[j + i * actual_m];
-                        double q_ip1 = Q_full[j + (i + 1) * actual_m];
-                        
-                        Q_full[j + i * actual_m] = cs[i] * q_i + sn[i] * q_ip1;
-                        Q_full[j + (i + 1) * actual_m] = -sn[i] * q_i + cs[i] * q_ip1;
-                    }
-                }
-                
-                // Form RQ: multiply R by Q^T from the right
-                // This restores tridiagonal form with shifted eigenvalues filtered
-                T_work_diag = T_shifted_diag;
-                // Recompute off-diagonals from the transformation
-            }
-            
-            // ===== Phase 5: Update basis vectors =====
-            std::cout << "Updating basis vectors..." << std::endl;
-            
-            // Compute new basis: V_new = V_old * Q[:, 1:k]
-            // Keep only the first k columns of the updated basis
+            // Compute k best Ritz vectors in original space: x_i = V_m * y_i
+            // where y_i are the eigenvectors of the tridiagonal from Phase 2
             std::vector<ComplexVector> new_basis(k, ComplexVector(N, Complex(0.0, 0.0)));
             
             for (int i = 0; i < k; ++i) {
                 for (int j = 0; j < actual_m; ++j) {
                     ComplexVector basis_j = read_basis_vector(temp_dir, j, N);
-                    Complex coef(Q_full[j + i * actual_m], 0.0);
+                    Complex coef(ritz_vectors[j + i * actual_m], 0.0);
                     cblas_zaxpy(N, &coef, basis_j.data(), 1, new_basis[i].data(), 1);
+                }
+                
+                // Reorthogonalize against previously computed Ritz vectors
+                for (int prev = 0; prev < i; ++prev) {
+                    Complex overlap;
+                    cblas_zdotc_sub(N, new_basis[prev].data(), 1, new_basis[i].data(), 1, &overlap);
+                    Complex neg_overlap = -overlap;
+                    cblas_zaxpy(N, &neg_overlap, new_basis[prev].data(), 1, new_basis[i].data(), 1);
                 }
                 
                 // Normalize
                 norm = cblas_dznrm2(N, new_basis[i].data(), 1);
                 if (norm < breakdown_tol) {
-                    std::cerr << "Warning: Near-zero basis vector after restart" << std::endl;
+                    std::cerr << "Warning: Near-zero Ritz vector after restart" << std::endl;
                     new_basis[i] = generateRandomVector(N, gen, dist);
                 } else {
                     scale = Complex(1.0/norm, 0.0);
                     cblas_zscal(N, &scale, new_basis[i].data(), 1);
                 }
                 
-                // Write updated basis vector
+                // Write as new basis vector for next cycle
                 write_basis_vector(temp_dir, i, new_basis[i], N);
             }
             
-            // Set starting vector for next iteration as the last retained basis vector
-            v_start = new_basis[k - 1];
+            // Start next Lanczos expansion from the ground-state Ritz vector
+            v_start = new_basis[0];
             
-            std::cout << "Restart complete. Basis reduced to " << k << " vectors." << std::endl;
+            std::cout << "Restart complete. Basis reduced to " << k << " Ritz vectors." << std::endl;
         }
     }
     
