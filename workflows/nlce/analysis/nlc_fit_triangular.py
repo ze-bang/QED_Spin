@@ -264,6 +264,15 @@ def run_nlce_triangular(params, fixed_params, exp_temp, work_dir, h_field=None, 
     temp_min = temp_range.get('temp_min', fixed_params["temp_min"]) if temp_range else fixed_params["temp_min"]
     temp_max = temp_range.get('temp_max', fixed_params["temp_max"]) if temp_range else fixed_params["temp_max"]
     
+    # Write experimental temperature points to a file so the NLCE evaluates
+    # C(T) at exactly the measurement temperatures — no interpolation needed.
+    # Filter to [temp_min, temp_max] before writing.
+    temp_mask = (exp_temp >= temp_min) & (exp_temp <= temp_max)
+    filtered_temps = np.sort(exp_temp[temp_mask])
+    
+    temp_points_file = os.path.join(work_dir, 'temp_points.txt')
+    np.savetxt(temp_points_file, filtered_temps, fmt='%.12e')
+    
     # Build NLCE command for triangular lattice
     script_dir = os.path.dirname(os.path.abspath(__file__))
     nlce_script = os.path.join(script_dir, '..', 'run', 'nlce_triangular.py')
@@ -275,6 +284,7 @@ def run_nlce_triangular(params, fixed_params, exp_temp, work_dir, h_field=None, 
         '--h', f'{h_value:.12f}',
         '--ed_executable', str(fixed_params["ED_path"]),
         '--field_dir', f'{field_dir[0]:.12f}', f'{field_dir[1]:.12f}', f'{field_dir[2]:.12f}',
+        '--temp_points_file', temp_points_file,
         '--temp_min', f'{temp_min:.8f}',
         '--temp_max', f'{temp_max:.8f}',
         '--temp_bins', str(fixed_params["temp_bins"]),
@@ -318,13 +328,18 @@ def run_nlce_triangular(params, fixed_params, exp_temp, work_dir, h_field=None, 
         if ed_cores > 0:
             cmd.extend(['--num_cores', str(ed_cores)])
     
-    # Symmetrized diagonalization: pass flag to NLCE runner.
+    # Streaming-symmetry diagonalization: pass flag to NLCE runner.
     # The orbit basis is cached inside each cluster's ham dir (basis_cache/).
-    # On the first iteration the basis is computed; subsequent iterations skip
-    # precomputation because the HDF5 cache already exists (preserved during
-    # Hamiltonian cleanup above).
-    if fixed_params.get("symmetrized", False):
-        cmd.append('--symmetrized')
+    # IMPORTANT: The orbit basis depends on which operator types are PRESENT
+    # on each bond (encoded via edge labels in the automorphism finder).
+    # If a coupling is zero, the corresponding bond term vanishes, which can
+    # enlarge the automorphism group and produce an INVALID basis for
+    # non-zero values of that coupling.  To guard against this, the fitter
+    # runs a dedicated basis-seeding pass (before the optimizer loop) using
+    # guaranteed-nonzero couplings, so the cached basis is valid for ALL
+    # parameter combinations the optimizer may explore.
+    if fixed_params.get("streaming_symmetry", False):
+        cmd.append('--streaming-symmetry')
     
     if not fixed_params.get("skip_ham_prep", False):
         # Clean up old results
@@ -333,9 +348,10 @@ def run_nlce_triangular(params, fixed_params, exp_temp, work_dir, h_field=None, 
             shutil.rmtree(ed_dir)
         ham_dir = os.path.join(work_dir, f'hamiltonians_order_{fixed_params["max_order"]}')
         if os.path.exists(ham_dir):
-            if fixed_params.get("symmetrized", False):
-                # Preserve basis_cache/ subdirectories inside each cluster's ham dir
-                # (orbit basis only depends on geometry, not coupling values)
+            if fixed_params.get("streaming_symmetry", False):
+                # Preserve basis_cache/ subdirectories inside each cluster's ham dir.
+                # The basis was pre-seeded with all-nonzero couplings before the
+                # optimizer loop, so it is valid for any coupling combination.
                 for entry in os.listdir(ham_dir):
                     entry_path = os.path.join(ham_dir, entry)
                     if os.path.isdir(entry_path):
@@ -535,15 +551,10 @@ def calc_chi_squared(params, fixed_params, exp_datasets, work_dir):
         all_exp_temps.append(exp_temp)
         all_exp_heats.append(exp_spec_heat)
         
-        # Interpolate to experimental temperatures
-        interp_spec_heat = interpolate_calc_data(calc_temp, calc_spec_heat, exp_temp)
-        all_interp_heats.append(interp_spec_heat)
-        
-        # Apply broadening if fitting
-        if fit_broadening and sigmas[i] > 0:
-            interp_spec_heat = apply_gaussian_broadening(exp_temp, interp_spec_heat, sigmas[i])
-        
-        # Filter by temperature range
+        # Match NLCE output to experimental temperatures.
+        # When --temp_points_file is used, the NLCE evaluates C(T) directly
+        # at the (filtered) experimental T values, so no interpolation needed.
+        # Check if grids match; fall back to interpolation if they don't.
         temp_mask = np.ones_like(exp_temp, dtype=bool)
         if 'temp_min' in dataset:
             temp_mask &= exp_temp >= dataset['temp_min']
@@ -553,8 +564,23 @@ def calc_chi_squared(params, fixed_params, exp_datasets, work_dir):
         if np.sum(temp_mask) == 0:
             continue
         
+        if len(calc_temp) == np.sum(temp_mask) and np.allclose(calc_temp, np.sort(exp_temp[temp_mask]), rtol=1e-8):
+            # Direct comparison — no interpolation
+            matched_spec_heat = calc_spec_heat[np.argsort(calc_temp)]
+            all_interp_heats.append(matched_spec_heat)
+        else:
+            # Fallback: interpolate (legacy path or mismatched grids)
+            interp_spec_heat = interpolate_calc_data(calc_temp, calc_spec_heat, exp_temp)
+            matched_spec_heat = interp_spec_heat[temp_mask]
+            all_interp_heats.append(interp_spec_heat)
+        
+        # Apply broadening if fitting
+        if fit_broadening and sigmas[i] > 0:
+            matched_spec_heat = apply_gaussian_broadening(
+                exp_temp[temp_mask], matched_spec_heat, sigmas[i])
+        
         # Calculate chi-squared
-        diff = (exp_spec_heat[temp_mask] - interp_spec_heat[temp_mask])
+        diff = (exp_spec_heat[temp_mask] - matched_spec_heat)
         chi_sq = np.sum(diff**2) * weight
         total_chi_squared += chi_sq
     
@@ -577,11 +603,20 @@ def calc_chi_squared(params, fixed_params, exp_datasets, work_dir):
             if len(all_calc_temps) > 0:
                 for T, C in zip(all_calc_temps[0], all_calc_heats[0]):
                     f.write(f"{T:.6e} {C:.6e}\n")
-            f.write("#\n# Experimental vs Interpolated:\n")
-            f.write("# T_exp  C_exp  C_interp  diff\n")
-            if len(all_exp_temps) > 0:
-                for T, C_exp, C_int in zip(all_exp_temps[0], all_exp_heats[0], all_interp_heats[0]):
-                    f.write(f"{T:.6e} {C_exp:.6e} {C_int:.6e} {C_exp-C_int:.6e}\n")
+            f.write("#\n# Experimental vs Calculated (at matched temperatures):\n")
+            f.write("# T_exp  C_exp  C_calc  diff\n")
+            if len(all_exp_temps) > 0 and len(all_interp_heats) > 0:
+                exp_t = all_exp_temps[0]
+                exp_c = all_exp_heats[0]
+                calc_c = all_interp_heats[0]
+                # Align arrays: calc_c may match a temp-masked subset
+                if len(calc_c) == len(exp_t):
+                    for T, C_exp, C_int in zip(exp_t, exp_c, calc_c):
+                        f.write(f"{T:.6e} {C_exp:.6e} {C_int:.6e} {C_exp-C_int:.6e}\n")
+                elif len(all_calc_temps) > 0:
+                    # Direct-match path: calc arrays correspond to NLCE output temps
+                    for T, C_int in zip(all_calc_temps[0], all_calc_heats[0]):
+                        f.write(f"{T:.6e} {'':10s} {C_int:.6e}\n")
     
     # Log progress with appropriate parameter names
     model = fixed_params.get("model", "xxz_j1j2")
@@ -855,8 +890,8 @@ def main():
     parser.add_argument('--ed_method', type=str, default='FULL',
                        help='ED solver method passed to the NLCE runner '
                             '(FULL, FULL_GPU, SCALAPACK_MIXED, etc. Default: FULL)')
-    parser.add_argument('--symmetrized', action='store_true',
-                       help='Use symmetrized diagonalization (exploits spatial automorphisms). '
+    parser.add_argument('--streaming-symmetry', action='store_true',
+                       help='Use streaming-symmetry diagonalization (exploits spatial automorphisms). '
                             'The orbit basis is precomputed once and cached, then reused '
                             'across all fitting iterations since it only depends on cluster '
                             'geometry and operator structure, not coupling values.')
@@ -1013,7 +1048,7 @@ def main():
         "ed_method": args.ed_method,
         "fit_Jz_ratio": args.fit_Jz_ratio,
         "Jz_ratio": args.Jz_ratio,
-        "symmetrized": args.symmetrized,
+        "streaming_symmetry": args.streaming_symmetry,
     }
     
     # Generate clusters first if needed
@@ -1090,6 +1125,79 @@ def main():
         fixed_params["landscape_logger"] = landscape_logger
         logging.info("Cost landscape logging enabled — "
                      "evaluations will be saved to cost_landscape.npz/csv")
+    
+    # --- Basis seeding pass (streaming-symmetry only) ---
+    # The orbit basis depends on which operator types are PRESENT on each bond.
+    # If a coupling parameter is exactly zero, the automorphism group enlarges
+    # and the cached basis becomes incompatible with nonzero values of that
+    # coupling.  To prevent this, we run a single NLCE pass with guaranteed-
+    # nonzero "seed" couplings (ham prep + basis precompute only, no ED/NLC)
+    # BEFORE the optimizer loop.  The cached basis is then valid for any
+    # coupling combination the optimizer explores.
+    if args.streaming_symmetry:
+        logging.info("="*80)
+        logging.info("Basis seeding pass: precomputing orbit basis with all couplings nonzero")
+        logging.info("="*80)
+        
+        # Choose small nonzero seed values for ALL coupling parameters.
+        # Exact values don't matter — only the operator structure (which bond
+        # types are present) affects the automorphism group.
+        _SEED = 0.12345  # arbitrary nonzero value
+        
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        nlce_script = os.path.join(script_dir, '..', 'run', 'nlce_triangular.py')
+        
+        def _seed_basis_in_work_dir(seed_work_dir):
+            """Run ham-prep + basis-precompute in a single work directory."""
+            seed_cmd = [
+                sys.executable, nlce_script,
+                '--max_order', str(args.max_order),
+                '--h', '0.0',
+                '--ed_executable', str(args.ed_executable),
+                '--field_dir', '0', '0', '1',
+                '--temp_min', '1.0', '--temp_max', '2.0', '--temp_bins', '2',
+                '--model', args.model,
+                '--method', fixed_params.get("ed_method", "FULL"),
+                '--base_dir', seed_work_dir,
+                '--g_ab', f'{args.g_ab:.12f}',
+                '--g_c', f'{args.g_c:.12f}',
+                '--streaming-symmetry',
+                '--skip_cluster_gen',
+                '--skip_ed',     # don't run ED
+                '--skip_nlc',    # don't run NLC summation
+            ]
+            # Add model-specific seed couplings (ALL nonzero)
+            if args.model == 'anisotropic':
+                seed_cmd.extend(['--Jzz', f'{_SEED}', '--Jpm', f'{_SEED}',
+                                 '--Jpmpm', f'{_SEED}', '--Jzpm', f'{_SEED}'])
+            elif args.model == 'kitaev':
+                seed_cmd.extend(['--J1', f'{_SEED}', '--J2', f'{_SEED}',
+                                 '--Gamma', f'{_SEED}', '--Gamma_prime', f'{_SEED}'])
+            else:
+                seed_cmd.extend(['--J1', f'{_SEED}', '--J2', f'{_SEED}',
+                                 '--Jz_ratio', f'{_SEED}'])
+            
+            try:
+                subprocess.run(seed_cmd, check=True, capture_output=True)
+                logging.info(f"Basis seeded in {seed_work_dir}")
+            except subprocess.CalledProcessError as e:
+                logging.error(f"Basis seeding failed in {seed_work_dir}: "
+                              f"{e.stderr.decode('utf-8')}")
+                raise
+        
+        # Seed basis in the directories that the optimizer will use
+        if args.parallel_fields and len(exp_datasets) > 1:
+            # Each field gets its own work dir; seed basis in each
+            for i in range(len(exp_datasets)):
+                field_work = _ensure_field_work_dir(
+                    args.work_dir, i, args.max_order)
+                _seed_basis_in_work_dir(field_work)
+        else:
+            _seed_basis_in_work_dir(args.work_dir)
+        
+        logging.info("Basis seeding complete — cached orbit basis will be reused "
+                     "across all fitting iterations")
+        logging.info("="*80)
     
     # Run optimization
     logging.info("Starting optimization...")

@@ -27,8 +27,8 @@ except ImportError:
 class NLCExpansionTriangular:
     """NLCE calculator for triangular lattice."""
     
-    def __init__(self, cluster_dir, eigenvalue_dir, temp_min, temp_max, num_temps, 
-                 measure_spin=False, SI_units=False):
+    def __init__(self, cluster_dir, eigenvalue_dir, temp_min=None, temp_max=None, num_temps=None, 
+                 measure_spin=False, SI_units=False, temp_points=None):
         """
         Initialize the NLC expansion calculator for triangular lattice.
         
@@ -37,14 +37,20 @@ class NLCExpansionTriangular:
             - Temperatures are in Kelvin
             - Energy output is in Kelvin (or J/mol if SI)
         
+        Temperature grid can be specified in two ways:
+            1. temp_min/temp_max/num_temps: logarithmic grid (legacy)
+            2. temp_points: explicit array of temperature values (preferred for fitting)
+        If temp_points is provided, temp_min/temp_max/num_temps are ignored.
+        
         Args:
             cluster_dir: Directory containing cluster information files
             eigenvalue_dir: Directory containing eigenvalue files from ED calculations
-            temp_min: Minimum temperature (Kelvin)
-            temp_max: Maximum temperature (Kelvin)
-            num_temps: Number of temperature points
+            temp_min: Minimum temperature (Kelvin) — used only if temp_points is None
+            temp_max: Maximum temperature (Kelvin) — used only if temp_points is None
+            num_temps: Number of temperature points — used only if temp_points is None
             measure_spin: Whether to compute spin expectation values
             SI_units: Convert to SI units (J/(mol·K) for C and S, J/mol for E)
+            temp_points: Explicit temperature array (Kelvin). Overrides temp_min/max/num.
                       
         SI Unit Conversion:
             - Specific heat: C_SI = R × C where R = 8.314 J/(mol·K)
@@ -56,7 +62,13 @@ class NLCExpansionTriangular:
         
         self.SI = SI_units
         self.measure_spin = measure_spin
-        self.temp_values = np.logspace(np.log10(temp_min), np.log10(temp_max), num_temps)
+        
+        if temp_points is not None:
+            self.temp_values = np.sort(np.asarray(temp_points, dtype=float))
+        else:
+            if temp_min is None or temp_max is None or num_temps is None:
+                raise ValueError("Must provide either temp_points or all of temp_min/temp_max/num_temps")
+            self.temp_values = np.logspace(np.log10(temp_min), np.log10(temp_max), num_temps)
         
         self.clusters = {}
         self.weights = {}
@@ -633,6 +645,9 @@ def main():
                        help='Maximum temperature')
     parser.add_argument('--temp_bins', type=int, default=100,
                        help='Number of temperature points')
+    parser.add_argument('--temp_points_file', type=str, default=None,
+                       help='File containing explicit temperature points (one per line, in Kelvin). '
+                            'Overrides --temp_min/--temp_max/--temp_bins.')
     parser.add_argument('--max_order', type=int, default=None,
                        help='Maximum order for summation')
     parser.add_argument('--measure_spin', action='store_true',
@@ -654,16 +669,31 @@ def main():
     if args.SI_units:
         print(f"SI units enabled: C, S in J/(mol·K), E in J/mol")
     
+    # Load explicit temperature points if provided
+    temp_points = None
+    if args.temp_points_file:
+        temp_points = np.loadtxt(args.temp_points_file)
+        print(f"Using {len(temp_points)} explicit temperature points from {args.temp_points_file}")
+    
     # Initialize calculator
-    nlc = NLCExpansionTriangular(
-        cluster_dir=args.cluster_dir,
-        eigenvalue_dir=args.eigenvalue_dir,
-        temp_min=args.temp_min,
-        temp_max=args.temp_max,
-        num_temps=args.temp_bins,
-        measure_spin=args.measure_spin,
-        SI_units=args.SI_units
-    )
+    if temp_points is not None:
+        nlc = NLCExpansionTriangular(
+            cluster_dir=args.cluster_dir,
+            eigenvalue_dir=args.eigenvalue_dir,
+            measure_spin=args.measure_spin,
+            SI_units=args.SI_units,
+            temp_points=temp_points
+        )
+    else:
+        nlc = NLCExpansionTriangular(
+            cluster_dir=args.cluster_dir,
+            eigenvalue_dir=args.eigenvalue_dir,
+            temp_min=args.temp_min,
+            temp_max=args.temp_max,
+            num_temps=args.temp_bins,
+            measure_spin=args.measure_spin,
+            SI_units=args.SI_units
+        )
     
     # Read data
     print("\nReading cluster information...")

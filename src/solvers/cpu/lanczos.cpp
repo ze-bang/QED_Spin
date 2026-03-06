@@ -575,6 +575,11 @@ void lanczos_no_ortho(std::function<void(const Complex*, Complex*, int)> H, uint
     
     max_iter = std::min(N, max_iter);
     
+    // Eigenvalue convergence checking
+    std::vector<double> prev_eigenvalues;
+    const int check_convergence_interval = 10;
+    bool eigenvalues_converged = false;
+    
     std::cout << "Begin Lanczos iterations with max_iter = " << max_iter << std::endl;
     std::cout << "Tolerance = " << tol << std::endl;
     std::cout << "Number of eigenvalues to compute = " << exct << std::endl;
@@ -610,6 +615,41 @@ void lanczos_no_ortho(std::function<void(const Complex*, Complex*, int)> H, uint
             std::cout << "Lanczos breakdown at iteration " << j + 1 << " (norm = " << norm << ")" << std::endl;
             max_iter = j + 1;
             break;
+        }
+        
+        // Eigenvalue convergence check (every check_convergence_interval iterations)
+        if (j >= (int)exct && (j + 1) % check_convergence_interval == 0) {
+            uint64_t m_cur = alpha.size();
+            std::vector<double> diag_check = alpha;
+            std::vector<double> offdiag_check(m_cur - 1);
+            for (uint64_t ii = 0; ii < m_cur - 1; ii++) {
+                offdiag_check[ii] = beta[ii + 1];
+            }
+            uint64_t info_check = LAPACKE_dstevd(LAPACK_COL_MAJOR, 'N', m_cur, 
+                                                  diag_check.data(), offdiag_check.data(), 
+                                                  nullptr, m_cur);
+            if (info_check == 0) {
+                uint64_t n_check = std::min(exct, m_cur);
+                std::vector<double> current_eigenvalues(diag_check.begin(), diag_check.begin() + n_check);
+                
+                if (!prev_eigenvalues.empty() && prev_eigenvalues.size() >= n_check) {
+                    double max_change = 0.0;
+                    for (uint64_t ii = 0; ii < n_check; ii++) {
+                        double change = std::abs(current_eigenvalues[ii] - prev_eigenvalues[ii]);
+                        max_change = std::max(max_change, change);
+                    }
+                    
+                    if (max_change < tol) {
+                        std::cout << "Lanczos: Eigenvalues converged at iteration " << j + 1 
+                                 << " (max change = " << std::scientific << std::setprecision(4) 
+                                 << max_change << " < tol = " << tol << ")" << std::defaultfloat << std::endl;
+                        eigenvalues_converged = true;
+                        max_iter = j + 1;
+                        break;
+                    }
+                }
+                prev_eigenvalues = current_eigenvalues;
+            }
         }
         
         // v_{j+1} = w / beta_{j+1}
@@ -693,6 +733,11 @@ void lanczos_selective_reorth(std::function<void(const Complex*, Complex*, int)>
     beta.push_back(0.0);        // β_0 is not used
     
     max_iter = std::min(N, max_iter);
+    
+    // Eigenvalue convergence checking
+    std::vector<double> prev_eigenvalues;
+    const int check_convergence_interval = 10;
+    bool eigenvalues_converged = false;
     
     std::cout << "Begin Lanczos iterations with max_iter = " << max_iter << std::endl;
     std::cout << "Tolerance = " << tol << std::endl;
@@ -835,6 +880,41 @@ void lanczos_selective_reorth(std::function<void(const Complex*, Complex*, int)>
             break;
         }
         
+        // Eigenvalue convergence check (every check_convergence_interval iterations)
+        if (j >= (int)exct && (j + 1) % check_convergence_interval == 0) {
+            uint64_t m_cur = alpha.size();
+            std::vector<double> diag_check = alpha;
+            std::vector<double> offdiag_check(m_cur - 1);
+            for (uint64_t ii = 0; ii < m_cur - 1; ii++) {
+                offdiag_check[ii] = beta[ii + 1];
+            }
+            uint64_t info_check = LAPACKE_dstevd(LAPACK_COL_MAJOR, 'N', m_cur, 
+                                                  diag_check.data(), offdiag_check.data(), 
+                                                  nullptr, m_cur);
+            if (info_check == 0) {
+                uint64_t n_check = std::min(exct, m_cur);
+                std::vector<double> current_eigenvalues(diag_check.begin(), diag_check.begin() + n_check);
+                
+                if (!prev_eigenvalues.empty() && prev_eigenvalues.size() >= n_check) {
+                    double max_change = 0.0;
+                    for (uint64_t ii = 0; ii < n_check; ii++) {
+                        double change = std::abs(current_eigenvalues[ii] - prev_eigenvalues[ii]);
+                        max_change = std::max(max_change, change);
+                    }
+                    
+                    if (max_change < tol) {
+                        std::cout << "Lanczos: Eigenvalues converged at iteration " << j + 1 
+                                 << " (max change = " << std::scientific << std::setprecision(4) 
+                                 << max_change << " < tol = " << tol << ")" << std::defaultfloat << std::endl;
+                        eigenvalues_converged = true;
+                        max_iter = j + 1;
+                        break;
+                    }
+                }
+                prev_eigenvalues = current_eigenvalues;
+            }
+        }
+        
         // v_{j+1} = w / beta_{j+1}
         for (int i = 0; i < N; i++) {
             v_next[i] = w[i] / norm;
@@ -943,6 +1023,11 @@ void lanczos(std::function<void(const Complex*, Complex*, int)> H, uint64_t N, u
     uint64_t full_reorth_count = 0;
     uint64_t selective_reorth_count = 0;
     
+    // Eigenvalue convergence checking
+    std::vector<double> prev_eigenvalues;
+    const int check_convergence_interval = 10;  // Check every 10 iterations
+    bool eigenvalues_converged = false;
+    
     std::cout << "Lanczos: max_iter=" << max_iter << ", n_eig=" << exct 
               << ", tol=" << tol << std::endl;
     
@@ -1033,6 +1118,44 @@ void lanczos(std::function<void(const Complex*, Complex*, int)> H, uint64_t N, u
             std::cout << "Iteration " << j + 1 << ": residual = " << residual_error << std::endl;
             std::cout << "This may indicate loss of orthogonality or numerical issues." << std::endl;
             std::cout << "Consider using more aggressive reorthogonalization.\n" << std::endl;
+        }
+        
+        // Eigenvalue convergence check (every check_convergence_interval iterations)
+        if (j >= (int)exct && (j + 1) % check_convergence_interval == 0) {
+            // Solve the tridiagonal eigenproblem for the current Krylov space
+            uint64_t m_cur = alpha.size();
+            std::vector<double> diag_check = alpha;
+            std::vector<double> offdiag_check(m_cur - 1);
+            for (uint64_t ii = 0; ii < m_cur - 1; ii++) {
+                offdiag_check[ii] = beta[ii + 1];
+            }
+            // We only need eigenvalues, not eigenvectors — use 'N' mode
+            uint64_t info_check = LAPACKE_dstevd(LAPACK_COL_MAJOR, 'N', m_cur, 
+                                                  diag_check.data(), offdiag_check.data(), 
+                                                  nullptr, m_cur);
+            if (info_check == 0) {
+                // diag_check now contains sorted eigenvalues
+                uint64_t n_check = std::min(exct, m_cur);
+                std::vector<double> current_eigenvalues(diag_check.begin(), diag_check.begin() + n_check);
+                
+                if (!prev_eigenvalues.empty() && prev_eigenvalues.size() >= n_check) {
+                    double max_change = 0.0;
+                    for (uint64_t ii = 0; ii < n_check; ii++) {
+                        double change = std::abs(current_eigenvalues[ii] - prev_eigenvalues[ii]);
+                        max_change = std::max(max_change, change);
+                    }
+                    
+                    if (max_change < tol) {
+                        std::cout << "Lanczos: Eigenvalues converged at iteration " << j + 1 
+                                 << " (max change = " << std::scientific << std::setprecision(4) 
+                                 << max_change << " < tol = " << tol << ")" << std::defaultfloat << std::endl;
+                        eigenvalues_converged = true;
+                        max_iter = j + 1;
+                        break;
+                    }
+                }
+                prev_eigenvalues = current_eigenvalues;
+            }
         }
         
         // v_{j+1} = w / beta_{j+1}
@@ -2605,9 +2728,15 @@ void krylov_schur(std::function<void(const Complex*, Complex*, int)> H, uint64_t
     cblas_zscal(N, &scale, v_current.data(), 1);
     
     // Krylov-Schur parameters
-    uint64_t m = std::min(2*num_eigs + 20, max_iter);  // Maximum Krylov subspace size
-    uint64_t k = num_eigs;                              // Number of desired eigenvalues
-    uint64_t p = std::min(num_eigs + 5, m - k);        // Number of shifts to apply
+    uint64_t k = std::min(num_eigs, N);                 // Number of desired eigenvalues (cannot exceed dimension)
+    uint64_t m = std::min(2*k + 20, max_iter);          // Maximum Krylov subspace size
+    m = std::min(m, N);                                 // Cannot exceed Hilbert space dimension
+    uint64_t p = std::min(k + 5, m > k ? m - k : (uint64_t)0);  // Number of extra vectors for restart
+    
+    // If the full dimension is small enough, just do full diag — no restarts needed
+    if (m <= k + 1) {
+        // Fall through: single Arnoldi pass will exhaust the space
+    }
     
     // Store the first basis vector
     write_basis_vector(temp_dir, 0, v_current, N);
@@ -2638,30 +2767,46 @@ void krylov_schur(std::function<void(const Complex*, Complex*, int)> H, uint64_t
             // Apply operator: w = H*v_j
             H(v_current.data(), w.data(), N);
             
-            // Orthogonalize against all previous vectors (Modified Gram-Schmidt)
+            // Orthogonalize against all previous vectors (Classical Gram-Schmidt)
+            // Cache basis vectors to avoid redundant disk reads
+            std::vector<ComplexVector> cached_basis(j + 1);
             for (int i = 0; i <= j; i++) {
-                ComplexVector v_i = read_basis_vector(temp_dir, i, N);
-                
-                // h_{i,j} = <v_i, w>
-                Complex h_ij;
-                cblas_zdotc_sub(N, v_i.data(), 1, w.data(), 1, &h_ij);
-                H_m[i][j] = h_ij;
-                
-                // w = w - h_{i,j} * v_i
-                Complex neg_h = -h_ij;
-                cblas_zaxpy(N, &neg_h, v_i.data(), 1, w.data(), 1);
+                cached_basis[i] = read_basis_vector(temp_dir, i, N);
             }
             
-            // Reorthogonalize for numerical stability
+            // Phase 1 (CGS): compute ALL dot products with unmodified w
+            std::vector<Complex> h_coeffs(j + 1);
             for (int i = 0; i <= j; i++) {
-                ComplexVector v_i = read_basis_vector(temp_dir, i, N);
-                Complex h_ij_correction;
-                cblas_zdotc_sub(N, v_i.data(), 1, w.data(), 1, &h_ij_correction);
-                
-                if (std::abs(h_ij_correction) > tol) {
-                    H_m[i][j] += h_ij_correction;
-                    Complex neg_h = -h_ij_correction;
-                    cblas_zaxpy(N, &neg_h, v_i.data(), 1, w.data(), 1);
+                cblas_zdotc_sub(N, cached_basis[i].data(), 1, w.data(), 1, &h_coeffs[i]);
+                H_m[i][j] = h_coeffs[i];
+            }
+            // Phase 2: subtract all projections at once
+            for (int i = 0; i <= j; i++) {
+                Complex neg_h = -h_coeffs[i];
+                cblas_zaxpy(N, &neg_h, cached_basis[i].data(), 1, w.data(), 1);
+            }
+            
+            // DGKS reorthogonalization criterion:
+            // If ||w_after|| < (1/sqrt(2)) * ||w_before||, do full second pass
+            double w_norm_after = cblas_dznrm2(N, w.data(), 1);
+            double h_norm_sq = 0.0;
+            for (int i = 0; i <= j; i++) {
+                h_norm_sq += std::norm(H_m[i][j]);
+            }
+            double w_norm_before = std::sqrt(h_norm_sq + w_norm_after * w_norm_after);
+            
+            constexpr double DGKS_ETA = 0.7071067811865476;  // 1/sqrt(2)
+            if (w_norm_after < DGKS_ETA * w_norm_before) {
+                // Phase 1: compute all corrections with unmodified w
+                std::vector<Complex> corrections(j + 1);
+                for (int i = 0; i <= j; i++) {
+                    cblas_zdotc_sub(N, cached_basis[i].data(), 1, w.data(), 1, &corrections[i]);
+                    H_m[i][j] += corrections[i];
+                }
+                // Phase 2: subtract all corrections
+                for (int i = 0; i <= j; i++) {
+                    Complex neg_h = -corrections[i];
+                    cblas_zaxpy(N, &neg_h, cached_basis[i].data(), 1, w.data(), 1);
                 }
             }
             
@@ -2685,17 +2830,31 @@ void krylov_schur(std::function<void(const Complex*, Complex*, int)> H, uint64_t
             }
         }
         
-        // Step 2: Compute Schur decomposition of H_m
-        // For Hermitian case, this is just eigendecomposition
-        // For general case, we need QR algorithm
+        // Step 2: Compute projected Hamiltonian EXPLICITLY from the basis.
+        // H_proj(i,j) = <v_i, H*v_j>.  This is more expensive than using
+        // the incremental Arnoldi Hessenberg (m extra mat-vecs) but is
+        // guaranteed to produce a correctly Hermitian projected matrix
+        // even after thick restarts.
         
-        // Extract the m×m upper-left block of H_m
-        std::vector<Complex> H_dense(m*m);
-        for (int i = 0; i < m; i++) {
-            for (int j = 0; j < m; j++) {
-                H_dense[j*m + i] = H_m[i][j];  // Column-major for LAPACK
+        std::vector<Complex> H_dense(m * m, Complex(0.0, 0.0));
+        ComplexVector Hv_tmp(N);
+        
+        for (int j = 0; j < m; j++) {
+            ComplexVector v_j = read_basis_vector(temp_dir, j, N);
+            H(v_j.data(), Hv_tmp.data(), N);
+            
+            // Upper triangle + diagonal: H_dense(i,j) for i <= j
+            for (int i = 0; i <= j; i++) {
+                ComplexVector v_i = (i == j) ? v_j : read_basis_vector(temp_dir, i, N);
+                Complex dot;
+                cblas_zdotc_sub(N, v_i.data(), 1, Hv_tmp.data(), 1, &dot);
+                H_dense[j * m + i] = dot;              // H(i,j)
+                H_dense[i * m + j] = std::conj(dot);   // H(j,i) = conj(H(i,j))
             }
         }
+        // Force real diagonal (absorb roundoff imaginary part)
+        for (int i = 0; i < m; i++)
+            H_dense[i * m + i] = Complex(std::real(H_dense[i * m + i]), 0.0);
         
         // Compute eigendecomposition (for Hermitian case)
         std::vector<double> eigenvalues_m(m);
@@ -2714,18 +2873,21 @@ void krylov_schur(std::function<void(const Complex*, Complex*, int)> H, uint64_t
         }
         
         // Step 3: Check convergence
-        std::vector<bool> converged_flags(k, false);
+        // k_eff = how many eigenvalues we can actually compute from this subspace
+        uint64_t k_eff = std::min(k, m);
+        std::vector<bool> converged_flags(k_eff, false);
         uint64_t num_converged = 0;
         
-        for (int i = 0; i < k; i++) {
+        for (uint64_t i = 0; i < k_eff; i++) {
             // Compute residual norm for each Ritz pair
             // For eigenvalue λ_i with eigenvector y_i, residual = ||H_m * y_i - λ_i * y_i|| * |β_m|
             // where β_m = H_m[m][m-1]
             
-            double beta_m = std::abs(H_m[m][m-1]);
+            double beta_m = (m < H_m.size()) ? std::abs(H_m[m][m-1]) : 0.0;
             
-            // The last component of the eigenvector gives the residual contribution
-            double residual = beta_m * std::abs(eigenvectors_m[(m-1)*m + i]);
+            // The last component of the i-th eigenvector gives the residual contribution
+            // Column i in column-major: eigenvectors_m[row + i*m]
+            double residual = beta_m * std::abs(eigenvectors_m[i*m + (m-1)]);
             
             if (residual < tol) {
                 converged_flags[i] = true;
@@ -2733,14 +2895,14 @@ void krylov_schur(std::function<void(const Complex*, Complex*, int)> H, uint64_t
             }
         }
         
-        std::cout << "  " << num_converged << " eigenvalues converged out of " << k << std::endl;
+        std::cout << "  " << num_converged << " eigenvalues converged out of " << k_eff << std::endl;
         
-        if (num_converged >= k || iter == max_outer_iter - 1) {
+        if (num_converged >= k_eff || m <= k + 1 || iter == max_outer_iter - 1) {
             converged = true;
             
             // Extract converged eigenvalues
-            eigenvalues.resize(k);
-            for (int i = 0; i < k; i++) {
+            eigenvalues.resize(k_eff);
+            for (uint64_t i = 0; i < k_eff; i++) {
                 eigenvalues[i] = eigenvalues_m[i];
             }
             
@@ -2748,10 +2910,10 @@ void krylov_schur(std::function<void(const Complex*, Complex*, int)> H, uint64_t
             if (compute_eigenvectors) {
                 std::cout << "  Computing eigenvectors..." << std::endl;
                 
-                std::vector<ComplexVector> full_eigenvectors(k, ComplexVector(N));
+                std::vector<ComplexVector> full_eigenvectors(k_eff, ComplexVector(N));
                 
                 #pragma omp parallel for
-                for (int i = 0; i < k; i++) {
+                for (uint64_t i = 0; i < k_eff; i++) {
                     ComplexVector eigenvector(N, Complex(0.0, 0.0));
                     
                     // Form eigenvector as V_m * y_i
@@ -2780,80 +2942,83 @@ void krylov_schur(std::function<void(const Complex*, Complex*, int)> H, uint64_t
             break;
         }
         
-        // Step 4: Perform Krylov-Schur restart
+        // Step 4: Perform Krylov-Schur thick restart
         std::cout << "  Performing Krylov-Schur restart..." << std::endl;
         
-        // Reorder Schur form so wanted eigenvalues come first
-        // (For Hermitian case with sorted eigenvalues, this is already done)
-        
-        // Update the Krylov basis: V_new = V_old * Q
-        std::vector<ComplexVector> new_basis(k+1, ComplexVector(N));
-        
-        #pragma omp parallel for
-        for (int i = 0; i <= k; i++) {
-            ComplexVector new_v(N, Complex(0.0, 0.0));
-            
-            for (int j = 0; j < m; j++) {
-                ComplexVector v_j = read_basis_vector(temp_dir, j, N);
-                // LAPACK column-major: column i is stored contiguously
-                Complex coef = eigenvectors_m[j + i*m];
-                cblas_zaxpy(N, &coef, v_j.data(), 1, new_v.data(), 1);
-            }
-            
-            // Normalize (should already be normalized, but for safety)
-            double vec_norm = cblas_dznrm2(N, new_v.data(), 1);
-            if (vec_norm > tol) {
-                Complex scale = Complex(1.0/vec_norm, 0.0);
-                cblas_zscal(N, &scale, new_v.data(), 1);
-            }
-            
-            new_basis[i] = new_v;
+        // Load all old basis vectors once (avoid repeated disk I/O)
+        std::vector<ComplexVector> old_basis(m);
+        for (int j = 0; j < m; j++) {
+            old_basis[j] = read_basis_vector(temp_dir, j, N);
         }
         
-        // Save the new basis vectors
-        for (int i = 0; i <= k; i++) {
+        // Compute new basis: V_new[:,i] = V_old * Q[:,i] for i=0..k-1
+        // (Q = eigenvectors stored in eigenvectors_m, column-major)
+        std::vector<ComplexVector> new_basis(k, ComplexVector(N, Complex(0.0, 0.0)));
+        
+        #pragma omp parallel for
+        for (int i = 0; i < k; i++) {
+            for (int j = 0; j < m; j++) {
+                Complex coef = eigenvectors_m[j + i*m];
+                cblas_zaxpy(N, &coef, old_basis[j].data(), 1, new_basis[i].data(), 1);
+            }
+        }
+        
+        // Reorthonormalize the new Ritz vectors (crucial for numerical stability)
+        for (int i = 0; i < k; i++) {
+            for (int j = 0; j < i; j++) {
+                Complex dot;
+                cblas_zdotc_sub(N, new_basis[j].data(), 1, new_basis[i].data(), 1, &dot);
+                Complex neg_dot = -dot;
+                cblas_zaxpy(N, &neg_dot, new_basis[j].data(), 1, new_basis[i].data(), 1);
+            }
+            double vec_norm = cblas_dznrm2(N, new_basis[i].data(), 1);
+            if (vec_norm > tol) {
+                Complex sc(1.0/vec_norm, 0.0);
+                cblas_zscal(N, &sc, new_basis[i].data(), 1);
+            }
             write_basis_vector(temp_dir, i, new_basis[i], N);
         }
         
-        // Update H_m to contain the restarted Hessenberg matrix
-        // The new Hessenberg matrix is Q^H * H_m * Q for the upper (k+1)×k block
-        std::vector<std::vector<Complex>> H_new(k+1, std::vector<Complex>(k, Complex(0.0, 0.0)));
-        
-        // Compute H_new = Q^H * H_m * Q
-        // For Hermitian case, this is diagonal with eigenvalues
-        for (int i = 0; i < k; i++) {
-            for (int j = 0; j < k; j++) {
-                Complex sum(0.0, 0.0);
-                for (int l = 0; l < m; l++) {
-                    for (int p = 0; p < m; p++) {
-                        // Q^H[i,l] * H_m[l,p] * Q[p,j]
-                        // Q is stored as eigenvectors_m with columns as eigenvectors
-                        Complex q_conj = std::conj(eigenvectors_m[l + i*m]);
-                        Complex q_elem = eigenvectors_m[p + j*m];
-                        sum += q_conj * H_m[l][p] * q_elem;
-                    }
-                }
-                H_new[i][j] = sum;
-            }
-        }
-        
-        // Add the residual contribution (last row): H_new[k][j] = beta_m * Q[m,j]
-        double beta_m = std::abs(H_m[m][m-1]);
-        for (int j = 0; j < k; j++) {
-            // Last component of eigenvector j (row m-1 in 0-indexed)
-            H_new[k][j] = eigenvectors_m[(m-1) + j*m] * beta_m;
-        }
-        
-        // Update H_m for next iteration - need to resize to accommodate expansion
-        // from k back to m columns
+        // Build proper restarted Hessenberg matrix.
+        // For Hermitian H, Q^H * H_proj * Q = diag(eigenvalues_m[0:k]).
+        // The O(m^3) triple product is unnecessary — just use the eigenvalues directly.
         H_m.clear();
         H_m.resize(m+1, std::vector<Complex>(m, Complex(0.0, 0.0)));
         
-        // Copy the restarted (k+1)×k block to the upper-left corner
-        for (int i = 0; i <= k; i++) {
-            for (int j = 0; j < k; j++) {
-                H_m[i][j] = H_new[i][j];
-            }
+        for (int i = 0; i < k; i++) {
+            H_m[i][i] = Complex(eigenvalues_m[i], 0.0);
+        }
+        
+        // Generate the continuation vector: r = H*v_{k-1}, orthogonalize
+        // against all retained Ritz vectors. Do NOT store the CGS coefficients
+        // into the Hessenberg — the first k columns are already correct
+        // (diagonal with eigenvalues). Only the sub-diagonal coupling to the
+        // new vector goes into the Hessenberg.
+        ComplexVector r(N);
+        H(new_basis[k-1].data(), r.data(), N);
+        
+        // First orthogonalization pass
+        for (int i = 0; i < k; i++) {
+            Complex dot;
+            cblas_zdotc_sub(N, new_basis[i].data(), 1, r.data(), 1, &dot);
+            Complex neg_dot = -dot;
+            cblas_zaxpy(N, &neg_dot, new_basis[i].data(), 1, r.data(), 1);
+        }
+        // Second pass for numerical stability
+        for (int i = 0; i < k; i++) {
+            Complex dot;
+            cblas_zdotc_sub(N, new_basis[i].data(), 1, r.data(), 1, &dot);
+            Complex neg_dot = -dot;
+            cblas_zaxpy(N, &neg_dot, new_basis[i].data(), 1, r.data(), 1);
+        }
+        
+        // Only the sub-diagonal goes into the Hessenberg
+        double beta_new = cblas_dznrm2(N, r.data(), 1);
+        if (beta_new > tol) {
+            H_m[k][k-1] = Complex(beta_new, 0.0);
+            scale = Complex(1.0/beta_new, 0.0);
+            cblas_zscal(N, &scale, r.data(), 1);
+            write_basis_vector(temp_dir, k, r, N);
         }
         
         iter++;
@@ -2870,8 +3035,10 @@ void krylov_schur(std::function<void(const Complex*, Complex*, int)> H, uint64_t
 }
 
 // Block Krylov-Schur algorithm implementation
-// Combines block Arnoldi iteration with Schur decomposition and implicit restarts
-// More efficient for computing multiple eigenvalues, especially with degeneracies
+// Thick-restart Arnoldi with incremental Hessenberg construction, DGKS
+// reorthogonalization, and residual-based convergence checking.
+// The block_size parameter controls how many extra vectors beyond num_eigs
+// are retained at each restart to accelerate convergence of clustered eigenvalues.
 void block_krylov_schur(std::function<void(const Complex*, Complex*, int)> H, uint64_t N, uint64_t max_iter, 
                         uint64_t num_eigs, uint64_t block_size, double tol, std::vector<double>& eigenvalues, 
                         std::string dir, bool compute_eigenvectors) {
@@ -2881,142 +3048,269 @@ void block_krylov_schur(std::function<void(const Complex*, Complex*, int)> H, ui
     std::cout << "  Hilbert space dimension: " << N << std::endl;
     
     // Parameters
-    uint64_t p = std::min(block_size, N);  // Block size
-    uint64_t k = std::min(num_eigs, N);    // Target eigenvalues
+    uint64_t p = std::min(block_size, N);  // Extra vectors beyond wanted eigenvalues per restart
+    uint64_t k = std::min(num_eigs, N);    // Number of target eigenvalues
     
-    // Subspace size: use larger subspace for reliable convergence
-    // At least 4*k + p, but can use full dimension for small systems
-    uint64_t m = std::min(std::max(4*k + p, 6*p), std::min(max_iter, N));
-    m = std::min(m, N);
-    // For small dimensions, use the full space
-    if (N <= 100) m = N;
+    // Subspace size m: k wanted + p extra, with room for at least 2 expansion steps after restart
+    uint64_t m = std::min(std::max(2*k + 2*p, 4*p), std::min(max_iter, N));
+    if (m < k + p + 2) m = std::min(k + p + 2, N);
+    if (N <= 100) m = N;  // For small dimensions, use the full space
+    
+    const uint64_t max_restarts = 200;
+    const Complex alpha_one(1.0, 0.0), alpha_zero(0.0, 0.0), alpha_neg(-1.0, 0.0);
     
     std::cout << "  Subspace size: " << m << std::endl;
     
-    // Random initialization with non-fixed seed for better convergence
+    // Random initialization
     std::random_device rd;
     std::mt19937 gen(rd());
     std::uniform_real_distribution<double> dist(-1.0, 1.0);
     
-    // V holds all Krylov vectors (N × m, column-major)
+    // V holds all Krylov vectors in-memory (N × m, column-major)
     std::vector<Complex> V(N * m, Complex(0.0, 0.0));
     
-    // Initialize first p vectors randomly
-    uint64_t first_block = std::min(p, m);
-    for (uint64_t j = 0; j < first_block; j++) {
-        for (uint64_t i = 0; i < N; i++) {
-            V[j * N + i] = Complex(dist(gen), dist(gen));
+    // Projected upper-Hessenberg matrix (m × m, column-major), built incrementally
+    std::vector<Complex> H_m(m * m, Complex(0.0, 0.0));
+    
+    // Workspace for CGS orthogonalization coefficients
+    std::vector<Complex> h_col(m, Complex(0.0, 0.0));
+    std::vector<Complex> h_corr(m, Complex(0.0, 0.0));
+    
+    // Initialize first basis vector: random, normalized
+    for (uint64_t i = 0; i < N; i++)
+        V[i] = Complex(dist(gen), dist(gen));
+    double init_norm = cblas_dznrm2(N, V.data(), 1);
+    Complex init_scale(1.0 / init_norm, 0.0);
+    cblas_zscal(N, &init_scale, V.data(), 1);
+    
+    uint64_t current_dim = 1;  // Number of basis vectors currently in V
+    bool converged = false;
+    std::vector<double> prev_eigenvalues;
+    
+    // ======== Thick-restart loop ========
+    for (uint64_t restart = 0; restart <= max_restarts && !converged; restart++) {
+        
+        // === Expand phase: Arnoldi iteration, grow basis from current_dim to m ===
+        while (current_dim < m) {
+            uint64_t j = current_dim - 1;  // Source vector index
+            Complex* w = &V[current_dim * N];  // Destination slot for new vector
+            
+            // w = H * v_j
+            H(&V[j * N], w, N);
+            
+            // --- CGS + DGKS orthogonalization ---
+            // Step 1 (CGS): h = V(:, 0:current_dim)^H * w
+            cblas_zgemv(CblasColMajor, CblasConjTrans, N, current_dim,
+                        &alpha_one, V.data(), N, w, 1, &alpha_zero, h_col.data(), 1);
+            // w -= V(:, 0:current_dim) * h
+            cblas_zgemv(CblasColMajor, CblasNoTrans, N, current_dim,
+                        &alpha_neg, V.data(), N, h_col.data(), 1, &alpha_one, w, 1);
+            
+            double w_norm_after = cblas_dznrm2(N, w, 1);
+            
+            // Estimate ||w_before|| via Pythagorean relation: ||w0||^2 ~ ||h||^2 + ||w_after||^2
+            double h_norm = cblas_dznrm2(current_dim, h_col.data(), 1);
+            double w_norm_before = std::sqrt(h_norm * h_norm + w_norm_after * w_norm_after);
+            
+            // DGKS criterion: reorthogonalize if significant cancellation occurred
+            if (w_norm_after < 0.7071067811865476 * w_norm_before) {
+                cblas_zgemv(CblasColMajor, CblasConjTrans, N, current_dim,
+                            &alpha_one, V.data(), N, w, 1, &alpha_zero, h_corr.data(), 1);
+                cblas_zgemv(CblasColMajor, CblasNoTrans, N, current_dim,
+                            &alpha_neg, V.data(), N, h_corr.data(), 1, &alpha_one, w, 1);
+                for (uint64_t i = 0; i < current_dim; i++)
+                    h_col[i] += h_corr[i];
+                w_norm_after = cblas_dznrm2(N, w, 1);
+            }
+            
+            // Store Hessenberg column: H_m(i, j) for i = 0 .. current_dim-1
+            for (uint64_t i = 0; i < current_dim; i++)
+                H_m[j * m + i] = h_col[i];
+            
+            // Handle breakdown (invariant subspace found)
+            if (w_norm_after < tol * 1e-3) {
+                // Inject random vector and orthogonalize
+                for (uint64_t i = 0; i < N; i++)
+                    w[i] = Complex(dist(gen), dist(gen));
+                cblas_zgemv(CblasColMajor, CblasConjTrans, N, current_dim,
+                            &alpha_one, V.data(), N, w, 1, &alpha_zero, h_corr.data(), 1);
+                cblas_zgemv(CblasColMajor, CblasNoTrans, N, current_dim,
+                            &alpha_neg, V.data(), N, h_corr.data(), 1, &alpha_one, w, 1);
+                w_norm_after = cblas_dznrm2(N, w, 1);
+                if (w_norm_after < tol * 1e-6) {
+                    std::cout << "  Krylov subspace exhausted at dimension " << current_dim << std::endl;
+                    break;
+                }
+                H_m[current_dim + j * m] = Complex(0.0, 0.0);  // Zero coupling (new direction)
+            } else {
+                H_m[current_dim + j * m] = Complex(w_norm_after, 0.0);  // Sub-diagonal h_{j+1,j}
+            }
+            
+            // Normalize to obtain v_{j+1}
+            Complex norm_scale(1.0 / w_norm_after, 0.0);
+            cblas_zscal(N, &norm_scale, w, 1);
+            current_dim++;
         }
-    }
-    
-    // Orthonormalize initial block via QR
-    std::vector<Complex> tau(first_block);
-    LAPACKE_zgeqrf(LAPACK_COL_MAJOR, N, first_block,
-                   reinterpret_cast<lapack_complex_double*>(V.data()),
-                   N, reinterpret_cast<lapack_complex_double*>(tau.data()));
-    LAPACKE_zungqr(LAPACK_COL_MAJOR, N, first_block, first_block,
-                   reinterpret_cast<lapack_complex_double*>(V.data()),
-                   N, reinterpret_cast<lapack_complex_double*>(tau.data()));
-    
-    uint64_t current_dim = first_block;  // Current basis size
-    
-    std::cout << "  Building Krylov subspace..." << std::endl;
-    
-    // Expand the Krylov subspace by applying H and orthogonalizing
-    while (current_dim < m) {
-        // Add one vector at a time to avoid index issues
-        uint64_t dst_idx = current_dim;
         
-        // Use the previous vector to apply H to
-        uint64_t src_idx = current_dim - 1;
+        if (current_dim <= 1) break;  // Nothing to work with
         
-        Complex* v_src = &V[src_idx * N];
-        Complex* v_dst = &V[dst_idx * N];
+        // === Compute projected Hamiltonian EXPLICITLY ===
+        // H_proj(i,j) = <v_i, H*v_j>.  This guarantees a correctly
+        // Hermitian projected matrix even after thick restarts.
+        std::vector<Complex> H_proj(current_dim * current_dim, Complex(0.0, 0.0));
+        std::vector<Complex> Hv_tmp(N);
         
-        // Apply Hamiltonian: v_dst = H * v_src
-        H(v_src, v_dst, N);
+        for (uint64_t jj = 0; jj < current_dim; jj++) {
+            H(&V[jj * N], Hv_tmp.data(), N);
+            for (uint64_t ii = 0; ii <= jj; ii++) {
+                Complex dot;
+                cblas_zdotc_sub(N, &V[ii * N], 1, Hv_tmp.data(), 1, &dot);
+                H_proj[jj * current_dim + ii] = dot;              // H(ii,jj)
+                H_proj[ii * current_dim + jj] = std::conj(dot);   // H(jj,ii)
+            }
+        }
+        for (uint64_t ii = 0; ii < current_dim; ii++)
+            H_proj[ii * current_dim + ii] = Complex(std::real(H_proj[ii * current_dim + ii]), 0.0);
         
-        // Full orthogonalization against all previous vectors (modified Gram-Schmidt)
-        for (uint64_t l = 0; l < current_dim; l++) {
-            Complex* v_l = &V[l * N];
-            Complex dot;
-            cblas_zdotc_sub(N, v_l, 1, v_dst, 1, &dot);
-            Complex neg_dot = -dot;
-            cblas_zaxpy(N, &neg_dot, v_l, 1, v_dst, 1);
+        std::vector<double> eigenvalues_m(current_dim);
+        int info = LAPACKE_zheev(LAPACK_COL_MAJOR, 'V', 'U', current_dim,
+                                 reinterpret_cast<lapack_complex_double*>(H_proj.data()),
+                                 current_dim, eigenvalues_m.data());
+        if (info != 0) {
+            std::cerr << "  LAPACKE_zheev failed with error " << info << std::endl;
+            return;
+        }
+        // H_proj now holds eigenvectors Y (columns), eigenvalues_m holds Ritz values (ascending)
+        
+        // === Check convergence via Arnoldi residual bounds ===
+        // For Ritz pair (theta_i, y_i): ||H*x_i - theta_i*x_i|| = |h_{m,m-1}| * |y_i[m-1]|
+        double h_sub = 0.0;
+        if (current_dim > 1)
+            h_sub = std::abs(H_m[(current_dim - 1) + (current_dim - 2) * m]);
+        
+        uint64_t n_converged = 0;
+        for (uint64_t i = 0; i < std::min(k, current_dim); i++) {
+            double last_comp = std::abs(H_proj[i * current_dim + (current_dim - 1)]);
+            double residual_bound = h_sub * last_comp;
+            double ref_scale = std::max(1.0, std::abs(eigenvalues_m[i]));
+            if (residual_bound < tol * ref_scale)
+                n_converged++;
+            else
+                break;  // Ritz values are ordered; stop at first unconverged
         }
         
-        // Reorthogonalization for numerical stability
-        for (uint64_t l = 0; l < current_dim; l++) {
-            Complex* v_l = &V[l * N];
-            Complex dot;
-            cblas_zdotc_sub(N, v_l, 1, v_dst, 1, &dot);
-            Complex neg_dot = -dot;
-            cblas_zaxpy(N, &neg_dot, v_l, 1, v_dst, 1);
+        // Secondary check: relative eigenvalue change between restarts
+        bool eigenvalue_stable = false;
+        if (!prev_eigenvalues.empty()) {
+            eigenvalue_stable = true;
+            for (uint64_t i = 0; i < std::min(k, current_dim); i++) {
+                if (i >= prev_eigenvalues.size()) { eigenvalue_stable = false; break; }
+                double diff = std::abs(eigenvalues_m[i] - prev_eigenvalues[i]);
+                double ref_scale = std::max(1.0, std::abs(eigenvalues_m[i]));
+                if (diff > tol * ref_scale) { eigenvalue_stable = false; break; }
+            }
+        }
+        prev_eigenvalues.assign(eigenvalues_m.begin(),
+                                eigenvalues_m.begin() + std::min(k, current_dim));
+        
+        if (restart % 10 == 0 || n_converged >= k || eigenvalue_stable) {
+            std::cout << "  Restart " << restart << ": " << n_converged << "/" << k
+                      << " converged, E[0] = " << std::fixed << std::setprecision(10)
+                      << eigenvalues_m[0] << std::endl;
         }
         
-        // Normalize
-        double norm = cblas_dznrm2(N, v_dst, 1);
-        if (norm < tol) {
-            std::cout << "  Krylov subspace exhausted at dimension " << current_dim << std::endl;
+        // === Converged or full-space solve: extract results ===
+        if (n_converged >= k || eigenvalue_stable || m >= N) {
+            converged = true;
+            eigenvalues.resize(std::min(k, current_dim));
+            for (uint64_t i = 0; i < eigenvalues.size(); i++)
+                eigenvalues[i] = eigenvalues_m[i];
+            
+            if (compute_eigenvectors && !eigenvalues.empty()) {
+                std::cout << "  Computing eigenvectors..." << std::endl;
+                std::vector<ComplexVector> full_eigenvectors(eigenvalues.size(), ComplexVector(N));
+                for (uint64_t e = 0; e < eigenvalues.size(); e++) {
+                    cblas_zgemv(CblasColMajor, CblasNoTrans, N, current_dim,
+                                &alpha_one, V.data(), N, &H_proj[e * current_dim], 1,
+                                &alpha_zero, full_eigenvectors[e].data(), 1);
+                    double vec_norm = cblas_dznrm2(N, full_eigenvectors[e].data(), 1);
+                    if (vec_norm > tol) {
+                        Complex sc(1.0 / vec_norm, 0.0);
+                        cblas_zscal(N, &sc, full_eigenvectors[e].data(), 1);
+                    }
+                }
+                if (!dir.empty())
+                    HDF5IO::saveDiagonalizationResults(dir, eigenvalues, full_eigenvectors, "Block-Krylov-Schur");
+            } else if (!dir.empty()) {
+                HDF5IO::saveDiagonalizationResults(dir, eigenvalues, {}, "Block-Krylov-Schur");
+            }
             break;
         }
-        Complex scale(1.0 / norm, 0.0);
-        cblas_zscal(N, &scale, v_dst, 1);
         
-        current_dim++;
-    }
-    
-    
-    std::cout << "  Final subspace size: " << current_dim << std::endl;
-    
-    // Compute projected Hamiltonian directly: H_m[i,j] = <v_i | H | v_j>
-    std::vector<Complex> H_m(current_dim * current_dim, Complex(0.0, 0.0));
-    std::vector<Complex> Hv(N);  // Temporary for H*v
-    
-    std::cout << "  Computing projected Hamiltonian..." << std::endl;
-    
-    for (uint64_t j = 0; j < current_dim; j++) {
-        // Compute H * v_j
-        H(&V[j * N], Hv.data(), N);
+        // === Thick restart: compress basis to k_keep Ritz vectors, continue Arnoldi ===
+        uint64_t k_keep = std::min(k + p, current_dim - 1);
+        k_keep = std::max(k_keep, (uint64_t)1);
+        // Ensure room for at least 1 expansion step after restart
+        if (k_keep >= m - 1) k_keep = m - 2;
         
-        // Compute inner products: H_m[i,j] = v_i^H * (H * v_j)
-        for (uint64_t i = 0; i < current_dim; i++) {
-            Complex dot;
-            cblas_zdotc_sub(N, &V[i * N], 1, Hv.data(), 1, &dot);
-            H_m[j * current_dim + i] = dot;  // Column-major
+        // V_new(:, 0:k_keep) = V * Y(:, 0:k_keep) via BLAS-3
+        std::vector<Complex> V_new(N * k_keep);
+        cblas_zgemm(CblasColMajor, CblasNoTrans, CblasNoTrans,
+                    N, k_keep, current_dim,
+                    &alpha_one, V.data(), N,
+                    H_proj.data(), current_dim,
+                    &alpha_zero, V_new.data(), N);
+        
+        // Copy Ritz vectors back into V
+        std::copy(V_new.begin(), V_new.end(), V.begin());
+        
+        // Reset H_m: diagonal entries are the Ritz values (Hermitian ⇒ Schur = diag)
+        std::fill(H_m.begin(), H_m.end(), Complex(0.0, 0.0));
+        for (uint64_t i = 0; i < k_keep; i++)
+            H_m[i + i * m] = Complex(eigenvalues_m[i], 0.0);
+        
+        // Generate the continuation vector: apply H to v_{k_keep-1}, orthogonalize
+        Complex* w_cont = &V[k_keep * N];
+        H(&V[(k_keep - 1) * N], w_cont, N);
+        
+        // CGS against retained Ritz vectors (only for orthogonalization;
+        // do NOT store coefficients into the Hessenberg — the first k_keep
+        // columns are already correct with diagonal eigenvalues).
+        cblas_zgemv(CblasColMajor, CblasConjTrans, N, k_keep,
+                    &alpha_one, V.data(), N, w_cont, 1, &alpha_zero, h_col.data(), 1);
+        cblas_zgemv(CblasColMajor, CblasNoTrans, N, k_keep,
+                    &alpha_neg, V.data(), N, h_col.data(), 1, &alpha_one, w_cont, 1);
+        
+        double cont_norm = cblas_dznrm2(N, w_cont, 1);
+        
+        // DGKS second pass if needed
+        double h_cont_norm = cblas_dznrm2(k_keep, h_col.data(), 1);
+        double cont_before = std::sqrt(h_cont_norm * h_cont_norm + cont_norm * cont_norm);
+        if (cont_norm < 0.7071067811865476 * cont_before) {
+            cblas_zgemv(CblasColMajor, CblasConjTrans, N, k_keep,
+                        &alpha_one, V.data(), N, w_cont, 1, &alpha_zero, h_corr.data(), 1);
+            cblas_zgemv(CblasColMajor, CblasNoTrans, N, k_keep,
+                        &alpha_neg, V.data(), N, h_corr.data(), 1, &alpha_one, w_cont, 1);
+            cont_norm = cblas_dznrm2(N, w_cont, 1);
         }
-    }
-    
-    // Enforce Hermitian symmetry for numerical stability
-    for (uint64_t i = 0; i < current_dim; i++) {
-        for (uint64_t j = i + 1; j < current_dim; j++) {
-            Complex avg = 0.5 * (H_m[j * current_dim + i] + std::conj(H_m[i * current_dim + j]));
-            H_m[j * current_dim + i] = avg;
-            H_m[i * current_dim + j] = std::conj(avg);
+        
+        // Only the sub-diagonal coupling goes into the Hessenberg
+        H_m[k_keep + (k_keep - 1) * m] = Complex(cont_norm, 0.0);
+        
+        // Normalize continuation vector
+        if (cont_norm > tol * 1e-3) {
+            Complex sc_cont(1.0 / cont_norm, 0.0);
+            cblas_zscal(N, &sc_cont, w_cont, 1);
         }
-        H_m[i * current_dim + i] = Complex(std::real(H_m[i * current_dim + i]), 0.0);
+        
+        current_dim = k_keep + 1;  // k_keep Ritz vectors + 1 new Arnoldi vector
     }
     
-    // Diagonalize projected Hamiltonian
-    std::cout << "  Diagonalizing projected matrix (size " << current_dim << "x" << current_dim << ")..." << std::endl;
-    
-    std::vector<double> eigenvalues_m(current_dim);
-    
-    int info = LAPACKE_zheev(LAPACK_COL_MAJOR, 'V', 'U', current_dim,
-                             reinterpret_cast<lapack_complex_double*>(H_m.data()),
-                             current_dim, eigenvalues_m.data());
-    
-    if (info != 0) {
-        std::cerr << "LAPACKE_zheev failed with error code " << info << std::endl;
-        return;
-    }
-    
-    // H_m now contains eigenvectors of projected problem
-    
-    // Extract eigenvalues
-    eigenvalues.resize(std::min(k, current_dim));
-    for (uint64_t i = 0; i < eigenvalues.size(); i++) {
-        eigenvalues[i] = eigenvalues_m[i];
+    if (!converged) {
+        // Return best estimates even without full convergence
+        if (eigenvalues.empty() && !prev_eigenvalues.empty())
+            eigenvalues = prev_eigenvalues;
+        std::cout << "Block Krylov-Schur: Maximum restarts reached without full convergence" << std::endl;
     }
     
     std::cout << "\n  Computed eigenvalues:" << std::endl;
@@ -3025,38 +3319,6 @@ void block_krylov_schur(std::function<void(const Complex*, Complex*, int)> H, ui
     }
     if (eigenvalues.size() > 5) {
         std::cout << "    ..." << std::endl;
-    }
-    
-    // Compute eigenvectors if requested
-    if (compute_eigenvectors && !eigenvalues.empty()) {
-        std::cout << "  Computing eigenvectors..." << std::endl;
-        
-        std::vector<ComplexVector> full_eigenvectors(eigenvalues.size(), ComplexVector(N));
-        
-        for (uint64_t e = 0; e < eigenvalues.size(); e++) {
-            ComplexVector eigenvector(N, Complex(0.0, 0.0));
-            
-            // eigenvector = V * y_e where y_e is the e-th column of H_m (now eigenvector matrix)
-            Complex alpha_v(1.0, 0.0);
-            Complex beta_v(0.0, 0.0);
-            cblas_zgemv(CblasColMajor, CblasNoTrans, N, current_dim, &alpha_v, V.data(), N,
-                       &H_m[e * current_dim], 1, &beta_v, eigenvector.data(), 1);
-            
-            // Normalize
-            double vec_norm = cblas_dznrm2(N, eigenvector.data(), 1);
-            if (vec_norm > tol) {
-                Complex scale = Complex(1.0 / vec_norm, 0.0);
-                cblas_zscal(N, &scale, eigenvector.data(), 1);
-            }
-            
-            full_eigenvectors[e] = std::move(eigenvector);
-        }
-        
-        if (!dir.empty()) {
-            HDF5IO::saveDiagonalizationResults(dir, eigenvalues, full_eigenvectors, "Block-Krylov-Schur");
-        }
-    } else if (!dir.empty()) {
-        HDF5IO::saveDiagonalizationResults(dir, eigenvalues, {}, "Block-Krylov-Schur");
     }
     
     std::cout << "Block Krylov-Schur: Successfully computed " << eigenvalues.size() << " eigenvalues" << std::endl;

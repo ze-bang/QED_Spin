@@ -185,9 +185,9 @@ def run_ed_for_cluster(args):
     if use_symm:
         cmd.append('--symm')
 
-    # Symmetrized diagonalization with pre-cached orbit basis
-    if ed_options.get("symmetrized", False):
-        cmd.append('--symmetrized')
+    # Streaming-symmetry diagonalization with pre-cached orbit basis
+    if ed_options.get("streaming_symmetry", False):
+        cmd.append('--streaming-symmetry')
         # Point to the pre-cached orbit basis for this cluster
         basis_cache = os.path.join(ham_subdir, 'basis_cache')
         if os.path.isdir(basis_cache):
@@ -279,6 +279,9 @@ def main():
     parser.add_argument('--temp_min', type=float, default=0.1, help='Minimum temperature (default 0.1 - NLCE poorly converges at lower T for frustrated systems)')
     parser.add_argument('--temp_max', type=float, default=10.0, help='Maximum temperature')
     parser.add_argument('--temp_bins', type=int, default=100, help='Number of temperature bins')
+    parser.add_argument('--temp_points_file', type=str, default=None,
+                       help='File containing explicit temperature points (one per line, in Kelvin). '
+                            'Overrides --temp_min/--temp_max/--temp_bins for NLCE summation.')
     parser.add_argument('--resummation', type=str, default='euler', choices=['none', 'euler', 'wynn'],
                        help='Resummation method for series acceleration (euler or wynn recommended)')
     
@@ -310,14 +313,14 @@ def main():
     parser.add_argument('--symm_threshold', type=int, default=13,
                        help='Site threshold for using --symm flag (default: 13)')
     
-    # Symmetrized diagonalization with basis caching
-    parser.add_argument('--symmetrized', action='store_true',
-                       help='Use symmetrized diagonalization (exploits spatial automorphisms). '
+    # Streaming-symmetry diagonalization with basis caching
+    parser.add_argument('--streaming-symmetry', action='store_true',
+                       help='Use streaming-symmetry diagonalization (exploits spatial automorphisms). '
                             'Automatically precomputes and caches the orbit basis for all clusters '
                             'before running ED, so the basis is reused across fitting iterations.')
     parser.add_argument('--skip_basis_precompute', action='store_true',
                        help='Skip orbit basis precomputation (assumes basis cache already exists). '
-                            'Only meaningful with --symmetrized.')
+                            'Only meaningful with --streaming-symmetry.')
 
     # Legacy arguments kept for backwards compatibility
     parser.add_argument('--no_auto_method', action='store_true',
@@ -484,14 +487,18 @@ def main():
     else:
         logging.info("Skipping Hamiltonian preparation step.")
     
-    # Step 2.5: Precompute symmetrized orbit basis for all clusters (if --symmetrized)
-    # The orbit basis depends only on the cluster geometry and the symmetry structure
-    # of the Hamiltonian (which operator types appear on which bonds), NOT on the
-    # numerical coupling values. So it can be cached once and reused across all
-    # fitting iterations as long as the model type stays the same.
-    if args.symmetrized and not args.skip_basis_precompute:
+    # Step 2.5: Precompute orbit basis for all clusters (if --streaming-symmetry)
+    # The orbit basis depends on the cluster geometry AND on which operator types
+    # appear on each bond (encoded as edge labels by the automorphism finder).
+    # If a coupling is exactly zero, that bond type vanishes and the
+    # automorphism group may enlarge — producing a basis incompatible with
+    # nonzero values of that coupling.  When using the fitter, a dedicated
+    # basis-seeding pass with all-nonzero couplings should be run BEFORE the
+    # optimizer loop to ensure the cached basis is valid for all parameter
+    # combinations (see nlc_fit_triangular.py).
+    if args.streaming_symmetry and not args.skip_basis_precompute:
         logging.info("="*80)
-        logging.info("Step 2.5: Precomputing orbit basis for symmetrized diagonalization")
+        logging.info("Step 2.5: Precomputing orbit basis for streaming-symmetry diagonalization")
         logging.info("="*80)
         
         def _precompute_basis_for_cluster(task_args):
@@ -560,7 +567,7 @@ def main():
                 _precompute_basis_for_cluster(task)
         
         logging.info("Basis precomputation complete — cached to each cluster's basis_cache/ directory")
-    elif args.symmetrized and args.skip_basis_precompute:
+    elif args.streaming_symmetry and args.skip_basis_precompute:
         logging.info("Skipping basis precomputation (--skip_basis_precompute). "
                      "Assuming basis cache already exists.")
     
@@ -580,7 +587,7 @@ def main():
             "symm_threshold": args.symm_threshold,
             "scalapack_threshold": args.scalapack_threshold,
             "use_scalapack": not args.no_scalapack,
-            "symmetrized": args.symmetrized,
+            "streaming_symmetry": args.streaming_symmetry,
         }
         
         use_gpu = (args.method.upper() == 'FULL_GPU')  # GPU used only for FULL_GPU method
@@ -594,8 +601,8 @@ def main():
         else:
             logging.info(f"  - Method: FULL diagonalization (ScaLAPACK disabled)")
         logging.info(f"  - Symmetry: --symm for clusters with > {args.symm_threshold} sites")
-        if args.symmetrized:
-            logging.info(f"  - Symmetrized diagonalization: ENABLED (orbit basis cached)")
+        if args.streaming_symmetry:
+            logging.info(f"  - Streaming-symmetry diagonalization: ENABLED (orbit basis cached)")
         
         # Prepare arguments for each cluster
         ed_tasks = []
@@ -633,12 +640,19 @@ def main():
             f'--cluster_dir={cluster_info_dir}',
             f'--eigenvalue_dir={ed_dir}',
             f'--output_dir={nlc_dir}',
-            f'--temp_min={args.temp_min}',
-            f'--temp_max={args.temp_max}',
-            f'--temp_bins={args.temp_bins}',
             f'--max_order={order_cutoff}',
             f'--resummation={args.resummation}',
         ]
+        
+        # Temperature grid: explicit file takes priority over min/max/bins
+        if args.temp_points_file:
+            cmd.append(f'--temp_points_file={args.temp_points_file}')
+        else:
+            cmd.extend([
+                f'--temp_min={args.temp_min}',
+                f'--temp_max={args.temp_max}',
+                f'--temp_bins={args.temp_bins}',
+            ])
         
         if args.measure_spin:
             cmd.append('--measure_spin')

@@ -1629,7 +1629,8 @@ EDResults diagonalize_symmetry_block(
         method == DiagonalizationMethod::BLOCK_LANCZOS_GPU_FIXED_SZ ||
         method == DiagonalizationMethod::DAVIDSON_GPU ||
         method == DiagonalizationMethod::LOBPCG_GPU ||
-        method == DiagonalizationMethod::KRYLOV_SCHUR_GPU) {
+        method == DiagonalizationMethod::KRYLOV_SCHUR_GPU ||
+        method == DiagonalizationMethod::BLOCK_KRYLOV_SCHUR_GPU) {
         if (!GPUEDWrapper::isGPUAvailable()) {
             std::cerr << "Warning: No CUDA-capable GPU found. Falling back to CPU for this block (dim="
                       << block_dim << ").\n";
@@ -1640,6 +1641,8 @@ EDResults diagonalize_symmetry_block(
                 method = DiagonalizationMethod::LOBPCG;
             } else if (method == DiagonalizationMethod::KRYLOV_SCHUR_GPU) {
                 method = DiagonalizationMethod::KRYLOV_SCHUR;
+            } else if (method == DiagonalizationMethod::BLOCK_KRYLOV_SCHUR_GPU) {
+                method = DiagonalizationMethod::BLOCK_KRYLOV_SCHUR;
             } else if (method == DiagonalizationMethod::BLOCK_LANCZOS_GPU ||
                        method == DiagonalizationMethod::BLOCK_LANCZOS_GPU_FIXED_SZ) {
                 method = DiagonalizationMethod::BLOCK_LANCZOS;
