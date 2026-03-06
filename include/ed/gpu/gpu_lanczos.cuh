@@ -438,6 +438,9 @@ private:
     // Host-side Hessenberg matrix (for easier manipulation)
     std::vector<std::complex<double>> h_H_projected_;
     
+    // Last sub-diagonal beta from Arnoldi (may not fit in H_projected when m == max_krylov_size_)
+    double last_beta_;
+    
     // Statistics
     Stats stats_;
     

@@ -51,7 +51,7 @@ GPUKrylovSchur::GPUKrylovSchur(GPUOperator* op, int max_iter, double tolerance)
       d_H_projected_(nullptr), d_evecs_(nullptr), d_evals_(nullptr),
       d_work_(nullptr), d_info_(nullptr), work_size_(0),
       d_V_restart_(nullptr), d_Q_k_(nullptr), restart_buffer_k_(0),
-      max_krylov_size_(0) {
+      max_krylov_size_(0), last_beta_(0.0) {
     
     dimension_ = op_->getDimension();
     
@@ -383,6 +383,12 @@ int GPUKrylovSchur::arnoldiIteration(int j_start, int m) {
             h_H_projected_[(j + 1) + j * max_krylov_size_] = std::complex<double>(beta, 0.0);
         }
         
+        // Always track the last beta for convergence residual estimation.
+        // When m == max_krylov_size_, the sub-diagonal at position (m, m-1)
+        // cannot be stored in the m x m Hessenberg, but we still need it
+        // for the Ritz residual formula: ||r_i|| = beta_m * |y_i[m-1]|.
+        last_beta_ = beta;
+        
         // Check for breakdown
         if (beta < tolerance_) {
             std::cout << "  Krylov subspace exhausted at dimension " << j + 1 << "\n";
@@ -667,6 +673,7 @@ void GPUKrylovSchur::run(int num_eigenvalues,
     
     for (int outer_iter = 0; outer_iter < max_outer_iter_ && !converged; outer_iter++) {
         stats_.outer_iterations++;
+        stats_.final_residual = 0.0;  // Reset per outer iteration for accurate tracking
         std::cout << "Krylov-Schur: Outer iteration " << outer_iter + 1 << "\n";
         
         // Determine starting point for Arnoldi.
@@ -708,16 +715,17 @@ void GPUKrylovSchur::run(int num_eigenvalues,
             break;
         }
         
-        // Get beta_m for residual estimation
-        // beta_m is the last subdiagonal element, at H[actual_m-1, actual_m-2] for actual_m >= 2
-        double beta_m = 0.0;
-        if (actual_m >= 2) {
-            beta_m = std::abs(h_H_projected_[(actual_m - 1) + (actual_m - 2) * max_krylov_size_]);
-        }
+        // Get beta_m for residual estimation.
+        // Use the last beta from the Arnoldi iteration (tracked in last_beta_),
+        // NOT the Hessenberg sub-diagonal, which may be the wrong entry when
+        // m == max_krylov_size_ (the entry at row m can't be stored in the m x m matrix).
+        double beta_m = last_beta_;
         
         // Check convergence
         int num_converged = checkConvergence(actual_m, k_eff, beta_m);
-        std::cout << "  " << num_converged << " / " << k_eff << " eigenvalues converged\n";
+        std::cout << "  " << num_converged << " / " << k_eff << " eigenvalues converged"
+                  << " (beta_m=" << std::scientific << std::setprecision(3) << beta_m
+                  << ", max_res=" << stats_.final_residual << std::fixed << ")\n";
         
         stats_.converged_eigs = num_converged;
         
