@@ -2218,7 +2218,15 @@ def _process_species_spectral(species, beta_groups, beta_bin_values,
                     connected_individual_data.append((omega, conn_spec, fpath))
                 rescaled_individual_data = connected_individual_data
                 
-                print(f"    Subtracted Bragg peak: |<S(q)>|^2 = {disconnected_abs_sq:.6e}")
+                # Compute QFI contribution from just the Bragg peak (disconnected part)
+                bragg_lorentzian = disconnected_abs_sq * (bragg_broadening / np.pi) / (mean_omega**2 + bragg_broadening**2)
+                bragg_qfi = calculate_qfi_from_spectral(mean_omega, bragg_lorentzian, beta) * QFI_SCALE_FACTOR
+                
+                print(f"    Subtracted Bragg peak: |<S(q)>|^2 = {disconnected_abs_sq:.6e}, Bragg QFI = {bragg_qfi:.6e}")
+            else:
+                bragg_qfi = 0.0
+        else:
+            bragg_qfi = 0.0
         
         # Calculate QFI from (rescaled) averaged spectral function
         qfi = calculate_qfi_from_spectral(mean_omega, rescaled_spectral, beta) * QFI_SCALE_FACTOR
@@ -2278,6 +2286,13 @@ def _process_species_spectral(species, beta_groups, beta_bin_values,
         
         # Store for summary plots (including per-sample data and error)
         all_species_qfi_data[species].append((beta, qfi, qfi_std, qfi_sem))
+        
+        # Store Bragg QFI (disconnected contribution) for diagnostic heatmap
+        if ENABLE_CONNECTED_CORRELATOR:
+            bragg_key = f"{species}_bragg_qfi"
+            if bragg_key not in all_species_qfi_data:
+                all_species_qfi_data[bragg_key] = []
+            all_species_qfi_data[bragg_key].append((beta, bragg_qfi, 0.0, 0.0))
         
         # Store per-sample QFI for parameter sweep heatmaps
         for sample_qfi, fpath in per_sample_qfi:
