@@ -92,6 +92,9 @@ private:
     // This enables O(1) projection of H-transformed states
     mutable std::vector<std::unordered_map<uint64_t, size_t>> state_to_sector_basis_;
     
+    // Cached group size from HDF5 load (allows skipping symmetry_info loading)
+    uint64_t cached_group_size_ = 0;
+    
 public:
     StreamingSymmetryOperator(uint64_t n_bits, float spin_l) 
         : Operator(n_bits, spin_l) {
@@ -99,6 +102,22 @@ public:
             throw std::runtime_error("StreamingSymmetryOperator: n_bits = " + std::to_string(n_bits)
                 + " >= 64 is not supported (would cause undefined behavior in 1ULL << n_bits)");
         }
+    }
+    
+    /**
+     * @brief Get the symmetry group size.
+     * Returns symmetry_info.max_clique.size() if loaded, else the value
+     * cached from an HDF5 basis load.  This allows the matvec and
+     * eigenvector expansion code to work without loading the full
+     * automorphism / symmetry data.
+     */
+    uint64_t getGroupSize() const {
+        if (!symmetry_info.max_clique.empty())
+            return symmetry_info.max_clique.size();
+        if (cached_group_size_ > 0)
+            return cached_group_size_;
+        throw std::runtime_error("getGroupSize: neither symmetry_info nor "
+                                 "cached group size available");
     }
     
     /**
@@ -279,7 +298,7 @@ public:
         std::fill(out, out + sector_dim, Complex(0.0, 0.0));
         
         // Pre-compute normalization factors
-        const double group_size = static_cast<double>(symmetry_info.max_clique.size());
+        const double group_size = static_cast<double>(getGroupSize());
         const double group_norm = 1.0 / group_size;
         
         // Thread-local accumulator for sequential case
@@ -667,12 +686,11 @@ public:
                           << " vs " << n_bits_ << std::endl;
                 return false;
             }
-            if (cached_group_size != symmetry_info.max_clique.size()) {
-                std::cerr << "Cache mismatch: group_size " << cached_group_size
-                          << " vs " << symmetry_info.max_clique.size()
-                          << std::endl;
-                return false;
-            }
+
+            // Store group size from cache so that matvec / expansion code
+            // can function without loading symmetry_info from disk.
+            cached_group_size_ = cached_group_size;
+            std::cout << "  group_size (from cache): " << cached_group_size_ << std::endl;
 
             // Allocate sector storage
             sectors_.resize(cached_num_sectors);
@@ -873,7 +891,7 @@ public:
         std::vector<Complex> full_vec(full_dim, Complex(0.0, 0.0));
 
         const double group_norm = 1.0 / std::sqrt(
-            static_cast<double>(symmetry_info.max_clique.size()));
+            static_cast<double>(getGroupSize()));
 
         for (size_t j = 0; j < sector_dim; ++j) {
             if (std::abs(sym_vec[j]) < 1e-15) continue;
@@ -1206,7 +1224,7 @@ private:
         }
         
         // Normalize
-        double norm_factor = 1.0 / (std::sqrt(symmetry_info.max_clique.size()) * state.norm);
+        double norm_factor = 1.0 / (std::sqrt(getGroupSize()) * state.norm);
         for (size_t i = 0; i < full_dim; ++i) {
             full_vec[i] *= norm_factor;
         }
@@ -1242,7 +1260,7 @@ private:
         }
         
         // Normalize
-        result /= (std::sqrt(symmetry_info.max_clique.size()) * state.norm);
+        result /= (std::sqrt(getGroupSize()) * state.norm);
         
         return result;
     }
@@ -1413,6 +1431,9 @@ private:
     mutable std::unordered_map<uint64_t, uint64_t> state_to_orbit_cache_;
     mutable std::mutex orbit_cache_mutex_;  // Protects state_to_orbit_cache_ in const methods
     
+    // Cached group size from HDF5 load (allows skipping symmetry_info loading)
+    uint64_t cached_group_size_ = 0;
+    
 public:
     FixedSzStreamingSymmetryOperator(uint64_t n_bits, float spin_l, int64_t n_up)
         : FixedSzOperator(n_bits, spin_l, n_up) {
@@ -1420,6 +1441,20 @@ public:
             throw std::runtime_error("FixedSzStreamingSymmetryOperator: n_bits = " + std::to_string(n_bits)
                 + " >= 64 is not supported (would cause undefined behavior in 1ULL << n_bits)");
         }
+    }
+    
+    /**
+     * @brief Get the symmetry group size.
+     * Returns symmetry_info.max_clique.size() if loaded, else the value
+     * cached from an HDF5 basis load.
+     */
+    uint64_t getGroupSize() const {
+        if (!symmetry_info.max_clique.empty())
+            return symmetry_info.max_clique.size();
+        if (cached_group_size_ > 0)
+            return cached_group_size_;
+        throw std::runtime_error("getGroupSize: neither symmetry_info nor "
+                                 "cached group size available");
     }
     
     /**
@@ -1608,7 +1643,7 @@ public:
         std::fill(out, out + sector_dim, Complex(0.0, 0.0));
         
         // Pre-compute normalization factors
-        const double group_size = static_cast<double>(symmetry_info.max_clique.size());
+        const double group_size = static_cast<double>(getGroupSize());
         const double group_norm = 1.0 / group_size;
         
         // Process each input basis state
@@ -1917,11 +1952,11 @@ public:
                           << " vs " << n_up_ << std::endl;
                 return false;
             }
-            if (cached_group_size != symmetry_info.max_clique.size()) {
-                std::cerr << "Cache mismatch: group_size " << cached_group_size
-                          << " vs " << symmetry_info.max_clique.size() << std::endl;
-                return false;
-            }
+
+            // Store group size from cache so that matvec / expansion code
+            // can function without loading symmetry_info from disk.
+            cached_group_size_ = cached_group_size;
+            std::cout << "  group_size (from cache): " << cached_group_size_ << std::endl;
 
             // Allocate sector storage
             sectors_.resize(cached_num_sectors);
@@ -2112,7 +2147,7 @@ public:
         }
 
         const double group_norm = 1.0 / std::sqrt(
-            static_cast<double>(symmetry_info.max_clique.size()));
+            static_cast<double>(getGroupSize()));
 
         std::vector<Complex> fixed_sz_vec(basis_states_.size(), Complex(0.0, 0.0));
 
@@ -2159,7 +2194,7 @@ public:
         std::vector<Complex> full_vec(full_dim, Complex(0.0, 0.0));
 
         const double group_norm = 1.0 / std::sqrt(
-            static_cast<double>(symmetry_info.max_clique.size()));
+            static_cast<double>(getGroupSize()));
 
         for (size_t j = 0; j < sector_dim; ++j) {
             if (std::abs(sym_vec[j]) < 1e-15) continue;

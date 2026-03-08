@@ -200,18 +200,34 @@ inline EDResults exact_diagonalization_streaming_symmetry(
     std::cout << "  Streaming Symmetry Exact Diagonalization" << std::endl;
     std::cout << "========================================\n" << std::endl;
     
-    // ========== Step 1: Generate or Load Automorphisms ==========
-    if (!generate_automorphisms(directory)) {
-        std::cerr << "Warning: Automorphism generation failed" << std::endl;
-        return EDResults();
-    }
-    
-    // ========== Step 2: Load Hamiltonian ==========
+    // ========== Step 1: Construct operator ==========
     std::string interaction_file = directory + "/" + interaction_filename;
     std::string single_site_file = directory + "/" + single_site_filename;
     
     StreamingSymmetryOperator hamiltonian(params.num_sites, params.spin_length);
 
+    // ========== Step 2: Try loading cached orbit basis ==========
+    std::string effective_cache_dir = basis_cache_dir;
+    if (effective_cache_dir.empty() && precompute_basis_only) {
+        effective_cache_dir = directory + "/basis_cache";
+    }
+
+    bool loaded_from_cache = false;
+    if (!effective_cache_dir.empty() && !precompute_basis_only) {
+        std::cout << "\nChecking for cached orbit basis in "
+                  << effective_cache_dir << "..." << std::endl;
+        // loadOrbitBasisHDF5 is self-contained: it stores group_size
+        // from the cache metadata, so we do NOT need to run
+        // generate_automorphisms or load symmetry_info here.
+        loaded_from_cache = hamiltonian.loadOrbitBasisHDF5(effective_cache_dir);
+        if (loaded_from_cache) {
+            std::cout << "*** Orbit basis loaded from cache — "
+                      << "skipping automorphism generation and sector generation ***"
+                      << std::endl;
+        }
+    }
+
+    // ========== Step 3: Load Hamiltonian ==========
     if (!precompute_basis_only) {
         std::cout << "\nLoading Hamiltonian..." << std::endl;
         hamiltonian.loadFromFile(single_site_file);
@@ -222,27 +238,13 @@ inline EDResults exact_diagonalization_streaming_symmetry(
         hamiltonian.loadFromFile(single_site_file);
     }
     
-    // ========== Step 3: Generate or Load Symmetry Sectors ==========
-    std::string effective_cache_dir = basis_cache_dir;
-    if (effective_cache_dir.empty() && precompute_basis_only) {
-        effective_cache_dir = directory + "/basis_cache";
-    }
-
-    bool loaded_from_cache = false;
-    if (!effective_cache_dir.empty()) {
-        if (!precompute_basis_only) {
-            std::cout << "\nChecking for cached orbit basis in "
-                      << effective_cache_dir << "..." << std::endl;
-            hamiltonian.symmetry_info.loadFromDirectory(directory);
-            loaded_from_cache = hamiltonian.loadOrbitBasisHDF5(effective_cache_dir);
-            if (loaded_from_cache) {
-                std::cout << "*** Orbit basis loaded from cache — "
-                          << "skipping sector generation ***" << std::endl;
-            }
-        }
-    }
-
+    // ========== Step 4: Generate automorphisms + sectors if needed ==========
     if (!loaded_from_cache) {
+        if (!generate_automorphisms(directory)) {
+            std::cerr << "Warning: Automorphism generation failed" << std::endl;
+            return EDResults();
+        }
+
         std::cout << "\nGenerating symmetry sectors (streaming mode)..." << std::endl;
         hamiltonian.generateSymmetrySectorsStreaming(directory);
 
@@ -554,18 +556,34 @@ inline EDResults exact_diagonalization_streaming_symmetry_fixed_sz(
         std::cout << "  Mode: PRECOMPUTE BASIS ONLY" << std::endl;
     std::cout << "========================================\n" << std::endl;
     
-    // ========== Step 1: Generate or Load Automorphisms ==========
-    if (!generate_automorphisms(directory)) {
-        std::cerr << "Warning: Automorphism generation failed" << std::endl;
-        return EDResults();
-    }
-    
-    // ========== Step 2: Construct operator and load Hamiltonian ==========
+    // ========== Step 1: Construct operator ==========
     std::string interaction_file = directory + "/" + interaction_filename;
     std::string single_site_file = directory + "/" + single_site_filename;
     
     FixedSzStreamingSymmetryOperator hamiltonian(params.num_sites, params.spin_length, n_up);
 
+    // ========== Step 2: Try loading cached orbit basis ==========
+    // Determine effective cache directory
+    std::string effective_cache_dir = basis_cache_dir;
+    if (effective_cache_dir.empty() && precompute_basis_only) {
+        effective_cache_dir = directory + "/basis_cache";
+    }
+
+    bool loaded_from_cache = false;
+    if (!effective_cache_dir.empty() && !precompute_basis_only) {
+        std::cout << "\nChecking for cached orbit basis in " << effective_cache_dir << "..." << std::endl;
+        // loadOrbitBasisHDF5 is self-contained: it stores group_size
+        // from the cache metadata, so we do NOT need to run
+        // generate_automorphisms or load symmetry_info here.
+        loaded_from_cache = hamiltonian.loadOrbitBasisHDF5(effective_cache_dir);
+        if (loaded_from_cache) {
+            std::cout << "*** Orbit basis loaded from cache — "
+                      << "skipping automorphism generation and sector generation ***"
+                      << std::endl;
+        }
+    }
+
+    // ========== Step 3: Load Hamiltonian ==========
     // Hamiltonian (InterAll.dat + Trans.dat) is only needed for the Lanczos solve,
     // not for orbit basis construction.  Load it unless we're only precomputing.
     if (!precompute_basis_only) {
@@ -583,28 +601,13 @@ inline EDResults exact_diagonalization_streaming_symmetry_fixed_sz(
     uint64_t fixed_sz_dim = hamiltonian.getFixedSzDim();
     std::cout << "Fixed Sz dimension: " << fixed_sz_dim << std::endl;
     
-    // ========== Step 3: Generate or Load Symmetry Sectors ==========
-    // Determine effective cache directory
-    std::string effective_cache_dir = basis_cache_dir;
-    if (effective_cache_dir.empty() && precompute_basis_only) {
-        effective_cache_dir = directory + "/basis_cache";
-    }
-
-    bool loaded_from_cache = false;
-    if (!effective_cache_dir.empty()) {
-        // Try loading from cache first (unless we're explicitly precomputing)
-        if (!precompute_basis_only) {
-            std::cout << "\nChecking for cached orbit basis in " << effective_cache_dir << "..." << std::endl;
-            // Load symmetry info so the operator can verify group_size
-            hamiltonian.symmetry_info.loadFromDirectory(directory);
-            loaded_from_cache = hamiltonian.loadOrbitBasisHDF5(effective_cache_dir);
-            if (loaded_from_cache) {
-                std::cout << "*** Orbit basis loaded from cache — skipping sector generation ***" << std::endl;
-            }
-        }
-    }
-
+    // ========== Step 4: Generate automorphisms + sectors if needed ==========
     if (!loaded_from_cache) {
+        if (!generate_automorphisms(directory)) {
+            std::cerr << "Warning: Automorphism generation failed" << std::endl;
+            return EDResults();
+        }
+
         std::cout << "\nGenerating symmetry sectors (streaming mode, fixed Sz)..." << std::endl;
         hamiltonian.generateSymmetrySectorsStreamingFixedSz(directory);
 
