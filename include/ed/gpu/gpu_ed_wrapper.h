@@ -100,7 +100,10 @@ public:
                                               int continue_sample = 0,
                                               double continue_beta = 0.0,
                                               bool save_thermal_states = false,
-                                              double target_beta = 1000.0);
+                                              double target_beta = 1000.0,
+                                              int num_measure_points = 20,
+                                              double measure_beta_min = 1.0,
+                                              double measure_beta_max = 1000.0);
     
     /**
      * Run GPU TPQ for Fixed Sz sector (canonical)
@@ -112,7 +115,10 @@ public:
                                          std::vector<double>& energies,
                                          std::string dir = "",
                                          double delta_beta = 0.1,
-                                         int taylor_order = 50);
+                                         int taylor_order = 50,
+                                         int num_measure_points = 20,
+                                         double measure_beta_min = 1.0,
+                                         double measure_beta_max = 1000.0);
     
     /**
      * Create GPU Fixed Sz operator directly from interaction lists
@@ -183,7 +189,10 @@ public:
                                         int continue_sample = 0,
                                         double continue_beta = 0.0,
                                         bool save_thermal_states = false,
-                                        double target_beta = 1000.0);
+                                        double target_beta = 1000.0,
+                                        int num_measure_points = 20,
+                                        double measure_beta_min = 1.0,
+                                        double measure_beta_max = 1000.0);
     
     /**
      * Run GPU-accelerated canonical TPQ
@@ -194,7 +203,10 @@ public:
                                    std::vector<double>& energies,
                                    std::string dir = "",
                                    double delta_beta = 0.1,
-                                   int taylor_order = 50);
+                                   int taylor_order = 50,
+                                   int num_measure_points = 20,
+                                   double measure_beta_min = 1.0,
+                                   double measure_beta_max = 1000.0);
     
     /**
      * Run GPU-accelerated Davidson method

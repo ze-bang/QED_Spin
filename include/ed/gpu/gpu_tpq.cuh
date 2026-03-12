@@ -62,7 +62,10 @@ public:
         int continue_sample = 0,
         double continue_beta = 0.0,
         bool save_thermal_states = false,
-        double target_beta = 1000.0
+        double target_beta = 1000.0,
+        int num_measure_points = 20,
+        double measure_beta_min = 1.0,
+        double measure_beta_max = 1000.0
     );
     
     /**
@@ -84,7 +87,10 @@ public:
         const std::string& dir = "",
         double delta_beta = 0.1,
         int taylor_order = 50,
-        class GPUFixedSzOperator* fixed_sz_op = nullptr
+        class GPUFixedSzOperator* fixed_sz_op = nullptr,
+        int num_measure_points = 20,
+        double measure_beta_min = 1.0,
+        double measure_beta_max = 1000.0
     );
     
     /**

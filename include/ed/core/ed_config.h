@@ -78,6 +78,11 @@ struct ThermalConfig {
     double tpq_continue_beta = 0.0;        // Beta to continue from (0.0 = use saved)
     double tpq_target_beta = 1000.0;       // Target beta at which to stop iteration (default 1000)
     
+    // Measurement temperature grid parameters
+    uint64_t tpq_num_measure_points = 20;  // Number of log-spaced measurement temperatures
+    double tpq_measure_beta_min = 1.0;     // Minimum inverse temperature for measurement grid
+    double tpq_measure_beta_max = 1000.0;  // Maximum inverse temperature for measurement grid
+    
     // ========== FTLM-specific parameters ==========
     uint64_t ftlm_krylov_dim = 100;    // Krylov subspace dimension per sample
     bool ftlm_full_reorth = false;     // Use full reorthogonalization

@@ -1852,7 +1852,10 @@ void microcanonical_tpq(
     bool continue_quenching,
     uint64_t continue_sample,
     double continue_beta,
-    double target_beta
+    double target_beta,
+    uint64_t num_measure_points,
+    double measure_beta_min,
+    double measure_beta_max
 ) {
     #ifdef WITH_MPI
     int rank = 0, size = 1;
@@ -1925,17 +1928,16 @@ void microcanonical_tpq(
 
 
 
-    const uint64_t num_temp_points = 20;
+    const uint64_t num_temp_points = num_measure_points;
     std::vector<double> measure_inv_temp(num_temp_points);
-    double log_min = std::log10(1);   // Start from β = 1
-    double log_max = std::log10(1000); // End at β = 1000
-    for (int i = 0; i < num_temp_points; ++i) {
+    double log_min = std::log10(measure_beta_min);
+    double log_max = std::log10(measure_beta_max);
+    for (uint64_t i = 0; i < num_temp_points; ++i) {
         measure_inv_temp[i] = std::pow(10.0, log_min + i * (log_max - log_min) / (num_temp_points - 1));
     }
 
     std::cout << "Setting LargeValue: " << LargeValue << std::endl;
-
-    std::cout << "Setting LargeValue: " << LargeValue << std::endl;
+    std::cout << "Measurement grid: " << num_temp_points << " log-spaced points from β=" << measure_beta_min << " to β=" << measure_beta_max << std::endl;
     std::cout << "Target beta: " << target_beta << std::endl;
     
     // Handle continue-quenching mode
@@ -2383,7 +2385,10 @@ void canonical_tpq(
     bool measure_sz,
     uint64_t sublattice_size,
     uint64_t num_sites,
-    FixedSzOperator* fixed_sz_op
+    FixedSzOperator* fixed_sz_op,
+    uint64_t num_measure_points,
+    double measure_beta_min,
+    double measure_beta_max
 ){
     #ifdef WITH_MPI
     int rank = 0, size = 1;
@@ -2433,11 +2438,11 @@ void canonical_tpq(
     }
 
     // Temperature checkpoints (log-spaced β for saving states)
-    const uint64_t num_temp_points = 20;
+    const uint64_t num_temp_points = num_measure_points;
     std::vector<double> measure_inv_temp(num_temp_points);
-    double log_min = std::log10(1.0);
-    double log_max = std::log10(1000.0);
-    for (int i = 0; i < num_temp_points; ++i) {
+    double log_min = std::log10(measure_beta_min);
+    double log_max = std::log10(measure_beta_max);
+    for (uint64_t i = 0; i < num_temp_points; ++i) {
         measure_inv_temp[i] = std::pow(10.0, log_min + i * (log_max - log_min) / (num_temp_points - 1));
     }
 

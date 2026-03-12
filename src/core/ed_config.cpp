@@ -211,6 +211,9 @@ EDConfig EDConfig::fromFile(const std::string& filename) {
                 else if (key == "continue_sample" || key == "tpq_continue_sample") config.thermal.tpq_continue_sample = std::stoi(value);
                 else if (key == "continue_beta" || key == "tpq_continue_beta") config.thermal.tpq_continue_beta = std::stod(value);
                 else if (key == "target_beta" || key == "tpq_target_beta") config.thermal.tpq_target_beta = std::stod(value);
+                else if (key == "tpq_num_measure_points" || key == "num_measure_points") config.thermal.tpq_num_measure_points = std::stoi(value);
+                else if (key == "tpq_measure_beta_min" || key == "measure_beta_min") config.thermal.tpq_measure_beta_min = std::stod(value);
+                else if (key == "tpq_measure_beta_max" || key == "measure_beta_max") config.thermal.tpq_measure_beta_max = std::stod(value);
             }
             // ========== [DynamicalResponse] section ==========
             else if (current_section == "dynamicalresponse") {
@@ -428,6 +431,9 @@ EDConfig EDConfig::fromCommandLine(uint64_t argc, char* argv[]) {
             else if (arg.find("--tpq_continue_beta=") == 0) config.thermal.tpq_continue_beta = std::stod(parse_value("--tpq_continue_beta="));
             else if (arg.find("--target_beta=") == 0) config.thermal.tpq_target_beta = std::stod(parse_value("--target_beta="));
             else if (arg.find("--tpq_target_beta=") == 0) config.thermal.tpq_target_beta = std::stod(parse_value("--tpq_target_beta="));
+            else if (arg.find("--tpq_num_measure_points=") == 0) config.thermal.tpq_num_measure_points = std::stoi(parse_value("--tpq_num_measure_points="));
+            else if (arg.find("--tpq_measure_beta_min=") == 0) config.thermal.tpq_measure_beta_min = std::stod(parse_value("--tpq_measure_beta_min="));
+            else if (arg.find("--tpq_measure_beta_max=") == 0) config.thermal.tpq_measure_beta_max = std::stod(parse_value("--tpq_measure_beta_max="));
             // TPQ observable options (new names + deprecated aliases)
             else if (arg == "--save-thermal-states" || arg == "--calc_observables") config.observable.save_thermal_states = true;
             else if (arg == "--compute-spin-correlations" || arg == "--measure_spin") config.observable.compute_spin_correlations = true;
@@ -1196,6 +1202,9 @@ std::string getMethodParameterInfo(DiagonalizationMethod method) {
             info << "  --temp_bins=<n>       Number of temperature points (default: 100)\n";
             info << "  --save-thermal-states Save TPQ states at target β values (for TPQ_DSSF)\n";
             info << "  --compute-spin-correlations  Compute ⟨Si⟩ and ⟨Si·Sj⟩ correlations\n";
+            info << "  --tpq_num_measure_points=<n> Number of log-spaced measurement β points (default: 20)\n";
+            info << "  --tpq_measure_beta_min=<β>  Minimum β for measurement grid (default: 1.0)\n";
+            info << "  --tpq_measure_beta_max=<β>  Maximum β for measurement grid (default: 1000.0)\n";
             info << "\nBest for: Thermal properties at finite temperature\n";
             break;
             
@@ -1210,6 +1219,9 @@ std::string getMethodParameterInfo(DiagonalizationMethod method) {
             info << "  --temp_bins=<n>       Number of temperature points (default: 100)\n";
             info << "  --save-thermal-states Save TPQ states at target β values (for TPQ_DSSF)\n";
             info << "  --compute-spin-correlations  Compute ⟨Si⟩ and ⟨Si·Sj⟩ correlations\n";
+            info << "  --tpq_num_measure_points=<n> Number of log-spaced measurement β points (default: 20)\n";
+            info << "  --tpq_measure_beta_min=<β>  Minimum β for measurement grid (default: 1.0)\n";
+            info << "  --tpq_measure_beta_max=<β>  Maximum β for measurement grid (default: 1000.0)\n";
             info << "\nBest for: Canonical ensemble thermal properties\n";
             break;
             
@@ -1428,7 +1440,10 @@ std::string getMethodParameterInfo(DiagonalizationMethod method) {
             info << "  - num_samples: Number of TPQ samples\n";
             info << "  - max_iterations: Maximum iterations per sample\n";
             info << "  - num_measure_freq: Measurement frequency\n";
-            info << "  - large_value: Large value parameter for TPQ\n\n";
+            info << "  - large_value: Large value parameter for TPQ\n";
+            info << "  - tpq_num_measure_points: Number of log-spaced measurement β points (default: 20)\n";
+            info << "  - tpq_measure_beta_min: Minimum β for measurement grid (default: 1.0)\n";
+            info << "  - tpq_measure_beta_max: Maximum β for measurement grid (default: 1000.0)\n\n";
             info << "Best for: GPU-accelerated finite-temperature calculations (microcanonical)\n";
             break;
             
@@ -1440,7 +1455,10 @@ std::string getMethodParameterInfo(DiagonalizationMethod method) {
             info << "  - temp_max: Maximum temperature\n";
             info << "  - num_measure_freq: Measurement frequency\n";
             info << "  - delta_tau: Imaginary time step\n";
-            info << "  - num_order: Order parameter for TPQ\n\n";
+            info << "  - num_order: Order parameter for TPQ\n";
+            info << "  - tpq_num_measure_points: Number of log-spaced measurement β points (default: 20)\n";
+            info << "  - tpq_measure_beta_min: Minimum β for measurement grid (default: 1.0)\n";
+            info << "  - tpq_measure_beta_max: Maximum β for measurement grid (default: 1000.0)\n\n";
             info << "Best for: GPU-accelerated finite-temperature calculations (canonical)\n";
             break;
             

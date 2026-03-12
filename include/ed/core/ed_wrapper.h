@@ -352,6 +352,11 @@ struct EDParameters {
     double tpq_continue_beta = 0.0;        // Beta to continue from (0.0 = use saved)
     double tpq_target_beta = 1000.0;       // Target beta at which to stop iteration (default 1000)
     
+    // Measurement temperature grid parameters
+    uint64_t tpq_num_measure_points = 20;  // Number of log-spaced measurement temperatures
+    double tpq_measure_beta_min = 1.0;     // Minimum inverse temperature for measurement grid
+    double tpq_measure_beta_max = 1000.0;  // Maximum inverse temperature for measurement grid
+    
     // ========== DEPRECATED PARAMETER ACCESSORS ==========
     // These provide backwards compatibility for legacy code using old parameter names.
     // New code should use the new names directly.
@@ -1045,7 +1050,10 @@ EDResults exact_diagonalization_core(
                             params.tpq_continue,
                             params.tpq_continue_sample,
                             params.tpq_continue_beta,
-                            params.tpq_target_beta); 
+                            params.tpq_target_beta,
+                            params.tpq_num_measure_points,
+                            params.tpq_measure_beta_min,
+                            params.tpq_measure_beta_max); 
             break;
 
         case DiagonalizationMethod::cTPQ:
@@ -1071,7 +1079,10 @@ EDResults exact_diagonalization_core(
                 params.compute_spin_correlations, // measure Sz and fluctuations
                 params.sublattice_size, // sublattice size
                 params.num_sites,       // number of sites
-                params.fixed_sz_op      // Fixed-Sz operator for embedding
+                params.fixed_sz_op,      // Fixed-Sz operator for embedding
+                params.tpq_num_measure_points,
+                params.tpq_measure_beta_min,
+                params.tpq_measure_beta_max
             );
             break;
 
@@ -3154,7 +3165,10 @@ inline EDResults exact_diagonalization_fixed_sz(
                 params.tpq_continue_sample,
                 params.tpq_continue_beta,
                 params.save_thermal_states,
-                params.tpq_target_beta);
+                params.tpq_target_beta,
+                params.tpq_num_measure_points,
+                params.tpq_measure_beta_min,
+                params.tpq_measure_beta_max);
         } else if (method == DiagonalizationMethod::cTPQ_GPU) {
             GPUEDWrapper::runGPUCanonicalTPQFixedSz(
                 gpu_op_handle, n_up,
@@ -3164,7 +3178,10 @@ inline EDResults exact_diagonalization_fixed_sz(
                 eigenvalues,
                 params.output_dir,
                 params.tpq_delta_beta,  // delta_beta
-                params.tpq_taylor_order);  // taylor_order
+                params.tpq_taylor_order,  // taylor_order
+                params.tpq_num_measure_points,
+                params.tpq_measure_beta_min,
+                params.tpq_measure_beta_max);
         } else if (method == DiagonalizationMethod::BLOCK_LANCZOS_GPU || 
                    method == DiagonalizationMethod::BLOCK_LANCZOS_GPU_FIXED_SZ) {
             GPUEDWrapper::runGPUBlockLanczosFixedSz(
@@ -3553,7 +3570,10 @@ EDResults exact_diagonalization_from_files(
                 params.tpq_continue_sample,
                 params.tpq_continue_beta,
                 params.save_thermal_states,
-                params.tpq_target_beta
+                params.tpq_target_beta,
+                params.tpq_num_measure_points,
+                params.tpq_measure_beta_min,
+                params.tpq_measure_beta_max
             );
             
             results.eigenvalues = eigenvalues;
@@ -3602,7 +3622,10 @@ EDResults exact_diagonalization_from_files(
                 eigenvalues,
                 params.output_dir,
                 params.delta_tau(),
-                params.num_order()
+                params.num_order(),
+                params.tpq_num_measure_points,
+                params.tpq_measure_beta_min,
+                params.tpq_measure_beta_max
             );
             
             results.eigenvalues = eigenvalues;

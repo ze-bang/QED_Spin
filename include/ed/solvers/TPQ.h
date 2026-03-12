@@ -288,7 +288,10 @@ void microcanonical_tpq(
     bool continue_quenching = false,
     uint64_t continue_sample = 0,
     double continue_beta = 0.0,
-    double target_beta = 1000.0
+    double target_beta = 1000.0,
+    uint64_t num_measure_points = 20,
+    double measure_beta_min = 1.0,
+    double measure_beta_max = 1000.0
 );
 
 // Canonical TPQ using imaginary-time propagation e^{-βH} |r>
@@ -323,7 +326,10 @@ void canonical_tpq(
     bool measure_sz = false,
     uint64_t sublattice_size = 1,
     uint64_t num_sites = 16,
-    class FixedSzOperator* fixed_sz_op = nullptr
+    class FixedSzOperator* fixed_sz_op = nullptr,
+    uint64_t num_measure_points = 20,
+    double measure_beta_min = 1.0,
+    double measure_beta_max = 1000.0
 );
 
 /**

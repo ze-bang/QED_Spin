@@ -658,7 +658,10 @@ void GPUEDWrapper::runGPUMicrocanonicalTPQ(void* gpu_op_handle,
                                            int continue_sample,
                                            double continue_beta,
                                            bool save_thermal_states,
-                                           double target_beta) {
+                                           double target_beta,
+                                           int num_measure_points,
+                                           double measure_beta_min,
+                                           double measure_beta_max) {
     if (!gpu_op_handle) {
         std::cerr << "Error: NULL GPU operator handle\n";
         return;
@@ -670,7 +673,8 @@ void GPUEDWrapper::runGPUMicrocanonicalTPQ(void* gpu_op_handle,
     tpq_solver.runMicrocanonicalTPQ(max_iter, num_samples, temp_interval,
                                     eigenvalues, dir, large_value, nullptr,
                                     continue_quenching, continue_sample, continue_beta,
-                                    save_thermal_states, target_beta);
+                                    save_thermal_states, target_beta,
+                                    num_measure_points, measure_beta_min, measure_beta_max);
 }
 
 void GPUEDWrapper::runGPUMicrocanonicalTPQFixedSz(void* gpu_op_handle,
@@ -684,7 +688,10 @@ void GPUEDWrapper::runGPUMicrocanonicalTPQFixedSz(void* gpu_op_handle,
                                                  int continue_sample,
                                                  double continue_beta,
                                                  bool save_thermal_states,
-                                                 double target_beta) {
+                                                 double target_beta,
+                                                 int num_measure_points,
+                                                 double measure_beta_min,
+                                                 double measure_beta_max) {
     if (!gpu_op_handle) {
         std::cerr << "Error: NULL GPU operator handle\n";
         return;
@@ -706,7 +713,8 @@ void GPUEDWrapper::runGPUMicrocanonicalTPQFixedSz(void* gpu_op_handle,
     tpq_solver.runMicrocanonicalTPQ(max_iter, num_samples, temp_interval,
                                     eigenvalues, dir, large_value, gpu_op,
                                     continue_quenching, continue_sample, continue_beta,
-                                    save_thermal_states, target_beta);
+                                    save_thermal_states, target_beta,
+                                    num_measure_points, measure_beta_min, measure_beta_max);
     
     std::cout << "\nGPU Microcanonical TPQ Fixed Sz complete\n";
 }
@@ -717,7 +725,10 @@ void GPUEDWrapper::runGPUCanonicalTPQ(void* gpu_op_handle,
                                       std::vector<double>& energies,
                                       std::string dir,
                                       double delta_beta,
-                                      int taylor_order) {
+                                      int taylor_order,
+                                      int num_measure_points,
+                                      double measure_beta_min,
+                                      double measure_beta_max) {
     if (!gpu_op_handle) {
         std::cerr << "Error: NULL GPU operator handle\n";
         return;
@@ -727,7 +738,8 @@ void GPUEDWrapper::runGPUCanonicalTPQ(void* gpu_op_handle,
     GPUTPQSolver tpq_solver(gpu_op, N);
     
     tpq_solver.runCanonicalTPQ(beta_max, num_samples, temp_interval,
-                               energies, dir, delta_beta, taylor_order);
+                               energies, dir, delta_beta, taylor_order, nullptr,
+                               num_measure_points, measure_beta_min, measure_beta_max);
 }
 
 void GPUEDWrapper::runGPUCanonicalTPQFixedSz(void* gpu_op_handle,
@@ -737,7 +749,10 @@ void GPUEDWrapper::runGPUCanonicalTPQFixedSz(void* gpu_op_handle,
                                             std::vector<double>& energies,
                                             std::string dir,
                                             double delta_beta,
-                                            int taylor_order) {
+                                            int taylor_order,
+                                            int num_measure_points,
+                                            double measure_beta_min,
+                                            double measure_beta_max) {
     if (!gpu_op_handle) {
         std::cerr << "Error: NULL GPU operator handle\n";
         return;
@@ -757,7 +772,8 @@ void GPUEDWrapper::runGPUCanonicalTPQFixedSz(void* gpu_op_handle,
     GPUTPQSolver tpq_solver(gpu_op, fixed_sz_dim);
     
     tpq_solver.runCanonicalTPQ(beta_max, num_samples, temp_interval,
-                               energies, dir, delta_beta, taylor_order, gpu_op);
+                               energies, dir, delta_beta, taylor_order, gpu_op,
+                               num_measure_points, measure_beta_min, measure_beta_max);
     
     std::cout << "\nGPU Canonical TPQ Fixed Sz complete\n";
 }
@@ -1630,7 +1646,10 @@ void GPUEDWrapper::runGPUMicrocanonicalTPQFixedSz(void* gpu_op_handle,
                                                  int continue_sample,
                                                  double continue_beta,
                                                  bool save_thermal_states,
-                                                 double target_beta) {}
+                                                 double target_beta,
+                                                 int num_measure_points,
+                                                 double measure_beta_min,
+                                                 double measure_beta_max) {}
 
 void GPUEDWrapper::runGPUCanonicalTPQFixedSz(void* gpu_op_handle,
                                             int n_up,
@@ -1639,7 +1658,10 @@ void GPUEDWrapper::runGPUCanonicalTPQFixedSz(void* gpu_op_handle,
                                             std::vector<double>& energies,
                                             std::string dir,
                                             double delta_beta,
-                                            int taylor_order) {}
+                                            int taylor_order,
+                                            int num_measure_points,
+                                            double measure_beta_min,
+                                            double measure_beta_max) {}
 
 void* GPUEDWrapper::createGPUFixedSzOperatorDirect(
     int n_sites, int n_up, float spin_l,
@@ -1658,7 +1680,10 @@ void GPUEDWrapper::runGPUMicrocanonicalTPQ(void* gpu_op_handle,
                                            int continue_sample,
                                            double continue_beta,
                                            bool save_thermal_states,
-                                           double target_beta) {}
+                                           double target_beta,
+                                           int num_measure_points,
+                                           double measure_beta_min,
+                                           double measure_beta_max) {}
 
 void GPUEDWrapper::runGPUCanonicalTPQ(void* gpu_op_handle,
                                       int N, double beta_max, int num_samples,
@@ -1666,7 +1691,10 @@ void GPUEDWrapper::runGPUCanonicalTPQ(void* gpu_op_handle,
                                       std::vector<double>& energies,
                                       std::string dir,
                                       double delta_beta,
-                                      int taylor_order) {}
+                                      int taylor_order,
+                                      int num_measure_points,
+                                      double measure_beta_min,
+                                      double measure_beta_max) {}
 
 void GPUEDWrapper::runGPUDavidson(void* gpu_op_handle,
                                   int N, int num_eigenvalues, int max_iter,

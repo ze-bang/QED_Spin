@@ -422,7 +422,10 @@ void GPUTPQSolver::runMicrocanonicalTPQ(
     int continue_sample,
     double continue_beta,
     bool save_thermal_states,
-    double target_beta
+    double target_beta,
+    int num_measure_points,
+    double measure_beta_min,
+    double measure_beta_max
 ) {
     auto total_start = std::chrono::high_resolution_clock::now();
     
@@ -510,13 +513,15 @@ void GPUTPQSolver::runMicrocanonicalTPQ(
     #endif
     
     // Define measurement temperatures (similar to CPU version)
-    const int num_temp_points = 20;
+    const int num_temp_points = num_measure_points;
     std::vector<double> measure_inv_temp(num_temp_points);
-    double log_min = std::log10(1);   // Start from β = 1
-    double log_max = std::log10(1000); // End at β = 1000
+    double log_min = std::log10(measure_beta_min);
+    double log_max = std::log10(measure_beta_max);
     for (int i = 0; i < num_temp_points; ++i) {
         measure_inv_temp[i] = std::pow(10.0, log_min + (log_max - log_min) * i / (num_temp_points - 1));
     }
+    
+    std::cout << "Measurement grid: " << num_temp_points << " log-spaced points from β=" << measure_beta_min << " to β=" << measure_beta_max << std::endl;
     
     for (int sample = start_sample; sample < end_sample; ++sample) {
         std::cout << "\n[Rank " << mpi_rank << "] Sample " << sample << " of " << num_samples 
@@ -799,7 +804,10 @@ void GPUTPQSolver::runCanonicalTPQ(
     const std::string& dir,
     double delta_beta,
     int taylor_order,
-    GPUFixedSzOperator* fixed_sz_op
+    GPUFixedSzOperator* fixed_sz_op,
+    int num_measure_points,
+    double measure_beta_min,
+    double measure_beta_max
 ) {
     auto total_start = std::chrono::high_resolution_clock::now();
     
@@ -878,10 +886,10 @@ void GPUTPQSolver::runCanonicalTPQ(
     #endif
     
     // Define measurement temperatures (similar to microcanonical version)
-    const int num_temp_points = 20;
+    const int num_temp_points = num_measure_points;
     std::vector<double> measure_inv_temp(num_temp_points);
-    double log_min = std::log10(1);   // Start from β = 1
-    double log_max = std::log10(1000); // End at β = 1000
+    double log_min = std::log10(measure_beta_min);
+    double log_max = std::log10(measure_beta_max);
     for (int i = 0; i < num_temp_points; ++i) {
         measure_inv_temp[i] = std::pow(10.0, log_min + (log_max - log_min) * i / (num_temp_points - 1));
     }

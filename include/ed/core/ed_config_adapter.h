@@ -43,6 +43,9 @@ inline EDParameters toEDParameters(const EDConfig& config) {
     params.tpq_continue_sample = config.thermal.tpq_continue_sample;
     params.tpq_continue_beta = config.thermal.tpq_continue_beta;
     params.tpq_target_beta = config.thermal.tpq_target_beta;
+    params.tpq_num_measure_points = config.thermal.tpq_num_measure_points;
+    params.tpq_measure_beta_min = config.thermal.tpq_measure_beta_min;
+    params.tpq_measure_beta_max = config.thermal.tpq_measure_beta_max;
     // Note: Legacy alias methods (num_order(), delta_tau(), etc.) are deprecated
     // and should not be used. The above tpq_* fields are the canonical ones.
     
@@ -142,6 +145,9 @@ inline EDConfig fromEDParameters(const EDParameters& params, DiagonalizationMeth
     config.thermal.tpq_continue_sample = params.tpq_continue_sample;
     config.thermal.tpq_continue_beta = params.tpq_continue_beta;
     config.thermal.tpq_target_beta = params.tpq_target_beta;
+    config.thermal.tpq_num_measure_points = params.tpq_num_measure_points;
+    config.thermal.tpq_measure_beta_min = params.tpq_measure_beta_min;
+    config.thermal.tpq_measure_beta_max = params.tpq_measure_beta_max;
     
     // FTLM (via thermal config)
     config.thermal.ftlm_krylov_dim = params.ftlm_krylov_dim;
