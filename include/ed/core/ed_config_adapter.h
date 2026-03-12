@@ -93,6 +93,9 @@ inline EDParameters toEDParameters(const EDConfig& config) {
     // Sector selection
     params.selected_sectors = config.workflow.selected_sectors;
     
+    // Symmetry options
+    params.translation_only = config.workflow.translation_only;
+    
     // ARPACK
     params.arpack_advanced_verbose = config.arpack.verbose;
     params.arpack_which = config.arpack.which;

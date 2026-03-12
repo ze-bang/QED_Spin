@@ -334,10 +334,28 @@ inline std::string find_automorphism_finder() {
  * @param directory Directory containing Hamiltonian files (InterAll.dat, Trans.dat)
  * @return true if automorphisms were generated successfully, false otherwise
  */
-inline bool generate_automorphisms(const std::string& directory) {
+inline bool generate_automorphisms(const std::string& directory, bool translation_only = false) {
     // Check if automorphisms already exist
     std::string automorphism_file = directory + "/automorphism_results/automorphisms.json";
-    if (std::filesystem::exists(automorphism_file)) {
+    std::string max_clique_file = directory + "/automorphism_results/max_clique.json";
+    
+    // When translation_only is requested, we may need to regenerate the max clique
+    // even if automorphisms.json exists (the full list is reusable but the clique differs)
+    bool needs_regeneration = !std::filesystem::exists(automorphism_file);
+    if (translation_only && !needs_regeneration) {
+        // Check for a marker file that indicates the clique was generated with translation_only
+        std::string marker = directory + "/automorphism_results/.translation_only";
+        if (!std::filesystem::exists(marker)) {
+            // Remove existing clique/generator/sector files to force regeneration
+            std::filesystem::remove(max_clique_file);
+            std::filesystem::remove(directory + "/automorphism_results/minimal_generators.json");
+            std::filesystem::remove(directory + "/automorphism_results/sector_metadata.json");
+            std::filesystem::remove(automorphism_file);  // Force full regeneration with --translation_only
+            needs_regeneration = true;
+        }
+    }
+    
+    if (!needs_regeneration) {
         std::cout << "Using existing automorphisms from: " << automorphism_file << std::endl;
         return true;
     }
@@ -359,6 +377,9 @@ inline bool generate_automorphisms(const std::string& directory) {
     std::string python_cmd = (python_env && strlen(python_env) > 0) ? python_env : "python3";
     
     std::string cmd = python_cmd + " \"" + finder_path + "\" --data_dir=\"" + directory + "\"";
+    if (translation_only) {
+        cmd += " --translation_only";
+    }
     std::cout << "Running: " << cmd << std::endl;
     
     if (!safe_system_call(cmd)) {

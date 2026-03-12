@@ -165,6 +165,7 @@ EDConfig EDConfig::fromFile(const std::string& filename) {
                 else if (key == "compute_static_response") config.workflow.compute_static_response = parse_bool(value);
                 else if (key == "compute_ground_state_dssf") config.workflow.compute_ground_state_dssf = parse_bool(value);
                 else if (key == "skip_ed") config.workflow.skip_ed = parse_bool(value);
+                else if (key == "translation_only") config.workflow.translation_only = parse_bool(value);
             }
             // ========== [Thermodynamics] section ==========
             else if (current_section == "thermodynamics") {
@@ -320,6 +321,7 @@ EDConfig EDConfig::fromFile(const std::string& filename) {
                 else if (key == "compute_thermo") config.workflow.compute_thermo = parse_bool(value);
                 else if (key == "compute_dynamical_response") config.workflow.compute_dynamical_response = parse_bool(value);
                 else if (key == "compute_static_response") config.workflow.compute_static_response = parse_bool(value);
+                else if (key == "translation_only") config.workflow.translation_only = parse_bool(value);
                 // Note: many legacy keys omitted for brevity - the section-based format is preferred
             }
         }
@@ -450,6 +452,7 @@ EDConfig EDConfig::fromCommandLine(uint64_t argc, char* argv[]) {
             else if (arg == "--static-response") config.workflow.compute_static_response = true;
             else if (arg == "--ground-state-dssf") config.workflow.compute_ground_state_dssf = true;
             else if (arg == "--precompute-basis") config.workflow.precompute_basis_only = true;
+            else if (arg == "--translation-only") config.workflow.translation_only = true;
             else if (arg.find("--basis-cache-dir=") == 0) config.workflow.basis_cache_dir = parse_value("--basis-cache-dir=");
             else if (arg.find("--sectors=") == 0) {
                 std::string sectors_str = parse_value("--sectors=");

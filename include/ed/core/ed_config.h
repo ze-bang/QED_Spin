@@ -270,6 +270,7 @@ struct WorkflowConfig {
     bool compute_ground_state_dssf = false;  // Ground state dynamical structure factor (continued fraction)
     bool skip_ed = false;
     bool precompute_basis_only = false;   // Only generate orbit basis and cache to HDF5, skip Lanczos
+    bool translation_only = false;        // Use only translation symmetries for max clique (requires positions.dat)
     std::string basis_cache_dir = "";      // Directory for cached orbit basis ("" = auto = hamiltonian_dir/basis_cache)
     std::string output_dir = "output";
     std::string eigenvector_dir = "";  // Directory with pre-computed eigenvectors (for ground state DSSF)

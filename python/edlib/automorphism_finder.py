@@ -700,11 +700,189 @@ class MaximalAbelianSubgroupFinder:
         return generator_info
 
 
+def read_positions_file(filename):
+    """Read site positions from positions.dat file.
+    
+    Format: site_id, matrix_index, sublattice_index, x, y[, z]
+    
+    Returns:
+        dict: site_id -> {'sublattice': int, 'position': np.array}
+    """
+    sites = {}
+    with open(filename, 'r') as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith('#'):
+                continue
+            parts = line.split()
+            if len(parts) >= 5:
+                site_id = int(parts[0])
+                sublattice = int(parts[2])
+                coords = [float(x) for x in parts[3:]]
+                sites[site_id] = {
+                    'sublattice': sublattice,
+                    'position': np.array(coords)
+                }
+    return sites
+
+
+def read_lattice_vectors(data_dir):
+    """Read lattice vectors and cluster dimensions from *_lattice_parameters.dat file.
+    
+    Searches for the lattice parameters file in data_dir and parses
+    the unit cell lattice vectors and cluster dimensions.
+    
+    Returns:
+        tuple: (lattice_vectors, cluster_dims) where
+            lattice_vectors: list of np.array [a1, a2, ...]
+            cluster_dims: list of int [N1, N2, ...] (unit cells per direction)
+        Returns (None, None) if no file found.
+    """
+    import glob
+    import re
+    pattern = os.path.join(data_dir, "*_lattice_parameters.dat")
+    files = glob.glob(pattern)
+    if not files:
+        return None, None
+    
+    # If multiple files, prefer the one with 'super' in the name (supercell lattice)
+    # as it matches the full cluster geometry
+    lattice_file = files[-1]
+    for f in files:
+        if 'super' in os.path.basename(f).lower():
+            lattice_file = f
+            break
+    vectors = []
+    cluster_dims = None
+    in_lattice_section = False
+    
+    with open(lattice_file, 'r') as f:
+        for line in f:
+            line = line.strip()
+            # Parse cluster dimensions: "# Unit cells: N1 x N2 [x N3]"
+            if 'unit cells:' in line.lower():
+                match = re.search(r':\s*([\d]+)\s*x\s*([\d]+)(?:\s*x\s*([\d]+))?', line)
+                if match:
+                    cluster_dims = [int(match.group(1)), int(match.group(2))]
+                    if match.group(3):
+                        cluster_dims.append(int(match.group(3)))
+                continue
+            # Match various header formats: "Lattice vectors", "Unit cell lattice vectors", etc.
+            if 'lattice vectors' in line.lower() and 'reciprocal' not in line.lower():
+                in_lattice_section = True
+                continue
+            if in_lattice_section:
+                if line.startswith('#'):
+                    continue
+                if not line:
+                    if vectors:
+                        break
+                    continue
+                parts = line.split()
+                if len(parts) >= 3:
+                    # Format: vector_index, x, y[, z]
+                    coords = [float(x) for x in parts[1:]]
+                    vectors.append(np.array(coords))
+    
+    if not vectors:
+        return None, None
+    return vectors, cluster_dims
+
+
+def filter_translation_automorphisms(automorphisms, sites, lattice_vectors, cluster_dims, tol=1e-6):
+    """Filter automorphisms to keep only pure translations.
+    
+    A permutation sigma is a pure translation if there exists a displacement T
+    such that for every site i:
+      position[sigma(i)] ≡ position[i] + T   (mod supercell)
+    AND sigma maps each site to the same sublattice.
+    
+    Uses supercell vectors (N_k * a_k) for the modular arithmetic so that
+    distinct translations within the cluster are distinguishable.
+    
+    Args:
+        automorphisms: List of permutations
+        sites: dict from read_positions_file
+        lattice_vectors: list of np.array from read_lattice_vectors (primitive)
+        cluster_dims: list of int [N1, N2, ...] from read_lattice_vectors
+        tol: tolerance for floating point comparison
+    
+    Returns:
+        List of translation automorphisms (always includes identity)
+    """
+    if cluster_dims is None:
+        raise ValueError("cluster_dims is required: could not parse '# Unit cells:' line from lattice_parameters.dat")
+    
+    site_ids = sorted(sites.keys())
+    n = len(site_ids)
+    lat_dim = len(lattice_vectors[0])  # Dimension of lattice vectors
+    num_lat_vecs = len(lattice_vectors)
+    
+    if lat_dim != num_lat_vecs:
+        raise ValueError(f"Non-square lattice matrix ({lat_dim}D vectors, {num_lat_vecs} vectors): "
+                         "translation filtering requires a square lattice basis")
+    
+    # Build SUPERCELL lattice matrix: S_k = N_k * a_k
+    # This ensures translations by different primitive vectors are distinguishable
+    supercell_vectors = []
+    for k in range(num_lat_vecs):
+        Nk = cluster_dims[k] if k < len(cluster_dims) else 1
+        supercell_vectors.append(Nk * lattice_vectors[k])
+    
+    S = np.column_stack(supercell_vectors)  # lat_dim x num_lat_vecs
+    S_inv = np.linalg.inv(S)
+    
+    identity = list(range(max(site_ids) + 1))
+    translations = []
+    
+    for sigma in automorphisms:
+        # Check if it's identity first (always a translation)
+        if sigma == identity:
+            translations.append(sigma)
+            continue
+        
+        is_translation = True
+        ref_displacement_frac = None
+        
+        for sid in site_ids:
+            mapped_sid = sigma[sid]
+            
+            # Must map to same sublattice
+            if sites[sid]['sublattice'] != sites[mapped_sid]['sublattice']:
+                is_translation = False
+                break
+            
+            # Compute displacement in fractional coordinates of SUPERCELL
+            displacement = sites[mapped_sid]['position'] - sites[sid]['position']
+            # Project to lattice subspace (handles 2D lattice with 3D coordinates)
+            displacement_lat = displacement[:lat_dim]
+            displacement_frac = S_inv @ displacement_lat
+            
+            # Reduce modulo supercell (mod 1 in supercell fractional coords)
+            displacement_frac_mod = displacement_frac - np.round(displacement_frac)
+            
+            if ref_displacement_frac is None:
+                ref_displacement_frac = displacement_frac_mod
+            else:
+                # All sites must have the same displacement (mod supercell)
+                diff = displacement_frac_mod - ref_displacement_frac
+                diff = diff - np.round(diff)
+                if np.max(np.abs(diff)) > tol:
+                    is_translation = False
+                    break
+        
+        if is_translation:
+            translations.append(sigma)
+    
+    return translations
+
+
 def main():
     parser = argparse.ArgumentParser(description='Hamiltonian Automorphism Finder')
     parser.add_argument('--data_dir', type=str, default='.', help='Directory containing data files')
     parser.add_argument('--generate-viz', action='store_true', help='Generate DOT visualizations (default: skip)')
     parser.add_argument('--viz-limit', type=int, default=200, help='Maximum number of automorphisms to visualize when --generate-viz is set (default: 200)')
+    parser.add_argument('--translation_only', action='store_true', help='Use only translation symmetries for the max clique (requires positions.dat and lattice_parameters.dat)')
     args = parser.parse_args()
 
     inter_all_file = os.path.join(args.data_dir, "InterAll.dat")
@@ -787,16 +965,53 @@ def main():
     # Initialize the analyzer
     analyzer = AutomorphismCliqueAnalyzer()
 
-    # Find maximum clique of commuting automorphisms
-    max_clique_indices = analyzer.find_maximum_clique(all_automorphisms)
+    # Filter to translation-only automorphisms if requested
+    if args.translation_only:
+        print("\n--- Translation-only mode ---")
+        positions_file = os.path.join(args.data_dir, "positions.dat")
+        if not os.path.exists(positions_file):
+            raise FileNotFoundError(f"positions.dat required for --translation_only but not found in {args.data_dir}")
+        
+        sites = read_positions_file(positions_file)
+        result = read_lattice_vectors(args.data_dir)
+        if result is None or result[0] is None:
+            raise FileNotFoundError(f"No *_lattice_parameters.dat file found in {args.data_dir} (required for --translation_only)")
+        lattice_vectors, cluster_dims = result
+        if cluster_dims is None:
+            raise ValueError(f"Could not parse '# Unit cells:' line from lattice_parameters.dat in {args.data_dir}. "
+                             "This line is required for --translation_only mode.")
+        
+        print(f"  Read {len(sites)} site positions")
+        print(f"  Read {len(lattice_vectors)} lattice vectors")
+        print(f"  Cluster dimensions: {' x '.join(str(d) for d in cluster_dims)}")
+        
+        translation_autos = filter_translation_automorphisms(all_automorphisms, sites, lattice_vectors, cluster_dims)
+        print(f"  Found {len(translation_autos)} translation symmetries out of {len(all_automorphisms)} total automorphisms")
+        
+        # All translations commute, so the full translation subgroup is the max clique
+        max_clique = translation_autos
+        print(f"  Translation subgroup size: {len(max_clique)} (all commute, no clique search needed)")
+    else:
+        # Find maximum clique of commuting automorphisms
+        max_clique_indices = analyzer.find_maximum_clique(all_automorphisms)
+        max_clique = [all_automorphisms[i] for i in max_clique_indices]
     
     # Save maximum clique to JSON
     max_clique_file = os.path.join(output_dir, "max_clique.json")
-    max_clique = [all_automorphisms[i] for i in max_clique_indices]
     with open(max_clique_file, 'w') as f:
         json.dump(max_clique, f, indent=2)
 
-    print(f"\nSaved maximum clique of {len(max_clique_indices)} commuting automorphisms to {max_clique_file}")
+    print(f"\nSaved maximum clique of {len(max_clique)} commuting automorphisms to {max_clique_file}")
+
+    # Write marker file for translation_only mode so C++ can detect it
+    marker_file = os.path.join(output_dir, ".translation_only")
+    if args.translation_only:
+        with open(marker_file, 'w') as f:
+            f.write("translation_only\n")
+    else:
+        # Remove marker if it exists from a previous run
+        if os.path.exists(marker_file):
+            os.remove(marker_file)
 
     # Generate visualization of the automorphism graph (optional, disabled by default)
     if args.generate_viz:
@@ -806,7 +1021,10 @@ def main():
         else:
             print(f"\nGenerating visualizations...")
             analyzer.generate_automorphism_graph(all_automorphisms, output_dir, finder)
-            analyzer.visualize_clique(all_automorphisms, max_clique_indices, output_dir, finder)
+            # Compute clique indices for visualization
+            clique_set = {tuple(p) for p in max_clique}
+            viz_clique_indices = [i for i, a in enumerate(all_automorphisms) if tuple(a) in clique_set]
+            analyzer.visualize_clique(all_automorphisms, viz_clique_indices, output_dir, finder)
     else:
         print(f"\nSkipping visualizations (use --generate-viz to enable)")
 

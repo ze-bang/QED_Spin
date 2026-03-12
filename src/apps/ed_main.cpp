@@ -2287,7 +2287,9 @@ void print_help(const char* prog_name) {
     std::cout << "  --thermo                Compute thermodynamic properties\n";
     std::cout << "  --dynamical-response    Compute dynamical response (spectral functions)\n";
     std::cout << "  --static-response       Compute static response (thermal expectation values)\n";
-    std::cout << "  --ground-state-dssf     Compute T=0 DSSF using continued fraction (optimal for 32-site ED)\n\n";
+    std::cout << "  --ground-state-dssf     Compute T=0 DSSF using continued fraction (optimal for 32-site ED)\n";
+    std::cout << "  --translation-only      Use only translation symmetries for symmetry sectors\n";
+    std::cout << "                          (requires positions.dat and *_lattice_parameters.dat)\n\n";
     
     std::cout << "TPQ Observable Options:\n";
     std::cout << "  --save-thermal-states   Save TPQ states at target temperatures (for TPQ_DSSF post-processing)\n";

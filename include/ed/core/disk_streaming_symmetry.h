@@ -574,7 +574,7 @@ inline EDResults exact_diagonalization_disk_streaming(
     std::cout << "========================================\n" << std::endl;
     
     // Generate automorphisms if needed
-    if (!generate_automorphisms(directory)) {
+    if (!generate_automorphisms(directory, params.translation_only)) {
         std::cerr << "Warning: Automorphism generation failed" << std::endl;
         return EDResults();
     }

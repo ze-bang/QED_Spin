@@ -240,7 +240,7 @@ inline EDResults exact_diagonalization_streaming_symmetry(
     
     // ========== Step 4: Generate automorphisms + sectors if needed ==========
     if (!loaded_from_cache) {
-        if (!generate_automorphisms(directory)) {
+        if (!generate_automorphisms(directory, params.translation_only)) {
             std::cerr << "Warning: Automorphism generation failed" << std::endl;
             return EDResults();
         }
@@ -603,7 +603,7 @@ inline EDResults exact_diagonalization_streaming_symmetry_fixed_sz(
     
     // ========== Step 4: Generate automorphisms + sectors if needed ==========
     if (!loaded_from_cache) {
-        if (!generate_automorphisms(directory)) {
+        if (!generate_automorphisms(directory, params.translation_only)) {
             std::cerr << "Warning: Automorphism generation failed" << std::endl;
             return EDResults();
         }

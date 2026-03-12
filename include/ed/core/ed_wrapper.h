@@ -468,6 +468,9 @@ struct EDParameters {
     mutable class FixedSzOperator* fixed_sz_op = nullptr;  // If using fixed-Sz, pointer to operator for embedding
     bool full_sz_split = false;  // Loop over ALL Sz sectors for full diag (automatic block-diagonal speedup)
     
+    // ========== Symmetry Options ==========
+    bool translation_only = false;  // Use only translation symmetries for max clique (requires positions.dat)
+    
     // ========== ScaLAPACK Distributed Diagonalization Options ==========
     // Used when method == SCALAPACK or SCALAPACK_MIXED
     int scalapack_nprow = 0;                    // Process grid rows (0 = auto)
@@ -3915,7 +3918,7 @@ EDResults exact_diagonalization_from_directory_symmetrized(
               << params.num_sites << ", method=" << static_cast<int>(method) << std::endl;
 
     // ========== Step 1: Generate or Load Automorphisms ==========
-    if (!generate_automorphisms(directory)) {
+    if (!generate_automorphisms(directory, params.translation_only)) {
         std::cerr << "Warning: Automorphism generation failed, continuing anyway..." << std::endl;
     }
     
@@ -4262,7 +4265,7 @@ inline EDResults exact_diagonalization_fixed_sz_symmetrized(
     std::cout << "========================================\n" << std::endl;
     
     // ========== Step 1: Ensure Automorphisms Exist ==========
-    if (!generate_automorphisms(directory)) {
+    if (!generate_automorphisms(directory, params.translation_only)) {
         std::cerr << "Error: Automorphism generation failed" << std::endl;
         return EDResults();
     }

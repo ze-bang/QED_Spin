@@ -61,7 +61,7 @@ inline EDResults exact_diagonalization_chunked_symmetry(
     std::cout << "========================================\n" << std::endl;
     
     // ========== Step 1: Generate or Load Automorphisms ==========
-    if (!generate_automorphisms(directory)) {
+    if (!generate_automorphisms(directory, params.translation_only)) {
         std::cerr << "Warning: Automorphism generation failed" << std::endl;
         return EDResults();
     }
@@ -341,7 +341,7 @@ inline EDResults exact_diagonalization_chunked_symmetry_fixed_sz(
     std::cout << "========================================\n" << std::endl;
     
     // ========== Step 1: Generate or Load Automorphisms ==========
-    if (!generate_automorphisms(directory)) {
+    if (!generate_automorphisms(directory, params.translation_only)) {
         std::cerr << "Warning: Automorphism generation failed" << std::endl;
         return EDResults();
     }
@@ -599,7 +599,7 @@ inline EDResults exact_diagonalization_disk_chunked_symmetry(
     std::cout << "========================================\n" << std::endl;
     
     // ========== Step 1: Generate or Load Automorphisms ==========
-    if (!generate_automorphisms(directory)) {
+    if (!generate_automorphisms(directory, params.translation_only)) {
         std::cerr << "Warning: Automorphism generation failed" << std::endl;
         return EDResults();
     }
