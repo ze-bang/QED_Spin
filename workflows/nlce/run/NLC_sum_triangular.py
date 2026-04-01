@@ -357,7 +357,11 @@ class NLCExpansionTriangular:
             print(f"  Cluster {cluster_id} (order {order}): OK")
     
     def perform_summation(self, max_order=None):
-        """Perform NLCE summation up to specified order."""
+        """Perform NLCE summation up to specified order.
+        
+        Includes order 0 (single-site seed) so that entropy gets the
+        ln(2)-per-site baseline and energy gets the free-spin ground state.
+        """
         if max_order is None:
             max_order = max(self.clusters[cid]['order'] for cid in self.valid_weights)
         
@@ -376,7 +380,7 @@ class NLCExpansionTriangular:
         
         current_sums = {prop: np.zeros_like(self.temp_values) for prop in results}
         
-        for order in range(1, max_order + 1):
+        for order in range(0, max_order + 1):
             order_contribution = {prop: np.zeros_like(self.temp_values) for prop in results}
             
             for cluster_id in self.valid_weights:
@@ -474,14 +478,20 @@ class NLCExpansionTriangular:
         #   1) Use a RELATIVE threshold (10%) to detect near-cancellation in
         #      the denominator.  When |diff| < 0.1 * max(|ε_k^(n+1)|, |ε_k^(n)|)
         #      the 1/diff term would produce a pole → fall back to previous column.
-        #   2) Cap the magnitude of the 1/diff correction so that no single
-        #      step can exceed 100× the partial-sum scale.
+        #   2) Cap the magnitude of the 1/diff correction using a PER-ELEMENT
+        #      scale derived from the column-0 partial sums at each temperature
+        #      point.  This prevents high-T scales from allowing spikes at low T.
         #   3) Post-process with iterative spike removal.
         REL_TOL = 0.1    # 10% relative threshold for near-singular denominators
         
-        # Reference scale: magnitude of the bare partial sums (for capping)
-        ps_scale = np.max(np.abs(np.array(partial_sums)))
-        ps_scale = max(ps_scale, 1e-30)
+        # Per-element reference scale from the column-0 (partial sum) entries.
+        # For scalar sequences this collapses to a single number.
+        ps_arr = np.array(partial_sums)
+        if ps_arr.ndim == 1:
+            ps_scale = max(np.max(np.abs(ps_arr)), 1e-30)
+        else:
+            # shape (n, n_temps) — take max over sequence axis, keep per-T
+            ps_scale = np.maximum(np.max(np.abs(ps_arr), axis=0), 1e-30)
         MAX_CORRECTION = 100.0 * ps_scale
         
         for k in range(0, n - 1):
@@ -523,9 +533,99 @@ class NLCExpansionTriangular:
         
         return result
     
+    def wynn_epsilon_multi_start(self, partial_sums, max_starts=None):
+        """Apply Wynn's epsilon from multiple starting indices and take the median.
+        
+        For a sequence S_0, S_1, ..., S_{n-1}, we apply Wynn starting from
+        S_k for k = 0, 1, ..., min(max_starts-1, n//3).  Taking the median
+        across starting points is much more robust than single-start Wynn,
+        especially when one starting point happens to hit a near-singular
+        denominator.
+        
+        Reference: Khatami & Rigol, Phys. Rev. B 83, 134431 (2011).
+        """
+        n = len(partial_sums)
+        if n < 3:
+            return partial_sums[-1] if n > 0 else 0.0
+        
+        # Number of starting points: use up to n//3 to leave enough terms
+        if max_starts is None:
+            max_starts = max(1, n // 3)
+        max_starts = min(max_starts, max(1, n // 3))
+        
+        estimates = []
+        for k_start in range(max_starts):
+            sub_seq = partial_sums[k_start:]
+            if len(sub_seq) < 3:
+                break
+            est = self.wynn_epsilon(sub_seq)
+            estimates.append(est)
+        
+        if not estimates:
+            return partial_sums[-1]
+        
+        # Take element-wise median across starting points
+        estimates_arr = np.array(estimates)
+        if estimates_arr.ndim == 1:
+            return np.median(estimates_arr)
+        else:
+            return np.median(estimates_arr, axis=0)
+    
+    def entropy_derived_specific_heat(self, results):
+        """Compute specific heat from C(T) = T dS/dT using the NLCE entropy.
+        
+        The entropy series converges ~1 order faster than the specific heat
+        series for frustrated systems.  Computing the derivative numerically
+        from the resummed entropy therefore extends the reliable C(T) window
+        to lower temperatures.
+        
+        Uses log-spaced finite differences for accuracy on a log-T grid.
+        """
+        T = self.temp_values
+        S = results['entropy']
+        
+        # Use log-T derivative: dS/dT = (1/T) dS/d(lnT)
+        # This is more accurate on the typical log-spaced temperature grid
+        lnT = np.log(T)
+        dS_dlnT = np.gradient(S, lnT)
+        
+        # C = T dS/dT = dS/d(lnT)
+        C_derived = dS_dlnT
+        
+        return C_derived
+    
     def perform_resummed_summation(self, max_order=None, method='euler'):
-        """Perform NLCE summation with resummation."""
+        """Perform NLCE summation with resummation.
+        
+        Methods:
+            'none'/'direct': No resummation, bare partial sums.
+            'euler': Euler transformation (Tang-Khatami-Rigol).
+            'wynn': Single-start Wynn epsilon.
+            'wynn_multi': Multi-start Wynn epsilon with median (recommended).
+            'entropy_derived': Resum entropy with Euler, then C = T dS/dT.
+        """
         raw_results = self.perform_summation(max_order)
+        
+        # For entropy_derived, resum entropy first, then derive C
+        if method == 'entropy_derived':
+            results = {}
+            # Resum entropy and energy with Euler (best behaved for integrals)
+            for prop in ['energy', 'entropy']:
+                resummed = np.zeros_like(self.temp_values)
+                for i in range(len(self.temp_values)):
+                    seq = self.partial_sums[prop][:, i]
+                    resummed[i] = self.euler_resummation(seq)
+                results[prop] = resummed
+            # Derive C(T) = T dS/dT from the resummed entropy
+            results['specific_heat'] = self.entropy_derived_specific_heat(results)
+            # Also store the direct-resummed C for comparison
+            direct_cv = np.zeros_like(self.temp_values)
+            for i in range(len(self.temp_values)):
+                seq = self.partial_sums['specific_heat'][:, i]
+                direct_cv[i] = self.euler_resummation(seq)
+            results['specific_heat_direct'] = direct_cv
+            print("Specific heat computed via entropy derivative: C(T) = T dS/dT")
+            return results
         
         results = {}
         for prop in ['energy', 'specific_heat', 'entropy']:
@@ -541,10 +641,13 @@ class NLCExpansionTriangular:
                 resummed = np.zeros_like(self.temp_values)
                 for i in range(len(self.temp_values)):
                     seq = [self.partial_sums[prop][j, i] for j in range(len(self.partial_sums[prop]))]
-                    # Convert to array of scalars for wynn_epsilon
                     seq_arr = [np.array([s]) for s in seq]
                     result = self.wynn_epsilon(seq_arr)
                     resummed[i] = result[0] if hasattr(result, '__len__') else result
+                results[prop] = resummed
+            elif method == 'wynn_multi':
+                # Multi-start Wynn with median — most robust
+                resummed = self.wynn_epsilon_multi_start(self.partial_sums[prop])
                 results[prop] = resummed
             else:
                 results[prop] = raw_results[prop]
@@ -576,6 +679,14 @@ class NLCExpansionTriangular:
         np.savetxt(output_file, data, header=header, comments='# ')
         print(f"Specific heat saved to {output_file}")
         
+        # Save entropy-derived specific heat comparison if available
+        if 'specific_heat_direct' in results:
+            output_file = os.path.join(output_dir, 'nlc_specific_heat_direct.txt')
+            data = np.column_stack([temp_output, results['specific_heat_direct']])
+            header = f'Temperature({temp_unit})  Specific_Heat_Direct({cv_unit})'
+            np.savetxt(output_file, data, header=header, comments='# ')
+            print(f"Direct specific heat (for comparison) saved to {output_file}")
+        
         # Save energy
         output_file = os.path.join(output_dir, 'nlc_energy.txt')
         data = np.column_stack([temp_output, results['energy']])
@@ -593,7 +704,7 @@ class NLCExpansionTriangular:
         # Save order-by-order results for convergence analysis
         for prop in ['specific_heat', 'energy', 'entropy']:
             output_file = os.path.join(output_dir, f'nlc_{prop}_by_order.txt')
-            header = f'Temperature({temp_unit})  ' + '  '.join([f'Order_{i+1}' for i in range(len(self.partial_sums[prop]))])
+            header = f'Temperature({temp_unit})  ' + '  '.join([f'Order_{i}' for i in range(len(self.partial_sums[prop]))])
             data = np.column_stack([temp_output] + [self.partial_sums[prop][i] for i in range(len(self.partial_sums[prop]))])
             np.savetxt(output_file, data, header=header, comments='# ')
     
@@ -619,7 +730,11 @@ class NLCExpansionTriangular:
         
         # Specific heat
         ax = axes[0, 0]
-        ax.semilogx(temp_plot, results['specific_heat'], 'b-', lw=2)
+        ax.semilogx(temp_plot, results['specific_heat'], 'b-', lw=2, label='C(T)')
+        if 'specific_heat_direct' in results:
+            ax.semilogx(temp_plot, results['specific_heat_direct'], 'b--', lw=1.5, alpha=0.6,
+                        label='C(T) direct resum')
+            ax.legend(loc='best', fontsize=8)
         ax.set_xlabel(temp_label)
         ax.set_ylabel(cv_label)
         ax.set_title(f'Specific Heat (NLCE order {max_order})')
@@ -645,7 +760,7 @@ class NLCExpansionTriangular:
         ax = axes[1, 1]
         colors = plt.cm.viridis(np.linspace(0, 1, len(self.partial_sums['specific_heat'])))
         for i, ps in enumerate(self.partial_sums['specific_heat']):
-            ax.semilogx(temp_plot, ps, color=colors[i], lw=1.5, label=f'Order {i+1}')
+            ax.semilogx(temp_plot, ps, color=colors[i], lw=1.5, label=f'Order {i}')
         ax.set_xlabel(temp_label)
         ax.set_ylabel(cv_label)
         ax.set_title('Order-by-order Convergence')
@@ -682,8 +797,9 @@ def main():
     parser.add_argument('--SI_units', action='store_true',
                        help='Convert to SI units: C,S in J/(mol·K), E in J/mol.')
     parser.add_argument('--resummation', type=str, default='none',
-                       choices=['none', 'euler', 'wynn'],
-                       help='Resummation method (none, euler, or wynn)')
+                       choices=['none', 'euler', 'wynn', 'wynn_multi', 'entropy_derived'],
+                       help='Resummation method: none, euler, wynn, wynn_multi (multi-start median), '
+                            'or entropy_derived (C = T dS/dT from resummed entropy)')
     
     args = parser.parse_args()
     
@@ -745,7 +861,7 @@ def main():
     
     # Perform summation
     print(f"\nPerforming NLCE summation up to order {max_order}...")
-    if args.resummation in ('euler', 'wynn'):
+    if args.resummation != 'none':
         print(f"Using {args.resummation} resummation")
         results = nlc.perform_resummed_summation(max_order, method=args.resummation)
     else:

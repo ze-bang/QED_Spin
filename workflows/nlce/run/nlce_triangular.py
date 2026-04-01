@@ -302,8 +302,10 @@ def main():
     parser.add_argument('--temp_points_file', type=str, default=None,
                        help='File containing explicit temperature points (one per line, in Kelvin). '
                             'Overrides --temp_min/--temp_max/--temp_bins for NLCE summation.')
-    parser.add_argument('--resummation', type=str, default='euler', choices=['none', 'euler', 'wynn'],
-                       help='Resummation method for series acceleration (euler or wynn recommended)')
+    parser.add_argument('--resummation', type=str, default='euler',
+                       choices=['none', 'euler', 'wynn', 'wynn_multi', 'entropy_derived'],
+                       help='Resummation method: none, euler, wynn, wynn_multi (multi-start median), '
+                            'or entropy_derived (C = T dS/dT from resummed entropy, best for frustrated systems)')
     
     # NLCE parameters
     parser.add_argument('--order_cutoff', type=int, help='Maximum order for NLCE summation')

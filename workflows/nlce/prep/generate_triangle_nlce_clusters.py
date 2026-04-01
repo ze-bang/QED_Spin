@@ -387,8 +387,13 @@ def identify_subclusters(distinct_clusters, multiplicities, orders, triangles, m
         cluster_order = orders[i]
         subclusters_info[i] = []
         
-        if cluster_order <= 1:
+        if cluster_order == 0:
             continue
+        
+        # Every cluster of order >= 1 embeds the single-site (order-0) cluster
+        # once per physical site.  Index 0 = the order-0 cluster.
+        n_sites = len(get_cluster_sites(triangles, cluster_nodes))
+        subclusters_info[i].append((0, n_sites))
         
         for sub_order in range(1, cluster_order):
             candidates = clusters_by_order[sub_order]
