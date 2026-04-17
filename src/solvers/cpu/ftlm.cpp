@@ -9,6 +9,7 @@
 #include <numeric>
 #include <cstring>
 #include <chrono>
+#include <omp.h>
 #ifdef WITH_MPI
 #include <mpi.h>
 #endif
@@ -1426,8 +1427,9 @@ DynamicalResponseResults compute_dynamical_correlation(
             // Compute ⟨n|O₂|ψ⟩ = evecs[n,0] × ||O₂|ψ|| (since |v₀⟩ = O₂|ψ⟩/||O₂|ψ||)
             Complex overlap_O2 = Complex(evecs[n * m + 0] * phi_norm, 0.0);
             
-            // Weight is ⟨ψ|O₁†|n⟩⟨n|O₂|ψ⟩ (complex product for general cross-correlation)
-            Complex weight_complex = std::conj(overlap_O1) * overlap_O2;
+            // Weight is ⟨ψ|O₁†|n⟩⟨n|O₂|ψ⟩ = ⟨O₁ψ|n⟩⟨n|O₂ψ⟩
+            // Note: overlap_O1 = ⟨O₁ψ|n⟩ (via zdotc), do NOT conjugate
+            Complex weight_complex = overlap_O1 * overlap_O2;
             complex_weights[n] = weight_complex;
         }
         
@@ -1667,8 +1669,9 @@ DynamicalResponseResults compute_dynamical_correlation_state(
         // Compute ⟨n|O₂|ψ⟩ = evecs[n,0] × ||O₂|ψ|| (since |v₀⟩ = O₂|ψ⟩/||O₂|ψ||)
         Complex overlap_O2 = Complex(evecs[n * m + 0] * phi_norm, 0.0);
         
-        // Weight is ⟨ψ|O₁†|n⟩⟨n|O₂|ψ⟩ (complex product for general cross-correlation)
-        Complex weight_complex = std::conj(overlap_O1) * overlap_O2;
+        // Weight is ⟨ψ|O₁†|n⟩⟨n|O₂|ψ⟩ = ⟨O₁ψ|n⟩⟨n|O₂ψ⟩
+        // Note: overlap_O1 = ⟨O₁ψ|n⟩ (via zdotc), do NOT conjugate
+        Complex weight_complex = overlap_O1 * overlap_O2;
         complex_weights[n] = weight_complex;
     }
     
@@ -2478,8 +2481,9 @@ LanczosSpectralData compute_lanczos_spectral_data(
         // Compute ⟨n|O₂|ψ⟩ = evecs[n,0] × ||O₂|ψ|| (since |v₀⟩ = O₂|ψ⟩/||O₂|ψ||)
         Complex overlap_O2 = Complex(evecs[n * m + 0] * phi_norm, 0.0);
         
-        // Weight is ⟨ψ|O₁†|n⟩⟨n|O₂|ψ⟩
-        Complex weight_complex = std::conj(overlap_O1) * overlap_O2;
+        // Weight is ⟨ψ|O₁†|n⟩⟨n|O₂|ψ⟩ = ⟨O₁ψ|n⟩⟨n|O₂ψ⟩
+        // Note: overlap_O1 = ⟨O₁ψ|n⟩ (via zdotc), do NOT conjugate
+        Complex weight_complex = overlap_O1 * overlap_O2;
         spectral_data.spectral_weights[n] = weight_complex;
     }
     
@@ -2781,13 +2785,17 @@ std::map<double, DynamicalResponseResults> compute_dynamical_correlation_multi_s
     // For each temperature, accumulate numerator (Σ_r Σ_i e^{-βε_i} |c_i|² S_i(ω))
     // and partition function (Σ_r Σ_i e^{-βε_i} |c_i|²)
     std::map<double, std::vector<double>> accumulated_spectral;
+    std::map<double, std::vector<double>> accumulated_spectral_imag;
     std::map<double, double> accumulated_Z;
     std::map<double, std::vector<std::vector<double>>> per_sample_spectral;  // For error estimation
+    std::map<double, std::vector<std::vector<double>>> per_sample_spectral_imag;
     
     for (double T : temperatures) {
         accumulated_spectral[T] = std::vector<double>(num_omega_bins, 0.0);
+        accumulated_spectral_imag[T] = std::vector<double>(num_omega_bins, 0.0);
         accumulated_Z[T] = 0.0;
         per_sample_spectral[T] = std::vector<std::vector<double>>();
+        per_sample_spectral_imag[T] = std::vector<std::vector<double>>();
     }
     
     // MPI parallelization: distribute samples across ranks
@@ -2948,18 +2956,23 @@ std::map<double, DynamicalResponseResults> compute_dynamical_correlation_multi_s
         // Step 2b: Precompute S_i(ω) for each significant Ritz state
         // This is the expensive part - Lanczos + continued fraction per state
         std::vector<std::vector<double>> precomputed_S_i(significant_states.size());
+        std::vector<std::vector<double>> precomputed_S_i_imag(significant_states.size());
         std::vector<double> precomputed_energies(significant_states.size());
         std::vector<double> precomputed_c_sq(significant_states.size());
         std::vector<bool> state_valid(significant_states.size(), false);
         
-        // OpenMP parallelization over Ritz states (most expensive loop)
-        #pragma omp parallel for schedule(dynamic) 
+        // Process Ritz states sequentially. The inner operator::apply() and
+        // build_lanczos_tridiagonal() use their own OpenMP parallel regions
+        // which parallelize over the Hilbert space dimension. Using an outer
+        // OpenMP parallel-for here would cause nested parallelism leading to
+        // thread explosion, heap corruption, and segfaults.
+        // MPI sample distribution handles the coarse-grained parallelism.
         for (size_t idx = 0; idx < significant_states.size(); idx++) {
             uint64_t i = significant_states[idx];
             
-            // Thread-local working vectors
+            // Working vectors
             ComplexVector psi_local(N, Complex(0.0, 0.0));
-            ComplexVector phi_local(N);
+            ComplexVector phi2_local(N);
             
             // Construct approximate eigenstate |ψ_i⟩ = Σ_j V[i,j] |v_j⟩
             for (uint64_t j = 0; j < m_H; j++) {
@@ -2974,40 +2987,101 @@ std::map<double, DynamicalResponseResults> compute_dynamical_correlation_multi_s
             Complex psi_scale(1.0/psi_norm, 0.0);
             cblas_zscal(N, &psi_scale, psi_local.data(), 1);
             
-            // Apply operator O2: |φ_i⟩ = O₂|ψ_i⟩
-            O2(psi_local.data(), phi_local.data(), N);
+            // Apply operator O2: |φ₂⟩ = O₂|ψ_i⟩
+            O2(psi_local.data(), phi2_local.data(), N);
             
-            double phi_norm = cblas_dznrm2(N, phi_local.data(), 1);
-            double phi_norm_sq = phi_norm * phi_norm;
+            double phi2_norm = cblas_dznrm2(N, phi2_local.data(), 1);
             
-            if (phi_norm < 1e-14) continue;
+            if (phi2_norm < 1e-14) continue;
             
             // Normalize for Lanczos
-            Complex phi_scale(1.0/phi_norm, 0.0);
-            cblas_zscal(N, &phi_scale, phi_local.data(), 1);
+            Complex phi2_scale(1.0/phi2_norm, 0.0);
+            cblas_zscal(N, &phi2_scale, phi2_local.data(), 1);
             
-            // Build Lanczos from |φ_i⟩
+            // Build Lanczos from |φ₂⟩ with basis storage (needed for cross-correlation overlaps)
             std::vector<double> alpha_S, beta_S;
-            build_lanczos_tridiagonal(
-                H, phi_local, N, params.krylov_dim, params.tolerance,
+            std::vector<ComplexVector> lanczos_basis_S;
+            build_lanczos_tridiagonal_with_basis(
+                H, phi2_local, N, params.krylov_dim, params.tolerance,
                 params.full_reorthogonalization, params.reorth_frequency,
-                alpha_S, beta_S
+                alpha_S, beta_S, &lanczos_basis_S
             );
             
             if (alpha_S.empty()) continue;
             
+            uint64_t m_S = alpha_S.size();
+            
             // Shift energies by E_gs
-            for (size_t k = 0; k < alpha_S.size(); k++) {
+            for (size_t k = 0; k < m_S; k++) {
                 alpha_S[k] -= E_gs;
             }
             
-            // Compute spectral function via continued fraction (ONCE per state)
-            std::vector<double> S_i = continued_fraction_spectral_function(
-                alpha_S, beta_S, frequencies, params.broadening, phi_norm_sq
-            );
+            // Apply O1 to the eigenstate: |φ₁⟩ = O₁|ψ_i⟩
+            ComplexVector phi1_local(N);
+            O1(psi_local.data(), phi1_local.data(), N);
             
-            // Store precomputed results (thread-safe since each idx is unique)
+            // Compute overlaps: p_j = ⟨φ₁|v_j⟩ where v_j are Lanczos basis vectors from |φ₂⟩
+            std::vector<Complex> phi1_overlaps(m_S);
+            for (uint64_t j = 0; j < m_S; j++) {
+                Complex overlap;
+                cblas_zdotc_sub(N, phi1_local.data(), 1, lanczos_basis_S[j].data(), 1, &overlap);
+                phi1_overlaps[j] = overlap;
+            }
+            
+            // Free the Lanczos basis vectors to save memory
+            lanczos_basis_S.clear();
+            lanczos_basis_S.shrink_to_fit();
+            
+            // Diagonalize the tridiagonal matrix to get Ritz eigenvalues and eigenvectors
+            std::vector<double> ritz_vals_S, dummy_wts_S;
+            std::vector<double> evecs_S;  // Row-major: evecs_S[k*m_S + j] = V[k,j]
+            diagonalize_tridiagonal_ritz(alpha_S, beta_S, ritz_vals_S, dummy_wts_S, &evecs_S);
+            
+            if (ritz_vals_S.empty()) continue;
+            
+            // Compute cross-spectral function using Lehmann representation
+            // S_cross(ω) = Σ_k w_k × L(ω - λ_k)
+            // where w_k = (Σ_j V_{jk} ⟨φ₁|v_j⟩) × V_{0k} × ‖φ₂‖
+            // and L(x) = (η/π) / (x² + η²) is the Lorentzian broadening kernel.
+            // For cross-correlations, w_k is complex → S(ω) is complex.
+            uint64_t n_ritz = ritz_vals_S.size();
+            std::vector<double> S_i(num_omega_bins, 0.0);
+            std::vector<double> S_i_imag(num_omega_bins, 0.0);
+            
+            for (uint64_t k = 0; k < n_ritz; k++) {
+                // Cross-correlation weight: w_k = conj(Σ_j V_{jk} ⟨φ₁|v_j⟩) × V_{0k}
+                Complex overlap_O1_nk(0.0, 0.0);
+                for (uint64_t j = 0; j < m_S; j++) {
+                    overlap_O1_nk += Complex(evecs_S[k * m_S + j], 0.0) * phi1_overlaps[j];
+                }
+                
+                // ⟨n_k|O₂|ψ⟩ = V_{0k} × ‖φ₂‖ (since v_0 = O₂|ψ⟩/‖O₂|ψ⟩‖)
+                double V_0k = evecs_S[k * m_S + 0];
+                
+                // Full weight: ⟨O₁ψ|n_k⟩ × ⟨n_k|O₂|ψ⟩ = overlap_O1_nk × V_{0k} × ‖φ₂‖
+                Complex w_k = overlap_O1_nk * Complex(V_0k * phi2_norm, 0.0);
+                
+                // Lorentzian broadening of complex Lehmann weight:
+                // S(ω) += w_k × (η/π) / ((ω - E_k)² + η²)
+                // Re[S] += Re(w_k) × L(ω - E_k)
+                // Im[S] += Im(w_k) × L(ω - E_k)
+                double E_k = ritz_vals_S[k];
+                double w_real = w_k.real();
+                double w_imag = w_k.imag();
+                double eta = params.broadening;
+                
+                for (uint64_t iw = 0; iw < num_omega_bins; iw++) {
+                    double delta = frequencies[iw] - E_k;
+                    double denom = delta * delta + eta * eta;
+                    double lorentzian = eta / (M_PI * denom);
+                    S_i[iw] += w_real * lorentzian;
+                    S_i_imag[iw] += w_imag * lorentzian;
+                }
+            }
+            
+            // Store precomputed results
             precomputed_S_i[idx] = std::move(S_i);
+            precomputed_S_i_imag[idx] = std::move(S_i_imag);
             precomputed_energies[idx] = ritz_values[i];
             precomputed_c_sq[idx] = c_sq[i];
             state_valid[idx] = true;
@@ -3037,8 +3111,9 @@ std::map<double, DynamicalResponseResults> compute_dynamical_correlation_multi_s
             
             accumulated_Z[T] += Z_sample;
             
-            // Accumulate weighted spectral contributions
+            // Accumulate weighted spectral contributions (both real and imaginary)
             std::vector<double> sample_spectral(num_omega_bins, 0.0);
+            std::vector<double> sample_spectral_imag(num_omega_bins, 0.0);
             
             for (size_t idx = 0; idx < significant_states.size(); idx++) {
                 if (!state_valid[idx]) continue;
@@ -3051,20 +3126,27 @@ std::map<double, DynamicalResponseResults> compute_dynamical_correlation_multi_s
                 
                 // Add contribution (vectorized)
                 const std::vector<double>& S_i = precomputed_S_i[idx];
+                const std::vector<double>& S_i_im = precomputed_S_i_imag[idx];
                 for (uint64_t iw = 0; iw < num_omega_bins; iw++) {
                     double contrib = thermal_weight * S_i[iw];
+                    double contrib_im = thermal_weight * S_i_im[iw];
                     sample_spectral[iw] += contrib;
+                    sample_spectral_imag[iw] += contrib_im;
                     accumulated_spectral[T][iw] += contrib;
+                    accumulated_spectral_imag[T][iw] += contrib_im;
                 }
             }
             
             // Store sample contribution for error estimation
             if (Z_sample > 1e-300) {
                 std::vector<double> normalized_sample(num_omega_bins);
+                std::vector<double> normalized_sample_imag(num_omega_bins);
                 for (uint64_t iw = 0; iw < num_omega_bins; iw++) {
                     normalized_sample[iw] = sample_spectral[iw] / Z_sample;
+                    normalized_sample_imag[iw] = sample_spectral_imag[iw] / Z_sample;
                 }
                 per_sample_spectral[T].push_back(normalized_sample);
+                per_sample_spectral_imag[T].push_back(normalized_sample_imag);
             }
         }
         
@@ -3096,18 +3178,22 @@ std::map<double, DynamicalResponseResults> compute_dynamical_correlation_multi_s
         std::cout << "All ranks have completed their sample processing.\n";
     }
     
-    // Reduce accumulated_spectral and accumulated_Z across all ranks
+    // Reduce accumulated_spectral, accumulated_spectral_imag, and accumulated_Z across all ranks
     for (double T : temperatures) {
         std::vector<double> global_spectral(num_omega_bins, 0.0);
+        std::vector<double> global_spectral_imag(num_omega_bins, 0.0);
         double global_Z = 0.0;
         
         MPI_Reduce(accumulated_spectral[T].data(), global_spectral.data(), 
+                   num_omega_bins, MPI_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD);
+        MPI_Reduce(accumulated_spectral_imag[T].data(), global_spectral_imag.data(), 
                    num_omega_bins, MPI_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD);
         MPI_Reduce(&accumulated_Z[T], &global_Z, 1, MPI_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD);
         
         // Only rank 0 needs the final values
         if (mpi_rank == 0) {
             accumulated_spectral[T] = global_spectral;
+            accumulated_spectral_imag[T] = global_spectral_imag;
             accumulated_Z[T] = global_Z;
         }
     }
@@ -3163,6 +3249,7 @@ std::map<double, DynamicalResponseResults> compute_dynamical_correlation_multi_s
         // which is the thermal expectation value as desired.
         for (uint64_t iw = 0; iw < num_omega_bins; iw++) {
             results.spectral_function[iw] = accumulated_spectral[T][iw] / Z_total;
+            results.spectral_function_imag[iw] = accumulated_spectral_imag[T][iw] / Z_total;
         }
         
         // Note: Error estimation with MPI requires gathering per-sample data from all ranks
@@ -3171,13 +3258,16 @@ std::map<double, DynamicalResponseResults> compute_dynamical_correlation_multi_s
         if (n_samples > 1 && mpi_size == 1) {
             // Compute mean of per-sample normalized spectra (serial only)
             std::vector<double> mean(num_omega_bins, 0.0);
+            std::vector<double> mean_imag(num_omega_bins, 0.0);
             for (uint64_t s = 0; s < n_samples; s++) {
                 for (uint64_t iw = 0; iw < num_omega_bins; iw++) {
                     mean[iw] += per_sample_spectral[T][s][iw];
+                    mean_imag[iw] += per_sample_spectral_imag[T][s][iw];
                 }
             }
             for (uint64_t iw = 0; iw < num_omega_bins; iw++) {
                 mean[iw] /= n_samples;
+                mean_imag[iw] /= n_samples;
             }
             
             // Compute variance and standard error
@@ -3185,12 +3275,15 @@ std::map<double, DynamicalResponseResults> compute_dynamical_correlation_multi_s
                 for (uint64_t iw = 0; iw < num_omega_bins; iw++) {
                     double diff = per_sample_spectral[T][s][iw] - mean[iw];
                     results.spectral_error[iw] += diff * diff;
+                    double diff_im = per_sample_spectral_imag[T][s][iw] - mean_imag[iw];
+                    results.spectral_error_imag[iw] += diff_im * diff_im;
                 }
             }
             
             double norm = std::sqrt(static_cast<double>(n_samples * (n_samples - 1)));
             for (uint64_t iw = 0; iw < num_omega_bins; iw++) {
                 results.spectral_error[iw] = std::sqrt(results.spectral_error[iw]) / norm;
+                results.spectral_error_imag[iw] = std::sqrt(results.spectral_error_imag[iw]) / norm;
             }
         }
         

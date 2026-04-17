@@ -1801,8 +1801,9 @@ GPUFTLMSolver::computeDynamicalCorrelation(
             // Compute ⟨n|O₂|ψ⟩ = evecs[n,0] × ||O₂|ψ|| (since |v₀⟩ = O₂|ψ⟩/||O₂|ψ||)
             std::complex<double> overlap_O2(evecs[n * m + 0] * phi_norm, 0.0);
             
-            // Weight is ⟨ψ|O₁†|n⟩⟨n|O₂|ψ⟩ = conj(⟨O₁ψ|n⟩) × ⟨n|O₂|ψ⟩
-            complex_weights[n] = std::conj(overlap_O1) * overlap_O2;
+            // Weight is ⟨ψ|O₁†|n⟩⟨n|O₂|ψ⟩ = ⟨O₁ψ|n⟩ × ⟨n|O₂|ψ⟩
+            // Note: overlap_O1 = ⟨O₁ψ|n⟩ (via zdotc), do NOT conjugate
+            complex_weights[n] = overlap_O1 * overlap_O2;
         }
         
         // Free basis vectors for this sample
@@ -2531,8 +2532,9 @@ GPUFTLMSolver::computeDynamicalCorrelationState(
         // Compute ⟨n|O₂|ψ⟩ = evecs[n,0] × ||O₂|ψ|| (since |v₀⟩ = O₂|ψ⟩/||O₂|ψ||)
         std::complex<double> overlap_O2(evecs[n * m + 0] * phi_norm, 0.0);
         
-        // Weight is ⟨ψ|O₁†|n⟩⟨n|O₂|ψ⟩ = conj(⟨O₁ψ|n⟩) × ⟨n|O₂|ψ⟩
-        complex_weights[n] = std::conj(overlap_O1) * overlap_O2;
+        // Weight is ⟨ψ|O₁†|n⟩⟨n|O₂|ψ⟩ = ⟨O₁ψ|n⟩ × ⟨n|O₂|ψ⟩
+        // Note: overlap_O1 = ⟨O₁ψ|n⟩ (via zdotc), do NOT conjugate
+        complex_weights[n] = overlap_O1 * overlap_O2;
     }
     
     // Free basis vectors

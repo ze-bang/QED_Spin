@@ -1277,8 +1277,27 @@ void compute_dynamical_response_workflow(const EDConfig& config) {
         int local_processed_count = 0;
         
         #ifdef WITH_MPI
-        if (size > 1) {
-            // MPI tags for communication
+        if (size > 1 && use_optimized_multi_temp) {
+            // ============================================================
+            // SYNCHRONIZED MODE: All ranks process the same operator at once
+            // Required because compute_dynamical_correlation_multi_sample_multi_temperature
+            // uses MPI collectives (Barrier, Reduce) internally for sample distribution.
+            // The master-worker pattern would cause collective mismatches since
+            // different ranks would be processing different operators.
+            // ============================================================
+            for (int task_idx = 0; task_idx < num_tasks; task_idx++) {
+                const auto& task = all_tasks[task_idx];
+                if (rank == 0) {
+                    std::cout << "\n--- Task " << (task_idx + 1) << " / " << num_tasks
+                              << ": Operator " << names[task.op_idx] << " (ALL temperatures, " << size << " MPI ranks) ---\n";
+                }
+                if (process_operator_all_temps(task.op_idx)) {
+                    local_processed_count++;
+                }
+            }
+        } else if (size > 1 && !use_optimized_multi_temp) {
+            // Master-worker pattern: safe for single-temperature tasks
+            // (process_task_single does NOT use MPI collectives internally)
             const int TASK_TAG = 1;
             const int DONE_TAG = 2;
             const int STOP_TAG = 3;
@@ -1310,19 +1329,11 @@ void compute_dynamical_response_workflow(const EDConfig& config) {
                         next_task++;
                         
                         const auto& task = all_tasks[my_task];
-                        if (task.is_multi_temp) {
-                            std::cout << "Rank 0 processing task " << (my_task + 1) << "/" << num_tasks
-                                      << " (op=" << names[task.op_idx] << ", ALL temperatures)\n";
-                            if (process_operator_all_temps(task.op_idx)) {
-                                local_processed_count++;
-                            }
-                        } else {
-                            std::cout << "Rank 0 processing task " << (my_task + 1) << "/" << num_tasks
-                                      << " (T=" << temperatures[task.temp_idx]
-                                      << ", op=" << names[task.op_idx] << ")\n";
-                            if (process_task_single(task)) {
-                                local_processed_count++;
-                            }
+                        std::cout << "Rank 0 processing task " << (my_task + 1) << "/" << num_tasks
+                                  << " (T=" << temperatures[task.temp_idx]
+                                  << ", op=" << names[task.op_idx] << ")\n";
+                        if (process_task_single(task)) {
+                            local_processed_count++;
                         }
                         completed++;
                     }
@@ -1358,19 +1369,11 @@ void compute_dynamical_response_workflow(const EDConfig& config) {
                     }
                     
                     const auto& task = all_tasks[task_id];
-                    if (task.is_multi_temp) {
-                        std::cout << "Rank " << rank << " processing task " << (task_id + 1) << "/" << num_tasks
-                                  << " (op=" << names[task.op_idx] << ", ALL temperatures)\n";
-                        if (process_operator_all_temps(task.op_idx)) {
-                            local_processed_count++;
-                        }
-                    } else {
-                        std::cout << "Rank " << rank << " processing task " << (task_id + 1) << "/" << num_tasks
-                                  << " (T=" << temperatures[task.temp_idx]
-                                  << ", op=" << names[task.op_idx] << ")\n";
-                        if (process_task_single(task)) {
-                            local_processed_count++;
-                        }
+                    std::cout << "Rank " << rank << " processing task " << (task_id + 1) << "/" << num_tasks
+                              << " (T=" << temperatures[task.temp_idx]
+                              << ", op=" << names[task.op_idx] << ")\n";
+                    if (process_task_single(task)) {
+                        local_processed_count++;
                     }
                     
                     MPI_Send(&task_id, 1, MPI_INT, 0, DONE_TAG, MPI_COMM_WORLD);
@@ -1432,6 +1435,14 @@ void compute_dynamical_response_workflow(const EDConfig& config) {
         std::string op_path = config.system.hamiltonian_dir + "/" + config.dynamical.operator_file;
         Operator op(config.system.num_sites, config.system.spin_length);
         op.loadFromInterAllFile(op_path);
+        // Also load three-body terms if a companion file exists
+        {
+            std::string op_3body = op_path + ".3body";
+            std::ifstream test_3b(op_3body);
+            if (test_3b.good()) {
+                op.loadThreeBodyTerm(op_3body);
+            }
+        }
         
         auto O_func = [&op](const Complex* in, Complex* out, uint64_t dim) {
             op.apply(in, out, dim);
@@ -1452,6 +1463,14 @@ void compute_dynamical_response_workflow(const EDConfig& config) {
                 std::string op2_path = config.system.hamiltonian_dir + "/" + config.dynamical.operator2_file;
                 Operator op2(config.system.num_sites, config.system.spin_length);
                 op2.loadFromInterAllFile(op2_path);
+                // Also load three-body terms for second operator
+                {
+                    std::string op2_3body = op2_path + ".3body";
+                    std::ifstream test_3b2(op2_3body);
+                    if (test_3b2.good()) {
+                        op2.loadThreeBodyTerm(op2_3body);
+                    }
+                }
                 
                 auto O2_func = [&op2](const Complex* in, Complex* out, uint64_t dim) {
                     op2.apply(in, out, dim);
