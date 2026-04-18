@@ -1,0 +1,66 @@
+#!/usr/bin/env bash
+# End-to-end smoke test for the `ED` executable.
+#
+# Runs ED on a tiny 4-site Heisenberg ring and checks:
+#   * the binary exits 0,
+#   * an eigenvalues file is produced,
+#   * the reported ground state matches the exact value E0 = -2 to 1e-6.
+#
+# This script is configured by CMake (paths below are substituted at
+# configure time) and registered as a CTest entry.
+
+set -euo pipefail
+
+ED_BIN="${ED_BINARY:-@ED_BINARY_FALLBACK@}"
+CFG="@TEST_CHAIN4_CFG@"
+OUT_DIR="@TEST_CHAIN4_OUT_DIR@"
+
+if [[ ! -x "$ED_BIN" ]]; then
+    echo "FAIL: ED binary not found at $ED_BIN" >&2
+    exit 2
+fi
+
+mkdir -p "$OUT_DIR"
+rm -f "$OUT_DIR"/*.dat "$OUT_DIR"/*.h5 2>/dev/null || true
+
+echo "[smoke] running: $ED_BIN $CFG"
+set +e
+"$ED_BIN" "$CFG" > "$OUT_DIR/ed_stdout.log" 2> "$OUT_DIR/ed_stderr.log"
+rc=$?
+set -e
+
+if [[ $rc -ne 0 ]]; then
+    echo "FAIL: ED exited with code $rc" >&2
+    tail -n 40 "$OUT_DIR/ed_stderr.log" >&2 || true
+    exit 3
+fi
+
+# ED writes its ground state to stdout in the form "E[0] = <value>" and
+# also to $OUT_DIR/ed_results.h5. Parsing stdout is robust across output
+# formats and more useful for a smoke test anyway.
+e0=$(grep -Eo 'E\[0\][[:space:]]*=[[:space:]]*-?[0-9.eE+-]+' \
+        "$OUT_DIR/ed_stdout.log" | tail -n 1 \
+        | sed -E 's/.*=[[:space:]]*//')
+
+if [[ -z "$e0" ]]; then
+    echo "FAIL: could not parse ground state from ED stdout" >&2
+    tail -n 40 "$OUT_DIR/ed_stdout.log" >&2
+    exit 4
+fi
+
+# Also verify that *some* persistent result artifact was produced.
+if ! find "$OUT_DIR" -maxdepth 4 \
+        \( -name '*.h5' -o -name 'eigenvalues.dat' \) -print -quit \
+        | grep -q .; then
+    echo "FAIL: no HDF5 or eigenvalues.dat result artifact in $OUT_DIR" >&2
+    ls -R "$OUT_DIR" >&2
+    exit 5
+fi
+
+# Expected ground state of 4-site PBC spin-1/2 Heisenberg (J=1) is -2 exactly.
+awk -v g="$e0" 'BEGIN{ if ((g - (-2.0))^2 < 1e-10) exit 0; else exit 1 }' || {
+    echo "FAIL: ground state $e0 differs from expected -2.0" >&2
+    exit 6
+}
+
+echo "[smoke] PASS  (E0 = $e0)"

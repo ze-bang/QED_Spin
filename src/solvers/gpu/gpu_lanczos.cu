@@ -33,41 +33,6 @@ __global__ void initRandomVectorKernel(cuDoubleComplex* vec, int N, unsigned lon
     vec[idx] = make_cuDoubleComplex(real_part, imag_part);
 }
 
-__global__ void vectorAddKernel(const cuDoubleComplex* x, const cuDoubleComplex* y,
-                               cuDoubleComplex* result, int N) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= N) return;
-    
-    result[idx] = cuCadd(x[idx], y[idx]);
-}
-
-__global__ void vectorSubKernel(const cuDoubleComplex* x, const cuDoubleComplex* y,
-                               cuDoubleComplex* result, int N) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= N) return;
-    
-    result[idx] = cuCsub(x[idx], y[idx]);
-}
-
-__global__ void vectorScaleKernel(cuDoubleComplex* vec, double scale, int N) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= N) return;
-    
-    vec[idx] = make_cuDoubleComplex(
-        cuCreal(vec[idx]) * scale,
-        cuCimag(vec[idx]) * scale
-    );
-}
-
-__global__ void vectorAxpyKernel(const cuDoubleComplex* x, cuDoubleComplex* y,
-                                cuDoubleComplex alpha, int N) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= N) return;
-    
-    cuDoubleComplex ax = cuCmul(alpha, x[idx]);
-    y[idx] = cuCadd(y[idx], ax);
-}
-
 /**
  * @brief Batched modified Gram-Schmidt orthogonalization kernel
  * 
@@ -163,7 +128,9 @@ __global__ void batchedOrthogonalizeKernel(cuDoubleComplex* const* basis,
 GPULanczos::GPULanczos(GPUOperator* op, int max_iter, double tolerance)
     : op_(op), max_iter_(max_iter), tolerance_(tolerance),
       d_v_current_(nullptr), d_v_prev_(nullptr), d_w_(nullptr), d_temp_(nullptr),
-      d_lanczos_vectors_(nullptr), num_stored_vectors_(0) {
+      d_lanczos_vectors_(nullptr), num_stored_vectors_(0),
+      d_ortho_basis_ptrs_(nullptr), d_ortho_overlaps_(nullptr),
+      ortho_timing_events_created_(false) {
     
     dimension_ = op_->getDimension();
     
@@ -241,6 +208,11 @@ void GPULanczos::allocateMemory() {
         std::cout << "  Storing " << num_stored_vectors_ << " Lanczos vectors on GPU for local reorthogonalization\n";
         std::cout << "  GPU Memory: " << (free_mem / (1024.0 * 1024.0 * 1024.0)) << " GB free, "
                   << "using " << ((num_stored_vectors_ * vec_size) / (1024.0 * 1024.0 * 1024.0)) << " GB for basis storage\n";
+
+        CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&d_ortho_basis_ptrs_),
+                              static_cast<size_t>(num_stored_vectors_) * sizeof(cuDoubleComplex*)));
+        CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&d_ortho_overlaps_),
+                              static_cast<size_t>(num_stored_vectors_) * sizeof(cuDoubleComplex)));
     } else {
         std::cout << "  Warning: Insufficient GPU memory for vector storage\n";
         std::cout << "  GPU Memory: " << (free_mem / (1024.0 * 1024.0 * 1024.0)) << " GB free, "
@@ -248,16 +220,33 @@ void GPULanczos::allocateMemory() {
         std::cout << "  Using no reorthogonalization (may produce less accurate results)\n";
         num_stored_vectors_ = 0;
     }
+
+    CUDA_CHECK(cudaEventCreate(&ortho_timing_start_));
+    CUDA_CHECK(cudaEventCreate(&ortho_timing_stop_));
+    ortho_timing_events_created_ = true;
     
     alpha_.reserve(max_iter_);
     beta_.reserve(max_iter_);
 }
 
 void GPULanczos::freeMemory() {
+    if (ortho_timing_events_created_) {
+        CUDA_CHECK(cudaEventDestroy(ortho_timing_start_));
+        CUDA_CHECK(cudaEventDestroy(ortho_timing_stop_));
+        ortho_timing_events_created_ = false;
+    }
     if (d_v_current_) cudaFree(d_v_current_);
     if (d_v_prev_) cudaFree(d_v_prev_);
     if (d_w_) cudaFree(d_w_);
     if (d_temp_) cudaFree(d_temp_);
+    if (d_ortho_basis_ptrs_) {
+        cudaFree(d_ortho_basis_ptrs_);
+        d_ortho_basis_ptrs_ = nullptr;
+    }
+    if (d_ortho_overlaps_) {
+        cudaFree(d_ortho_overlaps_);
+        d_ortho_overlaps_ = nullptr;
+    }
     
     if (d_lanczos_vectors_) {
         for (int i = 0; i < num_stored_vectors_; ++i) {
@@ -307,10 +296,8 @@ void GPULanczos::vectorCopy(const cuDoubleComplex* src, cuDoubleComplex* dst) {
 }
 
 void GPULanczos::vectorScale(cuDoubleComplex* d_vec, double scale) {
-    int num_blocks = (dimension_ + BLOCK_SIZE - 1) / BLOCK_SIZE;
-    GPULanczosKernels::vectorScaleKernel<<<num_blocks, BLOCK_SIZE>>>(
-        d_vec, scale, dimension_);
-    CUDA_CHECK(cudaGetLastError());
+    // cuBLAS Zdscal: x <- alpha * x with real alpha — same semantics as vectorScaleKernel
+    CUBLAS_CHECK(cublasZdscal(cublas_handle_, dimension_, &scale, d_vec, 1));
 }
 
 std::complex<double> GPULanczos::vectorDot(const cuDoubleComplex* d_x,
@@ -336,10 +323,7 @@ void GPULanczos::orthogonalize(cuDoubleComplex* d_vec, int iter,
                                const std::vector<double>& alpha,
                                const std::vector<double>& beta,
                                double ortho_threshold) {
-    cudaEvent_t start, stop;
-    CUDA_CHECK(cudaEventCreate(&start));
-    CUDA_CHECK(cudaEventCreate(&stop));
-    CUDA_CHECK(cudaEventRecord(start));
+    CUDA_CHECK(cudaEventRecord(ortho_timing_start_));
     
     if (num_stored_vectors_ > 0 && iter > 0) {
         // IMPROVED: Use FULL reorthogonalization for better stability
@@ -348,16 +332,13 @@ void GPULanczos::orthogonalize(cuDoubleComplex* d_vec, int iter,
         
         // Use batched approach when there are enough vectors (better GPU utilization)
         const int BATCH_THRESHOLD = 4;
-        
-        if (num_check >= BATCH_THRESHOLD) {
+        const bool use_batched = (num_check >= BATCH_THRESHOLD) &&
+                                 (d_ortho_basis_ptrs_ != nullptr) &&
+                                 (d_ortho_overlaps_ != nullptr);
+
+        if (use_batched) {
             // BATCHED ORTHOGONALIZATION: More efficient for multiple vectors
-            
-            // Allocate device memory for batch pointers and overlaps
-            cuDoubleComplex** d_basis_ptrs = nullptr;
-            cuDoubleComplex* d_overlaps = nullptr;
-            CUDA_CHECK(cudaMalloc(&d_basis_ptrs, num_check * sizeof(cuDoubleComplex*)));
-            CUDA_CHECK(cudaMalloc(&d_overlaps, num_check * sizeof(cuDoubleComplex)));
-            
+
             // Collect pointers to the basis vectors we want to orthogonalize against
             std::vector<cuDoubleComplex*> h_basis_ptrs(num_check);
             for (int i = 0; i < num_check; ++i) {
@@ -365,21 +346,23 @@ void GPULanczos::orthogonalize(cuDoubleComplex* d_vec, int iter,
                 int buffer_idx = src_idx % num_stored_vectors_;
                 h_basis_ptrs[i] = d_lanczos_vectors_[buffer_idx];
             }
-            CUDA_CHECK(cudaMemcpy(d_basis_ptrs, h_basis_ptrs.data(), 
-                                 num_check * sizeof(cuDoubleComplex*), cudaMemcpyHostToDevice));
-            
+            CUDA_CHECK(cudaMemcpy(d_ortho_basis_ptrs_, h_basis_ptrs.data(),
+                                 static_cast<size_t>(num_check) * sizeof(cuDoubleComplex*),
+                                 cudaMemcpyHostToDevice));
+
             // Launch batched dot product kernel
             // Each block handles one basis vector
             int threads_per_block = 256;
             size_t shared_mem = 2 * threads_per_block * sizeof(double);
             GPULanczosKernels::batchedDotProductKernel<<<num_check, threads_per_block, shared_mem>>>(
-                d_basis_ptrs, d_vec, d_overlaps, num_check, dimension_);
+                d_ortho_basis_ptrs_, d_vec, d_ortho_overlaps_, num_check, dimension_);
             CUDA_CHECK(cudaGetLastError());
-            
+
             // Copy overlaps back to host to check threshold
             std::vector<cuDoubleComplex> h_overlaps(num_check);
-            CUDA_CHECK(cudaMemcpy(h_overlaps.data(), d_overlaps, 
-                                 num_check * sizeof(cuDoubleComplex), cudaMemcpyDeviceToHost));
+            CUDA_CHECK(cudaMemcpy(h_overlaps.data(), d_ortho_overlaps_,
+                                 static_cast<size_t>(num_check) * sizeof(cuDoubleComplex),
+                                 cudaMemcpyDeviceToHost));
             
             // Count significant overlaps and apply corrections
             int num_reorthed = 0;
@@ -402,11 +385,12 @@ void GPULanczos::orthogonalize(cuDoubleComplex* d_vec, int iter,
                 // DOUBLE ORTHOGONALIZATION: Apply a second pass for numerical stability
                 // This is crucial for large systems where single pass can miss residual overlaps
                 GPULanczosKernels::batchedDotProductKernel<<<num_check, threads_per_block, shared_mem>>>(
-                    d_basis_ptrs, d_vec, d_overlaps, num_check, dimension_);
+                    d_ortho_basis_ptrs_, d_vec, d_ortho_overlaps_, num_check, dimension_);
                 CUDA_CHECK(cudaGetLastError());
-                
-                CUDA_CHECK(cudaMemcpy(h_overlaps.data(), d_overlaps, 
-                                     num_check * sizeof(cuDoubleComplex), cudaMemcpyDeviceToHost));
+
+                CUDA_CHECK(cudaMemcpy(h_overlaps.data(), d_ortho_overlaps_,
+                                     static_cast<size_t>(num_check) * sizeof(cuDoubleComplex),
+                                     cudaMemcpyDeviceToHost));
                 
                 for (int i = 0; i < num_check; ++i) {
                     double overlap_mag = sqrt(cuCreal(h_overlaps[i]) * cuCreal(h_overlaps[i]) + 
@@ -419,11 +403,7 @@ void GPULanczos::orthogonalize(cuDoubleComplex* d_vec, int iter,
                     }
                 }
             }
-            
-            // Cleanup
-            cudaFree(d_basis_ptrs);
-            cudaFree(d_overlaps);
-            
+
         } else {
             // SEQUENTIAL APPROACH: More efficient for small number of vectors
             int num_reorthed = 0;
@@ -460,15 +440,12 @@ void GPULanczos::orthogonalize(cuDoubleComplex* d_vec, int iter,
         }
     }
     
-    CUDA_CHECK(cudaEventRecord(stop));
-    CUDA_CHECK(cudaEventSynchronize(stop));
+    CUDA_CHECK(cudaEventRecord(ortho_timing_stop_));
+    CUDA_CHECK(cudaEventSynchronize(ortho_timing_stop_));
     
     float milliseconds = 0;
-    CUDA_CHECK(cudaEventElapsedTime(&milliseconds, start, stop));
+    CUDA_CHECK(cudaEventElapsedTime(&milliseconds, ortho_timing_start_, ortho_timing_stop_));
     stats_.ortho_time += milliseconds / 1000.0;
-    
-    CUDA_CHECK(cudaEventDestroy(start));
-    CUDA_CHECK(cudaEventDestroy(stop));
 }
 
 void GPULanczos::run(int num_eigenvalues,

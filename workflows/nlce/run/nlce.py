@@ -875,19 +875,15 @@ def main():
                 f'--lb_energy_tolerance=10.0',
             ]
         elif args.method == 'mTPQ':
-            logging.info("Using mTPQ method for NLCE summation")
-            # Add mTPQ specific parameters here if needed
-            nlc_params = [
-                sys.executable,  # Use the same Python interpreter
-                os.path.join(os.path.dirname(__file__), 'NLC_sum_TPQ.py'),
-                f'--cluster_dir={cluster_info_dir}',
-                f'--eigenvalue_dir={ed_dir}',
-                f'--output_dir={nlc_dir}',
-                '--plot',
-                f'--temp_min={args.temp_min}',
-                f'--temp_max={args.temp_max}',
-                f'--temp_bins={args.temp_bins}'
-            ]
+            # NLC_sum_TPQ.py never made it into the repository; the mTPQ
+            # branch was a placeholder. Fail loudly rather than silently
+            # launching a missing script.
+            raise NotImplementedError(
+                "NLCE summation for mTPQ is not implemented. "
+                "Use --method=FULL (NLC_sum.py), --method=FTLM "
+                "(nlce_ftlm.py + NLC_sum_ftlm.py), or --lanczos-boost "
+                "(NLC_sum_LB.py) instead."
+            )
         else:
             nlc_params = [
                 sys.executable,  # Use the same Python interpreter

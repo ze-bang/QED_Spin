@@ -73,7 +73,12 @@ exact_diagonalization_cpp/
 │   ├── prep/                 # Cluster generation
 │   ├── run/                  # ED execution and NLCE summation
 │   └── analysis/             # Fitting and convergence analysis
-├── scripts/                  # Plotting and utility scripts
+├── scripts/                  # Post-processing (plotting, analysis, utilities)
+│   ├── plotting/             # Publication plots (FTLM, TPQ, DSSF, SSSF, ...)
+│   ├── analysis/             # QFI, Berry curvature, thermodynamic heatmaps
+│   ├── utils/                # h5inspect, parse_tpq, print_gamma_matrices
+│   ├── research/             # Topic-specific pipelines (e.g. research/bfg/)
+│   └── archive/              # Retained for reference; not maintained
 ├── docs/                     # Extended documentation
 ├── examples/                 # Sample configuration files
 ├── data/                     # Input data files
@@ -662,7 +667,7 @@ For systems with 28+ sites, special strategies are required:
 
 ```bash
 # 1. Check resource requirements
-python3 scripts/check_system_feasibility.py 32 --fixed-sz --method=FTLM
+python3 workflows/nlce/prep/check_system_feasibility.py 32 --fixed-sz --method=FTLM
 
 # 2. Use Fixed-Sz + FTLM
 ./ED ./ham_dir --method=FTLM --fixed-sz --samples=50 \
@@ -730,17 +735,30 @@ with hdf5_io.open_results("./output/results.h5") as f:
 ### Plotting Scripts
 
 ```bash
-cd scripts
-
 # Plot thermodynamics
-python3 plot_ftlm.py --input ../results/thermo/thermo_data.txt
-
-# Animate dynamical structure factor
-python3 animate_DSSF.py --input ../results/dynamical_response/
+python3 scripts/plotting/plot_ftlm.py --input results/thermo/thermo_data.txt
 
 # Plot NLCE convergence
-python3 plot_ftlm_clusters.py --cluster_dir ../workflows/nlce/run/nlce_results
+python3 scripts/plotting/plot_ftlm_clusters.py \
+    --cluster_dir workflows/nlce/run/nlce_results
+
+# Inspect any ED HDF5 output
+python3 scripts/utils/h5inspect.py results/ed_results.h5
 ```
+
+### Analysis Scripts
+
+```bash
+# Quantum Fisher information from spectral data
+python3 scripts/analysis/calc_QFI_from_spectral.py \
+    --input results/dynamical_response/
+
+# Berry curvature / mean Uhlmann curvature
+python3 scripts/analysis/calc_curvature_from_spectral.py \
+    --input results/dynamical_response/
+```
+
+See `scripts/README.md` for the full catalog.
 
 ---
 

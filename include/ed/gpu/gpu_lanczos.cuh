@@ -62,6 +62,15 @@ private:
     // Lanczos vectors stored on GPU (if memory allows)
     cuDoubleComplex** d_lanczos_vectors_;
     int num_stored_vectors_;
+
+    // Reusable buffers for batched orthogonalization (avoid cudaMalloc/free per step)
+    cuDoubleComplex** d_ortho_basis_ptrs_;  // device pointer array [num_stored_vectors_]
+    cuDoubleComplex* d_ortho_overlaps_;      // overlap scratch [num_stored_vectors_]
+
+    // Reusable CUDA events for orthogonalize() timing (avoid create/destroy each call)
+    cudaEvent_t ortho_timing_start_;
+    cudaEvent_t ortho_timing_stop_;
+    bool ortho_timing_events_created_;
     
     // Tridiagonal matrix elements (on host)
     std::vector<double> alpha_;  // Diagonal
@@ -634,17 +643,6 @@ private:
 namespace GPULanczosKernels {
 
 __global__ void initRandomVectorKernel(cuDoubleComplex* vec, int N, unsigned long long seed);
-
-__global__ void vectorAddKernel(const cuDoubleComplex* x, const cuDoubleComplex* y,
-                               cuDoubleComplex* result, int N);
-
-__global__ void vectorSubKernel(const cuDoubleComplex* x, const cuDoubleComplex* y,
-                               cuDoubleComplex* result, int N);
-
-__global__ void vectorScaleKernel(cuDoubleComplex* vec, double scale, int N);
-
-__global__ void vectorAxpyKernel(const cuDoubleComplex* x, cuDoubleComplex* y,
-                                cuDoubleComplex alpha, int N);
 
 /**
  * @brief Batched dot product kernel for efficient orthogonalization

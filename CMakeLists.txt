@@ -874,6 +874,7 @@ set(SOURCES
     ${SOLVERS_CPU_DIR}/ltlm.cpp
     ${SOLVERS_CPU_DIR}/hybrid_thermal.cpp
     ${IO_DIR}/basis_vector_storage.cpp
+    ${IO_DIR}/lanczos_basis_buffer.cpp
 )
 
 # Add ScaLAPACK sources if available
@@ -967,7 +968,7 @@ if(WITH_MPI)
         set(HAS_PARALLEL_HDF5 FALSE)
     endif()
 
-    add_executable(TPQ_DSSF ${APPS_DIR}/TPQ_DSSF.cpp ${SOLVERS_CPU_DIR}/dynamics.cpp ${SOLVERS_CPU_DIR}/TPQ.cpp ${SOLVERS_CPU_DIR}/ftlm.cpp ${SOLVERS_CPU_DIR}/lanczos.cpp ${IO_DIR}/basis_vector_storage.cpp)
+    add_executable(TPQ_DSSF ${APPS_DIR}/TPQ_DSSF.cpp ${SOLVERS_CPU_DIR}/dynamics.cpp ${SOLVERS_CPU_DIR}/TPQ.cpp ${SOLVERS_CPU_DIR}/ftlm.cpp ${SOLVERS_CPU_DIR}/lanczos.cpp ${IO_DIR}/basis_vector_storage.cpp ${IO_DIR}/lanczos_basis_buffer.cpp)
 endif()
 
 # BFG Order Parameter computation (lightweight, HDF5 + OpenMP only)
@@ -1361,4 +1362,139 @@ if(OpenMP_CXX_FOUND)
     message(STATUS "  OpenMP Support: YES")
 else()
     message(STATUS "  OpenMP Support: NO")
+endif()
+
+# =============================================================================
+# ED test suite (CPU).
+#
+# A small, fast set of regression tests that exercise the matrix-free Operator
+# path, the fixed-Sz operator, full diagonalization, every Lanczos-family
+# solver, the in-memory basis buffer, and the Trans.dat/InterAll.dat loaders.
+# Enable with `-DBUILD_ED_TESTS=ON` (defaults to ON) and run with `ctest`.
+# =============================================================================
+option(BUILD_ED_TESTS "Build the ED regression test suite" ON)
+
+if(BUILD_ED_TESTS)
+    enable_testing()
+
+    # Sources that make up the CPU ED library (everything except the
+    # `ed_main.cpp` driver which provides its own `main`). Tests link against
+    # these directly so they share exactly the same compiled code as the ED
+    # executable.
+    set(ED_TEST_LIB_SOURCES
+        ${CORE_DIR}/ed_config.cpp
+        ${SOLVERS_CPU_DIR}/arpack.cpp
+        ${SOLVERS_CPU_DIR}/observables.cpp
+        ${SOLVERS_CPU_DIR}/lanczos.cpp
+        ${SOLVERS_CPU_DIR}/CG.cpp
+        ${SOLVERS_CPU_DIR}/dynamics.cpp
+        ${SOLVERS_CPU_DIR}/TPQ.cpp
+        ${SOLVERS_CPU_DIR}/ftlm.cpp
+        ${SOLVERS_CPU_DIR}/ltlm.cpp
+        ${SOLVERS_CPU_DIR}/hybrid_thermal.cpp
+        ${IO_DIR}/basis_vector_storage.cpp
+        ${IO_DIR}/lanczos_basis_buffer.cpp
+    )
+    if(WITH_SCALAPACK AND SCALAPACK_LIBRARIES)
+        list(APPEND ED_TEST_LIB_SOURCES ${SOLVERS_CPU_DIR}/scalapack_diag.cpp)
+    endif()
+
+    # Mirror ED's link stack so tests see the same symbols.
+    set(ED_TEST_LINK_LIBS
+        ${BLAS_LIBRARIES}
+        ${LAPACK_LIBRARIES}
+        ${LAPACKE_LIBRARIES}
+        ${EXTRA_LINALG_LIBRARIES}
+        ${ARPACK_LIBRARY}
+        ${HDF5_LIBRARIES}
+    )
+    if(WITH_SCALAPACK AND SCALAPACK_LIBRARIES)
+        list(INSERT ED_TEST_LINK_LIBS 0 ${SCALAPACK_LIBRARIES})
+    endif()
+    if(WITH_CUDA)
+        list(APPEND ED_TEST_LINK_LIBS
+            CUDA::cudart
+            CUDA::cublas
+            CUDA::cusparse
+            CUDA::curand
+            CUDA::cusolver
+        )
+    endif()
+    if(WITH_MPI)
+        list(APPEND ED_TEST_LINK_LIBS ${MPI_CXX_LIBRARIES})
+    endif()
+
+    # Helper to declare a test executable. Each test gets its own binary so
+    # CTest can run them in parallel and report failures independently.
+    function(ed_add_test test_name test_source)
+        add_executable(${test_name} ${test_source} ${ED_TEST_LIB_SOURCES})
+        target_include_directories(${test_name} PRIVATE
+            ${INCLUDE_DIR}
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests
+        )
+        target_link_libraries(${test_name} PRIVATE ${ED_TEST_LINK_LIBS})
+        if(OpenMP_CXX_FOUND)
+            target_link_libraries(${test_name} PRIVATE OpenMP::OpenMP_CXX)
+        endif()
+        target_compile_options(${test_name} PRIVATE
+            $<$<COMPILE_LANGUAGE:CXX>:${CPU_OPT_FLAGS}>
+        )
+        add_test(NAME ${test_name} COMMAND ${test_name})
+        set_tests_properties(${test_name} PROPERTIES
+            ENVIRONMENT "ED_TEST_TMP_DIR=${CMAKE_CURRENT_BINARY_DIR}/test_scratch"
+            TIMEOUT 180
+        )
+    endfunction()
+
+    ed_add_test(test_operator_apply             tests/unit/test_operator_apply.cpp)
+    ed_add_test(test_fixed_sz_operator          tests/unit/test_fixed_sz_operator.cpp)
+    ed_add_test(test_full_diagonalization       tests/unit/test_full_diagonalization.cpp)
+    ed_add_test(test_lanczos_variants           tests/unit/test_lanczos_variants.cpp)
+    ed_add_test(test_lanczos_basis_buffer       tests/unit/test_lanczos_basis_buffer.cpp)
+    ed_add_test(test_trans_interall_loading     tests/unit/test_trans_interall_loading.cpp)
+    ed_add_test(test_observables                tests/unit/test_observables.cpp)
+    ed_add_test(test_thermal_methods            tests/unit/test_thermal_methods.cpp)
+    ed_add_test(test_hdf5_io                    tests/unit/test_hdf5_io.cpp)
+    ed_add_test(test_symmetry                   tests/unit/test_symmetry.cpp)
+
+    # Regression test of the on-disk fallback path for the Lanczos basis
+    # buffer. `force_disk_storage()` is cached per-process, so we reuse the
+    # variants binary in a separate subprocess with ED_LANCZOS_DISK=1.
+    add_test(NAME test_lanczos_variants_disk COMMAND test_lanczos_variants)
+    set_tests_properties(test_lanczos_variants_disk PROPERTIES
+        ENVIRONMENT "ED_LANCZOS_DISK=1;ED_TEST_TMP_DIR=${CMAKE_CURRENT_BINARY_DIR}/test_scratch_disk"
+        TIMEOUT 240
+    )
+
+    # -------------------------------------------------------------------------
+    # End-to-end smoke test: run the actual `ED` binary on a 4-site Heisenberg
+    # ring fixture and verify the ground-state energy is -2 exactly.
+    # -------------------------------------------------------------------------
+    set(TEST_CHAIN4_DIR
+        ${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/chain4)
+    set(TEST_CHAIN4_OUT_DIR
+        ${CMAKE_CURRENT_BINARY_DIR}/test_scratch/chain4_out)
+    set(TEST_CHAIN4_CFG
+        ${CMAKE_CURRENT_BINARY_DIR}/test_scratch/chain4.cfg)
+    set(ED_BINARY_FALLBACK
+        ${CMAKE_CURRENT_BINARY_DIR}/ED)
+
+    configure_file(
+        ${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/chain4.cfg.in
+        ${TEST_CHAIN4_CFG}
+        @ONLY
+    )
+    configure_file(
+        ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_ed_smoke.sh.in
+        ${CMAKE_CURRENT_BINARY_DIR}/run_ed_smoke.sh
+        @ONLY
+    )
+
+    add_test(NAME test_ed_smoke
+             COMMAND bash ${CMAKE_CURRENT_BINARY_DIR}/run_ed_smoke.sh)
+    set_tests_properties(test_ed_smoke PROPERTIES
+        ENVIRONMENT "ED_BINARY=$<TARGET_FILE:ED>"
+        DEPENDS "ED"
+        TIMEOUT 120
+    )
 endif()

@@ -295,11 +295,11 @@ def main():
     print("="*70)
     print("\nOption 1 - Python/Matplotlib:")
     print("  pip install matplotlib numpy")
-    print(f"  python scripts/plot_ftlm.py {args.input}")
+    print(f"  python scripts/plotting/plot_ftlm.py {args.input}")
     
     print("\nOption 2 - Gnuplot:")
     print("  sudo apt-get install gnuplot")
-    print(f"  ./scripts/plot_ftlm.sh {args.input}")
+    print(f"  ./scripts/plotting/plot_ftlm.sh {args.input}")
     
     print("\nOption 3 - Manual (Excel, Origin, etc.):")
     print(f"  Open {args.input} in your plotting software")

@@ -150,27 +150,55 @@ public:
         
         auto pass1_start = std::chrono::high_resolution_clock::now();
         
-        std::vector<uint64_t> orbit_reps(dim);
-        
-        #pragma omp parallel for schedule(static)
-        for (size_t i = 0; i < dim; ++i) {
-            uint64_t basis = static_cast<uint64_t>(i);
+        // Collect canonical orbit representatives WITHOUT an O(dim) scratch array.
+        // For the full Hilbert space, rep(b) = min_{g in G} g(b); a state is its
+        // orbit's canonical rep iff b == rep(b). Same set as distinct values of
+        // rep(i) over all i, but only O(|orbits|) storage. With OpenMP, each thread
+        // appends canonical bases in a static chunk, then we sort to restore
+        // deterministic ascending order (matches the old "first occurrence" scan).
+        std::vector<uint64_t> unique_orbit_reps;
+#ifdef _OPENMP
+        {
+            const int nthreads = omp_get_max_threads();
+            std::vector<std::vector<uint64_t>> thread_reps(static_cast<size_t>(nthreads));
+            #pragma omp parallel
+            {
+                const int tid = omp_get_thread_num();
+                #pragma omp for schedule(static) nowait
+                for (size_t basis = 0; basis < dim; ++basis) {
+                    uint64_t rep = basis;
+                    for (const auto& perm : symmetry_info.max_clique) {
+                        uint64_t permuted = applyPermutation(basis, perm);
+                        if (permuted < rep) rep = permuted;
+                    }
+                    if (basis == rep) {
+                        thread_reps[static_cast<size_t>(tid)].push_back(basis);
+                    }
+                }
+            }
+            size_t total = 0;
+            for (const auto& v : thread_reps) {
+                total += v.size();
+            }
+            unique_orbit_reps.reserve(total);
+            for (const auto& v : thread_reps) {
+                unique_orbit_reps.insert(unique_orbit_reps.end(), v.begin(), v.end());
+            }
+            std::sort(unique_orbit_reps.begin(), unique_orbit_reps.end());
+        }
+#else
+        unique_orbit_reps.reserve(dim / symmetry_info.max_clique.size() + 1);
+        for (size_t basis = 0; basis < dim; ++basis) {
             uint64_t rep = basis;
             for (const auto& perm : symmetry_info.max_clique) {
-                uint64_t permuted = applyPermutation(basis, perm);
+                uint64_t permuted = applyPermutation(static_cast<uint64_t>(basis), perm);
                 if (permuted < rep) rep = permuted;
             }
-            orbit_reps[i] = rep;
-        }
-        
-        std::unordered_set<uint64_t> seen_reps;
-        std::vector<uint64_t> unique_orbit_reps;
-        unique_orbit_reps.reserve(dim / symmetry_info.max_clique.size() + 1);
-        for (size_t i = 0; i < dim; ++i) {
-            if (seen_reps.insert(orbit_reps[i]).second) {
-                unique_orbit_reps.push_back(orbit_reps[i]);
+            if (basis == rep) {
+                unique_orbit_reps.push_back(static_cast<uint64_t>(basis));
             }
         }
+#endif
         
         auto pass1_end = std::chrono::high_resolution_clock::now();
         double pass1_ms = std::chrono::duration<double, std::milli>(pass1_end - pass1_start).count();
@@ -1484,11 +1512,13 @@ public:
         
         auto pass1_start = std::chrono::high_resolution_clock::now();
         
-        // Parallel orbit representative computation
+        // Single streaming pass: compute rep(basis) and dedupe without storing
+        // orbit_reps[num_basis] (~8 bytes per Sz-sector basis element).
         const size_t num_basis = basis_states_.size();
-        std::vector<uint64_t> orbit_reps(num_basis);
+        std::unordered_set<uint64_t> seen_reps;
+        std::vector<uint64_t> unique_orbit_reps;
+        unique_orbit_reps.reserve(num_basis / symmetry_info.max_clique.size() + 1);
         
-        #pragma omp parallel for schedule(static)
         for (size_t i = 0; i < num_basis; ++i) {
             uint64_t basis = basis_states_[i];
             uint64_t rep = basis;
@@ -1498,16 +1528,8 @@ public:
                     rep = permuted;
                 }
             }
-            orbit_reps[i] = rep;
-        }
-        
-        // Collect unique orbit representatives (sequential, fast)
-        std::unordered_set<uint64_t> seen_reps;
-        std::vector<uint64_t> unique_orbit_reps;
-        unique_orbit_reps.reserve(num_basis / symmetry_info.max_clique.size() + 1);
-        for (size_t i = 0; i < num_basis; ++i) {
-            if (seen_reps.insert(orbit_reps[i]).second) {
-                unique_orbit_reps.push_back(orbit_reps[i]);
+            if (seen_reps.insert(rep).second) {
+                unique_orbit_reps.push_back(rep);
             }
         }
         

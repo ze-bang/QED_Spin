@@ -1,8 +1,53 @@
 #include <ed/solvers/lanczos.h>
-#include <ed/core/system_utils.h>
 #include <ed/core/hdf5_io.h>
+#include <ed/io/lanczos_basis_buffer.h>
+#include <filesystem>
 #include <limits>
 #include <iomanip>
+
+// -----------------------------------------------------------------------------
+// RAII-style helper: register an in-memory basis buffer for the lifetime of a
+// solver, and silently fall back to on-disk storage if the user forced disk
+// mode via ED_LANCZOS_DISK=1. When in memory mode, no filesystem work (mkdir
+// /rm -rf) is performed; when in disk mode the legacy path is preserved so
+// existing behaviour is unchanged.
+// -----------------------------------------------------------------------------
+namespace {
+
+class BasisBufferScope {
+public:
+    BasisBufferScope(const std::string& key, uint64_t N, uint64_t reserve_vectors)
+        : key_(key), in_memory_(!lanczos_io::force_disk_storage()) {
+        if (in_memory_) {
+            lanczos_io::register_basis_buffer(key_, N, reserve_vectors);
+        } else {
+            // Legacy on-disk path: ensure the directory exists.
+            std::error_code ec;
+            std::filesystem::create_directories(key_, ec);
+        }
+    }
+
+    ~BasisBufferScope() {
+        if (in_memory_) {
+            lanczos_io::release_basis_buffer(key_);
+        } else {
+            // Legacy on-disk path: best-effort cleanup without shell out.
+            std::error_code ec;
+            std::filesystem::remove_all(key_, ec);
+        }
+    }
+
+    bool in_memory() const { return in_memory_; }
+
+    BasisBufferScope(const BasisBufferScope&) = delete;
+    BasisBufferScope& operator=(const BasisBufferScope&) = delete;
+
+private:
+    std::string key_;
+    bool in_memory_;
+};
+
+} // anonymous namespace
 
 ComplexVector generateRandomVector(int N, std::mt19937& gen, std::uniform_real_distribution<double>& dist) {
     ComplexVector v(N);
@@ -245,7 +290,16 @@ void refine_degenerate_eigenvectors(std::function<void(const Complex*, Complex*,
 
 
 ComplexVector read_basis_vector(const std::string& temp_dir, uint64_t index, uint64_t N) {
-    ComplexVector vec(N);
+    // Fast path: in-memory buffer. This is the normal case once a solver has
+    // registered its temp_dir via BasisBufferScope.
+    ComplexVector vec;
+    if (lanczos_io::get_basis_vector(temp_dir, index, vec)) {
+        return vec;
+    }
+
+    // Fallback: legacy on-disk storage (used when ED_LANCZOS_DISK=1 or when
+    // a solver has not yet been ported to register a buffer).
+    vec.assign(N, Complex(0.0, 0.0));
     std::string filename = temp_dir + "/basis_" + std::to_string(index) + ".dat";
     std::ifstream infile(filename, std::ios::binary);
     if (!infile) {
@@ -256,8 +310,26 @@ ComplexVector read_basis_vector(const std::string& temp_dir, uint64_t index, uin
     return vec;
 }
 
-// Helper function to write a basis vector to file
+// Helper function to write a basis vector to file (or to the in-memory buffer
+// registered for `temp_dir`).
 bool write_basis_vector(const std::string& temp_dir, uint64_t index, const ComplexVector& vec, uint64_t N) {
+    // Fast path: in-memory buffer. Most call sites append in order
+    // (index == size), but restart algorithms (Krylov-Schur, IRL, thick
+    // restart) overwrite indices in place after a basis rotation.
+    if (lanczos_io::has_basis_buffer(temp_dir)) {
+        uint64_t sz = lanczos_io::basis_buffer_size(temp_dir);
+        if (index == sz) {
+            if (lanczos_io::append_basis_vector(temp_dir, vec)) {
+                return true;
+            }
+        } else if (index < sz) {
+            if (lanczos_io::set_basis_vector(temp_dir, index, vec)) {
+                return true;
+            }
+        }
+        // Gap in indices: fall through to disk path to preserve correctness.
+    }
+
     std::string filename = temp_dir + "/basis_" + std::to_string(index) + ".dat";
     std::ofstream outfile(filename, std::ios::binary);
     if (!outfile) {
@@ -587,12 +659,12 @@ void lanczos_no_ortho(std::function<void(const Complex*, Complex*, int)> H, uint
     Complex scale_factor = Complex(1.0/norm, 0.0);
     cblas_zscal(N, &scale_factor, v_current.data(), 1);
     
-    // Create a directory for temporary basis vector files
+    // Storage for basis vectors (RAM by default, disk via ED_LANCZOS_DISK=1)
     std::string temp_dir = (dir.empty() ? "./lanczos_basis_vectors" : dir+"/lanczos_basis_vectors");
-    std::string cmd = "mkdir -p " + temp_dir;
-    safe_system_call(cmd);
+    max_iter = std::min(N, max_iter);
+    BasisBufferScope basis_scope(temp_dir, N, max_iter);
 
-    // Write the first basis vector to file
+    // Store the first basis vector
     if (!write_basis_vector(temp_dir, 0, v_current, N)) {
         return;
     }
@@ -605,8 +677,6 @@ void lanczos_no_ortho(std::function<void(const Complex*, Complex*, int)> H, uint
     std::vector<double> alpha;  // Diagonal elements
     std::vector<double> beta;   // Off-diagonal elements
     beta.push_back(0.0);        // β_0 is not used
-    
-    max_iter = std::min(N, max_iter);
     
     // Eigenvalue convergence checking
     std::vector<double> prev_eigenvalues;
@@ -716,13 +786,10 @@ void lanczos_no_ortho(std::function<void(const Complex*, Complex*, int)> H, uint
     
     if (info != 0) {
         std::cerr << "Tridiagonal eigenvalue solver failed with error code " << info << std::endl;
-        // Clean up temporary files before returning
-        safe_system_call("rm -rf " + temp_dir);
+        // basis_scope RAII cleans up buffer/directory on return
         return;
     }
-    
-    // Clean up temporary files
-    safe_system_call("rm -rf " + temp_dir);
+    // basis_scope RAII cleans up buffer/directory on scope exit
 }
 
 // Lanczos algorithm with selective reorthogonalization
@@ -746,12 +813,12 @@ void lanczos_selective_reorth(std::function<void(const Complex*, Complex*, int)>
     Complex scale_factor = Complex(1.0/norm, 0.0);
     cblas_zscal(N, &scale_factor, v_current.data(), 1);
     
-    // Create a directory for temporary basis vector files
+    // Storage for basis vectors (RAM by default, disk via ED_LANCZOS_DISK=1)
     std::string temp_dir = (dir.empty() ? "./lanczos_basis_vectors" : dir+"/lanczos_basis_vectors");
-    std::string cmd = "mkdir -p " + temp_dir;
-    safe_system_call(cmd);
+    max_iter = std::min(N, max_iter);
+    BasisBufferScope basis_scope(temp_dir, N, max_iter);
 
-    // Write the first basis vector to file
+    // Store the first basis vector
     if (!write_basis_vector(temp_dir, 0, v_current, N)) {
         return;
     }
@@ -764,8 +831,6 @@ void lanczos_selective_reorth(std::function<void(const Complex*, Complex*, int)>
     std::vector<double> alpha;  // Diagonal elements
     std::vector<double> beta;   // Off-diagonal elements
     beta.push_back(0.0);        // β_0 is not used
-    
-    max_iter = std::min(N, max_iter);
     
     // Eigenvalue convergence checking
     std::vector<double> prev_eigenvalues;
@@ -985,13 +1050,10 @@ void lanczos_selective_reorth(std::function<void(const Complex*, Complex*, int)>
     
     if (info != 0) {
         std::cerr << "Tridiagonal eigenvalue solver failed with error code " << info << std::endl;
-        // Clean up temporary files before returning
-        safe_system_call("rm -rf " + temp_dir);
+        // basis_scope RAII cleans up buffer/directory on return
         return;
     }
-    
-    // Clean up temporary files
-    safe_system_call("rm -rf " + temp_dir);
+    // basis_scope RAII cleans up buffer/directory on scope exit
 }
 
 // Lanczos algorithm with adaptive selective reorthogonalization (Parlett-Simon)
@@ -1014,12 +1076,12 @@ void lanczos(std::function<void(const Complex*, Complex*, int)> H, uint64_t N, u
     Complex scale_factor = Complex(1.0/norm, 0.0);
     cblas_zscal(N, &scale_factor, v_current.data(), 1);
     
-    // Create a directory for temporary basis vector files
+    // Storage for basis vectors (RAM by default, disk via ED_LANCZOS_DISK=1)
     std::string temp_dir = (dir.empty() ? "./lanczos_basis_vectors" : dir+"/lanczos_basis_vectors");
-    std::string cmd = "mkdir -p " + temp_dir;
-    safe_system_call(cmd);
+    max_iter = std::min(N, max_iter);
+    BasisBufferScope basis_scope(temp_dir, N, max_iter);
 
-    // Write the first basis vector to file
+    // Store the first basis vector
     if (!write_basis_vector(temp_dir, 0, v_current, N)) {
         return;
     }
@@ -1032,8 +1094,6 @@ void lanczos(std::function<void(const Complex*, Complex*, int)> H, uint64_t N, u
     std::vector<double> alpha;  // Diagonal elements
     std::vector<double> beta;   // Off-diagonal elements
     beta.push_back(0.0);        // β_0 is not used
-    
-    max_iter = std::min(N, max_iter);
     
     // ===== ADAPTIVE SELECTIVE REORTHOGONALIZATION (Parlett-Simon) =====
     const double eps = std::numeric_limits<double>::epsilon();
@@ -1230,13 +1290,10 @@ void lanczos(std::function<void(const Complex*, Complex*, int)> H, uint64_t N, u
     
     if (info != 0) {
         std::cerr << "Tridiagonal eigenvalue solver failed with error code " << info << std::endl;
-        // Clean up temporary files before returning
-        safe_system_call("rm -rf " + temp_dir);
+        // basis_scope RAII cleans up buffer/directory on return
         return;
     }
-    
-    // Clean up temporary files
-    safe_system_call("rm -rf " + temp_dir);
+    // basis_scope RAII cleans up buffer/directory on scope exit
 }
 
 // Block Lanczos algorithm for finding eigenvalues with degeneracies
@@ -1258,11 +1315,11 @@ void block_lanczos(std::function<void(const Complex*, Complex*, int)> H, uint64_
     const double convergence_tol = (tol <= 0.0) ? 1e-12 : tol;
     const double breakdown_tol = 1e-12;
 
-    // ===== Setup directories =====
+    // ===== Setup storage =====
     const std::string temp_dir = (dir.empty() ? "./block_lanczos_basis" : dir + "/block_lanczos_basis");
     // Use output directory for HDF5 storage (eigenvectors saved to ed_results.h5)
     const std::string evec_dir = (dir.empty() ? "." : dir);
-    safe_system_call("mkdir -p " + temp_dir);
+    BasisBufferScope basis_scope(temp_dir, N, max_blocks * b);
 
     // ===== Initialize random starting block with QR =====
     std::mt19937 gen(std::random_device{}());
@@ -1546,7 +1603,6 @@ void block_lanczos(std::function<void(const Complex*, Complex*, int)> H, uint64_
     const uint64_t total_blocks = static_cast<int>(alpha_blocks.size());
     if (total_blocks == 0) {
         std::cerr << "Block Lanczos: no Krylov basis generated" << std::endl;
-        safe_system_call("rm -rf " + temp_dir);
         return;
     }
 
@@ -1560,7 +1616,6 @@ void block_lanczos(std::function<void(const Complex*, Complex*, int)> H, uint64_
                           evals.data());
     if (info != 0) {
         std::cerr << "Block Lanczos: final eigensolve failed (info=" << info << ")" << std::endl;
-        safe_system_call("rm -rf " + temp_dir);
         return;
     }
 
@@ -1617,8 +1672,7 @@ void block_lanczos(std::function<void(const Complex*, Complex*, int)> H, uint64_
         HDF5IO::saveDiagonalizationResults(dir, eigenvalues, {}, "Block Lanczos");
     }
 
-    // Cleanup temporary files
-    safe_system_call("rm -rf " + temp_dir);
+    // basis_scope RAII cleans up buffer/directory on scope exit
     std::cout << "Block Lanczos: completed successfully with " << output_eigs << " eigenvalues" << std::endl;
 }
 // Chebyshev Filtered Lanczos algorithm with automatic spectrum range estimation
@@ -1631,12 +1685,11 @@ void chebyshev_filtered_lanczos(std::function<void(const Complex*, Complex*, int
     std::cout << "Target eigenvalues: " << num_eigs << ", Max iterations: " << max_iter << std::endl;
     std::cout << "Tolerance: " << tol << std::endl;
     
-    // ===== Setup directories =====
+    // ===== Setup storage =====
     const std::string temp_dir = (dir.empty() ? "./chebyshev_lanczos_basis" : dir + "/chebyshev_lanczos_basis");
     // Use output directory for HDF5 storage (eigenvectors saved to ed_results.h5)
     const std::string evec_dir = (dir.empty() ? "." : dir);
-    
-    safe_system_call("mkdir -p " + temp_dir);
+    BasisBufferScope basis_scope(temp_dir, N, std::min(max_iter, N));
     
     // ===== Step 1: Estimate spectral bounds if not provided =====
     double lambda_min, lambda_max;
@@ -1975,7 +2028,6 @@ void chebyshev_filtered_lanczos(std::function<void(const Complex*, Complex*, int
     
     if (info != 0) {
         std::cerr << "Tridiagonal eigenvalue solver failed with error code " << info << std::endl;
-        safe_system_call("rm -rf " + temp_dir);
         return;
     }
     
@@ -2001,9 +2053,7 @@ void chebyshev_filtered_lanczos(std::function<void(const Complex*, Complex*, int
                   << eigenvalues.back() << "]" << std::endl;
     }
     
-    // Cleanup temporary files
-    safe_system_call("rm -rf " + temp_dir);
-    
+    // basis_scope RAII cleans up buffer/directory on scope exit
     std::cout << "Chebyshev Filtered Lanczos completed successfully" << std::endl;
 }
 
@@ -2017,12 +2067,12 @@ void shift_invert_lanczos(std::function<void(const Complex*, Complex*, int)> H, 
     std::cout << "Starting Shift-Invert Lanczos with shift σ = " << sigma << std::endl;
     std::cout << "Seeking " << num_eigs << " eigenvalues closest to σ" << std::endl;
     
-    // Create directories for output
+    // Setup storage
     std::string temp_dir = (dir.empty() ? "./lanczos_basis_vectors" : dir+"/lanczos_basis_vectors");
     // Use output directory for HDF5 storage (eigenvectors saved to ed_results.h5)
     std::string result_dir = (dir.empty() ? "." : dir);
-    
-    safe_system_call("mkdir -p " + temp_dir);
+    max_iter = std::min(N, max_iter);
+    BasisBufferScope basis_scope(temp_dir, N, max_iter);
     
     // Parameters for iterative solver (CG/GMRES)
     const uint64_t max_cg_iter = 100;
@@ -2074,8 +2124,6 @@ void shift_invert_lanczos(std::function<void(const Complex*, Complex*, int)> H, 
     std::vector<double> residual_norms;
     
     std::cout << "Starting Lanczos iterations with shift-invert..." << std::endl;
-    
-    max_iter = std::min(N, max_iter);
     
     // Main Lanczos iteration
     for (int j = 0; j < max_iter; j++) {
@@ -2306,7 +2354,6 @@ void shift_invert_lanczos(std::function<void(const Complex*, Complex*, int)> H, 
     
     if (info != 0) {
         std::cerr << "LAPACKE_dstevd failed with error code " << info << std::endl;
-        safe_system_call("rm -rf " + temp_dir);
         return;
     }
     
@@ -2389,9 +2436,7 @@ void shift_invert_lanczos(std::function<void(const Complex*, Complex*, int)> H, 
         std::cout << "Saved " << n_evals << " eigenvalues to " << eval_file << std::endl;
     }
     
-    // Cleanup
-    safe_system_call("rm -rf " + temp_dir);
-    
+    // basis_scope RAII cleans up buffer/directory on scope exit
     std::cout << "Shift-Invert Lanczos completed successfully" << std::endl;
 }
 
@@ -2406,7 +2451,8 @@ void full_diagonalization(std::function<void(const Complex*, Complex*, int)> H, 
         dir = ".";
     }
     if (compute_eigenvectors) {
-        safe_system_call("mkdir -p " + dir);
+        std::error_code ec;
+        std::filesystem::create_directories(dir, ec);
     }
 
     // Detect if matrix is small enough for dense approach or needs sparse optimization
@@ -2699,7 +2745,10 @@ void full_diagonalization(std::function<void(const Complex*, Complex*, int)> H, 
                 std::cout << "Saving " << actual_num_eigs << " eigenvectors to disk..." << std::endl;
                 
                 // Create output directory if needed
-                safe_system_call("mkdir -p " + dir);
+                {
+                    std::error_code ec;
+                    std::filesystem::create_directories(dir, ec);
+                }
                 
                 // Save to HDF5 in main output directory (primary format)
                 try {
@@ -2737,12 +2786,11 @@ void krylov_schur(std::function<void(const Complex*, Complex*, int)> H, uint64_t
     
     std::cout << "Starting Krylov-Schur algorithm for " << num_eigs << " eigenvalues" << std::endl;
     
-    // Create directories for temporary files and output
+    // Setup storage (RAM by default, disk via ED_LANCZOS_DISK=1)
     std::string temp_dir = (dir.empty() ? "./krylov_schur_temp" : dir + "/krylov_schur_temp");
     // Use output directory for HDF5 storage (eigenvectors saved to ed_results.h5)
     std::string evec_dir = (dir.empty() ? "." : dir);
-    
-    safe_system_call("mkdir -p " + temp_dir);
+    BasisBufferScope basis_scope(temp_dir, N, std::min(max_iter, N));
 
     // Initialize random starting vector
     std::mt19937 gen(std::random_device{}());
@@ -3057,9 +3105,7 @@ void krylov_schur(std::function<void(const Complex*, Complex*, int)> H, uint64_t
         iter++;
     }
     
-    // Clean up temporary files
-    safe_system_call("rm -rf " + temp_dir);
-    
+    // basis_scope RAII cleans up buffer/directory on scope exit
     if (!converged) {
         std::cout << "Krylov-Schur: Maximum iterations reached without full convergence" << std::endl;
     } else {
@@ -3367,12 +3413,11 @@ void implicitly_restarted_lanczos(std::function<void(const Complex*, Complex*, i
     std::cout << "Target eigenvalues: " << num_eigs << ", Max subspace size: " << max_iter << std::endl;
     std::cout << "Tolerance: " << tol << std::endl;
     
-    // ===== Setup directories =====
+    // ===== Setup storage (RAM by default, disk via ED_LANCZOS_DISK=1) =====
     const std::string temp_dir = (dir.empty() ? "./irl_basis_vectors" : dir + "/irl_basis_vectors");
     // Use output directory for HDF5 storage (eigenvectors saved to ed_results.h5)
     const std::string evec_dir = (dir.empty() ? "." : dir);
-    
-    safe_system_call("mkdir -p " + temp_dir);
+    BasisBufferScope basis_scope(temp_dir, N, std::min(max_iter, N));
     
     // ===== Parameters =====
     const uint64_t k = num_eigs;                          // Target number of eigenvalues
@@ -3673,14 +3718,13 @@ void thick_restart_lanczos(std::function<void(const Complex*, Complex*, int)> H,
     std::cout << "Target eigenvalues: " << num_eigs << ", Max subspace size: " << max_iter << std::endl;
     std::cout << "Tolerance: " << tol << std::endl;
     
-    // ===== Setup directories =====
+    // ===== Setup storage (RAM by default, disk via ED_LANCZOS_DISK=1) =====
     const std::string temp_dir = (dir.empty() ? "./trl_basis_vectors" : dir + "/trl_basis_vectors");
     const std::string locked_dir = (dir.empty() ? "./trl_locked" : dir + "/trl_locked");
     // Use output directory for HDF5 storage (eigenvectors saved to ed_results.h5)
     const std::string evec_dir = (dir.empty() ? "." : dir);
-    
-    safe_system_call("mkdir -p " + temp_dir);
-    safe_system_call("mkdir -p " + locked_dir);
+    BasisBufferScope basis_scope(temp_dir, N, std::min(max_iter, N));
+    BasisBufferScope locked_scope(locked_dir, N, std::min(max_iter, N));
     
     // ===== Parameters =====
     const uint64_t k = num_eigs;                          // Target number of eigenvalues
@@ -4053,9 +4097,7 @@ void thick_restart_lanczos(std::function<void(const Complex*, Complex*, int)> H,
         }
     }
     
-    // Cleanup temporary files
-    safe_system_call("rm -rf " + temp_dir);
-    safe_system_call("rm -rf " + locked_dir);
+    // basis_scope / locked_scope RAII clean up buffers/directories on exit
     
     std::cout << "\n=== Thick-Restart Lanczos completed successfully ===" << std::endl;
 }
@@ -4587,7 +4629,8 @@ void optimal_spectrum_solver(std::function<void(const Complex*, Complex*, int)> 
         // Clean up temporary slice directories
         for (size_t i = 0; i < slices.size(); i++) {
             std::string slice_dir = dir + "/slice_" + std::to_string(i);
-            safe_system_call("rm -rf " + slice_dir);
+            std::error_code ec;
+            std::filesystem::remove_all(slice_dir, ec);
         }
     }
     

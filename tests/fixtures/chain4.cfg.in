@@ -1,0 +1,29 @@
+# =============================================================================
+# End-to-end smoke test for the ED binary.
+# 4-site Heisenberg ring (J=1, PBC), Sz=0 sector, dim=6.
+# Ground state energy must be -2.0 (classic result).
+# =============================================================================
+
+[System]
+hamiltonian_dir = @TEST_CHAIN4_DIR@
+num_sites = 4
+spin_length = 0.5
+sublattice_size = 2
+
+use_fixed_sz = true
+n_up = 2
+
+[Diagonalization]
+method = LANCZOS
+num_eigenvalues = 1
+max_iterations = 100
+tolerance = 1e-12
+compute_eigenvectors = false
+
+[Workflow]
+run_standard = true
+run_symmetrized = false
+compute_thermo = false
+
+[Output]
+output_dir = @TEST_CHAIN4_OUT_DIR@
