@@ -47,6 +47,7 @@
 #include <ed/bfg/cluster.h>
 #include <ed/bfg/correlations.h>
 #include <ed/bfg/ring_observables.h>
+#include <ed/bfg/spin_structure_factor.h>
 #include <ed/bfg/structure_factor.h>
 #include <ed/bfg/topology.h>
 #include <ed/bfg/wavefunction_io.h>
@@ -1135,4 +1136,42 @@ PYBIND11_MODULE(_core, m) {
         "<psi| S+_1 S-_2 S+_3 + S-_1 S+_2 S-_3 |psi>. Note this is the "
         "(S+S-S+ + h.c.) symmetrisation, not the antisymmetric scalar "
         "chirality S_1 . (S_2 x S_3).");
+
+    // -------------------------------------------------------------------------
+    // P2.1 (6th slice): site-resolved spin structure factor over precomputed
+    // two-body correlations. The kernel does not see a wavefunction;
+    // collaborators feed in the (Hermitian-style) S^{-+} and SzSz tables
+    // they already obtained from `compute_smsp_correlations` /
+    // `compute_szsz_correlations`.
+    // -------------------------------------------------------------------------
+    py::class_<ed::bfg::StructureFactorResult>(m_bfg, "StructureFactorResult",
+        "Output of `compute_spin_structure_factor`. `s_q[ik]` is the "
+        "full Heisenberg structure factor at `cluster.k_points[ik]` in "
+        "the SzSz + Re S^{-+} reduction, decomposed into longitudinal "
+        "(`s_q_szsz`) and transverse (`s_q_smsp`) channels. "
+        "`q_max_idx` / `q_max` / `s_q_max` flag the abscissa of the "
+        "max |S(q)| and `m_translation = sqrt(max |S(q)| / N)` is the "
+        "BFG translation order parameter.")
+        .def_readonly("s_q",          &ed::bfg::StructureFactorResult::s_q)
+        .def_readonly("s_q_smsp",     &ed::bfg::StructureFactorResult::s_q_smsp)
+        .def_readonly("s_q_szsz",     &ed::bfg::StructureFactorResult::s_q_szsz)
+        .def_readonly("q_max_idx",    &ed::bfg::StructureFactorResult::q_max_idx)
+        .def_readonly("s_q_max",      &ed::bfg::StructureFactorResult::s_q_max)
+        .def_readonly("q_max",        &ed::bfg::StructureFactorResult::q_max)
+        .def_readonly("m_translation",
+                      &ed::bfg::StructureFactorResult::m_translation);
+
+    m_bfg.def("compute_spin_structure_factor",
+        [](const std::vector<std::vector<ed::bfg::Complex>>& smsp_corr,
+           const std::vector<std::vector<double>>& szsz_corr,
+           const ed::bfg::Cluster& cluster) {
+            py::gil_scoped_release release;
+            return ed::bfg::compute_spin_structure_factor(
+                smsp_corr, szsz_corr, cluster);
+        },
+        py::arg("smsp_corr"), py::arg("szsz_corr"), py::arg("cluster"),
+        "Compute S(q) at every k-point in `cluster.k_points` from "
+        "precomputed `<S^-_i S^+_j>` and `<S^z_i S^z_j>` tables. "
+        "Both inputs are site-by-site `n_sites x n_sites` matrices. "
+        "Returns a `StructureFactorResult`.");
 }

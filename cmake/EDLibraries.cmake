@@ -210,6 +210,10 @@ set_target_properties(ed_symmetry PROPERTIES POSITION_INDEPENDENT_CODE ON)
 #                              `compute_bowtie_resonance`,
 #                              `compute_triangle_chiral`. Reuses the
 #                              memory-efficient flag from structure_factor.
+#   * spin_structure_factor.cpp -- site-resolved spin structure factor
+#                              `compute_spin_structure_factor` over
+#                              precomputed two-body correlation tables;
+#                              produces `StructureFactorResult`.
 #   * wavefunction_io.cpp   -- HDF5 wavefunction + TPQ-state loaders shared
 #                              by the CPU and GPU drivers and by the Python
 #                              bindings (`load_wavefunction`,
@@ -232,6 +236,7 @@ add_library(ed_bfg STATIC
     ${BFG_DIR}/correlations.cpp
     ${BFG_DIR}/structure_factor.cpp
     ${BFG_DIR}/ring_observables.cpp
+    ${BFG_DIR}/spin_structure_factor.cpp
     ${BFG_DIR}/wavefunction_io.cpp
 )
 target_include_directories(ed_bfg PUBLIC ${_ED_PUBLIC_INCLUDES})

@@ -743,6 +743,13 @@ if(BUILD_ED_TESTS)
     ed_add_test(test_bfg_ring_observables       tests/unit/test_bfg_ring_observables.cpp USE_CATCH2)
     target_link_libraries(test_bfg_ring_observables PRIVATE ed_bfg)
 
+    # P2.1 (6th slice): site-resolved spin structure factor kernel
+    # (`compute_spin_structure_factor`) on synthesised two-body
+    # correlation tables. Tests on a 2-site Neel state with hand-checked
+    # Re/Im parts.
+    ed_add_test(test_bfg_spin_structure_factor  tests/unit/test_bfg_spin_structure_factor.cpp USE_CATCH2)
+    target_link_libraries(test_bfg_spin_structure_factor PRIVATE ed_bfg)
+
     # P2.1 (third slice): HDF5 wavefunction loaders shared by the CPU + GPU
     # drivers and by the Python bindings.
     ed_add_test(test_bfg_wavefunction_io        tests/unit/test_bfg_wavefunction_io.cpp USE_CATCH2)

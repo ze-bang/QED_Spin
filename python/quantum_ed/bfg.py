@@ -25,6 +25,9 @@ Exposes the same kernels the C++ ``compute_bfg_order_parameters`` and
     :class:`DimerSFResult`
   * ring observables (P2.1 5th slice): :func:`apply_bowtie_fourier`,
     :func:`compute_bowtie_resonance`, :func:`compute_triangle_chiral`
+  * site-resolved spin structure factor (P2.1 6th slice):
+    :func:`compute_spin_structure_factor`,
+    :class:`StructureFactorResult`
 
 This is the bridge that lets a notebook reuse the same spin-correlation
 pipeline the CLI binaries use without round-tripping through HDF5 files,
@@ -62,6 +65,7 @@ from ._core.bfg import (  # type: ignore[attr-defined]
     Bowtie,
     Cluster,
     DimerSFResult,
+    StructureFactorResult,
     TPQState,
     apply_bowtie_fourier,
     apply_dimer_fourier,
@@ -73,6 +77,7 @@ from ._core.bfg import (  # type: ignore[attr-defined]
     compute_heisenberg_dimer_dimer_correlation,
     compute_heisenberg_sf_direct,
     compute_smsp_correlations,
+    compute_spin_structure_factor,
     compute_spsm_bond_expectations,
     compute_szsz_bond_expectations,
     compute_szsz_correlations,
@@ -116,4 +121,6 @@ __all__ = [
     "apply_bowtie_fourier",
     "compute_bowtie_resonance",
     "compute_triangle_chiral",
+    "StructureFactorResult",
+    "compute_spin_structure_factor",
 ]

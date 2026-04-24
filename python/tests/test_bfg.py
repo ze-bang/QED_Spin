@@ -376,6 +376,76 @@ def test_apply_bowtie_fourier_picks_up_phase():
     assert math.isclose(out[0b1010].imag, expected.imag, abs_tol=1e-12)
 
 
+# -----------------------------------------------------------------------------
+# P2.1 (6th slice): site-resolved spin structure factor
+#
+# We can't synthesise a Cluster from Python (the binding is read-only), so
+# we use the existing kagome 1x1 fixture (3 sites, ~7 k-points) and feed
+# in handcomputed correlation tables. The exact-arithmetic lockdown
+# happens in `tests/unit/test_bfg_spin_structure_factor.cpp`; the pytest
+# cases below validate the binding marshalling and the "zero correlations
+# -> zero S(q)" / "uniform SzSz -> peak at Gamma" sanity checks.
+# -----------------------------------------------------------------------------
+
+
+def _zeros_corr_2d(n: int) -> list:
+    return [[0.0 for _ in range(n)] for _ in range(n)]
+
+
+def _zeros_complex_corr_2d(n: int) -> list:
+    return [[complex(0.0, 0.0) for _ in range(n)] for _ in range(n)]
+
+
+def test_compute_spin_structure_factor_on_zero_correlations_is_zero():
+    _require_kagome_fixture()
+    c = bfg.load_cluster(str(KAGOME_1X1))
+    n = c.n_sites
+
+    smsp = _zeros_complex_corr_2d(n)
+    szsz = _zeros_corr_2d(n)
+
+    r = bfg.compute_spin_structure_factor(smsp, szsz, c)
+    assert len(r.s_q) == len(c.k_points)
+    for s in r.s_q:
+        assert abs(s) < 1e-12
+    assert math.isclose(r.m_translation, 0.0, abs_tol=1e-12)
+
+
+def test_compute_spin_structure_factor_on_uniform_szsz_peaks_at_gamma():
+    """Uniform szsz_ij = 1/4 must put the maximum at q = (0, 0)."""
+    _require_kagome_fixture()
+    c = bfg.load_cluster(str(KAGOME_1X1))
+    n = c.n_sites
+
+    smsp = _zeros_complex_corr_2d(n)
+    szsz = [[0.25 for _ in range(n)] for _ in range(n)]
+
+    r = bfg.compute_spin_structure_factor(smsp, szsz, c)
+
+    # Gamma must be in the k_point list for any cluster with PBC.
+    gamma_idx = None
+    for ik, q in enumerate(c.k_points):
+        if abs(q[0]) < 1e-12 and abs(q[1]) < 1e-12:
+            gamma_idx = ik
+            break
+    assert gamma_idx is not None, "no Gamma point in cluster.k_points"
+
+    # At Gamma: s_q_szsz = (1/N) * N^2 * 0.25 = N * 0.25.
+    expected_gamma_szsz = c.n_sites * 0.25
+    assert math.isclose(
+        r.s_q_szsz[gamma_idx].real, expected_gamma_szsz, abs_tol=1e-12
+    )
+    assert math.isclose(r.s_q[gamma_idx].real, expected_gamma_szsz,
+                        abs_tol=1e-12)
+
+    # Gamma is the maximum (uniform real positive correlations -> only
+    # constructive interference at q=0).
+    assert r.q_max_idx == gamma_idx
+    assert math.isclose(r.s_q_max.real, expected_gamma_szsz, abs_tol=1e-12)
+    expected_m = math.sqrt(expected_gamma_szsz / c.n_sites)
+    assert math.isclose(r.m_translation, expected_m, abs_tol=1e-12)
+
+
 def test_apply_bowtie_fourier_fast_and_atomic_paths_agree():
     bts = [
         bfg.Bowtie(s1=0, s2=1, s3=2, s4=3, center=[0.25, 0.75]),

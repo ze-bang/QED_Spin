@@ -56,6 +56,7 @@
 #include "ed/bfg/cluster.h"
 #include "ed/bfg/correlations.h"
 #include "ed/bfg/ring_observables.h"
+#include "ed/bfg/spin_structure_factor.h"
 #include "ed/bfg/structure_factor.h"
 #include "ed/bfg/topology.h"
 #include "ed/bfg/wavefunction_io.h"
@@ -106,6 +107,10 @@ using ed::bfg::set_memory_efficient_mode;
 using ed::bfg::apply_bowtie_fourier;
 using ed::bfg::compute_bowtie_resonance;
 using ed::bfg::compute_triangle_chiral;
+// P2.1 (6th slice): spin structure factor S(q) over precomputed
+// two-body correlations now lives in ed_bfg::spin_structure_factor.
+using ed::bfg::compute_spin_structure_factor;
+using ed::bfg::StructureFactorResult;
 
 // -----------------------------------------------------------------------------
 // Bit manipulation helpers (inlined for speed)
@@ -206,92 +211,13 @@ inline double sz_value(uint64_t state, int site) {
 // -----------------------------------------------------------------------------
 
 // -----------------------------------------------------------------------------
-// Compute spin structure factor S(q)
-// Full Heisenberg: S(q) = Σ_ij e^(iq·r_ij) ⟨S_i · S_j⟩
-// where S_i · S_j = S^z_i S^z_j + (1/2)(S^+_i S^-_j + S^-_i S^+_j)
-//                 = S^z_i S^z_j + (1/2)(S^-_i S^+_j + S^+_i S^-_j)  [using S^-S^+ = (S^+S^-)^†]
-// Note: ⟨S^+_i S^-_j⟩ = ⟨S^-_j S^+_i⟩* so we compute from smsp_corr[j][i]*
+// P2.1 (6th slice): the spin structure factor S(q) over precomputed
+// two-body correlation tables (StructureFactorResult,
+// compute_spin_structure_factor) moved into the ed_bfg static library
+// (`include/ed/bfg/spin_structure_factor.h`,
+// `src/bfg/spin_structure_factor.cpp`). The using-declarations at the top
+// of this TU keep the existing call sites unchanged.
 // -----------------------------------------------------------------------------
-
-struct StructureFactorResult {
-    std::vector<Complex> s_q;       // Full S(q) = SzSz + (1/2)(S+S- + S-S+) at each k-point
-    std::vector<Complex> s_q_smsp;  // S^-S^+ only component
-    std::vector<Complex> s_q_szsz;  // S^zS^z only component
-    int q_max_idx;
-    Complex s_q_max;
-    std::array<double, 2> q_max;
-    double m_translation;
-};
-
-StructureFactorResult compute_spin_structure_factor(
-    const std::vector<std::vector<Complex>>& smsp_corr,
-    const std::vector<std::vector<double>>& szsz_corr,
-    const Cluster& cluster
-) {
-    StructureFactorResult result;
-    int n_k = cluster.k_points.size();
-    int n_sites = cluster.n_sites;
-    
-    result.s_q.resize(n_k, 0.0);
-    result.s_q_smsp.resize(n_k, 0.0);
-    result.s_q_szsz.resize(n_k, 0.0);
-    
-    std::cout << "Computing S(q) at " << n_k << " k-points (full Heisenberg)..." << std::flush;
-    auto start = std::chrono::high_resolution_clock::now();
-    
-    #pragma omp parallel for
-    for (int ik = 0; ik < n_k; ++ik) {
-        const auto& q = cluster.k_points[ik];
-        Complex s_q_smsp = 0.0;
-        double s_q_szsz = 0.0;
-        
-        for (int i = 0; i < n_sites; ++i) {
-            for (int j = 0; j < n_sites; ++j) {
-                // Use minimum-image displacement for PBC-correct phases
-                auto dr = cluster.minimum_image_displacement(i, j);
-                double phase_arg = q[0] * dr[0] + q[1] * dr[1];
-                Complex phase = std::exp(I * phase_arg);
-                
-                // S^-_i S^+_j contribution
-                s_q_smsp += smsp_corr[i][j] * phase;
-                
-                // S^z_i S^z_j contribution
-                s_q_szsz += szsz_corr[i][j] * std::real(phase);
-            }
-        }
-        
-        // Full S(q) = SzSz + (1/2)(S-S+ + S+S-)
-        // Note: ⟨S^+_i S^-_j⟩ = ⟨S^-_j S^+_i⟩* = smsp_corr[j][i]*
-        // But for structure factor with e^(iq·r_ij), this contributes smsp_corr[j][i]* · e^(iq·r_ij)
-        // The sum over (i,j) with smsp_corr[j][i]* e^(iq·r_ij) equals conj(Σ smsp_corr[j][i] e^(-iq·r_ij))
-        // = conj(s_q_smsp) for real lattices with inversion symmetry
-        // So XY contribution = (1/2)(s_q_smsp + conj(s_q_smsp)) = real(s_q_smsp)
-        // Full S(q) = SzSz + real(S-S+) which is real
-        result.s_q_smsp[ik] = s_q_smsp / static_cast<double>(n_sites);
-        result.s_q_szsz[ik] = s_q_szsz / static_cast<double>(n_sites);
-        result.s_q[ik] = result.s_q_szsz[ik] + std::real(result.s_q_smsp[ik]);
-    }
-    
-    // Find maximum
-    double max_val = 0.0;
-    for (int ik = 0; ik < n_k; ++ik) {
-        double val = std::abs(result.s_q[ik]);
-        if (val > max_val) {
-            max_val = val;
-            result.q_max_idx = ik;
-            result.s_q_max = result.s_q[ik];
-            result.q_max = cluster.k_points[ik];
-        }
-    }
-    
-    result.m_translation = std::sqrt(max_val / n_sites);
-    
-    auto end = std::chrono::high_resolution_clock::now();
-    auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
-    std::cout << " done (" << duration.count() << " ms)" << std::endl;
-    
-    return result;
-}
 
 // -----------------------------------------------------------------------------
 // Compute nematic order
