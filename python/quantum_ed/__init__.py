@@ -46,6 +46,7 @@ from ._core import (
     HybridThermalParameters,
 )
 
+from . import dssf  # high-level DSSF observable-pair builder (P2.8)
 from . import helpers  # re-export edlib utilities under quantum_ed.helpers
 
 __version__: Final[str] = "0.1.0"
@@ -65,6 +66,7 @@ __all__ = [
     "FTLMParameters",
     "LTLMParameters",
     "HybridThermalParameters",
+    "dssf",
     "helpers",
     "__version__",
 ]

@@ -38,6 +38,7 @@
 #include <pybind11/functional.h>
 
 #include <ed/core/construct_ham.h>
+#include <ed/dssf/operator_spec.h>
 #include <ed/solvers/ftlm.h>
 #include <ed/solvers/hybrid_thermal.h>
 #include <ed/solvers/lanczos.h>
@@ -461,4 +462,108 @@ PYBIND11_MODULE(_core, m) {
           py::arg("temp_max"),
           py::arg("num_temp_bins"),
           py::arg("output_dir") = "");
+
+    // ed::dssf -- structure-factor observable assembly (P2.8 / DSSF PR-G).
+    auto m_dssf = m.def_submodule("dssf",
+        "Bindings for the ed::dssf C++ library: assemble DSSF/SSSF "
+        "observable pairs from a parameter dict instead of hand-rolling "
+        "Sum/Transverse/Sublattice/Experimental Operator constructors.");
+
+    py::class_<ed::dssf::OperatorSpec>(m_dssf, "OperatorSpec", R"pbdoc(
+        Parameter object for ``build_observable_pairs``.
+
+        Mirrors the C++ ``ed::dssf::OperatorSpec`` 1:1; see
+        ``include/ed/dssf/operator_spec.h`` for the field-by-field
+        documentation. Construct the spec, set the fields you care about,
+        then pass it to :func:`build_observable_pairs`.
+    )pbdoc")
+        .def(py::init<>())
+        .def_readwrite("operator_type",     &ed::dssf::OperatorSpec::operator_type)
+        .def_readwrite("basis",             &ed::dssf::OperatorSpec::basis)
+        .def_readwrite("spin_combinations", &ed::dssf::OperatorSpec::spin_combinations)
+        .def_readwrite("momentum_points",   &ed::dssf::OperatorSpec::momentum_points)
+        .def_readwrite("polarization",      &ed::dssf::OperatorSpec::polarization)
+        .def_readwrite("theta",             &ed::dssf::OperatorSpec::theta)
+        .def_readwrite("unit_cell_size",    &ed::dssf::OperatorSpec::unit_cell_size)
+        .def_readwrite("num_sites",         &ed::dssf::OperatorSpec::num_sites)
+        .def_readwrite("spin_length",       &ed::dssf::OperatorSpec::spin_length)
+        .def_readwrite("use_fixed_sz",      &ed::dssf::OperatorSpec::use_fixed_sz)
+        .def_readwrite("n_up",              &ed::dssf::OperatorSpec::n_up)
+        .def_readwrite("positions_file",    &ed::dssf::OperatorSpec::positions_file)
+        .def_readwrite("single_obs_only",   &ed::dssf::OperatorSpec::single_obs_only)
+        .def_readwrite("sublattice_filter", &ed::dssf::OperatorSpec::sublattice_filter)
+        .def("__repr__", [](const ed::dssf::OperatorSpec& s) {
+            return "<quantum_ed.dssf.OperatorSpec operator_type='" +
+                   s.operator_type + "' basis='" + s.basis +
+                   "' num_sites=" + std::to_string(s.num_sites) +
+                   " momenta=" + std::to_string(s.momentum_points.size()) +
+                   " combos=" + std::to_string(s.spin_combinations.size()) +
+                   ">";
+        });
+
+    py::class_<ed::dssf::ObservablePairs>(m_dssf, "ObservablePairs", R"pbdoc(
+        Result of :func:`build_observable_pairs`.
+
+        Three parallel lists of equal length:
+
+        - ``obs_1`` (list[Operator]):  left  factor of each pair ⟨ψ|O₁†...|ψ⟩.
+        - ``obs_2`` (list[Operator]):  right factor of each pair ⟨...O₂|ψ⟩
+                                       (empty when ``OperatorSpec.single_obs_only``).
+        - ``names``  (list[str]):      legacy, byte-stable observable name
+                                       used as the HDF5 group key.
+    )pbdoc")
+        .def_readonly("obs_1", &ed::dssf::ObservablePairs::obs_1)
+        .def_readonly("obs_2", &ed::dssf::ObservablePairs::obs_2)
+        .def_readonly("names", &ed::dssf::ObservablePairs::names)
+        .def("__len__", [](const ed::dssf::ObservablePairs& p) {
+            return p.names.size();
+        });
+
+    m_dssf.def("build_observable_pairs",
+        &ed::dssf::build_observable_pairs,
+        py::arg("spec"),
+        R"pbdoc(
+        Build the DSSF/SSSF observable pairs requested by ``spec``.
+
+        This is the canonical entry point that the C++ ``ED`` /
+        ``TPQ_DSSF`` executables both call internally; using it from
+        Python guarantees byte-identical observable names and ordering.
+
+        Returns
+        -------
+        ObservablePairs
+            Parallel lists of obs_1 / obs_2 / names. Length is the number
+            of pairs the builder emitted (depends on operator_type x
+            momentum_points x spin_combinations x sublattice geometry).
+
+        Raises
+        ------
+        ValueError
+            On unrecognized ``operator_type`` or shape-mismatched inputs
+            (see ``ed::dssf::build_observable_pairs`` documentation).
+        )pbdoc");
+
+    m_dssf.def("compute_transverse_bases",
+        [](const std::vector<double>& Q,
+           const std::vector<double>& polarization) {
+            const auto [e1, e2] = ed::dssf::compute_transverse_bases(Q, polarization);
+            return py::make_tuple(
+                std::vector<double>{e1[0], e1[1], e1[2]},
+                std::vector<double>{e2[0], e2[1], e2[2]});
+        },
+        py::arg("Q"), py::arg("polarization"),
+        R"pbdoc(
+        Compute the (e1, e2) basis used for transverse-component DSSF
+        operators at one momentum point.
+
+        - ``e1`` is the polarization vector itself (SF projection).
+        - ``e2 = normalize(Q × polarization)`` (NSF projection), with a
+          fallback to ``{y, polarization}`` or ``{x, polarization}``
+          when ``Q`` is parallel to ``polarization``.
+
+        Returns
+        -------
+        (e1, e2) : tuple[list[float], list[float]]
+            Two unit 3-vectors.
+        )pbdoc");
 }

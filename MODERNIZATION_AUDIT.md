@@ -958,7 +958,7 @@ I recommend three phases. Phase boundaries are natural pause points where everyt
 - [ ] **P2.5 — DSSF PR-F** (per §3.10): Replace `TPQ_DSSF.cpp` (4 404 lines) with `tpq_dssf_compat.cpp` (~150 lines): argv-translates the 14-positional form into `ed::dssf::OperatorSpec` + `ed::dssf::run(...)`. Prints a deprecation warning. Executable name preserved for one release.
 - [ ] **P2.6** Stand up Doxygen + Sphinx + Breathe in `docs/`; publish to **GitHub Pages** via `actions/deploy-pages` (per §7.5 decision).
 - [ ] **P2.7** Stand up `python/quantum_ed/` with **pybind11 + scikit-build-core** (per §7.2 / §7.3 decisions). Rename PyPI conflict (`edlib` → **`quantum_ed`**). The old `python/edlib/` ships a shim that does `from quantum_ed import *` and emits `DeprecationWarning`.
-- [ ] **P2.8 — DSSF PR-G** (per §3.10): pybind11 binding `quantum_ed.dssf.run(...)` against `ed::dssf::dssf_engine`. `python/quantum_ed/dssf.py` provides the high-level Pythonic wrapper.
+- [x] **P2.8 — DSSF PR-G** (per §3.10): pybind11 binding for `ed::dssf::OperatorSpec` / `build_observable_pairs` / `compute_transverse_bases` exposed under `quantum_ed.dssf`. Adds `python/tests/test_dssf.py` (15 tests) mirroring `tests/unit/test_dssf_operator_spec.cpp`. The `quantum_ed.dssf.run(...)` end-to-end engine binding is deferred to P2.2 (DSSF PR-C) once `ed::dssf::dssf_engine` exists.
 - [ ] **P2.9** Add `python/tests/` with pytest; wire into CI.
 - [ ] **P2.10** Add a Hamiltonian builder DSL in Python (~250 lines, pays back forever).
 - [ ] **P2.11** Formalize symmetry DSL: `ed::Translation`, `ed::PointGroup`, `ed::Z2`; the JSON-driven workflow keeps working but a programmatic API is the new recommended path.
