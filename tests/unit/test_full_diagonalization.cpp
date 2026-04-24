@@ -1,21 +1,24 @@
 // =============================================================================
-// test_full_diagonalization
+// test_full_diagonalization (Catch2 v3, P1.8 / audit Q12)
 //
 // Drives the CPU `full_diagonalization()` entry point end-to-end on a small
-// Heisenberg chain (N=4, dim=16) and cross-checks its spectrum with an
-// independent Eigen SelfAdjointEigenSolver on the same operator.
+// Heisenberg chain (N=4, dim=16; N=6, dim=64) and cross-checks its spectrum
+// with an independent Eigen SelfAdjointEigenSolver on the same operator.
 // =============================================================================
 
-#include "common/test_harness.h"
+#include "common/catch2_harness.h"
 
 #include <ed/solvers/lanczos.h>
 
 #include <memory>
+#include <string>
 #include <vector>
 
 using namespace ed_tests;
 
-static void run_full_diag_for_N(TestContext& ctx, uint64_t N, double tol) {
+namespace {
+
+void run_full_diag_for_N(uint64_t N, double tol) {
     auto op = build_heisenberg_chain(N, 1.0);
     const uint64_t dim = 1ULL << N;
     auto ref = reference_from_operator(*op, dim);
@@ -30,14 +33,18 @@ static void run_full_diag_for_N(TestContext& ctx, uint64_t N, double tol) {
     full_diagonalization(Hv, dim, /*num_eigs=*/dim, eigs, outdir,
                          /*compute_eigenvectors=*/false);
 
-    check_eigs_close(ctx, eigs, ref.eigs, ref.eigs.size(), tol,
-                     "full_diagonalization matches dense reference (N=" +
-                         std::to_string(N) + ")");
+    require_eigs_close(eigs, ref.eigs, ref.eigs.size(), tol,
+                       "full_diagonalization N=" + std::to_string(N));
 }
 
-int main() {
-    TestContext ctx("test_full_diagonalization");
-    run_full_diag_for_N(ctx, 4, 1e-9);
-    run_full_diag_for_N(ctx, 6, 1e-8);
-    return ctx.summary_exit_code();
+} // namespace
+
+TEST_CASE("full_diagonalization matches dense reference for N=4",
+          "[full_diag][N4]") {
+    run_full_diag_for_N(4, 1e-9);
+}
+
+TEST_CASE("full_diagonalization matches dense reference for N=6",
+          "[full_diag][N6]") {
+    run_full_diag_for_N(6, 1e-8);
 }

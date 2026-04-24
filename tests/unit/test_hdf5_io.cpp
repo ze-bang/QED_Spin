@@ -1,26 +1,11 @@
 // =============================================================================
-// test_hdf5_io
+// test_hdf5_io (Catch2 v3, P1.8 / audit Q12)
 //
 // Round-trip tests for the unified HDF5 layer (`HDF5IO` in
 // `ed/core/hdf5_io.h`).
-//
-// Coverage:
-//   1. createOrOpenFile + standard groups: file is created, ensureStandardGroups
-//      runs without error, and reopening preserves data.
-//   2. saveEigenvalues / loadEigenvalues: byte-for-byte round trip on a
-//      hand-written spectrum.
-//   3. saveEigenvector / loadEigenvector: complex round trip preserving real
-//      and imaginary parts.
-//   4. saveDiagonalizationResults: end-to-end driver path used by the real
-//      solvers, written + read back.
-//   5. saveThermodynamics / loadThermodynamicObservable: per-observable
-//      append + load.
-//   6. Integration with `full_diagonalization`: actually run the solver,
-//      let it write its HDF5 file, then read the eigenvalues back and
-//      compare to the dense Eigen reference.
 // =============================================================================
 
-#include "common/test_harness.h"
+#include "common/catch2_harness.h"
 
 #include <ed/core/hdf5_io.h>
 #include <ed/solvers/lanczos.h>
@@ -33,45 +18,29 @@
 
 using namespace ed_tests;
 
-// `full_diagonalization` is declared in `lanczos.h` (already included).
-
-// -----------------------------------------------------------------------------
-// 1. Basic create/reopen behaviour.
-// -----------------------------------------------------------------------------
-static void test_create_or_open(TestContext& ctx) {
+TEST_CASE("HDF5IO::createOrOpenFile lifecycle", "[hdf5_io][create]") {
     std::string dir = make_scratch_dir("hdf5_io", "create");
     std::string path = HDF5IO::createOrOpenFile(dir, "ed_results.h5");
 
-    check(ctx, std::filesystem::exists(path),
-          "createOrOpenFile produces an HDF5 file",
-          path);
-    check(ctx, HDF5IO::fileExists(path),
-          "fileExists() returns true for the freshly-created file");
+    INFO("path=" << path);
+    REQUIRE(std::filesystem::exists(path));
+    REQUIRE(HDF5IO::fileExists(path));
 
-    // Reopen should not destroy contents: write something, reopen, check it
-    // is still there.
     std::vector<double> eigs = {1.5, 2.5, 3.5};
     HDF5IO::saveEigenvalues(path, eigs);
 
     std::string path_again = HDF5IO::createOrOpenFile(dir, "ed_results.h5");
-    check(ctx, path == path_again,
-          "createOrOpenFile is idempotent on the same directory");
+    REQUIRE(path == path_again);
 
     auto eigs_back = HDF5IO::loadEigenvalues(path_again);
-    check(ctx, eigs_back.size() == eigs.size(),
-          "createOrOpenFile preserves data on reopen (size)");
-    bool match = true;
+    REQUIRE(eigs_back.size() == eigs.size());
     for (size_t i = 0; i < eigs.size(); ++i) {
-        if (std::abs(eigs_back[i] - eigs[i]) > 1e-15) { match = false; break; }
+        INFO("i=" << i << " back=" << eigs_back[i] << " want=" << eigs[i]);
+        REQUIRE(std::abs(eigs_back[i] - eigs[i]) <= 1e-15);
     }
-    check(ctx, match,
-          "createOrOpenFile preserves data on reopen (values)");
 }
 
-// -----------------------------------------------------------------------------
-// 2. Eigenvalue round-trip.
-// -----------------------------------------------------------------------------
-static void test_eigenvalues_roundtrip(TestContext& ctx) {
+TEST_CASE("HDF5IO eigenvalue round-trip", "[hdf5_io][eigvals]") {
     std::string dir = make_scratch_dir("hdf5_io", "eigvals");
     std::string path = HDF5IO::createOrOpenFile(dir);
 
@@ -80,34 +49,23 @@ static void test_eigenvalues_roundtrip(TestContext& ctx) {
     HDF5IO::saveEigenvalues(path, eigs);
     auto loaded = HDF5IO::loadEigenvalues(path);
 
-    check(ctx, loaded.size() == eigs.size(),
-          "loadEigenvalues() size matches");
-    double max_err = 0.0;
+    REQUIRE(loaded.size() == eigs.size());
     for (size_t i = 0; i < eigs.size(); ++i) {
-        max_err = std::max(max_err, std::abs(loaded[i] - eigs[i]));
+        INFO("i=" << i);
+        REQUIRE(loaded[i] == eigs[i]);
     }
-    check(ctx, max_err == 0.0,
-          "loadEigenvalues() byte-exact round trip",
-          "max |Δ| = " + std::to_string(max_err));
 
-    // Overwrite: saving again with a different vector must replace, not
-    // append, the dataset.
     std::vector<double> eigs2 = {-1.0, 0.0, 1.0};
     HDF5IO::saveEigenvalues(path, eigs2);
     auto loaded2 = HDF5IO::loadEigenvalues(path);
-    check(ctx, loaded2.size() == eigs2.size(),
-          "saveEigenvalues() overwrites prior dataset (size)");
+    REQUIRE(loaded2.size() == eigs2.size());
 }
 
-// -----------------------------------------------------------------------------
-// 3. Eigenvector round-trip.
-// -----------------------------------------------------------------------------
-static void test_eigenvector_roundtrip(TestContext& ctx) {
+TEST_CASE("HDF5IO eigenvector round-trip (complex)",
+          "[hdf5_io][eigvecs]") {
     std::string dir = make_scratch_dir("hdf5_io", "eigvecs");
     std::string path = HDF5IO::createOrOpenFile(dir);
 
-    // Make a deterministic complex vector with non-trivial real and imag
-    // parts so we can detect any half/full silent loss.
     const size_t N = 64;
     std::vector<Complex> v(N);
     for (size_t i = 0; i < N; ++i) {
@@ -118,38 +76,29 @@ static void test_eigenvector_roundtrip(TestContext& ctx) {
     HDF5IO::saveEigenvector(path, /*index=*/0, v);
     auto loaded = HDF5IO::loadEigenvector(path, 0);
 
-    check(ctx, loaded.size() == v.size(),
-          "loadEigenvector() size matches");
-    double max_err = 0.0;
+    REQUIRE(loaded.size() == v.size());
     for (size_t i = 0; i < v.size(); ++i) {
-        max_err = std::max(max_err, std::abs(loaded[i] - v[i]));
+        INFO("i=" << i);
+        REQUIRE(loaded[i] == v[i]);
     }
-    check(ctx, max_err == 0.0,
-          "loadEigenvector() byte-exact round trip (complex)",
-          "max |Δ| = " + std::to_string(max_err));
 
-    // Multi-index: write index=2, ensure index=0 still readable.
     std::vector<Complex> v2(N);
     for (size_t i = 0; i < N; ++i) v2[i] = Complex(double(i), -double(i));
     HDF5IO::saveEigenvector(path, /*index=*/2, v2);
 
     auto loaded0_again = HDF5IO::loadEigenvector(path, 0);
     auto loaded2 = HDF5IO::loadEigenvector(path, 2);
-    bool ok = (loaded0_again.size() == N && loaded2.size() == N);
-    if (ok) {
-        for (size_t i = 0; i < N; ++i) {
-            if (std::abs(loaded0_again[i] - v[i]) != 0.0 ||
-                std::abs(loaded2[i] - v2[i]) != 0.0) { ok = false; break; }
-        }
+    REQUIRE(loaded0_again.size() == N);
+    REQUIRE(loaded2.size() == N);
+    for (size_t i = 0; i < N; ++i) {
+        INFO("multi-index i=" << i);
+        REQUIRE(loaded0_again[i] == v[i]);
+        REQUIRE(loaded2[i] == v2[i]);
     }
-    check(ctx, ok,
-          "Multi-index saveEigenvector() preserves all stored vectors");
 }
 
-// -----------------------------------------------------------------------------
-// 4. saveDiagonalizationResults driver path.
-// -----------------------------------------------------------------------------
-static void test_save_diag_results(TestContext& ctx) {
+TEST_CASE("HDF5IO::saveDiagonalizationResults round-trip",
+          "[hdf5_io][diag_results]") {
     std::string dir = make_scratch_dir("hdf5_io", "diag_results");
 
     std::vector<double> eigs = {-2.0, -1.0, 0.5, 1.5};
@@ -165,31 +114,23 @@ static void test_save_diag_results(TestContext& ctx) {
     HDF5IO::saveDiagonalizationResults(dir, eigs, vecs, "TEST");
 
     std::string path = dir + "/ed_results.h5";
-    check(ctx, std::filesystem::exists(path),
-          "saveDiagonalizationResults creates ed_results.h5");
+    REQUIRE(std::filesystem::exists(path));
 
     auto loaded_eigs = HDF5IO::loadEigenvalues(path);
-    bool eigs_ok = (loaded_eigs == eigs);
-    check(ctx, eigs_ok,
-          "saveDiagonalizationResults round-trips eigenvalues");
+    REQUIRE(loaded_eigs == eigs);
 
-    bool vecs_ok = true;
     for (size_t i = 0; i < vecs.size(); ++i) {
         auto v = HDF5IO::loadEigenvector(path, i);
-        if (v.size() != vecs[i].size()) { vecs_ok = false; break; }
+        INFO("i=" << i);
+        REQUIRE(v.size() == vecs[i].size());
         for (size_t k = 0; k < v.size(); ++k) {
-            if (std::abs(v[k] - vecs[i][k]) != 0.0) { vecs_ok = false; break; }
+            REQUIRE(v[k] == vecs[i][k]);
         }
-        if (!vecs_ok) break;
     }
-    check(ctx, vecs_ok,
-          "saveDiagonalizationResults round-trips all eigenvectors");
 }
 
-// -----------------------------------------------------------------------------
-// 5. Thermodynamics save/load.
-// -----------------------------------------------------------------------------
-static void test_thermodynamics(TestContext& ctx) {
+TEST_CASE("HDF5IO thermodynamics save/load",
+          "[hdf5_io][thermo]") {
     std::string dir = make_scratch_dir("hdf5_io", "thermo");
     std::string path = HDF5IO::createOrOpenFile(dir);
 
@@ -206,18 +147,15 @@ static void test_thermodynamics(TestContext& ctx) {
     auto S_back  = HDF5IO::loadThermodynamicObservable(path, "entropy");
     auto Cv_back = HDF5IO::loadThermodynamicObservable(path, "specific_heat");
 
-    check(ctx, E_back == E, "energy round trip");
-    check(ctx, S_back == S, "entropy round trip");
-    check(ctx, Cv_back == Cv, "specific_heat round trip");
+    REQUIRE(E_back == E);
+    REQUIRE(S_back == S);
+    REQUIRE(Cv_back == Cv);
 }
 
-// -----------------------------------------------------------------------------
-// 6. Integration: full_diagonalization writes an HDF5 file we can verify.
-// -----------------------------------------------------------------------------
-static void test_full_diag_integration(TestContext& ctx) {
+TEST_CASE("full_diagonalization writes valid HDF5",
+          "[hdf5_io][full_diag]") {
     std::string dir = make_scratch_dir("hdf5_io", "full_diag");
 
-    // Tiny system so the full_diagonalization is fast.
     auto op = build_heisenberg_chain(/*N=*/4, /*J=*/1.0, /*periodic=*/true);
     const uint64_t dim = 16;
 
@@ -230,31 +168,16 @@ static void test_full_diag_integration(TestContext& ctx) {
     full_diagonalization(Hv, dim, /*num_eigs=*/dim, eigs, dir,
                          /*compute_eigenvectors=*/false);
 
-    check(ctx, eigs.size() == dim,
-          "full_diagonalization returns dim eigenvalues",
-          "got " + std::to_string(eigs.size()));
+    INFO("eigs.size()=" << eigs.size());
+    REQUIRE(eigs.size() == dim);
 
     std::string h5_path = dir + "/ed_results.h5";
-    check(ctx, std::filesystem::exists(h5_path),
-          "full_diagonalization writes ed_results.h5",
-          h5_path);
+    INFO(h5_path);
+    REQUIRE(std::filesystem::exists(h5_path));
 
     auto loaded = HDF5IO::loadEigenvalues(h5_path);
-    check_eigs_close(ctx, loaded, ref.eigs, dim, 1e-9,
-                     "HDF5 eigenvalues match dense reference");
-
-    // Sanity: the in-memory result and the on-disk result must agree.
-    check_eigs_close(ctx, eigs, loaded, dim, 1e-15,
-                     "HDF5 round trip matches in-memory eigenvalues");
-}
-
-int main() {
-    TestContext ctx("test_hdf5_io");
-    test_create_or_open(ctx);
-    test_eigenvalues_roundtrip(ctx);
-    test_eigenvector_roundtrip(ctx);
-    test_save_diag_results(ctx);
-    test_thermodynamics(ctx);
-    test_full_diag_integration(ctx);
-    return ctx.summary_exit_code();
+    require_eigs_close(loaded, ref.eigs, dim, 1e-9,
+                       "HDF5 eigenvalues match dense reference");
+    require_eigs_close(eigs, loaded, dim, 1e-15,
+                       "HDF5 round trip matches in-memory");
 }

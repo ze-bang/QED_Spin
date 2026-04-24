@@ -1,5 +1,5 @@
 // =============================================================================
-// test_trans_interall_loading
+// test_trans_interall_loading (Catch2 v3, P1.8 / audit Q12)
 //
 // Writes synthetic Trans.dat and InterAll.dat files that encode the same
 // Heisenberg chain the in-memory fixture builds, loads them via
@@ -7,25 +7,22 @@
 // produce identical spectra.
 // =============================================================================
 
-#include "common/test_harness.h"
+#include "common/catch2_harness.h"
 
 #include <ed/core/construct_ham.h>
 
 #include <cstdio>
-#include <filesystem>  // P0.12
+#include <filesystem>
 #include <fstream>
 #include <memory>
-#include <sstream>
 #include <string>
-#include <system_error>  // P0.12
+#include <system_error>
 
 using namespace ed_tests;
 
-// Write a Heisenberg-chain InterAll.dat whose contents reproduce the
-// build_heisenberg_chain() programmatic Hamiltonian (J=1, OBC).
-// Trans.dat is written but empty of one-body terms (no magnetic field).
-static void write_files(uint64_t N, const std::string& dir) {
-    // P0.12: was system("mkdir -p '...'") (shell-quoted).
+namespace {
+
+void write_files(uint64_t N, const std::string& dir) {
     std::error_code ec;
     std::filesystem::create_directories(dir, ec);
 
@@ -49,7 +46,6 @@ static void write_files(uint64_t N, const std::string& dir) {
         f << "===================\n";
         for (uint64_t i = 0; i < N - 1; ++i) {
             uint64_t j = i + 1;
-            // Op codes follow construct_ham: 0=S+, 1=S-, 2=Sz
             f << "        2         " << i
               << "           2         " << j
               << "    1.000000    0.000000\n";
@@ -63,33 +59,29 @@ static void write_files(uint64_t N, const std::string& dir) {
     }
 }
 
-int main() {
-    TestContext ctx("test_trans_interall_loading");
+} // namespace
+
+TEST_CASE("Trans/InterAll file loader matches programmatic Heisenberg",
+          "[trans_interall][loader]") {
     const uint64_t N = 4;
     const uint64_t dim = 1ULL << N;
 
     std::string dir = make_scratch_dir("trans_interall");
     write_files(N, dir);
 
-    // Reference: programmatic in-memory construction
     auto op_ref = build_heisenberg_chain(N, 1.0);
     auto ref = reference_from_operator(*op_ref, dim);
 
-    // Loaded: via the public file-parsing API
     auto op_loaded = std::make_unique<Operator>(N, 0.5f);
     op_loaded->loadFromFile(dir + "/Trans.dat");
     op_loaded->loadFromInterAllFile(dir + "/InterAll.dat");
     auto loaded = reference_from_operator(*op_loaded, dim);
 
-    check_eigs_close(ctx, loaded.eigs, ref.eigs, ref.eigs.size(), 1e-10,
-                     "spectra from Trans+InterAll match programmatic H");
+    require_eigs_close(loaded.eigs, ref.eigs, ref.eigs.size(), 1e-10,
+                       "spectra from Trans+InterAll match programmatic H");
 
-    // Extra sanity: the two dense matrices must agree element-wise.
     double err = (loaded.H - ref.H).norm() /
                  std::max(ref.H.norm(), 1e-30);
-    check(ctx, err < 1e-12,
-          "loaded H matches programmatic H element-wise",
-          "rel err = " + std::to_string(err));
-
-    return ctx.summary_exit_code();
+    INFO("||H_loaded - H_ref|| / ||H_ref|| = " << err);
+    REQUIRE(err < 1e-12);
 }

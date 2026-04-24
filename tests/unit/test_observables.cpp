@@ -1,5 +1,5 @@
 // =============================================================================
-// test_observables
+// test_observables (Catch2 v3, P1.8 / audit Q12)
 //
 // Light-weight sanity checks for `calculate_thermodynamics_from_spectrum()`.
 // We verify:
@@ -10,7 +10,7 @@
 //   * at T->infinity the energy approaches the unweighted average.
 // =============================================================================
 
-#include "common/test_harness.h"
+#include "common/catch2_harness.h"
 
 #include <ed/core/thermal_types.h>
 #include <ed/solvers/observables.h>
@@ -19,17 +19,15 @@
 #include <cmath>
 #include <vector>
 
-// Implemented in observables.cpp, declared (inconsistently) as a free
-// function. Forward-declare to avoid pulling the full header.
 ThermodynamicData calculate_thermodynamics_from_spectrum(
     const std::vector<double>& eigenvalues,
     double T_min, double T_max, uint64_t num_points);
 
 using namespace ed_tests;
 
-static void test_two_level(TestContext& ctx) {
+TEST_CASE("Two-level system thermodynamics", "[observables][two_level]") {
     // H = diag(0, Δ) with degeneracies g0=1, g1=1. Then:
-    //   E(T)    = Δ / (1 + exp(Δ/T))
+    //   E(T) = Δ / (1 + exp(Δ/T))
     //   at T=0      => E=0, S=0
     //   at T=inf    => E=Δ/2, S=ln(2)
     const double dE = 1.0;
@@ -38,45 +36,44 @@ static void test_two_level(TestContext& ctx) {
     const uint64_t N = 40;
     auto r = calculate_thermodynamics_from_spectrum(eigs, 0.01, 100.0, N);
 
-    check(ctx, r.temperatures.size() == N, "temperatures size = num_points");
-    check(ctx, r.energy.size() == N, "energy size = num_points");
-    check(ctx, r.specific_heat.size() == N, "specific_heat size = num_points");
-    check(ctx, r.entropy.size() == N, "entropy size = num_points");
-    check(ctx, r.free_energy.size() == N, "free_energy size = num_points");
+    REQUIRE(r.temperatures.size() == N);
+    REQUIRE(r.energy.size() == N);
+    REQUIRE(r.specific_heat.size() == N);
+    REQUIRE(r.entropy.size() == N);
+    REQUIRE(r.free_energy.size() == N);
 
-    // Monotonic E(T).
-    bool mono = true;
-    for (uint64_t i = 1; i < N; ++i) {
-        if (r.energy[i] + 1e-12 < r.energy[i - 1]) { mono = false; break; }
+    SECTION("E(T) monotonically non-decreasing") {
+        for (uint64_t i = 1; i < N; ++i) {
+            INFO("i=" << i << " E[i-1]=" << r.energy[i - 1]
+                 << " E[i]=" << r.energy[i]);
+            REQUIRE(r.energy[i] + 1e-12 >= r.energy[i - 1]);
+        }
     }
-    check(ctx, mono, "E(T) monotonically non-decreasing");
 
-    // F = E - T*S within a reasonable tolerance.
-    double max_dev = 0.0;
-    for (uint64_t i = 0; i < N; ++i) {
-        double lhs = r.free_energy[i];
-        double rhs = r.energy[i] - r.temperatures[i] * r.entropy[i];
-        max_dev = std::max(max_dev, std::abs(lhs - rhs));
+    SECTION("F = E - T*S identity") {
+        double max_dev = 0.0;
+        for (uint64_t i = 0; i < N; ++i) {
+            double lhs = r.free_energy[i];
+            double rhs = r.energy[i] - r.temperatures[i] * r.entropy[i];
+            max_dev = std::max(max_dev, std::abs(lhs - rhs));
+        }
+        INFO("max |F - (E - T*S)| = " << max_dev);
+        REQUIRE(max_dev < 1e-6);
     }
-    check(ctx, max_dev < 1e-6,
-          "F = E - T*S identity",
-          "max |F - (E - T*S)| = " + std::to_string(max_dev));
 
-    // Low-T and high-T limits.
-    check(ctx, std::abs(r.energy.front()) < 1e-6,
-          "E(T_min) ~ ground state",
-          "E(T_min) = " + std::to_string(r.energy.front()));
-    check(ctx, std::abs(r.energy.back() - 0.5 * dE) < 1e-2,
-          "E(T_max) ~ mean energy",
-          "E(T_max) = " + std::to_string(r.energy.back()));
+    SECTION("low-T limit: E(T_min) ~ ground state") {
+        INFO("E(T_min) = " << r.energy.front());
+        REQUIRE(std::abs(r.energy.front()) < 1e-6);
+    }
+
+    SECTION("high-T limit: E(T_max) ~ mean energy") {
+        INFO("E(T_max) = " << r.energy.back());
+        REQUIRE(std::abs(r.energy.back() - 0.5 * dE) < 1e-2);
+    }
 }
 
-static void test_heisenberg_N4_partition(TestContext& ctx) {
-    // Full spectrum of the 4-site OBC Heisenberg chain, computed from the
-    // same apply() path the main code uses. Verify that:
-    //   * specific heat is non-negative,
-    //   * entropy is bounded by ln(dim),
-    //   * energy is bounded by min and max eigenvalue.
+TEST_CASE("Heisenberg N=4 partition function bounds",
+          "[observables][heisenberg]") {
     auto op = build_heisenberg_chain(4, 1.0);
     auto ref = reference_from_operator(*op, 16);
 
@@ -86,27 +83,15 @@ static void test_heisenberg_N4_partition(TestContext& ctx) {
     double e_hi = ref.eigs.back();
     double S_max = std::log(static_cast<double>(ref.eigs.size())) + 1e-9;
 
-    bool cv_ok = true, s_ok = true, e_ok = true;
-    double worst_cv = 0, worst_s = 0, worst_e = 0;
     for (uint64_t i = 0; i < r.temperatures.size(); ++i) {
-        if (r.specific_heat[i] < -1e-9) { cv_ok = false; worst_cv = std::min(worst_cv, r.specific_heat[i]); }
-        if (r.entropy[i] < -1e-9 || r.entropy[i] > S_max) { s_ok = false; worst_s = r.entropy[i]; }
-        if (r.energy[i] < e_lo - 1e-8 || r.energy[i] > e_hi + 1e-8) {
-            e_ok = false; worst_e = r.energy[i];
-        }
+        INFO("i=" << i << " T=" << r.temperatures[i]
+             << " Cv=" << r.specific_heat[i]
+             << " S=" << r.entropy[i]
+             << " E=" << r.energy[i]);
+        REQUIRE(r.specific_heat[i] >= -1e-9);
+        REQUIRE(r.entropy[i] >= -1e-9);
+        REQUIRE(r.entropy[i] <= S_max);
+        REQUIRE(r.energy[i] >= e_lo - 1e-8);
+        REQUIRE(r.energy[i] <= e_hi + 1e-8);
     }
-    check(ctx, cv_ok, "N=4 Heisenberg Cv(T) >= 0 everywhere",
-          "worst Cv = " + std::to_string(worst_cv));
-    check(ctx, s_ok, "N=4 Heisenberg 0 <= S(T) <= ln(dim) everywhere",
-          "worst S = " + std::to_string(worst_s) +
-              " max allowed = " + std::to_string(S_max));
-    check(ctx, e_ok, "N=4 Heisenberg E(T) within spectrum bounds",
-          "worst E = " + std::to_string(worst_e));
-}
-
-int main() {
-    TestContext ctx("test_observables");
-    test_two_level(ctx);
-    test_heisenberg_N4_partition(ctx);
-    return ctx.summary_exit_code();
 }

@@ -560,12 +560,21 @@ option(BUILD_ED_TESTS "Build the ED regression test suite" ON)
 if(BUILD_ED_TESTS)
     enable_testing()
 
+    # Catch2 v3 (P1.8 / audit Q12). Brought in via FetchContent with a
+    # system-wide find_package fallback. Defines Catch2::Catch2WithMain.
+    include(EDCatch2)
+
     # Helper to declare a test executable. Each test gets its own binary so
     # CTest can run them in parallel and report failures independently.
     # Tests link against ed_solvers_cpu (which transitively pulls in ed_core,
     # ed_io, BLAS/LAPACK/HDF5/ARPACK/MPI/OpenMP), and against ed_solvers_gpu
     # when CUDA is enabled. This guarantees tests are compiled against the
     # exact same TUs as the production binaries.
+    #
+    # Tests that opt into the new Catch2 v3 harness pass USE_CATCH2 as a
+    # third argument, in which case the helper links Catch2::Catch2WithMain
+    # and registers the binary with `catch_discover_tests` so CTest sees
+    # each TEST_CASE individually.
     function(ed_add_test test_name test_source)
         add_executable(${test_name} ${test_source})
         target_include_directories(${test_name} PRIVATE
@@ -579,23 +588,38 @@ if(BUILD_ED_TESTS)
         target_compile_options(${test_name} PRIVATE
             $<$<COMPILE_LANGUAGE:CXX>:${CPU_OPT_FLAGS}>
         )
-        add_test(NAME ${test_name} COMMAND ${test_name})
-        set_tests_properties(${test_name} PROPERTIES
-            ENVIRONMENT "ED_TEST_TMP_DIR=${CMAKE_CURRENT_BINARY_DIR}/test_scratch"
-            TIMEOUT 180
-        )
+
+        set(_use_catch2 FALSE)
+        if(${ARGC} GREATER 2 AND "${ARGV2}" STREQUAL "USE_CATCH2")
+            set(_use_catch2 TRUE)
+        endif()
+
+        if(_use_catch2)
+            target_link_libraries(${test_name} PRIVATE Catch2::Catch2WithMain)
+            catch_discover_tests(${test_name}
+                PROPERTIES
+                    ENVIRONMENT "ED_TEST_TMP_DIR=${CMAKE_CURRENT_BINARY_DIR}/test_scratch"
+                    TIMEOUT 180
+            )
+        else()
+            add_test(NAME ${test_name} COMMAND ${test_name})
+            set_tests_properties(${test_name} PROPERTIES
+                ENVIRONMENT "ED_TEST_TMP_DIR=${CMAKE_CURRENT_BINARY_DIR}/test_scratch"
+                TIMEOUT 180
+            )
+        endif()
     endfunction()
 
-    ed_add_test(test_operator_apply             tests/unit/test_operator_apply.cpp)
-    ed_add_test(test_fixed_sz_operator          tests/unit/test_fixed_sz_operator.cpp)
-    ed_add_test(test_full_diagonalization       tests/unit/test_full_diagonalization.cpp)
-    ed_add_test(test_lanczos_variants           tests/unit/test_lanczos_variants.cpp)
-    ed_add_test(test_lanczos_basis_buffer       tests/unit/test_lanczos_basis_buffer.cpp)
-    ed_add_test(test_trans_interall_loading     tests/unit/test_trans_interall_loading.cpp)
-    ed_add_test(test_observables                tests/unit/test_observables.cpp)
-    ed_add_test(test_thermal_methods            tests/unit/test_thermal_methods.cpp)
-    ed_add_test(test_hdf5_io                    tests/unit/test_hdf5_io.cpp)
-    ed_add_test(test_symmetry                   tests/unit/test_symmetry.cpp)
+    ed_add_test(test_operator_apply             tests/unit/test_operator_apply.cpp USE_CATCH2)
+    ed_add_test(test_fixed_sz_operator          tests/unit/test_fixed_sz_operator.cpp USE_CATCH2)
+    ed_add_test(test_full_diagonalization       tests/unit/test_full_diagonalization.cpp USE_CATCH2)
+    ed_add_test(test_lanczos_variants           tests/unit/test_lanczos_variants.cpp USE_CATCH2)
+    ed_add_test(test_lanczos_basis_buffer       tests/unit/test_lanczos_basis_buffer.cpp USE_CATCH2)
+    ed_add_test(test_trans_interall_loading     tests/unit/test_trans_interall_loading.cpp USE_CATCH2)
+    ed_add_test(test_observables                tests/unit/test_observables.cpp USE_CATCH2)
+    ed_add_test(test_thermal_methods            tests/unit/test_thermal_methods.cpp USE_CATCH2)
+    ed_add_test(test_hdf5_io                    tests/unit/test_hdf5_io.cpp USE_CATCH2)
+    ed_add_test(test_symmetry                   tests/unit/test_symmetry.cpp USE_CATCH2)
 
     # Regression test of the on-disk fallback path for the Lanczos basis
     # buffer. `force_disk_storage()` is cached per-process, so we reuse the
