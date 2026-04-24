@@ -16,6 +16,13 @@ Exposes the same kernels the C++ ``compute_bfg_order_parameters`` and
   * HDF5 wavefunction loaders: :func:`load_wavefunction`,
     :func:`load_tpq_state`, :func:`load_all_tpq_states`,
     :class:`TPQState`
+  * bond-bilinear structure factors / Fourier-applied dimer operators:
+    :func:`compute_dimer_sf_direct`, :func:`compute_heisenberg_sf_direct`,
+    :func:`apply_dimer_fourier`, :func:`apply_heisenberg_dimer_fourier`,
+    :func:`compute_dimer_dimer_correlation`,
+    :func:`compute_heisenberg_dimer_dimer_correlation`,
+    :func:`set_memory_efficient_mode`,
+    :class:`DimerSFResult`
 
 This is the bridge that lets a notebook reuse the same spin-correlation
 pipeline the CLI binaries use without round-tripping through HDF5 files,
@@ -52,8 +59,15 @@ from __future__ import annotations
 from ._core.bfg import (  # type: ignore[attr-defined]
     Bowtie,
     Cluster,
+    DimerSFResult,
     TPQState,
+    apply_dimer_fourier,
+    apply_heisenberg_dimer_fourier,
+    compute_dimer_dimer_correlation,
+    compute_dimer_sf_direct,
     compute_heisenberg_bond_expectations,
+    compute_heisenberg_dimer_dimer_correlation,
+    compute_heisenberg_sf_direct,
     compute_smsp_correlations,
     compute_spsm_bond_expectations,
     compute_szsz_bond_expectations,
@@ -65,11 +79,14 @@ from ._core.bfg import (  # type: ignore[attr-defined]
     load_cluster,
     load_tpq_state,
     load_wavefunction,
+    memory_efficient_mode_enabled,
+    set_memory_efficient_mode,
 )
 
 __all__ = [
     "Cluster",
     "Bowtie",
+    "DimerSFResult",
     "TPQState",
     "load_cluster",
     "load_wavefunction",
@@ -83,4 +100,12 @@ __all__ = [
     "compute_spsm_bond_expectations",
     "compute_szsz_bond_expectations",
     "compute_heisenberg_bond_expectations",
+    "compute_dimer_sf_direct",
+    "compute_heisenberg_sf_direct",
+    "apply_dimer_fourier",
+    "apply_heisenberg_dimer_fourier",
+    "compute_dimer_dimer_correlation",
+    "compute_heisenberg_dimer_dimer_correlation",
+    "set_memory_efficient_mode",
+    "memory_efficient_mode_enabled",
 ]

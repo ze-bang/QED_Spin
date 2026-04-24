@@ -730,6 +730,12 @@ if(BUILD_ED_TESTS)
     ed_add_test(test_bfg_correlations           tests/unit/test_bfg_correlations.cpp USE_CATCH2)
     target_link_libraries(test_bfg_correlations PRIVATE ed_bfg)
 
+    # P2.1 (4th slice): bond-bilinear structure factors / Fourier-applied
+    # dimer kernels shared by the CPU driver, the GPU driver, and the
+    # forthcoming Python bindings.
+    ed_add_test(test_bfg_structure_factor       tests/unit/test_bfg_structure_factor.cpp USE_CATCH2)
+    target_link_libraries(test_bfg_structure_factor PRIVATE ed_bfg)
+
     # P2.1 (third slice): HDF5 wavefunction loaders shared by the CPU + GPU
     # drivers and by the Python bindings.
     ed_add_test(test_bfg_wavefunction_io        tests/unit/test_bfg_wavefunction_io.cpp USE_CATCH2)

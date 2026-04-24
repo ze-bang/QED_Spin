@@ -196,6 +196,15 @@ set_target_properties(ed_symmetry PROPERTIES POSITION_INDEPENDENT_CODE ON)
 #                              (`compute_smsp_correlations`,
 #                               `compute_szsz_correlations`, the four
 #                               `compute_*_bond_expectations` overloads).
+#   * structure_factor.cpp  -- bond-bilinear structure factors and
+#                              Fourier-applied dimer operators
+#                              (`compute_dimer_sf_direct`,
+#                               `compute_heisenberg_sf_direct`,
+#                               `apply_dimer_fourier`,
+#                               `apply_heisenberg_dimer_fourier`,
+#                               `compute_dimer_dimer_correlation`,
+#                               `compute_heisenberg_dimer_dimer_correlation`,
+#                               `set_memory_efficient_mode`).
 #   * wavefunction_io.cpp   -- HDF5 wavefunction + TPQ-state loaders shared
 #                              by the CPU and GPU drivers and by the Python
 #                              bindings (`load_wavefunction`,
@@ -216,6 +225,7 @@ add_library(ed_bfg STATIC
     ${BFG_DIR}/cluster.cpp
     ${BFG_DIR}/topology.cpp
     ${BFG_DIR}/correlations.cpp
+    ${BFG_DIR}/structure_factor.cpp
     ${BFG_DIR}/wavefunction_io.cpp
 )
 target_include_directories(ed_bfg PUBLIC ${_ED_PUBLIC_INCLUDES})

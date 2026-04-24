@@ -205,3 +205,79 @@ def test_load_all_tpq_states_sorted_ascending_T(tmp_path):
     assert math.isclose(snapshots[0].beta, max(betas), rel_tol=1e-12)
     np.testing.assert_allclose(snapshots[0].psi,
                                payloads[max(betas)], atol=1e-15)
+
+
+# ---------------------------------------------------------------------------
+# Structure factor / Fourier-applied dimer kernels (P2.1, fourth slice).
+# Mirrors tests/unit/test_bfg_structure_factor.cpp on the same 2-site states.
+# ---------------------------------------------------------------------------
+
+_BOND_01 = [(0, 1)]
+_CENTER_01 = [(0.5, 0.0)]
+_QZERO = (0.0, 0.0)
+
+
+def _two_site_singlet_mix() -> np.ndarray:
+    """(|01> + |10>) / sqrt(2). Triplet m=0 in our convention."""
+    psi = np.zeros(4, dtype=np.complex128)
+    psi[0b01] = 1.0 / math.sqrt(2.0)
+    psi[0b10] = 1.0 / math.sqrt(2.0)
+    return psi
+
+
+def _two_site_up_up() -> np.ndarray:
+    psi = np.zeros(4, dtype=np.complex128)
+    psi[0b00] = 1.0
+    return psi
+
+
+def test_set_memory_efficient_mode_off_for_tiny():
+    bfg.set_memory_efficient_mode(0)
+    assert bfg.memory_efficient_mode_enabled() is False
+
+
+def test_compute_dimer_sf_direct_vanishes_on_up_up():
+    r = bfg.compute_dimer_sf_direct(_two_site_up_up(), _BOND_01, _CENTER_01,
+                                    _QZERO)
+    assert math.isclose(r.overlap.real, 0.0, abs_tol=1e-12)
+    assert abs(r.expect_q1) < 1e-12
+    assert abs(r.expect_q2) < 1e-12
+
+
+def test_compute_heisenberg_sf_direct_on_up_up_equals_one_sixteenth():
+    r = bfg.compute_heisenberg_sf_direct(_two_site_up_up(), _BOND_01,
+                                         _CENTER_01, _QZERO)
+    assert math.isclose(r.overlap.real, 1.0 / 16.0, abs_tol=1e-12)
+
+
+def test_apply_dimer_fourier_on_singlet_mix_is_identity():
+    psi = _two_site_singlet_mix()
+    out = bfg.apply_dimer_fourier(psi, _BOND_01, _CENTER_01, _QZERO)
+    assert out.dtype == np.complex128
+    np.testing.assert_allclose(out, psi, atol=1e-12)
+
+
+def test_apply_heisenberg_dimer_fourier_on_singlet_mix_returns_quarter_psi():
+    psi = _two_site_singlet_mix()
+    out, expect = bfg.apply_heisenberg_dimer_fourier(
+        psi, _BOND_01, _CENTER_01, _QZERO
+    )
+    assert out.dtype == np.complex128
+    np.testing.assert_allclose(out, 0.25 * psi, atol=1e-12)
+    assert math.isclose(expect.real, 0.25, abs_tol=1e-12)
+    assert abs(expect.imag) < 1e-12
+
+
+def test_compute_dimer_dimer_correlation_self_on_singlet_mix_equals_one():
+    r = bfg.compute_dimer_dimer_correlation(_two_site_singlet_mix(),
+                                            0, 1, 0, 1)
+    assert math.isclose(r.real, 1.0, abs_tol=1e-12)
+    assert abs(r.imag) < 1e-12
+
+
+def test_compute_heisenberg_dimer_dimer_correlation_self_on_triplet_eq_1_16():
+    # (S.S)^2 has eigenvalue (1/4)^2 = 1/16 on the triplet manifold.
+    r = bfg.compute_heisenberg_dimer_dimer_correlation(
+        _two_site_singlet_mix(), 0, 1, 0, 1
+    )
+    assert math.isclose(r, 1.0 / 16.0, abs_tol=1e-12)

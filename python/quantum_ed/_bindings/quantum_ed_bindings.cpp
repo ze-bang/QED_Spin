@@ -46,6 +46,7 @@
 #include <ed/solvers/observables.h>
 #include <ed/bfg/cluster.h>
 #include <ed/bfg/correlations.h>
+#include <ed/bfg/structure_factor.h>
 #include <ed/bfg/topology.h>
 #include <ed/bfg/wavefunction_io.h>
 #include <ed/symmetry/group.h>
@@ -901,4 +902,158 @@ PYBIND11_MODULE(_core, m) {
         py::arg("verbose") = true,
         "Load the lowest-temperature (highest-beta) TPQ snapshot from the "
         "file. Returns (psi, temperature).");
+
+    // ed::bfg::structure_factor: bond-bilinear structure factors and
+    // Fourier-applied dimer kernels (P2.1 fourth slice). Same NumPy
+    // marshalling as the correlation kernels above; the GIL is released
+    // around the C++ call because each kernel is O(N_bonds * Hilbert).
+    py::class_<ed::bfg::DimerSFResult>(m_bfg, "DimerSFResult",
+        "Tuple of dimer-structure-factor pieces returned by the "
+        "`compute_dimer_sf_direct` / `compute_heisenberg_sf_direct` "
+        "kernels: (overlap = ||D(q)|psi>||^2, expect_q1 = <D(q)>, "
+        "expect_q2 = <D(q)>). The structure factor consumed by callers "
+        "is `S_D(q) = overlap - |expect_q1|^2`.")
+        .def_readonly("overlap",   &ed::bfg::DimerSFResult::overlap)
+        .def_readonly("expect_q1", &ed::bfg::DimerSFResult::expect_q1)
+        .def_readonly("expect_q2", &ed::bfg::DimerSFResult::expect_q2);
+
+    m_bfg.def("set_memory_efficient_mode",
+        &ed::bfg::set_memory_efficient_mode,
+        py::arg("n_states"),
+        "Enable atomic-update kernels when the thread-local working set "
+        "would exceed 4 GB. Call once at startup; the flag is read by "
+        "every subsequent apply_*_fourier kernel.");
+
+    m_bfg.def("memory_efficient_mode_enabled",
+        &ed::bfg::memory_efficient_mode_enabled,
+        "Return whether memory-efficient (atomic-update) mode is on.");
+
+    auto sf_kernel = [wavefunction_to_numpy](
+        py::array_t<std::complex<double>,
+                    py::array::c_style | py::array::forcecast> psi,
+        const std::vector<std::pair<int, int>>& bonds,
+        const std::vector<std::array<double, 2>>& bond_centers,
+        const std::array<double, 2>& q,
+        ed::bfg::DimerSFResult (*fn)(const std::vector<ed::bfg::Complex>&,
+                                     const std::vector<std::pair<int, int>>&,
+                                     const std::vector<std::array<double, 2>>&,
+                                     const std::array<double, 2>&)) {
+            if (psi.ndim() != 1) {
+                throw std::runtime_error("psi must be a 1-D complex128 array");
+            }
+            const auto n = static_cast<std::size_t>(psi.shape(0));
+            std::vector<ed::bfg::Complex> v(n);
+            std::memcpy(v.data(), psi.data(), n * sizeof(ed::bfg::Complex));
+            py::gil_scoped_release release;
+            return fn(v, bonds, bond_centers, q);
+    };
+
+    m_bfg.def("compute_dimer_sf_direct",
+        [sf_kernel](py::array_t<std::complex<double>,
+                                py::array::c_style | py::array::forcecast> psi,
+                    const std::vector<std::pair<int, int>>& bonds,
+                    const std::vector<std::array<double, 2>>& bond_centers,
+                    const std::array<double, 2>& q) {
+            return sf_kernel(psi, bonds, bond_centers, q,
+                             &ed::bfg::compute_dimer_sf_direct);
+        },
+        py::arg("psi"), py::arg("bonds"), py::arg("bond_centers"), py::arg("q"),
+        "S_D(q) = <D^dag(q) D(q)> for the XY dimer D = S+S- + S-S+.");
+
+    m_bfg.def("compute_heisenberg_sf_direct",
+        [sf_kernel](py::array_t<std::complex<double>,
+                                py::array::c_style | py::array::forcecast> psi,
+                    const std::vector<std::pair<int, int>>& bonds,
+                    const std::vector<std::array<double, 2>>& bond_centers,
+                    const std::array<double, 2>& q) {
+            return sf_kernel(psi, bonds, bond_centers, q,
+                             &ed::bfg::compute_heisenberg_sf_direct);
+        },
+        py::arg("psi"), py::arg("bonds"), py::arg("bond_centers"), py::arg("q"),
+        "S_D(q) for the Heisenberg dimer D = S_i . S_j.");
+
+    m_bfg.def("apply_dimer_fourier",
+        [wavefunction_to_numpy](
+            py::array_t<std::complex<double>,
+                        py::array::c_style | py::array::forcecast> psi,
+            const std::vector<std::pair<int, int>>& bonds,
+            const std::vector<std::array<double, 2>>& bond_centers,
+            const std::array<double, 2>& q) {
+            if (psi.ndim() != 1) {
+                throw std::runtime_error("psi must be a 1-D complex128 array");
+            }
+            const auto n = static_cast<std::size_t>(psi.shape(0));
+            std::vector<ed::bfg::Complex> v(n);
+            std::memcpy(v.data(), psi.data(), n * sizeof(ed::bfg::Complex));
+            std::vector<ed::bfg::Complex> out;
+            {
+                py::gil_scoped_release release;
+                out = ed::bfg::apply_dimer_fourier(v, bonds, bond_centers, q);
+            }
+            return wavefunction_to_numpy(std::move(out));
+        },
+        py::arg("psi"), py::arg("bonds"), py::arg("bond_centers"), py::arg("q"),
+        "Apply D_XY(q) = sum_b exp(i q . r_b) (S+S- + S-S+) to psi. "
+        "Returns the resulting NumPy complex128 ket.");
+
+    m_bfg.def("apply_heisenberg_dimer_fourier",
+        [wavefunction_to_numpy](
+            py::array_t<std::complex<double>,
+                        py::array::c_style | py::array::forcecast> psi,
+            const std::vector<std::pair<int, int>>& bonds,
+            const std::vector<std::array<double, 2>>& bond_centers,
+            const std::array<double, 2>& q) {
+            if (psi.ndim() != 1) {
+                throw std::runtime_error("psi must be a 1-D complex128 array");
+            }
+            const auto n = static_cast<std::size_t>(psi.shape(0));
+            std::vector<ed::bfg::Complex> v(n);
+            std::memcpy(v.data(), psi.data(), n * sizeof(ed::bfg::Complex));
+            std::pair<std::vector<ed::bfg::Complex>, ed::bfg::Complex> pair;
+            {
+                py::gil_scoped_release release;
+                pair = ed::bfg::apply_heisenberg_dimer_fourier(
+                    v, bonds, bond_centers, q);
+            }
+            return py::make_tuple(wavefunction_to_numpy(std::move(pair.first)),
+                                  pair.second);
+        },
+        py::arg("psi"), py::arg("bonds"), py::arg("bond_centers"), py::arg("q"),
+        "Apply D_H(q) = sum_b exp(i q . r_b) (S_i . S_j) to psi. "
+        "Returns (D(q)|psi> as NumPy complex128, <D(q)>).");
+
+    m_bfg.def("compute_dimer_dimer_correlation",
+        [](py::array_t<std::complex<double>,
+                       py::array::c_style | py::array::forcecast> psi,
+           int i1, int j1, int i2, int j2) {
+            if (psi.ndim() != 1) {
+                throw std::runtime_error("psi must be a 1-D complex128 array");
+            }
+            const auto n = static_cast<std::size_t>(psi.shape(0));
+            std::vector<ed::bfg::Complex> v(n);
+            std::memcpy(v.data(), psi.data(), n * sizeof(ed::bfg::Complex));
+            py::gil_scoped_release release;
+            return ed::bfg::compute_dimer_dimer_correlation(v, i1, j1, i2, j2);
+        },
+        py::arg("psi"), py::arg("i1"), py::arg("j1"),
+        py::arg("i2"), py::arg("j2"),
+        "<psi| D_{b1} D_{b2} |psi> for the XY dimer.");
+
+    m_bfg.def("compute_heisenberg_dimer_dimer_correlation",
+        [](py::array_t<std::complex<double>,
+                       py::array::c_style | py::array::forcecast> psi,
+           int i1, int j1, int i2, int j2) {
+            if (psi.ndim() != 1) {
+                throw std::runtime_error("psi must be a 1-D complex128 array");
+            }
+            const auto n = static_cast<std::size_t>(psi.shape(0));
+            std::vector<ed::bfg::Complex> v(n);
+            std::memcpy(v.data(), psi.data(), n * sizeof(ed::bfg::Complex));
+            py::gil_scoped_release release;
+            return ed::bfg::compute_heisenberg_dimer_dimer_correlation(
+                v, i1, j1, i2, j2);
+        },
+        py::arg("psi"), py::arg("i1"), py::arg("j1"),
+        py::arg("i2"), py::arg("j2"),
+        "<psi| (S_i1 . S_j1)(S_i2 . S_j2) |psi>.");
 }

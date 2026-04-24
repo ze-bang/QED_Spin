@@ -55,6 +55,7 @@
 
 #include "ed/bfg/cluster.h"
 #include "ed/bfg/correlations.h"
+#include "ed/bfg/structure_factor.h"
 #include "ed/bfg/topology.h"
 #include "ed/bfg/wavefunction_io.h"
 
@@ -85,6 +86,17 @@ using ed::bfg::load_cluster;
 using ed::bfg::load_tpq_state;
 using ed::bfg::load_wavefunction;
 using ed::bfg::TPQState;
+// P2.1 (4th slice): bond-bilinear structure factors / Fourier-applied dimer
+// kernels also live in ed_bfg now.
+using ed::bfg::apply_dimer_fourier;
+using ed::bfg::apply_heisenberg_dimer_fourier;
+using ed::bfg::compute_dimer_dimer_correlation;
+using ed::bfg::compute_dimer_sf_direct;
+using ed::bfg::compute_heisenberg_dimer_dimer_correlation;
+using ed::bfg::compute_heisenberg_sf_direct;
+using ed::bfg::DimerSFResult;
+using ed::bfg::memory_efficient_mode_enabled;
+using ed::bfg::set_memory_efficient_mode;
 
 // -----------------------------------------------------------------------------
 // Bit manipulation helpers (inlined for speed)
@@ -160,484 +172,13 @@ inline double sz_value(uint64_t state, int site) {
 // mode below already log start/stop separately.
 
 // -----------------------------------------------------------------------------
-// Memory-efficient structure factor computation
-// Computes ⟨ψ|D†(q)D(q)|ψ⟩ directly without materializing O(Hilbert) vectors
-// This avoids the O(n_threads * n_states) memory explosion
-//
-// Strategy: Use ⟨D†D⟩ = ||D|ψ⟩||² which we compute via:
-//   ||D|ψ⟩||² = Σ_s |[D|ψ⟩]_s|² = Σ_s |Σ_b exp(iq·r_b) [D_b|ψ⟩]_s|²
-// 
-// For each state s, we accumulate contributions from all bonds b where D_b 
-// maps some state s' to s, then square the result.
+// P2.1 (4th slice): the bond-bilinear structure factor / Fourier-applied
+// dimer kernels (DimerSFResult, compute_*_sf_direct, apply_*_fourier,
+// compute_*_dimer_dimer_correlation, set_memory_efficient_mode) moved into
+// the ed_bfg static library (`include/ed/bfg/structure_factor.h`,
+// `src/bfg/structure_factor.cpp`). The using-declarations at the top of
+// this TU keep the existing call sites unchanged.
 // -----------------------------------------------------------------------------
-
-struct DimerSFResult {
-    Complex overlap;      // ⟨D(q)ψ|D(q)ψ⟩ = ||D(q)|ψ⟩||²
-    Complex expect_q1;    // ⟨D(q)⟩
-    Complex expect_q2;    // ⟨D(q)⟩ (same as expect_q1 for q1=q2)
-};
-
-// Compute dimer structure factor directly: S_D(q) = ⟨D†(q)D(q)⟩ - |⟨D(q)⟩|²
-// For XY dimer operator D_b = S⁺ᵢS⁻ⱼ + S⁻ᵢS⁺ⱼ
-// Complexity: O(N_bonds * Hilbert) time, O(Hilbert) memory for accumulation
-DimerSFResult compute_dimer_sf_direct(
-    const std::vector<Complex>& psi,
-    const std::vector<std::pair<int, int>>& bonds,
-    const std::vector<std::array<double, 2>>& bond_centers,
-    const std::array<double, 2>& q
-) {
-    uint64_t n_states = psi.size();
-    int n_bonds = bonds.size();
-    
-    // Precompute phases
-    std::vector<Complex> phases(n_bonds);
-    for (int b = 0; b < n_bonds; ++b) {
-        double phase_arg = q[0] * bond_centers[b][0] + q[1] * bond_centers[b][1];
-        phases[b] = std::exp(I * phase_arg);
-    }
-    
-    // Compute D(q)|ψ⟩ using atomic updates (like apply_dimer_fourier but accumulate norm)
-    std::vector<double> result_real(n_states, 0.0);
-    std::vector<double> result_imag(n_states, 0.0);
-    
-    double expect_real = 0.0, expect_imag = 0.0;
-    
-    #pragma omp parallel for schedule(dynamic, 1024) reduction(+:expect_real, expect_imag)
-    for (uint64_t state = 0; state < n_states; ++state) {
-        Complex coeff = psi[state];
-        if (std::abs(coeff) < 1e-15) continue;
-        
-        for (int b = 0; b < n_bonds; ++b) {
-            int i = bonds[b].first;
-            int j = bonds[b].second;
-            int s_i = get_bit(state, i);
-            int s_j = get_bit(state, j);
-            Complex phase = phases[b];
-            
-            // S⁺ᵢS⁻ⱼ: needs i=DOWN(1), j=UP(0)
-            if (s_i == 1 && s_j == 0) {
-                uint64_t new_state = flip_bit(flip_bit(state, i), j);
-                Complex val = phase * coeff;
-                #pragma omp atomic
-                result_real[new_state] += val.real();
-                #pragma omp atomic
-                result_imag[new_state] += val.imag();
-                
-                // Contribution to expectation: ⟨new_state|D_b|state⟩ * ψ*(new_state) * ψ(state)
-                Complex exp_contrib = std::conj(psi[new_state]) * coeff * phase;
-                expect_real += exp_contrib.real();
-                expect_imag += exp_contrib.imag();
-            }
-            
-            // S⁻ᵢS⁺ⱼ: needs i=UP(0), j=DOWN(1)
-            if (s_i == 0 && s_j == 1) {
-                uint64_t new_state = flip_bit(flip_bit(state, i), j);
-                Complex val = phase * coeff;
-                #pragma omp atomic
-                result_real[new_state] += val.real();
-                #pragma omp atomic
-                result_imag[new_state] += val.imag();
-                
-                Complex exp_contrib = std::conj(psi[new_state]) * coeff * phase;
-                expect_real += exp_contrib.real();
-                expect_imag += exp_contrib.imag();
-            }
-        }
-    }
-    
-    // Compute ||D(q)|ψ⟩||² = Σ_s |result_s|²
-    double overlap_val = 0.0;
-    #pragma omp parallel for reduction(+:overlap_val) schedule(static)
-    for (uint64_t s = 0; s < n_states; ++s) {
-        overlap_val += result_real[s] * result_real[s] + result_imag[s] * result_imag[s];
-    }
-    
-    Complex expect(expect_real, expect_imag);
-    return {Complex(overlap_val, 0.0), expect, expect};
-}
-
-// Memory-efficient Heisenberg dimer structure factor
-// D_b = S_i·S_j = SzSz + (1/2)(S⁺S⁻ + S⁻S⁺)
-// Uses the same strategy: compute D(q)|ψ⟩ with atomics, then ||D(q)|ψ⟩||²
-DimerSFResult compute_heisenberg_sf_direct(
-    const std::vector<Complex>& psi,
-    const std::vector<std::pair<int, int>>& bonds,
-    const std::vector<std::array<double, 2>>& bond_centers,
-    const std::array<double, 2>& q
-) {
-    uint64_t n_states = psi.size();
-    int n_bonds = bonds.size();
-    
-    std::vector<Complex> phases(n_bonds);
-    for (int b = 0; b < n_bonds; ++b) {
-        double phase_arg = q[0] * bond_centers[b][0] + q[1] * bond_centers[b][1];
-        phases[b] = std::exp(I * phase_arg);
-    }
-    
-    // Compute D(q)|ψ⟩ using atomic updates
-    // D_b = SzSz + 0.5*(S⁺S⁻ + S⁻S⁺)
-    std::vector<double> result_real(n_states, 0.0);
-    std::vector<double> result_imag(n_states, 0.0);
-    
-    double expect_real = 0.0, expect_imag = 0.0;
-    
-    #pragma omp parallel for schedule(dynamic, 1024) reduction(+:expect_real, expect_imag)
-    for (uint64_t state = 0; state < n_states; ++state) {
-        Complex coeff = psi[state];
-        if (std::abs(coeff) < 1e-15) continue;
-        
-        for (int b = 0; b < n_bonds; ++b) {
-            int i = bonds[b].first;
-            int j = bonds[b].second;
-            int s_i = get_bit(state, i);
-            int s_j = get_bit(state, j);
-            Complex phase = phases[b];
-            
-            // SzSz part (diagonal): contributes to result[state]
-            double sz_i = s_i ? -0.5 : 0.5;
-            double sz_j = s_j ? -0.5 : 0.5;
-            Complex szsz_contrib = phase * coeff * sz_i * sz_j;
-            #pragma omp atomic
-            result_real[state] += szsz_contrib.real();
-            #pragma omp atomic
-            result_imag[state] += szsz_contrib.imag();
-            
-            // SzSz expectation contribution
-            Complex exp_szsz = std::conj(psi[state]) * coeff * phase * sz_i * sz_j;
-            expect_real += exp_szsz.real();
-            expect_imag += exp_szsz.imag();
-            
-            // XY part (off-diagonal with factor 0.5)
-            // S⁺ᵢS⁻ⱼ: needs i=DOWN(1), j=UP(0)
-            if (s_i == 1 && s_j == 0) {
-                uint64_t new_state = flip_bit(flip_bit(state, i), j);
-                Complex val = phase * coeff * 0.5;
-                #pragma omp atomic
-                result_real[new_state] += val.real();
-                #pragma omp atomic
-                result_imag[new_state] += val.imag();
-                
-                Complex exp_contrib = std::conj(psi[new_state]) * coeff * phase * 0.5;
-                expect_real += exp_contrib.real();
-                expect_imag += exp_contrib.imag();
-            }
-            
-            // S⁻ᵢS⁺ⱼ: needs i=UP(0), j=DOWN(1)
-            if (s_i == 0 && s_j == 1) {
-                uint64_t new_state = flip_bit(flip_bit(state, i), j);
-                Complex val = phase * coeff * 0.5;
-                #pragma omp atomic
-                result_real[new_state] += val.real();
-                #pragma omp atomic
-                result_imag[new_state] += val.imag();
-                
-                Complex exp_contrib = std::conj(psi[new_state]) * coeff * phase * 0.5;
-                expect_real += exp_contrib.real();
-                expect_imag += exp_contrib.imag();
-            }
-        }
-    }
-    
-    // Compute ||D(q)|ψ⟩||² = Σ_s |result_s|²
-    double overlap_val = 0.0;
-    #pragma omp parallel for reduction(+:overlap_val) schedule(static)
-    for (uint64_t s = 0; s < n_states; ++s) {
-        overlap_val += result_real[s] * result_real[s] + result_imag[s] * result_imag[s];
-    }
-    
-    Complex expect(expect_real, expect_imag);
-    return {Complex(overlap_val, 0.0), expect, expect};
-}
-
-// Flag to enable memory-efficient mode (controlled by system memory check)
-static bool g_use_memory_efficient_mode = false;
-static uint64_t g_memory_threshold = 1ULL << 24;  // ~16M states threshold
-
-void set_memory_efficient_mode(uint64_t n_states) {
-    // Enable memory-efficient mode if Hilbert space is large
-    // Threshold: when thread-local arrays would exceed ~4GB total
-    int n_threads = 1;
-    #ifdef _OPENMP
-    n_threads = omp_get_max_threads();
-    #endif
-    
-    uint64_t mem_per_thread = n_states * sizeof(Complex);  // 16 bytes per complex
-    uint64_t total_thread_mem = n_threads * mem_per_thread;
-    
-    // Enable if total thread-local memory would exceed 4GB
-    g_use_memory_efficient_mode = (total_thread_mem > 4ULL * 1024 * 1024 * 1024);
-    
-    if (g_use_memory_efficient_mode) {
-        std::cout << "[Memory] Enabling memory-efficient mode for " << n_states 
-                  << " states (" << n_threads << " threads would need "
-                  << (total_thread_mem / (1024*1024*1024)) << " GB)" << std::endl;
-    }
-}
-
-// -----------------------------------------------------------------------------
-// Apply Fourier-transformed XY dimer operator: D_α(q)|ψ⟩ = Σ_{b∈α} exp(iq·r_b) D_b|ψ⟩
-// where D_b = S⁺ᵢS⁻ⱼ + S⁻ᵢS⁺ⱼ
-// This is O(N_bonds * Hilbert) instead of O(N_bonds² * Hilbert) for pairwise correlations
-// -----------------------------------------------------------------------------
-
-std::vector<Complex> apply_dimer_fourier(
-    const std::vector<Complex>& psi,
-    const std::vector<std::pair<int, int>>& bonds,  // Bonds in this orientation
-    const std::vector<std::array<double, 2>>& bond_centers,
-    const std::array<double, 2>& q
-) {
-    uint64_t n_states = psi.size();
-    std::vector<Complex> result(n_states, 0.0);
-    int n_bonds = bonds.size();
-    
-    // Precompute phases
-    std::vector<Complex> phases(n_bonds);
-    for (int b = 0; b < n_bonds; ++b) {
-        double phase_arg = q[0] * bond_centers[b][0] + q[1] * bond_centers[b][1];
-        phases[b] = std::exp(I * phase_arg);
-    }
-    
-    if (g_use_memory_efficient_mode) {
-        // Memory-efficient mode: use atomic updates instead of thread-local arrays
-        // Split result into real/imag parts for atomic operations
-        std::vector<double> result_real(n_states, 0.0);
-        std::vector<double> result_imag(n_states, 0.0);
-        
-        #pragma omp parallel for schedule(dynamic, 1024)
-        for (uint64_t state = 0; state < n_states; ++state) {
-            Complex coeff = psi[state];
-            if (std::abs(coeff) < 1e-15) continue;
-            
-            for (int b = 0; b < n_bonds; ++b) {
-                int i = bonds[b].first;
-                int j = bonds[b].second;
-                int s_i = get_bit(state, i);
-                int s_j = get_bit(state, j);
-                Complex phase = phases[b];
-                
-                // S⁺ᵢS⁻ⱼ: needs i=DOWN(1), j=UP(0)
-                if (s_i == 1 && s_j == 0) {
-                    uint64_t new_state = flip_bit(flip_bit(state, i), j);
-                    Complex val = phase * coeff;
-                    #pragma omp atomic
-                    result_real[new_state] += val.real();
-                    #pragma omp atomic
-                    result_imag[new_state] += val.imag();
-                }
-                
-                // S⁻ᵢS⁺ⱼ: needs i=UP(0), j=DOWN(1)
-                if (s_i == 0 && s_j == 1) {
-                    uint64_t new_state = flip_bit(flip_bit(state, i), j);
-                    Complex val = phase * coeff;
-                    #pragma omp atomic
-                    result_real[new_state] += val.real();
-                    #pragma omp atomic
-                    result_imag[new_state] += val.imag();
-                }
-            }
-        }
-        
-        // Combine real and imaginary parts (parallelized)
-        #pragma omp parallel for schedule(static)
-        for (uint64_t s = 0; s < n_states; ++s) {
-            result[s] = Complex(result_real[s], result_imag[s]);
-        }
-    } else {
-        // Original mode: thread-local arrays (fast but memory-hungry)
-        #pragma omp parallel
-        {
-            std::vector<Complex> local_result(n_states, 0.0);
-            
-            #pragma omp for schedule(dynamic, 1024)
-            for (uint64_t state = 0; state < n_states; ++state) {
-                Complex coeff = psi[state];
-                if (std::abs(coeff) < 1e-15) continue;
-                
-                for (int b = 0; b < n_bonds; ++b) {
-                    int i = bonds[b].first;
-                    int j = bonds[b].second;
-                    int s_i = get_bit(state, i);
-                    int s_j = get_bit(state, j);
-                    Complex phase = phases[b];
-                    
-                    // S⁺ᵢS⁻ⱼ: needs i=DOWN(1), j=UP(0)
-                    if (s_i == 1 && s_j == 0) {
-                        uint64_t new_state = flip_bit(flip_bit(state, i), j);
-                        local_result[new_state] += phase * coeff;
-                    }
-                    
-                    // S⁻ᵢS⁺ⱼ: needs i=UP(0), j=DOWN(1)
-                    if (s_i == 0 && s_j == 1) {
-                        uint64_t new_state = flip_bit(flip_bit(state, i), j);
-                        local_result[new_state] += phase * coeff;
-                    }
-                }
-            }
-            
-            #pragma omp critical
-            {
-                for (uint64_t s = 0; s < n_states; ++s) {
-                    result[s] += local_result[s];
-                }
-            }
-        }
-    }
-    
-    return result;
-}
-
-// -----------------------------------------------------------------------------
-// Apply Fourier-transformed Heisenberg dimer operator: D_α(q)|ψ⟩
-// D_b = S_i·S_j = SzSz + (1/2)(S⁺S⁻ + S⁻S⁺)
-// For structure factor we need the fluctuation part, so we apply the full operator
-// and subtract the mean later.
-// Returns {D(q)|ψ⟩, ⟨D(q)⟩} where D(q) = Σ_b exp(iq·r_b) D_b
-// -----------------------------------------------------------------------------
-
-std::pair<std::vector<Complex>, Complex> apply_heisenberg_dimer_fourier(
-    const std::vector<Complex>& psi,
-    const std::vector<std::pair<int, int>>& bonds,
-    const std::vector<std::array<double, 2>>& bond_centers,
-    const std::array<double, 2>& q
-) {
-    uint64_t n_states = psi.size();
-    std::vector<Complex> result(n_states, 0.0);
-    int n_bonds = bonds.size();
-    
-    // Precompute phases
-    std::vector<Complex> phases(n_bonds);
-    for (int b = 0; b < n_bonds; ++b) {
-        double phase_arg = q[0] * bond_centers[b][0] + q[1] * bond_centers[b][1];
-        phases[b] = std::exp(I * phase_arg);
-    }
-    
-    double expect_real = 0.0, expect_imag = 0.0;
-    
-    if (g_use_memory_efficient_mode) {
-        // Memory-efficient mode: use atomic updates
-        std::vector<double> result_real(n_states, 0.0);
-        std::vector<double> result_imag(n_states, 0.0);
-        
-        #pragma omp parallel for reduction(+:expect_real, expect_imag) schedule(dynamic, 1024)
-        for (uint64_t state = 0; state < n_states; ++state) {
-            Complex coeff = psi[state];
-            if (std::abs(coeff) < 1e-15) continue;
-            
-            for (int b = 0; b < n_bonds; ++b) {
-                int i = bonds[b].first;
-                int j = bonds[b].second;
-                int s_i = get_bit(state, i);
-                int s_j = get_bit(state, j);
-                Complex phase = phases[b];
-                
-                // SzSz term: diagonal
-                double sz_i = s_i ? -0.5 : 0.5;
-                double sz_j = s_j ? -0.5 : 0.5;
-                double szsz = sz_i * sz_j;
-                
-                Complex diag_contrib = phase * szsz * coeff;
-                #pragma omp atomic
-                result_real[state] += diag_contrib.real();
-                #pragma omp atomic
-                result_imag[state] += diag_contrib.imag();
-                
-                Complex exp_contrib = phase * szsz * std::norm(coeff);
-                expect_real += exp_contrib.real();
-                expect_imag += exp_contrib.imag();
-                
-                // (1/2) S⁺ᵢS⁻ⱼ: needs i=DOWN(1), j=UP(0)
-                if (s_i == 1 && s_j == 0) {
-                    uint64_t new_state = flip_bit(flip_bit(state, i), j);
-                    Complex val = 0.5 * phase * coeff;
-                    #pragma omp atomic
-                    result_real[new_state] += val.real();
-                    #pragma omp atomic
-                    result_imag[new_state] += val.imag();
-                }
-                
-                // (1/2) S⁻ᵢS⁺ⱼ: needs i=UP(0), j=DOWN(1)
-                if (s_i == 0 && s_j == 1) {
-                    uint64_t new_state = flip_bit(flip_bit(state, i), j);
-                    Complex val = 0.5 * phase * coeff;
-                    #pragma omp atomic
-                    result_real[new_state] += val.real();
-                    #pragma omp atomic
-                    result_imag[new_state] += val.imag();
-                }
-            }
-        }
-        
-        // Combine real and imaginary parts (parallelized)
-        #pragma omp parallel for schedule(static)
-        for (uint64_t s = 0; s < n_states; ++s) {
-            result[s] = Complex(result_real[s], result_imag[s]);
-        }
-    } else {
-        // Original mode with thread-local arrays
-        #pragma omp parallel reduction(+:expect_real, expect_imag)
-        {
-            std::vector<Complex> local_result(n_states, 0.0);
-            double local_expect_real = 0.0, local_expect_imag = 0.0;
-            
-            #pragma omp for schedule(dynamic, 1024)
-            for (uint64_t state = 0; state < n_states; ++state) {
-                Complex coeff = psi[state];
-                if (std::abs(coeff) < 1e-15) continue;
-                
-                for (int b = 0; b < n_bonds; ++b) {
-                    int i = bonds[b].first;
-                    int j = bonds[b].second;
-                    int s_i = get_bit(state, i);
-                    int s_j = get_bit(state, j);
-                    Complex phase = phases[b];
-                    
-                    // SzSz term: diagonal, contributes (s_i - 0.5)(s_j - 0.5) = ±0.25
-                    double sz_i = s_i ? -0.5 : 0.5;  // bit=0 is UP (+0.5)
-                    double sz_j = s_j ? -0.5 : 0.5;
-                    double szsz = sz_i * sz_j;
-                    
-                    // Diagonal contribution to D(q)|ψ⟩
-                    local_result[state] += phase * szsz * coeff;
-                    
-                    // Contribution to ⟨D(q)⟩
-                    Complex contrib = phase * szsz * std::norm(coeff);
-                    local_expect_real += contrib.real();
-                    local_expect_imag += contrib.imag();
-                    
-                    // (1/2) S⁺ᵢS⁻ⱼ: needs i=DOWN(1), j=UP(0)
-                    if (s_i == 1 && s_j == 0) {
-                        uint64_t new_state = flip_bit(flip_bit(state, i), j);
-                        local_result[new_state] += 0.5 * phase * coeff;
-                    }
-                    
-                    // (1/2) S⁻ᵢS⁺ⱼ: needs i=UP(0), j=DOWN(1)
-                    if (s_i == 0 && s_j == 1) {
-                        uint64_t new_state = flip_bit(flip_bit(state, i), j);
-                        local_result[new_state] += 0.5 * phase * coeff;
-                    }
-                }
-            }
-            
-            expect_real += local_expect_real;
-            expect_imag += local_expect_imag;
-            
-            #pragma omp critical
-            {
-                for (uint64_t s = 0; s < n_states; ++s) {
-                    result[s] += local_result[s];
-                }
-            }
-        }
-    }
-    
-    // ⟨D(q)⟩ = ⟨ψ|D(q)|ψ⟩
-    Complex expect = Complex(0, 0);
-    for (uint64_t s = 0; s < n_states; ++s) {
-        expect += std::conj(psi[s]) * result[s];
-    }
-    
-    return {result, expect};
-}
 
 // -----------------------------------------------------------------------------
 // Apply Fourier-transformed bowtie resonance operator: P_α(q)|ψ⟩
@@ -665,7 +206,7 @@ std::vector<Complex> apply_bowtie_fourier(
         phases[p] = std::exp(I * phase_arg);
     }
     
-    if (g_use_memory_efficient_mode) {
+    if (memory_efficient_mode_enabled()) {
         // Memory-efficient mode: use atomic updates
         std::vector<double> result_real(n_states, 0.0);
         std::vector<double> result_imag(n_states, 0.0);
@@ -766,207 +307,11 @@ std::vector<Complex> apply_bowtie_fourier(
 }
 
 // -----------------------------------------------------------------------------
-// Compute dimer-dimer correlation ⟨D_b1 D_b2⟩ for proper VBS order
-// D = S^+_i S^-_j + S^-_i S^+_j (XY dimer operator)
-// This is a 4-site spin correlation
+// P2.1 (4th slice): the real-space dimer-dimer correlations
+// (compute_dimer_dimer_correlation, compute_heisenberg_dimer_dimer_correlation)
+// also moved into ed_bfg::structure_factor; using-declarations at the top of
+// this TU pull them in unchanged.
 // -----------------------------------------------------------------------------
-
-Complex compute_dimer_dimer_correlation(
-    const std::vector<Complex>& psi,
-    int i1, int j1, int i2, int j2
-) {
-    uint64_t n_states = psi.size();
-    double result_real = 0.0;
-    double result_imag = 0.0;
-    
-    #pragma omp parallel reduction(+:result_real,result_imag)
-    {
-        double local_real = 0.0;
-        double local_imag = 0.0;
-        
-        #pragma omp for schedule(dynamic, 1024)
-        for (uint64_t state = 0; state < n_states; ++state) {
-            Complex coeff = psi[state];
-            if (std::abs(coeff) < 1e-15) continue;
-            
-            int s_i1 = get_bit(state, i1);
-            int s_j1 = get_bit(state, j1);
-            int s_i2 = get_bit(state, i2);
-            int s_j2 = get_bit(state, j2);
-            
-            // Term 1: S^+_{i1} S^-_{j1} S^+_{i2} S^-_{j2}
-            // S^-_j acts first (needs j=UP=0), S^+_i acts second (needs i=DOWN=1)
-            // ED convention: bit=0 is UP, bit=1 is DOWN
-            if (s_j1 == 0 && s_i1 == 1 && s_j2 == 0 && s_i2 == 1) {
-                uint64_t new_state = state;
-                new_state = flip_bit(new_state, j1);  // j1: up(0) -> down(1)
-                new_state = flip_bit(new_state, i1);  // i1: down(1) -> up(0)
-                new_state = flip_bit(new_state, j2);  // j2: up(0) -> down(1)
-                new_state = flip_bit(new_state, i2);  // i2: down(1) -> up(0)
-                Complex contrib = std::conj(psi[new_state]) * coeff;
-                local_real += contrib.real();
-                local_imag += contrib.imag();
-            }
-            
-            // Term 2: S^+_{i1} S^-_{j1} S^-_{i2} S^+_{j2}
-            // S^+S^-: j1=UP(0), i1=DOWN(1); S^-S^+: i2=UP(0), j2=DOWN(1)
-            if (s_j1 == 0 && s_i1 == 1 && s_i2 == 0 && s_j2 == 1) {
-                uint64_t new_state = state;
-                new_state = flip_bit(new_state, j1);
-                new_state = flip_bit(new_state, i1);
-                new_state = flip_bit(new_state, i2);
-                new_state = flip_bit(new_state, j2);
-                Complex contrib = std::conj(psi[new_state]) * coeff;
-                local_real += contrib.real();
-                local_imag += contrib.imag();
-            }
-            
-            // Term 3: S^-_{i1} S^+_{j1} S^+_{i2} S^-_{j2}
-            // S^-S^+: i1=UP(0), j1=DOWN(1); S^+S^-: j2=UP(0), i2=DOWN(1)
-            if (s_i1 == 0 && s_j1 == 1 && s_j2 == 0 && s_i2 == 1) {
-                uint64_t new_state = state;
-                new_state = flip_bit(new_state, i1);
-                new_state = flip_bit(new_state, j1);
-                new_state = flip_bit(new_state, j2);
-                new_state = flip_bit(new_state, i2);
-                Complex contrib = std::conj(psi[new_state]) * coeff;
-                local_real += contrib.real();
-                local_imag += contrib.imag();
-            }
-            
-            // Term 4: S^-_{i1} S^+_{j1} S^-_{i2} S^+_{j2}
-            // Both S^-S^+: i1=UP(0), j1=DOWN(1), i2=UP(0), j2=DOWN(1)
-            if (s_i1 == 0 && s_j1 == 1 && s_i2 == 0 && s_j2 == 1) {
-                uint64_t new_state = state;
-                new_state = flip_bit(new_state, i1);
-                new_state = flip_bit(new_state, j1);
-                new_state = flip_bit(new_state, i2);
-                new_state = flip_bit(new_state, j2);
-                Complex contrib = std::conj(psi[new_state]) * coeff;
-                local_real += contrib.real();
-                local_imag += contrib.imag();
-            }
-        }
-        
-        result_real += local_real;
-        result_imag += local_imag;
-    }
-    
-    return Complex(result_real, result_imag);
-}
-
-// -----------------------------------------------------------------------------
-// Compute Heisenberg dimer-dimer correlation ⟨(S_i·S_j)(S_k·S_l)⟩
-// This is a proper 4-site correlation for Heisenberg VBS order
-// S·S = SzSz + (1/2)(S+S- + S-S+)
-// -----------------------------------------------------------------------------
-
-double compute_heisenberg_dimer_dimer_correlation(
-    const std::vector<Complex>& psi,
-    int i1, int j1, int i2, int j2
-) {
-    uint64_t n_states = psi.size();
-    double result = 0.0;
-    
-    #pragma omp parallel reduction(+:result)
-    {
-        double local_result = 0.0;
-        
-        #pragma omp for schedule(dynamic, 1024)
-        for (uint64_t state = 0; state < n_states; ++state) {
-            Complex coeff = psi[state];
-            double prob = std::norm(coeff);
-            if (prob < 1e-30) continue;
-            
-            int s_i1 = get_bit(state, i1);
-            int s_j1 = get_bit(state, j1);
-            int s_i2 = get_bit(state, i2);
-            int s_j2 = get_bit(state, j2);
-            
-            // Sz values: bit=0 -> +1/2, bit=1 -> -1/2
-            double sz_i1 = s_i1 ? -0.5 : 0.5;
-            double sz_j1 = s_j1 ? -0.5 : 0.5;
-            double sz_i2 = s_i2 ? -0.5 : 0.5;
-            double sz_j2 = s_j2 ? -0.5 : 0.5;
-            
-            // ========================================================
-            // (S_i1·S_j1)(S_i2·S_j2) expansion:
-            // = (SzSz + 1/2(S+S- + S-S+))_bond1 × (SzSz + 1/2(S+S- + S-S+))_bond2
-            // 
-            // Diagonal terms (SzSz)×(SzSz):
-            double szsz_1 = sz_i1 * sz_j1;
-            double szsz_2 = sz_i2 * sz_j2;
-            local_result += prob * szsz_1 * szsz_2;
-            
-            // Cross terms (SzSz)×(1/2 XY) and (1/2 XY)×(SzSz):
-            // These require off-diagonal matrix elements on one bond only
-            
-            // (SzSz)_1 × (1/2)(S+S- + S-S+)_2:
-            // S+_i2 S-_j2: need i2=DOWN(1), j2=UP(0)
-            if (s_i2 == 1 && s_j2 == 0) {
-                uint64_t new_state = flip_bit(flip_bit(state, i2), j2);
-                Complex contrib = std::conj(psi[new_state]) * coeff;
-                local_result += 0.5 * szsz_1 * contrib.real();
-            }
-            // S-_i2 S+_j2: need i2=UP(0), j2=DOWN(1)
-            if (s_i2 == 0 && s_j2 == 1) {
-                uint64_t new_state = flip_bit(flip_bit(state, i2), j2);
-                Complex contrib = std::conj(psi[new_state]) * coeff;
-                local_result += 0.5 * szsz_1 * contrib.real();
-            }
-            
-            // (1/2)(S+S- + S-S+)_1 × (SzSz)_2:
-            // S+_i1 S-_j1: need i1=DOWN(1), j1=UP(0)
-            if (s_i1 == 1 && s_j1 == 0) {
-                uint64_t new_state = flip_bit(flip_bit(state, i1), j1);
-                Complex contrib = std::conj(psi[new_state]) * coeff;
-                local_result += 0.5 * szsz_2 * contrib.real();
-            }
-            // S-_i1 S+_j1: need i1=UP(0), j1=DOWN(1)
-            if (s_i1 == 0 && s_j1 == 1) {
-                uint64_t new_state = flip_bit(flip_bit(state, i1), j1);
-                Complex contrib = std::conj(psi[new_state]) * coeff;
-                local_result += 0.5 * szsz_2 * contrib.real();
-            }
-            
-            // (1/4)(XY)_1 × (XY)_2 terms:
-            // These are 4-spin off-diagonal terms, similar to XY dimer-dimer
-            // Factor is 1/4 from (1/2)×(1/2) prefactors
-            
-            // Term: S+_i1 S-_j1 S+_i2 S-_j2 (need i1=1,j1=0,i2=1,j2=0)
-            if (s_i1 == 1 && s_j1 == 0 && s_i2 == 1 && s_j2 == 0) {
-                uint64_t new_state = flip_bit(flip_bit(flip_bit(flip_bit(state, i1), j1), i2), j2);
-                Complex contrib = std::conj(psi[new_state]) * coeff;
-                local_result += 0.25 * contrib.real();
-            }
-            
-            // Term: S+_i1 S-_j1 S-_i2 S+_j2 (need i1=1,j1=0,i2=0,j2=1)
-            if (s_i1 == 1 && s_j1 == 0 && s_i2 == 0 && s_j2 == 1) {
-                uint64_t new_state = flip_bit(flip_bit(flip_bit(flip_bit(state, i1), j1), i2), j2);
-                Complex contrib = std::conj(psi[new_state]) * coeff;
-                local_result += 0.25 * contrib.real();
-            }
-            
-            // Term: S-_i1 S+_j1 S+_i2 S-_j2 (need i1=0,j1=1,i2=1,j2=0)
-            if (s_i1 == 0 && s_j1 == 1 && s_i2 == 1 && s_j2 == 0) {
-                uint64_t new_state = flip_bit(flip_bit(flip_bit(flip_bit(state, i1), j1), i2), j2);
-                Complex contrib = std::conj(psi[new_state]) * coeff;
-                local_result += 0.25 * contrib.real();
-            }
-            
-            // Term: S-_i1 S+_j1 S-_i2 S+_j2 (need i1=0,j1=1,i2=0,j2=1)
-            if (s_i1 == 0 && s_j1 == 1 && s_i2 == 0 && s_j2 == 1) {
-                uint64_t new_state = flip_bit(flip_bit(flip_bit(flip_bit(state, i1), j1), i2), j2);
-                Complex contrib = std::conj(psi[new_state]) * coeff;
-                local_result += 0.25 * contrib.real();
-            }
-        }
-        
-        result += local_result;
-    }
-    
-    return result;
-}
 
 // -----------------------------------------------------------------------------
 // Compute spin structure factor S(q)
@@ -1276,7 +621,7 @@ VBSResult compute_vbs_order(
     
     std::cout << "  Computing S_D(q) at " << n_k << " k-points using Fourier method..." << std::flush;
     
-    if (g_use_memory_efficient_mode) {
+    if (memory_efficient_mode_enabled()) {
         // Memory-efficient mode: use direct structure factor computation
         // This computes ⟨D†(q)D(q)⟩ without storing O(Hilbert) intermediate vectors
         std::cout << "\n  [Memory-efficient mode: using direct SF computation]" << std::endl;
@@ -1454,7 +799,7 @@ VBSResult compute_vbs_order(
     // Also compute on dense 2D grid for visualization (total S_D only)
     // Skip in memory-efficient mode for very large systems
     // =========================================================================
-    if (g_use_memory_efficient_mode && n_q_grid > 10) {
+    if (memory_efficient_mode_enabled() && n_q_grid > 10) {
         std::cout << "  [Memory-efficient mode: skipping dense 2D VBS grid (use --n-q-grid 10 to enable)]" << std::endl;
         // Just initialize empty grids
         result.S_d_xy_2d.resize(0);
@@ -1475,7 +820,7 @@ VBSResult compute_vbs_order(
                     q1 * cluster.b1[1] + q2 * cluster.b2[1]
                 };
                 
-                if (g_use_memory_efficient_mode) {
+                if (memory_efficient_mode_enabled()) {
                     // Use direct structure factor computation
                     auto sf_xy = compute_dimer_sf_direct(psi, edges, all_bond_centers, qvec);
                     result.S_d_xy_2d[i1][i2] = (sf_xy.overlap - std::norm(sf_xy.expect_q1)) / static_cast<double>(n_bonds);
@@ -1783,7 +1128,7 @@ PlaquetteResult compute_plaquette_order(
     
     std::cout << "  Computing S_P(q) at " << n_k << " k-points using Fourier method..." << std::flush;
     
-    if (g_use_memory_efficient_mode) {
+    if (memory_efficient_mode_enabled()) {
         // Memory-efficient mode: compute structure factor without storing full O(Hilbert) vectors
         // For plaquette/bowtie, this is more complex - we skip detailed orientation resolution
         std::cout << "\n  [Memory-efficient mode: using simplified plaquette SF computation]" << std::endl;
@@ -1904,7 +1249,7 @@ PlaquetteResult compute_plaquette_order(
     // Also compute on dense 2D grid for visualization
     // Skip in memory-efficient mode for large systems
     // =========================================================================
-    if (g_use_memory_efficient_mode && n_q_grid > 10) {
+    if (memory_efficient_mode_enabled() && n_q_grid > 10) {
         std::cout << "  [Memory-efficient mode: skipping dense 2D plaquette grid]" << std::endl;
         result.S_p_2d.resize(0);
     } else {
