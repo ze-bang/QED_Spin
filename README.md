@@ -41,8 +41,10 @@ make -j8
 # 2. Run a basic ED calculation
 ./ED /path/to/hamiltonian --method=LANCZOS --eigenvalues=6 --thermo
 
-# 3. Run a complete NLCE workflow (from workflows/nlce/run/)
-python3 nlce.py --max_order=4 --Jxx=1.0 --Jyy=1.0 --Jzz=1.0 --thermo
+# 3. Run a complete NLCE workflow via the unified package CLI
+python3 -m workflows.nlce \
+    --geometry=pyrochlore --pipeline=full_ed \
+    --max_order=4 --Jxx=1.0 --Jyy=1.0 --Jzz=1.0 --thermo
 ```
 
 ---
@@ -78,9 +80,13 @@ exact_diagonalization_cpp/
 │   ├── helper_pyrochlore.py  # Pyrochlore lattice utilities
 │   ├── hdf5_io.py            # HDF5 I/O utilities
 │   └── ...
-├── workflows/nlce/           # NLCE workflow scripts
-│   ├── prep/                 # Cluster generation
-│   ├── run/                  # ED execution and NLCE summation
+├── workflows/nlce/           # NLCE package (geometries × pipelines × workflow)
+│   ├── core/                 # Geometry/Pipeline ABCs + NLCEWorkflow + ed_runner
+│   ├── geometries/           # pyrochlore, triangular_site, triangular_triangle
+│   ├── pipelines/            # full_ed, ftlm, lanczos_boost
+│   ├── cli.py + __main__.py  # Unified `python -m workflows.nlce` entry point
+│   ├── prep/                 # Cluster generation scripts (used by geometries/)
+│   ├── run/                  # NLCE summation kernels + legacy CLI shims
 │   └── analysis/             # Fitting and convergence analysis
 ├── scripts/                  # Post-processing (plotting, analysis, utilities)
 │   ├── plotting/             # Publication plots (FTLM, TPQ, DSSF, SSSF, ...)
@@ -486,89 +492,108 @@ $$
 
 ```
 workflows/nlce/
-├── prep/
-│   └── generate_pyrochlore_clusters.py  # Cluster enumeration
-├── run/
-│   ├── nlce.py              # Full ED workflow orchestrator
-│   ├── nlce_ftlm.py         # FTLM-based workflow
-│   ├── NLC_sum.py           # NLCE summation (full spectrum)
-│   └── NLC_sum_ftlm.py      # NLCE summation (FTLM data)
-└── analysis/
-    ├── nlc_fit.py           # Fit NLCE to experimental data
-    ├── nlc_fit_ftlm.py      # Fitting for FTLM results
-    ├── nlc_convergence.py   # Order-by-order convergence
-    └── nlce_ftlm_convergence.py  # FTLM convergence analysis
+├── core/                 # Geometry/Pipeline ABCs, NLCEWorkflow, ed_runner, io
+├── geometries/           # @register_geometry implementations
+│   ├── pyrochlore.py
+│   ├── triangular_site.py
+│   └── triangular_triangle.py
+├── pipelines/            # @register_pipeline implementations
+│   ├── full_ed.py
+│   ├── ftlm.py
+│   └── lanczos_boost.py
+├── cli.py + __main__.py  # `python -m workflows.nlce` (unified entry point)
+├── prep/                 # Cluster generators (called by geometries/)
+├── run/                  # NLCE summation kernels + legacy CLI shims
+│   ├── NLC_sum.py
+│   ├── NLC_sum_ftlm.py
+│   ├── NLC_sum_LB.py
+│   ├── NLC_sum_triangular.py
+│   ├── nlce.py            # legacy shim → unified CLI
+│   ├── nlce_ftlm.py       # legacy shim → unified CLI
+│   └── nlce_triangular.py # legacy shim → unified CLI
+└── analysis/             # Fitting and convergence analysis
 ```
 
-### Running NLCE Calculations
+### Running NLCE Calculations (unified CLI)
 
-#### Full Diagonalization Workflow
+The single entry point is `python -m workflows.nlce`. You always pick
+exactly one `--geometry` and one `--pipeline`; the chosen pair injects
+its own model and ED-method flags.
 
 ```bash
-cd workflows/nlce/run
+# List everything that's registered
+python3 -m workflows.nlce --list
 
-# Basic NLCE calculation (Heisenberg model)
-python3 nlce.py --max_order=4 --Jxx=1.0 --Jyy=1.0 --Jzz=1.0 \
+# Pyrochlore + full / ScaLAPACK ED, Heisenberg point
+python3 -m workflows.nlce \
+    --geometry=pyrochlore --pipeline=full_ed \
+    --max_order=4 --Jxx=1.0 --Jyy=1.0 --Jzz=1.0 \
     --thermo --temp_min=0.01 --temp_max=10 --temp_bins=100
 
-# With magnetic field
-python3 nlce.py --max_order=4 --Jxx=1.0 --Jyy=1.0 --Jzz=1.0 \
-    --h=0.5 --field_dir 0 0 1 --thermo
+# With magnetic field, parallel
+python3 -m workflows.nlce \
+    --geometry=pyrochlore --pipeline=full_ed \
+    --max_order=4 --Jxx=1.0 --Jyy=1.0 --Jzz=1.0 \
+    --h=0.5 --field_dir 0 0 1 --thermo \
+    --parallel --num_cores=16
 
-# Parallel execution
-python3 nlce.py --max_order=5 --parallel --num_cores=16 \
-    --Jxx=1.0 --Jyy=1.0 --Jzz=1.0 --thermo
-
-# Skip certain steps (resume interrupted run)
-python3 nlce.py --max_order=4 --skip_cluster_gen --skip_ham_prep \
-    --Jxx=1.0 --Jyy=1.0 --Jzz=1.0 --thermo
+# Resume an interrupted run (skip earlier steps)
+python3 -m workflows.nlce \
+    --geometry=pyrochlore --pipeline=full_ed \
+    --max_order=4 --Jxx=1.0 --Jyy=1.0 --Jzz=1.0 --thermo \
+    --skip_cluster_gen --skip_ham_prep
 ```
 
-#### nlce.py Options
+#### Common options (every geometry × pipeline)
 
 | Option | Description | Default |
 |--------|-------------|---------|
+| `--geometry` | Registered geometry name | Required |
+| `--pipeline` | Registered pipeline name | Required |
 | `--max_order` | Maximum cluster order | Required |
-| `--base_dir` | Output directory | `./nlce_results` |
-| `--ed_executable` | Path to ED binary | `../../../build/ED` |
-| `--Jxx, --Jyy, --Jzz` | Exchange couplings | `1.0` |
-| `--h` | Magnetic field strength | `0.0` |
-| `--field_dir` | Field direction (x,y,z) | `[1/√3, 1/√3, 1/√3]` |
-| `--method` | ED method (`FULL`, `OSS`, `mTPQ`) | `FULL` |
+| `--base_dir` | Output directory | `./nlce_results` (geometry-overridable) |
+| `--ed_executable` | Path to ED binary | `<repo>/build/ED` |
 | `--thermo` | Compute thermodynamics | Off |
-| `--temp_min/max/bins` | Temperature grid | `0.001, 20.0, 100` |
-| `--parallel` | Enable parallel execution | Off |
+| `--temp_min/max/bins` | Temperature grid | Geometry-default |
+| `--parallel` | Enable per-cluster parallelism | Off |
 | `--num_cores` | CPU cores for parallel | All available |
-| `--symmetrized` | Use symmetry reduction | Off |
-| `--compute-spin-correlations` | Compute ⟨S⟩ correlations | Off |
 | `--skip_cluster_gen` | Skip cluster generation | Off |
 | `--skip_ham_prep` | Skip Hamiltonian prep | Off |
 | `--skip_ed` | Skip ED calculations | Off |
 | `--skip_nlc` | Skip NLCE summation | Off |
 
+Geometry- and pipeline-specific flags (e.g. `--Jxx --Jyy --Jzz --h`
+for `pyrochlore`, `--J1 --J2 --Jz_ratio --model` for `triangular_*`,
+`--ftlm_samples --krylov_dim --hybrid_threshold` for `ftlm`,
+`--method --scalapack_threshold` for `full_ed`) are added to the
+parser only when the corresponding component is selected; run
+`python3 -m workflows.nlce --geometry=… --pipeline=… --help` to see
+the full surface for a given combination.
+
 ### NLCE with FTLM
 
-For larger clusters (>15 sites), use FTLM instead of full diagonalization:
+For larger clusters (>15 sites), pick `--pipeline=ftlm`. It runs full
+ED for clusters below `--hybrid_threshold` (default 16) and switches
+to Finite-Temperature Lanczos with adaptive Krylov dimension above:
 
 ```bash
-# FTLM-based NLCE
-python3 nlce_ftlm.py --max_order=6 --Jxx=1.0 --Jyy=1.0 --Jzz=1.0 \
+python3 -m workflows.nlce \
+    --geometry=pyrochlore --pipeline=ftlm \
+    --max_order=6 --Jxx=1.0 --Jyy=1.0 --Jzz=1.0 \
     --ftlm_samples=50 --krylov_dim=200 \
     --temp_min=0.01 --temp_max=10 --temp_bins=100
 
-# With GPU acceleration
-python3 nlce_ftlm.py --max_order=6 --ftlm_samples=100 --krylov_dim=300 \
-    --Jxx=1.0 --Jyy=1.0 --Jzz=1.0
+# Triangular lattice, J1-J2 model, FTLM
+python3 -m workflows.nlce \
+    --geometry=triangular_site --pipeline=ftlm \
+    --max_order=12 --J1=1.0 --J2=0.125 --Jz_ratio=1.0 \
+    --ftlm_samples=50 --krylov_dim=200
 ```
 
-#### nlce_ftlm.py Additional Options
-
-| Option | Description | Default |
-|--------|-------------|---------|
-| `--ftlm_samples` | Random samples per cluster | `40` |
-| `--krylov_dim` | Krylov subspace dimension | `150` |
-| `--resummation` | Series acceleration method | `auto` |
-| `--robust_pipeline` | Cross-validated C(T) | Off |
+The three legacy entry points (`workflows/nlce/run/nlce.py`,
+`nlce_ftlm.py`, `nlce_triangular.py`) are now thin shims that
+translate their historical CLI surface onto `python -m workflows.nlce`,
+so any existing scripts that invoke them keep working unchanged.
 
 ### NLCE Output Structure
 

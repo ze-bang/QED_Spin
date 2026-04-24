@@ -7,7 +7,83 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Changed — NLCE workflow modernization
+### Changed — NLCE upgraded to a standalone, plugin-architecture package
+
+The NLCE workflow has been promoted from "three driver scripts that
+share a `_common.py`" into a proper modern package with a unified CLI
+and registry-based extension points.
+
+- **New `workflows/nlce/core/` subpackage** (~600 LOC) holding the only
+  things downstream extensions inherit from:
+  - `Geometry` ABC + `register_geometry` / `get_geometry` / `list_geometries`
+  - `Pipeline` ABC + `register_pipeline` / `get_pipeline` / `list_pipelines`
+  - `NLCEWorkflow` orchestrator running the canonical 4-step pipeline
+    (clusters → Hamiltonians → ED → summation), with parallelism,
+    skip-step flags, and the `--streaming-symmetry` orbit-basis
+    precompute step
+  - `EDOptions` / `build_ed_command` / `run_ed_subprocess` (the only
+    legal way for a `Pipeline` to talk to `./ED`) moved here from
+    `_common.py`
+  - I/O helpers (`ClusterEntry`, `get_cluster_files`,
+    `count_sites_in_info_file`, `load_thermo_dataset`,
+    `load_tpq_thermo_dataset`, `setup_logging`, `check_gpu_available`)
+
+- **New `workflows/nlce/geometries/` subpackage**: concrete
+  geometry implementations register themselves on import.
+  - `pyrochlore` — XYZ + Zeeman + optional random transverse field
+  - `triangular_site` — site-based NLCE, J1-J2 / Kitaev / anisotropic
+  - `triangular_triangle` — triangle-based NLCE, same model surface
+  - Adding a new lattice = drop a module, decorate with
+    `@register_geometry`, append one line to `__init__.py`.
+
+- **New `workflows/nlce/pipelines/` subpackage**: concrete ED-strategy
+  implementations register themselves on import.
+  - `full_ed` — full / ScaLAPACK auto-promoted dense ED
+  - `ftlm` — Finite-Temperature Lanczos with hybrid full-ED for small
+    clusters and adaptive Krylov dimension
+  - `lanczos_boost` — partial-Lanczos NLCE (Bhattaram & Khatami)
+  - Adding a new pipeline = drop a module, decorate with
+    `@register_pipeline`, append one line to `__init__.py`.
+  - All 9 `Geometry × Pipeline` combinations are valid;
+    `full_ed.summation_command` dispatches to the right `NLC_sum_*.py`
+    kernel based on geometry.
+
+- **New unified CLI `python -m workflows.nlce`** (`workflows/nlce/cli.py`
+  + `__main__.py`):
+  - `--list` enumerates registered geometries and pipelines.
+  - `--geometry=… --pipeline=…` selects exactly one of each; the chosen
+    pair injects its own model/ED-method flags into the parser.
+  - `--max_order`, `--base_dir`, `--ed_executable`, `--temp_min/max/bins`,
+    `--thermo`, `--skip_*`, `--parallel/--num_cores` are common across
+    every combination.
+  - Geometry-default temperature ranges (`pyrochlore` → 0.001-20,
+    `triangular_*` → 0.1-10) apply when the user doesn't override.
+
+- **The three legacy driver scripts** `run/nlce.py`, `run/nlce_ftlm.py`,
+  `run/nlce_triangular.py` are now ~50-line shims that translate the
+  historical CLI surface (`--lanczos_boost`, `--site_based`,
+  `--skip_ftlm`, …) onto the unified CLI. Existing analysis scripts
+  in `analysis/` that invoke them by path keep working unchanged.
+
+- **`workflows/nlce/_common.py`** is now a re-export shim of
+  `workflows.nlce.core` for backward compatibility with downstream
+  scripts that bind from there.
+
+- **17 new pytest cases** (`python/tests/test_nlce_package.py`) cover
+  registry mechanics, ED-CLI builder auto-promotion, pipeline
+  hybrid-mode dispatch, summation command routing per geometry, the
+  `--list` CLI path, and the legacy-shim argv translators.
+
+- **New top-level `workflows/nlce/README.md`** documents the package
+  architecture, the registries, the unified CLI, the
+  `Geometry × Pipeline` matrix, the on-disk output schema, the
+  ED-binary integration contract, and how to add new geometries or
+  pipelines.
+
+`ctest` (102/102) and `pytest` (98/98 — was 81 before, +17 new NLCE
+tests) remain green.
+
+### Changed — NLCE workflow refactor (intermediate, superseded above)
 
 - New shared-infrastructure module **`workflows/nlce/_common.py`** (~500
   LOC) consolidates the boilerplate that used to be triplicated across
