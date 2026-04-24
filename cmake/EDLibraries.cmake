@@ -57,6 +57,18 @@ if(OpenMP_CXX_FOUND)
     list(APPEND ED_COMMON_LINK_LIBS OpenMP::OpenMP_CXX)
 endif()
 
+# Helper: every public include directory is wrapped in BUILD_INTERFACE so the
+# install(EXPORT) step doesn't try to bake source-tree paths into the
+# exported targets. Installed consumers find headers via
+# INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}.
+set(_ED_PUBLIC_INCLUDES
+    "$<BUILD_INTERFACE:${INCLUDE_DIR}>"
+    "$<BUILD_INTERFACE:${INCLUDE_DIR}/ed/core>"
+    "$<BUILD_INTERFACE:${INCLUDE_DIR}/ed/solvers>"
+    "$<BUILD_INTERFACE:${INCLUDE_DIR}/ed/io>"
+    "$<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>"
+)
+
 # -----------------------------------------------------------------------------
 # ed_io: I/O helpers (basis vector / lanczos basis buffer)
 # -----------------------------------------------------------------------------
@@ -64,13 +76,11 @@ add_library(ed_io STATIC
     ${IO_DIR}/basis_vector_storage.cpp
     ${IO_DIR}/lanczos_basis_buffer.cpp
 )
-target_include_directories(ed_io PUBLIC
-    ${INCLUDE_DIR}
-    ${INCLUDE_DIR}/ed/core
-    ${INCLUDE_DIR}/ed/solvers
-    ${INCLUDE_DIR}/ed/io
-)
+target_include_directories(ed_io PUBLIC ${_ED_PUBLIC_INCLUDES})
 target_link_libraries(ed_io PUBLIC ${ED_COMMON_LINK_LIBS})
+target_link_libraries(ed_io PUBLIC
+    "$<BUILD_INTERFACE:nlohmann_json::nlohmann_json>"
+)
 target_compile_options(ed_io PRIVATE
     $<$<COMPILE_LANGUAGE:CXX>:${CPU_OPT_FLAGS}>
 )
@@ -81,13 +91,11 @@ target_compile_options(ed_io PRIVATE
 add_library(ed_core STATIC
     ${CORE_DIR}/ed_config.cpp
 )
-target_include_directories(ed_core PUBLIC
-    ${INCLUDE_DIR}
-    ${INCLUDE_DIR}/ed/core
-    ${INCLUDE_DIR}/ed/solvers
-    ${INCLUDE_DIR}/ed/io
-)
+target_include_directories(ed_core PUBLIC ${_ED_PUBLIC_INCLUDES})
 target_link_libraries(ed_core PUBLIC ed_io ${ED_COMMON_LINK_LIBS})
+target_link_libraries(ed_core PUBLIC
+    "$<BUILD_INTERFACE:nlohmann_json::nlohmann_json>"
+)
 target_compile_options(ed_core PRIVATE
     $<$<COMPILE_LANGUAGE:CXX>:${CPU_OPT_FLAGS}>
 )
@@ -111,13 +119,11 @@ if(WITH_SCALAPACK AND SCALAPACK_LIBRARIES)
 endif()
 
 add_library(ed_solvers_cpu STATIC ${ED_SOLVERS_CPU_SOURCES})
-target_include_directories(ed_solvers_cpu PUBLIC
-    ${INCLUDE_DIR}
-    ${INCLUDE_DIR}/ed/core
-    ${INCLUDE_DIR}/ed/solvers
-    ${INCLUDE_DIR}/ed/io
-)
+target_include_directories(ed_solvers_cpu PUBLIC ${_ED_PUBLIC_INCLUDES})
 target_link_libraries(ed_solvers_cpu PUBLIC ed_core ed_io ${ED_COMMON_LINK_LIBS})
+target_link_libraries(ed_solvers_cpu PUBLIC
+    "$<BUILD_INTERFACE:nlohmann_json::nlohmann_json>"
+)
 target_compile_options(ed_solvers_cpu PRIVATE
     $<$<COMPILE_LANGUAGE:CXX>:${CPU_OPT_FLAGS}>
 )
@@ -149,12 +155,14 @@ if(WITH_CUDA)
 
     add_library(ed_solvers_gpu STATIC ${ED_SOLVERS_GPU_SOURCES})
     target_include_directories(ed_solvers_gpu PUBLIC
-        ${INCLUDE_DIR}
-        ${INCLUDE_DIR}/ed/core
-        ${INCLUDE_DIR}/ed/solvers
-        ${INCLUDE_DIR}/ed/io
-        ${INCLUDE_DIR}/ed/gpu
-        ${SOLVERS_GPU_DIR}
+        ${_ED_PUBLIC_INCLUDES}
+        "$<BUILD_INTERFACE:${INCLUDE_DIR}/ed/gpu>"
+    )
+    # The src/solvers/gpu directory holds private *.cuh helpers shared between
+    # the .cu TUs in this library; keep that BUILD-only and PRIVATE so it
+    # doesn't leak into INTERFACE_INCLUDE_DIRECTORIES at install time.
+    target_include_directories(ed_solvers_gpu PRIVATE
+        "$<BUILD_INTERFACE:${SOLVERS_GPU_DIR}>"
     )
     # ed_solvers_gpu calls into the CPU-side helpers (e.g. save_ftlm_results,
     # average_ftlm_samples in ftlm.cpp), so it has a hard dependency on
@@ -169,6 +177,9 @@ if(WITH_CUDA)
         CUDA::curand
         CUDA::cusolver
         ${ED_COMMON_LINK_LIBS}
+    )
+    target_link_libraries(ed_solvers_gpu PUBLIC
+        "$<BUILD_INTERFACE:nlohmann_json::nlohmann_json>"
     )
     set_target_properties(ed_solvers_gpu PROPERTIES
         CUDA_SEPARABLE_COMPILATION ON

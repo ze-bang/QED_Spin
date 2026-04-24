@@ -117,12 +117,13 @@ endif()
 option(WITH_CUDA "Build with CUDA support" ${DEFAULT_WITH_CUDA})
 option(WITH_MPI "Build with MPI support" ${DEFAULT_WITH_MPI})
 
-# Set languages based on options
+# Set languages based on options. The version is mirrored in CITATION.cff
+# and CHANGELOG.md; bump in lockstep when releasing.
 if(WITH_CUDA)
-    project(ExactDiagonalization LANGUAGES CXX CUDA)
+    project(ExactDiagonalization VERSION 0.1.0 LANGUAGES CXX CUDA)
     enable_language(CUDA)
 else()
-    project(ExactDiagonalization LANGUAGES CXX)
+    project(ExactDiagonalization VERSION 0.1.0 LANGUAGES CXX)
 endif()
 
 # Set C++ standard
@@ -411,8 +412,77 @@ if(WITH_MKL AND USE_ONEMKL AND MKL_FOUND)
     endif()
 endif()
 
-# Install targets
-install(TARGETS ED DESTINATION bin)
+# =============================================================================
+# INSTALL RULES + EDConfig.cmake export (P1.7 / audit Q5)
+#
+# Allows the package to be installed into a prefix and consumed by downstream
+# CMake projects via:
+#
+#   find_package(ED CONFIG REQUIRED)
+#   target_link_libraries(myapp PRIVATE ED::ed_solvers_cpu)
+#
+# Layout under <prefix>:
+#   bin/                        ED, TPQ_DSSF, compute_bfg_order_parameters
+#   include/ed/                 public headers (kept hierarchical)
+#   lib/                        libed_io.a, libed_core.a, libed_solvers_cpu.a
+#                               libed_solvers_gpu.a (when WITH_CUDA)
+#   lib/cmake/ED/               EDConfig.cmake, EDConfigVersion.cmake,
+#                               EDTargets.cmake
+# =============================================================================
+include(GNUInstallDirs)
+include(CMakePackageConfigHelpers)
+
+set(_ED_INSTALL_TARGETS ed_io ed_core ed_solvers_cpu)
+if(TARGET ed_solvers_gpu)
+    list(APPEND _ED_INSTALL_TARGETS ed_solvers_gpu)
+endif()
+
+install(TARGETS ${_ED_INSTALL_TARGETS} ED
+    EXPORT EDTargets
+    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+    LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+    ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
+    INCLUDES DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
+)
+
+if(TARGET TPQ_DSSF)
+    install(TARGETS TPQ_DSSF RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+endif()
+if(TARGET compute_bfg_order_parameters)
+    install(TARGETS compute_bfg_order_parameters
+            RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+endif()
+
+# Public headers (preserve subdirectory layout).
+install(DIRECTORY ${INCLUDE_DIR}/ed
+        DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
+        FILES_MATCHING
+        PATTERN "*.h"
+        PATTERN "*.hpp"
+        PATTERN "*.cuh"
+)
+
+install(EXPORT EDTargets
+        FILE EDTargets.cmake
+        NAMESPACE ED::
+        DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/ED
+)
+
+configure_package_config_file(
+    ${CMAKE_CURRENT_SOURCE_DIR}/cmake/EDConfig.cmake.in
+    ${CMAKE_CURRENT_BINARY_DIR}/EDConfig.cmake
+    INSTALL_DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/ED
+)
+write_basic_package_version_file(
+    ${CMAKE_CURRENT_BINARY_DIR}/EDConfigVersion.cmake
+    VERSION ${PROJECT_VERSION}
+    COMPATIBILITY SameMinorVersion
+)
+install(FILES
+    ${CMAKE_CURRENT_BINARY_DIR}/EDConfig.cmake
+    ${CMAKE_CURRENT_BINARY_DIR}/EDConfigVersion.cmake
+    DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/ED
+)
 
 # Print configuration summary
 message(STATUS "Configuration Summary:")

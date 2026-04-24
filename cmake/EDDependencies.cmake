@@ -48,11 +48,13 @@ else()
     message(STATUS "nlohmann_json found: ${nlohmann_json_VERSION}")
 endif()
 
-# nlohmann_json is header-only, but we still expose it via link_libraries() so
-# the INTERFACE include directories propagate to every subsequently-defined
-# target without us having to remember to wire it up per-executable. This is
-# safe because the imported target carries no link-time symbols.
-link_libraries(nlohmann_json::nlohmann_json)
+# nlohmann_json is header-only. We deliberately do NOT use a global
+# `link_libraries(nlohmann_json::nlohmann_json)` here, because that would
+# bake the imported target into INTERFACE_LINK_LIBRARIES of our exported
+# static libraries -- and a fetched target cannot be exported via
+# install(EXPORT). EDLibraries.cmake instead wires nlohmann_json into each
+# library via `$<BUILD_INTERFACE:nlohmann_json::nlohmann_json>`. Downstream
+# consumers refind it via EDConfig.cmake's find_dependency(nlohmann_json).
 
 # Find HDF5 (with C++ bindings)
 # Prefer HDF5_DIR from environment (set by module system)
