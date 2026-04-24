@@ -31,9 +31,7 @@
 #include <cmath>
 #include <string>
 #include <map>
-#include <set>
 #include <algorithm>
-#include <numeric>
 #include <chrono>
 #include <iomanip>
 #include <filesystem>
@@ -51,6 +49,8 @@
 
 #include <H5Cpp.h>
 
+#include "ed/bfg/cluster.h"
+#include "ed/bfg/topology.h"
 #include "ed/bfg/wavefunction_io.h"
 
 namespace fs = std::filesystem;
@@ -59,10 +59,31 @@ using Complex = std::complex<double>;
 const double PI = 3.14159265358979323846;
 const Complex I_CPU(0.0, 1.0);
 
-// P2.1 (third slice): the wavefunction HDF5 loader moved to the ed_bfg
-// static library so the CPU driver, this GPU driver, and the future Python
-// bindings all share the same authoritative implementation. Pull the name
-// in via using-declaration so call sites stay unchanged.
+// P2.1 (slice 10): both the cluster loader (`Cluster`, `load_cluster`)
+// and the bowtie enumerator (`Bowtie`, `find_bowties`) now live in the
+// `ed_bfg` static library, sharing the same authoritative implementation
+// as the CPU driver and the Python bindings. The local copies (~200 LOC
+// of `Cluster` struct + `load_cluster` + nested `Cluster::Bowtie` +
+// inline triangle/bowtie search) are gone; the GPU driver's k-point
+// grid, bond-orientation map, and bowtie list are now identical to the
+// CPU pipeline by construction.
+//
+// Note: `ed::bfg::Cluster` and `ed::bfg::Bowtie` differ only in that
+// (a) the cluster owns lattice/PBC metadata (`n_cells_x/y`,
+// `cell_coords`, `sublattice_offsets`, `sites_per_cell`,
+// `minimum_image_displacement`) that the local copy never carried, and
+// (b) the bowtie list is no longer a member of `Cluster` -- it's
+// produced on demand by `find_bowties(cluster)`. The driver below stores
+// the result in a sibling local variable next to each `cluster` and
+// passes it explicitly to the kernels that need it.
+//
+// P2.1 (third slice, landed earlier): the wavefunction HDF5 loader
+// already moved to the same library (`load_wavefunction` /
+// `load_tpq_state` / `load_all_tpq_states`).
+using ed::bfg::Bowtie;
+using ed::bfg::Cluster;
+using ed::bfg::find_bowties;
+using ed::bfg::load_cluster;
 using ed::bfg::load_wavefunction;
 
 // CUDA error checking macro
@@ -324,26 +345,11 @@ public:
 };
 
 // -----------------------------------------------------------------------------
-// Cluster data structure
+// Cluster data structure: see `ed::bfg::Cluster` in include/ed/bfg/cluster.h.
+// The local copy that used to live here has been removed in P2.1 (slice 10);
+// the using-declarations near the top of this file route `Cluster`,
+// `Bowtie`, `load_cluster`, and `find_bowties` to the library versions.
 // -----------------------------------------------------------------------------
-
-struct Cluster {
-    int n_sites;
-    std::vector<std::array<double, 2>> positions;
-    std::vector<int> sublattice;
-    std::vector<std::pair<int, int>> edges_nn;
-    std::map<int, std::vector<int>> nn_list;
-    std::array<double, 2> a1, a2;
-    std::array<double, 2> b1, b2;
-    std::vector<std::array<double, 2>> k_points;
-    std::map<std::pair<int, int>, int> bond_orientation;
-    
-    struct Bowtie {
-        int s0, s1, s2, s3, s4;
-        std::array<double, 2> center;
-    };
-    std::vector<Bowtie> bowties;
-};
 
 // -----------------------------------------------------------------------------
 // Results structure
@@ -366,183 +372,11 @@ struct OrderParameterResults {
 };
 
 // -----------------------------------------------------------------------------
-// Load cluster from files
-// -----------------------------------------------------------------------------
-
-Cluster load_cluster(const std::string& cluster_dir) {
-    Cluster cluster;
-    
-    // Load positions
-    std::string pos_file = cluster_dir + "/positions.dat";
-    std::ifstream pos_in(pos_file);
-    if (!pos_in.is_open()) {
-        throw std::runtime_error("Cannot open positions.dat in " + cluster_dir);
-    }
-    
-    std::string line;
-    while (std::getline(pos_in, line)) {
-        if (line.empty() || line[0] == '#') continue;
-        std::istringstream iss(line);
-        int site_id, matrix_idx, sub_idx;
-        double x, y;
-        if (iss >> site_id >> matrix_idx >> sub_idx >> x >> y) {
-            if (site_id >= static_cast<int>(cluster.positions.size())) {
-                cluster.positions.resize(site_id + 1);
-                cluster.sublattice.resize(site_id + 1);
-            }
-            cluster.positions[site_id] = {x, y};
-            cluster.sublattice[site_id] = sub_idx;
-        }
-    }
-    cluster.n_sites = cluster.positions.size();
-    
-    // Load NN list - try to find any matching file
-    std::vector<std::string> nn_patterns = {"_nn_list.dat"};
-    std::string nn_file;
-    
-    for (const auto& entry : fs::directory_iterator(cluster_dir)) {
-        std::string filename = entry.path().filename().string();
-        if (filename.find("_nn_list.dat") != std::string::npos) {
-            nn_file = entry.path().string();
-            break;
-        }
-    }
-    
-    if (!nn_file.empty()) {
-        std::ifstream nn_in(nn_file);
-        while (std::getline(nn_in, line)) {
-            if (line.empty() || line[0] == '#') continue;
-            std::istringstream iss(line);
-            int site_id, n_neighbors;
-            if (iss >> site_id >> n_neighbors) {
-                for (int k = 0; k < n_neighbors; ++k) {
-                    int neighbor;
-                    if (iss >> neighbor) {
-                        cluster.nn_list[site_id].push_back(neighbor);
-                        if (site_id < neighbor) {
-                            cluster.edges_nn.push_back({site_id, neighbor});
-                        }
-                    }
-                }
-            }
-        }
-    } else {
-        // Construct from positions
-        double nn_dist = 0.51;
-        for (int i = 0; i < cluster.n_sites; ++i) {
-            for (int j = i + 1; j < cluster.n_sites; ++j) {
-                double dx = cluster.positions[j][0] - cluster.positions[i][0];
-                double dy = cluster.positions[j][1] - cluster.positions[i][1];
-                double d = std::sqrt(dx * dx + dy * dy);
-                if (d < nn_dist) {
-                    cluster.nn_list[i].push_back(j);
-                    cluster.nn_list[j].push_back(i);
-                    cluster.edges_nn.push_back({i, j});
-                }
-            }
-        }
-    }
-    
-    // Set lattice vectors (kagome)
-    cluster.a1 = {1.0, 0.0};
-    cluster.a2 = {0.5, std::sqrt(3.0) / 2.0};
-    
-    // Reciprocal vectors
-    double det = cluster.a1[0] * cluster.a2[1] - cluster.a1[1] * cluster.a2[0];
-    cluster.b1 = {2.0 * PI * cluster.a2[1] / det, -2.0 * PI * cluster.a2[0] / det};
-    cluster.b2 = {-2.0 * PI * cluster.a1[1] / det, 2.0 * PI * cluster.a1[0] / det};
-    
-    // Generate k-points
-    int n_cells = cluster.n_sites / 3;
-    int dim = static_cast<int>(std::sqrt(n_cells) + 0.5);
-    if (dim * dim != n_cells) dim = std::max(1, static_cast<int>(std::sqrt(n_cells)));
-    
-    for (int n1 = 0; n1 < dim; ++n1) {
-        for (int n2 = 0; n2 < dim; ++n2) {
-            double kx = (static_cast<double>(n1) / dim) * cluster.b1[0] + 
-                        (static_cast<double>(n2) / dim) * cluster.b2[0];
-            double ky = (static_cast<double>(n1) / dim) * cluster.b1[1] + 
-                        (static_cast<double>(n2) / dim) * cluster.b2[1];
-            cluster.k_points.push_back({kx, ky});
-        }
-    }
-    
-    // Compute bond orientations
-    for (const auto& [i, j] : cluster.edges_nn) {
-        double dx = cluster.positions[j][0] - cluster.positions[i][0];
-        double dy = cluster.positions[j][1] - cluster.positions[i][1];
-        double angle = std::atan2(dy, dx);
-        double angle_deg = std::fmod(angle * 180.0 / PI + 180.0, 180.0);
-        
-        int orientation = (angle_deg < 30.0 || angle_deg >= 150.0) ? 0 : 
-                          (angle_deg < 90.0) ? 1 : 2;
-        cluster.bond_orientation[{i, j}] = orientation;
-        cluster.bond_orientation[{j, i}] = orientation;
-    }
-    
-    // Find bowties
-    std::vector<std::array<int, 3>> triangles;
-    for (int i = 0; i < cluster.n_sites; ++i) {
-        const auto& ni = cluster.nn_list[i];
-        for (size_t a = 0; a < ni.size(); ++a) {
-            int j = ni[a];
-            if (j <= i) continue;
-            for (size_t b = a + 1; b < ni.size(); ++b) {
-                int k = ni[b];
-                if (k <= j) continue;
-                const auto& nj = cluster.nn_list[j];
-                if (std::find(nj.begin(), nj.end(), k) != nj.end()) {
-                    triangles.push_back({i, j, k});
-                }
-            }
-        }
-    }
-    
-    for (size_t t1 = 0; t1 < triangles.size(); ++t1) {
-        for (size_t t2 = t1 + 1; t2 < triangles.size(); ++t2) {
-            std::set<int> s1(triangles[t1].begin(), triangles[t1].end());
-            std::set<int> s2(triangles[t2].begin(), triangles[t2].end());
-            std::vector<int> shared;
-            std::set_intersection(s1.begin(), s1.end(), s2.begin(), s2.end(),
-                                  std::back_inserter(shared));
-            
-            if (shared.size() == 1) {
-                int s0 = shared[0];
-                std::vector<int> outer;
-                for (int v : triangles[t1]) if (v != s0) outer.push_back(v);
-                for (int v : triangles[t2]) if (v != s0) outer.push_back(v);
-                
-                if (outer.size() == 4) {
-                    Cluster::Bowtie bt;
-                    bt.s0 = s0;
-                    bt.s1 = outer[0]; bt.s2 = outer[1];
-                    bt.s3 = outer[2]; bt.s4 = outer[3];
-                    bt.center[0] = (cluster.positions[bt.s0][0] + cluster.positions[bt.s1][0] +
-                                    cluster.positions[bt.s2][0] + cluster.positions[bt.s3][0] +
-                                    cluster.positions[bt.s4][0]) / 5.0;
-                    bt.center[1] = (cluster.positions[bt.s0][1] + cluster.positions[bt.s1][1] +
-                                    cluster.positions[bt.s2][1] + cluster.positions[bt.s3][1] +
-                                    cluster.positions[bt.s4][1]) / 5.0;
-                    cluster.bowties.push_back(bt);
-                }
-            }
-        }
-    }
-    
-    return cluster;
-}
-
-// -----------------------------------------------------------------------------
-// P2.1 (third slice): `load_wavefunction` moved to the ed_bfg static library
-// (`include/ed/bfg/wavefunction_io.h`). The library version is strictly more
-// capable than the original GPU-local copy: it probes the same dataset paths
-// the CPU driver always used (including the canonical
-// `eigendata/eigenvector_<idx>` path that the new ED workflow writes), and
-// it understands HDF5 compound complex types with both `(real, imag)` and
-// `(r, i)` field names in addition to the raw-double layout. The GPU driver
-// already passes `eigenvector_idx` through and works with the default
-// verbose=true; the only behavioral change is that loads now log the chosen
-// dataset path, which matches the CPU driver and the rest of the pipeline.
+// Cluster + wavefunction loaders: see `ed::bfg::load_cluster` /
+// `ed::bfg::load_wavefunction` in `include/ed/bfg/cluster.h` /
+// `include/ed/bfg/wavefunction_io.h`. The using-declarations near the top
+// of this file route the names to the library implementations. P2.1
+// (slices 3 and 10).
 // -----------------------------------------------------------------------------
 
 // -----------------------------------------------------------------------------
@@ -622,17 +456,17 @@ Complex compute_bond_bond_correlation_gpu(
 std::vector<Complex> compute_bowtie_resonances_gpu(
     GPUWavefunction& gpu_psi,
     GPUResultAccumulator& acc,
-    const Cluster& cluster
+    const std::vector<Bowtie>& bowties
 ) {
-    std::vector<Complex> P_r(cluster.bowties.size());
-    
+    std::vector<Complex> P_r(bowties.size());
+
     int block_size = 256;
     int num_blocks = (gpu_psi.n_states + block_size - 1) / block_size;
-    
+
     acc.allocate();
-    
-    for (size_t b = 0; b < cluster.bowties.size(); ++b) {
-        const auto& bt = cluster.bowties[b];
+
+    for (size_t b = 0; b < bowties.size(); ++b) {
+        const auto& bt = bowties[b];
         acc.reset();
         compute_bowtie_resonance_kernel<<<num_blocks, block_size>>>(
             gpu_psi.d_psi, acc.d_result_real, acc.d_result_imag,
@@ -641,7 +475,7 @@ std::vector<Complex> compute_bowtie_resonances_gpu(
         CUDA_CHECK(cudaDeviceSynchronize());
         P_r[b] = acc.get_result();
     }
-    
+
     return P_r;
 }
 
@@ -652,6 +486,7 @@ std::vector<Complex> compute_bowtie_resonances_gpu(
 OrderParameterResults compute_order_parameters_gpu(
     const std::vector<Complex>& psi,
     const Cluster& cluster,
+    const std::vector<Bowtie>& bowties,
     double jpm_value = 0.0,
     bool skip_stripe = false
 ) {
@@ -820,12 +655,12 @@ OrderParameterResults compute_order_parameters_gpu(
     }
     
     // Compute plaquette/bowtie order
-    if (!cluster.bowties.empty()) {
+    if (!bowties.empty()) {
         std::cout << "  Computing bowtie resonance (GPU)..." << std::flush;
         start = std::chrono::high_resolution_clock::now();
-        
-        auto P_r = compute_bowtie_resonances_gpu(gpu_psi, acc, cluster);
-        
+
+        auto P_r = compute_bowtie_resonances_gpu(gpu_psi, acc, bowties);
+
         double sum_real = 0.0, sum_abs = 0.0;
         for (const auto& p : P_r) {
             sum_real += std::real(p);
@@ -833,22 +668,22 @@ OrderParameterResults compute_order_parameters_gpu(
         }
         results.P_mean = sum_real / P_r.size();
         results.resonance_strength = sum_abs / P_r.size();
-        
+
         // Plaquette structure factor
-        int n_bowties = cluster.bowties.size();
+        int n_bowties = static_cast<int>(bowties.size());
         std::vector<Complex> delta_P(n_bowties);
         for (int b = 0; b < n_bowties; ++b) {
             delta_P[b] = P_r[b] - results.P_mean;
         }
-        
+
         double s_p_max = 0.0;
         for (int ik = 0; ik < n_k; ++ik) {
             const auto& q = cluster.k_points[ik];
             Complex s_p = 0.0;
             for (int b1 = 0; b1 < n_bowties; ++b1) {
                 for (int b2 = 0; b2 < n_bowties; ++b2) {
-                    double dr_x = cluster.bowties[b1].center[0] - cluster.bowties[b2].center[0];
-                    double dr_y = cluster.bowties[b1].center[1] - cluster.bowties[b2].center[1];
+                    double dr_x = bowties[b1].center[0] - bowties[b2].center[0];
+                    double dr_y = bowties[b1].center[1] - bowties[b2].center[1];
                     double phase_arg = q[0] * dr_x + q[1] * dr_y;
                     s_p += delta_P[b1] * std::conj(delta_P[b2]) * std::exp(I_CPU * phase_arg);
                 }
@@ -857,7 +692,7 @@ OrderParameterResults compute_order_parameters_gpu(
             if (std::abs(s_p) > s_p_max) s_p_max = std::abs(s_p);
         }
         results.m_plaquette = std::sqrt(s_p_max / n_bowties);
-        
+
         end = std::chrono::high_resolution_clock::now();
         duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
         std::cout << " (" << duration.count() << " ms)" << std::endl;
@@ -866,7 +701,7 @@ OrderParameterResults compute_order_parameters_gpu(
         results.resonance_strength = 0.0;
         results.P_mean = 0.0;
     }
-    
+
     return results;
 }
 
@@ -904,9 +739,10 @@ std::vector<OrderParameterResults> scan_jpm_directories(
     
     // Load cluster from first directory
     Cluster cluster = load_cluster(jpm_dirs[0].second);
-    std::cout << "Cluster: " << cluster.n_sites << " sites, " 
+    auto bowties = find_bowties(cluster);
+    std::cout << "Cluster: " << cluster.n_sites << " sites, "
               << cluster.edges_nn.size() << " bonds, "
-              << cluster.bowties.size() << " bowties" << std::endl;
+              << bowties.size() << " bowties" << std::endl;
     
     // Process directories
     std::vector<OrderParameterResults> all_results(jpm_dirs.size());
@@ -964,7 +800,7 @@ std::vector<OrderParameterResults> scan_jpm_directories(
             auto psi = load_wavefunction(wf_file);
             
             // Compute order parameters
-            auto results = compute_order_parameters_gpu(psi, cluster, jpm, skip_stripe);
+            auto results = compute_order_parameters_gpu(psi, cluster, bowties, jpm, skip_stripe);
             all_results[i] = results;
             
             int done = ++completed;
@@ -1158,14 +994,15 @@ int main(int argc, char* argv[]) {
                       << "========================================" << std::endl;
             
             Cluster cluster = load_cluster(cluster_dir);
+            auto bowties = find_bowties(cluster);
             std::cout << "Cluster: " << cluster.n_sites << " sites, "
                       << cluster.edges_nn.size() << " bonds, "
-                      << cluster.bowties.size() << " bowties" << std::endl;
-            
+                      << bowties.size() << " bowties" << std::endl;
+
             auto psi = load_wavefunction(wf_file, eigenvector_idx);
             std::cout << "Wavefunction: " << psi.size() << " amplitudes" << std::endl;
-            
-            auto results = compute_order_parameters_gpu(psi, cluster, 0.0, skip_stripe);
+
+            auto results = compute_order_parameters_gpu(psi, cluster, bowties, 0.0, skip_stripe);
             
             std::cout << "\n========== RESULTS ==========\n"
                       << std::fixed << std::setprecision(6)
