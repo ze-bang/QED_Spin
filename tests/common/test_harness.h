@@ -17,12 +17,14 @@
 #include <complex>
 #include <cstdint>
 #include <cstdlib>
+#include <filesystem>  // P0.12
 #include <functional>
 #include <iomanip>
 #include <iostream>
 #include <random>
 #include <sstream>
 #include <string>
+#include <system_error>  // P0.12
 #include <vector>
 
 #include <Eigen/Dense>
@@ -314,9 +316,9 @@ inline std::string make_scratch_dir(const std::string& suite,
     std::string base = base_env && *base_env ? base_env : "test_scratch";
     std::string dir = base + "/" + suite;
     if (!suffix.empty()) dir += "_" + suffix;
-    std::string cmd = "mkdir -p '" + dir + "'";
-    int rc = std::system(cmd.c_str());
-    (void)rc;
+    // P0.12: was system("mkdir -p '...'") (shell-quoted).
+    std::error_code ec;
+    std::filesystem::create_directories(dir, ec);
     return dir;
 }
 

@@ -40,10 +40,12 @@
 #include <algorithm>
 #include <cmath>
 #include <complex>
+#include <filesystem>  // P0.12
 #include <fstream>
 #include <iomanip>
 #include <numeric>
 #include <sstream>
+#include <system_error>  // P0.12
 #include <vector>
 
 using namespace ed_tests;
@@ -77,10 +79,10 @@ std::vector<int> compose(const std::vector<int>& a, const std::vector<int>& b) {
 void write_zN_translation_fixtures(const std::string& dir, int N) {
     // Place under "<dir>/automorphism_results" -- this is the layout
     // SymmetryGroupInfo::loadFromDirectory() expects.
+    // P0.12: was system("mkdir -p '...'") (shell-quoted).
     std::string root = dir + "/automorphism_results";
-    std::string mkcmd = "mkdir -p '" + root + "'";
-    int rc = std::system(mkcmd.c_str());
-    (void)rc;
+    std::error_code ec;
+    std::filesystem::create_directories(root, ec);
 
     // ---- max_clique.json: the full group [T^0, T^1, ..., T^{N-1}].
     {

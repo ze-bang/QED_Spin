@@ -4,8 +4,10 @@
 #include <ed/core/construct_ham.h>
 #include <unordered_set>
 #include <algorithm>
+#include <filesystem>     // P0.12
 #include <numeric>
 #include <mutex>
+#include <system_error>   // P0.12
 
 /**
  * @file streaming_symmetry.h
@@ -404,7 +406,9 @@ public:
      */
     void saveSectorMetadata(const std::string& dir) const {
         std::string metadata_dir = dir + "/sym_metadata";
-        safe_system_call("mkdir -p " + metadata_dir);
+        // P0.12: was safe_system_call("mkdir -p ...").
+        std::error_code ec;
+        std::filesystem::create_directories(metadata_dir, ec);
         
         // Save sector dimensions
         std::ofstream dim_file(metadata_dir + "/sector_dimensions.txt");
@@ -513,7 +517,9 @@ public:
      * HDF5 layout identical to the fixed-Sz version but without n_up attribute.
      */
     void saveOrbitBasisHDF5(const std::string& cache_dir) const {
-        safe_system_call("mkdir -p " + cache_dir);
+        // P0.12: was safe_system_call("mkdir -p ...").
+        std::error_code ec;
+        std::filesystem::create_directories(cache_dir, ec);
         std::string filepath = getOrbitCachePath(cache_dir, n_bits_);
 
         std::cout << "\n=== Saving orbit basis cache (full-space) to "
@@ -1768,7 +1774,9 @@ public:
      *                 orbit_coefficients_real, orbit_coefficients_imag
      */
     void saveOrbitBasisHDF5(const std::string& cache_dir) const {
-        safe_system_call("mkdir -p " + cache_dir);
+        // P0.12: was safe_system_call("mkdir -p ...").
+        std::error_code ec;
+        std::filesystem::create_directories(cache_dir, ec);
         std::string filepath = getOrbitCachePath(cache_dir, n_bits_, n_up_);
 
         std::cout << "\n=== Saving orbit basis cache to " << filepath << " ===" << std::endl;

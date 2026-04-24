@@ -15,6 +15,7 @@
 #include <fstream>
 #include <iomanip>
 #include <numeric>
+#include <filesystem>  // P0.12: replace shell mkdir with std::filesystem
 
 // cuSOLVER error checking macro
 #define CUSOLVER_CHECK(call) do { \
@@ -1665,10 +1666,10 @@ GPUFTLMSolver::computeDynamicalCorrelation(
     std::vector<std::vector<double>> sample_spectra_real;
     std::vector<std::vector<double>> sample_spectra_imag;
     
-    // Create output directory if needed
+    // Create output directory if needed (P0.12: was system("mkdir -p ..."))
     if (!output_dir.empty() && store_intermediate) {
-        std::string cmd = "mkdir -p " + output_dir + "/dynamical_correlation_samples";
-        system(cmd.c_str());
+        std::error_code ec;
+        std::filesystem::create_directories(output_dir + "/dynamical_correlation_samples", ec);
     }
     
     // Allocate temporary device vectors for operator applications
@@ -1944,10 +1945,10 @@ GPUFTLMSolver::computeThermalExpectation(
     std::vector<std::vector<double>> sample_expectations(num_samples);
     std::vector<std::vector<double>> sample_variances(num_samples);
     
-    // Create output directory if needed
+    // Create output directory if needed (P0.12: was system("mkdir -p ..."))
     if (!output_dir.empty() && store_intermediate) {
-        std::string cmd = "mkdir -p " + output_dir + "/static_samples";
-        system(cmd.c_str());
+        std::error_code ec;
+        std::filesystem::create_directories(output_dir + "/static_samples", ec);
     }
     
     // Allocate temporary device vector for O|ψ⟩
@@ -2187,10 +2188,10 @@ GPUFTLMSolver::computeStaticCorrelation(
     // Storage for per-sample results
     std::vector<std::vector<double>> sample_expectations;
     
-    // Create output directory if needed
+    // Create output directory if needed (P0.12: was system("mkdir -p ..."))
     if (!output_dir.empty() && store_intermediate) {
-        std::string cmd = "mkdir -p " + output_dir + "/static_correlation_samples";
-        system(cmd.c_str());
+        std::error_code ec;
+        std::filesystem::create_directories(output_dir + "/static_correlation_samples", ec);
     }
     
     // Allocate temporary device vectors

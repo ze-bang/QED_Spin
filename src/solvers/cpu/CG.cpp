@@ -2,6 +2,9 @@
 #include <ed/core/system_utils.h>
 #include <ed/core/hdf5_io.h>
 
+#include <filesystem>      // P0.12
+#include <system_error>    // P0.12
+
 // Davidson method for finding lowest eigenvalues
 void davidson_method(
     std::function<void(const Complex*, Complex*, int)> H,  // Hamiltonian operator
@@ -14,11 +17,11 @@ void davidson_method(
     std::vector<ComplexVector>& eigenvectors,              // Output eigenvectors
     std::string dir                                   // Directory for temporary files
 ) {
-    // Create directory for temporary files if needed
+    // P0.12: was safe_system_call("mkdir -p ...").
     std::string temp_dir = dir + "/davidson_temp";
     if (!dir.empty()) {
-        std::string cmd = "mkdir -p " + temp_dir;
-        safe_system_call(cmd);
+        std::error_code ec;
+        std::filesystem::create_directories(temp_dir, ec);
     }
     
     // Initialize subspace with random vectors
@@ -198,10 +201,12 @@ void davidson_method(
         }
     }
     
-    // Clean up temporary directory if created
+    // P0.12: was safe_system_call("rm -rf ...") which falls through to
+    // std::system().  std::filesystem::remove_all does the same job
+    // without invoking the shell.
     if (!dir.empty()) {
-        std::string cmd = "rm -rf " + temp_dir;
-        safe_system_call(cmd);
+        std::error_code ec;
+        std::filesystem::remove_all(temp_dir, ec);
     }
 }
 
@@ -215,11 +220,11 @@ void bicg_eigenvalues(
     std::vector<ComplexVector>& eigenvectors,              // Output eigenvectors
     std::string dir                                   // Directory for temporary files
 ) {
-    // Create directory for temporary files if needed
+    // P0.12: was safe_system_call("mkdir -p ...").
     std::string temp_dir = dir + "/bicg_temp";
     if (!dir.empty()) {
-        std::string cmd = "mkdir -p " + temp_dir;
-        safe_system_call(cmd);
+        std::error_code ec;
+        std::filesystem::create_directories(temp_dir, ec);
     }
     
     // Initialize random vectors
@@ -426,10 +431,12 @@ void bicg_eigenvalues(
         }
     }
     
-    // Clean up temporary directory if created
+    // P0.12: was safe_system_call("rm -rf ...") which falls through to
+    // std::system().  std::filesystem::remove_all does the same job
+    // without invoking the shell.
     if (!dir.empty()) {
-        std::string cmd = "rm -rf " + temp_dir;
-        safe_system_call(cmd);
+        std::error_code ec;
+        std::filesystem::remove_all(temp_dir, ec);
     }
 }
 

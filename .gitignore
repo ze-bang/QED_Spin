@@ -163,6 +163,8 @@ local.cmake.user
 # ---------------------------------------------------------------------------
 # Misc
 # ---------------------------------------------------------------------------
-core
-core.*
+# Anchor 'core' / 'core.*' to root only so we don't accidentally exclude
+# include/ed/core/ or any other src/ed/core/ directories.
+/core
+/core.*
 *.dSYM/

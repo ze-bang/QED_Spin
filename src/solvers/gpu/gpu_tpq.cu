@@ -9,8 +9,10 @@
 #include <cmath>
 #include <sys/stat.h>
 #include <dirent.h>
+#include <filesystem>      // P0.12
 #include <regex>
 #include <sstream>
+#include <system_error>    // P0.12
 #include <algorithm>
 
 // Kernel to generate random complex numbers for initial state
@@ -443,10 +445,10 @@ void GPUTPQSolver::runMicrocanonicalTPQ(
         std::cout << "  Beta: " << (continue_beta == 0.0 ? "auto-detect" : std::to_string(continue_beta)) << std::endl;
     }
     
-    // Create output directory
+    // P0.12: was safe_system_call("mkdir -p ...").
     if (!dir.empty()) {
-        std::string cmd = "mkdir -p " + dir;
-        safe_system_call(cmd);
+        std::error_code ec;
+        std::filesystem::create_directories(dir, ec);
     }
     
     eigenvalues.clear();
@@ -817,10 +819,10 @@ void GPUTPQSolver::runCanonicalTPQ(
     std::cout << "Beta max: " << beta_max << std::endl;
     std::cout << "Delta beta: " << delta_beta << std::endl;
     
-    // Create output directory
+    // P0.12: was safe_system_call("mkdir -p ...").
     if (!dir.empty()) {
-        std::string cmd = "mkdir -p " + dir;
-        safe_system_call(cmd);
+        std::error_code ec;
+        std::filesystem::create_directories(dir, ec);
     }
     
     energies.clear();

@@ -5,6 +5,7 @@
 #include <ed/solvers/ftlm.h>     // For build_lanczos_tridiagonal function
 #include <ed/solvers/lanczos.h>  // For helper functions
 #include <ed/core/hdf5_io.h>       // For HDF5 output
+#include <filesystem>  // P0.12
 #include <fstream>
 #include <iomanip>
 #include <numeric>
@@ -219,10 +220,10 @@ LTLMResults low_temperature_lanczos(
     LTLMResults results;
     results.total_samples = 1;
     
-    // Create output directory if needed
+    // P0.12: was safe_system_call("mkdir -p ...").
     if (!output_dir.empty() && params.store_intermediate) {
-        std::string cmd = "mkdir -p " + output_dir + "/ltlm_data";
-        safe_system_call(cmd);
+        std::error_code ec;
+        std::filesystem::create_directories(output_dir + "/ltlm_data", ec);
     }
     
     // Step 1: Find or use ground state

@@ -12,10 +12,12 @@
 #include <ed/core/construct_ham.h>
 
 #include <cstdio>
+#include <filesystem>  // P0.12
 #include <fstream>
 #include <memory>
 #include <sstream>
 #include <string>
+#include <system_error>  // P0.12
 
 using namespace ed_tests;
 
@@ -23,8 +25,9 @@ using namespace ed_tests;
 // build_heisenberg_chain() programmatic Hamiltonian (J=1, OBC).
 // Trans.dat is written but empty of one-body terms (no magnetic field).
 static void write_files(uint64_t N, const std::string& dir) {
-    std::string cmd = "mkdir -p '" + dir + "'";
-    int rc = std::system(cmd.c_str()); (void)rc;
+    // P0.12: was system("mkdir -p '...'") (shell-quoted).
+    std::error_code ec;
+    std::filesystem::create_directories(dir, ec);
 
     {
         std::ofstream f(dir + "/Trans.dat");

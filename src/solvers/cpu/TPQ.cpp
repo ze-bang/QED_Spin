@@ -498,21 +498,19 @@ ComplexVector generateTPQVector(int N,  uint64_t seed) {
 }
 
 /**
- * Create directory if it doesn't exist
+ * Create directory if it doesn't exist (P0.12: replaced shell mkdir).
  */
 bool ensureDirectoryExists(const std::string& path) {
-    struct stat info;
-    if (stat(path.c_str(), &info) != 0) {
-        // Directory doesn't exist, create it
-        std::string cmd = "mkdir -p " + path;
-        return system(cmd.c_str()) == 0;
-    } else if (info.st_mode & S_IFDIR) {
-        // Path exists and is a directory
+    std::error_code ec;
+    if (std::filesystem::is_directory(path, ec)) {
         return true;
-    } else {
-        // Path exists but is not a directory
+    }
+    if (std::filesystem::exists(path, ec)) {
+        // Path exists but is not a directory.
         return false;
     }
+    std::filesystem::create_directories(path, ec);
+    return !ec || std::filesystem::is_directory(path);
 }
 
 /**
