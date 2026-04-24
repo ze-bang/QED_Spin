@@ -1,0 +1,118 @@
+name: Benchmarks (nightly)
+
+# Nightly perf-tracking job (P2.13). Builds the Google-Benchmark suite under
+# benchmarks/ in Release with OpenBLAS, runs each binary with the JSON output
+# format, and uploads the collated payload as a workflow artifact so trends
+# can be eyeballed across commits without standing up a full
+# `benchmark-action/github-action-benchmark` history yet.
+#
+# Triggers:
+#   * scheduled at 03:30 UTC every night
+#   * `workflow_dispatch` for ad-hoc runs from the Actions tab
+#   * `push` to main when files under benchmarks/ or src/solvers/cpu/ change
+#     (so a perf change shows up *with* the commit that introduced it)
+
+on:
+  schedule:
+    - cron: "30 3 * * *"
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "benchmarks/**"
+      - "src/solvers/cpu/**"
+      - "src/core/**"
+      - "include/ed/core/**"
+      - "include/ed/solvers/**"
+      - "cmake/EDBenchmark.cmake"
+      - ".github/workflows/benchmarks.yml"
+
+concurrency:
+  group: benchmarks-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  benchmark-linux-openblas:
+    name: Linux / GCC / OpenBLAS / Release benchmarks
+    runs-on: ubuntu-22.04
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential \
+            cmake \
+            ninja-build \
+            libopenblas-dev \
+            liblapacke-dev \
+            libhdf5-dev \
+            libhdf5-cpp-103 \
+            libeigen3-dev \
+            libarpack2-dev \
+            pkg-config
+
+      - name: Print toolchain versions
+        run: |
+          gcc --version | head -1
+          cmake --version | head -1
+
+      # We deliberately skip `BUILD_ED_TESTS=ON` here -- the test suite is
+      # exercised by .github/workflows/ci.yml on every push; here we only
+      # care about the perf surface.
+      - name: Configure (Release + ED_BUILD_BENCHMARKS=ON)
+        run: |
+          cmake -S . -B build-bench \
+            -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DED_BUILD_BENCHMARKS=ON \
+            -DBUILD_ED_TESTS=OFF \
+            -DWITH_CUDA=OFF \
+            -DWITH_MPI=OFF \
+            -DBLAS_PROFILE=OPENBLAS
+
+      - name: Build benchmarks
+        run: cmake --build build-bench --target ed_benchmarks -- -j$(nproc)
+
+      - name: Run benchmarks (JSON output)
+        run: |
+          mkdir -p bench-results
+          for b in bench_operator_apply bench_lanczos_ground_state bench_full_diagonalization; do
+            echo "Running $b ..."
+            ./build-bench/benchmarks/$b \
+              --benchmark_format=json \
+              --benchmark_out=bench-results/$b.json
+          done
+          ls -la bench-results
+
+      - name: Upload benchmark JSON
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-results-linux-openblas
+          path: bench-results/*.json
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Print one-line summary
+        run: |
+          python3 - <<'PY'
+          import glob
+          import json
+
+          for path in sorted(glob.glob("bench-results/*.json")):
+              print(f"=== {path} ===")
+              with open(path) as fh:
+                  data = json.load(fh)
+              for b in data.get("benchmarks", []):
+                  name = b.get("name", "?")
+                  t    = b.get("real_time", 0.0)
+                  unit = b.get("time_unit", "ns")
+                  print(f"  {name:<40s}  {t:10.3f} {unit}")
+          PY

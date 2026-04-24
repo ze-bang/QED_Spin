@@ -604,6 +604,16 @@ endif()
 # =============================================================================
 option(BUILD_ED_TESTS "Build the ED regression test suite" ON)
 
+# -----------------------------------------------------------------------------
+# Google-Benchmark micro-benchmarks (P2.13). Off by default to keep the
+# default build short; opt in with `-DED_BUILD_BENCHMARKS=ON`. The CI nightly
+# job (.github/workflows/benchmarks.yml) flips this to ON.
+# -----------------------------------------------------------------------------
+option(ED_BUILD_BENCHMARKS "Build the Google-Benchmark micro-benchmarks" OFF)
+if(ED_BUILD_BENCHMARKS)
+    add_subdirectory(benchmarks)
+endif()
+
 if(BUILD_ED_TESTS)
     enable_testing()
 
