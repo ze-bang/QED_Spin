@@ -213,81 +213,46 @@ include(EDDependencies)
 # diagonalization via ScaLAPACK (compatibility constrained by BLAS_PROFILE).
 include(EDMpiScalapack)
 
-# New elegant main sources - organized layout
-set(SOURCES
-    ${APPS_DIR}/ed_main.cpp
-    ${CORE_DIR}/ed_config.cpp
-    ${SOLVERS_CPU_DIR}/arpack.cpp
-    ${SOLVERS_CPU_DIR}/observables.cpp
-    ${SOLVERS_CPU_DIR}/lanczos.cpp
-    ${SOLVERS_CPU_DIR}/CG.cpp
-    ${SOLVERS_CPU_DIR}/dynamics.cpp
-    ${SOLVERS_CPU_DIR}/TPQ.cpp
-    ${SOLVERS_CPU_DIR}/ftlm.cpp
-    ${SOLVERS_CPU_DIR}/ltlm.cpp
-    ${SOLVERS_CPU_DIR}/hybrid_thermal.cpp
-    ${IO_DIR}/basis_vector_storage.cpp
-    ${IO_DIR}/lanczos_basis_buffer.cpp
-)
+# CPU optimization flags must be defined before EDLibraries so the static
+# libraries pick them up via target_compile_options(... PRIVATE CPU_OPT_FLAGS).
+include(EDOptimizationFlags)
 
-# Add ScaLAPACK sources if available
-if(WITH_SCALAPACK AND SCALAPACK_LIBRARIES)
-    list(APPEND SOURCES ${SOLVERS_CPU_DIR}/scalapack_diag.cpp)
-endif()
-
-# Header-only sources that should be included in compilation
-set(HEADER_SOURCES
-    ${SRC_DIR}/*.h
-)
-
-# GPU sources for CUDA-enabled builds - organized layout
-if(WITH_CUDA)
-    set(GPU_SOURCES
-        ${SOLVERS_GPU_DIR}/gpu_operator.cu
-        ${SOLVERS_GPU_DIR}/gpu_operator_conversion.cpp
-        ${SOLVERS_GPU_DIR}/gpu_kernels.cu
-        ${SOLVERS_GPU_DIR}/gpu_fixed_sz_operator.cu
-        ${SOLVERS_GPU_DIR}/gpu_symmetrized_operator.cu
-        ${SOLVERS_GPU_DIR}/gpu_full_diag.cu
-        ${SOLVERS_GPU_DIR}/gpu_lanczos.cu
-        ${SOLVERS_GPU_DIR}/gpu_block_lanczos.cu
-        ${SOLVERS_GPU_DIR}/gpu_krylov_schur.cu
-        ${SOLVERS_GPU_DIR}/gpu_block_krylov_schur.cu
-        ${SOLVERS_GPU_DIR}/gpu_ed_wrapper.cu
-        ${SOLVERS_GPU_DIR}/gpu_tpq.cu
-        ${SOLVERS_GPU_DIR}/gpu_cg.cu
-        ${SOLVERS_GPU_DIR}/lobpcg_eigen_solve.cpp
-        ${SOLVERS_GPU_DIR}/gpu_dynamics.cu
-        ${SOLVERS_GPU_DIR}/gpu_ftlm.cu
-    )
-    
-    set(GPU_HEADERS
-        ${INCLUDE_DIR}/ed/gpu/kernel_config.h
-        ${INCLUDE_DIR}/ed/gpu/bit_operations.cuh
-        ${INCLUDE_DIR}/ed/gpu/gpu_operator.cuh
-        ${INCLUDE_DIR}/ed/gpu/gpu_lanczos.cuh
-        ${INCLUDE_DIR}/ed/gpu/gpu_ed_wrapper.h
-        ${INCLUDE_DIR}/ed/gpu/gpu_tpq.cuh
-        ${INCLUDE_DIR}/ed/gpu/gpu_cg.cuh
-        ${INCLUDE_DIR}/ed/gpu/gpu_dynamics.cuh
-        ${INCLUDE_DIR}/ed/gpu/gpu_ftlm.cuh
-    )
-endif()
-
-# Define executables
-
-# New elegant main (add GPU sources if CUDA is enabled)
-if(WITH_CUDA)
-    add_executable(ED ${SOURCES} ${GPU_SOURCES})
-    target_include_directories(ED PRIVATE ${SOLVERS_GPU_DIR})
+# Find OpenMP BEFORE EDLibraries so the static libraries can link
+# OpenMP::OpenMP_CXX as PUBLIC, propagating it to every executable.
+find_package(OpenMP)
+if(OpenMP_CXX_FOUND)
+    message(STATUS "  OpenMP Support: YES")
 else()
-    add_executable(ED ${SOURCES})
+    message(STATUS "  OpenMP Support: NO")
 endif()
 
-# Add TPQ_DSSF executable (only if MPI is enabled since it uses MPI)
-# TPQ_DSSF uses parallel HDF5 for MPI-safe file access
+# =============================================================================
+# STATIC LIBRARIES
+# =============================================================================
+# Defines ed_io / ed_core / ed_solvers_cpu / ed_solvers_gpu (the last only
+# when WITH_CUDA). Each library exposes its include directories and its link
+# stack via PUBLIC properties so the executables below need only
+# `target_link_libraries(<exe> PRIVATE ed_solvers_cpu ...)`.
+include(EDLibraries)
+
+# =============================================================================
+# EXECUTABLES
+# =============================================================================
+
+# Main `ED` driver. The library targets carry every other source file.
+# When CUDA is on, ed_solvers_gpu PUBLIC-links ed_solvers_cpu so we only need
+# to mention the topmost library.
+add_executable(ED ${APPS_DIR}/ed_main.cpp)
+if(WITH_CUDA)
+    target_link_libraries(ED PRIVATE ed_solvers_gpu)
+else()
+    target_link_libraries(ED PRIVATE ed_solvers_cpu)
+endif()
+
+# TPQ_DSSF is a legacy DSSF/SSSF wrapper around the same CPU+GPU stack as ED,
+# plus parallel HDF5 for MPI-safe output. It will be replaced by `ED dssf` in
+# Phase 2 (DSSF PR-E/F); for now it just links the same libraries as ED.
 if(WITH_MPI)
-    # Find parallel HDF5 for TPQ_DSSF (OpenMPI version)
     set(HDF5_PREFER_PARALLEL TRUE)
     find_path(HDF5_PARALLEL_INCLUDE_DIR H5Cpp.h
         HINTS /usr/include/hdf5/openmpi /usr/include/hdf5/mpi
@@ -305,7 +270,7 @@ if(WITH_MPI)
         HINTS /usr/lib/x86_64-linux-gnu/hdf5/openmpi
         NO_DEFAULT_PATH
     )
-    
+
     if(HDF5_PARALLEL_INCLUDE_DIR AND HDF5_PARALLEL_C_LIBRARY AND HDF5_PARALLEL_CXX_LIBRARY)
         message(STATUS "Found parallel HDF5 for TPQ_DSSF:")
         message(STATUS "  Include: ${HDF5_PARALLEL_INCLUDE_DIR}")
@@ -321,14 +286,18 @@ if(WITH_MPI)
         set(HAS_PARALLEL_HDF5 FALSE)
     endif()
 
-    add_executable(TPQ_DSSF ${APPS_DIR}/TPQ_DSSF.cpp ${SOLVERS_CPU_DIR}/dynamics.cpp ${SOLVERS_CPU_DIR}/TPQ.cpp ${SOLVERS_CPU_DIR}/ftlm.cpp ${SOLVERS_CPU_DIR}/lanczos.cpp ${IO_DIR}/basis_vector_storage.cpp ${IO_DIR}/lanczos_basis_buffer.cpp)
+    add_executable(TPQ_DSSF ${APPS_DIR}/TPQ_DSSF.cpp)
+    if(WITH_CUDA)
+        target_link_libraries(TPQ_DSSF PRIVATE ed_solvers_gpu)
+    else()
+        target_link_libraries(TPQ_DSSF PRIVATE ed_solvers_cpu)
+    endif()
 endif()
 
 # BFG Order Parameter computation (lightweight, HDF5 + OpenMP only)
 add_executable(compute_bfg_order_parameters ${APPS_DIR}/compute_bfg_order_parameters.cpp)
 target_link_libraries(compute_bfg_order_parameters ${HDF5_LIBRARIES})
 target_include_directories(compute_bfg_order_parameters PRIVATE ${HDF5_INCLUDE_DIRS})
-find_package(OpenMP)
 if(OpenMP_CXX_FOUND)
     target_link_libraries(compute_bfg_order_parameters OpenMP::OpenMP_CXX)
     target_compile_definitions(compute_bfg_order_parameters PRIVATE _OPENMP)
@@ -359,89 +328,19 @@ if(WITH_CUDA)
 endif()
 
 
-# Link libraries for new main
-# ScaLAPACK must come FIRST so its RPATH is searched before BLAS's directory
-# (which may contain an incompatible ScaLAPACK)
-if(WITH_SCALAPACK AND SCALAPACK_LIBRARIES)
-    target_link_libraries(ED ${SCALAPACK_LIBRARIES})
-endif()
+# ED and TPQ_DSSF inherit BLAS/LAPACK/LAPACKE/HDF5/ARPACK/MPI/CUDA/OpenMP
+# transitively from ed_solvers_cpu (and ed_solvers_gpu when WITH_CUDA), since
+# those libraries declare their dependencies as PUBLIC.
 
-target_link_libraries(ED
-    ${BLAS_LIBRARIES}
-    ${LAPACK_LIBRARIES}
-    ${LAPACKE_LIBRARIES}
-    ${EXTRA_LINALG_LIBRARIES}
-    ${ARPACK_LIBRARY}
-    ${HDF5_LIBRARIES}
-)
-
-# Add CUDA libraries to ED if CUDA is enabled
-if(WITH_CUDA)
-    target_link_libraries(ED
-        CUDA::cudart
-        CUDA::cublas
-        CUDA::cusparse
-        CUDA::curand
-        CUDA::cusolver
+# TPQ_DSSF still needs its parallel-HDF5 override (different libs, extra
+# compile definition).
+if(TARGET TPQ_DSSF AND HAS_PARALLEL_HDF5)
+    target_include_directories(TPQ_DSSF PRIVATE ${HDF5_PARALLEL_INCLUDE_DIR})
+    target_compile_definitions(TPQ_DSSF PRIVATE HDF5_PARALLEL)
+    target_link_libraries(TPQ_DSSF PRIVATE
+        ${HDF5_PARALLEL_LIBRARIES}
+        z sz crypto curl dl m
     )
-    
-endif()
-
-# Link libraries for TPQ_DSSF executable (only if it exists)
-if(TARGET TPQ_DSSF)
-    # Use parallel HDF5 if available, otherwise serial HDF5
-    if(HAS_PARALLEL_HDF5)
-        target_include_directories(TPQ_DSSF PRIVATE ${HDF5_PARALLEL_INCLUDE_DIR})
-        target_compile_definitions(TPQ_DSSF PRIVATE HDF5_PARALLEL)
-        target_link_libraries(TPQ_DSSF
-            ${BLAS_LIBRARIES}
-            ${LAPACK_LIBRARIES}
-            ${LAPACKE_LIBRARIES}
-            ${EXTRA_LINALG_LIBRARIES}
-            ${ARPACK_LIBRARY}
-            ${HDF5_PARALLEL_LIBRARIES}
-            z sz crypto curl dl m
-        )
-    else()
-        target_link_libraries(TPQ_DSSF
-            ${BLAS_LIBRARIES}
-            ${LAPACK_LIBRARIES}
-            ${LAPACKE_LIBRARIES}
-            ${EXTRA_LINALG_LIBRARIES}
-            ${ARPACK_LIBRARY}
-            ${HDF5_LIBRARIES}
-        )
-    endif()
-    
-    # Add CUDA support for TPQ_DSSF if enabled
-    if(WITH_CUDA)
-        # Add GPU source files to TPQ_DSSF
-        target_sources(TPQ_DSSF PRIVATE
-            ${SOLVERS_GPU_DIR}/gpu_ed_wrapper.cu
-            ${SOLVERS_GPU_DIR}/gpu_operator.cu
-            ${SOLVERS_GPU_DIR}/gpu_operator_conversion.cpp
-            ${SOLVERS_GPU_DIR}/gpu_kernels.cu
-            ${SOLVERS_GPU_DIR}/gpu_fixed_sz_operator.cu
-            ${SOLVERS_GPU_DIR}/gpu_symmetrized_operator.cu
-            ${SOLVERS_GPU_DIR}/gpu_full_diag.cu
-            ${SOLVERS_GPU_DIR}/gpu_lanczos.cu
-            ${SOLVERS_GPU_DIR}/gpu_block_lanczos.cu
-            ${SOLVERS_GPU_DIR}/gpu_krylov_schur.cu
-            ${SOLVERS_GPU_DIR}/gpu_block_krylov_schur.cu
-            ${SOLVERS_GPU_DIR}/gpu_tpq.cu
-            ${SOLVERS_GPU_DIR}/gpu_cg.cu
-            ${SOLVERS_GPU_DIR}/lobpcg_eigen_solve.cpp
-            ${SOLVERS_GPU_DIR}/gpu_ftlm.cu
-        )
-        
-        target_link_libraries(TPQ_DSSF
-            CUDA::cudart
-            CUDA::cublas
-            CUDA::cusparse
-            CUDA::curand
-            CUDA::cusolver
-        )
-    endif()
 endif()
 
 # Link libraries for test_dynamical_correlation
@@ -504,59 +403,11 @@ if(TARGET CUDA_TEST)
 endif()
 
 
-if(WITH_MKL)
-    if(USE_ONEMKL AND MKL_FOUND)
-        # Link oneMKL using its modern CMake targets
-        target_link_libraries(ED MKL::MKL)
-        
-        if(TARGET TPQ_DSSF)
-            target_link_libraries(TPQ_DSSF MKL::MKL)
-        endif()
-        
-        # Link MKL to CUDA example if it exists
-        if(TARGET CUDA_EXAMPLE)
-            target_link_libraries(CUDA_EXAMPLE MKL::MKL)
-        endif()
-        
-        # Link MKL to CUDA test if it exists
-        if(TARGET CUDA_TEST)
-            target_link_libraries(CUDA_TEST MKL::MKL)
-        endif()
-        
-    else()
-        # Link traditional MKL (already linked via BLAS_LIBRARIES)
-        # No additional linking needed since MKL is detected as BLAS/LAPACK
-    endif()
-endif()
-
-# Add CUDA libraries if enabled
-if(WITH_CUDA)
-    target_link_libraries(ED
-        CUDA::cudart
-        CUDA::cublas
-        CUDA::cusparse
-        CUDA::curand
-        CUDA::cusolver
-    )
-    
-    if(TARGET TPQ_DSSF)
-        target_link_libraries(TPQ_DSSF
-            CUDA::cudart
-            CUDA::cublas
-            CUDA::cusparse
-            CUDA::curand
-            CUDA::cusolver
-        )
-    endif()
-    
-endif()
-
-# Add MPI if enabled
-if(WITH_MPI)
-    target_link_libraries(ED ${MPI_CXX_LIBRARIES})
-    
-    if(TARGET TPQ_DSSF)
-        target_link_libraries(TPQ_DSSF ${MPI_CXX_LIBRARIES})
+# If using oneMKL via its modern CMake target, propagate it to the libraries.
+if(WITH_MKL AND USE_ONEMKL AND MKL_FOUND)
+    target_link_libraries(ed_solvers_cpu PUBLIC MKL::MKL)
+    if(TARGET ed_solvers_gpu)
+        target_link_libraries(ed_solvers_gpu PUBLIC MKL::MKL)
     endif()
 endif()
 
@@ -606,14 +457,11 @@ message(STATUS "  OpenMP Support: ${OpenMP_CXX_FOUND}")
 # CPU information (informational; uses CPU_VENDOR set by EDPlatform).
 _ed_report_cpu_features()
 
-# CPU optimization flags (sets CPU_OPT_FLAGS in this scope).
-include(EDOptimizationFlags)
-
-# Apply CPU optimization flags to all targets that have already been defined.
+# Apply CPU optimization flags to driver TUs (the bulk of the codebase
+# already inherits them from the static libraries' PRIVATE compile options).
 target_compile_options(ED PRIVATE
     $<$<COMPILE_LANGUAGE:CXX>:${CPU_OPT_FLAGS}>
 )
-
 if(TARGET TPQ_DSSF)
     target_compile_options(TPQ_DSSF PRIVATE
         $<$<COMPILE_LANGUAGE:CXX>:${CPU_OPT_FLAGS}>
@@ -629,39 +477,6 @@ endif()
 # rebuilding the scaffold from scratch.
 # =============================================================================
 
-# CUDA-specific compile options
-if(WITH_CUDA)
-
-    set_property(TARGET ED PROPERTY CUDA_SEPARABLE_COMPILATION ON)
-    target_compile_options(ED PRIVATE 
-        $<$<COMPILE_LANGUAGE:CUDA>:-O3>
-        $<$<COMPILE_LANGUAGE:CUDA>:--extended-lambda>
-        $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr>
-    )
-    
-    if(TARGET TPQ_DSSF)
-        set_property(TARGET TPQ_DSSF PROPERTY CUDA_SEPARABLE_COMPILATION ON)
-        target_compile_options(TPQ_DSSF PRIVATE 
-            $<$<COMPILE_LANGUAGE:CUDA>:-O3>
-            $<$<COMPILE_LANGUAGE:CUDA>:--extended-lambda>
-            $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr>
-        )
-    endif()
-    
-endif()
-
-# Add OpenMP support if available
-find_package(OpenMP)
-if(OpenMP_CXX_FOUND)
-    target_link_libraries(ED OpenMP::OpenMP_CXX)
-    if(TARGET TPQ_DSSF)
-        target_link_libraries(TPQ_DSSF OpenMP::OpenMP_CXX)
-    endif()
-    message(STATUS "  OpenMP Support: YES")
-else()
-    message(STATUS "  OpenMP Support: NO")
-endif()
-
 # =============================================================================
 # ED test suite (CPU).
 #
@@ -675,64 +490,21 @@ option(BUILD_ED_TESTS "Build the ED regression test suite" ON)
 if(BUILD_ED_TESTS)
     enable_testing()
 
-    # Sources that make up the CPU ED library (everything except the
-    # `ed_main.cpp` driver which provides its own `main`). Tests link against
-    # these directly so they share exactly the same compiled code as the ED
-    # executable.
-    set(ED_TEST_LIB_SOURCES
-        ${CORE_DIR}/ed_config.cpp
-        ${SOLVERS_CPU_DIR}/arpack.cpp
-        ${SOLVERS_CPU_DIR}/observables.cpp
-        ${SOLVERS_CPU_DIR}/lanczos.cpp
-        ${SOLVERS_CPU_DIR}/CG.cpp
-        ${SOLVERS_CPU_DIR}/dynamics.cpp
-        ${SOLVERS_CPU_DIR}/TPQ.cpp
-        ${SOLVERS_CPU_DIR}/ftlm.cpp
-        ${SOLVERS_CPU_DIR}/ltlm.cpp
-        ${SOLVERS_CPU_DIR}/hybrid_thermal.cpp
-        ${IO_DIR}/basis_vector_storage.cpp
-        ${IO_DIR}/lanczos_basis_buffer.cpp
-    )
-    if(WITH_SCALAPACK AND SCALAPACK_LIBRARIES)
-        list(APPEND ED_TEST_LIB_SOURCES ${SOLVERS_CPU_DIR}/scalapack_diag.cpp)
-    endif()
-
-    # Mirror ED's link stack so tests see the same symbols.
-    set(ED_TEST_LINK_LIBS
-        ${BLAS_LIBRARIES}
-        ${LAPACK_LIBRARIES}
-        ${LAPACKE_LIBRARIES}
-        ${EXTRA_LINALG_LIBRARIES}
-        ${ARPACK_LIBRARY}
-        ${HDF5_LIBRARIES}
-    )
-    if(WITH_SCALAPACK AND SCALAPACK_LIBRARIES)
-        list(INSERT ED_TEST_LINK_LIBS 0 ${SCALAPACK_LIBRARIES})
-    endif()
-    if(WITH_CUDA)
-        list(APPEND ED_TEST_LINK_LIBS
-            CUDA::cudart
-            CUDA::cublas
-            CUDA::cusparse
-            CUDA::curand
-            CUDA::cusolver
-        )
-    endif()
-    if(WITH_MPI)
-        list(APPEND ED_TEST_LINK_LIBS ${MPI_CXX_LIBRARIES})
-    endif()
-
     # Helper to declare a test executable. Each test gets its own binary so
     # CTest can run them in parallel and report failures independently.
+    # Tests link against ed_solvers_cpu (which transitively pulls in ed_core,
+    # ed_io, BLAS/LAPACK/HDF5/ARPACK/MPI/OpenMP), and against ed_solvers_gpu
+    # when CUDA is enabled. This guarantees tests are compiled against the
+    # exact same TUs as the production binaries.
     function(ed_add_test test_name test_source)
-        add_executable(${test_name} ${test_source} ${ED_TEST_LIB_SOURCES})
+        add_executable(${test_name} ${test_source})
         target_include_directories(${test_name} PRIVATE
-            ${INCLUDE_DIR}
             ${CMAKE_CURRENT_SOURCE_DIR}/tests
         )
-        target_link_libraries(${test_name} PRIVATE ${ED_TEST_LINK_LIBS})
-        if(OpenMP_CXX_FOUND)
-            target_link_libraries(${test_name} PRIVATE OpenMP::OpenMP_CXX)
+        if(WITH_CUDA)
+            target_link_libraries(${test_name} PRIVATE ed_solvers_gpu)
+        else()
+            target_link_libraries(${test_name} PRIVATE ed_solvers_cpu)
         endif()
         target_compile_options(${test_name} PRIVATE
             $<$<COMPILE_LANGUAGE:CXX>:${CPU_OPT_FLAGS}>
