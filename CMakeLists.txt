@@ -689,6 +689,17 @@ if(BUILD_ED_TESTS)
         ED_TEST_BFG_KAGOME_1X1_DIR="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/bfg_kagome_1x1"
     )
 
+    # -------------------------------------------------------------------------
+    # CPU/GPU equivalence (P1.9). Only added when WITH_CUDA is ON so non-GPU
+    # builds skip compilation entirely. The TEST_CASEs themselves SKIP at
+    # runtime when no CUDA device is detected (cudaGetDeviceCount), which
+    # keeps the build-only `linux-cuda-build` CI lane green even though it
+    # has no NVIDIA hardware attached.
+    # -------------------------------------------------------------------------
+    if(WITH_CUDA)
+        ed_add_test(test_cpu_gpu_equivalence    tests/unit/test_cpu_gpu_equivalence.cpp USE_CATCH2)
+    endif()
+
     # Regression test of the on-disk fallback path for the Lanczos basis
     # buffer. `force_disk_storage()` is cached per-process, so we reuse the
     # variants binary in a separate subprocess with ED_LANCZOS_DISK=1.

@@ -940,7 +940,7 @@ I recommend three phases. Phase boundaries are natural pause points where everyt
 - [ ] **P1.6** Header → source split for `streaming_symmetry.h` (one PR).
 - [ ] **P1.7** Add `install()` rules + generate `EDConfig.cmake`.
 - [ ] **P1.8** Adopt **Catch2 v3** via `FetchContent` (per §7.1 decision). Mechanical migration of existing 12 tests; keep `tests/common/test_harness.h` as `tests/common/fixtures.h`.
-- [ ] **P1.9** Add Catch2 CPU/GPU equivalence tests tagged `[gpu][cpu-equivalent]` on small systems.
+- [x] **P1.9** Add Catch2 CPU/GPU equivalence tests tagged `[gpu][cpu-equivalent]` on small systems. (`tests/unit/test_cpu_gpu_equivalence.cpp` — only built when `WITH_CUDA=ON`; the test cases themselves call `cudaGetDeviceCount` and `SKIP` cleanly when no GPU is present, so the build-only `linux-cuda-build` CI lane stays green and the lab box runs them in full.)
 - [ ] **P1.10 — DSSF prerequisite PR-A** (per §3.10): Extract `construct_operators_from_config` into `include/ed/dssf/operator_spec.h` + `src/ed/dssf/operators.cpp`. Replace the four duplicated copies in `ed_main.cpp` (lines 938, 1630, 2098, 2728). Net delta −300 LOC.
 - [ ] **P1.11 — DSSF prerequisite PR-B** (per §3.10): Move `compute_dynamical_response_workflow` / `compute_static_response_workflow` / `compute_ground_state_dssf_workflow` into `src/ed/cli/workflows.cpp`. `ed_main.cpp` shrinks by ~1.5 kLOC.
 - [ ] **P1.12** Expand CI matrix: {gcc-13, clang-18} × {Release, Debug} × {OpenBLAS, generic} × {MPI ON/OFF} + a sanitizer job + a `cuda-build` (build-only) job (per §7.4 decision).
