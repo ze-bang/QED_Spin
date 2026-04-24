@@ -1,0 +1,73 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Cancel superseded runs on the same ref.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Phase-0 lane: single Linux/GCC/OpenBLAS Release build, ctest must be 100%.
+  # Phase-1 expands this into a matrix (gcc-13/clang-18 x Release/Debug x
+  # OpenBLAS/generic x MPI on/off + sanitizer + cuda-build-only).
+  # ---------------------------------------------------------------------------
+  linux-gcc-openblas:
+    name: Linux / GCC / OpenBLAS / Release
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential \
+            cmake \
+            ninja-build \
+            libopenblas-dev \
+            liblapacke-dev \
+            libhdf5-dev \
+            libhdf5-cpp-103 \
+            libeigen3-dev \
+            libarpack2-dev \
+            pkg-config
+
+      - name: Print toolchain versions
+        run: |
+          gcc --version | head -1
+          g++ --version | head -1
+          cmake --version | head -1
+          pkg-config --modversion openblas || true
+          pkg-config --modversion hdf5 || true
+
+      - name: Configure (preset ci-linux)
+        run: cmake --preset ci-linux
+
+      - name: Build
+        run: cmake --build --preset ci-linux -- -j$(nproc)
+
+      - name: Test (ctest)
+        run: ctest --preset ci-linux
+
+      - name: Upload CTest logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ctest-logs-linux-gcc-openblas
+          path: |
+            build/Testing/Temporary/LastTest.log
+            build/Testing/Temporary/LastTestsFailed.log
+          if-no-files-found: ignore
+          retention-days: 7
