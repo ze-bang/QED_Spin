@@ -1,6 +1,10 @@
 # Modernization Audit — `exact_diagonalization_cpp`
 
-Status: read-only audit; no code has been changed.
+Status: living document; tracks the modernization rollout. Phase 0, Phase 1,
+and Phase 2 (P2.1–P2.13) have all landed; the only remaining open item is
+P2.14 (deletion of the deprecated `--dssf` flag and the `tpq_dssf_compat`
+shim), which is intentionally deferred "one release after Phase 2 ships"
+to give collaborators time to migrate.
 Audience target (per user): "lab-grade" — installable, documented, testable, with CI; modern CMake, clang-format/tidy, Doxygen. Not aiming for pip/conda packaging today.
 Peer benchmarks (per user): QuSpin, EDLib, Pomerol, NetKet.
 
