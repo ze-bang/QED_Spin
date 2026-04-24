@@ -36,6 +36,42 @@ op = qe.FixedSzOperator(num_sites=8, spin_length=0.5, n_up=4)
 res = qe.full_diagonalization(op)
 ```
 
+## Hamiltonian builder DSL
+
+For textbook lattice models the `quantum_ed.hamiltonian` submodule wraps
+the C++ `Operator` API in a fluent QuSpin-style builder. The 4-site
+Heisenberg chain becomes one line:
+
+```python
+import quantum_ed as qe
+
+H = (
+    qe.hamiltonian.Hamiltonian(num_sites=4)
+    .heisenberg([(0, 1), (1, 2), (2, 3)])
+    .build()
+)
+print(qe.full_diagonalization(H).min())   # -1.6160254037844388
+```
+
+The builder accepts case-insensitive operator-token strings (`"x"`,
+`"y"`, `"z"`, `"+"`, `"-"`, plus the verbose `"sx"`/`"sy"`/`"sz"` forms);
+`Sx` and `Sy` are auto-expanded onto the underlying `S+`/`S-` primitives
+at `build()` time. Common Hamiltonians get one-liner shortcuts
+(`heisenberg`, `transverse_field_ising`, `xx_yy`, `zz`, `field`),
+and arbitrary terms can always be added via `.add(("x", "z"), (0, 1),
+coeff)`. The `n_up=` constructor kwarg returns a `FixedSzOperator`
+restricted to the requested sector, so symmetry-resolved sweeps stay
+ergonomic:
+
+```python
+H_singlet = (
+    qe.hamiltonian.Hamiltonian(num_sites=4, n_up=2)
+    .heisenberg([(0, 1), (1, 2), (2, 3)])
+    .build()
+)
+H_singlet.dimension   # C(4, 2) == 6
+```
+
 ## DSSF: building observable pairs
 
 The `quantum_ed.dssf` submodule exposes the *same* `OperatorSpec` /

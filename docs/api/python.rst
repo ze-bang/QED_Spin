@@ -24,6 +24,14 @@ Dynamical / static structure factor (``quantum_ed.dssf``)
    :undoc-members:
    :show-inheritance:
 
+Hamiltonian builder DSL (``quantum_ed.hamiltonian``)
+----------------------------------------------------
+
+.. automodule:: quantum_ed.hamiltonian
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
 Helpers (legacy ``edlib`` re-exports)
 -------------------------------------
 

@@ -47,6 +47,7 @@ from ._core import (
 )
 
 from . import dssf  # high-level DSSF observable-pair builder (P2.8)
+from . import hamiltonian  # fluent Hamiltonian builder DSL (P2.10)
 from . import helpers  # re-export edlib utilities under quantum_ed.helpers
 
 __version__: Final[str] = "0.1.0"
@@ -67,6 +68,7 @@ __all__ = [
     "LTLMParameters",
     "HybridThermalParameters",
     "dssf",
+    "hamiltonian",
     "helpers",
     "__version__",
 ]
