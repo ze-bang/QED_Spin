@@ -1,0 +1,168 @@
+# =============================================================================
+# .gitignore for exact_diagonalization_cpp
+# -----------------------------------------------------------------------------
+# Conventions:
+#   - Source-controlled inputs (e.g. tests/fixtures/*.dat, configs/*.cfg)
+#     are explicitly re-included after broad excludes.
+#   - Run output directories that ED produces under arbitrary names
+#     (e.g. output/, structure_factor_results/) are excluded.
+#   - Editor- and OS-specific noise is excluded broadly.
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# Build directories (CMake out-of-source builds)
+# ---------------------------------------------------------------------------
+build/
+build-*/
+cmake-build-*/
+out/
+_build/
+
+# CMake user-local config (presets that override the shared ones)
+CMakeUserPresets.json
+
+# Optional generated compile DB (some IDEs prefer it tracked; we don't)
+compile_commands.json
+
+# ---------------------------------------------------------------------------
+# Compiled binaries / object files
+# ---------------------------------------------------------------------------
+*.o
+*.obj
+*.lo
+*.a
+*.la
+*.so
+*.so.*
+*.dylib
+*.dll
+*.exe
+
+# CUDA fatbins / PTX
+*.fatbin
+*.cubin
+*.ptx
+
+# ---------------------------------------------------------------------------
+# Python build / wheel / cache artifacts
+# ---------------------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg
+*.egg-info/
+.eggs/
+dist/
+wheels/
+pip-wheel-metadata/
+.python-version
+.tox/
+.nox/
+.cache/
+.mypy_cache/
+.pyre/
+.pytype/
+.pytest_cache/
+.ruff_cache/
+
+# scikit-build-core / pybind11 build trees
+_skbuild/
+.scikit-build*/
+
+# ---------------------------------------------------------------------------
+# C++ / clang-tidy / sanitizer / coverage outputs
+# ---------------------------------------------------------------------------
+*.gcov
+*.gcno
+*.gcda
+*.profraw
+*.profdata
+coverage/
+htmlcov/
+.coverage
+*.lcov
+*.asan
+*.ubsan
+*.tsan
+*.msan
+
+# ---------------------------------------------------------------------------
+# CTest / test artifacts
+# ---------------------------------------------------------------------------
+Testing/
+LastTest.log
+LastTestsFailed.log
+CTestTestfile.cmake
+DartConfiguration.tcl
+
+# ---------------------------------------------------------------------------
+# ED run outputs (HDF5, scratch dirs, log files)
+# Inputs (tests/fixtures/, configs/) are re-included below.
+# ---------------------------------------------------------------------------
+*.h5
+*.hdf5
+*.log
+*.out
+*.err
+*.slurm.out
+*.checkpoint
+
+# Scratch / output directories ED creates
+output/
+output_*/
+results/
+results_*/
+structure_factor_results/
+nlce_results/
+nlce_runs/
+tpq_results/
+tpq_runs/
+ed_results*/
+
+# Bench output directories (the build artifacts the audit flagged)
+bench_bl_*/
+bench_full*/
+
+# Allow tracked test fixtures back in
+!tests/fixtures/**
+
+# ---------------------------------------------------------------------------
+# Editor / IDE / OS metadata
+# ---------------------------------------------------------------------------
+.vscode/
+.idea/
+*.swp
+*.swo
+*.swn
+*~
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Direnv / mise / asdf
+.envrc
+.direnv/
+.tool-versions
+
+# ---------------------------------------------------------------------------
+# Doxygen / Sphinx (Phase 2 docs build will populate these)
+# ---------------------------------------------------------------------------
+docs/_build/
+docs/html/
+docs/xml/
+docs/latex/
+docs/doxygen/
+
+# ---------------------------------------------------------------------------
+# Local developer overrides (kept untracked by convention)
+# ---------------------------------------------------------------------------
+local.cmake
+local.cmake.user
+*.local.cmake
+
+# ---------------------------------------------------------------------------
+# Misc
+# ---------------------------------------------------------------------------
+core
+core.*
+*.dSYM/
