@@ -381,118 +381,175 @@ def write_cluster_nn_list(output_dir, cluster_name, nn_list, positions, sublatti
         f.write("# Tetrahedra arrangement: Each vertex shared by 2 tetrahedra (up and down)\n")
         f.write("# Connectivity: Corner-sharing tetrahedra forming a 3D network\n")
 
-def generate_three_spin_terms(nn_list, node_mapping, three_spin_coeff, sublattice_indices):
-    """
-    Generate three-spin terms for ALL 15 neighbor pairs around each central site.
-    
-    For non-Kramers doublets on pyrochlore, the three-spin term has the form:
-    H_3 = Σ_j S^+_j Φ^-_j + h.c.
-    
-    where for each central site j:
-    Φ^-_j = Σ_{i≠k ∈ N(j)} K_{i,j,k} S^z_i S^z_k
-    
-    Each site j has 6 nearest neighbors N(j) = {1,2,3,1',2',3'}, giving 
-    C(6,2) = 15 neighbor pairs. These split into three symmetry types:
-    
-    Type A (6 pairs): Same-tetrahedron pairs
-      - Up tetra: {1,2}, {1,3}, {2,3}
-      - Down tetra: {1',2'}, {1',3'}, {2',3'}
-      
-    Type B (3 pairs): Collinear opposite pairs through j
-      - {1,1'}, {2,2'}, {3,3'}
-      
-    Type C (6 pairs): Non-collinear cross pairs
-      - {1,2'}, {1,3'}, {2,1'}, {2,3'}, {3,1'}, {3,2'}
-    
-    Each type has a coupling J_A, J_B, J_C (all ~ M²/Λ) and bond-dependent
-    phases φ^{A/B/C}_{ijk} ∈ {0, ±2π/3} from C_3 symmetry.
-    
-    For simplicity, we use three_spin_coeff as a single overall scale and
-    implement the phase structure using the non-Kramers phase matrix.
-    
+# --- Canonical three-spin phase tables (Kadowaki et al. PRB 105, 014439 (2022)) ---
+#
+# H_3s = sum_{i=1}^{3} J_{3s,i} sum_{<r,r',r''>^(i)}
+#        [ exp(i*phi^(i)_{r,r',r''}) sigma^+_r sigma^z_{r'} sigma^z_{r''} + h.c. ]
+#
+# i = 1 -> Type 1: COLLINEAR pair  (sub_{r'} == sub_{r''}, opposite tetras at r)
+# i = 2 -> Type 2: SAME-TETRAHEDRON pair (r' and r'' both NN of r in the SAME tetra)
+# i = 3 -> Type 3: CROSS pair (r' in one tetra of r, r'' in the other; sub_{r'} != sub_{r''})
+#
+# Phases (in units of 2*pi/3) with 0-indexed sublattices (Kadowaki nu = sub_idx + 1).
+# Type 1: a single phase per (sub_j, sub_outer) pair (diagonal sub_outer == sub' == sub'').
+# Types 2 and 3: identical phase per (sub_j, {sub', sub''}) — symmetry forces them equal,
+# what differs between Types 2 and 3 is only the (independent) coupling constant J_{3s,2}
+# vs J_{3s,3}.
+#
+# Matrices read off from Kadowaki Tables III, IV, V.
+
+PHI_COLLINEAR_2PI3 = {
+    # sub_j -> {sub_outer: integer p such that phase = exp(i * p * 2pi/3)}
+    0: {1: -1, 2: +1, 3:  0},
+    1: {0: -1, 2:  0, 3: +1},
+    2: {0: +1, 1:  0, 3: -1},
+    3: {0:  0, 1: +1, 2: -1},
+}
+
+PHI_PAIR_2PI3 = {
+    # sub_j -> {frozenset({sub_a, sub_b}): integer p}
+    0: {frozenset({1, 2}):  0, frozenset({1, 3}): +1, frozenset({2, 3}): -1},
+    1: {frozenset({0, 2}): +1, frozenset({0, 3}):  0, frozenset({2, 3}): -1},
+    2: {frozenset({0, 1}): -1, frozenset({0, 3}):  0, frozenset({1, 3}): +1},
+    3: {frozenset({0, 1}): -1, frozenset({0, 2}): +1, frozenset({1, 2}):  0},
+}
+
+
+def _normalise_three_spin_couplings(three_spin_coeffs):
+    """Accept either a scalar (broadcast to (J3, J3, J3)) or a length-3 sequence."""
+    if np.isscalar(three_spin_coeffs):
+        v = float(three_spin_coeffs)
+        return (v, v, v)
+    seq = tuple(float(x) for x in three_spin_coeffs)
+    if len(seq) != 3:
+        raise ValueError(
+            f"three_spin_coeffs must be a scalar or length-3 sequence (J_3s,1, J_3s,2, J_3s,3); "
+            f"got length {len(seq)}"
+        )
+    return seq
+
+
+def generate_three_spin_terms(nn_list, node_mapping, three_spin_coeffs,
+                              sublattice_indices, vertex_to_cell):
+    """Build the canonical non-Kramers pyrochlore three-spin Hamiltonian terms.
+
+    Implements Eq. (3) of Kadowaki, Wakita, Fak, Ollivier, Ohira-Kawamura,
+    Phys. Rev. B 105, 014439 (2022) [arXiv:2109.08799]:
+
+        H_3s = sum_{i=1}^{3} J_{3s,i}
+               sum_{<r, r', r''>^(i)}
+                  [ exp(i phi^(i)) sigma^+_r sigma^z_{r'} sigma^z_{r''} + h.c. ]
+
+    The triplet sum runs over geometric class i in {1, 2, 3}:
+        Type 1 (collinear): sub_{r'} == sub_{r''}, with r' and r'' on opposite
+            tetrahedra meeting at r.
+        Type 2 (same-tetra): r' and r'' are both NN of r in the same tetrahedron.
+        Type 3 (cross): r' and r'' are NN of r on different tetrahedra at r.
+
+    For each central site r the loop emits all 15 unordered NN pairs
+    (3 Type 1 + 6 Type 2 + 6 Type 3). Crucially, the same triangle of sites
+    {a, b, c} contributes three distinct terms (one per choice of central sigma^+
+    site) — the Hamiltonian sum is over (r; {r', r''}) with r explicit, not over
+    unordered triples.
+
     Args:
-        nn_list: Dictionary mapping each site to its nearest neighbors
-        node_mapping: Dictionary mapping original IDs to matrix indices
-        three_spin_coeff: Overall coefficient J_3 for the three-spin interaction
-        sublattice_indices: Dictionary mapping site to sublattice (0-3)
-        
+        nn_list: dict site_id -> list of NN site_ids.
+        node_mapping: dict site_id -> matrix index used in the output files.
+        three_spin_coeffs: scalar (broadcast: J_{3s,1}=J_{3s,2}=J_{3s,3}=J3) or
+            a length-3 sequence (J_{3s,1}, J_{3s,2}, J_{3s,3}).
+        sublattice_indices: dict site_id -> sublattice index in {0, 1, 2, 3}.
+        vertex_to_cell: dict site_id -> (i_cell, j_cell, k_cell, tet_idx, site_idx).
+            Used to identify which tetrahedron each NN belongs to relative to the
+            central site (the "primary" tetra of a site is the one whose four
+            sites share its (i_cell, j_cell, k_cell, tet_idx)).
+
     Returns:
-        List of three-spin terms in the format:
-        [op1, site1, op2, site2, op3, site3, real_coeff, imag_coeff]
+        list of [op_i, site_i, op_j, site_j, op_k, site_k, re_coeff, im_coeff]
+        rows in the InterAll-style ThreeBodyG.dat format. op = 0 (S+),
+        1 (S-), 2 (Sz). For each unordered (r', r'') pair around r the function
+        emits the sigma^+_r term and its hermitian conjugate.
     """
-    three_spin_terms = []
-    processed_triplets = set()
-    
-    # Phase factors: ω = e^(i*2π/3)
+    J3s = _normalise_three_spin_couplings(three_spin_coeffs)
     omega = np.exp(1j * 2 * np.pi / 3)
-    phase_factors = np.array([1, omega, omega**2])
-    
-    # For each site as the central site j
+
+    if vertex_to_cell is None:
+        raise ValueError(
+            "generate_three_spin_terms now requires vertex_to_cell to classify "
+            "NN as 'same-tetra-as-j' or 'opposite-tetra-of-j'. Pass it through "
+            "from prepare_hamiltonian_parameters / generate_pyrochlore_super_cluster."
+        )
+
+    def _primary_tetra(v):
+        # The primary tetra of site v is the one stored in vertex_to_cell:
+        # all four sites with the same (i_cell, j_cell, k_cell, tet_idx) lie in it.
+        return vertex_to_cell[v][:4]
+
+    three_spin_terms = []
+    counts = [0, 0, 0]  # (Type 1, Type 2, Type 3) — for a quick sanity check.
+
     for j in sorted(nn_list.keys()):
         neighbors = list(nn_list[j])
         sub_j = sublattice_indices[j]
-        
-        # Ensure we have 6 neighbors (standard for pyrochlore)
         if len(neighbors) != 6:
-            print(f"Warning: Site {j} has {len(neighbors)} neighbors (expected 6)")
-        
-        # Classify neighbors into "up" and "down" tetrahedra
-        # This is geometric: which tetrahedron (up vs down) does each neighbor belong to?
-        # For a proper classification, we check positions, but sublattice gives a proxy
-        
-        # Generate ALL neighbor pairs (i, k) with i ≠ k
-        # This gives us all 15 pairs around site j
-        for idx_i, i in enumerate(neighbors):
-            for idx_k, k in enumerate(neighbors):
-                if i >= k:  # Avoid double counting and self-pairs
-                    continue
-                
-                # Create canonical triplet identifier to avoid duplicates
-                triplet = tuple(sorted([i, j, k]))
-                
-                if triplet in processed_triplets:
-                    continue
-                processed_triplets.add(triplet)
-                
-                # Determine the phase based on the triplet geometry
+            print(f"Warning: site {j} has {len(neighbors)} NN (expected 6)")
+
+        prim_j = _primary_tetra(j)
+        nn_in_primary = {n: (_primary_tetra(n) == prim_j) for n in neighbors}
+
+        for a_idx in range(len(neighbors)):
+            i = neighbors[a_idx]
+            for k in neighbors[a_idx + 1:]:
                 sub_i = sublattice_indices[i]
                 sub_k = sublattice_indices[k]
-                
-                # Base Gamma matrix for sub_j = 0
-                Gamma_base = np.array(([[0,0,0,0],
-                                       [0,1,1,omega],
-                                       [0,1,omega**2, omega**2],
-                                       [0,omega,omega**2,omega]]), dtype=complex)
-                
-                # Permute rows and columns based on sub_j
-                # Create permutation: shift indices by sub_j (cyclic)
-                perm = np.array([(idx - sub_j) % 4 for idx in range(4)])
-                Gamma = Gamma_base[np.ix_(perm, perm)]
-                
-                # Print for testing (only once per central site j)
-                if i == neighbors[0] and k == neighbors[1]:
-                    print(f"\nCentral site j={j}, sublattice={sub_j}")
-                    print(f"Permutation: {perm}")
-                    print(f"Gamma matrix:\n{Gamma}")
+                same_side = (nn_in_primary[i] == nn_in_primary[k])
 
-                phase = Gamma[sub_i, sub_k]
-                
-                coeff = three_spin_coeff * phase
-                coeff_real = np.real(coeff)
-                coeff_imag = np.imag(coeff)
-                
-                # Add triplet term: S^z_i S^+_j S^z_k with phase
-                three_spin_terms.append([2, node_mapping[i], 
-                                        0, node_mapping[j], 
-                                        2, node_mapping[k], 
-                                        coeff_real, coeff_imag])
-                
-                # Add hermitian conjugate: S^z_i S^-_j S^z_k with conjugate phase
-                three_spin_terms.append([2, node_mapping[i], 
-                                        1, node_mapping[j], 
-                                        2, node_mapping[k], 
-                                        coeff_real, -coeff_imag])
-    
+                if sub_i == sub_k:
+                    if same_side:
+                        # Should never happen on a clean pyrochlore.
+                        print(
+                            f"Warning: (sub_i==sub_k, same primary tetra) at "
+                            f"j={j}, i={i}, k={k}; skipping."
+                        )
+                        continue
+                    type_idx = 0  # Type 1 -> J_{3s,1}
+                    p = PHI_COLLINEAR_2PI3[sub_j][sub_i]
+                else:
+                    type_idx = 1 if same_side else 2  # Type 2 / Type 3
+                    p = PHI_PAIR_2PI3[sub_j][frozenset({sub_i, sub_k})]
+
+                counts[type_idx] += 1
+
+                J = J3s[type_idx]
+                if J == 0.0:
+                    continue
+
+                coeff = J * (omega ** p)
+                cr = float(np.real(coeff))
+                ci = float(np.imag(coeff))
+
+                # sigma^z_i sigma^+_j sigma^z_k  with phase exp(i*phi)
+                three_spin_terms.append(
+                    [2, node_mapping[i], 0, node_mapping[j], 2, node_mapping[k], cr, ci]
+                )
+                # Hermitian conjugate: sigma^z_i sigma^-_j sigma^z_k with phase exp(-i*phi)
+                three_spin_terms.append(
+                    [2, node_mapping[i], 1, node_mapping[j], 2, node_mapping[k], cr, -ci]
+                )
+
+    if os.environ.get("ED_VERBOSE_TRILINEAR", "0") == "1":
+        n_sites = len(nn_list)
+        print(
+            "[trilinear] Triplet counts (Type 1 collinear, Type 2 same-tetra, "
+            f"Type 3 cross): {counts}  (per-site = {counts[0] / n_sites:.2f}, "
+            f"{counts[1] / n_sites:.2f}, {counts[2] / n_sites:.2f}; "
+            f"canonical = 3, 6, 6)"
+        )
+        print(
+            f"[trilinear] J_{{3s,i}} = {J3s} -> {len(three_spin_terms)} "
+            "three-body operator rows (each unordered (r', r'') around r "
+            "contributes one S+ row and one S- row)."
+        )
+
     return three_spin_terms
 
 def write_three_spin_terms(output_dir, three_spin_terms, file_name):
@@ -526,15 +583,22 @@ def write_three_spin_terms(output_dir, three_spin_terms, file_name):
                    f" {_s(term[7]):8f}   " \
                    f"\n")
 
-def prepare_hamiltonian_parameters(output_dir, non_kramer, nn_list, positions, sublattice_indices, 
-                                  node_mapping, Jxx, Jyy, Jzz, h, theta, field_dir, three_spin_coeff=0.0, bias_field=0.0, transverse_bias_field=0.0):
-    """
-    Prepare Hamiltonian parameters for exact diagonalization
-    
+def prepare_hamiltonian_parameters(output_dir, non_kramer, nn_list, positions, sublattice_indices,
+                                  node_mapping, Jxx, Jyy, Jzz, h, theta, field_dir,
+                                  three_spin_coeff=0.0, bias_field=0.0, transverse_bias_field=0.0,
+                                  vertex_to_cell=None):
+    """Prepare Hamiltonian parameters for exact diagonalization.
+
     Args:
-        three_spin_coeff: Coefficient for three-spin nearest neighbor terms
-        bias_field: Uniform local-frame Sz bias (-bias_field * Sz_i on each site)
-        transverse_bias_field: Uniform local-frame Sx bias (-transverse_bias_field * Sx_i on each site)
+        three_spin_coeff: Either a scalar J_3 (broadcast to
+            J_{3s,1} = J_{3s,2} = J_{3s,3} = J_3, the default geometric class
+            setting) or a length-3 sequence (J_{3s,1}, J_{3s,2}, J_{3s,3})
+            following the Kadowaki et al. PRB 105, 014439 (2022) convention
+            (Type 1 = collinear, Type 2 = same-tetra, Type 3 = cross).
+        bias_field: Uniform local-frame Sz bias (-bias_field * Sz_i on each site).
+        transverse_bias_field: Uniform local-frame Sx bias.
+        vertex_to_cell: dict site_id -> (i_cell, j_cell, k_cell, tet_idx, site_idx);
+            REQUIRED to enable the three-spin term.
     """
     # Prepare Hamiltonian parameters
     Jpm = -(Jxx+Jyy)/4
@@ -606,9 +670,13 @@ def prepare_hamiltonian_parameters(output_dir, non_kramer, nn_list, positions, s
     write_interALL(output_dir, interALL, f"InterAll.dat")
     write_transfer(output_dir, transfer, f"Trans.dat")
     
-    # Generate three-spin terms on nearest neighbor triangles
-    if three_spin_coeff != 0.0:
-        three_spin_terms = generate_three_spin_terms(nn_list, node_mapping, three_spin_coeff, sublattice_indices)
+    # Generate three-spin terms on nearest neighbor triangles (canonical Kadowaki form)
+    j3s_normalised = _normalise_three_spin_couplings(three_spin_coeff)
+    if any(abs(j) > 1e-15 for j in j3s_normalised):
+        three_spin_terms = generate_three_spin_terms(
+            nn_list, node_mapping, j3s_normalised, sublattice_indices,
+            vertex_to_cell=vertex_to_cell,
+        )
         write_three_spin_terms(output_dir, three_spin_terms, "ThreeBodyG.dat")
     
     # Write field strength
@@ -1223,7 +1291,15 @@ def plot_cluster(vertices, edges, output_dir, cluster_name, sublattice_indices=N
 def main():
     """Main function to process command line arguments and run the program"""
     if len(sys.argv) < 13:
-        print("Usage: python helper_pyrochlore_super.py Jxx Jyy Jzz h fieldx fieldy fieldz output_dir dim1 dim2 dim3 pbc [non_kramer] [theta] [counterterm_coeff] [three_spin_coeff] [bias_field] [transverse_bias_field]")
+        print("Usage: python helper_pyrochlore_super.py Jxx Jyy Jzz h fieldx fieldy fieldz "
+              "output_dir dim1 dim2 dim3 pbc [non_kramer] [theta] [counterterm_coeff] "
+              "[three_spin_coeff] [bias_field] [transverse_bias_field] "
+              "[three_spin_coeff_2] [three_spin_coeff_3]")
+        print("")
+        print("three_spin_coeff (arg 16) defaults J_{3s,1}=J_{3s,2}=J_{3s,3}=J_3 (geometric")
+        print("classes treated identically). To use three independent couplings (Kadowaki")
+        print("PRB 105, 014439 convention) supply optional args 19 and 20 with the values")
+        print("of J_{3s,2} and J_{3s,3}; arg 16 then sets J_{3s,1}.")
         sys.exit(1)
     
     # Parse command line arguments
@@ -1241,9 +1317,13 @@ def main():
     theta = float(sys.argv[14]) if len(sys.argv) > 14 else 0.0  # Default theta=0.0 if not provided
     theta = theta * np.pi
     counterterm_coeff = float(sys.argv[15]) if len(sys.argv) > 15 else 1.0  # Default counterterm_coeff=1.0 if not provided
-    three_spin_coeff = float(sys.argv[16]) if len(sys.argv) > 16 else 0.0  # Default three_spin_coeff=0.0 if not provided
+    three_spin_coeff = float(sys.argv[16]) if len(sys.argv) > 16 else 0.0  # J_3 broadcast default
     bias_field = float(sys.argv[17]) if len(sys.argv) > 17 else 0.0  # Uniform local-frame Sz bias
     transverse_bias_field = float(sys.argv[18]) if len(sys.argv) > 18 else 0.0  # Uniform local-frame Sx bias
+    # Optional separate per-class trilinear couplings; default to the broadcast value
+    three_spin_coeff_2 = float(sys.argv[19]) if len(sys.argv) > 19 else three_spin_coeff
+    three_spin_coeff_3 = float(sys.argv[20]) if len(sys.argv) > 20 else three_spin_coeff
+    three_spin_coeffs = (three_spin_coeff, three_spin_coeff_2, three_spin_coeff_3)
     # Ensure output directory exists
     if not os.path.isdir(output_dir):
         os.makedirs(output_dir)
@@ -1263,8 +1343,14 @@ def main():
     write_cluster_nn_list(output_dir, cluster_name, nn_list, positions, sublattice_indices, node_mapping, vertex_to_cell)
     
     # Prepare Hamiltonian parameters
-    prepare_hamiltonian_parameters(output_dir, non_kramer, nn_list, positions, sublattice_indices, 
-                                  node_mapping, Jxx, Jyy, Jzz, h, theta, field_dir, three_spin_coeff, bias_field, transverse_bias_field)
+    prepare_hamiltonian_parameters(
+        output_dir, non_kramer, nn_list, positions, sublattice_indices,
+        node_mapping, Jxx, Jyy, Jzz, h, theta, field_dir,
+        three_spin_coeff=three_spin_coeffs,
+        bias_field=bias_field,
+        transverse_bias_field=transverse_bias_field,
+        vertex_to_cell=vertex_to_cell,
+    )
 
     # Find and write counter term chains
     chains = find_counter_term_chains(vertices, nn_list, vertex_to_cell, dim1, dim2, dim3, use_pbc)
@@ -1282,7 +1368,13 @@ def main():
     print(f"Number of tetrahedra: {len(tetrahedra)}")
     print(f"Sites per unit cell: 16 (4 tetrahedra × 4 sites)")
     print(f"Counter term coefficient: {counterterm_coeff}")
-    print(f"Three-spin coefficient: {three_spin_coeff}")
+    print(
+        "Three-spin couplings (Kadowaki convention): "
+        f"J_{{3s,1}}={three_spin_coeffs[0]}, J_{{3s,2}}={three_spin_coeffs[1]}, "
+        f"J_{{3s,3}}={three_spin_coeffs[2]}  "
+        + ("[scalar broadcast: all classes equal]" if three_spin_coeffs[0] == three_spin_coeffs[1] == three_spin_coeffs[2]
+           else "[independent per geometric class]")
+    )
     print(f"Output written to: {output_dir}")
 
 if __name__ == "__main__":
