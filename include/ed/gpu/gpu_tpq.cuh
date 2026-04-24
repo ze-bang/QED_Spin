@@ -117,9 +117,11 @@ private:
     cuDoubleComplex* d_h_state_;
     double* d_real_scratch_;
     
-    // CUDA streams for pipelining
-    cudaStream_t compute_stream_;    // Main computation stream
-    cudaStream_t transfer_stream_;   // Data transfer stream
+    // CUDA stream for pipelining. (Previously also kept a transfer_stream_
+    // alongside, but the only downloads from this class are the per-
+    // iteration scalar energy/norm fetches that must be synchronous anyway,
+    // so it was never used. Removed in D-6.)
+    cudaStream_t compute_stream_;
     bool streams_initialized_;
     
     // Statistics

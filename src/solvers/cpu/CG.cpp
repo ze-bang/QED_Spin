@@ -536,18 +536,29 @@ void lobpcg_method(
             double res_norm = cblas_dznrm2(N, WXP[0][b].data(), 1);
             max_res_norm = std::max(max_res_norm, res_norm);
             
-            // Preconditioning if enabled
-            if (use_preconditioning && stp > 1) {
-                // Simple diagonal preconditioning (would need actual diagonal elements)
-                double preshift = eigenvalues[b] * 0.1; // Adaptive shift approximation
-                
-                for (int i = 0; i < N; i++) {
-                    // In a real implementation, we'd use actual diagonal elements
-                    double diag_approx = 1.0; // Placeholder
-                    double precon = diag_approx - preshift;
-                    if (std::abs(precon) > tol) {
-                        WXP[0][b][i] /= precon;
-                    }
+            // Preconditioning hook.
+            //
+            // The previous implementation used a placeholder
+            //   diag_approx = 1.0; precon = 1.0 - 0.1 * lambda;
+            // which is constant across i — i.e. it just rescales the
+            // residual by a scalar and is *not* a Jacobi preconditioner.
+            // A real Jacobi preconditioner needs diag(H), which isn't
+            // available through the matvec-only Operator API used here
+            // (extracting it would cost N matvecs). Rather than ship
+            // misleading "preconditioning", we now emit an explicit
+            // one-time notice when the flag is set and skip the no-op
+            // rescale. To get true Jacobi preconditioning, callers
+            // should switch to the GPU path (gpu_cg.cu) which does have
+            // a diagonal-extraction kernel.
+            if (use_preconditioning) {
+                static bool warned_once = false;
+                if (!warned_once) {
+                    warned_once = true;
+                    std::cerr << "[LOBPCG] use_preconditioning=true requested but "
+                              << "no Jacobi preconditioner is available on the CPU "
+                              << "path (diag(H) is not exposed through the matvec API). "
+                              << "Running without preconditioning. "
+                              << "Use the GPU LOBPCG path for diagonal preconditioning.\n";
                 }
             }
             

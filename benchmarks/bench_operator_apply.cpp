@@ -83,13 +83,22 @@ ComplexVec random_unit_vector(uint64_t dim, uint64_t seed) {
     return v;
 }
 
-void run_apply(benchmark::State& state, bool periodic) {
+void run_apply(benchmark::State& state, bool periodic, bool real_input) {
     const auto N   = static_cast<uint64_t>(state.range(0));
     const uint64_t dim = (1ULL << N);
 
     auto op = make_heisenberg_chain(N, periodic);
     ComplexVec vin  = random_unit_vector(dim, /*seed=*/42);
+    if (real_input) {
+        // Strip imag so apply()'s isReal-fast-path takes over (audit §2.1).
+        for (auto& z : vin) z = Complex(z.real(), 0.0);
+    }
     ComplexVec vout(dim);
+
+    // Warm-up: trigger the lazy CSR build (and OpenMP thread spawn) so
+    // it's NOT included in the first timed iteration. Especially important
+    // at large N where the build cost dwarfs a single SpMV.
+    op->apply(vin.data(), vout.data(), dim);
 
     for (auto _ : state) {
         op->apply(vin.data(), vout.data(), dim);
@@ -103,15 +112,53 @@ void run_apply(benchmark::State& state, bool periodic) {
     state.counters["N"]   = static_cast<double>(N);
 }
 
-void BM_OperatorApply_OBC(benchmark::State& state) { run_apply(state, false); }
-void BM_OperatorApply_PBC(benchmark::State& state) { run_apply(state, true);  }
+void BM_OperatorApply_OBC(benchmark::State& state)      { run_apply(state, false, /*real=*/false); }
+void BM_OperatorApply_PBC(benchmark::State& state)      { run_apply(state, true,  /*real=*/false); }
+void BM_OperatorApply_PBC_Real(benchmark::State& state) { run_apply(state, true,  /*real=*/true);  }
+
+// Direct apply_real() benchmark: bypasses the apply() dispatch entirely so we
+// can isolate the bandwidth/flop savings from the fast path itself.
+void BM_OperatorApplyReal_PBC(benchmark::State& state) {
+    const auto N = static_cast<uint64_t>(state.range(0));
+    const uint64_t dim = (1ULL << N);
+
+    auto op = make_heisenberg_chain(N, /*periodic=*/true);
+    ComplexVec vin = random_unit_vector(dim, /*seed=*/42);
+    std::vector<double> vin_r(dim), vout_r(dim);
+    for (uint64_t i = 0; i < dim; ++i) vin_r[i] = vin[i].real();
+
+    // Warm up matrix-free path's OpenMP team and any first-touch allocs.
+    op->apply_real(vin_r.data(), vout_r.data(), dim);
+
+    for (auto _ : state) {
+        op->apply_real(vin_r.data(), vout_r.data(), dim);
+        benchmark::DoNotOptimize(vout_r.data());
+        benchmark::ClobberMemory();
+    }
+    state.SetItemsProcessed(state.iterations() * dim);
+    // Two FP64 (8B each) per element on the load+store path; the kernel
+    // also touches H's coefficients, but those fit in cache.
+    state.SetBytesProcessed(state.iterations() * dim * 2 * 8);
+    state.counters["dim"] = static_cast<double>(dim);
+    state.counters["N"]   = static_cast<double>(N);
+}
 
 }  // namespace
 
-// Dims swept: 2^8=256, 2^10=1024, 2^12=4096, 2^14=16384. The two largest
-// are realistic Lanczos working sets; the smaller two probe per-iter
-// fixed-cost overhead (loop dispatch, virtual-call inlining, etc.).
-BENCHMARK(BM_OperatorApply_OBC)->Arg(8)->Arg(10)->Arg(12)->Arg(14)
+// Dims swept: 2^8=256, ..., 2^20=1.05M. The largest two stress true
+// memory-bound SpMV; the smaller ones probe per-iter overhead.
+// PBC_Real is the natural Lanczos workload (real seed); reports the
+// effective speedup of the audit §2.1 Phase 1 fast path over the pure
+// complex path of PBC.
+BENCHMARK(BM_OperatorApply_OBC)
+    ->Arg(8)->Arg(10)->Arg(12)->Arg(14)->Arg(16)->Arg(18)->Arg(20)
     ->Unit(benchmark::kMicrosecond);
-BENCHMARK(BM_OperatorApply_PBC)->Arg(8)->Arg(10)->Arg(12)->Arg(14)
+BENCHMARK(BM_OperatorApply_PBC)
+    ->Arg(8)->Arg(10)->Arg(12)->Arg(14)->Arg(16)->Arg(18)->Arg(20)
+    ->Unit(benchmark::kMicrosecond);
+BENCHMARK(BM_OperatorApply_PBC_Real)
+    ->Arg(10)->Arg(12)->Arg(14)->Arg(16)->Arg(18)->Arg(20)
+    ->Unit(benchmark::kMicrosecond);
+BENCHMARK(BM_OperatorApplyReal_PBC)
+    ->Arg(10)->Arg(12)->Arg(14)->Arg(16)->Arg(18)->Arg(20)
     ->Unit(benchmark::kMicrosecond);

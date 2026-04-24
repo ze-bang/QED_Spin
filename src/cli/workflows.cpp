@@ -376,15 +376,14 @@ EDResults run_disk_streaming_workflow(const EDConfig& config) {
     params.output_dir = config.workflow.output_dir;
     create_directory_mpi_safe(params.output_dir);
     
-    // Warn about GPU method override
+    // Warn about GPU method override.
+    // NOTE: previously this hand-rolled list omitted KRYLOV_SCHUR_GPU,
+    // BLOCK_KRYLOV_SCHUR_GPU, FULL_GPU, and the deprecated _FIXED_SZ
+    // variants, so those silently slipped through into the matrix-free
+    // streaming path and crashed at the first SpMV. Use the centralized
+    // predicate from ed_method_traits.h instead. (D-4.)
     DiagonalizationMethod method = config.method;
-    if (method == DiagonalizationMethod::LANCZOS_GPU || 
-        method == DiagonalizationMethod::BLOCK_LANCZOS_GPU ||
-        method == DiagonalizationMethod::DAVIDSON_GPU ||
-        method == DiagonalizationMethod::LOBPCG_GPU ||
-        method == DiagonalizationMethod::mTPQ_GPU ||
-        method == DiagonalizationMethod::cTPQ_GPU ||
-        method == DiagonalizationMethod::FTLM_GPU) {
+    if (ed::is_gpu_method(method)) {
         std::cout << "\n  WARNING: Disk-streaming mode uses matrix-free operations.\n";
         std::cout << "           GPU methods are not supported - using CPU Lanczos instead.\n\n";
         method = DiagonalizationMethod::LANCZOS;
@@ -437,15 +436,9 @@ EDResults run_chunked_symmetry_workflow(const EDConfig& config) {
     params.output_dir = config.workflow.output_dir;
     create_directory_mpi_safe(params.output_dir);
     
-    // Warn about GPU method override
+    // Warn about GPU method override (see comment in run_disk_streaming_workflow). (D-4.)
     DiagonalizationMethod method = config.method;
-    if (method == DiagonalizationMethod::LANCZOS_GPU || 
-        method == DiagonalizationMethod::BLOCK_LANCZOS_GPU ||
-        method == DiagonalizationMethod::DAVIDSON_GPU ||
-        method == DiagonalizationMethod::LOBPCG_GPU ||
-        method == DiagonalizationMethod::mTPQ_GPU ||
-        method == DiagonalizationMethod::cTPQ_GPU ||
-        method == DiagonalizationMethod::FTLM_GPU) {
+    if (ed::is_gpu_method(method)) {
         std::cout << "\n  WARNING: Chunked-symmetry mode uses matrix-free operations.\n";
         std::cout << "           GPU methods are not supported - using CPU Lanczos instead.\n\n";
         method = DiagonalizationMethod::LANCZOS;
@@ -539,14 +532,21 @@ void compute_dynamical_response_workflow(const EDConfig& config) {
     
     if (rank == 0) {
         std::cout << "\nDynamical Response Calculation\n";
-        
+
 #ifdef WITH_CUDA
         if (config.dynamical.use_gpu) {
-            std::cout << "  GPU: enabled";
             if (config.system.use_fixed_sz) {
-                std::cout << " (disabled for fixed-Sz)";
+                std::cout << "  GPU: requested but disabled (Fixed-Sz GPU path "
+                             "not implemented; falling back to CPU)\n";
+            } else {
+                std::cout << "  GPU: enabled (multi-temperature path; single-T "
+                             "and 1-sample tasks fall back to CPU)\n";
             }
-            std::cout << "\n";
+        }
+#else
+        if (config.dynamical.use_gpu) {
+            std::cout << "  GPU: requested but unavailable (build has no CUDA "
+                         "support; using CPU)\n";
         }
 #endif
     }
@@ -815,62 +815,22 @@ void compute_dynamical_response_workflow(const EDConfig& config) {
         }
         #endif
         
-        // Lambda to process a single task (single temperature, single operator)
+        // Lambda to process a single task (single temperature, single operator).
+        //
+        // GPU is only supported in the multi-temperature path
+        // (`process_operator_all_temps` below, via runGPUDynamicalCorrelationMultiTemp)
+        // and only when fixed-Sz is not active. Single-T or fixed-Sz combinations
+        // silently use the CPU kernel; the relevant heads-up is printed once at
+        // the workflow banner above (`config.dynamical.use_gpu` summary), so we
+        // do not repeat it per task here.
         auto process_task_single = [&](const DynTask& task) -> bool {
             int t_idx = task.temp_idx;
             int op_idx = task.op_idx;
             double temperature = temperatures[t_idx];
-            
+
             DynamicalResponseResults results;
-            
-#ifdef WITH_CUDA
-            if (config.dynamical.use_gpu) {
-                // Check for Fixed-Sz mode (not yet supported on GPU)
-                if (config.system.use_fixed_sz) {
-                    if (rank == 0) {
-                        std::cout << "  Note: Fixed-Sz GPU support not yet implemented, using CPU" << std::endl;
-                    }
-                    // Fall through to CPU path
-                } else {
-                    // GPU acceleration path
-                    try {
-                        // Convert operators to GPU
-                        GPUOperator gpu_ham(config.system.num_sites, config.system.spin_length);
-                        GPUOperator gpu_obs1(config.system.num_sites, config.system.spin_length);
-                        GPUOperator gpu_obs2(config.system.num_sites, config.system.spin_length);
-                    
-                    if (!convertOperatorToGPU(ham, gpu_ham) || 
-                        !convertOperatorToGPU(obs_1[op_idx], gpu_obs1) ||
-                        !convertOperatorToGPU(obs_2[op_idx], gpu_obs2)) {
-                        std::cerr << "  GPU operator conversion failed, falling back to CPU" << std::endl;
-                        throw std::runtime_error("GPU conversion failed");
-                    }
-                    
-                    // Call GPU FTLM thermal expectation
-                    auto [temps, exps, suscept, exp_err, sus_err] = GPUEDWrapper::runGPUThermalExpectation(
-                        &gpu_ham, &gpu_obs1,
-                        N, params.num_samples, params.krylov_dim,
-                        temperature, temperature, 1,  // Single temperature
-                        params.random_seed
-                    );
-                    
-                        // Package results for dynamical correlation
-                        // Note: This is thermal expectation, not full dynamical correlation
-                        // For full dynamical correlation with GPU, need different approach
-                        std::cout << "  Note: GPU currently supports thermal expectation only" << std::endl;
-                        throw std::runtime_error("Full GPU dynamical correlation not implemented for multi-sample");
-                        
-                    } catch (const std::exception& e) {
-                        if (rank == 0) {
-                            std::cerr << "  GPU computation failed: " << e.what() << ", using CPU" << std::endl;
-                        }
-                        // Fall through to CPU path
-                    }
-                }
-            }
-#endif
-            
-            // CPU computation path
+
+            // CPU computation path (the only supported path for single-T tasks).
             {
                 // Create function wrappers for this operator pair
                 auto O1_func = [&obs_1, op_idx](const Complex* in, Complex* out, uint64_t dim) {
@@ -921,70 +881,56 @@ void compute_dynamical_response_workflow(const EDConfig& config) {
             std::map<double, DynamicalResponseResults> results_map;
             
 #ifdef WITH_CUDA
-            if (config.dynamical.use_gpu) {
-                // Check for Fixed-Sz mode (not yet supported on GPU)
-                if (config.system.use_fixed_sz) {
+            // GPU multi-temperature path: requires --use-gpu (or --dyn-use-gpu)
+            // and not --fixed-sz. The fixed-Sz / unavailable-CUDA cases were
+            // already announced once at the workflow banner above; we simply
+            // skip the GPU branch silently here.
+            if (config.dynamical.use_gpu && !config.system.use_fixed_sz) {
+                try {
+                    GPUOperator gpu_ham(config.system.num_sites, config.system.spin_length);
+                    GPUOperator gpu_obs1(config.system.num_sites, config.system.spin_length);
+                    GPUOperator gpu_obs2(config.system.num_sites, config.system.spin_length);
+
+                    if (!convertOperatorToGPU(ham, gpu_ham) ||
+                        !convertOperatorToGPU(obs_1[op_idx], gpu_obs1) ||
+                        !convertOperatorToGPU(obs_2[op_idx], gpu_obs2)) {
+                        throw std::runtime_error("GPU operator conversion failed");
+                    }
+
+                    auto gpu_results = GPUEDWrapper::runGPUDynamicalCorrelationMultiTemp(
+                        &gpu_ham, &gpu_obs1, &gpu_obs2,
+                        N, params.num_samples, params.krylov_dim,
+                        config.dynamical.omega_min,
+                        config.dynamical.omega_max,
+                        config.dynamical.num_omega_points,
+                        params.broadening,
+                        temperatures,
+                        params.random_seed,
+                        ground_state_energy
+                    );
+
+                    for (const auto& [temp, result_tuple] : gpu_results) {
+                        auto [freqs, S_real, S_imag] = result_tuple;
+
+                        DynamicalResponseResults result;
+                        result.frequencies = freqs;
+                        result.spectral_function = S_real;
+                        result.spectral_function_imag = S_imag;
+                        // GPU multi-T kernel does not currently propagate
+                        // per-omega standard errors; leave them at zero.
+                        result.spectral_error.resize(freqs.size(), 0.0);
+                        result.spectral_error_imag.resize(freqs.size(), 0.0);
+                        result.total_samples = params.num_samples;
+
+                        results_map[temp] = result;
+                    }
+                } catch (const std::exception& e) {
                     if (rank == 0) {
-                        std::cout << "  Note: Fixed-Sz GPU support not yet implemented, using CPU" << std::endl;
+                        std::cerr << "  GPU computation failed for "
+                                  << names[op_idx] << ": " << e.what()
+                                  << " -- falling back to CPU\n";
                     }
-                    // Fall through to CPU path
-                } else {
-                    // GPU acceleration path
-                    try {
-                        if (rank == 0) {
-                            std::cout << "Using GPU for multi-temperature computation\n";
-                        }
-                        
-                        // Convert operators to GPU
-                        GPUOperator gpu_ham(config.system.num_sites, config.system.spin_length);
-                        GPUOperator gpu_obs1(config.system.num_sites, config.system.spin_length);
-                        GPUOperator gpu_obs2(config.system.num_sites, config.system.spin_length);
-                        
-                        if (!convertOperatorToGPU(ham, gpu_ham) || 
-                            !convertOperatorToGPU(obs_1[op_idx], gpu_obs1) ||
-                            !convertOperatorToGPU(obs_2[op_idx], gpu_obs2)) {
-                            throw std::runtime_error("GPU operator conversion failed");
-                        }
-                        
-                        // Call optimized GPU multi-temperature dynamical correlation
-                        auto gpu_results = GPUEDWrapper::runGPUDynamicalCorrelationMultiTemp(
-                            &gpu_ham, &gpu_obs1, &gpu_obs2,
-                            N, params.num_samples, params.krylov_dim,
-                            config.dynamical.omega_min,
-                            config.dynamical.omega_max,
-                            config.dynamical.num_omega_points,
-                            params.broadening,
-                            temperatures,
-                            params.random_seed,
-                            ground_state_energy
-                        );
-                        
-                        // Convert GPU results to DynamicalResponseResults format
-                        for (const auto& [temp, result_tuple] : gpu_results) {
-                            auto [freqs, S_real, S_imag] = result_tuple;
-                            
-                            DynamicalResponseResults result;
-                            result.frequencies = freqs;
-                            result.spectral_function = S_real;
-                            result.spectral_function_imag = S_imag;
-                            // Initialize error vectors to zero (GPU computation doesn't provide errors yet)
-                            result.spectral_error.resize(freqs.size(), 0.0);
-                            result.spectral_error_imag.resize(freqs.size(), 0.0);
-                            result.total_samples = params.num_samples;
-                            
-                            results_map[temp] = result;
-                        }
-                        
-                        if (rank == 0) {
-                            std::cout << "  GPU multi-temperature computation successful!" << std::endl;
-                        }
-                        
-                    } catch (const std::exception& e) {
-                        if (rank == 0) {
-                            std::cerr << "  GPU computation failed: " << e.what() << ", using CPU" << std::endl;
-                        }
-                        // Fall through to CPU path
-                    }
+                    results_map.clear();
                 }
             }
 #endif
@@ -1146,24 +1092,21 @@ void compute_dynamical_response_workflow(const EDConfig& config) {
                     }
                 }
             } else {
-                // Worker: request and process tasks
+                // Worker: request and process tasks. Quiet by design --
+                // the master log on rank 0 narrates progress.
                 while (true) {
                     int task_id;
                     MPI_Status status;
                     MPI_Recv(&task_id, 1, MPI_INT, 0, MPI_ANY_TAG, MPI_COMM_WORLD, &status);
-                    
+
                     if (status.MPI_TAG == STOP_TAG) {
                         break;
                     }
-                    
-                    const auto& task = all_tasks[task_id];
-                    std::cout << "Rank " << rank << " processing task " << (task_id + 1) << "/" << num_tasks
-                              << " (T=" << temperatures[task.temp_idx]
-                              << ", op=" << names[task.op_idx] << ")\n";
-                    if (process_task_single(task)) {
+
+                    if (process_task_single(all_tasks[task_id])) {
                         local_processed_count++;
                     }
-                    
+
                     MPI_Send(&task_id, 1, MPI_INT, 0, DONE_TAG, MPI_COMM_WORLD);
                 }
             }
@@ -1235,35 +1178,42 @@ void compute_dynamical_response_workflow(const EDConfig& config) {
         auto O_func = [&op](const Complex* in, Complex* out, uint64_t dim) {
             op.apply(in, out, dim);
         };
-        
-        // Compute for each temperature
+
+        // Hoist the optional second operator (and its 3-body sidecar) OUT of
+        // the per-temperature loop. The previous version reloaded op2 from
+        // disk, parsed InterAll, and reconstructed CSR for every temperature;
+        // for a temperature scan with N_T points that's O(N_T) redundant disk
+        // reads + sparse rebuilds.  The matrix elements don't depend on T.
+        const bool have_op2 = !config.dynamical.operator2_file.empty();
+        Operator op2(config.system.num_sites, config.system.spin_length);
+        if (have_op2) {
+            std::string op2_path = config.system.hamiltonian_dir + "/" + config.dynamical.operator2_file;
+            op2.loadFromInterAllFile(op2_path);
+            std::string op2_3body = op2_path + ".3body";
+            std::ifstream test_3b2(op2_3body);
+            if (test_3b2.good()) {
+                op2.loadThreeBodyTerm(op2_3body);
+            }
+        }
+        auto O2_func = [&op2](const Complex* in, Complex* out, uint64_t dim) {
+            op2.apply(in, out, dim);
+        };
+
+        // Compute for each temperature. Only rank 0 narrates so multi-rank
+        // logs stay readable; ranks > 0 still execute the loop body if the
+        // legacy path was reached (typically size==1, but do not assume).
         for (uint64_t t_idx = 0; t_idx < config.dynamical.num_temp_bins; t_idx++) {
             double temperature = temperatures[t_idx];
-            
-            std::cout << "\n--- Temperature " << (t_idx + 1) << " / " << config.dynamical.num_temp_bins 
-                      << ": T = " << temperature << " ---\n";
-        
+
+            if (rank == 0) {
+                std::cout << "\n--- Temperature " << (t_idx + 1) << " / " << config.dynamical.num_temp_bins
+                          << ": T = " << temperature << " ---\n";
+            }
+
             DynamicalResponseResults results;
-        
-            if (!config.dynamical.operator2_file.empty()) {
-                // Two different operators: ⟨O₁†(t)O₂⟩
-                std::cout << "Computing two-operator dynamical correlation ⟨O₁†(t)O₂⟩...\n";
-                std::string op2_path = config.system.hamiltonian_dir + "/" + config.dynamical.operator2_file;
-                Operator op2(config.system.num_sites, config.system.spin_length);
-                op2.loadFromInterAllFile(op2_path);
-                // Also load three-body terms for second operator
-                {
-                    std::string op2_3body = op2_path + ".3body";
-                    std::ifstream test_3b2(op2_3body);
-                    if (test_3b2.good()) {
-                        op2.loadThreeBodyTerm(op2_3body);
-                    }
-                }
-                
-                auto O2_func = [&op2](const Complex* in, Complex* out, uint64_t dim) {
-                    op2.apply(in, out, dim);
-                };
-                
+
+            if (have_op2) {
+                if (rank == 0) std::cout << "Computing two-operator dynamical correlation ⟨O₁†(t)O₂⟩...\n";
                 results = compute_dynamical_correlation(
                     H_func, O_func, O2_func, N, params,
                     config.dynamical.omega_min,
@@ -1274,8 +1224,7 @@ void compute_dynamical_response_workflow(const EDConfig& config) {
                     ground_state_energy
                 );
             } else {
-                // Same operator: ⟨O†(t)O⟩ (default auto-correlation)
-                std::cout << "Computing dynamical response ⟨O†(t)O⟩...\n";
+                if (rank == 0) std::cout << "Computing dynamical response ⟨O†(t)O⟩...\n";
                 results = compute_dynamical_response_thermal(
                     H_func, O_func, N, params,
                     config.dynamical.omega_min,
@@ -1285,20 +1234,24 @@ void compute_dynamical_response_workflow(const EDConfig& config) {
                     config.workflow.output_dir
                 );
             }
-            
-            // Save results for this temperature to HDF5
-            std::string h5_file = HDF5IO::createOrOpenFile(config.workflow.output_dir);
-            std::string op_name = config.dynamical.output_prefix;
-            if (config.dynamical.num_temp_bins > 1) {
-                op_name += "_T" + std::to_string(temperature);
+
+            // Save results for this temperature to HDF5 (rank 0 only -- the
+            // shared HDF5 file is not concurrently writable from multiple
+            // ranks without HDF5-MPI parallel I/O, which we don't link here).
+            if (rank == 0) {
+                std::string h5_file = HDF5IO::createOrOpenFile(config.workflow.output_dir);
+                std::string op_name = config.dynamical.output_prefix;
+                if (config.dynamical.num_temp_bins > 1) {
+                    op_name += "_T" + std::to_string(temperature);
+                }
+                HDF5IO::saveDynamicalResponseFull(
+                    h5_file, op_name,
+                    results.frequencies, results.spectral_function, results.spectral_function_imag,
+                    results.spectral_error, results.spectral_error_imag,
+                    results.total_samples, temperature
+                );
+                std::cout << "Results saved to HDF5: " << h5_file << " (" << op_name << ")\n";
             }
-            HDF5IO::saveDynamicalResponseFull(
-                h5_file, op_name,
-                results.frequencies, results.spectral_function, results.spectral_function_imag,
-                results.spectral_error, results.spectral_error_imag,
-                results.total_samples, temperature
-            );
-            if (rank == 0) std::cout << "Results saved to HDF5: " << h5_file << " (" << op_name << ")\n";
         }
     }
     
@@ -1322,14 +1275,21 @@ void compute_static_response_workflow(const EDConfig& config) {
     
     if (rank == 0) {
         std::cout << "\nStatic Response Calculation\n";
-        
+
 #ifdef WITH_CUDA
         if (config.static_resp.use_gpu) {
-            std::cout << "  GPU: enabled";
             if (config.system.use_fixed_sz) {
-                std::cout << " (disabled for fixed-Sz)";
+                std::cout << "  GPU: requested but disabled (Fixed-Sz GPU path "
+                             "not implemented; falling back to CPU)\n";
+            } else {
+                std::cout << "  GPU: enabled (config-based operator path; "
+                             "legacy --static-operator path is CPU-only)\n";
             }
-            std::cout << "\n";
+        }
+#else
+        if (config.static_resp.use_gpu) {
+            std::cout << "  GPU: requested but unavailable (build has no CUDA "
+                         "support; using CPU)\n";
         }
 #endif
     }
@@ -1495,29 +1455,22 @@ void compute_static_response_workflow(const EDConfig& config) {
             StaticResponseResults results;
             
 #ifdef WITH_CUDA
-            if (config.static_resp.use_gpu) {
-                // Check for Fixed-Sz mode (not yet supported on GPU)
-                if (config.system.use_fixed_sz) {
-                    if (rank == 0) {
-                        std::cout << "  Note: Fixed-Sz GPU support not yet implemented, using CPU" << std::endl;
-                    }
-                    // Fall through to CPU path
-                } else {
-                    // GPU acceleration path
-                    try {
-                        // Convert operators to GPU
-                        GPUOperator gpu_ham(config.system.num_sites, config.system.spin_length);
-                        GPUOperator gpu_obs1(config.system.num_sites, config.system.spin_length);
-                        GPUOperator gpu_obs2(config.system.num_sites, config.system.spin_length);
-                    
-                    if (!convertOperatorToGPU(ham, gpu_ham) || 
+            // GPU static path: requires --use-gpu (or --static-use-gpu) and
+            // not --fixed-sz. The fixed-Sz / unavailable-CUDA cases were
+            // announced once at the workflow banner above.
+            if (config.static_resp.use_gpu && !config.system.use_fixed_sz) {
+                try {
+                    GPUOperator gpu_ham(config.system.num_sites, config.system.spin_length);
+                    GPUOperator gpu_obs1(config.system.num_sites, config.system.spin_length);
+                    GPUOperator gpu_obs2(config.system.num_sites, config.system.spin_length);
+
+                    if (!convertOperatorToGPU(ham, gpu_ham) ||
                         !convertOperatorToGPU(obs_1[op_idx], gpu_obs1) ||
                         !convertOperatorToGPU(obs_2[op_idx], gpu_obs2)) {
                         throw std::runtime_error("GPU operator conversion failed");
                     }
-                    
-                    // Call GPU static correlation - returns tuple
-                    auto [temps, corr_real, corr_imag, err_real, err_imag] = 
+
+                    auto [temps, corr_real, corr_imag, err_real, err_imag] =
                         GPUEDWrapper::runGPUStaticCorrelation(
                             &gpu_ham, &gpu_obs1, &gpu_obs2,
                             N, params.num_samples, params.krylov_dim,
@@ -1526,27 +1479,22 @@ void compute_static_response_workflow(const EDConfig& config) {
                             config.static_resp.num_temp_points,
                             params.random_seed
                         );
-                    
-                    // Package into results struct
-                    // Note: GPU returns complex correlation (real, imag parts)
-                    // CPU returns expectation value and susceptibility
-                    // For now, store real part as expectation
-                    results.temperatures = temps;
-                    results.expectation = corr_real;
+
+                    // GPU kernel returns complex correlation (real, imag);
+                    // CPU returns expectation value and susceptibility.
+                    // We currently only surface the real part as ⟨O⟩ and skip
+                    // GPU susceptibility (TODO: kernel does not produce it).
+                    results.temperatures      = temps;
+                    results.expectation       = corr_real;
                     results.expectation_error = err_real;
-                    // TODO: Map imag part appropriately or compute susceptibility on GPU
-                    results.total_samples = params.num_samples;
-                    
-                        if (rank == 0) {
-                            std::cout << "  GPU computation successful for operator " << names[op_idx] << std::endl;
-                        }
-                        
-                    } catch (const std::exception& e) {
-                        if (rank == 0) {
-                            std::cerr << "  GPU computation failed: " << e.what() << ", using CPU" << std::endl;
-                        }
-                        // Fall through to CPU path
+                    results.total_samples     = params.num_samples;
+                } catch (const std::exception& e) {
+                    if (rank == 0) {
+                        std::cerr << "  GPU computation failed for "
+                                  << names[op_idx] << ": " << e.what()
+                                  << " -- falling back to CPU\n";
                     }
+                    results.temperatures.clear();
                 }
             }
 #endif
@@ -1650,23 +1598,22 @@ void compute_static_response_workflow(const EDConfig& config) {
                     }
                 }
             } else {
-                // Worker: request and process tasks
+                // Worker: request and process tasks. Workers stay quiet so
+                // the rank-0 master log remains the single source of truth;
+                // task progress is tracked there via DONE_TAG.
                 while (true) {
                     int task_id;
                     MPI_Status status;
                     MPI_Recv(&task_id, 1, MPI_INT, 0, MPI_ANY_TAG, MPI_COMM_WORLD, &status);
-                    
+
                     if (status.MPI_TAG == STOP_TAG) {
                         break;
                     }
-                    
-                    std::cout << "Rank " << rank << " processing task " << (task_id + 1) << "/" << num_tasks
-                              << " (op=" << names[all_tasks[task_id].op_idx] << ")\n";
-                    
+
                     if (process_task(all_tasks[task_id])) {
                         local_processed_count++;
                     }
-                    
+
                     MPI_Send(&task_id, 1, MPI_INT, 0, DONE_TAG, MPI_COMM_WORLD);
                 }
             }
@@ -1678,7 +1625,7 @@ void compute_static_response_workflow(const EDConfig& config) {
                 if (rank == 0) {
                     std::cout << "  Processing operator: " << names[all_tasks[task_idx].op_idx] << "\n";
                 }
-                
+
                 if (process_task(all_tasks[task_idx])) {
                     local_processed_count++;
                 }
@@ -1723,7 +1670,7 @@ void compute_static_response_workflow(const EDConfig& config) {
         
         if (config.static_resp.single_operator_mode) {
             // Single operator expectation value: ⟨O⟩
-            std::cout << "Computing thermal expectation value ⟨O⟩...\n";
+            if (rank == 0) std::cout << "Computing thermal expectation value ⟨O⟩...\n";
             results = compute_thermal_expectation_value(
                 H_func, O_func, N, params,
                 config.static_resp.temp_min,
@@ -1733,15 +1680,15 @@ void compute_static_response_workflow(const EDConfig& config) {
             );
         } else if (!config.static_resp.operator2_file.empty()) {
             // Two different operators: ⟨O₁†O₂⟩
-            std::cout << "Computing two-operator static response ⟨O₁†O₂⟩...\n";
+            if (rank == 0) std::cout << "Computing two-operator static response ⟨O₁†O₂⟩...\n";
             std::string op2_path = config.system.hamiltonian_dir + "/" + config.static_resp.operator2_file;
             Operator op2(config.system.num_sites, config.system.spin_length);
             op2.loadFromInterAllFile(op2_path);
-            
+
             auto O2_func = [&op2](const Complex* in, Complex* out, uint64_t dim) {
                 op2.apply(in, out, dim);
             };
-            
+
             results = compute_static_response(
                 H_func, O_func, O2_func, N, params,
                 config.static_resp.temp_min,
@@ -1751,7 +1698,7 @@ void compute_static_response_workflow(const EDConfig& config) {
             );
         } else {
             // Same operator: ⟨O†O⟩ (default two-point correlation)
-            std::cout << "Computing static response ⟨O†O⟩...\n";
+            if (rank == 0) std::cout << "Computing static response ⟨O†O⟩...\n";
             results = compute_static_response(
                 H_func, O_func, O_func, N, params,
                 config.static_resp.temp_min,
@@ -1760,17 +1707,22 @@ void compute_static_response_workflow(const EDConfig& config) {
                 config.workflow.output_dir
             );
         }
-        
-        // Save results to HDF5
-        std::string h5_file = HDF5IO::createOrOpenFile(config.workflow.output_dir);
-        HDF5IO::saveStaticResponse(
-            h5_file, config.static_resp.output_prefix,
-            results.temperatures, results.expectation, results.expectation_error,
-            results.variance, results.variance_error,
-            results.susceptibility, results.susceptibility_error,
-            results.total_samples
-        );
-        std::cout << "Static response saved to HDF5: " << h5_file << "\n";
+
+        // Save results to HDF5 -- only rank 0 writes to avoid concurrent
+        // overwrites of the shared ed_results.h5 in the legacy single-task
+        // path. (The MPI-sharded `use_config_operators` branch above writes
+        // per-task and serialises through the master.)
+        if (rank == 0) {
+            std::string h5_file = HDF5IO::createOrOpenFile(config.workflow.output_dir);
+            HDF5IO::saveStaticResponse(
+                h5_file, config.static_resp.output_prefix,
+                results.temperatures, results.expectation, results.expectation_error,
+                results.variance, results.variance_error,
+                results.susceptibility, results.susceptibility_error,
+                results.total_samples
+            );
+            std::cout << "Static response saved to HDF5: " << h5_file << "\n";
+        }
     }
 }
 
@@ -1798,6 +1750,15 @@ void compute_ground_state_dssf_workflow(const EDConfig& config) {
         std::cout << "Computing Ground State DSSF (T=0)\n";
         std::cout << "==========================================\n";
         std::cout << "Using continued fraction method for optimal efficiency\n";
+
+        // T=0 DSSF has no GPU kernel: the continued-fraction Lanczos walk
+        // and the cross-correlation accumulation both run on the CPU. Emit
+        // a single heads-up if the user asked for GPU so it does not look
+        // like the flag was silently ignored.
+        if (config.dynamical.use_gpu || config.static_resp.use_gpu) {
+            std::cout << "  Note: --use-gpu / --dyn-use-gpu is not implemented "
+                         "for --ground-state-dssf; using CPU\n";
+        }
     }
     
     // Prepare Hamiltonian
@@ -1990,27 +1951,32 @@ void compute_ground_state_dssf_workflow(const EDConfig& config) {
         std::cout << "\n--- Computing S(q,ω) for " << names.size() << " operators ---\n";
     }
     
+    // Hoist H_func_int construction out of the per-task loop -- it has
+    // no per-task state and rebuilding it on every iteration was wasteful.
+    auto H_func_int = [&ham](const Complex* in, Complex* out, int dim) {
+        ham.apply(in, out, static_cast<uint64_t>(dim));
+    };
+
+    // Only rank 0 narrates the per-task progress to keep multi-rank logs
+    // readable; non-rank-0 ranks still do the work, just silently.
     for (int op_idx : my_tasks) {
-        std::cout << "[Rank " << rank << "] Processing: " << names[op_idx] << "\n";
-        
-        // Create function wrappers (with int signature for FTLM functions)
-        auto H_func_int = [&ham](const Complex* in, Complex* out, int dim) {
-            ham.apply(in, out, static_cast<uint64_t>(dim));
-        };
-        
+        if (rank == 0) {
+            std::cout << "[Rank " << rank << "] Processing: " << names[op_idx] << "\n";
+        }
+
         auto O1_func = [&obs_1, op_idx](const Complex* in, Complex* out, int dim) {
             obs_1[op_idx].apply(in, out, static_cast<uint64_t>(dim));
         };
-        
+
         auto O2_func = [&obs_2, op_idx](const Complex* in, Complex* out, int dim) {
             obs_2[op_idx].apply(in, out, static_cast<uint64_t>(dim));
         };
-        
+
         // Compute ground state DSSF using continued fraction method
         auto results = compute_ground_state_cross_correlation(
             H_func_int, O1_func, O2_func, ground_state, ground_state_energy, N, gs_params
         );
-        
+
         // Save results to unified HDF5 file
         std::string h5_path = HDF5IO::createOrOpenFile(config.workflow.output_dir);
         std::string op_name = "ground_state_dssf/" + names[op_idx];
@@ -2020,7 +1986,9 @@ void compute_ground_state_dssf_workflow(const EDConfig& config) {
             results.spectral_error, results.spectral_error_imag,
             1, 0.0  // T=0 ground state
         );
-        std::cout << "[Rank " << rank << "] Saved to HDF5: " << op_name << "\n";
+        if (rank == 0) {
+            std::cout << "[Rank " << rank << "] Saved to HDF5: " << op_name << "\n";
+        }
     }
     
     #ifdef WITH_MPI

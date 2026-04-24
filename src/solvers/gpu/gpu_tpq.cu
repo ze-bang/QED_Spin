@@ -2,6 +2,7 @@
 #include <ed/gpu/gpu_operator.cuh>
 #include <ed/core/system_utils.h>
 #include <ed/core/hdf5_io.h>
+#include <ed/solvers/tpq_seeding.h>
 #include <iostream>
 #include <fstream>
 #include <iomanip>
@@ -50,7 +51,7 @@ __global__ void scaleVector(cuDoubleComplex* state, double scale, int N) {
 GPUTPQSolver::GPUTPQSolver(GPUOperator* gpu_op, int N)
     : gpu_op_(gpu_op), N_(N), d_state_(nullptr), d_temp_(nullptr), 
       d_h_state_(nullptr), d_real_scratch_(nullptr),
-      compute_stream_(nullptr), transfer_stream_(nullptr), streams_initialized_(false) {
+      compute_stream_(nullptr), streams_initialized_(false) {
     
     // Create cuBLAS handle
     cublasStatus_t stat = cublasCreate(&cublas_handle_);
@@ -66,12 +67,13 @@ GPUTPQSolver::GPUTPQSolver(GPUOperator* gpu_op, int N)
         throw std::runtime_error("cuRAND init failed");
     }
     
-    // Initialize CUDA streams for pipelining
+    // Initialize CUDA stream for pipelining. (transfer_stream_ was removed
+    // in D-6 — every download from this class is the per-iteration scalar
+    // energy/norm fetch that has to be synchronous anyway, so the second
+    // stream was never used.)
     cudaError_t stream_err1 = cudaStreamCreate(&compute_stream_);
-    cudaError_t stream_err2 = cudaStreamCreate(&transfer_stream_);
-    if (stream_err1 == cudaSuccess && stream_err2 == cudaSuccess) {
+    if (stream_err1 == cudaSuccess) {
         streams_initialized_ = true;
-        // Set cuBLAS to use compute stream
         cublasSetStream(cublas_handle_, compute_stream_);
     }
     
@@ -89,10 +91,8 @@ GPUTPQSolver::GPUTPQSolver(GPUOperator* gpu_op, int N)
 GPUTPQSolver::~GPUTPQSolver() {
     freeMemory();
     
-    // Destroy CUDA streams
     if (streams_initialized_) {
         cudaStreamDestroy(compute_stream_);
-        cudaStreamDestroy(transfer_stream_);
     }
     
     cublasDestroy(cublas_handle_);
@@ -598,7 +598,11 @@ void GPUTPQSolver::runMicrocanonicalTPQ(
         // If not continuing, initialize normally
         if (!loaded_from_file) {
             // Generate random initial state |v1⟩
-            generateRandomState(12345 + sample * 67890);
+            // Unified TPQ seeding (matches CPU TPQ for ED_TPQ_BASE_SEED).
+            // The cuRAND kernel takes a 32-bit seed; fold the 64-bit
+            // splitmix value into 32 bits with XOR to preserve entropy.
+            const std::uint64_t s64 = ed::tpq_per_sample_seed(static_cast<std::uint64_t>(sample));
+            generateRandomState(static_cast<unsigned int>((s64 ^ (s64 >> 32)) & 0xFFFFFFFFu));
             
             // Apply H|v1⟩ -> d_temp_
             gpu_op_->matVecGPU(d_state_, d_temp_, N_);
@@ -646,12 +650,17 @@ void GPUTPQSolver::runMicrocanonicalTPQ(
         
         // Determine final step: if continuing, run for additional max_iter iterations
         int final_step = loaded_from_file ? (start_step - 1 + max_iter) : max_iter;
-        
+
+        // Track the actual last step the loop completes; if the early-exit
+        // (inv_temp >= target_beta) fires we must use this for the final β
+        // label, NOT the scheduled final_step (was: P0-6 silent mislabel).
+        int actual_last_step = start_step - 1;
+
         // Main TPQ loop - applies (L-H) repeatedly
         // OPTIMIZATION: Pre-compute constants outside loop
         const cuDoubleComplex alpha_scale = make_cuDoubleComplex(large_value * D_S, 0.0);
         const cuDoubleComplex minus_one = make_cuDoubleComplex(-1.0, 0.0);
-        
+
         for (int step = start_step; step <= final_step; ++step) {
             // Apply H|v0⟩ -> d_temp_
             auto matvec_start = std::chrono::high_resolution_clock::now();
@@ -753,13 +762,17 @@ void GPUTPQSolver::runMicrocanonicalTPQ(
             }
             
             stats_.iterations++;
+            actual_last_step = step;
         }
-        
+
         // Compute final state metrics
         std::pair<double, double> final_pair = computeEnergyAndVariance();
         double final_energy = final_pair.first;
         double final_var = final_pair.second;
-        double final_inv_temp = (2.0 * final_step) / (large_value * D_S - final_energy);
+        // Use the step we actually reached, not the scheduled final_step, so
+        // that early termination (target_beta hit) doesn't mislabel the
+        // saved β. mTPQ schedule: β_step = 2 * step / (L * D_S - E).
+        double final_inv_temp = (2.0 * actual_last_step) / (large_value * D_S - final_energy);
         
         // Save final state to HDF5 only if save_thermal_states is enabled
         if (save_thermal_states) {
@@ -903,8 +916,10 @@ void GPUTPQSolver::runCanonicalTPQ(
         // Track which measurement temperatures have been saved
         std::vector<bool> temp_measured(num_temp_points, false);
         
-        // Generate random initial state
-        generateRandomState(98765 + sample * 43210);
+        // Generate random initial state (unified TPQ seeding; see
+        // tpq_per_sample_seed). Honours ED_TPQ_BASE_SEED for cross-validation.
+        const std::uint64_t s64 = ed::tpq_per_sample_seed(static_cast<std::uint64_t>(sample));
+        generateRandomState(static_cast<unsigned int>((s64 ^ (s64 >> 32)) & 0xFFFFFFFFu));
         
         // Initialize HDF5 sample group
         if (!h5_file.empty()) {

@@ -5,6 +5,7 @@
 #include <cuda_runtime.h>
 #include <cuComplex.h>
 #include <cublas_v2.h>
+#include <cusparse.h>
 #include <vector>
 #include <complex>
 #include <functional>
@@ -238,7 +239,8 @@ protected:
         UNINITIALIZED = 0,     // Not yet selected
         WARP_REDUCTION,        // Gather pattern, no atomics (T >= 1024, N >= 8192)
         BRANCH_FREE_SCATTER,   // Separated kernels with atomics (T >= 64)
-        SHARED_MEMORY          // State-parallel with shared mem (T < 64)
+        SHARED_MEMORY,         // State-parallel with shared mem (T < 64)
+        CUSPARSE_CSR           // Assembled CSR with cuSPARSE SpMV (fastest when matrix fits)
     };
     
     KernelPathway selected_pathway_ = KernelPathway::UNINITIALIZED;
@@ -260,6 +262,52 @@ protected:
     // Separate transforms by type (call before kernel launch)
     void separateTransformsByType();
     void copySeparatedTransformsToDevice();
+
+    // Drop ALL caches derived from transform_data_ / three_body_data_ when
+    // the operator definition mutates. See addOneBodyTerm() for the full
+    // contract — call this from any setter that touches the host-side data.
+    void invalidateDerivedCaches();
+
+    // ========================================================================
+    // cuSPARSE assembled-CSR fast path
+    //
+    // For sufficiently small N where the full sparse Hamiltonian fits in GPU
+    // memory, we assemble it once into CSR format and reuse cuSPARSE's
+    // hand-tuned SpMV kernels. This avoids the per-matvec transform-loop
+    // overhead and the atomic contention in the matrix-free pathways.
+    //
+    // Build is lazy: triggered on first matVecGPU call when the pathway is
+    // selected. Returns true if the matrix was successfully assembled (i.e.
+    // there is enough device memory). If false, caller should fall back to
+    // a matrix-free pathway.
+    //
+    // Cache invariants: invalidated whenever the operator definition mutates
+    // (transform_data_ changes). The host-side flag `csr_assembled_` is the
+    // single source of truth for "device CSR is up-to-date".
+    // ========================================================================
+    bool buildCsrOnDevice(int N);
+    void freeCsrDeviceData();
+    void applyCusparse(const cuDoubleComplex* d_x, cuDoubleComplex* d_y, int N,
+                       cudaStream_t stream = 0);
+
+    // CSR storage on device (column-flattened: row_offsets[N+1], col_idx[nnz],
+    // values[nnz]). Owned by this object.
+    int*               d_csr_row_offsets_ = nullptr;
+    int*               d_csr_col_idx_     = nullptr;
+    cuDoubleComplex*   d_csr_values_      = nullptr;
+    int64_t            csr_nnz_           = 0;
+    int                csr_dim_           = 0;        // N for which CSR was built
+    bool               csr_assembled_     = false;
+
+    // cuSPARSE descriptors and workspace buffer. cuSPARSE 11+ uses opaque
+    // sparse/dense descriptors plus a per-call workspace whose size is
+    // queried via cusparseSpMV_bufferSize(); we cache it across calls.
+    cusparseHandle_t   cusparse_handle_   = nullptr;
+    cusparseSpMatDescr_t csr_descr_       = nullptr;
+    cusparseDnVecDescr_t vec_x_descr_     = nullptr;
+    cusparseDnVecDescr_t vec_y_descr_     = nullptr;
+    void*              cusparse_workspace_ = nullptr;
+    size_t             cusparse_workspace_bytes_ = 0;
     
     // GPU memory pointers
     cuDoubleComplex* d_vector_in_;
@@ -352,6 +400,10 @@ __global__ void matVecFixedSzKernelOptimized(const cuDoubleComplex* x, cuDoubleC
 // Basis generation kernel for fixed Sz
 __global__ void generateFixedSzBasisKernel(uint64_t* basis_states, int n_bits, int n_up,
                                           uint64_t start_state, int num_states);
+
+// Upload Pascal triangle into __constant__ d_pascal[][]. Required before
+// the first generateFixedSzBasisKernel launch; idempotent across calls.
+void ensure_pascal_uploaded();
 
 // State lookup (binary search)
 __device__ int lookupState(uint64_t state, const void* basis_states_ptr, int num_states);

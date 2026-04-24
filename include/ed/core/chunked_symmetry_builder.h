@@ -282,6 +282,8 @@ public:
                     SymBasisState state(orbit_rep, sector.quantum_numbers, std::sqrt(norm_sq));
                     state.orbit_elements = std::move(orbit_elements);
                     state.orbit_coefficients = std::move(orbit_coefficients);
+                    // Sort once -> O(log |orbit|) lookups in applySymmetrized.
+                    state.sortOrbit();
                     
                     total_orbit_elements += state.orbit_elements.size();
                     sector.basis_states.push_back(std::move(state));
@@ -521,6 +523,8 @@ public:
                     SymBasisState state(orbit_rep, sector.quantum_numbers, std::sqrt(norm_sq));
                     state.orbit_elements = std::move(orbit_elements);
                     state.orbit_coefficients = std::move(orbit_coefficients);
+                    // Sort once -> O(log |orbit|) lookups in applySymmetrized.
+                    state.sortOrbit();
                     
                     total_orbit_elements += state.orbit_elements.size();
                     sector.basis_states.push_back(std::move(state));
@@ -794,6 +798,8 @@ public:
                         SymBasisState state(orbit_rep, sector_meta.quantum_numbers, std::sqrt(norm_sq));
                         state.orbit_elements = std::move(orbit_elements);
                         state.orbit_coefficients = std::move(orbit_coefficients);
+                        // Sort once -> O(log |orbit|) lookups in applySymmetrized.
+                        state.sortOrbit();
                         sector_states[sector_idx].push_back(std::move(state));
                         break;  // Each orbit belongs to exactly one sector
                     }

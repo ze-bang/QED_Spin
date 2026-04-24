@@ -39,7 +39,10 @@ public:
         double ortho_time;
         int iterations;
         double convergence_error;
-        uint64_t full_reorth_count;
+        // full_reorth_count was retired in D-6: nothing in the orthogonalization
+        // loop ever incremented it — the GPU Lanczos uses windowed/selective
+        // reorth, not periodic full reorth — so the counter was always
+        // zero and gave a misleading impression that full reorth was running.
         uint64_t selective_reorth_count;
         uint64_t total_reorth_ops;
     };
@@ -197,7 +200,22 @@ private:
     cusolverDnHandle_t cusolver_handle_;
     cudaStream_t compute_stream_;
     cudaStream_t transfer_stream_;
-    
+
+    // Persistent stream pool for parallel block-column matvec. Created
+    // once in allocateMemory() and destroyed in freeMemory(); the previous
+    // implementation paid block_size_ cudaStreamCreate/Destroy calls per
+    // blockMatVec(), which dominated host overhead at small block sizes.
+    std::vector<cudaStream_t> matvec_streams_;
+
+    // Per-stream completion events used to fan-in matvec_streams_ back to
+    // compute_stream_ via cudaStreamWaitEvent (replaces a per-column
+    // cudaStreamSynchronize host loop, which serialized the pipeline).
+    std::vector<cudaEvent_t> matvec_done_events_;
+
+    // Single event used to chain compute_stream_ -> transfer_stream_ after
+    // the QR + extractUpperTriangularKernel without forcing a host sync.
+    cudaEvent_t qr_done_event_;
+
     // ========== GPU Memory - Block Storage (Column-Major) ==========
     // Block vectors stored as contiguous column-major matrices for BLAS-3 efficiency
     // V_j is stored at d_block_basis_[j] with layout: dimension_ × block_size_
@@ -297,12 +315,6 @@ private:
      * Uses batched operations for efficiency when many blocks are stored
      */
     void reorthogonalizeBlock(cuDoubleComplex* d_block, int current_iter);
-    
-    /**
-     * @brief Full reorthogonalization against all stored blocks
-     * Uses streamed computation for large number of blocks
-     */
-    void fullReorthogonalization(cuDoubleComplex* d_block);
     
     // ========== Block Tridiagonal Solver ==========
     
@@ -633,7 +645,8 @@ private:
     int blockArnoldiIteration(int start_block, int max_blocks);
     bool solveBlockTridiagonalEigenproblem(int num_blocks, std::vector<double>& eigenvalues);
     int checkConvergence(int num_blocks, int num_desired);
-    void performRestart(int num_blocks, int num_keep);
+    // Thick restart for GPUBlockKrylovSchur is implemented inline in run()
+    // via Ritz-vector rotation; no separate performRestart method exists.
     void computeEigenvectors(int num_blocks, int num_eigs,
                             std::vector<std::vector<std::complex<double>>>& eigenvectors);
 };
@@ -641,7 +654,10 @@ private:
 // Kernel declarations for Lanczos helpers
 namespace GPULanczosKernels {
 
-__global__ void initRandomVectorKernel(cuDoubleComplex* vec, int N, unsigned long long seed);
+// complex_seed: 0 = real-only initialization (default, matches CPU lanczos
+// convention), 1 = fully complex (legacy / ED_LANCZOS_COMPLEX_SEED=1).
+__global__ void initRandomVectorKernel(cuDoubleComplex* vec, int N, unsigned long long seed,
+                                       int complex_seed);
 
 /**
  * @brief Batched dot product kernel for efficient orthogonalization

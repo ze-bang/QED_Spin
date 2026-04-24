@@ -1,7 +1,9 @@
 #pragma once
 
 #include <ed/core/ed_config.h>
-#include <ed/core/ed_wrapper.h>
+#include <ed/core/ed_parameters.h>  // EDParameters (was: ed_wrapper.h, which
+                                    // dragged in TPQ/lanczos/FTLM/LTLM/HDF5/
+                                    // GPU headers — D-2 in the audit).
 
 /**
  * @brief Adapter to convert between new EDConfig and legacy EDParameters

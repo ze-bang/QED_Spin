@@ -252,6 +252,8 @@ public:
                     SymBasisState state(orbit_rep, sector.quantum_numbers, std::sqrt(norm_sq));
                     state.orbit_elements = std::move(orbit_elements);
                     state.orbit_coefficients = std::move(orbit_coefficients);
+                    // Sort once so applySymmetrized's lookup is O(log |orbit|).
+                    state.sortOrbit();
                     
                     total_orbit_elements += state.orbit_elements.size();
                     sector.basis_states.push_back(std::move(state));
@@ -530,14 +532,8 @@ private:
                     size_t k = it->second;
                     const auto& state_k = loaded_sector_.basis_states[k];
                     
-                    // Find coefficient of s_prime in state_k
-                    Complex beta_s_prime(0.0, 0.0);
-                    for (size_t idx = 0; idx < state_k.orbit_elements.size(); ++idx) {
-                        if (state_k.orbit_elements[idx] == s_prime) {
-                            beta_s_prime = state_k.orbit_coefficients[idx];
-                            break;
-                        }
-                    }
+                    // O(log |orbit|) binary search instead of linear scan.
+                    const Complex beta_s_prime = state_k.findCoeff(s_prime);
                     
                     out[k] += prefactor * h_element * std::conj(beta_s_prime) * group_norm / state_k.norm;
                 }

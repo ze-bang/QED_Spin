@@ -2,12 +2,14 @@
 
 #include <ed/gpu/gpu_lanczos.cuh>
 #include <ed/gpu/kernel_config.h>
+#include <ed/core/blas_lapack_wrapper.h>
 #include <iostream>
 #include <iomanip>
 #include <cmath>
 #include <random>
 #include <algorithm>
 #include <chrono>
+#include <stdexcept>
 #include <Eigen/Dense>
 #include <Eigen/Eigenvalues>
 #include <curand_kernel.h>
@@ -20,16 +22,22 @@ using namespace GPUConfig;
 
 namespace GPULanczosKernels {
 
-__global__ void initRandomVectorKernel(cuDoubleComplex* vec, int N, unsigned long long seed) {
+__global__ void initRandomVectorKernel(cuDoubleComplex* vec, int N, unsigned long long seed,
+                                       int complex_seed) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= N) return;
-    
+
     curandState state;
     curand_init(seed, idx, 0, &state);
-    
+
+    // Default: real-only seed, mirroring the CPU lanczos.cpp convention. For
+    // a Hermitian, real H, a real Krylov space is mathematically sufficient
+    // and lets cuSPARSE/cuBLAS stay on real arithmetic where applicable.
+    // Set complex_seed=1 (host-side ED_LANCZOS_COMPLEX_SEED=1) to recover
+    // the legacy fully-complex behavior, e.g. for testing.
     double real_part = curand_normal_double(&state);
-    double imag_part = curand_normal_double(&state);
-    
+    double imag_part = complex_seed ? curand_normal_double(&state) : 0.0;
+
     vec[idx] = make_cuDoubleComplex(real_part, imag_part);
 }
 
@@ -205,7 +213,9 @@ void GPULanczos::allocateMemory() {
             CUDA_CHECK(cudaMalloc(&d_lanczos_vectors_[i], vec_size));
         }
         num_stored_vectors_ = target_storage;
-        std::cout << "  Storing " << num_stored_vectors_ << " Lanczos vectors on GPU for local reorthogonalization\n";
+        const char* reorth_kind = (num_stored_vectors_ >= max_iter_) ? "FULL" : "WINDOWED";
+        std::cout << "  Storing " << num_stored_vectors_ << " Lanczos vectors on GPU"
+                  << " (max_iter=" << max_iter_ << ", reorth=" << reorth_kind << ")\n";
         std::cout << "  GPU Memory: " << (free_mem / (1024.0 * 1024.0 * 1024.0)) << " GB free, "
                   << "using " << ((num_stored_vectors_ * vec_size) / (1024.0 * 1024.0 * 1024.0)) << " GB for basis storage\n";
 
@@ -260,16 +270,23 @@ void GPULanczos::freeMemory() {
 
 void GPULanczos::initializeRandomVector(cuDoubleComplex* d_vec, unsigned long long seed) {
     int num_blocks = (dimension_ + BLOCK_SIZE - 1) / BLOCK_SIZE;
-    
+
     // Use provided seed for reproducibility, or random seed if 0
     unsigned long long actual_seed = (seed == 0) ? std::random_device{}() : seed;
-    
+
+    // Honour the same real-only-seed convention as the CPU lanczos. The env
+    // var ED_LANCZOS_COMPLEX_SEED=1 forces a fully complex starting vector
+    // (legacy behaviour). Default is real-only so the real-arith fast path
+    // can be taken throughout the Krylov space when H is real Hermitian.
+    const char* cs = std::getenv("ED_LANCZOS_COMPLEX_SEED");
+    const int complex_seed = (cs && cs[0] == '1') ? 1 : 0;
+
     GPULanczosKernels::initRandomVectorKernel<<<num_blocks, BLOCK_SIZE>>>(
-        d_vec, dimension_, actual_seed);
-    
+        d_vec, dimension_, actual_seed, complex_seed);
+
     CUDA_CHECK(cudaGetLastError());
     CUDA_CHECK(cudaDeviceSynchronize());
-    
+
     normalizeVector(d_vec);
 }
 
@@ -314,21 +331,50 @@ void GPULanczos::vectorAxpy(const cuDoubleComplex* d_x, cuDoubleComplex* d_y,
                             &alpha, d_x, 1, d_y, 1));
 }
 
-// Reorthogonalization with configurable modes:
-// - FULL: Orthogonalize against ALL stored vectors (most stable, O(n*m) per iteration)
-// - LOCAL: Orthogonalize against last few vectors only (faster but less stable)
-// - DOUBLE: Apply orthogonalization twice for better numerical stability
-void GPULanczos::orthogonalize(cuDoubleComplex* d_vec, int iter, 
+// Reorthogonalization against the GPU-resident Lanczos basis.
+//
+// Window size: min(iter, num_stored_vectors_). When num_stored_vectors_ ==
+// max_iter_ (the common case — see allocateMemory()) this IS full
+// reorthogonalization; when GPU memory could only hold a prefix it degrades
+// gracefully to "reorth against the last num_stored_vectors_ vectors". The
+// runtime warning below fires once when that degradation is in effect, so
+// users are not silently running with windowed reorth.
+//
+// Two-pass DGKS is applied below: project out overlaps above
+// ortho_threshold, then re-project anything still above 1e-15.
+void GPULanczos::orthogonalize(cuDoubleComplex* d_vec, int iter,
                                std::vector<std::vector<double>>& omega,
                                const std::vector<double>& alpha,
                                const std::vector<double>& beta,
                                double ortho_threshold) {
-    CUDA_CHECK(cudaEventRecord(ortho_timing_start_));
-    
+    // Per-call orthogonalization timing forces a host/GPU sync via
+    // cudaEventSynchronize, which serializes the entire Lanczos pipeline.
+    // Make it opt-in via ED_GPU_TIMING=1 (same convention as matVecGPU).
+    static const bool timing_enabled = []() {
+        const char* s = std::getenv("ED_GPU_TIMING");
+        return (s && s[0] == '1');
+    }();
+    if (timing_enabled) {
+        CUDA_CHECK(cudaEventRecord(ortho_timing_start_));
+    }
+
     if (num_stored_vectors_ > 0 && iter > 0) {
-        // IMPROVED: Use FULL reorthogonalization for better stability
-        // For large systems, orthogonality loss is the main source of spurious eigenvalues
-        int num_check = std::min(iter, num_stored_vectors_);  // All stored vectors, not just 10
+        // Window size = min(iter, num_stored_vectors_). Equals 'iter' (full
+        // reorth) when the basis fits in GPU memory; otherwise falls back to
+        // the last num_stored_vectors_ vectors (windowed reorth).
+        int num_check = std::min(iter, num_stored_vectors_);
+
+        // Fire the windowed-reorth warning ONCE when we first wrap the
+        // ring buffer, so users aren't surprised by reduced numerical
+        // stability when iter > num_stored_vectors_.
+        static bool warned_once = false;
+        if (!warned_once && iter > num_stored_vectors_) {
+            warned_once = true;
+            std::cerr << "[GPULanczos] Note: iter=" << iter << " exceeds GPU basis buffer ("
+                      << num_stored_vectors_ << "). Reorthogonalization is now WINDOWED "
+                      << "against the last " << num_stored_vectors_ << " vectors. "
+                      << "Increase GPU memory or reduce max_iter for full reorth.\n";
+        }
         
         // Use batched approach when there are enough vectors (better GPU utilization)
         const int BATCH_THRESHOLD = 4;
@@ -337,9 +383,23 @@ void GPULanczos::orthogonalize(cuDoubleComplex* d_vec, int iter,
                                  (d_ortho_overlaps_ != nullptr);
 
         if (use_batched) {
-            // BATCHED ORTHOGONALIZATION: More efficient for multiple vectors
+            // BATCHED ON-DEVICE DGKS ORTHOGONALIZATION
+            //
+            // Previous version copied the m overlaps to the host, branched
+            // on |overlap| > threshold per-vector, and issued m separate
+            // axpy launches — forcing an implicit sync per call and
+            // serializing the pipeline. The fused path keeps everything
+            // on the device:
+            //   1. batchedDotProductKernel computes all m overlaps.
+            //   2. batchedOrthogonalizeKernel applies all m corrections
+            //      in one launch (overlaps below 1e-15 contribute nothing
+            //      meaningful, so we always apply both passes; this is
+            //      what cuBLAS-based eigensolvers like SLEPc-CUDA do).
+            // The threshold parameter is retained for API stability but
+            // its host-side use has been removed.
+            (void)ortho_threshold;
+            (void)omega;
 
-            // Collect pointers to the basis vectors we want to orthogonalize against
             std::vector<cuDoubleComplex*> h_basis_ptrs(num_check);
             for (int i = 0; i < num_check; ++i) {
                 int src_idx = std::max(0, iter - num_check) + i;
@@ -350,59 +410,29 @@ void GPULanczos::orthogonalize(cuDoubleComplex* d_vec, int iter,
                                  static_cast<size_t>(num_check) * sizeof(cuDoubleComplex*),
                                  cudaMemcpyHostToDevice));
 
-            // Launch batched dot product kernel
-            // Each block handles one basis vector
-            int threads_per_block = 256;
-            size_t shared_mem = 2 * threads_per_block * sizeof(double);
+            const int threads_per_block = 256;
+            const size_t shared_mem = 2 * threads_per_block * sizeof(double);
+            const int axpy_blocks = (dimension_ + threads_per_block - 1) / threads_per_block;
+
+            // ---- Pass 1 ----
             GPULanczosKernels::batchedDotProductKernel<<<num_check, threads_per_block, shared_mem>>>(
                 d_ortho_basis_ptrs_, d_vec, d_ortho_overlaps_, num_check, dimension_);
             CUDA_CHECK(cudaGetLastError());
+            GPULanczosKernels::batchedOrthogonalizeKernel<<<axpy_blocks, threads_per_block>>>(
+                d_ortho_basis_ptrs_, d_vec, d_ortho_overlaps_, num_check, dimension_);
+            CUDA_CHECK(cudaGetLastError());
 
-            // Copy overlaps back to host to check threshold
-            std::vector<cuDoubleComplex> h_overlaps(num_check);
-            CUDA_CHECK(cudaMemcpy(h_overlaps.data(), d_ortho_overlaps_,
-                                 static_cast<size_t>(num_check) * sizeof(cuDoubleComplex),
-                                 cudaMemcpyDeviceToHost));
-            
-            // Count significant overlaps and apply corrections
-            int num_reorthed = 0;
-            for (int i = 0; i < num_check; ++i) {
-                double overlap_mag = sqrt(cuCreal(h_overlaps[i]) * cuCreal(h_overlaps[i]) + 
-                                         cuCimag(h_overlaps[i]) * cuCimag(h_overlaps[i]));
-                if (overlap_mag > ortho_threshold) {
-                    // Apply correction: vec -= overlap * basis[i]
-                    cuDoubleComplex neg_overlap = make_cuDoubleComplex(-cuCreal(h_overlaps[i]), 
-                                                                       -cuCimag(h_overlaps[i]));
-                    vectorAxpy(h_basis_ptrs[i], d_vec, neg_overlap);
-                    num_reorthed++;
-                }
-            }
-            
-            if (num_reorthed > 0) {
-                stats_.selective_reorth_count++;
-                stats_.total_reorth_ops += num_reorthed;
-                
-                // DOUBLE ORTHOGONALIZATION: Apply a second pass for numerical stability
-                // This is crucial for large systems where single pass can miss residual overlaps
-                GPULanczosKernels::batchedDotProductKernel<<<num_check, threads_per_block, shared_mem>>>(
-                    d_ortho_basis_ptrs_, d_vec, d_ortho_overlaps_, num_check, dimension_);
-                CUDA_CHECK(cudaGetLastError());
+            // ---- Pass 2 (DGKS) ----
+            GPULanczosKernels::batchedDotProductKernel<<<num_check, threads_per_block, shared_mem>>>(
+                d_ortho_basis_ptrs_, d_vec, d_ortho_overlaps_, num_check, dimension_);
+            CUDA_CHECK(cudaGetLastError());
+            GPULanczosKernels::batchedOrthogonalizeKernel<<<axpy_blocks, threads_per_block>>>(
+                d_ortho_basis_ptrs_, d_vec, d_ortho_overlaps_, num_check, dimension_);
+            CUDA_CHECK(cudaGetLastError());
 
-                CUDA_CHECK(cudaMemcpy(h_overlaps.data(), d_ortho_overlaps_,
-                                     static_cast<size_t>(num_check) * sizeof(cuDoubleComplex),
-                                     cudaMemcpyDeviceToHost));
-                
-                for (int i = 0; i < num_check; ++i) {
-                    double overlap_mag = sqrt(cuCreal(h_overlaps[i]) * cuCreal(h_overlaps[i]) + 
-                                             cuCimag(h_overlaps[i]) * cuCimag(h_overlaps[i]));
-                    if (overlap_mag > 1e-15) {  // Tighter threshold for second pass
-                        cuDoubleComplex neg_overlap = make_cuDoubleComplex(-cuCreal(h_overlaps[i]), 
-                                                                           -cuCimag(h_overlaps[i]));
-                        vectorAxpy(h_basis_ptrs[i], d_vec, neg_overlap);
-                        stats_.total_reorth_ops++;
-                    }
-                }
-            }
+            // Bookkeeping (approximate: we always apply both passes now)
+            stats_.selective_reorth_count++;
+            stats_.total_reorth_ops += 2 * num_check;
 
         } else {
             // SEQUENTIAL APPROACH: More efficient for small number of vectors
@@ -440,12 +470,14 @@ void GPULanczos::orthogonalize(cuDoubleComplex* d_vec, int iter,
         }
     }
     
-    CUDA_CHECK(cudaEventRecord(ortho_timing_stop_));
-    CUDA_CHECK(cudaEventSynchronize(ortho_timing_stop_));
-    
-    float milliseconds = 0;
-    CUDA_CHECK(cudaEventElapsedTime(&milliseconds, ortho_timing_start_, ortho_timing_stop_));
-    stats_.ortho_time += milliseconds / 1000.0;
+    if (timing_enabled) {
+        CUDA_CHECK(cudaEventRecord(ortho_timing_stop_));
+        CUDA_CHECK(cudaEventSynchronize(ortho_timing_stop_));
+
+        float milliseconds = 0;
+        CUDA_CHECK(cudaEventElapsedTime(&milliseconds, ortho_timing_start_, ortho_timing_stop_));
+        stats_.ortho_time += milliseconds / 1000.0;
+    }
 }
 
 void GPULanczos::run(int num_eigenvalues,
@@ -491,8 +523,6 @@ void GPULanczos::run(int num_eigenvalues,
     const double ortho_threshold = sqrt_eps; // ~1.5e-8
     std::vector<std::vector<double>> omega; // Placeholder for compatibility (not used with fixed version)
     
-    // Statistics
-    stats_.full_reorth_count = 0;
     stats_.selective_reorth_count = 0;
     stats_.total_reorth_ops = 0;
     
@@ -778,38 +808,84 @@ void GPULanczos::run(int num_eigenvalues,
 void GPULanczos::solveTridiagonal(int m, int num_eigs,
                                  std::vector<double>& eigenvalues,
                                  std::vector<std::vector<double>>& eigenvectors) {
-    
-    // Use Eigen to solve tridiagonal system
-    Eigen::MatrixXd T = Eigen::MatrixXd::Zero(m, m);
-    
-    for (int i = 0; i < m; ++i) {
-        T(i, i) = alpha_[i];
-        if (i < m - 1) {
-            T(i, i+1) = beta_[i];
-            T(i+1, i) = beta_[i];
-        }
-    }
-    
-    Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> solver(T);
-    
-    if (solver.info() != Eigen::Success) {
-        std::cerr << "Eigenvalue computation failed!\n";
+    if (m <= 0) {
+        eigenvalues.clear();
+        eigenvectors.clear();
         return;
     }
-    
-    // Extract lowest eigenvalues
-    int n_eigs = std::min(num_eigs, m);
-    eigenvalues.resize(n_eigs);
-    eigenvectors.resize(n_eigs);
-    
-    for (int i = 0; i < n_eigs; ++i) {
-        eigenvalues[i] = solver.eigenvalues()(i);
-        eigenvectors[i].resize(m);
-        for (int j = 0; j < m; ++j) {
-            eigenvectors[i][j] = solver.eigenvectors()(j, i);
+
+    const int n_eigs = std::min(num_eigs, m);
+
+    // For tridiagonal eigenproblems, dstemr (MRRR) is the SOTA partial-spectrum
+    // solver: O(m * n_eigs) work and O(m) per-eigenvector storage instead of
+    // O(m^3)/O(m^2) for dense Jacobi/QR via Eigen::SelfAdjointEigenSolver.
+    // For small m (< 32) the dstemr setup constants don't pay off; fall back
+    // to dstevd (D&C), which is what Eigen's solver effectively does, but
+    // routed through tuned LAPACK rather than Eigen's portable implementation.
+    const bool use_dstemr = (m >= 32) && (n_eigs * 2 < m);
+
+    std::vector<double> diag(m);
+    std::vector<double> offdiag(m);  // dstemr requires m entries (last is workspace)
+    for (int i = 0; i < m; ++i) {
+        diag[i] = alpha_[i];
+        offdiag[i] = (i + 1 < m) ? beta_[i] : 0.0;
+    }
+
+    // Eigenvectors of the tridiagonal: column-major (m x n_eigs) for both paths
+    // (dstemr writes only the first n_eigs columns; dstevd writes all m, of
+    // which we discard the last m - n_eigs).
+    const lapack_int ldz = m;
+    eigenvalues.assign(n_eigs, 0.0);
+    eigenvectors.assign(n_eigs, std::vector<double>(m, 0.0));
+
+    if (use_dstemr) {
+        std::vector<double> w(m, 0.0);
+        std::vector<double> z(static_cast<size_t>(m) * n_eigs, 0.0);
+        std::vector<lapack_int> isuppz(2 * std::max(1, n_eigs), 0);
+        lapack_int m_found = 0;
+        lapack_logical tryrac = 1;
+
+        lapack_int info = LAPACKE_dstemr(
+            LAPACK_COL_MAJOR, 'V', 'I', static_cast<lapack_int>(m),
+            diag.data(), offdiag.data(),
+            /*vl=*/0.0, /*vu=*/0.0,
+            /*il=*/1, /*iu=*/static_cast<lapack_int>(n_eigs),
+            &m_found, w.data(),
+            z.data(), ldz, static_cast<lapack_int>(n_eigs),
+            isuppz.data(), &tryrac);
+
+        if (info != 0) {
+            throw std::runtime_error(
+                "GPULanczos::solveTridiagonal: LAPACKE_dstemr failed with info="
+                + std::to_string(info));
+        }
+
+        for (int i = 0; i < n_eigs; ++i) {
+            eigenvalues[i] = w[i];
+            for (int j = 0; j < m; ++j) {
+                eigenvectors[i][j] = z[j + static_cast<size_t>(i) * m];
+            }
+        }
+    } else {
+        std::vector<double> z(static_cast<size_t>(m) * m, 0.0);
+        lapack_int info = LAPACKE_dstevd(
+            LAPACK_COL_MAJOR, 'V', static_cast<lapack_int>(m),
+            diag.data(), offdiag.data(), z.data(), ldz);
+
+        if (info != 0) {
+            throw std::runtime_error(
+                "GPULanczos::solveTridiagonal: LAPACKE_dstevd failed with info="
+                + std::to_string(info));
+        }
+
+        for (int i = 0; i < n_eigs; ++i) {
+            eigenvalues[i] = diag[i];
+            for (int j = 0; j < m; ++j) {
+                eigenvectors[i][j] = z[j + static_cast<size_t>(i) * m];
+            }
         }
     }
-    
+
     std::cout << "\nLowest " << n_eigs << " eigenvalues:\n";
     for (int i = 0; i < n_eigs; ++i) {
         std::cout << "  E[" << i << "] = " << eigenvalues[i] << "\n";
@@ -823,13 +899,20 @@ void GPULanczos::computeRitzVectors(
     
     std::cout << "\nComputing Ritz vectors...\n";
     
-    // Safety check: can only compute Ritz vectors if all needed Lanczos vectors are stored
-    size_t num_lanczos_vecs_needed = tridiag_eigenvecs.empty() ? 0 : tridiag_eigenvecs[0].size();
+    // Hard fail (rather than silently producing zero vectors) when the
+    // Lanczos vector buffer is too small. Returning empty / zero Ritz
+    // vectors silently corrupts downstream observables and TPQ/FTLM
+    // sampling without any signal to the caller. The caller MUST either
+    // increase num_stored_vectors_ or reduce max_iterations to fit.
+    const size_t num_lanczos_vecs_needed =
+        tridiag_eigenvecs.empty() ? 0 : tridiag_eigenvecs[0].size();
     if (num_lanczos_vecs_needed > static_cast<size_t>(num_stored_vectors_)) {
-        std::cerr << "Warning: Cannot compute Ritz vectors - not enough Lanczos vectors stored\n";
-        std::cerr << "  Need: " << num_lanczos_vecs_needed << ", have: " << num_stored_vectors_ << "\n";
-        std::cerr << "  Increase GPU memory allocation or reduce max_iterations\n";
-        return;
+        throw std::runtime_error(
+            "GPULanczos::computeRitzVectors: Lanczos vector buffer overflow. "
+            "Need " + std::to_string(num_lanczos_vecs_needed) +
+            " Lanczos vectors but only " + std::to_string(num_stored_vectors_) +
+            " are stored. Increase GPU memory allocation (num_stored_vectors_) "
+            "or reduce max_iterations so the Krylov dimension fits.");
     }
     
     eigenvectors.resize(num_vecs);

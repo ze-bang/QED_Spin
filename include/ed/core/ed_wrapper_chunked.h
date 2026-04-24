@@ -236,13 +236,8 @@ inline EDResults exact_diagonalization_chunked_symmetry(
                                 size_t k = it->second;
                                 const auto& state_k = sector.basis_states[k];
                                 
-                                Complex beta_s_prime(0.0, 0.0);
-                                for (size_t idx = 0; idx < state_k.orbit_elements.size(); ++idx) {
-                                    if (state_k.orbit_elements[idx] == s_prime) {
-                                        beta_s_prime = state_k.orbit_coefficients[idx];
-                                        break;
-                                    }
-                                }
+                                // O(log |orbit|) binary search instead of linear scan.
+                                const Complex beta_s_prime = state_k.findCoeff(s_prime);
                                 
                                 out[k] += prefactor * h_element * std::conj(beta_s_prime) * group_norm / state_k.norm;
                             }
@@ -510,13 +505,8 @@ inline EDResults exact_diagonalization_chunked_symmetry_fixed_sz(
                                 size_t k = it->second;
                                 const auto& state_k = sector.basis_states[k];
                                 
-                                Complex beta_s_prime(0.0, 0.0);
-                                for (size_t idx = 0; idx < state_k.orbit_elements.size(); ++idx) {
-                                    if (state_k.orbit_elements[idx] == s_prime) {
-                                        beta_s_prime = state_k.orbit_coefficients[idx];
-                                        break;
-                                    }
-                                }
+                                // O(log |orbit|) binary search instead of linear scan.
+                                const Complex beta_s_prime = state_k.findCoeff(s_prime);
                                 
                                 out[k] += prefactor * h_element * std::conj(beta_s_prime) * group_norm / state_k.norm;
                             }

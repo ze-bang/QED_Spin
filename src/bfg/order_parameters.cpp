@@ -261,12 +261,23 @@ VBSResult compute_vbs_order(
 
                     if (N_a == 0 || N_b == 0) continue;
 
-                    Complex overlap = 0.0;
-                    for (size_t s = 0; s < psi.size(); ++s) {
-                        overlap +=
-                            std::conj(D_q_psi_xy[alpha][s]) *
-                            D_q_psi_xy[beta][s];
+                    // OpenMP reduction over the (potentially huge)
+                    // many-body Hilbert sum. Splitting into real+imag
+                    // accumulators because OpenMP cannot reduce on
+                    // `std::complex` directly. Same pattern below for
+                    // the Heisenberg overlap.
+                    double ovl_re = 0.0;
+                    double ovl_im = 0.0;
+                    const Complex* a_ptr = D_q_psi_xy[alpha].data();
+                    const Complex* b_ptr = D_q_psi_xy[beta].data();
+                    const std::size_t Ns = psi.size();
+                    #pragma omp parallel for reduction(+:ovl_re, ovl_im) schedule(static)
+                    for (std::size_t s = 0; s < Ns; ++s) {
+                        const Complex c = std::conj(a_ptr[s]) * b_ptr[s];
+                        ovl_re += c.real();
+                        ovl_im += c.imag();
                     }
+                    Complex overlap(ovl_re, ovl_im);
 
                     Complex connected = overlap -
                         std::conj(D_q_expect_xy[alpha]) * D_q_expect_xy[beta];
@@ -285,10 +296,11 @@ VBSResult compute_vbs_order(
             result.S_d_xy_oriented[ik] = s_d_xy_orient;
             result.S_d_xy[ik] = s_d_total / static_cast<double>(n_bonds);
 
-            // Heisenberg via Fourier-applied dimer kernel.
-            auto [D_q_psi_heis_all, D_q_expect_heis_all] =
-                apply_heisenberg_dimer_fourier(psi, edges, all_bond_centers, q);
-
+            // Heisenberg via Fourier-applied dimer kernel. Applied per
+            // orientation below; the previous all-bonds invocation that
+            // sat here was dead -- its (D_q_psi_heis_all, D_q_expect_heis_all)
+            // outputs were never read, but the call itself is O(n_bonds × N)
+            // and is the most expensive primitive in this loop.
             std::array<double, 6> s_d_heis_orient = {};
             double s_d_heis_total = 0.0;
 
@@ -315,12 +327,18 @@ VBSResult compute_vbs_order(
 
                     if (N_a == 0 || N_b == 0) continue;
 
-                    Complex overlap = 0.0;
-                    for (size_t s = 0; s < psi.size(); ++s) {
-                        overlap +=
-                            std::conj(D_q_psi_heis[alpha][s]) *
-                            D_q_psi_heis[beta][s];
+                    double ovl_re = 0.0;
+                    double ovl_im = 0.0;
+                    const Complex* a_ptr = D_q_psi_heis[alpha].data();
+                    const Complex* b_ptr = D_q_psi_heis[beta].data();
+                    const std::size_t Ns = psi.size();
+                    #pragma omp parallel for reduction(+:ovl_re, ovl_im) schedule(static)
+                    for (std::size_t s = 0; s < Ns; ++s) {
+                        const Complex c = std::conj(a_ptr[s]) * b_ptr[s];
+                        ovl_re += c.real();
+                        ovl_im += c.imag();
                     }
+                    Complex overlap(ovl_re, ovl_im);
 
                     Complex connected = overlap -
                         std::conj(D_q_expect_heis[alpha]) * D_q_expect_heis[beta];
@@ -417,10 +435,20 @@ VBSResult compute_vbs_order(
                         D_q_expect += std::exp(kI * phase_arg) *
                                       xy_bond_exp.at(edges[b]);
                     }
-                    Complex overlap = 0.0;
-                    for (size_t s = 0; s < psi.size(); ++s) {
-                        overlap += std::conj(D_q_psi[s]) * D_q_psi[s];
+                    // |D_q_psi|^2 reduction over the full Hilbert space.
+                    // Real-only since |c|^2 = c.real()^2 + c.imag()^2.
+                    double ovl_re = 0.0;
+                    {
+                        const Complex* p = D_q_psi.data();
+                        const std::size_t Ns = psi.size();
+                        #pragma omp parallel for reduction(+:ovl_re) schedule(static)
+                        for (std::size_t s = 0; s < Ns; ++s) {
+                            const double re = p[s].real();
+                            const double im = p[s].imag();
+                            ovl_re += re * re + im * im;
+                        }
                     }
+                    Complex overlap(ovl_re, 0.0);
                     result.S_d_xy_2d[i1][i2] =
                         (overlap - std::norm(D_q_expect)) /
                         static_cast<double>(n_bonds);
@@ -428,10 +456,18 @@ VBSResult compute_vbs_order(
                     auto [D_q_psi_h, D_q_expect_h] =
                         apply_heisenberg_dimer_fourier(
                             psi, edges, all_bond_centers, qvec);
-                    Complex overlap_h = 0.0;
-                    for (size_t s = 0; s < psi.size(); ++s) {
-                        overlap_h += std::conj(D_q_psi_h[s]) * D_q_psi_h[s];
+                    double ovl_re_h = 0.0;
+                    {
+                        const Complex* p = D_q_psi_h.data();
+                        const std::size_t Ns = psi.size();
+                        #pragma omp parallel for reduction(+:ovl_re_h) schedule(static)
+                        for (std::size_t s = 0; s < Ns; ++s) {
+                            const double re = p[s].real();
+                            const double im = p[s].imag();
+                            ovl_re_h += re * re + im * im;
+                        }
                     }
+                    Complex overlap_h(ovl_re_h, 0.0);
                     result.S_d_heis_2d[i1][i2] =
                         (overlap_h - std::norm(D_q_expect_h)).real() /
                         n_bonds;

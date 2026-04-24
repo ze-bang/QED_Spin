@@ -163,23 +163,86 @@ __global__ void matVecKernelOptimized(cudaTextureObject_t tex_x_unused, cuDouble
 }
 
 /**
- * Generate basis states for fixed Sz sector using parallel Gosper's hack
+ * Constant-memory Pascal triangle for combinadic unrank.
+ *
+ * Indexed as d_pascal[n][k] = C(n, k) for 0 <= n, k <= 64. ~33.8 KiB,
+ * fits well within the 64 KiB constant-memory limit on every CUDA arch
+ * we target. Populated once from the host via cudaMemcpyToSymbol when
+ * the first fixed-Sz operator is constructed (see ensure_pascal_uploaded
+ * below). Storage is uint64_t — C(64, 32) = 1.83e18 fits in 64 bits.
+ */
+__device__ __constant__ unsigned long long d_pascal[65][65];
+
+static __device__ __forceinline__ unsigned long long binomial_dev(int n, int k) {
+    if (k < 0 || k > n || n < 0 || n > 64) return 0ULL;
+    return d_pascal[n][k];
+}
+
+/**
+ * Combinadic unrank: O(k) per thread, total O(N * k) for the whole basis.
+ *
+ * For colex-ordered subsets of size k drawn from {0, ..., n_bits - 1}
+ * (Gosper's hack produces this order when interpreted as bit positions),
+ * the rank-r combination has positions p_{k-1} > ... > p_0 satisfying
+ *   r = sum_{i=0}^{k-1} C(p_i, i + 1).
+ * We extract them top-down: at step i, find the largest p with
+ * C(p, i+1) <= r, set bit p, subtract, recurse.
+ *
+ * Replaces the previous Gosper-walk implementation which cost O(idx)
+ * per thread (i.e. O(N^2) total work). For C(20, 10) = 184756 this is a
+ * ~5000x speedup at basis construction.
+ */
+static __device__ uint64_t unrank_combination_dev(uint64_t rank, int n_bits, int k) {
+    uint64_t state = 0ULL;
+    for (int i = k - 1; i >= 0; --i) {
+        // Find largest p in [i, n_bits - 1] with C(p, i+1) <= rank.
+        // Linear scan is O(n_bits) — fine for n_bits <= 64; binary
+        // search would shave a factor of log(n_bits) but adds branch
+        // divergence, which hurts on warps where all threads are in
+        // lock-step.
+        int p = i;
+        while (p + 1 < n_bits && binomial_dev(p + 1, i + 1) <= rank) {
+            ++p;
+        }
+        state |= (1ULL << p);
+        rank -= binomial_dev(p, i + 1);
+    }
+    return state;
+}
+
+/**
+ * Generate basis states for fixed-Sz sector via combinadic unrank.
+ *
+ * `start_state` is kept in the signature for ABI compatibility but is
+ * unused — the unrank is rooted at colex rank 0 = (1ULL << n_up) - 1
+ * (the lowest-popcount-n_up state), matching the previous behavior.
  */
 __global__ void generateFixedSzBasisKernel(uint64_t* basis_states, int n_bits, int n_up,
-                                          uint64_t start_state, int num_states) {
+                                          uint64_t /*start_state*/, int num_states) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= num_states) return;
-    
-    // Each thread generates one basis state
-    uint64_t state = start_state;
-    
-    // Skip ahead to this thread's state
-    for (int i = 0; i < idx; ++i) {
-        state = next_combination(state);
-        if (state >= (1ULL << n_bits)) return;
+    basis_states[idx] = unrank_combination_dev(static_cast<uint64_t>(idx), n_bits, n_up);
+}
+
+/**
+ * Host-callable: upload Pascal triangle to constant memory. Idempotent
+ * via a static flag — multiple GPUFixedSzOperator constructions share
+ * the same uploaded table.
+ */
+void ensure_pascal_uploaded() {
+    static bool uploaded = false;
+    if (uploaded) return;
+    unsigned long long h_pascal[65][65] = {};
+    for (int n = 0; n <= 64; ++n) {
+        h_pascal[n][0] = 1ULL;
+        for (int k = 1; k <= n; ++k) {
+            unsigned long long left  = (k - 1 >= 0) ? h_pascal[n - 1][k - 1] : 0ULL;
+            unsigned long long right = (k < n)      ? h_pascal[n - 1][k]     : 0ULL;
+            h_pascal[n][k] = left + right;
+        }
     }
-    
-    basis_states[idx] = state;
+    cudaMemcpyToSymbol(d_pascal, h_pascal, sizeof(h_pascal));
+    uploaded = true;
 }
 
 /**

@@ -123,8 +123,18 @@ ed_results*/
 bench_bl_*/
 bench_full*/
 
+# Benchmark JSON / output artifacts written at the repo root by
+# benchmarks/bench_*.{cpp,py}. These change every run and shouldn't
+# be in version control.
+/bench_*.json
+/benchmarks/*.json
+
 # Allow tracked test fixtures back in
 !tests/fixtures/**
+
+# But automorphism_results/ subdirs are scratch outputs of the symmetry
+# pre-computation step, not authored fixtures.
+tests/fixtures/**/automorphism_results/
 
 # ---------------------------------------------------------------------------
 # Editor / IDE / OS metadata

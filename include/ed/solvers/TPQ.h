@@ -28,9 +28,12 @@
 
 #define GET_VARIABLE_NAME(Variable) (#Variable)
 
+#include <ed/solvers/tpq_seeding.h>
+using ed::tpq_per_sample_seed;
+
 /**
  * Generate a random normalized vector for TPQ initial state
- * 
+ *
  * @param N Dimension of the Hilbert space
  * @param seed Random seed to use
  * @return Random normalized vector

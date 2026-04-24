@@ -38,6 +38,20 @@ using ComplexMatrix = std::vector<ComplexVector>;
 
 ComplexVector generateRandomVector(int N, std::mt19937& gen, std::uniform_real_distribution<double>& dist);
 
+/**
+ * @brief Generate a random complex vector with i.i.d. complex Gaussian components.
+ *
+ * Each component has independent N(0,1) real and imaginary parts; the result is
+ * then L2-normalised. This is the canonical Hutchinson-style trace estimator
+ * (Jaklic & Prelovsek, PRB 49, 5065 (1994); Skilling 1989) and is statistically
+ * isotropic on the unit sphere, unlike normalised uniform-cube samples.
+ *
+ * Use this for FTLM/LTLM/TPQ-style finite-temperature random sampling.
+ * For Lanczos starting vectors (where the distribution does not matter after
+ * normalisation), generateRandomVector is equally valid.
+ */
+ComplexVector generateGaussianRandomVector(int N, std::mt19937& gen);
+
 // Generate a random complex vector that is orthogonal to all vectors in the provided set
 ComplexVector generateOrthogonalVector(int N, const std::vector<ComplexVector>& vectors, std::mt19937& gen, std::uniform_real_distribution<double>& dist);
 
@@ -118,8 +132,14 @@ void lanczos_selective_reorth(std::function<void(const Complex*, Complex*, int)>
              double tol, std::vector<double>& eigenvalues, std::string dir = "",
              bool eigenvectors = false);
 
-// Lanczos algorithm implementation with basis vectors stored on disk
-void lanczos(std::function<void(const Complex*, Complex*, int)> H, uint64_t N, uint64_t max_iter, uint64_t exct, 
+// Default Lanczos with three-vector LOCAL reorthogonalization (DGKS-style),
+// basis vectors kept in RAM by default (use ED_LANCZOS_DISK=1 for disk).
+//
+// Best for small-to-medium Krylov spaces where the three-term recurrence
+// stays numerically clean. For large max_iter, ill-conditioned spectra, or
+// when many Ritz pairs are needed simultaneously, prefer
+// lanczos_selective_reorth() (periodic full + DGKS) below.
+void lanczos(std::function<void(const Complex*, Complex*, int)> H, uint64_t N, uint64_t max_iter, uint64_t exct,
              double tol, std::vector<double>& eigenvalues, std::string dir = "",
              bool eigenvectors = false);
 

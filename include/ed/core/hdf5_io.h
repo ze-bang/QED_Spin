@@ -13,6 +13,7 @@
 #include <map>
 #include <algorithm>
 #include <filesystem>
+#include <cstdlib>
 #include <ed/core/thermal_types.h>
 
 using Complex = std::complex<double>;
@@ -80,7 +81,117 @@ using Complex = std::complex<double>;
  */
 class HDF5IO {
 public:
-    
+
+    // ============================================================================
+    // Adaptive chunking + tunable compression
+    // ============================================================================
+    //
+    // HDF5 best-practice chunking targets a chunk size in [16 KiB, 1 MiB] for
+    // good throughput against the chunk cache and the storage layer. Hardcoded
+    // chunk shapes (e.g. {100, num_cols}) silently underperform when the
+    // dataset is much smaller (one tiny chunk -> compressor overhead dominates)
+    // or much larger (millions of rows / zillions of chunks -> per-chunk
+    // metadata dominates).
+    //
+    // Tunables (env, evaluated lazily on first use):
+    //   ED_HDF5_COMPRESSION_LEVEL : 0 (off) .. 9 (max). Default: 4 (balanced).
+    //   ED_HDF5_CHUNK_TARGET_BYTES: target chunk size in bytes. Default: 256 KiB.
+    //   ED_HDF5_SHUFFLE          : 0/1 to disable/enable shuffle filter. Default: 1.
+    //
+    // Defaults are chosen for typical ED outputs (TPQ thermodynamics, MELs,
+    // streaming append): deflate-4 + shuffle gives ~70-90% of deflate-6's
+    // compression at 2-3x the encode throughput, and 256 KiB chunks leave
+    // headroom for the default 1 MiB chunk cache while keeping the chunk
+    // count below ~10 for typical run sizes.
+    static int hdf5_compression_level() {
+        static const int level = []() {
+            const char* env = std::getenv("ED_HDF5_COMPRESSION_LEVEL");
+            if (!env) return 4;
+            try { return std::clamp(std::stoi(env), 0, 9); }
+            catch (...) { return 4; }
+        }();
+        return level;
+    }
+
+    static size_t hdf5_chunk_target_bytes() {
+        static const size_t bytes = []() -> size_t {
+            const char* env = std::getenv("ED_HDF5_CHUNK_TARGET_BYTES");
+            if (!env) return 256 * 1024;
+            try {
+                long long v = std::stoll(env);
+                if (v < 16 * 1024) return 16 * 1024;
+                if (v > 16ll * 1024 * 1024) return 16 * 1024 * 1024;
+                return static_cast<size_t>(v);
+            } catch (...) { return 256 * 1024; }
+        }();
+        return bytes;
+    }
+
+    static bool hdf5_shuffle_enabled() {
+        static const bool on = []() {
+            const char* env = std::getenv("ED_HDF5_SHUFFLE");
+            return env ? (std::string(env) != "0") : true;
+        }();
+        return on;
+    }
+
+    /**
+     * @brief Build a chunked + (optionally) compressed dataset property list,
+     *        adaptively sizing the chunk to ED_HDF5_CHUNK_TARGET_BYTES.
+     *
+     * @param dims        full dimensions of the dataset (rank == dims.size())
+     * @param element_size size in bytes of one element (e.g. sizeof(double))
+     * @param last_dim_full_chunk if true, chunk the trailing axis as one block
+     *                            (typical for tabular data: chunk full row,
+     *                            many rows per chunk).
+     */
+    static H5::DSetCreatPropList makeAdaptiveDsetProps(
+        const std::vector<hsize_t>& dims,
+        size_t element_size,
+        bool last_dim_full_chunk = true)
+    {
+        H5::DSetCreatPropList plist;
+        if (dims.empty()) return plist;
+
+        // Compute chunk shape.
+        std::vector<hsize_t> chunk(dims.size());
+        if (last_dim_full_chunk && dims.size() >= 2) {
+            // Tabular: chunk = (rows_per_chunk, full_remaining_dims)
+            hsize_t row_size_elems = 1;
+            for (size_t i = 1; i < dims.size(); ++i) {
+                chunk[i] = std::max<hsize_t>(1, dims[i]);
+                row_size_elems *= chunk[i];
+            }
+            const size_t row_bytes = static_cast<size_t>(row_size_elems) * element_size;
+            hsize_t rows_per_chunk = row_bytes == 0 ? 1
+                : std::max<hsize_t>(1, hdf5_chunk_target_bytes() / std::max<size_t>(row_bytes, 1));
+            // Cap by total rows.
+            rows_per_chunk = std::min<hsize_t>(rows_per_chunk, std::max<hsize_t>(dims[0], 1));
+            chunk[0] = rows_per_chunk;
+        } else {
+            // 1D or last_dim_full_chunk=false: pick a single chunk size by bytes.
+            hsize_t total = 1;
+            for (auto d : dims) total *= std::max<hsize_t>(d, 1);
+            const size_t target_elems = std::max<size_t>(
+                hdf5_chunk_target_bytes() / std::max<size_t>(element_size, 1), 1);
+            for (size_t i = 0; i < dims.size(); ++i) {
+                chunk[i] = std::max<hsize_t>(1, std::min<hsize_t>(dims[i], target_elems));
+            }
+            (void)total;
+        }
+
+        plist.setChunk(static_cast<int>(chunk.size()), chunk.data());
+
+        const int level = hdf5_compression_level();
+        if (level > 0) {
+            // Shuffle improves compression of float/double payloads by
+            // co-locating the bytes that vary most slowly. Cheap; standard.
+            if (hdf5_shuffle_enabled()) plist.setShuffle();
+            plist.setDeflate(level);
+        }
+        return plist;
+    }
+
     // ============================================================================
     // File Management - Safe Writing Protocol
     // ============================================================================
@@ -1198,12 +1309,10 @@ public:
             hsize_t dims[2] = {total_rows, num_cols};
             hsize_t maxdims[2] = {H5S_UNLIMITED, num_cols};
             H5::DataSpace dataspace(2, dims, maxdims);
-            
-            // Create chunked dataset
-            H5::DSetCreatPropList plist;
-            hsize_t chunk_dims[2] = {100, num_cols};
-            plist.setChunk(2, chunk_dims);
-            plist.setDeflate(6);
+
+            // Adaptive chunking + tunable compression (see makeAdaptiveDsetProps).
+            H5::DSetCreatPropList plist = makeAdaptiveDsetProps(
+                {dims[0], dims[1]}, sizeof(double));
             
             H5::DataSet dataset = file.createDataSet(dataset_path, 
                                                       H5::PredType::NATIVE_DOUBLE, 
@@ -1286,12 +1395,10 @@ public:
             hsize_t dims[2] = {total_rows, num_cols};
             hsize_t maxdims[2] = {H5S_UNLIMITED, num_cols};
             H5::DataSpace dataspace(2, dims, maxdims);
-            
-            // Create chunked dataset
-            H5::DSetCreatPropList plist;
-            hsize_t chunk_dims[2] = {100, num_cols};
-            plist.setChunk(2, chunk_dims);
-            plist.setDeflate(6);
+
+            // Adaptive chunking + tunable compression (see makeAdaptiveDsetProps).
+            H5::DSetCreatPropList plist = makeAdaptiveDsetProps(
+                {dims[0], dims[1]}, sizeof(double));
             
             H5::DataSet dataset = file.createDataSet(dataset_path, 
                                                       H5::PredType::NATIVE_DOUBLE, 
@@ -1383,11 +1490,9 @@ public:
                 hsize_t maxdims[2] = {H5S_UNLIMITED, num_cols};
                 H5::DataSpace dataspace(2, dims, maxdims);
                 
-                // Enable chunking for extensible dataset
-                H5::DSetCreatPropList plist;
-                hsize_t chunk_dims[2] = {100, num_cols};  // Chunk by 100 rows
-                plist.setChunk(2, chunk_dims);
-                plist.setDeflate(6);  // Compression level
+                // Adaptive chunking + tunable compression (see makeAdaptiveDsetProps).
+                H5::DSetCreatPropList plist = makeAdaptiveDsetProps(
+                    {dims[0], dims[1]}, sizeof(double));
                 
                 H5::DataSet dataset = file.createDataSet(dataset_path, 
                                                          H5::PredType::NATIVE_DOUBLE, 
@@ -1458,11 +1563,9 @@ public:
                     hsize_t new_dims[2] = {new_rows, num_cols};
                     hsize_t maxdims[2] = {H5S_UNLIMITED, num_cols};
                     H5::DataSpace new_dataspace(2, new_dims, maxdims);
-                    
-                    H5::DSetCreatPropList plist;
-                    hsize_t chunk_dims[2] = {100, num_cols};
-                    plist.setChunk(2, chunk_dims);
-                    plist.setDeflate(6);
+
+                    H5::DSetCreatPropList plist = makeAdaptiveDsetProps(
+                        {new_dims[0], new_dims[1]}, sizeof(double));
                     
                     H5::DataSet new_dataset = file.createDataSet(dataset_path, 
                                                                   H5::PredType::NATIVE_DOUBLE, 
@@ -1539,11 +1642,10 @@ public:
                 hsize_t dims[2] = {1, num_cols};
                 hsize_t maxdims[2] = {H5S_UNLIMITED, num_cols};
                 H5::DataSpace dataspace(2, dims, maxdims);
-                
-                H5::DSetCreatPropList plist;
-                hsize_t chunk_dims[2] = {100, num_cols};
-                plist.setChunk(2, chunk_dims);
-                plist.setDeflate(6);
+
+                // Adaptive chunking + tunable compression (see makeAdaptiveDsetProps).
+                H5::DSetCreatPropList plist = makeAdaptiveDsetProps(
+                    {dims[0], dims[1]}, sizeof(double));
                 
                 H5::DataSet dataset = file.createDataSet(dataset_path, 
                                                          H5::PredType::NATIVE_DOUBLE, 
@@ -1611,11 +1713,9 @@ public:
                     hsize_t new_dims[2] = {new_rows, num_cols};
                     hsize_t maxdims[2] = {H5S_UNLIMITED, num_cols};
                     H5::DataSpace new_dataspace(2, new_dims, maxdims);
-                    
-                    H5::DSetCreatPropList plist;
-                    hsize_t chunk_dims[2] = {100, num_cols};
-                    plist.setChunk(2, chunk_dims);
-                    plist.setDeflate(6);
+
+                    H5::DSetCreatPropList plist = makeAdaptiveDsetProps(
+                        {new_dims[0], new_dims[1]}, sizeof(double));
                     
                     H5::DataSet new_dataset = file.createDataSet(dataset_path, 
                                                                   H5::PredType::NATIVE_DOUBLE, 
@@ -1691,15 +1791,14 @@ public:
                 data[i * num_cols + 4] = static_cast<double>(points[i].step);
             }
             
-            // Create chunked extensible dataset (allows later appending)
+            // Create chunked extensible dataset (allows later appending).
+            // Adaptive chunking + tunable compression via makeAdaptiveDsetProps.
             hsize_t dims[2] = {num_rows, num_cols};
             hsize_t maxdims[2] = {H5S_UNLIMITED, num_cols};
             H5::DataSpace dataspace(2, dims, maxdims);
-            
-            H5::DSetCreatPropList plist;
-            hsize_t chunk_dims[2] = {100, num_cols};  // Chunk by 100 rows
-            plist.setChunk(2, chunk_dims);
-            plist.setDeflate(6);
+
+            H5::DSetCreatPropList plist = makeAdaptiveDsetProps(
+                {dims[0], dims[1]}, sizeof(double));
             
             H5::DataSet dataset = file.createDataSet(dataset_path, 
                                                      H5::PredType::NATIVE_DOUBLE, 
@@ -1765,15 +1864,14 @@ public:
                 data[i * num_cols + 3] = static_cast<double>(points[i].step);
             }
             
-            // Create chunked extensible dataset (allows later appending)
+            // Create chunked extensible dataset (allows later appending).
+            // Adaptive chunking + tunable compression via makeAdaptiveDsetProps.
             hsize_t dims[2] = {num_rows, num_cols};
             hsize_t maxdims[2] = {H5S_UNLIMITED, num_cols};
             H5::DataSpace dataspace(2, dims, maxdims);
-            
-            H5::DSetCreatPropList plist;
-            hsize_t chunk_dims[2] = {100, num_cols};  // Chunk by 100 rows
-            plist.setChunk(2, chunk_dims);
-            plist.setDeflate(6);
+
+            H5::DSetCreatPropList plist = makeAdaptiveDsetProps(
+                {dims[0], dims[1]}, sizeof(double));
             
             H5::DataSet dataset = file.createDataSet(dataset_path, 
                                                      H5::PredType::NATIVE_DOUBLE, 

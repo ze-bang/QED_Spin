@@ -203,8 +203,12 @@ void GPUKrylovSchur::initializeRandomVector(cuDoubleComplex* d_vec, unsigned lon
     int num_blocks = (dimension_ + BLOCK_SIZE - 1) / BLOCK_SIZE;
     // Use provided seed for reproducibility, or random seed if 0
     unsigned long long actual_seed = (seed == 0) ? std::random_device{}() : seed;
+    // Real-only seed by default; ED_LANCZOS_COMPLEX_SEED=1 reverts to legacy
+    // complex behaviour. See GPULanczos::initializeRandomVector for rationale.
+    const char* cs = std::getenv("ED_LANCZOS_COMPLEX_SEED");
+    const int complex_seed = (cs && cs[0] == '1') ? 1 : 0;
     GPULanczosKernels::initRandomVectorKernel<<<num_blocks, BLOCK_SIZE>>>(
-        d_vec, dimension_, actual_seed);
+        d_vec, dimension_, actual_seed, complex_seed);
     CUDA_CHECK(cudaGetLastError());
     CUDA_CHECK(cudaDeviceSynchronize());
     normalizeVector(d_vec);
@@ -471,29 +475,33 @@ bool GPUKrylovSchur::solveProjectedEigenproblem(int m, std::vector<double>& eige
 
 int GPUKrylovSchur::checkConvergence(int m, int k, double beta_m) {
     // For each Ritz pair (lambda_i, y_i), the residual is:
-    // ||H * V * y_i - lambda_i * V * y_i|| = |beta_m * y_i[m-1]|
-    // where y_i[m-1] is the last component of the Ritz vector
-    
-    // Get eigenvectors from device (stored in d_evecs_)
-    std::vector<cuDoubleComplex> h_evecs(m * m);
-    CUDA_CHECK(cudaMemcpy(h_evecs.data(), d_evecs_, 
-                         m * m * sizeof(cuDoubleComplex), cudaMemcpyDeviceToHost));
-    
+    //   ||H * V * y_i - lambda_i * V * y_i|| = |beta_m * y_i[m-1]|
+    // We only need the *last component* of each eigenvector, not all m
+    // components. Pull k strided doubles instead of m*m complexes.
+    const int n_check = std::min(k, m);
+    if (n_check <= 0) return 0;
+
+    std::vector<cuDoubleComplex> last_components(n_check);
+    // Source: row (m-1), columns 0..n_check-1 of the column-major (m x m) matrix.
+    // Strided D2H: pitch = m * sizeof(cuDoubleComplex), one element per column.
+    CUDA_CHECK(cudaMemcpy2D(
+        last_components.data(),                                  // dst
+        sizeof(cuDoubleComplex),                                 // dpitch
+        d_evecs_ + (m - 1),                                      // src start (offset to row m-1)
+        static_cast<size_t>(m) * sizeof(cuDoubleComplex),        // spitch (bytes per column)
+        sizeof(cuDoubleComplex),                                 // width per row in bytes
+        n_check,                                                 // height (#cols)
+        cudaMemcpyDeviceToHost));
+
     int num_converged = 0;
-    for (int i = 0; i < k && i < m; i++) {
-        // Get last component of eigenvector i
-        // Eigenvectors are stored column-major, so eigenvector i is at columns h_evecs[i*m : (i+1)*m]
-        cuDoubleComplex last_component = h_evecs[(m - 1) + i * m];
-        double residual = beta_m * sqrt(cuCreal(last_component) * cuCreal(last_component) +
-                                       cuCimag(last_component) * cuCimag(last_component));
-        
-        if (residual < tolerance_) {
-            num_converged++;
-        }
-        
+    for (int i = 0; i < n_check; i++) {
+        const cuDoubleComplex c = last_components[i];
+        const double residual = beta_m * sqrt(cuCreal(c) * cuCreal(c) +
+                                              cuCimag(c) * cuCimag(c));
+        if (residual < tolerance_) num_converged++;
         stats_.final_residual = std::max(stats_.final_residual, residual);
     }
-    
+
     return num_converged;
 }
 
@@ -505,31 +513,17 @@ double GPUKrylovSchur::performRestart(int m, int k) {
     // 2. Orthogonalize the residual against them
     // 3. Continue Arnoldi from the new starting point
     
-    // Get eigenvectors from device (columns of Q)
-    std::vector<cuDoubleComplex> h_evecs(m * m);
-    CUDA_CHECK(cudaMemcpy(h_evecs.data(), d_evecs_, 
-                         m * m * sizeof(cuDoubleComplex), cudaMemcpyDeviceToHost));
-    
-    // Get eigenvalues
+    // We only need columns 0..k-1 of the m x m eigenvector matrix to form
+    // the new basis V_old * Q[:, 0:k]. The previous code pulled all m*m
+    // entries to the host then re-uploaded just the first k*m of them; do
+    // a single device->device copy instead and skip the round trip.
+    CUDA_CHECK(cudaMemcpyAsync(d_Q_k_, d_evecs_,
+                               static_cast<size_t>(k) * m * sizeof(cuDoubleComplex),
+                               cudaMemcpyDeviceToDevice));
+
     std::vector<double> eigenvalues_m(m);
-    CUDA_CHECK(cudaMemcpy(eigenvalues_m.data(), d_evals_, 
+    CUDA_CHECK(cudaMemcpy(eigenvalues_m.data(), d_evals_,
                          m * sizeof(double), cudaMemcpyDeviceToHost));
-    
-    // Compute new basis: V_new[:, 0:k] = V_old * Q[:, 0:k]
-    // These are the Ritz vectors for the k smallest eigenvalues
-    
-    // Use pre-allocated restart buffers instead of dynamic allocation
-    // This avoids OOM errors during restart when GPU memory is fragmented
-    
-    // Copy Q[:, 0:k] to pre-allocated device buffer
-    std::vector<cuDoubleComplex> Q_k(static_cast<size_t>(k) * m);
-    for (int j = 0; j < k; j++) {
-        for (int i = 0; i < m; i++) {
-            Q_k[i + j * m] = h_evecs[i + j * m];
-        }
-    }
-    CUDA_CHECK(cudaMemcpy(d_Q_k_, Q_k.data(), 
-                         static_cast<size_t>(k) * m * sizeof(cuDoubleComplex), cudaMemcpyHostToDevice));
     
     // Use pre-allocated buffer for new basis (d_V_restart_ has size dimension_ * restart_buffer_k_)
     
@@ -592,55 +586,59 @@ double GPUKrylovSchur::performRestart(int m, int k) {
 void GPUKrylovSchur::computeEigenvectors(int m, int num_eigs,
                                          std::vector<std::vector<std::complex<double>>>& eigenvectors) {
     std::cout << "  Computing full eigenvectors on GPU...\n";
-    
-    // Get Ritz vectors (eigenvectors of projected matrix)
-    std::vector<cuDoubleComplex> h_evecs(m * m);
-    CUDA_CHECK(cudaMemcpy(h_evecs.data(), d_evecs_, 
-                         m * m * sizeof(cuDoubleComplex), cudaMemcpyDeviceToHost));
-    
+
     eigenvectors.resize(num_eigs);
-    
-    // Pre-allocate a single device buffer for Ritz coefficients (reused across eigenvectors)
-    cuDoubleComplex* d_ritz_vec;
-    CUDA_CHECK(cudaMalloc(&d_ritz_vec, m * sizeof(cuDoubleComplex)));
-    
-    // Pre-allocate host buffer for copying back eigenvectors
-    std::vector<cuDoubleComplex> h_eigvec(dimension_);
-    
-    for (int i = 0; i < num_eigs; i++) {
-        eigenvectors[i].resize(dimension_);
-        
-        // eigenvector[i] = V * y_i where y_i is the i-th Ritz vector
-        // Copy Ritz vector to pre-allocated device buffer
-        CUDA_CHECK(cudaMemcpy(d_ritz_vec, &h_evecs[i * m], 
-                             m * sizeof(cuDoubleComplex), cudaMemcpyHostToDevice));
-        
-        // eigvec = V * y_i using cuBLAS GEMV
-        cuDoubleComplex alpha = make_cuDoubleComplex(1.0, 0.0);
-        cuDoubleComplex beta = make_cuDoubleComplex(0.0, 0.0);
-        
-        CUBLAS_CHECK(cublasZgemv(cublas_handle_, CUBLAS_OP_N,
-                                dimension_, m,
-                                &alpha,
-                                d_V_, dimension_,
-                                d_ritz_vec, 1,
-                                &beta,
-                                d_temp_, 1));
-        
-        // Normalize
-        normalizeVector(d_temp_);
-        
-        // Copy to host
-        CUDA_CHECK(cudaMemcpy(h_eigvec.data(), d_temp_, 
-                             dimension_ * sizeof(cuDoubleComplex), cudaMemcpyDeviceToHost));
-        
-        for (int j = 0; j < dimension_; j++) {
-            eigenvectors[i][j] = std::complex<double>(cuCreal(h_eigvec[j]), cuCimag(h_eigvec[j]));
+    if (num_eigs <= 0) return;
+
+    // Compute all eigenvectors in one BLAS-3 call:
+    //   E = V * Q[:, 0:num_eigs]
+    // where V is (dim x m) on-device basis and Q is the (m x m) Ritz matrix.
+    // Previous code did num_eigs serialized Zgemv calls each gated by D2H of
+    // the entire m x m Ritz matrix; this one Zgemm replaces all of that.
+    cuDoubleComplex* d_eigvecs = nullptr;
+    CUDA_CHECK(cudaMalloc(&d_eigvecs,
+                          static_cast<size_t>(dimension_) * num_eigs * sizeof(cuDoubleComplex)));
+
+    const cuDoubleComplex one  = make_cuDoubleComplex(1.0, 0.0);
+    const cuDoubleComplex zero = make_cuDoubleComplex(0.0, 0.0);
+
+    CUBLAS_CHECK(cublasZgemm(cublas_handle_, CUBLAS_OP_N, CUBLAS_OP_N,
+                            dimension_, num_eigs, m,
+                            &one,
+                            d_V_,    dimension_,
+                            d_evecs_, m,           // already on-device, leading dim = m
+                            &zero,
+                            d_eigvecs, dimension_));
+
+    // Per-column normalization (each Ritz vector should already be unit norm
+    // when V is orthonormal and Q is unitary, but we re-normalize defensively
+    // for the same reason as before).
+    for (int i = 0; i < num_eigs; ++i) {
+        cuDoubleComplex* col = d_eigvecs + static_cast<size_t>(i) * dimension_;
+        double nrm = 0.0;
+        CUBLAS_CHECK(cublasDznrm2(cublas_handle_, dimension_, col, 1, &nrm));
+        if (nrm > 0.0) {
+            cuDoubleComplex scale = make_cuDoubleComplex(1.0 / nrm, 0.0);
+            CUBLAS_CHECK(cublasZscal(cublas_handle_, dimension_, &scale, col, 1));
         }
     }
-    
-    cudaFree(d_ritz_vec);
-    
+
+    // Bulk D2H of all eigenvector columns into a contiguous host buffer,
+    // then unpack into the per-eigenvector std::vector storage.
+    std::vector<cuDoubleComplex> h_eigvecs(static_cast<size_t>(dimension_) * num_eigs);
+    CUDA_CHECK(cudaMemcpy(h_eigvecs.data(), d_eigvecs,
+                          static_cast<size_t>(dimension_) * num_eigs * sizeof(cuDoubleComplex),
+                          cudaMemcpyDeviceToHost));
+    cudaFree(d_eigvecs);
+
+    for (int i = 0; i < num_eigs; ++i) {
+        eigenvectors[i].resize(dimension_);
+        const cuDoubleComplex* src = h_eigvecs.data() + static_cast<size_t>(i) * dimension_;
+        for (int j = 0; j < dimension_; ++j) {
+            eigenvectors[i][j] = std::complex<double>(cuCreal(src[j]), cuCimag(src[j]));
+        }
+    }
+
     std::cout << "  Eigenvectors computed\n";
 }
 

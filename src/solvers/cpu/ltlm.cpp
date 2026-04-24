@@ -233,15 +233,55 @@ LTLMResults low_temperature_lanczos(
     if (ground_state_input != nullptr && params.use_exact_ground_state) {
         std::cout << "\n--- Using provided ground state ---\n";
         ground_state = *ground_state_input;
-        
+
         // Compute ground state energy
         ComplexVector H_gs(N);
         H(ground_state.data(), H_gs.data(), N);
         Complex energy_complex;
         cblas_zdotc_sub(N, ground_state.data(), 1, H_gs.data(), 1, &energy_complex);
         ground_energy = std::real(energy_complex);
-        
+
         std::cout << "Ground state energy: " << ground_energy << std::endl;
+
+        // Krylov-collapse guard. If the supplied vector is (numerically)
+        // an exact eigenstate, the next Lanczos chain in
+        // build_excitation_spectrum() collapses to dim 1 because the first
+        // Lanczos residual w = (H - E) v0 is zero. Detect that case and
+        // perturb v0 with a small perpendicular Gaussian so the Krylov
+        // expansion still spans a useful low-energy subspace.
+        ComplexVector residual = H_gs;
+        Complex neg_E(-ground_energy, 0.0);
+        cblas_zaxpy(N, &neg_E, ground_state.data(), 1, residual.data(), 1);
+        double res_norm = cblas_dznrm2(N, residual.data(), 1);
+        const double res_floor = 1e-8;
+        if (res_norm < res_floor) {
+            std::cout << "  [LTLM] ground state appears to be a numerical eigenvector "
+                      << "(||H v - E v|| = " << res_norm
+                      << " < " << res_floor << ").\n"
+                      << "  [LTLM] Mixing in a small orthogonal perturbation to keep the "
+                      << "excitation Krylov space non-trivial.\n";
+            std::mt19937 gen(0xCA53D9D2u);  // fixed seed: reproducible perturbation
+            std::normal_distribution<double> nd(0.0, 1.0);
+            ComplexVector pert(N);
+            for (uint64_t i = 0; i < N; ++i) {
+                pert[i] = Complex(nd(gen), nd(gen));
+            }
+            // Project out the ground-state direction.
+            Complex proj;
+            cblas_zdotc_sub(N, ground_state.data(), 1, pert.data(), 1, &proj);
+            Complex neg_proj(-proj.real(), -proj.imag());
+            cblas_zaxpy(N, &neg_proj, ground_state.data(), 1, pert.data(), 1);
+            double pert_norm = cblas_dznrm2(N, pert.data(), 1);
+            if (pert_norm > 0.0) {
+                // Mix at amplitude 1e-3 so the dominant content is still v0
+                // but Lanczos sees a non-zero off-diagonal at step 1.
+                Complex mix(1e-3 / pert_norm, 0.0);
+                cblas_zaxpy(N, &mix, pert.data(), 1, ground_state.data(), 1);
+                double new_norm = cblas_dznrm2(N, ground_state.data(), 1);
+                Complex inv(1.0 / new_norm, 0.0);
+                cblas_zscal(N, &inv, ground_state.data(), 1);
+            }
+        }
     } else {
         std::cout << "\n--- Step 1: Finding Ground State ---\n";
         ground_energy = find_ground_state_lanczos(

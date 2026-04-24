@@ -49,17 +49,64 @@ private:
 
 } // anonymous namespace
 
+// Single source of truth for "should the random Krylov seed be real?".
+// Default is real-only (zero imag) so the Operator::apply() dispatcher
+// can take the real-CSR / apply_real fast path for the entire Krylov
+// space when the Hamiltonian is real (audit follow-up). Setting the
+// env var ED_LANCZOS_COMPLEX_SEED=1 reverts to a fully complex seed
+// (legacy behaviour, useful for testing complex spectra).
+inline bool ed_use_complex_lanczos_seed() {
+    const char* s = std::getenv("ED_LANCZOS_COMPLEX_SEED");
+    return (s && s[0] == '1');
+}
+
+// Per-iteration progress prints inside the Lanczos inner loops are useful for
+// development but flood stdout in production runs where Lanczos is called
+// hundreds of times (FTLM, TPQ, NLCE pipelines). Gate them behind a single
+// env var so the default is quiet but the chatter can be re-enabled when
+// debugging convergence or breakdown issues.
+inline bool ed_lanczos_verbose() {
+    static const bool v = []() {
+        const char* s = std::getenv("ED_LANCZOS_VERBOSE");
+        return (s && s[0] == '1');
+    }();
+    return v;
+}
+
 ComplexVector generateRandomVector(int N, std::mt19937& gen, std::uniform_real_distribution<double>& dist) {
     ComplexVector v(N);
-    
-    for (int i = 0; i < N; i++) {
-        v[i] = Complex(dist(gen), dist(gen));
+
+    if (ed_use_complex_lanczos_seed()) {
+        for (int i = 0; i < N; i++) {
+            v[i] = Complex(dist(gen), dist(gen));
+        }
+    } else {
+        for (int i = 0; i < N; i++) {
+            v[i] = Complex(dist(gen), 0.0);
+        }
     }
-    
+
     double norm = cblas_dznrm2(N, v.data(), 1);
     Complex scale_factor = Complex(1.0/norm, 0.0);
     cblas_zscal(N, &scale_factor, v.data(), 1);
 
+    return v;
+}
+
+ComplexVector generateGaussianRandomVector(int N, std::mt19937& gen) {
+    // i.i.d. standard complex Gaussian: real and imag parts ~ N(0, 1), then
+    // L2-normalise. This produces an isotropic random vector on the complex
+    // unit sphere and is the standard finite-T trace-estimator distribution
+    // (Jaklic-Prelovsek FTLM, Hutchinson, etc.). Variance bounds and isotropy
+    // properties differ from normalised uniform-cube sampling.
+    std::normal_distribution<double> ndist(0.0, 1.0);
+    ComplexVector v(N);
+    for (int i = 0; i < N; i++) {
+        v[i] = Complex(ndist(gen), ndist(gen));
+    }
+    double norm = cblas_dznrm2(N, v.data(), 1);
+    Complex scale_factor = Complex(1.0 / norm, 0.0);
+    cblas_zscal(N, &scale_factor, v.data(), 1);
     return v;
 }
 
@@ -494,11 +541,11 @@ int build_lanczos_tridiagonal_with_basis(
             break;
         }
         
-        // v_{j+1} = w / beta_{j+1}
-        for (int i = 0; i < N; i++) {
-            v_next[i] = w[i] / norm;
-        }
-        
+        // v_{j+1} = w / beta_{j+1}: copy then BLAS-scale (vectorised, threaded).
+        std::copy(w.begin(), w.end(), v_next.begin());
+        Complex inv_norm(1.0 / norm, 0.0);
+        cblas_zscal(N, &inv_norm, v_next.data(), 1);
+
         // Store next basis vector if requested
         if (basis_vectors != nullptr && j < max_iter - 1) {
             basis_vectors->push_back(v_next);
@@ -531,13 +578,65 @@ int solve_tridiagonal_matrix(const std::vector<double>& alpha, const std::vector
     uint64_t info;
     
     if (eigenvectors) {
-        // Use dstevd for all eigenvectors at once - simpler and more reliable
-        std::vector<double> evecs(m * m);
-        
-        info = LAPACKE_dstevd(LAPACK_COL_MAJOR, 'V', m, diag.data(), offdiag.data(), evecs.data(), m);
+        // Choose between dstemr (MRRR, range='I') and dstevd (D&C, all evals).
+        //
+        // dstemr with range='I' computes only the lowest n_eigenvalues
+        // eigenpairs in O(m * n_eigenvalues) time. dstevd computes all m
+        // eigenpairs in O(m^3) time and we discard everything past
+        // n_eigenvalues. For typical Lanczos runs (m ~ 200, n_eigenvalues
+        // ~ 10-50), dstemr is 5-20x faster.
+        //
+        // For very small m or n_eigenvalues / m close to 1, dstevd's
+        // tighter constants win; switch over at the empirical 50% threshold.
+        // dstemr also benefits from MRRR's O(n) per-eigenvector storage.
+        const bool use_dstemr = (m >= 32) && (n_eigenvalues * 2 < m);
+
+        // dstemr writes the requested eigenpairs to (W, Z); dstevd overwrites
+        // diag with eigenvalues and writes Z densely. Allocate the smaller
+        // m * n_eigenvalues block when using dstemr to also save memory.
+        const lapack_int ldz = static_cast<lapack_int>(m);
+        std::vector<double> evecs;
+        std::vector<double> w_only;
+        std::vector<lapack_int> isuppz;
+        lapack_int m_found = 0;
+        lapack_logical tryrac = 1;  // try high accuracy first
+
+        if (use_dstemr) {
+            // dstemr requires a fresh copy of d/e because it overwrites them.
+            // It also requires e to have m elements (not m-1) -- the trailing
+            // entry is workspace.
+            std::vector<double> d_copy = diag;
+            std::vector<double> e_copy(m);
+            for (int i = 0; i < (int)m - 1; ++i) e_copy[i] = offdiag[i];
+            e_copy[m - 1] = 0.0;
+
+            evecs.assign(static_cast<size_t>(m) * n_eigenvalues, 0.0);
+            w_only.assign(m, 0.0);
+            isuppz.assign(2 * std::max<size_t>(1, n_eigenvalues), 0);
+
+            info = LAPACKE_dstemr(LAPACK_COL_MAJOR, 'V', 'I',
+                                  static_cast<lapack_int>(m),
+                                  d_copy.data(), e_copy.data(),
+                                  /*vl=*/0.0, /*vu=*/0.0,
+                                  /*il=*/1, /*iu=*/static_cast<lapack_int>(n_eigenvalues),
+                                  &m_found, w_only.data(),
+                                  evecs.data(), ldz,
+                                  static_cast<lapack_int>(n_eigenvalues),
+                                  isuppz.data(), &tryrac);
+            if (info == 0) {
+                // Replace the prefix of diag with the n_eigenvalues smallest
+                // (already sorted ascending by dstemr).
+                for (size_t k = 0; k < n_eigenvalues; ++k) diag[k] = w_only[k];
+            }
+        } else {
+            evecs.assign(static_cast<size_t>(m) * m, 0.0);
+            info = LAPACKE_dstevd(LAPACK_COL_MAJOR, 'V', m, diag.data(),
+                                   offdiag.data(), evecs.data(), m);
+        }
         
         if (info != 0) {
-            std::cerr << "LAPACKE_dstevd failed with error code " << info << std::endl;
+            std::cerr << (use_dstemr ? "LAPACKE_dstemr" : "LAPACKE_dstevd")
+                      << " failed with error code " << info << std::endl;
             return info;
         }
         
@@ -546,12 +645,16 @@ int solve_tridiagonal_matrix(const std::vector<double>& alpha, const std::vector
         std::vector<ComplexVector> full_vectors(n_eigenvalues, ComplexVector(N, Complex(0.0, 0.0)));
         std::vector<ComplexVector> compensation(n_eigenvalues, ComplexVector(N, Complex(0.0, 0.0)));
 
+        // ldz_eff = m for both paths (dstemr ldz is the full m, even though
+        // only the first n_eigenvalues columns are meaningful).
+        const int ldz_eff = static_cast<int>(m);
+
         for (int j = 0; j < m; j++) {
             ComplexVector basis_j = read_basis_vector(temp_dir, j, N);
 
             #pragma omp parallel for schedule(static)
             for (int i = 0; i < n_eigenvalues; i++) {
-                double coef = evecs[j + i * m];
+                double coef = evecs[j + i * ldz_eff];
                 ComplexVector& full_vector = full_vectors[i];
                 ComplexVector& comp_vec = compensation[i];
 
@@ -614,11 +717,38 @@ int solve_tridiagonal_matrix(const std::vector<double>& alpha, const std::vector
         std::cout << "Saved " << n_eigenvalues << " eigenvectors" << std::endl;
 
     } else {
-        // Just compute eigenvalues
-        info = LAPACKE_dstevd(LAPACK_COL_MAJOR, 'N', m, diag.data(), offdiag.data(), nullptr, m);
+        // Eigenvalues only. Same selection as above: dstemr (range='I') is
+        // O(m * n_eigenvalues); dstevd is O(m^2). dstemr wins handily for
+        // typical Lanczos parameters.
+        const bool use_dstemr = (m >= 32) && (n_eigenvalues * 2 < m);
+        if (use_dstemr) {
+            std::vector<double> d_copy = diag;
+            std::vector<double> e_copy(m);
+            for (int i = 0; i < (int)m - 1; ++i) e_copy[i] = offdiag[i];
+            e_copy[m - 1] = 0.0;
+            std::vector<double> w_only(m, 0.0);
+            std::vector<lapack_int> isuppz(2 * std::max<size_t>(1, n_eigenvalues), 0);
+            lapack_int m_found = 0;
+            lapack_logical tryrac = 1;
+            info = LAPACKE_dstemr(LAPACK_COL_MAJOR, 'N', 'I',
+                                  static_cast<lapack_int>(m),
+                                  d_copy.data(), e_copy.data(),
+                                  /*vl=*/0.0, /*vu=*/0.0,
+                                  /*il=*/1, /*iu=*/static_cast<lapack_int>(n_eigenvalues),
+                                  &m_found, w_only.data(),
+                                  /*z=*/nullptr, /*ldz=*/static_cast<lapack_int>(m),
+                                  /*nzc=*/0, isuppz.data(), &tryrac);
+            if (info == 0) {
+                for (size_t k = 0; k < n_eigenvalues; ++k) diag[k] = w_only[k];
+            }
+        } else {
+            info = LAPACKE_dstevd(LAPACK_COL_MAJOR, 'N', m, diag.data(),
+                                   offdiag.data(), nullptr, m);
+        }
         
         if (info != 0) {
-            std::cerr << "LAPACKE_dstevd failed with error code " << info << std::endl;
+            std::cerr << (use_dstemr ? "LAPACKE_dstemr" : "LAPACKE_dstevd")
+                      << " failed with error code " << info << std::endl;
             return info;
         }
     }
@@ -627,15 +757,19 @@ int solve_tridiagonal_matrix(const std::vector<double>& alpha, const std::vector
     eigenvalues.resize(n_eigenvalues);
     std::copy(diag.begin(), diag.begin() + n_eigenvalues, eigenvalues.begin());
 
-    // Save eigenvalues using HDF5 in main output directory (unified ed_results.h5)
-    try {
-        std::string hdf5_file = HDF5IO::createOrOpenFile(evec_dir);
-        HDF5IO::saveEigenvalues(hdf5_file, eigenvalues);
-        std::cout << "Lanczos: Saved " << n_eigenvalues << " eigenvalues to HDF5" << std::endl;
-    } catch (const std::exception& e) {
-        std::cerr << "Warning: Failed to save eigenvalues to HDF5: " << e.what() << std::endl;
+    // Save eigenvalues using HDF5 in main output directory (unified ed_results.h5).
+    // Convention: dir == "/dev/null" disables the HDF5 dump entirely. Useful
+    // for benchmarks that don't want disk I/O in the timed loop.
+    if (evec_dir != "/dev/null") {
+        try {
+            std::string hdf5_file = HDF5IO::createOrOpenFile(evec_dir);
+            HDF5IO::saveEigenvalues(hdf5_file, eigenvalues);
+            std::cout << "Lanczos: Saved " << n_eigenvalues << " eigenvalues to HDF5" << std::endl;
+        } catch (const std::exception& e) {
+            std::cerr << "Warning: Failed to save eigenvalues to HDF5: " << e.what() << std::endl;
+        }
     }
-    
+
     return info;
 }
 
@@ -643,13 +777,16 @@ void lanczos_no_ortho(std::function<void(const Complex*, Complex*, int)> H, uint
              double tol, std::vector<double>& eigenvalues, std::string dir,
              bool eigenvectors) {
     
-    // Initialize random starting vector
+    // Initialize random starting vector. Default to a real-only seed for the
+    // same reason as lanczos(): keeps the entire Krylov space real for real H.
     std::mt19937 gen(std::random_device{}());
     std::uniform_real_distribution<double> dist(-1.0, 1.0);
     ComplexVector v_current(N);
-    
+    const bool complex_seed = ed_use_complex_lanczos_seed();
+
     for (int i = 0; i < N; i++) {
-        v_current[i] = Complex(dist(gen), dist(gen));
+        v_current[i] = complex_seed ? Complex(dist(gen), dist(gen))
+                                    : Complex(dist(gen), 0.0);
     }
 
     std::cout << "Lanczos: Initial vector generated" << std::endl;
@@ -689,9 +826,12 @@ void lanczos_no_ortho(std::function<void(const Complex*, Complex*, int)> H, uint
     std::cout << "Lanczos: Iterating..." << std::endl;   
     
     // Lanczos iteration
+    const bool verbose = ed_lanczos_verbose();
     for (int j = 0; j < max_iter; j++) {
+        if (verbose) {
+            std::cout << "Iteration " << j + 1 << " of " << max_iter << std::endl;
+        }
         // w = H*v_j
-        std::cout << "Iteration " << j + 1 << " of " << max_iter << std::endl;
         H(v_current.data(), w.data(), N);
         
         // w = w - beta_j * v_{j-1}
@@ -755,11 +895,11 @@ void lanczos_no_ortho(std::function<void(const Complex*, Complex*, int)> H, uint
             }
         }
         
-        // v_{j+1} = w / beta_{j+1}
-        for (int i = 0; i < N; i++) {
-            v_next[i] = w[i] / norm;
-        }
-        
+        // v_{j+1} = w / beta_{j+1}: copy then BLAS-scale.
+        std::copy(w.begin(), w.end(), v_next.begin());
+        Complex inv_norm(1.0 / norm, 0.0);
+        cblas_zscal(N, &inv_norm, v_next.data(), 1);
+
         // Store basis vector to file if eigenvectors are needed
         if (eigenvectors && j < max_iter - 1) {
             if (!write_basis_vector(temp_dir, j+1, v_next, N)) {
@@ -797,13 +937,16 @@ void lanczos_selective_reorth(std::function<void(const Complex*, Complex*, int)>
              double tol, std::vector<double>& eigenvalues, std::string dir,
              bool eigenvectors) {
     
-    // Initialize random starting vector
+    // Initialize random starting vector. Real seed by default so the apply()
+    // dispatcher takes the real fast path for real H (audit follow-up).
     std::mt19937 gen(std::random_device{}());
     std::uniform_real_distribution<double> dist(-1.0, 1.0);
     ComplexVector v_current(N);
-    
+    const bool complex_seed = ed_use_complex_lanczos_seed();
+
     for (int i = 0; i < N; i++) {
-        v_current[i] = Complex(dist(gen), dist(gen));
+        v_current[i] = complex_seed ? Complex(dist(gen), dist(gen))
+                                    : Complex(dist(gen), 0.0);
     }
 
     std::cout << "Lanczos: Initial vector generated" << std::endl;
@@ -844,16 +987,36 @@ void lanczos_selective_reorth(std::function<void(const Complex*, Complex*, int)>
     
     // Parameters for selective reorthogonalization
     const double orth_threshold = 1e-5;  // Threshold for selective reorthogonalization
-    const uint64_t periodic_full_reorth = max_iter/10; // Periodically do full reorthogonalization
-    
-    // Storage for tracking loss of orthogonality
-    std::vector<ComplexVector> recent_vectors; // Store most recent vectors in memory
-    const uint64_t max_recent = 5;                  // Maximum number of recent vectors to keep in memory
-    
+    // Periodic full reorthogonalization frequency. Guard against UB when
+    // max_iter < 10 (j % 0 is undefined behaviour).
+    const uint64_t periodic_full_reorth = std::max<uint64_t>(1, max_iter / 10);
+
+    // Ring buffer of the most recent basis vectors plus their basis indices
+    // so the periodic-full-reorth loop can skip them by *index* instead of
+    // re-reading every disk vector and doing an O(N) elementwise comparison
+    // (which was O(recent x N x j) per iteration).
+    const uint64_t max_recent = 5;
+    std::vector<ComplexVector> recent_vectors;
+    std::vector<uint64_t>     recent_indices;
+    recent_vectors.reserve(max_recent);
+    recent_indices.reserve(max_recent);
+    uint64_t recent_head = 0;     // next slot to write
+    uint64_t recent_count = 0;    // number of valid slots
+
+    auto is_recent_index = [&](uint64_t k) {
+        for (uint64_t s = 0; s < recent_count; ++s) {
+            if (recent_indices[s] == k) return true;
+        }
+        return false;
+    };
+
     // Lanczos iteration
+    const bool verbose = ed_lanczos_verbose();
     for (int j = 0; j < max_iter; j++) {
+        if (verbose) {
+            std::cout << "Iteration " << j + 1 << " of " << max_iter << std::endl;
+        }
         // w = H*v_j
-        std::cout << "Iteration " << j + 1 << " of " << max_iter << std::endl;
         H(v_current.data(), w.data(), N);
         
         // w = w - beta_j * v_{j-1}
@@ -896,32 +1059,22 @@ void lanczos_selective_reorth(std::function<void(const Complex*, Complex*, int)>
             }
         }
         
-        // Periodic full reorthogonalization or selective reorthogonalization. Currently suppressed
+        // Periodic full reorthogonalization or selective reorthogonalization.
+        // Skip indices already covered by the recent ring buffer (which was
+        // applied just above) by tracking their basis indices, not by reading
+        // every disk vector and elementwise-comparing.
         if (j % periodic_full_reorth == 0) {
-            // Full reorthogonalization
-            std::cout << "Performing full reorthogonalization at step " << j + 1 << std::endl;
+            if (verbose) {
+                std::cout << "Performing full reorthogonalization at step " << j + 1 << std::endl;
+            }
             for (int k = 0; k <= j; k++) {
-                // Skip recent vectors that were already orthogonalized
-                bool is_recent = false;
-                for (const auto& vec : recent_vectors) {
-                    ComplexVector recent_v = read_basis_vector(temp_dir, k, N);
-                    double diff = 0.0;
-                    for (int i = 0; i < N; i++) {
-                        diff += std::norm(vec[i] - recent_v[i]);
-                    }
-                    if (diff < 1e-12) {
-                        is_recent = true;
-                        break;
-                    }
-                }
-                if (is_recent) continue;
-                
-                // Read basis vector k from file
+                if (is_recent_index(static_cast<uint64_t>(k))) continue;
+
                 ComplexVector basis_k = read_basis_vector(temp_dir, k, N);
-                
+
                 Complex overlap;
                 cblas_zdotc_sub(N, basis_k.data(), 1, w.data(), 1, &overlap);
-                
+
                 if (std::abs(overlap) > orth_threshold) {
                     Complex neg_overlap = -overlap;
                     cblas_zaxpy(N, &neg_overlap, basis_k.data(), 1, w.data(), 1);
@@ -930,36 +1083,20 @@ void lanczos_selective_reorth(std::function<void(const Complex*, Complex*, int)>
         } else {
             // Selective reorthogonalization against vectors with significant overlap
             for (int k = 0; k <= j - 2; k++) {  // Skip v_{j-1} as it's already handled
-                // Skip recent vectors that were already orthogonalized
-                bool is_recent = false;
-                for (const auto& vec : recent_vectors) {
-                    ComplexVector recent_v = read_basis_vector(temp_dir, k, N);
-                    double diff = 0.0;
-                    for (int i = 0; i < N; i++) {
-                        diff += std::norm(vec[i] - recent_v[i]);
-                    }
-                    if (diff < 1e-12) {
-                        is_recent = true;
-                        break;
-                    }
-                }
-                if (is_recent) continue;
-                
-                // Read basis vector k from file
+                if (is_recent_index(static_cast<uint64_t>(k))) continue;
+
                 ComplexVector basis_k = read_basis_vector(temp_dir, k, N);
-                
-                // Check if orthogonalization against this vector is needed
+
                 Complex overlap;
                 cblas_zdotc_sub(N, basis_k.data(), 1, w.data(), 1, &overlap);
-                
+
                 if (std::abs(overlap) > orth_threshold) {
                     Complex neg_overlap = -overlap;
                     cblas_zaxpy(N, &neg_overlap, basis_k.data(), 1, w.data(), 1);
-                    
-                    // Double-check orthogonality
+
+                    // Iterated Gram-Schmidt: one more pass if still non-orthogonal.
                     cblas_zdotc_sub(N, basis_k.data(), 1, w.data(), 1, &overlap);
                     if (std::abs(overlap) > orth_threshold) {
-                        // If still not orthogonal, apply one more time
                         neg_overlap = -overlap;
                         cblas_zaxpy(N, &neg_overlap, basis_k.data(), 1, w.data(), 1);
                     }
@@ -1013,11 +1150,11 @@ void lanczos_selective_reorth(std::function<void(const Complex*, Complex*, int)>
             }
         }
         
-        // v_{j+1} = w / beta_{j+1}
-        for (int i = 0; i < N; i++) {
-            v_next[i] = w[i] / norm;
-        }
-        
+        // v_{j+1} = w / beta_{j+1}: copy then BLAS-scale (vectorised, threaded).
+        std::copy(w.begin(), w.end(), v_next.begin());
+        Complex inv_norm(1.0 / norm, 0.0);
+        cblas_zscal(N, &inv_norm, v_next.data(), 1);
+
         // Store basis vector to file
         if (j < max_iter - 1) {
             if (!write_basis_vector(temp_dir, j+1, v_next, N)) {
@@ -1029,11 +1166,19 @@ void lanczos_selective_reorth(std::function<void(const Complex*, Complex*, int)>
         v_prev = v_current;
         v_current = v_next;
         
-        // Keep track of recent vectors for quick access
-        recent_vectors.push_back(v_current);
-        if (recent_vectors.size() > max_recent) {
-            recent_vectors.erase(recent_vectors.begin());
+        // Keep track of recent vectors for quick access (ring buffer). We
+        // store both the vector and its basis index so the periodic reorth
+        // loop can skip them by index without reading from disk.
+        const uint64_t basis_index_just_stored = static_cast<uint64_t>(j) + 1;
+        if (recent_count < max_recent) {
+            recent_vectors.push_back(v_current);
+            recent_indices.push_back(basis_index_just_stored);
+            ++recent_count;
+        } else {
+            recent_vectors[recent_head] = v_current;
+            recent_indices[recent_head] = basis_index_just_stored;
         }
+        recent_head = (recent_head + 1) % max_recent;
     }
     
     // Construct and solve tridiagonal matrix
@@ -1056,19 +1201,48 @@ void lanczos_selective_reorth(std::function<void(const Complex*, Complex*, int)>
     // basis_scope RAII cleans up buffer/directory on scope exit
 }
 
-// Lanczos algorithm with adaptive selective reorthogonalization (Parlett-Simon)
-// This is now the DEFAULT implementation using industry-standard methods
-void lanczos(std::function<void(const Complex*, Complex*, int)> H, uint64_t N, uint64_t max_iter, uint64_t exct, 
+// Lanczos algorithm with three-vector LOCAL reorthogonalization.
+//
+// This is the default ED entry point. Important caveat: the reorthogonalization
+// scheme below is a small local correction (DGKS-style projection against the
+// three most recent Lanczos vectors), NOT a Parlett-Simon selective scheme
+// tracking the omega_jk recurrence. For workloads where loss of orthogonality
+// matters (large max_iter > ~200, ill-conditioned spectra, requesting many
+// Ritz pairs), call lanczos_selective_reorth() instead — it does periodic
+// full reorthogonalization plus a thresholded second pass and is the right
+// tool for production accuracy on big Krylov spaces. See lanczos.h for the
+// full menu (block_lanczos, krylov_schur, thick_restart_lanczos, ...).
+//
+// Convergence test: every check_convergence_interval=10 iterations, solve the
+// current tridiagonal eigenproblem and stop when the lowest `exct` Ritz values
+// stop changing by more than `tol`. A Ritz residual estimate (beta * |s_{m,i}|)
+// is also reported when verbose logging is enabled.
+void lanczos(std::function<void(const Complex*, Complex*, int)> H, uint64_t N, uint64_t max_iter, uint64_t exct,
              double tol, std::vector<double>& eigenvalues, std::string dir,
              bool eigenvectors) {
 
-    // Initialize random starting vector
+    // Initialize random starting vector.
+    // Audit follow-up: when H is real, a complex starting vector causes every
+    // Lanczos vector to be complex too, defeating the real-CSR/apply_real
+    // fast path that halves the bandwidth and flops. Default to a real-only
+    // seed (zero imaginary part), which is the standard Lanczos convention
+    // for real Hermitian operators (see e.g. Saad, Numerical Methods for
+    // Large Eigenvalue Problems, Ch.6.3). The dispatcher in apply() will
+    // automatically take the real fast path for the entire Krylov space.
+    // Override with ED_LANCZOS_COMPLEX_SEED=1 to force a complex seed.
     std::mt19937 gen(std::random_device{}());
     std::uniform_real_distribution<double> dist(-1.0, 1.0);
     ComplexVector v_current(N);
-    
-    for (int i = 0; i < N; i++) {
-        v_current[i] = Complex(dist(gen), dist(gen));
+
+    const bool complex_seed = ed_use_complex_lanczos_seed();
+    if (complex_seed) {
+        for (int i = 0; i < N; i++) {
+            v_current[i] = Complex(dist(gen), dist(gen));
+        }
+    } else {
+        for (int i = 0; i < N; i++) {
+            v_current[i] = Complex(dist(gen), 0.0);
+        }
     }
 
     // Normalize the starting vector
@@ -1095,25 +1269,28 @@ void lanczos(std::function<void(const Complex*, Complex*, int)> H, uint64_t N, u
     std::vector<double> beta;   // Off-diagonal elements
     beta.push_back(0.0);        // β_0 is not used
     
-    // ===== ADAPTIVE SELECTIVE REORTHOGONALIZATION (Parlett-Simon) =====
+    // ===== Local three-vector reorthogonalization =====
+    // Threshold below: skip the projection if |<v_k, w>| < sqrt(eps), since the
+    // resulting correction is below the floating-point round-off floor anyway.
     const double eps = std::numeric_limits<double>::epsilon();
     const double sqrt_eps = std::sqrt(eps);
     const double ortho_threshold = sqrt_eps;
-    
-    // Storage for recent basis vectors (keep in RAM for fast access)
-    std::vector<ComplexVector> recent_vectors;
+
+    // Ring buffer of recent basis vectors. We project against up to 3 of them
+    // every step (DGKS-style local correction). For full / selective reorth,
+    // call lanczos_selective_reorth instead. Buffer cap is bounded so that
+    // memory stays modest even for N >> 1; capping at 3 would technically
+    // suffice, but a slightly bigger window lets the periodic convergence
+    // check be cheap if we ever need to expand it.
     const uint64_t max_recent = std::min(static_cast<uint64_t>(20), N);
+    std::vector<ComplexVector> recent_vectors;
     recent_vectors.reserve(max_recent);
     recent_vectors.push_back(v_current);
-    
-    // Track which vectors need reorthogonalization
-    std::vector<std::vector<double>> omega;
-    omega.resize(1);
-    omega[0].push_back(eps);
-    
+    uint64_t ring_head = 0;            // index of oldest stored vector
+    uint64_t ring_count = 1;           // number of valid stored vectors
+
     // Monitoring counters
     uint64_t total_reorth_count = 0;
-    uint64_t full_reorth_count = 0;
     uint64_t selective_reorth_count = 0;
     
     // Eigenvalue convergence checking
@@ -1149,22 +1326,23 @@ void lanczos(std::function<void(const Complex*, Complex*, int)> H, uint64_t N, u
         // In finite precision, we only need to reorthogonalize against RECENT vectors
         // Full reorthogonalization against ALL previous vectors is expensive and unnecessary
         
-        // Reorthogonalize against last few vectors in cache (most likely to lose orthogonality)
-        // This is much cheaper than full reorthogonalization and works well in practice
-        int num_reorth = std::min(static_cast<int>(recent_vectors.size()), 3);
+        // Reorthogonalize against the last `num_reorth` vectors in the ring
+        // buffer (most recent first). Walking the ring backward avoids the
+        // old O(N*max_recent) erase().
+        int num_reorth = std::min(static_cast<int>(ring_count), 3);
         if (num_reorth > 0) {
             selective_reorth_count++;
             total_reorth_count += num_reorth;
-            
-            // Reorthogonalize against the most recent vectors (they're already in the cache)
-            for (int i = recent_vectors.size() - num_reorth; i < recent_vectors.size(); i++) {
+
+            for (int k = 0; k < num_reorth; ++k) {
+                // ring slot for "k-th most recent" = (head + count - 1 - k) mod cap
+                const uint64_t cap = recent_vectors.size();
+                const uint64_t slot = (ring_head + ring_count - 1 - k) % cap;
                 Complex overlap;
-                cblas_zdotc_sub(N, recent_vectors[i].data(), 1, w.data(), 1, &overlap);
-                
-                // Only reorthogonalize if overlap is significant
+                cblas_zdotc_sub(N, recent_vectors[slot].data(), 1, w.data(), 1, &overlap);
                 if (std::abs(overlap) > ortho_threshold) {
                     Complex neg_overlap = -overlap;
-                    cblas_zaxpy(N, &neg_overlap, recent_vectors[i].data(), 1, w.data(), 1);
+                    cblas_zaxpy(N, &neg_overlap, recent_vectors[slot].data(), 1, w.data(), 1);
                 }
             }
         }
@@ -1251,16 +1429,20 @@ void lanczos(std::function<void(const Complex*, Complex*, int)> H, uint64_t N, u
             }
         }
         
-        // v_{j+1} = w / beta_{j+1}
-        for (int i = 0; i < N; i++) {
-            v_next[i] = w[i] / norm;
+        // v_{j+1} = w / beta_{j+1}  (single BLAS-1 scale + copy).
+        const Complex scale_inv(1.0 / norm, 0.0);
+        std::copy(w.begin(), w.end(), v_next.begin());
+        cblas_zscal(N, &scale_inv, v_next.data(), 1);
+
+        // Update recent vectors cache (ring buffer; O(N) per iter).
+        if (ring_count < max_recent) {
+            recent_vectors.push_back(v_next);
+            ++ring_count;
+        } else {
+            const uint64_t slot = ring_head;
+            recent_vectors[slot] = v_next;     // overwrite oldest, single dim-N copy
+            ring_head = (ring_head + 1) % max_recent;
         }
-        
-        // Update recent vectors cache (rolling window)
-        if (recent_vectors.size() >= max_recent) {
-            recent_vectors.erase(recent_vectors.begin());
-        }
-        recent_vectors.push_back(v_next);
         
         // Store basis vector to file
         if (j < max_iter - 1) {
@@ -1276,12 +1458,14 @@ void lanczos(std::function<void(const Complex*, Complex*, int)> H, uint64_t N, u
     
     // Construct and solve tridiagonal matrix
     uint64_t m = alpha.size();
-    
-    // Print compact summary
+
+    // Compact summary: report iteration count and the number of times the
+    // local reorth pass was applied (expected: every iteration, ~3 dot
+    // products + axpys per pass).
     std::cout << "Lanczos: " << m << " iterations, "
-              << (m > 0 ? (double)(m * (m + 1) / 2) / std::max(1UL, total_reorth_count) : 0.0) 
-              << "x reorth savings" << std::endl;
-    
+              << total_reorth_count << " local-reorth axpys ("
+              << selective_reorth_count << " passes)" << std::endl;
+
     // Use output directory for HDF5 storage (eigenvectors saved to ed_results.h5)
     std::string evec_dir = (dir.empty() ? "." : dir);
 
@@ -2083,10 +2267,14 @@ void shift_invert_lanczos(std::function<void(const Complex*, Complex*, int)> H, 
     std::uniform_real_distribution<double> dist(-1.0, 1.0);
     ComplexVector v_current(N);
     
-    for (int i = 0; i < N; i++) {
-        v_current[i] = Complex(dist(gen), dist(gen));
+    {
+        const bool complex_seed = ed_use_complex_lanczos_seed();
+        for (int i = 0; i < N; i++) {
+            v_current[i] = complex_seed ? Complex(dist(gen), dist(gen))
+                                        : Complex(dist(gen), 0.0);
+        }
     }
-    
+
     // Normalize starting vector
     double norm = cblas_dznrm2(N, v_current.data(), 1);
     Complex scale = Complex(1.0/norm, 0.0);
@@ -2911,31 +3099,51 @@ void krylov_schur(std::function<void(const Complex*, Complex*, int)> H, uint64_t
             }
         }
         
-        // Step 2: Compute projected Hamiltonian EXPLICITLY from the basis.
-        // H_proj(i,j) = <v_i, H*v_j>.  This is more expensive than using
-        // the incremental Arnoldi Hessenberg (m extra mat-vecs) but is
-        // guaranteed to produce a correctly Hermitian projected matrix
-        // even after thick restarts.
-        
+        // Step 2: Build the projected Hamiltonian.
+        //
+        // Optimization: on the FIRST cycle (iter == 0) the Arnoldi
+        // Hessenberg H_m we just accumulated already equals
+        //   H_m[i][j] = <v_i, H v_j>     for i <= j
+        // (the CGS coefficients are exactly the projected matrix
+        // elements). Re-projecting would cost an additional m matvecs.
+        // For a Hermitian H we mirror the upper triangle and force a
+        // real diagonal to absorb round-off.
+        //
+        // After a thick restart (iter > 0) the current restart code
+        // resets the leading k×k block to diag(eigenvalues_m) without
+        // populating the proper Krylov-Schur bridging entries
+        //   rho_i = beta_m * y[m-1, i].
+        // Without those, H_m alone would not represent the true
+        // <v_i, H v_j> projection, so we fall back to the explicit
+        // re-projection on restart cycles. (Promoting the restart to a
+        // textbook Krylov-Schur in a future patch will let us drop this
+        // fallback entirely.)
         std::vector<Complex> H_dense(m * m, Complex(0.0, 0.0));
-        ComplexVector Hv_tmp(N);
-        
-        for (int j = 0; j < m; j++) {
-            ComplexVector v_j = read_basis_vector(temp_dir, j, N);
-            H(v_j.data(), Hv_tmp.data(), N);
-            
-            // Upper triangle + diagonal: H_dense(i,j) for i <= j
-            for (int i = 0; i <= j; i++) {
-                ComplexVector v_i = (i == j) ? v_j : read_basis_vector(temp_dir, i, N);
-                Complex dot;
-                cblas_zdotc_sub(N, v_i.data(), 1, Hv_tmp.data(), 1, &dot);
-                H_dense[j * m + i] = dot;              // H(i,j)
-                H_dense[i * m + j] = std::conj(dot);   // H(j,i) = conj(H(i,j))
+        if (iter == 0) {
+            for (int j = 0; j < static_cast<int>(m); ++j) {
+                H_dense[j * m + j] = Complex(std::real(H_m[j][j]), 0.0);
+                for (int i = 0; i < j; ++i) {
+                    Complex h = H_m[i][j];
+                    H_dense[j * m + i] = h;              // (i, j)
+                    H_dense[i * m + j] = std::conj(h);   // (j, i)
+                }
             }
+        } else {
+            ComplexVector Hv_tmp(N);
+            for (int j = 0; j < static_cast<int>(m); ++j) {
+                ComplexVector v_j = read_basis_vector(temp_dir, j, N);
+                H(v_j.data(), Hv_tmp.data(), N);
+                for (int i = 0; i <= j; ++i) {
+                    ComplexVector v_i = (i == j) ? v_j : read_basis_vector(temp_dir, i, N);
+                    Complex dot;
+                    cblas_zdotc_sub(N, v_i.data(), 1, Hv_tmp.data(), 1, &dot);
+                    H_dense[j * m + i] = dot;
+                    H_dense[i * m + j] = std::conj(dot);
+                }
+            }
+            for (int i = 0; i < static_cast<int>(m); ++i)
+                H_dense[i * m + i] = Complex(std::real(H_dense[i * m + i]), 0.0);
         }
-        // Force real diagonal (absorb roundoff imaginary part)
-        for (int i = 0; i < m; i++)
-            H_dense[i * m + i] = Complex(std::real(H_dense[i * m + i]), 0.0);
         
         // Compute eigendecomposition (for Hermitian case)
         std::vector<double> eigenvalues_m(m);
@@ -3155,9 +3363,13 @@ void block_krylov_schur(std::function<void(const Complex*, Complex*, int)> H, ui
     std::vector<Complex> h_col(m, Complex(0.0, 0.0));
     std::vector<Complex> h_corr(m, Complex(0.0, 0.0));
     
-    // Initialize first basis vector: random, normalized
-    for (uint64_t i = 0; i < N; i++)
-        V[i] = Complex(dist(gen), dist(gen));
+    // Initialize first basis vector: random (real-only by default for real H), normalized
+    {
+        const bool complex_seed = ed_use_complex_lanczos_seed();
+        for (uint64_t i = 0; i < N; i++)
+            V[i] = complex_seed ? Complex(dist(gen), dist(gen))
+                                : Complex(dist(gen), 0.0);
+    }
     double init_norm = cblas_dznrm2(N, V.data(), 1);
     Complex init_scale(1.0 / init_norm, 0.0);
     cblas_zscal(N, &init_scale, V.data(), 1);
@@ -3403,12 +3615,24 @@ void block_krylov_schur(std::function<void(const Complex*, Complex*, int)> H, ui
     std::cout << "Block Krylov-Schur: Successfully computed " << eigenvalues.size() << " eigenvalues" << std::endl;
 }
 
-// Implicitly Restarted Lanczos algorithm implementation
-void implicitly_restarted_lanczos(std::function<void(const Complex*, Complex*, int)> H, uint64_t N, 
-                                 uint64_t max_iter, uint64_t num_eigs, double tol, 
+// "Implicitly Restarted Lanczos" — historical name kept for API compatibility.
+// In practice this is an EXPLICITLY restarted Lanczos that filters down to the
+// k best Ritz vectors at the end of each outer cycle (see the bottom-of-loop
+// "Phase 4+5" block, which honestly documents this). The true Sorensen
+// implicit-QR shift bulge-chase is not implemented; for that level of
+// algorithmic fidelity, prefer SLEPc/PRIMME or use krylov_schur() below.
+//
+// Convergence guard: a Ritz pair is only accepted as converged once both
+//   (a) |beta_m * y[m-1, i]| < tol, and
+//   (b) the Ritz value has been stable to ritz_tol across two outer cycles.
+// On the very first outer cycle (when no history is available) we require a
+// tighter residual (tol/10) before accepting a Ritz pair, to guard against
+// ghost convergence from a single nearly-invariant Krylov draw.
+void implicitly_restarted_lanczos(std::function<void(const Complex*, Complex*, int)> H, uint64_t N,
+                                 uint64_t max_iter, uint64_t num_eigs, double tol,
                                  std::vector<double>& eigenvalues, std::string dir,
                                  bool compute_eigenvectors){
-    
+
     std::cout << "Starting Implicitly Restarted Lanczos (IRL) algorithm" << std::endl;
     std::cout << "Target eigenvalues: " << num_eigs << ", Max subspace size: " << max_iter << std::endl;
     std::cout << "Tolerance: " << tol << std::endl;
@@ -3437,10 +3661,14 @@ void implicitly_restarted_lanczos(std::function<void(const Complex*, Complex*, i
     // ===== Initialize random starting vector =====
     std::mt19937 gen(std::random_device{}());
     std::uniform_real_distribution<double> dist(-1.0, 1.0);
-    
+
     ComplexVector v0(N);
-    for (int i = 0; i < N; i++) {
-        v0[i] = Complex(dist(gen), dist(gen));
+    {
+        const bool complex_seed = ed_use_complex_lanczos_seed();
+        for (int i = 0; i < N; i++) {
+            v0[i] = complex_seed ? Complex(dist(gen), dist(gen))
+                                 : Complex(dist(gen), 0.0);
+        }
     }
     double norm = cblas_dznrm2(N, v0.data(), 1);
     Complex scale(1.0/norm, 0.0);
@@ -3563,21 +3791,29 @@ void implicitly_restarted_lanczos(std::function<void(const Complex*, Complex*, i
         std::vector<double> residuals(actual_m);
         std::vector<bool> is_converged(actual_m, false);
         uint64_t newly_converged = 0;
-        
+
+        // First-cycle anti-ghost guard: with no Ritz-value history we cannot
+        // rule out a ghost from a single near-invariant Krylov draw, so we
+        // only trust the residual estimate at a tighter threshold (tol/10).
+        // From cycle 2 onward the cross-cycle Ritz-stability check kicks in
+        // and replaces this conservatism.
+        const double residual_threshold =
+            prev_ritz_values.empty() ? (tol * 0.1) : tol;
+
         for (int i = 0; i < actual_m; ++i) {
             // Residual estimate: r_i = |β_m * y_i[m-1]|
             double y_last = ritz_vectors[(actual_m - 1) + i * actual_m];
             residuals[i] = std::abs(beta_m * y_last);
-            
-            // Check convergence: residual tolerance
-            if (residuals[i] < tol) {
-                // Also check Ritz value change if we have previous values
+
+            if (residuals[i] < residual_threshold) {
+                // Cross-cycle stability check: only accept if the Ritz value
+                // has settled to within ritz_tol since the previous cycle.
                 bool ritz_converged = true;
                 if (!prev_ritz_values.empty() && i < prev_ritz_values.size()) {
                     double ritz_change = std::abs(ritz_values[i] - prev_ritz_values[i]);
                     ritz_converged = (ritz_change < ritz_tol);
                 }
-                
+
                 if (ritz_converged && newly_converged < k) {
                     is_converged[i] = true;
                     newly_converged++;
@@ -3706,11 +3942,27 @@ void implicitly_restarted_lanczos(std::function<void(const Complex*, Complex*, i
         std::cout << "Ground state energy: " << eigenvalues[0] << std::endl;
     }
 }
-// Thick Restart Lanczos algorithm implementation
-// This algorithm retains converged Ritz vectors and restarts the Lanczos process
-// in a subspace orthogonal to them, providing better convergence for multiple eigenvalues
-void thick_restart_lanczos(std::function<void(const Complex*, Complex*, int)> H, uint64_t N, 
-                           uint64_t max_iter, uint64_t num_eigs, double tol, 
+// Restart-with-locking Lanczos.
+//
+// Algorithm in plain prose:
+//   1. Run a Lanczos chain of size m from the current starting vector.
+//   2. Solve the m x m tridiagonal eigenproblem; identify Ritz pairs whose
+//      residual |beta_m * y[m-1, i]| < tol and lock them.
+//   3. Form a new starting basis from (locked Ritz vectors + p active Ritz
+//      vectors), Gram-Schmidt-orthonormalize it.
+//   4. Continue the Lanczos chain from the last kept Ritz vector. The
+//      explicit full reorthogonalization in the inner Lanczos loop projects
+//      out any residual coupling to the kept basis on every step, so the
+//      new tridiagonal is the projection of H onto the orthogonal complement
+//      of the kept space. This is the "explicit restart" form (sometimes
+//      called Lanczos-with-deflation), NOT Wu & Simon thick-restart with the
+//      arrowhead matrix — the latter would also store rho_i = beta_m * y[m-1,i]
+//      bridging entries, which we deliberately project away here.
+//
+// Returns only the locked eigenvalues; active Ritz pairs are discarded if
+// they have not converged by the end.
+void thick_restart_lanczos(std::function<void(const Complex*, Complex*, int)> H, uint64_t N,
+                           uint64_t max_iter, uint64_t num_eigs, double tol,
                            std::vector<double>& eigenvalues, std::string dir,
                            bool compute_eigenvectors) {
     
@@ -3741,10 +3993,14 @@ void thick_restart_lanczos(std::function<void(const Complex*, Complex*, int)> H,
     // ===== Initialize random starting vector =====
     std::mt19937 gen(std::random_device{}());
     std::uniform_real_distribution<double> dist(-1.0, 1.0);
-    
+
     ComplexVector v0(N);
-    for (int i = 0; i < N; i++) {
-        v0[i] = Complex(dist(gen), dist(gen));
+    {
+        const bool complex_seed = ed_use_complex_lanczos_seed();
+        for (int i = 0; i < N; i++) {
+            v0[i] = complex_seed ? Complex(dist(gen), dist(gen))
+                                 : Complex(dist(gen), 0.0);
+        }
     }
     double norm = cblas_dznrm2(N, v0.data(), 1);
     Complex scale(1.0/norm, 0.0);
@@ -4001,21 +4257,27 @@ void thick_restart_lanczos(std::function<void(const Complex*, Complex*, int)> H,
             cblas_zscal(N, &scale, new_basis[i].data(), 1);
         }
         
-        // Build compressed tridiagonal matrix from projection
+        // Build compressed tridiagonal matrix from projection.
+        //
+        // Kept Ritz vectors are eigenvectors of T, so the projection of H onto
+        // span{v_kept_1, ..., v_kept_p} is diag(theta_i). The off-diagonal
+        // couplings within the kept block are therefore identically zero, and
+        // the bridging entries rho_i = beta_m * y[m-1, ritz_idx[i]] live on
+        // the column connecting the kept block to the next Lanczos vector.
+        // Since this implementation projects out residual coupling on every
+        // inner Lanczos step (full reorth at line ~4006), we can safely drop
+        // the rho_i and let the inner loop generate a fresh tridiagonal in
+        // the orthogonal complement (see function-level docstring).
         std::vector<double> new_alpha(new_basis_size);
         std::vector<double> new_beta(new_basis_size + 1, 0.0);
-        
+
         for (int i = 0; i < new_basis_size; ++i) {
             uint64_t ritz_idx = keep_indices[i];
             new_alpha[i] = ritz_values[ritz_idx];
         }
-        
-        // Off-diagonal: compute from recurrence relations
-        for (int i = 0; i < new_basis_size - 1; ++i) {
-            // Approximate beta from eigenvector tail
-            // In practice, this should be computed more carefully from the projection
-            new_beta[i + 1] = 0.0; // Will be recomputed in next Lanczos
-        }
+        // new_beta is intentionally all zero here (off-diagonals within the
+        // kept Ritz block vanish; bridging entries are absorbed by the
+        // projection-in-orthogonal-complement strategy described above).
         
         // Write new basis to disk
         for (int i = 0; i < new_basis_size; ++i) {

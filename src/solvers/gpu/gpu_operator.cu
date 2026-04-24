@@ -42,7 +42,12 @@ GPUOperator::GPUOperator(int n_sites, float spin_l)
     
     // Initialize CUDA libraries
     initializeCUBLAS();
-    
+
+    // cuSPARSE handle: shared across the assembled-CSR fast path and any
+    // future BSR/COO experiments. Deferred allocation of the SpMat / DnVec
+    // descriptors until we actually build the CSR (see buildCsrOnDevice).
+    CUSPARSE_CHECK(cusparseCreate(&cusparse_handle_));
+
     // OPTIMIZATION: Pre-allocate CUDA events for timing (avoid create/destroy per matVec)
     CUDA_CHECK(cudaEventCreate(&timing_start_));
     CUDA_CHECK(cudaEventCreate(&timing_stop_));
@@ -56,14 +61,19 @@ GPUOperator::GPUOperator(int n_sites, float spin_l)
 }
 
 GPUOperator::~GPUOperator() {
+    freeCsrDeviceData();
     freeGPUMemory();
-    
+
     // Clean up pre-allocated CUDA events
     if (events_initialized_) {
         cudaEventDestroy(timing_start_);
         cudaEventDestroy(timing_stop_);
     }
-    
+
+    if (cusparse_handle_) {
+        cusparseDestroy(cusparse_handle_);
+        cusparse_handle_ = nullptr;
+    }
     if (cublas_handle_) {
         cublasDestroy(cublas_handle_);
     }
@@ -74,6 +84,11 @@ void GPUOperator::initializeCUBLAS() {
 }
 
 // OPTIMIZED: Direct data population methods
+//
+// Every mutation invalidates ALL derived caches: separated SoA, host-side
+// SoA flag, the assembled CSR, and the kernel-pathway selection. Otherwise
+// a stale CSR / pathway from a previous call would silently return wrong
+// results once the operator is reused with new terms.
 void GPUOperator::addOneBodyTerm(uint8_t op_type, uint32_t site, const std::complex<double>& coeff) {
     GPUTransformData tdata;
     tdata.op_type = op_type;
@@ -81,6 +96,7 @@ void GPUOperator::addOneBodyTerm(uint8_t op_type, uint32_t site, const std::comp
     tdata.coefficient = make_cuDoubleComplex(coeff.real(), coeff.imag());
     tdata.is_two_body = 0;
     transform_data_.push_back(tdata);
+    invalidateDerivedCaches();
 }
 
 void GPUOperator::addTwoBodyTerm(uint8_t op1, uint32_t site1, uint8_t op2, uint32_t site2,
@@ -93,6 +109,7 @@ void GPUOperator::addTwoBodyTerm(uint8_t op1, uint32_t site1, uint8_t op2, uint3
     tdata.coefficient = make_cuDoubleComplex(coeff.real(), coeff.imag());
     tdata.is_two_body = 1;
     transform_data_.push_back(tdata);
+    invalidateDerivedCaches();
 }
 
 void GPUOperator::addThreeBodyTerm(uint8_t op1, uint32_t site1, uint8_t op2, uint32_t site2,
@@ -106,6 +123,26 @@ void GPUOperator::addThreeBodyTerm(uint8_t op1, uint32_t site1, uint8_t op2, uin
     tdata.site_index_3 = site3;
     tdata.coefficient = make_cuDoubleComplex(coeff.real(), coeff.imag());
     three_body_data_.push_back(tdata);
+    invalidateDerivedCaches();
+}
+
+void GPUOperator::invalidateDerivedCaches() {
+    // Host-side classification is now stale.
+    transforms_separated_ = false;
+    // Re-upload of separated SoA on next matVec is required.
+    separated_on_device_ = false;
+    // Re-select kernel pathway because nnz / off-diagonal ratio may change.
+    selected_pathway_ = KernelPathway::UNINITIALIZED;
+    // Drop the assembled CSR and any cuSPARSE descriptors that point into it.
+    if (csr_assembled_) {
+        freeCsrDeviceData();
+    }
+    // Drop cached transform_data_ device pointer (it'll get rebuilt on demand).
+    if (d_transform_data_) {
+        cudaFree(d_transform_data_);
+        d_transform_data_ = nullptr;
+        num_transforms_   = 0;
+    }
 }
 
 void GPUOperator::loadThreeBodyFile(const std::string& filename) {
@@ -146,14 +183,32 @@ void GPUOperator::loadThreeBodyFile(const std::string& filename) {
         lineCount++;
     }
     
-    std::cout << "GPU: Loaded " << three_body_data_.size() << " three-body terms from " 
+    std::cout << "GPU: Loaded " << three_body_data_.size() << " three-body terms from "
               << filename << std::endl;
-    
-    // Warn user that 3-body terms are not yet GPU-accelerated
+
+    // Three-body terms are loaded but the GPU kernel only handles 1- and
+    // 2-body parts of H. Silently dropping them would produce wrong-energy
+    // results that look superficially fine — refuse to proceed unless the
+    // user explicitly opts in via ED_GPU_ALLOW_DROPPED_THREEBODY=1, in
+    // which case we still emit the loud warning so the situation is
+    // recorded in run logs.
     if (!three_body_data_.empty()) {
-        std::cerr << "WARNING: Three-body terms loaded but GPU kernel not yet implemented.\n";
-        std::cerr << "         These terms will be IGNORED in GPU calculations.\n";
-        std::cerr << "         Consider using CPU solvers for Hamiltonians with 3-body interactions.\n";
+        const char* opt_in = std::getenv("ED_GPU_ALLOW_DROPPED_THREEBODY");
+        const bool user_acknowledged = (opt_in && opt_in[0] == '1');
+        if (!user_acknowledged) {
+            throw std::runtime_error(
+                "GPUOperator: " + std::to_string(three_body_data_.size()) +
+                " three-body terms were loaded from '" + filename +
+                "', but the GPU matvec kernel does not implement them. "
+                "Use a CPU solver for this Hamiltonian, or set "
+                "ED_GPU_ALLOW_DROPPED_THREEBODY=1 to acknowledge that "
+                "three-body interactions will be silently dropped on the GPU.");
+        }
+        std::cerr << "WARNING: Three-body terms loaded but GPU kernel not implemented.\n";
+        std::cerr << "         ED_GPU_ALLOW_DROPPED_THREEBODY=1 is set — proceeding with\n";
+        std::cerr << "         " << three_body_data_.size()
+                  << " three-body term(s) IGNORED on the GPU.\n";
+        std::cerr << "         Energies and observables will not match the full Hamiltonian.\n";
     }
 }
 
@@ -167,17 +222,13 @@ void GPUOperator::copyThreeBodyDataToDevice() {
                             cudaMemcpyHostToDevice));
         
         std::cout << "GPU: Copied " << num_three_body_ << " three-body operations to device\n";
-        
-        // WARNING: Three-body terms are stored but NOT yet supported in GPU kernels
-        std::cerr << "\n";
-        std::cerr << "╔══════════════════════════════════════════════════════════════════════════╗\n";
-        std::cerr << "║  WARNING: THREE-BODY TERMS NOT YET IMPLEMENTED IN GPU KERNELS           ║\n";
-        std::cerr << "╠══════════════════════════════════════════════════════════════════════════╣\n";
-        std::cerr << "║  " << num_three_body_ << " three-body terms loaded but will be IGNORED during GPU computation.  ║\n";
-        std::cerr << "║  For Hamiltonians with three-body interactions, use CPU solvers instead.║\n";
-        std::cerr << "║  GPU three-body kernel implementation is planned for a future release.  ║\n";
-        std::cerr << "╚══════════════════════════════════════════════════════════════════════════╝\n";
-        std::cerr << "\n";
+
+        // Reaching this point implies ED_GPU_ALLOW_DROPPED_THREEBODY=1 was
+        // set (otherwise loadInterAllFile would have thrown). Re-emit a
+        // compact warning so the run log makes the loss-of-physics obvious.
+        std::cerr << "[GPUOperator] " << num_three_body_
+                  << " three-body terms copied to device but IGNORED by the matvec kernel "
+                  << "(ED_GPU_ALLOW_DROPPED_THREEBODY=1).\n";
     }
 }
 
@@ -431,9 +482,19 @@ void GPUOperator::matVec(const std::complex<double>* x, std::complex<double>* y,
 }
 
 void GPUOperator::matVecGPU(const cuDoubleComplex* d_x, cuDoubleComplex* d_y, int N) {
-    // OPTIMIZATION: Use pre-allocated events instead of create/destroy per call
-    CUDA_CHECK(cudaEventRecord(timing_start_));
-    
+    // OPTIMIZATION: Per-call event timing forces a host-side sync at the end
+    // (cudaEventSynchronize) which serializes the GPU pipeline and can be
+    // 30-50% of the wall time at small N. Make it opt-in via env var so the
+    // hot path is fully asynchronous by default. CPU profilers like nsys /
+    // ncu still expose per-kernel timings without the host sync.
+    static const bool ed_gpu_timing = []{
+        const char* e = std::getenv("ED_GPU_TIMING");
+        return e && e[0] == '1';
+    }();
+    if (ed_gpu_timing) {
+        CUDA_CHECK(cudaEventRecord(timing_start_));
+    }
+
     if (!transform_data_.empty()) {
         // Copy transform data to device if not already done
         if (d_transform_data_ == nullptr) {
@@ -446,12 +507,23 @@ void GPUOperator::matVecGPU(const cuDoubleComplex* d_x, cuDoubleComplex* d_y, in
         }
         
         // Ensure transforms are separated and copied to device (for non-legacy paths)
-        if (selected_pathway_ != KernelPathway::SHARED_MEMORY && !separated_on_device_) {
+        // CUSPARSE_CSR doesn't need separated SoA on device — it uses its
+        // own assembled CSR cache built in selectKernelPathway().
+        if (selected_pathway_ != KernelPathway::SHARED_MEMORY &&
+            selected_pathway_ != KernelPathway::CUSPARSE_CSR &&
+            !separated_on_device_) {
             copySeparatedTransformsToDevice();
         }
-        
+
         // Execute selected pathway (no branching within hot path)
         switch (selected_pathway_) {
+        case KernelPathway::CUSPARSE_CSR: {
+            // Single tuned cuSPARSE SpMV. cusparseSpMV writes directly into
+            // d_y with beta=0, so no separate cudaMemset is needed.
+            applyCusparse(d_x, d_y, N, /*stream=*/0);
+            break;
+        }
+
         case KernelPathway::WARP_REDUCTION: {
             // V3: WARP-REDUCTION (GATHER) KERNEL - no atomics
             GPUKernels::matVecWarpReductionFused<<<launch_config_.num_blocks, launch_config_.threads_per_block>>>(
@@ -525,34 +597,53 @@ void GPUOperator::matVecGPU(const cuDoubleComplex* d_x, cuDoubleComplex* d_y, in
         CUDA_CHECK(cudaMemset(d_y, 0, N * sizeof(cuDoubleComplex)));
     }
     
-    // OPTIMIZATION: Use pre-allocated events
-    CUDA_CHECK(cudaEventRecord(timing_stop_));
-    CUDA_CHECK(cudaEventSynchronize(timing_stop_));
-    
-    float milliseconds = 0;
-    CUDA_CHECK(cudaEventElapsedTime(&milliseconds, timing_start_, timing_stop_));
-    stats_.matVecTime = milliseconds / 1000.0;
-    
-    // Estimate throughput (rough estimate)
-    double flops = static_cast<double>(N) * NNZ_PER_STATE_ESTIMATE * 8; // multiply-add per element
-    stats_.throughput = flops / (stats_.matVecTime * 1e9);
+    // Per-call event timing only when explicitly enabled. The
+    // cudaEventSynchronize stall would otherwise dominate at small N.
+    // When disabled, callers that read stats_.matVecTime get 0 (the GPU
+    // pipeline is fully asynchronous and per-call timing is meaningless
+    // without a sync). Use ED_GPU_TIMING=1 for honest per-call numbers.
+    if (ed_gpu_timing) {
+        CUDA_CHECK(cudaEventRecord(timing_stop_));
+        CUDA_CHECK(cudaEventSynchronize(timing_stop_));
+
+        float milliseconds = 0;
+        CUDA_CHECK(cudaEventElapsedTime(&milliseconds, timing_start_, timing_stop_));
+        stats_.matVecTime = milliseconds / 1000.0;
+
+        // Estimate throughput (rough estimate)
+        double flops = static_cast<double>(N) * NNZ_PER_STATE_ESTIMATE * 8;
+        stats_.throughput = flops / (stats_.matVecTime * 1e9);
+    } else {
+        stats_.matVecTime = 0.0;
+        stats_.throughput = 0.0;
+    }
 }
 
 void GPUOperator::selectKernelPathway(int N) {
     /**
      * Kernel Selection Criteria:
-     * 
+     *
+     * 0. CUSPARSE_CSR (assembled CSR + cuSPARSE SpMV) -- DEFAULT when feasible:
+     *    - Benefits: NVIDIA-tuned warp-vector SpMV, no per-call transform loop,
+     *      no atomic contention, tiny per-iteration launch overhead.
+     *    - Overhead: One-time host-side CSR build + HtoD copy (amortized over
+     *      hundreds of Lanczos matvecs).
+     *    - Use when: build succeeds (matrix fits in ~65% of free GPU memory)
+     *      AND not disabled via ED_GPU_DISABLE_CUSPARSE=1.
+     *    - Required for the GPU to match the CPU's assembled-CSR fast path
+     *      that gives 1.3-7.8x speedup vs SciPy on N=12-18.
+     *
      * 1. WARP_REDUCTION (gather pattern):
      *    - Benefits: Zero atomic contention, direct memory writes
      *    - Overhead: Must compute inverse transforms, warp shuffle reductions
      *    - Use when: T >= 1024 AND N >= 8192
      *    - Reason: Warp overhead only worth it with massive atomic contention
-     * 
+     *
      * 2. BRANCH_FREE_SCATTER (scatter pattern):
      *    - Benefits: No warp divergence, parallel over states × transforms
      *    - Overhead: Atomics for off-diagonal terms
      *    - Use when: T >= 64 (enough to saturate warps)
-     * 
+     *
      * 3. SHARED_MEMORY (legacy optimized):
      *    - Benefits: Coalesced access, shared memory caching of transforms
      *    - Overhead: Warp divergence for mixed transform types
@@ -560,7 +651,41 @@ void GPUOperator::selectKernelPathway(int N) {
      */
     
     cached_N_ = N;
-    
+
+    // ---- Preferred path: cuSPARSE assembled CSR ------------------------
+    // Three-body terms are not yet emitted into the CSR by buildCsrOnDevice,
+    // so they would silently get dropped if we took this path. Skip cuSPARSE
+    // for any operator that has them (and rely on the existing matrix-free
+    // pathways, which also currently ignore three-body GPU contributions but
+    // at least loudly warn). Use the host vector size, not num_three_body_,
+    // because the latter is only set after copyThreeBodyDataToDevice().
+    //
+    // Empirically (H100, Heisenberg PBC chain), the matrix-free fused kernel
+    // beats cuSPARSE for very small dimensions (<= ~16k rows) where the per-
+    // call cuSPARSE launch + descriptor binding overhead dominates over the
+    // raw SpMV work. The crossover is operator-dependent so we expose it via
+    // ED_GPU_CUSPARSE_MIN_DIM (default 32768).
+    const char* disable_env = std::getenv("ED_GPU_DISABLE_CUSPARSE");
+    const char* min_dim_env = std::getenv("ED_GPU_CUSPARSE_MIN_DIM");
+    const int   cusparse_min_dim =
+        (min_dim_env && min_dim_env[0] != '\0') ? std::atoi(min_dim_env) : 32768;
+    const bool cusparse_disabled =
+        (disable_env && disable_env[0] == '1') ||
+        (!three_body_data_.empty()) ||
+        (N < cusparse_min_dim);
+
+    if (!cusparse_disabled) {
+        if (!transforms_separated_) separateTransformsByType();
+        if (buildCsrOnDevice(N)) {
+            selected_pathway_ = KernelPathway::CUSPARSE_CSR;
+            std::cout << "Selected CUSPARSE_CSR pathway: T=" << num_transforms_
+                      << ", N=" << N << ", nnz=" << csr_nnz_ << std::endl;
+            return;
+        }
+        // If buildCsrOnDevice() returned false (insufficient memory or no
+        // entries), fall through to matrix-free selection.
+    }
+
     // Thresholds tuned from empirical testing
     constexpr int WARP_REDUCTION_T_THRESHOLD = 1024;  // High T needed for atomic contention
     constexpr int WARP_REDUCTION_N_THRESHOLD = 8192;  // Enough warps to amortize overhead
@@ -633,12 +758,20 @@ void GPUOperator::matVecGPUAsync(const cuDoubleComplex* d_x, cuDoubleComplex* d_
             selectKernelPathway(N);
         }
         
-        // Ensure separated transforms on device for non-SHARED_MEMORY paths
-        if (selected_pathway_ != KernelPathway::SHARED_MEMORY && !separated_on_device_) {
+        // Ensure separated transforms on device for non-SHARED_MEMORY paths.
+        // CUSPARSE_CSR uses its own assembled CSR cache (no SoA needed).
+        if (selected_pathway_ != KernelPathway::SHARED_MEMORY &&
+            selected_pathway_ != KernelPathway::CUSPARSE_CSR &&
+            !separated_on_device_) {
             copySeparatedTransformsToDevice();
         }
-        
+
         switch (selected_pathway_) {
+        case KernelPathway::CUSPARSE_CSR: {
+            applyCusparse(d_x, d_y, N, stream);
+            break;
+        }
+
         case KernelPathway::WARP_REDUCTION: {
             GPUKernels::matVecWarpReductionFused<<<launch_config_.num_blocks, launch_config_.threads_per_block, 0, stream>>>(
                 d_x, d_y,
@@ -700,6 +833,266 @@ void GPUOperator::matVecGPUAsync(const cuDoubleComplex* d_x, cuDoubleComplex* d_
     } else {
         // No transform data available - this shouldn't happen in normal operation
         cudaMemsetAsync(d_y, 0, N * sizeof(cuDoubleComplex), stream);
+    }
+}
+
+// ============================================================================
+// cuSPARSE assembled-CSR fast path
+//
+// One-time host-side CSR assembly (mirrors the CPU's
+// Operator::buildSparseMatrixFromData/buildRowMajorCSR), followed by an
+// HtoD memcpy and cuSPARSE SpMV calls. Once built, every matVec is a single
+// cusparseSpMV() launch — no atomics, no transform-loop overhead, and full
+// use of NVIDIA's tuned warp-vector SpMV scheduling.
+// ============================================================================
+
+void GPUOperator::freeCsrDeviceData() {
+    if (vec_x_descr_) { cusparseDestroyDnVec(vec_x_descr_); vec_x_descr_ = nullptr; }
+    if (vec_y_descr_) { cusparseDestroyDnVec(vec_y_descr_); vec_y_descr_ = nullptr; }
+    if (csr_descr_)   { cusparseDestroySpMat(csr_descr_);   csr_descr_   = nullptr; }
+    if (cusparse_workspace_) {
+        cudaFree(cusparse_workspace_);
+        cusparse_workspace_ = nullptr;
+        cusparse_workspace_bytes_ = 0;
+    }
+    if (d_csr_row_offsets_) { cudaFree(d_csr_row_offsets_); d_csr_row_offsets_ = nullptr; }
+    if (d_csr_col_idx_)     { cudaFree(d_csr_col_idx_);     d_csr_col_idx_     = nullptr; }
+    if (d_csr_values_)      { cudaFree(d_csr_values_);      d_csr_values_      = nullptr; }
+    csr_nnz_ = 0;
+    csr_dim_ = 0;
+    csr_assembled_ = false;
+}
+
+bool GPUOperator::buildCsrOnDevice(int N) {
+    // Caller is responsible for invalidating any stale CSR before mutating
+    // transform_data_; we just check the cached flag here.
+    if (csr_assembled_ && csr_dim_ == N) return true;
+    freeCsrDeviceData();
+
+    if (!transforms_separated_) separateTransformsByType();
+
+    // ---- Memory feasibility check --------------------------------------
+    // Estimate nnz pessimistically: each diagonal term contributes 1 entry per
+    // row, each off-diagonal one or two-body term up to 1 entry per row. The
+    // bound (terms_per_row) is exact for the operator types we support.
+    // Total bytes: (N+1)*4 (row_offsets) + nnz*(4 + 16) (col_idx + value).
+    //
+    // NOTE: We deliberately use the host-side vector sizes (.size()) rather
+    // than the num_* counters: those counters are only set by
+    // copySeparatedTransformsToDevice(), which the cuSPARSE path does not
+    // invoke. Using the counters here would make this function silently
+    // believe the operator is empty and bail out to the matrix-free path.
+    const size_t terms_per_row =
+        diag_one_body_.size() + offdiag_one_body_.size() +
+        diag_two_body_.size() + mixed_two_body_.size() +
+        offdiag_two_body_.size() + three_body_data_.size();
+    if (terms_per_row == 0) return false;
+
+    const size_t est_nnz   = static_cast<size_t>(N) * terms_per_row;
+    const size_t est_bytes = static_cast<size_t>(N + 1) * sizeof(int)
+                           + est_nnz * (sizeof(int) + sizeof(cuDoubleComplex));
+
+    size_t free_mem = 0, total_mem = 0;
+    cudaMemGetInfo(&free_mem, &total_mem);
+    // Reserve 35% of free memory for Lanczos vectors / cuSPARSE workspace /
+    // future allocations. This is conservative but avoids OOM under typical
+    // Lanczos workloads (4 working vectors + ~max_iter stored vectors).
+    const size_t budget = static_cast<size_t>(free_mem * 0.65);
+    if (est_bytes > budget) {
+        std::cout << "GPUOperator: CSR fast path skipped (" 
+                  << (est_bytes / (1024.0 * 1024.0)) << " MB > "
+                  << (budget / (1024.0 * 1024.0)) << " MB budget)\n";
+        return false;
+    }
+
+    // ---- Host-side CSR assembly ----------------------------------------
+    // Build COO-style triplets first (row, col, val), then sort by row to
+    // produce a sorted CSR. We use sequential build for now: it's a one-time
+    // O(N * T) cost that's amortized over hundreds of SpMV calls.
+    const float spin = spin_l_;
+    const double spin_sq = static_cast<double>(spin) * static_cast<double>(spin);
+
+    std::vector<int> rows;        rows.reserve(est_nnz);
+    std::vector<int> cols;        cols.reserve(est_nnz);
+    std::vector<cuDoubleComplex> vals;  vals.reserve(est_nnz);
+
+    auto emit = [&](int r, int c, cuDoubleComplex v) {
+        rows.push_back(r);
+        cols.push_back(c);
+        vals.push_back(v);
+    };
+
+    for (int basis = 0; basis < N; ++basis) {
+        // Diagonal one-body (Sz)
+        for (const auto& t : diag_one_body_) {
+            const double sign = ((basis >> t.site_index) & 1) ? -1.0 : 1.0;
+            cuDoubleComplex v = make_cuDoubleComplex(
+                cuCreal(t.coefficient) * spin * sign,
+                cuCimag(t.coefficient) * spin * sign);
+            emit(basis, basis, v);
+        }
+        // Off-diagonal one-body (S+/S-)
+        for (const auto& t : offdiag_one_body_) {
+            const uint64_t bit = (basis >> t.site_index) & 1;
+            if (bit != t.op_type) {
+                const int new_basis = basis ^ (1 << t.site_index);
+                if (new_basis < N) emit(new_basis, basis, t.coefficient);
+            }
+        }
+        // Diagonal two-body (Sz Sz)
+        for (const auto& t : diag_two_body_) {
+            const double si = ((basis >> t.site_index_1) & 1) ? -1.0 : 1.0;
+            const double sj = ((basis >> t.site_index_2) & 1) ? -1.0 : 1.0;
+            const double s  = spin_sq * si * sj;
+            cuDoubleComplex v = make_cuDoubleComplex(
+                cuCreal(t.coefficient) * s,
+                cuCimag(t.coefficient) * s);
+            emit(basis, basis, v);
+        }
+        // Mixed two-body (Sz * S+/S-)
+        for (const auto& t : mixed_two_body_) {
+            const uint64_t flip_bit = (basis >> t.flip_site) & 1;
+            if (flip_bit != t.flip_op_type) {
+                const double sz_sign = ((basis >> t.sz_site) & 1) ? -1.0 : 1.0;
+                const int new_basis = basis ^ (1 << t.flip_site);
+                if (new_basis < N) {
+                    const double s = spin * sz_sign;
+                    cuDoubleComplex v = make_cuDoubleComplex(
+                        cuCreal(t.coefficient) * s,
+                        cuCimag(t.coefficient) * s);
+                    emit(new_basis, basis, v);
+                }
+            }
+        }
+        // Off-diagonal two-body (S+/S- * S+/S-)
+        for (const auto& t : offdiag_two_body_) {
+            const uint64_t b1 = (basis >> t.site_index_1) & 1;
+            const uint64_t b2 = (basis >> t.site_index_2) & 1;
+            if (b1 != t.op_type_1 && b2 != t.op_type_2) {
+                const int new_basis = basis ^ (1 << t.site_index_1) ^ (1 << t.site_index_2);
+                if (new_basis < N) emit(new_basis, basis, t.coefficient);
+            }
+        }
+    }
+
+    if (rows.empty()) {
+        std::cout << "GPUOperator: CSR fast path skipped (no entries to assemble)\n";
+        return false;
+    }
+
+    // ---- COO -> CSR (sort by row, then merge duplicate (row,col) pairs) -
+    // Indirect sort to avoid moving cuDoubleComplex (16-byte) values during
+    // the comparison-heavy phase: build perm, then gather.
+    std::vector<int> perm(rows.size());
+    for (size_t i = 0; i < perm.size(); ++i) perm[i] = static_cast<int>(i);
+    std::sort(perm.begin(), perm.end(), [&](int a, int b) {
+        if (rows[a] != rows[b]) return rows[a] < rows[b];
+        return cols[a] < cols[b];
+    });
+
+    std::vector<int> sorted_rows(rows.size());
+    std::vector<int> sorted_cols(rows.size());
+    std::vector<cuDoubleComplex> sorted_vals(rows.size());
+    for (size_t i = 0; i < perm.size(); ++i) {
+        sorted_rows[i] = rows[perm[i]];
+        sorted_cols[i] = cols[perm[i]];
+        sorted_vals[i] = vals[perm[i]];
+    }
+
+    // Merge consecutive entries with identical (row, col) — duplicates are
+    // possible when two distinct transforms map basis -> new_basis with the
+    // same coefficient slot (e.g., two equivalent Sz_i*Sz_j terms).
+    std::vector<int> mrows;        mrows.reserve(sorted_rows.size());
+    std::vector<int> mcols;        mcols.reserve(sorted_cols.size());
+    std::vector<cuDoubleComplex> mvals;  mvals.reserve(sorted_vals.size());
+    for (size_t i = 0; i < sorted_rows.size(); ++i) {
+        if (!mrows.empty() && mrows.back() == sorted_rows[i] && mcols.back() == sorted_cols[i]) {
+            mvals.back() = cuCadd(mvals.back(), sorted_vals[i]);
+        } else {
+            mrows.push_back(sorted_rows[i]);
+            mcols.push_back(sorted_cols[i]);
+            mvals.push_back(sorted_vals[i]);
+        }
+    }
+
+    const int64_t nnz = static_cast<int64_t>(mrows.size());
+
+    // Build row_offsets[N+1] from the (now sorted) row array.
+    std::vector<int> row_offsets(N + 1, 0);
+    for (int64_t i = 0; i < nnz; ++i) {
+        row_offsets[mrows[i] + 1]++;
+    }
+    for (int r = 0; r < N; ++r) row_offsets[r + 1] += row_offsets[r];
+
+    // ---- Upload to device ----------------------------------------------
+    CUDA_CHECK(cudaMalloc(&d_csr_row_offsets_, (N + 1) * sizeof(int)));
+    CUDA_CHECK(cudaMalloc(&d_csr_col_idx_,     nnz * sizeof(int)));
+    CUDA_CHECK(cudaMalloc(&d_csr_values_,      nnz * sizeof(cuDoubleComplex)));
+    CUDA_CHECK(cudaMemcpy(d_csr_row_offsets_, row_offsets.data(),
+                          (N + 1) * sizeof(int), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(d_csr_col_idx_, mcols.data(),
+                          nnz * sizeof(int), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(d_csr_values_, mvals.data(),
+                          nnz * sizeof(cuDoubleComplex), cudaMemcpyHostToDevice));
+
+    // ---- cuSPARSE descriptors + workspace ------------------------------
+    CUSPARSE_CHECK(cusparseCreateCsr(&csr_descr_,
+        /*rows=*/N, /*cols=*/N, nnz,
+        d_csr_row_offsets_, d_csr_col_idx_, d_csr_values_,
+        CUSPARSE_INDEX_32I, CUSPARSE_INDEX_32I,
+        CUSPARSE_INDEX_BASE_ZERO, CUDA_C_64F));
+
+    // We create dense-vector descriptors with nullptr data pointers and
+    // re-bind them to (d_x, d_y) on every applyCusparse() call via
+    // cusparseDnVecSetValues. Cheaper than recreating the descriptor.
+    CUSPARSE_CHECK(cusparseCreateDnVec(&vec_x_descr_, N, nullptr, CUDA_C_64F));
+    CUSPARSE_CHECK(cusparseCreateDnVec(&vec_y_descr_, N, nullptr, CUDA_C_64F));
+
+    cuDoubleComplex alpha = make_cuDoubleComplex(1.0, 0.0);
+    cuDoubleComplex beta  = make_cuDoubleComplex(0.0, 0.0);
+
+    CUSPARSE_CHECK(cusparseSpMV_bufferSize(cusparse_handle_,
+        CUSPARSE_OPERATION_NON_TRANSPOSE,
+        &alpha, csr_descr_, vec_x_descr_, &beta, vec_y_descr_,
+        CUDA_C_64F, CUSPARSE_SPMV_CSR_ALG2, &cusparse_workspace_bytes_));
+
+    if (cusparse_workspace_bytes_ > 0) {
+        CUDA_CHECK(cudaMalloc(&cusparse_workspace_, cusparse_workspace_bytes_));
+    }
+
+    csr_nnz_ = nnz;
+    csr_dim_ = N;
+    csr_assembled_ = true;
+
+    std::cout << "GPUOperator: cuSPARSE CSR assembled, dim=" << N
+              << ", nnz=" << nnz
+              << " (" << (est_bytes / (1024.0 * 1024.0)) << " MB"
+              << ", workspace=" << (cusparse_workspace_bytes_ / 1024.0) << " KB)\n";
+    return true;
+}
+
+void GPUOperator::applyCusparse(const cuDoubleComplex* d_x, cuDoubleComplex* d_y,
+                                int N, cudaStream_t stream) {
+    // Bind I/O vectors to the cached descriptors. cusparseDnVecSetValues is
+    // O(1) -- it just patches the pointer in the opaque descriptor.
+    CUSPARSE_CHECK(cusparseDnVecSetValues(vec_x_descr_, const_cast<cuDoubleComplex*>(d_x)));
+    CUSPARSE_CHECK(cusparseDnVecSetValues(vec_y_descr_, d_y));
+
+    if (stream) {
+        CUSPARSE_CHECK(cusparseSetStream(cusparse_handle_, stream));
+    }
+
+    cuDoubleComplex alpha = make_cuDoubleComplex(1.0, 0.0);
+    cuDoubleComplex beta  = make_cuDoubleComplex(0.0, 0.0);
+    CUSPARSE_CHECK(cusparseSpMV(cusparse_handle_,
+        CUSPARSE_OPERATION_NON_TRANSPOSE,
+        &alpha, csr_descr_, vec_x_descr_, &beta, vec_y_descr_,
+        CUDA_C_64F, CUSPARSE_SPMV_CSR_ALG2, cusparse_workspace_));
+
+    if (stream) {
+        // Restore the default stream so subsequent (synchronous) cuSPARSE
+        // calls behave as expected.
+        CUSPARSE_CHECK(cusparseSetStream(cusparse_handle_, 0));
     }
 }
 

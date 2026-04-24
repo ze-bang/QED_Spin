@@ -84,7 +84,9 @@ public:
      */
     int runSingleSample(unsigned int seed,
                        std::vector<double>& alpha,
-                       std::vector<double>& beta);
+                       std::vector<double>& beta,
+                       bool full_reorth = false,
+                       int reorth_freq = 10);
     
     /**
      * @brief Compute thermodynamics from Lanczos tridiagonal matrix
@@ -441,9 +443,8 @@ private:
     int cusolver_lwork_;             // cuSOLVER workspace size
     int tridiag_capacity_;           // Maximum Krylov dimension allocated
     
-    // CUDA streams for pipelining
-    cudaStream_t compute_stream_;    // Main computation stream
-    cudaStream_t transfer_stream_;   // Data transfer stream
+    // CUDA stream for pipelining. (transfer_stream_ removed in D-6 — was never used.)
+    cudaStream_t compute_stream_;
     bool streams_initialized_;
     
     // Performance statistics

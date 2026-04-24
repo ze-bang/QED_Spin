@@ -80,14 +80,17 @@ void print_help(const char* prog_name) {
     
     std::cout << "Workflow Options:\n";
     std::cout << "  --standard              Run standard diagonalization\n";
-    std::cout << "  --symm                  Run symmetry-exploiting diagonalization (auto-selects best mode)\n";
+    std::cout << "  --symm                  Run symmetry-exploiting diagonalization (canonical flag,\n";
+    std::cout << "                          auto-selects best mode; works on CPU and GPU)\n";
     std::cout << "  --symm-threshold=<n>    Hilbert dim threshold for streaming mode (default: 4096)\n";
     std::cout << "  --disk-threshold=<n>    Hilbert dim threshold for disk-streaming mode (default: 67108864)\n";
-    std::cout << "  --symmetrized           Run symmetrized diagonalization (exploits symmetries)\n";
-    std::cout << "  --streaming-symmetry    Run streaming symmetry diagonalization (memory-efficient,\n";
-    std::cout << "                          recommended for systems ≥12 sites)\n";
+    std::cout << "  --symmetrized           (deprecated alias for --symm)\n";
+    std::cout << "  --streaming-symmetry    (deprecated alias for --symm)\n";
     std::cout << "  --disk-streaming        Run ultra-low-memory disk-based symmetry diagonalization\n";
-    std::cout << "                          (processes one sector at a time, uses disk cache)\n";
+    std::cout << "                          (processes one sector at a time, uses disk cache;\n";
+    std::cout << "                          GPU methods auto-fall back to CPU Lanczos)\n";
+    std::cout << "  --chunked-symm          Two-pass chunked symmetry build (lowest-memory basis;\n";
+    std::cout << "                          GPU methods auto-fall back to CPU Lanczos)\n";
     std::cout << "  --thermo                Compute thermodynamic properties\n";
     std::cout << "  --dynamical-response    Compute dynamical response (spectral functions)\n";
     std::cout << "  --static-response       Compute static response (thermal expectation values)\n";
@@ -145,7 +148,11 @@ void print_help(const char* prog_name) {
     std::cout << "  --use-gpu               Enable GPU acceleration for both dynamical and static response\n";
     std::cout << "  --dyn-use-gpu           Enable GPU acceleration for dynamical response only\n";
     std::cout << "  --static-use-gpu        Enable GPU acceleration for static response only\n";
-    std::cout << "                          Note: Fixed-Sz GPU support is not yet implemented\n\n";
+    std::cout << "                          Notes: --fixed-sz response GPU paths are not yet\n";
+    std::cout << "                          implemented and silently fall back to CPU.\n";
+    std::cout << "                          Single-T dynamical and --ground-state-dssf are CPU-only.\n";
+    std::cout << "                          The multi-temperature dynamical workflow is the\n";
+    std::cout << "                          GPU-accelerated path.\n\n";
     
     std::cout << "Static Response Options:\n";
     std::cout << "  --static-samples=<n>    Number of random states (default: 20)\n";

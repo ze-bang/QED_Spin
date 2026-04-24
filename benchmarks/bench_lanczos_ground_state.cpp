@@ -11,12 +11,16 @@
 #include <benchmark/benchmark.h>
 
 #include <ed/core/construct_ham.h>
+#include <ed/solvers/arpack.h>
 #include <ed/solvers/lanczos.h>
 
 #include <complex>
 #include <cstdint>
+#include <fstream>
 #include <functional>
+#include <iostream>
 #include <memory>
+#include <streambuf>
 #include <string>
 #include <vector>
 
@@ -52,6 +56,21 @@ make_heisenberg_chain_pbc(uint64_t N) {
     return op;
 }
 
+// Silence per-iter chatter so it doesn't dominate the timed region.
+struct CoutSilencer {
+    std::streambuf* old_cout;
+    std::streambuf* old_cerr;
+    std::ofstream sink{"/dev/null"};
+    CoutSilencer() {
+        old_cout = std::cout.rdbuf(sink.rdbuf());
+        old_cerr = std::cerr.rdbuf(sink.rdbuf());
+    }
+    ~CoutSilencer() {
+        std::cout.rdbuf(old_cout);
+        std::cerr.rdbuf(old_cerr);
+    }
+};
+
 void BM_LanczosGroundState(benchmark::State& state) {
     const auto N      = static_cast<uint64_t>(state.range(0));
     const auto kry    = static_cast<uint64_t>(state.range(1));
@@ -62,10 +81,41 @@ void BM_LanczosGroundState(benchmark::State& state) {
         op->apply(in, out, static_cast<size_t>(n));
     };
 
+    CoutSilencer silence;
     for (auto _ : state) {
         std::vector<double> eigs;
+        // dir="/dev/null" -> skip HDF5 dump (see lanczos.cpp solve_tridiagonal_matrix).
         lanczos(Hv, dim, /*max_iter=*/kry, /*exct=*/1, /*tol=*/1e-10,
-                eigs, /*dir=*/"", /*eigenvectors=*/false);
+                eigs, /*dir=*/"/dev/null", /*eigenvectors=*/false);
+        benchmark::DoNotOptimize(eigs.data());
+        benchmark::ClobberMemory();
+    }
+    state.counters["dim"]        = static_cast<double>(dim);
+    state.counters["N"]          = static_cast<double>(N);
+    state.counters["krylov_dim"] = static_cast<double>(kry);
+}
+
+// Same workload through the ARPACK (IRLM) wrapper. ARPACK is what
+// scipy.sparse.linalg.eigsh and QuSpin both wrap, so this is the
+// apples-to-apples comparison. Switch the default solver via
+// ED_USE_ARPACK_DEFAULT=1.
+void BM_ArpackGroundState(benchmark::State& state) {
+    const auto N      = static_cast<uint64_t>(state.range(0));
+    const auto kry    = static_cast<uint64_t>(state.range(1));
+    const uint64_t dim = (1ULL << N);
+
+    auto op = make_heisenberg_chain_pbc(N);
+    auto Hv = [&](const Complex* in, Complex* out, int n) {
+        op->apply(in, out, static_cast<size_t>(n));
+    };
+
+    CoutSilencer silence;
+    for (auto _ : state) {
+        std::vector<double> eigs;
+        // arpack_*'s save_eigs_to_dir treats empty dir as "skip save"
+        // (see arpack.cpp), so this avoids HDF5 I/O during timing.
+        arpack_ground_state(Hv, dim, /*max_iter=*/kry, /*exct=*/1, /*tol=*/1e-10,
+                            eigs, /*dir=*/"", /*eigenvectors=*/false);
         benchmark::DoNotOptimize(eigs.data());
         benchmark::ClobberMemory();
     }
@@ -85,5 +135,19 @@ BENCHMARK(BM_LanczosGroundState)
     ->Args({10, 50})
     ->Args({12, 50})
     ->Args({14, 50})
+    ->Args({16, 80})
+    ->Args({18, 100})
+    ->Args({20, 120})
+    ->Unit(benchmark::kMillisecond)
+    ->MinTime(1.0);
+
+BENCHMARK(BM_ArpackGroundState)
+    ->Args({8,  50})
+    ->Args({10, 50})
+    ->Args({12, 50})
+    ->Args({14, 50})
+    ->Args({16, 80})
+    ->Args({18, 100})
+    ->Args({20, 120})
     ->Unit(benchmark::kMillisecond)
     ->MinTime(1.0);

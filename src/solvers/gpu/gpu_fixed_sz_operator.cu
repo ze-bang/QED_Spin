@@ -50,91 +50,100 @@ GPUFixedSzOperator::~GPUFixedSzOperator() {
 
 void GPUFixedSzOperator::buildBasisOnGPU() {
     std::cout << "Building fixed Sz basis on GPU...\n";
-    
-    // Allocate memory for basis states
+
+    // Combinadic-unrank kernel needs the Pascal triangle in __constant__
+    // memory. ensure_pascal_uploaded() is idempotent across operators.
+    GPUKernels::ensure_pascal_uploaded();
+
     CUDA_CHECK(cudaMalloc(&d_basis_states_, fixed_sz_dim_ * sizeof(uint64_t)));
-    
-    // Generate initial state: lowest n_up bits set
+
+    // start_state retained in the kernel signature for ABI compatibility,
+    // but the unrank implementation roots its enumeration at colex rank 0
+    // = (1 << n_up) - 1, which is the same starting state.
     uint64_t start_state = (1ULL << n_up_) - 1;
-    
-    // Launch kernel to generate basis
+
     int num_blocks = (fixed_sz_dim_ + BLOCK_SIZE - 1) / BLOCK_SIZE;
-    
     GPUKernels::generateFixedSzBasisKernel<<<num_blocks, BLOCK_SIZE>>>(
         d_basis_states_, n_sites_, n_up_, start_state, fixed_sz_dim_);
-    
     CUDA_CHECK(cudaGetLastError());
-    CUDA_CHECK(cudaDeviceSynchronize());
-    
-    std::cout << "  Basis generation complete (naturally sorted)\n";
+    // No cudaDeviceSynchronize here: subsequent matVec calls are issued on
+    // the default stream too, so the dependency is implicit. Forcing a
+    // host sync at construction time only serialized solver initialization
+    // for no benefit. (Errors are caught by the next CUDA_CHECK on any
+    // downstream API call.)
+
+    std::cout << "  Basis generation complete (combinadic unrank, naturally sorted)\n";
     std::cout << "  State lookup optimized: Binary search O(log N) with no warp divergence\n";
 }
 
 void GPUFixedSzOperator::matVecFixedSz(const cuDoubleComplex* d_x, cuDoubleComplex* d_y) {
-    cudaEvent_t start, stop;
-    CUDA_CHECK(cudaEventCreate(&start));
-    CUDA_CHECK(cudaEventCreate(&stop));
-    CUDA_CHECK(cudaEventRecord(start));
-    
+    // Per-call timing forces a host/device sync via cudaEventSynchronize
+    // and, in the previous implementation, also a cudaDeviceSynchronize.
+    // Both completely serialize the Lanczos pipeline (every iteration
+    // waits on the GPU before launching the next BLAS call), which on
+    // typical Heisenberg models was costing ~30% of wall time. We keep
+    // the timing path as opt-in via ED_GPU_TIMING=1, matching the
+    // convention used by GPULanczos::orthogonalize() and the dense GPU
+    // matVec in gpu_operator.cu.
+    static const bool timing_enabled = []() {
+        const char* s = std::getenv("ED_GPU_TIMING");
+        return (s && s[0] == '1');
+    }();
+
+    cudaEvent_t start = nullptr, stop = nullptr;
+    if (timing_enabled) {
+        CUDA_CHECK(cudaEventCreate(&start));
+        CUDA_CHECK(cudaEventCreate(&stop));
+        CUDA_CHECK(cudaEventRecord(start));
+    }
+
     int num_blocks = (fixed_sz_dim_ + BLOCK_SIZE - 1) / BLOCK_SIZE;
     num_blocks = std::min(num_blocks, MAX_BLOCKS);
-    
+
     if (!transform_data_.empty()) {
-        // Copy transform data to device if not already done
         if (d_transform_data_ == nullptr) {
             copyTransformDataToDevice();
         }
-        
-        // Auto-select kernel based on parallelism potential
+
         const int TRANSFORM_PARALLEL_THRESHOLD = 64;
-        
         if (num_transforms_ > TRANSFORM_PARALLEL_THRESHOLD) {
-            // GPU-NATIVE: Transform-parallel kernel (2D parallelism)
-            // Zero output vector (required for atomic accumulation)
             CUDA_CHECK(cudaMemset(d_y, 0, fixed_sz_dim_ * sizeof(cuDoubleComplex)));
-            
-            // 2D grid: (N/16, T/16) with 16×16 blocks
             dim3 block(16, 16);
             dim3 grid((fixed_sz_dim_ + block.x - 1) / block.x,
                      (num_transforms_ + block.y - 1) / block.y);
-            
             GPUKernels::matVecFixedSzTransformParallel<<<grid, block>>>(
                 d_x, d_y, d_basis_states_,
                 d_transform_data_, num_transforms_, fixed_sz_dim_, n_sites_, spin_l_);
         } else {
-            // State-parallel kernel (better for small T)
-            // Zero output vector (required for atomic accumulation since we scatter writes)
             CUDA_CHECK(cudaMemset(d_y, 0, fixed_sz_dim_ * sizeof(cuDoubleComplex)));
-            
             size_t shared_mem_size = std::min(num_transforms_, 4096) * sizeof(GPUTransformData);
-            
             GPUKernels::matVecFixedSzKernelOptimized<<<num_blocks, BLOCK_SIZE, shared_mem_size>>>(
                 d_x, d_y, d_basis_states_,
                 fixed_sz_dim_, n_sites_, spin_l_,
                 d_transform_data_, num_transforms_);
         }
     } else {
-        // No transform data - error (transform data is always required)
         std::cerr << "Error: GPUFixedSzOperator::matVecFixedSz called with no transform data" << std::endl;
         CUDA_CHECK(cudaMemset(d_y, 0, fixed_sz_dim_ * sizeof(cuDoubleComplex)));
     }
-    
+
     CUDA_CHECK(cudaGetLastError());
-    CUDA_CHECK(cudaDeviceSynchronize());
-    
-    CUDA_CHECK(cudaEventRecord(stop));
-    CUDA_CHECK(cudaEventSynchronize(stop));
-    
-    float milliseconds = 0;
-    CUDA_CHECK(cudaEventElapsedTime(&milliseconds, start, stop));
-    stats_.matVecTime = milliseconds / 1000.0;
-    
-    // Estimate throughput
-    double flops = static_cast<double>(fixed_sz_dim_) * NNZ_PER_STATE_ESTIMATE * 8;
-    stats_.throughput = flops / (stats_.matVecTime * 1e9);
-    
-    CUDA_CHECK(cudaEventDestroy(start));
-    CUDA_CHECK(cudaEventDestroy(stop));
+    // No cudaDeviceSynchronize here: callers are responsible for
+    // ordering with respect to subsequent reads of d_y. All consumers
+    // (GPULanczos, GPUFTLM, GPUTPQ) chain operations on the same default
+    // stream, so the dependency is implicit.
+
+    if (timing_enabled) {
+        CUDA_CHECK(cudaEventRecord(stop));
+        CUDA_CHECK(cudaEventSynchronize(stop));
+        float milliseconds = 0;
+        CUDA_CHECK(cudaEventElapsedTime(&milliseconds, start, stop));
+        stats_.matVecTime = milliseconds / 1000.0;
+        double flops = static_cast<double>(fixed_sz_dim_) * NNZ_PER_STATE_ESTIMATE * 8;
+        stats_.throughput = flops / (stats_.matVecTime * 1e9);
+        CUDA_CHECK(cudaEventDestroy(start));
+        CUDA_CHECK(cudaEventDestroy(stop));
+    }
 }
 
 // Override matVecGPU to use fixed Sz version

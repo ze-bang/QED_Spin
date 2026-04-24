@@ -540,7 +540,10 @@ int arpack_core_advanced(const std::function<void(const Complex*, Complex*, int)
 void save_eigs_to_dir(const std::vector<double>& evals,
                       const std::vector<Complex>* evecs,
                       uint64_t N, uint64_t nev, const std::string& dir) {
-    if (dir.empty()) return;
+    // Empty string OR "/dev/null" both mean "don't save" -- match the
+    // sentinel convention used by lanczos.cpp so benchmarks can disable
+    // I/O uniformly.
+    if (dir.empty() || dir == "/dev/null") return;
     
     try {
         // Save to HDF5 using the diagonalization results format

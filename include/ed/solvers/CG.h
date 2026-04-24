@@ -3,6 +3,32 @@
 
 #pragma once
 
+// =============================================================================
+// IMPORTANT — naming history
+//
+// This header is named "CG.h" for legacy reasons. It does NOT implement
+// the resolvent / linear-solver Conjugate Gradient (which would solve
+// (A - sigma*I) x = b for a fixed shift sigma). The Conjugate Gradient
+// _eigen_solver path lived here historically, has long since been removed,
+// and the two functions that remain are:
+//
+//   * davidson_method      — preconditioned Davidson eigensolver
+//   * lobpcg_method        — Locally Optimal Block Preconditioned CG
+//                            EIGENSOLVER (the "CG" in the name) for the
+//                            lowest few eigenpairs
+//   * lobpcg_diagonalization — back-compat wrapper around lobpcg_method
+//
+// Both LOBPCG and Davidson are *eigenvalue* solvers, not linear solvers,
+// despite the file name. If you are looking for a resolvent CG (used by
+// e.g. the continued-fraction Green's function path), see
+// src/solvers/cpu/lanczos.cpp's continued-fraction routines or the
+// shift-invert path in arpack.h. (D-11 in the modernization audit.)
+//
+// TODO(Phase 2): rename this header to ed/solvers/eigen_cg.h and add a
+// shim that #includes the new name; keep the legacy "CG.h" as a
+// deprecated alias for one release cycle.
+// =============================================================================
+
 #include <vector>
 #include <complex>
 #include <functional>

@@ -88,7 +88,12 @@ struct ThermalConfig {
     
     // ========== FTLM-specific parameters ==========
     uint64_t ftlm_krylov_dim = 100;    // Krylov subspace dimension per sample
-    bool ftlm_full_reorth = false;     // Use full reorthogonalization
+    // Default: full reorthogonalization ON. Without it the basis loses
+    // orthogonality after ~50 iterations and the resulting Ritz spectrum
+    // develops "ghost" duplicates that bias Z and E. Matches the legacy
+    // EDParameters default and what every FTLM reference (Jaklic-Prelovsek,
+    // SLEPc, EDLib) recommends. (D-3 in the modernization audit.)
+    bool ftlm_full_reorth = true;      // Use full reorthogonalization
     uint64_t ftlm_reorth_freq = 10;    // Reorthogonalization frequency
     uint64_t ftlm_seed = 0;            // Random seed (0 = auto)
     bool ftlm_store_samples = false;   // Store per-sample intermediate data

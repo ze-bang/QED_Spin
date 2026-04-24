@@ -89,6 +89,45 @@ TEST_CASE("Operator::apply: N=4 PBC ground state below OBC ground state",
     REQUIRE(gap > 1e-10);
 }
 
+TEST_CASE("Operator::apply_real: matches Operator::apply on real Heisenberg",
+          "[operator_apply][apply_real][audit-2.1-phase-1]") {
+    // Audit §2.1 Phase 1: the real-typed SpMV must be byte-equivalent to the
+    // complex SpMV when the operator is real and the input vector is real.
+    // We use the dim>=1024 threshold from apply()'s dispatch, so N=10 (dim=1024)
+    // exercises both the apply_real direct path and the apply() dispatch path.
+    constexpr int N = 10;
+    constexpr uint64_t dim = 1ULL << N;
+    auto op = build_heisenberg_chain(N, /*J=*/1.0, /*periodic=*/true);
+
+    SECTION("isReal classifies a real Heisenberg chain as real") {
+        REQUIRE(op->isReal());
+    }
+
+    SECTION("apply_real(re) == real(apply(complex(re)))") {
+        for (uint64_t seed : {1u, 31415u, 2718281u}) {
+            auto v_complex = random_unit_vector(dim, seed);
+            std::vector<double> v_real(dim);
+            for (uint64_t i = 0; i < dim; ++i) v_real[i] = v_complex[i].real();
+            for (uint64_t i = 0; i < dim; ++i) v_complex[i] = Complex(v_real[i], 0.0);
+
+            std::vector<double> out_real(dim, 0.0);
+            op->apply_real(v_real.data(), out_real.data(), dim);
+
+            ComplexVector out_complex(dim);
+            op->apply(v_complex.data(), out_complex.data(), dim);
+
+            double diff_sq = 0.0;
+            for (uint64_t i = 0; i < dim; ++i) {
+                double dr = out_complex[i].real() - out_real[i];
+                double di = out_complex[i].imag();
+                diff_sq += dr * dr + di * di;
+            }
+            INFO("seed=" << seed << "  ||apply_real - apply||_2 = " << std::sqrt(diff_sq));
+            REQUIRE(std::sqrt(diff_sq) < 1e-12);
+        }
+    }
+}
+
 TEST_CASE("Operator::apply: zero-coefficient term does not change spectrum",
           "[operator_apply][regression]") {
     auto base = build_heisenberg_chain(/*N=*/4, /*J=*/1.0);

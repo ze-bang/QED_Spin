@@ -15,6 +15,7 @@
 #include <ed/solvers/observables.h>
 #include <ed/core/ed_config.h>
 #include <ed/core/system_utils.h>
+#include <ed/core/ed_logging.h>  // for ed_log::debug() — D-5 routes [DEBUG] prints through here
 #include <sys/stat.h>
 #include <filesystem>
 #include <algorithm>
@@ -113,6 +114,10 @@ inline std::vector<Complex> operator* (const std::vector<Complex>& a, const Comp
 // implementation in src/core/ed_config.cpp does not need to include this
 // 4500-line header just to mention the enum. (P0.14 / audit Q6.)
 #include <ed/core/ed_types.h>
+// Method-classification predicates (is_tpq_method, is_gpu_method, ...) live
+// in their own header so other TUs don't have to include this monolith
+// just to call them. (D-4 in the audit.)
+#include <ed/core/ed_method_traits.h>
 
 // ============================================================================
 // FEATURE AVAILABILITY CHECKS
@@ -251,200 +256,13 @@ struct EDResults {
     FTLMResults ftlm_results;       // For FTLM calculations (includes per-sector data)
 };
 
-/**
- * @brief Structure for exact diagonalization parameters
- * 
- * Contains all parameters needed to configure various diagonalization methods,
- * including convergence criteria, method-specific options, and observable calculations.
- */
-struct EDParameters {
-    // ========== General Parameters ==========
-    uint64_t max_iterations = 10000;
-    uint64_t num_eigenvalues = 1;
-    double tolerance = 1e-10;
-    bool compute_eigenvectors = false;
-    std::string output_dir = "";
-    
-    // ========== Method-Specific Parameters ==========
-    double shift = 0.0;        // For shift-invert methods
-    uint64_t block_size = 4;       // For block methods
-    uint64_t max_subspace = 100;    // For Davidson method
-    double target_lower = 0.0; // Lower energy bound for Chebyshev filtered (0 = auto)
-    double target_upper = 0.0; // Upper energy bound for Chebyshev filtered (0 = auto)
-    
-    // ========== Thermal Calculation Parameters ==========
-    // Common to all thermal methods (TPQ, FTLM, LTLM, Hybrid)
-    uint64_t num_samples = 1;              // Number of random samples for thermal averaging
-    double temp_min = 1e-3;                // Minimum temperature (for output grid)
-    double temp_max = 20;                  // Maximum temperature (for output grid)
-    uint64_t num_temp_bins = 100;          // Number of temperature bins for output
-    
-    // ========== TPQ-Specific Parameters ==========
-    // mTPQ (microcanonical) parameters
-    uint64_t tpq_max_steps = 10000;        // Maximum number of mTPQ evolution steps
-    uint64_t tpq_measurement_interval = 100; // Interval between measurements (in steps)
-    double tpq_energy_shift = 1e5;         // Large energy shift for mTPQ (ensures convergence)
-    
-    // cTPQ (canonical) parameters  
-    double tpq_beta_max = 20.0;            // Maximum inverse temperature (1/T_min)
-    double tpq_delta_beta = 1e-2;          // Imaginary-time step for cTPQ evolution
-    uint64_t tpq_taylor_order = 100;       // Taylor expansion order for e^{-delta_beta*H}
-    
-    // Continue quenching options
-    bool tpq_continue = false;             // Continue quenching from saved state
-    uint64_t tpq_continue_sample = 0;      // Sample to continue from (0 = auto-detect)
-    double tpq_continue_beta = 0.0;        // Beta to continue from (0.0 = use saved)
-    double tpq_target_beta = 1000.0;       // Target beta at which to stop iteration (default 1000)
-    
-    // Measurement temperature grid parameters
-    uint64_t tpq_num_measure_points = 20;  // Number of log-spaced measurement temperatures
-    double tpq_measure_beta_min = 1.0;     // Minimum inverse temperature for measurement grid
-    double tpq_measure_beta_max = 1000.0;  // Maximum inverse temperature for measurement grid
-    
-    // ========== DEPRECATED PARAMETER ACCESSORS ==========
-    // These provide backwards compatibility for legacy code using old parameter names.
-    // New code should use the new names directly.
-    // 
-    // Mapping:
-    //   num_order        -> tpq_taylor_order
-    //   num_measure_freq -> tpq_measurement_interval
-    //   delta_tau        -> tpq_delta_beta
-    //   large_value      -> tpq_energy_shift
-    //   continue_quenching -> tpq_continue
-    //   continue_sample  -> tpq_continue_sample
-    //   continue_beta    -> tpq_continue_beta
-    
-    [[deprecated("Use tpq_taylor_order instead")]]
-    uint64_t& num_order() { return tpq_taylor_order; }
-    [[deprecated("Use tpq_taylor_order instead")]]
-    uint64_t num_order() const { return tpq_taylor_order; }
-    
-    [[deprecated("Use tpq_measurement_interval instead")]]
-    uint64_t& num_measure_freq() { return tpq_measurement_interval; }
-    [[deprecated("Use tpq_measurement_interval instead")]]
-    uint64_t num_measure_freq() const { return tpq_measurement_interval; }
-    
-    [[deprecated("Use tpq_delta_beta instead")]]
-    double& delta_tau() { return tpq_delta_beta; }
-    [[deprecated("Use tpq_delta_beta instead")]]
-    double delta_tau() const { return tpq_delta_beta; }
-    
-    [[deprecated("Use tpq_energy_shift instead")]]
-    double& large_value() { return tpq_energy_shift; }
-    [[deprecated("Use tpq_energy_shift instead")]]
-    double large_value() const { return tpq_energy_shift; }
-    
-    [[deprecated("Use tpq_continue instead")]]
-    bool& continue_quenching() { return tpq_continue; }
-    [[deprecated("Use tpq_continue instead")]]
-    bool continue_quenching() const { return tpq_continue; }
-    
-    [[deprecated("Use tpq_continue_sample instead")]]
-    uint64_t& continue_sample() { return tpq_continue_sample; }
-    [[deprecated("Use tpq_continue_sample instead")]]
-    uint64_t continue_sample() const { return tpq_continue_sample; }
-    
-    [[deprecated("Use tpq_continue_beta instead")]]
-    double& continue_beta() { return tpq_continue_beta; }
-    [[deprecated("Use tpq_continue_beta instead")]]
-    double continue_beta() const { return tpq_continue_beta; }
-    
-    [[deprecated("Use tpq_target_beta instead")]]
-    double& target_beta() { return tpq_target_beta; }
-    [[deprecated("Use tpq_target_beta instead")]]
-    double target_beta() const { return tpq_target_beta; }
-    
-    // ========== FTLM-Specific Parameters ==========
-    uint64_t ftlm_krylov_dim = 100;     // Krylov subspace dimension per sample
-    bool ftlm_full_reorth = true; // Use full reorthogonalization
-    uint64_t ftlm_reorth_freq = 10;     // Reorthogonalization frequency
-    uint64_t ftlm_seed = 0;    // Random seed (0 = auto)
-    bool ftlm_store_samples = false; // Store per-sample intermediate data
-    bool ftlm_error_bars = true;   // Compute error bars
-    
-    // ========== LTLM-Specific Parameters ==========
-    uint64_t ltlm_krylov_dim = 200;     // Krylov subspace dimension for excitations
-    uint64_t ltlm_ground_krylov = 100;  // Krylov dimension for finding ground state
-    bool ltlm_full_reorth = true; // Use full reorthogonalization
-    uint64_t ltlm_reorth_freq = 10;     // Reorthogonalization frequency
-    uint64_t ltlm_seed = 0;    // Random seed (0 = auto)
-    bool ltlm_store_data = false;  // Store intermediate data
-    [[deprecated("Use method=HYBRID instead")]]
-    bool use_hybrid_method = false; // Use hybrid LTLM/FTLM (deprecated, use method=HYBRID)
-    double hybrid_crossover = 1.0; // Temperature crossover for hybrid
-    bool hybrid_auto_crossover = false; // Auto-determine crossover temperature
-    
-    // ========== Observable Calculations ==========
-    mutable std::vector<Operator> observables = {};             // Observables to calculate for TPQ
-    mutable std::vector<std::string> observable_names = {};     // Names of observables
-    double omega_min = -10.0;      // Minimum frequency for spectral function
-    double omega_max = 10.0;       // Maximum frequency for spectral function
-    uint64_t num_points = 1000;         // Number of points for spectral function
-    double t_end = 50.0;           // End time for time evolution
-    double dt = 0.01;              // Time step for time evolution
-    
-    // ========== Lattice Parameters ==========
-    uint64_t num_sites = 0;             // Number of sites in the system
-    float spin_length = 0.5;       // Spin length
-    uint64_t sublattice_size = 1;       // Size of the sublattice
-    std::vector<int> selected_sectors;  // If non-empty, only diagonalize these sector indices (0-based)
-    
-    // ========== TPQ Observable Parameters ==========
-    // save_thermal_states: Save TPQ states at target temperatures for post-processing (e.g., `ED dssf`)
-    // compute_spin_correlations: Compute spin expectation values (Sx,Sy,Sz) and correlations at each measurement
-    bool save_thermal_states = false;   // Save TPQ states at target β values
-    bool compute_spin_correlations = false;  // Compute ⟨Si⟩ and ⟨Si·Sj⟩ correlations
-    
-    // Deprecated aliases (for backwards compatibility) - use accessor methods
-    [[deprecated("Use save_thermal_states instead")]]
-    bool& calc_observables() { return save_thermal_states; }
-    [[deprecated("Use save_thermal_states instead")]]
-    bool calc_observables() const { return save_thermal_states; }
-    
-    [[deprecated("Use compute_spin_correlations instead")]]
-    bool& measure_spin() { return compute_spin_correlations; }
-    [[deprecated("Use compute_spin_correlations instead")]]
-    bool measure_spin() const { return compute_spin_correlations; }
-    
-    // ========== Fixed-Sz Parameters ==========
-    bool use_fixed_sz = false;  // Whether to use fixed-Sz sector (conserve total Sz)
-    int64_t n_up = -1;  // Number of up spins (-1 = not set, will use num_sites/2)
-    mutable class FixedSzOperator* fixed_sz_op = nullptr;  // If using fixed-Sz, pointer to operator for embedding
-    bool full_sz_split = false;  // Loop over ALL Sz sectors for full diag (automatic block-diagonal speedup)
-    
-    // ========== Symmetry Options ==========
-    bool translation_only = false;  // Use only translation symmetries for max clique (requires positions.dat)
-    
-    // ========== ScaLAPACK Distributed Diagonalization Options ==========
-    // Used when method == SCALAPACK or SCALAPACK_MIXED
-    int scalapack_nprow = 0;                    // Process grid rows (0 = auto)
-    int scalapack_npcol = 0;                    // Process grid cols (0 = auto)
-    int scalapack_block_size = 64;              // Distribution block size
-    bool scalapack_mixed_precision = true;      // Use single precision + refinement
-    double scalapack_refinement_tol = 1e-12;    // Refinement convergence tolerance
-    int scalapack_max_refinement_iter = 5;      // Maximum refinement iterations
-    bool scalapack_verbose = true;              // Print progress information
-    
-    // ========== ARPACK Advanced Options ==========
-    // Used when method == ARPACK_ADVANCED
-    // These mirror (a subset of) detail_arpack::ArpackAdvancedOptions
-    bool arpack_advanced_verbose = false;
-    std::string arpack_which = "SR";                            // SR=Smallest Real (ground state), LR=Largest Real, SM/LM=by magnitude
-    int64_t arpack_ncv = -1;                                        // Number of Lanczos vectors
-    uint64_t arpack_max_restarts = 2;                                // Maximum number of restarts
-    double arpack_ncv_growth = 1.5;                             // Growth factor for ncv
-    bool arpack_auto_enlarge_ncv = true;                        // Automatically enlarge ncv
-    bool arpack_two_phase_refine = true;                        // Use two-phase refinement
-    double arpack_relaxed_tol = 1e-6;                           // Relaxed tolerance
-    bool arpack_shift_invert = false;                           // Use shift-invert mode
-    double arpack_sigma = 0.0;                                  // Shift value
-    bool arpack_auto_switch_shift_invert = true;                // Auto switch to shift-invert
-    double arpack_switch_sigma = 0.0;                           // Sigma for auto-switch
-    bool arpack_adaptive_inner_tol = true;                      // Adaptive inner tolerance
-    double arpack_inner_tol_factor = 1e-2;                      // Inner tolerance factor
-    double arpack_inner_tol_min = 1e-14;                        // Minimum inner tolerance
-    uint64_t arpack_inner_max_iter = 300;                            // Maximum inner iterations
-};
+// EDParameters lives in <ed/core/ed_parameters.h> so that the legacy-config
+// adapter (and any other code that only needs the parameter bag) doesn't have
+// to drag in TPQ.h / CG.h / lanczos.h / ftlm.h / ltlm.h / arpack.h / hdf5_io.h /
+// observables.h / system_utils.h / GPU wrappers via this header. (D-2 in the
+// modernization audit.)
+#include <ed/core/ed_parameters.h>
+
 
 /**
  * @brief Enum for Hamiltonian file formats
@@ -471,110 +289,20 @@ EDResults exact_diagonalization_core(
 namespace ed_internal {
 
     // ========== Method Classification Helpers ==========
-    
-    /**
-     * @brief Check if method is a TPQ (Thermal Pure Quantum) method
-     */
-    inline bool is_tpq_method(DiagonalizationMethod method) {
-        return method == DiagonalizationMethod::mTPQ ||
-               method == DiagonalizationMethod::mTPQ_CUDA ||
-               method == DiagonalizationMethod::cTPQ ||
-               method == DiagonalizationMethod::mTPQ_GPU ||
-               method == DiagonalizationMethod::cTPQ_GPU;
-    }
-    
-    /**
-     * @brief Check if method is FTLM
-     */
-    inline bool is_ftlm_method(DiagonalizationMethod method) {
-        return method == DiagonalizationMethod::FTLM ||
-               method == DiagonalizationMethod::FTLM_GPU ||
-               method == DiagonalizationMethod::FTLM_GPU_FIXED_SZ;
-    }
-    
-    /**
-     * @brief Check if method requires ground state sector identification
-     */
-    inline bool requires_ground_state_sector(DiagonalizationMethod method) {
-        return is_tpq_method(method);
-    }
-    
-    /**
-     * @brief Check if method produces per-sector thermodynamic data that needs combining
-     */
-    inline bool requires_sector_combination(DiagonalizationMethod method) {
-        return is_ftlm_method(method);
-    }
-
-    // ========== Fixed-Sz Mode ==========
     //
-    // Fixed-Sz mode restricts calculations to states with a fixed total Sz
-    // quantum number, significantly reducing the Hilbert space dimension.
+    // The actual predicates (is_tpq_method, is_ftlm_method, is_gpu_method,
+    // is_deprecated_fixed_sz_method, normalize_method,
+    // requires_ground_state_sector, requires_sector_combination) live in
+    // <ed/core/ed_method_traits.h>. They are constexpr-friendly and
+    // depend only on <ed/core/ed_types.h>, so other translation units
+    // (workflows.cpp, ed_config.cpp, future Python bindings) can include
+    // *just* the traits header instead of dragging in this whole monolith
+    // every time they want to ask "is this method GPU?". (D-4 in the
+    // modernization audit.)
     //
-    // HOW TO USE:
-    //   Set `--fixed-sz` flag (or `use_fixed_sz = true` in config)
-    //   This works uniformly for ALL methods, both CPU and GPU.
-    //
-    // INTERNAL MECHANISM:
-    //   - For CPU methods: Uses FixedSzOperator instead of Operator
-    //   - For GPU methods: Uses GPUFixedSzOperator instead of GPUOperator
-    //   - The method enum stays the same (e.g., LANCZOS_GPU works with --fixed-sz)
-    //
-    // DEPRECATED _FIXED_SZ VARIANTS:
-    //   The enum values LANCZOS_GPU_FIXED_SZ, BLOCK_LANCZOS_GPU_FIXED_SZ, etc.
-    //   are deprecated. Use the base method with --fixed-sz flag instead.
-    //   They are kept for backwards compatibility and will normalize to the
-    //   base method with use_fixed_sz=true.
-    //
-    
-    /**
-     * @brief Check if method is a GPU method
-     */
-    inline bool is_gpu_method(DiagonalizationMethod method) {
-        return method == DiagonalizationMethod::LANCZOS_GPU ||
-               method == DiagonalizationMethod::LANCZOS_GPU_FIXED_SZ ||
-               method == DiagonalizationMethod::BLOCK_LANCZOS_GPU ||
-               method == DiagonalizationMethod::BLOCK_LANCZOS_GPU_FIXED_SZ ||
-               method == DiagonalizationMethod::DAVIDSON_GPU ||
-               method == DiagonalizationMethod::LOBPCG_GPU ||
-               method == DiagonalizationMethod::KRYLOV_SCHUR_GPU ||
-               method == DiagonalizationMethod::BLOCK_KRYLOV_SCHUR_GPU ||
-               method == DiagonalizationMethod::mTPQ_GPU ||
-               method == DiagonalizationMethod::cTPQ_GPU ||
-               method == DiagonalizationMethod::FTLM_GPU ||
-               method == DiagonalizationMethod::FTLM_GPU_FIXED_SZ ||
-               method == DiagonalizationMethod::FULL_GPU;
-    }
-    
-    /**
-     * @brief Check if method is a deprecated _FIXED_SZ variant
-     * 
-     * These methods are deprecated. The --fixed-sz flag should be used instead.
-     */
-    inline bool is_deprecated_fixed_sz_method(DiagonalizationMethod method) {
-        return method == DiagonalizationMethod::LANCZOS_GPU_FIXED_SZ ||
-               method == DiagonalizationMethod::BLOCK_LANCZOS_GPU_FIXED_SZ ||
-               method == DiagonalizationMethod::FTLM_GPU_FIXED_SZ;
-    }
-    
-    /**
-     * @brief Get the base (non-deprecated) method from a _FIXED_SZ variant
-     * 
-     * Converts deprecated _FIXED_SZ methods to their base method.
-     * The use_fixed_sz flag should be set to true separately.
-     */
-    inline DiagonalizationMethod normalize_method(DiagonalizationMethod method) {
-        switch (method) {
-            case DiagonalizationMethod::LANCZOS_GPU_FIXED_SZ:
-                return DiagonalizationMethod::LANCZOS_GPU;
-            case DiagonalizationMethod::BLOCK_LANCZOS_GPU_FIXED_SZ:
-                return DiagonalizationMethod::BLOCK_LANCZOS_GPU;
-            case DiagonalizationMethod::FTLM_GPU_FIXED_SZ:
-                return DiagonalizationMethod::FTLM_GPU;
-            default:
-                return method;
-        }
-    }
+    // The `using` declarations inside ed_method_traits.h re-export the
+    // ed:: predicates into ed_internal::, so existing call sites keep
+    // working unchanged.
     
     /**
      * @brief Normalize method and update use_fixed_sz flag if needed
@@ -901,11 +629,28 @@ inline EDResults exact_diagonalization_core(
 #endif
             break;
 
-        case DiagonalizationMethod::LANCZOS:
-            lanczos(H, hilbert_space_dim, params.max_iterations, params.num_eigenvalues, 
-                    params.tolerance, results.eigenvalues, params.output_dir, 
-                    params.compute_eigenvectors);
+        case DiagonalizationMethod::LANCZOS: {
+            // Audit follow-up: ARPACK (IRLM, ncv-restart) typically beats a plain
+            // Lanczos by 2-4x at our problem sizes -- it's what scipy.sparse.linalg.eigsh
+            // and quspin both wrap. Make it opt-in via env var so the default is
+            // identical to before, but a single flag (ED_USE_ARPACK_DEFAULT=1)
+            // drops the user onto the faster solver for k<=32 ground-state requests.
+            //  - ED_USE_ARPACK_DEFAULT=0 (or unset, default): plain in-house lanczos
+            //  - ED_USE_ARPACK_DEFAULT=1: route to arpack_ground_state when k<=32
+            const char* arpack_env = std::getenv("ED_USE_ARPACK_DEFAULT");
+            const bool use_arpack = (arpack_env && arpack_env[0] == '1');
+            if (use_arpack && params.num_eigenvalues <= 32) {
+                arpack_ground_state(H, hilbert_space_dim,
+                                    params.max_iterations, params.num_eigenvalues,
+                                    params.tolerance, results.eigenvalues,
+                                    params.output_dir, params.compute_eigenvectors);
+            } else {
+                lanczos(H, hilbert_space_dim, params.max_iterations, params.num_eigenvalues,
+                        params.tolerance, results.eigenvalues, params.output_dir,
+                        params.compute_eigenvectors);
+            }
             break;
+        }
             
         case DiagonalizationMethod::LANCZOS_SELECTIVE:
             lanczos_selective_reorth(H, hilbert_space_dim, params.max_iterations, 
@@ -1268,10 +1013,17 @@ inline EDResults exact_diagonalization_core(
             break;
 
         default:
-            std::cerr << "Unknown diagonalization method selected" << std::endl;
-            break;
+            // Hard-fail on an unrecognised method instead of silently
+            // returning empty results: in non-interactive runs the cerr
+            // line was getting buried and downstream code would happily
+            // operate on an empty EDResults.
+            throw std::runtime_error(
+                "exact_diagonalization_core: unknown DiagonalizationMethod "
+                "(enum value " + std::to_string(static_cast<int>(method)) +
+                "). Either the enum was extended without updating the "
+                "dispatcher or the caller is passing an uninitialised method.");
     }
-    
+
     if (params.compute_eigenvectors) {
         std::cout << "Eigenvectors computed and saved to " << params.output_dir << std::endl;
     }
@@ -3283,8 +3035,12 @@ inline EDResults exact_diagonalization_from_files(
     const EDParameters& params = EDParameters(),
     HamiltonianFileFormat format = HamiltonianFileFormat::STANDARD
 ) {
-    std::cerr << "[DEBUG] exact_diagonalization_from_files: num_sites=" << params.num_sites 
-              << ", method=" << static_cast<int>(method) << std::endl;
+    if (ed_log::isVerbose()) {
+        std::ostringstream _dbg;
+        _dbg << "exact_diagonalization_from_files: num_sites=" << params.num_sites
+             << ", method=" << static_cast<int>(method);
+        ed_log::debug(_dbg.str());
+    }
     
     // ========== Fixed-Sz Normalization ==========
     // Handle deprecated _FIXED_SZ method variants by normalizing to base method
@@ -3430,11 +3186,16 @@ inline EDResults exact_diagonalization_from_files(
             std::cout << "GPU Lanczos completed successfully!" << std::endl;
             
         } else if (method == DiagonalizationMethod::LANCZOS_GPU_FIXED_SZ) {
-            // Deprecated: Should have been normalized and routed to exact_diagonalization_fixed_sz
-            std::cerr << "Error: LANCZOS_GPU_FIXED_SZ should have been normalized. This is a bug.\n";
-            throw std::runtime_error("Internal error: deprecated method not normalized");
-            throw std::runtime_error("Fixed Sz GPU method not yet integrated with file interface");
-            
+            // Deprecated variant — normalize_method_and_fixed_sz() upstream
+            // should have collapsed this to LANCZOS_GPU + use_fixed_sz=true
+            // and routed it through exact_diagonalization_fixed_sz. If we
+            // ever hit here it means the dispatcher contract was broken.
+            // (D-6: removed a follow-up unreachable throw.)
+            throw std::runtime_error(
+                "Internal error: LANCZOS_GPU_FIXED_SZ reached the file-based "
+                "dispatcher without being normalized; this is a bug in the "
+                "method-dispatch path.");
+
         } else if (method == DiagonalizationMethod::DAVIDSON_GPU) {
             std::cout << "Running GPU Davidson method..." << std::endl;
             
@@ -3766,7 +3527,9 @@ inline EDResults exact_diagonalization_from_files(
     
     // Calculate Hilbert space dimension
     uint64_t hilbert_space_dim = static_cast<int>(1ULL << params.num_sites);
-    std::cerr << "[DEBUG] hilbert_space_dim=" << hilbert_space_dim << std::endl;
+    if (ed_log::isVerbose()) {
+        ed_log::debug("hilbert_space_dim=" + std::to_string(hilbert_space_dim));
+    }
     
     // Create Hamiltonian apply function
     auto apply_hamiltonian = ed_internal::create_hamiltonian_apply_function(hamiltonian);
@@ -3858,8 +3621,12 @@ inline EDResults exact_diagonalization_from_directory_symmetrized(
     const std::string& counterterm_filename = "CounterTerm.dat",
     const std::string& three_body_filename = "ThreeBodyG.dat"
 ) {
-    std::cerr << "[DEBUG] exact_diagonalization_from_directory_symmetrized: num_sites=" 
-              << params.num_sites << ", method=" << static_cast<int>(method) << std::endl;
+    if (ed_log::isVerbose()) {
+        std::ostringstream _dbg;
+        _dbg << "exact_diagonalization_from_directory_symmetrized: num_sites="
+             << params.num_sites << ", method=" << static_cast<int>(method);
+        ed_log::debug(_dbg.str());
+    }
 
     // ========== Step 1: Generate or Load Automorphisms ==========
     if (!generate_automorphisms(directory, params.translation_only)) {

@@ -17,12 +17,14 @@
 
 #include <ed/gpu/gpu_lanczos.cuh>
 #include <ed/gpu/kernel_config.h>
+#include <ed/core/blas_lapack_wrapper.h>
 #include <iostream>
 #include <iomanip>
 #include <cmath>
 #include <random>
 #include <algorithm>
 #include <chrono>
+#include <stdexcept>
 #include <numeric>
 #include <Eigen/Dense>
 #include <Eigen/Eigenvalues>
@@ -335,7 +337,8 @@ GPUBlockLanczos::GPUBlockLanczos(GPUOperator* op, int max_iter, int block_size, 
       d_V_current_(nullptr), d_V_prev_(nullptr), d_W_(nullptr), d_temp_block_(nullptr),
       d_block_basis_(nullptr), num_stored_blocks_(0), blocks_computed_(0),
       d_qr_work_(nullptr), d_tau_(nullptr), d_info_(nullptr), qr_lwork_(0),
-      d_overlap_(nullptr), d_projection_(nullptr) {
+      d_overlap_(nullptr), d_projection_(nullptr),
+      qr_done_event_(nullptr) {
     
     dimension_ = op_->getDimension();
     
@@ -493,6 +496,23 @@ void GPUBlockLanczos::allocateMemory() {
     // Reserve space for tridiagonal coefficients
     alpha_blocks_.reserve(max_iter_);
     beta_blocks_.reserve(max_iter_);
+
+    // Persistent matvec stream pool: one stream per block column. Pre-creating
+    // these eliminates the cudaStreamCreate/Destroy + bookkeeping that the
+    // previous blockMatVec() did on every call (hundreds of calls in a
+    // typical Lanczos run, each a host-side syscall + driver allocation).
+    matvec_streams_.assign(static_cast<size_t>(block_size_), nullptr);
+    matvec_done_events_.assign(static_cast<size_t>(block_size_), nullptr);
+    for (int i = 0; i < block_size_; ++i) {
+        CUDA_CHECK(cudaStreamCreate(&matvec_streams_[i]));
+        // cudaEventDisableTiming gives a much cheaper event (no timestamp
+        // capture); we only use these for ordering, never for measurement.
+        CUDA_CHECK(cudaEventCreateWithFlags(&matvec_done_events_[i],
+                                            cudaEventDisableTiming));
+    }
+
+    // Single re-used event for the QR -> R-diagonal transfer chain.
+    CUDA_CHECK(cudaEventCreateWithFlags(&qr_done_event_, cudaEventDisableTiming));
 }
 
 void GPUBlockLanczos::freeMemory() {
@@ -513,6 +533,21 @@ void GPUBlockLanczos::freeMemory() {
         delete[] d_block_basis_;
     }
     
+    for (auto s : matvec_streams_) {
+        if (s) cudaStreamDestroy(s);
+    }
+    matvec_streams_.clear();
+
+    for (auto e : matvec_done_events_) {
+        if (e) cudaEventDestroy(e);
+    }
+    matvec_done_events_.clear();
+
+    if (qr_done_event_) {
+        cudaEventDestroy(qr_done_event_);
+        qr_done_event_ = nullptr;
+    }
+
     d_V_current_ = d_V_prev_ = d_W_ = d_temp_block_ = nullptr;
     d_overlap_ = d_projection_ = nullptr;
     d_qr_work_ = nullptr;
@@ -571,20 +606,24 @@ void GPUBlockLanczos::blockMatVec(const cuDoubleComplex* d_V, cuDoubleComplex* d
     // For large block sizes, use stream-based parallelism
     // For small block sizes, sequential is often faster due to kernel launch overhead
     
-    if (block_size_ >= 4 && op_->supportsAsyncMatVec()) {
-        // Use multiple streams for parallel matVec (if operator supports it)
-        // Create temporary streams for parallel execution
-        std::vector<cudaStream_t> streams(block_size_);
+    if (block_size_ >= 4 && op_->supportsAsyncMatVec() &&
+        static_cast<int>(matvec_streams_.size()) >= block_size_) {
+        // Reuse the persistent stream pool created in allocateMemory().
         for (int col = 0; col < block_size_; ++col) {
-            cudaStreamCreate(&streams[col]);
             const cuDoubleComplex* v_col = d_V + col * dimension_;
             cuDoubleComplex* w_col = d_W + col * dimension_;
-            op_->matVecGPUAsync(v_col, w_col, dimension_, streams[col]);
+            op_->matVecGPUAsync(v_col, w_col, dimension_, matvec_streams_[col]);
         }
-        // Synchronize all streams
+        // Fan-in via events instead of a per-column host sync. Each
+        // matvec stream records a completion event; compute_stream_ waits
+        // on every event so subsequent BLAS3 ops on d_W can't start until
+        // all column matvecs are done. This keeps the pipeline fully
+        // device-side and removes block_size_ host syscalls per call.
         for (int col = 0; col < block_size_; ++col) {
-            cudaStreamSynchronize(streams[col]);
-            cudaStreamDestroy(streams[col]);
+            CUDA_CHECK(cudaEventRecord(matvec_done_events_[col],
+                                       matvec_streams_[col]));
+            CUDA_CHECK(cudaStreamWaitEvent(compute_stream_,
+                                           matvec_done_events_[col], 0));
         }
     } else {
         // Sequential fallback (still efficient for moderate block sizes)
@@ -687,10 +726,14 @@ bool GPUBlockLanczos::qrFactorization(cuDoubleComplex* d_block, cuDoubleComplex*
     // Copy Q back to block
     blockCopy(d_temp_block_, d_block);
     
-    // Synchronize compute_stream_ to ensure R matrix is fully written
-    // before transfer_stream_ reads it (fixes inter-stream race condition)
-    CUDA_CHECK(cudaStreamSynchronize(compute_stream_));
-    
+    // Replace the host-side cudaStreamSynchronize(compute_stream_) with an
+    // event-based dependency: compute_stream_ records when R is fully
+    // written, transfer_stream_ waits on that event before issuing the
+    // R-diagonal copies. The host is only blocked at the final
+    // cudaStreamSynchronize(transfer_stream_) below, instead of twice.
+    CUDA_CHECK(cudaEventRecord(qr_done_event_, compute_stream_));
+    CUDA_CHECK(cudaStreamWaitEvent(transfer_stream_, qr_done_event_, 0));
+
     // Now safe to read R diagonals on transfer_stream_
     std::vector<cuDoubleComplex> h_diag(block_size_);
     for (int i = 0; i < block_size_; ++i) {
@@ -804,26 +847,9 @@ void GPUBlockLanczos::reorthogonalizeBlock(cuDoubleComplex* d_block, int current
     stats_.ortho_time += std::chrono::duration<double>(end - start).count();
 }
 
-void GPUBlockLanczos::fullReorthogonalization(cuDoubleComplex* d_block) {
-    if (num_stored_blocks_ == 0 || blocks_computed_ <= 0) return;
-    
-    auto start = std::chrono::high_resolution_clock::now();
-    
-    int num_blocks = std::min(blocks_computed_, num_stored_blocks_);
-    
-    for (int k = 0; k < num_blocks; ++k) {
-        int buffer_idx = k % num_stored_blocks_;
-        
-        // Compute overlap and apply correction
-        blockInnerProduct(d_block_basis_[buffer_idx], d_block, d_overlap_);
-        blockAxpy(d_block, d_block_basis_[buffer_idx], d_overlap_, true);
-        
-        stats_.reorth_count++;
-    }
-    
-    auto end = std::chrono::high_resolution_clock::now();
-    stats_.ortho_time += std::chrono::duration<double>(end - start).count();
-}
+// NOTE: fullReorthogonalization() was removed; reorthogonalizeBlock() with
+// reorth_strategy_ == 3 (always-full) supersedes it (CGS-2 over the full
+// stored window) and was the only sensible call path.
 
 void GPUBlockLanczos::solveBlockTridiagonal(int num_blocks, int num_eigs,
                                            std::vector<double>& eigenvalues,
@@ -869,26 +895,54 @@ void GPUBlockLanczos::solveBlockTridiagonal(int num_blocks, int num_eigs,
         }
     }
     
-    // Solve eigenvalue problem
-    Eigen::SelfAdjointEigenSolver<Eigen::MatrixXcd> solver(T);
-    
-    if (solver.info() != Eigen::Success) {
-        std::cerr << "Block tridiagonal eigenvalue computation failed!\n";
+    // Solve the dense block-tridiagonal Hermitian eigenproblem.
+    //
+    // Replaces Eigen::SelfAdjointEigenSolver (Householder + QR, O(N^3)) with
+    // LAPACK's MRRR (zheevr, range='I') for partial spectrum: O(N^2 * n_eigs)
+    // and far better constants when only the lowest n_eigs are needed -- the
+    // common Krylov-Schur case. The dense solve still runs on the host: for
+    // typical block_size * num_blocks (~< 4000), the round-trip latency to
+    // cuSOLVER's cusolverDnZheevd dominates the actual eigensolve, and the
+    // host MRRR path is faster end-to-end.
+    const int n_eigs = std::min(num_eigs, total_dim);
+    eigenvalues.assign(n_eigs, 0.0);
+    tridiag_eigenvecs.assign(n_eigs, std::vector<std::complex<double>>(total_dim));
+
+    if (total_dim == 0 || n_eigs == 0) {
+        auto end = std::chrono::high_resolution_clock::now();
+        stats_.diag_time += std::chrono::duration<double>(end - start).count();
         return;
     }
-    
 
-    
-    // Extract requested eigenvalues (no deduplication - return raw spectrum)
-    int n_eigs = std::min(num_eigs, total_dim);
-    eigenvalues.resize(n_eigs);
-    tridiag_eigenvecs.resize(n_eigs);
-    
+    // Eigen MatrixXcd is column-major and uses std::complex<double>, so we
+    // can hand T.data() directly to LAPACKE without a copy.
+    std::vector<double> w(total_dim, 0.0);
+    std::vector<std::complex<double>> z(static_cast<size_t>(total_dim) * n_eigs);
+    std::vector<lapack_int> isuppz(2 * std::max(1, n_eigs), 0);
+    lapack_int m_found = 0;
+    const lapack_int N_li = static_cast<lapack_int>(total_dim);
+    const lapack_int n_eigs_li = static_cast<lapack_int>(n_eigs);
+
+    lapack_int info = LAPACKE_zheevr(
+        LAPACK_COL_MAJOR, 'V', 'I', 'U', N_li,
+        reinterpret_cast<lapack_complex_double*>(T.data()), N_li,
+        /*vl=*/0.0, /*vu=*/0.0,
+        /*il=*/1, /*iu=*/n_eigs_li,
+        /*abstol=*/0.0,
+        &m_found, w.data(),
+        reinterpret_cast<lapack_complex_double*>(z.data()), N_li,
+        isuppz.data());
+
+    if (info != 0) {
+        throw std::runtime_error(
+            "GPUBlockLanczos::solveBlockTridiagonal: LAPACKE_zheevr failed with info="
+            + std::to_string(info));
+    }
+
     for (int i = 0; i < n_eigs; ++i) {
-        eigenvalues[i] = solver.eigenvalues()(i);
-        tridiag_eigenvecs[i].resize(total_dim);
+        eigenvalues[i] = w[i];
         for (int j = 0; j < total_dim; ++j) {
-            tridiag_eigenvecs[i][j] = solver.eigenvectors()(j, i);
+            tridiag_eigenvecs[i][j] = z[j + static_cast<size_t>(i) * total_dim];
         }
     }
     
@@ -912,15 +966,26 @@ void GPUBlockLanczos::computeBlockRitzVectors(
     
     std::cout << "\nComputing Ritz vectors from block Lanczos basis...\n";
     
+    // Hard fail on Ritz overflow: silently degrading by emitting partial
+    // Ritz vectors corrupts downstream observables without any signal.
     if (num_stored_blocks_ == 0) {
-        std::cerr << "Cannot compute Ritz vectors: no blocks stored\n";
-        return;
+        throw std::runtime_error(
+            "GPUBlockLanczos::computeBlockRitzVectors: no Lanczos blocks stored. "
+            "Allocate at least num_blocks worth of basis storage on the GPU.");
     }
-    
+    if (tridiag_eigenvecs.empty() || tridiag_eigenvecs[0].empty()) {
+        throw std::runtime_error(
+            "GPUBlockLanczos::computeBlockRitzVectors: empty tridiagonal eigenvectors.");
+    }
+
     int num_blocks_needed = static_cast<int>(tridiag_eigenvecs[0].size()) / block_size_;
     if (num_blocks_needed > num_stored_blocks_) {
-        std::cerr << "Warning: Not enough blocks stored for accurate Ritz vectors\n";
-        std::cerr << "  Need: " << num_blocks_needed << ", have: " << num_stored_blocks_ << "\n";
+        throw std::runtime_error(
+            "GPUBlockLanczos::computeBlockRitzVectors: block buffer overflow. "
+            "Need " + std::to_string(num_blocks_needed) +
+            " Lanczos blocks but only " + std::to_string(num_stored_blocks_) +
+            " are stored. Increase GPU memory allocation (num_stored_blocks_) "
+            "or reduce max_iterations so the Krylov dimension fits.");
     }
     
     eigenvectors.resize(num_vecs);

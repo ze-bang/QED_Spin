@@ -33,7 +33,7 @@ struct HybridThermalParameters {
     // LTLM parameters (for T < T_crossover)
     uint64_t ltlm_krylov_dim = 200;           // Krylov dimension for excitations
     uint64_t ltlm_ground_krylov = 100;        // Krylov dimension for ground state finding
-    bool ltlm_full_reorth = false;       // Full reorthogonalization for LTLM
+    bool ltlm_full_reorth = true;        // Full reorthogonalization for LTLM (D-3: matches EDParameters/EDConfig defaults)
     uint64_t ltlm_reorth_freq = 10;           // Reorthogonalization frequency
     uint64_t ltlm_seed = 0;          // Random seed (0 = auto)
     bool ltlm_store_data = false;        // Store intermediate excitation data
@@ -41,7 +41,7 @@ struct HybridThermalParameters {
     // FTLM parameters (for T >= T_crossover)
     uint64_t ftlm_num_samples = 20;           // Number of random samples
     uint64_t ftlm_krylov_dim = 100;           // Krylov dimension per sample
-    bool ftlm_full_reorth = false;       // Full reorthogonalization for FTLM
+    bool ftlm_full_reorth = true;        // Full reorthogonalization for FTLM (D-3: matches EDParameters/EDConfig defaults)
     uint64_t ftlm_reorth_freq = 10;           // Reorthogonalization frequency
     uint64_t ftlm_seed = 0;          // Random seed (0 = auto)
     bool ftlm_store_samples = false;     // Store per-sample data

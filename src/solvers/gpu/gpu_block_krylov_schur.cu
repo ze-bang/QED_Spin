@@ -498,26 +498,32 @@ void GPUBlockKrylovSchur::computeEigenvectors(int num_blocks, int num_eigs,
                          cudaMemcpyDeviceToHost));
     
     eigenvectors.resize(num_eigs);
-    
+
+    // Hoist scratch out of the per-eigenvector / per-block loop. Previously
+    // this function did 1 + num_blocks cudaMalloc/cudaFree per eigenvector
+    // (one for d_eigvec, num_blocks for d_coef). For 100 eigenvalues with
+    // 50 stored blocks that is 5,000+ driver allocations -- pure host
+    // overhead with no algorithmic value.
+    cuDoubleComplex* d_eigvec = nullptr;
+    cuDoubleComplex* d_coef   = nullptr;
+    CUDA_CHECK(cudaMalloc(&d_eigvec, dimension_ * sizeof(cuDoubleComplex)));
+    CUDA_CHECK(cudaMalloc(&d_coef,   static_cast<size_t>(p) * sizeof(cuDoubleComplex)));
+    std::vector<cuDoubleComplex> h_eigvec(dimension_);
+
+    const cuDoubleComplex alpha = make_cuDoubleComplex(1.0, 0.0);
+    const cuDoubleComplex beta  = make_cuDoubleComplex(1.0, 0.0);
+
     for (int e = 0; e < num_eigs; e++) {
         eigenvectors[e].resize(dimension_, std::complex<double>(0.0, 0.0));
-        
-        // eigenvector = sum_b V_b * y_b where y_b is the b-th block of Ritz vector
-        cuDoubleComplex* d_eigvec;
-        CUDA_CHECK(cudaMalloc(&d_eigvec, dimension_ * sizeof(cuDoubleComplex)));
+
+        // eigenvector_e = sum_b V_b * y_{b,e}
         CUDA_CHECK(cudaMemset(d_eigvec, 0, dimension_ * sizeof(cuDoubleComplex)));
-        
-        cuDoubleComplex alpha = make_cuDoubleComplex(1.0, 0.0);
-        cuDoubleComplex beta = make_cuDoubleComplex(1.0, 0.0);
-        
+
         for (int b = 0; b < num_blocks; b++) {
-            // Extract coefficients for this block
-            cuDoubleComplex* d_coef;
-            CUDA_CHECK(cudaMalloc(&d_coef, p * sizeof(cuDoubleComplex)));
             CUDA_CHECK(cudaMemcpy(d_coef, &h_evecs[b * p + e * total_dim],
-                                 p * sizeof(cuDoubleComplex), cudaMemcpyHostToDevice));
-            
-            // eigvec += V_b * coef
+                                 static_cast<size_t>(p) * sizeof(cuDoubleComplex),
+                                 cudaMemcpyHostToDevice));
+
             CUBLAS_CHECK(cublasZgemv(cublas_handle_, CUBLAS_OP_N,
                                     dimension_, p,
                                     &alpha,
@@ -525,36 +531,33 @@ void GPUBlockKrylovSchur::computeEigenvectors(int num_blocks, int num_eigs,
                                     d_coef, 1,
                                     &beta,
                                     d_eigvec, 1));
-            
-            cudaFree(d_coef);
         }
-        
-        // Normalize
+
         double norm;
         CUBLAS_CHECK(cublasDznrm2(cublas_handle_, dimension_, d_eigvec, 1, &norm));
         if (norm > tolerance_) {
             cuDoubleComplex scale = make_cuDoubleComplex(1.0 / norm, 0.0);
             CUBLAS_CHECK(cublasZscal(cublas_handle_, dimension_, &scale, d_eigvec, 1));
         }
-        
-        // Copy to host
-        std::vector<cuDoubleComplex> h_eigvec(dimension_);
+
         CUDA_CHECK(cudaMemcpy(h_eigvec.data(), d_eigvec,
-                             dimension_ * sizeof(cuDoubleComplex), cudaMemcpyDeviceToHost));
-        
+                             dimension_ * sizeof(cuDoubleComplex),
+                             cudaMemcpyDeviceToHost));
+
         for (int i = 0; i < dimension_; i++) {
-            eigenvectors[e][i] = std::complex<double>(cuCreal(h_eigvec[i]), cuCimag(h_eigvec[i]));
+            eigenvectors[e][i] = std::complex<double>(cuCreal(h_eigvec[i]),
+                                                      cuCimag(h_eigvec[i]));
         }
-        
-        cudaFree(d_eigvec);
     }
+
+    cudaFree(d_eigvec);
+    cudaFree(d_coef);
 }
 
-void GPUBlockKrylovSchur::performRestart(int num_blocks, int num_keep) {
-    // Thick restart is handled inline in run() using Ritz vector rotation.
-    // This method is kept for API compatibility with the block tridiagonal interface.
-    // See run() Phase 4 for the actual restart implementation.
-}
+// NOTE: GPUBlockKrylovSchur::performRestart was removed; thick restart is
+// implemented inline in run() (see "Phase 4: Thick restart") via Ritz-vector
+// rotation. Keeping an empty stub previously confused readers about where the
+// restart logic lived.
 
 void GPUBlockKrylovSchur::run(int num_eigenvalues,
                               std::vector<double>& eigenvalues,
@@ -642,10 +645,15 @@ void GPUBlockKrylovSchur::run(int num_eigenvalues,
         std::vector<std::complex<double>> h_init(static_cast<size_t>(dimension_) * init_block);
         std::random_device rd;
         std::mt19937 gen(rd());
-        std::uniform_real_distribution<double> dist(-1.0, 1.0);
+        // i.i.d. complex Gaussian for the initial block; QR then orthonormalises.
+        // Gaussian columns yield a Haar-distributed orthonormal Q (right-rotation
+        // invariant), which is the standard initialisation for Krylov-Schur and
+        // gives the strongest convergence guarantees vs direction-biased
+        // uniform-cube samples.
+        std::normal_distribution<double> ndist(0.0, 1.0);
         for (int j = 0; j < init_block; j++) {
             for (int i = 0; i < dimension_; i++) {
-                h_init[j * dimension_ + i] = std::complex<double>(dist(gen), dist(gen));
+                h_init[j * dimension_ + i] = std::complex<double>(ndist(gen), ndist(gen));
             }
         }
         CUDA_CHECK(cudaMemcpy(d_V, h_init.data(),

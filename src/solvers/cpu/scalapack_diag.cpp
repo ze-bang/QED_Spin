@@ -119,7 +119,21 @@ extern "C" {
                   double* rwork, const int* lrwork,
                   int* iwork, const int* liwork,
                   int* info);
-    
+
+    // Double complex Hermitian eigensolver (MRRR; supports eigenvalues-only and
+    // index/value ranges). Strictly preferred over pzheevd when only a subset
+    // of the spectrum is needed, since pzheevd's divide-and-conquer always
+    // computes all eigenvectors.
+    void pzheevr_(const char* jobz, const char* range, const char* uplo, const int* n,
+                  void* a, const int* ia, const int* ja, const int* desca,
+                  const double* vl, const double* vu, const int* il, const int* iu,
+                  int* m, int* nz, double* w,
+                  void* z, const int* iz, const int* jz, const int* descz,
+                  void* work, const int* lwork,
+                  double* rwork, const int* lrwork,
+                  int* iwork, const int* liwork,
+                  int* info);
+
     // Single complex Hermitian eigensolver (divide-and-conquer)
     void pcheevd_(const char* jobz, const char* uplo, const int* n,
                   void* a, const int* ia, const int* ja, const int* desca,
@@ -774,16 +788,38 @@ ScaLAPACKResults scalapack_diagonalization(
         }
         
     } else {
-        // Double precision path
+        // Double precision path.
+        //
+        // Solver selection:
+        //   pzheevd (D&C) computes ALL eigenpairs and cannot honour jobz='N'
+        //     in many builds; it is only optimal when the full spectrum +
+        //     all eigenvectors are required.
+        //   pzheevr (MRRR) supports jobz='N' (no eigenvectors at all) and
+        //     range='I' (only the lowest k eigenvalues / vectors). It is
+        //     strictly preferred when either of those holds, both for
+        //     wall-time (O(N k) vs O(N^3)) and for memory (no Z storage
+        //     when jobz='N').
+        const uint64_t target_eigs = config.num_eigenvalues > 0
+            ? std::min<uint64_t>(config.num_eigenvalues, N)
+            : N;
+        const bool partial_spectrum = (target_eigs * 2 < N);  // <50% of spectrum
+        const bool use_pzheevr = (!config.compute_eigenvectors) || partial_spectrum;
+
         std::vector<Complex> local_A(static_cast<size_t>(local_rows) * local_cols);
-        // Note: pzheevd always computes eigenvectors (divide-and-conquer limitation),
-        // so we must always allocate local_Z even if we don't need the eigenvectors.
-        std::vector<Complex> local_Z(static_cast<size_t>(local_rows) * local_cols);
-        
+        // local_Z only allocated when eigenvectors are actually returned.
+        // pzheevr with jobz='N' does not reference Z; pzheevd always does.
+        std::vector<Complex> local_Z;
+        if (config.compute_eigenvectors || !use_pzheevr) {
+            local_Z.assign(static_cast<size_t>(local_rows) * local_cols, Complex(0.0, 0.0));
+        }
+
         if (g_mypnum == 0 && config.verbose) {
             size_t mem_per_proc = local_A.size() * sizeof(Complex);
-            std::cout << "Memory per process (double precision): " 
+            std::cout << "Memory per process (double precision): "
                       << mem_per_proc / (1024.0 * 1024.0) << " MB" << std::endl;
+            std::cout << "Solver: " << (use_pzheevr ? "pzheevr (MRRR)" : "pzheevd (D&C)")
+                      << ", compute_eigenvectors=" << (config.compute_eigenvectors ? "true" : "false")
+                      << ", target_eigs=" << target_eigs << "/" << N << std::endl;
         }
         
         // Construct local matrix
@@ -799,7 +835,6 @@ ScaLAPACKResults scalapack_diagonalization(
         // Diagonalization
         auto diag_start = std::chrono::high_resolution_clock::now();
         
-        // Workspace query
         SCALAPACK_INT lwork = -1, lrwork = -1, liwork = -1;
         Complex work_query;
         double rwork_query;
@@ -807,81 +842,138 @@ ScaLAPACKResults scalapack_diagonalization(
         SCALAPACK_INT one = 1;
         SCALAPACK_INT n_int = static_cast<SCALAPACK_INT>(n);
         SCALAPACK_INT info_int = 0;
-        
-        // Note: pzheevd does NOT support jobz='N' (eigenvalues only) in many implementations!
-        // The divide-and-conquer algorithm requires computing eigenvectors.
-        // Always use 'V' and ignore the vectors if not needed.
-        char jobz_str[2] = {'V', '\0'};  // Always compute vectors (pzheevd limitation)
+
+        char jobz_str[2] = {config.compute_eigenvectors ? 'V' : 'N', '\0'};
+        char range_str[2] = {partial_spectrum ? 'I' : 'A', '\0'};
         char uplo_str[2] = {'U', '\0'};
-        
-        if (!config.compute_eigenvectors && g_mypnum == 0 && config.verbose) {
-            std::cout << "Note: pzheevd always computes eigenvectors (divide-and-conquer limitation)" << std::endl;
-        }
-        
+
+        // pzheevd cannot do jobz='N'; force 'V' on the D&C fallback.
+        char jobz_pzheevd[2] = {'V', '\0'};
+        SCALAPACK_INT il = 1;
+        SCALAPACK_INT iu = static_cast<SCALAPACK_INT>(target_eigs);
+        SCALAPACK_INT m_found = 0;
+        SCALAPACK_INT nz_found = 0;
+        double vl = 0.0, vu = 0.0;
+
 #ifdef WITH_MKL
-        // Use MKL types for complex arrays
         MKL_Complex16* local_A_ptr = reinterpret_cast<MKL_Complex16*>(local_A.data());
-        MKL_Complex16* local_Z_ptr = reinterpret_cast<MKL_Complex16*>(local_Z.data());
-        
-        pzheevd_(jobz_str, uplo_str, &n_int,
-                 local_A_ptr, &one, &one, desc_A,
-                 eigenvalues_double.data(),
-                 local_Z_ptr, &one, &one, desc_A,
-                 reinterpret_cast<MKL_Complex16*>(&work_query), &lwork,
-                 &rwork_query, &lrwork,
-                 &iwork_query, &liwork,
-                 &info_int);
+        MKL_Complex16* local_Z_ptr = local_Z.empty() ? nullptr
+            : reinterpret_cast<MKL_Complex16*>(local_Z.data());
 #else
-        // Standard Fortran call - no hidden string lengths needed for system ScaLAPACK
-        pzheevd_(jobz_str, uplo_str, &n_int,
-                 local_A.data(), &one, &one, desc_A,
-                 eigenvalues_double.data(),
-                 local_Z.data(), &one, &one, desc_A,
-                 &work_query, &lwork,
-                 &rwork_query, &lrwork,
-                 &iwork_query, &liwork,
-                 &info_int);
+        Complex* local_A_ptr = local_A.data();
+        Complex* local_Z_ptr = local_Z.empty() ? nullptr : local_Z.data();
 #endif
-        
+
+        // ---- Workspace query ----
+        if (use_pzheevr) {
+#ifdef WITH_MKL
+            pzheevr_(jobz_str, range_str, uplo_str, &n_int,
+                     local_A_ptr, &one, &one, desc_A,
+                     &vl, &vu, &il, &iu, &m_found, &nz_found,
+                     eigenvalues_double.data(),
+                     local_Z_ptr, &one, &one, desc_A,
+                     reinterpret_cast<MKL_Complex16*>(&work_query), &lwork,
+                     &rwork_query, &lrwork,
+                     &iwork_query, &liwork,
+                     &info_int);
+#else
+            pzheevr_(jobz_str, range_str, uplo_str, &n_int,
+                     local_A.data(), &one, &one, desc_A,
+                     &vl, &vu, &il, &iu, &m_found, &nz_found,
+                     eigenvalues_double.data(),
+                     local_Z.data(), &one, &one, desc_A,
+                     &work_query, &lwork,
+                     &rwork_query, &lrwork,
+                     &iwork_query, &liwork,
+                     &info_int);
+#endif
+        } else {
+#ifdef WITH_MKL
+            pzheevd_(jobz_pzheevd, uplo_str, &n_int,
+                     local_A_ptr, &one, &one, desc_A,
+                     eigenvalues_double.data(),
+                     local_Z_ptr, &one, &one, desc_A,
+                     reinterpret_cast<MKL_Complex16*>(&work_query), &lwork,
+                     &rwork_query, &lrwork,
+                     &iwork_query, &liwork,
+                     &info_int);
+#else
+            pzheevd_(jobz_pzheevd, uplo_str, &n_int,
+                     local_A.data(), &one, &one, desc_A,
+                     eigenvalues_double.data(),
+                     local_Z.data(), &one, &one, desc_A,
+                     &work_query, &lwork,
+                     &rwork_query, &lrwork,
+                     &iwork_query, &liwork,
+                     &info_int);
+#endif
+        }
+
         if (info_int != 0) {
-            std::cerr << "pzheevd workspace query failed: info=" << info_int << std::endl;
+            std::cerr << (use_pzheevr ? "pzheevr" : "pzheevd")
+                      << " workspace query failed: info=" << info_int << std::endl;
             return results;
         }
-        
+
         lwork = static_cast<SCALAPACK_INT>(work_query.real()) + 1;
         lrwork = static_cast<SCALAPACK_INT>(rwork_query) + 1;
         liwork = iwork_query + 1;
-        
+
         std::vector<Complex> work(lwork);
         std::vector<double> rwork(lrwork);
         std::vector<SCALAPACK_INT> iwork(liwork);
-        
+
+        // ---- Actual computation ----
+        if (use_pzheevr) {
 #ifdef WITH_MKL
-        pzheevd_(jobz_str, uplo_str, &n_int,
-                 local_A_ptr, &one, &one, desc_A,
-                 eigenvalues_double.data(),
-                 local_Z_ptr, &one, &one, desc_A,
-                 reinterpret_cast<MKL_Complex16*>(work.data()), &lwork,
-                 rwork.data(), &lrwork,
-                 iwork.data(), &liwork,
-                 &info_int);
+            pzheevr_(jobz_str, range_str, uplo_str, &n_int,
+                     local_A_ptr, &one, &one, desc_A,
+                     &vl, &vu, &il, &iu, &m_found, &nz_found,
+                     eigenvalues_double.data(),
+                     local_Z_ptr, &one, &one, desc_A,
+                     reinterpret_cast<MKL_Complex16*>(work.data()), &lwork,
+                     rwork.data(), &lrwork,
+                     iwork.data(), &liwork,
+                     &info_int);
 #else
-        // Standard Fortran call - no hidden string lengths needed for system ScaLAPACK
-        pzheevd_(jobz_str, uplo_str, &n_int,
-                 local_A.data(), &one, &one, desc_A,
-                 eigenvalues_double.data(),
-                 local_Z.data(), &one, &one, desc_A,
-                 work.data(), &lwork,
-                 rwork.data(), &lrwork,
-                 iwork.data(), &liwork,
-                 &info_int);
+            pzheevr_(jobz_str, range_str, uplo_str, &n_int,
+                     local_A.data(), &one, &one, desc_A,
+                     &vl, &vu, &il, &iu, &m_found, &nz_found,
+                     eigenvalues_double.data(),
+                     local_Z.data(), &one, &one, desc_A,
+                     work.data(), &lwork,
+                     rwork.data(), &lrwork,
+                     iwork.data(), &liwork,
+                     &info_int);
 #endif
-        
+        } else {
+#ifdef WITH_MKL
+            pzheevd_(jobz_pzheevd, uplo_str, &n_int,
+                     local_A_ptr, &one, &one, desc_A,
+                     eigenvalues_double.data(),
+                     local_Z_ptr, &one, &one, desc_A,
+                     reinterpret_cast<MKL_Complex16*>(work.data()), &lwork,
+                     rwork.data(), &lrwork,
+                     iwork.data(), &liwork,
+                     &info_int);
+#else
+            pzheevd_(jobz_pzheevd, uplo_str, &n_int,
+                     local_A.data(), &one, &one, desc_A,
+                     eigenvalues_double.data(),
+                     local_Z.data(), &one, &one, desc_A,
+                     work.data(), &lwork,
+                     rwork.data(), &lrwork,
+                     iwork.data(), &liwork,
+                     &info_int);
+#endif
+        }
+
         if (info_int != 0) {
-            std::cerr << "pzheevd failed: info=" << info_int << std::endl;
+            std::cerr << (use_pzheevr ? "pzheevr" : "pzheevd")
+                      << " failed: info=" << info_int << std::endl;
             return results;
         }
-        
+
         auto diag_end = std::chrono::high_resolution_clock::now();
         results.diagonalization_time = std::chrono::duration<double>(diag_end - diag_start).count();
         
