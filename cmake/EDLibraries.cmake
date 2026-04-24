@@ -219,6 +219,12 @@ set_target_properties(ed_symmetry PROPERTIES POSITION_INDEPENDENT_CODE ON)
 #                              bindings (`load_wavefunction`,
 #                              `load_all_tpq_states`, `load_tpq_state`,
 #                              `TPQState`).
+#   * results_io.cpp        -- HDF5 results writers + scalar-summary structs
+#                              for the order-parameter pipeline
+#                              (`save_results`, `save_temperature_scan_results`,
+#                              `save_scan_results`, `NematicResult`,
+#                              `VBSResult`, `PlaquetteResult`, `Sq2DGridResult`,
+#                              `OrderParameterResults`).
 #
 # The CPU driver (`compute_bfg_order_parameters`), the GPU driver
 # (`compute_bfg_order_parameters_gpu`), and the future Python bindings all
@@ -238,6 +244,7 @@ add_library(ed_bfg STATIC
     ${BFG_DIR}/ring_observables.cpp
     ${BFG_DIR}/spin_structure_factor.cpp
     ${BFG_DIR}/wavefunction_io.cpp
+    ${BFG_DIR}/results_io.cpp
 )
 target_include_directories(ed_bfg PUBLIC ${_ED_PUBLIC_INCLUDES})
 target_include_directories(ed_bfg PRIVATE ${HDF5_INCLUDE_DIRS})
