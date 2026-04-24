@@ -71,3 +71,55 @@ jobs:
             build/Testing/Temporary/LastTestsFailed.log
           if-no-files-found: ignore
           retention-days: 7
+
+  # ---------------------------------------------------------------------------
+  # Python lane: install the wheel via scikit-build-core (which builds the
+  # pybind11 extension against the C++ ed_solvers_cpu library) and run the
+  # pytest smoke suite. This is independent of the C++-only lane above so a
+  # broken Python surface doesn't mask C++ regressions and vice versa.
+  # ---------------------------------------------------------------------------
+  linux-python:
+    name: Linux / Python wheel + pytest
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential \
+            cmake \
+            ninja-build \
+            libopenblas-dev \
+            liblapacke-dev \
+            libhdf5-dev \
+            libhdf5-cpp-103 \
+            libeigen3-dev \
+            libarpack2-dev \
+            pkg-config
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Upgrade pip + install build tooling
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install "scikit-build-core>=0.10" "pybind11>=2.13" pytest numpy h5py
+
+      - name: Build + install quantum_ed wheel (editable not yet supported by scikit-build-core fully)
+        env:
+          # Force the configure step to skip the C++ test build to keep the
+          # wheel build short -- the C++ tests already ran in the previous job.
+          CMAKE_ARGS: "-DBUILD_ED_TESTS=OFF -DWITH_CUDA=OFF -DWITH_MPI=OFF -DBLAS_PROFILE=OPENBLAS"
+        run: |
+          python -m pip install -v .
+
+      - name: Run pytest
+        run: |
+          python -m pytest python/tests -v
