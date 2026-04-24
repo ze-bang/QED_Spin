@@ -29,6 +29,24 @@ set(SCALAPACK_ROOT "" CACHE PATH "Root path to a custom ScaLAPACK installation")
 # Optional custom LAPACKE root (to avoid system BLAS/LAPACK alternatives)
 set(LAPACKE_ROOT "" CACHE PATH "Root path to a custom LAPACKE installation")
 
+# -----------------------------------------------------------------------------
+# Local-developer cache variables (P0.10).
+# Replaces the previously hardcoded /home/pc_linux/exact_diagonalization_clean/...
+# paths. Set these via -D on the command line or in a local.cmake file:
+#
+#   cmake --preset default -DED_LAPACKE_ROOT=/path/to/lapacke_ref/install \
+#                          -DED_BLAS_SHIM_DIR=/path/to/blas_shim
+#
+# Both default to empty; when empty, the system search paths are used.
+# -----------------------------------------------------------------------------
+set(ED_LAPACKE_ROOT "" CACHE PATH
+    "Optional override: path to a local LAPACKE install (used when LAPACKE_ROOT is unset). \
+P0.10 / audit Q7.")
+set(ED_BLAS_SHIM_DIR "" CACHE PATH
+    "Optional override: directory containing libblas.so.3 to PREPEND to RPATH \
+(used by the AOCL profile to avoid MKL alternatives via liblapacke). \
+P0.10 / audit Q7.")
+
 # Detect host CPU vendor to pick optimized BLAS/LAPACK defaults
 set(CPU_VENDOR "Unknown")
 if(EXISTS "/proc/cpuinfo")
@@ -508,9 +526,13 @@ if(BLAS_PROFILE STREQUAL "AOCL_BLIS")
         NO_DEFAULT_PATH
     )
 
-    # Default LAPACKE_ROOT to local reference build if present
-    if(NOT LAPACKE_ROOT AND EXISTS "/home/pc_linux/exact_diagonalization_clean/lapacke_ref/install")
-        set(LAPACKE_ROOT "/home/pc_linux/exact_diagonalization_clean/lapacke_ref/install")
+    # Default LAPACKE_ROOT to a user-provided ED_LAPACKE_ROOT if set; otherwise
+    # leave empty and let the search below fall back to system paths.
+    # (The previous version hard-coded a per-user absolute path; that has been
+    # replaced by the ED_LAPACKE_ROOT cache variable as part of P0.10.)
+    if(NOT LAPACKE_ROOT AND ED_LAPACKE_ROOT AND EXISTS "${ED_LAPACKE_ROOT}")
+        set(LAPACKE_ROOT "${ED_LAPACKE_ROOT}")
+        message(STATUS "  LAPACKE_ROOT (from ED_LAPACKE_ROOT): ${LAPACKE_ROOT}")
     endif()
     
     if(AOCL_INCLUDE_DIR AND AOCL_BLIS_LIBRARY AND REFLAPACK_LIBRARY)
@@ -527,12 +549,13 @@ if(BLAS_PROFILE STREQUAL "AOCL_BLIS")
         list(APPEND CMAKE_INSTALL_RPATH ${AOCL_LIB_DIR})
         set(CMAKE_BUILD_WITH_INSTALL_RPATH TRUE)
 
-        # BLAS shim to override system libblas (avoids MKL alternatives via liblapacke)
-        set(BLAS_SHIM_DIR "/home/pc_linux/exact_diagonalization_clean/blas_shim")
-        if(EXISTS "${BLAS_SHIM_DIR}/libblas.so.3")
-            list(PREPEND CMAKE_BUILD_RPATH ${BLAS_SHIM_DIR})
-            list(PREPEND CMAKE_INSTALL_RPATH ${BLAS_SHIM_DIR})
-            message(STATUS "  Added BLAS shim RPATH (prepend): ${BLAS_SHIM_DIR}")
+        # BLAS shim to override system libblas (avoids MKL alternatives via liblapacke).
+        # Set ED_BLAS_SHIM_DIR via -DED_BLAS_SHIM_DIR=... or in local.cmake to point
+        # at a directory containing libblas.so.3. Hard-coded path removed in P0.10.
+        if(ED_BLAS_SHIM_DIR AND EXISTS "${ED_BLAS_SHIM_DIR}/libblas.so.3")
+            list(PREPEND CMAKE_BUILD_RPATH ${ED_BLAS_SHIM_DIR})
+            list(PREPEND CMAKE_INSTALL_RPATH ${ED_BLAS_SHIM_DIR})
+            message(STATUS "  Added BLAS shim RPATH (prepend): ${ED_BLAS_SHIM_DIR}")
         endif()
 
         # AOCL BLIS depends on libomp

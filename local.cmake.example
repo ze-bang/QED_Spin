@@ -1,0 +1,34 @@
+# Local developer overrides (gitignored as 'local.cmake').
+# Copy this file to 'local.cmake' and adjust the paths to match your machine.
+# Then configure with:
+#
+#   cmake --preset default -C local.cmake
+#
+# This file is loaded BEFORE the main CMakeLists.txt processes its options,
+# so the values here populate the cache as if you'd passed them on the command
+# line. local.cmake is in .gitignore.
+
+# ---------------------------------------------------------------------------
+# AOCL BLIS users (or anyone with a hand-built reference LAPACKE):
+# point ED_LAPACKE_ROOT at the install prefix of your LAPACKE build.
+# Replaces the previously hardcoded
+#   /home/pc_linux/exact_diagonalization_clean/lapacke_ref/install
+# ---------------------------------------------------------------------------
+# set(ED_LAPACKE_ROOT "/path/to/lapacke_ref/install" CACHE PATH "")
+
+# ---------------------------------------------------------------------------
+# AOCL BLIS users on systems where liblapacke pulls in MKL-flavored libblas:
+# point ED_BLAS_SHIM_DIR at a directory containing a shim libblas.so.3 that
+# forwards to your AOCL BLIS. Replaces the previously hardcoded
+#   /home/pc_linux/exact_diagonalization_clean/blas_shim
+# ---------------------------------------------------------------------------
+# set(ED_BLAS_SHIM_DIR "/path/to/blas_shim" CACHE PATH "")
+
+# ---------------------------------------------------------------------------
+# Other useful overrides (uncomment as needed)
+# ---------------------------------------------------------------------------
+# set(BLAS_PROFILE "AOCL"       CACHE STRING "")
+# set(SCALAPACK_ROOT "/opt/aocl/4.2.0/aocc/lib" CACHE PATH "")
+# set(WITH_CUDA      ON         CACHE BOOL "")
+# set(WITH_MPI       ON         CACHE BOOL "")
+# set(CMAKE_CUDA_ARCHITECTURES "80;89" CACHE STRING "")
