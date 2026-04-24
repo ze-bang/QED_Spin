@@ -1,0 +1,107 @@
+# =============================================================================
+# Dockerfile.dev -- reproducible developer environment for quantum_ed.
+#
+# Goal: lab collaborators can run *exactly* the same C++ + Python toolchain
+# CI uses, without polluting their host system.
+#
+# Quick start
+# -----------
+#   docker build -t quantum-ed-dev -f Dockerfile.dev .
+#   docker run --rm -it -v "$PWD":/work -w /work quantum-ed-dev bash
+#   # Inside the container:
+#   cmake --preset ci-linux                 # one-shot configure
+#   cmake --build --preset ci-linux -j      # build everything
+#   ctest   --preset ci-linux               # 42/42 must pass
+#   pip install -e .                        # build + install quantum_ed wheel
+#   python -m pytest python/tests -v        # 22/22 must pass
+#
+# Notes
+# -----
+#   * No CUDA toolchain inside the image (keeps the image small and
+#     debuggable on laptops without an NVIDIA GPU). For the GPU build use the
+#     `nvidia/cuda:12.4.1-devel-ubuntu22.04` base or run `cmake -DWITH_CUDA=ON`
+#     against a host CUDA toolkit mounted into /usr/local/cuda.
+#   * The image pins ubuntu 22.04 to match the GitHub Actions runners we use
+#     in .github/workflows/ci.yml (linux-gcc-openblas / linux-python /
+#     linux-clang-debug / linux-clang-tidy lanes).
+#   * `BLAS_PROFILE=OPENBLAS` is the only profile guaranteed to be present.
+#     The MKL / AOCL / FlexiBLAS profiles still work but require those
+#     vendor-specific packages to be installed at runtime (mount in via
+#     -v /opt/intel:/opt/intel etc.).
+#
+# Audit ref: P2.12.
+# =============================================================================
+ARG UBUNTU_VERSION=22.04
+FROM ubuntu:${UBUNTU_VERSION}
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    LANG=C.UTF-8 \
+    LC_ALL=C.UTF-8 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PIP_NO_CACHE_DIR=1 \
+    BLAS_PROFILE=OPENBLAS
+
+# -----------------------------------------------------------------------------
+# Toolchain + scientific stack
+#   * gcc/g++ 11 (default on jammy) and clang/clang-tidy for the alternate
+#     compiler lane.
+#   * CMake >= 3.18 (jammy ships 3.22) and Ninja for the preset builds.
+#   * OpenBLAS / LAPACKE / Eigen3 / ARPACK / HDF5 (CXX) match the CI lane.
+#   * Python 3.11 + pip + venv: the wheel-build path uses scikit-build-core.
+#   * git + ssh-client + curl + ca-certificates: needed by FetchContent
+#     (Catch2 v3, pybind11 v2.13.6).
+#   * doxygen + graphviz: optional, builds the Sphinx + Breathe docs.
+# -----------------------------------------------------------------------------
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential \
+        clang \
+        clang-tidy \
+        clang-format \
+        cmake \
+        ninja-build \
+        pkg-config \
+        git \
+        ssh-client \
+        curl \
+        ca-certificates \
+        libopenblas-dev \
+        liblapacke-dev \
+        libhdf5-dev \
+        libhdf5-cpp-103 \
+        libeigen3-dev \
+        libarpack2-dev \
+        libopenmpi-dev \
+        openmpi-bin \
+        python3.11 \
+        python3.11-venv \
+        python3-pip \
+        python3-dev \
+        doxygen \
+        graphviz \
+        less \
+        vim-tiny \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN update-alternatives --install /usr/bin/python  python  /usr/bin/python3.11 1 \
+ && update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.11 1
+
+# Build/test tooling that matches the CI Python lane.
+RUN python -m pip install --upgrade pip \
+ && python -m pip install \
+        "scikit-build-core>=0.10" \
+        "pybind11>=2.13" \
+        numpy \
+        h5py \
+        pytest \
+        pre-commit
+
+# -----------------------------------------------------------------------------
+# Workspace setup. The image bind-mounts the repo at /work; running as root
+# keeps file ownership flexible across host UIDs (revisit with a non-root
+# user once we have a clear collaborator policy).
+# -----------------------------------------------------------------------------
+WORKDIR /work
+VOLUME /work
+
+# Pre-print the canonical workflow so newcomers see it on container start.
+CMD ["bash", "-lc", "cat <<'BANNER'\n\nquantum_ed dev container ready.\n\nFirst-time build:\n  cmake --preset ci-linux\n  cmake --build --preset ci-linux -j\n  ctest   --preset ci-linux\n\nPython wheel:\n  pip install -e .\n  python -m pytest python/tests -v\n\nDocs (optional):\n  pip install -r docs/requirements.txt\n  cmake -B build-docs -DED_BUILD_DOCS=ON\n  cmake --build build-docs --target sphinx\n\nBANNER\nexec bash"]

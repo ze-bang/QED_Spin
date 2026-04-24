@@ -36,6 +36,38 @@ op = qe.FixedSzOperator(num_sites=8, spin_length=0.5, n_up=4)
 res = qe.full_diagonalization(op)
 ```
 
+## DSSF: building observable pairs
+
+The `quantum_ed.dssf` submodule exposes the *same* `OperatorSpec` /
+`build_observable_pairs` / `compute_transverse_bases` C++ functions used by
+the `ED` and `TPQ_DSSF` executables, so a Python script can produce a
+byte-identical pair list (operators, names, ordering) and feed them into the
+solvers without any glue code:
+
+```python
+import quantum_ed as qe
+
+spec = qe.dssf.OperatorSpec()
+spec.operator_type     = "transverse"
+spec.basis             = "xyz"
+spec.spin_combinations = [("x", "x"), ("y", "y")]
+spec.momentum_points   = [[0.0, 0.0, 0.0], [3.14159, 0.0, 0.0]]
+spec.polarization      = [0.0, 0.0, 1.0]
+spec.unit_cell_size    = 4
+spec.num_sites         = 4
+spec.spin_length       = 0.5
+spec.positions_file    = "/abs/path/to/positions.dat"
+
+pairs = qe.dssf.build_observable_pairs(spec)
+for name in pairs.names:
+    print(name)
+```
+
+The returned `ObservablePairs` carries three parallel lists --- `obs_1`,
+`obs_2`, `names` --- of equal length. The `Operator` instances inside are the
+same C++ ones bound on the top-level facade, so `qe.lanczos(pair_obs_1)` /
+`qe.finite_temperature_lanczos(...)` work directly on them.
+
 ## Backwards compatibility with `edlib`
 
 The legacy `edlib` Python helpers (`hdf5_io`, `automorphism_finder`, …) are

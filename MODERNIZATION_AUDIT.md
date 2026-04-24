@@ -962,7 +962,7 @@ I recommend three phases. Phase boundaries are natural pause points where everyt
 - [ ] **P2.9** Add `python/tests/` with pytest; wire into CI.
 - [ ] **P2.10** Add a Hamiltonian builder DSL in Python (~250 lines, pays back forever).
 - [ ] **P2.11** Formalize symmetry DSL: `ed::Translation`, `ed::PointGroup`, `ed::Z2`; the JSON-driven workflow keeps working but a programmatic API is the new recommended path.
-- [ ] **P2.12** Add a `Dockerfile.dev` and a `flake.nix` for collaborator on-boarding.
+- [x] **P2.12** Add a `Dockerfile.dev` and a `flake.nix` for collaborator on-boarding. *Done:* `Dockerfile.dev` (Ubuntu 22.04 mirror of the `linux-gcc-openblas` + `linux-python` CI lanes; pinned `gcc`, `cmake`, `ninja`, `OpenBLAS`, `LAPACKE`, `HDF5 (C++)`, `Eigen3`, `ARPACK`, `Python 3.11`, `pybind11`, `scikit-build-core`, `clang-tidy`/`clang-format`, `doxygen`/`graphviz`) + `flake.nix` (NixOS 24.05 channel, `devShells.default` with the same toolchain, `packages.quantum-ed-cpp` for a content-addressed C++-only build artifact). Both deliberately exclude the CUDA toolchain to keep image size manageable; the `linux-cuda-build` CI lane is still the canonical GPU-compile gate. README "Reproducible Dev Environment" section documents the workflow.
 - [ ] **P2.13** Add `benchmarks/` with Google Benchmark; wire a nightly job that posts results.
 - [ ] **P2.14 — DSSF PR-H** (one release after Phase 2 ships): delete deprecated `--dssf` flag in `ed_main.cpp`, delete `tpq_dssf_compat.cpp`, drop `--dssf-legacy-output` writer.
 

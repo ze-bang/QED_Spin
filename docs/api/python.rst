@@ -16,6 +16,14 @@ Top-level facade
    :undoc-members:
    :show-inheritance:
 
+Dynamical / static structure factor (``quantum_ed.dssf``)
+---------------------------------------------------------
+
+.. automodule:: quantum_ed.dssf
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
 Helpers (legacy ``edlib`` re-exports)
 -------------------------------------
 

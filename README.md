@@ -136,6 +136,45 @@ pip install numpy scipy matplotlib h5py networkx tqdm
 pip install scikit-optimize
 ```
 
+### Reproducible Dev Environment (Docker / Nix)
+
+Two equivalent zero-config setups are provided so collaborators can reproduce
+the exact toolchain CI uses (`ubuntu-22.04`, `gcc 11`, `cmake >= 3.22`,
+`OpenBLAS`, `HDF5 (C++)`, `Eigen3`, `ARPACK`, `Python 3.11`, `pybind11`,
+`scikit-build-core`).
+
+**Docker** (`Dockerfile.dev` at the repo root):
+
+```bash
+docker build -t quantum-ed-dev -f Dockerfile.dev .
+docker run --rm -it -v "$PWD":/work -w /work quantum-ed-dev bash
+
+# Inside the container:
+cmake --preset ci-linux
+cmake --build --preset ci-linux -j
+ctest   --preset ci-linux              # 42/42 must pass
+pip install -e .
+python -m pytest python/tests -v       # 22/22 must pass
+```
+
+**Nix** (`flake.nix` at the repo root, requires
+`experimental-features = nix-command flakes`):
+
+```bash
+nix develop                            # drop into a dev shell
+cmake --preset ci-linux
+cmake --build --preset ci-linux -j
+ctest   --preset ci-linux
+
+# Or build a reproducible C++-only artifact:
+nix build .#quantum-ed-cpp
+./result/bin/ED ...
+```
+
+Both setups intentionally exclude CUDA: GPU work is best done on a host
+with a pre-installed CUDA toolkit (CI's `linux-cuda-build` lane validates the
+GPU compile path on every push).
+
 ---
 
 ## Exact Diagonalization Pipeline
