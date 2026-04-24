@@ -40,10 +40,27 @@ introduced (committed broken in P1.12 / P1.13 / P2.6) are now green:
   `construct_ham.h` was unresolved (GCC bundles its own libgomp via
   `build-essential`, which is why the GCC/OpenBLAS lane was unaffected).
   Added `libomp-dev` to both `apt-get install` lists.
-- **`CI / Linux / CUDA build-only`** -- the pinned
-  `Jimver/cuda-toolkit@v0.2.16` action + `cuda: "12.4.1"` combination
-  404'd on NVIDIA's package mirror (CUDA 12.4.1 deb URLs were retired).
-  Bumped to `v0.2.35` + `cuda: "12.6.3"`.
+- **`CI / Linux / CUDA build-only`** -- after three failed attempts to
+  resurrect this lane via the `Jimver/cuda-toolkit` action
+  (`v0.2.16` 404'd on retired CUDA 12.4.1 deb URLs; `v0.2.34/35` broke
+  on node24 + the deprecated GH Actions cache v1 API
+  (Jimver/cuda-toolkit#390); `v0.2.32` exited in ~20s before any
+  install), replaced the action entirely with direct `apt-get`
+  installs from NVIDIA's official Ubuntu 22.04 repo
+  (`cuda-keyring_1.1-1` + `cuda-nvcc-12-6` and friends). Two follow-up
+  fixes were needed once the install was happy:
+  - **`Configure` step**: added `libcurand-dev-12-6` so CMake's
+    `find_package(CUDAToolkit)` could resolve `CUDA::curand` (we link
+    it from `cmake/EDLibraries.cmake` and `CMakeLists.txt`, but it
+    isn't pulled in by the cudart/cublas/cusolver dev metapackages).
+  - **Final link step**: added the runtime-only `libnvjitlink-12-6`
+    (a transitive dependency of the cusolver/cusparse `.so`s in 12.6
+    that the dev packages do not list), otherwise `ld` fails with
+    `undefined reference to __nvJitLink*_12_6` when linking the `ED`
+    executable.
+  The configure + build of `ed_solvers_gpu` and `ED` (SM 70 only) now
+  completes in ~2.5 minutes locally inside an `ubuntu:22.04` container
+  using exactly the CI command sequence.
 
 `ctest` (102/102) and `pytest` (98/98) remain green locally; the local
 Sphinx build now reports `build succeeded.` with `-W --keep-going`.

@@ -296,6 +296,19 @@ jobs:
           wget -q https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/cuda-keyring_1.1-1_all.deb
           sudo dpkg -i cuda-keyring_1.1-1_all.deb
           sudo apt-get update
+          # NOTE: keep this list in sync with the CUDA::* targets used in
+          # cmake/EDLibraries.cmake / CMakeLists.txt. We currently link
+          # cudart, cublas, cusparse, cusolver and curand, so we need the
+          # matching -dev packages for each one (curand was missing on the
+          # first apt-based attempt and broke `find_package(CUDAToolkit)`
+          # at configure-time with "Target ... links to CUDA::curand but
+          # the target was not found").
+          #
+          # libnvjitlink-12-6 is a transitive dependency of cusolver/cusparse
+          # 12.6 (their .so files dlopen `libnvJitLink.so.12` at link time),
+          # but the dev metapackages do *not* pull it in automatically, so
+          # the final `ld` step on the ED executable fails with a flood of
+          # "undefined reference to __nvJitLink*_12_6" without it.
           sudo apt-get install -y --no-install-recommends \
             cuda-nvcc-12-6 \
             cuda-cudart-dev-12-6 \
@@ -303,6 +316,8 @@ jobs:
             libcublas-dev-12-6 \
             libcusparse-dev-12-6 \
             libcusolver-dev-12-6 \
+            libcurand-dev-12-6 \
+            libnvjitlink-12-6 \
             cuda-cccl-12-6
           echo "CUDA_PATH=/usr/local/cuda-12.6" >> "$GITHUB_ENV"
           echo "/usr/local/cuda-12.6/bin" >> "$GITHUB_PATH"
