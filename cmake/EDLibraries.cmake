@@ -148,8 +148,11 @@ set_target_properties(ed_solvers_cpu PROPERTIES POSITION_INDEPENDENT_CODE ON)
 # -----------------------------------------------------------------------------
 add_library(ed_dssf STATIC
     ${DSSF_DIR}/operator_spec.cpp
+    ${DSSF_DIR}/dssf_method.cpp
+    ${DSSF_DIR}/dssf_io.cpp
 )
 target_include_directories(ed_dssf PUBLIC ${_ED_PUBLIC_INCLUDES})
+target_include_directories(ed_dssf PRIVATE ${HDF5_INCLUDE_DIRS})
 target_link_libraries(ed_dssf PUBLIC ed_core ${ED_COMMON_LINK_LIBS})
 target_link_libraries(ed_dssf PUBLIC
     "$<BUILD_INTERFACE:nlohmann_json::nlohmann_json>"

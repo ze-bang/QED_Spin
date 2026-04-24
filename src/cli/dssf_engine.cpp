@@ -1,66 +1,25 @@
 // =============================================================================
-// src/dssf/dssf_engine.cpp
+// src/cli/dssf_engine.cpp
 //
 // Implementation of `ed::dssf::run(...)` -- the canonical DSSF/SSSF
 // dispatcher introduced in P2.2 (DSSF PR-C, audit §3.10).
 //
 // This translation unit deliberately stays small and *only* contains the
-// dispatch table + free functions on `DSSFMethod`. The actual workflow
-// bodies live (for now) in `src/cli/workflows.cpp`. P2.3 / P2.4 will move
-// them onto this seam one at a time so `ctest` stays green between commits.
+// `run(...)` dispatcher (it has to live in `ed_cli` so it can call into
+// the `compute_*_workflow` bodies that live in `src/cli/workflows.cpp`).
+// The pure helpers `to_string` / `method_from_string` were split out
+// into `src/dssf/dssf_method.cpp` (P2.3) so they can be linked from
+// `ed_dssf` consumers (e.g. `dssf_io.cpp`) without dragging in `ed_cli`.
 // =============================================================================
 
 #include <ed/dssf/dssf_engine.h>
 
 #include <ed/cli/workflows.h>
 
-#include <algorithm>
 #include <stdexcept>
 #include <string>
 
 namespace ed::dssf {
-
-namespace {
-
-constexpr const char* kDynamicalThermal = "dynamical_thermal";
-constexpr const char* kStaticThermal    = "static_thermal";
-constexpr const char* kGroundStateDSSF  = "ground_state_dssf";
-constexpr const char* kSingleExpect     = "single_expectation";
-
-} // namespace
-
-std::string to_string(DSSFMethod method) {
-    switch (method) {
-        case DSSFMethod::DYNAMICAL_THERMAL:  return kDynamicalThermal;
-        case DSSFMethod::STATIC_THERMAL:     return kStaticThermal;
-        case DSSFMethod::GROUND_STATE_DSSF:  return kGroundStateDSSF;
-        case DSSFMethod::SINGLE_EXPECTATION: return kSingleExpect;
-    }
-    // Future-proof: unrecognised numeric value (shouldn't happen for a
-    // strongly-typed enum, but be defensive against persisted enum values
-    // from a future schema).
-    throw std::invalid_argument(
-        "ed::dssf::to_string: unrecognised DSSFMethod value " +
-        std::to_string(static_cast<std::uint32_t>(method)));
-}
-
-DSSFMethod method_from_string(const std::string& token) {
-    // Normalise to lowercase for forgiving CLI parsing.
-    std::string normalized;
-    normalized.reserve(token.size());
-    std::transform(token.begin(), token.end(), std::back_inserter(normalized),
-                   [](unsigned char c) { return std::tolower(c); });
-
-    if (normalized == kDynamicalThermal) return DSSFMethod::DYNAMICAL_THERMAL;
-    if (normalized == kStaticThermal)    return DSSFMethod::STATIC_THERMAL;
-    if (normalized == kGroundStateDSSF)  return DSSFMethod::GROUND_STATE_DSSF;
-    if (normalized == kSingleExpect)     return DSSFMethod::SINGLE_EXPECTATION;
-
-    throw std::invalid_argument(
-        "ed::dssf::method_from_string: unrecognised method token '" +
-        token + "'. Valid tokens: dynamical_thermal, static_thermal, "
-        "ground_state_dssf, single_expectation.");
-}
 
 DSSFResult run(const DSSFRequest& request) {
     DSSFResult result;

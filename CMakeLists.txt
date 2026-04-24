@@ -690,6 +690,18 @@ if(BUILD_ED_TESTS)
     ed_add_test(test_dssf_engine                tests/unit/test_dssf_engine.cpp USE_CATCH2)
     target_link_libraries(test_dssf_engine PRIVATE ed_cli ed_dssf)
 
+    # P2.3 (DSSF PR-D): bit-for-bit lockdown of the legacy /dynamical/ and
+    # /correlations/ HDF5 schemas, so the unified /dssf/ writer cannot
+    # accidentally regress them. Reaches into ed_solvers_cpu for HDF5IO.
+    ed_add_test(test_dssf_legacy_schema         tests/unit/test_dssf_legacy_schema.cpp USE_CATCH2)
+    target_include_directories(test_dssf_legacy_schema PRIVATE ${HDF5_INCLUDE_DIRS})
+
+    # P2.3 (DSSF PR-D): round-trip lockdown for the new unified /dssf/ schema
+    # (ensure_metadata + write_record + read_record). Lives in ed_dssf.
+    ed_add_test(test_dssf_io                    tests/unit/test_dssf_io.cpp USE_CATCH2)
+    target_link_libraries(test_dssf_io PRIVATE ed_dssf)
+    target_include_directories(test_dssf_io PRIVATE ${HDF5_INCLUDE_DIRS})
+
     ed_add_test(test_bfg_cluster                tests/unit/test_bfg_cluster.cpp USE_CATCH2)
     target_link_libraries(test_bfg_cluster PRIVATE ed_bfg)
     target_compile_definitions(test_bfg_cluster PRIVATE
