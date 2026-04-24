@@ -109,65 +109,10 @@ inline std::vector<Complex> operator* (const std::vector<Complex>& a, const Comp
 // ENUMS AND STRUCTURES
 // ============================================================================
 
-/**
- * @brief Available diagonalization methods for exact diagonalization
- */
-enum class DiagonalizationMethod {
-    LANCZOS,               // Standard Lanczos algorithm
-    LANCZOS_SELECTIVE,     // Lanczos with selective reorthogonalization
-    LANCZOS_NO_ORTHO,      // Lanczos without reorthogonalization
-    BLOCK_LANCZOS,         // Block Lanczos
-    CHEBYSHEV_FILTERED,    // Chebyshev filtered Lanczos for spectral slicing
-    SHIFT_INVERT,          // Shift-invert Lanczos
-    SHIFT_INVERT_ROBUST,   // Robust shift-invert Lanczos
-    DAVIDSON,              // Davidson method
-    BICG,                  // Biconjugate gradient
-    LOBPCG,                // Locally optimal block preconditioned conjugate gradient
-    KRYLOV_SCHUR,          // Krylov-Schur algorithm
-    BLOCK_KRYLOV_SCHUR,    // Block Krylov-Schur algorithm for degenerate eigenvalues
-    IMPLICIT_RESTART_LANCZOS,  // Implicitly restarted Lanczos algorithm
-    THICK_RESTART_LANCZOS,     // Thick restart Lanczos algorithm with locking
-    FULL,                  // Full diagonalization
-    OSS,                   // Optimal spectrum solver
-    
-    // Distributed/Parallel methods
-    SCALAPACK,             // ScaLAPACK distributed diagonalization
-    SCALAPACK_MIXED,       // ScaLAPACK with mixed precision (single+refinement)
-    
-    // Thermal methods
-    mTPQ,                  // Microcanonical Thermal Pure Quantum states
-    mTPQ_MPI,              // MPI version of mTPQ
-    cTPQ,                  // Canonical Thermal Pure Quantum states
-    mTPQ_CUDA,             // CUDA microcanonical Thermal Pure Quantum states
-    FTLM,                  // Finite Temperature Lanczos Method
-    LTLM,                  // Low Temperature Lanczos Method
-    HYBRID,                // Hybrid Thermal Method (LTLM + FTLM with automatic crossover)
-    
-    // ARPACK methods
-    ARPACK_SM,             // ARPACK smallest magnitude eigenvalues
-    ARPACK_LM,             // ARPACK largest magnitude eigenvalues
-    ARPACK_SHIFT_INVERT,   // ARPACK in shift-invert mode
-    ARPACK_ADVANCED,       // ARPACK advanced multi-attempt strategy
-    
-    // GPU methods
-    LANCZOS_GPU,           // GPU-accelerated Lanczos (use --fixed-sz for fixed Sz sector)
-    BLOCK_LANCZOS_GPU,     // GPU-accelerated Block Lanczos (use --fixed-sz for fixed Sz sector)
-    DAVIDSON_GPU,          // GPU-accelerated Davidson method
-    LOBPCG_GPU,            // GPU-accelerated LOBPCG method
-    KRYLOV_SCHUR_GPU,      // GPU-accelerated Krylov-Schur algorithm
-    BLOCK_KRYLOV_SCHUR_GPU,// GPU-accelerated Block Krylov-Schur algorithm
-    mTPQ_GPU,              // GPU-accelerated microcanonical TPQ
-    cTPQ_GPU,              // GPU-accelerated canonical TPQ
-    FTLM_GPU,              // GPU-accelerated Finite Temperature Lanczos Method (use --fixed-sz for fixed Sz sector)
-    FULL_GPU,              // GPU-accelerated full diagonalization (cuSOLVER dense eigensolver)
-    
-    // ========== DEPRECATED: Use base method + --fixed-sz flag instead ==========
-    // These are kept for backwards compatibility but will be removed in a future version.
-    // Example: Instead of LANCZOS_GPU_FIXED_SZ, use LANCZOS_GPU with --fixed-sz flag.
-    LANCZOS_GPU_FIXED_SZ [[deprecated("Use LANCZOS_GPU with --fixed-sz flag instead")]],
-    BLOCK_LANCZOS_GPU_FIXED_SZ [[deprecated("Use BLOCK_LANCZOS_GPU with --fixed-sz flag instead")]],
-    FTLM_GPU_FIXED_SZ [[deprecated("Use FTLM_GPU with --fixed-sz flag instead")]]
-};
+// DiagonalizationMethod has been moved to <ed/core/ed_types.h> so that the
+// implementation in src/core/ed_config.cpp does not need to include this
+// 4500-line header just to mention the enum. (P0.14 / audit Q6.)
+#include <ed/core/ed_types.h>
 
 // ============================================================================
 // FEATURE AVAILABILITY CHECKS

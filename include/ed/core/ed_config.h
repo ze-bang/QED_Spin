@@ -14,8 +14,12 @@
 // FORWARD DECLARATIONS
 // ============================================================================
 
-// Forward declare to avoid including ed_wrapper.h (which has inline functions that cause linking issues)
-enum class DiagonalizationMethod;
+// DiagonalizationMethod lives in <ed/core/ed_types.h> -- a small header with no
+// transitive dependencies. Including it here (in place of the previous
+// forward declaration of `enum class DiagonalizationMethod`) lets call sites
+// use the enum directly without dragging in the 4500-line ed_wrapper.h.
+// (P0.14 / audit Q6.)
+#include <ed/core/ed_types.h>
 
 // ============================================================================
 // HIERARCHICAL PARAMETER STRUCTURES

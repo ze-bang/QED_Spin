@@ -1,64 +1,8 @@
 #include <ed/core/ed_config.h>
-// NOTE: We include ed_wrapper.h ONLY in the implementation of conversion functions
-// This is at the end of the file to avoid including it globally
+#include <ed/core/ed_types.h>  // Single source of truth for DiagonalizationMethod (P0.14).
 #include <algorithm>
 #include <cctype>
 #include <sstream>
-
-// ============================================================================
-// Temporary forward declaration to avoid including ed_wrapper.h here
-// The actual enum is defined in ed_wrapper.h
-// ============================================================================
-// NOTE: This enum MUST stay in sync with the one in ed_wrapper.h!
-// The order of values is critical for proper method dispatch.
-enum class DiagonalizationMethod {
-    LANCZOS,
-    LANCZOS_SELECTIVE,
-    LANCZOS_NO_ORTHO,
-    BLOCK_LANCZOS,
-    CHEBYSHEV_FILTERED,
-    SHIFT_INVERT,
-    SHIFT_INVERT_ROBUST,
-    DAVIDSON,
-    BICG,
-    LOBPCG,
-    KRYLOV_SCHUR,
-    BLOCK_KRYLOV_SCHUR,
-    IMPLICIT_RESTART_LANCZOS,
-    THICK_RESTART_LANCZOS,
-    FULL,
-    OSS,
-    // Distributed/Parallel methods
-    SCALAPACK,
-    SCALAPACK_MIXED,
-    // Thermal methods
-    mTPQ,
-    mTPQ_MPI,
-    cTPQ,
-    mTPQ_CUDA,
-    FTLM,
-    LTLM,
-    HYBRID,
-    ARPACK_SM,
-    ARPACK_LM,
-    ARPACK_SHIFT_INVERT,
-    ARPACK_ADVANCED,
-    // GPU methods - order must match ed_wrapper.h
-    LANCZOS_GPU,
-    BLOCK_LANCZOS_GPU,
-    DAVIDSON_GPU,
-    LOBPCG_GPU,
-    KRYLOV_SCHUR_GPU,
-    BLOCK_KRYLOV_SCHUR_GPU,
-    mTPQ_GPU,
-    cTPQ_GPU,
-    FTLM_GPU,
-    FULL_GPU,
-    // Deprecated methods (kept for backwards compatibility)
-    LANCZOS_GPU_FIXED_SZ,
-    BLOCK_LANCZOS_GPU_FIXED_SZ,
-    FTLM_GPU_FIXED_SZ
-};
 
 // ============================================================================
 // EDConfig Implementation
