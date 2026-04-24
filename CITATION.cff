@@ -1,0 +1,42 @@
+# https://citation-file-format.github.io
+# Validated by `cffconvert --validate` (one-shot, manual).
+
+cff-version: 1.2.0
+title: "exact_diagonalization_cpp: A C++/CUDA toolkit for exact diagonalization of quantum lattice models"
+message: "If you use this software in your research, please cite it as below."
+type: software
+version: "0.0.0-dev"
+date-released: "2026-04-24"
+url: "https://github.com/zhouzb79/exact_diagonalization_clean"
+repository-code: "https://github.com/zhouzb79/exact_diagonalization_clean"
+license: MIT
+
+authors:
+  - family-names: "Zhou"
+    given-names: "Zhengbang"
+    affiliation: "(institution to be filled in)"
+
+keywords:
+  - "exact diagonalization"
+  - "Lanczos"
+  - "thermal pure quantum"
+  - "FTLM"
+  - "quantum magnetism"
+  - "spectral function"
+  - "DSSF"
+  - "CUDA"
+  - "MPI"
+  - "scientific computing"
+
+abstract: >
+  exact_diagonalization_cpp is a research-grade C++/CUDA toolkit for
+  exact diagonalization (ED) of quantum spin lattice models. It supports
+  full diagonalization (LAPACK / ScaLAPACK), the Lanczos family
+  (standard, selective reorthogonalization, block, shift-invert,
+  Chebyshev-filtered, implicitly restarted, thick-restart, Krylov-Schur),
+  ARPACK with auto-tuning, finite-temperature methods (FTLM, LTLM,
+  Hybrid, microcanonical TPQ, canonical TPQ), and dynamical/static
+  spin structure factors (DSSF/SSSF). GPU acceleration is provided
+  for Lanczos / FTLM / TPQ via CUDA. MPI parallelism is supported for
+  TPQ sample-parallel runs and ScaLAPACK distributed full diagonalization.
+  A numerical linked-cluster expansion (NLCE) workflow is included.
