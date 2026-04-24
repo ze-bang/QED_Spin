@@ -836,7 +836,7 @@ namespace ed_internal {
  * @param params Parameters for diagonalization
  * @return EDResults containing eigenvalues and metadata
  */
-EDResults exact_diagonalization_core(
+inline EDResults exact_diagonalization_core(
     std::function<void(const Complex*, Complex*, int)> H, 
     uint64_t hilbert_space_dim,
     DiagonalizationMethod method = DiagonalizationMethod::LANCZOS,
@@ -1299,7 +1299,7 @@ namespace ed_internal {
  * @param params ED parameters containing temperature ranges and observables
  * @param hilbert_space_dim Dimension of the Hilbert space
  */
-void process_thermal_correlations(
+inline void process_thermal_correlations(
     const EDParameters& params,
     uint64_t hilbert_space_dim
 ) {
@@ -1514,7 +1514,7 @@ OperatorType* create_operator(const SystemConfig& config) {
 /**
  * @brief Load Hamiltonian from files based on format
  */
-Operator load_hamiltonian_from_files(
+inline Operator load_hamiltonian_from_files(
     const std::string& interaction_file,
     const std::string& single_site_file,
     const std::string& counterterm_file,
@@ -1566,7 +1566,7 @@ Operator load_hamiltonian_from_files(
 /**
  * @brief Create a lambda function to apply the Hamiltonian
  */
-std::function<void(const Complex*, Complex*, int)> create_hamiltonian_apply_function(
+inline std::function<void(const Complex*, Complex*, int)> create_hamiltonian_apply_function(
     Operator& hamiltonian
 ) {
     return [&hamiltonian](const Complex* in, Complex* out, uint64_t n) {
@@ -1578,7 +1578,7 @@ std::function<void(const Complex*, Complex*, int)> create_hamiltonian_apply_func
 /**
  * @brief Diagonalize a single symmetry block
  */
-EDResults diagonalize_symmetry_block(
+inline EDResults diagonalize_symmetry_block(
     Eigen::SparseMatrix<Complex>& block_matrix,
     uint64_t block_dim,
     DiagonalizationMethod method,
@@ -1707,7 +1707,7 @@ EDResults diagonalize_symmetry_block(
  * 
  * Supports Lanczos and Davidson methods. ARPACK and FULL require matrix construction.
  */
-EDResults diagonalize_matrix_free(
+inline EDResults diagonalize_matrix_free(
     std::function<void(const Complex*, Complex*, uint64_t)> apply_func,
     uint64_t dim,
     DiagonalizationMethod method,
@@ -1734,7 +1734,7 @@ EDResults diagonalize_matrix_free(
 /**
  * @brief Transform and save TPQ states from block to full basis
  */
-void transform_and_save_tpq_states(
+inline void transform_and_save_tpq_states(
     const std::string& block_output_dir,
     const std::string& main_output_dir,
     Operator& hamiltonian,
@@ -1838,7 +1838,7 @@ void transform_and_save_tpq_states(
 /**
  * @brief Transform and save eigenvectors from block to full basis
  */
-void transform_and_save_eigenvectors(
+inline void transform_and_save_eigenvectors(
     const std::string& block_output_dir,
     const std::string& main_output_dir,
     Operator& hamiltonian,
@@ -1916,7 +1916,7 @@ void transform_and_save_eigenvectors(
 /**
  * @brief Find the symmetry sector containing the ground state
  */
-GroundStateSectorInfo find_ground_state_sector(
+inline GroundStateSectorInfo find_ground_state_sector(
     const std::vector<int>& block_sizes,
     const std::string& directory,
     Operator& hamiltonian,
@@ -2003,7 +2003,7 @@ GroundStateSectorInfo find_ground_state_sector(
  * - automorphisms.json modified
  * - symmetry_data.h5 missing or corrupted
  */
-void setup_symmetry_basis(
+inline void setup_symmetry_basis(
     const std::string& directory,
     Operator& hamiltonian,
     bool use_hdf5 = true  // Use HDF5 by default for better file management
@@ -2066,7 +2066,7 @@ void setup_symmetry_basis(
 /**
  * @brief Transform a state from symmetry sector basis to fixed-Sz basis
  */
-std::vector<Complex> transform_sector_to_fixed_sz(
+inline std::vector<Complex> transform_sector_to_fixed_sz(
     const std::vector<Complex>& sector_state,
     FixedSzOperator& hamiltonian,
     const std::string& directory,
@@ -2097,7 +2097,7 @@ std::vector<Complex> transform_sector_to_fixed_sz(
 /**
  * @brief Transform a state from symmetry sector basis directly to full Hilbert space
  */
-std::vector<Complex> transform_sector_to_full(
+inline std::vector<Complex> transform_sector_to_full(
     const std::vector<Complex>& sector_state,
     FixedSzOperator& hamiltonian,
     const std::string& directory,
@@ -2124,7 +2124,7 @@ std::vector<Complex> transform_sector_to_full(
  * 2. If invalid or missing, regenerates from scratch
  * 3. Marks cache as valid after successful generation
  */
-bool setup_fixed_sz_symmetry_basis(
+inline bool setup_fixed_sz_symmetry_basis(
     const std::string& directory,
     FixedSzOperator& hamiltonian
 ) {
@@ -2181,7 +2181,7 @@ bool setup_fixed_sz_symmetry_basis(
 /**
  * @brief Find ground state sector for Fixed-Sz + Symmetry
  */
-GroundStateSectorInfo find_ground_state_sector_fixed_sz(
+inline GroundStateSectorInfo find_ground_state_sector_fixed_sz(
     const std::vector<int>& block_sizes,
     const std::string& directory,
     FixedSzOperator& hamiltonian,
@@ -2246,7 +2246,7 @@ GroundStateSectorInfo find_ground_state_sector_fixed_sz(
 /**
  * @brief Diagonalize a single symmetry sector in Fixed-Sz basis
  */
-SectorResult diagonalize_fixed_sz_sector(
+inline SectorResult diagonalize_fixed_sz_sector(
     FixedSzOperator& hamiltonian,
     const std::string& directory,
     const SectorInfo& sector,
@@ -2281,7 +2281,7 @@ SectorResult diagonalize_fixed_sz_sector(
 /**
  * @brief Transform and save eigenvectors/TPQ states from sector to full basis
  */
-void transform_and_save_sector_states(
+inline void transform_and_save_sector_states(
     FixedSzOperator& hamiltonian,
     const std::string& directory,
     const SectorInfo& sector,
@@ -3274,7 +3274,7 @@ inline EDResults exact_diagonalization_fixed_sz(
  * @param format File format for Hamiltonian
  * @return EDResults containing eigenvalues and metadata
  */
-EDResults exact_diagonalization_from_files(
+inline EDResults exact_diagonalization_from_files(
     const std::string& interaction_file,
     const std::string& single_site_file = "",
     const std::string& counterterm_file = "",
@@ -3789,7 +3789,7 @@ EDResults exact_diagonalization_from_files(
  * @param single_site_filename Name of single-site file (default: "Trans.dat")
  * @return EDResults containing eigenvalues and metadata
  */
-EDResults exact_diagonalization_from_directory(
+inline EDResults exact_diagonalization_from_directory(
     const std::string& directory,
     DiagonalizationMethod method = DiagonalizationMethod::LANCZOS,
     const EDParameters& params = EDParameters(),
@@ -3848,7 +3848,7 @@ EDResults exact_diagonalization_from_directory(
  * @param counterterm_filename Name of counter term file (default: "CounterTerm.dat")
  * @return EDResults containing eigenvalues and metadata
  */
-EDResults exact_diagonalization_from_directory_symmetrized(
+inline EDResults exact_diagonalization_from_directory_symmetrized(
     const std::string& directory,
     DiagonalizationMethod method = DiagonalizationMethod::LANCZOS,
     const EDParameters& params = EDParameters(),

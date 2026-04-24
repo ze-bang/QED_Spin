@@ -67,6 +67,7 @@ set(_ED_PUBLIC_INCLUDES
     "$<BUILD_INTERFACE:${INCLUDE_DIR}/ed/solvers>"
     "$<BUILD_INTERFACE:${INCLUDE_DIR}/ed/io>"
     "$<BUILD_INTERFACE:${INCLUDE_DIR}/ed/bfg>"
+    "$<BUILD_INTERFACE:${INCLUDE_DIR}/ed/cli>"
     "$<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>"
 )
 
@@ -178,6 +179,38 @@ target_compile_options(ed_bfg PRIVATE
     $<$<COMPILE_LANGUAGE:CXX>:${CPU_OPT_FLAGS}>
 )
 set_target_properties(ed_bfg PROPERTIES POSITION_INDEPENDENT_CODE ON)
+
+# -----------------------------------------------------------------------------
+# ed_cli: CLI workflow entry points (run_*_workflow / compute_*_workflow /
+# parse_* / construct_operators_from_config / print_eigenvalue_summary /
+# compute_thermodynamics).
+#
+# Extracted from src/apps/ed_main.cpp in P1.11 (DSSF PR-B / audit §3.10) so
+# the same workflow functions can be reused by future entry points
+# (`ED dssf` subcommand in P2.4) and by pybind11 bindings without also
+# pulling in the legacy `int main()` machinery.
+#
+# Depends on ed_solvers_cpu (Lanczos / FTLM / observables / ARPACK), ed_dssf
+# (build_observable_pairs), ed_io (HDF5IO via construct_ham), and
+# transitively on ed_core. When WITH_CUDA, also depends on ed_solvers_gpu
+# for the GPU dynamical/static-response code paths under the WITH_CUDA
+# guards.
+# -----------------------------------------------------------------------------
+add_library(ed_cli STATIC
+    ${CLI_DIR}/workflows.cpp
+)
+target_include_directories(ed_cli PUBLIC ${_ED_PUBLIC_INCLUDES})
+target_link_libraries(ed_cli PUBLIC ed_solvers_cpu ed_dssf ed_io ed_core)
+if(WITH_CUDA)
+    target_link_libraries(ed_cli PUBLIC ed_solvers_gpu)
+endif()
+target_link_libraries(ed_cli PUBLIC
+    "$<BUILD_INTERFACE:nlohmann_json::nlohmann_json>"
+)
+target_compile_options(ed_cli PRIVATE
+    $<$<COMPILE_LANGUAGE:CXX>:${CPU_OPT_FLAGS}>
+)
+set_target_properties(ed_cli PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
 # -----------------------------------------------------------------------------
 # ed_solvers_gpu: CUDA-only library; depends on the CUDA imported targets.
