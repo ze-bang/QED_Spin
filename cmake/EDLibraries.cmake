@@ -68,6 +68,7 @@ set(_ED_PUBLIC_INCLUDES
     "$<BUILD_INTERFACE:${INCLUDE_DIR}/ed/io>"
     "$<BUILD_INTERFACE:${INCLUDE_DIR}/ed/bfg>"
     "$<BUILD_INTERFACE:${INCLUDE_DIR}/ed/cli>"
+    "$<BUILD_INTERFACE:${INCLUDE_DIR}/ed/symmetry>"
     "$<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>"
 )
 
@@ -163,21 +164,66 @@ target_compile_options(ed_dssf PRIVATE
 set_target_properties(ed_dssf PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
 # -----------------------------------------------------------------------------
-# ed_bfg: cluster geometry / connectivity loader for the BFG order-parameter
-# pipeline (P2.1).
+# ed_symmetry: programmatic site-permutation symmetry DSL (P2.11 / audit
+# §3.10). Builds `SymmetryGroupInfo` from a list of permutation
+# generators without going through the JSON detour (`automorphism_finder.py`
+# + automorphism_results/*.json + SymmetryGroupInfo::loadFromDirectory).
 #
-# Currently exposes `ed::bfg::Cluster` + `load_cluster(...)`. Future work
-# will move the rest of `compute_bfg_order_parameters.cpp` (correlation
-# functions, structure factors, dimer / plaquette evaluators, HDF5 writers)
-# into this library so the binary becomes a thin argv driver and the same
-# computations can be called from Python via pybind11.
+# Depends on ed_core because `SymmetryGroupInfo` is declared inside
+# `ed/core/construct_ham.h` (alongside the `Operator` definition that
+# consumes it).
+# -----------------------------------------------------------------------------
+add_library(ed_symmetry STATIC
+    ${SYMMETRY_DIR}/group.cpp
+)
+target_include_directories(ed_symmetry PUBLIC ${_ED_PUBLIC_INCLUDES})
+target_link_libraries(ed_symmetry PUBLIC ed_core)
+target_compile_options(ed_symmetry PRIVATE
+    $<$<COMPILE_LANGUAGE:CXX>:${CPU_OPT_FLAGS}>
+)
+set_target_properties(ed_symmetry PROPERTIES POSITION_INDEPENDENT_CODE ON)
+
+# -----------------------------------------------------------------------------
+# ed_bfg: BFG order-parameter library (P2.1).
 #
-# No external link-deps -- only standard-library file I/O.
+# Houses the kagome / pyrochlore-superlattice geometry loader plus the
+# pure-physics building blocks for the order-parameter pipeline:
+#
+#   * cluster.cpp           -- `Cluster` struct + `load_cluster(...)`.
+#   * topology.cpp          -- `find_triangles` / `find_bowties`
+#                              (combinatorial helpers, no wavefunctions).
+#   * correlations.cpp      -- two-body spin correlations + bond expectations
+#                              (`compute_smsp_correlations`,
+#                               `compute_szsz_correlations`, the four
+#                               `compute_*_bond_expectations` overloads).
+#   * wavefunction_io.cpp   -- HDF5 wavefunction + TPQ-state loaders shared
+#                              by the CPU and GPU drivers and by the Python
+#                              bindings (`load_wavefunction`,
+#                              `load_all_tpq_states`, `load_tpq_state`,
+#                              `TPQState`).
+#
+# The CPU driver (`compute_bfg_order_parameters`), the GPU driver
+# (`compute_bfg_order_parameters_gpu`), and the future Python bindings all
+# call into this library so they share one authoritative implementation
+# instead of copy-pasting the kernels three times.
+#
+# Link-deps: OpenMP for the correlation kernels (PUBLIC so executables
+# inherit it). HDF5 is now PUBLIC because `wavefunction_io.cpp` exposes
+# H5::Exception in its declared signatures (the headers themselves only
+# include <complex>, but the implementation pulls in libhdf5_cpp).
 # -----------------------------------------------------------------------------
 add_library(ed_bfg STATIC
     ${BFG_DIR}/cluster.cpp
+    ${BFG_DIR}/topology.cpp
+    ${BFG_DIR}/correlations.cpp
+    ${BFG_DIR}/wavefunction_io.cpp
 )
 target_include_directories(ed_bfg PUBLIC ${_ED_PUBLIC_INCLUDES})
+target_include_directories(ed_bfg PRIVATE ${HDF5_INCLUDE_DIRS})
+target_link_libraries(ed_bfg PUBLIC ${HDF5_LIBRARIES})
+if(OpenMP_CXX_FOUND)
+    target_link_libraries(ed_bfg PUBLIC OpenMP::OpenMP_CXX)
+endif()
 target_compile_options(ed_bfg PRIVATE
     $<$<COMPILE_LANGUAGE:CXX>:${CPU_OPT_FLAGS}>
 )

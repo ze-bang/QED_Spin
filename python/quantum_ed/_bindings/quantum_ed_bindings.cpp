@@ -44,6 +44,11 @@
 #include <ed/solvers/lanczos.h>
 #include <ed/solvers/ltlm.h>
 #include <ed/solvers/observables.h>
+#include <ed/bfg/cluster.h>
+#include <ed/bfg/correlations.h>
+#include <ed/bfg/topology.h>
+#include <ed/bfg/wavefunction_io.h>
+#include <ed/symmetry/group.h>
 
 #include <complex>
 #include <cstdint>
@@ -566,4 +571,334 @@ PYBIND11_MODULE(_core, m) {
         (e1, e2) : tuple[list[float], list[float]]
             Two unit 3-vectors.
         )pbdoc");
+
+    // ed::sym -- programmatic site-permutation symmetry DSL (P2.11).
+    auto m_sym = m.def_submodule("symmetry",
+        "Bindings for the ed::sym C++ library: programmatic site-permutation "
+        "symmetry groups (translation, reflection, dihedral, custom). "
+        "Replaces the JSON detour through automorphism_finder.py for the "
+        "common 1D / point-group cases. The returned dictionary is the "
+        "bridge to the C++ engine: assign it to "
+        "`Operator.symmetry_info` (when that binding lands) or persist it "
+        "back through the legacy automorphism_results/ JSON files.");
+
+    m_sym.def("identity", &ed::sym::identity, py::arg("n_sites"),
+        "Identity permutation on `n_sites` sites.");
+    m_sym.def("compose", &ed::sym::compose, py::arg("a"), py::arg("b"),
+        "Composition (a o b)[i] = a[b[i]]. b is applied first.");
+    m_sym.def("power", &ed::sym::power, py::arg("g"), py::arg("k"),
+        "g^k for k >= 0; g^0 is the identity.");
+    m_sym.def("order", &ed::sym::order, py::arg("g"),
+        "Smallest positive integer k with g^k == identity.");
+    m_sym.def("translation", &ed::sym::translation,
+        py::arg("n_sites"), py::arg("shift") = 1,
+        "Cyclic translation by `shift` sites on a 1D ring of `n_sites` sites.");
+    m_sym.def("reflection_1d", &ed::sym::reflection_1d, py::arg("n_sites"),
+        "Spatial reflection on a 1D chain: site i goes to site n_sites-1-i.");
+    m_sym.def("site_swap", &ed::sym::site_swap,
+        py::arg("n_sites"), py::arg("a"), py::arg("b"),
+        "Permutation that swaps sites a and b; identity elsewhere.");
+    m_sym.def("generate_group", &ed::sym::generate_group,
+        py::arg("generators"),
+        "Expand a list of generators into the full group (BFS). The result "
+        "is sorted lexicographically for deterministic ordering.");
+
+    // group_from_generators returns SymmetryGroupInfo. We expose it as a
+    // Python dict so collaborators don't need to know the C++ struct
+    // internals; the dict can be re-marshalled back to JSON via the
+    // automorphism_results/ schema if they want to persist it.
+    m_sym.def("group_from_generators",
+        [](int n_sites,
+           std::vector<ed::sym::Permutation> generators,
+           std::vector<std::vector<int>> sector_quantum_numbers) {
+            auto info = ed::sym::group_from_generators(
+                n_sites, std::move(generators),
+                std::move(sector_quantum_numbers));
+            py::dict d;
+            d["num_generators"]       = info.num_generators;
+            d["generator_orders"]     = info.generator_orders;
+            d["generators"]           = info.generators;
+            d["max_clique"]           = info.max_clique;
+            d["power_representation"] = info.power_representation;
+            py::list sectors;
+            for (const auto& s : info.sectors) {
+                py::dict sd;
+                sd["sector_id"]       = s.sector_id;
+                sd["quantum_numbers"] = s.quantum_numbers;
+                py::list pf;
+                for (const auto& z : s.phase_factors) {
+                    pf.append(std::complex<double>(z.real(), z.imag()));
+                }
+                sd["phase_factors"] = pf;
+                sectors.append(sd);
+            }
+            d["sectors"] = sectors;
+            return d;
+        },
+        py::arg("n_sites"),
+        py::arg("generators"),
+        py::arg("sector_quantum_numbers") = std::vector<std::vector<int>>{},
+        R"pbdoc(
+        Build a fully-elaborated SymmetryGroupInfo from generators and
+        return it as a dict with the same keys the JSON-driven path
+        produces: ``num_generators``, ``generator_orders``,
+        ``generators``, ``max_clique``, ``power_representation``,
+        and ``sectors`` (list of {sector_id, quantum_numbers,
+        phase_factors}). When ``sector_quantum_numbers`` is omitted,
+        the full abelian product is enumerated and any phantom irreps
+        produced by generator relations are removed.
+        )pbdoc");
+
+    m_sym.def("translation_group_1d",
+        [](int n_sites) {
+            auto info = ed::sym::translation_group_1d(n_sites);
+            py::dict d;
+            d["num_generators"]       = info.num_generators;
+            d["generator_orders"]     = info.generator_orders;
+            d["generators"]           = info.generators;
+            d["max_clique"]           = info.max_clique;
+            d["power_representation"] = info.power_representation;
+            py::list sectors;
+            for (const auto& s : info.sectors) {
+                py::dict sd;
+                sd["sector_id"]       = s.sector_id;
+                sd["quantum_numbers"] = s.quantum_numbers;
+                py::list pf;
+                for (const auto& z : s.phase_factors) {
+                    pf.append(std::complex<double>(z.real(), z.imag()));
+                }
+                sd["phase_factors"] = pf;
+                sectors.append(sd);
+            }
+            d["sectors"] = sectors;
+            return d;
+        },
+        py::arg("n_sites"),
+        "Convenience: cyclic translation group Z_N on a 1D ring with all "
+        "N momentum sectors enumerated.");
+
+    // ed::bfg -- BFG order-parameter library helpers (P2.1).
+    auto m_bfg = m.def_submodule("bfg",
+        "Bindings for the ed::bfg C++ library: cluster loader, topology "
+        "(triangles / bowties), and the two-body spin correlations and bond "
+        "expectations used by the BFG order-parameter pipeline. Lets Python "
+        "scripts share the same authoritative kernels the CPU and GPU "
+        "drivers (`compute_bfg_order_parameters[_gpu]`) call internally.");
+
+    py::class_<ed::bfg::Cluster>(m_bfg, "Cluster",
+        "Geometry + connectivity of a kagome / pyrochlore-superlattice "
+        "BFG cluster (read-only handle to the C++ struct).")
+        .def_readonly("n_sites",          &ed::bfg::Cluster::n_sites)
+        .def_readonly("positions",        &ed::bfg::Cluster::positions)
+        .def_readonly("sublattice",       &ed::bfg::Cluster::sublattice)
+        .def_readonly("edges_nn",         &ed::bfg::Cluster::edges_nn)
+        .def_readonly("nn_list",          &ed::bfg::Cluster::nn_list)
+        .def_readonly("a1",               &ed::bfg::Cluster::a1)
+        .def_readonly("a2",               &ed::bfg::Cluster::a2)
+        .def_readonly("b1",               &ed::bfg::Cluster::b1)
+        .def_readonly("b2",               &ed::bfg::Cluster::b2)
+        .def_readonly("k_points",         &ed::bfg::Cluster::k_points)
+        .def_readonly("n_cells_x",        &ed::bfg::Cluster::n_cells_x)
+        .def_readonly("n_cells_y",        &ed::bfg::Cluster::n_cells_y)
+        .def_readonly("bond_orientation", &ed::bfg::Cluster::bond_orientation)
+        .def_readonly("sites_per_cell",   &ed::bfg::Cluster::sites_per_cell)
+        .def("minimum_image_displacement",
+             &ed::bfg::Cluster::minimum_image_displacement,
+             py::arg("i"), py::arg("j"))
+        .def("bond_center_pbc",
+             &ed::bfg::Cluster::bond_center_pbc,
+             py::arg("i"), py::arg("j"));
+
+    m_bfg.def("load_cluster", &ed::bfg::load_cluster, py::arg("cluster_dir"),
+        "Load a Cluster from `cluster_dir` (positions.dat + optional "
+        "lattice_parameters / nn_list files). Mirrors the loader the CPU "
+        "and GPU drivers call internally.");
+
+    py::class_<ed::bfg::Bowtie>(m_bfg, "Bowtie",
+        "Two NN-triangles sharing exactly one vertex (`s0`). Outer "
+        "vertices: (s1, s2) and (s3, s4). `center` is the mean Cartesian "
+        "position of the five sites; `orientation` is the sublattice index "
+        "of `s0`.")
+        .def_readonly("s0",          &ed::bfg::Bowtie::s0)
+        .def_readonly("s1",          &ed::bfg::Bowtie::s1)
+        .def_readonly("s2",          &ed::bfg::Bowtie::s2)
+        .def_readonly("s3",          &ed::bfg::Bowtie::s3)
+        .def_readonly("s4",          &ed::bfg::Bowtie::s4)
+        .def_readonly("center",      &ed::bfg::Bowtie::center)
+        .def_readonly("orientation", &ed::bfg::Bowtie::orientation);
+
+    m_bfg.def("find_triangles", &ed::bfg::find_triangles, py::arg("cluster"),
+        "Enumerate every triple (i, j, k) of pairwise nearest-neighbour "
+        "sites in the cluster. Each triangle appears once with i<j<k.");
+
+    m_bfg.def("find_bowties", &ed::bfg::find_bowties, py::arg("cluster"),
+        "Enumerate every bowtie (pair of NN-triangles sharing exactly one "
+        "vertex). Built on top of find_triangles.");
+
+    // The correlation kernels accept the wavefunction as a NumPy
+    // complex128 array; we copy it into std::vector<Complex> for the
+    // call. Long enough that we release the GIL.
+    m_bfg.def("compute_smsp_correlations",
+        [](py::array_t<std::complex<double>,
+                       py::array::c_style | py::array::forcecast> psi,
+           int n_sites) {
+            if (psi.ndim() != 1) {
+                throw std::runtime_error("psi must be a 1-D complex128 array");
+            }
+            const auto n = static_cast<std::size_t>(psi.shape(0));
+            std::vector<ed::bfg::Complex> v(n);
+            std::memcpy(v.data(), psi.data(), n * sizeof(ed::bfg::Complex));
+            py::gil_scoped_release release;
+            return ed::bfg::compute_smsp_correlations(v, n_sites);
+        },
+        py::arg("psi"), py::arg("n_sites"),
+        "Site-to-site <S^- S^+> correlation matrix.");
+
+    m_bfg.def("compute_szsz_correlations",
+        [](py::array_t<std::complex<double>,
+                       py::array::c_style | py::array::forcecast> psi,
+           int n_sites) {
+            if (psi.ndim() != 1) {
+                throw std::runtime_error("psi must be a 1-D complex128 array");
+            }
+            const auto n = static_cast<std::size_t>(psi.shape(0));
+            std::vector<ed::bfg::Complex> v(n);
+            std::memcpy(v.data(), psi.data(), n * sizeof(ed::bfg::Complex));
+            py::gil_scoped_release release;
+            return ed::bfg::compute_szsz_correlations(v, n_sites);
+        },
+        py::arg("psi"), py::arg("n_sites"),
+        "Site-to-site <S^z S^z> correlation matrix.");
+
+    m_bfg.def("compute_xy_bond_expectations",
+        [](py::array_t<std::complex<double>,
+                       py::array::c_style | py::array::forcecast> psi,
+           const ed::bfg::Cluster& cluster) {
+            if (psi.ndim() != 1) {
+                throw std::runtime_error("psi must be a 1-D complex128 array");
+            }
+            const auto n = static_cast<std::size_t>(psi.shape(0));
+            std::vector<ed::bfg::Complex> v(n);
+            std::memcpy(v.data(), psi.data(), n * sizeof(ed::bfg::Complex));
+            py::gil_scoped_release release;
+            return ed::bfg::compute_xy_bond_expectations(v, cluster);
+        },
+        py::arg("psi"), py::arg("cluster"),
+        "<S^+_i S^-_j + S^-_i S^+_j> per nearest-neighbour edge.");
+
+    m_bfg.def("compute_spsm_bond_expectations",
+        [](py::array_t<std::complex<double>,
+                       py::array::c_style | py::array::forcecast> psi,
+           const ed::bfg::Cluster& cluster) {
+            if (psi.ndim() != 1) {
+                throw std::runtime_error("psi must be a 1-D complex128 array");
+            }
+            const auto n = static_cast<std::size_t>(psi.shape(0));
+            std::vector<ed::bfg::Complex> v(n);
+            std::memcpy(v.data(), psi.data(), n * sizeof(ed::bfg::Complex));
+            py::gil_scoped_release release;
+            return ed::bfg::compute_spsm_bond_expectations(v, cluster);
+        },
+        py::arg("psi"), py::arg("cluster"),
+        "<S^+_i S^-_j> per nearest-neighbour edge (asymmetric).");
+
+    m_bfg.def("compute_szsz_bond_expectations",
+        [](py::array_t<std::complex<double>,
+                       py::array::c_style | py::array::forcecast> psi,
+           const ed::bfg::Cluster& cluster) {
+            if (psi.ndim() != 1) {
+                throw std::runtime_error("psi must be a 1-D complex128 array");
+            }
+            const auto n = static_cast<std::size_t>(psi.shape(0));
+            std::vector<ed::bfg::Complex> v(n);
+            std::memcpy(v.data(), psi.data(), n * sizeof(ed::bfg::Complex));
+            py::gil_scoped_release release;
+            return ed::bfg::compute_szsz_bond_expectations(v, cluster);
+        },
+        py::arg("psi"), py::arg("cluster"),
+        "<S^z_i S^z_j> per nearest-neighbour edge.");
+
+    m_bfg.def("compute_heisenberg_bond_expectations",
+        &ed::bfg::compute_heisenberg_bond_expectations,
+        py::arg("szsz_bonds"), py::arg("xy_bonds"),
+        "Combine SzSz and XY bond maps into the full Heisenberg "
+        "<S_i . S_j> per edge. The XY imaginary part is dropped.");
+
+    // ed::bfg::wavefunction_io: HDF5 wavefunction loaders shared by the
+    // CPU and GPU drivers (P2.1 third slice). Returning std::vector<Complex>
+    // through pybind11 produces a Python list of complex; callers that want
+    // a NumPy array can wrap with `np.asarray(...)`. We marshal the result
+    // into a NumPy complex128 array directly to avoid the per-element
+    // conversion cost on multi-million-amplitude wavefunctions.
+    auto wavefunction_to_numpy = [](std::vector<std::complex<double>>&& src) {
+        py::array_t<std::complex<double>> arr(static_cast<py::ssize_t>(src.size()));
+        std::memcpy(arr.mutable_data(), src.data(),
+                    src.size() * sizeof(std::complex<double>));
+        return arr;
+    };
+
+    m_bfg.def("load_wavefunction",
+        [wavefunction_to_numpy](const std::string& filename,
+                                int eigenvector_idx,
+                                bool verbose) {
+            std::vector<std::complex<double>> psi;
+            {
+                py::gil_scoped_release release;
+                psi = ed::bfg::load_wavefunction(filename, eigenvector_idx,
+                                                 verbose);
+            }
+            return wavefunction_to_numpy(std::move(psi));
+        },
+        py::arg("filename"),
+        py::arg("eigenvector_idx") = 0,
+        py::arg("verbose") = true,
+        "Load a single complex eigenvector from an ED HDF5 results file. "
+        "Probes both the canonical `eigendata/eigenvector_<idx>` and legacy "
+        "top-level paths, and supports HDF5 compound complex types with "
+        "either (real, imag) or (r, i) field names. Returns a NumPy "
+        "complex128 array.");
+
+    py::class_<ed::bfg::TPQState>(m_bfg, "TPQState",
+        "A single TPQ snapshot loaded from an HDF5 results file. The "
+        "wavefunction is exposed as a NumPy complex128 array; "
+        "`temperature` and `beta = 1/T` accompany it.")
+        .def_property_readonly("psi",
+            [wavefunction_to_numpy](const ed::bfg::TPQState& self) {
+                std::vector<std::complex<double>> copy(self.psi);
+                return wavefunction_to_numpy(std::move(copy));
+            })
+        .def_readonly("temperature", &ed::bfg::TPQState::temperature)
+        .def_readonly("beta",        &ed::bfg::TPQState::beta);
+
+    m_bfg.def("load_all_tpq_states",
+        [](const std::string& filename, int sample_idx, bool verbose) {
+            py::gil_scoped_release release;
+            return ed::bfg::load_all_tpq_states(filename, sample_idx, verbose);
+        },
+        py::arg("filename"),
+        py::arg("sample_idx") = 0,
+        py::arg("verbose") = true,
+        "Load every TPQ snapshot from `tpq/samples/sample_<idx>/states/"
+        "beta_*` in the file, sorted ascending in temperature.");
+
+    m_bfg.def("load_tpq_state",
+        [wavefunction_to_numpy](const std::string& filename,
+                                int sample_idx, bool verbose) {
+            std::vector<std::complex<double>> psi;
+            double temperature{0.0};
+            {
+                py::gil_scoped_release release;
+                auto pair = ed::bfg::load_tpq_state(filename, sample_idx,
+                                                     verbose);
+                psi = std::move(pair.first);
+                temperature = pair.second;
+            }
+            return py::make_tuple(wavefunction_to_numpy(std::move(psi)),
+                                  temperature);
+        },
+        py::arg("filename"),
+        py::arg("sample_idx") = 0,
+        py::arg("verbose") = true,
+        "Load the lowest-temperature (highest-beta) TPQ snapshot from the "
+        "file. Returns (psi, temperature).");
 }

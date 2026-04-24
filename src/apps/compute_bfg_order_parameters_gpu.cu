@@ -51,11 +51,19 @@
 
 #include <H5Cpp.h>
 
+#include "ed/bfg/wavefunction_io.h"
+
 namespace fs = std::filesystem;
 
 using Complex = std::complex<double>;
 const double PI = 3.14159265358979323846;
 const Complex I_CPU(0.0, 1.0);
+
+// P2.1 (third slice): the wavefunction HDF5 loader moved to the ed_bfg
+// static library so the CPU driver, this GPU driver, and the future Python
+// bindings all share the same authoritative implementation. Pull the name
+// in via using-declaration so call sites stay unchanged.
+using ed::bfg::load_wavefunction;
 
 // CUDA error checking macro
 #define CUDA_CHECK(call) do { \
@@ -525,64 +533,17 @@ Cluster load_cluster(const std::string& cluster_dir) {
 }
 
 // -----------------------------------------------------------------------------
-// Load wavefunction from HDF5
+// P2.1 (third slice): `load_wavefunction` moved to the ed_bfg static library
+// (`include/ed/bfg/wavefunction_io.h`). The library version is strictly more
+// capable than the original GPU-local copy: it probes the same dataset paths
+// the CPU driver always used (including the canonical
+// `eigendata/eigenvector_<idx>` path that the new ED workflow writes), and
+// it understands HDF5 compound complex types with both `(real, imag)` and
+// `(r, i)` field names in addition to the raw-double layout. The GPU driver
+// already passes `eigenvector_idx` through and works with the default
+// verbose=true; the only behavioral change is that loads now log the chosen
+// dataset path, which matches the CPU driver and the rest of the pipeline.
 // -----------------------------------------------------------------------------
-
-std::vector<Complex> load_wavefunction(const std::string& filename, int eigenvector_idx = 0) {
-    try {
-        H5::H5File file(filename, H5F_ACC_RDONLY);
-        
-        std::vector<std::string> dataset_names = {
-            "eigenvector_" + std::to_string(eigenvector_idx),
-            "eigenvectors", "psi", "wavefunction", "ground_state"
-        };
-        
-        H5::DataSet dataset;
-        bool found = false;
-        
-        for (const auto& name : dataset_names) {
-            try {
-                dataset = file.openDataSet(name);
-                found = true;
-                break;
-            } catch (...) { continue; }
-        }
-        
-        if (!found) {
-            throw std::runtime_error("Wavefunction dataset not found in " + filename);
-        }
-        
-        H5::DataSpace dataspace = dataset.getSpace();
-        int rank = dataspace.getSimpleExtentNdims();
-        std::vector<hsize_t> dims(rank);
-        dataspace.getSimpleExtentDims(dims.data());
-        
-        hsize_t total_size = 1;
-        for (int i = 0; i < rank; ++i) total_size *= dims[i];
-        
-        std::vector<Complex> psi(total_size);
-        
-        H5::DataType dtype = dataset.getDataType();
-        if (dtype.getSize() == 16) {
-            std::vector<double> buffer(total_size * 2);
-            dataset.read(buffer.data(), H5::PredType::NATIVE_DOUBLE);
-            for (hsize_t i = 0; i < total_size; ++i) {
-                psi[i] = Complex(buffer[2 * i], buffer[2 * i + 1]);
-            }
-        } else {
-            std::vector<double> real_data(total_size);
-            dataset.read(real_data.data(), H5::PredType::NATIVE_DOUBLE);
-            for (hsize_t i = 0; i < total_size; ++i) {
-                psi[i] = Complex(real_data[i], 0.0);
-            }
-        }
-        
-        return psi;
-        
-    } catch (H5::Exception& e) {
-        throw std::runtime_error("HDF5 error reading " + filename + ": " + e.getCDetailMsg());
-    }
-}
 
 // -----------------------------------------------------------------------------
 // GPU-accelerated computation functions

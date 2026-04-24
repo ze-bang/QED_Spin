@@ -48,6 +48,8 @@ from ._core import (
 
 from . import dssf  # high-level DSSF observable-pair builder (P2.8)
 from . import hamiltonian  # fluent Hamiltonian builder DSL (P2.10)
+from . import symmetry  # programmatic site-permutation symmetry DSL (P2.11)
+from . import bfg  # BFG order-parameter library helpers (P2.1)
 from . import helpers  # re-export edlib utilities under quantum_ed.helpers
 
 __version__: Final[str] = "0.1.0"
@@ -69,6 +71,8 @@ __all__ = [
     "HybridThermalParameters",
     "dssf",
     "hamiltonian",
+    "symmetry",
+    "bfg",
     "helpers",
     "__version__",
 ]

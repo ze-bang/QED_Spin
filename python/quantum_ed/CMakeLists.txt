@@ -23,6 +23,8 @@ pybind11_add_module(_core MODULE
 target_link_libraries(_core PRIVATE
     ed_solvers_cpu
     ed_dssf
+    ed_symmetry
+    ed_bfg
 )
 
 target_compile_options(_core PRIVATE

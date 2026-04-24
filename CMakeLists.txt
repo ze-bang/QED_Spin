@@ -183,6 +183,7 @@ set(IO_DIR ${SRC_DIR}/io)
 set(DSSF_DIR ${SRC_DIR}/dssf)
 set(BFG_DIR ${SRC_DIR}/bfg)
 set(CLI_DIR ${SRC_DIR}/cli)
+set(SYMMETRY_DIR ${SRC_DIR}/symmetry)
 
 # Include directories - public headers in include/, private in src/
 include_directories(${INCLUDE_DIR})
@@ -312,9 +313,13 @@ target_compile_options(compute_bfg_order_parameters PRIVATE -O3 -march=native -f
 # BFG Order Parameter GPU version (CUDA accelerated)
 if(WITH_CUDA)
     add_executable(compute_bfg_order_parameters_gpu ${APPS_DIR}/compute_bfg_order_parameters_gpu.cu)
-    # Link HDF5 libraries - use the same libraries as the CPU version
-    target_link_libraries(compute_bfg_order_parameters_gpu 
+    # Link the BFG library so the GPU driver shares the same authoritative
+    # `load_wavefunction` / `Cluster` infrastructure as the CPU driver
+    # (P2.1, third slice). `ed_bfg` brings the include path for
+    # `ed/bfg/wavefunction_io.h` and the HDF5 link stack PUBLIC-ly.
+    target_link_libraries(compute_bfg_order_parameters_gpu
         CUDA::cudart
+        ed_bfg
         ${HDF5_LIBRARIES}
     )
     # Explicitly add HDF5 include directories for CUDA compilation
@@ -436,7 +441,7 @@ endif()
 include(GNUInstallDirs)
 include(CMakePackageConfigHelpers)
 
-set(_ED_INSTALL_TARGETS ed_io ed_core ed_dssf ed_bfg ed_solvers_cpu ed_cli)
+set(_ED_INSTALL_TARGETS ed_io ed_core ed_dssf ed_bfg ed_symmetry ed_solvers_cpu ed_cli)
 if(TARGET ed_solvers_gpu)
     list(APPEND _ED_INSTALL_TARGETS ed_solvers_gpu)
 endif()
@@ -702,11 +707,34 @@ if(BUILD_ED_TESTS)
     target_link_libraries(test_dssf_io PRIVATE ed_dssf)
     target_include_directories(test_dssf_io PRIVATE ${HDF5_INCLUDE_DIRS})
 
+    # P2.11: lock down the programmatic symmetry DSL (ed::sym::Permutation
+    # algebra + group_from_generators + Bloch-momentum convention +
+    # phantom-irrep filter). Lives in ed_symmetry.
+    ed_add_test(test_symmetry_dsl               tests/unit/test_symmetry_dsl.cpp USE_CATCH2)
+    target_link_libraries(test_symmetry_dsl PRIVATE ed_symmetry)
+
     ed_add_test(test_bfg_cluster                tests/unit/test_bfg_cluster.cpp USE_CATCH2)
     target_link_libraries(test_bfg_cluster PRIVATE ed_bfg)
     target_compile_definitions(test_bfg_cluster PRIVATE
         ED_TEST_BFG_KAGOME_1X1_DIR="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/bfg_kagome_1x1"
     )
+
+    # P2.1: lockdown for the topology / correlation kernels lifted out of
+    # `compute_bfg_order_parameters.cpp` into `ed_bfg`.
+    ed_add_test(test_bfg_topology               tests/unit/test_bfg_topology.cpp USE_CATCH2)
+    target_link_libraries(test_bfg_topology PRIVATE ed_bfg)
+    target_compile_definitions(test_bfg_topology PRIVATE
+        ED_TEST_BFG_KAGOME_1X1_DIR="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/bfg_kagome_1x1"
+    )
+
+    ed_add_test(test_bfg_correlations           tests/unit/test_bfg_correlations.cpp USE_CATCH2)
+    target_link_libraries(test_bfg_correlations PRIVATE ed_bfg)
+
+    # P2.1 (third slice): HDF5 wavefunction loaders shared by the CPU + GPU
+    # drivers and by the Python bindings.
+    ed_add_test(test_bfg_wavefunction_io        tests/unit/test_bfg_wavefunction_io.cpp USE_CATCH2)
+    target_link_libraries(test_bfg_wavefunction_io PRIVATE ed_bfg)
+    target_include_directories(test_bfg_wavefunction_io PRIVATE ${HDF5_INCLUDE_DIRS})
 
     # -------------------------------------------------------------------------
     # CPU/GPU equivalence (P1.9). Only added when WITH_CUDA is ON so non-GPU
