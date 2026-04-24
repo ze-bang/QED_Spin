@@ -283,15 +283,25 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Install CUDA toolkit (12.x)
-        # NOTE: NVIDIA's package mirror retired the 12.4.1 deb URLs that the
-        # older v0.2.16 of this action hard-codes (returns 404 on apt-get).
-        # Bumping to the current action + a still-published 12.6.x point
-        # release, which is also a closer match to the local dev toolchains.
-        uses: Jimver/cuda-toolkit@v0.2.35
+        # NOTE: pinning history --
+        #   * v0.2.16 + cuda 12.4.1 -- NVIDIA retired the 12.4.1 .deb mirrors
+        #     so the old action 404s on apt-get.
+        #   * v0.2.34 / v0.2.35 -- moved to node24 and broke quickly on the
+        #     ubuntu-22.04 runner (the action exits in ~14s before any
+        #     install starts, see Jimver/cuda-toolkit#390 / runner cache).
+        #   * v0.2.32 is the last node20 release and is the version active
+        #     downstream projects (e.g. bazel-contrib/rules_cuda) pinned for
+        #     most of 2025/2026.
+        #   * use-github-cache=false avoids the deprecated GitHub Actions
+        #     cache v1 API, which the bundled cache code in this action
+        #     still tries to talk to.
+        uses: Jimver/cuda-toolkit@v0.2.32
         with:
           cuda: "12.6.3"
           method: "network"
           sub-packages: '["nvcc", "cudart-dev", "cublas-dev", "cusparse-dev", "cusolver-dev", "thrust"]'
+          use-github-cache: false
+          use-local-cache: false
 
       - name: Install host build dependencies
         run: |
