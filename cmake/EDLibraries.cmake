@@ -225,6 +225,11 @@ set_target_properties(ed_symmetry PROPERTIES POSITION_INDEPENDENT_CODE ON)
 #                              `save_scan_results`, `NematicResult`,
 #                              `VBSResult`, `PlaquetteResult`, `Sq2DGridResult`,
 #                              `OrderParameterResults`).
+#   * order_parameters.cpp  -- physics kernels building the result aggregates
+#                              above: `compute_nematic_order(_real)`,
+#                              `compute_vbs_order`, `compute_plaquette_order`,
+#                              `compute_sq_2d_grid`,
+#                              `compute_all_order_parameters`.
 #
 # The CPU driver (`compute_bfg_order_parameters`), the GPU driver
 # (`compute_bfg_order_parameters_gpu`), and the future Python bindings all
@@ -245,6 +250,7 @@ add_library(ed_bfg STATIC
     ${BFG_DIR}/spin_structure_factor.cpp
     ${BFG_DIR}/wavefunction_io.cpp
     ${BFG_DIR}/results_io.cpp
+    ${BFG_DIR}/order_parameters.cpp
 )
 target_include_directories(ed_bfg PUBLIC ${_ED_PUBLIC_INCLUDES})
 target_include_directories(ed_bfg PRIVATE ${HDF5_INCLUDE_DIRS})
