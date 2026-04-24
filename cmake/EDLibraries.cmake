@@ -66,6 +66,7 @@ set(_ED_PUBLIC_INCLUDES
     "$<BUILD_INTERFACE:${INCLUDE_DIR}/ed/core>"
     "$<BUILD_INTERFACE:${INCLUDE_DIR}/ed/solvers>"
     "$<BUILD_INTERFACE:${INCLUDE_DIR}/ed/io>"
+    "$<BUILD_INTERFACE:${INCLUDE_DIR}/ed/bfg>"
     "$<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>"
 )
 
@@ -156,6 +157,27 @@ target_compile_options(ed_dssf PRIVATE
     $<$<COMPILE_LANGUAGE:CXX>:${CPU_OPT_FLAGS}>
 )
 set_target_properties(ed_dssf PROPERTIES POSITION_INDEPENDENT_CODE ON)
+
+# -----------------------------------------------------------------------------
+# ed_bfg: cluster geometry / connectivity loader for the BFG order-parameter
+# pipeline (P2.1).
+#
+# Currently exposes `ed::bfg::Cluster` + `load_cluster(...)`. Future work
+# will move the rest of `compute_bfg_order_parameters.cpp` (correlation
+# functions, structure factors, dimer / plaquette evaluators, HDF5 writers)
+# into this library so the binary becomes a thin argv driver and the same
+# computations can be called from Python via pybind11.
+#
+# No external link-deps -- only standard-library file I/O.
+# -----------------------------------------------------------------------------
+add_library(ed_bfg STATIC
+    ${BFG_DIR}/cluster.cpp
+)
+target_include_directories(ed_bfg PUBLIC ${_ED_PUBLIC_INCLUDES})
+target_compile_options(ed_bfg PRIVATE
+    $<$<COMPILE_LANGUAGE:CXX>:${CPU_OPT_FLAGS}>
+)
+set_target_properties(ed_bfg PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
 # -----------------------------------------------------------------------------
 # ed_solvers_gpu: CUDA-only library; depends on the CUDA imported targets.

@@ -951,7 +951,7 @@ I recommend three phases. Phase boundaries are natural pause points where everyt
 ### Phase 2 — Apps → libraries, DSSF unification, docs, Python bindings, physics (4–5 weeks)
 > Goal: usable as a library by collaborators; one canonical DSSF CLI.
 
-- [ ] **P2.1** Refactor `compute_bfg_order_parameters.cpp` into `src/ed/bfg/` library + ~50-line `main`.
+- [~] **P2.1** Refactor `compute_bfg_order_parameters.cpp` into `src/bfg/` library + ~50-line `main`. *In progress -- first cut landed:* extracted `Cluster` + `load_cluster` (~330 LOC) into the new `ed_bfg` static library (`include/ed/bfg/cluster.h`, `src/bfg/cluster.cpp`) with Catch2 lockdown tests (`tests/unit/test_bfg_cluster.cpp`). The remaining ~3 800 LOC of compute helpers / HDF5 writers will be peeled off in follow-up commits (one logical group per commit) so `ctest` stays green between commits. The GPU twin (`compute_bfg_order_parameters_gpu.cu`) still carries its own drifted Cluster copy and will be re-pointed at `ed::bfg::Cluster` in a separate commit once the API surface is finalised.
 - [ ] **P2.2 — DSSF PR-C** (per §3.10): Introduce `include/ed/dssf/dssf_engine.h` + `src/ed/dssf/dssf_engine.cpp` with a single `enum class DSSFMethod` and dispatch table. The three Phase-1 workflows now call into it.
 - [ ] **P2.3 — DSSF PR-D** (per §3.10): Introduce unified `/dssf/...` HDF5 schema in `src/ed/dssf/dssf_io.cpp`. Add three Catch2 tests that lock down the *legacy* `dssf_results.h5` schema bit-for-bit before this PR. `TPQ_DSSF.cpp` keeps writing the old schema gated by `--dssf-legacy-output`.
 - [ ] **P2.4 — DSSF PR-E** (per §3.10): Add `ED dssf ...` subcommand wired to `ed::dssf::run(...)`. Deprecate the half-finished `--dssf` flag in `run_dssf_mode` (still works, prints warning).

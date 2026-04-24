@@ -181,6 +181,7 @@ set(SOLVERS_CPU_DIR ${SRC_DIR}/solvers/cpu)
 set(SOLVERS_GPU_DIR ${SRC_DIR}/solvers/gpu)
 set(IO_DIR ${SRC_DIR}/io)
 set(DSSF_DIR ${SRC_DIR}/dssf)
+set(BFG_DIR ${SRC_DIR}/bfg)
 
 # Include directories - public headers in include/, private in src/
 include_directories(${INCLUDE_DIR})
@@ -188,6 +189,7 @@ include_directories(${INCLUDE_DIR}/ed/core)
 include_directories(${INCLUDE_DIR}/ed/solvers)
 include_directories(${INCLUDE_DIR}/ed/io)
 include_directories(${INCLUDE_DIR}/ed/gpu)
+include_directories(${INCLUDE_DIR}/ed/bfg)
 include_directories(${SRC_DIR})
 include_directories(${CORE_DIR})
 include_directories(${SOLVERS_CPU_DIR})
@@ -298,7 +300,7 @@ endif()
 
 # BFG Order Parameter computation (lightweight, HDF5 + OpenMP only)
 add_executable(compute_bfg_order_parameters ${APPS_DIR}/compute_bfg_order_parameters.cpp)
-target_link_libraries(compute_bfg_order_parameters ${HDF5_LIBRARIES})
+target_link_libraries(compute_bfg_order_parameters ed_bfg ${HDF5_LIBRARIES})
 target_include_directories(compute_bfg_order_parameters PRIVATE ${HDF5_INCLUDE_DIRS})
 if(OpenMP_CXX_FOUND)
     target_link_libraries(compute_bfg_order_parameters OpenMP::OpenMP_CXX)
@@ -433,7 +435,7 @@ endif()
 include(GNUInstallDirs)
 include(CMakePackageConfigHelpers)
 
-set(_ED_INSTALL_TARGETS ed_io ed_core ed_dssf ed_solvers_cpu)
+set(_ED_INSTALL_TARGETS ed_io ed_core ed_dssf ed_bfg ed_solvers_cpu)
 if(TARGET ed_solvers_gpu)
     list(APPEND _ED_INSTALL_TARGETS ed_solvers_gpu)
 endif()
@@ -669,6 +671,12 @@ if(BUILD_ED_TESTS)
     target_link_libraries(test_dssf_operator_spec PRIVATE ed_dssf)
     target_compile_definitions(test_dssf_operator_spec PRIVATE
         ED_TEST_POSITIONS_4SITE="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/positions_4site.dat"
+    )
+
+    ed_add_test(test_bfg_cluster                tests/unit/test_bfg_cluster.cpp USE_CATCH2)
+    target_link_libraries(test_bfg_cluster PRIVATE ed_bfg)
+    target_compile_definitions(test_bfg_cluster PRIVATE
+        ED_TEST_BFG_KAGOME_1X1_DIR="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/bfg_kagome_1x1"
     )
 
     # Regression test of the on-disk fallback path for the Lanczos basis
