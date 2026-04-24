@@ -1311,25 +1311,13 @@ if(TARGET TPQ_DSSF)
 endif()
 
 # =============================================================================
-# DMRG Test executable
+# DMRG: removed in P0.9 (audit Q13).
+# The DMRG scaffold (include/ed/dmrg/, tests/test_dmrg.cpp) was an explicit
+# "implement the TODOs" placeholder with no working iDMRG backend. Rather
+# than carry dead code, it has been deleted entirely. If DMRG is needed in
+# the future, prefer integrating an established library (ITensor) over
+# rebuilding the scaffold from scratch.
 # =============================================================================
-add_executable(test_dmrg_vs_ed tests/test_dmrg.cpp)
-target_include_directories(test_dmrg_vs_ed PRIVATE ${INCLUDE_DIR})
-target_link_libraries(test_dmrg_vs_ed
-    ${BLAS_LIBRARIES}
-    ${LAPACK_LIBRARIES}
-    ${LAPACKE_LIBRARIES}
-    ${EXTRA_LINALG_LIBRARIES}
-)
-if(OpenMP_CXX_FOUND)
-    target_link_libraries(test_dmrg_vs_ed OpenMP::OpenMP_CXX)
-endif()
-if(WITH_MPI)
-    target_link_libraries(test_dmrg_vs_ed ${MPI_CXX_LIBRARIES})
-endif()
-target_compile_options(test_dmrg_vs_ed PRIVATE
-    $<$<COMPILE_LANGUAGE:CXX>:${CPU_OPT_FLAGS}>
-)
 
 # CUDA-specific compile options
 if(WITH_CUDA)
