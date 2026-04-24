@@ -13,6 +13,7 @@
 #include <ed/core/ed_wrapper_chunked.h>
 #include <ed/core/construct_ham.h>
 #include <ed/core/hdf5_io.h>
+#include <ed/dssf/operator_spec.h>
 #include <ed/solvers/ftlm.h>
 #include <ed/solvers/ltlm.h>
 #include <ed/solvers/observables.h>
@@ -162,30 +163,12 @@ std::vector<double> parse_polarization(const std::string& pol_str) {
 }
 
 /**
- * @brief Helper function for cross product
- */
-std::array<double, 3> cross_product(const std::vector<double>& a, const std::vector<double>& b) {
-    return {
-        a[1] * b[2] - a[2] * b[1],
-        a[2] * b[0] - a[0] * b[2],
-        a[0] * b[1] - a[1] * b[0]
-    };
-}
-
-/**
- * @brief Helper function to normalize a vector
- */
-std::array<double, 3> normalize(const std::array<double, 3>& v) {
-    double norm = std::sqrt(v[0]*v[0] + v[1]*v[1] + v[2]*v[2]);
-    if (norm < 1e-10) {
-        return {0.0, 0.0, 0.0};
-    }
-    return {v[0]/norm, v[1]/norm, v[2]/norm};
-}
-
-/**
- * @brief Construct operators based on configuration (like TPQ_DSSF)
- * Returns pairs of operators (obs_1, obs_2) and their names
+ * @brief Construct operators based on configuration.
+ *
+ * Thin wrapper around ed::dssf::build_observable_pairs (P1.10). The
+ * implementation moved to src/dssf/operator_spec.cpp; this function exists
+ * purely so the four legacy call sites in ed_main.cpp keep compiling.
+ * New code should call ed::dssf::build_observable_pairs directly.
  */
 void construct_operators_from_config(
     const std::string& operator_type,
@@ -204,245 +187,25 @@ void construct_operators_from_config(
     std::vector<Operator>& obs_2_out,
     std::vector<std::string>& names_out
 ) {
-    bool use_xyz_basis = (basis == "xyz");
-    
-    // Helper to get spin operator name
-    auto spin_combination_name = [use_xyz_basis](int op) {
-        if (use_xyz_basis) {
-            switch (op) {
-                case 0: return "Sx";
-                case 1: return "Sy";
-                case 2: return "Sz";
-                default: return "Unknown";
-            }
-        } else {
-            switch (op) {
-                case 2: return "Sz";
-                case 0: return "Sp";
-                case 1: return "Sm";
-                default: return "Unknown";
-            }
-        }
-    };
-    
-    // Iterate over momentum points and spin combinations
-    for (size_t qi = 0; qi < momentum_points.size(); ++qi) {
-        const auto& Q = momentum_points[qi];
-        
-        // Pre-compute transverse bases if needed
-        std::array<double, 3> transverse_basis_1, transverse_basis_2;
-        if (operator_type == "transverse" || operator_type == "transverse_experimental") {
-            std::array<double, 3> pol_array = {polarization[0], polarization[1], polarization[2]};
-            transverse_basis_1 = pol_array;
-            
-            // transverse_basis_2 is Q × polarization (cross product)
-            auto cross = cross_product(Q, polarization);
-            transverse_basis_2 = normalize(cross);
-            
-            // Handle special case: if Q is parallel to polarization, cross product is zero
-            double cross_norm = std::sqrt(cross[0]*cross[0] + cross[1]*cross[1] + cross[2]*cross[2]);
-            if (cross_norm < 1e-10) {
-                if (std::abs(pol_array[0]) > 0.5) {
-                    auto alt_cross = cross_product({0.0, 1.0, 0.0}, polarization);
-                    transverse_basis_2 = normalize(alt_cross);
-                } else {
-                    auto alt_cross = cross_product({1.0, 0.0, 0.0}, polarization);
-                    transverse_basis_2 = normalize(alt_cross);
-                }
-                std::cout << "Warning: Q parallel to polarization, using alternative basis" << std::endl;
-            }
-        }
-        
-        for (const auto& combo : spin_combinations) {
-            int op_type_1 = combo.first;
-            int op_type_2 = combo.second;
-            
-            // Convert operator indices for ladder basis
-            int first = op_type_1;
-            int second = op_type_2;
-            if (!use_xyz_basis) {
-                first = first == 2 ? 2 : 1 - first;  // Convert 0->1(Sp), 1->0(Sm) for first operator
-            }
-            
-            std::string base_name = std::string(spin_combination_name(first)) + std::string(spin_combination_name(second));
-            
-            if (operator_type == "sum") {
-                // Standard sum operators: S^{op1}(Q) S^{op2}(-Q)
-                std::stringstream name_ss;
-                name_ss << base_name << "_q_Qx" << Q[0] << "_Qy" << Q[1] << "_Qz" << Q[2];
-                
-                if (use_fixed_sz) {
-                    if (use_xyz_basis) {
-                        FixedSzSumOperatorXYZ sum_op_1(num_sites, spin_length, n_up, op_type_1, Q, positions_file);
-                        FixedSzSumOperatorXYZ sum_op_2(num_sites, spin_length, n_up, op_type_2, Q, positions_file);
-                        obs_1_out.push_back(Operator(sum_op_1));
-                        obs_2_out.push_back(Operator(sum_op_2));
-                    } else {
-                        FixedSzSumOperator sum_op_1(num_sites, spin_length, n_up, op_type_1, Q, positions_file);
-                        FixedSzSumOperator sum_op_2(num_sites, spin_length, n_up, op_type_2, Q, positions_file);
-                        obs_1_out.push_back(Operator(sum_op_1));
-                        obs_2_out.push_back(Operator(sum_op_2));
-                    }
-                } else {
-                    if (use_xyz_basis) {
-                        SumOperatorXYZ sum_op_1(num_sites, spin_length, op_type_1, Q, positions_file);
-                        SumOperatorXYZ sum_op_2(num_sites, spin_length, op_type_2, Q, positions_file);
-                        obs_1_out.push_back(Operator(sum_op_1));
-                        obs_2_out.push_back(Operator(sum_op_2));
-                    } else {
-                        SumOperator sum_op_1(num_sites, spin_length, op_type_1, Q, positions_file);
-                        SumOperator sum_op_2(num_sites, spin_length, op_type_2, Q, positions_file);
-                        obs_1_out.push_back(Operator(sum_op_1));
-                        obs_2_out.push_back(Operator(sum_op_2));
-                    }
-                }
-                
-                names_out.push_back(name_ss.str());
-                
-            } else if (operator_type == "transverse") {
-                // Transverse operators for SF/NSF separation
-                std::vector<double> e1_vec = {transverse_basis_1[0], transverse_basis_1[1], transverse_basis_1[2]};
-                std::vector<double> e2_vec = {transverse_basis_2[0], transverse_basis_2[1], transverse_basis_2[2]};
-                
-                std::stringstream name_sf, name_nsf;
-                name_sf << base_name << "_q_Qx" << Q[0] << "_Qy" << Q[1] << "_Qz" << Q[2] << "_NSF";
-                name_nsf << base_name << "_q_Qx" << Q[0] << "_Qy" << Q[1] << "_Qz" << Q[2] << "_SF";
-                
-                if (use_fixed_sz) {
-                    if (use_xyz_basis) {
-                        FixedSzTransverseOperatorXYZ op1_sf(num_sites, spin_length, n_up, op_type_1, Q, e1_vec, positions_file);
-                        FixedSzTransverseOperatorXYZ op2_sf(num_sites, spin_length, n_up, op_type_2, Q, e1_vec, positions_file);
-                        FixedSzTransverseOperatorXYZ op1_nsf(num_sites, spin_length, n_up, op_type_1, Q, e2_vec, positions_file);
-                        FixedSzTransverseOperatorXYZ op2_nsf(num_sites, spin_length, n_up, op_type_2, Q, e2_vec, positions_file);
-                        
-                        obs_1_out.push_back(Operator(op1_sf));
-                        obs_2_out.push_back(Operator(op2_sf));
-                        obs_1_out.push_back(Operator(op1_nsf));
-                        obs_2_out.push_back(Operator(op2_nsf));
-                    } else {
-                        FixedSzTransverseOperator op1_sf(num_sites, spin_length, n_up, op_type_1, Q, e1_vec, positions_file);
-                        FixedSzTransverseOperator op2_sf(num_sites, spin_length, n_up, op_type_2, Q, e1_vec, positions_file);
-                        FixedSzTransverseOperator op1_nsf(num_sites, spin_length, n_up, op_type_1, Q, e2_vec, positions_file);
-                        FixedSzTransverseOperator op2_nsf(num_sites, spin_length, n_up, op_type_2, Q, e2_vec, positions_file);
-                        
-                        obs_1_out.push_back(Operator(op1_sf));
-                        obs_2_out.push_back(Operator(op2_sf));
-                        obs_1_out.push_back(Operator(op1_nsf));
-                        obs_2_out.push_back(Operator(op2_nsf));
-                    }
-                } else {
-                    if (use_xyz_basis) {
-                        TransverseOperatorXYZ op1_sf(num_sites, spin_length, op_type_1, Q, e1_vec, positions_file);
-                        TransverseOperatorXYZ op2_sf(num_sites, spin_length, op_type_2, Q, e1_vec, positions_file);
-                        TransverseOperatorXYZ op1_nsf(num_sites, spin_length, op_type_1, Q, e2_vec, positions_file);
-                        TransverseOperatorXYZ op2_nsf(num_sites, spin_length, op_type_2, Q, e2_vec, positions_file);
-                        
-                        obs_1_out.push_back(Operator(op1_sf));
-                        obs_2_out.push_back(Operator(op2_sf));
-                        obs_1_out.push_back(Operator(op1_nsf));
-                        obs_2_out.push_back(Operator(op2_nsf));
-                    } else {
-                        TransverseOperator op1_sf(num_sites, spin_length, op_type_1, Q, e1_vec, positions_file);
-                        TransverseOperator op2_sf(num_sites, spin_length, op_type_2, Q, e1_vec, positions_file);
-                        TransverseOperator op1_nsf(num_sites, spin_length, op_type_1, Q, e2_vec, positions_file);
-                        TransverseOperator op2_nsf(num_sites, spin_length, op_type_2, Q, e2_vec, positions_file);
-                        
-                        obs_1_out.push_back(Operator(op1_sf));
-                        obs_2_out.push_back(Operator(op2_sf));
-                        obs_1_out.push_back(Operator(op1_nsf));
-                        obs_2_out.push_back(Operator(op2_nsf));
-                    }
-                }
-                
-                names_out.push_back(name_sf.str());
-                names_out.push_back(name_nsf.str());
-                
-            } else if (operator_type == "sublattice") {
-                // Sublattice-resolved operators (only compute upper triangle)
-                for (uint64_t sub_i = 0; sub_i < unit_cell_size; ++sub_i) {
-                    for (uint64_t sub_j = sub_i; sub_j < unit_cell_size; ++sub_j) {
-                        std::stringstream name_ss;
-                        name_ss << base_name << "_q_Qx" << Q[0] << "_Qy" << Q[1] << "_Qz" << Q[2]
-                                << "_sub" << sub_i << "_sub" << sub_j;
-                        
-                        if (use_fixed_sz) {
-                            FixedSzSublatticeOperator sub_op_1(sub_i, unit_cell_size, num_sites, spin_length, n_up, op_type_1, Q, positions_file);
-                            FixedSzSublatticeOperator sub_op_2(sub_j, unit_cell_size, num_sites, spin_length, n_up, op_type_2, Q, positions_file);
-                            obs_1_out.push_back(Operator(sub_op_1));
-                            obs_2_out.push_back(Operator(sub_op_2));
-                        } else {
-                            SublatticeOperator sub_op_1(sub_i, unit_cell_size, num_sites, spin_length, op_type_1, Q, positions_file);
-                            SublatticeOperator sub_op_2(sub_j, unit_cell_size, num_sites, spin_length, op_type_2, Q, positions_file);
-                            obs_1_out.push_back(Operator(sub_op_1));
-                            obs_2_out.push_back(Operator(sub_op_2));
-                        }
-                        
-                        names_out.push_back(name_ss.str());
-                    }
-                }
-                
-            } else if (operator_type == "experimental") {
-                // Experimental operators: cos(θ)Sz + sin(θ)Sx (only one per momentum point, independent of spin combo)
-                if (combo.first == spin_combinations[0].first && combo.second == spin_combinations[0].second) {
-                    std::stringstream name_ss;
-                    name_ss << "Experimental_q_Qx" << Q[0] << "_Qy" << Q[1] << "_Qz" << Q[2] << "_theta" << theta;
-                    
-                    if (use_fixed_sz) {
-                        FixedSzExperimentalOperator exp_op_1(num_sites, spin_length, n_up, theta, Q, positions_file);
-                        FixedSzExperimentalOperator exp_op_2(num_sites, spin_length, n_up, theta, Q, positions_file);
-                        obs_1_out.push_back(Operator(exp_op_1));
-                        obs_2_out.push_back(Operator(exp_op_2));
-                    } else {
-                        ExperimentalOperator exp_op_1(num_sites, spin_length, theta, Q, positions_file);
-                        ExperimentalOperator exp_op_2(num_sites, spin_length, theta, Q, positions_file);
-                        obs_1_out.push_back(Operator(exp_op_1));
-                        obs_2_out.push_back(Operator(exp_op_2));
-                    }
-                    
-                    names_out.push_back(name_ss.str());
-                }
-                
-            } else if (operator_type == "transverse_experimental") {
-                // Transverse experimental with SF/NSF separation (only one per momentum point)
-                if (combo.first == spin_combinations[0].first && combo.second == spin_combinations[0].second) {
-                    std::vector<double> e1_vec = {transverse_basis_1[0], transverse_basis_1[1], transverse_basis_1[2]};
-                    std::vector<double> e2_vec = {transverse_basis_2[0], transverse_basis_2[1], transverse_basis_2[2]};
-                    
-                    std::stringstream name_sf, name_nsf;
-                    name_sf << "TransverseExperimental_q_Qx" << Q[0] << "_Qy" << Q[1] << "_Qz" << Q[2] 
-                            << "_theta" << theta << "_NSF";
-                    name_nsf << "TransverseExperimental_q_Qx" << Q[0] << "_Qy" << Q[1] << "_Qz" << Q[2] 
-                             << "_theta" << theta << "_SF";
-                    
-                    if (use_fixed_sz) {
-                        FixedSzTransverseExperimentalOperator op1_sf(num_sites, spin_length, n_up, theta, Q, e1_vec, positions_file);
-                        FixedSzTransverseExperimentalOperator op2_sf(num_sites, spin_length, n_up, theta, Q, e1_vec, positions_file);
-                        FixedSzTransverseExperimentalOperator op1_nsf(num_sites, spin_length, n_up, theta, Q, e2_vec, positions_file);
-                        FixedSzTransverseExperimentalOperator op2_nsf(num_sites, spin_length, n_up, theta, Q, e2_vec, positions_file);
-                        
-                        obs_1_out.push_back(Operator(op1_sf));
-                        obs_2_out.push_back(Operator(op2_sf));
-                        obs_1_out.push_back(Operator(op1_nsf));
-                        obs_2_out.push_back(Operator(op2_nsf));
-                    } else {
-                        TransverseExperimentalOperator op1_sf(num_sites, spin_length, theta, Q, e1_vec, positions_file);
-                        TransverseExperimentalOperator op2_sf(num_sites, spin_length, theta, Q, e1_vec, positions_file);
-                        TransverseExperimentalOperator op1_nsf(num_sites, spin_length, theta, Q, e2_vec, positions_file);
-                        TransverseExperimentalOperator op2_nsf(num_sites, spin_length, theta, Q, e2_vec, positions_file);
-                        
-                        obs_1_out.push_back(Operator(op1_sf));
-                        obs_2_out.push_back(Operator(op2_sf));
-                        obs_1_out.push_back(Operator(op1_nsf));
-                        obs_2_out.push_back(Operator(op2_nsf));
-                    }
-                    
-                    names_out.push_back(name_sf.str());
-                    names_out.push_back(name_nsf.str());
-                }
-            }
-        }
-    }
+    ed::dssf::OperatorSpec spec;
+    spec.operator_type    = operator_type;
+    spec.basis            = basis;
+    spec.spin_combinations = spin_combinations;
+    spec.momentum_points  = momentum_points;
+    spec.polarization     = polarization;
+    spec.theta            = theta;
+    spec.unit_cell_size   = unit_cell_size;
+    spec.num_sites        = num_sites;
+    spec.spin_length      = spin_length;
+    spec.use_fixed_sz     = use_fixed_sz;
+    spec.n_up             = n_up;
+    spec.positions_file   = positions_file;
+    auto pairs = ed::dssf::build_observable_pairs(spec);
+    obs_1_out = std::move(pairs.obs_1);
+    obs_2_out = std::move(pairs.obs_2);
+    names_out = std::move(pairs.names);
 }
+
 
 // ============================================================================
 // WORKFLOW FUNCTIONS

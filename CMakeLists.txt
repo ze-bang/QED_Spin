@@ -180,6 +180,7 @@ set(APPS_DIR ${SRC_DIR}/apps)
 set(SOLVERS_CPU_DIR ${SRC_DIR}/solvers/cpu)
 set(SOLVERS_GPU_DIR ${SRC_DIR}/solvers/gpu)
 set(IO_DIR ${SRC_DIR}/io)
+set(DSSF_DIR ${SRC_DIR}/dssf)
 
 # Include directories - public headers in include/, private in src/
 include_directories(${INCLUDE_DIR})
@@ -245,9 +246,9 @@ include(EDLibraries)
 # to mention the topmost library.
 add_executable(ED ${APPS_DIR}/ed_main.cpp)
 if(WITH_CUDA)
-    target_link_libraries(ED PRIVATE ed_solvers_gpu)
+    target_link_libraries(ED PRIVATE ed_solvers_gpu ed_dssf)
 else()
-    target_link_libraries(ED PRIVATE ed_solvers_cpu)
+    target_link_libraries(ED PRIVATE ed_solvers_cpu ed_dssf)
 endif()
 
 # TPQ_DSSF is a legacy DSSF/SSSF wrapper around the same CPU+GPU stack as ED,
@@ -289,9 +290,9 @@ if(WITH_MPI)
 
     add_executable(TPQ_DSSF ${APPS_DIR}/TPQ_DSSF.cpp)
     if(WITH_CUDA)
-        target_link_libraries(TPQ_DSSF PRIVATE ed_solvers_gpu)
+        target_link_libraries(TPQ_DSSF PRIVATE ed_solvers_gpu ed_dssf)
     else()
-        target_link_libraries(TPQ_DSSF PRIVATE ed_solvers_cpu)
+        target_link_libraries(TPQ_DSSF PRIVATE ed_solvers_cpu ed_dssf)
     endif()
 endif()
 
@@ -432,7 +433,7 @@ endif()
 include(GNUInstallDirs)
 include(CMakePackageConfigHelpers)
 
-set(_ED_INSTALL_TARGETS ed_io ed_core ed_solvers_cpu)
+set(_ED_INSTALL_TARGETS ed_io ed_core ed_dssf ed_solvers_cpu)
 if(TARGET ed_solvers_gpu)
     list(APPEND _ED_INSTALL_TARGETS ed_solvers_gpu)
 endif()

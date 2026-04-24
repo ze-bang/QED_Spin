@@ -134,6 +134,30 @@ target_compile_options(ed_solvers_cpu PRIVATE
 set_target_properties(ed_solvers_cpu PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
 # -----------------------------------------------------------------------------
+# ed_dssf: pure-data DSSF/SSSF observable assembly (operator_spec etc.).
+#
+# This library is the canonical home for the (operator_type x basis x momentum
+# x spin-combo x fixed-Sz) cross-product that every dynamical/static
+# structure-factor workflow needs. Splitting it out of ed_main.cpp /
+# TPQ_DSSF.cpp eliminates the duplicated switch-statements those two
+# binaries used to maintain in lockstep (P1.10 / DSSF PR-A).
+#
+# Depends only on ed_core for the `Operator` definitions.
+# -----------------------------------------------------------------------------
+add_library(ed_dssf STATIC
+    ${DSSF_DIR}/operator_spec.cpp
+)
+target_include_directories(ed_dssf PUBLIC ${_ED_PUBLIC_INCLUDES})
+target_link_libraries(ed_dssf PUBLIC ed_core ${ED_COMMON_LINK_LIBS})
+target_link_libraries(ed_dssf PUBLIC
+    "$<BUILD_INTERFACE:nlohmann_json::nlohmann_json>"
+)
+target_compile_options(ed_dssf PRIVATE
+    $<$<COMPILE_LANGUAGE:CXX>:${CPU_OPT_FLAGS}>
+)
+set_target_properties(ed_dssf PROPERTIES POSITION_INDEPENDENT_CODE ON)
+
+# -----------------------------------------------------------------------------
 # ed_solvers_gpu: CUDA-only library; depends on the CUDA imported targets.
 # Always defined so callers can write `if(TARGET ed_solvers_gpu)` without
 # having to also re-check WITH_CUDA themselves.
