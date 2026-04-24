@@ -1,5 +1,4 @@
-#ifndef BASIS_VECTOR_STORAGE_H
-#define BASIS_VECTOR_STORAGE_H
+#pragma once
 
 #include <string>
 #include <vector>
@@ -52,5 +51,3 @@ private:
 // These wrap the HDF5 implementation
 ComplexVector read_basis_vector_h5(const std::string& h5_file, uint64_t index, uint64_t N);
 bool write_basis_vector_h5(const std::string& h5_file, uint64_t index, const ComplexVector& vec, uint64_t N);
-
-#endif // BASIS_VECTOR_STORAGE_H

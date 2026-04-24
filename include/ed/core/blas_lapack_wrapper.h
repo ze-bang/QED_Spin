@@ -1,8 +1,7 @@
 // blas_lapack_wrapper.h - Unified BLAS/LAPACK interface
 // Provides a single include that maps to the selected vendor backend
 
-#ifndef BLAS_LAPACK_WRAPPER_H
-#define BLAS_LAPACK_WRAPPER_H
+#pragma once
 
 // Always prefer vendor-specific umbrella headers when available.
 #if defined(WITH_MKL)
@@ -34,5 +33,3 @@
         static BlasBackendReporter g_blas_backend_reporter;
     }
 #endif
-
-#endif // BLAS_LAPACK_WRAPPER_H

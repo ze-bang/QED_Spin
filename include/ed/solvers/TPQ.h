@@ -1,7 +1,6 @@
 // TPQ.h - Thermal Pure Quantum state implementation
 
-#ifndef TPQ_H
-#define TPQ_H
+#pragma once
 
 #include <iostream>
 #include <complex>
@@ -405,5 +404,3 @@ void convert_tpq_to_unified_thermodynamics(
     double temp_max = 100.0,
     uint64_t num_temp_points = 200
 );
-
-#endif // TPQ_H

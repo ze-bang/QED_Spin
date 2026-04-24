@@ -1,5 +1,4 @@
-#ifndef ED_CONFIG_H
-#define ED_CONFIG_H
+#pragma once
 
 #include <string>
 #include <vector>
@@ -467,5 +466,3 @@ namespace ed_config {
      */
     std::string getMethodParameterInfo(DiagonalizationMethod method);
 }
-
-#endif // ED_CONFIG_H

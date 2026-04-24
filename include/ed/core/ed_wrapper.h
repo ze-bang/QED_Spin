@@ -1,5 +1,4 @@
-#ifndef ED_WRAPPER_H
-#define ED_WRAPPER_H
+#pragma once
 
 // ============================================================================
 // INCLUDES
@@ -4503,6 +4502,3 @@ inline EDResults exact_diagonalization_fixed_sz_symmetrized(
     
     return results;
 }
-
-
-#endif

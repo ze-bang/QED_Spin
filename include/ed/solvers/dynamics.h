@@ -2,8 +2,7 @@
 // This module provides time evolution and dynamical correlation function computation
 // that can be used with any quantum state (not exclusive to TPQ)
 
-#ifndef DYNAMICS_H
-#define DYNAMICS_H
+#pragma once
 
 #include <iostream>
 #include <complex>
@@ -320,5 +319,3 @@ void compute_operator_dynamics(
     double dt = 0.01,
     uint64_t krylov_dim = 30
 );
-
-#endif // DYNAMICS_H

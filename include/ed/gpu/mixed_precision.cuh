@@ -15,8 +15,7 @@
  *   config.apply(cublas_handle);
  */
 
-#ifndef MIXED_PRECISION_CUH
-#define MIXED_PRECISION_CUH
+#pragma once
 
 #ifdef WITH_CUDA
 
@@ -169,5 +168,3 @@ private:
 } // namespace mixed_precision
 
 #endif // WITH_CUDA
-
-#endif // MIXED_PRECISION_CUH

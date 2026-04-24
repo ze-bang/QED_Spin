@@ -1,5 +1,4 @@
-#ifndef GPU_FTLM_CUH
-#define GPU_FTLM_CUH
+#pragma once
 
 #ifdef WITH_CUDA
 
@@ -610,5 +609,3 @@ __global__ void scaleKernel(cuDoubleComplex* x, double alpha, int N);
 } // namespace GPUFTLMKernels
 
 #endif // WITH_CUDA
-
-#endif // GPU_FTLM_CUH

@@ -1,5 +1,4 @@
-#ifndef GPU_TPQ_CUH
-#define GPU_TPQ_CUH
+#pragma once
 
 #include <cuda_runtime.h>
 #include <cuComplex.h>
@@ -166,5 +165,3 @@ private:
     std::string findLowestEnergyTPQState(const std::string& dir, int sample, 
                                         double& beta_out, int& step_out);
 };
-
-#endif // GPU_TPQ_CUH

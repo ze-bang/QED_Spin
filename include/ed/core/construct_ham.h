@@ -1,5 +1,4 @@
-#ifndef CONSTRUCT_HAM_H
-#define CONSTRUCT_HAM_H
+#pragma once
 
 #include <vector>
 #include <complex>
@@ -4343,6 +4342,3 @@ public:
         }
     }
 };
-
-#endif // CONSTRUCT_HAM_H
-

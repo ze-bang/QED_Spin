@@ -12,8 +12,7 @@
  *   // Handle automatically destroyed when blas goes out of scope
  */
 
-#ifndef CUDA_RAII_CUH
-#define CUDA_RAII_CUH
+#pragma once
 
 #ifdef WITH_CUDA
 
@@ -415,5 +414,3 @@ private:
 } // namespace cuda_raii
 
 #endif // WITH_CUDA
-
-#endif // CUDA_RAII_CUH

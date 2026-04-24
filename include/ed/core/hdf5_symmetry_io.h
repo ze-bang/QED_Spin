@@ -1,5 +1,4 @@
-#ifndef HDF5_SYMMETRY_IO_H
-#define HDF5_SYMMETRY_IO_H
+#pragma once
 
 #include <H5Cpp.h>
 #include <vector>
@@ -474,5 +473,3 @@ public:
         return result;
     }
 };
-
-#endif // HDF5_SYMMETRY_IO_H

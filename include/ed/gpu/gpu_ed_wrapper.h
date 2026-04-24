@@ -1,5 +1,4 @@
-#ifndef GPU_ED_WRAPPER_H
-#define GPU_ED_WRAPPER_H
+#pragma once
 
 // Forward declaration to avoid including construct_ham.h which has CUDA-incompatible code
 class Operator;
@@ -636,5 +635,3 @@ private:
     static int getGPUCount();
     static size_t getAvailableGPUMemory(int device = 0);
 };
-
-#endif // GPU_ED_WRAPPER_H

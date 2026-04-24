@@ -1,5 +1,4 @@
-#ifndef GPU_BIT_OPERATIONS_CUH
-#define GPU_BIT_OPERATIONS_CUH
+#pragma once
 
 #ifdef WITH_CUDA
 #include <cuda_runtime.h>
@@ -164,5 +163,3 @@ __device__ __forceinline__ double complex_abs_squared(cuDoubleComplex a) {
 } // namespace GPUBitOps
 
 #endif // WITH_CUDA
-
-#endif // GPU_BIT_OPERATIONS_CUH

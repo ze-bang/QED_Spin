@@ -1,5 +1,4 @@
-#ifndef SYSTEM_UTILS_H
-#define SYSTEM_UTILS_H
+#pragma once
 
 #include <cstdlib>
 #include <cstring>
@@ -395,5 +394,3 @@ inline bool generate_automorphisms(const std::string& directory, bool translatio
     
     return true;
 }
-
-#endif // SYSTEM_UTILS_H

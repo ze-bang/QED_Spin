@@ -1,5 +1,4 @@
-#ifndef STREAMING_SYMMETRY_H
-#define STREAMING_SYMMETRY_H
+#pragma once
 
 #include <ed/core/construct_ham.h>
 #include <unordered_set>
@@ -2495,5 +2494,3 @@ private:
         return norm_sq;
     }
 };
-
-#endif // STREAMING_SYMMETRY_H

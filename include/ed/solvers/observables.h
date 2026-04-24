@@ -1,5 +1,4 @@
-#ifndef OBSERVABLES_H
-#define OBSERVABLES_H
+#pragma once
 
 #include <iostream>
 #include <complex>
@@ -25,5 +24,3 @@ ThermodynamicData calculate_thermodynamics_from_spectrum(
     double T_max = 10.0,        // Maximum temperature
     uint64_t num_points = 100   // Number of temperature points
 );
-
-#endif // OBSERVABLES_H

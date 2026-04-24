@@ -1,5 +1,4 @@
-#ifndef DISK_STREAMING_SYMMETRY_H
-#define DISK_STREAMING_SYMMETRY_H
+#pragma once
 
 #include <ed/core/streaming_symmetry.h>
 #include <fstream>
@@ -701,5 +700,3 @@ inline EDResults exact_diagonalization_disk_streaming(
     
     return results;
 }
-
-#endif // DISK_STREAMING_SYMMETRY_H

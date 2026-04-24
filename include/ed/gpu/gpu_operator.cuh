@@ -1,5 +1,4 @@
-#ifndef GPU_OPERATOR_CUH
-#define GPU_OPERATOR_CUH
+#pragma once
 
 #ifdef WITH_CUDA
 
@@ -568,5 +567,3 @@ class Operator;
 bool convertOperatorToGPU(const Operator& cpu_op, GPUOperator& gpu_op);
 
 #endif // WITH_CUDA
-
-#endif // GPU_OPERATOR_CUH

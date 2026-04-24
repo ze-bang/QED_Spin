@@ -1,5 +1,4 @@
-#ifndef ED_WRAPPER_STREAMING_H
-#define ED_WRAPPER_STREAMING_H
+#pragma once
 
 #include <ed/core/ed_wrapper.h>
 #include <ed/core/streaming_symmetry.h>
@@ -870,5 +869,3 @@ inline EDResults exact_diagonalization_streaming_symmetry_fixed_sz(
     
     return results;
 }
-
-#endif // ED_WRAPPER_STREAMING_H

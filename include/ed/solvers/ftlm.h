@@ -1,8 +1,7 @@
 // ftlm.h - Finite Temperature Lanczos Method implementation
 // Computes thermodynamic properties without full spectrum diagonalization
 
-#ifndef FTLM_H
-#define FTLM_H
+#pragma once
 
 #include <iostream>
 #include <complex>
@@ -859,5 +858,3 @@ bool load_ground_state_from_file(
     double& ground_state_energy,
     uint64_t expected_dim = 0
 );
-
-#endif // FTLM_H

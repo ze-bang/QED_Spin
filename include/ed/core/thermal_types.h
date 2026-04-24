@@ -1,5 +1,4 @@
-#ifndef THERMAL_TYPES_H
-#define THERMAL_TYPES_H
+#pragma once
 
 #include <vector>
 
@@ -41,5 +40,3 @@ struct FTLMResults {
     double ground_state_estimate = 0.0;     // Best estimate of ground state energy
     uint64_t total_samples = 0;              // Number of samples used
 };
-
-#endif // THERMAL_TYPES_H

@@ -10,8 +10,7 @@
 //   * Compose-friendly: each test file registers individual checks and
 //     returns a single int exit code; CTest consumes that directly.
 // =============================================================================
-#ifndef ED_TESTS_TEST_HARNESS_H
-#define ED_TESTS_TEST_HARNESS_H
+#pragma once
 
 #include <cmath>
 #include <complex>
@@ -323,5 +322,3 @@ inline std::string make_scratch_dir(const std::string& suite,
 }
 
 } // namespace ed_tests
-
-#endif // ED_TESTS_TEST_HARNESS_H

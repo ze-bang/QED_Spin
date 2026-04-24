@@ -1,5 +1,4 @@
-#ifndef ED_IO_LANCZOS_BASIS_BUFFER_H
-#define ED_IO_LANCZOS_BASIS_BUFFER_H
+#pragma once
 
 // =============================================================================
 // In-memory Lanczos basis-vector buffer
@@ -98,5 +97,3 @@ uint64_t basis_buffer_size(const std::string& key);
 uint64_t total_basis_buffer_bytes();
 
 } // namespace lanczos_io
-
-#endif // ED_IO_LANCZOS_BASIS_BUFFER_H

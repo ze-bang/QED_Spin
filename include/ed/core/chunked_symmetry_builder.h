@@ -1,5 +1,4 @@
-#ifndef CHUNKED_SYMMETRY_BUILDER_H
-#define CHUNKED_SYMMETRY_BUILDER_H
+#pragma once
 
 #include <ed/core/streaming_symmetry.h>
 #include <ed/core/disk_streaming_symmetry.h>
@@ -966,5 +965,3 @@ private:
         norm_sq /= symmetry_info.max_clique.size();
     }
 };
-
-#endif // CHUNKED_SYMMETRY_BUILDER_H

@@ -1,5 +1,4 @@
-#ifndef GPU_KERNEL_CONFIG_H
-#define GPU_KERNEL_CONFIG_H
+#pragma once
 
 #ifdef WITH_CUDA
 #include <cuda_runtime.h>
@@ -71,5 +70,3 @@ namespace GPUConfig {
 #define CUSPARSE_CHECK(call) call
 #define CUBLAS_CHECK(call) call
 #endif
-
-#endif // GPU_KERNEL_CONFIG_H

@@ -1,5 +1,4 @@
-#ifndef ED_WRAPPER_CHUNKED_H
-#define ED_WRAPPER_CHUNKED_H
+#pragma once
 
 #include <ed/core/ed_wrapper.h>
 #include <ed/core/chunked_symmetry_builder.h>
@@ -617,5 +616,3 @@ inline EDResults exact_diagonalization_disk_chunked_symmetry(
         directory, method, params, interaction_filename, single_site_filename
     );
 }
-
-#endif // ED_WRAPPER_CHUNKED_H

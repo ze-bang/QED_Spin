@@ -1,7 +1,6 @@
 // Lanczos algorithm implementation for exact diagonalization
 // filepath: /home/pc_linux/exact_diagonalization_cpp/src/lanczos.h
-#ifndef LANCZOS_H
-#define LANCZOS_H
+#pragma once
 #if defined(WITH_MKL)
 #define EIGEN_USE_MKL_ALL
 #endif
@@ -183,4 +182,3 @@ void orthogonalize_degenerate_subspace(std::vector<ComplexVector>& vectors, doub
 void optimal_spectrum_solver(std::function<void(const Complex*, Complex*, int)> H, uint64_t N, uint64_t max_iter,
                                              std::vector<double>& eigenvalues, std::string dir = "",
                                              bool compute_eigenvectors = true);
-#endif // LANCZOS_H

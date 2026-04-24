@@ -1,7 +1,6 @@
 // ScaLAPACK-based distributed diagonalization with mixed precision support
 // filepath: /home/pc_linux/exact_diagonalization_cpp/include/ed/solvers/scalapack_diag.h
-#ifndef SCALAPACK_DIAG_H
-#define SCALAPACK_DIAG_H
+#pragma once
 
 #include <complex>
 #include <vector>
@@ -284,5 +283,3 @@ int call_pcheev(
 );
 
 } // namespace scalapack_internal
-
-#endif // SCALAPACK_DIAG_H

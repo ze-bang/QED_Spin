@@ -1,5 +1,4 @@
-#ifndef ED_LOGGING_H
-#define ED_LOGGING_H
+#pragma once
 
 /**
  * @file ed_logging.h
@@ -300,5 +299,3 @@ inline void printConvergence(uint64_t iterations, double residual, bool converge
 }
 
 } // namespace ed_log
-
-#endif // ED_LOGGING_H

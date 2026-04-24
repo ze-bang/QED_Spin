@@ -1,8 +1,7 @@
 // ltlm.h - Low Temperature Lanczos Method implementation
 // Specialized for low temperature thermodynamics using ground state projection
 
-#ifndef LTLM_H
-#define LTLM_H
+#pragma once
 
 #include <iostream>
 #include <complex>
@@ -170,5 +169,3 @@ void save_ltlm_results(
     const LTLMResults& results,
     const std::string& filename
 );
-
-#endif // LTLM_H

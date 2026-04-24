@@ -1,5 +1,4 @@
-#ifndef GPU_CG_CUH
-#define GPU_CG_CUH
+#pragma once
 
 #include <cuda_runtime.h>
 #include <cuComplex.h>
@@ -129,5 +128,3 @@ private:
         std::vector<std::complex<double>>& eigenvector_coeffs,
         std::vector<double>& eigenvalues_out);
 };
-
-#endif // GPU_CG_CUH

@@ -1,8 +1,7 @@
 // hybrid_thermal.h - Hybrid Thermal Method (LTLM + FTLM with automatic crossover)
 // Standalone method that automatically combines LTLM and FTLM for optimal accuracy
 
-#ifndef HYBRID_THERMAL_H
-#define HYBRID_THERMAL_H
+#pragma once
 
 #include <iostream>
 #include <complex>
@@ -147,5 +146,3 @@ double estimate_optimal_crossover(
     double ground_energy,
     double first_excitation
 );
-
-#endif // HYBRID_THERMAL_H

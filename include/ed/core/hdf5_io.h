@@ -2252,14 +2252,27 @@ public:
         try {
             H5::H5File file(filepath, H5F_ACC_RDWR);
             
-            // Ensure dynamical group exists
-            if (!file.nameExists("/dynamical")) {
-                file.createGroup("/dynamical");
-            }
-            
             std::string base_path = "/dynamical/" + operator_name;
-            if (!file.nameExists(base_path)) {
-                file.createGroup(base_path);
+            // Walk the path and create any missing intermediate groups
+            // (HDF5 1.10 H5Lexists fails if intermediate components are missing)
+            {
+                std::string cur;
+                size_t pos = 0;
+                while (pos < base_path.size()) {
+                    size_t next = base_path.find('/', pos + 1);
+                    if (next == std::string::npos) next = base_path.size();
+                    cur = base_path.substr(0, next);
+                    if (cur.empty() || cur == "/") { pos = next; continue; }
+                    bool exists = false;
+                    H5E_BEGIN_TRY {
+                        try { exists = file.nameExists(cur); }
+                        catch (...) { exists = false; }
+                    } H5E_END_TRY;
+                    if (!exists) {
+                        file.createGroup(cur);
+                    }
+                    pos = next;
+                }
             }
             
             // Helper lambda to save an array

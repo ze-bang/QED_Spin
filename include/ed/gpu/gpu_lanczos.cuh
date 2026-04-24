@@ -1,5 +1,4 @@
-#ifndef GPU_LANCZOS_CUH
-#define GPU_LANCZOS_CUH
+#pragma once
 
 #ifdef WITH_CUDA
 
@@ -741,5 +740,3 @@ __global__ void checkDeflationKernel(const cuDoubleComplex* R, double threshold,
 } // namespace GPULanczosKernels
 
 #endif // WITH_CUDA
-
-#endif // GPU_LANCZOS_CUH

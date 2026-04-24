@@ -1,7 +1,6 @@
 // Exact diagonalization using ARPACK-NG (double complex Hermitian problems)
 // Provides drop-in style routines similar to lanczos.h plus wrappers
-#ifndef ARPACK_WRAPPER_H
-#define ARPACK_WRAPPER_H
+#pragma once
 #if defined(WITH_MKL)
 #define EIGEN_USE_MKL_ALL
 #endif
@@ -184,5 +183,3 @@ int arpack_eigs_advanced(std::function<void(const Complex*, Complex*, int)> H, u
                          std::vector<double>& eigenvalues,
                          std::string dir = "", bool eigenvectors = false,
                          std::vector<Complex>* out_evecs = nullptr);
-
-#endif // ARPACK_WRAPPER_H

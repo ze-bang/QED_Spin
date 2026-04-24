@@ -1,5 +1,4 @@
-#ifndef GPU_DYNAMICS_CUH
-#define GPU_DYNAMICS_CUH
+#pragma once
 
 #include <cuda_runtime.h>
 #include <cuComplex.h>
@@ -128,5 +127,3 @@ private:
     std::complex<double> dotProductGPU(const cuDoubleComplex* v1, const cuDoubleComplex* v2);
     void krylovTimeStep(cuDoubleComplex* state, double dt, int krylov_dim);
 };
-
-#endif // GPU_DYNAMICS_CUH

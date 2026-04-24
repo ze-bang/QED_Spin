@@ -1,5 +1,4 @@
-#ifndef ED_CONFIG_ADAPTER_H
-#define ED_CONFIG_ADAPTER_H
+#pragma once
 
 #include <ed/core/ed_config.h>
 #include <ed/core/ed_wrapper.h>
@@ -214,5 +213,3 @@ inline EDConfig fromEDParameters(const EDParameters& params, DiagonalizationMeth
 }
 
 } // namespace ed_adapter
-
-#endif // ED_CONFIG_ADAPTER_H
