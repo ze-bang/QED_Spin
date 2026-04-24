@@ -1,239 +1,142 @@
 #!/usr/bin/env python3
-"""
-NLCE Workflow with FTLM - Automates the entire NLCE calculation process using FTLM.
+"""NLCE workflow driver: pyrochlore lattice, FTLM-based.
 
-This script orchestrates the full Numerical Linked Cluster Expansion workflow using
-the Finite Temperature Lanczos Method (FTLM) instead of full diagonalization:
+Sister script to `nlce.py` -- same orchestration, but uses FTLM
+(Finite-Temperature Lanczos Method) for the per-cluster thermodynamics
+step. FTLM scales to ~20-30 sites versus ~15 sites for full ED at the
+cost of stochastic sampling noise (which propagates to error bars).
 
-1. Generate topologically distinct clusters on the pyrochlore lattice
-2. Prepare Hamiltonian parameters for each cluster
-3. Run FTLM for each cluster to compute thermodynamic properties directly
-4. Perform NLCE summation to obtain bulk thermodynamic properties
-
-Key differences from the full diagonalization approach:
-- Uses FTLM to sample thermodynamics without computing full spectrum
-- Handles larger clusters (scales to ~20-30 sites vs ~15 sites for full ED)
-- Outputs include error bars from FTLM sampling
+Hybrid mode (the default) uses full ED for clusters with
+<= `--hybrid_threshold` sites and FTLM only for the larger ones, giving
+the best of both worlds.
 """
 
-import os
-import sys
-import glob
-import re
-import logging
 import argparse
-import subprocess
+import logging
 import multiprocessing
+import os
+import subprocess
+import sys
+
 import numpy as np
 from tqdm import tqdm
 
-try:
-    import h5py
-    HAS_H5PY = True
-except ImportError:
-    HAS_H5PY = False
+_REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
 
+from workflows.nlce._common import (  # noqa: E402
+    HAS_H5PY,
+    DEFAULT_ED_PATH,
+    EDOptions,
+    build_ed_command,
+    count_sites_in_info_file,
+    get_cluster_files,
+    run_ed_subprocess,
+    setup_logging,
+)
 
-def setup_logging(log_file):
-    """Set up logging to file and console"""
-    logging.basicConfig(
-        level=logging.INFO,
-        format='%(asctime)s - %(levelname)s - %(message)s',
-        handlers=[
-            logging.FileHandler(log_file),
-            logging.StreamHandler()
-        ]
-    )
-
-
-def get_cluster_files(cluster_info_dir):
-    """Get list of cluster files and extract their IDs and orders"""
-    cluster_files = glob.glob(os.path.join(cluster_info_dir, "cluster_*_order_*.dat"))
-    clusters = []
-    
-    for file_path in cluster_files:
-        basename = os.path.basename(file_path)
-        match = re.search(r'cluster_(\d+)_order_(\d+)', basename)
-        if match:
-            cluster_id = int(match.group(1))
-            order = int(match.group(2))
-            clusters.append((cluster_id, order, file_path))
-    
-    return sorted(clusters)
+if HAS_H5PY:
+    import h5py  # noqa: E402  (used by FTLM-specific error-bar plotting only)
 
 
 def run_full_ed_for_cluster(args):
-    """
-    Run FULL diagonalization for a small cluster.
-    Used in hybrid mode for small clusters (<=10 sites) to ensure maximum accuracy.
-    """
+    """Hybrid-mode full ED for a small cluster (matches FTLM output schema)."""
     cluster_id, order, ed_executable, ham_dir, ftlm_dir, ftlm_options, symmetrized = args
-    
-    # Create output directory (same structure as FTLM for compatibility)
+
     cluster_output_dir = os.path.join(ftlm_dir, f'cluster_{cluster_id}_order_{order}')
     os.makedirs(cluster_output_dir, exist_ok=True)
-    
+
     ham_subdir = os.path.join(ham_dir, f'cluster_{cluster_id}_order_{order}')
-    
     if not os.path.exists(ham_subdir):
         logging.warning(f"Hamiltonian directory not found for cluster {cluster_id}")
         return False
-    
-    # Get number of sites
-    site_info_file = os.path.join(ham_subdir, "*_site_info.dat")
-    site_info_files = glob.glob(site_info_file)
-    
-    if not site_info_files:
+
+    num_sites = count_sites_in_info_file(ham_subdir)
+    if num_sites is None:
         logging.warning(f"Site info file not found for cluster {cluster_id}")
         return False
-    
-    num_sites = 0
-    with open(site_info_files[0], 'r') as f:
-        for line in f:
-            if not line.startswith('#') and line.strip():
-                num_sites += 1
-    
-    # Build FULL ED command with thermodynamics
-    cmd = [
-        ed_executable,
-        ham_subdir,
-        '--method=FULL',
-        '--eigenvalues=FULL',
-        f'--output={cluster_output_dir}/output',
-        f'--num_sites={num_sites}',
-        '--spin_length=0.5',
-        '--thermo',
-        f'--temp_min={ftlm_options["temp_min"]}',
-        f'--temp_max={ftlm_options["temp_max"]}',
-        f'--temp_bins={ftlm_options["temp_bins"]}'
-    ]
-    
-    if symmetrized:
-        cmd.append('--symmetrized')
-    
-    try:
-        result = subprocess.run(cmd, check=True, capture_output=True, text=True)
-        logging.info(f"Full ED completed for cluster {cluster_id} (order {order}, {num_sites} sites)")
-        return True
-        
-    except subprocess.CalledProcessError as e:
-        # Check if output exists despite error
-        output_dir = os.path.join(cluster_output_dir, 'output')
-        h5_file = os.path.join(output_dir, 'ed_results.h5')
-        if os.path.exists(h5_file):
-            logging.warning(f"Full ED for cluster {cluster_id} crashed but output exists - treating as success")
-            return True
-        
-        logging.error(f"Error running Full ED for cluster {cluster_id}: {e}")
-        if e.stdout:
-            logging.error(f"Stdout: {e.stdout}")
-        if e.stderr:
-            logging.error(f"Stderr: {e.stderr}")
-        return False
+
+    options = EDOptions(
+        method="FULL",
+        eigenvalues="FULL",
+        thermo=True,
+        temp_min=ftlm_options["temp_min"],
+        temp_max=ftlm_options["temp_max"],
+        temp_bins=ftlm_options["temp_bins"],
+        symmetrized=symmetrized,
+        use_symm=False,  # historical hybrid path doesn't pass --symm
+    )
+
+    cmd = build_ed_command(
+        ed_executable=ed_executable,
+        ham_subdir=ham_subdir,
+        output_dir=cluster_output_dir,
+        num_sites=num_sites,
+        options=options,
+        scalapack_threshold=10**9,  # never auto-promote in hybrid mode
+        use_scalapack=False,
+    )
+
+    return run_ed_subprocess(
+        cmd,
+        output_root=cluster_output_dir,
+        log_tag=f"hybrid-FULL:cluster_{cluster_id}",
+    )
 
 
 def run_ftlm_for_cluster(args):
-    """Run FTLM for a single cluster"""
+    """Run FTLM (or FTLM_GPU) for a single cluster, with adaptive Krylov dimension."""
     cluster_id, order, ed_executable, ham_dir, ftlm_dir, ftlm_options, symmetrized, use_gpu = args
-    
-    # Create output directory for FTLM results
+
     cluster_ftlm_dir = os.path.join(ftlm_dir, f'cluster_{cluster_id}_order_{order}')
     os.makedirs(cluster_ftlm_dir, exist_ok=True)
-    
-    # Set up FTLM command
+
     ham_subdir = os.path.join(ham_dir, f'cluster_{cluster_id}_order_{order}')
-    
     if not os.path.exists(ham_subdir):
         logging.warning(f"Hamiltonian directory not found for cluster {cluster_id}")
         return False
-    
-    # Get number of sites from the site info file
-    site_info_file = os.path.join(ham_subdir, "*_site_info.dat")
-    site_info_files = glob.glob(site_info_file)
-    
-    if not site_info_files:
+
+    num_sites = count_sites_in_info_file(ham_subdir)
+    if num_sites is None:
         logging.warning(f"Site info file not found for cluster {cluster_id}")
         return False
-    
-    # Count lines in site info file to get number of sites
-    num_sites = 0
-    with open(site_info_files[0], 'r') as f:
-        for line in f:
-            if not line.startswith('#') and line.strip():
-                num_sites += 1
-    
-    # Compute adaptive Krylov dimension based on Hilbert space size
-    # Krylov dimension should be sufficient to capture low-energy spectrum
-    # Hilbert space dimension is 2^num_sites for spin-1/2
+
     hilbert_dim = 2 ** num_sites
-    # Adaptive krylov: at least min(user_requested, hilbert_dim), 
-    # but scale up for small clusters to ensure accuracy
     adaptive_krylov = min(ftlm_options["krylov_dim"], hilbert_dim)
-    # For very small clusters, use full diagonalization worth of Krylov vectors
-    if num_sites <= 8:  # Small clusters: ensure high accuracy
+    # For very small clusters, ensure high accuracy by using a Krylov
+    # subspace large enough to span the spectrum.
+    if num_sites <= 8:
         adaptive_krylov = min(hilbert_dim, max(adaptive_krylov, hilbert_dim // 2))
-    
-    # Build FTLM command
-    ftlm_method = 'FTLM_GPU' if use_gpu else 'FTLM'
-    cmd = [
-        ed_executable,
-        ham_subdir,
-        f'--method={ftlm_method}',
-        f'--output={cluster_ftlm_dir}/output',
-        f'--num_sites={num_sites}',
-        '--spin_length=0.5',
-        f'--samples={ftlm_options["num_samples"]}',
-        f'--krylov_dim={adaptive_krylov}',
-    ]
-    
-    if symmetrized:
-        cmd.append('--symmetrized')
-    
-    # Add thermodynamic parameters
-    cmd.extend([
-        '--thermo',
-        f'--temp_min={ftlm_options["temp_min"]}',
-        f'--temp_max={ftlm_options["temp_max"]}',
-        f'--temp_bins={ftlm_options["temp_bins"]}'
-    ])
-    
-    try:
-        result = subprocess.run(cmd, check=True, capture_output=True, text=True)
-        logging.info(f"FTLM completed for cluster {cluster_id}")
-        return True
-        
-    except subprocess.CalledProcessError as e:
-        # Check if output exists despite error (crash during cleanup)
-        output_dir = os.path.join(cluster_ftlm_dir, 'output')
-        
-        # Check for HDF5 output file (new format) - check both locations
-        h5_file = os.path.join(output_dir, 'thermo', 'ed_results.h5')
-        if not os.path.exists(h5_file):
-            h5_file = os.path.join(output_dir, 'ed_results.h5')
-        if os.path.exists(h5_file):
-            logging.warning(f"FTLM for cluster {cluster_id} crashed with exit code {e.returncode} "
-                          f"but HDF5 output file exists - treating as success")
-            return True
-        
-        # Check for legacy text file
-        expected_output = os.path.join(output_dir, 'thermo', 'ftlm_thermo.txt')
-        if os.path.exists(expected_output):
-            logging.warning(f"FTLM for cluster {cluster_id} crashed with exit code {e.returncode} "
-                          f"but output file exists - treating as success")
-            return True
-        
-        # Log the error
-        if e.returncode == -11:  # SIGSEGV
-            logging.error(f"FTLM for cluster {cluster_id} crashed with SIGSEGV")
-        else:
-            logging.error(f"Error running FTLM for cluster {cluster_id}: {e}")
-        
-        if e.stdout:
-            logging.error(f"Stdout: {e.stdout}")
-        if e.stderr:
-            logging.error(f"Stderr: {e.stderr}")
-        
-        return False
+
+    options = EDOptions(
+        method="FTLM_GPU" if use_gpu else "FTLM",
+        eigenvalues=None,  # FTLM doesn't take --eigenvalues
+        thermo=True,
+        temp_min=ftlm_options["temp_min"],
+        temp_max=ftlm_options["temp_max"],
+        temp_bins=ftlm_options["temp_bins"],
+        symmetrized=symmetrized,
+        use_symm=False,
+        samples=ftlm_options["num_samples"],
+        krylov_dim=adaptive_krylov,
+    )
+
+    cmd = build_ed_command(
+        ed_executable=ed_executable,
+        ham_subdir=ham_subdir,
+        output_dir=cluster_ftlm_dir,
+        num_sites=num_sites,
+        options=options,
+        scalapack_threshold=10**9,
+        use_scalapack=False,
+    )
+
+    return run_ed_subprocess(
+        cmd,
+        output_root=cluster_ftlm_dir,
+        log_tag=f"FTLM:cluster_{cluster_id}",
+    )
 
 
 def main():
@@ -258,8 +161,8 @@ Example usage:
                        help='Maximum order of clusters to generate')
     parser.add_argument('--base_dir', type=str, default='./nlce_ftlm_results', 
                        help='Base directory for all results')
-    parser.add_argument('--ed_executable', type=str, default='../../../build/ED', 
-                       help='Path to the ED executable')
+    parser.add_argument('--ed_executable', type=str, default=DEFAULT_ED_PATH,
+                       help='Path to the ED executable (defaults to <repo_root>/build/ED).')
     
     # Model parameters
     parser.add_argument('--Jxx', type=float, default=1.0, help='Jxx coupling')

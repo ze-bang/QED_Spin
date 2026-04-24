@@ -1,240 +1,108 @@
-import os
-import sys
-import subprocess
+#!/usr/bin/env python3
+"""NLCE workflow driver: pyrochlore lattice, full / Lanczos-boosted ED.
+
+Orchestrates the full Numerical Linked Cluster Expansion pipeline:
+  1. Generate topologically distinct clusters on the pyrochlore lattice
+     (via `prep/generate_pyrochlore_clusters.py`).
+  2. Prepare per-cluster Hamiltonian parameter files
+     (via `python/edlib/helper_cluster.py`).
+  3. Diagonalize each cluster via the canonical `./ED` binary.
+  4. Perform NLCE summation (via `NLC_sum.py` or `NLC_sum_LB.py`).
+
+Shared infrastructure (logging, cluster discovery, ED-runner subprocess
+plumbing, HDF5/text fallback readers) lives in
+`workflows.nlce._common`. This file only owns the workflow
+orchestration -- the *which clusters / which model / which
+post-processing* decisions.
+"""
+
 import argparse
-import time
-import glob
-import re
-import multiprocessing
 import logging
-from tqdm import tqdm
-import numpy as np
+import multiprocessing
+import os
+import subprocess
+import sys
+import time
 import traceback
 
-try:
-    import h5py
-    HAS_H5PY = True
-except ImportError:
-    HAS_H5PY = False
+import numpy as np
+from tqdm import tqdm
 
+# Make `workflows.nlce._common` importable when this script is run
+# directly (the typical NLCE invocation pattern). The repo root is two
+# levels up from `workflows/nlce/run/`.
+_REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
 
-def check_gpu_available():
-    """Check if GPU is available for CUDA operations.
-    
-    Returns:
-        bool: True if GPU is available, False otherwise
-    """
-    try:
-        result = subprocess.run(
-            ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
-            capture_output=True, text=True, check=True, timeout=5
-        )
-        gpu_names = result.stdout.strip().split("\n")
-        if gpu_names and gpu_names[0]:
-            return True
-        return False
-    except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired):
-        return False
-
-
-#!/usr/bin/env python3
-"""
-NLCE Workflow - Automates the entire NLCE calculation process for pyrochlore lattice.
-
-This script orchestrates the full Numerical Linked Cluster Expansion workflow:
-1. Generate topologically distinct clusters on the pyrochlore lattice
-2. Prepare Hamiltonian parameters for each cluster
-3. Run Exact Diagonalization for each cluster to compute spectrum
-4. Perform NLCE summation to obtain thermodynamic properties
-"""
-
-
-def setup_logging(log_file):
-    """Set up logging to file and console"""
-    logging.basicConfig(
-        level=logging.INFO,
-        format='%(asctime)s - %(levelname)s - %(message)s',
-        handlers=[
-            logging.FileHandler(log_file),
-            logging.StreamHandler()
-        ]
-    )
-
-def get_cluster_files(cluster_info_dir):
-    """Get list of cluster files and extract their IDs and orders"""
-    cluster_files = glob.glob(os.path.join(cluster_info_dir, "cluster_*_order_*.dat"))
-    clusters = []
-    
-    for file_path in cluster_files:
-        basename = os.path.basename(file_path)
-        match = re.search(r'cluster_(\d+)_order_(\d+)', basename)
-        if match:
-            cluster_id = int(match.group(1))
-            order = int(match.group(2))
-            clusters.append((cluster_id, order, file_path))
-    
-    return sorted(clusters)
-
-def get_num_sites(file_path):
-    """Extract number of sites from a cluster file"""
-    with open(file_path, 'r') as f:
-        for line in f:
-            if "Number of vertices:" in line:
-                return int(line.split(":")[1].strip())
-    return None
+from workflows.nlce._common import (  # noqa: E402
+    DEFAULT_ED_PATH,
+    EDOptions,
+    build_ed_command,
+    count_sites_in_info_file,
+    get_cluster_files,
+    load_thermo_dataset,
+    load_tpq_thermo_dataset,
+    run_ed_subprocess,
+    setup_logging,
+)
 
 def run_ed_for_cluster(args):
-    """Run ED for a single cluster
-    
-    Uses --symm flag by default for automatic symmetry selection:
-    - Auto-selects between symmetrized and streaming-symmetry modes
-    - Exploits spatial symmetries to reduce Hilbert space dimension
-    
-    Method selection based on system size:
-    - FULL: For small clusters (< scalapack_threshold sites)
-    - SCALAPACK_MIXED: For large clusters (distributed diagonalization with mixed precision)
+    """Run ED for a single cluster.
+
+    Hands off to `_common.build_ed_command` for argv assembly (which
+    handles the FULL -> SCALAPACK_MIXED auto-promotion for large
+    clusters) and `_common.run_ed_subprocess` for the actual launch
+    plus exit-code-vs-output reconciliation.
     """
     cluster_id, order, ed_executable, ham_dir, ed_dir, ed_options, symmetrized, use_gpu = args
-    
-    # Create output directory for ED results
+
     cluster_ed_dir = os.path.join(ed_dir, f'cluster_{cluster_id}_order_{order}')
     os.makedirs(cluster_ed_dir, exist_ok=True)
-    
-    # Set up ED command
+
     ham_subdir = os.path.join(ham_dir, f'cluster_{cluster_id}_order_{order}')
-    
     if not os.path.exists(ham_subdir):
         logging.warning(f"Hamiltonian directory not found for cluster {cluster_id}")
         return False
-    
-    # Get number of sites from the input file
-    site_info_file = os.path.join(ham_subdir, f"*_site_info.dat")
-    site_info_files = glob.glob(site_info_file)
-    
-    if not site_info_files:
+
+    num_sites = count_sites_in_info_file(ham_subdir)
+    if num_sites is None:
         logging.warning(f"Site info file not found for cluster {cluster_id}")
         return False
-    
-    # Count lines in site info file to get number of sites (excluding header lines)
-    num_sites = 0
-    with open(site_info_files[0], 'r') as f:
-        for line in f:
-            if not line.startswith('#') and line.strip():
-                num_sites += 1
-    
-    # Calculate Hilbert space dimension
-    hilbert_dim = 2 ** num_sites
-    
-    # Threshold for switching to ScaLAPACK (distributed diagonalization)
-    scalapack_threshold = ed_options.get("scalapack_threshold", 16)  # Default: 16 sites (dim=65536)
-    use_scalapack = (num_sites >= scalapack_threshold and ed_options.get("use_scalapack", True))
-    
-    # Check if a specific ED method was requested (e.g. FULL_GPU)
-    requested_method = ed_options.get("method", "FULL").upper()
-    
-    if requested_method == 'FULL_GPU':
-        # GPU full diagonalization requested explicitly
-        logging.info(f"Cluster {cluster_id} ({num_sites} sites, dim={hilbert_dim}): Using FULL_GPU diagonalization")
-        cmd = [
-            ed_executable,
-            ham_subdir,
-            '--method=FULL_GPU',
-            '--eigenvalues=FULL',
-            f'--output={cluster_ed_dir}/output',
-            f'--num_sites={num_sites}',
-            '--spin_length=0.5',
-            '--symm',  # Auto-select best symmetry mode
-        ]
-    elif use_scalapack:
-        # Large cluster: use ScaLAPACK with mixed precision for efficient distributed diagonalization
-        logging.info(f"Cluster {cluster_id} ({num_sites} sites, dim={hilbert_dim}): Using SCALAPACK_MIXED diagonalization")
-        cmd = [
-            ed_executable,
-            ham_subdir,
-            '--method=SCALAPACK_MIXED',
-            '--eigenvalues=FULL',
-            f'--output={cluster_ed_dir}/output',
-            f'--num_sites={num_sites}',
-            '--spin_length=0.5',
-            '--symm',  # Auto-select best symmetry mode
-        ]
-    else:
-        # Small cluster: use standard FULL diagonalization
-        logging.info(f"Cluster {cluster_id} ({num_sites} sites, dim={hilbert_dim}): Using FULL diagonalization")
-        cmd = [
-            ed_executable,
-            ham_subdir,
-            '--method=FULL',
-            '--eigenvalues=FULL',
-            f'--output={cluster_ed_dir}/output',
-            f'--num_sites={num_sites}',
-            '--spin_length=0.5',
-            '--symm',  # Auto-select best symmetry mode
-        ]
 
-    if ed_options["measure_spin"]:
-        cmd.append('--measure_spin')
+    options = EDOptions(
+        method=ed_options.get("method", "FULL"),
+        eigenvalues="FULL",
+        thermo=ed_options.get("thermo", False),
+        temp_min=ed_options.get("temp_min", 0.001),
+        temp_max=ed_options.get("temp_max", 20.0),
+        temp_bins=ed_options.get("temp_bins", 100),
+        measure_spin=ed_options.get("measure_spin", False),
+        symmetrized=symmetrized,
+        use_symm=not symmetrized,
+    )
 
-    # If user explicitly requests --symmetrized, replace --symm with --symmetrized
-    if symmetrized:
-        # Remove --symm and add --symmetrized instead
-        if '--symm' in cmd:
-            cmd.remove('--symm')
-        cmd.append('--symmetrized')
-    
-    # Add thermodynamic parameters if required
-    if ed_options["thermo"]:
-        cmd.extend([
-            '--thermo',
-            f'--temp_min={ed_options["temp_min"]}',
-            f'--temp_max={ed_options["temp_max"]}',
-            f'--temp_bins={ed_options["temp_bins"]}'
-        ])
-    
-    # Set ED_PYTHON environment variable to use the same Python interpreter
-    # This ensures pynauty and other dependencies are found
-    env = os.environ.copy()
-    env['ED_PYTHON'] = sys.executable
-    
-    try:
-        result = subprocess.run(cmd, check=True, capture_output=True, env=env)
-        return True
-    except subprocess.CalledProcessError as e:
-        # Check if the computation actually succeeded despite the error
-        # This can happen when the ED program completes successfully but crashes during cleanup
-        expected_output_dir = os.path.join(cluster_ed_dir, 'output')
-        
-        # Check if output directory exists and has content
-        if os.path.exists(expected_output_dir):
-            output_files = os.listdir(expected_output_dir)
-            
-            # Check for HDF5 output file (new format)
-            h5_file = os.path.join(expected_output_dir, 'ed_results.h5')
-            if os.path.exists(h5_file):
-                logging.warning(f"ED for cluster {cluster_id} crashed with exit code {e.returncode} but HDF5 output file exists - treating as success")
-                return True
-            
-            if ed_options["thermo"]:
-                # For thermodynamic calculations, check for thermo directory (legacy)
-                thermo_dir = os.path.join(expected_output_dir, 'thermo')
-                if os.path.exists(thermo_dir) and os.listdir(thermo_dir):
-                    logging.warning(f"ED for cluster {cluster_id} crashed with exit code {e.returncode} but thermodynamic output files exist - treating as success")
-                    return True
-            
-            # For other methods, check for any meaningful output files
-            if output_files and any(f.endswith(('.dat', '.txt', '.h5')) or os.path.isdir(os.path.join(expected_output_dir, f)) for f in output_files):
-                logging.warning(f"ED for cluster {cluster_id} crashed with exit code {e.returncode} but output files exist - treating as success")
-                return True
-        
-        # Log the error with more specific information about the signal
-        if e.returncode == -11:  # SIGSEGV
-            logging.error(f"ED for cluster {cluster_id} crashed with SIGSEGV (segmentation fault) - computation may have completed but program crashed during cleanup")
-        else:
-            logging.error(f"Error running ED for cluster {cluster_id}: {e}")
-        
-        logging.error(f"Stdout: {e.stdout.decode('utf-8')}")
-        logging.error(f"Stderr: {e.stderr.decode('utf-8')}")
-        return False
+    cmd = build_ed_command(
+        ed_executable=ed_executable,
+        ham_subdir=ham_subdir,
+        output_dir=cluster_ed_dir,
+        num_sites=num_sites,
+        options=options,
+        scalapack_threshold=ed_options.get("scalapack_threshold", 16),
+        use_scalapack=ed_options.get("use_scalapack", True),
+    )
+
+    logging.info(
+        "Cluster %d (%d sites, dim=2^%d): %s",
+        cluster_id, num_sites, num_sites,
+        next((flag.split('=', 1)[1] for flag in cmd if flag.startswith('--method=')), 'FULL'),
+    )
+
+    return run_ed_subprocess(
+        cmd,
+        output_root=cluster_ed_dir,
+        log_tag=f"ED:cluster_{cluster_id}",
+    )
 
 
 def run_lb_ed_for_cluster(args):
@@ -252,105 +120,66 @@ def run_lb_ed_for_cluster(args):
     so we can compute observables <n|A|n> for each eigenstate.
     """
     (cluster_id, order, ed_executable, ham_dir, ed_dir, lb_options) = args
-    
-    # Create output directory for ED results
+
     cluster_ed_dir = os.path.join(ed_dir, f'cluster_{cluster_id}_order_{order}')
     os.makedirs(cluster_ed_dir, exist_ok=True)
-    
-    # Set up ED command
+
     ham_subdir = os.path.join(ham_dir, f'cluster_{cluster_id}_order_{order}')
-    
     if not os.path.exists(ham_subdir):
         logging.warning(f"[LB-NLCE] Hamiltonian directory not found for cluster {cluster_id}")
         return False
-    
-    # Get number of sites from the input file
-    site_info_file = os.path.join(ham_subdir, f"*_site_info.dat")
-    site_info_files = glob.glob(site_info_file)
-    
-    if not site_info_files:
+
+    num_sites = count_sites_in_info_file(ham_subdir)
+    if num_sites is None:
         logging.warning(f"[LB-NLCE] Site info file not found for cluster {cluster_id}")
         return False
-    
-    # Count lines in site info file to get number of sites (excluding header lines)
-    num_sites = 0
-    with open(site_info_files[0], 'r') as f:
-        for line in f:
-            if not line.startswith('#') and line.strip():
-                num_sites += 1
-    
-    # Calculate Hilbert space dimension
+
     hilbert_dim = 2 ** num_sites
-    
-    # Decide method based on cluster size
     lb_site_threshold = lb_options.get("lb_site_threshold", 12)
     lb_n_eigenvalues = lb_options.get("lb_n_eigenvalues", 200)
-    
+
     if num_sites <= lb_site_threshold:
-        # Small cluster: Full ED
-        n_eigs = "FULL"
         method = "FULL"
-        logging.info(f"[LB-NLCE] Cluster {cluster_id} ({num_sites} sites, dim={hilbert_dim}): "
-                    f"Full ED (all eigenvalues)")
+        n_eigs: object = "FULL"
+        logging.info(f"[LB-NLCE] Cluster {cluster_id} ({num_sites} sites, dim={hilbert_dim}): full ED")
     else:
-        # Large cluster: Partial Lanczos
-        # Ensure we don't request more eigenvalues than Hilbert space dimension
-        n_eigs = min(lb_n_eigenvalues, hilbert_dim)
         method = "LANCZOS"
-        logging.info(f"[LB-NLCE] Cluster {cluster_id} ({num_sites} sites, dim={hilbert_dim}): "
-                    f"Partial Lanczos (N_low={n_eigs} eigenvalues)")
-    
-    # Build ED command - request eigenvalues with eigenvectors for observable computation
-    cmd = [
-        ed_executable,
-        ham_subdir,
-        f'--method={method}',
-        f'--eigenvalues={n_eigs}',
-        f'--output={cluster_ed_dir}/output',
-        f'--num_sites={num_sites}',
-        '--spin_length=0.5',
-        '--symm',  # Auto-select best symmetry mode
-        '--compute_eigenvectors',  # Needed for <n|O|n> in LB-NLCE
-    ]
-    
-    # Add thermodynamic parameters - we compute them in post-processing for LB-NLCE
-    # but still pass temp range for metadata
-    if lb_options.get("thermo", False):
-        cmd.extend([
-            '--thermo',
-            f'--temp_min={lb_options["temp_min"]}',
-            f'--temp_max={lb_options["temp_max"]}',
-            f'--temp_bins={lb_options["temp_bins"]}'
-        ])
-    
-    if lb_options.get("measure_spin", False):
-        cmd.append('--measure_spin')
-    
-    # Set ED_PYTHON environment variable
-    env = os.environ.copy()
-    env['ED_PYTHON'] = sys.executable
-    
-    try:
-        result = subprocess.run(cmd, check=True, capture_output=True, env=env)
-        return True
-    except subprocess.CalledProcessError as e:
-        # Check if computation succeeded despite exit error
-        expected_output_dir = os.path.join(cluster_ed_dir, 'output')
-        
-        if os.path.exists(expected_output_dir):
-            h5_file = os.path.join(expected_output_dir, 'ed_results.h5')
-            if os.path.exists(h5_file):
-                logging.warning(f"[LB-NLCE] ED for cluster {cluster_id} crashed but HDF5 output exists - treating as success")
-                return True
-        
-        if e.returncode == -11:
-            logging.error(f"[LB-NLCE] ED for cluster {cluster_id} crashed with SIGSEGV")
-        else:
-            logging.error(f"[LB-NLCE] Error running ED for cluster {cluster_id}: {e}")
-        
-        logging.error(f"Stdout: {e.stdout.decode('utf-8')}")
-        logging.error(f"Stderr: {e.stderr.decode('utf-8')}")
-        return False
+        n_eigs = min(lb_n_eigenvalues, hilbert_dim)
+        logging.info(
+            f"[LB-NLCE] Cluster {cluster_id} ({num_sites} sites, dim={hilbert_dim}): "
+            f"partial Lanczos (N_low={n_eigs})"
+        )
+
+    options = EDOptions(
+        method=method,
+        eigenvalues=str(n_eigs),
+        thermo=lb_options.get("thermo", False),
+        temp_min=lb_options.get("temp_min", 0.001),
+        temp_max=lb_options.get("temp_max", 20.0),
+        temp_bins=lb_options.get("temp_bins", 100),
+        measure_spin=lb_options.get("measure_spin", False),
+        use_symm=True,
+        # LB-NLCE post-processing needs <n|O|n>, hence eigenvectors:
+        extra_flags=["--compute_eigenvectors"],
+    )
+
+    cmd = build_ed_command(
+        ed_executable=ed_executable,
+        ham_subdir=ham_subdir,
+        output_dir=cluster_ed_dir,
+        num_sites=num_sites,
+        options=options,
+        # LB-NLCE never wants the FULL -> SCALAPACK_MIXED auto-promotion;
+        # the method is already explicitly chosen above.
+        scalapack_threshold=10**9,
+        use_scalapack=False,
+    )
+
+    return run_ed_subprocess(
+        cmd,
+        output_root=cluster_ed_dir,
+        log_tag=f"LB-NLCE:cluster_{cluster_id}",
+    )
 
 
 def main():
@@ -360,7 +189,8 @@ def main():
     # Parameters for the entire workflow
     parser.add_argument('--max_order', type=int, required=True, help='Maximum order of clusters to generate')
     parser.add_argument('--base_dir', type=str, default='./nlce_results', help='Base directory for all results')
-    parser.add_argument('--ed_executable', type=str, default='../../../build/ED', help='Path to the ED executable')
+    parser.add_argument('--ed_executable', type=str, default=DEFAULT_ED_PATH,
+                       help='Path to the ED executable (defaults to <repo_root>/build/ED).')
     
     # Model parameters
     parser.add_argument('--Jxx', type=float, default=1.0, help='Jxx coupling')
@@ -406,16 +236,6 @@ def main():
                             'Clusters with >= sites use SCALAPACK_MIXED for distributed diagonalization.')
     parser.add_argument('--no_scalapack', action='store_true',
                        help='Disable ScaLAPACK - always use standard FULL diagonalization.')
-    
-    # Legacy arguments kept for backwards compatibility
-    parser.add_argument('--no_auto_method', action='store_true',
-                       help='(Ignored) Legacy argument.')
-    parser.add_argument('--full_ed_threshold', type=int, default=12,
-                       help='(Ignored) Legacy argument - use --scalapack_threshold instead.')
-    parser.add_argument('--block_size', type=int, default=8,
-                       help='(Ignored) Legacy argument.')
-    parser.add_argument('--use_gpu', action='store_true',
-                       help='(Ignored) Legacy argument.')
     
     # ========== Lanczos-Boosted NLCE Parameters ==========
     # Based on Bhattaram & Khatami method where large clusters use partial Lanczos
@@ -628,229 +448,72 @@ def main():
     else:
         logging.info("Skipping Exact Diagonalization step.")
     
-    # Step 3.5: Plot thermodynamic data for each cluster
-    if args.thermo and not args.skip_ed and not args.method == "mTPQ":
-        logging.info("="*80)
-        logging.info("Step 3.5: Plotting thermodynamic data for each cluster")
-        logging.info("="*80)
-        
-        # Create directory for thermodynamic plots
+    # Step 3.5: Plot per-cluster thermodynamic data (full / FTLM / TPQ).
+    # Reads via the unified `_common.load_*_thermo_dataset` helpers.
+    is_tpq = args.method == 'mTPQ'
+    if (args.thermo and not args.skip_ed) or is_tpq:
+        logging.info("=" * 80)
+        logging.info(
+            "Step 3.5: Plotting per-cluster %s thermodynamic data",
+            "TPQ" if is_tpq else "thermal",
+        )
+        logging.info("=" * 80)
+
         thermo_plots_dir = os.path.join(args.base_dir, f'thermo_plots_order_{args.max_order}')
         os.makedirs(thermo_plots_dir, exist_ok=True)
-        
+
         try:
             import matplotlib.pyplot as plt
-            
-            # Iterate through all clusters
-            for cluster_id, order, _ in tqdm(clusters, desc="Plotting thermodynamic data"):
-                cluster_ed_dir = os.path.join(ed_dir, f'cluster_{cluster_id}_order_{order}')
-                output_dir = os.path.join(cluster_ed_dir, "output")
-                
-                # Try HDF5 file first (new format)
-                h5_file = os.path.join(output_dir, "ed_results.h5")
-                thermo_data = None
-                
-                if HAS_H5PY and os.path.exists(h5_file):
-                    try:
-                        with h5py.File(h5_file, 'r') as f:
-                            # Check for thermodynamics group
-                            if '/thermodynamics' in f:
-                                thermo_grp = f['/thermodynamics']
-                                if 'temperatures' in thermo_grp:
-                                    thermo_data = {
-                                        'T': thermo_grp['temperatures'][:],
-                                        'energy': thermo_grp['energy'][:] if 'energy' in thermo_grp else None,
-                                        'specific_heat': thermo_grp['specific_heat'][:] if 'specific_heat' in thermo_grp else None,
-                                        'entropy': thermo_grp['entropy'][:] if 'entropy' in thermo_grp else None,
-                                        'free_energy': thermo_grp['free_energy'][:] if 'free_energy' in thermo_grp else None
-                                    }
-                            # Also try FTLM averaged
-                            elif '/ftlm/averaged' in f:
-                                ftlm_grp = f['/ftlm/averaged']
-                                if 'temperatures' in ftlm_grp:
-                                    thermo_data = {
-                                        'T': ftlm_grp['temperatures'][:],
-                                        'energy': ftlm_grp['energy'][:] if 'energy' in ftlm_grp else None,
-                                        'specific_heat': ftlm_grp['specific_heat'][:] if 'specific_heat' in ftlm_grp else None,
-                                        'entropy': ftlm_grp['entropy'][:] if 'entropy' in ftlm_grp else None,
-                                        'free_energy': ftlm_grp['free_energy'][:] if 'free_energy' in ftlm_grp else None
-                                    }
-                    except Exception as e:
-                        logging.warning(f"Error reading HDF5 for cluster {cluster_id}: {e}")
-                
-                # Fall back to legacy text file
-                if thermo_data is None:
-                    thermo_file = os.path.join(output_dir, "thermo/thermo_data.txt")
-                    if not os.path.exists(thermo_file):
-                        logging.warning(f"No thermodynamic data found for cluster {cluster_id}")
-                        continue
-                    
-                    try:
-                        data = np.loadtxt(thermo_file, comments='#')
-                        data = np.atleast_2d(data)
-                        thermo_data = {
-                            'T': data[:, 0],
-                            'energy': data[:, 1] if data.shape[1] > 1 else None,
-                            'specific_heat': data[:, 2] if data.shape[1] > 2 else None,
-                            'entropy': data[:, 3] if data.shape[1] > 3 else None,
-                            'free_energy': data[:, 4] if data.shape[1] > 4 else None
-                        }
-                    except Exception as e:
-                        logging.error(f"Error reading text file for cluster {cluster_id}: {e}")
-                        continue
-                
-                if thermo_data is None:
+        except ImportError:
+            logging.error("Matplotlib not installed. Skipping thermodynamic plots.")
+            plt = None
+
+        if plt is not None:
+            for cluster_id, order, _ in tqdm(clusters, desc="Plotting thermo"):
+                output_dir = os.path.join(ed_dir, f'cluster_{cluster_id}_order_{order}', 'output')
+                data = load_tpq_thermo_dataset(output_dir) if is_tpq else load_thermo_dataset(output_dir)
+                if data is None:
                     logging.warning(f"No thermodynamic data found for cluster {cluster_id}")
                     continue
-                
+
                 try:
-                    T = thermo_data['T']
+                    T = np.asarray(data['T'])
                     sort_idx = np.argsort(T)
                     T = T[sort_idx]
 
-                    # Create plots
-                    fig, axs = plt.subplots(2, 2, figsize=(12, 10))
-                    fig.suptitle(f"Thermodynamic Properties for Cluster {cluster_id} (Order {order})")
-
-                    # Plot energy
-                    if thermo_data['energy'] is not None:
-                        axs[0, 0].plot(T, thermo_data['energy'][sort_idx], 'r-')
-                    axs[0, 0].set_xlabel("Temperature")
-                    axs[0, 0].set_ylabel("Energy")
-                    axs[0, 0].set_xscale('log')
-                    axs[0, 0].grid(True)
-
-                    # Plot specific heat
-                    if thermo_data['specific_heat'] is not None:
-                        axs[0, 1].plot(T, thermo_data['specific_heat'][sort_idx], 'b-')
-                    axs[0, 1].set_xlabel("Temperature")
-                    axs[0, 1].set_ylabel("Specific Heat")
-                    axs[0, 1].set_xscale('log')
-                    axs[0, 1].grid(True)
-
-                    # Plot entropy
-                    if thermo_data['entropy'] is not None:
-                        axs[1, 0].plot(T, thermo_data['entropy'][sort_idx], 'g-')
-                    axs[1, 0].set_xlabel("Temperature")
-                    axs[1, 0].set_ylabel("Entropy")
-                    axs[1, 0].set_xscale('log')
-                    axs[1, 0].grid(True)
-
-                    # Plot free energy
-                    if thermo_data['free_energy'] is not None:
-                        axs[1, 1].plot(T, thermo_data['free_energy'][sort_idx], 'm-')
-                    axs[1, 1].set_xlabel("Temperature")
-                    axs[1, 1].set_ylabel("Free Energy")
-                    axs[1, 1].set_xscale('log')
-                    axs[1, 1].grid(True)
-
-                    # Save plot
-                    plt.tight_layout()
-                    plt.savefig(os.path.join(thermo_plots_dir, f"thermo_cluster_{cluster_id}_order_{order}.png"))
-                    plt.close(fig)
-
-                    logging.info(f"Thermodynamic plots created for cluster {cluster_id}")
-                    
-                except Exception as e:
-                    logging.error(f"Error plotting thermodynamic data for cluster {cluster_id}: {e}")
+                    if is_tpq:
+                        fig, axs = plt.subplots(2, 1, figsize=(10, 8))
+                        fig.suptitle(f"mTPQ thermodynamics: cluster {cluster_id} (order {order})")
+                        axs[0].plot(T, np.asarray(data['energy'])[sort_idx])
+                        axs[0].set(xlabel="Temperature", ylabel="Energy per site", xscale='log')
+                        axs[0].grid(True)
+                        axs[1].plot(T, np.asarray(data['specific_heat'])[sort_idx])
+                        axs[1].set(xlabel="Temperature", ylabel="Specific Heat", xscale='log')
+                        axs[1].grid(True)
+                        plt.tight_layout()
+                        plt.savefig(os.path.join(thermo_plots_dir,
+                                                 f"mTPQ_thermo_cluster_{cluster_id}_order_{order}.png"))
+                        plt.close(fig)
+                    else:
+                        fig, axs = plt.subplots(2, 2, figsize=(12, 10))
+                        fig.suptitle(f"Thermodynamics: cluster {cluster_id} (order {order})")
+                        for ax, key, color, label in [
+                            (axs[0, 0], 'energy', 'r-', "Energy"),
+                            (axs[0, 1], 'specific_heat', 'b-', "Specific Heat"),
+                            (axs[1, 0], 'entropy', 'g-', "Entropy"),
+                            (axs[1, 1], 'free_energy', 'm-', "Free Energy"),
+                        ]:
+                            if data.get(key) is not None:
+                                ax.plot(T, np.asarray(data[key])[sort_idx], color)
+                            ax.set(xlabel="Temperature", ylabel=label, xscale='log')
+                            ax.grid(True)
+                        plt.tight_layout()
+                        plt.savefig(os.path.join(thermo_plots_dir,
+                                                 f"thermo_cluster_{cluster_id}_order_{order}.png"))
+                        plt.close(fig)
+                except Exception as e:  # pragma: no cover - plot-only failure
+                    logging.error(f"Error plotting cluster {cluster_id}: {e}")
                     logging.error(traceback.format_exc())
-        
-        except ImportError:
-            logging.error("Matplotlib not installed. Skipping thermodynamic plots.")
-    elif args.method == 'mTPQ':
-        
-        logging.info("="*80)
-        logging.info("Step 3.5: Plotting mTPQ thermodynamic data for each cluster")
-        logging.info("="*80)
-
-        # Create directory for thermodynamic plots
-        thermo_plots_dir = os.path.join(args.base_dir, f'thermo_plots_order_{args.max_order}')
-        os.makedirs(thermo_plots_dir, exist_ok=True)
-
-        try:
-            import matplotlib.pyplot as plt
-            
-            # Iterate through all clusters
-            for cluster_id, order, _ in tqdm(clusters, desc="Plotting mTPQ thermodynamic data"):
-                cluster_ed_dir = os.path.join(ed_dir, f'cluster_{cluster_id}_order_{order}')
-                output_dir = os.path.join(cluster_ed_dir, "output")
-                
-                # Check if directory exists
-                if not os.path.exists(output_dir):
-                    logging.warning(f"No output directory found for cluster {cluster_id}")
-                    continue
-                
-                all_temps = None
-                all_energies = None
-                all_variances = None
-                
-                # Try HDF5 file first (new format)
-                h5_file = os.path.join(output_dir, "ed_results.h5")
-                if HAS_H5PY and os.path.exists(h5_file):
-                    try:
-                        with h5py.File(h5_file, 'r') as f:
-                            if '/tpq/averaged' in f and 'thermodynamics' in f['/tpq/averaged']:
-                                tpq_data = f['/tpq/averaged/thermodynamics'][:]
-                                # Format: beta, energy, variance, doublon, step
-                                betas = tpq_data[:, 0]
-                                all_temps = 1.0 / betas
-                                all_energies = tpq_data[:, 1]
-                                all_variances = tpq_data[:, 2] * betas**2
-                            elif '/tpq/samples/sample_0/thermodynamics' in f:
-                                # Read from first sample
-                                tpq_data = f['/tpq/samples/sample_0/thermodynamics'][:]
-                                betas = tpq_data[:, 0]
-                                all_temps = 1.0 / betas
-                                all_energies = tpq_data[:, 1]
-                                all_variances = tpq_data[:, 2] * betas**2
-                    except Exception as e:
-                        logging.warning(f"Error reading HDF5 TPQ data for cluster {cluster_id}: {e}")
-                
-                # Fall back to legacy text file format
-                if all_temps is None:
-                    ss_file = os.path.join(output_dir, "SS_rand0.dat")
-                    if not os.path.exists(ss_file):
-                        logging.warning(f"No TPQ data found for cluster {cluster_id}")
-                        continue
-                        
-                    SS_data = np.loadtxt(ss_file, unpack=True, skiprows=2)
-                    all_temps = 1.0 / SS_data[0]
-                    all_energies = SS_data[1] 
-                    all_variances = SS_data[2] * SS_data[0]**2
-
-                logging.info(f"Loaded TPQ data for cluster {cluster_id}")   
-
-                fig, axs = plt.subplots(2, 1, figsize=(10, 8))
-                fig.suptitle(f"mTPQ Thermodynamic Properties for Cluster {cluster_id} (Order {order})")
-
-                # Plot energy
-                axs[0].plot(all_temps, all_energies, label='Energy')
-                axs[0].set_xlabel("Temperature")
-                axs[0].set_ylabel("Energy per site")
-                axs[0].set_xscale('log')
-                axs[0].grid(True)
-                axs[0].legend()
-                
-                # Plot specific heat
-                axs[1].plot(all_temps, all_variances, label='Specific Heat')
-                axs[1].set_xlabel("Temperature")
-                axs[1].set_ylabel("Specific Heat")
-                axs[1].set_xscale('log')
-                axs[1].grid(True)
-                axs[1].legend()
-                
-                # Save plot
-                plt.tight_layout()
-                plt.savefig(os.path.join(thermo_plots_dir, f"mTPQ_thermo_cluster_{cluster_id}_order_{order}.png"))
-                plt.close(fig)
-
-                logging.info(f"mTPQ thermodynamic plots and data created for cluster {cluster_id}")
-
-        except ImportError:
-            logging.error("Matplotlib not installed. Skipping mTPQ thermodynamic plots.")
-        except Exception as e:
-            logging.error(f"Error in mTPQ thermodynamic analysis: {e}")
-            logging.error(traceback.format_exc())
 
     # Step 4: Perform NLCE summation
     if not args.skip_nlc:

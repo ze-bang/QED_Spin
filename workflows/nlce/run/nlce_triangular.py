@@ -1,260 +1,115 @@
 #!/usr/bin/env python3
+"""NLCE workflow driver: triangular lattice, full / ScaLAPACK ED.
+
+Sister to `nlce.py` for the triangular lattice. Supports two NLCE
+expansion schemes:
+
+* Triangle-based (the default): order = number of triangles. Gives far
+  fewer clusters per order; useful for frustrated systems.
+* Site-based (`--site_based`): order = number of sites.
+
+Models supported via `--model`:
+  - `xxz_j1j2`   (default): J1-J2 XXZ
+  - `kitaev`            : J-K-Γ-Γ' Kitaev
+  - `anisotropic`       : YbMgGaO4-style anisotropic exchange
 """
-NLCE Workflow - Automates the entire NLCE calculation process for triangular lattice.
 
-This script orchestrates the full Numerical Linked Cluster Expansion workflow:
-1. Generate topologically distinct clusters on the triangular lattice
-2. Prepare Hamiltonian parameters for each cluster (J1-J2 Heisenberg, XXZ, etc.)
-3. Run Exact Diagonalization for each cluster to compute spectrum
-4. Perform NLCE summation to obtain thermodynamic properties
-
-Supports two NLCE expansion schemes:
-- Site-based NLCE (default): Order = number of sites
-- Triangle-based NLCE (--triangle_based): Order = number of triangles
-  This gives far fewer clusters at each order, useful for frustrated systems
-"""
-
-import os
-import sys
-import subprocess
 import argparse
-import time
-import glob
-import re
-import multiprocessing
 import logging
+import multiprocessing
+import os
+import subprocess
+import sys
+
 from tqdm import tqdm
-import numpy as np
-import traceback
 
-# Compute workspace root from script location
-_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-_WORKSPACE_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(_SCRIPT_DIR)))
-_DEFAULT_ED_PATH = os.path.join(_WORKSPACE_ROOT, 'build', 'ED')
+_REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
 
-try:
-    import h5py
-    HAS_H5PY = True
-except ImportError:
-    HAS_H5PY = False
-
-
-def check_gpu_available():
-    """Check if GPU is available for CUDA operations."""
-    try:
-        result = subprocess.run(
-            ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
-            capture_output=True, text=True, check=True, timeout=5
-        )
-        gpu_names = result.stdout.strip().split("\n")
-        if gpu_names and gpu_names[0]:
-            return True
-        return False
-    except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired):
-        return False
-
-
-def setup_logging(log_file):
-    """Set up logging to file and console."""
-    logging.basicConfig(
-        level=logging.INFO,
-        format='%(asctime)s - %(levelname)s - %(message)s',
-        handlers=[
-            logging.FileHandler(log_file),
-            logging.StreamHandler()
-        ]
-    )
-
-
-def get_cluster_files(cluster_info_dir):
-    """Get list of cluster files and extract their IDs and orders."""
-    cluster_files = glob.glob(os.path.join(cluster_info_dir, "cluster_*_order_*.dat"))
-    clusters = []
-    
-    for file_path in cluster_files:
-        basename = os.path.basename(file_path)
-        match = re.search(r'cluster_(\d+)_order_(\d+)', basename)
-        if match:
-            cluster_id = int(match.group(1))
-            order = int(match.group(2))
-            clusters.append((cluster_id, order, file_path))
-    
-    return sorted(clusters)
-
-
-def get_num_sites(file_path):
-    """Extract number of sites from a cluster file."""
-    with open(file_path, 'r') as f:
-        for line in f:
-            if "Number of vertices:" in line:
-                return int(line.split(":")[1].strip())
-    return None
+from workflows.nlce._common import (  # noqa: E402
+    DEFAULT_ED_PATH,
+    EDOptions,
+    build_ed_command,
+    count_sites_in_info_file,
+    get_cluster_files,
+    run_ed_subprocess,
+    setup_logging,
+)
 
 
 def run_ed_for_cluster(args):
-    """Run ED for a single cluster.
-    
-    Method selection based on system size:
-    - FULL: For small clusters (< scalapack_threshold sites)
-    - SCALAPACK_MIXED: For large clusters (distributed diagonalization with mixed precision)
-    
-    Uses --symm flag for automatic symmetry selection on larger clusters.
+    """Run ED for a single triangular cluster.
+
+    Two key triangular-specific knobs vs `nlce.py`:
+
+    * `symm_threshold`: only attach `--symm` for clusters with strictly
+      more sites than this threshold (default 13). Smaller clusters
+      tend not to benefit from the symmetry-projected basis.
+    * `streaming_symmetry`: opt-in to the streaming-symmetry kernel
+      with `<ham_subdir>/basis_cache` as the pre-baked orbit basis.
+    * For `num_sites <= 8` we pin `OMP_NUM_THREADS=1` to dodge an
+      OpenMP race condition on very small matrices.
     """
     cluster_id, order, ed_executable, ham_dir, ed_dir, ed_options, use_gpu = args
-    
-    # Create output directory for ED results (including the 'output' subdirectory)
+
     cluster_ed_dir = os.path.join(ed_dir, f'cluster_{cluster_id}_order_{order}')
-    output_subdir = os.path.join(cluster_ed_dir, 'output')
-    os.makedirs(output_subdir, exist_ok=True)
-    
-    # Set up ED command
+    os.makedirs(os.path.join(cluster_ed_dir, 'output'), exist_ok=True)
+
     ham_subdir = os.path.join(ham_dir, f'cluster_{cluster_id}_order_{order}')
-    
     if not os.path.exists(ham_subdir):
         logging.warning(f"Hamiltonian directory not found for cluster {cluster_id}")
         return False
-    
-    # Get number of sites from the input file
-    site_info_file = os.path.join(ham_subdir, f"*_site_info.dat")
-    site_info_files = glob.glob(site_info_file)
-    
-    if not site_info_files:
+
+    num_sites = count_sites_in_info_file(ham_subdir)
+    if num_sites is None:
         logging.warning(f"Site info file not found for cluster {cluster_id}")
         return False
-    
-    # Count lines in site info file to get number of sites
-    num_sites = 0
-    with open(site_info_files[0], 'r') as f:
-        for line in f:
-            if not line.startswith('#') and line.strip():
-                num_sites += 1
-    
-    # Calculate Hilbert space dimension
-    hilbert_dim = 2 ** num_sites
-    
-    # Symmetry threshold for using --symm flag
-    symm_threshold = ed_options.get("symm_threshold", 13)
-    use_symm = (num_sites > symm_threshold)
-    
-    # Check if a specific ED method was requested (e.g. FULL_GPU)
-    requested_method = ed_options.get("method", "FULL").upper()
-    
-    # Threshold for switching to ScaLAPACK (distributed diagonalization)
-    scalapack_threshold = ed_options.get("scalapack_threshold", 16)
-    use_scalapack = (num_sites >= scalapack_threshold and ed_options.get("use_scalapack", True))
-    
-    symm_indicator = ' with --symm' if use_symm else ''
-    
-    if requested_method == 'FULL_GPU':
-        # GPU full diagonalization requested explicitly
-        logging.info(f"Cluster {cluster_id} ({num_sites} sites, dim={hilbert_dim}): Using FULL_GPU diagonalization{symm_indicator}")
-        cmd = [
-            ed_executable,
-            ham_subdir,
-            '--method=FULL_GPU',
-            '--eigenvalues=FULL',
-            f'--output={cluster_ed_dir}/output',
-            f'--num_sites={num_sites}',
-            '--spin_length=0.5',
-        ]
-    elif use_scalapack:
-        # Large cluster: use ScaLAPACK with mixed precision for efficient distributed diagonalization
-        logging.info(f"Cluster {cluster_id} ({num_sites} sites, dim={hilbert_dim}): Using SCALAPACK_MIXED{symm_indicator}")
-        cmd = [
-            ed_executable,
-            ham_subdir,
-            '--method=SCALAPACK_MIXED',
-            '--eigenvalues=FULL',
-            f'--output={cluster_ed_dir}/output',
-            f'--num_sites={num_sites}',
-            '--spin_length=0.5',
-        ]
-    else:
-        # Small cluster: use standard FULL diagonalization
-        logging.info(f"Cluster {cluster_id} ({num_sites} sites, dim={hilbert_dim}): Using FULL diagonalization{symm_indicator}")
-        cmd = [
-            ed_executable,
-            ham_subdir,
-            '--method=FULL',
-            '--eigenvalues=FULL',
-            f'--output={cluster_ed_dir}/output',
-            f'--num_sites={num_sites}',
-            '--spin_length=0.5',
-        ]
-    
-    if use_symm:
-        cmd.append('--symm')
 
-    # Streaming-symmetry diagonalization with pre-cached orbit basis
-    if ed_options.get("streaming_symmetry", False):
-        cmd.append('--streaming-symmetry')
-        # Point to the pre-cached orbit basis for this cluster
-        basis_cache = os.path.join(ham_subdir, 'basis_cache')
-        if os.path.isdir(basis_cache):
-            cmd.append(f'--basis-cache-dir={basis_cache}')
+    use_symm = (num_sites > ed_options.get("symm_threshold", 13))
+    streaming_symmetry = ed_options.get("streaming_symmetry", False)
+    basis_cache = os.path.join(ham_subdir, 'basis_cache') if streaming_symmetry else None
 
-    if ed_options.get("measure_spin", False):
-        cmd.append('--measure_spin')
-    
-    # Add thermodynamic parameters if required
-    if ed_options.get("thermo", False):
-        cmd.extend([
-            '--thermo',
-            f'--temp_min={ed_options["temp_min"]}',
-            f'--temp_max={ed_options["temp_max"]}',
-            f'--temp_bins={ed_options["temp_bins"]}'
-        ])
-    
-    # Set ED_PYTHON environment variable
-    env = os.environ.copy()
-    env['ED_PYTHON'] = sys.executable
-    
-    # For small matrices (num_sites <= 8), use single-threaded OpenMP to avoid race conditions
-    # This is a workaround for an OpenMP bug with very small matrices
+    options = EDOptions(
+        method=ed_options.get("method", "FULL"),
+        eigenvalues="FULL",
+        thermo=ed_options.get("thermo", False),
+        temp_min=ed_options.get("temp_min", 0.1),
+        temp_max=ed_options.get("temp_max", 10.0),
+        temp_bins=ed_options.get("temp_bins", 100),
+        measure_spin=ed_options.get("measure_spin", False),
+        use_symm=use_symm,
+        streaming_symmetry=streaming_symmetry,
+        basis_cache_dir=basis_cache,
+    )
+
+    cmd = build_ed_command(
+        ed_executable=ed_executable,
+        ham_subdir=ham_subdir,
+        output_dir=cluster_ed_dir,
+        num_sites=num_sites,
+        options=options,
+        scalapack_threshold=ed_options.get("scalapack_threshold", 16),
+        use_scalapack=ed_options.get("use_scalapack", True),
+    )
+
+    method = next((flag.split('=', 1)[1] for flag in cmd if flag.startswith('--method=')), 'FULL')
+    logging.info(
+        "Cluster %d (%d sites, dim=2^%d): %s%s",
+        cluster_id, num_sites, num_sites, method,
+        " with --symm" if use_symm else "",
+    )
+
+    extra_env = {}
     if num_sites <= 8:
-        env['OMP_NUM_THREADS'] = '1'
-    
-    try:
-        # Timeout: 1 hour per cluster by default; prevents infinite hangs
-        ed_timeout = int(os.environ.get('NLCE_ED_TIMEOUT', 3600))
-        result = subprocess.run(cmd, check=True, capture_output=True, env=env,
-                                timeout=ed_timeout)
-        return True
-    except subprocess.TimeoutExpired:
-        logging.error(f"ED for cluster {cluster_id} timed out after {ed_timeout}s")
-        return False
-    except subprocess.CalledProcessError as e:
-        # Check if the computation actually succeeded despite the error
-        expected_output_dir = os.path.join(cluster_ed_dir, 'output')
-        
-        if os.path.exists(expected_output_dir):
-            h5_file = os.path.join(expected_output_dir, 'ed_results.h5')
-            if os.path.exists(h5_file):
-                # Validate HDF5 file integrity before treating as success
-                try:
-                    import h5py
-                    with h5py.File(h5_file, 'r') as f:
-                        # Check that eigenvalues dataset exists and has data
-                        if 'eigenvalues' not in f:
-                            logging.error(f"HDF5 for cluster {cluster_id} missing 'eigenvalues' dataset")
-                            return False
-                        if f['eigenvalues'].shape[0] == 0:
-                            logging.error(f"HDF5 for cluster {cluster_id} has empty eigenvalues")
-                            return False
-                    logging.warning(f"ED for cluster {cluster_id} crashed but HDF5 output verified - treating as success")
-                    return True
-                except Exception as h5_err:
-                    logging.error(f"HDF5 for cluster {cluster_id} is corrupt: {h5_err}")
-                    return False
-        
-        if e.returncode == -11:
-            logging.error(f"ED for cluster {cluster_id} crashed with SIGSEGV")
-        else:
-            logging.error(f"Error running ED for cluster {cluster_id}: {e}")
-        
-        logging.error(f"Stdout: {e.stdout.decode('utf-8')}")
-        logging.error(f"Stderr: {e.stderr.decode('utf-8')}")
-        return False
+        extra_env["OMP_NUM_THREADS"] = "1"
+
+    return run_ed_subprocess(
+        cmd,
+        output_root=cluster_ed_dir,
+        extra_env=extra_env,
+        log_tag=f"ED:cluster_{cluster_id}",
+    )
 
 
 def main():
@@ -263,8 +118,8 @@ def main():
     # Parameters for the entire workflow
     parser.add_argument('--max_order', type=int, required=True, help='Maximum order of clusters to generate')
     parser.add_argument('--base_dir', type=str, default='./nlce_triangular_results', help='Base directory for all results')
-    parser.add_argument('--ed_executable', type=str, default=_DEFAULT_ED_PATH, 
-                        help='Path to the ED executable')
+    parser.add_argument('--ed_executable', type=str, default=DEFAULT_ED_PATH,
+                        help='Path to the ED executable (defaults to <repo_root>/build/ED).')
     
     # Model parameters for triangular lattice
     parser.add_argument('--J1', type=float, default=1.0, help='Nearest-neighbor exchange coupling')
@@ -344,16 +199,6 @@ def main():
                        help='Skip orbit basis precomputation (assumes basis cache already exists). '
                             'Only meaningful with --streaming-symmetry.')
 
-    # Legacy arguments kept for backwards compatibility
-    parser.add_argument('--no_auto_method', action='store_true',
-                       help='(Ignored) Legacy argument.')
-    parser.add_argument('--full_ed_threshold', type=int, default=14,
-                       help='(Ignored) Legacy argument - use --scalapack_threshold instead.')
-    parser.add_argument('--block_size', type=int, default=8,
-                       help='(Ignored) Legacy argument.')
-    parser.add_argument('--use_gpu', action='store_true',
-                       help='(Ignored) Legacy argument.')
-    
     parser.add_argument('--visualize', action='store_true', help='Generate cluster visualizations')
     
     # NLCE expansion type (triangle-based is the default)

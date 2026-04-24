@@ -7,6 +7,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed — NLCE workflow modernization
+
+- New shared-infrastructure module **`workflows/nlce/_common.py`** (~500
+  LOC) consolidates the boilerplate that used to be triplicated across
+  the three NLCE driver scripts: file/console logging, cluster-file
+  discovery + parsing, the `EDOptions` dataclass + `build_ed_command(...)`
+  argv builder, the exit-code-vs-output `run_ed_subprocess(...)`
+  driver (with the long-standing "ED crashed during cleanup but the
+  HDF5 file is intact" reconciliation), and HDF5/text-file fallback
+  readers (`load_thermo_dataset`, `load_tpq_thermo_dataset`).
+- New package init files **`workflows/__init__.py`** and
+  **`workflows/nlce/__init__.py`** make this a proper Python package.
+  Driver scripts add a `sys.path` shim so they remain runnable
+  directly without `pip install -e .`.
+- `workflows/nlce/run/nlce.py` (pyrochlore, full / Lanczos-boosted ED)
+  refactored: `run_ed_for_cluster`, `run_lb_ed_for_cluster`, and the
+  per-cluster thermodynamics-plotting step now go through the shared
+  helpers; the four legacy ignored CLI flags
+  (`--no_auto_method`, `--full_ed_threshold`, `--block_size`,
+  `--use_gpu`) are dropped; the duplicated thermal/mTPQ plotting
+  branches collapsed into a single block driven by the shared
+  HDF5/text readers. Net: 927 → 590 LOC.
+- `workflows/nlce/run/nlce_ftlm.py` (pyrochlore, FTLM with hybrid
+  full-ED for small clusters) refactored: `run_full_ed_for_cluster`
+  and `run_ftlm_for_cluster` now go through the shared helpers; the
+  adaptive Krylov heuristic stays. Net: 789 → 689 LOC.
+- `workflows/nlce/run/nlce_triangular.py` (triangular lattice, full /
+  ScaLAPACK ED) refactored: `run_ed_for_cluster` (with the
+  triangular-specific `--symm_threshold` and streaming-symmetry
+  knobs, plus the OpenMP=1 workaround for `num_sites <= 8`) goes
+  through the shared helpers; the four legacy ignored flags are
+  dropped. Net: 701 → 547 LOC.
+- New **`workflows/nlce/README.md`** documents the modernized layout,
+  the `_common` API surface, the on-disk output schema, and how to
+  add new drivers.
+- All three drivers now default `--ed_executable` to
+  `<repo_root>/build/ED` via `_common.DEFAULT_ED_PATH` rather than
+  the brittle `../../../build/ED` relative path.
+
+Net: ~700 LOC of duplicated driver code retired into ~500 LOC of
+shared, documented infrastructure. `ctest` (102/102) and `pytest`
+(81/81) remain green; all three drivers' `--help` continues to load
+cleanly.
+
 ### Removed — Phase 2 (DSSF consolidation, P2.14)
 
 - **`src/apps/TPQ_DSSF.cpp` (4 174 LOC)** — the historical standalone DSSF
