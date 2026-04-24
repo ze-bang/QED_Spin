@@ -230,6 +230,13 @@ set_target_properties(ed_symmetry PROPERTIES POSITION_INDEPENDENT_CODE ON)
 #                              `compute_vbs_order`, `compute_plaquette_order`,
 #                              `compute_sq_2d_grid`,
 #                              `compute_all_order_parameters`.
+#   * cli.cpp               -- BFG order-parameter CLI orchestration helpers
+#                              (`process_all_temperatures`,
+#                              `scan_jpm_directories`, `run_single_file`,
+#                              `run_scan`, `print_usage`) consumed by
+#                              `compute_bfg_order_parameters`. Keeps the
+#                              driver itself a thin argv shell. P2.1 (9th
+#                              slice).
 #
 # The CPU driver (`compute_bfg_order_parameters`), the GPU driver
 # (`compute_bfg_order_parameters_gpu`), and the future Python bindings all
@@ -239,7 +246,13 @@ set_target_properties(ed_symmetry PROPERTIES POSITION_INDEPENDENT_CODE ON)
 # Link-deps: OpenMP for the correlation kernels (PUBLIC so executables
 # inherit it). HDF5 is now PUBLIC because `wavefunction_io.cpp` exposes
 # H5::Exception in its declared signatures (the headers themselves only
-# include <complex>, but the implementation pulls in libhdf5_cpp).
+# include <complex>, but the implementation pulls in libhdf5_cpp). MPI
+# integration is intentionally compile-time-optional inside
+# `cli.cpp` -- the calling executable owns whether to define USE_MPI and
+# link MPI; `ed_bfg` itself never pulls MPI into its PUBLIC link line so
+# the library remains usable from non-MPI executables (the GPU driver,
+# the Python `_core.so` extension, the unit-test binaries) without any
+# MPI dependency leaking through.
 # -----------------------------------------------------------------------------
 add_library(ed_bfg STATIC
     ${BFG_DIR}/cluster.cpp
@@ -251,6 +264,7 @@ add_library(ed_bfg STATIC
     ${BFG_DIR}/wavefunction_io.cpp
     ${BFG_DIR}/results_io.cpp
     ${BFG_DIR}/order_parameters.cpp
+    ${BFG_DIR}/cli.cpp
 )
 target_include_directories(ed_bfg PUBLIC ${_ED_PUBLIC_INCLUDES})
 target_include_directories(ed_bfg PRIVATE ${HDF5_INCLUDE_DIRS})
