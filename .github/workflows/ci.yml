@@ -123,3 +123,195 @@ jobs:
       - name: Run pytest
         run: |
           python -m pytest python/tests -v
+
+  # ---------------------------------------------------------------------------
+  # Clang Debug lane: catch UB / signed-overflow / strict-aliasing issues that
+  # GCC Release silently optimizes away. Builds the same TUs and runs ctest
+  # again so we get coverage on the alternate compiler.
+  # ---------------------------------------------------------------------------
+  linux-clang-debug:
+    name: Linux / Clang / OpenBLAS / Debug
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential \
+            clang \
+            cmake \
+            ninja-build \
+            libopenblas-dev \
+            liblapacke-dev \
+            libhdf5-dev \
+            libhdf5-cpp-103 \
+            libeigen3-dev \
+            libarpack2-dev \
+            pkg-config
+
+      - name: Print toolchain versions
+        run: |
+          clang --version | head -1
+          clang++ --version | head -1
+          cmake --version | head -1
+
+      - name: Configure (clang Debug, no CUDA, no MPI)
+        env:
+          CC: clang
+          CXX: clang++
+        run: |
+          cmake -S . -B build-clang-debug \
+            -G Ninja \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DBUILD_ED_TESTS=ON \
+            -DWITH_CUDA=OFF \
+            -DWITH_MPI=OFF \
+            -DBLAS_PROFILE=OPENBLAS
+
+      - name: Build
+        run: cmake --build build-clang-debug -- -j$(nproc)
+
+      - name: Test (ctest)
+        run: ctest --test-dir build-clang-debug --output-on-failure
+
+      - name: Upload CTest logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ctest-logs-linux-clang-debug
+          path: |
+            build-clang-debug/Testing/Temporary/LastTest.log
+            build-clang-debug/Testing/Temporary/LastTestsFailed.log
+          if-no-files-found: ignore
+          retention-days: 7
+
+  # ---------------------------------------------------------------------------
+  # clang-tidy lane: pure analysis, warnings only (||true). Runs against the
+  # ed_core / ed_dssf / ed_io / ed_solvers_cpu translation units using the
+  # checks defined in .clang-tidy at repo root. We deliberately do NOT fail
+  # the build on warnings yet -- that flip will happen once the existing
+  # technical debt is triaged. The lane exists today so newly-added code is
+  # reviewed under the same lens.
+  # ---------------------------------------------------------------------------
+  linux-clang-tidy:
+    name: Linux / clang-tidy (warnings only)
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential \
+            clang \
+            clang-tidy \
+            cmake \
+            ninja-build \
+            libopenblas-dev \
+            liblapacke-dev \
+            libhdf5-dev \
+            libhdf5-cpp-103 \
+            libeigen3-dev \
+            libarpack2-dev \
+            pkg-config
+
+      - name: Configure with compile_commands.json
+        env:
+          CC: clang
+          CXX: clang++
+        run: |
+          cmake -S . -B build-tidy \
+            -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
+            -DBUILD_ED_TESTS=OFF \
+            -DWITH_CUDA=OFF \
+            -DWITH_MPI=OFF \
+            -DBLAS_PROFILE=OPENBLAS
+
+      - name: Build (needed so generated headers exist)
+        run: cmake --build build-tidy --target ed_core ed_io ed_dssf ed_solvers_cpu -- -j$(nproc)
+
+      - name: Run clang-tidy on src/dssf and src/core (warnings only)
+        run: |
+          # Keep the lane bounded on hosted runners: lint only the new
+          # ed::dssf code + src/core. Other directories will be added as
+          # the modernization rolls forward.
+          shopt -s globstar nullglob
+          files=(src/dssf/**/*.cpp src/core/**/*.cpp)
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "No source files matched -- skipping."
+            exit 0
+          fi
+          echo "Linting ${#files[@]} files..."
+          clang-tidy -p build-tidy --quiet "${files[@]}" || true
+
+  # ---------------------------------------------------------------------------
+  # CUDA build-only lane: install the CUDA toolkit and configure+build the
+  # GPU TUs. We do NOT run the GPU tests because hosted runners have no NVIDIA
+  # device -- but compiling against nvcc catches header / API breakage that
+  # the CPU-only lanes cannot see. Disabled by default; uncomment the
+  # `runs-on:` pin to a self-hosted GPU runner to actually execute tests.
+  # ---------------------------------------------------------------------------
+  linux-cuda-build:
+    name: Linux / CUDA build-only (no GPU)
+    runs-on: ubuntu-22.04
+    timeout-minutes: 45
+    # Skip on PRs from forks (no access to the CUDA-keyring secret) and skip
+    # if WITH_CUDA is set to OFF in the workflow_dispatch payload.
+    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install CUDA toolkit (12.x)
+        uses: Jimver/cuda-toolkit@v0.2.16
+        with:
+          cuda: "12.4.1"
+          method: "network"
+          sub-packages: '["nvcc", "cudart-dev", "cublas-dev", "cusparse-dev", "cusolver-dev", "thrust"]'
+
+      - name: Install host build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential \
+            cmake \
+            ninja-build \
+            libopenblas-dev \
+            liblapacke-dev \
+            libhdf5-dev \
+            libhdf5-cpp-103 \
+            libeigen3-dev \
+            libarpack2-dev \
+            pkg-config
+
+      - name: Print toolchain versions
+        run: |
+          gcc --version | head -1
+          nvcc --version | head -4
+          cmake --version | head -1
+
+      - name: Configure (CUDA on, MPI off, single SM 70 to keep build short)
+        run: |
+          cmake -S . -B build-cuda \
+            -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_ED_TESTS=OFF \
+            -DWITH_CUDA=ON \
+            -DWITH_MPI=OFF \
+            -DBLAS_PROFILE=OPENBLAS \
+            -DCMAKE_CUDA_ARCHITECTURES=70
+
+      - name: Build (compile only, no execution)
+        run: cmake --build build-cuda --target ed_solvers_gpu ED TPQ_DSSF -- -j$(nproc)
