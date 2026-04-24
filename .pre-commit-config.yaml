@@ -1,0 +1,81 @@
+# https://pre-commit.com
+# Install once:  pip install pre-commit && pre-commit install
+# Run on demand: pre-commit run --all-files
+#
+# All checks are intentionally LOCAL ONLY (no network) so collaborators
+# without internet during a flight or on a cluster compute node can still
+# commit. The clang-format hook expects clang-format >= 17 on PATH.
+
+minimum_pre_commit_version: "3.5.0"
+
+repos:
+  # ---------------------------------------------------------------------------
+  # Generic safety nets
+  # ---------------------------------------------------------------------------
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.6.0
+    hooks:
+      - id: trailing-whitespace
+        exclude: '\.md$'
+      - id: end-of-file-fixer
+      - id: check-merge-conflict
+      - id: check-added-large-files
+        args: ['--maxkb=512']
+        exclude: '^tests/fixtures/'
+      - id: check-case-conflict
+      - id: mixed-line-ending
+        args: ['--fix=lf']
+      - id: check-yaml
+      - id: check-json
+        exclude: '\.vscode/.*\.json$'
+      - id: check-toml
+      - id: check-symlinks
+      - id: destroyed-symlinks
+      - id: no-commit-to-branch
+        args: ['--branch', 'main']
+
+  # ---------------------------------------------------------------------------
+  # C++ formatting (uses local clang-format binary; respects .clang-format)
+  # ---------------------------------------------------------------------------
+  - repo: https://github.com/pre-commit/mirrors-clang-format
+    rev: v17.0.6
+    hooks:
+      - id: clang-format
+        types_or: [c, c++, cuda]
+        files: \.(c|h|cc|cxx|cpp|hh|hpp|hxx|cu|cuh|inl|ipp|tpp)$
+        exclude: '^(build|build-.*|_skbuild|.*third_party).*'
+
+  # ---------------------------------------------------------------------------
+  # Python formatting + lint (helpers + future quantum_ed/ bindings)
+  # ---------------------------------------------------------------------------
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.6.9
+    hooks:
+      - id: ruff
+        args: [--fix, --exit-non-zero-on-fix]
+      - id: ruff-format
+
+  # ---------------------------------------------------------------------------
+  # CMake formatting + lint
+  # ---------------------------------------------------------------------------
+  - repo: https://github.com/cheshirekow/cmake-format-precommit
+    rev: v0.6.13
+    hooks:
+      - id: cmake-format
+        args: ['--line-width', '100', '--tab-size', '4']
+
+  # ---------------------------------------------------------------------------
+  # YAML lint (catches CI workflow typos before they hit GitHub)
+  # ---------------------------------------------------------------------------
+  - repo: https://github.com/adrienverge/yamllint.git
+    rev: v1.35.1
+    hooks:
+      - id: yamllint
+        args: ['-d', '{extends: relaxed, rules: {line-length: {max: 200}}}']
+
+ci:
+  # When running in CI mode (https://pre-commit.ci/), skip the no-commit-to-branch
+  # check because CI legitimately commits to PR branches.
+  skip: [no-commit-to-branch]
+  autofix_commit_msg: 'style: pre-commit autofixes'
+  autoupdate_schedule: monthly
