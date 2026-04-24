@@ -21,8 +21,11 @@
 
 #include <ed/core/construct_ham.h>
 
+#include <array>
 #include <cstdint>
+#include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace ed::dssf {
@@ -77,6 +80,29 @@ struct OperatorSpec {
     /// Path to the lattice positions file (passed through to every
     /// `*Operator(...)` constructor).
     std::string positions_file;
+
+    /// If true, build only the left observable (`obs_1`) and leave
+    /// `obs_2` empty. Used by the `single_expectation` workflow that
+    /// evaluates ⟨ψ|O|ψ⟩ rather than ⟨ψ|O₁†O₂|ψ⟩.
+    ///
+    /// When set, the legacy ladder-basis swap of the first operator
+    /// index (`first = 1 - first` for op != 2) is also skipped, and the
+    /// observable name uses just the first operator label (e.g. "Sz")
+    /// instead of the concatenation ("SzSz"). This keeps HDF5 group
+    /// names byte-identical with TPQ_DSSF's legacy single-expectation
+    /// path.
+    bool single_obs_only{false};
+
+    /// If set, restrict the `sublattice` builder to exactly one
+    /// (sub_i, sub_j) pair instead of iterating over the full
+    /// `i <= j < unit_cell_size` triangle. Ignored for non-sublattice
+    /// `operator_type`s.
+    ///
+    /// In `single_obs_only` mode (single_expectation workflow) the
+    /// emitted name uses just `_sub<sub_i>` rather than the full
+    /// `_sub<sub_i>_sub<sub_j>` so it round-trips with the legacy
+    /// TPQ_DSSF naming convention.
+    std::optional<std::pair<std::uint64_t, std::uint64_t>> sublattice_filter;
 };
 
 /**
@@ -103,5 +129,25 @@ struct ObservablePairs {
  *         empty, or `spec.polarization` is not a 3-vector.
  */
 ObservablePairs build_observable_pairs(const OperatorSpec& spec);
+
+/**
+ * Compute the (e1, e2) orthonormal basis used by `transverse*` operators
+ * at a single momentum point.
+ *
+ * - `e1` is always the polarization vector itself (the SF/longitudinal
+ *   projection).
+ * - `e2` = normalize(Q × polarization). When Q ∥ polarization the cross
+ *   product vanishes and we fall back to {y, polarization} or
+ *   {x, polarization} depending on which component of `polarization`
+ *   dominates -- matching the legacy TPQ_DSSF.cpp behaviour.
+ *
+ * Exposed publicly so CLI / Python callers can introspect the bases that
+ * `build_observable_pairs` will use internally (e.g. for logging).
+ *
+ * @throws std::invalid_argument if `Q` or `polarization` is not a 3-vector.
+ */
+std::pair<std::array<double, 3>, std::array<double, 3>>
+compute_transverse_bases(const std::vector<double>& Q,
+                         const std::vector<double>& polarization);
 
 } // namespace ed::dssf

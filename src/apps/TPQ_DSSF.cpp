@@ -19,6 +19,7 @@
 #include <unordered_set> // for operator group tracking
 #include <ed/core/construct_ham.h>
 #include <ed/core/hdf5_io.h>
+#include <ed/dssf/operator_spec.h>
 #include <ed/solvers/TPQ.h>
 #include <ed/solvers/observables.h>
 #ifdef WITH_MPI
@@ -2347,24 +2348,6 @@ int main(int argc, char* argv[]) {
     }
     int N = static_cast<int>(N64);
     
-    // Helper function for cross product
-    auto cross_product = [](const std::vector<double>& a, const std::vector<double>& b) -> std::array<double, 3> {
-        return {
-            a[1] * b[2] - a[2] * b[1],
-            a[2] * b[0] - a[0] * b[2],
-            a[0] * b[1] - a[1] * b[0]
-        };
-    };
-    
-    // Helper function to normalize a vector
-    auto normalize = [](const std::array<double, 3>& v) -> std::array<double, 3> {
-        double norm = std::sqrt(v[0]*v[0] + v[1]*v[1] + v[2]*v[2]);
-        if (norm < 1e-10) {
-            return {0.0, 0.0, 0.0};
-        }
-        return {v[0]/norm, v[1]/norm, v[2]/norm};
-    };
-    
     if (rank == 0) {
         std::cout << "\nMomentum points:" << std::endl;
         for (size_t i = 0; i < momentum_points.size(); i++) {
@@ -2428,53 +2411,21 @@ int main(int argc, char* argv[]) {
     // Synchronize all processes
     MPI_Barrier(MPI_COMM_WORLD);
     
-    // Pre-compute transverse bases for transverse operators (needed for both krylov and taylor methods)
-    std::vector<std::array<double,3>> transverse_basis_1, transverse_basis_2;
-    
-    if (operator_type == "transverse" || operator_type == "transverse_experimental") {
-        int num_momentum = momentum_points.size();
-        transverse_basis_1.resize(num_momentum);
-        transverse_basis_2.resize(num_momentum);
-        
-        // transverse_basis_1 is the same for all momentum points (the polarization vector)
-        std::array<double, 3> pol_array = {polarization[0], polarization[1], polarization[2]};
-        
+    // For transverse operator types, log the (e1, e2) bases computed by
+    // ed::dssf::compute_transverse_bases (which is also what
+    // ed::dssf::build_observable_pairs uses internally below). Diagnostic
+    // only -- the actual operators are constructed inside the library.
+    if (rank == 0 &&
+        (operator_type == "transverse" || operator_type == "transverse_experimental")) {
+        std::cout << "\nTransverse bases for momentum points:" << std::endl;
+        const int num_momentum = static_cast<int>(momentum_points.size());
         for (int qi = 0; qi < num_momentum; ++qi) {
-            transverse_basis_1[qi] = pol_array;
-            
-            // transverse_basis_2 is Q × polarization (cross product)
-            auto cross = cross_product(momentum_points[qi], polarization);
-            transverse_basis_2[qi] = normalize(cross);
-            
-            // Handle special case: if Q is parallel to polarization, cross product is zero
-            double cross_norm = std::sqrt(cross[0]*cross[0] + cross[1]*cross[1] + cross[2]*cross[2]);
-            if (cross_norm < 1e-10) {
-                // Find an orthogonal vector to polarization
-                if (std::abs(pol_array[0]) > 0.5) {
-                    // polarization has significant x component, use y-axis as reference
-                    auto alt_cross = cross_product({0.0, 1.0, 0.0}, polarization);
-                    transverse_basis_2[qi] = normalize(alt_cross);
-                } else {
-                    // use x-axis as reference
-                    auto alt_cross = cross_product({1.0, 0.0, 0.0}, polarization);
-                    transverse_basis_2[qi] = normalize(alt_cross);
-                }
-                if (rank == 0) {
-                    std::cout << "Warning: Q[" << qi << "] parallel to polarization, using alternative basis" << std::endl;
-                }
-            }
-        }
-        
-        if (rank == 0) {
-            std::cout << "\nTransverse bases for momentum points:" << std::endl;
-            for (int qi = 0; qi < num_momentum; ++qi) {
-                const auto &Q = momentum_points[qi];
-                const auto &b1 = transverse_basis_1[qi];
-                const auto &b2 = transverse_basis_2[qi];
-                std::cout << "  Q[" << qi << "] = (" << Q[0] << "," << Q[1] << "," << Q[2] 
-                          << "), e1=(" << b1[0] << "," << b1[1] << "," << b1[2] 
-                          << "), e2=(" << b2[0] << "," << b2[1] << "," << b2[2] << ")" << std::endl;
-            }
+            const auto& Q = momentum_points[qi];
+            const auto [b1, b2] = ed::dssf::compute_transverse_bases(Q, polarization);
+            std::cout << "  Q[" << qi << "] = (" << Q[0] << "," << Q[1] << "," << Q[2]
+                      << "), e1=(" << b1[0] << "," << b1[1] << "," << b1[2]
+                      << "), e2=(" << b2[0] << "," << b2[1] << "," << b2[2] << ")"
+                      << std::endl;
         }
     }
     
@@ -3013,236 +2964,55 @@ int main(int argc, char* argv[]) {
         // Main (operators) × (method) structure
         // ============================================================
         
-        // STEP 1: Construct operators based on operator_type
+        // STEP 1: Construct operators via the canonical ed::dssf builder.
+        //
+        // The legacy ~230-line if/else cascade that lived here -- and its
+        // exact twin in ed_main.cpp -- have been hoisted into the
+        // `ed::dssf::build_observable_pairs` library (P1.10 / P2.5).
+        // See include/ed/dssf/operator_spec.h for the schema.
         std::vector<Operator> obs_1, obs_2;
         std::vector<std::string> obs_names;
         std::string method_dir = output_dir + "/" + operator_type;
-        
-        // Add suffix to directory if using fixed-Sz
         if (use_fixed_sz) {
             method_dir += "_fixed_sz_nup" + std::to_string(n_up);
         }
-        
-        const auto &Q = momentum_points[momentum_idx];
-        int op_type_1 = spin_combinations[combo_idx].first;
-        int op_type_2 = spin_combinations[combo_idx].second;
-        std::string base_name = std::string(spin_combination_names[combo_idx]);
-        
+
+        // Keep these locals in scope for downstream code paths in the same
+        // lambda (logging, identical-operator fast path, etc.); the actual
+        // operator construction happens inside ed::dssf::build_observable_pairs.
+        const auto& Q = momentum_points[momentum_idx];
+        const int op_type_1 = spin_combinations[combo_idx].first;
+        const int op_type_2 = spin_combinations[combo_idx].second;
+
         try {
-            if (operator_type == "sum") {
-                // Standard sum operators: S^{op1}(Q) S^{op2}(-Q)
-                std::stringstream name_ss;
-                name_ss << base_name << "_q_Qx" << Q[0] << "_Qy" << Q[1] << "_Qz" << Q[2];
-                obs_names.push_back(name_ss.str());
-                
-                if (use_fixed_sz) {
-                    // Fixed-Sz operators
-                    if (use_xyz_basis) {
-                        FixedSzSumOperatorXYZ sum_op_1(num_sites, spin_length, n_up, op_type_1, momentum_points[momentum_idx], positions_file);
-                        obs_1.push_back(Operator(sum_op_1));
-                        if (method != "single_expectation") {
-                            FixedSzSumOperatorXYZ sum_op_2(num_sites, spin_length, n_up, op_type_2, momentum_points[momentum_idx], positions_file);
-                            obs_2.push_back(Operator(sum_op_2));
-                        }
-                    } else {
-                        FixedSzSumOperator sum_op_1(num_sites, spin_length, n_up, op_type_1, momentum_points[momentum_idx], positions_file);
-                        obs_1.push_back(Operator(sum_op_1));
-                        if (method != "single_expectation") {
-                            FixedSzSumOperator sum_op_2(num_sites, spin_length, n_up, op_type_2, momentum_points[momentum_idx], positions_file);
-                            obs_2.push_back(Operator(sum_op_2));
-                        }
-                    }
-                } else {
-                    // Full Hilbert space operators
-                    if (use_xyz_basis) {
-                        SumOperatorXYZ sum_op_1(num_sites, spin_length, op_type_1, momentum_points[momentum_idx], positions_file);
-                        obs_1.push_back(Operator(sum_op_1));
-                        if (method != "single_expectation") {
-                            SumOperatorXYZ sum_op_2(num_sites, spin_length, op_type_2, momentum_points[momentum_idx], positions_file);
-                            obs_2.push_back(Operator(sum_op_2));
-                        }
-                    } else {
-                        SumOperator sum_op_1(num_sites, spin_length, op_type_1, momentum_points[momentum_idx], positions_file);
-                        obs_1.push_back(Operator(sum_op_1));
-                        if (method != "single_expectation") {
-                            SumOperator sum_op_2(num_sites, spin_length, op_type_2, momentum_points[momentum_idx], positions_file);
-                            obs_2.push_back(Operator(sum_op_2));
-                        }
-                    }
-                }
-                
-            } else if (operator_type == "transverse") {
-                // Transverse operators for SF/NSF separation
-                const auto &b1 = transverse_basis_1[momentum_idx];
-                const auto &b2 = transverse_basis_2[momentum_idx];
-                std::vector<double> e1_vec = {b1[0], b1[1], b1[2]};
-                std::vector<double> e2_vec = {b2[0], b2[1], b2[2]};
-                
-                // SF component (transverse_basis_1)
-                std::stringstream name_sf;
-                name_sf << base_name << "_q_Qx" << Q[0] << "_Qy" << Q[1] << "_Qz" << Q[2] << "_NSF";
-                
-                // NSF component (transverse_basis_2)
-                std::stringstream name_nsf;
-                name_nsf << base_name << "_q_Qx" << Q[0] << "_Qy" << Q[1] << "_Qz" << Q[2] << "_SF";
-                
-                if (use_fixed_sz) {
-                    // Fixed-Sz transverse operators
-                    if (use_xyz_basis) {
-                        FixedSzTransverseOperatorXYZ op1_sf(num_sites, spin_length, n_up, op_type_1, momentum_points[momentum_idx], e1_vec, positions_file);
-                        FixedSzTransverseOperatorXYZ op2_sf(num_sites, spin_length, n_up, op_type_2, momentum_points[momentum_idx], e1_vec, positions_file);
-                        FixedSzTransverseOperatorXYZ op1_nsf(num_sites, spin_length, n_up, op_type_1, momentum_points[momentum_idx], e2_vec, positions_file);
-                        FixedSzTransverseOperatorXYZ op2_nsf(num_sites, spin_length, n_up, op_type_2, momentum_points[momentum_idx], e2_vec, positions_file);
-                        
-                        obs_1.push_back(Operator(op1_sf));
-                        obs_2.push_back(Operator(op2_sf));
-                        obs_1.push_back(Operator(op1_nsf));
-                        obs_2.push_back(Operator(op2_nsf));
-                    } else {
-                        FixedSzTransverseOperator op1_sf(num_sites, spin_length, n_up, op_type_1, momentum_points[momentum_idx], e1_vec, positions_file);
-                        FixedSzTransverseOperator op2_sf(num_sites, spin_length, n_up, op_type_2, momentum_points[momentum_idx], e1_vec, positions_file);
-                        FixedSzTransverseOperator op1_nsf(num_sites, spin_length, n_up, op_type_1, momentum_points[momentum_idx], e2_vec, positions_file);
-                        FixedSzTransverseOperator op2_nsf(num_sites, spin_length, n_up, op_type_2, momentum_points[momentum_idx], e2_vec, positions_file);
-                        
-                        obs_1.push_back(Operator(op1_sf));
-                        obs_2.push_back(Operator(op2_sf));
-                        obs_1.push_back(Operator(op1_nsf));
-                        obs_2.push_back(Operator(op2_nsf));
-                    }
-                } else {
-                    // Full Hilbert space transverse operators
-                    if (use_xyz_basis) {
-                        TransverseOperatorXYZ op1_sf(num_sites, spin_length, op_type_1, momentum_points[momentum_idx], e1_vec, positions_file);
-                        TransverseOperatorXYZ op2_sf(num_sites, spin_length, op_type_2, momentum_points[momentum_idx], e1_vec, positions_file);
-                        TransverseOperatorXYZ op1_nsf(num_sites, spin_length, op_type_1, momentum_points[momentum_idx], e2_vec, positions_file);
-                        TransverseOperatorXYZ op2_nsf(num_sites, spin_length, op_type_2, momentum_points[momentum_idx], e2_vec, positions_file);
-                        
-                        obs_1.push_back(Operator(op1_sf));
-                        obs_2.push_back(Operator(op2_sf));
-                        obs_1.push_back(Operator(op1_nsf));
-                        obs_2.push_back(Operator(op2_nsf));
-                    } else {
-                        TransverseOperator op1_sf(num_sites, spin_length, op_type_1, momentum_points[momentum_idx], e1_vec, positions_file);
-                        TransverseOperator op2_sf(num_sites, spin_length, op_type_2, momentum_points[momentum_idx], e1_vec, positions_file);
-                        TransverseOperator op1_nsf(num_sites, spin_length, op_type_1, momentum_points[momentum_idx], e2_vec, positions_file);
-                        TransverseOperator op2_nsf(num_sites, spin_length, op_type_2, momentum_points[momentum_idx], e2_vec, positions_file);
-                        
-                        obs_1.push_back(Operator(op1_sf));
-                        obs_2.push_back(Operator(op2_sf));
-                        obs_1.push_back(Operator(op1_nsf));
-                        obs_2.push_back(Operator(op2_nsf));
-                    }
-                }
-                
-                obs_names.push_back(name_sf.str());
-                obs_names.push_back(name_nsf.str());
-                
-            } else if (operator_type == "sublattice") {
-                // Sublattice-resolved operators
-                std::stringstream name_ss;
-                if (method == "single_expectation") {
-                    name_ss << base_name << "_q_Qx" << Q[0] << "_Qy" << Q[1] << "_Qz" << Q[2]
-                            << "_sub" << sublattice_i;
-                } else {
-                    name_ss << base_name << "_q_Qx" << Q[0] << "_Qy" << Q[1] << "_Qz" << Q[2]
-                            << "_sub" << sublattice_i << "_sub" << sublattice_j;
-                }
-                obs_names.push_back(name_ss.str());
-                
-                std::vector<double> Q_vec = {Q[0], Q[1], Q[2]};
-                
-                if (use_fixed_sz) {
-                    // Fixed-Sz sublattice operators
-                    FixedSzSublatticeOperator sub_op_1(sublattice_i, unit_cell_size, num_sites, spin_length, n_up, op_type_1, Q_vec, positions_file);
-                    
-                    obs_1.push_back(Operator(sub_op_1));
-                    if (method != "single_expectation") {
-                        FixedSzSublatticeOperator sub_op_2(sublattice_j, unit_cell_size, num_sites, spin_length, n_up, op_type_2, Q_vec, positions_file);
-                        obs_2.push_back(Operator(sub_op_2));
-                    }
-                } else {
-                    // Full Hilbert space sublattice operators
-                    SublatticeOperator sub_op_1(sublattice_i, unit_cell_size, num_sites, spin_length, op_type_1, Q_vec, positions_file);
-                    
-                    obs_1.push_back(Operator(sub_op_1));
-                    if (method != "single_expectation") {
-                        SublatticeOperator sub_op_2(sublattice_j, unit_cell_size, num_sites, spin_length, op_type_2, Q_vec, positions_file);
-                        obs_2.push_back(Operator(sub_op_2));
-                    }
-                }
-                
-            } else if (operator_type == "experimental") {
-                // Experimental operators: cos(θ)Sz + sin(θ)Sx
-                std::stringstream name_ss;
-                name_ss << "Experimental_q_Qx" << Q[0] << "_Qy" << Q[1] << "_Qz" << Q[2] << "_theta" << theta;
-                obs_names.push_back(name_ss.str());
-                
-                if (use_fixed_sz) {
-                    // Fixed-Sz experimental operators
-                    FixedSzExperimentalOperator exp_op_1(num_sites, spin_length, n_up, theta, momentum_points[momentum_idx], positions_file);
-                    
-                    obs_1.push_back(Operator(exp_op_1));
-                    if (method != "single_expectation") {
-                        FixedSzExperimentalOperator exp_op_2(num_sites, spin_length, n_up, theta, momentum_points[momentum_idx], positions_file);
-                        obs_2.push_back(Operator(exp_op_2));
-                    }
-                } else {
-                    // Full Hilbert space experimental operators
-                    ExperimentalOperator exp_op_1(num_sites, spin_length, theta, momentum_points[momentum_idx], positions_file);
-                    
-                    obs_1.push_back(Operator(exp_op_1));
-                    if (method != "single_expectation") {
-                        ExperimentalOperator exp_op_2(num_sites, spin_length, theta, momentum_points[momentum_idx], positions_file);
-                        obs_2.push_back(Operator(exp_op_2));
-                    }
-                }
-                
-            } else if (operator_type == "transverse_experimental") {
-                // Transverse experimental operators with SF/NSF separation: cos(θ)Sz + sin(θ)Sx
-                const auto &b1 = transverse_basis_1[momentum_idx];
-                const auto &b2 = transverse_basis_2[momentum_idx];
-                std::vector<double> e1_vec = {b1[0], b1[1], b1[2]};
-                std::vector<double> e2_vec = {b2[0], b2[1], b2[2]};
-                
-                // SF component (transverse_basis_1)
-                std::stringstream name_sf;
-                name_sf << "TransverseExperimental_q_Qx" << Q[0] << "_Qy" << Q[1] << "_Qz" << Q[2] 
-                        << "_theta" << theta << "_NSF";
-                
-                // NSF component (transverse_basis_2)
-                std::stringstream name_nsf;
-                name_nsf << "TransverseExperimental_q_Qx" << Q[0] << "_Qy" << Q[1] << "_Qz" << Q[2] 
-                         << "_theta" << theta << "_SF";
-                
-                if (use_fixed_sz) {
-                    // Fixed-Sz transverse experimental operators
-                    FixedSzTransverseExperimentalOperator op1_sf(num_sites, spin_length, n_up, theta, momentum_points[momentum_idx], e1_vec, positions_file);
-                    FixedSzTransverseExperimentalOperator op2_sf(num_sites, spin_length, n_up, theta, momentum_points[momentum_idx], e1_vec, positions_file);
-                    FixedSzTransverseExperimentalOperator op1_nsf(num_sites, spin_length, n_up, theta, momentum_points[momentum_idx], e2_vec, positions_file);
-                    FixedSzTransverseExperimentalOperator op2_nsf(num_sites, spin_length, n_up, theta, momentum_points[momentum_idx], e2_vec, positions_file);
-                    
-                    obs_1.push_back(Operator(op1_sf));
-                    obs_2.push_back(Operator(op2_sf));
-                    obs_1.push_back(Operator(op1_nsf));
-                    obs_2.push_back(Operator(op2_nsf));
-                } else {
-                    // Full Hilbert space transverse experimental operators
-                    TransverseExperimentalOperator op1_sf(num_sites, spin_length, theta, momentum_points[momentum_idx], e1_vec, positions_file);
-                    TransverseExperimentalOperator op2_sf(num_sites, spin_length, theta, momentum_points[momentum_idx], e1_vec, positions_file);
-                    TransverseExperimentalOperator op1_nsf(num_sites, spin_length, theta, momentum_points[momentum_idx], e2_vec, positions_file);
-                    TransverseExperimentalOperator op2_nsf(num_sites, spin_length, theta, momentum_points[momentum_idx], e2_vec, positions_file);
-                    
-                    obs_1.push_back(Operator(op1_sf));
-                    obs_2.push_back(Operator(op2_sf));
-                    obs_1.push_back(Operator(op1_nsf));
-                    obs_2.push_back(Operator(op2_nsf));
-                }
-                
-                obs_names.push_back(name_sf.str());
-                obs_names.push_back(name_nsf.str());
+            ed::dssf::OperatorSpec spec;
+            spec.operator_type   = operator_type;
+            spec.basis           = use_xyz_basis ? "xyz" : "ladder";
+            spec.spin_combinations = {spin_combinations[combo_idx]};
+            spec.momentum_points = {Q};
+            spec.polarization    = polarization;
+            spec.theta           = theta;
+            spec.unit_cell_size  = unit_cell_size;
+            spec.num_sites       = num_sites;
+            spec.spin_length     = spin_length;
+            spec.use_fixed_sz    = use_fixed_sz;
+            spec.n_up            = n_up;
+            spec.positions_file  = positions_file;
+            // single_expectation only evaluates ⟨ψ|O|ψ⟩, so skip obs_2 and
+            // the legacy ladder-basis swap of the first index.
+            spec.single_obs_only = (method == "single_expectation");
+            if (operator_type == "sublattice") {
+                spec.sublattice_filter = std::make_pair<std::uint64_t, std::uint64_t>(
+                    static_cast<std::uint64_t>(sublattice_i),
+                    static_cast<std::uint64_t>(sublattice_j));
             }
-            
-        } catch (const std::exception &e) {
+
+            auto pairs = ed::dssf::build_observable_pairs(spec);
+            obs_1     = std::move(pairs.obs_1);
+            obs_2     = std::move(pairs.obs_2);
+            obs_names = std::move(pairs.names);
+
+        } catch (const std::exception& e) {
             std::cerr << "Rank " << rank << " failed operator construction: " << e.what() << std::endl;
             return false;
         }

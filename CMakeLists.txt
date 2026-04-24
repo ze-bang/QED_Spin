@@ -645,6 +645,11 @@ if(BUILD_ED_TESTS)
     ed_add_test(test_thermal_methods            tests/unit/test_thermal_methods.cpp USE_CATCH2)
     ed_add_test(test_hdf5_io                    tests/unit/test_hdf5_io.cpp USE_CATCH2)
     ed_add_test(test_symmetry                   tests/unit/test_symmetry.cpp USE_CATCH2)
+    ed_add_test(test_dssf_operator_spec         tests/unit/test_dssf_operator_spec.cpp USE_CATCH2)
+    target_link_libraries(test_dssf_operator_spec PRIVATE ed_dssf)
+    target_compile_definitions(test_dssf_operator_spec PRIVATE
+        ED_TEST_POSITIONS_4SITE="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/positions_4site.dat"
+    )
 
     # Regression test of the on-disk fallback path for the Lanczos basis
     # buffer. `force_disk_storage()` is cached per-process, so we reuse the
