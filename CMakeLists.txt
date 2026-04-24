@@ -684,6 +684,12 @@ if(BUILD_ED_TESTS)
         ED_TEST_POSITIONS_4SITE="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/positions_4site.dat"
     )
 
+    # P2.2 (DSSF PR-C): lockdown for the new ed::dssf::run dispatch + DSSFMethod
+    # round-trip tokens. Links against ed_cli because the implementation lives
+    # there (it needs to reach the workflow functions).
+    ed_add_test(test_dssf_engine                tests/unit/test_dssf_engine.cpp USE_CATCH2)
+    target_link_libraries(test_dssf_engine PRIVATE ed_cli ed_dssf)
+
     ed_add_test(test_bfg_cluster                tests/unit/test_bfg_cluster.cpp USE_CATCH2)
     target_link_libraries(test_bfg_cluster PRIVATE ed_bfg)
     target_compile_definitions(test_bfg_cluster PRIVATE

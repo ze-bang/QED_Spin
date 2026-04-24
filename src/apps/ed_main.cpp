@@ -31,6 +31,7 @@
 #include <ed/core/ed_wrapper.h>
 #include <ed/core/construct_ham.h>
 #include <ed/core/hdf5_io.h>
+#include <ed/dssf/dssf_engine.h>
 #include <ed/dssf/operator_spec.h>
 #include <ed/solvers/ftlm.h>
 #include <ed/solvers/ltlm.h>
@@ -54,11 +55,17 @@ void print_help(const char* prog_name) {
     std::cout << "==============================\n\n";
     std::cout << "Usage:\n";
     std::cout << "  " << prog_name << " <directory> [options]\n";
-    std::cout << "  " << prog_name << " --config=<file> [options]\n\n";
-    
+    std::cout << "  " << prog_name << " --config=<file> [options]\n";
+    std::cout << "  " << prog_name << " dssf <method> <directory> [options]\n";
+    std::cout << "                          (P2.4 subcommand wired through ed::dssf::run)\n";
+    std::cout << "                          method = dynamical_thermal | static_thermal |\n";
+    std::cout << "                                   ground_state_dssf  | single_expectation\n\n";
+
     std::cout << "Quick Examples:\n";
     std::cout << "  # Basic ground state calculation\n";
     std::cout << "  " << prog_name << " ./data --method=LANCZOS\n\n";
+    std::cout << "  # T=0 dynamical structure factor via the dssf subcommand\n";
+    std::cout << "  " << prog_name << " dssf ground_state_dssf ./data\n\n";
     std::cout << "  # Full spectrum with thermodynamics\n";
     std::cout << "  " << prog_name << " ./data --method=FULL --thermo\n\n";
     std::cout << "  # Symmetry-exploiting calculation (auto-selects best mode)\n";
@@ -740,10 +747,99 @@ int main(int argc, char* argv[]) {
         #endif
         return 1;
     }
-    
-    // Check for DSSF mode (TPQ_DSSF-style interface)
+
+    // -------------------------------------------------------------------
+    // P2.4 (DSSF PR-E): `ED dssf <method>` subcommand wired to
+    // ed::dssf::run(...). The first positional argument may be `dssf`,
+    // in which case we re-dispatch through the canonical engine seam
+    // introduced in P2.2 instead of going through the legacy --dssf
+    // shim (which is now deprecated and will be removed in P2.14).
+    //
+    // Recognised methods: dynamical_thermal | static_thermal |
+    //                     ground_state_dssf | single_expectation
+    //
+    // All other CLI flags continue to be parsed by EDConfig::fromCommandLine
+    // (so existing --dyn-* / --static-* / --gs-dssf-* knobs still work);
+    // the subcommand only changes which engine method is invoked.
+    // -------------------------------------------------------------------
+    if (argc >= 2 && std::string(argv[1]) == "dssf") {
+        if (argc < 3) {
+            std::cerr << "Error: `ED dssf` requires a method argument.\n"
+                      << "Usage: ED dssf <dynamical_thermal|static_thermal|"
+                         "ground_state_dssf|single_expectation> "
+                         "<directory> [options]\n";
+            #ifdef WITH_MPI
+            MPI_Finalize();
+            #endif
+            return 1;
+        }
+
+        ed::dssf::DSSFMethod method;
+        try {
+            method = ed::dssf::method_from_string(argv[2]);
+        } catch (const std::invalid_argument& e) {
+            std::cerr << "Error: " << e.what() << "\n";
+            #ifdef WITH_MPI
+            MPI_Finalize();
+            #endif
+            return 1;
+        }
+
+        // Strip the "dssf <method>" prefix so EDConfig parses the rest of
+        // argv as a normal ED invocation.
+        std::vector<char*> cfg_argv;
+        cfg_argv.reserve(argc - 1);
+        cfg_argv.push_back(argv[0]);
+        for (int i = 3; i < argc; ++i) cfg_argv.push_back(argv[i]);
+        EDConfig sub_config = EDConfig::fromCommandLine(
+            static_cast<int>(cfg_argv.size()), cfg_argv.data());
+
+        if (!sub_config.validate()) {
+            std::cerr << "\nConfiguration validation failed. Use --help.\n";
+            #ifdef WITH_MPI
+            MPI_Finalize();
+            #endif
+            return 1;
+        }
+
+        create_directory_mpi_safe(sub_config.workflow.output_dir);
+
+        ed::dssf::DSSFRequest request;
+        request.method     = method;
+        request.output_dir = sub_config.workflow.output_dir;
+        request.config     = &sub_config;
+        // operators left default-constructed: P2.2 transitional cut still
+        // routes operator construction through the workflow body (which
+        // reads sub_config.dynamical / .static_resp). P2.3 will populate
+        // request.operators here from the same EDConfig fields.
+
+        try {
+            const auto result = ed::dssf::run(request);
+            std::cout << "\n[ED dssf] method=" << ed::dssf::to_string(result.method)
+                      << " tasks=" << result.num_tasks_attempted
+                      << " output=" << result.output_dir << "\n";
+        } catch (const std::exception& e) {
+            std::cerr << "\nError: " << e.what() << "\n";
+            #ifdef WITH_MPI
+            MPI_Finalize();
+            #endif
+            return 1;
+        }
+
+        #ifdef WITH_MPI
+        MPI_Finalize();
+        #endif
+        return 0;
+    }
+
+    // Check for DSSF mode (TPQ_DSSF-style interface) -- DEPRECATED in P2.4,
+    // will be removed in P2.14 (DSSF PR-H). Prefer `ED dssf <method>`.
     for (int i = 1; i < argc; i++) {
         if (std::string(argv[i]) == "--dssf") {
+            std::cerr << "[deprecated] The --dssf flag is deprecated and "
+                         "will be removed in a future release. Migrate to "
+                         "the `ED dssf <method>` subcommand "
+                         "(see ED --help).\n";
             int result = run_dssf_mode(argc, argv);
             #ifdef WITH_MPI
             MPI_Finalize();
@@ -834,18 +930,30 @@ int main(int argc, char* argv[]) {
             }
         }
         
-        // Standalone response calculations (don't require prior diagonalization)
+        // Standalone response calculations (don't require prior diagonalization).
+        // P2.2 (DSSF PR-C): all three paths now route through the canonical
+        // ed::dssf::run dispatcher so the legacy --dynamical-response /
+        // --static-response / --ground-state-dssf flags share the same
+        // engine seam as the new `ED dssf` subcommand (P2.4) and the
+        // upcoming pybind11 binding (P2.x).
+        auto dispatch_dssf = [&config](ed::dssf::DSSFMethod method) {
+            ed::dssf::DSSFRequest request;
+            request.method     = method;
+            request.output_dir = config.workflow.output_dir;
+            request.config     = &config;
+            ed::dssf::run(request);
+        };
+
         if (config.workflow.compute_dynamical_response) {
-            compute_dynamical_response_workflow(config);
+            dispatch_dssf(ed::dssf::DSSFMethod::DYNAMICAL_THERMAL);
         }
-        
+
         if (config.workflow.compute_static_response) {
-            compute_static_response_workflow(config);
+            dispatch_dssf(ed::dssf::DSSFMethod::STATIC_THERMAL);
         }
-        
-        // Ground state DSSF (T=0 dynamical correlations using continued fraction)
+
         if (config.workflow.compute_ground_state_dssf) {
-            compute_ground_state_dssf_workflow(config);
+            dispatch_dssf(ed::dssf::DSSFMethod::GROUND_STATE_DSSF);
         }
         
         // Compare results if both were run

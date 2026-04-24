@@ -198,6 +198,7 @@ set_target_properties(ed_bfg PROPERTIES POSITION_INDEPENDENT_CODE ON)
 # -----------------------------------------------------------------------------
 add_library(ed_cli STATIC
     ${CLI_DIR}/workflows.cpp
+    ${CLI_DIR}/dssf_engine.cpp
 )
 target_include_directories(ed_cli PUBLIC ${_ED_PUBLIC_INCLUDES})
 target_link_libraries(ed_cli PUBLIC ed_solvers_cpu ed_dssf ed_io ed_core)
