@@ -1323,17 +1323,43 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|amd64|AMD64")
 endif()
 
 # CPU optimization flags
+#
+# P0.16 / audit Q12: -ffast-math is OFF by default.
+#
+# -ffast-math implies -fno-honor-nans, -fno-honor-infinities,
+# -ffinite-math-only, -fno-signed-zeros, and -freciprocal-math, all of which
+# are unsafe for an exact-diagonalization code that:
+#   * checks for NaN/Inf in iterative-solver convergence,
+#   * forms inner products near machine zero (where -fno-signed-zeros / FMA
+#     contraction can change which Krylov vectors are flagged as breakdown),
+#   * computes thermodynamic averages where loss of associativity in
+#     reductions silently changes the answer.
+# Set ED_ENABLE_FAST_MATH=ON only when you have a benchmark that proves the
+# speedup is worth the numerical risk for your specific workload.
+option(ED_ENABLE_FAST_MATH
+    "Enable -ffast-math (UNSAFE: breaks NaN handling, signed zero, reductions). \
+P0.16 / audit Q12."
+    OFF)
+
 set(CPU_OPT_FLAGS "")
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     list(APPEND CPU_OPT_FLAGS
         -O3                          # Maximum optimization
         -march=native                # Optimize for the build machine's CPU
         -mtune=native                # Tune for the build machine's CPU
-        -ffast-math                  # Aggressive floating-point optimizations
         -funroll-loops               # Unroll loops for better performance
         -ftree-vectorize             # Enable auto-vectorization
         -fomit-frame-pointer         # Remove frame pointer for extra register
     )
+
+    if(ED_ENABLE_FAST_MATH)
+        list(APPEND CPU_OPT_FLAGS -ffast-math)
+        message(WARNING
+            "ED_ENABLE_FAST_MATH=ON: -ffast-math added to CPU_OPT_FLAGS. "
+            "Krylov breakdown checks and NaN tracking may misbehave; verify "
+            "ctest is still green and that physical observables agree to "
+            "your reference precision before trusting results.")
+    endif()
     
     # Additional flags for GCC
     if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
