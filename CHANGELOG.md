@@ -7,6 +7,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — CI matrix back to green (Docs, Clang Debug, clang-tidy, CUDA)
+
+The four GitHub Actions lanes that had been dark since they were first
+introduced (committed broken in P1.12 / P1.13 / P2.6) are now green:
+
+- **`Docs / Build Sphinx site`** -- ran with `-W --keep-going`, so 28
+  pre-existing warnings were hard-failing the build. Triaged into:
+  - removed the bogus `solvers/diagonalization.h` doxygenfile entry and
+    switched the surviving solver/GPU `doxygenfile` directives to a
+    short prose listing (the per-file directives were re-emitting the
+    same shared typedefs from each header and producing
+    "Duplicate C++ declaration" errors);
+  - added `.. default-domain:: py` to `docs/api/python.rst` so
+    `:mod:` / `:func:` / `:class:` / `:meth:` resolve under the Python
+    domain instead of being silently routed to the cpp primary domain;
+  - dropped the `../CHANGELOG` and `../CONTRIBUTING` toctree entries +
+    the `../MODERNIZATION_AUDIT.md` MyST link from `docs/index.md`
+    (Sphinx can't include source files outside the doc root); replaced
+    with explicit GitHub URLs in a new "Project documents" section;
+  - added explicit MyST anchors `(from-source-cmake)=` etc. to
+    `docs/guides/install.md` so the in-page table-of-contents links
+    resolve;
+  - fixed the malformed reST table in
+    `python/quantum_ed/hamiltonian.py` (column 1 separator was 27
+    chars but the longest cell was 29 chars);
+  - created `docs/_static/.gitkeep` so the `html_static_path` entry no
+    longer warns.
+- **`CI / Linux / Clang / OpenBLAS / Debug`** and **`CI / Linux /
+  clang-tidy`** -- both failed at the `Build` step because CI
+  installed `clang` without `libomp-dev`, so `#include <omp.h>` from
+  `construct_ham.h` was unresolved (GCC bundles its own libgomp via
+  `build-essential`, which is why the GCC/OpenBLAS lane was unaffected).
+  Added `libomp-dev` to both `apt-get install` lists.
+- **`CI / Linux / CUDA build-only`** -- the pinned
+  `Jimver/cuda-toolkit@v0.2.16` action + `cuda: "12.4.1"` combination
+  404'd on NVIDIA's package mirror (CUDA 12.4.1 deb URLs were retired).
+  Bumped to `v0.2.35` + `cuda: "12.6.3"`.
+
+`ctest` (102/102) and `pytest` (98/98) remain green locally; the local
+Sphinx build now reports `build succeeded.` with `-W --keep-going`.
+
 ### Changed — NLCE upgraded to a standalone, plugin-architecture package
 
 The NLCE workflow has been promoted from "three driver scripts that

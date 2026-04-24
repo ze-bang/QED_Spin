@@ -1,7 +1,9 @@
 Python API reference (``quantum_ed``)
 =====================================
 
-The Python side lives under :mod:`quantum_ed`. It is a thin pybind11 layer
+.. default-domain:: py
+
+The Python side lives under :py:mod:`quantum_ed`. It is a thin pybind11 layer
 over the C++ ``ed_solvers_cpu`` library, wired up via ``scikit-build-core``.
 
 .. contents::

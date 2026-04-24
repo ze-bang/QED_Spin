@@ -139,12 +139,17 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Install build dependencies
+        # NOTE: clang ships *without* its own libomp on Ubuntu, so the
+        # `omp.h` that construct_ham.h includes is unresolved unless we
+        # also pull in libomp-dev. The GCC lane gets libgomp transitively
+        # via build-essential, which is why it doesn't need this.
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             build-essential \
             clang \
             cmake \
+            libomp-dev \
             ninja-build \
             libopenblas-dev \
             liblapacke-dev \
@@ -208,6 +213,8 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Install build dependencies
+        # NOTE: see the libomp-dev comment in the linux-clang-debug job --
+        # clang needs an explicit libomp install for `#include <omp.h>`.
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
@@ -215,6 +222,7 @@ jobs:
             clang \
             clang-tidy \
             cmake \
+            libomp-dev \
             ninja-build \
             libopenblas-dev \
             liblapacke-dev \
@@ -275,9 +283,13 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Install CUDA toolkit (12.x)
-        uses: Jimver/cuda-toolkit@v0.2.16
+        # NOTE: NVIDIA's package mirror retired the 12.4.1 deb URLs that the
+        # older v0.2.16 of this action hard-codes (returns 404 on apt-get).
+        # Bumping to the current action + a still-published 12.6.x point
+        # release, which is also a closer match to the local dev toolchains.
+        uses: Jimver/cuda-toolkit@v0.2.35
         with:
-          cuda: "12.4.1"
+          cuda: "12.6.3"
           method: "network"
           sub-packages: '["nvcc", "cudart-dev", "cublas-dev", "cusparse-dev", "cusolver-dev", "thrust"]'
 

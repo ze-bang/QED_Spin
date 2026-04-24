@@ -49,23 +49,23 @@ ed::core -- HDF5 I/O
 ed::solvers -- CPU solvers
 --------------------------
 
-.. doxygenfile:: solvers/diagonalization.h
-   :no-link:
+The CPU solver entry points live in the following headers. Each one is
+indexed and cross-linked from the auto-generated symbol index; see the
+header source for full signatures and per-parameter documentation.
 
-.. doxygenfile:: solvers/lanczos.h
-   :no-link:
-
-.. doxygenfile:: solvers/ftlm.h
-   :no-link:
-
-.. doxygenfile:: solvers/ltlm.h
-   :no-link:
-
-.. doxygenfile:: solvers/observables.h
-   :no-link:
+- ``ed/solvers/lanczos.h`` -- Lanczos diagonalization (in-memory and
+  disk-streamed) plus the basis-vector helpers used by FTLM/LTLM.
+- ``ed/solvers/ftlm.h`` -- Finite-Temperature Lanczos Method
+  (thermodynamics + dynamical / static response).
+- ``ed/solvers/ltlm.h`` -- Low-Temperature Lanczos Method (energy /
+  observables in the low-T regime).
+- ``ed/solvers/observables.h`` -- spin / energy observables on
+  eigenstates and TPQ snapshots.
 
 ed::solvers -- GPU solvers (built only with WITH_CUDA=ON)
 ---------------------------------------------------------
 
-.. doxygenfile:: gpu/gpu_ed_wrapper.h
-   :no-link:
+GPU solvers mirror their CPU counterparts under ``include/ed/gpu/``:
+``gpu_ed_wrapper.h``, ``gpu_lanczos.cuh``, ``gpu_ftlm.cuh``,
+``gpu_tpq.cuh``, ``gpu_dynamics.cuh``, ``gpu_cg.cuh``,
+``gpu_operator.cuh``. They are only compiled when ``WITH_CUDA=ON``.

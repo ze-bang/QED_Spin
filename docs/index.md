@@ -34,14 +34,6 @@ api/cpp
 api/python
 ```
 
-```{toctree}
-:maxdepth: 1
-:caption: Project
-
-../CHANGELOG
-../CONTRIBUTING
-```
-
 ## Why a "modern" rewrite?
 
 The codebase is being modernized so collaborators can reuse it without
@@ -57,8 +49,16 @@ needing institutional knowledge:
   (`Operator`, `FixedSzOperator`, `full_diagonalization`, `lanczos`,
   `finite_temperature_lanczos`, …) under the new `quantum_ed` namespace.
 
-See [`MODERNIZATION_AUDIT.md`](../MODERNIZATION_AUDIT.md) at the repo root
-for the full rolling roadmap.
+## Project documents
+
+The following live at the repository root and are rendered on GitHub:
+
+- [`CHANGELOG.md`](https://github.com/ze-bang/exact_diagonalization_cpp/blob/main/CHANGELOG.md)
+  — versioned release notes.
+- [`CONTRIBUTING.md`](https://github.com/ze-bang/exact_diagonalization_cpp/blob/main/CONTRIBUTING.md)
+  — how to set up a dev environment and submit changes.
+- [`MODERNIZATION_AUDIT.md`](https://github.com/ze-bang/exact_diagonalization_cpp/blob/main/MODERNIZATION_AUDIT.md)
+  — the full rolling roadmap.
 
 ## Indices and tables
 

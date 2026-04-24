@@ -10,6 +10,7 @@ intended workflow:
 | Python user, wants the `quantum_ed` package     | [Install the wheel (pip)](#install-the-python-wheel) |
 | Casual user, wants a sandboxed environment      | [Docker / dev container](#docker-and-dev-containers) (planned) |
 
+(from-source-cmake)=
 ## From source (CMake)
 
 Prerequisites (Ubuntu 22.04 names; the package names on other distros are
@@ -39,6 +40,7 @@ cmake --build --preset ci-linux -- -j$(nproc)
 ctest --preset ci-linux
 ```
 
+(consume-via-find_packageed-config)=
 ## Consume via `find_package(ED CONFIG)`
 
 After building, install to a prefix of your choice:
@@ -67,6 +69,7 @@ The exported targets are:
 - `ED::ed_solvers_cpu`
 - `ED::ed_solvers_gpu` (only if the install was built `WITH_CUDA=ON`)
 
+(install-the-python-wheel)=
 ## Install the Python wheel
 
 The `quantum_ed` Python package is built via `scikit-build-core`, which
@@ -94,6 +97,7 @@ op = quantum_ed.Operator(num_sites=2, spin_length=0.5)
 print(op.dimension)   # -> 4
 ```
 
+(docker-and-dev-containers)=
 ## Docker and dev containers
 
 A reproducible `Dockerfile.dev` plus a Nix flake are tracked under audit
