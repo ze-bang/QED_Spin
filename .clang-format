@@ -1,0 +1,127 @@
+# clang-format >= 17 expected.
+# Style: LLVM-derived, 4-space indent, 100-col, pointer/reference attached
+# to the type. Conservative on existing layout to keep PR diffs small.
+#
+# This file is intentionally NOT applied yet via clang-format -i; that
+# happens in a single dedicated commit (P0.11) so that one big format
+# diff is reviewable in isolation.
+
+---
+Language: Cpp
+BasedOnStyle: LLVM
+
+# Indentation
+IndentWidth: 4
+TabWidth: 4
+UseTab: Never
+ContinuationIndentWidth: 4
+ConstructorInitializerIndentWidth: 4
+AccessModifierOffset: -4
+
+# Width
+ColumnLimit: 100
+
+# Braces
+BreakBeforeBraces: Attach
+Cpp11BracedListStyle: true
+
+# Pointers / references attach to type
+PointerAlignment: Left
+ReferenceAlignment: Pointer
+DerivePointerAlignment: false
+
+# Includes
+SortIncludes: CaseSensitive
+IncludeBlocks: Regroup
+IncludeCategories:
+  # Project headers (ed/...) come last
+  - Regex: '^"ed/'
+    Priority: 6
+  - Regex: '^<ed/'
+    Priority: 6
+  # Project-local quoted headers
+  - Regex: '^"'
+    Priority: 5
+  # CUDA headers
+  - Regex: '^<(cuda|cublas|cusparse|cusolver|curand|cuComplex|cooperative_groups|nvml|thrust)'
+    Priority: 4
+  # MPI / HDF5 / external libs
+  - Regex: '^<(mpi|H5|hdf5|nlohmann|Catch2|pybind11|Eigen|boost|fmt|spdlog)'
+    Priority: 3
+  # POSIX/system C headers
+  - Regex: '^<(sys|unistd|fcntl|signal|pthread|errno|dirent|netinet|arpa|sched)'
+    Priority: 2
+  # C/C++ standard library
+  - Regex: '^<[a-z_]+>$'
+    Priority: 1
+  - Regex: '.*'
+    Priority: 7
+
+# Spacing
+SpaceAfterCStyleCast: false
+SpaceAfterTemplateKeyword: true
+SpaceBeforeAssignmentOperators: true
+SpaceBeforeCpp11BracedList: false
+SpaceBeforeCtorInitializerColon: true
+SpaceBeforeInheritanceColon: true
+SpaceBeforeParens: ControlStatements
+SpaceBeforeRangeBasedForLoopColon: true
+SpaceBeforeSquareBrackets: false
+SpaceInEmptyParentheses: false
+SpacesBeforeTrailingComments: 2
+SpacesInAngles: false
+SpacesInCStyleCastParentheses: false
+SpacesInContainerLiterals: false
+SpacesInParentheses: false
+SpacesInSquareBrackets: false
+
+# Line breaks
+AllowShortBlocksOnASingleLine: Empty
+AllowShortCaseLabelsOnASingleLine: false
+AllowShortFunctionsOnASingleLine: InlineOnly
+AllowShortIfStatementsOnASingleLine: Never
+AllowShortLambdasOnASingleLine: All
+AllowShortLoopsOnASingleLine: false
+AlwaysBreakAfterReturnType: None
+AlwaysBreakBeforeMultilineStrings: false
+AlwaysBreakTemplateDeclarations: Yes
+BinPackArguments: true
+BinPackParameters: true
+BreakBeforeBinaryOperators: None
+BreakBeforeTernaryOperators: true
+BreakConstructorInitializers: BeforeColon
+BreakInheritanceList: BeforeColon
+BreakStringLiterals: true
+
+# Alignment
+AlignAfterOpenBracket: Align
+AlignConsecutiveAssignments: None
+AlignConsecutiveDeclarations: None
+AlignConsecutiveMacros: Consecutive
+AlignEscapedNewlines: Right
+AlignOperands: Align
+AlignTrailingComments: true
+
+# Penalties (LLVM defaults are generally fine)
+PenaltyBreakAssignment: 2
+PenaltyBreakBeforeFirstCallParameter: 19
+PenaltyBreakComment: 300
+PenaltyBreakFirstLessLess: 120
+PenaltyBreakString: 1000
+PenaltyExcessCharacter: 1000000
+PenaltyReturnTypeOnItsOwnLine: 60
+
+# Misc
+ReflowComments: true
+SortUsingDeclarations: true
+FixNamespaceComments: true
+NamespaceIndentation: None
+CompactNamespaces: false
+KeepEmptyLinesAtTheStartOfBlocks: false
+MaxEmptyLinesToKeep: 1
+Standard: c++17
+---
+# CUDA: same as C++
+Language: Cpp
+---
+# Use Python defaults for now (handled by black/ruff externally if adopted).
