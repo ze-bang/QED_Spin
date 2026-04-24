@@ -282,26 +282,30 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install CUDA toolkit (12.x)
-        # NOTE: pinning history --
-        #   * v0.2.16 + cuda 12.4.1 -- NVIDIA retired the 12.4.1 .deb mirrors
-        #     so the old action 404s on apt-get.
-        #   * v0.2.34 / v0.2.35 -- moved to node24 and broke quickly on the
-        #     ubuntu-22.04 runner (the action exits in ~14s before any
-        #     install starts, see Jimver/cuda-toolkit#390 / runner cache).
-        #   * v0.2.32 is the last node20 release and is the version active
-        #     downstream projects (e.g. bazel-contrib/rules_cuda) pinned for
-        #     most of 2025/2026.
-        #   * use-github-cache=false avoids the deprecated GitHub Actions
-        #     cache v1 API, which the bundled cache code in this action
-        #     still tries to talk to.
-        uses: Jimver/cuda-toolkit@v0.2.32
-        with:
-          cuda: "12.6.3"
-          method: "network"
-          sub-packages: '["nvcc", "cudart-dev", "cublas-dev", "cusparse-dev", "cusolver-dev", "thrust"]'
-          use-github-cache: false
-          use-local-cache: false
+      - name: Install CUDA toolkit (12.6) via NVIDIA apt repo
+        # Replaces the third-party Jimver/cuda-toolkit action, which has
+        # been failing on every recent run regardless of version --
+        # v0.2.16 404s on retired 12.4.1 deb URLs, v0.2.34/35 broke on
+        # node24 + the deprecated GH Actions cache v1 API
+        # (Jimver/cuda-toolkit#390), and v0.2.32 (network method) exits in
+        # ~20s before any install. Going straight to NVIDIA's official
+        # apt repo is more reliable and follows their canonical install
+        # instructions for Ubuntu 22.04.
+        run: |
+          set -euxo pipefail
+          wget -q https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/cuda-keyring_1.1-1_all.deb
+          sudo dpkg -i cuda-keyring_1.1-1_all.deb
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            cuda-nvcc-12-6 \
+            cuda-cudart-dev-12-6 \
+            cuda-driver-dev-12-6 \
+            libcublas-dev-12-6 \
+            libcusparse-dev-12-6 \
+            libcusolver-dev-12-6 \
+            cuda-cccl-12-6
+          echo "CUDA_PATH=/usr/local/cuda-12.6" >> "$GITHUB_ENV"
+          echo "/usr/local/cuda-12.6/bin" >> "$GITHUB_PATH"
 
       - name: Install host build dependencies
         run: |
