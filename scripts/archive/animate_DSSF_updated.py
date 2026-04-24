@@ -10,7 +10,8 @@ This script reads the processed_data directory structure created by calc_QFI.py:
       - spectral_beta_{beta}.dat
       - peaks_beta_{beta}.dat
 
-The species names come from TPQ_DSSF.cpp and include the operator_type prefix:
+The species names come from `ed::dssf::build_observable_pairs` (the same naming
+that the `ED dssf` CLI emits) and include the operator_type prefix:
 - sum: SpSm_q_Qx0_Qy0_Qz0, SzSz_q_Qx0_Qy0_Qz0, etc.
 - sublattice: SpSm_q_Qx0_Qy0_Qz0_sub0_sub1, SzSz_q_Qx0_Qy0_Qz0_sub2_sub3, etc.
 - transverse: SpSm_q_Qx0_Qy0_Qz0_SF, SzSz_q_Qx0_Qy0_Qz0_NSF, etc.

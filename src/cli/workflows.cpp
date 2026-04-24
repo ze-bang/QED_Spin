@@ -1390,7 +1390,7 @@ void compute_static_response_workflow(const EDConfig& config) {
     
     if (use_config_operators) {
         // ============================================================
-        // Configuration-based operator construction (like TPQ_DSSF)
+        // Configuration-based operator construction (canonical `ED dssf` knobs)
         // ============================================================
         if (rank == 0) {
             std::cout << "\nUsing configuration-based operator construction\n";
@@ -1438,7 +1438,7 @@ void compute_static_response_workflow(const EDConfig& config) {
         }
         
         // ============================================================
-        // MPI Task Distribution (like TPQ_DSSF.cpp)
+        // MPI Task Distribution (per-operator-pair sharding)
         // ============================================================
         
         // Build task list: each task is an operator pair

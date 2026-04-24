@@ -7,8 +7,8 @@
 //
 // Why a new schema?
 // -----------------
-// Today's outputs are split across THREE incompatible layouts that
-// drifted independently:
+// Historically there were THREE incompatible on-disk layouts that drifted
+// independently:
 //
 //   * `compute_dynamical_response_workflow` -> `/dynamical/<op>/...`
 //                                              (real/imag pair, attrs T,
@@ -16,16 +16,17 @@
 //   * `compute_static_response_workflow`    -> `/correlations/<op>/...`
 //                                              (1D temp grid, expectation,
 //                                               variance, susceptibility)
-//   * `TPQ_DSSF.cpp`                        -> `/dssf_results/...`
+//   * `TPQ_DSSF.cpp` (deleted in P2.14)     -> `/dssf_results/...`
 //                                              (positional + per-Q groups,
 //                                               separate metadata blob)
 //
 // The unified schema collapses these onto a single root group `/dssf/`
 // with a `schema_version` attribute so post-processing scripts can detect
-// the layout once and dispatch on it forever after. The legacy writers
-// remain in place (gated by `--dssf-legacy-output` for `TPQ_DSSF`) for
-// one release; `TPQ_DSSF`-style outputs become read-only after P2.5 and
-// are deleted in P2.14.
+// the layout once and dispatch on it forever after. The first two legacy
+// writers remain in place (and are pinned by `test_dssf_legacy_schema.cpp`)
+// because downstream notebooks and the j3_h0_scan post-processing scripts
+// still consume them; the third (`TPQ_DSSF.cpp` `/dssf_results/...`) is
+// gone with the binary.
 //
 // Schema (root group `/dssf`):
 //

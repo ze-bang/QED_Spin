@@ -1,32 +1,34 @@
 // =============================================================================
 // include/ed/dssf/dssf_engine.h
 //
-// `ed::dssf::run(...)` -- the canonical, library-level entry point that wraps
-// the entire DSSF / SSSF / single-expectation pipeline behind a single
-// `enum class DSSFMethod` dispatch table.
+// `ed::dssf::run(...)` -- the canonical, library-level entry point that
+// wraps the entire DSSF / SSSF / single-expectation pipeline behind a
+// single `enum class DSSFMethod` dispatch table.
 //
-// Before this refactor (P2.2 / DSSF PR-C), every caller into the DSSF
-// pipeline had to pick the correct workflow by hand:
+// One seam, four kernels, three callers:
 //
-//   * `compute_dynamical_response_workflow`  -- ω-resolved response
-//   * `compute_static_response_workflow`     -- thermal expectation values
-//   * `compute_ground_state_dssf_workflow`   -- T=0 continued fraction
-//   * `TPQ_DSSF::main()`                     -- TPQ-based S(q,ω) / S(q)
+//   Kernels (live in `src/cli/workflows.cpp`):
+//     * `compute_dynamical_response_workflow`  -- ω-resolved response
+//     * `compute_static_response_workflow`     -- thermal expectation values
+//     * `compute_ground_state_dssf_workflow`   -- T=0 continued fraction
+//     * SINGLE_EXPECTATION                     -- single ⟨ψ|O|ψ⟩
 //
-// And the matching CLI flags duplicated the dispatch logic across
-// `ed_main.cpp` (`--mode=dynamical|static|gs-dssf`), `TPQ_DSSF.cpp`'s
-// 14-positional-arg form, and the future `ED dssf` subcommand (P2.4).
+//   Callers all funnel through `run(DSSFRequest)`:
+//     * The C++ CLI: `ED dssf <method> ...` (src/apps/ed_main.cpp).
+//     * The C++ CLI: legacy `--dynamical-response` / `--static-response` /
+//       `--ground-state-dssf` flags (src/apps/ed_main.cpp).
+//     * The Python bindings: `quantum_ed.dssf.run(...)` (P2.8).
 //
-// `ed::dssf::run(...)` collapses all of those into one function. It takes a
-// `DSSFRequest` (composed of an `OperatorSpec` + a `DSSFMethod` + the
-// per-method parameters) and dispatches to the correct workflow under the
-// hood. The body of each method is currently still hosted by the existing
-// `compute_*_workflow` functions in `src/cli/workflows.cpp` -- this PR
-// introduces the *seam*; later PRs (P2.3, P2.4, P2.5) move the actual
-// computation bodies onto this seam one at a time so `ctest` stays green
-// between commits.
+// Historical context (archived; do not regress):
+//   Before P2.14 the codebase carried *two* DSSF entry points: this seam
+//   plus a 4 174-LOC standalone `TPQ_DSSF` binary with its own
+//   14-positional-arg CLI and a duplicated `/dssf_results/...` HDF5 schema.
+//   `TPQ_DSSF` was deleted in P2.14; `ED dssf <method>` is now the only
+//   supported front end and the kernels are the only authoritative
+//   implementation.
 //
-// Audit ref: P2.2 (DSSF PR-C) of `MODERNIZATION_AUDIT.md` (§3.10 + §6).
+// Audit ref: P2.2 (DSSF PR-C) -- seam introduction; P2.4 (DSSF PR-E) --
+// `ED dssf` subcommand; P2.14 (DSSF PR-H) -- `TPQ_DSSF` deletion.
 // =============================================================================
 
 #pragma once
@@ -63,9 +65,10 @@ enum class DSSFMethod : std::uint32_t {
     /// fixed-Sz 32-site ED on a single node.
     GROUND_STATE_DSSF = 2,
 
-    /// Single expectation value ⟨ψ|O|ψ⟩ (no Hermitian conjugate / no
-    /// product). Used by the legacy single-observable mode of TPQ_DSSF
-    /// where only one operator is written instead of an O₁†O₂ pair.
+    /// Single expectation value ⟨ψ|O|ψ⟩ (no Hermitian conjugate, no
+    /// O₁†O₂ product): writes one operator per group rather than a pair.
+    /// Useful for diagnostic observables (energy, magnetisation, etc.)
+    /// where the second operator would be the identity.
     SINGLE_EXPECTATION = 3,
 };
 
@@ -141,18 +144,18 @@ struct DSSFResult {
 /**
  * Dispatch into the correct DSSF pipeline.
  *
- * For now (P2.2 / DSSF PR-C transitional cut) this function simply
- * delegates to the matching `compute_*_workflow(*request.config)` call:
+ * The DSSFMethod -> kernel mapping:
  *
  *   DYNAMICAL_THERMAL  -> compute_dynamical_response_workflow
  *   STATIC_THERMAL     -> compute_static_response_workflow
  *   GROUND_STATE_DSSF  -> compute_ground_state_dssf_workflow
  *   SINGLE_EXPECTATION -> compute_static_response_workflow
- *                         (legacy TPQ_DSSF parity; will get its own
- *                          dedicated workflow in P2.3)
+ *                         (single-operator diagnostic mode; flagged via
+ *                          OperatorSpec::single_obs_only on the request)
  *
- * Future PRs (P2.3 / P2.4) will move the workflow bodies onto this seam
- * so `EDConfig` no longer has to be passed in.
+ * The `compute_*_workflow` bodies live in `src/cli/workflows.cpp` and
+ * read per-method parameters off `request.config`. New methods just need
+ * an entry in this dispatch table plus a kernel.
  *
  * @throws std::invalid_argument if `request.method` is unrecognised or
  *         if the matching workflow requires `request.config` and it is

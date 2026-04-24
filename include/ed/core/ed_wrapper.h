@@ -390,7 +390,7 @@ struct EDParameters {
     std::vector<int> selected_sectors;  // If non-empty, only diagonalize these sector indices (0-based)
     
     // ========== TPQ Observable Parameters ==========
-    // save_thermal_states: Save TPQ states at target temperatures for post-processing (e.g., TPQ_DSSF)
+    // save_thermal_states: Save TPQ states at target temperatures for post-processing (e.g., `ED dssf`)
     // compute_spin_correlations: Compute spin expectation values (Sx,Sy,Sz) and correlations at each measurement
     bool save_thermal_states = false;   // Save TPQ states at target β values
     bool compute_spin_correlations = false;  // Compute ⟨Si⟩ and ⟨Si·Sj⟩ correlations

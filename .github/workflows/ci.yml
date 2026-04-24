@@ -314,4 +314,4 @@ jobs:
             -DCMAKE_CUDA_ARCHITECTURES=70
 
       - name: Build (compile only, no execution)
-        run: cmake --build build-cuda --target ed_solvers_gpu ED TPQ_DSSF -- -j$(nproc)
+        run: cmake --build build-cuda --target ed_solvers_gpu ED -- -j$(nproc)

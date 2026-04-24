@@ -15,8 +15,8 @@
 #                   cuRAND/cuSOLVER imported targets.
 #
 # Each library exposes its include directories and link dependencies via
-# PUBLIC properties, so executables (ED, TPQ_DSSF, compute_bfg_order_parameters,
-# the test binaries) only need to write `target_link_libraries(<exe> PRIVATE
+# PUBLIC properties, so executables (ED, compute_bfg_order_parameters, the
+# test binaries) only need to write `target_link_libraries(<exe> PRIVATE
 # ed_solvers_cpu)` -- the include path and BLAS/LAPACK/HDF5/OpenMP/MPI/CUDA
 # link stack propagate automatically.
 #
@@ -141,9 +141,9 @@ set_target_properties(ed_solvers_cpu PROPERTIES POSITION_INDEPENDENT_CODE ON)
 #
 # This library is the canonical home for the (operator_type x basis x momentum
 # x spin-combo x fixed-Sz) cross-product that every dynamical/static
-# structure-factor workflow needs. Splitting it out of ed_main.cpp /
-# TPQ_DSSF.cpp eliminates the duplicated switch-statements those two
-# binaries used to maintain in lockstep (P1.10 / DSSF PR-A).
+# structure-factor workflow needs. The ED CLI consumes it via
+# `compute_*_workflow` (in ed_cli) and the canonical `ed::dssf::run` engine
+# seam (P1.10 / DSSF PR-A; P2.5 / DSSF PR-F; P2.14 deletion of TPQ_DSSF).
 #
 # Depends only on ed_core for the `Operator` definitions.
 # -----------------------------------------------------------------------------

@@ -26,7 +26,7 @@ sudo apt-get install -y \
 Optional:
 
 - **MPI** (`libopenmpi-dev openmpi-bin`) — enables ScaLAPACK distributed
-  diagonalization and the parallel TPQ_DSSF driver.
+  diagonalization and MPI-aware workflows.
 - **CUDA Toolkit ≥ 12.x** — enables the GPU solvers (`ed_solvers_gpu`).
 
 Then:

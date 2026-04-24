@@ -1,6 +1,6 @@
 """High-level Python wrapper around ``ed::dssf`` (P2.8 / DSSF PR-G).
 
-The C++ ``ED`` and ``TPQ_DSSF`` executables both call
+The C++ ``ED dssf`` subcommand calls
 ``ed::dssf::build_observable_pairs`` to assemble the list of observable
 pairs ``(O_1, O_2, name)`` that get fed into the dynamical / static
 structure-factor evaluator. This module re-exports the *same* builder so

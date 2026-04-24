@@ -255,50 +255,11 @@ else()
     target_link_libraries(ED PRIVATE ed_cli ed_solvers_cpu ed_dssf)
 endif()
 
-# TPQ_DSSF is a legacy DSSF/SSSF wrapper around the same CPU+GPU stack as ED,
-# plus parallel HDF5 for MPI-safe output. It will be replaced by `ED dssf` in
-# Phase 2 (DSSF PR-E/F); for now it just links the same libraries as ED.
-if(WITH_MPI)
-    set(HDF5_PREFER_PARALLEL TRUE)
-    find_path(HDF5_PARALLEL_INCLUDE_DIR H5Cpp.h
-        HINTS /usr/include/hdf5/openmpi /usr/include/hdf5/mpi
-        NO_DEFAULT_PATH
-    )
-    find_library(HDF5_PARALLEL_C_LIBRARY NAMES hdf5_openmpi hdf5
-        HINTS /usr/lib/x86_64-linux-gnu/hdf5/openmpi
-        NO_DEFAULT_PATH
-    )
-    find_library(HDF5_PARALLEL_CXX_LIBRARY NAMES hdf5_openmpi_cpp hdf5_cpp
-        HINTS /usr/lib/x86_64-linux-gnu/hdf5/openmpi
-        NO_DEFAULT_PATH
-    )
-    find_library(HDF5_PARALLEL_HL_LIBRARY NAMES hdf5_openmpi_hl hdf5_hl
-        HINTS /usr/lib/x86_64-linux-gnu/hdf5/openmpi
-        NO_DEFAULT_PATH
-    )
-
-    if(HDF5_PARALLEL_INCLUDE_DIR AND HDF5_PARALLEL_C_LIBRARY AND HDF5_PARALLEL_CXX_LIBRARY)
-        message(STATUS "Found parallel HDF5 for TPQ_DSSF:")
-        message(STATUS "  Include: ${HDF5_PARALLEL_INCLUDE_DIR}")
-        message(STATUS "  C lib: ${HDF5_PARALLEL_C_LIBRARY}")
-        message(STATUS "  C++ lib: ${HDF5_PARALLEL_CXX_LIBRARY}")
-        set(HDF5_PARALLEL_LIBRARIES ${HDF5_PARALLEL_CXX_LIBRARY} ${HDF5_PARALLEL_C_LIBRARY})
-        if(HDF5_PARALLEL_HL_LIBRARY)
-            list(APPEND HDF5_PARALLEL_LIBRARIES ${HDF5_PARALLEL_HL_LIBRARY})
-        endif()
-        set(HAS_PARALLEL_HDF5 TRUE)
-    else()
-        message(STATUS "Parallel HDF5 not found, TPQ_DSSF will use serial HDF5 with file locking workaround")
-        set(HAS_PARALLEL_HDF5 FALSE)
-    endif()
-
-    add_executable(TPQ_DSSF ${APPS_DIR}/TPQ_DSSF.cpp)
-    if(WITH_CUDA)
-        target_link_libraries(TPQ_DSSF PRIVATE ed_solvers_gpu ed_dssf)
-    else()
-        target_link_libraries(TPQ_DSSF PRIVATE ed_solvers_cpu ed_dssf)
-    endif()
-endif()
+# NOTE: The historical `TPQ_DSSF` standalone binary (~4.2 kLOC of duplicated
+# kernels + a positional CLI + parallel HDF5 plumbing) was deleted in P2.14.
+# Every feature it offered is now reachable through `ED dssf <method>`, which
+# routes the same `compute_*_workflow` kernels through `ed::dssf::run(...)`.
+# See `MODERNIZATION_AUDIT.md` for migration notes and the historical context.
 
 # BFG Order Parameter computation (lightweight, HDF5 + OpenMP only)
 add_executable(compute_bfg_order_parameters ${APPS_DIR}/compute_bfg_order_parameters.cpp)
@@ -338,20 +299,9 @@ if(WITH_CUDA)
 endif()
 
 
-# ED and TPQ_DSSF inherit BLAS/LAPACK/LAPACKE/HDF5/ARPACK/MPI/CUDA/OpenMP
-# transitively from ed_solvers_cpu (and ed_solvers_gpu when WITH_CUDA), since
-# those libraries declare their dependencies as PUBLIC.
-
-# TPQ_DSSF still needs its parallel-HDF5 override (different libs, extra
-# compile definition).
-if(TARGET TPQ_DSSF AND HAS_PARALLEL_HDF5)
-    target_include_directories(TPQ_DSSF PRIVATE ${HDF5_PARALLEL_INCLUDE_DIR})
-    target_compile_definitions(TPQ_DSSF PRIVATE HDF5_PARALLEL)
-    target_link_libraries(TPQ_DSSF PRIVATE
-        ${HDF5_PARALLEL_LIBRARIES}
-        z sz crypto curl dl m
-    )
-endif()
+# ED inherits BLAS/LAPACK/LAPACKE/HDF5/ARPACK/MPI/CUDA/OpenMP transitively
+# from ed_solvers_cpu (and ed_solvers_gpu when WITH_CUDA), since those
+# libraries declare their dependencies as PUBLIC.
 
 # Link libraries for test_dynamical_correlation
 if(TARGET test_dynamical_correlation)
@@ -431,7 +381,7 @@ endif()
 #   target_link_libraries(myapp PRIVATE ED::ed_solvers_cpu)
 #
 # Layout under <prefix>:
-#   bin/                        ED, TPQ_DSSF, compute_bfg_order_parameters
+#   bin/                        ED, compute_bfg_order_parameters
 #   include/ed/                 public headers (kept hierarchical)
 #   lib/                        libed_io.a, libed_core.a, libed_solvers_cpu.a
 #                               libed_solvers_gpu.a (when WITH_CUDA)
@@ -454,9 +404,6 @@ install(TARGETS ${_ED_INSTALL_TARGETS} ED
     INCLUDES DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
 )
 
-if(TARGET TPQ_DSSF)
-    install(TARGETS TPQ_DSSF RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
-endif()
 if(TARGET compute_bfg_order_parameters)
     install(TARGETS compute_bfg_order_parameters
             RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
@@ -541,11 +488,6 @@ _ed_report_cpu_features()
 target_compile_options(ED PRIVATE
     $<$<COMPILE_LANGUAGE:CXX>:${CPU_OPT_FLAGS}>
 )
-if(TARGET TPQ_DSSF)
-    target_compile_options(TPQ_DSSF PRIVATE
-        $<$<COMPILE_LANGUAGE:CXX>:${CPU_OPT_FLAGS}>
-    )
-endif()
 
 # =============================================================================
 # Optional Python bindings (P2.7 / audit "modern python interface").

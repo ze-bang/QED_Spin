@@ -12,9 +12,10 @@ scripts/
 ```
 
 Nothing under `scripts/` is required to **build** the toolkit or to **run**
-the `ED` or `TPQ_DSSF` executables. The hard build-time and run-time
-dependency is the Python utility package `python/edlib/`, which the C++
-streaming-symmetry workflow invokes to enumerate automorphism groups.
+the `ED` executable (which now also owns the `dssf` subcommand). The hard
+build-time and run-time dependency is the Python utility package
+`python/edlib/`, which the C++ streaming-symmetry workflow invokes to
+enumerate automorphism groups.
 
 ---
 

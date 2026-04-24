@@ -533,9 +533,9 @@ PYBIND11_MODULE(_core, m) {
         R"pbdoc(
         Build the DSSF/SSSF observable pairs requested by ``spec``.
 
-        This is the canonical entry point that the C++ ``ED`` /
-        ``TPQ_DSSF`` executables both call internally; using it from
-        Python guarantees byte-identical observable names and ordering.
+        This is the canonical entry point that the C++ ``ED dssf``
+        subcommand calls internally; using it from Python guarantees
+        byte-identical observable names and ordering.
 
         Returns
         -------

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-HDF5 File Inspector for ED/TPQ_DSSF Output Files
+HDF5 File Inspector for ED Output Files (ground state, TPQ, dssf, BFG)
 
 Usage:
     python3 h5inspect.py <file.h5>                    # Show structure
@@ -255,7 +255,7 @@ def summarize_dssf_results(f):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Inspect HDF5 files from ED/TPQ_DSSF",
+        description="Inspect HDF5 files from the ED toolkit (ED, ED dssf, BFG)",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:

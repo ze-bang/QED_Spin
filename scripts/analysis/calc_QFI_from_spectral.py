@@ -171,7 +171,7 @@ HIGH_BETA_QFI_FLOOR_THRESHOLD = 230.0
 # But in magnetically ordered phases, <S(q)> ≠ 0, and the broadened Bragg peak
 # at ω ≈ 0 contributes spuriously to QFI. This subtracts that contribution.
 #
-# Requires single_expectation data in dssf_results.h5 (from TPQ_DSSF single_expectation run).
+# Requires single_expectation data in dssf_results.h5 (from `ED dssf single_expectation`).
 ENABLE_CONNECTED_CORRELATOR = True
 
 # ==============================================================================

@@ -1,10 +1,11 @@
 // =============================================================================
 // test_dssf_operator_spec (Catch2 v3, P1.10 / P2.5 / DSSF PR-A+F lockdown)
 //
-// Sanity tests for the new `ed::dssf::build_observable_pairs` /
-// `ed::dssf::compute_transverse_bases` library that replaced ~500 LOC of
-// duplicated operator-construction logic in `src/apps/ed_main.cpp` and
-// `src/apps/TPQ_DSSF.cpp`.
+// Sanity tests for `ed::dssf::build_observable_pairs` /
+// `ed::dssf::compute_transverse_bases`. These library functions are the
+// single source of truth for DSSF observable construction; they replaced
+// ~500 LOC of duplicated logic that used to live in `src/apps/ed_main.cpp`
+// and the now-deleted `src/apps/TPQ_DSSF.cpp` (P2.14).
 //
 // What we lock down here:
 //   * `compute_transverse_bases`: Q × polarization basis math, including
@@ -19,7 +20,7 @@
 // We deliberately avoid asserting the matrix elements of the constructed
 // Operators (that's covered by test_operator_apply / test_observables);
 // here we only assert the *shape* of the output and the bookkeeping that
-// the legacy CLI has implicitly relied on.
+// downstream HDF5 schemas (`test_dssf_legacy_schema.cpp`) depend on.
 // =============================================================================
 
 #include "common/catch2_harness.h"

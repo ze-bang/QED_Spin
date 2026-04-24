@@ -35,8 +35,9 @@ using Complex = std::complex<double>;
  * Site-to-site S^- S^+ correlation matrix:
  *   corr[i][j] = <psi| S^-_i S^+_j |psi>
  * Diagonal entries i==j reduce to <psi| (1/2 - S^z_i) |psi> for spin-1/2
- * (i.e. the down-spin density at site i). Matches the TPQ_DSSF "0,0"
- * convention.
+ * (i.e. the down-spin density at site i), matching the `(Sm, Sp)` pair
+ * convention used by `ed::dssf::build_observable_pairs` for the
+ * spin-combination "0,0" in ladder basis.
  */
 std::vector<std::vector<Complex>> compute_smsp_correlations(
     const std::vector<Complex>& psi,

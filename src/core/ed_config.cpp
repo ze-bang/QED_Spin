@@ -1147,7 +1147,7 @@ std::string getMethodParameterInfo(DiagonalizationMethod method) {
             info << "  --temp_min=<T>        Minimum temperature (default: 1e-3)\n";
             info << "  --temp_max=<T>        Maximum temperature (default: 20.0)\n";
             info << "  --temp_bins=<n>       Number of temperature points (default: 100)\n";
-            info << "  --save-thermal-states Save TPQ states at target β values (for TPQ_DSSF)\n";
+            info << "  --save-thermal-states Save TPQ states at target β values (for `ED dssf`)\n";
             info << "  --compute-spin-correlations  Compute ⟨Si⟩ and ⟨Si·Sj⟩ correlations\n";
             info << "  --tpq_num_measure_points=<n> Number of log-spaced measurement β points (default: 20)\n";
             info << "  --tpq_measure_beta_min=<β>  Minimum β for measurement grid (default: 1.0)\n";
@@ -1164,7 +1164,7 @@ std::string getMethodParameterInfo(DiagonalizationMethod method) {
             info << "  --temp_min=<T>        Minimum temperature (default: 1e-3)\n";
             info << "  --temp_max=<T>        Maximum temperature (default: 20.0)\n";
             info << "  --temp_bins=<n>       Number of temperature points (default: 100)\n";
-            info << "  --save-thermal-states Save TPQ states at target β values (for TPQ_DSSF)\n";
+            info << "  --save-thermal-states Save TPQ states at target β values (for `ED dssf`)\n";
             info << "  --compute-spin-correlations  Compute ⟨Si⟩ and ⟨Si·Sj⟩ correlations\n";
             info << "  --tpq_num_measure_points=<n> Number of log-spaced measurement β points (default: 20)\n";
             info << "  --tpq_measure_beta_min=<β>  Minimum β for measurement grid (default: 1.0)\n";

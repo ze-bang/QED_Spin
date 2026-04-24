@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Plot static structure factor S(q) vs temperature from TPQ_DSSF results.
+Plot static structure factor S(q) vs temperature from `ED dssf` results.
 Compares with compute_bfg_order_parameters.cpp output.
 """
 
@@ -188,13 +188,13 @@ def main():
     if gamma_key and gamma_key in results:
         data = results[gamma_key]
         ax1.scatter(data['T'], data['S'], s=80, marker='o', color='blue', 
-                   edgecolors='black', linewidth=0.5, label=r"TPQ_DSSF '0,0' $\Gamma$", zorder=5)
+                   edgecolors='black', linewidth=0.5, label=r"ED dssf '0,0' $\Gamma$", zorder=5)
         ax1.plot(data['T'], data['S'], 'b-', alpha=0.5, linewidth=1)
     
     if m_key and m_key in results:
         data = results[m_key]
         ax1.scatter(data['T'], data['S'], s=80, marker='s', color='red',
-                   edgecolors='black', linewidth=0.5, label=r"TPQ_DSSF '0,0' M", zorder=5)
+                   edgecolors='black', linewidth=0.5, label=r"ED dssf '0,0' M", zorder=5)
         ax1.plot(data['T'], data['S'], 'r-', alpha=0.5, linewidth=1)
     
     # Add compute_bfg_order_parameters results as horizontal lines (ground state)

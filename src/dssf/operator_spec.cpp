@@ -283,10 +283,10 @@ ObservablePairs build_observable_pairs(const OperatorSpec& spec) {
             const int op_type_1 = combo.first;
             const int op_type_2 = combo.second;
 
-            // Convert operator indices for ladder basis: legacy code maps
-            // the first slot 0->1 (Sp -> Sm) when in ladder basis. The
-            // single_expectation workflow skips this swap (TPQ_DSSF
-            // historically did the same) so that ⟨ψ|S+|ψ⟩ stays labelled
+            // Convert operator indices for ladder basis: the pair-product
+            // path maps the first slot 0->1 (Sp -> Sm) so that ⟨S-(Q)†
+            // S+(Q)⟩ is built from `(Sm, Sp)`. The single_expectation
+            // workflow skips this swap so that ⟨ψ|S+|ψ⟩ stays labelled
             // "Sp" rather than getting silently relabelled "Sm".
             int first = op_type_1;
             const int second = op_type_2;

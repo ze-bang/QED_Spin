@@ -133,7 +133,7 @@ struct ThermalConfig {
  */
 struct ObservableConfig {
     // TPQ-specific observable options
-    // save_thermal_states: Save TPQ states at target temperatures for post-processing (e.g., TPQ_DSSF)
+    // save_thermal_states: Save TPQ states at target temperatures for post-processing (e.g., `ED dssf`)
     // compute_spin_correlations: Compute spin expectation values (Sx,Sy,Sz) and two-point correlations
     bool save_thermal_states = false;   // Save TPQ states at target β values
     bool compute_spin_correlations = false;  // Compute ⟨Si⟩ and ⟨Si·Sj⟩ correlations
@@ -177,7 +177,7 @@ struct DynamicalResponseConfig {
     std::string output_prefix = "dynamical_response";
     uint64_t random_seed = 0;     // Random seed (0 = auto)
     
-    // Configuration-based operator construction (like TPQ_DSSF)
+    // Configuration-based operator construction (canonical `ED dssf` knobs)
     std::string operator_type = "sum";  // sum | transverse | sublattice | experimental | transverse_experimental
     std::string basis = "ladder";       // ladder | xyz
     std::string spin_combinations = "0,0;2,2";  // Format: "op1,op2;op3,op4;..." (0=Sp/Sx, 1=Sm/Sy, 2=Sz)
@@ -206,7 +206,7 @@ struct StaticResponseConfig {
     std::string output_prefix = "static_response";
     uint64_t random_seed = 0;     // Random seed (0 = auto)
     
-    // Configuration-based operator construction (like TPQ_DSSF)
+    // Configuration-based operator construction (canonical `ED dssf` knobs)
     std::string operator_type = "sum";  // sum | transverse | sublattice | experimental | transverse_experimental
     std::string basis = "ladder";       // ladder | xyz
     std::string spin_combinations = "0,0;2,2";  // Format: "op1,op2;op3,op4;..." (0=Sp/Sx, 1=Sm/Sy, 2=Sz)

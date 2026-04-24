@@ -57,10 +57,11 @@ DSSFResult run(const DSSFRequest& request) {
 
         case DSSFMethod::STATIC_THERMAL:
         case DSSFMethod::SINGLE_EXPECTATION:
-            // Legacy TPQ_DSSF treated single_expectation as a special
-            // mode of the static workflow; we preserve that wiring here
-            // for one release. P2.3 will give SINGLE_EXPECTATION its own
-            // dedicated workflow body.
+            // SINGLE_EXPECTATION is the single-operator diagnostic flavour
+            // of the static workflow (no Hermitian conjugate, no O₁†O₂
+            // product); the static kernel branches on
+            // `OperatorSpec::single_obs_only` so both flavours share the
+            // same FTLM thermal averaging machinery.
             compute_static_response_workflow(*request.config);
             return result;
 

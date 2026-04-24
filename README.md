@@ -15,19 +15,18 @@ acceleration and Numerical Linked Cluster Expansion (NLCE) workflows.
 4. [Exact Diagonalization Pipeline](#exact-diagonalization-pipeline)
    - [Solver Methods](#solver-methods)
    - [Command-Line Interface](#command-line-interface)
-   - [DSSF Mode](#dssf-mode-simplified-spectral-interface)
+   - [DSSF / SSSF Subcommand](#dssf--sssf-subcommand)
    - [Configuration Files](#configuration-files)
    - [Input File Formats](#input-file-formats)
    - [Output Files](#output-files)
-5. [TPQ_DSSF Executable](#tpq_dssf-executable)
-6. [NLCE Workflow](#nlce-workflow)
+5. [NLCE Workflow](#nlce-workflow)
    - [Overview](#nlce-overview)
    - [Running NLCE Calculations](#running-nlce-calculations)
    - [NLCE with FTLM](#nlce-with-ftlm)
    - [Analysis and Fitting](#analysis-and-fitting)
-7. [Advanced Topics](#advanced-topics)
-8. [Python Utilities](#python-utilities)
-9. [License](#license)
+6. [Advanced Topics](#advanced-topics)
+7. [Python Utilities](#python-utilities)
+8. [License](#license)
 
 ---
 
@@ -58,13 +57,23 @@ exact_diagonalization_cpp/
 │   ├── io/                   # HDF5, basis storage
 │   └── gpu/                  # CUDA wrappers and GPU kernels
 ├── src/                      # Implementation sources
-│   ├── apps/                 # Entry points: ed_main.cpp, TPQ_DSSF.cpp
-│   ├── core/                 # Core implementations
+│   ├── apps/                 # Entry points: ed_main.cpp + research add-ons
+│   ├── core/                 # Core implementations (EDConfig, ed_wrapper)
+│   ├── cli/                  # `ed_cli` library: workflow + dssf engine seam
+│   ├── dssf/                 # `ed_dssf` library: operator/observable assembly
+│   ├── symmetry/             # `ed_symmetry` library: programmatic symmetry DSL
+│   ├── bfg/                  # `ed_bfg` library: research BFG add-on
 │   ├── solvers/
 │   │   ├── cpu/              # CPU solver implementations
 │   │   └── gpu/              # CUDA implementations
 │   └── io/                   # I/O implementations
-├── python/edlib/             # Python utilities package
+├── python/quantum_ed/        # Primary Python package (pybind11 bindings)
+│   ├── _bindings/            # C++ binding source for `_core` extension
+│   ├── dssf.py               # `ed::dssf::run` Python wrapper
+│   ├── hamiltonian.py        # Fluent Hamiltonian builder DSL
+│   ├── symmetry.py           # `ed::sym` programmatic symmetry DSL
+│   └── bfg.py                # BFG cluster / order-parameter helpers
+├── python/edlib/             # Legacy helper package (lattice generators)
 │   ├── helper_cluster.py     # Hamiltonian preparation for clusters
 │   ├── helper_pyrochlore.py  # Pyrochlore lattice utilities
 │   ├── hdf5_io.py            # HDF5 I/O utilities
@@ -79,11 +88,13 @@ exact_diagonalization_cpp/
 │   ├── utils/                # h5inspect, parse_tpq, print_gamma_matrices
 │   ├── research/             # Topic-specific pipelines (e.g. research/bfg/)
 │   └── archive/              # Retained for reference; not maintained
-├── docs/                     # Extended documentation
-├── examples/                 # Sample configuration files
-├── data/                     # Input data files
-├── results/                  # Output directory (gitignored)
-└── CMakeLists.txt            # Build configuration
+├── tests/unit/               # Catch2 v3 unit tests (102 tests; ctest)
+├── benchmarks/               # Google Benchmark micro-benchmarks
+├── configs/                  # Worked example configuration files
+├── docs/                     # Doxygen + Sphinx documentation sources
+├── cmake/                    # Modular CMake helpers (EDLibraries, etc.)
+├── .github/workflows/        # CI lanes (Linux GCC/Clang, CUDA-build, docs)
+└── CMakeLists.txt            # Top-level build configuration
 ```
 
 ---
@@ -125,7 +136,7 @@ cmake -DWITH_MKL=ON ..
 cmake -DUSE_AOCL_BLIS=ON ..
 
 # Build
-cmake --build . --target ED TPQ_DSSF -j$(nproc)
+cmake --build . --target ED -j$(nproc)
 ```
 
 ### Python Dependencies
@@ -313,33 +324,59 @@ mpirun -np 8 ./ED config.cfg  # Uses 8 MPI processes
 ./ED ./ham_dir --method=LANCZOS --symmetrized --eigenvalues=50
 ```
 
-### DSSF Mode (Simplified Spectral Interface)
+### DSSF / SSSF Subcommand
 
-For spectral function calculations, ED supports a simplified command-line interface
-via the `--dssf` flag. This provides TPQ_DSSF-style argument parsing as an alternative
-to full configuration files.
+All dynamical and static structure-factor calculations route through the
+`ED dssf <method>` subcommand, which dispatches into the canonical
+`ed::dssf::run(...)` engine seam shared by the C++ CLI and the Python
+`quantum_ed.dssf` bindings.
 
 ```bash
-# Basic syntax
-./ED --dssf <directory> <krylov_dim> <spin_combinations> [options]
+# Generic syntax
+./ED dssf <method> <directory> [options]
+#   method = dynamical_thermal | static_thermal |
+#            ground_state_dssf  | single_expectation
 
-# Examples
-./ED --dssf ./ham_dir 50 "2,2" --dssf-method=spectral
-./ED --dssf ./ham_dir 50 "0,1;2,2" --dssf-method=ftlm_thermal --dssf-temps=0.1,10.0,20
-./ED --dssf ./ham_dir 50 "0,0;1,1;2,2" --dssf-method=static --dssf-temps=0.01,5.0,50
+# T = 0 ground-state DSSF
+./ED dssf ground_state_dssf ./ham_dir
+
+# Finite-T DSSF via FTLM continued fraction (per-method knobs are the
+# standard --dyn-* flags parsed by EDConfig::fromCommandLine).
+./ED dssf dynamical_thermal ./ham_dir \
+    --dyn-omega-min=-5 --dyn-omega-max=5 --dyn-omega-points=200 \
+    --dyn-broadening=0.1 --dyn-temp-min=0.1 --dyn-temp-max=10 \
+    --dyn-temp-bins=20 --dyn-samples=40
+
+# Static structure factor S(Q) via FTLM thermal averaging
+./ED dssf static_thermal ./ham_dir \
+    --static-temp-min=0.01 --static-temp-max=5.0 --static-temp-points=50 \
+    --static-samples=40 \
+    --static-momentum-points="0,0,0;0.5,0.5,0;1,0,0"
+
+# GPU-accelerated finite-T DSSF
+./ED dssf dynamical_thermal ./ham_dir --use-gpu
 ```
 
-| Option | Description | Example |
-|--------|-------------|---------|
-| `--dssf-method=<m>` | Method: spectral, ftlm_thermal, static, ground_state | `spectral` |
-| `--dssf-operator=<o>` | Operator: sum, transverse, sublattice | `sum` |
-| `--dssf-basis=<b>` | Spin basis: ladder or xyz | `ladder` |
-| `--dssf-omega=<params>` | Frequency grid: min,max,bins,eta | `-5,5,200,0.1` |
-| `--dssf-temps=<params>` | Temperature range: min,max,steps | `0.1,10,20` |
-| `--dssf-momentum=<pts>` | Q-points in units of π | `0,0,0;0.5,0.5,0` |
-| `--dssf-samples=<n>` | FTLM random samples | `40` |
+| Knob (per-method prefix `--dyn-` or `--static-`) | Description |
+|--------------------------------------------------|-------------|
+| `--dyn-omega-min/--max/--points`                 | Frequency window + resolution |
+| `--dyn-broadening`                               | Lorentzian η |
+| `--dyn-temp-min/--max/--bins`                    | Temperature scan (log-spaced) |
+| `--dyn-samples`                                  | FTLM random samples (default 40) |
+| `--dyn-operator-type` (sum, transverse, sublattice, experimental) | Observable family |
+| `--dyn-basis` (ladder or xyz)                    | Spin basis |
+| `--dyn-spin-combinations`                        | "op1,op2;op3,op4" |
+| `--dyn-momentum-points`                          | "Qx,Qy,Qz;..." in units of π |
+| `--dyn-polarization`, `--dyn-theta`              | For transverse / experimental |
+| `--use-gpu` / `--n-up=<n>`                       | GPU + fixed-Sz sector |
 
-See `./ED --help` for full DSSF mode documentation.
+The same knobs exist with the `--static-` prefix for the static workflow.
+Run `./ED --help` for the complete list.
+
+> Migration note: the `TPQ_DSSF` standalone binary and the legacy
+> `--dssf <dir> <krylov> <ops>` half-positional flag (both ~4.5 kLOC of
+> duplicated UI on top of the same kernels) were removed in P2.14. Every
+> feature they offered is now reachable through `ED dssf <method>`.
 
 ### Configuration Files
 
@@ -420,79 +457,6 @@ output/
 │   └── eigenvector_*.dat
 └── results.h5                # HDF5 output (all data)
 ```
-
----
-
-## TPQ_DSSF Executable
-
-The `TPQ_DSSF` executable is a standalone tool for computing dynamical and static
-spin structure factors. It provides a simpler command-line interface compared to
-the full ED configuration files.
-
-### Basic Syntax
-
-```bash
-./TPQ_DSSF <directory> <krylov_dim> <spin_combinations> [method] [operator] [basis] [params] ...
-```
-
-### Available Methods
-
-| Method | Description |
-|--------|-------------|
-| `krylov` | Time-domain C(t) using Krylov evolution |
-| `taylor` | Time-domain C(t) using Taylor expansion |
-| `spectral` | Frequency-domain S(ω) via continued fraction (single state) |
-| `spectral_thermal` | S(ω) with thermal averaging over TPQ states |
-| `ftlm_thermal` | FTLM with random sampling for finite-T S(ω,T) |
-| `static` | Static structure factor S(q) vs T (SSSF) |
-| `ground_state` | T=0 DSSF using continued fraction |
-
-### Operator Types
-
-| Type | Description |
-|------|-------------|
-| `sum` | Standard Fourier transform: S^α(q) = Σᵢ exp(iq·rᵢ) Sᵢ^α |
-| `transverse` | Project onto plane ⊥ to Q (neutron spin-flip channel) |
-| `sublattice` | Sublattice-resolved structure factors |
-| `experimental` | Custom rotation: cos(θ)Sz + sin(θ)Sx |
-| `transverse_experimental` | Combined transverse + rotation |
-
-### Example Commands
-
-```bash
-# Basic SzSz spectral function
-./TPQ_DSSF ./my_system 50 "2,2"
-
-# SpSm and SzSz with custom frequency range
-./TPQ_DSSF ./my_system 100 "0,1;2,2" spectral sum ladder "-5.0,5.0,200,0.1"
-
-# FTLM thermal averaging with temperature scan
-./TPQ_DSSF ./my_system 50 "2,2" ftlm_thermal sum ladder \
-    "-5.0,5.0,200,0.1" 4 "0,0,0" "1,0,0" 0.0 0 8 "0.1,10.0,20" 40
-
-# Static structure factor vs temperature
-./TPQ_DSSF ./my_system 50 "0,0;1,1;2,2" static sum xyz \
-    "-5.0,5.0,200,0.1" 4 "0,0,0;0.5,0.5,0" "1,0,0" 0.0 0 8 "0.1,10.0,50" 40
-
-# Ground state T=0 DSSF
-./TPQ_DSSF ./my_system 100 "0,1;2,2" ground_state sum ladder \
-    "0.0,10.0,500,0.05" 4 "0,0,0;0.5,0.5,0.5"
-
-# Transverse operator for neutron scattering
-./TPQ_DSSF ./my_system 80 "0,0;1,1;2,2" spectral transverse xyz \
-    "-5.0,5.0,200,0.05" 4 "0,0,0;0.5,0.5,0;1,0,0" "1,-1,0" 0.0 0 8
-```
-
-### Parameter Formats
-
-| Parameter | Format | Example |
-|-----------|--------|---------|
-| Spin combinations | `"op1,op2;op3,op4"` | `"0,1;2,2"` |
-| Spectral params | `"ω_min,ω_max,bins,η"` | `"-5.0,5.0,200,0.1"` |
-| Momentum points | `"Qx,Qy,Qz;..."` | `"0,0,0;0.5,0.5,0"` |
-| Temperature range | `"T_min,T_max,steps"` | `"0.1,10.0,20"` |
-
-Run `./TPQ_DSSF` without arguments for complete usage help.
 
 ---
 
@@ -753,7 +717,37 @@ Each MPI rank processes samples/size samples independently.
 
 ## Python Utilities
 
-### python/edlib Package
+### `quantum_ed` Package (primary, pybind11 bindings)
+
+The modern primary Python package; built and installed by
+`pip install .` (uses `scikit-build-core`).
+
+```python
+import numpy as np
+from quantum_ed import _core, dssf, hamiltonian, symmetry
+
+# Build a Hamiltonian via the fluent DSL
+H = (
+    hamiltonian.Hamiltonian(num_sites=8)
+    .heisenberg(j=1.0, edges=[(i, (i + 1) % 8) for i in range(8)])
+    .field(direction="z", h=0.1)
+    .build()
+)
+
+# Run the canonical DSSF engine seam from Python
+spec = dssf.OperatorSpec(
+    operator_type="sum", basis="ladder",
+    spin_combinations=[(2, 2)],          # SzSz
+    momentum_points=[[0.0, 0.0, 0.0]],
+    num_sites=8, spin_length=0.5,
+)
+pairs = dssf.build_observable_pairs(spec)
+```
+
+### `python/edlib` Package (legacy helpers)
+
+Helper scripts kept for compatibility with existing notebooks (lattice
+generators, HDF5 readers). New code should prefer `quantum_ed`.
 
 ```python
 from edlib import helper_pyrochlore, hdf5_io
@@ -810,17 +804,24 @@ temperatures now run **up to 35× faster** by reusing the Lanczos decomposition.
 calculations on 600M-dimensional Hilbert spaces with ~40-80 GB RAM.
 
 **📦 Reorganized Codebase** – Modern directory layout with separated headers
-(`include/ed/`), sources (`src/`), Python package (`python/edlib/`), and
+(`include/ed/`), sources (`src/`), pybind11 Python package
+(`python/quantum_ed/`), legacy helper shim (`python/edlib/`), and
 workflows (`workflows/nlce/`).
+
+**🧹 Single Canonical CLI** – As of P2.14, every dynamical / static
+structure-factor calculation routes through `ED dssf <method>`. The
+historical `TPQ_DSSF` standalone binary and the deprecated `--dssf`
+half-positional flag have been removed; `ED` is now the one canonical
+caller for every ED core routine.
 
 ---
 
 ## Getting Help
 
-- `ED --help` – Full option reference
+- `ED --help` – Full option reference (includes the `ED dssf` subcommand)
 - `ED --method-info=<METHOD>` – Method-specific parameters
-- `docs/` – Extended documentation
-- `examples/` – Sample configuration files
+- `docs/` – Extended Doxygen + Sphinx documentation sources
+- `configs/` – Worked example configuration files
 
 ---
 

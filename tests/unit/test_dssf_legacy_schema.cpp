@@ -3,8 +3,14 @@
 //
 // Pin the *legacy* HDF5 schemas that the existing CLI workflows
 // (`compute_dynamical_response_workflow`, `compute_static_response_workflow`)
-// and the legacy `TPQ_DSSF` binary write today, BEFORE the unified
-// `/dssf/...` schema lands in P2.3.
+// continue to write (`/dynamical/...` and `/correlations/...`) on top
+// of the unified `/dssf/...` schema. These layouts are consumed by
+// downstream notebooks and the j3_h0_scan post-processing scripts; this
+// test ensures we don't accidentally break the bit-for-bit on-disk
+// contract.
+//
+// (The third historical schema -- `/dssf_results/...`, written by the
+// since-deleted `TPQ_DSSF` binary -- is gone with the binary in P2.14.)
 //
 // What we lock down here (one test per schema family):
 //

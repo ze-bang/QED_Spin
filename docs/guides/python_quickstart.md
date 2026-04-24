@@ -76,9 +76,9 @@ H_singlet.dimension   # C(4, 2) == 6
 
 The `quantum_ed.dssf` submodule exposes the *same* `OperatorSpec` /
 `build_observable_pairs` / `compute_transverse_bases` C++ functions used by
-the `ED` and `TPQ_DSSF` executables, so a Python script can produce a
-byte-identical pair list (operators, names, ordering) and feed them into the
-solvers without any glue code:
+the `ED dssf` subcommand, so a Python script can produce a byte-identical
+pair list (operators, names, ordering) and feed them into the solvers
+without any glue code:
 
 ```python
 import quantum_ed as qe

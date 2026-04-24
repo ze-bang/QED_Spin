@@ -2,8 +2,8 @@
 
 These tests are the Python mirror of ``tests/unit/test_dssf_operator_spec.cpp``;
 they exercise the *same* C++ ``ed::dssf::build_observable_pairs`` /
-``ed::dssf::compute_transverse_bases`` entry points the C++ ``ED`` and
-``TPQ_DSSF`` executables call internally, and lock down:
+``ed::dssf::compute_transverse_bases`` entry points the C++ ``ED dssf``
+subcommand calls internally, and lock down:
 
   * the pair count for ``sum`` / ``transverse`` / ``sublattice`` operator types
   * the ``single_obs_only`` shortcut (empty ``obs_2``, single-op naming)
