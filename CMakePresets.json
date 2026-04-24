@@ -1,0 +1,162 @@
+{
+    "version": 3,
+    "cmakeMinimumRequired": {
+        "major": 3,
+        "minor": 21,
+        "patch": 0
+    },
+    "configurePresets": [
+        {
+            "name": "default",
+            "displayName": "Default (Release, OpenBLAS, no CUDA, no MPI)",
+            "description": "Sane defaults for a CPU-only build that newcomers can run on a stock Linux box. No CUDA, no MPI, OpenBLAS, Release.",
+            "binaryDir": "${sourceDir}/build",
+            "generator": "Unix Makefiles",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Release",
+                "BLAS_PROFILE": "OPENBLAS",
+                "WITH_CUDA": "OFF",
+                "WITH_MPI": "OFF"
+            }
+        },
+        {
+            "name": "release",
+            "inherits": "default",
+            "displayName": "Release (CPU, OpenBLAS, no CUDA, no MPI)",
+            "description": "Alias for 'default' for users who explicitly want a release config."
+        },
+        {
+            "name": "debug",
+            "inherits": "default",
+            "displayName": "Debug (CPU, OpenBLAS, no CUDA, no MPI)",
+            "description": "Debug symbols, no optimization, assertions on. Use with gdb/lldb.",
+            "binaryDir": "${sourceDir}/build-debug",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Debug"
+            }
+        },
+        {
+            "name": "debug-asan",
+            "inherits": "debug",
+            "displayName": "Debug + ASan + UBSan (CPU)",
+            "description": "Debug + AddressSanitizer + UndefinedBehaviorSanitizer. Use to catch memory bugs and UB. Slow.",
+            "binaryDir": "${sourceDir}/build-asan",
+            "cacheVariables": {
+                "CMAKE_CXX_FLAGS_DEBUG": "-O1 -g -fno-omit-frame-pointer -fsanitize=address,undefined -fno-sanitize-recover=undefined",
+                "CMAKE_EXE_LINKER_FLAGS_DEBUG": "-fsanitize=address,undefined"
+            }
+        },
+        {
+            "name": "release-mpi",
+            "inherits": "default",
+            "displayName": "Release + MPI (CPU, OpenBLAS, MPI ON, no CUDA)",
+            "description": "Release with MPI for distributed TPQ / ScaLAPACK runs. Requires OpenMPI or MPICH.",
+            "binaryDir": "${sourceDir}/build-mpi",
+            "cacheVariables": {
+                "WITH_MPI": "ON"
+            }
+        },
+        {
+            "name": "release-cuda",
+            "inherits": "default",
+            "displayName": "Release + CUDA (CPU+GPU, OpenBLAS, no MPI)",
+            "description": "Release with CUDA for GPU Lanczos / FTLM / TPQ. Requires NVCC and a CUDA-capable GPU at runtime.",
+            "binaryDir": "${sourceDir}/build-cuda",
+            "cacheVariables": {
+                "WITH_CUDA": "ON",
+                "CMAKE_CUDA_ARCHITECTURES": "75;80;86;89;90"
+            }
+        },
+        {
+            "name": "release-cuda-mpi",
+            "inherits": "release-cuda",
+            "displayName": "Release + CUDA + MPI (full HPC build)",
+            "description": "Everything turned on. Requires NVCC, OpenMPI/MPICH, CUDA-aware MPI (recommended).",
+            "binaryDir": "${sourceDir}/build-cuda-mpi",
+            "cacheVariables": {
+                "WITH_MPI": "ON"
+            }
+        },
+        {
+            "name": "ci-linux",
+            "inherits": "default",
+            "displayName": "CI: Linux / GCC / OpenBLAS / Release",
+            "description": "Used by .github/workflows/ci.yml. Mirrors 'default' but pins the compiler so CI is reproducible.",
+            "binaryDir": "${sourceDir}/build",
+            "cacheVariables": {
+                "CMAKE_C_COMPILER": "gcc",
+                "CMAKE_CXX_COMPILER": "g++"
+            }
+        }
+    ],
+    "buildPresets": [
+        {
+            "name": "default",
+            "configurePreset": "default",
+            "jobs": 0
+        },
+        {
+            "name": "debug",
+            "configurePreset": "debug",
+            "jobs": 0
+        },
+        {
+            "name": "debug-asan",
+            "configurePreset": "debug-asan",
+            "jobs": 0
+        },
+        {
+            "name": "release-mpi",
+            "configurePreset": "release-mpi",
+            "jobs": 0
+        },
+        {
+            "name": "release-cuda",
+            "configurePreset": "release-cuda",
+            "jobs": 0
+        },
+        {
+            "name": "release-cuda-mpi",
+            "configurePreset": "release-cuda-mpi",
+            "jobs": 0
+        },
+        {
+            "name": "ci-linux",
+            "configurePreset": "ci-linux",
+            "jobs": 0
+        }
+    ],
+    "testPresets": [
+        {
+            "name": "default",
+            "configurePreset": "default",
+            "output": {
+                "outputOnFailure": true
+            },
+            "execution": {
+                "noTestsAction": "error",
+                "stopOnFailure": false,
+                "jobs": 0
+            }
+        },
+        {
+            "name": "debug-asan",
+            "inherits": "default",
+            "configurePreset": "debug-asan",
+            "environment": {
+                "ASAN_OPTIONS": "detect_leaks=1:strict_string_checks=1:detect_stack_use_after_return=1:check_initialization_order=1",
+                "UBSAN_OPTIONS": "print_stacktrace=1:halt_on_error=1"
+            }
+        },
+        {
+            "name": "release-cuda",
+            "inherits": "default",
+            "configurePreset": "release-cuda"
+        },
+        {
+            "name": "ci-linux",
+            "inherits": "default",
+            "configurePreset": "ci-linux"
+        }
+    ]
+}
