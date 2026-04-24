@@ -46,6 +46,7 @@
 #include <ed/solvers/observables.h>
 #include <ed/bfg/cluster.h>
 #include <ed/bfg/correlations.h>
+#include <ed/bfg/ring_observables.h>
 #include <ed/bfg/structure_factor.h>
 #include <ed/bfg/topology.h>
 #include <ed/bfg/wavefunction_io.h>
@@ -720,13 +721,24 @@ PYBIND11_MODULE(_core, m) {
         "vertices: (s1, s2) and (s3, s4). `center` is the mean Cartesian "
         "position of the five sites; `orientation` is the sublattice index "
         "of `s0`.")
-        .def_readonly("s0",          &ed::bfg::Bowtie::s0)
-        .def_readonly("s1",          &ed::bfg::Bowtie::s1)
-        .def_readonly("s2",          &ed::bfg::Bowtie::s2)
-        .def_readonly("s3",          &ed::bfg::Bowtie::s3)
-        .def_readonly("s4",          &ed::bfg::Bowtie::s4)
-        .def_readonly("center",      &ed::bfg::Bowtie::center)
-        .def_readonly("orientation", &ed::bfg::Bowtie::orientation);
+        .def(py::init([](int s0, int s1, int s2, int s3, int s4,
+                         std::array<double, 2> center, int orientation) {
+            return ed::bfg::Bowtie{s0, s1, s2, s3, s4, center, orientation};
+        }),
+            py::arg("s0") = -1, py::arg("s1"), py::arg("s2"),
+            py::arg("s3"), py::arg("s4"),
+            py::arg("center") = std::array<double, 2>{0.0, 0.0},
+            py::arg("orientation") = 0,
+            "Construct a Bowtie from explicit fields. `s0` and `orientation` "
+            "default to placeholders (the ring kernels in "
+            "ed_bfg::ring_observables ignore them).")
+        .def_readwrite("s0",          &ed::bfg::Bowtie::s0)
+        .def_readwrite("s1",          &ed::bfg::Bowtie::s1)
+        .def_readwrite("s2",          &ed::bfg::Bowtie::s2)
+        .def_readwrite("s3",          &ed::bfg::Bowtie::s3)
+        .def_readwrite("s4",          &ed::bfg::Bowtie::s4)
+        .def_readwrite("center",      &ed::bfg::Bowtie::center)
+        .def_readwrite("orientation", &ed::bfg::Bowtie::orientation);
 
     m_bfg.def("find_triangles", &ed::bfg::find_triangles, py::arg("cluster"),
         "Enumerate every triple (i, j, k) of pairwise nearest-neighbour "
@@ -1056,4 +1068,71 @@ PYBIND11_MODULE(_core, m) {
         py::arg("psi"), py::arg("i1"), py::arg("j1"),
         py::arg("i2"), py::arg("j2"),
         "<psi| (S_i1 . S_j1)(S_i2 . S_j2) |psi>.");
+
+    // -------------------------------------------------------------------------
+    // P2.1 (5th slice): ring observables (bowtie ring-flip + triangle
+    // ring-exchange + Fourier-applied bowtie operator). The Fourier kernel
+    // shares the memory-efficient flag bound above with the dimer kernels.
+    // -------------------------------------------------------------------------
+    m_bfg.def("apply_bowtie_fourier",
+        [wavefunction_to_numpy](
+            const std::vector<ed::bfg::Bowtie>& bowties,
+            py::array_t<std::complex<double>,
+                        py::array::c_style | py::array::forcecast> psi,
+            const std::array<double, 2>& q) {
+            if (psi.ndim() != 1) {
+                throw std::runtime_error("psi must be a 1-D complex128 array");
+            }
+            const auto n = static_cast<std::size_t>(psi.shape(0));
+            std::vector<ed::bfg::Complex> v(n);
+            std::memcpy(v.data(), psi.data(), n * sizeof(ed::bfg::Complex));
+            std::vector<ed::bfg::Complex> out;
+            {
+                py::gil_scoped_release release;
+                out = ed::bfg::apply_bowtie_fourier(bowties, v, q);
+            }
+            return wavefunction_to_numpy(std::move(out));
+        },
+        py::arg("bowties"), py::arg("psi"), py::arg("q"),
+        "Apply P(q) = sum_bt exp(i q . r_bt) (S+_1 S-_2 S+_3 S-_4 + h.c.) "
+        "to psi over the supplied bowties. Only `s1..s4` and `center` are "
+        "read; `s0` / `orientation` are ignored. Returns the resulting "
+        "NumPy complex128 ket.");
+
+    m_bfg.def("compute_bowtie_resonance",
+        [](py::array_t<std::complex<double>,
+                       py::array::c_style | py::array::forcecast> psi,
+           int s1, int s2, int s3, int s4) {
+            if (psi.ndim() != 1) {
+                throw std::runtime_error("psi must be a 1-D complex128 array");
+            }
+            const auto n = static_cast<std::size_t>(psi.shape(0));
+            std::vector<ed::bfg::Complex> v(n);
+            std::memcpy(v.data(), psi.data(), n * sizeof(ed::bfg::Complex));
+            py::gil_scoped_release release;
+            return ed::bfg::compute_bowtie_resonance(v, s1, s2, s3, s4);
+        },
+        py::arg("psi"), py::arg("s1"), py::arg("s2"),
+        py::arg("s3"), py::arg("s4"),
+        "Real-space bowtie ring-flip expectation "
+        "<psi| S+_1 S-_2 S+_3 S-_4 + h.c. |psi> on the four outer corners.");
+
+    m_bfg.def("compute_triangle_chiral",
+        [](py::array_t<std::complex<double>,
+                       py::array::c_style | py::array::forcecast> psi,
+           int s1, int s2, int s3) {
+            if (psi.ndim() != 1) {
+                throw std::runtime_error("psi must be a 1-D complex128 array");
+            }
+            const auto n = static_cast<std::size_t>(psi.shape(0));
+            std::vector<ed::bfg::Complex> v(n);
+            std::memcpy(v.data(), psi.data(), n * sizeof(ed::bfg::Complex));
+            py::gil_scoped_release release;
+            return ed::bfg::compute_triangle_chiral(v, s1, s2, s3);
+        },
+        py::arg("psi"), py::arg("s1"), py::arg("s2"), py::arg("s3"),
+        "Symmetric triangle ring-exchange expectation "
+        "<psi| S+_1 S-_2 S+_3 + S-_1 S+_2 S-_3 |psi>. Note this is the "
+        "(S+S-S+ + h.c.) symmetrisation, not the antisymmetric scalar "
+        "chirality S_1 . (S_2 x S_3).");
 }

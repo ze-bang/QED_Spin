@@ -55,6 +55,7 @@
 
 #include "ed/bfg/cluster.h"
 #include "ed/bfg/correlations.h"
+#include "ed/bfg/ring_observables.h"
 #include "ed/bfg/structure_factor.h"
 #include "ed/bfg/topology.h"
 #include "ed/bfg/wavefunction_io.h"
@@ -97,6 +98,14 @@ using ed::bfg::compute_heisenberg_sf_direct;
 using ed::bfg::DimerSFResult;
 using ed::bfg::memory_efficient_mode_enabled;
 using ed::bfg::set_memory_efficient_mode;
+// P2.1 (5th slice): bowtie ring-flip + triangle ring-exchange kernels live
+// in ed_bfg::ring_observables. The Bowtie POD that was passed to
+// `apply_bowtie_fourier` from this TU is now the canonical
+// `ed::bfg::Bowtie` (already used by find_bowties) -- the file-local
+// `BowtieData` has been retired.
+using ed::bfg::apply_bowtie_fourier;
+using ed::bfg::compute_bowtie_resonance;
+using ed::bfg::compute_triangle_chiral;
 
 // -----------------------------------------------------------------------------
 // Bit manipulation helpers (inlined for speed)
@@ -181,130 +190,13 @@ inline double sz_value(uint64_t state, int site) {
 // -----------------------------------------------------------------------------
 
 // -----------------------------------------------------------------------------
-// Apply Fourier-transformed bowtie resonance operator: P_α(q)|ψ⟩
-// P_bt = S⁺₁S⁻₂S⁺₃S⁻₄ + S⁻₁S⁺₂S⁻₃S⁺₄ (4-spin ring flip on outer corners)
+// P2.1 (5th slice): apply_bowtie_fourier moved to ed_bfg::ring_observables.
+// The file-local `BowtieData {s1,s2,s3,s4,center}` POD was a strict subset
+// of `ed::bfg::Bowtie` (which carries `s0` and `orientation` on top of the
+// same five fields), so the kernel now consumes `Bowtie` directly and the
+// caller-side rebuild loop drops away (see the `find_bowties` consumer
+// below).
 // -----------------------------------------------------------------------------
-
-struct BowtieData {
-    int s1, s2, s3, s4;  // Outer corner sites
-    std::array<double, 2> center;
-};
-
-std::vector<Complex> apply_bowtie_fourier(
-    const std::vector<Complex>& psi,
-    const std::vector<BowtieData>& bowties,  // Bowties in this orientation
-    const std::array<double, 2>& q
-) {
-    uint64_t n_states = psi.size();
-    std::vector<Complex> result(n_states, 0.0);
-    int n_bowties = bowties.size();
-    
-    // Precompute phases
-    std::vector<Complex> phases(n_bowties);
-    for (int p = 0; p < n_bowties; ++p) {
-        double phase_arg = q[0] * bowties[p].center[0] + q[1] * bowties[p].center[1];
-        phases[p] = std::exp(I * phase_arg);
-    }
-    
-    if (memory_efficient_mode_enabled()) {
-        // Memory-efficient mode: use atomic updates
-        std::vector<double> result_real(n_states, 0.0);
-        std::vector<double> result_imag(n_states, 0.0);
-        
-        #pragma omp parallel for schedule(dynamic, 1024)
-        for (uint64_t state = 0; state < n_states; ++state) {
-            Complex coeff = psi[state];
-            if (std::abs(coeff) < 1e-15) continue;
-            
-            for (int p = 0; p < n_bowties; ++p) {
-                int s1 = bowties[p].s1;
-                int s2 = bowties[p].s2;
-                int s3 = bowties[p].s3;
-                int s4 = bowties[p].s4;
-                
-                int b1 = get_bit(state, s1);
-                int b2 = get_bit(state, s2);
-                int b3 = get_bit(state, s3);
-                int b4 = get_bit(state, s4);
-                
-                Complex phase = phases[p];
-                
-                // S⁺₁S⁻₂S⁺₃S⁻₄: needs s1=DOWN(1), s2=UP(0), s3=DOWN(1), s4=UP(0)
-                if (b1 == 1 && b2 == 0 && b3 == 1 && b4 == 0) {
-                    uint64_t new_state = flip_bit(flip_bit(flip_bit(flip_bit(state, s1), s2), s3), s4);
-                    Complex val = phase * coeff;
-                    #pragma omp atomic
-                    result_real[new_state] += val.real();
-                    #pragma omp atomic
-                    result_imag[new_state] += val.imag();
-                }
-                
-                // S⁻₁S⁺₂S⁻₃S⁺₄: needs s1=UP(0), s2=DOWN(1), s3=UP(0), s4=DOWN(1)
-                if (b1 == 0 && b2 == 1 && b3 == 0 && b4 == 1) {
-                    uint64_t new_state = flip_bit(flip_bit(flip_bit(flip_bit(state, s1), s2), s3), s4);
-                    Complex val = phase * coeff;
-                    #pragma omp atomic
-                    result_real[new_state] += val.real();
-                    #pragma omp atomic
-                    result_imag[new_state] += val.imag();
-                }
-            }
-        }
-        
-        // Combine real and imaginary parts (parallelized)
-        #pragma omp parallel for schedule(static)
-        for (uint64_t s = 0; s < n_states; ++s) {
-            result[s] = Complex(result_real[s], result_imag[s]);
-        }
-    } else {
-        // Original mode with thread-local arrays
-        #pragma omp parallel
-        {
-            std::vector<Complex> local_result(n_states, 0.0);
-            
-            #pragma omp for schedule(dynamic, 1024)
-            for (uint64_t state = 0; state < n_states; ++state) {
-                Complex coeff = psi[state];
-                if (std::abs(coeff) < 1e-15) continue;
-                
-                for (int p = 0; p < n_bowties; ++p) {
-                    int s1 = bowties[p].s1;
-                    int s2 = bowties[p].s2;
-                    int s3 = bowties[p].s3;
-                    int s4 = bowties[p].s4;
-                    
-                    int b1 = get_bit(state, s1);
-                    int b2 = get_bit(state, s2);
-                    int b3 = get_bit(state, s3);
-                    int b4 = get_bit(state, s4);
-                    
-                    Complex phase = phases[p];
-                    
-                    // S⁺₁S⁻₂S⁺₃S⁻₄: needs s1=DOWN(1), s2=UP(0), s3=DOWN(1), s4=UP(0)
-                    if (b1 == 1 && b2 == 0 && b3 == 1 && b4 == 0) {
-                        uint64_t new_state = flip_bit(flip_bit(flip_bit(flip_bit(state, s1), s2), s3), s4);
-                        local_result[new_state] += phase * coeff;
-                    }
-                    
-                    // S⁻₁S⁺₂S⁻₃S⁺₄: needs s1=UP(0), s2=DOWN(1), s3=UP(0), s4=DOWN(1)
-                    if (b1 == 0 && b2 == 1 && b3 == 0 && b4 == 1) {
-                        uint64_t new_state = flip_bit(flip_bit(flip_bit(flip_bit(state, s1), s2), s3), s4);
-                        local_result[new_state] += phase * coeff;
-                    }
-                }
-            }
-            
-            #pragma omp critical
-            {
-                for (uint64_t s = 0; s < n_states; ++s) {
-                    result[s] += local_result[s];
-                }
-            }
-        }
-    }
-    
-    return result;
-}
 
 // -----------------------------------------------------------------------------
 // P2.1 (4th slice): the real-space dimer-dimer correlations
@@ -881,113 +773,10 @@ VBSResult compute_vbs_order(
 // unchanged.
 
 // -----------------------------------------------------------------------------
-// Compute bowtie ring-flip expectation:
-// P_r = ⟨S⁺₁S⁻₂S⁺₃S⁻₄ + h.c.⟩
-// Acts on the 4 OUTER corners (s1, s2, s3, s4), EXCLUDING center s0
+// P2.1 (5th slice): compute_bowtie_resonance and compute_triangle_chiral
+// moved to ed_bfg::ring_observables. Pulled in via the using-declarations at
+// the top of this TU so call sites stay unchanged.
 // -----------------------------------------------------------------------------
-
-Complex compute_bowtie_resonance(
-    const std::vector<Complex>& psi,
-    int s1, int s2, int s3, int s4
-) {
-    uint64_t n_states = psi.size();
-    double result_real = 0.0;
-    double result_imag = 0.0;
-    
-    #pragma omp parallel reduction(+:result_real,result_imag)
-    {
-        double local_real = 0.0;
-        double local_imag = 0.0;
-        
-        #pragma omp for schedule(dynamic, 1024)
-        for (uint64_t state = 0; state < n_states; ++state) {
-            Complex coeff = psi[state];
-            if (std::abs(coeff) < 1e-15) continue;
-            
-            // S⁺_s1 S⁻_s2 S⁺_s3 S⁻_s4 term
-            // Requires: bit(s1)=1 (down), bit(s2)=0 (up), bit(s3)=1 (down), bit(s4)=0 (up)
-            int b1 = get_bit(state, s1);
-            int b2 = get_bit(state, s2);
-            int b3 = get_bit(state, s3);
-            int b4 = get_bit(state, s4);
-            
-            // S+ raises: needs spin down (bit=1), S- lowers: needs spin up (bit=0)
-            if (b1 == 1 && b2 == 0 && b3 == 1 && b4 == 0) {
-                // All operators succeed with coefficient 1 each
-                uint64_t new_state = flip_bit(flip_bit(flip_bit(flip_bit(state, s1), s2), s3), s4);
-                Complex contrib = std::conj(psi[new_state]) * coeff;
-                local_real += contrib.real();
-                local_imag += contrib.imag();
-            }
-            
-            // Hermitian conjugate: S⁻_s1 S⁺_s2 S⁻_s3 S⁺_s4
-            // Requires: bit(s1)=0, bit(s2)=1, bit(s3)=0, bit(s4)=1
-            if (b1 == 0 && b2 == 1 && b3 == 0 && b4 == 1) {
-                uint64_t new_state = flip_bit(flip_bit(flip_bit(flip_bit(state, s1), s2), s3), s4);
-                Complex contrib = std::conj(psi[new_state]) * coeff;
-                local_real += contrib.real();
-                local_imag += contrib.imag();
-            }
-        }
-        
-        result_real += local_real;
-        result_imag += local_imag;
-    }
-    
-    return Complex(result_real, result_imag);
-}
-
-// -----------------------------------------------------------------------------
-// Compute triangle chiral/resonance expectation:
-// χ = ⟨S⁺₁S⁻₂S⁺₃ + S⁻₁S⁺₂S⁻₃⟩
-// Measures 3-site ring exchange around a triangle
-// -----------------------------------------------------------------------------
-
-Complex compute_triangle_chiral(
-    const std::vector<Complex>& psi,
-    int s1, int s2, int s3
-) {
-    uint64_t n_states = psi.size();
-    double result_real = 0.0;
-    double result_imag = 0.0;
-    
-    #pragma omp parallel reduction(+:result_real,result_imag)
-    {
-        double local_real = 0.0;
-        double local_imag = 0.0;
-        
-        #pragma omp for schedule(dynamic, 1024)
-        for (uint64_t state = 0; state < n_states; ++state) {
-            Complex coeff = psi[state];
-            if (std::abs(coeff) < 1e-15) continue;
-            
-            int b1 = get_bit(state, s1);
-            int b2 = get_bit(state, s2);
-            int b3 = get_bit(state, s3);
-            
-            // S⁺_s1 S⁻_s2 S⁺_s3: needs b1=1, b2=0, b3=1
-            if (b1 == 1 && b2 == 0 && b3 == 1) {
-                uint64_t new_state = flip_bit(flip_bit(flip_bit(state, s1), s2), s3);
-                Complex contrib = std::conj(psi[new_state]) * coeff;
-                local_real += contrib.real();
-                local_imag += contrib.imag();
-            }
-            
-            // S⁻_s1 S⁺_s2 S⁻_s3: needs b1=0, b2=1, b3=0
-            if (b1 == 0 && b2 == 1 && b3 == 0) {
-                uint64_t new_state = flip_bit(flip_bit(flip_bit(state, s1), s2), s3);
-                Complex contrib = std::conj(psi[new_state]) * coeff;
-                local_real += contrib.real();
-                local_imag += contrib.imag();
-            }
-        }
-        
-        result_real += local_real;
-        result_imag += local_imag;
-    }
-    
-    return Complex(result_real, result_imag);
-}
 
 // -----------------------------------------------------------------------------
 // Plaquette order parameter result structure
@@ -1056,20 +845,21 @@ PlaquetteResult compute_plaquette_order(
         return result;
     }
     
-    // Group bowties by orientation and prepare BowtieData for Fourier transform
-    std::array<std::vector<BowtieData>, 3> bowties_by_orient;
-    std::vector<BowtieData> all_bowties(result.n_plaquettes);
-    
+    // P2.1 (5th slice): apply_bowtie_fourier now takes `ed::bfg::Bowtie`
+    // directly (it only reads s1..s4 + center; s0/orientation are ignored),
+    // so the file-local BowtieData rebuild from previous revisions is gone.
+    std::array<std::vector<Bowtie>, 3> bowties_by_orient;
+    const std::vector<Bowtie>& all_bowties = bowties;
+
     result.P_r.resize(result.n_plaquettes);
     result.centers.resize(result.n_plaquettes);
     result.orientations.resize(result.n_plaquettes);
-    
+
     for (int idx = 0; idx < result.n_plaquettes; ++idx) {
         const auto& bt = bowties[idx];
-        all_bowties[idx] = {bt.s1, bt.s2, bt.s3, bt.s4, bt.center};
         result.centers[idx] = bt.center;
         result.orientations[idx] = bt.orientation;
-        bowties_by_orient[bt.orientation].push_back(all_bowties[idx]);
+        bowties_by_orient[bt.orientation].push_back(bt);
     }
     
     result.n_plaquettes_per_orientation = {
@@ -1176,7 +966,7 @@ PlaquetteResult compute_plaquette_order(
                     P_q_psi[alpha].resize(psi.size(), 0.0);
                     continue;
                 }
-                P_q_psi[alpha] = apply_bowtie_fourier(psi, bowties_by_orient[alpha], q);
+                P_q_psi[alpha] = apply_bowtie_fourier(bowties_by_orient[alpha], psi, q);
                 
                 // ⟨P_α(q)⟩ = Σ_p exp(iq·r_p) ⟨P_p⟩
                 int local_idx = 0;
@@ -1266,7 +1056,7 @@ PlaquetteResult compute_plaquette_order(
                     q1 * cluster.b1[1] + q2 * cluster.b2[1]
                 };
                 
-                auto P_q_psi = apply_bowtie_fourier(psi, all_bowties, qvec);
+                auto P_q_psi = apply_bowtie_fourier(all_bowties, psi, qvec);
                 Complex P_q_expect = 0.0;
                 for (int p = 0; p < result.n_plaquettes; ++p) {
                     double phase_arg = qvec[0] * result.centers[p][0] + qvec[1] * result.centers[p][1];

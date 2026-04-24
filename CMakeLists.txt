@@ -736,6 +736,13 @@ if(BUILD_ED_TESTS)
     ed_add_test(test_bfg_structure_factor       tests/unit/test_bfg_structure_factor.cpp USE_CATCH2)
     target_link_libraries(test_bfg_structure_factor PRIVATE ed_bfg)
 
+    # P2.1 (5th slice): bowtie + triangle ring kernels promoted into
+    # `ed_bfg::ring_observables`. Same call-site contract as the dimer
+    # structure factor tests above, plus toggles for the memory-efficient
+    # global flag.
+    ed_add_test(test_bfg_ring_observables       tests/unit/test_bfg_ring_observables.cpp USE_CATCH2)
+    target_link_libraries(test_bfg_ring_observables PRIVATE ed_bfg)
+
     # P2.1 (third slice): HDF5 wavefunction loaders shared by the CPU + GPU
     # drivers and by the Python bindings.
     ed_add_test(test_bfg_wavefunction_io        tests/unit/test_bfg_wavefunction_io.cpp USE_CATCH2)

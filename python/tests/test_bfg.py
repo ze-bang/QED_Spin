@@ -281,3 +281,122 @@ def test_compute_heisenberg_dimer_dimer_correlation_self_on_triplet_eq_1_16():
         _two_site_singlet_mix(), 0, 1, 0, 1
     )
     assert math.isclose(r, 1.0 / 16.0, abs_tol=1e-12)
+
+
+# -----------------------------------------------------------------------------
+# P2.1 (5th slice): ring observables
+#
+# All cases exercise hand-checkable spin-1/2 product / superposition states.
+# Convention: bit=0 -> spin UP, bit=1 -> spin DOWN.
+# -----------------------------------------------------------------------------
+
+
+def test_compute_triangle_chiral_vanishes_on_polarised_state():
+    psi = np.zeros(8, dtype=np.complex128)
+    psi[0b000] = 1.0
+    chi = bfg.compute_triangle_chiral(psi, 0, 1, 2)
+    assert abs(chi.real) < 1e-12
+    assert abs(chi.imag) < 1e-12
+
+
+def test_compute_triangle_chiral_picks_up_2_re_conj_a_b():
+    # |UDU> = bits (0,1,0) -> integer 2; |DUD> = bits (1,0,1) -> integer 5.
+    psi = np.zeros(8, dtype=np.complex128)
+    a = 0.6 + 0.0j
+    b = 0.0 + 0.8j
+    psi[2] = a
+    psi[5] = b
+    chi = bfg.compute_triangle_chiral(psi, 0, 1, 2)
+    expected = np.conj(psi[2]) * b + np.conj(psi[5]) * a  # = 2 Re(conj(a) b)
+    assert math.isclose(chi.real, expected.real, abs_tol=1e-12)
+    assert math.isclose(chi.imag, expected.imag, abs_tol=1e-12)
+    # a real, b purely imaginary -> Re(conj(a) b) = 0.
+    assert abs(chi) < 1e-12
+
+
+def test_compute_bowtie_resonance_vanishes_on_polarised_state():
+    psi = np.zeros(16, dtype=np.complex128)
+    psi[0] = 1.0
+    p = bfg.compute_bowtie_resonance(psi, 0, 1, 2, 3)
+    assert abs(p.real) < 1e-12
+    assert abs(p.imag) < 1e-12
+
+
+def test_compute_bowtie_resonance_on_DUDU_UDUD_mix_equals_2_re_conj_a_b():
+    # (s1, s2, s3, s4) = (0, 1, 2, 3).
+    # |D,U,D,U> -> bits (1,0,1,0) -> integer 0b0101 = 5
+    # |U,D,U,D> -> bits (0,1,0,1) -> integer 0b1010 = 10
+    psi = np.zeros(16, dtype=np.complex128)
+    a = 0.6 + 0.1j
+    b = 0.2 - 0.7j
+    psi[5] = a
+    psi[10] = b
+    p = bfg.compute_bowtie_resonance(psi, 0, 1, 2, 3)
+    expected = np.conj(b) * a + np.conj(a) * b  # = 2 Re(conj(a) b)
+    assert math.isclose(p.real, expected.real, abs_tol=1e-12)
+    assert math.isclose(p.imag, expected.imag, abs_tol=1e-12)
+    assert abs(p.imag) < 1e-12  # purely real result
+
+
+def test_apply_bowtie_fourier_with_no_bowties_returns_zero_ket():
+    psi = np.full(16, 0.5, dtype=np.complex128)
+    out = bfg.apply_bowtie_fourier([], psi, [0.0, 0.0])
+    assert out.shape == (16,)
+    assert out.dtype == np.complex128
+    np.testing.assert_allclose(out, np.zeros_like(psi), atol=1e-15)
+
+
+def test_apply_bowtie_fourier_flips_DUDU_to_UDUD_at_q_zero():
+    bts = [bfg.Bowtie(s1=0, s2=1, s3=2, s4=3, center=[1.5, 2.5])]
+    psi = np.zeros(16, dtype=np.complex128)
+    psi[0b0101] = 1.0  # |DUDU>
+
+    bfg.set_memory_efficient_mode(0)
+    assert bfg.memory_efficient_mode_enabled() is False
+
+    out = bfg.apply_bowtie_fourier(bts, psi, [0.0, 0.0])
+    # S+_1 S-_2 S+_3 S-_4 |DUDU> -> |UDUD> = 0b1010 = 10, phase 1 at q=0.
+    assert math.isclose(out[0b1010].real, 1.0, abs_tol=1e-12)
+    assert abs(out[0b1010].imag) < 1e-12
+    mask = np.ones(16, dtype=bool)
+    mask[0b1010] = False
+    np.testing.assert_allclose(np.abs(out[mask]), 0.0, atol=1e-12)
+
+
+def test_apply_bowtie_fourier_picks_up_phase():
+    center = [1.5, -0.5]
+    q = [0.7, 1.3]
+    bts = [bfg.Bowtie(s1=0, s2=1, s3=2, s4=3, center=center)]
+    psi = np.zeros(16, dtype=np.complex128)
+    psi[0b0101] = 1.0
+    out = bfg.apply_bowtie_fourier(bts, psi, q)
+    phi = q[0] * center[0] + q[1] * center[1]
+    expected = np.exp(1j * phi)
+    assert math.isclose(out[0b1010].real, expected.real, abs_tol=1e-12)
+    assert math.isclose(out[0b1010].imag, expected.imag, abs_tol=1e-12)
+
+
+def test_apply_bowtie_fourier_fast_and_atomic_paths_agree():
+    bts = [
+        bfg.Bowtie(s1=0, s2=1, s3=2, s4=3, center=[0.25, 0.75]),
+        bfg.Bowtie(s1=0, s2=1, s3=2, s4=3, center=[-1.0, 0.5]),
+    ]
+    q = [0.4, -0.3]
+    psi = np.zeros(16, dtype=np.complex128)
+    psi[0b0101] = 0.7 + 0.1j
+    psi[0b1010] = -0.2 + 0.5j
+
+    bfg.set_memory_efficient_mode(0)
+    fast = bfg.apply_bowtie_fourier(bts, psi, q)
+
+    # Force the atomic / memory-efficient branch (~16 TiB / thread on paper,
+    # so the threshold is comfortably crossed; the kernel itself only
+    # allocates psi-sized buffers).
+    bfg.set_memory_efficient_mode(1 << 40)
+    assert bfg.memory_efficient_mode_enabled() is True
+    slow = bfg.apply_bowtie_fourier(bts, psi, q)
+
+    bfg.set_memory_efficient_mode(0)
+    assert bfg.memory_efficient_mode_enabled() is False
+
+    np.testing.assert_allclose(fast, slow, atol=1e-12)
