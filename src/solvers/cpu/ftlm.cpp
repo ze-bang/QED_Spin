@@ -3640,29 +3640,32 @@ DynamicalResponseResults compute_ground_state_cross_correlation(
     ComplexVector phi1(N);
     O1(ground_state.data(), phi1.data(), N);  // Assuming O1 is Hermitian
     
-    // Compute overlap ⟨0|O₁†|n⟩ = ⟨φ₁|n⟩ for each Ritz state |n⟩
-    // |n⟩ = Σⱼ V[j,n] |vⱼ⟩ where |vⱼ⟩ are Lanczos basis vectors
+    // Compute spectral weights ⟨0|O₁†|n⟩⟨n|O₂|0⟩ for each Ritz state |n⟩.
+    // The Lanczos was built starting from |v₀⟩ = |φ₂⟩/||φ₂||, so the projection
+    // of |φ₂⟩ on |n⟩ is ⟨n|φ₂⟩ = ||φ₂|| · V[0,n] (V real because the
+    // tridiagonal is real symmetric).  The other factor ⟨0|O₁†|n⟩ = ⟨φ₁|n⟩
+    // we compute by reconstructing the Ritz state and taking an inner product.
     std::vector<Complex> spectral_weights(M);
     
     for (size_t n = 0; n < M; n++) {
-        // Reconstruct |n⟩ in full Hilbert space
+        // Reconstruct unit-normalized Ritz state |n⟩ = Σⱼ V[j,n] |vⱼ⟩
         ComplexVector ritz_state(N, Complex(0.0, 0.0));
-        
         for (size_t j = 0; j < std::min(M, basis_vectors.size()); j++) {
-            // evecs is column-major: V[j,n] = evecs[n*M + j]
-            double v_jn = evecs[n * M + j];
-            Complex coeff(v_jn * phi2_norm, 0.0);  // Scale by original norm
+            double v_jn = evecs[n * M + j];   // column-major: V[j,n] = evecs[n*M+j]
+            Complex coeff(v_jn, 0.0);
             cblas_zaxpy(N, &coeff, basis_vectors[j].data(), 1, ritz_state.data(), 1);
         }
         
-        // Compute ⟨φ₁|n⟩
+        // ⟨φ₁|n⟩ = ⟨0|O₁†|n⟩
         Complex overlap;
         cblas_zdotc_sub(N, phi1.data(), 1, ritz_state.data(), 1, &overlap);
         
-        // Weight = ⟨0|O₁†|n⟩⟨n|O₂|0⟩ = ⟨φ₁|n⟩ * ⟨n|φ₂⟩
-        // ⟨n|φ₂⟩ = sqrt(weights[n]) * phi2_norm (from diagonalization)
-        Complex weight_n = overlap;  // ⟨φ₁|n⟩ already includes proper normalization
-        spectral_weights[n] = weight_n;
+        // ⟨n|φ₂⟩ = phi2_norm · V[0,n]
+        double v0n = evecs[n * M + 0];
+        Complex me_O2(phi2_norm * v0n, 0.0);
+        
+        // Weight = ⟨0|O₁†|n⟩ · ⟨n|O₂|0⟩
+        spectral_weights[n] = overlap * me_O2;
     }
     
     // Shift eigenvalues by ground state energy
