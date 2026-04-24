@@ -1,0 +1,98 @@
+name: Docs
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+# Only one in-flight docs build per ref.
+concurrency:
+  group: docs-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Build job: configure with ED_BUILD_DOCS=ON, run `cmake --build ... sphinx`,
+  # upload the rendered site as a Pages artifact. Pull requests just build
+  # (validation only); only `main` triggers the deploy step below.
+  # ---------------------------------------------------------------------------
+  build:
+    name: Build Sphinx site
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install system docs dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            cmake \
+            ninja-build \
+            doxygen \
+            graphviz \
+            libopenblas-dev \
+            liblapacke-dev \
+            libhdf5-dev \
+            libhdf5-cpp-103 \
+            libeigen3-dev \
+            libarpack2-dev \
+            pkg-config
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Python docs requirements
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r docs/requirements.txt
+
+      - name: Configure (docs only -- no tests, no CUDA, no Python ext)
+        run: |
+          cmake -S . -B build-docs \
+            -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DED_BUILD_DOCS=ON \
+            -DBUILD_ED_TESTS=OFF \
+            -DWITH_CUDA=OFF \
+            -DWITH_MPI=OFF \
+            -DBLAS_PROFILE=OPENBLAS
+
+      - name: Build (sphinx target -- pulls in doxygen)
+        run: cmake --build build-docs --target sphinx
+
+      - name: Upload site artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: build-docs/docs/sphinx/html
+
+  # ---------------------------------------------------------------------------
+  # Deploy job: only runs on push to main. Uses the Pages artifact uploaded
+  # above. Requires that GitHub Pages is configured to "GitHub Actions" as
+  # its source in the repo settings.
+  # ---------------------------------------------------------------------------
+  deploy:
+    name: Deploy to GitHub Pages
+    needs: build
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+
+    steps:
+      - name: Deploy
+        id: deployment
+        uses: actions/deploy-pages@v4

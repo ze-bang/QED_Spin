@@ -564,6 +564,26 @@ if(ED_BUILD_PYTHON)
 endif()
 
 # =============================================================================
+# Documentation site (Doxygen + Sphinx + Breathe -> GitHub Pages).
+#
+# Opt-in via `-DED_BUILD_DOCS=ON`. The required Python packages
+# (sphinx, breathe, myst-parser, furo) are listed in docs/requirements.txt;
+# install them inside your virtualenv before configuring with this flag.
+# Doxygen itself must be available on the host (`apt install doxygen`).
+#
+# Targets (only created when ED_BUILD_DOCS is on):
+#   * `doxygen`  -- regenerates the C++ API XML
+#   * `sphinx`   -- builds the public HTML site (depends on `doxygen`)
+#
+# CI builds the site on every push to main and publishes the result to
+# GitHub Pages; see .github/workflows/docs.yml for the deployment pipeline.
+# =============================================================================
+option(ED_BUILD_DOCS "Build the Doxygen + Sphinx documentation site" OFF)
+if(ED_BUILD_DOCS)
+    add_subdirectory(docs)
+endif()
+
+# =============================================================================
 # DMRG: removed in P0.9 (audit Q13).
 # The DMRG scaffold (include/ed/dmrg/, tests/test_dmrg.cpp) was an explicit
 # "implement the TODOs" placeholder with no working iDMRG backend. Rather

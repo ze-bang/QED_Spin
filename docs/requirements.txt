@@ -1,0 +1,12 @@
+# Documentation build requirements (P2.6).
+#
+# Install with:
+#   python -m pip install -r docs/requirements.txt
+#
+# The CI docs job (.github/workflows/docs.yml) installs this exact set so
+# local builds reproduce what gets published to GitHub Pages.
+sphinx>=7.2,<9
+furo>=2024.1
+breathe>=4.35
+myst-parser>=2.0
+sphinx-autodoc-typehints>=1.25
