@@ -20,6 +20,7 @@
 #include <omp.h>
 #include <ed/core/system_utils.h>
 #include <ed/core/hdf5_symmetry_io.h>
+#include <nlohmann/json.hpp>  // P0.15: replaces three hand-rolled JSON parsers below.
 
 // Define complex number type for convenience
 using Complex = std::complex<double>;
@@ -175,198 +176,117 @@ struct SymmetryGroupInfo {
     
 private:
     void loadMaxClique(const std::string& auto_dir) {
-        std::string filepath = auto_dir + "/max_clique.json";
+        // P0.15: was a hand-rolled .find('[') / .substr() parser. Now uses
+        // nlohmann/json. The on-disk schema is a flat array of integer arrays:
+        //   [[0,1,...,N-1], [N-1,0,...,N-2], ...]
+        const std::string filepath = auto_dir + "/max_clique.json";
         std::ifstream file(filepath);
         if (!file.is_open()) {
             throw std::runtime_error("Could not open max_clique.json: " + filepath);
         }
-        
-        std::string json((std::istreambuf_iterator<char>(file)),
-                        std::istreambuf_iterator<char>());
-        max_clique = parseJsonIntArrays(json);
-        
+
+        nlohmann::json j;
+        try {
+            file >> j;
+        } catch (const nlohmann::json::parse_error& e) {
+            throw std::runtime_error("Failed to parse " + filepath + ": " + e.what());
+        }
+        if (!j.is_array()) {
+            throw std::runtime_error(filepath + ": expected a top-level JSON array");
+        }
+        max_clique.clear();
+        max_clique.reserve(j.size());
+        for (const auto& perm : j) {
+            max_clique.push_back(perm.get<std::vector<int>>());
+        }
+
         std::cout << "Loaded max clique with " << max_clique.size() << " automorphisms" << std::endl;
     }
     
     void loadMinimalGenerators(const std::string& auto_dir) {
-        std::string filepath = auto_dir + "/minimal_generators.json";
+        // P0.15: was a manual scan looking for "\"permutation\":" / "\"order\":"
+        // substrings; that approach broke the moment the JSON producer changed
+        // whitespace or key ordering. The on-disk schema is:
+        //   {"generators":[{"permutation":[...], "order":N}, ...]}
+        const std::string filepath = auto_dir + "/minimal_generators.json";
         std::ifstream file(filepath);
         if (!file.is_open()) {
             throw std::runtime_error("Could not open minimal_generators.json: " + filepath);
         }
-        
-        std::string json((std::istreambuf_iterator<char>(file)),
-                        std::istreambuf_iterator<char>());
-        
-        // Parse JSON manually (simple parser for our specific format)
+
+        nlohmann::json j;
+        try {
+            file >> j;
+        } catch (const nlohmann::json::parse_error& e) {
+            throw std::runtime_error("Failed to parse " + filepath + ": " + e.what());
+        }
+
         generators.clear();
         generator_orders.clear();
-        
-        size_t pos = 0;
-        while ((pos = json.find("\"permutation\":", pos)) != std::string::npos) {
-            pos += 14;
-            size_t start = json.find('[', pos);
-            size_t end = json.find(']', start);
-            if (start == std::string::npos || end == std::string::npos) break;
-            
-            std::string perm_str = json.substr(start + 1, end - start - 1);
-            std::vector<int> perm;
-            std::istringstream iss(perm_str);
-            std::string num;
-            while (std::getline(iss, num, ',')) {
-                num.erase(0, num.find_first_not_of(" \t\n\r"));
-                num.erase(num.find_last_not_of(" \t\n\r") + 1);
-                if (!num.empty()) perm.push_back(std::stoi(num));
-            }
-            generators.push_back(perm);
-            
-            // Find order
-            size_t order_pos = json.find("\"order\":", pos);
-            if (order_pos != std::string::npos && order_pos < json.find('{', pos)) {
-                order_pos += 8;
-                size_t comma_pos = json.find_first_of(",}", order_pos);
-                std::string order_str = json.substr(order_pos, comma_pos - order_pos);
-                order_str.erase(0, order_str.find_first_not_of(" \t\n\r"));
-                order_str.erase(order_str.find_last_not_of(" \t\n\r") + 1);
-                generator_orders.push_back(std::stoi(order_str));
-            }
-            
-            pos = end;
+
+        if (!j.contains("generators") || !j.at("generators").is_array()) {
+            throw std::runtime_error(filepath + ": missing or non-array 'generators' field");
         }
-        
+        const auto& gens = j.at("generators");
+        generators.reserve(gens.size());
+        generator_orders.reserve(gens.size());
+        for (const auto& g : gens) {
+            generators.push_back(g.at("permutation").get<std::vector<int>>());
+            generator_orders.push_back(g.at("order").get<int>());
+        }
+
         num_generators = generators.size();
         std::cout << "Loaded " << num_generators << " minimal generators" << std::endl;
     }
     
     void loadSectorMetadata(const std::string& auto_dir) {
-        std::string filepath = auto_dir + "/sector_metadata.json";
+        // P0.15: was a 130-line manual scan with bracket-depth tracking. The
+        // on-disk schema is:
+        //   {"sectors":[
+        //       {"sector_id": k,
+        //        "quantum_numbers": [q_0, q_1, ...],
+        //        "phase_factors":  [{"real": x, "imag": y}, ...]},
+        //       ...
+        //   ]}
+        const std::string filepath = auto_dir + "/sector_metadata.json";
         std::ifstream file(filepath);
         if (!file.is_open()) {
             throw std::runtime_error("Could not open sector_metadata.json: " + filepath);
         }
-        
-        std::string json((std::istreambuf_iterator<char>(file)),
-                        std::istreambuf_iterator<char>());
-        
+
+        nlohmann::json j;
+        try {
+            file >> j;
+        } catch (const nlohmann::json::parse_error& e) {
+            throw std::runtime_error("Failed to parse " + filepath + ": " + e.what());
+        }
+
         sectors.clear();
-        
-        // Parse sectors array
-        size_t sectors_pos = json.find("\"sectors\":");
-        if (sectors_pos == std::string::npos) {
-            throw std::runtime_error("Could not find 'sectors' in metadata");
+
+        if (!j.contains("sectors") || !j.at("sectors").is_array()) {
+            throw std::runtime_error("Could not find 'sectors' array in " + filepath);
         }
-        
-        size_t pos = json.find('[', sectors_pos);
-        if (pos == std::string::npos) {
-            throw std::runtime_error("Could not find sectors array start");
-        }
-        pos++; // Move past the opening bracket
-        
-        // Find the end of the sectors array by counting brackets
-        size_t array_end = pos;
-        uint64_t bracket_depth = 1;
-        while (array_end < json.size() && bracket_depth > 0) {
-            if (json[array_end] == '[') bracket_depth++;
-            else if (json[array_end] == ']') bracket_depth--;
-            array_end++;
-        }
-        
-        // Parse each sector object
-        while (pos < array_end) {
-            // Skip whitespace and commas
-            while (pos < array_end && (json[pos] == ' ' || json[pos] == '\n' || 
-                   json[pos] == '\r' || json[pos] == '\t' || json[pos] == ',')) {
-                pos++;
+        const auto& jsec = j.at("sectors");
+        sectors.reserve(jsec.size());
+
+        for (const auto& s : jsec) {
+            SectorMetadata sector;
+            sector.sector_id        = s.value("sector_id", 0);
+            sector.dimension        = 0;  // Filled in during basis generation.
+            sector.quantum_numbers  = s.value("quantum_numbers", std::vector<int>{});
+
+            if (s.contains("phase_factors")) {
+                const auto& pfs = s.at("phase_factors");
+                sector.phase_factors.reserve(pfs.size());
+                for (const auto& pf : pfs) {
+                    sector.phase_factors.emplace_back(
+                        pf.value("real", 0.0), pf.value("imag", 0.0));
+                }
             }
-            
-            if (pos >= array_end || json[pos] == ']') break;
-            
-            if (json[pos] == '{') {
-                // Find the matching closing brace for this sector
-                size_t sector_start = pos;
-                size_t sector_end = sector_start + 1;
-                uint64_t brace_depth = 1;
-                while (sector_end < array_end && brace_depth > 0) {
-                    if (json[sector_end] == '{') brace_depth++;
-                    else if (json[sector_end] == '}') brace_depth--;
-                    sector_end++;
-                }
-                
-                // Extract this sector's JSON
-                std::string sector_json = json.substr(sector_start, sector_end - sector_start);
-                
-                // Parse one sector
-                SectorMetadata sector;
-                
-                // Find sector_id
-                size_t id_pos = sector_json.find("\"sector_id\":");
-                if (id_pos != std::string::npos) {
-                    id_pos += 12;
-                    size_t comma = sector_json.find_first_of(",}", id_pos);
-                    std::string id_str = sector_json.substr(id_pos, comma - id_pos);
-                    id_str.erase(0, id_str.find_first_not_of(" \t\n\r"));
-                    sector.sector_id = std::stoi(id_str);
-                }
-                
-                // Find quantum_numbers array
-                size_t qn_pos = sector_json.find("\"quantum_numbers\":");
-                if (qn_pos != std::string::npos) {
-                    size_t qn_start = sector_json.find('[', qn_pos);
-                    size_t qn_end = sector_json.find(']', qn_start);
-                    std::string qn_str = sector_json.substr(qn_start + 1, qn_end - qn_start - 1);
-                    
-                    std::istringstream iss(qn_str);
-                    std::string num;
-                    while (std::getline(iss, num, ',')) {
-                        num.erase(0, num.find_first_not_of(" \t\n\r"));
-                        num.erase(num.find_last_not_of(" \t\n\r") + 1);
-                        if (!num.empty()) sector.quantum_numbers.push_back(std::stoi(num));
-                    }
-                }
-                
-                // Parse phase_factors
-                size_t pf_pos = sector_json.find("\"phase_factors\":");
-                if (pf_pos != std::string::npos) {
-                    size_t pf_start = sector_json.find('[', pf_pos);
-                    size_t pf_end = sector_json.find(']', pf_start);
-                    
-                    std::string pf_section = sector_json.substr(pf_start, pf_end - pf_start + 1);
-                    size_t temp_pos = 0;
-                    while ((temp_pos = pf_section.find('{', temp_pos)) != std::string::npos) {
-                        size_t real_pos = pf_section.find("\"real\":", temp_pos);
-                        size_t imag_pos = pf_section.find("\"imag\":", temp_pos);
-                        
-                        if (real_pos != std::string::npos && imag_pos != std::string::npos) {
-                            real_pos += 7;
-                            size_t real_end = pf_section.find_first_of(",}", real_pos);
-                            std::string real_str = pf_section.substr(real_pos, real_end - real_pos);
-                            real_str.erase(0, real_str.find_first_not_of(" \t\n\r"));
-                            real_str.erase(real_str.find_last_not_of(" \t\n\r") + 1);
-                            
-                            imag_pos += 7;
-                            size_t imag_end = pf_section.find_first_of(",}", imag_pos);
-                            std::string imag_str = pf_section.substr(imag_pos, imag_end - imag_pos);
-                            imag_str.erase(0, imag_str.find_first_not_of(" \t\n\r"));
-                            imag_str.erase(imag_str.find_last_not_of(" \t\n\r") + 1);
-                            
-                            Complex phase(std::stod(real_str), std::stod(imag_str));
-                            sector.phase_factors.push_back(phase);
-                        }
-                        
-                        temp_pos = pf_section.find('}', temp_pos) + 1;
-                    }
-                }
-                
-                sector.dimension = 0;  // Will be set during basis generation
-                sectors.push_back(sector);
-                
-                // Move to the position after this sector
-                pos = sector_end;
-            } else {
-                pos++;
-            }
+
+            sectors.push_back(std::move(sector));
         }
-        
+
         std::cout << "Loaded metadata for " << sectors.size() << " symmetry sectors" << std::endl;
     }
     
@@ -567,40 +487,8 @@ private:
         return std::vector<int>();  // Not found
     }
     
-    std::vector<std::vector<int>> parseJsonIntArrays(const std::string& json) {
-        std::vector<std::vector<int>> result;
-        size_t pos = json.find('[');
-        if (pos == std::string::npos) return result;
-        ++pos;
-        
-        while (pos < json.size()) {
-            while (pos < json.size() && (json[pos] == ' ' || json[pos] == '\n' || json[pos] == '\t')) ++pos;
-            if (pos >= json.size() || json[pos] == ']') break;
-            
-            if (json[pos] == '[') {
-                size_t end = json.find(']', pos);
-                if (end == std::string::npos) break;
-                
-                std::string array_str = json.substr(pos + 1, end - pos - 1);
-                std::vector<int> array;
-                std::istringstream iss(array_str);
-                std::string num;
-                
-                while (std::getline(iss, num, ',')) {
-                    num.erase(0, num.find_first_not_of(" \t\n\r"));
-                    num.erase(num.find_last_not_of(" \t\n\r") + 1);
-                    if (!num.empty()) array.push_back(std::stoi(num));
-                }
-                
-                result.push_back(array);
-                pos = end + 1;
-            } else {
-                ++pos;
-            }
-        }
-        
-        return result;
-    }
+    // P0.15: parseJsonIntArrays() helper was removed -- nlohmann/json now does
+    // the parsing in loadMaxClique() / loadMinimalGenerators() / loadSectorMetadata().
 };
 
 // ============================================================================

@@ -719,6 +719,37 @@ message(STATUS "LAPACK library: ${LAPACK_LIBRARIES}")
 find_package(Eigen3 REQUIRED)
 include_directories(SYSTEM ${EIGEN3_INCLUDE_DIR})
 
+# -----------------------------------------------------------------------------
+# nlohmann/json (P0.15 / audit Q8).
+# Replaces three brittle hand-rolled JSON parsers in
+# include/ed/core/construct_ham.h that walked strings with .find('[') / .substr().
+# We prefer a system-installed nlohmann_json (most distros ship it as
+# nlohmann-json3-dev), and fall back to FetchContent for portability on
+# clusters where it is not installed.
+# -----------------------------------------------------------------------------
+find_package(nlohmann_json 3.7.0 QUIET)
+if(NOT nlohmann_json_FOUND)
+    message(STATUS "nlohmann_json not found system-wide; fetching via FetchContent")
+    include(FetchContent)
+    FetchContent_Declare(
+        nlohmann_json
+        GIT_REPOSITORY https://github.com/nlohmann/json.git
+        GIT_TAG        v3.11.3
+        GIT_SHALLOW    TRUE
+    )
+    set(JSON_BuildTests OFF CACHE INTERNAL "")
+    set(JSON_Install    OFF CACHE INTERNAL "")
+    FetchContent_MakeAvailable(nlohmann_json)
+else()
+    message(STATUS "nlohmann_json found: ${nlohmann_json_VERSION}")
+endif()
+
+# nlohmann_json is header-only, but we still expose it via link_libraries() so
+# the INTERFACE include directories propagate to every subsequently-defined
+# target without us having to remember to wire it up per-executable. This is
+# safe because the imported target carries no link-time symbols.
+link_libraries(nlohmann_json::nlohmann_json)
+
 # Find HDF5 (with C++ bindings)
 # Prefer HDF5_DIR from environment (set by module system)
 if(DEFINED ENV{HDF5_DIR} AND NOT HDF5_ROOT)
