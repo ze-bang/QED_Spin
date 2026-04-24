@@ -84,6 +84,9 @@ target_link_libraries(ed_io PUBLIC
 target_compile_options(ed_io PRIVATE
     $<$<COMPILE_LANGUAGE:CXX>:${CPU_OPT_FLAGS}>
 )
+# -fPIC so this archive can be linked into the pybind11 shared module
+# (`_core.so`). Harmless overhead for the C++-only executables.
+set_target_properties(ed_io PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
 # -----------------------------------------------------------------------------
 # ed_core: ed_config + (eventually) split-out construct_ham / hdf5_io / etc.
@@ -99,6 +102,7 @@ target_link_libraries(ed_core PUBLIC
 target_compile_options(ed_core PRIVATE
     $<$<COMPILE_LANGUAGE:CXX>:${CPU_OPT_FLAGS}>
 )
+set_target_properties(ed_core PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
 # -----------------------------------------------------------------------------
 # ed_solvers_cpu: CPU eigensolvers + thermal methods.
@@ -127,6 +131,7 @@ target_link_libraries(ed_solvers_cpu PUBLIC
 target_compile_options(ed_solvers_cpu PRIVATE
     $<$<COMPILE_LANGUAGE:CXX>:${CPU_OPT_FLAGS}>
 )
+set_target_properties(ed_solvers_cpu PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
 # -----------------------------------------------------------------------------
 # ed_solvers_gpu: CUDA-only library; depends on the CUDA imported targets.

@@ -539,6 +539,30 @@ if(TARGET TPQ_DSSF)
 endif()
 
 # =============================================================================
+# Optional Python bindings (P2.7 / audit "modern python interface").
+#
+# When enabled, builds the `quantum_ed._core` pybind11 extension using the
+# project's static-library stack. Two ways to enable:
+#
+#   * Top-level CMake: `cmake -B build -DED_BUILD_PYTHON=ON ...` and then
+#     run `import quantum_ed` from `python/`.
+#   * `pip install .` from the project root, which uses scikit-build-core
+#     (configured in pyproject.toml) and forces ED_BUILD_PYTHON=ON behind
+#     the scenes.
+#
+# The default is OFF so the C++-only build stays lean for HPC clusters
+# without a Python toolchain.
+# =============================================================================
+option(ED_BUILD_PYTHON "Build the quantum_ed pybind11 Python bindings" OFF)
+if(SKBUILD)
+    set(ED_BUILD_PYTHON ON CACHE BOOL "" FORCE)
+endif()
+
+if(ED_BUILD_PYTHON)
+    add_subdirectory(python/quantum_ed)
+endif()
+
+# =============================================================================
 # DMRG: removed in P0.9 (audit Q13).
 # The DMRG scaffold (include/ed/dmrg/, tests/test_dmrg.cpp) was an explicit
 # "implement the TODOs" placeholder with no working iDMRG backend. Rather

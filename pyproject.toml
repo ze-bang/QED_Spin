@@ -1,0 +1,107 @@
+[build-system]
+requires = ["scikit-build-core>=0.10", "pybind11>=2.13"]
+build-backend = "scikit_build_core.build"
+
+[project]
+name = "quantum_ed"
+version = "0.1.0"
+description = "Modern Python interface to the C++ exact-diagonalization engine"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { file = "LICENSE" }
+authors = [
+    { name = "ED collaborators" },
+]
+keywords = [
+    "exact-diagonalization",
+    "quantum",
+    "lanczos",
+    "ftlm",
+    "ltlm",
+    "spin",
+    "condensed-matter",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: C++",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Topic :: Scientific/Engineering :: Physics",
+]
+dependencies = [
+    "numpy>=1.21",
+    "h5py>=3.0",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=7", "pytest-xdist"]
+docs = ["sphinx>=7", "sphinx_rtd_theme", "breathe"]
+dev = [
+    "pytest>=7",
+    "pytest-xdist",
+    "ruff",
+    "mypy",
+]
+
+[project.urls]
+Homepage = "https://github.com/yourorg/exact_diagonalization"
+Documentation = "https://yourorg.github.io/exact_diagonalization/"
+Repository = "https://github.com/yourorg/exact_diagonalization"
+
+# -----------------------------------------------------------------------------
+# scikit-build-core configuration.
+#
+# We point CMake at the project root (where the top-level CMakeLists.txt
+# lives) and force ED_BUILD_PYTHON=ON. The C++ tests are deliberately
+# turned off in wheel builds to keep the wheel slim and the CI fast.
+# -----------------------------------------------------------------------------
+[tool.scikit-build]
+cmake.version = ">=3.18"
+cmake.build-type = "Release"
+build-dir = "build/python-{build_type}"
+wheel.packages = ["python/quantum_ed", "python/edlib"]
+wheel.install-dir = "."
+wheel.exclude = ["**/__pycache__/**", "**/*.pyc"]
+sdist.include = [
+    "include",
+    "src",
+    "cmake",
+    "python/quantum_ed",
+    "python/edlib",
+    "CMakeLists.txt",
+    "pyproject.toml",
+    "README.md",
+    "LICENSE",
+]
+sdist.exclude = [
+    "build",
+    ".git",
+    "**/__pycache__",
+    "**/*.so",
+]
+
+[tool.scikit-build.cmake.define]
+ED_BUILD_PYTHON = "ON"
+BUILD_ED_TESTS = "OFF"
+WITH_CUDA = "OFF"
+WITH_MPI = "OFF"
+
+# -----------------------------------------------------------------------------
+# Tooling: ruff (linter) + pytest defaults.
+# -----------------------------------------------------------------------------
+[tool.pytest.ini_options]
+testpaths = ["python/tests"]
+python_files = ["test_*.py"]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 100
+target-version = "py39"
+extend-exclude = ["build", "_deps"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP"]
+ignore = ["E501"]
