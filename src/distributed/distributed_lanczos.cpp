@@ -197,6 +197,44 @@ void solve_tridiag_with_weights(const std::vector<double>& alpha,
     }
 }
 
+// Same as solve_tridiag_with_weights but also exports the FULL (m x m)
+// eigenvector matrix in column-major flat layout (column k starts at
+// offset k * m). Caller uses this with the rank-local Krylov basis to
+// reconstruct distributed Ritz vectors via psi_k_local = V_local @ U[:,k].
+void solve_tridiag_with_eigenvectors(const std::vector<double>& alpha,
+                                     const std::vector<double>& beta,
+                                     std::size_t m,
+                                     std::vector<double>& evals,
+                                     std::vector<double>& weights,
+                                     std::vector<double>& evecs_colmajor) {
+    evals.clear();
+    weights.clear();
+    evecs_colmajor.clear();
+    if (m == 0) return;
+    Eigen::MatrixXd T(m, m);
+    T.setZero();
+    for (std::size_t i = 0; i < m; ++i) {
+        T(i, i) = alpha[i];
+        if (i + 1 < m) {
+            T(i, i + 1) = beta[i + 1];
+            T(i + 1, i) = beta[i + 1];
+        }
+    }
+    Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> es(T);
+    evals.resize(m);
+    weights.resize(m);
+    evecs_colmajor.resize(m * m);
+    const auto& V = es.eigenvectors();  // m x m, columns = eigenvectors
+    for (std::size_t k = 0; k < m; ++k) {
+        evals[k] = es.eigenvalues()(k);
+        const double v0k = V(0, k);
+        weights[k] = v0k * v0k;
+        for (std::size_t j = 0; j < m; ++j) {
+            evecs_colmajor[k * m + j] = V(j, k);
+        }
+    }
+}
+
 }  // namespace
 
 DistributedLanczosResult distributed_lanczos(
@@ -213,15 +251,20 @@ DistributedLanczosResult distributed_lanczos(
         throw std::invalid_argument("distributed_lanczos: max_iter == 0");
     }
 
+    // compute_eigenvectors implies we MUST keep the basis around AND it
+    // must be numerically orthonormal -- otherwise V_local @ U[:,k] is
+    // not a useful Ritz vector. Force full_reorth = true in that case.
+    const bool keep_basis = options.full_reorth || options.compute_eigenvectors;
+
     // Initial vector
     std::vector<Complex> v_curr;
     scatter_initial_vector(op, options.seed, v_curr);
 
     // Storage for Krylov basis vectors -- each rank holds its slab of every
-    // V_j. For options.full_reorth = true we keep all of them; otherwise we
-    // only keep V_{j-1} and V_j for the three-term recurrence.
+    // V_j. For full_reorth (or compute_eigenvectors) we keep all of them;
+    // otherwise we only keep V_{j-1} and V_j for the three-term recurrence.
     std::vector<std::vector<Complex>> basis;
-    if (options.full_reorth) {
+    if (keep_basis) {
         basis.reserve(max_iter);
         basis.push_back(v_curr);
     }
@@ -253,8 +296,9 @@ DistributedLanczosResult distributed_lanczos(
                        local_n);
         }
 
-        // Optional full re-orthogonalization (MGS over all prior basis vectors)
-        if (options.full_reorth && !basis.empty()) {
+        // Optional full re-orthogonalization (MGS over all prior basis vectors).
+        // Triggered by either full_reorth = true OR compute_eigenvectors = true.
+        if (keep_basis && !basis.empty()) {
             for (std::size_t k = 0; k < basis.size(); ++k) {
                 Complex c = dist_zdotc(basis[k].data(), w.data(), local_n,
                                        op.comm());
@@ -308,7 +352,7 @@ DistributedLanczosResult distributed_lanczos(
         // w now holds the previous v_curr -- the next iteration overwrites
         // it via op.apply, so its contents do not matter.
 
-        if (options.full_reorth) {
+        if (keep_basis) {
             basis.push_back(v_curr);
         }
     }
@@ -317,7 +361,33 @@ DistributedLanczosResult distributed_lanczos(
     DistributedLanczosResult result;
     result.iterations = iters_done;
 
-    if (options.compute_weights) {
+    if (options.compute_eigenvectors) {
+        std::vector<double> evals_unsorted, weights_unsorted, evecs_cm;
+        solve_tridiag_with_eigenvectors(alpha, beta, alpha.size(),
+                                        evals_unsorted, weights_unsorted,
+                                        evecs_cm);
+        result.tridiag_eigenvalues   = evals_unsorted;
+        result.tridiag_weights       = weights_unsorted;
+        result.tridiag_eigenvectors  = std::move(evecs_cm);
+        // Drop the trailing element of `basis` (which is V_{m}, *one past*
+        // the m vectors V_0..V_{m-1} that the eigensolve actually used).
+        // After `iters_done` iterations alpha has m entries, basis has
+        // `keep_basis ? m : 0` entries pre-loop plus one push per iter
+        // -> m + 1 entries when keep_basis. Drop the last so basis size
+        // matches the tridiag dimension exactly.
+        if (basis.size() > static_cast<std::size_t>(iters_done)) {
+            basis.resize(static_cast<std::size_t>(iters_done));
+        }
+        result.krylov_basis_local = std::move(basis);
+
+        std::vector<double> evals_sorted = evals_unsorted;
+        std::sort(evals_sorted.begin(), evals_sorted.end());
+        const std::size_t n_keep =
+            std::min<std::size_t>(static_cast<std::size_t>(exct),
+                                  evals_sorted.size());
+        result.eigenvalues.assign(evals_sorted.begin(),
+                                  evals_sorted.begin() + n_keep);
+    } else if (options.compute_weights) {
         std::vector<double> evals_unsorted, weights_unsorted;
         solve_tridiag_with_weights(alpha, beta, alpha.size(),
                                     evals_unsorted, weights_unsorted);
@@ -340,6 +410,76 @@ DistributedLanczosResult distributed_lanczos(
                                    all_ev.begin() + n_keep);
     }
     return result;
+}
+
+// ---------------------------------------------------------------------------
+// Phase 3b #6: rank-local Ritz vector reconstruction
+// ---------------------------------------------------------------------------
+void reconstruct_local_eigenvector(
+    const DistributedLanczosResult& result,
+    std::size_t k,
+    std::vector<std::complex<double>>& psi_k_local) {
+
+    if (result.krylov_basis_local.empty() ||
+        result.tridiag_eigenvectors.empty()) {
+        throw std::invalid_argument(
+            "reconstruct_local_eigenvector: result lacks krylov_basis_local "
+            "or tridiag_eigenvectors -- did you set "
+            "compute_eigenvectors=true on DistributedLanczosOptions?");
+    }
+    const std::size_t m = result.tridiag_eigenvalues.size();
+    if (m == 0 || result.krylov_basis_local.size() != m) {
+        throw std::invalid_argument(
+            "reconstruct_local_eigenvector: basis size ("
+            + std::to_string(result.krylov_basis_local.size())
+            + ") does not match tridiag dim (" + std::to_string(m) + ")");
+    }
+    if (k >= m) {
+        throw std::out_of_range(
+            "reconstruct_local_eigenvector: k=" + std::to_string(k)
+            + " out of range, m=" + std::to_string(m));
+    }
+    const std::size_t local_n = result.krylov_basis_local[0].size();
+    psi_k_local.assign(local_n, std::complex<double>(0.0, 0.0));
+    const double* U_col = &result.tridiag_eigenvectors[k * m];
+    for (std::size_t j = 0; j < m; ++j) {
+        const double c_j = U_col[j];
+        if (c_j == 0.0) continue;
+        const auto& V_j = result.krylov_basis_local[j];
+        for (std::size_t i = 0; i < local_n; ++i) {
+            psi_k_local[i] += c_j * V_j[i];
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Phase 3b #6: convenience wrapper
+// ---------------------------------------------------------------------------
+DistributedEigenpairsResult distributed_lanczos_eigenvectors(
+    const DistributedOperator& op,
+    const DistributedLanczosOptions& options) {
+
+    DistributedLanczosOptions opts = options;
+    opts.compute_eigenvectors = true;
+    opts.compute_weights      = true;
+    opts.full_reorth          = true;
+
+    DistributedLanczosResult lres = distributed_lanczos(op, opts);
+
+    DistributedEigenpairsResult out;
+    out.iterations  = lres.iterations;
+
+    // tridiag_eigenvalues / tridiag_eigenvectors are ordered by Eigen's
+    // SelfAdjointEigenSolver, which returns ascending eigenvalues. The
+    // sorted-prefix in lres.eigenvalues therefore corresponds 1-to-1 to
+    // columns 0..n_keep-1 of the U matrix.
+    const std::size_t n_keep = lres.eigenvalues.size();
+    out.eigenvalues = lres.eigenvalues;
+    out.eigenvectors_local.assign(n_keep, {});
+    for (std::size_t k = 0; k < n_keep; ++k) {
+        reconstruct_local_eigenvector(lres, k, out.eigenvectors_local[k]);
+    }
+    return out;
 }
 
 }  // namespace ed::distributed

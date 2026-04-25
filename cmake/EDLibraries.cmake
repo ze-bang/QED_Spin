@@ -195,14 +195,19 @@ set_target_properties(ed_solvers_cpu PROPERTIES POSITION_INDEPENDENT_CODE ON)
 #   #1 distributed_operator.cpp     -- gather-form SpMV + halo exchange
 #   #2 distributed_lanczos.cpp      -- Lanczos w/ MPI_Allreduce dot/norm
 #                                      and rank-local Krylov basis
+#                                      (#6: + eigenvector reconstruction)
 #   #3 distributed_ftlm.cpp         -- multi-sample FTLM w/ MPI-over-samples
 #                                      composed on top of distributed Lanczos
+#                                      (#5: + observable expectation values)
+#   #8 distributed_tpq.cpp          -- canonical TPQ via Taylor-truncated
+#                                      e^{-(delta/2) H} on rank-local |psi>
 # -----------------------------------------------------------------------------
 if(WITH_MPI)
     add_library(ed_distributed STATIC
         ${DISTRIBUTED_DIR}/distributed_operator.cpp
         ${DISTRIBUTED_DIR}/distributed_lanczos.cpp
         ${DISTRIBUTED_DIR}/distributed_ftlm.cpp
+        ${DISTRIBUTED_DIR}/distributed_tpq.cpp
     )
     target_include_directories(ed_distributed PUBLIC ${_ED_PUBLIC_INCLUDES})
     target_link_libraries(ed_distributed PUBLIC

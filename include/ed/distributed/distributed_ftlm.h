@@ -14,21 +14,27 @@
 // src/solvers/cpu/ftlm.cpp (Jaklic & Prelovsek, PRB 49, 5065 (1994)) so
 // the partition-function and observable-normalisation conventions match.
 //
+// Phase 3b #5 wires up arbitrary observable expectation values via the
+// canonical Jaklic-Prelovsek (J&P 1994) trace estimator:
+//
+//   <O>(beta) = ( sum_s sum_j q_j(s)^* f_j(s, beta) )
+//             / ( sum_s sum_k w_k(s) exp(-beta E_k(s)) )
+//
+// where q_j(s) = <V_s[j] | O r_s>, f_j(s, beta) = sum_k U_s[j,k] U_s[0,k]
+// exp(-beta E_k(s)), and r_s = V_s[0] is the Lanczos seed. Computational
+// cost vs the Z-only path is O(1) extra DistributedOperator matvecs per
+// sample (one for u = O r_s) plus m extra rank-local zdotc + Allreduce.
+//
 // Honest scope notes (carried into PHASE_3_SUMMARY.md):
 //
-//   * The first cut returns ONLY the partition-function trace estimate
-//     Z(beta) = (1/n_samples) sum_s sum_k |v0_s . V_k_s|^2 exp(-beta*E_k_s).
-//     Operator expectation values are wired in as a second pass: every
-//     rank can replay the rank-local Krylov basis from its v0_s seed,
-//     compute <V_k_s | O | V_l_s> with another DistributedOperator wrapping
-//     O, then assemble the trace contribution. We document that hook here
-//     and leave the actual O-side wiring for the `compute_o_estimator`
-//     follow-up (Phase 3b #3.5).
 //   * For honest 40 the inner DistributedOperator hits the slab-decomposition
 //     limits documented in the DistributedOperator header. Honest-40 FTLM
 //     therefore needs the same symmetry-aware slabbing fix that
 //     DistributedOperator does, before this module is run on the real-world
 //     spectrum target.
+//   * The observable Operator MUST share the same Hilbert space (n_bits) as
+//     the Hamiltonian Operator, since we reuse the same balanced 1D row
+//     decomposition. We do not currently check this -- caller is responsible.
 // =============================================================================
 
 #pragma once
@@ -67,6 +73,15 @@ struct DistributedFtlmOptions {
 
     /// If true, rank 0 prints per-sample / per-beta diagnostics.
     bool verbose = false;
+
+    /// Optional observable. If non-null, distributed_ftlm() additionally
+    /// computes <O>(beta) at every entry of `betas` and stores the result
+    /// in `DistributedFtlmResult::O_expectation`. The observable Operator
+    /// MUST act on the same Hilbert space as `op` (same n_bits / no
+    /// symmetry-sector projection); callers are responsible. Internally
+    /// adds one DistributedOperator constructor per group plus one
+    /// matvec + m local zdotc + Allreduce per sample. Default null.
+    std::shared_ptr<class ::Operator> observable_op = nullptr;
 };
 
 struct DistributedFtlmResult {
@@ -74,6 +89,10 @@ struct DistributedFtlmResult {
     /// options.betas, or 1 if betas was empty).
     /// All ranks in the world communicator hold the same array on return.
     std::vector<double> Z;
+
+    /// Observable expectation values at each beta. Empty unless
+    /// options.observable_op was non-null. Replicated on every rank.
+    std::vector<double> O_expectation;
 
     /// Number of samples actually reduced into Z (=options.n_samples,
     /// modulo dropped sample slots if n_groups doesn't divide evenly).

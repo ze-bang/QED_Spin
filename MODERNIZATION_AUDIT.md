@@ -1238,7 +1238,7 @@ write-up. New namespace `ed::distributed` under
   followed by `MPI_Alltoallv` of `Complex` values per matvec; gather-form
   OpenMP-parallel SpMV; receive-buffer lookup is the Phase 3a #5
   `SortedUint64Index` (16 B/entry).
-* `distributed_lanczos` (Phase 3b #2): rank-local Krylov basis;
+* `distributed_lanczos` (Phase 3b #2 + #6): rank-local Krylov basis;
   `MPI_Allreduce` for dot products and norms; purely local axpy/scal;
   optional full re-orthogonalisation (MGS over prior basis vectors with
   `MPI_Allreduce`-based inner products); replicated tridiagonal
@@ -1246,8 +1246,15 @@ write-up. New namespace `ed::distributed` under
   when `compute_weights = true`, the full Ritz spectrum
   (`tridiag_eigenvalues`) plus the squared first-component weights
   (`tridiag_weights`) needed by FTLM/DOS estimators — bit-replicated
-  across all ranks.
-* `distributed_ftlm` (Phase 3b #3): two-level parallelism via
+  across all ranks. **Phase 3b #6**: when
+  `compute_eigenvectors = true` the result also retains the rank-local
+  Krylov basis (`m × local_n × 16 B` per rank, same cost as
+  `full_reorth = true`) and the small `m × m` tridiagonal eigenvector
+  matrix; the new `reconstruct_local_eigenvector(result, k, ψ_k_local)`
+  contracts them locally with no MPI traffic, and the convenience
+  wrapper `distributed_lanczos_eigenvectors(...)` returns the lowest
+  `n_keep` eigenpairs as `(eigenvalues, eigenvectors_local)`.
+* `distributed_ftlm` (Phase 3b #3 + #5): two-level parallelism via
   `MPI_Comm_split` outer groups of size `world_size / n_groups`. Each
   group instantiates its own `DistributedOperator`; inside a group,
   samples are distributed round-robin and each calls
@@ -1255,8 +1262,23 @@ write-up. New namespace `ed::distributed` under
   trace estimator
   `Z(β) ≈ (D/R) Σ_s Σ_k tridiag_weights[k] · exp(-β · tridiag_eigenvalues[k])`
   (with `D = global_dim`, `R = n_samples`) is then `MPI_Allreduce`'d
-  across the world communicator. Operator expectation values `⟨O⟩(β)`
-  are deferred to Phase 3b #5.
+  across the world communicator. **Phase 3b #5**: passing a non-null
+  `options.observable_op` triggers the canonical J&P observable
+  formula `⟨O⟩(β) = N_O / N_Z` with
+  `N_O = (D/R) Σ_s Re(Σ_j q_j(s)* f_j(s,β))`, where
+  `q_j = ⟨V_s[j] | O r_s⟩` (one extra `DistributedOperator(O)` apply +
+  `m` distributed inner products per sample) and
+  `f_j(s,β) = Σ_k U_s[j,k] U_s[0,k] e^{-β E_k}`. The implementation
+  reuses the Krylov basis and tridiag eigenvectors retained by Phase
+  3b #6.
+* `distributed_tpq` (Phase 3b #8): canonical TPQ via Taylor-truncated
+  imaginary-time evolution `e^{-(δβ/2) H}` on the rank-local state
+  vector. Same outer/inner MPI split as `distributed_ftlm`
+  (`n_groups × ranks_per_group`). Each substep is `taylor_order`
+  `DistributedOperator::apply` calls + local axpy + dist-norm
+  renormalisation; observables are `E(β) = ⟨ψ|H|ψ⟩` (always) and
+  `⟨H²⟩ = ‖Hψ‖²` (when `compute_variance = true`) at every entry of
+  `options.betas`.
 * `ed_distributed_main` (Phase 3b #4): minimal CLI driver
   (`src/cli/ed_distributed_main.cpp`) that builds an unsymmetrised
   Heisenberg chain and routes through either solver. Wrapper scripts in
@@ -1268,8 +1290,14 @@ CMake plumbing: new static lib `ed_distributed` (gated by
 `WITH_MPI=ON`), new helper `ed_add_mpi_test()` that registers each MPI
 test 3× (np ∈ {1,2,4}), install hook for `ed_distributed_main`.
 Lockdown coverage: `tests/unit/test_distributed_operator.cpp`,
-`test_distributed_lanczos.cpp`, `test_distributed_ftlm.cpp` —
-**9 ctest entries (3 tests × 3 np), all green**, total 17.5 s wall.
+`test_distributed_lanczos.cpp`, `test_distributed_ftlm.cpp`,
+`test_distributed_eigenvectors.cpp`, `test_distributed_tpq.cpp` —
+**15 ctest entries (5 tests × 3 np), all green**, ~120 s wall (TPQ at
+np=4 dominates). Total project test count: **146/146 pass**.
+
+What is *still* open inside Phase 3b: **#7** (symmetry-aware row
+partitioning that respects orbit boundaries; required for "honest 40"
+on a real cluster).
 
 **Phase 3c (NCCL-based multi-GPU) is detection-only.** New CMake block
 under the build summary discovers NCCL when both `WITH_CUDA` and

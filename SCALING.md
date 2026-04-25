@@ -366,18 +366,59 @@ Distributed memory. This is the regime change.
    tests check ground state vs dense reference on N=4 OBC, N=6 PBC, plus
    `full_reorth = true ↔ false` agreement and bit-replicated eigenvalues
    across all ranks (`tests/unit/test_distributed_lanczos.cpp`).
-3. **Distributed FTLM / TPQ.** — **PARTIAL (Phase 3b #3).** Header at
-   `include/ed/distributed/distributed_ftlm.h`. Implements MPI-over-
-   samples (`n_groups` outer parallelism via `MPI_Comm_split`) on top of
-   `DistributedLanczos` with the proper J&P trace estimator
-   `Z(β) ≈ (D/R) Σ_s Σ_k |⟨v0_s|ψ_k_s⟩|² exp(-β E_k_s)`. Lockdown tests
-   recover the exact partition function on N=4 OBC within statistical
-   noise across `np ∈ {1,2,4}` (`tests/unit/test_distributed_ftlm.cpp`).
-   *Deferred to Phase 3b #5:* generic operator expectation values
-   `⟨O⟩(β)` (needs a distributed Krylov-basis replay against a second
-   `DistributedOperator` wrapping `O`); distributed TPQ
-   imaginary-time evolution.
-4. **Cluster-aware launcher.** — **DONE (Phase 3b #4).** Standalone
+3. **Distributed FTLM (Z(β) AND ⟨O⟩(β)).** — **DONE (Phase 3b #3 + #5).**
+   Header at `include/ed/distributed/distributed_ftlm.h`. Implements
+   MPI-over-samples (`n_groups` outer parallelism via `MPI_Comm_split`)
+   on top of `DistributedLanczos` with the proper J&P trace estimator
+   `Z(β) ≈ (D/R) Σ_s Σ_k |⟨v0_s|ψ_k_s⟩|² exp(-β E_k_s)`. **Phase 3b #5
+   add-on:** if `options.observable_op` is non-null, the same call
+   computes the canonical J&P observable expectation
+   `⟨O⟩(β) = N_O / N_Z` with
+   `N_O = (D/R) Σ_s Re(Σ_j q_j(s)* f_j(s,β))`, where
+   `q_j = ⟨V_s[j] | O r_s⟩` and
+   `f_j(s,β) = Σ_k U_s[j,k] U_s[0,k] e^{-β E_k}`. Cost: one extra
+   `DistributedOperator(O)` apply + `m` distributed inner products per
+   sample. Lockdown tests recover the exact partition function on N=4
+   OBC within statistical noise, recover the exact thermal energy
+   `⟨H⟩(β)` for `O = H` at β ∈ {0.1, 0.5, 1.0}, and verify both Z(β) and
+   ⟨O⟩(β) are bit-replicated across `np ∈ {1,2,4}`
+   (`tests/unit/test_distributed_ftlm.cpp`).
+4. **Distributed eigenvector reconstruction.** — **DONE (Phase 3b #6).**
+   Setting `DistributedLanczosOptions::compute_eigenvectors = true`
+   forces `full_reorth = true` and retains both the rank-local Krylov
+   basis (`m × local_n × 16 B` per rank) and the small `m × m`
+   tridiagonal eigenvector matrix `U` in the result. The new helper
+   `reconstruct_local_eigenvector(result, k, ψ_k_local)` does the
+   contraction `ψ_k_local = V_local @ U[:,k]` purely locally — no MPI
+   traffic. The convenience wrapper
+   `distributed_lanczos_eigenvectors(op, options)` returns the lowest
+   `n_keep` eigenpairs as `(eigenvalues, eigenvectors_local)`. Lockdown
+   tests assemble the full ψ via `MPI_Allgatherv`, apply the *serial*
+   Operator, and check `‖H ψ - E ψ‖₂ < 1e-8` on N=4 OBC + N=6 PBC,
+   plus a global-phase replication check across `np ∈ {1,2,4}`
+   (`tests/unit/test_distributed_eigenvectors.cpp`). *Honest scope:* at
+   "honest 40" with `m = 200` and `local_n ≈ 5e9` the basis costs
+   ~16 TB per rank — way outside any sane budget. The recommended
+   workflow at scale remains "distributed energy + symmetry-projected
+   serial eigenvector"; the new API is honest about this in its
+   docstring.
+5. **Distributed canonical TPQ.** — **DONE (Phase 3b #8).** New header
+   `include/ed/distributed/distributed_tpq.h`. `distributed_tpq(op,
+   options, comm)` initialises a rank-local random complex state,
+   evolves it via Taylor-truncated `e^{-(δβ/2) H}` substeps (one
+   `DistributedOperator::apply` per Taylor order; local zaxpy + dist-norm
+   renormalisation between substeps), and measures `E(β) = ⟨ψ|H|ψ⟩` (and
+   optionally variance via `⟨H²⟩ = ‖Hψ‖²`) at every entry of
+   `options.betas`. Same outer/inner MPI parallelism as
+   `distributed_ftlm` (`n_groups` × ranks-per-group). Lockdown tests
+   recover the exact thermal energy on N=4 OBC at β ∈ {0.5, 2.0} within
+   statistical noise (R = 8 on D = 16), verify replication across ranks,
+   and check `E(β=0) ≈ Tr(H)/D = 0` (`tests/unit/test_distributed_tpq.cpp`).
+   *Honest scope:* the Taylor truncation is unconditionally stable only
+   when `(δβ/2) ‖H‖ ≪ taylor_order`. Defaults (`δβ = 0.05`, order 30)
+   cover `‖H‖ ≲ 30` per local site. For larger spectral radii, drop
+   `δβ` or raise the order.
+6. **Cluster-aware launcher.** — **DONE (Phase 3b #4).** Standalone
    driver `ed_distributed_main` (built when `WITH_MPI=ON`) at
    `src/cli/ed_distributed_main.cpp` exercises both
    `distributed_lanczos` and `distributed_ftlm` from the command line.
@@ -385,9 +426,16 @@ Distributed memory. This is the regime change.
    `run_dist.sh` for single-node `mpiexec`, `slurm_dist.sbatch` for
    slurm, `README.md` for the CLI surface. Smoke-test on N=12 PBC
    reproduces the exact ground state E0 = -5.387… on `np=4`.
+7. **Symmetry-aware row partitioning.** — **OPEN (Phase 3b #7).** The
+   current `balanced_slab` splits the unsymmetrised basis evenly. With
+   full point-group + Sz the natural partition is by orbit, which is
+   non-trivial to balance when orbit sizes vary by an order of
+   magnitude. Required for "honest 40" before the Alltoallv halo size
+   blows up.
 
-After Phase 3b: N=40 with symmetry on ~64 ranks is **possible**, and
-N=36 thermodynamics finishes in hours instead of days.
+After Phase 3b: N=40 with symmetry on ~64 ranks is **possible** in
+principle, and N=36 thermodynamics finishes in hours instead of days.
+The actual cluster lockdown awaits HPC time + Phase 3b #7.
 
 ### Phase 3c — "toward 48" (~2–3 months, requires HPC time)
 
@@ -426,12 +474,13 @@ ED. Until then, claim only what we can deliver.
 
 * That the current code can do 40+ sites *as a routine production
   workflow*. The Phase 3b distributed solvers in `ed::distributed`
-  (`DistributedOperator` / `DistributedLanczos` / `DistributedFTLM`,
-  Phase 3b #1–#4) are correctness-locked vs the serial path on
+  (`DistributedOperator` / `DistributedLanczos` (energies + Ritz
+  vectors) / `DistributedFTLM` (Z + ⟨O⟩) / `DistributedTPQ`, Phase
+  3b #1–#6 + #8) are correctness-locked vs the serial path on
   Heisenberg N≤8 across `np ∈ {1,2,4}`, but they ride a 1D row
   decomposition that is **not** symmetry-aware and they have not yet
-  been exercised at N=40 on a real cluster. "Honest 40" remains a
-  Phase 3b #5 objective.
+  been exercised at N=40 on a real cluster. "Honest 40" remains the
+  Phase 3b #7 objective (orbit-respecting partition).
 * That the MPI in the original `ED` driver / `ed_main.cpp` is
   "distributed Lanczos". It is not — there MPI is *only* sample-level
   parallelism in FTLM (and Jpm-sweep parallelism in BFG). For

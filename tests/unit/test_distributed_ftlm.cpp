@@ -45,6 +45,21 @@ double exact_Z(const std::vector<double>& E, double beta) {
     return s * std::exp(-beta * E0);
 }
 
+// Exact thermal expectation for an observable O whose diagonal in the
+// eigenbasis of H is `O_diag` (sorted by ascending E like ref.eigs).
+double exact_O(const std::vector<double>& E,
+               const std::vector<double>& O_diag,
+               double beta) {
+    const double E0 = E.front();
+    double num = 0.0, den = 0.0;
+    for (std::size_t n = 0; n < E.size(); ++n) {
+        const double w = std::exp(-beta * (E[n] - E0));
+        num += w * O_diag[n];
+        den += w;
+    }
+    return num / den;
+}
+
 }  // namespace
 
 TEST_CASE("Distributed FTLM: Z(beta) approximates exact trace at high T",
@@ -106,6 +121,81 @@ TEST_CASE("Distributed FTLM: replicated Z across all ranks",
     double rank0_Z = res.Z[0];
     MPI_Bcast(&rank0_Z, 1, MPI_DOUBLE, 0, MPI_COMM_WORLD);
     REQUIRE(std::abs(res.Z[0] - rank0_Z) < 1e-10);
+}
+
+TEST_CASE("Distributed FTLM: <H>(beta) approximates exact thermal energy",
+          "[distributed_ftlm][observable][heisenberg]") {
+    // Use H itself as the observable: <H>(beta) = thermal energy.
+    auto op = std::shared_ptr<Operator>(
+        ed_tests::build_heisenberg_chain(/*N=*/4, /*J=*/1.0,
+                                          /*periodic=*/false).release());
+    auto obs_op = std::shared_ptr<Operator>(
+        ed_tests::build_heisenberg_chain(/*N=*/4, /*J=*/1.0,
+                                          /*periodic=*/false).release());
+
+    const std::uint64_t dim = 1ULL << 4;
+    auto ref = ed_tests::reference_from_operator(*op, dim);
+    // For O = H, <n|O|n> = E_n.
+    std::vector<double> O_diag = ref.eigs;
+
+    DistributedFtlmOptions opts;
+    opts.n_samples       = 64;
+    opts.n_groups        = 1;
+    opts.lanczos_max_iter = 30;
+    opts.betas           = {0.1, 0.5, 1.0};
+    opts.seed_offset     = 0UL;
+    opts.observable_op   = obs_op;
+
+    DistributedFtlmResult res = distributed_ftlm(op, opts, MPI_COMM_WORLD);
+    REQUIRE(res.Z.size() == opts.betas.size());
+    REQUIRE(res.O_expectation.size() == opts.betas.size());
+
+    for (std::size_t b = 0; b < opts.betas.size(); ++b) {
+        const double beta = opts.betas[b];
+        const double Eexact = exact_O(ref.eigs, O_diag, beta);
+        const double Eftlm  = res.O_expectation[b];
+        const double abs_err = std::abs(Eftlm - Eexact);
+        // Energies are O(1) for N=4, so absolute error here is meaningful.
+        // 64 samples gives stat noise ~1/sqrt(64) ~ 12.5%; we allow 0.30
+        // absolute (looser than relative because <H> can cross zero with
+        // beta).
+        INFO("beta=" << beta
+             << " <H>_exact=" << Eexact
+             << " <H>_ftlm="  << Eftlm
+             << " |diff|=" << abs_err);
+        REQUIRE(abs_err < 0.30);
+    }
+}
+
+TEST_CASE("Distributed FTLM: <O>(beta) replicated across all ranks",
+          "[distributed_ftlm][observable][replicated]") {
+    auto op = std::shared_ptr<Operator>(
+        ed_tests::build_heisenberg_chain(/*N=*/4, /*J=*/1.0,
+                                          /*periodic=*/false).release());
+    auto obs_op = std::shared_ptr<Operator>(
+        ed_tests::build_heisenberg_chain(/*N=*/4, /*J=*/1.0,
+                                          /*periodic=*/false).release());
+
+    DistributedFtlmOptions opts;
+    opts.n_samples       = 8;
+    opts.n_groups        = 1;
+    opts.lanczos_max_iter = 20;
+    opts.betas           = {0.5, 2.0};
+    opts.seed_offset     = 31UL;
+    opts.observable_op   = obs_op;
+
+    DistributedFtlmResult res = distributed_ftlm(op, opts, MPI_COMM_WORLD);
+    REQUIRE(res.O_expectation.size() == opts.betas.size());
+
+    int rank;
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+
+    std::vector<double> rank0_O = res.O_expectation;
+    MPI_Bcast(rank0_O.data(), static_cast<int>(rank0_O.size()),
+              MPI_DOUBLE, 0, MPI_COMM_WORLD);
+    for (std::size_t b = 0; b < rank0_O.size(); ++b) {
+        REQUIRE(std::abs(res.O_expectation[b] - rank0_O[b]) < 1e-10);
+    }
 }
 
 int main(int argc, char** argv) {

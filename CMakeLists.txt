@@ -755,6 +755,18 @@ if(BUILD_ED_TESTS)
         # MPI parallelism over samples)
         ed_add_mpi_test(test_distributed_ftlm
                         tests/unit/test_distributed_ftlm.cpp)
+
+        # Phase 3b #6: distributed Lanczos eigenvector reconstruction
+        # (rank-local V_local @ U[:,k] contraction; assemble via Allgatherv;
+        # ||H psi - E psi|| < 1e-8 lockdown)
+        ed_add_mpi_test(test_distributed_eigenvectors
+                        tests/unit/test_distributed_eigenvectors.cpp)
+
+        # Phase 3b #8: distributed canonical TPQ (Taylor-truncated
+        # e^{-(delta/2) H} on rank-local |psi>; cross-check vs exact
+        # thermal energy at np=1,2,4)
+        ed_add_mpi_test(test_distributed_tpq
+                        tests/unit/test_distributed_tpq.cpp)
     endif()
     ed_add_test(test_trans_interall_loading     tests/unit/test_trans_interall_loading.cpp USE_CATCH2)
     ed_add_test(test_observables                tests/unit/test_observables.cpp USE_CATCH2)
