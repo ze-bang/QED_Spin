@@ -445,102 +445,90 @@ class NLCExpansionTriangular:
         ε_0^{(n)} = S_n  (partial sums)
         ε_{k+1}^{(n)} = ε_{k-1}^{(n+1)} + 1/(ε_k^{(n+1)} - ε_k^{(n)})
         
-        The even columns ε_{2k}^{(n)} converge to the limit faster than the original series.
-        The best estimate is typically ε_{2*floor((n-1)/2)}^{(0)} for n partial sums.
+        The even columns ε_{2k}^{(n)} converge to the limit faster than the
+        original series.  Odd columns contain reciprocal differences and are
+        NOT sequence estimates.
         
-        This is particularly effective for alternating series like NLCE.
+        Singularity handling: when a denominator is near-zero, the entry is
+        set to a large sentinel (1e50) so that subsequent iterations also
+        detect it.  The final answer is taken from the highest even column
+        at row 0 whose value is not blown up.
+        
+        Supports both scalar sequences and array-valued sequences (one value
+        per temperature point).
         """
         n = len(partial_sums)
         if n < 2:
             return partial_sums[-1] if n > 0 else 0.0
         
-        # Initialize epsilon table
-        # We need columns -1, 0, 1, 2, ..., n-1
-        # epsilon[k][i] = ε_k^{(i)}
-        # Column -1 is all zeros
-        # Column 0 is partial sums
+        SENTINEL = 1e50
         
-        # For numerical stability, we work with arrays
-        epsilon = {}
+        # Detect whether entries are scalars or arrays
+        first = partial_sums[0]
+        is_array = hasattr(first, '__len__')
         
-        # Column -1: all zeros
-        for i in range(n):
-            epsilon[(-1, i)] = np.zeros_like(partial_sums[0])
-        
-        # Column 0: partial sums
-        for i in range(n):
-            epsilon[(0, i)] = partial_sums[i].copy()
-        
-        # Build subsequent columns
-        # ε_{k+1}^{(i)} = ε_{k-1}^{(i+1)} + 1/(ε_k^{(i+1)} - ε_k^{(i)})
-        #
-        # Robust singularity handling:
-        #   1) Use a RELATIVE threshold (10%) to detect near-cancellation in
-        #      the denominator.  When |diff| < 0.1 * max(|ε_k^(n+1)|, |ε_k^(n)|)
-        #      the 1/diff term would produce a pole → fall back to previous column.
-        #   2) Cap the magnitude of the 1/diff correction using a PER-ELEMENT
-        #      scale derived from the column-0 partial sums at each temperature
-        #      point.  This prevents high-T scales from allowing spikes at low T.
-        #   3) Post-process with iterative spike removal.
-        REL_TOL = 0.1    # 10% relative threshold for near-singular denominators
-        
-        # Per-element reference scale from the column-0 (partial sum) entries.
-        # For scalar sequences this collapses to a single number.
-        ps_arr = np.array(partial_sums)
-        if ps_arr.ndim == 1:
-            ps_scale = max(np.max(np.abs(ps_arr)), 1e-30)
+        # Build epsilon table: eps[j][i] where j = column index + 1
+        #   j=0 → column k=-1 (zeros)
+        #   j=1 → column k=0  (partial sums)
+        #   j=2 → column k=1  (reciprocal differences)
+        #   ...
+        if is_array:
+            shape = np.asarray(first).shape
+            eps = np.zeros((n + 1, n) + shape)
+            for i in range(n):
+                eps[1, i] = np.asarray(partial_sums[i])
+            
+            for j in range(2, n + 1):
+                for i in range(n - j + 1):
+                    diff = eps[j-1, i+1] - eps[j-1, i]
+                    result = np.full(shape, SENTINEL)
+                    ok = np.abs(diff) > 1e-15 * (1.0 + np.abs(eps[j-1, i]))
+                    if np.any(ok):
+                        result[ok] = eps[j-2, i+1][ok] + 1.0 / diff[ok]
+                    eps[j, i] = result
+            
+            # Best estimate: highest even column (j=1,3,5,...) at row 0
+            # that is not blown up (element-wise fallback).
+            # Start with raw sum S_{n-1} as fallback (better than S_0=0).
+            best = np.asarray(partial_sums[-1]).copy()
+            for j in range(3, n + 1, 2):
+                ok = np.abs(eps[j, 0]) < SENTINEL * 0.1
+                best[ok] = eps[j, 0][ok]
+            return best
         else:
-            # shape (n, n_temps) — take max over sequence axis, keep per-T
-            ps_scale = np.maximum(np.max(np.abs(ps_arr), axis=0), 1e-30)
-        MAX_CORRECTION = 100.0 * ps_scale
-        
-        for k in range(0, n - 1):
-            for i in range(n - k - 1):
-                diff = epsilon[(k, i + 1)] - epsilon[(k, i)]
-                
-                if np.isscalar(diff):
-                    scale = max(np.abs(epsilon[(k, i + 1)]),
-                                np.abs(epsilon[(k, i)]), 1e-30)
-                    if np.abs(diff) < REL_TOL * scale:
-                        epsilon[(k + 1, i)] = epsilon[(k - 1, i + 1)]
+            # Scalar path
+            eps = np.zeros((n + 1, n))
+            for i in range(n):
+                s = partial_sums[i]
+                eps[1, i] = s[0] if hasattr(s, '__len__') else s
+            
+            for j in range(2, n + 1):
+                for i in range(n - j + 1):
+                    diff = eps[j-1, i+1] - eps[j-1, i]
+                    if abs(diff) < 1e-15 * (1.0 + abs(eps[j-1, i])):
+                        eps[j, i] = SENTINEL
                     else:
-                        correction = 1.0 / diff
-                        correction = np.clip(correction, -MAX_CORRECTION, MAX_CORRECTION)
-                        epsilon[(k + 1, i)] = epsilon[(k - 1, i + 1)] + correction
-                else:
-                    # Array case — element-wise robust threshold
-                    result = epsilon[(k - 1, i + 1)].copy()
-                    scale = np.maximum(np.abs(epsilon[(k, i + 1)]),
-                                       np.abs(epsilon[(k, i)]))
-                    scale = np.maximum(scale, 1e-30)
-                    mask = np.abs(diff) > REL_TOL * scale
-                    if np.any(mask):
-                        correction = np.zeros_like(diff)
-                        correction[mask] = 1.0 / diff[mask]
-                        correction = np.clip(correction, -MAX_CORRECTION, MAX_CORRECTION)
-                        result[mask] = result[mask] + correction[mask]
-                    epsilon[(k + 1, i)] = result
-        
-        # The best approximation is from even columns
-        # For n partial sums, we can compute up to column n-1
-        # The even columns 0, 2, 4, ... give approximations
-        # Return the highest even column at row 0
-        best_col = 2 * ((n - 1) // 2)
-        if best_col >= 0 and (best_col, 0) in epsilon:
-            result = epsilon[(best_col, 0)]
-        else:
-            result = partial_sums[-1]
-        
-        return result
+                        eps[j, i] = eps[j-2, i+1] + 1.0 / diff
+            
+            # Best estimate: highest even column at row 0 that isn't blown up.
+            # Fall back to raw sum S_{n-1} if all Wynn columns blow up.
+            s_last = partial_sums[-1]
+            best = s_last[0] if hasattr(s_last, '__len__') else s_last
+            for j in range(3, n + 1, 2):
+                if abs(eps[j, 0]) < SENTINEL * 0.1:
+                    best = eps[j, 0]
+            return best
     
     def wynn_epsilon_multi_start(self, partial_sums, max_starts=None):
         """Apply Wynn's epsilon from multiple starting indices and take the median.
         
         For a sequence S_0, S_1, ..., S_{n-1}, we apply Wynn starting from
-        S_k for k = 0, 1, ..., min(max_starts-1, n//3).  Taking the median
-        across starting points is much more robust than single-start Wynn,
-        especially when one starting point happens to hit a near-singular
-        denominator.
+        S_k for k = 0, 1, ..., max_starts-1.  Taking the median across
+        starting points is more robust than single-start Wynn when one
+        starting point happens to hit a near-singular denominator.
+        
+        Uses n//2 starting points (leaving at least 3 terms each) to get a
+        robust median, instead of n//3 which gives too few samples.
         
         Reference: Khatami & Rigol, Phys. Rev. B 83, 134431 (2011).
         """
@@ -548,10 +536,10 @@ class NLCExpansionTriangular:
         if n < 3:
             return partial_sums[-1] if n > 0 else 0.0
         
-        # Number of starting points: use up to n//3 to leave enough terms
+        # Use up to n//2 starting points, each needing at least 3 terms
         if max_starts is None:
-            max_starts = max(1, n // 3)
-        max_starts = min(max_starts, max(1, n // 3))
+            max_starts = max(1, n - 2)  # all valid starting points
+        max_starts = min(max_starts, max(1, n - 2))
         
         estimates = []
         for k_start in range(max_starts):
@@ -570,6 +558,323 @@ class NLCExpansionTriangular:
             return np.median(estimates_arr)
         else:
             return np.median(estimates_arr, axis=0)
+    
+    def brezinski_theta(self, partial_sums):
+        """Brezinski's theta algorithm for series acceleration.
+        
+        Unlike Wynn epsilon, the theta algorithm uses ALL terms regardless
+        of whether n is even or odd.  It constructs a three-column recurrence:
+        
+            θ_{-1}^{(n)} = 0
+            θ_0^{(n)}    = S_n
+            ω_{k}^{(n)}  = θ_{k-1}^{(n+1)} + 1/(θ_{k}^{(n+1)} - θ_{k}^{(n)})
+            θ_{k+1}^{(n)}= ω_{k}^{(n+1)} + (θ_{k}^{(n+2)} - θ_{k}^{(n+1)}) / 
+                           ((θ_{k}^{(n+2)} - θ_{k}^{(n+1)}) / (θ_{k}^{(n+1)} - θ_{k}^{(n)}) - 1)
+        
+        Equivalently, the theta algorithm consumes 3 terms per "level" and
+        each level produces a higher-order estimate.  The best estimate uses
+        all n terms.
+        
+        Ref: Brezinski, J. Comput. Appl. Math. 122, 223 (2000).
+        
+        Supports both scalar and array-valued sequences.
+        """
+        n = len(partial_sums)
+        if n < 3:
+            return partial_sums[-1] if n > 0 else 0.0
+        
+        SENTINEL = 1e50
+        first = partial_sums[0]
+        is_array = hasattr(first, '__len__')
+        
+        if is_array:
+            shape = np.asarray(first).shape
+            # theta[k][i] and omega[k][i]
+            theta = {}
+            for i in range(n):
+                theta[(-1, i)] = np.zeros(shape)
+                theta[(0, i)] = np.asarray(partial_sums[i]).copy()
+            
+            max_k = (n - 1) // 2  # each theta level consumes 2 terms
+            for k in range(max_k):
+                # omega_k^(i) = theta_{k-1}^(i+1) + 1/(theta_k^(i+1) - theta_k^(i))
+                omega = {}
+                for i in range(n - 2*k - 1):
+                    diff = theta[(k, i+1)] - theta[(k, i)]
+                    result = np.full(shape, SENTINEL)
+                    ok = np.abs(diff) > 1e-15 * (1 + np.abs(theta[(k, i)]))
+                    if np.any(ok):
+                        result[ok] = theta[(k-1, i+1)][ok] + 1.0 / diff[ok]
+                    omega[(k, i)] = result
+                
+                # theta_{k+1}^(i) from omega
+                for i in range(n - 2*k - 2):
+                    diff_theta = theta[(k, i+2)] - theta[(k, i+1)]
+                    diff_theta_prev = theta[(k, i+1)] - theta[(k, i)]
+                    result = np.full(shape, SENTINEL)
+                    # ratio = diff_theta / diff_theta_prev
+                    ok_denom = np.abs(diff_theta_prev) > 1e-15 * (1 + np.abs(theta[(k, i)]))
+                    ratio = np.zeros(shape)
+                    ratio[ok_denom] = diff_theta[ok_denom] / diff_theta_prev[ok_denom]
+                    factor_denom = ratio - 1.0
+                    ok = ok_denom & (np.abs(factor_denom) > 1e-15)
+                    if np.any(ok):
+                        result[ok] = omega[(k, i+1)][ok] + diff_theta[ok] / factor_denom[ok]
+                    theta[(k+1, i)] = result
+            
+            # Best estimate: highest k at row 0 that isn't blown up
+            best = np.asarray(partial_sums[-1]).copy()
+            for k in range(1, max_k + 1):
+                if (k, 0) in theta:
+                    ok = np.abs(theta[(k, 0)]) < SENTINEL * 0.1
+                    best[ok] = theta[(k, 0)][ok]
+            return best
+        else:
+            # Scalar path
+            theta = {}
+            for i in range(n):
+                theta[(-1, i)] = 0.0
+                s = partial_sums[i]
+                theta[(0, i)] = s[0] if hasattr(s, '__len__') else s
+            
+            max_k = (n - 1) // 2
+            for k in range(max_k):
+                omega = {}
+                for i in range(n - 2*k - 1):
+                    diff = theta[(k, i+1)] - theta[(k, i)]
+                    if abs(diff) < 1e-15 * (1 + abs(theta[(k, i)])):
+                        omega[(k, i)] = SENTINEL
+                    else:
+                        omega[(k, i)] = theta[(k-1, i+1)] + 1.0 / diff
+                
+                for i in range(n - 2*k - 2):
+                    diff_theta = theta[(k, i+2)] - theta[(k, i+1)]
+                    diff_theta_prev = theta[(k, i+1)] - theta[(k, i)]
+                    if abs(diff_theta_prev) < 1e-15 * (1 + abs(theta[(k, i)])):
+                        theta[(k+1, i)] = SENTINEL
+                    else:
+                        ratio = diff_theta / diff_theta_prev
+                        if abs(ratio - 1.0) < 1e-15:
+                            theta[(k+1, i)] = SENTINEL
+                        else:
+                            theta[(k+1, i)] = omega[(k, i+1)] + diff_theta / (ratio - 1.0)
+            
+            s_last = partial_sums[-1]
+            best = s_last[0] if hasattr(s_last, '__len__') else s_last
+            for k in range(1, max_k + 1):
+                if (k, 0) in theta and abs(theta[(k, 0)]) < SENTINEL * 0.1:
+                    best = theta[(k, 0)]
+            return best
+    
+    def iterated_aitken(self, partial_sums):
+        """Iterated Aitken Δ² (Shanks) transformation.
+        
+        Aitken's Δ² method accelerates convergence of a sequence {S_n}:
+            S'_n = S_n - (S_{n+1} - S_n)² / (S_{n+2} - 2 S_{n+1} + S_n)
+        
+        Iterated Aitken applies this repeatedly.  Each application consumes
+        2 terms: n terms → n-2 transformed terms.  After ⌊(n-1)/2⌋ levels,
+        one estimate remains.  Unlike Wynn, every term contributes at every
+        level regardless of parity.
+        
+        Supports both scalar and array inputs.
+        """
+        n = len(partial_sums)
+        if n < 3:
+            return partial_sums[-1] if n > 0 else 0.0
+        
+        SENTINEL = 1e50
+        first = partial_sums[0]
+        is_array = hasattr(first, '__len__')
+        
+        if is_array:
+            shape = np.asarray(first).shape
+            current = [np.asarray(s).copy() for s in partial_sums]
+            
+            while len(current) >= 3:
+                new_seq = []
+                for i in range(len(current) - 2):
+                    denom = current[i+2] - 2*current[i+1] + current[i]
+                    numer = (current[i+1] - current[i])**2
+                    result = current[i].copy()
+                    ok = np.abs(denom) > 1e-15 * (1 + np.abs(current[i]))
+                    if np.any(ok):
+                        result[ok] = current[i][ok] - numer[ok] / denom[ok]
+                    # Guard against blowup
+                    bad = np.abs(result) > SENTINEL * 0.1
+                    result[bad] = current[i][bad]
+                    new_seq.append(result)
+                current = new_seq
+            
+            return current[-1]
+        else:
+            current = []
+            for s in partial_sums:
+                current.append(s[0] if hasattr(s, '__len__') else s)
+            
+            while len(current) >= 3:
+                new_seq = []
+                for i in range(len(current) - 2):
+                    denom = current[i+2] - 2*current[i+1] + current[i]
+                    numer = (current[i+1] - current[i])**2
+                    if abs(denom) < 1e-15 * (1 + abs(current[i])):
+                        new_seq.append(current[i])
+                    else:
+                        val = current[i] - numer / denom
+                        if abs(val) > SENTINEL * 0.1:
+                            new_seq.append(current[i])
+                        else:
+                            new_seq.append(val)
+                current = new_seq
+            
+            return current[-1]
+    
+    def pade_approximant(self, partial_sums):
+        """Padé-inspired resummation from NLCE partial sums.
+        
+        Given partial sums S_0, S_1, ..., S_{n-1}, treat the increments
+        a_k = S_k - S_{k-1} as "series coefficients" and form the Padé
+        approximant [L/M] of the generating function f(x) = Σ a_k x^k
+        evaluated at x=1.
+        
+        We use a balanced approximant: L = ⌊(n-1)/2⌋, M = n-1-L, so that
+        all n coefficients are used regardless of parity.
+        
+        The Padé approximant is computed via the Wynn rho algorithm on the
+        increments, which is equivalent to solving the Padé equations but
+        more numerically stable.
+        
+        Supports both scalar and array inputs.
+        """
+        n = len(partial_sums)
+        if n < 2:
+            return partial_sums[-1] if n > 0 else 0.0
+        
+        SENTINEL = 1e50
+        first = partial_sums[0]
+        is_array = hasattr(first, '__len__')
+        
+        if is_array:
+            shape = np.asarray(first).shape
+            # Increments: a_0 = S_0, a_k = S_k - S_{k-1}
+            increments = [np.asarray(partial_sums[0]).copy()]
+            for k in range(1, n):
+                increments.append(np.asarray(partial_sums[k]) - np.asarray(partial_sums[k-1]))
+            
+            # Build Padé table via epsilon algorithm on the cumulative sums
+            # of increments (which are just the partial sums themselves).
+            # Use the Shanks/Padé connection: the [L/M] Padé at x=1 equals
+            # the Shanks transform e_M(S_L+M) when L+M = n-1.
+            # 
+            # For balanced [L/M], we want M = ⌊(n-1)/2⌋.
+            # The Shanks e_M transform is exactly Wynn ε_{2M}^{(0)} applied
+            # to the first 2M+1 terms... but we want to use ALL n terms.
+            #
+            # Instead, use the iterated Shanks approach: apply Aitken Δ² 
+            # repeatedly to the increments' partial sums.  This is equivalent
+            # to the diagonal Padé approximant and uses all terms.
+            
+            # Actually, the cleanest Padé approach for NLCE:
+            # Solve the linear system for [L/M] directly.
+            L = (n - 1) // 2
+            M = n - 1 - L
+            
+            # P(x)/Q(x) where P has degree L, Q has degree M, Q(0)=1
+            # f(x) Q(x) - P(x) = O(x^n) where f(x) = Σ a_k x^k
+            # We need: Σ_{j=0}^{M} q_j a_{k-j} = 0 for k = L+1, ..., L+M
+            # with q_0 = 1
+            
+            # Build per-temperature Padé (vectorized)
+            a = np.array([np.asarray(inc) for inc in increments])  # (n, *shape)
+            original_shape = shape
+            # Flatten spatial dims for batch processing
+            a_flat = a.reshape(n, -1)  # (n, n_pts)
+            n_pts = a_flat.shape[1]
+            
+            result = np.asarray(partial_sums[-1]).copy().ravel()
+            
+            for pt in range(n_pts):
+                a_pt = a_flat[:, pt]
+                # Build M×M Toeplitz-like system for denominator coefficients
+                # Σ_{j=1}^{M} q_j * a_{L+1+i-j} = -a_{L+1+i} for i=0..M-1
+                if M == 0:
+                    result[pt] = np.sum(a_pt)
+                    continue
+                mat = np.zeros((M, M))
+                rhs = np.zeros(M)
+                for i in range(M):
+                    for j in range(M):
+                        idx = L + 1 + i - (j + 1)
+                        if 0 <= idx < n:
+                            mat[i, j] = a_pt[idx]
+                    rhs[i] = -a_pt[L + 1 + i] if L + 1 + i < n else 0.0
+                
+                try:
+                    q = np.linalg.solve(mat, rhs)
+                except np.linalg.LinAlgError:
+                    continue  # keep raw sum fallback
+                
+                # Q(1) = 1 + Σ q_j
+                Q1 = 1.0 + np.sum(q)
+                if abs(Q1) < 1e-15:
+                    continue
+                
+                # P(x) = Σ_{k=0}^{L} p_k x^k where p_k = a_k + Σ_{j=1}^{min(k,M)} q_j a_{k-j}
+                P1 = 0.0
+                for k in range(L + 1):
+                    p_k = a_pt[k]
+                    for j in range(1, min(k, M) + 1):
+                        p_k += q[j-1] * a_pt[k - j]
+                    P1 += p_k  # x=1
+                
+                val = P1 / Q1
+                if abs(val) < SENTINEL * 0.1:
+                    result[pt] = val
+            
+            return result.reshape(original_shape)
+        else:
+            # Scalar path
+            S = []
+            for s in partial_sums:
+                S.append(s[0] if hasattr(s, '__len__') else s)
+            
+            a = [S[0]]
+            for k in range(1, n):
+                a.append(S[k] - S[k-1])
+            
+            L = (n - 1) // 2
+            M = n - 1 - L
+            
+            if M == 0:
+                return sum(a)
+            
+            mat = np.zeros((M, M))
+            rhs = np.zeros(M)
+            for i in range(M):
+                for j in range(M):
+                    idx = L + 1 + i - (j + 1)
+                    if 0 <= idx < n:
+                        mat[i, j] = a[idx]
+                rhs[i] = -a[L + 1 + i] if L + 1 + i < n else 0.0
+            
+            try:
+                q = np.linalg.solve(mat, rhs)
+            except np.linalg.LinAlgError:
+                return S[-1]
+            
+            Q1 = 1.0 + np.sum(q)
+            if abs(Q1) < 1e-15:
+                return S[-1]
+            
+            P1 = 0.0
+            for k in range(L + 1):
+                p_k = a[k]
+                for j in range(1, min(k, M) + 1):
+                    p_k += q[j-1] * a[k - j]
+                P1 += p_k
+            
+            val = P1 / Q1
+            return val if abs(val) < SENTINEL * 0.1 else S[-1]
     
     def entropy_derived_specific_heat(self, results):
         """Compute specific heat from C(T) = T dS/dT using the NLCE entropy.
@@ -601,7 +906,10 @@ class NLCExpansionTriangular:
             'none'/'direct': No resummation, bare partial sums.
             'euler': Euler transformation (Tang-Khatami-Rigol).
             'wynn': Single-start Wynn epsilon.
-            'wynn_multi': Multi-start Wynn epsilon with median (recommended).
+            'wynn_multi': Multi-start Wynn epsilon with median.
+            'brezinski': Brezinski theta algorithm (no even/odd waste).
+            'aitken': Iterated Aitken delta-squared (no even/odd waste).
+            'pade': Balanced Pade approximant [L/M] (no even/odd waste).
             'entropy_derived': Resum entropy with Euler, then C = T dS/dT.
         """
         raw_results = self.perform_summation(max_order)
@@ -646,8 +954,17 @@ class NLCExpansionTriangular:
                     resummed[i] = result[0] if hasattr(result, '__len__') else result
                 results[prop] = resummed
             elif method == 'wynn_multi':
-                # Multi-start Wynn with median — most robust
+                # Multi-start Wynn with median
                 resummed = self.wynn_epsilon_multi_start(self.partial_sums[prop])
+                results[prop] = resummed
+            elif method == 'brezinski':
+                resummed = self.brezinski_theta(self.partial_sums[prop])
+                results[prop] = resummed
+            elif method == 'aitken':
+                resummed = self.iterated_aitken(self.partial_sums[prop])
+                results[prop] = resummed
+            elif method == 'pade':
+                resummed = self.pade_approximant(self.partial_sums[prop])
                 results[prop] = resummed
             else:
                 results[prop] = raw_results[prop]
@@ -797,9 +1114,10 @@ def main():
     parser.add_argument('--SI_units', action='store_true',
                        help='Convert to SI units: C,S in J/(mol·K), E in J/mol.')
     parser.add_argument('--resummation', type=str, default='none',
-                       choices=['none', 'euler', 'wynn', 'wynn_multi', 'entropy_derived'],
-                       help='Resummation method: none, euler, wynn, wynn_multi (multi-start median), '
-                            'or entropy_derived (C = T dS/dT from resummed entropy)')
+                       choices=['none', 'euler', 'wynn', 'wynn_multi',
+                                'brezinski', 'aitken', 'pade', 'entropy_derived'],
+                       help='Resummation method: none, euler, wynn, wynn_multi, '
+                            'brezinski, aitken, pade, or entropy_derived')
     
     args = parser.parse_args()
     

@@ -293,8 +293,13 @@ def run_nlce_triangular(params, fixed_params, exp_temp, work_dir, h_field=None, 
         '--thermo',
         '--base_dir', work_dir,
         '--g_ab', f'{fixed_params.get("g_ab", 2.0):.12f}',
-        '--g_c', f'{fixed_params.get("g_c", 2.0):.12f}'
+        '--g_c', f'{fixed_params.get("g_c", 2.0):.12f}',
+        '--resummation', fixed_params.get("resummation", "euler")
     ]
+    
+    # Symmetry threshold for --symm auto-selection
+    if fixed_params.get("symm_threshold") is not None:
+        cmd.extend(['--symm_threshold', str(fixed_params["symm_threshold"])])
     
     # Add model-specific parameters
     if model == 'anisotropic':
@@ -890,11 +895,19 @@ def main():
     parser.add_argument('--ed_method', type=str, default='FULL',
                        help='ED solver method passed to the NLCE runner '
                             '(FULL, FULL_GPU, SCALAPACK_MIXED, etc. Default: FULL)')
+    parser.add_argument('--resummation', type=str, default='euler',
+                       choices=['none', 'euler', 'wynn', 'wynn_multi',
+                                'brezinski', 'aitken', 'pade'],
+                       help='NLCE resummation method (default: euler).')
     parser.add_argument('--streaming-symmetry', action='store_true',
                        help='Use streaming-symmetry diagonalization (exploits spatial automorphisms). '
                             'The orbit basis is precomputed once and cached, then reused '
                             'across all fitting iterations since it only depends on cluster '
                             'geometry and operator structure, not coupling values.')
+    parser.add_argument('--symm_threshold', type=int, default=None,
+                       help='Site count threshold for --symm auto-selection in ED. '
+                            'Clusters with num_sites > threshold get --symm. '
+                            'Default: runner default (13). Set to 9 to cover all 10+ site clusters.')
     parser.add_argument('--n_starts', type=int, default=20, help='Number of random starts')
     parser.add_argument('--max_iter', type=int, default=1000, help='Max iterations')
 
@@ -1049,18 +1062,21 @@ def main():
         "fit_Jz_ratio": args.fit_Jz_ratio,
         "Jz_ratio": args.Jz_ratio,
         "streaming_symmetry": args.streaming_symmetry,
+        "symm_threshold": args.symm_threshold,
+        "resummation": args.resummation,
     }
     
     # Generate clusters first if needed
     if not args.skip_cluster_gen:
-        logging.info("Generating triangular lattice clusters...")
+        logging.info("Generating triangle-based NLCE clusters...")
         script_dir = os.path.dirname(os.path.abspath(__file__))
-        cluster_gen_script = os.path.join(script_dir, '..', 'prep', 'generate_triangular_clusters.py')
+        cluster_gen_script = os.path.join(script_dir, '..', 'prep', 'generate_triangle_nlce_clusters.py')
         cluster_gen_cmd = [
             sys.executable,
             cluster_gen_script,
             '--max_order', str(args.max_order),
-            '--output_dir', os.path.join(args.work_dir, f'clusters_order_{args.max_order}')
+            '--output_dir', os.path.join(args.work_dir, f'clusters_order_{args.max_order}'),
+            '--no_visualize',
         ]
         subprocess.run(cluster_gen_cmd, check=True)
         fixed_params["skip_cluster_gen"] = True
@@ -1239,10 +1255,16 @@ def main():
             logging.error("scikit-optimize is required for Bayesian optimization. "
                           "Install it with: pip install scikit-optimize")
             sys.exit(1)
-        # Build skopt search space from bounds
-        dimensions = [Real(lo, hi, name=name.strip())
-                      for (lo, hi), name in zip(bounds,
-                                                 param_names.split(','))]
+        # Build skopt search space from bounds, skipping frozen dims (lo==hi)
+        all_names = [n.strip() for n in param_names.split(',')]
+        free_idx = [i for i, (lo, hi) in enumerate(bounds) if lo != hi]
+        frozen_idx = [i for i, (lo, hi) in enumerate(bounds) if lo == hi]
+        frozen_vals = {i: bounds[i][0] for i in frozen_idx}
+        if frozen_idx:
+            logging.info(f"Frozen parameters (lo==hi): "
+                         f"{', '.join(all_names[i] + f'={frozen_vals[i]}' for i in frozen_idx)}")
+        dimensions = [Real(bounds[i][0], bounds[i][1], name=all_names[i])
+                      for i in free_idx]
         n_calls = args.max_iter
         n_initial_points = min(args.n_initial, n_calls)
         # xi/kappa are top-level kwargs in skopt's gp_minimize
@@ -1267,8 +1289,9 @@ def main():
         # entirely on random initialization.
         x0_list = None
         if args.bo_inject_x0:
-            x0_list = [list(initial_params)]
-            logging.info(f"Injecting initial guess as x0: {initial_params}")
+            x0_free = [initial_params[i] for i in free_idx]
+            x0_list = [x0_free]
+            logging.info(f"Injecting initial guess as x0: {x0_free}")
 
         # Optionally log-transform the objective so the GP surrogate
         # models log(χ²) instead of raw χ². This compresses the
@@ -1277,8 +1300,18 @@ def main():
         # acquisition quality.
         use_log = args.bo_log_transform
 
+        def _expand_params(x_free):
+            """Expand reduced BO vector back to full parameter vector."""
+            full = np.empty(len(bounds))
+            for j, idx in enumerate(free_idx):
+                full[idx] = x_free[j]
+            for idx, val in frozen_vals.items():
+                full[idx] = val
+            return full
+
         def _bo_objective(x):
-            chi2 = calc_chi_squared(np.array(x), fixed_params,
+            full_x = _expand_params(x)
+            chi2 = calc_chi_squared(full_x, fixed_params,
                                     exp_datasets, args.work_dir)
             return float(np.log(chi2)) if use_log else chi2
 
@@ -1303,7 +1336,7 @@ def main():
         class _BOResult:
             pass
         result = _BOResult()
-        result.x = np.array(bo_result.x)
+        result.x = _expand_params(bo_result.x)
         # Convert back from log space if needed
         result.fun = float(np.exp(bo_result.fun)) if use_log else bo_result.fun
         result.nfev = len(bo_result.func_vals)
