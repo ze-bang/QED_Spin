@@ -9,6 +9,7 @@
 
 #include "ed/io/lanczos_basis_buffer.h"
 #include "ed/core/blas_lapack_wrapper.h"
+#include "ed/parallel/numa.h"
 
 #include <algorithm>
 #include <cstdlib>
@@ -53,6 +54,15 @@ uint64_t load_basis_tile(const std::string& temp_dir,
     }
     tile.assign(static_cast<std::size_t>(N) * static_cast<std::size_t>(count),
                 Complex(0.0, 0.0));
+    // NUMA first-touch (Phase 3a #4): if ED_NUMA_FIRST_TOUCH=1 and the
+    // tile is large enough to matter, parallel-zero it again so each
+    // OpenMP thread owns the chunk of pages it will later read in
+    // blocked_reorth's zgemv. `assign` above served-touched the buffer
+    // on the calling thread; we need the parallel touch to spread it
+    // across NUMA nodes.
+    ed::parallel::first_touch_complex(
+        tile.data(),
+        static_cast<std::size_t>(N) * static_cast<std::size_t>(count));
 
     for (uint64_t k = 0; k < count; ++k) {
         Complex* col = tile.data() + static_cast<std::size_t>(k) * N;

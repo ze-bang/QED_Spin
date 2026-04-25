@@ -184,6 +184,7 @@ set(DSSF_DIR ${SRC_DIR}/dssf)
 set(BFG_DIR ${SRC_DIR}/bfg)
 set(CLI_DIR ${SRC_DIR}/cli)
 set(SYMMETRY_DIR ${SRC_DIR}/symmetry)
+set(PARALLEL_DIR ${SRC_DIR}/parallel)
 
 # Include directories - public headers in include/, private in src/
 include_directories(${INCLUDE_DIR})
@@ -391,7 +392,7 @@ endif()
 include(GNUInstallDirs)
 include(CMakePackageConfigHelpers)
 
-set(_ED_INSTALL_TARGETS ed_io ed_core ed_dssf ed_bfg ed_symmetry ed_solvers_cpu ed_cli)
+set(_ED_INSTALL_TARGETS ed_parallel ed_io ed_core ed_dssf ed_bfg ed_symmetry ed_solvers_cpu ed_cli)
 if(TARGET ed_solvers_gpu)
     list(APPEND _ED_INSTALL_TARGETS ed_solvers_gpu)
 endif()
@@ -627,6 +628,10 @@ if(BUILD_ED_TESTS)
     # threshold + skip filters, in-memory + on-disk tile loading, end-to-end
     # tile-size invariance for lanczos_selective_reorth).
     ed_add_test(test_lanczos_reorth             tests/unit/test_lanczos_reorth.cpp USE_CATCH2)
+    # Phase 3a #4: NUMA first-touch + thread-pinning hooks (env-knob defaults +
+    # parsing, threshold + counter contract, idempotent pinning, end-to-end
+    # Lanczos eigenvalue invariance with knobs on vs off).
+    ed_add_test(test_numa                       tests/unit/test_numa.cpp USE_CATCH2)
     ed_add_test(test_trans_interall_loading     tests/unit/test_trans_interall_loading.cpp USE_CATCH2)
     ed_add_test(test_observables                tests/unit/test_observables.cpp USE_CATCH2)
     ed_add_test(test_thermal_methods            tests/unit/test_thermal_methods.cpp USE_CATCH2)

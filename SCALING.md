@@ -136,6 +136,8 @@ them in your run script, not mid-run.
 |---|---|---|
 | `ED_FTLM_PARALLEL` | `0` (serial) | Enables OpenMP over FTLM samples (Batch 2, P1-4). **Opt-in** because the default `Operator` is not guaranteed thread-safe — concurrent `apply()` calls can corrupt shared scratch. Safe with the per-sector-CSR Operator and with the chunked-symmetry Operator. Validate against the serial run before trusting averaged thermodynamics. |
 | `ED_GPU_TIMING` | `0` | If `1`, GPU fixed-Sz matvec calls insert `cudaDeviceSynchronize()` and record per-call timings. Off by default for performance (Batch 2, P1-6). |
+| `ED_NUMA_FIRST_TOUCH` | unset (off) | If `1`/`true`/`yes`, basis-sized work vectors (Lanczos `v_curr` / `v_prev` / `v_next` / `w`, the blocked-reorth tile) are parallel-zero-touched after allocation so each OpenMP thread owns the chunk of pages it will later read in `cblas_zaxpy` / `zdotc` / `zgemv` (Phase 3a #4, see `include/ed/parallel/numa.h`). On a multi-socket box this is the difference between every SpMV pulling its operand vector across the inter-socket link vs. straight from local DRAM (typically 2-4× SpMV bandwidth). No-op below a 256 KB threshold; never changes numerical results. Pair with `ED_NUMA_PIN_THREADS=1` so the thread-to-page assignment is stable across iterations. |
+| `ED_NUMA_PIN_THREADS` | unset (off) | If `1`/`true`/`yes`, OpenMP worker threads are pinned compactly via `pthread_setaffinity_np` (thread `t` → CPU `t mod ncpus`) on first call into `lanczos` / `lanczos_selective_reorth` (Phase 3a #4). Idempotent within a process. Pairs with `ED_NUMA_FIRST_TOUCH=1` so each thread keeps owning the same page range across iterations; without pinning the kernel is free to migrate threads between cores and socket-local DRAM access is no longer guaranteed. Honour `OMP_PROC_BIND` / `OMP_PLACES` for non-compact layouts. |
 
 ### Diagnostics
 
@@ -281,9 +283,28 @@ publication-grade-fast on GPU.
    templating for FP32 matrix-free is a separate, larger job and is
    deferred). Symmetrized / fixed-Sz operators do not currently build a
    CSR and so silently stay FP64.
-4. **NUMA-aware first-touch allocator + thread-pinning hooks.** On a
-   4-socket node the difference between "OS scheduler decides" and
-   "first-touch on the rank that owns the slice" is 30–50% on SpMV.
+4. **NUMA-aware first-touch allocator + thread-pinning hooks. — DONE
+   (Phase 3a #4).** New module
+   `include/ed/parallel/numa.h` + `src/parallel/numa.cpp` adds two
+   default-off env knobs: `ED_NUMA_FIRST_TOUCH=1` makes
+   `ed::parallel::first_touch_complex` parallel-zero the buffer it's
+   given (page-aligned static schedule, so the same OMP thread later
+   reads the chunk it just wrote), and `ED_NUMA_PIN_THREADS=1` calls
+   `pthread_setaffinity_np` once per process to pin OMP workers
+   compactly across logical cores. The Lanczos entry points
+   (`lanczos`, `lanczos_selective_reorth`, `lanczos_no_ortho`) and the
+   blocked-reorth tile loader (`load_basis_tile`) call into the helpers
+   right after their basis-sized allocations. No libnuma dependency
+   (works on any Linux + glibc + OpenMP); explicit `numa_alloc_onnode`
+   / `mbind` placement is a separate follow-up. Knobs never change
+   numerical results -- they only change DRAM page placement and OMP
+   thread affinity. Below the 256 KB threshold the touch is a no-op
+   (small scratch vectors fit in L2 anyway). Covered by seven lockdown
+   tests in `tests/unit/test_numa.cpp` (env-knob defaults + truthy
+   string parsing, off-state no-op, sub-threshold no-op, on-state
+   counter contract, raw-byte first-touch, idempotent pinning,
+   end-to-end Lanczos ground-state energy invariance with knobs on
+   vs off to within 1e-12).
 5. **Symmetry-projected basis: switch `unordered_map<uint64_t, size_t>`
    to a perfect hash** (e.g., compressed-sparse representative table +
    Robin-Hood probing, or a true minimal perfect hash via the BBHash /

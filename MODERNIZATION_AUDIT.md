@@ -1117,10 +1117,12 @@ distributed-memory state vector for SpMV (the single biggest gap — every
 Lanczos / FTLM / TPQ / Krylov-Schur vector is `std::vector<Complex>` on one
 rank); multi-GPU NCCL Lanczos; symmetry-projected basis indexing past ~2 × 10⁹
 states (current `unordered_map<uint64_t, ...>` cannot be materialized);
-NUMA-aware allocator + thread-pinning hooks; FP32 matrix-free SpMV (Phase 3a #3
-covered the cuSPARSE CSR pathway only — kernel-templated FP32 versions of
-the WARP_REDUCTION / BRANCH_FREE_SCATTER / SHARED_MEMORY paths and the
-fixed-Sz / symmetrized operators are deferred); distributed FTLM/TPQ
+explicit `numa_alloc_onnode` / `mbind` placement (Phase 3a #4 landed
+opportunistic first-touch + thread-pinning, libnuma-free; explicit per-node
+allocation is a follow-up); FP32 matrix-free SpMV (Phase 3a #3 covered the
+cuSPARSE CSR pathway only — kernel-templated FP32 versions of the
+WARP_REDUCTION / BRANCH_FREE_SCATTER / SHARED_MEMORY paths and the fixed-Sz
+/ symmetrized operators are deferred); distributed FTLM/TPQ
 **imaginary-time evolution** (the per-sample work is local but the per-rank
 vector still has to fit).
 
@@ -1169,13 +1171,38 @@ FP64. Covered by two GPU lockdown tests in
 N=10 Heisenberg PBC; ground-state Lanczos eigenvalue within 1e-5 of the
 dense reference at N=8).
 
+**Phase 3a #4 (NUMA-aware first-touch + thread-pinning hooks) is now
+landed** — new tiny utility module `include/ed/parallel/numa.h` +
+`src/parallel/numa.cpp` exposes two default-off env knobs:
+`ED_NUMA_FIRST_TOUCH=1` makes `ed::parallel::first_touch_complex` walk
+a basis-sized buffer in OpenMP parallel and zero-write each chunk so
+the corresponding pages get faulted onto the NUMA node of the thread
+that will later read them (Linux first-touch placement); above a
+256 KB threshold, below it the call is a no-op. `ED_NUMA_PIN_THREADS=1`
+calls `pthread_setaffinity_np` once per process to pin OMP workers
+compactly across logical cores so the first-touch ownership is stable
+across iterations. The Lanczos entry points (`lanczos`,
+`lanczos_selective_reorth`, `lanczos_no_ortho`) and the blocked-reorth
+tile loader (`load_basis_tile`) call into the helpers right after their
+basis-sized allocations. Pure C++ implementation -- no libnuma
+dependency, works on any Linux + glibc + OpenMP system; explicit
+`numa_alloc_onnode` / `mbind` placement is a separate follow-up.
+Knobs never change numerical results -- only DRAM page placement and
+OMP thread affinity. New lib `ed_parallel` linked PUBLIC into `ed_io`
+and `ed_solvers_cpu`. Covered by seven lockdown tests in
+`tests/unit/test_numa.cpp` (env-knob defaults + truthy parsing,
+off-state and sub-threshold no-ops, on-state counter contract,
+raw-byte first-touch, idempotent pinning, end-to-end Lanczos
+ground-state energy invariance with knobs on vs off to within 1e-12).
+
 See [`SCALING.md`](./SCALING.md) for the full memory tables, runtime regime
 notes, environment-variable controls (`ED_LANCZOS_DISK`, `ED_FTLM_PARALLEL`,
 `ED_GPU_TIMING`, `ED_USE_SPARSE`, `ED_SPARSE_DIM_MAX`,
 `ED_GPU_ALLOW_DROPPED_THREEBODY`, `ED_CTPQ_PROPAGATOR`, `ED_CTPQ_KRYLOV_M`,
 `ED_LANCZOS_COMPLEX_SEED`, `ED_LANCZOS_VERBOSE`, `ED_LANCZOS_REORTH_TILE`,
 `ED_LANCZOS_CHECKPOINT_DIR`, `ED_LANCZOS_CHECKPOINT_INTERVAL`,
-`ED_LANCZOS_RESUME`, `ED_GPU_MIXED_PRECISION_SPMV`), and the proposed
+`ED_LANCZOS_RESUME`, `ED_GPU_MIXED_PRECISION_SPMV`,
+`ED_NUMA_FIRST_TOUCH`, `ED_NUMA_PIN_THREADS`), and the proposed
 Phase-3a/3b/3c sequencing to lift the ceiling from 36 → 40 → 48 sites.
 
 (Q14 is the one-shot `clang-format -i` pass that depends on Q3 having landed first.)

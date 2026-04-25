@@ -3,6 +3,7 @@
 #include <ed/io/lanczos_basis_buffer.h>
 #include <ed/io/lanczos_checkpoint.h>
 #include <ed/io/lanczos_reorth.h>
+#include <ed/parallel/numa.h>
 #include <filesystem>
 #include <limits>
 #include <iomanip>
@@ -811,7 +812,17 @@ void lanczos_no_ortho(std::function<void(const Complex*, Complex*, int)> H, uint
     ComplexVector v_prev(N, Complex(0.0, 0.0));
     ComplexVector v_next(N);
     ComplexVector w(N);
-    
+
+    // NUMA first-touch + thread pinning (Phase 3a #4). Default-off; turning
+    // them on never changes numerical results, only DRAM page placement
+    // and thread affinity. Pin once per process before the first big OMP
+    // region; first-touch the basis-sized work vectors so each OMP thread
+    // owns the chunk it will later read in cblas_zaxpy / zdotc / zgemv.
+    ed::parallel::pin_omp_threads_once();
+    ed::parallel::first_touch_complex(v_prev.data(), N);
+    ed::parallel::first_touch_complex(v_next.data(), N);
+    ed::parallel::first_touch_complex(w.data(), N);
+
     // Initialize alpha and beta vectors for tridiagonal matrix
     std::vector<double> alpha;  // Diagonal elements
     std::vector<double> beta;   // Off-diagonal elements
@@ -971,7 +982,17 @@ void lanczos_selective_reorth(std::function<void(const Complex*, Complex*, int)>
     ComplexVector v_prev(N, Complex(0.0, 0.0));
     ComplexVector v_next(N);
     ComplexVector w(N);
-    
+
+    // NUMA first-touch + thread pinning (Phase 3a #4). Default-off; turning
+    // them on never changes numerical results, only DRAM page placement
+    // and thread affinity. Pin once per process before the first big OMP
+    // region; first-touch the basis-sized work vectors so each OMP thread
+    // owns the chunk it will later read in cblas_zaxpy / zdotc / zgemv.
+    ed::parallel::pin_omp_threads_once();
+    ed::parallel::first_touch_complex(v_prev.data(), N);
+    ed::parallel::first_touch_complex(v_next.data(), N);
+    ed::parallel::first_touch_complex(w.data(), N);
+
     // Initialize alpha and beta vectors for tridiagonal matrix
     std::vector<double> alpha;  // Diagonal elements
     std::vector<double> beta;   // Off-diagonal elements
@@ -1330,7 +1351,17 @@ void lanczos(std::function<void(const Complex*, Complex*, int)> H, uint64_t N, u
     ComplexVector v_prev(N, Complex(0.0, 0.0));
     ComplexVector v_next(N);
     ComplexVector w(N);
-    
+
+    // NUMA first-touch + thread pinning (Phase 3a #4). Default-off; turning
+    // them on never changes numerical results, only DRAM page placement
+    // and thread affinity. Pin once per process before the first big OMP
+    // region; first-touch the basis-sized work vectors so each OMP thread
+    // owns the chunk it will later read in cblas_zaxpy / zdotc / zgemv.
+    ed::parallel::pin_omp_threads_once();
+    ed::parallel::first_touch_complex(v_prev.data(), N);
+    ed::parallel::first_touch_complex(v_next.data(), N);
+    ed::parallel::first_touch_complex(w.data(), N);
+
     // Initialize alpha and beta vectors for tridiagonal matrix
     std::vector<double> alpha;  // Diagonal elements
     std::vector<double> beta;   // Off-diagonal elements

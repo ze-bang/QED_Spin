@@ -69,8 +69,46 @@ set(_ED_PUBLIC_INCLUDES
     "$<BUILD_INTERFACE:${INCLUDE_DIR}/ed/bfg>"
     "$<BUILD_INTERFACE:${INCLUDE_DIR}/ed/cli>"
     "$<BUILD_INTERFACE:${INCLUDE_DIR}/ed/symmetry>"
+    "$<BUILD_INTERFACE:${INCLUDE_DIR}/ed/parallel>"
     "$<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>"
 )
+
+# -----------------------------------------------------------------------------
+# ed_parallel: NUMA-aware first-touch + thread-pinning hooks (Phase 3a #4).
+#
+# Tiny utility library: a single TU that exposes
+# `ed::parallel::first_touch_complex` / `first_touch_bytes` /
+# `pin_omp_threads_once` / `describe_numa_state`. Both knobs are
+# DEFAULT-OFF (`ED_NUMA_FIRST_TOUCH`, `ED_NUMA_PIN_THREADS`); turning them
+# on never changes numerical results, only page placement and thread
+# affinity. Linked PUBLIC into ed_io and ed_solvers_cpu so the in-memory
+# basis tile loader (`lanczos_reorth.cpp`) and the Lanczos / FTLM /
+# selective-reorth entry points can call into the helpers without
+# pulling in an extra optional dep.
+#
+# Intentionally NO libnuma dependency: the first cut works on any Linux +
+# glibc + OpenMP system. Explicit `numa_alloc_onnode` / `mbind` placement
+# can be added later as a follow-up if profiling justifies it (would need
+# a `find_library(NUMA numa)` and a WITH_LIBNUMA option).
+# -----------------------------------------------------------------------------
+add_library(ed_parallel STATIC
+    ${PARALLEL_DIR}/numa.cpp
+)
+target_include_directories(ed_parallel PUBLIC ${_ED_PUBLIC_INCLUDES})
+if(OpenMP_CXX_FOUND)
+    target_link_libraries(ed_parallel PUBLIC OpenMP::OpenMP_CXX)
+endif()
+# pthread for pthread_setaffinity_np on Linux. Empty no-op on platforms
+# where pthreads isn't a separate library (most modern glibc setups link
+# it transitively, but be explicit so this archive is self-contained).
+find_package(Threads QUIET)
+if(Threads_FOUND)
+    target_link_libraries(ed_parallel PUBLIC Threads::Threads)
+endif()
+target_compile_options(ed_parallel PRIVATE
+    $<$<COMPILE_LANGUAGE:CXX>:${CPU_OPT_FLAGS}>
+)
+set_target_properties(ed_parallel PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
 # -----------------------------------------------------------------------------
 # ed_io: I/O helpers (basis vector / lanczos basis buffer)
@@ -82,7 +120,7 @@ add_library(ed_io STATIC
     ${IO_DIR}/lanczos_reorth.cpp
 )
 target_include_directories(ed_io PUBLIC ${_ED_PUBLIC_INCLUDES})
-target_link_libraries(ed_io PUBLIC ${ED_COMMON_LINK_LIBS})
+target_link_libraries(ed_io PUBLIC ed_parallel ${ED_COMMON_LINK_LIBS})
 target_link_libraries(ed_io PUBLIC
     "$<BUILD_INTERFACE:nlohmann_json::nlohmann_json>"
 )
@@ -129,7 +167,7 @@ endif()
 
 add_library(ed_solvers_cpu STATIC ${ED_SOLVERS_CPU_SOURCES})
 target_include_directories(ed_solvers_cpu PUBLIC ${_ED_PUBLIC_INCLUDES})
-target_link_libraries(ed_solvers_cpu PUBLIC ed_core ed_io ${ED_COMMON_LINK_LIBS})
+target_link_libraries(ed_solvers_cpu PUBLIC ed_core ed_io ed_parallel ${ED_COMMON_LINK_LIBS})
 target_link_libraries(ed_solvers_cpu PUBLIC
     "$<BUILD_INTERFACE:nlohmann_json::nlohmann_json>"
 )
