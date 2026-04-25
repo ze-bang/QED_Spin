@@ -1115,14 +1115,24 @@ schema with provenance and intermediate-state checkpointing.
 **What this codebase does NOT have** that blocks N ≥ 40 (the "Phase 3" gap):
 distributed-memory state vector for SpMV (the single biggest gap — every
 Lanczos / FTLM / TPQ / Krylov-Schur vector is `std::vector<Complex>` on one
-rank); multi-GPU NCCL Lanczos; checkpoint/restart of the Krylov state itself
-(α, β, last 2 vectors, RNG); out-of-core *blocked-tile reorthogonalization*
+rank); multi-GPU NCCL Lanczos; out-of-core *blocked-tile reorthogonalization*
 against the streamed basis; symmetry-projected basis indexing past ~2 × 10⁹
 states (current `unordered_map<uint64_t, ...>` cannot be materialized);
 NUMA-aware allocator + thread-pinning hooks; mixed-precision SpMV (FP32
 matvec + FP64 dot/normalize) — deferred from Batch 2; distributed FTLM/TPQ
 **imaginary-time evolution** (the per-sample work is local but the per-rank
 vector still has to fit).
+
+**Phase 3a #1 (Krylov-state checkpoint/restart) is now landed** —
+`include/ed/io/lanczos_checkpoint.h` + `src/io/lanczos_checkpoint.cpp`
+add an HDF5-backed snapshot of `(α, β, v_{k-1}, v_k, ring buffer, RNG,
+counters, convergence cache)` that the default `lanczos()` writes
+atomically every `ED_LANCZOS_CHECKPOINT_INTERVAL` iterations and resumes
+from on `ED_LANCZOS_RESUME=1`. Eigenvalue-only mode for now (Ritz-vector
+reconstruction needs the early basis vectors which a resumed run lacks);
+covered by four lockdown tests in
+`tests/unit/test_lanczos_checkpoint.cpp` (round-trip, atomic-rename,
+resume-vs-dense convergence, validation errors).
 
 See [`SCALING.md`](./SCALING.md) for the full memory tables, runtime regime
 notes, environment-variable controls (`ED_LANCZOS_DISK`, `ED_FTLM_PARALLEL`,

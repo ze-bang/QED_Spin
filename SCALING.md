@@ -83,8 +83,9 @@ needs `m` of them; full re-orth needs all `m` simultaneously addressable
     thread-safe (the default `Operator::apply` may share scratch buffers).
     Run samples serially or distribute them over MPI ranks via
     `mpirun -n R ./ED ftlm.cfg`.
-  * Multi-day wallclock. There is **no Krylov-state checkpoint/restart**
-    today — a node failure means starting Lanczos from zero. See §6.
+  * Multi-day wallclock. **Krylov-state checkpoint/restart is now
+    available** for the default `lanczos()` solver (Phase 3a #1, see §3
+    "Memory / disk strategy" knobs and §6).
 
 ### What does NOT work (period)
 
@@ -114,6 +115,9 @@ them in your run script, not mid-run.
 | `ED_LANCZOS_DISK` | `0` (in-memory) | If `1`/`true`/`yes`, the Krylov basis is spilled to a per-call working directory instead of registering in `lanczos_io::register_basis_buffer`. **Required for N≥36.** Costs disk I/O bandwidth per re-orth sweep; pair with NVMe. |
 | `ED_USE_SPARSE` | unset (auto) | `0` forces matrix-free SpMV always; `1` forces CSR assembly. The auto threshold is `dim ≤ 2²⁰` (~1 M states), see `Operator::apply`. **Never set `=1` for N≥28** — assembling a 10⁸-row CSR will OOM you. |
 | `ED_SPARSE_DIM_MAX` | `1<<20` | Custom dim cutoff for the sparse-vs-matrix-free dispatch. Raise carefully. |
+| `ED_LANCZOS_CHECKPOINT_DIR` | unset (off) | Directory for atomic Krylov-state checkpoints (Phase 3a #1, see `include/ed/io/lanczos_checkpoint.h`). When set, the default `lanczos()` writes `lanczos_checkpoint.h5` every `ED_LANCZOS_CHECKPOINT_INTERVAL` iterations and on the final iteration. Atomic write-then-rename, so a SIGKILL mid-write leaves the previous checkpoint intact. |
+| `ED_LANCZOS_CHECKPOINT_INTERVAL` | `100` | Iterations between checkpoint writes. Lower for faster crash recovery, higher to amortize HDF5 I/O on long runs (each write is ~22 N complex doubles). |
+| `ED_LANCZOS_RESUME` | `0` | If `1` and `ED_LANCZOS_CHECKPOINT_DIR` contains a checkpoint, `lanczos()` skips its random-vector init and resumes from `(α[0..k], β[0..k], v_{k-1}, v_k, ring buffer)`. **Eigenvalue-only mode** (`eigenvectors=false`) — eigenvector reconstruction needs the early basis vectors which a resumed run lacks; resuming with `eigenvectors=true` throws. |
 
 ### Numerics
 
@@ -223,10 +227,15 @@ Lanczos (m=50–100), and you average over R=10–100 i.i.d. random vectors.
 Single-node improvements. No new MPI. Goal: make N=36 routine and N=32
 publication-grade-fast on GPU.
 
-1. **Krylov-state checkpoint/restart.** Persist `(α[0..k], β[0..k], v_{k-1},
-   v_k, RNG state, iteration counter)` to HDF5 every M iterations and on
-   SIGTERM. Resume from `--restart` flag. This is the #1 ask from anyone
-   running multi-day jobs.
+1. **Krylov-state checkpoint/restart. — DONE (Phase 3a #1).** Persists
+   `(α[0..k], β[0..k], v_{k-1}, v_k, ring buffer, RNG state, iteration
+   counter, convergence cache)` to a single HDF5 file via atomic
+   write-then-rename. Activated by `ED_LANCZOS_CHECKPOINT_DIR=...`,
+   resumed via `ED_LANCZOS_RESUME=1`. Eigenvalue-only mode (the basis
+   vectors needed for Ritz-vector reconstruction would have to be
+   replicated separately, deferred to item #2). See
+   `include/ed/io/lanczos_checkpoint.h` and the four-test lockdown in
+   `tests/unit/test_lanczos_checkpoint.cpp`.
 2. **Out-of-core blocked-tile reorthogonalization.** Today, when
    `ED_LANCZOS_DISK=1`, the re-orth pass random-accesses the on-disk basis
    one vector at a time. Refactor to walk the basis in tiles of
@@ -313,8 +322,11 @@ ED. Until then, claim only what we can deliver.
 * That mixed precision is wired up. The `mixed_precision.cuh` header was
   deleted in Batch 2 (P1-9) precisely because it was a misleading stub.
   Real mixed precision is Phase 3a item #3.
-* That checkpoint/restart of Lanczos exists. *Intermediate observables* are
-  checkpointed via HDF5; the *Krylov state* is not. Phase 3a item #1.
+* That eigenvector reconstruction survives a Lanczos restart. The Krylov
+  state is now checkpointed (Phase 3a #1) but the per-iteration basis
+  vectors v_0..v_{k-1} required for Ritz-vector recomposition are not;
+  resuming with `eigenvectors=true` therefore throws. The eigenvalue-only
+  case (the common multi-day workhorse) does work end-to-end.
 
 ---
 

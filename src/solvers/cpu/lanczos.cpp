@@ -1,6 +1,7 @@
 #include <ed/solvers/lanczos.h>
 #include <ed/core/hdf5_io.h>
 #include <ed/io/lanczos_basis_buffer.h>
+#include <ed/io/lanczos_checkpoint.h>
 #include <filesystem>
 #include <limits>
 #include <iomanip>
@@ -1221,6 +1222,45 @@ void lanczos(std::function<void(const Complex*, Complex*, int)> H, uint64_t N, u
              double tol, std::vector<double>& eigenvalues, std::string dir,
              bool eigenvectors) {
 
+    // ===== Phase 3a #1: Krylov-state checkpoint / restart =====
+    // Off by default (zero overhead). Activated by ED_LANCZOS_CHECKPOINT_DIR;
+    // resume requested by ED_LANCZOS_RESUME=1. See
+    // include/ed/io/lanczos_checkpoint.h for the schema.
+    const bool ckpt_resume = lanczos_io::checkpoint_resume_requested();
+    const bool ckpt_write_enabled = lanczos_io::checkpoint_enabled();
+    const std::string ckpt_dir = lanczos_io::checkpoint_dir();
+    const uint64_t ckpt_interval = lanczos_io::checkpoint_interval();
+
+    // Eigenvector reconstruction reads basis vectors v_0..v_{m-1} from
+    // temp_dir. A resumed run does NOT have the early basis vectors; only
+    // the most recent two (v_prev, v_current) plus the ring buffer survive.
+    // Fail loud now rather than silently producing garbage later.
+    if (ckpt_resume && eigenvectors) {
+        throw std::runtime_error(
+            "Lanczos resume currently supports eigenvalue-only mode "
+            "(eigenvectors=false). Re-run without ED_LANCZOS_RESUME for "
+            "eigenvector reconstruction, or remove the checkpoint to start "
+            "fresh.");
+    }
+
+    lanczos_io::LanczosCheckpoint loaded_cp;
+    if (ckpt_resume) {
+        loaded_cp = lanczos_io::read_lanczos_checkpoint(ckpt_dir);
+        if (loaded_cp.N != N) {
+            throw std::runtime_error(
+                "Lanczos resume: checkpoint dim N=" +
+                std::to_string(loaded_cp.N) + " != requested N=" +
+                std::to_string(N));
+        }
+        if (loaded_cp.iteration >= std::min(N, max_iter)) {
+            std::cout << "Lanczos: checkpoint already at iteration "
+                      << loaded_cp.iteration
+                      << " >= max_iter=" << std::min(N, max_iter)
+                      << "; nothing to do, solving tridiagonal directly."
+                      << std::endl;
+        }
+    }
+
     // Initialize random starting vector.
     // Audit follow-up: when H is real, a complex starting vector causes every
     // Lanczos vector to be complex too, defeating the real-CSR/apply_real
@@ -1235,7 +1275,13 @@ void lanczos(std::function<void(const Complex*, Complex*, int)> H, uint64_t N, u
     ComplexVector v_current(N);
 
     const bool complex_seed = ed_use_complex_lanczos_seed();
-    if (complex_seed) {
+    if (ckpt_resume) {
+        // Resumed: state comes from the checkpoint, not from the RNG.
+        v_current = std::move(loaded_cp.v_current);
+        if (!loaded_cp.rng_state_text.empty()) {
+            lanczos_io::restore_mt19937_state(gen, loaded_cp.rng_state_text);
+        }
+    } else if (complex_seed) {
         for (int i = 0; i < N; i++) {
             v_current[i] = Complex(dist(gen), dist(gen));
         }
@@ -1245,7 +1291,9 @@ void lanczos(std::function<void(const Complex*, Complex*, int)> H, uint64_t N, u
         }
     }
 
-    // Normalize the starting vector
+    // Normalize the starting vector. (For a resumed run v_current is already
+    // unit-norm by construction, but we re-normalise to absorb any rounding
+    // drift across the on-disk round-trip.)
     double norm = cblas_dznrm2(N, v_current.data(), 1);
     Complex scale_factor = Complex(1.0/norm, 0.0);
     cblas_zscal(N, &scale_factor, v_current.data(), 1);
@@ -1255,9 +1303,13 @@ void lanczos(std::function<void(const Complex*, Complex*, int)> H, uint64_t N, u
     max_iter = std::min(N, max_iter);
     BasisBufferScope basis_scope(temp_dir, N, max_iter);
 
-    // Store the first basis vector
-    if (!write_basis_vector(temp_dir, 0, v_current, N)) {
-        return;
+    // Store the first basis vector. Skipped on resume because index 0 here
+    // would be v_K, not v_0 -- the basis store can only be reconstructed
+    // from a contiguous run.
+    if (!ckpt_resume) {
+        if (!write_basis_vector(temp_dir, 0, v_current, N)) {
+            return;
+        }
     }
     
     ComplexVector v_prev(N, Complex(0.0, 0.0));
@@ -1285,9 +1337,11 @@ void lanczos(std::function<void(const Complex*, Complex*, int)> H, uint64_t N, u
     const uint64_t max_recent = std::min(static_cast<uint64_t>(20), N);
     std::vector<ComplexVector> recent_vectors;
     recent_vectors.reserve(max_recent);
-    recent_vectors.push_back(v_current);
     uint64_t ring_head = 0;            // index of oldest stored vector
     uint64_t ring_count = 1;           // number of valid stored vectors
+    if (!ckpt_resume) {
+        recent_vectors.push_back(v_current);
+    }
 
     // Monitoring counters
     uint64_t total_reorth_count = 0;
@@ -1297,12 +1351,54 @@ void lanczos(std::function<void(const Complex*, Complex*, int)> H, uint64_t N, u
     std::vector<double> prev_eigenvalues;
     const int check_convergence_interval = 10;  // Check every 10 iterations
     bool eigenvalues_converged = false;
-    
+
+    // Loop start index. 0 for a fresh run; cp.iteration for a resumed run.
+    int j_start = 0;
+
+    if (ckpt_resume) {
+        // Restore tridiagonal entries.
+        alpha = std::move(loaded_cp.alpha);
+        beta  = std::move(loaded_cp.beta);
+        v_prev = std::move(loaded_cp.v_prev);
+
+        // Restore ring buffer with the original (head, count) convention so
+        // the modular indexing in the re-orth pass matches.
+        recent_vectors = std::move(loaded_cp.ring_vectors);
+        ring_head  = loaded_cp.ring_head;
+        ring_count = recent_vectors.size();
+        if (recent_vectors.empty()) {
+            // Defensive: every checkpoint should have at least v_current in
+            // the ring. Re-seed with v_current so the local-reorth pass at
+            // j=cp.iteration projects against at least one vector.
+            recent_vectors.push_back(v_current);
+            ring_head = 0;
+            ring_count = 1;
+        }
+
+        total_reorth_count = loaded_cp.total_reorth_count;
+        selective_reorth_count = loaded_cp.selective_reorth_count;
+        prev_eigenvalues = std::move(loaded_cp.prev_eigenvalues);
+        eigenvalues_converged = loaded_cp.eigenvalues_converged;
+
+        j_start = static_cast<int>(loaded_cp.iteration);
+        std::cout << "Lanczos: RESUMING from checkpoint at iteration "
+                  << j_start << " (last beta=" << std::scientific
+                  << std::setprecision(4) << loaded_cp.last_w_norm
+                  << std::defaultfloat << ", ring_count=" << ring_count
+                  << ")" << std::endl;
+    }
+
     std::cout << "Lanczos: max_iter=" << max_iter << ", n_eig=" << exct 
-              << ", tol=" << tol << std::endl;
+              << ", tol=" << tol;
+    if (ckpt_resume) std::cout << " (resuming from j=" << j_start << ")";
+    if (ckpt_write_enabled) {
+        std::cout << " [checkpoint every " << ckpt_interval
+                  << " iters → " << ckpt_dir << "]";
+    }
+    std::cout << std::endl;
     
     // Lanczos iteration
-    for (int j = 0; j < max_iter; j++) {
+    for (int j = j_start; j < max_iter; j++) {
         // w = H*v_j
         H(v_current.data(), w.data(), N);
         
@@ -1444,8 +1540,11 @@ void lanczos(std::function<void(const Complex*, Complex*, int)> H, uint64_t N, u
             ring_head = (ring_head + 1) % max_recent;
         }
         
-        // Store basis vector to file
-        if (j < max_iter - 1) {
+        // Store basis vector to file. Skipped on a resumed run because the
+        // index would not be contiguous from 0 (we'd be writing v_{K+1} at
+        // index K+1 with no v_0..v_K available); the resumed run is
+        // eigenvalue-only by contract (see the throw at function entry).
+        if (!ckpt_resume && j < max_iter - 1) {
             if (!write_basis_vector(temp_dir, j+1, v_next, N)) {
                 return;
             }
@@ -1454,6 +1553,47 @@ void lanczos(std::function<void(const Complex*, Complex*, int)> H, uint64_t N, u
         // Update for next iteration
         v_prev = v_current;
         v_current = v_next;
+
+        // ===== Phase 3a #1: periodic checkpoint write =====
+        // After this point all state for "iteration j+1 complete" is
+        // consistent: alpha[0..j], beta[0..j+1], v_prev=v_j, v_current=v_{j+1},
+        // ring buffer updated. Write atomically every ckpt_interval iters,
+        // and once more on the final iteration so a follow-up run with a
+        // larger max_iter can pick up where this one left off.
+        const bool last_iter = (j + 1 == static_cast<int>(max_iter));
+        if (ckpt_write_enabled &&
+            ((static_cast<uint64_t>(j + 1) % ckpt_interval == 0) || last_iter)) {
+            lanczos_io::LanczosCheckpoint cp;
+            cp.N = N;
+            cp.max_iter = max_iter;
+            cp.exct = exct;
+            cp.tol = tol;
+            cp.complex_seed = complex_seed;
+            cp.iteration = static_cast<uint64_t>(j + 1);
+            cp.alpha = alpha;
+            cp.beta  = beta;
+            cp.v_prev = v_prev;
+            cp.v_current = v_current;
+            // Emit the ring buffer in storage order; readers reconstruct the
+            // (head, count) modular indexing via ring_head.
+            cp.ring_vectors = recent_vectors;
+            cp.ring_head = ring_head;
+            cp.rng_state_text = lanczos_io::capture_mt19937_state(gen);
+            cp.total_reorth_count = total_reorth_count;
+            cp.selective_reorth_count = selective_reorth_count;
+            cp.prev_eigenvalues = prev_eigenvalues;
+            cp.eigenvalues_converged = eigenvalues_converged;
+            cp.last_w_norm = beta.back();
+            try {
+                lanczos_io::write_lanczos_checkpoint(ckpt_dir, cp);
+            } catch (const std::exception& e) {
+                // Don't kill the solver over a checkpoint I/O failure;
+                // the user can still recover the eigenvalues from this
+                // run. Log loudly so the failure isn't missed.
+                std::cerr << "[lanczos] checkpoint write failed at iter "
+                          << (j + 1) << ": " << e.what() << std::endl;
+            }
+        }
     }
     
     // Construct and solve tridiagonal matrix
