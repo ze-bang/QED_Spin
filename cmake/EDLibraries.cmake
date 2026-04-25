@@ -335,6 +335,7 @@ if(WITH_CUDA)
         ${SOLVERS_GPU_DIR}/lobpcg_eigen_solve.cpp
         ${SOLVERS_GPU_DIR}/gpu_dynamics.cu
         ${SOLVERS_GPU_DIR}/gpu_ftlm.cu
+        ${SOLVERS_GPU_DIR}/gpu_mixed_precision.cu
     )
 
     add_library(ed_solvers_gpu STATIC ${ED_SOLVERS_GPU_SOURCES})

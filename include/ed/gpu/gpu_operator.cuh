@@ -290,6 +290,36 @@ protected:
     void applyCusparse(const cuDoubleComplex* d_x, cuDoubleComplex* d_y, int N,
                        cudaStream_t stream = 0);
 
+    // ------------------------------------------------------------------------
+    // Mixed-precision FP32 CSR cache (Phase 3a #3).
+    // See include/ed/gpu/gpu_mixed_precision.h for the design rationale and
+    // the env knob that gates the FP32 path.
+    //
+    // Built lazily by buildCsrFp32OnDevice() the first time applyCusparse()
+    // is asked to use the mixed-precision path. Aliases the integer index
+    // arrays of the FP64 CSR (d_csr_row_offsets_ / d_csr_col_idx_); only
+    // d_csr_values_fp32_ is a fresh FP32 copy of d_csr_values_.
+    //
+    // Workspace vectors d_x_fp32_workspace_ / d_y_fp32_workspace_ are
+    // allocated to length csr_dim_fp32_ at build time and reused on every
+    // mixed-precision SpMV call.
+    // ------------------------------------------------------------------------
+    bool buildCsrFp32OnDevice(int N);
+    void freeCsrFp32DeviceData();
+    void applyCusparseMixed(const cuDoubleComplex* d_x, cuDoubleComplex* d_y,
+                            int N, cudaStream_t stream = 0);
+
+    cuFloatComplex*       d_csr_values_fp32_       = nullptr;
+    cuFloatComplex*       d_x_fp32_workspace_      = nullptr;
+    cuFloatComplex*       d_y_fp32_workspace_      = nullptr;
+    cusparseSpMatDescr_t  csr_descr_fp32_          = nullptr;
+    cusparseDnVecDescr_t  vec_x_descr_fp32_        = nullptr;
+    cusparseDnVecDescr_t  vec_y_descr_fp32_        = nullptr;
+    void*                 cusparse_workspace_fp32_ = nullptr;
+    size_t                cusparse_workspace_bytes_fp32_ = 0;
+    int                   csr_dim_fp32_            = 0;
+    bool                  fp32_csr_assembled_      = false;
+
     // CSR storage on device (column-flattened: row_offsets[N+1], col_idx[nnz],
     // values[nnz]). Owned by this object.
     int*               d_csr_row_offsets_ = nullptr;
@@ -407,6 +437,18 @@ void ensure_pascal_uploaded();
 
 // State lookup (binary search)
 __device__ int lookupState(uint64_t state, const void* basis_states_ptr, int num_states);
+
+// ============================================================================
+// MIXED-PRECISION CAST KERNELS (Phase 3a #3)
+// Element-wise FP64 <-> FP32 complex casts used by the mixed-precision
+// SpMV path (see include/ed/gpu/gpu_mixed_precision.h).
+// ============================================================================
+__global__ void castDoubleToFloatComplex(const cuDoubleComplex* in,
+                                         cuFloatComplex* out, int N);
+__global__ void castFloatToDoubleComplex(const cuFloatComplex* in,
+                                         cuDoubleComplex* out, int N);
+__global__ void castDoubleToFloatComplexValues(const cuDoubleComplex* in,
+                                               cuFloatComplex* out, int64_t nnz);
 
 // ============================================================================
 // BRANCH-FREE KERNELS (v2 optimization)

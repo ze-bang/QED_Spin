@@ -4,6 +4,7 @@
 #define CONSTRUCT_HAM_H  
 
 #include <ed/gpu/gpu_operator.cuh>
+#include <ed/gpu/gpu_mixed_precision.h>
 #include <iostream>
 #include <fstream>
 #include <sstream>
@@ -847,6 +848,12 @@ void GPUOperator::matVecGPUAsync(const cuDoubleComplex* d_x, cuDoubleComplex* d_
 // ============================================================================
 
 void GPUOperator::freeCsrDeviceData() {
+    // Mixed-precision (Phase 3a #3) cache aliases the FP64 row/col index
+    // arrays. Tear it down FIRST so its descriptors don't outlive the
+    // arrays they reference. The FP32 helper itself only frees the
+    // value-array + descriptors + workspace, not the shared int arrays.
+    freeCsrFp32DeviceData();
+
     if (vec_x_descr_) { cusparseDestroyDnVec(vec_x_descr_); vec_x_descr_ = nullptr; }
     if (vec_y_descr_) { cusparseDestroyDnVec(vec_y_descr_); vec_y_descr_ = nullptr; }
     if (csr_descr_)   { cusparseDestroySpMat(csr_descr_);   csr_descr_   = nullptr; }
@@ -861,6 +868,154 @@ void GPUOperator::freeCsrDeviceData() {
     csr_nnz_ = 0;
     csr_dim_ = 0;
     csr_assembled_ = false;
+}
+
+// ----------------------------------------------------------------------------
+// Mixed-precision FP32 CSR cache (Phase 3a #3)
+// See include/ed/gpu/gpu_mixed_precision.h for the design rationale.
+// ----------------------------------------------------------------------------
+
+void GPUOperator::freeCsrFp32DeviceData() {
+    if (vec_x_descr_fp32_) { cusparseDestroyDnVec(vec_x_descr_fp32_); vec_x_descr_fp32_ = nullptr; }
+    if (vec_y_descr_fp32_) { cusparseDestroyDnVec(vec_y_descr_fp32_); vec_y_descr_fp32_ = nullptr; }
+    if (csr_descr_fp32_)   { cusparseDestroySpMat(csr_descr_fp32_);   csr_descr_fp32_   = nullptr; }
+    if (cusparse_workspace_fp32_) {
+        cudaFree(cusparse_workspace_fp32_);
+        cusparse_workspace_fp32_ = nullptr;
+        cusparse_workspace_bytes_fp32_ = 0;
+    }
+    if (d_csr_values_fp32_) {
+        cudaFree(d_csr_values_fp32_);
+        d_csr_values_fp32_ = nullptr;
+    }
+    if (d_x_fp32_workspace_) {
+        cudaFree(d_x_fp32_workspace_);
+        d_x_fp32_workspace_ = nullptr;
+    }
+    if (d_y_fp32_workspace_) {
+        cudaFree(d_y_fp32_workspace_);
+        d_y_fp32_workspace_ = nullptr;
+    }
+    csr_dim_fp32_ = 0;
+    fp32_csr_assembled_ = false;
+}
+
+bool GPUOperator::buildCsrFp32OnDevice(int N) {
+    // Fast path: cache is already valid for this N.
+    if (fp32_csr_assembled_ && csr_dim_fp32_ == N) return true;
+
+    // The FP32 cache derives from the FP64 cache; the caller must have
+    // built the FP64 CSR before requesting the FP32 path. selectKernelPathway
+    // builds the FP64 CSR for any pathway that decides on CUSPARSE_CSR, so
+    // by the time we get here through applyCusparse the FP64 CSR exists.
+    if (!csr_assembled_ || csr_dim_ != N) return false;
+
+    // Tear down any stale FP32 cache (different N, etc.).
+    freeCsrFp32DeviceData();
+
+    // Allocate the FP32 value array and run the cast. nnz can exceed
+    // INT_MAX on very big sectors, so we use the int64 launcher.
+    CUDA_CHECK(cudaMalloc(&d_csr_values_fp32_,
+                          csr_nnz_ * sizeof(cuFloatComplex)));
+    {
+        const int threads = 256;
+        const int64_t blocks_i64 = (csr_nnz_ + threads - 1) / threads;
+        // CUDA grid x-dim limit is 2^31-1; for csr_nnz_ > that we'd need
+        // multi-launch. At spin-1/2 this corresponds to dim ~ 10^11 which
+        // is far beyond what fits on a single GPU anyway, so we just
+        // assert we're below the limit.
+        if (blocks_i64 > static_cast<int64_t>(2147483647)) {
+            std::cerr << "GPUOperator: FP32 CSR build skipped, nnz too large\n";
+            cudaFree(d_csr_values_fp32_);
+            d_csr_values_fp32_ = nullptr;
+            return false;
+        }
+        const int blocks = static_cast<int>(blocks_i64);
+        GPUKernels::castDoubleToFloatComplexValues<<<blocks, threads>>>(
+            d_csr_values_, d_csr_values_fp32_, csr_nnz_);
+        CUDA_CHECK(cudaGetLastError());
+    }
+
+    // FP32 CSR descriptor *aliases* the FP64 row/col index arrays. cuSPARSE
+    // does not own these pointers; freeCsrDeviceData() drives the lifetime.
+    CUSPARSE_CHECK(cusparseCreateCsr(&csr_descr_fp32_,
+        /*rows=*/N, /*cols=*/N, csr_nnz_,
+        d_csr_row_offsets_, d_csr_col_idx_, d_csr_values_fp32_,
+        CUSPARSE_INDEX_32I, CUSPARSE_INDEX_32I,
+        CUSPARSE_INDEX_BASE_ZERO, CUDA_C_32F));
+
+    CUSPARSE_CHECK(cusparseCreateDnVec(&vec_x_descr_fp32_, N, nullptr, CUDA_C_32F));
+    CUSPARSE_CHECK(cusparseCreateDnVec(&vec_y_descr_fp32_, N, nullptr, CUDA_C_32F));
+
+    // Permanent FP32 workspaces (one matvec's worth).
+    CUDA_CHECK(cudaMalloc(&d_x_fp32_workspace_, N * sizeof(cuFloatComplex)));
+    CUDA_CHECK(cudaMalloc(&d_y_fp32_workspace_, N * sizeof(cuFloatComplex)));
+
+    cuFloatComplex alpha32 = make_cuFloatComplex(1.0f, 0.0f);
+    cuFloatComplex beta32  = make_cuFloatComplex(0.0f, 0.0f);
+    CUSPARSE_CHECK(cusparseSpMV_bufferSize(cusparse_handle_,
+        CUSPARSE_OPERATION_NON_TRANSPOSE,
+        &alpha32, csr_descr_fp32_, vec_x_descr_fp32_, &beta32, vec_y_descr_fp32_,
+        CUDA_C_32F, CUSPARSE_SPMV_CSR_ALG2, &cusparse_workspace_bytes_fp32_));
+
+    if (cusparse_workspace_bytes_fp32_ > 0) {
+        CUDA_CHECK(cudaMalloc(&cusparse_workspace_fp32_,
+                              cusparse_workspace_bytes_fp32_));
+    }
+
+    csr_dim_fp32_ = N;
+    fp32_csr_assembled_ = true;
+
+    std::cout << "GPUOperator: FP32 CSR built (mixed-precision SpMV), dim="
+              << N << ", nnz=" << csr_nnz_
+              << " (values " << (csr_nnz_ * sizeof(cuFloatComplex) /
+                                 (1024.0 * 1024.0))
+              << " MB, workspace=" << (cusparse_workspace_bytes_fp32_ / 1024.0)
+              << " KB)\n";
+    return true;
+}
+
+void GPUOperator::applyCusparseMixed(const cuDoubleComplex* d_x,
+                                     cuDoubleComplex* d_y,
+                                     int N, cudaStream_t stream) {
+    // Cast x: FP64 -> FP32 into the persistent workspace.
+    {
+        const int threads = 256;
+        const int blocks  = (N + threads - 1) / threads;
+        GPUKernels::castDoubleToFloatComplex<<<blocks, threads, 0, stream>>>(
+            d_x, d_x_fp32_workspace_, N);
+        CUDA_CHECK(cudaGetLastError());
+    }
+
+    // Bind FP32 vectors to the FP32 descriptors.
+    CUSPARSE_CHECK(cusparseDnVecSetValues(vec_x_descr_fp32_,
+                                          d_x_fp32_workspace_));
+    CUSPARSE_CHECK(cusparseDnVecSetValues(vec_y_descr_fp32_,
+                                          d_y_fp32_workspace_));
+
+    if (stream) {
+        CUSPARSE_CHECK(cusparseSetStream(cusparse_handle_, stream));
+    }
+
+    cuFloatComplex alpha32 = make_cuFloatComplex(1.0f, 0.0f);
+    cuFloatComplex beta32  = make_cuFloatComplex(0.0f, 0.0f);
+    CUSPARSE_CHECK(cusparseSpMV(cusparse_handle_,
+        CUSPARSE_OPERATION_NON_TRANSPOSE,
+        &alpha32, csr_descr_fp32_, vec_x_descr_fp32_, &beta32, vec_y_descr_fp32_,
+        CUDA_C_32F, CUSPARSE_SPMV_CSR_ALG2, cusparse_workspace_fp32_));
+
+    if (stream) {
+        CUSPARSE_CHECK(cusparseSetStream(cusparse_handle_, 0));
+    }
+
+    // Cast y: FP32 -> FP64 (Lanczos / FTLM dot-product etc. continue in FP64).
+    {
+        const int threads = 256;
+        const int blocks  = (N + threads - 1) / threads;
+        GPUKernels::castFloatToDoubleComplex<<<blocks, threads, 0, stream>>>(
+            d_y_fp32_workspace_, d_y, N);
+        CUDA_CHECK(cudaGetLastError());
+    }
 }
 
 bool GPUOperator::buildCsrOnDevice(int N) {
@@ -1073,6 +1228,18 @@ bool GPUOperator::buildCsrOnDevice(int N) {
 
 void GPUOperator::applyCusparse(const cuDoubleComplex* d_x, cuDoubleComplex* d_y,
                                 int N, cudaStream_t stream) {
+    // Mixed-precision routing (Phase 3a #3). When ED_GPU_MIXED_PRECISION_SPMV
+    // is set, lazily build the FP32 CSR cache on first call and route through
+    // applyCusparseMixed. If the FP32 build fails (out of memory, nnz too
+    // large) we silently fall back to FP64 -- the env knob requests but does
+    // not force.
+    if (ed::gpu::gpu_mixed_precision_spmv_enabled()) {
+        if (buildCsrFp32OnDevice(N)) {
+            applyCusparseMixed(d_x, d_y, N, stream);
+            return;
+        }
+    }
+
     // Bind I/O vectors to the cached descriptors. cusparseDnVecSetValues is
     // O(1) -- it just patches the pointer in the opaque descriptor.
     CUSPARSE_CHECK(cusparseDnVecSetValues(vec_x_descr_, const_cast<cuDoubleComplex*>(d_x)));

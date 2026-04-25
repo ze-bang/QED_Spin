@@ -1117,8 +1117,10 @@ distributed-memory state vector for SpMV (the single biggest gap — every
 Lanczos / FTLM / TPQ / Krylov-Schur vector is `std::vector<Complex>` on one
 rank); multi-GPU NCCL Lanczos; symmetry-projected basis indexing past ~2 × 10⁹
 states (current `unordered_map<uint64_t, ...>` cannot be materialized);
-NUMA-aware allocator + thread-pinning hooks; mixed-precision SpMV (FP32
-matvec + FP64 dot/normalize) — deferred from Batch 2; distributed FTLM/TPQ
+NUMA-aware allocator + thread-pinning hooks; FP32 matrix-free SpMV (Phase 3a #3
+covered the cuSPARSE CSR pathway only — kernel-templated FP32 versions of
+the WARP_REDUCTION / BRANCH_FREE_SCATTER / SHARED_MEMORY paths and the
+fixed-Sz / symmetrized operators are deferred); distributed FTLM/TPQ
 **imaginary-time evolution** (the per-sample work is local but the per-rank
 vector still has to fit).
 
@@ -1148,13 +1150,32 @@ covered by seven lockdown tests in `tests/unit/test_lanczos_reorth.cpp`
 in-memory and on-disk tile loading, end-to-end tile-size invariance for
 `lanczos_selective_reorth` across `B ∈ {1, 4, 16}`, knob clamping).
 
+**Phase 3a #3 (mixed-precision FP32 cuSPARSE SpMV with FP64 outer Krylov
+ops) is now landed** — `include/ed/gpu/gpu_mixed_precision.h` +
+`src/solvers/gpu/gpu_mixed_precision.cu` add the `ED_GPU_MIXED_PRECISION_SPMV`
+env knob; `GPUOperator` gains a lazily-built FP32 CSR cache
+(`d_csr_values_fp32_`, `csr_descr_fp32_`, FP32 dn-vec workspaces) that
+shares the FP64 row/col index arrays. On every `applyCusparse` we cast
+the FP64 input to FP32, run `cusparseSpMV` with `CUDA_C_32F`, and cast
+back to FP64 — outer Lanczos / FTLM dot/normalize/axpy stay in FP64 so
+global orthogonality is preserved at the FP64 backward bound. Halves the
+SpMV value-array bandwidth on memory-bound matvec; ground-state Lanczos
+converges to within 1e-5 of the FP64 result on the lockdown tests at
+the cost of ≤2 extra Krylov iterations. Scope is the cuSPARSE CSR
+pathway only — matrix-free WARP_REDUCTION / BRANCH_FREE_SCATTER /
+SHARED_MEMORY kernels and the symmetrized / fixed-Sz operators stay
+FP64. Covered by two GPU lockdown tests in
+`tests/unit/test_gpu_mixed_precision_spmv.cpp` (H*v rel L2 < 5e-6 at
+N=10 Heisenberg PBC; ground-state Lanczos eigenvalue within 1e-5 of the
+dense reference at N=8).
+
 See [`SCALING.md`](./SCALING.md) for the full memory tables, runtime regime
 notes, environment-variable controls (`ED_LANCZOS_DISK`, `ED_FTLM_PARALLEL`,
 `ED_GPU_TIMING`, `ED_USE_SPARSE`, `ED_SPARSE_DIM_MAX`,
 `ED_GPU_ALLOW_DROPPED_THREEBODY`, `ED_CTPQ_PROPAGATOR`, `ED_CTPQ_KRYLOV_M`,
 `ED_LANCZOS_COMPLEX_SEED`, `ED_LANCZOS_VERBOSE`, `ED_LANCZOS_REORTH_TILE`,
 `ED_LANCZOS_CHECKPOINT_DIR`, `ED_LANCZOS_CHECKPOINT_INTERVAL`,
-`ED_LANCZOS_RESUME`), and the proposed
+`ED_LANCZOS_RESUME`, `ED_GPU_MIXED_PRECISION_SPMV`), and the proposed
 Phase-3a/3b/3c sequencing to lift the ceiling from 36 → 40 → 48 sites.
 
 (Q14 is the one-shot `clang-format -i` pass that depends on Q3 having landed first.)

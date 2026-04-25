@@ -714,6 +714,8 @@ if(BUILD_ED_TESTS)
     # -------------------------------------------------------------------------
     if(WITH_CUDA)
         ed_add_test(test_cpu_gpu_equivalence    tests/unit/test_cpu_gpu_equivalence.cpp USE_CATCH2)
+        # Phase 3a #3: FP32 cuSPARSE SpMV + FP64 dot/norm/axpy mixed-precision path.
+        ed_add_test(test_gpu_mixed_precision_spmv tests/unit/test_gpu_mixed_precision_spmv.cpp USE_CATCH2)
     endif()
 
     # Regression test of the on-disk fallback path for the Lanczos basis

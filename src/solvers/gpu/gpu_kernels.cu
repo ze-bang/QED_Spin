@@ -1133,6 +1133,46 @@ __global__ void matVecSymmetrized(
     atomicAddDouble(&((double*)&y[k])[1], cuCimag(contrib));
 }
 
+// ============================================================================
+// MIXED-PRECISION CAST KERNELS (Phase 3a #3)
+//
+// These are tight, embarrassingly parallel element-wise casts. They run on
+// the same stream as the surrounding cuSPARSE call, so no host-side sync
+// is needed: GPU ordering on the stream guarantees the cast completes
+// before cusparseSpMV reads the FP32 input vector.
+// ============================================================================
+__global__ void castDoubleToFloatComplex(const cuDoubleComplex* in,
+                                         cuFloatComplex* out, int N) {
+    const int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= N) return;
+    const cuDoubleComplex z = in[idx];
+    out[idx] = make_cuFloatComplex(static_cast<float>(cuCreal(z)),
+                                   static_cast<float>(cuCimag(z)));
+}
+
+__global__ void castFloatToDoubleComplex(const cuFloatComplex* in,
+                                         cuDoubleComplex* out, int N) {
+    const int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= N) return;
+    const cuFloatComplex z = in[idx];
+    out[idx] = make_cuDoubleComplex(static_cast<double>(cuCrealf(z)),
+                                    static_cast<double>(cuCimagf(z)));
+}
+
+// Same kernel as castDoubleToFloatComplex but with int64 length so we can
+// process the full nnz (which can exceed INT_MAX on big sectors). Kept
+// distinct so the per-vector launch (where N fits in int) doesn't pay
+// the 64-bit index arithmetic on every thread.
+__global__ void castDoubleToFloatComplexValues(const cuDoubleComplex* in,
+                                               cuFloatComplex* out, int64_t nnz) {
+    const int64_t idx =
+        static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (idx >= nnz) return;
+    const cuDoubleComplex z = in[idx];
+    out[idx] = make_cuFloatComplex(static_cast<float>(cuCreal(z)),
+                                   static_cast<float>(cuCimag(z)));
+}
+
 } // namespace GPUKernels
 
 #endif // WITH_CUDA

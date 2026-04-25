@@ -119,6 +119,7 @@ them in your run script, not mid-run.
 | `ED_LANCZOS_CHECKPOINT_INTERVAL` | `100` | Iterations between checkpoint writes. Lower for faster crash recovery, higher to amortize HDF5 I/O on long runs (each write is ~22 N complex doubles). |
 | `ED_LANCZOS_RESUME` | `0` | If `1` and `ED_LANCZOS_CHECKPOINT_DIR` contains a checkpoint, `lanczos()` skips its random-vector init and resumes from `(α[0..k], β[0..k], v_{k-1}, v_k, ring buffer)`. **Eigenvalue-only mode** (`eigenvectors=false`) — eigenvector reconstruction needs the early basis vectors which a resumed run lacks; resuming with `eigenvectors=true` throws. |
 | `ED_LANCZOS_REORTH_TILE` | `16` | Tile size `B` (in basis vectors) for the blocked-CGS reorthogonalization in `lanczos` and `lanczos_selective_reorth` (Phase 3a #2, see `include/ed/io/lanczos_reorth.h`). Each tile collapses `B` BLAS-1 `zdotc` + `zaxpy` pairs into two BLAS-2 `zgemv` calls, cutting per-iter file-open overhead by `B×` in disk mode. Clamped to `[1, 256]`; raise on machines with large L2/L3 (working set is `B × N` complex doubles), drop to `1` for the legacy per-vector behaviour. |
+| `ED_GPU_MIXED_PRECISION_SPMV` | unset (off) | If `1`/`true`/`yes`, `GPUOperator::applyCusparse` runs the cuSPARSE SpMV in FP32 (`CUDA_C_32F`) instead of FP64 (Phase 3a #3, see `include/ed/gpu/gpu_mixed_precision.h`). Halves the value-array bandwidth on memory-bound matvec; outer Lanczos / FTLM dot / normalize / axpy stay in FP64 so orthogonality is preserved. Only takes effect on the CSR pathway (`N ≥ ED_GPU_CUSPARSE_MIN_DIM`); matrix-free pathways and symmetrized / fixed-Sz operators silently stay FP64. |
 
 ### Numerics
 
@@ -255,11 +256,31 @@ publication-grade-fast on GPU.
    on-disk tile loading, end-to-end tile-size invariance for
    `lanczos_selective_reorth` across `B ∈ {1, 4, 16}`, and knob
    clamping).
-3. **Mixed-precision SpMV (FP32 matvec + FP64 dot/normalize)** on GPU.
-   Deferred from Batch 2 (P1-9). 1.7–2× speedup on
-   memory-bandwidth-bound matvec at the cost of one extra Krylov iteration
-   to compensate for the lower-precision intermediates. Easiest big win we
-   are leaving on the table.
+3. **Mixed-precision SpMV (FP32 matvec + FP64 dot/normalize) on GPU. —
+   DONE (Phase 3a #3).** When `ED_GPU_MIXED_PRECISION_SPMV=1` is set and
+   the cuSPARSE CSR pathway is selected (`N ≥ ED_GPU_CUSPARSE_MIN_DIM`,
+   default 32768), `GPUOperator::applyCusparse` lazily builds an FP32
+   copy of the CSR value array (sharing the FP64 row/col index arrays),
+   casts the FP64 input vector to FP32 with a tiny element-wise kernel,
+   runs `cusparseSpMV` with `CUDA_C_32F`, and casts the FP32 output back
+   to FP64. The Lanczos / FTLM outer dot/norm/axpy stay in FP64 (cuBLAS
+   `cublasZdotc` / `cublasZdscal` / `cublasZaxpy` on FP64 vectors), so
+   global orthogonality is preserved at FP64 precision. Halves the
+   value-array bandwidth on a memory-bound SpMV; ground-state Lanczos
+   eigenvalues converge to within 1e-5 of the FP64 result on the lockdown
+   tests at the cost of ≤2 extra Krylov iterations. New files:
+   `include/ed/gpu/gpu_mixed_precision.h`,
+   `src/solvers/gpu/gpu_mixed_precision.cu`, plus the FP32 CSR cache
+   members on `GPUOperator` (`d_csr_values_fp32_`, `csr_descr_fp32_`,
+   workspace vectors); covered by two GPU lockdown tests in
+   `tests/unit/test_gpu_mixed_precision_spmv.cpp` (H*v rel L2 < 5e-6 on
+   N=10 Heisenberg PBC, ground-state Lanczos eigenvalue within 1e-5 of
+   the dense reference at N=8). **Scope of this landing:** only the
+   cuSPARSE CSR pathway; matrix-free WARP_REDUCTION /
+   BRANCH_FREE_SCATTER / SHARED_MEMORY pathways stay FP64 (kernel
+   templating for FP32 matrix-free is a separate, larger job and is
+   deferred). Symmetrized / fixed-Sz operators do not currently build a
+   CSR and so silently stay FP64.
 4. **NUMA-aware first-touch allocator + thread-pinning hooks.** On a
    4-socket node the difference between "OS scheduler decides" and
    "first-touch on the rank that owns the slice" is 30–50% on SpMV.
