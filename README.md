@@ -104,6 +104,15 @@ A full distributed (MPI) ground state on a 24-site chain:
 mpiexec -n 4 ./build/examples/ex05_mpi_distributed_lanczos
 ```
 
+The legacy production workflow — Python `edlib` helper writes `InterAll.dat`,
+`Trans.dat`, `positions.dat` into a directory; `./ED <directory>` consumes
+them; results land in `<directory>/output/ed_results.h5` — is fully
+preserved alongside these new in-process modes. For a comprehensive
+catalogue of every supported invocation pattern (legacy directory →
+binary, config files, `ED dssf` subcommand, `quantum_ed` Python API, NLCE
+pipeline, distributed MPI driver, raw C++ linkage) see
+[`docs/guides/usage.md`](docs/guides/usage.md).
+
 ---
 
 ## Examples
@@ -193,6 +202,7 @@ exact_diagonalization_cpp/
 | Install everything | [`docs/guides/install.md`](docs/guides/install.md) |
 | Get a 5-minute C++ tour | [`docs/guides/quickstart.md`](docs/guides/quickstart.md) |
 | Get a 5-minute Python tour | [`docs/guides/python_quickstart.md`](docs/guides/python_quickstart.md) |
+| See **every way** the toolkit can be invoked (legacy `edlib → ./ED`, configs, `dssf` subcommand, `quantum_ed`, NLCE, MPI, raw C++) | [`docs/guides/usage.md`](docs/guides/usage.md) |
 | Pick the right solver | [`docs/architecture/IMPLEMENTATION_REPORT.md`](docs/architecture/IMPLEMENTATION_REPORT.md) |
 | Understand performance ceilings | [`docs/architecture/SCALING.md`](docs/architecture/SCALING.md) |
 | Reproduce the published numbers | [`docs/benchmarks/BENCHMARKS.md`](docs/benchmarks/BENCHMARKS.md) |
