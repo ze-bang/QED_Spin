@@ -50,6 +50,7 @@
 #include <ed/distributed/distributed_ftlm.h>
 #include <ed/distributed/distributed_lanczos.h>
 #include <ed/distributed/distributed_operator.h>
+#include <ed/distributed/multi_gpu.h>  // Phase 3c: NCCL status banner
 
 #include <chrono>
 #include <cmath>
@@ -194,6 +195,14 @@ int main(int argc, char** argv) {
                       << " periodic=" << (a.periodic ? 1 : 0)
                       << " world_size=" << world_size
                       << " hilbert_dim=" << (1ULL << a.N)
+                      << std::endl;
+            // Phase 3c banner: print NCCL availability so cluster smoke
+            // logs record whether the distributed Lanczos dot/norm path
+            // can route through GPU collectives. The launcher itself
+            // still uses the CPU MPI Allreduce path; this is purely a
+            // diagnostic for now.
+            std::cout << "ed_distributed_main: "
+                      << ed::distributed::multi_gpu::nccl_status_string()
                       << std::endl;
         }
 

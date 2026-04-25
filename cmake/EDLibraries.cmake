@@ -208,6 +208,14 @@ if(WITH_MPI)
         ${DISTRIBUTED_DIR}/distributed_lanczos.cpp
         ${DISTRIBUTED_DIR}/distributed_ftlm.cpp
         ${DISTRIBUTED_DIR}/distributed_tpq.cpp
+        # Phase 3b #7 stage 1: orbit-respecting partition primitive.
+        ${DISTRIBUTED_DIR}/orbit_partition.cpp
+        # Phase 3b #7 stage 2 prep: orbit-aware MPI_Alltoallv halo plan
+        # (consumed by DistributedSymmetryOperator).
+        ${DISTRIBUTED_DIR}/orbit_halo_plan.cpp
+        # Phase 3b #7 stage 2: symmetry-projected distributed SpMV
+        # (orbit-partitioned rows + orbit-aware halo + sparse local SpMV).
+        ${DISTRIBUTED_DIR}/distributed_symmetry_operator.cpp
     )
     target_include_directories(ed_distributed PUBLIC ${_ED_PUBLIC_INCLUDES})
     target_link_libraries(ed_distributed PUBLIC
@@ -217,6 +225,60 @@ if(WITH_MPI)
         $<$<COMPILE_LANGUAGE:CXX>:${CPU_OPT_FLAGS}>
     )
     set_target_properties(ed_distributed PROPERTIES POSITION_INDEPENDENT_CODE ON)
+endif()
+
+# -----------------------------------------------------------------------------
+# ed_distributed_gpu: Phase 3c -- multi-GPU collectives over NCCL.
+#
+# Built only when WITH_MPI && WITH_CUDA && NCCL_FOUND. Holds the .cu TU
+# that #includes <nccl.h> and <cuda_runtime.h>; keeping it OUT of
+# ed_distributed lets the CPU-only path stay a pure CXX library and avoids
+# pulling the CUDA toolchain into builds that don't ask for it.
+#
+# Phase 3c items:
+#   #1 multi_gpu.cu  -- MultiGpuCommunicator (RAII over ncclComm_t built
+#                       from MPI_Comm) + sum/broadcast wrappers used by
+#                       the future distributed_lanczos_gpu (#2). Stage 1
+#                       implementation; the SpMV halo continues to ride
+#                       MPI in this stage and only the dot/norm
+#                       reductions are NCCL-aware.
+#
+# Wired into ed_distributed_main and the multi-GPU tests via
+# `if(TARGET ed_distributed_gpu)` checks downstream so the rest of the
+# tree is honest about the optional dependency.
+#
+# NCCL_FOUND / NCCL_INCLUDE_DIRS / NCCL_LIBRARIES are populated by the
+# Phase 3c block in the top-level CMakeLists.txt (Phase 3c detection).
+# -----------------------------------------------------------------------------
+if(WITH_MPI AND WITH_CUDA AND NCCL_FOUND)
+    add_library(ed_distributed_gpu STATIC
+        ${DISTRIBUTED_DIR}/multi_gpu.cu
+        # Phase 3c stage 2: GPU-resident distributed Lanczos with
+        # ncclAllReduce dot/norm + host-staged SpMV via the existing
+        # CPU DistributedOperator.
+        ${DISTRIBUTED_DIR}/distributed_lanczos_gpu.cu
+        # Phase 3c stage 3: fully GPU-resident DistributedGPUOperator
+        # (NCCL pairwise SendRecv halo + CUDA SpMV kernel).
+        ${DISTRIBUTED_DIR}/distributed_gpu_operator.cu
+    )
+    target_include_directories(ed_distributed_gpu PUBLIC ${_ED_PUBLIC_INCLUDES})
+    target_include_directories(ed_distributed_gpu PRIVATE ${NCCL_INCLUDE_DIRS})
+    target_link_libraries(ed_distributed_gpu PUBLIC
+        ed_distributed
+        CUDA::cudart
+        CUDA::cublas
+        ${NCCL_LIBRARIES}
+        ${ED_COMMON_LINK_LIBS}
+    )
+    target_compile_definitions(ed_distributed_gpu PUBLIC ED_HAVE_NCCL=1)
+    set_target_properties(ed_distributed_gpu PROPERTIES
+        CUDA_SEPARABLE_COMPILATION ON
+        POSITION_INDEPENDENT_CODE ON
+    )
+    target_compile_options(ed_distributed_gpu PRIVATE
+        $<$<COMPILE_LANGUAGE:CXX>:${CPU_OPT_FLAGS}>
+        $<$<COMPILE_LANGUAGE:CUDA>:-O3>
+    )
 endif()
 
 # -----------------------------------------------------------------------------

@@ -7,6 +7,7 @@
 #ifdef WITH_MPI
 
 #include <ed/distributed/distributed_lanczos.h>
+#include <ed/distributed/distributed_lanczos_kernel.h>
 
 #include <algorithm>
 #include <cmath>
@@ -480,6 +481,82 @@ DistributedEigenpairsResult distributed_lanczos_eigenvectors(
         reconstruct_local_eigenvector(lres, k, out.eigenvectors_local[k]);
     }
     return out;
+}
+
+// =============================================================================
+// Phase 3b #7 stage 3: distributed Lanczos on the symmetry-projected operator.
+//
+// Builds a rank-major-scattered initial vector that matches the
+// `DistributedSymmetryOperator`'s LPT-permuted slab geometry, then dispatches
+// to the templated Lanczos kernel.
+// =============================================================================
+DistributedLanczosResult distributed_lanczos_symmetry(
+    const DistributedSymmetryOperator& op,
+    const DistributedLanczosOptions& options) {
+
+    const int rank = op.rank();
+    const int size = op.comm_size();
+    const std::uint64_t global_dim = op.global_dim();
+    const std::uint64_t local_n    = op.local_size();
+
+    // ---------------- Initial vector scatter ---------------------------------
+    // Strategy: rank 0 generates a deterministic L2-normalised global random
+    // vector in NATURAL orbit ordering, scatters it via per-rank packed buffers
+    // permuted into rank-major order using `partition.rank_orbits`, and every
+    // rank receives its slab directly into rank-major layout. This matches
+    // what `DistributedSymmetryOperator::apply` expects.
+    const auto& partition = op.partition();
+    std::vector<int> sendcounts(size, 0), displs(size, 0);
+    {
+        int run = 0;
+        for (int r = 0; r < size; ++r) {
+            sendcounts[r] = static_cast<int>(partition.rank_orbits[r].size());
+            displs[r] = run;
+            run += sendcounts[r];
+        }
+    }
+
+    std::vector<Complex> v_local(local_n, Complex(0.0, 0.0));
+
+    if (rank == 0) {
+        std::vector<Complex> v_natural(static_cast<std::size_t>(global_dim));
+        std::mt19937_64 gen(options.seed);
+        std::normal_distribution<double> nd(0.0, 1.0);
+        double sumsq = 0.0;
+        for (std::uint64_t i = 0; i < global_dim; ++i) {
+            const double a = nd(gen);
+            const double b = nd(gen);
+            v_natural[i] = Complex(a, b);
+            sumsq += a * a + b * b;
+        }
+        const double inv = 1.0 / std::sqrt(sumsq);
+        for (auto& z : v_natural) z *= inv;
+
+        // Permute into rank-major packed buffer: slot (rank_offsets[r] + k)
+        // holds amplitude of orbit `partition.rank_orbits[r][k]`.
+        std::vector<Complex> v_rankmajor(
+            static_cast<std::size_t>(global_dim));
+        for (int r = 0; r < size; ++r) {
+            for (std::size_t k = 0; k < partition.rank_orbits[r].size(); ++k) {
+                const std::size_t orbit_id = partition.rank_orbits[r][k];
+                const std::size_t global_pos = partition.rank_offsets[r] + k;
+                v_rankmajor[global_pos] = v_natural[orbit_id];
+            }
+        }
+
+        MPI_Scatterv(v_rankmajor.data(), sendcounts.data(), displs.data(),
+                     kComplexDatatype,
+                     v_local.data(), sendcounts[rank], kComplexDatatype,
+                     0, op.comm());
+    } else {
+        MPI_Scatterv(nullptr, sendcounts.data(), displs.data(),
+                     kComplexDatatype,
+                     v_local.data(), sendcounts[rank], kComplexDatatype,
+                     0, op.comm());
+    }
+
+    // ---------------- Run kernel --------------------------------------------
+    return kernel::distributed_lanczos_kernel(op, std::move(v_local), options);
 }
 
 }  // namespace ed::distributed

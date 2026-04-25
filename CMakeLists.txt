@@ -234,6 +234,47 @@ else()
     message(STATUS "  OpenMP Support: NO")
 endif()
 
+# -----------------------------------------------------------------------------
+# Phase 3c: NCCL detection (used by ed_distributed_gpu).
+#
+# Multi-GPU dot/norm reductions for ed::distributed::distributed_lanczos
+# ride NCCL (Phase 3c stage 1). This block is run BEFORE EDLibraries so
+# that `ed_distributed_gpu` can be added conditionally inside that file.
+#
+# Sets:
+#   * NCCL_FOUND          (TRUE / FALSE)
+#   * NCCL_INCLUDE_DIRS
+#   * NCCL_LIBRARIES
+#
+# Disabling: set `-DWITH_NCCL=OFF` to forcibly turn the discovery off
+# even on hosts where it would otherwise be found (useful for CPU-only
+# regression rebuilds on GPU nodes).
+# -----------------------------------------------------------------------------
+option(WITH_NCCL "Discover NCCL for ed_distributed_gpu (Phase 3c)" ON)
+if(WITH_CUDA AND WITH_MPI AND WITH_NCCL)
+    find_path(NCCL_INCLUDE_DIRS NAMES nccl.h
+              HINTS $ENV{NCCL_ROOT}/include $ENV{NCCL_HOME}/include
+                    /usr/include /usr/local/include /opt/nccl/include)
+    find_library(NCCL_LIBRARIES NAMES nccl
+                 HINTS $ENV{NCCL_ROOT}/lib $ENV{NCCL_HOME}/lib
+                       /usr/lib/x86_64-linux-gnu /usr/local/lib /opt/nccl/lib)
+    if(NCCL_INCLUDE_DIRS AND NCCL_LIBRARIES)
+        set(NCCL_FOUND TRUE)
+        message(STATUS "  NCCL Support: DETECTED (Phase 3c multi-GPU enabled)")
+        message(STATUS "    NCCL_INCLUDE_DIRS: ${NCCL_INCLUDE_DIRS}")
+        message(STATUS "    NCCL_LIBRARIES:    ${NCCL_LIBRARIES}")
+    else()
+        set(NCCL_FOUND FALSE)
+        message(STATUS "  NCCL Support: NOT FOUND "
+                       "(Phase 3c multi-GPU disabled; pass NCCL_ROOT to override)")
+    endif()
+else()
+    set(NCCL_FOUND FALSE)
+    if(NOT WITH_NCCL)
+        message(STATUS "  NCCL Support: DISABLED via WITH_NCCL=OFF")
+    endif()
+endif()
+
 # =============================================================================
 # STATIC LIBRARIES
 # =============================================================================
@@ -279,6 +320,15 @@ if(WITH_MPI AND TARGET ed_distributed)
     target_compile_options(ed_distributed_main PRIVATE
         $<$<COMPILE_LANGUAGE:CXX>:${CPU_OPT_FLAGS}>
     )
+    # Phase 3c: when NCCL is discovered, also link the multi-GPU library so
+    # the launcher can print runtime status (`nccl_status_string()`) and so
+    # the future GPU-backed distributed_lanczos can resolve its symbols.
+    # ed_distributed_gpu propagates ED_HAVE_NCCL=1 to consumers via PUBLIC
+    # compile_definitions, so the CLI TU automatically picks the
+    # NCCL-aware code branch when the library is in scope.
+    if(TARGET ed_distributed_gpu)
+        target_link_libraries(ed_distributed_main PRIVATE ed_distributed_gpu)
+    endif()
 endif()
 
 # BFG Order Parameter computation (lightweight, HDF5 + OpenMP only)
@@ -483,46 +533,6 @@ else()
     message(STATUS "  CUDA Support: NO")
 endif()
 message(STATUS "  MPI Support: ${WITH_MPI}")
-
-# -----------------------------------------------------------------------------
-# Phase 3c: NCCL detection (read-only stub).
-#
-# Multi-GPU support (Phase 3c "honest 48") will eventually need NCCL for
-# collective allreduce on device buffers. This block is a *detection-only*
-# stub: it discovers the NCCL include / library if installed, exposes the
-# usual NCCL_FOUND/NCCL_INCLUDE_DIRS/NCCL_LIBRARIES variables, and prints a
-# status line. It does NOT yet enable any code paths -- the actual
-# multi-GPU validation requires HPC time we have not allocated. See
-# `docs/history/MODERNIZATION_AUDIT.md` (Phase 3c) and `docs/architecture/SCALING.md` for the honest
-# scope. The detection lives here so cluster admins can ship a build with
-# NCCL discovered and we can flip the implementation switch in a future
-# PR without re-touching the build system.
-# -----------------------------------------------------------------------------
-if(WITH_CUDA AND WITH_MPI)
-    find_path(NCCL_INCLUDE_DIRS NAMES nccl.h
-              HINTS $ENV{NCCL_ROOT}/include $ENV{NCCL_HOME}/include
-                    /usr/include /usr/local/include /opt/nccl/include)
-    find_library(NCCL_LIBRARIES NAMES nccl
-                 HINTS $ENV{NCCL_ROOT}/lib $ENV{NCCL_HOME}/lib
-                       /usr/lib/x86_64-linux-gnu /usr/local/lib /opt/nccl/lib)
-    if(NCCL_INCLUDE_DIRS AND NCCL_LIBRARIES)
-        set(NCCL_FOUND TRUE)
-        message(STATUS "  NCCL Support: DETECTED (detection-only; "
-                       "Phase 3c multi-GPU code path is a stub)")
-        message(STATUS "    NCCL_INCLUDE_DIRS: ${NCCL_INCLUDE_DIRS}")
-        message(STATUS "    NCCL_LIBRARIES:    ${NCCL_LIBRARIES}")
-        # Propagate ED_HAVE_NCCL to ed_distributed (and any TU that
-        # transitively pulls in <ed/distributed/multi_gpu_stub.h>).
-        if(TARGET ed_distributed)
-            target_compile_definitions(ed_distributed PUBLIC ED_HAVE_NCCL=1)
-        endif()
-    else()
-        set(NCCL_FOUND FALSE)
-        message(STATUS "  NCCL Support: NOT FOUND (Phase 3c multi-GPU disabled)")
-    endif()
-else()
-    set(NCCL_FOUND FALSE)
-endif()
 
 # Build configuration summary and performance options
 message(STATUS "")
@@ -776,6 +786,95 @@ if(BUILD_ED_TESTS)
         # thermal energy at np=1,2,4)
         ed_add_mpi_test(test_distributed_tpq
                         tests/unit/test_distributed_tpq.cpp)
+
+        # Phase 3b #7 stage 2 prep: orbit-aware MPI_Alltoallv halo plan
+        # consumed by the DistributedSymmetryOperator. Synthetic
+        # 1-D ring lockdown at np=1,2,4 (no GPU dependency).
+        ed_add_mpi_test(test_orbit_halo_plan
+                        tests/unit/test_orbit_halo_plan.cpp)
+
+        # Phase 3b #7 stage 2: full DistributedSymmetryOperator end-to-end
+        # (orbit-aware partition + halo + sparse symmetry-projected SpMV).
+        # Cross-checks distributed apply vs an independently-built dense
+        # reference of H_q on N=4/N=6 Heisenberg chains with translation
+        # symmetry, every momentum sector, np ∈ {1, 2, 4}.
+        ed_add_mpi_test(test_distributed_symmetry_operator
+                        tests/unit/test_distributed_symmetry_operator.cpp)
+        target_link_libraries(test_distributed_symmetry_operator PRIVATE
+            ed_symmetry)
+
+        # Phase 3b #7 stage 3: distributed Lanczos rebased onto
+        # DistributedSymmetryOperator. Cross-checks ground-state energies
+        # vs a dense Eigen::SelfAdjointEigenSolver reference of H_q on
+        # N=4/N=6 Heisenberg chains with translation symmetry across np ∈ {1,2,4}.
+        ed_add_mpi_test(test_distributed_lanczos_symmetry
+                        tests/unit/test_distributed_lanczos_symmetry.cpp)
+        target_link_libraries(test_distributed_lanczos_symmetry PRIVATE
+            ed_symmetry)
+
+        # Phase 3c #1: NCCL multi-GPU collectives. Built only when
+        # ed_distributed_gpu is alive (WITH_CUDA + NCCL_FOUND); registered
+        # at np {1,2,4} same as the CPU MPI tests. The tests SKIP when no
+        # CUDA device is visible at runtime (e.g. CI on a CPU box) so the
+        # CTest invocation stays green even without GPUs.
+        if(TARGET ed_distributed_gpu)
+            # Helper to register a Phase 3c MPI+GPU test at np {1,2,4}.
+            function(ed_add_phase3c_test test_name test_source)
+                add_executable(${test_name} ${test_source})
+                target_include_directories(${test_name} PRIVATE
+                    ${CMAKE_CURRENT_SOURCE_DIR}/tests
+                )
+                target_link_libraries(${test_name} PRIVATE
+                    ed_distributed_gpu Catch2::Catch2)
+                target_compile_options(${test_name} PRIVATE
+                    $<$<COMPILE_LANGUAGE:CXX>:${CPU_OPT_FLAGS}>
+                )
+                foreach(np IN ITEMS 1 2 4)
+                    set(_tname "${test_name}_np${np}")
+                    add_test(NAME ${_tname}
+                             COMMAND ${MPIEXEC_EXECUTABLE}
+                                     ${MPIEXEC_NUMPROC_FLAG} ${np}
+                                     ${MPIEXEC_PREFLAGS}
+                                     $<TARGET_FILE:${test_name}>
+                                     ${MPIEXEC_POSTFLAGS})
+                    set_tests_properties(${_tname} PROPERTIES
+                        TIMEOUT 240
+                        LABELS "mpi;phase3c;gpu"
+                    )
+                endforeach()
+            endfunction()
+
+            # Phase 3c #1: NCCL collective wrappers (lockdown vs MPI ref).
+            ed_add_phase3c_test(test_multi_gpu_nccl
+                                tests/unit/test_multi_gpu_nccl.cpp)
+
+            # Phase 3c #2 (stage 2): GPU-resident distributed Lanczos with
+            # ncclAllReduce dot/norm + host-staged SpMV. Cross-checks the
+            # CPU distributed_lanczos on small Heisenberg chains; SKIPs
+            # gracefully when CUDA / NCCL / device count is insufficient.
+            ed_add_phase3c_test(test_distributed_lanczos_gpu
+                                tests/unit/test_distributed_lanczos_gpu.cpp)
+            target_link_libraries(test_distributed_lanczos_gpu PRIVATE
+                ed_distributed)
+
+            # Phase 3c #2 (stage 3): fully GPU-resident DistributedGPUOperator
+            # (NCCL pairwise SendRecv halo + CUDA SpMV kernel). Cross-checks
+            # the CPU DistributedOperator::apply on small Heisenberg chains;
+            # SKIPs gracefully when CUDA / NCCL / device count is insufficient.
+            ed_add_phase3c_test(test_distributed_gpu_operator
+                                tests/unit/test_distributed_gpu_operator.cpp)
+            target_link_libraries(test_distributed_gpu_operator PRIVATE
+                ed_distributed)
+        endif()
+    endif()
+
+    # Phase 3b #7 stage 1: orbit-respecting partition primitive (no MPI;
+    # the LPT greedy is a deterministic function of (orbit_weights,
+    # n_ranks) and runs in serial).
+    if(WITH_MPI AND TARGET ed_distributed)
+        ed_add_test(test_orbit_partition
+                    tests/unit/test_orbit_partition.cpp USE_CATCH2)
+        target_link_libraries(test_orbit_partition PRIVATE ed_distributed)
     endif()
     ed_add_test(test_trans_interall_loading     tests/unit/test_trans_interall_loading.cpp USE_CATCH2)
     ed_add_test(test_observables                tests/unit/test_observables.cpp USE_CATCH2)

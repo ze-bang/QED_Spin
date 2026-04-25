@@ -170,4 +170,33 @@ DistributedEigenpairsResult distributed_lanczos_eigenvectors(
 
 }  // namespace ed::distributed
 
+// -----------------------------------------------------------------------------
+// Phase 3b #7 stage 3: distributed Lanczos on the symmetry-projected operator.
+//
+// `distributed_lanczos_symmetry` runs the same kernel as `distributed_lanczos`
+// (via the templated helper in `distributed_lanczos_kernel.h`) but on a
+// `DistributedSymmetryOperator` --  i.e. the LPT-balanced orbit-row operator
+// over the symmetry-projected basis. The slab geometry is rank-major with
+// scrambled orbit ids; this entry point handles the initial-vector scatter
+// + result reproduction so callers don't need to know about the orbit
+// permutation.
+//
+// Eigenvalue / weights / eigenvector extraction options match the
+// `DistributedLanczosOptions` semantics exactly. Eigenvector reconstruction
+// produces the rank-local slab in *rank-major orbit ordering*; callers that
+// want a global eigenvector in *natural orbit ordering* can use
+// `partition.rank_orbits[r][k]` to permute back, exactly like the
+// test harness in `test_distributed_symmetry_operator.cpp`.
+// -----------------------------------------------------------------------------
+
+#include <ed/distributed/distributed_symmetry_operator.h>
+
+namespace ed::distributed {
+
+DistributedLanczosResult distributed_lanczos_symmetry(
+    const DistributedSymmetryOperator& op,
+    const DistributedLanczosOptions& options = {});
+
+}  // namespace ed::distributed
+
 #endif  // WITH_MPI

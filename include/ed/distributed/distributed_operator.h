@@ -158,6 +158,48 @@ public:
     std::size_t num_flip_patterns() const noexcept { return flip_patterns_.size(); }
 
     // -------------------------------------------------------------------------
+    // Comm plan view (Phase 3c stage 3). Exposed so that
+    // `DistributedGPUOperator` can mirror the same MPI_Alltoallv-derived
+    // plan onto the device and run a pack + NCCL pairwise SendRecv halo
+    // without reconstructing it from the operator definition. All pointers
+    // are valid for the lifetime of `*this`; do NOT cache them past a move
+    // of the parent (this object is non-copyable but moves invalidate
+    // pointers as usual).
+    // -------------------------------------------------------------------------
+    struct CommPlanView {
+        const int*           send_counts   = nullptr;
+        const int*           send_displs   = nullptr;
+        const int*           recv_counts   = nullptr;
+        const int*           recv_displs   = nullptr;
+        const int*           send_local_idx = nullptr;  // length total_send
+        const std::uint64_t* recv_keys     = nullptr;   // sorted; length total_recv
+        const std::size_t*   recv_values   = nullptr;   // length total_recv
+        int total_send = 0;
+        int total_recv = 0;
+        int comm_size  = 0;
+    };
+    CommPlanView comm_plan_view() const noexcept {
+        CommPlanView v;
+        v.send_counts    = send_counts_.data();
+        v.send_displs    = send_displs_.data();
+        v.recv_counts    = recv_counts_.data();
+        v.recv_displs    = recv_displs_.data();
+        v.send_local_idx = send_local_idx_.data();
+        v.recv_keys      = recv_lookup_.empty()
+                              ? nullptr : recv_lookup_.keys().data();
+        v.recv_values    = recv_lookup_.empty()
+                              ? nullptr : recv_lookup_.values().data();
+        v.total_send = total_send_;
+        v.total_recv = total_recv_;
+        v.comm_size  = size_;
+        return v;
+    }
+
+    /// Underlying serial operator. The GPU operator pulls its SoA term
+    /// tables from this. Lifetime tied to `*this`.
+    std::shared_ptr<Operator> serial_operator() const noexcept { return op_; }
+
+    // -------------------------------------------------------------------------
     // Static helpers (collective-friendly: each rank can call
     // independently, given the same args, and get the same answers).
     // -------------------------------------------------------------------------
