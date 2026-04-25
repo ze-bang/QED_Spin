@@ -185,6 +185,7 @@ set(BFG_DIR ${SRC_DIR}/bfg)
 set(CLI_DIR ${SRC_DIR}/cli)
 set(SYMMETRY_DIR ${SRC_DIR}/symmetry)
 set(PARALLEL_DIR ${SRC_DIR}/parallel)
+set(DISTRIBUTED_DIR ${SRC_DIR}/distributed)
 
 # Include directories - public headers in include/, private in src/
 include_directories(${INCLUDE_DIR})
@@ -393,6 +394,9 @@ include(GNUInstallDirs)
 include(CMakePackageConfigHelpers)
 
 set(_ED_INSTALL_TARGETS ed_parallel ed_io ed_core ed_dssf ed_bfg ed_symmetry ed_solvers_cpu ed_cli)
+if(WITH_MPI AND TARGET ed_distributed)
+    list(APPEND _ED_INSTALL_TARGETS ed_distributed)
+endif()
 if(TARGET ed_solvers_gpu)
     list(APPEND _ED_INSTALL_TARGETS ed_solvers_gpu)
 endif()
@@ -637,6 +641,52 @@ if(BUILD_ED_TESTS)
     # Coverage: empty / build / duplicate-key / clear / sort-invariant +
     # 1M-entry stress vs unordered_map oracle (memory + correctness).
     ed_add_test(test_sorted_uint64_index        tests/unit/test_sorted_uint64_index.cpp USE_CATCH2)
+
+    # -------------------------------------------------------------------------
+    # Phase 3b: distributed-memory tests. Always built when WITH_MPI is ON
+    # (regardless of MPIEXEC discovery); each test is registered N times --
+    # once per `np` count in {1, 2, 4} -- and launched via `mpiexec -np N`.
+    # The test binary uses Catch2 with a manual MPI_Init/Finalize main, and
+    # rank 0 owns stdout while non-zero ranks pipe to /dev/null. A failed
+    # REQUIRE() on any rank propagates via MPI_Allreduce(MPI_MAX) to the
+    # CTest exit code.
+    # -------------------------------------------------------------------------
+    if(WITH_MPI AND TARGET ed_distributed AND MPIEXEC_EXECUTABLE)
+        function(ed_add_mpi_test test_name test_source)
+            add_executable(${test_name} ${test_source})
+            target_include_directories(${test_name} PRIVATE
+                ${CMAKE_CURRENT_SOURCE_DIR}/tests
+            )
+            target_link_libraries(${test_name} PRIVATE
+                ed_distributed Catch2::Catch2)
+            target_compile_options(${test_name} PRIVATE
+                $<$<COMPILE_LANGUAGE:CXX>:${CPU_OPT_FLAGS}>
+            )
+            foreach(np IN ITEMS 1 2 4)
+                set(_tname "${test_name}_np${np}")
+                add_test(NAME ${_tname}
+                         COMMAND ${MPIEXEC_EXECUTABLE}
+                                 ${MPIEXEC_NUMPROC_FLAG} ${np}
+                                 ${MPIEXEC_PREFLAGS}
+                                 $<TARGET_FILE:${test_name}>
+                                 ${MPIEXEC_POSTFLAGS})
+                set_tests_properties(${_tname} PROPERTIES
+                    ENVIRONMENT
+                        "ED_TEST_TMP_DIR=${CMAKE_CURRENT_BINARY_DIR}/test_scratch_${_tname}"
+                    TIMEOUT 240
+                    LABELS "mpi;phase3b"
+                )
+            endforeach()
+        endfunction()
+
+        # Phase 3b #1: distributed matrix-free SpMV (DistributedOperator)
+        ed_add_mpi_test(test_distributed_operator
+                        tests/unit/test_distributed_operator.cpp)
+
+        # Phase 3b #2: distributed Lanczos (rank-local Krylov + MPI_Allreduce)
+        ed_add_mpi_test(test_distributed_lanczos
+                        tests/unit/test_distributed_lanczos.cpp)
+    endif()
     ed_add_test(test_trans_interall_loading     tests/unit/test_trans_interall_loading.cpp USE_CATCH2)
     ed_add_test(test_observables                tests/unit/test_observables.cpp USE_CATCH2)
     ed_add_test(test_thermal_methods            tests/unit/test_thermal_methods.cpp USE_CATCH2)

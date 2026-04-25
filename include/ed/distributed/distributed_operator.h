@@ -1,0 +1,217 @@
+// =============================================================================
+// include/ed/distributed/distributed_operator.h
+//
+// Phase 3b #1: distributed-memory matrix-free SpMV (the load-bearing piece
+// for "honest 40").
+//
+//   y_local = (H * v_global)[local_offset, local_offset + local_size)
+//
+// where every rank holds ONLY its slab of `v` and `y`. No rank ever
+// materialises the full state vector -- that is the entire point of Phase
+// 3b versus the trivial "Allgatherv the world to every rank" pattern.
+//
+// Design (one-time at construction):
+//
+//   1.  Decompose [0, global_dim) into balanced 1D row slabs:
+//         rank r owns rows [offset_r, offset_r + n_r).
+//   2.  Walk the operator's separated-by-type term storage
+//       (Operator::diag_one_body_, offdiag_one_body_, diag_two_body_,
+//       mixed_two_body_, offdiag_two_body_, three_body_data_) and extract
+//       the unique set of column-flip patterns
+//         { p in [0, 2^n_bits) : exists term s.t. col = row XOR p }
+//       For Heisenberg/Hubbard-style spin Hamiltonians this is bounded by
+//       O(N^2) patterns, each of popcount <= 3.
+//   3.  For each local row r and each pattern p, the column c = r XOR p is
+//       either local (in our slab) or remote. For every remote c, append
+//       to a per-rank "I want this global index" list, then sort + dedupe.
+//   4.  MPI_Alltoall to communicate counts, MPI_Alltoallv to communicate
+//       the actual global indices we want from each rank. The receiving
+//       side translates those into LOCAL slab offsets for the future send
+//       phase of every apply().
+//   5.  Build a `SortedUint64Index` (Phase 3a #5) `recv_lookup_` that maps
+//       a remote global column -> its position in the contiguous recv
+//       buffer. O(log) lookups during the SpMV inner loop.
+//
+// Per-apply (hot path):
+//
+//   1.  Pack send buffer: send_buf[k] = v_local[send_local_idx_[k]].
+//   2.  Single MPI_Alltoallv exchanging Complex values (NOT indices --
+//       indices were resolved at construction time).
+//   3.  Matrix-free apply in GATHER form:
+//         for each local row r in [local_offset, local_offset + local_n):
+//           for each H term that touches r:
+//             c = r XOR (term flip pattern)
+//             read v[c] from local slab if c in [offset, offset + n_local),
+//                                else from recv_buf via recv_lookup_.
+//             y_local[r - local_offset] += <r|H|c> * v[c]
+//
+// Why GATHER and not SCATTER:
+//
+//   The matrix-free apply in `Operator::apply_optimized` runs in SCATTER
+//   form (iterate input basis b, compute output target c, atomic-add into
+//   y[c]). For distributed-memory SpMV with row-owned y, this would require
+//   a sparse all-to-all of (index, value) pairs -- 24 bytes per nonzero
+//   instead of 16. GATHER form, by contrast, exchanges only Complex values
+//   (16 bytes/entry) and the resulting y_local is rank-private (no
+//   cross-rank atomics needed).
+//
+//   GATHER for spin Hamiltonians is mathematically equivalent because H is
+//   Hermitian and the term coefficients are real (or, for complex H,
+//   conjugated correctly below). The condition rewrites are derived in
+//   distributed_operator.cpp -- search for "Gather rewrite".
+//
+// Honest scope notes (carried into PHASE_3_SUMMARY.md):
+//
+//   * The bit-flip-pattern enumeration is bounded by O(local_n_ *
+//     |patterns|) raw column references; for Heisenberg with O(N) bonds
+//     the recv-buffer per rank is bounded by min(local_n_ * O(N^2),
+//     global_dim - local_n_).
+//   * Honest-40 (dim = 2^40, e.g., spin-1/2 chain on 40 sites without
+//     symmetry projection) needs ~7e10 local rows per rank with 16 ranks.
+//     The raw 1D row-slab decomposition produces a recv-buffer per rank
+//     bounded by ~15 * local_n_ at worst -- which, at 16 GB/Complex per
+//     2^30, is too large. The PROPER fix is symmetry-aware slabbing: keep
+//     each fixed-Sz orbit on a single rank, then the bit-flip patterns
+//     within an orbit are local. We document this honestly in
+//     SCALING.md §6 / PHASE_3_SUMMARY.md and leave it as the next
+//     load-bearing item.
+//   * For the bounded tests in this PR (N <= 16, np up to 4) the recv
+//     buffer is small enough that the slab decomposition works directly
+//     and validates the architecture end-to-end.
+// =============================================================================
+
+#pragma once
+
+#ifdef WITH_MPI
+#include <mpi.h>
+
+#include <complex>
+#include <cstddef>
+#include <cstdint>
+#include <memory>
+#include <utility>
+#include <vector>
+
+#include <ed/core/sorted_uint64_index.h>
+
+// Forward declaration to avoid pulling all of construct_ham.h into this header.
+class Operator;
+
+namespace ed::distributed {
+
+class DistributedOperator {
+public:
+    using Complex = std::complex<double>;
+
+    /**
+     * Construct a distributed wrapper around a serial Operator.
+     *
+     * Collective: every rank in `comm` must call this with an Operator that
+     * carries the SAME term lists (i.e., the same Hamiltonian definition).
+     * The serial Operator is kept alive by `op_` and never mutated by this
+     * class; we only read its term storage.
+     *
+     * Builds the communication plan during construction. Throws on:
+     *   - n_bits >= 64 (would overflow uint64_t basis indices)
+     *   - any term coefficient with |imag| > 1e-15 in operator-flagged real
+     *     mode -- caller may pre-validate via op->isReal() if needed.
+     */
+    DistributedOperator(std::shared_ptr<Operator> op, MPI_Comm comm);
+
+    /**
+     * y_local = (H * v_global)[local_offset, local_offset + local_size).
+     *
+     * v_local and y_local are sized exactly local_size().  Internally
+     * performs ONE MPI_Alltoallv of Complex values + one matrix-free local
+     * SpMV. Thread-safe within a single `apply()` call (the inner loop is
+     * parallelised with OpenMP).
+     */
+    void apply(const Complex* v_local, Complex* y_local) const;
+
+    // -------------------------------------------------------------------------
+    // Slab geometry (queryable on every rank).
+    // -------------------------------------------------------------------------
+    std::uint64_t global_dim()   const noexcept { return global_dim_; }
+    std::uint64_t local_offset() const noexcept { return local_offset_; }
+    std::uint64_t local_size()   const noexcept { return local_n_; }
+    int           rank()         const noexcept { return rank_; }
+    int           comm_size()    const noexcept { return size_; }
+    MPI_Comm      comm()         const noexcept { return comm_; }
+
+    /// Owner rank for a given GLOBAL row/column index, under this object's
+    /// balanced 1D decomposition.
+    int owner_rank(std::uint64_t global_idx) const noexcept;
+
+    /// Convert a global index to a local index (only meaningful when
+    /// owner_rank(global_idx) == this->rank()).
+    std::uint64_t to_local(std::uint64_t global_idx) const noexcept {
+        return global_idx - local_offset_;
+    }
+
+    /// Sum of approximate per-rank memory bytes held by the comm plan.
+    /// Exposed for diagnostics / logging. Excludes v_local / y_local
+    /// themselves, which the caller owns.
+    std::size_t plan_bytes() const noexcept;
+
+    /// Number of unique bit-flip patterns extracted from the operator
+    /// (informational; relevant for capacity planning / honest scope notes).
+    std::size_t num_flip_patterns() const noexcept { return flip_patterns_.size(); }
+
+    // -------------------------------------------------------------------------
+    // Static helpers (collective-friendly: each rank can call
+    // independently, given the same args, and get the same answers).
+    // -------------------------------------------------------------------------
+
+    /// Balanced 1D row slab for given (global_dim, rank, size).
+    /// First (global_dim mod size) ranks get ceil(global_dim/size) rows,
+    /// the rest get floor(global_dim/size) rows.
+    static void balanced_slab(std::uint64_t global_dim, int rank, int size,
+                              std::uint64_t& out_offset,
+                              std::uint64_t& out_n) noexcept;
+
+    /// Owner rank for a given global index under balanced_slab().
+    static int balanced_owner_rank(std::uint64_t global_idx,
+                                   std::uint64_t global_dim,
+                                   int size) noexcept;
+
+private:
+    void extract_flip_patterns_();
+    void build_comm_pattern_();
+
+    std::shared_ptr<Operator> op_;
+    MPI_Comm     comm_;
+    int          rank_;
+    int          size_;
+    std::uint64_t global_dim_;
+    std::uint64_t local_offset_;
+    std::uint64_t local_n_;
+
+    /// rank_offsets_[r] = global index of the first row owned by rank r.
+    /// rank_offsets_[size_] = global_dim_. Used by owner_rank() for O(log)
+    /// lookup via std::upper_bound (much faster than a per-call recompute
+    /// of balanced_slab() for every call).
+    std::vector<std::uint64_t> rank_offsets_;
+
+    /// Unique column-flip patterns from H. ALWAYS contains 0 (diagonal).
+    std::vector<std::uint64_t> flip_patterns_;
+
+    /// MPI_Alltoallv counts (Complex elements, not bytes).
+    std::vector<int> send_counts_;
+    std::vector<int> send_displs_;
+    std::vector<int> recv_counts_;
+    std::vector<int> recv_displs_;
+    int total_send_ = 0;
+    int total_recv_ = 0;
+
+    /// For each entry in the send buffer (length total_send_), the LOCAL
+    /// index in v_local to copy from. Filled at construction time.
+    std::vector<int> send_local_idx_;
+
+    /// recv_lookup_[global_col] = offset into recv_buf (built once,
+    /// queried during every apply()'s inner loop).
+    ed::core::SortedUint64Index recv_lookup_;
+};
+
+}  // namespace ed::distributed
+
+#endif  // WITH_MPI

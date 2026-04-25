@@ -70,6 +70,7 @@ set(_ED_PUBLIC_INCLUDES
     "$<BUILD_INTERFACE:${INCLUDE_DIR}/ed/cli>"
     "$<BUILD_INTERFACE:${INCLUDE_DIR}/ed/symmetry>"
     "$<BUILD_INTERFACE:${INCLUDE_DIR}/ed/parallel>"
+    "$<BUILD_INTERFACE:${INCLUDE_DIR}/ed/distributed>"
     "$<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>"
 )
 
@@ -175,6 +176,43 @@ target_compile_options(ed_solvers_cpu PRIVATE
     $<$<COMPILE_LANGUAGE:CXX>:${CPU_OPT_FLAGS}>
 )
 set_target_properties(ed_solvers_cpu PROPERTIES POSITION_INDEPENDENT_CODE ON)
+
+# -----------------------------------------------------------------------------
+# ed_distributed: Phase 3b -- distributed-memory matrix-free SpMV
+# (DistributedOperator) and distributed Lanczos / FTLM hooks built on top.
+#
+# Only built when WITH_MPI is ON; the library is the canonical home for
+# every TU that depends symbolically on `<mpi.h>` for the SOTA "honest 40"
+# scaling story. Depends on ed_core (for the `Operator` term storage we
+# read), ed_solvers_cpu (for re-orth helpers reused by DistributedLanczos),
+# and ed_parallel (for NUMA hooks shared with the single-rank Lanczos).
+#
+# The three Phase-3b TUs are intentionally CPU-only and OpenMP-friendly:
+# they layer cleanly on top of the rank-local SpMV without re-implementing
+# any of the matrix-free term iteration in `Operator::apply_real`.
+#
+# Phase 3b items:
+#   #1 distributed_operator.cpp     -- gather-form SpMV + halo exchange
+#   #2 distributed_lanczos.cpp      -- Lanczos w/ MPI_Allreduce dot/norm
+#                                      and rank-local Krylov basis
+#   #3 distributed_ftlm.cpp         -- multi-sample FTLM w/ MPI-over-samples
+#                                      composed on top of distributed Lanczos
+# -----------------------------------------------------------------------------
+if(WITH_MPI)
+    add_library(ed_distributed STATIC
+        ${DISTRIBUTED_DIR}/distributed_operator.cpp
+        ${DISTRIBUTED_DIR}/distributed_lanczos.cpp
+        ${DISTRIBUTED_DIR}/distributed_ftlm.cpp
+    )
+    target_include_directories(ed_distributed PUBLIC ${_ED_PUBLIC_INCLUDES})
+    target_link_libraries(ed_distributed PUBLIC
+        ed_core ed_io ed_solvers_cpu ed_parallel ${ED_COMMON_LINK_LIBS}
+    )
+    target_compile_options(ed_distributed PRIVATE
+        $<$<COMPILE_LANGUAGE:CXX>:${CPU_OPT_FLAGS}>
+    )
+    set_target_properties(ed_distributed PROPERTIES POSITION_INDEPENDENT_CODE ON)
+endif()
 
 # -----------------------------------------------------------------------------
 # ed_dssf: pure-data DSSF/SSSF observable assembly (operator_spec etc.).
