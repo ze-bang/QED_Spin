@@ -1080,4 +1080,55 @@ Each item below is small enough to be a single self-contained PR. The audit can 
 
 **Rollout order (per §7.7 "slow rollout")**: Q1 → Q2 → Q3 → Q11 → Q8 → Q10 → Q13 → Q7 → Q4 → Q5 → Q14 (clang-format -i pass) → Q6 → Q9 → Q12. Each is its own commit; `ctest` 12/12 must remain green between every commit.
 
+---
+
+## 9. Scaling envelope (post Batches 1–3)
+
+After Batches 1, 2 and 3 landed, the codebase is *clean* and *honest* but the
+single-process architecture has a hard ceiling. The dedicated reference for
+this is [`SCALING.md`](./SCALING.md); this section is the one-paragraph
+summary so nobody reads the audit and assumes "modernized" implies "48 sites".
+
+**Practical envelope on a single node, today:**
+
+| sites N | sector dim (Sz=0, ÷ ~N for symmetry) | one Cdouble vector | status |
+|--:|--:|--:|---|
+| ≤ 28 | ≤ 1.4 × 10⁶ | ≤ 23 MB | trivial — peer with QuSpin/EDLib/Pomerol |
+| 32   | ~1.9 × 10⁷ | 300 MB | comfortable on a workstation; GPU shines |
+| 36   | ~2.5 × 10⁸ | 4 GB   | **feasible on a fat node** (≥256 GB RAM, NVMe scratch, `ED_LANCZOS_DISK=1`) |
+| 40   | ~3.5 × 10⁹ | 56 GB  | **not supported** — needs MPI-distributed state vector |
+| 48   | ~6.7 × 10¹¹ | 10.7 TB | **not supported** — needs distributed multi-GPU + perfect-hash basis (HΦ-on-Fugaku scale) |
+
+**What this codebase already has** that is load-bearing for ≤36 sites:
+matrix-free SpMV with a CSR fast-path crossover at dim ≤ 2²⁰; selective /
+DGKS local re-orth (CPU + GPU, post-Batch-1); implicitly-restarted +
+thick-restart Lanczos with locking; Krylov–Schur with α/β reuse from the
+Arnoldi pass (post-Batch-2 — saves O(m) matvecs); disk-backed Lanczos basis
+(`BasisBufferScope`, `ED_LANCZOS_DISK=1`); streaming + chunked symmetry
+construction (`streaming_symmetry.h`, `chunked_symmetry_builder.h`,
+`disk_streaming_symmetry.h`); GPU Lanczos / block-Lanczos / FTLM / TPQ with
+on-device DGKS, event-based stream sync, combinadic-unrank fixed-Sz basis on
+GPU, deterministic per-sample seeding shared CPU↔GPU; MPI-parallelism over
+*independent samples* in FTLM (and over sweeps in BFG); HDF5 unified output
+schema with provenance and intermediate-state checkpointing.
+
+**What this codebase does NOT have** that blocks N ≥ 40 (the "Phase 3" gap):
+distributed-memory state vector for SpMV (the single biggest gap — every
+Lanczos / FTLM / TPQ / Krylov-Schur vector is `std::vector<Complex>` on one
+rank); multi-GPU NCCL Lanczos; checkpoint/restart of the Krylov state itself
+(α, β, last 2 vectors, RNG); out-of-core *blocked-tile reorthogonalization*
+against the streamed basis; symmetry-projected basis indexing past ~2 × 10⁹
+states (current `unordered_map<uint64_t, ...>` cannot be materialized);
+NUMA-aware allocator + thread-pinning hooks; mixed-precision SpMV (FP32
+matvec + FP64 dot/normalize) — deferred from Batch 2; distributed FTLM/TPQ
+**imaginary-time evolution** (the per-sample work is local but the per-rank
+vector still has to fit).
+
+See [`SCALING.md`](./SCALING.md) for the full memory tables, runtime regime
+notes, environment-variable controls (`ED_LANCZOS_DISK`, `ED_FTLM_PARALLEL`,
+`ED_GPU_TIMING`, `ED_USE_SPARSE`, `ED_SPARSE_DIM_MAX`,
+`ED_GPU_ALLOW_DROPPED_THREEBODY`, `ED_CTPQ_PROPAGATOR`, `ED_CTPQ_KRYLOV_M`,
+`ED_LANCZOS_COMPLEX_SEED`, `ED_LANCZOS_VERBOSE`), and the proposed
+Phase-3a/3b/3c sequencing to lift the ceiling from 36 → 40 → 48 sites.
+
 (Q14 is the one-shot `clang-format -i` pass that depends on Q3 having landed first.)
