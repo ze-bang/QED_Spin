@@ -1227,6 +1227,60 @@ external dep, and the dominant remaining cost at N=36 is the
 orbit-element CSR (`SymBasisState::orbit_elements`), not the lookup
 index.
 
+**Phase 3b (distributed-memory `Operator` / `Lanczos` / `FTLM`) is now
+landed** — see [`PHASE_3_SUMMARY.md`](./PHASE_3_SUMMARY.md) for the full
+write-up. New namespace `ed::distributed` under
+`include/ed/distributed/` and `src/distributed/`:
+
+* `DistributedOperator` (Phase 3b #1): 1D row-slab decomposition; one-time
+  bit-flip-pattern extraction from `Operator::transform_data_`; sparse
+  halo plan via `MPI_Alltoallv` of `uint64_t` global-column requests
+  followed by `MPI_Alltoallv` of `Complex` values per matvec; gather-form
+  OpenMP-parallel SpMV; receive-buffer lookup is the Phase 3a #5
+  `SortedUint64Index` (16 B/entry).
+* `distributed_lanczos` (Phase 3b #2): rank-local Krylov basis;
+  `MPI_Allreduce` for dot products and norms; purely local axpy/scal;
+  optional full re-orthogonalisation (MGS over prior basis vectors with
+  `MPI_Allreduce`-based inner products); replicated tridiagonal
+  eigensolve (Eigen). Result struct exposes both `eigenvalues` *and*,
+  when `compute_weights = true`, the full Ritz spectrum
+  (`tridiag_eigenvalues`) plus the squared first-component weights
+  (`tridiag_weights`) needed by FTLM/DOS estimators — bit-replicated
+  across all ranks.
+* `distributed_ftlm` (Phase 3b #3): two-level parallelism via
+  `MPI_Comm_split` outer groups of size `world_size / n_groups`. Each
+  group instantiates its own `DistributedOperator`; inside a group,
+  samples are distributed round-robin and each calls
+  `distributed_lanczos` with `compute_weights = true`. The proper J&P
+  trace estimator
+  `Z(β) ≈ (D/R) Σ_s Σ_k tridiag_weights[k] · exp(-β · tridiag_eigenvalues[k])`
+  (with `D = global_dim`, `R = n_samples`) is then `MPI_Allreduce`'d
+  across the world communicator. Operator expectation values `⟨O⟩(β)`
+  are deferred to Phase 3b #5.
+* `ed_distributed_main` (Phase 3b #4): minimal CLI driver
+  (`src/cli/ed_distributed_main.cpp`) that builds an unsymmetrised
+  Heisenberg chain and routes through either solver. Wrapper scripts in
+  `scripts/distributed/` (`run_dist.sh`, `slurm_dist.sbatch`, `README.md`).
+  Designed as a smoke-test launcher for cluster admins; production
+  workflows still go through `ED dssf <method>`.
+
+CMake plumbing: new static lib `ed_distributed` (gated by
+`WITH_MPI=ON`), new helper `ed_add_mpi_test()` that registers each MPI
+test 3× (np ∈ {1,2,4}), install hook for `ed_distributed_main`.
+Lockdown coverage: `tests/unit/test_distributed_operator.cpp`,
+`test_distributed_lanczos.cpp`, `test_distributed_ftlm.cpp` —
+**9 ctest entries (3 tests × 3 np), all green**, total 17.5 s wall.
+
+**Phase 3c (NCCL-based multi-GPU) is detection-only.** New CMake block
+under the build summary discovers NCCL when both `WITH_CUDA` and
+`WITH_MPI` are ON, sets `NCCL_FOUND` / `NCCL_INCLUDE_DIRS` /
+`NCCL_LIBRARIES`, and propagates `ED_HAVE_NCCL` to `ed_distributed`.
+Companion header `include/ed/distributed/multi_gpu_stub.h` exposes
+`ed::distributed::multi_gpu::nccl_compiled_in()` and
+`nccl_status_string()` for diagnostics. **No runtime kernels exist
+yet** — multi-GPU validation requires HPC time we have not booked.
+See `SCALING.md` §6 ("Phase 3c") for the honest scope.
+
 See [`SCALING.md`](./SCALING.md) for the full memory tables, runtime regime
 notes, environment-variable controls (`ED_LANCZOS_DISK`, `ED_FTLM_PARALLEL`,
 `ED_GPU_TIMING`, `ED_USE_SPARSE`, `ED_SPARSE_DIM_MAX`,

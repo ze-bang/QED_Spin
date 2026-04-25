@@ -95,6 +95,11 @@ LastTestsFailed.log
 CTestTestfile.cmake
 DartConfiguration.tcl
 
+# Per-test scratch directories created by ed_tests::make_scratch_dir()
+# (and by the Phase 3b MPI tests when run under ctest).
+test_scratch/
+test_scratch_*/
+
 # ---------------------------------------------------------------------------
 # ED run outputs (HDF5, scratch dirs, log files)
 # Inputs (tests/fixtures/, configs/) are re-included below.

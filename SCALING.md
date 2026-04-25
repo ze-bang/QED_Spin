@@ -340,21 +340,51 @@ node, and N=32 GPU runs are 2× faster.
 
 Distributed memory. This is the regime change.
 
-1. **`DistributedOperator` abstraction** parallel to `Operator`. Each MPI
-   rank owns a contiguous slab of the basis; `apply(v_in_local,
-   v_out_local)` does local SpMV + `MPI_Alltoallv` for the off-diagonal
-   columns. Symmetry-aware: the slab boundaries should respect orbit
-   structure so the off-rank traffic is bounded.
-2. **Distributed Lanczos** built on top. Dot products via `MPI_Allreduce`,
-   `axpy` is purely local. Re-orth is the painful one — needs either
-   replicated short Krylov basis (`m ≤ 100`) or distributed re-orth via
-   ring-exchange.
-3. **Distributed FTLM / TPQ.** Once distributed Lanczos exists, FTLM
-   becomes "distributed Lanczos × MPI-over-samples" and TPQ becomes
-   "distributed-vector imaginary-time evolution" — both straightforward.
-4. **Cluster-aware launcher.** A `scripts/launch_distributed.sh` that does
-   the right SLURM / Open MPI / MVAPICH2 incantations for common HPC
-   environments, with rank-binding and HBM-aware placement.
+1. **`DistributedOperator` abstraction** parallel to `Operator`. — **DONE
+   (Phase 3b #1).** Header at
+   `include/ed/distributed/distributed_operator.h`. Each MPI rank owns a
+   contiguous slab of the basis (1D row decomposition via
+   `balanced_slab`); `apply(v_in_local, v_out_local)` extracts the
+   bit-flip patterns of the Hamiltonian once at construction time, builds
+   an `MPI_Alltoallv` plan + a `SortedUint64Index` lookup for the receive
+   buffer (Phase 3a #5 reused), then runs a single Alltoallv per matvec
+   followed by a gather-form OpenMP-parallel SpMV. Lockdown tests vs the
+   serial `Operator` are bit-identical on N=4 OBC, N=6 PBC, N=8 OBC
+   across `np ∈ {1,2,4}` (`tests/unit/test_distributed_operator.cpp`).
+   *Honest scope:* the current 1D row partitioning is **not**
+   symmetry-aware — for "honest 40" with full lattice symmetry we still
+   need the orbit-respecting slab boundaries, otherwise Alltoallv counts
+   may approach the slab size on long-range Hamiltonians.
+2. **Distributed Lanczos** built on top. — **DONE (Phase 3b #2).** Header
+   at `include/ed/distributed/distributed_lanczos.h`. Rank-local Krylov
+   basis; dot products via `MPI_Allreduce`, `axpy` / `scal` purely local;
+   tridiagonal eigensolve replicated on every rank (Eigen). Optional
+   `full_reorth` for high-precision runs. The result struct now also
+   exposes `tridiag_eigenvalues` + `tridiag_weights` (squared first
+   component of each tridiagonal eigenvector) so FTLM / DOS estimators
+   can use the proper J&P weights without re-running Lanczos. Lockdown
+   tests check ground state vs dense reference on N=4 OBC, N=6 PBC, plus
+   `full_reorth = true ↔ false` agreement and bit-replicated eigenvalues
+   across all ranks (`tests/unit/test_distributed_lanczos.cpp`).
+3. **Distributed FTLM / TPQ.** — **PARTIAL (Phase 3b #3).** Header at
+   `include/ed/distributed/distributed_ftlm.h`. Implements MPI-over-
+   samples (`n_groups` outer parallelism via `MPI_Comm_split`) on top of
+   `DistributedLanczos` with the proper J&P trace estimator
+   `Z(β) ≈ (D/R) Σ_s Σ_k |⟨v0_s|ψ_k_s⟩|² exp(-β E_k_s)`. Lockdown tests
+   recover the exact partition function on N=4 OBC within statistical
+   noise across `np ∈ {1,2,4}` (`tests/unit/test_distributed_ftlm.cpp`).
+   *Deferred to Phase 3b #5:* generic operator expectation values
+   `⟨O⟩(β)` (needs a distributed Krylov-basis replay against a second
+   `DistributedOperator` wrapping `O`); distributed TPQ
+   imaginary-time evolution.
+4. **Cluster-aware launcher.** — **DONE (Phase 3b #4).** Standalone
+   driver `ed_distributed_main` (built when `WITH_MPI=ON`) at
+   `src/cli/ed_distributed_main.cpp` exercises both
+   `distributed_lanczos` and `distributed_ftlm` from the command line.
+   Wrappers in `scripts/distributed/`:
+   `run_dist.sh` for single-node `mpiexec`, `slurm_dist.sbatch` for
+   slurm, `README.md` for the CLI surface. Smoke-test on N=12 PBC
+   reproduces the exact ground state E0 = -5.387… on `np=4`.
 
 After Phase 3b: N=40 with symmetry on ~64 ranks is **possible**, and
 N=36 thermodynamics finishes in hours instead of days.
@@ -364,10 +394,18 @@ N=36 thermodynamics finishes in hours instead of days.
 Multi-GPU and the last 10× of scale. Validation requires actual cluster
 hardware.
 
-1. **NCCL-based multi-GPU Lanczos.** Replace `MPI_Allreduce` with
-   `ncclAllReduce` for dot products on the same node; use NVLink/NVSwitch
-   when available; fall back to MPI-over-Infiniband across nodes. Build
-   on cuQuantum's `custatevec`-style API for the SpMV.
+1. **NCCL-based multi-GPU Lanczos.** — **STUB ONLY (Phase 3c).** The
+   build system now discovers NCCL when both `WITH_CUDA=ON` and
+   `WITH_MPI=ON` (sets `NCCL_FOUND`, `NCCL_INCLUDE_DIRS`,
+   `NCCL_LIBRARIES`, propagates `ED_HAVE_NCCL` to `ed_distributed`); a
+   detection-only header lives at
+   `include/ed/distributed/multi_gpu_stub.h` exposing
+   `ed::distributed::multi_gpu::nccl_compiled_in()` and
+   `nccl_status_string()`. **No runtime kernels exist yet.** Plan once
+   we book HPC time: replace `MPI_Allreduce` with `ncclAllReduce` for
+   dot products on the same node; use NVLink/NVSwitch when available;
+   fall back to MPI-over-Infiniband across nodes. Build on cuQuantum's
+   `custatevec`-style API for the SpMV.
 2. **GPU-Direct RDMA for halo exchange.** The off-diagonal columns in
    distributed SpMV are the bottleneck once compute is GPU-resident. RDMA
    directly between GPU memory across the IB fabric makes this work at
@@ -386,10 +424,23 @@ ED. Until then, claim only what we can deliver.
 
 ## 7. What I am explicitly *not* claiming
 
-* That the current code can do 40+ sites. It cannot.
-* That MPI in the current code is "distributed Lanczos". It is not — MPI
-  here is *only* sample-level parallelism in FTLM (and Jpm-sweep
-  parallelism in BFG). The state vector is local to one rank.
+* That the current code can do 40+ sites *as a routine production
+  workflow*. The Phase 3b distributed solvers in `ed::distributed`
+  (`DistributedOperator` / `DistributedLanczos` / `DistributedFTLM`,
+  Phase 3b #1–#4) are correctness-locked vs the serial path on
+  Heisenberg N≤8 across `np ∈ {1,2,4}`, but they ride a 1D row
+  decomposition that is **not** symmetry-aware and they have not yet
+  been exercised at N=40 on a real cluster. "Honest 40" remains a
+  Phase 3b #5 objective.
+* That the MPI in the original `ED` driver / `ed_main.cpp` is
+  "distributed Lanczos". It is not — there MPI is *only* sample-level
+  parallelism in FTLM (and Jpm-sweep parallelism in BFG). For
+  rank-distributed state vectors, use `ed::distributed::*` /
+  `ed_distributed_main`.
+* That Phase 3c multi-GPU is implemented. It is not. The build system
+  detects NCCL when present and `ed::distributed::multi_gpu::
+  nccl_compiled_in()` reports back, but no NCCL-backed kernels exist
+  yet (validation needs HPC time we have not booked).
 * That `BasisBufferScope` / `ED_LANCZOS_DISK=1` lets you hold a vector
   bigger than node RAM. It only spills the *Krylov basis*; the *active
   vectors* still live in RAM.

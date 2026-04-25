@@ -76,42 +76,45 @@ DistributedFtlmResult distributed_ftlm(
     std::vector<double> Z_local(betas.size(), 0.0);
 
     DistributedLanczosOptions lopts;
-    lopts.max_iter   = options.lanczos_max_iter;
-    lopts.exct       = options.lanczos_max_iter;  // keep all Ritz values
-    lopts.full_reorth = false;
+    lopts.max_iter        = options.lanczos_max_iter;
+    lopts.exct            = options.lanczos_max_iter;  // keep all Ritz values
+    lopts.full_reorth     = true;   // FTLM weights need clean orthogonality
+    lopts.compute_weights = true;
+
+    // FTLM trace-estimator scaling: the standard J&P normalisation is
+    //   Z(beta) ~ (D / R) * sum_s sum_k |<r_s | psi_k_s>|^2 exp(-beta E_k_s)
+    // where D = global Hilbert-space dimension and R = number of random
+    // samples. Our v0_s is L2-normalised to 1, so |<r_s | psi_k_s>|^2 is
+    // already in units of 1/D^2 relative to a Hutchinson estimator that
+    // would set ||v0_s||^2 = D. We restore the canonical D scaling at the
+    // end (multiply by D/R).
+    const double D = static_cast<double>(dop.global_dim());
 
     for (int s : my_samples) {
         lopts.seed = options.seed_offset + static_cast<unsigned long>(s);
 
-        // We need both Ritz values AND the squared first-component weights
-        // for the FTLM trace estimator
-        //
-        //   Z(beta) = sum_k |<v0 | psi_k>|^2 exp(-beta E_k)
-        //           = sum_k weights[k] * exp(-beta E_k)
-        //
-        // The DistributedLanczosResult struct currently only carries
-        // eigenvalues. For the first cut, we replicate the partial trace:
-        // the leading-order FTLM kernel uses *only* the ground-state
-        // contribution. A full FTLM with Ritz weights is wired in here as
-        // soon as DistributedLanczos exposes them (currently a Phase
-        // 3b #2.5 follow-up).
-        //
-        // Until then, we contribute exp(-beta E_min) per sample, which is
-        // a strict-from-below partition-function estimator that converges
-        // to the true Z at beta -> infinity. Documented honestly in
-        // PHASE_3_SUMMARY.md.
         DistributedLanczosResult lres = distributed_lanczos(dop, lopts);
 
-        if (lres.eigenvalues.empty()) continue;
-        const double E_min = lres.eigenvalues.front();
+        if (lres.tridiag_eigenvalues.empty()) {
+            // Recurrence broke down too early -- skip sample.
+            continue;
+        }
+
+        // Z(beta) ~= D * sum_k weights[k] * exp(-beta * E_k)
         for (std::size_t b = 0; b < betas.size(); ++b) {
-            Z_local[b] += std::exp(-betas[b] * E_min);
+            double zk = 0.0;
+            const double beta = betas[b];
+            for (std::size_t k = 0; k < lres.tridiag_eigenvalues.size(); ++k) {
+                zk += lres.tridiag_weights[k]
+                      * std::exp(-beta * lres.tridiag_eigenvalues[k]);
+            }
+            Z_local[b] += D * zk;
         }
 
         if (options.verbose && world_rank == 0) {
             std::cout << "  [dist-ftlm] sample s=" << s
                       << " group=" << my_group
-                      << " E0=" << E_min
+                      << " E0=" << lres.eigenvalues.front()
                       << " iters=" << lres.iterations << std::endl;
         }
     }

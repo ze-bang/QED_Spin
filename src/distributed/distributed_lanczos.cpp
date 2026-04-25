@@ -165,6 +165,38 @@ std::vector<double> solve_tridiag(const std::vector<double>& alpha,
     return evals;
 }
 
+// Same as solve_tridiag but also returns the squared first-row component of
+// each eigenvector |<e_0|psi_k>|^2 -- the FTLM weight. Eigenvalues here are
+// returned in Eigen's natural ascending order (not re-sorted, since that
+// would shuffle the weights).
+void solve_tridiag_with_weights(const std::vector<double>& alpha,
+                                const std::vector<double>& beta,
+                                std::size_t m,
+                                std::vector<double>& evals,
+                                std::vector<double>& weights) {
+    evals.clear();
+    weights.clear();
+    if (m == 0) return;
+    Eigen::MatrixXd T(m, m);
+    T.setZero();
+    for (std::size_t i = 0; i < m; ++i) {
+        T(i, i) = alpha[i];
+        if (i + 1 < m) {
+            T(i, i + 1) = beta[i + 1];
+            T(i + 1, i) = beta[i + 1];
+        }
+    }
+    Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> es(T);
+    evals.resize(m);
+    weights.resize(m);
+    const auto& V = es.eigenvectors();  // m x m, columns = eigenvectors
+    for (std::size_t k = 0; k < m; ++k) {
+        evals[k] = es.eigenvalues()(k);
+        const double v0k = V(0, k);
+        weights[k] = v0k * v0k;
+    }
+}
+
 }  // namespace
 
 DistributedLanczosResult distributed_lanczos(
@@ -282,14 +314,31 @@ DistributedLanczosResult distributed_lanczos(
     }
 
     // Solve final tridiagonal eigenproblem.
-    std::vector<double> all_ev =
-        solve_tridiag(alpha, beta, alpha.size());
-
     DistributedLanczosResult result;
     result.iterations = iters_done;
-    const std::size_t n_keep =
-        std::min<std::size_t>(static_cast<std::size_t>(exct), all_ev.size());
-    result.eigenvalues.assign(all_ev.begin(), all_ev.begin() + n_keep);
+
+    if (options.compute_weights) {
+        std::vector<double> evals_unsorted, weights_unsorted;
+        solve_tridiag_with_weights(alpha, beta, alpha.size(),
+                                    evals_unsorted, weights_unsorted);
+        result.tridiag_eigenvalues = evals_unsorted;
+        result.tridiag_weights     = weights_unsorted;
+        std::vector<double> evals_sorted = evals_unsorted;
+        std::sort(evals_sorted.begin(), evals_sorted.end());
+        const std::size_t n_keep =
+            std::min<std::size_t>(static_cast<std::size_t>(exct),
+                                  evals_sorted.size());
+        result.eigenvalues.assign(evals_sorted.begin(),
+                                  evals_sorted.begin() + n_keep);
+    } else {
+        std::vector<double> all_ev =
+            solve_tridiag(alpha, beta, alpha.size());
+        const std::size_t n_keep =
+            std::min<std::size_t>(static_cast<std::size_t>(exct),
+                                  all_ev.size());
+        result.eigenvalues.assign(all_ev.begin(),
+                                   all_ev.begin() + n_keep);
+    }
     return result;
 }
 

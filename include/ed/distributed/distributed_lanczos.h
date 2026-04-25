@@ -60,6 +60,13 @@ struct DistributedLanczosOptions {
     /// their slab via MPI_Scatterv, so different `seed` values produce
     /// different runs across all ranks consistently.
     unsigned long seed = 12345UL;
+
+    /// If true, populate `tridiag_eigenvalues` and `tridiag_weights` in
+    /// the result struct (one extra (m x m) eigensolve in addition to
+    /// the per-iteration tridiagonal solves; m = max_iter).  Required
+    /// by distributed_ftlm() for its trace estimator; default false to
+    /// keep the eigenvalue-only path lean.
+    bool compute_weights = false;
 };
 
 struct DistributedLanczosResult {
@@ -71,6 +78,19 @@ struct DistributedLanczosResult {
     /// if the recurrence breaks down via beta_j ~= 0, which signals an
     /// invariant Krylov subspace).
     int iterations = 0;
+
+    /// Full Ritz spectrum (same length as `tridiag_alpha`, replicated on
+    /// every rank). Caller may use this with `tridiag_weights` for
+    /// FTLM-style trace estimators when `compute_weights = true`. Empty
+    /// otherwise.
+    std::vector<double> tridiag_eigenvalues;
+
+    /// Squared first component of each tridiagonal eigenvector
+    /// (|<e_0 | psi_k>|^2 in tridiagonal-basis). Combined with the
+    /// initial-vector overlap in the FTLM kernel:
+    ///   Z(beta) ~ sum_k tridiag_weights[k] * exp(-beta * tridiag_eigenvalues[k])
+    /// when v0 is L2-normalised. Empty unless compute_weights = true.
+    std::vector<double> tridiag_weights;
 };
 
 /// Distributed Lanczos for a DistributedOperator. Collective on

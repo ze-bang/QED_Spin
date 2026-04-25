@@ -263,6 +263,24 @@ endif()
 # routes the same `compute_*_workflow` kernels through `ed::dssf::run(...)`.
 # See `MODERNIZATION_AUDIT.md` for migration notes and the historical context.
 
+# -----------------------------------------------------------------------------
+# Phase 3b #4: ed_distributed_main (MPI cluster launcher)
+#
+# Tiny standalone driver that exercises ed::distributed::distributed_lanczos
+# and ed::distributed::distributed_ftlm on an unsymmetrised Heisenberg chain.
+# Designed to validate a build/queue/interconnect triple end-to-end before
+# scientists try the full DSSF/FTLM workflows on top of it. See the file
+# header for the CLI surface and `scripts/distributed/run_dist.sh` for the
+# launcher template.
+# -----------------------------------------------------------------------------
+if(WITH_MPI AND TARGET ed_distributed)
+    add_executable(ed_distributed_main src/cli/ed_distributed_main.cpp)
+    target_link_libraries(ed_distributed_main PRIVATE ed_distributed)
+    target_compile_options(ed_distributed_main PRIVATE
+        $<$<COMPILE_LANGUAGE:CXX>:${CPU_OPT_FLAGS}>
+    )
+endif()
+
 # BFG Order Parameter computation (lightweight, HDF5 + OpenMP only)
 add_executable(compute_bfg_order_parameters ${APPS_DIR}/compute_bfg_order_parameters.cpp)
 target_link_libraries(compute_bfg_order_parameters ed_bfg ${HDF5_LIBRARIES})
@@ -414,6 +432,12 @@ if(TARGET compute_bfg_order_parameters)
             RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 endif()
 
+# Phase 3b #4: install the distributed cluster launcher alongside ED.
+if(TARGET ed_distributed_main)
+    install(TARGETS ed_distributed_main
+            RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+endif()
+
 # Public headers (preserve subdirectory layout).
 install(DIRECTORY ${INCLUDE_DIR}/ed
         DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
@@ -459,6 +483,46 @@ else()
     message(STATUS "  CUDA Support: NO")
 endif()
 message(STATUS "  MPI Support: ${WITH_MPI}")
+
+# -----------------------------------------------------------------------------
+# Phase 3c: NCCL detection (read-only stub).
+#
+# Multi-GPU support (Phase 3c "honest 48") will eventually need NCCL for
+# collective allreduce on device buffers. This block is a *detection-only*
+# stub: it discovers the NCCL include / library if installed, exposes the
+# usual NCCL_FOUND/NCCL_INCLUDE_DIRS/NCCL_LIBRARIES variables, and prints a
+# status line. It does NOT yet enable any code paths -- the actual
+# multi-GPU validation requires HPC time we have not allocated. See
+# `MODERNIZATION_AUDIT.md` (Phase 3c) and `SCALING.md` for the honest
+# scope. The detection lives here so cluster admins can ship a build with
+# NCCL discovered and we can flip the implementation switch in a future
+# PR without re-touching the build system.
+# -----------------------------------------------------------------------------
+if(WITH_CUDA AND WITH_MPI)
+    find_path(NCCL_INCLUDE_DIRS NAMES nccl.h
+              HINTS $ENV{NCCL_ROOT}/include $ENV{NCCL_HOME}/include
+                    /usr/include /usr/local/include /opt/nccl/include)
+    find_library(NCCL_LIBRARIES NAMES nccl
+                 HINTS $ENV{NCCL_ROOT}/lib $ENV{NCCL_HOME}/lib
+                       /usr/lib/x86_64-linux-gnu /usr/local/lib /opt/nccl/lib)
+    if(NCCL_INCLUDE_DIRS AND NCCL_LIBRARIES)
+        set(NCCL_FOUND TRUE)
+        message(STATUS "  NCCL Support: DETECTED (detection-only; "
+                       "Phase 3c multi-GPU code path is a stub)")
+        message(STATUS "    NCCL_INCLUDE_DIRS: ${NCCL_INCLUDE_DIRS}")
+        message(STATUS "    NCCL_LIBRARIES:    ${NCCL_LIBRARIES}")
+        # Propagate ED_HAVE_NCCL to ed_distributed (and any TU that
+        # transitively pulls in <ed/distributed/multi_gpu_stub.h>).
+        if(TARGET ed_distributed)
+            target_compile_definitions(ed_distributed PUBLIC ED_HAVE_NCCL=1)
+        endif()
+    else()
+        set(NCCL_FOUND FALSE)
+        message(STATUS "  NCCL Support: NOT FOUND (Phase 3c multi-GPU disabled)")
+    endif()
+else()
+    set(NCCL_FOUND FALSE)
+endif()
 
 # Build configuration summary and performance options
 message(STATUS "")
@@ -686,6 +750,11 @@ if(BUILD_ED_TESTS)
         # Phase 3b #2: distributed Lanczos (rank-local Krylov + MPI_Allreduce)
         ed_add_mpi_test(test_distributed_lanczos
                         tests/unit/test_distributed_lanczos.cpp)
+
+        # Phase 3b #3: distributed FTLM (J&P trace estimator with Ritz weights,
+        # MPI parallelism over samples)
+        ed_add_mpi_test(test_distributed_ftlm
+                        tests/unit/test_distributed_ftlm.cpp)
     endif()
     ed_add_test(test_trans_interall_loading     tests/unit/test_trans_interall_loading.cpp USE_CATCH2)
     ed_add_test(test_observables                tests/unit/test_observables.cpp USE_CATCH2)
