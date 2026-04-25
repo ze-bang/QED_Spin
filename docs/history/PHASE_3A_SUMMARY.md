@@ -7,7 +7,7 @@
 > single-node bottleneck a profiler can find.
 >
 > Read this once and you have the full picture. For per-item depth see
-> [`SCALING.md`](./SCALING.md) §6 and [`MODERNIZATION_AUDIT.md`](./MODERNIZATION_AUDIT.md) §9.
+> [`../architecture/SCALING.md`](../architecture/SCALING.md) §6 and [`./MODERNIZATION_AUDIT.md`](./MODERNIZATION_AUDIT.md) §9.
 
 ## Headline result
 

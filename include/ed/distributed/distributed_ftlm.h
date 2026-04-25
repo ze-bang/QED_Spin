@@ -25,7 +25,7 @@
 // cost vs the Z-only path is O(1) extra DistributedOperator matvecs per
 // sample (one for u = O r_s) plus m extra rank-local zdotc + Allreduce.
 //
-// Honest scope notes (carried into PHASE_3_SUMMARY.md):
+// Honest scope notes (carried into docs/history/PHASE_3_SUMMARY.md):
 //
 //   * For honest 40 the inner DistributedOperator hits the slab-decomposition
 //     limits documented in the DistributedOperator header. Honest-40 FTLM

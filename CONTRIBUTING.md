@@ -10,10 +10,10 @@ cd exact_diagonalization_cpp
 pre-commit install                  # one-time, after `pip install pre-commit`
 cmake --preset default              # Release + OpenBLAS, no CUDA/MPI
 cmake --build --preset default -j   # build
-ctest --preset default              # 12/12 must pass
+ctest --preset default              # 146/146 must pass
 ```
 
-If `ctest` is not 12/12 green on `main`, that is a bug. File an issue.
+If `ctest` is not 146/146 green on `main`, that is a bug. File an issue.
 
 ## Build presets
 
@@ -60,7 +60,7 @@ If you want them set automatically every time you configure, copy `local.cmake.e
 
 - One logical change per commit. Big refactors land as a series of small commits where every intermediate state still builds and `ctest` is green.
 - Commit messages: imperative subject ("add", "fix", "refactor"), 72-col first line, then a body that explains *why*.
-- Reference the audit phase if applicable: `(P0.7)`, `(P1.3)`, `(P2.2)`, etc. See `MODERNIZATION_AUDIT.md`.
+- Reference the audit phase if applicable: `(P0.7)`, `(P1.3)`, `(P2.2)`, etc. See `docs/history/MODERNIZATION_AUDIT.md` for the legacy numbering scheme.
 - PRs: small, focused, one author. Self-review before requesting review.
 - CI must be green before merge. No exceptions for `main`.
 
@@ -83,5 +83,8 @@ Open a GitHub issue with:
 
 ## Architecture documents
 
-- `MODERNIZATION_AUDIT.md` — the master plan for the modernization effort. Read this before making structural changes.
+- `docs/architecture/IMPLEMENTATION_REPORT.md` — exhaustive subsystem reference. Read this before making structural changes.
+- `docs/architecture/SCALING.md` — performance envelope and tunable knobs.
+- `docs/architecture/IMPLEMENTATION_NOTES.md` — deferred / HPC-gated work; pick from here if you have cluster time.
+- `docs/history/MODERNIZATION_AUDIT.md`, `docs/history/PHASE_3*_SUMMARY.md` — historical roadmap and phase summaries (frozen).
 - `README.md` — user-facing introduction to the toolkit.

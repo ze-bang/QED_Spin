@@ -78,5 +78,5 @@ sbatch --export=ALL,MODE=ftlm,NSITES=24 scripts/distributed/slurm_dist.sbatch
   launcher, not a science driver. The full DSSF / FTLM workflows still
   go through the `ED dssf <method>` CLI in the main `ED` binary.
 
-See `SCALING.md` and `MODERNIZATION_AUDIT.md` for the broader Phase 3
+See `docs/architecture/SCALING.md` and `docs/history/PHASE_3_SUMMARY.md` for the broader Phase 3
 context.

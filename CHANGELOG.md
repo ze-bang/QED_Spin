@@ -7,6 +7,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — Phase 3b lockdown, head-to-head benchmarks, and release polish
+
+The Phase 3 distributed-memory campaign reaches its publication-grade
+checkpoint. What landed:
+
+- **Distributed Lanczos with eigenvector reconstruction** (Phase 3b #6).
+  `ed::distributed::distributed_lanczos_eigenvectors` returns rank-local
+  eigenvector slabs that satisfy `||H psi - E psi||_2 < 1e-8` and are
+  bit-identical across ranks (`tests/unit/test_distributed_eigenvectors.cpp`).
+- **Distributed FTLM with observables** (Phase 3b #5). The Jaklic-Prelovsek
+  estimator is generalized to arbitrary `Operator` observables; energy
+  matches the exact thermal trace to machine precision on small systems
+  (`tests/unit/test_distributed_ftlm.cpp`).
+- **Distributed canonical TPQ** (Phase 3b #8). Imaginary-time evolution
+  via Taylor expansion of `e^{-dB H}`, with energy and variance reported
+  per target beta and replicated across ranks
+  (`tests/unit/test_distributed_tpq.cpp`).
+- **Comprehensive head-to-head benchmark suite**. New
+  `benchmarks/bench_all_backends.py` orchestrator emits a single JSON
+  artefact across CPU SpMV, CPU Lanczos, GPU SpMV, GPU Lanczos,
+  distributed Lanczos, QuSpin's `hamiltonian.dot`, SciPy `csr @ v`, and
+  `scipy.sparse.linalg.eigsh` peer baselines; results are written up in
+  `docs/benchmarks/BENCHMARKS.md`.
+- **Runnable examples for every workflow.** New top-level `examples/`
+  directory with thirteen self-contained programs (CPU / GPU / MPI / FTLM /
+  TPQ / DSSF / NLCE / CLI) that build via `-DED_BUILD_EXAMPLES=ON`.
+- **Repository cleanup for release.** Top-level markdown reduced to the
+  three canonical files (`README.md`, `CHANGELOG.md`, `CONTRIBUTING.md`).
+  All architectural documents moved under `docs/architecture/`, the
+  benchmark write-up under `docs/benchmarks/`, and historical phase
+  reports archived under `docs/history/`. New
+  `docs/architecture/IMPLEMENTATION_NOTES.md` consolidates every deferred
+  HPC-time-gated item (symmetry-aware row partitioning, NCCL multi-GPU,
+  GPU-Direct RDMA, distributed disk-backed Krylov, 40-site validation).
+
+Test coverage: 146 / 146 green (was 137 / 137 in the previous Phase 3a
+checkpoint).
+
 ### Fixed — CI matrix back to green (Docs, Clang Debug, clang-tidy, CUDA)
 
 The four GitHub Actions lanes that had been dark since they were first

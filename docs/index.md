@@ -57,8 +57,18 @@ The following live at the repository root and are rendered on GitHub:
   — versioned release notes.
 - [`CONTRIBUTING.md`](https://github.com/ze-bang/exact_diagonalization_cpp/blob/main/CONTRIBUTING.md)
   — how to set up a dev environment and submit changes.
-- [`MODERNIZATION_AUDIT.md`](https://github.com/ze-bang/exact_diagonalization_cpp/blob/main/MODERNIZATION_AUDIT.md)
-  — the full rolling roadmap.
+- [`docs/architecture/IMPLEMENTATION_REPORT.md`](https://github.com/ze-bang/exact_diagonalization_cpp/blob/main/docs/architecture/IMPLEMENTATION_REPORT.md)
+  — exhaustive subsystem reference.
+- [`docs/architecture/SCALING.md`](https://github.com/ze-bang/exact_diagonalization_cpp/blob/main/docs/architecture/SCALING.md)
+  — scaling envelope, memory tables, environment-variable controls.
+- [`docs/architecture/IMPLEMENTATION_NOTES.md`](https://github.com/ze-bang/exact_diagonalization_cpp/blob/main/docs/architecture/IMPLEMENTATION_NOTES.md)
+  — deferred work and HPC-gated milestones.
+- [`docs/benchmarks/BENCHMARKS.md`](https://github.com/ze-bang/exact_diagonalization_cpp/blob/main/docs/benchmarks/BENCHMARKS.md)
+  — head-to-head benchmark write-up vs QuSpin / SciPy.
+- [`examples/`](https://github.com/ze-bang/exact_diagonalization_cpp/tree/main/examples)
+  — runnable C++ / Python / CLI examples (one per use case).
+- [`docs/history/`](https://github.com/ze-bang/exact_diagonalization_cpp/tree/main/docs/history)
+  — historical phase summaries (`MODERNIZATION_AUDIT`, `PHASE_3A`, `PHASE_3`).
 
 ## Indices and tables
 

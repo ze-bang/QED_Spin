@@ -31,7 +31,7 @@
 // a world-level Allreduce, which is then divided by `n_samples` so all
 // ranks return the same sample-averaged result.
 //
-// Honest scope notes (carried into PHASE_3_SUMMARY.md):
+// Honest scope notes (carried into docs/history/PHASE_3_SUMMARY.md):
 //
 //   * The Taylor expansion is stable up to ||delta_beta * H|| of order 1.
 //     For honest 40 the full operator norm scales like O(N), so practical

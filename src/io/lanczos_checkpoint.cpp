@@ -3,7 +3,7 @@
 //
 // HDF5-backed Krylov-state checkpoint / restart for the default Lanczos
 // solver. See include/ed/io/lanczos_checkpoint.h for the schema and the
-// rationale (Phase 3a #1 from SCALING.md / MODERNIZATION_AUDIT.md §9).
+// rationale (Phase 3a #1 from docs/architecture/SCALING.md / docs/history/MODERNIZATION_AUDIT.md §9).
 // =============================================================================
 
 #include "ed/io/lanczos_checkpoint.h"

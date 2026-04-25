@@ -44,6 +44,14 @@ compile_commands.json
 *.ptx
 
 # ---------------------------------------------------------------------------
+# Benchmark log files (the JSON artifact `bench_all_backends.json` IS
+# checked in as the reference data backing docs/benchmarks/BENCHMARKS.md;
+# the verbose .log file is not.)
+# ---------------------------------------------------------------------------
+bench_all_backends.log
+bench_vs_quspin*.log
+
+# ---------------------------------------------------------------------------
 # Python build / wheel / cache artifacts
 # ---------------------------------------------------------------------------
 __pycache__/

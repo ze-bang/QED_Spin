@@ -5,7 +5,7 @@
 // =============================================================================
 //
 // At ~2 × 10⁸ sector states (N≈36 with full point-group + Sz symmetry, see
-// SCALING.md) a Lanczos run is a multi-day job. Today the solver has no way
+// docs/architecture/SCALING.md) a Lanczos run is a multi-day job. Today the solver has no way
 // to resume after a node failure or wall-clock kill: a SIGTERM at hour 40
 // throws away every iteration. This header adds a small, side-channel
 // checkpoint format that snapshots the exact Krylov state at iteration k so

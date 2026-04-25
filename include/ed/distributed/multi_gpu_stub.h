@@ -11,7 +11,7 @@
 //   ED_HAVE_NCCL  -- defined to 1 by CMake when NCCL was discovered AND
 //                    both WITH_CUDA and WITH_MPI are ON. Otherwise undefined.
 //
-// Honest-scope notes (see SCALING.md "Phase 3c"):
+// Honest-scope notes (see docs/architecture/SCALING.md "Phase 3c"):
 //   * Validating multi-GPU correctness needs >= 2 visible CUDA devices,
 //     a working NCCL/RDMA stack, and an HPC slot we have not booked.
 //     Until that work happens, this header exists ONLY so that:

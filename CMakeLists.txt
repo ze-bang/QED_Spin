@@ -261,7 +261,7 @@ endif()
 # kernels + a positional CLI + parallel HDF5 plumbing) was deleted in P2.14.
 # Every feature it offered is now reachable through `ED dssf <method>`, which
 # routes the same `compute_*_workflow` kernels through `ed::dssf::run(...)`.
-# See `MODERNIZATION_AUDIT.md` for migration notes and the historical context.
+# See `docs/history/MODERNIZATION_AUDIT.md` for migration notes and the historical context.
 
 # -----------------------------------------------------------------------------
 # Phase 3b #4: ed_distributed_main (MPI cluster launcher)
@@ -493,7 +493,7 @@ message(STATUS "  MPI Support: ${WITH_MPI}")
 # usual NCCL_FOUND/NCCL_INCLUDE_DIRS/NCCL_LIBRARIES variables, and prints a
 # status line. It does NOT yet enable any code paths -- the actual
 # multi-GPU validation requires HPC time we have not allocated. See
-# `MODERNIZATION_AUDIT.md` (Phase 3c) and `SCALING.md` for the honest
+# `docs/history/MODERNIZATION_AUDIT.md` (Phase 3c) and `docs/architecture/SCALING.md` for the honest
 # scope. The detection lives here so cluster admins can ship a build with
 # NCCL discovered and we can flip the implementation switch in a future
 # PR without re-touching the build system.
@@ -629,6 +629,15 @@ option(BUILD_ED_TESTS "Build the ED regression test suite" ON)
 option(ED_BUILD_BENCHMARKS "Build the Google-Benchmark micro-benchmarks" OFF)
 if(ED_BUILD_BENCHMARKS)
     add_subdirectory(benchmarks)
+endif()
+
+# -----------------------------------------------------------------------------
+# Runnable use-case examples under examples/. Off by default; opt in via
+# `-DED_BUILD_EXAMPLES=ON`. See examples/README.md for the full index.
+# -----------------------------------------------------------------------------
+option(ED_BUILD_EXAMPLES "Build the runnable C++ examples in examples/" OFF)
+if(ED_BUILD_EXAMPLES)
+    add_subdirectory(examples)
 endif()
 
 if(BUILD_ED_TESTS)

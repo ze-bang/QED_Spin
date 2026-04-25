@@ -1086,7 +1086,7 @@ Each item below is small enough to be a single self-contained PR. The audit can 
 
 After Batches 1, 2 and 3 landed, the codebase is *clean* and *honest* but the
 single-process architecture has a hard ceiling. The dedicated reference for
-this is [`SCALING.md`](./SCALING.md); this section is the one-paragraph
+this is [`SCALING.md`](../architecture/SCALING.md); this section is the one-paragraph
 summary so nobody reads the audit and assumes "modernized" implies "48 sites".
 
 **Practical envelope on a single node, today:**
@@ -1228,7 +1228,7 @@ orbit-element CSR (`SymBasisState::orbit_elements`), not the lookup
 index.
 
 **Phase 3b (distributed-memory `Operator` / `Lanczos` / `FTLM`) is now
-landed** — see [`PHASE_3_SUMMARY.md`](./PHASE_3_SUMMARY.md) for the full
+landed** — see [`PHASE_3_SUMMARY.md`](./PHASE_3_SUMMARY.md) (this file's directory) for the full
 write-up. New namespace `ed::distributed` under
 `include/ed/distributed/` and `src/distributed/`:
 
@@ -1309,7 +1309,7 @@ Companion header `include/ed/distributed/multi_gpu_stub.h` exposes
 yet** — multi-GPU validation requires HPC time we have not booked.
 See `SCALING.md` §6 ("Phase 3c") for the honest scope.
 
-See [`SCALING.md`](./SCALING.md) for the full memory tables, runtime regime
+See [`SCALING.md`](../architecture/SCALING.md) for the full memory tables, runtime regime
 notes, environment-variable controls (`ED_LANCZOS_DISK`, `ED_FTLM_PARALLEL`,
 `ED_GPU_TIMING`, `ED_USE_SPARSE`, `ED_SPARSE_DIM_MAX`,
 `ED_GPU_ALLOW_DROPPED_THREEBODY`, `ED_CTPQ_PROPAGATOR`, `ED_CTPQ_KRYLOV_M`,

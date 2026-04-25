@@ -267,4 +267,4 @@ continue to work without changes.
   convergence estimators.
 * `python/quantum_ed/` — in-process ED Python bindings (no
   subprocess overhead) for prototyping new observables.
-* `MODERNIZATION_AUDIT.md` — top-level rollout log.
+* `docs/history/MODERNIZATION_AUDIT.md` — historical rollout log.

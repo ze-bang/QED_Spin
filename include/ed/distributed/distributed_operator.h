@@ -60,7 +60,7 @@
 //   conjugated correctly below). The condition rewrites are derived in
 //   distributed_operator.cpp -- search for "Gather rewrite".
 //
-// Honest scope notes (carried into PHASE_3_SUMMARY.md):
+// Honest scope notes (carried into docs/history/PHASE_3_SUMMARY.md):
 //
 //   * The bit-flip-pattern enumeration is bounded by O(local_n_ *
 //     |patterns|) raw column references; for Heisenberg with O(N) bonds
@@ -73,7 +73,7 @@
 //     2^30, is too large. The PROPER fix is symmetry-aware slabbing: keep
 //     each fixed-Sz orbit on a single rank, then the bit-flip patterns
 //     within an orbit are local. We document this honestly in
-//     SCALING.md §6 / PHASE_3_SUMMARY.md and leave it as the next
+//     docs/architecture/SCALING.md §6 / docs/history/PHASE_3_SUMMARY.md and leave it as the next
 //     load-bearing item.
 //   * For the bounded tests in this PR (N <= 16, np up to 4) the recv
 //     buffer is small enough that the slab decomposition works directly

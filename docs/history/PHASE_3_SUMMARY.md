@@ -3,7 +3,7 @@
 > Closes Phase 3 of the SOTA-publication-grade ED roadmap. **3a** lifted
 > the realistic single-node ceiling from "honest 32, painful 36" to
 > "honest 36 routine, fast 32 GPU" (5 commits, see
-> [`PHASE_3A_SUMMARY.md`](./PHASE_3A_SUMMARY.md)). **3b** shipped a
+> [`PHASE_3A_SUMMARY.md`](./PHASE_3A_SUMMARY.md) — this directory). **3b** shipped a
 > rank-distributed solver suite: `DistributedOperator`,
 > `distributed_lanczos` (energies AND eigenvectors), `distributed_ftlm`
 > (Z(β) AND `<O>(β)`), and `distributed_tpq` (canonical TPQ via
@@ -15,8 +15,8 @@
 > at the end of Phase 2; +15 MPI tests at np ∈ {1,2,4} this phase).
 >
 > Read this once for the full picture. For per-item depth see
-> [`SCALING.md`](./SCALING.md) §6 and
-> [`MODERNIZATION_AUDIT.md`](./MODERNIZATION_AUDIT.md).
+> [`../architecture/SCALING.md`](../architecture/SCALING.md) §6 and
+> [`./MODERNIZATION_AUDIT.md`](./MODERNIZATION_AUDIT.md) (this directory).
 
 ## Headline result
 
