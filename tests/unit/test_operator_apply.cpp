@@ -143,31 +143,3 @@ TEST_CASE("Operator::apply: zero-coefficient term does not change spectrum",
     auto em = reference_from_operator(*modified, dim).eigs;
     require_eigs_close(em, eb, eb.size(), 1e-12, "zero-coeff term invariance");
 }
-
-TEST_CASE("Operator::apply_row_range matches full apply on row slabs (N=6 PBC)",
-          "[operator_apply][row_range][phase3b]") {
-    auto op = build_heisenberg_chain(/*N=*/6, /*J=*/1.0, /*periodic=*/true);
-    const uint64_t dim = 1ULL << 6;
-    ComplexVector v(dim);
-    for (uint64_t i = 0; i < dim; ++i) {
-        v[i] = Complex(0.01 * static_cast<double>(i % 11),
-                       0.02 * static_cast<double>(i % 7));
-    }
-    ComplexVector y_full(dim);
-    op->apply(v.data(), y_full.data(), dim);
-
-    for (uint64_t rb : {uint64_t{0}, uint64_t{13}, uint64_t{31}}) {
-        for (uint64_t n : {uint64_t{1}, uint64_t{17}, uint64_t{32}}) {
-            if (rb + n > dim) continue;
-            ComplexVector y_part(n);
-            op->apply_row_range(v.data(), y_part.data(), dim, rb, n);
-            for (uint64_t k = 0; k < n; ++k) {
-                const double d =
-                    std::abs(y_part[k].real() - y_full[rb + k].real()) +
-                    std::abs(y_part[k].imag() - y_full[rb + k].imag());
-                INFO("rb=" << rb << " n=" << n << " k=" << k << " err=" << d);
-                REQUIRE(d < 1e-10);
-            }
-        }
-    }
-}

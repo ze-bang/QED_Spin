@@ -1112,18 +1112,6 @@ GPU, deterministic per-sample seeding shared CPU↔GPU; MPI-parallelism over
 *independent samples* in FTLM (and over sweeps in BFG); HDF5 unified output
 schema with provenance and intermediate-state checkpointing.
 
-**Phase 3b bootstrap (MPI row-sliced matrix-free H·v) is now landed** — when
-built with `WITH_MPI=ON`, the `ed_distributed` static library exposes
-`ed::distributed::DistributedMatrixFreeOperator`, which balances a 1D row
-decomposition of the Hilbert space across ranks, `MPI_Allgatherv`s the input
-slice to a full `v` on every rank, and calls the new `Operator::apply_row_range`
-so each rank only stores its output slab. This proves MPI wiring + numerical
-equivalence vs `Operator::apply` (`test_distributed_matrix_free_np4` under
-`mpirun -n 4`; serial row-slice lockdown in `test_operator_apply` `[row_range]`).
-It is **not** yet the memory-reduced honest-40 path (full `v` is still
-replicated after the gather); that is the next engineering milestone
-(sparse halo + `MPI_Alltoallv` / distributed Lanczos).
-
 **What this codebase does NOT have** that blocks N ≥ 40 (the "Phase 3" gap):
 distributed-memory state vector for SpMV (the single biggest gap — every
 Lanczos / FTLM / TPQ / Krylov-Schur vector is `std::vector<Complex>` on one

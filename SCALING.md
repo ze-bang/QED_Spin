@@ -340,21 +340,11 @@ node, and N=32 GPU runs are 2× faster.
 
 Distributed memory. This is the regime change.
 
-1. **`DistributedOperator` abstraction** — **bootstrap landed (Phase 3b
-   #1).** New static lib `ed_distributed` + `include/ed/distributed/distributed_operator.h`:
-   `ed::distributed::DistributedMatrixFreeOperator` wraps `Operator` with a
-   balanced 1D row split (`local_row_offset`, `local_row_count`). `gather_input`
-   uses `MPI_Allgatherv` to assemble the full input vector from per-rank
-   slices; `apply` then calls `Operator::apply_row_range` so each rank only
-   allocates `y` for its owned rows. **Correctness-first:** every rank still
-   holds a full replica of `v` after the gather — this is *not* yet the
-   memory-reduced N=40 path; the next milestone replaces `MPI_Allgatherv`
-   with a sparse halo / `MPI_Alltoallv` pattern keyed by the Hamiltonian's
-   column structure. `Operator::apply_row_range` is the serial primitive
-   (CSR row slice + matrix-free `apply_optimized_impl` with filtered atomic
-   scatter); covered by `test_operator_apply` (`[row_range]`, N=6 PBC) and
-   `test_distributed_matrix_free_np4` under `mpirun -n 4` when `WITH_MPI=ON`.
-   Symmetry-aware slabbing (orbit-respecting partitions) remains future work.
+1. **`DistributedOperator` abstraction** parallel to `Operator`. Each MPI
+   rank owns a contiguous slab of the basis; `apply(v_in_local,
+   v_out_local)` does local SpMV + `MPI_Alltoallv` for the off-diagonal
+   columns. Symmetry-aware: the slab boundaries should respect orbit
+   structure so the off-rank traffic is bounded.
 2. **Distributed Lanczos** built on top. Dot products via `MPI_Allreduce`,
    `axpy` is purely local. Re-orth is the painful one — needs either
    replicated short Krylov basis (`m ≤ 100`) or distributed re-orth via

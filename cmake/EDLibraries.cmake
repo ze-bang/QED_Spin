@@ -70,7 +70,6 @@ set(_ED_PUBLIC_INCLUDES
     "$<BUILD_INTERFACE:${INCLUDE_DIR}/ed/cli>"
     "$<BUILD_INTERFACE:${INCLUDE_DIR}/ed/symmetry>"
     "$<BUILD_INTERFACE:${INCLUDE_DIR}/ed/parallel>"
-    "$<BUILD_INTERFACE:${INCLUDE_DIR}/ed/distributed>"
     "$<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>"
 )
 
@@ -110,35 +109,6 @@ target_compile_options(ed_parallel PRIVATE
     $<$<COMPILE_LANGUAGE:CXX>:${CPU_OPT_FLAGS}>
 )
 set_target_properties(ed_parallel PROPERTIES POSITION_INDEPENDENT_CODE ON)
-
-# -----------------------------------------------------------------------------
-# ed_distributed: Phase 3b MPI bootstrap — row-sliced matrix-free H·v
-# -----------------------------------------------------------------------------
-#
-# `DistributedMatrixFreeOperator` wraps `Operator::apply_row_range` with an
-# MPI_Allgatherv of the input vector (same 1D row decomposition as the output
-# slab). Correctness-first: full v is still materialised on every rank in
-# this milestone; a follow-up replaces the gather with sparse halo exchange.
-#
-# Only built when WITH_MPI=ON (requires MPI_Init before construction).
-# -----------------------------------------------------------------------------
-if(WITH_MPI)
-    add_library(ed_distributed STATIC
-        ${SRC_DIR}/distributed/distributed_operator.cpp
-    )
-    target_include_directories(ed_distributed PUBLIC ${_ED_PUBLIC_INCLUDES})
-    target_link_libraries(ed_distributed PUBLIC ed_core)
-    if(TARGET MPI::MPI_CXX)
-        target_link_libraries(ed_distributed PRIVATE MPI::MPI_CXX)
-    else()
-        target_include_directories(ed_distributed SYSTEM PRIVATE ${MPI_CXX_INCLUDE_PATH})
-        target_link_libraries(ed_distributed PRIVATE ${MPI_CXX_LIBRARIES})
-    endif()
-    target_compile_options(ed_distributed PRIVATE
-        $<$<COMPILE_LANGUAGE:CXX>:${CPU_OPT_FLAGS}>
-    )
-    set_target_properties(ed_distributed PROPERTIES POSITION_INDEPENDENT_CODE ON)
-endif()
 
 # -----------------------------------------------------------------------------
 # ed_io: I/O helpers (basis vector / lanczos basis buffer)

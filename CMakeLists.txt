@@ -393,9 +393,6 @@ include(GNUInstallDirs)
 include(CMakePackageConfigHelpers)
 
 set(_ED_INSTALL_TARGETS ed_parallel ed_io ed_core ed_dssf ed_bfg ed_symmetry ed_solvers_cpu ed_cli)
-if(TARGET ed_distributed)
-    list(APPEND _ED_INSTALL_TARGETS ed_distributed)
-endif()
 if(TARGET ed_solvers_gpu)
     list(APPEND _ED_INSTALL_TARGETS ed_solvers_gpu)
 endif()
@@ -640,33 +637,6 @@ if(BUILD_ED_TESTS)
     # Coverage: empty / build / duplicate-key / clear / sort-invariant +
     # 1M-entry stress vs unordered_map oracle (memory + correctness).
     ed_add_test(test_sorted_uint64_index        tests/unit/test_sorted_uint64_index.cpp USE_CATCH2)
-    # Phase 3b bootstrap: MPI row-sliced H·v (Allgatherv + apply_row_range).
-    # Launched as np=4 via MPIEXEC when WITH_MPI=ON and FindMPI provides a launcher.
-    if(WITH_MPI AND TARGET ed_distributed)
-        add_executable(test_distributed_matrix_free
-            tests/unit/test_distributed_matrix_free.cpp)
-        target_include_directories(test_distributed_matrix_free PRIVATE
-            ${CMAKE_CURRENT_SOURCE_DIR}/tests
-        )
-        target_link_libraries(test_distributed_matrix_free PRIVATE
-            ed_distributed ed_solvers_cpu
-        )
-        target_compile_options(test_distributed_matrix_free PRIVATE
-            $<$<COMPILE_LANGUAGE:CXX>:${CPU_OPT_FLAGS}>
-        )
-        if(MPIEXEC_EXECUTABLE)
-            add_test(
-                NAME test_distributed_matrix_free_np4
-                COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 4
-                    $<TARGET_FILE:test_distributed_matrix_free>
-            )
-            set_tests_properties(test_distributed_matrix_free_np4 PROPERTIES
-                ENVIRONMENT "ED_TEST_TMP_DIR=${CMAKE_CURRENT_BINARY_DIR}/test_scratch"
-                LABELS "mpi"
-                TIMEOUT 180
-            )
-        endif()
-    endif()
     ed_add_test(test_trans_interall_loading     tests/unit/test_trans_interall_loading.cpp USE_CATCH2)
     ed_add_test(test_observables                tests/unit/test_observables.cpp USE_CATCH2)
     ed_add_test(test_thermal_methods            tests/unit/test_thermal_methods.cpp USE_CATCH2)

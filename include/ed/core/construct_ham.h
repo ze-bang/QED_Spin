@@ -895,120 +895,6 @@ public:
         apply_optimized(in, out, size);
     }
 
-    /**
-     * @brief SpMV restricted to contiguous output rows [row_begin, row_begin + n_rows).
-     *
-     * Writes y_partial[k] = (H v)[row_begin + k] for k in [0, n_rows). The
-     * input vector @p in must be the full Hilbert-space vector of length
-     * `size == 2^n_bits` (same contract as apply()). The slice
-     * `y_partial[0..n_rows)` is zero-filled at entry; contributions are
-     * accumulated with the same OpenMP atomics as apply_optimized().
-     *
-     * Phase 3b bootstrap: enables MPI distributed matvec where each rank
-     * owns an output row slab without allocating the full `y` vector on
-     * that rank.
-     *
-     * Dispatch matches apply() for the CSR fast paths (row-sliced parallel
-     * loops). If neither CSR nor the matrix-free separated-transform path
-     * applies, falls back to a temporary full vector (acceptable only at
-     * modest dim; throws if dim > 1<<22 to avoid silent OOM at N>=40).
-     */
-    void apply_row_range(const Complex* in, Complex* y_partial, size_t size,
-                         uint64_t row_begin, uint64_t n_rows) const {
-        const uint64_t dim = 1ULL << n_bits_;
-        if (size != static_cast<size_t>(dim)) {
-            throw std::invalid_argument("apply_row_range: input size mismatch");
-        }
-        if (n_rows == 0) return;
-        if (row_begin > dim || row_begin + n_rows > dim) {
-            throw std::invalid_argument("apply_row_range: row range out of bounds");
-        }
-
-        std::fill(y_partial, y_partial + n_rows, Complex(0.0, 0.0));
-
-        const bool sparse_built_complex = matrixBuilt_;
-        const bool sparse_built_real    = matrixBuiltReal_;
-        const bool dispatch_sparse      = sparse_dispatch_enabled(dim);
-
-        if (sparse_built_complex || sparse_built_real || dispatch_sparse) {
-            const bool op_real = isReal();
-            bool input_real = false;
-            if (op_real) {
-                input_real = true;
-                for (uint64_t i = 0; i < dim; ++i) {
-                    if (in[i].imag() != 0.0) { input_real = false; break; }
-                }
-            }
-            if (op_real && input_real) {
-                std::vector<double> in_re(dim);
-                for (uint64_t i = 0; i < dim; ++i) in_re[i] = in[i].real();
-                buildRowMajorCSRReal();
-                const auto* outer  = sparseMatrixRealRow_.outerIndexPtr();
-                const auto* inner  = sparseMatrixRealRow_.innerIndexPtr();
-                const auto* vals   = sparseMatrixRealRow_.valuePtr();
-                const uint64_t par_threshold =
-                    static_cast<uint64_t>(omp_get_max_threads()) * 1024ULL;
-                const uint64_t rb = row_begin;
-                const uint64_t re = row_begin + n_rows;
-
-                #pragma omp parallel for schedule(static) if((re - rb) > par_threshold)
-                for (uint64_t ii = 0; ii < n_rows; ++ii) {
-                    const uint64_t i = rb + ii;
-                    double sum = 0.0;
-                    for (auto k = outer[i]; k < outer[i + 1]; ++k) {
-                        sum += vals[k] * in_re[inner[k]];
-                    }
-                    y_partial[ii] = Complex(sum, 0.0);
-                }
-                return;
-            }
-            buildRowMajorCSR();
-            const auto* outer  = sparseMatrixRow_.outerIndexPtr();
-            const auto* inner  = sparseMatrixRow_.innerIndexPtr();
-            const auto* vals   = sparseMatrixRow_.valuePtr();
-            const uint64_t par_threshold =
-                static_cast<uint64_t>(omp_get_max_threads()) * 1024ULL;
-            const uint64_t rb = row_begin;
-            const uint64_t re = row_begin + n_rows;
-
-            #pragma omp parallel for schedule(static) if((re - rb) > par_threshold)
-            for (uint64_t ii = 0; ii < n_rows; ++ii) {
-                const uint64_t i = rb + ii;
-                double re_acc = 0.0, im_acc = 0.0;
-                for (auto k = outer[i]; k < outer[i + 1]; ++k) {
-                    const Complex a = vals[k];
-                    const Complex x = in[inner[k]];
-                    re_acc += a.real() * x.real() - a.imag() * x.imag();
-                    im_acc += a.real() * x.imag() + a.imag() * x.real();
-                }
-                y_partial[ii] += Complex(re_acc, im_acc);
-            }
-            return;
-        }
-
-        if (isReal() && dim >= 1024) {
-            bool real_input = true;
-            for (uint64_t i = 0; i < dim; ++i) {
-                if (in[i].imag() != 0.0) { real_input = false; break; }
-            }
-            if (real_input) {
-                if (dim > (1ULL << 22)) {
-                    throw std::runtime_error(
-                        "apply_row_range: dim too large for real-path fallback "
-                        "(use CSR / matrix-free with separated transforms)");
-                }
-                std::vector<Complex> y_full(dim);
-                apply(in, y_full.data(), size);
-                for (uint64_t k = 0; k < n_rows; ++k) {
-                    y_partial[k] += y_full[row_begin + k];
-                }
-                return;
-            }
-        }
-
-        apply_optimized_impl(in, nullptr, y_partial, row_begin, row_begin + n_rows, size);
-    }
-
 private:
     static bool sparse_dispatch_enabled(uint64_t dim) {
         const char* opt = std::getenv("ED_USE_SPARSE");
@@ -1036,19 +922,6 @@ public:
      * Performance: Additional 2-3x speedup over v1 for large N
      */
     void apply_optimized(const Complex* in, Complex* out, size_t size) const {
-        apply_optimized_impl(in, out, nullptr, 0, 0, size);
-    }
-
-    /**
-     * Matrix-free scatter implementation. When @p out_partial is non-null,
-     * only rows in [row_begin, row_end_exclusive) receive contributions
-     * (via atomics into @p out_partial[idx - row_begin]); @p out_full is
-     * ignored. Otherwise writes go to @p out_full (full vector mode).
-     */
-    void apply_optimized_impl(const Complex* in, Complex* out_full,
-                              Complex* out_partial,
-                              uint64_t row_begin, uint64_t row_end_exclusive,
-                              size_t size) const {
         const uint64_t dim = 1ULL << n_bits_;
         const double spin_sq = spin_l_ * spin_l_;
         
@@ -1143,20 +1016,6 @@ public:
 
                 radix_sort_buffer();
 
-                auto atomic_add = [&](uint64_t idx, const Complex& acc) {
-                    double* out_ptr;
-                    if (out_partial) {
-                        if (idx < row_begin || idx >= row_end_exclusive) return;
-                        out_ptr = reinterpret_cast<double*>(&out_partial[idx - row_begin]);
-                    } else {
-                        out_ptr = reinterpret_cast<double*>(&out_full[idx]);
-                    }
-                    #pragma omp atomic
-                    out_ptr[0] += acc.real();
-                    #pragma omp atomic
-                    out_ptr[1] += acc.imag();
-                };
-
                 uint64_t current_index = local_buffer.front().index;
                 Complex accumulated = local_buffer.front().value;
 
@@ -1165,13 +1024,22 @@ public:
                     if (item.index == current_index) {
                         accumulated += item.value;
                     } else {
-                        atomic_add(current_index, accumulated);
+                        double* out_ptr = reinterpret_cast<double*>(&out[current_index]);
+                        #pragma omp atomic
+                        out_ptr[0] += accumulated.real();
+                        #pragma omp atomic
+                        out_ptr[1] += accumulated.imag();
+
                         current_index = item.index;
                         accumulated = item.value;
                     }
                 }
 
-                atomic_add(current_index, accumulated);
+                double* out_ptr = reinterpret_cast<double*>(&out[current_index]);
+                #pragma omp atomic
+                out_ptr[0] += accumulated.real();
+                #pragma omp atomic
+                out_ptr[1] += accumulated.imag();
 
                 local_buffer.clear();
             };
