@@ -305,11 +305,33 @@ publication-grade-fast on GPU.
    counter contract, raw-byte first-touch, idempotent pinning,
    end-to-end Lanczos ground-state energy invariance with knobs on
    vs off to within 1e-12).
-5. **Symmetry-projected basis: switch `unordered_map<uint64_t, size_t>`
-   to a perfect hash** (e.g., compressed-sparse representative table +
-   Robin-Hood probing, or a true minimal perfect hash via the BBHash /
-   PTHash library). Today this map dominates RAM at N=36 and *fails* at
-   N=40. The fix is local to `streaming_symmetry.h`.
+5. **Symmetry-projected basis: compact lookup index. — DONE
+   (Phase 3a #5).** New header `include/ed/core/sorted_uint64_index.h`
+   provides `ed::core::SortedUint64Index`, a sorted-vector + binary-search
+   replacement for `std::unordered_map<uint64_t, size_t>`. Same build
+   idiom (`m[state] = basis_idx` then `m.finalize()` once per sector);
+   lookup returns `kNotFound` sentinel instead of an end-iterator.
+   Wired into both `StreamingSymmetryOperator::state_to_sector_basis_`
+   and `FixedSzStreamingSymmetryOperator::state_to_sector_basis_` plus
+   the corresponding HDF5 reload paths and the inner SpMV kernels
+   (`applyHamiltonianTermsFullSpace`, `applyHamiltonianTerms`). Cuts the
+   per-entry footprint from ~32-40 B to a flat **16 B** (verified by the
+   build-log line `Lookup index footprint: ... B/entry` -- 16.00 in
+   practice). At N=36 with full point-group + Sz the dominant sector
+   has ~3 × 10⁷ representatives, so this saves ~0.5-0.7 GB and pushes
+   that regime from "barely fits" to "comfortably fits". Lookup
+   performance is competitive with `unordered_map::find` because the
+   binary search is on a contiguous, prefetchable array (~23 cmps for
+   10⁷ keys, all on hot cache lines). Covered by `test_sorted_uint64_index`
+   (8 sections, 111k assertions: empty / build / duplicate-key /
+   sort-invariant / pre-finalize-throws / clear / size-bytes / 1 M-entry
+   stress vs `unordered_map` oracle) plus the existing N=4 and N=6
+   end-to-end symmetry-projected spectra in `test_symmetry` (still match
+   dense reference to 1e-9). A *true* minimal perfect hash via PTHash /
+   BBHash is deferred to Phase 3b: it would shave another ~6 B/entry
+   but adds an external dep, and the dominant remaining cost at N=36 is
+   the orbit-element CSR (`SymBasisState::orbit_elements`), not the
+   lookup index.
 
 After Phase 3a: N=36 with full symmetry is **routine** on a single fat
 node, and N=32 GPU runs are 2× faster.

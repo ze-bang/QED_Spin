@@ -1115,16 +1115,18 @@ schema with provenance and intermediate-state checkpointing.
 **What this codebase does NOT have** that blocks N ≥ 40 (the "Phase 3" gap):
 distributed-memory state vector for SpMV (the single biggest gap — every
 Lanczos / FTLM / TPQ / Krylov-Schur vector is `std::vector<Complex>` on one
-rank); multi-GPU NCCL Lanczos; symmetry-projected basis indexing past ~2 × 10⁹
-states (current `unordered_map<uint64_t, ...>` cannot be materialized);
-explicit `numa_alloc_onnode` / `mbind` placement (Phase 3a #4 landed
-opportunistic first-touch + thread-pinning, libnuma-free; explicit per-node
-allocation is a follow-up); FP32 matrix-free SpMV (Phase 3a #3 covered the
-cuSPARSE CSR pathway only — kernel-templated FP32 versions of the
-WARP_REDUCTION / BRANCH_FREE_SCATTER / SHARED_MEMORY paths and the fixed-Sz
-/ symmetrized operators are deferred); distributed FTLM/TPQ
-**imaginary-time evolution** (the per-sample work is local but the per-rank
-vector still has to fit).
+rank); multi-GPU NCCL Lanczos; *true* minimal perfect hash for symmetry-projected
+basis indexing past ~10⁹ states (Phase 3a #5 landed the 16 B/entry sorted-vector
++ binary-search index, halving the unordered_map footprint and unblocking N=36
+on a fat node, but a minimal perfect hash via PTHash / BBHash would shave
+another ~6 B/entry and is deferred); explicit `numa_alloc_onnode` / `mbind`
+placement (Phase 3a #4 landed opportunistic first-touch + thread-pinning,
+libnuma-free; explicit per-node allocation is a follow-up); FP32 matrix-free
+SpMV (Phase 3a #3 covered the cuSPARSE CSR pathway only — kernel-templated
+FP32 versions of the WARP_REDUCTION / BRANCH_FREE_SCATTER / SHARED_MEMORY
+paths and the fixed-Sz / symmetrized operators are deferred); distributed
+FTLM/TPQ **imaginary-time evolution** (the per-sample work is local but the
+per-rank vector still has to fit).
 
 **Phase 3a #1 (Krylov-state checkpoint/restart) is now landed** —
 `include/ed/io/lanczos_checkpoint.h` + `src/io/lanczos_checkpoint.cpp`
@@ -1194,6 +1196,36 @@ and `ed_solvers_cpu`. Covered by seven lockdown tests in
 off-state and sub-threshold no-ops, on-state counter contract,
 raw-byte first-touch, idempotent pinning, end-to-end Lanczos
 ground-state energy invariance with knobs on vs off to within 1e-12).
+
+**Phase 3a #5 (compact symmetry-projected basis lookup index) is now
+landed** — new header `include/ed/core/sorted_uint64_index.h` provides
+`ed::core::SortedUint64Index`, a sorted-vector + binary-search drop-in
+for `std::unordered_map<uint64_t, size_t>`. Same build idiom
+(`m[state] = basis_idx`) followed by one `m.finalize()` per sector;
+lookup returns `kNotFound` sentinel rather than an end-iterator. Wired
+into both `StreamingSymmetryOperator::state_to_sector_basis_` and
+`FixedSzStreamingSymmetryOperator::state_to_sector_basis_`, plus the
+HDF5 reload paths and the inner SpMV kernels
+(`applyHamiltonianTermsFullSpace`, `applyHamiltonianTerms`). Cuts the
+per-entry footprint from ~32-40 B (libstdc++ `unordered_map`) to a
+flat **16 B** -- this is exactly what the build log now reports
+(`Lookup index footprint: ... B/entry`, 16.00 in practice). At N=36
+with full point-group + Sz the dominant sector has ~3 × 10⁷
+representatives, so this saves ~0.5-0.7 GB per run and pushes that
+regime from "barely fits" to "comfortably fits". Lookup performance
+is competitive with `unordered_map::find` because the binary search
+walks a contiguous prefetchable array (~23 cmps for 10⁷ keys, all on
+hot cache lines, vs typical 2-4 L3 misses for an `unordered_map`
+probe at that scale). Covered by `test_sorted_uint64_index` (8
+sections, 111k assertions: empty / build / duplicate-key /
+sort-invariant / pre-finalize-throws / clear / size-bytes / 1 M-entry
+stress vs `unordered_map` oracle) plus the existing N=4 and N=6
+end-to-end symmetry-projected spectra in `test_symmetry` (still match
+dense reference to 1e-9). A *true* minimal perfect hash via PTHash /
+BBHash is deferred: it would shave another ~6 B/entry but adds an
+external dep, and the dominant remaining cost at N=36 is the
+orbit-element CSR (`SymBasisState::orbit_elements`), not the lookup
+index.
 
 See [`SCALING.md`](./SCALING.md) for the full memory tables, runtime regime
 notes, environment-variable controls (`ED_LANCZOS_DISK`, `ED_FTLM_PARALLEL`,

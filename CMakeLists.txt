@@ -632,6 +632,11 @@ if(BUILD_ED_TESTS)
     # parsing, threshold + counter contract, idempotent pinning, end-to-end
     # Lanczos eigenvalue invariance with knobs on vs off).
     ed_add_test(test_numa                       tests/unit/test_numa.cpp USE_CATCH2)
+    # Phase 3a #5: SortedUint64Index — drop-in replacement for
+    # `unordered_map<uint64_t, size_t>` in the streaming-symmetry hot path.
+    # Coverage: empty / build / duplicate-key / clear / sort-invariant +
+    # 1M-entry stress vs unordered_map oracle (memory + correctness).
+    ed_add_test(test_sorted_uint64_index        tests/unit/test_sorted_uint64_index.cpp USE_CATCH2)
     ed_add_test(test_trans_interall_loading     tests/unit/test_trans_interall_loading.cpp USE_CATCH2)
     ed_add_test(test_observables                tests/unit/test_observables.cpp USE_CATCH2)
     ed_add_test(test_thermal_methods            tests/unit/test_thermal_methods.cpp USE_CATCH2)

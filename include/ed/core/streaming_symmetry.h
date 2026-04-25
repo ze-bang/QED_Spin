@@ -1,6 +1,7 @@
 #pragma once
 
 #include <ed/core/construct_ham.h>
+#include <ed/core/sorted_uint64_index.h>   // Phase 3a #5: compact uint64->size_t map
 #include <unordered_set>
 #include <algorithm>
 #include <filesystem>     // P0.12
@@ -127,9 +128,16 @@ private:
     mutable std::unordered_map<uint64_t, uint64_t> state_to_orbit_cache_;  // Cache for orbit lookups
     mutable std::mutex orbit_cache_mutex_;  // Protects state_to_orbit_cache_ in const methods
     
-    // Lookup table: computational_state -> (sector_idx, basis_idx_in_sector)
-    // This enables O(1) projection of H-transformed states
-    mutable std::vector<std::unordered_map<uint64_t, size_t>> state_to_sector_basis_;
+    // Lookup table: computational_state -> basis_idx_in_sector (one per sector).
+    // Phase 3a #5: replaced std::unordered_map with SortedUint64Index (sorted
+    // vector + binary search) to halve per-entry footprint from ~32-40 B to
+    // 16 B. Critical at N>=36 with full point-group + Sz where the dominant
+    // sector has ~3 x 10^7 representatives. The class exposes the same
+    // operator[] = idiom for the build phase, so call sites only change in
+    // the lookup pattern (find() -> sentinel kNotFound, no iterator). MUST
+    // call .finalize() once per sector after the build pass to sort the
+    // backing keys array.
+    mutable std::vector<ed::core::SortedUint64Index> state_to_sector_basis_;
     
     // Cached group size from HDF5 load (allows skipping symmetry_info loading)
     uint64_t cached_group_size_ = 0;
@@ -309,7 +317,12 @@ public:
                 total_orbit_elements += state.orbit_elements.size();
                 sector.basis_states.push_back(std::move(state));
             }
-            
+
+            // Phase 3a #5: sort the per-sector lookup once now that all
+            // (state -> basis_idx) pairs have been appended. All subsequent
+            // applySymmetrized() calls expect a finalized index.
+            state_to_sector_basis_[sector_idx].finalize();
+
             symmetrized_block_ham_sizes[sector_idx] = sector.basis_states.size();
             
             if (sector_idx % std::max(size_t(1), num_sectors / 20) == 0 ||
@@ -326,13 +339,28 @@ public:
         for (const auto& sector : sectors_) {
             total_basis += sector.basis_states.size();
         }
-        
+
+        // Phase 3a #5: report cumulative lookup-index memory so the savings
+        // are visible in the standard build log (compare to the old
+        // unordered_map footprint of ~32-40 B/entry vs our 16 B/entry).
+        std::size_t lookup_bytes = 0;
+        for (const auto& idx : state_to_sector_basis_) {
+            lookup_bytes += idx.size_bytes();
+        }
+
         std::cout << "\n=== Matrix-Free Sector Generation Complete ===" << std::endl;
         std::cout << "Total sectors: " << sectors_.size() << std::endl;
         std::cout << "Total symmetrized basis: " << total_basis << std::endl;
         std::cout << "Total orbit elements stored: " << total_orbit_elements << std::endl;
         std::cout << "Pass 1 time: " << std::fixed << std::setprecision(1) << pass1_ms << " ms" << std::endl;
         std::cout << "Pass 2 time: " << std::fixed << std::setprecision(1) << pass2_ms << " ms" << std::endl;
+        std::cout << "Lookup index footprint: "
+                  << std::fixed << std::setprecision(2)
+                  << (lookup_bytes / (1024.0 * 1024.0)) << " MiB ("
+                  << (total_orbit_elements > 0
+                          ? (double(lookup_bytes) / total_orbit_elements)
+                          : 0.0)
+                  << " B/entry)" << std::endl;
         std::cout << "Memory saved vs full expansion: " 
                   << std::fixed << std::setprecision(1)
                   << (100.0 * (1.0 - double(total_orbit_elements) / (total_basis * dim)))
@@ -882,6 +910,10 @@ public:
                     total_orbit_elements += len;
                 }
 
+                // Phase 3a #5: finalize the lookup index for this sector
+                // before the next outer iteration moves on.
+                state_to_sector_basis_[si].finalize();
+
                 symmetrized_block_ham_sizes[si] = nb;
                 grp.close();
             }
@@ -1119,16 +1151,17 @@ private:
      */
     void applyHamiltonianTermsFullSpace(uint64_t s, Complex weighted_coeff,
                                         const SymmetrySector& sector,
-                                        const std::unordered_map<uint64_t, size_t>& lookup,
+                                        const ed::core::SortedUint64Index& lookup,
                                         double group_norm,
                                         std::vector<Complex>& local_out) const {
-        
-        // Helper lambda to project result onto sector
+
+        // Helper lambda to project result onto sector. Phase 3a #5: lookup
+        // is now a SortedUint64Index; find() returns kNotFound on miss
+        // instead of an end-iterator.
         auto projectResult = [&](uint64_t s_prime, Complex h_element) {
-            auto it = lookup.find(s_prime);
-            if (it == lookup.end()) return;
-            
-            size_t k = it->second;
+            const std::size_t k = lookup.find(s_prime);
+            if (k == ed::core::SortedUint64Index::kNotFound) return;
+
             const auto& state_k = sector.basis_states[k];
             
             // O(log |orbit|) binary search instead of O(|orbit|) linear scan.
@@ -1492,9 +1525,10 @@ class FixedSzStreamingSymmetryOperator : public FixedSzOperator {
 private:
     std::vector<SymmetrySector> sectors_;
     
-    // Lookup table: computational_state -> (sector_index, basis_index_in_sector)
-    // This enables O(1) projection of H-transformed states
-    mutable std::vector<std::unordered_map<uint64_t, size_t>> state_to_sector_basis_;
+    // Lookup table: computational_state -> basis_idx_in_sector (one per sector).
+    // Phase 3a #5: same SortedUint64Index swap as in StreamingSymmetryOperator
+    // (see comment there). 16 B/entry vs ~32-40 B/entry for unordered_map.
+    mutable std::vector<ed::core::SortedUint64Index> state_to_sector_basis_;
     
     mutable std::unordered_map<uint64_t, uint64_t> state_to_orbit_cache_;
     mutable std::mutex orbit_cache_mutex_;  // Protects state_to_orbit_cache_ in const methods
@@ -1652,7 +1686,11 @@ public:
                 total_orbit_elements += state.orbit_elements.size();
                 sector.basis_states.push_back(std::move(state));
             }
-            
+
+            // Phase 3a #5: sort the per-sector lookup once now that all
+            // (state -> basis_idx) pairs have been appended.
+            state_to_sector_basis_[sector_idx].finalize();
+
             symmetrized_block_ham_sizes[sector_idx] = sector.basis_states.size();
             
             if (sector_idx % std::max(size_t(1), num_sectors / 20) == 0 ||
@@ -1669,13 +1707,26 @@ public:
         for (const auto& sector : sectors_) {
             total_basis += sector.basis_states.size();
         }
-        
+
+        // Phase 3a #5: report cumulative lookup-index memory.
+        std::size_t lookup_bytes = 0;
+        for (const auto& idx : state_to_sector_basis_) {
+            lookup_bytes += idx.size_bytes();
+        }
+
         std::cout << "\n=== Matrix-Free Sector Generation Complete ===" << std::endl;
         std::cout << "Total sectors: " << sectors_.size() << std::endl;
         std::cout << "Total symmetrized basis: " << total_basis << std::endl;
         std::cout << "Total orbit elements stored: " << total_orbit_elements << std::endl;
         std::cout << "Pass 1 time: " << std::fixed << std::setprecision(1) << pass1_ms << " ms" << std::endl;
         std::cout << "Pass 2 time: " << std::fixed << std::setprecision(1) << pass2_ms << " ms" << std::endl;
+        std::cout << "Lookup index footprint: "
+                  << std::fixed << std::setprecision(2)
+                  << (lookup_bytes / (1024.0 * 1024.0)) << " MiB ("
+                  << (total_orbit_elements > 0
+                          ? (double(lookup_bytes) / total_orbit_elements)
+                          : 0.0)
+                  << " B/entry)" << std::endl;
         std::cout << "Memory saved vs full expansion: " 
                   << std::fixed << std::setprecision(1)
                   << (100.0 * (1.0 - double(total_orbit_elements) / (total_basis * fixed_sz_dim_)))
@@ -2133,6 +2184,10 @@ public:
                     total_orbit_elements += len;
                 }
 
+                // Phase 3a #5: finalize the lookup index for this sector
+                // before the next outer iteration moves on.
+                state_to_sector_basis_[si].finalize();
+
                 symmetrized_block_ham_sizes[si] = nb;
                 grp.close();
             }
@@ -2286,7 +2341,7 @@ private:
      */
     void applyHamiltonianTerms(uint64_t s, Complex weighted_coeff,
                                const SymmetrySector& sector,
-                               const std::unordered_map<uint64_t, size_t>& lookup,
+                               const ed::core::SortedUint64Index& lookup,
                                double group_norm,
                                std::vector<Complex>& local_out) const {
         
@@ -2350,12 +2405,11 @@ private:
             }
             
             if (!valid) continue;
-            
-            // Check if s_prime is in this sector (via lookup)
-            auto it = lookup.find(s_prime);
-            if (it == lookup.end()) continue;
-            
-            size_t k = it->second;  // Index of target basis state
+
+            // Phase 3a #5: SortedUint64Index lookup (returns kNotFound on miss).
+            const std::size_t k = lookup.find(s_prime);
+            if (k == ed::core::SortedUint64Index::kNotFound) continue;
+
             const auto& state_k = sector.basis_states[k];
             
             // O(log |orbit|) binary search instead of linear scan.
@@ -2420,11 +2474,10 @@ private:
 
             if (!valid) continue;
 
-            // Check if s_prime is in this sector (via lookup)
-            auto it = lookup.find(s_prime);
-            if (it == lookup.end()) continue;
+            // Phase 3a #5: SortedUint64Index lookup (returns kNotFound on miss).
+            const std::size_t k = lookup.find(s_prime);
+            if (k == ed::core::SortedUint64Index::kNotFound) continue;
 
-            size_t k = it->second;
             const auto& state_k = sector.basis_states[k];
 
             // O(log |orbit|) binary search instead of linear scan.
