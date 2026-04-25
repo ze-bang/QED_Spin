@@ -1115,8 +1115,7 @@ schema with provenance and intermediate-state checkpointing.
 **What this codebase does NOT have** that blocks N ≥ 40 (the "Phase 3" gap):
 distributed-memory state vector for SpMV (the single biggest gap — every
 Lanczos / FTLM / TPQ / Krylov-Schur vector is `std::vector<Complex>` on one
-rank); multi-GPU NCCL Lanczos; out-of-core *blocked-tile reorthogonalization*
-against the streamed basis; symmetry-projected basis indexing past ~2 × 10⁹
+rank); multi-GPU NCCL Lanczos; symmetry-projected basis indexing past ~2 × 10⁹
 states (current `unordered_map<uint64_t, ...>` cannot be materialized);
 NUMA-aware allocator + thread-pinning hooks; mixed-precision SpMV (FP32
 matvec + FP64 dot/normalize) — deferred from Batch 2; distributed FTLM/TPQ
@@ -1134,11 +1133,28 @@ covered by four lockdown tests in
 `tests/unit/test_lanczos_checkpoint.cpp` (round-trip, atomic-rename,
 resume-vs-dense convergence, validation errors).
 
+**Phase 3a #2 (out-of-core blocked-tile reorthogonalization) is now landed**
+— `include/ed/io/lanczos_reorth.h` + `src/io/lanczos_reorth.cpp` add
+`load_basis_tile` (zero-copy from the in-memory buffer; sequential
+ifstream from the legacy on-disk store) and `blocked_reorth` (CGS via two
+BLAS-2 `zgemv` calls per tile, with index-skip and threshold predicates).
+The default `lanczos()` and `lanczos_selective_reorth()` now walk the
+basis in tiles of `ED_LANCZOS_REORTH_TILE` vectors (default 16, clamped
+to `[1, 256]`); the selective branch runs CGS2 (two passes per tile) for
+MGS-equivalent backward stability. Cuts per-iteration file-open overhead
+by `B×` in disk mode and lets the matrix engine reuse the tile in cache;
+covered by seven lockdown tests in `tests/unit/test_lanczos_reorth.cpp`
+(CGS-vs-MGS correctness on orthonormal V, threshold + skip filters,
+in-memory and on-disk tile loading, end-to-end tile-size invariance for
+`lanczos_selective_reorth` across `B ∈ {1, 4, 16}`, knob clamping).
+
 See [`SCALING.md`](./SCALING.md) for the full memory tables, runtime regime
 notes, environment-variable controls (`ED_LANCZOS_DISK`, `ED_FTLM_PARALLEL`,
 `ED_GPU_TIMING`, `ED_USE_SPARSE`, `ED_SPARSE_DIM_MAX`,
 `ED_GPU_ALLOW_DROPPED_THREEBODY`, `ED_CTPQ_PROPAGATOR`, `ED_CTPQ_KRYLOV_M`,
-`ED_LANCZOS_COMPLEX_SEED`, `ED_LANCZOS_VERBOSE`), and the proposed
+`ED_LANCZOS_COMPLEX_SEED`, `ED_LANCZOS_VERBOSE`, `ED_LANCZOS_REORTH_TILE`,
+`ED_LANCZOS_CHECKPOINT_DIR`, `ED_LANCZOS_CHECKPOINT_INTERVAL`,
+`ED_LANCZOS_RESUME`), and the proposed
 Phase-3a/3b/3c sequencing to lift the ceiling from 36 → 40 → 48 sites.
 
 (Q14 is the one-shot `clang-format -i` pass that depends on Q3 having landed first.)

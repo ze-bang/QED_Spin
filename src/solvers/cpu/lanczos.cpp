@@ -2,6 +2,7 @@
 #include <ed/core/hdf5_io.h>
 #include <ed/io/lanczos_basis_buffer.h>
 #include <ed/io/lanczos_checkpoint.h>
+#include <ed/io/lanczos_reorth.h>
 #include <filesystem>
 #include <limits>
 #include <iomanip>
@@ -1061,47 +1062,61 @@ void lanczos_selective_reorth(std::function<void(const Complex*, Complex*, int)>
         }
         
         // Periodic full reorthogonalization or selective reorthogonalization.
-        // Skip indices already covered by the recent ring buffer (which was
-        // applied just above) by tracking their basis indices, not by reading
-        // every disk vector and elementwise-comparing.
+        // Both branches now walk the basis in tiles of B vectors (Phase 3a #2,
+        // see include/ed/io/lanczos_reorth.h). For each tile we issue two
+        // BLAS-2 zgemv calls (overlaps = V^H w; w := w - V*overlaps) instead
+        // of B BLAS-1 dot/axpy pairs -- this collapses B per-vector file
+        // opens into a tile load and lets the matrix engine reuse the tile
+        // in cache. Indices already covered by the recent ring buffer are
+        // skipped via the predicate (their overlap is zeroed in-place inside
+        // blocked_reorth, no extra read avoided -- the per-tile load is
+        // unconditional, but the cost difference is negligible vs. the
+        // BLAS-2 win).
+        const uint64_t tile_B = lanczos_io::reorth_tile_size();
+        std::vector<Complex> tile_buf;
+        std::vector<uint64_t> tile_idx(tile_B);
+        auto skip_pred = [&](uint64_t k) -> bool {
+            return is_recent_index(k);
+        };
+
         if (j % periodic_full_reorth == 0) {
             if (verbose) {
                 std::cout << "Performing full reorthogonalization at step " << j + 1 << std::endl;
             }
-            for (int k = 0; k <= j; k++) {
-                if (is_recent_index(static_cast<uint64_t>(k))) continue;
-
-                ComplexVector basis_k = read_basis_vector(temp_dir, k, N);
-
-                Complex overlap;
-                cblas_zdotc_sub(N, basis_k.data(), 1, w.data(), 1, &overlap);
-
-                if (std::abs(overlap) > orth_threshold) {
-                    Complex neg_overlap = -overlap;
-                    cblas_zaxpy(N, &neg_overlap, basis_k.data(), 1, w.data(), 1);
+            const uint64_t k_last = static_cast<uint64_t>(j);  // inclusive
+            for (uint64_t k_start = 0; k_start <= k_last; k_start += tile_B) {
+                const uint64_t this_count =
+                    std::min(tile_B, k_last + 1 - k_start);
+                for (uint64_t kk = 0; kk < this_count; ++kk) {
+                    tile_idx[kk] = k_start + kk;
                 }
+                lanczos_io::load_basis_tile(temp_dir, k_start, this_count, N,
+                                            tile_buf);
+                lanczos_io::blocked_reorth(N, this_count, tile_buf.data(),
+                                           w.data(), orth_threshold,
+                                           tile_idx.data(), skip_pred);
             }
-        } else {
-            // Selective reorthogonalization against vectors with significant overlap
-            for (int k = 0; k <= j - 2; k++) {  // Skip v_{j-1} as it's already handled
-                if (is_recent_index(static_cast<uint64_t>(k))) continue;
-
-                ComplexVector basis_k = read_basis_vector(temp_dir, k, N);
-
-                Complex overlap;
-                cblas_zdotc_sub(N, basis_k.data(), 1, w.data(), 1, &overlap);
-
-                if (std::abs(overlap) > orth_threshold) {
-                    Complex neg_overlap = -overlap;
-                    cblas_zaxpy(N, &neg_overlap, basis_k.data(), 1, w.data(), 1);
-
-                    // Iterated Gram-Schmidt: one more pass if still non-orthogonal.
-                    cblas_zdotc_sub(N, basis_k.data(), 1, w.data(), 1, &overlap);
-                    if (std::abs(overlap) > orth_threshold) {
-                        neg_overlap = -overlap;
-                        cblas_zaxpy(N, &neg_overlap, basis_k.data(), 1, w.data(), 1);
-                    }
+        } else if (j >= 2) {
+            // Selective reorthogonalization on [0, j-2]. We do TWO blocked
+            // CGS passes per tile (CGS2): a single CGS pass is slightly
+            // less stable than MGS, but two passes match MGS's backward
+            // bound (Giraud-Langou-Rozloznik 2005) -- this is the blocked
+            // analogue of the original "iterated Gram-Schmidt" path.
+            const uint64_t k_last = static_cast<uint64_t>(j) - 2;  // inclusive
+            for (uint64_t k_start = 0; k_start <= k_last; k_start += tile_B) {
+                const uint64_t this_count =
+                    std::min(tile_B, k_last + 1 - k_start);
+                for (uint64_t kk = 0; kk < this_count; ++kk) {
+                    tile_idx[kk] = k_start + kk;
                 }
+                lanczos_io::load_basis_tile(temp_dir, k_start, this_count, N,
+                                            tile_buf);
+                lanczos_io::blocked_reorth(N, this_count, tile_buf.data(),
+                                           w.data(), orth_threshold,
+                                           tile_idx.data(), skip_pred);
+                lanczos_io::blocked_reorth(N, this_count, tile_buf.data(),
+                                           w.data(), orth_threshold,
+                                           tile_idx.data(), skip_pred);
             }
         }
         

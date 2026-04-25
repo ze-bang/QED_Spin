@@ -623,6 +623,10 @@ if(BUILD_ED_TESTS)
     # Phase 3a #1: Krylov-state checkpoint / restart for the default Lanczos
     # solver (round-trip + resume-equivalence + validation-error coverage).
     ed_add_test(test_lanczos_checkpoint         tests/unit/test_lanczos_checkpoint.cpp USE_CATCH2)
+    # Phase 3a #2: Out-of-core blocked-tile reorthogonalization (CGS correctness,
+    # threshold + skip filters, in-memory + on-disk tile loading, end-to-end
+    # tile-size invariance for lanczos_selective_reorth).
+    ed_add_test(test_lanczos_reorth             tests/unit/test_lanczos_reorth.cpp USE_CATCH2)
     ed_add_test(test_trans_interall_loading     tests/unit/test_trans_interall_loading.cpp USE_CATCH2)
     ed_add_test(test_observables                tests/unit/test_observables.cpp USE_CATCH2)
     ed_add_test(test_thermal_methods            tests/unit/test_thermal_methods.cpp USE_CATCH2)

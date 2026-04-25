@@ -79,6 +79,7 @@ add_library(ed_io STATIC
     ${IO_DIR}/basis_vector_storage.cpp
     ${IO_DIR}/lanczos_basis_buffer.cpp
     ${IO_DIR}/lanczos_checkpoint.cpp
+    ${IO_DIR}/lanczos_reorth.cpp
 )
 target_include_directories(ed_io PUBLIC ${_ED_PUBLIC_INCLUDES})
 target_link_libraries(ed_io PUBLIC ${ED_COMMON_LINK_LIBS})

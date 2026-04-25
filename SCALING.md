@@ -118,6 +118,7 @@ them in your run script, not mid-run.
 | `ED_LANCZOS_CHECKPOINT_DIR` | unset (off) | Directory for atomic Krylov-state checkpoints (Phase 3a #1, see `include/ed/io/lanczos_checkpoint.h`). When set, the default `lanczos()` writes `lanczos_checkpoint.h5` every `ED_LANCZOS_CHECKPOINT_INTERVAL` iterations and on the final iteration. Atomic write-then-rename, so a SIGKILL mid-write leaves the previous checkpoint intact. |
 | `ED_LANCZOS_CHECKPOINT_INTERVAL` | `100` | Iterations between checkpoint writes. Lower for faster crash recovery, higher to amortize HDF5 I/O on long runs (each write is ~22 N complex doubles). |
 | `ED_LANCZOS_RESUME` | `0` | If `1` and `ED_LANCZOS_CHECKPOINT_DIR` contains a checkpoint, `lanczos()` skips its random-vector init and resumes from `(α[0..k], β[0..k], v_{k-1}, v_k, ring buffer)`. **Eigenvalue-only mode** (`eigenvectors=false`) — eigenvector reconstruction needs the early basis vectors which a resumed run lacks; resuming with `eigenvectors=true` throws. |
+| `ED_LANCZOS_REORTH_TILE` | `16` | Tile size `B` (in basis vectors) for the blocked-CGS reorthogonalization in `lanczos` and `lanczos_selective_reorth` (Phase 3a #2, see `include/ed/io/lanczos_reorth.h`). Each tile collapses `B` BLAS-1 `zdotc` + `zaxpy` pairs into two BLAS-2 `zgemv` calls, cutting per-iter file-open overhead by `B×` in disk mode. Clamped to `[1, 256]`; raise on machines with large L2/L3 (working set is `B × N` complex doubles), drop to `1` for the legacy per-vector behaviour. |
 
 ### Numerics
 
@@ -236,11 +237,24 @@ publication-grade-fast on GPU.
    replicated separately, deferred to item #2). See
    `include/ed/io/lanczos_checkpoint.h` and the four-test lockdown in
    `tests/unit/test_lanczos_checkpoint.cpp`.
-2. **Out-of-core blocked-tile reorthogonalization.** Today, when
-   `ED_LANCZOS_DISK=1`, the re-orth pass random-accesses the on-disk basis
-   one vector at a time. Refactor to walk the basis in tiles of
-   `B = 8–32` vectors, holding `B × N` complex doubles in pinned RAM and
-   calling a single `zgemv` per tile. Cuts re-orth I/O by `B×`.
+2. **Out-of-core blocked-tile reorthogonalization. — DONE (Phase 3a #2).**
+   The periodic-full and selective re-orth passes in
+   `lanczos_selective_reorth` (and the default `lanczos`) now walk the
+   Krylov basis in tiles of `B` vectors. Per tile we issue two BLAS-2
+   `zgemv` calls (`overlaps = V^H w`; `w := w − V * overlaps`) instead of
+   `B` BLAS-1 `zdotc` + `zaxpy` pairs. The selective branch runs CGS2
+   (two passes) which is backward-stable to the same bound as MGS
+   (Giraud-Langou-Rozložník 2005). Tile size is configured by
+   `ED_LANCZOS_REORTH_TILE` (default 16, clamped to `[1, 256]`); the
+   in-memory basis buffer is zero-copy through `get_basis_vector_ptr`,
+   the legacy on-disk store is read sequentially per tile so the OS page
+   cache stays warm. New helpers in `include/ed/io/lanczos_reorth.h` +
+   `src/io/lanczos_reorth.cpp`; covered by seven lockdown tests in
+   `tests/unit/test_lanczos_reorth.cpp` (CGS-vs-MGS correctness on
+   orthonormal V, threshold filter, skip predicate, in-memory and
+   on-disk tile loading, end-to-end tile-size invariance for
+   `lanczos_selective_reorth` across `B ∈ {1, 4, 16}`, and knob
+   clamping).
 3. **Mixed-precision SpMV (FP32 matvec + FP64 dot/normalize)** on GPU.
    Deferred from Batch 2 (P1-9). 1.7–2× speedup on
    memory-bandwidth-bound matvec at the cost of one extra Krylov iteration
