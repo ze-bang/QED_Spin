@@ -141,11 +141,44 @@ for in its 2025 paper.
 * **No surprise HDF5 or basis I/O in the default Python path.**
   Eigenvalues-only Python calls default `output_dir` to a no-op path so
   we do not open `ed_results.h5` every invocation; pass
-  `output_dir="."` to restore the legacy on-disk dump. When eigenvectors
-  are not requested, the complex `lanczos()` implementation does not
-  retain the full Krylov basis in RAM either (see `lanczos.cpp` Phase 6
-  gates). XDiag's `eigval0` likewise returns a scalar `E0` without
-  writing a project-local HDF5 file on each call.
+  `output_dir="."` to restore the legacy on-disk dump. As of Phase 6.1
+  this applies uniformly to every Python solver wrapper
+  (`lanczos`, `full_diagonalization`, `finite_temperature_lanczos`,
+  `low_temperature_lanczos`, `hybrid_thermal_method`), the high-level
+  dispatcher `quantum_ed.exact_diagonalization_core(op, method,
+  EDParameters())` (which now remaps an empty `params.output_dir` to
+  `"/dev/null"` before fanning out to any backend), and every C++
+  HDF5 helper (`HDF5IO::createOrOpenFile`, `saveEigenvalues`,
+  `saveEigenvector`, `saveDiagonalizationResults`,
+  `ensureTPQSampleGroup`, `saveTPQState`, the full `saveTPQ*` /
+  `saveFTLM*` / `saveStaticResponse` / `saveHybridThermalResults`
+  surface, plus `ensureFTLMSampleGroups` / `ensureTimeCorrelationGroups`
+  / `fileExists`). They all short-circuit on `""` / `"/dev/null"`
+  paths via `HDF5IO::isDisabledOutputPath`, so the same hygiene
+  extends transparently to TPQ, FTLM/LTLM, Hybrid Thermal,
+  Krylov-Schur, ARPACK, the DSSF unified schema (`src/dssf/dssf_io.cpp`),
+  etc. The raw `eigenvalues.dat` / `eigenvalues.txt` side files
+  written by `thick_restart_lanczos()` and `shift_invert_lanczos()`
+  (which bypass `HDF5IO`) are gated by the same predicate. When
+  eigenvectors are not requested, the complex `lanczos()`
+  implementation does not retain the full Krylov basis in RAM either
+  (see `lanczos.cpp` Phase 6 gates). XDiag's `eigval0` likewise
+  returns a scalar `E0` without writing a project-local HDF5 file on
+  each call.
+
+* **The Phase 6 perf hygiene applies across the whole CPU solver matrix
+  as of Phase 6.1**, not just the standalone `lanczos()` driver: every
+  CPU solver entry point (`block_lanczos`, `chebyshev_filtered_lanczos`,
+  `shift_invert_lanczos`, `krylov_schur`, `block_krylov_schur`,
+  `implicitly_restarted_lanczos`, `thick_restart_lanczos`,
+  `full_diagonalization`, `optimal_spectrum_solver`, FTLM, LTLM, TPQ,
+  Hybrid Thermal, ARPACK / ARPACK advanced) is wrapped in an
+  `ed::parallel::ThreadBudgetScope` that caps OpenMP+OpenBLAS threads
+  to `auto_threads_for_dim(N)` for its lifetime, with `std::swap`
+  rotates replacing the per-iteration `O(N)` `std::copy` traffic in the
+  Chebyshev / shift-invert / standard Lanczos inner loops. The MPI
+  distributed solvers re-enter the same CPU drivers and so inherit
+  these wins automatically.
 
 * **GPU and MPI not exercised here.** This page is intentionally a
   CPU-vs-CPU, single-node comparison so it isolates the

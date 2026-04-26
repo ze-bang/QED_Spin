@@ -4,6 +4,7 @@
 #include <ed/solvers/ltlm.h>
 #include <ed/solvers/ftlm.h>
 #include <ed/core/hdf5_io.h>       // For HDF5 output
+#include <ed/parallel/thread_budget.h>  // Phase 6.1: dim-aware OMP+BLAS cap
 #include <fstream>
 #include <iomanip>
 #include <sstream>
@@ -21,6 +22,10 @@ HybridThermalResults hybrid_thermal_method(
     uint64_t num_temp_bins,
     const std::string& output_dir
 ) {
+    // Phase 6.1: dim-aware OMP+BLAS thread cap (see lanczos() rationale).
+    const ed::parallel::ThreadBudgetScope budget(
+        ed::parallel::auto_threads_for_dim(N));
+
     std::cout << "\n================================================\n";
     std::cout << "       Hybrid Thermal Method (LTLM+FTLM)       \n";
     std::cout << "================================================\n";

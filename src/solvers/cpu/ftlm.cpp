@@ -1,6 +1,7 @@
 // ftlm.cpp - Finite Temperature Lanczos Method implementation
 #include <ed/core/system_utils.h>
 #include <ed/core/hdf5_io.h>       // For HDF5 output
+#include <ed/parallel/thread_budget.h>  // Phase 6.1: dim-aware OMP+BLAS cap
 
 #include <ed/solvers/ftlm.h>
 #include <ed/solvers/lanczos.h>
@@ -438,6 +439,14 @@ FTLMResults finite_temperature_lanczos(
     uint64_t num_temp_bins,
     const std::string& output_dir
 ) {
+    // Phase 6.1: dim-aware OMP+BLAS thread cap (see lanczos() rationale).
+    // FTLM runs ``num_samples`` independent Lanczos chains; each one is
+    // limited by the same memory-bandwidth cliff that hits the standalone
+    // ``lanczos()`` driver, so the same ``auto_threads_for_dim(N)`` bound
+    // helps here too.
+    const ed::parallel::ThreadBudgetScope budget(
+        ed::parallel::auto_threads_for_dim(N));
+
     const bool verbose = ed_dssf_verbose();
 
     if (verbose) {

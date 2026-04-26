@@ -5,6 +5,7 @@
 #include <ed/solvers/ftlm.h>     // For build_lanczos_tridiagonal function
 #include <ed/solvers/lanczos.h>  // For helper functions
 #include <ed/core/hdf5_io.h>       // For HDF5 output
+#include <ed/parallel/thread_budget.h>  // Phase 6.1: dim-aware OMP+BLAS cap
 #include <filesystem>  // P0.12
 #include <fstream>
 #include <iomanip>
@@ -198,6 +199,10 @@ LTLMResults low_temperature_lanczos(
     const ComplexVector* ground_state_input,
     const std::string& output_dir
 ) {
+    // Phase 6.1: dim-aware OMP+BLAS thread cap (see lanczos() rationale).
+    const ed::parallel::ThreadBudgetScope budget(
+        ed::parallel::auto_threads_for_dim(N));
+
     std::cout << "\n==========================================\n";
     std::cout << "Low Temperature Lanczos Method (LTLM)\n";
     std::cout << "==========================================\n";

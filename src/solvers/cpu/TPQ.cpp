@@ -1,6 +1,7 @@
 #include <ed/solvers/TPQ.h>
 #include <ed/core/construct_ham.h>
 #include <ed/core/hdf5_io.h>
+#include <ed/parallel/thread_budget.h>  // Phase 6.1: dim-aware OMP+BLAS cap
 #include <algorithm>
 #include <cctype>
 #include <filesystem>
@@ -1848,6 +1849,12 @@ void microcanonical_tpq(
     double measure_beta_min,
     double measure_beta_max
 ) {
+    // Phase 6.1: dim-aware OMP+BLAS thread cap (see lanczos() rationale).
+    // Microcanonical TPQ is dominated by H * v applies; same memory-bandwidth
+    // cliff as a Lanczos chain on the same dim.
+    const ed::parallel::ThreadBudgetScope budget(
+        ed::parallel::auto_threads_for_dim(N));
+
     #ifdef WITH_MPI
     int rank = 0, size = 1;
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
@@ -2553,6 +2560,10 @@ void canonical_tpq(
     double measure_beta_min,
     double measure_beta_max
 ){
+    // Phase 6.1: dim-aware OMP+BLAS thread cap (see lanczos() rationale).
+    const ed::parallel::ThreadBudgetScope budget(
+        ed::parallel::auto_threads_for_dim(N));
+
     #ifdef WITH_MPI
     int rank = 0, size = 1;
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);

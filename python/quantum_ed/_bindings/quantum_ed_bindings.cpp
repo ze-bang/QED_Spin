@@ -235,16 +235,36 @@ make_hv_real(const FixedSzOperator& op) {
     };
 }
 
+// Phase 6.1: shared HDF5-output gating for all solver wrappers.
+//
+// Historically a Python caller that did *not* pass ``output_dir`` got an
+// empty string here, which the C++ solvers interpret as "current working
+// directory" (``"."``). That triggered HDF5 file creation /
+// ed_results.h5 writes on every call, paying ~1 ms / call of pure I/O
+// overhead even when the user only wanted the return value (the
+// canonical interactive / benchmarking pattern). The xdiag bake-off
+// surfaced this as a 2-3x slowdown on small / mid-N Lanczos.
+//
+// Rather than bake the remap into every individual wrapper (we did this
+// for ``py_lanczos`` initially), centralize it: empty -> "/dev/null",
+// which the C++ HDF5 layer special-cases as "skip all I/O" (see
+// ``HDF5IO::isDisabledOutputPath`` in ``ed/core/hdf5_io.h``).
+// Pass ``"."`` explicitly to restore the legacy behavior.
+inline std::string output_dir_or_devnull(const std::string& s) {
+    return s.empty() ? std::string("/dev/null") : s;
+}
+
 py::array_t<double>
 py_full_diag(const Operator& op,
              uint64_t num_eigs,
              const std::string& output_dir) {
     const uint64_t n = hv_dim(op);
     if (num_eigs == 0 || num_eigs > n) num_eigs = n;
+    const std::string dir = output_dir_or_devnull(output_dir);
     std::vector<double> eigs;
     {
         py::gil_scoped_release release;
-        full_diagonalization(make_hv(op), n, num_eigs, eigs, output_dir,
+        full_diagonalization(make_hv(op), n, num_eigs, eigs, dir,
                              /*compute_eigenvectors=*/false);
     }
     return to_numpy_d(eigs);
@@ -256,10 +276,11 @@ py_full_diag_fixed_sz(const FixedSzOperator& op,
                       const std::string& output_dir) {
     const uint64_t n = hv_dim(op);
     if (num_eigs == 0 || num_eigs > n) num_eigs = n;
+    const std::string dir = output_dir_or_devnull(output_dir);
     std::vector<double> eigs;
     {
         py::gil_scoped_release release;
-        full_diagonalization(make_hv(op), n, num_eigs, eigs, output_dir,
+        full_diagonalization(make_hv(op), n, num_eigs, eigs, dir,
                              /*compute_eigenvectors=*/false);
     }
     return to_numpy_d(eigs);
@@ -290,11 +311,7 @@ py_lanczos(const Operator& op,
            double tolerance,
            const std::string& output_dir) {
     const uint64_t n = hv_dim(op);
-    // Empty string historically meant "." and triggered HDF5 writes to
-    // ./ed_results.h5 (pure overhead in interactive / benchmark code).
-    // Match the C++ ``/dev/null`` convention from solve_tridiagonal_matrix.
-    const std::string dir = output_dir.empty() ? std::string("/dev/null")
-                                               : output_dir;
+    const std::string dir = output_dir_or_devnull(output_dir);
     std::vector<double> eigs;
     {
         py::gil_scoped_release release;
@@ -315,8 +332,7 @@ py_lanczos_fixed_sz(const FixedSzOperator& op,
                     double tolerance,
                     const std::string& output_dir) {
     const uint64_t n = hv_dim(op);
-    const std::string dir = output_dir.empty() ? std::string("/dev/null")
-                                              : output_dir;
+    const std::string dir = output_dir_or_devnull(output_dir);
     std::vector<double> eigs;
     {
         py::gil_scoped_release release;
@@ -360,11 +376,12 @@ py::dict py_finite_temperature_lanczos(const Operator& op,
                                        uint64_t num_temp_bins,
                                        const std::string& output_dir) {
     const uint64_t n = hv_dim(op);
+    const std::string dir = output_dir_or_devnull(output_dir);
     FTLMResults res;
     {
         py::gil_scoped_release release;
         res = finite_temperature_lanczos(make_hv(op), n, params, temp_min,
-                                         temp_max, num_temp_bins, output_dir);
+                                         temp_max, num_temp_bins, dir);
     }
     py::dict d = thermo_to_dict(res.thermo_data);
     d["ground_state_estimate"] = res.ground_state_estimate;
@@ -378,11 +395,12 @@ py::dict py_finite_temperature_lanczos_fixed_sz(const FixedSzOperator& op,
                                                 uint64_t num_temp_bins,
                                                 const std::string& output_dir) {
     const uint64_t n = hv_dim(op);
+    const std::string dir = output_dir_or_devnull(output_dir);
     FTLMResults res;
     {
         py::gil_scoped_release release;
         res = finite_temperature_lanczos(make_hv(op), n, params, temp_min,
-                                         temp_max, num_temp_bins, output_dir);
+                                         temp_max, num_temp_bins, dir);
     }
     py::dict d = thermo_to_dict(res.thermo_data);
     d["ground_state_estimate"] = res.ground_state_estimate;
@@ -396,12 +414,13 @@ py::dict py_low_temperature_lanczos(const Operator& op,
                                     uint64_t num_temp_bins,
                                     const std::string& output_dir) {
     const uint64_t n = hv_dim(op);
+    const std::string dir = output_dir_or_devnull(output_dir);
     LTLMResults res;
     {
         py::gil_scoped_release release;
         res = low_temperature_lanczos(make_hv(op), n, params, temp_min,
                                       temp_max, num_temp_bins,
-                                      /*ground_state=*/nullptr, output_dir);
+                                      /*ground_state=*/nullptr, dir);
     }
     py::dict d = thermo_to_dict(res.thermo_data);
     d["ground_state_energy"] = res.ground_state_energy;
@@ -415,12 +434,13 @@ py::dict py_low_temperature_lanczos_fixed_sz(const FixedSzOperator& op,
                                              uint64_t num_temp_bins,
                                              const std::string& output_dir) {
     const uint64_t n = hv_dim(op);
+    const std::string dir = output_dir_or_devnull(output_dir);
     LTLMResults res;
     {
         py::gil_scoped_release release;
         res = low_temperature_lanczos(make_hv(op), n, params, temp_min,
                                       temp_max, num_temp_bins,
-                                      /*ground_state=*/nullptr, output_dir);
+                                      /*ground_state=*/nullptr, dir);
     }
     py::dict d = thermo_to_dict(res.thermo_data);
     d["ground_state_energy"] = res.ground_state_energy;
@@ -434,11 +454,12 @@ py::dict py_hybrid_thermal(const Operator& op,
                            uint64_t num_temp_bins,
                            const std::string& output_dir) {
     const uint64_t n = hv_dim(op);
+    const std::string dir = output_dir_or_devnull(output_dir);
     HybridThermalResults res;
     {
         py::gil_scoped_release release;
         res = hybrid_thermal_method(make_hv(op), n, params, temp_min, temp_max,
-                                    num_temp_bins, output_dir);
+                                    num_temp_bins, dir);
     }
     py::dict d = thermo_to_dict(res.thermo_data);
     d["ground_state_energy"] = res.ground_state_energy;
@@ -454,11 +475,12 @@ py::dict py_hybrid_thermal_fixed_sz(const FixedSzOperator& op,
                                     uint64_t num_temp_bins,
                                     const std::string& output_dir) {
     const uint64_t n = hv_dim(op);
+    const std::string dir = output_dir_or_devnull(output_dir);
     HybridThermalResults res;
     {
         py::gil_scoped_release release;
         res = hybrid_thermal_method(make_hv(op), n, params, temp_min, temp_max,
-                                    num_temp_bins, output_dir);
+                                    num_temp_bins, dir);
     }
     py::dict d = thermo_to_dict(res.thermo_data);
     d["ground_state_energy"] = res.ground_state_energy;

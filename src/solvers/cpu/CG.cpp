@@ -1,6 +1,7 @@
 #include <ed/solvers/CG.h>
 #include <ed/core/system_utils.h>
 #include <ed/core/hdf5_io.h>
+#include <ed/parallel/thread_budget.h>  // Phase 6.1: dim-aware OMP+BLAS cap
 
 #include <filesystem>      // P0.12
 #include <system_error>    // P0.12
@@ -17,6 +18,10 @@ void davidson_method(
     std::vector<ComplexVector>& eigenvectors,              // Output eigenvectors
     std::string dir                                   // Directory for temporary files
 ) {
+    // Phase 6.1: dim-aware OMP+BLAS thread cap (see lanczos() rationale).
+    const ed::parallel::ThreadBudgetScope budget(
+        ed::parallel::auto_threads_for_dim(N));
+
     // P0.12: was safe_system_call("mkdir -p ...").
     std::string temp_dir = dir + "/davidson_temp";
     if (!dir.empty()) {
@@ -220,6 +225,10 @@ void bicg_eigenvalues(
     std::vector<ComplexVector>& eigenvectors,              // Output eigenvectors
     std::string dir                                   // Directory for temporary files
 ) {
+    // Phase 6.1: dim-aware OMP+BLAS thread cap (see lanczos() rationale).
+    const ed::parallel::ThreadBudgetScope budget(
+        ed::parallel::auto_threads_for_dim(N));
+
     // P0.12: was safe_system_call("mkdir -p ...").
     std::string temp_dir = dir + "/bicg_temp";
     if (!dir.empty()) {

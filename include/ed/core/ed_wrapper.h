@@ -568,19 +568,36 @@ inline EDResults exact_diagonalization_core(
     std::function<void(const Complex*, Complex*, int)> H, 
     uint64_t hilbert_space_dim,
     DiagonalizationMethod method = DiagonalizationMethod::LANCZOS,
-    const EDParameters& params = EDParameters()
+    const EDParameters& params_in = EDParameters()
 ) {
     EDResults results;
-    
-    // Initialize output directory if needed
-    if (!params.output_dir.empty()) {
+
+    // Phase 6.1: empty params.output_dir historically meant "current working
+    // directory" -- underlying solvers (e.g. thick_restart_lanczos,
+    // shift_invert_lanczos) would dump eigenvalues.dat / eigenvalues.txt
+    // into wherever the process happened to be running, polluting cwd
+    // every time the Python dispatcher was used. Mirror the
+    // ``output_dir_or_devnull`` convention used by the standalone Python
+    // wrappers: empty -> "/dev/null", which the C++ HDF5 layer
+    // (``HDF5IO::isDisabledOutputPath``) and the ``ofstream`` writes (via
+    // path concatenation that produces a non-openable path) both treat
+    // as "skip all I/O". Pass ``"."`` explicitly to restore legacy
+    // cwd-dump behaviour.
+    EDParameters params = params_in;
+    if (params.output_dir.empty()) {
+        params.output_dir = "/dev/null";
+    }
+
+    // Initialize output directory if needed (skip the disabled sentinel).
+    if (!HDF5IO::isDisabledOutputPath(params.output_dir)) {
         std::string cmd = "mkdir -p " + params.output_dir;
         safe_system_call(cmd);
     }
-    
+
     // Set eigenvectors flag in results
     results.eigenvectors_computed = params.compute_eigenvectors;
-    if (params.compute_eigenvectors && !params.output_dir.empty()) {
+    if (params.compute_eigenvectors &&
+        !HDF5IO::isDisabledOutputPath(params.output_dir)) {
         results.eigenvectors_path = params.output_dir;
     }
     

@@ -2059,6 +2059,15 @@ void block_lanczos(std::function<void(const Complex*, Complex*, int)> H, uint64_
         return;
     }
 
+    // Phase 6.1: dim-aware OMP+BLAS thread cap, same rationale as the
+    // single-vector lanczos() driver. Block Lanczos is BLAS-2 / BLAS-3
+    // dominated (b vectors at a time) so the cliff is less sharp, but
+    // OpenBLAS still re-enters its pthread pool on every block-SpMV /
+    // block-QR call -- capping to ``auto_threads_for_dim(N)`` cuts the
+    // per-call overhead for small-to-mid N.
+    const ed::parallel::ThreadBudgetScope budget(
+        ed::parallel::auto_threads_for_dim(N));
+
     const uint64_t b = (block_size <= 0) ? std::min(static_cast<uint64_t>(4), N) : std::min(block_size, N);
     const uint64_t target_eigs = std::max(static_cast<uint64_t>(1), std::min(num_eigs > 0 ? num_eigs : static_cast<uint64_t>(1), N));
     const uint64_t max_blocks = (max_iter <= 0) ? (N + b - 1) / b : std::min(max_iter, (N + b - 1) / b);
@@ -2434,6 +2443,10 @@ void chebyshev_filtered_lanczos(std::function<void(const Complex*, Complex*, int
     std::cout << "Starting Chebyshev Filtered Lanczos algorithm" << std::endl;
     std::cout << "Target eigenvalues: " << num_eigs << ", Max iterations: " << max_iter << std::endl;
     std::cout << "Tolerance: " << tol << std::endl;
+
+    // Phase 6.1: dim-aware OMP+BLAS thread cap (see lanczos() rationale).
+    const ed::parallel::ThreadBudgetScope budget(
+        ed::parallel::auto_threads_for_dim(N));
     
     // ===== Setup storage =====
     const std::string temp_dir = (dir.empty() ? "./chebyshev_lanczos_basis" : dir + "/chebyshev_lanczos_basis");
@@ -2734,9 +2747,14 @@ void chebyshev_filtered_lanczos(std::function<void(const Complex*, Complex*, int
             write_basis_vector(temp_dir, j + 1, w, N);
         }
         
-        // Update for next iteration
-        v_prev = v_current;
-        v_current = w;
+        // Phase 6.1: 3-way swap-rotate to avoid the O(N) memcpy of the
+        // ``v_prev = v_current; v_current = w;`` assignments. After the
+        // swaps:
+        //   v_prev    <- old v_current (= v_j)        [used next iter as v_{j-1}]
+        //   v_current <- old w         (= v_{j+1})    [next iter's v_j]
+        //   w         <- garbage (was v_prev)         [overwritten by H(v_current,w)]
+        std::swap(v_prev, v_current);
+        std::swap(v_current, w);
         
         // Check convergence periodically
         if ((j + 1) % 20 == 0 && j >= num_eigs) {
@@ -2816,6 +2834,10 @@ void shift_invert_lanczos(std::function<void(const Complex*, Complex*, int)> H, 
     
     std::cout << "Starting Shift-Invert Lanczos with shift σ = " << sigma << std::endl;
     std::cout << "Seeking " << num_eigs << " eigenvalues closest to σ" << std::endl;
+
+    // Phase 6.1: dim-aware OMP+BLAS thread cap (see lanczos() rationale).
+    const ed::parallel::ThreadBudgetScope budget(
+        ed::parallel::auto_threads_for_dim(N));
     
     // Setup storage
     std::string temp_dir = (dir.empty() ? "./lanczos_basis_vectors" : dir+"/lanczos_basis_vectors");
@@ -3032,9 +3054,11 @@ void shift_invert_lanczos(std::function<void(const Complex*, Complex*, int)> H, 
             write_basis_vector(temp_dir, j + 1, w, N);
         }
         
-        // Update vectors
-        v_prev = v_current;
-        v_current = w;
+        // Phase 6.1: 3-way swap-rotate avoids the O(N) memcpy of
+        // ``v_prev = v_current; v_current = w;``. See the matching
+        // comment in chebyshev_filtered_lanczos.
+        std::swap(v_prev, v_current);
+        std::swap(v_current, w);
         
         // Periodically check convergence of Ritz values
         if ((j + 1) % 10 == 0 || j == max_iter - 1) {
@@ -3179,17 +3203,20 @@ void shift_invert_lanczos(std::function<void(const Complex*, Complex*, int)> H, 
         }
     }
     
-    // Save eigenvalues
-    std::string eval_file = result_dir + "/eigenvalues.dat";
-    std::ofstream eval_outfile(eval_file, std::ios::binary);
-    if (eval_outfile) {
-        size_t n_evals = eigenvalues.size();
-        eval_outfile.write(reinterpret_cast<const char*>(&n_evals), sizeof(size_t));
-        eval_outfile.write(reinterpret_cast<const char*>(eigenvalues.data()), n_evals * sizeof(double));
-        eval_outfile.close();
-        std::cout << "Saved " << n_evals << " eigenvalues to " << eval_file << std::endl;
+    // Phase 6.1: skip eigenvalues.dat write on the disabled-output sentinel
+    // (matches HDF5IO::isDisabledOutputPath semantics).
+    if (!HDF5IO::isDisabledOutputPath(result_dir)) {
+        std::string eval_file = result_dir + "/eigenvalues.dat";
+        std::ofstream eval_outfile(eval_file, std::ios::binary);
+        if (eval_outfile) {
+            size_t n_evals = eigenvalues.size();
+            eval_outfile.write(reinterpret_cast<const char*>(&n_evals), sizeof(size_t));
+            eval_outfile.write(reinterpret_cast<const char*>(eigenvalues.data()), n_evals * sizeof(double));
+            eval_outfile.close();
+            std::cout << "Saved " << n_evals << " eigenvalues to " << eval_file << std::endl;
+        }
     }
-    
+
     // basis_scope RAII cleans up buffer/directory on scope exit
     std::cout << "Shift-Invert Lanczos completed successfully" << std::endl;
 }
@@ -3199,7 +3226,15 @@ void full_diagonalization(std::function<void(const Complex*, Complex*, int)> H, 
                        std::vector<double>& eigenvalues, std::string dir,
                        bool compute_eigenvectors) {
     std::cout << "Starting full diagonalization for matrix of dimension " << N << std::endl;
-    
+
+    // Phase 6.1: dim-aware OMP+BLAS thread cap. Full diag is BLAS-3 dense
+    // LAPACK -- the cap rarely hurts (LAPACK already saturates) but
+    // matters when ``num_eigs`` is small enough to take the sparse
+    // restart fallback below, which loops H * v in the same way Lanczos
+    // does.
+    const ed::parallel::ThreadBudgetScope budget(
+        ed::parallel::auto_threads_for_dim(N));
+
     // Create output directory if needed
     if (dir.empty()) {
         dir = ".";
@@ -3539,6 +3574,10 @@ void krylov_schur(std::function<void(const Complex*, Complex*, int)> H, uint64_t
                   bool compute_eigenvectors) {
     
     std::cout << "Starting Krylov-Schur algorithm for " << num_eigs << " eigenvalues" << std::endl;
+
+    // Phase 6.1: dim-aware OMP+BLAS thread cap (see lanczos() rationale).
+    const ed::parallel::ThreadBudgetScope budget(
+        ed::parallel::auto_threads_for_dim(N));
     
     // Setup storage (RAM by default, disk via ED_LANCZOS_DISK=1)
     std::string temp_dir = (dir.empty() ? "./krylov_schur_temp" : dir + "/krylov_schur_temp");
@@ -3899,6 +3938,10 @@ void block_krylov_schur(std::function<void(const Complex*, Complex*, int)> H, ui
     std::cout << "Starting Block Krylov-Schur algorithm for " << num_eigs << " eigenvalues" << std::endl;
     std::cout << "  Block size: " << block_size << std::endl;
     std::cout << "  Hilbert space dimension: " << N << std::endl;
+
+    // Phase 6.1: dim-aware OMP+BLAS thread cap (see lanczos() rationale).
+    const ed::parallel::ThreadBudgetScope budget(
+        ed::parallel::auto_threads_for_dim(N));
     
     // Parameters
     uint64_t p = std::min(block_size, N);  // Extra vectors beyond wanted eigenvalues per restart
@@ -4202,6 +4245,10 @@ void implicitly_restarted_lanczos(std::function<void(const Complex*, Complex*, i
     std::cout << "Starting Implicitly Restarted Lanczos (IRL) algorithm" << std::endl;
     std::cout << "Target eigenvalues: " << num_eigs << ", Max subspace size: " << max_iter << std::endl;
     std::cout << "Tolerance: " << tol << std::endl;
+
+    // Phase 6.1: dim-aware OMP+BLAS thread cap (see lanczos() rationale).
+    const ed::parallel::ThreadBudgetScope budget(
+        ed::parallel::auto_threads_for_dim(N));
     
     // ===== Setup storage (RAM by default, disk via ED_LANCZOS_DISK=1) =====
     const std::string temp_dir = (dir.empty() ? "./irl_basis_vectors" : dir + "/irl_basis_vectors");
@@ -4535,6 +4582,10 @@ void thick_restart_lanczos(std::function<void(const Complex*, Complex*, int)> H,
     std::cout << "Starting Thick-Restart Lanczos algorithm" << std::endl;
     std::cout << "Target eigenvalues: " << num_eigs << ", Max subspace size: " << max_iter << std::endl;
     std::cout << "Tolerance: " << tol << std::endl;
+
+    // Phase 6.1: dim-aware OMP+BLAS thread cap (see lanczos() rationale).
+    const ed::parallel::ThreadBudgetScope budget(
+        ed::parallel::auto_threads_for_dim(N));
     
     // ===== Setup storage (RAM by default, disk via ED_LANCZOS_DISK=1) =====
     const std::string temp_dir = (dir.empty() ? "./trl_basis_vectors" : dir + "/trl_basis_vectors");
@@ -4879,26 +4930,31 @@ void thick_restart_lanczos(std::function<void(const Complex*, Complex*, int)> H,
     eigenvalues.assign(locked_eigenvalues.begin(), locked_eigenvalues.begin() + n_output);
     
     std::cout << "Computed " << eigenvalues.size() << " eigenvalues" << std::endl;
-    
-    // Save eigenvalues
-    std::string eval_file = evec_dir + "/eigenvalues.dat";
-    std::ofstream eval_out(eval_file, std::ios::binary);
-    if (eval_out) {
-        size_t n_evals = eigenvalues.size();
-        eval_out.write(reinterpret_cast<const char*>(&n_evals), sizeof(size_t));
-        eval_out.write(reinterpret_cast<const char*>(eigenvalues.data()), n_evals * sizeof(double));
-        eval_out.close();
-    }
-    
-    std::string eval_text_file = evec_dir + "/eigenvalues.txt";
-    std::ofstream eval_text_out(eval_text_file);
-    if (eval_text_out) {
-        eval_text_out << std::scientific << std::setprecision(15);
-        eval_text_out << eigenvalues.size() << "\n";
-        for (double val : eigenvalues) {
-            eval_text_out << val << "\n";
+
+    // Phase 6.1: skip all eigenvalues.dat / eigenvalues.txt writes when the
+    // caller passed an empty / "/dev/null" output dir (Python dispatcher
+    // default; matches HDF5IO::isDisabledOutputPath semantics).
+    if (!HDF5IO::isDisabledOutputPath(evec_dir)) {
+        // Save eigenvalues
+        std::string eval_file = evec_dir + "/eigenvalues.dat";
+        std::ofstream eval_out(eval_file, std::ios::binary);
+        if (eval_out) {
+            size_t n_evals = eigenvalues.size();
+            eval_out.write(reinterpret_cast<const char*>(&n_evals), sizeof(size_t));
+            eval_out.write(reinterpret_cast<const char*>(eigenvalues.data()), n_evals * sizeof(double));
+            eval_out.close();
         }
-        eval_text_out.close();
+
+        std::string eval_text_file = evec_dir + "/eigenvalues.txt";
+        std::ofstream eval_text_out(eval_text_file);
+        if (eval_text_out) {
+            eval_text_out << std::scientific << std::setprecision(15);
+            eval_text_out << eigenvalues.size() << "\n";
+            for (double val : eigenvalues) {
+                eval_text_out << val << "\n";
+            }
+            eval_text_out.close();
+        }
     }
     
     // Save eigenvectors if requested
@@ -5112,6 +5168,10 @@ void optimal_spectrum_solver(std::function<void(const Complex*, Complex*, int)> 
                                              bool compute_eigenvectors) {
     std::cout << "Starting Adaptive Spectrum Slicing Full Diagonalization for dimension " << N << std::endl;
     std::cout << "This algorithm preserves all degenerate eigenvalues with high numerical accuracy" << std::endl;
+
+    // Phase 6.1: dim-aware OMP+BLAS thread cap (see lanczos() rationale).
+    const ed::parallel::ThreadBudgetScope budget(
+        ed::parallel::auto_threads_for_dim(N));
     
     // Create output directory
     if (dir.empty()) {

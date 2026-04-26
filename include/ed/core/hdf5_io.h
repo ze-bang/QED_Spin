@@ -275,6 +275,33 @@ public:
     }
     
     /**
+     * @brief Universal "disable HDF5 output" sentinel.
+     *
+     * Phase 6.1: every solver write path goes through ``createOrOpenFile`` /
+     * ``saveEigenvalues`` / ``saveEigenvector`` / ``saveDiagonalizationResults``
+     * / ``ensureTPQSampleGroup`` / ``saveTPQState``. Centralising the
+     * "skip all I/O" check here means that **any** caller (CPU / GPU /
+     * MPI / DSSF / Python / CLI) gets the no-write fast path simply by
+     * passing an empty string or ``"/dev/null"`` for the output dir, with
+     * zero per-call-site changes.
+     *
+     * Treats ``"/dev/null"`` and any path of the form ``"/dev/null/..."``
+     * as disabled. The Python bindings remap a default ``output_dir=""``
+     * to ``"/dev/null"`` so interactive / benchmarking calls never write
+     * to disk unless the caller asked for it.
+     */
+    static inline bool isDisabledOutputPath(const std::string& s) {
+        if (s.empty()) return true;
+        // Exact match on the conventional sentinel.
+        if (s == "/dev/null") return true;
+        // ``/dev/null/<anything>`` -- e.g. createOrOpenFile concatenates
+        // ``dir + "/" + filename`` so a disabled dir yields a disabled path.
+        constexpr const char* kDevNull = "/dev/null/";
+        if (s.size() > 10 && s.compare(0, 10, kDevNull) == 0) return true;
+        return false;
+    }
+
+    /**
      * @brief Create or open an HDF5 file for results storage (SAFE - preserves existing data)
      * 
      * SAFE WRITING PROTOCOL:
@@ -282,13 +309,20 @@ public:
      * - If the file doesn't exist, creates a new file with standard groups
      * - Always ensures standard groups exist (creates if missing)
      * - NEVER overwrites or truncates existing data
-     * 
+     *
+     * If ``directory`` is empty or "/dev/null", returns the
+     * sentinel ``"/dev/null"`` immediately and performs no I/O. All
+     * downstream HDF5IO writers detect this sentinel and short-circuit.
+     *
      * @param directory Directory to create/open the file in
      * @param filename Name of the HDF5 file (default: ed_results.h5)
      * @return Full path to the HDF5 file
      */
     static std::string createOrOpenFile(const std::string& directory, 
                                         const std::string& filename = "ed_results.h5") {
+        if (isDisabledOutputPath(directory)) {
+            return std::string("/dev/null");
+        }
         std::string filepath = directory + "/" + filename;
         
         try {
@@ -331,6 +365,9 @@ public:
      */
     static std::string forceCreateFile(const std::string& directory, 
                                        const std::string& filename = "ed_results.h5") {
+        if (isDisabledOutputPath(directory)) {
+            return std::string("/dev/null");
+        }
         std::string filepath = directory + "/" + filename;
         
         try {
@@ -351,6 +388,11 @@ public:
      * Uses filesystem check first to avoid HDF5 error messages when file doesn't exist
      */
     static bool fileExists(const std::string& filepath) {
+        // Phase 6.1: short-circuit on the disabled-output sentinel. Without
+        // this, /dev/null would pass std::filesystem::exists (it is a real
+        // device node on Linux) and then fail noisily inside the H5::H5File
+        // ctor below.
+        if (isDisabledOutputPath(filepath)) return false;
         // First check if file exists on filesystem to avoid HDF5 error output
         if (!std::filesystem::exists(filepath)) {
             return false;
@@ -387,6 +429,7 @@ public:
      */
     static void saveEigenvalues(const std::string& filepath, 
                                 const std::vector<double>& eigenvalues) {
+        if (isDisabledOutputPath(filepath)) return;
         try {
             H5::H5File file(filepath, H5F_ACC_RDWR);
             
@@ -454,6 +497,7 @@ public:
     static void saveEigenvector(const std::string& filepath, 
                                 size_t index, 
                                 const std::vector<Complex>& eigenvector) {
+        if (isDisabledOutputPath(filepath)) return;
         try {
             H5::H5File file(filepath, H5F_ACC_RDWR);
             
@@ -526,7 +570,7 @@ public:
         const std::vector<std::vector<Complex>>& eigenvectors = {},
         const std::string& solver_name = ""
     ) {
-        if (output_dir.empty()) return;
+        if (isDisabledOutputPath(output_dir)) return;
         
         // Create output directory if needed (for .dat files and HDF5)
         std::error_code ec;
@@ -618,6 +662,7 @@ public:
                                    const std::vector<double>& temperatures,
                                    const std::string& observable_name,
                                    const std::vector<double>& values) {
+        if (isDisabledOutputPath(filepath)) return;
         try {
             H5::H5File file(filepath, H5F_ACC_RDWR);
             
@@ -694,6 +739,7 @@ public:
     static void saveCorrelationMatrix(const std::string& filepath,
                                       const std::string& correlation_name,
                                       const std::vector<std::vector<Complex>>& matrix) {
+        if (isDisabledOutputPath(filepath)) return;
         try {
             H5::H5File file(filepath, H5F_ACC_RDWR);
             
@@ -751,6 +797,7 @@ public:
     static void saveCorrelationData(const std::string& filepath,
                                     const std::string& dataset_name,
                                     const std::vector<Complex>& data) {
+        if (isDisabledOutputPath(filepath)) return;
         try {
             H5::H5File file(filepath, H5F_ACC_RDWR);
             
@@ -807,6 +854,7 @@ public:
                                       const std::vector<double>& frequencies,
                                       const std::vector<double>& spectral_function,
                                       const std::map<std::string, double>& metadata = {}) {
+        if (isDisabledOutputPath(filepath)) return;
         try {
             H5::H5File file(filepath, H5F_ACC_RDWR);
             
@@ -865,6 +913,7 @@ public:
                                size_t sample_index,
                                const std::vector<double>& eigenvalues,
                                const std::map<std::string, std::vector<double>>& observables) {
+        if (isDisabledOutputPath(filepath)) return;
         try {
             H5::H5File file(filepath, H5F_ACC_RDWR);
             
@@ -931,6 +980,7 @@ public:
                              double beta,
                              const std::vector<Complex>& state,
                              bool overwrite = false) {
+        if (isDisabledOutputPath(filepath)) return true;
         try {
             H5::H5File file(filepath, H5F_ACC_RDWR);
             
@@ -1252,6 +1302,7 @@ public:
      * @param sample_index Sample index
      */
     static void ensureTPQSampleGroup(const std::string& filepath, size_t sample_index) {
+        if (isDisabledOutputPath(filepath)) return;
         try {
             H5::H5File file(filepath, H5F_ACC_RDWR);
             
@@ -1461,6 +1512,7 @@ public:
     static bool appendTPQThermodynamics(const std::string& filepath,
                                         size_t sample_index,
                                         const TPQThermodynamicPoint& point) {
+        if (isDisabledOutputPath(filepath)) return false;
         try {
             H5::H5File file(filepath, H5F_ACC_RDWR);
             
@@ -1614,6 +1666,7 @@ public:
     static bool appendTPQNorm(const std::string& filepath,
                               size_t sample_index,
                               const TPQNormPoint& point) {
+        if (isDisabledOutputPath(filepath)) return false;
         try {
             H5::H5File file(filepath, H5F_ACC_RDWR);
             
@@ -1760,7 +1813,8 @@ public:
                                       size_t sample_index,
                                       const std::vector<TPQThermodynamicPoint>& points) {
         if (points.empty()) return;
-        
+        if (isDisabledOutputPath(filepath)) return;
+
         try {
             H5::H5File file(filepath, H5F_ACC_RDWR);
             
@@ -1834,7 +1888,8 @@ public:
                             size_t sample_index,
                             const std::vector<TPQNormPoint>& points) {
         if (points.empty()) return;
-        
+        if (isDisabledOutputPath(filepath)) return;
+
         try {
             H5::H5File file(filepath, H5F_ACC_RDWR);
             
@@ -2066,6 +2121,7 @@ public:
         const std::vector<double>& entropy_error,
         uint64_t num_samples
     ) {
+        if (isDisabledOutputPath(filepath)) return;
         try {
             H5::H5File file(filepath, H5F_ACC_RDWR);
             
@@ -2169,6 +2225,7 @@ public:
         uint64_t total_samples,
         const std::string& method = "FTLM"
     ) {
+        if (isDisabledOutputPath(filepath)) return;
         try {
             H5::H5File file(filepath, H5F_ACC_RDWR);
             
@@ -2263,6 +2320,7 @@ public:
         const std::vector<double>& susceptibility_error = {},
         uint64_t total_samples = 1
     ) {
+        if (isDisabledOutputPath(filepath)) return;
         try {
             H5::H5File file(filepath, H5F_ACC_RDWR);
             
@@ -2347,6 +2405,7 @@ public:
         uint64_t total_samples = 1,
         double temperature = 0.0
     ) {
+        if (isDisabledOutputPath(filepath)) return;
         try {
             H5::H5File file(filepath, H5F_ACC_RDWR);
             
@@ -2449,6 +2508,7 @@ public:
         uint64_t ftlm_points,
         uint64_t ftlm_samples_used
     ) {
+        if (isDisabledOutputPath(filepath)) return;
         try {
             H5::H5File file(filepath, H5F_ACC_RDWR);
             
@@ -2559,6 +2619,7 @@ public:
                          const std::vector<double>& data,
                          const std::map<std::string, std::string>& string_attrs = {},
                          const std::map<std::string, double>& double_attrs = {}) {
+        if (isDisabledOutputPath(filepath)) return;
         try {
             H5::H5File file(filepath, H5F_ACC_RDWR);
             
@@ -2661,6 +2722,7 @@ public:
      * @brief Ensure FTLM sample groups exist in HDF5 file
      */
     static void ensureFTLMSampleGroups(const std::string& filepath) {
+        if (isDisabledOutputPath(filepath)) return;
         try {
             H5::H5File file(filepath, H5F_ACC_RDWR);
             
@@ -2699,6 +2761,7 @@ public:
     static void saveFTLMThermodynamicSample(const std::string& filepath,
                                             size_t sample_index,
                                             const FTLMThermodynamicSample& sample) {
+        if (isDisabledOutputPath(filepath)) return;
         try {
             H5::H5File file(filepath, H5F_ACC_RDWR);
             
@@ -2754,6 +2817,7 @@ public:
                                         size_t sample_index,
                                         const FTLMDynamicalSample& sample,
                                         bool is_correlation = false) {
+        if (isDisabledOutputPath(filepath)) return;
         try {
             H5::H5File file(filepath, H5F_ACC_RDWR);
             
@@ -2802,6 +2866,7 @@ public:
                                      size_t sample_index,
                                      const FTLMStaticSample& sample,
                                      const std::string& operator_name = "") {
+        if (isDisabledOutputPath(filepath)) return;
         try {
             H5::H5File file(filepath, H5F_ACC_RDWR);
             
@@ -2865,6 +2930,7 @@ public:
      * @brief Ensure time correlation groups exist in HDF5 file
      */
     static void ensureTimeCorrelationGroups(const std::string& filepath) {
+        if (isDisabledOutputPath(filepath)) return;
         try {
             H5::H5File file(filepath, H5F_ACC_RDWR);
             
@@ -2897,6 +2963,7 @@ public:
                                     double beta,
                                     const TimeCorrelationData& data,
                                     const std::string& label = "") {
+        if (isDisabledOutputPath(filepath)) return;
         try {
             H5::H5File file(filepath, H5F_ACC_RDWR);
             
@@ -3066,6 +3133,9 @@ public:
     static std::string getPerRankFilePath(const std::string& directory,
                                           int rank,
                                           const std::string& filename = "ed_results.h5") {
+        if (isDisabledOutputPath(directory)) {
+            return std::string("/dev/null");
+        }
         // Extract base name and extension
         size_t dot_pos = filename.rfind('.');
         std::string base = (dot_pos != std::string::npos) ? filename.substr(0, dot_pos) : filename;
@@ -3090,6 +3160,9 @@ public:
     static std::string createPerRankFile(const std::string& directory,
                                          int rank,
                                          const std::string& filename = "ed_results.h5") {
+        if (isDisabledOutputPath(directory)) {
+            return std::string("/dev/null");
+        }
         std::string filepath = getPerRankFilePath(directory, rank, filename);
         
         try {

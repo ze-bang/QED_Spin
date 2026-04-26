@@ -11,6 +11,8 @@
 
 #include <ed/dssf/dssf_io.h>
 
+#include <ed/core/hdf5_io.h>  // Phase 6.1: HDF5IO::isDisabledOutputPath
+
 #include <H5Cpp.h>
 
 #include <algorithm>
@@ -152,6 +154,10 @@ void require_matching_lengths(const std::vector<const std::vector<double>*>& xs,
 } // namespace
 
 void ensure_metadata(const std::string& filepath, const Metadata& meta) {
+    // Phase 6.1: respect the centralised "disable HDF5 output" sentinel
+    // so DSSF writers behave consistently with HDF5IO::saveDynamicalResponse
+    // and friends when the caller passes "" or "/dev/null".
+    if (HDF5IO::isDisabledOutputPath(filepath)) return;
     H5::H5File file;
     open_or_create_file(filepath, file);
     ensure_group(file, kRoot);
@@ -181,6 +187,9 @@ void write_record(const std::string& filepath, const Record& record) {
         throw std::invalid_argument(
             "ed::dssf::write_record: record.operator_name must be non-empty");
     }
+    // Phase 6.1: see comment in ensure_metadata; same disabled-path
+    // short-circuit so empty / /dev/null filepaths are a silent no-op.
+    if (HDF5IO::isDisabledOutputPath(filepath)) return;
 
     require_matching_lengths(
         {&record.frequencies, &record.spectral_real, &record.spectral_imag,

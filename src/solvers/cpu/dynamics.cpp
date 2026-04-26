@@ -3,6 +3,7 @@
 #include <ed/solvers/dynamics.h>
 #include <ed/core/hdf5_io.h>  // For HDF5 output
 #include <ed/core/blas_lapack_wrapper.h>  // For LAPACKE interface
+#include <ed/parallel/thread_budget.h>  // Phase 6.1: dim-aware OMP+BLAS cap
 
 // ============================================================================
 // TIME EVOLUTION METHODS
@@ -725,6 +726,11 @@ void compute_time_correlations_incremental(
     double dt,
     std::vector<std::ofstream>& output_files
 ) {
+    // Phase 6.1: dim-aware OMP+BLAS thread cap (see lanczos() rationale).
+    // The inner U_t / operator applies share this scope.
+    const ed::parallel::ThreadBudgetScope budget(
+        ed::parallel::auto_threads_for_dim(N));
+
     uint64_t num_operators = operators_1.size();
     
     // Pre-allocate all buffers
@@ -881,7 +887,12 @@ void compute_operator_dynamics(
     uint64_t krylov_dim
 ) {
     std::cout << "Computing dynamical correlations using Krylov method, label: " << label << std::endl;
-    
+
+    // Phase 6.1: dim-aware OMP+BLAS thread cap (see lanczos() rationale).
+    // Inner Krylov time-evolve calls all share this scope.
+    const ed::parallel::ThreadBudgetScope budget(
+        ed::parallel::auto_threads_for_dim(N));
+
     // Ensure Krylov dimension doesn't exceed system size
     krylov_dim = std::min(krylov_dim, N/2);
     

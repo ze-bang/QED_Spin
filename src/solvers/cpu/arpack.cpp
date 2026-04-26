@@ -2,6 +2,7 @@
 #include <ed/solvers/arpack.h>
 #include <ed/core/system_utils.h>
 #include <ed/core/hdf5_io.h>       // For HDF5 output
+#include <ed/parallel/thread_budget.h>  // Phase 6.1: dim-aware OMP+BLAS cap
 #include <iostream>
 #include <fstream>
 #include <iomanip>
@@ -250,7 +251,13 @@ int arpack_core(const std::function<void(const Complex*, Complex*, int)>& H,
                 const std::vector<Complex>* initial_resid,
                 uint64_t inner_max_override,
                 double inner_tol_override) {
-    
+    // Phase 6.1: dim-aware OMP+BLAS thread cap (see lanczos() rationale).
+    // ARPACK's reverse-communication loop calls ``H * v`` once per iteration;
+    // the same memory-bandwidth cliff that hits Lanczos at small-mid N hits
+    // ARPACK too.
+    const ed::parallel::ThreadBudgetScope budget(
+        ed::parallel::auto_threads_for_dim(N));
+
     uint64_t ncv = (explicit_ncv > 0) ? std::min(N, static_cast<uint64_t>(explicit_ncv))
                                  : std::min(N, std::max(uint64_t(4 * nev + 20), uint64_t(30)));
     uint64_t ldv = N;
@@ -443,7 +450,10 @@ int arpack_core_advanced(const std::function<void(const Complex*, Complex*, int)
                          std::vector<double>& evals_out,
                          std::vector<Complex>& evecs_out,
                          bool want_evecs) {
-    
+    // Phase 6.1: dim-aware OMP+BLAS thread cap (see lanczos() rationale).
+    const ed::parallel::ThreadBudgetScope budget(
+        ed::parallel::auto_threads_for_dim(N));
+
     uint64_t base_ncv = (opts.ncv > 0) ? opts.ncv
                     : std::min(N, std::max(uint64_t((opts.which == "SM" || opts.which == "SR" ? 6 : 4) * opts.nev + 40), uint64_t(30)));
     double target_tol = opts.tol;

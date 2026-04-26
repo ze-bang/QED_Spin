@@ -7,6 +7,87 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — Phase 6.1: Phase 6 perf hygiene applied across the whole CPU solver matrix
+
+The Phase 6 / xdiag bake-off only patched the standalone `lanczos()` driver.
+Phase 6.1 broadens the same hygiene to **every CPU solver entry point** —
+TPQ, FTLM, LTLM, Hybrid Thermal, full diagonalization, block Lanczos,
+Krylov-Schur, block Krylov-Schur, Chebyshev-filtered Lanczos, shift-invert
+Lanczos, implicitly-restarted / thick-restart Lanczos, ARPACK, optimal
+spectrum solver — plus the Python wrappers in front of them.
+
+- **Centralised `HDF5IO::isDisabledOutputPath`** helper in
+  `include/ed/core/hdf5_io.h`. Every HDF5 entry point
+  (`createOrOpenFile`, `forceCreateFile`, `saveEigenvalues`,
+  `saveEigenvector`, `saveDiagonalizationResults`, `ensureTPQSampleGroup`,
+  `saveTPQState`, `saveDynamicalResponse`, `saveDynamicalResponseFull`,
+  `saveTimeCorrelation`, `getPerRankFilePath`, `createPerRankFile`,
+  `saveThermodynamics`, `saveCorrelationMatrix`, `saveCorrelationData`,
+  `saveFTLMSample`, `appendTPQThermodynamics`, `appendTPQNorm`,
+  `saveTPQThermodynamics`, `saveTPQNorm`, `saveTPQAveragedThermodynamics`,
+  `saveFTLMThermodynamics`, `saveStaticResponse`, `saveHybridThermalResults`,
+  `saveArray`, `ensureFTLMSampleGroups`, `saveFTLMThermodynamicSample`,
+  `saveFTLMDynamicalSample`, `saveFTLMStaticSample`,
+  `ensureTimeCorrelationGroups`) short-circuits when the path is empty,
+  `"/dev/null"`, or any `"/dev/null/..."` derivative. Even
+  `fileExists()` now returns `false` on the disabled sentinel so we
+  never try to `H5Fopen("/dev/null", ...)` (which is a real device
+  node on Linux and silently passes `std::filesystem::exists`). The
+  C++ solver code remains unchanged — it still calls the same HDF5
+  helpers, but those helpers now no-op on disabled paths instead of
+  crashing or writing junk under `/dev/null/`.
+- **`exact_diagonalization_core` dispatcher** (`include/ed/core/ed_wrapper.h`)
+  now remaps `params.output_dir == ""` to `"/dev/null"` *before*
+  fanning out to any backend, mirroring the standalone Python
+  wrappers' `output_dir_or_devnull(...)` convention. Without this,
+  the Python `quantum_ed.exact_diagonalization_core(op, method,
+  default_params)` path silently dumped `ed_results.h5` /
+  `eigenvalues.dat` / `eigenvalues.txt` into whatever cwd the
+  process happened to be in — pollutes notebook environments and
+  makes benchmark loops look slower than they are. Pass
+  `params.output_dir = "."` explicitly to opt back into the legacy
+  cwd-dump behaviour. The dispatcher also now skips the
+  `mkdir -p $output_dir` shell call and the
+  `results.eigenvectors_path` assignment on disabled paths.
+- **Raw `std::ofstream` writes** in `thick_restart_lanczos()` and
+  `shift_invert_lanczos()` (the `eigenvalues.dat` / `eigenvalues.txt`
+  side files that bypass the `HDF5IO` layer) are now gated by
+  `HDF5IO::isDisabledOutputPath(evec_dir)`. Same default-cwd-pollution
+  story as above — the dispatcher fix covers the HDF5 path, this
+  covers the legacy raw-binary side files.
+- **DSSF unified HDF5 schema** (`src/dssf/dssf_io.cpp`,
+  `ensure_metadata` / `write_record`) now respects
+  `HDF5IO::isDisabledOutputPath()` so the DSSF writer is consistent
+  with the rest of the HDF5 I/O. DSSF has its own `H5::H5File`
+  handling (it does not go through the central `HDF5IO::saveDynamicalResponse`
+  helpers), so it needed an explicit gate.
+- **Python bindings** for `full_diagonalization`, `lanczos`,
+  `finite_temperature_lanczos`, `low_temperature_lanczos`, and
+  `hybrid_thermal_method` (both the regular and `FixedSzOperator`
+  overloads) now remap a default `output_dir=""` to `"/dev/null"` via
+  the new `output_dir_or_devnull(...)` helper, mirroring the existing
+  Lanczos behaviour. Callers who actually want disk output pass
+  `"."` or any explicit directory.
+- **`ed::parallel::ThreadBudgetScope`** now wraps the entry points of
+  every CPU solver listed above (previously only the bare `lanczos`,
+  `lanczos_no_ortho`, `lanczos_selective_reorth`, and `lanczos_real`
+  drivers were budgeted). Each call now caps OpenMP+OpenBLAS threads to
+  `auto_threads_for_dim(N)` for its lifetime. RAII semantics mean
+  nested scopes (e.g. FTLM driving Lanczos chains) compose correctly.
+- **`std::swap` rotate** for `v_prev / v_current / w` propagated to
+  `chebyshev_filtered_lanczos` and `shift_invert_lanczos` inner loops
+  (the same optimisation already in `lanczos`, `lanczos_no_ortho`,
+  `lanczos_real`). Drops the per-iteration `O(N)` `std::copy` traffic.
+- ScaLAPACK / GPU / MPI entry points: GPU code does not share the
+  OpenMP+OpenBLAS pool (own kernels), and the MPI distributed solvers
+  re-enter the same CPU code paths they wrap, so they automatically
+  inherit the wins. ScaLAPACK is dense BLAS-3 dominated and benefits
+  marginally from the HDF5 gating only.
+
+Numerical verification: full `ctest` (134/134) + Python `pytest` (132/132)
+green; the xdiag-style smoke run on N = 12-18 still matches the
+ground-state energy to ~1e-12 against the previous build.
+
 ### Fixed — `quantum_ed.lanczos` wall time vs `XDiag` at large `N` (Python default)
 
 - **Default `output_dir` for `quantum_ed.lanczos` (and the
