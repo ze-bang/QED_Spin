@@ -58,6 +58,8 @@
 
 #include <complex>
 #include <cstdint>
+#include <cstdlib>
+#include <cstring>
 #include <functional>
 #include <memory>
 #include <stdexcept>
@@ -190,6 +192,14 @@ ComplexArray fop_apply(const FixedSzOperator& op, const ComplexArray& vin) {
 }
 
 // A trivial std::function adapter that calls op.apply() for the solvers below.
+//
+// IMPORTANT: ``Operator::apply`` is *non-virtual*, so dispatch via this lambda
+// is purely static. If you template ``Op = Operator`` but pass a
+// ``FixedSzOperator`` reference, the lambda will run the base-class apply on
+// the FULL Hilbert space (dim = 2^N), not the Sz-projected sector. The Python
+// bindings below therefore provide explicit ``FixedSzOperator`` overloads
+// that template-dispatch through ``make_hv<FixedSzOperator>(op)`` and use
+// ``getFixedSzDim()`` instead of ``2^N`` for the Krylov-space dim.
 template <typename Op>
 std::function<void(const Complex*, Complex*, int)>
 make_hv(const Op& op) {
@@ -199,11 +209,37 @@ make_hv(const Op& op) {
     };
 }
 
+// Helper: dispatch dim for an arbitrary (Fixed)SzOperator. The free-function
+// overload makes the FixedSz vs full-Hilbert distinction explicit at the
+// callsite and avoids having to remember the rule in every wrapper below.
+inline uint64_t hv_dim(const Operator&        op) { return 1ULL << op.getNumBits(); }
+inline uint64_t hv_dim(const FixedSzOperator& op) { return op.getFixedSzDim(); }
+
+// Real-arithmetic mat-vec adapters for the lanczos_real fast path
+// (Phase 6 #7). These call directly into the operator's real CSR SpMV --
+// skipping the std::complex<double> wrapping layer entirely. Caller must
+// have verified ``op.isReal() == true`` before invoking.
+inline std::function<void(const double*, double*, int)>
+make_hv_real(const Operator& op) {
+    const Operator* p = &op;
+    return [p](const double* in, double* out, int n) {
+        p->apply_via_csr_parallel_real(in, out, static_cast<size_t>(n));
+    };
+}
+
+inline std::function<void(const double*, double*, int)>
+make_hv_real(const FixedSzOperator& op) {
+    const FixedSzOperator* p = &op;
+    return [p](const double* in, double* out, int n) {
+        p->apply_via_fixed_sz_csr_real(in, out, static_cast<size_t>(n));
+    };
+}
+
 py::array_t<double>
 py_full_diag(const Operator& op,
              uint64_t num_eigs,
              const std::string& output_dir) {
-    const uint64_t n = 1ULL << op.getNumBits();
+    const uint64_t n = hv_dim(op);
     if (num_eigs == 0 || num_eigs > n) num_eigs = n;
     std::vector<double> eigs;
     {
@@ -215,17 +251,81 @@ py_full_diag(const Operator& op,
 }
 
 py::array_t<double>
+py_full_diag_fixed_sz(const FixedSzOperator& op,
+                      uint64_t num_eigs,
+                      const std::string& output_dir) {
+    const uint64_t n = hv_dim(op);
+    if (num_eigs == 0 || num_eigs > n) num_eigs = n;
+    std::vector<double> eigs;
+    {
+        py::gil_scoped_release release;
+        full_diagonalization(make_hv(op), n, num_eigs, eigs, output_dir,
+                             /*compute_eigenvectors=*/false);
+    }
+    return to_numpy_d(eigs);
+}
+
+// Phase 6 #7: dispatch eigenvalue-only Lanczos to the real-arithmetic
+// fast path when the Hamiltonian is real. The real path uses double
+// storage end-to-end (cuts BLAS-1 traffic and FLOPs in half vs the
+// complex variant) and is the largest residual win at N >= 18 in the
+// FixedSz Heisenberg benchmark vs xdiag.
+//
+// Opt-out via ED_LANCZOS_REAL_DISPATCH=0 (default on).
+namespace {
+inline bool real_lanczos_dispatch_enabled() {
+    const char* env = std::getenv("ED_LANCZOS_REAL_DISPATCH");
+    if (!env || env[0] == '\0') return true;
+    if (std::strcmp(env, "0")     == 0) return false;
+    if (std::strcmp(env, "false") == 0) return false;
+    if (std::strcmp(env, "FALSE") == 0) return false;
+    return true;
+}
+}  // namespace
+
+py::array_t<double>
 py_lanczos(const Operator& op,
            uint64_t max_iter,
            uint64_t exct,
            double tolerance,
            const std::string& output_dir) {
-    const uint64_t n = 1ULL << op.getNumBits();
+    const uint64_t n = hv_dim(op);
+    // Empty string historically meant "." and triggered HDF5 writes to
+    // ./ed_results.h5 (pure overhead in interactive / benchmark code).
+    // Match the C++ ``/dev/null`` convention from solve_tridiagonal_matrix.
+    const std::string dir = output_dir.empty() ? std::string("/dev/null")
+                                               : output_dir;
     std::vector<double> eigs;
     {
         py::gil_scoped_release release;
-        lanczos(make_hv(op), n, max_iter, exct, tolerance, eigs, output_dir,
-                /*compute_eigenvectors=*/false);
+        if (op.isReal() && real_lanczos_dispatch_enabled()) {
+            lanczos_real(make_hv_real(op), n, max_iter, exct, tolerance, eigs);
+        } else {
+            lanczos(make_hv(op), n, max_iter, exct, tolerance, eigs, dir,
+                    /*compute_eigenvectors=*/false);
+        }
+    }
+    return to_numpy_d(eigs);
+}
+
+py::array_t<double>
+py_lanczos_fixed_sz(const FixedSzOperator& op,
+                    uint64_t max_iter,
+                    uint64_t exct,
+                    double tolerance,
+                    const std::string& output_dir) {
+    const uint64_t n = hv_dim(op);
+    const std::string dir = output_dir.empty() ? std::string("/dev/null")
+                                              : output_dir;
+    std::vector<double> eigs;
+    {
+        py::gil_scoped_release release;
+        if (op.isReal() && real_lanczos_dispatch_enabled()) {
+            lanczos_real(make_hv_real(op), n, max_iter, exct, tolerance, eigs);
+        } else {
+            lanczos(make_hv(op), n, max_iter, exct, tolerance, eigs, dir,
+                    /*compute_eigenvectors=*/false);
+        }
     }
     return to_numpy_d(eigs);
 }
@@ -259,7 +359,25 @@ py::dict py_finite_temperature_lanczos(const Operator& op,
                                        double temp_max,
                                        uint64_t num_temp_bins,
                                        const std::string& output_dir) {
-    const uint64_t n = 1ULL << op.getNumBits();
+    const uint64_t n = hv_dim(op);
+    FTLMResults res;
+    {
+        py::gil_scoped_release release;
+        res = finite_temperature_lanczos(make_hv(op), n, params, temp_min,
+                                         temp_max, num_temp_bins, output_dir);
+    }
+    py::dict d = thermo_to_dict(res.thermo_data);
+    d["ground_state_estimate"] = res.ground_state_estimate;
+    return d;
+}
+
+py::dict py_finite_temperature_lanczos_fixed_sz(const FixedSzOperator& op,
+                                                const FTLMParameters& params,
+                                                double temp_min,
+                                                double temp_max,
+                                                uint64_t num_temp_bins,
+                                                const std::string& output_dir) {
+    const uint64_t n = hv_dim(op);
     FTLMResults res;
     {
         py::gil_scoped_release release;
@@ -277,7 +395,26 @@ py::dict py_low_temperature_lanczos(const Operator& op,
                                     double temp_max,
                                     uint64_t num_temp_bins,
                                     const std::string& output_dir) {
-    const uint64_t n = 1ULL << op.getNumBits();
+    const uint64_t n = hv_dim(op);
+    LTLMResults res;
+    {
+        py::gil_scoped_release release;
+        res = low_temperature_lanczos(make_hv(op), n, params, temp_min,
+                                      temp_max, num_temp_bins,
+                                      /*ground_state=*/nullptr, output_dir);
+    }
+    py::dict d = thermo_to_dict(res.thermo_data);
+    d["ground_state_energy"] = res.ground_state_energy;
+    return d;
+}
+
+py::dict py_low_temperature_lanczos_fixed_sz(const FixedSzOperator& op,
+                                             const LTLMParameters& params,
+                                             double temp_min,
+                                             double temp_max,
+                                             uint64_t num_temp_bins,
+                                             const std::string& output_dir) {
+    const uint64_t n = hv_dim(op);
     LTLMResults res;
     {
         py::gil_scoped_release release;
@@ -296,7 +433,27 @@ py::dict py_hybrid_thermal(const Operator& op,
                            double temp_max,
                            uint64_t num_temp_bins,
                            const std::string& output_dir) {
-    const uint64_t n = 1ULL << op.getNumBits();
+    const uint64_t n = hv_dim(op);
+    HybridThermalResults res;
+    {
+        py::gil_scoped_release release;
+        res = hybrid_thermal_method(make_hv(op), n, params, temp_min, temp_max,
+                                    num_temp_bins, output_dir);
+    }
+    py::dict d = thermo_to_dict(res.thermo_data);
+    d["ground_state_energy"] = res.ground_state_energy;
+    d["ltlm_points"]         = res.ltlm_points;
+    d["ftlm_points"]         = res.ftlm_points;
+    return d;
+}
+
+py::dict py_hybrid_thermal_fixed_sz(const FixedSzOperator& op,
+                                    const HybridThermalParameters& params,
+                                    double temp_min,
+                                    double temp_max,
+                                    uint64_t num_temp_bins,
+                                    const std::string& output_dir) {
+    const uint64_t n = hv_dim(op);
     HybridThermalResults res;
     {
         py::gil_scoped_release release;
@@ -413,7 +570,32 @@ PYBIND11_MODULE(_core, m) {
           py::arg("exct") = 3,
           py::arg("tolerance") = 1e-12,
           py::arg("output_dir") = "",
-          "Plain Lanczos (no reorth) for the bottom `exct` eigenvalues.");
+          "Ground-state (and lowest ``exct``) eigenvalues. Real Hamiltonians use "
+          "a real-storage fast path. ``output_dir==\"\"`` disables HDF5 output "
+          "(``/dev/null``); pass ``\".\"`` to write ``ed_results.h5`` as before.");
+
+    // ``FixedSzOperator`` overload: dispatches through ``hv_dim`` /
+    // ``make_hv<FixedSzOperator>``, so the Krylov space lives in the
+    // ``C(N, n_up)`` Sz-projected sector instead of the full ``2^N``
+    // Hilbert space. Pybind picks this overload when the first argument
+    // is a ``FixedSzOperator`` instance.
+    m.def("lanczos", &py_lanczos_fixed_sz,
+          py::arg("operator"),
+          py::arg("max_iter") = 100,
+          py::arg("exct") = 3,
+          py::arg("tolerance") = 1e-12,
+          py::arg("output_dir") = "",
+          "Same as ``lanczos`` for a ``FixedSzOperator``. "
+          "``output_dir==\"\"`` suppresses HDF5 (see main overload).");
+
+    m.def("full_diagonalization", &py_full_diag_fixed_sz,
+          py::arg("operator"),
+          py::arg("num_eigs") = 0,
+          py::arg("output_dir") = "",
+          "Dense LAPACK diagonalization of a fixed-Sz operator.");
+
+    // FTLM / LTLM / Hybrid overloads for FixedSz are registered next to
+    // their base-class counterparts further down the file.
 
     m.def("compute_thermodynamics_from_spectrum",
           &py_compute_thermo_from_spectrum,
@@ -443,6 +625,14 @@ PYBIND11_MODULE(_core, m) {
           py::arg("temp_max"),
           py::arg("num_temp_bins"),
           py::arg("output_dir") = "");
+    m.def("finite_temperature_lanczos", &py_finite_temperature_lanczos_fixed_sz,
+          py::arg("operator"),
+          py::arg("params"),
+          py::arg("temp_min"),
+          py::arg("temp_max"),
+          py::arg("num_temp_bins"),
+          py::arg("output_dir") = "",
+          "FTLM on a fixed-Sz sector (Krylov dim = C(N, n_up)).");
 
     // LTLM ----------------------------------------------------------------
     py::class_<LTLMParameters>(m, "LTLMParameters")
@@ -461,6 +651,14 @@ PYBIND11_MODULE(_core, m) {
           py::arg("temp_max"),
           py::arg("num_temp_bins"),
           py::arg("output_dir") = "");
+    m.def("low_temperature_lanczos", &py_low_temperature_lanczos_fixed_sz,
+          py::arg("operator"),
+          py::arg("params"),
+          py::arg("temp_min"),
+          py::arg("temp_max"),
+          py::arg("num_temp_bins"),
+          py::arg("output_dir") = "",
+          "LTLM on a fixed-Sz sector (Krylov dim = C(N, n_up)).");
 
     // Hybrid --------------------------------------------------------------
     py::class_<HybridThermalParameters>(m, "HybridThermalParameters")
@@ -484,6 +682,14 @@ PYBIND11_MODULE(_core, m) {
           py::arg("temp_max"),
           py::arg("num_temp_bins"),
           py::arg("output_dir") = "");
+    m.def("hybrid_thermal_method", &py_hybrid_thermal_fixed_sz,
+          py::arg("operator"),
+          py::arg("params"),
+          py::arg("temp_min"),
+          py::arg("temp_max"),
+          py::arg("num_temp_bins"),
+          py::arg("output_dir") = "",
+          "Hybrid LTLM/FTLM on a fixed-Sz sector.");
 
     // ed::dssf -- structure-factor observable assembly (P2.8 / DSSF PR-G).
     auto m_dssf = m.def_submodule("dssf",

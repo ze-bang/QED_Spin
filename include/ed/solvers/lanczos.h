@@ -143,6 +143,31 @@ void lanczos(std::function<void(const Complex*, Complex*, int)> H, uint64_t N, u
              double tol, std::vector<double>& eigenvalues, std::string dir = "",
              bool eigenvectors = false);
 
+// -----------------------------------------------------------------------------
+// Real-arithmetic Lanczos (eigenvalues only).                Phase 6 #7
+//
+// When the Hamiltonian is real and we use a real starting vector, the entire
+// Krylov basis stays real in exact arithmetic and to machine precision in
+// finite arithmetic. ``lanczos()`` above always uses ``std::complex<double>``
+// storage, which doubles every BLAS-1 call's memory traffic and FLOP count
+// over the strictly-needed amount.
+//
+// This entry point uses real (double) storage end-to-end:
+//   * 4x4 working set: v_prev, v_current, v_next, w  (each ``N * 8`` bytes)
+//   * BLAS-1: cblas_daxpy / cblas_ddot / cblas_dnrm2 / cblas_dscal
+//   * H is a real-arithmetic matrix-vector product: ``f(in_re, out_re, N)``
+//
+// Eigenvalue-only by contract (no basis I/O, no Ritz reconstruction). For
+// eigenvector reconstruction, fall back to the complex ``lanczos()``.
+//
+// Algorithmic choices match ``lanczos()``: 3-vector ring-buffer DGKS local
+// reorth, periodic eigenvalue convergence check on the Lanczos tridiagonal
+// every 10 iters, breakdown on beta < tol.
+// -----------------------------------------------------------------------------
+void lanczos_real(std::function<void(const double*, double*, int)> H_real,
+                  uint64_t N, uint64_t max_iter, uint64_t exct,
+                  double tol, std::vector<double>& eigenvalues);
+
 // Block Lanczos algorithm for finding eigenvalues with degeneracies
 void block_lanczos(std::function<void(const Complex*, Complex*, int)> H, uint64_t N, uint64_t max_iter, 
                    uint64_t num_eigs, uint64_t block_size, double tol, std::vector<double>& eigenvalues, 

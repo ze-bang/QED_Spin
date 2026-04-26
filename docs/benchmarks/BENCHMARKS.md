@@ -17,6 +17,14 @@ particular run.
 
 ## Headlines
 
+> **Looking for the head-to-head against
+> [XDiag](https://github.com/awietek/XDiag.jl)?**
+> See [`bench_vs_xdiag.md`](./bench_vs_xdiag.md). On the 1D Heisenberg
+> reference sweep, `quantum_ed.lanczos` (real fast path, default Python
+> output settings) is faster than `XDiag.eigval0` at every listed `N` in
+> both the full and Sz=0 sectors on the same machine; energies match to
+> high precision.
+
 On a 16-thread x86_64 reference machine (WSL2, gcc-13, Eigen+OpenBLAS,
 CUDA 12 + RTX-class GPU), benchmarking a 1D Heisenberg spin-1/2 PBC
 chain across `N = 12, 14, 16, 18` (Hilbert dimension `4 096 .. 262 144`):
@@ -239,6 +247,10 @@ benchmarks/
   bench_gpu_operator_apply.cu     -- per-call SpMV (GPU)
   bench_gpu_lanczos_ground_state.cu  -- ground-state Lanczos (GPU)
   bench_vs_quspin.py        -- legacy QuSpin-only sweep (kept for reproducibility)
+  bench_vs_xdiag.py         -- head-to-head against XDiag.jl
+                               (orchestrator; see docs/benchmarks/bench_vs_xdiag.md)
+  bench_vs_xdiag.jl         -- XDiag-side runner (Julia subprocess)
+  xdiag_env/                -- Julia env with XDiag.jl + JSON.jl pinned
 ```
 
 The JSON output file written by `bench_all_backends.py` is the artefact

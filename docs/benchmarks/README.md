@@ -1,12 +1,17 @@
 # Benchmarks (documentation index)
 
-Two layers:
+Three layers:
 
 1. **[BENCHMARKS.md](./BENCHMARKS.md)** — canonical, human-readable
    benchmark write-up. Contains the headline tables, methodology, and
    reproducer command, with peers (QuSpin / SciPy) on the same workloads.
 
-2. **[`../../benchmarks/README.md`](../../benchmarks/README.md)** — per-binary
+2. **[bench_vs_xdiag.md](./bench_vs_xdiag.md)** — head-to-head against
+   [`XDiag`](https://github.com/awietek/XDiag.jl), the state-of-the-art
+   ED library by A. Wietek et al. CPU-only, both unsymmetrised and
+   `Sz = 0`-sector runs, with full reproducer commands.
+
+3. **[`../../benchmarks/README.md`](../../benchmarks/README.md)** — per-binary
    reference for every Google-Benchmark target in
    [`benchmarks/`](../../benchmarks/) (CPU SpMV, GPU SpMV, CPU/GPU
    Lanczos, GPU mixed-precision, MPI scaling, etc.). This is the

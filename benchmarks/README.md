@@ -52,3 +52,30 @@ visible without downloading the artifact.
    short `--benchmark_min_time=0.2s` smoke run.
 
 Audit ref: P2.13.
+
+## Cross-library head-to-head benchmarks
+
+Two Python orchestrators wrap the C++ binaries above with peer
+libraries on the same workload (1D Heisenberg PBC chain):
+
+| Script | Peers | Output |
+|---|---|---|
+| `bench_vs_quspin.py` | QuSpin + scipy.sparse | `bench_vs_quspin_results.json` |
+| `bench_all_backends.py` | QuSpin + scipy + (this codebase's CPU/GPU/MPI backends) | `bench_all_backends.json` |
+| `bench_vs_xdiag.py` | [XDiag.jl](https://github.com/awietek/XDiag.jl) | `bench_vs_xdiag.json` (and `_fixed_sz.json`) |
+
+The XDiag run drives a Julia subprocess (`bench_vs_xdiag.jl`) so it
+needs Julia >= 1.9 and a one-time install:
+
+```bash
+julia --project=benchmarks/xdiag_env -e \
+      'using Pkg; Pkg.add("XDiag"); Pkg.add("JSON")'
+
+PYTHONPATH=python python3 benchmarks/bench_vs_xdiag.py \
+        --sizes 12 14 16 18 20 --threads $(nproc) \
+        --output docs/benchmarks/bench_vs_xdiag.json
+```
+
+The narrative write-up of the XDiag head-to-head lives in
+[`docs/benchmarks/bench_vs_xdiag.md`](../docs/benchmarks/bench_vs_xdiag.md).
+

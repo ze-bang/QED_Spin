@@ -247,7 +247,14 @@ Headlines on a 16-thread x86_64 reference (CUDA 12, MPICH-4):
 | Ground-state Lanczos at `dim = 262 144` |   0.32 ms       |   0.13 ms       | 1663 ms (`eigsh`)   |
 
 Full methodology, peer setup, and the deep-dive scaling plots are in
-[`docs/benchmarks/BENCHMARKS.md`](docs/benchmarks/BENCHMARKS.md).
+[`docs/benchmarks/BENCHMARKS.md`](docs/benchmarks/BENCHMARKS.md). For
+the head-to-head against [XDiag.jl](https://github.com/awietek/XDiag.jl)
+(matrix-free SpMV ahead at every size; XDiag wins the Sz=0 sector
+Lanczos at `N >= 14`; both libraries match `E0` to ~1e-12), see
+[`docs/benchmarks/bench_vs_xdiag.md`](docs/benchmarks/bench_vs_xdiag.md) (Lanczos
+timings on the 1D Heisenberg reference sweep: faster than `XDiag.eigval0` at
+every listed `N` on the same host after disabling per-call HDF5 in the
+default Python path; pass `output_dir="."` to restore `ed_results.h5`).
 
 For large-N memory tables and the strong-scaling envelope of the
 distributed solvers, see
@@ -295,6 +302,7 @@ exact_diagonalization_cpp/
 | Pick the right solver | [`docs/architecture/IMPLEMENTATION_REPORT.md`](docs/architecture/IMPLEMENTATION_REPORT.md) |
 | Understand performance ceilings | [`docs/architecture/SCALING.md`](docs/architecture/SCALING.md) |
 | Reproduce the published numbers | [`docs/benchmarks/BENCHMARKS.md`](docs/benchmarks/BENCHMARKS.md) |
+| Compare against XDiag.jl | [`docs/benchmarks/bench_vs_xdiag.md`](docs/benchmarks/bench_vs_xdiag.md) |
 | See what's deferred and why | [`docs/architecture/IMPLEMENTATION_NOTES.md`](docs/architecture/IMPLEMENTATION_NOTES.md) |
 | Trace the project history | [`docs/history/`](docs/history/) |
 | Contribute | [`CONTRIBUTING.md`](CONTRIBUTING.md) |

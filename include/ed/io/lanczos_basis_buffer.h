@@ -66,6 +66,10 @@ bool has_basis_buffer(const std::string& key);
 // or if the dimension does not match.
 bool append_basis_vector(const std::string& key, const ComplexVector& vec);
 
+// Move-append: avoids a copy of ``vec`` when the caller no longer needs it
+// (saves one dim-N memcpy on every Lanczos iteration for eigenvector runs).
+bool append_basis_vector(const std::string& key, ComplexVector&& vec);
+
 // Overwrite the vector at `index` in place. Returns false if no buffer is
 // registered, the index is out of range, or the dimension does not match.
 // Used by restart algorithms (Krylov-Schur, IRL, thick-restart).

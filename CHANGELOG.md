@@ -7,6 +7,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — `quantum_ed.lanczos` wall time vs `XDiag` at large `N` (Python default)
+
+- **Default `output_dir` for `quantum_ed.lanczos` (and the
+  `FixedSzOperator` overload) now maps to the existing C++ `"/dev/null"`
+  convention** when the user passes the default empty string, so
+  **HDF5 is not opened on every call** (previously the implicit `"."`
+  path triggered `HDF5IO::createOrOpenFile` + `saveEigenvalues` to
+  `./ed_results.h5` after every solve, which dominated wall time at
+  `N >= 16` in benchmarks).
+- **Complex `lanczos()` (eigenvalue-only)**: the local-reorth ring buffer
+  cap is **3 vectors** when `eigenvectors=false` (the DGKS pass only
+  needs three directions); the old cap of 20 added unnecessary dim-N
+  copies before the ring started rotating.
+- **`lanczos_io::append_basis_vector`**: added a **move** overload for
+  future call sites that hand off ownership of a `ComplexVector`.
+- **Docs**: updated [`docs/benchmarks/bench_vs_xdiag.md`](docs/benchmarks/bench_vs_xdiag.md)
+  tables and **re-ran** `benchmarks/bench_vs_xdiag.py` so the checked-in
+  JSON matches the new defaults.
+
+### Added — head-to-head benchmark vs `XDiag.jl`
+
+- New `benchmarks/bench_vs_xdiag.py` (Python orchestrator) +
+  `benchmarks/bench_vs_xdiag.jl` (Julia subprocess) that runs the same
+  1D Heisenberg PBC chain workload through `quantum_ed` and through
+  [`XDiag.jl`](https://github.com/awietek/XDiag.jl), reporting per-call
+  SpMV (`H @ v`) and full ground-state Lanczos timings side-by-side, in
+  both the unsymmetrised (`Spinhalf(N)` / `Operator`) and Sz=0
+  (`Spinhalf(N, N/2)` / `FixedSzOperator`) configurations.
+- New Julia env at `benchmarks/xdiag_env/` (Project.toml + Manifest.toml
+  pinning XDiag.jl + JSON.jl).
+- New write-up at [`docs/benchmarks/bench_vs_xdiag.md`](docs/benchmarks/bench_vs_xdiag.md)
+  with the full reference tables, methodology, and an honest
+  open-question section about the local-reorth Lanczos cliff at
+  `N >= 16` (matrix-free SpMV is unaffected and stays 3-20x ahead at
+  every size). Snapshot JSON checked in next to it
+  (`bench_vs_xdiag.json`, `bench_vs_xdiag_fixed_sz.json`, plus the raw
+  XDiag-side JSON for reproducibility).
+- Cross-links from `README.md`, `docs/benchmarks/README.md`, the main
+  `BENCHMARKS.md`, and `benchmarks/README.md` so anyone landing on the
+  perf docs sees the XDiag comparison alongside the QuSpin / SciPy one.
+
+Both libraries match `E0` on the test sweep to ~1e-12, confirming the
+operator convention parity.
+
 ### Added — Phase 5: full Python parity with the C++/CLI advanced backends
 
 The `quantum_ed` Python package previously exposed only a curated CPU

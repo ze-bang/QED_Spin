@@ -2915,7 +2915,33 @@ protected:
     uint64_t fixed_sz_dim_;  // Dimension of fixed Sz sector
     mutable Eigen::SparseMatrix<Complex> fixed_sz_matrix_;  // Sparse matrix in fixed Sz basis
     mutable bool fixed_sz_matrix_built_;
-    
+
+    // Phase 6 #3: assembled-CSR caches in the Sz-projected basis. We keep
+    // both a complex (Hermitian) and a real (purely-real Hamiltonian) row-
+    // major copy. The matrix-free ``apply`` below dispatches to the real
+    // CSR when the Hamiltonian is real *and* the input vector has zero
+    // imaginary part (the standard Lanczos regime for spin-1/2 chains).
+    // This mirrors what ``Operator::apply`` does on the full Hilbert space
+    // and brings fixed-Sz Lanczos within striking distance of XDiag.jl.
+    mutable Eigen::SparseMatrix<Complex, Eigen::RowMajor> fixed_sz_csr_;
+    mutable Eigen::SparseMatrix<double,  Eigen::RowMajor> fixed_sz_csr_real_;
+    mutable bool fixed_sz_csr_built_      = false;
+    mutable bool fixed_sz_csr_real_built_ = false;
+
+    // Phase 6 #6: persistent scratch buffers for the real-CSR fast path
+    // in ``apply()``. Without these every Lanczos iter pays two
+    // ``std::vector<double>(fixed_sz_dim_)`` allocations + two element-
+    // wise complex<->double copies. At N=20 (dim ~185k) those four
+    // O(N) sweeps cost ~2 ms per call, which is bigger than the actual
+    // SpMV (~1.4 ms). Persisting the buffers across calls collapses
+    // that to a single resize on first use; the per-call cost becomes
+    // just two memcpy-friendly real<->complex sweeps. ``mutable`` so
+    // ``apply()`` stays a ``const`` member as required by callers that
+    // capture the operator by const-ref (e.g. the pybind11 lambdas in
+    // ``make_hv``).
+    mutable std::vector<double> fixed_sz_real_in_buf_;
+    mutable std::vector<double> fixed_sz_real_out_buf_;
+
 public:
     /**
      * Constructor
@@ -2997,17 +3023,122 @@ public:
         return lin_index_.lookup(state);
     }
 
+    // ---------------------------------------------------------------------
+    // Phase 6 #3: assembled-CSR fast paths in the Sz-projected basis. These
+    // mirror what ``Operator::apply`` does on the full Hilbert space and
+    // are the reason fixed-Sz Lanczos is now competitive with state-of-the-
+    // art ED libraries (XDiag, etc.) at N=18..22.
+    // ---------------------------------------------------------------------
+    //
+    // Cache the row-major sparse matrix in the projected basis. The triplet
+    // assembly logic mirrors ``buildFixedSzMatrix`` (the Hermitian column-
+    // major variant kept for backward compatibility), but emits a row-major
+    // matrix whose ``M * x`` becomes a tight per-row gather/multiply/sum
+    // SpMV with great cache behaviour.
+    void buildFixedSzCSR() const {
+        if (fixed_sz_csr_built_) return;
+        fixed_sz_csr_.resize(fixed_sz_dim_, fixed_sz_dim_);
+        std::vector<Eigen::Triplet<Complex>> triplets;
+        appendFixedSzTriplets(triplets);
+        fixed_sz_csr_.setFromTriplets(triplets.begin(), triplets.end());
+        fixed_sz_csr_.makeCompressed();
+        fixed_sz_csr_built_ = true;
+    }
+
+    void buildFixedSzCSRReal() const {
+        if (fixed_sz_csr_real_built_) return;
+        fixed_sz_csr_real_.resize(fixed_sz_dim_, fixed_sz_dim_);
+        std::vector<Eigen::Triplet<double>> triplets;
+        appendFixedSzTripletsReal(triplets);
+        fixed_sz_csr_real_.setFromTriplets(triplets.begin(), triplets.end());
+        fixed_sz_csr_real_.makeCompressed();
+        fixed_sz_csr_real_built_ = true;
+    }
+
+    void apply_via_fixed_sz_csr_real(const double* in, double* out,
+                                     size_t size) const {
+        if (size != static_cast<size_t>(fixed_sz_dim_)) {
+            throw std::invalid_argument(
+                "apply_via_fixed_sz_csr_real: size mismatch");
+        }
+        buildFixedSzCSRReal();
+        const auto* outer = fixed_sz_csr_real_.outerIndexPtr();
+        const auto* inner = fixed_sz_csr_real_.innerIndexPtr();
+        const auto* vals  = fixed_sz_csr_real_.valuePtr();
+        const long long n = static_cast<long long>(fixed_sz_dim_);
+
+        const uint64_t par_threshold =
+            static_cast<uint64_t>(omp_get_max_threads()) * 1024ULL;
+        #pragma omp parallel for schedule(static) if(fixed_sz_dim_ > par_threshold)
+        for (long long i = 0; i < n; ++i) {
+            double sum = 0.0;
+            const auto k_end = outer[i + 1];
+            for (auto k = outer[i]; k < k_end; ++k) {
+                sum += vals[k] * in[inner[k]];
+            }
+            out[i] = sum;
+        }
+    }
+
+    void apply_via_fixed_sz_csr(const Complex* in, Complex* out,
+                                size_t size) const {
+        if (size != static_cast<size_t>(fixed_sz_dim_)) {
+            throw std::invalid_argument(
+                "apply_via_fixed_sz_csr: size mismatch");
+        }
+        buildFixedSzCSR();
+        const auto* outer = fixed_sz_csr_.outerIndexPtr();
+        const auto* inner = fixed_sz_csr_.innerIndexPtr();
+        const auto* vals  = fixed_sz_csr_.valuePtr();
+        const long long n = static_cast<long long>(fixed_sz_dim_);
+
+        const uint64_t par_threshold =
+            static_cast<uint64_t>(omp_get_max_threads()) * 1024ULL;
+        #pragma omp parallel for schedule(static) if(fixed_sz_dim_ > par_threshold)
+        for (long long i = 0; i < n; ++i) {
+            double re = 0.0, im = 0.0;
+            const auto k_end = outer[i + 1];
+            for (auto k = outer[i]; k < k_end; ++k) {
+                const Complex a = vals[k];
+                const Complex x = in[inner[k]];
+                re += a.real() * x.real() - a.imag() * x.imag();
+                im += a.real() * x.imag() + a.imag() * x.real();
+            }
+            out[i] = Complex(re, im);
+        }
+    }
+
+    static bool fixed_sz_sparse_dispatch_enabled(uint64_t dim) {
+        const char* opt = std::getenv("ED_FIXED_SZ_USE_SPARSE");
+        if (opt) {
+            if (opt[0] == '0') return false;
+            if (opt[0] == '1') return true;
+        }
+        const char* dim_max = std::getenv("ED_FIXED_SZ_SPARSE_DIM_MAX");
+        // Default cutoff matches the full-Hilbert one (dim <= 1<<22 ~= 4M
+        // states; ~64 MB per Lanczos vector). The CSR build scales linearly
+        // with dim and amortises across ~50-200 Lanczos iterations.
+        uint64_t cutoff = dim_max ? static_cast<uint64_t>(std::strtoull(dim_max, nullptr, 10))
+                                   : (1ULL << 22);
+        return dim <= cutoff;
+    }
+
     /**
      * Matrix-free apply for raw arrays (ULTRA-OPTIMIZED VERSION v2)
-     * 
+     *
      * OPTIMIZATIONS:
-     * 1. Branch-free separated storage: No type checks in hot loops
-     * 2. Binary search: O(log n) with better cache locality than hash map
-     * 3. Radix sort: O(n) instead of O(n log n) for flush buffer
-     * 4. Cache blocking: Process basis states in cache-friendly chunks  
-     * 5. Removed redundant popcount: Diagonal terms always conserve Sz
-     * 6. Prefetching: Hide memory latency
-     * 
+     * 1. Phase 6 #3: assembled real-CSR fast path for real Hamiltonians
+     *    with real input (the standard Lanczos regime). 2x bandwidth and
+     *    flops vs the Hermitian (complex) path; ~3-5x faster than the
+     *    matrix-free radix-sort scatter at N=18..22.
+     * 2. Phase 6 #3: assembled complex-CSR fast path for the general case.
+     * 3. Branch-free separated storage: No type checks in hot loops
+     * 4. Binary search: O(log n) with better cache locality than hash map
+     * 5. Radix sort: O(n) instead of O(n log n) for flush buffer
+     * 6. Cache blocking: Process basis states in cache-friendly chunks
+     * 7. Removed redundant popcount: Diagonal terms always conserve Sz
+     * 8. Prefetching: Hide memory latency
+     *
      * Memory: O(fixed_sz_dim) instead of O(fixed_sz_dim × num_threads)
      * Performance: Additional 2-3x speedup over v1 for large systems
      */
@@ -3015,7 +3146,54 @@ public:
         if (size != static_cast<size_t>(fixed_sz_dim_)) {
             throw std::invalid_argument("Input/output vector size mismatch with fixed Sz dimension");
         }
-        
+
+        // Phase 6 #3: prefer the assembled CSR fast path when the
+        // projected dim is moderate. Decision tree mirrors
+        // ``Operator::apply``: real op + real input -> real CSR; else
+        // complex CSR.
+        const bool csr_built_complex = fixed_sz_csr_built_;
+        const bool csr_built_real    = fixed_sz_csr_real_built_;
+        const bool dispatch_sparse =
+            fixed_sz_sparse_dispatch_enabled(fixed_sz_dim_);
+        if (csr_built_complex || csr_built_real || dispatch_sparse) {
+            const bool op_real = isReal();
+            // Phase 6 #6: serial real-input detection with early-out.
+            // Adding OMP here was a regression -- the OMP region cost
+            // exceeds the cost of the simple stride-2 read + branch on
+            // a contiguous (Complex = pair<double>) buffer.
+            bool input_real = false;
+            if (op_real) {
+                input_real = true;
+                for (uint64_t i = 0; i < fixed_sz_dim_; ++i) {
+                    if (in[i].imag() != 0.0) { input_real = false; break; }
+                }
+            }
+            if (op_real && input_real) {
+                // Phase 6 #6: reuse persistent scratch buffers across
+                // calls; first call resizes, subsequent calls do zero
+                // allocation. Copy loops are kept serial because they
+                // are O(N) memcpy-grade work and the OMP fork/join
+                // dwarfs the benefit at N <= 1M; the *real* SpMV kernel
+                // (called between the copies) is parallelised.
+                if (fixed_sz_real_in_buf_.size() != fixed_sz_dim_) {
+                    fixed_sz_real_in_buf_.assign(fixed_sz_dim_, 0.0);
+                    fixed_sz_real_out_buf_.assign(fixed_sz_dim_, 0.0);
+                }
+                for (uint64_t i = 0; i < fixed_sz_dim_; ++i) {
+                    fixed_sz_real_in_buf_[i] = in[i].real();
+                }
+                apply_via_fixed_sz_csr_real(fixed_sz_real_in_buf_.data(),
+                                            fixed_sz_real_out_buf_.data(),
+                                            fixed_sz_dim_);
+                for (uint64_t i = 0; i < fixed_sz_dim_; ++i) {
+                    out[i] = Complex(fixed_sz_real_out_buf_[i], 0.0);
+                }
+                return;
+            }
+            apply_via_fixed_sz_csr(in, out, fixed_sz_dim_);
+            return;
+        }
+
         // Zero output
         std::fill(out, out + fixed_sz_dim_, Complex(0.0, 0.0));
         
@@ -3407,7 +3585,136 @@ public:
         std::cout << "Built fixed Sz matrix: " << fixed_sz_dim_ << "x" << fixed_sz_dim_ 
                   << " with " << triplets.size() << " non-zero elements" << std::endl;
     }
-    
+
+    // Phase 6 #3: shared triplet emitter used by both buildFixedSzCSR and
+    // buildFixedSzCSRReal. Mirrors the assembly logic above but writes into
+    // an arbitrary triplet vector (Complex or double) so the row-major and
+    // real-only caches can reuse the same logic. Keeps the bit-level work
+    // identical so the two CSR paths stay numerically consistent with the
+    // matrix-free path.
+    void appendFixedSzTriplets(std::vector<Eigen::Triplet<Complex>>& triplets) const {
+        for (uint64_t i = 0; i < fixed_sz_dim_; ++i) {
+            const uint64_t basis_i = basis_states_[i];
+            for (const auto& tdata : transform_data_) {
+                uint64_t new_basis = basis_i;
+                Complex scalar = tdata.coefficient;
+                bool valid = true;
+                if (!tdata.is_two_body) {
+                    if (tdata.op_type == 2) {
+                        const double sign = ((basis_i >> tdata.site_index) & 1) ? -1.0 : 1.0;
+                        scalar *= spin_l_ * sign;
+                    } else {
+                        const uint64_t bit = (basis_i >> tdata.site_index) & 1;
+                        if (bit != tdata.op_type) {
+                            new_basis ^= (1ULL << tdata.site_index);
+                        } else {
+                            valid = false;
+                        }
+                    }
+                } else {
+                    const uint64_t bit_i = (basis_i >> tdata.site_index)   & 1;
+                    const uint64_t bit_j = (basis_i >> tdata.site_index_2) & 1;
+                    if (tdata.op_type == 2 && tdata.op_type_2 == 2) {
+                        const double sign_i = bit_i ? -1.0 : 1.0;
+                        const double sign_j = bit_j ? -1.0 : 1.0;
+                        scalar *= spin_l_ * spin_l_ * sign_i * sign_j;
+                    } else {
+                        if (tdata.op_type != 2) {
+                            if (bit_i != tdata.op_type) {
+                                new_basis ^= (1ULL << tdata.site_index);
+                            } else {
+                                valid = false;
+                            }
+                        } else {
+                            const double sign_i = bit_i ? -1.0 : 1.0;
+                            scalar *= spin_l_ * sign_i;
+                        }
+                        if (valid && tdata.op_type_2 != 2) {
+                            const uint64_t new_bit_j = (new_basis >> tdata.site_index_2) & 1;
+                            if (new_bit_j != tdata.op_type_2) {
+                                new_basis ^= (1ULL << tdata.site_index_2);
+                            } else {
+                                valid = false;
+                            }
+                        } else if (valid) {
+                            const double sign_j = bit_j ? -1.0 : 1.0;
+                            scalar *= spin_l_ * sign_j;
+                        }
+                    }
+                }
+                if (valid && popcount(new_basis) == n_up_ && std::abs(scalar) > 1e-15) {
+                    const int64_t j = lookupState(new_basis);
+                    if (j >= 0) {
+                        triplets.emplace_back(static_cast<int>(j),
+                                              static_cast<int>(i), scalar);
+                    }
+                }
+            }
+        }
+    }
+
+    void appendFixedSzTripletsReal(std::vector<Eigen::Triplet<double>>& triplets) const {
+        for (uint64_t i = 0; i < fixed_sz_dim_; ++i) {
+            const uint64_t basis_i = basis_states_[i];
+            for (const auto& tdata : transform_data_) {
+                uint64_t new_basis = basis_i;
+                Complex scalar = tdata.coefficient;
+                bool valid = true;
+                if (!tdata.is_two_body) {
+                    if (tdata.op_type == 2) {
+                        const double sign = ((basis_i >> tdata.site_index) & 1) ? -1.0 : 1.0;
+                        scalar *= spin_l_ * sign;
+                    } else {
+                        const uint64_t bit = (basis_i >> tdata.site_index) & 1;
+                        if (bit != tdata.op_type) {
+                            new_basis ^= (1ULL << tdata.site_index);
+                        } else {
+                            valid = false;
+                        }
+                    }
+                } else {
+                    const uint64_t bit_i = (basis_i >> tdata.site_index)   & 1;
+                    const uint64_t bit_j = (basis_i >> tdata.site_index_2) & 1;
+                    if (tdata.op_type == 2 && tdata.op_type_2 == 2) {
+                        const double sign_i = bit_i ? -1.0 : 1.0;
+                        const double sign_j = bit_j ? -1.0 : 1.0;
+                        scalar *= spin_l_ * spin_l_ * sign_i * sign_j;
+                    } else {
+                        if (tdata.op_type != 2) {
+                            if (bit_i != tdata.op_type) {
+                                new_basis ^= (1ULL << tdata.site_index);
+                            } else {
+                                valid = false;
+                            }
+                        } else {
+                            const double sign_i = bit_i ? -1.0 : 1.0;
+                            scalar *= spin_l_ * sign_i;
+                        }
+                        if (valid && tdata.op_type_2 != 2) {
+                            const uint64_t new_bit_j = (new_basis >> tdata.site_index_2) & 1;
+                            if (new_bit_j != tdata.op_type_2) {
+                                new_basis ^= (1ULL << tdata.site_index_2);
+                            } else {
+                                valid = false;
+                            }
+                        } else if (valid) {
+                            const double sign_j = bit_j ? -1.0 : 1.0;
+                            scalar *= spin_l_ * sign_j;
+                        }
+                    }
+                }
+                if (valid && popcount(new_basis) == n_up_ && std::abs(scalar) > 1e-15) {
+                    const int64_t j = lookupState(new_basis);
+                    if (j >= 0) {
+                        triplets.emplace_back(static_cast<int>(j),
+                                              static_cast<int>(i),
+                                              scalar.real());
+                    }
+                }
+            }
+        }
+    }
+
     /**
      * Get sparse matrix in fixed Sz basis
      */

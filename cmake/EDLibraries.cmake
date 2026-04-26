@@ -94,6 +94,7 @@ set(_ED_PUBLIC_INCLUDES
 # -----------------------------------------------------------------------------
 add_library(ed_parallel STATIC
     ${PARALLEL_DIR}/numa.cpp
+    ${PARALLEL_DIR}/thread_budget.cpp
 )
 target_include_directories(ed_parallel PUBLIC ${_ED_PUBLIC_INCLUDES})
 if(OpenMP_CXX_FOUND)

@@ -3,6 +3,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <mutex>
+#include <utility>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -89,6 +90,21 @@ bool append_basis_vector(const std::string& key, const ComplexVector& vec) {
     if (buf.N == 0) buf.N = vec.size();
 
     buf.vectors.push_back(vec);
+    return true;
+}
+
+bool append_basis_vector(const std::string& key, ComplexVector&& vec) {
+    auto& reg = registry();
+    std::lock_guard<std::mutex> lock(reg.mtx);
+
+    auto it = reg.buffers.find(key);
+    if (it == reg.buffers.end()) return false;
+
+    Buffer& buf = it->second;
+    if (buf.N != 0 && vec.size() != buf.N) return false;
+    if (buf.N == 0) buf.N = vec.size();
+
+    buf.vectors.push_back(std::move(vec));
     return true;
 }
 

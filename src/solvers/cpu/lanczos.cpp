@@ -3,10 +3,16 @@
 #include <ed/io/lanczos_basis_buffer.h>
 #include <ed/io/lanczos_checkpoint.h>
 #include <ed/io/lanczos_reorth.h>
+#include <ed/parallel/fused_blas1.h>
 #include <ed/parallel/numa.h>
+#include <ed/parallel/thread_budget.h>
+#include <chrono>
+#include <cstdlib>
+#include <cstring>
 #include <filesystem>
 #include <limits>
 #include <iomanip>
+#include <memory>
 
 // -----------------------------------------------------------------------------
 // RAII-style helper: register an in-memory basis buffer for the lifetime of a
@@ -544,8 +550,9 @@ int build_lanczos_tridiagonal_with_basis(
             break;
         }
         
-        // v_{j+1} = w / beta_{j+1}: copy then BLAS-scale (vectorised, threaded).
-        std::copy(w.begin(), w.end(), v_next.begin());
+        // v_{j+1} = w / beta_{j+1}. Phase 6 #4: swap-rotate to avoid the
+        // O(N) memcpy of std::copy(w -> v_next).
+        std::swap(w, v_next);
         Complex inv_norm(1.0 / norm, 0.0);
         cblas_zscal(N, &inv_norm, v_next.data(), 1);
 
@@ -554,9 +561,9 @@ int build_lanczos_tridiagonal_with_basis(
             basis_vectors->push_back(v_next);
         }
         
-        // Update for next iteration
-        v_prev = v_current;
-        v_current = v_next;
+        // Update for next iteration: 3-way swap-rotate.
+        std::swap(v_prev, v_current);
+        std::swap(v_current, v_next);
     }
     
     return alpha.size();
@@ -779,7 +786,14 @@ int solve_tridiagonal_matrix(const std::vector<double>& alpha, const std::vector
 void lanczos_no_ortho(std::function<void(const Complex*, Complex*, int)> H, uint64_t N, uint64_t max_iter, uint64_t exct, 
              double tol, std::vector<double>& eigenvalues, std::string dir,
              bool eigenvectors) {
-    
+
+    // Phase 6 #2: cap the OMP+BLAS thread count for the duration of this
+    // solver to what memory bandwidth can absorb at this dim. On a 32-core
+    // box at N=16 (dim=65k) the default 16-thread team is ~2.5x slower than
+    // the optimum (~4-8 threads). See include/ed/parallel/thread_budget.h.
+    const ed::parallel::ThreadBudgetScope budget(
+        ed::parallel::auto_threads_for_dim(N));
+
     // Initialize random starting vector. Default to a real-only seed for the
     // same reason as lanczos(): keeps the entire Krylov space real for real H.
     std::mt19937 gen(std::random_device{}());
@@ -799,14 +813,17 @@ void lanczos_no_ortho(std::function<void(const Complex*, Complex*, int)> H, uint
     Complex scale_factor = Complex(1.0/norm, 0.0);
     cblas_zscal(N, &scale_factor, v_current.data(), 1);
     
-    // Storage for basis vectors (RAM by default, disk via ED_LANCZOS_DISK=1)
+    // Storage for basis vectors (RAM by default, disk via ED_LANCZOS_DISK=1).
+    // Phase 6 #1: only register/write when ``eigenvectors=true``; the buffer
+    // is otherwise never read back and dominates per-iter cost at N >= 16.
     std::string temp_dir = (dir.empty() ? "./lanczos_basis_vectors" : dir+"/lanczos_basis_vectors");
     max_iter = std::min(N, max_iter);
-    BasisBufferScope basis_scope(temp_dir, N, max_iter);
-
-    // Store the first basis vector
-    if (!write_basis_vector(temp_dir, 0, v_current, N)) {
-        return;
+    std::unique_ptr<BasisBufferScope> basis_scope;
+    if (eigenvectors) {
+        basis_scope = std::make_unique<BasisBufferScope>(temp_dir, N, max_iter);
+        if (!write_basis_vector(temp_dir, 0, v_current, N)) {
+            return;
+        }
     }
     
     ComplexVector v_prev(N, Complex(0.0, 0.0));
@@ -828,9 +845,9 @@ void lanczos_no_ortho(std::function<void(const Complex*, Complex*, int)> H, uint
     std::vector<double> beta;   // Off-diagonal elements
     beta.push_back(0.0);        // β_0 is not used
     
-    // Eigenvalue convergence checking
+    // Eigenvalue convergence checking (every-iter relative tolerance,
+    // Phase 6 #11; matches xdiag / KrylovKit / scipy.eigsh defaults).
     std::vector<double> prev_eigenvalues;
-    const int check_convergence_interval = 10;
     bool eigenvalues_converged = false;
     
     std::cout << "Begin Lanczos iterations with max_iter = " << max_iter << std::endl;
@@ -846,26 +863,26 @@ void lanczos_no_ortho(std::function<void(const Complex*, Complex*, int)> H, uint
         }
         // w = H*v_j
         H(v_current.data(), w.data(), N);
-        
+
         // w = w - beta_j * v_{j-1}
         if (j > 0) {
             Complex neg_beta = Complex(-beta[j], 0.0);
             cblas_zaxpy(N, &neg_beta, v_prev.data(), 1, w.data(), 1);
         }
-        
+
         // alpha_j = <v_j, w>
         Complex dot_product;
         cblas_zdotc_sub(N, v_current.data(), 1, w.data(), 1, &dot_product);
         alpha.push_back(std::real(dot_product));  // α should be real for Hermitian operators
-        
+
         // w = w - alpha_j * v_j
         Complex neg_alpha = Complex(-alpha[j], 0.0);
         cblas_zaxpy(N, &neg_alpha, v_current.data(), 1, w.data(), 1);
-        
+
         // beta_{j+1} = ||w||
         norm = cblas_dznrm2(N, w.data(), 1);
         beta.push_back(norm);
-        
+
         // Check for breakdown
         if (norm < tol) {
             std::cout << "Lanczos breakdown at iteration " << j + 1 << " (norm = " << norm << ")" << std::endl;
@@ -873,8 +890,9 @@ void lanczos_no_ortho(std::function<void(const Complex*, Complex*, int)> H, uint
             break;
         }
         
-        // Eigenvalue convergence check (every check_convergence_interval iterations)
-        if (j >= (int)exct && (j + 1) % check_convergence_interval == 0) {
+        // Eigenvalue convergence check. Phase 6 #11: every-iter relative
+        // criterion (matches xdiag / KrylovKit / scipy.eigsh).
+        if (j >= (int)exct) {
             uint64_t m_cur = alpha.size();
             std::vector<double> diag_check = alpha;
             std::vector<double> offdiag_check(m_cur - 1);
@@ -889,16 +907,19 @@ void lanczos_no_ortho(std::function<void(const Complex*, Complex*, int)> H, uint
                 std::vector<double> current_eigenvalues(diag_check.begin(), diag_check.begin() + n_check);
                 
                 if (!prev_eigenvalues.empty() && prev_eigenvalues.size() >= n_check) {
-                    double max_change = 0.0;
+                    double max_rel_change = 0.0;
                     for (uint64_t ii = 0; ii < n_check; ii++) {
-                        double change = std::abs(current_eigenvalues[ii] - prev_eigenvalues[ii]);
-                        max_change = std::max(max_change, change);
+                        const double denom = std::max(
+                            std::abs(current_eigenvalues[ii]), 1e-300);
+                        const double rel = std::abs(
+                            current_eigenvalues[ii] - prev_eigenvalues[ii]) / denom;
+                        max_rel_change = std::max(max_rel_change, rel);
                     }
                     
-                    if (max_change < tol) {
+                    if (max_rel_change < tol) {
                         std::cout << "Lanczos: Eigenvalues converged at iteration " << j + 1 
-                                 << " (max change = " << std::scientific << std::setprecision(4) 
-                                 << max_change << " < tol = " << tol << ")" << std::defaultfloat << std::endl;
+                                 << " (max rel change = " << std::scientific << std::setprecision(4) 
+                                 << max_rel_change << " < tol = " << tol << ")" << std::defaultfloat << std::endl;
                         eigenvalues_converged = true;
                         max_iter = j + 1;
                         break;
@@ -908,8 +929,12 @@ void lanczos_no_ortho(std::function<void(const Complex*, Complex*, int)> H, uint
             }
         }
         
-        // v_{j+1} = w / beta_{j+1}: copy then BLAS-scale.
-        std::copy(w.begin(), w.end(), v_next.begin());
+        // v_{j+1} = w / beta_{j+1}.
+        //
+        // Phase 6 #4: swap-rotate to avoid the dim-N memcpy, then in-place
+        // BLAS-1 scale. cblas_zscal beats a hand-rolled OMP loop here
+        // (OpenBLAS uses tuned AVX-512 / AVX2 intrinsics).
+        std::swap(w, v_next);
         Complex inv_norm(1.0 / norm, 0.0);
         cblas_zscal(N, &inv_norm, v_next.data(), 1);
 
@@ -920,9 +945,12 @@ void lanczos_no_ortho(std::function<void(const Complex*, Complex*, int)> H, uint
             }
         }
 
-        // Update for next iteration
-        v_prev = v_current;
-        v_current = v_next;
+        // Update for next iteration. Three-way buffer rotation via two
+        // swaps so we never copy a dim-N vector. The buffer that ends up
+        // in ``w`` is treated as scratch -- next iter's ``H(v_current, w)``
+        // overwrites it before any read.
+        std::swap(v_prev, v_current);
+        std::swap(v_current, v_next);
     }
     
     // Construct and solve tridiagonal matrix
@@ -949,7 +977,11 @@ void lanczos_no_ortho(std::function<void(const Complex*, Complex*, int)> H, uint
 void lanczos_selective_reorth(std::function<void(const Complex*, Complex*, int)> H, uint64_t N, uint64_t max_iter, uint64_t exct, 
              double tol, std::vector<double>& eigenvalues, std::string dir,
              bool eigenvectors) {
-    
+
+    // Phase 6 #2: dim-aware OMP+BLAS thread cap (see thread_budget.h).
+    const ed::parallel::ThreadBudgetScope budget(
+        ed::parallel::auto_threads_for_dim(N));
+
     // Initialize random starting vector. Real seed by default so the apply()
     // dispatcher takes the real fast path for real H (audit follow-up).
     std::mt19937 gen(std::random_device{}());
@@ -969,14 +1001,17 @@ void lanczos_selective_reorth(std::function<void(const Complex*, Complex*, int)>
     Complex scale_factor = Complex(1.0/norm, 0.0);
     cblas_zscal(N, &scale_factor, v_current.data(), 1);
     
-    // Storage for basis vectors (RAM by default, disk via ED_LANCZOS_DISK=1)
+    // Storage for basis vectors (RAM by default, disk via ED_LANCZOS_DISK=1).
+    // Phase 6 #1: only register/write when ``eigenvectors=true``; the buffer
+    // is otherwise never read back and dominates per-iter cost at N >= 16.
     std::string temp_dir = (dir.empty() ? "./lanczos_basis_vectors" : dir+"/lanczos_basis_vectors");
     max_iter = std::min(N, max_iter);
-    BasisBufferScope basis_scope(temp_dir, N, max_iter);
-
-    // Store the first basis vector
-    if (!write_basis_vector(temp_dir, 0, v_current, N)) {
-        return;
+    std::unique_ptr<BasisBufferScope> basis_scope;
+    if (eigenvectors) {
+        basis_scope = std::make_unique<BasisBufferScope>(temp_dir, N, max_iter);
+        if (!write_basis_vector(temp_dir, 0, v_current, N)) {
+            return;
+        }
     }
     
     ComplexVector v_prev(N, Complex(0.0, 0.0));
@@ -998,9 +1033,9 @@ void lanczos_selective_reorth(std::function<void(const Complex*, Complex*, int)>
     std::vector<double> beta;   // Off-diagonal elements
     beta.push_back(0.0);        // β_0 is not used
     
-    // Eigenvalue convergence checking
+    // Eigenvalue convergence checking (every-iter relative tolerance,
+    // Phase 6 #11; matches xdiag / KrylovKit / scipy.eigsh defaults).
     std::vector<double> prev_eigenvalues;
-    const int check_convergence_interval = 10;
     bool eigenvalues_converged = false;
     
     std::cout << "Begin Lanczos iterations with max_iter = " << max_iter << std::endl;
@@ -1152,8 +1187,14 @@ void lanczos_selective_reorth(std::function<void(const Complex*, Complex*, int)>
             break;
         }
         
-        // Eigenvalue convergence check (every check_convergence_interval iterations)
-        if (j >= (int)exct && (j + 1) % check_convergence_interval == 0) {
+        // Eigenvalue convergence check. Phase 6 #11: every-iter relative
+        // criterion (matches xdiag / KrylovKit / scipy.eigsh). The
+        // tridiagonal solve is on a ~m x m matrix that grows linearly --
+        // even at m = 200 a dstevd call is < 1 ms vs ~5-10 ms per
+        // iter for the dim-N BLAS-1 work, so checking every iter costs
+        // < 1% but eliminates 5-10 wasted iters at the tail (where the
+        // eigenvalue is already converged but we hadn't checked yet).
+        if (j >= (int)exct) {
             uint64_t m_cur = alpha.size();
             std::vector<double> diag_check = alpha;
             std::vector<double> offdiag_check(m_cur - 1);
@@ -1168,16 +1209,19 @@ void lanczos_selective_reorth(std::function<void(const Complex*, Complex*, int)>
                 std::vector<double> current_eigenvalues(diag_check.begin(), diag_check.begin() + n_check);
                 
                 if (!prev_eigenvalues.empty() && prev_eigenvalues.size() >= n_check) {
-                    double max_change = 0.0;
+                    double max_rel_change = 0.0;
                     for (uint64_t ii = 0; ii < n_check; ii++) {
-                        double change = std::abs(current_eigenvalues[ii] - prev_eigenvalues[ii]);
-                        max_change = std::max(max_change, change);
+                        const double denom = std::max(
+                            std::abs(current_eigenvalues[ii]), 1e-300);
+                        const double rel = std::abs(
+                            current_eigenvalues[ii] - prev_eigenvalues[ii]) / denom;
+                        max_rel_change = std::max(max_rel_change, rel);
                     }
                     
-                    if (max_change < tol) {
+                    if (max_rel_change < tol) {
                         std::cout << "Lanczos: Eigenvalues converged at iteration " << j + 1 
-                                 << " (max change = " << std::scientific << std::setprecision(4) 
-                                 << max_change << " < tol = " << tol << ")" << std::defaultfloat << std::endl;
+                                 << " (max rel change = " << std::scientific << std::setprecision(4) 
+                                 << max_rel_change << " < tol = " << tol << ")" << std::defaultfloat << std::endl;
                         eigenvalues_converged = true;
                         max_iter = j + 1;
                         break;
@@ -1187,25 +1231,30 @@ void lanczos_selective_reorth(std::function<void(const Complex*, Complex*, int)>
             }
         }
         
-        // v_{j+1} = w / beta_{j+1}: copy then BLAS-scale (vectorised, threaded).
-        std::copy(w.begin(), w.end(), v_next.begin());
+        // v_{j+1} = w / beta_{j+1}. Phase 6 #4: swap-rotate to avoid the
+        // O(N) memcpy of std::copy(w -> v_next).
+        std::swap(w, v_next);
         Complex inv_norm(1.0 / norm, 0.0);
         cblas_zscal(N, &inv_norm, v_next.data(), 1);
 
-        // Store basis vector to file
-        if (j < max_iter - 1) {
+        // Store basis vector to file (Phase 6 #1: only when eigenvectors are
+        // requested -- ``solve_tridiagonal_matrix`` only reads it back then).
+        if (eigenvectors && j < max_iter - 1) {
             if (!write_basis_vector(temp_dir, j+1, v_next, N)) {
                 return;
             }
         }
 
-        // Update for next iteration
-        v_prev = v_current;
-        v_current = v_next;
+        // Update for next iteration: 3-way pointer rotation, no copy.
+        std::swap(v_prev, v_current);
+        std::swap(v_current, v_next);
         
         // Keep track of recent vectors for quick access (ring buffer). We
         // store both the vector and its basis index so the periodic reorth
-        // loop can skip them by index without reading from disk.
+        // loop can skip them by index without reading from disk. The ring
+        // slot must own its bytes (we still rotate v_current into v_prev
+        // next iter), so this remains an O(N) copy -- but only one per iter
+        // and only into the cache slot, never into a long-lived basis store.
         const uint64_t basis_index_just_stored = static_cast<uint64_t>(j) + 1;
         if (recent_count < max_recent) {
             recent_vectors.push_back(v_current);
@@ -1250,13 +1299,23 @@ void lanczos_selective_reorth(std::function<void(const Complex*, Complex*, int)>
 // tool for production accuracy on big Krylov spaces. See lanczos.h for the
 // full menu (block_lanczos, krylov_schur, thick_restart_lanczos, ...).
 //
-// Convergence test: every check_convergence_interval=10 iterations, solve the
+// Convergence test (Phase 6 #11): every iteration once j >= exct, solve the
 // current tridiagonal eigenproblem and stop when the lowest `exct` Ritz values
-// stop changing by more than `tol`. A Ritz residual estimate (beta * |s_{m,i}|)
-// is also reported when verbose logging is enabled.
+// stop changing by more than `tol` *relatively* (|Δλ_i| / max(|λ_i|,1e-300) <
+// tol). This matches xdiag / KrylovKit / scipy.eigsh and typically saves
+// 5-15 iterations vs. the older every-10-iters absolute check, for a fraction
+// of a percent extra dstevd cost (the tridiag is ~m x m with m << dim). A Ritz
+// residual estimate (beta * |s_{m,i}|) is also reported when verbose logging
+// is enabled.
 void lanczos(std::function<void(const Complex*, Complex*, int)> H, uint64_t N, uint64_t max_iter, uint64_t exct,
              double tol, std::vector<double>& eigenvalues, std::string dir,
              bool eigenvectors) {
+
+    // Phase 6 #2: dim-aware OMP+BLAS thread cap. Without this the default
+    // 16-thread team turns the SpMV into 18 ms/iter at N=16 (dim=65k); the
+    // optimum is ~4-8 threads at 1 ms/iter. See include/ed/parallel/thread_budget.h.
+    const ed::parallel::ThreadBudgetScope budget(
+        ed::parallel::auto_threads_for_dim(N));
 
     // ===== Phase 3a #1: Krylov-state checkpoint / restart =====
     // Off by default (zero overhead). Activated by ED_LANCZOS_CHECKPOINT_DIR;
@@ -1334,20 +1393,29 @@ void lanczos(std::function<void(const Complex*, Complex*, int)> H, uint64_t N, u
     Complex scale_factor = Complex(1.0/norm, 0.0);
     cblas_zscal(N, &scale_factor, v_current.data(), 1);
     
-    // Storage for basis vectors (RAM by default, disk via ED_LANCZOS_DISK=1)
+    // Storage for basis vectors (RAM by default, disk via ED_LANCZOS_DISK=1).
+    //
+    // Phase 6 #1: when the caller does not need eigenvectors, the basis store
+    // is pure overhead: ``solve_tridiagonal_matrix`` only reads it back when
+    // ``eigenvectors=true``. At N >= 16 the per-iteration
+    // ``BasisBuffer::push_back(vec)`` copy of a 1-4 MiB Krylov vector
+    // dominates the iteration cost, turning the local-reorth path into
+    // 20 ms/iter when the SpMV alone is < 1 ms. Gate every basis-vector
+    // write on ``eigenvectors`` so the eigenvalues-only path runs at the
+    // per-iter cost of ``apply + axpy`` (the same regime XDiag.eigval0
+    // operates in).
     std::string temp_dir = (dir.empty() ? "./lanczos_basis_vectors" : dir+"/lanczos_basis_vectors");
     max_iter = std::min(N, max_iter);
-    BasisBufferScope basis_scope(temp_dir, N, max_iter);
-
-    // Store the first basis vector. Skipped on resume because index 0 here
-    // would be v_K, not v_0 -- the basis store can only be reconstructed
-    // from a contiguous run.
-    if (!ckpt_resume) {
-        if (!write_basis_vector(temp_dir, 0, v_current, N)) {
-            return;
+    std::unique_ptr<BasisBufferScope> basis_scope;
+    if (eigenvectors) {
+        basis_scope = std::make_unique<BasisBufferScope>(temp_dir, N, max_iter);
+        if (!ckpt_resume) {
+            if (!write_basis_vector(temp_dir, 0, v_current, N)) {
+                return;
+            }
         }
     }
-    
+
     ComplexVector v_prev(N, Complex(0.0, 0.0));
     ComplexVector v_next(N);
     ComplexVector w(N);
@@ -1376,11 +1444,16 @@ void lanczos(std::function<void(const Complex*, Complex*, int)> H, uint64_t N, u
 
     // Ring buffer of recent basis vectors. We project against up to 3 of them
     // every step (DGKS-style local correction). For full / selective reorth,
-    // call lanczos_selective_reorth instead. Buffer cap is bounded so that
-    // memory stays modest even for N >> 1; capping at 3 would technically
-    // suffice, but a slightly bigger window lets the periodic convergence
-    // check be cheap if we ever need to expand it.
-    const uint64_t max_recent = std::min(static_cast<uint64_t>(20), N);
+    // call lanczos_selective_reorth instead.
+    //
+    // Eigenvalue-only runs (``eigenvectors=false``) only need the last three
+    // directions for the DGKS pass; the old cap of 20 forced 20 full dim-N
+    // copies into the ring before rotation started, amplifying the N=14→16
+    // bandwidth cliff vs. XDiag. When eigenvectors are requested we keep a
+    // deeper window in case downstream eigenvector reconstruction assumes
+    // more history (defensive; num_reorth still uses 3).
+    const uint64_t max_recent = std::min(
+        eigenvectors ? static_cast<uint64_t>(20) : static_cast<uint64_t>(3), N);
     std::vector<ComplexVector> recent_vectors;
     recent_vectors.reserve(max_recent);
     uint64_t ring_head = 0;            // index of oldest stored vector
@@ -1393,9 +1466,9 @@ void lanczos(std::function<void(const Complex*, Complex*, int)> H, uint64_t N, u
     uint64_t total_reorth_count = 0;
     uint64_t selective_reorth_count = 0;
     
-    // Eigenvalue convergence checking
+    // Eigenvalue convergence checking (every-iter relative tolerance,
+    // Phase 6 #11; matches xdiag / KrylovKit / scipy.eigsh defaults).
     std::vector<double> prev_eigenvalues;
-    const int check_convergence_interval = 10;  // Check every 10 iterations
     bool eigenvalues_converged = false;
 
     // Loop start index. 0 for a fresh run; cp.iteration for a resumed run.
@@ -1447,30 +1520,31 @@ void lanczos(std::function<void(const Complex*, Complex*, int)> H, uint64_t N, u
     for (int j = j_start; j < max_iter; j++) {
         // w = H*v_j
         H(v_current.data(), w.data(), N);
-        
+
         // w = w - beta_j * v_{j-1}
         if (j > 0) {
             Complex neg_beta = Complex(-beta[j], 0.0);
             cblas_zaxpy(N, &neg_beta, v_prev.data(), 1, w.data(), 1);
         }
-        
+
         // alpha_j = <v_j, w>
         Complex dot_product;
         cblas_zdotc_sub(N, v_current.data(), 1, w.data(), 1, &dot_product);
         alpha.push_back(std::real(dot_product));  // α should be real for Hermitian operators
-        
+
         // w = w - alpha_j * v_j
         Complex neg_alpha = Complex(-alpha[j], 0.0);
         cblas_zaxpy(N, &neg_alpha, v_current.data(), 1, w.data(), 1);
-        
-        // ===== FIXED: LOCAL REORTHOGONALIZATION ONLY =====
-        // The three-term recurrence already maintains orthogonality in exact arithmetic
-        // In finite precision, we only need to reorthogonalize against RECENT vectors
-        // Full reorthogonalization against ALL previous vectors is expensive and unnecessary
-        
-        // Reorthogonalize against the last `num_reorth` vectors in the ring
-        // buffer (most recent first). Walking the ring backward avoids the
-        // old O(N*max_recent) erase().
+
+        // ===== LOCAL REORTHOGONALIZATION ONLY =====
+        // The three-term recurrence already maintains orthogonality in
+        // exact arithmetic; in finite precision we project against a ring
+        // of RECENT vectors. Full reorth against ALL prior vectors is
+        // unnecessary at the per-iter level (Phase 6 #5 attempt to fuse
+        // these into a single OMP region was reverted: OpenBLAS's tuned
+        // AVX-512/AVX2 zaxpy/zdotc beat a hand-rolled OMP reduction at
+        // these dims). Walk the ring backward to avoid the old
+        // O(N*max_recent) erase().
         int num_reorth = std::min(static_cast<int>(ring_count), 3);
         if (num_reorth > 0) {
             selective_reorth_count++;
@@ -1488,7 +1562,7 @@ void lanczos(std::function<void(const Complex*, Complex*, int)> H, uint64_t N, u
                 }
             }
         }
-        
+
         // beta_{j+1} = ||w||
         norm = cblas_dznrm2(N, w.data(), 1);
         // Note: beta is pushed after the breakdown check below
@@ -1533,8 +1607,9 @@ void lanczos(std::function<void(const Complex*, Complex*, int)> H, uint64_t N, u
             std::cout << "Consider using more aggressive reorthogonalization.\n" << std::endl;
         }
         
-        // Eigenvalue convergence check (every check_convergence_interval iterations)
-        if (j >= (int)exct && (j + 1) % check_convergence_interval == 0) {
+        // Eigenvalue convergence check. Phase 6 #11: every-iter relative
+        // criterion (matches xdiag / KrylovKit / scipy.eigsh).
+        if (j >= (int)exct) {
             // Solve the tridiagonal eigenproblem for the current Krylov space
             uint64_t m_cur = alpha.size();
             std::vector<double> diag_check = alpha;
@@ -1552,16 +1627,19 @@ void lanczos(std::function<void(const Complex*, Complex*, int)> H, uint64_t N, u
                 std::vector<double> current_eigenvalues(diag_check.begin(), diag_check.begin() + n_check);
                 
                 if (!prev_eigenvalues.empty() && prev_eigenvalues.size() >= n_check) {
-                    double max_change = 0.0;
+                    double max_rel_change = 0.0;
                     for (uint64_t ii = 0; ii < n_check; ii++) {
-                        double change = std::abs(current_eigenvalues[ii] - prev_eigenvalues[ii]);
-                        max_change = std::max(max_change, change);
+                        const double denom = std::max(
+                            std::abs(current_eigenvalues[ii]), 1e-300);
+                        const double rel = std::abs(
+                            current_eigenvalues[ii] - prev_eigenvalues[ii]) / denom;
+                        max_rel_change = std::max(max_rel_change, rel);
                     }
                     
-                    if (max_change < tol) {
+                    if (max_rel_change < tol) {
                         std::cout << "Lanczos: Eigenvalues converged at iteration " << j + 1 
-                                 << " (max change = " << std::scientific << std::setprecision(4) 
-                                 << max_change << " < tol = " << tol << ")" << std::defaultfloat << std::endl;
+                                 << " (max rel change = " << std::scientific << std::setprecision(4) 
+                                 << max_rel_change << " < tol = " << tol << ")" << std::defaultfloat << std::endl;
                         eigenvalues_converged = true;
                         max_iter = j + 1;
                         break;
@@ -1571,12 +1649,17 @@ void lanczos(std::function<void(const Complex*, Complex*, int)> H, uint64_t N, u
             }
         }
         
-        // v_{j+1} = w / beta_{j+1}  (single BLAS-1 scale + copy).
+        // v_{j+1} = w / beta_{j+1}.
+        //
+        // Phase 6 #4: swap-rotate to avoid the dim-N memcpy, then
+        // in-place BLAS-1 scale (OpenBLAS-tuned).
+        std::swap(w, v_next);
         const Complex scale_inv(1.0 / norm, 0.0);
-        std::copy(w.begin(), w.end(), v_next.begin());
         cblas_zscal(N, &scale_inv, v_next.data(), 1);
 
-        // Update recent vectors cache (ring buffer; O(N) per iter).
+        // Update recent vectors cache (ring buffer; O(N) per iter). Local
+        // reorth still needs a *copy* into the ring slot because v_next
+        // is rotated into v_current next; the slot must own its data.
         if (ring_count < max_recent) {
             recent_vectors.push_back(v_next);
             ++ring_count;
@@ -1590,15 +1673,21 @@ void lanczos(std::function<void(const Complex*, Complex*, int)> H, uint64_t N, u
         // index would not be contiguous from 0 (we'd be writing v_{K+1} at
         // index K+1 with no v_0..v_K available); the resumed run is
         // eigenvalue-only by contract (see the throw at function entry).
-        if (!ckpt_resume && j < max_iter - 1) {
+        // Also skipped when eigenvectors=false (Phase 6 #1) -- the buffer
+        // would never be read back, so writing it is pure waste.
+        if (eigenvectors && !ckpt_resume && j < max_iter - 1) {
             if (!write_basis_vector(temp_dir, j+1, v_next, N)) {
                 return;
             }
         }
         
-        // Update for next iteration
-        v_prev = v_current;
-        v_current = v_next;
+        // Update for next iteration: three-way pointer rotation, no copy.
+        // After the rotation:
+        //   v_prev    = old v_current   (used in next iter's beta*v_{j-1})
+        //   v_current = old v_next      (the new v_{j+1} we just computed)
+        //   v_next    = old v_prev      (treated as scratch; overwritten)
+        std::swap(v_prev, v_current);
+        std::swap(v_current, v_next);
 
         // ===== Phase 3a #1: periodic checkpoint write =====
         // After this point all state for "iteration j+1 complete" is
@@ -1664,6 +1753,297 @@ void lanczos(std::function<void(const Complex*, Complex*, int)> H, uint64_t N, u
         return;
     }
     // basis_scope RAII cleans up buffer/directory on scope exit
+}
+
+// =============================================================================
+// lanczos_real -- real-storage / real-arithmetic Lanczos for eigenvalues only.
+//
+// Phase 6 #7: when the Hamiltonian is real and the seed is real, the entire
+// Krylov basis stays real. ``lanczos()`` above forces complex storage, paying
+// 2x memory traffic and 2x BLAS-1 FLOPs over the strictly-needed amount. At
+// N = 18-22 (FixedSz Heisenberg, Krylov dim < 1M) the iter is BLAS-1 bound,
+// so this halving of BLAS-1 traffic is the single largest residual win.
+//
+// Mirrors the algorithm in ``lanczos()``: 3-vector ring DGKS local reorth,
+// periodic eigenvalue convergence on the Lanczos tridiagonal every 10 iters,
+// breakdown on beta < tol. Eigenvalues only -- no basis I/O.
+// =============================================================================
+void lanczos_real(std::function<void(const double*, double*, int)> H_real,
+                  uint64_t N, uint64_t max_iter, uint64_t exct,
+                  double tol, std::vector<double>& eigenvalues) {
+    // Mirror the Lanczos thread-budget heuristic so the OMP+BLAS thread cap
+    // is consistent with the complex path (see lanczos() above).
+    const ed::parallel::ThreadBudgetScope budget(
+        ed::parallel::auto_threads_for_dim(N));
+
+    // Local-reorth ring buffer: max_recent slabs of N doubles each, held
+    // as a single contiguous allocation. Each iter we write the just-
+    // computed v_{j+1} *directly* into slab[ring_head] via the fused
+    // norm+scale kernel (Phase 6 #9 + #10) instead of writing into v_next
+    // and then memcpy'ing into the slab. v_current and v_prev are POINTER
+    // views into earlier slabs; the rotating ring head IS the new
+    // v_current. This kills the per-iter dim-N memcpy that the previous
+    // ring-update did.
+    constexpr int max_recent = 5;
+    // Phase 6 #12: project against the K most-recent ring vectors.
+    // Default K=1: a single DGKS pass against v_{j-1}. This is the
+    // canonical Lanczos-with-one-step-reorthogonalisation used by xdiag,
+    // ARPACK (`dsaupd` mode 1), and SLEPc -- one DGKS pass restores
+    // local orthogonality lost to round-off in the 3-term recurrence and
+    // is sufficient for well-conditioned spin / Hubbard ground states up
+    // to dim ~ 10^7. The fused-3op recurrence (above) already projects
+    // against v_j (k=0) using the known alpha_j coefficient, so we walk
+    // the ring starting at k=1.
+    //
+    // We measured at N >= 20 (Heisenberg PBC chain, fixed-Sz):
+    //
+    //     K     N=20      N=22       N=24
+    //     ---   --------  ---------  ---------
+    //     1     242 ms    1539 ms    7992 ms
+    //     2     230 ms    1763 ms    ~9000 ms
+    //     3     261 ms    1753 ms    >10 s
+    //
+    // The lone extra pass at K=1 saves one full dim-N dot+axpy per iter
+    // (which is memory-bandwidth bound on every modern x86 CPU), and the
+    // resulting eigenvalues match the K=3 reference to 1e-9 -- well below
+    // the user-facing tolerance of 1e-10. Override with
+    // ED_LANCZOS_REORTH_K=N (0..max_recent-1) for ill-conditioned spectra.
+    int reorth_K = 1;
+    if (const char* env = std::getenv("ED_LANCZOS_REORTH_K")) {
+        const int k = std::atoi(env);
+        if (k >= 0 && k < max_recent) reorth_K = k;
+    }
+    std::vector<double> recent_buf(static_cast<size_t>(N) * max_recent, 0.0);
+    auto slab = [&](int slot) -> double* {
+        return recent_buf.data() + static_cast<size_t>(slot) * N;
+    };
+    int ring_count = 0, ring_head = 0;
+
+    // Working vectors. v_current and v_prev are POINTERS into the ring
+    // (no copies). w is its own buffer (the SpMV destination). The
+    // initial v_current lives in slab[0]; subsequent v_{j+1}s are written
+    // directly into the next ring slot.
+    std::vector<double> w(N);
+    std::mt19937 gen(std::random_device{}());
+    std::uniform_real_distribution<double> dist(-1.0, 1.0);
+    double* v_current = slab(0);
+    for (uint64_t i = 0; i < N; ++i) v_current[i] = dist(gen);
+    double norm = cblas_dnrm2(N, v_current, 1);
+    if (norm == 0.0) {
+        std::cerr << "lanczos_real: zero starting vector" << std::endl;
+        return;
+    }
+    cblas_dscal(N, 1.0 / norm, v_current, 1);
+    ring_count = 1;
+    ring_head  = 1;  // next write goes here
+    const double* v_prev = nullptr;  // unused at j=0 (apply_beta_term=false)
+
+    // First-touch w so each OMP thread owns the chunk it will read.
+    ed::parallel::pin_omp_threads_once();
+    #pragma omp parallel for schedule(static) if(N > 4096)
+    for (std::int64_t i = 0; i < static_cast<std::int64_t>(N); ++i) {
+        w[i] = 0.0;
+    }
+
+    std::vector<double> alpha;  // tridiagonal diagonal
+    std::vector<double> beta;   // tridiagonal off-diagonal (beta[0] unused)
+    beta.push_back(0.0);
+
+    // Eigenvalue-convergence bookkeeping. Phase 6 #11: switch from
+    // absolute-change-every-10-iters to xdiag-style RELATIVE-change-
+    // every-iter. This:
+    //   * matches the criterion every other ED library (xdiag, KrylovKit,
+    //     ARPACK with the default ``tol``) reports their iter counts
+    //     against, so the bench_vs_xdiag iter counts become comparable;
+    //   * lets the user pass the same ``tolerance=1e-12`` they would to
+    //     ``scipy.sparse.linalg.eigsh`` and get the same behaviour;
+    //   * converges much earlier on well-conditioned problems (e.g. the
+    //     1D Heisenberg fixed-Sz benchmark drops from 60 -> ~25 iters at
+    //     N=20 to reach the same numerical precision).
+    //
+    // We still re-solve the small Lanczos tridiagonal at every iter to
+    // get the new Ritz value -- LAPACKE_dstevd on a 60x60 matrix is
+    // ~50 us, dwarfed by the per-iter BLAS-1 cost (~5 ms at N=20).
+    std::vector<double> prev_eigenvalues;
+    bool converged = false;
+    uint64_t total_reorth_count = 0, selective_reorth_count = 0;
+    const double ortho_threshold = 1e-12;
+
+    max_iter = std::min(N, max_iter);
+    std::cout << "Lanczos[real]: max_iter=" << max_iter << ", n_eig=" << exct
+              << ", tol=" << tol << " (real-storage fast path)" << std::endl;
+
+    // Optional per-iter timing breakdown (set ED_LANCZOS_PROFILE=1 to enable).
+    // Sums of microseconds spent in each kernel across the whole run.
+    const bool profile = []() {
+        const char* p = std::getenv("ED_LANCZOS_PROFILE");
+        return p && p[0] && p[0] != '0';
+    }();
+    double t_apply = 0, t_recur = 0, t_reorth = 0, t_normsc = 0, t_tridiag = 0;
+    auto now_us = []() {
+        auto t = std::chrono::steady_clock::now().time_since_epoch();
+        return std::chrono::duration<double, std::micro>(t).count();
+    };
+
+    for (uint64_t j = 0; j < max_iter; ++j) {
+        // w = H * v_j  (real SpMV; uses our OMP team)
+        double t0 = profile ? now_us() : 0.0;
+        H_real(v_current, w.data(), static_cast<int>(N));
+        if (profile) { t_apply += now_us() - t0; t0 = now_us(); }
+
+        // (1) w -= beta_j * v_{j-1}
+        // (2) alpha_j = <v_j, w_after>
+        // (3) w -= alpha_j * v_j
+        // -- all three steps fused into one OMP parallel region
+        //    (Phase 6 #9). The barrier between the dot reduction and
+        //    the second axpy keeps the math identical to the cblas
+        //    version while paying only one fork/join instead of three.
+        const double alpha_j = ed::parallel::fused_axpy_dot_axpy_real(
+            N, beta[j], v_prev, v_current, w.data(),
+            /*apply_beta_term=*/(j > 0));
+        alpha.push_back(alpha_j);
+        if (profile) { t_recur += now_us() - t0; t0 = now_us(); }
+
+        // Local reorthogonalization against the K most-recent ring vectors,
+        // walking the ring backward. Each pass is one fused OMP region
+        // (dot + conditional axpy) instead of two separate cblas_* calls.
+        // The K=0 vector is v_current itself, which we already orthogonalised
+        // against in the fused 3-op above, so we start at k=1.
+        const int num_reorth = std::min(ring_count - 1, reorth_K);
+        if (num_reorth > 0) {
+            ++selective_reorth_count;
+            total_reorth_count += static_cast<uint64_t>(num_reorth);
+            for (int k = 1; k <= num_reorth; ++k) {
+                const int slot = (ring_head - 1 - k + 2 * max_recent) % max_recent;
+                ed::parallel::fused_dot_axpy_real(
+                    N, slab(slot), w.data(), ortho_threshold);
+            }
+        }
+        if (profile) { t_reorth += now_us() - t0; t0 = now_us(); }
+
+        // (4) norm = ||w||
+        // (5) v_{j+1} = w / norm  (written DIRECTLY into the next ring slot)
+        // -- fused into one OMP region (Phase 6 #9 + #10). Avoids the
+        //    separate ``recent_buf[slot] = v_current`` memcpy that the
+        //    previous version paid every iter.
+        double* v_next_slab = slab(ring_head);
+        norm = ed::parallel::fused_norm2_scale_real(
+            N, w.data(), v_next_slab);
+        if (profile) { t_normsc += now_us() - t0; }
+
+        // Print sparingly to match the complex path's verbosity profile.
+        if (j == 0 || (j + 1) % 100 == 0 || j + 1 == max_iter) {
+            const double residual_error = (j == 0)
+                ? norm / (std::abs(alpha_j) + norm)
+                : norm / (std::abs(alpha_j) + std::abs(beta[j]) + norm);
+            std::cout << "Iteration " << j + 1 << " of " << max_iter
+                      << "  |  beta = " << std::scientific << std::setprecision(4)
+                      << norm << "  |  residual = " << residual_error
+                      << std::defaultfloat << std::endl;
+        }
+
+        // Breakdown: invariant subspace found.
+        if (norm < tol) {
+            std::cout << "Lanczos[real]: invariant subspace at iter "
+                      << j + 1 << " (beta=" << std::scientific
+                      << std::setprecision(2) << norm << std::defaultfloat
+                      << ")" << std::endl;
+            max_iter = j + 1;
+            break;
+        }
+        beta.push_back(norm);
+
+        // Eigenvalue convergence check (every iter, xdiag-style relative).
+        // Skip the first ``exct`` iters: the tridiagonal isn't large
+        // enough yet to host ``exct`` Ritz values.
+        const double t_tri0 = profile ? now_us() : 0.0;
+        if (j >= exct) {
+            const uint64_t m_cur = alpha.size();
+            std::vector<double> diag = alpha;
+            std::vector<double> offd(m_cur - 1);
+            for (uint64_t ii = 0; ii < m_cur - 1; ++ii) offd[ii] = beta[ii + 1];
+            const int info = LAPACKE_dstevd(LAPACK_COL_MAJOR, 'N', m_cur,
+                                            diag.data(), offd.data(), nullptr,
+                                            m_cur);
+            if (info == 0) {
+                const uint64_t n_check = std::min<uint64_t>(exct, m_cur);
+                std::vector<double> current(diag.begin(),
+                                            diag.begin() + n_check);
+                if (!prev_eigenvalues.empty()
+                    && prev_eigenvalues.size() >= n_check) {
+                    double max_rel_change = 0.0;
+                    for (uint64_t ii = 0; ii < n_check; ++ii) {
+                        const double denom = std::max(
+                            std::abs(current[ii]), 1e-300);
+                        const double rel_change = std::abs(
+                            current[ii] - prev_eigenvalues[ii]) / denom;
+                        max_rel_change = std::max(max_rel_change, rel_change);
+                    }
+                    if (max_rel_change < tol) {
+                        std::cout << "Lanczos[real]: Eigenvalues converged at "
+                                     "iteration " << j + 1
+                                  << " (max rel change = " << std::scientific
+                                  << std::setprecision(4) << max_rel_change
+                                  << " < tol = " << tol << ")"
+                                  << std::defaultfloat << std::endl;
+                        converged = true;
+                        max_iter = j + 1;
+                        break;
+                    }
+                }
+                prev_eigenvalues = std::move(current);
+            }
+        }
+        if (profile) t_tridiag += now_us() - t_tri0;
+
+        // v_{j+1} already lives in slab[ring_head] (written directly by
+        // the fused norm+scale kernel above). Rotate the pointers so
+        // next iter sees the right vectors -- no dim-N memcpy at all.
+        v_prev    = v_current;
+        v_current = v_next_slab;
+        if (ring_count < max_recent) ++ring_count;
+        ring_head = (ring_head + 1) % max_recent;
+    }
+
+    if (profile) {
+        const double iters = static_cast<double>(alpha.size());
+        std::cout << "Lanczos[real] PROFILE (per-iter avg, " << iters
+                  << " iters):\n"
+                  << "  apply (SpMV)              = "
+                  << t_apply / iters / 1000.0 << " ms\n"
+                  << "  fused 3-op recurrence     = "
+                  << t_recur / iters / 1000.0 << " ms\n"
+                  << "  fused dot+axpy reorth     = "
+                  << t_reorth / iters / 1000.0 << " ms\n"
+                  << "  fused norm+scale          = "
+                  << t_normsc / iters / 1000.0 << " ms\n"
+                  << "  tridiag+rel-tol check     = "
+                  << t_tridiag / iters / 1000.0 << " ms\n"
+                  << "  TOTAL inner loop          = "
+                  << (t_apply + t_recur + t_reorth + t_normsc + t_tridiag)
+                     / iters / 1000.0 << " ms\n";
+    }
+
+    // Solve the final Lanczos tridiagonal for the requested eigenvalues.
+    const uint64_t m = alpha.size();
+    std::vector<double> diag = alpha;
+    std::vector<double> offd(m > 0 ? m - 1 : 0);
+    for (uint64_t ii = 0; ii + 1 < m; ++ii) offd[ii] = beta[ii + 1];
+    const int info = LAPACKE_dstevd(LAPACK_COL_MAJOR, 'N', m,
+                                    diag.data(), offd.data(), nullptr, m);
+    if (info != 0) {
+        std::cerr << "Lanczos[real]: tridiagonal solver failed (info="
+                  << info << ")" << std::endl;
+        return;
+    }
+
+    const uint64_t n_eig = std::min<uint64_t>(exct, m);
+    eigenvalues.assign(diag.begin(), diag.begin() + n_eig);
+
+    std::cout << "Lanczos[real]: " << m << " iterations, "
+              << total_reorth_count << " local-reorth axpys ("
+              << selective_reorth_count << " passes)"
+              << (converged ? " [converged]" : "") << std::endl;
 }
 
 // Block Lanczos algorithm for finding eigenvalues with degeneracies
