@@ -1,3 +1,7 @@
+---
+orphan: true
+---
+
 # Phase 3a — single-node scale-up: shipped
 
 > Closes Phase 3a of the SOTA-publication-grade ED roadmap. Five

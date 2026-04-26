@@ -3,6 +3,7 @@ title: Implementation notes — deferred work and HPC-gated milestones
 audience: future maintainers, HPC reviewers
 status: tracker (mix of DONE / OPEN — see per-item headings)
 last_updated: 2026-04-25
+orphan: true
 ---
 
 # Implementation notes

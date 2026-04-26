@@ -1,3 +1,7 @@
+---
+orphan: true
+---
+
 # Benchmarks (documentation index)
 
 Three layers:

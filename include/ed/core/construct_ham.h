@@ -245,12 +245,10 @@ inline uint64_t applyPermutation(uint64_t basis, const std::vector<int>& perm) {
  * Structure to hold symmetry sector metadata
  */
 struct SectorMetadata {
-    uint64_t sector_id;
+    uint64_t sector_id = 0;
     std::vector<int> quantum_numbers;
     std::vector<Complex> phase_factors;
-    uint64_t dimension;  // Computed during basis generation
-    
-    SectorMetadata() : sector_id(0), dimension(0) {}
+    uint64_t dimension = 0;  // Computed during basis generation
 };
 
 /**
@@ -258,7 +256,14 @@ struct SectorMetadata {
  * Loads data from JSON files produced by automorphism_finder.py
  */
 struct SymmetryGroupInfo {
-    uint64_t num_generators;
+    // Default-initialise the primitive scalar so freshly-constructed
+    // Operators (which store SymmetryGroupInfo by value) report
+    // ``num_generators == 0`` instead of whatever bit-pattern happened
+    // to be in the heap slot. The CI lane on Ubuntu 22.04 / Python 3.11
+    // tripped this with a ``4607182418800017408`` (= 1.0 as bits)
+    // value reinterpreted from a previous allocation; on glibc / libstdc++
+    // this is not guaranteed to be zero unless we explicitly say so.
+    uint64_t num_generators = 0;
     std::vector<int> generator_orders;
     std::vector<std::vector<int>> generators;
     std::vector<std::vector<int>> max_clique;

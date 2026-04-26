@@ -1,3 +1,7 @@
+---
+orphan: true
+---
+
 # Benchmarks: `exact_diagonalization_cpp` vs peers
 
 This document is the canonical reference for **how fast each ED backend in

@@ -1,3 +1,7 @@
+---
+orphan: true
+---
+
 # Head-to-head: `quantum_ed` vs `XDiag`
 
 This document compares this project against

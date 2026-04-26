@@ -1,3 +1,7 @@
+---
+orphan: true
+---
+
 # Scaling envelope of `exact_diagonalization_cpp`
 
 > **One-sentence answer.** This codebase is genuinely peer-grade with QuSpin

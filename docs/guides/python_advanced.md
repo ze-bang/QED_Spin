@@ -1,3 +1,7 @@
+---
+orphan: true
+---
+
 # Advanced Python usage (`quantum_ed` Phase 5)
 
 This guide is the **catalogue of advanced patterns** the Python API

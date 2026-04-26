@@ -2,6 +2,7 @@
 title: Exact Diagonalization Toolkit — Implementation Report
 audience: contributors, reviewers, advanced users
 last_updated: 2026-04-24
+orphan: true
 ---
 
 # Exact Diagonalization Toolkit — Implementation Report

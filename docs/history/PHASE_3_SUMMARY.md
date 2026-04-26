@@ -1,3 +1,7 @@
+---
+orphan: true
+---
+
 # Phase 3 — distributed-memory ED: 3a + 3b + 3c (stages 1-3) shipped
 
 > Closes Phase 3 of the SOTA-publication-grade ED roadmap. **3a** lifted

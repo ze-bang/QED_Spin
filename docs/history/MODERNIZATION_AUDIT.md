@@ -1,3 +1,7 @@
+---
+orphan: true
+---
+
 # Modernization Audit — `exact_diagonalization_cpp`
 
 Status: living document; tracks the modernization rollout. Phase 0, Phase 1,
