@@ -29,7 +29,18 @@ inline EDParameters toEDParameters(const EDConfig& config) {
     params.max_subspace = config.diag.max_subspace;
     params.target_lower = config.diag.target_lower;
     params.target_upper = config.diag.target_upper;
-    
+
+    // Phase 8 #5: ScaLAPACK knobs (CLI -> EDConfig -> EDParameters).
+    // ``scalapack_block_size_auto`` defaults to true on both sides, so
+    // legacy callers that only set the legacy ``scalapack_block_size``
+    // EDParameters field directly are unaffected -- they go through the
+    // adapter only when they came in via CLI / EDConfig in the first
+    // place.
+    params.scalapack_nprow            = config.diag.scalapack_nprow;
+    params.scalapack_npcol            = config.diag.scalapack_npcol;
+    params.scalapack_block_size       = config.diag.scalapack_block_size;
+    params.scalapack_block_size_auto  = config.diag.scalapack_block_size_auto;
+
     // Thermal
     params.num_samples = config.thermal.num_samples;
     params.temp_min = config.thermal.temp_min;
@@ -87,7 +98,15 @@ inline EDParameters toEDParameters(const EDConfig& config) {
     params.use_fixed_sz = config.system.use_fixed_sz;
     params.n_up = config.system.n_up;
     params.full_sz_split = config.system.full_sz_split;
-    
+
+    // Phase 7: orthogonal device / parallelism axes
+    params.use_gpu = config.system.use_gpu;
+    params.use_mpi = config.system.use_mpi;
+    // Phase 7.1: 5th orthogonal axis -- symmetry projection. Honour either
+    // the canonical SystemConfig flag or the legacy WorkflowConfig flag
+    // (the CLI parser sets both, but external callers may set only one).
+    params.use_symmetry = config.system.use_symmetry || config.workflow.run_symm_auto;
+
     // Output
     params.output_dir = config.workflow.output_dir;
     
@@ -134,7 +153,13 @@ inline EDConfig fromEDParameters(const EDParameters& params, DiagonalizationMeth
     config.diag.max_subspace = params.max_subspace;
     config.diag.target_lower = params.target_lower;
     config.diag.target_upper = params.target_upper;
-    
+
+    // Phase 8 #5: ScaLAPACK knobs (round-trip back into EDConfig).
+    config.diag.scalapack_nprow            = params.scalapack_nprow;
+    config.diag.scalapack_npcol            = params.scalapack_npcol;
+    config.diag.scalapack_block_size       = params.scalapack_block_size;
+    config.diag.scalapack_block_size_auto  = params.scalapack_block_size_auto;
+
     // Thermal
     config.thermal.num_samples = params.num_samples;
     config.thermal.temp_min = params.temp_min;
@@ -189,7 +214,19 @@ inline EDConfig fromEDParameters(const EDParameters& params, DiagonalizationMeth
     config.system.use_fixed_sz = params.use_fixed_sz;
     config.system.n_up = params.n_up;
     config.system.full_sz_split = params.full_sz_split;
-    
+
+    // Phase 7: orthogonal device / parallelism axes
+    config.system.use_gpu = params.use_gpu;
+    config.system.use_mpi = params.use_mpi;
+    // Phase 7.1: 5th orthogonal axis -- symmetry projection. Mirror the
+    // flag onto both the canonical SystemConfig field and the legacy
+    // WorkflowConfig flag so the existing ed_main.cpp dispatch keeps
+    // firing run_streaming_symmetry_workflow.
+    config.system.use_symmetry = params.use_symmetry;
+    if (params.use_symmetry) {
+        config.workflow.run_symm_auto = true;
+    }
+
     // Output
     config.workflow.output_dir = params.output_dir;
     

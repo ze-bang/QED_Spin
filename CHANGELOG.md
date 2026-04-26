@@ -7,6 +7,249 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed — Phase 8: GPU and MPI solver optimisations
+
+Closes the audit item _"optimization for GPU and MPI solvers."_  Carries
+over the Phase 6.1 thread-budgeting / output-gating / vector-swap
+playbook to the distributed and CUDA solvers, plus a small handful of
+targeted hot-path fixes.  Pure performance — bit-identical eigenvalues,
+backwards-compatible CLI / Python.  Full design in
+[`docs/history/PHASE_8_GPU_MPI_OPT.md`](docs/history/PHASE_8_GPU_MPI_OPT.md).
+
+**Tier A — high-impact, low-invasiveness**
+
+- **`quantum_ed.mpi.run_distributed`** argv now matches
+  `ed_distributed_main` (`--mode`); `directory=` / `extra_args=` accepted
+  with `DeprecationWarning` and dropped.
+- **DistributedOperator + DistributedSymmetryOperator** own persistent
+  `send_buf_` / `recv_buf_` / `halo_buf_` (sized once in
+  `build_comm_pattern_` / constructor).  No per-matvec heap allocation in
+  the MPI hot path.
+- **`ThreadBudgetScope`** wired through every distributed and GPU host
+  hot path: `distributed_lanczos`, `distributed_lanczos_kernel`,
+  `distributed_tpq`, `distributed_ftlm`,
+  `GPULanczos::solveTridiagonal`,
+  `GPUBlockLanczos::solveBlockTridiagonal`,
+  `lobpcg_solve_generalized_eigenproblem`, `GPUFTLMSolver::run`.  Sized
+  against the rank-local slab on MPI paths.  `ED_AUTO_THREADS=0` still
+  disables.
+- **`GPULanczos` cuBLAS scalar pipeline**: `cublasZdotc` runs in
+  `DEVICE_POINTER_MODE` and stores alpha in a 1-element device buffer;
+  a 1-thread `negateZScalarRealKernel` produces `-Re(alpha)` on-device;
+  the follow-up `cublasZaxpy` issues without a host sync.  Alpha is
+  async-copied to a pinned host slot and consumed only after
+  `vectorNorm(d_w_)`.  Eliminates one implicit device→host sync per
+  Lanczos iteration.
+- **ScaLAPACK auto-block-size**: new `scalapack_block_size_auto` flag
+  (default `true`) replaces the legacy fixed `mb=nb=64` with
+  `get_optimal_block_size(N, nprow, npcol)` at solve time.  Backwards
+  compatible: `--scalapack-block-size=N` (or
+  `--no-scalapack-block-size-auto` / `EDParameters::scalapack_block_size_auto = False`)
+  reverts to the explicit value.
+
+**Tier B — algorithmic / hot-path**
+
+- **`distributed_lanczos` batched CGS2 reorth** (also in
+  `distributed_lanczos_kernel`): replaces `m` serial `MPI_Allreduce`
+  calls per Lanczos iteration with **2 batched** Allreduces (one per
+  CGS pass).  For full-reorth Lanczos at scale this is the dominant
+  network cost; reorth Allreduces drop from `~m^2/2` to `2m` over a run.
+  Falls back to MGS for `basis.size() < 8` where the per-coeff
+  Allreduce is cheaper than the batched buffer's setup cost.
+- **`GPULanczos` persistent ring-buffer pointer table**: new
+  `d_ortho_basis_ptrs_full_` device-side mirror of the entire
+  `d_lanczos_vectors_` pointer table, filled once at `allocateMemory`
+  time.  `orthogonalize()` passes it directly to the batched DGKS
+  kernels for the common (non-wrapped) case — zero H2D traffic in the
+  reorth hot path.  Wrapped (windowed reorth) case keeps the legacy
+  per-iter copy of the windowed slice.
+
+**New CLI flags**
+
+```
+--scalapack-nprow=N
+--scalapack-npcol=N
+--scalapack-block-size=N           # implicitly disables auto
+--scalapack-block-size-auto        # explicit on (default)
+--no-scalapack-block-size-auto
+```
+
+**Test coverage** — all 150 C++ Catch2 tests + 197 Python pytest tests
+keep passing, plus new tests for `scalapack_block_size_auto` defaults,
+adapter round-trips, and CLI parsing.
+
+### Changed — Phase 7.1: 5th orthogonal axis — symmetry projection
+
+Closes the audit item _"there are way too many ways to symmetrize; just
+decide on the best way and stick to this as the only symm flag."_
+Symmetry projection joins fixed-Sz / GPU / MPI as a single boolean flag
+on `EDParameters`, and the streaming kernel becomes the only canonical
+entry point. The full design is in
+[`docs/history/PHASE_7_1_SYMMETRY_AXIS.md`](docs/history/PHASE_7_1_SYMMETRY_AXIS.md).
+
+The Phase 7 axis matrix grows from 4 to 5 orthogonal flags:
+
+```
+  solver       (DiagonalizationMethod)
+  use_fixed_sz (bool, EDParameters::use_fixed_sz)
+  use_gpu      (bool, EDParameters::use_gpu)
+  use_mpi      (bool, EDParameters::use_mpi)
+  use_symmetry (bool, EDParameters::use_symmetry)   ← NEW
+```
+
+- **New flag on `EDParameters`** (`include/ed/core/ed_parameters.h`):
+  `use_symmetry`. Mirrored on `SystemConfig`
+  (`include/ed/core/ed_config.h::SystemConfig::use_symmetry`) and
+  threaded through the `EDConfig ↔ EDParameters` adapter
+  (`include/ed/core/ed_config_adapter.h`). The
+  `EDConfig::useSymmetry(bool)` builder method sets BOTH the canonical
+  `system.use_symmetry` AND the legacy `workflow.run_symm_auto` so the
+  existing `ed_main.cpp` dispatch (which fires
+  `run_streaming_symmetry_workflow` when `run_symm_auto` is set) keeps
+  working unchanged.
+- **Canonical 5-axis dispatcher** in
+  `include/ed/core/ed_dispatch_symmetry.h`:
+  `ed_dispatch::exact_diagonalization_from_directory(...)` and
+  `ed_dispatch::exact_diagonalization_from_files(...)` route to the
+  streaming symmetry kernel when `params.use_symmetry == true` and
+  fall back to the standard dispatcher otherwise. This header lives
+  outside `ed_wrapper.h` because the streaming kernel
+  (`ed_wrapper_streaming.h`) depends on `ed_wrapper.h` — the dispatcher
+  layer is the only place that can include both.
+- **Python `quantum_ed.exact_diagonalization_from_directory(...)` is
+  now the canonical 5-axis entry point**
+  (`python/quantum_ed/_bindings/dispatcher_bindings.cpp`). It forwards
+  through `ed_dispatch::exact_diagonalization_from_directory(...)`,
+  honouring `params.use_symmetry` (with `use_fixed_sz`, `use_gpu`,
+  `use_mpi` orthogonally as before). `EDParameters::use_symmetry` is
+  exposed as a settable Python property next to the existing flag axes.
+- **Streaming kernel chosen as canonical**: the only symmetry path that
+  (a) supports `use_gpu` (per-sector GPU kernel in
+  `gpu_symmetrized_operator.cu`), (b) supports `use_fixed_sz`
+  orthogonally, (c) avoids materialising the orbit basis on disk,
+  (d) was already the route for the unified `--symm` CLI flag. See
+  `include/ed/core/ed_wrapper_streaming.h`.
+- **Deprecation of explicit-block symmetrized entry points**
+  (`include/ed/core/ed_wrapper.h`):
+  `exact_diagonalization_from_directory_symmetrized(...)` and
+  `exact_diagonalization_fixed_sz_symmetrized(...)` are now annotated
+  `[[deprecated(...)]]` with a redirect to the canonical streaming
+  kernel. They remain ABI-stable for back-compat (existing user
+  scripts keep working) but emit a compiler deprecation warning at
+  the call site. The Python bindings keep the legacy entry points
+  reachable inside a targeted `#pragma GCC diagnostic` block.
+- **Chunked / disk-streaming kernels stay as CLI-only escape hatches**
+  for very-large-N memory-budget edge cases (`--chunked-symm`,
+  `--disk-streaming`). They are *not* reachable via
+  `EDParameters::use_symmetry` and are not part of the orthogonal-axis
+  contract — they are separate kernels with their own trade-offs.
+- **CLI**: `--symm` (and the deprecated aliases `--symmetrized` /
+  `--streaming-symmetry`) sets BOTH `system.use_symmetry = true` and
+  `workflow.run_symm_auto = true`. New `--no-symm` flag explicitly
+  disables symmetry projection (useful when overriding a config file
+  default on a per-run basis). See `src/core/ed_config.cpp`.
+- **Hard error in `exact_diagonalization_from_files()`** when called
+  directly with `params.use_symmetry == true`: the function lives in
+  `ed_wrapper.h` and cannot itself include the streaming kernel. The
+  error message points to `ed_dispatch_symmetry.h` so stale C++ call
+  sites fail loudly rather than silently dropping the projection.
+- **Tests**:
+  [`tests/unit/test_method_canonicalize.cpp`](tests/unit/test_method_canonicalize.cpp)
+  gains 4 cases for `EDParameters::use_symmetry` defaults,
+  `EDConfig::useSymmetry()` mirroring, adapter round-trip, and
+  orthogonality with `canonicalize_method_and_flags()`.
+  [`python/tests/test_canonicalize_method.py`](python/tests/test_canonicalize_method.py)
+  gains 3 cases mirroring the same contract through the Python
+  binding plus deprecated-binding back-compat checks.
+  Aggregate: **148/148 ctest passing** (was 144),
+  **196/196 pytest passing** (was 193, excluding the pre-existing
+  `test_build_introspection_consistency` ScaLAPACK-without-MPI build
+  failure unrelated to Phase 7.1).
+
+### Changed — Phase 7: solver organization on orthogonal axes (SOLVER × FIXED_SZ × GPU × MPI)
+
+The old enum tangled algorithm choice ("Lanczos vs FTLM vs ScaLAPACK …")
+with device choice ("CPU vs GPU"), parallelism choice ("single-process
+vs MPI"), and basis choice ("full vs fixed-Sz") into a single
+`DiagonalizationMethod` enum. Phase 7 separates them: the enum names
+*algorithms only*, and the device / parallelism / basis axes live on
+`EDParameters` as orthogonal flags. The legacy `_GPU` / `_CUDA` /
+`_MPI` / `_FIXED_SZ` enum variants are kept as deprecated aliases for
+backwards compatibility (HDF5 metadata, CLI strings, pre-Phase-7 user
+code) and are collapsed onto the canonical tuple at every dispatcher
+entry point.
+
+- **New flags on `EDParameters`** (`include/ed/core/ed_parameters.h`):
+  `use_gpu`, `use_mpi` (next to the existing `use_fixed_sz`). Mirrored
+  on `SystemConfig` (`include/ed/core/ed_config.h`) and threaded through
+  the `EDConfig ↔ EDParameters` adapter
+  (`include/ed/core/ed_config_adapter.h`) so config files, the CLI, and
+  the C++ / Python APIs all share a single set of flags.
+- **`ed::canonicalize_method_and_flags(method, fz, gpu, mpi)` helper**
+  (`include/ed/core/ed_method_traits.h`). The single source of truth for
+  collapsing every legacy `_GPU` / `_CUDA` / `_MPI` / `_FIXED_SZ` enum
+  value onto its canonical `(base_method, use_fixed_sz, use_gpu, use_mpi)`
+  tuple. The transformation is OR-merge with caller-supplied flags
+  (so no information is lost), idempotent, and constexpr.
+  `ed::legacy_method_for_dispatch(base, use_gpu)` is the inverse half
+  used internally to keep the existing `_GPU` switch-statement
+  structure.
+- **Centralised canonicalization in dispatcher entry points**
+  (`include/ed/core/ed_wrapper.h` —  `exact_diagonalization_core`,
+  `exact_diagonalization_from_files`, `exact_diagonalization_fixed_sz`).
+  Every public entry now calls `ed::canonicalize_method_and_flags()`
+  on the way in, so callers passing `LANCZOS_GPU` and callers passing
+  `LANCZOS` + `use_gpu=true` end up dispatching exactly the same code.
+- **Legacy enum values marked `[[deprecated]]`** in
+  `include/ed/core/ed_types.h`. The deprecation message points at the
+  canonical replacement (e.g. _"Use LANCZOS with EDParameters::use_gpu=true
+  instead"_). Internal code that legitimately handles the deprecated
+  values (the dispatcher, the CLI string parser, the Python enum
+  binding, the canonicalizer itself) silences the warning with a
+  targeted `#pragma GCC diagnostic` block instead of leaking it to
+  users.
+- **`mTPQ_CUDA` is no longer a separate solver.** It was previously a
+  no-op alias for `mTPQ_GPU` (the dispatcher had a dead
+  `case mTPQ_CUDA: break;`). It now canonicalizes to `mTPQ` +
+  `use_gpu=true`, identical to `mTPQ_GPU`.
+- **`SCALAPACK` and `SCALAPACK_MIXED` kept as separate solvers.** They
+  go through `PDSYEVR` / mixed-precision refinement, which is a
+  *different* dense LAPACK call than `FULL` — not "FULL with
+  use_mpi=true". Canonicalization marks them as `use_mpi=true` for
+  honest introspection but does not collapse them.
+- **CLI gained `--gpu` / `--mpi` flags** in `src/core/ed_config.cpp`,
+  next to the existing `--fixed-sz` / `--n-up`. The `--method`
+  argument keeps accepting all legacy strings.
+- **Python bindings updated** (`python/quantum_ed/_bindings/dispatcher_bindings.cpp`):
+  `EDParameters::use_gpu` / `use_mpi` exposed as read/write properties;
+  the deprecated combined `LANCZOS_GPU_FIXED_SZ` /
+  `BLOCK_LANCZOS_GPU_FIXED_SZ` / `FTLM_GPU_FIXED_SZ` enum values
+  exposed for HDF5 metadata round-tripping; the canonicalizer
+  re-exported as `quantum_ed.canonicalize_method(...)` so Python
+  tooling and tests can verify the orthogonal decomposition without
+  going through the dispatcher.
+- **Lockdown tests**:
+  [`tests/unit/test_method_canonicalize.cpp`](tests/unit/test_method_canonicalize.cpp)
+  (10 cases, 163 Catch2 assertions: identity for canonical inputs;
+  `_GPU` / `_FIXED_SZ` / `_MPI` / `_CUDA` collapse; SCALAPACK kept
+  distinct; OR-merge of caller flags; idempotence;
+  `legacy_method_for_dispatch()` round-trip) and
+  [`python/tests/test_canonicalize_method.py`](python/tests/test_canonicalize_method.py)
+  (61 parametrised pytest cases mirroring the C++ contract through the
+  Python binding plus `EDParameters::use_gpu` / `use_mpi`
+  round-trip).
+
+Migration: replace `LANCZOS_GPU` → `LANCZOS` + `params.use_gpu = True`,
+`LANCZOS_GPU_FIXED_SZ` → `LANCZOS` + `params.use_gpu = True` +
+`params.use_fixed_sz = True`, `mTPQ_CUDA` and `mTPQ_GPU` →  `mTPQ` +
+`params.use_gpu = True`, `mTPQ_MPI` → `mTPQ` + `params.use_mpi = True`.
+Capability matrix and full migration table in
+[`docs/history/PHASE_7_SOLVER_AXES.md`](docs/history/PHASE_7_SOLVER_AXES.md).
+
+Test totals: **144** C++ test cases (was 134; +10 from Phase 7),
+**254** pytest cases (was 193; +61 from Phase 7). Zero existing tests
+broken.
+
 ### Added — Phase 6.1: Phase 6 perf hygiene applied across the whole CPU solver matrix
 
 The Phase 6 / xdiag bake-off only patched the standalone `lanczos()` driver.

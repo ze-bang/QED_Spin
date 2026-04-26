@@ -97,6 +97,7 @@ from ._core import (
     has_cuda_build,
     has_mpi_build,
     has_scalapack_build,
+    canonicalize_method,
 )
 
 from . import dssf  # high-level DSSF observable-pair builder + ./ED dssf runner (P2.8)
@@ -139,6 +140,7 @@ __all__ = [
     "has_cuda_build",
     "has_mpi_build",
     "has_scalapack_build",
+    "canonicalize_method",
     # Submodules
     "dssf",
     "hamiltonian",

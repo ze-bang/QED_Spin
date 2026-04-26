@@ -9,7 +9,9 @@
 
 #include <Eigen/Dense>
 #include <Eigen/Eigenvalues>
+#include <ed/parallel/thread_budget.h>
 #include <complex>
+#include <cstdint>
 #include <vector>
 #include <iostream>
 #include <cmath>
@@ -42,6 +44,16 @@ int lobpcg_solve_generalized_eigenproblem(
     double* out_coeffs,
     double rank_threshold
 ) {
+    // Phase 8 #3: cap host-side BLAS threads for the Rayleigh-Ritz step.
+    // nsub is small (3 * block_size, so typically a few hundred at most),
+    // and Eigen::SelfAdjointEigenSolver under MKL/OpenBLAS launches the
+    // full pthread team for the Householder + tridiag pass. ThreadBudget
+    // sized against nsub^2 (the relevant memory footprint) consistently
+    // beats the default on small RR steps.
+    const ed::parallel::ThreadBudgetScope rr_budget(
+        ed::parallel::auto_threads_for_dim(
+            static_cast<std::uint64_t>(nsub) * static_cast<std::uint64_t>(nsub)));
+
     // Map input data to Eigen matrices (complex interleaved format: re0,im0,re1,im1,...)
     // h_sub_data and s_sub_data are stored as interleaved real/imag pairs, column-major
     Eigen::MatrixXcd h_sub(nsub, nsub);

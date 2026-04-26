@@ -81,7 +81,10 @@ The following live at the repository root and are rendered on GitHub:
 - [`examples/`](https://github.com/ze-bang/exact_diagonalization_cpp/tree/main/examples)
   — runnable C++ / Python / CLI examples (one per use case).
 - [`docs/history/`](https://github.com/ze-bang/exact_diagonalization_cpp/tree/main/docs/history)
-  — historical phase summaries (`MODERNIZATION_AUDIT`, `PHASE_3A`, `PHASE_3`).
+  — historical phase summaries (`MODERNIZATION_AUDIT`, `PHASE_3A`, `PHASE_3`,
+  [`PHASE_7_SOLVER_AXES`](https://github.com/ze-bang/exact_diagonalization_cpp/blob/main/docs/history/PHASE_7_SOLVER_AXES.md),
+  [`PHASE_7_1_SYMMETRY_AXIS`](https://github.com/ze-bang/exact_diagonalization_cpp/blob/main/docs/history/PHASE_7_1_SYMMETRY_AXIS.md),
+  [`PHASE_8_GPU_MPI_OPT`](https://github.com/ze-bang/exact_diagonalization_cpp/blob/main/docs/history/PHASE_8_GPU_MPI_OPT.md)).
 
 ## Indices and tables
 

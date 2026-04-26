@@ -115,6 +115,26 @@ def test_ed_parameters_defaults_and_round_trip():
     assert p.num_sites == N_SITES
 
 
+def test_scalapack_block_size_auto_default_and_override():
+    """Phase 8 #5: scalapack_block_size_auto controls heuristic.
+
+    Default is True (heuristic picks block size from N + grid). Setting
+    scalapack_block_size to a custom value typically goes through the
+    CLI, which flips this off; from Python we expose it as a separate
+    attribute so users opting in to the auto path don't accidentally
+    have their explicit block size silently ignored.
+    """
+    p = quantum_ed.EDParameters()
+    # Default: auto on, legacy block size kept for the !auto branch.
+    assert p.scalapack_block_size_auto is True
+    assert p.scalapack_block_size == 64
+    # Round-trip: explicit opt-out works.
+    p.scalapack_block_size_auto = False
+    p.scalapack_block_size = 128
+    assert p.scalapack_block_size_auto is False
+    assert p.scalapack_block_size == 128
+
+
 # ----------------------------------------------------------------------------
 # CPU dispatcher round-trips
 # ----------------------------------------------------------------------------

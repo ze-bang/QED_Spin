@@ -10,6 +10,7 @@
 #include <ed/distributed/distributed_operator.h>
 
 #include <ed/core/construct_ham.h>
+#include <ed/parallel/thread_budget.h>
 
 #include <algorithm>
 #include <cmath>
@@ -179,6 +180,15 @@ DistributedTpqResult distributed_tpq(
     MPI_Comm_split(world_comm, my_group, world_rank, &group_comm);
 
     DistributedOperator dop(op, group_comm);
+
+    // Phase 8 #3: dim-aware OMP+BLAS thread cap, sized against the
+    // rank-local slab. Same rationale as distributed_lanczos -- the
+    // taylor_step inner loops (local_axpy, local_norm_sq, local_scal)
+    // and the per-sample matvec packing are memory-bound and pay heavy
+    // OpenBLAS / OMP setup cost on small-to-mid N. ED_AUTO_THREADS=0
+    // disables the cap for users running their own pinning.
+    const ed::parallel::ThreadBudgetScope budget(
+        ed::parallel::auto_threads_for_dim(dop.local_size()));
 
     const int n_samples = std::max(1, options.n_samples);
     std::vector<int> my_samples;

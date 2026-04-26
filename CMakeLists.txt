@@ -705,6 +705,9 @@ if(BUILD_ED_TESTS)
 
     ed_add_test(test_operator_apply             tests/unit/test_operator_apply.cpp USE_CATCH2)
     ed_add_test(test_fixed_sz_operator          tests/unit/test_fixed_sz_operator.cpp USE_CATCH2)
+    # Phase 7: pin the canonicalize_method_and_flags() / legacy_method_for_dispatch()
+    # contract — the SOLVER × FIXED_SZ × GPU × MPI orthogonality story.
+    ed_add_test(test_method_canonicalize        tests/unit/test_method_canonicalize.cpp USE_CATCH2)
     ed_add_test(test_full_diagonalization       tests/unit/test_full_diagonalization.cpp USE_CATCH2)
     ed_add_test(test_lanczos_variants           tests/unit/test_lanczos_variants.cpp USE_CATCH2)
     ed_add_test(test_lanczos_basis_buffer       tests/unit/test_lanczos_basis_buffer.cpp USE_CATCH2)

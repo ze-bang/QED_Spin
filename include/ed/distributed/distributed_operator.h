@@ -252,6 +252,26 @@ private:
     /// recv_lookup_[global_col] = offset into recv_buf (built once,
     /// queried during every apply()'s inner loop).
     ed::core::SortedUint64Index recv_lookup_;
+
+    // -------------------------------------------------------------------------
+    // Phase 8: reusable halo-exchange staging buffers.
+    //
+    // The pre-Phase-8 implementation allocated `send_buf` and `recv_buf` on
+    // every call to apply(). For Lanczos / TPQ where apply() is called
+    // hundreds of times that is two heap round-trips per matvec (and two
+    // full-buffer first-touch faults if the allocator handed back fresh
+    // pages). The buffers are sized exactly by the comm plan and never
+    // change once build_comm_pattern_ has run, so we keep them as instance
+    // members and only mutate their contents on each apply().
+    //
+    // mutable: apply() must remain const because callers (Lanczos kernels,
+    // distributed_tpq, distributed_ftlm) pass `const DistributedOperator&`
+    // and the SpMV is logically read-only on the operator. The buffers are
+    // pure scratch -- conceptually they belong to the apply() call, not to
+    // the matrix definition.
+    // -------------------------------------------------------------------------
+    mutable std::vector<Complex> send_buf_;
+    mutable std::vector<Complex> recv_buf_;
 };
 
 }  // namespace ed::distributed

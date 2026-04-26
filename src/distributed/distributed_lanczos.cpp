@@ -8,6 +8,7 @@
 
 #include <ed/distributed/distributed_lanczos.h>
 #include <ed/distributed/distributed_lanczos_kernel.h>
+#include <ed/parallel/thread_budget.h>
 
 #include <algorithm>
 #include <cmath>
@@ -82,6 +83,57 @@ inline Complex dist_zdotc(const Complex* x_local, const Complex* y_local,
     double buf_out[2] = {0.0, 0.0};
     MPI_Allreduce(buf_in, buf_out, 2, MPI_DOUBLE, MPI_SUM, comm);
     return Complex(buf_out[0], buf_out[1]);
+}
+
+// -----------------------------------------------------------------------------
+// Phase 8 #6: batched <basis[k]|w> for all k in one MPI_Allreduce.
+//
+// Classical-Gram-Schmidt reorth is implemented as
+//
+//     for k: c_k = <V_k | w>;  w -= c_k * V_k
+//
+// The Allreduce is the expensive part: with MGS we pay ``m`` of them per
+// Lanczos iteration (one per basis vector), so over a 200-iter Lanczos that
+// is ~20 000 round-trips through the network stack -- and they dominate the
+// runtime once N gets large enough that the local SpMV is bandwidth-bound.
+//
+// CGS2 batches all m dots into a single Allreduce per pass; running two
+// passes (the "twice-is-enough" trick) restores the numerical stability we
+// lost when going from MGS, at the cost of 2 batched Allreduces total.
+//
+// Returns the *batched* coefficients on every rank in `c_out` (size = m).
+// Callers should follow up with a local axpy loop using these coefficients.
+// -----------------------------------------------------------------------------
+inline void dist_zdotc_batched(
+    const std::vector<std::vector<Complex>>& basis,
+    const Complex* w_local,
+    std::uint64_t n_local,
+    MPI_Comm comm,
+    std::vector<Complex>& c_out) {
+
+    const std::size_t m = basis.size();
+    c_out.assign(m, Complex(0.0, 0.0));
+    if (m == 0) return;
+
+    // Local dots. Use a flat real-pair buffer so we can hand it straight to
+    // MPI_Allreduce -- we are not allowed to reduce on std::complex<double>
+    // directly because MPI's predefined datatypes are language-level types
+    // and the SUM op on MPI_C_DOUBLE_COMPLEX is technically undefined in
+    // some MPI 3.x stacks. Two MPI_DOUBLE entries per coefficient is the
+    // portable shape.
+    std::vector<double> local_buf(2 * m, 0.0);
+    for (std::size_t k = 0; k < m; ++k) {
+        const Complex c = local_zdotc(basis[k].data(), w_local, n_local);
+        local_buf[2 * k]     = c.real();
+        local_buf[2 * k + 1] = c.imag();
+    }
+    std::vector<double> global_buf(2 * m, 0.0);
+    MPI_Allreduce(local_buf.data(), global_buf.data(),
+                  static_cast<int>(2 * m),
+                  MPI_DOUBLE, MPI_SUM, comm);
+    for (std::size_t k = 0; k < m; ++k) {
+        c_out[k] = Complex(global_buf[2 * k], global_buf[2 * k + 1]);
+    }
 }
 
 // Generate the global initial vector on rank 0 (deterministic from `seed`),
@@ -252,6 +304,19 @@ DistributedLanczosResult distributed_lanczos(
         throw std::invalid_argument("distributed_lanczos: max_iter == 0");
     }
 
+    // Phase 8 #3: dim-aware OMP+BLAS thread cap on the rank-local hot path.
+    // We size the budget against the *rank-local* slab dimension, not the
+    // global one: each rank only ever touches its own ``local_n`` slice in
+    // local_axpy / local_zdotc / local_norm_sq, and it is that loop that
+    // pays the OpenBLAS / OMP startup cost. Capping to a sane thread count
+    // here is the same trick that gave Phase 6.1 single-rank Lanczos a
+    // 2.5x speedup at N=16; on MPI runs it also keeps us from
+    // oversubscribing the node when (n_ranks * omp_max_threads) far
+    // exceeds the physical core count. Honours ``ED_AUTO_THREADS=0`` for
+    // users who prefer to do their own pinning via mpiexec --bind-to.
+    const ed::parallel::ThreadBudgetScope budget(
+        ed::parallel::auto_threads_for_dim(local_n));
+
     // compute_eigenvectors implies we MUST keep the basis around AND it
     // must be numerically orthonormal -- otherwise V_local @ U[:,k] is
     // not a useful Ritz vector. Force full_reorth = true in that case.
@@ -297,13 +362,40 @@ DistributedLanczosResult distributed_lanczos(
                        local_n);
         }
 
-        // Optional full re-orthogonalization (MGS over all prior basis vectors).
-        // Triggered by either full_reorth = true OR compute_eigenvectors = true.
+        // Optional full re-orthogonalization. Triggered by either
+        // full_reorth = true OR compute_eigenvectors = true.
+        //
+        // Phase 8 #6: replace the ``m`` serial MPI_Allreduce calls of MGS
+        // with two CGS passes (CGS2), each batching all ``m`` dots into one
+        // Allreduce. For full-reorth Lanczos this is the dominant runtime
+        // cost at scale (m^2 small Allreduces dominate the local SpMV).
+        // Two passes give MGS-equivalent numerical stability ("twice is
+        // enough"); we still keep MGS as a fallback for tiny basis sizes
+        // where the dominant cost is the local axpy, not the Allreduce.
         if (keep_basis && !basis.empty()) {
-            for (std::size_t k = 0; k < basis.size(); ++k) {
-                Complex c = dist_zdotc(basis[k].data(), w.data(), local_n,
-                                       op.comm());
-                local_axpy(-c, basis[k].data(), w.data(), local_n);
+            // Heuristic threshold: below 8 prior vectors the batched-dot's
+            // 2*m-double Allreduce is barely cheaper than 1-coeff
+            // Allreduces and the CGS2 second pass is pure overhead. Above
+            // that, CGS2 wins decisively.
+            constexpr std::size_t kCgs2Threshold = 8;
+            if (basis.size() < kCgs2Threshold) {
+                for (std::size_t k = 0; k < basis.size(); ++k) {
+                    Complex c = dist_zdotc(basis[k].data(), w.data(), local_n,
+                                           op.comm());
+                    local_axpy(-c, basis[k].data(), w.data(), local_n);
+                }
+            } else {
+                std::vector<Complex> coeffs;
+                for (int pass = 0; pass < 2; ++pass) {
+                    dist_zdotc_batched(basis, w.data(), local_n, op.comm(),
+                                       coeffs);
+                    for (std::size_t k = 0; k < basis.size(); ++k) {
+                        if (coeffs[k] != Complex(0.0, 0.0)) {
+                            local_axpy(-coeffs[k], basis[k].data(), w.data(),
+                                       local_n);
+                        }
+                    }
+                }
             }
         }
 

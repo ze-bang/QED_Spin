@@ -299,6 +299,12 @@ void DistributedOperator::build_comm_pattern_() {
         recv_lookup_.insert(recv_global_concat[k], k);
     }
     recv_lookup_.finalize();
+
+    // -- pre-size the reusable halo staging buffers (Phase 8) ----------------
+    // total_send_ / total_recv_ are fixed for the lifetime of *this; sizing
+    // the buffers here means apply() does no allocation in the hot path.
+    send_buf_.assign(static_cast<std::size_t>(total_send_), Complex(0.0, 0.0));
+    recv_buf_.assign(static_cast<std::size_t>(total_recv_), Complex(0.0, 0.0));
 }
 
 // -----------------------------------------------------------------------------
@@ -306,17 +312,21 @@ void DistributedOperator::build_comm_pattern_() {
 // -----------------------------------------------------------------------------
 void DistributedOperator::apply(const Complex* v_local,
                                 Complex* y_local) const {
-    // Pack send buffer.
-    std::vector<Complex> send_buf(static_cast<std::size_t>(total_send_));
+    // Pack send buffer. The destination buffer is the persistent
+    // send_buf_ allocated once in build_comm_pattern_ -- no per-call
+    // heap activity in the hot path (Phase 8 carryover of the
+    // memory-pool optimisation that the Phase 6.1 audit already applied
+    // to the CPU code paths).
+    Complex* const send_buf = send_buf_.data();
     for (int k = 0; k < total_send_; ++k) {
         send_buf[k] = v_local[send_local_idx_[k]];
     }
 
-    // Halo exchange.
-    std::vector<Complex> recv_buf(static_cast<std::size_t>(total_recv_));
-    MPI_Alltoallv(send_buf.data(),
+    // Halo exchange into the matching persistent recv_buf_.
+    Complex* const recv_buf = recv_buf_.data();
+    MPI_Alltoallv(send_buf,
                   send_counts_.data(), send_displs_.data(), kComplexDatatype,
-                  recv_buf.data(),
+                  recv_buf,
                   recv_counts_.data(), recv_displs_.data(), kComplexDatatype,
                   comm_);
 

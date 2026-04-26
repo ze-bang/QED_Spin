@@ -24,10 +24,19 @@ struct ScaLAPACKConfig {
     // Process grid configuration
     int nprow = 0;              // Number of process rows (0 = auto-detect)
     int npcol = 0;              // Number of process columns (0 = auto-detect)
-    
-    // Block sizes for distribution
-    int mb = 64;                // Row block size
-    int nb = 64;                // Column block size
+
+    // Block sizes for distribution.
+    //
+    // When ``block_size_auto`` is true (the new Phase 8 #5 default), ``mb``
+    // and ``nb`` are *ignored* and overridden by
+    // ``get_optimal_block_size(N, nprow, npcol)`` at solve time. Set
+    // ``block_size_auto = false`` to honour the explicit ``mb`` / ``nb``
+    // values below -- this is what the CLI flag ``--scalapack-block-size N``
+    // does for users who tune the block size manually. The legacy mb=nb=64
+    // behaviour is reproduced exactly by ``block_size_auto=false; mb=nb=64``.
+    int mb = 64;                // Row block size (used iff !block_size_auto)
+    int nb = 64;                // Column block size (used iff !block_size_auto)
+    bool block_size_auto = true;
     
     // Mixed precision settings
     bool use_mixed_precision = true;     // Use single precision for intermediate calculations

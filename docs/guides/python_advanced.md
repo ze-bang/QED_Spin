@@ -32,18 +32,26 @@ at a few thermodynamic curves), use the quickstart. If you need:
 
 ## 0. Choosing the right entry point
 
-There are now **five** entry points into the dispatcher; pick whichever
-matches your inputs.
+There are now **three** entry points into the dispatcher (Phase 7.1
+collapsed the symmetry zoo onto a single flag — see below); pick
+whichever matches your inputs.
 
 | You have… | …call this | Lives in |
 |-----------|------------|----------|
 | an in-memory `Operator` (matrix-free) | `exact_diagonalization_core(op, method, params)` | `quantum_ed._core` |
 | an in-memory `FixedSzOperator` | `exact_diagonalization_core(fop, method, params)` (overload) | `quantum_ed._core` |
-| a directory of `.dat` files | `exact_diagonalization_from_directory(dir, method, params, ...)` | `quantum_ed._core` |
-| a directory + `automorphism_results/` | `exact_diagonalization_from_directory_symmetrized(dir, method, params, ...)` *or* `exact_diagonalization_streaming_symmetry(dir, method, params, ...)` (preferred for large clusters and for GPU per-sector dispatch) | `quantum_ed._core` |
-| a directory + a Sz sector | `exact_diagonalization_fixed_sz_symmetrized(dir, n_up, method, params, ...)` *or* `exact_diagonalization_streaming_symmetry_fixed_sz(dir, n_up, method, params, ...)` | `quantum_ed._core` |
+| a directory of `.dat` files (any combination of axes) | `exact_diagonalization_from_directory(dir, method, params, ...)` — set `params.use_symmetry`, `params.use_fixed_sz`, `params.use_gpu`, `params.use_mpi` orthogonally | `quantum_ed._core` |
 | an MPI cluster + a directory | `quantum_ed.mpi.run_distributed(dir, method, n_ranks, ...)` | `quantum_ed.mpi` |
 | a directory + want S(Q,ω) / S(Q) | `quantum_ed.dssf.run_from_directory(dir, method, ...)` | `quantum_ed.dssf` |
+
+The legacy entry points
+`exact_diagonalization_streaming_symmetry[_fixed_sz](...)` and
+`exact_diagonalization_*_symmetrized(...)` remain for back-compat but
+are no longer the recommended way to request symmetry projection.
+Phase 7.1 routes everything through `from_directory(...)` based on the
+`params.use_symmetry` flag — the explicit-block `_symmetrized`
+variants are now `[[deprecated]]` (slower, no GPU, materialises blocks
+on disk).
 
 ---
 
@@ -180,14 +188,26 @@ subprocess.run([
 params = qed.EDParameters()
 params.num_sites = N
 params.num_eigenvalues = 4
+# Phase 7.1: symmetry projection is the 5th orthogonal axis. Setting
+# this flag is *the* way to request symmetry-projected ED -- the
+# dispatcher routes through the streaming kernel internally, which is
+# the only path that supports GPU per-sector dispatch and avoids
+# materialising the orbit basis on disk.
+params.use_symmetry = True
 
-result = qed.exact_diagonalization_streaming_symmetry(
+result = qed.exact_diagonalization_from_directory(
     "/tmp/heisenberg-6-chain",
     qed.DiagonalizationMethod.LANCZOS,
     params,
 )
 print("symmetry-projected E0..E3 =", sorted(result.eigenvalues)[:4])
 ```
+
+The legacy entry point `exact_diagonalization_streaming_symmetry(...)`
+still works and routes through the same kernel — but new code should
+prefer the orthogonal-flag form: it composes cleanly with
+`params.use_fixed_sz`, `params.use_gpu`, and `params.use_mpi` without
+needing a different function name per combination.
 
 ---
 
@@ -210,30 +230,64 @@ params.num_sites = 24
 params.num_eigenvalues = 4
 params.tolerance = 1e-10
 
+# Phase 7.1 canonical form: pick the *algorithm* on `method`, then
+# turn on the orthogonal axes via flags. All four flags compose:
+params.use_symmetry  = True   # symmetry projection (streaming kernel)
+params.use_gpu       = True   # per-sector GPU dispatch
+params.use_fixed_sz  = False  # full Hilbert space (set True + n_up to restrict)
+params.use_mpi       = False  # single-process
+
 # Per-sector GPU Lanczos for a 24-site cluster with C2 + translations.
-result = qed.exact_diagonalization_streaming_symmetry(
+result = qed.exact_diagonalization_from_directory(
     directory="/scratch/runs/kagome-24",
-    method=qed.DiagonalizationMethod.LANCZOS_GPU,   # or BLOCK_LANCZOS_GPU,
-                                                    # KRYLOV_SCHUR_GPU,
-                                                    # BLOCK_KRYLOV_SCHUR_GPU,
-                                                    # DAVIDSON_GPU, LOBPCG_GPU
+    method=qed.DiagonalizationMethod.LANCZOS,       # or BLOCK_LANCZOS,
+                                                    # KRYLOV_SCHUR,
+                                                    # BLOCK_KRYLOV_SCHUR,
+                                                    # DAVIDSON, LOBPCG
     params=params,
-    basis_cache_dir="/scratch/runs/kagome-24/basis_cache",
-    precompute_basis_only=False,
 )
 print("GPU per-sector eigenvalues:", sorted(result.eigenvalues)[:4])
 ```
 
-The same dispatcher knows about the fixed-Sz × symmetry path:
+Equivalently — and this is the only form pre-Phase-7 code knows about
+— pass the deprecated combined enum value and leave the flags
+default-false:
 
 ```python
-result = qed.exact_diagonalization_streaming_symmetry_fixed_sz(
+result = qed.exact_diagonalization_from_directory(
     directory="/scratch/runs/kagome-24",
-    n_up=12,
-    method=qed.DiagonalizationMethod.LANCZOS_GPU,
+    method=qed.DiagonalizationMethod.LANCZOS_GPU,   # legacy spelling
+    # canonicalize_method() collapses LANCZOS_GPU -> (LANCZOS, use_gpu=True);
+    # the symmetry flag still has to be set explicitly though.
+    params=qed.EDParameters(use_symmetry=True),
+)
+```
+
+The same dispatcher knows about the fixed-Sz × symmetry path —
+Phase 7.1 canonical form: turn on **three** orthogonal flags on top
+of plain `LANCZOS`:
+
+```python
+params = qed.EDParameters()
+params.num_sites    = 24
+params.use_symmetry = True
+params.use_gpu      = True
+params.use_fixed_sz = True
+params.n_up         = 12
+
+result = qed.exact_diagonalization_from_directory(
+    directory="/scratch/runs/kagome-24",
+    method=qed.DiagonalizationMethod.LANCZOS,    # algorithm only
     params=params,
 )
 ```
+
+The legacy `LANCZOS_GPU_FIXED_SZ` enum value still works (it gets
+canonicalized to `LANCZOS` + `use_gpu=True` + `use_fixed_sz=True` on
+entry) and the legacy
+`exact_diagonalization_streaming_symmetry_fixed_sz(...)` entry point
+still routes through the same kernel — but new code should prefer the
+orthogonal-flag form on the canonical `from_directory` dispatcher.
 
 For the **full-Hilbert-space** GPU methods (`mTPQ_GPU`, `cTPQ_GPU`,
 `FULL_GPU`, `FTLM_GPU`, `LANCZOS_GPU` with no symmetry projection)

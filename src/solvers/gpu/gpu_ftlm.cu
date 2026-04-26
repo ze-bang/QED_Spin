@@ -1,6 +1,7 @@
 // gpu_ftlm.cu - GPU-accelerated Finite Temperature Lanczos Method
 #include <ed/gpu/gpu_ftlm.cuh>
 #include <ed/core/hdf5_io.h>  // For HDF5 output
+#include <ed/parallel/thread_budget.h>
 
 #ifdef WITH_CUDA
 
@@ -1032,9 +1033,19 @@ FTLMResults GPUFTLMSolver::run(int num_samples,
                               bool full_reorth,
                               int reorth_freq,
                               unsigned int random_seed) {
-    
+
     auto total_start = std::chrono::high_resolution_clock::now();
-    
+
+    // Phase 8 #3: dim-aware OMP+BLAS thread cap covering the entire
+    // FTLM run. Each sample fires off many small host-side LAPACKE_dstevd
+    // calls (one per temperature bin in computeThermodynamics, plus the
+    // diagonalize-tridiagonal at the end of each Lanczos build); each one
+    // is small enough that the OpenBLAS pthread spinup cost dominates the
+    // arithmetic. ThreadBudgetScope sized against the full Hilbert dim
+    // mirrors the CPU FTLM convention (see src/solvers/cpu/ftlm.cpp).
+    const ed::parallel::ThreadBudgetScope budget(
+        ed::parallel::auto_threads_for_dim(static_cast<std::uint64_t>(N_)));
+
     std::cout << "\n==========================================\n";
     std::cout << "GPU Finite Temperature Lanczos Method\n";
     std::cout << "==========================================\n";

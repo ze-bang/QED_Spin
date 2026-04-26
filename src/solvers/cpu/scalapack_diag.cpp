@@ -549,10 +549,22 @@ ScaLAPACKResults scalapack_diagonalization(
     int n = static_cast<int>(N);
     int mb = config.mb;
     int nb = config.nb;
-    
-    // Adjust block size if needed
-    if (mb <= 0) mb = get_optimal_block_size(N, g_nprow, g_npcol);
-    if (nb <= 0) nb = mb;
+
+    // Phase 8 #5: prefer the dim/grid-aware heuristic over the user's
+    // ``mb``/``nb`` when ``block_size_auto`` is true (the default).
+    // This decouples the auto path from the legacy "0 means auto"
+    // protocol -- explicit "use exactly mb=64" still works via
+    // ``block_size_auto = false``, which is what the CLI flag
+    // ``--scalapack-block-size N`` triggers.
+    if (config.block_size_auto) {
+        mb = get_optimal_block_size(N, g_nprow, g_npcol);
+        nb = mb;
+    } else {
+        // Legacy fallback: 0 still routes through the heuristic to keep
+        // pre-Phase-8 callers that relied on "0 means auto" working.
+        if (mb <= 0) mb = get_optimal_block_size(N, g_nprow, g_npcol);
+        if (nb <= 0) nb = mb;
+    }
     
     if (g_mypnum == 0 && config.verbose) {
         std::cout << "ScaLAPACK diagonalization: N=" << N 

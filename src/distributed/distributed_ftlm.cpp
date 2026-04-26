@@ -11,6 +11,7 @@
 #include <ed/distributed/distributed_operator.h>
 
 #include <ed/core/construct_ham.h>
+#include <ed/parallel/thread_budget.h>
 
 #include <algorithm>
 #include <cmath>
@@ -59,6 +60,17 @@ DistributedFtlmResult distributed_ftlm(
     MPI_Comm_split(world_comm, my_group, world_rank, &group_comm);
 
     DistributedOperator dop(op, group_comm);
+
+    // Phase 8 #3: dim-aware OMP+BLAS thread cap. distributed_lanczos
+    // (called per sample below) installs its own ThreadBudgetScope, but we
+    // also cover the FTLM-level outer loop here -- the per-sample
+    // observable contraction (length-m complex zdotc and length-m real
+    // dot products in the f_b accumulation) and the dop_O.apply matvec
+    // are bottlenecked on the same OpenBLAS pthread pool. Nesting two
+    // scopes is fine; the inner restore on its destructor returns the
+    // counts to whatever the outer scope set.
+    const ed::parallel::ThreadBudgetScope budget(
+        ed::parallel::auto_threads_for_dim(dop.local_size()));
 
     const bool compute_obs = static_cast<bool>(options.observable_op);
     std::unique_ptr<DistributedOperator> dop_O;

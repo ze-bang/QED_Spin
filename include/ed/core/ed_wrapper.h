@@ -32,6 +32,26 @@
 #include <ed/gpu/gpu_ed_wrapper.h>
 #endif
 
+// ============================================================================
+// Phase 7: this header is the legacy CPU/GPU dispatcher and must keep
+// branching on the deprecated `_GPU` / `_CUDA` / `_MPI` / `_FIXED_SZ`
+// enum variants for backwards compatibility (HDF5 metadata, pre-Phase-7
+// CLI configs, pre-Phase-7 Python code). The orthogonal axes
+// (use_gpu / use_mpi / use_fixed_sz on EDParameters) are folded onto
+// these enum values inside the dispatcher entry points via
+// `ed::canonicalize_method_and_flags()` + `ed::legacy_method_for_dispatch()`,
+// so external code only ever sees the deprecation warning if it uses
+// the deprecated enum values directly.
+//
+// We push/pop the deprecated-declarations diagnostic across the entire
+// header. The pop is at the very end of the file. Downstream
+// translation units that #include <ed/core/ed_wrapper.h> are NOT
+// affected: the pop restores their default diagnostic state before
+// any user code is parsed.
+// ============================================================================
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+
 
 // ============================================================================
 // VECTOR OPERATIONS FOR COMPLEX VECTORS
@@ -588,6 +608,21 @@ inline EDResults exact_diagonalization_core(
         params.output_dir = "/dev/null";
     }
 
+    // Phase 7: collapse legacy `_GPU` / `_CUDA` / `_MPI` / `_FIXED_SZ`
+    // enum variants onto the canonical (base, use_fixed_sz, use_gpu,
+    // use_mpi) tuple, then rebuild the legacy "_GPU" enum value from
+    // the flag for the existing CPU-vs-GPU dispatcher branches below.
+    // This is the single normalization point: every code path beneath
+    // this one sees a fully orthogonal ``(method, params)``.
+    {
+        const auto canon = ed::canonicalize_method_and_flags(
+            method, params.use_fixed_sz, params.use_gpu, params.use_mpi);
+        params.use_fixed_sz = canon.use_fixed_sz;
+        params.use_gpu      = canon.use_gpu;
+        params.use_mpi      = canon.use_mpi;
+        method = ed::legacy_method_for_dispatch(canon.method, canon.use_gpu);
+    }
+
     // Initialize output directory if needed (skip the disabled sentinel).
     if (!HDF5IO::isDisabledOutputPath(params.output_dir)) {
         std::string cmd = "mkdir -p " + params.output_dir;
@@ -615,8 +650,15 @@ inline EDResults exact_diagonalization_core(
                 ScaLAPACKConfig scalapack_config;
                 scalapack_config.nprow = params.scalapack_nprow;
                 scalapack_config.npcol = params.scalapack_npcol;
+                // Phase 8 #5: route the new auto flag through to the
+                // solver. When auto is on (the default), the explicit
+                // mb/nb values are ignored at solve time and replaced
+                // by ``get_optimal_block_size`` -- so we still set them
+                // from params for the case where the user disabled auto
+                // via the CLI / Python API.
                 scalapack_config.mb = params.scalapack_block_size;
                 scalapack_config.nb = params.scalapack_block_size;
+                scalapack_config.block_size_auto = params.scalapack_block_size_auto;
                 // SCALAPACK uses double precision, SCALAPACK_MIXED uses single with refinement
                 scalapack_config.use_mixed_precision = (method == DiagonalizationMethod::SCALAPACK_MIXED);
                 scalapack_config.refinement_tol = params.scalapack_refinement_tol;
@@ -796,9 +838,12 @@ inline EDResults exact_diagonalization_core(
             break;
 
 
-        case DiagonalizationMethod::mTPQ_CUDA:
-            break;
-        
+        // Note: DiagonalizationMethod::mTPQ_CUDA used to fall through here
+        // as a no-op (silently returning empty EDResults). Phase 7 collapses
+        // mTPQ_CUDA -> mTPQ + use_gpu=true via canonicalize_method_and_flags,
+        // so it now reaches the GPU-error branch below (`case mTPQ_GPU:`)
+        // and produces a clear "GPU methods must be called via
+        // exact_diagonalization_from_files" diagnostic instead.
 
         case DiagonalizationMethod::BLOCK_LANCZOS:
             block_lanczos(H, hilbert_space_dim, 
@@ -2710,9 +2755,22 @@ inline EDResults exact_diagonalization_fixed_sz(
     float spin_length,
     int64_t n_up,
     DiagonalizationMethod method,
-    const EDParameters& params
+    const EDParameters& params_in
 ) {
-    // Create Fixed Sz operator
+    // Phase 7: idempotent canonicalization (also covers callers that
+    // skip exact_diagonalization_from_files and jump straight to here,
+    // e.g. workflows.cpp::run_standard_workflow when --fixed-sz is set
+    // in the config).
+    EDParameters params = params_in;
+    {
+        const auto canon = ed::canonicalize_method_and_flags(
+            method, params.use_fixed_sz, params.use_gpu, params.use_mpi);
+        params.use_fixed_sz = canon.use_fixed_sz;
+        params.use_gpu      = canon.use_gpu;
+        params.use_mpi      = canon.use_mpi;
+        method = ed::legacy_method_for_dispatch(canon.method, canon.use_gpu);
+    }
+
     FixedSzOperator hamiltonian(num_sites, spin_length, n_up);
     
     // Load Hamiltonian terms
@@ -3049,23 +3107,56 @@ inline EDResults exact_diagonalization_from_files(
     const std::string& counterterm_file = "",
     const std::string& three_body_file = "",
     DiagonalizationMethod method = DiagonalizationMethod::LANCZOS,
-    const EDParameters& params = EDParameters(),
+    const EDParameters& params_in = EDParameters(),
     HamiltonianFileFormat format = HamiltonianFileFormat::STANDARD
 ) {
     if (ed_log::isVerbose()) {
         std::ostringstream _dbg;
-        _dbg << "exact_diagonalization_from_files: num_sites=" << params.num_sites
+        _dbg << "exact_diagonalization_from_files: num_sites=" << params_in.num_sites
              << ", method=" << static_cast<int>(method);
         ed_log::debug(_dbg.str());
     }
-    
-    // ========== Fixed-Sz Normalization ==========
-    // Handle deprecated _FIXED_SZ method variants by normalizing to base method
-    // and setting the use_fixed_sz flag. The --fixed-sz flag is the single
-    // source of truth for fixed-Sz mode.
+
+    // ========== Phase 7: Single canonicalization point ==========
+    // Collapse legacy _FIXED_SZ / _GPU / _CUDA / _MPI enum variants onto
+    // the canonical (base_method, use_fixed_sz, use_gpu, use_mpi) tuple.
+    // This is the only place where the deprecated variants are observed;
+    // every dispatch branch below sees flags only.
+    EDParameters params = params_in;
+    {
+        const auto canon = ed::canonicalize_method_and_flags(
+            method, params.use_fixed_sz, params.use_gpu, params.use_mpi);
+        params.use_fixed_sz = canon.use_fixed_sz;
+        params.use_gpu      = canon.use_gpu;
+        params.use_mpi      = canon.use_mpi;
+        method = ed::legacy_method_for_dispatch(canon.method, canon.use_gpu);
+    }
+
     bool use_fixed_sz = params.use_fixed_sz;
-    ed_internal::normalize_method_and_fixed_sz(method, use_fixed_sz);
-    
+
+    // ========== Phase 7.1: Symmetry routing (5th orthogonal axis) ==========
+    // When `use_symmetry == true` the canonical dispatch is to route to
+    // the streaming symmetry kernel in ed_wrapper_streaming.h. We CANNOT
+    // call it from this header because ed_wrapper_streaming.h includes
+    // ed_wrapper.h (circular). Instead, the routing happens in the
+    // higher-level dispatcher seam:
+    //   * Python:  ed_dispatch::exact_diagonalization_from_directory(...)
+    //              in ed_dispatch_symmetry.h (included by the Python
+    //              binding, which sees both headers).
+    //   * CLI:     ed_main.cpp routes via run_streaming_symmetry_workflow
+    //              when WorkflowConfig::run_symm_auto is set.
+    //   * C++:     direct callers of from_files() that set use_symmetry=true
+    //              get a hard error here so the bug is loud, not silent.
+    if (params.use_symmetry) {
+        throw std::runtime_error(
+            "EDParameters::use_symmetry=true is not supported by "
+            "exact_diagonalization_from_files() directly. Call "
+            "ed_dispatch::exact_diagonalization_from_directory() "
+            "(declared in ed/core/ed_dispatch_symmetry.h) or invoke "
+            "exact_diagonalization_streaming_symmetry[_fixed_sz]() "
+            "explicitly. See docs/history/PHASE_7_SYMMETRY_AXIS.md.");
+    }
+
     // Check if method supports fixed-Sz when requested
     if (use_fixed_sz && !ed_internal::supports_fixed_sz(method)) {
         std::cerr << "Warning: Method does not support fixed-Sz mode. "
@@ -3628,6 +3719,11 @@ inline EDResults exact_diagonalization_from_directory(
  * @param counterterm_filename Name of counter term file (default: "CounterTerm.dat")
  * @return EDResults containing eigenvalues and metadata
  */
+[[deprecated(
+    "Phase 7.1: use exact_diagonalization_from_directory(...) with "
+    "EDParameters::use_symmetry = true instead. The explicit-block "
+    "symmetrized path is slower than the streaming kernel, materialises "
+    "block matrices on disk, and does not support GPU per-sector dispatch.")]]
 inline EDResults exact_diagonalization_from_directory_symmetrized(
     const std::string& directory,
     DiagonalizationMethod method = DiagonalizationMethod::LANCZOS,
@@ -3975,6 +4071,11 @@ inline EDResults exact_diagonalization_from_directory_symmetrized(
  * @param three_body_filename Three-body interaction file name
  * @return EDResults containing eigenvalues and metadata
  */
+[[deprecated(
+    "Phase 7.1: use exact_diagonalization_from_directory(...) with "
+    "EDParameters::use_symmetry = true and EDParameters::use_fixed_sz = true "
+    "(and EDParameters::n_up) instead. The explicit-block symmetrized path "
+    "materialises blocks on disk and does not support GPU per-sector dispatch.")]]
 inline EDResults exact_diagonalization_fixed_sz_symmetrized(
     const std::string& directory,
     int64_t n_up,
@@ -4231,3 +4332,6 @@ inline EDResults exact_diagonalization_fixed_sz_symmetrized(
     
     return results;
 }
+
+// End of Phase 7 deprecated-declarations diagnostic scope (push at top of file).
+#pragma GCC diagnostic pop

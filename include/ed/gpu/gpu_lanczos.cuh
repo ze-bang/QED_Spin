@@ -69,11 +69,62 @@ private:
     cuDoubleComplex** d_ortho_basis_ptrs_;  // device pointer array [num_stored_vectors_]
     cuDoubleComplex* d_ortho_overlaps_;      // overlap scratch [num_stored_vectors_]
 
+    // -------------------------------------------------------------------------
+    // Phase 8 #7: persistent device-side mirror of the *entire* ring buffer
+    // pointer table.
+    //
+    // The pre-Phase-8 batched orthogonalize() rebuilt the windowed pointer
+    // slice on the host on every iteration and `cudaMemcpy`'d it into
+    // ``d_ortho_basis_ptrs_``. That is one synchronous H2D copy per Lanczos
+    // step (default-stream, sized only ``num_check * 8`` bytes but blocking
+    // because the destination is reused immediately by a kernel launch).
+    //
+    // ``d_ortho_basis_ptrs_full_`` mirrors the full
+    // ``d_lanczos_vectors_[0..num_stored_vectors_-1]`` device-pointer
+    // table once at allocate time. The pointers themselves never change
+    // for the lifetime of GPULanczos (each ring-buffer slot owns a fixed
+    // ``cudaMalloc``ed slab), so the table can stay resident on the
+    // device for the whole run.
+    //
+    // Hot path savings: for iter <= num_stored_vectors_ (the common
+    // "basis fits in GPU" case) we just pass
+    // ``d_ortho_basis_ptrs_full_`` directly to the kernels -- *zero* H2D
+    // traffic in the orthogonalize() critical section. Only the wrapped
+    // (iter > num_stored_vectors_, windowed reorth) case still pays the
+    // H2D cost, and that is the explicitly-degraded path users are
+    // already warned about.
+    // -------------------------------------------------------------------------
+    cuDoubleComplex** d_ortho_basis_ptrs_full_;  // [num_stored_vectors_]
+
     // Reusable CUDA events for orthogonalize() timing (avoid create/destroy each call)
     cudaEvent_t ortho_timing_start_;
     cudaEvent_t ortho_timing_stop_;
     bool ortho_timing_events_created_;
-    
+
+    // -------------------------------------------------------------------------
+    // Phase 8 #4: device-resident scalar buffers for the alpha = <v|H|v> step.
+    //
+    // Without these, ``vectorDot`` runs cuBLAS in HOST pointer mode, which
+    // forces an implicit device->host sync on every Lanczos iteration:
+    // cublasZdotc cannot return until the result has reached host memory.
+    // The follow-up ``vectorAxpy(d_v_current, d_w, -alpha)`` then has to wait
+    // for that sync before it can issue.
+    //
+    // With DEVICE pointer mode + a one-element device buffer for alpha, the
+    // dot result lands on the device, the negation is one trivial kernel
+    // launch, and the subsequent zaxpy can be queued back-to-back -- no
+    // host sync at all on the alpha path. We still copy alpha to a pinned
+    // host slot (cudaMemcpyAsync), but the first time we *read* it on the
+    // host is after the orthogonalize() call has issued, so the latency
+    // overlaps with downstream device work.
+    //
+    // beta = ||w|| stays in HOST mode because the convergence check that
+    // immediately follows it would have to sync anyway.
+    // -------------------------------------------------------------------------
+    cuDoubleComplex* d_alpha_dev_;       // [1] device-side alpha
+    cuDoubleComplex* d_neg_alpha_dev_;   // [1] device-side -alpha
+    cuDoubleComplex* h_alpha_pinned_;    // [1] pinned host (async D2H target)
+
     // Tridiagonal matrix elements (on host)
     std::vector<double> alpha_;  // Diagonal
     std::vector<double> beta_;   // Off-diagonal

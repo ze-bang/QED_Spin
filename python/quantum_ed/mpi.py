@@ -1,8 +1,8 @@
-"""Phase 5: thin Python wrapper over the standalone ``ed_distributed_main`` binary.
+"""Phase 5 / Phase 8: thin Python wrapper over the standalone
+``ed_distributed_main`` binary.
 
 The C++ MPI distributed solvers (``ed::distributed::distributed_lanczos``,
-``distributed_ftlm``, ``distributed_tpq``, ``distributed_lanczos_symmetry``,
-``distributed_lanczos_gpu``) are designed to be driven from an
+``distributed_ftlm``) are designed to be driven from an
 ``mpirun`` / ``mpiexec`` launcher on an HPC cluster. They are deliberately
 **not** bound to ``quantum_ed._core``: a single-process Python interpreter
 cannot host ``MPI_Init`` cleanly, and the right idiomatic launch is
@@ -11,10 +11,18 @@ cannot host ``MPI_Init`` cleanly, and the right idiomatic launch is
 
 This module provides a tiny helper, :func:`run_distributed`, that builds
 the right command-line and shells out for you so notebook callers don't
-have to remember the launcher syntax. For the exact CLI surface of
-``ed_distributed_main`` (``--method=lanczos|ftlm|tpq|lanczos_symmetry|
-lanczos_gpu``, ``--max-iter``, ``--tol``, ``--reorth``, etc.), see the
-self-documenting ``--help`` of the binary.
+have to remember the launcher syntax.
+
+Phase 8 fix: the wrapper now matches the *actual* CLI surface of the
+``ed_distributed_main`` binary (``--mode lanczos|ftlm`` plus model
+parameters). Earlier versions wrote ``--method=<m>`` and a leading
+``directory`` argument which the binary never consumed -- the launches
+silently ignored those tokens and ran the default Heisenberg chain
+instead. The previous ``MPI_METHODS`` tuple also advertised three
+methods (``tpq``, ``lanczos_symmetry``, ``lanczos_gpu``) that the
+standalone driver does not expose; those are still available from
+within Python via the :mod:`quantum_ed.distributed` extension module on
+MPI-capable builds, but not via this subprocess shim.
 
 Example
 -------
@@ -23,20 +31,21 @@ Example
 
     from quantum_ed import mpi as qed_mpi
 
+    # Lanczos on an N=20 Heisenberg chain:
     qed_mpi.run_distributed(
-        directory="/scratch/runs/heisenberg-32-chain",
         method="lanczos",
         n_ranks=8,
-        extra_args=("--max-iter", "400", "--reorth", "1"),
+        binary_args=("--N", "20", "--J", "1.0", "--max-iter", "200",
+                     "--reorth", "1", "--periodic", "1", "--seed", "42"),
         launcher="srun",  # default is "mpiexec"
     )
 
-The capability is also exposed through the build introspection helpers in
-``quantum_ed`` itself: ``quantum_ed.has_mpi_build()`` reports whether the
-companion C++ build was made with ``WITH_MPI=ON`` (the precondition for
-``ed_distributed_main`` to exist), and ``quantum_ed.has_cuda_build()``
-reports whether ``--method=lanczos_gpu`` (NCCL halo path) will be
-available in that binary.
+For the exact CLI surface, run ``ed_distributed_main --help``.
+
+The capability is also exposed through the build introspection helpers
+in ``quantum_ed`` itself: ``quantum_ed.has_mpi_build()`` reports whether
+the companion C++ build was made with ``WITH_MPI=ON`` (the precondition
+for ``ed_distributed_main`` to exist).
 """
 
 from __future__ import annotations
@@ -44,15 +53,16 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import warnings
 from typing import Optional, Sequence
 
-# Mirror the four MPI methods ed_distributed_main exposes as of Phase 3c.
+# The standalone ``ed_distributed_main`` driver currently exposes two
+# solver modes. Adding more (e.g. distributed_tpq, lanczos_symmetry) is a
+# CLI question on the C++ side -- bump this tuple in lockstep with the
+# binary's parse_args() switch.
 MPI_METHODS = (
-    "lanczos",            # distributed_lanczos
-    "ftlm",               # distributed_ftlm
-    "tpq",                # distributed_tpq (canonical)
-    "lanczos_symmetry",   # distributed_lanczos_symmetry
-    "lanczos_gpu",        # distributed_lanczos_gpu (NCCL halo)
+    "lanczos",  # distributed_lanczos
+    "ftlm",     # distributed_ftlm
 )
 
 
@@ -75,32 +85,43 @@ def _resolve_binary(name: str, override: Optional[str]) -> str:
 
 
 def run_distributed(
-    directory: str,
     method: str,
     n_ranks: int,
     *,
+    binary_args: Sequence[str] = (),
     launcher: str = "mpiexec",
     launcher_args: Sequence[str] = (),
     binary: Optional[str] = None,
     launcher_binary: Optional[str] = None,
-    extra_args: Sequence[str] = (),
     env: Optional[dict[str, str]] = None,
     check: bool = True,
     capture_output: bool = False,
-) -> subprocess.CompletedProcess[str]:
-    """Launch ``mpiexec -n N ed_distributed_main ...`` and wait.
+    # ------------------------------------------------------------------
+    # Deprecated arguments -- kept for one minor version so existing
+    # call sites get a warning instead of a silent behavior change. The
+    # ``directory`` positional was always a no-op (``ed_distributed_main``
+    # never consumed it); ``extra_args`` was concatenated *after*
+    # ``--method=...``, which the binary also never consumed.
+    # ------------------------------------------------------------------
+    directory: Optional[str] = None,
+    extra_args: Optional[Sequence[str]] = None,
+) -> subprocess.CompletedProcess:
+    """Launch ``mpiexec -n N ed_distributed_main --mode <method> ...`` and wait.
 
     Parameters
     ----------
-    directory : str
-        Path to the run directory the binary should consume (positional
-        first argument to ``ed_distributed_main``).
     method : str
-        One of ``"lanczos"``, ``"ftlm"``, ``"tpq"``,
-        ``"lanczos_symmetry"``, or ``"lanczos_gpu"`` -- mapped to
-        ``--method=<method>``.
+        One of :data:`MPI_METHODS`. Mapped to ``--mode <method>`` on the
+        binary's CLI.
     n_ranks : int
         Number of MPI ranks. Forwarded to the launcher as ``-n N``.
+    binary_args : sequence of str, optional
+        Extra CLI flags forwarded to ``ed_distributed_main`` after the
+        ``--mode`` token; e.g. ``("--N", "20", "--max-iter", "400",
+        "--reorth", "1")``. See ``ed_distributed_main --help`` for the
+        full surface (``--N``, ``--J``, ``--periodic``, ``--max-iter``,
+        ``--exct``, ``--reorth``, ``--seed``, ``--samples``,
+        ``--groups``, ``--betas``, ``--verbose``).
     launcher : str, optional
         Launcher executable name, default ``"mpiexec"``. Set to
         ``"srun"`` on SLURM, ``"mpirun"`` for OpenMPI users who prefer
@@ -112,15 +133,20 @@ def run_distributed(
         Absolute path to ``ed_distributed_main``. Defaults to ``shutil.which``.
     launcher_binary : str, optional
         Absolute path to the launcher; same default rule.
-    extra_args : sequence of str, optional
-        Extra CLI flags forwarded to ``ed_distributed_main`` (after
-        ``--method=...``); e.g. ``("--max-iter", "400", "--reorth", "1")``.
     env : dict, optional
         Environment overrides for the subprocess.
     check : bool, optional
         If True (default), raise ``CalledProcessError`` on non-zero exit.
     capture_output : bool, optional
         If True, capture stdout/stderr in the returned object.
+    directory : str, optional
+        **Deprecated.** Pre-Phase-8 versions accepted a directory
+        positional that was silently ignored by the binary. Passing it
+        now raises a ``DeprecationWarning`` and the value is dropped.
+    extra_args : sequence of str, optional
+        **Deprecated.** Use ``binary_args`` instead. If provided, the
+        contents are appended to ``binary_args`` and a
+        ``DeprecationWarning`` is emitted.
 
     Returns
     -------
@@ -136,24 +162,37 @@ def run_distributed(
     if method not in MPI_METHODS:
         raise ValueError(
             f"method={method!r} not in {MPI_METHODS}. "
-            "ed_distributed_main exposes a fixed set of MPI solvers; "
+            "ed_distributed_main exposes a fixed set of MPI solver modes; "
             "extend MPI_METHODS in quantum_ed/mpi.py if you add a new one."
         )
-    if not os.path.isdir(directory):
-        raise FileNotFoundError(
-            f"directory={directory!r} does not exist or is not a directory"
+
+    if directory is not None:
+        warnings.warn(
+            "quantum_ed.mpi.run_distributed(directory=...) is deprecated and "
+            "ignored: ed_distributed_main never consumed a directory "
+            "positional argument. Drop the directory= kwarg from your call.",
+            DeprecationWarning,
+            stacklevel=2,
         )
+    if extra_args is not None:
+        warnings.warn(
+            "quantum_ed.mpi.run_distributed(extra_args=...) is deprecated; "
+            "use binary_args= instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        binary_args = tuple(binary_args) + tuple(extra_args)
 
     launcher_path = _resolve_binary(launcher, launcher_binary)
     binary_path = _resolve_binary("ed_distributed_main", binary)
 
+    # The binary uses `--mode <name>` (two tokens), not `--method=<name>`.
     cmd = [
         launcher_path, "-n", str(int(n_ranks)),
         *launcher_args,
         binary_path,
-        directory,
-        f"--method={method}",
-        *extra_args,
+        "--mode", method,
+        *binary_args,
     ]
     return subprocess.run(
         cmd,

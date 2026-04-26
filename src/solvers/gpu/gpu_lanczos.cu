@@ -3,6 +3,7 @@
 #include <ed/gpu/gpu_lanczos.cuh>
 #include <ed/gpu/kernel_config.h>
 #include <ed/core/blas_lapack_wrapper.h>
+#include <ed/parallel/thread_budget.h>
 #include <iostream>
 #include <iomanip>
 #include <cmath>
@@ -127,6 +128,23 @@ __global__ void batchedOrthogonalizeKernel(cuDoubleComplex* const* basis,
     target[idx] = cuCsub(target[idx], correction);
 }
 
+// Phase 8 #4: trivial 1-thread kernel that writes ``-Re(src)`` into ``dst``.
+// Used to negate an alpha computed on-device by cublasZdotc (DEVICE pointer
+// mode) so it can feed straight back into cublasZaxpy without a host copy.
+// We deliberately zero the imaginary part to preserve bit-identity with the
+// pre-Phase-8 host path, which did
+//   neg_alpha = make_cuDoubleComplex(-alpha_complex.real(), 0.0);
+// For a Hermitian H, <v|H|v> is mathematically real; any imaginary content
+// in the dot is roundoff noise that the original axpy explicitly dropped to
+// keep the tridiag entries on the real line. One block, one thread; cost is
+// dwarfed by the surrounding BLAS work.
+__global__ void negateZScalarRealKernel(cuDoubleComplex* dst,
+                                        const cuDoubleComplex* src) {
+    if (threadIdx.x == 0 && blockIdx.x == 0) {
+        *dst = make_cuDoubleComplex(-cuCreal(*src), 0.0);
+    }
+}
+
 } // namespace GPULanczosKernels
 
 // ============================================================================
@@ -138,7 +156,10 @@ GPULanczos::GPULanczos(GPUOperator* op, int max_iter, double tolerance)
       d_v_current_(nullptr), d_v_prev_(nullptr), d_w_(nullptr), d_temp_(nullptr),
       d_lanczos_vectors_(nullptr), num_stored_vectors_(0),
       d_ortho_basis_ptrs_(nullptr), d_ortho_overlaps_(nullptr),
-      ortho_timing_events_created_(false) {
+      d_ortho_basis_ptrs_full_(nullptr),
+      ortho_timing_events_created_(false),
+      d_alpha_dev_(nullptr), d_neg_alpha_dev_(nullptr),
+      h_alpha_pinned_(nullptr) {
     
     dimension_ = op_->getDimension();
     
@@ -223,6 +244,20 @@ void GPULanczos::allocateMemory() {
                               static_cast<size_t>(num_stored_vectors_) * sizeof(cuDoubleComplex*)));
         CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&d_ortho_overlaps_),
                               static_cast<size_t>(num_stored_vectors_) * sizeof(cuDoubleComplex)));
+
+        // Phase 8 #7: persistent device-side mirror of the *full* ring
+        // buffer pointer table. Filled exactly once here -- the per-slot
+        // device pointers in d_lanczos_vectors_ are owned for the
+        // lifetime of *this and never get reallocated. orthogonalize()
+        // can then pass d_ortho_basis_ptrs_full_ directly to the kernels
+        // for the non-wrapped case (iter <= num_stored_vectors_), saving
+        // one synchronous H2D copy per Lanczos iteration.
+        CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&d_ortho_basis_ptrs_full_),
+                              static_cast<size_t>(num_stored_vectors_) * sizeof(cuDoubleComplex*)));
+        CUDA_CHECK(cudaMemcpy(d_ortho_basis_ptrs_full_,
+                              d_lanczos_vectors_,
+                              static_cast<size_t>(num_stored_vectors_) * sizeof(cuDoubleComplex*),
+                              cudaMemcpyHostToDevice));
     } else {
         std::cout << "  Warning: Insufficient GPU memory for vector storage\n";
         std::cout << "  GPU Memory: " << (free_mem / (1024.0 * 1024.0 * 1024.0)) << " GB free, "
@@ -234,7 +269,15 @@ void GPULanczos::allocateMemory() {
     CUDA_CHECK(cudaEventCreate(&ortho_timing_start_));
     CUDA_CHECK(cudaEventCreate(&ortho_timing_stop_));
     ortho_timing_events_created_ = true;
-    
+
+    // Phase 8 #4: scalar workspace for cuBLAS DEVICE pointer mode (see header).
+    // Three trivially-small allocations -- the entire footprint is well under
+    // a kibibyte, so we never touch the per-vec memory budget computed above.
+    CUDA_CHECK(cudaMalloc(&d_alpha_dev_,     sizeof(cuDoubleComplex)));
+    CUDA_CHECK(cudaMalloc(&d_neg_alpha_dev_, sizeof(cuDoubleComplex)));
+    CUDA_CHECK(cudaMallocHost(reinterpret_cast<void**>(&h_alpha_pinned_),
+                              sizeof(cuDoubleComplex)));
+
     alpha_.reserve(max_iter_);
     beta_.reserve(max_iter_);
 }
@@ -257,6 +300,10 @@ void GPULanczos::freeMemory() {
         cudaFree(d_ortho_overlaps_);
         d_ortho_overlaps_ = nullptr;
     }
+    if (d_ortho_basis_ptrs_full_) {  // Phase 8 #7
+        cudaFree(d_ortho_basis_ptrs_full_);
+        d_ortho_basis_ptrs_full_ = nullptr;
+    }
     
     if (d_lanczos_vectors_) {
         for (int i = 0; i < num_stored_vectors_; ++i) {
@@ -265,6 +312,21 @@ void GPULanczos::freeMemory() {
             }
         }
         delete[] d_lanczos_vectors_;
+        d_lanczos_vectors_ = nullptr;
+    }
+
+    // Phase 8 #4: tear down scalar workspace.
+    if (d_alpha_dev_) {
+        cudaFree(d_alpha_dev_);
+        d_alpha_dev_ = nullptr;
+    }
+    if (d_neg_alpha_dev_) {
+        cudaFree(d_neg_alpha_dev_);
+        d_neg_alpha_dev_ = nullptr;
+    }
+    if (h_alpha_pinned_) {
+        cudaFreeHost(h_alpha_pinned_);
+        h_alpha_pinned_ = nullptr;
     }
 }
 
@@ -400,15 +462,46 @@ void GPULanczos::orthogonalize(cuDoubleComplex* d_vec, int iter,
             (void)ortho_threshold;
             (void)omega;
 
-            std::vector<cuDoubleComplex*> h_basis_ptrs(num_check);
-            for (int i = 0; i < num_check; ++i) {
-                int src_idx = std::max(0, iter - num_check) + i;
-                int buffer_idx = src_idx % num_stored_vectors_;
-                h_basis_ptrs[i] = d_lanczos_vectors_[buffer_idx];
+            // ----------------------------------------------------------------
+            // Phase 8 #7: pick the pointer table the kernel consumes.
+            //
+            // Common case (iter <= num_stored_vectors_, no ring-buffer
+            // wrap): the windowed slice is exactly the prefix
+            // d_lanczos_vectors_[0 .. iter-1] of the full ring buffer.
+            // We pre-uploaded that table once at allocateMemory time
+            // into d_ortho_basis_ptrs_full_, so we can hand the kernel
+            // the device pointer directly -- *no H2D copy on the hot
+            // path*.
+            //
+            // Wrapped case (iter > num_stored_vectors_, windowed reorth):
+            // the slice starts at (iter - num_check) modulo
+            // num_stored_vectors_ and is non-contiguous in the ring.
+            // Fall back to the legacy windowed-table H2D copy. Users in
+            // this regime are already in the explicitly-degraded
+            // "windowed reorth" path warned about above; the per-step
+            // H2D cost there is negligible compared to the lost
+            // numerical accuracy.
+            // ----------------------------------------------------------------
+            cuDoubleComplex** d_basis_ptrs_for_kernel = nullptr;
+            const bool ring_wrapped = (iter > num_stored_vectors_);
+            if (!ring_wrapped && d_ortho_basis_ptrs_full_ != nullptr) {
+                // Slice is d_lanczos_vectors_[0..iter-1]; persistent
+                // device-side mirror is d_ortho_basis_ptrs_full_, so we
+                // pass it directly -- the kernel sees only the first
+                // num_check entries through its `num_vecs` parameter.
+                d_basis_ptrs_for_kernel = d_ortho_basis_ptrs_full_;
+            } else {
+                std::vector<cuDoubleComplex*> h_basis_ptrs(num_check);
+                for (int i = 0; i < num_check; ++i) {
+                    int src_idx = std::max(0, iter - num_check) + i;
+                    int buffer_idx = src_idx % num_stored_vectors_;
+                    h_basis_ptrs[i] = d_lanczos_vectors_[buffer_idx];
+                }
+                CUDA_CHECK(cudaMemcpy(d_ortho_basis_ptrs_, h_basis_ptrs.data(),
+                                     static_cast<size_t>(num_check) * sizeof(cuDoubleComplex*),
+                                     cudaMemcpyHostToDevice));
+                d_basis_ptrs_for_kernel = d_ortho_basis_ptrs_;
             }
-            CUDA_CHECK(cudaMemcpy(d_ortho_basis_ptrs_, h_basis_ptrs.data(),
-                                 static_cast<size_t>(num_check) * sizeof(cuDoubleComplex*),
-                                 cudaMemcpyHostToDevice));
 
             const int threads_per_block = 256;
             const size_t shared_mem = 2 * threads_per_block * sizeof(double);
@@ -416,18 +509,18 @@ void GPULanczos::orthogonalize(cuDoubleComplex* d_vec, int iter,
 
             // ---- Pass 1 ----
             GPULanczosKernels::batchedDotProductKernel<<<num_check, threads_per_block, shared_mem>>>(
-                d_ortho_basis_ptrs_, d_vec, d_ortho_overlaps_, num_check, dimension_);
+                d_basis_ptrs_for_kernel, d_vec, d_ortho_overlaps_, num_check, dimension_);
             CUDA_CHECK(cudaGetLastError());
             GPULanczosKernels::batchedOrthogonalizeKernel<<<axpy_blocks, threads_per_block>>>(
-                d_ortho_basis_ptrs_, d_vec, d_ortho_overlaps_, num_check, dimension_);
+                d_basis_ptrs_for_kernel, d_vec, d_ortho_overlaps_, num_check, dimension_);
             CUDA_CHECK(cudaGetLastError());
 
             // ---- Pass 2 (DGKS) ----
             GPULanczosKernels::batchedDotProductKernel<<<num_check, threads_per_block, shared_mem>>>(
-                d_ortho_basis_ptrs_, d_vec, d_ortho_overlaps_, num_check, dimension_);
+                d_basis_ptrs_for_kernel, d_vec, d_ortho_overlaps_, num_check, dimension_);
             CUDA_CHECK(cudaGetLastError());
             GPULanczosKernels::batchedOrthogonalizeKernel<<<axpy_blocks, threads_per_block>>>(
-                d_ortho_basis_ptrs_, d_vec, d_ortho_overlaps_, num_check, dimension_);
+                d_basis_ptrs_for_kernel, d_vec, d_ortho_overlaps_, num_check, dimension_);
             CUDA_CHECK(cudaGetLastError());
 
             // Bookkeeping (approximate: we always apply both passes now)
@@ -534,33 +627,65 @@ void GPULanczos::run(int num_eigenvalues,
     int good_m = 0;  // Last known-good iteration count for tridiagonal solve
     double max_beta = 0.0;  // Track maximum beta for relative breakdown detection
     double early_max_beta = 0.0;  // Track max beta from first 20 iterations
-    
+
     for (m = 0; m < max_iter_; ++m) {
         // w = H * v_current
         op_->matVecGPU(d_v_current_, d_w_, dimension_);
         stats_.matvec_time += op_->getStats().matVecTime;
-        
-        // alpha[m] = <v_current | w>
-        std::complex<double> alpha_complex = vectorDot(d_v_current_, d_w_);
-        alpha_.push_back(alpha_complex.real());
-        
-        // w = w - alpha[m] * v_current
-        cuDoubleComplex neg_alpha = make_cuDoubleComplex(-alpha_complex.real(), 0.0);
-        vectorAxpy(d_v_current_, d_w_, neg_alpha);
-        
+
+        // alpha[m] = <v_current | w>, w -= alpha[m] * v_current
+        //
+        // Phase 8 #4: instead of running the dot in HOST pointer mode (which
+        // forces an implicit device->host sync inside cublasZdotc and stalls
+        // the subsequent zaxpy), we keep the result on-device:
+        //   1. cublasZdotc in DEVICE mode -> d_alpha_dev_
+        //   2. trivial 1-thread kernel:    d_neg_alpha_dev_ = -d_alpha_dev_
+        //   3. cublasZaxpy in DEVICE mode using d_neg_alpha_dev_
+        //   4. async D2H copy d_alpha_dev_ -> h_alpha_pinned_
+        // Step 4 is overlapped with the upcoming v_prev axpy and the
+        // orthogonalize() launches. We only consume h_alpha_pinned_ on the
+        // host *after* those have been issued, which is when the orthog
+        // sync (or the next BLAS call) implicitly drains the stream.
+        CUBLAS_CHECK(cublasSetPointerMode(cublas_handle_,
+                                          CUBLAS_POINTER_MODE_DEVICE));
+        CUBLAS_CHECK(cublasZdotc(cublas_handle_, dimension_,
+                                 d_v_current_, 1, d_w_, 1, d_alpha_dev_));
+        GPULanczosKernels::negateZScalarRealKernel<<<1, 1>>>(d_neg_alpha_dev_,
+                                                             d_alpha_dev_);
+        CUDA_CHECK(cudaGetLastError());
+        CUBLAS_CHECK(cublasZaxpy(cublas_handle_, dimension_,
+                                 d_neg_alpha_dev_, d_v_current_, 1, d_w_, 1));
+        CUBLAS_CHECK(cudaMemcpyAsync(h_alpha_pinned_, d_alpha_dev_,
+                                     sizeof(cuDoubleComplex),
+                                     cudaMemcpyDeviceToHost,
+                                     /*stream=*/0));
+        CUBLAS_CHECK(cublasSetPointerMode(cublas_handle_,
+                                          CUBLAS_POINTER_MODE_HOST));
+
         // w = w - beta[m-1] * v_prev
         if (m > 0) {
             cuDoubleComplex neg_beta = make_cuDoubleComplex(-beta_[m-1], 0.0);
             vectorAxpy(d_v_prev_, d_w_, neg_beta);
         }
         
-        // Local reorthogonalization with stored vectors
+        // Local reorthogonalization with stored vectors. We deliberately
+        // call this BEFORE pushing alpha onto alpha_: orthogonalize() ignores
+        // its alpha/beta arguments in the batched fast path (see
+        // GPULanczos::orthogonalize) and the ring-buffer reorth never
+        // depends on the current step's alpha. Keeping the push deferred
+        // overlaps with the async D2H started above.
         if (num_stored_vectors_ > 0 && m > 0) {
             orthogonalize(d_w_, m, omega, alpha_, beta_, ortho_threshold);
         }
-        
-        // beta[m] = ||w||
+
+        // beta[m] = ||w||. vectorNorm runs cuBLAS in HOST pointer mode, which
+        // implicitly drains the default stream -- guaranteeing that the
+        // earlier cudaMemcpyAsync into h_alpha_pinned_ has completed before
+        // we read it on the next line. So this is the canonical sync point
+        // for the device-side alpha computed at the top of the iteration.
         double beta = vectorNorm(d_w_);
+        const cuDoubleComplex alpha_pinned = *h_alpha_pinned_;
+        alpha_.push_back(cuCreal(alpha_pinned));
         beta_.push_back(beta);
         max_beta = std::max(max_beta, beta);
         if (m < 20) early_max_beta = std::max(early_max_beta, beta);
@@ -815,6 +940,14 @@ void GPULanczos::solveTridiagonal(int m, int num_eigs,
     }
 
     const int n_eigs = std::min(num_eigs, m);
+
+    // Phase 8 #3: cap host-side LAPACK threads for the small (m x m) tridiag.
+    // dstemr / dstevd are bandwidth-bound at the m we see (typically a few
+    // hundred), so the OpenBLAS pthread pool's startup cost dominates if we
+    // let it spin up the full team. ThreadBudgetScope sized against m alone
+    // hits the same sweet spot the CPU Lanczos uses for its tridiag step.
+    const ed::parallel::ThreadBudgetScope tridiag_budget(
+        ed::parallel::auto_threads_for_dim(static_cast<std::uint64_t>(m)));
 
     // For tridiagonal eigenproblems, dstemr (MRRR) is the SOTA partial-spectrum
     // solver: O(m * n_eigs) work and O(m) per-eigenvector storage instead of

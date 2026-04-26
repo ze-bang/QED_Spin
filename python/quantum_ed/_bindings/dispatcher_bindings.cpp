@@ -16,6 +16,7 @@
 
 #include <ed/core/ed_wrapper.h>
 #include <ed/core/ed_wrapper_streaming.h>
+#include <ed/core/ed_dispatch_symmetry.h>  // Phase 7.1: canonical 5-axis dispatcher
 #include <ed/core/ed_parameters.h>
 #include <ed/core/ed_types.h>
 #include <ed/core/construct_ham.h>
@@ -175,14 +176,31 @@ void bind_dispatcher(py::module_& m) {
     //    The numeric values are part of the public ABI (see ed_types.h);
     //    pybind11 preserves them, so cross-language IO via int casts works.
     // ------------------------------------------------------------------------
+    // Phase 7: pybind11's `.value(...)` helper takes the enum value as a
+    // template argument, which trips the deprecation warning even though
+    // we *want* to keep the legacy bindings live for backwards compatibility.
+    // Suppress the diagnostic for this single block.
+    #pragma GCC diagnostic push
+    #pragma GCC diagnostic ignored "-Wdeprecated-declarations"
     py::enum_<DiagonalizationMethod>(m, "DiagonalizationMethod", R"pbdoc(
         Every solver the C++ dispatcher knows about.
 
-        Pass a value of this enum to ``exact_diagonalization_core(...)``,
-        ``exact_diagonalization_from_directory(...)``, or
-        ``exact_diagonalization_streaming_symmetry(...)`` to select the
-        backend. GPU values silently fall back to CPU when the build does
-        not have ``WITH_CUDA=ON`` (see ``has_cuda_build()``).
+        The canonical surface is **algorithmic_solver** only.  Device
+        (CPU vs GPU) and parallelism (single-process vs MPI) are now
+        flags on :class:`EDParameters`:
+
+            params = EDParameters()
+            params.use_gpu = True   # canonical replacement for LANCZOS_GPU
+            params.use_mpi = True   # canonical replacement for mTPQ_MPI
+            params.use_fixed_sz = True  # always the right way to pick fixed-Sz
+
+        The legacy ``_GPU`` / ``_CUDA`` / ``_MPI`` / ``_FIXED_SZ`` enum
+        values are still recognised (the dispatcher canonicalizes them
+        on entry via ``ed::canonicalize_method_and_flags()``) but new
+        code is encouraged to use the base solver + flag form.
+
+        GPU values silently fall back to CPU when the build does not
+        have ``WITH_CUDA=ON`` (see ``has_cuda_build()``).
     )pbdoc")
         // CPU iterative
         .value("LANCZOS",                  DiagonalizationMethod::LANCZOS)
@@ -228,7 +246,13 @@ void bind_dispatcher(py::module_& m) {
         .value("cTPQ_GPU",                 DiagonalizationMethod::cTPQ_GPU)
         .value("FTLM_GPU",                 DiagonalizationMethod::FTLM_GPU)
         .value("FULL_GPU",                 DiagonalizationMethod::FULL_GPU)
+        // Deprecated combined GPU + FIXED_SZ variants (Phase 7: use base
+        // method + use_gpu=true + use_fixed_sz=true).
+        .value("LANCZOS_GPU_FIXED_SZ",       DiagonalizationMethod::LANCZOS_GPU_FIXED_SZ)
+        .value("BLOCK_LANCZOS_GPU_FIXED_SZ", DiagonalizationMethod::BLOCK_LANCZOS_GPU_FIXED_SZ)
+        .value("FTLM_GPU_FIXED_SZ",          DiagonalizationMethod::FTLM_GPU_FIXED_SZ)
         .export_values();
+    #pragma GCC diagnostic pop  // legacy _GPU / _CUDA / _MPI / _FIXED_SZ enum bindings
 
     // ------------------------------------------------------------------------
     // 2. HamiltonianFileFormat (used by the directory dispatchers).
@@ -337,12 +361,35 @@ void bind_dispatcher(py::module_& m) {
         .def_readwrite("use_fixed_sz",   &EDParameters::use_fixed_sz)
         .def_readwrite("n_up",           &EDParameters::n_up)
         .def_readwrite("full_sz_split",  &EDParameters::full_sz_split)
-        // Symmetry
+        // Phase 7: orthogonal device / parallelism axes. Setting these is
+        // equivalent to picking the deprecated `_GPU` / `_MPI` enum value.
+        // E.g. ``DiagonalizationMethod.LANCZOS`` + ``params.use_gpu = True``
+        // is the canonical replacement for ``DiagonalizationMethod.LANCZOS_GPU``.
+        // The dispatcher canonicalizes both forms via
+        // ``ed::canonicalize_method_and_flags()`` at entry.
+        .def_readwrite("use_gpu",        &EDParameters::use_gpu)
+        .def_readwrite("use_mpi",        &EDParameters::use_mpi)
+        // Phase 7.1: 5th orthogonal axis -- symmetry projection.
+        // Setting ``use_symmetry = True`` and calling
+        // ``exact_diagonalization_from_directory(...)`` is the canonical
+        // (and only non-deprecated) way to request symmetry-projected ED.
+        // Internally routes through the streaming symmetry kernel
+        // (per-sector, matrix-free, GPU-capable). This replaces the
+        // deprecated entry points
+        // ``exact_diagonalization_from_directory_symmetrized`` and
+        // ``exact_diagonalization_fixed_sz_symmetrized``.
+        .def_readwrite("use_symmetry",   &EDParameters::use_symmetry)
+        // Symmetry sub-options
         .def_readwrite("translation_only", &EDParameters::translation_only)
         // ScaLAPACK
         .def_readwrite("scalapack_nprow",                &EDParameters::scalapack_nprow)
         .def_readwrite("scalapack_npcol",                &EDParameters::scalapack_npcol)
         .def_readwrite("scalapack_block_size",           &EDParameters::scalapack_block_size)
+        // Phase 8 #5: when true (default), ``scalapack_block_size`` is
+        // overridden by a dim/grid-aware heuristic at solve time. Setting
+        // ``scalapack_block_size`` from Python (or via the CLI) implicitly
+        // disables auto -- see ``run_diagonalization`` Python wrapper.
+        .def_readwrite("scalapack_block_size_auto",      &EDParameters::scalapack_block_size_auto)
         .def_readwrite("scalapack_mixed_precision",      &EDParameters::scalapack_mixed_precision)
         .def_readwrite("scalapack_refinement_tol",       &EDParameters::scalapack_refinement_tol)
         .def_readwrite("scalapack_max_refinement_iter",  &EDParameters::scalapack_max_refinement_iter)
@@ -698,7 +745,13 @@ void bind_dispatcher(py::module_& m) {
               EDResults res;
               {
                   py::gil_scoped_release release;
-                  res = exact_diagonalization_from_directory(
+                  // Phase 7.1: route through the canonical 5-axis
+                  // dispatcher in ed_dispatch_symmetry.h. When
+                  // params.use_symmetry is set this forwards to
+                  // exact_diagonalization_streaming_symmetry[_fixed_sz];
+                  // otherwise it forwards to the standard
+                  // exact_diagonalization_from_directory in ed_wrapper.h.
+                  res = ed_dispatch::exact_diagonalization_from_directory(
                       directory, method, params, format,
                       interaction_filename, single_site_filename,
                       counterterm_filename, three_body_filename);
@@ -714,21 +767,42 @@ void bind_dispatcher(py::module_& m) {
           py::arg("counterterm_filename") = "CounterTerm.dat",
           py::arg("three_body_filename") = "ThreeBodyG.dat",
           R"pbdoc(
-        Run ED on a directory of Hamiltonian files.
+        Run ED on a directory of Hamiltonian files (Phase 7.1: 5-axis dispatcher).
 
-        Convenience wrapper around the C++
-        ``exact_diagonalization_from_directory(...)``. Reads
-        ``InterAll.dat`` / ``Trans.dat`` (plus optional
-        ``CounterTerm.dat`` / ``ThreeBodyG.dat``) and dispatches to the
-        chosen ``method``.
+        Reads ``InterAll.dat`` / ``Trans.dat`` (plus optional
+        ``CounterTerm.dat`` / ``ThreeBodyG.dat``) and dispatches on
+        the orthogonal axes carried by ``params``:
 
-        For GPU methods (``LANCZOS_GPU`` etc.), the C++ wrapper
-        constructs a ``GPUOperator`` from the file data and routes
-        through ``GPUEDWrapper::runGPULanczos(...)`` -- this is the
-        Python path to single-shot GPU ED on a precomputed file deck
-        (e.g. one written by ``HamiltonianBuilder.write_files(...)``).
+        ====================  ================================================
+        Flag                  Effect
+        ====================  ================================================
+        ``use_fixed_sz``      restrict to the ``n_up`` Sz-sector
+        ``use_gpu``           use GPU kernels (legacy ``LANCZOS_GPU`` etc.)
+        ``use_mpi``           use MPI parallelism (ScaLAPACK, mTPQ_MPI, ...)
+        ``use_symmetry``      project onto symmetry-adapted basis (streaming)
+        ====================  ================================================
+
+        Setting ``params.use_symmetry = True`` is the canonical way to
+        request symmetry-projected ED -- it routes internally through
+        :func:`exact_diagonalization_streaming_symmetry` (or its
+        fixed-Sz cousin), which is the only symmetry kernel that
+        supports GPU per-sector dispatch and avoids materialising the
+        orbit basis on disk. The deprecated explicit-block path
+        (:func:`exact_diagonalization_from_directory_symmetrized`) is
+        kept around for back-compat but never reached from this entry
+        point.
     )pbdoc");
 
+    // Phase 7.1: the *_symmetrized entry points are now [[deprecated]] in
+    // C++. They are kept here for ABI / source compat, but the binding
+    // wraps them inside a pragma block so the build doesn't trip the
+    // deprecation warning. New code should call
+    // ``exact_diagonalization_from_directory(...)`` with
+    // ``params.use_symmetry = True`` (and optionally
+    // ``params.use_fixed_sz = True``), which is the canonical 5-axis
+    // dispatcher.
+    #pragma GCC diagnostic push
+    #pragma GCC diagnostic ignored "-Wdeprecated-declarations"
     m.def("exact_diagonalization_from_directory_symmetrized",
           [](const std::string& directory,
              DiagonalizationMethod method,
@@ -756,13 +830,12 @@ void bind_dispatcher(py::module_& m) {
           py::arg("single_site_filename") = "Trans.dat",
           py::arg("counterterm_filename") = "CounterTerm.dat",
           py::arg("three_body_filename") = "ThreeBodyG.dat",
-          "Symmetrised explicit-block ED from a directory. Uses the "
-          "explicit-block symmetry path (Eigen sparse blocks) rather than "
-          "the streaming variant -- generally slower for medium clusters "
-          "but exposes per-sector eigenvectors and supports CPU-only "
-          "block diagonalisation. For GPU symmetry-projected runs prefer "
-          ":func:`exact_diagonalization_streaming_symmetry` which can "
-          "dispatch each sector to a GPU kernel.");
+          "DEPRECATED (Phase 7.1): use "
+          ":func:`exact_diagonalization_from_directory` with "
+          "``params.use_symmetry = True``. This function uses the "
+          "older explicit-block path (Eigen sparse blocks per sector) "
+          "which is slower than the canonical streaming kernel and "
+          "does not support GPU per-sector dispatch.");
 
     m.def("exact_diagonalization_fixed_sz_symmetrized",
           [](const std::string& directory,
@@ -791,12 +864,13 @@ void bind_dispatcher(py::module_& m) {
           py::arg("interaction_filename") = "InterAll.dat",
           py::arg("single_site_filename") = "Trans.dat",
           py::arg("three_body_filename") = "ThreeBodyG.dat",
-          "Fixed-Sz x symmetry-projected ED from a directory. Returns "
-          "the eigenvalues of the symmetry-projected blocks restricted "
-          "to the ``n_up`` Sz sector. The streaming-symmetry variant "
-          "(:func:`exact_diagonalization_streaming_symmetry_fixed_sz`) "
-          "is generally preferred -- it does not materialise the orbit "
-          "basis on disk and supports GPU per-sector solves.");
+          "DEPRECATED (Phase 7.1): use "
+          ":func:`exact_diagonalization_from_directory` with "
+          "``params.use_symmetry = True`` and "
+          "``params.use_fixed_sz = True`` (set ``params.n_up``). The "
+          "canonical streaming kernel does not materialise the orbit "
+          "basis on disk and supports GPU per-sector dispatch.");
+    #pragma GCC diagnostic pop  // legacy *_symmetrized bindings (Phase 7.1)
 
     // ------------------------------------------------------------------------
     // 9. Build introspection. Lets callers gate GPU / MPI codepaths in
@@ -837,4 +911,47 @@ void bind_dispatcher(py::module_& m) {
         "True iff this build was compiled with both ``WITH_MPI=ON`` and "
         "ScaLAPACK linkage. When False the SCALAPACK / SCALAPACK_MIXED "
         "method values silently fall back to FULL diagonalization.");
+
+    // ------------------------------------------------------------------------
+    // 10. Phase 7 introspection: expose the canonicalize() helper so
+    //     Python-side tooling and tests can verify that the orthogonal
+    //     (SOLVER, use_fixed_sz, use_gpu, use_mpi) decomposition is
+    //     correct without having to round-trip through the dispatcher.
+    // ------------------------------------------------------------------------
+    m.def("canonicalize_method",
+          [](DiagonalizationMethod method,
+             bool use_fixed_sz,
+             bool use_gpu,
+             bool use_mpi) {
+              const auto canon = ed::canonicalize_method_and_flags(
+                  method, use_fixed_sz, use_gpu, use_mpi);
+              py::dict d;
+              d["method"]       = canon.method;
+              d["use_fixed_sz"] = canon.use_fixed_sz;
+              d["use_gpu"]      = canon.use_gpu;
+              d["use_mpi"]      = canon.use_mpi;
+              return d;
+          },
+          py::arg("method"),
+          py::arg("use_fixed_sz") = false,
+          py::arg("use_gpu")      = false,
+          py::arg("use_mpi")      = false,
+          R"pbdoc(
+Collapse the deprecated ``_GPU`` / ``_CUDA`` / ``_MPI`` / ``_FIXED_SZ``
+enum variants of :class:`DiagonalizationMethod` onto the canonical
+``(method, use_fixed_sz, use_gpu, use_mpi)`` tuple.
+
+Returns a dict with keys ``method`` (the base solver), ``use_fixed_sz``,
+``use_gpu``, ``use_mpi``. The flags are *OR-ed* with the input values so
+calling with ``use_fixed_sz=True`` plus a deprecated ``LANCZOS_GPU_FIXED_SZ``
+enum value still returns ``use_fixed_sz=True``.
+
+Idempotent: feeding the output back in produces the same dict.
+
+>>> canon = canonicalize_method(DiagonalizationMethod.LANCZOS_GPU)
+>>> canon["method"], canon["use_gpu"]
+(DiagonalizationMethod.LANCZOS, True)
+>>> canonicalize_method(DiagonalizationMethod.SCALAPACK)["use_mpi"]
+True
+)pbdoc");
 }

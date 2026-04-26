@@ -40,6 +40,23 @@ struct DiagonalizationConfig {
     uint64_t max_subspace = 100;       // For Davidson
     double target_lower = 0.0;    // For Chebyshev filtered (lower energy bound)
     double target_upper = 0.0;    // For Chebyshev filtered (upper energy bound)
+
+    // ========== ScaLAPACK-specific knobs ==========
+    // These mirror the corresponding fields on ``EDParameters`` so that
+    // CLI flags (``--scalapack-block-size``, ``--scalapack-nprow``, ...)
+    // can be wired through the EDConfig -> EDParameters adapter without
+    // bypassing the hierarchical config layer.
+    //
+    // Phase 8 #5: ``scalapack_block_size_auto`` defaults to true; the
+    // explicit ``scalapack_block_size`` is only consulted when auto is
+    // disabled (which the CLI does implicitly when ``--scalapack-block-size``
+    // is set). The remaining ``scalapack_block_size`` default (64) is
+    // kept solely for users who flip auto off without specifying their
+    // own block size.
+    int scalapack_nprow = 0;            // 0 = auto (square-ish grid)
+    int scalapack_npcol = 0;            // 0 = auto
+    int scalapack_block_size = 64;      // honoured iff !scalapack_block_size_auto
+    bool scalapack_block_size_auto = true;
 };
 
 /**
@@ -233,7 +250,25 @@ struct SystemConfig {
     bool use_fixed_sz = false;
     int64_t n_up = -1;  // Number of up spins (-1 = not set, will use num_sites/2)
     bool full_sz_split = false;  // When true with FULL method, loop over all Sz sectors
-    
+
+    // Phase 7: orthogonal device / parallelism axes. Mirrored onto
+    // EDParameters::use_gpu / use_mpi by ed_config_adapter::toEDParameters().
+    // Setting these is equivalent to passing the deprecated `_GPU` /
+    // `_MPI` enum value (e.g. method=LANCZOS + use_gpu=true is the
+    // canonical replacement for method=LANCZOS_GPU).
+    bool use_gpu = false;
+    bool use_mpi = false;
+
+    // Phase 7.1: 5th orthogonal axis -- symmetry projection.
+    //
+    // When true, exact_diagonalization_from_files /
+    // exact_diagonalization_from_directory route through the streaming
+    // symmetry kernel (ed_wrapper_streaming.h). This is the canonical
+    // (and only non-deprecated) way to opt into symmetry-projected ED.
+    // Equivalent to the legacy `--symm` CLI flag and to manually calling
+    // `exact_diagonalization_streaming_symmetry[_fixed_sz]`.
+    bool use_symmetry = false;
+
     std::string hamiltonian_dir = "";
     std::string interaction_file = "InterAll.dat";
     std::string single_site_file = "Trans.dat";
@@ -352,11 +387,32 @@ public:
     }
     EDConfig& fixedSz(bool use = true) { system.use_fixed_sz = use; return *this; }
     EDConfig& numUp(uint64_t n) { system.n_up = n; return *this; }
-    
+    EDConfig& useGpu(bool b = true) { system.use_gpu = b; return *this; }
+    EDConfig& useMpi(bool b = true) { system.use_mpi = b; return *this; }
+    // Canonical Phase-7.1 setter for the 5th orthogonal axis. Equivalent
+    // to passing `EDParameters::use_symmetry = true` to the dispatcher;
+    // routes ED through the streaming symmetry kernel.
+    EDConfig& useSymmetry(bool b = true) {
+        system.use_symmetry = b;
+        // Keep workflow.run_symm_auto in sync so the legacy CLI dispatch
+        // in ed_main.cpp continues to fire `run_streaming_symmetry_workflow`.
+        workflow.run_symm_auto = b;
+        return *this;
+    }
+
     // Workflow
     EDConfig& standard(bool b = true) { workflow.run_standard = b; return *this; }
-    EDConfig& symm(bool b = true) { workflow.run_symm_auto = b; return *this; }
-    EDConfig& symmAuto(bool b = true) { workflow.run_symm_auto = b; return *this; }  // Alias
+    EDConfig& symm(bool b = true) {
+        // Alias for useSymmetry() -- kept for source compat.
+        workflow.run_symm_auto = b;
+        system.use_symmetry = b;
+        return *this;
+    }
+    EDConfig& symmAuto(bool b = true) {
+        workflow.run_symm_auto = b;
+        system.use_symmetry = b;
+        return *this;
+    }
     EDConfig& diskStreaming(bool b = true) { workflow.run_disk_streaming = b; return *this; }
     EDConfig& chunkedSymm(bool b = true) { workflow.run_chunked_symmetry = b; return *this; }
     EDConfig& thermo(bool b = true) { workflow.compute_thermo = b; return *this; }

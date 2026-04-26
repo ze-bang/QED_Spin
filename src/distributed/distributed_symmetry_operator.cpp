@@ -340,6 +340,12 @@ DistributedSymmetryOperator::DistributedSymmetryOperator(
                                               needed_orbits.end());
     halo_plan_ = std::make_unique<OrbitHaloPlan>(partition_, needed_vec, comm_);
 
+    // Phase 8: pre-size the persistent halo recv buffer. The plan's
+    // recv_total() is fixed for the lifetime of *this, so apply() never
+    // needs to (re)allocate. Empty vector for ranks with no incoming halo
+    // is fine -- exchange() handles that case symmetrically (see apply()).
+    halo_buf_.assign(halo_plan_->recv_total(), Complex(0.0, 0.0));
+
     // Build halo_index_ table: orbit_id -> position in halo recv buffer.
     halo_index_.assign(n_orbits, kHaloMissing);
     {
@@ -382,17 +388,13 @@ void DistributedSymmetryOperator::apply(const Complex* x_local,
     const std::size_t local_n = row_col_idx_.size();
 
     // Halo exchange first so subsequent local SpMV can read freely.
-    std::vector<Complex> halo;
+    // halo_buf_ was pre-sized in the constructor; we reuse it on every
+    // apply() to avoid per-matvec heap activity (Phase 8). exchange()
+    // tolerates an empty recv buffer when peers still have sends to us.
     if (halo_plan_) {
-        halo.assign(halo_plan_->recv_total(), Complex(0.0, 0.0));
-        if (!halo.empty()) {
-            halo_plan_->exchange(x_local, halo.data());
-        } else {
-            // Even with empty recv buffer, peers may have sends to us.
-            // OrbitHaloPlan::exchange handles that case symmetrically.
-            halo_plan_->exchange(x_local, halo.data());
-        }
+        halo_plan_->exchange(x_local, halo_buf_.data());
     }
+    const Complex* const halo = halo_buf_.data();
 
     // Rank-local CSR-style SpMV.
     for (std::size_t r = 0; r < local_n; ++r) {

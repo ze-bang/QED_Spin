@@ -218,6 +218,15 @@ private:
     std::vector<std::vector<std::size_t>> row_col_idx_;
     std::vector<std::vector<std::uint8_t>> row_is_local_;
     std::vector<std::vector<Complex>>     row_coeff_;
+
+    // -------------------------------------------------------------------------
+    // Phase 8: persistent halo recv buffer.
+    //
+    // Same rationale as DistributedOperator::send_buf_/recv_buf_ -- the size
+    // is fixed by the OrbitHaloPlan after construction, so we allocate once
+    // and reuse on every apply(). Marked mutable because apply() is const.
+    // -------------------------------------------------------------------------
+    mutable std::vector<Complex> halo_buf_;
 };
 
 }  // namespace ed::distributed

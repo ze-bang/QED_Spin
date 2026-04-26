@@ -348,9 +348,29 @@ EDConfig EDConfig::fromCommandLine(uint64_t argc, char* argv[]) {
             else if (arg.find("--block-size=") == 0) config.diag.block_size = std::stoi(parse_value("--block-size="));
             else if (arg.find("--target-lower=") == 0) config.diag.target_lower = std::stod(parse_value("--target-lower="));
             else if (arg.find("--target-upper=") == 0) config.diag.target_upper = std::stod(parse_value("--target-upper="));
+            // Phase 8 #5: ScaLAPACK distributed-diag knobs. The original
+            // hierarchical-config layer only exposed these via Python
+            // (``EDParameters.scalapack_*``). Promoting them to CLI flags
+            // lets users tune the BLACS grid + block size from the C++
+            // entry points too. ``--scalapack-block-size N`` implicitly
+            // disables the new auto-block-size heuristic so the explicit
+            // value is honoured by the solver.
+            else if (arg.find("--scalapack-nprow=") == 0)       config.diag.scalapack_nprow = std::stoi(parse_value("--scalapack-nprow="));
+            else if (arg.find("--scalapack-npcol=") == 0)       config.diag.scalapack_npcol = std::stoi(parse_value("--scalapack-npcol="));
+            else if (arg.find("--scalapack-block-size=") == 0) {
+                config.diag.scalapack_block_size = std::stoi(parse_value("--scalapack-block-size="));
+                config.diag.scalapack_block_size_auto = false;  // explicit value -> opt out of auto
+            }
+            else if (arg == "--scalapack-block-size-auto")    config.diag.scalapack_block_size_auto = true;
+            else if (arg == "--no-scalapack-block-size-auto") config.diag.scalapack_block_size_auto = false;
             else if (arg.find("--num_sites=") == 0) config.system.num_sites = std::stoi(parse_value("--num_sites="));
             else if (arg.find("--spin_length=") == 0) config.system.spin_length = std::stof(parse_value("--spin_length="));
             else if (arg == "--fixed-sz") config.system.use_fixed_sz = true;
+            // Phase 7: orthogonal device / parallelism flags. Combine with
+            // any base method (e.g. `--method=lanczos --gpu` is the canonical
+            // replacement for the deprecated `--method=lanczos_gpu`).
+            else if (arg == "--gpu") config.system.use_gpu = true;
+            else if (arg == "--mpi") config.system.use_mpi = true;
             else if (arg == "--full-sz-split") config.system.full_sz_split = true;
             else if (arg.find("--n-up=") == 0) config.system.n_up = std::stoi(parse_value("--n-up="));
             else if (arg.find("--output=") == 0) config.workflow.output_dir = parse_value("--output=");
@@ -384,11 +404,28 @@ EDConfig EDConfig::fromCommandLine(uint64_t argc, char* argv[]) {
             else if (arg == "--save-thermal-states" || arg == "--calc_observables") config.observable.save_thermal_states = true;
             else if (arg == "--compute-spin-correlations" || arg == "--measure_spin") config.observable.compute_spin_correlations = true;
             else if (arg == "--standard") config.workflow.run_standard = true;
-            else if (arg == "--symmetrized") config.workflow.run_symm_auto = true;  // Alias for --symm
-            else if (arg == "--streaming-symmetry") config.workflow.run_symm_auto = true;  // Alias for --symm
+            // Phase 7.1: --symm and its deprecated aliases set BOTH the legacy
+            // workflow flag (which dispatches in ed_main.cpp) and the canonical
+            // SystemConfig::use_symmetry flag (the 5th orthogonal axis seen by
+            // exact_diagonalization_from_directory through toEDParameters).
+            else if (arg == "--symmetrized") {  // deprecated alias
+                config.workflow.run_symm_auto = true;
+                config.system.use_symmetry = true;
+            }
+            else if (arg == "--streaming-symmetry") {  // deprecated alias
+                config.workflow.run_symm_auto = true;
+                config.system.use_symmetry = true;
+            }
+            else if (arg == "--symm") {
+                config.workflow.run_symm_auto = true;
+                config.system.use_symmetry = true;
+            }
+            else if (arg == "--no-symm") {
+                config.workflow.run_symm_auto = false;
+                config.system.use_symmetry = false;
+            }
             else if (arg == "--disk-streaming") config.workflow.run_disk_streaming = true;
             else if (arg == "--chunked-symm") config.workflow.run_chunked_symmetry = true;
-            else if (arg == "--symm") config.workflow.run_symm_auto = true;
             else if (arg.find("--disk-threshold=") == 0) config.workflow.disk_streaming_threshold = std::stoull(parse_value("--disk-threshold="));
             else if (arg.find("--chunked-threshold=") == 0) config.workflow.chunked_symm_threshold = std::stoull(parse_value("--chunked-threshold="));
             else if (arg == "--thermo") config.workflow.compute_thermo = true;
@@ -794,6 +831,16 @@ bool EDConfig::autoDetectNumSites() {
 
 namespace ed_config {
 
+// The CLI / config parser must accept the legacy `_GPU` / `_CUDA` /
+// `_MPI` / `_FIXED_SZ` enum strings to stay backwards-compatible with
+// pre-Phase-7 user configs. Phase 7 collapses them onto base method +
+// flags via canonicalize_method_and_flags() at the dispatcher entry
+// point; here we just translate the string to its enum value, so the
+// deprecation warning emitted by referencing the deprecated enum
+// values is intentional noise that we suppress.
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+
 std::optional<DiagonalizationMethod> parseMethod(const std::string& str) {
     std::string lower = str;
     std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
@@ -924,6 +971,8 @@ std::string methodToString(DiagonalizationMethod method) {
     }
 }
 
+#pragma GCC diagnostic pop  // legacy _GPU / _CUDA / _MPI / _FIXED_SZ string round-trip
+
 EDConfig defaultConfigFor(DiagonalizationMethod method) {
     EDConfig config(method);
     
@@ -954,6 +1003,12 @@ EDConfig defaultConfigFor(DiagonalizationMethod method) {
 /**
  * @brief Get detailed parameter information for a diagonalization method
  */
+// Phase 7: this function legitimately enumerates legacy `_GPU` / `_CUDA`
+// / `_MPI` / `_FIXED_SZ` enum values to produce help text for the
+// `--info <method>` CLI subcommand. Suppress the deprecation diagnostic
+// for the case labels.
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
 std::string getMethodParameterInfo(DiagonalizationMethod method) {
     std::ostringstream info;
     
@@ -1462,6 +1517,7 @@ std::string getMethodParameterInfo(DiagonalizationMethod method) {
     info << "\n========================================\n";
     return info.str();
 }
+#pragma GCC diagnostic pop  // legacy _GPU / _CUDA / _MPI / _FIXED_SZ help text
 
 } // namespace ed_config
 

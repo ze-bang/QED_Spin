@@ -42,6 +42,7 @@
 #ifdef WITH_MPI
 
 #include <ed/distributed/distributed_lanczos.h>
+#include <ed/parallel/thread_budget.h>
 
 #include <algorithm>
 #include <cmath>
@@ -101,6 +102,35 @@ inline Complex dist_zdotc(const Complex* x_local, const Complex* y_local,
     double buf_out[2] = {0.0, 0.0};
     MPI_Allreduce(buf_in, buf_out, 2, MPI_DOUBLE, MPI_SUM, comm);
     return Complex(buf_out[0], buf_out[1]);
+}
+
+// Phase 8 #6: batched <basis[k]|w> for all k via a single MPI_Allreduce.
+// See the matching docstring on
+// ``ed::distributed::dist_zdotc_batched`` in distributed_lanczos.cpp.
+inline void dist_zdotc_batched(
+    const std::vector<std::vector<Complex>>& basis,
+    const Complex* w_local,
+    std::uint64_t n_local,
+    MPI_Comm comm,
+    std::vector<Complex>& c_out) {
+
+    const std::size_t m = basis.size();
+    c_out.assign(m, Complex(0.0, 0.0));
+    if (m == 0) return;
+
+    std::vector<double> local_buf(2 * m, 0.0);
+    for (std::size_t k = 0; k < m; ++k) {
+        const Complex c = local_zdotc(basis[k].data(), w_local, n_local);
+        local_buf[2 * k]     = c.real();
+        local_buf[2 * k + 1] = c.imag();
+    }
+    std::vector<double> global_buf(2 * m, 0.0);
+    MPI_Allreduce(local_buf.data(), global_buf.data(),
+                  static_cast<int>(2 * m),
+                  MPI_DOUBLE, MPI_SUM, comm);
+    for (std::size_t k = 0; k < m; ++k) {
+        c_out[k] = Complex(global_buf[2 * k], global_buf[2 * k + 1]);
+    }
 }
 
 // ----- tridiagonal solvers ---------------------------------------------------
@@ -206,6 +236,14 @@ DistributedLanczosResult distributed_lanczos_kernel(
             + ") != op.local_size() (" + std::to_string(local_n) + ")");
     }
 
+    // Phase 8 #3: dim-aware OMP+BLAS thread cap on the rank-local slab.
+    // Same heuristic as distributed_lanczos() in distributed_lanczos.cpp;
+    // applies equally to the templated path used by both
+    // DistributedOperator and DistributedSymmetryOperator. Disable via
+    // ED_AUTO_THREADS=0 if you are pinning threads externally.
+    const ed::parallel::ThreadBudgetScope budget(
+        ed::parallel::auto_threads_for_dim(local_n));
+
     const bool keep_basis =
         options.full_reorth || options.compute_eigenvectors;
 
@@ -248,10 +286,28 @@ DistributedLanczosResult distributed_lanczos_kernel(
         }
 
         if (keep_basis && !basis.empty()) {
-            for (std::size_t k = 0; k < basis.size(); ++k) {
-                Complex c = dist_zdotc(basis[k].data(), w.data(),
-                                       local_n, op.comm());
-                local_axpy(-c, basis[k].data(), w.data(), local_n);
+            // Phase 8 #6: batched CGS2 reorth -- mirrors the
+            // ed::distributed::distributed_lanczos branch. Two batched
+            // Allreduces total instead of basis.size() serial ones.
+            constexpr std::size_t kCgs2Threshold = 8;
+            if (basis.size() < kCgs2Threshold) {
+                for (std::size_t k = 0; k < basis.size(); ++k) {
+                    Complex c = dist_zdotc(basis[k].data(), w.data(),
+                                           local_n, op.comm());
+                    local_axpy(-c, basis[k].data(), w.data(), local_n);
+                }
+            } else {
+                std::vector<Complex> coeffs;
+                for (int pass = 0; pass < 2; ++pass) {
+                    dist_zdotc_batched(basis, w.data(), local_n, op.comm(),
+                                       coeffs);
+                    for (std::size_t k = 0; k < basis.size(); ++k) {
+                        if (coeffs[k] != Complex(0.0, 0.0)) {
+                            local_axpy(-coeffs[k], basis[k].data(),
+                                       w.data(), local_n);
+                        }
+                    }
+                }
             }
         }
 

@@ -166,7 +166,64 @@ struct EDParameters {
     mutable FixedSzOperator* fixed_sz_op = nullptr;
     bool full_sz_split = false;
 
-    // ========== Symmetry Options ==========
+    // ========== Phase 7: orthogonal device / parallelism axes ==========
+    //
+    // The DiagonalizationMethod enum used to encode the device backend
+    // ("LANCZOS" vs "LANCZOS_GPU") and the parallelism backend ("mTPQ" vs
+    // "mTPQ_MPI") in the enum value itself, which (a) caused a quadratic
+    // blow-up of the enum surface, (b) duplicated the same axis already
+    // factored out for fixed-Sz, and (c) led to inconsistent naming
+    // (mTPQ_GPU vs mTPQ_CUDA, both for the same code path).
+    //
+    // Phase 7 promotes these to flags on EDParameters, mirroring the
+    // existing use_fixed_sz convention. The dispatcher canonicalizes
+    // legacy `_GPU` / `_CUDA` / `_MPI` enum values onto base method +
+    // flag at the entry point, so old call sites keep working without
+    // change while new code can stay on the orthogonal axes:
+    //
+    //     SOLVER_type  ×  use_fixed_sz  ×  use_gpu  ×  use_mpi
+    //
+    // ScaLAPACK is *not* a "FULL + use_mpi" alias -- it's a distinct
+    // distributed dense kernel (different LAPACK call, different
+    // block-cyclic data layout, mixed-precision refinement). So
+    // ScaLAPACK / SCALAPACK_MIXED stay as their own DiagonalizationMethod
+    // values; they implicitly require MPI.
+    bool use_gpu = false;
+    bool use_mpi = false;
+
+    // ========== Symmetry Options (Phase 7.1: 5th orthogonal axis) ==========
+    //
+    // Symmetry projection used to be encoded in the entry-point name:
+    //   exact_diagonalization_from_directory_symmetrized(...)   // disk-block
+    //   exact_diagonalization_streaming_symmetry(...)           // streaming
+    //   exact_diagonalization_chunked_symmetry(...)             // chunked
+    //   exact_diagonalization_disk_chunked_symmetry(...)        // disk-chunked
+    // plus the same four for fixed-Sz, giving 8 distinct symmetry-aware
+    // entry points. Phase 7.1 collapses all of them onto a single flag:
+    //
+    //     SOLVER_type  ×  use_fixed_sz  ×  use_gpu  ×  use_mpi  ×  use_symmetry
+    //
+    // When `use_symmetry == true`, exact_diagonalization_from_files /
+    // exact_diagonalization_from_directory route through the streaming
+    // symmetry kernel (ed_wrapper_streaming.h), which is the only path that:
+    //   * keeps orbit data in memory (no disk basis materialisation),
+    //   * supports use_gpu (per-sector GPU kernels),
+    //   * supports use_fixed_sz orthogonally,
+    //   * scales to the largest tractable systems (32-site spin-1/2 etc.),
+    //   * works in pure Python (no /automorphism_results/ on disk required
+    //     beyond the one-shot generator the streaming path runs).
+    //
+    // The deprecated explicit-block path (`*_symmetrized`) and the
+    // chunked / disk-chunked variants are kept as CLI-only escape hatches
+    // for very-large-N memory-budget edge cases, but they are no longer
+    // selectable via the EDParameters flag axis. Setting use_symmetry=true
+    // is the only way new code should request symmetry projection.
+    //
+    // `translation_only` is an *orthogonal* sub-flag: when true, the
+    // automorphism generator restricts to the translation subgroup. It
+    // controls *which* symmetries are used, not whether symmetries are
+    // exploited at all.
+    bool use_symmetry = false;
     bool translation_only = false;
 
     // ========== ScaLAPACK Distributed Diagonalization Options ==========
@@ -177,6 +234,20 @@ struct EDParameters {
     double scalapack_refinement_tol = 1e-12;
     int scalapack_max_refinement_iter = 5;
     bool scalapack_verbose = true;
+
+    // Phase 8 #5: when true (the default), ``scalapack_block_size`` is
+    // ignored at solve time and replaced by ``get_optimal_block_size(N,
+    // nprow, npcol)`` -- a heuristic that balances the local-tile size
+    // against the BLACS process grid for the actual matrix dimension.
+    // The legacy default of 64 tends to be too small for the larger
+    // matrices we now run (N >> 64*sqrt(P)), and over-blocks the smaller
+    // ones; the auto path consistently beats the fixed default in the
+    // benchmarks against MKL ScaLAPACK 2024 on 4-32 MPI ranks.
+    //
+    // CLI ``--scalapack-block-size N`` overrides ``scalapack_block_size``
+    // *and* sets this flag to false, preserving backward compatibility
+    // for users who tune the block size manually.
+    bool scalapack_block_size_auto = true;
 
     // ========== ARPACK Advanced Options ==========
     bool arpack_advanced_verbose = false;

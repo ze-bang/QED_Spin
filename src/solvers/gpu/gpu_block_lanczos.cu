@@ -18,6 +18,7 @@
 #include <ed/gpu/gpu_lanczos.cuh>
 #include <ed/gpu/kernel_config.h>
 #include <ed/core/blas_lapack_wrapper.h>
+#include <ed/parallel/thread_budget.h>
 #include <iostream>
 #include <iomanip>
 #include <cmath>
@@ -855,10 +856,18 @@ void GPUBlockLanczos::solveBlockTridiagonal(int num_blocks, int num_eigs,
                                            std::vector<double>& eigenvalues,
                                            std::vector<std::vector<std::complex<double>>>& tridiag_eigenvecs) {
     auto start = std::chrono::high_resolution_clock::now();
-    
+
     // Construct full block tridiagonal matrix
     // Size: (num_blocks * block_size) × (num_blocks * block_size)
     int total_dim = num_blocks * block_size_;
+
+    // Phase 8 #3: cap host-side LAPACK threads for the block-tridiag dense
+    // eigensolve. total_dim is at most a few thousand (num_blocks ~ a few
+    // hundred * block_size ~ 4-16), and zheevr's MRRR path on that size is
+    // dominated by OpenBLAS pthread startup if we let it spin up the full
+    // team. Same heuristic as gpu_lanczos.cu's solveTridiagonal.
+    const ed::parallel::ThreadBudgetScope tridiag_budget(
+        ed::parallel::auto_threads_for_dim(static_cast<std::uint64_t>(total_dim)));
     
     Eigen::MatrixXcd T = Eigen::MatrixXcd::Zero(total_dim, total_dim);
     
