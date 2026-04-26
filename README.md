@@ -20,6 +20,29 @@ the same single-file ergonomics and adds:
   diagonalization, ARPACK, and a programmatic symmetry DSL — all
   reachable from one CLI binary, one C++ static library, and one Python
   package (`quantum_ed`);
+* a **standalone `ed_input` C++ library** (with matching
+  `quantum_ed.input` Python bindings) that supplants the legacy
+  `python/edlib/helper_*.py` family — every textbook lattice (chain /
+  square / triangular / honeycomb / kagome / pyrochlore + arbitrary
+  user-supplied adjacency / `cluster.txt`), every standard term shortcut
+  (Heisenberg / XXZ / XYZ / Ising / transverse-field Ising / Kitaev / DM
+  / Zeeman / pyrochlore non-Kramers), and a single fluent surface that
+  emits **either** an in-memory `Operator` *or* the exact `InterAll.dat` /
+  `Trans.dat` / `positions.dat` directory the `./ED` CLI consumes;
+* a **first-class Python interface** (`import quantum_ed`) that since
+  Phase 5 (Apr 2026) reaches **every backend the CLI knows about** —
+  `exact_diagonalization_core(op, method, params)` dispatches to the
+  full `LANCZOS{,_SELECTIVE,_NO_ORTHO}` / `BLOCK_LANCZOS` /
+  `KRYLOV_SCHUR{,_BLOCK}` / `DAVIDSON` / `LOBPCG` /
+  `CHEBYSHEV_FILTERED` / `SHIFT_INVERT[_ROBUST]` / `IRL` / `TRL` /
+  `BICG` / `ARPACK_*` family, plus `FULL` / `OSS` /
+  `SCALAPACK[_MIXED]`, plus `FTLM` / `LTLM` / `HYBRID` / `mTPQ` /
+  `cTPQ`; `_streaming_symmetry[_fixed_sz]` covers the largest clusters
+  with optional GPU per-sector dispatch; `_from_directory[_symmetrized]`
+  routes to every `*_GPU` method when CUDA is on; and thin launcher
+  helpers (`quantum_ed.mpi.run_distributed`,
+  `quantum_ed.dssf.run_from_directory`) wrap the MPI distributed
+  solvers and the full continued-fraction `./ED dssf` engine;
 * a **Numerical Linked Cluster Expansion (NLCE)** workflow on top of
   the same solvers, used in production for the pyrochlore + triangular
   lattice studies in `scripts/research/`.
@@ -29,12 +52,18 @@ one CLI, one solver entry point per regime, every result reproducible
 from the JSON / HDF5 it writes. The entire test matrix
 (146 unit + integration tests) runs in CI on every commit.
 
-> **Status (2026-04 release)**: production-ready for serial and
-> single-node multi-threaded use; distributed Lanczos / FTLM / TPQ are
-> validated end-to-end and ship today (Phase 3b lockdown). Symmetry-aware
-> row partitioning and NCCL-based multi-GPU scaling are documented under
+> **Status (2026-04 release)**: production-ready for serial,
+> single-node multi-threaded, **and** multi-rank / multi-GPU distributed
+> use. Distributed Lanczos / FTLM / TPQ ship as Phase 3b. Phase 3b #7
+> (orbit-aware partitioning + symmetry-projected distributed SpMV +
+> `distributed_lanczos_symmetry`) and Phase 3c
+> (`MultiGpuCommunicator`, `distributed_lanczos_gpu`,
+> `DistributedGPUOperator`) shipped in the 2026-04-25 cluster pass and
+> are correctness-locked on rorqual H100×{1,2,4} — see
 > [`docs/architecture/IMPLEMENTATION_NOTES.md`](docs/architecture/IMPLEMENTATION_NOTES.md)
-> and gated on HPC-time access.
+> for the cluster job IDs and the residual deferred items
+> (parallel-HDF5 distributed disk-backed Krylov, inter-node IB-fabric
+> validation, HΦ 40-site head-to-head).
 
 ---
 
@@ -98,6 +127,62 @@ CLI (no code at all):
 ./build/ED /path/to/heisenberg_dir --method=LANCZOS --eigenvalues=3 --thermo
 ```
 
+Modern Python (build the `InterAll.dat` *and* solve in one breath, **no
+helper script**):
+
+```python
+import quantum_ed as qed
+lat = qed.input.lattice.chain(12, pbc=True)
+op  = (qed.input.HamiltonianBuilder(lat.num_sites)
+              .heisenberg(lat.nn_pairs(), 1.0)
+              .to_operator())
+print("E0 =", qed.lanczos(op, max_iter=200, n_eig=1, tol=1e-10)[0])
+
+# or — drop into the production CLI through Mode 1:
+# qed.input.HamiltonianBuilder(lat.num_sites) \
+#       .heisenberg(lat.nn_pairs(), 1.0) \
+#       .write_directory("./chain12", lattice=lat)
+```
+
+Modern Python — single-call dispatcher to **any** backend (Phase 5):
+
+```python
+import quantum_ed as qed
+
+# Build a 12-site Heisenberg ring as before.
+lat = qed.input.lattice.chain(12, pbc=True)
+op  = (qed.input.HamiltonianBuilder(lat.num_sites)
+              .heisenberg(lat.nn_pairs(), 1.0)
+              .to_operator())
+
+# Pick any of ~30 backends -- LANCZOS, KRYLOV_SCHUR, DAVIDSON, LOBPCG,
+# BLOCK_LANCZOS, every ARPACK variant, FULL/SCALAPACK, FTLM/LTLM,
+# mTPQ/cTPQ, ... See docs/guides/python_advanced.md.
+params = qed.EDParameters(); params.num_eigenvalues = 4; params.tolerance = 1e-12
+res    = qed.exact_diagonalization_core(
+    op, qed.DiagonalizationMethod.KRYLOV_SCHUR, params,
+)
+print("E0..E3 =", sorted(res.eigenvalues)[:4])
+
+# GPU per-sector with in-process symmetry projection (large clusters):
+if qed.has_cuda_build():
+    info = qed.symmetry.group_from_generators(
+        12, [qed.symmetry.translation(12), qed.symmetry.reflection_1d(12)],
+        sector_quantum_numbers=[0, 0],
+    )
+    op.set_symmetry_info_from_dict(info)
+    res_sym = qed.exact_diagonalization_streaming_symmetry(
+        "./chain12", qed.DiagonalizationMethod.LANCZOS_GPU, params,
+    )
+
+# Distributed MPI (no MPI_Init in your script -- the helper builds argv):
+if qed.has_mpi_build():
+    qed.mpi.run_distributed("./chain12", method="lanczos", n_ranks=8)
+
+# Full continued-fraction S(Q,omega) driver:
+qed.dssf.run_from_directory("./chain12", method="LANCZOS")
+```
+
 A full distributed (MPI) ground state on a 24-site chain:
 
 ```bash
@@ -107,10 +192,11 @@ mpiexec -n 4 ./build/examples/ex05_mpi_distributed_lanczos
 The legacy production workflow — Python `edlib` helper writes `InterAll.dat`,
 `Trans.dat`, `positions.dat` into a directory; `./ED <directory>` consumes
 them; results land in `<directory>/output/ed_results.h5` — is fully
-preserved alongside these new in-process modes. For a comprehensive
-catalogue of every supported invocation pattern (legacy directory →
-binary, config files, `ED dssf` subcommand, `quantum_ed` Python API, NLCE
-pipeline, distributed MPI driver, raw C++ linkage) see
+preserved alongside the new in-process and `ed_input`-builder modes. For
+a comprehensive catalogue of every supported invocation pattern (legacy
+directory → binary, config files, `ED dssf` subcommand, `quantum_ed`
+Python API, NLCE pipeline, distributed MPI driver, raw C++ linkage, and
+the new `ed_input` C++/Python lattice + Hamiltonian builder) see
 [`docs/guides/usage.md`](docs/guides/usage.md).
 
 ---
@@ -173,9 +259,9 @@ distributed solvers, see
 
 ```
 exact_diagonalization_cpp/
-├── include/ed/             # Public C++ API (operator, solvers, distributed/, gpu/, io/)
-├── src/                    # Implementations + apps (ed_main, ed_distributed_main)
-├── python/quantum_ed/      # pybind11 bindings + DSSF / Hamiltonian / symmetry helpers
+├── include/ed/             # Public C++ API (operator, solvers, distributed/, gpu/, io/, input/)
+├── src/                    # Implementations + apps (ed_main, ed_distributed_main, src/input/)
+├── python/quantum_ed/      # pybind11 bindings + DSSF / Hamiltonian / symmetry / input helpers
 ├── workflows/nlce/         # Numerical Linked Cluster Expansion (geometries × pipelines × workflow)
 ├── examples/               # Runnable end-to-end examples (one per use case)
 ├── benchmarks/             # Google-Benchmark micros + bench_all_backends.py
@@ -202,7 +288,10 @@ exact_diagonalization_cpp/
 | Install everything | [`docs/guides/install.md`](docs/guides/install.md) |
 | Get a 5-minute C++ tour | [`docs/guides/quickstart.md`](docs/guides/quickstart.md) |
 | Get a 5-minute Python tour | [`docs/guides/python_quickstart.md`](docs/guides/python_quickstart.md) |
-| See **every way** the toolkit can be invoked (legacy `edlib → ./ED`, configs, `dssf` subcommand, `quantum_ed`, NLCE, MPI, raw C++) | [`docs/guides/usage.md`](docs/guides/usage.md) |
+| See **every way** the toolkit can be invoked (legacy `edlib → ./ED`, configs, `dssf` subcommand, `quantum_ed`, NLCE, MPI, raw C++, **and the new `ed_input` C++/Python builder**) | [`docs/guides/usage.md`](docs/guides/usage.md) |
+| See what `import quantum_ed` does **and does not** cover vs `./ED` (incl. the `quantum_ed.input` C++-backed builder) | [`docs/guides/python_api_coverage.md`](docs/guides/python_api_coverage.md) |
+| Walk every advanced Python entry point — single-call dispatcher across ~30 backends, in-process symmetry projection, GPU per-sector dispatch, MPI launcher, full `./ED dssf` driver | [`docs/guides/python_advanced.md`](docs/guides/python_advanced.md) |
+| Map every static lib, source leaf, and `ED` → solver path | [`docs/architecture/CODEMAP.md`](docs/architecture/CODEMAP.md) |
 | Pick the right solver | [`docs/architecture/IMPLEMENTATION_REPORT.md`](docs/architecture/IMPLEMENTATION_REPORT.md) |
 | Understand performance ceilings | [`docs/architecture/SCALING.md`](docs/architecture/SCALING.md) |
 | Reproduce the published numbers | [`docs/benchmarks/BENCHMARKS.md`](docs/benchmarks/BENCHMARKS.md) |
@@ -215,18 +304,200 @@ exact_diagonalization_cpp/
 
 ## Solver matrix
 
-| Method                           | CPU | GPU | MPI | Notes |
-|----------------------------------|:---:|:---:|:---:|-------|
-| `full_diagonalization`           | ✓   | —   | —   | LAPACK / Eigen for `dim ≲ 1e4`. |
-| `lanczos`                        | ✓   | ✓   | ✓   | Selective reorthogonalization, optional disk-backed Krylov. |
-| `block_lanczos`, `arpack`, `KS`, `chebyshev_filter` | ✓ | partial | — | Implemented; see `include/ed/solvers/`. |
-| `finite_temperature_lanczos`     | ✓   | ✓   | ✓   | Includes observable expectations `⟨O⟩(β)`. |
-| `low_temperature_lanczos`        | ✓   | —   | —   | Microcanonical-style refinement on top of FTLM. |
-| `tpq` (microcanonical)           | ✓   | ✓   | —   | `tpq.h`, `tpq_gpu.h`. |
-| `tpq_canonical` / `distributed_tpq` | ✓ | ✓ | ✓   | Imaginary-time evolution via Taylor expansion. |
-| DSSF / SSSF (continued fraction) | ✓   | ✓   | partial | `src/dssf/`, GPU kernels in `src/solvers/gpu/`. |
-| Symmetry-projected (`FixedSzOperator`, point group) | ✓ | partial | — | Programmatic DSL via `quantum_ed.symmetry`. |
-| NLCE workflow                    | ✓   | ✓   | —   | `python -m workflows.nlce`. |
+The tables below are the **single capability map** for what backend exists
+in the codebase today; for the **per-interface** breakdown (which of these
+are reachable from `./ED`, from `import quantum_ed`, from the C++ static
+libraries, or from `ed_distributed_main`) see the
+[Capability matrix in `python_api_coverage.md` §0](docs/guides/python_api_coverage.md#0-capability-matrix-c-vs-python-vs-cli).
+
+A cell with **✓** means a header / `--method=` token / library function is
+implemented and tested; **—** means deliberately not implemented (rationale
+listed underneath each table); **stub** means the parser accepts the token
+but the dispatcher throws or no-ops (kept for API stability — listed
+explicitly so callers know not to use it).
+
+### 1. Dense exact diagonalization
+
+Dense ED needs \(O(d^2)\) memory and \(O(d^3)\) time, so it is the
+right tool only for **small-cluster exact spectra, NLCE anchors, and
+regression baselines** — not for the large-\(d\) workflows that motivate
+the rest of this repo.
+
+| Method (CLI token) | CPU | GPU | MPI | Header / source |
+|---|:---:|:---:|:---:|---|
+| `FULL` (and `OSS`) | ✓ | — | — | `include/ed/solvers/full_diagonalization.h` |
+| `SCALAPACK`, `SCALAPACK_MIXED` | ✓ | — | ✓ | `include/ed/solvers/scalapack_diag.h` (needs ScaLAPACK build) |
+| `FULL_GPU` | — | ✓ | — | `src/solvers/gpu/gpu_full_diag.cu` (cuSOLVER `zheevd`) |
+
+**Not present (and not planned):** a single `GPU + MPI` dense token
+(`SCALAPACK_GPU` / `FULL_GPU_MPI`). For \(d\) large enough that one GPU
+no longer fits the dense matrix, dense ED is no longer the right tool —
+the matrix-free `distributed_lanczos_gpu` (NCCL multi-GPU, see §2)
+replaces it. This is the deliberate stop on the dense ladder; multi-GPU
+dense is listed under "deferred, but not load-bearing" in
+[`docs/architecture/IMPLEMENTATION_NOTES.md`](docs/architecture/IMPLEMENTATION_NOTES.md).
+
+### 2. Matrix-free / iterative (Krylov & friends)
+
+| Method (CLI token) | CPU | GPU | MPI | Header / source | Notes |
+|---|:---:|:---:|:---:|---|---|
+| `LANCZOS` (and `LANCZOS_FIXED_SZ`) | ✓ | ✓ (`LANCZOS_GPU`) | ✓ (`distributed_lanczos`, `distributed_lanczos_symmetry`, `distributed_lanczos_gpu`) | `include/ed/solvers/Lanczos.h`, `include/ed/distributed/distributed_lanczos.h`, `src/solvers/gpu/gpu_lanczos.cu` | Workhorse. **MPI flavours**: 1D-slab, orbit-balanced symmetry-projected, fully GPU-resident with NCCL halo. |
+| `BLOCK_LANCZOS` | ✓ | ✓ (`BLOCK_LANCZOS_GPU`, `BLOCK_LANCZOS_GPU_FIXED_SZ`) | — | `src/solvers/gpu/gpu_block_lanczos.cu` | Multiple eigenpairs at once. |
+| `KRYLOV_SCHUR` | ✓ | ✓ (`KRYLOV_SCHUR_GPU`) | — | `src/solvers/gpu/gpu_krylov_schur.cu` | Restart-friendly variant of Lanczos. |
+| `BLOCK_KRYLOV_SCHUR` | ✓ | ✓ (`BLOCK_KRYLOV_SCHUR_GPU`) | — | `src/solvers/gpu/gpu_block_krylov_schur.cu` | Block + restarts. |
+| `DAVIDSON` | ✓ | ✓ (`DAVIDSON_GPU`) | — | `src/solvers/gpu/gpu_ed_wrapper.cu` (`runGPUDavidson`) | Diagonal-preconditioned. |
+| `LOBPCG` | ✓ | ✓ (`LOBPCG_GPU`) | — | `src/solvers/gpu/gpu_ed_wrapper.cu` (`runGPULOBPCG`) | Locally-Optimal Block PCG. |
+| `LANCZOS_SELECTIVE`, `LANCZOS_NO_ORTHO` | ✓ | — | — | `include/ed/solvers/Lanczos.h` | CPU-only orthogonalization variants of `LANCZOS`. |
+| `CHEBYSHEV_FILTERED` | ✓ | — | — | `include/ed/solvers/chebyshev_filtered.h` | Energy-window filter for interior eigenvalues. |
+| `SHIFT_INVERT`, `SHIFT_INVERT_ROBUST` | ✓ | — | — | `include/ed/solvers/shift_invert.h` | Needs sparse LU per shift; no GPU port. |
+| `IMPLICIT_RESTART_LANCZOS` (`IRL`), `THICK_RESTART_LANCZOS` (`TRLAN`) | ✓ | — | — | `include/ed/solvers/{irl,trl}.h` | Legacy restart variants kept for parity with old configs. |
+| `BICG` | ✓ | — | — | `include/ed/solvers/bicg.h` | Linear-solver, not eigensolver. |
+| `ARPACK_SM`, `ARPACK_LM`, `ARPACK_SHIFT_INVERT`, `ARPACK_ADVANCED` | ✓ | — | — | `include/ed/solvers/arpack/*.h` | Wraps the Fortran ARPACK; no GPU equivalent exists upstream. |
+
+**Why several CPU-only tokens have no `_GPU` sibling — and whether to ship one.**
+The six methods that *do* have a GPU port (`LANCZOS`, `BLOCK_LANCZOS`,
+`KRYLOV_SCHUR`, `BLOCK_KRYLOV_SCHUR`, `DAVIDSON`, `LOBPCG`) are the
+modern Krylov / preconditioned subspace family that share a single hot
+loop: dense BLAS-2/3 on a small Krylov basis + one matrix-free SpMV per
+iteration. Porting them to CUDA reuses the same `GPUOperator` SpMV +
+cuBLAS Rayleigh-Ritz path, which is why all six landed at once.
+
+The ones **without** a `_GPU` token are deliberately CPU-only:
+
+* `LANCZOS_SELECTIVE` / `LANCZOS_NO_ORTHO` — research orthogonalization
+  variants that never beat full-reorth Lanczos in practice; the matvec
+  is the bottleneck, and `LANCZOS_GPU` already accelerates that.
+* `CHEBYSHEV_FILTERED` / `SHIFT_INVERT*` — interior-eigenvalue methods.
+  Either needs a polynomial in `H` (so many SpMVs back-to-back, where
+  `LANCZOS_GPU` + restart is competitive on GPU) or a sparse LU
+  (`SuperLU` / `MUMPS` — no production-grade GPU port exists yet for
+  complex Hermitian sparse).
+* `IRL` / `TRLAN` / `BICG` — superseded in this codebase by
+  `KRYLOV_SCHUR` / `BLOCK_KRYLOV_SCHUR` (which **do** have GPU ports);
+  kept only for backward-compat with old `.cfg` files.
+* `ARPACK_*` — ARPACK is a Fortran library; nobody has shipped a
+  drop-in GPU port. The advice is to use `LANCZOS_GPU` or
+  `KRYLOV_SCHUR_GPU` instead, which are strictly more capable.
+
+So **GPU coverage of the iterative family is not "partial" by accident
+— it is complete for every method whose CPU implementation is the
+right tool to begin with**. Filling the remaining cells would require
+either (a) duplicating CPU-Krylov with GPU SpMV, which `LANCZOS_GPU`
+already does, or (b) GPU sparse direct factorization, which is gated on
+upstream library support.
+
+### 3. Finite-temperature methods
+
+| Method (CLI token) | CPU | GPU | MPI | Header / source |
+|---|:---:|:---:|:---:|---|
+| `FTLM` (Finite-Temperature Lanczos) | ✓ | ✓ (`FTLM_GPU`, `FTLM_GPU_FIXED_SZ`) | ✓ (`distributed_ftlm`) | `include/ed/solvers/FTLM.h`, `src/solvers/gpu/gpu_ftlm.cu`, `include/ed/distributed/distributed_ftlm.h` |
+| `LTLM` (Low-Temperature Lanczos) | ✓ | — | — | `include/ed/solvers/LTLM.h` |
+| `HYBRID` (LTLM ⊕ FTLM crossover) | ✓ | — | — | `include/ed/solvers/HybridLTLM.h` |
+
+`LTLM` and `HYBRID` are CPU-only because they are *post-processors* on
+top of Lanczos vectors — once `LANCZOS_GPU` / `FTLM_GPU` produces the
+basis, the LTLM bookkeeping is sub-dominant in wall time. Adding
+`LTLM_GPU` would not materially speed anything up on the workloads
+where these methods actually matter (small `d`, large `β`).
+
+### 4. Thermal Pure Quantum (TPQ) — clarified family tree
+
+Two **physically distinct** algorithms share the "TPQ" name in the
+literature; the enum in `include/ed/core/ed_types.h` keeps them
+separate. Both produce `〈O〉(β)` from a single random `|r〉`, but the
+recipe to evolve `|r〉` to inverse temperature `β` is different.
+
+```
+                                         TPQ
+                                          │
+            ┌─────────────────────────────┴─────────────────────────────┐
+            │ microcanonical (mTPQ, Sugiura 2012)                       │ canonical (cTPQ, Sugiura–Shimizu)
+            │ |k+1⟩ = (Λ − H) |k⟩, Λ chosen by `LargeValue`             │ |ψ(β)⟩ ∝ e^{−βH/2} |r⟩
+            │ then renormalize, β derived a posteriori from ⟨H⟩         │ Taylor-evolve in `delta_beta` substeps
+            ├──────────┬───────────┬─────────────────────────────────── │──────────┬───────────┬─────────────────────────────
+            │ mTPQ     │ mTPQ_GPU  │ mTPQ_MPI                          │ cTPQ     │ cTPQ_GPU  │ ed::distributed::distributed_tpq
+            │ (CPU)    │ (GPU)     │  ── stub: throws,                 │ (CPU)    │ (GPU)     │  (the MPI implementation of cTPQ;
+            │          │           │     parser kept for API stability │          │           │   matrix-free 1D slab + MPI_Alltoallv,
+            │          │ alias:    │                                   │          │           │   sample-parallel, two-level groups)
+            │          │ mTPQ_CUDA │                                   │          │           │
+            │          │ (legacy   │                                   │          │           │
+            │          │ name —    │                                   │          │           │
+            │          │ same code)│                                   │          │           │
+```
+
+The corresponding implementation table:
+
+| Token | CPU | GPU | MPI | Status / source |
+|---|:---:|:---:|:---:|---|
+| `mTPQ` (microcanonical) | ✓ | — | — | `microcanonical_tpq()` in `include/ed/solvers/TPQ.h` |
+| `mTPQ_GPU` (microcanonical, device) | — | ✓ | — | `runGPUMicrocanonicalTPQ[FixedSz]` in `src/solvers/gpu/gpu_tpq.cu` |
+| `mTPQ_CUDA` (deprecated alias of `mTPQ_GPU`) | — | ✓ | — | Same code as `mTPQ_GPU`; only the parser token differs. **Prefer `mTPQ_GPU`.** |
+| `mTPQ_MPI` | — | — | — | **stub** — the parser recognizes `--method=mTPQ_MPI` but the dispatcher throws `mTPQ_MPI not available` with the message "Use standard mTPQ instead". *No microcanonical MPI driver exists; the TPQ "MPI story" is canonical-only via `distributed_tpq`.* |
+| `cTPQ` (canonical) | ✓ | — | — | `canonical_tpq()` in `include/ed/solvers/TPQ.h` |
+| `cTPQ_GPU` (canonical, device) | — | ✓ | — | `runGPUCanonicalTPQ[FixedSz]` in `src/solvers/gpu/gpu_tpq.cu` |
+| `ed::distributed::distributed_tpq` | — | — | ✓ | **Not** a `parseMethod` token — C++/MPI library function in `include/ed/distributed/distributed_tpq.h`. Implements *canonical* TPQ (same physics as `cTPQ` / `cTPQ_GPU`) on MPI ranks; sample-parallel two-level groups, Taylor-truncated `e^{−(δβ/2)H}` per substep, one `MPI_Alltoallv` per matvec. Driven by `examples/08_mpi_distributed_tpq.cpp`. |
+
+**Decision tree — which TPQ token should I use?**
+
+1. Pick the **physics convention** first, *not* the backend.
+   * **Canonical (cTPQ / `cTPQ*` / `distributed_tpq`)** if you want
+     `〈O〉(β)` at a *fixed schedule of `β` values*, especially across a
+     wide temperature range. The `delta_beta` Taylor recipe is the
+     standard high-precision path for thermodynamics.
+   * **Microcanonical (mTPQ / `mTPQ*`)** if you want the
+     "energy-shell quench" recipe — useful when `β(k)` derived a
+     posteriori from `⟨H⟩` is the natural axis (many condensed-matter
+     papers do it this way). It is also marginally cheaper per step
+     (one matvec + one renorm), at the price of needing a `LargeValue`
+     hyperparameter.
+2. Then pick the **backend** by problem size:
+   * Single GPU available → `cTPQ_GPU` (or `mTPQ_GPU`).
+   * Multi-rank without GPU → `ed::distributed::distributed_tpq`
+     (canonical only; if you genuinely need *microcanonical* MPI you
+     must split your samples across independent CPU `mTPQ` runs by
+     hand and average yourself — see §3 of
+     [`docs/architecture/IMPLEMENTATION_NOTES.md`](docs/architecture/IMPLEMENTATION_NOTES.md)).
+   * Single-node, single-CPU → `cTPQ` or `mTPQ`.
+3. **Avoid** `mTPQ_CUDA` (use `mTPQ_GPU`; identical code, less
+   confusing name) and `mTPQ_MPI` (stub that throws).
+
+### 5. Symmetry projection
+
+| Capability | CPU | GPU | MPI | Header / source |
+|---|:---:|:---:|:---:|---|
+| In-process symmetry-projected `Operator` (attach `SymmetryGroupInfo`, call `generateSymmetrySectorsHDF5()`) | ✓ | — | — | `include/ed/symmetry/group.h`, `include/ed/core/construct_ham.h` |
+| Streaming symmetry (`StreamingSymmetryOperator`, no disk basis storage) | ✓ | ✓ | — | `include/ed/core/ed_wrapper_streaming.h` (CLI: `./ED <dir> --symm --method=…`) |
+| GPU dispatch per symmetry sector (`GPUSymmetrizedOperator` + matvec on device) | — | ✓ | — | `src/solvers/gpu/gpu_symmetrized_operator.cu` (called automatically by streaming-symmetry when `--method=` is one of `LANCZOS_GPU`, `BLOCK_LANCZOS_GPU`, `DAVIDSON_GPU`, `KRYLOV_SCHUR_GPU`, `BLOCK_KRYLOV_SCHUR_GPU`, `FULL_GPU`) |
+| Distributed symmetry-projected SpMV (orbit-balanced row partition + orbit-aware `MPI_Alltoallv`) | — | — | ✓ | `include/ed/distributed/distributed_symmetry_operator.h` (driver: `distributed_lanczos_symmetry`) |
+| Programmatic symmetry DSL (`translation`, `reflection_1d`, `site_swap`, `compose`, `power`, `generate_group`, `translation_group_with_reflection_1d`) | ✓ | n/a | n/a | `include/ed/symmetry/group.h` (Python: `quantum_ed.symmetry.*`) |
+
+So the symmetry-projected stack **does** have GPU support, contra the
+old README row that said "partial":
+`./ED <dir> --symm --method=LANCZOS_GPU` is the CLI form,
+`dispatchGPUSymmetrizedSector()` is the C++ form, and per-sector device
+kernels live in `gpu_symmetrized_operator.cu`. What is **deliberately
+not present** is GPU dispatch for **streaming symmetry's CPU-only
+solvers** (LTLM-by-sector, Hybrid-by-sector) — those remain CPU because
+their CPU implementation is sub-dominant once the per-sector matvec
+is on the device.
+
+### 6. Fixed-Sz
+
+| Capability | CPU | GPU | MPI | Header / source |
+|---|:---:|:---:|:---:|---|
+| `FixedSzOperator` (combinatorial sector basis) | ✓ | ✓ (`GPUFixedSzOperator`) | — | `include/ed/core/construct_ham.h`, `include/ed/gpu/gpu_operator.cuh` |
+| Every CPU iterative / thermal / dense solver above on a fixed-Sz sector | ✓ | n/a | n/a | Same call signature as the full-Hilbert version; pass `fop.apply` and `fop.getFixedSzDim()`. |
+| Per-Sz GPU variants (`runGPULanczosFixedSz`, `runGPUBlockLanczosFixedSz`, `runGPUFTLMFixedSz`, `runGPUDavidsonFixedSz`, `runGPULOBPCGFixedSz`, `runGPUMicrocanonicalTPQFixedSz`, `runGPUCanonicalTPQFixedSz`) | — | ✓ | — | `src/solvers/gpu/gpu_ed_wrapper.cu` |
+| Fixed-Sz × space-symmetry (`exact_diagonalization_fixed_sz_symmetrized`) | ✓ | — | — | `include/ed/core/ed_wrapper.h` |
+
+### 7. Other
+
+| Area | CPU | GPU | MPI | Notes |
+|---|:---:|:---:|:---:|---|
+| DSSF / SSSF (`./ED dssf {dynamical_thermal,static_thermal,ground_state_dssf}`) | ✓ | ✓ | partial | `src/dssf/`, `src/solvers/gpu/gpu_dynamics.cu` (`runGPUDynamicalResponse[Thermal]`, `runGPUDynamicalCorrelation*`, `runGPUStaticCorrelation`, `runGPUThermalExpectation`). Distributed DSSF is gated on the deferred TPQ-DSSF Mori continued-fraction work — see [`IMPLEMENTATION_NOTES.md` §6.3](docs/architecture/IMPLEMENTATION_NOTES.md). |
+| BFG order-parameter post-processing | ✓ | ✓ | — | `compute_bfg_order_parameters[_gpu]` binaries; Python `quantum_ed.bfg.*`. |
+| Lattice + Hamiltonian construction (`ed_input` / `quantum_ed.input`) | ✓ | n/a | n/a | `include/ed/input/input.h`; full Python parity. |
+| NLCE driver | ✓ | ✓ | — | Orchestrates `./ED`; the inner solver picks its own backend. |
 
 ---
 

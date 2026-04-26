@@ -1,8 +1,18 @@
 # Python quickstart (`quantum_ed`)
 
-The Python facade lives under the `quantum_ed` package. It is a thin
-`pybind11` layer over the same `ed_solvers_cpu` static library that the C++
-CLI uses, so results are bit-identical.
+The Python facade lives under the `quantum_ed` package. It is a `pybind11`
+layer over the same `ed_solvers_*` static libraries that the C++ CLI
+uses, so results are bit-identical. Since Phase 5 (Apr 2026) it reaches
+**every backend** the CLI knows about (CPU iterative + dense, FTLM /
+LTLM / TPQ, GPU per-method and per-sector, in-process symmetry
+projection, ScaLAPACK) plus thin launcher helpers for the MPI
+distributed solvers and the full `./ED dssf` continued-fraction engine.
+
+This page covers the everyday entry points; for the full advanced
+catalogue (single-call dispatcher across ~30 solver variants, GPU
+streaming symmetry, MPI launcher, build introspection, end-to-end
+worked example) jump to
+[`python_advanced.md`](python_advanced.md).
 
 ## Heisenberg chain in 12 lines
 
@@ -103,6 +113,50 @@ The returned `ObservablePairs` carries three parallel lists --- `obs_1`,
 `obs_2`, `names` --- of equal length. The `Operator` instances inside are the
 same C++ ones bound on the top-level facade, so `qe.lanczos(pair_obs_1)` /
 `qe.finite_temperature_lanczos(...)` work directly on them.
+
+## Single-call dispatcher (Phase 5)
+
+The thin wrappers above (`qe.full_diagonalization`, `qe.lanczos`,
+`qe.finite_temperature_lanczos`, …) cover the everyday cases. For the
+full backend matrix use the dispatcher:
+
+```python
+import quantum_ed as qe
+
+params = qe.EDParameters()
+params.num_eigenvalues = 4
+params.tolerance = 1e-12
+
+# CPU iterative: any of LANCZOS{,_SELECTIVE,_NO_ORTHO}, BLOCK_LANCZOS,
+# KRYLOV_SCHUR, BLOCK_KRYLOV_SCHUR, DAVIDSON, LOBPCG,
+# THICK_RESTART_LANCZOS, IMPLICIT_RESTART_LANCZOS, CHEBYSHEV_FILTERED,
+# SHIFT_INVERT[_ROBUST], BICG, ARPACK_{SM,LM,SR,LR}.
+res = qe.exact_diagonalization_core(
+    op, qe.DiagonalizationMethod.KRYLOV_SCHUR, params,
+)
+
+# Dense (FULL, OSS, SCALAPACK[_MIXED]) and thermal
+# (FTLM, LTLM, HYBRID, mTPQ, cTPQ) flow through the same call.
+
+# GPU per-sector with symmetry projection (large clusters):
+if qe.has_cuda_build():
+    res = qe.exact_diagonalization_streaming_symmetry(
+        "./my_dir", qe.DiagonalizationMethod.LANCZOS_GPU, params,
+    )
+
+# MPI distributed solvers (helper builds the mpiexec / srun argv):
+if qe.has_mpi_build():
+    qe.mpi.run_distributed("./my_dir", method="lanczos", n_ranks=8)
+
+# Full continued-fraction S(Q,omega) engine:
+qe.dssf.run_from_directory("./my_dir", method="LANCZOS")
+```
+
+See [`python_advanced.md`](python_advanced.md) for the full pattern
+catalogue (every `EDParameters` knob, GPU per-method dispatch, in-process
+symmetry round-trip, ScaLAPACK setup, choosing between
+`exact_diagonalization_core` / `_from_directory[_symmetrized]` /
+`_streaming_symmetry[_fixed_sz]`).
 
 ## Backwards compatibility with `edlib`
 

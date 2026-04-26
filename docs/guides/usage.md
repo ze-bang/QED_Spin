@@ -4,17 +4,25 @@
 > **Yes — it is fully preserved and is still the production workhorse.** The
 > `edlib` helpers in `python/edlib/` continue to write `InterAll.dat`,
 > `Trans.dat`, `positions.dat` to a directory of your choosing, and
-> `./ED <directory>` continues to consume them exactly as before. The only
-> things that have changed are *additions*:
+> `./ED <directory>` continues to consume them exactly as before. What was
+> added on top:
 >
-> * a modern in-process Python API (`import quantum_ed`) that lets you build
->   and solve a Hamiltonian without ever touching the file system, and
-> * a small set of C++ examples (`examples/`) that show the same matrix-free
->   API the bindings call into.
+> * a modern **in-process Python API** (`import quantum_ed`) that lets you
+>   build and solve a Hamiltonian without ever touching the file system;
+> * a **standalone C++ `ed_input` library** (`ed::input::HamiltonianBuilder`,
+>   `ed::input::lattice::*`) that reproduces every legacy `edlib.helper_*`
+>   capability through a fluent, header-only-style C++ API — same in-memory
+>   `Operator` *or* the same `InterAll.dat` / `Trans.dat` / `positions.dat`
+>   files the production CLI consumes;
+> * **`quantum_ed.input`** — a thin pybind11 mirror of the same C++
+>   `ed_input` surface, so notebooks can write the directory format (or skip
+>   the disk entirely) with one fluent call;
+> * a runnable `examples/` directory covering each invocation pattern.
 >
-> All three modes (legacy, in-process Python, raw C++) sit on top of the
-> same set of solvers and produce the same HDF5 output schema. Pick the
-> one that fits your workflow; nothing was deprecated.
+> All four modes (legacy `edlib` files, `ed_input` C++/Python builder, raw
+> C++, in-process `quantum_ed`) sit on top of the same set of solvers and
+> produce the same HDF5 output schema. Pick the one that fits your
+> workflow; nothing was deprecated.
 
 This guide is the single reference for **every way you can call this
 toolkit**. It is organized by execution mode, not by solver. For
@@ -31,10 +39,11 @@ solver-specific algorithmic detail see
 6. [Mode 5: NLCE pipeline via `python -m workflows.nlce`](#6-mode-5-nlce-pipeline-via-python--m-workflowsnlce)
 7. [Mode 6: distributed-memory MPI binary `ed_distributed_main`](#7-mode-6-distributed-memory-mpi-binary-ed_distributed_main)
 8. [Mode 7: raw C++ API (link against `ed_solvers_*`)](#8-mode-7-raw-c-api-link-against-ed_solvers_)
-9. [Input file formats reference](#9-input-file-formats-reference)
-10. [Output: the unified `ed_results.h5` schema](#10-output-the-unified-ed_resultsh5-schema)
-11. [Auxiliary tools](#11-auxiliary-tools)
-12. [Where to look next](#12-where-to-look-next)
+9. [Mode 8: standalone `ed_input` C++/Python lattice + Hamiltonian builder](#9-mode-8-standalone-ed_input-cpython-lattice--hamiltonian-builder)
+10. [Input file formats reference](#10-input-file-formats-reference)
+11. [Output: the unified `ed_results.h5` schema](#11-output-the-unified-ed_resultsh5-schema)
+12. [Auxiliary tools](#12-auxiliary-tools)
+13. [Where to look next](#13-where-to-look-next)
 
 ---
 
@@ -45,14 +54,19 @@ solver-specific algorithmic detail see
 | Reproduce a published result on a fixed lattice / coupling sweep, with persistent inputs in version control | **Mode 1** (Python helper → directory → `./ED`) |
 | Write a config file and rerun easily, without remembering 30+ CLI flags                                    | **Mode 2** (`./ED --config=foo.cfg`)            |
 | Compute `S(Q,ω)` or `S(Q)` for a system whose ground state / TPQ states already live in HDF5               | **Mode 3** (`./ED dssf <method> <dir>`)         |
-| Build and solve a small system inside a Jupyter notebook or research script                                | **Mode 4** (`import quantum_ed`)                |
+| Build and solve a system inside a Jupyter notebook or research script -- **including** GPU per-sector, in-process symmetry projection, ARPACK / Krylov-Schur / Davidson / LOBPCG, FTLM/LTLM/TPQ, and ScaLAPACK | **Mode 4** (`import quantum_ed`)                |
+| Launch MPI distributed solvers from Python without touching a shell      | **Mode 4** helper (`quantum_ed.mpi.run_distributed`) |
+| Run the full continued-fraction `S(Q,ω)` engine from Python              | **Mode 4** helper (`quantum_ed.dssf.run_from_directory`) |
 | Run a full Numerical Linked Cluster Expansion (NLCE) on the pyrochlore or triangular lattice               | **Mode 5** (`python -m workflows.nlce`)         |
 | Validate distributed Lanczos / FTLM scaling on a Heisenberg test problem (no input files needed)           | **Mode 6** (`ed_distributed_main`)              |
 | Embed a solver call inside your own C++ program                                                            | **Mode 7** (link against `ed_solvers_cpu` etc.) |
+| Build a Hamiltonian from a textbook lattice (chain / kagome / pyrochlore / …) **without** writing a Python helper, in either C++ or Python, and *optionally* dump the legacy `.dat` files | **Mode 8** (`ed::input` / `quantum_ed.input`)   |
 
-Modes 1–3 share the same `ED` binary; modes 4 and 5 share the same Python
+Modes 1–3 share the same `ED` binary; modes 4, 5 and 8 share the same Python
 package; mode 6 is a self-contained MPI demo binary; mode 7 is the
-unwrapped library API that everything else is built on.
+unwrapped library API that everything else is built on; mode 8 is the
+**modern, programmatic replacement** for the legacy `python/edlib/helper_*`
+file-writing layer (see §9).
 
 ---
 
@@ -403,8 +417,31 @@ that runs this end-to-end on a synthetic 12-site chain.
 
 ## 5. Mode 4: in-process Python via `import quantum_ed`
 
-The modern Python package gives you the same solvers without ever
-writing files. Install once:
+The modern Python package gives you the **full backend surface** in
+process: every CPU iterative method (`LANCZOS` family, `BLOCK_LANCZOS`,
+`KRYLOV_SCHUR`[`_BLOCK`], `DAVIDSON`, `LOBPCG`, `CHEBYSHEV_FILTERED`,
+`SHIFT_INVERT[_ROBUST]`, `IRL` / `TRL`, `BICG`, all four ARPACK
+variants), every dense backend (`FULL`, `OSS`,
+`SCALAPACK[_MIXED]`), every thermal solver (`FTLM`, `LTLM`, `HYBRID`,
+`mTPQ`, `cTPQ`), in-process symmetry projection
+(`Operator.set_symmetry_info_from_dict(...)`), streaming-symmetry ED
+(`exact_diagonalization_streaming_symmetry[_fixed_sz]`) and directory-driven
+ED (`exact_diagonalization_from_directory[_symmetrized]` /
+`exact_diagonalization_fixed_sz_symmetrized`). GPU per-sector dispatch
+is reached by passing any `*_GPU` `DiagonalizationMethod` value to the
+streaming or directory dispatcher. The MPI distributed solvers and the
+full continued-fraction `./ED dssf` engine are reached through thin
+launcher helpers (`quantum_ed.mpi.run_distributed`,
+`quantum_ed.dssf.run_from_directory`) — no `subprocess` boilerplate
+required.
+
+The complete C++ ↔ Python ↔ CLI capability matrix lives in
+[python_api_coverage.md §0](python_api_coverage.md#0-capability-matrix-c-vs-python-vs-cli).
+For the full advanced-pattern catalogue (when to call which dispatcher,
+how to attach symmetries, how to gate GPU vs CPU code paths with
+`qed.has_cuda_build()`), see [python_advanced.md](python_advanced.md).
+
+Install once:
 
 ```bash
 pip install -v ./python   # builds the `quantum_ed._core` extension
@@ -412,9 +449,22 @@ pip install -v ./python   # builds the `quantum_ed._core` extension
 
 ### 5.1 Build a Hamiltonian
 
-Three options, in order of decreasing convenience:
+Four options, in order of decreasing convenience:
 
-**(a) Fluent DSL** (`quantum_ed.hamiltonian.Hamiltonian`):
+**(a) `quantum_ed.input` C++-backed builder** (recommended, **Mode 8**;
+mirrors the standalone C++ `ed::input` library — see §9):
+
+```python
+import quantum_ed as qed
+
+lat = qed.input.lattice.chain(12, pbc=True)
+op  = (qed.input.HamiltonianBuilder(lat.num_sites)
+              .heisenberg(lat.nn_pairs(), J=1.0)
+              .on_site_field(h_z=0.1)
+              .to_operator())
+```
+
+**(b) Pure-Python fluent DSL** (`quantum_ed.hamiltonian.Hamiltonian`):
 
 ```python
 from quantum_ed.hamiltonian import Hamiltonian
@@ -425,7 +475,7 @@ H = (Hamiltonian(num_sites=12, spin=0.5, n_up=6)
         .build())                  # returns FixedSzOperator (n_up set)
 ```
 
-**(b) Raw `Operator` API** (matches the C++ class one-to-one):
+**(c) Raw `Operator` API** (matches the C++ class one-to-one):
 
 ```python
 import quantum_ed as qed
@@ -435,7 +485,8 @@ op.add_two_body(qed.OP_SPLUS, 0, qed.OP_SMINUS, 1, 0.5)
 op.add_two_body(qed.OP_SMINUS, 0, qed.OP_SPLUS, 1, 0.5)
 ```
 
-**(c) Load a directory written by an `edlib` helper** (Mode 1 hybrid):
+**(d) Load a directory written by an `edlib` helper or `qed.input`**
+(Mode 1 / Mode 8 hybrid):
 
 ```python
 op = qed.Operator(num_sites=12)
@@ -445,22 +496,92 @@ op.load_trans("my_chain12/Trans.dat")
 
 ### 5.2 Solve
 
+There are now two equivalent paths: the **legacy thin wrappers**
+(`qed.full_diagonalization`, `qed.lanczos`,
+`qed.finite_temperature_lanczos`, `qed.low_temperature_lanczos`,
+`qed.hybrid_thermal_method`) and the **single-call dispatcher**
+(`qed.exact_diagonalization_core(op, method, params)`). The dispatcher
+unlocks every additional method (`BLOCK_LANCZOS`, `KRYLOV_SCHUR`,
+`DAVIDSON`, `LOBPCG`, every ARPACK variant, `mTPQ` / `cTPQ`, …) so it
+is the recommended modern entry point.
+
+Legacy thin wrappers (still supported, identical numerics):
+
 ```python
 e_full = qed.full_diagonalization(op)            # dim must be small
 e_low  = qed.lanczos(op, max_iter=200, exct=3, tolerance=1e-10)
 
-# Finite temperature
 ftlm_p = qed.FTLMParameters()
 ftlm_p.krylov_dim = 100
 ftlm_p.num_samples = 32
 res = qed.finite_temperature_lanczos(op, ftlm_p,
                                      temp_min=0.01, temp_max=10.0,
                                      num_temp_bins=50)
-print(res["temperatures"], res["energy"], res["specific_heat"])
 ```
 
-`compute_thermodynamics_from_spectrum`, `low_temperature_lanczos`, and
-`hybrid_thermal_method` follow the same shape.
+Phase 5 dispatcher (every backend, one entry point):
+
+```python
+params = qed.EDParameters()
+params.num_eigenvalues = 4
+params.max_iterations = 400
+params.tolerance = 1e-12
+
+# CPU iterative (any of LANCZOS family, BLOCK_LANCZOS, KRYLOV_SCHUR,
+# BLOCK_KRYLOV_SCHUR, DAVIDSON, LOBPCG, CHEBYSHEV_FILTERED,
+# SHIFT_INVERT[_ROBUST], IRL/TRL, BICG, ARPACK_*).
+result = qed.exact_diagonalization_core(
+    op, qed.DiagonalizationMethod.KRYLOV_SCHUR, params,
+)
+print("E0..E3 =", sorted(result.eigenvalues)[:4])
+
+# Dense (FULL, OSS, SCALAPACK[_MIXED] when qed.has_scalapack_build()).
+result = qed.exact_diagonalization_core(
+    op, qed.DiagonalizationMethod.FULL, params,
+)
+
+# Thermal (FTLM, LTLM, HYBRID, mTPQ, cTPQ).
+fparams = qed.EDParameters()
+fparams.num_samples = 32
+fparams.ftlm_krylov_dim = 80
+fparams.temp_min, fparams.temp_max, fparams.num_temp_bins = 0.05, 5.0, 80
+result = qed.exact_diagonalization_core(
+    op, qed.DiagonalizationMethod.FTLM, fparams,
+)
+T  = result.thermo_data.temperatures
+Cv = result.thermo_data.specific_heat
+
+# GPU per-method (LANCZOS_GPU, FULL_GPU, mTPQ_GPU, ...) via the
+# directory dispatcher. Requires WITH_CUDA=ON; check qed.has_cuda_build().
+if qed.has_cuda_build():
+    gpu_result = qed.exact_diagonalization_from_directory(
+        "./my_chain12", qed.DiagonalizationMethod.LANCZOS_GPU, params,
+    )
+
+# GPU per-sector (LANCZOS_GPU, BLOCK_LANCZOS_GPU, ...) via the
+# streaming-symmetry dispatcher (the right path for the largest clusters).
+if qed.has_cuda_build():
+    sym_result = qed.exact_diagonalization_streaming_symmetry(
+        "./my_kagome24", qed.DiagonalizationMethod.LANCZOS_GPU, params,
+    )
+
+# MPI distributed solvers via mpiexec ed_distributed_main (no in-process
+# MPI_Init -- the helper just builds the right launcher argv).
+if qed.has_mpi_build():
+    qed.mpi.run_distributed(
+        "./my_chain32", method="lanczos", n_ranks=8,
+        launcher="srun", launcher_args=("--bind-to=core",),
+        extra_args=("--max-iter", "400"),
+    )
+```
+
+The dispatcher's `EDParameters` exposes every C++-side knob (block
+size, ARPACK NCV, FTLM Krylov dim, TPQ Taylor order, ScaLAPACK process
+grid, etc.) as a read/write Python attribute -- see
+[`include/ed/core/ed_parameters.h`](../../include/ed/core/ed_parameters.h)
+for the full inventory and
+[python_advanced.md](python_advanced.md) for runnable patterns covering
+each backend family.
 
 ### 5.3 Build observable pairs for DSSF
 
@@ -494,8 +615,21 @@ info = group_from_generators(12, [T, R],
 ```
 
 `info` is the same dict shape that `edlib.automorphism_finder` writes to
-`automorphism_results/`. You can hand it directly to the C++
-sector-projection code.
+`automorphism_results/`. From Phase 5 onwards you can hand it
+**directly** to an in-process `Operator` (no JSON detour) and then
+solve in any sector:
+
+```python
+op.set_symmetry_info_from_dict(info)        # also works on FixedSzOperator
+result = qed.exact_diagonalization_streaming_symmetry(
+    "./my_chain12", qed.DiagonalizationMethod.LANCZOS, qed.EDParameters(),
+)
+```
+
+The directory-mode equivalents are
+`exact_diagonalization_from_directory_symmetrized` and
+`exact_diagonalization_fixed_sz_symmetrized` -- they read the
+`automorphism_results/` JSON tree the legacy CLI uses.
 
 ### 5.5 BFG / cluster observables
 
@@ -530,6 +664,56 @@ with hdf5_io.EDResultsReader("my_pyrochlore_run/output/ed_results.h5") as r:
 
 You can freely mix: write inputs in Python, run `./ED`, read HDF5 back in
 Python. That is how every NLCE pipeline is glued.
+
+### 5.7 Build introspection, MPI, and the `./ED dssf` driver
+
+Three small helpers close the remaining gaps to the CLI.
+
+```python
+import quantum_ed as qed
+
+qed.has_cuda_build()        # WITH_CUDA=ON at build time?
+qed.has_mpi_build()         # WITH_MPI=ON?
+qed.has_scalapack_build()   # WITH_SCALAPACK=ON?
+```
+
+Use them to gate GPU / MPI / ScaLAPACK code paths cleanly. The
+dispatcher will of course raise informatively if you ask for, say,
+`LANCZOS_GPU` on a CPU-only build, but conditional gating lets a single
+script run on both a laptop and an HPC node without try/except.
+
+The MPI distributed solvers cannot be hosted inside one Python process
+(they need `MPI_Init` across ranks), so we expose them as a launcher:
+
+```python
+result = qed.mpi.run_distributed(
+    directory="./my_chain32",
+    method="lanczos",                # any value listed in qed.mpi.MPI_METHODS
+    n_ranks=8,
+    launcher="srun",                 # or "mpiexec" (default)
+    launcher_args=("--bind-to=core",),
+    extra_args=("--max-iter", "400"),
+    capture_output=True,
+)
+print(result.stdout)
+```
+
+The full continued-fraction `./ED dssf <method> <dir>` engine is wrapped
+the same way:
+
+```python
+qed.dssf.run_from_directory(
+    directory="./my_chain12",
+    method="LANCZOS",                # or "BICG", "FULL", "FTLM", ...
+    extra_args=("--num_eigenvalues", "1"),
+)
+```
+
+Both helpers find `ed_distributed_main` / `ED` on `$PATH` automatically
+and let you override via `binary=...`. Together with §5.1–5.6 this
+gives the Python package functional parity with every `./ED ...` mode
+the CLI ships -- see [python_advanced.md](python_advanced.md) for an
+end-to-end worked example.
 
 ---
 
@@ -622,19 +806,23 @@ which build with `-DED_BUILD_EXAMPLES=ON` and ship as
 
 ## 8. Mode 7: raw C++ API (link against `ed_solvers_*`)
 
-When you want to embed a solver into your own C++ research code, link
-against the static libraries the build produces:
+This is the **complete** programmatic surface. Every backend the `./ED`
+binary itself uses — CPU iterative, full dense, GPU, MPI distributed,
+symmetry-projected, streaming symmetry, fixed-Sz — is exposed through
+public headers and the static libraries below. Pick the libraries you
+need and link.
 
 | Static library      | Purpose                                                                  |
 |---------------------|--------------------------------------------------------------------------|
 | `ed_core`           | `Operator`, `FixedSzOperator`, basis types, file loaders.                 |
 | `ed_io`             | `HDF5IO` reader/writer, checkpointing.                                    |
-| `ed_solvers_cpu`    | Every CPU solver (`lanczos`, `full_diagonalization`, `finite_temperature_lanczos`, ...). |
-| `ed_solvers_gpu`    | GPU equivalents (`GPUOperator`, `GPULanczos`, `gpu_ftlm`, ...).            |
+| `ed_solvers_cpu`    | Every CPU solver (`lanczos`, `block_lanczos`, `chebyshev_filtered_lanczos`, `krylov_schur`, `davidson_method`, `arpack_*`, `microcanonical_tpq`, `canonical_tpq`, `finite_temperature_lanczos`, `low_temperature_lanczos`, `hybrid_thermal_method`, `full_diagonalization`, ...). |
+| `ed_solvers_gpu`    | GPU equivalents — class `GPUOperator` / `GPULanczos` plus the `GPUEDWrapper` static façade (`runGPULanczos`, `runGPUFTLM`, `runGPUMicrocanonicalTPQ`, `runGPUCanonicalTPQ`, `runGPUFullDiag`, `runGPUDavidson`, `runGPULOBPCG`, `runGPUKrylovSchur`, `runGPUDynamicalResponse[Thermal]`, `runGPUDynamicalCorrelation[State,MultiTemp,StateCF]`, `runGPUStaticCorrelation`, `runGPUThermalExpectation`, …). Per-Sz variants `*FixedSz`. |
 | `ed_dssf`           | `ed::dssf::run` engine, observable assembly.                              |
-| `ed_distributed`    | `ed::distributed::DistributedOperator`, `distributed_lanczos`, `distributed_ftlm`, `distributed_tpq`. |
-| `ed_symmetry`       | Programmatic symmetry DSL.                                                |
+| `ed_distributed`    | `DistributedOperator`, `DistributedSymmetryOperator`, `DistributedGPUOperator`, `distributed_lanczos[_eigenvectors,_symmetry,_gpu]`, `distributed_ftlm`, `distributed_tpq`, multi-GPU NCCL helpers. |
+| `ed_symmetry`       | Programmatic symmetry DSL (`ed::sym::translation`, `reflection_1d`, `group_from_generators`, `translation_group_1d`, `translation_group_with_reflection_1d`, ...). |
 | `ed_bfg`            | BFG cluster / order-parameter helpers.                                    |
+| `ed_input`          | `ed::input::HamiltonianBuilder` + lattice generators + `.dat` writers (Mode 8). |
 | `ed_cli`            | The workflow + dssf engine seam.                                          |
 
 A minimal CMake consumer (the same setup
@@ -644,11 +832,11 @@ A minimal CMake consumer (the same setup
 find_package(ED CONFIG REQUIRED)            # if you've installed the package
 add_executable(my_app my_app.cpp)
 target_link_libraries(my_app PRIVATE ed_solvers_cpu)
-# Optional add-ons:
-#   ed_solvers_gpu   ed_distributed   ed_dssf   ed_symmetry   ed_bfg
+# Optional add-ons (link only what you use):
+#   ed_solvers_gpu   ed_distributed   ed_dssf   ed_symmetry   ed_bfg   ed_input
 ```
 
-Minimal source:
+### 8.1 Minimal CPU snippet
 
 ```cpp
 #include "ed/core/construct_ham.h"
@@ -657,28 +845,428 @@ Minimal source:
 int main() {
     auto op = std::make_shared<Operator>(/*N=*/12);
     op->loadFromInterAllFile("my_chain12/InterAll.dat");
-    auto res = lanczos(op, /*max_iter=*/200, /*n_eig=*/3, /*tol=*/1e-10);
-    std::cout << "E0 = " << res.eigenvalues[0] << "\n";
+    std::vector<double> eigs;
+    lanczos([&](const Complex* in, Complex* out, int n) { op->apply(in, out, n); },
+            /*N=*/1ULL << 12, /*max_iter=*/200, /*exct=*/3, /*tol=*/1e-10,
+            eigs, /*output_dir=*/"", /*compute_eigenvectors=*/false);
+    std::cout << "E0 = " << eigs[0] << "\n";
 }
 ```
 
-The `examples/` directory has one runnable file per use case; pick the
-closest to yours and adapt:
+### 8.2 Runnable examples
 
-| Example                                                                                                       | Backend          |
-|---------------------------------------------------------------------------------------------------------------|------------------|
-| [`01_cpp_ground_state.cpp`](../../examples/01_cpp_ground_state.cpp)                                           | CPU Lanczos      |
-| [`02_cpp_full_spectrum.cpp`](../../examples/02_cpp_full_spectrum.cpp)                                         | Full diag         |
-| [`03_cpp_ftlm_thermal.cpp`](../../examples/03_cpp_ftlm_thermal.cpp)                                           | CPU FTLM          |
-| [`04_cpp_gpu_lanczos.cpp`](../../examples/04_cpp_gpu_lanczos.cpp)                                             | GPU Lanczos       |
-| [`05_mpi_distributed_lanczos.cpp`](../../examples/05_mpi_distributed_lanczos.cpp)                              | MPI Lanczos        |
-| [`06_mpi_distributed_eigenvectors.cpp`](../../examples/06_mpi_distributed_eigenvectors.cpp)                    | MPI eigenvectors    |
-| [`07_mpi_distributed_ftlm.cpp`](../../examples/07_mpi_distributed_ftlm.cpp)                                    | MPI FTLM          |
-| [`08_mpi_distributed_tpq.cpp`](../../examples/08_mpi_distributed_tpq.cpp)                                      | MPI canonical TPQ |
+The `examples/` directory has one file per use case; pick the closest to
+yours and adapt:
+
+| Example                                                                                                       | Backend                  |
+|---------------------------------------------------------------------------------------------------------------|--------------------------|
+| [`01_cpp_ground_state.cpp`](../../examples/01_cpp_ground_state.cpp)                                           | CPU Lanczos              |
+| [`02_cpp_full_spectrum.cpp`](../../examples/02_cpp_full_spectrum.cpp)                                         | CPU full diag            |
+| [`03_cpp_ftlm_thermal.cpp`](../../examples/03_cpp_ftlm_thermal.cpp)                                           | CPU FTLM                 |
+| [`04_cpp_gpu_lanczos.cpp`](../../examples/04_cpp_gpu_lanczos.cpp)                                             | GPU Lanczos              |
+| [`05_mpi_distributed_lanczos.cpp`](../../examples/05_mpi_distributed_lanczos.cpp)                             | MPI Lanczos              |
+| [`06_mpi_distributed_eigenvectors.cpp`](../../examples/06_mpi_distributed_eigenvectors.cpp)                   | MPI eigenvectors         |
+| [`07_mpi_distributed_ftlm.cpp`](../../examples/07_mpi_distributed_ftlm.cpp)                                   | MPI FTLM                 |
+| [`08_mpi_distributed_tpq.cpp`](../../examples/08_mpi_distributed_tpq.cpp)                                     | MPI canonical TPQ        |
+
+The next four subsections (8.3 – 8.6) are short C++ usage templates for
+the **advanced backends that today are not bound to Python** but are
+fully callable from any C++ program. They mirror the rows marked
+**"yes / —"** in the [Python API coverage matrix](python_api_coverage.md#0-capability-matrix-c-vs-python-vs-cli).
+
+### 8.3 GPU solvers (C++ only; link `ed_solvers_gpu`)
+
+Build with `-DWITH_CUDA=ON`. Two layers exist:
+
+* **`GPUOperator` + `GPULanczos`** — the object-oriented class API used by
+  [`examples/04_cpp_gpu_lanczos.cpp`](../../examples/04_cpp_gpu_lanczos.cpp).
+  Best for ground state / smallest-magnitude Lanczos with custom GPU work.
+* **`GPUEDWrapper`** — a thin static façade in
+  [`include/ed/gpu/gpu_ed_wrapper.h`](../../include/ed/gpu/gpu_ed_wrapper.h)
+  that exposes **every** GPU solver (`runGPUFullDiag` via cuSOLVER zheevd,
+  `runGPUFTLM`, `runGPUMicrocanonicalTPQ`, `runGPUCanonicalTPQ`,
+  `runGPUDavidson`, `runGPULOBPCG`, `runGPUKrylovSchur`,
+  `runGPUBlockKrylovSchur`, all the dynamical-response and
+  static-correlation kernels, plus per-Sz variants `*FixedSz`).
+
+Sketch with the wrapper façade (works the same for any of the
+`runGPU*` methods):
+
+```cpp
+#include <ed/core/construct_ham.h>
+#include <ed/gpu/gpu_ed_wrapper.h>
+
+int main() {
+    Operator cpu_op(/*N=*/16, /*spin=*/0.5f);
+    cpu_op.loadFromFile("my_chain16/Trans.dat");
+    cpu_op.loadFromInterAllFile("my_chain16/InterAll.dat");
+
+    void* gpu_op = nullptr;
+    GPUEDWrapper::createGPUOperatorFromCPU(cpu_op, &gpu_op, /*n_sites=*/16);
+
+    std::vector<double> eigenvalues;
+    GPUEDWrapper::runGPULanczos(gpu_op, /*N=*/1 << 16, /*max_iter=*/200,
+                                /*num_eigs=*/3, /*tol=*/1e-10,
+                                eigenvalues, /*dir=*/"./out",
+                                /*eigenvectors=*/false);
+
+    // GPU FTLM at finite T:
+    GPUEDWrapper::runGPUFTLM(gpu_op, /*N=*/1 << 16,
+                             /*krylov_dim=*/100, /*num_samples=*/32,
+                             /*temp_min=*/0.05, /*temp_max=*/10.0,
+                             /*num_temp_bins=*/50, /*tol=*/1e-10,
+                             /*dir=*/"./out");
+
+    // GPU canonical TPQ at finite β:
+    std::vector<double> tpq_energies;
+    GPUEDWrapper::runGPUCanonicalTPQ(gpu_op, /*N=*/1 << 16,
+                                     /*beta_max=*/100.0, /*num_samples=*/8,
+                                     /*temp_interval=*/10, tpq_energies,
+                                     /*dir=*/"./out");
+
+    GPUEDWrapper::destroyGPUOperator(gpu_op);
+}
+```
+
+For **fixed-Sz on the GPU**, swap the constructor for
+`createGPUFixedSzOperatorDirect(...)` and use `runGPULanczosFixedSz` /
+`runGPUFTLMFixedSz` / `runGPUMicrocanonicalTPQFixedSz` /
+`runGPUCanonicalTPQFixedSz` / `runGPUKrylovSchurFixedSz` /
+`runGPULOBPCGFixedSz` / `runGPUDavidsonFixedSz` etc. — they take an
+extra `n_up` argument and otherwise have the same signatures.
+
+### 8.4 MPI distributed solvers (C++ only; link `ed_distributed`, MPI required)
+
+Build with `-DWITH_MPI=ON`. The four entry points correspond to the
+four examples:
+
+| Function                                  | Header                                        | Example                                                                                                     |
+|-------------------------------------------|-----------------------------------------------|-------------------------------------------------------------------------------------------------------------|
+| `distributed_lanczos`                     | `<ed/distributed/distributed_lanczos.h>`      | [`05_mpi_distributed_lanczos.cpp`](../../examples/05_mpi_distributed_lanczos.cpp)                            |
+| `distributed_lanczos_eigenvectors`        | (same)                                         | [`06_mpi_distributed_eigenvectors.cpp`](../../examples/06_mpi_distributed_eigenvectors.cpp)                  |
+| `distributed_ftlm`                        | `<ed/distributed/distributed_ftlm.h>`         | [`07_mpi_distributed_ftlm.cpp`](../../examples/07_mpi_distributed_ftlm.cpp)                                  |
+| `distributed_tpq`                         | `<ed/distributed/distributed_tpq.h>`          | [`08_mpi_distributed_tpq.cpp`](../../examples/08_mpi_distributed_tpq.cpp)                                    |
+| `distributed_lanczos_symmetry`            | `<ed/distributed/distributed_lanczos.h>`      | (uses `DistributedSymmetryOperator` from `<ed/distributed/distributed_symmetry_operator.h>`; tested in `tests/distributed/test_distributed_symmetry_operator.cpp`) |
+| `distributed_lanczos_gpu` (NCCL)          | `<ed/distributed/distributed_lanczos_gpu.h>`  | (Phase 3c stage 4; uses `DistributedGPUOperator` from `<ed/distributed/distributed_gpu_operator.h>`)         |
+
+Sketch for `distributed_ftlm` (the `_lanczos`, `_tpq`, and
+`_lanczos_symmetry` variants are structurally identical — different
+`Options` struct, same call collective on `MPI_COMM_WORLD`):
+
+```cpp
+#include <mpi.h>
+#include <ed/core/construct_ham.h>
+#include <ed/distributed/distributed_ftlm.h>
+
+int main(int argc, char** argv) {
+    int provided{};
+    MPI_Init_thread(&argc, &argv, MPI_THREAD_FUNNELED, &provided);
+
+    auto op = std::make_shared<Operator>(/*N=*/22);
+    op->loadFromFile("my_run/Trans.dat");
+    op->loadFromInterAllFile("my_run/InterAll.dat");
+
+    ed::distributed::DistributedFtlmOptions opts;
+    opts.n_samples         = 32;
+    opts.n_groups          = 2;          // outer parallelism: 2 sample groups
+    opts.lanczos_max_iter  = 100;
+    opts.betas             = {0.1, 0.5, 1.0, 5.0};
+    opts.observable_op     = my_observable_op;  // optional <O>(β) trace
+
+    auto res = ed::distributed::distributed_ftlm(op, opts, MPI_COMM_WORLD);
+
+    int rank{}; MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    if (rank == 0) {
+        for (std::size_t i = 0; i < opts.betas.size(); ++i) {
+            std::cout << "β=" << opts.betas[i]
+                      << "  Z="  << res.Z[i]
+                      << "  <O>=" << res.O_expectation[i] << "\n";
+        }
+    }
+    MPI_Finalize();
+}
+```
+
+`distributed_lanczos_symmetry` accepts a `DistributedSymmetryOperator`
+constructed from the same `(serial Operator + Lpt-balanced orbit
+partition)` you would otherwise feed `./ED --symm`. `distributed_lanczos_gpu`
+takes a `DistributedGPUOperator` and replaces the per-iteration host
+SpMV with a fully GPU-resident `ncclSendRecv` halo exchange (Phase 3c
+stage 3).
+
+### 8.5 In-process symmetry-projected solve (C++ and Python)
+
+`Operator` has a public `symmetry_info` field
+([`include/ed/core/construct_ham.h`](../../include/ed/core/construct_ham.h)).
+You can build a `SymmetryGroupInfo` programmatically (no JSON detour)
+with the [`ed::sym`](../../include/ed/symmetry/group.h) DSL, attach it to
+your operator, and then call the existing `generateSymmetrySectors*` /
+`exact_diagonalization_*_symmetrized` family:
+
+```cpp
+#include <ed/core/construct_ham.h>
+#include <ed/core/ed_wrapper.h>          // exact_diagonalization_*_symmetrized
+#include <ed/symmetry/group.h>
+
+int main() {
+    Operator op(/*N=*/12, /*spin=*/0.5f);
+    op.loadFromFile("my_chain12/Trans.dat");
+    op.loadFromInterAllFile("my_chain12/InterAll.dat");
+
+    // Programmatic group: D_12 = Z_12 ⋊ Z_2 (translation × reflection).
+    op.symmetry_info = ed::sym::translation_group_with_reflection_1d(/*n_sites=*/12);
+
+    // Now run any sector-aware workflow. Example: per-sector full diag,
+    // saving HDF5 blocks under "./out/sym/".
+    op.generateSymmetrySectorsHDF5("./out/sym",
+                                   /*verbose=*/false,
+                                   /*save_blocks=*/true);
+
+    // Or use the dispatcher from <ed/core/ed_wrapper.h>:
+    EDParameters p;
+    p.num_sites          = 12;
+    p.num_eigenvalues    = 5;
+    p.compute_eigenvectors = true;
+    p.output_dir         = "./out/sym";
+    auto res = exact_diagonalization_from_directory_symmetrized(
+        "./my_chain12", DiagonalizationMethod::LANCZOS, p);
+}
+```
+
+For lattices outside the four built-in 1D groups, build the
+`SymmetryGroupInfo` from a list of permutation generators:
+
+```cpp
+ed::sym::Permutation g0 = ed::sym::translation(N=24, /*shift=*/1);
+ed::sym::Permutation g1 = ed::sym::reflection_1d(N=24);
+op.symmetry_info = ed::sym::group_from_generators(/*n_sites=*/24, {g0, g1});
+```
+
+The same DSL is bound in Python (`quantum_ed.symmetry.*`) and returns
+the identical dict layout. Since Phase 5 (Apr 2026), the
+`Operator.symmetry_info` setter is also bound from Python, so the
+**entire** in-process symmetry-projected pipeline runs without any
+JSON detour:
+
+```python
+info = qed.symmetry.group_from_generators(
+    24, [qed.symmetry.translation(24), qed.symmetry.reflection_1d(24)],
+    sector_quantum_numbers=[0, 0],
+)
+op.set_symmetry_info_from_dict(info)
+result = qed.exact_diagonalization_streaming_symmetry(
+    "./my_chain24", qed.DiagonalizationMethod.LANCZOS, qed.EDParameters(),
+)
+```
+
+### 8.6 Streaming symmetry (C++ and Python; large clusters)
+
+For clusters where the symmetrized basis would not fit in RAM,
+[`<ed/core/ed_wrapper_streaming.h>`](../../include/ed/core/ed_wrapper_streaming.h)
+provides `exact_diagonalization_streaming_symmetry` (and
+`_streaming_symmetry_fixed_sz`), which keep one orbit row at a time and
+optionally cache the orbit basis to HDF5 for restart:
+
+```cpp
+#include <ed/core/ed_wrapper_streaming.h>
+
+int main() {
+    EDParameters p;
+    p.num_sites          = 32;
+    p.num_eigenvalues    = 1;
+    p.tolerance          = 1e-10;
+    p.compute_eigenvectors = false;
+    p.output_dir         = "./out";
+
+    auto res = exact_diagonalization_streaming_symmetry(
+        /*directory=*/"./my_pyrochlore_run",
+        /*method=*/DiagonalizationMethod::LANCZOS,
+        /*params=*/p,
+        /*interaction_filename=*/"InterAll.dat",
+        /*single_site_filename=*/"Trans.dat",
+        /*basis_cache_dir=*/"./my_pyrochlore_run/basis_cache",
+        /*precompute_basis_only=*/false);
+}
+```
+
+This is the underlying call behind `./ED <dir> --streaming-symmetry
+--precompute-basis`. With CUDA enabled it also dispatches per-sector to
+the GPU solvers via `dispatchGPUSymmetrizedSector` (no extra source
+changes required). The same entry point is bound from Python --
+`qed.exact_diagonalization_streaming_symmetry(directory, method, params,
+...)` -- so large-cluster GPU-per-sector runs are scriptable in
+exactly the same way (see [§5.2](#52-solve) and
+[python_advanced.md](python_advanced.md)).
 
 ---
 
-## 9. Input file formats reference
+## 9. Mode 8: standalone `ed_input` C++/Python lattice + Hamiltonian builder
+
+`ed_input` is the **modern programmatic replacement** for the legacy
+`python/edlib/helper_*.py` family. The same surface ships in **two
+languages** that both call the *same* C++ library:
+
+| Surface                              | Header / module                                              |
+|--------------------------------------|--------------------------------------------------------------|
+| C++ (header + static lib)            | `#include <ed/input/input.h>`, link `ed_input`               |
+| Python (pybind11)                    | `import quantum_ed.input as qinput`                          |
+
+It produces:
+
+* a fully populated **in-memory `ed::Operator`** (drop straight into
+  `lanczos`, `full_diagonalization`, `finite_temperature_lanczos`, …), or
+* the **legacy `Trans.dat` / `InterAll.dat` / `ThreeBodyG.dat` /
+  `positions.dat` directory** that `./ED <directory>` reads.
+
+The two paths are bit-identical — `HamiltonianBuilder.write_directory()`
+emits the exact format of §10 — so you can prototype in Python, freeze
+the directory once, and run the production sweep through the existing
+`./ED` CLI without changing a single line.
+
+### 9.1 Capability matrix
+
+| Geometry generator (`ed::input::lattice` / `qinput.lattice`) | Replaces                                            |
+|--------------------------------------------------------------|-----------------------------------------------------|
+| `chain(length, pbc)`                                         | hand-rolled 1D Heisenberg helpers                   |
+| `square(Lx, Ly, pbc)`                                        | `helper_square` (legacy)                            |
+| `triangular(Lx, Ly, pbc)`                                    | `helper_cluster_triangular`                         |
+| `honeycomb(Lx, Ly, pbc)` (Kitaev colour in `Bond.bond_type`) | `helper_honeycomb` / `_BCAO` / `_c3` / `_c3_BCAO`   |
+| `kagome(Lx, Ly, pbc)`                                        | `helper_kagome_bfg` / `_sqrt3`                      |
+| `pyrochlore(Lx, Ly, Lz, pbc)`                                | `helper_pyrochlore` / `helper_pyrochlore_super`     |
+| `from_neighbor_lists(positions, edges, sublattice=...)`      | `helper_cluster` (generic adjacency)                |
+| `from_cluster_file(path)`                                    | `helper_cluster_triangular` `cluster.txt` reader    |
+
+| Hamiltonian shortcut (`HamiltonianBuilder` / `qinput.HamiltonianBuilder`) | Physics                                                       |
+|---------------------------------------------------------------------------|----------------------------------------------------------------|
+| `heisenberg(bonds, J)`                                                    | $J\sum_{\langle ij\rangle}\,\vec S_i\cdot\vec S_j$              |
+| `xxz(bonds, Jxy, Jz)`                                                     | XX-Z anisotropic                                                |
+| `xyz(bonds, Jxx, Jyy, Jzz)`                                               | fully anisotropic XYZ                                           |
+| `ising(bonds, J)`                                                         | $J\sum S^z_iS^z_j$                                              |
+| `transverse_field_ising(bonds, J, h)`                                     | $-J\sum S^zS^z - h\sum S^x$                                     |
+| `kitaev(bonds, bond_axis, K)`                                             | Per-bond Kitaev (axis ∈ {0,1,2} = x/y/z)                        |
+| `dm(bonds, D_per_bond)`                                                   | Dzyaloshinskii–Moriya $\vec D\cdot(\vec S_i\times\vec S_j)$     |
+| `zeeman(h)` / `zeeman_per_site(h_per_site)`                              | Uniform / site-resolved magnetic field                          |
+| `on_site_field(h_z)`                                                      | Single-axis $+h_z\sum S^z_i$                                    |
+| `pyrochlore_non_kramers(lattice, Jxx, Jyy, Jzz)`                          | Non-Kramers Jₚₘₚₘ phase (sublattice-aware)                      |
+| `add_one_body / add_two_body / add_three_body`                            | Low-level escape hatch (matches `Operator::add_*_body` 1:1)     |
+
+Both surfaces also expose the **low-level file writers** (`Trans.dat`,
+`InterAll.dat`, `ThreeBodyG.dat`, `positions.dat`,
+`one_body_correlations*.dat`, `two_body_correlations**.dat`,
+momentum-projected observables) under `ed::input::write_*` /
+`qinput.io.write_*` for callers that want fine-grained control.
+
+### 9.2 C++ usage
+
+```cpp
+#include <ed/input/input.h>
+#include <ed/solvers/lanczos.h>
+
+namespace ein = ed::input;
+
+int main() {
+    // 1. Build the geometry (kagome 2x2 PBC, 12 sites).
+    auto lat = ein::lattice::kagome(/*Lx=*/2, /*Ly=*/2, /*pbc=*/true);
+
+    // 2. Accumulate terms with the fluent shortcut API.
+    auto builder = ein::HamiltonianBuilder(lat.num_sites)
+                       .heisenberg(lat.nn_pairs(), /*J=*/1.0)
+                       .on_site_field(/*h_z=*/0.05);
+
+    // 3a. Path A — in-memory Operator, no file I/O:
+    auto op = builder.to_operator();
+    auto res = lanczos(op, /*max_iter=*/200, /*n_eig=*/3, /*tol=*/1e-10);
+    std::cout << "E0 = " << res.eigenvalues[0] << "\n";
+
+    // 3b. Path B — emit the legacy directory format and then drive ./ED:
+    builder.write_directory("./kagome_2x2", &lat);  // optional Lattice for positions.dat
+    // system("./build/ED ./kagome_2x2 --method=LANCZOS --eigenvalues=3");
+}
+```
+
+CMake hookup:
+
+```cmake
+find_package(ED CONFIG REQUIRED)
+add_executable(my_app my_app.cpp)
+target_link_libraries(my_app PRIVATE ed_input ed_solvers_cpu)
+```
+
+### 9.3 Python usage
+
+The same API in Python (`pip install -v ./python` first):
+
+```python
+import quantum_ed as qed
+
+lat = qed.input.lattice.pyrochlore(2, 2, 2, pbc=True)        # 32 sites
+builder = (qed.input.HamiltonianBuilder(lat.num_sites)
+                  .pyrochlore_non_kramers(lat,
+                                          Jxx=1.0, Jyy=0.5, Jzz=0.7)
+                  .zeeman((0.0, 0.0, 0.05)))
+
+# Path A — in-memory:
+op = builder.to_operator()
+e_low = qed.lanczos(op, max_iter=200, n_eig=3, tol=1e-10)
+print("E0 =", e_low[0])
+
+# Path B — drop into the existing ./ED CLI:
+builder.write_directory("./pyro_2x2x2", lattice=lat)
+# subprocess.run(["./build/ED", "./pyro_2x2x2", "--method=LANCZOS"])
+```
+
+Custom lattices through plain edge lists work the same way (this replaces
+the most common `helper_cluster.py` use case):
+
+```python
+lat = qed.input.lattice.from_neighbor_lists(
+    positions=[(0, 0, 0), (1, 0, 0), (0.5, 1, 0)],
+    nn_pairs=[(0, 1), (1, 2), (2, 0)],
+    sublattice=[0, 1, 2],
+)
+op = qed.input.HamiltonianBuilder(lat.num_sites) \
+              .heisenberg(lat.nn_pairs(), 1.0) \
+              .to_operator()
+```
+
+`FileOptions` controls every output filename / tolerance:
+
+```python
+opts = qed.input.FileOptions()
+opts.tol = 1e-12
+opts.write_lattice_metadata = True   # also dumps a JSON sidecar
+builder.write_directory("./run_dir", lattice=lat, opts=opts)
+```
+
+### 9.4 What lives where
+
+| Component                                  | Path                                                              |
+|--------------------------------------------|-------------------------------------------------------------------|
+| C++ public headers                         | [`include/ed/input/`](../../include/ed/input/)                    |
+| C++ implementation                         | [`src/input/`](../../src/input/)                                  |
+| pybind11 bindings                          | [`python/quantum_ed/_bindings/input_bindings.cpp`](../../python/quantum_ed/_bindings/input_bindings.cpp) |
+| Python facade                              | [`python/quantum_ed/input.py`](../../python/quantum_ed/input.py)  |
+| Catch2 unit tests                          | `tests/unit/test_input_library.cpp`                              |
+| pytest suite                               | [`python/tests/test_input.py`](../../python/tests/test_input.py)  |
+
+### 9.5 When to use Mode 1 vs Mode 8
+
+* **Use Mode 8** when you would otherwise hand-write a one-off
+  `helper_*.py`, want notebook-friendly construction, or want the same
+  Hamiltonian to flow through *both* Python and `./ED` (Path B emits the
+  exact same files).
+* **Keep Mode 1** for archived production runs whose `InterAll.dat`
+  already lives in version control, or when an `edlib` helper does
+  something `ed_input` does not (e.g. random-disorder sweeps wired into
+  the `helper_pyrochlore_super` driver).
+
+The two are interoperable: `Operator.load_inter_all` /
+`Operator.load_trans` consume Mode-8 output, and Mode 8 will happily
+load a `cluster.txt` written by Mode 1's `helper_cluster*` family.
+
+---
+
+## 10. Input file formats reference
 
 All three plain-text inputs follow the same mVMC-derived header style:
 five header lines (the second of which contains a `numLines` token after
@@ -767,7 +1355,7 @@ the most reliable schema reference.
 
 ---
 
-## 10. Output: the unified `ed_results.h5` schema
+## 11. Output: the unified `ed_results.h5` schema
 
 Every `./ED` invocation (and every Python solver call that takes an
 `output_dir`) writes a single HDF5 file `ed_results.h5` in the output
@@ -803,7 +1391,7 @@ of distributed solvers, use the C++ API directly).
 
 ---
 
-## 11. Auxiliary tools
+## 12. Auxiliary tools
 
 ### Energy-current operators (thermal Hall, κ\_xy)
 
@@ -837,7 +1425,7 @@ the canonical write-up of the numbers.
 
 ---
 
-## 12. Where to look next
+## 13. Where to look next
 
 * [`docs/guides/install.md`](install.md) — build prerequisites, OS notes.
 * [`docs/guides/quickstart.md`](quickstart.md) — a 5-minute C++ tour.

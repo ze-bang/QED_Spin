@@ -329,6 +329,46 @@ target_compile_options(ed_symmetry PRIVATE
 set_target_properties(ed_symmetry PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
 # -----------------------------------------------------------------------------
+# ed_input: standalone C++ lattice + Hamiltonian builder (replaces the
+# `python/edlib/helper_*.py` family).
+#
+# Three TUs:
+#   * lattice.cpp                -- 1D / 2D / 3D lattice generators (chain,
+#                                   square, triangular, honeycomb, kagome,
+#                                   pyrochlore, custom-from-edges,
+#                                   cluster.txt).
+#   * hamiltonian_builder.cpp    -- fluent term accumulator with shortcuts
+#                                   for Heisenberg / XXZ / XYZ / Ising /
+#                                   Kitaev / DM / Zeeman / pyrochlore
+#                                   non-Kramers + emit_into(Operator&) /
+#                                   write_directory(...) outputs.
+#   * file_io.cpp                -- low-level Trans.dat / InterAll.dat /
+#                                   ThreeBodyG.dat / positions.dat /
+#                                   one_body_correlations*.dat /
+#                                   two_body_correlations**.dat writers.
+#
+# `ed_input` PUBLIC-links `ed_core` because `HamiltonianBuilder::emit_into`
+# touches `Operator::transform_data_` / `three_body_data_` directly (matching
+# the way the existing `addOneBody` / `addTwoBody` shortcuts in
+# construct_ham.h push records into those vectors). The only consumers of
+# `ed_input` are (i) the new examples under examples/, (ii) the pybind11
+# bindings under python/quantum_ed/_input.cpp, and (iii) the unit tests in
+# tests/unit/test_input_*.cpp -- the production `./ED <dir>` driver does
+# not depend on it.
+# -----------------------------------------------------------------------------
+add_library(ed_input STATIC
+    ${SRC_DIR}/input/lattice.cpp
+    ${SRC_DIR}/input/hamiltonian_builder.cpp
+    ${SRC_DIR}/input/file_io.cpp
+)
+target_include_directories(ed_input PUBLIC ${_ED_PUBLIC_INCLUDES})
+target_link_libraries(ed_input PUBLIC ed_core)
+target_compile_options(ed_input PRIVATE
+    $<$<COMPILE_LANGUAGE:CXX>:${CPU_OPT_FLAGS}>
+)
+set_target_properties(ed_input PROPERTIES POSITION_INDEPENDENT_CODE ON)
+
+# -----------------------------------------------------------------------------
 # ed_bfg: BFG order-parameter library (P2.1).
 #
 # Houses the kagome / pyrochlore-superlattice geometry loader plus the

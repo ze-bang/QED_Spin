@@ -53,6 +53,9 @@
 #include <ed/bfg/wavefunction_io.h>
 #include <ed/symmetry/group.h>
 
+#include "dispatcher_bindings.h"
+#include "input_bindings.h"
+
 #include <complex>
 #include <cstdint>
 #include <functional>
@@ -318,6 +321,17 @@ PYBIND11_MODULE(_core, m) {
     m.attr("OP_SPLUS")  = py::int_(0);
     m.attr("OP_SMINUS") = py::int_(1);
     m.attr("OP_SZ")     = py::int_(2);
+
+    // Standalone ed_input C++ library bindings (lattice generators +
+    // HamiltonianBuilder + low-level file writers). Mounted under
+    // `quantum_ed._core.input`; re-exported as `quantum_ed.input` from
+    // the Python facade.
+    bind_input(m);
+
+    // NOTE: bind_dispatcher() runs at the END of the module (after
+    // Operator and FixedSzOperator are registered) because it attaches
+    // `set_symmetry_info_from_dict` / `get_symmetry_info_as_dict` methods
+    // to those classes via m.attr("Operator").
 
     py::class_<Operator>(m, "Operator", R"pbdoc(
         Spin-1/2 Hamiltonian builder backed by the C++ matrix-free apply().
@@ -1174,4 +1188,12 @@ PYBIND11_MODULE(_core, m) {
         "precomputed `<S^-_i S^+_j>` and `<S^z_i S^z_j>` tables. "
         "Both inputs are site-by-site `n_sites x n_sites` matrices. "
         "Returns a `StructureFactorResult`.");
+
+    // -------------------------------------------------------------------------
+    // Phase 5 (Apr 2026): high-level dispatcher + symmetry setter +
+    // streaming/directory dispatchers + build introspection. Must run AFTER
+    // Operator and FixedSzOperator are bound (it attaches symmetry methods
+    // to them via m.attr("Operator")). See dispatcher_bindings.{h,cpp}.
+    // -------------------------------------------------------------------------
+    bind_dispatcher(m);
 }

@@ -7,6 +7,305 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — Phase 5: full Python parity with the C++/CLI advanced backends
+
+The `quantum_ed` Python package previously exposed only a curated CPU
+subset (full diagonalization, Lanczos, FTLM/LTLM/hybrid, observable
+construction, BFG post-processing). Phase 5 closes the remaining gaps
+identified in the Phase 4 capability matrix so that `import quantum_ed`
+now reaches **every backend the `./ED` CLI knows about**.
+
+- **High-level dispatcher bound from Python** (new
+  `python/quantum_ed/_bindings/dispatcher_bindings.{h,cpp}`):
+  - `quantum_ed.exact_diagonalization_core(op, method, params)` is the
+    single entry point that fans out to ~30 CPU solver variants:
+    `LANCZOS` / `LANCZOS_SELECTIVE` / `LANCZOS_NO_ORTHO`,
+    `BLOCK_LANCZOS`, `KRYLOV_SCHUR`, `BLOCK_KRYLOV_SCHUR`, `DAVIDSON`,
+    `LOBPCG`, `THICK_RESTART_LANCZOS`, `IMPLICIT_RESTART_LANCZOS`,
+    `CHEBYSHEV_FILTERED`, `SHIFT_INVERT[_ROBUST]`, `BICG`,
+    every `ARPACK_*` variant, the dense `FULL`/`OSS`/`SCALAPACK[_MIXED]`
+    backends, and the thermal solvers (`FTLM`, `LTLM`, `HYBRID`,
+    `mTPQ`, `cTPQ`). Overloaded for both `Operator` and
+    `FixedSzOperator`.
+  - `quantum_ed.DiagonalizationMethod` enum (every value the C++ enum
+    carries), `quantum_ed.HamiltonianFileFormat` enum, and an
+    `EDParameters` parameter bag with **every** C++ knob exposed as a
+    read/write Python attribute (block size, ARPACK NCV, FTLM Krylov
+    dim, TPQ Taylor order, ScaLAPACK process grid, …).
+  - `quantum_ed.EDResults` envelope (eigenvalues, eigenvectors,
+    `thermo_data` with temperatures / energy / specific heat /
+    susceptibility / entropy, FTLM-specific error estimates).
+- **Directory + streaming symmetry dispatchers bound from Python**:
+  - `quantum_ed.exact_diagonalization_from_directory[_symmetrized]` and
+    `quantum_ed.exact_diagonalization_fixed_sz_symmetrized` for
+    file-based runs. These are the canonical path for any *_GPU* method
+    (`LANCZOS_GPU`, `FULL_GPU`, `mTPQ_GPU`, `cTPQ_GPU`, …) when
+    `WITH_CUDA=ON`.
+  - `quantum_ed.exact_diagonalization_streaming_symmetry[_fixed_sz]`
+    for the in-memory symmetry-projected path (with optional GPU
+    per-sector dispatch). Replaces the JSON-only workaround documented
+    in the previous Phase 4 changelog entry.
+- **In-process symmetry projection from Python** (no JSON detour):
+  - `Operator.set_symmetry_info_from_dict(info)` /
+    `Operator.get_symmetry_info_as_dict()` (and the same on
+    `FixedSzOperator`) consume the dict produced by
+    `quantum_ed.symmetry.group_from_generators(...)` directly. The
+    legacy `automorphism_results/` round-trip is no longer required.
+- **Build introspection helpers**: `quantum_ed.has_cuda_build()`,
+  `quantum_ed.has_mpi_build()`, `quantum_ed.has_scalapack_build()` so a
+  single Python script can gate GPU / MPI / ScaLAPACK code paths
+  without try/except.
+- **MPI launcher helper** (`python/quantum_ed/mpi.py`):
+  `quantum_ed.mpi.run_distributed(directory, method, n_ranks, ...)`
+  builds the right `mpiexec` / `srun` argv for every distributed solver
+  (`lanczos`, `lanczos_symmetry`, `lanczos_gpu`, `ftlm`, `tpq`) and
+  shells out -- no manual `subprocess` wiring, no need to embed
+  `MPI_Init` inside Python. Exports `quantum_ed.mpi.MPI_METHODS`.
+- **DSSF launcher helper** (extends `python/quantum_ed/dssf.py`):
+  `quantum_ed.dssf.run_from_directory(directory, method, ...)` invokes
+  the full `./ED dssf <method> <dir>` continued-fraction engine
+  (LANCZOS / BICG / FULL / FTLM, S(Q,ω), HDF5 trees) the same way.
+- **Build system wiring** (`python/quantum_ed/CMakeLists.txt`):
+  - Conditionally links `ed_solvers_gpu` (and `ed_distributed_gpu` when
+    NCCL is present) into `_core.so` whenever `WITH_CUDA=ON`, so the
+    GPU symbols referenced from the dispatcher header resolve at link
+    time.
+  - Sets `CUDA_RESOLVE_DEVICE_SYMBOLS=ON` and disables LTO on the
+    `_core` target (passes `NO_EXTRAS` to `pybind11_add_module` under
+    CUDA) to fix the `undefined symbol: fatbinData` import error that
+    arose from pybind11's default LTO discarding NVCC's synthetic
+    `cmake_device_link.o`.
+- **Tests** (`python/tests/test_dispatcher.py`, 22 new cases): build
+  introspection, `DiagonalizationMethod` enum, `EDParameters` defaults
+  and round-trip, `exact_diagonalization_core` ground-state recovery
+  across `LANCZOS{,_SELECTIVE,_NO_ORTHO}`, `BLOCK_LANCZOS`,
+  `KRYLOV_SCHUR`, `BLOCK_KRYLOV_SCHUR`, `DAVIDSON`, `LOBPCG`,
+  `THICK_RESTART_LANCZOS`, `IMPLICIT_RESTART_LANCZOS`, `ARPACK_SM`,
+  `ARPACK_LM` (largest eigenvalue), `FixedSzOperator` overload,
+  symmetry info round-trip, and smoke tests for
+  `dssf.run_from_directory` and `mpi.run_distributed`. Full Python
+  test suite (133 tests) passes on a CUDA-enabled build.
+- **Documentation:**
+  - `docs/guides/python_api_coverage.md` rewritten: the executive
+    summary, capability matrix, and per-submodule sections all reflect
+    full functional parity. The "what's not in Python" entry shrinks
+    to *MPI* (subprocess-only by design) and *full DSSF spectral
+    driver* (subprocess-only by design), both with first-class Python
+    helpers.
+  - New `docs/guides/python_advanced.md` walks every Phase 5 entry
+    point: choosing between `exact_diagonalization_core`,
+    `_from_directory[_symmetrized]`, and `_streaming_symmetry[_fixed_sz]`;
+    GPU per-sector dispatch; in-process symmetry projection;
+    `quantum_ed.mpi.run_distributed` and `quantum_ed.dssf.run_from_directory`;
+    build introspection; and an end-to-end worked example.
+  - `docs/guides/usage.md` Mode 4 rewritten to advertise the full
+    backend surface (the previous "curated CPU subset" caveat is
+    gone), the legacy thin wrappers + dispatcher coexist in §5.2, the
+    in-process symmetry path is shown in §5.4, and a new §5.7 covers
+    build introspection + MPI + the `./ED dssf` driver. §8.5 / §8.6
+    section titles updated to "C++ and Python" and cross-link the
+    Python entry points.
+  - `README.md` Phase 5 callout: Python is now a first-class peer to
+    the CLI for every backend.
+
+### Added — Phase 4: standalone `ed_input` C++ library + `quantum_ed.input` Python bindings
+
+The legacy `python/edlib/helper_*.py` family — which had to write
+`InterAll.dat` / `Trans.dat` / `positions.dat` to a directory before
+`./ED` could read it — has been **superseded** by a typed, fluent C++
+library that is exposed identically from Python. Mode 1 (file-based) is
+fully preserved; the new Mode 8 covers the same physics through a
+single in-process surface that can either materialise an `Operator` or
+emit the same legacy directory.
+
+- **`ed_input` static library** (`include/ed/input/`, `src/input/`):
+  - `Lattice` struct + `ed::input::lattice::{chain, square, triangular,
+    honeycomb, kagome, pyrochlore, from_neighbor_lists,
+    from_cluster_file}` generators.
+  - `HamiltonianBuilder` fluent term accumulator with shortcuts:
+    `heisenberg`, `xxz`, `xyz`, `ising`, `transverse_field_ising`,
+    `kitaev`, `dm`, `zeeman`, `zeeman_per_site`, `on_site_field`,
+    `ring_exchange`, `pyrochlore_non_kramers`; low level
+    `add_one_body / add_two_body / add_three_body`. Finalisers
+    `to_operator()` (in-memory `ed::Operator`) and `write_directory()`
+    (legacy `.dat` directory consumed by `./ED`).
+  - Low-level `ed::input::write_*` writers for every legacy file format
+    (`Trans.dat`, `InterAll.dat`, `ThreeBodyG.dat`, `positions.dat`,
+    one/two-body correlation files, momentum-projected observables).
+  - CMake target `ed_input` (`cmake/EDLibraries.cmake`,
+    `CMakeLists.txt`).
+  - Catch2 unit tests in `tests/unit/test_input_library.cpp`
+    (chain / square / kagome / pyrochlore generators,
+    `HamiltonianBuilder.heisenberg` cross-check vs the existing
+    `build_heisenberg_chain` reference, `xxz` collapsing to Heisenberg,
+    `write_directory` round-trip vs in-memory `Operator`,
+    `on_site_field`).
+- **`quantum_ed.input` pybind11 mirror** (`python/quantum_ed/input.py`,
+  `python/quantum_ed/_bindings/input_bindings.{h,cpp}`):
+  - 1:1 surface coverage of the C++ library: `Op` enum, `Bond`,
+    `Plaquette`, `Lattice`, every lattice generator under
+    `quantum_ed.input.lattice.*`, `FileOptions`, `HamiltonianBuilder`
+    (every shortcut + `to_operator` + `write_directory`),
+    `quantum_ed.input.io.*` low-level writers.
+  - `HamiltonianBuilder.to_operator()` returns a uniquely-owned
+    `quantum_ed.Operator` (the binding constructs a `unique_ptr` on the
+    Python side and `emit_into`'s the terms; this resolves a
+    `shared_ptr` / `unique_ptr` holder conflict that previously
+    surfaced as a `double free detected in tcache 2` when feeding the
+    operator into `qed.full_diagonalization`).
+  - pytest suite `python/tests/test_input.py` (13 tests) covering
+    every generator, the textbook Heisenberg / XXZ shortcuts vs the
+    pure-Python `quantum_ed.hamiltonian` DSL, `write_directory` round
+    trip vs in-memory ground state, `Op` enum, `Bond` repr, and the
+    low-level `add_one_body` escape hatch.
+- **Documentation:**
+  - `docs/guides/usage.md` gains a new **Mode 8** section (full
+    capability matrix, C++ + Python end-to-end recipes, when to pick
+    Mode 1 vs Mode 8).
+  - `docs/guides/python_api_coverage.md` lists `quantum_ed.input` as
+    Phase 4 and inventories every bound symbol.
+  - `docs/architecture/CODEMAP.md` adds `ed_input` to the build graph,
+    documents `include/ed/input/` and `src/input/` as new file leaves,
+    and renumbers section 5 accordingly.
+  - `README.md` advertises the new builder in the headline bullets,
+    quickstart, and documentation map.
+
+### Documentation — advanced-backend C++/Python/CLI capability matrix
+
+Clarifies for users which advanced backends (GPU, MPI, alternative CPU
+iterative, TPQ, symmetry projection, fixed-Sz) are callable from where:
+
+- `docs/guides/python_api_coverage.md` adds a new **§0 capability
+  matrix** (a single table that lists every solver / backend / feature
+  cross-tabulated against C++, Python, and CLI). Sharpens the existing
+  "what's not in Python" section by tagging each gap with the C++
+  header that already exposes it (`<ed/gpu/gpu_ed_wrapper.h>`,
+  `<ed/distributed/*.h>`, `<ed/symmetry/group.h>`,
+  `<ed/core/ed_wrapper_streaming.h>`, etc.).
+- `docs/guides/usage.md` Mode 7 (raw C++) gains four new subsections
+  with end-to-end runnable templates for the C++-only paths:
+  - **§8.3 GPU solvers** (`GPUEDWrapper::runGPULanczos`, `runGPUFTLM`,
+    `runGPUMicrocanonicalTPQ`, `runGPUCanonicalTPQ`, full diag, plus
+    per-Sz variants);
+  - **§8.4 MPI distributed solvers** (`distributed_lanczos`,
+    `distributed_ftlm` with optional observable, `distributed_tpq`,
+    `distributed_lanczos_symmetry`, `distributed_lanczos_gpu` NCCL);
+  - **§8.5 In-process symmetry-projected solve** (`Operator::symmetry_info
+    = ed::sym::translation_group_with_reflection_1d(N);` then
+    `generateSymmetrySectorsHDF5()` / `exact_diagonalization_*_symmetrized`);
+  - **§8.6 Streaming symmetry** for clusters that exceed RAM
+    (`exact_diagonalization_streaming_symmetry`).
+  Mode 4 (Python) explicitly cross-references §8.3–§8.6 and the new
+  capability matrix so users know which advanced features still
+  require dropping to C++ today.
+- The static-libraries table in §8 now includes `ed_input` as a
+  link target alongside `ed_solvers_cpu` / `_gpu`, `ed_distributed`,
+  `ed_symmetry`, etc., and spells out which symbols each library exports.
+
+### Documentation — corrected `README.md` solver matrix
+
+`README.md` §"Solver matrix" rewritten to reflect the audited backend
+coverage and to retire several misleading rows from the previous draft:
+
+- The old **iterative** table collapsed everything into one row with
+  `GPU = "partial"`. The new §2 lists every iterative method
+  separately, marks each cell ✓ / — / stub, and adds explicit prose
+  ("Why several CPU-only tokens have no `_GPU` sibling — and whether
+  to ship one") that names the six methods which **do** have a full
+  GPU port (`LANCZOS`, `BLOCK_LANCZOS`, `KRYLOV_SCHUR`,
+  `BLOCK_KRYLOV_SCHUR`, `DAVIDSON`, `LOBPCG`) and explains why the
+  remaining ones (`LANCZOS_SELECTIVE/_NO_ORTHO`, `CHEBYSHEV_FILTERED`,
+  `SHIFT_INVERT*`, `IRL`, `TRLAN`, `BICG`, `ARPACK_*`) are
+  intentionally CPU-only.
+- A new **§3 Finite-temperature methods** row separates `FTLM` (full
+  CPU/GPU/MPI coverage) from `LTLM` / `HYBRID` (CPU-only by design).
+- The **TPQ family tree** is rewritten with a tree diagram + decision
+  tree (§4). Marks `mTPQ_CUDA` as a deprecated alias of `mTPQ_GPU`
+  (parser kept for API stability), `mTPQ_MPI` as a parser stub that
+  throws `mTPQ_MPI not available` (no microcanonical MPI driver
+  exists), and clarifies that `ed::distributed::distributed_tpq` is
+  the canonical-TPQ MPI implementation, not a third TPQ variant.
+- The **symmetry** row in the old table said "GPU = partial". The
+  new §5 documents that GPU dispatch per symmetry sector is
+  fully wired through `dispatchGPUSymmetrizedSector` /
+  `GPUSymmetrizedOperator` for `LANCZOS_GPU`, `BLOCK_LANCZOS_GPU`,
+  `DAVIDSON_GPU`, `KRYLOV_SCHUR_GPU`, `BLOCK_KRYLOV_SCHUR_GPU`, and
+  `FULL_GPU`, reachable from `./ED <dir> --symm --method=…`.
+- A new **§6 Fixed-Sz** row enumerates the per-Sz GPU wrappers
+  (`runGPULanczosFixedSz`, `runGPUBlockLanczosFixedSz`,
+  `runGPUFTLMFixedSz`, `runGPUDavidsonFixedSz`, `runGPULOBPCGFixedSz`,
+  `runGPUMicrocanonicalTPQFixedSz`, `runGPUCanonicalTPQFixedSz`).
+
+The new tables also cross-link to the matching C++ headers and to the
+single-source-of-truth capability matrix in
+`docs/guides/python_api_coverage.md` §0, so the README and the
+detailed docs cannot drift apart again.
+
+### Added — Phase 3b #7 + Phase 3c HPC lockdown (rorqual)
+
+The 2026-04-25 cluster pass (commit `33de7d6`) closes the symmetry-aware
+distributed and multi-GPU items that were previously deferred to HPC time:
+
+- **Phase 3b #7 — symmetry-aware distributed SpMV + Lanczos.**
+  - `OrbitPartition`: deterministic LPT-greedy load-balanced row
+    partitioning over symmetry orbits
+    (`include/ed/distributed/orbit_partition.h`).
+  - `OrbitHaloPlan`: orbit-aware `MPI_Alltoallv` halo exchange with one
+    `MPI_Alltoall` (counts) + one `MPI_Alltoallv` (orbit ids) at
+    construction and one `MPI_Alltoallv` per `exchange()`
+    (`include/ed/distributed/orbit_halo_plan.h`).
+  - `DistributedSymmetryOperator`: matrix-free SpMV in the symmetry-
+    projected basis — orbit slabs + halo + per-`(g, a)` character
+    weights matching `ed::sym::group_from_generators`
+    (`include/ed/distributed/distributed_symmetry_operator.h`).
+  - `distributed_lanczos_kernel<OpT>`: header-only templated kernel
+    reused by both the unsymmetrised `DistributedOperator` and the new
+    `DistributedSymmetryOperator`
+    (`include/ed/distributed/distributed_lanczos_kernel.h`).
+  - `distributed_lanczos_symmetry`: scatters into rank-major orbit
+    layout then runs the kernel; locked down vs dense
+    `Eigen::SelfAdjointEigenSolver` ground-state on every momentum
+    sector of N=4 OBC, N=4 PBC, N=6 PBC.
+  - Cluster lockdown: `test_distributed_symmetry_operator` (rorqual
+    `cpubase_b1`, job 10953752) — 82 / 4 PASS;
+    `test_distributed_lanczos_symmetry` (job 10954066) — 45 / 54 PASS.
+
+- **Phase 3c — multi-GPU NCCL runtime.**
+  - `MultiGpuCommunicator`: RAII wrapper over `ncclComm_t`, built
+    collectively from an `MPI_Comm` (rank-0 generates `ncclUniqueId`,
+    every rank `cudaSetDevice`s its node-local slot then
+    `ncclCommInitRank`s); collective wrappers on device pointers
+    (`include/ed/distributed/multi_gpu.h`, `src/distributed/multi_gpu.cu`).
+  - `distributed_lanczos_gpu`: GPU-resident Krylov basis with
+    `cublasZdotc` + `ncclAllReduce` for dot/norm reductions on device
+    buffers; `gpu_resident_spmv = true` switch routes the SpMV through
+    the new fully-on-device `DistributedGPUOperator` (NCCL pairwise
+    `ncclSend` / `ncclRecv` halo + CUDA SpMV kernel with device-side
+    binary search column lookup).
+  - `cmake/EDLibraries.cmake`: optional NCCL detection populates
+    `NCCL_FOUND` / `NCCL_INCLUDE_DIRS` / `NCCL_LIBRARIES` and gates the
+    new `ed_distributed_gpu` static library; `multi_gpu_stub.h` kept as
+    a pure back-compat shim.
+  - Cluster lockdown on real H100 hardware (`gpubase_bygpu_b1`):
+    `test_multi_gpu_nccl` (jobs 10942714 / 10943562 / 10943975) PASS at
+    `np ∈ {1, 2, 4}`; `test_distributed_lanczos_gpu`
+    (jobs 10942714 / 10943561 / 10943974 — stage 2; jobs 10950081 /
+    10950082 / 10950083 — stage 4) PASS, GPU vs CPU `\|E0\| < 1e-10`;
+    `test_distributed_gpu_operator` (jobs 10945403 / 10945402 / 10949083)
+    PASS, max element-wise difference vs CPU `MPI_Alltoallv` SpMV
+    `< 1e-12`.
+
+- **Reproducible cluster build.** New `build_rorqual.sh` configures
+  a release build with `StdEnv/2023`, GCC 12.3, OpenMPI 4.1.5, AOCL
+  BLIS + libflame via FlexiBLAS, ScaLAPACK 2.2.0, CUDA, with both
+  `WITH_MPI=ON` and `WITH_CUDA=ON`.
+
+`docs/architecture/IMPLEMENTATION_NOTES.md` has been updated to mark
+Phase 3b #7 and Phase 3c #1 / #2 (intra-node) as **DONE** with cluster
+job IDs; only Phase 3c #3 (parallel-HDF5 distributed disk-backed
+Krylov), the inter-node IB-fabric lockdown of Phase 3c #2, and the
+HΦ head-to-head 40-site validation remain explicitly deferred.
+
 ### Added — Phase 3b lockdown, head-to-head benchmarks, and release polish
 
 The Phase 3 distributed-memory campaign reaches its publication-grade

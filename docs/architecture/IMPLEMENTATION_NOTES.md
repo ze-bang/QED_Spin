@@ -1,23 +1,22 @@
 ---
 title: Implementation notes — deferred work and HPC-gated milestones
 audience: future maintainers, HPC reviewers
-status: design notes (no implementation)
+status: tracker (mix of DONE / OPEN — see per-item headings)
 last_updated: 2026-04-25
 ---
 
 # Implementation notes
 
 This file is the **single canonical landing pad** for work that is
-*designed and scoped* but **not implemented** in the released codebase.
-Each item below has a clear motivation, a concrete API sketch, and the
-hardware / external-library prerequisites that gate it. The items live
-here (rather than in `MODERNIZATION_AUDIT.md` or as scattered TODOs)
-so a future contributor with HPC access can pick them up cold.
+*designed and scoped*. Originally it tracked items that were **not yet
+implemented** in the released codebase; the 2026-04-25 cluster pass
+landed Phase 3b #7 + the first three Phase 3c stages (commit `33de7d6`),
+so several items here are now marked **DONE** with a pointer to the
+shipped headers, sources, and cluster job IDs that locked them down.
 
-Everything here was descoped in the v1.0 release because it required
-either:
+Everything still labelled OPEN was descoped because it required either:
 
-1. **Multi-node / multi-GPU HPC time** that we have not booked, or
+1. **Multi-node / multi-GPU HPC time** beyond what was booked, or
 2. **Non-trivial design work on a 2-week-plus horizon** that is best
    done with a real production workload to validate against (not
    single-node toy tests).
@@ -30,22 +29,48 @@ and link the PR.
 
 ## Table of contents
 
-1. [Phase 3b #7 — symmetry-aware row partitioning](#phase-3b-7--symmetry-aware-row-partitioning)
-2. [Phase 3c #1 — NCCL multi-GPU Lanczos](#phase-3c-1--nccl-multi-gpu-lanczos)
-3. [Phase 3c #2 — GPU-Direct RDMA halo exchange](#phase-3c-2--gpu-direct-rdma-halo-exchange)
-4. [Phase 3c #3 — distributed disk-backed Krylov basis](#phase-3c-3--distributed-disk-backed-krylov-basis)
-5. [Phase 3c #4 — published 40-site validation against HΦ](#phase-3c-4--published-40-site-validation-against-h)
+1. [Phase 3b #7 — symmetry-aware row partitioning](#phase-3b-7--symmetry-aware-row-partitioning) — **DONE (rorqual lockdown)**
+2. [Phase 3c #1 — NCCL multi-GPU Lanczos](#phase-3c-1--nccl-multi-gpu-lanczos) — **DONE (rorqual H100 lockdown)**
+3. [Phase 3c #2 — GPU-Direct RDMA halo exchange](#phase-3c-2--gpu-direct-rdma-halo-exchange) — DONE on a single node (NCCL pairwise SendRecv); inter-node RDMA still gated on a real IB fabric
+4. [Phase 3c #3 — distributed disk-backed Krylov basis](#phase-3c-3--distributed-disk-backed-krylov-basis) — OPEN (Lustre-class scratch needed)
+5. [Phase 3c #4 — published 40-site validation against HΦ](#phase-3c-4--published-40-site-validation-against-h) — OPEN
 6. [Smaller deferred items](#smaller-deferred-items)
 
 ---
 
 ## Phase 3b #7 — symmetry-aware row partitioning
 
-**Status:** design only. No code.
-**Gates the milestone:** "honest 40 routine on a real cluster".
-**Hardware needed for validation:** 16+ MPI ranks on a real
-high-bandwidth cluster (Infiniband or equivalent), to actually exercise
-`MPI_Alltoallv` halo cost as a function of partition geometry.
+**Status: DONE.** LPT-greedy orbit partitioner + orbit-aware halo plan +
+distributed symmetry-projected SpMV + symmetry-aware distributed Lanczos
+are shipped and locked down on a real cluster. Implementation:
+
+| Stage | Header / source | Test (registered at `np ∈ {1,2,4}`) |
+|---|---|---|
+| LPT-greedy orbit partition | `include/ed/distributed/orbit_partition.h`, `src/distributed/orbit_partition.cpp` | `test_orbit_partition` (75 208 assertions on rorqual login) |
+| Orbit-aware `MPI_Alltoallv` halo plan | `include/ed/distributed/orbit_halo_plan.h`, `src/distributed/orbit_halo_plan.cpp` | `test_orbit_halo_plan` (145 assertions across `np`) |
+| Symmetry-projected distributed SpMV | `include/ed/distributed/distributed_symmetry_operator.h`, `src/distributed/distributed_symmetry_operator.cpp` | `test_distributed_symmetry_operator` — every momentum sector of N=4 OBC, N=4 PBC, N=6 PBC; **82 assertions / 4 cases PASS** on rorqual `cpubase_b1` job **10953752** |
+| Templated Lanczos kernel reused by symmetric + unsymmetric paths | `include/ed/distributed/distributed_lanczos_kernel.h` | exercised via the two distributed Lanczos tests below |
+| Symmetry-aware distributed Lanczos | `include/ed/distributed/distributed_lanczos.h` (`distributed_lanczos_symmetry`), `src/distributed/distributed_lanczos.cpp` | `test_distributed_lanczos_symmetry` (E0 vs `Eigen::SelfAdjointEigenSolver` < 1e-8) — 45 / 54 assertions on rorqual `cpubase_b1` job **10954066** |
+
+**Original motivation kept below as design rationale:** "honest 40
+routine on a real cluster"; the `apply()` hot path is now
+`O(local_nnz)` per matvec on the orbit-projected basis with one
+orbit-aware Alltoallv halo per call, replacing the naïve 1D row split
+on the unsymmetrised basis.
+
+**What is *not* yet done:** the LPT greedy is a deterministic balance
+heuristic; if the orbit weights are extremely heterogeneous a real
+graph partitioner (METIS / Zoltan) could shave another 10–30% off the
+halo size. That refinement is captured in **Smaller deferred items
+#1** (halo-size instrumentation) and would only be worth shipping
+after the instrumentation confirms it is the bottleneck.
+
+The original API sketch and validation plan are preserved below for
+reference — none of the API has shifted from the sketch except
+`Partitioner` is currently free-functional (`balanced_orbit_slab`)
+rather than a class hierarchy.
+
+
 
 ### Why we need it
 
@@ -152,13 +177,26 @@ Total: ~3 weeks of focused work + actual HPC time.
 
 ## Phase 3c #1 — NCCL multi-GPU Lanczos
 
-**Status:** detection-only stub at
-`include/ed/distributed/multi_gpu_stub.h`. CMake discovers NCCL when
-present (`NCCL_FOUND`, `NCCL_INCLUDE_DIRS`, `NCCL_LIBRARIES`,
-`ED_HAVE_NCCL` propagated), but no kernels exist.
-**Gates the milestone:** "fast 36 → 40 on a single 8-GPU node".
-**Hardware needed:** ≥2 NVIDIA GPUs with NVLink or NVSwitch (ideally a
-DGX-class node), NCCL ≥2.18 installed, CUDA ≥12.
+**Status: DONE on rorqual H100×{1,2,4}.** Real `MultiGpuCommunicator`
+RAII wrapper around `ncclComm_t`, `ncclAllReduce` on device buffers
+replacing the host-staged `MPI_Allreduce`, plus a fully GPU-resident
+`distributed_lanczos_gpu` Krylov inner loop. Implementation:
+
+| Stage | Header / source | Test (`np ∈ {1,2,4}`) |
+|---|---|---|
+| Real `MultiGpuCommunicator` (RAII over `ncclComm_t`, built collectively from `MPI_Comm` + per-rank `cudaSetDevice`) + sum/broadcast wrappers (`double` / `complex<double>`) | `include/ed/distributed/multi_gpu.h`, `src/distributed/multi_gpu.cu` | `test_multi_gpu_nccl` — single-MIG slice job **10942714** PASS, 2×H100 job **10943562** (594 assertions) PASS, 4×H100 job **10943975** PASS |
+| GPU-resident Krylov + `cublasZdotc` + `ncclAllReduce` for dot/norm; SpMV host-staged through CPU `DistributedOperator` (stage 2) | `include/ed/distributed/distributed_lanczos_gpu.h`, `src/distributed/distributed_lanczos_gpu.cu` | `test_distributed_lanczos_gpu` — 1×H100 job **10942714**, 2×H100 job **10943561**, 4×H100 job **10943974**; all 13 / 3 cases PASS, GPU E0 vs CPU within 1e-10 |
+| `gpu_resident_spmv = true` toggle that swaps the host-staged sandwich for `DistributedGPUOperator::apply` (stage 4) | same `distributed_lanczos_gpu.{h,cu}` | `test_distributed_lanczos_gpu` (`stage4` section) — 1×H100 job **10950081**, 2×H100 job **10950082**, 4×H100 job **10950083**; **19 / 4 PASS** |
+| `multi_gpu_stub.h` reduced to a back-compat shim (`#include <ed/distributed/multi_gpu.h>`) so out-of-tree callers stay valid | `include/ed/distributed/multi_gpu_stub.h` | n/a |
+| Reproducible cluster build script (`StdEnv/2023`, AOCL BLIS+libflame via FlexiBLAS, OpenMPI 4.1.5, ScaLAPACK 2.2.0, CUDA, MPI+CUDA) | `build_rorqual.sh` | n/a |
+
+**The original Phase 3c #1 motivation and design sketch — preserved
+below for reference — was implemented essentially verbatim.** The
+remaining stage-2 follow-ups (GPU-resident `distributed_ftlm` /
+`distributed_tpq`) are tracked under **Phase 3c #1 follow-ups** at the
+end of this section.
+
+
 
 ### Why we need it
 
@@ -230,10 +268,30 @@ suit, ~1 week of cluster validation + benchmarking.
 
 ## Phase 3c #2 — GPU-Direct RDMA halo exchange
 
-**Status:** not started.
-**Gates the milestone:** "honest 44–48 across a real cluster".
-**Hardware needed:** RDMA-capable Infiniband fabric, `nv_peer_mem` or
-GPUDirect RDMA enabled in the kernel, NCCL ≥2.18 with RDMA support.
+**Status: DONE on a single H100 node (NCCL pairwise SendRecv).**
+The intra-node version of this item shipped as Phase 3c stage 3 — a
+fully GPU-resident `DistributedGPUOperator` whose `apply()` runs three
+GPU phases on the caller's stream: `pack_send_buf_kernel` → grouped
+`ncclSend` / `ncclRecv` per peer → `distributed_gpu_spmv_kernel`
+(device-side binary search into `recv_keys` / `recv_values` for off-rank
+columns). On a multi-GPU node with NVLink / NVSwitch this already
+runs the halo entirely on device buffers; the residual "GPU-Direct
+across an actual IB fabric" work is now scoped to **inter-node
+validation** rather than the whole pipeline.
+
+| Stage | Header / source | Test (`np ∈ {1,2,4}`) |
+|---|---|---|
+| GPU-resident SpMV + on-device pack + NCCL pairwise SendRecv halo + device-side binary search column lookup | `include/ed/distributed/distributed_gpu_operator.h`, `src/distributed/distributed_gpu_operator.cu` | `test_distributed_gpu_operator` — 1×H100 job **10945403**, 2×H100 job **10945402**, 4×H100 job **10949083**; **6 assertions / 3 cases PASS**, max element-wise difference vs CPU `MPI_Alltoallv` path < 1e-12 |
+| `DistributedOperator::CommPlanView` accessor so the GPU operator can mirror the CPU comm plan without re-deriving it | `include/ed/distributed/distributed_operator.h` | covered by the CPU test plus the GPU operator test above |
+
+**Remaining work — *truly* across-node RDMA:** validate the same
+pipeline on a 2-node multi-GPU run with `nv_peer_mem` / GPUDirect RDMA
+enabled, and lock down the `apply()` wall-time at `np ≥ 8` across a
+real Infiniband fabric. The original design sketch below is unchanged;
+intra-node lockdown gives confidence the inter-node lockdown will be
+mostly a deployment exercise.
+
+
 
 ### Why we need it
 
@@ -344,6 +402,26 @@ we should claim only what the existing N≤8 lockdown supports.
 
 The test harness should live under `benchmarks/vs_hphi/` and produce
 a JSON artefact analogous to today's `bench_vs_quspin_results.json`.
+
+---
+
+## Phase 3c #1 follow-ups (mostly mechanical)
+
+The GPU Lanczos lockdown above leaves three TUs to rebase onto
+`MultiGpuCommunicator` + `DistributedGPUOperator`:
+
+1. `distributed_ftlm_gpu` — exact same Krylov scaffolding as
+   `distributed_lanczos_gpu`, plus the `Z(β)` / `<O>(β)` Ritz-weight
+   reductions over MPI sample groups.
+2. `distributed_tpq_gpu` — Taylor-truncated `e^{-(δβ/2) H}` on
+   rank-local device slabs; no fundamentally new device kernels.
+3. 3-body term support inside `distributed_gpu_spmv_kernel`. CPU 3-body
+   is real-only by design; a GPU port needs to reproduce the
+   `walking`-state convention verbatim. Currently rejected at
+   construction with a clear `std::invalid_argument`.
+
+None of these need new HPC time *per se*; they should reuse the
+`gpubase_bygpu_b1` lockdown matrix (`np ∈ {1,2,4}` on H100×{1,2,4}).
 
 ---
 

@@ -25,6 +25,7 @@ guides/install
 guides/quickstart
 guides/python_quickstart
 guides/usage
+guides/python_api_coverage
 ```
 
 ```{toctree}
@@ -33,6 +34,13 @@ guides/usage
 
 api/cpp
 api/python
+```
+
+```{toctree}
+:maxdepth: 2
+:caption: Architecture
+
+architecture/CODEMAP
 ```
 
 ## Why a "modern" rewrite?
@@ -58,6 +66,8 @@ The following live at the repository root and are rendered on GitHub:
   — versioned release notes.
 - [`CONTRIBUTING.md`](https://github.com/ze-bang/exact_diagonalization_cpp/blob/main/CONTRIBUTING.md)
   — how to set up a dev environment and submit changes.
+- [`docs/architecture/CODEMAP.md`](https://github.com/ze-bang/exact_diagonalization_cpp/blob/main/docs/architecture/CODEMAP.md)
+  — static libraries, file-level tree, `ED` flowcharts, MPI vs GPU layers, redundancies.
 - [`docs/architecture/IMPLEMENTATION_REPORT.md`](https://github.com/ze-bang/exact_diagonalization_cpp/blob/main/docs/architecture/IMPLEMENTATION_REPORT.md)
   — exhaustive subsystem reference.
 - [`docs/architecture/SCALING.md`](https://github.com/ze-bang/exact_diagonalization_cpp/blob/main/docs/architecture/SCALING.md)
@@ -66,6 +76,8 @@ The following live at the repository root and are rendered on GitHub:
   — deferred work and HPC-gated milestones.
 - [`docs/benchmarks/BENCHMARKS.md`](https://github.com/ze-bang/exact_diagonalization_cpp/blob/main/docs/benchmarks/BENCHMARKS.md)
   — head-to-head benchmark write-up vs QuSpin / SciPy.
+- [`docs/guides/python_api_coverage.md`](https://github.com/ze-bang/exact_diagonalization_cpp/blob/main/docs/guides/python_api_coverage.md)
+  — what `import quantum_ed` covers vs the full `ED` binary.
 - [`examples/`](https://github.com/ze-bang/exact_diagonalization_cpp/tree/main/examples)
   — runnable C++ / Python / CLI examples (one per use case).
 - [`docs/history/`](https://github.com/ze-bang/exact_diagonalization_cpp/tree/main/docs/history)
