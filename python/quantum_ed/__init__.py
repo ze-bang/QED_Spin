@@ -107,6 +107,17 @@ from . import symmetry  # programmatic site-permutation symmetry DSL (P2.11)
 from . import bfg  # BFG order-parameter library helpers (P2.1)
 from . import mpi  # mpiexec ed_distributed_main runner helper (Phase 5)
 from . import helpers  # re-export edlib utilities under quantum_ed.helpers
+from . import workflow  # Phase 9: stress-free unified workflow API
+from .workflow import (  # noqa: E402  (top-level re-exports)
+    GeneratorSet,
+    SymmetryReport,
+    diag,
+    find_symmetries,
+    list_diag_parameters,
+    load_mpi_eigenvector,
+    load_mpi_eigenvectors,
+    solver_device_support,
+)
 
 __version__: Final[str] = "0.2.0"
 
@@ -149,5 +160,15 @@ __all__ = [
     "bfg",
     "mpi",
     "helpers",
+    "workflow",
+    # Phase 9 unified workflow API
+    "diag",
+    "find_symmetries",
+    "list_diag_parameters",
+    "solver_device_support",
+    "load_mpi_eigenvector",
+    "load_mpi_eigenvectors",
+    "GeneratorSet",
+    "SymmetryReport",
     "__version__",
 ]

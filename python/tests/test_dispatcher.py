@@ -26,6 +26,7 @@ Krylov / Davidson / LOBPCG / Krylov-Schur variants must reproduce it to
 from __future__ import annotations
 
 import os
+import shutil
 
 import numpy as np
 import pytest
@@ -294,10 +295,18 @@ def test_mpi_run_distributed_rejects_unknown_method(tmp_path):
         )
 
 
-def test_mpi_run_distributed_rejects_missing_directory():
-    with pytest.raises(FileNotFoundError):
+def test_mpi_run_distributed_directory_kwarg_is_deprecated():
+    """``directory=`` is the old positional placeholder; ed_distributed_main
+    never consumed it. The wrapper should emit a DeprecationWarning and
+    drop the value rather than failing on a non-existent path."""
+    if shutil.which("ed_distributed_main") is None or shutil.which("mpiexec") is None:
+        pytest.skip("ed_distributed_main / mpiexec not on PATH")
+    with pytest.warns(DeprecationWarning, match="directory"):
         quantum_ed.mpi.run_distributed(
             directory="/definitely/not/a/dir",
             method="lanczos",
             n_ranks=1,
+            binary_args=("--num-sites", "8", "--max-iter", "20", "--exct", "1"),
+            check=True,
+            capture_output=True,
         )

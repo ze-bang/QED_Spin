@@ -56,14 +56,38 @@ import subprocess
 import warnings
 from typing import Optional, Sequence
 
-# The standalone ``ed_distributed_main`` driver currently exposes two
-# solver modes. Adding more (e.g. distributed_tpq, lanczos_symmetry) is a
-# CLI question on the C++ side -- bump this tuple in lockstep with the
-# binary's parse_args() switch.
+# The standalone ``ed_distributed_main`` driver exposes a fixed set of
+# solver "modes" through its ``--mode`` flag. Bump this tuple in lockstep
+# with the binary's parse_args() switch (``src/cli/ed_distributed_main.cpp``).
+#
+# Phase 9 (Apr 2026): added "tpq" → distributed_tpq (canonical TPQ across
+# MPI ranks) and "krylov_schur" → distributed_krylov_schur (thick-restart
+# Lanczos with locking). The Python wrapper accepts the kwarg
+# unconditionally; the binary itself enforces availability based on its
+# build flags.
 MPI_METHODS = (
-    "lanczos",  # distributed_lanczos
-    "ftlm",     # distributed_ftlm
+    "lanczos",       # distributed_lanczos          (CPU; GPU per rank if --gpu)
+    "krylov_schur",  # distributed_krylov_schur     (thick-restart + locking)
+    "ftlm",          # distributed_ftlm
+    "tpq",           # distributed_tpq              (canonical TPQ)
 )
+
+# Solver names whose only distributed kernel is via the standalone binary
+# above. ``run_distributed`` accepts these as ``method=`` for ergonomics
+# (so users can copy-paste the ``solver=`` value from ``qed.diag``).
+#
+# Each entry maps ``alias -> (binary_mode, warn)``. ``warn=True`` means
+# the alias represents a semantic downgrade (e.g. an alias mapping to a
+# weaker kernel because the requested one has no distributed
+# implementation) and we should emit a UserWarning. ``warn=False`` is
+# for surface-equivalent renames (``mTPQ`` → ``tpq`` because
+# ``distributed_tpq`` IS the canonical TPQ kernel; the case difference
+# is just naming).
+_METHOD_ALIASES = {
+    "ks":             ("krylov_schur", False),
+    "mtpq":           ("tpq",          False),
+    "ctpq":           ("tpq",          False),
+}
 
 
 def _resolve_binary(name: str, override: Optional[str]) -> str:
@@ -88,6 +112,7 @@ def run_distributed(
     method: str,
     n_ranks: int,
     *,
+    use_gpu: bool = False,
     binary_args: Sequence[str] = (),
     launcher: str = "mpiexec",
     launcher_args: Sequence[str] = (),
@@ -111,10 +136,24 @@ def run_distributed(
     Parameters
     ----------
     method : str
-        One of :data:`MPI_METHODS`. Mapped to ``--mode <method>`` on the
-        binary's CLI.
+        One of :data:`MPI_METHODS` (``"lanczos"``, ``"ftlm"``, ``"tpq"``).
+        Common aliases from ``qed.diag(solver=...)`` are also accepted:
+        ``"ks"`` maps to ``"krylov_schur"`` (real distributed kernel
+        since Phase 9), and ``"mtpq"`` / ``"ctpq"`` map to ``"tpq"``.
     n_ranks : int
         Number of MPI ranks. Forwarded to the launcher as ``-n N``.
+    use_gpu : bool, optional
+        If True, append ``--gpu`` to the binary command. The
+        ``ed_distributed_main`` driver routes
+        ``--mode lanczos --gpu`` through ``distributed_lanczos_gpu``
+        (multi-GPU per rank + NCCL allreduce) and
+        ``--mode tpq --gpu`` through ``distributed_tpq_gpu``
+        (Phase 9 / Layer 2: device-resident |psi> + cuBLAS axpys/
+        dotcs + NCCL allreduces, MPI-over-samples). The binary
+        errors cleanly if it was built without ``WITH_CUDA=ON``;
+        this Python wrapper forwards the flag blindly because the
+        binary's build flags can't be introspected without
+        launching it.
     binary_args : sequence of str, optional
         Extra CLI flags forwarded to ``ed_distributed_main`` after the
         ``--mode`` token; e.g. ``("--N", "20", "--max-iter", "400",
@@ -159,11 +198,28 @@ def run_distributed(
     FileNotFoundError
         If the launcher or ``ed_distributed_main`` cannot be found.
     """
+    # Accept the same names users pass to qed.diag(solver=...) and map
+    # them onto the binary's --mode tokens. Case-insensitive.
+    requested = method
+    method_key = method.lower()
+    if method_key in _METHOD_ALIASES:
+        aliased, should_warn = _METHOD_ALIASES[method_key]
+        if should_warn:
+            warnings.warn(
+                f"run_distributed(method={method!r}) maps to "
+                f"--mode {aliased!r} on ed_distributed_main "
+                f"(no distributed kernel exists for {method!r} itself; "
+                "the closest equivalent is being used).",
+                stacklevel=2,
+            )
+        method = aliased
     if method not in MPI_METHODS:
         raise ValueError(
-            f"method={method!r} not in {MPI_METHODS}. "
+            f"method={requested!r} not in {MPI_METHODS}. "
             "ed_distributed_main exposes a fixed set of MPI solver modes; "
-            "extend MPI_METHODS in quantum_ed/mpi.py if you add a new one."
+            "extend MPI_METHODS in quantum_ed/mpi.py if you add a new one. "
+            "See qed.solver_device_support() for the full (solver, "
+            "device) compatibility matrix."
         )
 
     if directory is not None:
@@ -187,11 +243,18 @@ def run_distributed(
     binary_path = _resolve_binary("ed_distributed_main", binary)
 
     # The binary uses `--mode <name>` (two tokens), not `--method=<name>`.
+    # ``--gpu`` is the (Phase 9) flag that switches the inner kernel to
+    # the GPU variant (e.g. distributed_lanczos_gpu). The binary errors
+    # cleanly if it was built without WITH_CUDA=ON; we forward the flag
+    # blindly because we can't introspect the binary's build flags
+    # from Python without launching it.
+    gpu_flag = ("--gpu",) if use_gpu else ()
     cmd = [
         launcher_path, "-n", str(int(n_ranks)),
         *launcher_args,
         binary_path,
         "--mode", method,
+        *gpu_flag,
         *binary_args,
     ]
     return subprocess.run(

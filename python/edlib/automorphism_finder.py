@@ -1036,9 +1036,13 @@ def main():
         print(f"  Generator: {gen}")
     
     # Save generators to JSON
+    # The C++ engine (construct_ham.h::loadMinimalGenerators) expects the on-disk
+    # schema {"generators": [...]}; downstream Python plot scripts that consume
+    # this file accept either the bare array (legacy) or the wrapped form, so we
+    # write the wrapped form unconditionally.
     generators_file = os.path.join(output_dir, "minimal_generators.json")
     with open(generators_file, 'w') as f:
-        json.dump(generators, f, indent=2)
+        json.dump({"generators": generators}, f, indent=2)
     print(f"Saved minimal generators to {generators_file}")
 
     # Generate sector metadata for symmetry sectors

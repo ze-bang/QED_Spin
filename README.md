@@ -144,7 +144,36 @@ print("E0 =", qed.lanczos(op, max_iter=200, n_eig=1, tol=1e-10)[0])
 #       .write_directory("./chain12", lattice=lat)
 ```
 
-Modern Python — single-call dispatcher to **any** backend (Phase 5):
+Modern Python — **single-call workflow** with smart defaults (Phase 9, recommended):
+
+```python
+import quantum_ed as qed
+
+# 1. Build a Hamiltonian.
+N = 12
+H = (qed.input.HamiltonianBuilder(N)
+        .heisenberg([(i, (i + 1) % N) for i in range(N)], J=1.0)
+        .to_operator())
+
+# 2. (Optional) inspect symmetries — also tells you about U(1) Sz sectors.
+report = qed.find_symmetries(H, verbose=False)
+print(report.summary())
+
+# 3. One-call ED. Solver, device, Krylov sizes are auto-tuned. Pass `sz=k`
+#    to project onto the n_up=k sector (auto-checks Sz conservation),
+#    pass `symmetry=...` to project onto a generator subgroup, or both.
+e0 = qed.diag(H).eigenvalues[0]                                    # full Hilbert
+e_sz = qed.diag(H, num_eigenvalues=4, sz=N // 2).eigenvalues       # fixed Sz
+e_sym = qed.diag(H, num_eigenvalues=4,
+                 symmetry=report.full_set, sz=N // 2).eigenvalues   # both
+```
+
+See [`docs/guides/workflow.md`](docs/guides/workflow.md) for the full
+defaults table, recipes, and the migration map from the legacy multi-step
+API.
+
+Modern Python — single-call dispatcher to **any** backend (Phase 5,
+lower-level than `qed.diag`):
 
 ```python
 import quantum_ed as qed
@@ -221,6 +250,7 @@ Every supported workflow has a self-contained, runnable example under
 | [11_cli_thermo.sh](examples/11_cli_thermo.sh)                                     | CLI         | One-line FTLM thermodynamic sweep via `./ED`. |
 | [12_cli_dssf.sh](examples/12_cli_dssf.sh)                                         | CLI         | One-line finite-T DSSF via `./ED dssf dynamical_thermal`. |
 | [13_nlce_full_workflow.sh](examples/13_nlce_full_workflow.sh)                     | NLCE driver | Full pyrochlore NLCE pipeline. |
+| [14_python_workflow.py](examples/14_python_workflow.py)                           | Python      | The Phase-9 stress-free workflow: build → `find_symmetries` → `qed.diag` (full / Sz / symmetry / both). |
 
 See [`examples/README.md`](examples/README.md) for the full index, build
 prerequisites, and run recipes.

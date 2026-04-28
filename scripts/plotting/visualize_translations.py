@@ -172,6 +172,8 @@ def main():
         # Factor group
         with open(os.path.join(data_dir, 'automorphism_results', 'minimal_generators.json')) as f:
             gens = json.load(f)
+        if isinstance(gens, dict) and 'generators' in gens:
+            gens = gens['generators']
         gen_orders = [g['order'] for g in gens]
         group_str = ' × '.join(f'Z_{o}' for o in sorted(gen_orders))
     

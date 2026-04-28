@@ -191,6 +191,107 @@ ComplexArray fop_apply(const FixedSzOperator& op, const ComplexArray& vin) {
     return to_numpy(out);
 }
 
+// =============================================================================
+// Phase 9: in-process introspection helpers used by the unified workflow API
+// (`quantum_ed.workflow.find_symmetries` / `quantum_ed.workflow.diag`).
+//
+// Without these the Python facade would have to either (a) round-trip the
+// operator through `HamiltonianBuilder.write_directory` and re-parse the
+// resulting `Trans.dat` / `InterAll.dat`, or (b) crack open the C++
+// `transform_data_` POD layout from Python, which is brittle. Exposing
+// small "iterate the terms" / "is Sz conserved?" / "clone into FixedSz"
+// helpers gives the workflow layer a clean, type-safe surface.
+// =============================================================================
+
+// Returns true iff every (one-, two-, three-body) term commutes with total
+// Sz. The rule is the same as the on-disk `hamiltonian_conserves_sz` in
+// ed/core/ed_wrapper.h: a term preserves Sz iff its operator slots have a
+// net Sz-shift of zero (S+ = +1, S- = -1, Sz = 0).
+bool op_conserves_sz(const Operator& op) {
+    auto sz_shift = [](int op_type) {
+        if (op_type == 0) return  1;  // S+ raises by 1
+        if (op_type == 1) return -1;  // S- lowers by 1
+        return 0;                     // Sz is diagonal
+    };
+
+    for (const auto& t : op.transform_data_) {
+        if (std::abs(t.coefficient) < 1e-15) continue;
+        int delta = sz_shift(t.op_type);
+        if (t.is_two_body) delta += sz_shift(t.op_type_2);
+        if (delta != 0) return false;
+    }
+    for (const auto& t : op.three_body_data_) {
+        if (std::abs(t.coefficient) < 1e-15) continue;
+        int delta = sz_shift(t.op_type_1) + sz_shift(t.op_type_2) +
+                    sz_shift(t.op_type_3);
+        if (delta != 0) return false;
+    }
+    return true;
+}
+
+// Yields (op_type, site, coeff) tuples for every one-body term.
+py::list op_iter_one_body(const Operator& op) {
+    py::list out;
+    for (const auto& t : op.transform_data_) {
+        if (t.is_two_body) continue;
+        out.append(py::make_tuple(static_cast<int>(t.op_type),
+                                  static_cast<uint64_t>(t.site_index),
+                                  t.coefficient));
+    }
+    return out;
+}
+
+// Yields (op_type_1, site_1, op_type_2, site_2, coeff) tuples for every
+// two-body term.
+py::list op_iter_two_body(const Operator& op) {
+    py::list out;
+    for (const auto& t : op.transform_data_) {
+        if (!t.is_two_body) continue;
+        out.append(py::make_tuple(static_cast<int>(t.op_type),
+                                  static_cast<uint64_t>(t.site_index),
+                                  static_cast<int>(t.op_type_2),
+                                  static_cast<uint64_t>(t.site_index_2),
+                                  t.coefficient));
+    }
+    return out;
+}
+
+// Yields (op_type_1, site_1, op_type_2, site_2, op_type_3, site_3, coeff)
+// tuples for every three-body term.
+py::list op_iter_three_body(const Operator& op) {
+    py::list out;
+    for (const auto& t : op.three_body_data_) {
+        out.append(py::make_tuple(static_cast<int>(t.op_type_1),
+                                  static_cast<uint64_t>(t.site_index_1),
+                                  static_cast<int>(t.op_type_2),
+                                  static_cast<uint64_t>(t.site_index_2),
+                                  static_cast<int>(t.op_type_3),
+                                  static_cast<uint64_t>(t.site_index_3),
+                                  t.coefficient));
+    }
+    return out;
+}
+
+// Allocate a fresh FixedSzOperator on the same number of sites and copy
+// the source operator's term lists across. The fixed-Sz operator inherits
+// `transform_data_` / `three_body_data_` straight from `Operator`, so a
+// member-wise copy gets us a fully working sector-restricted operator
+// without having to re-add each term.
+std::unique_ptr<FixedSzOperator>
+op_make_fixed_sz(const Operator& op, int64_t n_up) {
+    if (n_up < 0 || n_up > static_cast<int64_t>(op.getNumBits())) {
+        throw std::invalid_argument(
+            "n_up = " + std::to_string(n_up) +
+            " out of range [0, num_sites=" + std::to_string(op.getNumBits()) + "]");
+    }
+    auto fop = std::make_unique<FixedSzOperator>(
+        op.getNumBits(), op.getSpin(), n_up);
+    fop->transform_data_  = op.transform_data_;
+    fop->three_body_data_ = op.three_body_data_;
+    fop->invalidateMatrixCaches();
+    return fop;
+}
+
 // A trivial std::function adapter that calls op.apply() for the solvers below.
 //
 // IMPORTANT: ``Operator::apply`` is *non-virtual*, so dispatch via this lambda
@@ -556,7 +657,32 @@ PYBIND11_MODULE(_core, m) {
              "Load two-body terms from an mVMC-style InterAll.dat file.")
         .def("apply", &op_apply,
              py::arg("vec"),
-             "Compute H * v on a 1-D complex128 array.");
+             "Compute H * v on a 1-D complex128 array.")
+        // Phase 9: in-process introspection used by the unified workflow API
+        // (``quantum_ed.workflow.find_symmetries`` / ``.diag``).
+        .def("conserves_sz", &op_conserves_sz,
+             "True iff every term commutes with total Sz (U(1) symmetry). "
+             "Mirrors the on-disk ``hamiltonian_conserves_sz`` check used by "
+             "the C++ CLI but works on the in-memory operator directly.")
+        .def("iter_one_body_terms", &op_iter_one_body,
+             "List of ``(op_type, site, coeff)`` tuples for every one-body "
+             "term currently in the operator. ``op_type`` is one of "
+             "``OP_SPLUS`` / ``OP_SMINUS`` / ``OP_SZ``. Order matches the "
+             "internal ``transform_data_`` storage order.")
+        .def("iter_two_body_terms", &op_iter_two_body,
+             "List of ``(op_type_1, site_1, op_type_2, site_2, coeff)`` "
+             "tuples for every two-body term. Same ordering convention as "
+             "``iter_one_body_terms``.")
+        .def("iter_three_body_terms", &op_iter_three_body,
+             "List of ``(op_type_1, site_1, op_type_2, site_2, op_type_3, "
+             "site_3, coeff)`` tuples for every three-body term.")
+        .def("make_fixed_sz", &op_make_fixed_sz,
+             py::arg("n_up"),
+             "Return a new ``FixedSzOperator`` on the same sites with the "
+             "same one-/two-/three-body terms, restricted to the Sz sector "
+             "with ``n_up`` up spins. Equivalent to ``FixedSzOperator(...)`` "
+             "+ replaying every ``add_one_body`` / ``add_two_body`` call, "
+             "but routed through a single C++ copy of the term arrays.");
 
     py::class_<FixedSzOperator, Operator>(m, "FixedSzOperator", R"pbdoc(
         Spin-1/2 Hamiltonian restricted to a fixed total Sz sector.

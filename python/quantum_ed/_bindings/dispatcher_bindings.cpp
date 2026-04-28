@@ -427,11 +427,12 @@ void bind_dispatcher(py::module_& m) {
     py::class_<ThermodynamicData>(m, "ThermodynamicData",
         "Thermodynamic observables on the temperature grid the dispatcher "
         "computed. Populated by FTLM/LTLM/HYBRID/TPQ; otherwise empty.")
-        .def_readonly("temperatures",   &ThermodynamicData::temperatures)
-        .def_readonly("energy",         &ThermodynamicData::energy)
-        .def_readonly("specific_heat",  &ThermodynamicData::specific_heat)
-        .def_readonly("entropy",        &ThermodynamicData::entropy)
-        .def_readonly("free_energy",    &ThermodynamicData::free_energy)
+        .def(py::init<>())
+        .def_readwrite("temperatures",  &ThermodynamicData::temperatures)
+        .def_readwrite("energy",        &ThermodynamicData::energy)
+        .def_readwrite("specific_heat", &ThermodynamicData::specific_heat)
+        .def_readwrite("entropy",       &ThermodynamicData::entropy)
+        .def_readwrite("free_energy",   &ThermodynamicData::free_energy)
         .def("to_dict", &thermo_data_to_dict);
 
     py::class_<EDResults>(m, "EDResults", R"pbdoc(
@@ -452,11 +453,17 @@ void bind_dispatcher(py::module_& m) {
         thermo_data : ThermodynamicData
             Per-temperature ``E(T)``, ``Cv(T)``, ``S(T)``, ``F(T)`` for
             FTLM/LTLM/HYBRID/TPQ runs.
+
+        The fields are read-write so external code (notably the MPI
+        Python wrapper that reads ``ed_distributed_main`` HDF5 dumps)
+        can construct a fully-populated EDResults from disk and return
+        it from ``qed.diag(H, device='mpi', ...)``.
     )pbdoc")
-        .def_readonly("eigenvalues",           &EDResults::eigenvalues)
-        .def_readonly("eigenvectors_computed", &EDResults::eigenvectors_computed)
-        .def_readonly("eigenvectors_path",     &EDResults::eigenvectors_path)
-        .def_readonly("thermo_data",           &EDResults::thermo_data)
+        .def(py::init<>())
+        .def_readwrite("eigenvalues",           &EDResults::eigenvalues)
+        .def_readwrite("eigenvectors_computed", &EDResults::eigenvectors_computed)
+        .def_readwrite("eigenvectors_path",     &EDResults::eigenvectors_path)
+        .def_readwrite("thermo_data",           &EDResults::thermo_data)
         .def("to_dict", &ed_results_to_dict);
 
     // ------------------------------------------------------------------------

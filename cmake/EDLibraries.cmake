@@ -209,6 +209,9 @@ if(WITH_MPI)
         ${DISTRIBUTED_DIR}/distributed_lanczos.cpp
         ${DISTRIBUTED_DIR}/distributed_ftlm.cpp
         ${DISTRIBUTED_DIR}/distributed_tpq.cpp
+        # Phase 9 / Layer 3: distributed thick-restart Lanczos (Krylov-Schur
+        # for Hermitian operators); see distributed_krylov_schur.h.
+        ${DISTRIBUTED_DIR}/distributed_krylov_schur.cpp
         # Phase 3b #7 stage 1: orbit-respecting partition primitive.
         ${DISTRIBUTED_DIR}/orbit_partition.cpp
         # Phase 3b #7 stage 2 prep: orbit-aware MPI_Alltoallv halo plan
@@ -261,6 +264,11 @@ if(WITH_MPI AND WITH_CUDA AND NCCL_FOUND)
         # Phase 3c stage 3: fully GPU-resident DistributedGPUOperator
         # (NCCL pairwise SendRecv halo + CUDA SpMV kernel).
         ${DISTRIBUTED_DIR}/distributed_gpu_operator.cu
+        # Phase 9 / Layer 2: multi-GPU canonical TPQ. Device-resident
+        # |psi> + DistributedGPUOperator SpMV + cuBLAS axpys/dotcs +
+        # NCCL allreduces for normalisation/observables. MPI-over-
+        # samples mirrors the CPU distributed_tpq.
+        ${DISTRIBUTED_DIR}/distributed_tpq_gpu.cu
     )
     target_include_directories(ed_distributed_gpu PUBLIC ${_ED_PUBLIC_INCLUDES})
     target_include_directories(ed_distributed_gpu PRIVATE ${NCCL_INCLUDE_DIRS})
