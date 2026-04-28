@@ -118,6 +118,20 @@ from .workflow import (  # noqa: E402  (top-level re-exports)
     load_mpi_eigenvectors,
     solver_device_support,
 )
+from . import feasibility  # Phase 9 / Layer 6: pre-flight planner
+from .feasibility import (  # noqa: E402
+    BasisChoice,
+    FeasibilityReport,
+    HostResources,
+    OperatorMetadata,
+    ResourceError,
+    WorkflowCandidate,
+    WorkflowSuggestion,
+    estimate_resources,
+    inspect_operator,
+    probe_host,
+    suggest_workflow,
+)
 
 __version__: Final[str] = "0.2.0"
 
@@ -170,5 +184,18 @@ __all__ = [
     "load_mpi_eigenvectors",
     "GeneratorSet",
     "SymmetryReport",
+    # Phase 9 / Layer 6: feasibility planner
+    "feasibility",
+    "estimate_resources",
+    "suggest_workflow",
+    "probe_host",
+    "inspect_operator",
+    "FeasibilityReport",
+    "WorkflowSuggestion",
+    "WorkflowCandidate",
+    "ResourceError",
+    "HostResources",
+    "OperatorMetadata",
+    "BasisChoice",
     "__version__",
 ]

@@ -151,6 +151,32 @@ def main() -> int:
     print("    qed.mpi.run_distributed('tpq', n_ranks=N, ...)")
     print("                                   -- distributed canonical TPQ")
 
+    print("\n--- (i) pre-flight planner: 'will this fit on this host?' ---")
+    print("  qed.diag always asks the planner before dispatching; here")
+    print("  we call it directly so we can show the verdict.")
+    rep = qed.estimate_resources(H, solver="LANCZOS", device="cpu",
+                                  num_eigenvalues=2)
+    for line in rep.summary().splitlines():
+        print("  " + line)
+
+    print()
+    print("  For a much larger problem the planner refuses the dispatch")
+    print("  with ranked, copy-pasteable suggestions. dry_run=True prints")
+    print("  the verdict and exits without running the kernel.")
+    big = (qed.input.HamiltonianBuilder(28)
+              .heisenberg([(i, (i + 1) % 28) for i in range(28)], J=1.0)
+              .to_operator())
+    print()
+    qed.diag(big, solver="FULL", dry_run=True, verbose=False)
+
+    print()
+    print("  Goal-oriented planner: rank candidate workflows for a goal")
+    print("  ('ground_state' / 'low_lying' / 'thermal' / 'spectral').")
+    sug = qed.suggest_workflow(H, intent="ground_state", num_eigenvalues=4)
+    print()
+    for line in sug.summary(top=4).splitlines():
+        print("  " + line)
+
     return 0
 
 

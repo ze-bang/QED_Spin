@@ -166,11 +166,22 @@ e0 = qed.diag(H).eigenvalues[0]                                    # full Hilber
 e_sz = qed.diag(H, num_eigenvalues=4, sz=N // 2).eigenvalues       # fixed Sz
 e_sym = qed.diag(H, num_eigenvalues=4,
                  symmetry=report.full_set, sz=N // 2).eigenvalues   # both
+
+# 4. Pre-flight planner is ALWAYS on: when the requested (solver, device,
+#    basis) doesn't fit on this host, qed.diag raises qed.ResourceError
+#    with ranked, copy-pasteable suggestions ("pass sz=N//2 -- 7x smaller",
+#    "switch to device='mpi' with mpi_n_ranks>=7", ...). Use dry_run=True
+#    to see the verdict without dispatching, force=True to override.
+qed.diag(H_big, solver="FTLM", sz=16, dry_run=True)
+
+# 5. Goal-oriented: rank workflows for "I want a ground state / thermal
+#    curve / spectral function" against the actual host.
+print(qed.suggest_workflow(H_big, intent="thermal", n_samples=8).summary())
 ```
 
 See [`docs/guides/workflow.md`](docs/guides/workflow.md) for the full
-defaults table, recipes, and the migration map from the legacy multi-step
-API.
+defaults table, recipes, the planner / dry_run / suggest_workflow
+surface, and the migration map from the legacy multi-step API.
 
 Modern Python — single-call dispatcher to **any** backend (Phase 5,
 lower-level than `qed.diag`):

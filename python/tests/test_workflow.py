@@ -778,8 +778,11 @@ class TestDeviceMatrix:
         monkeypatch.setattr(wf, "exact_diagonalization_core", fake_core)
         monkeypatch.setattr(wf, "exact_diagonalization_from_directory", fake_from_directory)
 
+        # plan=False bypasses the pre-flight planner (which would correctly
+        # refuse to dispatch to GPU on a no-GPU CI host); we're testing
+        # dispatch routing here, not resource accounting.
         quantum_ed.diag(H, solver="LANCZOS", device="gpu",
-                        num_eigenvalues=1, verbose=False)
+                        num_eigenvalues=1, verbose=False, plan=False)
         assert called == {"core": 0, "from_directory": 1}, (
             f"GPU path hit the wrong dispatcher: {called}"
         )
@@ -834,6 +837,10 @@ class TestDeviceMatrix:
             H, solver=solver, device=device,
             num_eigenvalues=1, target_beta=5.0,
             num_samples=1, mpi_n_ranks=2,
+            # plan=False: dispatch routing test, not feasibility -- the CI
+            # host typically has no NCCL build, so the planner would
+            # (correctly) refuse mpi_gpu without it.
+            plan=False,
             verbose=False,
         )
         expected_mode = {

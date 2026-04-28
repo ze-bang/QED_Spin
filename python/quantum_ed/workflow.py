@@ -409,6 +409,26 @@ def find_symmetries(
     num_sites = int(operator.num_sites)
 
     # ------------------------------------------------------------------
+    # 0. Pre-flight cost note. The colored-graph automorphism search is
+    #     polynomial in the operator's term graph but the Schreier-Sims
+    #     enumeration of the resulting permutation group can blow up
+    #     for large highly-symmetric clusters. Surface a one-line note
+    #     when the user is asking for something potentially expensive.
+    # ------------------------------------------------------------------
+    if verbose:
+        if num_sites >= 28:
+            print(f"[qed.find_symmetries] N={num_sites}: full Hilbert dim "
+                  f"= 2^{num_sites} = {1 << num_sites:_d}. The automorphism "
+                  "search is on the term graph (cheap), but enumerating the "
+                  "resulting group can take seconds-to-minutes for large "
+                  "clusters with rich point-group symmetry. Pass "
+                  "translation_only=True (with lattice=) to skip the full "
+                  "search if you only need k-point projection.")
+        elif num_sites >= 20:
+            print(f"[qed.find_symmetries] N={num_sites}: searching the "
+                  f"automorphism group (cheap; should finish in <1 s).")
+
+    # ------------------------------------------------------------------
     # 1. U(1) Sz sectors.
     # ------------------------------------------------------------------
     has_sz = bool(operator.conserves_sz())
@@ -590,6 +610,10 @@ def diag(
     mpi_binary: Optional[str] = None,
     mpi_launcher: str = "mpiexec",
     mpi_launcher_binary: Optional[str] = None,
+    # Pre-flight planner (Phase 9 / Layer 6).
+    plan: bool = True,
+    dry_run: bool = False,
+    force: bool = False,
     verbose: bool = True,
     extra_params: Optional[dict[str, Any]] = None,
 ) -> EDResults:
@@ -695,6 +719,26 @@ def diag(
         Useful for niche flags (``arpack_*``, ``tpq_*``, ``ltlm_*``,
         etc.) that the unified ``diag`` doesn't expose individually.
         Call :func:`list_diag_parameters` to see the full catalogue.
+
+    plan : bool, optional
+        If True (default), run the pre-flight planner
+        (:func:`quantum_ed.estimate_resources`) before dispatch and
+        emit a one-line "FEASIBLE / INFEASIBLE" verdict (verbose mode
+        prints the full report). When the planner judges the request
+        infeasible (memory / build / kernel), :exc:`ResourceError`
+        is raised with a list of cheaper alternatives -- override
+        with ``force=True``.
+    dry_run : bool, optional
+        If True, run the planner only and **do not** dispatch the
+        kernel. Returns the report on the (raised) ``ResourceError``
+        but, if feasible, raises :exc:`SystemExit` with code 0 after
+        printing. Useful for "would this run?" CI checks. Default
+        False.
+    force : bool, optional
+        If True, ignore ``ResourceError`` from the planner and
+        dispatch anyway. Use this when you trust the host has more
+        resources than the planner detected (e.g. when running under
+        a job scheduler the planner cannot see). Default False.
 
     Returns
     -------
@@ -836,6 +880,51 @@ def diag(
         print(f"[qed.diag] solver={method_name} ({kind})  "
               f"num_eigenvalues={num_eigenvalues}  "
               f"tolerance={tolerance:g}  use_gpu={use_gpu}  use_mpi={use_mpi}")
+
+    # ------------------------------------------------------------------
+    # 3.5. Pre-flight planner. Estimate memory + wall-time for the
+    #     resolved (solver, device, basis, n_ranks) plan; abort with a
+    #     ResourceError + ranked suggestions when the plan won't fit on
+    #     the host. dry_run=True returns after printing the report.
+    # ------------------------------------------------------------------
+    if plan or dry_run:
+        from .feasibility import estimate_resources, ResourceError
+        if use_mpi and use_gpu:
+            planned_device = "mpi_gpu"
+        elif use_mpi:
+            planned_device = "mpi"
+        elif use_gpu:
+            planned_device = "gpu"
+        else:
+            planned_device = "cpu"
+        report = estimate_resources(
+            op_to_use,
+            solver=method,
+            device=planned_device,
+            sz=sz if (sz is not None and not fixed_sz_input) else None,
+            symmetry=symmetry,
+            num_eigenvalues=num_eigenvalues,
+            n_samples=num_samples,
+            n_ranks=mpi_n_ranks,
+            max_subspace=max_subspace,
+            max_iterations=max_iterations,
+            block_size=block_size,
+            compute_eigenvectors=compute_eigenvectors,
+            sector_size_estimate=sector_dim if symmetry is not None else None,
+        )
+        if verbose or dry_run or not report.feasible:
+            for line in report.summary().splitlines():
+                print(line)
+        if dry_run:
+            return EDResults()  # planner-only mode; no kernel dispatch
+        if not report.feasible and not force:
+            raise ResourceError(
+                f"qed.diag planner judged the request infeasible: "
+                f"bottleneck={report.bottleneck}. See the report above for "
+                "ranked suggestions, or pass force=True to dispatch anyway "
+                "(at your own risk).",
+                report=report,
+            )
 
     # ------------------------------------------------------------------
     # 4. Build EDParameters with auto-tuned Krylov / thermal sizes.
