@@ -7,6 +7,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Removed — Phase 9: collapse the symmetry surface to a single canonical kernel
+
+Closes the audit item _"there are multiple ways of symmetry here
+(streaming, disk, ...) — is this really necessary? Just keep the one
+that trumps overall."_  Phase 7.1 already audited the eight pre-existing
+symmetry entry points and named the streaming kernel canonical, marking
+the explicit-block path `[[deprecated]]`.  Phase 9 follows through:
+the deprecated path is gone.
+
+**Removed (BREAKING)** — the explicit-block ``*_symmetrized`` entry
+points:
+
+- C++: `exact_diagonalization_from_directory_symmetrized(...)` and
+  `exact_diagonalization_fixed_sz_symmetrized(...)` (in
+  `<ed/core/ed_wrapper.h>`).
+- Python: `quantum_ed.exact_diagonalization_from_directory_symmetrized`
+  and `quantum_ed.exact_diagonalization_fixed_sz_symmetrized` (the
+  pybind11 bindings in `dispatcher_bindings.cpp`).
+- Internal: the now-unreachable `ed_internal::` cluster
+  (`diagonalize_symmetry_block`, `setup_symmetry_basis`,
+  `setup_fixed_sz_symmetry_basis`, `find_ground_state_sector*`,
+  `diagonalize_fixed_sz_sector`, `transform_sector_to_*`,
+  `transform_fixed_sz_to_full`, `transform_and_save_*`, plus the
+  `GroundStateSectorInfo`/`SectorInfo`/`SectorResult` PODs).
+
+**Migration**
+
+| pre-Phase-9                                                       | Phase 9 canonical                                                                                          |
+|-------------------------------------------------------------------|------------------------------------------------------------------------------------------------------------|
+| `qed.exact_diagonalization_from_directory_symmetrized(d, m, p)`   | `qed.diag(H, symmetry=...)` _(preferred)_ or `qed.exact_diagonalization_from_directory(d, m, p)` with `p.use_symmetry = True` |
+| `qed.exact_diagonalization_fixed_sz_symmetrized(d, n_up, m, p)`   | `qed.diag(H, sz=n_up, symmetry=...)` _(preferred)_ or `from_directory(d, m, p)` with `p.use_symmetry = True; p.use_fixed_sz = True; p.n_up = n_up` |
+| `exact_diagonalization_from_directory_symmetrized(...)` (C++)     | `ed_dispatch::exact_diagonalization_from_directory(d, m, p, ...)` with `p.use_symmetry = true`             |
+| `exact_diagonalization_fixed_sz_symmetrized(d, n_up, m, p, ...)`  | same dispatcher with `p.use_symmetry = true; p.use_fixed_sz = true; p.n_up = n_up`                         |
+
+The streaming kernel is faster on every problem size we have benchmarked,
+materialises no per-sector blocks on disk, and supports GPU per-sector
+dispatch (the deprecated path did neither).  The expert escape hatches
+for very-large-N memory-budget edge cases — `--chunked-symm` and
+`--disk-streaming` in `./ED` — are unchanged and remain as documented
+CLI-only entry points.  See
+[`docs/history/PHASE_7_1_SYMMETRY_AXIS.md`](docs/history/PHASE_7_1_SYMMETRY_AXIS.md)
+for the original audit and the per-kernel verdicts.
+
 ### Changed — Phase 8: GPU and MPI solver optimisations
 
 Closes the audit item _"optimization for GPU and MPI solvers."_  Carries
@@ -138,6 +181,9 @@ The Phase 7 axis matrix grows from 4 to 5 orthogonal flags:
   scripts keep working) but emit a compiler deprecation warning at
   the call site. The Python bindings keep the legacy entry points
   reachable inside a targeted `#pragma GCC diagnostic` block.
+  *(Phase 9 follow-up: both entry points were removed entirely. See the
+  Phase 9 "collapse the symmetry surface" entry above for the migration
+  table.)*
 - **Chunked / disk-streaming kernels stay as CLI-only escape hatches**
   for very-large-N memory-budget edge cases (`--chunked-symm`,
   `--disk-streaming`). They are *not* reachable via

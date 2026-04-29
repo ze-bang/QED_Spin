@@ -426,10 +426,12 @@ variants), every dense backend (`FULL`, `OSS`,
 `mTPQ`, `cTPQ`), in-process symmetry projection
 (`Operator.set_symmetry_info_from_dict(...)`), streaming-symmetry ED
 (`exact_diagonalization_streaming_symmetry[_fixed_sz]`) and directory-driven
-ED (`exact_diagonalization_from_directory[_symmetrized]` /
-`exact_diagonalization_fixed_sz_symmetrized`). GPU per-sector dispatch
-is reached by passing any `*_GPU` `DiagonalizationMethod` value to the
-streaming or directory dispatcher. The MPI distributed solvers and the
+ED (`exact_diagonalization_from_directory(...)` with
+`EDParameters::use_symmetry = true` for symmetry projection,
+`use_fixed_sz = true` + `n_up = ...` for the U(1) sector). GPU
+per-sector dispatch is reached by passing any `*_GPU`
+`DiagonalizationMethod` value to the streaming or directory
+dispatcher. The MPI distributed solvers and the
 full continued-fraction `./ED dssf` engine are reached through thin
 launcher helpers (`quantum_ed.mpi.run_distributed`,
 `quantum_ed.dssf.run_from_directory`) — no `subprocess` boilerplate
@@ -626,10 +628,12 @@ result = qed.exact_diagonalization_streaming_symmetry(
 )
 ```
 
-The directory-mode equivalents are
-`exact_diagonalization_from_directory_symmetrized` and
-`exact_diagonalization_fixed_sz_symmetrized` -- they read the
-`automorphism_results/` JSON tree the legacy CLI uses.
+The directory-mode equivalent is
+`qed.exact_diagonalization_from_directory(d, m, p)` with
+``p.use_symmetry = True`` (and optionally ``p.use_fixed_sz = True`` +
+``p.n_up = n_up``); it reads the `automorphism_results/` JSON tree the
+legacy CLI uses, generating it on the fly if missing. The same
+five-axis dispatcher routes into the canonical streaming kernel.
 
 ### 5.5 BFG / cluster observables
 
@@ -1022,13 +1026,15 @@ int main() {
                                    /*verbose=*/false,
                                    /*save_blocks=*/true);
 
-    // Or use the dispatcher from <ed/core/ed_wrapper.h>:
+    // Or use the canonical 5-axis dispatcher (reaches the streaming
+    // symmetry kernel inside ed/core/ed_wrapper_streaming.h):
     EDParameters p;
-    p.num_sites          = 12;
-    p.num_eigenvalues    = 5;
+    p.num_sites            = 12;
+    p.num_eigenvalues      = 5;
     p.compute_eigenvectors = true;
-    p.output_dir         = "./out/sym";
-    auto res = exact_diagonalization_from_directory_symmetrized(
+    p.output_dir           = "./out/sym";
+    p.use_symmetry         = true;   // route through the streaming kernel
+    auto res = ed_dispatch::exact_diagonalization_from_directory(
         "./my_chain12", DiagonalizationMethod::LANCZOS, p);
 }
 ```

@@ -74,13 +74,12 @@ from where". Cells are interpreted as:
 | **Symmetry projection** | | | |
 | `ed::sym` DSL: `translation`, `reflection_1d`, `site_swap`, `compose`, `power`, `generate_group`, `group_from_generators`, `translation_group_1d`, `translation_group_with_reflection_1d` | yes | **`quantum_ed.symmetry.*`** (returns dict) | (writes `automorphism_results/*.json`) |
 | Attach `SymmetryGroupInfo` to an `Operator` for in-process projected solve | yes (`op.symmetry_info = …;` then call `generateSymmetrySectorsHDF5()` etc.) | **`op.set_symmetry_info_from_dict(info)`** / **`op.get_symmetry_info_as_dict()`** (Phase 5) | `./ED <dir> --symm` (reads `automorphism_results/`) |
-| Streaming / disk-backed symmetry (`StreamingSymmetryOperator`, `exact_diagonalization_streaming_symmetry`) | yes (`<ed/core/ed_wrapper_streaming.h>`) | **`qed.exact_diagonalization_streaming_symmetry(dir, method, params, ...)`** | `./ED <dir> --streaming-symmetry --precompute-basis` |
-| Symmetrised explicit-block ED (Eigen sparse blocks per sector) | yes (`exact_diagonalization_from_directory_symmetrized`) | **`qed.exact_diagonalization_from_directory_symmetrized(dir, method, params)`** | `./ED <dir> --symm` |
+| Streaming / disk-backed symmetry (`StreamingSymmetryOperator`, `exact_diagonalization_streaming_symmetry`) — **canonical 5-axis path** | yes (`<ed/core/ed_wrapper_streaming.h>`) | **`qed.diag(H, symmetry=...)`** _(preferred)_; lower-level **`qed.exact_diagonalization_from_directory(dir, method, params)`** with `params.use_symmetry = True` (or **`qed.exact_diagonalization_streaming_symmetry(dir, method, params, ...)`** for the explicit kernel call) | `./ED <dir> --symm` |
 | **Fixed-Sz** | | | |
 | `FixedSzOperator` (combinatorial sector basis) | yes | **`qed.FixedSzOperator(num_sites=…, n_up=…)`** | `--fixed-sz --n-up=…` |
 | Every CPU solver above on a `FixedSzOperator` | yes | **`qed.exact_diagonalization_core(fop, method, params)`** (the FixedSzOperator overload of the dispatcher; the legacy `qed.lanczos / qed.full_diagonalization / qed.finite_temperature_lanczos / …` continue to work too) | `--fixed-sz` flag combined with `--method=…` |
 | Every GPU solver above on a fixed-Sz sector (`runGPULanczosFixedSz`, …) | yes | **`qed.exact_diagonalization_streaming_symmetry_fixed_sz(dir, n_up, qed.DiagonalizationMethod.<METHOD_GPU>, params)`** | `--method=…_GPU --fixed-sz` |
-| `exact_diagonalization_fixed_sz_symmetrized` (Sz × space-symmetry) | yes | **`qed.exact_diagonalization_fixed_sz_symmetrized(dir, n_up, method, params)`** | `./ED <dir> --fixed-sz --symm` |
+| Sz × space-symmetry (canonical streaming-kernel path) | yes (`<ed/core/ed_wrapper_streaming.h>`) | **`qed.diag(H, sz=n_up, symmetry=...)`** _(preferred)_; lower-level **`qed.exact_diagonalization_from_directory(dir, method, params)`** with `params.use_symmetry = True; params.use_fixed_sz = True; params.n_up = n_up` | `./ED <dir> --fixed-sz --symm` |
 | **DSSF** (structure factors) | | | |
 | `ed::dssf::build_observable_pairs` (operator assembly) | yes | **`quantum_ed.dssf.build_observable_pairs`** | (used internally by `./ED dssf`) |
 | Full S(Q,ω) / S(Q) driver (continued-fraction, FTLM averaging) | yes (`ed::dssf::run`, `ed_cli` workflow) | **`quantum_ed.dssf.run_from_directory(dir, method, ...)`** (Phase 5 helper that locates and shells out to `./ED dssf <method>`) | `./ED dssf {dynamical_thermal,static_thermal,ground_state_dssf}` |
@@ -88,7 +87,7 @@ from where". Cells are interpreted as:
 | Correlations, ring observables, structure factors, HDF5 wavefunction / TPQ-state loaders | yes (`<ed/bfg/*.h>`) | **`quantum_ed.bfg.*`** | `compute_bfg_order_parameters[_gpu]` |
 | **High-level dispatcher** | | | |
 | `exact_diagonalization_core(H, dim, method, params)` — single call routes to any CPU iterative / dense / thermal / ARPACK / TPQ method | yes (`<ed/core/ed_wrapper.h>`) | **`qed.exact_diagonalization_core(op_or_fop, method, params)`** (Phase 5 — both `Operator` and `FixedSzOperator` overloads) | (this *is* what `./ED` ultimately calls) |
-| `exact_diagonalization_from_directory[_symmetrized]` / `exact_diagonalization_fixed_sz_symmetrized` (file-deck driver, also reaches the GPU path) | yes (`<ed/core/ed_wrapper.h>`) | **`qed.exact_diagonalization_from_directory(...)`**, **`qed.exact_diagonalization_from_directory_symmetrized(...)`**, **`qed.exact_diagonalization_fixed_sz_symmetrized(...)`** (Phase 5) | (CLI internals) |
+| `exact_diagonalization_from_directory` (file-deck driver, 5-axis dispatcher; also reaches the GPU path and the symmetry-projected path via `params.use_symmetry = True` and the fixed-Sz path via `params.use_fixed_sz = True`) | yes (`<ed/core/ed_dispatch_symmetry.h>`) | **`qed.exact_diagonalization_from_directory(...)`** (Phase 5; the deprecated `*_symmetrized` entry points were removed in Phase 9 — set the flags on `EDParameters` instead) | (CLI internals) |
 | **Build introspection** | | | |
 | `ED_WITH_CUDA` / `ED_WITH_MPI` / `ED_WITH_SCALAPACK` (CMake-config flags) | yes (`@PACKAGE_INIT@`) | **`qed.has_cuda_build()`**, **`qed.has_mpi_build()`**, **`qed.has_scalapack_build()`** (Phase 5) | (compile-time only) |
 | **Hamiltonian + lattice construction** | | | |
@@ -106,9 +105,13 @@ from Python** today. The Python entry points are:
   `quantum_ed.DiagonalizationMethod` enum value.
 * `quantum_ed.exact_diagonalization_streaming_symmetry[_fixed_sz](...)`
   for symmetry-projected ED with optional GPU per-sector dispatch.
-* `quantum_ed.exact_diagonalization_from_directory[_symmetrized]` /
-  `quantum_ed.exact_diagonalization_fixed_sz_symmetrized` for the
-  file-deck workflow (the same one `./ED` consumes).
+* `quantum_ed.exact_diagonalization_from_directory(dir, method, params)`
+  for the file-deck workflow (the same one `./ED` consumes). Flip
+  `params.use_symmetry = True` to project onto the symmetry-adapted
+  basis and `params.use_fixed_sz = True` (with `params.n_up = N_up`) to
+  restrict to a U(1) sector. The Phase 9 cleanup removed the older
+  `*_symmetrized` entry points; the canonical 5-axis dispatcher is the
+  only public path now.
 * `quantum_ed.dssf.run_from_directory(dir, method, ...)` — Python
   helper that builds the right `argv` and shells out to `./ED dssf
   <method>` for the full continued-fraction S(Q,ω) / S(Q) driver.
@@ -156,9 +159,7 @@ from `quantum_ed/__init__.py`:
 | `EDParameters` | Fully read/write parameter bag mirroring `<ed/core/ed_parameters.h>` (every CPU + GPU + ARPACK + TPQ + FTLM + LTLM + ScaLAPACK + observables knob). |
 | `EDResults`, `ThermodynamicData` | Result envelope: `eigenvalues`, `eigenvectors_computed`, `eigenvectors_path`, `thermo_data`. `to_dict()` for ergonomic serialisation. |
 | `exact_diagonalization_core(op, method, params)` | The single-call dispatcher. Two overloads (`Operator` and `FixedSzOperator`). |
-| `exact_diagonalization_from_directory(dir, method, params, ...)` | File-deck driver. **Reaches the GPU per-method paths** (LANCZOS_GPU, FULL_GPU, mTPQ_GPU, …) since the C++ wrapper builds a `GPUOperator` from the .dat files when `WITH_CUDA` is on. |
-| `exact_diagonalization_from_directory_symmetrized(...)` | Explicit-block symmetrised ED on a directory deck. |
-| `exact_diagonalization_fixed_sz_symmetrized(dir, n_up, ...)` | Fixed-Sz × symmetry-projected ED on a directory deck. |
+| `exact_diagonalization_from_directory(dir, method, params, ...)` | File-deck driver. **The 5-axis dispatcher.** Flip `params.use_symmetry = True` to project onto the symmetry-adapted basis (routes through the streaming kernel — `exact_diagonalization_streaming_symmetry[_fixed_sz]`); `params.use_fixed_sz = True` (with `params.n_up = N_up`) to restrict to a U(1) sector; `params.use_gpu = True` to reach `LANCZOS_GPU` / `FULL_GPU` / `mTPQ_GPU` etc.; `params.use_mpi = True` for the distributed dispatchers. The Phase 9 cleanup removed the older `*_symmetrized` entry points — set the flags on `EDParameters` instead. |
 | `exact_diagonalization_streaming_symmetry(dir, method, params, ...)` | Streaming-symmetry ED (orbit basis on the fly, per-sector solve). Pass any GPU method to dispatch each sector to a CUDA kernel. |
 | `exact_diagonalization_streaming_symmetry_fixed_sz(dir, n_up, method, params, ...)` | Same, restricted to the n_up Sz sector — the right entry point for the largest tractable clusters. |
 | `has_cuda_build()` / `has_mpi_build()` / `has_scalapack_build()` | Runtime build introspection. |

@@ -537,7 +537,7 @@ is on the device.
 | `FixedSzOperator` (combinatorial sector basis) | ✓ | ✓ (`GPUFixedSzOperator`) | — | `include/ed/core/construct_ham.h`, `include/ed/gpu/gpu_operator.cuh` |
 | Every CPU iterative / thermal / dense solver above on a fixed-Sz sector | ✓ | n/a | n/a | Same call signature as the full-Hilbert version; pass `fop.apply` and `fop.getFixedSzDim()`. |
 | Per-Sz GPU variants (`runGPULanczosFixedSz`, `runGPUBlockLanczosFixedSz`, `runGPUFTLMFixedSz`, `runGPUDavidsonFixedSz`, `runGPULOBPCGFixedSz`, `runGPUMicrocanonicalTPQFixedSz`, `runGPUCanonicalTPQFixedSz`) | — | ✓ | — | `src/solvers/gpu/gpu_ed_wrapper.cu` |
-| Fixed-Sz × space-symmetry (`exact_diagonalization_fixed_sz_symmetrized`) | ✓ | — | — | `include/ed/core/ed_wrapper.h` |
+| Fixed-Sz × space-symmetry (streaming kernel; reach via `qed.diag(H, sz=..., symmetry=...)` or `exact_diagonalization_from_directory(..., params)` with `params.use_symmetry = True` and `params.use_fixed_sz = True`) | ✓ | ✓ (per-sector) | ✓ (`device='mpi'`) | `include/ed/core/ed_wrapper_streaming.h` |
 
 ### 7. Other
 

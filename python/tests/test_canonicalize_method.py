@@ -231,20 +231,28 @@ def test_use_symmetry_does_not_alter_canonicalize():
     )
 
 
-def test_deprecated_symmetrized_bindings_still_exist_for_back_compat():
-    # Phase 7.1: the *_symmetrized entry points are now [[deprecated]] in
-    # C++ and emit a runtime DeprecationWarning-style note in their
-    # docstring, but they remain reachable from Python so existing user
-    # scripts keep working.
-    assert hasattr(
+def test_deprecated_symmetrized_bindings_were_removed():
+    # Phase 9 cleanup: the legacy explicit-block ``*_symmetrized`` entry
+    # points (``exact_diagonalization_from_directory_symmetrized`` and
+    # ``exact_diagonalization_fixed_sz_symmetrized``) were removed.
+    # They were already ``[[deprecated]]`` in Phase 7.1 -- they
+    # materialised block matrices on disk, were strictly slower than
+    # the streaming kernel, and had no GPU support. Anyone hitting an
+    # ``AttributeError`` on those names should switch to
+    # ``qed.diag(H, ..., symmetry=...)`` (the unified Phase 9 entry
+    # point) or, for the lower-level dispatcher, to
+    # ``exact_diagonalization_from_directory(...)`` with
+    # ``params.use_symmetry = True`` (and optionally
+    # ``params.use_fixed_sz = True`` + ``params.n_up = ...``).
+    assert not hasattr(
         quantum_ed, "exact_diagonalization_from_directory_symmetrized"
     )
-    assert hasattr(
+    assert not hasattr(
         quantum_ed, "exact_diagonalization_fixed_sz_symmetrized"
     )
-    # And the canonical entry point exists.
+    # The canonical entry point still exists.
     assert hasattr(quantum_ed, "exact_diagonalization_from_directory")
-    # And the streaming primitives are still reachable for power users.
+    # The streaming primitives remain reachable for power users.
     assert hasattr(quantum_ed, "exact_diagonalization_streaming_symmetry")
     assert hasattr(
         quantum_ed, "exact_diagonalization_streaming_symmetry_fixed_sz"

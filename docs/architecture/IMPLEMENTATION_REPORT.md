@@ -380,8 +380,15 @@ underlying solver call is:
 - `exact_diagonalization_all_sz_sectors` / `_gpu` — block by total `S^z`
   (`--full-sz-split`).
 - `exact_diagonalization_from_directory_symmetrized`,
-  `exact_diagonalization_fixed_sz_symmetrized` — older
-  pre-streaming symmetrized variants kept for completeness.
+  `exact_diagonalization_fixed_sz_symmetrized` — *(removed in
+  Phase 9)*. Pre-streaming explicit-block path; the canonical 5-axis
+  dispatcher (`exact_diagonalization_from_directory(...)` with
+  `params.use_symmetry = true` / `params.use_fixed_sz = true` /
+  `params.n_up = ...`) is now the only public path. The streaming
+  kernel is faster on every problem size we have benchmarked, supports
+  GPU per-sector dispatch, and materialises no per-sector blocks on
+  disk. See the Phase 9 entry in `CHANGELOG.md` for the migration
+  table.
 
 ### 4.5 Streaming/Chunked wrappers
 

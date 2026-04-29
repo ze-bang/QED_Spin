@@ -374,10 +374,7 @@ void bind_dispatcher(py::module_& m) {
         // ``exact_diagonalization_from_directory(...)`` is the canonical
         // (and only non-deprecated) way to request symmetry-projected ED.
         // Internally routes through the streaming symmetry kernel
-        // (per-sector, matrix-free, GPU-capable). This replaces the
-        // deprecated entry points
-        // ``exact_diagonalization_from_directory_symmetrized`` and
-        // ``exact_diagonalization_fixed_sz_symmetrized``.
+        // (per-sector, matrix-free, GPU-capable).
         .def_readwrite("use_symmetry",   &EDParameters::use_symmetry)
         // Symmetry sub-options
         .def_readwrite("translation_only", &EDParameters::translation_only)
@@ -794,90 +791,21 @@ void bind_dispatcher(py::module_& m) {
         :func:`exact_diagonalization_streaming_symmetry` (or its
         fixed-Sz cousin), which is the only symmetry kernel that
         supports GPU per-sector dispatch and avoids materialising the
-        orbit basis on disk. The deprecated explicit-block path
-        (:func:`exact_diagonalization_from_directory_symmetrized`) is
-        kept around for back-compat but never reached from this entry
-        point.
+        orbit basis on disk.
     )pbdoc");
 
-    // Phase 7.1: the *_symmetrized entry points are now [[deprecated]] in
-    // C++. They are kept here for ABI / source compat, but the binding
-    // wraps them inside a pragma block so the build doesn't trip the
-    // deprecation warning. New code should call
+    // Phase 9 cleanup: the explicit-block ``*_symmetrized`` entry points
+    // (``exact_diagonalization_from_directory_symmetrized`` and
+    // ``exact_diagonalization_fixed_sz_symmetrized``) were removed.
+    // They were already ``[[deprecated]]`` in Phase 7.1 -- they
+    // materialised block matrices on disk, were strictly slower than
+    // the streaming kernel, and had no GPU support. Anyone hitting
+    // ``AttributeError`` on those names should switch to
     // ``exact_diagonalization_from_directory(...)`` with
     // ``params.use_symmetry = True`` (and optionally
-    // ``params.use_fixed_sz = True``), which is the canonical 5-axis
-    // dispatcher.
-    #pragma GCC diagnostic push
-    #pragma GCC diagnostic ignored "-Wdeprecated-declarations"
-    m.def("exact_diagonalization_from_directory_symmetrized",
-          [](const std::string& directory,
-             DiagonalizationMethod method,
-             const EDParameters& params,
-             HamiltonianFileFormat format,
-             const std::string& interaction_filename,
-             const std::string& single_site_filename,
-             const std::string& counterterm_filename,
-             const std::string& three_body_filename) {
-              EDResults res;
-              {
-                  py::gil_scoped_release release;
-                  res = exact_diagonalization_from_directory_symmetrized(
-                      directory, method, params, format,
-                      interaction_filename, single_site_filename,
-                      counterterm_filename, three_body_filename);
-              }
-              return res;
-          },
-          py::arg("directory"),
-          py::arg("method") = DiagonalizationMethod::LANCZOS,
-          py::arg("params") = EDParameters(),
-          py::arg("format") = HamiltonianFileFormat::STANDARD,
-          py::arg("interaction_filename") = "InterAll.dat",
-          py::arg("single_site_filename") = "Trans.dat",
-          py::arg("counterterm_filename") = "CounterTerm.dat",
-          py::arg("three_body_filename") = "ThreeBodyG.dat",
-          "DEPRECATED (Phase 7.1): use "
-          ":func:`exact_diagonalization_from_directory` with "
-          "``params.use_symmetry = True``. This function uses the "
-          "older explicit-block path (Eigen sparse blocks per sector) "
-          "which is slower than the canonical streaming kernel and "
-          "does not support GPU per-sector dispatch.");
-
-    m.def("exact_diagonalization_fixed_sz_symmetrized",
-          [](const std::string& directory,
-             std::int64_t n_up,
-             DiagonalizationMethod method,
-             const EDParameters& params,
-             HamiltonianFileFormat format,
-             const std::string& interaction_filename,
-             const std::string& single_site_filename,
-             const std::string& three_body_filename) {
-              EDResults res;
-              {
-                  py::gil_scoped_release release;
-                  res = exact_diagonalization_fixed_sz_symmetrized(
-                      directory, n_up, method, params, format,
-                      interaction_filename, single_site_filename,
-                      three_body_filename);
-              }
-              return res;
-          },
-          py::arg("directory"),
-          py::arg("n_up"),
-          py::arg("method") = DiagonalizationMethod::LANCZOS,
-          py::arg("params") = EDParameters(),
-          py::arg("format") = HamiltonianFileFormat::STANDARD,
-          py::arg("interaction_filename") = "InterAll.dat",
-          py::arg("single_site_filename") = "Trans.dat",
-          py::arg("three_body_filename") = "ThreeBodyG.dat",
-          "DEPRECATED (Phase 7.1): use "
-          ":func:`exact_diagonalization_from_directory` with "
-          "``params.use_symmetry = True`` and "
-          "``params.use_fixed_sz = True`` (set ``params.n_up``). The "
-          "canonical streaming kernel does not materialise the orbit "
-          "basis on disk and supports GPU per-sector dispatch.");
-    #pragma GCC diagnostic pop  // legacy *_symmetrized bindings (Phase 7.1)
+    // ``params.use_fixed_sz = True`` + ``params.n_up = ...``), which is
+    // the canonical 5-axis dispatcher and is faster on every problem
+    // size we have benchmarked.
 
     // ------------------------------------------------------------------------
     // 9. Build introspection. Lets callers gate GPU / MPI codepaths in
