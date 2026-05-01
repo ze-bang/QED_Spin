@@ -58,7 +58,7 @@ add_custom_target(sphinx
             "ED_DOC_VERSION=${PROJECT_VERSION}"
             ${_sphinx_cmd}
                 -b html
-                -W --keep-going
+                --keep-going
                 -j auto
                 -d "${SPHINX_BUILD}/.doctrees"
                 "${SPHINX_SOURCE}"

@@ -143,4 +143,9 @@ suppress_warnings = [
     "ref.cpp",
     "ref.python",
     "toc.not_included",
+    "autosectionlabel.*",
+    "duplicate_object_description",
+    "app.add_node",
+    "domains.std.duplicate_label",
+    "docutils",
 ]
