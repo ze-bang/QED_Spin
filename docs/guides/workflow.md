@@ -418,7 +418,7 @@ kernel for every cell -- the table below is the canonical record.
 | ------------------------ | :---: | :---: | :---: | :-----: | ---------------------------------------------------- |
 | `LANCZOS`                |  ✅   |  ✅   |  ✅   |   ✅¹   | `qed.diag(H[, device='gpu'/'mpi'/'mpi_gpu'])` / `run_distributed("lanczos"[, use_gpu=True])` |
 | `BLOCK_LANCZOS`          |  ✅   |  ✅   |  ❌   |   ❌    | `qed.diag(H, solver="BLOCK_LANCZOS"[, device='gpu'])` |
-| `KRYLOV_SCHUR`           |  ✅   |  ✅   |  ✅²  |   ❌²   | `qed.diag(H, solver="KRYLOV_SCHUR"[, device='gpu'/'mpi'])` |
+| `KRYLOV_SCHUR`           |  ✅   |  ✅   |  ✅²  |   ✅⁶   | `qed.diag(H, solver="KRYLOV_SCHUR"[, device='gpu'/'mpi'/'mpi_gpu'])` |
 | `BLOCK_KRYLOV_SCHUR`     |  ✅   |  ✅   |  ❌   |   ❌    | `qed.diag(H, solver="BLOCK_KRYLOV_SCHUR"[, device='gpu'])` |
 | `DAVIDSON` / `LOBPCG`    |  ✅   |  ✅   |  ❌   |   ❌    | `qed.diag(H, solver="DAVIDSON"[, device='gpu'])`     |
 | `ARPACK_*`               |  ✅   |  ❌   |  ❌   |   ❌    | `qed.diag(H, solver="ARPACK_SM")`                    |
@@ -441,11 +441,9 @@ supported fabrics).
 
 ² Distributed Krylov-Schur is the `distributed_krylov_schur` kernel:
 thick-restart Lanczos with Ritz-pair locking, full re-orthogonalisation
-against locked vectors, and an orthogonalised re-seed each cycle. It
-sits on the existing CPU `DistributedOperator`, so the mpi+gpu cell is
-still ❌ -- the restart machinery isn't templated on
-`DistributedGPUOperator` yet (use `device='mpi_gpu'` with
-`solver='LANCZOS'` to get GPU + MPI for now).
+against locked vectors, and an orthogonalised re-seed each cycle.
+Built on the CPU `DistributedOperator`. See footnote ⁶ for the
+multi-GPU sibling.
 
 ³ Distributed mTPQ/cTPQ goes through `--mode tpq` of
 `ed_distributed_main`, which invokes `distributed_tpq` (canonical TPQ
@@ -473,6 +471,24 @@ same on-device basis with one extra device SpMV per sample plus a
 single NCCL allreduce of `2·m` doubles. MPI-over-samples mirrors the
 CPU `distributed_ftlm`. Built only when `WITH_MPI=ON && WITH_CUDA=ON
 && NCCL_FOUND`.
+
+⁶ Multi-GPU Krylov-Schur is the `distributed_krylov_schur_gpu` kernel:
+the same thick-restart Lanczos with Ritz-pair locking as the CPU
+sibling, but the in-cycle Krylov basis V[0..m-1] **and** the locked
+Ritz vectors live in two contiguous device slabs ((m_max + |locked|)
+× local_n × 16 B per rank). Twice-CGS re-orthogonalisation against
+both sets is coalesced — each pass packs the |set| local
+`cublasZdotc` results into a single NCCL allreduce of `2·|set|`
+doubles, then runs |set| `cublasZaxpy` calls to subtract. SpMV goes
+through `DistributedGPUOperator` (NCCL halo + on-device SoA SpMV).
+The `(m × m)` tridiagonal eigensolve and the Ritz-residual /
+locking sweep are host-side (replicated on every rank); reconstruction
+of locked Ritz vectors `phi = Σ_j U[j,i] V[j]` and of the next-cycle
+seed runs on device via `cublasZaxpy`. **Limitation**: the locked
+Ritz vectors stay on device — `--compute-eigenvectors` /
+`--eigenvector-dir` is rejected on the GPU path with an actionable
+error (drop `--gpu` or skip the eigenvector dump). Built only when
+`WITH_MPI=ON && WITH_CUDA=ON && NCCL_FOUND`.
 
 ### Path × device — cross-product caveats
 

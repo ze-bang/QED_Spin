@@ -282,6 +282,13 @@ if(WITH_MPI AND WITH_CUDA AND NCCL_FOUND)
         # contraction reuses the same on-device basis. MPI-over-
         # samples mirrors the CPU distributed_ftlm.
         ${DISTRIBUTED_DIR}/distributed_ftlm_gpu.cu
+        # Phase B (device matrix MPI+GPU): on-device Krylov-Schur
+        # (thick-restart Lanczos with Ritz-pair locking). In-cycle
+        # basis + locked Ritz vectors held in two device slabs;
+        # twice-CGS reorth against both is coalesced into single NCCL
+        # allreduces; DistributedGPUOperator for the SpMV; host-side
+        # (m x m) Eigen tridiag eigensolve per cycle.
+        ${DISTRIBUTED_DIR}/distributed_krylov_schur_gpu.cu
     )
     target_include_directories(ed_distributed_gpu PUBLIC ${_ED_PUBLIC_INCLUDES})
     target_include_directories(ed_distributed_gpu PRIVATE ${NCCL_INCLUDE_DIRS})

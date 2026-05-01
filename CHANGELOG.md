@@ -7,6 +7,70 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — Phase B (device matrix MPI+GPU): on-device Krylov-Schur
+
+Implements `distributed_krylov_schur_gpu`, the multi-GPU companion of
+the CPU `distributed_krylov_schur`. Closes the previously-❌
+`KRYLOV_SCHUR × mpi+gpu` cell of the solver × device support matrix.
+
+- **`include/ed/distributed/distributed_krylov_schur_gpu.h`** (new) —
+  public API: `distributed_krylov_schur_gpu(op, options, world_comm,
+  device_index = -1) -> DistributedLanczosResult`. Reuses the CPU
+  `DistributedLanczosOptions` / `DistributedLanczosResult` so callers
+  see a single type. Header is only compiled under `#ifdef WITH_MPI`;
+  consumers guard the include with `#ifdef ED_HAVE_NCCL`.
+- **`src/distributed/distributed_krylov_schur_gpu.cu`** (new, wrapped
+  in `#ifdef ED_HAVE_NCCL`) — same thick-restart Lanczos with
+  Ritz-pair locking as the CPU sibling, but the in-cycle Krylov basis
+  V[0..m-1] **and** the locked Ritz vectors live in two contiguous
+  device slabs (`(m_max + |locked|) × local_n × 16 B` per rank).
+  Twice-CGS re-orth against both sets is coalesced — each pass packs
+  the |set| local `cublasZdotc` results into a single NCCL allreduce
+  of `2·|set|` doubles, then runs |set| `cublasZaxpy` calls to
+  subtract. SpMV goes through `DistributedGPUOperator` (NCCL halo +
+  on-device SoA SpMV); inner products / norms via `cublasZdotc` +
+  `multi_gpu::all_reduce_sum_complex_double`. The `(m × m)` Eigen
+  tridiagonal eigensolve and the Ritz-residual / locking sweep are
+  host-side, replicated on every rank; reconstruction of locked Ritz
+  vectors `phi = Σ_j U[j,i] V[j]` and of the next-cycle seed runs on
+  device via `cublasZaxpy`. **Honest limitation**: the locked Ritz
+  vectors stay on device — `compute_eigenvectors=true` is silently
+  ignored on the result side, and the dispatcher rejects
+  `--compute-eigenvectors` / `--eigenvector-dir` on the GPU path with
+  an actionable error.
+- **`tests/unit/test_distributed_krylov_schur_gpu.cpp`** (new) —
+  three `TEST_CASE`s cross-check the GPU result against the CPU
+  `distributed_krylov_schur` on the same MPI_COMM_WORLD with the same
+  operator / seeds / `max_iter` / `tol`: N=4 OBC lowest-3, N=6 PBC
+  lowest-4, replicated eigenvalues across world ranks. Tolerance
+  `1e-8` (absolute, since both kernels lock against `tol = 1e-10`).
+  Build-only on CI's CUDA-build-only lane; runtime-tested on dev
+  hosts with GPUs (uses the `runtime_supports_gpu_*` SKIP gate).
+  Custom `int main` does `MPI_Init` + `Catch::Session().run` +
+  `MPI_Finalize`.
+- **`cmake/EDLibraries.cmake`** — adds `distributed_krylov_schur_gpu.cu`
+  to the `ed_distributed_gpu` STATIC target (compiled iff `WITH_MPI &&
+  WITH_CUDA && NCCL_FOUND`).
+- **`CMakeLists.txt`** — registers the new test via
+  `ed_add_phase3c_test(test_distributed_krylov_schur_gpu ...)` at np ∈
+  {1, 2, 4}, only inside `if(TARGET ed_distributed_gpu)`.
+- **`src/cli/ed_distributed_main.cpp`** — `--mode krylov_schur` now
+  accepts `--gpu`: when `ED_HAVE_NCCL` is defined the dispatcher
+  invokes `distributed_krylov_schur_gpu(...)` (`backend=
+  gpu_krylov_schur`); otherwise it errors out with a build-flag hint,
+  mirroring the existing TPQ / FTLM patterns. The previously-bald
+  `fail("--mode krylov_schur --gpu is not yet wired ...")` is gone.
+  Eigenvector output (`--compute-eigenvectors` /
+  `--eigenvector-dir`) on the GPU path is rejected with an actionable
+  message.
+- **`docs/guides/workflow.md`** — flips the KRYLOV_SCHUR × `mpi+gpu`
+  cell from ❌ to ✅⁶, rewrites footnote ² to drop the "still ❌ for
+  mpi+gpu" wording, and adds new footnote ⁶ describing the on-device
+  basis layout, coalesced re-orth, and the eigenvector limitation.
+
+CPU tests: all 24 MPI ctests (`distributed_*`, `orbit_*` at np ∈
+{1, 2, 4}) still pass after the dispatcher edit.
+
 ### Added — Phase A (device matrix MPI+GPU): on-device FTLM
 
 Implements `distributed_ftlm_gpu`, the multi-GPU companion of the CPU

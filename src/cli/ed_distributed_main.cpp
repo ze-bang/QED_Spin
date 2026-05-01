@@ -57,6 +57,9 @@
 #  include <ed/distributed/distributed_ftlm_gpu.h>
 #endif
 #include <ed/distributed/distributed_krylov_schur.h>
+#ifdef ED_HAVE_NCCL
+#  include <ed/distributed/distributed_krylov_schur_gpu.h>
+#endif
 #include <ed/distributed/distributed_lanczos.h>
 #include <ed/distributed/distributed_operator.h>
 #include <ed/distributed/distributed_symmetry_operator.h>
@@ -696,18 +699,14 @@ int main(int argc, char** argv) {
         else if (a.mode == "krylov_schur" || a.mode == "krylov-schur" ||
                  a.mode == "ks") {
             // Layer 3 (Phase 9): thick-restart Lanczos with locking.
-            // Built only on top of DistributedOperator -- the symmetry
-            // variant would need a templated kernel like the plain
-            // Lanczos one (TODO).
+            // Phase B (device matrix MPI+GPU): on-device variant via
+            // `distributed_krylov_schur_gpu`. The symmetry variant
+            // would need a templated kernel like the plain Lanczos one
+            // (TODO -- Phase D).
             if (a.use_symmetry) {
                 fail("--mode krylov_schur --use-symmetry is not yet "
                      "supported. Run --mode lanczos --use-symmetry "
                      "instead, or pre-project to a fixed-Sz block.");
-            }
-            if (a.gpu) {
-                fail("--mode krylov_schur --gpu is not yet wired. "
-                     "distributed_krylov_schur builds on the CPU "
-                     "DistributedOperator only.");
             }
             auto dop = std::make_unique<ed::distributed::DistributedOperator>(
                 op, MPI_COMM_WORLD);
@@ -725,12 +724,34 @@ int main(int argc, char** argv) {
             lopts.compute_eigenvectors =
                 a.compute_eigenvectors || !a.eigenvector_dir.empty();
 
-            auto res = ed::distributed::distributed_krylov_schur(*dop, lopts);
+            ed::distributed::DistributedLanczosResult res;
+            const char* backend_label = "cpu_krylov_schur";
+            if (a.gpu) {
+#ifdef ED_HAVE_NCCL
+                if (lopts.compute_eigenvectors) {
+                    fail("--mode krylov_schur --gpu does not yet support "
+                         "--compute-eigenvectors / --eigenvector-dir. "
+                         "The locked Ritz vectors live on device and are "
+                         "not staged back to host. Run without --gpu, or "
+                         "drop the eigenvector output, for now.");
+                }
+                res = ed::distributed::distributed_krylov_schur_gpu(
+                    op, lopts, MPI_COMM_WORLD, /*device_index=*/-1);
+                backend_label = "gpu_krylov_schur";
+#else
+                fail("--mode krylov_schur --gpu requires WITH_CUDA=ON + "
+                     "NCCL_FOUND. This binary was built without GPU "
+                     "support; rebuild with -DWITH_CUDA=ON or run "
+                     "without --gpu.");
+#endif
+            } else {
+                res = ed::distributed::distributed_krylov_schur(*dop, lopts);
+            }
 
             if (world_rank == 0) {
                 std::cout << "elapsed_s=" << seconds_since(t0)
                           << " iterations=" << res.iterations
-                          << " backend=cpu_krylov_schur"
+                          << " backend=" << backend_label
                           << " plan_bytes_rank0=" << plan_bytes
                           << " local_n_rank0=" << local_n
                           << " global_dim=" << global_dim

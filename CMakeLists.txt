@@ -888,6 +888,16 @@ if(BUILD_ED_TESTS)
                                 tests/unit/test_distributed_ftlm_gpu.cpp)
             target_link_libraries(test_distributed_ftlm_gpu PRIVATE
                 ed_distributed)
+
+            # Phase B (device matrix MPI+GPU): on-device Krylov-Schur
+            # (thick-restart Lanczos with locking). Cross-checks the
+            # CPU `distributed_krylov_schur` on the lowest k_target
+            # eigenvalues at the same tol. SKIPs gracefully when CUDA /
+            # NCCL / device count is insufficient.
+            ed_add_phase3c_test(test_distributed_krylov_schur_gpu
+                                tests/unit/test_distributed_krylov_schur_gpu.cpp)
+            target_link_libraries(test_distributed_krylov_schur_gpu PRIVATE
+                ed_distributed)
         endif()
     endif()
 
