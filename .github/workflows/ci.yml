@@ -110,7 +110,7 @@ jobs:
       - name: Upgrade pip + install build tooling
         run: |
           python -m pip install --upgrade pip
-          python -m pip install "scikit-build-core>=0.10" "pybind11>=2.13" pytest numpy h5py
+          python -m pip install "scikit-build-core>=0.10" "pybind11>=2.13" pytest numpy h5py networkx pynauty
 
       - name: Build + install quantum_ed wheel (editable not yet supported by scikit-build-core fully)
         env:

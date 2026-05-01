@@ -655,10 +655,10 @@ void GPULanczos::run(int num_eigenvalues,
         CUDA_CHECK(cudaGetLastError());
         CUBLAS_CHECK(cublasZaxpy(cublas_handle_, dimension_,
                                  d_neg_alpha_dev_, d_v_current_, 1, d_w_, 1));
-        CUBLAS_CHECK(cudaMemcpyAsync(h_alpha_pinned_, d_alpha_dev_,
-                                     sizeof(cuDoubleComplex),
-                                     cudaMemcpyDeviceToHost,
-                                     /*stream=*/0));
+        CUDA_CHECK(cudaMemcpyAsync(h_alpha_pinned_, d_alpha_dev_,
+                                   sizeof(cuDoubleComplex),
+                                   cudaMemcpyDeviceToHost,
+                                   /*stream=*/0));
         CUBLAS_CHECK(cublasSetPointerMode(cublas_handle_,
                                           CUBLAS_POINTER_MODE_HOST));
 

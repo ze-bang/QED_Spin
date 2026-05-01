@@ -1033,3 +1033,128 @@ eigenvectors with `qed.load_mpi_eigenvector(...)`.
 | inspect what the auto-pilot decided                      | `qed.diag(H, …, verbose=True)` (default) |
 | force a kernel through despite an `INFEASIBLE` verdict   | `qed.diag(H, …, force=True)` |
 | chain low-level kernels yourself (Lanczos → CG → …)      | the dedicated solver modules in `quantum_ed.*` (see `python_advanced.md`) |
+
+
+---
+
+## DSSF / SSSF — `qed.dssf.compute` auto-pilot + low-level overrides
+
+Spectral / structure-factor calculations have their own one-call
+auto-pilot, [`qed.dssf.compute`](../../python/quantum_ed/dssf.py). It
+mirrors `qed.diag` exactly: pass a directory + the axes you want, and
+the wrapper picks the right kernel.
+
+### Method auto-selection
+
+The token forwarded to `./ED dssf` is decided by a 2×2 truth table on
+`(T, omega)` — see `qed.dssf.pick_method(T=..., omega=...)`:
+
+| `T` given? | `omega` given? | Method token | What it computes |
+|:---:|:---:|---|---|
+| no  | no  | `single_expectation`  | static observable ⟨ψ₀\|O\|ψ₀⟩ on the GS only |
+| no  | yes | `ground_state_dssf`   | T=0 dynamical S(Q, ω) via Lanczos continued fractions |
+| yes | no  | `static_thermal`      | thermal expectation ⟨O⟩(T) and equal-time S(Q, T) |
+| yes | yes | `dynamical_thermal`   | full S(Q, ω, T) via FTLM/LTLM continued fractions |
+
+Pass `method="ground_state_dssf"` (etc.) to override the auto-rule.
+Bad tokens are rejected up-front with a helpful list.
+
+### Common path — auto-pilot
+
+```python
+import numpy as np, quantum_ed as qed
+
+# directory must already contain parameters.def, Hamiltonian deck,
+# and (for momentum-resolved DSSF) automorphism_results/ if symmetry
+# projection is desired. See `qed.input.HamiltonianBuilder` and
+# `qed.find_symmetries` for the build steps.
+
+# Static SSSF at three temperatures:
+qed.dssf.compute("runs/heisenberg_N16",
+                 T=[0.05, 0.2, 1.0])
+
+# T=0 dynamical S(Q, ω):
+qed.dssf.compute("runs/heisenberg_N16",
+                 omega=np.linspace(-3.0, 3.0, 400))
+
+# Full S(Q, ω, T):
+qed.dssf.compute("runs/heisenberg_N16",
+                 T=[0.1, 0.5, 2.0],
+                 omega=np.linspace(-3.0, 3.0, 400))
+```
+
+Output lands in `runs/<dir>/dssf/<momentum>/<observable>/<T>/` as the
+unified `(omega, S, error)` HDF5 schema (Phase 8 — see
+[`docs/architecture/CODEMAP.md`](../architecture/CODEMAP.md#dssf-output-schema)).
+
+### Low-level control — extra CLI flags
+
+`compute(...)` forwards an arbitrary `extra_args=(...)` tuple to the
+underlying `./ED dssf` invocation, giving you the full CLI surface of
+[`src/cli/dssf_engine.cpp`](../../src/cli/dssf_engine.cpp). Common
+flags:
+
+| Flag (extra_args) | Knob | Notes |
+|---|---|---|
+| `--ftlm-krylov 200` | inner Krylov M for thermal kernels | matches `EDParameters::ftlm_krylov_dim` |
+| `--num-random-states 32` | R random samples for FTLM/LTLM | controls statistical error |
+| `--lanczos-iters 400` | max outer Lanczos for GS DSSF | continued-fraction depth |
+| `--broadening 0.05` | Lorentzian η in S(Q, ω) | overrides `parameters.def` |
+| `--method ltlm` | force LTLM continued fraction | default at low T is auto |
+| `--gpu` | promote matvec to CUDA | if `WITH_CUDA` was on at build |
+| `--seed 20260501` | RNG seed for random-state seeding | reproducibility |
+| `--no-symmetry` | bypass `automorphism_results/` | falls back to full sector |
+
+```python
+qed.dssf.compute(
+    "runs/heisenberg_N16",
+    T=[0.1, 1.0],
+    omega=np.linspace(-3.0, 3.0, 400),
+    extra_args=(
+        "--ftlm-krylov", "200",
+        "--num-random-states", "32",
+        "--broadening",        "0.04",
+        "--gpu",
+        "--seed",              "20260501",
+    ),
+    capture_output=True,        # collect stdout/stderr into the result
+)
+```
+
+### When to bypass `compute(...)`
+
+For total control (custom env vars, custom binary path, distributed
+DSSF), drop down to the lower layer:
+
+| Use this | When |
+|----------|------|
+| `qed.dssf.run_from_directory(dir, method, ...)` | you already know the method token and want named-kwarg control |
+| direct `subprocess.run([qed.dssf._resolve_ed_binary(), "dssf", dir, ...])` | scripting around bespoke MPI launchers / SLURM |
+| `ed::auto_pilot::dssf::compute(DSSFRequest{...}, AutoDSSFOptions{...})` ([`include/ed/auto/dssf.h`](../../include/ed/auto/dssf.h)) | embedding DSSF in a C++ pipeline |
+| `ed::dssf::run(EDConfig*, DSSFRequest, DSSFMethod)` | full library-level control from C++ (no shell-out) |
+
+### SSSF (equal-time structure factor)
+
+SSSF is a **special case** of `static_thermal`: pass `T=...` without
+`omega=`. The `./ED dssf` engine recognises that ω is absent and
+short-circuits to the equal-time correlator branch:
+
+```python
+# Equal-time S(Q) at two temperatures and on the ground state:
+qed.dssf.compute("runs/heisenberg_N16", T=[0.0, 0.5, 2.0])
+```
+
+`T=[0.0, ...]` is treated as the GS branch automatically by the C++
+engine — no separate driver needed.
+
+### C++ parity
+
+| Python | C++ |
+|--------|-----|
+| `qed.dssf.compute(dir, T=..., omega=...)` | `ed::auto_pilot::dssf::compute(req, opts)` |
+| `qed.dssf.pick_method(T=..., omega=...)` | `ed::auto_pilot::dssf::pick_method(has_T, has_w)` |
+| `qed.dssf.run_from_directory(dir, method, ...)` | `ed::dssf::run(EDConfig*, req, method)` |
+
+The same auto-rules apply on both sides — see
+[`include/ed/auto/dssf.h`](../../include/ed/auto/dssf.h) and the
+two-test smoke suite in `tests/unit/test_auto_dssf.cpp`.

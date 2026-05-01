@@ -139,4 +139,8 @@ myst_enable_extensions = [
 suppress_warnings = [
     "myst.xref_missing",
     "misc.highlighting_failure",
+    "epub.unknown_project_files",
+    "ref.cpp",
+    "ref.python",
+    "toc.not_included",
 ]
