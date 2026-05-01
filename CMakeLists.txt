@@ -717,7 +717,7 @@ if(BUILD_ED_TESTS)
     # `ed::auto_pilot::dssf::compute(DSSFRequest, AutoDSSFOptions)` --
     # method-selection rule + EDConfig-null guard.
     ed_add_test(test_auto_dssf                  tests/unit/test_auto_dssf.cpp USE_CATCH2)
-    target_link_libraries(test_auto_dssf PRIVATE ed_cli ed_dssf)
+    target_link_libraries(test_auto_dssf PRIVATE ed_cli ed_dssf ed_input)
     ed_add_test(test_lanczos_variants           tests/unit/test_lanczos_variants.cpp USE_CATCH2)
     ed_add_test(test_lanczos_basis_buffer       tests/unit/test_lanczos_basis_buffer.cpp USE_CATCH2)
     # Phase 3a #1: Krylov-state checkpoint / restart for the default Lanczos
