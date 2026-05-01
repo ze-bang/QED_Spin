@@ -877,6 +877,17 @@ if(BUILD_ED_TESTS)
                                 tests/unit/test_distributed_gpu_operator.cpp)
             target_link_libraries(test_distributed_gpu_operator PRIVATE
                 ed_distributed)
+
+            # Phase A (device matrix MPI+GPU): on-device FTLM. Cross-checks
+            # the CPU `distributed_ftlm` on the same MPI_COMM_WORLD with the
+            # same operator/seeds/betas, with and without an observable.
+            # SKIPs gracefully when CUDA / NCCL / device count is
+            # insufficient (the test is build-only on CI's CUDA-build-only
+            # lane and runtime-tested on dev hosts with GPUs).
+            ed_add_phase3c_test(test_distributed_ftlm_gpu
+                                tests/unit/test_distributed_ftlm_gpu.cpp)
+            target_link_libraries(test_distributed_ftlm_gpu PRIVATE
+                ed_distributed)
         endif()
     endif()
 

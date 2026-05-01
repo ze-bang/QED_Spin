@@ -426,7 +426,7 @@ kernel for every cell -- the table below is the canonical record.
 | `SCALAPACK[_MIXED]`      |  ❌   |  ❌   |  ✅   |   ❌    | `run_distributed("lanczos", ...)` (under the hood)   |
 | `mTPQ`                   |  ✅   |  ✅   |  ✅³  |   ✅⁴   | `qed.diag(H, solver="mTPQ"[, device='mpi'/'mpi_gpu'])` / `run_distributed("tpq"[, use_gpu=True], ...)` |
 | `cTPQ`                   |  ✅   |  ✅   |  ✅³  |   ✅⁴   | `qed.diag(H, solver="cTPQ"[, device='mpi'/'mpi_gpu'])` / `run_distributed("tpq"[, use_gpu=True], ...)` |
-| `FTLM`                   |  ✅   |  ✅   |  ✅   |   ❌    | `qed.diag(H, solver="FTLM")` / `run_distributed("ftlm", ...)` |
+| `FTLM`                   |  ✅   |  ✅   |  ✅   |   ✅⁵   | `qed.diag(H, solver="FTLM")` / `run_distributed("ftlm"[, use_gpu=True], ...)` |
 | `LTLM` / `HYBRID`        |  ✅   |  ❌   |  ❌   |   ❌    | `qed.diag(H, solver="LTLM")`                          |
 | `SHIFT_INVERT[_ROBUST]` etc. | ✅ |  ❌   |  ❌   |   ❌    | `qed.diag(H, solver="SHIFT_INVERT")`                  |
 
@@ -459,6 +459,56 @@ observable reductions through `cublasZdotc` +
 `multi_gpu::all_reduce_sum_complex_double` (one NCCL allreduce per
 scalar). MPI-over-samples mirrors the CPU path. Built only when
 `WITH_MPI=ON && WITH_CUDA=ON && NCCL_FOUND`.
+
+⁵ Multi-GPU FTLM is the `distributed_ftlm_gpu` kernel: per-sample
+Lanczos with full modified Gram–Schmidt re-orthogonalisation runs
+**entirely on device** (Krylov basis V[0..m-1] held contiguously in a
+single device slab, `cublasZdotc` for the inner products, one NCCL
+allreduce per scalar via `multi_gpu::all_reduce_sum_complex_double`,
+`cublasZaxpy` for the recurrence, `DistributedGPUOperator` for the
+SpMV). The (m × m) tridiagonal eigensolve is done redundantly on every
+rank with Eigen (small problem; not a bottleneck). When an observable
+is supplied the J&P contraction `q_j = ⟨V[j] | O V[0]⟩` reuses the
+same on-device basis with one extra device SpMV per sample plus a
+single NCCL allreduce of `2·m` doubles. MPI-over-samples mirrors the
+CPU `distributed_ftlm`. Built only when `WITH_MPI=ON && WITH_CUDA=ON
+&& NCCL_FOUND`.
+
+### Path × device — cross-product caveats
+
+The path matrix (`full` / `sz` / `symm` / `symm + sz`) and the device
+matrix (`cpu` / `gpu` / `mpi` / `mpi+gpu`) are **almost** orthogonal
+but not quite — a few combinations have known carve-outs that the
+two tables above don't capture on their own:
+
+* `full` and `sz` work on every device cell where the solver is ✅.
+  This is the common case and what the `qed.diag(...)` quick-start
+  examples use.
+* `symm` (symmetry-projected basis) and `symm + sz` work on **cpu**
+  and **gpu** for every solver that supports them (the symmetry
+  projection happens before the Lanczos / TPQ kernel sees the
+  vector, so the kernel itself is none the wiser).
+* `symm` × **mpi** is wired through `DistributedSymmetryOperator`
+  for `LANCZOS` and `FTLM` only at the time of writing. Other
+  distributed solvers (`KRYLOV_SCHUR`, `BLOCK_*`, `DAVIDSON`,
+  `LOBPCG`, `mTPQ`, `cTPQ`) currently fall back with an actionable
+  error if `symm` and `mpi` are both requested. Phase D extends the
+  dispatcher to wire them all uniformly once the GPU symmetry
+  operator (Phase C) lands.
+* `symm` × **mpi+gpu** is not yet implemented anywhere — it waits
+  on `DistributedSymmetryOperatorGPU` (Phase C). Until then,
+  symmetry-projected runs on multi-GPU clusters should drop to
+  `device='gpu'` per node.
+* `mTPQ` / `cTPQ` × `symm`: see Phase E. The lift is "per-sector
+  TPQ + FTLM-style Z-aggregation" (each sector gets its own random
+  state and its own canonical TPQ trajectory; partition functions
+  combine additively with the irrep multiplicities, exactly like
+  FTLM does). Until Phase E ships, the workflow raises a clear
+  `ValueError` for this combination.
+
+The introspection helper `qed.solver_device_support()` only reports
+the solver × device tensor; consult this subsection for the
+path-axis carve-outs that aren't visible there.
 
 ### Build-aware introspection
 

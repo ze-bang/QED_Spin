@@ -53,6 +53,9 @@
 #include <ed/core/construct_ham.h>
 #include <ed/core/hdf5_io.h>
 #include <ed/distributed/distributed_ftlm.h>
+#ifdef ED_HAVE_NCCL
+#  include <ed/distributed/distributed_ftlm_gpu.h>
+#endif
 #include <ed/distributed/distributed_krylov_schur.h>
 #include <ed/distributed/distributed_lanczos.h>
 #include <ed/distributed/distributed_operator.h>
@@ -838,20 +841,43 @@ int main(int argc, char** argv) {
                      "Run per sector by setting --sector-index in a loop "
                      "and aggregating Z by hand for now.");
             }
-            ed::distributed::DistributedFtlmOptions fopts;
-            fopts.n_samples         = a.n_samples;
-            fopts.n_groups          = a.n_groups;
-            fopts.lanczos_max_iter  = a.max_iter;
-            fopts.betas             = a.betas;
-            fopts.seed_offset       = a.seed;
-            fopts.verbose           = a.verbose;
 
-            auto res = ed::distributed::distributed_ftlm(
-                op, fopts, MPI_COMM_WORLD);
+            ed::distributed::DistributedFtlmResult res;
+            const char* backend_label = "cpu_mpi";
+            if (a.gpu) {
+#ifdef ED_HAVE_NCCL
+                // Phase A (device matrix MPI+GPU): on-device FTLM.
+                ed::distributed::DistributedFtlmGPUOptions gfopts;
+                gfopts.n_samples         = a.n_samples;
+                gfopts.n_groups          = a.n_groups;
+                gfopts.lanczos_max_iter  = a.max_iter;
+                gfopts.betas             = a.betas;
+                gfopts.seed_offset       = a.seed;
+                gfopts.verbose           = a.verbose;
+
+                res = ed::distributed::distributed_ftlm_gpu(
+                    op, gfopts, MPI_COMM_WORLD);
+                backend_label = "gpu_mpi";
+#else
+                fail("--mode ftlm --gpu requires WITH_CUDA=ON + NCCL_FOUND.");
+#endif
+            } else {
+                ed::distributed::DistributedFtlmOptions fopts;
+                fopts.n_samples         = a.n_samples;
+                fopts.n_groups          = a.n_groups;
+                fopts.lanczos_max_iter  = a.max_iter;
+                fopts.betas             = a.betas;
+                fopts.seed_offset       = a.seed;
+                fopts.verbose           = a.verbose;
+
+                res = ed::distributed::distributed_ftlm(
+                    op, fopts, MPI_COMM_WORLD);
+            }
 
             if (world_rank == 0) {
                 std::cout << "elapsed_s=" << seconds_since(t0)
                           << " samples_used=" << res.samples_used
+                          << " backend=" << backend_label
                           << std::endl;
                 for (std::size_t b = 0; b < a.betas.size(); ++b) {
                     std::cout << "  beta=" << a.betas[b]

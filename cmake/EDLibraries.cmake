@@ -274,6 +274,14 @@ if(WITH_MPI AND WITH_CUDA AND NCCL_FOUND)
         # NCCL allreduces for normalisation/observables. MPI-over-
         # samples mirrors the CPU distributed_tpq.
         ${DISTRIBUTED_DIR}/distributed_tpq_gpu.cu
+        # Phase A (device matrix MPI+GPU): on-device FTLM. Per-sample
+        # Lanczos with full re-orth runs entirely on the GPU (basis
+        # held in one device slab, cublasZdotc/cublasZaxpy/NCCL
+        # allreduce for the inner products, DistributedGPUOperator for
+        # the SpMV, host-side tridiag eigensolve), J&P observable
+        # contraction reuses the same on-device basis. MPI-over-
+        # samples mirrors the CPU distributed_ftlm.
+        ${DISTRIBUTED_DIR}/distributed_ftlm_gpu.cu
     )
     target_include_directories(ed_distributed_gpu PUBLIC ${_ED_PUBLIC_INCLUDES})
     target_include_directories(ed_distributed_gpu PRIVATE ${NCCL_INCLUDE_DIRS})

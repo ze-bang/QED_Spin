@@ -7,6 +7,74 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — Phase A (device matrix MPI+GPU): on-device FTLM
+
+Implements `distributed_ftlm_gpu`, the multi-GPU companion of the CPU
+`distributed_ftlm`. Closes the previously-❌ FTLM × `mpi+gpu` cell of
+the solver × device support matrix.
+
+- **`include/ed/distributed/distributed_ftlm_gpu.h`** (new) — public
+  API: `DistributedFtlmGPUOptions { n_samples, n_groups,
+  lanczos_max_iter, betas, seed_offset, observable_op, device_index,
+  verbose }` and free function `distributed_ftlm_gpu(op, options,
+  world_comm) -> DistributedFtlmResult`. Reuses the existing CPU
+  result struct from `distributed_ftlm.h` so callers see one type.
+  Header is only compiled under `#ifdef WITH_MPI`; consumers guard
+  the include with `#ifdef ED_HAVE_NCCL`.
+- **`src/distributed/distributed_ftlm_gpu.cu`** (new, ~510 lines,
+  wrapped in `#ifdef ED_HAVE_NCCL`) — per-sample Lanczos with **full
+  modified Gram–Schmidt re-orthogonalisation** runs entirely on
+  device: the Krylov basis V[0..m-1] is held contiguously in a single
+  device slab (`m_max × local_n × 16 B` per rank, ~1 GiB at m=64,
+  local_n=1e6 — fits a single V100/A100/H100), `cublasZdotc` for the
+  inner products, **one** NCCL allreduce per scalar via
+  `multi_gpu::all_reduce_sum_complex_double` after coalescing the
+  `j+1` re-orth dot products into a single `2·(j+1)` double payload,
+  `cublasZaxpy` for the recurrence, `DistributedGPUOperator` (NCCL
+  pairwise SendRecv halo + on-device SoA SpMV) for the SpMV, and a
+  redundant host-side `(m × m)` Eigen tridiagonal eigensolve. When an
+  observable is supplied the J&P contraction `q_j = ⟨V[j] | O V[0]⟩`
+  reuses the same on-device basis with one extra device SpMV per
+  sample plus a single NCCL allreduce of `2·m` doubles. MPI-over-
+  samples mirrors the CPU path; group-rank-0 contributes to the world
+  reduction to avoid double-counting replicated per-group
+  accumulators. Throws `std::logic_error` if NCCL was not compiled
+  in.
+- **`tests/unit/test_distributed_ftlm_gpu.cpp`** (new) — four
+  `TEST_CASE`s cross-check the GPU FTLM against the CPU
+  `distributed_ftlm` on the same MPI_COMM_WORLD with the same
+  operator / seeds / betas: N=4 OBC `Z(β)`, N=6 PBC `Z(β)`, N=4 OBC
+  `⟨O⟩(β)` with `O = H`, and a replication check across world ranks.
+  Tolerance `1e-6` (relative). Build-only on CI's CUDA-build-only
+  lane; runtime-tested on dev hosts with GPUs (uses the
+  `runtime_supports_gpu_*` SKIP gate from the existing GPU Lanczos
+  test). Custom `int main` does `MPI_Init` + `Catch::Session().run` +
+  `MPI_Finalize`.
+- **`cmake/EDLibraries.cmake`** — adds `distributed_ftlm_gpu.cu` to
+  the `ed_distributed_gpu` STATIC target (compiled iff `WITH_MPI &&
+  WITH_CUDA && NCCL_FOUND`, propagating `ED_HAVE_NCCL=1` PUBLIC).
+- **`CMakeLists.txt`** — registers the new test via
+  `ed_add_phase3c_test(test_distributed_ftlm_gpu ...)` at np ∈
+  {1, 2, 4}, only inside `if(TARGET ed_distributed_gpu)`.
+- **`src/cli/ed_distributed_main.cpp`** — `--mode ftlm` now accepts
+  `--gpu`: when `ED_HAVE_NCCL` is defined the dispatcher invokes
+  `distributed_ftlm_gpu(...)` (`backend=gpu_mpi`); otherwise it errors
+  out with a build-flag hint, mirroring the existing TPQ pattern.
+  `--use-symmetry` continues to fail with the same message as on the
+  CPU path until Phase D wires symmetry through every distributed
+  cell.
+- **`docs/guides/workflow.md`** — flips the FTLM × `mpi+gpu` cell of
+  the solver × device matrix from ❌ to ✅⁵, adds footnote ⁵ describing
+  the on-device Lanczos / re-orth / J&P contraction layout, and adds
+  a new "Path × device — cross-product caveats" subsection that calls
+  out the remaining (non-orthogonal) carve-outs in the
+  path-axis × device-axis cross-product (Phases B–E roadmap visible
+  to readers).
+
+CPU MPI ctest (`distributed_ftlm`, `distributed_tpq`,
+`distributed_lanczos`, `distributed_eigenvectors` at np ∈ {1, 2, 4})
+all 9 tests still pass after the dispatcher edit.
+
 ### Fixed — DSSF: positions.dat parser and num_sites auto-detection
 
 Two bugs caused `./ED dssf` (and therefore `qed.dssf.compute(...)` /
