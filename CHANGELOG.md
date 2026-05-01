@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — DSSF: positions.dat parser and num_sites auto-detection
+
+Two bugs caused `./ED dssf` (and therefore `qed.dssf.compute(...)` /
+`ed::auto_pilot::dssf::compute(...)`) to crash on every deck produced
+by `HamiltonianBuilder::write_directory(...)`:
+
+- **`include/ed/core/operator_types.h`** — `readPositionsFromFile`
+  expected the legacy 6-column format `site_id  matrix_idx  sublattice
+  x  y  z`, but `write_positions_file` writes only `x y z`. Every line
+  failed to parse, leaving all `positions[i]` empty, and
+  `calculatePhaseFactors` crashed with an out-of-bounds access during
+  observable assembly. The parser now accepts the canonical 3-column
+  format with the line index used as the site index.
+- **`src/core/ed_config.cpp`** — `EDConfig::autoDetectNumSites` tried to
+  read the x-coordinate as a `uint64_t` site id. For an `N`-site chain
+  with positions `0.0, 1.0, ..., (N-1).0` written in scientific
+  notation (`1.0000000000e+01` for site 10), `>>` only consumed the
+  leading `1` so a 12-site deck was mis-detected as 10 sites. Now
+  counts non-comment lines instead.
+
+After the fix both static and dynamical workflows succeed at N=12 from
+the Python side and a new C++ end-to-end ctest (`test_auto_dssf`,
+case _"runs static\_thermal end-to-end on a 4-site chain"_) drives the
+full `ed::auto_pilot::dssf::compute` path on a real deck. `ctest`
+183/183 passing.
+
+`docs/guides/workflow.md` Section 3 was rewritten to be a verified
+smoke-tested DSSF/SSSF example (builds the deck on the fly, runs both
+`static_thermal` and `dynamical_thermal`); the older "API shape only"
+caveat is gone, and the `extra_args=` flags now use the canonical
+`--dyn-*` / `--static-*` `=`-syntax accepted by `ED dssf`.
+
 ### Removed — Phase 9: collapse the symmetry surface to a single canonical kernel
 
 Closes the audit item _"there are multiple ways of symmetry here
