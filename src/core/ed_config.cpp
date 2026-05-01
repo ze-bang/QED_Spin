@@ -796,32 +796,32 @@ void EDConfig::print(std::ostream& out) const {
 bool EDConfig::autoDetectNumSites() {
     std::string positions_file = system.hamiltonian_dir + "/positions.dat";
     std::ifstream file(positions_file);
-    
+
     if (!file.is_open()) {
         return false;
     }
-    
-    uint64_t max_site_id = 0;
-    bool found_site = false;
+
+    // The canonical positions.dat format (written by write_positions_file) is
+    //   x y z
+    // one line per site, with comment lines beginning with '#'. Count the
+    // number of data lines; that equals num_sites.
+    uint64_t count = 0;
     std::string line;
-    
     while (std::getline(file, line)) {
         if (line.empty() || line[0] == '#') continue;
-        
         std::istringstream iss(line);
-        uint64_t site_id;
-        if (iss >> site_id) {
-            max_site_id = std::max(max_site_id, site_id);
-            found_site = true;
+        double x;
+        if (iss >> x) {
+            ++count;
         }
     }
-    
-    if (found_site) {
-        system.num_sites = max_site_id + 1;
+
+    if (count > 0) {
+        system.num_sites = count;
         std::cout << "Auto-detected num_sites = " << system.num_sites << " from positions.dat\n";
         return true;
     }
-    
+
     return false;
 }
 

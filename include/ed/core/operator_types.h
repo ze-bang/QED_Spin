@@ -89,28 +89,28 @@ protected:
         if (!file.is_open()) {
             throw std::runtime_error("Could not open positions file: " + filename);
         }
-        
-        std::vector<std::vector<double>> positions(expected_sites);
+
+        // The canonical positions.dat format (written by write_positions_file /
+        // HamiltonianBuilder::write_directory) is one line per site:
+        //   x y z
+        // where the site index equals the (0-based) line number.
+        // Lines beginning with '#' are treated as comments and skipped.
+        std::vector<std::vector<double>> positions(expected_sites, std::vector<double>(3, 0.0));
         std::string line;
-        
-        while (std::getline(file, line) && line[0] == '#');
-        
-        bool process_current = !line.empty() && line[0] != '#';
-        
-        do {
+        uint64_t site_id = 0;
+
+        while (std::getline(file, line)) {
             if (line.empty() || line[0] == '#') continue;
-            
             std::istringstream iss(line);
-            uint64_t site_id, matrix_idx, sublattice;
             double x, y, z;
-            
-            if (iss >> site_id >> matrix_idx >> sublattice >> x >> y >> z) {
-                if (site_id >= 0 && site_id < expected_sites) {
+            if (iss >> x >> y >> z) {
+                if (site_id < expected_sites) {
                     positions[site_id] = {x, y, z};
                 }
+                ++site_id;
             }
-        } while (std::getline(file, line));
-        
+        }
+
         return positions;
     }
     

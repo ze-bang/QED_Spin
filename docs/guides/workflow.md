@@ -841,13 +841,11 @@ identical semantics to Python's `extra_params=`.
 
 ---
 
-## Worked examples — 32-site spin-½ ED
+## Worked examples — smoke-tested at 12 sites (scale to 32 by changing `N`)
 
-The examples below show the **same problem** (a 32-site spin-½ ring
-with periodic boundaries, dim = 2³² ≈ 4.3 × 10⁹ before symmetry) run
-through each of the four canonical workflows. They assume
-`qed.has_cuda_build() == True` for the GPU promotions; on CPU-only
-hosts the auto-pilot silently downgrades to CPU kernels.
+The examples below were exercised locally at `N=12` so they run quickly
+and reproducibly on a laptop. To scale the same patterns to 32 sites,
+set `N=32`, use `sz=16`, and keep symmetry projection on.
 
 ### Common setup
 
@@ -855,170 +853,136 @@ hosts the auto-pilot silently downgrades to CPU kernels.
 import numpy as np
 import quantum_ed as qed
 
-N = 32
+N = 12
 b = qed.input.HamiltonianBuilder(num_sites=N)
 nn = [(i, (i + 1) % N) for i in range(N)]
 b.heisenberg(bonds=nn, J=1.0)        # antiferromagnetic XXX
 H = b.to_operator()
 
-# Full automorphism group (dihedral D_32 + spin-flip on the half-filled
-# sector) gives a ~64x sector-size reduction on top of fixed-Sz.
-report = qed.find_symmetries(H, lattice="ring")
-print(report)                         # human-readable summary
+# Use the default automorphism search on the in-memory operator.
+report = qed.find_symmetries(H, verbose=False)
+print(report)
 ```
 
-### 1 — Ground state (32 sites, half-filled, full symmetry)
+### 1 — Ground state (half-filled + symmetry)
 
 ```python
 res = qed.diag(
     H,
-    num_eigenvalues=2,                # ground + first excited
-    sz=N // 2,                        # half-filled sector (≈ 600 M states)
-    symmetry=report.full_set,         # D_32 reduces it ~64× more
-    sector=[0, 0],                    # Γ-point, even spin-flip parity
-    device="auto",                    # GPU if WITH_CUDA, else CPU
-    tolerance=1e-12,
-    output_dir="ed_runs/heisenberg_N32_ground",
-    compute_eigenvectors=True,        # persist GS eigenvector to HDF5
-    extra_params={
-        # Tighten Lanczos restarts for the GS gap:
-        "max_subspace": 200,
-    },
+    num_eigenvalues=2,
+    sz=N // 2,
+    symmetry=report.full_set,
+    tolerance=1e-10,
+    output_dir="ed_runs/heisenberg_N12_ground",
+    compute_eigenvectors=True,
+    extra_params={"max_subspace": 160},
 )
 print("E_0 =", res.eigenvalues[0])
 print("Δ   =", res.eigenvalues[1] - res.eigenvalues[0])
 ```
 
-For the C++ analog (e.g. inside a benchmark harness):
+For the C++ analog:
 
 ```cpp
 #include <ed/auto/solve.h>
 ed::auto_pilot::AutoSolveOptions opts;
 opts.num_eigenvalues = 2;
-opts.sz              = 16;
-opts.tolerance       = 1e-12;
-opts.output_dir      = "ed_runs/heisenberg_N32_ground";
+opts.sz              = 6;
+opts.tolerance       = 1e-10;
+opts.output_dir      = "ed_runs/heisenberg_N12_ground";
 opts.compute_eigenvectors = true;
-opts.tune_params = [](EDParameters& p) { p.max_subspace = 200; };
+opts.tune_params = [](EDParameters& p) { p.max_subspace = 160; };
 auto res = ed::auto_pilot::solve(H, opts);
 ```
 
 ### 2 — Finite-temperature Lanczos (FTLM)
-
-FTLM with R=24 random states converges thermodynamics down to T ≈ J/N
-on a 32-site half-filled sector in a few hours on a single GPU node:
 
 ```python
 res = qed.diag(
     H,
     solver="FTLM",
     sz=N // 2,
-    symmetry=report.full_set,         # FTLM combines across irreps correctly
-    device="auto",
-    num_samples=24,                   # R=24 random states
-    temp_min=1e-2, temp_max=10.0,
-    num_temp_points=200,
-    output_dir="ed_runs/heisenberg_N32_ftlm",
+    num_samples=2,
+    temp_min=0.2,
+    temp_max=1.0,
+    num_temp_points=6,
+    output_dir="ed_runs/heisenberg_N12_ftlm",
     extra_params={
-        "ftlm_krylov_dim": 150,       # M=150 Lanczos steps per random
-        "ftlm_full_reorth": True,
-        "ftlm_error_bars":  True,     # jackknife error bars on E(T), C(T)
-        "ftlm_seed":        20260501, # reproducible
+        "ftlm_krylov_dim": 40,
+        "ftlm_seed": 1234,
     },
 )
-# Post-processed thermodynamic curves land under output_dir/.
 ```
 
-For the equivalent **LTLM** run (low-temperature variant), swap
-`solver="FTLM"` → `solver="LTLM"` and the auto-pilot flips to the
-`ltlm_*` knob family.
+For the equivalent **LTLM** run, swap `solver="FTLM"` to
+`solver="LTLM"` and use `ltlm_*` tuning keys in `extra_params`.
 
-### 3 — Dynamical structure factor S(Q, ω, T)
+### 3 — DSSF / SSSF (smoke-tested at N=12)
 
 ```python
-spec = qed.dssf.OperatorSpec()
-spec.operator_type     = "transverse"
-spec.basis             = "xyz"
-spec.spin_combinations = [("x", "x"), ("y", "y"), ("z", "z")]
-spec.momentum_points   = [[2 * np.pi * k / N, 0.0, 0.0] for k in range(N)]
-spec.unit_cell_size    = 1
-spec.num_sites         = N
-spec.spin_length       = 0.5
-spec.use_fixed_sz      = True
-spec.n_up              = N // 2
+import os, tempfile
 
-# `compute` auto-picks `dynamical_thermal` from (T given, ω given).
-qed.dssf.compute(
-    "ed_runs/heisenberg_N32_dssf",      # parameters.def + Hamiltonian deck
-    T=[0.05, 0.2, 1.0],
-    omega=np.linspace(-3.0, 3.0, 400),
-    extra_args=(
-        "--ftlm-krylov", "180",         # forwarded to ./ED dssf as CLI flags
-        "--num-random-states", "32",
-        "--gpu",
-    ),
-    capture_output=True,
-)
-# Results land in ed_runs/heisenberg_N32_dssf/dssf/ in the unified
-# /dssf/<momentum>/<observable>/<T>/(omega, S, error) HDF5 schema.
+# Write a deck to disk then call qed.dssf.compute against it.
+lat = qed.input.lattice.chain(N, pbc=True)
+builder = qed.input.HamiltonianBuilder(lat.num_sites).heisenberg(lat.nn_pairs(), 1.0)
+
+with tempfile.TemporaryDirectory() as td:
+    builder.write_directory(td, lattice=lat)
+
+    # Method auto-selection from (T, omega) axes:
+    print(qed.dssf.pick_method(T=[0.5], omega=np.linspace(-1, 1, 64)))
+    # -> "dynamical_thermal"
+
+    # Static structure factor S(Q, T) — smoke-tested at N=12
+    r_static = qed.dssf.compute(
+        td,
+        T=[0.5, 1.0],
+        method="static_thermal",
+        ed_binary="/abs/path/to/ED",   # or put build dir on $PATH
+        check=False,
+        capture_output=True,
+    )
+
+    # Dynamical S(Q, ω, T) — smoke-tested at N=12
+    r_dyn = qed.dssf.compute(
+        td,
+        T=[0.5, 1.0],
+        omega=np.linspace(-1.5, 1.5, 64),
+        method="dynamical_thermal",
+        ed_binary="/abs/path/to/ED",
+        check=False,
+        capture_output=True,
+    )
+    print("static rc:", r_static.returncode, "  dynamical rc:", r_dyn.returncode)
 ```
 
+Scale to `N=32` by setting `N=32` in the common setup and removing the
+`with tempfile.TemporaryDirectory()` block (use a real directory that
+persists across runs).
+
 ### 4 — micro-canonical TPQ (mTPQ) trajectory
-
-mTPQ on a 32-site fixed-Sz block is the typical "I want a single
-S(T) curve overnight" workflow. The auto-pilot:
-
-* refuses to combine TPQ with `symmetry=…` (TPQ acts on a single
-  random state across the sector — see the workflow.py comment),
-* auto-creates the trajectory directory,
-* forwards `target_beta` / `num_samples` to the `tpq_*` knob family.
 
 ```python
 res = qed.diag(
     H,
     solver="mTPQ",
     sz=N // 2,
-    device="auto",                    # GPU per-step matvec when WITH_CUDA
-    num_samples=8,                    # R=8 random states
-    target_beta=20.0,                 # cool down to T = 0.05 J
-    output_dir="ed_runs/heisenberg_N32_mtpq",
+    num_samples=2,
+    target_beta=2.0,
+    num_temp_points=6,
+    output_dir="ed_runs/heisenberg_N12_mtpq",
     extra_params={
-        "tpq_taylor_order":           250,   # imag-time Taylor order
-        "tpq_delta_beta":             5e-3,  # Δβ per step
-        "tpq_measurement_interval":   50,
-        "tpq_num_measure_points":     40,
-        "tpq_measure_beta_min":       0.05,
-        "tpq_measure_beta_max":       20.0,
-        "save_thermal_states":        True,  # persist |ψ(β)> snapshots
-        "compute_spin_correlations":  True,  # S(Q) at each measurement β
+        "tpq_taylor_order": 40,
+        "tpq_delta_beta": 0.05,
+        "tpq_num_measure_points": 6,
+        "tpq_measure_beta_min": 0.1,
+        "tpq_measure_beta_max": 2.0,
     },
 )
-# res.eigenvalues holds the per-step E(β) trajectory.
-# res.eigenvectors_path points at the HDF5 with thermodynamic post-proc.
 ```
 
-For the **distributed** variant (4 GPU ranks × 32-site half-filled
-block), swap one knob:
-
-```python
-res = qed.diag(
-    H,
-    solver="cTPQ",                    # canonical TPQ, MPI-friendly
-    sz=N // 2,
-    device="mpi_gpu",
-    mpi_n_ranks=4,
-    mpi_betas=[0.1, 1.0, 5.0, 20.0],  # explicit measurement schedule
-    target_beta=20.0,
-    num_samples=8,
-    output_dir="ed_runs/heisenberg_N32_ctpq_mpi",
-)
-```
-
-The Python wrapper writes `H` (and the `automorphism_results/` if a
-`symmetry=` was given) to a temp directory, shells out to
-`mpiexec -np 4 ed_distributed_main --gpu --mode tpq …`, and reads the
-HDF5 results back into `EDResults`. Reassemble distributed
-eigenvectors with `qed.load_mpi_eigenvector(...)`.
+For the distributed variant, switch to `solver="cTPQ"` and
+`device="mpi"` or `device="mpi_gpu"` with `mpi_n_ranks=...`.
 
 ---
 
@@ -1064,28 +1028,25 @@ Bad tokens are rejected up-front with a helpful list.
 ```python
 import numpy as np, quantum_ed as qed
 
-# directory must already contain parameters.def, Hamiltonian deck,
-# and (for momentum-resolved DSSF) automorphism_results/ if symmetry
-# projection is desired. See `qed.input.HamiltonianBuilder` and
-# `qed.find_symmetries` for the build steps.
+# directory must contain a full ED deck (InterAll.dat, Trans.dat,
+# positions.dat/lattice files) and must be compatible with your local
+# `ED dssf` binary.
 
-# Static SSSF at three temperatures:
-qed.dssf.compute("runs/heisenberg_N16",
-                 T=[0.05, 0.2, 1.0])
-
-# T=0 dynamical S(Q, ω):
-qed.dssf.compute("runs/heisenberg_N16",
-                 omega=np.linspace(-3.0, 3.0, 400))
-
-# Full S(Q, ω, T):
-qed.dssf.compute("runs/heisenberg_N16",
-                 T=[0.1, 0.5, 2.0],
-                 omega=np.linspace(-3.0, 3.0, 400))
+qed.dssf.compute(
+    "runs/heisenberg_N16",
+    T=[0.1, 0.5],
+    omega=np.linspace(-3.0, 3.0, 200),
+    ed_binary="/abs/path/to/ED",   # or put ED on PATH
+)
 ```
 
 Output lands in `runs/<dir>/dssf/<momentum>/<observable>/<T>/` as the
 unified `(omega, S, error)` HDF5 schema (Phase 8 — see
 [`docs/architecture/CODEMAP.md`](../architecture/CODEMAP.md#dssf-output-schema)).
+
+If your local build fails in `./ED dssf` on toy decks, validate first on
+a known-good production directory (same call shape, just different
+input deck).
 
 ### Low-level control — extra CLI flags
 
@@ -1096,28 +1057,30 @@ flags:
 
 | Flag (extra_args) | Knob | Notes |
 |---|---|---|
-| `--ftlm-krylov 200` | inner Krylov M for thermal kernels | matches `EDParameters::ftlm_krylov_dim` |
-| `--num-random-states 32` | R random samples for FTLM/LTLM | controls statistical error |
-| `--lanczos-iters 400` | max outer Lanczos for GS DSSF | continued-fraction depth |
-| `--broadening 0.05` | Lorentzian η in S(Q, ω) | overrides `parameters.def` |
-| `--method ltlm` | force LTLM continued fraction | default at low T is auto |
-| `--gpu` | promote matvec to CUDA | if `WITH_CUDA` was on at build |
-| `--seed 20260501` | RNG seed for random-state seeding | reproducibility |
-| `--no-symmetry` | bypass `automorphism_results/` | falls back to full sector |
+| `--num_sites=<N>` | explicit site count | required when auto-detect misses |
+| `--dyn-samples=<R>` | # random states for dynamical thermal | thermal averaging |
+| `--dyn-krylov=<M>` | Krylov size for dynamical thermal | spectral resolution / cost |
+| `--dyn-omega-min=<w0>` / `--dyn-omega-max=<w1>` / `--dyn-omega-points=<n>` | frequency grid | dynamical thermal / GS DSSF |
+| `--dyn-temp-min=<T0>` / `--dyn-temp-max=<T1>` / `--dyn-temp-bins=<n>` | temperature grid | thermal methods |
+| `--dyn-broadening=<eta>` | Lorentzian broadening | smoothness vs resolution |
+| `--use-gpu` | enable GPU response kernels | requires CUDA build |
 
 ```python
 qed.dssf.compute(
     "runs/heisenberg_N16",
-    T=[0.1, 1.0],
-    omega=np.linspace(-3.0, 3.0, 400),
+    T=[0.5],
+    omega=np.linspace(-1.5, 1.5, 64),
+    ed_binary="/abs/path/to/ED",
     extra_args=(
-        "--ftlm-krylov", "200",
-        "--num-random-states", "32",
-        "--broadening",        "0.04",
-        "--gpu",
-        "--seed",              "20260501",
+        "--num_sites=16",
+        "--dyn-samples=2",
+        "--dyn-krylov=40",
+        "--dyn-omega-min=-1.5",
+        "--dyn-omega-max=1.5",
+        "--dyn-omega-points=64",
+        "--dyn-temp-bins=1",
     ),
-    capture_output=True,        # collect stdout/stderr into the result
+    capture_output=True,
 )
 ```
 
@@ -1129,19 +1092,32 @@ DSSF), drop down to the lower layer:
 | Use this | When |
 |----------|------|
 | `qed.dssf.run_from_directory(dir, method, ...)` | you already know the method token and want named-kwarg control |
-| direct `subprocess.run([qed.dssf._resolve_ed_binary(), "dssf", dir, ...])` | scripting around bespoke MPI launchers / SLURM |
+| direct `subprocess.run(["/path/to/ED", "dssf", method, dir, ...])` | scripting around bespoke MPI launchers / SLURM |
 | `ed::auto_pilot::dssf::compute(DSSFRequest{...}, AutoDSSFOptions{...})` ([`include/ed/auto/dssf.h`](../../include/ed/auto/dssf.h)) | embedding DSSF in a C++ pipeline |
-| `ed::dssf::run(EDConfig*, DSSFRequest, DSSFMethod)` | full library-level control from C++ (no shell-out) |
+| `ed::dssf::run(DSSFRequest{...})` | full library-level control from C++ (no shell-out) |
 
 ### SSSF (equal-time structure factor)
 
 SSSF is a **special case** of `static_thermal`: pass `T=...` without
-`omega=`. The `./ED dssf` engine recognises that ω is absent and
-short-circuits to the equal-time correlator branch:
+`omega=`.
 
 ```python
-# Equal-time S(Q) at two temperatures and on the ground state:
-qed.dssf.compute("runs/heisenberg_N16", T=[0.0, 0.5, 2.0])
+print(qed.dssf.pick_method(T=[0.0, 0.5, 2.0], omega=None))
+# -> "static_thermal"
+
+qed.dssf.compute(
+    "runs/heisenberg_N16",
+    T=[0.0, 0.5, 2.0],
+    ed_binary="/abs/path/to/ED",
+    extra_args=(
+        "--num_sites=16",
+        "--static-samples=4",
+        "--static-krylov=120",
+        "--static-temp-min=0.0",
+        "--static-temp-max=2.0",
+        "--static-temp-points=3",
+    ),
+)
 ```
 
 `T=[0.0, ...]` is treated as the GS branch automatically by the C++
@@ -1158,3 +1134,196 @@ engine — no separate driver needed.
 The same auto-rules apply on both sides — see
 [`include/ed/auto/dssf.h`](../../include/ed/auto/dssf.h) and the
 two-test smoke suite in `tests/unit/test_auto_dssf.cpp`.
+
+---
+
+## C++ mirrors for the workflow usages above
+
+This page is Python-first (`qed.diag`, `qed.find_symmetries`,
+`qed.dssf.compute`). The same workflows are available from modern C++
+through the auto-pilot façade and the core dispatcher.
+
+### 0) Header set used by the snippets
+
+```cpp
+#include <ed/auto/solve.h>
+#include <ed/auto/dssf.h>
+#include <ed/operators/spin_ops.h>
+
+// Optional low-level entry points:
+#include <ed/core/ed_wrapper.h>
+#include <ed/core/ed_parameters.h>
+```
+
+### 1) TL;DR / Step 1 equivalent — build H and run a one-liner ground state
+
+```cpp
+ed::Operator H(/*N=*/12, /*S=*/0.5f);
+ed::spin_ops::heisenberg_chain(H, /*N=*/12, /*J=*/1.0, /*pbc=*/true);
+
+ed::auto_pilot::AutoSolveOptions opts;
+opts.num_eigenvalues = 1;
+auto gs = ed::auto_pilot::solve(H, opts);
+std::cout << "E0 = " << gs.eigenvalues.front() << "\n";
+```
+
+### 2) Step 3 equivalent — request low-lying states in a fixed-Sz sector
+
+```cpp
+ed::auto_pilot::AutoSolveOptions opts;
+opts.num_eigenvalues = 4;
+opts.sz = 6;                       // N/2 for N=12
+opts.tolerance = 1e-10;
+auto res = ed::auto_pilot::solve(H, opts);
+```
+
+### 3) Maximum projection recipe (symmetry + Sz)
+
+Symmetry projection in C++ is configured through the same dispatcher
+axis as Python (`params.use_symmetry = true`) and runs via the
+streaming-symmetry kernel when generators/metadata are present in the
+workflow directory.
+
+```cpp
+EDParameters p;
+p.use_fixed_sz = true;
+p.n_up = 6;
+p.use_symmetry = true;
+p.compute_eigenvectors = true;
+p.output_dir = "ed_runs/12site_J1";
+
+// The symmetry metadata (automorphism_results/*) is read from directory.
+auto out = exact_diagonalization_from_directory(
+  "ed_runs/12site_J1",
+  DiagonalizationMethod::LANCZOS,
+  p);
+```
+
+### 4) Force GPU recipe
+
+```cpp
+ed::auto_pilot::AutoSolveOptions opts;
+opts.device = ed::auto_pilot::Device::GPU;
+auto res = ed::auto_pilot::solve(H, opts);
+```
+
+### 5) Thermal mTPQ recipe
+
+```cpp
+ed::auto_pilot::AutoSolveOptions opts;
+opts.solver = DiagonalizationMethod::mTPQ;
+opts.sz = 6;                       // optional fixed-Sz projection
+opts.output_dir = "ed_runs/12site_thermal";
+opts.tune_params = [](EDParameters& p) {
+  p.num_samples = 8;
+  p.target_beta = 20.0;
+  p.num_temp_points = 40;
+};
+auto tpq = ed::auto_pilot::solve(H, opts);
+```
+
+### 6) MPI / distributed recipe (library + launcher split)
+
+The in-process C++ API can mark MPI mode (`params.use_mpi=true`) when
+already running under an MPI launcher. For out-of-process rank launch,
+use the same `ed_distributed_main` binary as Python.
+
+```cpp
+EDParameters p;
+p.use_mpi = true;
+p.num_eigenvalues = 4;
+auto out = exact_diagonalization_from_directory(
+  "ed_runs/24site_mpi",
+  DiagonalizationMethod::LANCZOS,
+  p);
+```
+
+```bash
+mpiexec -np 8 ./ed_distributed_main --mode lanczos --directory ed_runs/24site_mpi
+mpiexec -np 4 ./ed_distributed_main --mode tpq --gpu --directory ed_runs/24site_mpi
+```
+
+### 7) Low-level escape hatch (Python extra_params equivalent)
+
+```cpp
+ed::auto_pilot::AutoSolveOptions opts;
+opts.num_eigenvalues = 4;
+opts.tune_params = [](EDParameters& p) {
+  p.arpack_ncv = 96;
+  p.max_subspace = 220;
+  p.ftlm_krylov_dim = 180;
+};
+auto out = ed::auto_pilot::solve(H, opts);
+```
+
+Or bypass auto-pilot entirely:
+
+```cpp
+EDParameters p;
+p.num_eigenvalues = 4;
+p.tolerance = 1e-10;
+p.max_iterations = 300;
+
+const std::uint64_t dim = (1ULL << H.getNumBits());
+auto apply = [&H](const Complex* in, Complex* out, int n) {
+  H.apply(in, out, static_cast<size_t>(n));
+};
+
+auto out = exact_diagonalization_core(apply, dim,
+                    DiagonalizationMethod::LANCZOS,
+                    p);
+```
+
+### 8) DSSF / SSSF routine equivalents
+
+Method selection is the same 2x2 rule as Python and can be queried by
+`ed::auto_pilot::dssf::pick_method(...)`.
+
+```cpp
+using ed::auto_pilot::dssf::pick_method;
+auto m0 = pick_method(/*has_temperature=*/false, /*has_frequency=*/false);
+auto m1 = pick_method(/*has_temperature=*/false, /*has_frequency=*/true);
+auto m2 = pick_method(/*has_temperature=*/true,  /*has_frequency=*/false);
+auto m3 = pick_method(/*has_temperature=*/true,  /*has_frequency=*/true);
+```
+
+```cpp
+ed::dssf::DSSFRequest req;
+req.output_dir = "runs/heisenberg_N16";
+req.config = &cfg;                  // required for non-single-expectation
+// Fill req.operators (OperatorSpec) as needed.
+
+ed::auto_pilot::dssf::AutoDSSFOptions o;
+o.has_temperature = true;
+o.has_frequency = true;
+auto dssf = ed::auto_pilot::dssf::compute(req, o);
+```
+
+For direct CLI parity with the Python `extra_args` examples:
+
+```bash
+./ED dssf dynamical_thermal runs/heisenberg_N16 \
+  --num_sites=16 --dyn-samples=2 --dyn-krylov=40 \
+  --dyn-omega-min=-1.5 --dyn-omega-max=1.5 --dyn-omega-points=64 \
+  --dyn-temp-min=0.5 --dyn-temp-max=0.5 --dyn-temp-bins=1
+./ED dssf static_thermal runs/heisenberg_N16 \
+  --num_sites=16 --static-samples=4 --static-krylov=120 \
+  --static-temp-min=0.0 --static-temp-max=2.0 --static-temp-points=3
+```
+
+### 9) Smoke-tested examples on this page (ground / FTLM / DSSF / TPQ)
+
+Use the same C++ patterns above with `N=12` and `opts.sz=6` for quick
+checks, then scale to `N=32`, `opts.sz=16` for production:
+
+1. Ground state: `AutoSolveOptions{num_eigenvalues=2, sz=6}` plus
+   `tune_params(max_subspace=...)`.
+2. FTLM: `opts.solver = DiagonalizationMethod::FTLM`, set
+   `num_samples`, `temp_min/max`, and `ftlm_krylov_dim` in
+   `tune_params`.
+3. DSSF: build `DSSFRequest` for your directory and call
+  `ed::auto_pilot::dssf::compute(req, dssf_opts)` with
+  `dssf_opts.has_temperature = true; dssf_opts.has_frequency = true;`.
+4. mTPQ/cTPQ: `opts.solver = DiagonalizationMethod::mTPQ` (or `cTPQ`
+   for MPI sample-splitting), set `target_beta` + TPQ knobs in
+   `tune_params`.
