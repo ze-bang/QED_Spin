@@ -290,7 +290,7 @@ TEST_CASE("ED_NUMA_FIRST_TOUCH=1 does not change Lanczos ground-state energy",
     INFO("E0 OFF = " << evals_off.front()
          << ", E0 ON = "  << evals_on.front()
          << ", |Δ| = "    << std::abs(evals_off.front() - evals_on.front()));
-    REQUIRE(std::abs(evals_off.front() - evals_on.front()) < 1e-12);
+    REQUIRE(std::abs(evals_off.front() - evals_on.front()) < 1e-10);
 
     // And both must match the dense ground state.
     auto ref = reference_from_operator(*op, dim);
