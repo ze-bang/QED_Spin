@@ -709,6 +709,15 @@ if(BUILD_ED_TESTS)
     # contract — the SOLVER × FIXED_SZ × GPU × MPI orthogonality story.
     ed_add_test(test_method_canonicalize        tests/unit/test_method_canonicalize.cpp USE_CATCH2)
     ed_add_test(test_full_diagonalization       tests/unit/test_full_diagonalization.cpp USE_CATCH2)
+    # Phase 9 façade: smoke-test the modern-C++ auto-pilot
+    # `ed::auto_pilot::solve(Operator&, AutoSolveOptions)` — Sz guard,
+    # auto fixed-Sz projection, default-method picker, GPU fallback.
+    ed_add_test(test_auto_solve                 tests/unit/test_auto_solve.cpp USE_CATCH2)
+    # Phase 9 façade: smoke-test the modern-C++ DSSF auto-pilot
+    # `ed::auto_pilot::dssf::compute(DSSFRequest, AutoDSSFOptions)` --
+    # method-selection rule + EDConfig-null guard.
+    ed_add_test(test_auto_dssf                  tests/unit/test_auto_dssf.cpp USE_CATCH2)
+    target_link_libraries(test_auto_dssf PRIVATE ed_cli ed_dssf)
     ed_add_test(test_lanczos_variants           tests/unit/test_lanczos_variants.cpp USE_CATCH2)
     ed_add_test(test_lanczos_basis_buffer       tests/unit/test_lanczos_basis_buffer.cpp USE_CATCH2)
     # Phase 3a #1: Krylov-state checkpoint / restart for the default Lanczos
@@ -886,6 +895,18 @@ if(BUILD_ED_TESTS)
     target_link_libraries(test_input_library PRIVATE ed_input)
     ed_add_test(test_observables                tests/unit/test_observables.cpp USE_CATCH2)
     ed_add_test(test_thermal_methods            tests/unit/test_thermal_methods.cpp USE_CATCH2)
+    # Phase A (SOTA two-point correlator): JP double-Lanczos kernel
+    # validated against full-diag Lehmann reference, detailed balance,
+    # and the Z-weighted sector recombination helper.
+    ed_add_test(test_ftlm_jp                    tests/unit/test_ftlm_jp.cpp USE_CATCH2)
+    # Phase B (LTLM dynamical + spin operator factories)
+    ed_add_test(test_ftlm_ltlm_dyn              tests/unit/test_ftlm_ltlm_dyn.cpp USE_CATCH2)
+    # Phase C (SSSF finite-T static structure factor)
+    ed_add_test(test_ftlm_sssf                  tests/unit/test_ftlm_sssf.cpp USE_CATCH2)
+    # Phase D (KPM / Chebyshev moment spectral kernel)
+    ed_add_test(test_ftlm_kpm                   tests/unit/test_ftlm_kpm.cpp USE_CATCH2)
+    # Phase E (TPQ dynamical correlator)
+    ed_add_test(test_tpq_dynamical               tests/unit/test_tpq_dynamical.cpp USE_CATCH2)
     ed_add_test(test_hdf5_io                    tests/unit/test_hdf5_io.cpp USE_CATCH2)
     ed_add_test(test_symmetry                   tests/unit/test_symmetry.cpp USE_CATCH2)
     ed_add_test(test_dssf_operator_spec         tests/unit/test_dssf_operator_spec.cpp USE_CATCH2)

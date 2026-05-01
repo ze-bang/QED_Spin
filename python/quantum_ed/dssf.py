@@ -166,4 +166,167 @@ __all__ = [
     "build_observable_pairs",
     "compute_transverse_bases",
     "run_from_directory",
+    "pick_method",
+    "compute",
 ]
+
+
+# ----------------------------------------------------------------------------
+# Phase 9 (Apr 2026): stress-free auto-pilot mirroring `qed.diag`.
+#
+# `qed.dssf.compute(directory, T=..., omega=..., ...)` picks the right
+# `DSSFMethod` from the (T, omega) tuple, then delegates to the canonical
+# `./ED dssf <method> <directory>` runner. The selection rule mirrors the
+# C++ `ed::dssf::DSSFMethod` enum (see include/ed/dssf/dssf_engine.h):
+#
+#   T is None,    omega is None     -> "single_expectation"   (zero-T <O>)
+#   T is None,    omega is not None -> "ground_state_dssf"    (T=0 S(Q,ω))
+#   T is not None, omega is None    -> "static_thermal"       (S(Q,T))
+#   T is not None, omega is not None-> "dynamical_thermal"    (S(Q,ω,T))
+#
+# This is the "I just want the answer" entry point. Users who need
+# fine-grained control over individual workflow knobs (frequency window,
+# Krylov dim, num_random_states, ...) keep using `run_from_directory`
+# directly with `extra_args=`.
+# ----------------------------------------------------------------------------
+
+
+_VALID_METHODS: tuple[str, ...] = (
+    "dynamical_thermal",
+    "static_thermal",
+    "ground_state_dssf",
+    "single_expectation",
+)
+
+
+def pick_method(*, T: Optional[float | Iterable[float]] = None,
+                omega: Optional[Iterable[float]] = None) -> str:
+    """Return the DSSF method token for a (T, omega) tuple.
+
+    Parameters
+    ----------
+    T : float, sequence of floats, or None
+        Temperature axis. ``None`` means the user wants T=0 (ground-state
+        path). A scalar or any non-empty iterable selects a thermal
+        kernel.
+    omega : sequence of floats or None
+        Frequency axis. ``None`` means the user wants no ω-resolved
+        spectrum (static / single-expectation path).
+
+    Returns
+    -------
+    str
+        One of ``"dynamical_thermal"``, ``"static_thermal"``,
+        ``"ground_state_dssf"``, ``"single_expectation"`` -- the same
+        tokens accepted by :func:`run_from_directory`.
+
+    Examples
+    --------
+    >>> pick_method(T=None, omega=None)
+    'single_expectation'
+    >>> pick_method(T=0.5, omega=None)
+    'static_thermal'
+    >>> pick_method(T=None, omega=[0.0, 0.1, 0.2])
+    'ground_state_dssf'
+    >>> pick_method(T=[0.1, 1.0], omega=[0.0, 0.5])
+    'dynamical_thermal'
+    """
+    has_T = T is not None
+    has_w = omega is not None
+    if has_T and has_w:
+        return "dynamical_thermal"
+    if has_T:
+        return "static_thermal"
+    if has_w:
+        return "ground_state_dssf"
+    return "single_expectation"
+
+
+def compute(
+    directory: str,
+    *,
+    T: Optional[float | Iterable[float]] = None,
+    omega: Optional[Iterable[float]] = None,
+    method: Optional[str] = None,
+    ed_binary: Optional[str] = None,
+    extra_args: Sequence[str] = (),
+    env: Optional[dict[str, str]] = None,
+    check: bool = True,
+    capture_output: bool = False,
+    verbose: bool = True,
+) -> subprocess.CompletedProcess[str]:
+    """Auto-pilot DSSF runner -- one call, no method picking required.
+
+    Mirrors :func:`quantum_ed.diag` for spectral / structure-factor
+    computations. The DSSF method is auto-selected from whether ``T``
+    and/or ``omega`` are supplied (see :func:`pick_method`); pass
+    ``method=`` to override the auto-rule. Everything else is delegated
+    verbatim to :func:`run_from_directory`.
+
+    Parameters
+    ----------
+    directory : str
+        Directory containing ``parameters.def`` plus the Hamiltonian
+        deck (the same layout :func:`run_from_directory` consumes).
+    T : float, sequence of floats, or None, optional
+        Temperature(s). ``None`` (default) → T=0 path.
+    omega : sequence of floats or None, optional
+        Frequency grid. ``None`` (default) → no ω-resolved output.
+    method : str, optional
+        Explicit override for the auto-selected method token.
+    ed_binary, extra_args, env, check, capture_output : see
+        :func:`run_from_directory`.
+    verbose : bool, optional
+        If True (default), print one ``[qed.dssf.compute]`` line
+        announcing the auto-selected method.
+
+    Returns
+    -------
+    subprocess.CompletedProcess
+        The ``./ED dssf`` invocation result.
+
+    Examples
+    --------
+    Static structure factor at one temperature:
+
+    .. code-block:: python
+
+        qed.dssf.compute("runs/heisenberg6", T=0.5)
+
+    T=0 dynamical S(Q, ω):
+
+    .. code-block:: python
+
+        qed.dssf.compute("runs/heisenberg6", omega=np.linspace(-2, 2, 200))
+
+    Full S(Q, ω, T):
+
+    .. code-block:: python
+
+        qed.dssf.compute("runs/heisenberg6",
+                         T=[0.1, 0.3, 1.0],
+                         omega=np.linspace(-2, 2, 200))
+    """
+    if method is None:
+        chosen = pick_method(T=T, omega=omega)
+    else:
+        if method not in _VALID_METHODS:
+            raise ValueError(
+                f"method={method!r} is not a recognised DSSF method token. "
+                f"Valid tokens: {_VALID_METHODS}."
+            )
+        chosen = method
+    if verbose:
+        has_T = T is not None
+        has_w = omega is not None
+        print(f"[qed.dssf.compute] method={chosen!r} "
+              f"(T given: {has_T}, omega given: {has_w})")
+    return run_from_directory(
+        directory,
+        chosen,
+        ed_binary=ed_binary,
+        extra_args=tuple(extra_args),
+        env=env,
+        check=check,
+        capture_output=capture_output,
+    )

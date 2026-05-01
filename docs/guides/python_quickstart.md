@@ -38,6 +38,58 @@ result = qe.lanczos(op, max_iter=200, exct=4, tolerance=1e-12)
 print("Lowest 4 eigenvalues:", result.eigenvalues[:4])
 ```
 
+## One-call auto-pilot — `qe.diag(...)` and `qe.dssf.compute(...)`
+
+Phase 9 ships a **stress-free unified entry point** that picks the
+solver, device, and Sz sector for you. Use it whenever you don't need
+to override individual knobs:
+
+```python
+# Eigenvalues only — auto-picks FULL for tiny dim, LANCZOS / KRYLOV_SCHUR
+# for medium / many eigenpairs, promotes to GPU if WITH_CUDA and
+# sector_dim ≥ 2^17, and projects onto the Sz=N/2 sector when the
+# Hamiltonian conserves total Sz.
+res = qe.diag(op, num_eigenvalues=4)         # smart defaults
+
+# Force CPU + explicit sector. The Sz guard refuses sz= for
+# Sz-breaking Hamiltonians (transverse field, etc.) instead of
+# silently giving the wrong answer.
+res = qe.diag(op, num_eigenvalues=4, device="cpu", sz=N // 2)
+
+# Thermal trajectory — auto-creates an output directory.
+res = qe.diag(op, solver="mTPQ", sz=N // 2,
+              num_samples=4, target_beta=20.0)
+```
+
+The DSSF pipeline has the same shape via
+`qe.dssf.compute(directory, T=..., omega=...)`. The `(T, omega)` tuple
+selects the kernel for you (the same rule as the C++ `DSSFMethod`
+enum):
+
+| `T` given? | `omega` given? | Method picked        |
+|-----------:|---------------:|----------------------|
+| no         | no             | `single_expectation` |
+| no         | yes            | `ground_state_dssf`  |
+| yes        | no             | `static_thermal`     |
+| yes        | yes            | `dynamical_thermal`  |
+
+```python
+# Static structure factor at one T:
+qe.dssf.compute("runs/heisenberg6", T=0.5)
+
+# T = 0 dynamical S(Q, ω):
+qe.dssf.compute("runs/heisenberg6", omega=np.linspace(-2, 2, 200))
+
+# Full S(Q, ω, T):
+qe.dssf.compute("runs/heisenberg6",
+                T=[0.1, 0.3, 1.0],
+                omega=np.linspace(-2, 2, 200))
+```
+
+For maximum control over per-method knobs (frequency window, Krylov
+dim, num_random_states, …) keep using `qe.dssf.run_from_directory(...)`
+with explicit `extra_args`.
+
 ## Fixed-Sz sector
 
 ```python

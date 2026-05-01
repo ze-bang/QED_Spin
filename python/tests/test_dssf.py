@@ -205,3 +205,21 @@ def test_obs_1_handles_are_apply_callable():
     # We don't assert numeric value -- correctness of the apply() math is
     # covered by the C++ ctest baseline. We only check the bridge works.
     assert out.dtype == np.complex128
+
+
+# ---------------------------------------------------------------------------
+# Phase 9 auto-pilot: qed.dssf.pick_method + qed.dssf.compute
+# ---------------------------------------------------------------------------
+
+def test_pick_method_truth_table():
+    """The (T, omega) -> DSSFMethod rule must match the C++ enum mapping."""
+    assert dssf.pick_method(T=None, omega=None) == "single_expectation"
+    assert dssf.pick_method(T=None, omega=[0.0, 0.5]) == "ground_state_dssf"
+    assert dssf.pick_method(T=0.5,  omega=None) == "static_thermal"
+    assert dssf.pick_method(T=[0.1, 1.0], omega=[0.0, 0.5]) == "dynamical_thermal"
+
+
+def test_compute_rejects_unknown_method_override():
+    import pytest
+    with pytest.raises(ValueError):
+        dssf.compute("/nonexistent", T=0.5, method="not_a_real_method")

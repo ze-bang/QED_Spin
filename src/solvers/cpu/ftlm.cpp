@@ -3927,28 +3927,17 @@ DynamicalResponseResults compute_ground_state_dssf(
         std::cout << "  Ratio: " << integral / phi_norm_sq << " (should be ≈ 1.0)" << std::endl;
     }
 
-    // RENORMALIZATION: Enforce sum rule by rescaling spectral function.
-    // This corrects for spectral weight loss due to finite Krylov dimension
-    // and finite frequency window truncation. Skip if the integral is too
-    // small (operator orthogonal to ground state) -- the spectrum is then
-    // already zero everywhere and renormalization would be a divide-by-zero.
+    // Sum-rule diagnostic: warn if spectral weight is significantly missing.
+    // Do NOT renormalize — uniform rescaling enforces the integral but
+    // distorts relative peak heights (finite Krylov clips low-weight peaks
+    // differently than high-weight ones).  Increase krylov_dim instead.
     if (integral > 1e-14) {
-        const double renorm_factor = phi_norm_sq / integral;
-        for (size_t i = 0; i < params.num_omega_points; i++) {
-            results.spectral_function[i] *= renorm_factor;
+        const double ratio = integral / phi_norm_sq;
+        if (ratio < 0.95 || ratio > 1.05) {
+            std::cerr << "[GS-DSSF] Warning: sum-rule ratio = " << ratio
+                      << " (|1 - ratio| > 5%). Consider increasing krylov_dim ("
+                      << params.krylov_dim << ") or widening [omega_min, omega_max].\n";
         }
-        if (verbose) {
-            std::cout << "  Renormalization factor: " << renorm_factor << std::endl;
-            double integral_renorm = 0.0;
-            for (size_t i = 1; i < params.num_omega_points; i++) {
-                double dw = results.frequencies[i] - results.frequencies[i-1];
-                integral_renorm += 0.5 * (results.spectral_function[i] + results.spectral_function[i-1]) * dw;
-            }
-            std::cout << "  After renormalization: ∫ S(ω) dω = " << integral_renorm << std::endl;
-            std::cout << "  New ratio: " << integral_renorm / phi_norm_sq << std::endl;
-        }
-    } else if (verbose) {
-        std::cout << "  Warning: Integral too small, skipping renormalization" << std::endl;
     }
 
     auto end_time = std::chrono::high_resolution_clock::now();

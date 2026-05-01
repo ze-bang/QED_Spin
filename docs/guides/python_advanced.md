@@ -482,3 +482,33 @@ the CLI directly.
 * **Tests:** `python/tests/test_dispatcher.py` exercises every entry
   point listed in §0 above on a 6-site Heisenberg ring and checks
   ground-state recovery to 1e-5.
+
+
+---
+
+## See also — auto-pilot abstraction & 32-site recipes
+
+The "common path" wrappers `qed.diag(...)` and `qed.dssf.compute(...)`
+sit on top of the dispatcher described in this document. They make the
+following auto-decisions for you (Sz projection + guard, solver
+selection by `(dim, num_eigenvalues)`, GPU promotion when
+`has_cuda_build()` and `dim ≥ 2¹⁷`, MPI shell-out, thermal output-dir
+bookkeeping, pre-flight planning) **without taking away** any of the
+control surface this page documents.
+
+The escape hatches:
+
+* `qed.diag(H, …, extra_params={...})` — sets any of the ~70
+  `EDParameters` fields after the auto-pilot has populated them.
+* `qed.exact_diagonalization_core(H, method, params)` — full manual
+  control; bypass `qed.diag` entirely.
+* `qed.list_diag_parameters("arpack" / "tpq" / "ftlm" / "ltlm" /
+  "scalapack" / "hybrid" / "general")` — print the catalogue grouped
+  by family.
+
+End-to-end **32-site** worked examples for ground state, FTLM, DSSF,
+and mTPQ live in
+[`workflow.md`](workflow.md#worked-examples-32-site-spin-ed). The
+abstraction layering (`qed.diag` decision tree → C++ `EDParameters`
+fields) is documented in
+[`workflow.md`](workflow.md#how-qeddiag-abstracts-the-dispatcher).

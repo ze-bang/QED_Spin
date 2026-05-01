@@ -829,6 +829,20 @@ def diag(
                       f"(reduced from {base_dim}).")
     elif fixed_sz_input and verbose:
         print(f"[qed.diag] FixedSzOperator supplied: dim={H.dimension}.")
+    elif (sz is None and not fixed_sz_input and verbose
+          and H.conserves_sz()):
+        # Proactive hint: the user is paying for the full 2^N Hilbert
+        # space even though the Hamiltonian respects total Sz. The
+        # Sz=N/2 sector is C(N, N/2) ~ 2^N / sqrt(πN/2), i.e. roughly a
+        # √(πN/2)× speedup at zero risk.
+        try:
+            half = num_sites // 2
+            sec = math.comb(num_sites, half)
+            print(f"[qed.diag] HINT: this Hamiltonian conserves total Sz. "
+                  f"Passing sz={half} would project onto the C({num_sites}, "
+                  f"{half})={sec} sector (full dim={base_dim}).")
+        except Exception:  # pragma: no cover  -- defensive against odd N
+            pass
 
     sector_dim = int(op_to_use.dimension)
 

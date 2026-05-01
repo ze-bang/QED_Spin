@@ -160,6 +160,11 @@ set(ED_SOLVERS_CPU_SOURCES
     ${SOLVERS_CPU_DIR}/dynamics.cpp
     ${SOLVERS_CPU_DIR}/TPQ.cpp
     ${SOLVERS_CPU_DIR}/ftlm.cpp
+    ${SOLVERS_CPU_DIR}/ftlm_jp.cpp
+    ${SOLVERS_CPU_DIR}/ftlm_ltlm_dyn.cpp
+    ${SOLVERS_CPU_DIR}/ftlm_sssf.cpp
+    ${SOLVERS_CPU_DIR}/ftlm_kpm.cpp
+    ${SOLVERS_CPU_DIR}/tpq_dynamical.cpp
     ${SOLVERS_CPU_DIR}/ltlm.cpp
     ${SOLVERS_CPU_DIR}/hybrid_thermal.cpp
 )
