@@ -891,16 +891,15 @@ int main(int argc, char** argv) {
             }
         }
         else if (a.mode == "ftlm") {
-            if (a.use_symmetry) {
-                fail("--mode ftlm --use-symmetry: distributed FTLM with "
-                     "the per-sector symmetry kernel is not yet wired. "
-                     "Run per sector by setting --sector-index in a loop "
-                     "and aggregating Z by hand for now.");
-            }
-
             ed::distributed::DistributedFtlmResult res;
             const char* backend_label = "cpu_mpi";
             if (a.gpu) {
+                if (a.use_symmetry) {
+                    fail("--mode ftlm --gpu --use-symmetry is not yet "
+                         "supported (Phase D step 5). Drop --gpu to use "
+                         "the per-sector symmetry-projected CPU FTLM, "
+                         "or drop --use-symmetry for the GPU path.");
+                }
 #ifdef ED_HAVE_NCCL
                 // Phase A (device matrix MPI+GPU): on-device FTLM.
                 ed::distributed::DistributedFtlmGPUOptions gfopts;
@@ -926,8 +925,19 @@ int main(int argc, char** argv) {
                 fopts.seed_offset       = a.seed;
                 fopts.verbose           = a.verbose;
 
-                res = ed::distributed::distributed_ftlm(
-                    op, fopts, MPI_COMM_WORLD);
+                if (a.use_symmetry) {
+                    // Phase D step 4: per-sector FTLM. The returned Z[b]
+                    // and O_expectation[b] are the contributions from
+                    // this sector alone -- the caller is responsible
+                    // for aggregating across sectors when reconstructing
+                    // the full-space partition function.
+                    res = ed::distributed::distributed_ftlm_symmetry(
+                        op, a.sector_index, fopts, MPI_COMM_WORLD);
+                    backend_label = "cpu_mpi_symmetry";
+                } else {
+                    res = ed::distributed::distributed_ftlm(
+                        op, fopts, MPI_COMM_WORLD);
+                }
             }
 
             if (world_rank == 0) {

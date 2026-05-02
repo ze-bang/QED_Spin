@@ -107,6 +107,24 @@ DistributedFtlmResult distributed_ftlm(
     const DistributedFtlmOptions& options,
     MPI_Comm world_comm);
 
+/// Symmetry-projected variant of `distributed_ftlm` (Phase D step 4).
+/// Same trace-estimator algorithm, but every per-sample SpMV runs
+/// inside ONE symmetry sector (`sector_idx`) of the underlying
+/// `Operator` (and the optional `observable_op`). Internally builds
+/// `DistributedSymmetryOperator` instances on the per-group
+/// subcommunicator, then routes through `distributed_lanczos_symmetry`.
+/// The returned `Z[b]` and `O_expectation[b]` are the contributions
+/// from this sector alone (un-multiplied by any irrep-multiplicity
+/// weight); the caller is responsible for aggregating across sectors
+/// when reconstructing the full-space partition function.
+///
+/// Collective on `world_comm` -- every rank must call.
+DistributedFtlmResult distributed_ftlm_symmetry(
+    std::shared_ptr<class ::Operator> op,
+    std::size_t sector_idx,
+    const DistributedFtlmOptions& options,
+    MPI_Comm world_comm);
+
 }  // namespace ed::distributed
 
 #endif  // WITH_MPI

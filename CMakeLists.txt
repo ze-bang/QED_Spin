@@ -835,6 +835,17 @@ if(BUILD_ED_TESTS)
         target_link_libraries(test_distributed_krylov_schur_symmetry PRIVATE
             ed_symmetry)
 
+        # Phase D step 4: distributed FTLM rebased onto
+        # DistributedSymmetryOperator (CPU-only, no NCCL). Verifies that
+        # summing per-sector Z(beta) over every momentum sector of an
+        # N=4 PBC Heisenberg chain reproduces the full-space partition
+        # function within the J&P trace-estimator noise floor at np
+        # {1, 2, 4}.
+        ed_add_mpi_test(test_distributed_ftlm_symmetry
+                        tests/unit/test_distributed_ftlm_symmetry.cpp)
+        target_link_libraries(test_distributed_ftlm_symmetry PRIVATE
+            ed_symmetry)
+
         # Phase 3c #1: NCCL multi-GPU collectives. Built only when
         # ed_distributed_gpu is alive (WITH_CUDA + NCCL_FOUND); registered
         # at np {1,2,4} same as the CPU MPI tests. The tests SKIP when no

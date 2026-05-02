@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — Phase D step 4 (path matrix symm × mpi): per-sector FTLM
+
+New function `ed::distributed::distributed_ftlm_symmetry` — the
+symmetry-projected companion of `distributed_ftlm`. The per-sample
+J&P trace-estimator body in `distributed_ftlm.cpp` is now factored
+into a templated helper `ftlm_impl<Op, LanczosCall>` shared by both
+the dense and the symmetry path; the new entry point builds a
+`DistributedSymmetryOperator` (and an optional symmetry-projected
+observable operator) on each per-group subcommunicator and routes
+the per-sample Krylov build through `distributed_lanczos_symmetry`.
+
+The CLI now accepts `--mode ftlm --use-symmetry --sector-index k`
+on the CPU MPI path; the returned `Z[b]` and `O_expectation[b]` are
+the contributions from sector `k` alone (un-multiplied by any
+irrep-multiplicity weight). The caller is responsible for
+aggregating across sectors when reconstructing the full-space
+partition function. The GPU FTLM path with `--use-symmetry` still
+fails with a Phase D step 5 pointer.
+
+New unit test `test_distributed_ftlm_symmetry` (registered as
+`phase3b` at np ∈ {1, 2, 4}) verifies that summing per-sector Z(β)
+over every momentum sector of an N=4 PBC Heisenberg chain
+reproduces the full-space partition function within the J&P
+trace-estimator noise floor.
+
 ### Added — Phase D step 3 (path matrix symm × mpi+gpu): on-device Krylov-Schur
 
 New function `ed::distributed::distributed_krylov_schur_gpu_symmetry`
