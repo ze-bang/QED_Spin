@@ -584,13 +584,6 @@ int main(int argc, char** argv) {
 
             if (a.gpu) {
 #ifdef ED_HAVE_NCCL
-                if (a.use_symmetry) {
-                    fail("--mode lanczos --gpu --use-symmetry is not yet "
-                         "wired. distributed_lanczos_gpu currently consumes "
-                         "DistributedOperator (not the symmetry-projected "
-                         "variant). Run without --gpu, or without "
-                         "--use-symmetry.");
-                }
                 ed::distributed::DistributedLanczosGPUOptions gopts;
                 gopts.max_iter         = a.max_iter;
                 gopts.exct             = a.exct;
@@ -598,8 +591,20 @@ int main(int argc, char** argv) {
                 gopts.verbose          = a.verbose;
                 gopts.gpu_resident_spmv = a.gpu_resident_spmv;
 
-                auto res = ed::distributed::distributed_lanczos_gpu(
-                    *dop_full, gopts);
+                ed::distributed::DistributedLanczosGPUResult res;
+                if (a.use_symmetry) {
+                    // Phase D step 1: --mode lanczos --gpu --use-symmetry
+                    // routes through DistributedSymmetryOperatorGPU
+                    // (NCCL pairwise SendRecv halo + on-device CSR SpMV
+                    // on the orbit row slab). The CPU `dop_sym` carries
+                    // the orbit basis + LPT partition + halo plan; the
+                    // GPU wrapper is built inside the function.
+                    res = ed::distributed::distributed_lanczos_gpu_symmetry(
+                        *dop_sym, gopts);
+                } else {
+                    res = ed::distributed::distributed_lanczos_gpu(
+                        *dop_full, gopts);
+                }
 
                 if (world_rank == 0) {
                     std::cout << "elapsed_s=" << seconds_since(t0)

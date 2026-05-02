@@ -511,15 +511,15 @@ two tables above don't capture on their own:
   error if `symm` and `mpi` are both requested. Phase D extends the
   dispatcher to wire them all uniformly once the GPU symmetry
   operator (Phase C) lands.
-* `symm` × **mpi+gpu** has the on-device SpMV primitive in place
-  (`DistributedSymmetryOperatorGPU` — Phase C: NCCL pairwise SendRecv
-  halo + a single CSR sparse-matvec kernel reading the row slab that
-  the wrapped CPU `DistributedSymmetryOperator` already built). It is
-  not yet wired into individual solver dispatchers — Phase D walks
-  through (solver × device × path) and routes every distributed
-  GPU solver through this primitive when `--use-symmetry` is set.
-  Until then, symmetry-projected runs on multi-GPU clusters should
-  drop to `device='gpu'` per node.
+* `symm` × **mpi+gpu** is wired for `LANCZOS` via
+  `distributed_lanczos_gpu_symmetry` (Phase D step 1 — builds a
+  `DistributedSymmetryOperatorGPU` internally and runs the same
+  per-iteration cublasZdotc/cublasZaxpy/NCCL-allreduce recipe as the
+  unsymmetrised GPU Lanczos but with the orbit-row SpMV). The
+  remaining distributed GPU solvers (`KRYLOV_SCHUR`, `FTLM`,
+  `BLOCK_*`, `DAVIDSON`, `LOBPCG`) still need their per-solver wiring
+  (Phase D steps 2-5). Until those land, drop to `device='gpu'` per
+  node for those solvers when `--use-symmetry` is set.
 * `mTPQ` / `cTPQ` × `symm`: see Phase E. The lift is "per-sector
   TPQ + FTLM-style Z-aggregation" (each sector gets its own random
   state and its own canonical TPQ trajectory; partition functions

@@ -908,6 +908,15 @@ if(BUILD_ED_TESTS)
                                 tests/unit/test_distributed_symmetry_operator_gpu.cpp)
             target_link_libraries(test_distributed_symmetry_operator_gpu PRIVATE
                 ed_distributed)
+
+            # Phase D step 1 (path matrix symm × mpi+gpu): on-device
+            # Lanczos consuming a `DistributedSymmetryOperatorGPU`. Cross-
+            # checks the GPU symm Lanczos eigenvalues against the CPU
+            # `distributed_lanczos_symmetry` at the same seed/max_iter.
+            ed_add_phase3c_test(test_distributed_lanczos_gpu_symmetry
+                                tests/unit/test_distributed_lanczos_gpu_symmetry.cpp)
+            target_link_libraries(test_distributed_lanczos_gpu_symmetry PRIVATE
+                ed_distributed)
         endif()
     endif()
 

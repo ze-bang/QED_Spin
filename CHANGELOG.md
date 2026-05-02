@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — Phase D step 1 (path matrix symm × mpi+gpu): on-device Lanczos
+
+New function `ed::distributed::distributed_lanczos_gpu_symmetry` — the
+multi-GPU companion of the CPU `distributed_lanczos_symmetry`. Builds
+a `DistributedSymmetryOperatorGPU` internally from the supplied CPU
+`DistributedSymmetryOperator` and runs the same per-iteration recipe
+as `distributed_lanczos_gpu` (cublasZdotc + NCCL allreduce of two
+doubles for alpha/beta, cublasZaxpy for the recurrence updates,
+host-side tridiag eigensolve for convergence) but with the orbit-row
+SpMV from Phase C.
+
+Dispatcher: the `--mode lanczos --gpu --use-symmetry` carve-out at
+`ed_distributed_main.cpp` is gone — the code path now routes through
+the new function. Initial vector is generated identically to the CPU
+`distributed_lanczos_symmetry` (deterministic in NATURAL orbit order,
+rank-major + LPT-orbit-permuted scatter) so eigenvalues are bit-
+comparable across CPU/GPU at the same seed.
+
+Tests: `test_distributed_lanczos_gpu_symmetry` cross-checks GPU symm
+eigenvalues vs CPU symm at all Z_N momentum sectors of N ∈ {4, 6}
+Heisenberg chains, abs tol 1e-9 (Lanczos noise floor at
+max_iter=200). Build-only on the CUDA build-only CI lane; runtime-
+tested via `runtime_supports_gpu_lanczos_sym()` SKIP gate.
+
+The remaining Phase D wiring — `KRYLOV_SCHUR × symm` (CPU & GPU) and
+`FTLM × symm` (CPU & GPU) — are queued as steps D2-D5.
+
 ### Added — Phase C (device matrix MPI+GPU): on-device symmetry-projected SpMV
 
 New class `ed::distributed::DistributedSymmetryOperatorGPU` — a

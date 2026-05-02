@@ -21,6 +21,8 @@
 
 #include <ed/distributed/distributed_lanczos_gpu.h>
 #include <ed/distributed/distributed_gpu_operator.h>
+#include <ed/distributed/distributed_symmetry_operator.h>
+#include <ed/distributed/distributed_symmetry_operator_gpu.h>
 #include <ed/distributed/multi_gpu.h>
 
 #include <cublas_v2.h>
@@ -409,6 +411,264 @@ DistributedLanczosGPUResult distributed_lanczos_gpu(
     }
 
     // Final eigensolve: smallest exct values, replicated on every rank.
+    std::vector<double> final_evals = solve_tridiag(alpha, beta, iters_done);
+    DistributedLanczosGPUResult result;
+    result.iterations = iters_done;
+    result.alphas = std::move(alpha);
+    result.betas  = std::move(beta);
+    if (!final_evals.empty()) {
+        const std::size_t keep = std::min<std::size_t>(exct, final_evals.size());
+        result.eigenvalues.assign(final_evals.begin(),
+                                  final_evals.begin() + keep);
+    }
+    return result;
+}
+
+// ===========================================================================
+// distributed_lanczos_gpu_symmetry --- Phase D step 1.
+// Same per-iteration recipe as distributed_lanczos_gpu above, but with:
+//   * SpMV via DistributedSymmetryOperatorGPU (NCCL pairwise SendRecv halo
+//     + on-device CSR sparse-matvec on the orbit row slab).
+//   * Initial vector scattered in rank-major + LPT-orbit-permuted order to
+//     match the orbit row layout that DistributedSymmetryOperator(GPU)
+//     consumes.
+// No CPU-staging fallback (the symm SpMV needs the orbit permutation that
+// only lives inside DistributedSymmetryOperator).
+// ===========================================================================
+namespace {
+
+void scatter_initial_vector_symmetry(const DistributedSymmetryOperator& op,
+                                     unsigned long seed,
+                                     std::vector<Complex>& v_local) {
+    const int rank = op.rank();
+    const int size = op.comm_size();
+    const std::uint64_t global_dim = op.global_dim();
+    const std::uint64_t local_n    = op.local_size();
+
+    v_local.assign(local_n, Complex(0.0, 0.0));
+
+    const auto& partition = op.partition();
+    std::vector<int> sendcounts(size, 0), displs(size, 0);
+    {
+        int run = 0;
+        for (int r = 0; r < size; ++r) {
+            sendcounts[r] = static_cast<int>(partition.rank_orbits[r].size());
+            displs[r] = run;
+            run += sendcounts[r];
+        }
+    }
+
+    if (rank == 0) {
+        std::vector<Complex> v_natural(static_cast<std::size_t>(global_dim));
+        std::mt19937_64 gen(seed);
+        std::normal_distribution<double> nd(0.0, 1.0);
+        double sumsq = 0.0;
+        for (std::uint64_t i = 0; i < global_dim; ++i) {
+            const double a = nd(gen);
+            const double b = nd(gen);
+            v_natural[i] = Complex(a, b);
+            sumsq += a * a + b * b;
+        }
+        const double inv = 1.0 / std::sqrt(sumsq);
+        for (auto& z : v_natural) z *= inv;
+
+        // Permute into rank-major packed buffer (matches the CPU
+        // distributed_lanczos_symmetry scatter exactly).
+        std::vector<Complex> v_rankmajor(
+            static_cast<std::size_t>(global_dim));
+        for (int r = 0; r < size; ++r) {
+            for (std::size_t k = 0; k < partition.rank_orbits[r].size(); ++k) {
+                const std::size_t orbit_id = partition.rank_orbits[r][k];
+                const std::size_t global_pos = partition.rank_offsets[r] + k;
+                v_rankmajor[global_pos] = v_natural[orbit_id];
+            }
+        }
+        MPI_Scatterv(v_rankmajor.data(), sendcounts.data(), displs.data(),
+                     kComplexDatatype,
+                     v_local.data(), sendcounts[rank], kComplexDatatype,
+                     0, op.comm());
+    } else {
+        MPI_Scatterv(nullptr, sendcounts.data(), displs.data(),
+                     kComplexDatatype,
+                     v_local.data(), sendcounts[rank], kComplexDatatype,
+                     0, op.comm());
+    }
+
+    // Defensive global re-normalisation (absorbs scatter rounding).
+    double local_sq = 0.0;
+    for (auto& z : v_local) local_sq += std::norm(z);
+    double global_sq = 0.0;
+    MPI_Allreduce(&local_sq, &global_sq, 1, MPI_DOUBLE, MPI_SUM, op.comm());
+    if (global_sq > 0.0) {
+        const double inv = 1.0 / std::sqrt(global_sq);
+        for (auto& z : v_local) z *= inv;
+    }
+}
+
+}  // namespace
+
+DistributedLanczosGPUResult distributed_lanczos_gpu_symmetry(
+    const DistributedSymmetryOperator& op,
+    const DistributedLanczosGPUOptions& options) {
+
+    if (!multi_gpu::nccl_compiled_in()) {
+        throw std::logic_error(
+            "distributed_lanczos_gpu_symmetry: NCCL not compiled in");
+    }
+
+    const int rank = op.rank();
+    const std::uint64_t local_n  = op.local_size();
+    const std::uint64_t max_iter = options.max_iter;
+    const std::uint64_t exct = std::max<std::uint64_t>(1, options.exct);
+    const double tol = options.tol;
+
+    if (max_iter == 0) {
+        throw std::invalid_argument(
+            "distributed_lanczos_gpu_symmetry: max_iter == 0");
+    }
+
+    multi_gpu::MultiGpuCommunicator gpu_comm(op.comm(), options.device_index);
+
+    // Wrap the CPU symmetry op in a non-owning shared_ptr (caller owns it).
+    std::shared_ptr<DistributedSymmetryOperator> op_alias(
+        std::shared_ptr<DistributedSymmetryOperator>{},
+        const_cast<DistributedSymmetryOperator*>(&op));
+    DistributedSymmetryOperatorGPU gop(op_alias, gpu_comm);
+
+    std::vector<Complex> v_curr_host;
+    scatter_initial_vector_symmetry(op, options.seed, v_curr_host);
+
+    const std::size_t vec_bytes = local_n * sizeof(cuDoubleComplex);
+    DeviceBuffer v_prev_buf(vec_bytes);
+    DeviceBuffer v_curr_buf(vec_bytes);
+    DeviceBuffer w_buf(vec_bytes);
+
+    auto* v_prev_d = static_cast<cuDoubleComplex*>(v_prev_buf.ptr);
+    auto* v_curr_d = static_cast<cuDoubleComplex*>(v_curr_buf.ptr);
+    auto* w_d      = static_cast<cuDoubleComplex*>(w_buf.ptr);
+
+    DeviceBuffer dot_buf(sizeof(cuDoubleComplex));
+    auto* dot_d = static_cast<cuDoubleComplex*>(dot_buf.ptr);
+
+    if (local_n > 0) {
+        check_cu(cudaMemcpy(v_curr_d, v_curr_host.data(), vec_bytes,
+                            cudaMemcpyHostToDevice),
+                 "H2D v_curr (init, symm)");
+        check_cu(cudaMemset(v_prev_d, 0, vec_bytes),
+                 "memset v_prev (init, symm)");
+    }
+
+    CublasHandleGuard handle_guard;
+    cublasHandle_t handle = handle_guard.h;
+    check_cublas(cublasSetPointerMode(handle, CUBLAS_POINTER_MODE_HOST),
+                 "cublasSetPointerMode(HOST)");
+
+    std::vector<double> alpha; alpha.reserve(max_iter);
+    std::vector<double> beta;  beta.reserve(max_iter + 1);
+    beta.push_back(0.0);
+
+    double prev_smallest = std::numeric_limits<double>::infinity();
+    int iters_done = 0;
+
+    for (std::uint64_t j = 0; j < max_iter; ++j) {
+        // (1) SpMV via the on-device symm operator.
+        gop.apply(gpu_comm,
+                  reinterpret_cast<const Complex*>(v_curr_d),
+                  reinterpret_cast<Complex*>(w_d),
+                  /*stream=*/nullptr);
+
+        // (2) alpha_j = Re <v_curr | w>.
+        cuDoubleComplex alpha_local{0.0, 0.0};
+        if (local_n > 0) {
+            check_cublas(cublasZdotc(handle, static_cast<int>(local_n),
+                                     v_curr_d, 1, w_d, 1, &alpha_local),
+                         "cublasZdotc(alpha,symm)");
+        }
+        check_cu(cudaMemcpy(dot_d, &alpha_local, sizeof(cuDoubleComplex),
+                            cudaMemcpyHostToDevice),
+                 "H2D alpha_local (pre-allreduce, symm)");
+        multi_gpu::all_reduce_sum_complex_double(
+            gpu_comm, reinterpret_cast<std::complex<double>*>(dot_d), 1);
+        multi_gpu::synchronize_stream(nullptr);
+        check_cu(cudaMemcpy(&alpha_local, dot_d, sizeof(cuDoubleComplex),
+                            cudaMemcpyDeviceToHost),
+                 "D2H alpha_local (post-allreduce, symm)");
+        alpha.push_back(alpha_local.x);
+
+        // (3) w := w - alpha v_curr - beta_prev v_prev.
+        if (local_n > 0) {
+            cuDoubleComplex neg_alpha = make_cuDoubleComplex(-alpha.back(), 0.0);
+            check_cublas(cublasZaxpy(handle, static_cast<int>(local_n),
+                                     &neg_alpha, v_curr_d, 1, w_d, 1),
+                         "cublasZaxpy(-alpha v_curr,symm)");
+            if (j > 0) {
+                cuDoubleComplex neg_beta =
+                    make_cuDoubleComplex(-beta.back(), 0.0);
+                check_cublas(cublasZaxpy(handle, static_cast<int>(local_n),
+                                         &neg_beta, v_prev_d, 1, w_d, 1),
+                             "cublasZaxpy(-beta v_prev,symm)");
+            }
+        }
+
+        // (4) beta_{j+1} = sqrt(<w|w>).
+        cuDoubleComplex nrm_local{0.0, 0.0};
+        if (local_n > 0) {
+            check_cublas(cublasZdotc(handle, static_cast<int>(local_n),
+                                     w_d, 1, w_d, 1, &nrm_local),
+                         "cublasZdotc(norm,symm)");
+        }
+        check_cu(cudaMemcpy(dot_d, &nrm_local, sizeof(cuDoubleComplex),
+                            cudaMemcpyHostToDevice),
+                 "H2D nrm_local (pre-allreduce, symm)");
+        multi_gpu::all_reduce_sum_complex_double(
+            gpu_comm, reinterpret_cast<std::complex<double>*>(dot_d), 1);
+        multi_gpu::synchronize_stream(nullptr);
+        check_cu(cudaMemcpy(&nrm_local, dot_d, sizeof(cuDoubleComplex),
+                            cudaMemcpyDeviceToHost),
+                 "D2H nrm_local (post-allreduce, symm)");
+        const double b = std::sqrt(std::max(0.0, nrm_local.x));
+        beta.push_back(b);
+        ++iters_done;
+
+        if (options.verbose && rank == 0) {
+            std::cout << "  [dist-lanczos-gpu-symm] j=" << j
+                      << " alpha=" << alpha.back()
+                      << " beta_{j+1}=" << b << std::endl;
+        }
+
+        // (5) Convergence.
+        std::vector<double> evals = solve_tridiag(alpha, beta, j + 1);
+        const double smallest = evals.empty() ? 0.0 : evals.front();
+        if (j > 0 && std::abs(smallest - prev_smallest) < tol) {
+            if (options.verbose && rank == 0) {
+                std::cout << "  [dist-lanczos-gpu-symm] converged at iter "
+                          << (j + 1) << " (smallest=" << smallest << ")"
+                          << std::endl;
+            }
+            break;
+        }
+        prev_smallest = smallest;
+
+        // (6) Breakdown.
+        if (b < 1e-300) {
+            if (options.verbose && rank == 0) {
+                std::cout << "  [dist-lanczos-gpu-symm] beta breakdown at j="
+                          << j << std::endl;
+            }
+            break;
+        }
+
+        // (7) Rotate: v_prev := v_curr; v_curr := w / b.
+        std::swap(v_prev_d, v_curr_d);
+        std::swap(v_curr_d, w_d);
+        if (local_n > 0) {
+            const double inv_b = 1.0 / b;
+            check_cublas(cublasZdscal(handle, static_cast<int>(local_n),
+                                      &inv_b, v_curr_d, 1),
+                         "cublasZdscal(1/beta,symm)");
+        }
+    }
+
     std::vector<double> final_evals = solve_tridiag(alpha, beta, iters_done);
     DistributedLanczosGPUResult result;
     result.iterations = iters_done;

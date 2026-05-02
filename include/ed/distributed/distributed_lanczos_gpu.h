@@ -119,6 +119,33 @@ DistributedLanczosGPUResult distributed_lanczos_gpu(
     const DistributedOperator& op,
     const DistributedLanczosGPUOptions& options = {});
 
+/**
+ * GPU-resident distributed Lanczos on the **symmetry-projected** basis.
+ * Collective on `op.comm()`.
+ *
+ * Builds a `DistributedSymmetryOperatorGPU` internally from the supplied
+ * CPU `DistributedSymmetryOperator` and runs the same per-iteration
+ * recipe as `distributed_lanczos_gpu` but with the orbit-row SpMV (one
+ * NCCL pairwise SendRecv halo + one CSR sparse-matvec kernel per
+ * iteration).
+ *
+ * The initial vector is generated deterministically from `seed` in
+ * NATURAL orbit ordering, then permuted into rank-major-with-LPT-orbit
+ * scrambling on rank 0 and scattered via `MPI_Scatterv` -- exactly the
+ * same convention as the CPU `distributed_lanczos_symmetry` path, so
+ * the resulting Ritz values are bit-comparable across CPU/GPU at the
+ * same seed.
+ *
+ * `gpu_resident_spmv` is forced to `true` on this path (the CPU
+ * fallback is meaningless because the symmetry SpMV needs the orbit
+ * permutation that lives only inside `DistributedSymmetryOperator`).
+ *
+ * Throws `std::logic_error` if NCCL is not compiled in.
+ */
+DistributedLanczosGPUResult distributed_lanczos_gpu_symmetry(
+    const class DistributedSymmetryOperator& op,
+    const DistributedLanczosGPUOptions& options = {});
+
 }  // namespace ed::distributed
 
 #endif  // WITH_MPI
