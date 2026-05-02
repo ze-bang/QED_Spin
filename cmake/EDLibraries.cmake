@@ -389,7 +389,7 @@ set_target_properties(ed_symmetry PROPERTIES POSITION_INDEPENDENT_CODE ON)
 # the way the existing `addOneBody` / `addTwoBody` shortcuts in
 # construct_ham.h push records into those vectors). The only consumers of
 # `ed_input` are (i) the new examples under examples/, (ii) the pybind11
-# bindings under python/quantum_ed/_input.cpp, and (iii) the unit tests in
+# bindings under python/qed/_input.cpp, and (iii) the unit tests in
 # tests/unit/test_input_*.cpp -- the production `./ED <dir>` driver does
 # not depend on it.
 # -----------------------------------------------------------------------------

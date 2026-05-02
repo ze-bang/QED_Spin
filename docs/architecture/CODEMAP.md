@@ -13,7 +13,7 @@ For scaling and env knobs see [`SCALING.md`](SCALING.md).
 
 Libraries are defined in [`cmake/EDLibraries.cmake`](../../cmake/EDLibraries.cmake).
 The `ED` driver links a **subset** of them; not every installed archive is
-linked into every binary (e.g. `ed_symmetry` is linked by `quantum_ed._core`
+linked into every binary (e.g. `ed_symmetry` is linked by `qed._core`
 and unit tests, but **not** by the main `ED` executable — symmetry sectors
 for `ED` typically come from JSON via `construct_ham` / file I/O).
 
@@ -62,8 +62,8 @@ flowchart TB
 
 `ed_input` is **not** in the `ED` link line — it is a *standalone* lattice
 + Hamiltonian builder library consumed by the new `examples/`, by the
-`quantum_ed._core` pybind11 module (which exposes it as
-`quantum_ed.input`), and by the Catch2 unit tests
+`qed._core` pybind11 module (which exposes it as
+`qed.input`), and by the Catch2 unit tests
 (`tests/unit/test_input_library.cpp`). Its job is to **replace** the
 legacy `python/edlib/helper_*.py` family with a typed, in-process API
 that can either materialise an `ed::Operator` *or* emit the same
@@ -290,7 +290,7 @@ Below is **every** `.h` / `.hpp` / `.cuh` / `.cpp` / `.cu` file under
 
 - `dssf_io.cpp`, `dssf_method.cpp`, `operator_spec.cpp`
 
-### 5.18 `src/input/`  *(Phase 4 — backs `ed_input` / `quantum_ed.input`)*
+### 5.18 `src/input/`  *(Phase 4 — backs `ed_input` / `qed.input`)*
 
 - `lattice.cpp` *(implementations of every generator in
   `ed::input::lattice::*`)*,
@@ -334,7 +334,7 @@ Below is **every** `.h` / `.hpp` / `.cuh` / `.cpp` / `.cu` file under
 
 | Path | Purpose |
 |------|---------|
-| `python/quantum_ed/` | `pybind11` `_core` + pure Python `hamiltonian`, `dssf`, `symmetry`, `bfg`, `helpers`, **`input`** *(Phase 4 — facade for the `ed_input` C++ library)* |
+| `python/qed/` | `pybind11` `_core` + pure Python `hamiltonian`, `dssf`, `symmetry`, `bfg`, `helpers`, **`input`** *(Phase 4 — facade for the `ed_input` C++ library)* |
 | `workflows/nlce/` | Python driver that **subprocess**-launches `ED` |
 | `examples/` | C++/MPI/CUDA/Python samples |
 | `benchmarks/` | Google Benchmark + `bench_all_backends.py` |

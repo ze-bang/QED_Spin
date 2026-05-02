@@ -57,7 +57,7 @@ orphan: true
 Notes:
 
 1. CPU-iterative solvers reach the MPI surface via the standalone
-   `ed_distributed_main` binary (`quantum_ed.mpi.run_distributed(...)`),
+   `ed_distributed_main` binary (`qed.mpi.run_distributed(...)`),
    not by setting `use_mpi=true` on the in-process dispatcher. The
    `use_mpi` flag is consumed by the distributed driver and serialized
    into HDF5 metadata.
@@ -76,7 +76,7 @@ collapses every legacy `_GPU` / `_CUDA` / `_MPI` / `_FIXED_SZ` enum
 variant onto the canonical `(base_method, flags)` tuple. The
 collapse is OR-merged with caller-supplied flags so no information is
 lost; the operation is idempotent and is exposed to Python as
-`quantum_ed.canonicalize_method(...)` for testing and introspection.
+`qed.canonicalize_method(...)` for testing and introspection.
 
 | input enum                       | canonical method  | use_fixed_sz | use_gpu | use_mpi |
 |----------------------------------|-------------------|--------------|---------|---------|
@@ -141,7 +141,7 @@ Phase 7 adds two lockdown test files:
 | file | scope | sections |
 |------|-------|----------|
 | [`tests/unit/test_method_canonicalize.cpp`](../../tests/unit/test_method_canonicalize.cpp) | C++ canonicalize() contract: identity for canonical inputs; `_GPU` / `_FIXED_SZ` / `_MPI` / `_CUDA` collapse; SCALAPACK kept distinct; OR-merge of caller flags; idempotence; `legacy_method_for_dispatch()` round-trip. | 10 cases, 163 assertions |
-| [`python/tests/test_canonicalize_method.py`](../../python/tests/test_canonicalize_method.py) | Mirrors the C++ contract through the Python binding (`quantum_ed.canonicalize_method`) plus `EDParameters::use_gpu` / `use_mpi` round-trip. | 61 parametrised cases |
+| [`python/tests/test_canonicalize_method.py`](../../python/tests/test_canonicalize_method.py) | Mirrors the C++ contract through the Python binding (`qed.canonicalize_method`) plus `EDParameters::use_gpu` / `use_mpi` round-trip. | 61 parametrised cases |
 
 Both files keep the canonicalize behaviour from accidentally diverging
 between the C++ dispatcher and the Python introspection helper, and

@@ -112,7 +112,7 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install "scikit-build-core>=0.10" "pybind11>=2.13" pytest numpy h5py networkx pynauty
 
-      - name: Build + install quantum_ed wheel (editable not yet supported by scikit-build-core fully)
+      - name: Build + install qed wheel (editable not yet supported by scikit-build-core fully)
         env:
           # Force the configure step to skip the C++ test build to keep the
           # wheel build short -- the C++ tests already ran in the previous job.

@@ -120,10 +120,10 @@ option(WITH_MPI "Build with MPI support" ${DEFAULT_WITH_MPI})
 # Set languages based on options. The version is mirrored in CITATION.cff
 # and CHANGELOG.md; bump in lockstep when releasing.
 if(WITH_CUDA)
-    project(ExactDiagonalization VERSION 0.1.0 LANGUAGES CXX CUDA)
+    project(QED VERSION 0.1.0 LANGUAGES CXX CUDA)
     enable_language(CUDA)
 else()
-    project(ExactDiagonalization VERSION 0.1.0 LANGUAGES CXX)
+    project(QED VERSION 0.1.0 LANGUAGES CXX)
 endif()
 
 # Set C++ standard
@@ -442,21 +442,21 @@ if(WITH_MKL AND USE_ONEMKL AND MKL_FOUND)
 endif()
 
 # =============================================================================
-# INSTALL RULES + EDConfig.cmake export (P1.7 / audit Q5)
+# INSTALL RULES + QEDConfig.cmake export (P1.7 / audit Q5)
 #
 # Allows the package to be installed into a prefix and consumed by downstream
 # CMake projects via:
 #
-#   find_package(ED CONFIG REQUIRED)
-#   target_link_libraries(myapp PRIVATE ED::ed_solvers_cpu)
+#   find_package(QED CONFIG REQUIRED)
+#   target_link_libraries(myapp PRIVATE QED::ed_solvers_cpu)
 #
 # Layout under <prefix>:
 #   bin/                        ED, compute_bfg_order_parameters
 #   include/ed/                 public headers (kept hierarchical)
 #   lib/                        libed_io.a, libed_core.a, libed_solvers_cpu.a
 #                               libed_solvers_gpu.a (when WITH_CUDA)
-#   lib/cmake/ED/               EDConfig.cmake, EDConfigVersion.cmake,
-#                               EDTargets.cmake
+#   lib/cmake/QED/              QEDConfig.cmake, QEDConfigVersion.cmake,
+#                               QEDTargets.cmake
 # =============================================================================
 include(GNUInstallDirs)
 include(CMakePackageConfigHelpers)
@@ -470,7 +470,7 @@ if(TARGET ed_solvers_gpu)
 endif()
 
 install(TARGETS ${_ED_INSTALL_TARGETS} ED
-    EXPORT EDTargets
+    EXPORT QEDTargets
     RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
     LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
     ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
@@ -497,26 +497,26 @@ install(DIRECTORY ${INCLUDE_DIR}/ed
         PATTERN "*.cuh"
 )
 
-install(EXPORT EDTargets
-        FILE EDTargets.cmake
-        NAMESPACE ED::
-        DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/ED
+install(EXPORT QEDTargets
+        FILE QEDTargets.cmake
+        NAMESPACE QED::
+        DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/QED
 )
 
 configure_package_config_file(
-    ${CMAKE_CURRENT_SOURCE_DIR}/cmake/EDConfig.cmake.in
-    ${CMAKE_CURRENT_BINARY_DIR}/EDConfig.cmake
-    INSTALL_DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/ED
+    ${CMAKE_CURRENT_SOURCE_DIR}/cmake/QEDConfig.cmake.in
+    ${CMAKE_CURRENT_BINARY_DIR}/QEDConfig.cmake
+    INSTALL_DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/QED
 )
 write_basic_package_version_file(
-    ${CMAKE_CURRENT_BINARY_DIR}/EDConfigVersion.cmake
+    ${CMAKE_CURRENT_BINARY_DIR}/QEDConfigVersion.cmake
     VERSION ${PROJECT_VERSION}
     COMPATIBILITY SameMinorVersion
 )
 install(FILES
-    ${CMAKE_CURRENT_BINARY_DIR}/EDConfig.cmake
-    ${CMAKE_CURRENT_BINARY_DIR}/EDConfigVersion.cmake
-    DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/ED
+    ${CMAKE_CURRENT_BINARY_DIR}/QEDConfig.cmake
+    ${CMAKE_CURRENT_BINARY_DIR}/QEDConfigVersion.cmake
+    DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/QED
 )
 
 # Print configuration summary
@@ -571,11 +571,11 @@ target_compile_options(ED PRIVATE
 # =============================================================================
 # Optional Python bindings (P2.7 / audit "modern python interface").
 #
-# When enabled, builds the `quantum_ed._core` pybind11 extension using the
+# When enabled, builds the `qed._core` pybind11 extension using the
 # project's static-library stack. Two ways to enable:
 #
 #   * Top-level CMake: `cmake -B build -DED_BUILD_PYTHON=ON ...` and then
-#     run `import quantum_ed` from `python/`.
+#     run `import qed` from `python/`.
 #   * `pip install .` from the project root, which uses scikit-build-core
 #     (configured in pyproject.toml) and forces ED_BUILD_PYTHON=ON behind
 #     the scenes.
@@ -583,13 +583,13 @@ target_compile_options(ED PRIVATE
 # The default is OFF so the C++-only build stays lean for HPC clusters
 # without a Python toolchain.
 # =============================================================================
-option(ED_BUILD_PYTHON "Build the quantum_ed pybind11 Python bindings" OFF)
+option(ED_BUILD_PYTHON "Build the qed pybind11 Python bindings" OFF)
 if(SKBUILD)
     set(ED_BUILD_PYTHON ON CACHE BOOL "" FORCE)
 endif()
 
 if(ED_BUILD_PYTHON)
-    add_subdirectory(python/quantum_ed)
+    add_subdirectory(python/qed)
 endif()
 
 # =============================================================================
@@ -715,7 +715,7 @@ if(BUILD_ED_TESTS)
     ed_add_test(test_auto_solve                 tests/unit/test_auto_solve.cpp USE_CATCH2)
     # Phase 9 façade: smoke-test the modern-C++ DSSF auto-pilot
     # `ed::auto_pilot::dssf::compute(DSSFRequest, AutoDSSFOptions)` --
-    # method-selection rule + EDConfig-null guard.
+    # method-selection rule + QEDConfig-null guard.
     ed_add_test(test_auto_dssf                  tests/unit/test_auto_dssf.cpp USE_CATCH2)
     target_link_libraries(test_auto_dssf PRIVATE ed_cli ed_dssf ed_input)
     ed_add_test(test_lanczos_variants           tests/unit/test_lanczos_variants.cpp USE_CATCH2)

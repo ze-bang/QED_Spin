@@ -39,7 +39,7 @@ Quick start
 .. code-block:: python
 
     import numpy as np
-    import quantum_ed as qed
+    import qed as qed
 
     cluster = qed.bfg.load_cluster("/path/to/cluster_dir")
     print("n_sites =", cluster.n_sites,

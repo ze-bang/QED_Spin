@@ -1,7 +1,7 @@
 // =============================================================================
-// python/quantum_ed/_bindings/quantum_ed_bindings.cpp
+// python/qed/_bindings/qed_bindings.cpp
 //
-// pybind11 binding module `quantum_ed._core`.
+// pybind11 binding module `qed._core`.
 //
 // What we expose (Phase 1, deliberately a small surface):
 //   * Operator                     -- spin-1/2 Hamiltonian builder.
@@ -193,7 +193,7 @@ ComplexArray fop_apply(const FixedSzOperator& op, const ComplexArray& vin) {
 
 // =============================================================================
 // Phase 9: in-process introspection helpers used by the unified workflow API
-// (`quantum_ed.workflow.find_symmetries` / `quantum_ed.workflow.diag`).
+// (`qed.workflow.find_symmetries` / `qed.workflow.diag`).
 //
 // Without these the Python facade would have to either (a) round-trip the
 // operator through `HamiltonianBuilder.write_directory` and re-parse the
@@ -594,8 +594,8 @@ py::dict py_hybrid_thermal_fixed_sz(const FixedSzOperator& op,
 
 PYBIND11_MODULE(_core, m) {
     m.doc() =
-        "quantum_ed._core: pybind11 binding for the C++ exact-diagonalization "
-        "engine. See quantum_ed.__init__ for the user-facing facade.";
+        "qed._core: pybind11 binding for the C++ exact-diagonalization "
+        "engine. See qed.__init__ for the user-facing facade.";
 
     // Operator op-type constants. Keep in sync with TransformData::op_type.
     m.attr("OP_SPLUS")  = py::int_(0);
@@ -604,7 +604,7 @@ PYBIND11_MODULE(_core, m) {
 
     // Standalone ed_input C++ library bindings (lattice generators +
     // HamiltonianBuilder + low-level file writers). Mounted under
-    // `quantum_ed._core.input`; re-exported as `quantum_ed.input` from
+    // `qed._core.input`; re-exported as `qed.input` from
     // the Python facade.
     bind_input(m);
 
@@ -659,7 +659,7 @@ PYBIND11_MODULE(_core, m) {
              py::arg("vec"),
              "Compute H * v on a 1-D complex128 array.")
         // Phase 9: in-process introspection used by the unified workflow API
-        // (``quantum_ed.workflow.find_symmetries`` / ``.diag``).
+        // (``qed.workflow.find_symmetries`` / ``.diag``).
         .def("conserves_sz", &op_conserves_sz,
              "True iff every term commutes with total Sz (U(1) symmetry). "
              "Mirrors the on-disk ``hamiltonian_conserves_sz`` check used by "
@@ -869,7 +869,7 @@ PYBIND11_MODULE(_core, m) {
         .def_readwrite("single_obs_only",   &ed::dssf::OperatorSpec::single_obs_only)
         .def_readwrite("sublattice_filter", &ed::dssf::OperatorSpec::sublattice_filter)
         .def("__repr__", [](const ed::dssf::OperatorSpec& s) {
-            return "<quantum_ed.dssf.OperatorSpec operator_type='" +
+            return "<qed.dssf.OperatorSpec operator_type='" +
                    s.operator_type + "' basis='" + s.basis +
                    "' num_sites=" + std::to_string(s.num_sites) +
                    " momenta=" + std::to_string(s.momentum_points.size()) +

@@ -11,7 +11,7 @@ This document is an exhaustive, pedagogical walk-through of the working
 functionality of the C++/CUDA/Python codebase rooted at
 `exact_diagonalization_cpp/`. It traces every layer that is reachable from
 the user-facing CLIs (`ED`, `compute_bfg_order_parameters[_gpu]`, the Python
-extension `quantum_ed._core`, and the NLCE workflow package) down to the
+extension `qed._core`, and the NLCE workflow package) down to the
 algorithmic kernels and on-disk schemas they ultimately invoke.
 
 The goal is twofold: (i) help a new contributor reason about the codebase
@@ -36,7 +36,7 @@ Throughout, paths are relative to `exact_diagonalization_cpp/` unless noted.
 9. [BFG: bond-bilinear, structure factors, order parameters](#9-bfg-bond-bilinear-structure-factors-order-parameters)
 10. [I/O layer (HDF5 schema & basis buffers)](#10-io-layer-hdf5-schema--basis-buffers)
 11. [CLI: `ED` driver](#11-cli-ed-driver)
-12. [Python bindings (`quantum_ed`) and `edlib`](#12-python-bindings)
+12. [Python bindings (`qed`) and `edlib`](#12-python-bindings)
 13. [NLCE workflow package](#13-nlce-workflow-package)
 14. [Tests, benchmarks, and operational notes](#14-tests-benchmarks-and-operational-notes)
 15. [Subsystem cross-reference](#15-subsystem-cross-reference)
@@ -61,7 +61,7 @@ Concretely, the toolkit exposes four public surfaces:
   post-process saved wavefunctions or TPQ states to compute bond-bilinear
   observables, structure factors, and VBS / nematic / plaquette order
   parameters.
-- **`quantum_ed`** — a `pybind11` Python package that wraps the CPU
+- **`qed`** — a `pybind11` Python package that wraps the CPU
   solver/observable layer for use from notebooks and other tools.
 - **`workflows.nlce`** — a Python package that orchestrates ED across
   cluster expansions (geometry × pipeline matrix), driving the `ED`
@@ -99,7 +99,7 @@ src/                       # Implementations (mirrors `include/ed/...`)
 ├── bfg/                   # BFG library
 └── io/                    # Basis storage + buffer
 
-python/quantum_ed/         # pybind11 module (CPU only)
+python/qed/         # pybind11 module (CPU only)
 python/edlib/              # Lattice/automorphism helpers (Python)
 workflows/nlce/            # NLCE orchestrator (calls `ED` binary)
 tests/unit/                # Catch2 v3 unit tests, registered via ctest
@@ -123,8 +123,8 @@ configs/                   # Worked example .cfg INI files
   is detected. ScaLAPACK is consumed by `scalapack_diag.cpp`.
 - `BLAS_PROFILE` (`AUTO`, `MKL`, `AOCL`, `OPENBLAS`, `REFBLAS`) —
   selects the BLAS/LAPACK shim included by `blas_lapack_wrapper.h`.
-- `ED_BUILD_PYTHON` — adds `python/quantum_ed` as a CMake subdirectory
-  and produces `_core*.so` next to `__init__.py` (so `import quantum_ed`
+- `ED_BUILD_PYTHON` — adds `python/qed` as a CMake subdirectory
+  and produces `_core*.so` next to `__init__.py` (so `import qed`
   works in-tree).
 - HDF5 (C++ API) and ARPACK are **required**; they are not gated by an
   option. They are looked up in `cmake/EDDependencies.cmake`.
@@ -1323,16 +1323,16 @@ After the recent CLI cleanup audit:
 
 ## 12. Python bindings
 
-### 12.1 The `quantum_ed._core` extension
+### 12.1 The `qed._core` extension
 
-`python/quantum_ed/CMakeLists.txt` builds a `pybind11` module from
-`_bindings/quantum_ed_bindings.cpp` that links against
+`python/qed/CMakeLists.txt` builds a `pybind11` module from
+`_bindings/qed_bindings.cpp` that links against
 `ed_solvers_cpu`, `ed_dssf`, `ed_symmetry`, and `ed_bfg` (the **CPU
 stack**; GPU is intentionally out of scope for the Python module). The
-artifact is placed next to `python/quantum_ed/__init__.py` so
-`import quantum_ed` works in-tree and from a wheel.
+artifact is placed next to `python/qed/__init__.py` so
+`import qed` works in-tree and from a wheel.
 
-Top-level Python surface (`quantum_ed/__init__.py.__all__`):
+Top-level Python surface (`qed/__init__.py.__all__`):
 
 - `Operator`, `FixedSzOperator` — matrix-free Hamiltonian classes.
 - `OP_SPLUS`, `OP_SMINUS`, `OP_SZ` — operator type tags.
@@ -1359,16 +1359,16 @@ in the same `S+ / S- / Sz` convention as the C++ loaders, then
 
 ### 12.3 DSSF, symmetry, BFG submodules
 
-- `quantum_ed.dssf` re-exports `OperatorSpec`, `ObservablePairs`,
+- `qed.dssf` re-exports `OperatorSpec`, `ObservablePairs`,
   `build_observable_pairs`, `compute_transverse_bases`. This guarantees
   the **same operator construction** as the `ED dssf` CLI, so
   observable names and ordering match the on-disk HDF5 layout.
-- `quantum_ed.symmetry` re-exports the `ed::sym` permutation DSL
+- `qed.symmetry` re-exports the `ed::sym` permutation DSL
   (`identity`, `compose`, `power`, `order`, `translation`,
   `reflection_1d`, `site_swap`, `generate_group`, `group_from_generators`,
   `translation_group_1d`). The full-group helpers return `dict`s that
   mirror `SymmetryGroupInfo` / the JSON schema.
-- `quantum_ed.bfg` re-exports the BFG cluster, topology, correlation,
+- `qed.bfg` re-exports the BFG cluster, topology, correlation,
   structure-factor, and TPQ I/O helpers.
 
 ### 12.4 `edlib`
@@ -1383,7 +1383,7 @@ The legacy data-prep package. Headline modules:
   `positions.dat`, `Trans.dat`, `InterAll.dat`, and lattice parameter
   files for the C++ pipeline.
 
-`quantum_ed.helpers` lazy-imports these so they appear under the modern
+`qed.helpers` lazy-imports these so they appear under the modern
 namespace.
 
 ---

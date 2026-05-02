@@ -7,7 +7,7 @@
 //
 // Single source of truth for the {operator_type x basis x momentum x
 // spin-combo x fixed-Sz} cross-product. Both the C++ CLI (`ED dssf`) and
-// the Python bindings (`quantum_ed.dssf`) call this; bug fixes (e.g. for
+// the Python bindings (`qed.dssf`) call this; bug fixes (e.g. for
 // `transverse` SF/NSF naming) only need to be made once.
 //
 // Historical context: before P1.10 the assembly logic was duplicated
@@ -38,7 +38,7 @@ namespace ed::dssf {
  *
  * Mirrors the `ED dssf <method>` CLI surface so the parameter blob can
  * flow straight from argv into a single library call. The Python binding
- * (`quantum_ed.dssf.OperatorSpec`) exposes the same fields verbatim.
+ * (`qed.dssf.OperatorSpec`) exposes the same fields verbatim.
  */
 struct OperatorSpec {
     /// "sum" | "transverse" | "sublattice" | "experimental"

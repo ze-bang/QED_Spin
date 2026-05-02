@@ -11,7 +11,7 @@ Heisenberg chain at spin 1/2, no symmetries -- and report:
   * The full ground-state Lanczos to numerical convergence (ms).
 
 The XDiag side runs as a Julia subprocess (`bench_vs_xdiag.jl`) and
-writes its results to a JSON file we splice in here. The quantum_ed
+writes its results to a JSON file we splice in here. The qed
 side uses `qed.lanczos` and a direct timing of `Operator.apply`.
 
 Usage:
@@ -49,15 +49,15 @@ import numpy as np
 
 
 # ============================================================================
-# quantum_ed peer
+# qed peer
 # ============================================================================
 
 
 def _build_chain_op(N: int, fixed_sz: bool):
-    """Return a ``quantum_ed`` (Fixed)SzOperator for the same Heisenberg PBC
+    """Return a ``qed`` (Fixed)SzOperator for the same Heisenberg PBC
     chain XDiag is given. We use the input library so the term layout matches
     XDiag's ``SdotS`` shortcut bit-for-bit (S+S- + S-S+ + SzSz, J=1)."""
-    import quantum_ed as qed
+    import qed as qed
 
     nn = [(i, (i + 1) % N) for i in range(N)]
     builder = qed.input.HamiltonianBuilder(num_sites=N)
@@ -70,10 +70,10 @@ def _build_chain_op(N: int, fixed_sz: bool):
     return op
 
 
-def time_quantum_ed_apply(N: int, fixed_sz: bool,
+def time_qed_apply(N: int, fixed_sz: bool,
                           n_warmup: int = 1, n_calls: int = 5) -> float | None:
     """Median microseconds for one ``Operator.apply(v)`` on a unit-norm vector."""
-    import quantum_ed as qed
+    import qed as qed
 
     op = _build_chain_op(N, fixed_sz=fixed_sz)
     dim = op.dimension if hasattr(op, "dimension") else (1 << N)
@@ -95,7 +95,7 @@ def time_quantum_ed_apply(N: int, fixed_sz: bool,
     return statistics.median(samples_us)
 
 
-def time_quantum_ed_lanczos(N: int, fixed_sz: bool,
+def time_qed_lanczos(N: int, fixed_sz: bool,
                             n_calls: int = 3) -> tuple[float | None,
                                                        float | None]:
     """Median ground-state Lanczos time (to ``tol=1e-10``). Returns
@@ -105,7 +105,7 @@ def time_quantum_ed_lanczos(N: int, fixed_sz: bool,
     the XDiag side: a single timed call is too noisy at large N
     (variance dominated by cache state and the OS scheduler).
     """
-    import quantum_ed as qed
+    import qed as qed
 
     op = _build_chain_op(N, fixed_sz=fixed_sz)
     # Warm up: triggers any first-touch allocation, JIT, etc.
@@ -217,7 +217,7 @@ def main() -> None:
     ap.add_argument("--skip-quantum-ed", action="store_true",
                     help="Only run the Julia/XDiag side (debug aid).")
     ap.add_argument("--skip-xdiag", action="store_true",
-                    help="Only run the quantum_ed side (debug aid).")
+                    help="Only run the qed side (debug aid).")
     args = ap.parse_args()
 
     # ---- XDiag ---------------------------------------------------------
@@ -236,27 +236,27 @@ def main() -> None:
 
     xdiag_by_N = {row["N"]: row for row in xdiag_payload.get("rows", [])}
 
-    # ---- quantum_ed ----------------------------------------------------
+    # ---- qed ----------------------------------------------------
     rows = []
     for N in args.sizes:
         dim = (math.comb(N, N // 2) if args.fixed_sz else (1 << N))
         print(f"\n=== N = {N}  (dim = {dim:,})  fixed_sz={args.fixed_sz} ===",
               flush=True)
-        if args.skip_quantum_ed:
+        if args.skip_qed:
             us_apply = None
             us_lanczos = None
             e0_us = None
         else:
             try:
-                us_apply = time_quantum_ed_apply(N, args.fixed_sz,
+                us_apply = time_qed_apply(N, args.fixed_sz,
                                                  n_calls=args.n_apply)
             except Exception as exc:
-                print(f"  [quantum_ed apply] N={N} failed: {exc}")
+                print(f"  [qed apply] N={N} failed: {exc}")
                 us_apply = None
             try:
-                us_lanczos, e0_us = time_quantum_ed_lanczos(N, args.fixed_sz)
+                us_lanczos, e0_us = time_qed_lanczos(N, args.fixed_sz)
             except Exception as exc:
-                print(f"  [quantum_ed lanczos] N={N} failed: {exc}")
+                print(f"  [qed lanczos] N={N} failed: {exc}")
                 us_lanczos = None
                 e0_us = None
 
@@ -278,7 +278,7 @@ def main() -> None:
         if e0_us is not None and xd.get("e0") is not None:
             d = abs(float(e0_us) - float(xd["e0"]))
             tag = "OK" if d < 1e-6 else "MISMATCH"
-            print(f"  E0(quantum_ed) = {e0_us:.10f}, "
+            print(f"  E0(qed) = {e0_us:.10f}, "
                   f"E0(xdiag) = {xd['e0']:.10f}, |delta| = {d:.2e}  [{tag}]",
                   flush=True)
 
@@ -288,7 +288,7 @@ def main() -> None:
     print(f"Per-call SpMV (lower is better). 1D Heisenberg PBC chain, "
           f"threads = {args.threads}, fixed_sz = {args.fixed_sz}.")
     print("=" * 96)
-    hdr = (f"{'N':>3} {'dim':>10} | {'quantum_ed':>12} | {'xdiag':>12} | "
+    hdr = (f"{'N':>3} {'dim':>10} | {'qed':>12} | {'xdiag':>12} | "
            f"{'speedup':>9}")
     print(hdr)
     print("-" * len(hdr))
@@ -300,10 +300,10 @@ def main() -> None:
 
     print()
     print("=" * 96)
-    print(f"Ground-state Lanczos. quantum_ed.lanczos vs XDiag.eigval0 (both at "
+    print(f"Ground-state Lanczos. qed.lanczos vs XDiag.eigval0 (both at "
           f"natural numerical convergence).")
     print("=" * 96)
-    hdr = (f"{'N':>3} {'dim':>10} | {'quantum_ed':>12} | {'xdiag':>12} | "
+    hdr = (f"{'N':>3} {'dim':>10} | {'qed':>12} | {'xdiag':>12} | "
            f"{'speedup':>9} | {'E0 (xdiag)':>14}")
     print(hdr)
     print("-" * len(hdr))

@@ -18,7 +18,7 @@ Quick start
 
 .. code-block:: python
 
-    import quantum_ed as qed
+    import qed as qed
 
     # Translation group on a 4-site ring (Z_4).
     g = qed.symmetry.translation_group_1d(4)

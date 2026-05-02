@@ -7,7 +7,7 @@
 // terms and can emit them either:
 //
 //   1. **In-process** as an `ed::Operator` (no file I/O at all -- the
-//      preferred path for `quantum_ed` users), or
+//      preferred path for `qed` users), or
 //   2. As legacy directory output (`InterAll.dat`, `Trans.dat`,
 //      `ThreeBodyG.dat`, `positions.dat`) consumed by `./ED <directory>`,
 //      preserving every input contract that the production CLI workflow
@@ -203,7 +203,7 @@ public:
     std::shared_ptr<Operator> to_operator() const;
 
     // Overload that writes the terms directly into an existing Operator
-    // (used by the pybind11 bindings to wire into `quantum_ed.Operator`).
+    // (used by the pybind11 bindings to wire into `qed.Operator`).
     void emit_into(Operator& op) const;
 
     // Write the legacy directory format (`InterAll.dat`, `Trans.dat`,

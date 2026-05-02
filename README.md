@@ -19,9 +19,9 @@ the same single-file ergonomics and adds:
   TPQ), dynamical/static structure factors (DSSF / SSSF), full
   diagonalization, ARPACK, and a programmatic symmetry DSL — all
   reachable from one CLI binary, one C++ static library, and one Python
-  package (`quantum_ed`);
+  package (`qed`);
 * a **standalone `ed_input` C++ library** (with matching
-  `quantum_ed.input` Python bindings) that supplants the legacy
+  `qed.input` Python bindings) that supplants the legacy
   `python/edlib/helper_*.py` family — every textbook lattice (chain /
   square / triangular / honeycomb / kagome / pyrochlore + arbitrary
   user-supplied adjacency / `cluster.txt`), every standard term shortcut
@@ -29,7 +29,7 @@ the same single-file ergonomics and adds:
   / Zeeman / pyrochlore non-Kramers), and a single fluent surface that
   emits **either** an in-memory `Operator` *or* the exact `InterAll.dat` /
   `Trans.dat` / `positions.dat` directory the `./ED` CLI consumes;
-* a **first-class Python interface** (`import quantum_ed`) that since
+* a **first-class Python interface** (`import qed`) that since
   Phase 5 (Apr 2026) reaches **every backend the CLI knows about** —
   `exact_diagonalization_core(op, method, params)` dispatches to the
   full `LANCZOS{,_SELECTIVE,_NO_ORTHO}` / `BLOCK_LANCZOS` /
@@ -40,8 +40,8 @@ the same single-file ergonomics and adds:
   `cTPQ`; `_streaming_symmetry[_fixed_sz]` covers the largest clusters
   with optional GPU per-sector dispatch; `_from_directory[_symmetrized]`
   routes to every `*_GPU` method when CUDA is on; and thin launcher
-  helpers (`quantum_ed.mpi.run_distributed`,
-  `quantum_ed.dssf.run_from_directory`) wrap the MPI distributed
+  helpers (`qed.mpi.run_distributed`,
+  `qed.dssf.run_from_directory`) wrap the MPI distributed
   solvers and the full continued-fraction `./ED dssf` engine;
 * a **Numerical Linked Cluster Expansion (NLCE)** workflow on top of
   the same solvers, used in production for the pyrochlore + triangular
@@ -93,8 +93,8 @@ notes live in [`docs/guides/install.md`](docs/guides/install.md).
 ### Install the Python package
 
 ```bash
-pip install -v ./python   # builds the `quantum_ed` extension via scikit-build-core
-python -c "import quantum_ed; print(quantum_ed.__version__)"
+pip install -v ./python   # builds the `qed` extension via scikit-build-core
+python -c "import qed; print(qed.__version__)"
 ```
 
 The Python quickstart is at
@@ -114,7 +114,7 @@ std::cout << "E0 = " << res.eigenvalues[0] << "\n";
 Python:
 
 ```python
-import quantum_ed as qed
+import qed as qed
 op  = qed.Operator(num_sites=12)
 op.loadFromInterAllFile("InterAll.dat")
 e   = qed.lanczos(op, max_iter=200, n_eig=3, tol=1e-10)
@@ -131,7 +131,7 @@ Modern Python (build the `InterAll.dat` *and* solve in one breath, **no
 helper script**):
 
 ```python
-import quantum_ed as qed
+import qed as qed
 lat = qed.input.lattice.chain(12, pbc=True)
 op  = (qed.input.HamiltonianBuilder(lat.num_sites)
               .heisenberg(lat.nn_pairs(), 1.0)
@@ -147,7 +147,7 @@ print("E0 =", qed.lanczos(op, max_iter=200, n_eig=1, tol=1e-10)[0])
 Modern Python — **single-call workflow** with smart defaults (Phase 9, recommended):
 
 ```python
-import quantum_ed as qed
+import qed as qed
 
 # 1. Build a Hamiltonian.
 N = 12
@@ -187,7 +187,7 @@ Modern Python — single-call dispatcher to **any** backend (Phase 5,
 lower-level than `qed.diag`):
 
 ```python
-import quantum_ed as qed
+import qed as qed
 
 # Build a 12-site Heisenberg ring as before.
 lat = qed.input.lattice.chain(12, pbc=True)
@@ -234,7 +234,7 @@ The legacy production workflow — Python `edlib` helper writes `InterAll.dat`,
 them; results land in `<directory>/output/ed_results.h5` — is fully
 preserved alongside the new in-process and `ed_input`-builder modes. For
 a comprehensive catalogue of every supported invocation pattern (legacy
-directory → binary, config files, `ED dssf` subcommand, `quantum_ed`
+directory → binary, config files, `ED dssf` subcommand, `qed`
 Python API, NLCE pipeline, distributed MPI driver, raw C++ linkage, and
 the new `ed_input` C++/Python lattice + Hamiltonian builder) see
 [`docs/guides/usage.md`](docs/guides/usage.md).
@@ -256,7 +256,7 @@ Every supported workflow has a self-contained, runnable example under
 | [06_mpi_distributed_eigenvectors.cpp](examples/06_mpi_distributed_eigenvectors.cpp) | MPI         | Reconstruct the eigenvector slabs and check residual. |
 | [07_mpi_distributed_ftlm.cpp](examples/07_mpi_distributed_ftlm.cpp)               | MPI         | Distributed FTLM with observable expectations. |
 | [08_mpi_distributed_tpq.cpp](examples/08_mpi_distributed_tpq.cpp)                 | MPI         | Distributed canonical TPQ. |
-| [09_python_quickstart.py](examples/09_python_quickstart.py)                       | Python      | The ground state via the `quantum_ed` bindings. |
+| [09_python_quickstart.py](examples/09_python_quickstart.py)                       | Python      | The ground state via the `qed` bindings. |
 | [10_python_dssf.py](examples/10_python_dssf.py)                                   | Python      | Build observables for a T=0 DSSF on an 8-site chain. |
 | [11_cli_thermo.sh](examples/11_cli_thermo.sh)                                     | CLI         | One-line FTLM thermodynamic sweep via `./ED`. |
 | [12_cli_dssf.sh](examples/12_cli_dssf.sh)                                         | CLI         | One-line finite-T DSSF via `./ED dssf dynamical_thermal`. |
@@ -309,7 +309,7 @@ distributed solvers, see
 exact_diagonalization_cpp/
 ├── include/ed/             # Public C++ API (operator, solvers, distributed/, gpu/, io/, input/)
 ├── src/                    # Implementations + apps (ed_main, ed_distributed_main, src/input/)
-├── python/quantum_ed/      # pybind11 bindings + DSSF / Hamiltonian / symmetry / input helpers
+├── python/qed/      # pybind11 bindings + DSSF / Hamiltonian / symmetry / input helpers
 ├── workflows/nlce/         # Numerical Linked Cluster Expansion (geometries × pipelines × workflow)
 ├── examples/               # Runnable end-to-end examples (one per use case)
 ├── benchmarks/             # Google-Benchmark micros + bench_all_backends.py
@@ -336,8 +336,8 @@ exact_diagonalization_cpp/
 | Install everything | [`docs/guides/install.md`](docs/guides/install.md) |
 | Get a 5-minute C++ tour | [`docs/guides/quickstart.md`](docs/guides/quickstart.md) |
 | Get a 5-minute Python tour | [`docs/guides/python_quickstart.md`](docs/guides/python_quickstart.md) |
-| See **every way** the toolkit can be invoked (legacy `edlib → ./ED`, configs, `dssf` subcommand, `quantum_ed`, NLCE, MPI, raw C++, **and the new `ed_input` C++/Python builder**) | [`docs/guides/usage.md`](docs/guides/usage.md) |
-| See what `import quantum_ed` does **and does not** cover vs `./ED` (incl. the `quantum_ed.input` C++-backed builder) | [`docs/guides/python_api_coverage.md`](docs/guides/python_api_coverage.md) |
+| See **every way** the toolkit can be invoked (legacy `edlib → ./ED`, configs, `dssf` subcommand, `qed`, NLCE, MPI, raw C++, **and the new `ed_input` C++/Python builder**) | [`docs/guides/usage.md`](docs/guides/usage.md) |
+| See what `import qed` does **and does not** cover vs `./ED` (incl. the `qed.input` C++-backed builder) | [`docs/guides/python_api_coverage.md`](docs/guides/python_api_coverage.md) |
 | Walk every advanced Python entry point — single-call dispatcher across ~30 backends, in-process symmetry projection, GPU per-sector dispatch, MPI launcher, full `./ED dssf` driver | [`docs/guides/python_advanced.md`](docs/guides/python_advanced.md) |
 | Map every static lib, source leaf, and `ED` → solver path | [`docs/architecture/CODEMAP.md`](docs/architecture/CODEMAP.md) |
 | Pick the right solver | [`docs/architecture/IMPLEMENTATION_REPORT.md`](docs/architecture/IMPLEMENTATION_REPORT.md) |
@@ -355,7 +355,7 @@ exact_diagonalization_cpp/
 
 The tables below are the **single capability map** for what backend exists
 in the codebase today; for the **per-interface** breakdown (which of these
-are reachable from `./ED`, from `import quantum_ed`, from the C++ static
+are reachable from `./ED`, from `import qed`, from the C++ static
 libraries, or from `ed_distributed_main`) see the
 [Capability matrix in `python_api_coverage.md` §0](docs/guides/python_api_coverage.md#0-capability-matrix-c-vs-python-vs-cli).
 
@@ -518,7 +518,7 @@ The corresponding implementation table:
 | Streaming symmetry (`StreamingSymmetryOperator`, no disk basis storage) | ✓ | ✓ | — | `include/ed/core/ed_wrapper_streaming.h` (CLI: `./ED <dir> --symm --method=…`) |
 | GPU dispatch per symmetry sector (`GPUSymmetrizedOperator` + matvec on device) | — | ✓ | — | `src/solvers/gpu/gpu_symmetrized_operator.cu` (called automatically by streaming-symmetry when `--method=` is one of `LANCZOS_GPU`, `BLOCK_LANCZOS_GPU`, `DAVIDSON_GPU`, `KRYLOV_SCHUR_GPU`, `BLOCK_KRYLOV_SCHUR_GPU`, `FULL_GPU`) |
 | Distributed symmetry-projected SpMV (orbit-balanced row partition + orbit-aware `MPI_Alltoallv`) | — | — | ✓ | `include/ed/distributed/distributed_symmetry_operator.h` (driver: `distributed_lanczos_symmetry`) |
-| Programmatic symmetry DSL (`translation`, `reflection_1d`, `site_swap`, `compose`, `power`, `generate_group`, `translation_group_with_reflection_1d`) | ✓ | n/a | n/a | `include/ed/symmetry/group.h` (Python: `quantum_ed.symmetry.*`) |
+| Programmatic symmetry DSL (`translation`, `reflection_1d`, `site_swap`, `compose`, `power`, `generate_group`, `translation_group_with_reflection_1d`) | ✓ | n/a | n/a | `include/ed/symmetry/group.h` (Python: `qed.symmetry.*`) |
 
 So the symmetry-projected stack **does** have GPU support, contra the
 old README row that said "partial":
@@ -544,8 +544,8 @@ is on the device.
 | Area | CPU | GPU | MPI | Notes |
 |---|:---:|:---:|:---:|---|
 | DSSF / SSSF (`./ED dssf {dynamical_thermal,static_thermal,ground_state_dssf}`) | ✓ | ✓ | partial | `src/dssf/`, `src/solvers/gpu/gpu_dynamics.cu` (`runGPUDynamicalResponse[Thermal]`, `runGPUDynamicalCorrelation*`, `runGPUStaticCorrelation`, `runGPUThermalExpectation`). Distributed DSSF is gated on the deferred TPQ-DSSF Mori continued-fraction work — see [`IMPLEMENTATION_NOTES.md` §6.3](docs/architecture/IMPLEMENTATION_NOTES.md). |
-| BFG order-parameter post-processing | ✓ | ✓ | — | `compute_bfg_order_parameters[_gpu]` binaries; Python `quantum_ed.bfg.*`. |
-| Lattice + Hamiltonian construction (`ed_input` / `quantum_ed.input`) | ✓ | n/a | n/a | `include/ed/input/input.h`; full Python parity. |
+| BFG order-parameter post-processing | ✓ | ✓ | — | `compute_bfg_order_parameters[_gpu]` binaries; Python `qed.bfg.*`. |
+| Lattice + Hamiltonian construction (`ed_input` / `qed.input`) | ✓ | n/a | n/a | `include/ed/input/input.h`; full Python parity. |
 | NLCE driver | ✓ | ✓ | — | Orchestrates `./ED`; the inner solver picks its own backend. |
 
 ---

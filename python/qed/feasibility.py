@@ -1,5 +1,5 @@
 # =============================================================================
-# python/quantum_ed/feasibility.py    (Phase 9 / Layer 6)
+# python/qed/feasibility.py    (Phase 9 / Layer 6)
 #
 # Pre-flight planner for `qed.diag` / `qed.find_symmetries` /
 # `qed.mpi.run_distributed`.
@@ -92,9 +92,9 @@ class HostResources:
         Best guess at number of MPI ranks the user could launch on this
         host (defaults to logical CPU count if no scheduler hints).
     has_cuda_build : bool
-        ``quantum_ed._core.has_cuda_build()``.
+        ``qed._core.has_cuda_build()``.
     has_mpi_build : bool
-        ``quantum_ed._core.has_mpi_build()``.
+        ``qed._core.has_mpi_build()``.
     has_nccl_build : bool
         Whether the C++ side was built with NCCL (multi-GPU collectives).
     notes : list[str]
@@ -732,7 +732,7 @@ def estimate_resources(
 ) -> FeasibilityReport:
     """Plan one (solver, device, basis, n_ranks) combination.
 
-    Parameters mirror :func:`quantum_ed.diag` so the planner can be
+    Parameters mirror :func:`qed.diag` so the planner can be
     invoked with the same kwargs the user is about to dispatch with.
     Returns a :class:`FeasibilityReport`. Does **not** raise on
     infeasibility; the caller decides whether to abort or proceed.

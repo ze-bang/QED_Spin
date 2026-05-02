@@ -2,7 +2,7 @@
 
 The C++ side is covered by ``tests/unit/test_symmetry_dsl.cpp`` and the
 ``Catch2`` ctest suite. This module checks the *bridge*: that the helpers are
-reachable from ``quantum_ed.symmetry``, that the dictionary returned by the
+reachable from ``qed.symmetry``, that the dictionary returned by the
 group builders has the same shape as the legacy
 ``SymmetryGroupInfo::loadFromDirectory`` output, and that the permutation
 algebra matches the C++ semantics (``(a o b)[i] = a[b[i]]``).
@@ -17,8 +17,8 @@ import math
 
 import pytest
 
-quantum_ed = pytest.importorskip("quantum_ed")
-sym = quantum_ed.symmetry
+qed = pytest.importorskip("qed")
+sym = qed.symmetry
 
 
 # ---------------------------------------------------------------------------

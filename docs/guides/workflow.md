@@ -1,7 +1,7 @@
 # Stress-free workflow (`qed.diag` + `qed.find_symmetries`)
 
 This page documents the recommended Python entry point for new code:
-the unified `quantum_ed.workflow` API. It collapses the
+the unified `qed.workflow` API. It collapses the
 "build → discover symmetries → pick sector → diagonalise" pipeline into
 two function calls (`find_symmetries` and `diag`) with smart defaults
 that match what an experienced ED user would tune by hand.
@@ -17,7 +17,7 @@ how much knob-twiddling you want to do yourself.
 ## TL;DR
 
 ```python
-import quantum_ed as qed
+import qed as qed
 
 # 1. Build a Hamiltonian.
 N = 12
@@ -65,8 +65,8 @@ for you.
 
 ## Step 1 — Build the Hamiltonian
 
-`quantum_ed.input.HamiltonianBuilder` is the fluent C++-backed builder
-(see `python/quantum_ed/input.py`). The same model can also be loaded
+`qed.input.HamiltonianBuilder` is the fluent C++-backed builder
+(see `python/qed/input.py`). The same model can also be loaded
 from disk (`Operator()` + `op.load_inter_all` / `op.load_trans`) or
 constructed by hand with `op.add_one_body` / `add_two_body` /
 `add_three_body`. All three paths land in the same `Operator`
@@ -238,7 +238,7 @@ qed.diag(H,
   enum value (`qed.DiagonalizationMethod.LOBPCG`, etc.) or its string
   name to override.
 * **Device.** `device=None` uses GPU iff
-  `quantum_ed.has_cuda_build()` is true and the matrix is large
+  `qed.has_cuda_build()` is true and the matrix is large
   enough for cuSPARSE matvec to amortize H2D / D2H (rule of thumb:
   dim ≥ 2¹⁴). Pass `"cpu"` / `"gpu"` to force a backend.
   `"mpi"` and `"mpi_gpu"` are also accepted: the workflow writes
@@ -669,7 +669,7 @@ container limits), use `force=True` and trust the scheduler.
 | CPU RAM | `psutil.virtual_memory().total` -> `/proc/meminfo` -> 16 GB default | `QED_HOST_MEMORY_GB` |
 | GPU VRAM | `nvidia-smi --query-gpu=memory.total` (smallest visible device) | `QED_HOST_GPU_MEMORY_GB`, `QED_HOST_N_GPUS` |
 | MPI ranks | `SLURM_NTASKS` -> `PBS_NP` -> `OMPI_COMM_WORLD_SIZE` -> CPU count | `QED_HOST_N_MPI_RANKS` |
-| build flags | `quantum_ed._core.has_{cuda,mpi,nccl}_build()` | (rebuild) |
+| build flags | `qed._core.has_{cuda,mpi,nccl}_build()` | (rebuild) |
 
 ---
 
@@ -968,7 +968,7 @@ set `N=32`, use `sz=16`, and keep symmetry projection on.
 
 ```python
 import numpy as np
-import quantum_ed as qed
+import qed as qed
 
 N = 12
 b = qed.input.HamiltonianBuilder(num_sites=N)
@@ -1113,7 +1113,7 @@ For the distributed variant, switch to `solver="cTPQ"` and
 | ask "would this fit on this host?" without running       | `qed.diag(H, …, dry_run=True)` |
 | inspect what the auto-pilot decided                      | `qed.diag(H, …, verbose=True)` (default) |
 | force a kernel through despite an `INFEASIBLE` verdict   | `qed.diag(H, …, force=True)` |
-| chain low-level kernels yourself (Lanczos → CG → …)      | the dedicated solver modules in `quantum_ed.*` (see `python_advanced.md`) |
+| chain low-level kernels yourself (Lanczos → CG → …)      | the dedicated solver modules in `qed.*` (see `python_advanced.md`) |
 
 
 ---
@@ -1121,7 +1121,7 @@ For the distributed variant, switch to `solver="cTPQ"` and
 ## DSSF / SSSF — `qed.dssf.compute` auto-pilot + low-level overrides
 
 Spectral / structure-factor calculations have their own one-call
-auto-pilot, [`qed.dssf.compute`](../../python/quantum_ed/dssf.py). It
+auto-pilot, [`qed.dssf.compute`](../../python/qed/dssf.py). It
 mirrors `qed.diag` exactly: pass a directory + the axes you want, and
 the wrapper picks the right kernel.
 
@@ -1143,7 +1143,7 @@ Bad tokens are rejected up-front with a helpful list.
 ### Common path — auto-pilot
 
 ```python
-import numpy as np, quantum_ed as qed
+import numpy as np, qed as qed
 
 # directory must contain a full ED deck (InterAll.dat, Trans.dat,
 # positions.dat/lattice files) and must be compatible with your local

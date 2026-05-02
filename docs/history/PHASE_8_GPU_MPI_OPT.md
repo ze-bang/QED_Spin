@@ -20,7 +20,7 @@ passing.
 
 ## Tier A — high-impact, low-invasiveness
 
-### 1. Python `quantum_ed.mpi.run_distributed` argv mismatch (`a-mpi-py`)
+### 1. Python `qed.mpi.run_distributed` argv mismatch (`a-mpi-py`)
 
 `run_distributed` was emitting CLI arguments that no longer matched
 `ed_distributed_main`'s parser (the hyphenated `--mode` form had moved

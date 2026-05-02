@@ -1,16 +1,16 @@
-"""Phase 5 (Apr 2026) tests for the new ``quantum_ed`` dispatcher surface.
+"""Phase 5 (Apr 2026) tests for the new ``qed`` dispatcher surface.
 
 These tests validate that:
 
-1. ``quantum_ed.exact_diagonalization_core`` reaches every CPU iterative,
+1. ``qed.exact_diagonalization_core`` reaches every CPU iterative,
    thermal, and dense backend the C++ ``./ED`` CLI exposes -- proven by
    running each method on a 6-site Heisenberg chain and checking that the
    ground state matches the reference value to 1e-6.
-2. ``quantum_ed.has_cuda_build`` / ``has_mpi_build`` /
+2. ``qed.has_cuda_build`` / ``has_mpi_build`` /
    ``has_scalapack_build`` return well-typed booleans matching the build
    the wheel was compiled against.
 3. ``Operator.set_symmetry_info_from_dict`` round-trips with
-   ``quantum_ed.symmetry.group_from_generators`` so callers can attach
+   ``qed.symmetry.group_from_generators`` so callers can attach
    in-process symmetry info without going through automorphism_results/.
 4. The ``DiagonalizationMethod`` enum matches the C++ enum value-by-value.
 5. ``EDParameters`` round-trips its core fields and works as a default
@@ -31,7 +31,7 @@ import shutil
 import numpy as np
 import pytest
 
-quantum_ed = pytest.importorskip("quantum_ed")
+qed = pytest.importorskip("qed")
 
 # Single-site coupling J=1 antiferromagnetic chain with 6 spins, periodic
 # boundary conditions: ground state E0 = -2.8027756377319946 (Bethe ansatz).
@@ -41,14 +41,14 @@ GROUND_STATE_ENERGY = -2.8027756377319946
 
 def _build_heisenberg_ring(num_sites: int = N_SITES):
     """Build the matrix-free spin-1/2 Heisenberg chain operator."""
-    op = quantum_ed.Operator(num_sites=num_sites, spin=0.5)
+    op = qed.Operator(num_sites=num_sites, spin=0.5)
     for i in range(num_sites):
         j = (i + 1) % num_sites
         # SzSz
-        op.add_two_body(quantum_ed.OP_SZ, i, quantum_ed.OP_SZ, j, 1.0 + 0.0j)
+        op.add_two_body(qed.OP_SZ, i, qed.OP_SZ, j, 1.0 + 0.0j)
         # 0.5 * (S+S- + S-S+)
-        op.add_two_body(quantum_ed.OP_SPLUS, i, quantum_ed.OP_SMINUS, j, 0.5 + 0.0j)
-        op.add_two_body(quantum_ed.OP_SMINUS, i, quantum_ed.OP_SPLUS, j, 0.5 + 0.0j)
+        op.add_two_body(qed.OP_SPLUS, i, qed.OP_SMINUS, j, 0.5 + 0.0j)
+        op.add_two_body(qed.OP_SMINUS, i, qed.OP_SPLUS, j, 0.5 + 0.0j)
     return op
 
 
@@ -58,14 +58,14 @@ def _build_heisenberg_ring(num_sites: int = N_SITES):
 
 
 def test_build_introspection_returns_bools():
-    assert isinstance(quantum_ed.has_cuda_build(), bool)
-    assert isinstance(quantum_ed.has_mpi_build(), bool)
-    assert isinstance(quantum_ed.has_scalapack_build(), bool)
+    assert isinstance(qed.has_cuda_build(), bool)
+    assert isinstance(qed.has_mpi_build(), bool)
+    assert isinstance(qed.has_scalapack_build(), bool)
 
 
 def test_build_introspection_consistency():
-    if quantum_ed.has_scalapack_build():
-        assert quantum_ed.has_mpi_build(), (
+    if qed.has_scalapack_build():
+        assert qed.has_mpi_build(), (
             "ScaLAPACK requires MPI; the build flags are inconsistent."
         )
 
@@ -76,7 +76,7 @@ def test_build_introspection_consistency():
 
 
 def test_diagonalization_method_enum_has_canonical_values():
-    DM = quantum_ed.DiagonalizationMethod
+    DM = qed.DiagonalizationMethod
     # Sample a representative subset across CPU / dense / thermal / GPU groups.
     expected = {
         "LANCZOS",
@@ -104,7 +104,7 @@ def test_diagonalization_method_enum_has_canonical_values():
 
 
 def test_ed_parameters_defaults_and_round_trip():
-    p = quantum_ed.EDParameters()
+    p = qed.EDParameters()
     assert p.num_eigenvalues == 1
     assert p.tolerance > 0
     assert p.use_fixed_sz is False
@@ -125,7 +125,7 @@ def test_scalapack_block_size_auto_default_and_override():
     attribute so users opting in to the auto path don't accidentally
     have their explicit block size silently ignored.
     """
-    p = quantum_ed.EDParameters()
+    p = qed.EDParameters()
     # Default: auto on, legacy block size kept for the !auto branch.
     assert p.scalapack_block_size_auto is True
     assert p.scalapack_block_size == 64
@@ -162,14 +162,14 @@ def test_scalapack_block_size_auto_default_and_override():
 )
 def test_cpu_dispatcher_recovers_ground_state(method_name, extra_setup):
     op = _build_heisenberg_ring()
-    method = getattr(quantum_ed.DiagonalizationMethod, method_name)
-    params = quantum_ed.EDParameters()
+    method = getattr(qed.DiagonalizationMethod, method_name)
+    params = qed.EDParameters()
     params.num_eigenvalues = 1
     params.max_iterations = 200
     params.tolerance = 1e-12
     if extra_setup == "block":
         params.block_size = 2
-    res = quantum_ed.exact_diagonalization_core(op, method, params)
+    res = qed.exact_diagonalization_core(op, method, params)
     assert len(res.eigenvalues) >= 1
     e0 = min(res.eigenvalues)
     assert abs(e0 - GROUND_STATE_ENERGY) < 1e-5, (
@@ -180,12 +180,12 @@ def test_cpu_dispatcher_recovers_ground_state(method_name, extra_setup):
 def test_arpack_lm_recovers_largest_eigenvalue():
     """ARPACK_LM targets the largest-magnitude eigenvalue (= +1.5 for the chain)."""
     op = _build_heisenberg_ring()
-    params = quantum_ed.EDParameters()
+    params = qed.EDParameters()
     params.num_eigenvalues = 1
     params.max_iterations = 200
     params.tolerance = 1e-12
-    res = quantum_ed.exact_diagonalization_core(
-        op, quantum_ed.DiagonalizationMethod.ARPACK_LM, params
+    res = qed.exact_diagonalization_core(
+        op, qed.DiagonalizationMethod.ARPACK_LM, params
     )
     assert len(res.eigenvalues) >= 1
     # Heisenberg-ring spectrum is bounded by |E| <= N*S^2*4 = 1.5 for N=6, S=1/2.
@@ -196,10 +196,10 @@ def test_arpack_lm_recovers_largest_eigenvalue():
 def test_full_dispatcher_recovers_full_spectrum():
     """LAPACK FULL diag should give the same set as the matrix-free apply path."""
     op = _build_heisenberg_ring(num_sites=4)  # smaller dim 16 to keep test fast
-    params = quantum_ed.EDParameters()
+    params = qed.EDParameters()
     params.num_eigenvalues = 16
-    res = quantum_ed.exact_diagonalization_core(
-        op, quantum_ed.DiagonalizationMethod.FULL, params
+    res = qed.exact_diagonalization_core(
+        op, qed.DiagonalizationMethod.FULL, params
     )
     eigs = sorted(res.eigenvalues)
     assert len(eigs) == 16
@@ -216,20 +216,20 @@ def test_full_dispatcher_recovers_full_spectrum():
 
 def test_fixed_sz_dispatcher_recovers_ground_state():
     """At total Sz=0 (n_up=N/2) the chain ground state lives in this sector."""
-    fop = quantum_ed.FixedSzOperator(num_sites=N_SITES, n_up=N_SITES // 2, spin=0.5)
+    fop = qed.FixedSzOperator(num_sites=N_SITES, n_up=N_SITES // 2, spin=0.5)
     # Build the same Heisenberg Hamiltonian on the FixedSzOperator (which
     # inherits the Operator builder methods).
     for i in range(N_SITES):
         j = (i + 1) % N_SITES
-        fop.add_two_body(quantum_ed.OP_SZ, i, quantum_ed.OP_SZ, j, 1.0 + 0.0j)
-        fop.add_two_body(quantum_ed.OP_SPLUS, i, quantum_ed.OP_SMINUS, j, 0.5 + 0.0j)
-        fop.add_two_body(quantum_ed.OP_SMINUS, i, quantum_ed.OP_SPLUS, j, 0.5 + 0.0j)
-    params = quantum_ed.EDParameters()
+        fop.add_two_body(qed.OP_SZ, i, qed.OP_SZ, j, 1.0 + 0.0j)
+        fop.add_two_body(qed.OP_SPLUS, i, qed.OP_SMINUS, j, 0.5 + 0.0j)
+        fop.add_two_body(qed.OP_SMINUS, i, qed.OP_SPLUS, j, 0.5 + 0.0j)
+    params = qed.EDParameters()
     params.num_eigenvalues = 1
     params.max_iterations = 200
     params.tolerance = 1e-12
-    res = quantum_ed.exact_diagonalization_core(
-        fop, quantum_ed.DiagonalizationMethod.LANCZOS, params
+    res = qed.exact_diagonalization_core(
+        fop, qed.DiagonalizationMethod.LANCZOS, params
     )
     e0 = min(res.eigenvalues)
     assert abs(e0 - GROUND_STATE_ENERGY) < 1e-5
@@ -241,10 +241,10 @@ def test_fixed_sz_dispatcher_recovers_ground_state():
 
 
 def test_symmetry_info_round_trip_via_dict():
-    g = quantum_ed.symmetry.translation(N_SITES, 1)
-    info = quantum_ed.symmetry.group_from_generators(N_SITES, [g])
+    g = qed.symmetry.translation(N_SITES, 1)
+    info = qed.symmetry.group_from_generators(N_SITES, [g])
 
-    op = quantum_ed.Operator(num_sites=N_SITES, spin=0.5)
+    op = qed.Operator(num_sites=N_SITES, spin=0.5)
     # Initially empty.
     empty = op.get_symmetry_info_as_dict()
     assert empty["num_generators"] == 0
@@ -260,7 +260,7 @@ def test_symmetry_info_round_trip_via_dict():
     assert len(out["sectors"]) == len(info["sectors"])
 
     # Same setter / getter are also available on FixedSzOperator.
-    fop = quantum_ed.FixedSzOperator(num_sites=N_SITES, n_up=N_SITES // 2, spin=0.5)
+    fop = qed.FixedSzOperator(num_sites=N_SITES, n_up=N_SITES // 2, spin=0.5)
     fop.set_symmetry_info_from_dict(info)
     out2 = fop.get_symmetry_info_as_dict()
     assert out2["num_generators"] == info["num_generators"]
@@ -274,7 +274,7 @@ def test_symmetry_info_round_trip_via_dict():
 
 def test_dssf_run_from_directory_validates_inputs(tmp_path):
     with pytest.raises(FileNotFoundError):
-        quantum_ed.dssf.run_from_directory(
+        qed.dssf.run_from_directory(
             directory=str(tmp_path / "does-not-exist"),
             method="dynamical_thermal",
             ed_binary="/definitely/not/a/path/to/ED",
@@ -288,7 +288,7 @@ def test_dssf_run_from_directory_validates_inputs(tmp_path):
 
 def test_mpi_run_distributed_rejects_unknown_method(tmp_path):
     with pytest.raises(ValueError, match="not in"):
-        quantum_ed.mpi.run_distributed(
+        qed.mpi.run_distributed(
             directory=str(tmp_path),
             method="not-a-real-method",
             n_ranks=1,
@@ -302,7 +302,7 @@ def test_mpi_run_distributed_directory_kwarg_is_deprecated():
     if shutil.which("ed_distributed_main") is None or shutil.which("mpiexec") is None:
         pytest.skip("ed_distributed_main / mpiexec not on PATH")
     with pytest.warns(DeprecationWarning, match="directory"):
-        quantum_ed.mpi.run_distributed(
+        qed.mpi.run_distributed(
             directory="/definitely/not/a/dir",
             method="lanczos",
             n_ranks=1,

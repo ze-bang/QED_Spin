@@ -22,7 +22,7 @@ HERE = Path(__file__).resolve().parent
 REPO_ROOT = HERE.parent
 
 # Make the python/ tree importable so autodoc can pull docstrings from
-# quantum_ed.* without the user having to `pip install` the project first.
+# qed.* without the user having to `pip install` the project first.
 sys.path.insert(0, str(REPO_ROOT / "python"))
 
 # -- Project information -----------------------------------------------------
@@ -86,7 +86,7 @@ autoclass_content = "both"
 
 # Avoid hard import failures during a docs-only build (e.g. when the
 # pybind11 _core extension hasn't been compiled yet).
-autodoc_mock_imports = ["quantum_ed._core", "h5py", "numpy"]
+autodoc_mock_imports = ["qed._core", "h5py", "numpy"]
 
 # -- intersphinx -------------------------------------------------------------
 

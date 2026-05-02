@@ -12,8 +12,8 @@ import math
 
 import pytest
 
-import quantum_ed as qed
-from quantum_ed import feasibility as fea
+import qed as qed
+from qed import feasibility as fea
 
 
 # ---------------------------------------------------------------------------

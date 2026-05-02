@@ -17,7 +17,7 @@
 //     * The C++ CLI: `ED dssf <method> ...` (src/apps/ed_main.cpp).
 //     * The C++ CLI: legacy `--dynamical-response` / `--static-response` /
 //       `--ground-state-dssf` flags (src/apps/ed_main.cpp).
-//     * The Python bindings: `quantum_ed.dssf.run(...)` (P2.8).
+//     * The Python bindings: `qed.dssf.run(...)` (P2.8).
 //
 // Historical context (archived; do not regress):
 //   Before P2.14 the codebase carried *two* DSSF entry points: this seam

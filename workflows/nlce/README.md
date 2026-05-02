@@ -265,6 +265,6 @@ continue to work without changes.
 
 * `workflows/nlce/analysis/` — resummation diagnostics, NLCE fits,
   convergence estimators.
-* `python/quantum_ed/` — in-process ED Python bindings (no
+* `python/qed/` — in-process ED Python bindings (no
   subprocess overhead) for prototyping new observables.
 * `docs/history/MODERNIZATION_AUDIT.md` — historical rollout log.

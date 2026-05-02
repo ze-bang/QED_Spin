@@ -1,4 +1,4 @@
-"""Phase 7 tests for ``quantum_ed.canonicalize_method`` and the
+"""Phase 7 tests for ``qed.canonicalize_method`` and the
 ``EDParameters`` flag triple ``(use_fixed_sz, use_gpu, use_mpi)``.
 
 The canonical surface for picking a solver is
@@ -7,7 +7,7 @@ The canonical surface for picking a solver is
 
 Algorithm choice is the ``DiagonalizationMethod`` enum; the device (CPU vs
 GPU), parallelism (single-process vs MPI), and basis (full vs fixed-Sz)
-axes are flags on :class:`quantum_ed.EDParameters`. The legacy ``_GPU`` /
+axes are flags on :class:`qed.EDParameters`. The legacy ``_GPU`` /
 ``_CUDA`` / ``_MPI`` / ``_FIXED_SZ`` enum variants are kept for backwards
 compatibility (HDF5 metadata, pre-Phase-7 user code) but are collapsed
 onto the canonical (base, flags) tuple at the dispatcher entry point.
@@ -19,10 +19,10 @@ from __future__ import annotations
 
 import pytest
 
-quantum_ed = pytest.importorskip("quantum_ed")
+qed = pytest.importorskip("qed")
 
-M = quantum_ed.DiagonalizationMethod
-canon = quantum_ed.canonicalize_method
+M = qed.DiagonalizationMethod
+canon = qed.canonicalize_method
 
 
 def _tup(d):
@@ -173,7 +173,7 @@ def test_canonicalize_is_idempotent(method):
 # ---------------------------------------------------------------------------
 
 def test_ed_parameters_exposes_phase7_flags():
-    params = quantum_ed.EDParameters()
+    params = qed.EDParameters()
     # Defaults are all False.
     assert params.use_gpu is False
     assert params.use_mpi is False
@@ -201,7 +201,7 @@ def test_ed_parameters_exposes_phase7_flags():
 # ``tests/python/test_streaming_symmetry.py``.
 
 def test_ed_parameters_exposes_use_symmetry_flag():
-    params = quantum_ed.EDParameters()
+    params = qed.EDParameters()
 
     # Default: full Hilbert space (no symmetry projection).
     assert params.use_symmetry is False
@@ -245,15 +245,15 @@ def test_deprecated_symmetrized_bindings_were_removed():
     # ``params.use_symmetry = True`` (and optionally
     # ``params.use_fixed_sz = True`` + ``params.n_up = ...``).
     assert not hasattr(
-        quantum_ed, "exact_diagonalization_from_directory_symmetrized"
+        qed, "exact_diagonalization_from_directory_symmetrized"
     )
     assert not hasattr(
-        quantum_ed, "exact_diagonalization_fixed_sz_symmetrized"
+        qed, "exact_diagonalization_fixed_sz_symmetrized"
     )
     # The canonical entry point still exists.
-    assert hasattr(quantum_ed, "exact_diagonalization_from_directory")
+    assert hasattr(qed, "exact_diagonalization_from_directory")
     # The streaming primitives remain reachable for power users.
-    assert hasattr(quantum_ed, "exact_diagonalization_streaming_symmetry")
+    assert hasattr(qed, "exact_diagonalization_streaming_symmetry")
     assert hasattr(
-        quantum_ed, "exact_diagonalization_streaming_symmetry_fixed_sz"
+        qed, "exact_diagonalization_streaming_symmetry_fixed_sz"
     )

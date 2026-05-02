@@ -1,7 +1,7 @@
-"""Tests for the standalone ``quantum_ed.input`` C++ library bindings.
+"""Tests for the standalone ``qed.input`` C++ library bindings.
 
 Cross-checks the new ``HamiltonianBuilder`` against the legacy Python
-``quantum_ed.hamiltonian.Hamiltonian`` DSL and against
+``qed.hamiltonian.Hamiltonian`` DSL and against
 ``Operator.load_trans`` / ``Operator.load_inter_all`` round-trips for a
 handful of textbook lattices.
 """
@@ -14,8 +14,8 @@ import tempfile
 import numpy as np
 import pytest
 
-quantum_ed = pytest.importorskip("quantum_ed")
-qinput = quantum_ed.input
+qed = pytest.importorskip("qed")
+qinput = qed.input
 lattice = qinput.lattice
 
 
@@ -71,7 +71,7 @@ def test_from_neighbor_lists_roundtrip():
 # ----------------------------------------------------------------------
 
 def _ground_state(op):
-    return float(np.asarray(quantum_ed.full_diagonalization(op)).min())
+    return float(np.asarray(qed.full_diagonalization(op)).min())
 
 
 def test_heisenberg_chain_4_matches_python_dsl():
@@ -79,7 +79,7 @@ def test_heisenberg_chain_4_matches_python_dsl():
     H_cpp = (qinput.HamiltonianBuilder(4)
                   .heisenberg(bonds, 1.0)
                   .to_operator())
-    H_py = (quantum_ed.hamiltonian.Hamiltonian(4)
+    H_py = (qed.hamiltonian.Hamiltonian(4)
                       .heisenberg(bonds, 1.0)
                       .build())
     assert np.isclose(_ground_state(H_cpp), _ground_state(H_py), atol=1e-12)
@@ -121,7 +121,7 @@ def test_write_directory_roundtrip_matches_in_memory():
         assert os.path.exists(os.path.join(td, "InterAll.dat"))
         assert os.path.exists(os.path.join(td, "positions.dat"))
 
-        op_loaded = quantum_ed.Operator(lat.num_sites)
+        op_loaded = qed.Operator(lat.num_sites)
         op_loaded.load_trans(os.path.join(td, "Trans.dat"))
         op_loaded.load_inter_all(os.path.join(td, "InterAll.dat"))
 
@@ -155,6 +155,6 @@ def test_low_level_add_one_body():
                .add_one_body(qinput.Op.Sz, 0, 1.0)
                .add_one_body(qinput.Op.Sz, 1, 1.0)
                .to_operator())
-    eigs = sorted(np.real(quantum_ed.full_diagonalization(H)))
+    eigs = sorted(np.real(qed.full_diagonalization(H)))
     # Sz_0 + Sz_1 has eigenvalues -1, 0, 0, 1.
     assert np.allclose(eigs, [-1.0, 0.0, 0.0, 1.0], atol=1e-12)

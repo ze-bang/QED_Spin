@@ -28,7 +28,7 @@ from __future__ import annotations
 
 import sys
 
-import quantum_ed as qed
+import qed as qed
 
 
 def main() -> int:

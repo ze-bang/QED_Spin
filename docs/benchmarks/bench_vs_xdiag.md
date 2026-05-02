@@ -2,7 +2,7 @@
 orphan: true
 ---
 
-# Head-to-head: `quantum_ed` vs `XDiag`
+# Head-to-head: `qed` vs `XDiag`
 
 This document compares this project against
 [**XDiag**](https://github.com/awietek/XDiag.jl) (Wietek et al.,
@@ -16,7 +16,7 @@ ED workflow lives or dies by:
 
   * a single **matrix-vector product** `H @ v` on a unit-norm vector;
   * a full **ground-state Lanczos** to numerical convergence
-    (`tol = 1e-10` for `quantum_ed`, library default for XDiag).
+    (`tol = 1e-10` for `qed`, library default for XDiag).
 
 The full reproducer is checked in:
 
@@ -59,7 +59,7 @@ PYTHONPATH=python python3 benchmarks/bench_vs_xdiag.py \
 ## Headlines
 
 A reference run on a 16-thread x86_64 workstation (WSL2, Ubuntu, gcc-13,
-OpenBLAS, Julia 1.12.5, XDiag 0.4.x). The `quantum_ed` column uses
+OpenBLAS, Julia 1.12.5, XDiag 0.4.x). The `qed` column uses
 `lanczos()` with default `output_dir` (HDF5 **off**; real Heisenberg
 operators take the `lanczos_real` fast path — see
 [`CHANGELOG.md`](../../CHANGELOG.md) Phase 6 notes).
@@ -71,7 +71,7 @@ operators take the `lanczos_real` fast path — see
 * **Matrix-free `Operator.apply` is order-of-magnitude faster than a
   standalone XDiag `apply` micro-call** in this bench (XDiag reuses
   `State` inside `eigval0`; see [Caveats](#caveats)).
-* **Ground-state Lanczos (`quantum_ed.lanczos` vs `XDiag.eigval0`)**:
+* **Ground-state Lanczos (`qed.lanczos` vs `XDiag.eigval0`)**:
   on this sweep we are faster in **both** the full Hilbert space and
   the Sz=0 sector — from a few x at `N=12` up to **~30–65x** in the
   mid-range and **~2–11x** at `N=20` (full vs Sz=0 respectively), on
@@ -89,7 +89,7 @@ The full numbers are below.
 `threads = 16`, `J = 1`, periodic boundary conditions, no Sz
 conservation. Per-call SpMV and full ground-state Lanczos. The
 `E0 (xdiag)` column is XDiag's ground-state energy (also recovered by
-`quantum_ed` to within `~1e-12`).
+`qed` to within `~1e-12`).
 
 | N  | dim       | qed apply | XDiag apply | qed lanczos | XDiag lanczos | speedup (lanczos) |  E0 (XDiag)              |
 |---:|----------:|----------:|------------:|------------:|--------------:|------------------:|--------------------------|
@@ -99,7 +99,7 @@ conservation. Per-call SpMV and full ground-state Lanczos. The
 | 18 |   262 144 |   6.6 ms  |     9.1 ms  |    23.8 ms  |    709.9 ms  |           29.8x  |  -8.022 749 087 030 387  |
 | 20 | 1 048 576 |  10.8 ms  |    30.7 ms  |   233.1 ms  |      2.54 s  |           10.9x  |  -8.904 386 529 872 813  |
 
-The `qed lanczos` column uses `quantum_ed.lanczos` (the local
+The `qed lanczos` column uses `qed.lanczos` (the local
 three-vector reorth path that backs the Phase 5 `LANCZOS` dispatcher
 method). The `XDiag lanczos` column uses `XDiag.eigval0` -- XDiag's
 canonical ground-state Lanczos.
@@ -133,7 +133,7 @@ for in its 2025 paper.
   `XDiag lanczos / iters`. The Lanczos column is the apples-to-apples
   comparison; the SpMV column is provided only for completeness.
 
-* **Numerical convergence behaviour.** `quantum_ed.lanczos` uses a
+* **Numerical convergence behaviour.** `qed.lanczos` uses a
   relative stop (`tol = 1e-10`); real Heisenberg models use
   `lanczos_real`. `XDiag.eigval0` uses XDiag's own criterion. Energies
   agree to high precision (see the `E0` column).
@@ -145,7 +145,7 @@ for in its 2025 paper.
   this applies uniformly to every Python solver wrapper
   (`lanczos`, `full_diagonalization`, `finite_temperature_lanczos`,
   `low_temperature_lanczos`, `hybrid_thermal_method`), the high-level
-  dispatcher `quantum_ed.exact_diagonalization_core(op, method,
+  dispatcher `qed.exact_diagonalization_core(op, method,
   EDParameters())` (which now remaps an empty `params.output_dir` to
   `"/dev/null"` before fanning out to any backend), and every C++
   HDF5 helper (`HDF5IO::createOrOpenFile`, `saveEigenvalues`,

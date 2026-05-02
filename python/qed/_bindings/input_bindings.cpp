@@ -1,9 +1,9 @@
 // =============================================================================
-// python/quantum_ed/_bindings/input_bindings.cpp
+// python/qed/_bindings/input_bindings.cpp
 //
 // pybind11 bindings for the standalone `ed::input` C++ library.
 //
-// Surface mounted under `quantum_ed._core.input`:
+// Surface mounted under `qed._core.input`:
 //
 //   * Op enum                     - Sp, Sm, Sz with integer values 0/1/2.
 //   * Bond / Plaquette structs    - lightweight POD records.
@@ -23,13 +23,13 @@
 //                                   `two_body_correlations**.dat` /
 //                                   momentum-projected observable writers.
 //
-// `HamiltonianBuilder.to_operator()` returns a `quantum_ed.Operator`, the
+// `HamiltonianBuilder.to_operator()` returns a `qed.Operator`, the
 // same Python class produced by `Operator(num_sites)` -- so users can drop
 // the result straight into `lanczos`, `full_diagonalization`,
 // `finite_temperature_lanczos`, etc.
 //
-// The Python-side facade in `python/quantum_ed/input.py` re-exports this
-// submodule under `quantum_ed.input`.
+// The Python-side facade in `python/qed/input.py` re-exports this
+// submodule under `qed.input`.
 // =============================================================================
 
 #include "input_bindings.h"
@@ -176,14 +176,14 @@ void bind_input(py::module_& parent) {
         .def("nnnn_pairs", &Lattice::nnnn_pairs)
         .def("all_sites", &Lattice::all_sites)
         .def("__repr__", [](const Lattice& L) {
-            return "<quantum_ed.input.Lattice " + L.label +
+            return "<qed.input.Lattice " + L.label +
                    " num_sites=" + std::to_string(L.num_sites) +
                    " nn_bonds=" + std::to_string(L.nn_bonds.size()) + ">";
         });
 
     // ---------------------------------------------------------------------
     // Lattice factory functions: mirror the C++ namespace ed::input::lattice
-    // under quantum_ed.input.lattice.
+    // under qed.input.lattice.
     // ---------------------------------------------------------------------
     py::module_ ml = m.def_submodule(
         "lattice",
@@ -234,7 +234,7 @@ void bind_input(py::module_& parent) {
         Fluent C++-backed Hamiltonian builder.
 
         Accumulates one-/two-/three-body terms in the canonical (S+, S-, Sz)
-        basis used by `quantum_ed.Operator`. Materialise the result via
+        basis used by `qed.Operator`. Materialise the result via
         :meth:`to_operator` (in-memory, no file I/O) or :meth:`write_directory`
         (legacy `InterAll.dat` / `Trans.dat` / `ThreeBodyG.dat` /
         `positions.dat` files consumed by the production `./ED` driver).
@@ -373,7 +373,7 @@ void bind_input(py::module_& parent) {
         // Output paths ---------------------------------------------------
         // `to_operator()` returns a freshly-allocated unique-owned Operator
         // (matching the default pybind11 holder for the `Operator` class
-        // bound in quantum_ed_bindings.cpp). The C++ API returns a
+        // bound in qed_bindings.cpp). The C++ API returns a
         // shared_ptr; we copy-construct into a unique_ptr so Python takes
         // sole ownership and there is no shared_ptr/unique_ptr holder
         // conflict.
@@ -385,7 +385,7 @@ void bind_input(py::module_& parent) {
                  self.emit_into(*op);
                  return op;
              },
-             "Materialise into an in-memory `quantum_ed.Operator`. No file I/O.")
+             "Materialise into an in-memory `qed.Operator`. No file I/O.")
         .def("emit_into",
              [](const HamiltonianBuilder& self, Operator& op) {
                  self.emit_into(op);

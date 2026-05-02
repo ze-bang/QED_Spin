@@ -18,7 +18,7 @@ into your own working directory, and edit the constants at the top.
 | [`06_mpi_distributed_eigenvectors.cpp`](./06_mpi_distributed_eigenvectors.cpp) | Distributed Ritz vectors via `distributed_lanczos_eigenvectors`; assembles the global `\|psi_0>` and checks `\|H psi - E psi\|` | MPI |
 | [`07_mpi_distributed_ftlm.cpp`](./07_mpi_distributed_ftlm.cpp) | MPI-over-samples J&P FTLM: `Z(β)` and `<H>(β)` against exact thermal energy | MPI |
 | [`08_mpi_distributed_tpq.cpp`](./08_mpi_distributed_tpq.cpp) | Distributed canonical TPQ: Taylor-truncated imaginary-time evolution + `<H>(β)` measurement | MPI |
-| [`09_python_quickstart.py`](./09_python_quickstart.py) | The same 4-site Heisenberg ground state via the `quantum_ed` Python bindings | Python (CPU) |
+| [`09_python_quickstart.py`](./09_python_quickstart.py) | The same 4-site Heisenberg ground state via the `qed` Python bindings | Python (CPU) |
 | [`10_python_dssf.py`](./10_python_dssf.py) | Dynamical structure factor `S(q,ω)` at T=0 on an 8-site chain | Python (CPU) |
 | [`11_cli_thermo.sh`](./11_cli_thermo.sh) | One-line CLI invocation of `./ED` for a 12-site Heisenberg thermodynamic sweep | CLI |
 | [`12_cli_dssf.sh`](./12_cli_dssf.sh) | One-line CLI invocation of `./ED dssf dynamical_thermal` for finite-T DSSF | CLI |

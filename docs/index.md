@@ -9,7 +9,7 @@ spin-1/2 Hamiltonians, with first-class support for:
   sublattice resolution;
 - Symmetry sectors (translation, point-group, fixed-Sz);
 - HDF5 I/O for eigenvectors, thermodynamic observables, and DSSF traces;
-- A first-class **Python interface** (`quantum_ed`) built via `pybind11` +
+- A first-class **Python interface** (`qed`) built via `pybind11` +
   `scikit-build-core`, plus a compatibility shim for the legacy `edlib`
   package.
 
@@ -57,7 +57,7 @@ needing institutional knowledge:
   pytest, and CUDA build-only.
 - **Python bindings** that expose the high-value entry points
   (`Operator`, `FixedSzOperator`, `full_diagonalization`, `lanczos`,
-  `finite_temperature_lanczos`, …) under the new `quantum_ed` namespace.
+  `finite_temperature_lanczos`, …) under the new `qed` namespace.
 
 ## Project documents
 
@@ -78,7 +78,7 @@ The following live at the repository root and are rendered on GitHub:
 - [`docs/benchmarks/BENCHMARKS.md`](https://github.com/ze-bang/exact_diagonalization_cpp/blob/main/docs/benchmarks/BENCHMARKS.md)
   — head-to-head benchmark write-up vs QuSpin / SciPy.
 - [`docs/guides/python_api_coverage.md`](https://github.com/ze-bang/exact_diagonalization_cpp/blob/main/docs/guides/python_api_coverage.md)
-  — what `import quantum_ed` covers vs the full `ED` binary.
+  — what `import qed` covers vs the full `ED` binary.
 - [`examples/`](https://github.com/ze-bang/exact_diagonalization_cpp/tree/main/examples)
   — runnable C++ / Python / CLI examples (one per use case).
 - [`docs/history/`](https://github.com/ze-bang/exact_diagonalization_cpp/tree/main/docs/history)

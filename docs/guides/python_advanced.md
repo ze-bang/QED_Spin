@@ -2,10 +2,10 @@
 orphan: true
 ---
 
-# Advanced Python usage (`quantum_ed` Phase 5)
+# Advanced Python usage (`qed` Phase 5)
 
 This guide is the **catalogue of advanced patterns** the Python API
-supports as of `quantum_ed` 0.2.0 (Phase 5, Apr 2026). It complements the
+supports as of `qed` 0.2.0 (Phase 5, Apr 2026). It complements the
 quickstart at [`python_quickstart.md`](python_quickstart.md) and the
 capability matrix at [`python_api_coverage.md`](python_api_coverage.md).
 
@@ -38,11 +38,11 @@ whichever matches your inputs.
 
 | You have… | …call this | Lives in |
 |-----------|------------|----------|
-| an in-memory `Operator` (matrix-free) | `exact_diagonalization_core(op, method, params)` | `quantum_ed._core` |
-| an in-memory `FixedSzOperator` | `exact_diagonalization_core(fop, method, params)` (overload) | `quantum_ed._core` |
-| a directory of `.dat` files (any combination of axes) | `exact_diagonalization_from_directory(dir, method, params, ...)` — set `params.use_symmetry`, `params.use_fixed_sz`, `params.use_gpu`, `params.use_mpi` orthogonally | `quantum_ed._core` |
-| an MPI cluster + a directory | `quantum_ed.mpi.run_distributed(dir, method, n_ranks, ...)` | `quantum_ed.mpi` |
-| a directory + want S(Q,ω) / S(Q) | `quantum_ed.dssf.run_from_directory(dir, method, ...)` | `quantum_ed.dssf` |
+| an in-memory `Operator` (matrix-free) | `exact_diagonalization_core(op, method, params)` | `qed._core` |
+| an in-memory `FixedSzOperator` | `exact_diagonalization_core(fop, method, params)` (overload) | `qed._core` |
+| a directory of `.dat` files (any combination of axes) | `exact_diagonalization_from_directory(dir, method, params, ...)` — set `params.use_symmetry`, `params.use_fixed_sz`, `params.use_gpu`, `params.use_mpi` orthogonally | `qed._core` |
+| an MPI cluster + a directory | `qed.mpi.run_distributed(dir, method, n_ranks, ...)` | `qed.mpi` |
+| a directory + want S(Q,ω) / S(Q) | `qed.dssf.run_from_directory(dir, method, ...)` | `qed.dssf` |
 
 The legacy entry points
 `exact_diagonalization_streaming_symmetry[_fixed_sz](...)` and
@@ -58,7 +58,7 @@ on disk).
 ## 1. The single-call CPU dispatcher
 
 ```python
-import quantum_ed as qed
+import qed as qed
 
 N = 12
 b = qed.input.HamiltonianBuilder(num_sites=N)
@@ -144,12 +144,12 @@ through the fixed-Sz code paths automatically.
 
 ## 2. Symmetry projection in-process
 
-The `quantum_ed.symmetry` DSL builds the same symmetry-group dict the C++
+The `qed.symmetry` DSL builds the same symmetry-group dict the C++
 engine consumes, and Phase 5 lets you attach it directly to an
 `Operator` without going through `automorphism_results/*.json`.
 
 ```python
-import quantum_ed as qed
+import qed as qed
 
 N = 6
 g_t = qed.symmetry.translation(N, 1)        # cyclic shift by 1
@@ -219,7 +219,7 @@ value reaches the appropriate CUDA kernel through the
 streaming-symmetry or directory dispatcher:
 
 ```python
-import quantum_ed as qed
+import qed as qed
 
 if not qed.has_cuda_build():
     print("This wheel was built without CUDA; GPU methods will run on CPU "
@@ -312,13 +312,13 @@ with the same flags.
 
 ## 4. MPI distributed solvers
 
-`quantum_ed.mpi.run_distributed` is a thin Python wrapper that locates
+`qed.mpi.run_distributed` is a thin Python wrapper that locates
 `mpiexec` (or your launcher of choice — `srun`, `mpirun`,
 `jsrun`, …) and `ed_distributed_main`, then runs the right argv:
 
 ```python
-import quantum_ed as qed
-from quantum_ed import mpi as qed_mpi
+import qed as qed
+from qed import mpi as qed_mpi
 
 if not qed.has_mpi_build():
     raise RuntimeError("This build was made without MPI; ed_distributed_main "
@@ -355,7 +355,7 @@ the **continued-fraction S(Q,ω)** engine, the static-thermal driver,
 and (when the build is GPU-enabled) the CUDA spectral kernels.
 
 ```python
-from quantum_ed import dssf
+from qed import dssf
 
 result = dssf.run_from_directory(
     directory="/scratch/runs/heisenberg-16-chain",
@@ -368,7 +368,7 @@ print(result.stdout)
 
 The DSSF observables themselves (the $(O_1, O_2, \text{name})$ pairs
 the engine averages over) can still be assembled from Python via
-`quantum_ed.dssf.build_observable_pairs(...)` — the
+`qed.dssf.build_observable_pairs(...)` — the
 `run_from_directory` helper is for the *full pipeline* (operator
 assembly + continued fractions + HDF5 output trees).
 
@@ -377,7 +377,7 @@ assembly + continued fractions + HDF5 output trees).
 ## 6. Build introspection
 
 ```python
-import quantum_ed as qed
+import qed as qed
 
 print("CUDA build:    ", qed.has_cuda_build())
 print("MPI build:     ", qed.has_mpi_build())
@@ -401,7 +401,7 @@ build without if-else gymnastics around `import` failures.
 ## 7. Worked example: end-to-end on a 16-site Heisenberg chain
 
 ```python
-import quantum_ed as qed
+import qed as qed
 
 N = 16
 b = qed.input.HamiltonianBuilder(num_sites=N)
@@ -473,8 +473,8 @@ the CLI directly.
 ## 8. Where to look for more
 
 * **Authoritative bindings:**
-  `python/quantum_ed/_bindings/dispatcher_bindings.cpp` (Phase 5),
-  `python/quantum_ed/_bindings/quantum_ed_bindings.cpp`
+  `python/qed/_bindings/dispatcher_bindings.cpp` (Phase 5),
+  `python/qed/_bindings/qed_bindings.cpp`
   (legacy thin wrappers).
 * **Capability matrix:** [`python_api_coverage.md`](python_api_coverage.md).
 * **CLI counterparts:** [`usage.md`](usage.md) §2 (single-process CLI),

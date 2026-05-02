@@ -1,4 +1,4 @@
-"""``quantum_ed.input``: standalone C++ lattice + Hamiltonian builder library.
+"""``qed.input``: standalone C++ lattice + Hamiltonian builder library.
 
 This module re-exports the C++ ``ed::input`` library through pybind11.
 It is the modern, programmatic replacement for the legacy
@@ -11,13 +11,13 @@ Two ways to use it
 
 1. **In-process (recommended for notebooks and Python-side workflows).**
    ``HamiltonianBuilder.to_operator()`` returns a fully populated
-   ``quantum_ed.Operator`` you can drop straight into
-   :func:`quantum_ed.full_diagonalization`,
-   :func:`quantum_ed.lanczos`, etc.
+   ``qed.Operator`` you can drop straight into
+   :func:`qed.full_diagonalization`,
+   :func:`qed.lanczos`, etc.
 
    .. code-block:: python
 
-      import quantum_ed as qed
+      import qed as qed
       lat = qed.input.lattice.chain(8, pbc=True)
       H = (qed.input.HamiltonianBuilder(lat.num_sites)
                 .heisenberg(lat.nn_pairs(), 1.0)
@@ -29,14 +29,14 @@ Two ways to use it
 
    .. code-block:: python
 
-      import quantum_ed as qed
+      import qed as qed
       lat = qed.input.lattice.pyrochlore(2, 2, 2, pbc=True)
       builder = (qed.input.HamiltonianBuilder(lat.num_sites)
                        .pyrochlore_non_kramers(lat, Jxx=1.0, Jyy=0.5, Jzz=0.7))
       builder.write_directory("/tmp/pyro_2x2x2", lattice=lat)
       # subprocess.run(["./ED", "/tmp/pyro_2x2x2"])  # business as usual
 
-Available lattice generators (``quantum_ed.input.lattice``)
+Available lattice generators (``qed.input.lattice``)
 -----------------------------------------------------------
 
 ==============  ====================================================

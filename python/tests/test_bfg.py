@@ -2,7 +2,7 @@
 
 These mirror the C++ Catch2 tests in ``tests/unit/test_bfg_topology.cpp``
 and ``tests/unit/test_bfg_correlations.cpp`` but exercise the bindings
-through ``quantum_ed.bfg`` so we know the wavefunction marshalling
+through ``qed.bfg`` so we know the wavefunction marshalling
 (NumPy ``complex128`` -> ``std::vector<Complex>``) and the dictionary /
 Bowtie / Cluster handles are wired up correctly.
 
@@ -25,8 +25,8 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-quantum_ed = pytest.importorskip("quantum_ed")
-bfg = quantum_ed.bfg
+qed = pytest.importorskip("qed")
+bfg = qed.bfg
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 KAGOME_1X1 = REPO_ROOT / "tests" / "fixtures" / "bfg_kagome_1x1"

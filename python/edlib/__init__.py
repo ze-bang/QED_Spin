@@ -3,10 +3,10 @@
 
 This package is preserved so existing notebooks (`from edlib.helper_pyrochlore
 import ...`) keep working. New code should prefer the modern
-``quantum_ed.helpers`` aliases (see ``quantum_ed.helpers``) and the
-``quantum_ed`` solver bindings.
+``qed.helpers`` aliases (see ``qed.helpers``) and the
+``qed`` solver bindings.
 
-The C++ pybind11 bindings are exposed under ``quantum_ed`` only -- there is
+The C++ pybind11 bindings are exposed under ``qed`` only -- there is
 intentionally no ``edlib`` shim for them, because the legacy package never
 exposed a C++ surface.
 

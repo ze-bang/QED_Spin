@@ -1,5 +1,5 @@
 #!/bin/bash
-# Build ExactDiagonalization (modern ED layout) on rorqual-class clusters.
+# Build QED (modern ED layout) on rorqual-class clusters.
 #
 # The C++ tree is CMake-first: top-level CMakeLists.txt pulls in cmake/ED*.cmake
 # for BLAS profiles, MPI/ScaLAPACK, dependencies, and static libs (ed_io, ed_core,

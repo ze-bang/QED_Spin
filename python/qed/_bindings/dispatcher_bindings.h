@@ -1,12 +1,12 @@
 // =============================================================================
-// python/quantum_ed/_bindings/dispatcher_bindings.h
+// python/qed/_bindings/dispatcher_bindings.h
 //
 // Phase 5 of the Python interface modernization (Apr 2026): expose the
 // **single** high-level dispatcher and the directory- / streaming-symmetry
 // drivers to Python so that one binding call unlocks the entire CPU iterative
 // + dense + thermal + ARPACK + TPQ + per-sector GPU stack.
 //
-// `bind_dispatcher(m)` populates `quantum_ed._core` with:
+// `bind_dispatcher(m)` populates `qed._core` with:
 //   * `DiagonalizationMethod` enum (every value the C++ enum carries)
 //   * `EDParameters` mutable parameter bag
 //   * `EDResults` immutable result envelope
@@ -24,14 +24,14 @@
 //     symmetry-projected ED with optional GPU sector solves.
 //   * `Operator.set_symmetry_info_from_dict()` /
 //     `FixedSzOperator.set_symmetry_info_from_dict()` so callers can wire
-//     the dict produced by `quantum_ed.symmetry.group_from_generators(...)`
+//     the dict produced by `qed.symmetry.group_from_generators(...)`
 //     straight onto an in-process Operator without going through the
 //     legacy `automorphism_results/*.json` detour.
-//   * `quantum_ed._core.has_cuda_build()` /
+//   * `qed._core.has_cuda_build()` /
 //     `has_mpi_build()` / `has_scalapack_build()` build introspection.
 //
 // The binding compiles against the same CMake target as the rest of
-// `quantum_ed._core`, so `WITH_CUDA` / `WITH_MPI` / `WITH_SCALAPACK`
+// `qed._core`, so `WITH_CUDA` / `WITH_MPI` / `WITH_SCALAPACK`
 // macros are visible: GPU-only methods (`LANCZOS_GPU`, etc.) fall through
 // to the C++ runtime's existing CPU-fallback warning when CUDA is off,
 // and the introspection helpers report the exact build configuration.

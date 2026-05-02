@@ -7,20 +7,20 @@
 > `./ED <directory>` continues to consume them exactly as before. What was
 > added on top:
 >
-> * a modern **in-process Python API** (`import quantum_ed`) that lets you
+> * a modern **in-process Python API** (`import qed`) that lets you
 >   build and solve a Hamiltonian without ever touching the file system;
 > * a **standalone C++ `ed_input` library** (`ed::input::HamiltonianBuilder`,
 >   `ed::input::lattice::*`) that reproduces every legacy `edlib.helper_*`
 >   capability through a fluent, header-only-style C++ API — same in-memory
 >   `Operator` *or* the same `InterAll.dat` / `Trans.dat` / `positions.dat`
 >   files the production CLI consumes;
-> * **`quantum_ed.input`** — a thin pybind11 mirror of the same C++
+> * **`qed.input`** — a thin pybind11 mirror of the same C++
 >   `ed_input` surface, so notebooks can write the directory format (or skip
 >   the disk entirely) with one fluent call;
 > * a runnable `examples/` directory covering each invocation pattern.
 >
 > All four modes (legacy `edlib` files, `ed_input` C++/Python builder, raw
-> C++, in-process `quantum_ed`) sit on top of the same set of solvers and
+> C++, in-process `qed`) sit on top of the same set of solvers and
 > produce the same HDF5 output schema. Pick the one that fits your
 > workflow; nothing was deprecated.
 
@@ -35,7 +35,7 @@ solver-specific algorithmic detail see
 2. [Mode 1 (legacy/canonical): Python helpers → directory → `./ED`](#2-mode-1-legacycanonical-python-helpers--directory--ed)
 3. [Mode 2: `./ED` with a config file](#3-mode-2-ed-with-a-config-file)
 4. [Mode 3: `./ED dssf` subcommand for spectral / static structure factors](#4-mode-3-ed-dssf-subcommand-for-spectral--static-structure-factors)
-5. [Mode 4: in-process Python via `import quantum_ed`](#5-mode-4-in-process-python-via-import-quantum_ed)
+5. [Mode 4: in-process Python via `import qed`](#5-mode-4-in-process-python-via-import-qed)
 6. [Mode 5: NLCE pipeline via `python -m workflows.nlce`](#6-mode-5-nlce-pipeline-via-python--m-workflowsnlce)
 7. [Mode 6: distributed-memory MPI binary `ed_distributed_main`](#7-mode-6-distributed-memory-mpi-binary-ed_distributed_main)
 8. [Mode 7: raw C++ API (link against `ed_solvers_*`)](#8-mode-7-raw-c-api-link-against-ed_solvers_)
@@ -54,13 +54,13 @@ solver-specific algorithmic detail see
 | Reproduce a published result on a fixed lattice / coupling sweep, with persistent inputs in version control | **Mode 1** (Python helper → directory → `./ED`) |
 | Write a config file and rerun easily, without remembering 30+ CLI flags                                    | **Mode 2** (`./ED --config=foo.cfg`)            |
 | Compute `S(Q,ω)` or `S(Q)` for a system whose ground state / TPQ states already live in HDF5               | **Mode 3** (`./ED dssf <method> <dir>`)         |
-| Build and solve a system inside a Jupyter notebook or research script -- **including** GPU per-sector, in-process symmetry projection, ARPACK / Krylov-Schur / Davidson / LOBPCG, FTLM/LTLM/TPQ, and ScaLAPACK | **Mode 4** (`import quantum_ed`)                |
-| Launch MPI distributed solvers from Python without touching a shell      | **Mode 4** helper (`quantum_ed.mpi.run_distributed`) |
-| Run the full continued-fraction `S(Q,ω)` engine from Python              | **Mode 4** helper (`quantum_ed.dssf.run_from_directory`) |
+| Build and solve a system inside a Jupyter notebook or research script -- **including** GPU per-sector, in-process symmetry projection, ARPACK / Krylov-Schur / Davidson / LOBPCG, FTLM/LTLM/TPQ, and ScaLAPACK | **Mode 4** (`import qed`)                |
+| Launch MPI distributed solvers from Python without touching a shell      | **Mode 4** helper (`qed.mpi.run_distributed`) |
+| Run the full continued-fraction `S(Q,ω)` engine from Python              | **Mode 4** helper (`qed.dssf.run_from_directory`) |
 | Run a full Numerical Linked Cluster Expansion (NLCE) on the pyrochlore or triangular lattice               | **Mode 5** (`python -m workflows.nlce`)         |
 | Validate distributed Lanczos / FTLM scaling on a Heisenberg test problem (no input files needed)           | **Mode 6** (`ed_distributed_main`)              |
 | Embed a solver call inside your own C++ program                                                            | **Mode 7** (link against `ed_solvers_cpu` etc.) |
-| Build a Hamiltonian from a textbook lattice (chain / kagome / pyrochlore / …) **without** writing a Python helper, in either C++ or Python, and *optionally* dump the legacy `.dat` files | **Mode 8** (`ed::input` / `quantum_ed.input`)   |
+| Build a Hamiltonian from a textbook lattice (chain / kagome / pyrochlore / …) **without** writing a Python helper, in either C++ or Python, and *optionally* dump the legacy `.dat` files | **Mode 8** (`ed::input` / `qed.input`)   |
 
 Modes 1–3 share the same `ED` binary; modes 4, 5 and 8 share the same Python
 package; mode 6 is a self-contained MPI demo binary; mode 7 is the
@@ -287,7 +287,7 @@ seq 0 $((N - 1)) | awk '{print $1, $1, 0, 0}' > my_chain12/positions.dat
 
 # 3. Inspect the output
 python3 - <<'PY'
-from quantum_ed.helpers import hdf5_io
+from qed.helpers import hdf5_io
 with hdf5_io.EDResultsReader("my_chain12/output/ed_results.h5") as r:
     print("E0..E5 =", r.get_eigenvalues()[:6])
 PY
@@ -415,7 +415,7 @@ that runs this end-to-end on a synthetic 12-site chain.
 
 ---
 
-## 5. Mode 4: in-process Python via `import quantum_ed`
+## 5. Mode 4: in-process Python via `import qed`
 
 The modern Python package gives you the **full backend surface** in
 process: every CPU iterative method (`LANCZOS` family, `BLOCK_LANCZOS`,
@@ -433,8 +433,8 @@ per-sector dispatch is reached by passing any `*_GPU`
 `DiagonalizationMethod` value to the streaming or directory
 dispatcher. The MPI distributed solvers and the
 full continued-fraction `./ED dssf` engine are reached through thin
-launcher helpers (`quantum_ed.mpi.run_distributed`,
-`quantum_ed.dssf.run_from_directory`) — no `subprocess` boilerplate
+launcher helpers (`qed.mpi.run_distributed`,
+`qed.dssf.run_from_directory`) — no `subprocess` boilerplate
 required.
 
 The complete C++ ↔ Python ↔ CLI capability matrix lives in
@@ -446,18 +446,18 @@ how to attach symmetries, how to gate GPU vs CPU code paths with
 Install once:
 
 ```bash
-pip install -v ./python   # builds the `quantum_ed._core` extension
+pip install -v ./python   # builds the `qed._core` extension
 ```
 
 ### 5.1 Build a Hamiltonian
 
 Four options, in order of decreasing convenience:
 
-**(a) `quantum_ed.input` C++-backed builder** (recommended, **Mode 8**;
+**(a) `qed.input` C++-backed builder** (recommended, **Mode 8**;
 mirrors the standalone C++ `ed::input` library — see §9):
 
 ```python
-import quantum_ed as qed
+import qed as qed
 
 lat = qed.input.lattice.chain(12, pbc=True)
 op  = (qed.input.HamiltonianBuilder(lat.num_sites)
@@ -466,10 +466,10 @@ op  = (qed.input.HamiltonianBuilder(lat.num_sites)
               .to_operator())
 ```
 
-**(b) Pure-Python fluent DSL** (`quantum_ed.hamiltonian.Hamiltonian`):
+**(b) Pure-Python fluent DSL** (`qed.hamiltonian.Hamiltonian`):
 
 ```python
-from quantum_ed.hamiltonian import Hamiltonian
+from qed.hamiltonian import Hamiltonian
 
 H = (Hamiltonian(num_sites=12, spin=0.5, n_up=6)
         .heisenberg([(i, (i + 1) % 12) for i in range(12)], j=1.0)
@@ -480,7 +480,7 @@ H = (Hamiltonian(num_sites=12, spin=0.5, n_up=6)
 **(c) Raw `Operator` API** (matches the C++ class one-to-one):
 
 ```python
-import quantum_ed as qed
+import qed as qed
 op = qed.Operator(num_sites=4)
 op.add_two_body(qed.OP_SZ, 0, qed.OP_SZ, 1, 1.0)
 op.add_two_body(qed.OP_SPLUS, 0, qed.OP_SMINUS, 1, 0.5)
@@ -588,7 +588,7 @@ each backend family.
 ### 5.3 Build observable pairs for DSSF
 
 ```python
-from quantum_ed.dssf import OperatorSpec, build_observable_pairs
+from qed.dssf import OperatorSpec, build_observable_pairs
 
 spec = OperatorSpec()
 spec.num_sites = 8
@@ -605,7 +605,7 @@ operators the `./ED dssf` path constructs internally.
 ### 5.4 Programmatic symmetries
 
 ```python
-from quantum_ed.symmetry import (
+from qed.symmetry import (
     translation, reflection_1d, generate_group, group_from_generators,
 )
 
@@ -638,7 +638,7 @@ five-axis dispatcher routes into the canonical streaming kernel.
 ### 5.5 BFG / cluster observables
 
 ```python
-from quantum_ed import bfg
+from qed import bfg
 
 cluster = bfg.load_cluster("./my_pyrochlore_run")
 psi, T  = bfg.load_tpq_state("./my_pyrochlore_run/output/ed_results.h5",
@@ -654,11 +654,11 @@ for runnable variants.
 
 ### 5.6 Bridging modes 1 ↔ 4
 
-The bindings expose `quantum_ed.helpers`, a lazy bridge to every legacy
+The bindings expose `qed.helpers`, a lazy bridge to every legacy
 `edlib.*` module:
 
 ```python
-from quantum_ed.helpers import helper_pyrochlore, hdf5_io
+from qed.helpers import helper_pyrochlore, hdf5_io
 
 helper_pyrochlore.write_inputs(...)            # legacy file writer
 # ... ./build/ED ./my_pyrochlore_run --method=LANCZOS --eigenvectors ...
@@ -674,7 +674,7 @@ Python. That is how every NLCE pipeline is glued.
 Three small helpers close the remaining gaps to the CLI.
 
 ```python
-import quantum_ed as qed
+import qed as qed
 
 qed.has_cuda_build()        # WITH_CUDA=ON at build time?
 qed.has_mpi_build()         # WITH_MPI=ON?
@@ -1048,7 +1048,7 @@ ed::sym::Permutation g1 = ed::sym::reflection_1d(N=24);
 op.symmetry_info = ed::sym::group_from_generators(/*n_sites=*/24, {g0, g1});
 ```
 
-The same DSL is bound in Python (`quantum_ed.symmetry.*`) and returns
+The same DSL is bound in Python (`qed.symmetry.*`) and returns
 the identical dict layout. Since Phase 5 (Apr 2026), the
 `Operator.symmetry_info` setter is also bound from Python, so the
 **entire** in-process symmetry-projected pipeline runs without any
@@ -1115,7 +1115,7 @@ languages** that both call the *same* C++ library:
 | Surface                              | Header / module                                              |
 |--------------------------------------|--------------------------------------------------------------|
 | C++ (header + static lib)            | `#include <ed/input/input.h>`, link `ed_input`               |
-| Python (pybind11)                    | `import quantum_ed.input as qinput`                          |
+| Python (pybind11)                    | `import qed.input as qinput`                          |
 
 It produces:
 
@@ -1203,7 +1203,7 @@ target_link_libraries(my_app PRIVATE ed_input ed_solvers_cpu)
 The same API in Python (`pip install -v ./python` first):
 
 ```python
-import quantum_ed as qed
+import qed as qed
 
 lat = qed.input.lattice.pyrochlore(2, 2, 2, pbc=True)        # 32 sites
 builder = (qed.input.HamiltonianBuilder(lat.num_sites)
@@ -1250,8 +1250,8 @@ builder.write_directory("./run_dir", lattice=lat, opts=opts)
 |--------------------------------------------|-------------------------------------------------------------------|
 | C++ public headers                         | [`include/ed/input/`](../../include/ed/input/)                    |
 | C++ implementation                         | [`src/input/`](../../src/input/)                                  |
-| pybind11 bindings                          | [`python/quantum_ed/_bindings/input_bindings.cpp`](../../python/quantum_ed/_bindings/input_bindings.cpp) |
-| Python facade                              | [`python/quantum_ed/input.py`](../../python/quantum_ed/input.py)  |
+| pybind11 bindings                          | [`python/qed/_bindings/input_bindings.cpp`](../../python/qed/_bindings/input_bindings.cpp) |
+| Python facade                              | [`python/qed/input.py`](../../python/qed/input.py)  |
 | Catch2 unit tests                          | `tests/unit/test_input_library.cpp`                              |
 | pytest suite                               | [`python/tests/test_input.py`](../../python/tests/test_input.py)  |
 
@@ -1385,7 +1385,7 @@ directory. The high-level groups (defined in
 Read it back from Python:
 
 ```python
-from quantum_ed.helpers import hdf5_io
+from qed.helpers import hdf5_io
 with hdf5_io.EDResultsReader("my_run/output/ed_results.h5") as r:
     e   = r.get_eigenvalues()
     psi = r.get_eigenvector(0)

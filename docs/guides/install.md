@@ -7,7 +7,7 @@ intended workflow:
 |-------------------------------------------------|---------------------------------|
 | C++ developer, wants to hack on the source      | [From source (CMake)](#from-source-cmake) |
 | C++ user, wants to consume the library          | [Install + `find_package(ED)`](#consume-via-find_packageed-config) |
-| Python user, wants the `quantum_ed` package     | [Install the wheel (pip)](#install-the-python-wheel) |
+| Python user, wants the `qed` package     | [Install the wheel (pip)](#install-the-python-wheel) |
 | Casual user, wants a sandboxed environment      | [Docker / dev container](#docker-and-dev-containers) (planned) |
 
 (from-source-cmake)=
@@ -72,7 +72,7 @@ The exported targets are:
 (install-the-python-wheel)=
 ## Install the Python wheel
 
-The `quantum_ed` Python package is built via `scikit-build-core`, which
+The `qed` Python package is built via `scikit-build-core`, which
 drives the same CMake build under the hood:
 
 ```bash
@@ -91,9 +91,9 @@ CMAKE_ARGS="-DBUILD_ED_TESTS=OFF -DWITH_CUDA=OFF -DWITH_MPI=OFF -DBLAS_PROFILE=O
 To verify the install:
 
 ```python
-import quantum_ed
-print(quantum_ed.__version__)
-op = quantum_ed.Operator(num_sites=2, spin_length=0.5)
+import qed
+print(qed.__version__)
+op = qed.Operator(num_sites=2, spin_length=0.5)
 print(op.dimension)   # -> 4
 ```
 

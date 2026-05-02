@@ -24,7 +24,7 @@ particular run.
 > **Looking for the head-to-head against
 > [XDiag](https://github.com/awietek/XDiag.jl)?**
 > See [`bench_vs_xdiag.md`](./bench_vs_xdiag.md). On the 1D Heisenberg
-> reference sweep, `quantum_ed.lanczos` (real fast path, default Python
+> reference sweep, `qed.lanczos` (real fast path, default Python
 > output settings) is faster than `XDiag.eigval0` at every listed `N` in
 > both the full and Sz=0 sectors on the same machine; energies match to
 > high precision.

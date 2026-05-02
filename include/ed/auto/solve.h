@@ -3,7 +3,7 @@
 // include/ed/auto/solve.h
 //
 // `ed::auto_pilot::solve(Operator&, AutoSolveOptions)` — stress-free,
-// modern-C++ entry point that mirrors the Python `quantum_ed.diag(...)`
+// modern-C++ entry point that mirrors the Python `qed.diag(...)`
 // auto-selector but stays fully in-process. It is a thin convenience
 // layer over the canonical `exact_diagonalization_core(...)` dispatcher
 // in `ed/core/ed_wrapper.h`; it does NOT introduce any new solver, it
@@ -49,7 +49,7 @@ namespace ed::auto_pilot {
 // ---------------------------------------------------------------------------
 // Internal helpers (kept inline so this header stays standalone).
 // Mirror the logic of `op_conserves_sz` / `op_make_fixed_sz` in
-// `python/quantum_ed/_bindings/quantum_ed_bindings.cpp` so the C++ and
+// `python/qed/_bindings/qed_bindings.cpp` so the C++ and
 // Python façades agree byte-for-byte on what counts as Sz-conserving.
 // ---------------------------------------------------------------------------
 

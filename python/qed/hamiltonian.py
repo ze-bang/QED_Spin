@@ -6,7 +6,7 @@ toy / textbook Hamiltonians collaborators want to scribble in a notebook.
 This module wraps that API in a fluent, QuSpin / NetKet-style builder so
 that something like a Heisenberg chain can be written in *one line*::
 
-    >>> import quantum_ed as qe
+    >>> import qed as qe
     >>> H = qe.hamiltonian.Hamiltonian(num_sites=4).heisenberg([(0,1),(1,2),(2,3)]).build()
     >>> qe.full_diagonalization(H).min()
     -1.6160254037844388
@@ -358,6 +358,6 @@ class Hamiltonian:
 
     def __repr__(self) -> str:
         return (
-            f"<quantum_ed.hamiltonian.Hamiltonian num_sites={self.num_sites} "
+            f"<qed.hamiltonian.Hamiltonian num_sites={self.num_sites} "
             f"spin={self.spin} n_up={self.n_up} terms={len(self._terms)}>"
         )

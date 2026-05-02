@@ -54,7 +54,7 @@ endif()
 # static libraries -- and a fetched target cannot be exported via
 # install(EXPORT). EDLibraries.cmake instead wires nlohmann_json into each
 # library via `$<BUILD_INTERFACE:nlohmann_json::nlohmann_json>`. Downstream
-# consumers refind it via EDConfig.cmake's find_dependency(nlohmann_json).
+# consumers refind it via QEDConfig.cmake's find_dependency(nlohmann_json).
 
 # Find HDF5 (with C++ bindings)
 # Prefer HDF5_DIR from environment (set by module system)

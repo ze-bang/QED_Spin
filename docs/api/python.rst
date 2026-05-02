@@ -1,9 +1,9 @@
-Python API reference (``quantum_ed``)
+Python API reference (``qed``)
 =====================================
 
 .. default-domain:: py
 
-The Python side lives under :py:mod:`quantum_ed`. It is a thin pybind11 layer
+The Python side lives under :py:mod:`qed`. It is a thin pybind11 layer
 over the C++ ``ed_solvers_cpu`` library, wired up via ``scikit-build-core``.
 
 .. contents::
@@ -13,23 +13,23 @@ over the C++ ``ed_solvers_cpu`` library, wired up via ``scikit-build-core``.
 Top-level facade
 ----------------
 
-.. automodule:: quantum_ed
+.. automodule:: qed
    :members:
    :undoc-members:
    :show-inheritance:
 
-Dynamical / static structure factor (``quantum_ed.dssf``)
+Dynamical / static structure factor (``qed.dssf``)
 ---------------------------------------------------------
 
-.. automodule:: quantum_ed.dssf
+.. automodule:: qed.dssf
    :members:
    :undoc-members:
    :show-inheritance:
 
-Hamiltonian builder DSL (``quantum_ed.hamiltonian``)
+Hamiltonian builder DSL (``qed.hamiltonian``)
 ----------------------------------------------------
 
-.. automodule:: quantum_ed.hamiltonian
+.. automodule:: qed.hamiltonian
    :members:
    :undoc-members:
    :show-inheritance:
@@ -37,6 +37,6 @@ Hamiltonian builder DSL (``quantum_ed.hamiltonian``)
 Helpers (legacy ``edlib`` re-exports)
 -------------------------------------
 
-.. automodule:: quantum_ed.helpers
+.. automodule:: qed.helpers
    :members:
    :undoc-members:

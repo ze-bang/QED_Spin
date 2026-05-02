@@ -1,18 +1,18 @@
 """Regression tests for the Phase-9 stress-free workflow API.
 
-Covers the public surface of :mod:`quantum_ed.workflow`:
+Covers the public surface of :mod:`qed.workflow`:
 
-* :func:`quantum_ed.find_symmetries`           -- in-memory operator
+* :func:`qed.find_symmetries`           -- in-memory operator
   introspection produces correct U(1) Sz info and a non-trivial
   generator set for the periodic Heisenberg ring.
-* :func:`quantum_ed.diag` (no symmetry, no Sz) -- end-to-end "just call
+* :func:`qed.diag` (no symmetry, no Sz) -- end-to-end "just call
   it" path matching the Bethe-ansatz reference.
-* :func:`quantum_ed.diag` with ``sz``          -- automatic
+* :func:`qed.diag` with ``sz``          -- automatic
   ``FixedSzOperator`` construction, ground state in Sz=N/2 sector.
-* :func:`quantum_ed.diag` with ``symmetry``    -- streaming-symmetry
+* :func:`qed.diag` with ``symmetry``    -- streaming-symmetry
   kernel via temp-dir round-trip (covers the JSON schema fix that
   ``phase_factors`` is per-generator, not per-element).
-* :func:`quantum_ed.diag` with both at once    -- combined fixed-Sz +
+* :func:`qed.diag` with both at once    -- combined fixed-Sz +
   symmetry kernel.
 * Solver / device auto-selection                -- ``auto`` heuristics
   pick FULL for the tiny 6-site ring, GPU only when available, and MPI
@@ -30,7 +30,7 @@ import math
 import numpy as np
 import pytest
 
-quantum_ed = pytest.importorskip("quantum_ed")
+qed = pytest.importorskip("qed")
 
 N_SITES = 6
 GROUND_STATE_ENERGY = -2.802775637731995
@@ -43,7 +43,7 @@ GROUND_STATE_ENERGY = -2.802775637731995
 
 def _heisenberg_ring(num_sites: int = N_SITES):
     """Build the periodic spin-1/2 Heisenberg ring via the fluent builder."""
-    builder = quantum_ed.input.HamiltonianBuilder(num_sites)
+    builder = qed.input.HamiltonianBuilder(num_sites)
     bonds = [(i, (i + 1) % num_sites) for i in range(num_sites)]
     builder.heisenberg(bonds, J=1.0)
     return builder.to_operator()
@@ -56,7 +56,7 @@ def _heisenberg_ring(num_sites: int = N_SITES):
 
 def test_find_symmetries_reports_u1_sz_sectors():
     H = _heisenberg_ring()
-    report = quantum_ed.find_symmetries(H, verbose=False)
+    report = qed.find_symmetries(H, verbose=False)
 
     assert report.num_sites == N_SITES
     assert report.has_u1_sz is True
@@ -67,7 +67,7 @@ def test_find_symmetries_reports_u1_sz_sectors():
 
 def test_find_symmetries_finds_full_automorphism_for_ring():
     H = _heisenberg_ring()
-    report = quantum_ed.find_symmetries(H, verbose=False)
+    report = qed.find_symmetries(H, verbose=False)
 
     # Always at least the trivial set.
     assert report.trivial_set.generators == []
@@ -92,14 +92,14 @@ def test_find_symmetries_finds_full_automorphism_for_ring():
 
 def test_diag_full_hilbert_default_args():
     H = _heisenberg_ring()
-    res = quantum_ed.diag(H, verbose=False)
+    res = qed.diag(H, verbose=False)
     assert len(res.eigenvalues) >= 1
     assert math.isclose(res.eigenvalues[0], GROUND_STATE_ENERGY, abs_tol=1e-9)
 
 
 def test_diag_full_hilbert_explicit_solver_and_device():
     H = _heisenberg_ring()
-    res = quantum_ed.diag(
+    res = qed.diag(
         H,
         num_eigenvalues=4,
         solver="LANCZOS",
@@ -122,23 +122,23 @@ def test_diag_full_hilbert_explicit_solver_and_device():
 def test_diag_sz_constructs_fixed_sz_operator_under_the_hood():
     H = _heisenberg_ring()
     # Ground state of AFM Heisenberg ring at N=6 lives in Sz=0 (n_up=3).
-    res = quantum_ed.diag(H, num_eigenvalues=2, sz=N_SITES // 2, verbose=False)
+    res = qed.diag(H, num_eigenvalues=2, sz=N_SITES // 2, verbose=False)
     assert math.isclose(res.eigenvalues[0], GROUND_STATE_ENERGY, abs_tol=1e-9)
 
 
 def test_diag_sz_rejects_when_operator_breaks_sz():
-    op = quantum_ed.Operator(num_sites=4, spin=0.5)
+    op = qed.Operator(num_sites=4, spin=0.5)
     # Pure transverse field breaks total Sz.
-    op.add_one_body(quantum_ed.OP_SPLUS, 0, complex(1.0, 0.0))
-    op.add_one_body(quantum_ed.OP_SMINUS, 0, complex(1.0, 0.0))
+    op.add_one_body(qed.OP_SPLUS, 0, complex(1.0, 0.0))
+    op.add_one_body(qed.OP_SMINUS, 0, complex(1.0, 0.0))
     with pytest.raises(ValueError, match="does not commute with total Sz"):
-        quantum_ed.diag(op, sz=2, verbose=False)
+        qed.diag(op, sz=2, verbose=False)
 
 
 def test_diag_sz_rejects_out_of_range():
     H = _heisenberg_ring()
     with pytest.raises(ValueError, match="out of range"):
-        quantum_ed.diag(H, sz=N_SITES + 1, verbose=False)
+        qed.diag(H, sz=N_SITES + 1, verbose=False)
 
 
 # ---------------------------------------------------------------------------
@@ -152,14 +152,14 @@ def test_diag_with_explicit_z6_translation_generator():
     finder, silently replacing the user's choice)."""
     H = _heisenberg_ring()
     T = [(i + 1) % N_SITES for i in range(N_SITES)]
-    z6 = quantum_ed.GeneratorSet(
+    z6 = qed.GeneratorSet(
         name="Z6_translation",
         description="Single Z6 translation generator (order 6)",
         generators=[T],
         orders=[6],
         group_size=6,
     )
-    res = quantum_ed.diag(H, num_eigenvalues=2, symmetry=z6, verbose=False)
+    res = qed.diag(H, num_eigenvalues=2, symmetry=z6, verbose=False)
     eigs = sorted(res.eigenvalues)
     # All 6 momentum sectors are diagonalised; merged spectrum should
     # contain the GS as the lowest entry.
@@ -168,8 +168,8 @@ def test_diag_with_explicit_z6_translation_generator():
 
 def test_diag_with_full_set_from_find_symmetries():
     H = _heisenberg_ring()
-    report = quantum_ed.find_symmetries(H, verbose=False)
-    res = quantum_ed.diag(
+    report = qed.find_symmetries(H, verbose=False)
+    res = qed.diag(
         H, num_eigenvalues=2, symmetry=report.full_set, verbose=False
     )
     eigs = sorted(res.eigenvalues)
@@ -179,14 +179,14 @@ def test_diag_with_full_set_from_find_symmetries():
 def test_diag_with_symmetry_and_sz_simultaneously():
     H = _heisenberg_ring()
     T = [(i + 1) % N_SITES for i in range(N_SITES)]
-    z6 = quantum_ed.GeneratorSet(
+    z6 = qed.GeneratorSet(
         name="Z6_translation",
         description="Single Z6 translation generator (order 6)",
         generators=[T],
         orders=[6],
         group_size=6,
     )
-    res = quantum_ed.diag(
+    res = qed.diag(
         H,
         num_eigenvalues=2,
         symmetry=z6,
@@ -201,14 +201,14 @@ def test_diag_with_trivial_generator_set_falls_back_to_full_hilbert():
     """An empty GeneratorSet must short-circuit to the in-memory dispatcher
     (i.e. NOT touch the temp dir / streaming kernel)."""
     H = _heisenberg_ring()
-    trivial = quantum_ed.GeneratorSet(
+    trivial = qed.GeneratorSet(
         name="trivial",
         description="",
         generators=[],
         orders=[],
         group_size=1,
     )
-    res = quantum_ed.diag(H, num_eigenvalues=1, symmetry=trivial, verbose=False)
+    res = qed.diag(H, num_eigenvalues=1, symmetry=trivial, verbose=False)
     assert math.isclose(res.eigenvalues[0], GROUND_STATE_ENERGY, abs_tol=1e-9)
 
 
@@ -223,7 +223,7 @@ def test_diag_dispatches_mpi_via_subprocess(monkeypatch):
     The unified ``qed.diag`` writes the operator to a temp dir, spawns
     ``ed_distributed_main`` under ``mpiexec``, and reads the HDF5
     result file back. We don't actually launch mpiexec here; we
-    monkeypatch ``quantum_ed.mpi.run_distributed`` to capture the
+    monkeypatch ``qed.mpi.run_distributed`` to capture the
     invocation and stub the result file so the test runs purely in
     process. The point of the test is to verify the routing, not
     re-test the C++ binary (those tests live in test_distributed_*).
@@ -231,7 +231,7 @@ def test_diag_dispatches_mpi_via_subprocess(monkeypatch):
     import os
     import h5py
     import numpy as np
-    from quantum_ed import mpi as qed_mpi
+    from qed import mpi as qed_mpi
 
     captured = {}
 
@@ -259,7 +259,7 @@ def test_diag_dispatches_mpi_via_subprocess(monkeypatch):
     monkeypatch.setattr(qed_mpi, "run_distributed", fake_run_distributed)
 
     H = _heisenberg_ring()
-    res = quantum_ed.diag(
+    res = qed.diag(
         H, device="mpi", num_eigenvalues=2,
         mpi_n_ranks=2, verbose=False,
     )
@@ -276,7 +276,7 @@ def test_diag_routes_krylov_schur_solver_to_distributed_ks(monkeypatch):
     --mode lanczos downgrade)."""
     import h5py
     import numpy as np
-    from quantum_ed import mpi as qed_mpi
+    from qed import mpi as qed_mpi
 
     captured = {}
     def fake_run_distributed(*, method, n_ranks, binary_args, **_kw):
@@ -295,7 +295,7 @@ def test_diag_routes_krylov_schur_solver_to_distributed_ks(monkeypatch):
     monkeypatch.setattr(qed_mpi, "run_distributed", fake_run_distributed)
 
     H = _heisenberg_ring()
-    quantum_ed.diag(
+    qed.diag(
         H, device="mpi", solver="KRYLOV_SCHUR", num_eigenvalues=1,
         mpi_n_ranks=2, verbose=False,
     )
@@ -305,7 +305,7 @@ def test_diag_routes_krylov_schur_solver_to_distributed_ks(monkeypatch):
 def test_diag_rejects_unknown_solver_name():
     H = _heisenberg_ring()
     with pytest.raises(ValueError, match="Unknown solver name"):
-        quantum_ed.diag(H, solver="MAGIC_NEW_SOLVER", verbose=False)
+        qed.diag(H, solver="MAGIC_NEW_SOLVER", verbose=False)
 
 
 def test_diag_results_match_explicit_dispatcher_call():
@@ -313,17 +313,17 @@ def test_diag_results_match_explicit_dispatcher_call():
     ``exact_diagonalization_core`` it routes to (no off-by-one in
     parameter setup)."""
     H = _heisenberg_ring()
-    high = quantum_ed.diag(H, num_eigenvalues=4, verbose=False)
+    high = qed.diag(H, num_eigenvalues=4, verbose=False)
 
-    p = quantum_ed.EDParameters()
+    p = qed.EDParameters()
     p.num_sites = N_SITES
     p.num_eigenvalues = 4
     p.tolerance = 1e-10
     p.compute_eigenvectors = False
     p.max_iterations = 200
     p.max_subspace = 80
-    low = quantum_ed.exact_diagonalization_core(
-        H, quantum_ed.DiagonalizationMethod.FULL, p
+    low = qed.exact_diagonalization_core(
+        H, qed.DiagonalizationMethod.FULL, p
     )
     np.testing.assert_allclose(
         sorted(high.eigenvalues)[:4], sorted(low.eigenvalues)[:4], atol=1e-9
@@ -337,14 +337,14 @@ def test_diag_results_match_explicit_dispatcher_call():
 
 def test_generator_set_supports_len_and_indexing():
     H = _heisenberg_ring()
-    report = quantum_ed.find_symmetries(H, verbose=False)
+    report = qed.find_symmetries(H, verbose=False)
     full = report.full_set
     assert full is not None
     # 6-site ring -> Z2 x Z3 minimal generators (orders [2, 3]).
     assert len(full) == 2
 
     sub_first = full[0]
-    assert isinstance(sub_first, quantum_ed.GeneratorSet)
+    assert isinstance(sub_first, qed.GeneratorSet)
     assert len(sub_first.generators) == 1
     assert sub_first.orders == [full.orders[0]]
     assert sub_first.group_size == full.orders[0]
@@ -357,7 +357,7 @@ def test_generator_set_supports_len_and_indexing():
 
 def test_generator_set_subgroup_by_indices():
     H = _heisenberg_ring()
-    report = quantum_ed.find_symmetries(H, verbose=False)
+    report = qed.find_symmetries(H, verbose=False)
     full = report.full_set
     assert full is not None
 
@@ -374,7 +374,7 @@ def test_generator_set_subgroup_by_indices():
 
 def test_generator_set_subgroup_rejects_out_of_range():
     H = _heisenberg_ring()
-    report = quantum_ed.find_symmetries(H, verbose=False)
+    report = qed.find_symmetries(H, verbose=False)
     full = report.full_set
     assert full is not None
     with pytest.raises(IndexError, match="out of range"):
@@ -382,7 +382,7 @@ def test_generator_set_subgroup_rejects_out_of_range():
 
 
 def test_generator_set_subgroup_of_trivial_set_raises():
-    trivial = quantum_ed.GeneratorSet(
+    trivial = qed.GeneratorSet(
         name="trivial", description="", generators=[], orders=[], group_size=1,
     )
     with pytest.raises(ValueError, match="trivial"):
@@ -394,7 +394,7 @@ def test_find_symmetries_emits_per_generator_subgroup_entries():
     add one named single-generator subgroup per generator so users can
     browse them via report.get('full_automorphism[0]') etc."""
     H = _heisenberg_ring()
-    report = quantum_ed.find_symmetries(H, verbose=False)
+    report = qed.find_symmetries(H, verbose=False)
     names = {gs.name for gs in report.generator_sets}
     assert "full_automorphism" in names
     # With 2 generators we expect 2 single-generator subgroup entries.
@@ -410,10 +410,10 @@ def test_diag_with_single_generator_subgroup_matches_full_group():
     """A single-generator subgroup must still recover the same ground
     state energy (just with fewer / larger sectors)."""
     H = _heisenberg_ring()
-    report = quantum_ed.find_symmetries(H, verbose=False)
+    report = qed.find_symmetries(H, verbose=False)
     sub = report.full_set.subgroup([1])  # the order-3 rotation alone
 
-    res_sub = quantum_ed.diag(
+    res_sub = qed.diag(
         H, num_eigenvalues=2, symmetry=sub, verbose=False,
     )
     eigs = sorted(res_sub.eigenvalues)
@@ -428,7 +428,7 @@ def test_diag_with_single_generator_subgroup_matches_full_group():
 def test_list_diag_parameters_returns_dict_with_every_field():
     """return_dict=True must list every introspectable field on
     EDParameters (currently 80+) bucketed by category."""
-    catalog = quantum_ed.list_diag_parameters(return_dict=True)
+    catalog = qed.list_diag_parameters(return_dict=True)
     assert isinstance(catalog, dict)
     assert "general" in catalog
     assert "arpack" in catalog
@@ -448,7 +448,7 @@ def test_list_diag_parameters_returns_dict_with_every_field():
 
 
 def test_list_diag_parameters_filters_by_category_substring():
-    catalog = quantum_ed.list_diag_parameters(
+    catalog = qed.list_diag_parameters(
         category="arp", return_dict=True
     )
     assert list(catalog) == ["arpack"]
@@ -458,14 +458,14 @@ def test_list_diag_parameters_filters_by_category_substring():
 
 def test_list_diag_parameters_unknown_category_raises():
     with pytest.raises(KeyError, match="No parameter category"):
-        quantum_ed.list_diag_parameters("does_not_exist", return_dict=True)
+        qed.list_diag_parameters("does_not_exist", return_dict=True)
 
 
 def test_list_diag_parameters_defaults_match_EDParameters_defaults():
     """The reported default for every field must equal the actual
     default on a freshly constructed EDParameters."""
-    catalog = quantum_ed.list_diag_parameters(return_dict=True)
-    actual = quantum_ed.EDParameters()
+    catalog = qed.list_diag_parameters(return_dict=True)
+    actual = qed.EDParameters()
     for rows in catalog.values():
         for name, reported in rows:
             assert getattr(actual, name) == reported, name
@@ -476,7 +476,7 @@ def test_diag_extra_params_unknown_field_points_at_helper():
     list_diag_parameters() so users can discover the catalog."""
     H = _heisenberg_ring()
     with pytest.raises(AttributeError, match="list_diag_parameters"):
-        quantum_ed.diag(
+        qed.diag(
             H, verbose=False,
             extra_params={"definitely_not_a_real_field": 42},
         )
@@ -504,7 +504,7 @@ def test_diag_extra_params_unknown_field_points_at_helper():
     ("FULL", "FULL"),
 ])
 def test_solver_name_lookup_is_case_insensitive(name, expected):
-    from quantum_ed.workflow import _resolve_solver
+    from qed.workflow import _resolve_solver
     method = _resolve_solver(name, num_eigenvalues=1, dim=64)
     assert method.name == expected
 
@@ -529,11 +529,11 @@ EIG_PATHS = [
 @pytest.mark.parametrize("label,kwargs", EIG_PATHS)
 def test_eigenvalue_solver_matches_reference_across_paths(solver, label, kwargs):
     H = _heisenberg_ring()
-    report = quantum_ed.find_symmetries(H, verbose=False)
+    report = qed.find_symmetries(H, verbose=False)
     real_kwargs = dict(kwargs)
     if real_kwargs.pop("_symm", False):
         real_kwargs["symmetry"] = report.full_set
-    res = quantum_ed.diag(
+    res = qed.diag(
         H, num_eigenvalues=2, solver=solver, verbose=False, **real_kwargs
     )
     eigs = sorted(res.eigenvalues)
@@ -552,7 +552,7 @@ def test_mtpq_runs_on_full_hilbert(tmp_path):
     branch -- both populate the vector with at least 1 value)."""
     H = _heisenberg_ring()
     out = str(tmp_path / "tpq_full")
-    res = quantum_ed.diag(
+    res = qed.diag(
         H, solver="mTPQ",
         target_beta=5.0,
         num_samples=1,
@@ -569,7 +569,7 @@ def test_mtpq_runs_on_full_hilbert(tmp_path):
 def test_mtpq_runs_on_fixed_sz(tmp_path):
     H = _heisenberg_ring()
     out = str(tmp_path / "tpq_sz")
-    res = quantum_ed.diag(
+    res = qed.diag(
         H, solver="mTPQ",
         sz=N_SITES // 2,
         target_beta=5.0,
@@ -582,14 +582,14 @@ def test_mtpq_runs_on_fixed_sz(tmp_path):
 
 def test_mtpq_with_symmetry_is_rejected_with_actionable_error():
     H = _heisenberg_ring()
-    report = quantum_ed.find_symmetries(H, verbose=False)
+    report = qed.find_symmetries(H, verbose=False)
     with pytest.raises(ValueError, match="TPQ.*symmetry"):
-        quantum_ed.diag(
+        qed.diag(
             H, solver="mTPQ", symmetry=report.full_set,
             target_beta=5.0, num_samples=1, verbose=False,
         )
     with pytest.raises(ValueError, match="TPQ.*symmetry"):
-        quantum_ed.diag(
+        qed.diag(
             H, solver="mTPQ", symmetry=report.full_set, sz=N_SITES // 2,
             target_beta=5.0, num_samples=1, verbose=False,
         )
@@ -601,7 +601,7 @@ def test_mtpq_auto_creates_output_dir_when_unspecified(tmp_path, monkeypatch):
     qed_thermal_* dirs in the test-runner cwd."""
     monkeypatch.chdir(tmp_path)
     H = _heisenberg_ring()
-    res = quantum_ed.diag(
+    res = qed.diag(
         H, solver="mTPQ",
         target_beta=5.0, num_samples=1, verbose=False,
     )
@@ -617,7 +617,7 @@ def test_thermal_kwargs_populate_ed_parameters():
     """The first-class thermal kwargs (num_samples, target_beta,
     num_temp_points, temp_min, temp_max) must end up on EDParameters
     in the right slots before dispatch."""
-    from quantum_ed.workflow import _make_params, _resolve_solver
+    from qed.workflow import _make_params, _resolve_solver
     method = _resolve_solver("mTPQ", num_eigenvalues=1, dim=64)
     params = _make_params(
         num_sites=N_SITES,
@@ -654,7 +654,7 @@ def test_thermal_kwargs_populate_ed_parameters():
 def test_eigenvalue_kwargs_ignore_thermal_only_kwargs():
     """num_samples/target_beta passed alongside an eigenvalue solver
     must not corrupt the resulting EDParameters' Krylov sizes."""
-    from quantum_ed.workflow import _make_params, _resolve_solver
+    from qed.workflow import _make_params, _resolve_solver
     method = _resolve_solver("LANCZOS", num_eigenvalues=4, dim=64)
     params = _make_params(
         num_sites=N_SITES,
@@ -714,7 +714,7 @@ class TestDeviceMatrix:
     @pytest.mark.parametrize("solver", ["LANCZOS", "KRYLOV_SCHUR", "FULL"])
     def test_cpu_path_is_default(self, H, solver):
         """device='cpu' should round-trip via the in-process kernel."""
-        res = quantum_ed.diag(
+        res = qed.diag(
             H, solver=solver, device="cpu",
             num_eigenvalues=2, verbose=False,
         )
@@ -723,7 +723,7 @@ class TestDeviceMatrix:
 
     def test_cpu_mtpq_runs(self, H, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
-        res = quantum_ed.diag(
+        res = qed.diag(
             H, solver="mTPQ", device="cpu",
             target_beta=5.0, num_samples=1, verbose=False,
         )
@@ -733,10 +733,10 @@ class TestDeviceMatrix:
     def test_gpu_unbuilt_raises_actionable(self, H, solver):
         """On WITH_CUDA=OFF builds, device='gpu' must raise a clean
         runtime error that points at the rebuild flag."""
-        if quantum_ed.has_cuda_build():
+        if qed.has_cuda_build():
             pytest.skip("CUDA built in -- this branch only fires on CPU-only builds")
         with pytest.raises(RuntimeError, match="WITH_CUDA=ON"):
-            quantum_ed.diag(
+            qed.diag(
                 H, solver=solver, device="gpu",
                 target_beta=5.0, num_samples=1, verbose=False,
             )
@@ -750,7 +750,7 @@ class TestDeviceMatrix:
         dispatchers; the temp-dir one MUST be the one that fires.
         """
         monkeypatch.chdir(tmp_path)
-        from quantum_ed import workflow as wf
+        from qed import workflow as wf
 
         called = {"core": 0, "from_directory": 0}
 
@@ -781,7 +781,7 @@ class TestDeviceMatrix:
         # plan=False bypasses the pre-flight planner (which would correctly
         # refuse to dispatch to GPU on a no-GPU CI host); we're testing
         # dispatch routing here, not resource accounting.
-        quantum_ed.diag(H, solver="LANCZOS", device="gpu",
+        qed.diag(H, solver="LANCZOS", device="gpu",
                         num_eigenvalues=1, verbose=False, plan=False)
         assert called == {"core": 0, "from_directory": 1}, (
             f"GPU path hit the wrong dispatcher: {called}"
@@ -804,7 +804,7 @@ class TestDeviceMatrix:
         """
         import h5py
         import numpy as np
-        from quantum_ed import mpi as qed_mpi
+        from qed import mpi as qed_mpi
 
         captured = {}
         def fake_run_distributed(*, method, n_ranks, binary_args,
@@ -833,7 +833,7 @@ class TestDeviceMatrix:
 
         monkeypatch.setattr(qed_mpi, "run_distributed", fake_run_distributed)
 
-        quantum_ed.diag(
+        qed.diag(
             H, solver=solver, device=device,
             num_eigenvalues=1, target_beta=5.0,
             num_samples=1, mpi_n_ranks=2,
@@ -857,7 +857,7 @@ class TestDeviceMatrix:
 
     def test_unknown_device_rejects(self, H):
         with pytest.raises(ValueError, match="device="):
-            quantum_ed.diag(H, device="quantum-foam", verbose=False)
+            qed.diag(H, device="quantum-foam", verbose=False)
 
     @pytest.mark.parametrize("solver", ["FTLM", "mTPQ"])
     @pytest.mark.parametrize("device", ["mpi", "mpi_gpu"])
@@ -881,13 +881,13 @@ class TestDeviceMatrix:
         """
         import h5py
         import numpy as np
-        from quantum_ed import mpi as qed_mpi
+        from qed import mpi as qed_mpi
 
         # Use translation symmetry on the Heisenberg ring -- gives
         # multiple irreps so the aggregation actually has work to do.
         N = H.num_sites
         translation = [(i + 1) % N for i in range(N)]
-        symm = quantum_ed.GeneratorSet(
+        symm = qed.GeneratorSet(
             name="Cn",
             description="translation on the ring",
             generators=[translation],
@@ -934,7 +934,7 @@ class TestDeviceMatrix:
         monkeypatch.setattr(qed_mpi, "run_distributed",
                             fake_run_distributed)
 
-        res = quantum_ed.diag(
+        res = qed.diag(
             H, solver=solver, device=device,
             symmetry=symm,
             target_beta=2.0, num_samples=1, mpi_n_ranks=2,
@@ -974,11 +974,11 @@ class TestDeviceMatrix:
         """
         import h5py
         import numpy as np
-        from quantum_ed import mpi as qed_mpi
+        from qed import mpi as qed_mpi
 
         N = H.num_sites
         translation = [(i + 1) % N for i in range(N)]
-        symm = quantum_ed.GeneratorSet(
+        symm = qed.GeneratorSet(
             name="Cn",
             description="translation on the ring",
             generators=[translation],
@@ -1008,7 +1008,7 @@ class TestDeviceMatrix:
         monkeypatch.setattr(qed_mpi, "run_distributed",
                             fake_run_distributed)
 
-        res = quantum_ed.diag(
+        res = qed.diag(
             H, solver="FTLM", device=device,
             symmetry=symm, sector=[0],
             target_beta=2.0, num_samples=1, mpi_n_ranks=2,
@@ -1031,7 +1031,7 @@ class TestDeviceMatrix:
 
 class TestSolverDeviceSupport:
     def test_returns_dict_with_all_devices(self):
-        m = quantum_ed.solver_device_support(return_dict=True)
+        m = qed.solver_device_support(return_dict=True)
         assert "LANCZOS" in m
         for dev in ("cpu", "gpu", "mpi", "mpi_gpu"):
             assert dev in m["LANCZOS"]
@@ -1039,12 +1039,12 @@ class TestSolverDeviceSupport:
             assert {"kernel", "available", "note"} <= set(cell)
 
     def test_cpu_lanczos_always_available(self):
-        m = quantum_ed.solver_device_support(return_dict=True)
+        m = qed.solver_device_support(return_dict=True)
         assert m["LANCZOS"]["cpu"]["available"] is True
         assert m["LANCZOS"]["cpu"]["kernel"] is True
 
     def test_unbuilt_cells_have_actionable_notes(self):
-        m = quantum_ed.solver_device_support(return_dict=True)
+        m = qed.solver_device_support(return_dict=True)
         for solver_name, cells in m.items():
             for device, cell in cells.items():
                 if cell["kernel"] and not cell["available"]:
@@ -1056,7 +1056,7 @@ class TestSolverDeviceSupport:
                     )
 
     def test_no_kernel_cells_say_so(self):
-        m = quantum_ed.solver_device_support(return_dict=True)
+        m = qed.solver_device_support(return_dict=True)
         # ARPACK has no GPU kernel (intentional).
         assert m["ARPACK_*"]["gpu"]["kernel"] is False
         assert m["ARPACK_*"]["gpu"]["available"] is False
@@ -1065,7 +1065,7 @@ class TestSolverDeviceSupport:
         assert m["SCALAPACK"]["cpu"]["available"] is False
 
     def test_filter_by_solver(self):
-        m = quantum_ed.solver_device_support(solver="lanczos", return_dict=True)
+        m = qed.solver_device_support(solver="lanczos", return_dict=True)
         # Substring match (case-insensitive) -> LANCZOS, BLOCK_LANCZOS.
         assert "LANCZOS" in m
         assert "BLOCK_LANCZOS" in m
@@ -1073,7 +1073,7 @@ class TestSolverDeviceSupport:
         assert "FTLM" not in m
 
     def test_print_form_runs(self, capsys):
-        ret = quantum_ed.solver_device_support()
+        ret = qed.solver_device_support()
         assert ret is None
         captured = capsys.readouterr()
         assert "Build flags:" in captured.out
@@ -1096,7 +1096,7 @@ class TestRunDistributedAliases:
 
     @pytest.fixture
     def captured_argv(self, monkeypatch):
-        from quantum_ed import mpi as qed_mpi
+        from qed import mpi as qed_mpi
         captured = {}
 
         def fake_run(cmd, **kw):
@@ -1113,14 +1113,14 @@ class TestRunDistributedAliases:
         return captured
 
     def test_method_lanczos_no_gpu_flag(self, captured_argv):
-        from quantum_ed import mpi as qed_mpi
+        from qed import mpi as qed_mpi
         qed_mpi.run_distributed(method="lanczos", n_ranks=4)
         cmd = captured_argv["cmd"]
         assert "--mode" in cmd and "lanczos" in cmd
         assert "--gpu" not in cmd
 
     def test_use_gpu_appends_flag(self, captured_argv):
-        from quantum_ed import mpi as qed_mpi
+        from qed import mpi as qed_mpi
         qed_mpi.run_distributed(method="lanczos", n_ranks=4, use_gpu=True)
         cmd = captured_argv["cmd"]
         assert "--gpu" in cmd
@@ -1130,7 +1130,7 @@ class TestRunDistributedAliases:
         assert mode_idx < gpu_idx
 
     def test_tpq_mode_is_accepted(self, captured_argv):
-        from quantum_ed import mpi as qed_mpi
+        from qed import mpi as qed_mpi
         qed_mpi.run_distributed(
             method="tpq", n_ranks=2,
             binary_args=("--betas", "0.1,1.0", "--samples", "4"),
@@ -1140,7 +1140,7 @@ class TestRunDistributedAliases:
         assert "--betas" in cmd
 
     def test_mtpq_alias_maps_to_tpq(self, captured_argv):
-        from quantum_ed import mpi as qed_mpi
+        from qed import mpi as qed_mpi
         qed_mpi.run_distributed(method="mtpq", n_ranks=2)
         cmd = captured_argv["cmd"]
         assert cmd[cmd.index("--mode") + 1] == "tpq"
@@ -1150,7 +1150,7 @@ class TestRunDistributedAliases:
         # Lanczos with locking) is now its own --mode on
         # ed_distributed_main; the wrapper no longer downgrades to
         # plain lanczos.
-        from quantum_ed import mpi as qed_mpi
+        from qed import mpi as qed_mpi
         import warnings
         with warnings.catch_warnings():
             warnings.simplefilter("error")
@@ -1159,13 +1159,13 @@ class TestRunDistributedAliases:
         assert cmd[cmd.index("--mode") + 1] == "krylov_schur"
 
     def test_ks_alias_maps_to_krylov_schur(self, captured_argv):
-        from quantum_ed import mpi as qed_mpi
+        from qed import mpi as qed_mpi
         qed_mpi.run_distributed(method="ks", n_ranks=2)
         cmd = captured_argv["cmd"]
         assert cmd[cmd.index("--mode") + 1] == "krylov_schur"
 
     def test_unknown_method_lists_supported_modes(self, captured_argv):
-        from quantum_ed import mpi as qed_mpi
+        from qed import mpi as qed_mpi
         with pytest.raises(ValueError) as exc:
             qed_mpi.run_distributed(method="quantum-magic", n_ranks=1)
         msg = str(exc.value)

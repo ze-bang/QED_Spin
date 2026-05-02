@@ -1,13 +1,13 @@
-"""pytest configuration for the quantum_ed Python bindings.
+"""pytest configuration for the qed Python bindings.
 
 Resolution strategy (first match wins):
   1. ``ED_BUILD_DIR`` env var pointing at a CMake build tree that contains
-     ``python/quantum_ed/_core*.so`` -- used by developers who keep the
+     ``python/qed/_core*.so`` -- used by developers who keep the
      wheel uninstalled and iterate via ``cmake --build``.
   2. The repo's ``python/`` directory if it already has a built
      ``_core*.so`` next to ``__init__.py`` (top-level CMake build with
      ``-DED_BUILD_PYTHON=ON``).
-  3. Whatever ``quantum_ed`` is on ``sys.path`` already (typically the
+  3. Whatever ``qed`` is on ``sys.path`` already (typically the
      installed wheel). This is what CI uses after ``pip install .``.
 """
 
@@ -27,8 +27,8 @@ def _has_built_core(pkg_dir: Path) -> bool:
 _candidates: list[Path] = []
 build_env = os.environ.get("ED_BUILD_DIR")
 if build_env:
-    _candidates.append(Path(build_env) / "python" / "quantum_ed")
-_candidates.append(PROJECT_ROOT / "python" / "quantum_ed")
+    _candidates.append(Path(build_env) / "python" / "qed")
+_candidates.append(PROJECT_ROOT / "python" / "qed")
 
 for cand in _candidates:
     if cand.is_dir() and _has_built_core(cand):

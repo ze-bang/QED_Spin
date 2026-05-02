@@ -4,7 +4,7 @@
 The C++ MPI distributed solvers (``ed::distributed::distributed_lanczos``,
 ``distributed_ftlm``) are designed to be driven from an
 ``mpirun`` / ``mpiexec`` launcher on an HPC cluster. They are deliberately
-**not** bound to ``quantum_ed._core``: a single-process Python interpreter
+**not** bound to ``qed._core``: a single-process Python interpreter
 cannot host ``MPI_Init`` cleanly, and the right idiomatic launch is
 ``mpiexec -n N ed_distributed_main ...`` (or
 ``srun -n N ed_distributed_main ...`` on SLURM).
@@ -21,7 +21,7 @@ silently ignored those tokens and ran the default Heisenberg chain
 instead. The previous ``MPI_METHODS`` tuple also advertised three
 methods (``tpq``, ``lanczos_symmetry``, ``lanczos_gpu``) that the
 standalone driver does not expose; those are still available from
-within Python via the :mod:`quantum_ed.distributed` extension module on
+within Python via the :mod:`qed.distributed` extension module on
 MPI-capable builds, but not via this subprocess shim.
 
 Example
@@ -29,7 +29,7 @@ Example
 
 .. code-block:: python
 
-    from quantum_ed import mpi as qed_mpi
+    from qed import mpi as qed_mpi
 
     # Lanczos on an N=20 Heisenberg chain:
     qed_mpi.run_distributed(
@@ -43,7 +43,7 @@ Example
 For the exact CLI surface, run ``ed_distributed_main --help``.
 
 The capability is also exposed through the build introspection helpers
-in ``quantum_ed`` itself: ``quantum_ed.has_mpi_build()`` reports whether
+in ``qed`` itself: ``qed.has_mpi_build()`` reports whether
 the companion C++ build was made with ``WITH_MPI=ON`` (the precondition
 for ``ed_distributed_main`` to exist).
 """
@@ -217,14 +217,14 @@ def run_distributed(
         raise ValueError(
             f"method={requested!r} not in {MPI_METHODS}. "
             "ed_distributed_main exposes a fixed set of MPI solver modes; "
-            "extend MPI_METHODS in quantum_ed/mpi.py if you add a new one. "
+            "extend MPI_METHODS in qed/mpi.py if you add a new one. "
             "See qed.solver_device_support() for the full (solver, "
             "device) compatibility matrix."
         )
 
     if directory is not None:
         warnings.warn(
-            "quantum_ed.mpi.run_distributed(directory=...) is deprecated and "
+            "qed.mpi.run_distributed(directory=...) is deprecated and "
             "ignored: ed_distributed_main never consumed a directory "
             "positional argument. Drop the directory= kwarg from your call.",
             DeprecationWarning,
@@ -232,7 +232,7 @@ def run_distributed(
         )
     if extra_args is not None:
         warnings.warn(
-            "quantum_ed.mpi.run_distributed(extra_args=...) is deprecated; "
+            "qed.mpi.run_distributed(extra_args=...) is deprecated; "
             "use binary_args= instead.",
             DeprecationWarning,
             stacklevel=2,

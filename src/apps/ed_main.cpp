@@ -261,7 +261,7 @@ void print_help(const char* prog_name) {
     std::cout << "All dynamical / static structure-factor calculations route through the\n";
     std::cout << "`ED dssf` subcommand, which dispatches into `ed::dssf::run(...)` -- the\n";
     std::cout << "single canonical engine seam shared by the C++ CLI and the Python\n";
-    std::cout << "`quantum_ed.dssf` bindings.\n\n";
+    std::cout << "`qed.dssf` bindings.\n\n";
     std::cout << "  " << prog_name << " dssf <method> <directory> [options]\n\n";
     std::cout << "  Methods (case-insensitive):\n";
     std::cout << "    dynamical_thermal    Finite-T S(Q,ω) via FTLM continued fraction.\n";
@@ -357,7 +357,7 @@ int main(int argc, char* argv[]) {
     // `ED dssf <method>` subcommand -- the canonical, single entry point
     // for every dynamical / static structure-factor calculation. Routes
     // through `ed::dssf::run(...)` (the same engine seam that the Python
-    // `quantum_ed.dssf` bindings consume), so the C++ CLI and the Python
+    // `qed.dssf` bindings consume), so the C++ CLI and the Python
     // wrapper share identical observable construction, dispatch, and
     // on-disk output.
     //

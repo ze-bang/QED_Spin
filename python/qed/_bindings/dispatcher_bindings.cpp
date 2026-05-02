@@ -1,5 +1,5 @@
 // =============================================================================
-// python/quantum_ed/_bindings/dispatcher_bindings.cpp
+// python/qed/_bindings/dispatcher_bindings.cpp
 //
 // Phase 5 Python interface expansion (Apr 2026): bind the high-level C++
 // dispatcher and the directory- / streaming-symmetry drivers so the entire
@@ -51,9 +51,9 @@ make_matvec(const Op& op) {
 
 // -----------------------------------------------------------------------------
 // Convert a Python dict (matching the schema returned by
-// quantum_ed.symmetry.group_from_generators / translation_group_1d) into a
+// qed.symmetry.group_from_generators / translation_group_1d) into a
 // SymmetryGroupInfo. Both endpoints round-trip:
-//   d = quantum_ed.symmetry.group_from_generators(...)
+//   d = qed.symmetry.group_from_generators(...)
 //   op.set_symmetry_info_from_dict(d)
 //   d2 = op.get_symmetry_info_as_dict()
 //   assert d2 == d  # up to ordering of generators
@@ -261,7 +261,7 @@ void bind_dispatcher(py::module_& m) {
         "On-disk format for the Hamiltonian files passed to "
         "`exact_diagonalization_from_directory(...)`. The default "
         "STANDARD value is the mVMC InterAll/Trans tuple that "
-        "`quantum_ed.input.HamiltonianBuilder.write_files(...)` "
+        "`qed.input.HamiltonianBuilder.write_files(...)` "
         "emits.")
         .value("STANDARD",      HamiltonianFileFormat::STANDARD)
         .value("SPARSE_MATRIX", HamiltonianFileFormat::SPARSE_MATRIX)
@@ -284,7 +284,7 @@ void bind_dispatcher(py::module_& m) {
 
         Example
         -------
-        >>> import quantum_ed as qed
+        >>> import qed as qed
         >>> params = qed.EDParameters()
         >>> params.num_sites = 6
         >>> params.num_eigenvalues = 4
@@ -409,7 +409,7 @@ void bind_dispatcher(py::module_& m) {
         .def_readwrite("arpack_inner_tol_min",            &EDParameters::arpack_inner_tol_min)
         .def_readwrite("arpack_inner_max_iter",           &EDParameters::arpack_inner_max_iter)
         .def("__repr__", [](const EDParameters& p) {
-            return "<quantum_ed.EDParameters num_eigenvalues=" +
+            return "<qed.EDParameters num_eigenvalues=" +
                    std::to_string(p.num_eigenvalues) +
                    " max_iterations=" + std::to_string(p.max_iterations) +
                    " tolerance=" + std::to_string(p.tolerance) +
@@ -552,12 +552,12 @@ void bind_dispatcher(py::module_& m) {
 
     // ------------------------------------------------------------------------
     // 6. Symmetry projection: attach the Operator.symmetry_info setter /
-    //    getter so callers can wire `quantum_ed.symmetry.group_from_generators(...)`
+    //    getter so callers can wire `qed.symmetry.group_from_generators(...)`
     //    output straight onto an in-process Operator without going through
     //    the on-disk automorphism_results/ JSON detour.
     //
     //    The Operator and FixedSzOperator pybind11 classes were already
-    //    declared in quantum_ed_bindings.cpp before bind_dispatcher() runs,
+    //    declared in qed_bindings.cpp before bind_dispatcher() runs,
     //    so we attach the new methods by looking them up via attr() and
     //    binding cpp_functions as instance methods. SymmetryGroupInfo lives
     //    on Operator (FixedSzOperator inherits it), so a single Operator-
@@ -571,8 +571,8 @@ void bind_dispatcher(py::module_& m) {
             Attach a symmetry group to the operator from a dict.
 
             The dict schema matches what
-            ``quantum_ed.symmetry.group_from_generators(...)`` and
-            ``quantum_ed.symmetry.translation_group_1d(...)`` return:
+            ``qed.symmetry.group_from_generators(...)`` and
+            ``qed.symmetry.translation_group_1d(...)`` return:
             ``num_generators`` (int), ``generator_orders`` (list[int]),
             ``generators`` (list[list[int]]), ``max_clique``
             (list[list[int]]), ``power_representation`` (list[list[int]]),
@@ -586,7 +586,7 @@ void bind_dispatcher(py::module_& m) {
 
             Example
             -------
-            >>> import quantum_ed as qed
+            >>> import qed as qed
             >>> N = 6
             >>> g = qed.symmetry.translation(N, 1)
             >>> info = qed.symmetry.group_from_generators(N, [g])
@@ -599,7 +599,7 @@ void bind_dispatcher(py::module_& m) {
         const char* getter_doc =
             "Round-trip the operator's symmetry group as a Python dict. "
             "The dict is bit-compatible with the schema produced by "
-            "``quantum_ed.symmetry.group_from_generators(...)``. Returns "
+            "``qed.symmetry.group_from_generators(...)``. Returns "
             "an empty-defaults dict if no symmetry info has been set.";
 
         op_cls.attr("set_symmetry_info_from_dict") = py::cpp_function(
@@ -818,7 +818,7 @@ void bind_dispatcher(py::module_& m) {
         return false;
 #endif
     },
-        "True iff this build of ``quantum_ed._core`` was compiled with "
+        "True iff this build of ``qed._core`` was compiled with "
         "``WITH_CUDA=ON``. GPU-flavoured methods (``LANCZOS_GPU`` etc.) "
         "fall back to their CPU equivalents on builds where this is "
         "False.");
@@ -831,9 +831,9 @@ void bind_dispatcher(py::module_& m) {
 #endif
     },
         "True iff this build was compiled with ``WITH_MPI=ON``. The "
-        "single-process ``quantum_ed._core`` does not call MPI directly; "
+        "single-process ``qed._core`` does not call MPI directly; "
         "use the standalone ``mpiexec ed_distributed_main ...`` binary "
-        "(see ``quantum_ed.mpi.run_distributed(...)``) to drive the MPI "
+        "(see ``qed.mpi.run_distributed(...)``) to drive the MPI "
         "solvers.");
 
     m.def("has_scalapack_build", []() {

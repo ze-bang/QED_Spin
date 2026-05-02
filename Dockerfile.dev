@@ -1,5 +1,5 @@
 # =============================================================================
-# Dockerfile.dev -- reproducible developer environment for quantum_ed.
+# Dockerfile.dev -- reproducible developer environment for qed.
 #
 # Goal: lab collaborators can run *exactly* the same C++ + Python toolchain
 # CI uses, without polluting their host system.
@@ -12,7 +12,7 @@
 #   cmake --preset ci-linux                 # one-shot configure
 #   cmake --build --preset ci-linux -j      # build everything
 #   ctest   --preset ci-linux               # 42/42 must pass
-#   pip install -e .                        # build + install quantum_ed wheel
+#   pip install -e .                        # build + install qed wheel
 #   python -m pytest python/tests -v        # 22/22 must pass
 #
 # Notes
@@ -104,4 +104,4 @@ WORKDIR /work
 VOLUME /work
 
 # Pre-print the canonical workflow so newcomers see it on container start.
-CMD ["bash", "-lc", "cat <<'BANNER'\n\nquantum_ed dev container ready.\n\nFirst-time build:\n  cmake --preset ci-linux\n  cmake --build --preset ci-linux -j\n  ctest   --preset ci-linux\n\nPython wheel:\n  pip install -e .\n  python -m pytest python/tests -v\n\nDocs (optional):\n  pip install -r docs/requirements.txt\n  cmake -B build-docs -DED_BUILD_DOCS=ON\n  cmake --build build-docs --target sphinx\n\nBANNER\nexec bash"]
+CMD ["bash", "-lc", "cat <<'BANNER'\n\nqed dev container ready.\n\nFirst-time build:\n  cmake --preset ci-linux\n  cmake --build --preset ci-linux -j\n  ctest   --preset ci-linux\n\nPython wheel:\n  pip install -e .\n  python -m pytest python/tests -v\n\nDocs (optional):\n  pip install -r docs/requirements.txt\n  cmake -B build-docs -DED_BUILD_DOCS=ON\n  cmake --build build-docs --target sphinx\n\nBANNER\nexec bash"]

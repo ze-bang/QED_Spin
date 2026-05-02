@@ -1,4 +1,4 @@
-"""quantum_ed: Python interface to the C++ exact-diagonalization engine.
+"""qed: Python interface to the C++ exact-diagonalization engine.
 
 This package wraps the matrix-free C++ ``Operator`` / ``FixedSzOperator`` and
 the family of solvers (full diagonalization, every Lanczos / Krylov / Davidson
@@ -7,12 +7,12 @@ streaming symmetry, symmetrised block ED) through a thin pybind11 layer.
 
 The package has three layers of access:
 
-1. **Solver-level** ``quantum_ed.lanczos / full_diagonalization /
+1. **Solver-level** ``qed.lanczos / full_diagonalization /
    finite_temperature_lanczos / low_temperature_lanczos /
    hybrid_thermal_method``. Stable, narrowly-typed wrappers; great for
    notebook prototyping.
 
-2. **Dispatcher-level** ``quantum_ed.exact_diagonalization_core(op, method,
+2. **Dispatcher-level** ``qed.exact_diagonalization_core(op, method,
    params)`` (and the directory + streaming-symmetry siblings). One Python
    function reaches every solver the ``./ED`` CLI knows about, including
    ARPACK, BLOCK_LANCZOS, KRYLOV_SCHUR, BLOCK_KRYLOV_SCHUR, DAVIDSON,
@@ -22,16 +22,16 @@ The package has three layers of access:
    to a CUDA kernel (when the build was made with ``WITH_CUDA=ON``; check
    :func:`has_cuda_build`).
 
-3. **Library-level submodules**: ``quantum_ed.input`` (lattice + Hamiltonian
-   builders), ``quantum_ed.symmetry`` (programmatic permutation groups),
-   ``quantum_ed.dssf`` (DSSF observable assembly + ``./ED dssf`` runner),
-   ``quantum_ed.bfg`` (BFG order-parameter kernels), ``quantum_ed.mpi``
+3. **Library-level submodules**: ``qed.input`` (lattice + Hamiltonian
+   builders), ``qed.symmetry`` (programmatic permutation groups),
+   ``qed.dssf`` (DSSF observable assembly + ``./ED dssf`` runner),
+   ``qed.bfg`` (BFG order-parameter kernels), ``qed.mpi``
    (helper for the standalone ``mpiexec ed_distributed_main`` binary).
 
 Example -- end-to-end Heisenberg chain
 --------------------------------------
 
-    >>> import quantum_ed as qed
+    >>> import qed as qed
     >>> N = 6
     >>> # Build the Hamiltonian programmatically.
     >>> b = qed.input.HamiltonianBuilder(num_sites=N)
@@ -104,7 +104,7 @@ from . import input  # standalone C++ ed_input library bindings (Phase 4)
 from . import symmetry  # programmatic site-permutation symmetry DSL (P2.11)
 from . import bfg  # BFG order-parameter library helpers (P2.1)
 from . import mpi  # mpiexec ed_distributed_main runner helper (Phase 5)
-from . import helpers  # re-export edlib utilities under quantum_ed.helpers
+from . import helpers  # re-export edlib utilities under qed.helpers
 from . import workflow  # Phase 9: stress-free unified workflow API
 from .workflow import (  # noqa: E402  (top-level re-exports)
     GeneratorSet,

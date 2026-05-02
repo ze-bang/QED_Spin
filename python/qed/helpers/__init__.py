@@ -1,10 +1,10 @@
-"""quantum_ed.helpers: re-exports of the legacy ``edlib`` geometry utilities.
+"""qed.helpers: re-exports of the legacy ``edlib`` geometry utilities.
 
 These modules were originally developed under the ``edlib`` namespace.
-Importing ``quantum_ed.helpers`` exposes them under the new
-``quantum_ed.*`` namespace while keeping ``edlib`` as a compatibility
+Importing ``qed.helpers`` exposes them under the new
+``qed.*`` namespace while keeping ``edlib`` as a compatibility
 alias (see ``edlib.__init__``). New code should import from
-``quantum_ed.helpers``.
+``qed.helpers``.
 
 This module is intentionally lazy: heavy imports (e.g. lattice helpers
 that pull SymPy or sage-like dependencies) only happen when accessed.
@@ -36,7 +36,7 @@ __all__ = list(_ALIAS_MAP.keys())
 def __getattr__(name: str) -> Any:
     target = _ALIAS_MAP.get(name)
     if target is None:
-        raise AttributeError(f"module 'quantum_ed.helpers' has no attribute '{name}'")
+        raise AttributeError(f"module 'qed.helpers' has no attribute '{name}'")
     module = import_module(target)
     globals()[name] = module
     return module

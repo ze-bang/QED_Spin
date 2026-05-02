@@ -1,6 +1,6 @@
-# Python quickstart (`quantum_ed`)
+# Python quickstart (`qed`)
 
-The Python facade lives under the `quantum_ed` package. It is a `pybind11`
+The Python facade lives under the `qed` package. It is a `pybind11`
 layer over the same `ed_solvers_*` static libraries that the C++ CLI
 uses, so results are bit-identical. Since Phase 5 (Apr 2026) it reaches
 **every backend** the CLI knows about (CPU iterative + dense, FTLM /
@@ -18,7 +18,7 @@ worked example) jump to
 
 ```python
 import numpy as np
-import quantum_ed as qe
+import qed as qe
 
 # 2-site Heisenberg dimer, S = 1/2
 op = qe.Operator(num_sites=2, spin_length=0.5)
@@ -100,12 +100,12 @@ res = qe.full_diagonalization(op)
 
 ## Hamiltonian builder DSL
 
-For textbook lattice models the `quantum_ed.hamiltonian` submodule wraps
+For textbook lattice models the `qed.hamiltonian` submodule wraps
 the C++ `Operator` API in a fluent QuSpin-style builder. The 4-site
 Heisenberg chain becomes one line:
 
 ```python
-import quantum_ed as qe
+import qed as qe
 
 H = (
     qe.hamiltonian.Hamiltonian(num_sites=4)
@@ -136,14 +136,14 @@ H_singlet.dimension   # C(4, 2) == 6
 
 ## DSSF: building observable pairs
 
-The `quantum_ed.dssf` submodule exposes the *same* `OperatorSpec` /
+The `qed.dssf` submodule exposes the *same* `OperatorSpec` /
 `build_observable_pairs` / `compute_transverse_bases` C++ functions used by
 the `ED dssf` subcommand, so a Python script can produce a byte-identical
 pair list (operators, names, ordering) and feed them into the solvers
 without any glue code:
 
 ```python
-import quantum_ed as qe
+import qed as qe
 
 spec = qe.dssf.OperatorSpec()
 spec.operator_type     = "transverse"
@@ -173,7 +173,7 @@ The thin wrappers above (`qe.full_diagonalization`, `qe.lanczos`,
 full backend matrix use the dispatcher:
 
 ```python
-import quantum_ed as qe
+import qed as qe
 
 params = qe.EDParameters()
 params.num_eigenvalues = 4
@@ -222,8 +222,8 @@ from edlib import hdf5_io, automorphism_finder   # legacy code keeps working
 New code should prefer the namespaced re-exports:
 
 ```python
-from quantum_ed.helpers import hdf5_io, automorphism_finder
+from qed.helpers import hdf5_io, automorphism_finder
 ```
 
 The `edlib` shim stays in place so that downstream notebooks and scripts
-don't break, but every new feature lands under `quantum_ed.*`.
+don't break, but every new feature lands under `qed.*`.

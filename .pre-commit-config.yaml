@@ -46,7 +46,7 @@ repos:
         exclude: '^(build|build-.*|_skbuild|.*third_party).*'
 
   # ---------------------------------------------------------------------------
-  # Python formatting + lint (helpers + future quantum_ed/ bindings)
+  # Python formatting + lint (helpers + future qed/ bindings)
   # ---------------------------------------------------------------------------
   - repo: https://github.com/astral-sh/ruff-pre-commit
     rev: v0.6.9

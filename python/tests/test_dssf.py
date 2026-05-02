@@ -23,8 +23,8 @@ from pathlib import Path
 
 import pytest
 
-quantum_ed = pytest.importorskip("quantum_ed")
-dssf = quantum_ed.dssf
+qed = pytest.importorskip("qed")
+dssf = qed.dssf
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]

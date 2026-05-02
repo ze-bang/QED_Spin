@@ -3,14 +3,14 @@ requires = ["scikit-build-core>=0.10", "pybind11>=2.13"]
 build-backend = "scikit_build_core.build"
 
 [project]
-name = "quantum_ed"
+name = "qed"
 version = "0.1.0"
-description = "Modern Python interface to the C++ exact-diagonalization engine"
+description = "Modern Python interface to the C++ exact-diagonalization engine (QED)"
 readme = "README.md"
 requires-python = ">=3.9"
 license = { file = "LICENSE" }
 authors = [
-    { name = "ED collaborators" },
+    { name = "QED collaborators" },
 ]
 keywords = [
     "exact-diagonalization",
@@ -47,9 +47,9 @@ dev = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/yourorg/exact_diagonalization"
-Documentation = "https://yourorg.github.io/exact_diagonalization/"
-Repository = "https://github.com/yourorg/exact_diagonalization"
+Homepage = "https://github.com/ze-bang/QED"
+Documentation = "https://ze-bang.github.io/QED/"
+Repository = "https://github.com/ze-bang/QED"
 
 # -----------------------------------------------------------------------------
 # scikit-build-core configuration.
@@ -62,14 +62,14 @@ Repository = "https://github.com/yourorg/exact_diagonalization"
 cmake.version = ">=3.18"
 cmake.build-type = "Release"
 build-dir = "build/python-{build_type}"
-wheel.packages = ["python/quantum_ed", "python/edlib"]
+wheel.packages = ["python/qed", "python/edlib"]
 wheel.install-dir = "."
 wheel.exclude = ["**/__pycache__/**", "**/*.pyc"]
 sdist.include = [
     "include",
     "src",
     "cmake",
-    "python/quantum_ed",
+    "python/qed",
     "python/edlib",
     "CMakeLists.txt",
     "pyproject.toml",

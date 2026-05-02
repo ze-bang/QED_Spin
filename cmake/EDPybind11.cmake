@@ -3,7 +3,7 @@
 #
 # Discovers pybind11 (with FetchContent fallback) and exposes the imported
 # target `pybind11::module` for building Python extensions. Used by
-# python/quantum_ed/CMakeLists.txt when ED_BUILD_PYTHON=ON.
+# python/qed/CMakeLists.txt when ED_BUILD_PYTHON=ON.
 #
 # P2.7 / audit "modern python interface".
 # =============================================================================

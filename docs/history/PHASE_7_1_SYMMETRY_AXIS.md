@@ -103,7 +103,7 @@ namespace ed_dispatch {
 }
 ```
 
-The Python binding for `quantum_ed.exact_diagonalization_from_directory`
+The Python binding for `qed.exact_diagonalization_from_directory`
 forwards through `ed_dispatch::exact_diagonalization_from_directory`,
 so the 5-axis contract is the *only* public Python entry point.
 

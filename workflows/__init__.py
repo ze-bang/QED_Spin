@@ -1,7 +1,7 @@
 """Workflows package: research-grade extensions on top of the ED toolkit.
 
 Each subpackage is a self-contained workflow that drives the canonical
-`./ED` binary (and its Python bindings in `quantum_ed`) through a
+`./ED` binary (and its Python bindings in `qed`) through a
 multi-step pipeline. Currently shipping:
 
 * `workflows.nlce` -- Numerical Linked Cluster Expansion (pyrochlore +

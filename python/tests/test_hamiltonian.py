@@ -10,8 +10,8 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-quantum_ed = pytest.importorskip("quantum_ed")
-hamiltonian = quantum_ed.hamiltonian
+qed = pytest.importorskip("qed")
+hamiltonian = qed.hamiltonian
 
 
 # ----------------------------------------------------------------------
@@ -34,8 +34,8 @@ def test_unknown_token_raises():
 def test_token_case_insensitive():
     H_upper = hamiltonian.Hamiltonian(2).add(("X", "X"), (0, 1), 1.0).build()
     H_lower = hamiltonian.Hamiltonian(2).add(("x", "x"), (0, 1), 1.0).build()
-    e_upper = np.sort(np.asarray(quantum_ed.full_diagonalization(H_upper)))
-    e_lower = np.sort(np.asarray(quantum_ed.full_diagonalization(H_lower)))
+    e_upper = np.sort(np.asarray(qed.full_diagonalization(H_upper)))
+    e_lower = np.sort(np.asarray(qed.full_diagonalization(H_lower)))
     assert np.allclose(e_upper, e_lower)
 
 
@@ -76,7 +76,7 @@ def test_heisenberg_2site_matches_analytic_spectrum():
         .heisenberg([(0, 1)])
         .build()
     )
-    eigvals = np.sort(np.asarray(quantum_ed.full_diagonalization(H)))
+    eigvals = np.sort(np.asarray(qed.full_diagonalization(H)))
     assert eigvals.shape == (4,)
     assert np.isclose(eigvals[0], -0.75, atol=1e-10)
     assert np.allclose(eigvals[1:], 0.25, atol=1e-10)
@@ -89,7 +89,7 @@ def test_heisenberg_4site_chain_matches_analytic():
         .heisenberg([(0, 1), (1, 2), (2, 3)])
         .build()
     )
-    eigvals = np.sort(np.asarray(quantum_ed.full_diagonalization(H)))
+    eigvals = np.sort(np.asarray(qed.full_diagonalization(H)))
     assert np.isclose(eigvals[0], -1.6160254037844388, atol=1e-10)
 
 
@@ -98,16 +98,16 @@ def test_heisenberg_matches_handrolled_operator():
     edges = [(0, 1), (1, 2), (2, 3)]
     H_dsl = hamiltonian.Hamiltonian(4).heisenberg(edges, j=1.0).build()
 
-    H_manual = quantum_ed.Operator(num_sites=4, spin=0.5)
+    H_manual = qed.Operator(num_sites=4, spin=0.5)
     half = complex(0.5, 0.0)
     one = complex(1.0, 0.0)
     for i, j in edges:
-        H_manual.add_two_body(quantum_ed.OP_SPLUS,  i, quantum_ed.OP_SMINUS, j, half)
-        H_manual.add_two_body(quantum_ed.OP_SMINUS, i, quantum_ed.OP_SPLUS,  j, half)
-        H_manual.add_two_body(quantum_ed.OP_SZ,     i, quantum_ed.OP_SZ,     j, one)
+        H_manual.add_two_body(qed.OP_SPLUS,  i, qed.OP_SMINUS, j, half)
+        H_manual.add_two_body(qed.OP_SMINUS, i, qed.OP_SPLUS,  j, half)
+        H_manual.add_two_body(qed.OP_SZ,     i, qed.OP_SZ,     j, one)
 
-    e_dsl    = np.sort(np.asarray(quantum_ed.full_diagonalization(H_dsl)))
-    e_manual = np.sort(np.asarray(quantum_ed.full_diagonalization(H_manual)))
+    e_dsl    = np.sort(np.asarray(qed.full_diagonalization(H_dsl)))
+    e_manual = np.sort(np.asarray(qed.full_diagonalization(H_manual)))
     assert np.allclose(e_dsl, e_manual, atol=1e-12)
 
 
@@ -128,8 +128,8 @@ def test_xx_yy_via_x_x_and_y_y_tokens_matches_xx_yy_helper():
         .xx_yy([(0, 1)], j=1.0)
         .build()
     )
-    e_tokens = np.sort(np.asarray(quantum_ed.full_diagonalization(H_tokens)))
-    e_helper = np.sort(np.asarray(quantum_ed.full_diagonalization(H_helper)))
+    e_tokens = np.sort(np.asarray(qed.full_diagonalization(H_tokens)))
+    e_helper = np.sort(np.asarray(qed.full_diagonalization(H_helper)))
     assert np.allclose(e_tokens, e_helper, atol=1e-12)
 
 
@@ -144,7 +144,7 @@ def test_transverse_field_ising_h_zero_matches_classical_ising():
         .transverse_field_ising([(0, 1), (1, 2), (2, 3)], j=1.0, h=0.0)
         .build()
     )
-    eigvals = np.sort(np.asarray(quantum_ed.full_diagonalization(H)))
+    eigvals = np.sort(np.asarray(qed.full_diagonalization(H)))
     # Ground state of -J Sz Sz chain is all-up or all-down: E0 = -J*3/4
     assert np.isclose(eigvals[0], -0.75, atol=1e-10)
 
@@ -161,7 +161,7 @@ def test_transverse_field_ising_critical_point_2site():
         .transverse_field_ising([(0, 1)], j=j, h=h)
         .build()
     )
-    eigvals = np.sort(np.asarray(quantum_ed.full_diagonalization(H)))
+    eigvals = np.sort(np.asarray(qed.full_diagonalization(H)))
     # Numerically derive the expected spectrum from the 4x4 dense matrix.
     sx = 0.5 * np.array([[0, 1], [1, 0]], dtype=complex)
     sz = 0.5 * np.array([[1, 0], [0, -1]], dtype=complex)
@@ -183,12 +183,12 @@ def test_field_z_uniform_zeeman_matches_handrolled():
         .field("z", h)
         .build()
     )
-    H_manual = quantum_ed.Operator(num_sites=3, spin=0.5)
+    H_manual = qed.Operator(num_sites=3, spin=0.5)
     for i in range(3):
-        H_manual.add_one_body(quantum_ed.OP_SZ, i, complex(h, 0.0))
+        H_manual.add_one_body(qed.OP_SZ, i, complex(h, 0.0))
 
-    e_dsl = np.sort(np.asarray(quantum_ed.full_diagonalization(H_dsl)))
-    e_man = np.sort(np.asarray(quantum_ed.full_diagonalization(H_manual)))
+    e_dsl = np.sort(np.asarray(qed.full_diagonalization(H_dsl)))
+    e_man = np.sort(np.asarray(qed.full_diagonalization(H_manual)))
     assert np.allclose(e_dsl, e_man, atol=1e-12)
 
 
@@ -199,7 +199,7 @@ def test_field_subset_of_sites():
         .field("z", 1.0, sites=[0])
         .build()
     )
-    eigvals = np.sort(np.asarray(quantum_ed.full_diagonalization(H)))
+    eigvals = np.sort(np.asarray(qed.full_diagonalization(H)))
     expected = np.array([-0.5, -0.5, 0.5, 0.5])
     assert np.allclose(eigvals, expected, atol=1e-10)
 
@@ -214,7 +214,7 @@ def test_fixed_sz_sector_dimension():
         .heisenberg([(0, 1), (1, 2), (2, 3)])
         .build()
     )
-    assert isinstance(H, quantum_ed.FixedSzOperator)
+    assert isinstance(H, qed.FixedSzOperator)
     # C(4, 2) = 6
     assert H.dimension == 6
 

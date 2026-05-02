@@ -14,7 +14,7 @@ Quick start
 
 .. code-block:: python
 
-    import quantum_ed as qed
+    import qed as qed
 
     spec = qed.dssf.OperatorSpec()
     spec.operator_type     = "transverse"
@@ -34,7 +34,7 @@ Quick start
 The returned :class:`ObservablePairs` carries three parallel lists --
 ``obs_1``, ``obs_2``, ``names`` -- of equal length. The ``Operator`` objects
 inside are the *same* C++ ``Operator`` / ``FixedSzOperator`` exposed via
-:mod:`quantum_ed`, so they can be plugged directly into Lanczos / FTLM /
+:mod:`qed`, so they can be plugged directly into Lanczos / FTLM /
 LTLM / Hybrid solvers without conversion.
 
 See also
@@ -257,7 +257,7 @@ def compute(
 ) -> subprocess.CompletedProcess[str]:
     """Auto-pilot DSSF runner -- one call, no method picking required.
 
-    Mirrors :func:`quantum_ed.diag` for spectral / structure-factor
+    Mirrors :func:`qed.diag` for spectral / structure-factor
     computations. The DSSF method is auto-selected from whether ``T``
     and/or ``omega`` are supplied (see :func:`pick_method`); pass
     ``method=`` to override the auto-rule. Everything else is delegated

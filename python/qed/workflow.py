@@ -1,11 +1,11 @@
-"""``quantum_ed.workflow``: maximally stress-free ED workflow (Phase 9).
+"""``qed.workflow``: maximally stress-free ED workflow (Phase 9).
 
 This module is the recommended entry point for new code. It takes care of
 the three friction points the legacy multi-step API forces every user to
 solve themselves:
 
 1. **Symmetry discovery.** :func:`find_symmetries` inspects an in-memory
-   :class:`quantum_ed.Operator`, runs the colored-graph automorphism
+   :class:`qed.Operator`, runs the colored-graph automorphism
    pipeline (the same one that powers ``automorphism_finder.py`` on
    disk), and returns a :class:`SymmetryReport` summarising every
    generator set the engine could find. The report also tells the user
@@ -27,7 +27,7 @@ Quick start
 
 .. code-block:: python
 
-    import quantum_ed as qed
+    import qed as qed
 
     # 1. Build a Hamiltonian.
     lat = qed.input.lattice.chain(12, pbc=True)
@@ -58,7 +58,7 @@ What ``diag`` does for you (smart defaults)
   ``dim ~ 2048``), ``LANCZOS`` for the bottom of the spectrum at
   moderate N, ``KRYLOV_SCHUR`` / ``BLOCK_LANCZOS`` when the user
   asks for many eigenvalues. Pass an explicit
-  :class:`~quantum_ed.DiagonalizationMethod` value to override.
+  :class:`~qed.DiagonalizationMethod` value to override.
 * ``device=None`` picks ``"cpu"``, ``"gpu"``, ``"mpi"``, or
   ``"mpi_gpu"`` based on Hilbert-space size, build introspection
   (``has_cuda_build`` / ``has_mpi_build``), and the fact that an
@@ -382,7 +382,7 @@ def find_symmetries(
     ----------
     operator : Operator
         Spin Hamiltonian to inspect.
-    lattice : quantum_ed.input.Lattice, optional
+    lattice : qed.input.Lattice, optional
         If provided, an additional ``"translation"`` generator set is
         produced by filtering automorphisms to pure lattice
         translations. Requires ``lattice.positions`` and
@@ -673,7 +673,7 @@ def diag(
         basis via the streaming symmetry kernel (per-sector matrix-free
         apply). Accepts a :class:`GeneratorSet`, a raw list of
         permutations, or the dict produced by
-        :func:`quantum_ed.symmetry.group_from_generators`.
+        :func:`qed.symmetry.group_from_generators`.
 
         **Not supported for TPQ methods**: TPQ relies on a single
         random vector spread across the whole Hilbert space, so the
@@ -722,7 +722,7 @@ def diag(
 
     plan : bool, optional
         If True (default), run the pre-flight planner
-        (:func:`quantum_ed.estimate_resources`) before dispatch and
+        (:func:`qed.estimate_resources`) before dispatch and
         emit a one-line "FEASIBLE / INFEASIBLE" verdict (verbose mode
         prints the full report). When the planner judges the request
         infeasible (memory / build / kernel), :exc:`ResourceError`
@@ -1198,7 +1198,7 @@ def solver_device_support(
     The MPI cells require the standalone ``ed_distributed_main`` binary
     in addition to ``WITH_MPI=ON`` in the Python extension build (the
     binary is built only when WITH_MPI=ON). The Python wrapper
-    :func:`quantum_ed.mpi.run_distributed` checks ``shutil.which`` at
+    :func:`qed.mpi.run_distributed` checks ``shutil.which`` at
     call time, so a True ``available`` here means the Python side
     knows how to launch it; the binary itself may still be elsewhere
     on $PATH.
@@ -1688,7 +1688,7 @@ def _resolve_device(device: Optional[str], dim: int) -> tuple[bool, bool]:
     if device_lc == "gpu":
         if not has_cuda_build():
             raise RuntimeError(
-                "device='gpu' requested but this build of quantum_ed._core "
+                "device='gpu' requested but this build of qed._core "
                 "does not have WITH_CUDA=ON. Rebuild with -DWITH_CUDA=ON or "
                 "use device='cpu'."
             )

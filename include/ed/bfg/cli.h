@@ -14,7 +14,7 @@
 // `ed_bfg` slice (cluster loader, correlations, structure factors, ring
 // observables, spin S(q), order parameters, results-IO writers) and
 // nothing outside it, and the dispatchers are reusable from any future
-// front-end (e.g. a Python `quantum_ed.cli` mirror, a benchmarking
+// front-end (e.g. a Python `qed.cli` mirror, a benchmarking
 // harness, or a unified `ED bfg-order-parameters` subcommand).
 //
 // Audit ref: P2.1.

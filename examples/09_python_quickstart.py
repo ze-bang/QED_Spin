@@ -3,7 +3,7 @@
 
 The same 4-site Heisenberg ground state as `01_cpp_ground_state.cpp`, this
 time through the Python bindings (`pip install -e .` from the repo root,
-which installs the `quantum_ed` package).
+which installs the `qed` package).
 
 Run::
 
@@ -18,7 +18,7 @@ import sys
 
 import numpy as np
 
-import quantum_ed as qed
+import qed as qed
 
 
 def build_heisenberg_chain(N: int, periodic: bool, J: float = 1.0) -> qed.Operator:

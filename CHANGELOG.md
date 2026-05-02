@@ -7,6 +7,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed — repository / package rename to **QED**
+
+Renamed top-level identifiers (C++ `namespace ed::` and binary names
+`ED`/`ed_distributed_main`/`compute_bfg_order_parameters[_gpu]` are
+**unchanged**; this is a user-facing rebrand only).
+
+- **CMake project**: `ExactDiagonalization` → `QED`. Downstream consumers
+  now use:
+    ```cmake
+    find_package(QED CONFIG REQUIRED)
+    target_link_libraries(myapp PRIVATE QED::ed_solvers_cpu)
+    ```
+  Installed config artifacts are now `lib/cmake/QED/QEDConfig.cmake`,
+  `QEDConfigVersion.cmake`, `QEDTargets.cmake` (export namespace
+  `QED::`). The template lives at `cmake/QEDConfig.cmake.in`.
+- **Python distribution / import**: `quantum_ed` → `qed`. The package
+  directory moved from `python/quantum_ed/` to `python/qed/`. Update
+  call sites:
+    ```python
+    import qed                  # was: import quantum_ed as qed
+    from qed import workflow    # was: from quantum_ed import workflow
+    ```
+  `pyproject.toml`'s `name = "qed"`. The pybind11 module is now
+  `qed._core` (was `quantum_ed._core`).
+- **Workspace folder / GitHub repo**: `exact_diagonalization_cpp/` →
+  `QED/`. Update any external scripts that hardcode the path
+  (`launch_*.sh`, helper analysis drivers).
+- **Binding source**: renamed `python/qed/_bindings/quantum_ed_bindings.cpp`
+  → `python/qed/_bindings/qed_bindings.cpp`.
+- **Benchmark CLI**: `--skip_quantum_ed` → `--skip_qed`; functions
+  `time_quantum_ed_apply`/`time_quantum_ed_lanczos` → `time_qed_apply`/`time_qed_lanczos`.
+- **Old build directories must be deleted** — stale `EDConfig.cmake`
+  files and frozen absolute paths in CMake caches will not migrate.
+
+Historical CHANGELOG entries below intentionally still reference
+`python/quantum_ed/...` because they describe the codebase state at
+the time those changes landed.
+
 ### Added — Phase H: auto-aggregate FTLM/TPQ across symmetry sectors on MPI path
 
 Closes the last MPI symmetry footgun: previously

@@ -2,7 +2,7 @@
 """examples/10_python_dssf.py
 
 T=0 ground-state Dynamical Structure Factor S(q, omega) on an 8-site
-Heisenberg PBC chain. Uses the high-level `quantum_ed.dssf` wrapper
+Heisenberg PBC chain. Uses the high-level `qed.dssf` wrapper
 that the C++ `ED dssf` subcommand calls under the hood, so the
 observable assembly is byte-identical to the production CLI.
 
@@ -17,7 +17,7 @@ import tempfile
 
 import numpy as np
 
-import quantum_ed as qed
+import qed as qed
 
 
 def build_chain(N: int, periodic: bool = True, J: float = 1.0) -> qed.Operator:

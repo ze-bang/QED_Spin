@@ -1,7 +1,7 @@
 # =============================================================================
-# python/quantum_ed/CMakeLists.txt
+# python/qed/CMakeLists.txt
 #
-# Build target: pybind11 module `quantum_ed._core`.
+# Build target: pybind11 module `qed._core`.
 #
 # Linked against the project's CPU static-library stack (ed_solvers_cpu) so
 # the binding inherits BLAS/LAPACK/ARPACK/HDF5/OpenMP transitively. When the
@@ -15,9 +15,9 @@
 # dispatchers, which then call into the CUDA kernels.
 #
 # When built via scikit-build-core (pip install [-e] .), the binary lands in
-# `python/quantum_ed/_core*.so` next to `__init__.py`. When built via the
+# `python/qed/_core*.so` next to `__init__.py`. When built via the
 # top-level CMake with -DED_BUILD_PYTHON=ON, the binary lands in
-# `<build>/python/quantum_ed/_core*.so` for in-tree experimentation.
+# `<build>/python/qed/_core*.so` for in-tree experimentation.
 # =============================================================================
 
 include(EDPybind11)
@@ -32,13 +32,13 @@ include(EDPybind11)
 # default extras (smallest possible wheel, hidden symbols).
 if(WITH_CUDA AND TARGET ed_solvers_gpu)
     pybind11_add_module(_core MODULE NO_EXTRAS
-        _bindings/quantum_ed_bindings.cpp
+        _bindings/qed_bindings.cpp
         _bindings/input_bindings.cpp
         _bindings/dispatcher_bindings.cpp
     )
 else()
     pybind11_add_module(_core MODULE
-        _bindings/quantum_ed_bindings.cpp
+        _bindings/qed_bindings.cpp
         _bindings/input_bindings.cpp
         _bindings/dispatcher_bindings.cpp
     )
@@ -87,8 +87,8 @@ set_target_properties(_core PROPERTIES
 )
 
 # scikit-build-core installs the extension into the wheel under
-# quantum_ed/_core*.so; ED_PYTHON_INSTALL_DIR is the wheel install prefix
-# scikit-build-core selects (defaults to site-packages/quantum_ed).
+# qed/_core*.so; ED_PYTHON_INSTALL_DIR is the wheel install prefix
+# scikit-build-core selects (defaults to site-packages/qed).
 if(DEFINED SKBUILD_PROJECT_NAME)
-    install(TARGETS _core LIBRARY DESTINATION quantum_ed)
+    install(TARGETS _core LIBRARY DESTINATION qed)
 endif()
