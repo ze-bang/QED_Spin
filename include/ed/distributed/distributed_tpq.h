@@ -50,6 +50,7 @@
 
 #include <ed/distributed/distributed_operator.h>
 
+#include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <vector>
@@ -113,6 +114,23 @@ struct DistributedTpqResult {
 /// reduces sample-averaged observables across the world.
 DistributedTpqResult distributed_tpq(
     std::shared_ptr<class ::Operator> op,
+    const DistributedTpqOptions& options,
+    MPI_Comm world_comm);
+
+/// Symmetry-projected variant of `distributed_tpq` (Phase E).
+/// Same canonical-TPQ algorithm, but every per-sample SpMV runs inside
+/// ONE symmetry sector (`sector_idx`) of the underlying `Operator`.
+/// Internally builds a `DistributedSymmetryOperator` on the per-group
+/// subcommunicator. The returned `energy[b]` is the sample-averaged
+/// `<H>(beta)` measured WITHIN this sector (not weighted by the
+/// sector's contribution to the full-space partition function); the
+/// caller is responsible for FTLM-style aggregation across sectors
+/// when reconstructing full-space thermal observables.
+///
+/// Collective on `world_comm` -- every rank must call.
+DistributedTpqResult distributed_tpq_symmetry(
+    std::shared_ptr<class ::Operator> op,
+    std::size_t sector_idx,
     const DistributedTpqOptions& options,
     MPI_Comm world_comm);
 

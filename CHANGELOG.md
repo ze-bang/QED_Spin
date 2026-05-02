@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — Phase E step 1 (path matrix symm × mpi for TPQ): per-sector canonical TPQ
+
+New function `ed::distributed::distributed_tpq_symmetry` — the
+symmetry-projected companion of `distributed_tpq`. The per-sample
+canonical-TPQ body in `distributed_tpq.cpp` (initial-state scatter,
+`taylor_step` propagation, energy/variance measurement, world-rank
+reduction) is now factored into a templated helper
+`tpq_impl<Op, ScatterFn>` shared by both the dense and the symmetry
+path. `taylor_step` itself is now a function template on the operator
+type (`DistributedOperator` and `DistributedSymmetryOperator` both
+expose `apply(const Complex*, Complex*)`, `local_size()`, `comm()`).
+The new entry point builds a `DistributedSymmetryOperator` on the
+per-group communicator and supplies an orbit-permuted scatter helper
+so the per-sample seed -> rank-major host vector path matches the
+existing FTLM symm convention exactly.
+
+The CLI now accepts `--mode tpq --use-symmetry --sector-index k`
+(the previous explicit fail at `ed_distributed_main.cpp` is gone).
+The returned `energy[b]` is the sample-averaged `<H>(beta)` measured
+inside sector `k` only — caller-side aggregation is required to
+reconstruct full-space thermal observables, mirroring the convention
+established by `distributed_ftlm_symmetry`. The `--mode tpq --gpu
+--use-symmetry` combination still emits an actionable diagnostic
+pointing users at the CPU symm path; GPU symm TPQ is Phase E step 2.
+
+New unit test `test_distributed_tpq_symmetry` (registered as `mpi`
+at np ∈ {1, 2, 4}) verifies that the sample-averaged per-sector
+`<H>(beta)` converges to the dense-projected exact thermal energy of
+that sector on an N=4 PBC Heisenberg chain, and replicates `energy[b]`
+across ranks within a group.
+
 ### Added — Phase D step 5 (path matrix symm × mpi+gpu): per-sector multi-GPU FTLM
 
 New function `ed::distributed::distributed_ftlm_gpu_symmetry` — the

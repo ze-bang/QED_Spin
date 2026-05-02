@@ -822,18 +822,16 @@ int main(int argc, char** argv) {
             }
         }
         else if (a.mode == "tpq") {
-            if (a.use_symmetry) {
-                fail("--mode tpq --use-symmetry is not supported. "
-                     "Canonical TPQ acts on a single random state in the "
-                     "full sector; projecting onto a symmetry irrep "
-                     "destroys the Z normalisation. Pre-project to a "
-                     "fixed-Sz block instead, or use --mode ftlm which "
-                     "DOES combine across symmetry blocks.");
-            }
-
             ed::distributed::DistributedTpqResult res;
             const char* backend_label = "cpu_mpi";
             if (a.gpu) {
+                if (a.use_symmetry) {
+                    fail("--mode tpq --gpu --use-symmetry is not yet "
+                         "supported. Drop --gpu to use the per-sector "
+                         "symmetry-projected CPU canonical TPQ "
+                         "(distributed_tpq_symmetry), or drop "
+                         "--use-symmetry for the GPU path.");
+                }
 #ifdef ED_HAVE_NCCL
                 // Phase 9 / Layer 2: multi-GPU canonical TPQ.
                 ed::distributed::DistributedTpqGPUOptions gtopts;
@@ -863,8 +861,19 @@ int main(int argc, char** argv) {
                 topts.compute_variance = a.compute_variance;
                 topts.verbose          = a.verbose;
 
-                res = ed::distributed::distributed_tpq(
-                    op, topts, MPI_COMM_WORLD);
+                if (a.use_symmetry) {
+                    // Phase E: per-sector canonical TPQ. The returned
+                    // energy[b] is the sample-averaged <H>(beta)
+                    // measured WITHIN this sector. The caller
+                    // aggregates across sectors when reconstructing
+                    // full-space thermal observables.
+                    res = ed::distributed::distributed_tpq_symmetry(
+                        op, a.sector_index, topts, MPI_COMM_WORLD);
+                    backend_label = "cpu_mpi_symmetry";
+                } else {
+                    res = ed::distributed::distributed_tpq(
+                        op, topts, MPI_COMM_WORLD);
+                }
             }
 
             if (world_rank == 0) {

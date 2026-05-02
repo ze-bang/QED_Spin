@@ -8,6 +8,7 @@
 
 #include <ed/distributed/distributed_tpq.h>
 #include <ed/distributed/distributed_operator.h>
+#include <ed/distributed/distributed_symmetry_operator.h>
 
 #include <ed/core/construct_ham.h>
 #include <ed/parallel/thread_budget.h>
@@ -118,75 +119,118 @@ void scatter_initial_vector(const DistributedOperator& op,
     if (n2 > 0.0) local_scal(1.0 / n2, v_local.data(), local_n);
 }
 
-// Apply e^{-(delta/2) H} to psi_local via Taylor truncation:
-//   result = sum_{n=0}^{taylor_order} (-(delta/2))^n H^n psi / n!
-// then renormalise.  All matvecs are DistributedOperator.apply (one
-// MPI_Alltoallv per matvec) and all axpys are rank-local.
-void taylor_step(const DistributedOperator& dop,
+// Symmetry-projected scatter (Phase E). Same algorithm as the orbit
+// scatter helpers in distributed_lanczos_gpu.cu / distributed_ftlm_gpu.cu:
+// generate a unit Gaussian vector in natural-orbit indexing on rank 0,
+// permute into rank-major packed layout matching the partition, then
+// MPI_Scatterv on op.comm(). Final renorm via dist_norm absorbs scatter
+// rounding.
+void scatter_initial_vector(const DistributedSymmetryOperator& op,
+                            unsigned long seed,
+                            std::vector<Complex>& v_local) {
+    const int rank = op.rank();
+    const int size = op.comm_size();
+    const std::uint64_t global_dim = op.global_dim();
+    const std::uint64_t local_n    = op.local_size();
+
+    v_local.assign(local_n, Complex(0.0, 0.0));
+
+    const auto& partition = op.partition();
+    std::vector<int> sendcounts(size, 0), displs(size, 0);
+    {
+        int run = 0;
+        for (int r = 0; r < size; ++r) {
+            sendcounts[r] = static_cast<int>(partition.rank_orbits[r].size());
+            displs[r] = run;
+            run += sendcounts[r];
+        }
+    }
+
+    if (rank == 0) {
+        std::vector<Complex> v_natural(static_cast<std::size_t>(global_dim));
+        std::mt19937_64 gen(seed);
+        std::normal_distribution<double> nd(0.0, 1.0);
+        double sumsq = 0.0;
+        for (std::uint64_t i = 0; i < global_dim; ++i) {
+            const double a = nd(gen);
+            const double b = nd(gen);
+            v_natural[i] = Complex(a, b);
+            sumsq += a * a + b * b;
+        }
+        const double inv = 1.0 / std::sqrt(sumsq);
+        for (auto& z : v_natural) z *= inv;
+
+        std::vector<Complex> v_rankmajor(
+            static_cast<std::size_t>(global_dim));
+        for (int r = 0; r < size; ++r) {
+            for (std::size_t k = 0; k < partition.rank_orbits[r].size(); ++k) {
+                const std::size_t orbit_id = partition.rank_orbits[r][k];
+                const std::size_t global_pos = partition.rank_offsets[r] + k;
+                v_rankmajor[global_pos] = v_natural[orbit_id];
+            }
+        }
+        MPI_Scatterv(v_rankmajor.data(), sendcounts.data(), displs.data(),
+                     kComplexDatatype,
+                     v_local.data(), sendcounts[rank], kComplexDatatype,
+                     0, op.comm());
+    } else {
+        MPI_Scatterv(nullptr, sendcounts.data(), displs.data(),
+                     kComplexDatatype,
+                     v_local.data(), sendcounts[rank], kComplexDatatype,
+                     0, op.comm());
+    }
+
+    const double n2 = dist_norm(v_local.data(), local_n, op.comm());
+    if (n2 > 0.0) local_scal(1.0 / n2, v_local.data(), local_n);
+}
+
+// Apply e^{-(delta/2) H} to psi_local via Taylor truncation. Templated
+// on the operator type: both `DistributedOperator` and
+// `DistributedSymmetryOperator` expose
+// `{apply(const Complex*, Complex*), local_size(), comm()}`.
+template <typename Op>
+void taylor_step(const Op& dop,
                  std::vector<Complex>& psi_local,
                  double delta,
                  std::uint64_t taylor_order) {
     const std::uint64_t local_n = dop.local_size();
-    std::vector<Complex> term(psi_local);   // term_0 = psi
+    std::vector<Complex> term(psi_local);
     std::vector<Complex> Hterm(local_n, Complex(0.0, 0.0));
-    std::vector<Complex> result(psi_local); // result accumulator
+    std::vector<Complex> result(psi_local);
 
     double coef = 1.0;
     for (std::uint64_t order = 1; order <= taylor_order; ++order) {
-        // term <- H * term  (one Alltoallv + local matvec)
         dop.apply(term.data(), Hterm.data());
         std::swap(term, Hterm);
 
         coef *= -(delta / 2.0) / static_cast<double>(order);
         local_axpy(Complex(coef, 0.0), term.data(), result.data(), local_n);
 
-        // Cheap stability bail-out: if |coef| * ||term|| underflows below
-        // 1e-30, further terms are noise. Skip the work for the next
-        // iteration; we use a lazy estimate that ||term|| <= ||H||^order
-        // (bounded by ||H|| ~ O(N) for spin Hamiltonians at our test
-        // sizes), so we just check the coefficient size.
         if (std::abs(coef) < 1e-30) break;
     }
 
     psi_local.swap(result);
 
-    // Renormalise on the slab (Allreduce).
     const double n2 = dist_norm(psi_local.data(), local_n, dop.comm());
     if (n2 > 0.0) local_scal(1.0 / n2, psi_local.data(), local_n);
 }
 
-}  // namespace
-
-DistributedTpqResult distributed_tpq(
-    std::shared_ptr<class ::Operator> op,
+// Templated per-sample TPQ driver shared by the dense and symm paths.
+// `Op` provides {apply(const Complex*, Complex*), local_size(),
+// global_dim(), rank(), comm_size(), comm()}; `ScatterFn` is a callable
+// `void(const Op&, unsigned long seed, std::vector<Complex>&)`.
+template <typename Op, typename ScatterFn>
+DistributedTpqResult tpq_impl(
+    const Op& dop,
+    int world_rank,
+    int my_group,
+    int n_groups,
+    int ranks_per_group,
+    MPI_Comm world_comm,
+    MPI_Comm group_comm,
     const DistributedTpqOptions& options,
-    MPI_Comm world_comm) {
+    ScatterFn&& scatter_fn) {
 
-    int world_rank = 0, world_size = 0;
-    MPI_Comm_rank(world_comm, &world_rank);
-    MPI_Comm_size(world_comm, &world_size);
-
-    int n_groups = std::max(1, options.n_groups);
-    if (n_groups > world_size) n_groups = world_size;
-    if (world_size % n_groups != 0) {
-        throw std::invalid_argument(
-            "distributed_tpq: n_groups (" + std::to_string(n_groups)
-            + ") must divide world_size (" + std::to_string(world_size) + ")");
-    }
-    const int ranks_per_group = world_size / n_groups;
-    const int my_group        = world_rank / ranks_per_group;
-
-    MPI_Comm group_comm;
-    MPI_Comm_split(world_comm, my_group, world_rank, &group_comm);
-
-    DistributedOperator dop(op, group_comm);
-
-    // Phase 8 #3: dim-aware OMP+BLAS thread cap, sized against the
-    // rank-local slab. Same rationale as distributed_lanczos -- the
-    // taylor_step inner loops (local_axpy, local_norm_sq, local_scal)
-    // and the per-sample matvec packing are memory-bound and pay heavy
-    // OpenBLAS / OMP setup cost on small-to-mid N. ED_AUTO_THREADS=0
-    // disables the cap for users running their own pinning.
     const ed::parallel::ThreadBudgetScope budget(
         ed::parallel::auto_threads_for_dim(dop.local_size()));
 
@@ -199,7 +243,6 @@ DistributedTpqResult distributed_tpq(
 
     std::vector<double> betas = options.betas;
     if (betas.empty()) betas.push_back(1.0);
-    // Defensive: enforce strict ascending order.
     for (std::size_t i = 1; i < betas.size(); ++i) {
         if (betas[i] <= betas[i - 1]) {
             throw std::invalid_argument(
@@ -224,35 +267,25 @@ DistributedTpqResult distributed_tpq(
     std::vector<Complex> Hpsi_local(local_n, Complex(0.0, 0.0));
 
     for (int s : my_samples) {
-        scatter_initial_vector(dop,
-                               options.seed_offset
-                                   + static_cast<unsigned long>(s),
-                               psi_local);
+        scatter_fn(dop,
+                   options.seed_offset + static_cast<unsigned long>(s),
+                   psi_local);
 
         double cur_beta = 0.0;
-
-        // Special case: if betas[0] == 0, measure the initial state
-        // directly without any propagation.
         for (std::size_t b = 0; b < betas.size(); ++b) {
             const double tgt = betas[b];
 
-            // Advance from cur_beta to tgt in substeps of delta_beta,
-            // ending with a (possibly shorter) final substep so we land
-            // exactly on tgt.
             while (cur_beta + 0.5 * delta_beta < tgt) {
                 const double remain = tgt - cur_beta;
                 const double step   = std::min(delta_beta, remain);
                 taylor_step(dop, psi_local, step, taylor_order);
                 cur_beta += step;
             }
-            // Snap-to (tiny adjustment if any rounding leftover) -- only
-            // do it if the gap is non-negligible relative to delta_beta.
             if (std::abs(cur_beta - tgt) > 1e-12) {
                 taylor_step(dop, psi_local, tgt - cur_beta, taylor_order);
                 cur_beta = tgt;
             }
 
-            // Measure E = <psi | H psi>.
             dop.apply(psi_local.data(), Hpsi_local.data());
             Complex Ec = dist_zdotc(psi_local.data(), Hpsi_local.data(),
                                     local_n, group_comm);
@@ -260,7 +293,6 @@ DistributedTpqResult distributed_tpq(
             E_local[b] += E_b;
 
             if (options.compute_variance) {
-                // E2 = <psi | H^2 psi> = || H psi ||_2^2.
                 const double Hpsi_n2 =
                     dist_norm(Hpsi_local.data(), local_n, group_comm);
                 E2_local[b] += Hpsi_n2 * Hpsi_n2;
@@ -275,9 +307,6 @@ DistributedTpqResult distributed_tpq(
         }
     }
 
-    // World-level reduce: only group rank 0 contributes to avoid double
-    // counting (each rank in a group holds the same per-sample E because
-    // dist_zdotc + dist_norm are collective on group_comm).
     if (world_rank % ranks_per_group != 0) {
         std::fill(E_local.begin(),  E_local.end(),  0.0);
         std::fill(E2_local.begin(), E2_local.end(), 0.0);
@@ -309,6 +338,81 @@ DistributedTpqResult distributed_tpq(
         }
     }
     result.samples_used = n_samples;
+    return result;
+}
+
+}  // namespace
+
+DistributedTpqResult distributed_tpq(
+    std::shared_ptr<class ::Operator> op,
+    const DistributedTpqOptions& options,
+    MPI_Comm world_comm) {
+
+    int world_rank = 0, world_size = 0;
+    MPI_Comm_rank(world_comm, &world_rank);
+    MPI_Comm_size(world_comm, &world_size);
+
+    int n_groups = std::max(1, options.n_groups);
+    if (n_groups > world_size) n_groups = world_size;
+    if (world_size % n_groups != 0) {
+        throw std::invalid_argument(
+            "distributed_tpq: n_groups (" + std::to_string(n_groups)
+            + ") must divide world_size (" + std::to_string(world_size) + ")");
+    }
+    const int ranks_per_group = world_size / n_groups;
+    const int my_group        = world_rank / ranks_per_group;
+
+    MPI_Comm group_comm;
+    MPI_Comm_split(world_comm, my_group, world_rank, &group_comm);
+
+    DistributedOperator dop(op, group_comm);
+
+    DistributedTpqResult result = tpq_impl(
+        dop, world_rank, my_group, n_groups, ranks_per_group,
+        world_comm, group_comm, options,
+        [](const DistributedOperator& d, unsigned long seed,
+           std::vector<Complex>& v_local) {
+            scatter_initial_vector(d, seed, v_local);
+        });
+
+    MPI_Comm_free(&group_comm);
+    return result;
+}
+
+DistributedTpqResult distributed_tpq_symmetry(
+    std::shared_ptr<class ::Operator> op,
+    std::size_t sector_idx,
+    const DistributedTpqOptions& options,
+    MPI_Comm world_comm) {
+
+    int world_rank = 0, world_size = 0;
+    MPI_Comm_rank(world_comm, &world_rank);
+    MPI_Comm_size(world_comm, &world_size);
+
+    int n_groups = std::max(1, options.n_groups);
+    if (n_groups > world_size) n_groups = world_size;
+    if (world_size % n_groups != 0) {
+        throw std::invalid_argument(
+            "distributed_tpq_symmetry: n_groups ("
+            + std::to_string(n_groups)
+            + ") must divide world_size ("
+            + std::to_string(world_size) + ")");
+    }
+    const int ranks_per_group = world_size / n_groups;
+    const int my_group        = world_rank / ranks_per_group;
+
+    MPI_Comm group_comm;
+    MPI_Comm_split(world_comm, my_group, world_rank, &group_comm);
+
+    DistributedSymmetryOperator dop(op, sector_idx, group_comm);
+
+    DistributedTpqResult result = tpq_impl(
+        dop, world_rank, my_group, n_groups, ranks_per_group,
+        world_comm, group_comm, options,
+        [](const DistributedSymmetryOperator& d, unsigned long seed,
+           std::vector<Complex>& v_local) {
+            scatter_initial_vector(d, seed, v_local);
+        });
 
     MPI_Comm_free(&group_comm);
     return result;

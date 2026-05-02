@@ -541,12 +541,18 @@ two tables above don't capture on their own:
   still need their per-solver wiring. Until those land, drop to
   `device='gpu'` per node for those solvers when `--use-symmetry`
   is set.
-* `mTPQ` / `cTPQ` × `symm`: see Phase E. The lift is "per-sector
-  TPQ + FTLM-style Z-aggregation" (each sector gets its own random
-  state and its own canonical TPQ trajectory; partition functions
-  combine additively with the irrep multiplicities, exactly like
-  FTLM does). Until Phase E ships, the workflow raises a clear
-  `ValueError` for this combination.
+* `mTPQ` / `cTPQ` × **mpi** is wired (Phase E step 1) via
+  `distributed_tpq_symmetry` — templated per-sample canonical-TPQ
+  body shared with the unsymmetrised TPQ, with an orbit-aware
+  initial-state scatter and a per-group `DistributedSymmetryOperator`
+  driving the `taylor_step` propagation. The CLI accepts `--mode tpq
+  --use-symmetry --sector-index k`; the returned `energy[b]` is the
+  sample-averaged `<H>(beta)` measured **inside sector k only**, and
+  the caller is responsible for FTLM-style aggregation across sectors
+  when reconstructing full-space thermal observables. The
+  multi-GPU companion (`distributed_tpq_gpu_symmetry`) is Phase E
+  step 2; until then `--mode tpq --gpu --use-symmetry` emits an
+  actionable diagnostic pointing at the CPU symm path.
 
 The introspection helper `qed.solver_device_support()` only reports
 the solver × device tensor; consult this subsection for the

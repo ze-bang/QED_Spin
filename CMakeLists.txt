@@ -846,6 +846,16 @@ if(BUILD_ED_TESTS)
         target_link_libraries(test_distributed_ftlm_symmetry PRIVATE
             ed_symmetry)
 
+        # Phase E step 1: per-sector canonical TPQ rebased onto
+        # DistributedSymmetryOperator (CPU-only). Verifies that the
+        # sample-averaged <H>(beta) measured inside one momentum sector
+        # of an N=4 PBC Heisenberg chain converges to the dense-projected
+        # thermal energy of that sector at np {1, 2, 4}.
+        ed_add_mpi_test(test_distributed_tpq_symmetry
+                        tests/unit/test_distributed_tpq_symmetry.cpp)
+        target_link_libraries(test_distributed_tpq_symmetry PRIVATE
+            ed_symmetry)
+
         # Phase 3c #1: NCCL multi-GPU collectives. Built only when
         # ed_distributed_gpu is alive (WITH_CUDA + NCCL_FOUND); registered
         # at np {1,2,4} same as the CPU MPI tests. The tests SKIP when no
