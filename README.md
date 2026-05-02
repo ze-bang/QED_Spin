@@ -1,4 +1,4 @@
-# exact_diagonalization_cpp
+# QED
 
 A modern C++17 / CUDA / MPI / Python toolkit for **exact diagonalization
 (ED)** of quantum spin Hamiltonians.
