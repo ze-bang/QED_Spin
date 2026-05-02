@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — Path × device matrix reachability audit (post Phase E)
+
+After auditing every ✅ cell in the Solver × device support matrix
+(see `docs/guides/workflow.md` lines 419-432) for end-to-end
+reachability from `qed.diag(...)`:
+
+- `python/quantum_ed/workflow.py` `_SOLVER_DEVICE_KERNELS`:
+  `KRYLOV_SCHUR.mpi_gpu` and `FTLM.mpi_gpu` were stale `False`
+  even though Phase D step 3 (`distributed_krylov_schur_gpu` /
+  `distributed_krylov_schur_gpu_symmetry`) and the existing
+  `distributed_ftlm_gpu` kernel (footnote ⁵) wire the cells.
+  Flip both to `True` so `solver_device_support()` agrees with
+  the documented matrix and the C++ dispatcher.
+- `python/quantum_ed/workflow.py` `_diag` TPQ + symmetry rejection:
+  Phase E wired `distributed_tpq_symmetry` (CPU MPI) and
+  `distributed_tpq_gpu_symmetry` (multi-GPU) which DO project onto
+  a single sector and return per-sector sample-averaged
+  `<H>(beta)` (caller responsible for FTLM-style aggregation
+  across sectors). The blanket `ValueError` is now scoped to
+  `device='cpu'/'gpu'` (where the in-process streaming kernel
+  still falls back to Lanczos per `ed_wrapper.h:1458`); the MPI
+  device cells flow through `_diag_via_mpi`.
+- `python/quantum_ed/feasibility.py`: TPQ + symm hard-block
+  similarly relaxed for `device='mpi'/'mpi_gpu'`.
+
+No new unit tests required — the existing
+`test_mtpq_with_symmetry_is_rejected_with_actionable_error` still
+passes (the regex `TPQ.*symmetry` matches the new message), and
+the 115 workflow + feasibility tests pass.
+
 ### Added — Phase E step 2 (path matrix symm × mpi+gpu for TPQ): per-sector multi-GPU canonical TPQ
 
 New function `ed::distributed::distributed_tpq_gpu_symmetry` — the

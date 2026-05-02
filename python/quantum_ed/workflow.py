@@ -855,18 +855,30 @@ def diag(
     is_tpq = _is_tpq_method(method)
 
     # TPQ relies on a single random state evolving on the full Hilbert
-    # space (or on a single fixed-Sz block). Per-sector symmetry
-    # projection breaks that; the C++ streaming path silently falls
-    # back to Lanczos in that case (per ed_wrapper.h L1458). Reject
-    # the combination explicitly so users get a clear diagnostic.
-    if symmetry is not None and is_tpq:
+    # space (or on a single fixed-Sz block). For the in-process
+    # (cpu / gpu) streaming kernel, per-sector symmetry projection
+    # breaks that and the C++ side silently falls back to Lanczos
+    # (ed_wrapper.h L1458) -- reject explicitly so users get a clear
+    # diagnostic. Phase E wires the distributed path:
+    # `distributed_tpq_symmetry` (CPU MPI) and
+    # `distributed_tpq_gpu_symmetry` (multi-GPU) DO project onto a
+    # single sector and return per-sector sample-averaged
+    # `<H>(beta)`; the caller is responsible for FTLM-style
+    # aggregation across sectors. Allow that combination through
+    # to `_diag_via_mpi`.
+    if symmetry is not None and is_tpq and not use_mpi:
         raise ValueError(
-            "qed.diag(H, solver='mTPQ'/'cTPQ', symmetry=...) is not "
-            "supported: TPQ acts on a single random state across the "
-            "whole sector and per-symmetry-block diagonalisation does "
-            "not factor through. Drop the symmetry= argument (TPQ + "
-            "sz= is supported), or use a different thermal method "
-            "(FTLM/LTLM combine across symmetry blocks correctly)."
+            "qed.diag(H, solver='mTPQ'/'cTPQ', symmetry=..., "
+            "device='cpu'/'gpu') is not supported: TPQ acts on a "
+            "single random state across the whole sector and per-"
+            "symmetry-block diagonalisation does not factor through "
+            "the in-process streaming kernel. Options: drop the "
+            "symmetry= argument (TPQ + sz= is supported), use the "
+            "distributed path with device='mpi'/'mpi_gpu' (Phase E "
+            "wires `distributed_tpq_symmetry` -- returns per-sector "
+            "<H>(beta), caller aggregates across sectors), or use a "
+            "different thermal method (FTLM/LTLM combine across "
+            "symmetry blocks correctly)."
         )
 
     # ------------------------------------------------------------------
@@ -1116,10 +1128,10 @@ _SOLVER_DEVICE_KERNELS: dict[str, dict[str, bool]] = {
     "LANCZOS":         {"cpu": True, "gpu": True,  "mpi": True,  "mpi_gpu": True},
     "BLOCK_LANCZOS":   {"cpu": True, "gpu": True,  "mpi": False, "mpi_gpu": False},
     # Phase 9 / Layer 3: distributed_krylov_schur (thick-restart Lanczos
-    # with Ritz-pair locking) wires up real MPI support; the GPU/MPI+GPU
-    # cells still go through the plain Lanczos kernel because the KS
-    # restart machinery isn't yet templated on DistributedGPUOperator.
-    "KRYLOV_SCHUR":    {"cpu": True, "gpu": True,  "mpi": True,  "mpi_gpu": False},
+    # with Ritz-pair locking) wires up real MPI support. Phase D step 3
+    # extends to mpi_gpu via distributed_krylov_schur_gpu (and the symm
+    # companion distributed_krylov_schur_gpu_symmetry).
+    "KRYLOV_SCHUR":    {"cpu": True, "gpu": True,  "mpi": True,  "mpi_gpu": True},
     "BLOCK_KRYLOV_SCHUR": {"cpu": True, "gpu": True, "mpi": False, "mpi_gpu": False},
     "DAVIDSON":        {"cpu": True, "gpu": True,  "mpi": False, "mpi_gpu": False},
     "LOBPCG":          {"cpu": True, "gpu": True,  "mpi": False, "mpi_gpu": False},
@@ -1131,7 +1143,10 @@ _SOLVER_DEVICE_KERNELS: dict[str, dict[str, bool]] = {
     # (when the build has WITH_CUDA=ON + NCCL_FOUND).
     "mTPQ":            {"cpu": True, "gpu": True,  "mpi": True,  "mpi_gpu": True},
     "cTPQ":            {"cpu": True, "gpu": True,  "mpi": True,  "mpi_gpu": True},
-    "FTLM":            {"cpu": True, "gpu": True,  "mpi": True,  "mpi_gpu": False},
+    # distributed_ftlm_gpu (Phase 9 footnote ⁵) wires the multi-GPU
+    # cell; Phase D step 5 adds the symm companion
+    # distributed_ftlm_gpu_symmetry.
+    "FTLM":            {"cpu": True, "gpu": True,  "mpi": True,  "mpi_gpu": True},
     "LTLM":            {"cpu": True, "gpu": False, "mpi": False, "mpi_gpu": False},
     "HYBRID":          {"cpu": True, "gpu": False, "mpi": False, "mpi_gpu": False},
     "SHIFT_INVERT":    {"cpu": True, "gpu": False, "mpi": False, "mpi_gpu": False},

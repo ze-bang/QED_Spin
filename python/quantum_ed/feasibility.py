@@ -821,13 +821,23 @@ def estimate_resources(
             "at runtime (rebuild with NCCL_FOUND, or use device='mpi').")
 
     if "TPQ" in method_name and (basis.kind in ("symm", "sym+sz")) \
-            and basis.kind == "symm":
-        # symmetry+TPQ on the irrep destroys Z normalisation
+            and basis.kind == "symm" \
+            and device_lc not in ("mpi", "mpi_gpu"):
+        # In-process streaming kernel falls back to Lanczos for
+        # TPQ + symm. The distributed path (Phase E) DOES support
+        # per-sector canonical TPQ via `distributed_tpq_symmetry` /
+        # `distributed_tpq_gpu_symmetry`; for those device cells
+        # the combination is feasible (caller aggregates across
+        # sectors when reconstructing full-space Z).
         feasible = False
         bottleneck = "kernel"
         suggestions.append(
-            "TPQ on a symmetry-projected irrep destroys the Z normalisation. "
-            "Drop symmetry= or pre-project to a fixed-Sz block.")
+            "TPQ on a symmetry-projected irrep falls back to Lanczos in "
+            "the in-process streaming kernel. Drop symmetry=, pre-project "
+            "to a fixed-Sz block, or use device='mpi'/'mpi_gpu' (Phase E "
+            "wires per-sector canonical TPQ; caller aggregates over "
+            "sectors)."
+        )
 
     # ------------------------------------------------------------------
     # Memory verdict.
