@@ -59,6 +59,22 @@ struct SymmetryGroupInfo {
     std::vector<std::vector<int>> max_clique;
     std::vector<std::vector<int>> power_representation;
     std::vector<SectorMetadata> sectors;
+
+    // Phase F (May 2026): optional Sz quantum-number filter.
+    //
+    // Site permutations preserve the popcount of every basis state, so
+    // restricting the symmetry-projected basis to "orbits whose
+    // representative has popcount == n_up" yields a closed sub-block
+    // that combines the U(1)-Sz quantum number with the lattice
+    // symmetry sector. ``DistributedSymmetryOperator`` (and the CLI
+    // ``--sz`` flag in ``ed_distributed_main``) honour this field;
+    // the in-process streaming kernel currently ignores it (it has
+    // its own FixedSzOperator path).
+    //
+    // ``-1`` (the default) means "no Sz constraint -- use the full
+    // symmetry-projected basis." Values in ``[0, num_sites]`` select
+    // a single Sz sector with magnetisation ``2*n_up - num_sites``.
+    int n_up = -1;
     
     /**
      * Load all symmetry information from directory

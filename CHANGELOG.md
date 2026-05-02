@@ -7,6 +7,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — Phase F: Sz quantum-number filter on the distributed
+symmetry-projected basis
+
+Combines a `U(1)`-Sz block with a lattice symmetry sector on the
+distributed path. Site permutations preserve popcount, so filtering
+the orbit basis to `popcount(rep) == n_up` is a closed sub-block;
+the in-process kernel had this via `FixedSzOperator`, but the
+distributed path silently dropped `sz=` until now.
+
+- New optional field `int n_up = -1` on
+  `SymmetryGroupInfo` (`include/ed/core/symmetry_metadata.h`).
+  `-1` means "no Sz constraint" (back-compat default).
+- `DistributedSymmetryOperator` ctor reads `info.n_up` and skips
+  orbits whose representative popcount does not match (Step 1
+  BFS now pushes a zero-norm placeholder for filtered orbits so
+  Step 2's existing `kZeroNormTolerance` filter drops them).
+  Zero diff on the construction / apply hot path when `n_up == -1`.
+- `ed_distributed_main` exposes `--sz <n_up>`. Validates
+  `0 <= n_up <= num_sites`, requires `--use-symmetry`, and writes
+  `op->symmetry_info.n_up` before any `DistributedSymmetryOperator`
+  is constructed (so all four solver branches and their `_gpu`
+  siblings inherit the filter automatically).
+- `python/quantum_ed/workflow.py` `_diag_via_mpi` forwards
+  `sz=` as `--sz <int>` when `symmetry=` is also set; without
+  symmetry, it now raises a clear `NotImplementedError` instead
+  of silently dropping the constraint.
+- New test cases on `test_distributed_symmetry_operator` (np
+  {1,2,4}; +4 cases × 8 assertions per): for every Sz value k in
+  [0, N], the filtered `global_dim()` equals the count of
+  unfiltered orbits with popcount k; the filtered apply matches
+  the unfiltered apply restricted to the popcount-k subspace
+  (and the orthogonal complement leaks 0 -- the
+  `[H, popcount] = 0` check); `sum_k filtered_dim == full_dim`;
+  and `n_up in {0, N}` give `global_dim == 1`.
+
+This wires the long-standing "ftlm gpu + symm + sz" combination
+(and `lanczos`, `krylov_schur`, `tpq` × `gpu`/`mpi+gpu` × `symm`
+× `sz`) end-to-end without changing any of the seven
+`*_symmetry` entry-point signatures.
+
 ### Fixed — Path × device matrix reachability audit (post Phase E)
 
 After auditing every ✅ cell in the Solver × device support matrix

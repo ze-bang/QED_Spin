@@ -393,6 +393,225 @@ TEST_CASE("DistributedSymmetryOperator: halo plan diagnostics N=6 PBC",
 }
 
 // -----------------------------------------------------------------------------
+// Phase F: optional Sz (popcount) filter on the orbit basis.
+//
+// Site permutations preserve popcount, so restricting the symm-projected
+// basis to "orbits whose representative has popcount == n_up" yields a
+// closed sub-block. We verify:
+//
+//   1. Setting `info.n_up = k` reduces global_dim() to exactly the count
+//      of unfiltered orbits whose representative has popcount k.
+//   2. The Sz-filtered apply matches the unfiltered apply restricted
+//      to the popcount-k subspace (componentwise, modulo orbit
+//      reindexing).
+//   3. Sum over k=0..N of Sz-filtered global_dim == unfiltered global_dim
+//      (partition of unity across Sz blocks).
+//   4. n_up == 0 (or N) gives global_dim == 1 (the unique all-down /
+//      all-up state, which is its own translation orbit).
+// -----------------------------------------------------------------------------
+
+// Build a fresh op with the Sz filter applied to symmetry_info.
+std::shared_ptr<Operator>
+make_heisenberg_translation_op_sz(int N, double J, bool periodic, int n_up) {
+    auto op = make_heisenberg_translation_op(N, J, periodic);
+    op->symmetry_info.n_up = n_up;
+    return op;
+}
+
+void check_sz_filter(int N, double J, bool periodic,
+                     std::size_t sector_idx,
+                     std::initializer_list<unsigned long> seeds) {
+    // Unfiltered reference (full symm-projected basis).
+    auto op_full = make_heisenberg_translation_op(N, J, periodic);
+    DistributedSymmetryOperator dop_full(op_full, sector_idx,
+                                          MPI_COMM_WORLD);
+    const auto& reps_full = dop_full.orbit_reps();
+    const std::uint64_t full_dim = dop_full.global_dim();
+
+    // Per-Sz expected dim count + Sz partition of unity.
+    std::vector<std::uint64_t> per_sz_count(N + 1, 0);
+    for (auto rep : reps_full) {
+        per_sz_count[__builtin_popcountll(rep)]++;
+    }
+    std::uint64_t sum_sz = 0;
+    for (auto c : per_sz_count) sum_sz += c;
+    REQUIRE(sum_sz == full_dim);
+
+    // Map from (popcount-filtered orbit index in the Sz-restricted dop)
+    // to its position in the unfiltered orbit_reps array. Build it
+    // for each Sz value and verify dims + apply.
+    for (int n_up = 0; n_up <= N; ++n_up) {
+        auto op_sz = make_heisenberg_translation_op_sz(N, J, periodic, n_up);
+        DistributedSymmetryOperator dop_sz(op_sz, sector_idx, MPI_COMM_WORLD);
+
+        INFO("N=" << N << " periodic=" << periodic
+             << " sector=" << sector_idx
+             << " n_up=" << n_up
+             << " filtered_dim=" << dop_sz.global_dim()
+             << " expected=" << per_sz_count[n_up]);
+        REQUIRE(dop_sz.global_dim() == per_sz_count[n_up]);
+
+        if (per_sz_count[n_up] == 0) continue;
+
+        // Reps of the Sz-filtered dop must be a popcount-k subset of
+        // reps_full, in the SAME order (BFS visits states in increasing
+        // index order in both ctors).
+        const auto& reps_sz = dop_sz.orbit_reps();
+        std::vector<std::size_t> sz_to_full;
+        sz_to_full.reserve(reps_sz.size());
+        std::size_t cursor = 0;
+        for (auto r : reps_sz) {
+            REQUIRE(static_cast<int>(__builtin_popcountll(r)) == n_up);
+            while (cursor < reps_full.size() && reps_full[cursor] != r) {
+                ++cursor;
+            }
+            REQUIRE(cursor < reps_full.size());
+            sz_to_full.push_back(cursor++);
+        }
+        REQUIRE(sz_to_full.size() == reps_sz.size());
+
+        // Apply check: drive the Sz-filtered dop with a deterministic
+        // vector and compare against the unfiltered apply restricted
+        // to popcount-k orbit indices.
+        const auto& part_sz   = dop_sz.partition();
+        const auto& part_full = dop_full.partition();
+        const int my_rank = dop_sz.rank();
+        const int n_ranks = dop_sz.comm_size();
+
+        // rank-major -> orbit_id permutations for both ops.
+        std::vector<std::size_t> rm_to_orbit_sz(dop_sz.global_dim(), 0);
+        for (int r = 0; r < n_ranks; ++r) {
+            for (std::size_t k = 0; k < part_sz.rank_orbits[r].size(); ++k) {
+                rm_to_orbit_sz[part_sz.rank_offsets[r] + k] =
+                    part_sz.rank_orbits[r][k];
+            }
+        }
+        std::vector<std::size_t> rm_to_orbit_full(full_dim, 0);
+        for (int r = 0; r < n_ranks; ++r) {
+            for (std::size_t k = 0; k < part_full.rank_orbits[r].size(); ++k) {
+                rm_to_orbit_full[part_full.rank_offsets[r] + k] =
+                    part_full.rank_orbits[r][k];
+            }
+        }
+
+        for (unsigned long seed : seeds) {
+            // Generate a vector in NATURAL Sz-orbit ordering.
+            auto x_sz_natural = deterministic_global_vector(
+                static_cast<std::size_t>(dop_sz.global_dim()), seed);
+
+            // Lift to the unfiltered basis: zero everywhere, copy the
+            // popcount-k entries from x_sz_natural at positions
+            // sz_to_full[i].
+            std::vector<Complex> x_full_natural(full_dim,
+                                                Complex(0.0, 0.0));
+            for (std::size_t i = 0; i < x_sz_natural.size(); ++i) {
+                x_full_natural[sz_to_full[i]] = x_sz_natural[i];
+            }
+
+            // Drive Sz-filtered dop.
+            std::vector<Complex> x_sz_local(dop_sz.local_size());
+            for (std::uint64_t k = 0; k < dop_sz.local_size(); ++k) {
+                x_sz_local[k] = x_sz_natural[part_sz.rank_orbits[my_rank][k]];
+            }
+            std::vector<Complex> y_sz_local(dop_sz.local_size(),
+                                             Complex(0.0, 0.0));
+            dop_sz.apply(x_sz_local.data(), y_sz_local.data());
+            auto y_sz_rm = allgather_slabs(
+                y_sz_local.data(), dop_sz.local_size(),
+                dop_sz.global_dim(), MPI_COMM_WORLD);
+            std::vector<Complex> y_sz_natural(dop_sz.global_dim(),
+                                               Complex(0.0, 0.0));
+            for (std::size_t g = 0; g < y_sz_rm.size(); ++g) {
+                y_sz_natural[rm_to_orbit_sz[g]] = y_sz_rm[g];
+            }
+
+            // Drive unfiltered dop with the lifted vector.
+            std::vector<Complex> x_full_local(dop_full.local_size());
+            for (std::uint64_t k = 0; k < dop_full.local_size(); ++k) {
+                x_full_local[k] =
+                    x_full_natural[part_full.rank_orbits[my_rank][k]];
+            }
+            std::vector<Complex> y_full_local(dop_full.local_size(),
+                                                Complex(0.0, 0.0));
+            dop_full.apply(x_full_local.data(), y_full_local.data());
+            auto y_full_rm = allgather_slabs(
+                y_full_local.data(), dop_full.local_size(),
+                dop_full.global_dim(), MPI_COMM_WORLD);
+            std::vector<Complex> y_full_natural(full_dim,
+                                                  Complex(0.0, 0.0));
+            for (std::size_t g = 0; g < y_full_rm.size(); ++g) {
+                y_full_natural[rm_to_orbit_full[g]] = y_full_rm[g];
+            }
+
+            // Compare: y_full_natural projected onto the popcount-k
+            // orbit indices must equal y_sz_natural componentwise.
+            // (Because [H, popcount] = 0, the unfiltered apply leaves
+            // the popcount-k subspace invariant.)
+            double err = 0.0;
+            for (std::size_t i = 0; i < y_sz_natural.size(); ++i) {
+                err = std::max(
+                    err,
+                    std::abs(y_sz_natural[i] - y_full_natural[sz_to_full[i]]));
+            }
+            // Also: the orthogonal complement (popcount != k) of the
+            // unfiltered output, when driven by the lifted vector,
+            // must be ZERO -- this is the Sz-conservation check.
+            std::set<std::size_t> popcount_k_positions(sz_to_full.begin(),
+                                                        sz_to_full.end());
+            double leak = 0.0;
+            for (std::size_t i = 0; i < full_dim; ++i) {
+                if (popcount_k_positions.count(i) == 0) {
+                    leak = std::max(leak, std::abs(y_full_natural[i]));
+                }
+            }
+            INFO("N=" << N << " periodic=" << periodic
+                 << " sector=" << sector_idx << " n_up=" << n_up
+                 << " seed=" << seed
+                 << " err=" << err << " leak=" << leak);
+            REQUIRE(err <= 1e-10);
+            REQUIRE(leak <= 1e-10);
+        }
+    }
+}
+
+TEST_CASE("DistributedSymmetryOperator: Sz filter, N=4 PBC, k=0 sector",
+          "[distributed_symmetry_operator][sz][n4][pbc]") {
+    check_sz_filter(/*N=*/4, /*J=*/1.0, /*periodic=*/true,
+                    /*sector_idx=*/0, {7UL, 31415UL});
+}
+
+TEST_CASE("DistributedSymmetryOperator: Sz filter, N=4 PBC, all sectors",
+          "[distributed_symmetry_operator][sz][n4][pbc]") {
+    auto info = ed::sym::translation_group_1d(4);
+    for (std::size_t s = 0; s < info.sectors.size(); ++s) {
+        check_sz_filter(/*N=*/4, /*J=*/1.0, /*periodic=*/true,
+                        /*sector_idx=*/s, {1UL});
+    }
+}
+
+TEST_CASE("DistributedSymmetryOperator: Sz filter, N=6 PBC, k=0 sector",
+          "[distributed_symmetry_operator][sz][n6][pbc]") {
+    check_sz_filter(/*N=*/6, /*J=*/-1.5, /*periodic=*/true,
+                    /*sector_idx=*/0, {99UL});
+}
+
+TEST_CASE("DistributedSymmetryOperator: Sz filter, all-up / all-down "
+          "give global_dim==1",
+          "[distributed_symmetry_operator][sz][edge]") {
+    for (int N : {4, 6}) {
+        for (int n_up : {0, N}) {
+            auto op = make_heisenberg_translation_op_sz(
+                N, /*J=*/1.0, /*periodic=*/true, n_up);
+            DistributedSymmetryOperator dop(op, /*sector_idx=*/0,
+                                              MPI_COMM_WORLD);
+            INFO("N=" << N << " n_up=" << n_up
+                 << " global_dim=" << dop.global_dim());
+            REQUIRE(dop.global_dim() == 1);
+        }
+    }
+}
+
+// -----------------------------------------------------------------------------
 // Custom main: MPI_Init + Catch2 + MPI_Finalize.
 // Same pattern as the other Phase 3b MPI tests.
 // -----------------------------------------------------------------------------

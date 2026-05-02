@@ -161,6 +161,23 @@ DistributedSymmetryOperator::DistributedSymmetryOperator(
         const std::int64_t  oid =
             static_cast<std::int64_t>(raw_orbit_reps.size());
 
+        // Phase F: optional Sz-quantum-number filter. Site permutations
+        // preserve popcount, so every state in this orbit shares
+        // popcount(rep). When `info.n_up >= 0` and that popcount does
+        // not match, push a zero-norm placeholder orbit so Step 2's
+        // filter drops it (and so future b's in the same orbit hit
+        // the `raw_state_to_orbit[b] != kNoOrbit` short-circuit).
+        if (info.n_up >= 0 &&
+            static_cast<int>(__builtin_popcountll(rep)) != info.n_up) {
+            for (std::uint64_t s : orbit) {
+                raw_state_to_orbit[s] = oid;
+            }
+            raw_orbit_reps.push_back(rep);
+            raw_orbit_sizes.push_back(static_cast<std::uint64_t>(orbit.size()));
+            raw_orbit_norms_sq.push_back(0.0);
+            continue;
+        }
+
         // Project: ~|i>_s = sum_{g: g(rep) = s} chi_q(g)*
         // For each group element g, accumulate chi_q(g)* into
         // raw_phi[g(rep)].

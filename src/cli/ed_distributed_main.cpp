@@ -133,6 +133,11 @@ struct CliArgs {
     bool use_symmetry = false;
     std::size_t sector_index = 0;
 
+    // Phase F: optional Sz (popcount) restriction. Only meaningful with
+    // --use-symmetry; the symmetry-projected basis is filtered to orbits
+    // whose representative has popcount == n_up. -1 = no constraint.
+    int n_up = -1;
+
     // -------- Result IO (Layer 4 / 5b) -----------------------------------
     std::string result_file;
     std::string eigenvector_dir;
@@ -191,6 +196,7 @@ CliArgs parse_args(int argc, char** argv) {
         else if (k == "--compute-eigenvectors"){ a.compute_eigenvectors = true; }
         else if (k == "--use-symmetry")        { a.use_symmetry = true; }
         else if (k == "--sector-index")  { need(1); a.sector_index = std::stoull(argv[++i]); }
+        else if (k == "--sz")           { need(1); a.n_up = std::atoi(argv[++i]); }
         else if (k == "--result-file")   { need(1); a.result_file = argv[++i]; }
         else if (k == "--eigenvector-dir") { need(1); a.eigenvector_dir = argv[++i]; }
         else if (k == "--help" || k == "-h") {
@@ -226,6 +232,10 @@ CliArgs parse_args(int argc, char** argv) {
               "                            (requires --directory with\n"
               "                             automorphism_results/ inside)\n"
               "  --sector-index <int>      which sector (default: 0)\n"
+              "  --sz <int>                (Phase F) restrict the symmetry-\n"
+              "                            projected basis to popcount==n_up\n"
+              "                            orbits (combine with --use-symmetry).\n"
+              "                            -1 (default) = no Sz constraint.\n"
               "Multi-GPU (requires WITH_CUDA=ON + NCCL_FOUND):\n"
               "  --gpu                     (lanczos only) distributed_lanczos_gpu\n"
               "  --gpu-resident-spmv       NCCL halo SpMV (no PCIe round-trip)\n"
@@ -253,6 +263,13 @@ CliArgs parse_args(int argc, char** argv) {
     if (a.use_symmetry && a.directory.empty()) {
         fail("--use-symmetry requires --directory <path> "
              "(the symmetry kernel reads automorphism_results/ from disk).");
+    }
+    if (a.n_up >= 0 && !a.use_symmetry) {
+        fail("--sz <n_up> requires --use-symmetry. The bare distributed "
+             "path (DistributedOperator) operates on the full Hilbert "
+             "space [0, 2^N) and has no fixed-Sz basis yet; use "
+             "--use-symmetry to combine Sz with a lattice sector, or "
+             "run a single-process FixedSz workflow.");
     }
     return a;
 }
@@ -540,6 +557,17 @@ int main(int argc, char** argv) {
                          " >= number of sectors (" +
                          std::to_string(op->symmetry_info.sectors.size()) +
                          ") in " + a.directory + "/automorphism_results/");
+                }
+                // Phase F: thread the optional Sz restriction onto the
+                // SymmetryGroupInfo so DistributedSymmetryOperator's
+                // popcount-filtered ctor honours it.
+                if (a.n_up >= 0) {
+                    if (a.n_up > static_cast<int>(op->getNumBits())) {
+                        fail("--sz " + std::to_string(a.n_up) +
+                             " exceeds num_sites (" +
+                             std::to_string(op->getNumBits()) + ")");
+                    }
+                    op->symmetry_info.n_up = a.n_up;
                 }
             }
         }

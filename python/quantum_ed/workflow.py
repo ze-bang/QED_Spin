@@ -2001,6 +2001,27 @@ def _diag_via_mpi(
                     )
             binary_args += ["--use-symmetry", "--sector-index", str(sec_idx)]
 
+            # Phase F: thread sz= onto the symm-projected basis. The
+            # binary's `--sz <n_up>` flag flips
+            # `op->symmetry_info.n_up`, which
+            # `DistributedSymmetryOperator`'s ctor honours by filtering
+            # orbits whose representative popcount does not match.
+            if sz is not None:
+                binary_args += ["--sz", str(int(sz))]
+        elif sz is not None:
+            # Bare distributed path (no symmetry) -- the underlying
+            # DistributedOperator works on the full Hilbert space and
+            # has no fixed-Sz basis yet. Reject explicitly so the user
+            # gets a clear diagnostic instead of a silent drop.
+            raise NotImplementedError(
+                "qed.diag(H, device='mpi'/'mpi_gpu', sz=...) without "
+                "symmetry= is not yet wired: the bare distributed "
+                "kernel iterates [0, 2^N) and has no fixed-Sz basis. "
+                "Pass symmetry= as well (the symm-projected basis is "
+                "popcount-filtered when sz is set), or run a single-"
+                "process FixedSz workflow."
+            )
+
         if bool(getattr(params, "compute_eigenvectors", False)):
             eigvec_dir = os.path.join(tmpdir, "eigvecs")
             os.makedirs(eigvec_dir, exist_ok=True)
