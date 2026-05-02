@@ -824,6 +824,17 @@ if(BUILD_ED_TESTS)
         target_link_libraries(test_distributed_lanczos_symmetry PRIVATE
             ed_symmetry)
 
+        # Phase D step 2: distributed Krylov-Schur rebased onto
+        # DistributedSymmetryOperator (CPU-only, no NCCL). Cross-checks
+        # the leading min(k_target, ks_locked) eigenvalues against
+        # `distributed_lanczos_symmetry` at the same seed/max_iter on
+        # N=4/N=6 Heisenberg chains across all momentum sectors at
+        # np ∈ {1, 2, 4}.
+        ed_add_mpi_test(test_distributed_krylov_schur_symmetry
+                        tests/unit/test_distributed_krylov_schur_symmetry.cpp)
+        target_link_libraries(test_distributed_krylov_schur_symmetry PRIVATE
+            ed_symmetry)
+
         # Phase 3c #1: NCCL multi-GPU collectives. Built only when
         # ed_distributed_gpu is alive (WITH_CUDA + NCCL_FOUND); registered
         # at np {1,2,4} same as the CPU MPI tests. The tests SKIP when no

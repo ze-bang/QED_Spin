@@ -9,6 +9,7 @@
 
 #include <ed/distributed/distributed_krylov_schur.h>
 #include <ed/distributed/distributed_lanczos_kernel.h>
+#include <ed/distributed/distributed_symmetry_operator.h>
 #include <ed/parallel/thread_budget.h>
 
 #include <algorithm>
@@ -85,6 +86,72 @@ void scatter_initial_vector(const DistributedOperator& op,
     if (n2 > 0.0) local_scal(1.0 / n2, v_local.data(), local_n);
 }
 
+// Symmetry-aware initial vector scatter (Phase D step 2). Mirrors the
+// scatter inside `distributed_lanczos_symmetry`: rank 0 builds a
+// deterministic global random vector in NATURAL orbit ordering, permutes
+// it into rank-major + LPT-orbit-scrambled order, and MPI_Scatterv's
+// each rank's slab. Slot k of `v_local` holds the amplitude of orbit
+// `partition.rank_orbits[rank][k]` -- which is exactly what
+// DistributedSymmetryOperator::apply expects.
+void scatter_initial_vector(const DistributedSymmetryOperator& op,
+                            unsigned long seed,
+                            std::vector<Complex>& v_local) {
+    const int rank = op.rank();
+    const int size = op.comm_size();
+    const std::uint64_t global_dim = op.global_dim();
+    const std::uint64_t local_n    = op.local_size();
+
+    v_local.assign(local_n, Complex(0.0, 0.0));
+
+    const auto& partition = op.partition();
+    std::vector<int> sendcounts(size, 0), displs(size, 0);
+    {
+        int run = 0;
+        for (int r = 0; r < size; ++r) {
+            sendcounts[r] = static_cast<int>(partition.rank_orbits[r].size());
+            displs[r] = run;
+            run += sendcounts[r];
+        }
+    }
+
+    if (rank == 0) {
+        std::vector<Complex> v_natural(static_cast<std::size_t>(global_dim));
+        std::mt19937_64 gen(seed);
+        std::normal_distribution<double> nd(0.0, 1.0);
+        double sumsq = 0.0;
+        for (std::uint64_t i = 0; i < global_dim; ++i) {
+            const double a = nd(gen);
+            const double b = nd(gen);
+            v_natural[i] = Complex(a, b);
+            sumsq += a * a + b * b;
+        }
+        const double inv = 1.0 / std::sqrt(sumsq);
+        for (auto& z : v_natural) z *= inv;
+
+        std::vector<Complex> v_rankmajor(
+            static_cast<std::size_t>(global_dim));
+        for (int r = 0; r < size; ++r) {
+            for (std::size_t k = 0; k < partition.rank_orbits[r].size(); ++k) {
+                const std::size_t orbit_id = partition.rank_orbits[r][k];
+                const std::size_t global_pos = partition.rank_offsets[r] + k;
+                v_rankmajor[global_pos] = v_natural[orbit_id];
+            }
+        }
+        MPI_Scatterv(v_rankmajor.data(), sendcounts.data(), displs.data(),
+                     MPI_C_DOUBLE_COMPLEX,
+                     v_local.data(), sendcounts[rank], MPI_C_DOUBLE_COMPLEX,
+                     0, op.comm());
+    } else {
+        MPI_Scatterv(nullptr, sendcounts.data(), displs.data(),
+                     MPI_C_DOUBLE_COMPLEX,
+                     v_local.data(), sendcounts[rank], MPI_C_DOUBLE_COMPLEX,
+                     0, op.comm());
+    }
+
+    const double n2 = dist_norm(v_local.data(), local_n, op.comm());
+    if (n2 > 0.0) local_scal(1.0 / n2, v_local.data(), local_n);
+}
+
 // Reorthogonalise w against the locked Ritz vectors and the in-cycle Krylov
 // basis. Two CGS passes ("twice-is-enough") for robustness; both passes
 // happen with the same `aux` set on every rank, so the cost per pass is
@@ -120,9 +187,23 @@ void reconstruct_local(const std::vector<std::vector<Complex>>& basis,
 
 }  // namespace
 
-DistributedLanczosResult distributed_krylov_schur(
-    const DistributedOperator& op,
-    const DistributedLanczosOptions& options) {
+namespace {
+
+// Templated KS body. `OpT` must satisfy the same duck-typed surface that
+// `kernel::distributed_lanczos_kernel` consumes (apply, rank, comm_size,
+// comm, global_dim, local_size). Both `DistributedOperator` and
+// `DistributedSymmetryOperator` qualify; the only operator-specific
+// hook is `scatter_initial_vector(op, seed, v_local)`, which is
+// overload-resolved on the operator type.
+//
+// The `lanczos_fallback` callable handles the tiny-problem fallback to
+// the matching baseline kernel without forcing this template to know
+// anything about `distributed_lanczos` vs `distributed_lanczos_symmetry`.
+template <typename OpT, typename LanczosFallback>
+DistributedLanczosResult distributed_krylov_schur_impl(
+    const OpT& op,
+    const DistributedLanczosOptions& options,
+    LanczosFallback&& lanczos_fallback) {
 
     const int rank = op.rank();
     const std::uint64_t local_n = op.local_size();
@@ -142,7 +223,7 @@ DistributedLanczosResult distributed_krylov_schur(
     // baseline kernel (avoids an awkward edge case where the basis is
     // smaller than the requested k_target).
     if (k_target * 2 + 4 > m_max || m_max < 8) {
-        return distributed_lanczos(op, options);
+        return lanczos_fallback(op, options);
     }
 
     const ed::parallel::ThreadBudgetScope budget(
@@ -172,9 +253,6 @@ DistributedLanczosResult distributed_krylov_schur(
         const double seed_norm = dist_norm(v_seed_local.data(), local_n,
                                             op.comm());
         if (seed_norm < 1e-13) {
-            // Span exhausted: locked set already captures every direction
-            // the operator has produced. Re-seed with a fresh random
-            // vector to push into the orthogonal complement.
             scatter_initial_vector(op,
                                     options.seed + 1u + 7919u * restart,
                                     v_seed_local);
@@ -194,7 +272,6 @@ DistributedLanczosResult distributed_krylov_schur(
             local_scal(1.0 / seed_norm, v_seed_local.data(), local_n);
         }
 
-        // ---- Build a Krylov basis of size up to m_max --------------------
         std::vector<std::vector<Complex>> basis;
         basis.reserve(m_max);
         basis.push_back(v_seed_local);
@@ -223,7 +300,6 @@ DistributedLanczosResult distributed_krylov_schur(
                            w.data(), local_n);
             }
 
-            // Twice-CGS reorth against locked + in-cycle basis.
             reorth_against(locked_vecs, basis, w.data(), local_n, op.comm());
 
             const double b = dist_norm(w.data(), local_n, op.comm());
@@ -249,7 +325,6 @@ DistributedLanczosResult distributed_krylov_schur(
 
         if (alpha.empty()) break;
 
-        // ---- Diagonalise the in-cycle tridiagonal -----------------------
         std::vector<double> evals, weights, evecs_cm;
         solve_tridiag_with_eigenvectors(alpha, beta, alpha.size(),
                                         evals, weights, evecs_cm);
@@ -257,9 +332,6 @@ DistributedLanczosResult distributed_krylov_schur(
         const std::size_t m_eff = alpha.size();
         const double beta_last = beta.back();
 
-        // Sort indices ascending by eigenvalue (Eigen returns ascending,
-        // but solve_tridiag_with_eigenvectors does not guarantee, so we
-        // sort defensively).
         std::vector<std::size_t> idx(m_eff);
         std::iota(idx.begin(), idx.end(), std::size_t{0});
         std::sort(idx.begin(), idx.end(),
@@ -267,7 +339,6 @@ DistributedLanczosResult distributed_krylov_schur(
                       return evals[a] < evals[b];
                   });
 
-        // Lock the leading newly-converged Ritz pairs.
         std::size_t newly_locked = 0;
         const std::uint64_t need = (k_target > locked_evals.size())
                                        ? k_target - locked_evals.size()
@@ -281,7 +352,6 @@ DistributedLanczosResult distributed_krylov_schur(
                 std::vector<Complex> phi;
                 reconstruct_local(basis, &evecs_cm[i * m_eff],
                                   local_n, phi);
-                // Orthogonalise + normalise.
                 for (int pass = 0; pass < 2; ++pass) {
                     for (const auto& lv : locked_vecs) {
                         const Complex c = dist_zdotc(lv.data(), phi.data(),
@@ -296,18 +366,15 @@ DistributedLanczosResult distributed_krylov_schur(
                     locked_vecs.push_back(std::move(phi));
                     ++newly_locked;
                 } else {
-                    // Numerically dependent on locked set; treat as a stop
-                    // signal for this cycle.
                     break;
                 }
             } else {
-                break;  // first unconverged stops the locking sweep
+                break;
             }
         }
 
         if (locked_evals.size() >= k_target) break;
 
-        // Pick the leading unlocked Ritz vector as the next seed.
         const std::size_t seed_rank =
             std::min<std::size_t>(newly_locked, m_eff - 1);
         const std::size_t i_seed = idx[seed_rank];
@@ -315,13 +382,12 @@ DistributedLanczosResult distributed_krylov_schur(
         reconstruct_local(basis, &evecs_cm[i_seed * m_eff], local_n, phi);
         v_seed_local = std::move(phi);
 
-        if (iters_done_cycle == 0) break;  // nothing happened, bail out
+        if (iters_done_cycle == 0) break;
     }
 
     DistributedLanczosResult result;
     result.iterations = total_iters;
 
-    // Sort the locked spectrum ascending.
     std::vector<std::size_t> ord(locked_evals.size());
     std::iota(ord.begin(), ord.end(), std::size_t{0});
     std::sort(ord.begin(), ord.end(),
@@ -332,11 +398,6 @@ DistributedLanczosResult distributed_krylov_schur(
     for (std::size_t i : ord) result.eigenvalues.push_back(locked_evals[i]);
 
     if (options.compute_eigenvectors) {
-        // Surface the locked Ritz vectors as a degenerate "krylov basis"
-        // whose tridiag eigenvector matrix is the identity. This lets
-        // ``reconstruct_local_eigenvector`` from distributed_lanczos.h
-        // reuse the same plumbing the CLI driver invokes for plain
-        // Lanczos.
         const std::size_t n_eig = ord.size();
         result.krylov_basis_local.resize(n_eig);
         for (std::size_t k = 0; k < n_eig; ++k) {
@@ -351,6 +412,30 @@ DistributedLanczosResult distributed_krylov_schur(
     }
 
     return result;
+}
+
+}  // namespace
+
+DistributedLanczosResult distributed_krylov_schur(
+    const DistributedOperator& op,
+    const DistributedLanczosOptions& options) {
+    return distributed_krylov_schur_impl(
+        op, options,
+        [](const DistributedOperator& o,
+           const DistributedLanczosOptions& opts) {
+            return distributed_lanczos(o, opts);
+        });
+}
+
+DistributedLanczosResult distributed_krylov_schur_symmetry(
+    const DistributedSymmetryOperator& op,
+    const DistributedLanczosOptions& options) {
+    return distributed_krylov_schur_impl(
+        op, options,
+        [](const DistributedSymmetryOperator& o,
+           const DistributedLanczosOptions& opts) {
+            return distributed_lanczos_symmetry(o, opts);
+        });
 }
 
 }  // namespace ed::distributed

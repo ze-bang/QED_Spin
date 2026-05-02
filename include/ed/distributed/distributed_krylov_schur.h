@@ -59,10 +59,23 @@
 
 namespace ed::distributed {
 
+class DistributedSymmetryOperator;
+
 /// Distributed Krylov-Schur (thick-restart Lanczos with locking).
 /// Collective on ``op.comm()`` -- every rank must call.
 DistributedLanczosResult distributed_krylov_schur(
     const DistributedOperator& op,
+    const DistributedLanczosOptions& options = {});
+
+/// Symmetry-projected variant of ``distributed_krylov_schur`` (Phase D
+/// step 2). Same algorithm as the unsymmetrised KS, but every SpMV is
+/// the orbit-row matvec exposed by ``DistributedSymmetryOperator`` and
+/// the initial-vector scatter matches the rank-major + LPT-orbit-
+/// permuted layout that ``distributed_lanczos_symmetry`` uses, so the
+/// two routines accept the same seed and produce comparable spectra.
+/// Collective on ``op.comm()`` -- every rank must call.
+DistributedLanczosResult distributed_krylov_schur_symmetry(
+    const DistributedSymmetryOperator& op,
     const DistributedLanczosOptions& options = {});
 
 }  // namespace ed::distributed

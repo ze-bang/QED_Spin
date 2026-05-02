@@ -705,20 +705,37 @@ int main(int argc, char** argv) {
                  a.mode == "ks") {
             // Layer 3 (Phase 9): thick-restart Lanczos with locking.
             // Phase B (device matrix MPI+GPU): on-device variant via
-            // `distributed_krylov_schur_gpu`. The symmetry variant
-            // would need a templated kernel like the plain Lanczos one
-            // (TODO -- Phase D).
+            // `distributed_krylov_schur_gpu`. Phase D step 2 wires the
+            // CPU symmetry-projected variant (`distributed_krylov_schur_symmetry`);
+            // the GPU symmetry path is queued for Phase D step 3.
+            std::unique_ptr<ed::distributed::DistributedOperator> dop_full;
+            std::unique_ptr<ed::distributed::DistributedSymmetryOperator> dop_sym;
+            std::uint64_t local_n = 0, local_offset = 0, global_dim = 0;
+            std::size_t plan_bytes = 0;
+
             if (a.use_symmetry) {
-                fail("--mode krylov_schur --use-symmetry is not yet "
-                     "supported. Run --mode lanczos --use-symmetry "
-                     "instead, or pre-project to a fixed-Sz block.");
+                if (a.gpu) {
+                    fail("--mode krylov_schur --gpu --use-symmetry is not "
+                         "yet supported (Phase D step 3). Drop --gpu to "
+                         "use the symmetry-projected CPU Krylov-Schur, "
+                         "or drop --use-symmetry for the GPU path.");
+                }
+                dop_sym = std::make_unique<ed::distributed::DistributedSymmetryOperator>(
+                    op, a.sector_index, MPI_COMM_WORLD);
+                local_n      = dop_sym->local_size();
+                local_offset = dop_sym->local_offset();
+                global_dim   = dop_sym->global_dim();
+                plan_bytes   = dop_sym->halo_plan()
+                                   ? sizeof(*dop_sym->halo_plan())
+                                   : 0;
+            } else {
+                dop_full = std::make_unique<ed::distributed::DistributedOperator>(
+                    op, MPI_COMM_WORLD);
+                local_n      = dop_full->local_size();
+                local_offset = dop_full->local_offset();
+                global_dim   = (1ULL << effective_N);
+                plan_bytes   = dop_full->plan_bytes();
             }
-            auto dop = std::make_unique<ed::distributed::DistributedOperator>(
-                op, MPI_COMM_WORLD);
-            const std::uint64_t local_n      = dop->local_size();
-            const std::uint64_t local_offset = dop->local_offset();
-            const std::uint64_t global_dim   = (1ULL << effective_N);
-            const std::size_t plan_bytes     = dop->plan_bytes();
 
             ed::distributed::DistributedLanczosOptions lopts;
             lopts.max_iter             = a.max_iter;
@@ -750,7 +767,14 @@ int main(int argc, char** argv) {
                      "without --gpu.");
 #endif
             } else {
-                res = ed::distributed::distributed_krylov_schur(*dop, lopts);
+                if (a.use_symmetry) {
+                    res = ed::distributed::distributed_krylov_schur_symmetry(
+                        *dop_sym, lopts);
+                    backend_label = "cpu_krylov_schur_symmetry";
+                } else {
+                    res = ed::distributed::distributed_krylov_schur(
+                        *dop_full, lopts);
+                }
             }
 
             if (world_rank == 0) {

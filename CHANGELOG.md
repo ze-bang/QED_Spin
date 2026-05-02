@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — Phase D step 2 (path matrix symm × mpi): templated CPU Krylov-Schur
+
+New function `ed::distributed::distributed_krylov_schur_symmetry` — the
+symmetry-projected companion of `distributed_krylov_schur`. The thick-
+restart Lanczos body is now a template `distributed_krylov_schur_impl<OpT,
+LanczosFallback>` shared by both the unsymmetrised and the symmetrised
+entry points; the only operator-specific hooks are the
+`scatter_initial_vector` overload (rank-major + LPT-orbit-permuted layout
+for the symm path) and the tiny-problem fallback callback (routes to the
+matching `distributed_lanczos` flavour).
+
+Dispatcher: the `--mode krylov_schur --use-symmetry` carve-out at
+`ed_distributed_main.cpp` is gone for the CPU branch; the GPU branch
+still fails with a Phase D step 3 pointer.
+
+Tests: `test_distributed_krylov_schur_symmetry` cross-checks the leading
+eigenvalue per momentum sector against `distributed_lanczos_symmetry` on
+N=4/N=6 Heisenberg chains at np ∈ {1, 2, 4} (all 27 CPU MPI tests pass
+locally).
+
 ### Added — Phase D step 1 (path matrix symm × mpi+gpu): on-device Lanczos
 
 New function `ed::distributed::distributed_lanczos_gpu_symmetry` — the

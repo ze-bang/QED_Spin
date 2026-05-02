@@ -515,10 +515,14 @@ two tables above don't capture on their own:
   `distributed_lanczos_gpu_symmetry` (Phase D step 1 — builds a
   `DistributedSymmetryOperatorGPU` internally and runs the same
   per-iteration cublasZdotc/cublasZaxpy/NCCL-allreduce recipe as the
-  unsymmetrised GPU Lanczos but with the orbit-row SpMV). The
-  remaining distributed GPU solvers (`KRYLOV_SCHUR`, `FTLM`,
+  unsymmetrised GPU Lanczos but with the orbit-row SpMV).
+* `symm` × **mpi** is wired for `KRYLOV_SCHUR` via
+  `distributed_krylov_schur_symmetry` (Phase D step 2 — templated
+  thick-restart body shared with the unsymmetrised KS, with a
+  symmetry-aware scatter helper). The remaining distributed GPU
+  solvers (`KRYLOV_SCHUR × mpi+gpu`, `FTLM × mpi`, `FTLM × mpi+gpu`,
   `BLOCK_*`, `DAVIDSON`, `LOBPCG`) still need their per-solver wiring
-  (Phase D steps 2-5). Until those land, drop to `device='gpu'` per
+  (Phase D steps 3-5). Until those land, drop to `device='gpu'` per
   node for those solvers when `--use-symmetry` is set.
 * `mTPQ` / `cTPQ` × `symm`: see Phase E. The lift is "per-sector
   TPQ + FTLM-style Z-aggregation" (each sector gets its own random
