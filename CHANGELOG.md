@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — Phase D step 3 (path matrix symm × mpi+gpu): on-device Krylov-Schur
+
+New function `ed::distributed::distributed_krylov_schur_gpu_symmetry`
+— the multi-GPU companion of `distributed_krylov_schur_symmetry`. The
+on-device thick-restart Lanczos body in
+`distributed_krylov_schur_gpu.cu` is now factored into a templated
+`ks_gpu_impl<CpuDop, GpuOp>` shared by both the unsymmetrised and
+symmetrised entry points; the CPU op surface required is
+`{rank, local_size, global_dim, comm}` and the GPU op surface is
+`apply(gpu_comm, const Complex*, Complex*, cudaStream_t)`. The
+`scatter_initial_vector_host(cpu_dop, seed, host_v)` overload is
+resolved at template-instantiation time on the CPU operator type.
+
+Dispatcher: the `--mode krylov_schur --gpu --use-symmetry` carve-out
+at `ed_distributed_main.cpp` (added in Phase D step 2 as a queue
+pointer) is gone.
+
+Tests: `test_distributed_krylov_schur_gpu_symmetry` cross-checks the
+GPU symm KS ground-state eigenvalue against
+`distributed_krylov_schur_symmetry` at all Z_N momentum sectors of
+N ∈ {4, 6} Heisenberg chains, abs tol 1e-9. Build-only on CI's CUDA
+build-only lane; runtime-tested via the `runtime_supports_gpu_ks_sym()`
+SKIP gate.
+
+The remaining Phase D wiring — `FTLM × symm` (CPU & GPU) — is queued
+as steps D4-D5.
+
 ### Added — Phase D step 2 (path matrix symm × mpi): templated CPU Krylov-Schur
 
 New function `ed::distributed::distributed_krylov_schur_symmetry` — the

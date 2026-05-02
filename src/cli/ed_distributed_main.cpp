@@ -714,12 +714,6 @@ int main(int argc, char** argv) {
             std::size_t plan_bytes = 0;
 
             if (a.use_symmetry) {
-                if (a.gpu) {
-                    fail("--mode krylov_schur --gpu --use-symmetry is not "
-                         "yet supported (Phase D step 3). Drop --gpu to "
-                         "use the symmetry-projected CPU Krylov-Schur, "
-                         "or drop --use-symmetry for the GPU path.");
-                }
                 dop_sym = std::make_unique<ed::distributed::DistributedSymmetryOperator>(
                     op, a.sector_index, MPI_COMM_WORLD);
                 local_n      = dop_sym->local_size();
@@ -757,9 +751,21 @@ int main(int argc, char** argv) {
                          "not staged back to host. Run without --gpu, or "
                          "drop the eigenvector output, for now.");
                 }
-                res = ed::distributed::distributed_krylov_schur_gpu(
-                    op, lopts, MPI_COMM_WORLD, /*device_index=*/-1);
-                backend_label = "gpu_krylov_schur";
+                if (a.use_symmetry) {
+                    // Phase D step 3: --mode krylov_schur --gpu --use-symmetry
+                    // routes through DistributedSymmetryOperatorGPU
+                    // (NCCL pairwise SendRecv halo + on-device CSR symm
+                    // SpMV). The CPU `dop_sym` carries the orbit basis +
+                    // LPT partition + halo plan; the GPU wrapper is
+                    // built inside the function.
+                    res = ed::distributed::distributed_krylov_schur_gpu_symmetry(
+                        *dop_sym, lopts, /*device_index=*/-1);
+                    backend_label = "gpu_krylov_schur_symmetry";
+                } else {
+                    res = ed::distributed::distributed_krylov_schur_gpu(
+                        op, lopts, MPI_COMM_WORLD, /*device_index=*/-1);
+                    backend_label = "gpu_krylov_schur";
+                }
 #else
                 fail("--mode krylov_schur --gpu requires WITH_CUDA=ON + "
                      "NCCL_FOUND. This binary was built without GPU "

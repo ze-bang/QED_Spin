@@ -48,6 +48,8 @@
 
 namespace ed::distributed {
 
+class DistributedSymmetryOperator;
+
 /// Distributed Krylov-Schur (thick-restart Lanczos with Ritz-pair
 /// locking) on the multi-GPU `DistributedGPUOperator`. Collective on
 /// `world_comm` -- every rank must call.
@@ -58,6 +60,24 @@ DistributedLanczosResult distributed_krylov_schur_gpu(
     std::shared_ptr<class ::Operator> op,
     const DistributedLanczosOptions& options,
     MPI_Comm world_comm,
+    int device_index = -1);
+
+/// Symmetry-projected variant of ``distributed_krylov_schur_gpu``
+/// (Phase D step 3). Same algorithm as the unsymmetrised GPU KS, but
+/// every SpMV is the on-device orbit-row matvec exposed by
+/// ``DistributedSymmetryOperatorGPU`` (NCCL pairwise SendRecv halo +
+/// CSR symm SpMV) and the initial-vector scatter matches the rank-
+/// major + LPT-orbit-permuted layout that
+/// ``distributed_krylov_schur_symmetry`` and
+/// ``distributed_lanczos_symmetry`` use, so the three routines accept
+/// the same seed and produce comparable spectra. Reuses the caller-
+/// owned ``DistributedSymmetryOperator`` (held by non-owning
+/// ``shared_ptr`` internally).
+///
+/// Throws ``std::logic_error`` if NCCL was not compiled in.
+DistributedLanczosResult distributed_krylov_schur_gpu_symmetry(
+    const DistributedSymmetryOperator& op,
+    const DistributedLanczosOptions& options,
     int device_index = -1);
 
 }  // namespace ed::distributed

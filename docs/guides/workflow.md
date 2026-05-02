@@ -519,10 +519,14 @@ two tables above don't capture on their own:
 * `symm` × **mpi** is wired for `KRYLOV_SCHUR` via
   `distributed_krylov_schur_symmetry` (Phase D step 2 — templated
   thick-restart body shared with the unsymmetrised KS, with a
-  symmetry-aware scatter helper). The remaining distributed GPU
-  solvers (`KRYLOV_SCHUR × mpi+gpu`, `FTLM × mpi`, `FTLM × mpi+gpu`,
+  symmetry-aware scatter helper).
+* `symm` × **mpi+gpu** is wired for `KRYLOV_SCHUR` via
+  `distributed_krylov_schur_gpu_symmetry` (Phase D step 3 — templated
+  on-device thick-restart body shared with the unsymmetrised GPU KS,
+  with the same orbit-aware scatter as the CPU symm path). The
+  remaining distributed solvers (`FTLM × mpi`, `FTLM × mpi+gpu`,
   `BLOCK_*`, `DAVIDSON`, `LOBPCG`) still need their per-solver wiring
-  (Phase D steps 3-5). Until those land, drop to `device='gpu'` per
+  (Phase D steps 4-5). Until those land, drop to `device='gpu'` per
   node for those solvers when `--use-symmetry` is set.
 * `mTPQ` / `cTPQ` × `symm`: see Phase E. The lift is "per-sector
   TPQ + FTLM-style Z-aggregation" (each sector gets its own random
