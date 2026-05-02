@@ -863,9 +863,11 @@ def diag(
     # `distributed_tpq_symmetry` (CPU MPI) and
     # `distributed_tpq_gpu_symmetry` (multi-GPU) DO project onto a
     # single sector and return per-sector sample-averaged
-    # `<H>(beta)`; the caller is responsible for FTLM-style
-    # aggregation across sectors. Allow that combination through
-    # to `_diag_via_mpi`.
+    # `<H>(beta)`. As of Phase H the Python dispatcher
+    # (`_diag_via_mpi`) automatically Z-weight-aggregates across
+    # sectors when `sector=` is omitted, so the user-facing
+    # `EDResults.thermo_data.energy` is the full-trace `<H>(beta)`.
+    # Allow this combination through to `_diag_via_mpi`.
     if symmetry is not None and is_tpq and not use_mpi:
         raise ValueError(
             "qed.diag(H, solver='mTPQ'/'cTPQ', symmetry=..., "
@@ -875,10 +877,11 @@ def diag(
             "the in-process streaming kernel. Options: drop the "
             "symmetry= argument (TPQ + sz= is supported), use the "
             "distributed path with device='mpi'/'mpi_gpu' (Phase E "
-            "wires `distributed_tpq_symmetry` -- returns per-sector "
-            "<H>(beta), caller aggregates across sectors), or use a "
-            "different thermal method (FTLM/LTLM combine across "
-            "symmetry blocks correctly)."
+            "wires `distributed_tpq_symmetry` per-sector and "
+            "Phase H Z-weight-aggregates across sectors when "
+            "`sector=` is omitted), or use a different thermal "
+            "method (FTLM/LTLM combine across symmetry blocks "
+            "correctly)."
         )
 
     # ------------------------------------------------------------------
@@ -1917,6 +1920,27 @@ def _diag_via_mpi(
     The :func:`qed.mpi.run_distributed` wrapper handles launcher /
     binary discovery, alias mapping (``mtpq`` → ``tpq``), and the
     ``use_gpu`` flag.
+
+    Multi-sector aggregation (Phase H)
+    ----------------------------------
+    When ``symmetry`` is set, ``mode`` is a thermal solver
+    (``ftlm`` / ``tpq``), and no explicit ``sector=`` was passed,
+    this function spawns ``ed_distributed_main`` ONCE PER irrep
+    (each call uses ``--sector-index <q>``), then combines the
+    per-sector results using the Z-weighted average:
+
+        Z(beta)   = sum_q Z_q(beta)
+        <H>(beta) = sum_q Z_q(beta) * <H>_q(beta) / Z(beta)
+
+    ``EDResults.thermo_data.energy`` then carries the full-trace
+    ``<H>(beta)`` (matching the in-process ``_diag_with_symmetry``
+    behaviour). Pass an explicit ``sector=`` to opt out of the
+    aggregation and get the per-sector ``Z_q`` / ``<H>_q`` instead.
+
+    For non-thermal solvers (``lanczos`` / ``krylov_schur``) the
+    function still picks ``sector=0`` by default; ground-state
+    aggregation across sectors is the user's responsibility (the
+    GS lives in exactly one sector and isn't a Z-weighted sum).
     """
     from . import mpi as _qed_mpi
     from .symmetry import group_from_generators
@@ -1934,37 +1958,54 @@ def _diag_via_mpi(
     effective_n_ranks = int(n_ranks) if n_ranks else _MPI_RANKS_DEFAULT
     mode = _ed_method_to_mpi_mode(method)
 
+    # --------------------------------------------------------------
     # Translate EDParameters into ed_distributed_main CLI flags.
-    binary_args: list[str] = [
+    # NOTE: this list does NOT yet contain --result-file,
+    # --use-symmetry, --sector-index, or --sz; those are appended
+    # per-sector inside the dispatch loop below so multi-sector
+    # aggregation can reuse the same base.
+    # --------------------------------------------------------------
+    base_binary_args: list[str] = [
         "--num-sites", str(int(operator.num_sites)),
     ]
     max_iter = int(getattr(params, "max_iterations", 0) or 0)
     if max_iter > 0:
-        binary_args += ["--max-iter", str(max_iter)]
+        base_binary_args += ["--max-iter", str(max_iter)]
     exct = int(getattr(params, "num_eigenvalues", 1) or 1)
-    binary_args += ["--exct", str(exct)]
+    base_binary_args += ["--exct", str(exct)]
     if mode in ("ftlm", "tpq"):
         n_samples = int(getattr(params, "tpq_num_samples", 0) or 0) \
             or int(getattr(params, "ftlm_store_samples", 0) or 0) \
             or 8
-        binary_args += ["--samples", str(n_samples)]
+        base_binary_args += ["--samples", str(n_samples)]
         if betas:
-            binary_args += ["--betas",
-                            ",".join(f"{float(b):g}" for b in betas)]
+            base_binary_args += ["--betas",
+                                 ",".join(f"{float(b):g}" for b in betas)]
     if mode == "tpq":
-        binary_args += ["--delta-beta",
-                        f"{float(getattr(params, 'tpq_delta_tau', 0.05)):g}"]
-        binary_args += ["--taylor-order",
-                        str(int(getattr(params, 'tpq_taylor_order', 30)))]
+        base_binary_args += ["--delta-beta",
+                             f"{float(getattr(params, 'tpq_delta_tau', 0.05)):g}"]
+        base_binary_args += ["--taylor-order",
+                             str(int(getattr(params, 'tpq_taylor_order', 30)))]
         if compute_variance:
-            binary_args += ["--compute-variance"]
+            base_binary_args += ["--compute-variance"]
 
     tmpdir = tempfile.mkdtemp(prefix="qed_diag_mpi_")
-    result_file = os.path.join(tmpdir, "result.h5")
     eigvec_dir = ""
     try:
         _write_operator_directory(operator, tmpdir)
-        binary_args += ["--directory", tmpdir, "--result-file", result_file]
+        base_binary_args += ["--directory", tmpdir]
+
+        # ----------------------------------------------------------
+        # Resolve the symmetry / sz / sector configuration into:
+        #   sym_args     : list[str]    -- common flags for every spawn
+        #                                   (--use-symmetry, --sz, ...)
+        #   sectors_list : list[int]    -- sector indices to dispatch
+        #   aggregate    : bool         -- whether to Z-weight-combine
+        #                                   the per-sector results
+        # ----------------------------------------------------------
+        sym_args: list[str] = []
+        sectors_list: list[int] = [0]   # single dispatch by default
+        aggregate: bool = False
 
         if symmetry is not None:
             # Translate the symmetry argument into the on-disk JSON the
@@ -1984,22 +2025,7 @@ def _diag_via_mpi(
                     f"symmetry must be GeneratorSet, list[Permutation], "
                     f"or dict; got {type(symmetry).__name__}")
             _write_symmetry_directory(tmpdir, info)
-
-            sec_idx = 0
-            if sector is not None:
-                requested = [int(q) for q in sector]
-                for s in info.get("sectors", []):
-                    if list(map(int, s.get("quantum_numbers", []))) == requested:
-                        sec_idx = int(s.get("sector_id", 0))
-                        break
-                else:
-                    raise ValueError(
-                        f"sector={requested!r} does not match any of the "
-                        f"{len(info.get('sectors', []))} irreps the symmetry "
-                        "group projects onto. Try qed.find_symmetries(H) to "
-                        "list the available quantum numbers."
-                    )
-            binary_args += ["--use-symmetry", "--sector-index", str(sec_idx)]
+            sym_args.append("--use-symmetry")
 
             # Phase F: thread sz= onto the symm-projected basis. The
             # binary's `--sz <n_up>` flag flips
@@ -2007,7 +2033,37 @@ def _diag_via_mpi(
             # `DistributedSymmetryOperator`'s ctor honours by filtering
             # orbits whose representative popcount does not match.
             if sz is not None:
-                binary_args += ["--sz", str(int(sz))]
+                sym_args += ["--sz", str(int(sz))]
+
+            n_sectors = len(info.get("sectors", []))
+            if sector is not None:
+                # User opted into a single sector -- no aggregation.
+                requested = [int(q) for q in sector]
+                sec_idx = None
+                for s in info.get("sectors", []):
+                    if list(map(int, s.get("quantum_numbers", []))) == requested:
+                        sec_idx = int(s.get("sector_id", 0))
+                        break
+                if sec_idx is None:
+                    raise ValueError(
+                        f"sector={requested!r} does not match any of the "
+                        f"{n_sectors} irreps the symmetry group projects "
+                        "onto. Try qed.find_symmetries(H) to list the "
+                        "available quantum numbers."
+                    )
+                sectors_list = [sec_idx]
+            elif mode in ("ftlm", "tpq") and n_sectors > 1:
+                # Phase H: thermal solver + symm + no explicit sector
+                # -> auto-aggregate across all irreps. Each sector
+                # contributes additively to the partition function so
+                # the Z-weighted average gives the full <H>(beta).
+                sectors_list = list(range(n_sectors))
+                aggregate = True
+            else:
+                # Eigenvalue solver, or single-sector group, or sym+sz
+                # (sz collapses to one effective irrep for thermal
+                # purposes when the user is partitioning by Sz only).
+                sectors_list = [0]
         elif sz is not None:
             # Phase G: bare distributed FixedSz path.
             #
@@ -2028,39 +2084,80 @@ def _diag_via_mpi(
                 )
             info = group_from_generators(n_sites, [list(range(n_sites))])
             _write_symmetry_directory(tmpdir, info)
-            binary_args += ["--use-symmetry", "--sector-index", "0",
-                            "--sz", str(int(sz))]
+            sym_args += ["--use-symmetry", "--sz", str(int(sz))]
+            sectors_list = [0]
 
         if bool(getattr(params, "compute_eigenvectors", False)):
             eigvec_dir = os.path.join(tmpdir, "eigvecs")
             os.makedirs(eigvec_dir, exist_ok=True)
-            binary_args += ["--compute-eigenvectors",
-                            "--eigenvector-dir", eigvec_dir]
+            base_binary_args += ["--compute-eigenvectors",
+                                 "--eigenvector-dir", eigvec_dir]
+            if aggregate:
+                # Per-rank Lanczos slabs from a thermal aggregation
+                # would mix sectors and lose semantic meaning; reject.
+                raise ValueError(
+                    "qed.diag(device='mpi'/'mpi_gpu', symmetry=..., "
+                    "compute_eigenvectors=True) is not supported when "
+                    "auto-aggregating across sectors. Pass sector= to "
+                    "pin a single irrep, or run an eigenvalue solver "
+                    "(lanczos / krylov_schur)."
+                )
 
         if verbose:
             print(f"[qed.diag] MPI dispatch via {tmpdir!r} "
                   f"(n_ranks={effective_n_ranks}, mode={mode}, "
-                  f"use_gpu={use_gpu}, symmetry={'yes' if symmetry else 'no'})")
+                  f"use_gpu={use_gpu}, "
+                  f"symmetry={'yes' if symmetry else 'no'}, "
+                  f"sectors={sectors_list}, aggregate={aggregate})")
 
-        completed = _qed_mpi.run_distributed(
-            method=mode,
-            n_ranks=effective_n_ranks,
-            use_gpu=use_gpu,
-            binary_args=tuple(binary_args),
-            launcher=launcher,
-            binary=binary,
-            launcher_binary=launcher_binary,
-            check=True,
-            capture_output=not verbose,
-        )
-        if verbose and completed and completed.stdout:
-            tail = completed.stdout.strip().splitlines()[-12:]
-            for line in tail:
-                print(f"[qed.diag.mpi] {line}")
+        # ----------------------------------------------------------
+        # Dispatch loop. For non-aggregated cases this runs once and
+        # behaves exactly like the pre-Phase-H code; for the symm+
+        # thermal+no-explicit-sector case it runs once per irrep and
+        # the per-sector HDF5 files land at result_q<idx>.h5.
+        # ----------------------------------------------------------
+        per_sector_files: list[tuple[int, str]] = []
+        for sec_idx in sectors_list:
+            rfile = os.path.join(
+                tmpdir,
+                "result.h5" if not aggregate
+                else f"result_q{sec_idx}.h5"
+            )
+            spawn_args = list(base_binary_args) + sym_args
+            if sym_args:
+                spawn_args += ["--sector-index", str(sec_idx)]
+            spawn_args += ["--result-file", rfile]
 
-        return _read_mpi_result_file(
-            result_file, mode=mode,
-            eigenvector_dir=eigvec_dir if eigvec_dir else None,
+            completed = _qed_mpi.run_distributed(
+                method=mode,
+                n_ranks=effective_n_ranks,
+                use_gpu=use_gpu,
+                binary_args=tuple(spawn_args),
+                launcher=launcher,
+                binary=binary,
+                launcher_binary=launcher_binary,
+                check=True,
+                capture_output=not verbose,
+            )
+            if verbose and completed and completed.stdout:
+                tail = completed.stdout.strip().splitlines()[-12:]
+                for line in tail:
+                    print(f"[qed.diag.mpi q={sec_idx}] {line}")
+            per_sector_files.append((sec_idx, rfile))
+
+        # ----------------------------------------------------------
+        # Read result(s).
+        # ----------------------------------------------------------
+        if not aggregate:
+            sec_idx, rfile = per_sector_files[0]
+            return _read_mpi_result_file(
+                rfile, mode=mode,
+                eigenvector_dir=eigvec_dir if eigvec_dir else None,
+            )
+
+        # Aggregate thermal: Z-weighted average across sectors.
+        return _aggregate_thermal_sectors(
+            [rf for _, rf in per_sector_files], mode=mode,
         )
     finally:
         # Keep the eigenvector slabs around when the user asked for
@@ -2229,6 +2326,98 @@ def load_mpi_eigenvectors(
 
     cols = [load_mpi_eigenvector(eigenvector_dir, k=k) for k in range(n_eig)]
     return np.stack(cols, axis=0)
+
+
+def _read_mpi_thermo_arrays(
+    path: str,
+) -> tuple[list[float], list[float], list[float]]:
+    """Return ``(betas, energies, Z)`` from a thermal MPI result file.
+
+    Used both by :func:`_read_mpi_result_file` (for the user-facing
+    EDResults shape) and by :func:`_aggregate_thermal_sectors` (which
+    needs the raw per-sector ``Z(beta)`` to do the Z-weighted
+    average -- the field is otherwise dropped from EDResults).
+    """
+    import h5py
+    with h5py.File(path, "r") as f:
+        betas = (list(map(float, f["/betas"][:]))
+                 if "/betas" in f else [])
+        energies = (list(map(float, f["/energy"][:]))
+                    if "/energy" in f else [])
+        zvals = (list(map(float, f["/Z"][:]))
+                 if "/Z" in f else [])
+    return betas, energies, zvals
+
+
+def _aggregate_thermal_sectors(
+    per_sector_paths: Sequence[str],
+    *,
+    mode: str,
+) -> EDResults:
+    """Combine per-sector FTLM/TPQ result files into one full-trace EDResults.
+
+    The Phase-H multi-sector dispatch in :func:`_diag_via_mpi` runs
+    ``ed_distributed_main`` once per irrep; each spawn writes its own
+    HDF5 file with that sector's ``Z_q(beta)`` and ``<H>_q(beta)``.
+    This helper reads them back and combines via the
+    additive-partition-function rule so the returned EDResults matches
+    the in-process :func:`_diag_with_symmetry` shape (one
+    ``thermo_data.energy`` per beta, totalled over irreps):
+
+        Z(beta)   = sum_q Z_q(beta)
+        <H>(beta) = sum_q Z_q(beta) * <H>_q(beta) / Z(beta)
+    """
+    if not per_sector_paths:
+        raise RuntimeError(
+            "internal: _aggregate_thermal_sectors called with no sectors"
+        )
+
+    raw: list[tuple[list[float], list[float], list[float]]] = [
+        _read_mpi_thermo_arrays(p) for p in per_sector_paths
+    ]
+
+    # All sectors must agree on the beta grid (the binary writes the
+    # same /betas dataset for every sector since the schedule is set
+    # by --betas / --delta-beta on the CLI).
+    betas_ref = raw[0][0]
+    for q, (betas_q, _, _) in enumerate(raw):
+        if betas_q != betas_ref:
+            raise RuntimeError(
+                f"sector q={q} returned a different beta grid than "
+                f"sector q=0; cannot aggregate."
+            )
+
+    n_beta = len(betas_ref)
+    if n_beta == 0:
+        # Degenerate: nothing to aggregate, return the first as-is.
+        return per_sector[0]
+
+    z_total = [0.0] * n_beta
+    zh_total = [0.0] * n_beta
+    for _, energies_q, zvals_q in raw:
+        if len(zvals_q) != n_beta or len(energies_q) != n_beta:
+            raise RuntimeError(
+                "per-sector arrays have inconsistent length vs the "
+                "beta grid; aborting aggregation."
+            )
+        for i in range(n_beta):
+            z_total[i] += zvals_q[i]
+            zh_total[i] += zvals_q[i] * energies_q[i]
+
+    energy_avg = [
+        (zh_total[i] / z_total[i]) if z_total[i] > 0.0 else float("nan")
+        for i in range(n_beta)
+    ]
+
+    out = EDResults()
+    out.eigenvalues = list(energy_avg)
+    out.eigenvectors_computed = False
+    out.eigenvectors_path = ""
+    t = ThermodynamicData()
+    t.temperatures = [1.0 / b if b > 0 else float("inf") for b in betas_ref]
+    t.energy = energy_avg
+    out.thermo_data = t
+    return out
 
 
 def _read_mpi_result_file(

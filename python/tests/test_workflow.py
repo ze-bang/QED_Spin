@@ -859,6 +859,170 @@ class TestDeviceMatrix:
         with pytest.raises(ValueError, match="device="):
             quantum_ed.diag(H, device="quantum-foam", verbose=False)
 
+    @pytest.mark.parametrize("solver", ["FTLM", "mTPQ"])
+    @pytest.mark.parametrize("device", ["mpi", "mpi_gpu"])
+    def test_mpi_symm_thermal_aggregates_across_sectors(
+        self, H, solver, device, monkeypatch,
+    ):
+        """Phase H: ``device='mpi'/'mpi_gpu' + symmetry= + thermal``
+        must spawn ``ed_distributed_main`` once per irrep AND
+        Z-weight-average the per-sector ``Z_q``, ``<H>_q`` into a
+        single full-trace ``thermo_data.energy``.
+
+        We monkeypatch :func:`run_distributed` so each spawn writes a
+        synthetic per-sector HDF5 file with KNOWN ``/Z`` and
+        ``/energy`` arrays. The test then asserts:
+
+          1. ``run_distributed`` was called exactly ``len(sectors)``
+             times -- one per irrep -- with distinct
+             ``--sector-index`` values;
+          2. the returned ``EDResults.thermo_data.energy[i]`` equals
+             ``sum_q Z_q[i] * E_q[i] / sum_q Z_q[i]`` for every beta.
+        """
+        import h5py
+        import numpy as np
+        from quantum_ed import mpi as qed_mpi
+
+        # Use translation symmetry on the Heisenberg ring -- gives
+        # multiple irreps so the aggregation actually has work to do.
+        N = H.num_sites
+        translation = [(i + 1) % N for i in range(N)]
+        symm = quantum_ed.GeneratorSet(
+            name="Cn",
+            description="translation on the ring",
+            generators=[translation],
+        )
+
+        sector_calls: list[int] = []
+        # Two betas; per-sector synthetic data so the Z-weighted
+        # average has an obvious closed form to assert against.
+        betas = np.array([0.5, 1.5])
+        # Map sector_idx -> (energy[beta], Z[beta]).
+        synthetic = {
+            0: (np.array([-1.0, -2.0]), np.array([3.0, 4.0])),
+            1: (np.array([-0.5, -1.5]), np.array([1.0, 2.0])),
+            2: (np.array([+0.5, +0.5]), np.array([2.0, 1.0])),
+            3: (np.array([+1.0, +0.0]), np.array([1.0, 1.0])),
+            # extras in case the group has more irreps:
+            4: (np.array([0.0, 0.0]), np.array([1.0, 1.0])),
+            5: (np.array([0.0, 0.0]), np.array([1.0, 1.0])),
+        }
+
+        def fake_run_distributed(*, method, n_ranks, binary_args,
+                                  use_gpu=False, **_kw):
+            # Pull --sector-index and --result-file out of the args.
+            sec_idx = None
+            result_file = None
+            args = list(binary_args)
+            for i, tok in enumerate(args):
+                if tok == "--sector-index":
+                    sec_idx = int(args[i + 1])
+                elif tok == "--result-file":
+                    result_file = args[i + 1]
+            assert sec_idx is not None and result_file is not None
+            sector_calls.append(sec_idx)
+            energy_q, z_q = synthetic[sec_idx]
+            with h5py.File(result_file, "w") as f:
+                f.create_dataset("/betas", data=betas)
+                f.create_dataset("/energy", data=energy_q)
+                f.create_dataset("/Z", data=z_q)
+                f.attrs["samples_used"] = 1
+                f.attrs["elapsed_s"] = 0.0
+            class _CP: returncode = 0; stdout = ""; stderr = ""
+            return _CP()
+
+        monkeypatch.setattr(qed_mpi, "run_distributed",
+                            fake_run_distributed)
+
+        res = quantum_ed.diag(
+            H, solver=solver, device=device,
+            symmetry=symm,
+            target_beta=2.0, num_samples=1, mpi_n_ranks=2,
+            plan=False, verbose=False,
+        )
+
+        # Phase H invariant 1: at least 2 distinct sectors were
+        # dispatched (translation gives N irreps; we just need >1
+        # to prove aggregation actually fired).
+        assert len(sector_calls) >= 2, (
+            f"expected >=2 per-sector spawns, got {sector_calls}"
+        )
+        assert len(set(sector_calls)) == len(sector_calls), (
+            f"each sector should be visited exactly once; "
+            f"got duplicates in {sector_calls}"
+        )
+
+        # Phase H invariant 2: Z-weighted average reproduces the
+        # closed-form combination.
+        z_total = np.zeros(len(betas))
+        zh_total = np.zeros(len(betas))
+        for q in sector_calls:
+            energy_q, z_q = synthetic[q]
+            z_total += z_q
+            zh_total += z_q * energy_q
+        expected = zh_total / z_total
+        got = np.asarray(res.thermo_data.energy, dtype=float)
+        np.testing.assert_allclose(got, expected, rtol=1e-12, atol=1e-12)
+
+    @pytest.mark.parametrize("device", ["mpi", "mpi_gpu"])
+    def test_mpi_symm_thermal_explicit_sector_skips_aggregation(
+        self, H, device, monkeypatch,
+    ):
+        """When the user passes an explicit ``sector=``, the Phase-H
+        aggregation must NOT fire: the binary is invoked exactly
+        once and its raw ``<H>_q(beta)`` is surfaced as-is.
+        """
+        import h5py
+        import numpy as np
+        from quantum_ed import mpi as qed_mpi
+
+        N = H.num_sites
+        translation = [(i + 1) % N for i in range(N)]
+        symm = quantum_ed.GeneratorSet(
+            name="Cn",
+            description="translation on the ring",
+            generators=[translation],
+        )
+
+        n_calls = {"n": 0}
+        per_sector_energy = np.array([-0.7, -1.3])
+        betas = np.array([0.5, 1.5])
+
+        def fake_run_distributed(*, method, n_ranks, binary_args,
+                                  use_gpu=False, **_kw):
+            n_calls["n"] += 1
+            args = list(binary_args)
+            result_file = next(
+                args[i + 1] for i, t in enumerate(args)
+                if t == "--result-file"
+            )
+            with h5py.File(result_file, "w") as f:
+                f.create_dataset("/betas", data=betas)
+                f.create_dataset("/energy", data=per_sector_energy)
+                f.create_dataset("/Z", data=np.array([1.0, 1.0]))
+                f.attrs["samples_used"] = 1
+                f.attrs["elapsed_s"] = 0.0
+            class _CP: returncode = 0; stdout = ""; stderr = ""
+            return _CP()
+
+        monkeypatch.setattr(qed_mpi, "run_distributed",
+                            fake_run_distributed)
+
+        res = quantum_ed.diag(
+            H, solver="FTLM", device=device,
+            symmetry=symm, sector=[0],
+            target_beta=2.0, num_samples=1, mpi_n_ranks=2,
+            plan=False, verbose=False,
+        )
+
+        assert n_calls["n"] == 1, (
+            f"explicit sector= must dispatch ONCE, got {n_calls['n']}"
+        )
+        np.testing.assert_allclose(
+            np.asarray(res.thermo_data.energy, dtype=float),
+            per_sector_energy, rtol=1e-12, atol=1e-12,
+        )
+
 
 # ---------------------------------------------------------------------------
 # solver_device_support()

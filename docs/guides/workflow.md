@@ -350,20 +350,34 @@ refers to the four basis choices the workflow can compose:
 | `ARPACK_*` (`SM`, `LM`, `SHIFT_INVERT`, `ADVANCED`) | ✅ | ✅ | ✅ | ✅ | `EDResults.eigenvalues` |
 | `CHEBYSHEV_FILTERED`, `SHIFT_INVERT[_ROBUST]`, `BICG`, `OSS` | ✅ | ✅ | ✅ | ✅ | `EDResults.eigenvalues` |
 | `FULL`, `SCALAPACK[_MIXED]` | ✅ | ✅ | ✅ | ✅ | `EDResults.eigenvalues` |
-| `mTPQ` / `cTPQ`           | ✅ | ✅ | ❌¹ | ❌¹ | trajectory in `eigenvalues`; thermo curve in `output_dir` |
+| `mTPQ` / `cTPQ`           | ✅ | ✅ | ❌¹ / ✅³ | ❌¹ / ✅³ | trajectory in `eigenvalues`; thermo curve in `output_dir`/`thermo_data` |
 | `FTLM`                    | ✅ | ✅ | ✅² | ✅² | `EDResults.thermo_data` (sectors are summed) |
 | `LTLM` / `HYBRID`         | ✅ | ✅ | ✅² | ✅² | `EDResults.thermo_data` |
 
 Notes:
 
-¹ TPQ acts on a single random vector spread across the whole sector;
-projecting onto each symmetry irrep destroys the Z normalisation. The
-workflow raises a clear `ValueError` when this combination is
-requested. Pre-project to a fixed-Sz block instead.
+¹ In the in-process (`device='cpu'`/`'gpu'`) path TPQ acts on a
+single random vector spread across the whole sector; projecting onto
+each symmetry irrep destroys the Z normalisation. The workflow
+raises a clear `ValueError` when this combination is requested on
+those devices. Pre-project to a fixed-Sz block instead, or use
+`device='mpi'`/`'mpi_gpu'` (see footnote ³).
 
 ² FTLM/LTLM/HYBRID *do* combine across symmetry blocks correctly
 because each block contributes an additive term to the partition
-function. The dispatcher handles the per-sector aggregation.
+function. On `device='cpu'`/`'gpu'` the in-process dispatcher loops
+the sectors itself; on `device='mpi'`/`'mpi_gpu'` the Python
+layer (`_diag_via_mpi`, Phase H) spawns `ed_distributed_main` once
+per irrep and Z-weight-averages the per-sector results so the
+returned `EDResults.thermo_data.energy` is the full-trace
+`<H>(beta)`. Pass an explicit `sector=` to opt out of the
+aggregation and keep just one irrep's `Z_q`, `<H>_q`.
+
+³ On `device='mpi'`/`'mpi_gpu'` only, `mTPQ` / `cTPQ` + symmetry
+is wired through `distributed_tpq_symmetry` (Phase E). Each sector
+uses an orbit-aware initial-state scatter so the Z normalisation is
+preserved, and the Phase-H aggregation in `_diag_via_mpi` Z-weight-
+averages across sectors automatically when `sector=` is omitted.
 
 ```python
 # Eigenvalue solver, all four paths:
@@ -547,9 +561,12 @@ two tables above don't capture on their own:
   initial-state scatter and a per-group `DistributedSymmetryOperator`
   driving the `taylor_step` propagation. The CLI accepts `--mode tpq
   --use-symmetry --sector-index k`; the returned `energy[b]` is the
-  sample-averaged `<H>(beta)` measured **inside sector k only**, and
-  the caller is responsible for FTLM-style aggregation across sectors
-  when reconstructing full-space thermal observables.
+  sample-averaged `<H>(beta)` measured **inside sector k only**.
+  When called from Python via `qed.diag(H, device='mpi',
+  symmetry=...)` without an explicit `sector=`, the Phase-H
+  multi-sector dispatch in `_diag_via_mpi` invokes the binary once
+  per irrep and Z-weight-averages the results so the returned
+  `EDResults.thermo_data.energy` is the full-trace `<H>(beta)`.
 * `mTPQ` / `cTPQ` × **mpi+gpu** is wired (Phase E step 2) via
   `distributed_tpq_gpu_symmetry` — templated on-device per-sample
   canonical-TPQ body shared with the unsymmetrised GPU TPQ, with the

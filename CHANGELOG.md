@@ -7,6 +7,73 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — Phase H: auto-aggregate FTLM/TPQ across symmetry sectors on MPI path
+
+Closes the last MPI symmetry footgun: previously
+`qed.diag(H, device='mpi'/'mpi_gpu', solver='FTLM'|'mTPQ'|'cTPQ',
+symmetry=...)` would dispatch ONE call to `ed_distributed_main`
+with `--sector-index 0` and return that sector's `Z_q(beta)`,
+`<H>_q(beta)` -- silently giving the user a partial-trace thermal
+curve. Callers had to manually loop sectors and Z-weight-average
+themselves.
+
+The Python dispatcher (`_diag_via_mpi`) now does this for them:
+when `symmetry=` is set, the solver is thermal (`ftlm`/`tpq`),
+and `sector=` is NOT supplied, the binary is invoked once per
+irrep and the per-sector results are combined via the
+additive-partition-function rule
+
+```
+Z(beta)   = sum_q Z_q(beta)
+<H>(beta) = sum_q Z_q(beta) * <H>_q(beta) / Z(beta)
+```
+
+so `EDResults.thermo_data.energy[i]` is the full-trace
+`<H>(beta_i)` -- matching the in-process `_diag_with_symmetry`
+contract. Pass an explicit `sector=` to opt out and keep the raw
+per-sector arrays.
+
+For the non-thermal MPI path (`lanczos`/`krylov_schur` + symm)
+the dispatcher still picks `sector=0` by default; ground-state
+aggregation across sectors is the user's responsibility (the GS
+lives in exactly one irrep and is not a Z-weighted sum).
+
+- `python/quantum_ed/workflow.py`:
+  - Refactored `_diag_via_mpi` so the per-spawn `--sector-index`
+    and `--result-file` are appended inside a dispatch loop;
+    `base_binary_args` and `sym_args` are built once.
+  - New helpers `_read_mpi_thermo_arrays` (returns the raw
+    `(betas, energies, Z)` triple from a thermal HDF5 file --
+    the user-facing EDResults discards `Z`) and
+    `_aggregate_thermal_sectors` (Z-weighted average across
+    paths, with a beta-grid consistency check).
+  - The `compute_eigenvectors=True` + multi-sector aggregation
+    combination is rejected with a clear error (per-rank slabs
+    from different irreps would not stitch).
+- `python/tests/test_workflow.py`: new
+  `test_mpi_symm_thermal_aggregates_across_sectors[FTLM|mTPQ,
+  mpi|mpi_gpu]` (4 cells) monkeypatches `run_distributed`,
+  emits synthetic per-sector `Z_q`, `<H>_q` arrays, and asserts
+  (a) one spawn per irrep with distinct `--sector-index`, (b)
+  the returned `thermo_data.energy` equals the closed-form
+  Z-weighted average. New
+  `test_mpi_symm_thermal_explicit_sector_skips_aggregation[mpi|
+  mpi_gpu]` confirms passing `sector=[0]` falls back to the
+  one-shot per-sector behaviour.
+- `docs/guides/workflow.md`: footnote 2 rewritten -- now
+  distinguishes the in-process aggregator (which loops sectors
+  in C++) from the new MPI Phase-H Python aggregator (which
+  spawns per irrep and combines in Python). Footnote 1 updated
+  to point users at `device='mpi'/'mpi_gpu'` for TPQ + symm.
+  New footnote 3 documents the MPI TPQ + symm + Phase-H path.
+  The `mTPQ`/`cTPQ` MPI bullet no longer says "the caller is
+  responsible for FTLM-style aggregation" -- it's automatic.
+- The Phase-E TPQ + symm rejection message in
+  `_dispatch_to_diagonalization_kernel` now references Phase H
+  ("the dispatcher Z-weight-aggregates across sectors when
+  `sector=` is omitted") instead of telling the user to
+  aggregate themselves.
+
 ### Added — Phase G: bare distributed FixedSz path (no symmetry)
 
 Wires `qed.diag(H, device='mpi'/'mpi_gpu', sz=k)` (without
