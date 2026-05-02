@@ -289,6 +289,14 @@ if(WITH_MPI AND WITH_CUDA AND NCCL_FOUND)
         # allreduces; DistributedGPUOperator for the SpMV; host-side
         # (m x m) Eigen tridiag eigensolve per cycle.
         ${DISTRIBUTED_DIR}/distributed_krylov_schur_gpu.cu
+        # Phase C (device matrix MPI+GPU): on-device symmetry-projected
+        # SpMV. Wraps a CPU `DistributedSymmetryOperator` (orbit basis
+        # + LPT partition + OrbitHaloPlan + projected CSR row slab),
+        # uploads the per-row CSR (col_idx, is_local mask, complex
+        # coefficients) and the halo-plan send_local_idx to device,
+        # halo runs through NCCL pairwise SendRecv, SpMV is one
+        # CUDA kernel per local row.
+        ${DISTRIBUTED_DIR}/distributed_symmetry_operator_gpu.cu
     )
     target_include_directories(ed_distributed_gpu PUBLIC ${_ED_PUBLIC_INCLUDES})
     target_include_directories(ed_distributed_gpu PRIVATE ${NCCL_INCLUDE_DIRS})

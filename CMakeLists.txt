@@ -898,6 +898,16 @@ if(BUILD_ED_TESTS)
                                 tests/unit/test_distributed_krylov_schur_gpu.cpp)
             target_link_libraries(test_distributed_krylov_schur_gpu PRIVATE
                 ed_distributed)
+
+            # Phase C (device matrix MPI+GPU): on-device symmetry-projected
+            # SpMV. Cross-checks `DistributedSymmetryOperatorGPU::apply`
+            # against the CPU `DistributedSymmetryOperator::apply` on
+            # Heisenberg chains with translation symmetry across all
+            # momentum sectors at np in {1, 2, 4}.
+            ed_add_phase3c_test(test_distributed_symmetry_operator_gpu
+                                tests/unit/test_distributed_symmetry_operator_gpu.cpp)
+            target_link_libraries(test_distributed_symmetry_operator_gpu PRIVATE
+                ed_distributed)
         endif()
     endif()
 

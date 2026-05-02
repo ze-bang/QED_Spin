@@ -7,6 +7,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — Phase C (device matrix MPI+GPU): on-device symmetry-projected SpMV
+
+New class `ed::distributed::DistributedSymmetryOperatorGPU` — a
+multi-GPU companion of the CPU `DistributedSymmetryOperator`. Wraps
+an existing CPU instance (orbit basis, LPT-balanced
+`OrbitPartition`, `OrbitHaloPlan`, projected CSR row slab) and
+flattens the per-row CSR (`row_offsets`, `col_idx`, `is_local` mask,
+complex coefficients) plus the halo plan's `send_local_idx` into
+device-resident SoA arrays at construction time. `apply()` runs:
+
+1. A pack kernel — `d_send_buf[k] = d_x_local[d_send_local_idx[k]]`.
+2. NCCL pairwise `ncclSend` / `ncclRecv` (one `ncclGroupStart`/End)
+   over the orbit-aware halo schedule on device buffers.
+3. A CSR sparse-matvec kernel — one thread per local row; each
+   non-zero loads from `d_x_local` or the just-filled halo recv
+   buffer based on the `is_local` tag.
+
+This is the foundation for Phase D, which will wire every
+distributed GPU solver (`KRYLOV_SCHUR`, `BLOCK_*`, `DAVIDSON`,
+`LOBPCG`, `mTPQ`, `cTPQ`) through this primitive when
+`--use-symmetry` is set on the `--gpu` path.
+
+CPU-side: the `DistributedSymmetryOperator` header gains three
+narrow public accessors (`csr_row_col_idx()`, `csr_row_is_local()`,
+`csr_row_coeff()`) so the GPU mirror can flatten the row slab
+without becoming a friend.
+
+Tests: `test_distributed_symmetry_operator_gpu` cross-checks the
+GPU `apply()` against the CPU `apply()` on Heisenberg chains
+N ∈ {4, 6} (OBC + PBC) over every Z_N momentum sector at np
+∈ {1, 2, 4}, abs tol 1e-12. Build-only on the CUDA build-only CI
+lane; runtime-tested via the `runtime_supports_gpu_sym()` SKIP
+gate. Compiled iff `WITH_MPI=ON && WITH_CUDA=ON && NCCL_FOUND`.
+
 ### Added — Phase B (device matrix MPI+GPU): on-device Krylov-Schur
 
 Implements `distributed_krylov_schur_gpu`, the multi-GPU companion of

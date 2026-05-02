@@ -184,6 +184,24 @@ public:
     /// want this signal).
     std::size_t local_nnz() const noexcept;
 
+    /// Per-row CSR-style accessors for the locally-owned row slab.
+    /// `csr_row_col_idx()[r][k]` is either an index into a length-
+    /// `local_size()` amplitude vector (when `csr_row_is_local()[r][k]
+    /// != 0`) or an index into the halo recv buffer of `halo_plan()`
+    /// (when 0). `csr_row_coeff()[r][k]` is the matrix element
+    /// `H_q[i_local(r), j]`. These are exposed so a GPU mirror
+    /// (`DistributedSymmetryOperatorGPU`) can flatten the row slab
+    /// into device-resident SoA arrays at construction time.
+    const std::vector<std::vector<std::size_t>>&  csr_row_col_idx() const noexcept {
+        return row_col_idx_;
+    }
+    const std::vector<std::vector<std::uint8_t>>& csr_row_is_local() const noexcept {
+        return row_is_local_;
+    }
+    const std::vector<std::vector<Complex>>&      csr_row_coeff() const noexcept {
+        return row_coeff_;
+    }
+
 private:
     std::shared_ptr<Operator> op_;
     MPI_Comm                  comm_   = MPI_COMM_NULL;
