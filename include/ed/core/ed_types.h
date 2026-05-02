@@ -75,6 +75,9 @@ enum class DiagonalizationMethod {
     FTLM,                     // Finite Temperature Lanczos Method
     LTLM,                     // Low-Temperature Lanczos Method
     HYBRID,                   // Hybrid (LTLM + FTLM with automatic crossover)
+    KPM_DOS,                  // Kernel Polynomial Method density-of-states +
+                              // thermodynamics (Chebyshev moments + Hutchinson
+                              // trace; recommended for N >= 13).
 
     // ARPACK methods (algorithmic variants — *not* device variants)
     ARPACK_SM,                // ARPACK smallest magnitude

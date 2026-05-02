@@ -131,6 +131,20 @@ struct EDParameters {
     double hybrid_crossover = 1.0;
     bool hybrid_auto_crossover = false;
 
+    // ========== KPM-DOS-Specific Parameters ==========
+    // Kernel Polynomial Method density-of-states + thermodynamics.
+    // See include/ed/solvers/kpm_dos.h for full algorithmic specification.
+    uint64_t kpm_num_moments = 2048;          // M, Chebyshev moments
+    uint64_t kpm_num_random_vectors = 20;     // R, Hutchinson samples
+    uint64_t kpm_num_quadrature_nodes = 0;    // 0 = auto = 2*M
+    uint64_t kpm_spectral_bounds_krylov = 150;
+    double kpm_spectral_bound_buffer = 0.05;
+    bool kpm_use_jackson_kernel = true;       // false = Lorentz kernel
+    double kpm_lorentz_lambda = 4.0;
+    bool kpm_full_reorth = true;
+    uint64_t kpm_reorth_freq = 10;
+    uint64_t kpm_seed = 0;
+
     // ========== Observable Calculations ==========
     mutable std::vector<Operator> observables = {};
     mutable std::vector<std::string> observable_names = {};

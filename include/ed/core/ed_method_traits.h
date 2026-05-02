@@ -58,10 +58,16 @@ constexpr bool is_hybrid_method(DiagonalizationMethod m) noexcept {
     return m == DiagonalizationMethod::HYBRID;
 }
 
-/// True for any thermal method (TPQ / FTLM / LTLM / Hybrid).
+/// True for the KPM-DOS thermodynamics solver.
+constexpr bool is_kpm_dos_method(DiagonalizationMethod m) noexcept {
+    return m == DiagonalizationMethod::KPM_DOS;
+}
+
+/// True for any thermal method (TPQ / FTLM / LTLM / Hybrid / KPM-DOS).
 constexpr bool is_thermal_method(DiagonalizationMethod m) noexcept {
     return is_tpq_method(m) || is_ftlm_method(m) ||
-           is_ltlm_method(m) || is_hybrid_method(m);
+           is_ltlm_method(m) || is_hybrid_method(m) ||
+           is_kpm_dos_method(m);
 }
 
 // ----------------------------------------------------------------------------

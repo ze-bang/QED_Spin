@@ -10,6 +10,7 @@
 #include <ed/solvers/ftlm.h>
 #include <ed/solvers/ltlm.h>
 #include <ed/solvers/hybrid_thermal.h>
+#include <ed/solvers/kpm_dos.h>
 #include <ed/core/construct_ham.h>
 #include <ed/core/hdf5_io.h>
 #include <ed/solvers/observables.h>
@@ -910,7 +911,74 @@ inline EDResults exact_diagonalization_core(
                 }
             }
             break;
-        
+
+        case DiagonalizationMethod::KPM_DOS:
+            {
+                // Build temperature grid (linear in T, matching what FTLM/LTLM do)
+                std::vector<double> betas;
+                std::vector<double> temps;
+                betas.reserve(params.num_temp_bins);
+                temps.reserve(params.num_temp_bins);
+                if (params.num_temp_bins == 1) {
+                    temps.push_back(params.temp_min);
+                    betas.push_back(1.0 / std::max(params.temp_min, 1e-300));
+                } else {
+                    double dT = (params.temp_max - params.temp_min) /
+                                static_cast<double>(params.num_temp_bins - 1);
+                    for (uint64_t i = 0; i < params.num_temp_bins; ++i) {
+                        double T = params.temp_min + dT * static_cast<double>(i);
+                        temps.push_back(T);
+                        betas.push_back(1.0 / std::max(T, 1e-300));
+                    }
+                }
+
+                ed::kpm_dos::KPMDOSParameters kpm_params;
+                kpm_params.num_moments              = params.kpm_num_moments;
+                kpm_params.num_random_vectors       = params.kpm_num_random_vectors;
+                kpm_params.num_quadrature_nodes     = params.kpm_num_quadrature_nodes;
+                kpm_params.spectral_bounds_krylov   = params.kpm_spectral_bounds_krylov;
+                kpm_params.spectral_bound_buffer    = params.kpm_spectral_bound_buffer;
+                kpm_params.use_jackson_kernel       = params.kpm_use_jackson_kernel;
+                kpm_params.lorentz_lambda           = params.kpm_lorentz_lambda;
+                kpm_params.tolerance                = params.tolerance;
+                kpm_params.full_reorthogonalization = params.kpm_full_reorth;
+                kpm_params.reorth_frequency         = params.kpm_reorth_freq;
+                kpm_params.random_seed              = params.kpm_seed;
+
+                ed::kpm_dos::KPMDOSResult kpm_res =
+                    ed::kpm_dos::compute_kpm_dos(H, hilbert_space_dim, betas,
+                                                 /*dos_energies=*/{}, kpm_params);
+
+                results.thermo_data.temperatures   = temps;
+                results.thermo_data.energy         = kpm_res.energy;
+                results.thermo_data.specific_heat  = kpm_res.specific_heat;
+                results.thermo_data.entropy        = kpm_res.entropy;
+                results.thermo_data.free_energy    = kpm_res.free_energy;
+                // Provide e_min so the resummation pipeline has the same
+                // ground-state reference convention as FTLM/LTLM.
+                results.thermo_data.e_min          = kpm_res.e_min_estimate;
+                results.eigenvalues.push_back(kpm_res.e_min_estimate);
+
+                // Persist /thermodynamics/{temperatures,energy,specific_heat,
+                // entropy,free_energy} so the NLCE summation kernel
+                // (NLC_sum_ftlm.py) finds the same dataset layout it reads
+                // for FTLM.
+                if (!params.output_dir.empty()) {
+                    safe_system_call("mkdir -p " + params.output_dir);
+                    try {
+                        std::string h5_file = HDF5IO::createOrOpenFile(params.output_dir);
+                        HDF5IO::saveThermodynamics(h5_file, temps, "energy",        kpm_res.energy);
+                        HDF5IO::saveThermodynamics(h5_file, temps, "specific_heat", kpm_res.specific_heat);
+                        HDF5IO::saveThermodynamics(h5_file, temps, "entropy",       kpm_res.entropy);
+                        HDF5IO::saveThermodynamics(h5_file, temps, "free_energy",   kpm_res.free_energy);
+                    } catch (const std::exception& e) {
+                        std::cerr << "  KPM-DOS: failed to write thermodynamics HDF5: "
+                                  << e.what() << std::endl;
+                    }
+                }
+            }
+            break;
+
         case DiagonalizationMethod::LANCZOS_GPU:
         case DiagonalizationMethod::LANCZOS_GPU_FIXED_SZ:
         case DiagonalizationMethod::DAVIDSON_GPU:

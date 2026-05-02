@@ -882,6 +882,7 @@ std::optional<DiagonalizationMethod> parseMethod(const std::string& str) {
     if (lower == "ftlm") return DiagonalizationMethod::FTLM;
     if (lower == "ltlm") return DiagonalizationMethod::LTLM;
     if (lower == "hybrid") return DiagonalizationMethod::HYBRID;
+    if (lower == "kpm_dos" || lower == "kpmdos" || lower == "kpm") return DiagonalizationMethod::KPM_DOS;
     
     // ARPACK methods
     if (lower == "arpack" || lower == "arpack_sm") return DiagonalizationMethod::ARPACK_SM;
@@ -945,6 +946,7 @@ std::string methodToString(DiagonalizationMethod method) {
         case DiagonalizationMethod::FTLM: return "FTLM";
         case DiagonalizationMethod::LTLM: return "LTLM";
         case DiagonalizationMethod::HYBRID: return "HYBRID";
+        case DiagonalizationMethod::KPM_DOS: return "KPM_DOS";
         
         // ARPACK methods
         case DiagonalizationMethod::ARPACK_SM: return "ARPACK_SM";
