@@ -69,6 +69,7 @@
 
 #include <ed/distributed/distributed_ftlm.h>   // re-use Result struct
 
+#include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <vector>
@@ -76,6 +77,8 @@
 #include <mpi.h>
 
 namespace ed::distributed {
+
+class DistributedSymmetryOperator;
 
 struct DistributedFtlmGPUOptions {
     /// Number of random samples (R). Distributed evenly across `n_groups`
@@ -123,6 +126,25 @@ struct DistributedFtlmGPUOptions {
 /// Throws `std::logic_error` if NCCL is not compiled in.
 DistributedFtlmResult distributed_ftlm_gpu(
     std::shared_ptr<class ::Operator> op,
+    const DistributedFtlmGPUOptions& options,
+    MPI_Comm world_comm);
+
+/// Symmetry-projected variant of `distributed_ftlm_gpu` (Phase D step 5).
+/// Same on-device J&P trace estimator, but every per-sample SpMV runs
+/// inside ONE symmetry sector (`sector_idx`) of the underlying
+/// `Operator` (and the optional `observable_op`). Internally builds
+/// `DistributedSymmetryOperatorGPU` instances on the per-group
+/// MultiGpuCommunicator. The returned `Z[b]` and `O_expectation[b]`
+/// are the contributions from this sector alone -- the caller
+/// aggregates across sectors when reconstructing the full-space
+/// partition function (matching the CPU `distributed_ftlm_symmetry`
+/// convention).
+///
+/// Collective on `world_comm`. Throws `std::logic_error` if NCCL is
+/// not compiled in.
+DistributedFtlmResult distributed_ftlm_gpu_symmetry(
+    std::shared_ptr<class ::Operator> op,
+    std::size_t sector_idx,
     const DistributedFtlmGPUOptions& options,
     MPI_Comm world_comm);
 

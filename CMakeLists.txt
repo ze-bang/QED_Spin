@@ -949,6 +949,16 @@ if(BUILD_ED_TESTS)
                                 tests/unit/test_distributed_krylov_schur_gpu_symmetry.cpp)
             target_link_libraries(test_distributed_krylov_schur_gpu_symmetry PRIVATE
                 ed_distributed)
+
+            # Phase D step 5 (path matrix symm × mpi+gpu): on-device FTLM
+            # consuming a `DistributedSymmetryOperatorGPU`. Cross-checks
+            # the GPU symm FTLM Z(beta) against the CPU
+            # `distributed_ftlm_symmetry` at the same seed/max_iter on
+            # an N=4 PBC Heisenberg chain (single sector).
+            ed_add_phase3c_test(test_distributed_ftlm_gpu_symmetry
+                                tests/unit/test_distributed_ftlm_gpu_symmetry.cpp)
+            target_link_libraries(test_distributed_ftlm_gpu_symmetry PRIVATE
+                ed_distributed)
         endif()
     endif()
 

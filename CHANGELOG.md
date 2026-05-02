@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — Phase D step 5 (path matrix symm × mpi+gpu): per-sector multi-GPU FTLM
+
+New function `ed::distributed::distributed_ftlm_gpu_symmetry` — the
+multi-GPU companion of `distributed_ftlm_symmetry`. The on-device
+J&P trace-estimator body in `distributed_ftlm_gpu.cu` is now factored
+into a templated helper `ftlm_gpu_impl<CpuDop, GpuOp, ScatterFn>`
+shared by both the dense and the symmetry path; the new entry point
+builds a `DistributedSymmetryOperatorGPU` (and an optional
+symmetry-projected observable operator) on the per-group
+`MultiGpuCommunicator`, and supplies an orbit-permuted scatter
+helper so the per-sample seed -> rank-major host vector path
+matches the CPU `distributed_ftlm_symmetry` exactly.
+
+The CLI now accepts `--mode ftlm --gpu --use-symmetry --sector-index k`;
+the returned `Z[b]` and `O_expectation[b]` are the contributions
+from sector `k` alone, matching the CPU symm convention. The caller
+aggregates across sectors when reconstructing the full-space
+partition function.
+
+New unit test `test_distributed_ftlm_gpu_symmetry` (registered as
+`phase3c` at np ∈ {1, 2, 4}, SKIPs when no CUDA device is visible)
+cross-checks the GPU symm FTLM Z(beta) at every momentum sector of
+an N=4 PBC Heisenberg chain against the CPU `distributed_ftlm_symmetry`
+at the same seed_offset within 1e-9 relative.
+
 ### Added — Phase D step 4 (path matrix symm × mpi): per-sector FTLM
 
 New function `ed::distributed::distributed_ftlm_symmetry` — the

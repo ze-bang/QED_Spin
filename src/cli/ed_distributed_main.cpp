@@ -895,27 +895,41 @@ int main(int argc, char** argv) {
             const char* backend_label = "cpu_mpi";
             if (a.gpu) {
                 if (a.use_symmetry) {
-                    fail("--mode ftlm --gpu --use-symmetry is not yet "
-                         "supported (Phase D step 5). Drop --gpu to use "
-                         "the per-sector symmetry-projected CPU FTLM, "
-                         "or drop --use-symmetry for the GPU path.");
-                }
 #ifdef ED_HAVE_NCCL
-                // Phase A (device matrix MPI+GPU): on-device FTLM.
-                ed::distributed::DistributedFtlmGPUOptions gfopts;
-                gfopts.n_samples         = a.n_samples;
-                gfopts.n_groups          = a.n_groups;
-                gfopts.lanczos_max_iter  = a.max_iter;
-                gfopts.betas             = a.betas;
-                gfopts.seed_offset       = a.seed;
-                gfopts.verbose           = a.verbose;
+                    // Phase D step 5: per-sector multi-GPU FTLM.
+                    ed::distributed::DistributedFtlmGPUOptions gfopts;
+                    gfopts.n_samples         = a.n_samples;
+                    gfopts.n_groups          = a.n_groups;
+                    gfopts.lanczos_max_iter  = a.max_iter;
+                    gfopts.betas             = a.betas;
+                    gfopts.seed_offset       = a.seed;
+                    gfopts.verbose           = a.verbose;
 
-                res = ed::distributed::distributed_ftlm_gpu(
-                    op, gfopts, MPI_COMM_WORLD);
-                backend_label = "gpu_mpi";
+                    res = ed::distributed::distributed_ftlm_gpu_symmetry(
+                        op, a.sector_index, gfopts, MPI_COMM_WORLD);
+                    backend_label = "gpu_mpi_symmetry";
 #else
-                fail("--mode ftlm --gpu requires WITH_CUDA=ON + NCCL_FOUND.");
+                    fail("--mode ftlm --gpu --use-symmetry requires "
+                         "WITH_CUDA=ON + NCCL_FOUND.");
 #endif
+                } else {
+#ifdef ED_HAVE_NCCL
+                    // Phase A (device matrix MPI+GPU): on-device FTLM.
+                    ed::distributed::DistributedFtlmGPUOptions gfopts;
+                    gfopts.n_samples         = a.n_samples;
+                    gfopts.n_groups          = a.n_groups;
+                    gfopts.lanczos_max_iter  = a.max_iter;
+                    gfopts.betas             = a.betas;
+                    gfopts.seed_offset       = a.seed;
+                    gfopts.verbose           = a.verbose;
+
+                    res = ed::distributed::distributed_ftlm_gpu(
+                        op, gfopts, MPI_COMM_WORLD);
+                    backend_label = "gpu_mpi";
+#else
+                    fail("--mode ftlm --gpu requires WITH_CUDA=ON + NCCL_FOUND.");
+#endif
+                }
             } else {
                 ed::distributed::DistributedFtlmOptions fopts;
                 fopts.n_samples         = a.n_samples;

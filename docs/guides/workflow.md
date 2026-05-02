@@ -531,11 +531,16 @@ two tables above don't capture on their own:
   per-sample Krylov build through `distributed_lanczos_symmetry`).
   The CLI accepts `--mode ftlm --use-symmetry --sector-index k`; the
   returned `Z[b]` is the contribution from that sector alone, and
-  the caller aggregates over sectors. The remaining distributed
-  solvers (`FTLM × mpi+gpu`, `BLOCK_*`, `DAVIDSON`, `LOBPCG`) still
-  need their per-solver wiring (Phase D step 5). Until those land,
-  drop to `device='gpu'` per node for those solvers when
-  `--use-symmetry` is set.
+  the caller aggregates over sectors.
+* `symm` × **mpi+gpu** is wired for `FTLM` via
+  `distributed_ftlm_gpu_symmetry` (Phase D step 5 — templated
+  on-device J&P trace-estimator body shared with the unsymmetrised
+  GPU FTLM, with the same orbit-aware scatter as the CPU symm path).
+  The CLI accepts `--mode ftlm --gpu --use-symmetry --sector-index k`.
+  The remaining distributed solvers (`BLOCK_*`, `DAVIDSON`, `LOBPCG`)
+  still need their per-solver wiring. Until those land, drop to
+  `device='gpu'` per node for those solvers when `--use-symmetry`
+  is set.
 * `mTPQ` / `cTPQ` × `symm`: see Phase E. The lift is "per-sector
   TPQ + FTLM-style Z-aggregation" (each sector gets its own random
   state and its own canonical TPQ trajectory; partition functions
