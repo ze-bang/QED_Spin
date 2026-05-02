@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — Phase E step 2 (path matrix symm × mpi+gpu for TPQ): per-sector multi-GPU canonical TPQ
+
+New function `ed::distributed::distributed_tpq_gpu_symmetry` — the
+multi-GPU companion of `distributed_tpq_symmetry`. The on-device
+per-sample canonical-TPQ body in `distributed_tpq_gpu.cu` is now
+factored into a templated helper `tpq_gpu_impl<CpuDop, GpuOp,
+ScatterFn>` shared by both the dense and the symmetry path;
+`taylor_step_gpu` is a function template on the GPU operator type
+(`DistributedGPUOperator` and `DistributedSymmetryOperatorGPU` both
+expose `apply(const MultiGpuCommunicator&, const Complex*, Complex*,
+cudaStream_t)`). The new entry point builds a
+`DistributedSymmetryOperator` (shared_ptr) + `DistributedSymmetryOperatorGPU`
+on the per-group `MultiGpuCommunicator`, and supplies an
+orbit-permuted scatter helper so the per-sample seed -> rank-major
+host vector path matches the CPU `distributed_tpq_symmetry` exactly.
+
+The CLI now accepts `--mode tpq --gpu --use-symmetry --sector-index k`;
+the returned `energy[b]` is the contribution from sector `k` alone,
+matching the CPU symm convention.
+
+New unit test `test_distributed_tpq_gpu_symmetry` (registered as
+`phase3c` at np ∈ {1, 2, 4}, SKIPs when no CUDA device is visible)
+cross-checks the GPU symm TPQ `energy(beta)` at every momentum sector
+of an N=4 PBC Heisenberg chain against the CPU
+`distributed_tpq_symmetry` at the same seed_offset, delta_beta, and
+taylor_order within 1e-9 relative.
+
 ### Added — Phase E step 1 (path matrix symm × mpi for TPQ): per-sector canonical TPQ
 
 New function `ed::distributed::distributed_tpq_symmetry` — the

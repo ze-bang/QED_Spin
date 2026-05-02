@@ -549,10 +549,12 @@ two tables above don't capture on their own:
   --use-symmetry --sector-index k`; the returned `energy[b]` is the
   sample-averaged `<H>(beta)` measured **inside sector k only**, and
   the caller is responsible for FTLM-style aggregation across sectors
-  when reconstructing full-space thermal observables. The
-  multi-GPU companion (`distributed_tpq_gpu_symmetry`) is Phase E
-  step 2; until then `--mode tpq --gpu --use-symmetry` emits an
-  actionable diagnostic pointing at the CPU symm path.
+  when reconstructing full-space thermal observables.
+* `mTPQ` / `cTPQ` × **mpi+gpu** is wired (Phase E step 2) via
+  `distributed_tpq_gpu_symmetry` — templated on-device per-sample
+  canonical-TPQ body shared with the unsymmetrised GPU TPQ, with the
+  same orbit-aware scatter as the CPU symm path. The CLI accepts
+  `--mode tpq --gpu --use-symmetry --sector-index k`.
 
 The introspection helper `qed.solver_device_support()` only reports
 the solver × device tensor; consult this subsection for the

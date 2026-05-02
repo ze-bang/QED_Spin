@@ -826,30 +826,44 @@ int main(int argc, char** argv) {
             const char* backend_label = "cpu_mpi";
             if (a.gpu) {
                 if (a.use_symmetry) {
-                    fail("--mode tpq --gpu --use-symmetry is not yet "
-                         "supported. Drop --gpu to use the per-sector "
-                         "symmetry-projected CPU canonical TPQ "
-                         "(distributed_tpq_symmetry), or drop "
-                         "--use-symmetry for the GPU path.");
-                }
 #ifdef ED_HAVE_NCCL
-                // Phase 9 / Layer 2: multi-GPU canonical TPQ.
-                ed::distributed::DistributedTpqGPUOptions gtopts;
-                gtopts.n_samples        = a.n_samples;
-                gtopts.n_groups         = a.n_groups;
-                gtopts.delta_beta       = a.delta_beta;
-                gtopts.taylor_order     = a.taylor_order;
-                gtopts.betas            = a.betas;
-                gtopts.seed_offset      = a.seed;
-                gtopts.compute_variance = a.compute_variance;
-                gtopts.verbose          = a.verbose;
+                    ed::distributed::DistributedTpqGPUOptions gtopts;
+                    gtopts.n_samples        = a.n_samples;
+                    gtopts.n_groups         = a.n_groups;
+                    gtopts.delta_beta       = a.delta_beta;
+                    gtopts.taylor_order     = a.taylor_order;
+                    gtopts.betas            = a.betas;
+                    gtopts.seed_offset      = a.seed;
+                    gtopts.compute_variance = a.compute_variance;
+                    gtopts.verbose          = a.verbose;
 
-                res = ed::distributed::distributed_tpq_gpu(
-                    op, gtopts, MPI_COMM_WORLD);
-                backend_label = "gpu_mpi";
+                    res = ed::distributed::distributed_tpq_gpu_symmetry(
+                        op, a.sector_index, gtopts, MPI_COMM_WORLD);
+                    backend_label = "gpu_mpi_symmetry";
 #else
-                fail("--mode tpq --gpu requires WITH_CUDA=ON + NCCL_FOUND.");
+                    fail("--mode tpq --gpu --use-symmetry requires "
+                         "WITH_CUDA=ON + NCCL_FOUND.");
 #endif
+                } else {
+#ifdef ED_HAVE_NCCL
+                    // Phase 9 / Layer 2: multi-GPU canonical TPQ.
+                    ed::distributed::DistributedTpqGPUOptions gtopts;
+                    gtopts.n_samples        = a.n_samples;
+                    gtopts.n_groups         = a.n_groups;
+                    gtopts.delta_beta       = a.delta_beta;
+                    gtopts.taylor_order     = a.taylor_order;
+                    gtopts.betas            = a.betas;
+                    gtopts.seed_offset      = a.seed;
+                    gtopts.compute_variance = a.compute_variance;
+                    gtopts.verbose          = a.verbose;
+
+                    res = ed::distributed::distributed_tpq_gpu(
+                        op, gtopts, MPI_COMM_WORLD);
+                    backend_label = "gpu_mpi";
+#else
+                    fail("--mode tpq --gpu requires WITH_CUDA=ON + NCCL_FOUND.");
+#endif
+                }
             } else {
                 ed::distributed::DistributedTpqOptions topts;
                 topts.n_samples        = a.n_samples;

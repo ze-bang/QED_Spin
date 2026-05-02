@@ -62,6 +62,7 @@
 
 #include <ed/distributed/distributed_tpq.h>     // DistributedTpqOptions/Result
 
+#include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <vector>
@@ -69,6 +70,8 @@
 #include <mpi.h>
 
 namespace ed::distributed {
+
+class DistributedSymmetryOperator;
 
 struct DistributedTpqGPUOptions {
     /// Number of random samples (the R in the Sugiura-Shimizu sum). Each
@@ -115,6 +118,22 @@ struct DistributedTpqGPUOptions {
 /// Results are bit-compatible with `distributed_tpq` (same struct).
 DistributedTpqResult distributed_tpq_gpu(
     std::shared_ptr<class ::Operator> op,
+    const DistributedTpqGPUOptions& options,
+    MPI_Comm world_comm);
+
+/// Symmetry-projected variant of `distributed_tpq_gpu` (Phase E step 2).
+/// Same canonical-TPQ algorithm, but every per-sample on-device SpMV
+/// runs through `DistributedSymmetryOperatorGPU` for sector
+/// `sector_idx`. The returned `energy[b]` is the sample-averaged
+/// `<H>(beta)` measured WITHIN this sector; the caller aggregates
+/// across sectors when reconstructing full-space thermal observables
+/// (matching the convention established by
+/// `distributed_ftlm_gpu_symmetry` / `distributed_tpq_symmetry`).
+///
+/// Collective on `world_comm`; every rank must call.
+DistributedTpqResult distributed_tpq_gpu_symmetry(
+    std::shared_ptr<class ::Operator> op,
+    std::size_t sector_idx,
     const DistributedTpqGPUOptions& options,
     MPI_Comm world_comm);
 

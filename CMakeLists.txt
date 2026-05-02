@@ -969,6 +969,18 @@ if(BUILD_ED_TESTS)
                                 tests/unit/test_distributed_ftlm_gpu_symmetry.cpp)
             target_link_libraries(test_distributed_ftlm_gpu_symmetry PRIVATE
                 ed_distributed)
+
+            # Phase E step 2 (path matrix symm × mpi+gpu for TPQ):
+            # on-device canonical TPQ consuming a
+            # `DistributedSymmetryOperatorGPU`. Cross-checks the GPU
+            # symm TPQ energy(beta) against the CPU
+            # `distributed_tpq_symmetry` at the same seed / delta_beta
+            # / taylor_order on an N=4 PBC Heisenberg chain (every
+            # momentum sector).
+            ed_add_phase3c_test(test_distributed_tpq_gpu_symmetry
+                                tests/unit/test_distributed_tpq_gpu_symmetry.cpp)
+            target_link_libraries(test_distributed_tpq_gpu_symmetry PRIVATE
+                ed_distributed)
         endif()
     endif()
 

@@ -11,6 +11,8 @@
 #include <ed/distributed/distributed_tpq_gpu.h>
 #include <ed/distributed/distributed_gpu_operator.h>
 #include <ed/distributed/distributed_operator.h>
+#include <ed/distributed/distributed_symmetry_operator.h>
+#include <ed/distributed/distributed_symmetry_operator_gpu.h>
 #include <ed/distributed/multi_gpu.h>
 
 #include <ed/parallel/thread_budget.h>
@@ -157,6 +159,77 @@ void scatter_initial_vector_host(const DistributedOperator& op,
     }
 }
 
+// Symmetry-projected scatter (Phase E step 2). Same orbit-permuted
+// algorithm as the helpers in distributed_lanczos_gpu.cu /
+// distributed_ftlm_gpu.cu / distributed_tpq.cpp: generate a unit
+// Gaussian vector in natural-orbit indexing on rank 0, permute into
+// rank-major packed layout matching the partition, scatter on op.comm(),
+// renormalise on the slab.
+void scatter_initial_vector_host(const DistributedSymmetryOperator& op,
+                                  unsigned long seed,
+                                  std::vector<Complex>& v_local) {
+    const int rank = op.rank();
+    const int size = op.comm_size();
+    const std::uint64_t global_dim = op.global_dim();
+    const std::uint64_t local_n    = op.local_size();
+
+    v_local.assign(local_n, Complex(0.0, 0.0));
+
+    const auto& partition = op.partition();
+    std::vector<int> sendcounts(size, 0), displs(size, 0);
+    {
+        int run = 0;
+        for (int r = 0; r < size; ++r) {
+            sendcounts[r] = static_cast<int>(partition.rank_orbits[r].size());
+            displs[r] = run;
+            run += sendcounts[r];
+        }
+    }
+
+    if (rank == 0) {
+        std::vector<Complex> v_natural(static_cast<std::size_t>(global_dim));
+        std::mt19937_64 gen(seed);
+        std::normal_distribution<double> nd(0.0, 1.0);
+        double sumsq = 0.0;
+        for (std::uint64_t i = 0; i < global_dim; ++i) {
+            const double a = nd(gen);
+            const double b = nd(gen);
+            v_natural[i] = Complex(a, b);
+            sumsq += a * a + b * b;
+        }
+        const double inv = 1.0 / std::sqrt(sumsq);
+        for (auto& z : v_natural) z *= inv;
+
+        std::vector<Complex> v_rankmajor(
+            static_cast<std::size_t>(global_dim));
+        for (int r = 0; r < size; ++r) {
+            for (std::size_t k = 0; k < partition.rank_orbits[r].size(); ++k) {
+                const std::size_t orbit_id = partition.rank_orbits[r][k];
+                const std::size_t global_pos = partition.rank_offsets[r] + k;
+                v_rankmajor[global_pos] = v_natural[orbit_id];
+            }
+        }
+        MPI_Scatterv(v_rankmajor.data(), sendcounts.data(), displs.data(),
+                     kComplexDatatype,
+                     v_local.data(), sendcounts[rank], kComplexDatatype,
+                     0, op.comm());
+    } else {
+        MPI_Scatterv(nullptr, sendcounts.data(), displs.data(),
+                     kComplexDatatype,
+                     v_local.data(), sendcounts[rank], kComplexDatatype,
+                     0, op.comm());
+    }
+
+    double local_sq = 0.0;
+    for (auto& z : v_local) local_sq += std::norm(z);
+    double global_sq = 0.0;
+    MPI_Allreduce(&local_sq, &global_sq, 1, MPI_DOUBLE, MPI_SUM, op.comm());
+    if (global_sq > 0.0) {
+        const double inv = 1.0 / std::sqrt(global_sq);
+        for (auto& z : v_local) z *= inv;
+    }
+}
+
 // ---------------------------------------------------------------------------
 // dist_norm_gpu / dist_zdotc_gpu : NCCL allreduce wrappers around
 // cublasZdotc on device buffers. Both buffers MUST already be on the
@@ -218,11 +291,14 @@ cuDoubleComplex dist_zdotc_gpu(cublasHandle_t handle,
 
 // ---------------------------------------------------------------------------
 // taylor_step_gpu : in-place |psi> := exp(-(delta/2) H) |psi>, then
-// renormalise. Uses cublasZaxpy for the accumulator and
-// DistributedGPUOperator::apply for the SpMV. result/term/Hterm all
-// live on the device.
+// renormalise. Templated on the GPU operator type (DistributedGPUOperator
+// or DistributedSymmetryOperatorGPU); both expose
+//   apply(const MultiGpuCommunicator&, const Complex*, Complex*, cudaStream_t).
+// Uses cublasZaxpy for the accumulator. result/term/Hterm all live on the
+// device.
 // ---------------------------------------------------------------------------
-void taylor_step_gpu(const DistributedGPUOperator& gop,
+template <typename GpuOp>
+void taylor_step_gpu(const GpuOp& gop,
                       const multi_gpu::MultiGpuCommunicator& gpu_comm,
                       cublasHandle_t handle,
                       cuDoubleComplex* d_psi,
@@ -287,6 +363,177 @@ void taylor_step_gpu(const DistributedGPUOperator& gop,
 
 }  // namespace
 
+namespace {
+
+// Templated per-sample on-device TPQ driver shared by the dense and
+// symm GPU paths. `cpu_dop` is used only for slab geometry & the
+// ThreadBudgetScope; `gop` does the SpMVs; `scatter_fn` produces the
+// host-side initial vector (dense vs orbit-permuted layout).
+template <typename CpuDop, typename GpuOp, typename ScatterFn>
+DistributedTpqResult tpq_gpu_impl(
+    const CpuDop& cpu_dop,
+    const GpuOp& gop,
+    const multi_gpu::MultiGpuCommunicator& gpu_comm,
+    int world_rank,
+    int my_group,
+    int n_groups,
+    int ranks_per_group,
+    MPI_Comm world_comm,
+    const std::vector<double>& betas_in,
+    int n_samples_in,
+    double delta_beta_in,
+    std::uint64_t taylor_order_in,
+    unsigned long seed_offset,
+    bool compute_variance,
+    bool verbose,
+    ScatterFn&& scatter_fn) {
+
+    const ed::parallel::ThreadBudgetScope budget(
+        ed::parallel::auto_threads_for_dim(cpu_dop.local_size()));
+
+    const int n_samples = std::max(1, n_samples_in);
+    std::vector<int> my_samples;
+    my_samples.reserve(n_samples / n_groups + 1);
+    for (int s = 0; s < n_samples; ++s) {
+        if ((s % n_groups) == my_group) my_samples.push_back(s);
+    }
+
+    std::vector<double> betas = betas_in;
+    if (betas.empty()) betas.push_back(1.0);
+    for (std::size_t i = 1; i < betas.size(); ++i) {
+        if (betas[i] <= betas[i - 1]) {
+            throw std::invalid_argument(
+                "distributed_tpq_gpu: options.betas must be strictly ascending");
+        }
+    }
+    if (betas.front() < 0.0) {
+        throw std::invalid_argument(
+            "distributed_tpq_gpu: options.betas must be non-negative");
+    }
+
+    const double delta_beta = std::max(1e-12, delta_beta_in);
+    const std::uint64_t taylor_order = std::max<std::uint64_t>(
+        1, taylor_order_in);
+
+    const std::uint64_t local_n =
+        static_cast<std::uint64_t>(cpu_dop.local_size());
+    const std::size_t vec_bytes = local_n * sizeof(cuDoubleComplex);
+
+    DeviceBuffer psi_buf(vec_bytes);
+    DeviceBuffer term_buf(vec_bytes);
+    DeviceBuffer Hterm_buf(vec_bytes);
+    DeviceBuffer result_buf(vec_bytes);
+    DeviceBuffer Hpsi_buf(vec_bytes);
+    DeviceBuffer scratch_buf(sizeof(cuDoubleComplex));
+
+    auto* d_psi    = static_cast<cuDoubleComplex*>(psi_buf.ptr);
+    auto* d_term   = static_cast<cuDoubleComplex*>(term_buf.ptr);
+    auto* d_Hterm  = static_cast<cuDoubleComplex*>(Hterm_buf.ptr);
+    auto* d_result = static_cast<cuDoubleComplex*>(result_buf.ptr);
+    auto* d_Hpsi   = static_cast<cuDoubleComplex*>(Hpsi_buf.ptr);
+    auto* d_scratch_complex =
+        static_cast<cuDoubleComplex*>(scratch_buf.ptr);
+
+    CublasHandleGuard handle_guard;
+    cublasHandle_t handle = handle_guard.h;
+    check_cublas(cublasSetPointerMode(handle, CUBLAS_POINTER_MODE_HOST),
+                 "cublasSetPointerMode(HOST)");
+
+    std::vector<double> E_local(betas.size(), 0.0);
+    std::vector<double> E2_local(betas.size(), 0.0);
+
+    std::vector<Complex> psi_host;
+
+    for (int s : my_samples) {
+        scatter_fn(seed_offset + static_cast<unsigned long>(s), psi_host);
+        if (local_n > 0) {
+            check_cu(cudaMemcpy(d_psi, psi_host.data(), vec_bytes,
+                                cudaMemcpyHostToDevice),
+                     "H2D psi (init)");
+        }
+
+        double cur_beta = 0.0;
+        for (std::size_t b = 0; b < betas.size(); ++b) {
+            const double tgt = betas[b];
+
+            while (cur_beta + 0.5 * delta_beta < tgt) {
+                const double remain = tgt - cur_beta;
+                const double step   = std::min(delta_beta, remain);
+                taylor_step_gpu(gop, gpu_comm, handle,
+                                 d_psi, d_term, d_Hterm, d_result,
+                                 d_scratch_complex, local_n,
+                                 step, taylor_order);
+                cur_beta += step;
+            }
+            if (std::abs(cur_beta - tgt) > 1e-12) {
+                taylor_step_gpu(gop, gpu_comm, handle,
+                                 d_psi, d_term, d_Hterm, d_result,
+                                 d_scratch_complex, local_n,
+                                 tgt - cur_beta, taylor_order);
+                cur_beta = tgt;
+            }
+
+            gop.apply(gpu_comm,
+                      reinterpret_cast<const Complex*>(d_psi),
+                      reinterpret_cast<Complex*>(d_Hpsi),
+                      /*stream=*/nullptr);
+            cuDoubleComplex Ec = dist_zdotc_gpu(handle,
+                                                 d_psi, d_Hpsi, local_n,
+                                                 gpu_comm, d_scratch_complex);
+            const double E_b = Ec.x;
+            E_local[b] += E_b;
+
+            if (compute_variance) {
+                const double Hpsi_n = dist_norm_gpu(
+                    handle, d_Hpsi, local_n, gpu_comm, d_scratch_complex);
+                E2_local[b] += Hpsi_n * Hpsi_n;
+            }
+
+            if (verbose && world_rank == 0) {
+                std::cout << "  [dist-tpq-gpu] sample s=" << s
+                          << " group=" << my_group
+                          << " beta=" << tgt
+                          << " E=" << E_b << std::endl;
+            }
+        }
+    }
+
+    if (world_rank % ranks_per_group != 0) {
+        std::fill(E_local.begin(),  E_local.end(),  0.0);
+        std::fill(E2_local.begin(), E2_local.end(), 0.0);
+    }
+    std::vector<double> E_global(betas.size(),  0.0);
+    std::vector<double> E2_global(betas.size(), 0.0);
+    MPI_Allreduce(E_local.data(),  E_global.data(),
+                  static_cast<int>(betas.size()),
+                  MPI_DOUBLE, MPI_SUM, world_comm);
+    if (compute_variance) {
+        MPI_Allreduce(E2_local.data(), E2_global.data(),
+                      static_cast<int>(betas.size()),
+                      MPI_DOUBLE, MPI_SUM, world_comm);
+    }
+
+    const double inv = 1.0 / static_cast<double>(n_samples);
+
+    DistributedTpqResult result;
+    result.energy.assign(betas.size(), 0.0);
+    for (std::size_t b = 0; b < betas.size(); ++b) {
+        result.energy[b] = E_global[b] * inv;
+    }
+    if (compute_variance) {
+        result.variance.assign(betas.size(), 0.0);
+        for (std::size_t b = 0; b < betas.size(); ++b) {
+            const double E_b  = result.energy[b];
+            const double E2_b = E2_global[b] * inv;
+            result.variance[b] = E2_b - E_b * E_b;
+        }
+    }
+    result.samples_used = n_samples;
+    return result;
+}
+
+}  // namespace
+
 DistributedTpqResult distributed_tpq_gpu(
     std::shared_ptr<class ::Operator> op,
     const DistributedTpqGPUOptions& options,
@@ -315,168 +562,69 @@ DistributedTpqResult distributed_tpq_gpu(
     MPI_Comm group_comm;
     MPI_Comm_split(world_comm, my_group, world_rank, &group_comm);
 
-    // Build CPU-side DistributedOperator (provides the comm plan + slab
-    // geometry the GPU operator mirrors).
     auto cpu_dop = std::make_shared<DistributedOperator>(op, group_comm);
-
-    // GPU-side comm bound to the group (NCCL group within the sample's
-    // MPI subcommunicator).
     multi_gpu::MultiGpuCommunicator gpu_comm(group_comm, options.device_index);
-
-    // Build the GPU operator (uploads SoA term tables + comm plan).
     DistributedGPUOperator gop(cpu_dop, gpu_comm);
 
-    const ed::parallel::ThreadBudgetScope budget(
-        ed::parallel::auto_threads_for_dim(cpu_dop->local_size()));
+    DistributedTpqResult result = tpq_gpu_impl(
+        *cpu_dop, gop, gpu_comm,
+        world_rank, my_group, n_groups, ranks_per_group, world_comm,
+        options.betas, options.n_samples, options.delta_beta,
+        options.taylor_order, options.seed_offset,
+        options.compute_variance, options.verbose,
+        [&](unsigned long seed, std::vector<Complex>& psi_host) {
+            scatter_initial_vector_host(*cpu_dop, seed, psi_host);
+        });
 
-    const int n_samples = std::max(1, options.n_samples);
-    std::vector<int> my_samples;
-    my_samples.reserve(n_samples / n_groups + 1);
-    for (int s = 0; s < n_samples; ++s) {
-        if ((s % n_groups) == my_group) my_samples.push_back(s);
+    MPI_Comm_free(&group_comm);
+    return result;
+}
+
+DistributedTpqResult distributed_tpq_gpu_symmetry(
+    std::shared_ptr<class ::Operator> op,
+    std::size_t sector_idx,
+    const DistributedTpqGPUOptions& options,
+    MPI_Comm world_comm) {
+
+    if (!multi_gpu::nccl_compiled_in()) {
+        throw std::logic_error(
+            "distributed_tpq_gpu_symmetry: NCCL not compiled in (rebuild "
+            "with WITH_CUDA=ON and NCCL_FOUND=ON).");
     }
 
-    std::vector<double> betas = options.betas;
-    if (betas.empty()) betas.push_back(1.0);
-    for (std::size_t i = 1; i < betas.size(); ++i) {
-        if (betas[i] <= betas[i - 1]) {
-            throw std::invalid_argument(
-                "distributed_tpq_gpu: options.betas must be strictly ascending");
-        }
-    }
-    if (betas.front() < 0.0) {
+    int world_rank = 0, world_size = 0;
+    MPI_Comm_rank(world_comm, &world_rank);
+    MPI_Comm_size(world_comm, &world_size);
+
+    int n_groups = std::max(1, options.n_groups);
+    if (n_groups > world_size) n_groups = world_size;
+    if (world_size % n_groups != 0) {
         throw std::invalid_argument(
-            "distributed_tpq_gpu: options.betas must be non-negative");
+            "distributed_tpq_gpu_symmetry: n_groups ("
+            + std::to_string(n_groups)
+            + ") must divide world_size ("
+            + std::to_string(world_size) + ")");
     }
+    const int ranks_per_group = world_size / n_groups;
+    const int my_group        = world_rank / ranks_per_group;
 
-    const double delta_beta = std::max(1e-12, options.delta_beta);
-    const std::uint64_t taylor_order = std::max<std::uint64_t>(
-        1, options.taylor_order);
+    MPI_Comm group_comm;
+    MPI_Comm_split(world_comm, my_group, world_rank, &group_comm);
 
-    const std::uint64_t local_n =
-        static_cast<std::uint64_t>(cpu_dop->local_size());
-    const std::size_t vec_bytes = local_n * sizeof(cuDoubleComplex);
+    auto cpu_dop = std::make_shared<DistributedSymmetryOperator>(
+        op, sector_idx, group_comm);
+    multi_gpu::MultiGpuCommunicator gpu_comm(group_comm, options.device_index);
+    DistributedSymmetryOperatorGPU gop(cpu_dop, gpu_comm);
 
-    // Persistent device buffers (one allocation per rank, reused across
-    // every sample, every beta, every Taylor order).
-    DeviceBuffer psi_buf(vec_bytes);
-    DeviceBuffer term_buf(vec_bytes);
-    DeviceBuffer Hterm_buf(vec_bytes);
-    DeviceBuffer result_buf(vec_bytes);
-    DeviceBuffer Hpsi_buf(vec_bytes);
-    DeviceBuffer scratch_buf(sizeof(cuDoubleComplex));
-
-    auto* d_psi    = static_cast<cuDoubleComplex*>(psi_buf.ptr);
-    auto* d_term   = static_cast<cuDoubleComplex*>(term_buf.ptr);
-    auto* d_Hterm  = static_cast<cuDoubleComplex*>(Hterm_buf.ptr);
-    auto* d_result = static_cast<cuDoubleComplex*>(result_buf.ptr);
-    auto* d_Hpsi   = static_cast<cuDoubleComplex*>(Hpsi_buf.ptr);
-    auto* d_scratch_complex =
-        static_cast<cuDoubleComplex*>(scratch_buf.ptr);
-
-    CublasHandleGuard handle_guard;
-    cublasHandle_t handle = handle_guard.h;
-    check_cublas(cublasSetPointerMode(handle, CUBLAS_POINTER_MODE_HOST),
-                 "cublasSetPointerMode(HOST)");
-
-    std::vector<double> E_local(betas.size(), 0.0);
-    std::vector<double> E2_local(betas.size(), 0.0);
-
-    std::vector<Complex> psi_host;  // scratch for initial-vector scatter
-
-    for (int s : my_samples) {
-        scatter_initial_vector_host(*cpu_dop,
-                                     options.seed_offset
-                                         + static_cast<unsigned long>(s),
-                                     psi_host);
-        if (local_n > 0) {
-            check_cu(cudaMemcpy(d_psi, psi_host.data(), vec_bytes,
-                                cudaMemcpyHostToDevice),
-                     "H2D psi (init)");
-        }
-
-        double cur_beta = 0.0;
-        for (std::size_t b = 0; b < betas.size(); ++b) {
-            const double tgt = betas[b];
-
-            while (cur_beta + 0.5 * delta_beta < tgt) {
-                const double remain = tgt - cur_beta;
-                const double step   = std::min(delta_beta, remain);
-                taylor_step_gpu(gop, gpu_comm, handle,
-                                 d_psi, d_term, d_Hterm, d_result,
-                                 d_scratch_complex, local_n,
-                                 step, taylor_order);
-                cur_beta += step;
-            }
-            if (std::abs(cur_beta - tgt) > 1e-12) {
-                taylor_step_gpu(gop, gpu_comm, handle,
-                                 d_psi, d_term, d_Hterm, d_result,
-                                 d_scratch_complex, local_n,
-                                 tgt - cur_beta, taylor_order);
-                cur_beta = tgt;
-            }
-
-            // Measure E = <psi | H psi>: one SpMV + one NCCL-allreduced dot.
-            gop.apply(gpu_comm,
-                      reinterpret_cast<const Complex*>(d_psi),
-                      reinterpret_cast<Complex*>(d_Hpsi),
-                      /*stream=*/nullptr);
-            cuDoubleComplex Ec = dist_zdotc_gpu(handle,
-                                                 d_psi, d_Hpsi, local_n,
-                                                 gpu_comm, d_scratch_complex);
-            const double E_b = Ec.x;  // .x = real
-            E_local[b] += E_b;
-
-            if (options.compute_variance) {
-                // E2 = ||H psi||^2 (single NCCL-allreduced norm).
-                const double Hpsi_n = dist_norm_gpu(
-                    handle, d_Hpsi, local_n, gpu_comm, d_scratch_complex);
-                E2_local[b] += Hpsi_n * Hpsi_n;
-            }
-
-            if (options.verbose && world_rank == 0) {
-                std::cout << "  [dist-tpq-gpu] sample s=" << s
-                          << " group=" << my_group
-                          << " beta=" << tgt
-                          << " E=" << E_b << std::endl;
-            }
-        }
-    }
-
-    // World-level reduce: only group rank 0 contributes (every other
-    // rank in the group holds the same per-sample E because the
-    // dist_zdotc_gpu / dist_norm_gpu calls are collective on group_comm).
-    if (world_rank % ranks_per_group != 0) {
-        std::fill(E_local.begin(),  E_local.end(),  0.0);
-        std::fill(E2_local.begin(), E2_local.end(), 0.0);
-    }
-    std::vector<double> E_global(betas.size(),  0.0);
-    std::vector<double> E2_global(betas.size(), 0.0);
-    MPI_Allreduce(E_local.data(),  E_global.data(),
-                  static_cast<int>(betas.size()),
-                  MPI_DOUBLE, MPI_SUM, world_comm);
-    if (options.compute_variance) {
-        MPI_Allreduce(E2_local.data(), E2_global.data(),
-                      static_cast<int>(betas.size()),
-                      MPI_DOUBLE, MPI_SUM, world_comm);
-    }
-
-    const double inv = 1.0 / static_cast<double>(n_samples);
-
-    DistributedTpqResult result;
-    result.energy.assign(betas.size(), 0.0);
-    for (std::size_t b = 0; b < betas.size(); ++b) {
-        result.energy[b] = E_global[b] * inv;
-    }
-    if (options.compute_variance) {
-        result.variance.assign(betas.size(), 0.0);
-        for (std::size_t b = 0; b < betas.size(); ++b) {
-            const double E_b  = result.energy[b];
-            const double E2_b = E2_global[b] * inv;
-            result.variance[b] = E2_b - E_b * E_b;
-        }
-    }
-    result.samples_used = n_samples;
+    DistributedTpqResult result = tpq_gpu_impl(
+        *cpu_dop, gop, gpu_comm,
+        world_rank, my_group, n_groups, ranks_per_group, world_comm,
+        options.betas, options.n_samples, options.delta_beta,
+        options.taylor_order, options.seed_offset,
+        options.compute_variance, options.verbose,
+        [&](unsigned long seed, std::vector<Complex>& psi_host) {
+            scatter_initial_vector_host(*cpu_dop, seed, psi_host);
+        });
 
     MPI_Comm_free(&group_comm);
     return result;
