@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — Phase G: bare distributed FixedSz path (no symmetry)
+
+Wires `qed.diag(H, device='mpi'/'mpi_gpu', sz=k)` (without
+`symmetry=`) end-to-end by routing through
+`DistributedSymmetryOperator` with a TRIVIAL one-element symmetry
+group (identity only) plus the Phase F `n_up` filter. With `|G|=1`
+every orbit is a singleton, so the popcount-filtered orbit basis
+IS exactly the `C(N, k)` binomial basis -- the same sub-block
+`FixedSzOperator` carries in-process. No new C++ class, no new
+distributed kernel: all four solvers (lanczos / krylov_schur /
+ftlm / tpq) and their GPU siblings inherit the FixedSz path
+automatically.
+
+- `python/quantum_ed/workflow.py` `_diag_via_mpi`: replaces the
+  Phase-F `NotImplementedError` for the bare-`sz=` branch with a
+  trivial-group construction (`group_from_generators(N,
+  [identity])`), writes the symmetry directory, and forwards
+  `--use-symmetry --sector-index 0 --sz <k>`.
+- `tests/unit/test_distributed_symmetry_operator.cpp`: new
+  TEST_CASE `Phase G (trivial group + sz) is the binomial basis`
+  on np {1,2,4} for `N in {4, 6}`. For every `n_up in [0, N]`,
+  verifies: `global_dim() == C(N, n_up)`; `orbit_reps()` are
+  exactly the popcount-`n_up` states in lex order; orbit sizes
+  all equal 1; orbit norms_sq all equal 1; the apply matches
+  the serial `Operator::apply` restricted to popcount-`n_up`
+  positions; orthogonal complement leak <= 1e-10
+  (`[H, popcount] = 0` check).
+
+This closes the last gap in the device × path × Sz cube. The
+Solver × device matrix now has no silently-dropping cells.
+
 ### Added — Phase F: Sz quantum-number filter on the distributed
 symmetry-projected basis
 

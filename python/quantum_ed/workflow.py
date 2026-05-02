@@ -2009,18 +2009,27 @@ def _diag_via_mpi(
             if sz is not None:
                 binary_args += ["--sz", str(int(sz))]
         elif sz is not None:
-            # Bare distributed path (no symmetry) -- the underlying
-            # DistributedOperator works on the full Hilbert space and
-            # has no fixed-Sz basis yet. Reject explicitly so the user
-            # gets a clear diagnostic instead of a silent drop.
-            raise NotImplementedError(
-                "qed.diag(H, device='mpi'/'mpi_gpu', sz=...) without "
-                "symmetry= is not yet wired: the bare distributed "
-                "kernel iterates [0, 2^N) and has no fixed-Sz basis. "
-                "Pass symmetry= as well (the symm-projected basis is "
-                "popcount-filtered when sz is set), or run a single-"
-                "process FixedSz workflow."
-            )
+            # Phase G: bare distributed FixedSz path.
+            #
+            # The underlying DistributedOperator iterates [0, 2^N) and
+            # has no fixed-Sz basis of its own. Rather than introducing
+            # a new DistributedFixedSzOperator class, we route through
+            # DistributedSymmetryOperator with a TRIVIAL one-element
+            # symmetry group (identity only) + the Phase F popcount
+            # filter (`--sz`). With |G|=1 every orbit is a singleton,
+            # so the popcount-filtered orbit basis IS exactly the
+            # C(N, n_up) binomial basis -- the same sub-block
+            # FixedSzOperator carries in-process.
+            n_sites = int(operator.num_sites)
+            if not (0 <= int(sz) <= n_sites):
+                raise ValueError(
+                    f"sz={sz} out of range [0, num_sites={n_sites}] for "
+                    f"the bare-FixedSz distributed path."
+                )
+            info = group_from_generators(n_sites, [list(range(n_sites))])
+            _write_symmetry_directory(tmpdir, info)
+            binary_args += ["--use-symmetry", "--sector-index", "0",
+                            "--sz", str(int(sz))]
 
         if bool(getattr(params, "compute_eigenvectors", False)):
             eigvec_dir = os.path.join(tmpdir, "eigvecs")

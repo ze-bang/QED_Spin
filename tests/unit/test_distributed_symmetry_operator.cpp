@@ -612,6 +612,161 @@ TEST_CASE("DistributedSymmetryOperator: Sz filter, all-up / all-down "
 }
 
 // -----------------------------------------------------------------------------
+// Phase G: bare FixedSz route via the trivial 1-element symmetry group.
+//
+// The `qed.diag(H, device='mpi', sz=k)` path (without symmetry=) routes
+// through DistributedSymmetryOperator with a TRIVIAL one-element group
+// (identity only) + the Phase F popcount filter. With |G|=1 every orbit
+// is a singleton, so the popcount-filtered orbit basis IS exactly the
+// C(N, k) binomial basis (the same sub-block FixedSzOperator carries
+// in-process). We verify:
+//
+//   1. global_dim() == binomial(N, k) for every k in [0, N].
+//   2. orbit_reps() are exactly the popcount-k states in lex order.
+//   3. The apply matches the unfiltered (full Hilbert) DistributedOperator
+//      apply restricted to the popcount-k subspace -- i.e., Sz is
+//      conserved by H on the bare FixedSz path.
+// -----------------------------------------------------------------------------
+
+std::shared_ptr<Operator>
+make_heisenberg_trivial_op_sz(int N, double J, bool periodic, int n_up) {
+    auto op = std::shared_ptr<Operator>(
+        ed_tests::build_heisenberg_chain(static_cast<uint64_t>(N), J,
+                                         periodic).release());
+    // Trivial group: identity permutation only.
+    std::vector<int> identity(N);
+    for (int i = 0; i < N; ++i) identity[i] = i;
+    op->symmetry_info = ed::sym::group_from_generators(
+        N, {identity}, /*sector_quantum_numbers=*/{});
+    op->symmetry_info.n_up = n_up;
+    return op;
+}
+
+std::uint64_t binomial(int n, int k) {
+    if (k < 0 || k > n) return 0;
+    std::uint64_t r = 1;
+    for (int i = 0; i < k; ++i) {
+        r = r * static_cast<std::uint64_t>(n - i) /
+            static_cast<std::uint64_t>(i + 1);
+    }
+    return r;
+}
+
+TEST_CASE("DistributedSymmetryOperator: Phase G (trivial group + sz) "
+          "is the binomial basis",
+          "[distributed_symmetry_operator][trivial_group][sz][phaseG]") {
+    for (int N : {4, 6}) {
+        // Reference: the unfiltered apply on the full Hilbert space
+        // (no symmetry, no Sz). We reconstruct it densely on rank 0
+        // for the comparison since DistributedOperator's apply is
+        // tested elsewhere and we just need a serial reference here.
+        auto op_full_serial = std::shared_ptr<Operator>(
+            ed_tests::build_heisenberg_chain(
+                static_cast<uint64_t>(N), 1.0, /*periodic=*/true).release());
+
+        const std::uint64_t dim = 1ULL << N;
+        // Build the dense Hamiltonian once; the apply we want is
+        // y_full = H * x_full via op_full_serial->apply (per column).
+        // Cheaper: just call op->apply directly on the lifted vectors.
+
+        for (int n_up = 0; n_up <= N; ++n_up) {
+            auto op_sz = make_heisenberg_trivial_op_sz(
+                N, /*J=*/1.0, /*periodic=*/true, n_up);
+            DistributedSymmetryOperator dop(op_sz, /*sector_idx=*/0,
+                                              MPI_COMM_WORLD);
+
+            const std::uint64_t expected_dim = binomial(N, n_up);
+            INFO("N=" << N << " n_up=" << n_up
+                 << " global_dim=" << dop.global_dim()
+                 << " expected=" << expected_dim);
+            REQUIRE(dop.global_dim() == expected_dim);
+
+            // Reps must be exactly the popcount-n_up states in lex order.
+            const auto& reps = dop.orbit_reps();
+            std::vector<std::uint64_t> expected_reps;
+            for (std::uint64_t b = 0; b < dim; ++b) {
+                if (static_cast<int>(__builtin_popcountll(b)) == n_up) {
+                    expected_reps.push_back(b);
+                }
+            }
+            REQUIRE(reps.size() == expected_reps.size());
+            for (std::size_t i = 0; i < reps.size(); ++i) {
+                REQUIRE(reps[i] == expected_reps[i]);
+            }
+
+            // Orbit sizes must all be 1 (singleton orbits) and norms
+            // must all be 1 (trivial projection: chi_q(e) = 1).
+            for (auto sz : dop.orbit_sizes()) REQUIRE(sz == 1);
+            for (auto N_i : dop.orbit_norms_sq()) {
+                REQUIRE(std::abs(N_i - 1.0) <= 1e-12);
+            }
+
+            if (expected_dim == 0) continue;
+
+            // Apply check: drive the trivial-group dop with a
+            // deterministic vector and compare against the full-Hilbert
+            // serial apply restricted to popcount-n_up positions.
+            const auto& part = dop.partition();
+            const int my_rank = dop.rank();
+
+            auto x_natural = deterministic_global_vector(
+                static_cast<std::size_t>(dop.global_dim()), /*seed=*/N * 100 + n_up);
+
+            // Lift to full Hilbert vector.
+            std::vector<Complex> x_full(dim, Complex(0.0, 0.0));
+            for (std::size_t i = 0; i < x_natural.size(); ++i) {
+                x_full[expected_reps[i]] = x_natural[i];
+            }
+
+            // Distributed apply.
+            std::vector<Complex> x_local(dop.local_size());
+            for (std::uint64_t k = 0; k < dop.local_size(); ++k) {
+                x_local[k] = x_natural[part.rank_orbits[my_rank][k]];
+            }
+            std::vector<Complex> y_local(dop.local_size(), Complex(0.0, 0.0));
+            dop.apply(x_local.data(), y_local.data());
+            auto y_rm = allgather_slabs(y_local.data(), dop.local_size(),
+                                         dop.global_dim(), MPI_COMM_WORLD);
+            std::vector<Complex> y_dist(dop.global_dim(), Complex(0.0, 0.0));
+            for (std::size_t g = 0; g < y_rm.size(); ++g) {
+                std::size_t orb_id = 0;
+                for (int r = 0; r < dop.comm_size(); ++r) {
+                    if (g >= part.rank_offsets[r] &&
+                        g <  part.rank_offsets[r] + part.rank_orbits[r].size()) {
+                        orb_id = part.rank_orbits[r][g - part.rank_offsets[r]];
+                        break;
+                    }
+                }
+                y_dist[orb_id] = y_rm[g];
+            }
+
+            // Serial reference: y_full = H * x_full via op->apply.
+            std::vector<Complex> y_full(dim, Complex(0.0, 0.0));
+            op_full_serial->apply(x_full.data(), y_full.data(), dim);
+
+            // Compare popcount-n_up positions.
+            double err = 0.0;
+            for (std::size_t i = 0; i < expected_reps.size(); ++i) {
+                err = std::max(err,
+                               std::abs(y_dist[i] - y_full[expected_reps[i]]));
+            }
+            // Sz conservation: leak into popcount != n_up positions
+            // of y_full must be zero.
+            double leak = 0.0;
+            for (std::uint64_t b = 0; b < dim; ++b) {
+                if (static_cast<int>(__builtin_popcountll(b)) != n_up) {
+                    leak = std::max(leak, std::abs(y_full[b]));
+                }
+            }
+            INFO("N=" << N << " n_up=" << n_up
+                 << " err=" << err << " leak=" << leak);
+            REQUIRE(err <= 1e-10);
+            REQUIRE(leak <= 1e-10);
+        }
+    }
+}
+
+// -----------------------------------------------------------------------------
 // Custom main: MPI_Init + Catch2 + MPI_Finalize.
 // Same pattern as the other Phase 3b MPI tests.
 // -----------------------------------------------------------------------------
