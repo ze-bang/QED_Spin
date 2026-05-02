@@ -36,7 +36,7 @@ solver-specific algorithmic detail see
 3. [Mode 2: `./ED` with a config file](#3-mode-2-ed-with-a-config-file)
 4. [Mode 3: `./ED dssf` subcommand for spectral / static structure factors](#4-mode-3-ed-dssf-subcommand-for-spectral--static-structure-factors)
 5. [Mode 4: in-process Python via `import qed`](#5-mode-4-in-process-python-via-import-qed)
-6. [Mode 5: NLCE pipeline via `python -m workflows.nlce`](#6-mode-5-nlce-pipeline-via-python--m-workflowsnlce)
+6. [Mode 5: NLCE pipeline via the standalone `qed-nlce` package](#6-mode-5-nlce-pipeline-via-the-standalone-qed-nlce-package)
 7. [Mode 6: distributed-memory MPI binary `ed_distributed_main`](#7-mode-6-distributed-memory-mpi-binary-ed_distributed_main)
 8. [Mode 7: raw C++ API (link against `ed_solvers_*`)](#8-mode-7-raw-c-api-link-against-ed_solvers_)
 9. [Mode 8: standalone `ed_input` C++/Python lattice + Hamiltonian builder](#9-mode-8-standalone-ed_input-cpython-lattice--hamiltonian-builder)
@@ -57,7 +57,7 @@ solver-specific algorithmic detail see
 | Build and solve a system inside a Jupyter notebook or research script -- **including** GPU per-sector, in-process symmetry projection, ARPACK / Krylov-Schur / Davidson / LOBPCG, FTLM/LTLM/TPQ, and ScaLAPACK | **Mode 4** (`import qed`)                |
 | Launch MPI distributed solvers from Python without touching a shell      | **Mode 4** helper (`qed.mpi.run_distributed`) |
 | Run the full continued-fraction `S(Q,ω)` engine from Python              | **Mode 4** helper (`qed.dssf.run_from_directory`) |
-| Run a full Numerical Linked Cluster Expansion (NLCE) on the pyrochlore or triangular lattice               | **Mode 5** (`python -m workflows.nlce`)         |
+| Run a full Numerical Linked Cluster Expansion (NLCE) on the pyrochlore or triangular lattice               | **Mode 5** (the [`qed_nlce`](https://github.com/ze-bang/QED_NLCE) package, ships `qed-nlce`)         |
 | Validate distributed Lanczos / FTLM scaling on a Heisenberg test problem (no input files needed)           | **Mode 6** (`ed_distributed_main`)              |
 | Embed a solver call inside your own C++ program                                                            | **Mode 7** (link against `ed_solvers_cpu` etc.) |
 | Build a Hamiltonian from a textbook lattice (chain / kagome / pyrochlore / …) **without** writing a Python helper, in either C++ or Python, and *optionally* dump the legacy `.dat` files | **Mode 8** (`ed::input` / `qed.input`)   |
@@ -721,13 +721,21 @@ end-to-end worked example.
 
 ---
 
-## 6. Mode 5: NLCE pipeline via `python -m workflows.nlce`
+## 6. Mode 5: NLCE pipeline via the standalone `qed-nlce` package
 
-The unified Numerical Linked Cluster Expansion driver wraps everything
-above into a single CLI:
+The Numerical Linked Cluster Expansion driver is now maintained as a
+separate repository, [QED_NLCE](https://github.com/ze-bang/QED_NLCE),
+that depends on this toolkit at runtime (it shells out to `./ED` for
+every cluster). Install once:
 
 ```bash
-python3 -m workflows.nlce \
+pip install git+https://github.com/ze-bang/QED_NLCE.git
+```
+
+Then the unified driver is available as `qed-nlce` (or `python -m qed_nlce`):
+
+```bash
+qed-nlce \
     --geometry=pyrochlore --pipeline=full_ed \
     --max_order=4 --Jxx=1.0 --Jyy=1.0 --Jzz=1.0 \
     --thermo --temp_min=0.05 --temp_max=10.0 --temp_bins=50 \
@@ -752,13 +760,13 @@ geometry+pipeline help only appears once both `--geometry` and
 `--pipeline` are supplied:
 
 ```bash
-python3 -m workflows.nlce --geometry=pyrochlore --pipeline=ftlm --help
+qed-nlce --geometry=pyrochlore --pipeline=ftlm --help
 ```
 
 Internally NLCE runs four steps: cluster generation → Hamiltonian prep
 (via the `edlib.helper_*` modules) → `./ED` per cluster (in parallel
 when `--parallel` is set) → inclusion-exclusion summation
-(`workflows/nlce/run/NLC_sum*.py`). Every per-cluster directory ends up
+(`qed_nlce/run/NLC_sum*.py`). Every per-cluster directory ends up
 looking exactly like a Mode-1 directory, so you can always inspect or
 rerun an individual cluster by hand. See
 [`examples/13_nlce_full_workflow.sh`](../../examples/13_nlce_full_workflow.sh).

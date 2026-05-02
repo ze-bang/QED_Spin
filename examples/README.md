@@ -22,7 +22,7 @@ into your own working directory, and edit the constants at the top.
 | [`10_python_dssf.py`](./10_python_dssf.py) | Dynamical structure factor `S(q,ω)` at T=0 on an 8-site chain | Python (CPU) |
 | [`11_cli_thermo.sh`](./11_cli_thermo.sh) | One-line CLI invocation of `./ED` for a 12-site Heisenberg thermodynamic sweep | CLI |
 | [`12_cli_dssf.sh`](./12_cli_dssf.sh) | One-line CLI invocation of `./ED dssf dynamical_thermal` for finite-T DSSF | CLI |
-| [`13_nlce_full_workflow.sh`](./13_nlce_full_workflow.sh) | Complete NLCE workflow on the pyrochlore lattice using `python -m workflows.nlce` | Python orchestrator |
+| [`13_nlce_full_workflow.sh`](./13_nlce_full_workflow.sh) | Complete NLCE workflow on the pyrochlore lattice using `qed-nlce` (requires the separate [QED_NLCE](https://github.com/ze-bang/QED_NLCE) package) | Python orchestrator |
 
 ## Prerequisites
 

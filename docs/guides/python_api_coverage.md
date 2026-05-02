@@ -285,7 +285,8 @@ asks the caller to write any `subprocess` boilerplate; both forward
 `extra_args=` to the underlying CLI so the full surface area remains
 accessible.
 
-**NLCE** (`python -m workflows.nlce`) orchestrates **subprocess** calls to `./ED`
+**NLCE** (the standalone [`qed_nlce`](https://github.com/ze-bang/QED_NLCE)
+package; CLI: `qed-nlce`) orchestrates **subprocess** calls to `./ED`
 — it is Python, but it is not “in-process `qed`”. (Migrating it to
 the in-process dispatcher is straightforward now that
 `exact_diagonalization_from_directory` is bound.)
@@ -304,7 +305,7 @@ The remaining items are quality-of-life rather than capability gaps:
    `distributed_*` solvers as `mpi4py`-compatible classes.
 3. **Optional NumPy / CuPy dispatch:** zero-copy interop between `qed.input`
    geometries and the standard scientific-Python stack.
-4. **NLCE refactor:** rewrite `python -m workflows.nlce` to use
+4. **NLCE refactor:** rewrite the standalone [`qed_nlce`](https://github.com/ze-bang/QED_NLCE) driver to use
    `qed.exact_diagonalization_from_directory(...)` instead of shelling out.
 
 ---

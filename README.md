@@ -310,7 +310,6 @@ exact_diagonalization_cpp/
 ├── include/ed/             # Public C++ API (operator, solvers, distributed/, gpu/, io/, input/)
 ├── src/                    # Implementations + apps (ed_main, ed_distributed_main, src/input/)
 ├── python/qed/      # pybind11 bindings + DSSF / Hamiltonian / symmetry / input helpers
-├── workflows/nlce/         # Numerical Linked Cluster Expansion (geometries × pipelines × workflow)
 ├── examples/               # Runnable end-to-end examples (one per use case)
 ├── benchmarks/             # Google-Benchmark micros + bench_all_backends.py
 ├── tests/                  # Catch2 v3 unit tests (146/146 green) and integration tests

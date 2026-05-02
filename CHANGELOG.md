@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Removed — NLCE workflow extracted to a standalone repository
+
+The Numerical Linked Cluster Expansion driver (`workflows/nlce/`) has
+been split into its own GitHub repository,
+**[QED_NLCE](https://github.com/ze-bang/QED_NLCE)**. NLCE never linked
+against the QED C++ libraries — every cluster diagonalization is a
+`subprocess` call to `./ED` — so the dependency is purely runtime.
+This separation lets the NLCE toolkit evolve independently.
+
+- `workflows/` and `workflows/nlce/` removed from this repo (49 commits
+  of NLCE history were preserved verbatim into QED_NLCE via
+  `git filter-repo`).
+- Python package renamed `workflows.nlce` → `qed_nlce`.
+- Unified CLI is now `qed-nlce` (or `python -m qed_nlce`); install with
+  `pip install git+https://github.com/ze-bang/QED_NLCE.git`.
+- `python/tests/test_nlce_package.py` moved to `qed_nlce/tests/`.
+- `examples/13_nlce_full_workflow.sh` now invokes `qed-nlce` and
+  fails fast with an install hint if the package is missing.
+- `docs/guides/usage.md` Mode 5 and `docs/guides/python_api_coverage.md`
+  updated to point at the new repo.
+
 ### Changed — repository / package rename to **QED**
 
 Renamed top-level identifiers (C++ `namespace ed::` and binary names
