@@ -95,13 +95,33 @@ struct DistributedTpqOptions {
 };
 
 struct DistributedTpqResult {
-    /// Sample-averaged <H>(beta) at each entry of options.betas. Replicated
-    /// on every rank in world_comm.
+    /// Z-weighted sample-averaged <H>(beta) at each entry of options.betas.
+    /// Replicated on every rank in world_comm. Defined as
+    ///   <H>(beta) = (sum_r w_r(beta) E_r(beta)) / (sum_r w_r(beta))
+    /// where w_r(beta) = <r|e^{-beta H}|r> is the per-sample weight that
+    /// the cTPQ propagator implicitly accumulates as the product of
+    /// pre-renormalisation step squared-norms. This is the J&P-consistent
+    /// canonical estimator and is what makes cross-sector recombination
+    /// Z(beta) = sum_alpha Z_alpha(beta), <H>(beta) = sum_alpha Z_alpha
+    /// <H>_alpha / sum_alpha Z_alpha exact in the limit of many samples.
     std::vector<double> energy;
 
-    /// Sample-averaged variance <H^2>(beta) - <H>(beta)^2. Empty unless
-    /// options.compute_variance was true.
+    /// Z-weighted sample-averaged variance <H^2>(beta) - <H>(beta)^2.
+    /// Empty unless options.compute_variance was true.
     std::vector<double> variance;
+
+    /// Per-beta partition function estimate
+    ///   Z(beta) = (D / R) * sum_r w_r(beta)
+    /// where D is the (sector) dimension exposed by the operator and R is
+    /// the number of samples actually reduced. Replicated on every rank.
+    /// This is the field the Phase-H Python aggregator consumes via
+    /// the HDF5 dataset `/Z`.
+    std::vector<double> Z;
+
+    /// log Z(beta) computed via logsumexp of the per-sample log-weights;
+    /// numerically robust at large |beta| where Z itself may underflow.
+    /// Same length as `energy`.
+    std::vector<double> lnZ;
 
     /// Number of samples actually reduced.
     int samples_used = 0;

@@ -2602,6 +2602,197 @@ StaticResponseResults compute_static_response(
 }
 
 /**
+ * @brief Compute ∂T⟨O⟩ = (⟨OH⟩ - ⟨O⟩⟨H⟩) / T² from one FTLM Krylov basis.
+ */
+StaticResponseResults compute_connected_qh_response(
+    std::function<void(const Complex*, Complex*, int)> H,
+    std::function<void(const Complex*, Complex*, int)> O,
+    uint64_t N,
+    const StaticResponseParameters& params,
+    double temp_min,
+    double temp_max,
+    uint64_t num_temp_bins,
+    const std::string& output_dir
+) {
+    const bool verbose = ed_dssf_verbose();
+
+    if (!(temp_min > 0.0) || !(temp_max > 0.0)) {
+        throw std::invalid_argument(
+            "compute_connected_qh_response: temp_min and temp_max must both be > 0.");
+    }
+
+    if (verbose) {
+        std::cout << "\n==========================================\n";
+        std::cout << "Connected Q-H Response (FTLM)\n";
+        std::cout << "==========================================\n";
+        std::cout << "Computing (⟨OH⟩ - ⟨O⟩⟨H⟩) / T²\n";
+        std::cout << "Hilbert space dimension: " << N << std::endl;
+        std::cout << "Krylov dimension: " << params.krylov_dim << std::endl;
+        std::cout << "Number of samples: " << params.num_samples << std::endl;
+        std::cout << "Temperature range: [" << temp_min << ", " << temp_max << "]" << std::endl;
+    }
+
+    StaticResponseResults results;
+    results.total_samples = params.num_samples;
+
+    results.temperatures.resize(num_temp_bins);
+    const double log_tmin = std::log(temp_min);
+    const double log_tmax = std::log(temp_max);
+    const double log_step = (log_tmax - log_tmin) / std::max(uint64_t(1), num_temp_bins - 1);
+    for (int i = 0; i < num_temp_bins; i++) {
+        results.temperatures[i] = std::exp(log_tmin + i * log_step);
+    }
+
+    std::mt19937 gen;
+    if (params.random_seed == 0) {
+        std::random_device rd;
+        gen.seed(rd());
+    } else {
+        gen.seed(params.random_seed);
+    }
+
+    std::vector<std::vector<double>> sample_alpha;
+    std::vector<std::vector<double>> sample_connected;
+
+    if (!output_dir.empty() && params.store_intermediate) {
+        std::string cmd = "mkdir -p " + output_dir + "/static_connected_qh_samples";
+        safe_system_call(cmd);
+    }
+
+    ComplexVector psi_n(N);
+    ComplexVector O_psi_n(N);
+
+    for (int sample = 0; sample < params.num_samples; sample++) {
+        if (verbose) {
+            std::cout << "\n--- Sample " << sample + 1 << " / "
+                      << params.num_samples << " ---\n";
+        }
+
+        ComplexVector v0 = generateGaussianRandomVector(N, gen);
+
+        std::vector<double> alpha, beta;
+        std::vector<ComplexVector> lanczos_vectors;
+        build_lanczos_tridiagonal_with_basis(
+            H, v0, N, params.krylov_dim, params.tolerance,
+            params.full_reorthogonalization, params.reorth_frequency,
+            alpha, beta, &lanczos_vectors
+        );
+
+        const uint64_t m = alpha.size();
+        if (m == 0) {
+            std::cerr << "  Warning: Failed to build Krylov subspace, skipping sample\n";
+            continue;
+        }
+
+        std::vector<double> ritz_values, weights;
+        std::vector<double> evecs;
+        diagonalize_tridiagonal_ritz(alpha, beta, ritz_values, weights, &evecs);
+        if (ritz_values.empty()) {
+            std::cerr << "  Warning: Tridiagonal diagonalization failed, skipping sample\n";
+            continue;
+        }
+
+        std::vector<double> q_values(m, 0.0);
+        for (uint64_t n = 0; n < m; n++) {
+            std::fill(psi_n.begin(), psi_n.end(), Complex(0.0, 0.0));
+            for (uint64_t j = 0; j < m; j++) {
+                const Complex coeff(evecs[n * m + j], 0.0);
+                cblas_zaxpy(N, &coeff, lanczos_vectors[j].data(), 1,
+                            psi_n.data(), 1);
+            }
+
+            O(psi_n.data(), O_psi_n.data(), N);
+
+            Complex q_complex;
+            cblas_zdotc_sub(N, psi_n.data(), 1, O_psi_n.data(), 1, &q_complex);
+            q_values[n] = std::real(q_complex);
+        }
+
+        std::vector<double> alpha_T(num_temp_bins, 0.0);
+        std::vector<double> connected_T(num_temp_bins, 0.0);
+        const double e_min = *std::min_element(ritz_values.begin(), ritz_values.end());
+
+        for (int t = 0; t < num_temp_bins; t++) {
+            const double T = results.temperatures[t];
+            const double beta_T = 1.0 / T;
+
+            double Z = 0.0;
+            double sum_Q = 0.0;
+            double sum_H = 0.0;
+            double sum_QH = 0.0;
+            for (uint64_t i = 0; i < m; i++) {
+                const double bw = weights[i] * std::exp(-beta_T * (ritz_values[i] - e_min));
+                const double qi = q_values[i];
+                const double ei = ritz_values[i];
+                Z      += bw;
+                sum_Q  += bw * qi;
+                sum_H  += bw * ei;
+                sum_QH += bw * qi * ei;
+            }
+
+            if (Z > 1e-300) {
+                const double inv_Z = 1.0 / Z;
+                const double q_avg = sum_Q * inv_Z;
+                const double h_avg = sum_H * inv_Z;
+                const double qh_avg = sum_QH * inv_Z;
+                const double connected = qh_avg - q_avg * h_avg;
+                connected_T[t] = connected;
+                alpha_T[t] = connected / (T * T);
+            }
+        }
+
+        sample_alpha.push_back(alpha_T);
+        sample_connected.push_back(connected_T);
+    }
+
+    const uint64_t n_valid_samples = sample_alpha.size();
+    results.expectation.resize(num_temp_bins, 0.0);
+    results.variance.resize(num_temp_bins, 0.0);
+    results.susceptibility.resize(num_temp_bins, 0.0);
+    results.expectation_error.resize(num_temp_bins, 0.0);
+    results.variance_error.resize(num_temp_bins, 0.0);
+    results.susceptibility_error.resize(num_temp_bins, 0.0);
+
+    if (n_valid_samples == 0) {
+        std::cerr << "Error: No valid samples obtained" << std::endl;
+        return results;
+    }
+
+    for (uint64_t s = 0; s < n_valid_samples; s++) {
+        for (int t = 0; t < num_temp_bins; t++) {
+            results.expectation[t] += sample_alpha[s][t];
+            results.variance[t] += sample_connected[s][t];
+        }
+    }
+
+    for (int t = 0; t < num_temp_bins; t++) {
+        results.expectation[t] /= n_valid_samples;
+        results.variance[t] /= n_valid_samples;
+        results.susceptibility[t] = results.variance[t] / results.temperatures[t];
+    }
+
+    if (params.compute_error_bars && n_valid_samples > 1) {
+        for (uint64_t s = 0; s < n_valid_samples; s++) {
+            for (int t = 0; t < num_temp_bins; t++) {
+                const double diff_alpha = sample_alpha[s][t] - results.expectation[t];
+                const double diff_conn = sample_connected[s][t] - results.variance[t];
+                results.expectation_error[t] += diff_alpha * diff_alpha;
+                results.variance_error[t] += diff_conn * diff_conn;
+            }
+        }
+
+        const double norm = std::sqrt(static_cast<double>(n_valid_samples * (n_valid_samples - 1)));
+        for (int t = 0; t < num_temp_bins; t++) {
+            results.expectation_error[t] = std::sqrt(results.expectation_error[t]) / norm;
+            results.variance_error[t] = std::sqrt(results.variance_error[t]) / norm;
+            results.susceptibility_error[t] = results.variance_error[t] / results.temperatures[t];
+        }
+    }
+
+    return results;
+}
+
+/**
  * @brief Save static response to text file in unified format
  * 
  * Unified format: 8 columns

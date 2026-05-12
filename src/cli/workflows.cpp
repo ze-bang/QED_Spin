@@ -1660,6 +1660,25 @@ void compute_static_response_workflow(const EDConfig& config) {
         std::string op_path = config.system.hamiltonian_dir + "/" + config.static_resp.operator_file;
         Operator op(config.system.num_sites, config.system.spin_length);
         op.loadFromInterAllFile(op_path);
+        {
+            // Optional legacy companion ``*.Trans.dat`` with the same basename as
+            // ``*.InterAll.dat`` (num two-body lines may be zero).  One-body terms
+            // from ``Trans.dat`` are needed for quadrupole / magnetostriction
+            // observables built solely from on-site ``S^{±}``.
+            std::string trans_path = op_path;
+            const std::string suf = ".InterAll.dat";
+            if (trans_path.size() >= suf.size() &&
+                trans_path.compare(trans_path.size() - suf.size(), suf.size(), suf) == 0) {
+                trans_path.replace(trans_path.size() - suf.size(), suf.size(), ".Trans.dat");
+                if (std::filesystem::exists(trans_path)) {
+                    op.loadFromFile(trans_path);
+                    if (rank == 0) {
+                        std::cout << "  Loaded one-body companion operator file: "
+                                  << trans_path << "\n";
+                    }
+                }
+            }
+        }
         
         auto O_func = [&op](const Complex* in, Complex* out, uint64_t dim) {
             op.apply(in, out, dim);
@@ -1678,12 +1697,41 @@ void compute_static_response_workflow(const EDConfig& config) {
                 config.static_resp.num_temp_points,
                 config.workflow.output_dir
             );
+        } else if (config.static_resp.operator2_file == "__connected_hamiltonian__") {
+            // Magnetostriction / thermal expansion: ∂T⟨O⟩ =
+            // (⟨OH⟩ - ⟨O⟩⟨H⟩) / T², evaluated in the same FTLM sample.
+            if (rank == 0) {
+                std::cout << "Computing connected O-H thermal expansion "
+                          << "(⟨OH⟩ - ⟨O⟩⟨H⟩) / T²...\n";
+            }
+            results = compute_connected_qh_response(
+                H_func, O_func, N, params,
+                config.static_resp.temp_min,
+                config.static_resp.temp_max,
+                config.static_resp.num_temp_points,
+                config.workflow.output_dir
+            );
         } else if (!config.static_resp.operator2_file.empty()) {
             // Two different operators: ⟨O₁†O₂⟩
             if (rank == 0) std::cout << "Computing two-operator static response ⟨O₁†O₂⟩...\n";
             std::string op2_path = config.system.hamiltonian_dir + "/" + config.static_resp.operator2_file;
             Operator op2(config.system.num_sites, config.system.spin_length);
             op2.loadFromInterAllFile(op2_path);
+            {
+                std::string trans_path = op2_path;
+                const std::string suf = ".InterAll.dat";
+                if (trans_path.size() >= suf.size() &&
+                    trans_path.compare(trans_path.size() - suf.size(), suf.size(), suf) == 0) {
+                    trans_path.replace(trans_path.size() - suf.size(), suf.size(), ".Trans.dat");
+                    if (std::filesystem::exists(trans_path)) {
+                        op2.loadFromFile(trans_path);
+                        if (rank == 0) {
+                            std::cout << "  Loaded one-body companion for operator2: "
+                                      << trans_path << "\n";
+                        }
+                    }
+                }
+            }
 
             auto O2_func = [&op2](const Complex* in, Complex* out, uint64_t dim) {
                 op2.apply(in, out, dim);

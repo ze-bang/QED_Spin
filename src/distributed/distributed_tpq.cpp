@@ -18,6 +18,7 @@
 #include <complex>
 #include <cstdio>
 #include <iostream>
+#include <limits>
 #include <random>
 #include <stdexcept>
 #include <string>
@@ -188,11 +189,16 @@ void scatter_initial_vector(const DistributedSymmetryOperator& op,
 // on the operator type: both `DistributedOperator` and
 // `DistributedSymmetryOperator` expose
 // `{apply(const Complex*, Complex*), local_size(), comm()}`.
+//
+// Returns ||result||  (i.e. the L2 norm of e^{-(delta/2)H}|psi> assuming
+// |psi> entered the function with unit norm). The caller can use this to
+// accumulate log w_r(beta) = log <r|e^{-beta H}|r> for the canonical-TPQ
+// J&P estimator of Z(beta).
 template <typename Op>
-void taylor_step(const Op& dop,
-                 std::vector<Complex>& psi_local,
-                 double delta,
-                 std::uint64_t taylor_order) {
+double taylor_step(const Op& dop,
+                   std::vector<Complex>& psi_local,
+                   double delta,
+                   std::uint64_t taylor_order) {
     const std::uint64_t local_n = dop.local_size();
     std::vector<Complex> term(psi_local);
     std::vector<Complex> Hterm(local_n, Complex(0.0, 0.0));
@@ -213,6 +219,7 @@ void taylor_step(const Op& dop,
 
     const double n2 = dist_norm(psi_local.data(), local_n, dop.comm());
     if (n2 > 0.0) local_scal(1.0 / n2, psi_local.data(), local_n);
+    return n2;
 }
 
 // Templated per-sample TPQ driver shared by the dense and symm paths.
@@ -259,9 +266,24 @@ DistributedTpqResult tpq_impl(
         1, options.taylor_order);
 
     const std::size_t local_n = static_cast<std::size_t>(dop.local_size());
+    const std::size_t B = betas.size();
 
-    std::vector<double> E_local(betas.size(), 0.0);
-    std::vector<double> E2_local(betas.size(), 0.0);
+    // Per-sample, per-beta storage on each rank. Only entries that this
+    // rank's group owns are populated; everything else stays at 0 and the
+    // world-level Allreduce consolidates them.
+    //
+    //   logw_per_sample[s*B + b] = log <r_s | e^{-beta_b H} | r_s>
+    //   E_per_sample   [s*B + b] = <psi_s(beta_b) | H | psi_s(beta_b)>   (normalised)
+    //   E2_per_sample  [s*B + b] = <psi_s(beta_b) | H^2 | psi_s(beta_b)> (normalised)
+    //
+    // For samples not owned by this group, all three remain zero. We then
+    // mark non-owned (s,b) entries by carrying a separate "owned" mask
+    // that we Allreduce as well; this lets us subtract the unowned zeros
+    // from the logsumexp sentinel below.
+    std::vector<double> logw_per_sample(static_cast<std::size_t>(n_samples) * B, 0.0);
+    std::vector<double> E_per_sample   (static_cast<std::size_t>(n_samples) * B, 0.0);
+    std::vector<double> E2_per_sample  (static_cast<std::size_t>(n_samples) * B, 0.0);
+    std::vector<int>    owned_mask     (static_cast<std::size_t>(n_samples), 0);
 
     std::vector<Complex> psi_local;
     std::vector<Complex> Hpsi_local(local_n, Complex(0.0, 0.0));
@@ -272,17 +294,25 @@ DistributedTpqResult tpq_impl(
                    psi_local);
 
         double cur_beta = 0.0;
-        for (std::size_t b = 0; b < betas.size(); ++b) {
+        // log w_r(beta) accumulated as the sum of 2*log||result|| across
+        // every Taylor step, since the state is unit-normalised entering
+        // each step. Equivalently log <r|e^{-beta H}|r>.
+        double log_w = 0.0;
+
+        for (std::size_t b = 0; b < B; ++b) {
             const double tgt = betas[b];
 
             while (cur_beta + 0.5 * delta_beta < tgt) {
                 const double remain = tgt - cur_beta;
                 const double step   = std::min(delta_beta, remain);
-                taylor_step(dop, psi_local, step, taylor_order);
+                const double n2 = taylor_step(dop, psi_local, step, taylor_order);
+                if (n2 > 0.0) log_w += 2.0 * std::log(n2);
                 cur_beta += step;
             }
             if (std::abs(cur_beta - tgt) > 1e-12) {
-                taylor_step(dop, psi_local, tgt - cur_beta, taylor_order);
+                const double n2 = taylor_step(
+                    dop, psi_local, tgt - cur_beta, taylor_order);
+                if (n2 > 0.0) log_w += 2.0 * std::log(n2);
                 cur_beta = tgt;
             }
 
@@ -290,52 +320,112 @@ DistributedTpqResult tpq_impl(
             Complex Ec = dist_zdotc(psi_local.data(), Hpsi_local.data(),
                                     local_n, group_comm);
             const double E_b = Ec.real();
-            E_local[b] += E_b;
+
+            const std::size_t idx =
+                static_cast<std::size_t>(s) * B + b;
+            logw_per_sample[idx] = log_w;
+            E_per_sample[idx]    = E_b;
 
             if (options.compute_variance) {
-                const double Hpsi_n2 =
-                    dist_norm(Hpsi_local.data(), local_n, group_comm);
-                E2_local[b] += Hpsi_n2 * Hpsi_n2;
+                const double Hpsi_n = dist_norm(
+                    Hpsi_local.data(), local_n, group_comm);
+                E2_per_sample[idx] = Hpsi_n * Hpsi_n;
             }
 
             if (options.verbose && world_rank == 0) {
                 std::cout << "  [dist-tpq] sample s=" << s
                           << " group=" << my_group
                           << " beta=" << tgt
-                          << " E=" << E_b << std::endl;
+                          << " E=" << E_b
+                          << " logw=" << log_w << std::endl;
             }
         }
+        owned_mask[s] = 1;
     }
 
+    // Within a group only rank 0 contributes; null out the rest so the
+    // world-level SUM Allreduce doesn't double-count.
     if (world_rank % ranks_per_group != 0) {
-        std::fill(E_local.begin(),  E_local.end(),  0.0);
-        std::fill(E2_local.begin(), E2_local.end(), 0.0);
+        std::fill(logw_per_sample.begin(), logw_per_sample.end(), 0.0);
+        std::fill(E_per_sample.begin(),    E_per_sample.end(),    0.0);
+        std::fill(E2_per_sample.begin(),   E2_per_sample.end(),   0.0);
+        std::fill(owned_mask.begin(),      owned_mask.end(),      0);
     }
-    std::vector<double> E_global(betas.size(),  0.0);
-    std::vector<double> E2_global(betas.size(), 0.0);
-    MPI_Allreduce(E_local.data(),  E_global.data(),
-                  static_cast<int>(betas.size()),
-                  MPI_DOUBLE, MPI_SUM, world_comm);
-    if (options.compute_variance) {
-        MPI_Allreduce(E2_local.data(), E2_global.data(),
-                      static_cast<int>(betas.size()),
+    {
+        std::vector<double> tmp(logw_per_sample.size(), 0.0);
+        MPI_Allreduce(logw_per_sample.data(), tmp.data(),
+                      static_cast<int>(tmp.size()),
                       MPI_DOUBLE, MPI_SUM, world_comm);
+        logw_per_sample.swap(tmp);
+    }
+    {
+        std::vector<double> tmp(E_per_sample.size(), 0.0);
+        MPI_Allreduce(E_per_sample.data(), tmp.data(),
+                      static_cast<int>(tmp.size()),
+                      MPI_DOUBLE, MPI_SUM, world_comm);
+        E_per_sample.swap(tmp);
+    }
+    if (options.compute_variance) {
+        std::vector<double> tmp(E2_per_sample.size(), 0.0);
+        MPI_Allreduce(E2_per_sample.data(), tmp.data(),
+                      static_cast<int>(tmp.size()),
+                      MPI_DOUBLE, MPI_SUM, world_comm);
+        E2_per_sample.swap(tmp);
+    }
+    {
+        std::vector<int> tmp(owned_mask.size(), 0);
+        MPI_Allreduce(owned_mask.data(), tmp.data(),
+                      static_cast<int>(tmp.size()),
+                      MPI_INT, MPI_SUM, world_comm);
+        owned_mask.swap(tmp);
     }
 
-    const double inv = 1.0 / static_cast<double>(n_samples);
+    const double D = static_cast<double>(dop.global_dim());
+    const double R = static_cast<double>(n_samples);
 
     DistributedTpqResult result;
-    result.energy.assign(betas.size(), 0.0);
-    for (std::size_t b = 0; b < betas.size(); ++b) {
-        result.energy[b] = E_global[b] * inv;
-    }
-    if (options.compute_variance) {
-        result.variance.assign(betas.size(), 0.0);
-        for (std::size_t b = 0; b < betas.size(); ++b) {
-            const double E_b  = result.energy[b];
-            const double E2_b = E2_global[b] * inv;
-            result.variance[b] = E2_b - E_b * E_b;
+    result.energy.assign(B, 0.0);
+    result.Z.assign(B, 0.0);
+    result.lnZ.assign(B, 0.0);
+    if (options.compute_variance) result.variance.assign(B, 0.0);
+
+    for (std::size_t b = 0; b < B; ++b) {
+        // logsumexp over owned samples.
+        double max_lw = -std::numeric_limits<double>::infinity();
+        for (int s = 0; s < n_samples; ++s) {
+            if (!owned_mask[s]) continue;
+            const double lw = logw_per_sample[static_cast<std::size_t>(s) * B + b];
+            if (lw > max_lw) max_lw = lw;
         }
+        if (!std::isfinite(max_lw)) {
+            // No samples owned anywhere: degenerate. Leave zeros.
+            continue;
+        }
+        double sum_w     = 0.0;
+        double sum_w_E   = 0.0;
+        double sum_w_E2  = 0.0;
+        for (int s = 0; s < n_samples; ++s) {
+            if (!owned_mask[s]) continue;
+            const std::size_t idx =
+                static_cast<std::size_t>(s) * B + b;
+            const double w = std::exp(logw_per_sample[idx] - max_lw);
+            sum_w    += w;
+            sum_w_E  += w * E_per_sample[idx];
+            if (options.compute_variance) {
+                sum_w_E2 += w * E2_per_sample[idx];
+            }
+        }
+        if (sum_w > 0.0) {
+            result.energy[b] = sum_w_E / sum_w;
+            if (options.compute_variance) {
+                const double E_b  = result.energy[b];
+                const double E2_b = sum_w_E2 / sum_w;
+                result.variance[b] = E2_b - E_b * E_b;
+            }
+        }
+        // Z(beta) = (D/R) * sum_r exp(log w_r) = (D/R) * exp(max_lw) * sum_w
+        result.lnZ[b]  = std::log(D / R) + max_lw + std::log(sum_w);
+        result.Z[b]    = std::exp(result.lnZ[b]);
     }
     result.samples_used = n_samples;
     return result;

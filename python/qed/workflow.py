@@ -2330,13 +2330,18 @@ def load_mpi_eigenvectors(
 
 def _read_mpi_thermo_arrays(
     path: str,
-) -> tuple[list[float], list[float], list[float]]:
-    """Return ``(betas, energies, Z)`` from a thermal MPI result file.
+) -> tuple[list[float], list[float], list[float], list[float]]:
+    """Return ``(betas, energies, Z, lnZ)`` from a thermal MPI result file.
 
     Used both by :func:`_read_mpi_result_file` (for the user-facing
     EDResults shape) and by :func:`_aggregate_thermal_sectors` (which
     needs the raw per-sector ``Z(beta)`` to do the Z-weighted
     average -- the field is otherwise dropped from EDResults).
+
+    ``lnZ`` is the log-partition-function vector emitted by the
+    canonical-TPQ binary for numerical stability when ``Z`` itself
+    underflows at large beta. Returned empty for backends that don't
+    produce it (FTLM emits only ``/Z``).
     """
     import h5py
     with h5py.File(path, "r") as f:
@@ -2346,7 +2351,9 @@ def _read_mpi_thermo_arrays(
                     if "/energy" in f else [])
         zvals = (list(map(float, f["/Z"][:]))
                  if "/Z" in f else [])
-    return betas, energies, zvals
+        lnzvals = (list(map(float, f["/lnZ"][:]))
+                   if "/lnZ" in f else [])
+    return betas, energies, zvals, lnzvals
 
 
 def _aggregate_thermal_sectors(
@@ -2366,13 +2373,18 @@ def _aggregate_thermal_sectors(
 
         Z(beta)   = sum_q Z_q(beta)
         <H>(beta) = sum_q Z_q(beta) * <H>_q(beta) / Z(beta)
+
+    When every per-sector file carries ``/lnZ`` (canonical-TPQ binary
+    since the self-consistent-Z fix), the recombination is done in
+    log-space via logsumexp so the aggregation stays numerically valid
+    at low temperature where each Z_q has wildly different magnitude.
     """
     if not per_sector_paths:
         raise RuntimeError(
             "internal: _aggregate_thermal_sectors called with no sectors"
         )
 
-    raw: list[tuple[list[float], list[float], list[float]]] = [
+    raw: list[tuple[list[float], list[float], list[float], list[float]]] = [
         _read_mpi_thermo_arrays(p) for p in per_sector_paths
     ]
 
@@ -2380,7 +2392,7 @@ def _aggregate_thermal_sectors(
     # same /betas dataset for every sector since the schedule is set
     # by --betas / --delta-beta on the CLI).
     betas_ref = raw[0][0]
-    for q, (betas_q, _, _) in enumerate(raw):
+    for q, (betas_q, _, _, _) in enumerate(raw):
         if betas_q != betas_ref:
             raise RuntimeError(
                 f"sector q={q} returned a different beta grid than "
@@ -2389,25 +2401,59 @@ def _aggregate_thermal_sectors(
 
     n_beta = len(betas_ref)
     if n_beta == 0:
-        # Degenerate: nothing to aggregate, return the first as-is.
-        return per_sector[0]
+        raise RuntimeError(
+            "_aggregate_thermal_sectors: per-sector files contain an "
+            "empty /betas grid; nothing to aggregate."
+        )
 
-    z_total = [0.0] * n_beta
-    zh_total = [0.0] * n_beta
-    for _, energies_q, zvals_q in raw:
-        if len(zvals_q) != n_beta or len(energies_q) != n_beta:
-            raise RuntimeError(
-                "per-sector arrays have inconsistent length vs the "
-                "beta grid; aborting aggregation."
-            )
+    # Sanity: every sector must have provided /Z. If a sector returned
+    # only energy[] -- the historical TPQ-binary bug fixed in the
+    # self-consistent-Z change -- we abort loudly rather than silently
+    # producing NaNs.
+    missing = [p for p, (_, _, z, _) in zip(per_sector_paths, raw)
+               if len(z) != n_beta]
+    if missing:
+        raise RuntimeError(
+            "_aggregate_thermal_sectors: the following per-sector "
+            f"result files are missing the /Z dataset (or its length "
+            f"disagrees with /betas) and cannot be combined: {missing}. "
+            "If the underlying binary is canonical-TPQ, ensure it was "
+            "built after the cTPQ self-consistent-Z fix."
+        )
+
+    have_lnz = all(len(lnz) == n_beta for _, _, _, lnz in raw)
+
+    import math
+    energy_avg: list[float] = [float("nan")] * n_beta
+
+    if have_lnz:
+        # Numerically robust: logsumexp over sectors of lnZ_q to get lnZ,
+        # then normalised weights w_q = exp(lnZ_q - lnZ_max) / sum, and
+        # <H> = sum_q w_q <H>_q.
         for i in range(n_beta):
-            z_total[i] += zvals_q[i]
-            zh_total[i] += zvals_q[i] * energies_q[i]
-
-    energy_avg = [
-        (zh_total[i] / z_total[i]) if z_total[i] > 0.0 else float("nan")
-        for i in range(n_beta)
-    ]
+            lnz_col = [lnz[i] for _, _, _, lnz in raw]
+            lnz_max = max(lnz_col)
+            if not math.isfinite(lnz_max):
+                continue
+            ws = [math.exp(lz - lnz_max) for lz in lnz_col]
+            sw = sum(ws)
+            if sw <= 0.0:
+                continue
+            num = 0.0
+            for (_, energies_q, _, _), w in zip(raw, ws):
+                num += w * energies_q[i]
+            energy_avg[i] = num / sw
+    else:
+        # Legacy: linear-space accumulation.
+        z_total = [0.0] * n_beta
+        zh_total = [0.0] * n_beta
+        for _, energies_q, zvals_q, _ in raw:
+            for i in range(n_beta):
+                z_total[i] += zvals_q[i]
+                zh_total[i] += zvals_q[i] * energies_q[i]
+        for i in range(n_beta):
+            if z_total[i] > 0.0:
+                energy_avg[i] = zh_total[i] / z_total[i]
 
     out = EDResults()
     out.eigenvalues = list(energy_avg)

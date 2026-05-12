@@ -25,6 +25,7 @@
 #include <cmath>
 #include <complex>
 #include <iostream>
+#include <limits>
 #include <random>
 #include <sstream>
 #include <stdexcept>
@@ -296,9 +297,12 @@ cuDoubleComplex dist_zdotc_gpu(cublasHandle_t handle,
 //   apply(const MultiGpuCommunicator&, const Complex*, Complex*, cudaStream_t).
 // Uses cublasZaxpy for the accumulator. result/term/Hterm all live on the
 // device.
+//
+// Returns ||result||  = ||e^{-(delta/2)H} psi|| (assumes psi entered with
+// unit norm). Caller accumulates log w_r(beta) for the J&P Z-estimator.
 // ---------------------------------------------------------------------------
 template <typename GpuOp>
-void taylor_step_gpu(const GpuOp& gop,
+double taylor_step_gpu(const GpuOp& gop,
                       const multi_gpu::MultiGpuCommunicator& gpu_comm,
                       cublasHandle_t handle,
                       cuDoubleComplex* d_psi,
@@ -359,6 +363,7 @@ void taylor_step_gpu(const GpuOp& gop,
                                    &inv, d_psi, 1),
                      "cublasZdscal(1/||psi||)");
     }
+    return n2;
 }
 
 }  // namespace
@@ -442,6 +447,12 @@ DistributedTpqResult tpq_gpu_impl(
     std::vector<double> E_local(betas.size(), 0.0);
     std::vector<double> E2_local(betas.size(), 0.0);
 
+    const std::size_t B = betas.size();
+    std::vector<double> logw_per_sample(static_cast<std::size_t>(n_samples) * B, 0.0);
+    std::vector<double> E_per_sample   (static_cast<std::size_t>(n_samples) * B, 0.0);
+    std::vector<double> E2_per_sample  (static_cast<std::size_t>(n_samples) * B, 0.0);
+    std::vector<int>    owned_mask     (static_cast<std::size_t>(n_samples), 0);
+
     std::vector<Complex> psi_host;
 
     for (int s : my_samples) {
@@ -453,23 +464,28 @@ DistributedTpqResult tpq_gpu_impl(
         }
 
         double cur_beta = 0.0;
-        for (std::size_t b = 0; b < betas.size(); ++b) {
+        double log_w = 0.0;
+        for (std::size_t b = 0; b < B; ++b) {
             const double tgt = betas[b];
 
             while (cur_beta + 0.5 * delta_beta < tgt) {
                 const double remain = tgt - cur_beta;
                 const double step   = std::min(delta_beta, remain);
-                taylor_step_gpu(gop, gpu_comm, handle,
-                                 d_psi, d_term, d_Hterm, d_result,
-                                 d_scratch_complex, local_n,
-                                 step, taylor_order);
+                const double n2 = taylor_step_gpu(
+                    gop, gpu_comm, handle,
+                    d_psi, d_term, d_Hterm, d_result,
+                    d_scratch_complex, local_n,
+                    step, taylor_order);
+                if (n2 > 0.0) log_w += 2.0 * std::log(n2);
                 cur_beta += step;
             }
             if (std::abs(cur_beta - tgt) > 1e-12) {
-                taylor_step_gpu(gop, gpu_comm, handle,
-                                 d_psi, d_term, d_Hterm, d_result,
-                                 d_scratch_complex, local_n,
-                                 tgt - cur_beta, taylor_order);
+                const double n2 = taylor_step_gpu(
+                    gop, gpu_comm, handle,
+                    d_psi, d_term, d_Hterm, d_result,
+                    d_scratch_complex, local_n,
+                    tgt - cur_beta, taylor_order);
+                if (n2 > 0.0) log_w += 2.0 * std::log(n2);
                 cur_beta = tgt;
             }
 
@@ -481,52 +497,101 @@ DistributedTpqResult tpq_gpu_impl(
                                                  d_psi, d_Hpsi, local_n,
                                                  gpu_comm, d_scratch_complex);
             const double E_b = Ec.x;
-            E_local[b] += E_b;
+
+            const std::size_t idx =
+                static_cast<std::size_t>(s) * B + b;
+            logw_per_sample[idx] = log_w;
+            E_per_sample[idx]    = E_b;
 
             if (compute_variance) {
                 const double Hpsi_n = dist_norm_gpu(
                     handle, d_Hpsi, local_n, gpu_comm, d_scratch_complex);
-                E2_local[b] += Hpsi_n * Hpsi_n;
+                E2_per_sample[idx] = Hpsi_n * Hpsi_n;
             }
 
             if (verbose && world_rank == 0) {
                 std::cout << "  [dist-tpq-gpu] sample s=" << s
                           << " group=" << my_group
                           << " beta=" << tgt
-                          << " E=" << E_b << std::endl;
+                          << " E=" << E_b
+                          << " logw=" << log_w << std::endl;
             }
         }
+        owned_mask[s] = 1;
     }
 
     if (world_rank % ranks_per_group != 0) {
-        std::fill(E_local.begin(),  E_local.end(),  0.0);
-        std::fill(E2_local.begin(), E2_local.end(), 0.0);
+        std::fill(logw_per_sample.begin(), logw_per_sample.end(), 0.0);
+        std::fill(E_per_sample.begin(),    E_per_sample.end(),    0.0);
+        std::fill(E2_per_sample.begin(),   E2_per_sample.end(),   0.0);
+        std::fill(owned_mask.begin(),      owned_mask.end(),      0);
     }
-    std::vector<double> E_global(betas.size(),  0.0);
-    std::vector<double> E2_global(betas.size(), 0.0);
-    MPI_Allreduce(E_local.data(),  E_global.data(),
-                  static_cast<int>(betas.size()),
-                  MPI_DOUBLE, MPI_SUM, world_comm);
-    if (compute_variance) {
-        MPI_Allreduce(E2_local.data(), E2_global.data(),
-                      static_cast<int>(betas.size()),
+    {
+        std::vector<double> tmp(logw_per_sample.size(), 0.0);
+        MPI_Allreduce(logw_per_sample.data(), tmp.data(),
+                      static_cast<int>(tmp.size()),
                       MPI_DOUBLE, MPI_SUM, world_comm);
+        logw_per_sample.swap(tmp);
+    }
+    {
+        std::vector<double> tmp(E_per_sample.size(), 0.0);
+        MPI_Allreduce(E_per_sample.data(), tmp.data(),
+                      static_cast<int>(tmp.size()),
+                      MPI_DOUBLE, MPI_SUM, world_comm);
+        E_per_sample.swap(tmp);
+    }
+    if (compute_variance) {
+        std::vector<double> tmp(E2_per_sample.size(), 0.0);
+        MPI_Allreduce(E2_per_sample.data(), tmp.data(),
+                      static_cast<int>(tmp.size()),
+                      MPI_DOUBLE, MPI_SUM, world_comm);
+        E2_per_sample.swap(tmp);
+    }
+    {
+        std::vector<int> tmp(owned_mask.size(), 0);
+        MPI_Allreduce(owned_mask.data(), tmp.data(),
+                      static_cast<int>(tmp.size()),
+                      MPI_INT, MPI_SUM, world_comm);
+        owned_mask.swap(tmp);
     }
 
-    const double inv = 1.0 / static_cast<double>(n_samples);
+    const double D = static_cast<double>(cpu_dop.global_dim());
+    const double R = static_cast<double>(n_samples);
 
     DistributedTpqResult result;
-    result.energy.assign(betas.size(), 0.0);
-    for (std::size_t b = 0; b < betas.size(); ++b) {
-        result.energy[b] = E_global[b] * inv;
-    }
-    if (compute_variance) {
-        result.variance.assign(betas.size(), 0.0);
-        for (std::size_t b = 0; b < betas.size(); ++b) {
-            const double E_b  = result.energy[b];
-            const double E2_b = E2_global[b] * inv;
-            result.variance[b] = E2_b - E_b * E_b;
+    result.energy.assign(B, 0.0);
+    result.Z.assign(B, 0.0);
+    result.lnZ.assign(B, 0.0);
+    if (compute_variance) result.variance.assign(B, 0.0);
+
+    for (std::size_t b = 0; b < B; ++b) {
+        double max_lw = -std::numeric_limits<double>::infinity();
+        for (int s = 0; s < n_samples; ++s) {
+            if (!owned_mask[s]) continue;
+            const double lw = logw_per_sample[static_cast<std::size_t>(s) * B + b];
+            if (lw > max_lw) max_lw = lw;
         }
+        if (!std::isfinite(max_lw)) continue;
+        double sum_w = 0.0, sum_w_E = 0.0, sum_w_E2 = 0.0;
+        for (int s = 0; s < n_samples; ++s) {
+            if (!owned_mask[s]) continue;
+            const std::size_t idx =
+                static_cast<std::size_t>(s) * B + b;
+            const double w = std::exp(logw_per_sample[idx] - max_lw);
+            sum_w   += w;
+            sum_w_E += w * E_per_sample[idx];
+            if (compute_variance) sum_w_E2 += w * E2_per_sample[idx];
+        }
+        if (sum_w > 0.0) {
+            result.energy[b] = sum_w_E / sum_w;
+            if (compute_variance) {
+                const double E_b  = result.energy[b];
+                const double E2_b = sum_w_E2 / sum_w;
+                result.variance[b] = E2_b - E_b * E_b;
+            }
+        }
+        result.lnZ[b] = std::log(D / R) + max_lw + std::log(sum_w);
+        result.Z[b]   = std::exp(result.lnZ[b]);
     }
     result.samples_used = n_samples;
     return result;

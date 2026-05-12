@@ -548,6 +548,26 @@ StaticResponseResults compute_static_response(
 );
 
 /**
+ * @brief Compute the thermal-expansion covariance β²⟨δO δH⟩.
+ *
+ * The returned ``expectation`` dataset is
+ *     (⟨OH⟩ - ⟨O⟩⟨H⟩) / T² = ∂_T⟨O⟩,
+ * evaluated within each FTLM sample on a log-spaced temperature grid.
+ * The returned ``variance`` dataset stores the raw connected covariance
+ * ⟨δO δH⟩ before division by T².
+ */
+StaticResponseResults compute_connected_qh_response(
+    std::function<void(const Complex*, Complex*, int)> H,
+    std::function<void(const Complex*, Complex*, int)> O,
+    uint64_t N,
+    const StaticResponseParameters& params,
+    double temp_min,
+    double temp_max,
+    uint64_t num_temp_bins,
+    const std::string& output_dir = ""
+);
+
+/**
  * @brief Save static response results to file
  * 
  * @param results Static response results to save

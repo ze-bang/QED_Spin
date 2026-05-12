@@ -926,6 +926,13 @@ class TestDeviceMatrix:
                 f.create_dataset("/betas", data=betas)
                 f.create_dataset("/energy", data=energy_q)
                 f.create_dataset("/Z", data=z_q)
+                # Mirror the cTPQ binary post self-consistent-Z fix
+                # by also publishing /lnZ; the aggregator prefers the
+                # log-space recombination when present. For FTLM (which
+                # only emits /Z) we leave /lnZ off to keep coverage of
+                # the legacy linear path.
+                if solver == "mTPQ":
+                    f.create_dataset("/lnZ", data=np.log(z_q))
                 f.attrs["samples_used"] = 1
                 f.attrs["elapsed_s"] = 0.0
             class _CP: returncode = 0; stdout = ""; stderr = ""
@@ -963,6 +970,32 @@ class TestDeviceMatrix:
         expected = zh_total / z_total
         got = np.asarray(res.thermo_data.energy, dtype=float)
         np.testing.assert_allclose(got, expected, rtol=1e-12, atol=1e-12)
+
+    def test_aggregate_thermal_sectors_rejects_missing_Z(
+        self, tmp_path,
+    ):
+        """Regression for the silent-NaN bug: prior to the cTPQ
+        self-consistent-Z fix the TPQ binary wrote ``/energy`` but no
+        ``/Z``, and the aggregator silently produced NaN energies. The
+        guard must instead raise loudly so the broken result is never
+        consumed downstream.
+        """
+        import h5py
+        import numpy as np
+        from qed.workflow import _aggregate_thermal_sectors
+
+        betas = np.array([0.5, 1.0, 1.5])
+        files = []
+        for q in range(2):
+            p = tmp_path / f"sector_{q}.h5"
+            with h5py.File(p, "w") as f:
+                f.create_dataset("/betas",  data=betas)
+                f.create_dataset("/energy", data=np.full_like(betas, -0.5))
+                # NOTE: deliberately no /Z dataset.
+            files.append(str(p))
+
+        with pytest.raises(RuntimeError, match="missing the /Z dataset"):
+            _aggregate_thermal_sectors(files, mode="mTPQ")
 
     @pytest.mark.parametrize("device", ["mpi", "mpi_gpu"])
     def test_mpi_symm_thermal_explicit_sector_skips_aggregation(

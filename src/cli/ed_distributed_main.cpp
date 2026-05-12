@@ -933,6 +933,12 @@ int main(int argc, char** argv) {
                 }
                 dump_doubles(a.result_file, "/betas", a.betas);
                 dump_doubles(a.result_file, "/energy", res.energy);
+                if (!res.Z.empty()) {
+                    dump_doubles(a.result_file, "/Z",   res.Z);
+                }
+                if (!res.lnZ.empty()) {
+                    dump_doubles(a.result_file, "/lnZ", res.lnZ);
+                }
                 if (a.compute_variance) {
                     dump_doubles(a.result_file, "/variance", res.variance);
                 }
