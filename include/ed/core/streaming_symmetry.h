@@ -4,10 +4,63 @@
 #include <ed/core/sorted_uint64_index.h>   // Phase 3a #5: compact uint64->size_t map
 #include <unordered_set>
 #include <algorithm>
+#include <array>
 #include <filesystem>     // P0.12
 #include <numeric>
 #include <mutex>
 #include <system_error>   // P0.12
+
+// ============================================================================
+// ShardedOrbitCache -- striped lock map for state -> orbit-rep memoisation
+// ----------------------------------------------------------------------------
+// The streaming symmetry operator memoises basis -> orbit_representative
+// across SpMV iterations. Hot SpMV is multi-threaded (OpenMP), and a single
+// std::mutex around one std::unordered_map serialises every cache hit, which
+// can cap parallel scaling at ~4 cores. This struct shards by (basis %
+// kNumShards), so contention drops by ~kNumShards (16x by default).
+//
+// API mirrors the small subset that the call sites used (find / insert).
+// ============================================================================
+struct ShardedOrbitCache {
+    static constexpr std::size_t kNumShards = 16;  // power of two for fast %
+    struct Shard {
+        std::unordered_map<uint64_t, uint64_t> map;
+        mutable std::mutex mu;
+    };
+    mutable std::array<Shard, kNumShards> shards;
+
+    static inline std::size_t shard_of(uint64_t key) noexcept {
+        // splitmix64-style mix to avoid pathological clustering when keys
+        // share low bits (typical for fixed-Sz / popcount-aligned states).
+        uint64_t x = key + 0x9E3779B97F4A7C15ULL;
+        x = (x ^ (x >> 30)) * 0xBF58476D1CE4E5B9ULL;
+        x = (x ^ (x >> 27)) * 0x94D049BB133111EBULL;
+        x ^= (x >> 31);
+        return static_cast<std::size_t>(x) & (kNumShards - 1);
+    }
+
+    bool find(uint64_t key, uint64_t& out) const {
+        const auto& s = shards[shard_of(key)];
+        std::lock_guard<std::mutex> lock(s.mu);
+        auto it = s.map.find(key);
+        if (it == s.map.end()) return false;
+        out = it->second;
+        return true;
+    }
+
+    void insert(uint64_t key, uint64_t value) const {
+        auto& s = shards[shard_of(key)];
+        std::lock_guard<std::mutex> lock(s.mu);
+        s.map.emplace(key, value);
+    }
+
+    void clear() {
+        for (auto& s : shards) {
+            std::lock_guard<std::mutex> lock(s.mu);
+            s.map.clear();
+        }
+    }
+};
 
 /**
  * @file streaming_symmetry.h
@@ -125,8 +178,7 @@ struct SymmetrySector {
 class StreamingSymmetryOperator : public Operator {
 private:
     std::vector<SymmetrySector> sectors_;
-    mutable std::unordered_map<uint64_t, uint64_t> state_to_orbit_cache_;  // Cache for orbit lookups
-    mutable std::mutex orbit_cache_mutex_;  // Protects state_to_orbit_cache_ in const methods
+    mutable ShardedOrbitCache state_to_orbit_cache_;  // Striped-lock cache (16 shards) -- lower contention than single-mutex map
     
     // Lookup table: computational_state -> basis_idx_in_sector (one per sector).
     // Phase 3a #5: replaced std::unordered_map with SortedUint64Index (sorted
@@ -1016,28 +1068,21 @@ private:
      * @brief Fast orbit representative computation with caching
      */
     uint64_t getOrbitRepresentativeFast(uint64_t basis) const {
-        // Check cache first (thread-safe)
-        {
-            std::lock_guard<std::mutex> lock(orbit_cache_mutex_);
-            auto it = state_to_orbit_cache_.find(basis);
-            if (it != state_to_orbit_cache_.end()) {
-                return it->second;
-            }
+        // Check cache first (sharded, thread-safe)
+        uint64_t cached;
+        if (state_to_orbit_cache_.find(basis, cached)) {
+            return cached;
         }
-        
+
         // Compute orbit representative
         uint64_t rep = basis;
         for (const auto& perm : symmetry_info.max_clique) {
             uint64_t permuted = applyPermutation(basis, perm);
             if (permuted < rep) rep = permuted;
         }
-        
-        // Cache result (thread-safe)
-        {
-            std::lock_guard<std::mutex> lock(orbit_cache_mutex_);
-            state_to_orbit_cache_[basis] = rep;
-        }
-        
+
+        // Cache result (sharded, thread-safe)
+        state_to_orbit_cache_.insert(basis, rep);
         return rep;
     }
     
@@ -1530,8 +1575,7 @@ private:
     // (see comment there). 16 B/entry vs ~32-40 B/entry for unordered_map.
     mutable std::vector<ed::core::SortedUint64Index> state_to_sector_basis_;
     
-    mutable std::unordered_map<uint64_t, uint64_t> state_to_orbit_cache_;
-    mutable std::mutex orbit_cache_mutex_;  // Protects state_to_orbit_cache_ in const methods
+    mutable ShardedOrbitCache state_to_orbit_cache_;  // Striped-lock cache (16 shards) -- lower contention than single-mutex map
     
     // Cached group size from HDF5 load (allows skipping symmetry_info loading)
     uint64_t cached_group_size_ = 0;
@@ -2488,14 +2532,11 @@ private:
     }
     
     uint64_t getOrbitRepresentativeFixedSzFast(uint64_t basis) const {
-        {
-            std::lock_guard<std::mutex> lock(orbit_cache_mutex_);
-            auto it = state_to_orbit_cache_.find(basis);
-            if (it != state_to_orbit_cache_.end()) {
-                return it->second;
-            }
+        uint64_t cached;
+        if (state_to_orbit_cache_.find(basis, cached)) {
+            return cached;
         }
-        
+
         uint64_t rep = basis;
         for (const auto& perm : symmetry_info.max_clique) {
             uint64_t permuted = applyPermutation(basis, perm);
@@ -2504,11 +2545,8 @@ private:
                 rep = permuted;
             }
         }
-        
-        {
-            std::lock_guard<std::mutex> lock(orbit_cache_mutex_);
-            state_to_orbit_cache_[basis] = rep;
-        }
+
+        state_to_orbit_cache_.insert(basis, rep);
         return rep;
     }
     
