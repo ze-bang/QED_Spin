@@ -722,6 +722,9 @@ if(BUILD_ED_TESTS)
     # (eta / omega / krylov / num_random / device pickers). Header-only so
     # no extra link libs needed beyond the Catch2 main.
     ed_add_test(test_dssf_tune                  tests/unit/test_dssf_tune.cpp USE_CATCH2)
+    # Phase 9.3: ED-solver auto-tuner heuristics (tolerance / max_iter /
+    # max_subspace / arpack_ncv / FTLM-LTLM Krylov / mTPQ Taylor + delta_beta).
+    ed_add_test(test_diag_tune                  tests/unit/test_diag_tune.cpp USE_CATCH2)
     ed_add_test(test_lanczos_variants           tests/unit/test_lanczos_variants.cpp USE_CATCH2)
     ed_add_test(test_lanczos_basis_buffer       tests/unit/test_lanczos_basis_buffer.cpp USE_CATCH2)
     # Phase 3a #1: Krylov-state checkpoint / restart for the default Lanczos

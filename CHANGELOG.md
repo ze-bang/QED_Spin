@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — One-call ED-solver auto-tuner (`qed.auto_tune.tune_diag` / `ed::auto_pilot::diag::apply_auto_tune`)
+
+Companion to the DSSF auto-tuner shipped earlier in this release. Both
+`qed.diag(H, ..., auto_tune=True, level="balanced")` and
+`ed::auto_pilot::solve(H, opts)` now auto-pick **every family-specific
+EDParameters knob** the existing `_make_params` did not cover:
+
+- Convergence: `tolerance`, `max_iterations`, `max_subspace`,
+  `block_size` — sized from sector dim + `num_eigenvalues` with three
+  aggressiveness levels.
+- Eigenvalue sub-solvers: `arpack_ncv` (≥ 2k+1 with `2/4/6 × k`
+  per-level multiplier).
+- Thermal: `ftlm_krylov_dim`, `ltlm_krylov_dim`, `ltlm_ground_krylov`,
+  `tpq_taylor_order` (Taylor-truncation bound from ‖H‖·Δβ),
+  `tpq_delta_beta` (capped at `0.5 / ‖H‖`), `num_samples`
+  (∝ 1/√D, per-level [min, max] clamp).
+
+All overrides are sentinel-only — anything the caller sets via direct
+kwargs, `extra_params={}`, or `tune_params=` (C++) passes through.
+
+- New `python/qed/auto_tune.py` exports `tune_diag(...) → TunedDiagKnobs`
+  alongside `tune_dssf`. `TunedDiagKnobs.to_extra_params()` renders to
+  the `extra_params=` dict consumed by `qed.diag`.
+- New header `include/ed/auto/diag_tune.h` — header-only mirror of the
+  Python heuristics + `apply_auto_tune(EDParameters&, sector_dim,
+  num_eigenvalues, op, ov)` sentinel-based mutator.
+- `qed.diag(...)` + `ed::auto_pilot::AutoSolveOptions` gain
+  `auto_tune=True` and `level=` / `auto_tune_level=` knobs.
+- New tests: 12 Python (`test_auto_tune.py`) + 10 Catch2
+  (`tests/unit/test_diag_tune.cpp`).
+- `docs/guides/one_call_api.md` extended with §3a "ED-solver auto-tuning".
+
 ### Added — One-call DSSF auto-tuner (`qed.auto_tune` / `ed::auto_pilot::dssf::apply_auto_tune`)
 
 Both the Python `qed.dssf.compute(...)` and C++ `ed::auto_pilot::dssf::compute(...)`

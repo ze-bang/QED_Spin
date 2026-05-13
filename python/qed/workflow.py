@@ -615,6 +615,13 @@ def diag(
     dry_run: bool = False,
     force: bool = False,
     verbose: bool = True,
+    # Auto-tuner (Phase 9.3) — picks ARPACK ncv, FTLM/LTLM Krylov dim,
+    # mTPQ taylor order + delta_beta, tolerance level, and # thermal
+    # samples from sector dim, num_eigenvalues, and Hamiltonian
+    # bandwidth. Anything explicitly set on this call (or via
+    # ``extra_params``) wins.
+    auto_tune: bool = True,
+    level: str = "balanced",
     extra_params: Optional[dict[str, Any]] = None,
 ) -> EDResults:
     """One-call exact diagonalization with smart defaults.
@@ -989,6 +996,76 @@ def diag(
                     "qed.list_diag_parameters('arpack'))."
                 )
             setattr(params, key, value)
+
+    # ------------------------------------------------------------------
+    # 4.5. Auto-tune family-specific knobs (Phase 9.3). Sentinel-based
+    #     fill: only EDParameters fields still at their struct default
+    #     get overwritten, so anything set above by the user (kwargs
+    #     or ``extra_params``) passes through untouched. Mirrors the
+    #     C++ ``apply_auto_tune`` in include/ed/auto/diag_tune.h.
+    # ------------------------------------------------------------------
+    if auto_tune:
+        from . import auto_tune as _at
+        try:
+            from . import has_cuda_build, has_mpi_build  # type: ignore
+            _has_cuda, _has_mpi = bool(has_cuda_build()), bool(has_mpi_build())
+        except Exception:  # pragma: no cover  -- standalone Python build
+            _has_cuda, _has_mpi = False, False
+        method_name = method.name if hasattr(method, "name") else str(method)
+        explicit = set(extra_params or {})
+        tuned = _at.tune_diag(
+            operator=op_to_use,
+            sector_dim=sector_dim,
+            num_eigenvalues=int(num_eigenvalues),
+            solver=method_name,
+            device=("mpi_gpu" if (use_mpi and use_gpu)
+                    else "mpi" if use_mpi
+                    else "gpu" if use_gpu else "cpu"),
+            has_cuda_build=_has_cuda,
+            has_mpi_build=_has_mpi,
+            level=level,
+            tolerance=tolerance if "tolerance" not in explicit else
+                      extra_params["tolerance"],
+            max_iterations=max_iterations,
+            max_subspace=max_subspace,
+            block_size=block_size,
+        )
+        # Fill only sentinel-defaulted fields. Each entry maps an
+        # EDParameters field to its struct default (matching
+        # include/ed/core/ed_parameters.h).
+        _SENTINELS: dict[str, object] = {
+            "arpack_ncv":         -1,
+            "ftlm_krylov_dim":    100,
+            "ltlm_krylov_dim":    200,
+            "ltlm_ground_krylov": 100,
+            "tpq_taylor_order":   100,
+            "tpq_delta_beta":     1e-2,
+        }
+        _TUNED_VALUES = {
+            "arpack_ncv":         tuned.arpack_ncv,
+            "ftlm_krylov_dim":    tuned.ftlm_krylov_dim,
+            "ltlm_krylov_dim":    tuned.ltlm_krylov_dim,
+            "ltlm_ground_krylov": tuned.ltlm_ground_krylov,
+            "tpq_taylor_order":   tuned.tpq_taylor_order,
+            "tpq_delta_beta":     tuned.tpq_delta_beta,
+        }
+        for fname, sentinel in _SENTINELS.items():
+            if fname in explicit:
+                continue  # caller wins
+            if not hasattr(params, fname):
+                continue  # build-time skipped field
+            current = getattr(params, fname)
+            if current == sentinel:
+                setattr(params, fname, _TUNED_VALUES[fname])
+        if verbose:
+            print(f"[qed.diag] auto-tune (level={tuned.level}): "
+                  f"tol={params.tolerance:g} max_iter={params.max_iterations} "
+                  f"max_sub={params.max_subspace} ftlm_M={params.ftlm_krylov_dim} "
+                  f"ltlm_M={params.ltlm_krylov_dim} "
+                  f"tpq_p={params.tpq_taylor_order} "
+                  f"tpq_dbeta={params.tpq_delta_beta:g} "
+                  f"arpack_ncv={params.arpack_ncv} "
+                  f"bandwidth≈{tuned.bandwidth:g}")
 
     # ------------------------------------------------------------------
     # 5. Dispatch. Three branches:

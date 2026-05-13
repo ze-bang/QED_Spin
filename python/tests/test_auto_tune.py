@@ -166,3 +166,118 @@ def test_tune_dssf_emits_use_gpu_when_device_gpu():
 def test_tune_dssf_omega_too_short_raises():
     with pytest.raises(ValueError, match="at least two grid points"):
         auto_tune.tune_dssf(sector_dim=1024, omega=[0.0])
+
+
+# ===========================================================================
+#                      ED solver auto-tuning (tune_diag)
+# ===========================================================================
+
+
+def test_pick_solver_thresholds():
+    assert auto_tune.pick_solver(num_eigenvalues=1, sector_dim=512) == "FULL"
+    assert auto_tune.pick_solver(num_eigenvalues=3, sector_dim=1 << 14) == "LANCZOS"
+    assert auto_tune.pick_solver(num_eigenvalues=10, sector_dim=1 << 14) == "KRYLOV_SCHUR"
+    assert auto_tune.pick_solver(num_eigenvalues=50, sector_dim=1 << 14) == "BLOCK_LANCZOS"
+
+
+def test_pick_max_iterations_capped_by_dim():
+    # Big sector → max(floor=200, 8*1 + 80=88) = 200.
+    assert auto_tune.pick_max_iterations(1, 1 << 16, level="balanced") == 200
+    # Tiny sector → capped at D-1.
+    assert auto_tune.pick_max_iterations(4, 50) == 49
+
+
+def test_pick_max_subspace_level_ordering():
+    cons = auto_tune.pick_max_subspace(4, 1 << 18, level="conservative")
+    bal  = auto_tune.pick_max_subspace(4, 1 << 18, level="balanced")
+    aggr = auto_tune.pick_max_subspace(4, 1 << 18, level="aggressive")
+    assert cons < bal < aggr
+
+
+def test_pick_tolerance_level_ordering():
+    assert auto_tune.pick_tolerance(level="conservative") > \
+           auto_tune.pick_tolerance(level="balanced") > \
+           auto_tune.pick_tolerance(level="aggressive")
+
+
+def test_pick_arpack_ncv_at_least_2k_plus_1():
+    for k in (1, 4, 16, 64):
+        for L in ("conservative", "balanced", "aggressive"):
+            ncv = auto_tune.pick_arpack_ncv(k, level=L)
+            assert ncv >= 2 * k + 1
+
+
+def test_pick_ftlm_ltlm_krylov_increase_with_level():
+    assert auto_tune.pick_ftlm_krylov_dim(level="conservative") < \
+           auto_tune.pick_ftlm_krylov_dim(level="balanced") < \
+           auto_tune.pick_ftlm_krylov_dim(level="aggressive")
+    assert auto_tune.pick_ltlm_krylov_dim(level="conservative") < \
+           auto_tune.pick_ltlm_krylov_dim(level="balanced") < \
+           auto_tune.pick_ltlm_krylov_dim(level="aggressive")
+
+
+def test_pick_tpq_delta_beta_is_capped_by_bandwidth():
+    # Big bandwidth → 0.5 / W wins over the level baseline.
+    dbeta = auto_tune.pick_tpq_delta_beta(bandwidth=1000.0, level="balanced")
+    assert dbeta == pytest.approx(0.5 / 1000.0)
+    # Small bandwidth → level baseline wins.
+    dbeta = auto_tune.pick_tpq_delta_beta(bandwidth=1.0, level="balanced")
+    assert dbeta == pytest.approx(1e-2)
+
+
+def test_pick_tpq_taylor_order_grows_with_argument():
+    # Small ‖H‖·Δβ → level default.
+    p_small = auto_tune.pick_tpq_taylor_order(bandwidth=1.0, delta_beta=1e-2,
+                                              level="balanced")
+    assert p_small == 100
+    # Very large argument forces growth past the per-level baseline.
+    p_large = auto_tune.pick_tpq_taylor_order(bandwidth=10000.0, delta_beta=1.0,
+                                              level="balanced")
+    assert p_large > p_small
+
+
+def test_pick_num_thermal_samples_decreases_with_dim():
+    big = auto_tune.pick_num_thermal_samples(1 << 20, level="balanced")
+    small = auto_tune.pick_num_thermal_samples(1024, level="balanced")
+    assert small >= big
+    assert big >= 1
+
+
+def test_tune_diag_returns_consistent_bundle():
+    knobs = auto_tune.tune_diag(num_eigenvalues=4, sector_dim=1 << 14,
+                                bandwidth=8.0)
+    assert knobs.solver == "LANCZOS"
+    assert knobs.tolerance == pytest.approx(1e-10)
+    assert knobs.ftlm_krylov_dim == 100
+    assert knobs.ltlm_krylov_dim == 200
+    assert knobs.bandwidth == pytest.approx(8.0)
+
+
+def test_tune_diag_user_overrides_pass_through():
+    knobs = auto_tune.tune_diag(num_eigenvalues=2, sector_dim=1 << 14,
+                                bandwidth=4.0, tolerance=1e-6,
+                                ftlm_krylov_dim=999,
+                                tpq_delta_beta=0.001)
+    assert knobs.tolerance == pytest.approx(1e-6)
+    assert knobs.ftlm_krylov_dim == 999
+    assert knobs.tpq_delta_beta == pytest.approx(0.001)
+
+
+def test_tune_diag_to_extra_params_filters_by_solver():
+    # FULL: no Krylov / TPQ knobs.
+    knobs = auto_tune.tune_diag(num_eigenvalues=1, sector_dim=512, solver="FULL")
+    d = knobs.to_extra_params()
+    assert "ftlm_krylov_dim" not in d
+    assert "tpq_taylor_order" not in d
+    # FTLM: includes the FTLM knob.
+    knobs = auto_tune.tune_diag(num_eigenvalues=1, sector_dim=1 << 16,
+                                solver="FTLM")
+    d = knobs.to_extra_params()
+    assert d["ftlm_krylov_dim"] == 100
+    assert "num_samples" in d
+    # mTPQ: includes the TPQ knobs.
+    knobs = auto_tune.tune_diag(num_eigenvalues=1, sector_dim=1 << 16,
+                                solver="mTPQ", bandwidth=4.0)
+    d = knobs.to_extra_params()
+    assert d["tpq_taylor_order"] == 100
+    assert d["tpq_delta_beta"] == pytest.approx(1e-2)

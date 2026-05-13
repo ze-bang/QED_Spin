@@ -185,10 +185,51 @@ Both Python (`level=`) and C++ (`TuneLevel`) accept three levels:
 
 The exact numeric rules live in
 [python/qed/auto_tune.py](../../python/qed/auto_tune.py) and
-[include/ed/auto/dssf_tune.h](../../include/ed/auto/dssf_tune.h);
+[include/ed/auto/dssf_tune.h](../../include/ed/auto/dssf_tune.h) +
+[include/ed/auto/diag_tune.h](../../include/ed/auto/diag_tune.h);
 they are kept in sync by the unit tests
 [python/tests/test_auto_tune.py](../../python/tests/test_auto_tune.py)
-and `tests/unit/test_dssf_tune.cpp`.
+and `tests/unit/test_dssf_tune.cpp` + `tests/unit/test_diag_tune.cpp`.
+
+### 3a. ED-solver auto-tuning
+
+`qed.diag(...)` ships the same `auto_tune=True, level="balanced"` knobs
+as `qed.dssf.compute`. Per-family fields filled from sector dim,
+`num_eigenvalues`, and Hamiltonian bandwidth (sentinel-only — anything
+the caller sets passes through):
+
+| Field                   | What it controls                | Sentinel default |
+| ----------------------- | ------------------------------- | ---------------- |
+| `tolerance`             | Eigenvalue convergence target   | `1e-10`          |
+| `max_iterations`        | Krylov outer-iteration cap      | `10000`          |
+| `max_subspace`          | Krylov subspace dim             | `100`            |
+| `arpack_ncv`            | ARPACK Lanczos vectors          | `-1`             |
+| `ftlm_krylov_dim`       | FTLM Lanczos micro-basis        | `100`            |
+| `ltlm_krylov_dim`       | LTLM excitation Krylov dim      | `200`            |
+| `ltlm_ground_krylov`    | LTLM ground-state Krylov dim    | `100`            |
+| `tpq_taylor_order`      | mTPQ Taylor order p             | `100`            |
+| `tpq_delta_beta`        | mTPQ imaginary-time step Δβ     | `1e-2`           |
+
+Standalone use (without dispatching the kernel):
+
+```python
+knobs = qed.auto_tune.tune_diag(
+    operator=H, num_eigenvalues=4, level="aggressive",
+    has_cuda_build=qed.has_cuda_build(),
+    has_mpi_build=qed.has_mpi_build())
+print(knobs.solver, knobs.device, knobs.to_extra_params())
+```
+
+C++ side (mirror of the above; called automatically by
+`ed::auto_pilot::solve(...)`):
+
+```cpp
+EDParameters p;
+p.num_eigenvalues = 4;
+ed::auto_pilot::diag::AutoTuneOverrides ov;
+ov.level = ed::auto_pilot::dssf::TuneLevel::Aggressive;
+ed::auto_pilot::diag::apply_auto_tune(p, sector_dim, /*k=*/4, &H, ov);
+```
 
 ## 4. When to drop down to the low-level API
 

@@ -34,6 +34,7 @@
 #include <ed/core/ed_wrapper.h>
 #include <ed/core/fixed_sz_operator.h>
 #include <ed/core/operator.h>
+#include <ed/auto/diag_tune.h>
 
 #include <cmath>
 #include <cstdint>
@@ -171,6 +172,20 @@ struct AutoSolveOptions {
     /// without giving up the auto solver / device / Sz selection.
     /// Pass `nullptr` (the default) to skip.
     std::function<void(EDParameters&)> tune_params{};
+
+    /// Phase 9.3: Auto-tune family-specific EDParameters knobs
+    /// (ARPACK ncv, FTLM/LTLM Krylov dim, mTPQ Taylor order +
+    /// delta_beta, tolerance, max_iterations, max_subspace) from the
+    /// sector dim, num_eigenvalues, and Hamiltonian bandwidth.
+    /// Sentinel-based: only fields still at their EDParameters struct
+    /// default get overwritten, so anything set above (by `tolerance`
+    /// here or by `tune_params`) passes through. Mirrors
+    /// `qed.diag(auto_tune=True, level=...)` on the Python side.
+    bool auto_tune = true;
+
+    /// Aggressiveness for `auto_tune`. 0=conservative, 1=balanced,
+    /// 2=aggressive. Default balanced.
+    int auto_tune_level = 1;
 };
 
 // ---------------------------------------------------------------------------
@@ -331,6 +346,22 @@ inline EDResults solve(Operator& H, const AutoSolveOptions& options) {
     // EDParameters fields the auto-pilot doesn't surface explicitly.
     if (options.tune_params) {
         options.tune_params(params);
+    }
+
+    // Phase 9.3: auto-tune family-specific knobs from the sector dim,
+    // num_eigenvalues, and Hamiltonian bandwidth. Sentinel-based, so
+    // anything `tune_params` (or `options.tolerance`) already set
+    // passes through.
+    if (options.auto_tune) {
+        ::ed::auto_pilot::diag::AutoTuneOverrides ov;
+        switch (options.auto_tune_level) {
+            case 0: ov.level = ::ed::auto_pilot::dssf::TuneLevel::Conservative; break;
+            case 2: ov.level = ::ed::auto_pilot::dssf::TuneLevel::Aggressive; break;
+            default: ov.level = ::ed::auto_pilot::dssf::TuneLevel::Balanced; break;
+        }
+        ov.verbose = verbose;
+        ::ed::auto_pilot::diag::apply_auto_tune(
+            params, sector_dim, options.num_eigenvalues, op_to_use, ov);
     }
 
     auto apply = [op_to_use, projected_ptr = projected.get()](

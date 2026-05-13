@@ -379,6 +379,7 @@ def tune_dssf(
 __all__ = [
     "Level",
     "TunedDSSFKnobs",
+    "TunedDiagKnobs",
     "estimate_bandwidth",
     "pick_omega_window",
     "pick_num_omega_points",
@@ -387,5 +388,356 @@ __all__ = [
     "pick_num_random_vectors",
     "pick_kpm_moments",
     "pick_device",
+    "pick_solver",
+    "pick_max_iterations",
+    "pick_max_subspace",
+    "pick_block_size",
+    "pick_tolerance",
+    "pick_arpack_ncv",
+    "pick_ftlm_krylov_dim",
+    "pick_ltlm_krylov_dim",
+    "pick_tpq_taylor_order",
+    "pick_tpq_delta_beta",
+    "pick_num_thermal_samples",
     "tune_dssf",
+    "tune_diag",
 ]
+
+
+# ===========================================================================
+#                       ED solver auto-tuning helpers
+# ===========================================================================
+#
+# Mirrors the DSSF helpers above for the diagonalization side.
+# Used by :func:`qed.diag` (via :func:`tune_diag`) and the C++
+# `ed::auto_pilot::AutoSolveOptions` path (via
+# `include/ed/auto/diag_tune.h`). The numeric constants are kept here so
+# the C++ mirror can copy them verbatim.
+#
+# Per-level knob bounds were chosen to match the bake-off vs xdiag in
+# docs/benchmarks/bench_vs_xdiag.md. "Balanced" is the default and is
+# what `qed.diag` ships today; "conservative" trims memory at the cost
+# of a few extra restarts; "aggressive" widens subspace + ncv for
+# stiff problems.
+# ---------------------------------------------------------------------------
+
+
+# Solver picker thresholds. Matches qed.workflow._resolve_solver +
+# include/ed/auto/solve.h. Surface them as module-level constants so the
+# C++ mirror in include/ed/auto/diag_tune.h can copy them verbatim.
+_SMALL_DIM_THRESHOLD = 2048           # FULL below this
+_LANCZOS_NEIG_THRESHOLD = 5           # plain Lanczos at or below
+_KRYLOV_SCHUR_NEIG_THRESHOLD = 20     # KRYLOV_SCHUR at or below
+                                       # else BLOCK_LANCZOS
+
+# Tolerance defaults — looser for big sectors (the eigensolver typically
+# converges to ε_machine · ‖H‖, which dominates 1e-12 once ‖H‖·D > 1e10).
+_TOLERANCE = {
+    "conservative": 1e-8,
+    "balanced":     1e-10,
+    "aggressive":   1e-12,
+}
+
+# Lanczos / Krylov-Schur subspace bounds (per requested eigenvalue).
+# Each level: (max_iter_floor, max_iter_per_eig, max_sub_floor,
+# max_sub_per_eig). Used by pick_max_iterations / pick_max_subspace.
+_KRYLOV_BOUNDS = {
+    "conservative": (150,  6, 60,  3),
+    "balanced":     (200,  8, 80,  4),
+    "aggressive":   (400, 16, 160, 8),
+}
+
+# ARPACK ncv heuristic: ARPACK recommends 2·k + 1, but for thick-restart
+# Lanczos / Krylov-Schur 4·k typically converges in fewer restarts.
+_ARPACK_NCV_FACTOR = {"conservative": 2, "balanced": 4, "aggressive": 6}
+
+# FTLM / LTLM Krylov dim. Larger M reduces statistical error in
+# ⟨e^{-βH}⟩_R but costs O(M) reorthogonalisations per random vector.
+_FTLM_KRYLOV = {"conservative": 80,  "balanced": 100, "aggressive": 160}
+_LTLM_KRYLOV = {"conservative": 150, "balanced": 200, "aggressive": 320}
+
+# mTPQ Taylor order + delta_beta. Imaginary-time Taylor expansion of
+# e^{-Δβ·H/2}: order p ≈ 50 is accurate to 1e-10 for ‖H‖·Δβ ≲ 5;
+# delta_beta should be ≲ 0.5 / ‖H‖ to keep truncation error bounded.
+_TPQ_TAYLOR_ORDER = {"conservative": 50,  "balanced": 100, "aggressive": 200}
+_TPQ_DELTA_BETA   = {"conservative": 5e-2, "balanced": 1e-2, "aggressive": 2e-3}
+
+# Thermal sample count R. Variance scales as 1/(R·D); for big sectors
+# even one sample is adequate.
+_THERMAL_SAMPLES_MIN = {"conservative": 1, "balanced": 1,  "aggressive": 4}
+_THERMAL_SAMPLES_MAX = {"conservative": 4, "balanced": 16, "aggressive": 32}
+
+
+def pick_solver(num_eigenvalues: int, sector_dim: int) -> str:
+    """Return the recommended ``DiagonalizationMethod`` name string.
+
+    Same rule as :func:`qed.diag`'s default (and the C++ auto-pilot):
+
+    * ``sector_dim ≤ 2048``         → ``"FULL"``      (LAPACK)
+    * ``num_eigenvalues ≤ 5``       → ``"LANCZOS"``
+    * ``num_eigenvalues ≤ 20``      → ``"KRYLOV_SCHUR"``
+    * else                          → ``"BLOCK_LANCZOS"``
+
+    Returned as a string so callers without ``qed._core`` available
+    (notebook prototyping, doctest) can still introspect the rule.
+    """
+    if sector_dim <= _SMALL_DIM_THRESHOLD:
+        return "FULL"
+    if num_eigenvalues <= _LANCZOS_NEIG_THRESHOLD:
+        return "LANCZOS"
+    if num_eigenvalues <= _KRYLOV_SCHUR_NEIG_THRESHOLD:
+        return "KRYLOV_SCHUR"
+    return "BLOCK_LANCZOS"
+
+
+def pick_max_iterations(num_eigenvalues: int, sector_dim: int,
+                        *, level: Level = "balanced") -> int:
+    """Krylov outer-iteration cap. Floor + per-eig term, capped at D-1."""
+    level = _check_level(level)
+    floor, per_eig, _, _ = _KRYLOV_BOUNDS[level]
+    target = max(floor, per_eig * max(1, num_eigenvalues) + 80)
+    if sector_dim > 1:
+        target = min(target, max(1, sector_dim - 1))
+    return int(target)
+
+
+def pick_max_subspace(num_eigenvalues: int, sector_dim: int,
+                      *, level: Level = "balanced") -> int:
+    """Krylov subspace dim. Floor + per-eig term, capped at D-1."""
+    level = _check_level(level)
+    _, _, floor, per_eig = _KRYLOV_BOUNDS[level]
+    target = max(floor, per_eig * max(1, num_eigenvalues) + 40)
+    if sector_dim > 1:
+        target = min(target, max(1, sector_dim - 1))
+    return int(target)
+
+
+def pick_block_size(num_eigenvalues: int, *, level: Level = "balanced") -> int:
+    """Block size for BLOCK_LANCZOS / BLOCK_KRYLOV_SCHUR."""
+    _ = _check_level(level)
+    return max(1, min(num_eigenvalues, 4))
+
+
+def pick_tolerance(*, level: Level = "balanced") -> float:
+    """Convergence tolerance for eigenvalue solvers."""
+    return _TOLERANCE[_check_level(level)]
+
+
+def pick_arpack_ncv(num_eigenvalues: int,
+                    *, level: Level = "balanced") -> int:
+    """ARPACK Lanczos vector count. 2k+1 is the ARPACK floor; we
+    over-shoot by `_ARPACK_NCV_FACTOR[level]` for fewer restarts."""
+    factor = _ARPACK_NCV_FACTOR[_check_level(level)]
+    return max(2 * num_eigenvalues + 1, factor * num_eigenvalues)
+
+
+def pick_ftlm_krylov_dim(*, level: Level = "balanced") -> int:
+    """FTLM Lanczos micro-basis dimension M (per random vector)."""
+    return _FTLM_KRYLOV[_check_level(level)]
+
+
+def pick_ltlm_krylov_dim(*, level: Level = "balanced") -> int:
+    """LTLM excitation Krylov dim."""
+    return _LTLM_KRYLOV[_check_level(level)]
+
+
+def pick_tpq_taylor_order(bandwidth: float, delta_beta: float,
+                          *, level: Level = "balanced") -> int:
+    """mTPQ Taylor order p.
+
+    For e^{-Δβ·H/2} the truncation error of an order-p Taylor expansion
+    is bounded by ``(‖H‖·Δβ/2)^p / p!``. We pick ``p`` such that this is
+    < 1e-12 at the chosen ``level``, with per-level minima.
+    """
+    level = _check_level(level)
+    base = _TPQ_TAYLOR_ORDER[level]
+    if bandwidth <= 0 or delta_beta <= 0:
+        return base
+    arg = 0.5 * bandwidth * delta_beta
+    if arg <= 1.0:
+        return base
+    p = base
+    log_arg = math.log(arg)
+    for _ in range(2 * base):
+        if p * log_arg - sum(math.log(k) for k in range(1, p + 1)) < -27.6:
+            return p
+        p += 10
+    return p
+
+
+def pick_tpq_delta_beta(bandwidth: float,
+                        *, level: Level = "balanced") -> float:
+    """mTPQ imaginary-time step Δβ.
+
+    Capped at ``0.5 / ‖H‖`` so the per-level baseline never violates the
+    truncation-error bound; otherwise picks the level default.
+    """
+    level = _check_level(level)
+    base = _TPQ_DELTA_BETA[level]
+    if bandwidth <= 0:
+        return base
+    return min(base, 0.5 / bandwidth)
+
+
+def pick_num_thermal_samples(sector_dim: int,
+                             *, level: Level = "balanced") -> int:
+    """Thermal sample count R. ∝ 1/√D, clamped to per-level [min, max]."""
+    level = _check_level(level)
+    lo, hi = _THERMAL_SAMPLES_MIN[level], _THERMAL_SAMPLES_MAX[level]
+    if sector_dim <= 1:
+        return hi
+    target = max(1, int(math.ceil(64.0 / math.sqrt(float(sector_dim)))))
+    return int(max(lo, min(hi, target)))
+
+
+# ---------------------------------------------------------------------------
+# Convenience bundle — output of :func:`tune_diag`. Mirrors the
+# `TunedDSSFKnobs` shape so callers can introspect / log uniformly.
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class TunedDiagKnobs:
+    """Auto-selected ED-solver knobs (output of :func:`tune_diag`)."""
+    solver: str
+    device: str
+    tolerance: float
+    max_iterations: int
+    max_subspace: int
+    block_size: int
+    arpack_ncv: int
+    ftlm_krylov_dim: int
+    ltlm_krylov_dim: int
+    ltlm_ground_krylov: int
+    tpq_taylor_order: int
+    tpq_delta_beta: float
+    num_thermal_samples: int
+    bandwidth: float
+    level: str
+
+    def to_extra_params(self) -> dict[str, object]:
+        """Render to an ``extra_params=`` dict for :func:`qed.diag`.
+
+        Only includes fields actually consumed by the requested
+        ``solver`` family — keeps the dict small so logging is readable.
+        """
+        d: dict[str, object] = {
+            "tolerance":          self.tolerance,
+            "max_iterations":     self.max_iterations,
+        }
+        s = self.solver.upper()
+        if "BLOCK" in s:
+            d["block_size"] = self.block_size
+        if "ARPACK" in s:
+            d["arpack_ncv"] = self.arpack_ncv
+        if s.startswith("FTLM") or s == "HYBRID":
+            d["ftlm_krylov_dim"] = self.ftlm_krylov_dim
+        if s.startswith("LTLM") or s == "HYBRID":
+            d["ltlm_krylov_dim"] = self.ltlm_krylov_dim
+            d["ltlm_ground_krylov"] = self.ltlm_ground_krylov
+        if "TPQ" in s:
+            d["tpq_taylor_order"] = self.tpq_taylor_order
+            d["tpq_delta_beta"]   = self.tpq_delta_beta
+        if any(t in s for t in ("FTLM", "LTLM", "TPQ", "HYBRID")):
+            d["num_samples"] = self.num_thermal_samples
+        else:
+            d["max_subspace"] = self.max_subspace
+        return d
+
+
+def tune_diag(
+    *,
+    operator=None,
+    sector_dim: Optional[int] = None,
+    num_eigenvalues: int = 1,
+    bandwidth: Optional[float] = None,
+    solver: Optional[str] = None,
+    device: Optional[str] = None,
+    has_cuda_build: bool = False,
+    has_mpi_build: bool = False,
+    level: Level = "balanced",
+    # Per-knob overrides — anything provided wins over the heuristic.
+    tolerance: Optional[float] = None,
+    max_iterations: Optional[int] = None,
+    max_subspace: Optional[int] = None,
+    block_size: Optional[int] = None,
+    arpack_ncv: Optional[int] = None,
+    ftlm_krylov_dim: Optional[int] = None,
+    ltlm_krylov_dim: Optional[int] = None,
+    ltlm_ground_krylov: Optional[int] = None,
+    tpq_taylor_order: Optional[int] = None,
+    tpq_delta_beta: Optional[float] = None,
+    num_thermal_samples: Optional[int] = None,
+) -> TunedDiagKnobs:
+    """Pick every ED-solver knob, honouring user overrides.
+
+    Sister of :func:`tune_dssf`. Used by :func:`qed.diag` to fill in the
+    family-specific fields of :class:`EDParameters` that the legacy
+    ``_make_params`` path does not handle (FTLM / LTLM Krylov dim,
+    ARPACK ncv, mTPQ Taylor order + delta_beta, thermal sample count).
+
+    Anything left as ``None`` is auto-selected from
+    (``operator`` / ``sector_dim`` / ``num_eigenvalues``) and the
+    requested ``level``.
+    """
+    level = _check_level(level)
+
+    # Bandwidth.
+    if bandwidth is None:
+        bandwidth = (estimate_bandwidth(operator)
+                     if operator is not None else 4.0)
+
+    # Sector dim.
+    if sector_dim is None and operator is not None:
+        try:
+            sector_dim = int(operator.dimension)
+        except AttributeError:
+            sector_dim = None
+    if sector_dim is None:
+        sector_dim = 1024
+
+    # Solver + device.
+    chosen_solver = solver or pick_solver(num_eigenvalues, sector_dim)
+    chosen_device = pick_device(
+        sector_dim,
+        has_cuda_build=has_cuda_build,
+        has_mpi_build=has_mpi_build,
+        user_request=device,
+    )
+
+    return TunedDiagKnobs(
+        solver=chosen_solver,
+        device=chosen_device,
+        tolerance=float(tolerance if tolerance is not None
+                        else pick_tolerance(level=level)),
+        max_iterations=int(max_iterations if max_iterations is not None
+                           else pick_max_iterations(num_eigenvalues,
+                                                    sector_dim, level=level)),
+        max_subspace=int(max_subspace if max_subspace is not None
+                         else pick_max_subspace(num_eigenvalues,
+                                                sector_dim, level=level)),
+        block_size=int(block_size if block_size is not None
+                       else pick_block_size(num_eigenvalues, level=level)),
+        arpack_ncv=int(arpack_ncv if arpack_ncv is not None
+                       else pick_arpack_ncv(num_eigenvalues, level=level)),
+        ftlm_krylov_dim=int(ftlm_krylov_dim if ftlm_krylov_dim is not None
+                            else pick_ftlm_krylov_dim(level=level)),
+        ltlm_krylov_dim=int(ltlm_krylov_dim if ltlm_krylov_dim is not None
+                            else pick_ltlm_krylov_dim(level=level)),
+        ltlm_ground_krylov=int(ltlm_ground_krylov
+                               if ltlm_ground_krylov is not None
+                               else pick_ftlm_krylov_dim(level=level)),
+        tpq_delta_beta=float(tpq_delta_beta if tpq_delta_beta is not None
+                             else pick_tpq_delta_beta(bandwidth, level=level)),
+        tpq_taylor_order=int(tpq_taylor_order if tpq_taylor_order is not None
+                             else pick_tpq_taylor_order(
+                                 bandwidth,
+                                 (tpq_delta_beta if tpq_delta_beta is not None
+                                  else pick_tpq_delta_beta(bandwidth, level=level)),
+                                 level=level)),
+        num_thermal_samples=int(num_thermal_samples
+                                if num_thermal_samples is not None
+                                else pick_num_thermal_samples(sector_dim,
+                                                              level=level)),
+        bandwidth=float(bandwidth),
+        level=level,
+    )
