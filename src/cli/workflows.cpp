@@ -1006,7 +1006,94 @@ void compute_dynamical_response_workflow(const EDConfig& config) {
             
             return true;
         };
-        
+
+        // ============================================================
+        // Multi-operator dispatcher (item #7): processes ALL operator
+        // pairs in a single call so that the per-sample H-Lanczos chain
+        // (and the cached Ritz eigenstates) are reused across pairs
+        // instead of being recomputed P times.
+        //
+        // CPU multi-sample only. If GPU is requested (and available,
+        // and not fixed-Sz) we keep the per-operator GPU path -- the
+        // GPU multi-T kernel already amortizes Lanczos across
+        // temperatures and is generally faster than the CPU shared-
+        // Lanczos path for the same operator. Single-sample mode still
+        // uses the state-based optimization in the per-op path.
+        // ============================================================
+        auto process_all_operators_at_once_cpu = [&]() -> int {
+            const int P = static_cast<int>(obs_1.size());
+            if (P == 0) return 0;
+
+            std::vector<std::function<void(const Complex*, Complex*, int)>>
+                O1_funcs, O2_funcs;
+            O1_funcs.reserve(P);
+            O2_funcs.reserve(P);
+            for (int op_idx = 0; op_idx < P; ++op_idx) {
+                O1_funcs.emplace_back([&obs_1, op_idx]
+                    (const Complex* in, Complex* out, uint64_t dim) {
+                        obs_1[op_idx].apply(in, out, dim);
+                    });
+                O2_funcs.emplace_back([&obs_2, op_idx]
+                    (const Complex* in, Complex* out, uint64_t dim) {
+                        obs_2[op_idx].apply(in, out, dim);
+                    });
+            }
+
+            if (rank == 0) {
+                std::cout << "\n=== SHARED-LANCZOS: " << P
+                          << " operator pairs, all temperatures, "
+                          << "single per-sample H-Lanczos chain ===\n";
+            }
+
+            auto results_list =
+                compute_dynamical_correlation_multi_operator_multi_temperature(
+                    H_func, O1_funcs, O2_funcs, N, params,
+                    config.dynamical.omega_min,
+                    config.dynamical.omega_max,
+                    config.dynamical.num_omega_points,
+                    temperatures,
+                    ground_state_energy,
+                    config.workflow.output_dir);
+
+            if (rank == 0) {
+                std::string h5_file =
+                    HDF5IO::createOrOpenFile(config.workflow.output_dir);
+                for (size_t op_idx = 0; op_idx < results_list.size(); ++op_idx) {
+                    for (const auto& [temperature, results]
+                         : results_list[op_idx]) {
+                        std::string op_name = names[op_idx];
+                        if (temperatures.size() > 1) {
+                            op_name += "_T" + std::to_string(temperature);
+                        }
+                        HDF5IO::saveDynamicalResponseFull(
+                            h5_file, op_name,
+                            results.frequencies,
+                            results.spectral_function,
+                            results.spectral_function_imag,
+                            results.spectral_error,
+                            results.spectral_error_imag,
+                            results.total_samples, temperature);
+                    }
+                }
+            }
+            return P;
+        };
+
+        // Decide whether the multi-operator shared-Lanczos path applies.
+        bool use_shared_lanczos_multi_op = false;
+        {
+            const bool cpu_only =
+#ifdef WITH_CUDA
+                (!config.dynamical.use_gpu) || config.system.use_fixed_sz;
+#else
+                true;
+#endif
+            use_shared_lanczos_multi_op =
+                cpu_only &&
+                (params.num_samples > 1) &&
+                (num_operators > 1);
+        }
+
         // Execute tasks with dynamic work distribution
         int local_processed_count = 0;
         
@@ -1019,14 +1106,20 @@ void compute_dynamical_response_workflow(const EDConfig& config) {
             // The master-worker pattern would cause collective mismatches since
             // different ranks would be processing different operators.
             // ============================================================
-            for (int task_idx = 0; task_idx < num_tasks; task_idx++) {
-                const auto& task = all_tasks[task_idx];
-                if (rank == 0) {
-                    std::cout << "\n--- Task " << (task_idx + 1) << " / " << num_tasks
-                              << ": Operator " << names[task.op_idx] << " (ALL temperatures, " << size << " MPI ranks) ---\n";
-                }
-                if (process_operator_all_temps(task.op_idx)) {
-                    local_processed_count++;
+            if (use_shared_lanczos_multi_op) {
+                // One synchronized call across all ranks; the new
+                // multi-operator FTLM uses MPI collectives internally.
+                local_processed_count += process_all_operators_at_once_cpu();
+            } else {
+                for (int task_idx = 0; task_idx < num_tasks; task_idx++) {
+                    const auto& task = all_tasks[task_idx];
+                    if (rank == 0) {
+                        std::cout << "\n--- Task " << (task_idx + 1) << " / " << num_tasks
+                                  << ": Operator " << names[task.op_idx] << " (ALL temperatures, " << size << " MPI ranks) ---\n";
+                    }
+                    if (process_operator_all_temps(task.op_idx)) {
+                        local_processed_count++;
+                    }
                 }
             }
         } else if (size > 1 && !use_optimized_multi_temp) {
@@ -1114,6 +1207,9 @@ void compute_dynamical_response_workflow(const EDConfig& config) {
         #endif
         {
             // Sequential execution (no MPI or single rank)
+            if (use_shared_lanczos_multi_op) {
+                local_processed_count += process_all_operators_at_once_cpu();
+            } else {
             for (int task_idx = 0; task_idx < num_tasks; task_idx++) {
                 const auto& task = all_tasks[task_idx];
                 
@@ -1136,6 +1232,7 @@ void compute_dynamical_response_workflow(const EDConfig& config) {
                     }
                 }
             }
+            }  // end else (use_shared_lanczos_multi_op)
         }
         
         #ifdef WITH_MPI

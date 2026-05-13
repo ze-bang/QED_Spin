@@ -1022,6 +1022,13 @@ int main(int argc, char** argv) {
                 }
                 dump_doubles(a.result_file, "/betas", a.betas);
                 dump_doubles(a.result_file, "/Z", res.Z);
+                if (!res.lnZ.empty()) {
+                    dump_doubles(a.result_file, "/lnZ", res.lnZ);
+                }
+                if (!res.O_expectation.empty()) {
+                    dump_doubles(a.result_file, "/O", res.O_expectation);
+                }
+                dump_double_attr(a.result_file, "E_shift", res.E_shift);
                 dump_int_attr(a.result_file, "samples_used", res.samples_used);
                 dump_double_attr(a.result_file, "elapsed_s",
                                  seconds_since(t0));

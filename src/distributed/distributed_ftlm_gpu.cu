@@ -29,6 +29,7 @@
 #include <cmath>
 #include <complex>
 #include <iostream>
+#include <limits>
 #include <random>
 #include <sstream>
 #include <stdexcept>
@@ -576,6 +577,20 @@ DistributedFtlmResult ftlm_gpu_impl(
 
     const double D = static_cast<double>(cpu_dop.global_dim());
 
+    // Per-sample cache: needed so we can do a global Allreduce(MIN) over
+    // E_0 across samples / groups before evaluating any exp(-beta E_k).
+    // Mirrors the CPU SampleCache in src/distributed/distributed_ftlm.cpp.
+    struct GPUSampleCache {
+        std::size_t m = 0;
+        std::vector<double> evals;          // tridiag eigenvalues  (m)
+        std::vector<double> weights;        // tridiag weights      (m)
+        std::vector<double> U_cm;           // eigvecs, k-major     (m*m)
+        std::vector<cuDoubleComplex> q;     // <V_j | O r>          (m)
+    };
+    std::vector<GPUSampleCache> cache;
+    cache.reserve(my_samples.size());
+    double local_min_E = std::numeric_limits<double>::infinity();
+
     std::vector<Complex> psi_host;
 
     for (int s : my_samples) {
@@ -597,17 +612,13 @@ DistributedFtlmResult ftlm_gpu_impl(
 
         if (m == 0) continue;
 
-        std::vector<double> evals, weights, U_cm;
+        GPUSampleCache c;
+        c.m = m;
         solve_tridiag_with_eigenvectors_host(alpha, beta, m,
-                                              evals, weights, U_cm);
-
-        for (std::size_t b = 0; b < betas.size(); ++b) {
-            double zk = 0.0;
-            const double bv = betas[b];
-            for (std::size_t k = 0; k < m; ++k) {
-                zk += weights[k] * std::exp(-bv * evals[k]);
-            }
-            N_Z_local[b] += zk;
+                                              c.evals, c.weights, c.U_cm);
+        if (!c.evals.empty()) {
+            local_min_E = std::min(local_min_E,
+                *std::min_element(c.evals.begin(), c.evals.end()));
         }
 
         if (compute_obs) {
@@ -616,7 +627,7 @@ DistributedFtlmResult ftlm_gpu_impl(
                          reinterpret_cast<Complex*>(d_u),
                          /*stream=*/nullptr);
 
-            std::vector<cuDoubleComplex> q_host(m, cuDoubleComplex{0.0, 0.0});
+            c.q.assign(m, cuDoubleComplex{0.0, 0.0});
             for (std::size_t j = 0; j < m; ++j) {
                 cuDoubleComplex local{0.0, 0.0};
                 if (local_n > 0) {
@@ -625,11 +636,11 @@ DistributedFtlmResult ftlm_gpu_impl(
                                               d_u, 1, &local),
                                  "cublasZdotc(q_j local)");
                 }
-                q_host[j] = local;
+                c.q[j] = local;
             }
             DeviceBuffer q_buf(m * sizeof(cuDoubleComplex));
             auto* d_q = static_cast<cuDoubleComplex*>(q_buf.ptr);
-            check_cu(cudaMemcpy(d_q, q_host.data(),
+            check_cu(cudaMemcpy(d_q, c.q.data(),
                                 m * sizeof(cuDoubleComplex),
                                 cudaMemcpyHostToDevice),
                      "H2D q coeffs");
@@ -638,39 +649,63 @@ DistributedFtlmResult ftlm_gpu_impl(
                 reinterpret_cast<std::complex<double>*>(d_q),
                 m);
             multi_gpu::synchronize_stream(/*stream=*/nullptr);
-            check_cu(cudaMemcpy(q_host.data(), d_q,
+            check_cu(cudaMemcpy(c.q.data(), d_q,
                                 m * sizeof(cuDoubleComplex),
                                 cudaMemcpyDeviceToHost),
                      "D2H q coeffs");
-
-            std::vector<double> g_b(m, 0.0), f_b(m, 0.0);
-            for (std::size_t b = 0; b < betas.size(); ++b) {
-                const double bv = betas[b];
-                for (std::size_t k = 0; k < m; ++k) {
-                    g_b[k] = U_cm[k * m + 0] * std::exp(-bv * evals[k]);
-                }
-                for (std::size_t j = 0; j < m; ++j) {
-                    double f = 0.0;
-                    for (std::size_t k = 0; k < m; ++k) {
-                        f += U_cm[k * m + j] * g_b[k];
-                    }
-                    f_b[j] = f;
-                }
-                double contrib = 0.0;
-                for (std::size_t j = 0; j < m; ++j) {
-                    contrib += q_host[j].x * f_b[j];
-                }
-                N_O_local[b] += contrib;
-            }
         }
 
         if (verbose && world_rank == 0) {
             std::cout << "  [dist-ftlm-gpu] sample s=" << s
                       << " group=" << my_group
                       << " m=" << m
-                      << " E0=" << *std::min_element(evals.begin(), evals.end())
+                      << " E0=" << *std::min_element(c.evals.begin(), c.evals.end())
                       << (compute_obs ? "  (with O)" : "")
                       << std::endl;
+        }
+        cache.push_back(std::move(c));
+    }
+
+    // Global E_shift across all samples / ranks.
+    double E_shift = 0.0;
+    {
+        double in = local_min_E;
+        if (!std::isfinite(in)) in = std::numeric_limits<double>::infinity();
+        MPI_Allreduce(&in, &E_shift, 1, MPI_DOUBLE, MPI_MIN, world_comm);
+        if (!std::isfinite(E_shift)) E_shift = 0.0;
+    }
+
+    // Pass 2: shifted-exponent accumulation.
+    for (const auto& c : cache) {
+        const std::size_t m = c.m;
+        for (std::size_t b = 0; b < betas.size(); ++b) {
+            double zk = 0.0;
+            const double bv = betas[b];
+            for (std::size_t k = 0; k < m; ++k) {
+                zk += c.weights[k] * std::exp(-bv * (c.evals[k] - E_shift));
+            }
+            N_Z_local[b] += zk;
+        }
+        if (!compute_obs || c.U_cm.empty() || c.q.empty()) continue;
+
+        std::vector<double> g_b(m, 0.0), f_b(m, 0.0);
+        for (std::size_t b = 0; b < betas.size(); ++b) {
+            const double bv = betas[b];
+            for (std::size_t k = 0; k < m; ++k) {
+                g_b[k] = c.U_cm[k * m + 0] * std::exp(-bv * (c.evals[k] - E_shift));
+            }
+            for (std::size_t j = 0; j < m; ++j) {
+                double f = 0.0;
+                for (std::size_t k = 0; k < m; ++k) {
+                    f += c.U_cm[k * m + j] * g_b[k];
+                }
+                f_b[j] = f;
+            }
+            double contrib = 0.0;
+            for (std::size_t j = 0; j < m; ++j) {
+                contrib += c.q[j].x * f_b[j];
+            }
+            N_O_local[b] += contrib;
         }
     }
 
@@ -691,8 +726,13 @@ DistributedFtlmResult ftlm_gpu_impl(
 
     const double DoverR = D / static_cast<double>(n_samples);
     std::vector<double> Z(betas.size(), 0.0);
+    std::vector<double> lnZ(betas.size(),
+                            -std::numeric_limits<double>::infinity());
     for (std::size_t b = 0; b < betas.size(); ++b) {
-        Z[b] = DoverR * N_Z[b];
+        Z[b] = DoverR * std::exp(-betas[b] * E_shift) * N_Z[b];
+        if (N_Z[b] > 0.0) {
+            lnZ[b] = std::log(DoverR) - betas[b] * E_shift + std::log(N_Z[b]);
+        }
     }
 
     std::vector<double> O_expectation;
@@ -704,9 +744,11 @@ DistributedFtlmResult ftlm_gpu_impl(
     }
 
     DistributedFtlmResult result;
-    result.Z = std::move(Z);
+    result.Z             = std::move(Z);
+    result.lnZ           = std::move(lnZ);
+    result.E_shift       = E_shift;
     result.O_expectation = std::move(O_expectation);
-    result.samples_used = n_samples;
+    result.samples_used  = n_samples;
     return result;
 }
 

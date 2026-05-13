@@ -90,6 +90,24 @@ struct DistributedFtlmResult {
     /// All ranks in the world communicator hold the same array on return.
     std::vector<double> Z;
 
+    /// log Z(beta) at each beta, computed in shifted-exponent form so it
+    /// stays finite at low T where Z itself underflows. Replicated on
+    /// every rank. Same length as `Z`.
+    ///
+    /// Numerically: lnZ[b] = log(D/R) - beta * E_shift
+    ///                       + log( sum_s sum_k w_k(s) exp(-beta(E_k(s) - E_shift)) ),
+    /// where E_shift is the global minimum Lanczos Ritz value across all
+    /// samples and ranks (Allreduce MPI_MIN). Use this instead of
+    /// log(Z[b]) when beta * |E| is large (Z[b] may have underflowed to
+    /// zero while lnZ[b] remains accurate).
+    std::vector<double> lnZ;
+
+    /// Global minimum Ritz eigenvalue across all samples / ranks. Used as
+    /// the universal exponent shift so that exp(-beta(E_k - E_shift)) is
+    /// O(1) for the lowest-energy sample. Useful for cross-sector
+    /// recombination where every sector reports its own E_shift.
+    double E_shift = 0.0;
+
     /// Observable expectation values at each beta. Empty unless
     /// options.observable_op was non-null. Replicated on every rank.
     std::vector<double> O_expectation;

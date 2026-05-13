@@ -747,6 +747,51 @@ std::map<double, DynamicalResponseResults> compute_dynamical_correlation_multi_s
     const std::string& output_dir = ""
 );
 
+/**
+ * @brief Multi-operator extension of FTLM dynamical correlation.
+ *
+ * Computes spectral functions for many operator pairs (O1[p], O2[p]) sharing
+ * the SAME Hamiltonian Lanczos chain per random sample. The expensive outer
+ * Lanczos run on H from |r> is performed exactly once per sample (instead of
+ * once per (sample, operator) pair as in the per-pair entry point), and the
+ * reconstructed Ritz eigenstates |psi_i> are cached and reused across pairs.
+ *
+ * Each pair p still triggers its own per-Ritz-state inner Lanczos (starting
+ * from O2_p|psi_i>) and per-pair spectral accumulation; that work is not
+ * shareable because it depends on the operators.
+ *
+ * Result: results[p] is the temperature->spectral map for the p-th pair,
+ * structurally identical to what `compute_dynamical_correlation_multi_sample_multi_temperature`
+ * would produce if called individually for that pair (modulo non-determinism
+ * from differently-seeded sub-Lanczos calls; the outer sample seed and Krylov
+ * basis are bit-identical to a single per-pair invocation).
+ *
+ * @param H Hamiltonian matvec
+ * @param O1_list Operators on the bra side (size = number of pairs)
+ * @param O2_list Operators on the ket side (same size)
+ * @param N Hilbert dimension
+ * @param params FTLM parameters
+ * @param omega_min,omega_max,num_omega_bins Frequency grid
+ * @param temperatures Temperatures
+ * @param energy_shift Ground state energy shift (0 -> auto)
+ * @param output_dir Optional debug output directory
+ * @return Vector indexed by operator pair, each element a per-T results map
+ */
+std::vector<std::map<double, DynamicalResponseResults>>
+compute_dynamical_correlation_multi_operator_multi_temperature(
+    std::function<void(const Complex*, Complex*, int)> H,
+    const std::vector<std::function<void(const Complex*, Complex*, int)>>& O1_list,
+    const std::vector<std::function<void(const Complex*, Complex*, int)>>& O2_list,
+    uint64_t N,
+    const DynamicalResponseParameters& params,
+    double omega_min,
+    double omega_max,
+    uint64_t num_omega_bins,
+    const std::vector<double>& temperatures,
+    double energy_shift = 0.0,
+    const std::string& output_dir = ""
+);
+
 // ============================================================================
 // GROUND STATE DYNAMICAL STRUCTURE FACTOR (CONTINUED FRACTION METHOD)
 // ============================================================================

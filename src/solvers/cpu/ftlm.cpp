@@ -3877,6 +3877,436 @@ std::map<double, DynamicalResponseResults> compute_dynamical_correlation_multi_s
 }
 
 // ============================================================================
+// MULTI-OPERATOR FTLM: shares the per-sample H-Lanczos chain (and the cached
+// Ritz eigenstates |psi_i>) across all (O1[p], O2[p]) pairs. The per-pair
+// inner work (O2|psi_i>, sub-Lanczos, Lehmann weights) is unchanged. This is
+// item #7 from the audit: only the operator-independent setup is hoisted.
+// ============================================================================
+std::vector<std::map<double, DynamicalResponseResults>>
+compute_dynamical_correlation_multi_operator_multi_temperature(
+    std::function<void(const Complex*, Complex*, int)> H,
+    const std::vector<std::function<void(const Complex*, Complex*, int)>>& O1_list,
+    const std::vector<std::function<void(const Complex*, Complex*, int)>>& O2_list,
+    uint64_t N,
+    const DynamicalResponseParameters& params,
+    double omega_min,
+    double omega_max,
+    uint64_t num_omega_bins,
+    const std::vector<double>& temperatures,
+    double energy_shift,
+    const std::string& output_dir
+) {
+    if (O1_list.size() != O2_list.size()) {
+        throw std::invalid_argument(
+            "compute_dynamical_correlation_multi_operator_multi_temperature: "
+            "O1_list and O2_list must have the same size");
+    }
+    const size_t P = O1_list.size();
+    if (P == 0) {
+        return {};
+    }
+
+    const bool verbose = ed_dssf_verbose();
+    int mpi_rank_early = 0;
+#ifdef WITH_MPI
+    MPI_Comm_rank(MPI_COMM_WORLD, &mpi_rank_early);
+#endif
+
+    for (double T : temperatures) {
+        if (!(T > 0.0)) {
+            throw std::invalid_argument(
+                "compute_dynamical_correlation_multi_operator_multi_temperature: "
+                "temperatures must be > 0 (got T = " + std::to_string(T) + ")");
+        }
+    }
+
+    if (verbose && mpi_rank_early == 0) {
+        std::cout << "\n=========================================="  << std::endl;
+        std::cout << "FTLM SPECTRAL (MULTI-OPERATOR, SHARED H-LANCZOS)" << std::endl;
+        std::cout << "==========================================" << std::endl;
+        std::cout << "Operator pairs: " << P << std::endl;
+        std::cout << "Samples:        " << params.num_samples << std::endl;
+        std::cout << "Temperatures:   " << temperatures.size() << std::endl;
+        std::cout << "Krylov dim:     " << params.krylov_dim << std::endl;
+        std::cout << "Broadening:     " << params.broadening << std::endl;
+        std::cout << "==========================================" << std::endl;
+    }
+
+    // RNG / E_gs setup mirrors the per-pair entry point.
+    std::mt19937 gen;
+    if (params.random_seed == 0) {
+        std::random_device rd;
+        gen.seed(rd());
+    } else {
+        gen.seed(params.random_seed);
+    }
+    std::uniform_real_distribution<double> dist(-1.0, 1.0);
+
+    double E_gs = energy_shift;
+    if (std::abs(E_gs) < 1e-14) {
+        ComplexVector test_state(N);
+        const char* env_complex_seed = std::getenv("ED_LANCZOS_COMPLEX_SEED");
+        const bool complex_seed = (env_complex_seed && env_complex_seed[0] == '1');
+        for (uint64_t i = 0; i < N; i++) {
+            test_state[i] = complex_seed ? Complex(dist(gen), dist(gen))
+                                         : Complex(dist(gen), 0.0);
+        }
+        double norm = cblas_dznrm2(N, test_state.data(), 1);
+        Complex scale(1.0/norm, 0.0);
+        cblas_zscal(N, &scale, test_state.data(), 1);
+        std::vector<double> a, b;
+        build_lanczos_tridiagonal(H, test_state, N,
+                                  std::min(params.krylov_dim, (uint64_t)100),
+                                  params.tolerance, false, 10, a, b);
+        std::vector<double> rv, w;
+        diagonalize_tridiagonal_ritz(a, b, rv, w);
+        if (!rv.empty()) E_gs = *std::min_element(rv.begin(), rv.end());
+    }
+
+    std::vector<double> frequencies(num_omega_bins);
+    double omega_step = (omega_max - omega_min) /
+                        std::max(uint64_t(1), num_omega_bins - 1);
+    for (uint64_t i = 0; i < num_omega_bins; i++) {
+        frequencies[i] = omega_min + i * omega_step;
+    }
+
+    // Per-pair accumulators.
+    using Vec = std::vector<double>;
+    std::vector<std::map<double, Vec>>    accumulated_spectral(P);
+    std::vector<std::map<double, Vec>>    accumulated_spectral_imag(P);
+    std::vector<std::map<double, double>> accumulated_Z(P);
+    std::vector<std::map<double, std::vector<Vec>>> per_sample_spectral(P);
+    std::vector<std::map<double, std::vector<Vec>>> per_sample_spectral_imag(P);
+    for (size_t p = 0; p < P; ++p) {
+        for (double T : temperatures) {
+            accumulated_spectral[p][T]      = Vec(num_omega_bins, 0.0);
+            accumulated_spectral_imag[p][T] = Vec(num_omega_bins, 0.0);
+            accumulated_Z[p][T]             = 0.0;
+            per_sample_spectral[p][T]       = {};
+            per_sample_spectral_imag[p][T]  = {};
+        }
+    }
+
+    int mpi_rank = 0, mpi_size = 1;
+#ifdef WITH_MPI
+    MPI_Comm_rank(MPI_COMM_WORLD, &mpi_rank);
+    MPI_Comm_size(MPI_COMM_WORLD, &mpi_size);
+#endif
+    uint64_t samples_per_rank = params.num_samples / mpi_size;
+    uint64_t remainder        = params.num_samples % mpi_size;
+    uint64_t start_sample = mpi_rank * samples_per_rank +
+                            std::min((uint64_t)mpi_rank, remainder);
+    uint64_t end_sample   = start_sample + samples_per_rank +
+                            (mpi_rank < (int)remainder ? 1 : 0);
+    uint64_t local_num_samples = end_sample - start_sample;
+
+#ifdef WITH_MPI
+    MPI_Barrier(MPI_COMM_WORLD);
+#endif
+
+    uint64_t max_ritz_states = std::min(params.krylov_dim, (uint64_t)50);
+    const double eta = params.broadening;
+    const double eta_sq = eta * eta;
+    const double inv_pi_eta = eta / M_PI;
+
+    for (uint64_t sample_idx = start_sample; sample_idx < end_sample; sample_idx++) {
+        if (mpi_rank == 0 && verbose) {
+            std::cout << "\n--- Sample " << (sample_idx - start_sample + 1)
+                      << "/" << local_num_samples
+                      << " (Global " << (sample_idx + 1) << "/" << params.num_samples
+                      << ") ---" << std::endl;
+        }
+
+        std::mt19937 sample_gen(params.random_seed + sample_idx * 12345);
+        ComplexVector r_state =
+            generateGaussianRandomVector(static_cast<int>(N), sample_gen);
+
+        // -------- shared per-sample work: outer Lanczos on H from |r> --------
+        std::vector<double> alpha_H, beta_H;
+        std::vector<ComplexVector> lanczos_vectors;
+        build_lanczos_tridiagonal_with_basis(
+            H, r_state, N, params.krylov_dim, params.tolerance,
+            params.full_reorthogonalization, params.reorth_frequency,
+            alpha_H, beta_H, &lanczos_vectors);
+        const uint64_t m_H = alpha_H.size();
+        if (m_H == 0) continue;
+
+        std::vector<double> ritz_values, dummy_w, evecs;
+        diagonalize_tridiagonal_ritz(alpha_H, beta_H, ritz_values, dummy_w, &evecs);
+        if (ritz_values.empty()) continue;
+
+        std::vector<double> c_sq(m_H);
+        for (uint64_t i = 0; i < m_H; i++) {
+            c_sq[i] = evecs[i * m_H + 0] * evecs[i * m_H + 0];
+        }
+        const double E_min =
+            *std::min_element(ritz_values.begin(), ritz_values.end());
+
+        // Significance threshold (use highest T to be most permissive).
+        const double T_max_local =
+            *std::max_element(temperatures.begin(), temperatures.end());
+        const double beta_min = 1.0 / T_max_local;
+        std::vector<double> max_weights(m_H);
+        double Z_max = 0.0;
+        for (uint64_t i = 0; i < m_H; i++) {
+            max_weights[i] = c_sq[i] *
+                std::exp(-beta_min * (ritz_values[i] - E_min));
+            Z_max += max_weights[i];
+        }
+        const double weight_threshold = 1e-10 * Z_max;
+        std::vector<uint64_t> significant;
+        significant.reserve(max_ritz_states);
+        for (uint64_t i = 0; i < std::min(m_H, max_ritz_states); i++) {
+            if (max_weights[i] >= weight_threshold || c_sq[i] > 1e-12) {
+                significant.push_back(i);
+            }
+        }
+
+        // -------- shared per-sample work: reconstruct Ritz eigenstates -------
+        // psi_cache[s] corresponds to significant[s], normalized.
+        std::vector<ComplexVector> psi_cache;
+        std::vector<bool> psi_valid;
+        psi_cache.reserve(significant.size());
+        psi_valid.reserve(significant.size());
+        for (uint64_t i_sig : significant) {
+            ComplexVector psi(N, Complex(0.0, 0.0));
+            for (uint64_t j = 0; j < m_H; j++) {
+                Complex coeff(evecs[i_sig * m_H + j], 0.0);
+                cblas_zaxpy(N, &coeff, lanczos_vectors[j].data(), 1,
+                            psi.data(), 1);
+            }
+            const double pn = cblas_dznrm2(N, psi.data(), 1);
+            if (pn < 1e-14) {
+                psi_cache.emplace_back();   // empty, marked invalid
+                psi_valid.push_back(false);
+                continue;
+            }
+            Complex sc(1.0/pn, 0.0);
+            cblas_zscal(N, &sc, psi.data(), 1);
+            psi_cache.push_back(std::move(psi));
+            psi_valid.push_back(true);
+        }
+
+        // Lanczos basis no longer needed -- free before the inner heavy loops.
+        lanczos_vectors.clear();
+        lanczos_vectors.shrink_to_fit();
+
+        // -------- per-pair work: inner Lanczos + Lehmann weights -------------
+        for (size_t p = 0; p < P; ++p) {
+            const auto& O1 = O1_list[p];
+            const auto& O2 = O2_list[p];
+
+            std::vector<Vec> precomputed_S_i(significant.size());
+            std::vector<Vec> precomputed_S_i_imag(significant.size());
+            std::vector<double> precomputed_E(significant.size(), 0.0);
+            std::vector<double> precomputed_csq(significant.size(), 0.0);
+            std::vector<bool>   state_valid(significant.size(), false);
+
+            for (size_t idx = 0; idx < significant.size(); ++idx) {
+                if (!psi_valid[idx]) continue;
+                const ComplexVector& psi_local = psi_cache[idx];
+
+                ComplexVector phi2(N);
+                O2(psi_local.data(), phi2.data(), N);
+                double phi2_norm = cblas_dznrm2(N, phi2.data(), 1);
+                if (phi2_norm < 1e-14) continue;
+                Complex sc2(1.0/phi2_norm, 0.0);
+                cblas_zscal(N, &sc2, phi2.data(), 1);
+
+                std::vector<double> alpha_S, beta_S;
+                std::vector<ComplexVector> basis_S;
+                build_lanczos_tridiagonal_with_basis(
+                    H, phi2, N, params.krylov_dim, params.tolerance,
+                    params.full_reorthogonalization, params.reorth_frequency,
+                    alpha_S, beta_S, &basis_S);
+                if (alpha_S.empty()) continue;
+                const uint64_t m_S = alpha_S.size();
+                for (uint64_t k = 0; k < m_S; k++) alpha_S[k] -= E_gs;
+
+                ComplexVector phi1(N);
+                O1(psi_local.data(), phi1.data(), N);
+                std::vector<Complex> phi1_overlaps(m_S);
+                for (uint64_t j = 0; j < m_S; j++) {
+                    Complex ov;
+                    cblas_zdotc_sub(N, phi1.data(), 1,
+                                    basis_S[j].data(), 1, &ov);
+                    phi1_overlaps[j] = ov;
+                }
+                basis_S.clear();
+                basis_S.shrink_to_fit();
+
+                std::vector<double> ritz_S, dum_S, evecs_S;
+                diagonalize_tridiagonal_ritz(alpha_S, beta_S,
+                                             ritz_S, dum_S, &evecs_S);
+                if (ritz_S.empty()) continue;
+
+                const uint64_t n_ritz = ritz_S.size();
+                Vec S_i(num_omega_bins, 0.0);
+                Vec S_i_im(num_omega_bins, 0.0);
+                std::vector<double> w_re(n_ritz), w_im(n_ritz), E_arr(n_ritz);
+                for (uint64_t k = 0; k < n_ritz; k++) {
+                    Complex ov_O1(0.0, 0.0);
+                    for (uint64_t j = 0; j < m_S; j++) {
+                        ov_O1 += Complex(evecs_S[k * m_S + j], 0.0)
+                                 * phi1_overlaps[j];
+                    }
+                    const double V_0k = evecs_S[k * m_S + 0];
+                    const Complex w_k = ov_O1 *
+                        Complex(V_0k * phi2_norm, 0.0);
+                    w_re[k]  = w_k.real();
+                    w_im[k]  = w_k.imag();
+                    E_arr[k] = ritz_S[k];
+                }
+                #pragma omp parallel for schedule(static)
+                for (uint64_t iw = 0; iw < num_omega_bins; iw++) {
+                    const double omega = frequencies[iw];
+                    double s_re = 0.0, s_im = 0.0;
+                    for (uint64_t k = 0; k < n_ritz; k++) {
+                        const double delta = omega - E_arr[k];
+                        const double L = inv_pi_eta /
+                                         (delta * delta + eta_sq);
+                        s_re += w_re[k] * L;
+                        s_im += w_im[k] * L;
+                    }
+                    S_i[iw]    = s_re;
+                    S_i_im[iw] = s_im;
+                }
+
+                precomputed_S_i[idx]      = std::move(S_i);
+                precomputed_S_i_imag[idx] = std::move(S_i_im);
+                precomputed_E[idx]        = ritz_values[significant[idx]];
+                precomputed_csq[idx]      = c_sq[significant[idx]];
+                state_valid[idx]          = true;
+            }
+
+            // Apply thermal weights for this pair p.
+            for (double T : temperatures) {
+                const double beta = 1.0 / T;
+                double Z_sample = 0.0;
+                for (size_t idx = 0; idx < significant.size(); ++idx) {
+                    if (!state_valid[idx]) continue;
+                    Z_sample += precomputed_csq[idx] *
+                        std::exp(-beta * (precomputed_E[idx] - E_min));
+                }
+                accumulated_Z[p][T] += Z_sample;
+
+                Vec sample_S(num_omega_bins, 0.0);
+                Vec sample_S_im(num_omega_bins, 0.0);
+                for (size_t idx = 0; idx < significant.size(); ++idx) {
+                    if (!state_valid[idx]) continue;
+                    const double th =
+                        precomputed_csq[idx] *
+                        std::exp(-beta * (precomputed_E[idx] - E_min));
+                    if (th < 1e-14 * Z_sample) continue;
+                    const auto& Si  = precomputed_S_i[idx];
+                    const auto& Sii = precomputed_S_i_imag[idx];
+                    for (uint64_t iw = 0; iw < num_omega_bins; iw++) {
+                        const double a  = th * Si[iw];
+                        const double ai = th * Sii[iw];
+                        sample_S[iw]    += a;
+                        sample_S_im[iw] += ai;
+                        accumulated_spectral[p][T][iw]      += a;
+                        accumulated_spectral_imag[p][T][iw] += ai;
+                    }
+                }
+                if (Z_sample > 1e-300) {
+                    Vec ns(num_omega_bins), ni(num_omega_bins);
+                    for (uint64_t iw = 0; iw < num_omega_bins; iw++) {
+                        ns[iw] = sample_S[iw]    / Z_sample;
+                        ni[iw] = sample_S_im[iw] / Z_sample;
+                    }
+                    per_sample_spectral[p][T].push_back(std::move(ns));
+                    per_sample_spectral_imag[p][T].push_back(std::move(ni));
+                }
+            }
+        } // end pairs
+    } // end samples
+
+#ifdef WITH_MPI
+    MPI_Barrier(MPI_COMM_WORLD);
+    for (size_t p = 0; p < P; ++p) {
+        for (double T : temperatures) {
+            Vec gS(num_omega_bins, 0.0), gSi(num_omega_bins, 0.0);
+            double gZ = 0.0;
+            MPI_Reduce(accumulated_spectral[p][T].data(), gS.data(),
+                       num_omega_bins, MPI_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD);
+            MPI_Reduce(accumulated_spectral_imag[p][T].data(), gSi.data(),
+                       num_omega_bins, MPI_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD);
+            MPI_Reduce(&accumulated_Z[p][T], &gZ, 1,
+                       MPI_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD);
+            if (mpi_rank == 0) {
+                accumulated_spectral[p][T]      = std::move(gS);
+                accumulated_spectral_imag[p][T] = std::move(gSi);
+                accumulated_Z[p][T]             = gZ;
+            }
+        }
+    }
+    uint64_t global_total_samples = 0;
+    MPI_Reduce(&local_num_samples, &global_total_samples, 1,
+               MPI_UINT64_T, MPI_SUM, 0, MPI_COMM_WORLD);
+#else
+    uint64_t global_total_samples = local_num_samples;
+#endif
+
+    std::vector<std::map<double, DynamicalResponseResults>> out(P);
+    for (size_t p = 0; p < P; ++p) {
+        for (double T : temperatures) {
+            DynamicalResponseResults r;
+            r.frequencies = frequencies;
+            r.omega_min = omega_min;
+            r.omega_max = omega_max;
+            r.total_samples = (mpi_rank == 0) ? global_total_samples
+                                              : local_num_samples;
+            r.spectral_function.assign(num_omega_bins, 0.0);
+            r.spectral_function_imag.assign(num_omega_bins, 0.0);
+            r.spectral_error.assign(num_omega_bins, 0.0);
+            r.spectral_error_imag.assign(num_omega_bins, 0.0);
+            const double Zt = accumulated_Z[p][T];
+            if (mpi_rank == 0 && Zt > 1e-300) {
+                for (uint64_t iw = 0; iw < num_omega_bins; iw++) {
+                    r.spectral_function[iw] =
+                        accumulated_spectral[p][T][iw] / Zt;
+                    r.spectral_function_imag[iw] =
+                        accumulated_spectral_imag[p][T][iw] / Zt;
+                }
+                const uint64_t ns = per_sample_spectral[p][T].size();
+                if (ns > 1 && mpi_size == 1) {
+                    Vec mean(num_omega_bins, 0.0), mean_i(num_omega_bins, 0.0);
+                    for (uint64_t s = 0; s < ns; s++) {
+                        for (uint64_t iw = 0; iw < num_omega_bins; iw++) {
+                            mean[iw]   += per_sample_spectral[p][T][s][iw];
+                            mean_i[iw] += per_sample_spectral_imag[p][T][s][iw];
+                        }
+                    }
+                    for (uint64_t iw = 0; iw < num_omega_bins; iw++) {
+                        mean[iw]   /= ns;
+                        mean_i[iw] /= ns;
+                    }
+                    for (uint64_t s = 0; s < ns; s++) {
+                        for (uint64_t iw = 0; iw < num_omega_bins; iw++) {
+                            const double d  = per_sample_spectral[p][T][s][iw]
+                                              - mean[iw];
+                            const double di = per_sample_spectral_imag[p][T][s][iw]
+                                              - mean_i[iw];
+                            r.spectral_error[iw]      += d * d;
+                            r.spectral_error_imag[iw] += di * di;
+                        }
+                    }
+                    const double nrm =
+                        std::sqrt(static_cast<double>(ns * (ns - 1)));
+                    for (uint64_t iw = 0; iw < num_omega_bins; iw++) {
+                        r.spectral_error[iw]      = std::sqrt(r.spectral_error[iw]) / nrm;
+                        r.spectral_error_imag[iw] = std::sqrt(r.spectral_error_imag[iw]) / nrm;
+                    }
+                }
+            }
+            out[p][T] = std::move(r);
+        }
+    }
+    return out;
+}
+
+// ============================================================================
 // GROUND STATE DYNAMICAL STRUCTURE FACTOR (CONTINUED FRACTION METHOD)
 // ============================================================================
 
