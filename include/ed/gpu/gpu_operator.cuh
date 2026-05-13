@@ -363,6 +363,21 @@ protected:
 };
 
 /**
+ * Open-addressing hash entry for fixed-Sz state -> basis-index lookup.
+ *
+ * Stored device-side. Empty slots use key == UINT64_MAX (set via cudaMemset 0xFF).
+ * Layout: 16 bytes (key 8 + value 4 + pad 4), naturally aligned for 64-bit loads.
+ */
+struct GPUStateLookupEntry {
+    uint64_t key;     // basis state bitmask (UINT64_MAX = empty)
+    int32_t  value;   // index into basis_states[] (-1 = unused)
+    int32_t  _pad;    // align to 16 bytes
+
+    __host__ __device__ GPUStateLookupEntry()
+        : key(static_cast<uint64_t>(-1)), value(-1), _pad(0) {}
+};
+
+/**
  * GPU-accelerated Fixed Sz Operator class
  * Optimized for fixed magnetization sectors
  */
@@ -385,6 +400,11 @@ public:
     
     // Build basis states on GPU
     void buildBasisOnGPU();
+
+    // Build open-addressing hash table state -> basis_idx on GPU
+    // (sized to next power of two >= 2 * fixed_sz_dim_, load factor <= 0.5).
+    // No-op if hash already built or env ED_GPU_FIXED_SZ_HASH=0.
+    void buildStateHashOnGPU();
     
     // Get basis dimension
     int getFixedSzDimension() const { return fixed_sz_dim_; }
@@ -404,6 +424,13 @@ private:
     
     // Basis states stored on GPU
     uint64_t* d_basis_states_;
+
+    // Open-addressing hash table for state -> basis_idx (O(1) avg lookup)
+    // d_state_hash_ == nullptr signals "not built" -> kernels fall back to
+    // binary search on basis_states. state_hash_size_ is a power of two.
+    GPUStateLookupEntry* d_state_hash_      = nullptr;
+    int                  state_hash_size_   = 0;  // power of 2, mask = size-1
+    bool                 use_hash_          = true;
 };
 
 // CUDA kernel declarations
@@ -437,6 +464,43 @@ void ensure_pascal_uploaded();
 
 // State lookup (binary search)
 __device__ int lookupState(uint64_t state, const void* basis_states_ptr, int num_states);
+
+// ============================================================================
+// Hash-table accelerated fixed-Sz matvec kernels (Phase X optimization)
+// Replace per-element O(log N) binary search with O(1) avg open-addressing
+// hash lookup. Hash table is built once in GPUFixedSzOperator::buildStateHashOnGPU().
+// Hash size is a power of two; modulo replaced by bitmask in the lookup.
+// ============================================================================
+
+// One-pass build kernel: each thread inserts one basis state into the hash
+// using atomicCAS on the 64-bit key. Empty key sentinel = UINT64_MAX.
+__global__ void buildStateHashKernel(GPUStateLookupEntry* table,
+                                     int table_size,        // power of 2
+                                     uint32_t table_mask,   // = table_size - 1
+                                     const uint64_t* basis_states,
+                                     int num_states);
+
+// Hash-lookup variant of matVecFixedSzTransformParallel. Same 2D launch grid.
+__global__ void matVecFixedSzTransformParallelHash(const cuDoubleComplex* x,
+                                                   cuDoubleComplex* y,
+                                                   const uint64_t* basis_states,
+                                                   const GPUStateLookupEntry* hash_table,
+                                                   int hash_table_size,
+                                                   uint32_t hash_table_mask,
+                                                   const GPUTransformData* transforms,
+                                                   int num_transforms,
+                                                   int N, int n_sites, float spin_l);
+
+// Hash-lookup variant of matVecFixedSzKernelOptimized.
+__global__ void matVecFixedSzKernelOptimizedHash(const cuDoubleComplex* x,
+                                                 cuDoubleComplex* y,
+                                                 const uint64_t* basis_states,
+                                                 const GPUStateLookupEntry* hash_table,
+                                                 int hash_table_size,
+                                                 uint32_t hash_table_mask,
+                                                 int N, int n_sites, float spin_l,
+                                                 const GPUTransformData* transforms,
+                                                 int num_transforms);
 
 // ============================================================================
 // MIXED-PRECISION CAST KERNELS (Phase 3a #3)

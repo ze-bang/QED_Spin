@@ -30,21 +30,40 @@ GPUFixedSzOperator::GPUFixedSzOperator(int n_sites, int n_up, float spin_l)
     
     fixed_sz_dim_ = binomial(n_sites, n_up);
     dimension_ = fixed_sz_dim_;  // Override full dimension
-    
+
+    // Hash table opt-in (default ON). Set ED_GPU_FIXED_SZ_HASH=0 to fall back
+    // to binary-search lookup (used for benchmarking / debugging).
+    {
+        const char* s = std::getenv("ED_GPU_FIXED_SZ_HASH");
+        use_hash_ = !(s && s[0] == '0');
+    }
+
     std::cout << "GPU Fixed Sz Operator initialized (OPTIMIZED)\n";
     std::cout << "  Sites: " << n_sites << ", N_up: " << n_up << "\n";
     std::cout << "  Fixed Sz dimension: " << fixed_sz_dim_ << "\n";
     std::cout << "  Reduction factor: " << (1 << n_sites) / (double)fixed_sz_dim_ << "x\n";
-    std::cout << "  State lookup: Binary search (warp-coherent)\n";
-    
+    std::cout << "  State lookup: " << (use_hash_ ? "Hash table (open addressing, O(1) avg)"
+                                                  : "Binary search (warp-coherent)") << "\n";
+
     // Build basis on GPU
     buildBasisOnGPU();
+
+    // Build hash table after basis is on device. Skip if disabled or if
+    // we cannot fit the table in remaining device memory.
+    if (use_hash_) {
+        buildStateHashOnGPU();
+    }
 }
 
 GPUFixedSzOperator::~GPUFixedSzOperator() {
     if (d_basis_states_) {
         cudaFree(d_basis_states_);
         d_basis_states_ = nullptr;
+    }
+    if (d_state_hash_) {
+        cudaFree(d_state_hash_);
+        d_state_hash_ = nullptr;
+        state_hash_size_ = 0;
     }
 }
 
@@ -73,7 +92,61 @@ void GPUFixedSzOperator::buildBasisOnGPU() {
     // downstream API call.)
 
     std::cout << "  Basis generation complete (combinadic unrank, naturally sorted)\n";
-    std::cout << "  State lookup optimized: Binary search O(log N) with no warp divergence\n";
+}
+
+void GPUFixedSzOperator::buildStateHashOnGPU() {
+    if (!use_hash_) return;
+    if (d_state_hash_ != nullptr) return;  // already built
+
+    // Pick power-of-two table size with load factor <= 0.5.
+    // (load factor 0.5 keeps avg probe count ~1.5; max ~log N very rare.)
+    int target = static_cast<int>(2 * static_cast<int64_t>(fixed_sz_dim_));
+    int p = 1;
+    while (p < target) p <<= 1;
+    state_hash_size_ = p;
+    uint32_t mask = static_cast<uint32_t>(p - 1);
+
+    size_t hash_bytes = static_cast<size_t>(state_hash_size_) * sizeof(GPUStateLookupEntry);
+
+    // Memory guard: skip hash if it would exceed remaining device memory.
+    size_t free_bytes = 0, total_bytes = 0;
+    cudaMemGetInfo(&free_bytes, &total_bytes);
+    // Leave a 2 GB buffer for transient allocations (Lanczos vectors etc).
+    const size_t kSafetyBuffer = static_cast<size_t>(2) << 30;
+    if (hash_bytes + kSafetyBuffer > free_bytes) {
+        std::cout << "  [hash] insufficient device memory ("
+                  << (hash_bytes >> 20) << " MiB needed, "
+                  << (free_bytes  >> 20) << " MiB free) — falling back to binary search\n";
+        use_hash_ = false;
+        state_hash_size_ = 0;
+        return;
+    }
+
+    cudaError_t err = cudaMalloc(&d_state_hash_, hash_bytes);
+    if (err != cudaSuccess) {
+        std::cout << "  [hash] cudaMalloc failed for "
+                  << (hash_bytes >> 20) << " MiB ("
+                  << cudaGetErrorString(err) << ") — falling back to binary search\n";
+        use_hash_ = false;
+        state_hash_size_ = 0;
+        d_state_hash_ = nullptr;
+        return;
+    }
+
+    // Initialize all keys to UINT64_MAX (= 0xFF byte fill) and values to -1.
+    // Both fields are -1 under 0xFF, which matches GPUStateLookupEntry default.
+    CUDA_CHECK(cudaMemset(d_state_hash_, 0xFF, hash_bytes));
+
+    int build_blocks = (fixed_sz_dim_ + BLOCK_SIZE - 1) / BLOCK_SIZE;
+    GPUKernels::buildStateHashKernel<<<build_blocks, BLOCK_SIZE>>>(
+        d_state_hash_, state_hash_size_, mask,
+        d_basis_states_, fixed_sz_dim_);
+    CUDA_CHECK(cudaGetLastError());
+    CUDA_CHECK(cudaDeviceSynchronize());
+
+    std::cout << "  [hash] built table: " << state_hash_size_ << " slots, "
+              << (hash_bytes >> 20) << " MiB, load factor "
+              << (static_cast<double>(fixed_sz_dim_) / state_hash_size_) << "\n";
 }
 
 void GPUFixedSzOperator::matVecFixedSz(const cuDoubleComplex* d_x, cuDoubleComplex* d_y) {
@@ -105,22 +178,40 @@ void GPUFixedSzOperator::matVecFixedSz(const cuDoubleComplex* d_x, cuDoubleCompl
             copyTransformDataToDevice();
         }
 
+        const bool hash_ready = (d_state_hash_ != nullptr) && (state_hash_size_ > 0);
+        const uint32_t hash_mask = hash_ready ? static_cast<uint32_t>(state_hash_size_ - 1) : 0u;
+
         const int TRANSFORM_PARALLEL_THRESHOLD = 64;
         if (num_transforms_ > TRANSFORM_PARALLEL_THRESHOLD) {
             CUDA_CHECK(cudaMemset(d_y, 0, fixed_sz_dim_ * sizeof(cuDoubleComplex)));
             dim3 block(16, 16);
             dim3 grid((fixed_sz_dim_ + block.x - 1) / block.x,
                      (num_transforms_ + block.y - 1) / block.y);
-            GPUKernels::matVecFixedSzTransformParallel<<<grid, block>>>(
-                d_x, d_y, d_basis_states_,
-                d_transform_data_, num_transforms_, fixed_sz_dim_, n_sites_, spin_l_);
+            if (hash_ready) {
+                GPUKernels::matVecFixedSzTransformParallelHash<<<grid, block>>>(
+                    d_x, d_y, d_basis_states_,
+                    d_state_hash_, state_hash_size_, hash_mask,
+                    d_transform_data_, num_transforms_, fixed_sz_dim_, n_sites_, spin_l_);
+            } else {
+                GPUKernels::matVecFixedSzTransformParallel<<<grid, block>>>(
+                    d_x, d_y, d_basis_states_,
+                    d_transform_data_, num_transforms_, fixed_sz_dim_, n_sites_, spin_l_);
+            }
         } else {
             CUDA_CHECK(cudaMemset(d_y, 0, fixed_sz_dim_ * sizeof(cuDoubleComplex)));
             size_t shared_mem_size = std::min(num_transforms_, 4096) * sizeof(GPUTransformData);
-            GPUKernels::matVecFixedSzKernelOptimized<<<num_blocks, BLOCK_SIZE, shared_mem_size>>>(
-                d_x, d_y, d_basis_states_,
-                fixed_sz_dim_, n_sites_, spin_l_,
-                d_transform_data_, num_transforms_);
+            if (hash_ready) {
+                GPUKernels::matVecFixedSzKernelOptimizedHash<<<num_blocks, BLOCK_SIZE, shared_mem_size>>>(
+                    d_x, d_y, d_basis_states_,
+                    d_state_hash_, state_hash_size_, hash_mask,
+                    fixed_sz_dim_, n_sites_, spin_l_,
+                    d_transform_data_, num_transforms_);
+            } else {
+                GPUKernels::matVecFixedSzKernelOptimized<<<num_blocks, BLOCK_SIZE, shared_mem_size>>>(
+                    d_x, d_y, d_basis_states_,
+                    fixed_sz_dim_, n_sites_, spin_l_,
+                    d_transform_data_, num_transforms_);
+            }
         }
     } else {
         std::cerr << "Error: GPUFixedSzOperator::matVecFixedSz called with no transform data" << std::endl;

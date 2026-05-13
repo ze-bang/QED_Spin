@@ -278,6 +278,275 @@ __device__ int lookupState(uint64_t state, const void* basis_states_ptr, int num
     return -1;  // Not found
 }
 
+// ============================================================================
+// HASH-LOOKUP FAST PATH (Phase X)
+//
+// Drop-in replacement for the binary search above. Each thread does
+//   slot = (key * GOLDEN_RATIO_64) & (table_size - 1)
+// then linearly probes until the matching key is found or an empty slot
+// (UINT64_MAX) is hit. Average probe count at load factor 0.5 is ~1.5.
+//
+// Memory model: table is read-only for the matvec, so __ldg is used. Each
+// probe is one 16-byte load (key+value). At dim=601M, table is ~19 GB
+// (load factor 0.5). The hot fast path (probe == 0) is ONE random global
+// read per (state, transform) pair, vs ~28 reads for binary search at
+// the same N.
+// ============================================================================
+
+__device__ __forceinline__ int lookupStateHashFixedSz(uint64_t key,
+                                                      const GPUStateLookupEntry* table,
+                                                      int table_size,
+                                                      uint32_t table_mask) {
+    // Fibonacci / golden-ratio hash for good avalanche on bit-packed states.
+    uint64_t hash = key * 11400714819323198485ULL;
+    uint32_t slot = static_cast<uint32_t>(hash) & table_mask;
+
+    // Bounded probe: with load factor <= 0.5 we expect ~1.5 probes avg.
+    // Cap at table_size to make the loop provably terminating; in practice
+    // we exit on the first hit or empty slot.
+    for (int probe = 0; probe < table_size; ++probe) {
+        // Single 16-byte load via __ldg-friendly reads. We split into two
+        // reads so the 64-bit key load is naturally aligned.
+        uint64_t k = __ldg(&table[slot].key);
+        if (k == key) {
+            return __ldg(&table[slot].value);
+        }
+        if (k == static_cast<uint64_t>(-1)) {
+            return -1;  // empty slot — key not present in this sector
+        }
+        slot = (slot + 1u) & table_mask;
+    }
+    return -1;
+}
+
+/**
+ * Build the open-addressing hash table for fixed-Sz state lookup.
+ * Each thread inserts one basis state via atomicCAS on the 64-bit key.
+ * Caller must initialize `table[i].key = UINT64_MAX` (e.g. via cudaMemset 0xFF)
+ * before launching.
+ */
+__global__ void buildStateHashKernel(GPUStateLookupEntry* table,
+                                     int table_size,
+                                     uint32_t table_mask,
+                                     const uint64_t* basis_states,
+                                     int num_states) {
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid >= num_states) return;
+
+    uint64_t key = basis_states[tid];
+    uint64_t hash = key * 11400714819323198485ULL;
+    uint32_t slot = static_cast<uint32_t>(hash) & table_mask;
+
+    // Linear probe with atomicCAS until we claim an empty slot.
+    // Basis states are unique by construction (combinadic enumeration), so
+    // we never collide on identical keys; only on hash collisions.
+    for (int probe = 0; probe < table_size; ++probe) {
+        unsigned long long* k_ptr =
+            reinterpret_cast<unsigned long long*>(&table[slot].key);
+        unsigned long long prev = atomicCAS(k_ptr,
+                                            static_cast<unsigned long long>(-1),
+                                            static_cast<unsigned long long>(key));
+        if (prev == static_cast<unsigned long long>(-1)) {
+            // Won the slot. value write is safe — no other thread will look
+            // here until we exit this kernel (no concurrent matvecs).
+            table[slot].value = tid;
+            return;
+        }
+        slot = (slot + 1u) & table_mask;
+    }
+    // Should never reach here when load factor < 1.
+}
+
+/**
+ * Hash-lookup variant of matVecFixedSzTransformParallel.
+ * Identical semantics to the binary-search version, but the per-(state,
+ * transform) "lookup new_state -> new_idx" call is O(1) avg instead of
+ * O(log N).
+ */
+__global__ void matVecFixedSzTransformParallelHash(const cuDoubleComplex* x,
+                                                   cuDoubleComplex* y,
+                                                   const uint64_t* basis_states,
+                                                   const GPUStateLookupEntry* hash_table,
+                                                   int hash_table_size,
+                                                   uint32_t hash_table_mask,
+                                                   const GPUTransformData* transforms,
+                                                   int num_transforms,
+                                                   int N, int n_sites, float spin_l) {
+    int state_idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int transform_idx = blockIdx.y * blockDim.y + threadIdx.y;
+
+    if (state_idx >= N || transform_idx >= num_transforms) return;
+
+    uint64_t state = basis_states[state_idx];
+    const GPUTransformData& tdata = transforms[transform_idx];
+
+    cuDoubleComplex factor = tdata.coefficient;
+    uint64_t new_state = state;
+    bool valid = true;
+
+    if (tdata.is_two_body) {
+        uint64_t bit1 = (state >> tdata.site_index) & 1;
+        if (tdata.op_type == 2) {
+            double sign = spin_l * ((bit1 == 0) ? 1.0 : -1.0);
+            factor = complex_scale(factor, sign);
+        } else {
+            if (bit1 != tdata.op_type) {
+                new_state ^= (1ULL << tdata.site_index);
+            } else {
+                valid = false;
+            }
+        }
+        if (valid) {
+            uint64_t bit2_new = (new_state >> tdata.site_index_2) & 1;
+            if (tdata.op_type_2 == 2) {
+                double sign = spin_l * ((bit2_new == 0) ? 1.0 : -1.0);
+                factor = complex_scale(factor, sign);
+            } else {
+                if (bit2_new != tdata.op_type_2) {
+                    new_state ^= (1ULL << tdata.site_index_2);
+                } else {
+                    valid = false;
+                }
+            }
+        }
+    } else {
+        uint64_t bit = (state >> tdata.site_index) & 1;
+        if (tdata.op_type == 2) {
+            double sign = spin_l * ((bit == 0) ? 1.0 : -1.0);
+            factor = complex_scale(factor, sign);
+        } else {
+            if (bit != tdata.op_type) {
+                new_state ^= (1ULL << tdata.site_index);
+            } else {
+                valid = false;
+            }
+        }
+    }
+
+    if (valid) {
+        // Diagonal short-circuit: if the operator left the state unchanged
+        // (e.g. SzSz), we can skip the hash lookup entirely.
+        int new_idx = (new_state == state)
+            ? state_idx
+            : lookupStateHashFixedSz(new_state, hash_table,
+                                      hash_table_size, hash_table_mask);
+        if (new_idx >= 0) {
+            cuDoubleComplex x_val = __ldg(&x[state_idx]);
+            cuDoubleComplex contrib = cuCmul(factor, x_val);
+            atomicAddDouble(&y[new_idx].x, cuCreal(contrib));
+            atomicAddDouble(&y[new_idx].y, cuCimag(contrib));
+        }
+    }
+}
+
+/**
+ * Hash-lookup variant of matVecFixedSzKernelOptimized (transforms in
+ * shared memory, inner loop over t = 0..num_transforms-1).
+ */
+__global__ void matVecFixedSzKernelOptimizedHash(const cuDoubleComplex* x,
+                                                 cuDoubleComplex* y,
+                                                 const uint64_t* basis_states,
+                                                 const GPUStateLookupEntry* hash_table,
+                                                 int hash_table_size,
+                                                 uint32_t hash_table_mask,
+                                                 int N, int n_sites, float spin_l,
+                                                 const GPUTransformData* transforms,
+                                                 int num_transforms) {
+    extern __shared__ GPUTransformData s_transforms[];
+
+    int num_loads = (num_transforms + blockDim.x - 1) / blockDim.x;
+    for (int i = 0; i < num_loads; ++i) {
+        int tidx = i * blockDim.x + threadIdx.x;
+        if (tidx < num_transforms) {
+            s_transforms[tidx] = transforms[tidx];
+        }
+    }
+    __syncthreads();
+
+    int grid_stride = blockDim.x * gridDim.x;
+
+    for (int idx = blockIdx.x * blockDim.x + threadIdx.x; idx < N; idx += grid_stride) {
+        uint64_t state = basis_states[idx];
+        cuDoubleComplex x_val = __ldg(&x[idx]);
+
+        const GPUTransformData* t_data = (num_transforms <= 4096) ? s_transforms : transforms;
+
+        #pragma unroll 4
+        for (int t = 0; t < num_transforms; ++t) {
+            const GPUTransformData& tdata = t_data[t];
+
+            if (tdata.is_two_body) {
+                uint64_t bit1 = (state >> tdata.site_index) & 1;
+                uint64_t new_state = state;
+                cuDoubleComplex factor = tdata.coefficient;
+                bool valid = true;
+
+                if (tdata.op_type == 2) {
+                    double sign = spin_l * ((bit1 == 0) ? 1.0 : -1.0);
+                    factor = complex_scale(factor, sign);
+                } else {
+                    if (bit1 != tdata.op_type) {
+                        new_state ^= (1ULL << tdata.site_index);
+                    } else {
+                        valid = false;
+                    }
+                }
+                if (valid) {
+                    uint64_t bit2_new = (new_state >> tdata.site_index_2) & 1;
+                    if (tdata.op_type_2 == 2) {
+                        double sign = spin_l * ((bit2_new == 0) ? 1.0 : -1.0);
+                        factor = complex_scale(factor, sign);
+                    } else {
+                        if (bit2_new != tdata.op_type_2) {
+                            new_state ^= (1ULL << tdata.site_index_2);
+                        } else {
+                            valid = false;
+                        }
+                    }
+                }
+                if (valid) {
+                    int new_idx = (new_state == state)
+                        ? idx
+                        : lookupStateHashFixedSz(new_state, hash_table,
+                                                  hash_table_size, hash_table_mask);
+                    if (new_idx >= 0) {
+                        cuDoubleComplex contrib = cuCmul(factor, x_val);
+                        atomicAddDouble(&y[new_idx].x, cuCreal(contrib));
+                        atomicAddDouble(&y[new_idx].y, cuCimag(contrib));
+                    }
+                }
+            } else {
+                uint64_t bit = (state >> tdata.site_index) & 1;
+                uint64_t new_state = state;
+                cuDoubleComplex factor = tdata.coefficient;
+                bool valid = true;
+
+                if (tdata.op_type == 2) {
+                    double sign = spin_l * ((bit == 0) ? 1.0 : -1.0);
+                    factor = complex_scale(factor, sign);
+                } else {
+                    if (bit != tdata.op_type) {
+                        new_state ^= (1ULL << tdata.site_index);
+                    } else {
+                        valid = false;
+                    }
+                }
+                if (valid) {
+                    int new_idx = (new_state == state)
+                        ? idx
+                        : lookupStateHashFixedSz(new_state, hash_table,
+                                                  hash_table_size, hash_table_mask);
+                    if (new_idx >= 0) {
+                        cuDoubleComplex contrib = cuCmul(factor, x_val);
+                        atomicAddDouble(&y[new_idx].x, cuCreal(contrib));
+                        atomicAddDouble(&y[new_idx].y, cuCimag(contrib));
+                    }
+                }
+            }
+        }
+    }
+}
+
 /**
  * ULTRA-OPTIMIZED: Fixed-Sz matrix-vector product using Structure-of-Arrays
  * 
