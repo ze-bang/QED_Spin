@@ -60,6 +60,7 @@
 #include <ed/core/fixed_sz_operator.h>
 #include <ed/core/fixed_sz_operator_types.h>
 #include <ed/solvers/ftlm.h>
+#include <ed/solvers/ftlm_dist.h>
 #include <ed/solvers/kpm_dos.h>
 #include <ed/solvers/ltlm.h>
 #include <ed/solvers/observables.h>
@@ -1167,6 +1168,53 @@ void compute_dynamical_response_workflow(const EDConfig& config) {
         };
 
         // ============================================================
+        // Audit #4: comm-aware variant of process_operator_all_temps.
+        // Used by the MPI_Comm_split orchestration path below so that
+        // each subgroup runs FTLM independently on its own communicator
+        // (sample reductions stay local to the subgroup) and only the
+        // subgroup's rank-0 returns the per-T results map. CPU only;
+        // GPU and single-sample paths fall back to per-world-rank
+        // execution and are not split.
+        // ============================================================
+#ifdef WITH_MPI
+        auto process_operator_all_temps_on_comm =
+            [&](int op_idx, MPI_Comm comm)
+                -> std::map<double, DynamicalResponseResults> {
+            int local_rank = 0;
+            MPI_Comm_rank(comm, &local_rank);
+            if (local_rank == 0) {
+                std::cout << "  [op-group leader, world rank " << rank
+                          << "] " << names[op_idx]
+                          << " (" << temperatures.size() << " temps) on "
+                          << "subgroup\n";
+            }
+            auto O1_func = [&obs_1, op_idx]
+                (const Complex* in, Complex* out, uint64_t dim) {
+                    obs_1[op_idx].apply(in, out, dim);
+                };
+            auto O2_func = [&obs_2, op_idx]
+                (const Complex* in, Complex* out, uint64_t dim) {
+                    obs_2[op_idx].apply(in, out, dim);
+                };
+            // Single-sample path also goes through the standard CPU
+            // multi-sample multi-T kernel here (with num_samples=1) so
+            // the comm parameter is honored. The state-based optimization
+            // is skipped in this branch -- it doesn't move the needle
+            // when each subgroup already has reduced sample count.
+            return ed::dssf::
+                compute_dynamical_correlation_multi_sample_multi_temperature_comm(
+                    H_func, O1_func, O2_func, N, params,
+                    config.dynamical.omega_min,
+                    config.dynamical.omega_max,
+                    config.dynamical.num_omega_points,
+                    temperatures,
+                    ground_state_energy,
+                    config.workflow.output_dir,
+                    comm);
+        };
+#endif
+
+        // ============================================================
         // Multi-operator dispatcher (item #7): processes ALL operator
         // pairs in a single call so that the per-sample H-Lanczos chain
         // (and the cached Ritz eigenstates) are reused across pairs
@@ -1264,11 +1312,106 @@ void compute_dynamical_response_workflow(const EDConfig& config) {
             // uses MPI collectives (Barrier, Reduce) internally for sample distribution.
             // The master-worker pattern would cause collective mismatches since
             // different ranks would be processing different operators.
+            //
+            // Audit #4: when num_operators > 1 and CPU multi-sample (no
+            // GPU, no shared-Lanczos), split MPI_COMM_WORLD into
+            // op_groups so subgroups handle distinct operators in
+            // parallel. Each subgroup runs FTLM on its own communicator;
+            // HDF5 writes are serialized across subgroup leaders to
+            // avoid concurrent writers on the same file.
             // ============================================================
+            const bool gpu_path_active =
+#ifdef WITH_CUDA
+                config.dynamical.use_gpu;
+#else
+                false;
+#endif
+            const int num_op_groups =
+                std::min<int>(num_operators, size);
+            const bool can_split =
+                !use_shared_lanczos_multi_op &&
+                !gpu_path_active &&
+                (num_op_groups > 1) &&
+                (params.num_samples >= static_cast<uint64_t>(num_op_groups));
+
             if (use_shared_lanczos_multi_op) {
                 // One synchronized call across all ranks; the new
                 // multi-operator FTLM uses MPI collectives internally.
                 local_processed_count += process_all_operators_at_once_cpu();
+            } else if (can_split) {
+                if (rank == 0) {
+                    std::cout << "\n=== Audit #4: MPI_Comm_split into "
+                              << num_op_groups << " op-groups ("
+                              << (size / num_op_groups) << "-"
+                              << ((size + num_op_groups - 1) / num_op_groups)
+                              << " ranks per group, "
+                              << num_operators << " operators, "
+                              << params.num_samples << " samples) ===\n";
+                }
+                const int color = (rank * num_op_groups) / size;
+                MPI_Comm op_comm;
+                MPI_Comm_split(MPI_COMM_WORLD, color, rank, &op_comm);
+                int op_rank = 0;
+                MPI_Comm_rank(op_comm, &op_rank);
+
+                // Round-robin assignment of operators (by all_tasks order
+                // for load-balance reasons -- tasks are sorted heaviest
+                // first by weight above).
+                std::vector<int> my_ops;
+                for (int t = 0; t < num_tasks; t++) {
+                    if (t % num_op_groups == color) {
+                        my_ops.push_back(all_tasks[t].op_idx);
+                    }
+                }
+
+                // Run each assigned op on op_comm; cache (op_idx, results)
+                // on subgroup leader for serialized HDF5 write below.
+                std::vector<std::pair<int,
+                    std::map<double, DynamicalResponseResults>>> cached;
+                cached.reserve(my_ops.size());
+                for (int op_idx : my_ops) {
+                    auto results_map =
+                        process_operator_all_temps_on_comm(op_idx, op_comm);
+                    if (op_rank == 0) {
+                        cached.emplace_back(op_idx, std::move(results_map));
+                    }
+                    local_processed_count++;
+                }
+
+                // Serialized HDF5 writes: each subgroup leader writes its
+                // cached operators in order; non-leaders just barrier.
+                for (int g = 0; g < num_op_groups; g++) {
+                    if (color == g && op_rank == 0) {
+                        std::string h5_file =
+                            HDF5IO::createOrOpenFile(config.workflow.output_dir);
+                        for (auto& kv : cached) {
+                            int op_idx = kv.first;
+                            auto& rm = kv.second;
+                            for (auto& tv : rm) {
+                                double temperature = tv.first;
+                                auto& results = tv.second;
+                                std::string op_name = names[op_idx];
+                                if (temperatures.size() > 1) {
+                                    op_name += "_T" + std::to_string(temperature);
+                                }
+                                HDF5IO::saveDynamicalResponseFull(
+                                    h5_file, op_name,
+                                    results.frequencies,
+                                    results.spectral_function,
+                                    results.spectral_function_imag,
+                                    results.spectral_error,
+                                    results.spectral_error_imag,
+                                    results.total_samples, temperature);
+                            }
+                        }
+                        std::cout << "  [Group " << g
+                                  << " leader, world rank " << rank
+                                  << "] wrote " << cached.size()
+                                  << " operator(s) to HDF5\n";
+                    }
+                    MPI_Barrier(MPI_COMM_WORLD);
+                }
+                MPI_Comm_free(&op_comm);
             } else {
                 for (int task_idx = 0; task_idx < num_tasks; task_idx++) {
                     const auto& task = all_tasks[task_idx];

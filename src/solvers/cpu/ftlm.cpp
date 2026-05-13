@@ -4,6 +4,7 @@
 #include <ed/parallel/thread_budget.h>  // Phase 6.1: dim-aware OMP+BLAS cap
 
 #include <ed/solvers/ftlm.h>
+#include <ed/solvers/ftlm_dist.h>
 #include <ed/solvers/lanczos.h>
 #include <cstdlib>
 #include <fstream>
@@ -3249,7 +3250,11 @@ std::map<double, DynamicalResponseResults> compute_dynamical_correlation_state_m
  * weights already capture the transition amplitudes - we only need the
  * thermal prefactor from the partition function.
  */
-std::map<double, DynamicalResponseResults> compute_dynamical_correlation_multi_sample_multi_temperature(
+// Implementation core for both the legacy MPI_COMM_WORLD entry point and the
+// audit-#4 MPI_Comm-aware overload. All MPI calls within use the `comm`
+// parameter (replaced from MPI_COMM_WORLD via sed during the refactor).
+static std::map<double, DynamicalResponseResults>
+compute_dynamical_correlation_multi_sample_multi_temperature_impl(
     std::function<void(const Complex*, Complex*, int)> H,
     std::function<void(const Complex*, Complex*, int)> O1,
     std::function<void(const Complex*, Complex*, int)> O2,
@@ -3261,11 +3266,14 @@ std::map<double, DynamicalResponseResults> compute_dynamical_correlation_multi_s
     const std::vector<double>& temperatures,
     double energy_shift,
     const std::string& output_dir
+#ifdef WITH_MPI
+    , MPI_Comm comm
+#endif
 ) {
     const bool verbose = ed_dssf_verbose();
     int mpi_rank_early = 0;
 #ifdef WITH_MPI
-    MPI_Comm_rank(MPI_COMM_WORLD, &mpi_rank_early);
+    MPI_Comm_rank(comm, &mpi_rank_early);
 #endif
 
     // Reject T <= 0 up-front: the inner thermal weight is exp(-β(E-E_min))
@@ -3372,8 +3380,8 @@ std::map<double, DynamicalResponseResults> compute_dynamical_correlation_multi_s
     // MPI parallelization: distribute samples across ranks
     int mpi_rank = 0, mpi_size = 1;
 #ifdef WITH_MPI
-    MPI_Comm_rank(MPI_COMM_WORLD, &mpi_rank);
-    MPI_Comm_size(MPI_COMM_WORLD, &mpi_size);
+    MPI_Comm_rank(comm, &mpi_rank);
+    MPI_Comm_size(comm, &mpi_size);
 #endif
     
     // Calculate sample distribution for this rank
@@ -3404,7 +3412,7 @@ std::map<double, DynamicalResponseResults> compute_dynamical_correlation_multi_s
     }
 
     // Synchronize before starting (always; correctness, not chatter)
-    MPI_Barrier(MPI_COMM_WORLD);
+    MPI_Barrier(comm);
 
     if (mpi_rank == 0 && verbose) {
         std::cout << "\nStarting parallel sample processing across " << mpi_size << " ranks...\n";
@@ -3745,7 +3753,7 @@ std::map<double, DynamicalResponseResults> compute_dynamical_correlation_multi_s
     
 #ifdef WITH_MPI
     // MPI Reduce: gather accumulated results from all ranks
-    MPI_Barrier(MPI_COMM_WORLD);
+    MPI_Barrier(comm);
     
     if (mpi_rank == 0 && verbose) {
         std::cout << "\n--- Gathering results from all MPI ranks ---\n";
@@ -3759,10 +3767,10 @@ std::map<double, DynamicalResponseResults> compute_dynamical_correlation_multi_s
         double global_Z = 0.0;
         
         MPI_Reduce(accumulated_spectral[T].data(), global_spectral.data(), 
-                   num_omega_bins, MPI_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD);
+                   num_omega_bins, MPI_DOUBLE, MPI_SUM, 0, comm);
         MPI_Reduce(accumulated_spectral_imag[T].data(), global_spectral_imag.data(), 
-                   num_omega_bins, MPI_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD);
-        MPI_Reduce(&accumulated_Z[T], &global_Z, 1, MPI_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD);
+                   num_omega_bins, MPI_DOUBLE, MPI_SUM, 0, comm);
+        MPI_Reduce(&accumulated_Z[T], &global_Z, 1, MPI_DOUBLE, MPI_SUM, 0, comm);
         
         // Only rank 0 needs the final values
         if (mpi_rank == 0) {
@@ -3774,7 +3782,7 @@ std::map<double, DynamicalResponseResults> compute_dynamical_correlation_multi_s
     
     // Gather total sample count for error estimation
     uint64_t global_total_samples = 0;
-    MPI_Reduce(&local_num_samples, &global_total_samples, 1, MPI_UINT64_T, MPI_SUM, 0, MPI_COMM_WORLD);
+    MPI_Reduce(&local_num_samples, &global_total_samples, 1, MPI_UINT64_T, MPI_SUM, 0, comm);
 #else
     uint64_t global_total_samples = local_num_samples;
 #endif
@@ -3882,8 +3890,8 @@ std::map<double, DynamicalResponseResults> compute_dynamical_correlation_multi_s
 // inner work (O2|psi_i>, sub-Lanczos, Lehmann weights) is unchanged. This is
 // item #7 from the audit: only the operator-independent setup is hoisted.
 // ============================================================================
-std::vector<std::map<double, DynamicalResponseResults>>
-compute_dynamical_correlation_multi_operator_multi_temperature(
+static std::vector<std::map<double, DynamicalResponseResults>>
+compute_dynamical_correlation_multi_operator_multi_temperature_impl(
     std::function<void(const Complex*, Complex*, int)> H,
     const std::vector<std::function<void(const Complex*, Complex*, int)>>& O1_list,
     const std::vector<std::function<void(const Complex*, Complex*, int)>>& O2_list,
@@ -3895,6 +3903,9 @@ compute_dynamical_correlation_multi_operator_multi_temperature(
     const std::vector<double>& temperatures,
     double energy_shift,
     const std::string& output_dir
+#ifdef WITH_MPI
+    , MPI_Comm comm
+#endif
 ) {
     if (O1_list.size() != O2_list.size()) {
         throw std::invalid_argument(
@@ -3909,7 +3920,7 @@ compute_dynamical_correlation_multi_operator_multi_temperature(
     const bool verbose = ed_dssf_verbose();
     int mpi_rank_early = 0;
 #ifdef WITH_MPI
-    MPI_Comm_rank(MPI_COMM_WORLD, &mpi_rank_early);
+    MPI_Comm_rank(comm, &mpi_rank_early);
 #endif
 
     for (double T : temperatures) {
@@ -3989,8 +4000,8 @@ compute_dynamical_correlation_multi_operator_multi_temperature(
 
     int mpi_rank = 0, mpi_size = 1;
 #ifdef WITH_MPI
-    MPI_Comm_rank(MPI_COMM_WORLD, &mpi_rank);
-    MPI_Comm_size(MPI_COMM_WORLD, &mpi_size);
+    MPI_Comm_rank(comm, &mpi_rank);
+    MPI_Comm_size(comm, &mpi_size);
 #endif
     uint64_t samples_per_rank = params.num_samples / mpi_size;
     uint64_t remainder        = params.num_samples % mpi_size;
@@ -4001,7 +4012,7 @@ compute_dynamical_correlation_multi_operator_multi_temperature(
     uint64_t local_num_samples = end_sample - start_sample;
 
 #ifdef WITH_MPI
-    MPI_Barrier(MPI_COMM_WORLD);
+    MPI_Barrier(comm);
 #endif
 
     uint64_t max_ritz_states = std::min(params.krylov_dim, (uint64_t)50);
@@ -4223,17 +4234,17 @@ compute_dynamical_correlation_multi_operator_multi_temperature(
     } // end samples
 
 #ifdef WITH_MPI
-    MPI_Barrier(MPI_COMM_WORLD);
+    MPI_Barrier(comm);
     for (size_t p = 0; p < P; ++p) {
         for (double T : temperatures) {
             Vec gS(num_omega_bins, 0.0), gSi(num_omega_bins, 0.0);
             double gZ = 0.0;
             MPI_Reduce(accumulated_spectral[p][T].data(), gS.data(),
-                       num_omega_bins, MPI_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD);
+                       num_omega_bins, MPI_DOUBLE, MPI_SUM, 0, comm);
             MPI_Reduce(accumulated_spectral_imag[p][T].data(), gSi.data(),
-                       num_omega_bins, MPI_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD);
+                       num_omega_bins, MPI_DOUBLE, MPI_SUM, 0, comm);
             MPI_Reduce(&accumulated_Z[p][T], &gZ, 1,
-                       MPI_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD);
+                       MPI_DOUBLE, MPI_SUM, 0, comm);
             if (mpi_rank == 0) {
                 accumulated_spectral[p][T]      = std::move(gS);
                 accumulated_spectral_imag[p][T] = std::move(gSi);
@@ -4243,7 +4254,7 @@ compute_dynamical_correlation_multi_operator_multi_temperature(
     }
     uint64_t global_total_samples = 0;
     MPI_Reduce(&local_num_samples, &global_total_samples, 1,
-               MPI_UINT64_T, MPI_SUM, 0, MPI_COMM_WORLD);
+               MPI_UINT64_T, MPI_SUM, 0, comm);
 #else
     uint64_t global_total_samples = local_num_samples;
 #endif
@@ -4305,6 +4316,107 @@ compute_dynamical_correlation_multi_operator_multi_temperature(
     }
     return out;
 }
+
+// ============================================================================
+// Public dispatch wrappers for the two FTLM dynamical-correlation kernels.
+// Audit #4: the heavy bodies above are MPI-Comm-aware (`comm` parameter);
+// these thin wrappers preserve the legacy MPI_COMM_WORLD-only API and
+// expose a parallel `_comm` API in `ed::dssf` for distributed-DSSF
+// orchestration via MPI_Comm_split.
+// ============================================================================
+std::map<double, DynamicalResponseResults>
+compute_dynamical_correlation_multi_sample_multi_temperature(
+    std::function<void(const Complex*, Complex*, int)> H,
+    std::function<void(const Complex*, Complex*, int)> O1,
+    std::function<void(const Complex*, Complex*, int)> O2,
+    uint64_t N,
+    const DynamicalResponseParameters& params,
+    double omega_min,
+    double omega_max,
+    uint64_t num_omega_bins,
+    const std::vector<double>& temperatures,
+    double energy_shift,
+    const std::string& output_dir
+) {
+    return compute_dynamical_correlation_multi_sample_multi_temperature_impl(
+        H, O1, O2, N, params, omega_min, omega_max, num_omega_bins,
+        temperatures, energy_shift, output_dir
+#ifdef WITH_MPI
+        , MPI_COMM_WORLD
+#endif
+    );
+}
+
+std::vector<std::map<double, DynamicalResponseResults>>
+compute_dynamical_correlation_multi_operator_multi_temperature(
+    std::function<void(const Complex*, Complex*, int)> H,
+    const std::vector<std::function<void(const Complex*, Complex*, int)>>& O1_list,
+    const std::vector<std::function<void(const Complex*, Complex*, int)>>& O2_list,
+    uint64_t N,
+    const DynamicalResponseParameters& params,
+    double omega_min,
+    double omega_max,
+    uint64_t num_omega_bins,
+    const std::vector<double>& temperatures,
+    double energy_shift,
+    const std::string& output_dir
+) {
+    return compute_dynamical_correlation_multi_operator_multi_temperature_impl(
+        H, O1_list, O2_list, N, params, omega_min, omega_max, num_omega_bins,
+        temperatures, energy_shift, output_dir
+#ifdef WITH_MPI
+        , MPI_COMM_WORLD
+#endif
+    );
+}
+
+#ifdef WITH_MPI
+namespace ed {
+namespace dssf {
+
+std::map<double, DynamicalResponseResults>
+compute_dynamical_correlation_multi_sample_multi_temperature_comm(
+    std::function<void(const Complex*, Complex*, int)> H,
+    std::function<void(const Complex*, Complex*, int)> O1,
+    std::function<void(const Complex*, Complex*, int)> O2,
+    uint64_t N,
+    const DynamicalResponseParameters& params,
+    double omega_min,
+    double omega_max,
+    uint64_t num_omega_bins,
+    const std::vector<double>& temperatures,
+    double energy_shift,
+    const std::string& output_dir,
+    MPI_Comm comm
+) {
+    return ::compute_dynamical_correlation_multi_sample_multi_temperature_impl(
+        H, O1, O2, N, params, omega_min, omega_max, num_omega_bins,
+        temperatures, energy_shift, output_dir, comm);
+}
+
+std::vector<std::map<double, DynamicalResponseResults>>
+compute_dynamical_correlation_multi_operator_multi_temperature_comm(
+    std::function<void(const Complex*, Complex*, int)> H,
+    const std::vector<std::function<void(const Complex*, Complex*, int)>>& O1_list,
+    const std::vector<std::function<void(const Complex*, Complex*, int)>>& O2_list,
+    uint64_t N,
+    const DynamicalResponseParameters& params,
+    double omega_min,
+    double omega_max,
+    uint64_t num_omega_bins,
+    const std::vector<double>& temperatures,
+    double energy_shift,
+    const std::string& output_dir,
+    MPI_Comm comm
+) {
+    return ::compute_dynamical_correlation_multi_operator_multi_temperature_impl(
+        H, O1_list, O2_list, N, params, omega_min, omega_max, num_omega_bins,
+        temperatures, energy_shift, output_dir, comm);
+}
+
+}  // namespace dssf
+}  // namespace ed
+#endif  // WITH_MPI
 
 // ============================================================================
 // GROUND STATE DYNAMICAL STRUCTURE FACTOR (CONTINUED FRACTION METHOD)
