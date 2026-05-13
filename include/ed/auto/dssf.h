@@ -20,6 +20,7 @@
 //     T absent, ω absent     -> SINGLE_EXPECTATION
 // =============================================================================
 
+#include <ed/auto/dssf_tune.h>
 #include <ed/dssf/dssf_engine.h>
 
 #include <iostream>
@@ -36,6 +37,18 @@ struct AutoDSSFOptions {
     bool   has_temperature = false;
     bool   has_frequency   = false;
     bool   verbose         = true;
+
+    // Phase 9.2 (May 2026): auto-tune knobs forwarded to
+    // `apply_auto_tune` when `auto_tune == true`. Anything left at the
+    // sentinel value (NaN / 0 / DSSFDevice::Auto) is picked by the
+    // tuner; any explicit value overrides it. See dssf_tune.h.
+    bool                auto_tune       = true;
+    AutoTuneOverrides   tune_overrides  = {};
+
+    // Sector dimension hint used for tuning when no Operator is
+    // attached to the request. When 0 (default), we fall back to
+    // `request.config->system.num_sites`-derived 2^N.
+    std::uint64_t       sector_dim_hint = 0;
 };
 
 /// Pure method picker. No I/O, no side effects. Useful in tests and as
@@ -83,6 +96,32 @@ inline ed::dssf::DSSFResult compute(ed::dssf::DSSFRequest request,
             "for method " + ed::dssf::to_string(request.method)
             + " (the workflow needs the per-method knobs from EDConfig).");
     }
+
+    // Phase 9.2: auto-tune missing EDConfig knobs (eta / omega / krylov /
+    // num_random / device) based on sector dim and operator coefficients.
+    // Only fields still at their struct-default sentinel are overwritten,
+    // so caller-supplied values pass through untouched.
+    //
+    // DSSFRequest::config is `const EDConfig*`, so we copy into a local
+    // mutable EDConfig, mutate that, then re-point request.config at it
+    // for the dispatcher call.
+    EDConfig tuned_config;
+    if (options.auto_tune
+        && request.config != nullptr
+        && request.method != DSSFMethod::SINGLE_EXPECTATION) {
+        tuned_config = *request.config;
+        std::uint64_t sector_dim = options.sector_dim_hint;
+        if (sector_dim == 0) {
+            const auto N = static_cast<std::uint64_t>(
+                tuned_config.system.num_sites);
+            sector_dim = (N > 0 && N < 64) ? (1ULL << N) : 1ULL;
+        }
+        AutoTuneOverrides tov = options.tune_overrides;
+        tov.verbose = options.verbose;
+        apply_auto_tune(tuned_config, sector_dim, /*op=*/nullptr, tov);
+        request.config = &tuned_config;
+    }
+
     return ed::dssf::run(request);
 }
 

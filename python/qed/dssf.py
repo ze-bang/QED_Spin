@@ -168,7 +168,16 @@ __all__ = [
     "run_from_directory",
     "pick_method",
     "compute",
+    "TunedDSSFKnobs",
 ]
+
+
+# Re-export the auto-tuner output dataclass so callers can introspect the
+# auto-selected knobs without reaching into a separate module.
+from .auto_tune import (  # noqa: E402  (top-level re-export)
+    TunedDSSFKnobs,
+    tune_dssf as _tune_dssf,
+)
 
 
 # ----------------------------------------------------------------------------
@@ -196,6 +205,7 @@ _VALID_METHODS: tuple[str, ...] = (
     "static_thermal",
     "ground_state_dssf",
     "single_expectation",
+    "kpm_thermodynamics",
 )
 
 
@@ -248,6 +258,20 @@ def compute(
     T: Optional[float | Iterable[float]] = None,
     omega: Optional[Iterable[float]] = None,
     method: Optional[str] = None,
+    # Auto-tuning surface (Phase 9.2 / May 2026). Anything left as None
+    # is filled in by qed.auto_tune.tune_dssf based on the operator /
+    # sector dim and the requested ``level``. Pass an explicit value to
+    # override the heuristic.
+    eta: Optional[float] = None,
+    krylov_dim: Optional[int] = None,
+    num_random_vectors: Optional[int] = None,
+    kpm_moments: Optional[int] = None,
+    bandwidth: Optional[float] = None,
+    device: Optional[str] = None,
+    level: str = "balanced",
+    sector_dim: Optional[int] = None,
+    operator: Optional[object] = None,
+    auto_tune: bool = True,
     ed_binary: Optional[str] = None,
     extra_args: Sequence[str] = (),
     env: Optional[dict[str, str]] = None,
@@ -260,8 +284,10 @@ def compute(
     Mirrors :func:`qed.diag` for spectral / structure-factor
     computations. The DSSF method is auto-selected from whether ``T``
     and/or ``omega`` are supplied (see :func:`pick_method`); pass
-    ``method=`` to override the auto-rule. Everything else is delegated
-    verbatim to :func:`run_from_directory`.
+    ``method=`` to override the auto-rule. Internal knobs (η broadening,
+    ω window, Krylov dim, # random vectors, KPM moments, device) are
+    auto-tuned by :func:`qed.auto_tune.tune_dssf` when left as ``None``;
+    pass any of them explicitly to override.
 
     Parameters
     ----------
@@ -274,38 +300,75 @@ def compute(
         Frequency grid. ``None`` (default) → no ω-resolved output.
     method : str, optional
         Explicit override for the auto-selected method token.
+    eta : float, optional
+        Lorentzian broadening η. Default: ``2-5 ×`` ω-grid spacing
+        (level-dependent).
+    krylov_dim : int, optional
+        FTLM / continued-fraction Krylov subspace dimension. Default
+        scales as ``D^{1/3}`` clamped to per-level [min, max].
+    num_random_vectors : int, optional
+        Number of random initial vectors for FTLM / dynamical response.
+        Default scales as ``64 / √D`` clamped to per-level [min, max].
+    kpm_moments : int, optional
+        Number of KPM Chebyshev moments (only meaningful for
+        ``method="kpm_thermodynamics"``). Default 2048 (balanced).
+    bandwidth : float, optional
+        Operator spectral bandwidth W. Used only for omega/eta defaults
+        when omega= and eta= are both omitted. Default: estimated from
+        the operator coefficients via
+        :func:`qed.auto_tune.estimate_bandwidth` when ``operator=`` is
+        passed; otherwise ``4·num_sites``.
+    device : {"auto", "cpu", "gpu", "mpi", "mpi_gpu"}, optional
+        Backend. Default ``"auto"`` picks based on sector dim + build
+        flags (``qed.has_cuda_build()`` / ``qed.has_mpi_build()``).
+        ``"gpu"`` / ``"mpi_gpu"`` add the ``--use-gpu`` flag to the
+        ``./ED dssf`` invocation.
+    level : {"conservative", "balanced", "aggressive"}, optional
+        Auto-tune aggressiveness. Default ``"balanced"``.
+    sector_dim, operator : optional
+        Either the explicit Sz-sector dimension or an :class:`Operator`
+        from which dim + bandwidth are inferred. Used only for
+        auto-tuning; ignored when ``auto_tune=False``.
+    auto_tune : bool, optional
+        If False, no auto-tuning is performed and only the explicit
+        kwargs (eta/krylov_dim/etc.) are forwarded. Default True.
     ed_binary, extra_args, env, check, capture_output : see
         :func:`run_from_directory`.
     verbose : bool, optional
         If True (default), print one ``[qed.dssf.compute]`` line
-        announcing the auto-selected method.
+        announcing the auto-selected method and tuned knobs.
 
     Returns
     -------
     subprocess.CompletedProcess
-        The ``./ED dssf`` invocation result.
+        The ``./ED dssf`` invocation result. The ``returncode`` /
+        ``stdout`` / ``stderr`` semantics are inherited from
+        :func:`subprocess.run`.
 
     Examples
     --------
-    Static structure factor at one temperature:
+    Static structure factor at one temperature, all knobs auto-tuned:
 
     .. code-block:: python
 
         qed.dssf.compute("runs/heisenberg6", T=0.5)
 
-    T=0 dynamical S(Q, ω):
+    T=0 dynamical S(Q, ω), explicit omega grid:
 
     .. code-block:: python
 
-        qed.dssf.compute("runs/heisenberg6", omega=np.linspace(-2, 2, 200))
+        import numpy as np
+        qed.dssf.compute("runs/heisenberg6",
+                         omega=np.linspace(-2, 2, 200))
 
-    Full S(Q, ω, T):
+    Full S(Q, ω, T) with manual broadening:
 
     .. code-block:: python
 
         qed.dssf.compute("runs/heisenberg6",
                          T=[0.1, 0.3, 1.0],
-                         omega=np.linspace(-2, 2, 200))
+                         omega=np.linspace(-2, 2, 400),
+                         eta=0.05, level="aggressive")
     """
     if method is None:
         chosen = pick_method(T=T, omega=omega)
@@ -316,16 +379,52 @@ def compute(
                 f"Valid tokens: {_VALID_METHODS}."
             )
         chosen = method
+
+    auto_args: list[str] = []
+    tuned: Optional[TunedDSSFKnobs] = None
+    if auto_tune and chosen != "single_expectation":
+        try:
+            from . import has_cuda_build, has_mpi_build  # local import
+            cuda_ok = bool(has_cuda_build())
+            mpi_ok  = bool(has_mpi_build())
+        except Exception:
+            cuda_ok = mpi_ok = False
+        tuned = _tune_dssf(
+            operator=operator,
+            sector_dim=sector_dim,
+            bandwidth=bandwidth,
+            omega=omega,
+            eta=eta,
+            krylov_dim=krylov_dim,
+            num_random_vectors=num_random_vectors,
+            kpm_moments=kpm_moments,
+            device=device,
+            has_cuda_build=cuda_ok,
+            has_mpi_build=mpi_ok,
+            level=level,
+        )
+        auto_args = tuned.to_cli_args(method=chosen)
+
     if verbose:
         has_T = T is not None
         has_w = omega is not None
-        print(f"[qed.dssf.compute] method={chosen!r} "
-              f"(T given: {has_T}, omega given: {has_w})")
+        msg = (f"[qed.dssf.compute] method={chosen!r} "
+               f"(T given: {has_T}, omega given: {has_w})")
+        if tuned is not None:
+            msg += (f" | auto-tuned [{tuned.level}]: "
+                    f"eta={tuned.eta:.4g}, "
+                    f"krylov={tuned.krylov_dim}, "
+                    f"R={tuned.num_random_vectors}, "
+                    f"omega=[{tuned.omega_min:.4g},{tuned.omega_max:.4g}]"
+                    f" x {tuned.num_omega_points}, "
+                    f"device={tuned.device}")
+        print(msg)
+
     return run_from_directory(
         directory,
         chosen,
         ed_binary=ed_binary,
-        extra_args=tuple(extra_args),
+        extra_args=tuple(auto_args) + tuple(extra_args),
         env=env,
         check=check,
         capture_output=capture_output,

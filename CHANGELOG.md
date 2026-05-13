@@ -7,6 +7,63 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — One-call DSSF auto-tuner (`qed.auto_tune` / `ed::auto_pilot::dssf::apply_auto_tune`)
+
+Both the Python `qed.dssf.compute(...)` and C++ `ed::auto_pilot::dssf::compute(...)`
+entry points now auto-pick **every internal DSSF knob** (η broadening,
+ω window, # ω-grid points, FTLM/continued-fraction Krylov dim, # random
+vectors, KPM moments, device backend) from the operator size + build
+flags. Anything the caller specifies explicitly is honoured; only
+sentinels are filled. Three aggressiveness levels (`conservative`,
+`balanced`, `aggressive`).
+
+- New module `python/qed/auto_tune.py`: pure heuristic helpers
+  (`estimate_bandwidth`, `pick_eta`, `pick_omega_window`,
+  `pick_krylov_dim`, `pick_num_random_vectors`, `pick_kpm_moments`,
+  `pick_device`, `tune_dssf`). Returned as a frozen
+  `TunedDSSFKnobs` dataclass; `to_cli_args(method=...)` renders the
+  `--dyn-* / --static-* / --ftlm-*` CLI flags consumed by `./ED dssf`.
+- `qed.dssf.compute(...)` extended with `eta=`, `krylov_dim=`,
+  `num_random_vectors=`, `kpm_moments=`, `bandwidth=`, `device=`,
+  `level=`, `auto_tune=` kwargs. `_VALID_METHODS` now includes
+  `kpm_thermodynamics`.
+- New header `include/ed/auto/dssf_tune.h`: header-only mirror of the
+  Python heuristics, plus an `apply_auto_tune(EDConfig&, sector_dim,
+  op, overrides)` helper that mutates only struct-default sentinels.
+- `ed::auto_pilot::dssf::AutoDSSFOptions` extended with `auto_tune`,
+  `tune_overrides`, `sector_dim_hint`. `compute(...)` now copies the
+  caller's `EDConfig`, applies the tuner, and re-points
+  `request.config` for the dispatcher call (preserves the
+  `const EDConfig*` ABI).
+- New tests:
+  - `python/tests/test_auto_tune.py` — 14 tests (bandwidth, omega
+    window, eta scaling/ordering, krylov + random monotonicity,
+    device picker, `tune_dssf` overrides + CLI rendering).
+  - `tests/unit/test_dssf_tune.cpp` — 8 Catch2 tests (mirror of the
+    Python lockdown so drift between the two implementations breaks
+    the build).
+- New documentation page `docs/guides/one_call_api.md` — the canonical
+  reference for **`qed.diag(H, ...)`** and
+  **`qed.dssf.compute(directory, T=, omega=)`** (plus their C++
+  counterparts), the auto-selection rules, the per-method knob
+  defaults, and the override surface.
+
+### Audit follow-ups (May 2026)
+
+- **#3** Surface `KPM_THERMODYNAMICS` as a first-class `DSSFMethod` in
+  the `ED dssf <method>` CLI help / error text. Lockdown tests in
+  `tests/unit/test_dssf_engine.cpp` now cover round-trip,
+  case-insensitivity, numeric stability (= 4u), and null-config
+  rejection for the KPM branch (commit 094d47c).
+- **#2** FixedSz-projected operators now take the GPU path **and** the
+  CPU fallback path correctly. The CPU bug was that
+  `Operator::apply` is non-virtual, so building a `std::vector<Operator>`
+  out of derived `FixedSz*Operator` instances sliced the override away.
+  Fix: parallel `std::vector<std::shared_ptr<FixedSzOperator>>` arrays
+  in `ObservablePairs`, populated only when `spec.use_fixed_sz=true`,
+  with workflow-side lambdas dispatching on the use-case (commit
+  1ffb0b1).
+
 ### Removed — NLCE workflow extracted to a standalone repository
 
 The Numerical Linked Cluster Expansion driver (`workflows/nlce/`) has

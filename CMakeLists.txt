@@ -718,6 +718,10 @@ if(BUILD_ED_TESTS)
     # method-selection rule + QEDConfig-null guard.
     ed_add_test(test_auto_dssf                  tests/unit/test_auto_dssf.cpp USE_CATCH2)
     target_link_libraries(test_auto_dssf PRIVATE ed_cli ed_dssf ed_input)
+    # Phase 9.2: pure-numerical lockdown of the DSSF auto-tuner heuristics
+    # (eta / omega / krylov / num_random / device pickers). Header-only so
+    # no extra link libs needed beyond the Catch2 main.
+    ed_add_test(test_dssf_tune                  tests/unit/test_dssf_tune.cpp USE_CATCH2)
     ed_add_test(test_lanczos_variants           tests/unit/test_lanczos_variants.cpp USE_CATCH2)
     ed_add_test(test_lanczos_basis_buffer       tests/unit/test_lanczos_basis_buffer.cpp USE_CATCH2)
     # Phase 3a #1: Krylov-state checkpoint / restart for the default Lanczos

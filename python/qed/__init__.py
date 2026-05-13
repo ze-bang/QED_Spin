@@ -5,57 +5,82 @@ the family of solvers (full diagonalization, every Lanczos / Krylov / Davidson
 variant, ARPACK, FTLM/LTLM/Hybrid, mTPQ/cTPQ, GPU per-sector dispatch under
 streaming symmetry, symmetrised block ED) through a thin pybind11 layer.
 
-The package has three layers of access:
+The package has **two stress-free entry points** plus three layers of
+deeper access for advanced use:
 
-1. **Solver-level** ``qed.lanczos / full_diagonalization /
-   finite_temperature_lanczos / low_temperature_lanczos /
-   hybrid_thermal_method``. Stable, narrowly-typed wrappers; great for
-   notebook prototyping.
+* **One-call API** (the recommended path for routine work)
 
-2. **Dispatcher-level** ``qed.exact_diagonalization_core(op, method,
-   params)`` (and the directory + streaming-symmetry siblings). One Python
-   function reaches every solver the ``./ED`` CLI knows about, including
-   ARPACK, BLOCK_LANCZOS, KRYLOV_SCHUR, BLOCK_KRYLOV_SCHUR, DAVIDSON,
-   LOBPCG, CHEBYSHEV_FILTERED, SHIFT_INVERT[_ROBUST], IRL/TRL, BICG,
-   FULL/SCALAPACK, mTPQ/cTPQ, FTLM/LTLM/HYBRID. Pass a GPU method to the
-   streaming or directory dispatchers and each sector / matrix-vector goes
-   to a CUDA kernel (when the build was made with ``WITH_CUDA=ON``; check
-   :func:`has_cuda_build`).
+  - :func:`qed.diag(H, ...) <qed.diag>` — exact diagonalisation of any
+    Hamiltonian. Auto-picks solver / device (CPU / GPU / MPI / MPI+GPU) /
+    Sz sector / pre-flight planner.
+  - :func:`qed.dssf.compute(directory, T=, omega=, ...) <qed.dssf.compute>`
+    — every structure-factor / spectral-function computation, finite or
+    zero temperature. Auto-picks the DSSF method **and** the internal knobs
+    (η broadening, ω window, FTLM Krylov dim, # random vectors, KPM moments,
+    device backend).
 
-3. **Library-level submodules**: ``qed.input`` (lattice + Hamiltonian
-   builders), ``qed.symmetry`` (programmatic permutation groups),
-   ``qed.dssf`` (DSSF observable assembly + ``./ED dssf`` runner),
-   ``qed.bfg`` (BFG order-parameter kernels), ``qed.mpi``
-   (helper for the standalone ``mpiexec ed_distributed_main`` binary).
+  See ``docs/guides/one_call_api.md`` for the canonical documentation of
+  both entry points, including the auto-selection rules and per-knob
+  overrides.
 
-Example -- end-to-end Heisenberg chain
---------------------------------------
+* **Low-level access** for niche / programmatic use:
 
-    >>> import qed as qed
+  1. **Solver-level** ``qed.lanczos / full_diagonalization /
+     finite_temperature_lanczos / low_temperature_lanczos /
+     hybrid_thermal_method``. Stable, narrowly-typed wrappers; great for
+     notebook prototyping.
+
+  2. **Dispatcher-level** ``qed.exact_diagonalization_core(op, method,
+     params)`` (and the directory + streaming-symmetry siblings). One Python
+     function reaches every solver the ``./ED`` CLI knows about, including
+     ARPACK, BLOCK_LANCZOS, KRYLOV_SCHUR, BLOCK_KRYLOV_SCHUR, DAVIDSON,
+     LOBPCG, CHEBYSHEV_FILTERED, SHIFT_INVERT[_ROBUST], IRL/TRL, BICG,
+     FULL/SCALAPACK, mTPQ/cTPQ, FTLM/LTLM/HYBRID. Pass a GPU method to the
+     streaming or directory dispatchers and each sector / matrix-vector goes
+     to a CUDA kernel (when the build was made with ``WITH_CUDA=ON``; check
+     :func:`has_cuda_build`).
+
+  3. **Library-level submodules**: ``qed.input`` (lattice + Hamiltonian
+     builders), ``qed.symmetry`` (programmatic permutation groups),
+     ``qed.dssf`` (DSSF observable assembly + ``./ED dssf`` runner),
+     ``qed.auto_tune`` (heuristic helpers for the DSSF auto-tuner),
+     ``qed.bfg`` (BFG order-parameter kernels), ``qed.mpi``
+     (helper for the standalone ``mpiexec ed_distributed_main`` binary).
+
+Example -- one-call diagonalisation
+-----------------------------------
+
+    >>> import qed
     >>> N = 6
-    >>> # Build the Hamiltonian programmatically.
     >>> b = qed.input.HamiltonianBuilder(num_sites=N)
-    >>> nn = [(i, (i + 1) % N) for i in range(N)]
-    >>> b.heisenberg(bonds=nn, J=1.0)
-    >>> op = b.to_operator()
-    >>> # Drive the dispatcher.
+    >>> b.heisenberg(bonds=[(i, (i + 1) % N) for i in range(N)], J=1.0)
+    >>> H = b.to_operator()
+    >>> sorted(qed.diag(H, num_eigenvalues=2).eigenvalues)[:2]   # doctest: +SKIP
+    [-2.802..., -1.0]
+
+Example -- one-call DSSF
+------------------------
+
+    >>> import numpy as np                                       # doctest: +SKIP
+    >>> qed.dssf.compute("runs/heisenberg6",                     # doctest: +SKIP
+    ...                  T=[0.1, 0.5],
+    ...                  omega=np.linspace(-2, 2, 200))
+
+Example -- low-level dispatcher (when you want full control)
+------------------------------------------------------------
+
     >>> params = qed.EDParameters()
     >>> params.num_eigenvalues = 4
     >>> result = qed.exact_diagonalization_core(
-    ...     op, qed.DiagonalizationMethod.LANCZOS, params)
-    >>> sorted(result.eigenvalues)[:2]
-    [-2.802..., -1.0]
+    ...     H, qed.DiagonalizationMethod.LANCZOS, params)        # doctest: +SKIP
 
 Example -- in-process symmetry projection on the same chain
 -----------------------------------------------------------
 
     >>> g = qed.symmetry.translation(N, 1)
     >>> info = qed.symmetry.group_from_generators(N, [g])
-    >>> # Either persist `info` to automorphism_results/ on disk and call
-    >>> # exact_diagonalization_streaming_symmetry, or attach it directly
-    >>> # to the operator for downstream workflows that introspect it:
-    >>> op.set_symmetry_info_from_dict(info)
-    >>> op.get_symmetry_info_as_dict()["num_generators"]
+    >>> H.set_symmetry_info_from_dict(info)
+    >>> H.get_symmetry_info_as_dict()["num_generators"]
     1
 
 See ``docs/guides/python_advanced.md`` for the full advanced-use catalogue.
@@ -99,6 +124,7 @@ from ._core import (
 )
 
 from . import dssf  # high-level DSSF observable-pair builder + ./ED dssf runner (P2.8)
+from . import auto_tune  # Phase 9.2: heuristic helpers for the DSSF auto-tuner
 from . import hamiltonian  # legacy Python-side fluent Hamiltonian DSL (P2.10)
 from . import input  # standalone C++ ed_input library bindings (Phase 4)
 from . import symmetry  # programmatic site-permutation symmetry DSL (P2.11)
@@ -164,6 +190,7 @@ __all__ = [
     "canonicalize_method",
     # Submodules
     "dssf",
+    "auto_tune",
     "hamiltonian",
     "input",
     "symmetry",

@@ -24,6 +24,7 @@ through how the pieces fit together end-to-end.
 guides/install
 guides/quickstart
 guides/python_quickstart
+guides/one_call_api
 guides/workflow
 guides/usage
 guides/python_api_coverage
