@@ -23,9 +23,11 @@
 #pragma once
 
 #include <ed/core/construct_ham.h>
+#include <ed/core/fixed_sz_operator_types.h>
 
 #include <array>
 #include <cstdint>
+#include <memory>
 #include <optional>
 #include <string>
 #include <utility>
@@ -121,6 +123,21 @@ struct ObservablePairs {
     std::vector<Operator>    obs_1;
     std::vector<Operator>    obs_2;
     std::vector<std::string> names;
+
+    /// Audit #2 (FixedSz->Operator path): parallel
+    /// `shared_ptr<FixedSzOperator>` arrays of equal length to obs_1/obs_2,
+    /// populated only when `spec.use_fixed_sz` is true. Needed because
+    /// slicing `FixedSzSumOperator(...)` etc. into a value-type `Operator`
+    /// destroys the dimension semantics: the base `Operator::apply` checks
+    /// `size != (1ULL << n_bits_)` and throws on the smaller fixed-Sz
+    /// dimension. CPU dispatch in workflows that consume these vectors
+    /// must call `obs_1_fs[i]->apply(...)` instead of `obs_1[i].apply(...)`
+    /// when `use_fixed_sz` is true. The GPU path is unaffected because
+    /// `convertOperatorToGPU` only reads the basis-independent
+    /// `transform_data_` member, which lives on the base and is preserved
+    /// through the slice.
+    std::vector<std::shared_ptr<FixedSzOperator>> obs_1_fs;
+    std::vector<std::shared_ptr<FixedSzOperator>> obs_2_fs;
 };
 
 /**

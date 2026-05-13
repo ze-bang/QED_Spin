@@ -679,27 +679,54 @@ void compute_dynamical_response_workflow(const EDConfig& config) {
     bool use_config_operators = config.dynamical.operator_file.empty() || 
                                 config.dynamical.operator_type != "sum";
     
-    // Prepare Hamiltonian
-    Operator ham(config.system.num_sites, config.system.spin_length);
+    // Prepare Hamiltonian.
+    //
+    // Audit #2 (FixedSz->Operator path): under use_fixed_sz the legacy
+    // `Operator ham` would evaluate apply at the full Hilbert dimension
+    // (1 << num_sites) and throw when called with the smaller fixed-Sz
+    // dim. Mirror the audit #1 fix: keep two parallel shared pointers and
+    // dispatch via std::function so both modes work cleanly.
+    const bool use_fixed_sz = config.system.use_fixed_sz;
+    const int64_t n_up_dim =
+        (use_fixed_sz && config.system.n_up >= 0)
+            ? config.system.n_up
+            : static_cast<int64_t>(config.system.num_sites) / 2;
     std::string interaction_file = config.system.hamiltonian_dir + "/" + config.system.interaction_file;
     std::string single_site_file = config.system.hamiltonian_dir + "/" + config.system.single_site_file;
-    ham.loadFromInterAllFile(interaction_file);
-    ham.loadFromFile(single_site_file);
+    std::shared_ptr<Operator> ham_full;
+    std::shared_ptr<FixedSzOperator> ham_fs;
+    if (use_fixed_sz) {
+        ham_fs = std::make_shared<FixedSzOperator>(
+            config.system.num_sites, config.system.spin_length, n_up_dim);
+        ham_fs->loadFromInterAllFile(interaction_file);
+        ham_fs->loadFromFile(single_site_file);
+    } else {
+        ham_full = std::make_shared<Operator>(
+            config.system.num_sites, config.system.spin_length);
+        ham_full->loadFromInterAllFile(interaction_file);
+        ham_full->loadFromFile(single_site_file);
+    }
+    // Provide a `ham` reference for legacy code paths that need a base
+    // Operator& (e.g. convertOperatorToGPU). The slice preserves
+    // transform_data_, so the GPU-side basis-independent transform copy
+    // is unaffected.
+    Operator& ham = use_fixed_sz ? static_cast<Operator&>(*ham_fs)
+                                 : *ham_full;
     
     // Load three-body terms if specified
     if (!config.system.three_body_file.empty()) {
         std::string three_body_file = config.system.hamiltonian_dir + "/" + config.system.three_body_file;
         if (std::filesystem::exists(three_body_file)) {
             if (rank == 0) std::cout << "Loading three-body terms from: " << three_body_file << "\n";
-            ham.loadThreeBodyTerm(three_body_file);
+            if (use_fixed_sz) ham_fs->loadThreeBodyTerm(three_body_file);
+            else              ham_full->loadThreeBodyTerm(three_body_file);
         }
     }
     
     // Hilbert space dimension
     uint64_t N;
-    if (config.system.use_fixed_sz) {
+    if (use_fixed_sz) {
         // Use binomial coefficient C(num_sites, n_up) for fixed-Sz sector
-        int64_t n_up_dim = (config.system.n_up >= 0) ? config.system.n_up : config.system.num_sites / 2;
         N = 1;
         for (int64_t i = 0; i < n_up_dim; i++) {
             N = N * (config.system.num_sites - i) / (i + 1);
@@ -709,9 +736,12 @@ void compute_dynamical_response_workflow(const EDConfig& config) {
         N = 1ULL << config.system.num_sites;
     }
     
-    // Create function wrapper for Hamiltonian
-    auto H_func = [&ham](const Complex* in, Complex* out, uint64_t dim) {
-        ham.apply(in, out, dim);
+    // Create function wrapper for Hamiltonian (audit #2: dispatches on
+    // use_fixed_sz so the CPU fallback path no longer throws).
+    auto H_func = [ham_full, ham_fs, use_fixed_sz](
+        const Complex* in, Complex* out, uint64_t dim) {
+        if (use_fixed_sz) ham_fs->apply(in, out, dim);
+        else              ham_full->apply(in, out, dim);
     };
     
     // Setup parameters
@@ -849,27 +879,39 @@ void compute_dynamical_response_workflow(const EDConfig& config) {
         bool use_fixed_sz = config.system.use_fixed_sz;
         int64_t n_up = (use_fixed_sz && config.system.n_up >= 0) ? config.system.n_up : config.system.num_sites / 2;
         
-        // Construct operators
-        std::vector<Operator> obs_1, obs_2;
-        std::vector<std::string> names;
-        
-        construct_operators_from_config(
-            config.dynamical.operator_type,
-            config.dynamical.basis,
-            spin_combinations,
-            momentum_points,
-            polarization,
-            config.dynamical.theta,
-            config.dynamical.unit_cell_size,
-            config.system.num_sites,
-            config.system.spin_length,
-            use_fixed_sz,
-            n_up,
-            positions_file,
-            obs_1,
-            obs_2,
-            names
-        );
+        // Construct operators (audit #2: also obtain shared_ptr<FixedSzOperator>
+        // arrays so the CPU apply path correctly dispatches at the fixed-Sz
+        // dimension instead of slicing into Operator::apply which throws).
+        ed::dssf::OperatorSpec _spec;
+        _spec.operator_type     = config.dynamical.operator_type;
+        _spec.basis             = config.dynamical.basis;
+        _spec.spin_combinations = spin_combinations;
+        _spec.momentum_points   = momentum_points;
+        _spec.polarization      = polarization;
+        _spec.theta             = config.dynamical.theta;
+        _spec.unit_cell_size    = config.dynamical.unit_cell_size;
+        _spec.num_sites         = config.system.num_sites;
+        _spec.spin_length       = config.system.spin_length;
+        _spec.use_fixed_sz      = use_fixed_sz;
+        _spec.n_up              = n_up;
+        _spec.positions_file    = positions_file;
+        auto _pairs = ed::dssf::build_observable_pairs(_spec);
+        std::vector<Operator>&    obs_1 = _pairs.obs_1;
+        std::vector<Operator>&    obs_2 = _pairs.obs_2;
+        std::vector<std::string>& names = _pairs.names;
+        std::vector<std::shared_ptr<FixedSzOperator>>& obs_1_fs = _pairs.obs_1_fs;
+        std::vector<std::shared_ptr<FixedSzOperator>>& obs_2_fs = _pairs.obs_2_fs;
+        // CPU dispatcher used by every O1/O2 lambda below.
+        auto apply_obs1 = [&obs_1, &obs_1_fs, use_fixed_sz](
+            int op_idx, const Complex* in, Complex* out, uint64_t dim) {
+            if (use_fixed_sz) obs_1_fs[op_idx]->apply(in, out, dim);
+            else              obs_1[op_idx].apply(in, out, dim);
+        };
+        auto apply_obs2 = [&obs_2, &obs_2_fs, use_fixed_sz](
+            int op_idx, const Complex* in, Complex* out, uint64_t dim) {
+            if (use_fixed_sz) obs_2_fs[op_idx]->apply(in, out, dim);
+            else              obs_2[op_idx].apply(in, out, dim);
+        };
         
         if (rank == 0) {
             std::cout << "  Operators: " << obs_1.size() << " pair(s)\n";
@@ -962,13 +1004,14 @@ void compute_dynamical_response_workflow(const EDConfig& config) {
 
             // CPU computation path (the only supported path for single-T tasks).
             {
-                // Create function wrappers for this operator pair
-                auto O1_func = [&obs_1, op_idx](const Complex* in, Complex* out, uint64_t dim) {
-                    obs_1[op_idx].apply(in, out, dim);
+                // Create function wrappers for this operator pair (audit #2:
+                // dispatch via apply_obs* so fixed-Sz uses the typed override).
+                auto O1_func = [apply_obs1, op_idx](const Complex* in, Complex* out, uint64_t dim) {
+                    apply_obs1(op_idx, in, out, dim);
                 };
-                
-                auto O2_func = [&obs_2, op_idx](const Complex* in, Complex* out, uint64_t dim) {
-                    obs_2[op_idx].apply(in, out, dim);
+
+                auto O2_func = [apply_obs2, op_idx](const Complex* in, Complex* out, uint64_t dim) {
+                    apply_obs2(op_idx, in, out, dim);
                 };
                 
                 // Compute response on CPU
@@ -1097,13 +1140,14 @@ void compute_dynamical_response_workflow(const EDConfig& config) {
             
             // CPU computation path (only if GPU didn't produce results)
             if (results_map.empty()) {
-                // Create function wrappers for this operator pair
-                auto O1_func = [&obs_1, op_idx](const Complex* in, Complex* out, uint64_t dim) {
-                    obs_1[op_idx].apply(in, out, dim);
+                // Create function wrappers for this operator pair (audit #2:
+                // dispatch via apply_obs* so fixed-Sz uses the typed override).
+                auto O1_func = [apply_obs1, op_idx](const Complex* in, Complex* out, uint64_t dim) {
+                    apply_obs1(op_idx, in, out, dim);
                 };
-                
-                auto O2_func = [&obs_2, op_idx](const Complex* in, Complex* out, uint64_t dim) {
-                    obs_2[op_idx].apply(in, out, dim);
+
+                auto O2_func = [apply_obs2, op_idx](const Complex* in, Complex* out, uint64_t dim) {
+                    apply_obs2(op_idx, in, out, dim);
                 };
                 
                 if (params.num_samples == 1) {
@@ -1188,13 +1232,13 @@ void compute_dynamical_response_workflow(const EDConfig& config) {
                           << " (" << temperatures.size() << " temps) on "
                           << "subgroup\n";
             }
-            auto O1_func = [&obs_1, op_idx]
+            auto O1_func = [apply_obs1, op_idx]
                 (const Complex* in, Complex* out, uint64_t dim) {
-                    obs_1[op_idx].apply(in, out, dim);
+                    apply_obs1(op_idx, in, out, dim);
                 };
-            auto O2_func = [&obs_2, op_idx]
+            auto O2_func = [apply_obs2, op_idx]
                 (const Complex* in, Complex* out, uint64_t dim) {
-                    obs_2[op_idx].apply(in, out, dim);
+                    apply_obs2(op_idx, in, out, dim);
                 };
             // Single-sample path also goes through the standard CPU
             // multi-sample multi-T kernel here (with num_samples=1) so
@@ -1236,13 +1280,13 @@ void compute_dynamical_response_workflow(const EDConfig& config) {
             O1_funcs.reserve(P);
             O2_funcs.reserve(P);
             for (int op_idx = 0; op_idx < P; ++op_idx) {
-                O1_funcs.emplace_back([&obs_1, op_idx]
+                O1_funcs.emplace_back([apply_obs1, op_idx]
                     (const Complex* in, Complex* out, uint64_t dim) {
-                        obs_1[op_idx].apply(in, out, dim);
+                        apply_obs1(op_idx, in, out, dim);
                     });
-                O2_funcs.emplace_back([&obs_2, op_idx]
+                O2_funcs.emplace_back([apply_obs2, op_idx]
                     (const Complex* in, Complex* out, uint64_t dim) {
-                        obs_2[op_idx].apply(in, out, dim);
+                        apply_obs2(op_idx, in, out, dim);
                     });
             }
 
@@ -1698,27 +1742,44 @@ void compute_static_response_workflow(const EDConfig& config) {
     bool use_config_operators = config.static_resp.operator_file.empty() || 
                                 config.static_resp.operator_type != "sum";
     
-    // Prepare Hamiltonian
-    Operator ham(config.system.num_sites, config.system.spin_length);
+    // Prepare Hamiltonian (audit #2: shared_ptr dispatch so fixed-Sz CPU
+    // path no longer slices into Operator::apply at the wrong dimension).
+    const bool use_fixed_sz = config.system.use_fixed_sz;
+    const int64_t n_up_dim =
+        (use_fixed_sz && config.system.n_up >= 0)
+            ? config.system.n_up
+            : static_cast<int64_t>(config.system.num_sites) / 2;
     std::string interaction_file = config.system.hamiltonian_dir + "/" + config.system.interaction_file;
     std::string single_site_file = config.system.hamiltonian_dir + "/" + config.system.single_site_file;
-    ham.loadFromInterAllFile(interaction_file);
-    ham.loadFromFile(single_site_file);
+    std::shared_ptr<Operator> ham_full;
+    std::shared_ptr<FixedSzOperator> ham_fs;
+    if (use_fixed_sz) {
+        ham_fs = std::make_shared<FixedSzOperator>(
+            config.system.num_sites, config.system.spin_length, n_up_dim);
+        ham_fs->loadFromInterAllFile(interaction_file);
+        ham_fs->loadFromFile(single_site_file);
+    } else {
+        ham_full = std::make_shared<Operator>(
+            config.system.num_sites, config.system.spin_length);
+        ham_full->loadFromInterAllFile(interaction_file);
+        ham_full->loadFromFile(single_site_file);
+    }
+    Operator& ham = use_fixed_sz ? static_cast<Operator&>(*ham_fs)
+                                 : *ham_full;
     
     // Load three-body terms if specified
     if (!config.system.three_body_file.empty()) {
         std::string three_body_file = config.system.hamiltonian_dir + "/" + config.system.three_body_file;
         if (std::filesystem::exists(three_body_file)) {
             if (rank == 0) std::cout << "Loading three-body terms from: " << three_body_file << "\n";
-            ham.loadThreeBodyTerm(three_body_file);
+            if (use_fixed_sz) ham_fs->loadThreeBodyTerm(three_body_file);
+            else              ham_full->loadThreeBodyTerm(three_body_file);
         }
     }
     
     // Hilbert space dimension
     uint64_t N;
-    if (config.system.use_fixed_sz) {
-        // Use binomial coefficient C(num_sites, n_up) for fixed-Sz sector
-        int64_t n_up_dim = (config.system.n_up >= 0) ? config.system.n_up : config.system.num_sites / 2;
+    if (use_fixed_sz) {
         N = 1;
         for (int64_t i = 0; i < n_up_dim; i++) {
             N = N * (config.system.num_sites - i) / (i + 1);
@@ -1728,9 +1789,11 @@ void compute_static_response_workflow(const EDConfig& config) {
         N = 1ULL << config.system.num_sites;
     }
     
-    // Create function wrapper for Hamiltonian
-    auto H_func = [&ham](const Complex* in, Complex* out, uint64_t dim) {
-        ham.apply(in, out, dim);
+    // Create function wrapper for Hamiltonian (audit #2 dispatch).
+    auto H_func = [ham_full, ham_fs, use_fixed_sz](
+        const Complex* in, Complex* out, uint64_t dim) {
+        if (use_fixed_sz) ham_fs->apply(in, out, dim);
+        else              ham_full->apply(in, out, dim);
     };
     
     // Setup parameters
@@ -1773,31 +1836,41 @@ void compute_static_response_workflow(const EDConfig& config) {
         // Get positions file
         std::string positions_file = config.system.hamiltonian_dir + "/positions.dat";
         
-        // Determine fixed-Sz parameters
+        // Determine fixed-Sz parameters (shadows the outer use_fixed_sz; same value)
         bool use_fixed_sz = config.system.use_fixed_sz;
         int64_t n_up = (use_fixed_sz && config.system.n_up >= 0) ? config.system.n_up : config.system.num_sites / 2;
         
-        // Construct operators
-        std::vector<Operator> obs_1, obs_2;
-        std::vector<std::string> names;
-        
-        construct_operators_from_config(
-            config.static_resp.operator_type,
-            config.static_resp.basis,
-            spin_combinations,
-            momentum_points,
-            polarization,
-            config.static_resp.theta,
-            config.static_resp.unit_cell_size,
-            config.system.num_sites,
-            config.system.spin_length,
-            use_fixed_sz,
-            n_up,
-            positions_file,
-            obs_1,
-            obs_2,
-            names
-        );
+        // Construct operators (audit #2: also obtain shared_ptr<FixedSzOperator>
+        // arrays so the CPU apply path correctly dispatches at the fixed-Sz dim).
+        ed::dssf::OperatorSpec _spec;
+        _spec.operator_type     = config.static_resp.operator_type;
+        _spec.basis             = config.static_resp.basis;
+        _spec.spin_combinations = spin_combinations;
+        _spec.momentum_points   = momentum_points;
+        _spec.polarization      = polarization;
+        _spec.theta             = config.static_resp.theta;
+        _spec.unit_cell_size    = config.static_resp.unit_cell_size;
+        _spec.num_sites         = config.system.num_sites;
+        _spec.spin_length       = config.system.spin_length;
+        _spec.use_fixed_sz      = use_fixed_sz;
+        _spec.n_up              = n_up;
+        _spec.positions_file    = positions_file;
+        auto _pairs = ed::dssf::build_observable_pairs(_spec);
+        std::vector<Operator>&    obs_1 = _pairs.obs_1;
+        std::vector<Operator>&    obs_2 = _pairs.obs_2;
+        std::vector<std::string>& names = _pairs.names;
+        std::vector<std::shared_ptr<FixedSzOperator>>& obs_1_fs = _pairs.obs_1_fs;
+        std::vector<std::shared_ptr<FixedSzOperator>>& obs_2_fs = _pairs.obs_2_fs;
+        auto apply_obs1 = [&obs_1, &obs_1_fs, use_fixed_sz](
+            int op_idx, const Complex* in, Complex* out, uint64_t dim) {
+            if (use_fixed_sz) obs_1_fs[op_idx]->apply(in, out, dim);
+            else              obs_1[op_idx].apply(in, out, dim);
+        };
+        auto apply_obs2 = [&obs_2, &obs_2_fs, use_fixed_sz](
+            int op_idx, const Complex* in, Complex* out, uint64_t dim) {
+            if (use_fixed_sz) obs_2_fs[op_idx]->apply(in, out, dim);
+            else              obs_2[op_idx].apply(in, out, dim);
+        };
         
         if (rank == 0) {
             std::cout << "Constructed " << obs_1.size() << " operator pair(s)\n";
@@ -1936,13 +2009,14 @@ void compute_static_response_workflow(const EDConfig& config) {
             
             // CPU computation path
             if (results.temperatures.empty()) {  // Only compute on CPU if GPU didn't succeed
-                // Create function wrappers for this operator pair
-                auto O1_func = [&obs_1, op_idx](const Complex* in, Complex* out, uint64_t dim) {
-                    obs_1[op_idx].apply(in, out, dim);
+                // Create function wrappers for this operator pair (audit #2:
+                // dispatch via apply_obs* so fixed-Sz uses the typed override).
+                auto O1_func = [apply_obs1, op_idx](const Complex* in, Complex* out, uint64_t dim) {
+                    apply_obs1(op_idx, in, out, dim);
                 };
-                
-                auto O2_func = [&obs_2, op_idx](const Complex* in, Complex* out, uint64_t dim) {
-                    obs_2[op_idx].apply(in, out, dim);
+
+                auto O2_func = [apply_obs2, op_idx](const Complex* in, Complex* out, uint64_t dim) {
+                    apply_obs2(op_idx, in, out, dim);
                 };
                 
                 // Compute response on CPU
@@ -2388,24 +2462,32 @@ void compute_ground_state_dssf_workflow(const EDConfig& config) {
                   << "compute_ground_state_dssf_cross_sector.\n";
     }
 
-    // Construct same-sector operator pairs the legacy way.
+    // Construct same-sector operator pairs (audit #2: build via
+    // build_observable_pairs to also obtain the typed shared_ptr<FixedSzOperator>
+    // arrays needed for correct CPU dispatch under fixed-Sz).
     std::vector<Operator> obs_1, obs_2;
     std::vector<std::string> names;
+    std::vector<std::shared_ptr<FixedSzOperator>> obs_1_fs, obs_2_fs;
     if (!same_sector_pairs.empty()) {
-        construct_operators_from_config(
-            config.dynamical.operator_type,
-            config.dynamical.basis,
-            same_sector_pairs,
-            momentum_points,
-            polarization,
-            config.dynamical.theta,
-            config.dynamical.unit_cell_size,
-            config.system.num_sites,
-            config.system.spin_length,
-            use_fixed_sz,
-            n_up,
-            positions_file,
-            obs_1, obs_2, names);
+        ed::dssf::OperatorSpec _spec;
+        _spec.operator_type     = config.dynamical.operator_type;
+        _spec.basis             = config.dynamical.basis;
+        _spec.spin_combinations = same_sector_pairs;
+        _spec.momentum_points   = momentum_points;
+        _spec.polarization      = polarization;
+        _spec.theta             = config.dynamical.theta;
+        _spec.unit_cell_size    = config.dynamical.unit_cell_size;
+        _spec.num_sites         = config.system.num_sites;
+        _spec.spin_length       = config.system.spin_length;
+        _spec.use_fixed_sz      = use_fixed_sz;
+        _spec.n_up              = n_up;
+        _spec.positions_file    = positions_file;
+        auto _pairs = ed::dssf::build_observable_pairs(_spec);
+        obs_1    = std::move(_pairs.obs_1);
+        obs_2    = std::move(_pairs.obs_2);
+        names    = std::move(_pairs.names);
+        obs_1_fs = std::move(_pairs.obs_1_fs);
+        obs_2_fs = std::move(_pairs.obs_2_fs);
     }
 
     if (rank == 0) {
@@ -2490,11 +2572,18 @@ void compute_ground_state_dssf_workflow(const EDConfig& config) {
             std::cout << "[Rank " << rank << "] Processing: "
                       << names[op_idx] << "\n";
         }
-        auto O1_func = [&obs_1, op_idx](const Complex* in, Complex* out, int dim) {
-            obs_1[op_idx].apply(in, out, static_cast<uint64_t>(dim));
+        // Audit #2: dispatch via FixedSzOperator under fixed-Sz so the
+        // CPU apply path uses the typed override instead of the sliced
+        // Operator::apply (which would throw on the smaller dim).
+        auto O1_func = [&obs_1, &obs_1_fs, op_idx, use_fixed_sz]
+            (const Complex* in, Complex* out, int dim) {
+            if (use_fixed_sz) obs_1_fs[op_idx]->apply(in, out, static_cast<uint64_t>(dim));
+            else              obs_1[op_idx].apply(in, out, static_cast<uint64_t>(dim));
         };
-        auto O2_func = [&obs_2, op_idx](const Complex* in, Complex* out, int dim) {
-            obs_2[op_idx].apply(in, out, static_cast<uint64_t>(dim));
+        auto O2_func = [&obs_2, &obs_2_fs, op_idx, use_fixed_sz]
+            (const Complex* in, Complex* out, int dim) {
+            if (use_fixed_sz) obs_2_fs[op_idx]->apply(in, out, static_cast<uint64_t>(dim));
+            else              obs_2[op_idx].apply(in, out, static_cast<uint64_t>(dim));
         };
         auto results = compute_ground_state_cross_correlation(
             H_apply_int, O1_func, O2_func, ground_state, ground_state_energy,
