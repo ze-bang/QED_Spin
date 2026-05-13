@@ -554,6 +554,7 @@ if(WITH_CUDA)
         ${SOLVERS_GPU_DIR}/gpu_block_krylov_schur.cu
         ${SOLVERS_GPU_DIR}/gpu_ed_wrapper.cu
         ${SOLVERS_GPU_DIR}/gpu_tpq.cu
+        ${SOLVERS_GPU_DIR}/kpm_dos_gpu.cu
         ${SOLVERS_GPU_DIR}/gpu_cg.cu
         ${SOLVERS_GPU_DIR}/lobpcg_eigen_solve.cpp
         ${SOLVERS_GPU_DIR}/gpu_dynamics.cu

@@ -946,7 +946,7 @@ if(BUILD_ED_TESTS)
             ed_add_phase3c_test(test_distributed_symmetry_operator_gpu
                                 tests/unit/test_distributed_symmetry_operator_gpu.cpp)
             target_link_libraries(test_distributed_symmetry_operator_gpu PRIVATE
-                ed_distributed)
+                ed_distributed ed_symmetry)
 
             # Phase D step 1 (path matrix symm × mpi+gpu): on-device
             # Lanczos consuming a `DistributedSymmetryOperatorGPU`. Cross-
@@ -955,7 +955,7 @@ if(BUILD_ED_TESTS)
             ed_add_phase3c_test(test_distributed_lanczos_gpu_symmetry
                                 tests/unit/test_distributed_lanczos_gpu_symmetry.cpp)
             target_link_libraries(test_distributed_lanczos_gpu_symmetry PRIVATE
-                ed_distributed)
+                ed_distributed ed_symmetry)
 
             # Phase D step 3 (path matrix symm × mpi+gpu): on-device
             # thick-restart Lanczos consuming a `DistributedSymmetryOperatorGPU`.
@@ -965,7 +965,7 @@ if(BUILD_ED_TESTS)
             ed_add_phase3c_test(test_distributed_krylov_schur_gpu_symmetry
                                 tests/unit/test_distributed_krylov_schur_gpu_symmetry.cpp)
             target_link_libraries(test_distributed_krylov_schur_gpu_symmetry PRIVATE
-                ed_distributed)
+                ed_distributed ed_symmetry)
 
             # Phase D step 5 (path matrix symm × mpi+gpu): on-device FTLM
             # consuming a `DistributedSymmetryOperatorGPU`. Cross-checks
@@ -975,7 +975,7 @@ if(BUILD_ED_TESTS)
             ed_add_phase3c_test(test_distributed_ftlm_gpu_symmetry
                                 tests/unit/test_distributed_ftlm_gpu_symmetry.cpp)
             target_link_libraries(test_distributed_ftlm_gpu_symmetry PRIVATE
-                ed_distributed)
+                ed_distributed ed_symmetry)
 
             # Phase E step 2 (path matrix symm × mpi+gpu for TPQ):
             # on-device canonical TPQ consuming a
@@ -987,7 +987,7 @@ if(BUILD_ED_TESTS)
             ed_add_phase3c_test(test_distributed_tpq_gpu_symmetry
                                 tests/unit/test_distributed_tpq_gpu_symmetry.cpp)
             target_link_libraries(test_distributed_tpq_gpu_symmetry PRIVATE
-                ed_distributed)
+                ed_distributed ed_symmetry)
         endif()
     endif()
 

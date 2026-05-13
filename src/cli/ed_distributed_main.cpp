@@ -128,6 +128,12 @@ struct CliArgs {
     double delta_beta = 0.05;
     std::uint64_t taylor_order = 30;
     bool compute_variance = false;
+    // Phase A.1 (May 2026): set the FTLM observable to H itself so
+    // <H>(beta) is returned in DistributedFtlmResult::O_expectation
+    // and dumped to /energy. With per-sector FTLM the caller assembles
+    // the full-space E(beta) via
+    //     E_total(beta) = sum_s Z_s(beta) * E_s(beta) / sum_s Z_s(beta).
+    bool observable_h = false;
 
     // -------- Symmetry projection (Layer 5a) -----------------------------
     bool use_symmetry = false;
@@ -192,6 +198,7 @@ CliArgs parse_args(int argc, char** argv) {
         else if (k == "--delta-beta")    { need(1); a.delta_beta = std::stod(argv[++i]); }
         else if (k == "--taylor-order")  { need(1); a.taylor_order = std::stoull(argv[++i]); }
         else if (k == "--compute-variance")    { a.compute_variance = true; }
+        else if (k == "--observable-h")        { a.observable_h = true; }
         else if (k == "--gpu-resident-spmv")   { a.gpu_resident_spmv = true; }
         else if (k == "--compute-eigenvectors"){ a.compute_eigenvectors = true; }
         else if (k == "--use-symmetry")        { a.use_symmetry = true; }
@@ -227,6 +234,11 @@ CliArgs parse_args(int argc, char** argv) {
               "  --delta-beta <double>     (tpq) imag-time substep (default: 0.05)\n"
               "  --taylor-order <int>      (tpq) Taylor truncation (default: 30)\n"
               "  --compute-variance        (tpq) also report <H^2>-<H>^2\n"
+              "  --observable-h            (ftlm) compute <H>(beta) per\n"
+              "                            sector via observable=H; result\n"
+              "                            file gains /energy in addition\n"
+              "                            to /Z (combine across sectors\n"
+              "                            via E = sum_s Z_s * E_s / Z_tot)\n"
               "Symmetry projection (uses DistributedSymmetryOperator):\n"
               "  --use-symmetry            project onto a symmetry sector\n"
               "                            (requires --directory with\n"
@@ -961,6 +973,9 @@ int main(int argc, char** argv) {
                     gfopts.betas             = a.betas;
                     gfopts.seed_offset       = a.seed;
                     gfopts.verbose           = a.verbose;
+                    if (a.observable_h) {
+                        gfopts.observable_op = op;
+                    }
 
                     res = ed::distributed::distributed_ftlm_gpu_symmetry(
                         op, a.sector_index, gfopts, MPI_COMM_WORLD);
@@ -979,6 +994,9 @@ int main(int argc, char** argv) {
                     gfopts.betas             = a.betas;
                     gfopts.seed_offset       = a.seed;
                     gfopts.verbose           = a.verbose;
+                    if (a.observable_h) {
+                        gfopts.observable_op = op;
+                    }
 
                     res = ed::distributed::distributed_ftlm_gpu(
                         op, gfopts, MPI_COMM_WORLD);
@@ -995,6 +1013,9 @@ int main(int argc, char** argv) {
                 fopts.betas             = a.betas;
                 fopts.seed_offset       = a.seed;
                 fopts.verbose           = a.verbose;
+                if (a.observable_h) {
+                    fopts.observable_op = op;
+                }
 
                 if (a.use_symmetry) {
                     // Phase D step 4: per-sector FTLM. The returned Z[b]
@@ -1016,20 +1037,27 @@ int main(int argc, char** argv) {
                           << " samples_used=" << res.samples_used
                           << " backend=" << backend_label
                           << std::endl;
+                const bool have_E = !res.O_expectation.empty();
                 for (std::size_t b = 0; b < a.betas.size(); ++b) {
                     std::cout << "  beta=" << a.betas[b]
-                              << " Z=" << res.Z[b] << std::endl;
+                              << " Z=" << res.Z[b];
+                    if (have_E) {
+                        std::cout << " E=" << res.O_expectation[b];
+                    }
+                    std::cout << std::endl;
                 }
                 dump_doubles(a.result_file, "/betas", a.betas);
                 dump_doubles(a.result_file, "/Z", res.Z);
                 if (!res.lnZ.empty()) {
                     dump_doubles(a.result_file, "/lnZ", res.lnZ);
                 }
-                if (!res.O_expectation.empty()) {
-                    dump_doubles(a.result_file, "/O", res.O_expectation);
+                if (have_E) {
+                    dump_doubles(a.result_file, "/energy", res.O_expectation);
                 }
                 dump_double_attr(a.result_file, "E_shift", res.E_shift);
                 dump_int_attr(a.result_file, "samples_used", res.samples_used);
+                dump_int_attr(a.result_file, "has_observable",
+                              have_E ? 1 : 0);
                 dump_double_attr(a.result_file, "elapsed_s",
                                  seconds_since(t0));
             }

@@ -72,6 +72,7 @@
 #ifdef WITH_CUDA
 #include <ed/gpu/gpu_operator.cuh>
 #include <ed/gpu/gpu_ed_wrapper.h>
+#include <ed/gpu/kpm_dos_gpu.cuh>
 #include <cuda_runtime.h>
 #endif
 
@@ -2883,13 +2884,47 @@ void compute_kpm_thermodynamics_workflow(const EDConfig& config) {
 
     create_directory_mpi_safe(config.workflow.output_dir);
 
-    // Run KPM (CPU-only, single-process; no MPI distribution at this point).
+    // Single-process driver: no MPI distribution at this point.  GPU dispatch
+    // is per rank when --use-gpu is enabled (and CUDA is built); otherwise we
+    // fall back to the CPU operator-free implementation.
     if (rank != 0) {
         return;
     }
 
-    auto kpm = ed::kpm_dos::compute_kpm_dos(
+    ed::kpm_dos::KPMDOSResult kpm;
+#ifdef WITH_CUDA
+    const bool kpm_use_gpu =
+        config.dynamical.use_gpu || config.system.use_gpu;
+    if (kpm_use_gpu) {
+        std::unique_ptr<GPUOperator> gpu_ham_owned;
+        if (use_fixed_sz) {
+            gpu_ham_owned.reset(new GPUFixedSzOperator(
+                config.system.num_sites,
+                static_cast<int>(n_up),
+                config.system.spin_length));
+        } else {
+            gpu_ham_owned.reset(new GPUOperator(
+                config.system.num_sites,
+                config.system.spin_length));
+        }
+        if (!convertOperatorToGPU(ham, *gpu_ham_owned)) {
+            throw std::runtime_error(
+                "compute_kpm_thermodynamics_workflow: GPU operator conversion failed");
+        }
+        std::cout << "  backend      = GPU (matrix-free"
+                  << (use_fixed_sz ? ", fixed-Sz" : "") << ")\n";
+        kpm = ed::kpm_dos::compute_kpm_dos_gpu(
+            gpu_ham_owned.get(), N, betas, /*dos_grid=*/{}, kpm_params);
+    } else {
+        std::cout << "  backend      = CPU (operator-free)\n";
+        kpm = ed::kpm_dos::compute_kpm_dos(
+            H_func, N, betas, /*dos_grid=*/{}, kpm_params);
+    }
+#else
+    std::cout << "  backend      = CPU (operator-free; no CUDA build)\n";
+    kpm = ed::kpm_dos::compute_kpm_dos(
         H_func, N, betas, /*dos_grid=*/{}, kpm_params);
+#endif
 
     // Persist under the standard thermodynamics group so existing readers
     // (Python `qed.workflow`, the analysis scripts) just work, and stamp
