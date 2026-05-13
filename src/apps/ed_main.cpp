@@ -362,17 +362,19 @@ int main(int argc, char* argv[]) {
     // on-disk output.
     //
     // Recognised methods: dynamical_thermal | static_thermal |
-    //                     ground_state_dssf | single_expectation
+    //                     ground_state_dssf | single_expectation |
+    //                     kpm_thermodynamics
     //
     // All other CLI flags continue to be parsed by EDConfig::fromCommandLine
-    // (so existing --dyn-* / --static-* / --gs-dssf-* knobs still work);
-    // the subcommand only chooses which engine method is invoked.
+    // (so existing --dyn-* / --static-* / --gs-dssf-* / --kpm-* knobs still
+    // work); the subcommand only chooses which engine method is invoked.
     // -------------------------------------------------------------------
     if (argc >= 2 && std::string(argv[1]) == "dssf") {
         if (argc < 3) {
             std::cerr << "Error: `ED dssf` requires a method argument.\n"
                       << "Usage: ED dssf <dynamical_thermal|static_thermal|"
-                         "ground_state_dssf|single_expectation> "
+                         "ground_state_dssf|single_expectation|"
+                         "kpm_thermodynamics> "
                          "<directory> [options]\n";
             #ifdef WITH_MPI
             MPI_Finalize();

@@ -36,7 +36,8 @@ TEST_CASE("DSSFMethod string round-trip is the identity",
     for (auto m : {DSSFMethod::DYNAMICAL_THERMAL,
                    DSSFMethod::STATIC_THERMAL,
                    DSSFMethod::GROUND_STATE_DSSF,
-                   DSSFMethod::SINGLE_EXPECTATION}) {
+                   DSSFMethod::SINGLE_EXPECTATION,
+                   DSSFMethod::KPM_THERMODYNAMICS}) {
         const auto s = to_string(m);
         REQUIRE_FALSE(s.empty());
         const auto m2 = method_from_string(s);
@@ -57,6 +58,8 @@ TEST_CASE("method_from_string accepts mixed case",
             DSSFMethod::GROUND_STATE_DSSF);
     REQUIRE(method_from_string("single_EXPECTATION") ==
             DSSFMethod::SINGLE_EXPECTATION);
+    REQUIRE(method_from_string("KPM_Thermodynamics") ==
+            DSSFMethod::KPM_THERMODYNAMICS);
 }
 
 TEST_CASE("method_from_string rejects unknown tokens",
@@ -78,6 +81,20 @@ TEST_CASE("run() rejects null EDConfig in transitional P2.2 mode",
     REQUIRE_THROWS_AS(run(req), std::invalid_argument);
 }
 
+TEST_CASE("run() also rejects null EDConfig for KPM_THERMODYNAMICS",
+          "[dssf][engine][kpm]") {
+    // KPM_THERMODYNAMICS routes through compute_kpm_thermodynamics_workflow
+    // and reads its kpm_* knobs out of EDConfig, so the null-config guard
+    // must fire just like the FTLM-based methods. Lockdown for audit #3
+    // (KPM exposed as DSSFMethod).
+    using namespace ed::dssf;
+
+    DSSFRequest req;
+    req.method  = DSSFMethod::KPM_THERMODYNAMICS;
+    req.config  = nullptr;
+    REQUIRE_THROWS_AS(run(req), std::invalid_argument);
+}
+
 TEST_CASE("DSSFMethod numeric values are stable",
           "[dssf][engine][p2-2]") {
     using ed::dssf::DSSFMethod;
@@ -85,4 +102,5 @@ TEST_CASE("DSSFMethod numeric values are stable",
     REQUIRE(static_cast<unsigned>(DSSFMethod::STATIC_THERMAL)     == 1u);
     REQUIRE(static_cast<unsigned>(DSSFMethod::GROUND_STATE_DSSF)  == 2u);
     REQUIRE(static_cast<unsigned>(DSSFMethod::SINGLE_EXPECTATION) == 3u);
+    REQUIRE(static_cast<unsigned>(DSSFMethod::KPM_THERMODYNAMICS) == 4u);
 }
