@@ -2785,28 +2785,45 @@ void compute_kpm_thermodynamics_workflow(const EDConfig& config) {
         std::cout << "==========================================\n";
     }
 
-    // Load Hamiltonian (mirrors compute_ground_state_dssf_workflow).
-    Operator ham(config.system.num_sites, config.system.spin_length);
-    {
-        const std::string interaction_file =
-            config.system.hamiltonian_dir + "/" + config.system.interaction_file;
-        const std::string single_site_file =
-            config.system.hamiltonian_dir + "/" + config.system.single_site_file;
-        ham.loadFromInterAllFile(interaction_file);
-        ham.loadFromFile(single_site_file);
-        if (!config.system.three_body_file.empty()) {
-            const std::string tb =
-                config.system.hamiltonian_dir + "/" + config.system.three_body_file;
-            if (std::filesystem::exists(tb)) {
-                ham.loadThreeBodyTerm(tb);
-            }
-        }
-    }
-
+    // Load Hamiltonian.  Audit #2 pattern (mirrors
+    // compute_dynamical_response_workflow): under --fixed-sz we must build a
+    // FixedSzOperator so apply()/matVecGPU() work on the C(N, n_up) sector
+    // dimension; otherwise the CPU operator-free path throws "Input/output
+    // vector size mismatch" because Operator::apply assumes 2^N.
     const bool use_fixed_sz = config.system.use_fixed_sz;
-    int64_t n_up = (use_fixed_sz && config.system.n_up >= 0)
+    const int64_t n_up = (use_fixed_sz && config.system.n_up >= 0)
                        ? config.system.n_up
                        : static_cast<int64_t>(config.system.num_sites) / 2;
+
+    const std::string interaction_file =
+        config.system.hamiltonian_dir + "/" + config.system.interaction_file;
+    const std::string single_site_file =
+        config.system.hamiltonian_dir + "/" + config.system.single_site_file;
+
+    std::shared_ptr<Operator> ham_full;
+    std::shared_ptr<FixedSzOperator> ham_fs;
+    if (use_fixed_sz) {
+        ham_fs = std::make_shared<FixedSzOperator>(
+            config.system.num_sites, config.system.spin_length, n_up);
+        ham_fs->loadFromInterAllFile(interaction_file);
+        ham_fs->loadFromFile(single_site_file);
+    } else {
+        ham_full = std::make_shared<Operator>(
+            config.system.num_sites, config.system.spin_length);
+        ham_full->loadFromInterAllFile(interaction_file);
+        ham_full->loadFromFile(single_site_file);
+    }
+    if (!config.system.three_body_file.empty()) {
+        const std::string tb =
+            config.system.hamiltonian_dir + "/" + config.system.three_body_file;
+        if (std::filesystem::exists(tb)) {
+            if (use_fixed_sz) ham_fs->loadThreeBodyTerm(tb);
+            else              ham_full->loadThreeBodyTerm(tb);
+        }
+    }
+    Operator& ham = use_fixed_sz ? static_cast<Operator&>(*ham_fs)
+                                 : *ham_full;
+
     uint64_t N;
     if (use_fixed_sz) {
         N = 1;
@@ -2817,8 +2834,10 @@ void compute_kpm_thermodynamics_workflow(const EDConfig& config) {
         N = 1ULL << config.system.num_sites;
     }
 
-    auto H_func = [&ham](const Complex* in, Complex* out, uint64_t dim) {
-        ham.apply(in, out, dim);
+    auto H_func = [ham_full, ham_fs, use_fixed_sz](
+        const Complex* in, Complex* out, uint64_t dim) {
+        if (use_fixed_sz) ham_fs->apply(in, out, dim);
+        else              ham_full->apply(in, out, dim);
     };
 
     // Temperature grid: prefer the dynamical-block grid when a sweep is
@@ -2871,6 +2890,31 @@ void compute_kpm_thermodynamics_workflow(const EDConfig& config) {
     if (config.dynamical.random_seed != 0) {
         kpm_params.random_seed =
             static_cast<std::uint64_t>(config.dynamical.random_seed);
+    }
+    // Tunables not yet exposed through ed_config.cpp — pick them up from env
+    // so production scripts can sweep without rebuilding.  Defaults are
+    // documented next to KPMDOSParameters in include/ed/solvers/kpm_dos.h.
+    if (const char* env_M = std::getenv("ED_KPM_NUM_MOMENTS")) {
+        const int v = std::atoi(env_M);
+        if (v >= 4) kpm_params.num_moments = v;
+    }
+    if (const char* env_Nq = std::getenv("ED_KPM_NUM_QUAD")) {
+        const int v = std::atoi(env_Nq);
+        if (v > 0) kpm_params.num_quadrature_nodes = v;
+    }
+    if (const char* env_buf = std::getenv("ED_KPM_BOUND_BUFFER")) {
+        const double v = std::atof(env_buf);
+        if (v > 0.0) kpm_params.spectral_bound_buffer = v;
+    }
+    if (const char* env_kern = std::getenv("ED_KPM_KERNEL")) {
+        const std::string s(env_kern);
+        if (s == "lorentz" || s == "Lorentz" || s == "LORENTZ") {
+            kpm_params.use_jackson_kernel = false;
+        }
+    }
+    if (const char* env_lambda = std::getenv("ED_KPM_LORENTZ_LAMBDA")) {
+        const double v = std::atof(env_lambda);
+        if (v > 0.0) kpm_params.lorentz_lambda = v;
     }
 
     if (rank == 0) {
