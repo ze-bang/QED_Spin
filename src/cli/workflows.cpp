@@ -109,6 +109,99 @@ std::vector<std::pair<int, int>> parse_spin_combinations(const std::string& spin
     return spin_combinations;
 }
 
+// ----------------------------------------------------------------------------
+// Audit item #1 (partial): cross-sector DSSF correctness guard.
+//
+// In fixed-Sz mode, single-site transverse channels (S+/S-/Sx/Sy, op != 2)
+// change the magnetisation by ±1 and therefore land in a *different*
+// Sz sector than the one we have built a basis for. The legacy
+// `FixedSz*Operator::apply` silently drops those contributions because
+// they fail the `popcount(new_basis) == n_up_` filter, which means the
+// computed spectrum is *zero* rather than the physical ⟨S^α(-Q,t) S^α(Q)⟩.
+//
+// Cross-sector kernels exist (`compute_dynamical_correlation_cross_sector`
+// and friends) but the dispatch wiring for the DSSF workflow is not yet
+// in place. Until it lands, we (a) warn loudly when the user requests
+// such a channel under fixed-Sz, and (b) drop it from the work list so
+// downstream HDF5 files do not silently contain wrong (all-zero) spectra
+// that could be mistaken for converged results.
+//
+// Returns the filtered list and writes a one-shot diagnostic to stdout
+// (rank 0 only) describing what was removed and why.
+// ----------------------------------------------------------------------------
+inline std::vector<std::pair<int, int>>
+filter_fixed_sz_transverse_channels(
+    const std::vector<std::pair<int, int>>& spin_combinations,
+    bool use_fixed_sz,
+    bool use_xyz_basis,
+    int rank,
+    const char* workflow_label)
+{
+    if (!use_fixed_sz) return spin_combinations;
+
+    std::vector<std::pair<int, int>> kept;
+    std::vector<std::pair<int, int>> dropped;
+    kept.reserve(spin_combinations.size());
+
+    auto is_transverse = [](int op) { return op != 2; };
+
+    for (const auto& pr : spin_combinations) {
+        // A pair contributes only if BOTH operators preserve the Sz
+        // sector. (A mixed pair like S+Sz lands in the n_up+1 sector
+        // for ⟨S+(t) Sz⟩ and is also a cross-sector observable.)
+        if (is_transverse(pr.first) || is_transverse(pr.second)) {
+            dropped.push_back(pr);
+        } else {
+            kept.push_back(pr);
+        }
+    }
+
+    if (rank == 0 && !dropped.empty()) {
+        const char* op0 = use_xyz_basis ? "Sx" : "Sp";
+        const char* op1 = use_xyz_basis ? "Sy" : "Sm";
+        const char* op2 = "Sz";
+        const char* op_names[3] = {op0, op1, op2};
+
+        std::cerr << "\n";
+        std::cerr << "  ============================================================\n";
+        std::cerr << "  WARNING (" << workflow_label << ", audit #1):\n";
+        std::cerr << "    Dropping " << dropped.size()
+                  << " transverse spin channel(s) under --fixed-sz:\n";
+        for (const auto& pr : dropped) {
+            std::cerr << "      - " << op_names[pr.first]
+                      << op_names[pr.second] << "\n";
+        }
+        std::cerr << "    Reason: these operators change the total Sz quantum\n";
+        std::cerr << "    number, so they map between sectors of different n_up.\n";
+        std::cerr << "    The current dispatcher applies them within a single\n";
+        std::cerr << "    fixed-Sz sector, which silently produces *zero* output\n";
+        std::cerr << "    instead of the physical correlator. Cross-sector kernels\n";
+        std::cerr << "    (compute_dynamical_correlation_cross_sector) exist but\n";
+        std::cerr << "    are not yet wired through the DSSF dispatcher.\n";
+        std::cerr << "    Workaround: re-run without --fixed-sz to compute\n";
+        std::cerr << "    transverse channels in the full Hilbert space, or\n";
+        std::cerr << "    request only longitudinal (SzSz) channels.\n";
+        std::cerr << "  ============================================================\n";
+        std::cerr << "\n";
+    }
+
+    if (kept.empty()) {
+        // Don't fall back to SzSz silently; surface the issue.
+        if (rank == 0) {
+            std::cerr << "  ERROR: all requested spin channels were transverse "
+                      << "and have been dropped (see warning above). "
+                      << "Aborting " << workflow_label << ".\n";
+        }
+        throw std::invalid_argument(
+            std::string("ed::") + workflow_label +
+            ": no valid spin channels remain after fixed-Sz cross-sector "
+            "filtering (audit item #1). Re-run without --fixed-sz, or "
+            "request a longitudinal SzSz channel.");
+    }
+
+    return kept;
+}
+
 /**
  * @brief Parse momentum points from string format
  * Format: "Qx1,Qy1,Qz1;Qx2,Qy2,Qz2;..." (values are multiplied by π)
@@ -712,6 +805,12 @@ void compute_dynamical_response_workflow(const EDConfig& config) {
         
         // Parse configuration
         auto spin_combinations = parse_spin_combinations(config.dynamical.spin_combinations);
+        spin_combinations = filter_fixed_sz_transverse_channels(
+            spin_combinations,
+            config.system.use_fixed_sz,
+            (config.dynamical.basis == "xyz"),
+            rank,
+            "compute_dynamical_response_workflow");
         auto momentum_points = parse_momentum_points(config.dynamical.momentum_points);
         auto polarization = parse_polarization(config.dynamical.polarization);
         
@@ -1492,6 +1591,12 @@ void compute_static_response_workflow(const EDConfig& config) {
         
         // Parse configuration
         auto spin_combinations = parse_spin_combinations(config.static_resp.spin_combinations);
+        spin_combinations = filter_fixed_sz_transverse_channels(
+            spin_combinations,
+            config.system.use_fixed_sz,
+            (config.static_resp.basis == "xyz"),
+            rank,
+            "compute_static_response_workflow");
         auto momentum_points = parse_momentum_points(config.static_resp.momentum_points);
         auto polarization = parse_polarization(config.static_resp.polarization);
         
@@ -2037,6 +2142,12 @@ void compute_ground_state_dssf_workflow(const EDConfig& config) {
     
     // Parse configuration for operators
     auto spin_combinations = parse_spin_combinations(config.dynamical.spin_combinations);
+    spin_combinations = filter_fixed_sz_transverse_channels(
+        spin_combinations,
+        config.system.use_fixed_sz,
+        (config.dynamical.basis == "xyz"),
+        rank,
+        "compute_ground_state_dssf_workflow");
     auto momentum_points = parse_momentum_points(config.dynamical.momentum_points);
     auto polarization = parse_polarization(config.dynamical.polarization);
     std::string positions_file = config.system.hamiltonian_dir + "/positions.dat";
