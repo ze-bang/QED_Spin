@@ -70,6 +70,14 @@ enum class DSSFMethod : std::uint32_t {
     /// Useful for diagnostic observables (energy, magnetisation, etc.)
     /// where the second operator would be the identity.
     SINGLE_EXPECTATION = 3,
+
+    /// KPM-based thermodynamics from the Chebyshev-expanded DOS:
+    /// computes Z(β), E(β), C(β), S(β), F(β) (and optionally a DOS grid)
+    /// using the existing `ed::kpm_dos::compute_kpm_dos` solver. Does
+    /// not produce S(Q, ω) -- it is the operator-free thermodynamics
+    /// alternative to STATIC_THERMAL when only bulk thermodynamic
+    /// quantities are needed and FTLM sampling is too expensive.
+    KPM_THERMODYNAMICS = 4,
 };
 
 /// Convert a DSSFMethod to its lowercase string token (the same token that

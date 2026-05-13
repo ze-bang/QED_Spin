@@ -122,6 +122,14 @@ void compute_static_response_workflow(const EDConfig& config);
 /// optimal path for fixed-Sz 32-site ED.
 void compute_ground_state_dssf_workflow(const EDConfig& config);
 
+/// Compute KPM-based thermodynamics: Chebyshev moments of the spectral
+/// density (Hutchinson-sampled), reconstructed thermal Z(β), E(β), C(β),
+/// S(β), F(β), and an optional DOS grid. Operator-free; uses only the
+/// Hamiltonian. Persists results under `/kpm_thermodynamics/...` in the
+/// run's HDF5 file. Item #3 of the audit (expose KPM at the DSSF method
+/// surface).
+void compute_kpm_thermodynamics_workflow(const EDConfig& config);
+
 /// Print the lowest `max_show` eigenvalues from the input vector.
 void print_eigenvalue_summary(const std::vector<double>& eigenvalues,
                               uint64_t max_show = 10);

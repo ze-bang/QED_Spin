@@ -29,19 +29,21 @@ namespace ed::dssf {
 
 namespace {
 
-constexpr const char* kDynamicalThermal = "dynamical_thermal";
-constexpr const char* kStaticThermal    = "static_thermal";
-constexpr const char* kGroundStateDSSF  = "ground_state_dssf";
-constexpr const char* kSingleExpect     = "single_expectation";
+constexpr const char* kDynamicalThermal  = "dynamical_thermal";
+constexpr const char* kStaticThermal     = "static_thermal";
+constexpr const char* kGroundStateDSSF   = "ground_state_dssf";
+constexpr const char* kSingleExpect      = "single_expectation";
+constexpr const char* kKPMThermodynamics = "kpm_thermodynamics";
 
 } // namespace
 
 std::string to_string(DSSFMethod method) {
     switch (method) {
-        case DSSFMethod::DYNAMICAL_THERMAL:  return kDynamicalThermal;
-        case DSSFMethod::STATIC_THERMAL:     return kStaticThermal;
-        case DSSFMethod::GROUND_STATE_DSSF:  return kGroundStateDSSF;
-        case DSSFMethod::SINGLE_EXPECTATION: return kSingleExpect;
+        case DSSFMethod::DYNAMICAL_THERMAL:   return kDynamicalThermal;
+        case DSSFMethod::STATIC_THERMAL:      return kStaticThermal;
+        case DSSFMethod::GROUND_STATE_DSSF:   return kGroundStateDSSF;
+        case DSSFMethod::SINGLE_EXPECTATION:  return kSingleExpect;
+        case DSSFMethod::KPM_THERMODYNAMICS:  return kKPMThermodynamics;
     }
     throw std::invalid_argument(
         "ed::dssf::to_string: unrecognised DSSFMethod value " +
@@ -55,15 +57,16 @@ DSSFMethod method_from_string(const std::string& token) {
                    std::back_inserter(normalized),
                    [](unsigned char c) { return std::tolower(c); });
 
-    if (normalized == kDynamicalThermal) return DSSFMethod::DYNAMICAL_THERMAL;
-    if (normalized == kStaticThermal)    return DSSFMethod::STATIC_THERMAL;
-    if (normalized == kGroundStateDSSF)  return DSSFMethod::GROUND_STATE_DSSF;
-    if (normalized == kSingleExpect)     return DSSFMethod::SINGLE_EXPECTATION;
+    if (normalized == kDynamicalThermal)  return DSSFMethod::DYNAMICAL_THERMAL;
+    if (normalized == kStaticThermal)     return DSSFMethod::STATIC_THERMAL;
+    if (normalized == kGroundStateDSSF)   return DSSFMethod::GROUND_STATE_DSSF;
+    if (normalized == kSingleExpect)      return DSSFMethod::SINGLE_EXPECTATION;
+    if (normalized == kKPMThermodynamics) return DSSFMethod::KPM_THERMODYNAMICS;
 
     throw std::invalid_argument(
         "ed::dssf::method_from_string: unrecognised method token '" +
         token + "'. Valid tokens: dynamical_thermal, static_thermal, "
-        "ground_state_dssf, single_expectation.");
+        "ground_state_dssf, single_expectation, kpm_thermodynamics.");
 }
 
 } // namespace ed::dssf

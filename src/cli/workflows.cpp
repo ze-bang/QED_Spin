@@ -41,6 +41,7 @@
 #include <cmath>
 #include <limits>
 #include <filesystem>
+#include <memory>
 #include <random>
 #include <algorithm>
 #include <map>
@@ -56,6 +57,7 @@
 #include <ed/core/hdf5_io.h>
 #include <ed/dssf/operator_spec.h>
 #include <ed/solvers/ftlm.h>
+#include <ed/solvers/kpm_dos.h>
 #include <ed/solvers/ltlm.h>
 #include <ed/solvers/observables.h>
 
@@ -536,8 +538,9 @@ void compute_dynamical_response_workflow(const EDConfig& config) {
 #ifdef WITH_CUDA
         if (config.dynamical.use_gpu) {
             if (config.system.use_fixed_sz) {
-                std::cout << "  GPU: requested but disabled (Fixed-Sz GPU path "
-                             "not implemented; falling back to CPU)\n";
+                std::cout << "  GPU: enabled (fixed-Sz; transverse channels "
+                             "with operators that change Sz still fall back "
+                             "to CPU until cross-sector wiring lands)\n";
             } else {
                 std::cout << "  GPU: enabled (multi-temperature path; single-T "
                              "and 1-sample tasks fall back to CPU)\n";
@@ -881,15 +884,45 @@ void compute_dynamical_response_workflow(const EDConfig& config) {
             std::map<double, DynamicalResponseResults> results_map;
             
 #ifdef WITH_CUDA
-            // GPU multi-temperature path: requires --use-gpu (or --dyn-use-gpu)
-            // and not --fixed-sz. The fixed-Sz / unavailable-CUDA cases were
-            // already announced once at the workflow banner above; we simply
-            // skip the GPU branch silently here.
-            if (config.dynamical.use_gpu && !config.system.use_fixed_sz) {
+            // GPU multi-temperature path: requires --use-gpu (or --dyn-use-gpu).
+            // Audit item #2: fixed-Sz now also takes the GPU path via
+            // `GPUFixedSzOperator` (subclass of GPUOperator); the wrapper
+            // dispatches polymorphically on virtual `matVecGPU`. Cross-sector
+            // operators (S±) still need audit item #1 to produce non-zero
+            // transverse channels.
+            if (config.dynamical.use_gpu) {
                 try {
-                    GPUOperator gpu_ham(config.system.num_sites, config.system.spin_length);
-                    GPUOperator gpu_obs1(config.system.num_sites, config.system.spin_length);
-                    GPUOperator gpu_obs2(config.system.num_sites, config.system.spin_length);
+                    std::unique_ptr<GPUOperator> gpu_ham_owned;
+                    std::unique_ptr<GPUOperator> gpu_obs1_owned;
+                    std::unique_ptr<GPUOperator> gpu_obs2_owned;
+                    if (config.system.use_fixed_sz) {
+                        const int n_up_int = static_cast<int>(
+                            (config.system.n_up >= 0)
+                                ? config.system.n_up
+                                : config.system.num_sites / 2);
+                        gpu_ham_owned.reset(new GPUFixedSzOperator(
+                            config.system.num_sites, n_up_int,
+                            config.system.spin_length));
+                        gpu_obs1_owned.reset(new GPUFixedSzOperator(
+                            config.system.num_sites, n_up_int,
+                            config.system.spin_length));
+                        gpu_obs2_owned.reset(new GPUFixedSzOperator(
+                            config.system.num_sites, n_up_int,
+                            config.system.spin_length));
+                    } else {
+                        gpu_ham_owned.reset(new GPUOperator(
+                            config.system.num_sites,
+                            config.system.spin_length));
+                        gpu_obs1_owned.reset(new GPUOperator(
+                            config.system.num_sites,
+                            config.system.spin_length));
+                        gpu_obs2_owned.reset(new GPUOperator(
+                            config.system.num_sites,
+                            config.system.spin_length));
+                    }
+                    GPUOperator& gpu_ham  = *gpu_ham_owned;
+                    GPUOperator& gpu_obs1 = *gpu_obs1_owned;
+                    GPUOperator& gpu_obs2 = *gpu_obs2_owned;
 
                     if (!convertOperatorToGPU(ham, gpu_ham) ||
                         !convertOperatorToGPU(obs_1[op_idx], gpu_obs1) ||
@@ -1084,7 +1117,7 @@ void compute_dynamical_response_workflow(const EDConfig& config) {
         {
             const bool cpu_only =
 #ifdef WITH_CUDA
-                (!config.dynamical.use_gpu) || config.system.use_fixed_sz;
+                (!config.dynamical.use_gpu);
 #else
                 true;
 #endif
@@ -1376,8 +1409,9 @@ void compute_static_response_workflow(const EDConfig& config) {
 #ifdef WITH_CUDA
         if (config.static_resp.use_gpu) {
             if (config.system.use_fixed_sz) {
-                std::cout << "  GPU: requested but disabled (Fixed-Sz GPU path "
-                             "not implemented; falling back to CPU)\n";
+                std::cout << "  GPU: enabled (fixed-Sz; transverse channels "
+                             "with operators that change Sz still fall back "
+                             "to CPU until cross-sector wiring lands)\n";
             } else {
                 std::cout << "  GPU: enabled (config-based operator path; "
                              "legacy --static-operator path is CPU-only)\n";
@@ -1552,14 +1586,43 @@ void compute_static_response_workflow(const EDConfig& config) {
             StaticResponseResults results;
             
 #ifdef WITH_CUDA
-            // GPU static path: requires --use-gpu (or --static-use-gpu) and
-            // not --fixed-sz. The fixed-Sz / unavailable-CUDA cases were
-            // announced once at the workflow banner above.
-            if (config.static_resp.use_gpu && !config.system.use_fixed_sz) {
+            // GPU static path: requires --use-gpu (or --static-use-gpu).
+            // Audit item #2: fixed-Sz now also takes the GPU path via
+            // `GPUFixedSzOperator`. Operators that change Sz still need
+            // cross-sector wiring (audit item #1) to produce non-zero values.
+            if (config.static_resp.use_gpu) {
                 try {
-                    GPUOperator gpu_ham(config.system.num_sites, config.system.spin_length);
-                    GPUOperator gpu_obs1(config.system.num_sites, config.system.spin_length);
-                    GPUOperator gpu_obs2(config.system.num_sites, config.system.spin_length);
+                    std::unique_ptr<GPUOperator> gpu_ham_owned;
+                    std::unique_ptr<GPUOperator> gpu_obs1_owned;
+                    std::unique_ptr<GPUOperator> gpu_obs2_owned;
+                    if (config.system.use_fixed_sz) {
+                        const int n_up_int = static_cast<int>(
+                            (config.system.n_up >= 0)
+                                ? config.system.n_up
+                                : config.system.num_sites / 2);
+                        gpu_ham_owned.reset(new GPUFixedSzOperator(
+                            config.system.num_sites, n_up_int,
+                            config.system.spin_length));
+                        gpu_obs1_owned.reset(new GPUFixedSzOperator(
+                            config.system.num_sites, n_up_int,
+                            config.system.spin_length));
+                        gpu_obs2_owned.reset(new GPUFixedSzOperator(
+                            config.system.num_sites, n_up_int,
+                            config.system.spin_length));
+                    } else {
+                        gpu_ham_owned.reset(new GPUOperator(
+                            config.system.num_sites,
+                            config.system.spin_length));
+                        gpu_obs1_owned.reset(new GPUOperator(
+                            config.system.num_sites,
+                            config.system.spin_length));
+                        gpu_obs2_owned.reset(new GPUOperator(
+                            config.system.num_sites,
+                            config.system.spin_length));
+                    }
+                    GPUOperator& gpu_ham  = *gpu_ham_owned;
+                    GPUOperator& gpu_obs1 = *gpu_obs1_owned;
+                    GPUOperator& gpu_obs2 = *gpu_obs2_owned;
 
                     if (!convertOperatorToGPU(ham, gpu_ham) ||
                         !convertOperatorToGPU(obs_1[op_idx], gpu_obs1) ||
@@ -2146,6 +2209,193 @@ void compute_ground_state_dssf_workflow(const EDConfig& config) {
         std::cout << "Results saved to: " << config.workflow.output_dir << "/ed_results.h5\n";
         std::cout << "==========================================\n";
     }
+}
+
+// ============================================================================
+// KPM thermodynamics workflow (audit item #3)
+//
+// Operator-free thermodynamics from the Chebyshev-expanded density of
+// states: Z(beta), E(beta), C(beta), S(beta), F(beta) (and an optional
+// reconstructed DOS) for the configured Hamiltonian. Persists results
+// under `/kpm_thermodynamics/...` in the run's HDF5 file.
+//
+// Driven by the existing `ed::kpm_dos::compute_kpm_dos` solver. The
+// dispatch wiring lives in `src/cli/dssf_engine.cpp`; this is the body.
+// ============================================================================
+void compute_kpm_thermodynamics_workflow(const EDConfig& config) {
+    int rank = 0;
+#ifdef WITH_MPI
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+#endif
+
+    if (rank == 0) {
+        std::cout << "\n==========================================\n";
+        std::cout << "KPM Thermodynamics (Chebyshev DOS)\n";
+        std::cout << "==========================================\n";
+    }
+
+    // Load Hamiltonian (mirrors compute_ground_state_dssf_workflow).
+    Operator ham(config.system.num_sites, config.system.spin_length);
+    {
+        const std::string interaction_file =
+            config.system.hamiltonian_dir + "/" + config.system.interaction_file;
+        const std::string single_site_file =
+            config.system.hamiltonian_dir + "/" + config.system.single_site_file;
+        ham.loadFromInterAllFile(interaction_file);
+        ham.loadFromFile(single_site_file);
+        if (!config.system.three_body_file.empty()) {
+            const std::string tb =
+                config.system.hamiltonian_dir + "/" + config.system.three_body_file;
+            if (std::filesystem::exists(tb)) {
+                ham.loadThreeBodyTerm(tb);
+            }
+        }
+    }
+
+    const bool use_fixed_sz = config.system.use_fixed_sz;
+    int64_t n_up = (use_fixed_sz && config.system.n_up >= 0)
+                       ? config.system.n_up
+                       : static_cast<int64_t>(config.system.num_sites) / 2;
+    uint64_t N;
+    if (use_fixed_sz) {
+        N = 1;
+        for (int64_t i = 0; i < n_up; i++) {
+            N = N * (config.system.num_sites - i) / (i + 1);
+        }
+    } else {
+        N = 1ULL << config.system.num_sites;
+    }
+
+    auto H_func = [&ham](const Complex* in, Complex* out, uint64_t dim) {
+        ham.apply(in, out, dim);
+    };
+
+    // Temperature grid: prefer the dynamical-block grid when a sweep is
+    // configured (num_temp_bins > 1); else fall back to the thermal block
+    // (which the standard thermodynamics workflow uses) so the user gets
+    // something sensible without having to repopulate dssf-specific knobs.
+    std::vector<double> temperatures;
+    {
+        double tmin = config.dynamical.temp_min;
+        double tmax = config.dynamical.temp_max;
+        uint64_t nT = config.dynamical.num_temp_bins;
+        if (nT <= 1) {
+            tmin = config.thermal.temp_min;
+            tmax = config.thermal.temp_max;
+            nT   = std::max<uint64_t>(1, config.thermal.num_temp_bins);
+        }
+        temperatures.resize(nT);
+        if (nT == 1) {
+            temperatures[0] = tmin;
+        } else {
+            const double log_tmin = std::log(tmin);
+            const double log_tmax = std::log(tmax);
+            const double dl = (log_tmax - log_tmin) / (nT - 1);
+            for (uint64_t i = 0; i < nT; ++i) {
+                temperatures[i] = std::exp(log_tmin + i * dl);
+            }
+        }
+    }
+
+    std::vector<double> betas(temperatures.size());
+    for (size_t i = 0; i < temperatures.size(); ++i) {
+        if (!(temperatures[i] > 0.0)) {
+            throw std::invalid_argument(
+                "compute_kpm_thermodynamics_workflow: temperature must be > 0");
+        }
+        betas[i] = 1.0 / temperatures[i];
+    }
+
+    ed::kpm_dos::KPMDOSParameters kpm_params;
+    if (config.dynamical.krylov_dim > 0) {
+        // Reuse the user's Krylov budget for the spectral-bound Lanczos.
+        kpm_params.spectral_bounds_krylov =
+            static_cast<int>(std::min<uint64_t>(
+                config.dynamical.krylov_dim, 500));
+    }
+    if (config.dynamical.num_random_states > 0) {
+        kpm_params.num_random_vectors =
+            static_cast<int>(config.dynamical.num_random_states);
+    }
+    if (config.dynamical.random_seed != 0) {
+        kpm_params.random_seed =
+            static_cast<std::uint64_t>(config.dynamical.random_seed);
+    }
+
+    if (rank == 0) {
+        std::cout << "  dim          = " << N << "\n";
+        std::cout << "  num_moments  = " << kpm_params.num_moments << "\n";
+        std::cout << "  num_samples  = " << kpm_params.num_random_vectors << "\n";
+        std::cout << "  temperatures = " << temperatures.size() << "\n";
+        std::cout << "  jackson      = "
+                  << (kpm_params.use_jackson_kernel ? "yes" : "no") << "\n";
+    }
+
+    create_directory_mpi_safe(config.workflow.output_dir);
+
+    // Run KPM (CPU-only, single-process; no MPI distribution at this point).
+    if (rank != 0) {
+        return;
+    }
+
+    auto kpm = ed::kpm_dos::compute_kpm_dos(
+        H_func, N, betas, /*dos_grid=*/{}, kpm_params);
+
+    // Persist under the standard thermodynamics group so existing readers
+    // (Python `qed.workflow`, the analysis scripts) just work, and stamp
+    // a small KPM_THERMODYNAMICS provenance under /kpm_thermodynamics.
+    const std::string h5_file =
+        HDF5IO::createOrOpenFile(config.workflow.output_dir);
+    HDF5IO::saveThermodynamics(h5_file, temperatures, "energy",        kpm.energy);
+    HDF5IO::saveThermodynamics(h5_file, temperatures, "specific_heat", kpm.specific_heat);
+    HDF5IO::saveThermodynamics(h5_file, temperatures, "entropy",       kpm.entropy);
+    HDF5IO::saveThermodynamics(h5_file, temperatures, "free_energy",   kpm.free_energy);
+    HDF5IO::saveThermodynamics(h5_file, temperatures, "partition_function",
+                               kpm.partition_function);
+
+    try {
+        H5::H5File file(h5_file, H5F_ACC_RDWR);
+        if (!file.nameExists("/kpm_thermodynamics")) {
+            file.createGroup("/kpm_thermodynamics");
+        }
+        H5::Group g = file.openGroup("/kpm_thermodynamics");
+        const auto write_dbl = [&](const char* name, double v) {
+            H5::DataSpace s(H5S_SCALAR);
+            if (g.attrExists(name)) g.removeAttr(name);
+            auto a = g.createAttribute(name, H5::PredType::NATIVE_DOUBLE, s);
+            a.write(H5::PredType::NATIVE_DOUBLE, &v);
+        };
+        const auto write_int = [&](const char* name, int v) {
+            H5::DataSpace s(H5S_SCALAR);
+            if (g.attrExists(name)) g.removeAttr(name);
+            auto a = g.createAttribute(name, H5::PredType::NATIVE_INT, s);
+            a.write(H5::PredType::NATIVE_INT, &v);
+        };
+        write_int("num_moments_used",        kpm.num_moments_used);
+        write_int("num_random_vectors_used", kpm.num_random_vectors_used);
+        write_dbl("kpm_a",                   kpm.kpm_a);
+        write_dbl("kpm_b",                   kpm.kpm_b);
+        write_dbl("e_min_estimate",          kpm.e_min_estimate);
+        write_dbl("e_max_estimate",          kpm.e_max_estimate);
+        write_dbl("energy_shift_used",       kpm.energy_shift_used);
+
+        if (!kpm.moments_weighted.empty()) {
+            const std::string ds = "/kpm_thermodynamics/moments_weighted";
+            if (file.nameExists(ds)) file.unlink(ds);
+            hsize_t dims[1] = { kpm.moments_weighted.size() };
+            H5::DataSpace ms(1, dims);
+            auto d = file.createDataSet(
+                ds, H5::PredType::NATIVE_DOUBLE, ms);
+            d.write(kpm.moments_weighted.data(), H5::PredType::NATIVE_DOUBLE);
+        }
+    } catch (const H5::Exception& e) {
+        std::cerr << "  Warning: KPM provenance write failed: "
+                  << e.getDetailMsg() << "\n";
+    }
+
+    std::cout << "\nKPM thermodynamics complete.\n";
+    std::cout << "Results: " << config.workflow.output_dir
+              << "/ed_results.h5  (groups /thermodynamics, /kpm_thermodynamics)\n";
 }
 
 /**

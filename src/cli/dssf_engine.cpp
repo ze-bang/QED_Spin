@@ -68,6 +68,16 @@ DSSFResult run(const DSSFRequest& request) {
         case DSSFMethod::GROUND_STATE_DSSF:
             compute_ground_state_dssf_workflow(*request.config);
             return result;
+
+        case DSSFMethod::KPM_THERMODYNAMICS:
+            // Operator-free thermodynamics from the Chebyshev-expanded
+            // density of states. The "structure" terminology is loose
+            // here: KPM_THERMODYNAMICS does not consume an OperatorSpec
+            // beyond ignoring it, but routing it through the DSSF
+            // dispatcher gives consumers a single uniform entry point
+            // for "give me thermodynamic observables for this H".
+            compute_kpm_thermodynamics_workflow(*request.config);
+            return result;
     }
 
     throw std::invalid_argument(
