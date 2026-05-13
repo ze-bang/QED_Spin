@@ -904,6 +904,60 @@ DynamicalResponseResults compute_ground_state_cross_correlation(
 );
 
 /**
+ * @brief Compute ground state DSSF in a *different* Hilbert sector than |0>.
+ *
+ * Audit item #1 (full): for fixed-Sz Hamiltonians the standard scalar
+ * ground-state DSSF
+ *
+ *     S_{O1, O2}(omega) = -1/pi Im <0| O1^dag (omega + E0 - H + i eta)^{-1} O2 |0>
+ *
+ * vanishes whenever O1, O2 change the magnetisation by +-1 (e.g. S+, S-),
+ * because the resolvent (omega - H)^{-1} only has matrix elements within
+ * the same Sz sector and O2|0> sits in a different sector than the
+ * source <0|. This routine evaluates the legitimate cross-sector
+ * spectrum by:
+ *   * applying O2 to |0> to obtain |phi> = O2|0> in the *destination*
+ *     sector (dim = dim_inner);
+ *   * applying O1^dag to |0> in the same destination sector to obtain |chi>;
+ *   * running Lanczos with H_inner (the Hamiltonian restricted to the
+ *     destination sector) starting from a normalised |phi>;
+ *   * forming S(omega) from the Krylov tridiagonal projection of |phi>
+ *     and |chi>, with a frequency shift by E0 to align onto the
+ *     standard energy axis.
+ *
+ * For O1 == O2 this reduces to a self-correlator and the implementation
+ * collapses to the cheaper continued-fraction path used by
+ * `compute_ground_state_dssf`. For O1 != O2 the spectral weight is
+ * evaluated via the Ritz eigendecomposition of the tridiagonal so that
+ * the cross-coefficient <chi|n_ritz><n_ritz|phi> can be reconstructed.
+ *
+ * @param H_inner   Hamiltonian matvec on the *destination* sector, dim = dim_inner.
+ * @param O1_dagger_apply  applies O1^dag to a vector of size dim_outer
+ *                          (the source sector), producing dim_inner output.
+ * @param O2_apply         applies O2 to a vector of size dim_outer,
+ *                          producing dim_inner output.
+ * @param ground_state     Normalised ground state |0> in the source sector
+ *                          (size dim_outer).
+ * @param ground_state_energy E0.
+ * @param dim_outer        Source sector dimension (size of ground_state).
+ * @param dim_inner        Destination sector dimension.
+ * @param params           Parameters mirror compute_ground_state_dssf.
+ *
+ * The result fills `spectral_function` (real part) and `spectral_function_imag`
+ * (imaginary part of the cross-correlation, zero in the diagonal case).
+ */
+DynamicalResponseResults compute_ground_state_dssf_cross_sector(
+    std::function<void(const Complex*, Complex*, int)> H_inner,
+    std::function<void(const Complex*, Complex*, int)> O1_dagger_apply,
+    std::function<void(const Complex*, Complex*, int)> O2_apply,
+    const ComplexVector& ground_state,
+    double ground_state_energy,
+    uint64_t dim_outer,
+    uint64_t dim_inner,
+    const GroundStateDSSFParameters& params
+);
+
+/**
  * @brief Load ground state from eigenvector files
  * 
  * Attempts to load ground state from various possible file formats:

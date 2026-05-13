@@ -1013,6 +1013,9 @@ if(BUILD_ED_TESTS)
     ed_add_test(test_kpm_dos                    tests/unit/test_kpm_dos.cpp USE_CATCH2)
     # Audit item #6: block / band Lanczos for multi-channel ground-state DSSF
     ed_add_test(test_block_lanczos_dssf         tests/unit/test_block_lanczos_dssf.cpp USE_CATCH2)
+    # Audit item #1 (full): cross-sector rectangular observable + DSSF kernel
+    ed_add_test(test_cross_sector_dssf          tests/unit/test_cross_sector_dssf.cpp USE_CATCH2)
+    target_link_libraries(test_cross_sector_dssf PRIVATE ed_dssf)
     # Phase E (TPQ dynamical correlator)
     ed_add_test(test_tpq_dynamical               tests/unit/test_tpq_dynamical.cpp USE_CATCH2)
     ed_add_test(test_hdf5_io                    tests/unit/test_hdf5_io.cpp USE_CATCH2)

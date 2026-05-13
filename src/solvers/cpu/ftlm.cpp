@@ -4739,6 +4739,171 @@ DynamicalResponseResults compute_ground_state_cross_correlation(
 }
 
 /**
+ * @brief Compute ground-state DSSF when O1, O2 lift |0> into a different
+ *        magnetisation sector (audit item #1 -- full).
+ *
+ * The standard `compute_ground_state_dssf` / cross_correlation kernels
+ * assume H, |0>, O1|0>, O2|0> all live in a single Hilbert space of
+ * dimension N. For fixed-Sz workflows with raising/lowering observables
+ * (S+, S-, Sx, Sy, ...) the resolvent (omega - H)^{-1} is block-diagonal
+ * in n_up and the relevant matrix elements live in a destination sector
+ * of dimension `dim_inner`, which is generally != `dim_outer` = dim of
+ * the source sector hosting |0>.
+ *
+ * This routine therefore:
+ *   1) applies O2 to |0> (size dim_outer) to obtain |phi> in the
+ *      destination sector (size dim_inner);
+ *   2) Lanczos-tridiagonalises H_inner restricted to dim_inner with
+ *      |phi>/||phi|| as the start vector;
+ *   3) applies O1 to |0> to obtain |chi> in dim_inner; computes the
+ *      Krylov projection coefficients p[j] = <chi|v_j>;
+ *   4) reconstructs the Lehmann sum via the Ritz eigendecomposition.
+ *
+ * Bug-for-bug compatible with `compute_ground_state_cross_correlation`
+ * when dim_outer == dim_inner and O1, O2 preserve the sector.
+ */
+DynamicalResponseResults compute_ground_state_dssf_cross_sector(
+    std::function<void(const Complex*, Complex*, int)> H_inner,
+    std::function<void(const Complex*, Complex*, int)> O1_dagger_apply,
+    std::function<void(const Complex*, Complex*, int)> O2_apply,
+    const ComplexVector& ground_state,
+    double ground_state_energy,
+    uint64_t dim_outer,
+    uint64_t dim_inner,
+    const GroundStateDSSFParameters& params
+) {
+    const bool verbose = ed_dssf_verbose();
+    if (verbose) {
+        std::cout << "\n==========================================\n";
+        std::cout << "Cross-sector ground-state DSSF (audit #1 full)\n";
+        std::cout << "  dim_outer = " << dim_outer
+                  << ", dim_inner = " << dim_inner << "\n";
+        std::cout << "==========================================\n";
+    }
+
+    DynamicalResponseResults results;
+    results.total_samples = 1;
+    results.omega_min = params.omega_min;
+    results.omega_max = params.omega_max;
+    results.frequencies.resize(params.num_omega_points);
+    const double omega_step = (params.omega_max - params.omega_min) /
+                              std::max<uint64_t>(1, params.num_omega_points - 1);
+    for (size_t i = 0; i < params.num_omega_points; ++i) {
+        results.frequencies[i] = params.omega_min + i * omega_step;
+    }
+    results.spectral_function.assign(params.num_omega_points, 0.0);
+    results.spectral_function_imag.assign(params.num_omega_points, 0.0);
+    results.spectral_error.assign(params.num_omega_points, 0.0);
+    results.spectral_error_imag.assign(params.num_omega_points, 0.0);
+
+    if (ground_state.size() != dim_outer) {
+        std::cerr << "compute_ground_state_dssf_cross_sector: ground_state size "
+                  << ground_state.size() << " != dim_outer " << dim_outer
+                  << "; aborting kernel.\n";
+        return results;
+    }
+    if (dim_inner == 0) {
+        if (verbose) {
+            std::cout << "  destination sector is empty; spectrum = 0.\n";
+        }
+        return results;
+    }
+
+    // |phi> = O2 |0> in destination sector.
+    ComplexVector phi(dim_inner);
+    O2_apply(ground_state.data(), phi.data(),
+             static_cast<int>(dim_inner));
+    const double phi_norm = cblas_dznrm2(static_cast<int>(dim_inner),
+                                         phi.data(), 1);
+    if (phi_norm < 1e-14) {
+        if (verbose) std::cout << "  ||O2|0>|| ~ 0; spectrum = 0.\n";
+        return results;
+    }
+    {
+        const Complex scale(1.0 / phi_norm, 0.0);
+        cblas_zscal(static_cast<int>(dim_inner), &scale, phi.data(), 1);
+    }
+
+    // Lanczos tridiagonal in destination sector with full basis storage.
+    std::vector<double> alpha, beta;
+    std::vector<ComplexVector> basis_vectors;
+    const int iters = build_lanczos_tridiagonal_with_basis(
+        H_inner, phi, dim_inner, params.krylov_dim, params.tolerance,
+        params.full_reorthogonalization, params.reorth_frequency,
+        alpha, beta, &basis_vectors);
+    if (verbose) {
+        std::cout << "  Lanczos iterations: " << iters << "\n";
+    }
+
+    std::vector<double> ritz_values, weights, evecs;
+    diagonalize_tridiagonal_ritz(alpha, beta, ritz_values, weights, &evecs);
+    const size_t M = ritz_values.size();
+    const size_t M_basis = std::min(M, basis_vectors.size());
+    if (M == 0) {
+        if (verbose) std::cout << "  empty Ritz set; spectrum = 0.\n";
+        return results;
+    }
+
+    // |chi> = O1 |0> in destination sector (note: caller passes the
+    // same physical operator O1 -- the apply lambda is what makes it
+    // act 'as O1', not the conjugate).
+    ComplexVector chi(dim_inner);
+    O1_dagger_apply(ground_state.data(), chi.data(),
+                    static_cast<int>(dim_inner));
+
+    // p[j] = <chi | v_j> via zdotc (returns chi^dagger v_j).
+    std::vector<Complex> p(M_basis);
+    for (size_t j = 0; j < M_basis; ++j) {
+        cblas_zdotc_sub(static_cast<int>(dim_inner), chi.data(), 1,
+                        basis_vectors[j].data(), 1, &p[j]);
+    }
+    std::vector<double> p_re(M, 0.0), p_im(M, 0.0);
+    for (size_t j = 0; j < M_basis; ++j) {
+        p_re[j] = p[j].real();
+        p_im[j] = p[j].imag();
+    }
+    std::vector<double> overlap_re(M), overlap_im(M);
+    cblas_dgemv(CblasColMajor, CblasTrans,
+                static_cast<int>(M), static_cast<int>(M),
+                1.0, evecs.data(), static_cast<int>(M),
+                p_re.data(), 1, 0.0, overlap_re.data(), 1);
+    cblas_dgemv(CblasColMajor, CblasTrans,
+                static_cast<int>(M), static_cast<int>(M),
+                1.0, evecs.data(), static_cast<int>(M),
+                p_im.data(), 1, 0.0, overlap_im.data(), 1);
+
+    std::vector<Complex> spectral_weights(M);
+    for (size_t n = 0; n < M; ++n) {
+        const Complex overlap_O1(overlap_re[n], overlap_im[n]);
+        const Complex me_O2(phi_norm * evecs[n * M + 0], 0.0);
+        spectral_weights[n] = overlap_O1 * me_O2;
+    }
+
+    basis_vectors.clear();
+    basis_vectors.shrink_to_fit();
+
+    for (size_t i = 0; i < M; ++i) {
+        ritz_values[i] -= ground_state_energy;
+    }
+
+    const double eta = params.broadening;
+    #pragma omp parallel for schedule(static)
+    for (size_t iw = 0; iw < params.num_omega_points; ++iw) {
+        const double omega = results.frequencies[iw];
+        Complex sum(0.0, 0.0);
+        for (size_t n = 0; n < M; ++n) {
+            const double delta = omega - ritz_values[n];
+            const double L = (eta / M_PI) / (delta * delta + eta * eta);
+            sum += spectral_weights[n] * L;
+        }
+        results.spectral_function[iw] = sum.real();
+        results.spectral_function_imag[iw] = sum.imag();
+    }
+
+    return results;
+}
+
+/**
  * @brief Load ground state from eigenvector files (HDF5 or legacy formats)
  */
 bool load_ground_state_from_file(

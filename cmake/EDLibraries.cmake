@@ -335,6 +335,7 @@ add_library(ed_dssf STATIC
     ${DSSF_DIR}/operator_spec.cpp
     ${DSSF_DIR}/dssf_method.cpp
     ${DSSF_DIR}/dssf_io.cpp
+    ${DSSF_DIR}/cross_sector_observable.cpp
 )
 target_include_directories(ed_dssf PUBLIC ${_ED_PUBLIC_INCLUDES})
 target_include_directories(ed_dssf PRIVATE ${HDF5_INCLUDE_DIRS})
