@@ -56,6 +56,9 @@
 #include <ed/core/construct_ham.h>
 #include <ed/core/hdf5_io.h>
 #include <ed/dssf/operator_spec.h>
+#include <ed/dssf/cross_sector_observable.h>
+#include <ed/core/fixed_sz_operator.h>
+#include <ed/core/fixed_sz_operator_types.h>
 #include <ed/solvers/ftlm.h>
 #include <ed/solvers/kpm_dos.h>
 #include <ed/solvers/ltlm.h>
@@ -119,12 +122,19 @@ std::vector<std::pair<int, int>> parse_spin_combinations(const std::string& spin
 // they fail the `popcount(new_basis) == n_up_` filter, which means the
 // computed spectrum is *zero* rather than the physical ⟨S^α(-Q,t) S^α(Q)⟩.
 //
-// Cross-sector kernels exist (`compute_dynamical_correlation_cross_sector`
-// and friends) but the dispatch wiring for the DSSF workflow is not yet
-// in place. Until it lands, we (a) warn loudly when the user requests
-// such a channel under fixed-Sz, and (b) drop it from the work list so
-// downstream HDF5 files do not silently contain wrong (all-zero) spectra
-// that could be mistaken for converged results.
+// Audit item #1 (full) -- this filter has been narrowed:
+//   * Pairs that are *legitimately zero by sector orthogonality* (i.e.
+//     delta(op1) != delta(op2), e.g. (S+, S-) or (Sz, S+)) are dropped
+//     here with a clear warning.
+//   * Pairs that are *cross-sector but legitimate* (delta(op1) == delta(op2)
+//     and not (Sz, Sz)), like (S+, S+) or (S-, S-), are KEPT and routed
+//     by the workflow (`compute_ground_state_dssf_workflow`) to the new
+//     `compute_ground_state_dssf_cross_sector` kernel via
+//     `ed::dssf::CrossSectorObservable`.
+//   * (Sz, Sz) is the same-sector path and is unchanged.
+//
+// XYZ-basis (Sx, Sy) decomposition is NOT yet handled by the cross-sector
+// dispatcher and is dropped here with a follow-up TODO.
 //
 // Returns the filtered list and writes a one-shot diagnostic to stdout
 // (rank 0 only) describing what was removed and why.
@@ -139,64 +149,81 @@ filter_fixed_sz_transverse_channels(
 {
     if (!use_fixed_sz) return spin_combinations;
 
+    // delta_n_up shift induced by each op_type in this codebase's
+    // convention (bit=1 carries the popcount):
+    //   op_type=0 ("S+", physics raising)  -> bit 1->0  -> delta = -1
+    //   op_type=1 ("S-", physics lowering) -> bit 0->1  -> delta = +1
+    //   op_type=2 ("Sz")                    -> diagonal -> delta =  0
+    auto delta_of = [](int op) -> int {
+        switch (op) {
+            case 0: return -1;
+            case 1: return +1;
+            case 2: return  0;
+            default: return  0;
+        }
+    };
+
     std::vector<std::pair<int, int>> kept;
-    std::vector<std::pair<int, int>> dropped;
+    std::vector<std::pair<int, int>> dropped_zero;
+    std::vector<std::pair<int, int>> dropped_xyz;
     kept.reserve(spin_combinations.size());
 
-    auto is_transverse = [](int op) { return op != 2; };
-
     for (const auto& pr : spin_combinations) {
-        // A pair contributes only if BOTH operators preserve the Sz
-        // sector. (A mixed pair like S+Sz lands in the n_up+1 sector
-        // for ⟨S+(t) Sz⟩ and is also a cross-sector observable.)
-        if (is_transverse(pr.first) || is_transverse(pr.second)) {
-            dropped.push_back(pr);
+        const int d1 = delta_of(pr.first);
+        const int d2 = delta_of(pr.second);
+        // XYZ basis: Sx and Sy are linear combos of S+ and S-, which
+        // requires the cross-sector dispatcher to issue *two* sub-calls
+        // and combine; not yet implemented (audit #1 follow-up).
+        if (use_xyz_basis && (pr.first != 2 || pr.second != 2)) {
+            dropped_xyz.push_back(pr);
+        } else if (d1 != d2) {
+            // Sector orthogonality: spectrum is identically zero.
+            dropped_zero.push_back(pr);
         } else {
             kept.push_back(pr);
         }
     }
 
-    if (rank == 0 && !dropped.empty()) {
+    if (rank == 0 && (!dropped_zero.empty() || !dropped_xyz.empty())) {
         const char* op0 = use_xyz_basis ? "Sx" : "Sp";
         const char* op1 = use_xyz_basis ? "Sy" : "Sm";
         const char* op2 = "Sz";
         const char* op_names[3] = {op0, op1, op2};
-
         std::cerr << "\n";
         std::cerr << "  ============================================================\n";
-        std::cerr << "  WARNING (" << workflow_label << ", audit #1):\n";
-        std::cerr << "    Dropping " << dropped.size()
-                  << " transverse spin channel(s) under --fixed-sz:\n";
-        for (const auto& pr : dropped) {
-            std::cerr << "      - " << op_names[pr.first]
-                      << op_names[pr.second] << "\n";
+        std::cerr << "  NOTE (" << workflow_label << ", audit #1):\n";
+        if (!dropped_zero.empty()) {
+            std::cerr << "    Dropping " << dropped_zero.size()
+                      << " spin pair(s) with delta_n_up(op1) != delta_n_up(op2);\n"
+                      << "    these are identically zero by sector orthogonality:\n";
+            for (const auto& pr : dropped_zero) {
+                std::cerr << "      - " << op_names[pr.first]
+                          << op_names[pr.second] << "\n";
+            }
         }
-        std::cerr << "    Reason: these operators change the total Sz quantum\n";
-        std::cerr << "    number, so they map between sectors of different n_up.\n";
-        std::cerr << "    The current dispatcher applies them within a single\n";
-        std::cerr << "    fixed-Sz sector, which silently produces *zero* output\n";
-        std::cerr << "    instead of the physical correlator. Cross-sector kernels\n";
-        std::cerr << "    (compute_dynamical_correlation_cross_sector) exist but\n";
-        std::cerr << "    are not yet wired through the DSSF dispatcher.\n";
-        std::cerr << "    Workaround: re-run without --fixed-sz to compute\n";
-        std::cerr << "    transverse channels in the full Hilbert space, or\n";
-        std::cerr << "    request only longitudinal (SzSz) channels.\n";
-        std::cerr << "  ============================================================\n";
-        std::cerr << "\n";
+        if (!dropped_xyz.empty()) {
+            std::cerr << "    Dropping " << dropped_xyz.size()
+                      << " XYZ-basis pair(s); cross-sector dispatch for Sx/Sy is\n"
+                      << "    not yet wired (audit #1 follow-up). Workaround:\n"
+                      << "    use the ladder basis (Sp/Sm/Sz) instead of xyz, or\n"
+                      << "    re-run without --fixed-sz.\n";
+            for (const auto& pr : dropped_xyz) {
+                std::cerr << "      - " << op_names[pr.first]
+                          << op_names[pr.second] << "\n";
+            }
+        }
+        std::cerr << "  ============================================================\n\n";
     }
 
     if (kept.empty()) {
-        // Don't fall back to SzSz silently; surface the issue.
         if (rank == 0) {
-            std::cerr << "  ERROR: all requested spin channels were transverse "
-                      << "and have been dropped (see warning above). "
-                      << "Aborting " << workflow_label << ".\n";
+            std::cerr << "  ERROR: all requested spin channels were filtered out "
+                      << "(see warning above). Aborting " << workflow_label << ".\n";
         }
         throw std::invalid_argument(
             std::string("ed::") + workflow_label +
             ": no valid spin channels remain after fixed-Sz cross-sector "
-            "filtering (audit item #1). Re-run without --fixed-sz, or "
-            "request a longitudinal SzSz channel.");
+            "filtering (audit item #1).");
     }
 
     return kept;
@@ -2057,56 +2084,72 @@ void compute_ground_state_dssf_workflow(const EDConfig& config) {
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
     MPI_Comm_size(MPI_COMM_WORLD, &size);
     #endif
-    
+
     if (rank == 0) {
         std::cout << "\n==========================================\n";
         std::cout << "Computing Ground State DSSF (T=0)\n";
         std::cout << "==========================================\n";
         std::cout << "Using continued fraction method for optimal efficiency\n";
-
-        // T=0 DSSF has no GPU kernel: the continued-fraction Lanczos walk
-        // and the cross-correlation accumulation both run on the CPU. Emit
-        // a single heads-up if the user asked for GPU so it does not look
-        // like the flag was silently ignored.
         if (config.dynamical.use_gpu || config.static_resp.use_gpu) {
             std::cout << "  Note: --use-gpu / --dyn-use-gpu is not implemented "
                          "for --ground-state-dssf; using CPU\n";
         }
     }
-    
-    // Prepare Hamiltonian
-    Operator ham(config.system.num_sites, config.system.spin_length);
-    std::string interaction_file = config.system.hamiltonian_dir + "/" + config.system.interaction_file;
-    std::string single_site_file = config.system.hamiltonian_dir + "/" + config.system.single_site_file;
-    ham.loadFromInterAllFile(interaction_file);
-    ham.loadFromFile(single_site_file);
-    
-    // Load three-body terms if specified
+
+    // ------------------------------------------------------------------
+    // Build Hamiltonian (apply correctly under both full and fixed-Sz).
+    //
+    // Audit #1 (full): under use_fixed_sz the legacy `Operator ham` would
+    // slice all FixedSz* observables and `Operator::apply` would throw on
+    // the smaller fixed-Sz dimension. We now keep two parallel shared
+    // pointers and dispatch via std::function so both modes work cleanly.
+    // ------------------------------------------------------------------
+    const std::string interaction_file =
+        config.system.hamiltonian_dir + "/" + config.system.interaction_file;
+    const std::string single_site_file =
+        config.system.hamiltonian_dir + "/" + config.system.single_site_file;
+    const bool use_fixed_sz = config.system.use_fixed_sz;
+    const int64_t n_up =
+        (use_fixed_sz && config.system.n_up >= 0)
+            ? config.system.n_up
+            : static_cast<int64_t>(config.system.num_sites) / 2;
+
+    std::shared_ptr<Operator> ham_full;
+    std::shared_ptr<FixedSzOperator> ham_fs;
+    if (use_fixed_sz) {
+        ham_fs = std::make_shared<FixedSzOperator>(
+            config.system.num_sites, config.system.spin_length, n_up);
+        ham_fs->loadFromInterAllFile(interaction_file);
+        ham_fs->loadFromFile(single_site_file);
+    } else {
+        ham_full = std::make_shared<Operator>(
+            config.system.num_sites, config.system.spin_length);
+        ham_full->loadFromInterAllFile(interaction_file);
+        ham_full->loadFromFile(single_site_file);
+    }
     if (!config.system.three_body_file.empty()) {
-        std::string three_body_file = config.system.hamiltonian_dir + "/" + config.system.three_body_file;
+        const std::string three_body_file =
+            config.system.hamiltonian_dir + "/" + config.system.three_body_file;
         if (std::filesystem::exists(three_body_file)) {
             if (rank == 0) {
                 std::cout << "Loading three-body terms from: " << three_body_file << "\n";
             }
-            ham.loadThreeBodyTerm(three_body_file);
+            if (use_fixed_sz) ham_fs->loadThreeBodyTerm(three_body_file);
+            else              ham_full->loadThreeBodyTerm(three_body_file);
         }
     }
-    
-    // Hilbert space dimension
-    bool use_fixed_sz = config.system.use_fixed_sz;
-    int64_t n_up = (use_fixed_sz && config.system.n_up >= 0) ? config.system.n_up : config.system.num_sites / 2;
+
+    // Hilbert space dimension of the |0> sector.
     uint64_t N;
-    
     if (use_fixed_sz) {
-        // Binomial coefficient for fixed Sz
-        uint64_t num_sites = config.system.num_sites;
+        const uint64_t num_sites = config.system.num_sites;
         N = 1;
-        for (uint64_t i = 0; i < n_up; i++) {
+        for (int64_t i = 0; i < n_up; i++) {
             N = N * (num_sites - i) / (i + 1);
         }
         if (rank == 0) {
-            std::cout << "Fixed-Sz sector: N_sites=" << num_sites << ", n_up=" << n_up 
-                      << ", dim=" << N << "\n";
+            std::cout << "Fixed-Sz sector: N_sites=" << num_sites
+                      << ", n_up=" << n_up << ", dim=" << N << "\n";
         }
     } else {
         N = 1ULL << config.system.num_sites;
@@ -2114,15 +2157,17 @@ void compute_ground_state_dssf_workflow(const EDConfig& config) {
             std::cout << "Full Hilbert space: dim=" << N << "\n";
         }
     }
-    
-    // Create function wrapper for Hamiltonian
-    auto H_func = [&ham](const Complex* in, Complex* out, uint64_t dim) {
-        ham.apply(in, out, dim);
+
+    // Hamiltonian apply lambda. Captures shared_ptrs by value so it
+    // outlives the local owners regardless of capture order issues.
+    auto H_apply_int = [ham_full, ham_fs, use_fixed_sz](
+        const Complex* in, Complex* out, int dim) {
+        if (use_fixed_sz) ham_fs->apply(in, out, static_cast<uint64_t>(dim));
+        else              ham_full->apply(in, out, static_cast<uint64_t>(dim));
     };
-    
-    // Ensure output directory exists
+
     create_directory_mpi_safe(config.workflow.output_dir);
-    
+
     // Setup ground state DSSF parameters
     GroundStateDSSFParameters gs_params;
     gs_params.krylov_dim = config.dynamical.krylov_dim > 0 ? config.dynamical.krylov_dim : 300;
@@ -2131,122 +2176,146 @@ void compute_ground_state_dssf_workflow(const EDConfig& config) {
     gs_params.num_omega_points = config.dynamical.num_omega_points;
     gs_params.broadening = config.dynamical.broadening;
     gs_params.tolerance = config.diag.tolerance;
-    gs_params.full_reorthogonalization = true;  // Important for accuracy
-    
+    gs_params.full_reorthogonalization = true;
+
     if (rank == 0) {
         std::cout << "Krylov dimension: " << gs_params.krylov_dim << "\n";
-        std::cout << "Frequency range: [" << gs_params.omega_min << ", " << gs_params.omega_max << "]\n";
+        std::cout << "Frequency range: [" << gs_params.omega_min
+                  << ", " << gs_params.omega_max << "]\n";
         std::cout << "Frequency points: " << gs_params.num_omega_points << "\n";
         std::cout << "Broadening (eta): " << gs_params.broadening << "\n";
     }
-    
-    // Parse configuration for operators
+
+    // Parse configuration for operators.
     auto spin_combinations = parse_spin_combinations(config.dynamical.spin_combinations);
     spin_combinations = filter_fixed_sz_transverse_channels(
         spin_combinations,
-        config.system.use_fixed_sz,
+        use_fixed_sz,
         (config.dynamical.basis == "xyz"),
         rank,
         "compute_ground_state_dssf_workflow");
     auto momentum_points = parse_momentum_points(config.dynamical.momentum_points);
     auto polarization = parse_polarization(config.dynamical.polarization);
-    std::string positions_file = config.system.hamiltonian_dir + "/positions.dat";
-    
+    const std::string positions_file = config.system.hamiltonian_dir + "/positions.dat";
+
     if (rank == 0) {
         std::cout << "Operator type: " << config.dynamical.operator_type << "\n";
         std::cout << "Basis: " << config.dynamical.basis << "\n";
         std::cout << "Momentum points: " << momentum_points.size() << "\n";
         std::cout << "Spin combinations: " << spin_combinations.size() << "\n";
     }
-    
-    // Construct operators
+
+    // ------------------------------------------------------------------
+    // Audit #1 (full): partition spin pairs into same-sector (delta=0,
+    // both Sz) vs cross-sector (delta != 0 but matched). Cross-sector
+    // pairs are dispatched to the new kernel below.
+    //
+    // For now this dispatcher only handles operator_type == "sum" with
+    // ladder basis (Sp/Sm/Sz). Other operator types fall through to the
+    // legacy path; mixed-delta pairs were already filtered out above.
+    // ------------------------------------------------------------------
+    auto delta_of = [](int op) -> int {
+        switch (op) {
+            case 0: return -1;  // S+ (physics raising; bit 1->0)
+            case 1: return +1;  // S- (physics lowering; bit 0->1)
+            default: return 0;  // Sz
+        }
+    };
+
+    std::vector<std::pair<int, int>> same_sector_pairs;
+    std::vector<std::pair<int, int>> cross_sector_pairs;
+    const bool use_xyz_basis = (config.dynamical.basis == "xyz");
+    const bool cross_dispatch_supported =
+        use_fixed_sz && !use_xyz_basis &&
+        config.dynamical.operator_type == "sum";
+
+    for (const auto& pr : spin_combinations) {
+        const int d1 = delta_of(pr.first);
+        const int d2 = delta_of(pr.second);
+        if (cross_dispatch_supported && d1 == d2 && d1 != 0) {
+            cross_sector_pairs.push_back(pr);
+        } else {
+            same_sector_pairs.push_back(pr);
+        }
+    }
+
+    if (rank == 0 && !cross_sector_pairs.empty()) {
+        std::cout << "\n  Audit #1 (full): " << cross_sector_pairs.size()
+                  << " cross-sector pair(s) will be dispatched to "
+                  << "compute_ground_state_dssf_cross_sector.\n";
+    }
+
+    // Construct same-sector operator pairs the legacy way.
     std::vector<Operator> obs_1, obs_2;
     std::vector<std::string> names;
-    
-    construct_operators_from_config(
-        config.dynamical.operator_type,
-        config.dynamical.basis,
-        spin_combinations,
-        momentum_points,
-        polarization,
-        config.dynamical.theta,
-        config.dynamical.unit_cell_size,
-        config.system.num_sites,
-        config.system.spin_length,
-        use_fixed_sz,
-        n_up,
-        positions_file,
-        obs_1, obs_2, names
-    );
-    
-    if (rank == 0) {
-        std::cout << "Constructed " << names.size() << " operator pairs\n";
+    if (!same_sector_pairs.empty()) {
+        construct_operators_from_config(
+            config.dynamical.operator_type,
+            config.dynamical.basis,
+            same_sector_pairs,
+            momentum_points,
+            polarization,
+            config.dynamical.theta,
+            config.dynamical.unit_cell_size,
+            config.system.num_sites,
+            config.system.spin_length,
+            use_fixed_sz,
+            n_up,
+            positions_file,
+            obs_1, obs_2, names);
     }
-    
-    // Find ground state using Lanczos
+
+    if (rank == 0) {
+        std::cout << "Constructed " << names.size()
+                  << " same-sector operator pair(s)\n";
+    }
+
     if (rank == 0) {
         std::cout << "\n--- Finding ground state ---\n";
     }
-    
-    // Validate dimension fits in int for solver function signatures
+
     if (N > static_cast<uint64_t>(std::numeric_limits<int>::max())) {
         if (rank == 0) {
             std::cerr << "Error: Hilbert space dimension " << N
-                      << " exceeds INT_MAX. The current solver API uses int for "
-                      << "dimension parameters. Use fixed-Sz or symmetry reduction."
-                      << std::endl;
+                      << " exceeds INT_MAX. Use fixed-Sz or symmetry reduction.\n";
         }
         return;
     }
-    
+
     ComplexVector ground_state(N);
-    double ground_state_energy;
-    
-    // Check if ground state is already saved in HDF5
-    std::string h5_file = config.workflow.output_dir + "/ed_results.h5";
+    double ground_state_energy = 0.0;
+    const std::string h5_file = config.workflow.output_dir + "/ed_results.h5";
     bool gs_loaded = false;
-    
+
     if (HDF5IO::fileExists(h5_file)) {
         try {
-            // Try to load eigenvalue (ground state energy)
             auto eigenvalues = HDF5IO::loadEigenvalues(h5_file);
             if (!eigenvalues.empty()) {
                 ground_state_energy = eigenvalues[0];
-                
-                // Try to load eigenvector (ground state)
                 auto gs_vec = HDF5IO::loadEigenvector(h5_file, 0);
                 if (gs_vec.size() == N) {
                     std::copy(gs_vec.begin(), gs_vec.end(), ground_state.begin());
                     gs_loaded = true;
                     if (rank == 0) {
-                        std::cout << "Loaded ground state from HDF5: E0 = " << ground_state_energy << "\n";
+                        std::cout << "Loaded ground state from HDF5: E0 = "
+                                  << ground_state_energy << "\n";
                     }
                 }
             }
-        } catch (const std::exception& e) {
+        } catch (const std::exception&) {
             if (rank == 0) {
                 std::cout << "Could not load ground state from HDF5, will compute...\n";
             }
         }
     }
-    
+
     if (!gs_loaded) {
-        // Compute ground state
-        // Create int-based wrapper for find_ground_state_lanczos
-        auto H_func_int = [&ham](const Complex* in, Complex* out, int dim) {
-            ham.apply(in, out, static_cast<uint64_t>(dim));
-        };
-        
         ground_state_energy = find_ground_state_lanczos(
-            H_func_int, N, gs_params.krylov_dim, gs_params.tolerance,
+            H_apply_int, N, gs_params.krylov_dim, gs_params.tolerance,
             gs_params.full_reorthogonalization, gs_params.reorth_frequency,
-            ground_state
-        );
-        
+            ground_state);
         if (rank == 0) {
             std::cout << "Computed ground state: E0 = " << ground_state_energy << "\n";
-            
-            // Save ground state to HDF5
             try {
                 std::string h5_path = HDF5IO::createOrOpenFile(config.workflow.output_dir);
                 HDF5IO::saveEigenvalues(h5_path, {ground_state_energy});
@@ -2254,70 +2323,208 @@ void compute_ground_state_dssf_workflow(const EDConfig& config) {
                 HDF5IO::saveEigenvector(h5_path, 0, gs_vec);
                 std::cout << "Saved ground state to HDF5: " << h5_path << "\n";
             } catch (const std::exception& e) {
-                std::cerr << "Warning: Failed to save ground state to HDF5: " << e.what() << "\n";
+                std::cerr << "Warning: Failed to save ground state to HDF5: "
+                          << e.what() << "\n";
             }
         }
     }
-    
-    // Compute DSSF for each operator pair
-    // Distribute work across MPI ranks
+
+    // ------------------------------------------------------------------
+    // Same-sector dispatch (existing code path).
+    // ------------------------------------------------------------------
+    if (!names.empty() && rank == 0) {
+        std::cout << "\n--- Computing S(q,ω) for " << names.size()
+                  << " same-sector operator pair(s) ---\n";
+    }
+
     std::vector<int> my_tasks;
     for (int i = rank; i < (int)names.size(); i += size) {
         my_tasks.push_back(i);
     }
-    
-    if (rank == 0) {
-        std::cout << "\n--- Computing S(q,ω) for " << names.size() << " operators ---\n";
-    }
-    
-    // Hoist H_func_int construction out of the per-task loop -- it has
-    // no per-task state and rebuilding it on every iteration was wasteful.
-    auto H_func_int = [&ham](const Complex* in, Complex* out, int dim) {
-        ham.apply(in, out, static_cast<uint64_t>(dim));
-    };
 
-    // Only rank 0 narrates the per-task progress to keep multi-rank logs
-    // readable; non-rank-0 ranks still do the work, just silently.
     for (int op_idx : my_tasks) {
         if (rank == 0) {
-            std::cout << "[Rank " << rank << "] Processing: " << names[op_idx] << "\n";
+            std::cout << "[Rank " << rank << "] Processing: "
+                      << names[op_idx] << "\n";
         }
-
         auto O1_func = [&obs_1, op_idx](const Complex* in, Complex* out, int dim) {
             obs_1[op_idx].apply(in, out, static_cast<uint64_t>(dim));
         };
-
         auto O2_func = [&obs_2, op_idx](const Complex* in, Complex* out, int dim) {
             obs_2[op_idx].apply(in, out, static_cast<uint64_t>(dim));
         };
-
-        // Compute ground state DSSF using continued fraction method
         auto results = compute_ground_state_cross_correlation(
-            H_func_int, O1_func, O2_func, ground_state, ground_state_energy, N, gs_params
-        );
-
-        // Save results to unified HDF5 file
+            H_apply_int, O1_func, O2_func, ground_state, ground_state_energy,
+            N, gs_params);
         std::string h5_path = HDF5IO::createOrOpenFile(config.workflow.output_dir);
         std::string op_name = "ground_state_dssf/" + names[op_idx];
         HDF5IO::saveDynamicalResponseFull(
             h5_path, op_name,
             results.frequencies, results.spectral_function, results.spectral_function_imag,
             results.spectral_error, results.spectral_error_imag,
-            1, 0.0  // T=0 ground state
-        );
+            1, 0.0);
         if (rank == 0) {
             std::cout << "[Rank " << rank << "] Saved to HDF5: " << op_name << "\n";
         }
     }
-    
+
+    // ------------------------------------------------------------------
+    // Cross-sector dispatch (audit #1 full). Each (Q, op_pair) builds:
+    //   * dst sector at n_up + delta_n_up
+    //   * a FixedSzOperator inner Hamiltonian at the dst sector
+    //   * two CrossSectorObservable instances for O1 and O2
+    //   * routes through compute_ground_state_dssf_cross_sector.
+    // ------------------------------------------------------------------
+    if (!cross_sector_pairs.empty()) {
+        if (rank == 0) {
+            std::cout << "\n--- Computing cross-sector S(q,ω) for "
+                      << cross_sector_pairs.size() << " pair(s) x "
+                      << momentum_points.size() << " momentum point(s) ---\n";
+        }
+        // Cache one inner Hamiltonian per dst_n_up across pairs at the
+        // same delta. With ladder basis the only deltas are +-1.
+        std::map<int64_t, std::shared_ptr<FixedSzOperator>> ham_dst_cache;
+        auto get_ham_dst = [&](int64_t dst_n_up)
+            -> std::shared_ptr<FixedSzOperator> {
+            auto it = ham_dst_cache.find(dst_n_up);
+            if (it != ham_dst_cache.end()) return it->second;
+            auto h = std::make_shared<FixedSzOperator>(
+                config.system.num_sites, config.system.spin_length, dst_n_up);
+            h->loadFromInterAllFile(interaction_file);
+            h->loadFromFile(single_site_file);
+            if (!config.system.three_body_file.empty()) {
+                const std::string tb_file =
+                    config.system.hamiltonian_dir + "/" + config.system.three_body_file;
+                if (std::filesystem::exists(tb_file)) {
+                    h->loadThreeBodyTerm(tb_file);
+                }
+            }
+            ham_dst_cache[dst_n_up] = h;
+            return h;
+        };
+
+        // Flatten (Q, pair) into a global task list for round-robin MPI.
+        struct CrossTask {
+            std::vector<double> Q;
+            int op_type_1;
+            int op_type_2;
+            std::string name;
+        };
+        std::vector<CrossTask> cross_tasks;
+        for (const auto& Q : momentum_points) {
+            for (const auto& pr : cross_sector_pairs) {
+                CrossTask t;
+                t.Q = Q;
+                t.op_type_1 = pr.first;
+                t.op_type_2 = pr.second;
+                // Mirror legacy naming: non-XYZ ladder basis swaps first
+                // slot (Sp <-> Sm) so the spectral label matches the
+                // physics convention <0|O1†|n><n|O2|0>. We keep raw
+                // op_type_1/2 for kernel construction.
+                int first_label = (pr.first == 2) ? 2 : (1 - pr.first);
+                auto opname = [](int op) -> const char* {
+                    switch (op) { case 2: return "Sz"; case 0: return "Sp";
+                                  case 1: return "Sm"; default: return "?"; }
+                };
+                std::stringstream name_ss;
+                name_ss << opname(first_label) << opname(pr.second)
+                        << "_q_Qx" << Q[0] << "_Qy" << Q[1] << "_Qz" << Q[2];
+                t.name = name_ss.str();
+                cross_tasks.push_back(t);
+            }
+        }
+
+        std::vector<int> my_cross_tasks;
+        for (int i = rank; i < (int)cross_tasks.size(); i += size) {
+            my_cross_tasks.push_back(i);
+        }
+
+        for (int idx : my_cross_tasks) {
+            const auto& task = cross_tasks[idx];
+            const int delta = delta_of(task.op_type_1);
+            const int64_t dst_n_up = n_up + delta;
+            if (dst_n_up < 0 ||
+                dst_n_up > static_cast<int64_t>(config.system.num_sites)) {
+                if (rank == 0) {
+                    std::cerr << "  Skipping " << task.name
+                              << ": dst sector n_up=" << dst_n_up
+                              << " is out of range; spectrum identically zero.\n";
+                }
+                continue;
+            }
+
+            if (rank == 0) {
+                std::cout << "[Rank " << rank << "] Cross-sector ["
+                          << task.name << "], dst n_up=" << dst_n_up << "\n";
+            }
+
+            auto ham_dst = get_ham_dst(dst_n_up);
+            const uint64_t dst_dim = ham_dst->getFixedSzDim();
+
+            // Build src and dst FixedSzSumOperators. We use src's
+            // transform_data_ (independent of n_up by construction)
+            // as the operator definition; dst supplies the basis +
+            // Lin lookup table.
+            auto src_op1 = std::make_shared<FixedSzSumOperator>(
+                config.system.num_sites, config.system.spin_length, n_up,
+                static_cast<uint64_t>(task.op_type_1), task.Q, positions_file);
+            auto dst_op1 = std::make_shared<FixedSzSumOperator>(
+                config.system.num_sites, config.system.spin_length, dst_n_up,
+                static_cast<uint64_t>(task.op_type_1), task.Q, positions_file);
+            ed::dssf::CrossSectorObservable O1_cross(
+                src_op1, dst_op1,
+                src_op1->transform_data_, config.system.spin_length);
+
+            auto src_op2 = std::make_shared<FixedSzSumOperator>(
+                config.system.num_sites, config.system.spin_length, n_up,
+                static_cast<uint64_t>(task.op_type_2), task.Q, positions_file);
+            auto dst_op2 = std::make_shared<FixedSzSumOperator>(
+                config.system.num_sites, config.system.spin_length, dst_n_up,
+                static_cast<uint64_t>(task.op_type_2), task.Q, positions_file);
+            ed::dssf::CrossSectorObservable O2_cross(
+                src_op2, dst_op2,
+                src_op2->transform_data_, config.system.spin_length);
+
+            auto H_inner_apply = [ham_dst](const Complex* in, Complex* out, int dim) {
+                ham_dst->apply(in, out, static_cast<uint64_t>(dim));
+            };
+            auto O1_apply = O1_cross.as_apply_function();
+            auto O2_apply = O2_cross.as_apply_function();
+            auto O1_apply_int = [O1_apply](const Complex* in, Complex* out, int dim) {
+                O1_apply(in, out, static_cast<std::size_t>(dim));
+            };
+            auto O2_apply_int = [O2_apply](const Complex* in, Complex* out, int dim) {
+                O2_apply(in, out, static_cast<std::size_t>(dim));
+            };
+
+            auto results = compute_ground_state_dssf_cross_sector(
+                H_inner_apply, O1_apply_int, O2_apply_int,
+                ground_state, ground_state_energy, N, dst_dim, gs_params);
+
+            std::string h5_path = HDF5IO::createOrOpenFile(config.workflow.output_dir);
+            std::string op_name = "ground_state_dssf/" + task.name;
+            HDF5IO::saveDynamicalResponseFull(
+                h5_path, op_name,
+                results.frequencies, results.spectral_function,
+                results.spectral_function_imag,
+                results.spectral_error, results.spectral_error_imag,
+                1, 0.0);
+            if (rank == 0) {
+                std::cout << "[Rank " << rank << "] Saved to HDF5: "
+                          << op_name << "\n";
+            }
+        }
+    }
+
     #ifdef WITH_MPI
     MPI_Barrier(MPI_COMM_WORLD);
     #endif
-    
+
     if (rank == 0) {
         std::cout << "\n==========================================\n";
         std::cout << "Ground State DSSF Complete\n";
-        std::cout << "Results saved to: " << config.workflow.output_dir << "/ed_results.h5\n";
+        std::cout << "Results saved to: " << config.workflow.output_dir
+                  << "/ed_results.h5\n";
         std::cout << "==========================================\n";
     }
 }
