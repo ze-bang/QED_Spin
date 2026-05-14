@@ -10,6 +10,7 @@
 #include <cmath>
 #include <ed/core/blas_lapack_wrapper.h>
 #include <ed/core/construct_ham.h>
+#include <ed/solvers/ftlm.h>
 
 using Complex = std::complex<double>;
 using ComplexVector = std::vector<Complex>;
@@ -103,6 +104,25 @@ struct HybridThermalResults {
  */
 HybridThermalResults hybrid_thermal_method(
     std::function<void(const Complex*, Complex*, int)> H,
+    uint64_t N,
+    const HybridThermalParameters& params,
+    double temp_min,
+    double temp_max,
+    uint64_t num_temp_bins,
+    const std::string& output_dir = ""
+);
+
+/**
+ * @brief Hybrid LTLM/FTLM evaluation of the connected static Q-H response.
+ *
+ * Low temperatures are evaluated with the deterministic LTLM estimator,
+ * while high temperatures use the stochastic FTLM estimator and keep its
+ * error bars. The returned layout matches ``StaticResponseResults`` so the
+ * legacy static-response HDF5 writer can store the result unchanged.
+ */
+StaticResponseResults compute_connected_qh_response_hybrid(
+    std::function<void(const Complex*, Complex*, int)> H,
+    std::function<void(const Complex*, Complex*, int)> O,
     uint64_t N,
     const HybridThermalParameters& params,
     double temp_min,

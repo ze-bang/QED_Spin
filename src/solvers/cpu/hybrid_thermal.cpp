@@ -265,6 +265,170 @@ HybridThermalResults hybrid_thermal_method(
     return results;
 }
 
+StaticResponseResults compute_connected_qh_response_hybrid(
+    std::function<void(const Complex*, Complex*, int)> H,
+    std::function<void(const Complex*, Complex*, int)> O,
+    uint64_t N,
+    const HybridThermalParameters& params,
+    double temp_min,
+    double temp_max,
+    uint64_t num_temp_bins,
+    const std::string& output_dir
+) {
+    const ed::parallel::ThreadBudgetScope budget(
+        ed::parallel::auto_threads_for_dim(N));
+
+    std::cout << "\n================================================\n";
+    std::cout << "  Hybrid Connected Q-H Response (LTLM+FTLM)   \n";
+    std::cout << "================================================\n";
+    std::cout << "Temperature range: " << temp_min << " - " << temp_max << std::endl;
+    std::cout << "Temperature bins: " << num_temp_bins << std::endl;
+
+    double crossover_temp = params.crossover_temperature;
+    if (params.auto_crossover) {
+        std::cout << "Auto-crossover enabled: Determining optimal crossover temperature...\n";
+
+        ComplexVector ground_state;
+        const double ground_energy = find_ground_state_lanczos(
+            H, N, params.ltlm_ground_krylov, params.tolerance,
+            params.ltlm_full_reorth, params.ltlm_reorth_freq, ground_state
+        );
+
+        std::vector<double> excitation_energies;
+        std::vector<double> weights;
+        const uint64_t num_excitations = build_excitation_spectrum(
+            H, ground_state, ground_energy, N,
+            std::min(uint64_t(50), params.ltlm_krylov_dim),
+            params.tolerance, params.ltlm_full_reorth, params.ltlm_reorth_freq,
+            excitation_energies, weights
+        );
+
+        double first_excitation = ground_energy;
+        if (num_excitations > 0 && !excitation_energies.empty()) {
+            constexpr double degeneracy_threshold = 1e-6;
+            for (uint64_t i = 0; i < num_excitations; ++i) {
+                const double gap = excitation_energies[i] - ground_energy;
+                if (std::abs(gap) > degeneracy_threshold) {
+                    first_excitation = excitation_energies[i];
+                    break;
+                }
+            }
+            if (std::abs(first_excitation - ground_energy) <= degeneracy_threshold) {
+                first_excitation = excitation_energies.back();
+            }
+        }
+
+        crossover_temp = estimate_optimal_crossover(H, N, ground_energy, first_excitation);
+        std::cout << "Auto-determined crossover temperature: " << crossover_temp << "\n";
+    }
+
+    std::cout << "Crossover temperature: " << crossover_temp << std::endl;
+    std::cout << "  • LTLM for T < " << crossover_temp << "\n";
+    std::cout << "  • FTLM for T ≥ " << crossover_temp << "\n";
+    std::cout << "================================================\n\n";
+
+    std::vector<double> temperatures(num_temp_bins);
+    const double log_tmin = std::log(temp_min);
+    const double log_tmax = std::log(temp_max);
+    const double log_step = (log_tmax - log_tmin) / std::max(uint64_t(1), num_temp_bins - 1);
+    for (uint64_t i = 0; i < num_temp_bins; ++i) {
+        temperatures[i] = std::exp(log_tmin + static_cast<double>(i) * log_step);
+    }
+
+    uint64_t crossover_index = 0;
+    double actual_crossover = crossover_temp;
+    for (uint64_t i = 0; i < num_temp_bins; ++i) {
+        if (temperatures[i] >= crossover_temp) {
+            crossover_index = i;
+            actual_crossover = temperatures[i];
+            break;
+        }
+    }
+    if (crossover_index == 0 && crossover_temp > temp_max) {
+        crossover_index = num_temp_bins;
+        actual_crossover = temp_max;
+    }
+
+    StaticResponseResults results;
+    results.temperatures = temperatures;
+    results.expectation.assign(num_temp_bins, 0.0);
+    results.expectation_error.assign(num_temp_bins, 0.0);
+    results.variance.assign(num_temp_bins, 0.0);
+    results.variance_error.assign(num_temp_bins, 0.0);
+    results.susceptibility.assign(num_temp_bins, 0.0);
+    results.susceptibility_error.assign(num_temp_bins, 0.0);
+    results.total_samples = (crossover_index < num_temp_bins)
+        ? params.ftlm_num_samples
+        : uint64_t(1);
+
+    if (crossover_index > 0) {
+        LTLMParameters ltlm_params;
+        ltlm_params.krylov_dim = params.ltlm_krylov_dim;
+        ltlm_params.ground_state_krylov = params.ltlm_ground_krylov;
+        ltlm_params.full_reorthogonalization = params.ltlm_full_reorth;
+        ltlm_params.reorth_frequency = params.ltlm_reorth_freq;
+        ltlm_params.random_seed = params.ltlm_seed;
+        ltlm_params.store_intermediate = params.ltlm_store_data;
+        ltlm_params.max_iterations = params.max_iterations;
+        ltlm_params.tolerance = params.tolerance;
+        ltlm_params.num_samples = 1;
+        ltlm_params.compute_error_bars = false;
+
+        auto ltlm_results = compute_connected_qh_response_ltlm(
+            H, O, N, ltlm_params,
+            temperatures.front(), temperatures[crossover_index - 1], crossover_index,
+            output_dir
+        );
+
+        for (uint64_t i = 0; i < crossover_index; ++i) {
+            results.expectation[i] = ltlm_results.expectation[i];
+            results.expectation_error[i] = ltlm_results.expectation_error[i];
+            results.variance[i] = ltlm_results.variance[i];
+            results.variance_error[i] = ltlm_results.variance_error[i];
+            results.susceptibility[i] = ltlm_results.susceptibility[i];
+            results.susceptibility_error[i] = ltlm_results.susceptibility_error[i];
+        }
+    }
+
+    if (crossover_index < num_temp_bins) {
+        StaticResponseParameters ftlm_params;
+        ftlm_params.num_samples = params.ftlm_num_samples;
+        ftlm_params.krylov_dim = params.ftlm_krylov_dim;
+        ftlm_params.tolerance = params.tolerance;
+        ftlm_params.full_reorthogonalization = params.ftlm_full_reorth;
+        ftlm_params.reorth_frequency = params.ftlm_reorth_freq;
+        ftlm_params.random_seed = params.ftlm_seed;
+        ftlm_params.store_intermediate = params.ftlm_store_samples;
+        ftlm_params.compute_error_bars = params.ftlm_error_bars;
+
+        auto ftlm_results = compute_connected_qh_response(
+            H, O, N, ftlm_params,
+            temperatures[crossover_index], temperatures.back(), num_temp_bins - crossover_index,
+            output_dir
+        );
+
+        for (uint64_t i = 0; i < num_temp_bins - crossover_index; ++i) {
+            const uint64_t idx = crossover_index + i;
+            results.expectation[idx] = ftlm_results.expectation[i];
+            results.expectation_error[idx] = ftlm_results.expectation_error[i];
+            results.variance[idx] = ftlm_results.variance[i];
+            results.variance_error[idx] = ftlm_results.variance_error[i];
+            results.susceptibility[idx] = ftlm_results.susceptibility[i];
+            results.susceptibility_error[idx] = ftlm_results.susceptibility_error[i];
+        }
+    }
+
+    std::cout << "================================================\n";
+    std::cout << "  Hybrid Connected Q-H Calculation Complete    \n";
+    std::cout << "================================================\n";
+    std::cout << "  LTLM points: " << crossover_index << "\n";
+    std::cout << "  FTLM points: " << (num_temp_bins - crossover_index) << "\n";
+    std::cout << "  Crossover at T = " << actual_crossover << "\n";
+    std::cout << "================================================\n\n";
+
+    return results;
+}
+
 /**
  * @brief Save hybrid thermal results to HDF5 file and unified text format
  */

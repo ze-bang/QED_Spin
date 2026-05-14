@@ -12,6 +12,7 @@
 #include <algorithm>
 #include <ed/core/blas_lapack_wrapper.h>
 #include <ed/core/construct_ham.h>
+#include <ed/solvers/ftlm.h>
 
 using Complex = std::complex<double>;
 using ComplexVector = std::vector<Complex>;
@@ -156,6 +157,32 @@ LTLMResults low_temperature_lanczos(
     double temp_max,
     uint64_t num_temp_bins,
     const ComplexVector* ground_state = nullptr,
+    const std::string& output_dir = ""
+);
+
+/**
+ * @brief Compute the connected thermal-expansion covariance with LTLM.
+ *
+ * Evaluates the low-temperature estimator
+ *     (⟨OH⟩ - ⟨O⟩⟨H⟩) / T²
+ * by retaining the lowest LTLM Ritz states from a single outer Lanczos run.
+ *
+ * The returned ``expectation`` dataset stores the thermal-expansion
+ * coefficient itself, while ``variance`` stores the raw connected covariance
+ * ⟨δO δH⟩ and ``susceptibility`` stores ⟨δO δH⟩ / T.
+ *
+ * Parameter mapping for the legacy LTLM knobs:
+ * - ``ground_state_krylov`` sets the outer Lanczos dimension floor.
+ * - ``krylov_dim`` sets how many lowest Ritz states are retained.
+ */
+StaticResponseResults compute_connected_qh_response_ltlm(
+    std::function<void(const Complex*, Complex*, int)> H,
+    std::function<void(const Complex*, Complex*, int)> O,
+    uint64_t N,
+    const LTLMParameters& params,
+    double temp_min,
+    double temp_max,
+    uint64_t num_temp_bins,
     const std::string& output_dir = ""
 );
 

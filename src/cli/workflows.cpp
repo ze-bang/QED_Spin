@@ -61,6 +61,7 @@
 #include <ed/core/fixed_sz_operator_types.h>
 #include <ed/solvers/ftlm.h>
 #include <ed/solvers/ftlm_dist.h>
+#include <ed/solvers/hybrid_thermal.h>
 #include <ed/solvers/kpm_dos.h>
 #include <ed/solvers/ltlm.h>
 #include <ed/solvers/observables.h>
@@ -2209,18 +2210,67 @@ void compute_static_response_workflow(const EDConfig& config) {
             );
         } else if (config.static_resp.operator2_file == "__connected_hamiltonian__") {
             // Magnetostriction / thermal expansion: ∂T⟨O⟩ =
-            // (⟨OH⟩ - ⟨O⟩⟨H⟩) / T², evaluated in the same FTLM sample.
+            // (⟨OH⟩ - ⟨O⟩⟨H⟩) / T², evaluated with the selected thermal method.
             if (rank == 0) {
                 std::cout << "Computing connected O-H thermal expansion "
                           << "(⟨OH⟩ - ⟨O⟩⟨H⟩) / T²...\n";
             }
-            results = compute_connected_qh_response(
-                H_func, O_func, N, params,
-                config.static_resp.temp_min,
-                config.static_resp.temp_max,
-                config.static_resp.num_temp_points,
-                config.workflow.output_dir
-            );
+            if (config.method == DiagonalizationMethod::LTLM) {
+                LTLMParameters ltlm_params;
+                ltlm_params.krylov_dim = config.thermal.ltlm_krylov_dim;
+                ltlm_params.ground_state_krylov = config.thermal.ltlm_ground_krylov;
+                ltlm_params.max_iterations = config.diag.max_iterations;
+                ltlm_params.tolerance = config.diag.tolerance;
+                ltlm_params.full_reorthogonalization = config.thermal.ltlm_full_reorth;
+                ltlm_params.reorth_frequency = config.thermal.ltlm_reorth_freq;
+                ltlm_params.random_seed = config.thermal.ltlm_seed;
+                ltlm_params.store_intermediate = config.thermal.ltlm_store_data;
+                ltlm_params.compute_error_bars = false;
+                ltlm_params.num_samples = 1;
+
+                results = compute_connected_qh_response_ltlm(
+                    H_func, O_func, N, ltlm_params,
+                    config.static_resp.temp_min,
+                    config.static_resp.temp_max,
+                    config.static_resp.num_temp_points,
+                    config.workflow.output_dir
+                );
+            } else if (config.method == DiagonalizationMethod::HYBRID) {
+                HybridThermalParameters hybrid_params;
+                hybrid_params.crossover_temperature = config.thermal.hybrid_crossover;
+                hybrid_params.auto_crossover = config.thermal.hybrid_auto_crossover;
+                hybrid_params.ltlm_krylov_dim = config.thermal.ltlm_krylov_dim;
+                hybrid_params.ltlm_ground_krylov = config.thermal.ltlm_ground_krylov;
+                hybrid_params.ltlm_full_reorth = config.thermal.ltlm_full_reorth;
+                hybrid_params.ltlm_reorth_freq = config.thermal.ltlm_reorth_freq;
+                hybrid_params.ltlm_seed = config.thermal.ltlm_seed;
+                hybrid_params.ltlm_store_data = config.thermal.ltlm_store_data;
+                hybrid_params.ftlm_num_samples = params.num_samples;
+                hybrid_params.ftlm_krylov_dim = params.krylov_dim;
+                hybrid_params.ftlm_full_reorth = params.full_reorthogonalization;
+                hybrid_params.ftlm_reorth_freq = params.reorth_frequency;
+                hybrid_params.ftlm_seed = params.random_seed;
+                hybrid_params.ftlm_store_samples = params.store_intermediate;
+                hybrid_params.ftlm_error_bars = params.compute_error_bars;
+                hybrid_params.max_iterations = config.diag.max_iterations;
+                hybrid_params.tolerance = config.diag.tolerance;
+
+                results = compute_connected_qh_response_hybrid(
+                    H_func, O_func, N, hybrid_params,
+                    config.static_resp.temp_min,
+                    config.static_resp.temp_max,
+                    config.static_resp.num_temp_points,
+                    config.workflow.output_dir
+                );
+            } else {
+                results = compute_connected_qh_response(
+                    H_func, O_func, N, params,
+                    config.static_resp.temp_min,
+                    config.static_resp.temp_max,
+                    config.static_resp.num_temp_points,
+                    config.workflow.output_dir
+                );
+            }
         } else if (!config.static_resp.operator2_file.empty()) {
             // Two different operators: ⟨O₁†O₂⟩
             if (rank == 0) std::cout << "Computing two-operator static response ⟨O₁†O₂⟩...\n";
