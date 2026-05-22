@@ -70,46 +70,22 @@ struct EDParameters {
     double tpq_measure_beta_min = 1.0;
     double tpq_measure_beta_max = 1000.0;
 
-    // ========== DEPRECATED PARAMETER ACCESSORS ==========
-    [[deprecated("Use tpq_taylor_order instead")]]
-    uint64_t& num_order() { return tpq_taylor_order; }
-    [[deprecated("Use tpq_taylor_order instead")]]
-    uint64_t num_order() const { return tpq_taylor_order; }
-
-    [[deprecated("Use tpq_measurement_interval instead")]]
-    uint64_t& num_measure_freq() { return tpq_measurement_interval; }
-    [[deprecated("Use tpq_measurement_interval instead")]]
-    uint64_t num_measure_freq() const { return tpq_measurement_interval; }
-
-    [[deprecated("Use tpq_delta_beta instead")]]
-    double& delta_tau() { return tpq_delta_beta; }
-    [[deprecated("Use tpq_delta_beta instead")]]
-    double delta_tau() const { return tpq_delta_beta; }
-
-    [[deprecated("Use tpq_energy_shift instead")]]
-    double& large_value() { return tpq_energy_shift; }
-    [[deprecated("Use tpq_energy_shift instead")]]
-    double large_value() const { return tpq_energy_shift; }
-
-    [[deprecated("Use tpq_continue instead")]]
-    bool& continue_quenching() { return tpq_continue; }
-    [[deprecated("Use tpq_continue instead")]]
-    bool continue_quenching() const { return tpq_continue; }
-
-    [[deprecated("Use tpq_continue_sample instead")]]
-    uint64_t& continue_sample() { return tpq_continue_sample; }
-    [[deprecated("Use tpq_continue_sample instead")]]
-    uint64_t continue_sample() const { return tpq_continue_sample; }
-
-    [[deprecated("Use tpq_continue_beta instead")]]
-    double& continue_beta() { return tpq_continue_beta; }
-    [[deprecated("Use tpq_continue_beta instead")]]
-    double continue_beta() const { return tpq_continue_beta; }
-
-    [[deprecated("Use tpq_target_beta instead")]]
-    double& target_beta() { return tpq_target_beta; }
-    [[deprecated("Use tpq_target_beta instead")]]
-    double target_beta() const { return tpq_target_beta; }
+    // ------------------------------------------------------------------
+    // Removed in matvec-unification Phase 7.5:
+    //   - num_order()             -> tpq_taylor_order
+    //   - num_measure_freq()      -> tpq_measurement_interval
+    //   - delta_tau()             -> tpq_delta_beta
+    //   - large_value()           -> tpq_energy_shift
+    //   - continue_quenching()    -> tpq_continue
+    //   - continue_sample()       -> tpq_continue_sample
+    //   - continue_beta()         -> tpq_continue_beta
+    //   - target_beta()           -> tpq_target_beta
+    //
+    // These were [[deprecated]] accessor shims for the canonical
+    // tpq_<name> data members above. All in-tree callers have been
+    // migrated; out-of-tree callers should rename the call sites
+    // (search-and-replace).
+    // ------------------------------------------------------------------
 
     // ========== FTLM-Specific Parameters ==========
     uint64_t ftlm_krylov_dim = 100;
@@ -166,15 +142,14 @@ struct EDParameters {
     bool save_thermal_states = false;
     bool compute_spin_correlations = false;
 
-    [[deprecated("Use save_thermal_states instead")]]
-    bool& calc_observables() { return save_thermal_states; }
-    [[deprecated("Use save_thermal_states instead")]]
-    bool calc_observables() const { return save_thermal_states; }
-
-    [[deprecated("Use compute_spin_correlations instead")]]
-    bool& measure_spin() { return compute_spin_correlations; }
-    [[deprecated("Use compute_spin_correlations instead")]]
-    bool measure_spin() const { return compute_spin_correlations; }
+    // ------------------------------------------------------------------
+    // Removed in matvec-unification Phase 7.5:
+    //   - calc_observables()      -> save_thermal_states
+    //   - measure_spin()          -> compute_spin_correlations
+    //
+    // These were [[deprecated]] accessor shims. All in-tree callers
+    // have been migrated.
+    // ------------------------------------------------------------------
 
     // ========== Fixed-Sz Parameters ==========
     bool use_fixed_sz = false;
