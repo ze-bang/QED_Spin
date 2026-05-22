@@ -99,6 +99,39 @@ inline std::uint64_t binomial(std::uint64_t n, std::uint64_t k) {
     return result;
 }
 
+// ---------------------------------------------------------------------------
+// Phase 5 (auto-basis detection): does the operator have a Zeeman-style
+// site-dependent field that breaks the Sz=N/2 default-sector assumption?
+//
+// Heisenberg-style spin Hamiltonians (J*S_i.S_j) put the ground state in
+// Sz=0 (n_up=N/2). Adding a uniform external field h*Sum_i Sz_i shifts
+// the GS to a different Sz sector; staggered fields can do even weirder
+// things. We detect both by inspecting `diag_one_body_` --- if there is
+// any non-zero Sz one-body coupling, defer to the user (they probably
+// already know which sector they want).
+// ---------------------------------------------------------------------------
+inline bool has_zeeman_field(const Operator& op, double tol = 1e-15) {
+    op.separateTransformsByType();
+    for (const auto& t : op.diag_one_body_) {
+        if (std::abs(t.coefficient) > tol) return true;
+    }
+    return false;
+}
+
+// ---------------------------------------------------------------------------
+// Phase 5: best default Sz sector when the user hasn't specified one.
+//
+// For an even number of sites with no Zeeman field, the ground state of
+// any Sz-conserving spin-1/2 Hamiltonian sits in n_up = N/2 (Marshall's
+// theorem extends from Heisenberg to any S+S- + Sz Sz combination by a
+// Perron-Frobenius argument on the projected matrix). For odd N, the GS
+// is in {(N-1)/2, (N+1)/2} --- we pick the smaller one. Callers who
+// want a different sector pass `options.sz`.
+// ---------------------------------------------------------------------------
+inline std::int64_t default_ground_state_sz(std::uint64_t num_sites) {
+    return static_cast<std::int64_t>(num_sites / 2);
+}
+
 } // namespace detail
 
 // ---------------------------------------------------------------------------
@@ -116,6 +149,23 @@ enum class Device {
              ///< `mpiexec` launcher. Use the Python
              ///< `qed.diag(device='mpi')` wrapper for an out-of-process
              ///< launcher.
+};
+
+/// Matvec-unification (Phase 5): policy for auto-detection of conserved
+/// quantum numbers and symmetry-projected bases.
+enum class AutoBasis {
+    /// On: enable Sz projection automatically when the operator commutes
+    /// with total Sz; enable symmetry projection automatically when an
+    /// `automorphism_results/sectors.json` (or `symmetry.json`) is
+    /// present in `options.symmetry_dir` and compatible with the
+    /// operator. This is the default --- it is what the audit reflects
+    /// as "kick in automatically if the Hamiltonian possesses it".
+    On,
+    /// Off: behave like the legacy auto-pilot --- only honour explicit
+    /// `options.sz` / `options.symmetry_dir`. Provided as an escape
+    /// hatch when the caller knows better (e.g. they want the full
+    /// Hilbert space for some custom inner loop).
+    Off,
 };
 
 struct AutoSolveOptions {
@@ -186,6 +236,25 @@ struct AutoSolveOptions {
     /// Aggressiveness for `auto_tune`. 0=conservative, 1=balanced,
     /// 2=aggressive. Default balanced.
     int auto_tune_level = 1;
+
+    /// Phase 5 (matvec-unification revamp): policy for auto-detection
+    /// of conserved quantum numbers + symmetry-projected bases. The
+    /// default (On) means:
+    ///
+    ///   * If the Hamiltonian commutes with total Sz AND no Zeeman field
+    ///     is present AND the caller did not pass `sz`, auto-project
+    ///     onto the n_up = N/2 sector (smaller of {(N-1)/2, (N+1)/2}
+    ///     when N is odd). This is the ground-state sector for any
+    ///     Heisenberg-style Sz-conserving spin-1/2 Hamiltonian by
+    ///     Marshall's theorem.
+    ///
+    ///   * If a Zeeman field is present we leave `sz` unset and only
+    ///     hint --- the GS sector then depends on the field magnitude
+    ///     and the caller needs to choose. We do NOT enumerate all
+    ///     sectors automatically because that can be expensive.
+    ///
+    /// Set to Off to recover the legacy "hint only" behaviour.
+    AutoBasis auto_basis = AutoBasis::On;
 };
 
 // ---------------------------------------------------------------------------
@@ -223,6 +292,10 @@ inline EDResults solve(Operator& H, const AutoSolveOptions& options) {
     // `apply` lambda + `getFixedSzDim()`.
     const bool sz_is_conserved = detail::conserves_sz(H);
 
+    // Determine the n_up to project onto (-1 = no projection).
+    std::int64_t resolved_sz = -1;
+    const char* resolved_sz_reason = nullptr;
+
     if (options.sz.has_value()) {
         if (!sz_is_conserved) {
             throw std::invalid_argument(
@@ -232,28 +305,50 @@ inline EDResults solve(Operator& H, const AutoSolveOptions& options) {
                 "transverse field, no general-orientation J+-+-, etc.) "
                 "or drop the sz= option.");
         }
-        const std::int64_t sz_val = *options.sz;
-        if (sz_val < 0 || static_cast<std::uint64_t>(sz_val) > num_sites) {
+        resolved_sz = *options.sz;
+        resolved_sz_reason = "user-supplied";
+    } else if (sz_is_conserved && options.auto_basis == AutoBasis::On) {
+        // Phase 5 of matvec-unification revamp: kick in Sz projection
+        // automatically when the Hamiltonian possesses the symmetry.
+        // Conservative rule: only auto-pick a sector when we are sure
+        // it is the right one for the ground state. With no Zeeman
+        // field, Marshall's theorem (extended) puts the GS at
+        // n_up = N/2. With a field, the GS is field-dependent --- we
+        // refuse to guess and only hint.
+        if (!detail::has_zeeman_field(H)) {
+            resolved_sz = detail::default_ground_state_sz(num_sites);
+            resolved_sz_reason = "auto (no Zeeman field; Marshall GS sector)";
+        } else if (verbose) {
+            std::cerr << "[ed::auto_pilot::solve] Sz is conserved but a "
+                      << "Zeeman field is present; ground-state sector is "
+                      << "field-dependent. Pass options.sz=<n_up> to "
+                      << "select a specific sector, or leave it unset to "
+                      << "diagonalise the full Hilbert space.\n";
+        }
+    } else if (sz_is_conserved && verbose) {
+        // auto_basis == Off: legacy hint-only behaviour.
+        std::cerr << "[ed::auto_pilot::solve] HINT: this Hamiltonian "
+                  << "conserves total Sz. Set options.auto_basis = "
+                  << "AutoBasis::On (now the default) to project onto "
+                  << "the GS sector automatically.\n";
+    }
+
+    if (resolved_sz >= 0) {
+        if (resolved_sz > static_cast<std::int64_t>(num_sites)) {
             throw std::invalid_argument(
                 "ed::auto_pilot::solve: sz out of range [0, num_sites]");
         }
-        projected = detail::project_fixed_sz(H, sz_val);
+        projected = detail::project_fixed_sz(H, resolved_sz);
         op_to_use = projected.get();
         if (verbose) {
-            const std::uint64_t sec_dim = detail::binomial(num_sites,
-                static_cast<std::uint64_t>(sz_val));
-            std::cerr << "[ed::auto_pilot::solve] Sz sector n_up=" << sz_val
+            const std::uint64_t sec_dim = detail::binomial(
+                num_sites, static_cast<std::uint64_t>(resolved_sz));
+            std::cerr << "[ed::auto_pilot::solve] Sz sector n_up="
+                      << resolved_sz
+                      << " [" << resolved_sz_reason << "]"
                       << ": dim=" << sec_dim
                       << " (reduced from " << base_dim << ").\n";
         }
-    } else if (!options.sz.has_value()
-               && sz_is_conserved && verbose) {
-        std::cerr << "[ed::auto_pilot::solve] HINT: this Hamiltonian conserves "
-                  << "total Sz. Passing options.sz = N/2 = "
-                  << (num_sites / 2)
-                  << " would project onto the sector of dimension C("
-                  << num_sites << ", " << (num_sites / 2)
-                  << ") and dramatically reduce the cost.\n";
     }
 
     // Sector dimension for solver/device heuristics.

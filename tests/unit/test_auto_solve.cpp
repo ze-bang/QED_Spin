@@ -33,21 +33,83 @@ std::unique_ptr<Operator> build_heisen(uint64_t N) {
 
 } // namespace
 
-TEST_CASE("auto_pilot::solve picks FULL on small full Hilbert space",
+TEST_CASE("auto_pilot::solve picks FULL on small full Hilbert space "
+          "(auto_basis off)",
           "[auto_pilot]") {
+    // Legacy code path: with auto_basis = Off we get the full Hilbert
+    // space ground manifold even when Sz is conserved.
     auto H = build_heisen(4);                 // dim = 16, ≤ small-dim threshold
     auto ref = reference_from_operator(*H, 16);
 
     AutoSolveOptions opts;
     opts.num_eigenvalues = 4;
-    opts.verbose         = false;             // keep test output clean
-    opts.device          = Device::CPU;       // pin device to avoid GPU promo
+    opts.verbose         = false;
+    opts.device          = Device::CPU;
+    opts.auto_basis      = ed::auto_pilot::AutoBasis::Off;  // legacy behaviour
 
     auto res = solve(*H, opts);
 
     REQUIRE(res.eigenvalues.size() >= 4);
     require_eigs_close(res.eigenvalues, ref.eigs, 4, 1e-8,
-                       "auto_pilot::solve N=4 ground manifold");
+                       "auto_pilot::solve N=4 ground manifold (legacy)");
+}
+
+TEST_CASE("auto_pilot::solve auto-projects to GS Sz sector when the "
+          "Hamiltonian conserves Sz and has no Zeeman field",
+          "[auto_pilot][auto_basis]") {
+    // Phase 5 of matvec-unification: AutoBasis::On (the default) makes
+    // Sz projection "kick in automatically" for Sz-conserving operators
+    // with no diagonal one-body Sz term. The auto-pilot picks the
+    // Marshall ground-state sector n_up = N/2.
+    auto H = build_heisen(4);
+
+    AutoSolveOptions opts;
+    opts.num_eigenvalues = 1;
+    opts.verbose         = false;
+    opts.device          = Device::CPU;
+    // auto_basis defaults to On.
+
+    auto res = solve(*H, opts);
+    REQUIRE(res.eigenvalues.size() >= 1);
+
+    // Ground-state energy must agree with the dense full-Hilbert
+    // reference. The Heisenberg chain's GS sits in Sz=0 (n_up=N/2),
+    // so the projected solve sees it.
+    auto ref = reference_from_operator(*H, 16);
+    REQUIRE(std::abs(res.eigenvalues[0] - ref.eigs[0]) < 1e-8);
+}
+
+TEST_CASE("auto_pilot::solve does NOT auto-project when a Zeeman field "
+          "is present (GS sector is field-dependent)",
+          "[auto_pilot][auto_basis]") {
+    // With a uniform external field, the GS sector depends on the
+    // field magnitude. The auto-pilot must NOT silently guess --- it
+    // should fall through to the full Hilbert space and let the caller
+    // either tell us which sector to use or solve unprojected.
+    auto H = build_heisen(4);
+    // Inject a uniform h * sum_i Sz_i term.
+    Operator::TransformData zeeman{};
+    zeeman.is_two_body = false;
+    zeeman.op_type     = 2;            // Sz
+    zeeman.coefficient = Complex(0.3, 0.0);
+    for (uint64_t i = 0; i < 4; ++i) {
+        zeeman.site_index = i;
+        H->transform_data_.push_back(zeeman);
+    }
+    H->invalidateMatrixCaches();
+
+    AutoSolveOptions opts;
+    opts.num_eigenvalues = 4;
+    opts.verbose         = false;
+    opts.device          = Device::CPU;
+
+    auto res = solve(*H, opts);
+    auto ref = reference_from_operator(*H, 16);
+
+    // Falls through to the full Hilbert space; we get the full
+    // 16-state spectrum.
+    require_eigs_close(res.eigenvalues, ref.eigs, 4, 1e-8,
+                       "auto_pilot::solve falls through with Zeeman field");
 }
 
 TEST_CASE("auto_pilot::solve auto-projects when sz= is given on a "
