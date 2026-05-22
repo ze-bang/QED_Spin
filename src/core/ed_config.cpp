@@ -474,8 +474,13 @@ EDConfig EDConfig::fromCommandLine(uint64_t argc, char* argv[]) {
             else if (arg.find("--ltlm-reorth-freq=") == 0) config.thermal.ltlm_reorth_freq = std::stoi(parse_value("--ltlm-reorth-freq="));
             else if (arg.find("--ltlm-seed=") == 0) config.thermal.ltlm_seed = std::stoul(parse_value("--ltlm-seed="));
             else if (arg == "--ltlm-store-data") config.thermal.ltlm_store_data = true;
-            // Hybrid LTLM/FTLM options (DEPRECATED: use --method=HYBRID instead)
-            else if (arg == "--hybrid-thermal") config.thermal.use_hybrid_method = true;  // Deprecated: use --method=HYBRID
+            // --hybrid-thermal was removed in matvec-unification Phase 7.3.
+            // Use `--method=HYBRID` (or the canonical DiagonalizationMethod::HYBRID).
+            else if (arg == "--hybrid-thermal") {
+                std::cerr << "[ED] WARNING: --hybrid-thermal has been removed "
+                          << "(matvec-unification Phase 7.3). Pass "
+                          << "'--method=HYBRID' instead. Ignoring.\n";
+            }
             else if (arg.find("--hybrid-crossover=") == 0) config.thermal.hybrid_crossover = std::stod(parse_value("--hybrid-crossover="));
             else if (arg == "--hybrid-auto-crossover") config.thermal.hybrid_auto_crossover = true;
             // Dynamical response options

@@ -824,12 +824,12 @@ inline EDResults exact_diagonalization_core(
         
         case DiagonalizationMethod::LTLM:
             {
-                if (params.use_hybrid_method) {
-                    // Deprecated: use method=HYBRID instead
-                    std::cerr << "Warning: use_hybrid_method flag is deprecated. Use --method=HYBRID instead.\n";
-                    std::cerr << "Falling back to standard LTLM.\n";
-                }
-                
+                // The `use_hybrid_method` legacy flag was removed in
+                // matvec-unification Phase 7.3 (it had been
+                // [[deprecated]] for several releases and only emitted
+                // a warning + fell back to standard LTLM). Use
+                // DiagonalizationMethod::HYBRID instead.
+
                 // Standard LTLM
                 // Setup LTLM parameters
                 LTLMParameters ltlm_params;

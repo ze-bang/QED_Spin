@@ -126,8 +126,10 @@ struct EDParameters {
     uint64_t ltlm_reorth_freq = 10;
     uint64_t ltlm_seed = 0;
     bool ltlm_store_data = false;
-    [[deprecated("Use method=HYBRID instead")]]
-    bool use_hybrid_method = false;
+    // use_hybrid_method was removed in matvec-unification Phase 7.3.
+    // It was [[deprecated]] for several releases and only emitted a
+    // warning + fell back to standard LTLM. Use `method=HYBRID` instead
+    // (DiagonalizationMethod::HYBRID) -- the canonical knob.
     double hybrid_crossover = 1.0;
     bool hybrid_auto_crossover = false;
 

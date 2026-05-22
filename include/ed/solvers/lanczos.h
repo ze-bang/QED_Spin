@@ -18,6 +18,7 @@
 #include <cmath>
 #include <ed/core/blas_lapack_wrapper.h>
 #include <ed/core/construct_ham.h>
+#include <ed/matvec/matvec.h>            // MatVecOperator + as_apply_function (Phase 4)
 #include <iomanip>
 #include <algorithm>
 #include <Eigen/Dense>
@@ -227,3 +228,122 @@ void orthogonalize_degenerate_subspace(std::vector<ComplexVector>& vectors, doub
 void optimal_spectrum_solver(std::function<void(const Complex*, Complex*, int)> H, uint64_t N, uint64_t max_iter,
                                              std::vector<double>& eigenvalues, std::string dir = "",
                                              bool compute_eigenvectors = true);
+
+// =============================================================================
+// Phase 4 (matvec-unification): MatVecOperator-taking convenience overloads.
+//
+// Every solver above keeps its legacy std::function signature for back-compat,
+// and gets a thin inline overload that takes `const ed::matvec::MatVecOperator&`
+// directly. The overload uses ed::matvec::as_apply_function(op) -- a one-line
+// std::function adapter that captures `&op` and calls op.apply(...) -- so the
+// per-matvec cost is one virtual call (already implicit in MatVecOperator).
+// No solver internals had to change; the bridge collapses to identity when
+// the optimiser inlines through it.
+//
+// Call sites that already build a std::function continue to compile unchanged;
+// new call sites can pass any Operator / FixedSzOperator / GPUOperator /
+// StreamingSymmetrySectorView / Distributed{,Symmetry}Operator directly.
+// =============================================================================
+inline void lanczos(const ed::matvec::MatVecOperator& H_op,
+                    uint64_t N, uint64_t max_iter, uint64_t exct, double tol,
+                    std::vector<double>& eigenvalues, std::string dir = "",
+                    bool eigenvectors = false)
+{
+    lanczos(ed::matvec::as_apply_function(H_op),
+            N, max_iter, exct, tol, eigenvalues, std::move(dir), eigenvectors);
+}
+
+inline void block_lanczos(const ed::matvec::MatVecOperator& H_op,
+                          uint64_t N, uint64_t max_iter, uint64_t num_eigs,
+                          uint64_t block_size, double tol,
+                          std::vector<double>& eigenvalues, std::string dir = "",
+                          bool compute_eigenvectors = false)
+{
+    block_lanczos(ed::matvec::as_apply_function(H_op),
+                  N, max_iter, num_eigs, block_size, tol, eigenvalues,
+                  std::move(dir), compute_eigenvectors);
+}
+
+inline void chebyshev_filtered_lanczos(const ed::matvec::MatVecOperator& H_op,
+                                       uint64_t N, uint64_t max_iter, uint64_t num_eigs,
+                                       double tol, std::vector<double>& eigenvalues,
+                                       std::string dir = "",
+                                       bool compute_eigenvectors = false,
+                                       double target_lower = 0,
+                                       double target_upper = 0)
+{
+    chebyshev_filtered_lanczos(ed::matvec::as_apply_function(H_op),
+                               N, max_iter, num_eigs, tol, eigenvalues,
+                               std::move(dir), compute_eigenvectors,
+                               target_lower, target_upper);
+}
+
+inline void shift_invert_lanczos(const ed::matvec::MatVecOperator& H_op,
+                                 uint64_t N, uint64_t max_iter, uint64_t num_eigs,
+                                 double sigma, double tol,
+                                 std::vector<double>& eigenvalues,
+                                 std::string dir = "",
+                                 bool compute_eigenvectors = false)
+{
+    shift_invert_lanczos(ed::matvec::as_apply_function(H_op),
+                         N, max_iter, num_eigs, sigma, tol, eigenvalues,
+                         std::move(dir), compute_eigenvectors);
+}
+
+inline void full_diagonalization(const ed::matvec::MatVecOperator& H_op,
+                                 uint64_t N, uint64_t num_eigs,
+                                 std::vector<double>& eigenvalues,
+                                 std::string dir = "",
+                                 bool compute_eigenvectors = true)
+{
+    full_diagonalization(ed::matvec::as_apply_function(H_op),
+                         N, num_eigs, eigenvalues, std::move(dir),
+                         compute_eigenvectors);
+}
+
+inline void krylov_schur(const ed::matvec::MatVecOperator& H_op,
+                         uint64_t N, uint64_t max_iter, uint64_t num_eigs,
+                         double tol, std::vector<double>& eigenvalues,
+                         std::string dir = "",
+                         bool compute_eigenvectors = false)
+{
+    krylov_schur(ed::matvec::as_apply_function(H_op),
+                 N, max_iter, num_eigs, tol, eigenvalues, std::move(dir),
+                 compute_eigenvectors);
+}
+
+inline void block_krylov_schur(const ed::matvec::MatVecOperator& H_op,
+                               uint64_t N, uint64_t max_iter, uint64_t num_eigs,
+                               uint64_t block_size, double tol,
+                               std::vector<double>& eigenvalues,
+                               std::string dir = "",
+                               bool compute_eigenvectors = false)
+{
+    block_krylov_schur(ed::matvec::as_apply_function(H_op),
+                       N, max_iter, num_eigs, block_size, tol, eigenvalues,
+                       std::move(dir), compute_eigenvectors);
+}
+
+inline void implicitly_restarted_lanczos(const ed::matvec::MatVecOperator& H_op,
+                                         uint64_t N, uint64_t max_iter,
+                                         uint64_t num_eigs, double tol,
+                                         std::vector<double>& eigenvalues,
+                                         std::string dir = "",
+                                         bool compute_eigenvectors = false)
+{
+    implicitly_restarted_lanczos(ed::matvec::as_apply_function(H_op),
+                                 N, max_iter, num_eigs, tol, eigenvalues,
+                                 std::move(dir), compute_eigenvectors);
+}
+
+inline void thick_restart_lanczos(const ed::matvec::MatVecOperator& H_op,
+                                  uint64_t N, uint64_t max_iter,
+                                  uint64_t num_eigs, double tol,
+                                  std::vector<double>& eigenvalues,
+                                  std::string dir = "",
+                                  bool compute_eigenvectors = false)
+{
+    thick_restart_lanczos(ed::matvec::as_apply_function(H_op),
+                          N, max_iter, num_eigs, tol, eigenvalues,
+                          std::move(dir), compute_eigenvectors);
+}

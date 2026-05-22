@@ -169,4 +169,39 @@ TEST_CASE("Lanczos-family solvers reproduce dense spectrum (N=8)",
                                             1e-10, e, dir, false);
                    });
     }
+
+    // -------------------------------------------------------------------
+    // Phase 4 (matvec-unification): exercise the MatVecOperator-taking
+    // overloads. The Operator (built via build_heisenberg_chain) inherits
+    // from MatVecOperator after Phase 2, so we can pass `*f.op` directly
+    // and the new inline overload forwards through as_apply_function.
+    // The numerics had better agree with the std::function path; that
+    // path is exercised above.
+    // -------------------------------------------------------------------
+    SECTION("matvec-unification: lanczos(MatVecOperator&) "
+            "matches lanczos(std::function&)") {
+        run_solver("lanczos[MatVecOperator]", f, 1e-5, 5e-1,
+                   [&](const std::string& dir, std::vector<double>& e) {
+                       lanczos(*f.op, f.dim, max_iter, /*exct=*/1, 1e-10,
+                               e, dir, false);
+                   });
+    }
+
+    SECTION("matvec-unification: block_lanczos(MatVecOperator&) "
+            "matches block_lanczos(std::function&)") {
+        run_solver("block_lanczos[MatVecOperator]", f, 1e-5, 5e-1,
+                   [&](const std::string& dir, std::vector<double>& e) {
+                       block_lanczos(*f.op, f.dim, max_iter, /*num_eigs=*/1,
+                                     /*block_size=*/2, 1e-10, e, dir, false);
+                   });
+    }
+
+    SECTION("matvec-unification: krylov_schur(MatVecOperator&) "
+            "matches krylov_schur(std::function&)") {
+        run_solver("krylov_schur[MatVecOperator]", f, 1e-5, 5e-1,
+                   [&](const std::string& dir, std::vector<double>& e) {
+                       krylov_schur(*f.op, f.dim, max_iter, /*num_eigs=*/1,
+                                    1e-10, e, dir, false);
+                   });
+    }
 }

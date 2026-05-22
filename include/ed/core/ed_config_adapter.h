@@ -76,7 +76,7 @@ inline EDParameters toEDParameters(const EDConfig& config) {
     params.ltlm_reorth_freq = config.thermal.ltlm_reorth_freq;
     params.ltlm_seed = config.thermal.ltlm_seed;
     params.ltlm_store_data = config.thermal.ltlm_store_data;
-    params.use_hybrid_method = config.thermal.use_hybrid_method;
+    // use_hybrid_method removed in Phase 7.3 (use method=HYBRID instead).
     params.hybrid_crossover = config.thermal.hybrid_crossover;
     params.hybrid_auto_crossover = config.thermal.hybrid_auto_crossover;
     
@@ -193,7 +193,7 @@ inline EDConfig fromEDParameters(const EDParameters& params, DiagonalizationMeth
     config.thermal.ltlm_reorth_freq = params.ltlm_reorth_freq;
     config.thermal.ltlm_seed = params.ltlm_seed;
     config.thermal.ltlm_store_data = params.ltlm_store_data;
-    config.thermal.use_hybrid_method = params.use_hybrid_method;
+    // use_hybrid_method removed in Phase 7.3.
     config.thermal.hybrid_crossover = params.hybrid_crossover;
     
     // Observable (TPQ thermal state and spin correlation options)

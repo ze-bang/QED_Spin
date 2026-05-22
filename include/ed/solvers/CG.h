@@ -87,4 +87,44 @@ void lobpcg_diagonalization(
     bool use_preconditioning = false
 );
 
+// =============================================================================
+// Phase 4 (matvec-unification): MatVecOperator-taking overloads.
+// =============================================================================
+#include <ed/matvec/matvec.h>
+
+inline void davidson_method(const ed::matvec::MatVecOperator& H_op,
+                            uint64_t N, uint64_t max_iter, uint64_t max_subspace,
+                            uint64_t num_eigenvalues, double tol,
+                            std::vector<double>& eigenvalues,
+                            std::vector<ComplexVector>& eigenvectors,
+                            std::string dir = "")
+{
+    davidson_method(ed::matvec::as_apply_function(H_op),
+                    N, max_iter, max_subspace, num_eigenvalues, tol,
+                    eigenvalues, eigenvectors, std::move(dir));
+}
+
+inline void lobpcg_method(const ed::matvec::MatVecOperator& H_op,
+                          uint64_t N, uint64_t max_iter, uint64_t num_eigenvalues,
+                          double tol, std::vector<double>& eigenvalues,
+                          std::vector<ComplexVector>& eigenvectors,
+                          std::string dir = "", bool use_preconditioning = false)
+{
+    lobpcg_method(ed::matvec::as_apply_function(H_op),
+                  N, max_iter, num_eigenvalues, tol, eigenvalues, eigenvectors,
+                  std::move(dir), use_preconditioning);
+}
+
+inline void lobpcg_diagonalization(const ed::matvec::MatVecOperator& H_op,
+                                   uint64_t N, uint64_t max_iter, uint64_t exct,
+                                   double tol, std::vector<double>& eigenvalues,
+                                   std::string dir = "",
+                                   bool compute_eigenvectors = false,
+                                   bool use_preconditioning = false)
+{
+    lobpcg_diagonalization(ed::matvec::as_apply_function(H_op),
+                           N, max_iter, exct, tol, eigenvalues, std::move(dir),
+                           compute_eigenvectors, use_preconditioning);
+}
+
 #endif  // CG_H

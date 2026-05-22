@@ -13,6 +13,7 @@
 #include <map>
 #include <ed/core/blas_lapack_wrapper.h>
 #include <ed/core/construct_ham.h>
+#include <ed/matvec/matvec.h>            // MatVecOperator + as_apply_function (Phase 4)
 
 using Complex = std::complex<double>;
 using ComplexVector = std::vector<Complex>;
@@ -228,6 +229,23 @@ FTLMResults finite_temperature_lanczos(
     uint64_t num_temp_bins,
     const std::string& output_dir = ""
 );
+
+// Phase 4 (matvec-unification): MatVecOperator-taking overload. The body
+// is a single ed::matvec::as_apply_function() forward; see lanczos.h for
+// the design notes.
+inline FTLMResults finite_temperature_lanczos(
+    const ed::matvec::MatVecOperator& H_op,
+    uint64_t N,
+    const FTLMParameters& params,
+    double temp_min,
+    double temp_max,
+    uint64_t num_temp_bins,
+    const std::string& output_dir = "")
+{
+    return finite_temperature_lanczos(
+        ed::matvec::as_apply_function(H_op),
+        N, params, temp_min, temp_max, num_temp_bins, output_dir);
+}
 
 /**
  * @brief Save FTLM results to file

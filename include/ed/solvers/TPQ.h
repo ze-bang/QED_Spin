@@ -9,6 +9,7 @@
 #include <random>
 #include <cmath>
 #include <ed/core/blas_lapack_wrapper.h>
+#include <ed/matvec/matvec.h>            // MatVecOperator + as_apply_function (Phase 4)
 #include <fstream>
 #include <iomanip>
 #include <algorithm>
@@ -296,6 +297,37 @@ void microcanonical_tpq(
     double measure_beta_max = 1000.0
 );
 
+// Phase 4 (matvec-unification): MatVecOperator-taking overload.
+inline void microcanonical_tpq(
+    const ed::matvec::MatVecOperator& H_op,
+    uint64_t N, uint64_t max_iter, uint64_t num_samples,
+    uint64_t temp_interval, std::vector<double>& eigenvalues,
+    std::string dir = "", bool compute_spectrum = false,
+    double LargeValue = 1e5, bool compute_observables = false,
+    std::vector<Operator> observables = {},
+    std::vector<std::string> observable_names = {},
+    double omega_min = -20.0, double omega_max = 20.0,
+    uint64_t num_points = 10000, double t_end = 50.0,
+    double dt = 0.01, float spin_length = 0.5,
+    bool measure_sz = false, uint64_t sublattice_size = 1,
+    uint64_t num_sites = 16,
+    class FixedSzOperator* fixed_sz_op = nullptr,
+    bool continue_quenching = false, uint64_t continue_sample = 0,
+    double continue_beta = 0.0, double target_beta = 1000.0,
+    uint64_t num_measure_points = 20,
+    double measure_beta_min = 1.0, double measure_beta_max = 1000.0)
+{
+    microcanonical_tpq(
+        ed::matvec::as_apply_function(H_op),
+        N, max_iter, num_samples, temp_interval, eigenvalues,
+        std::move(dir), compute_spectrum, LargeValue, compute_observables,
+        std::move(observables), std::move(observable_names),
+        omega_min, omega_max, num_points, t_end, dt, spin_length,
+        measure_sz, sublattice_size, num_sites, fixed_sz_op,
+        continue_quenching, continue_sample, continue_beta, target_beta,
+        num_measure_points, measure_beta_min, measure_beta_max);
+}
+
 // Canonical TPQ using imaginary-time propagation e^{-βH} |r>
 inline void imaginary_time_evolve_tpq_taylor(
     std::function<void(const Complex*, Complex*, int)> H,
@@ -333,6 +365,33 @@ void canonical_tpq(
     double measure_beta_min = 1.0,
     double measure_beta_max = 1000.0
 );
+
+// Phase 4 (matvec-unification): MatVecOperator-taking overload.
+inline void canonical_tpq(
+    const ed::matvec::MatVecOperator& H_op,
+    uint64_t N, double beta_max, uint64_t num_samples,
+    uint64_t temp_interval, std::vector<double>& energies,
+    std::string dir = "", double delta_beta = 0.1, uint64_t taylor_order = 50,
+    bool compute_observables = false, std::vector<Operator> observables = {},
+    std::vector<std::string> observable_names = {},
+    double omega_min = -20.0, double omega_max = 20.0,
+    uint64_t num_points = 10000, double t_end = 50.0,
+    double dt = 0.01, float spin_length = 0.5,
+    bool measure_sz = false, uint64_t sublattice_size = 1,
+    uint64_t num_sites = 16,
+    class FixedSzOperator* fixed_sz_op = nullptr,
+    uint64_t num_measure_points = 20,
+    double measure_beta_min = 1.0, double measure_beta_max = 1000.0)
+{
+    canonical_tpq(
+        ed::matvec::as_apply_function(H_op),
+        N, beta_max, num_samples, temp_interval, energies, std::move(dir),
+        delta_beta, taylor_order, compute_observables,
+        std::move(observables), std::move(observable_names),
+        omega_min, omega_max, num_points, t_end, dt, spin_length,
+        measure_sz, sublattice_size, num_sites, fixed_sz_op,
+        num_measure_points, measure_beta_min, measure_beta_max);
+}
 
 /**
  * Compute dynamical correlations for TPQ using Krylov method

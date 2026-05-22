@@ -160,6 +160,23 @@ LTLMResults low_temperature_lanczos(
     const std::string& output_dir = ""
 );
 
+// Phase 4 (matvec-unification): MatVecOperator-taking overload.
+inline LTLMResults low_temperature_lanczos(
+    const ed::matvec::MatVecOperator& H_op,
+    uint64_t N,
+    const LTLMParameters& params,
+    double temp_min,
+    double temp_max,
+    uint64_t num_temp_bins,
+    const ComplexVector* ground_state = nullptr,
+    const std::string& output_dir = "")
+{
+    return low_temperature_lanczos(
+        ed::matvec::as_apply_function(H_op),
+        N, params, temp_min, temp_max, num_temp_bins,
+        ground_state, output_dir);
+}
+
 /**
  * @brief Compute the connected thermal-expansion covariance with LTLM.
  *

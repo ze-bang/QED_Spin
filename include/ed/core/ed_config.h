@@ -125,7 +125,8 @@ struct ThermalConfig {
     bool ltlm_store_data = false;      // Store intermediate data
     
     // ========== Hybrid Thermal parameters ==========
-    bool use_hybrid_method = false;    // DEPRECATED: use method=HYBRID instead
+    // `use_hybrid_method` was removed in matvec-unification Phase 7.3.
+    // Use `config.method = HYBRID` (DiagonalizationMethod::HYBRID) instead.
     double hybrid_crossover = 1.0;     // Temperature crossover for hybrid method
     bool hybrid_auto_crossover = false;// Automatically determine crossover temperature
     

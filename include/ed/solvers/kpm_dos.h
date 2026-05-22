@@ -58,6 +58,7 @@
 
 #include <ed/core/blas_lapack_wrapper.h>
 #include <ed/core/matvec_types.h>
+#include <ed/matvec/matvec.h>            // MatVecOperator + as_apply_function (Phase 4)
 
 #include <cstdint>
 #include <vector>
@@ -180,5 +181,18 @@ KPMDOSResult compute_kpm_dos(
     const std::vector<double>& betas,
     const std::vector<double>& dos_energies,
     const KPMDOSParameters& params = {});
+
+// Phase 4 (matvec-unification): MatVecOperator-taking overload.
+inline KPMDOSResult compute_kpm_dos(
+    const ed::matvec::MatVecOperator& H_op,
+    std::uint64_t dim,
+    const std::vector<double>& betas,
+    const std::vector<double>& dos_energies,
+    const KPMDOSParameters& params = {})
+{
+    return compute_kpm_dos(
+        ed::matvec::as_apply_function(H_op),
+        dim, betas, dos_energies, params);
+}
 
 }  // namespace ed::kpm_dos
