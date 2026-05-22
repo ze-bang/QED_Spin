@@ -50,9 +50,46 @@
 #include <ed/core/ed_wrapper_streaming.h>  // streaming-symmetry kernel
 
 #include <cstdint>
+#include <filesystem>
+#include <iostream>
 #include <string>
 
 namespace ed {
+
+namespace detail {
+
+// Phase 5 (matvec-unification): auto-detect spatial symmetry from the
+// canonical "automorphism_results/sectors.json" file inside a Hamiltonian
+// directory. Used by ed::exact_diagonalization to flip params.use_symmetry
+// on for callers that have a symmetry directory but did not explicitly
+// opt in (the user-visible "kicks in automatically if the Hamiltonian
+// possesses it" behaviour from the audit).
+//
+// We only auto-promote when:
+//   1. params.use_symmetry was left at its default (false), AND
+//   2. `<directory>/automorphism_results/sectors.json` exists.
+//
+// Callers can defeat the auto-promotion by setting params.use_symmetry
+// explicitly to false in a future EDParameters extension (currently the
+// boolean is ambiguous between "explicit false" and "default false");
+// we treat this as acceptable because the only failure mode is "we use
+// symmetry projection when symmetry data is present", which is what the
+// user asked for in the matvec-unification audit.
+inline bool symmetry_data_present(const std::string& directory) {
+    namespace fs = std::filesystem;
+    const fs::path d(directory);
+    if (!fs::exists(d) || !fs::is_directory(d)) return false;
+    const fs::path sectors = d / "automorphism_results" / "sectors.json";
+    if (fs::exists(sectors) && fs::is_regular_file(sectors)) return true;
+    // Some pipelines write the symmetry info one level deeper; check the
+    // permutation generator file as a secondary indicator. (We do not
+    // require both; either is enough to trigger the streaming path,
+    // which itself decides whether the data is internally consistent.)
+    const fs::path gens = d / "automorphism_results" / "generators.json";
+    return fs::exists(gens) && fs::is_regular_file(gens);
+}
+
+}  // namespace detail
 
 /**
  * @brief Canonical ED entry point (directory form).
@@ -90,12 +127,30 @@ inline EDResults exact_diagonalization(
     const std::string& counterterm_filename = "CounterTerm.dat",
     const std::string& three_body_filename = "ThreeBodyG.dat")
 {
+    // Phase 5 (matvec-unification): auto-promote use_symmetry when the
+    // caller has a Hamiltonian directory with automorphism_results/
+    // present. This is the "kick in automatically if the Hamiltonian
+    // possesses it" half of the audit -- the streaming-symmetry kernel
+    // is strictly faster than the full-Hilbert kernel whenever a
+    // non-trivial spatial group is present, so flipping the axis on
+    // for the user is unambiguously correct when the data is there.
+    EDParameters resolved = params;
+    if (!resolved.use_symmetry && detail::symmetry_data_present(directory)) {
+        resolved.use_symmetry = true;
+        std::cerr << "[ed::exact_diagonalization] auto-detected "
+                  << "automorphism_results/ in '" << directory
+                  << "' -- routing through the streaming-symmetry "
+                  << "kernel. Pass params.use_symmetry=true to make "
+                  << "this explicit, or remove the directory to "
+                  << "force the full-Hilbert path.\n";
+    }
+
     // ----- Non-symmetry path: full-Hilbert / fixed-Sz / GPU / MPI -----
     // ed_wrapper.h's exact_diagonalization_from_directory already routes
     // on use_fixed_sz, use_gpu, and use_mpi internally.
-    if (!params.use_symmetry) {
+    if (!resolved.use_symmetry) {
         return ::exact_diagonalization_from_directory(
-            directory, method, params, format,
+            directory, method, resolved, format,
             interaction_filename, single_site_filename,
             counterterm_filename, three_body_filename);
     }
@@ -103,19 +158,19 @@ inline EDResults exact_diagonalization(
     // ----- Spatial-symmetry path: streaming kernel (per-sector matvec) -----
     // The streaming kernel honours use_gpu (per-sector GPU dispatch) and
     // use_fixed_sz (fixed-Sz orbit basis) inside its implementation.
-    if (params.use_fixed_sz) {
-        const std::int64_t n_up = (params.n_up >= 0)
-            ? params.n_up
-            : static_cast<std::int64_t>(params.num_sites / 2);
+    if (resolved.use_fixed_sz) {
+        const std::int64_t n_up = (resolved.n_up >= 0)
+            ? resolved.n_up
+            : static_cast<std::int64_t>(resolved.num_sites / 2);
         return ::exact_diagonalization_streaming_symmetry_fixed_sz(
-            directory, n_up, method, params,
+            directory, n_up, method, resolved,
             interaction_filename, single_site_filename,
-            params.basis_cache_dir, params.precompute_basis_only);
+            resolved.basis_cache_dir, resolved.precompute_basis_only);
     }
     return ::exact_diagonalization_streaming_symmetry(
-        directory, method, params,
+        directory, method, resolved,
         interaction_filename, single_site_filename,
-        params.basis_cache_dir, params.precompute_basis_only);
+        resolved.basis_cache_dir, resolved.precompute_basis_only);
 }
 
 /**
