@@ -34,6 +34,7 @@
 #include <ed/core/ed_wrapper.h>
 #include <ed/core/fixed_sz_operator.h>
 #include <ed/core/operator.h>
+#include <ed/matvec/matvec.h>
 #include <ed/auto/diag_tune.h>
 
 #include <cmath>
@@ -459,14 +460,13 @@ inline EDResults solve(Operator& H, const AutoSolveOptions& options) {
             params, sector_dim, options.num_eigenvalues, op_to_use, ov);
     }
 
-    // Phase 2 of matvec-unification: Operator::apply is now virtual, so
-    // `op_to_use->apply(...)` dispatches correctly to FixedSzOperator's
-    // override when projected. The legacy manual branch has been
-    // removed.
-    auto apply = [op_to_use](const Complex* in, Complex* out, int n) {
-        op_to_use->apply(in, out, static_cast<size_t>(n));
-    };
-    return exact_diagonalization_core(apply, sector_dim, method, params);
+    // Phase 2/4 of matvec-unification: Operator::apply is now virtual,
+    // so passing the operator through the MatVecOperator bridge picks
+    // up the correct subclass (FixedSzOperator when projected) via
+    // virtual dispatch with no manual branching.
+    return exact_diagonalization_core(
+        ed::matvec::as_apply_function(*op_to_use),
+        sector_dim, method, params);
 }
 
 } // namespace ed::auto_pilot

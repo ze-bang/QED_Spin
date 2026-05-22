@@ -133,4 +133,27 @@ public:
     }
 };
 
+// =============================================================================
+// Legacy-bridge adapter. Many existing CPU solvers in this codebase take a
+// `std::function<void(const Complex*, Complex*, int)>` for the matvec.
+// Rather than touch every solver signature, this small free function turns
+// any MatVecOperator into that callable shape --- so callers can write:
+//
+//     ed::auto_pilot::solve(H, ...)               // H is an Operator
+//        -> uses H.apply(...) via virtual dispatch                  (best)
+//
+//     legacy_solver(as_apply_function(some_matvec_op), N, ...);    (bridge)
+//
+// The returned callable holds a reference to the passed operator; the
+// caller must keep the operator alive for the lifetime of the callable.
+// Cost: ~ one virtual call per matvec, identical to what a direct
+// MatVecOperator& would pay. NO additional std::function allocation
+// overhead beyond what the caller already had.
+// =============================================================================
+[[nodiscard]] inline auto as_apply_function(const MatVecOperator& op) {
+    return [&op](const Complex* in, Complex* out, int n) {
+        op.apply(in, out, static_cast<std::size_t>(n));
+    };
+}
+
 } // namespace ed::matvec

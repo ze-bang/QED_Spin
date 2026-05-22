@@ -12,6 +12,7 @@
 #include <memory>
 #include <ed/gpu/kernel_config.h>
 #include <ed/gpu/bit_operations.cuh>
+#include <ed/matvec/matvec.h>
 
 // Forward declare only - don't include construct_ham.h to avoid CUDA compilation issues
 // The CPU Operator class uses C++ features incompatible with NVCC
@@ -132,13 +133,40 @@ struct GPUThreeBodyTransformData {
  * 
  * OPTIMIZED: Uses Structure-of-Arrays to eliminate std::function overhead
  */
-class GPUOperator {
+class GPUOperator : public ed::matvec::MatVecOperator {
 public:
     // Constructor
     GPUOperator(int n_sites, float spin_l = 0.5f);
     
     // Destructor - virtual for correct polymorphic deletion
-    virtual ~GPUOperator();
+    ~GPUOperator() override;
+
+    // -------------------------------------------------------------------
+    // MatVecOperator interface (Phase 2 of matvec-unification revamp).
+    // GPUOperator advertises CudaDevice memory space; `in` and `out`
+    // are treated as device pointers (cuDoubleComplex and
+    // std::complex<double> are layout-compatible). matVecGPU is
+    // already virtual, so this dispatches through to GPUFixedSz /
+    // GPUSymmetrized overrides without further intervention.
+    // -------------------------------------------------------------------
+    void apply(const std::complex<double>* in, std::complex<double>* out,
+               std::size_t size) const override {
+        const_cast<GPUOperator*>(this)->matVecGPU(
+            reinterpret_cast<const cuDoubleComplex*>(in),
+            reinterpret_cast<cuDoubleComplex*>(out),
+            static_cast<int>(size));
+    }
+    [[nodiscard]] std::size_t dim() const override {
+        return static_cast<std::size_t>(dimension_);
+    }
+    [[nodiscard]] ed::matvec::MemorySpace memory_space() const override {
+        return ed::matvec::MemorySpace::CudaDevice;
+    }
+    [[nodiscard]] bool is_hermitian() const override { return true; }
+    [[nodiscard]] std::string description() const override {
+        return "GPUOperator(n_sites=" + std::to_string(n_sites_)
+            + ", dim=" + std::to_string(dimension_) + ")";
+    }
     
     // OPTIMIZED: Direct data population (no std::function overhead)
     void addOneBodyTerm(uint8_t op_type, uint32_t site, const std::complex<double>& coeff);
@@ -394,6 +422,18 @@ public:
     void matVec(const std::complex<double>* x, std::complex<double>* y, int N) override;
     void matVecGPUAsync(const cuDoubleComplex* d_x, cuDoubleComplex* d_y, int N, cudaStream_t stream) override;
 
+    // MatVecOperator overrides (Phase 2): dim() and description() reflect the
+    // projected sector. apply / memory_space / is_hermitian are inherited
+    // from GPUOperator and dispatch to GPUFixedSz::matVecGPU virtually.
+    [[nodiscard]] std::size_t dim() const override {
+        return static_cast<std::size_t>(fixed_sz_dim_);
+    }
+    [[nodiscard]] std::string description() const override {
+        return "GPUFixedSzOperator(n_sites=" + std::to_string(n_sites_)
+            + ", n_up=" + std::to_string(n_up_)
+            + ", dim=" + std::to_string(fixed_sz_dim_) + ")";
+    }
+
     // Fixed-Sz kernels use shared basis table and atomic accumulation,
     // so concurrent multi-stream execution is not safe.
     bool supportsAsyncMatVec() const override { return false; }
@@ -642,7 +682,16 @@ public:
     void matVecGPU(const cuDoubleComplex* d_x, cuDoubleComplex* d_y, int N) override;
     void matVecGPUAsync(const cuDoubleComplex* d_x, cuDoubleComplex* d_y, int N, cudaStream_t stream) override;
     void matVec(const std::complex<double>* x, std::complex<double>* y, int N) override;
-    
+
+    // MatVecOperator overrides (Phase 2): symmetrized sector dim + label.
+    [[nodiscard]] std::size_t dim() const override {
+        return static_cast<std::size_t>(sector_dim_);
+    }
+    [[nodiscard]] std::string description() const override {
+        return "GPUSymmetrizedOperator(n_sites=" + std::to_string(n_sites_)
+            + ", sector_dim=" + std::to_string(sector_dim_) + ")";
+    }
+
     // Fixed-Sz kernels use shared basis table and atomic accumulation
     bool supportsAsyncMatVec() const override { return false; }
     
