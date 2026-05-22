@@ -7,6 +7,131 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed — Matvec-unification: a single matrix-vector core for the whole library
+
+A full-audit refactor that collapses every Hamiltonian × vector code path
+in the codebase onto one polymorphic interface. The user's original
+complaint -- "the matvec implementation is lousy and clumsy, no matter
+what ED solver or whether I'm doing DSSF" -- is the root issue this
+arc addresses.
+
+What changed at the interface layer:
+
+- New `ed::matvec::MatVecOperator` interface
+  (`include/ed/matvec/matvec.h`): a single virtual `apply(in, out,
+  size)` + `dim()` / `memory_space()` / `is_hermitian()` /
+  `description()` surface that every Hamiltonian wrapper in the library
+  now implements. The companion `MemorySpace` enum
+  (`include/ed/matvec/memory_space.h`) tags whether the operator
+  expects `Host`, `CudaDevice`, `DistributedHost`, or
+  `DistributedCudaDevice` vectors; solvers and DSSF can dispatch on
+  this without caring which concrete operator they have.
+- New `ed::matvec::Backend` interface (`include/ed/matvec/backend.h`)
+  + `backends/cpu_backend.h`: level-1 BLAS (`axpy`, `dot`, `norm`,
+  `scale`, `copy`) and allocation/copy primitives, decoupled from the
+  operator. CUDA / MPI backends slot in behind the same surface.
+- New `ed::matvec::kernel::apply_terms` in
+  `include/ed/matvec/term_kernels.h`: the **single source of truth** for
+  Hamiltonian term evaluation (diag-1-body, offdiag-1-body, diag-2-body,
+  mixed-2-body, offdiag-2-body, three-body), parameterised by a
+  compile-time `BasisPolicy` (full / fixed-Sz). Replaces ~3-way
+  duplication that used to live in `Operator::apply_optimized`,
+  `Operator::apply_real`, and `FixedSzOperator::apply`.
+
+Operator-side inheritance (Phase 2):
+
+- `Operator`, `FixedSzOperator`, `GPUOperator`, `GPUFixedSzOperator`,
+  `GPUSymmetrizedOperator`, `DistributedOperator`, and
+  `DistributedSymmetryOperator` now publicly inherit from
+  `ed::matvec::MatVecOperator`.
+- `StreamingSymmetryOperator` and `FixedSzStreamingSymmetryOperator`
+  gain a nested `SectorView` (a lightweight, non-owning
+  `MatVecOperator` wrapper for a single symmetry sector) so per-sector
+  diagonalization slots into the same uniform solver interface.
+
+Auto-pilot (Phase 5):
+
+- `auto_pilot::solve` auto-projects to the Sz=N/2 sector when Sz is
+  conserved and no Zeeman field is present
+  (`include/ed/auto/solve.h`, `AutoBasis::On` is the new default).
+  Opt-out with `AutoBasis::Off` for the legacy full-Hilbert path.
+- `ed::exact_diagonalization` auto-promotes `params.use_symmetry = true`
+  when `automorphism_results/sectors.json` (or `generators.json`)
+  exists in the Hamiltonian directory -- so the streaming-symmetry
+  kernel kicks in automatically when the data is there, no extra flag
+  needed.
+
+Solver-API consolidation (Phase 4):
+
+- Every CPU solver in `lanczos.h`, `ftlm.h`, `ltlm.h`, `TPQ.h`, `CG.h`,
+  and `kpm_dos.h` ships an inline overload that takes
+  `const ed::matvec::MatVecOperator&` directly, alongside the legacy
+  `std::function<void(const Complex*, Complex*, int)>` overload. The
+  bridge `ed::matvec::as_apply_function(op)` lets old call sites keep
+  compiling unchanged. New code can hand any concrete operator to any
+  solver and let virtual dispatch route to the right matvec.
+- Validated by three new sections in `test_lanczos_variants` exercising
+  `lanczos` / `block_lanczos` / `krylov_schur` through `MatVecOperator&`.
+
+Dispatch collapse (Phase 6):
+
+- New `ed/core/dispatch.h` exposes the single canonical entry
+  `ed::exact_diagonalization(directory|files, method, params, format)`.
+  The legacy `ed_dispatch_symmetry.h` is now a 55-line forwarder shim
+  (preserved for the documented `ed_dispatch::` Python-binding API).
+  `ed_wrapper.h` + `ed_wrapper_streaming.h` are internal implementation
+  details behind `dispatch.h`.
+- `EDParameters` gained `basis_cache_dir` (string) and
+  `precompute_basis_only` (bool), promoting them from workflow-specific
+  flags into the central parameter bag.
+
+Aggressive cleanup (Phase 7):
+
+- **Phase 7.1**: Deleted the legacy text-based fixed-Sz symmetrized-
+  basis generation pipeline (`generateSymmetrizedBasisFixedSz` +
+  helpers, ~670 lines) -- streaming/HDF5 is the canonical path.
+- **Phase 7.2**: Deleted the chunked-symmetry + disk-streaming-symmetry
+  workflows in full (`chunked_symmetry_builder.h`,
+  `disk_streaming_symmetry.h`, `ed_wrapper_chunked.h`,
+  `run_chunked_symmetry_workflow`, `run_disk_streaming_workflow`,
+  associated EDConfig fields and CLI flags -- ~2.3 kLOC). The
+  distributed/MPI build is the canonical answer at the scales these
+  single-node fallbacks targeted, and is now first-class
+  (`DistributedHost` memory space tag on `DistributedOperator`).
+  `--disk-streaming` / `--chunked-symm` CLI flags now print a one-line
+  deprecation notice and are ignored.
+- **Phase 7.3**: Retired the `[[deprecated]]` `use_hybrid_method` flag
+  (`method=HYBRID` is the canonical knob).
+- **Phase 7.4**: `docs/architecture/{CODEMAP, SCALING,
+  IMPLEMENTATION_REPORT}.md` brought up to date with the
+  post-unification reality (single entry point, MatVecOperator
+  inheritance, MPI replacement of single-node disk paths).
+- **Phase 7.5**: Removed ten `[[deprecated]]` accessor shims in
+  `EDParameters` (`num_order` → `tpq_taylor_order`, `delta_tau` →
+  `tpq_delta_beta`, …). All in-tree callers migrated.
+
+Compatibility:
+
+- The legacy `std::function`-based solver signatures all stay.
+- `ed_dispatch::exact_diagonalization_from_directory(...)` stays.
+- The `_GPU` and `_GPU_FIXED_SZ` deprecated enum aliases in
+  `DiagonalizationMethod` are kept as zero-cost compile-time aliases
+  (Python-binding / HDF5 metadata ABI surface) -- they canonicalise to
+  `{base, use_gpu=true, use_fixed_sz=…}` via
+  `canonicalize_method_and_flags`.
+
+Tests:
+
+- All 254 unit + MPI tests pass at every checkpoint.
+- New regression tests:
+  * `test_auto_solve.cpp` -- two new sections validating the
+    auto-Sz-to-N/2 projection on a Heisenberg ring and confirming the
+    Zeeman-field path bypasses it.
+  * `test_lanczos_variants.cpp` -- three new sections exercising the
+    new `MatVecOperator&` overloads of `lanczos` / `block_lanczos` /
+    `krylov_schur` and asserting numerics match the `std::function`
+    path.
+
 ### Added — One-call ED-solver auto-tuner (`qed.auto_tune.tune_diag` / `ed::auto_pilot::diag::apply_auto_tune`)
 
 Companion to the DSSF auto-tuner shipped earlier in this release. Both
