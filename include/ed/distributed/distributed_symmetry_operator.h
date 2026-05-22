@@ -70,12 +70,14 @@
 
 #include <ed/distributed/orbit_halo_plan.h>
 #include <ed/distributed/orbit_partition.h>
+#include <ed/matvec/matvec.h>          // MatVecOperator interface (Phase 2)
+#include <ed/matvec/memory_space.h>    // DistributedHost tag
 
 class Operator;
 
 namespace ed::distributed {
 
-class DistributedSymmetryOperator {
+class DistributedSymmetryOperator : public ed::matvec::MatVecOperator {
 public:
     using Complex = std::complex<double>;
 
@@ -144,9 +146,35 @@ public:
     void apply(const Complex* x_local, Complex* y_local) const;
 
     // -------------------------------------------------------------------------
-    // Geometry / diagnostics
+    // Matvec-unification Phase 2: MatVecOperator overrides.
+    //
+    // dim() reports the LOCAL orbit count (per-rank); the inherited
+    // virtual `global_dim()` reports the full # of nonzero-norm orbits
+    // (see the existing accessor below). Memory space is DistributedHost.
+    // The orbit-index vectors must use the MPI Backend for axpy/dot/norm
+    // so reductions cross-rank correctly.
     // -------------------------------------------------------------------------
-    std::uint64_t global_dim()   const noexcept;  // # nonzero-norm orbits
+    void apply(const ed::matvec::Complex* x_local,
+               ed::matvec::Complex* y_local,
+               std::size_t size) const override
+    {
+        check_size(size);
+        apply(reinterpret_cast<const Complex*>(x_local),
+              reinterpret_cast<Complex*>(y_local));
+    }
+    [[nodiscard]] std::size_t dim() const override;
+    [[nodiscard]] std::size_t global_dim() const override;
+    [[nodiscard]] ed::matvec::MemorySpace memory_space() const override {
+        return ed::matvec::MemorySpace::DistributedHost;
+    }
+    [[nodiscard]] bool is_hermitian() const override { return true; }
+    [[nodiscard]] std::string description() const override;
+
+    // -------------------------------------------------------------------------
+    // Geometry / diagnostics (legacy uint64_t accessors retained for
+    // back-compat; the MatVecOperator overrides above forward to the
+    // same data through std::size_t).
+    // -------------------------------------------------------------------------
     std::uint64_t local_size()   const noexcept;  // # orbits on this rank
     std::uint64_t local_offset() const noexcept;  // rank-major prefix offset
     int           rank()         const noexcept { return rank_; }

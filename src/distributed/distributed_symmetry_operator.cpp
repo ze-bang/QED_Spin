@@ -430,8 +430,21 @@ void DistributedSymmetryOperator::apply(const Complex* x_local,
 // -----------------------------------------------------------------------------
 // Geometry / diagnostics
 // -----------------------------------------------------------------------------
-std::uint64_t DistributedSymmetryOperator::global_dim() const noexcept {
-    return static_cast<std::uint64_t>(orbit_reps_.size());
+std::size_t DistributedSymmetryOperator::dim() const {
+    // Phase 2 MatVecOperator: local orbit count (per-rank).
+    return partition_.local_size(rank_);
+}
+
+std::size_t DistributedSymmetryOperator::global_dim() const {
+    // Phase 2 MatVecOperator: total # of nonzero-norm orbits.
+    return orbit_reps_.size();
+}
+
+std::string DistributedSymmetryOperator::description() const {
+    return "DistributedSymmetryOperator(sector=" + std::to_string(sector_index_)
+        + ", local=" + std::to_string(dim())
+        + ", global=" + std::to_string(global_dim())
+        + ", nproc=" + std::to_string(size_) + ")";
 }
 
 std::uint64_t DistributedSymmetryOperator::local_size() const noexcept {

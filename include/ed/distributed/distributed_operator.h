@@ -93,13 +93,15 @@
 #include <vector>
 
 #include <ed/core/sorted_uint64_index.h>
+#include <ed/matvec/matvec.h>          // MatVecOperator interface (Phase 2)
+#include <ed/matvec/memory_space.h>    // DistributedHost tag
 
 // Forward declaration to avoid pulling all of construct_ham.h into this header.
 class Operator;
 
 namespace ed::distributed {
 
-class DistributedOperator {
+class DistributedOperator : public ed::matvec::MatVecOperator {
 public:
     using Complex = std::complex<double>;
 
@@ -129,9 +131,45 @@ public:
     void apply(const Complex* v_local, Complex* y_local) const;
 
     // -------------------------------------------------------------------------
+    // Matvec-unification Phase 2: MatVecOperator overrides.
+    //
+    // dim() reports the LOCAL (per-rank) length so solvers that walk
+    // through the polymorphic interface size their work buffers
+    // correctly. The orthogonal `global_dim()` accessor (already in
+    // the original API and now a MatVecOperator virtual) reports the
+    // full Hilbert-space length so reductions / norms can normalise.
+    // Memory space is DistributedHost -- solvers must use the MPI
+    // Backend variant for axpy/dot/norm; using a plain CpuBackend would
+    // give wrong norms (it does not allreduce across ranks).
+    // -------------------------------------------------------------------------
+    void apply(const ed::matvec::Complex* v_local,
+               ed::matvec::Complex* y_local,
+               std::size_t size) const override
+    {
+        check_size(size);
+        // ed::matvec::Complex is exactly std::complex<double>; identity cast.
+        apply(reinterpret_cast<const Complex*>(v_local),
+              reinterpret_cast<Complex*>(y_local));
+    }
+    [[nodiscard]] std::size_t dim() const override {
+        return static_cast<std::size_t>(local_n_);
+    }
+    [[nodiscard]] std::size_t global_dim() const override {
+        return static_cast<std::size_t>(global_dim_);
+    }
+    [[nodiscard]] ed::matvec::MemorySpace memory_space() const override {
+        return ed::matvec::MemorySpace::DistributedHost;
+    }
+    [[nodiscard]] bool is_hermitian() const override { return true; }
+    [[nodiscard]] std::string description() const override {
+        return "DistributedOperator(local_n=" + std::to_string(local_n_)
+            + ", global_dim=" + std::to_string(global_dim_)
+            + ", nproc=" + std::to_string(size_) + ")";
+    }
+
+    // -------------------------------------------------------------------------
     // Slab geometry (queryable on every rank).
     // -------------------------------------------------------------------------
-    std::uint64_t global_dim()   const noexcept { return global_dim_; }
     std::uint64_t local_offset() const noexcept { return local_offset_; }
     std::uint64_t local_size()   const noexcept { return local_n_; }
     int           rank()         const noexcept { return rank_; }

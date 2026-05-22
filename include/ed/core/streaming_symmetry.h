@@ -497,7 +497,79 @@ public:
         
         return result;
     }
-    
+
+    // -----------------------------------------------------------------
+    // Matvec-unification Phase 2: per-sector MatVecOperator view.
+    //
+    // A StreamingSymmetryOperator is naturally multi-sector: each
+    // symmetry sector has its own Hamiltonian block and its own matvec
+    // (applySymmetrized(sector_idx, in, out)). It therefore cannot be
+    // a single MatVecOperator -- instead it MANUFACTURES them on demand
+    // via the lightweight SectorView wrapper below.
+    //
+    // Usage:
+    //
+    //     StreamingSymmetryOperator H(...);
+    //     H.generateSymmetrySectorsStreaming(dir);
+    //     for (std::size_t k = 0; k < H.num_sectors(); ++k) {
+    //         auto Hk = H.sector(k);                  // owns a SectorView
+    //         lanczos(*Hk, num_eigenvalues, ...);     // solver sees a
+    //                                                 // standard
+    //                                                 // MatVecOperator
+    //     }
+    //
+    // The view does not own the underlying operator -- the caller must
+    // keep the StreamingSymmetryOperator alive for the view's lifetime.
+    // -----------------------------------------------------------------
+    class SectorView final : public ed::matvec::MatVecOperator {
+    public:
+        SectorView(const StreamingSymmetryOperator& op, std::size_t sector_idx)
+            : op_(&op), sector_idx_(sector_idx)
+        {
+            if (sector_idx >= op.sectors_.size()) {
+                throw std::out_of_range(
+                    "StreamingSymmetryOperator::SectorView: sector_idx out of range");
+            }
+            dim_ = op.sectors_[sector_idx].basis_states.size();
+        }
+
+        void apply(const ed::matvec::Complex* in,
+                   ed::matvec::Complex* out,
+                   std::size_t size) const override
+        {
+            check_size(size);
+            op_->applySymmetrized(sector_idx_, in, out);
+        }
+
+        [[nodiscard]] std::size_t dim() const override { return dim_; }
+        [[nodiscard]] ed::matvec::MemorySpace memory_space() const override {
+            return ed::matvec::MemorySpace::Host;
+        }
+        [[nodiscard]] bool is_hermitian() const override { return true; }
+        [[nodiscard]] std::string description() const override {
+            return "StreamingSymmetrySectorView(sector="
+                + std::to_string(sector_idx_) + ", dim="
+                + std::to_string(dim_) + ")";
+        }
+
+        [[nodiscard]] std::size_t sector_index() const noexcept { return sector_idx_; }
+
+    private:
+        const StreamingSymmetryOperator* op_;
+        std::size_t                      sector_idx_;
+        std::size_t                      dim_;
+    };
+
+    /// Number of symmetry sectors after generateSymmetrySectorsStreaming().
+    [[nodiscard]] std::size_t num_sectors() const noexcept {
+        return sectors_.size();
+    }
+
+    /// MatVecOperator view of a single symmetry sector.
+    [[nodiscard]] std::unique_ptr<SectorView> sector(std::size_t sector_idx) const {
+        return std::make_unique<SectorView>(*this, sector_idx);
+    }
+
     /**
      * @brief Get sector information
      */
@@ -1854,7 +1926,64 @@ public:
         applySymmetrizedFixedSz(sector_idx, vec.data(), result.data());
         return result;
     }
-    
+
+    // -----------------------------------------------------------------
+    // Matvec-unification Phase 2: per-sector MatVecOperator view.
+    // Symmetric to StreamingSymmetryOperator::SectorView (see the long
+    // comment there); the only difference is that this view forwards to
+    // applySymmetrizedFixedSz instead of applySymmetrized.
+    // -----------------------------------------------------------------
+    class SectorView final : public ed::matvec::MatVecOperator {
+    public:
+        SectorView(const FixedSzStreamingSymmetryOperator& op,
+                   std::size_t sector_idx)
+            : op_(&op), sector_idx_(sector_idx)
+        {
+            if (sector_idx >= op.sectors_.size()) {
+                throw std::out_of_range(
+                    "FixedSzStreamingSymmetryOperator::SectorView: "
+                    "sector_idx out of range");
+            }
+            dim_ = op.sectors_[sector_idx].basis_states.size();
+        }
+
+        void apply(const ed::matvec::Complex* in,
+                   ed::matvec::Complex* out,
+                   std::size_t size) const override
+        {
+            check_size(size);
+            op_->applySymmetrizedFixedSz(sector_idx_, in, out);
+        }
+
+        [[nodiscard]] std::size_t dim() const override { return dim_; }
+        [[nodiscard]] ed::matvec::MemorySpace memory_space() const override {
+            return ed::matvec::MemorySpace::Host;
+        }
+        [[nodiscard]] bool is_hermitian() const override { return true; }
+        [[nodiscard]] std::string description() const override {
+            return "FixedSzStreamingSymmetrySectorView(sector="
+                + std::to_string(sector_idx_) + ", dim="
+                + std::to_string(dim_) + ")";
+        }
+
+        [[nodiscard]] std::size_t sector_index() const noexcept { return sector_idx_; }
+
+    private:
+        const FixedSzStreamingSymmetryOperator* op_;
+        std::size_t                             sector_idx_;
+        std::size_t                             dim_;
+    };
+
+    /// Number of symmetry sectors after generation.
+    [[nodiscard]] std::size_t num_sectors() const noexcept {
+        return sectors_.size();
+    }
+
+    /// MatVecOperator view of a single symmetry sector.
+    [[nodiscard]] std::unique_ptr<SectorView> sector(std::size_t sector_idx) const {
+        return std::make_unique<SectorView>(*this, sector_idx);
+    }
+
     const SymmetrySector& getSector(size_t sector_idx) const {
         return sectors_[sector_idx];
     }
