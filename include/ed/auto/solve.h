@@ -459,17 +459,12 @@ inline EDResults solve(Operator& H, const AutoSolveOptions& options) {
             params, sector_dim, options.num_eigenvalues, op_to_use, ov);
     }
 
-    auto apply = [op_to_use, projected_ptr = projected.get()](
-                     const Complex* in, Complex* out, int n) {
-        // Operator::apply() is non-virtual, so we MUST dispatch on the
-        // statically-known concrete type to keep the FixedSzOperator
-        // override from being sliced into the base-Operator path (which
-        // would silently run on the full 2^N Hilbert space).
-        if (projected_ptr != nullptr) {
-            projected_ptr->apply(in, out, static_cast<size_t>(n));
-        } else {
-            op_to_use->apply(in, out, static_cast<size_t>(n));
-        }
+    // Phase 2 of matvec-unification: Operator::apply is now virtual, so
+    // `op_to_use->apply(...)` dispatches correctly to FixedSzOperator's
+    // override when projected. The legacy manual branch has been
+    // removed.
+    auto apply = [op_to_use](const Complex* in, Complex* out, int n) {
+        op_to_use->apply(in, out, static_cast<size_t>(n));
     };
     return exact_diagonalization_core(apply, sector_dim, method, params);
 }

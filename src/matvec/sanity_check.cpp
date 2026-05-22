@@ -22,12 +22,16 @@ namespace ed::matvec::detail {
 // and every template instantiation we care about for Phase 1 to fire.
 [[maybe_unused]] inline void compile_check(const Operator& op,
                                            const FixedSzOperator& fz_op) {
-    // Adapter construction.
-    auto a1 = adapt(op);
-    auto a2 = adapt(fz_op);
-    (void)a1->dim();
-    (void)a2->dim();
-    (void)a1->memory_space();
+    // Phase 2: Operator IS a MatVecOperator now --- no adapter needed.
+    const ed::matvec::MatVecOperator& mv1 = op;
+    const ed::matvec::MatVecOperator& mv2 = fz_op;
+    (void)mv1.dim();
+    (void)mv2.dim();
+    (void)mv1.memory_space();
+    (void)mv2.description();
+    // OperatorRef shim still exists for unique_ptr handoff scenarios.
+    auto owned = adapt(op);
+    (void)owned->dim();
     (void)default_cpu_backend().memory_space();
 
     // Force one instantiation of the unified term kernel against each

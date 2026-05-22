@@ -2,22 +2,22 @@
 // =============================================================================
 // include/ed/matvec/operator_adapter.h
 //
-// Adapters wrapping the legacy `Operator` / `FixedSzOperator` classes
-// as `MatVecOperator` instances. They keep the term storage and
-// matvec implementations on the legacy class for now --- the unified
-// term kernel (term_kernels.h) takes over in Phase 3 of the revamp
-// once we have validated that the new boundary plumbs correctly.
+// Phase 2 of the matvec-unification revamp: this header used to wrap the
+// legacy `Operator` / `FixedSzOperator` classes in adapter shims so they
+// could be consumed through the `MatVecOperator` interface. After Phase 2
+// `Operator` itself derives from `MatVecOperator` and overrides `apply()`
+// / `dim()` / `memory_space()` / `is_hermitian()` / `description()` ---
+// so the adapters no longer add anything.
 //
-// These adapters are non-owning: they hold a reference to a long-lived
-// Operator instance. The adapter is meant to be constructed cheaply at
-// the dispatch boundary and handed straight to a solver. Construction is
-// always on the host side and the matvec runs on the host.
-//
-// Phase 1 of the matvec-unification revamp.
+// We keep the `adapt(...)` free function as a thin convenience wrapper
+// that returns a unique_ptr<MatVecOperator> --- useful when a caller
+// wants to own the operator polymorphically but doesn't have the
+// concrete type at hand. Concrete `Operator&` / `FixedSzOperator&`
+// callers should just pass the reference straight to solvers; there is
+// no longer any reason to box it.
 // =============================================================================
 
-#include <cstddef>
-#include <string>
+#include <memory>
 
 #include <ed/core/fixed_sz_operator.h>
 #include <ed/core/operator.h>
@@ -25,87 +25,38 @@
 
 namespace ed::matvec {
 
-// ----------------------------------------------------------------------------
-// Adapter for the full Hilbert space Operator.
-// ----------------------------------------------------------------------------
-class OperatorAdapter final : public MatVecOperator {
+// Non-owning adoption: wrap an externally-owned Operator as a
+// MatVecOperator without copying. Mostly redundant now that Operator IS
+// a MatVecOperator, but useful when a caller wants a unique_ptr to
+// hand off to a function expecting one (e.g. a factory return value).
+class OperatorRef final : public MatVecOperator {
 public:
-    explicit OperatorAdapter(const Operator& op) noexcept
-        : op_(&op) {}
+    explicit OperatorRef(const Operator& op) noexcept : op_(&op) {}
 
     void apply(const Complex* in, Complex* out, std::size_t size) const override {
-        check_size(size);
         op_->apply(in, out, size);
     }
-    [[nodiscard]] std::size_t dim() const override {
-        return static_cast<std::size_t>(1ULL << op_->getNumBits());
-    }
+    [[nodiscard]] std::size_t dim() const override { return op_->dim(); }
     [[nodiscard]] MemorySpace memory_space() const override {
-        return MemorySpace::Host;
+        return op_->memory_space();
     }
     [[nodiscard]] bool is_hermitian() const override {
-        return true;
+        return op_->is_hermitian();
     }
     [[nodiscard]] std::string description() const override {
-        return "OperatorAdapter(full, n_bits="
-            + std::to_string(op_->getNumBits()) + ")";
+        return "OperatorRef(" + op_->description() + ")";
     }
-    [[nodiscard]] const Operator& underlying() const noexcept { return *op_; }
 
 private:
     const Operator* op_;
 };
 
-// ----------------------------------------------------------------------------
-// Adapter for the fixed-Sz projected Operator.
-// ----------------------------------------------------------------------------
-class FixedSzOperatorAdapter final : public MatVecOperator {
-public:
-    explicit FixedSzOperatorAdapter(const FixedSzOperator& op) noexcept
-        : op_(&op) {}
-
-    void apply(const Complex* in, Complex* out, std::size_t size) const override {
-        check_size(size);
-        op_->apply(in, out, size);
-    }
-    [[nodiscard]] std::size_t dim() const override {
-        return static_cast<std::size_t>(op_->getFixedSzDim());
-    }
-    [[nodiscard]] MemorySpace memory_space() const override {
-        return MemorySpace::Host;
-    }
-    [[nodiscard]] bool is_hermitian() const override {
-        return true;
-    }
-    [[nodiscard]] std::string description() const override {
-        return "FixedSzOperatorAdapter(n_bits="
-            + std::to_string(op_->getNumBits())
-            + ", dim=" + std::to_string(op_->getFixedSzDim()) + ")";
-    }
-    [[nodiscard]] const FixedSzOperator& underlying() const noexcept { return *op_; }
-
-private:
-    const FixedSzOperator* op_;
-};
-
-// ----------------------------------------------------------------------------
-// Factory: build the right adapter for an Operator / FixedSzOperator.
-//
-// Operator is intentionally non-polymorphic (the legacy design pre-dates
-// this revamp), so we cannot use dynamic_cast to discriminate. We instead
-// rely on function overloading: callers with a FixedSzOperator& pick up
-// the more-specific overload; callers with an Operator& get the full-
-// space adapter. This is the same trick auto_pilot::solve uses today and
-// makes the call site type-safe at compile time. Phase 2 of the revamp
-// makes Operator polymorphic and replaces this with a virtual factory.
-// ----------------------------------------------------------------------------
 [[nodiscard]] inline std::unique_ptr<MatVecOperator>
 adapt(const Operator& op) {
-    return std::make_unique<OperatorAdapter>(op);
+    return std::make_unique<OperatorRef>(op);
 }
-[[nodiscard]] inline std::unique_ptr<MatVecOperator>
-adapt(const FixedSzOperator& op) {
-    return std::make_unique<FixedSzOperatorAdapter>(op);
-}
+// FixedSzOperator IS-A Operator, so the same overload picks it up
+// correctly --- the virtual `apply()` / `dim()` will dispatch through
+// the vtable. No special overload needed any more.
 
 } // namespace ed::matvec

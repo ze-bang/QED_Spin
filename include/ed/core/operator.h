@@ -42,12 +42,21 @@
 #include <ed/core/basis_utils.h>
 #include <ed/core/symmetry_metadata.h>
 #include <ed/matvec/basis_policy.h>
+#include <ed/matvec/matvec.h>
 #include <ed/matvec/term_kernels.h>
 #include <nlohmann/json.hpp>
 
 using Complex = std::complex<double>;
 
-class Operator {
+// Operator now implements the matvec-unification boundary
+// (ed::matvec::MatVecOperator). This makes apply(), dim(),
+// memory_space() and is_hermitian() virtual, which lets solvers and
+// dispatchers consume Operator / FixedSzOperator / future symmetry-
+// adapted operators through one interface --- no more dispatching by
+// inspecting concrete pointer types or by wrapping apply() inside a
+// std::function. The virtual destructor also fixes the latent slicing
+// hazard that auto_pilot::solve previously worked around manually.
+class Operator : public ed::matvec::MatVecOperator {
 public:
     // Optimized transform representation (Structure-of-Arrays)
     struct TransformData {
@@ -160,6 +169,29 @@ public:
     uint64_t getNumBits() const { return n_bits_; }
     float getSpin() const { return spin_l_; }
     const std::vector<TransformData>& getTransformData() const { return transform_data_; }
+
+    // -------------------------------------------------------------------
+    // MatVecOperator interface (matvec-unification revamp, Phase 2).
+    // apply() is overridden above near the top of the public block;
+    // dim() / memory_space() / is_hermitian() / description() are
+    // declared here to keep the polymorphic surface in one place.
+    // -------------------------------------------------------------------
+    [[nodiscard]] std::size_t dim() const override {
+        return static_cast<std::size_t>(1ULL << n_bits_);
+    }
+    [[nodiscard]] ed::matvec::MemorySpace memory_space() const override {
+        return ed::matvec::MemorySpace::Host;
+    }
+    [[nodiscard]] bool is_hermitian() const override {
+        // We do not currently track non-Hermitian operators; every
+        // path that constructs an Operator (Heisenberg / BFG / etc.)
+        // emits its terms in Hermitian-symmetric pairs. Override on
+        // future asymmetric subclasses if that changes.
+        return true;
+    }
+    [[nodiscard]] std::string description() const override {
+        return "Operator(n_bits=" + std::to_string(n_bits_) + ")";
+    }
     
     // Constructor
     Operator(uint64_t n_bits, float spin_l) : n_bits_(n_bits), spin_l_(spin_l), matrixBuilt_(false) {
@@ -254,7 +286,7 @@ public:
      * Memory: 2 × 2GB for N=27 (vs 128 GB with thread-local buffers)
      * Performance: ~500x faster than std::function version for N≥27
      */
-    void apply(const Complex* in, Complex* out, size_t size) const {
+    void apply(const Complex* in, Complex* out, std::size_t size) const override {
         uint64_t dim = 1ULL << n_bits_;
         if (size != static_cast<size_t>(dim)) {
             throw std::invalid_argument("Input/output vector size mismatch");

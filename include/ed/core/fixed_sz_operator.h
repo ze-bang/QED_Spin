@@ -104,6 +104,23 @@ public:
     // build a non-owning view without forcing a copy. Added as part of
     // Phase 1 of the matvec-unification revamp.
     const LinIndexTable& lin_index_table() const noexcept { return lin_index_; }
+
+    // -------------------------------------------------------------------
+    // MatVecOperator interface (Phase 2 of matvec-unification revamp).
+    // We override dim() and description() so that solvers receiving an
+    // `Operator&` see the projected sector dim (NOT the full 2^N) and
+    // get a useful diagnostic string. The other base-class overrides
+    // (memory_space, is_hermitian, apply) come from Operator and apply
+    // is overridden above to use the fixed-Sz basis policy.
+    // -------------------------------------------------------------------
+    [[nodiscard]] std::size_t dim() const override {
+        return static_cast<std::size_t>(fixed_sz_dim_);
+    }
+    [[nodiscard]] std::string description() const override {
+        return "FixedSzOperator(n_bits=" + std::to_string(getNumBits())
+            + ", n_up=" + std::to_string(n_up_)
+            + ", dim=" + std::to_string(fixed_sz_dim_) + ")";
+    }
     
     /**
      * @brief Read a symmetrized basis vector from file (fixed-Sz sector)
@@ -263,7 +280,7 @@ public:
      * Memory: O(fixed_sz_dim) instead of O(fixed_sz_dim × num_threads)
      * Performance: Additional 2-3x speedup over v1 for large systems
      */
-    void apply(const Complex* in, Complex* out, size_t size) const {
+    void apply(const Complex* in, Complex* out, std::size_t size) const override {
         if (size != static_cast<size_t>(fixed_sz_dim_)) {
             throw std::invalid_argument("Input/output vector size mismatch with fixed Sz dimension");
         }
