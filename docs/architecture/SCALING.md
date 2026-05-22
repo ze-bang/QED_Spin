@@ -75,10 +75,10 @@ needs `m` of them; full re-orth needs all `m` simultaneously addressable
   * `ED_LANCZOS_DISK=1` so the Krylov basis spills to a directory under the
     lanczos working dir (the basis doesn't have to fit in RAM, only two
     active vectors and one accumulator do — ~12 GB working set).
-  * Disk-streaming sector construction
-    (`run_disk_streaming_workflow` / `run_chunked_symmetry_workflow` in
-    `src/cli/workflows.cpp`) so the symmetry-projected basis is not built
-    in RAM all at once.
+  * **Distributed/MPI build** (`ed_distributed_main`) for symmetry-projected
+    bases that don't fit in single-node RAM. The chunked/disk-streaming
+    single-node fallbacks were retired in matvec-unification Phase 7.2;
+    the MPI path is faster and works on any cluster.
   * Selective re-orth (the default after Batch 1) — full re-orth at m=200
     against 250 M-state vectors costs 8 TFLOPs per sweep just for the
     re-orth pass.
@@ -166,9 +166,14 @@ precision.
 * **Memory**: 3 × 10⁷ × 16 B = 480 MB per vector. m=200 in-memory basis is
   96 GB — fits on a fat node (`ED_LANCZOS_DISK=0`). On a 64 GB workstation,
   set `ED_LANCZOS_DISK=1` and let the basis spill.
-* **Symmetry construction**: use `run_chunked_symmetry_workflow` if memory
-  is tight, or `run_disk_streaming_workflow` if you want zero in-RAM
-  intermediate basis at all.
+* **Symmetry construction**: if the symmetry-projected basis does not fit
+  in single-node RAM, switch to the distributed/MPI build
+  (`ed_distributed_main`, exercised by the `phase3b` / `mpi` test labels).
+  The Phase 7.2 cleanup retired the chunked / disk-streaming single-node
+  fallbacks (`run_chunked_symmetry_workflow`,
+  `run_disk_streaming_workflow`); the MPI path is faster, works on
+  arbitrary cluster sizes, and is matvec-unification first-class
+  (`DistributedHost` memory space tag on `DistributedOperator`).
 * **Wallclock**: hours, not days. GPU path (`LANCZOS_GPU` with
   `BLOCK_LANCZOS_GPU` for nev=5) is 3–10× faster.
 * **Honesty**: this is well-trodden territory. Multiple groups have

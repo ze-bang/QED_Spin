@@ -820,18 +820,32 @@ The same module manages an HDF5 **basis cache** under `basis_cache_dir`
 freely; writes only happen in `--precompute-basis-only` mode (avoiding
 clobbering shared caches).
 
-### 7.4 Chunked and disk-based variants
+### 7.4 Chunked and disk-based variants — **RETIRED in Phase 7.2**
 
-- `include/ed/core/chunked_symmetry_builder.h` — two-pass orbit
-  enumeration that walks Hilbert in chunks, persists per-sector data
-  under `…/sector_cache_chunked/`, and supports a fixed-`S^z` variant
-  and a fully disk-based variant `DiskBasedChunkedSymmetryBuilder` that
-  k-way merges sorted rep chunks before sector assignment.
-- `include/ed/core/disk_streaming_symmetry.h` — `DiskStreamingSymmetryOperator`
-  serialises one sector at a time as binary files (sector header, QN,
-  phase factors, then `SymBasisState` records). The matvec keeps a
-  reverse lookup map for the loaded sector only. The wrapper
-  `exact_diagonalization_disk_streaming` is **CPU-only**.
+The single-node "ultra-low-memory" symmetry pipelines were removed in
+matvec-unification Phase 7.2:
+
+- ~~`include/ed/core/chunked_symmetry_builder.h`~~ — two-pass orbit
+  enumeration walking Hilbert in chunks, persisting per-sector data
+  under `…/sector_cache_chunked/`, with a fixed-`S^z` variant and a
+  disk-based `DiskBasedChunkedSymmetryBuilder` doing k-way merges of
+  sorted rep chunks before sector assignment.
+- ~~`include/ed/core/disk_streaming_symmetry.h`~~ —
+  `DiskStreamingSymmetryOperator` serialising one sector at a time as
+  binary files (sector header, QN, phase factors, then `SymBasisState`
+  records). The matvec kept a reverse lookup map for the loaded sector
+  only. The wrapper `exact_diagonalization_disk_streaming` was
+  **CPU-only**.
+
+For Hilbert spaces too large for the streaming-symmetry path
+(`streaming_symmetry.h`) to fit in single-node RAM, use the
+distributed/MPI build (`ed_distributed_main`,
+`include/ed/distributed/`). It is faster on a cluster, parallel by
+construction, and exposes the same `MatVecOperator` interface
+(`DistributedOperator` / `DistributedSymmetryOperator`) so solvers and
+DSSF treat it transparently. The disk fallback was a single-node
+last-resort and no longer pulls its weight given the MPI path's
+maturity.
 
 ### 7.5 Symmetry-sector I/O — `hdf5_symmetry_io.h`
 
@@ -1278,8 +1292,10 @@ to `output_dir/ed_config.txt`, `ED` runs whichever workflows are flagged:
 if (config.workflow.precompute_basis_only) run_streaming_symmetry_workflow(config);
 if (config.workflow.run_symm_auto && !skip_ed) sym_results = run_streaming_symmetry_workflow(config);
 if (config.workflow.run_standard && !skip_ed) standard_results = run_standard_workflow(config);
-if (config.workflow.run_disk_streaming && !skip_ed) ... run_disk_streaming_workflow(config);
-if (config.workflow.run_chunked_symmetry && !skip_ed) ... run_chunked_symmetry_workflow(config);
+// run_disk_streaming_workflow / run_chunked_symmetry_workflow were retired in
+// matvec-unification Phase 7.2 (single-node fallbacks superseded by the MPI
+// build); --disk-streaming / --chunked-symm CLI flags print a one-line
+// deprecation notice and are ignored.
 if (config.workflow.compute_dynamical_response) dispatch_dssf(DYNAMICAL_THERMAL);
 if (config.workflow.compute_static_response)    dispatch_dssf(STATIC_THERMAL);
 if (config.workflow.compute_ground_state_dssf)  dispatch_dssf(GROUND_STATE_DSSF);

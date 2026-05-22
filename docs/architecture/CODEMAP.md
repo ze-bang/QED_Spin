@@ -105,15 +105,9 @@ flowchart TD
   J -->|yes| K[run_streaming_symmetry_workflow]
   I --> L{run_standard && not skip?}
   L -->|yes| M[run_standard_workflow]
-  I --> N{run_disk_streaming?}
-  N --> O[run_disk_streaming_workflow]
-  I --> P{run_chunked_symmetry?}
-  P --> Q[run_chunked_symmetry_workflow]
 
   K --> R[compute_thermodynamics if flags]
   M --> R
-  O --> R
-  Q --> R
 
   I --> S{response flags?}
   S --> T[ed::dssf::run DYNAMICAL_THERMAL]
@@ -124,19 +118,24 @@ flowchart TD
   V --> Z
 ```
 
-*Figure: Main-line `ED` (not the `dssf` subcommand). Multiple **basis**
-workflows can be toggled in one config; the most confusing case is
-`run_standard` **and** `run_symm_auto` both true — **both** runs execute and
-eigenvalues are **compared** (see `ed_main.cpp`).*
+*Figure: Main-line `ED` (not the `dssf` subcommand). The `--disk-streaming`
+and `--chunked-symm` workflows were retired in matvec-unification Phase 7.2;
+the streaming-symmetry path scales to every case they used to cover, and the
+distributed/MPI build is the canonical answer for Hilbert spaces too large
+for in-RAM streaming. Multiple workflows can still be toggled in one config;
+the most confusing case is `run_standard` **and** `run_symm_auto` both true
+— **both** runs execute and eigenvalues are **compared** (see `ed_main.cpp`).*
 
-**Where solvers actually run:** `run_*_workflow` calls into
-`exact_diagonalization_from_directory` / streaming / disk / chunked variants in
-`ed_wrapper.h` + `ed_wrapper_streaming.h` + `ed_wrapper_chunked.h` +
-`disk_streaming_symmetry.h`, which **switch** on `EDConfig::method`
-(`DiagonalizationMethod` in [`ed_types.h`](../../include/ed/core/ed_types.h))
-and call `exact_diagonalization_core` (CPU) or GPU routes in
-`gpu_ed_wrapper.cu` / `exact_diagonalization_from_files` when
-`--method=*_GPU` etc.
+**Where solvers actually run:** `run_*_workflow` calls into the single
+canonical entry `ed::exact_diagonalization(...)` in
+[`dispatch.h`](../../include/ed/core/dispatch.h) (matvec-unification Phase 6),
+which switches on the orthogonal `EDParameters` axes (`use_symmetry`,
+`use_fixed_sz`, `use_gpu`, `use_mpi`) and forwards to the per-kernel
+implementations in `ed_wrapper.h` (full-Hilbert / fixed-Sz / GPU /
+ScaLAPACK) and `ed_wrapper_streaming.h` (streaming symmetry). The choice
+of `DiagonalizationMethod` (the per-algorithm enum, in
+[`ed_types.h`](../../include/ed/core/ed_types.h)) is orthogonal and resolved
+inside `exact_diagonalization_core`.
 
 ---
 
@@ -194,13 +193,27 @@ Below is **every** `.h` / `.hpp` / `.cuh` / `.cpp` / `.cu` file under
 
 ### 5.3 `include/ed/core/`
 
-- `blas_lapack_wrapper.h`, `chunked_symmetry_builder.h`, `construct_ham.h`
-  (very large: `Operator`, Hamiltonian I/O, much symmetry wiring),
-- `disk_streaming_symmetry.h`, `ed_config.h`, `ed_config_adapter.h`,
-  `ed_logging.h`, `ed_method_traits.h`, `ed_parameters.h`, `ed_types.h`,
-- `ed_wrapper.h`, `ed_wrapper_chunked.h`, `ed_wrapper_streaming.h`,
+- `blas_lapack_wrapper.h`, `construct_ham.h` (very large: `Operator`,
+  Hamiltonian I/O, much symmetry wiring; `Operator` and `FixedSzOperator`
+  now inherit from `ed::matvec::MatVecOperator` -- Phase 2 of matvec-
+  unification),
+- `dispatch.h` (matvec-unification Phase 6: the single canonical
+  `ed::exact_diagonalization()` entry; supersedes the legacy
+  `ed_dispatch_symmetry.h` -- now a 50-line forwarder shim),
+- `ed_config.h`, `ed_config_adapter.h`, `ed_logging.h`,
+  `ed_method_traits.h`, `ed_parameters.h`, `ed_types.h`,
+- `ed_wrapper.h`, `ed_wrapper_streaming.h` (internal implementation
+  headers behind `dispatch.h`),
 - `hdf5_io.h`, `hdf5_symmetry_io.h`, `sorted_uint64_index.h`,
-- `streaming_symmetry.h`, `system_utils.h`, `thermal_types.h`
+- `streaming_symmetry.h` (now also exposes `SectorView` per-sector
+  `MatVecOperator` wrappers -- Phase 2),
+- `system_utils.h`, `thermal_types.h`
+
+The chunked-symmetry / disk-streaming triplet
+(`chunked_symmetry_builder.h`, `disk_streaming_symmetry.h`,
+`ed_wrapper_chunked.h`) was deleted in matvec-unification Phase 7.2
+(~2.4 kLOC of ultra-low-memory single-node CPU specialisations; the
+distributed/MPI path is the canonical answer at those scales).
 
 ### 5.4 `include/ed/distributed/`
 
@@ -346,18 +359,29 @@ Below is **every** `.h` / `.hpp` / `.cuh` / `.cpp` / `.cu` file under
 
 ### 7.1 Intentional (design, not sloppiness)
 
-- **Multiple symmetry front-ends** (`ed_wrapper_streaming.h`,
-  `ed_wrapper_chunked.h`, `disk_streaming_symmetry.h`): four memory/latency
-  tradeoffs for the *same* physics; code overlap is high but **not** bit-identical
-  (I/O and basis iteration differ).
+- **Symmetry front-end** is now a single header
+  (`ed_wrapper_streaming.h`, accessed via `ed::exact_diagonalization`
+  in `dispatch.h`). The chunked / disk-streaming variants
+  (`ed_wrapper_chunked.h`, `chunked_symmetry_builder.h`,
+  `disk_streaming_symmetry.h`) were retired in matvec-unification
+  Phase 7.2 -- the distributed/MPI build covers the very-large-Hilbert
+  case the chunked path was built for.
 - **CPU + GPU solvers** (`lanczos.cpp` vs `gpu_lanczos.cu`, `TPQ.cpp` vs
   `gpu_tpq.cu`, …): separate implementations bound by regression tests
-  (`test_cpu_gpu_equivalence.cpp`).
+  (`test_cpu_gpu_equivalence.cpp`). Both paths plug into the unified
+  `ed::matvec::MatVecOperator` interface -- the Hamiltonian wrappers
+  (`Operator`, `GPUOperator`, etc.) advertise their memory space tag
+  so solvers can dispatch on it.
 - **DSSF** kernel overlap between `workflows.cpp` response helpers and
   `dssf_engine.cpp` was **unified** under `ed::dssf::run` (P2.x); remaining
   overlap should be only thin wrappers.
 - **Deprecated ARpack-style aliases** in `ed_types.h` (`LANCZOS_GPU_FIXED_SZ` …):
-  kept for ABI / CLI compatibility.
+  kept for Python-binding ABI / CLI compatibility. They are zero-cost
+  compile-time aliases that route to
+  `{method=X, use_gpu=true, use_fixed_sz=true}` via
+  `canonicalize_method_and_flags`; removing them requires a Python
+  binding deprecation window which the matvec-unification audit's
+  "aggressive cleanup" budget doesn't justify.
 
 ### 7.2 Worth knowing (possible future consolidation)
 
