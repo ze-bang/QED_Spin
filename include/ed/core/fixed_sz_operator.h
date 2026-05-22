@@ -96,6 +96,12 @@ public:
     
     // Get basis states
     const std::vector<uint64_t>& getBasisStates() const { return basis_states_; }
+
+    // Get the Lin (1990) two-table state -> index lookup. Public so the
+    // matvec-unification layer (ed::matvec::basis::FixedSzBasisPolicy) can
+    // build a non-owning view without forcing a copy. Added as part of
+    // Phase 1 of the matvec-unification revamp.
+    const LinIndexTable& lin_index_table() const noexcept { return lin_index_; }
     
     /**
      * @brief Read a symmetrized basis vector from file (fixed-Sz sector)

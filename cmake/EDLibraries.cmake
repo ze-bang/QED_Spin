@@ -71,6 +71,7 @@ set(_ED_PUBLIC_INCLUDES
     "$<BUILD_INTERFACE:${INCLUDE_DIR}/ed/symmetry>"
     "$<BUILD_INTERFACE:${INCLUDE_DIR}/ed/parallel>"
     "$<BUILD_INTERFACE:${INCLUDE_DIR}/ed/distributed>"
+    "$<BUILD_INTERFACE:${INCLUDE_DIR}/ed/matvec>"  # Matvec-unification revamp
     "$<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>"
 )
 
@@ -150,6 +151,41 @@ target_compile_options(ed_core PRIVATE
 set_target_properties(ed_core PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
 # -----------------------------------------------------------------------------
+# ed_matvec: unified matrix-vector multiplication layer (Phase 1 of the
+# matvec-unification revamp). Provides:
+#
+#   * MatVecOperator       polymorphic base for any operator that acts on
+#                          a vector (any backend, any basis, MPI or not)
+#   * Backend              host/cuda/mpi backends for the surrounding
+#                          level-1 BLAS (axpy/dot/norm/scale)
+#   * basis::*Policy       compile-time basis descriptions used by the
+#                          shared term kernel
+#   * kernel::apply_terms  the *single* matrix-free term-evaluation
+#                          implementation, parameterised on basis policy
+#                          and scalar type
+#   * OperatorAdapter /    legacy Operator / FixedSzOperator wrapped as
+#     FixedSzOperatorAdapter MatVecOperator instances (Phase 2 collapses
+#                          these so the Operator implementations call
+#                          directly into the shared kernel)
+#
+# Layered above ed_core (which owns Operator / FixedSzOperator term
+# storage); consumed by ed_solvers_cpu (and later ed_solvers_gpu /
+# ed_distributed).
+# -----------------------------------------------------------------------------
+add_library(ed_matvec STATIC
+    ${MATVEC_DIR}/sanity_check.cpp
+)
+target_include_directories(ed_matvec PUBLIC ${_ED_PUBLIC_INCLUDES})
+target_link_libraries(ed_matvec PUBLIC ed_core ${ED_COMMON_LINK_LIBS})
+target_link_libraries(ed_matvec PUBLIC
+    "$<BUILD_INTERFACE:nlohmann_json::nlohmann_json>"
+)
+target_compile_options(ed_matvec PRIVATE
+    $<$<COMPILE_LANGUAGE:CXX>:${CPU_OPT_FLAGS}>
+)
+set_target_properties(ed_matvec PROPERTIES POSITION_INDEPENDENT_CODE ON)
+
+# -----------------------------------------------------------------------------
 # ed_solvers_cpu: CPU eigensolvers + thermal methods.
 # -----------------------------------------------------------------------------
 set(ED_SOLVERS_CPU_SOURCES
@@ -176,7 +212,7 @@ endif()
 
 add_library(ed_solvers_cpu STATIC ${ED_SOLVERS_CPU_SOURCES})
 target_include_directories(ed_solvers_cpu PUBLIC ${_ED_PUBLIC_INCLUDES})
-target_link_libraries(ed_solvers_cpu PUBLIC ed_core ed_io ed_parallel ${ED_COMMON_LINK_LIBS})
+target_link_libraries(ed_solvers_cpu PUBLIC ed_matvec ed_core ed_io ed_parallel ${ED_COMMON_LINK_LIBS})
 target_link_libraries(ed_solvers_cpu PUBLIC
     "$<BUILD_INTERFACE:nlohmann_json::nlohmann_json>"
 )

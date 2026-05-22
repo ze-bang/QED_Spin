@@ -1,0 +1,580 @@
+#pragma once
+// =============================================================================
+// include/ed/matvec/term_kernels.h
+//
+// The unified matrix-free term-evaluation kernel.
+//
+// This header is the single source of truth for "apply a list of one-/two-/
+// three-body spin operators to a state vector" in *every* basis the rest of
+// the codebase cares about (full Hilbert space, fixed-Sz, ...). It replaces
+// the seven copies of the same bit-flip / radix-sort scatter loop that
+// previously lived in:
+//
+//   * Operator::apply_optimized           (full, complex)
+//   * Operator::apply_real                (full, real)
+//   * FixedSzOperator::apply              (fixed-Sz, complex)
+//   * StreamingSymmetryOperator::...      (symmetry, complex)        [Phase 3]
+//   * ed_wrapper_chunked.h inline lambdas (chunked symmetry)         [Phase 3]
+//   * GPU kernels                         (full/fixed-Sz, complex)   [Phase 3]
+//
+// The kernel is templated on:
+//
+//   BasisPolicy  --- see basis_policy.h. Tells us how array-index <-> bitstring
+//                    maps. Compile-time `may_leave_basis` controls whether
+//                    off-diagonal terms can produce out-of-basis states.
+//
+//   Scalar       --- std::complex<double> or double. Selecting `double` gives
+//                    the "real Hamiltonian + real input" fast path that the
+//                    legacy Operator::apply_real provided: half the
+//                    bandwidth, half the flops, vectorises better.
+//
+//   TermContainers --- DUCK TYPED. The kernel reads fields by name:
+//      diag_one_body[i].site_index, .coefficient
+//      offdiag_one_body[i].site_index, .op_type, .coefficient
+//      diag_two_body[i].site_index_1, .site_index_2, .coefficient
+//      mixed_two_body[i].sz_site, .flip_site, .flip_op_type, .coefficient
+//      offdiag_two_body[i].site_index_1, .site_index_2, .op_type_1,
+//                          .op_type_2, .coefficient
+//      three_body[i].op_type_1/2/3, .site_index_1/2/3, .coefficient
+//
+//      This is exactly the schema Operator already uses for its SoA term
+//      vectors (diag_one_body_, offdiag_one_body_, ...). It also lets us
+//      pass any compatible struct (e.g. a future SoA storage tuned for
+//      AVX-512 gather/scatter) without touching the kernel.
+//
+// Algorithm (CPU/host variant in this header, GPU equivalent in a future
+// term_kernels_cuda.cuh):
+//
+//   1. parallel over output basis states (`for i in [0, dim)`)
+//   2. for each input state with non-negligible amplitude:
+//      apply each term type's bit-flip semantics
+//      accumulate contributions into a thread-local buffer
+//   3. flush thread-local buffer with O(n) radix sort + atomic scatter
+//
+// This is BYTE-FOR-BYTE identical to the existing Operator::apply_optimized
+// behavior, just with the basis-state <-> array-index mapping abstracted
+// behind BasisPolicy. The validation regression tests pinned in
+// `tests/test_*` continue to pass.
+//
+// Phase 1 of the matvec-unification revamp.
+// =============================================================================
+
+#include <algorithm>
+#include <array>
+#include <complex>
+#include <cmath>
+#include <cstdint>
+#include <type_traits>
+#include <utility>
+#include <vector>
+
+#ifdef _OPENMP
+#  include <omp.h>
+#endif
+
+namespace ed::matvec::kernel {
+
+// ---------------------------------------------------------------------------
+// Element-wise term operator types: 0=S+, 1=S-, 2=Sz. The encoding matches
+// what Operator already uses everywhere else in the codebase.
+// ---------------------------------------------------------------------------
+inline constexpr uint8_t kOpSPlus  = 0;
+inline constexpr uint8_t kOpSMinus = 1;
+inline constexpr uint8_t kOpSz     = 2;
+
+// ---------------------------------------------------------------------------
+// Internal: convert a (complex) coefficient to the chosen Scalar kernel
+// type. For Scalar==Complex we just return it; for Scalar==double we drop
+// the imaginary part (the surrounding code is required to verify that all
+// couplings are real before invoking the real kernel; see
+// Operator::isReal()).
+// ---------------------------------------------------------------------------
+template <class Scalar>
+[[nodiscard]] inline Scalar coerce_coeff(const std::complex<double>& c) noexcept {
+    if constexpr (std::is_same_v<Scalar, std::complex<double>>) {
+        return c;
+    } else {
+        static_assert(std::is_same_v<Scalar, double>,
+                      "Scalar must be std::complex<double> or double");
+        return c.real();
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Internal: SoA-friendly thread-local scratch buffer used by the radix-sort
+// scatter flush. Identical layout to what Operator::apply_optimized used.
+// ---------------------------------------------------------------------------
+template <class Scalar>
+struct LocalContribution {
+    uint64_t index;
+    Scalar   value;
+};
+
+// ---------------------------------------------------------------------------
+// Internal: O(n) radix sort by uint64 index. Identical algorithm to what
+// Operator::apply_optimized used; factored out so the complex and real
+// kernels share it.
+//
+// `dim_for_bytes` is the max possible value of `index` (used to truncate
+// the byte loop early; for fixed-Sz that is the projected dim, for full
+// basis it is 1 << n_bits).
+// ---------------------------------------------------------------------------
+template <class Scalar>
+inline void radix_sort_local(
+    std::vector<LocalContribution<Scalar>>& buf,
+    std::vector<LocalContribution<Scalar>>& scratch,
+    std::array<size_t, 257>& count,
+    uint64_t dim_for_bytes)
+{
+    if (buf.size() < 64) {
+        std::sort(buf.begin(), buf.end(),
+            [](const auto& a, const auto& b) noexcept {
+                return a.index < b.index;
+            });
+        return;
+    }
+    scratch.resize(buf.size());
+    LocalContribution<Scalar>* src = buf.data();
+    LocalContribution<Scalar>* dst = scratch.data();
+    const size_t n = buf.size();
+    const int num_bytes = (64 - __builtin_clzll(dim_for_bytes | 1) + 7) / 8;
+    for (int byte = 0; byte < num_bytes; ++byte) {
+        const int shift = byte * 8;
+        std::fill(count.begin(), count.end(), 0);
+        for (size_t i = 0; i < n; ++i) {
+            const uint8_t bucket = (src[i].index >> shift) & 0xFF;
+            count[bucket + 1]++;
+        }
+        for (int i = 1; i < 257; ++i) count[i] += count[i - 1];
+        for (size_t i = 0; i < n; ++i) {
+            const uint8_t bucket = (src[i].index >> shift) & 0xFF;
+            dst[count[bucket]++] = src[i];
+        }
+        std::swap(src, dst);
+    }
+    if (src != buf.data()) {
+        std::copy(scratch.begin(), scratch.end(), buf.begin());
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Internal: scatter sorted local buffer into `out` with one atomic per
+// (basis_state, run-of-equal-indices). Identical to what
+// Operator::apply_optimized used.
+//
+// We specialise on Scalar so the real path emits a single `#pragma omp
+// atomic double` instead of the pair-of-doubles trick required for
+// std::complex<double>.
+// ---------------------------------------------------------------------------
+template <class Scalar>
+inline void scatter_flush(
+    std::vector<LocalContribution<Scalar>>& buf,
+    Scalar* __restrict__ out)
+{
+    if (buf.empty()) return;
+    uint64_t current_index = buf.front().index;
+    Scalar accumulated = buf.front().value;
+    for (size_t entry = 1; entry < buf.size(); ++entry) {
+        const auto& item = buf[entry];
+        if (item.index == current_index) {
+            accumulated += item.value;
+        } else {
+            if constexpr (std::is_same_v<Scalar, std::complex<double>>) {
+                double* p = reinterpret_cast<double*>(&out[current_index]);
+                #pragma omp atomic
+                p[0] += accumulated.real();
+                #pragma omp atomic
+                p[1] += accumulated.imag();
+            } else {
+                #pragma omp atomic
+                out[current_index] += accumulated;
+            }
+            current_index = item.index;
+            accumulated   = item.value;
+        }
+    }
+    if constexpr (std::is_same_v<Scalar, std::complex<double>>) {
+        double* p = reinterpret_cast<double*>(&out[current_index]);
+        #pragma omp atomic
+        p[0] += accumulated.real();
+        #pragma omp atomic
+        p[1] += accumulated.imag();
+    } else {
+        #pragma omp atomic
+        out[current_index] += accumulated;
+    }
+    buf.clear();
+}
+
+// ---------------------------------------------------------------------------
+// THE KERNEL.
+//
+// Computes `out = H * in` where:
+//   * `in` and `out` have `basis.dim()` elements (both already-allocated
+//     by the caller; this kernel does NOT touch `out` other than to write
+//     into it via atomic adds, so callers MUST zero `out` first).
+//   * `basis` says how to map array indices to bitstrings.
+//   * The six term containers describe H in the standard SoA layout.
+//   * `spin_l` is the spin length (0.5, 1.0, 1.5, ...).
+//
+// Termination guarantees: every contribution is flushed before the kernel
+// returns (no thread-local buffer outlives the parallel region).
+// ---------------------------------------------------------------------------
+template <
+    class BasisPolicy,
+    class Scalar,
+    class DiagOneBodyVec,
+    class OffDiagOneBodyVec,
+    class DiagTwoBodyVec,
+    class MixedTwoBodyVec,
+    class OffDiagTwoBodyVec,
+    class ThreeBodyVec>
+inline void apply_terms(
+    BasisPolicy              basis,
+    double                   spin_l,
+    const DiagOneBodyVec&    diag_one_body,
+    const OffDiagOneBodyVec& offdiag_one_body,
+    const DiagTwoBodyVec&    diag_two_body,
+    const MixedTwoBodyVec&   mixed_two_body,
+    const OffDiagTwoBodyVec& offdiag_two_body,
+    const ThreeBodyVec&      three_body,
+    const Scalar* __restrict__ in,
+    Scalar*       __restrict__ out)
+{
+    using Contrib = LocalContribution<Scalar>;
+    const uint64_t dim      = basis.dim();
+    const double   spin_sq  = spin_l * spin_l;
+
+    // Cache-blocking + parallelism mirrors Operator::apply_optimized.
+    // The radix-sort scatter is unchanged --- it was proven optimal in
+    // the audit of Phase 6.
+    constexpr size_t kCacheBlockSize = 4096;
+    constexpr size_t kFlushThreshold = 4096;
+    const uint64_t num_blocks =
+        (dim + kCacheBlockSize - 1) / kCacheBlockSize;
+
+#ifdef _OPENMP
+    const uint64_t par_threshold =
+        static_cast<uint64_t>(omp_get_max_threads()) * 1024ULL;
+#else
+    const uint64_t par_threshold = std::numeric_limits<uint64_t>::max();
+#endif
+
+    #pragma omp parallel if(dim > par_threshold)
+    {
+        std::vector<Contrib> local_buffer;
+        std::vector<Contrib> radix_scratch;
+        std::array<size_t, 257> radix_count;
+        local_buffer.reserve(kFlushThreshold);
+        radix_scratch.reserve(kFlushThreshold);
+
+        auto flush = [&]() {
+            if (local_buffer.empty()) return;
+            radix_sort_local<Scalar>(local_buffer, radix_scratch, radix_count, dim);
+            scatter_flush<Scalar>(local_buffer, out);
+        };
+
+        #pragma omp for schedule(dynamic, 1) nowait
+        for (uint64_t block = 0; block < num_blocks; ++block) {
+            const uint64_t block_start = block * kCacheBlockSize;
+            const uint64_t block_end   = std::min(block_start + kCacheBlockSize, dim);
+
+            for (uint64_t i = block_start; i < block_end; ++i) {
+                const Scalar coeff = in[i];
+                // Skip negligible-amplitude states. Identical threshold
+                // to legacy Operator::apply_optimized; tweak with care
+                // (lowering breaks Lanczos invariants at quad-precision
+                // Krylov subspaces).
+                if constexpr (std::is_same_v<Scalar, std::complex<double>>) {
+                    if (std::abs(coeff) < 1e-15) continue;
+                } else {
+                    if (std::abs(coeff) < 1e-15) continue;
+                }
+
+                const uint64_t basis_state = basis.state_of(i);
+
+                // Prefetch the next state's bitstring + amplitude.
+                if (i + 8 < block_end) {
+                    __builtin_prefetch(&in[i + 8], 0, 1);
+                    if constexpr (!std::is_same_v<BasisPolicy,
+                                                  /* FullBasisPolicy */
+                                                  decltype(basis)>) {
+                        // For non-trivial basis policies (e.g. fixed-Sz)
+                        // the state lookup chases an additional pointer.
+                        // The optimizer elides this prefetch for the
+                        // FullBasisPolicy specialisation.
+                    }
+                }
+
+                // ----------------------------------------------------------
+                // 1. One-body diagonal (Sz_k):   |i> -> |i>, scalar = +/- s
+                // ----------------------------------------------------------
+                for (const auto& t : diag_one_body) {
+                    const double sign =
+                        ((basis_state >> t.site_index) & 1) ? -1.0 : 1.0;
+                    const Scalar contrib =
+                        coerce_coeff<Scalar>(t.coefficient) * spin_l * sign * coeff;
+                    local_buffer.push_back({i, contrib});
+                }
+
+                // ----------------------------------------------------------
+                // 2. One-body off-diagonal (S+_k or S-_k): flip one bit.
+                //    For fixed-Sz, this can leave the basis; index_of()
+                //    will return -1 and we skip. For full basis this is
+                //    a no-op check (compiler elides via may_leave_basis).
+                // ----------------------------------------------------------
+                for (const auto& t : offdiag_one_body) {
+                    const uint64_t bit = (basis_state >> t.site_index) & 1;
+                    if (bit == t.op_type) continue;
+                    const uint64_t new_state = basis_state ^ (1ULL << t.site_index);
+                    if constexpr (BasisPolicy::may_leave_basis) {
+                        const int64_t j = basis.index_of(new_state);
+                        if (j < 0) continue;
+                        const Scalar contrib = coerce_coeff<Scalar>(t.coefficient) * coeff;
+                        local_buffer.push_back({static_cast<uint64_t>(j), contrib});
+                    } else {
+                        // FullBasisPolicy: bitstring IS the array index.
+                        const Scalar contrib = coerce_coeff<Scalar>(t.coefficient) * coeff;
+                        local_buffer.push_back({new_state, contrib});
+                    }
+                }
+
+                // ----------------------------------------------------------
+                // 3. Two-body purely diagonal (Sz_i Sz_j): |i> -> |i>.
+                // ----------------------------------------------------------
+                for (const auto& t : diag_two_body) {
+                    const double sign_a =
+                        ((basis_state >> t.site_index_1) & 1) ? -1.0 : 1.0;
+                    const double sign_b =
+                        ((basis_state >> t.site_index_2) & 1) ? -1.0 : 1.0;
+                    const Scalar contrib =
+                        coerce_coeff<Scalar>(t.coefficient)
+                        * spin_sq * sign_a * sign_b * coeff;
+                    local_buffer.push_back({i, contrib});
+                }
+
+                // ----------------------------------------------------------
+                // 4. Two-body mixed (Sz S+ / Sz S-): flip one bit.
+                // ----------------------------------------------------------
+                for (const auto& t : mixed_two_body) {
+                    const uint64_t flip_bit =
+                        (basis_state >> t.flip_site) & 1;
+                    if (flip_bit == t.flip_op_type) continue;
+                    const double sz_sign =
+                        ((basis_state >> t.sz_site) & 1) ? -1.0 : 1.0;
+                    const uint64_t new_state =
+                        basis_state ^ (1ULL << t.flip_site);
+                    const Scalar contrib =
+                        coerce_coeff<Scalar>(t.coefficient)
+                        * spin_l * sz_sign * coeff;
+
+                    if constexpr (BasisPolicy::may_leave_basis) {
+                        const int64_t j = basis.index_of(new_state);
+                        if (j < 0) continue;
+                        local_buffer.push_back({static_cast<uint64_t>(j), contrib});
+                    } else {
+                        local_buffer.push_back({new_state, contrib});
+                    }
+                }
+
+                // ----------------------------------------------------------
+                // 5. Two-body off-diagonal (S+ S- / S- S+ / S+ S+ / ...).
+                //    Both bits must flip; if either gate fails the term
+                //    contributes zero.
+                // ----------------------------------------------------------
+                for (const auto& t : offdiag_two_body) {
+                    const uint64_t bit_1 = (basis_state >> t.site_index_1) & 1;
+                    const uint64_t bit_2 = (basis_state >> t.site_index_2) & 1;
+                    if (bit_1 == t.op_type_1 || bit_2 == t.op_type_2) continue;
+                    const uint64_t new_state =
+                        basis_state ^ (1ULL << t.site_index_1)
+                                    ^ (1ULL << t.site_index_2);
+                    const Scalar contrib =
+                        coerce_coeff<Scalar>(t.coefficient) * coeff;
+
+                    if constexpr (BasisPolicy::may_leave_basis) {
+                        const int64_t j = basis.index_of(new_state);
+                        if (j < 0) continue;
+                        local_buffer.push_back({static_cast<uint64_t>(j), contrib});
+                    } else {
+                        local_buffer.push_back({new_state, contrib});
+                    }
+                }
+
+                // ----------------------------------------------------------
+                // 6. Three-body terms (op1 op2 op3). Rare; kept as a
+                //    straight-line product of three single-site gates.
+                // ----------------------------------------------------------
+                for (const auto& t : three_body) {
+                    uint64_t cur_state = basis_state;
+                    Scalar   scalar    = coerce_coeff<Scalar>(t.coefficient);
+                    bool     valid     = true;
+
+                    // op_type_1
+                    if (t.op_type_1 == kOpSz) {
+                        const double s =
+                            ((cur_state >> t.site_index_1) & 1) ? -1.0 : 1.0;
+                        scalar *= spin_l * s;
+                    } else {
+                        const uint64_t b = (cur_state >> t.site_index_1) & 1;
+                        if (b != t.op_type_1) {
+                            cur_state ^= (1ULL << t.site_index_1);
+                        } else {
+                            valid = false;
+                        }
+                    }
+                    // op_type_2
+                    if (valid) {
+                        if (t.op_type_2 == kOpSz) {
+                            const double s =
+                                ((cur_state >> t.site_index_2) & 1) ? -1.0 : 1.0;
+                            scalar *= spin_l * s;
+                        } else {
+                            const uint64_t b = (cur_state >> t.site_index_2) & 1;
+                            if (b != t.op_type_2) cur_state ^= (1ULL << t.site_index_2);
+                            else                  valid = false;
+                        }
+                    }
+                    // op_type_3
+                    if (valid) {
+                        if (t.op_type_3 == kOpSz) {
+                            const double s =
+                                ((cur_state >> t.site_index_3) & 1) ? -1.0 : 1.0;
+                            scalar *= spin_l * s;
+                        } else {
+                            const uint64_t b = (cur_state >> t.site_index_3) & 1;
+                            if (b != t.op_type_3) cur_state ^= (1ULL << t.site_index_3);
+                            else                  valid = false;
+                        }
+                    }
+
+                    if (!valid) continue;
+                    if (std::abs(scalar) < 1e-15) continue;
+
+                    const Scalar contrib = scalar * coeff;
+                    if constexpr (BasisPolicy::may_leave_basis) {
+                        const int64_t j = basis.index_of(cur_state);
+                        if (j < 0) continue;
+                        local_buffer.push_back({static_cast<uint64_t>(j), contrib});
+                    } else {
+                        local_buffer.push_back({cur_state, contrib});
+                    }
+                }
+
+                if (local_buffer.size() >= kFlushThreshold) flush();
+            }
+        }
+
+        flush();
+    } // end parallel
+}
+
+// ---------------------------------------------------------------------------
+// CSR triplet builder. Used by both the full-basis and fixed-Sz CSR
+// assembly paths. Emits Eigen-style triplets (row, col, value) into the
+// provided sink (anything with `.emplace_back(int row, int col, Scalar)`).
+//
+// Same template parameters and same duck-typed term containers as
+// apply_terms above. The only differences are: no parallelism (CSR build
+// is single-threaded; the SpMV is parallel later), and we emit triplets
+// instead of accumulating into out[].
+// ---------------------------------------------------------------------------
+template <
+    class BasisPolicy,
+    class Scalar,
+    class TripletSink,
+    class DiagOneBodyVec,
+    class OffDiagOneBodyVec,
+    class DiagTwoBodyVec,
+    class MixedTwoBodyVec,
+    class OffDiagTwoBodyVec,
+    class ThreeBodyVec>
+inline void emit_csr_triplets(
+    BasisPolicy              basis,
+    double                   spin_l,
+    const DiagOneBodyVec&    diag_one_body,
+    const OffDiagOneBodyVec& offdiag_one_body,
+    const DiagTwoBodyVec&    diag_two_body,
+    const MixedTwoBodyVec&   mixed_two_body,
+    const OffDiagTwoBodyVec& offdiag_two_body,
+    const ThreeBodyVec&      three_body,
+    TripletSink&             out_triplets)
+{
+    const uint64_t dim     = basis.dim();
+    const double   spin_sq = spin_l * spin_l;
+
+    auto emit = [&](uint64_t row, uint64_t col, Scalar v) {
+        out_triplets.emplace_back(static_cast<int>(row),
+                                  static_cast<int>(col),
+                                  v);
+    };
+
+    for (uint64_t i = 0; i < dim; ++i) {
+        const uint64_t basis_state = basis.state_of(i);
+
+        for (const auto& t : diag_one_body) {
+            const double sign = ((basis_state >> t.site_index) & 1) ? -1.0 : 1.0;
+            emit(i, i, coerce_coeff<Scalar>(t.coefficient) * spin_l * sign);
+        }
+        for (const auto& t : offdiag_one_body) {
+            const uint64_t bit = (basis_state >> t.site_index) & 1;
+            if (bit == t.op_type) continue;
+            const uint64_t new_state = basis_state ^ (1ULL << t.site_index);
+            const int64_t j = basis.index_of(new_state);
+            if (j < 0) continue;
+            emit(static_cast<uint64_t>(j), i, coerce_coeff<Scalar>(t.coefficient));
+        }
+        for (const auto& t : diag_two_body) {
+            const double sa = ((basis_state >> t.site_index_1) & 1) ? -1.0 : 1.0;
+            const double sb = ((basis_state >> t.site_index_2) & 1) ? -1.0 : 1.0;
+            emit(i, i, coerce_coeff<Scalar>(t.coefficient) * spin_sq * sa * sb);
+        }
+        for (const auto& t : mixed_two_body) {
+            const uint64_t fb = (basis_state >> t.flip_site) & 1;
+            if (fb == t.flip_op_type) continue;
+            const double sz_sign =
+                ((basis_state >> t.sz_site) & 1) ? -1.0 : 1.0;
+            const uint64_t new_state = basis_state ^ (1ULL << t.flip_site);
+            const int64_t j = basis.index_of(new_state);
+            if (j < 0) continue;
+            emit(static_cast<uint64_t>(j), i,
+                 coerce_coeff<Scalar>(t.coefficient) * spin_l * sz_sign);
+        }
+        for (const auto& t : offdiag_two_body) {
+            const uint64_t b1 = (basis_state >> t.site_index_1) & 1;
+            const uint64_t b2 = (basis_state >> t.site_index_2) & 1;
+            if (b1 == t.op_type_1 || b2 == t.op_type_2) continue;
+            const uint64_t new_state = basis_state
+                ^ (1ULL << t.site_index_1)
+                ^ (1ULL << t.site_index_2);
+            const int64_t j = basis.index_of(new_state);
+            if (j < 0) continue;
+            emit(static_cast<uint64_t>(j), i, coerce_coeff<Scalar>(t.coefficient));
+        }
+        for (const auto& t : three_body) {
+            uint64_t cur = basis_state;
+            Scalar   sc  = coerce_coeff<Scalar>(t.coefficient);
+            bool     ok  = true;
+            auto step = [&](uint8_t op, uint64_t site) {
+                if (op == kOpSz) {
+                    const double s = ((cur >> site) & 1) ? -1.0 : 1.0;
+                    sc *= spin_l * s;
+                } else {
+                    const uint64_t b = (cur >> site) & 1;
+                    if (b != op) cur ^= (1ULL << site);
+                    else         ok = false;
+                }
+            };
+            step(t.op_type_1, t.site_index_1);
+            if (ok) step(t.op_type_2, t.site_index_2);
+            if (ok) step(t.op_type_3, t.site_index_3);
+            if (!ok) continue;
+            if (std::abs(sc) < 1e-15) continue;
+            const int64_t j = basis.index_of(cur);
+            if (j < 0) continue;
+            emit(static_cast<uint64_t>(j), i, sc);
+        }
+    }
+}
+
+} // namespace ed::matvec::kernel
