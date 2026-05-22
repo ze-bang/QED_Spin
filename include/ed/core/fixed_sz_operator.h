@@ -661,92 +661,16 @@ public:
         fixed_sz_matrix_built_ = false;
     }
     
-    /**
-     * Generate symmetrized basis for fixed Sz sector with spatial symmetries
-     * Combines Sz conservation with spatial symmetry group
-     * 
-     * WARNING: This legacy text-based version has known issues with phase calculation.
-     * Use generateSymmetrizedBasisFixedSzHDF5() instead for correct results.
-     * @deprecated Use generateSymmetrizedBasisFixedSzHDF5() instead
-     */
-    [[deprecated("Use generateSymmetrizedBasisFixedSzHDF5() instead - this version has phase calculation issues")]]
-    void generateSymmetrizedBasisFixedSz(const std::string& dir) {
-        std::cout << "\n=== Generating Symmetrized Basis (Fixed Sz) ===" << std::endl;
-        std::cout << "WARNING: Using legacy text-based method. Consider using HDF5 version instead." << std::endl;
-        std::cout << "Fixed Sz sector: n_up=" << n_up_ 
-                  << ", dimension=" << fixed_sz_dim_ << std::endl;
-        
-        // Load symmetry information
-        symmetry_info.loadFromDirectory(dir);
-        
-        // Setup output directory
-        std::string sym_basis_dir = dir + "/sym_basis_fixed_sz";
-        safe_system_call("mkdir -p " + sym_basis_dir);
-        
-        // Generate basis for each sector
-        size_t total_written = 0;
-        symmetrized_block_ham_sizes.assign(symmetry_info.sectors.size(), 0);
-        
-        for (size_t sector_idx = 0; sector_idx < symmetry_info.sectors.size(); ++sector_idx) {
-            const auto& sector = symmetry_info.sectors[sector_idx];
-            
-            std::cout << "\nProcessing sector " << (sector_idx + 1) << "/"
-                      << symmetry_info.sectors.size() << " (QN: ";
-            for (uint64_t qn : sector.quantum_numbers) std::cout << qn << " ";
-            std::cout << ")" << std::endl;
-            
-            std::set<uint64_t> processed_orbits;
-            size_t sector_basis_count = 0;
-            
-            // Only iterate over fixed Sz basis states
-            for (uint64_t basis_idx = 0; basis_idx < fixed_sz_dim_; ++basis_idx) {
-                uint64_t basis = basis_states_[basis_idx];
-                
-                size_t progress_interval = fixed_sz_dim_ / 20;
-                if (progress_interval > 0 && basis_idx % progress_interval == 0 && fixed_sz_dim_ > 20) {
-                    std::cout << "\r  Progress: " << (100 * basis_idx / fixed_sz_dim_) << "%" << std::flush;
-                }
-                
-                // Check if this basis state's orbit was already processed
-                uint64_t orbit_rep = getOrbitRepresentativeFixedSz(basis);
-                if (processed_orbits.count(orbit_rep)) continue;
-                processed_orbits.insert(orbit_rep);
-                
-                // Create symmetrized vector for this sector
-                std::vector<Complex> sym_vec = createSymmetrizedVectorFixedSz(
-                    basis, sector.quantum_numbers, sector.phase_factors);
-                
-                // Check if vector is valid (non-zero norm)
-                double norm_sq = 0.0;
-                for (const auto& v : sym_vec) norm_sq += std::norm(v);
-                
-                if (norm_sq > 1e-10) {
-                    // Normalize
-                    double norm = std::sqrt(norm_sq);
-                    for (auto& v : sym_vec) v /= norm;
-                    
-                    // Save vector
-                    saveSymBasisVectorFixedSz(sym_basis_dir, total_written, sym_vec);
-                    sector_basis_count++;
-                    total_written++;
-                }
-            }
-            
-            symmetrized_block_ham_sizes[sector_idx] = sector_basis_count;
-            std::cout << "\r  Sector " << (sector_idx + 1) << " complete: "
-                      << sector_basis_count << " basis vectors" << std::endl;
-        }
-        
-        // Save block sizes
-        saveBlockSizesFixedSz(dir);
-        
-        std::cout << "\nTotal symmetrized basis vectors (Fixed Sz): " << total_written << std::endl;
-        std::cout << "=== Symmetrized Basis Generation Complete ===" << std::endl;
-    }
-    
     // ========================================================================
-    // HDF5-based methods for Fixed Sz (recommended)
+    // HDF5-based methods for Fixed Sz (the canonical / only supported path)
     // ========================================================================
+    //
+    // The legacy text-based generateSymmetrizedBasisFixedSz() and its helper
+    // createSymmetrizedVectorFixedSz() were removed in the matvec-unification
+    // cleanup (Phase 7). They were marked [[deprecated]] for several releases
+    // and had a known phase-calculation bug. Use
+    // generateSymmetrizedBasisFixedSzHDF5() (or the streaming /
+    // disk-free symmetry pipeline) instead.
     
     /**
      * Generate symmetrized basis vectors using HDF5 storage (Fixed Sz)
@@ -1134,92 +1058,22 @@ public:
         return blocks;
     }
     
-protected:
-    /**
-     * Get orbit representative for a state in fixed Sz sector
-     * Uses BFS to generate complete orbit, then returns lexicographic minimum
-     */
-    uint64_t getOrbitRepresentativeFixedSz(uint64_t state) const {
-        std::set<uint64_t> orbit;
-        std::queue<uint64_t> to_process;
-        to_process.push(state);
-        orbit.insert(state);
-        
-        // Generate full orbit using BFS with generators
-        while (!to_process.empty()) {
-            uint64_t current = to_process.front();
-            to_process.pop();
-            
-            for (const auto& gen : symmetry_info.generators) {
-                uint64_t transformed = applyPermutation(current, gen);
-                
-                // Check if still in fixed Sz sector
-                if (popcount(transformed) != static_cast<uint64_t>(n_up_)) continue;
-                
-                if (orbit.find(transformed) == orbit.end()) {
-                    orbit.insert(transformed);
-                    to_process.push(transformed);
-                }
-            }
-        }
-        
-        // Return lexicographic minimum as canonical representative
-        return *orbit.begin();
-    }
-    
-    /**
-     * Create symmetrized vector in fixed Sz basis
-     * @deprecated This function has incorrect phase calculation. Use HDF5-based methods instead.
-     */
-    [[deprecated("Use HDF5-based methods instead - this has incorrect phase calculation")]]
-    std::vector<Complex> createSymmetrizedVectorFixedSz(
-        uint64_t seed_state,
-        const std::vector<int>& quantum_numbers,
-        const std::vector<Complex>& phase_factors) const {
-        
-        throw std::runtime_error(
-            "createSymmetrizedVectorFixedSz() is deprecated due to incorrect phase calculation.\n"
-            "Use generateSymmetrizedBasisFixedSzHDF5() instead, which implements correct projection."
-        );
-        
-        // Dead code below - kept for reference only
-        // The issue is that calculatePhaseFixedSz() only checks single generator applications,
-        // missing most phase relationships in the orbit. The HDF5 version uses the full
-        // group projection formula directly.
-        
-        return std::vector<Complex>();  // Never reached
-    }
-    
-    /**
-     * Save symmetrized basis vector for fixed Sz
-     */
-    void saveSymBasisVectorFixedSz(const std::string& dir, size_t index, 
-                                    const std::vector<Complex>& vec) const {
-        std::string filename = dir + "/basis_" + std::to_string(index) + ".dat";
-        std::ofstream file(filename, std::ios::binary);
-        
-        uint64_t dim = fixed_sz_dim_;
-        file.write(reinterpret_cast<const char*>(&dim), sizeof(uint64_t));
-        file.write(reinterpret_cast<const char*>(vec.data()), dim * sizeof(Complex));
-    }
-    
-    /**
-     * Save block sizes for fixed Sz sectors
-     */
-    void saveBlockSizesFixedSz(const std::string& dir) const {
-        std::string filename = dir + "/sym_basis_fixed_sz/block_sizes.txt";
-        std::ofstream file(filename);
-        
-        file << "# Fixed Sz symmetrized block sizes\n";
-        file << "# n_up = " << n_up_ << "\n";
-        file << "# fixed_sz_dim = " << fixed_sz_dim_ << "\n";
-        file << "# num_sectors = " << symmetrized_block_ham_sizes.size() << "\n\n";
-        
-        for (size_t i = 0; i < symmetrized_block_ham_sizes.size(); ++i) {
-            file << i << " " << symmetrized_block_ham_sizes[i] << "\n";
-        }
-    }
-    
+    // ------------------------------------------------------------------
+    // Removed in matvec-unification Phase 7:
+    //
+    //   - getOrbitRepresentativeFixedSz(state)
+    //   - createSymmetrizedVectorFixedSz(state, qns, phases)
+    //   - saveSymBasisVectorFixedSz(dir, index, vec)
+    //   - saveBlockSizesFixedSz(dir)
+    //
+    // These were helpers for the legacy text-based
+    // generateSymmetrizedBasisFixedSz() (also removed). The
+    // streaming / HDF5 pipelines own all symmetrized-basis I/O.
+    // streaming_symmetry.h has its own fast orbit-rep routine
+    // (getOrbitRepresentativeFixedSzFast) which is the canonical
+    // implementation.
+    // ------------------------------------------------------------------
+
 private:
     /**
      * Load block sizes if needed (Fixed Sz)
