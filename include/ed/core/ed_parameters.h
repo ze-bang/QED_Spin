@@ -247,6 +247,23 @@ struct EDParameters {
     bool use_symmetry = false;
     bool translation_only = false;
 
+    // Streaming-symmetry-specific options. They are only consulted when
+    // ed::exact_diagonalization(...) (or auto_pilot::solve) routes through
+    // the streaming-symmetry kernel (use_symmetry == true). Promoted from
+    // the workflow layer into EDParameters in Phase 6 of matvec-unification
+    // so that there is *one* EDParameters bag carrying every solve option.
+    //
+    //   * basis_cache_dir       -- if non-empty, cache the per-sector
+    //                              orbit basis here so reruns at fixed
+    //                              symmetry sector skip the basis build.
+    //                              Empty (default) disables caching.
+    //   * precompute_basis_only -- when true, return immediately after
+    //                              the basis cache is written; eigen-
+    //                              values are not computed. Useful for
+    //                              prebuilding caches in batch jobs.
+    std::string basis_cache_dir{};
+    bool precompute_basis_only = false;
+
     // ========== ScaLAPACK Distributed Diagonalization Options ==========
     int scalapack_nprow = 0;
     int scalapack_npcol = 0;

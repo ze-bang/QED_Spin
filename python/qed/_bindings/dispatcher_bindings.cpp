@@ -14,9 +14,9 @@
 #include <pybind11/complex.h>
 #include <pybind11/numpy.h>
 
-#include <ed/core/ed_wrapper.h>
-#include <ed/core/ed_wrapper_streaming.h>
-#include <ed/core/ed_dispatch_symmetry.h>  // Phase 7.1: canonical 5-axis dispatcher
+#include <ed/core/ed_wrapper.h>            // EDResults / EDParameters / legacy free functions
+#include <ed/core/ed_wrapper_streaming.h>  // streaming-symmetry kernel (transitive via dispatch.h)
+#include <ed/core/dispatch.h>              // Phase 6: ed::exact_diagonalization(...) -- canonical entry
 #include <ed/core/ed_parameters.h>
 #include <ed/core/ed_types.h>
 #include <ed/core/construct_ham.h>
@@ -761,13 +761,12 @@ void bind_dispatcher(py::module_& m) {
               EDResults res;
               {
                   py::gil_scoped_release release;
-                  // Phase 7.1: route through the canonical 5-axis
-                  // dispatcher in ed_dispatch_symmetry.h. When
-                  // params.use_symmetry is set this forwards to
-                  // exact_diagonalization_streaming_symmetry[_fixed_sz];
-                  // otherwise it forwards to the standard
-                  // exact_diagonalization_from_directory in ed_wrapper.h.
-                  res = ed_dispatch::exact_diagonalization_from_directory(
+                  // Phase 6 (matvec-unification): canonical entry point
+                  // ed::exact_diagonalization(...) in <ed/core/dispatch.h>.
+                  // Dispatches on the four orthogonal axes recorded in
+                  // params (use_symmetry, use_fixed_sz, use_gpu, use_mpi);
+                  // see ed/core/dispatch.h for the full contract.
+                  res = ed::exact_diagonalization(
                       directory, method, params, format,
                       interaction_filename, single_site_filename,
                       counterterm_filename, three_body_filename);

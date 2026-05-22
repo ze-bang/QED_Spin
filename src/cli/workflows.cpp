@@ -50,8 +50,9 @@
 
 #include <ed/core/ed_config.h>
 #include <ed/core/ed_config_adapter.h>
-#include <ed/core/ed_wrapper.h>
-#include <ed/core/ed_wrapper_streaming.h>
+#include <ed/core/ed_wrapper.h>            // legacy exact_diagonalization_fixed_sz (file-based)
+#include <ed/core/ed_wrapper_streaming.h>  // streaming kernel (transitive via dispatch.h)
+#include <ed/core/dispatch.h>              // ed::exact_diagonalization -- canonical entry
 #include <ed/core/construct_ham.h>
 #include <ed/core/hdf5_io.h>
 #include <ed/dssf/operator_spec.h>
@@ -367,35 +368,31 @@ EDResults run_standard_workflow(const EDConfig& config) {
     auto params = ed_adapter::toEDParameters(config);
     params.output_dir = config.workflow.output_dir;
     create_directory_mpi_safe(params.output_dir);
-    
-    auto start = std::chrono::high_resolution_clock::now();
-    
-    EDResults results;
-    
-    // Check if fixed Sz mode is enabled
-    if (config.system.use_fixed_sz) {
-        int64_t n_up = (config.system.n_up >= 0) ? config.system.n_up : config.system.num_sites / 2;
-        std::string interaction_file = config.system.hamiltonian_dir + "/" + config.system.interaction_file;
-        std::string single_site_file = config.system.hamiltonian_dir + "/" + config.system.single_site_file;
-        
-        results = exact_diagonalization_fixed_sz(
-            interaction_file,
-            single_site_file,
-            config.system.num_sites,
-            config.system.spin_length,
-            n_up,
-            config.method,
-            params
-        );
-    } else {
-        results = exact_diagonalization_from_directory(
-            config.system.hamiltonian_dir,
-            config.method,
-            params,
-            HamiltonianFileFormat::STANDARD
-        );
+
+    // Phase 6 (matvec-unification): collapse the workflow's manual
+    // fixed-Sz vs full-Hilbert branch onto the canonical entry
+    // ed::exact_diagonalization. The legacy file-based
+    // exact_diagonalization_fixed_sz() entry is kept inside ed_wrapper.h
+    // for out-of-tree callers, but the workflow now records the axis
+    // choice in params (use_fixed_sz / n_up) and lets the dispatcher
+    // pick the kernel -- same final destination, one entry point.
+    params.use_symmetry = false;
+    params.use_fixed_sz = config.system.use_fixed_sz;
+    if (config.system.use_fixed_sz && params.n_up < 0) {
+        params.n_up = (config.system.n_up >= 0)
+            ? config.system.n_up
+            : static_cast<int64_t>(config.system.num_sites / 2);
     }
-    
+
+    auto start = std::chrono::high_resolution_clock::now();
+
+    EDResults results = ed::exact_diagonalization(
+        config.system.hamiltonian_dir,
+        config.method,
+        params,
+        HamiltonianFileFormat::STANDARD
+    );
+
     auto end = std::chrono::high_resolution_clock::now();
     auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
     
@@ -433,35 +430,32 @@ EDResults run_streaming_symmetry_workflow(const EDConfig& config) {
     auto params = ed_adapter::toEDParameters(config);
     params.output_dir = config.workflow.output_dir;
     create_directory_mpi_safe(params.output_dir);
-    
-    auto start = std::chrono::high_resolution_clock::now();
-    
-    EDResults results;
-    
-    if (config.system.use_fixed_sz) {
-        int64_t n_up = (config.system.n_up >= 0) ? config.system.n_up : config.system.num_sites / 2;
-        results = exact_diagonalization_streaming_symmetry_fixed_sz(
-            config.system.hamiltonian_dir,
-            n_up,
-            config.method,
-            params,
-            "InterAll.dat",
-            "Trans.dat",
-            config.workflow.basis_cache_dir,
-            config.workflow.precompute_basis_only
-        );
-    } else {
-        results = exact_diagonalization_streaming_symmetry(
-            config.system.hamiltonian_dir,
-            config.method,
-            params,
-            "InterAll.dat",
-            "Trans.dat",
-            config.workflow.basis_cache_dir,
-            config.workflow.precompute_basis_only
-        );
+
+    // Phase 6 (matvec-unification): route through ed::exact_diagonalization.
+    // Streaming-specific options (basis cache + precompute-only) now live
+    // on EDParameters; the workflow just records the orthogonal axes and
+    // hands the bag to the canonical dispatcher.
+    params.use_symmetry         = true;
+    params.use_fixed_sz         = config.system.use_fixed_sz;
+    if (config.system.use_fixed_sz && params.n_up < 0) {
+        params.n_up = (config.system.n_up >= 0)
+            ? config.system.n_up
+            : static_cast<int64_t>(config.system.num_sites / 2);
     }
-    
+    params.basis_cache_dir      = config.workflow.basis_cache_dir;
+    params.precompute_basis_only = config.workflow.precompute_basis_only;
+
+    auto start = std::chrono::high_resolution_clock::now();
+
+    EDResults results = ed::exact_diagonalization(
+        config.system.hamiltonian_dir,
+        config.method,
+        params,
+        HamiltonianFileFormat::STANDARD,
+        "InterAll.dat",
+        "Trans.dat"
+    );
+
     auto end = std::chrono::high_resolution_clock::now();
     auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
     
