@@ -192,12 +192,16 @@ struct EDParameters {
     // plus the same four for fixed-Sz, giving 8 distinct symmetry-aware
     // entry points. Phase 7.1 collapsed all of them onto a single flag:
     //
-    // (Phase 9 follow-up: the deprecated explicit-block entry points
-    // -- `exact_diagonalization_from_directory_symmetrized` and
-    // `exact_diagonalization_fixed_sz_symmetrized` -- were removed
-    // entirely. The chunked / disk-streaming kernels remain reachable
-    // only through their dedicated CLI flags `--chunked-symm` and
-    // `--disk-streaming` and are not selectable via `use_symmetry`.)
+    //   * Phase 9: the deprecated explicit-block entry points
+    //     (`exact_diagonalization_from_directory_symmetrized`,
+    //     `exact_diagonalization_fixed_sz_symmetrized`) were removed.
+    //   * matvec-unification Phase 7.2: the chunked / disk-streaming
+    //     CPU-only fallbacks were retired entirely; the distributed/MPI
+    //     build (`ed_distributed_main`, `DistributedOperator` with
+    //     `MemorySpace::DistributedHost`) is the canonical answer at
+    //     the scales they targeted. `--disk-streaming` / `--chunked-symm`
+    //     CLI flags now print a one-line deprecation notice and are
+    //     ignored.
     //
     //     SOLVER_type  ×  use_fixed_sz  ×  use_gpu  ×  use_mpi  ×  use_symmetry
     //

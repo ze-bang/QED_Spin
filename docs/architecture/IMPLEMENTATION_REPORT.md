@@ -1331,9 +1331,11 @@ After the recent CLI cleanup audit:
   `--fixed-sz` is not set; otherwise the workflow banner emits a
   one-line "fall back to CPU" note. `--ground-state-dssf` has no GPU
   path and emits a one-line "using CPU" note when GPU was requested.
-- `--disk-streaming` and `--chunked-symm` warn and downgrade GPU
-  diagonalization methods to CPU Lanczos (their matrix-free CPU
-  representation is incompatible with the GPU operator classes).
+- `--disk-streaming` and `--chunked-symm` were retired in
+  matvec-unification Phase 7.2. The CLI flags now print a one-line
+  deprecation notice and are ignored; the distributed/MPI build
+  (`ed_distributed_main`) is the canonical replacement at the Hilbert
+  scales those workflows targeted.
 
 ---
 
@@ -1519,8 +1521,11 @@ backends).
 | `--use-gpu` + `--fixed-sz` (DSSF/SSSF) | Banner notes the fallback; CPU path is taken |
 | `--use-gpu` + `--ground-state-dssf` | Banner notes "no GPU path"; CPU path is taken |
 | `--use-gpu` + dynamical, single-T, single-sample | CPU path is taken (no message; documented in workflow comment) |
-| `--disk-streaming` / `--chunked-symm` + GPU method | Warning, downgrade to CPU Lanczos |
 | GPU build absent + `--use-gpu` | Banner notes "build has no CUDA support; using CPU" |
+
+`--disk-streaming` and `--chunked-symm` were retired in
+matvec-unification Phase 7.2; they no longer interact with the GPU
+fallback table.
 
 ---
 

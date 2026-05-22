@@ -138,7 +138,7 @@ them in your run script, not mid-run.
 
 | Env var | Default | What it does |
 |---|---|---|
-| `ED_FTLM_PARALLEL` | `0` (serial) | Enables OpenMP over FTLM samples (Batch 2, P1-4). **Opt-in** because the default `Operator` is not guaranteed thread-safe — concurrent `apply()` calls can corrupt shared scratch. Safe with the per-sector-CSR Operator and with the chunked-symmetry Operator. Validate against the serial run before trusting averaged thermodynamics. |
+| `ED_FTLM_PARALLEL` | `0` (serial) | Enables OpenMP over FTLM samples (Batch 2, P1-4). **Opt-in** because the default `Operator` is not guaranteed thread-safe — concurrent `apply()` calls can corrupt shared scratch. Safe with the per-sector-CSR Operator. Validate against the serial run before trusting averaged thermodynamics. (The chunked-symmetry Operator was retired in matvec-unification Phase 7.2 and is no longer available as a thread-safe alternative.) |
 | `ED_GPU_TIMING` | `0` | If `1`, GPU fixed-Sz matvec calls insert `cudaDeviceSynchronize()` and record per-call timings. Off by default for performance (Batch 2, P1-6). |
 | `ED_NUMA_FIRST_TOUCH` | unset (off) | If `1`/`true`/`yes`, basis-sized work vectors (Lanczos `v_curr` / `v_prev` / `v_next` / `w`, the blocked-reorth tile) are parallel-zero-touched after allocation so each OpenMP thread owns the chunk of pages it will later read in `cblas_zaxpy` / `zdotc` / `zgemv` (Phase 3a #4, see `include/ed/parallel/numa.h`). On a multi-socket box this is the difference between every SpMV pulling its operand vector across the inter-socket link vs. straight from local DRAM (typically 2-4× SpMV bandwidth). No-op below a 256 KB threshold; never changes numerical results. Pair with `ED_NUMA_PIN_THREADS=1` so the thread-to-page assignment is stable across iterations. |
 | `ED_NUMA_PIN_THREADS` | unset (off) | If `1`/`true`/`yes`, OpenMP worker threads are pinned compactly via `pthread_setaffinity_np` (thread `t` → CPU `t mod ncpus`) on first call into `lanczos` / `lanczos_selective_reorth` (Phase 3a #4). Idempotent within a process. Pairs with `ED_NUMA_FIRST_TOUCH=1` so each thread keeps owning the same page range across iterations; without pinning the kernel is free to migrate threads between cores and socket-local DRAM access is no longer guaranteed. Honour `OMP_PROC_BIND` / `OMP_PLACES` for non-compact layouts. |
@@ -451,18 +451,22 @@ The actual cluster lockdown awaits HPC time + Phase 3b #7.
 Multi-GPU and the last 10× of scale. Validation requires actual cluster
 hardware.
 
-1. **NCCL-based multi-GPU Lanczos.** — **STUB ONLY (Phase 3c).** The
-   build system now discovers NCCL when both `WITH_CUDA=ON` and
-   `WITH_MPI=ON` (sets `NCCL_FOUND`, `NCCL_INCLUDE_DIRS`,
-   `NCCL_LIBRARIES`, propagates `ED_HAVE_NCCL` to `ed_distributed`); a
-   detection-only header lives at
-   `include/ed/distributed/multi_gpu_stub.h` exposing
-   `ed::distributed::multi_gpu::nccl_compiled_in()` and
-   `nccl_status_string()`. **No runtime kernels exist yet.** Plan once
-   we book HPC time: replace `MPI_Allreduce` with `ncclAllReduce` for
-   dot products on the same node; use NVLink/NVSwitch when available;
-   fall back to MPI-over-Infiniband across nodes. Build on cuQuantum's
-   `custatevec`-style API for the SpMV.
+1. **NCCL-based multi-GPU Lanczos.** — **IMPLEMENTED (Phase 3c stages
+   1-3); validation pending.** The build system discovers NCCL when
+   both `WITH_CUDA=ON` and `WITH_MPI=ON` (sets `NCCL_FOUND`,
+   `NCCL_INCLUDE_DIRS`, `NCCL_LIBRARIES`, propagates `ED_HAVE_NCCL` to
+   `ed_distributed`). The runtime surface lives in
+   `include/ed/distributed/multi_gpu.h`
+   (`ed::distributed::multi_gpu::MultiGpuCommunicator` -- RAII
+   communicator + NCCL collectives) and
+   `include/ed/distributed/distributed_lanczos_gpu.h`
+   (`distributed_lanczos_gpu` -- distributed Lanczos with
+   GPU-resident vectors and NCCL halo exchange via
+   `DistributedGPUOperator`). The older detection-only
+   `multi_gpu_stub.h` remains as a back-compat shim that transitively
+   includes `multi_gpu.h`. End-to-end validation on real
+   multi-node multi-GPU hardware is still TODO; in-process tests
+   currently exercise the single-process multi-GPU path under MPS.
 2. **GPU-Direct RDMA for halo exchange.** The off-diagonal columns in
    distributed SpMV are the bottleneck once compute is GPU-resident. RDMA
    directly between GPU memory across the IB fabric makes this work at
