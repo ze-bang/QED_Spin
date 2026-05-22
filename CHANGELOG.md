@@ -72,6 +72,18 @@ Solver-API consolidation (Phase 4):
   solver and let virtual dispatch route to the right matvec.
 - Validated by three new sections in `test_lanczos_variants` exercising
   `lanczos` / `block_lanczos` / `krylov_schur` through `MatVecOperator&`.
+- New `ed/gpu/gpu_solvers.h` (Phase 4 GPU): mirrors the CPU pattern for
+  the GPU stack. Provides two overloads of each entry --
+  `ed::matvec::gpu::{lanczos, block_lanczos, davidson, krylov_schur,
+  block_krylov_schur, lobpcg, full_diagonalization, ftlm,
+  microcanonical_tpq, canonical_tpq}` -- one type-safe
+  (`const GPUOperator&`, zero-overhead forward to the existing
+  `GPUEDWrapper::runGPU*` kernel) and one polymorphic
+  (`const ed::matvec::MatVecOperator&`, runtime-checks the operator's
+  `memory_space() == CudaDevice` tag and dynamic_casts to GPUOperator,
+  throwing `std::invalid_argument` on a Host operator). Validated by
+  three new tests in `test_cpu_gpu_equivalence` covering the
+  type-safe path, the polymorphic path, and the Host-operator rejection.
 
 Dispatch collapse (Phase 6):
 
@@ -84,6 +96,18 @@ Dispatch collapse (Phase 6):
 - `EDParameters` gained `basis_cache_dir` (string) and
   `precompute_basis_only` (bool), promoting them from workflow-specific
   flags into the central parameter bag.
+
+In-memory dispatcher robustness (Phase 7.6):
+
+- `exact_diagonalization_core` now silently falls back to the
+  corresponding CPU base method when a deprecated `_GPU` enum variant
+  reaches it (e.g. via `auto_pilot::solve` on a `WITH_CUDA=ON` build
+  that pre-Phase-7.6 used to hard-throw "GPU methods require
+  file-based interface"). Emits a one-line stderr note. Matches the
+  documented `auto_pilot::solve` contract: "either GPU runs, or we
+  silently fall back to CPU." Callers that genuinely require a GPU
+  run should use the file-based `ed::exact_diagonalization()` entry
+  point or set `allow_fallback=false` in `AutoSolveOptions`.
 
 Aggressive cleanup (Phase 7):
 
@@ -122,7 +146,14 @@ Compatibility:
 
 Tests:
 
-- All 254 unit + MPI tests pass at every checkpoint.
+- 254 / 254 unit + MPI tests pass on a `WITH_CUDA=OFF, WITH_MPI=ON`
+  build (the matvec-unification regression sweep ran on this config
+  throughout Phases 1-7.5).
+- 261 / 261 unit + MPI + GPU tests pass on a
+  `WITH_CUDA=ON, WITH_MPI=ON` build (RTX 4080 SUPER, CUDA 12.9, archs
+  70-90) -- the additional 7 cases cover Phase 4 GPU overloads,
+  CPU/GPU equivalence on Heisenberg, mixed-precision Lanczos, and the
+  Phase 7.6 in-memory fallback.
 - New regression tests:
   * `test_auto_solve.cpp` -- two new sections validating the
     auto-Sz-to-N/2 projection on a Heisenberg ring and confirming the
@@ -131,6 +162,11 @@ Tests:
     new `MatVecOperator&` overloads of `lanczos` / `block_lanczos` /
     `krylov_schur` and asserting numerics match the `std::function`
     path.
+  * `test_cpu_gpu_equivalence.cpp` -- three new sections covering
+    `ed::matvec::gpu::lanczos(GPUOperator&)` vs the legacy
+    `GPULanczos` class on 8-site Heisenberg, the polymorphic
+    `MatVecOperator&` overload matching the same reference, and
+    runtime rejection of Host-memory operators.
 
 ### Added — One-call ED-solver auto-tuner (`qed.auto_tune.tune_diag` / `ed::auto_pilot::diag::apply_auto_tune`)
 

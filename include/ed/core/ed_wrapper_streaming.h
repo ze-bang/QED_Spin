@@ -117,6 +117,18 @@ inline EDResults dispatchGPUSymmetrizedSector(
     // Dispatch to appropriate GPU solver
     // Note: all symmetrized methods use the full-space kernel variants since
     // the symmetrized operator already handles the projection internally.
+    //
+    // The {LANCZOS,BLOCK_LANCZOS,DAVIDSON,KRYLOV_SCHUR,BLOCK_KRYLOV_SCHUR,
+    // FULL}_GPU{,_FIXED_SZ} enum aliases below are intentionally kept (Python
+    // ABI / HDF5 metadata back-compat); they canonicalise to
+    // {base, use_gpu=true, use_fixed_sz=...} but this dispatcher still has to
+    // *name* them to handle inbound HDF5 / CLI traffic. Suppress the
+    // -Wdeprecated-declarations noise locally rather than letting it spam
+    // every CUDA-enabled rebuild.
+#if defined(__GNUC__) || defined(__clang__)
+#  pragma GCC diagnostic push
+#  pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+#endif
     if (method == DiagonalizationMethod::LANCZOS_GPU ||
         method == DiagonalizationMethod::LANCZOS_GPU_FIXED_SZ) {
         GPUEDWrapper::runGPULanczos(
@@ -155,6 +167,9 @@ inline EDResults dispatchGPUSymmetrizedSector(
     } else {
         throw std::runtime_error("Unsupported GPU method for symmetrized diagonalization: use Lanczos, Block Lanczos, Davidson, or Krylov-Schur GPU variants");
     }
+#if defined(__GNUC__) || defined(__clang__)
+#  pragma GCC diagnostic pop
+#endif
 
     // gpu_op_guard destructor handles cleanup
 

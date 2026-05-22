@@ -991,12 +991,48 @@ inline EDResults exact_diagonalization_core(
         case DiagonalizationMethod::cTPQ_GPU:
         case DiagonalizationMethod::FTLM_GPU:
         case DiagonalizationMethod::FTLM_GPU_FIXED_SZ:
-            // These should be handled in exact_diagonalization_from_files
-            // If we reach here, it means they were called incorrectly
-            std::cerr << "Error: GPU methods must be called via exact_diagonalization_from_files" << std::endl;
-            std::cerr << "Use: ED <directory> --method=<GPU_METHOD>" << std::endl;
-            throw std::runtime_error("GPU methods require file-based interface");
-            break;
+        case DiagonalizationMethod::FULL_GPU: {
+            // ----------------------------------------------------------
+            // Matvec-unification Phase 7.6: graceful CPU fallback.
+            //
+            // The in-memory exact_diagonalization_core() entry has no
+            // GPU code path (all GPU kernels live behind the file-based
+            // exact_diagonalization_from_files() entry, where they have
+            // a real device-resident Operator). Before Phase 7.6 this
+            // case list threw, which broke any in-memory caller (like
+            // auto_pilot::solve) that ran on a WITH_CUDA=ON build with
+            // GPU available: the legacy `_GPU` enum got promoted by
+            // legacy_method_for_dispatch() and we'd land here.
+            //
+            // The right semantic is "either GPU runs or we fall back to
+            // CPU silently", matching what auto_pilot::solve already
+            // documents for the WITH_CUDA=OFF case. So we now:
+            //   1. canonicalise back to the base CPU method,
+            //   2. clear params.use_gpu so downstream stays consistent,
+            //   3. emit a one-line stderr note (so the fallback is
+            //      visible in logs), and
+            //   4. recurse into exact_diagonalization_core() with the
+            //      CPU method.
+            //
+            // Throwing was the wrong default; if a caller genuinely
+            // *requires* a GPU run, they should use
+            // exact_diagonalization_from_files() / from_directory()
+            // directly (or pass allow_fallback=false through the
+            // auto_pilot::solve() options).
+            // ----------------------------------------------------------
+            const auto canon = ed::canonicalize_method_and_flags(
+                method, params.use_fixed_sz, /*use_gpu=*/true,
+                params.use_mpi);
+            std::cerr << "[ed] note: GPU method "
+                      << static_cast<int>(method)
+                      << " has no in-memory implementation; "
+                      << "running CPU base method "
+                      << static_cast<int>(canon.method)
+                      << " instead.\n";
+            params.use_gpu = false;
+            return exact_diagonalization_core(
+                H, hilbert_space_dim, canon.method, params);
+        }
 
         default:
             // Hard-fail on an unrecognised method instead of silently
