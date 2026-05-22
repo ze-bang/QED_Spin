@@ -424,10 +424,18 @@ EDConfig EDConfig::fromCommandLine(uint64_t argc, char* argv[]) {
                 config.workflow.run_symm_auto = false;
                 config.system.use_symmetry = false;
             }
-            else if (arg == "--disk-streaming") config.workflow.run_disk_streaming = true;
-            else if (arg == "--chunked-symm") config.workflow.run_chunked_symmetry = true;
-            else if (arg.find("--disk-threshold=") == 0) config.workflow.disk_streaming_threshold = std::stoull(parse_value("--disk-threshold="));
-            else if (arg.find("--chunked-threshold=") == 0) config.workflow.chunked_symm_threshold = std::stoull(parse_value("--chunked-threshold="));
+            // --disk-streaming / --chunked-symm / --disk-threshold= / --chunked-threshold=
+            // were retired in matvec-unification Phase 7.2. They were
+            // single-node CPU-only ultra-low-memory specialisations. Use
+            // the distributed/MPI build for those scales.
+            else if (arg == "--disk-streaming" || arg == "--chunked-symm"
+                  || arg.find("--disk-threshold=") == 0
+                  || arg.find("--chunked-threshold=") == 0) {
+                std::cerr << "[ED] WARNING: '" << arg << "' has been removed "
+                          << "(matvec-unification Phase 7.2). Use the "
+                          << "distributed/MPI build for very large Hilbert "
+                          << "spaces. Ignoring.\n";
+            }
             else if (arg == "--thermo") config.workflow.compute_thermo = true;
             else if (arg == "--dynamical-response") config.workflow.compute_dynamical_response = true;
             else if (arg == "--static-response") config.workflow.compute_static_response = true;

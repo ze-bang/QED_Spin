@@ -302,11 +302,11 @@ struct ArpackConfig {
  */
 struct WorkflowConfig {
     bool run_standard = false;
-    bool run_symm_auto = false;  // Unified --symm flag: auto-select between streaming, disk-streaming, or chunked
-    uint64_t disk_streaming_threshold = 67108864;  // 2^26 threshold for disk-based mode (default: 64M states)
-    uint64_t chunked_symm_threshold = 268435456;  // 2^28 threshold for chunked mode (default: 256M states)
-    bool run_disk_streaming = false;  // Ultra-low-memory disk-based streaming (expert override)
-    bool run_chunked_symmetry = false;  // Ultra-low-memory chunked basis construction (expert override)
+    bool run_symm_auto = false;  // --symm flag: route through streaming-symmetry path
+    // run_disk_streaming / run_chunked_symmetry / disk_streaming_threshold /
+    // chunked_symm_threshold were retired in matvec-unification Phase 7.2.
+    // The CLI flags now print a one-line deprecation notice. Use MPI for
+    // Hilbert spaces too large for in-RAM streaming-symmetry.
     bool compute_thermo = false;
     bool compute_dynamical_response = false;
     bool compute_static_response = false;
@@ -413,8 +413,8 @@ public:
         system.use_symmetry = b;
         return *this;
     }
-    EDConfig& diskStreaming(bool b = true) { workflow.run_disk_streaming = b; return *this; }
-    EDConfig& chunkedSymm(bool b = true) { workflow.run_chunked_symmetry = b; return *this; }
+    // diskStreaming() and chunkedSymm() were retired in matvec-unification
+    // Phase 7.2; use the distributed/MPI path for those scales.
     EDConfig& thermo(bool b = true) { workflow.compute_thermo = b; return *this; }
     EDConfig& dynamicalResponse(bool b = true) { workflow.compute_dynamical_response = b; return *this; }
     EDConfig& staticResponse(bool b = true) { workflow.compute_static_response = b; return *this; }

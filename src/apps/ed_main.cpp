@@ -520,23 +520,12 @@ int main(int argc, char* argv[]) {
             }
         }
         
-        if (config.workflow.run_disk_streaming && !config.workflow.skip_ed) {
-            EDResults disk_results = run_disk_streaming_workflow(config);
-            print_eigenvalue_summary(disk_results.eigenvalues);
-            
-            if (config.workflow.compute_thermo && !disk_results.eigenvalues.empty()) {
-                compute_thermodynamics(disk_results.eigenvalues, config);
-            }
-        }
-        
-        if (config.workflow.run_chunked_symmetry && !config.workflow.skip_ed) {
-            EDResults chunked_results = run_chunked_symmetry_workflow(config);
-            print_eigenvalue_summary(chunked_results.eigenvalues);
-            
-            if (config.workflow.compute_thermo && !chunked_results.eigenvalues.empty()) {
-                compute_thermodynamics(chunked_results.eigenvalues, config);
-            }
-        }
+        // --disk-streaming and --chunked-symm were retired in matvec-unification
+        // Phase 7.2 (single-node CPU-only ultra-low-memory fallbacks). For
+        // Hilbert spaces too large for in-RAM streaming-symmetry, use the
+        // distributed/MPI build instead -- it is matvec-unification first-class
+        // and exercised by the phase3b/mpi test labels.
+
         
         // Standalone response calculations (don't require prior diagonalization).
         // P2.2 (DSSF PR-C): all three paths now route through the canonical

@@ -14,8 +14,9 @@
 //     `ed::dssf::build_observable_pairs` (P1.10), preserved so the four
 //     historical call sites in this file (and the `run_dssf_mode` shim
 //     still living in ed_main.cpp) keep compiling.
-//   * The four `run_*_workflow` (standard / streaming-symmetry /
-//     disk-streaming / chunked-symmetry) entry points.
+//   * The two `run_*_workflow` (standard / streaming-symmetry) entry points.
+//     (`run_disk_streaming_workflow` / `run_chunked_symmetry_workflow` were
+//      retired in matvec-unification Phase 7.2; see comment in this file.)
 //   * `compute_thermodynamics`.
 //   * The three `compute_*_workflow` entry points (dynamical response,
 //     static response, ground-state DSSF) — these are the principal
@@ -51,8 +52,6 @@
 #include <ed/core/ed_config_adapter.h>
 #include <ed/core/ed_wrapper.h>
 #include <ed/core/ed_wrapper_streaming.h>
-#include <ed/core/disk_streaming_symmetry.h>
-#include <ed/core/ed_wrapper_chunked.h>
 #include <ed/core/construct_ham.h>
 #include <ed/core/hdf5_io.h>
 #include <ed/dssf/operator_spec.h>
@@ -486,129 +485,17 @@ EDResults run_streaming_symmetry_workflow(const EDConfig& config) {
     return results;
 }
 
-/**
- * @brief Run disk-based streaming symmetry diagonalization workflow
- * 
- * This ultra-low-memory mode processes sectors one at a time,
- * storing sector data on disk. Suitable for very large Hilbert spaces
- * (>64M states) where standard streaming would OOM.
- * 
- * NOTE: GPU methods are NOT supported - this uses matrix-free operations
- * which require CPU Lanczos. GPU methods will be automatically converted.
- */
-EDResults run_disk_streaming_workflow(const EDConfig& config) {
-    auto params = ed_adapter::toEDParameters(config);
-    params.output_dir = config.workflow.output_dir;
-    create_directory_mpi_safe(params.output_dir);
-    
-    // Warn about GPU method override.
-    // NOTE: previously this hand-rolled list omitted KRYLOV_SCHUR_GPU,
-    // BLOCK_KRYLOV_SCHUR_GPU, FULL_GPU, and the deprecated _FIXED_SZ
-    // variants, so those silently slipped through into the matrix-free
-    // streaming path and crashed at the first SpMV. Use the centralized
-    // predicate from ed_method_traits.h instead. (D-4.)
-    DiagonalizationMethod method = config.method;
-    if (ed::is_gpu_method(method)) {
-        std::cout << "\n  WARNING: Disk-streaming mode uses matrix-free operations.\n";
-        std::cout << "           GPU methods are not supported - using CPU Lanczos instead.\n\n";
-        method = DiagonalizationMethod::LANCZOS;
-    }
-    
-    auto start = std::chrono::high_resolution_clock::now();
-    
-    EDResults results = exact_diagonalization_disk_streaming(
-        config.system.hamiltonian_dir,
-        method,
-        params
-    );
-    
-    auto end = std::chrono::high_resolution_clock::now();
-    auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
-    
-    // Print results summary
-    if (!results.eigenvalues.empty()) {
-        std::cout << "\n  Lowest eigenvalues:\n";
-        size_t show = std::min(results.eigenvalues.size(), (size_t)5);
-        for (size_t i = 0; i < show; i++) {
-            std::cout << "    E[" << i << "] = " << std::fixed << std::setprecision(10) 
-                      << results.eigenvalues[i] << "\n";
-        }
-        if (results.eigenvalues.size() > 5) {
-            std::cout << "    ... (" << (results.eigenvalues.size() - 5) << " more)\n";
-        }
-    }
-    
-    std::cout << "\n  Time: " << std::fixed << std::setprecision(2) << duration / 1000.0 << " s\n";
-    
-    return results;
-}
-
-/**
- * @brief Run ultra-low-memory chunked symmetry diagonalization workflow
- * 
- * This mode uses a two-pass algorithm to minimize memory during basis construction:
- * 1. Discover orbit representatives without caching (O(1) memory per state)
- * 2. Build sectors one at a time from the orbit representatives
- * 
- * Use this when standard streaming modes run out of memory during the
- * symmetry sector building phase.
- * 
- * NOTE: This trades speed for memory efficiency - it's slower than standard
- * streaming because it doesn't use orbit lookup caching.
- */
-EDResults run_chunked_symmetry_workflow(const EDConfig& config) {
-    auto params = ed_adapter::toEDParameters(config);
-    params.output_dir = config.workflow.output_dir;
-    create_directory_mpi_safe(params.output_dir);
-    
-    // Warn about GPU method override (see comment in run_disk_streaming_workflow). (D-4.)
-    DiagonalizationMethod method = config.method;
-    if (ed::is_gpu_method(method)) {
-        std::cout << "\n  WARNING: Chunked-symmetry mode uses matrix-free operations.\n";
-        std::cout << "           GPU methods are not supported - using CPU Lanczos instead.\n\n";
-        method = DiagonalizationMethod::LANCZOS;
-    }
-    
-    auto start = std::chrono::high_resolution_clock::now();
-    
-    EDResults results;
-    
-    if (config.system.use_fixed_sz) {
-        int64_t n_up = (config.system.n_up >= 0) ? config.system.n_up : config.system.num_sites / 2;
-        results = exact_diagonalization_chunked_symmetry_fixed_sz(
-            config.system.hamiltonian_dir,
-            n_up,
-            method,
-            params
-        );
-    } else {
-        results = exact_diagonalization_chunked_symmetry(
-            config.system.hamiltonian_dir,
-            method,
-            params
-        );
-    }
-    
-    auto end = std::chrono::high_resolution_clock::now();
-    auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
-    
-    // Print results summary
-    if (!results.eigenvalues.empty()) {
-        std::cout << "\n  Lowest eigenvalues:\n";
-        size_t show = std::min(results.eigenvalues.size(), (size_t)5);
-        for (size_t i = 0; i < show; i++) {
-            std::cout << "    E[" << i << "] = " << std::fixed << std::setprecision(10) 
-                      << results.eigenvalues[i] << "\n";
-        }
-        if (results.eigenvalues.size() > 5) {
-            std::cout << "    ... (" << (results.eigenvalues.size() - 5) << " more)\n";
-        }
-    }
-    
-    std::cout << "\n  Time: " << std::fixed << std::setprecision(2) << duration / 1000.0 << " s\n";
-    
-    return results;
-}
+// ---------------------------------------------------------------------------
+// run_disk_streaming_workflow() and run_chunked_symmetry_workflow() were
+// retired in the matvec-unification cleanup (Phase 7.2). They were ultra-low-
+// memory single-node fallbacks (-> std::FILE-backed sector cache; two-pass
+// orbit discovery) intended for >64M-state Hilbert spaces on RAM-starved
+// machines. They never had a unit test, never had a Python binding, did not
+// support GPU, and were quietly slower than the streaming path even when
+// they fit in RAM. The right answer for those sizes is MPI/distributed
+// (which is now first-class in matvec-unification) -- there's no point in
+// shipping the disk/chunked CPU-only specialisations alongside it.
+// ---------------------------------------------------------------------------
 
 /**
  * @brief Compute thermodynamics from eigenvalue spectrum

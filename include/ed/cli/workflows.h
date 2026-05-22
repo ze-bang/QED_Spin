@@ -98,11 +98,10 @@ EDResults run_standard_workflow(const EDConfig& config);
 /// Symmetry-exploiting diagonalization via the streaming-symmetry path.
 EDResults run_streaming_symmetry_workflow(const EDConfig& config);
 
-/// Disk-based streaming symmetry diagonalization (ultra-low-memory).
-EDResults run_disk_streaming_workflow(const EDConfig& config);
-
-/// Two-pass chunked symmetry diagonalization (low-memory basis build).
-EDResults run_chunked_symmetry_workflow(const EDConfig& config);
+// run_disk_streaming_workflow() and run_chunked_symmetry_workflow() were
+// retired in matvec-unification Phase 7.2. They were single-node CPU-only
+// ultra-low-memory fallbacks for >64M-state Hilbert spaces; the distributed
+// MPI pipeline is the canonical answer at that scale now.
 
 /// Compute thermodynamics from a finite eigenvalue spectrum and persist
 /// them to the run's HDF5 file.
