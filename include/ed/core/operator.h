@@ -41,6 +41,8 @@
 #include <ed/core/thermal_types.h>
 #include <ed/core/basis_utils.h>
 #include <ed/core/symmetry_metadata.h>
+#include <ed/matvec/basis_policy.h>
+#include <ed/matvec/term_kernels.h>
 #include <nlohmann/json.hpp>
 
 using Complex = std::complex<double>;
@@ -346,262 +348,26 @@ public:
      * 
      * Performance: Additional 2-3x speedup over v1 for large N
      */
-    void apply_optimized(const Complex* in, Complex* out, size_t size) const {
-        const uint64_t dim = 1ULL << n_bits_;
-        const double spin_sq = spin_l_ * spin_l_;
-        
-        // Ensure transforms are separated by type
+    void apply_optimized(const Complex* in, Complex* out, size_t /*size*/) const {
+        // Phase 3 of the matvec-unification revamp: this used to be a
+        // 250-line inline copy of the bit-flip/scatter loop. The kernel
+        // is now factored into ed::matvec::kernel::apply_terms (the
+        // SINGLE source of truth for matrix-free SpMV across full /
+        // fixed-Sz / symmetry / GPU / MPI paths). This shim picks the
+        // FullBasisPolicy + complex-scalar specialisation.
+        //
+        // Behaviour is byte-for-byte identical to the legacy code:
+        // same cache blocking, same radix-sort flush, same atomic
+        // accumulator, same prefetch hints.
         separateTransformsByType();
-        
-        // Cache blocking parameters
-        constexpr size_t kCacheBlockSize = 4096;  // Process this many basis states at a time
-        const uint64_t num_blocks = (dim + kCacheBlockSize - 1) / kCacheBlockSize;
-
-        // Audit follow-up: the previous fixed `dim > 10000` threshold caused
-        // major slowdowns at small dim on large machines because the OpenMP
-        // team-spawn cost (~5-10us per thread) and false-sharing on the
-        // atomic scatter dominate when each thread gets <1k basis states.
-        // We now require >=1024 basis states per thread to even consider
-        // going parallel, which on a 32-core box pushes the cutoff to
-        // dim >= 32k (i.e., we stay serial below N=15).
-        const uint64_t par_threshold =
-            static_cast<uint64_t>(omp_get_max_threads()) * 1024ULL;
-
-        #pragma omp parallel if(dim > par_threshold)
-        {
-            struct LocalContribution {
-                uint64_t index;
-                Complex value;
-            };
-
-            constexpr size_t kFlushThreshold = 4096;
-            std::vector<LocalContribution> local_buffer;
-            local_buffer.reserve(kFlushThreshold);
-            
-            // Radix sort workspace (reused across flushes)
-            std::vector<LocalContribution> radix_temp;
-            radix_temp.reserve(kFlushThreshold);
-            
-            // Counting sort buckets for radix sort (256 buckets per byte)
-            std::array<size_t, 257> count;  // Extra element for prefix sum
-
-            // Radix sort implementation for uint64_t keys (O(n) vs O(n log n))
-            auto radix_sort_buffer = [&]() {
-                if (local_buffer.size() < 64) {
-                    // For small buffers, std::sort is faster due to cache effects
-                    std::sort(local_buffer.begin(), local_buffer.end(),
-                        [](const LocalContribution& a, const LocalContribution& b) {
-                            return a.index < b.index;
-                        });
-                    return;
-                }
-                
-                radix_temp.resize(local_buffer.size());
-                LocalContribution* src = local_buffer.data();
-                LocalContribution* dst = radix_temp.data();
-                const size_t n = local_buffer.size();
-                
-                // Sort by each byte of the index (LSB first)
-                // Only process bytes that matter (based on dim)
-                const int num_bytes = (64 - __builtin_clzll(dim | 1) + 7) / 8;
-                
-                for (int byte = 0; byte < num_bytes; ++byte) {
-                    const int shift = byte * 8;
-                    
-                    // Count occurrences
-                    std::fill(count.begin(), count.end(), 0);
-                    for (size_t i = 0; i < n; ++i) {
-                        uint8_t bucket = (src[i].index >> shift) & 0xFF;
-                        count[bucket + 1]++;
-                    }
-                    
-                    // Prefix sum
-                    for (int i = 1; i < 257; ++i) {
-                        count[i] += count[i - 1];
-                    }
-                    
-                    // Scatter
-                    for (size_t i = 0; i < n; ++i) {
-                        uint8_t bucket = (src[i].index >> shift) & 0xFF;
-                        dst[count[bucket]++] = src[i];
-                    }
-                    
-                    // Swap buffers
-                    std::swap(src, dst);
-                }
-                
-                // Ensure result is in local_buffer
-                if (src != local_buffer.data()) {
-                    std::copy(radix_temp.begin(), radix_temp.end(), local_buffer.begin());
-                }
-            };
-
-            auto flush_buffer = [&]() {
-                if (local_buffer.empty()) return;
-
-                radix_sort_buffer();
-
-                uint64_t current_index = local_buffer.front().index;
-                Complex accumulated = local_buffer.front().value;
-
-                for (size_t entry = 1; entry < local_buffer.size(); ++entry) {
-                    const auto& item = local_buffer[entry];
-                    if (item.index == current_index) {
-                        accumulated += item.value;
-                    } else {
-                        double* out_ptr = reinterpret_cast<double*>(&out[current_index]);
-                        #pragma omp atomic
-                        out_ptr[0] += accumulated.real();
-                        #pragma omp atomic
-                        out_ptr[1] += accumulated.imag();
-
-                        current_index = item.index;
-                        accumulated = item.value;
-                    }
-                }
-
-                double* out_ptr = reinterpret_cast<double*>(&out[current_index]);
-                #pragma omp atomic
-                out_ptr[0] += accumulated.real();
-                #pragma omp atomic
-                out_ptr[1] += accumulated.imag();
-
-                local_buffer.clear();
-            };
-
-            // Process basis states in cache-friendly blocks
-            #pragma omp for schedule(dynamic, 1) nowait
-            for (uint64_t block = 0; block < num_blocks; ++block) {
-                const uint64_t block_start = block * kCacheBlockSize;
-                const uint64_t block_end = std::min(block_start + kCacheBlockSize, dim);
-                
-                for (uint64_t basis = block_start; basis < block_end; ++basis) {
-                    Complex coeff = in[basis];
-                    if (std::abs(coeff) < 1e-15) continue;
-
-                    // Prefetch next cache line
-                    if (basis + 8 < block_end) {
-                        __builtin_prefetch(&in[basis + 8], 0, 1);
-                    }
-                    
-                    // ============================================================
-                    // BRANCH-FREE LOOPS: Each loop has uniform operations
-                    // ============================================================
-                    
-                    // 1. One-body diagonal (Sz): accumulate directly to output
-                    for (const auto& t : diag_one_body_) {
-                        double sign = ((basis >> t.site_index) & 1) ? -1.0 : 1.0;
-                        Complex contrib = t.coefficient * static_cast<double>(spin_l_) * sign * coeff;
-                        local_buffer.push_back({basis, contrib});
-                    }
-                    
-                    // 2. One-body off-diagonal (S+/S-): flip single bit
-                    for (const auto& t : offdiag_one_body_) {
-                        uint64_t bit = (basis >> t.site_index) & 1;
-                        if (bit != t.op_type) {
-                            uint64_t new_basis = basis ^ (1ULL << t.site_index);
-                            Complex contrib = t.coefficient * coeff;
-                            local_buffer.push_back({new_basis, contrib});
-                        }
-                    }
-                    
-                    // 3. Two-body diagonal (Sz_i Sz_j): accumulate directly
-                    for (const auto& t : diag_two_body_) {
-                        double sign_i = ((basis >> t.site_index_1) & 1) ? -1.0 : 1.0;
-                        double sign_j = ((basis >> t.site_index_2) & 1) ? -1.0 : 1.0;
-                        Complex contrib = t.coefficient * spin_sq * sign_i * sign_j * coeff;
-                        local_buffer.push_back({basis, contrib});
-                    }
-                    
-                    // 4. Two-body mixed (Sz * S+/S-): flip one bit
-                    for (const auto& t : mixed_two_body_) {
-                        uint64_t flip_bit = (basis >> t.flip_site) & 1;
-                        if (flip_bit != t.flip_op_type) {
-                            double sz_sign = ((basis >> t.sz_site) & 1) ? -1.0 : 1.0;
-                            uint64_t new_basis = basis ^ (1ULL << t.flip_site);
-                            Complex contrib = t.coefficient * static_cast<double>(spin_l_) * sz_sign * coeff;
-                            local_buffer.push_back({new_basis, contrib});
-                        }
-                    }
-                    
-                    // 5. Two-body off-diagonal (S+/S- * S+/S-): flip two bits
-                    for (const auto& t : offdiag_two_body_) {
-                        uint64_t bit_1 = (basis >> t.site_index_1) & 1;
-                        uint64_t bit_2 = (basis >> t.site_index_2) & 1;
-                        if (bit_1 != t.op_type_1 && bit_2 != t.op_type_2) {
-                            uint64_t new_basis = basis ^ (1ULL << t.site_index_1) ^ (1ULL << t.site_index_2);
-                            Complex contrib = t.coefficient * coeff;
-                            local_buffer.push_back({new_basis, contrib});
-                        }
-                    }
-                    
-                    // 6. Three-body terms (kept as-is, typically rare)
-                    for (const auto& tdata : three_body_data_) {
-                        uint64_t new_basis = basis;
-                        Complex scalar = tdata.coefficient;
-                        bool valid = true;
-                        
-                        // Apply first operator
-                        if (tdata.op_type_1 == 2) {
-                            uint64_t bit_1 = (new_basis >> tdata.site_index_1) & 1;
-                            double sign_1 = bit_1 ? -1.0 : 1.0;
-                            scalar *= static_cast<double>(spin_l_) * sign_1;
-                        } else {
-                            uint64_t bit_1 = (new_basis >> tdata.site_index_1) & 1;
-                            if (bit_1 != tdata.op_type_1) {
-                                new_basis ^= (1ULL << tdata.site_index_1);
-                            } else {
-                                valid = false;
-                            }
-                        }
-                        
-                        // Apply second operator
-                        if (valid) {
-                            if (tdata.op_type_2 == 2) {
-                                uint64_t bit_2 = (new_basis >> tdata.site_index_2) & 1;
-                                double sign_2 = bit_2 ? -1.0 : 1.0;
-                                scalar *= static_cast<double>(spin_l_) * sign_2;
-                            } else {
-                                uint64_t bit_2 = (new_basis >> tdata.site_index_2) & 1;
-                                if (bit_2 != tdata.op_type_2) {
-                                    new_basis ^= (1ULL << tdata.site_index_2);
-                                } else {
-                                    valid = false;
-                                }
-                            }
-                        }
-                        
-                        // Apply third operator
-                        if (valid) {
-                            if (tdata.op_type_3 == 2) {
-                                uint64_t bit_3 = (new_basis >> tdata.site_index_3) & 1;
-                                double sign_3 = bit_3 ? -1.0 : 1.0;
-                                scalar *= static_cast<double>(spin_l_) * sign_3;
-                            } else {
-                                uint64_t bit_3 = (new_basis >> tdata.site_index_3) & 1;
-                                if (bit_3 != tdata.op_type_3) {
-                                    new_basis ^= (1ULL << tdata.site_index_3);
-                                } else {
-                                    valid = false;
-                                }
-                            }
-                        }
-                        
-                        if (valid && std::abs(scalar) > 1e-15) {
-                            Complex contrib = scalar * coeff;
-                            local_buffer.push_back({new_basis, contrib});
-                        }
-                    }
-                    
-                    // Flush if buffer is getting full
-                    if (local_buffer.size() >= kFlushThreshold) {
-                        flush_buffer();
-                    }
-                }
-            }
-
-            flush_buffer();
-        }
+        const auto basis = ed::matvec::basis::make_full_basis(n_bits_);
+        ed::matvec::kernel::apply_terms<
+            ed::matvec::basis::FullBasisPolicy, Complex>(
+            basis, static_cast<double>(spin_l_),
+            diag_one_body_, offdiag_one_body_,
+            diag_two_body_, mixed_two_body_, offdiag_two_body_,
+            three_body_data_,
+            in, out);
     }
 
     // ========================================================================
@@ -667,6 +433,10 @@ public:
      * silently dropped. (We assert in debug builds.)
      */
     void apply_real(const double* in, double* out, size_t size) const {
+        // Phase 3 of the matvec-unification revamp: delegates to the
+        // shared term kernel (Scalar=double specialisation). Same
+        // performance characteristics as the legacy implementation,
+        // one copy of the bit-flip code instead of seven.
         const uint64_t dim = 1ULL << n_bits_;
         if (size != static_cast<size_t>(dim)) {
             throw std::invalid_argument("apply_real: input/output size mismatch");
@@ -674,180 +444,16 @@ public:
         assert(isReal() && "apply_real called on operator with complex couplings");
 
         std::fill(out, out + dim, 0.0);
-        const double spin_sq = spin_l_ * spin_l_;
-        const double spin = static_cast<double>(spin_l_);
-
         separateTransformsByType();
 
-        constexpr size_t kCacheBlockSize = 4096;
-        const uint64_t num_blocks = (dim + kCacheBlockSize - 1) / kCacheBlockSize;
-
-        // See apply_optimized for rationale; same threads-aware threshold.
-        const uint64_t par_threshold =
-            static_cast<uint64_t>(omp_get_max_threads()) * 1024ULL;
-
-        #pragma omp parallel if(dim > par_threshold)
-        {
-            struct LocalContribution {
-                uint64_t index;
-                double value;
-            };
-
-            constexpr size_t kFlushThreshold = 4096;
-            std::vector<LocalContribution> local_buffer;
-            local_buffer.reserve(kFlushThreshold);
-            std::vector<LocalContribution> radix_temp;
-            radix_temp.reserve(kFlushThreshold);
-            std::array<size_t, 257> count;
-
-            // Mirror of the complex radix-sort flush: O(n) sort by uint64
-            // index, then accumulate equal-key runs into one atomic update.
-            auto radix_sort_buffer = [&]() {
-                if (local_buffer.size() < 64) {
-                    std::sort(local_buffer.begin(), local_buffer.end(),
-                        [](const LocalContribution& a, const LocalContribution& b) {
-                            return a.index < b.index;
-                        });
-                    return;
-                }
-                radix_temp.resize(local_buffer.size());
-                LocalContribution* src = local_buffer.data();
-                LocalContribution* dst = radix_temp.data();
-                const size_t n = local_buffer.size();
-                const int num_bytes = (64 - __builtin_clzll(dim | 1) + 7) / 8;
-                for (int byte = 0; byte < num_bytes; ++byte) {
-                    const int shift = byte * 8;
-                    std::fill(count.begin(), count.end(), 0);
-                    for (size_t i = 0; i < n; ++i) {
-                        uint8_t bucket = (src[i].index >> shift) & 0xFF;
-                        count[bucket + 1]++;
-                    }
-                    for (int i = 1; i < 257; ++i) count[i] += count[i - 1];
-                    for (size_t i = 0; i < n; ++i) {
-                        uint8_t bucket = (src[i].index >> shift) & 0xFF;
-                        dst[count[bucket]++] = src[i];
-                    }
-                    std::swap(src, dst);
-                }
-                if (src != local_buffer.data()) {
-                    std::copy(radix_temp.begin(), radix_temp.end(), local_buffer.begin());
-                }
-            };
-
-            auto flush_buffer = [&]() {
-                if (local_buffer.empty()) return;
-                radix_sort_buffer();
-                uint64_t current_index = local_buffer.front().index;
-                double accumulated = local_buffer.front().value;
-                for (size_t entry = 1; entry < local_buffer.size(); ++entry) {
-                    const auto& item = local_buffer[entry];
-                    if (item.index == current_index) {
-                        accumulated += item.value;
-                    } else {
-                        #pragma omp atomic
-                        out[current_index] += accumulated;
-                        current_index = item.index;
-                        accumulated = item.value;
-                    }
-                }
-                #pragma omp atomic
-                out[current_index] += accumulated;
-                local_buffer.clear();
-            };
-
-            #pragma omp for schedule(dynamic, 1) nowait
-            for (uint64_t block = 0; block < num_blocks; ++block) {
-                const uint64_t block_start = block * kCacheBlockSize;
-                const uint64_t block_end = std::min(block_start + kCacheBlockSize, dim);
-
-                for (uint64_t basis = block_start; basis < block_end; ++basis) {
-                    const double coeff = in[basis];
-                    if (std::abs(coeff) < 1e-15) continue;
-
-                    if (basis + 8 < block_end) {
-                        __builtin_prefetch(&in[basis + 8], 0, 1);
-                    }
-
-                    for (const auto& t : diag_one_body_) {
-                        double sign = ((basis >> t.site_index) & 1) ? -1.0 : 1.0;
-                        double contrib = t.coefficient.real() * spin * sign * coeff;
-                        local_buffer.push_back({basis, contrib});
-                    }
-                    for (const auto& t : offdiag_one_body_) {
-                        uint64_t bit = (basis >> t.site_index) & 1;
-                        if (bit != t.op_type) {
-                            uint64_t new_basis = basis ^ (1ULL << t.site_index);
-                            double contrib = t.coefficient.real() * coeff;
-                            local_buffer.push_back({new_basis, contrib});
-                        }
-                    }
-                    for (const auto& t : diag_two_body_) {
-                        double sign_i = ((basis >> t.site_index_1) & 1) ? -1.0 : 1.0;
-                        double sign_j = ((basis >> t.site_index_2) & 1) ? -1.0 : 1.0;
-                        double contrib = t.coefficient.real() * spin_sq * sign_i * sign_j * coeff;
-                        local_buffer.push_back({basis, contrib});
-                    }
-                    for (const auto& t : mixed_two_body_) {
-                        uint64_t flip_bit = (basis >> t.flip_site) & 1;
-                        if (flip_bit != t.flip_op_type) {
-                            double sz_sign = ((basis >> t.sz_site) & 1) ? -1.0 : 1.0;
-                            uint64_t new_basis = basis ^ (1ULL << t.flip_site);
-                            double contrib = t.coefficient.real() * spin * sz_sign * coeff;
-                            local_buffer.push_back({new_basis, contrib});
-                        }
-                    }
-                    for (const auto& t : offdiag_two_body_) {
-                        uint64_t bit_1 = (basis >> t.site_index_1) & 1;
-                        uint64_t bit_2 = (basis >> t.site_index_2) & 1;
-                        if (bit_1 != t.op_type_1 && bit_2 != t.op_type_2) {
-                            uint64_t new_basis = basis ^ (1ULL << t.site_index_1) ^ (1ULL << t.site_index_2);
-                            double contrib = t.coefficient.real() * coeff;
-                            local_buffer.push_back({new_basis, contrib});
-                        }
-                    }
-                    for (const auto& tdata : three_body_data_) {
-                        uint64_t new_basis = basis;
-                        double scalar = tdata.coefficient.real();
-                        bool valid = true;
-                        if (tdata.op_type_1 == 2) {
-                            uint64_t bit_1 = (new_basis >> tdata.site_index_1) & 1;
-                            scalar *= spin * (bit_1 ? -1.0 : 1.0);
-                        } else {
-                            uint64_t bit_1 = (new_basis >> tdata.site_index_1) & 1;
-                            if (bit_1 != tdata.op_type_1) new_basis ^= (1ULL << tdata.site_index_1);
-                            else valid = false;
-                        }
-                        if (valid) {
-                            if (tdata.op_type_2 == 2) {
-                                uint64_t bit_2 = (new_basis >> tdata.site_index_2) & 1;
-                                scalar *= spin * (bit_2 ? -1.0 : 1.0);
-                            } else {
-                                uint64_t bit_2 = (new_basis >> tdata.site_index_2) & 1;
-                                if (bit_2 != tdata.op_type_2) new_basis ^= (1ULL << tdata.site_index_2);
-                                else valid = false;
-                            }
-                        }
-                        if (valid) {
-                            if (tdata.op_type_3 == 2) {
-                                uint64_t bit_3 = (new_basis >> tdata.site_index_3) & 1;
-                                scalar *= spin * (bit_3 ? -1.0 : 1.0);
-                            } else {
-                                uint64_t bit_3 = (new_basis >> tdata.site_index_3) & 1;
-                                if (bit_3 != tdata.op_type_3) new_basis ^= (1ULL << tdata.site_index_3);
-                                else valid = false;
-                            }
-                        }
-                        if (valid && std::abs(scalar) > 1e-15) {
-                            double contrib = scalar * coeff;
-                            local_buffer.push_back({new_basis, contrib});
-                        }
-                    }
-
-                    if (local_buffer.size() >= kFlushThreshold) flush_buffer();
-                }
-            }
-            flush_buffer();
-        }
+        const auto basis = ed::matvec::basis::make_full_basis(n_bits_);
+        ed::matvec::kernel::apply_terms<
+            ed::matvec::basis::FullBasisPolicy, double>(
+            basis, static_cast<double>(spin_l_),
+            diag_one_body_, offdiag_one_body_,
+            diag_two_body_, mixed_two_body_, offdiag_two_body_,
+            three_body_data_,
+            in, out);
     }
 
     /**

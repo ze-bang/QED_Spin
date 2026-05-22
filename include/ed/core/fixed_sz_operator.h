@@ -10,6 +10,8 @@
 // =============================================================================
 
 #include <ed/core/operator.h>
+#include <ed/matvec/basis_policy.h>
+#include <ed/matvec/term_kernels.h>
 
 // ============================================================================
 // Fixed Sz Operator Class
@@ -313,267 +315,23 @@ public:
             return;
         }
 
-        // Zero output
+        // Phase 3 of the matvec-unification revamp: matrix-free fallback
+        // delegates to the SHARED term kernel with the fixed-Sz basis
+        // policy. The cache-blocking, OpenMP scheduling, radix-sort
+        // flush, and atomic accumulator are now defined once in
+        // ed::matvec::kernel::apply_terms and reused identically here.
         std::fill(out, out + fixed_sz_dim_, Complex(0.0, 0.0));
-        
-        const double spin_sq = spin_l_ * spin_l_;
-        
-        // Ensure transforms are separated by type
         separateTransformsByType();
-        
-        // Cache blocking parameters
-        constexpr size_t kCacheBlockSize = 2048;
-        const uint64_t num_blocks = (fixed_sz_dim_ + kCacheBlockSize - 1) / kCacheBlockSize;
-        
-        #pragma omp parallel if(fixed_sz_dim_ > 10000)
-        {
-            struct LocalContribution {
-                uint64_t index;
-                Complex value;
-            };
 
-            constexpr size_t kFlushThreshold = 4096;
-            std::vector<LocalContribution> local_buffer;
-            local_buffer.reserve(kFlushThreshold);
-            
-            // Radix sort workspace
-            std::vector<LocalContribution> radix_temp;
-            radix_temp.reserve(kFlushThreshold);
-            std::array<size_t, 257> count;
-            
-            // Radix sort for O(n) performance
-            auto radix_sort_buffer = [&]() {
-                if (local_buffer.size() < 64) {
-                    std::sort(local_buffer.begin(), local_buffer.end(),
-                        [](const LocalContribution& a, const LocalContribution& b) {
-                            return a.index < b.index;
-                        });
-                    return;
-                }
-                
-                radix_temp.resize(local_buffer.size());
-                LocalContribution* src = local_buffer.data();
-                LocalContribution* dst = radix_temp.data();
-                const size_t n = local_buffer.size();
-                
-                // Only process bytes needed for fixed_sz_dim_
-                const int num_bytes = (64 - __builtin_clzll(fixed_sz_dim_ | 1) + 7) / 8;
-                
-                for (int byte = 0; byte < num_bytes; ++byte) {
-                    const int shift = byte * 8;
-                    
-                    std::fill(count.begin(), count.end(), 0);
-                    for (size_t i = 0; i < n; ++i) {
-                        uint8_t bucket = (src[i].index >> shift) & 0xFF;
-                        count[bucket + 1]++;
-                    }
-                    
-                    for (int i = 1; i < 257; ++i) {
-                        count[i] += count[i - 1];
-                    }
-                    
-                    for (size_t i = 0; i < n; ++i) {
-                        uint8_t bucket = (src[i].index >> shift) & 0xFF;
-                        dst[count[bucket]++] = src[i];
-                    }
-                    
-                    std::swap(src, dst);
-                }
-                
-                if (src != local_buffer.data()) {
-                    std::copy(radix_temp.begin(), radix_temp.end(), local_buffer.begin());
-                }
-            };
-
-            auto flush_buffer = [&]() {
-                if (local_buffer.empty()) return;
-
-                radix_sort_buffer();
-
-                uint64_t current_index = local_buffer.front().index;
-                Complex accumulated = local_buffer.front().value;
-
-                for (size_t entry = 1; entry < local_buffer.size(); ++entry) {
-                    const auto& item = local_buffer[entry];
-                    if (item.index == current_index) {
-                        accumulated += item.value;
-                    } else {
-                        double* out_ptr = reinterpret_cast<double*>(&out[current_index]);
-                        #pragma omp atomic
-                        out_ptr[0] += accumulated.real();
-                        #pragma omp atomic
-                        out_ptr[1] += accumulated.imag();
-
-                        current_index = item.index;
-                        accumulated = item.value;
-                    }
-                }
-
-                double* out_ptr = reinterpret_cast<double*>(&out[current_index]);
-                #pragma omp atomic
-                out_ptr[0] += accumulated.real();
-                #pragma omp atomic
-                out_ptr[1] += accumulated.imag();
-
-                local_buffer.clear();
-            };
-
-            // Process basis states in cache-friendly blocks
-            #pragma omp for schedule(dynamic, 1) nowait
-            for (uint64_t block = 0; block < num_blocks; ++block) {
-                const uint64_t block_start = block * kCacheBlockSize;
-                const uint64_t block_end = std::min(block_start + kCacheBlockSize, fixed_sz_dim_);
-                
-                for (uint64_t i = block_start; i < block_end; ++i) {
-                    Complex coeff = in[i];
-                    if (std::abs(coeff) < 1e-15) continue;
-                    
-                    uint64_t basis_i = basis_states_[i];
-                    
-                    // Prefetch ahead
-                    if (i + 8 < block_end) {
-                        __builtin_prefetch(&basis_states_[i + 8], 0, 1);
-                        __builtin_prefetch(&in[i + 8], 0, 1);
-                    }
-                    
-                    // ============================================================
-                    // BRANCH-FREE LOOPS: Each loop has uniform operations
-                    // ============================================================
-                    
-                    // 1. One-body diagonal (Sz): always stays in same Sz sector (i -> i)
-                    for (const auto& t : diag_one_body_) {
-                        double sign = ((basis_i >> t.site_index) & 1) ? -1.0 : 1.0;
-                        Complex contrib = t.coefficient * static_cast<double>(spin_l_) * sign * coeff;
-                        local_buffer.push_back({i, contrib});  // Diagonal: output index = input index
-                    }
-                    
-                    // 2. One-body off-diagonal (S+/S-): changes Sz by ±1, NOT in same sector
-                    //    Skip these for Sz-conserving Hamiltonians (they give zero contribution)
-                    //    Only process if this is an observable operator, not the Hamiltonian
-                    for (const auto& t : offdiag_one_body_) {
-                        uint64_t bit = (basis_i >> t.site_index) & 1;
-                        if (bit != t.op_type) {
-                            uint64_t new_basis = basis_i ^ (1ULL << t.site_index);
-                            // This changes n_up by ±1, so state is NOT in the fixed Sz sector.
-                            // Lin lookup will return -1 via the popcount check.
-                            int64_t j = lookupState(new_basis);
-                            if (j >= 0) {
-                                Complex contrib = t.coefficient * coeff;
-                                local_buffer.push_back({static_cast<uint64_t>(j), contrib});
-                            }
-                        }
-                    }
-                    
-                    // 3. Two-body diagonal (Sz_i Sz_j): always stays in same sector (i -> i)
-                    for (const auto& t : diag_two_body_) {
-                        double sign_i = ((basis_i >> t.site_index_1) & 1) ? -1.0 : 1.0;
-                        double sign_j = ((basis_i >> t.site_index_2) & 1) ? -1.0 : 1.0;
-                        Complex contrib = t.coefficient * spin_sq * sign_i * sign_j * coeff;
-                        local_buffer.push_back({i, contrib});  // Diagonal
-                    }
-                    
-                    // 4. Two-body mixed (Sz * S+/S-): changes Sz by ±1, NOT in sector
-                    for (const auto& t : mixed_two_body_) {
-                        uint64_t flip_bit = (basis_i >> t.flip_site) & 1;
-                        if (flip_bit != t.flip_op_type) {
-                            uint64_t new_basis = basis_i ^ (1ULL << t.flip_site);
-                            int64_t j = lookupState(new_basis);
-                            if (j >= 0) {
-                                double sz_sign = ((basis_i >> t.sz_site) & 1) ? -1.0 : 1.0;
-                                Complex contrib = t.coefficient * static_cast<double>(spin_l_) * sz_sign * coeff;
-                                local_buffer.push_back({static_cast<uint64_t>(j), contrib});
-                            }
-                        }
-                    }
-                    
-                    // 5. Two-body off-diagonal (S+_i S-_j): conserves Sz if op_type_1 != op_type_2
-                    for (const auto& t : offdiag_two_body_) {
-                        uint64_t bit_1 = (basis_i >> t.site_index_1) & 1;
-                        uint64_t bit_2 = (basis_i >> t.site_index_2) & 1;
-                        if (bit_1 != t.op_type_1 && bit_2 != t.op_type_2) {
-                            uint64_t new_basis = basis_i ^ (1ULL << t.site_index_1) ^ (1ULL << t.site_index_2);
-                            // Lin O(1) lookup -- new_basis preserves popcount so this never returns -1
-                            // for a well-formed Sz-conserving Hamiltonian.
-                            int64_t j = lookupState(new_basis);
-                            if (j >= 0) {
-                                Complex contrib = t.coefficient * coeff;
-                                local_buffer.push_back({static_cast<uint64_t>(j), contrib});
-                            }
-                        }
-                    }
-                    
-                    // 6. Three-body terms
-                    for (const auto& tdata : three_body_data_) {
-                        uint64_t new_basis = basis_i;
-                        Complex scalar = tdata.coefficient;
-                        bool valid = true;
-                        
-                        // Apply first operator
-                        if (tdata.op_type_1 == 2) {
-                            uint64_t bit_1 = (new_basis >> tdata.site_index_1) & 1;
-                            double sign_1 = bit_1 ? -1.0 : 1.0;
-                            scalar *= static_cast<double>(spin_l_) * sign_1;
-                        } else {
-                            uint64_t bit_1 = (new_basis >> tdata.site_index_1) & 1;
-                            if (bit_1 != tdata.op_type_1) {
-                                new_basis ^= (1ULL << tdata.site_index_1);
-                            } else {
-                                valid = false;
-                            }
-                        }
-                        
-                        // Apply second operator
-                        if (valid) {
-                            if (tdata.op_type_2 == 2) {
-                                uint64_t bit_2 = (new_basis >> tdata.site_index_2) & 1;
-                                double sign_2 = bit_2 ? -1.0 : 1.0;
-                                scalar *= static_cast<double>(spin_l_) * sign_2;
-                            } else {
-                                uint64_t bit_2 = (new_basis >> tdata.site_index_2) & 1;
-                                if (bit_2 != tdata.op_type_2) {
-                                    new_basis ^= (1ULL << tdata.site_index_2);
-                                } else {
-                                    valid = false;
-                                }
-                            }
-                        }
-                        
-                        // Apply third operator
-                        if (valid) {
-                            if (tdata.op_type_3 == 2) {
-                                uint64_t bit_3 = (new_basis >> tdata.site_index_3) & 1;
-                                double sign_3 = bit_3 ? -1.0 : 1.0;
-                                scalar *= static_cast<double>(spin_l_) * sign_3;
-                            } else {
-                                uint64_t bit_3 = (new_basis >> tdata.site_index_3) & 1;
-                                if (bit_3 != tdata.op_type_3) {
-                                    new_basis ^= (1ULL << tdata.site_index_3);
-                                } else {
-                                    valid = false;
-                                }
-                            }
-                        }
-                        
-                        // Lin O(1) lookup (popcount check inside handles the
-                        // non-Sz-conserving case where new_basis is outside the basis).
-                        if (valid && std::abs(scalar) > 1e-15) {
-                            int64_t j = lookupState(new_basis);
-                            if (j >= 0) {
-                                Complex contrib = scalar * coeff;
-                                local_buffer.push_back({static_cast<uint64_t>(j), contrib});
-                            }
-                        }
-                    }
-                    
-                    // Flush if buffer is getting full
-                    if (local_buffer.size() >= kFlushThreshold) {
-                        flush_buffer();
-                    }
-                }
-            }
-
-            flush_buffer();
-        }
+        const auto basis = ed::matvec::basis::make_fixed_sz_basis(
+            basis_states_, lin_index_);
+        ed::matvec::kernel::apply_terms<
+            ed::matvec::basis::FixedSzBasisPolicy, Complex>(
+            basis, static_cast<double>(spin_l_),
+            diag_one_body_, offdiag_one_body_,
+            diag_two_body_, mixed_two_body_, offdiag_two_body_,
+            three_body_data_,
+            in, out);
     }
     
     /**
