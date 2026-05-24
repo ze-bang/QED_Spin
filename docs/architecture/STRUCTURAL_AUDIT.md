@@ -1349,15 +1349,34 @@ Both are tracked as discrete follow-up tasks.
 
 | Counter                                  | Before     | After      | Δ      |
 |------------------------------------------|-----------:|-----------:|-------:|
-| Total source files (cpp + cu + h)        | ~330       | ~324       | -6     |
+| Total source files (cpp + cu + h)        | ~330       | ~322       | -8     |
 | `include/ed/auto/` headers               | 5          | 0          | -5     |
 | `include/ed/core/ed_dispatch_symmetry.h` | 1          | 0          | -1     |
+| `include/ed/core/hdf5_symmetry_io.h`     | 1          | 0          | -1     |
+| `include/ed/distributed/multi_gpu_stub.h`| 1          | 0          | -1     |
 | `include/ed/gpu/gpu_dynamics.{cuh,cu}`   | 2          | 0          | -2     |
-| LOC (incl. tests, excl. docs)            | ~85 600    | ~81 900    | -3 700 |
+| LOC (incl. tests, excl. docs)            | ~85 600    | ~81 400    | -4 200 |
 
 Final tree after the full sweep completes will be ~67 K LOC; the
 intermediate landing here is the **safe** subset that keeps every
 binary, test, and example green.
+
+## VII.4.1 Day-17 follow-up dead-header subtraction
+
+After the main sweep landed, a header-graph re-scan (compute the
+in-degree of every `include/ed/**/*.h{,cuh}` across `src/`, `tests/`,
+`benchmarks/`, `examples/`, `python/`) surfaced three headers with
+exactly **zero** `#include` references anywhere in the tree:
+
+| Header                                          | LOC  | Disposition |
+|-------------------------------------------------|-----:|-------------|
+| `include/ed/core/hdf5_symmetry_io.h`            | 496  | **Deleted** — symmetry path migrated to the streaming kernel; the on-disk basis/block file format this header described is no longer materialised. |
+| `include/ed/distributed/multi_gpu_stub.h`       |  16  | **Deleted** — pure forwarding shim that just `#include`d the real `multi_gpu.h` after Phase 3c promoted the stub API to a real implementation. |
+| `include/ed/core/make_operator.h`               | 168  | **Kept** — documented future API surface (the `ed::make_operator(OperatorSpec)` factory) referenced from `CHANGELOG.md`, `docs/MIGRATION.md`, `docs/architecture/ARCHITECTURE.md`. The Phase 4 CLI migration is the planned first consumer. |
+
+Net day-17 subtraction: **512 LOC** across 2 files. The two deletions
+do not touch any active API surface; the build and all 271 unit tests
+remain green.
 
 ## VII.5 Day-17 perf-polish follow-up
 

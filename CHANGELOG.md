@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Day-17 follow-up — header-graph dead-code subtraction (May 2026)
+
+Re-scanned the include graph after the main cleanup sweep and found two
+genuinely unreachable headers (zero `#include` references anywhere in
+`src/`, `tests/`, `benchmarks/`, `examples/`, `python/`):
+
+* **`include/ed/core/hdf5_symmetry_io.h` (496 LOC) — deleted**. Defined
+  the `HDF5SymmetryIO` class for sparse symmetry-basis / block-Hamiltonian
+  HDF5 I/O. The symmetry path migrated to the streaming kernel in
+  `ed/core/ed_wrapper_streaming.h` (matrix-free per sector), so the
+  on-disk basis/block format this header described is no longer
+  materialised. The companion `.cpp` was already removed in an earlier
+  sweep; this finishes the removal.
+* **`include/ed/distributed/multi_gpu_stub.h` (16 LOC) — deleted**.
+  Backwards-compat shim that just forwarded to `ed/distributed/multi_gpu.h`
+  after Phase 3c promoted the stub API to a real implementation.
+  Historical doc mentions in `docs/history/PHASE_3_SUMMARY.md` are
+  intentionally preserved.
+
+`include/ed/core/make_operator.h` (168 LOC) was also flagged with zero
+includers but kept: it's the documented future-API surface referenced
+from CHANGELOG / MIGRATION.md / ARCHITECTURE.md and is the planned
+first-consumer target for the Phase 4 CLI migration.
+
+Net subtraction this day: **512 LOC** across 2 files. Tree size table in
+`STRUCTURAL_AUDIT.md` VII.4 refreshed: total source files 324 → 322,
+LOC (incl. tests, excl. docs) ~81 900 → ~81 400. Build green; 271/271
+tests pass in isolation (2 intermittent ctest failures remain in
+parallel runs — known parallel-HDF5 contention races, both pass solo).
+
 ### Orchestrator Lanczos lane — perf tuning + small dead-code subtraction (May 2026, day 17)
 
 Follow-up to the cleanup sweep that closes part of the ~1.45× constant
