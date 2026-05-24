@@ -60,6 +60,10 @@ struct KpmDosResult {
     double e_max_estimate = 0.0;
 };
 
+// Wave B (Full unified-interface collapse, May 2026): the driver in
+// `src/solvers/cpu/kpm_dos.cpp::compute_kpm_dos` is CPU-host today.
+// Guard against silent miscalibration when the orchestrator hands
+// the kernel a device backend.
 template <typename Backend, typename MatvecFn>
 KpmDosResult kpm_dos_kernel(const Backend& /*backend*/,
                             MatvecFn&&     apply_H,
@@ -67,6 +71,11 @@ KpmDosResult kpm_dos_kernel(const Backend& /*backend*/,
                             std::uint64_t  /*global_n*/,
                             const KpmDosOptions& opts)
 {
+    static_assert(
+        std::is_same_v<Backend, ed::matvec::CpuBackend>,
+        "kpm_dos_kernel: only CpuBackend is supported today. See "
+        "ftlm_kernel.h for the wave-b-thermal context.");
+
     ed::kpm_dos::KPMDOSParameters params;
     params.num_moments             = opts.num_moments;
     params.num_random_vectors      = opts.num_random_vectors;

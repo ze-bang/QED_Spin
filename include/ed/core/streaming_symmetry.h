@@ -556,6 +556,49 @@ public:
 
         [[nodiscard]] std::size_t sector_index() const noexcept { return sector_idx_; }
 
+        // ----------------------------------------------------------
+        // bind_<Backend> overrides (Wave A2 -- Full unified-interface
+        // collapse, May 2026).
+        //
+        // SectorView is host-resident; `apply()` calls
+        // `op_->applySymmetrized(sector_idx, in, out)` which is the
+        // host-side symmetry-projected matvec. `bind_cpu` is the
+        // supported lane. The GPU-side symmetrized apply
+        // (`GPUSymmetrizedOperator::matVecGPU`, defined in
+        // src/solvers/gpu/gpu_symmetrized_operator.cu) is a separate
+        // type with its own term storage; integrating it into
+        // SectorView::bind_cuda would require holding a
+        // GPUSymmetrizedOperator alongside the host view, which is
+        // out of scope for this wave. Callers needing the GPU lane
+        // construct GPUSymmetrizedOperator directly today.
+        // ----------------------------------------------------------
+        [[nodiscard]] MatvecFn bind_cpu() const override {
+            return [this](const ed::matvec::Complex* in,
+                          ed::matvec::Complex* out, std::size_t n) {
+                this->apply(in, out, n);
+            };
+        }
+        [[nodiscard]] MatvecFn bind_cuda() const override {
+            throw std::runtime_error(
+                "StreamingSymmetryOperator::SectorView: bind_cuda() is "
+                "not supported -- this view is host-resident. The GPU "
+                "symmetrized lane goes through GPUSymmetrizedOperator "
+                "(src/solvers/gpu/gpu_symmetrized_operator.cu); "
+                "construct that type directly when running on the "
+                "GPU.");
+        }
+        [[nodiscard]] MatvecFn bind_mpi() const override {
+            throw std::runtime_error(
+                "StreamingSymmetryOperator::SectorView: bind_mpi() is "
+                "not supported -- for the MPI lane use "
+                "ed::distributed::DistributedSymmetryOperator.");
+        }
+        [[nodiscard]] MatvecFn bind_mpi_cuda() const override {
+            throw std::runtime_error(
+                "StreamingSymmetryOperator::SectorView: bind_mpi_cuda() "
+                "is not supported.");
+        }
+
     private:
         const StreamingSymmetryOperator* op_;
         std::size_t                      sector_idx_;

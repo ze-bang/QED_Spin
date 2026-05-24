@@ -93,19 +93,27 @@ GroundStateResult solve_on(Backend& be,
     const auto t0 = std::chrono::steady_clock::now();
 
     // Deterministic-ish seed for reproducibility within a single process.
-    std::vector<Complex> seed(geom.local_dim);
+    // The kernel expects the seed in the backend's memory space (host for
+    // CPU/MPI, device for CUDA/MPI+CUDA). Build the seed on host first then
+    // stage through `copy_from_host` into a backend-allocated vector so the
+    // kernel's internal `be.copy(seed -> v_curr)` (which is a D2D for CUDA)
+    // is given a properly-resident pointer.
+    std::vector<Complex> seed_host(geom.local_dim);
     {
         std::mt19937_64 gen(0xCAFEBABEULL);
         std::normal_distribution<double> nd(0.0, 1.0);
         double sumsq = 0.0;
-        for (auto& z : seed) {
+        for (auto& z : seed_host) {
             const double a = nd(gen), b = nd(gen);
             z = Complex(a, b);
             sumsq += a * a + b * b;
         }
         const double inv = (sumsq > 0.0) ? (1.0 / std::sqrt(sumsq)) : 1.0;
-        for (auto& z : seed) z *= inv;
+        for (auto& z : seed_host) z *= inv;
     }
+    auto seed_backend = be.make_zero_vector(geom.local_dim);
+    be.copy_from_host(seed_host.data(), seed_backend.get(), geom.local_dim);
+    const Complex* seed = seed_backend.get();
 
     if (method == SolveMethod::Lanczos) {
         ed::krylov::LanczosKernelOptions kopts;
@@ -125,7 +133,7 @@ GroundStateResult solve_on(Backend& be,
         // every-5 introduced ~5 extra iters of overhead before triggering.
         kopts.convergence_check_interval = 1;
         auto kres = ed::krylov::lanczos_kernel(be, matvec, geom.local_dim,
-                                               seed.data(), kopts);
+                                               seed, kopts);
         // Solve the small (m x m) real-symmetric tridiagonal for the
         // lowest `num_eigs` eigenvalues. When the caller didn't request
         // eigenvectors, use the eigenvalues-only Eigen path -- the
@@ -168,7 +176,7 @@ GroundStateResult solve_on(Backend& be,
         kopts.global_n        = geom.global_dim;
         kopts.output_dir      = opts.output_dir;
         auto kres = ed::krylov::krylov_schur_kernel(be, matvec,
-            geom.local_dim, seed.data(), kopts);
+            geom.local_dim, seed, kopts);
         R.eigenvalues = std::move(kres.eigenvalues);
         R.krylov.iters_done = kres.iters_done;
         R.krylov.converged  = kres.converged;
@@ -177,27 +185,119 @@ GroundStateResult solve_on(Backend& be,
         // basis vector and run LAPACK zheevd via the legacy
         // `full_diagonalization` helper. The orchestrator only takes this
         // path for small dimensions (<= 2^12 by default) so the O(N^3)
-        // dense step is affordable. Distributed lane is intentionally
-        // unsupported here -- a distributed full-diag would need
-        // ScaLAPACK redistribution.
+        // dense step is affordable.
+        //
+        // Distributed path (Wave A4 -- Full unified-interface collapse,
+        // May 2026): gather the per-rank slab matvecs onto rank 0,
+        // assemble the dense matrix there, run zheevd on rank 0, then
+        // MPI_Bcast the eigenvalues. This trades the simplicity of a
+        // ScaLAPACK redistribution for not introducing a new dependency,
+        // and is correct precisely in the regime where FullDiag is the
+        // orchestrator's chosen method (global_dim <= 2^12 -- ~12-13 MB
+        // of dense complex<double> on rank 0). A ScaLAPACK path can
+        // replace this when callers exercise FullDiag at larger
+        // distributed dims.
+#ifdef WITH_MPI
         if (geom.is_distributed()) {
-            throw std::runtime_error("ed::solve: FullDiag lane is not "
-                                      "supported on the distributed Backend; "
-                                      "use a Krylov method instead.");
+            int mpi_rank = 0, mpi_size = 1;
+            MPI_Comm_rank(geom.comm, &mpi_rank);
+            MPI_Comm_size(geom.comm, &mpi_size);
+
+            const auto Nlocal  = static_cast<int>(geom.local_dim);
+            const auto Nglobal = static_cast<int>(geom.global_dim);
+
+            std::vector<int> recv_counts(mpi_size, 0);
+            std::vector<int> recv_displs(mpi_size, 0);
+            MPI_Allgather(&Nlocal, 1, MPI_INT,
+                          recv_counts.data(), 1, MPI_INT, geom.comm);
+            for (int r = 1; r < mpi_size; ++r) {
+                recv_displs[r] = recv_displs[r-1] + recv_counts[r-1];
+            }
+
+            // Dense matrix on rank 0; null elsewhere.
+            std::vector<Complex> H_dense;
+            if (mpi_rank == 0) {
+                H_dense.assign(static_cast<std::size_t>(Nglobal)
+                               * static_cast<std::size_t>(Nglobal),
+                               Complex{0.0, 0.0});
+            }
+
+            // For each column k: build e_k as a slab-distributed
+            // vector, apply H to get H * e_k (per-rank y_local),
+            // gather y_local onto rank 0 into column k of H_dense.
+            std::vector<Complex> ek_local(Nlocal, Complex{0.0, 0.0});
+            std::vector<Complex> y_local(Nlocal, Complex{0.0, 0.0});
+            for (int k = 0; k < Nglobal; ++k) {
+                // Set e_k on the rank that owns global index k.
+                std::fill(ek_local.begin(), ek_local.end(),
+                          Complex{0.0, 0.0});
+                const std::uint64_t lo = geom.local_offset;
+                const std::uint64_t hi = lo + Nlocal;
+                if (static_cast<std::uint64_t>(k) >= lo
+                    && static_cast<std::uint64_t>(k) < hi) {
+                    ek_local[static_cast<std::size_t>(
+                        static_cast<std::uint64_t>(k) - lo)] =
+                        Complex{1.0, 0.0};
+                }
+
+                matvec(ek_local.data(), y_local.data(),
+                       static_cast<std::size_t>(Nlocal));
+
+                // Gather column k onto rank 0.
+                Complex* col_ptr = (mpi_rank == 0)
+                    ? &H_dense[static_cast<std::size_t>(k)
+                               * static_cast<std::size_t>(Nglobal)]
+                    : nullptr;
+                MPI_Gatherv(
+                    y_local.data(), Nlocal, MPI_DOUBLE_COMPLEX,
+                    col_ptr, recv_counts.data(), recv_displs.data(),
+                    MPI_DOUBLE_COMPLEX, /*root=*/0, geom.comm);
+            }
+
+            std::vector<double> eigs(Nglobal, 0.0);
+            if (mpi_rank == 0) {
+                std::function<void(const Complex*, Complex*, int)> Hv =
+                    [&](const Complex* in, Complex* out, int n) {
+                        // Apply H_dense (column-major) once per call.
+                        for (int i = 0; i < n; ++i) {
+                            Complex acc{0.0, 0.0};
+                            for (int j = 0; j < n; ++j) {
+                                acc += H_dense[static_cast<std::size_t>(j)
+                                                * static_cast<std::size_t>(n)
+                                                + static_cast<std::size_t>(i)]
+                                    * in[j];
+                            }
+                            out[i] = acc;
+                        }
+                    };
+                full_diagonalization(Hv, static_cast<std::size_t>(Nglobal),
+                                     opts.num_eigs, eigs,
+                                     opts.output_dir,
+                                     opts.compute_vectors);
+            }
+            MPI_Bcast(eigs.data(), Nglobal, MPI_DOUBLE, 0, geom.comm);
+            const std::size_t n_keep = std::min<std::size_t>(
+                opts.num_eigs, static_cast<std::size_t>(Nglobal));
+            R.eigenvalues.assign(eigs.begin(), eigs.begin() + n_keep);
+            R.krylov.iters_done = 0;
+            R.krylov.converged  = true;
+        } else
+#endif
+        {
+            std::function<void(const Complex*, Complex*, int)> Hv =
+                [&](const Complex* in, Complex* out, int n) {
+                    matvec(in, out, static_cast<std::size_t>(n));
+                };
+            std::vector<double> eigs;
+            full_diagonalization(Hv, geom.local_dim, opts.num_eigs, eigs,
+                                 opts.output_dir,
+                                 opts.compute_vectors);
+            const std::size_t n_keep = std::min<std::size_t>(
+                opts.num_eigs, eigs.size());
+            R.eigenvalues.assign(eigs.begin(), eigs.begin() + n_keep);
+            R.krylov.iters_done = 0;
+            R.krylov.converged  = true;
         }
-        std::function<void(const Complex*, Complex*, int)> Hv =
-            [&](const Complex* in, Complex* out, int n) {
-                matvec(in, out, static_cast<std::size_t>(n));
-            };
-        std::vector<double> eigs;
-        full_diagonalization(Hv, geom.local_dim, opts.num_eigs, eigs,
-                             opts.output_dir,
-                             opts.compute_vectors);
-        const std::size_t n_keep = std::min<std::size_t>(
-            opts.num_eigs, eigs.size());
-        R.eigenvalues.assign(eigs.begin(), eigs.begin() + n_keep);
-        R.krylov.iters_done = 0;
-        R.krylov.converged  = true;
     }
 
     R.backend.lane = (geom.is_distributed() ? "mpi" : "cpu");
@@ -288,62 +388,91 @@ ThermalResult thermal(const LinearOperator& H, ThermalOptions opts) {
                 ? 0.0 : *std::min_element(kres.energies.begin(), kres.energies.end());
         }, variant);
     } else if (opts.method == ThermalOptions::Method::FTLM) {
+        // Wave B (Full unified-interface collapse, May 2026): the
+        // FTLM/LTLM/KpmDos kernel facades are static_assert-gated to
+        // `CpuBackend` (see ftlm_kernel.h). Filter to that variant
+        // alternative explicitly so the std::visit doesn't try to
+        // instantiate the template against CudaBackend / MpiBackend.
         std::visit([&](auto& backend_uptr) {
             using BPtr = std::decay_t<decltype(backend_uptr)>;
             using B = typename BPtr::element_type;
-            ed::thermal::FtlmOptions kopts;
-            kopts.num_samples = opts.num_samples;
-            kopts.krylov_dim  = opts.krylov_dim ? opts.krylov_dim : 100;
-            kopts.betas       = opts.betas;
-            kopts.random_seed = opts.random_seed;
-            kopts.output_dir  = opts.output_dir;
-            auto matvec = H.template bind<B>();
-            auto kres = ed::thermal::ftlm_kernel<B>(
-                *backend_uptr, matvec, H.geometry().local_dim,
-                H.geometry().global_dim, kopts);
-            R.thermo.energy = std::move(kres.energy);
-            R.thermo.specific_heat = std::move(kres.heat_capacity);
-            R.thermo.entropy = std::move(kres.entropy);
+            if constexpr (!std::is_same_v<B, ed::matvec::CpuBackend>) {
+                throw std::runtime_error(
+                    "ed::thermal: FTLM lane requires a CpuBackend "
+                    "today; the inner driver is host-side. Pin "
+                    "BackendConstraints::allow_gpu = false / "
+                    "allow_mpi = false to route through the CPU "
+                    "lane explicitly.");
+            } else {
+                ed::thermal::FtlmOptions kopts;
+                kopts.num_samples = opts.num_samples;
+                kopts.krylov_dim  = opts.krylov_dim ? opts.krylov_dim : 100;
+                kopts.betas       = opts.betas;
+                kopts.random_seed = opts.random_seed;
+                kopts.output_dir  = opts.output_dir;
+                auto matvec = H.template bind<B>();
+                auto kres = ed::thermal::ftlm_kernel<B>(
+                    *backend_uptr, matvec, H.geometry().local_dim,
+                    H.geometry().global_dim, kopts);
+                R.thermo.energy = std::move(kres.energy);
+                R.thermo.specific_heat = std::move(kres.heat_capacity);
+                R.thermo.entropy = std::move(kres.entropy);
+            }
             R.ground_state_energy = R.thermo.energy.empty()
                 ? 0.0
                 : *std::min_element(R.thermo.energy.begin(), R.thermo.energy.end());
         }, variant);
     } else if (opts.method == ThermalOptions::Method::LTLM) {
+        // Wave B: LTLM is CPU-only today (static_assert in ltlm_kernel.h).
         std::visit([&](auto& backend_uptr) {
             using BPtr = std::decay_t<decltype(backend_uptr)>;
             using B = typename BPtr::element_type;
-            ed::thermal::LtlmOptions kopts;
-            kopts.num_samples         = opts.num_samples;
-            kopts.krylov_dim          = opts.krylov_dim ? opts.krylov_dim : 200;
-            kopts.ground_state_krylov = opts.krylov_dim ? opts.krylov_dim : 100;
-            kopts.betas               = opts.betas;
-            kopts.random_seed         = opts.random_seed;
-            kopts.output_dir          = opts.output_dir;
-            auto matvec = H.template bind<B>();
-            auto kres = ed::thermal::ltlm_kernel<B>(
-                *backend_uptr, matvec, H.geometry().local_dim,
-                H.geometry().global_dim, kopts);
-            R.thermo.energy = std::move(kres.energy);
-            R.thermo.specific_heat = std::move(kres.heat_capacity);
-            R.thermo.entropy = std::move(kres.entropy);
-            R.ground_state_energy = kres.ground_state_energy;
+            if constexpr (!std::is_same_v<B, ed::matvec::CpuBackend>) {
+                throw std::runtime_error(
+                    "ed::thermal: LTLM lane requires a CpuBackend "
+                    "today; pin BackendConstraints to route via the "
+                    "CPU lane.");
+            } else {
+                ed::thermal::LtlmOptions kopts;
+                kopts.num_samples         = opts.num_samples;
+                kopts.krylov_dim          = opts.krylov_dim ? opts.krylov_dim : 200;
+                kopts.ground_state_krylov = opts.krylov_dim ? opts.krylov_dim : 100;
+                kopts.betas               = opts.betas;
+                kopts.random_seed         = opts.random_seed;
+                kopts.output_dir          = opts.output_dir;
+                auto matvec = H.template bind<B>();
+                auto kres = ed::thermal::ltlm_kernel<B>(
+                    *backend_uptr, matvec, H.geometry().local_dim,
+                    H.geometry().global_dim, kopts);
+                R.thermo.energy = std::move(kres.energy);
+                R.thermo.specific_heat = std::move(kres.heat_capacity);
+                R.thermo.entropy = std::move(kres.entropy);
+                R.ground_state_energy = kres.ground_state_energy;
+            }
         }, variant);
     } else if (opts.method == ThermalOptions::Method::KpmDos) {
+        // Wave B: KpmDos is CPU-only today (static_assert in kpm_dos_kernel.h).
         std::visit([&](auto& backend_uptr) {
             using BPtr = std::decay_t<decltype(backend_uptr)>;
             using B = typename BPtr::element_type;
-            ed::thermal::KpmDosOptions kopts;
-            kopts.betas = opts.betas;
-            kopts.random_seed = opts.random_seed;
-            auto matvec = H.template bind<B>();
-            auto kres = ed::thermal::kpm_dos_kernel<B>(
-                *backend_uptr, matvec, H.geometry().local_dim,
-                H.geometry().global_dim, kopts);
-            R.thermo.energy = std::move(kres.energy);
-            R.thermo.specific_heat = std::move(kres.specific_heat);
-            R.thermo.entropy = std::move(kres.entropy);
-            R.thermo.free_energy = std::move(kres.free_energy);
-            R.ground_state_energy = kres.e_min_estimate;
+            if constexpr (!std::is_same_v<B, ed::matvec::CpuBackend>) {
+                throw std::runtime_error(
+                    "ed::thermal: KpmDos lane requires a CpuBackend "
+                    "today.");
+            } else {
+                ed::thermal::KpmDosOptions kopts;
+                kopts.betas = opts.betas;
+                kopts.random_seed = opts.random_seed;
+                auto matvec = H.template bind<B>();
+                auto kres = ed::thermal::kpm_dos_kernel<B>(
+                    *backend_uptr, matvec, H.geometry().local_dim,
+                    H.geometry().global_dim, kopts);
+                R.thermo.energy = std::move(kres.energy);
+                R.thermo.specific_heat = std::move(kres.specific_heat);
+                R.thermo.entropy = std::move(kres.entropy);
+                R.thermo.free_energy = std::move(kres.free_energy);
+                R.ground_state_energy = kres.e_min_estimate;
+            }
         }, variant);
     } else {
         throw std::runtime_error(
@@ -406,22 +535,28 @@ SpectralResult spectral(const LinearOperator&                      H,
         // "compute_dynamical_correlation_state_cf" code path that takes an
         // arbitrary input state). Use it that way for now; a future
         // tightening will plumb the actual eigenvector through.
-        std::vector<Complex> seed(H.geometry().local_dim);
+        std::vector<Complex> seed_host(H.geometry().local_dim);
         {
             std::mt19937_64 gen(0xC0FFEEULL);
             std::normal_distribution<double> nd(0.0, 1.0);
             double sumsq = 0.0;
-            for (auto& z : seed) {
+            for (auto& z : seed_host) {
                 const double a = nd(gen), b = nd(gen);
                 z = Complex(a, b);
                 sumsq += a * a + b * b;
             }
             const double inv = (sumsq > 0.0) ? (1.0 / std::sqrt(sumsq)) : 1.0;
-            for (auto& z : seed) z *= inv;
+            for (auto& z : seed_host) z *= inv;
         }
         std::visit([&](auto& backend_uptr) {
             using BPtr = std::decay_t<decltype(backend_uptr)>;
             using B = typename BPtr::element_type;
+            // Stage the host seed into backend-resident memory; the kernel
+            // expects pointers in the backend's address space.
+            auto seed_backend =
+                backend_uptr->make_zero_vector(H.geometry().local_dim);
+            backend_uptr->copy_from_host(seed_host.data(), seed_backend.get(),
+                                         H.geometry().local_dim);
             ed::observables::CfSpectralOptions cfopts;
             cfopts.krylov_dim   = opts.krylov_dim;
             cfopts.broadening   = opts.broadening;
@@ -432,15 +567,67 @@ SpectralResult spectral(const LinearOperator&                      H,
             auto kres = ed::observables::cf_spectral_kernel(
                 *backend_uptr, matvec_h, matvec_o,
                 H.geometry().local_dim,
-                seed.data(), R.omega, cfopts);
+                seed_backend.get(), R.omega, cfopts);
             R.S_real = std::move(kres.spectral_function);
         }, variant);
         R.S_imag.assign(opts.num_omega, 0.0);
     } else {
-        throw std::runtime_error(
-            "ed::spectral: FtlmDynamical lane not yet wired through the "
-            "orchestrator; use the legacy compute_dynamical_correlation_*"
-            " entry point.");
+        // FtlmDynamical lane (Wave A4 -- Full unified-interface
+        // collapse, May 2026): finite-temperature dynamical correlator
+        // via the legacy FTLM CF-Lanczos routine. We delegate to the
+        // existing `compute_dynamical_correlation` body since it is the
+        // single source of truth for the FTLM dynamical pipeline and
+        // already handles multi-sample averaging + per-temperature
+        // weighting. The orchestrator's first landing keeps the
+        // temperature axis at the legacy default (T = 0); per-T
+        // scanning is plumbed through the CLI / Python entry points
+        // until the SpectralOptions struct grows a `temperatures`
+        // vector (Wave A5).
+        if (observables.size() < 1) {
+            throw std::invalid_argument(
+                "ed::spectral: FtlmDynamical requires at least one "
+                "observable.");
+        }
+        const LinearOperator& O1 = *observables.front();
+        const LinearOperator& O2 = (observables.size() >= 2)
+            ? *observables[1] : O1;
+
+        std::function<void(const Complex*, Complex*, int)> H_apply =
+            [&H](const Complex* in, Complex* out, int n) {
+                H.apply(in, out, static_cast<std::size_t>(n));
+            };
+        std::function<void(const Complex*, Complex*, int)> O1_apply =
+            [&O1](const Complex* in, Complex* out, int n) {
+                O1.apply(in, out, static_cast<std::size_t>(n));
+            };
+        std::function<void(const Complex*, Complex*, int)> O2_apply =
+            [&O2](const Complex* in, Complex* out, int n) {
+                O2.apply(in, out, static_cast<std::size_t>(n));
+            };
+
+        DynamicalResponseParameters params;
+        params.krylov_dim               =
+            static_cast<std::uint64_t>(opts.krylov_dim);
+        params.broadening               = opts.broadening;
+        params.tolerance                = 1e-10;
+        params.full_reorthogonalization = true;
+        params.random_seed              = 0;
+
+        const auto legacy = ::compute_dynamical_correlation(
+            H_apply, O1_apply, O2_apply,
+            static_cast<std::uint64_t>(H.geometry().local_dim),
+            params,
+            opts.omega_min, opts.omega_max,
+            static_cast<std::uint64_t>(opts.num_omega),
+            /*temperature=*/0.0,
+            opts.output_dir,
+            opts.energy_shift);
+
+        R.S_real = legacy.spectral_function;
+        R.S_imag = legacy.spectral_function_imag;
+        if (R.S_imag.size() != R.S_real.size()) {
+            R.S_imag.assign(R.S_real.size(), 0.0);
+        }
     }
 
     R.errors_real.assign(opts.num_omega, 0.0);

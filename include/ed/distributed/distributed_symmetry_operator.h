@@ -171,6 +171,47 @@ public:
     [[nodiscard]] bool is_hermitian() const override { return true; }
     [[nodiscard]] std::string description() const override;
 
+    // -------------------------------------------------------------------
+    // bind_<Backend> overrides (Wave A2 -- Full unified-interface
+    // collapse, May 2026).
+    //
+    // Same policy as `DistributedOperator`: `bind_mpi` is the
+    // supported lane; `bind_cuda` / `bind_mpi_cuda` throw (no
+    // distributed-symmetry GPU operator exists yet), `bind_cpu`
+    // throws when the comm has more than one rank.
+    // -------------------------------------------------------------------
+    [[nodiscard]] MatvecFn bind_mpi() const override {
+        return [this](const ed::matvec::Complex* in,
+                      ed::matvec::Complex* out, std::size_t n) {
+            this->apply(in, out, n);
+        };
+    }
+    [[nodiscard]] MatvecFn bind_cpu() const override {
+        if (comm_size() > 1) {
+            throw std::runtime_error(
+                "DistributedSymmetryOperator: bind_cpu() is not "
+                "supported on a multi-rank communicator. Use "
+                "bind<MpiBackend>() so reductions allreduce across "
+                "ranks.");
+        }
+        return [this](const ed::matvec::Complex* in,
+                      ed::matvec::Complex* out, std::size_t n) {
+            this->apply(in, out, n);
+        };
+    }
+    [[nodiscard]] MatvecFn bind_cuda() const override {
+        throw std::runtime_error(
+            "DistributedSymmetryOperator: bind_cuda() is not supported "
+            "-- this operator is host-resident.");
+    }
+    [[nodiscard]] MatvecFn bind_mpi_cuda() const override {
+        throw std::runtime_error(
+            "DistributedSymmetryOperator: bind_mpi_cuda() is not "
+            "supported -- a distributed-symmetry GPU operator has not "
+            "been wired yet (see distributed_symmetry_operator_gpu.h "
+            "for the per-sector GPU primitive).");
+    }
+
     // -------------------------------------------------------------------------
     // Geometry / diagnostics (legacy uint64_t accessors retained for
     // back-compat; the MatVecOperator overrides above forward to the

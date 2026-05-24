@@ -1,29 +1,32 @@
 // =============================================================================
 // examples/01_cpp_ground_state.cpp
 //
-// Single-process CPU ground state of a Heisenberg chain via the matrix-free
-// `Operator` API + `lanczos()`. This is the smallest possible end-to-end
-// program that uses the toolkit.
+// Single-process CPU ground state of a Heisenberg chain via the unified
+// ED interface (Full Unified-Interface Collapse, May 2026):
 //
-// Build (from the examples/ directory, after the main project is built):
+//     OperatorSpec  ->  ed::make_operator(spec)  ->  ed::workflows::solve(*op, opts)
 //
-//     cmake -B build -DCMAKE_PREFIX_PATH="$PWD/../build" .
+// This is the smallest possible end-to-end program that uses the toolkit.
+//
+// Build (from the top-level build directory):
+//
 //     cmake --build build -j --target ex01_cpp_ground_state
 //
 // Run:
 //
-//     ./build/ex01_cpp_ground_state            # default N=12 PBC
-//     ./build/ex01_cpp_ground_state 16 0       # N=16 OBC
+//     ./build/examples/ex01_cpp_ground_state            # default N=12 PBC
+//     ./build/examples/ex01_cpp_ground_state 16 0       # N=16 OBC
 // =============================================================================
 
-#include <ed/core/construct_ham.h>
-#include <ed/solvers/lanczos.h>
+#include <ed/core/make_operator.h>
+#include <ed/core/operator.h>
+#include <ed/orchestrator.h>
 
 #include <complex>
 #include <cstdint>
 #include <cstdlib>
 #include <iostream>
-#include <vector>
+#include <memory>
 
 namespace {
 
@@ -38,24 +41,9 @@ build_heisenberg_chain(std::uint64_t N, bool periodic) {
     const std::uint64_t last = periodic ? N : (N - 1);
     for (std::uint64_t i = 0; i < last; ++i) {
         const std::uint64_t j = (i + 1) % N;
-
-        Operator::TransformData zz;
-        zz.op_type = 2; zz.site_index = i;
-        zz.op_type_2 = 2; zz.site_index_2 = j;
-        zz.coefficient = Jz; zz.is_two_body = true;
-        op->transform_data_.push_back(zz);
-
-        Operator::TransformData pm;
-        pm.op_type = 0; pm.site_index = i;
-        pm.op_type_2 = 1; pm.site_index_2 = j;
-        pm.coefficient = Jpm; pm.is_two_body = true;
-        op->transform_data_.push_back(pm);
-
-        Operator::TransformData mp;
-        mp.op_type = 1; mp.site_index = i;
-        mp.op_type_2 = 0; mp.site_index_2 = j;
-        mp.coefficient = Jpm; mp.is_two_body = true;
-        op->transform_data_.push_back(mp);
+        op->addTwoBodyTerm(2, i, 2, j, Jz);
+        op->addTwoBodyTerm(0, i, 1, j, Jpm);
+        op->addTwoBodyTerm(1, i, 0, j, Jpm);
     }
     return op;
 }
@@ -67,29 +55,34 @@ int main(int argc, char** argv) {
     const bool          periodic = (argc > 2) ? (std::atoi(argv[2]) != 0) : true;
 
     const std::uint64_t dim = 1ULL << N;
-    auto op = build_heisenberg_chain(N, periodic);
-
     std::cout << "Heisenberg chain  N=" << N
               << "  PBC=" << (periodic ? 1 : 0)
               << "  dim=" << dim << "\n";
 
-    std::vector<double> eigenvalues;
-    lanczos(
-        // matrix-vector callback bound to op->apply
-        [&op](const Complex* in, Complex* out, int n) {
-            op->apply(in, out, static_cast<std::size_t>(n));
-        },
-        /*N=*/dim,
-        /*max_iter=*/200,
-        /*exct=*/3,           // keep the lowest 3 Ritz values
-        /*tol=*/1e-10,
-        eigenvalues,
-        /*dir=*/"",           // empty = no on-disk basis
-        /*eigenvectors=*/false);
+    // 1. Describe the operator. `InMemoryOperator` forwards the
+    //    already-built Operator straight through `make_operator`.
+    ed::OperatorSpec spec;
+    spec.source    = ed::InMemoryOperator{build_heisenberg_chain(N, periodic)};
+    spec.num_sites = N;
+    spec.spin_l    = 0.5f;
+
+    // 2. Materialize the LinearOperator (no-op forward in this case).
+    auto op = ed::make_operator(std::move(spec));
+
+    // 3. Run the orchestrator. The backend (CPU here) is auto-selected.
+    ed::SolveOptions opts;
+    opts.num_eigs        = 3;
+    opts.method          = ed::SolveMethod::Lanczos;
+    opts.tolerance       = 1e-10;
+    opts.compute_vectors = false;
+
+    auto result = ed::workflows::solve(*op, opts);
 
     std::cout << "Lowest 3 eigenvalues:\n";
-    for (std::size_t k = 0; k < eigenvalues.size() && k < 3; ++k) {
-        std::cout << "  E[" << k << "] = " << eigenvalues[k] << "\n";
+    for (std::size_t k = 0; k < result.eigenvalues.size() && k < 3; ++k) {
+        std::cout << "  E[" << k << "] = " << result.eigenvalues[k] << "\n";
     }
+    std::cout << "  backend = " << result.backend.lane
+              << "  (wall = " << result.backend.wall_seconds << " s)\n";
     return 0;
 }

@@ -677,6 +677,16 @@ if(BUILD_ED_TESTS)
         else()
             target_link_libraries(${test_name} PRIVATE ed_solvers_cpu)
         endif()
+        # Wave A (Full unified-interface collapse, May 2026): `make_operator.h`
+        # references `DistributedOperator` / `DistributedSymmetryOperator`
+        # constructors in inline factory bodies under `WITH_MPI`. The compiler
+        # emits the inline bodies for every TU that includes the header even
+        # when the runtime branch is unreachable, so the linker needs the
+        # distributed library when MPI is on. Link transitively here so test
+        # authors do not have to remember per-target.
+        if(WITH_MPI AND TARGET ed_distributed)
+            target_link_libraries(${test_name} PRIVATE ed_distributed)
+        endif()
         target_compile_options(${test_name} PRIVATE
             $<$<COMPILE_LANGUAGE:CXX>:${CPU_OPT_FLAGS}>
         )
@@ -724,6 +734,10 @@ if(BUILD_ED_TESTS)
     ed_add_test(test_kernel_facades             tests/unit/test_kernel_facades.cpp USE_CATCH2)
     ed_add_test(test_orchestrator               tests/unit/test_orchestrator.cpp USE_CATCH2)
     ed_add_test(test_minimalist_collapse        tests/unit/test_minimalist_collapse.cpp USE_CATCH2)
+    # Wave A acceptance (Full unified-interface collapse, May 2026):
+    # the `ed::make_operator(OperatorSpec)` factory + the new
+    # `bind_<Backend>` override matrix.
+    ed_add_test(test_make_operator              tests/unit/test_make_operator.cpp USE_CATCH2)
     # test_method_canonicalize retired in the minimalist-architecture rev
     # (May 2026): all the deprecated `_GPU`/`_FIXED_SZ`/`_MPI`/`_CUDA`
     # enum aliases and ARPACK/SCALAPACK/DAVIDSON/LOBPCG variants this

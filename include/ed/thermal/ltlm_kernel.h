@@ -68,6 +68,10 @@ inline LtlmResult to_ltlm_result(const ::LTLMResults& legacy,
 
 }  // namespace detail
 
+// Wave B (Full unified-interface collapse, May 2026): the inner
+// driver in `src/solvers/cpu/ltlm.cpp::low_temperature_lanczos` is
+// CPU-host today. Guard against silent miscalibration when the
+// orchestrator hands the kernel a device backend.
 template <typename Backend, typename MatvecFn>
 LtlmResult ltlm_kernel(const Backend&  /*backend*/,
                        MatvecFn&&      apply_H,
@@ -75,6 +79,11 @@ LtlmResult ltlm_kernel(const Backend&  /*backend*/,
                        std::uint64_t   /*global_n*/,
                        const LtlmOptions& opts)
 {
+    static_assert(
+        std::is_same_v<Backend, ed::matvec::CpuBackend>,
+        "ltlm_kernel: only CpuBackend is supported today. See "
+        "ftlm_kernel.h for the wave-b-thermal context.");
+
     LTLMParameters params;
     params.krylov_dim           = static_cast<std::uint64_t>(opts.krylov_dim);
     params.ground_state_krylov  = static_cast<std::uint64_t>(opts.ground_state_krylov);

@@ -36,6 +36,7 @@
 #  include <mpi.h>
 #  include <ed/matvec/backends/mpi_backend.h>
 #  ifdef ED_HAVE_NCCL
+#    include <ed/distributed/multi_gpu.h>
 #    include <ed/matvec/backends/mpi_cuda_backend.cuh>
 #  endif
 #endif
@@ -198,6 +199,68 @@ inline BackendVariant select_backend(const LinearOperator& op,
 inline BackendVariant WithMpiCudaBackend(
     std::unique_ptr<ed::matvec::MpiCudaBackend> be) {
     return BackendVariant{std::move(be)};
+}
+
+/// `MpiCudaBackendContext` --- RAII bundle bundling a NCCL
+/// `MultiGpuCommunicator` and the `MpiCudaBackend` that references it.
+///
+/// The `MpiCudaBackend` keeps a reference to the
+/// `MultiGpuCommunicator`; both must outlive the kernel call. This
+/// context bundle owns the comm by `unique_ptr` and hands the backend
+/// out via the `BackendVariant` member. Construct once at CLI startup,
+/// keep alive until after the orchestrator call returns.
+///
+/// The context is non-movable / non-copyable on purpose: the backend
+/// holds a raw reference into the comm. Stash it on the caller's stack
+/// (e.g. inside `main()`) for the duration of the workflow.
+struct MpiCudaBackendContext {
+    std::unique_ptr<ed::distributed::multi_gpu::MultiGpuCommunicator> comm;
+    BackendVariant                                                   backend;
+
+    MpiCudaBackendContext(MpiCudaBackendContext&&) = delete;
+    MpiCudaBackendContext& operator=(MpiCudaBackendContext&&) = delete;
+};
+
+/// Build a `MpiCudaBackendContext` from an MPI communicator and an
+/// optional explicit CUDA device index. Defaults: `MPI_COMM_WORLD` and
+/// auto-detected node-local device binding (one GPU per rank,
+/// node-local rank modulo visible device count).
+///
+/// Construction is COLLECTIVE on `mpi_comm`. Throws
+/// `std::logic_error` if `ED_HAVE_NCCL` was not set at compile time,
+/// `std::runtime_error` on cuda / nccl / MPI failure.
+///
+/// Typical use:
+///
+///     auto ctx = ed::make_mpi_cuda_backend();      // collective
+///     auto op  = ed::make_operator({...,
+///                                   .distributed = true});
+///     auto gs  = ed::workflows::solve(*op, opts);  // uses ctx.backend
+///                                                   // via the caller
+///                                                   // plumbing.
+///
+/// The orchestrator does not yet accept an externally-supplied
+/// `BackendVariant`; callers needing the MPI+CUDA lane today drive the
+/// kernel manually via `std::visit(ctx.backend, ...)`. The factory
+/// exists so that machinery has a single, RAII-correct entry point.
+inline std::unique_ptr<MpiCudaBackendContext> make_mpi_cuda_backend(
+    MPI_Comm mpi_comm = MPI_COMM_WORLD,
+    int      device_index =
+        ed::distributed::multi_gpu::kAutoDeviceIndex)
+{
+    if (!ed::distributed::multi_gpu::nccl_compiled_in()) {
+        throw std::logic_error(
+            "ed::make_mpi_cuda_backend: NCCL not compiled in. Rebuild "
+            "with -DED_USE_NCCL=ON and a NCCL-enabled toolchain.");
+    }
+    auto comm =
+        std::make_unique<ed::distributed::multi_gpu::MultiGpuCommunicator>(
+            mpi_comm, device_index);
+    auto be = std::make_unique<ed::matvec::MpiCudaBackend>(*comm);
+    auto ctx = std::unique_ptr<MpiCudaBackendContext>(
+        new MpiCudaBackendContext{
+            std::move(comm), WithMpiCudaBackend(std::move(be))});
+    return ctx;
 }
 #endif
 

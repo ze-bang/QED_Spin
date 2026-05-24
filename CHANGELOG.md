@@ -7,6 +7,149 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Full Unified-Interface Collapse — Waves A, B, E, G (May 2026)
+
+The "fragmented surface" the user kept hitting (`ed::exact_diagonalization_*`,
+`GPUEDWrapper::*`, `distributed_lanczos*`, `qed.exact_diagonalization_*` plus
+the new `ed::workflows::*` orchestrator surface co-existing) is now collapsed
+into a single canonical entry-point shape **for every consumer that has been
+migrated**:
+
+    OperatorSpec  ->  ed::make_operator(spec)  ->  ed::workflows::{solve,thermal,spectral}
+
+The same three-line shape works from C++ and from Python (`qed.workflows.*`),
+with the backend (CPU / GPU / MPI / MPI+GPU) auto-selected internally from
+the operator's `geometry()`.
+
+#### Wave A — structural enablers (additive, zero behaviour change)
+
+* **A1. `include/ed/core/make_operator.h`** — extended to honour every spec
+  axis: `fixed_sz`, `streaming_symmetry`, `distributed`, and their pairwise
+  combinations. Returns `std::unique_ptr<LinearOperator>`. New
+  `InMemoryOperator` / `FilePaths` / `DirectoryPath` `std::variant` source
+  alternative makes the factory work for both programmatic operators and
+  file-based loaders. Companion `sector_view_from(spec, sector_idx)` for the
+  streaming-symmetry per-sector lane.
+* **A2.** Real `bind_<Backend>` overrides on `GPUOperator`,
+  `DistributedOperator`, `DistributedSymmetryOperator`, and
+  `StreamingSymmetryOperator::SectorView`. The default no-op forwarder is
+  gone for these subclasses; wrong-backend calls now throw a documented
+  `std::runtime_error` instead of silently miscompiling.
+* **A3. `make_mpi_cuda_backend()` factory** in
+  `include/ed/core/select_backend.h`. RAII `MpiCudaBackendContext` bundles
+  the NCCL `MultiGpuCommunicator` and the `MpiCudaBackend` that references
+  it; the backend reference into the comm is now lifetime-safe by
+  construction. Used by the eventual distributed CLI to wrap externally-
+  constructed MPI+GPU backends in the orchestrator's `BackendVariant`.
+* **A4. Two dead lanes wired** in `src/orchestrator.cpp`:
+  * `solve()` FullDiag on distributed -> gather-to-root + LAPACK `zheevd`
+    on rank 0 + `MPI_Bcast` of eigenvalues (correct in the regime where
+    FullDiag is picked: `global_dim <= 2^12`).
+  * `spectral()` `FtlmDynamical` -> delegate to
+    `::compute_dynamical_correlation` (the legacy FTLM-dynamical body in
+    `ed/solvers/ftlm.h`).
+* **A5.** Extended `SolveOptions` / `ThermalOptions` / `SpectralOptions`
+  with the full CLI-parity knob set (`use_fixed_sz`, `use_symmetry`,
+  `n_up`, `basis_cache_dir`, `precompute_basis_only`, `temp_min/max`,
+  `num_temp_bins`, `broadening`, `num_samples`, `temperatures`,
+  `observable_type`) so the upcoming CLI migration (Wave C) is a pure
+  refactor with no feature loss.
+* **A acceptance**: build green, **279 / 279 tests pass sequentially**;
+  the parallel-ctest run has 2 intermittent races on the FullDiag
+  HDF5-output tests (`test #49`, `#52`) — pre-existing, unrelated to
+  this wave (both pass solo and under `-j 1`).
+
+#### Wave B — thermal kernel-shim honest dispatch
+
+The full delegation inversion (move algorithm bodies from CPU `.cpp` into
+templated `*_kernel.h` headers, so FTLM/LTLM/KPM-DOS actually run on
+CUDA / MPI backends) is deferred. What landed here makes the current
+state explicit and crash-safe:
+
+* `ftlm_kernel.h`, `ltlm_kernel.h`, `kpm_dos_kernel.h` now carry a
+  `static_assert(std::is_same_v<Backend, CpuBackend>, ...)` declaring that
+  CPU is the only supported backend today. The mTPQ / cTPQ kernels are
+  already fully backend-templated and remain so.
+* `src/orchestrator.cpp` thermal lanes use `if constexpr` filters around
+  the `std::visit` so the FTLM / LTLM / KPM-DOS branches compile cleanly
+  under `WITH_CUDA` / `WITH_MPI`, and raise a documented
+  `std::runtime_error` if a caller asks for an unsupported backend. The
+  mTPQ / cTPQ paths run on every backend variant.
+
+#### Wave E — Python unified surface
+
+* New module **`qed.workflows`** (`python/qed/workflows.py`) exposing
+  `workflows.solve(op, opts)`, `workflows.thermal(op, opts)`,
+  `workflows.spectral(op, observables, opts)` as thin wrappers over the
+  C++ orchestrator bindings. Re-exports the option / result / method-tag
+  classes (`SolveOptions`, `ThermalOptions`, `SpectralOptions`,
+  `GroundStateResult`, etc.) so callers never have to reach into
+  `qed._core`.
+* `qed.solve` / `qed.spectral` still go through the auto-pilot
+  (`qed.diag` / `qed.dssf.compute`) for smart-defaults users; the
+  `qed.workflows.*` module is the canonical entry point for callers
+  who want explicit control over the orchestrator surface.
+
+Verified end-to-end on N=6 Heisenberg PBC: `qed.workflows.solve` runs,
+returns the correct eigenvalues, and reports `backend.lane = 'cpu'` with
+`wall_seconds` populated.
+
+#### Wave G — examples rewritten + a new canonical end-to-end demo
+
+* New **`examples/00_unified_interface.cpp`** — single self-contained
+  walkthrough of the unified API: ground-state Lanczos, fixed-Sz sector
+  solve, mTPQ thermal, and ground-state CF spectral, all in the same
+  `OperatorSpec -> make_operator -> workflows::*` shape. Builds + runs
+  end-to-end, prints E0 / E1, mTPQ E_min, and S(omega) samples.
+* **Examples 01-04 + 09-10 rewritten** onto the unified API:
+  * `01_cpp_ground_state.cpp`: in-memory Heisenberg chain ->
+    `ed::workflows::solve(*op, Lanczos)`.
+  * `02_cpp_full_spectrum.cpp`: J1-J2 chain ->
+    `ed::workflows::solve(*op, FullDiag)`.
+  * `03_cpp_ftlm_thermal.cpp`: Heisenberg PBC chain ->
+    `ed::workflows::thermal(*op, FTLM)`.
+  * `04_cpp_gpu_lanczos.cpp`: `GPUOperator` ->
+    `ed::workflows::solve(op, Lanczos)`; backend auto-picked to
+    `CudaBackend` because the operator's `geometry().memory_space ==
+    Device`. Verified runs with `backend lane = gpu`.
+  * `09_python_quickstart.py`: same Heisenberg chain via
+    `qed.workflows.solve`.
+  * `10_python_dssf.py`: full DSSF pipeline via `qed.dssf` +
+    `qed.workflows.solve` + `qed.workflows.spectral`.
+
+#### Real bug fix shaken loose by the GPU example rewrite
+
+* `src/orchestrator.cpp` — Lanczos / Krylov-Schur / spectral seed-vector
+  staging was using `seed.data()` (host pointer) as the initial vector
+  passed to `lanczos_kernel<Backend>` / `krylov_schur_kernel<Backend>` /
+  `cf_spectral_kernel<Backend>`. The kernels then call
+  `be.copy(v0_local, v_curr.get(), local_n)` which for `CudaBackend` is
+  a device-to-device `cudaMemcpy` — passing a host pointer there
+  produces `cudaErrorInvalidValue` at runtime. Fixed by allocating a
+  backend-resident vector via `be.make_zero_vector` and staging the
+  host seed through `be.copy_from_host` before invoking the kernel.
+  Caught by `ex04_cpp_gpu_lanczos`; this was a latent bug nothing
+  else exercised because the existing GPU tests use `GPULanczos` /
+  `GPUEDWrapper` directly, never the orchestrator's CudaBackend
+  Lanczos lane.
+
+#### Status of the remaining waves
+
+The plan's Waves C (CLI migration of the seven `src/cli/workflows.cpp`
+functions), D (distributed CLI + examples + tests), F (hard-removal of
+~7 K LOC of legacy headers), and E4 (collapse `dispatcher_bindings.cpp`)
+are not landed in this commit. They are non-trivial — each of the seven
+CLI workflows is hundreds of lines of HDF5 plumbing + sector iteration
++ method canonicalization, and the hard-removal step is gated on those
+migrations finishing. The Wave A enablers above are deliberately
+sufficient for those migrations to proceed: the factory understands
+every operator axis, the bind overrides are real, the
+`make_mpi_cuda_backend()` factory is in place, and the option structs
+carry every CLI knob. The unified surface is the canonical path for
+**new** code; the legacy `ed::exact_diagonalization_*` / `GPUEDWrapper`
+entry points remain only as in-tree CLI implementation detail until
+those waves land.
+
 ### Day-17 follow-up — header-graph dead-code subtraction (May 2026)
 
 Re-scanned the include graph after the main cleanup sweep and found two

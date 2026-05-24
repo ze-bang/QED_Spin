@@ -70,9 +70,23 @@ inline FtlmResult to_ftlm_result(const ::FTLMResults& legacy,
  * @brief Run FTLM using the supplied `Backend` linalg primitives and an
  *        `apply_H(in, out, n)` matvec callable.
  *
- * The CPU body delegates to `::finite_temperature_lanczos`. Backend
- * specialisations for CudaBackend / MpiBackend / MpiCudaBackend reuse
- * the same options + result envelope.
+ * Today the CPU body delegates to `::finite_temperature_lanczos`. The
+ * `apply_H` callable allocates HOST-side scratch vectors inside the
+ * legacy body, so paired with a device-only Backend (CudaBackend /
+ * MpiCudaBackend) it would silently miscalibrate (host vectors handed
+ * to a device-pointer matvec). We guard against that here: only
+ * `CpuBackend` (and the bandwidth-equivalent `MpiBackend` when
+ * `apply_H` ferries host buffers) is supported, and the kernel throws
+ * loudly when paired with anything else.
+ *
+ * Wave B (Full unified-interface collapse, May 2026): full delegation
+ * inversion (moving the 200+ LOC FTLM driver from
+ * `src/solvers/cpu/ftlm.cpp` into this header and replacing the inner
+ * Lanczos loop with `ed::krylov::lanczos_kernel<Backend>`) is a
+ * dedicated work item tracked separately. The explicit Backend guard
+ * here keeps the facade honest until the inversion lands. mTPQ and
+ * cTPQ (see `mtpq_kernel.h` / `ctpq_kernel.h`) are already fully
+ * backend-templated through `tpq_kernel<Backend>`.
  */
 template <typename Backend, typename MatvecFn>
 FtlmResult ftlm_kernel(const Backend&  /*backend*/,
@@ -81,6 +95,15 @@ FtlmResult ftlm_kernel(const Backend&  /*backend*/,
                        std::uint64_t   /*global_n*/,
                        const FtlmOptions& opts)
 {
+    static_assert(
+        std::is_same_v<Backend, ed::matvec::CpuBackend>,
+        "ftlm_kernel: only CpuBackend is supported today. The "
+        "templated FTLM kernel body is tracked under wave-b-thermal "
+        "(see ed/thermal/ftlm_kernel.h comments). For the GPU lane, "
+        "construct a GPUOperator and use the legacy "
+        "compute_dynamical_correlation entry point until Wave B "
+        "lands.");
+
     FTLMParameters params;
     params.krylov_dim   = static_cast<std::uint64_t>(opts.krylov_dim);
     params.num_samples  = static_cast<std::uint64_t>(opts.num_samples);

@@ -161,6 +161,9 @@ def solve(*args, **kwargs):
     This is the Minimalist ED Collapse name for what used to be
     :func:`qed.diag`. Same signature, same return type; new code MUST
     use this name. ``qed.diag`` is preserved as a deprecation alias.
+
+    For direct access to the unified C++ orchestrator (skipping the
+    auto-pilot layer), use :func:`qed.workflows.solve` instead.
     """
     return diag(*args, **kwargs)
 
@@ -170,8 +173,17 @@ def spectral(*args, **kwargs):
 
     Thin alias for :func:`qed.dssf.compute`. New code MUST use this name;
     ``qed.dssf.compute`` is preserved as a deprecation alias.
+
+    For direct access to the unified C++ orchestrator, use
+    :func:`qed.workflows.spectral` instead.
     """
     return dssf.compute(*args, **kwargs)
+
+
+# Full Unified-Interface Collapse (May 2026): expose the structured
+# ``workflows.*`` module that wraps the C++ orchestrator surface
+# (`ed::workflows::solve / thermal / spectral`) directly.
+from . import workflows  # noqa: E402, F401
 
 
 def _deprecated_alias(new_name, fn):

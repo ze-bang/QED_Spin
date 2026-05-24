@@ -79,6 +79,43 @@ struct SolveOptions {
     std::string output_dir;
     SolveMethod method         = SolveMethod::Auto;
     BackendConstraints backend;
+
+    // -----------------------------------------------------------------
+    // CLI parity knobs (Wave A5 -- Full unified-interface collapse,
+    // May 2026). These extend SolveOptions so the CLI migration
+    // (Wave C) can pure-refactor without losing any of the orthogonal
+    // axes the legacy `EDParameters` carried.
+    // -----------------------------------------------------------------
+
+    /// If true, the operator construction should project to a single
+    /// Sz sector. The actual sector is picked by `n_up` (or, when
+    /// `n_up < 0`, the half-filled sector). This duplicates the
+    /// `OperatorSpec::fixed_sz` axis but is carried on the solve
+    /// options too so the CLI can flip the axis on without touching
+    /// the operator factory call site.
+    bool        use_fixed_sz   = false;
+
+    /// If true, the operator construction should use the
+    /// streaming-symmetry path. Same redundancy story as
+    /// `use_fixed_sz` above.
+    bool        use_symmetry   = false;
+
+    /// Number of "up" spins for the fixed-Sz sector. -1 means
+    /// "half-filled" (= num_sites / 2). Only consulted when
+    /// `use_fixed_sz` is true.
+    int         n_up           = -1;
+
+    /// Directory for caching the streaming-symmetry basis between
+    /// runs. Empty means "no caching" (recompute every run). The
+    /// streaming-symmetry kernel writes `automorphism_results/` and
+    /// `basis_cache/` HDF5 files here.
+    std::string basis_cache_dir;
+
+    /// If true, generate the symmetry basis + the sector-block
+    /// Hamiltonians and exit without diagonalising. Used by the CLI's
+    /// `precompute_basis_only` mode to pre-warm the cache on a single
+    /// node before launching the diagonalisation step on a cluster.
+    bool        precompute_basis_only = false;
 };
 
 struct ThermalOptions {
@@ -95,6 +132,22 @@ struct ThermalOptions {
     std::uint64_t random_seed  = 0;
     std::string output_dir;
     BackendConstraints backend;
+
+    // -----------------------------------------------------------------
+    // CLI parity knobs (Wave A5). Match the temperature-scan
+    // controls the legacy `EDParameters` / CLI thermo section carry.
+    // -----------------------------------------------------------------
+
+    /// Temperature scan range (used by both the thermodynamics
+    /// post-processing and the KPM-DOS lane). Linear in T by
+    /// default; the CLI may convert to inverse-temperature betas if
+    /// needed.
+    double      temp_min       = 0.01;
+    double      temp_max       = 10.0;
+    std::size_t num_temp_bins  = 100;
+
+    /// Lorentzian broadening eta for the KPM-DOS density lane.
+    double      broadening     = 0.05;
 };
 
 struct SpectralOptions {
@@ -112,6 +165,24 @@ struct SpectralOptions {
     double      energy_shift  = 0.0;
     std::string output_dir;
     BackendConstraints backend;
+
+    // -----------------------------------------------------------------
+    // CLI parity knobs (Wave A5). FTLM-dynamical needs sample-count +
+    // temperature scan controls; the static-response lane carries an
+    // observable-type discriminator used by the legacy CLI.
+    // -----------------------------------------------------------------
+
+    /// Number of random samples for FtlmDynamical averaging. Ignored
+    /// by GroundStateCF (which uses the ground-state vector).
+    std::size_t num_samples   = 30;
+
+    /// Temperature scan for FtlmDynamical; empty means "T = 0 only".
+    std::vector<double> temperatures;
+
+    /// Observable-type label carried for HDF5 output / Python
+    /// roundtripping (e.g., "Sz", "Sx_Sx", "Sz_Sz"). Optional --
+    /// orchestrator does not consume it; the CLI uses it for naming.
+    std::string observable_type;
 };
 
 // ---------------------------------------------------------------------------

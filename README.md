@@ -102,6 +102,57 @@ The Python quickstart is at
 
 ### Run a 12-site Heisenberg ground state
 
+#### Recommended: the unified ED interface (May 2026 — Full Unified-Interface Collapse)
+
+Every ED workflow on every backend collapses to the same three-line shape:
+
+    OperatorSpec  ->  ed::make_operator(spec)  ->  ed::workflows::{solve, thermal, spectral}
+
+C++ (see [`examples/00_unified_interface.cpp`](examples/00_unified_interface.cpp)
+for the full end-to-end walkthrough with thermal + spectral, and the
+rewritten [`examples/01_cpp_ground_state.cpp`](examples/01_cpp_ground_state.cpp)
+for the minimal case):
+
+```cpp
+ed::OperatorSpec spec;
+spec.source    = ed::InMemoryOperator{build_heisenberg_chain(12)};
+spec.num_sites = 12;
+auto op = ed::make_operator(std::move(spec));
+
+ed::SolveOptions opts;
+opts.num_eigs = 3;
+opts.method   = ed::SolveMethod::Lanczos;
+auto res = ed::workflows::solve(*op, opts);
+std::cout << "E0 = " << res.eigenvalues[0]
+          << "  backend = " << res.backend.lane << "\n";
+```
+
+Python — `qed.workflows.solve / thermal / spectral` mirror the C++
+orchestrator surface (see
+[`examples/09_python_quickstart.py`](examples/09_python_quickstart.py)
+and [`examples/10_python_dssf.py`](examples/10_python_dssf.py)):
+
+```python
+import qed
+from qed import workflows
+
+op = qed.Operator(12, 0.5)
+# ... add interaction terms ...
+
+opts = workflows.SolveOptions()
+opts.num_eigs = 3
+opts.method = workflows.SolveMethod.Lanczos
+result = workflows.solve(op, opts)
+print("E0 =", result.eigenvalues[0], " backend =", result.backend.lane)
+```
+
+The backend (CPU / GPU / MPI / MPI+GPU) is auto-selected inside
+`make_operator + workflows::*` from the operator's `geometry()` and the
+runtime probes in `ed::select_backend`. Pass a `GPUOperator` to get the
+GPU lane; build under `WITH_MPI` and the distributed lane is auto-picked.
+
+#### Lower-level / legacy entry points
+
 C++ (one of nine end-to-end runnable examples in [`examples/`](examples/)):
 
 ```cpp

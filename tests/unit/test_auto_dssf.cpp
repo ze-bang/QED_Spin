@@ -89,18 +89,30 @@ TEST_CASE("workflows::spectral throws when no observable is supplied",
                        std::invalid_argument);
 }
 
-TEST_CASE("workflows::spectral FtlmDynamical lane throws the documented "
-          "not-yet-wired message",
-          "[workflows][spectral][not_implemented]") {
+TEST_CASE("workflows::spectral FtlmDynamical lane runs the FTLM "
+          "continued-fraction body and returns a populated spectrum",
+          "[workflows][spectral][ftlm_dynamical]") {
+    // Wave A4 (Full unified-interface collapse, May 2026): the
+    // FtlmDynamical lane is now wired through to the legacy
+    // `compute_dynamical_correlation` body inside the orchestrator.
+    // This test verifies the lane returns a sensibly-sized result on
+    // a small Heisenberg chain.
     auto H   = build_heisen(4);
     auto Sz0 = build_single_site_sz(4);
 
     SpectralOptions opts;
-    opts.method     = SpectralOptions::Method::FtlmDynamical;
-    opts.krylov_dim = 32;
-    opts.num_omega  = 16;
+    opts.method      = SpectralOptions::Method::FtlmDynamical;
+    opts.krylov_dim  = 32;
+    opts.num_omega   = 16;
+    opts.num_samples = 4;
+    opts.omega_min   = -3.0;
+    opts.omega_max   = +3.0;
+    opts.broadening  = 0.1;
 
     std::vector<const ed::LinearOperator*> obs{ Sz0.get() };
-    REQUIRE_THROWS_AS(ed::workflows::spectral(*H, obs, opts),
-                       std::runtime_error);
+    ed::SpectralResult R;
+    REQUIRE_NOTHROW(R = ed::workflows::spectral(*H, obs, opts));
+    REQUIRE(R.omega.size() == opts.num_omega);
+    REQUIRE(R.S_real.size() == R.omega.size());
+    REQUIRE(R.S_imag.size() == R.omega.size());
 }

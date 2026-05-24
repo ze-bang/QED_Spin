@@ -168,6 +168,46 @@ public:
         return "GPUOperator(n_sites=" + std::to_string(n_sites_)
             + ", dim=" + std::to_string(dimension_) + ")";
     }
+
+    // -------------------------------------------------------------------
+    // bind_<Backend> overrides (Wave A2 -- Full unified-interface
+    // collapse, May 2026).
+    //
+    // GPUOperator's `apply()` (defined above) takes device pointers and
+    // dispatches to `matVecGPU()` via the cuDoubleComplex reinterpret
+    // cast. The matching `bind_cuda` is the supported lane. Other
+    // backends are explicitly unsupported (a host-pointer caller
+    // through `bind_cpu` would crash on the implicit
+    // device-pointer cast inside `apply()`); throwing here is strictly
+    // safer than the silent base-class default.
+    // -------------------------------------------------------------------
+    [[nodiscard]] MatvecFn bind_cuda() const override {
+        return [this](const ed::matvec::Complex* in,
+                      ed::matvec::Complex* out, std::size_t n) {
+            // apply() already does the device-pointer cast + matVecGPU
+            // dispatch (virtual through GPUFixedSz / GPUSymmetrized).
+            this->apply(in, out, n);
+        };
+    }
+    [[nodiscard]] MatvecFn bind_cpu() const override {
+        throw std::runtime_error(
+            "GPUOperator: bind_cpu() is not supported -- this operator "
+            "expects device pointers. Use bind<CudaBackend>() instead, "
+            "or pair the operator with a CudaBackend via "
+            "ed::select_backend().");
+    }
+    [[nodiscard]] MatvecFn bind_mpi() const override {
+        throw std::runtime_error(
+            "GPUOperator: bind_mpi() is not supported -- this is a "
+            "single-rank GPU operator. Use ed::distributed::"
+            "DistributedGPUOperator for the MPI+CUDA lane.");
+    }
+    [[nodiscard]] MatvecFn bind_mpi_cuda() const override {
+        throw std::runtime_error(
+            "GPUOperator: bind_mpi_cuda() is not supported -- this is a "
+            "single-rank GPU operator. Use ed::distributed::"
+            "DistributedGPUOperator for the MPI+CUDA lane.");
+    }
     
     // OPTIMIZED: Direct data population (no std::function overhead)
     void addOneBodyTerm(uint8_t op_type, uint32_t site, const std::complex<double>& coeff);

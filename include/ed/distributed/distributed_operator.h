@@ -177,6 +177,58 @@ public:
             + ", nproc=" + std::to_string(size_) + ")";
     }
 
+    // -------------------------------------------------------------------
+    // bind_<Backend> overrides (Wave A2 -- Full unified-interface
+    // collapse, May 2026).
+    //
+    // `apply()` already performs the MPI_Alltoallv halo exchange and
+    // the local SpMV; the matching `bind_mpi` returns a callable that
+    // wraps it. Kernels using `MpiBackend::all_reduce_sum` for norm /
+    // dot reductions then compose with this matvec correctly --- the
+    // matvec emits per-rank y_local slices and the reductions sum
+    // across ranks. `bind_cpu` / `bind_cuda` are explicitly
+    // unsupported: a single-rank caller through `bind_cpu` would
+    // (correctly, on np = 1) just receive the same wrapper, but on
+    // np > 1 the `apply()` body needs the MpiBackend's collectives to
+    // make the per-rank vector lengths add up; routing through
+    // `bind_cpu` invites silent miscalibration. We allow `bind_cpu`
+    // when the operator's communicator is single-rank, matching the
+    // "degenerate to plain Operator" semantics callers expect.
+    // -------------------------------------------------------------------
+    [[nodiscard]] MatvecFn bind_mpi() const override {
+        return [this](const ed::matvec::Complex* in,
+                      ed::matvec::Complex* out, std::size_t n) {
+            this->apply(in, out, n);
+        };
+    }
+    [[nodiscard]] MatvecFn bind_cpu() const override {
+        if (size_ > 1) {
+            throw std::runtime_error(
+                "DistributedOperator: bind_cpu() is not supported on a "
+                "multi-rank communicator. Use bind<MpiBackend>() so "
+                "axpy/dot reductions allreduce across ranks.");
+        }
+        return [this](const ed::matvec::Complex* in,
+                      ed::matvec::Complex* out, std::size_t n) {
+            this->apply(in, out, n);
+        };
+    }
+    [[nodiscard]] MatvecFn bind_cuda() const override {
+        throw std::runtime_error(
+            "DistributedOperator: bind_cuda() is not supported -- this "
+            "operator is host-resident. For the MPI+CUDA lane wrap a "
+            "ed::distributed::DistributedGPUOperator around this "
+            "instance and pair it with an MpiCudaBackend (see "
+            "ed::WithMpiCudaBackend in select_backend.h).");
+    }
+    [[nodiscard]] MatvecFn bind_mpi_cuda() const override {
+        throw std::runtime_error(
+            "DistributedOperator: bind_mpi_cuda() is not supported -- "
+            "this operator is host-resident. Use "
+            "ed::distributed::DistributedGPUOperator for the MPI+CUDA "
+            "lane.");
+    }
+
     // -------------------------------------------------------------------------
     // Slab geometry (queryable on every rank).
     // -------------------------------------------------------------------------

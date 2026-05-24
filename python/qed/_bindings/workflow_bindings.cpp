@@ -79,7 +79,18 @@ void bind_workflows(py::module_& m) {
         .def_readwrite("compute_vectors", &ed::workflows::SolveOptions::compute_vectors)
         .def_readwrite("output_dir",      &ed::workflows::SolveOptions::output_dir)
         .def_readwrite("method",          &ed::workflows::SolveOptions::method)
-        .def_readwrite("backend",         &ed::workflows::SolveOptions::backend);
+        .def_readwrite("backend",         &ed::workflows::SolveOptions::backend)
+        // Wave A5 (Full unified-interface collapse, May 2026): CLI parity knobs.
+        .def_readwrite("use_fixed_sz",
+                       &ed::workflows::SolveOptions::use_fixed_sz)
+        .def_readwrite("use_symmetry",
+                       &ed::workflows::SolveOptions::use_symmetry)
+        .def_readwrite("n_up",
+                       &ed::workflows::SolveOptions::n_up)
+        .def_readwrite("basis_cache_dir",
+                       &ed::workflows::SolveOptions::basis_cache_dir)
+        .def_readwrite("precompute_basis_only",
+                       &ed::workflows::SolveOptions::precompute_basis_only);
 
     py::class_<ed::BackendMetadata>(m, "BackendMetadata")
         .def(py::init<>())
@@ -133,7 +144,16 @@ void bind_workflows(py::module_& m) {
         .def_readwrite("beta_max",     &ed::workflows::ThermalOptions::beta_max)
         .def_readwrite("random_seed",  &ed::workflows::ThermalOptions::random_seed)
         .def_readwrite("output_dir",   &ed::workflows::ThermalOptions::output_dir)
-        .def_readwrite("backend",      &ed::workflows::ThermalOptions::backend);
+        .def_readwrite("backend",      &ed::workflows::ThermalOptions::backend)
+        // Wave A5: CLI parity knobs (temperature scan + KPM broadening).
+        .def_readwrite("temp_min",
+                       &ed::workflows::ThermalOptions::temp_min)
+        .def_readwrite("temp_max",
+                       &ed::workflows::ThermalOptions::temp_max)
+        .def_readwrite("num_temp_bins",
+                       &ed::workflows::ThermalOptions::num_temp_bins)
+        .def_readwrite("broadening",
+                       &ed::workflows::ThermalOptions::broadening);
 
     py::class_<ed::ThermalResult>(m, "ThermalResult")
         .def(py::init<>())
@@ -160,7 +180,15 @@ void bind_workflows(py::module_& m) {
         .def_readwrite("num_omega",    &ed::workflows::SpectralOptions::num_omega)
         .def_readwrite("energy_shift", &ed::workflows::SpectralOptions::energy_shift)
         .def_readwrite("output_dir",   &ed::workflows::SpectralOptions::output_dir)
-        .def_readwrite("backend",      &ed::workflows::SpectralOptions::backend);
+        .def_readwrite("backend",      &ed::workflows::SpectralOptions::backend)
+        // Wave A5: CLI parity knobs (FtlmDynamical sample/temperature
+        // controls and the observable-type discriminator).
+        .def_readwrite("num_samples",
+                       &ed::workflows::SpectralOptions::num_samples)
+        .def_readwrite("temperatures",
+                       &ed::workflows::SpectralOptions::temperatures)
+        .def_readwrite("observable_type",
+                       &ed::workflows::SpectralOptions::observable_type);
 
     py::class_<ed::SpectralResult>(m, "SpectralResult")
         .def(py::init<>())
