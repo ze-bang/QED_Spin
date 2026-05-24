@@ -343,7 +343,4 @@ public:
                                std::string dir = "",
                                bool compute_eigenvectors = true);
 
-private:
-    static int getGPUCount();
-    static size_t getAvailableGPUMemory(int device = 0);
 };

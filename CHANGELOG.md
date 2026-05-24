@@ -145,26 +145,29 @@ diagonalization. All on the same 1-D periodic Heisenberg chain.
 
 | N  | dim    | `ed::workflows::solve` (Lanczos) | Legacy `EDCore` (Lanczos) | LAPACK full diag |
 |---:|-------:|---------------------------------:|---------------------------:|-----------------:|
-| 6  | 64     | 0.160 ms                         | 0.101 ms                   | 1.43 ms          |
-| 8  | 256    | 0.253 ms                         | 0.184 ms                   | 23.6 ms          |
-| 10 | 1 024  | 0.573 ms                         | 0.416 ms                   | 332 ms           |
-| 12 | 4 096  | 2.01 ms                          | 1.36 ms                    | 8 857 ms         |
-| 14 | 16 384 | 31.0 ms                          | 3.63 ms                    | (not run)        |
+| 6  | 64     | 0.166 ms                         | 0.098 ms                   | 1.43 ms          |
+| 8  | 256    | 0.260 ms                         | 0.184 ms                   | 23.6 ms          |
+| 10 | 1 024  | 0.582 ms                         | 0.423 ms                   | 332 ms           |
+| 12 | 4 096  | 2.01 ms                          | 1.38 ms                    | 8 857 ms         |
+| 14 | 16 384 | 5.32 ms                          | 3.68 ms                    | (not run)        |
 
 Two observations from the sweep:
 
 1. **Lanczos vs LAPACK crossover stays where it was**: the workflows
    lane beats LAPACK by ~9× at N = 8 and >100× by N = 12 — same
    asymptotic behaviour as the legacy lane.
-2. **The new lane carries a constant per-call overhead** of ~50 µs at
-   small N (visible at N = 6: 0.16 ms vs 0.10 ms) from the
-   `select_backend` dispatch + Result-struct allocation. At N = 14
-   the gap widens to ~8.5×; the regression is traced to the
-   `lanczos_kernel<CpuBackend>` reorthogonalisation policy defaulting to
-   `LocalDGKS3` (3 passes) whereas the legacy CPU Lanczos defaulted to a
-   single MGS pass. The kernel exposes the policy via
-   `lanczos_options.reorth_policy`; the orchestrator will switch to a
-   `LocalDGKS1`-equivalent default in a follow-up PR to restore parity.
+2. **The new lane carries a ~1.4–1.7× constant overhead**: visible at
+   N = 6 (0.17 ms vs 0.10 ms ≈ 1.7×) and narrowing toward N = 14
+   (5.3 ms vs 3.7 ms ≈ 1.45×) where matvec time dominates. The overhead
+   tracks to (a) `select_backend` + `unique_ptr<CpuBackend>` allocation
+   per call, (b) `LinearOperator::bind<CpuBackend>` constructing a
+   `std::function` envelope around the matvec, and (c) the
+   `lanczos_kernel<CpuBackend>` defaulting to `ReorthPolicy::LocalDGKS3`
+   (a 3-vector ring DGKS pass) vs the legacy CPU Lanczos's single-MGS
+   reorth. None are correctness issues; (c) is configurable via
+   `LanczosKernelOptions::reorth`. A follow-up may swap the orchestrator
+   default to a 1-vector DGKS when `num_eigs == 1` and `max_iter` is
+   small enough that LocalDGKS3's stability margin isn't needed.
 
 #### Summary of LOC subtracted in this sweep
 

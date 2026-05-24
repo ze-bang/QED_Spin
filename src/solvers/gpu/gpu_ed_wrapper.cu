@@ -60,19 +60,6 @@ void GPUEDWrapper::printGPUInfo() {
     std::cout << "=======================\n\n";
 }
 
-int GPUEDWrapper::getGPUCount() {
-    int device_count = 0;
-    cudaGetDeviceCount(&device_count);
-    return device_count;
-}
-
-size_t GPUEDWrapper::getAvailableGPUMemory(int device) {
-    cudaSetDevice(device);
-    size_t free_mem, total_mem;
-    cudaMemGetInfo(&free_mem, &total_mem);
-    return free_mem;
-}
-
 void* GPUEDWrapper::createGPUOperatorDirect(
     int n_sites,
     const std::vector<std::tuple<int, int, char, char, double>>& interactions,
