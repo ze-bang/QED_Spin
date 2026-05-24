@@ -809,6 +809,49 @@ class TestDeviceMatrix:
             f"GPU path hit the wrong dispatcher: {called}"
         )
 
+    def test_cpu_path_lands_in_workflows_solve(self, H, monkeypatch):
+        """Full Unified-Interface Collapse, Wave E acceptance (May 2026):
+        the CPU+no-symmetry default path of `qed.diag` for ground-state
+        solvers (LANCZOS / KRYLOV_SCHUR / FULL / BLOCK_LANCZOS) must
+        route through `_core.workflows_solve` -- NOT the legacy
+        `exact_diagonalization_core` -- after the
+        `_diag_via_workflows_solve` helper landed.
+
+        The legacy core remains reachable through the deprecation alias
+        (`_core.exact_diagonalization_core`); this test makes sure no
+        in-tree call ever takes that branch for a ground-state method.
+        """
+        from qed import workflow as wf
+        from qed import _core as _qcore
+
+        called = {"core": 0, "workflows_solve": 0}
+
+        def fake_core(*a, **k):
+            called["core"] += 1
+            class _R:
+                eigenvalues = [0.0]
+                eigenvectors_computed = False
+                eigenvectors_path = ""
+            return _R()
+
+        def fake_workflows_solve(*a, **k):
+            called["workflows_solve"] += 1
+            class _R:
+                eigenvalues = [0.0]
+                eigenvectors = []
+                hdf5_path = ""
+            return _R()
+
+        monkeypatch.setattr(wf, "exact_diagonalization_core", fake_core)
+        monkeypatch.setattr(_qcore, "workflows_solve", fake_workflows_solve)
+
+        qed.diag(H, solver="LANCZOS", num_eigenvalues=1,
+                 verbose=False, plan=False)
+        assert called == {"core": 0, "workflows_solve": 1}, (
+            f"CPU+no-symmetry path took the wrong dispatcher: {called}. "
+            "Expected the unified `workflows_solve` route after Wave E1."
+        )
+
     @pytest.mark.parametrize("device", ["mpi", "mpi_gpu"])
     @pytest.mark.parametrize("solver", ["LANCZOS", "KRYLOV_SCHUR", "mTPQ"])
     def test_mpi_paths_dispatch_binary(self, H, device, solver, monkeypatch):

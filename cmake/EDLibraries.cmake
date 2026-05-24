@@ -556,6 +556,17 @@ target_link_libraries(ed_cli PUBLIC ed_solvers_cpu ed_dssf ed_io ed_core)
 if(WITH_CUDA)
     target_link_libraries(ed_cli PUBLIC ed_solvers_gpu)
 endif()
+# Wave C2 (Full Unified-Interface Collapse, May 2026): the CLI now
+# builds operators via the inline `ed::make_operator` factory, whose
+# body references `DistributedOperator` /
+# `DistributedSymmetryOperator` constructors under `WITH_MPI`. The
+# distributed lanes are never selected from the CLI (it always sets
+# `spec.distributed = false`), but the constructors still appear as
+# weak references in the emitted object file and need to resolve
+# transitively for any binary that links `ed_cli`.
+if(WITH_MPI AND TARGET ed_distributed)
+    target_link_libraries(ed_cli PUBLIC ed_distributed)
+endif()
 target_link_libraries(ed_cli PUBLIC
     "$<BUILD_INTERFACE:nlohmann_json::nlohmann_json>"
 )

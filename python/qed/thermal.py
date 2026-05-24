@@ -44,11 +44,13 @@ thermodynamics plus a per-sector breakdown for diagnostics.
 
 from __future__ import annotations
 
+import contextlib
 import math
 import os
 import shutil
 import tempfile
 import time
+import warnings
 from dataclasses import dataclass, field
 from typing import Any, Optional, Union
 
@@ -60,11 +62,114 @@ from ._core import (
     EDParameters,
     EDResults,
     Operator,
+    ThermodynamicData,
     exact_diagonalization_from_directory,
 )
 from .workflow import diag
 
 __all__ = ["ThermalResult", "ThermalSectorEntry", "thermal"]
+
+
+# ---------------------------------------------------------------------------
+# Full Unified-Interface Collapse, Wave E2 (May 2026): repoint the two
+# `exact_diagonalization_from_directory` call sites on this file at
+# `_core.workflows_thermal` when the dispatch is safely covered by the
+# orchestrator (no spatial symmetry, or TPQ which always disables
+# symmetry). The streaming-symmetry irrep loop is NOT yet a feature of
+# `workflows_thermal`; in that case we keep falling back to the legacy
+# directory dispatcher.
+# ---------------------------------------------------------------------------
+
+# Full Unified-Interface Collapse, Wave E4 (May 2026): suppress the C++
+# legacy deprecation warning when we deliberately fall back to
+# `exact_diagonalization_from_directory` for lanes the orchestrator
+# does not yet cover (streaming-symmetry irrep iteration).
+@contextlib.contextmanager
+def _suppress_legacy_dispatch_warning():
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", DeprecationWarning)
+        yield
+
+
+_THERMAL_METHOD_MAP = {
+    DiagonalizationMethod.FTLM:    _core.ThermalMethod.FTLM,
+    DiagonalizationMethod.LTLM:    _core.ThermalMethod.LTLM,
+    DiagonalizationMethod.mTPQ:    _core.ThermalMethod.mTPQ,
+    DiagonalizationMethod.cTPQ:    _core.ThermalMethod.cTPQ,
+    DiagonalizationMethod.KPM_DOS: _core.ThermalMethod.KpmDos,
+}
+
+
+def _ed_params_to_thermal_options(
+    params: EDParameters,
+    method: DiagonalizationMethod,
+) -> "_core.ThermalOptions":
+    """Translate `EDParameters` + thermal `DiagonalizationMethod` into
+    a `_core.ThermalOptions`. Mirrors the C++ adapter helpers; only
+    fields the orchestrator's `workflows_thermal` actually consults are
+    forwarded."""
+    opts = _core.ThermalOptions()
+    opts.method        = _THERMAL_METHOD_MAP.get(method, _core.ThermalMethod.FTLM)
+    opts.num_samples   = int(params.num_samples)
+    opts.krylov_dim    = int(params.ftlm_krylov_dim) \
+        if method == DiagonalizationMethod.FTLM \
+        else int(params.ltlm_krylov_dim) \
+        if method == DiagonalizationMethod.LTLM \
+        else 100
+    opts.taylor_order  = int(params.tpq_taylor_order)
+    opts.delta_beta    = float(params.tpq_delta_beta)
+    opts.beta_max      = float(params.tpq_beta_max)
+    opts.random_seed   = int(params.ftlm_seed or params.ltlm_seed or 0)
+    opts.output_dir    = str(params.output_dir or "")
+    opts.temp_min      = float(params.temp_min)
+    opts.temp_max      = float(params.temp_max)
+    opts.num_temp_bins = int(params.num_temp_bins)
+    return opts
+
+
+def _ed_result_from_thermal_result(
+    tr: "_core.ThermalResult",
+) -> EDResults:
+    """Wrap a `_core.ThermalResult` (the orchestrator's return shape)
+    into an `EDResults` whose `thermo_data` carries the recombined
+    temperature scan, matching the legacy dispatcher's contract."""
+    out = EDResults()
+    out.thermo_data = tr.thermo
+    out.eigenvalues = [float(tr.ground_state_energy)] \
+        if tr.ground_state_energy != 0.0 else []
+    return out
+
+
+def _can_use_workflows_thermal(
+    method: DiagonalizationMethod,
+    has_symmetry: bool,
+) -> bool:
+    """True when the orchestrator's `workflows_thermal` covers the
+    requested lane today: any method that does not need the
+    streaming-symmetry irrep loop. TPQ silently disables symmetry,
+    so it is always safe; everything else is safe iff
+    `has_symmetry == False`."""
+    if method not in _THERMAL_METHOD_MAP:
+        return False
+    if method in (DiagonalizationMethod.mTPQ, DiagonalizationMethod.cTPQ):
+        return True
+    return not has_symmetry
+
+
+def _thermal_via_workflows_thermal(
+    H_op: Operator,
+    method: DiagonalizationMethod,
+    params: EDParameters,
+) -> EDResults:
+    """Route a (possibly fixed-Sz) operator through
+    `_core.workflows_thermal` and reshape the result to `EDResults`."""
+    if params.use_fixed_sz:
+        op = H_op.make_fixed_sz(int(params.n_up))
+    else:
+        op = H_op
+    opts = _ed_params_to_thermal_options(params, method)
+    tr = _core.workflows_thermal(op, opts)
+    return _ed_result_from_thermal_result(tr)
 
 
 # ---------------------------------------------------------------------------
@@ -550,8 +655,17 @@ def thermal(
                     f"{method} call via the directory dispatcher."
                 )
             try:
-                res = exact_diagonalization_from_directory(
-                    directory, method_enum, _make_dir_params(None))
+                p = _make_dir_params(None)
+                # Wave E2 (Full Unified-Interface Collapse, May 2026):
+                # repoint at `_core.workflows_thermal` when the
+                # orchestrator covers the lane (any method that doesn't
+                # need the streaming-symmetry irrep loop).
+                if _can_use_workflows_thermal(method_enum, has_sym):
+                    res = _thermal_via_workflows_thermal(H_op, method_enum, p)
+                else:
+                    with _suppress_legacy_dispatch_warning():
+                        res = exact_diagonalization_from_directory(
+                            directory, method_enum, p)
                 thermo = _sector_thermo_arrays(res)
                 if thermo is None:
                     raise RuntimeError(
@@ -587,8 +701,16 @@ def thermal(
                     continue
                 if verbose:
                     print(f"  [n_up={n_up}] dim={sec_dim}")
-                res = exact_diagonalization_from_directory(
-                    directory, method_enum, _make_dir_params(n_up))
+                p = _make_dir_params(n_up)
+                # Wave E2 (Full Unified-Interface Collapse, May 2026):
+                # per-sector thermal lands on `workflows_thermal` when
+                # the orchestrator covers the lane.
+                if _can_use_workflows_thermal(method_enum, has_sym):
+                    res = _thermal_via_workflows_thermal(H_op, method_enum, p)
+                else:
+                    with _suppress_legacy_dispatch_warning():
+                        res = exact_diagonalization_from_directory(
+                            directory, method_enum, p)
                 thermo = _sector_thermo_arrays(res)
                 if thermo is None:
                     if verbose:

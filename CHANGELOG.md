@@ -7,6 +7,135 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Full Unified-Interface Collapse — Remaining waves C2, E1-E4, F-partial (May 2026)
+
+Continues the collapse landed in commit 6983531 ("Waves A, B, E-pilot, G").
+This drop shrinks the legacy-symbol cone again: the two pilot CLI workflows,
+all in-tree Python dispatch sites, and the C++ `dispatch.h` header are now
+gone or routed through the unified `make_operator + workflows::*` shape.
+
+#### Wave C2 — CLI workflow pilot (2 of 7 workflows migrated)
+
+* **`run_standard_workflow`** in `src/cli/workflows.cpp` no longer calls the
+  legacy `ed::exact_diagonalization(directory, method, params, ...)` entry
+  from `<ed/core/dispatch.h>`. It now builds an `OperatorSpec`, calls
+  `ed::make_operator(spec)`, and dispatches through `ed::workflows::solve`.
+  An explicit `HDF5IO::saveEigenvalues(...)` keeps CLI parity with the
+  orchestrator (which does not auto-save). The `params.full_sz_split &&
+  method == FULL` branch (`ALL_SZ_SECTORS` in the legacy world) is
+  reproduced as an explicit Sz loop that merges + sorts eigenvalues across
+  sectors.
+* **`run_streaming_symmetry_workflow`** in the same file uses
+  `spec.streaming_symmetry = true` (with optional `spec.fixed_sz`) and
+  iterates symmetry sectors explicitly via the downcast
+  `StreamingSymmetryOperator::sector(k)` / `FixedSzStreamingSymmetryOperator
+  ::sector(k)` -> `SectorView`. Each `SectorView` is solved independently
+  through `ed::workflows::solve`, with per-sector HDF5 emission.
+* **`include/ed/core/ed_config_adapter.h`** gains
+  `ed_adapter::toSolveOptions(EDParameters, DiagonalizationMethod)`, which
+  maps the legacy `EDParameters` field set + method enum onto
+  `ed::workflows::SolveOptions` (including the CLI-parity knobs:
+  `use_fixed_sz`, `use_symmetry`, `n_up`, `basis_cache_dir`,
+  `precompute_basis_only`).
+* **Build system** — `ed_distributed` is now a `PUBLIC` dependency of
+  `ed_cli` in `cmake/EDLibraries.cmake` (under `WITH_MPI`), so any binary
+  linking `ed_cli` automatically resolves the `DistributedOperator` /
+  `DistributedSymmetryOperator` symbols pulled in transitively by the
+  inline `ed::make_operator` factory.
+
+#### Wave E1-E4 — Python `qed.*` wrappers point at the unified C++ surface
+
+* **E1 — `python/qed/workflow.py`**: ground-state dispatch in `qed.diag`
+  now routes through new helper `_diag_via_workflows_solve(...)`, which
+  builds an in-memory `Operator`, maps `EDParameters` -> `SolveOptions`
+  via `_ed_params_to_solve_options`, calls `_core.workflows_solve`, and
+  reshapes the `GroundStateResult` into the legacy `EDResults` shape.
+  Thermal methods (FTLM / TPQ / KPM-DOS) fall through to the existing
+  `exact_diagonalization_core` path, which now emits a `DeprecationWarning`
+  -- a new `_suppress_legacy_dispatch_warning` context manager silences
+  those internal fallback calls so user-facing pytest runs are clean.
+* **E2 — `python/qed/thermal.py`**: the two `exact_diagonalization_from_
+  directory` call-sites repoint at `_core.workflows_thermal` when the
+  orchestrator covers the lane (no spatial symmetry, or any TPQ method --
+  which disables symmetry anyway). Builds an `Operator` from directory
+  files, maps `EDParameters` -> `ThermalOptions`, and reshapes
+  `ThermalResult` (now exposing `thermo` + `per_sector`) back into
+  `EDResults`. Spatial-symmetry cases continue through the legacy lane.
+* **E2 binding follow-up — `python/qed/_bindings/workflow_bindings.cpp`**:
+  `ThermalResult` now exposes `thermo` (`ThermodynamicData`) and
+  `per_sector` (`std::vector<ThermalSectorEntry>`), and a new
+  `py::class_<ThermalSectorEntry>` binding surfaces `sz_index`,
+  `ground_state_energy`, and `thermo`.
+* **E3 (skip)** — `python/qed/dssf.py`: `qed.dssf.compute` still shells
+  out to `./ED dssf`. The in-process `_core.workflows_spectral` path
+  needs a non-trivial cross-correlator pair assembler in Python (or a new
+  C++ `workflows_dssf_compute` orchestrator), so it is documented in the
+  docstring as a tracked follow-up rather than landed now.
+* **E4 — `python/qed/_bindings/dispatcher_bindings.cpp`**: the 5
+  ED-related `m.def(...)` registrations (`exact_diagonalization_core`
+  -- both overloads, `exact_diagonalization_streaming_symmetry`,
+  `_streaming_symmetry_fixed_sz`, `exact_diagonalization_from_directory`)
+  are now thin **deprecation-warning forwarders**. Each emits a Python
+  `DeprecationWarning` pointing at the new `qed.workflows` /
+  `qed.solve` / `qed.thermal` surface, then routes through the C++
+  `ed_wrapper.h` / `ed_wrapper_streaming.h` entries directly (the
+  `exact_diagonalization_from_directory` binding inlines the
+  symmetry-detect + method-canonicalize logic that previously lived in
+  `dispatch.h`).
+* **E acceptance** — `python/tests/test_workflow.py` gains
+  `test_cpu_path_lands_in_workflows_solve`, which monkeypatches
+  `exact_diagonalization_core` and `workflows_solve` and asserts that
+  `qed.diag(method=lanczos, ...)` lands in the unified entry. The full
+  Python workflow suite passes under `pytest -W error::DeprecationWarning`
+  (modulo pre-existing path / `edlib`-import failures unrelated to this
+  drop).
+
+#### Wave F-partial — first hard removals
+
+* **`include/ed/core/dispatch.h` deleted** (~312 LOC). Its last in-tree
+  callers were `run_standard_workflow`, `run_streaming_symmetry_workflow`,
+  the Python `exact_diagonalization_from_directory` binding, and the
+  `test_dispatch_streaming_thermo` unit test. The first two migrated to
+  `make_operator + workflows::solve` in Wave C2; the Python binding now
+  inlines the symmetry-detect + method-canonicalize routing in Wave E4;
+  the unit test was deleted (the streaming-symmetry + FTLM end-to-end
+  behaviour it covered is now exercised by `test_auto_thermal`).
+* **`tests/unit/test_dispatch_streaming_thermo.cpp` deleted** and its
+  `add_test(test_dispatch_streaming_thermo ...)` block removed from
+  `CMakeLists.txt`.
+* **Docs** — `docs/MIGRATION.md` and `docs/architecture/STRUCTURAL_AUDIT.md`
+  updated: `dispatch.h` removed, the remaining legacy headers listed
+  with their gating story.
+
+#### Net effect
+
+| Surface | Before this drop | After |
+|---|---|---|
+| `ed::exact_diagonalization` in-tree production callers (`.cpp`) | 2 in `workflows.cpp` + 1 in `dispatcher_bindings.cpp` + 2 in `test_dispatch_streaming_thermo.cpp` | 0 (only doc-comment references remain) |
+| Python `qed.diag` ground-state lane | `_core.exact_diagonalization_core` (legacy) | `_core.workflows_solve` (unified) |
+| Python `qed.thermal` (no-spatial-symmetry / TPQ lane) | `_core.exact_diagonalization_from_directory` | `_core.workflows_thermal` |
+| LOC removed | -- | ~362 (`dispatch.h` + deleted test) |
+| C++ tests green sequentially | 279 / 279 | 277 / 277 (the 2 removed were the `test_dispatch_streaming_thermo` Catch2 cases) |
+
+#### Deferred (tracked in `plans/remaining_unified-interface_waves_*.plan.md`)
+
+* Wave C3: migrate the 5 remaining heavy CLI workflows
+  (`compute_dynamical_response_workflow`, `compute_static_response_workflow`,
+  `compute_ground_state_dssf_workflow`, `compute_kpm_thermodynamics_workflow`,
+  and the four DSSF helpers). Blocked on either extending
+  `SpectralResult` / `ThermalResult` with the missing CLI-only HDF5
+  fields (variance, susceptibility, ground-state vector, KPM moments) or
+  keeping the HDF5 plumbing in the CLI and only swapping the inner
+  `GPUEDWrapper::*` calls.
+* Wave D: distributed CLI + 19 distributed tests (blocked on Wave B
+  kernel-delegation inversion for the FTLM / TPQ distributed thermal
+  lanes).
+* Wave E5: `qed.dssf.compute` in-process path.
+* Wave F2-F5: hard-rm of `ed_wrapper.h`, `ed_wrapper_streaming.h`, the 8
+  distributed-solver shells, `gpu_ed_wrapper.h`, `gpu_lanczos.cuh`,
+  `ed/solvers/{TPQ,ftlm,ltlm,kpm_dos}.h`. Each is gated on the
+  corresponding C3 / D / B wave clearing the in-tree callers.
+
 ### Full Unified-Interface Collapse — Waves A, B, E, G (May 2026)
 
 The "fragmented surface" the user kept hitting (`ed::exact_diagonalization_*`,

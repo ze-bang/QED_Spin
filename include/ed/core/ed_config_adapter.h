@@ -2,6 +2,8 @@
 
 #include <ed/core/ed_config.h>
 #include <ed/core/ed_parameters.h>  // EDParameters
+#include <ed/core/ed_types.h>       // DiagonalizationMethod
+#include <ed/orchestrator.h>        // ed::workflows::SolveOptions / SolveMethod
 
 /**
  * @brief Adapter to convert between new EDConfig and legacy EDParameters
@@ -187,6 +189,54 @@ inline EDConfig fromEDParameters(const EDParameters& params, DiagonalizationMeth
     config.workflow.translation_only = params.translation_only;
 
     return config;
+}
+
+/**
+ * @brief Map `EDParameters` + `DiagonalizationMethod` onto the new
+ *        `ed::workflows::SolveOptions`.
+ *
+ * Full Unified-Interface Collapse, Wave C2 (May 2026): used by the CLI
+ * workflows in src/cli/workflows.cpp to feed the orchestrator surface
+ * without losing any of the orthogonal axes the legacy EDParameters
+ * carries. Symmetric to `toEDParameters`: every field that survives
+ * the collapse is preserved; the few that have no orchestrator
+ * counterpart (sector_index, save_thermal_states, observable name
+ * lists, etc.) are left for the CLI layer to consume directly.
+ */
+inline ed::workflows::SolveOptions
+toSolveOptions(const EDParameters& params,
+               ::DiagonalizationMethod method = ::DiagonalizationMethod::LANCZOS) {
+    ed::workflows::SolveOptions opts;
+
+    opts.num_eigs       = static_cast<std::size_t>(params.num_eigenvalues);
+    opts.max_iter       = static_cast<std::size_t>(params.max_iterations);
+    opts.block_size     = static_cast<std::size_t>(params.block_size);
+    opts.tolerance      = params.tolerance;
+    opts.compute_vectors = params.compute_eigenvectors;
+    opts.output_dir     = params.output_dir;
+
+    // Map `DiagonalizationMethod` onto `SolveMethod`. The orchestrator
+    // already knows how to auto-select between Lanczos / Krylov-Schur /
+    // FullDiag based on `num_eigs` + `geometry().global_dim` when
+    // `SolveMethod::Auto` is set; we honour the caller's explicit
+    // choice when it maps cleanly and fall back to `Auto` otherwise.
+    using SM = ed::workflows::SolveMethod;
+    switch (method) {
+        case ::DiagonalizationMethod::LANCZOS:        opts.method = SM::Lanczos; break;
+        case ::DiagonalizationMethod::BLOCK_LANCZOS:  opts.method = SM::BlockLanczos; break;
+        case ::DiagonalizationMethod::KRYLOV_SCHUR:   opts.method = SM::KrylovSchur; break;
+        case ::DiagonalizationMethod::FULL:           opts.method = SM::FullDiag; break;
+        default:                                      opts.method = SM::Auto; break;
+    }
+
+    // Orthogonal axes mirrored onto SolveOptions (Wave A5 CLI parity).
+    opts.use_fixed_sz          = params.use_fixed_sz;
+    opts.use_symmetry          = params.use_symmetry;
+    opts.n_up                  = static_cast<int>(params.n_up);
+    opts.basis_cache_dir       = params.basis_cache_dir;
+    opts.precompute_basis_only = params.precompute_basis_only;
+
+    return opts;
 }
 
 } // namespace ed_adapter

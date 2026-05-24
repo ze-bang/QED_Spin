@@ -72,9 +72,11 @@ from __future__ import annotations
 
 import json
 import math
+import contextlib
 import os
 import shutil
 import tempfile
+import warnings
 from dataclasses import dataclass, field
 from typing import Any, Iterable, Optional, Sequence, Union
 
@@ -112,6 +114,129 @@ __all__ = [
 
 Permutation = list[int]
 SymmetryArg = Union["GeneratorSet", Sequence[Permutation], dict[str, Any], None]
+
+
+# ---------------------------------------------------------------------------
+# Full Unified-Interface Collapse, Wave E4 (May 2026): the C++ pybind11
+# bindings `_core.exact_diagonalization_*` now emit a DeprecationWarning
+# to nudge external callers off the legacy surface. In-tree fallback
+# call sites (the GPU directory dispatcher and the streaming-symmetry
+# kernel, both of which the orchestrator does not yet fully cover)
+# suppress the warning so they don't trigger `pytest -W
+# error::DeprecationWarning`.
+# ---------------------------------------------------------------------------
+@contextlib.contextmanager
+def _suppress_legacy_dispatch_warning():
+    """Silence the DeprecationWarning the C++ legacy bindings emit. Used
+    by the in-tree fallback paths that cannot yet route through
+    `_core.workflows_*`."""
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", DeprecationWarning)
+        yield
+
+
+# ---------------------------------------------------------------------------
+# Full Unified-Interface Collapse, Wave E1 (May 2026): helpers that bridge
+# the legacy `EDParameters` + `DiagonalizationMethod` surface onto the new
+# `_core.workflows_solve(op, SolveOptions)` orchestrator. Used by
+# `_diag_via_workflows_solve` below to repoint the canonical
+# CPU+no-symmetry ground-state path at the unified orchestrator while
+# preserving the `EDResults` envelope every legacy caller expects.
+# ---------------------------------------------------------------------------
+
+# Ground-state methods the orchestrator's `workflows_solve` natively
+# supports. Thermal methods (FTLM / LTLM / mTPQ / cTPQ / KPM_DOS) keep
+# routing through the legacy `exact_diagonalization_core`; they'll move
+# under `_core.workflows_thermal` in Wave E2.
+_GROUND_STATE_METHODS = frozenset({
+    DiagonalizationMethod.LANCZOS,
+    DiagonalizationMethod.BLOCK_LANCZOS,
+    DiagonalizationMethod.KRYLOV_SCHUR,
+    DiagonalizationMethod.FULL,
+})
+
+
+def _is_ground_state_method(method: DiagonalizationMethod) -> bool:
+    """True when `method` is one of the four ground-state lanes that
+    `_core.workflows_solve` handles natively."""
+    return method in _GROUND_STATE_METHODS
+
+
+def _ed_params_to_solve_options(
+    params: EDParameters,
+    method: DiagonalizationMethod,
+) -> "_core.SolveOptions":
+    """Translate `EDParameters` + `DiagonalizationMethod` into a
+    `_core.SolveOptions` for the orchestrator.
+
+    Mirrors `ed_adapter::toSolveOptions` on the C++ side: every field
+    that survives the unified collapse is forwarded; thermal / TPQ /
+    KPM-DOS knobs are simply not consulted because `workflows_solve`
+    does not exercise them."""
+    opts = _core.SolveOptions()
+    opts.num_eigs        = int(params.num_eigenvalues)
+    opts.max_iter        = int(params.max_iterations)
+    opts.block_size      = int(params.block_size)
+    opts.tolerance       = float(params.tolerance)
+    opts.compute_vectors = bool(params.compute_eigenvectors)
+    opts.output_dir      = str(params.output_dir or "")
+
+    method_map = {
+        DiagonalizationMethod.LANCZOS:       _core.SolveMethod.Lanczos,
+        DiagonalizationMethod.BLOCK_LANCZOS: _core.SolveMethod.BlockLanczos,
+        DiagonalizationMethod.KRYLOV_SCHUR:  _core.SolveMethod.KrylovSchur,
+        DiagonalizationMethod.FULL:          _core.SolveMethod.FullDiag,
+    }
+    opts.method = method_map.get(method, _core.SolveMethod.Auto)
+
+    opts.use_fixed_sz          = bool(params.use_fixed_sz)
+    opts.use_symmetry          = bool(params.use_symmetry)
+    opts.n_up                  = int(params.n_up)
+    # `basis_cache_dir` / `precompute_basis_only` are streaming-symmetry
+    # knobs that may not be bound on the Python `EDParameters` (the
+    # in-process pybind11 surface only exposes what `qed.diag` consumes
+    # today). Fall back to defaults when the attribute is absent.
+    opts.basis_cache_dir       = str(getattr(params, "basis_cache_dir", "") or "")
+    opts.precompute_basis_only = bool(getattr(params, "precompute_basis_only", False))
+    return opts
+
+
+def _ed_result_from_gs_result(
+    gs_result: "_core.GroundStateResult",
+    params: EDParameters,
+) -> EDResults:
+    """Wrap a `_core.GroundStateResult` (the orchestrator's return shape)
+    into an `EDResults` so callers see the same envelope they got from
+    `exact_diagonalization_core`."""
+    out = EDResults()
+    out.eigenvalues = list(gs_result.eigenvalues)
+    out.eigenvectors_computed = bool(params.compute_eigenvectors)
+    out.eigenvectors_path = str(getattr(gs_result, "hdf5_path", "") or "")
+    return out
+
+
+def _diag_via_workflows_solve(
+    operator: Operator,
+    method: DiagonalizationMethod,
+    params: EDParameters,
+) -> EDResults:
+    """Route an in-memory `Operator` through the unified orchestrator
+    (`_core.workflows_solve`) for the ground-state lanes; transparently
+    falls back to the legacy `exact_diagonalization_core` for any
+    thermal method (FTLM / LTLM / mTPQ / cTPQ / KPM_DOS) that the
+    orchestrator's ground-state surface does not cover today.
+
+    Repoints lines 1105 / 2569 / 2577 of this file onto the new
+    surface as part of the Full Unified-Interface Collapse, Wave E1
+    (May 2026)."""
+    if _is_ground_state_method(method):
+        opts = _ed_params_to_solve_options(params, method)
+        gs   = _core.workflows_solve(operator, opts)
+        return _ed_result_from_gs_result(gs, params)
+    # Thermal methods still go through the legacy core; suppress the
+    # C++ deprecation warning since this is an in-tree fallback path.
+    with _suppress_legacy_dispatch_warning():
+        return exact_diagonalization_core(operator, method, params)
 
 
 # ---------------------------------------------------------------------------
@@ -1102,7 +1227,7 @@ def diag(
     if use_gpu:
         return _diag_via_directory(op_to_use, method, params, verbose=verbose)
 
-    return exact_diagonalization_core(op_to_use, method, params)
+    return _diag_via_workflows_solve(op_to_use, method, params)
 
 
 # ---------------------------------------------------------------------------
@@ -1876,9 +2001,10 @@ def _diag_via_directory(
         _write_operator_directory(operator, tmpdir)
         if verbose:
             print(f"[qed.diag] GPU dispatch via temp directory {tmpdir!r}")
-        return exact_diagonalization_from_directory(
-            tmpdir, method, params,
-        )
+        with _suppress_legacy_dispatch_warning():
+            return exact_diagonalization_from_directory(
+                tmpdir, method, params,
+            )
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
 
@@ -2565,8 +2691,11 @@ def _diag_with_symmetry(
         gens = symmetry.generators
         if not gens:
             # Empty generators ⇔ trivial; no symmetry projection needed.
+            # Full Unified-Interface Collapse, Wave E1 (May 2026): route
+            # through the orchestrator (`_core.workflows_solve`) so the
+            # trivial-symmetry path lands on the unified surface too.
             params.use_symmetry = False
-            return exact_diagonalization_core(operator, method, params)
+            return _diag_via_workflows_solve(operator, method, params)
         info = group_from_generators(int(operator.num_sites), gens)
     elif isinstance(symmetry, dict):
         info = symmetry
@@ -2574,7 +2703,7 @@ def _diag_with_symmetry(
         gens = [list(map(int, p)) for p in symmetry]
         if not gens:
             params.use_symmetry = False
-            return exact_diagonalization_core(operator, method, params)
+            return _diag_via_workflows_solve(operator, method, params)
         info = group_from_generators(int(operator.num_sites), gens)
     else:
         raise TypeError(
@@ -2611,12 +2740,14 @@ def _diag_with_symmetry(
                         "knows the sector."
                     )
                 sz = int(params.n_up)
-            return exact_diagonalization_streaming_symmetry_fixed_sz(
-                tmpdir, int(sz), method, params
+            with _suppress_legacy_dispatch_warning():
+                return exact_diagonalization_streaming_symmetry_fixed_sz(
+                    tmpdir, int(sz), method, params
+                )
+        with _suppress_legacy_dispatch_warning():
+            return exact_diagonalization_streaming_symmetry(
+                tmpdir, method, params
             )
-        return exact_diagonalization_streaming_symmetry(
-            tmpdir, method, params
-        )
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
 

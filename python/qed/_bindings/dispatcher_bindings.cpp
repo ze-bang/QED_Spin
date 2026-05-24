@@ -15,11 +15,13 @@
 #include <pybind11/numpy.h>
 
 #include <ed/core/ed_wrapper.h>            // EDResults / EDParameters / legacy free functions
-#include <ed/core/ed_wrapper_streaming.h>  // streaming-symmetry kernel (transitive via dispatch.h)
-#include <ed/core/dispatch.h>              // Phase 6: ed::exact_diagonalization(...) -- canonical entry
+#include <ed/core/ed_wrapper_streaming.h>  // streaming-symmetry kernel
+#include <ed/core/ed_method_traits.h>      // canonicalize_method_and_flags
 #include <ed/core/ed_parameters.h>
 #include <ed/core/ed_types.h>
 #include <ed/core/construct_ham.h>
+
+#include <filesystem>
 
 #include <complex>
 #include <cstdint>
@@ -34,6 +36,36 @@ namespace py = pybind11;
 namespace {
 
 using Complex = std::complex<double>;
+
+// -----------------------------------------------------------------------------
+// Full Unified-Interface Collapse, Wave E4 (May 2026): the
+// `exact_diagonalization_*` Python entry points exposed by this file are
+// legacy aliases. The canonical surface is now `qed.workflows.solve /
+// thermal / spectral` (which delegates to the C++
+// `ed::workflows::{solve,thermal,spectral}` orchestrator). The aliases
+// here keep working for out-of-tree consumers but emit a
+// `DeprecationWarning` to nudge migration.
+//
+// Internal in-tree callers should NOT use these aliases directly --
+// they should use `qed.workflows.*` or the C++ `_core.workflows_*`
+// bindings instead.
+// -----------------------------------------------------------------------------
+inline void emit_deprecation_warning(const char* legacy_name,
+                                     const char* replacement) {
+    // Use stacklevel = 2 so the warning points at the caller, not at
+    // the lambda inside the binding.
+    std::string msg = std::string(legacy_name) +
+        " is a legacy alias since the Full Unified-Interface Collapse "
+        "(May 2026); use " + replacement + " instead. "
+        "This alias will be removed in a future release.";
+    if (PyErr_WarnEx(PyExc_DeprecationWarning, msg.c_str(), 2) < 0) {
+        // PyErr_WarnEx returns -1 if the warning was promoted to an
+        // exception (e.g. via `-W error::DeprecationWarning`). The
+        // pybind11 trampoline will see PyErr_Occurred() and convert
+        // it into a Python exception on return.
+        throw py::error_already_set();
+    }
+}
 
 // -----------------------------------------------------------------------------
 // Adapter: build an `apply(in, out, n)` callback closing over an Operator-like
@@ -390,6 +422,8 @@ void bind_dispatcher(py::module_& m) {
     auto run_core_op = [](const Operator& op,
                           DiagonalizationMethod method,
                           const EDParameters& params) {
+        emit_deprecation_warning("exact_diagonalization_core",
+                                 "qed.workflows.solve / qed.workflows.thermal");
         const std::uint64_t dim = (std::uint64_t{1} << op.getNumBits());
         EDResults results;
         auto matvec = make_matvec(op);
@@ -403,6 +437,8 @@ void bind_dispatcher(py::module_& m) {
     auto run_core_fixed = [](const FixedSzOperator& op,
                              DiagonalizationMethod method,
                              EDParameters params) {
+        emit_deprecation_warning("exact_diagonalization_core",
+                                 "qed.workflows.solve / qed.workflows.thermal");
         const std::uint64_t dim = op.getFixedSzDim();
         // Mirror the C++ convention: when called with a FixedSzOperator the
         // dispatcher needs use_fixed_sz=True to dispatch the fixed-Sz
@@ -566,6 +602,11 @@ void bind_dispatcher(py::module_& m) {
              const std::string& single_site_filename,
              const std::string& basis_cache_dir,
              bool precompute_basis_only) {
+              emit_deprecation_warning(
+                  "exact_diagonalization_streaming_symmetry",
+                  "qed.workflows.solve with an OperatorSpec carrying "
+                  "streaming_symmetry=true (per-sector iteration via "
+                  "StreamingSymmetryOperator::sector(k))");
               EDResults res;
               {
                   py::gil_scoped_release release;
@@ -629,6 +670,10 @@ void bind_dispatcher(py::module_& m) {
              const std::string& single_site_filename,
              const std::string& basis_cache_dir,
              bool precompute_basis_only) {
+              emit_deprecation_warning(
+                  "exact_diagonalization_streaming_symmetry_fixed_sz",
+                  "qed.workflows.solve with an OperatorSpec carrying "
+                  "streaming_symmetry=true and fixed_sz=<n_up>");
               EDResults res;
               {
                   py::gil_scoped_release release;
@@ -667,18 +712,72 @@ void bind_dispatcher(py::module_& m) {
              const std::string& single_site_filename,
              const std::string& counterterm_filename,
              const std::string& three_body_filename) {
+              emit_deprecation_warning(
+                  "exact_diagonalization_from_directory",
+                  "qed.workflows.solve / qed.workflows.thermal with an "
+                  "OperatorSpec carrying source=DirectoryPath(...)");
               EDResults res;
               {
                   py::gil_scoped_release release;
-                  // Phase 6 (matvec-unification): canonical entry point
-                  // ed::exact_diagonalization(...) in <ed/core/dispatch.h>.
-                  // Dispatches on the four orthogonal axes recorded in
-                  // params (use_symmetry, use_fixed_sz, use_gpu, use_mpi);
-                  // see ed/core/dispatch.h for the full contract.
-                  res = ed::exact_diagonalization(
-                      directory, method, params, format,
-                      interaction_filename, single_site_filename,
-                      counterterm_filename, three_body_filename);
+                  // Full Unified-Interface Collapse, Wave F-partial
+                  // (May 2026): the legacy `<ed/core/dispatch.h>` is
+                  // gone. The routing it used to do --
+                  // canonicalize_method_and_flags + auto-promote
+                  // use_symmetry when `automorphism_results/` is
+                  // present + route to streaming when use_symmetry is
+                  // set -- is inlined here so the deprecation alias
+                  // keeps the same observable behaviour for
+                  // out-of-tree callers.
+                  EDParameters resolved = params;
+                  {
+                      const auto canon = ed::canonicalize_method_and_flags(
+                          method,
+                          resolved.use_fixed_sz, resolved.use_gpu, resolved.use_mpi);
+                      method                = canon.method;
+                      resolved.use_fixed_sz = canon.use_fixed_sz;
+                      resolved.use_gpu      = canon.use_gpu;
+                      resolved.use_mpi      = canon.use_mpi;
+                  }
+                  if (!resolved.use_symmetry) {
+                      namespace fs = std::filesystem;
+                      const fs::path ar =
+                          fs::path(directory) / "automorphism_results";
+                      if (fs::exists(ar) && fs::is_directory(ar)) {
+                          for (const char* name : {
+                                  "automorphisms.json",
+                                  "max_clique.json",
+                                  "sector_metadata.json",
+                                  "minimal_generators.json",
+                                  "sectors.json",
+                                  "generators.json"}) {
+                              if (fs::exists(ar / name)) {
+                                  resolved.use_symmetry = true;
+                                  break;
+                              }
+                          }
+                      }
+                  }
+                  if (!resolved.use_symmetry) {
+                      res = ::exact_diagonalization_from_directory(
+                          directory, method, resolved, format,
+                          interaction_filename, single_site_filename,
+                          counterterm_filename, three_body_filename);
+                  } else if (resolved.use_fixed_sz) {
+                      const std::int64_t n_up = (resolved.n_up >= 0)
+                          ? resolved.n_up
+                          : static_cast<std::int64_t>(resolved.num_sites / 2);
+                      res = ::exact_diagonalization_streaming_symmetry_fixed_sz(
+                          directory, n_up, method, resolved,
+                          interaction_filename, single_site_filename,
+                          resolved.basis_cache_dir,
+                          resolved.precompute_basis_only);
+                  } else {
+                      res = ::exact_diagonalization_streaming_symmetry(
+                          directory, method, resolved,
+                          interaction_filename, single_site_filename,
+                          resolved.basis_cache_dir,
+                          resolved.precompute_basis_only);
+                  }
               }
               return res;
           },

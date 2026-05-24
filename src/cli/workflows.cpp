@@ -51,10 +51,17 @@
 #include <ed/core/ed_config.h>
 #include <ed/core/ed_config_adapter.h>
 #include <ed/core/ed_wrapper.h>            // legacy exact_diagonalization_fixed_sz (file-based)
-#include <ed/core/ed_wrapper_streaming.h>  // streaming kernel (transitive via dispatch.h)
-#include <ed/core/dispatch.h>              // ed::exact_diagonalization -- canonical entry
+#include <ed/core/ed_wrapper_streaming.h>  // streaming kernel (used directly by GPU lanes)
 #include <ed/core/construct_ham.h>
 #include <ed/core/hdf5_io.h>
+
+// Full Unified-Interface Collapse, Wave C2 (May 2026): run_standard_workflow
+// and run_streaming_symmetry_workflow now build their operator via the
+// unified factory and dispatch through the orchestrator, replacing the
+// legacy `ed::exact_diagonalization(directory, method, params, ...)` entry
+// from the now-deleted <ed/core/dispatch.h>.
+#include <ed/core/make_operator.h>
+#include <ed/orchestrator.h>
 #include <ed/dssf/operator_spec.h>
 #include <ed/dssf/cross_sector_observable.h>
 #include <ed/core/fixed_sz_operator.h>
@@ -482,19 +489,32 @@ build_workflow_hamiltonian(const EDConfig& config,
 
 /**
  * @brief Run standard diagonalization workflow
+ *
+ * Full Unified-Interface Collapse, Wave C2 (May 2026): collapses what used
+ * to be a single `ed::exact_diagonalization(directory, method, params, ...)`
+ * call into the canonical three-step unified shape:
+ *
+ *     OperatorSpec -> ed::make_operator(spec) -> ed::workflows::solve(...)
+ *
+ * Two behavioural lanes are preserved:
+ *   1. Standard: single sector (full Hilbert space, or fixed-Sz when the
+ *      caller sets `use_fixed_sz`).
+ *   2. ALL_SZ_SECTORS: when `params.full_sz_split && params.method == FULL`,
+ *      loop over every Sz sector (n_up = 0..num_sites) via the same
+ *      factory + orchestrator path, merge the eigenvalues, and sort.
+ *      This replaces the dispatcher's internal `exact_diagonalization_all_sz_sectors`
+ *      branch with an explicit, auditable loop in the CLI.
+ *
+ * HDF5 output is now emitted explicitly here (the orchestrator does not
+ * auto-save eigenvalues from the Lanczos / Krylov-Schur lane today), so
+ * the CLI's output contract is unchanged.
  */
 EDResults run_standard_workflow(const EDConfig& config) {
     auto params = ed_adapter::toEDParameters(config);
     params.output_dir = config.workflow.output_dir;
     create_directory_mpi_safe(params.output_dir);
 
-    // Phase 6 (matvec-unification): collapse the workflow's manual
-    // fixed-Sz vs full-Hilbert branch onto the canonical entry
-    // ed::exact_diagonalization. The legacy file-based
-    // exact_diagonalization_fixed_sz() entry is kept inside ed_wrapper.h
-    // for out-of-tree callers, but the workflow now records the axis
-    // choice in params (use_fixed_sz / n_up) and lets the dispatcher
-    // pick the kernel -- same final destination, one entry point.
+    // Force off the symmetry axis (this is the non-symmetry lane).
     params.use_symmetry = false;
     params.use_fixed_sz = config.system.use_fixed_sz;
     if (config.system.use_fixed_sz && params.n_up < 0) {
@@ -505,16 +525,73 @@ EDResults run_standard_workflow(const EDConfig& config) {
 
     auto start = std::chrono::high_resolution_clock::now();
 
-    EDResults results = ed::exact_diagonalization(
-        config.system.hamiltonian_dir,
-        config.method,
-        params,
-        HamiltonianFileFormat::STANDARD
-    );
+    auto build_spec = [&](std::optional<int> sector_n_up) {
+        ed::OperatorSpec spec;
+        spec.source    = ed::DirectoryPath{config.system.hamiltonian_dir};
+        spec.num_sites = config.system.num_sites;
+        spec.spin_l    = config.system.spin_length;
+        if (sector_n_up.has_value()) {
+            spec.fixed_sz = sector_n_up.value();
+        }
+        return spec;
+    };
+
+    ed::workflows::SolveOptions opts =
+        ed_adapter::toSolveOptions(params, config.method);
+
+    EDResults results;
+
+    const bool all_sz_split =
+        params.full_sz_split && config.method == DiagonalizationMethod::FULL;
+
+    if (all_sz_split) {
+        // ALL_SZ_SECTORS lane: loop over n_up = 0..num_sites, projecting
+        // to each Sz sector via FixedSzOperator + workflows::solve, then
+        // merge and globally sort. Matches the legacy
+        // `exact_diagonalization_all_sz_sectors` behaviour now driven
+        // explicitly from the CLI rather than buried in the dispatcher.
+        std::vector<double> all_evals;
+        for (uint64_t n_up = 0; n_up <= config.system.num_sites; ++n_up) {
+            ed::OperatorSpec spec = build_spec(static_cast<int>(n_up));
+            auto sector_op  = ed::make_operator(std::move(spec));
+            ed::workflows::SolveOptions sopts = opts;
+            sopts.use_fixed_sz = true;
+            sopts.n_up         = static_cast<int>(n_up);
+            auto r = ed::workflows::solve(*sector_op, sopts);
+            all_evals.insert(all_evals.end(),
+                             r.eigenvalues.begin(), r.eigenvalues.end());
+        }
+        std::sort(all_evals.begin(), all_evals.end());
+        if (params.num_eigenvalues > 0 &&
+            all_evals.size() > params.num_eigenvalues) {
+            all_evals.resize(params.num_eigenvalues);
+        }
+        results.eigenvalues = std::move(all_evals);
+    } else {
+        ed::OperatorSpec spec = build_spec(
+            params.use_fixed_sz ? std::optional<int>(static_cast<int>(params.n_up))
+                                : std::nullopt);
+        auto op = ed::make_operator(std::move(spec));
+        auto r  = ed::workflows::solve(*op, opts);
+        results.eigenvalues = std::move(r.eigenvalues);
+    }
+
+    // Explicit HDF5 save for CLI parity. The orchestrator currently only
+    // auto-saves eigenvectors when `compute_vectors=true`; the CLI's
+    // contract has always been that eigenvalues land on disk regardless.
+    if (!params.output_dir.empty() && !results.eigenvalues.empty()) {
+        try {
+            std::string h5_path = HDF5IO::createOrOpenFile(params.output_dir);
+            HDF5IO::saveEigenvalues(h5_path, results.eigenvalues);
+        } catch (const std::exception& e) {
+            std::cerr << "Warning: failed to save eigenvalues to HDF5: "
+                      << e.what() << "\n";
+        }
+    }
 
     auto end = std::chrono::high_resolution_clock::now();
     auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
-    
+
     // Print results summary
     if (!results.eigenvalues.empty()) {
         std::cout << "\n  Lowest eigenvalues:\n";
@@ -529,8 +606,6 @@ EDResults run_standard_workflow(const EDConfig& config) {
     }
     
     std::cout << "\n  Time: " << std::fixed << std::setprecision(2) << duration / 1000.0 << " s\n";
-    
-    // Eigenvalues are saved to HDF5 by the underlying diagonalization functions
     
     return results;
 }
@@ -550,10 +625,12 @@ EDResults run_streaming_symmetry_workflow(const EDConfig& config) {
     params.output_dir = config.workflow.output_dir;
     create_directory_mpi_safe(params.output_dir);
 
-    // Phase 6 (matvec-unification): route through ed::exact_diagonalization.
-    // Streaming-specific options (basis cache + precompute-only) now live
-    // on EDParameters; the workflow just records the orthogonal axes and
-    // hands the bag to the canonical dispatcher.
+    // Full Unified-Interface Collapse, Wave C2 (May 2026): same factory +
+    // orchestrator pattern as run_standard_workflow, but with the
+    // `streaming_symmetry` axis flipped on (and `fixed_sz` honoured when
+    // the caller requests it).  The streaming-symmetry kernel walks every
+    // symmetry sector internally; the orchestrator iterates them via
+    // `StreamingSymmetryOperator::SectorView`.
     params.use_symmetry         = true;
     params.use_fixed_sz         = config.system.use_fixed_sz;
     if (config.system.use_fixed_sz && params.n_up < 0) {
@@ -566,18 +643,93 @@ EDResults run_streaming_symmetry_workflow(const EDConfig& config) {
 
     auto start = std::chrono::high_resolution_clock::now();
 
-    EDResults results = ed::exact_diagonalization(
-        config.system.hamiltonian_dir,
-        config.method,
-        params,
-        HamiltonianFileFormat::STANDARD,
-        "InterAll.dat",
-        "Trans.dat"
-    );
+    ed::OperatorSpec spec;
+    spec.source             = ed::DirectoryPath{config.system.hamiltonian_dir};
+    spec.num_sites          = config.system.num_sites;
+    spec.spin_l             = config.system.spin_length;
+    spec.streaming_symmetry = true;
+    if (params.use_fixed_sz) {
+        spec.fixed_sz = static_cast<int>(params.n_up);
+    }
+    auto base_op = ed::make_operator(std::move(spec));
+
+    ed::workflows::SolveOptions opts =
+        ed_adapter::toSolveOptions(params, config.method);
+
+    // Walk every symmetry sector via SectorView and run the orchestrator
+    // per sector. Matches the legacy `exact_diagonalization_streaming_symmetry`
+    // sector loop (ed_wrapper_streaming.h:333), but now expressed as a
+    // CLI-visible iteration over `make_operator(streaming_symmetry=true)
+    // -> sector(k) -> workflows::solve`.
+    EDResults results;
+    auto* sym_op = dynamic_cast<StreamingSymmetryOperator*>(base_op.get());
+    auto* fsz_sym_op = dynamic_cast<FixedSzStreamingSymmetryOperator*>(base_op.get());
+
+    const std::size_t num_sectors = fsz_sym_op
+        ? fsz_sym_op->num_sectors()
+        : (sym_op ? sym_op->num_sectors() : 0);
+
+    if (num_sectors == 0) {
+        throw std::runtime_error(
+            "run_streaming_symmetry_workflow: make_operator returned an "
+            "operator with no symmetry sectors. Check the "
+            "automorphism_results/ directory and the InterAll.dat deck.");
+    }
+
+    std::vector<double> all_eigs;
+    for (std::size_t k = 0; k < num_sectors; ++k) {
+        std::unique_ptr<ed::LinearOperator> sec;
+        if (fsz_sym_op) {
+            sec = fsz_sym_op->sector(k);
+        } else {
+            sec = sym_op->sector(k);
+        }
+        if (sec->dim() == 0) continue;
+        ed::workflows::SolveOptions sopts = opts;
+        sopts.num_eigs = std::min<std::size_t>(opts.num_eigs, sec->dim());
+        // Per-sector HDF5 save (matches legacy
+        // `exact_diagonalization_streaming_symmetry`'s
+        // `sector_<idx>/ed_results.h5` layout).
+        if (!opts.output_dir.empty()) {
+            sopts.output_dir = opts.output_dir + "/sector_" + std::to_string(k);
+        }
+        auto sr = ed::workflows::solve(*sec, sopts);
+        all_eigs.insert(all_eigs.end(),
+                        sr.eigenvalues.begin(), sr.eigenvalues.end());
+        if (!sopts.output_dir.empty() && !sr.eigenvalues.empty()) {
+            try {
+                create_directory_mpi_safe(sopts.output_dir);
+                std::string h5 = HDF5IO::createOrOpenFile(sopts.output_dir);
+                HDF5IO::saveEigenvalues(h5, sr.eigenvalues);
+            } catch (const std::exception& e) {
+                std::cerr << "  Warning: sector " << k
+                          << " HDF5 save failed: " << e.what() << "\n";
+            }
+        }
+    }
+    std::sort(all_eigs.begin(), all_eigs.end());
+    // Legacy parity: `exact_diagonalization_streaming_symmetry` does NOT
+    // truncate the merged eigenvalue list at `params.num_eigenvalues`;
+    // each sector contributes its own `min(num_eigs, sector_dim)` and
+    // the global vector is the union, sorted. The truncation
+    // applies only inside each sector solve (already enforced above
+    // via `sopts.num_eigs = std::min(opts.num_eigs, sec->dim())`).
+    results.eigenvalues = std::move(all_eigs);
+
+    // Top-level merged HDF5 save (matches the legacy global summary).
+    if (!params.output_dir.empty() && !results.eigenvalues.empty()) {
+        try {
+            std::string h5_path = HDF5IO::createOrOpenFile(params.output_dir);
+            HDF5IO::saveEigenvalues(h5_path, results.eigenvalues);
+        } catch (const std::exception& e) {
+            std::cerr << "Warning: failed to save eigenvalues to HDF5: "
+                      << e.what() << "\n";
+        }
+    }
 
     auto end = std::chrono::high_resolution_clock::now();
     auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
-    
+
     // Print results summary
     if (!results.eigenvalues.empty()) {
         std::cout << "\n  Lowest eigenvalues:\n";
@@ -592,8 +744,6 @@ EDResults run_streaming_symmetry_workflow(const EDConfig& config) {
     }
     
     std::cout << "\n  Time: " << std::fixed << std::setprecision(2) << duration / 1000.0 << " s\n";
-    
-    // Eigenvalues are saved to HDF5 by the underlying diagonalization functions
     
     return results;
 }

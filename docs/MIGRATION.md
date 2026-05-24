@@ -27,12 +27,26 @@ legacy surface is being removed phase-by-phase as in-tree callers
 * `include/ed/gpu/gpu_dynamics.cuh` + `src/solvers/gpu/gpu_dynamics.cu`
   (`GPUDynamicsSolver` class) — had zero callers.
 
-**Still scheduled for removal (deferred to follow-up PR after Phase 4
-CLI migration completes):**
+**Removed in the Full Unified-Interface Collapse Wave F-partial (May 2026):**
 
-* `include/ed/core/dispatch.h`, `ed_wrapper.h`, `ed_wrapper_streaming.h`.
-* `python/qed/_bindings/dispatcher_bindings.cpp` (collapse to
-  deprecation aliases).
+* `include/ed/core/dispatch.h` (~312 LOC) — its only callers were the
+  two pilot CLI workflows (`run_standard_workflow`,
+  `run_streaming_symmetry_workflow`), the Python
+  `exact_diagonalization_from_directory` binding, and the
+  `test_dispatch_streaming_thermo` unit test. All of those have been
+  migrated to `ed::make_operator + ed::workflows::solve` (CLI / Python)
+  or removed (the unit test, which is now covered by
+  `test_auto_thermal` exercising the unified entry).
+
+**Still scheduled for removal (deferred to follow-up PR after the
+remaining 5 heavy CLI workflows, distributed CLI/tests, and GPU
+kernel-delegation inversion land):**
+
+* `python/qed/_bindings/dispatcher_bindings.cpp`'s 5 ED-related
+  `m.def(...)` registrations remain as **deprecation-warning forwarders**
+  for out-of-tree consumers; they will be deleted once all known
+  downstream callers are ported.
+* `include/ed/core/ed_wrapper.h`, `ed_wrapper_streaming.h`.
 * `include/ed/distributed/{distributed_lanczos,distributed_lanczos_gpu,
   distributed_krylov_schur,distributed_krylov_schur_gpu,distributed_ftlm,
   distributed_ftlm_gpu,distributed_tpq,distributed_tpq_gpu}.h`.

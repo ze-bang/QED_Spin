@@ -289,6 +289,19 @@ def compute(
     auto-tuned by :func:`qed.auto_tune.tune_dssf` when left as ``None``;
     pass any of them explicitly to override.
 
+    .. note::
+
+       Full Unified-Interface Collapse, Wave E3 (May 2026) -- this
+       entry point still shells out to ``./ED dssf`` via
+       :func:`run_from_directory`. An in-process path using
+       ``_core.workflows_spectral`` is tracked as a follow-up; the
+       blocker is the cross-sector observable-pair assembly + per-pair
+       continued-fraction Lanczos + HDF5 schema, which would need
+       another ~500 LOC of Python plumbing or a new C++
+       ``workflows_dssf_compute`` orchestrator. For now use
+       :func:`qed.workflows.spectral` (one observable pair at a time)
+       to drive the orchestrator directly.
+
     Parameters
     ----------
     directory : str

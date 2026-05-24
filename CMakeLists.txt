@@ -299,6 +299,10 @@ if(WITH_CUDA)
 else()
     target_link_libraries(ED PRIVATE ed_cli ed_solvers_cpu ed_dssf)
 endif()
+# Wave C2 (Full Unified-Interface Collapse, May 2026): `ed_cli` already
+# pulls in `ed_distributed` PUBLIC-ly so binaries linking `ed_cli`
+# resolve `DistributedOperator` / `DistributedSymmetryOperator`
+# constructors that the inline `ed::make_operator` factory references.
 
 # NOTE: The historical `TPQ_DSSF` standalone binary (~4.2 kLOC of duplicated
 # kernels + a positional CLI + parallel HDF5 plumbing) was deleted in P2.14.
@@ -763,13 +767,13 @@ if(BUILD_ED_TESTS)
     # Reference is the dense `calculate_thermodynamics_from_spectrum` on
     # the union of all sector spectra.
     ed_add_test(test_sector_thermo              tests/unit/test_sector_thermo.cpp USE_CATCH2)
-    # Matvec-unification audit follow-up: end-to-end integration through
-    # `ed::exact_diagonalization(method=FTLM, use_symmetry=auto)`. Drives
-    # the streaming-symmetry kernel + sector-thermo recombination on a
-    # 4-site Heisenberg PBC chain and asserts that the recombined thermo
-    # matches the unprojected FTLM reference within statistical tolerances.
-    ed_add_test(test_dispatch_streaming_thermo  tests/unit/test_dispatch_streaming_thermo.cpp USE_CATCH2)
-    target_link_libraries(test_dispatch_streaming_thermo PRIVATE ed_input)
+    # Full Unified-Interface Collapse, Wave F-partial (May 2026):
+    # `tests/unit/test_dispatch_streaming_thermo.cpp` and its target
+    # were removed together with `include/ed/core/dispatch.h`. The
+    # streaming-symmetry + FTLM end-to-end behaviour is now covered by
+    # `tests/unit/test_auto_thermal.cpp` (which uses the unified entry
+    # `ed::auto_pilot::thermal(...)` rather than the legacy
+    # `ed::exact_diagonalization(...)` it was probing).
     # Audit follow-up: one canonical finite-T entry point
     # `ed::auto_pilot::thermal(...)`. Exercises auto-Sz + auto-symmetry +
     # Z-recombination via both the in-memory and the directory overloads.

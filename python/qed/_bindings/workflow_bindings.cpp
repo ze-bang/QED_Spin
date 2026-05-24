@@ -157,10 +157,25 @@ void bind_workflows(py::module_& m) {
 
     py::class_<ed::ThermalResult>(m, "ThermalResult")
         .def(py::init<>())
+        // Full Unified-Interface Collapse, Wave E2 (May 2026): expose
+        // the `thermo` (ThermodynamicData) field so qed.thermal can read
+        // back the recombined temperature scan from
+        // `_core.workflows_thermal`. `ThermodynamicData` is already bound
+        // via `dispatcher_bindings.cpp`, and the per-sector entries are
+        // also surfaced for the Sz-iteration consumer.
+        .def_readonly("thermo",              &ed::ThermalResult::thermo)
+        .def_readonly("per_sector",          &ed::ThermalResult::per_sector)
         .def_readonly("ground_state_energy", &ed::ThermalResult::ground_state_energy)
         .def_readonly("krylov",              &ed::ThermalResult::krylov)
         .def_readonly("backend",             &ed::ThermalResult::backend)
         .def_readonly("hdf5_path",           &ed::ThermalResult::hdf5_path);
+
+    // ThermalSectorEntry binding (needed for ThermalResult.per_sector).
+    py::class_<ed::ThermalSectorEntry>(m, "ThermalSectorEntry")
+        .def(py::init<>())
+        .def_readonly("sz_index",            &ed::ThermalSectorEntry::sz_index)
+        .def_readonly("ground_state_energy", &ed::ThermalSectorEntry::ground_state_energy)
+        .def_readonly("thermo",              &ed::ThermalSectorEntry::thermo);
 
     // -----------------------------------------------------------------
     // SpectralOptions / SpectralResult.
