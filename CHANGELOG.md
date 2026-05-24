@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Orchestrator Lanczos lane — perf tuning + small dead-code subtraction (May 2026, day 17)
+
+Follow-up to the cleanup sweep that closes part of the ~1.45× constant
+overhead gap measured in `bench_minimalist_collapse`:
+
+* `src/orchestrator.cpp` — `ed::workflows::solve` Lanczos lane:
+  * `convergence_check_interval` dropped from `5` → `1` so the orchestrator
+    matches the legacy CPU `lanczos()`'s every-iteration Ritz-value
+    convergence check (previously ran up to 4 extra iterations after
+    convergence).
+  * Tridiag solve now picks the cheaper Eigen path: `solve_tridiag(...)`
+    (eigenvalues-only) when `opts.compute_vectors == false`,
+    `solve_tridiag_with_eigenvectors(...)` only when the eigenvectors are
+    actually requested. The legacy `_with_eigenvectors` path runs the full
+    SelfAdjointEigenSolver unconditionally — ~2-3× slower for the common
+    "num_eigs=1, vectors=false" workflow.
+* Effect on `bench_minimalist_collapse` (N = 14, single rank, CPU):
+  workflows Lanczos lane goes from **5.32 ms → 4.74 ms**, narrowing the
+  gap to the legacy lane from 1.45× to 1.24×.
+* `include/ed/core/ed_wrapper.h` — removed the empty pass-through shim
+  `ed_internal::normalize_method_and_fixed_sz()` (zero call sites; the
+  `_FIXED_SZ` enum variants it was guarding were retired earlier in the
+  minimalist refactor).
+
 ### ED cleanup sweep — phased deletion of legacy dispatcher / auto-pilot surface (May 2026, days 15-16)
 
 The Minimalist ED Collapse landed the new `ed::workflows::solve / thermal /
@@ -145,29 +169,28 @@ diagonalization. All on the same 1-D periodic Heisenberg chain.
 
 | N  | dim    | `ed::workflows::solve` (Lanczos) | Legacy `EDCore` (Lanczos) | LAPACK full diag |
 |---:|-------:|---------------------------------:|---------------------------:|-----------------:|
-| 6  | 64     | 0.166 ms                         | 0.098 ms                   | 1.43 ms          |
-| 8  | 256    | 0.260 ms                         | 0.184 ms                   | 23.6 ms          |
-| 10 | 1 024  | 0.582 ms                         | 0.423 ms                   | 332 ms           |
-| 12 | 4 096  | 2.01 ms                          | 1.38 ms                    | 8 857 ms         |
-| 14 | 16 384 | 5.32 ms                          | 3.68 ms                    | (not run)        |
+| 6  | 64     | 0.147 ms                         | 0.099 ms                   | 1.43 ms          |
+| 8  | 256    | 0.270 ms                         | 0.188 ms                   | 23.6 ms          |
+| 10 | 1 024  | 0.589 ms                         | 0.427 ms                   | 332 ms           |
+| 12 | 4 096  | 1.79 ms                          | 1.43 ms                    | 8 857 ms         |
+| 14 | 16 384 | 4.74 ms                          | 3.81 ms                    | (not run)        |
 
 Two observations from the sweep:
 
 1. **Lanczos vs LAPACK crossover stays where it was**: the workflows
    lane beats LAPACK by ~9× at N = 8 and >100× by N = 12 — same
    asymptotic behaviour as the legacy lane.
-2. **The new lane carries a ~1.4–1.7× constant overhead**: visible at
-   N = 6 (0.17 ms vs 0.10 ms ≈ 1.7×) and narrowing toward N = 14
-   (5.3 ms vs 3.7 ms ≈ 1.45×) where matvec time dominates. The overhead
-   tracks to (a) `select_backend` + `unique_ptr<CpuBackend>` allocation
-   per call, (b) `LinearOperator::bind<CpuBackend>` constructing a
-   `std::function` envelope around the matvec, and (c) the
-   `lanczos_kernel<CpuBackend>` defaulting to `ReorthPolicy::LocalDGKS3`
-   (a 3-vector ring DGKS pass) vs the legacy CPU Lanczos's single-MGS
-   reorth. None are correctness issues; (c) is configurable via
-   `LanczosKernelOptions::reorth`. A follow-up may swap the orchestrator
-   default to a 1-vector DGKS when `num_eigs == 1` and `max_iter` is
-   small enough that LocalDGKS3's stability margin isn't needed.
+2. **The new lane carries a ~1.2–1.5× constant overhead**: visible at
+   N = 6 (0.15 ms vs 0.10 ms ≈ 1.5×) and narrowing toward N = 14
+   (4.7 ms vs 3.8 ms ≈ 1.24×) where matvec time dominates. After the
+   orchestrator-side perf pass (May 2026 cleanup-sweep follow-up: drop
+   `convergence_check_interval` from 5→1, and use the eigenvalues-only
+   tridiag solve when `compute_vectors == false`), the residual gap
+   tracks entirely to (a) `select_backend` + `unique_ptr<CpuBackend>`
+   allocation per call, and (b) `LinearOperator::bind<CpuBackend>`
+   constructing a `std::function` envelope around the matvec. Both are
+   amortizable across a longer-running session; neither is a correctness
+   issue.
 
 #### Summary of LOC subtracted in this sweep
 

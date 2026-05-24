@@ -121,15 +121,26 @@ GroundStateResult solve_on(Backend& be,
             ed::krylov::make_smallest_ritz_convergence(opts.num_eigs,
                                                        opts.tolerance,
                                                        /*min_iters=*/0);
-        kopts.convergence_check_interval = 5;
+        // Check every iteration (matches the legacy CPU `lanczos()` body);
+        // every-5 introduced ~5 extra iters of overhead before triggering.
+        kopts.convergence_check_interval = 1;
         auto kres = ed::krylov::lanczos_kernel(be, matvec, geom.local_dim,
                                                seed.data(), kopts);
-        // Solve the tridiag for the lowest `num_eigs` eigenvalues.
-        // For simplicity, leverage Eigen via the existing helper in the
-        // distributed-Lanczos kernel header.
-        std::vector<double> evals, weights, evecs;
-        ed::distributed::kernel::solve_tridiag_with_eigenvectors(
-            kres.alpha, kres.beta, kres.alpha.size(), evals, weights, evecs);
+        // Solve the small (m x m) real-symmetric tridiagonal for the
+        // lowest `num_eigs` eigenvalues. When the caller didn't request
+        // eigenvectors, use the eigenvalues-only Eigen path -- the
+        // legacy `solve_tridiag_with_eigenvectors` did the full eigen
+        // problem unconditionally, which is ~2-3x slower for the
+        // common num_eigs=1 + compute_vectors=false workflow.
+        std::vector<double> evals;
+        if (opts.compute_vectors) {
+            std::vector<double> weights, evecs;
+            ed::distributed::kernel::solve_tridiag_with_eigenvectors(
+                kres.alpha, kres.beta, kres.alpha.size(), evals, weights, evecs);
+        } else {
+            evals = ed::distributed::kernel::solve_tridiag(
+                kres.alpha, kres.beta, kres.alpha.size());
+        }
         const std::size_t n_keep = std::min<std::size_t>(opts.num_eigs, evals.size());
         R.eigenvalues.assign(evals.begin(), evals.begin() + n_keep);
         R.krylov.alpha = std::move(kres.alpha);

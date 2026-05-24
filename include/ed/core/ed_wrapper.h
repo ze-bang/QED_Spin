@@ -165,14 +165,9 @@ namespace ed_internal {
     // ed:: predicates into ed_internal::, so existing call sites keep
     // working unchanged.
     
-    /**
-     * @brief Pass-through. The legacy `_FIXED_SZ` enum variants were
-     * retired in the minimalist refactor; fixed-Sz is a plain
-     * EDParameters::use_fixed_sz flag now.
-     */
-    inline void normalize_method_and_fixed_sz(DiagonalizationMethod& /*method*/, bool& /*use_fixed_sz*/) {
-        // No-op (kept for ABI compatibility with legacy call sites).
-    }
+    // `normalize_method_and_fixed_sz` (no-op shim kept for back-compat with
+    // legacy `_FIXED_SZ` enum variants) was retired in the May 2026
+    // cleanup sweep: zero call sites anywhere in the tree.
 
     // `supports_fixed_sz(method)` was retired in the minimalist-
     // architecture rev (May 2026): after Phase 1 every remaining
