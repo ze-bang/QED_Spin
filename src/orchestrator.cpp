@@ -31,6 +31,8 @@
 #include <ed/krylov/ritz_convergence.h>
 #include <ed/matvec/backends/cpu_backend.h>
 #include <ed/observables/cf_spectral_kernel.h>
+#include <ed/parallel/numa.h>            // pin_omp_threads_once
+#include <ed/parallel/thread_budget.h>   // auto_threads_for_dim + ThreadBudgetScope
 #include <ed/solvers/lanczos.h>  // FullDiag fallback (zheevd on the dense matrix)
 #include <ed/thermal/ctpq_kernel.h>
 #include <ed/thermal/ftlm_kernel.h>
@@ -203,6 +205,17 @@ GroundStateResult solve_on(Backend& be,
 // ---------------------------------------------------------------------------
 
 GroundStateResult solve(const LinearOperator& H, SolveOptions opts) {
+    // Apply the same thread-budget hygiene the legacy `lanczos()` /
+    // `block_lanczos()` / `krylov_schur()` entries do (Phase 6.1 of the
+    // matvec-unification arc; see docs/history/PHASE_8_GPU_MPI_OPT.md).
+    // Without this the orchestrator runs OpenBLAS + OpenMP at
+    // `omp_get_max_threads()` for every BLAS-1 / SpMV call -- which at
+    // N=14 dim=16k turns a ~1 ms/iter SpMV into a ~5 ms/iter SpMV due to
+    // inter-core memory-bandwidth contention. ED_AUTO_THREADS=0 disables.
+    const ed::parallel::ThreadBudgetScope budget(
+        ed::parallel::auto_threads_for_dim(H.geometry().local_dim));
+    ed::parallel::pin_omp_threads_once();
+
     auto variant = select_backend(H.geometry(), opts.backend);
     return std::visit(
         [&](auto& backend_uptr) -> GroundStateResult {
@@ -222,6 +235,10 @@ ThermalResult thermal(const LinearOperator& H, ThermalOptions opts) {
     // get a documented `runtime_error` with a pointer to the legacy
     // entry point.
     using Complex = std::complex<double>;
+    const ed::parallel::ThreadBudgetScope budget(
+        ed::parallel::auto_threads_for_dim(H.geometry().local_dim));
+    ed::parallel::pin_omp_threads_once();
+
     auto variant = select_backend(H.geometry(), opts.backend);
 
     ThermalResult R;
@@ -342,6 +359,10 @@ SpectralResult spectral(const LinearOperator&                      H,
             "ed::spectral: at least one observable is required.");
     }
     using Complex = std::complex<double>;
+
+    const ed::parallel::ThreadBudgetScope budget(
+        ed::parallel::auto_threads_for_dim(H.geometry().local_dim));
+    ed::parallel::pin_omp_threads_once();
 
     auto variant = select_backend(H.geometry(), opts.backend);
     SpectralResult R;
