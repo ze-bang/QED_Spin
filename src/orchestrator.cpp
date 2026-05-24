@@ -238,13 +238,11 @@ GroundStateResult solve(const LinearOperator& H, SolveOptions opts) {
 }
 
 ThermalResult thermal(const LinearOperator& H, ThermalOptions opts) {
-    // Minimal first landing: TPQ lanes dispatched through the unified
-    // tpq_kernel via the facade headers from Phase 2.4.  FTLM / LTLM /
-    // KpmDos are intentionally NOT auto-routed yet --- those legacy
-    // CPU-only paths require additional adapter work to plumb through
-    // the BackendVariant cleanly. Callers asking for those methods
-    // get a documented `runtime_error` with a pointer to the legacy
-    // entry point.
+    // All five lanes are wired: mTPQ + cTPQ dispatch through the unified
+    // `tpq_kernel` via the Phase 2.4 facades; FTLM / LTLM / KpmDos
+    // dispatch through their own `*_kernel<Backend>` templates (CPU
+    // implementations today, GPU when the kernels migrate). The variant
+    // visit at each lane keeps the dispatch backend-agnostic.
     using Complex = std::complex<double>;
     const ed::parallel::ThreadBudgetScope budget(
         ed::parallel::auto_threads_for_dim(H.geometry().local_dim));

@@ -1358,3 +1358,44 @@ Both are tracked as discrete follow-up tasks.
 Final tree after the full sweep completes will be ~67 K LOC; the
 intermediate landing here is the **safe** subset that keeps every
 binary, test, and example green.
+
+## VII.5 Day-17 perf-polish follow-up
+
+After Part VII.1 landed, a small perf pass on the orchestrator's Lanczos
+lane closed part of the constant-overhead gap measured in
+`bench_minimalist_collapse`. The changes are surgical (no API change, no
+LOC delta worth tabling):
+
+* `src/orchestrator.cpp` (`solve_on<B>`, Lanczos branch):
+  * `convergence_check_interval`: 5 → 1 to match the legacy CPU
+    `lanczos()`'s every-iteration check (the every-5 setting allowed up
+    to 4 extra Lanczos iterations after the Ritz convergence criterion
+    was already satisfied).
+  * Tridiag eigensolve: dispatch the eigenvalues-only Eigen helper
+    `solve_tridiag(...)` when `opts.compute_vectors == false`, and the
+    full `solve_tridiag_with_eigenvectors(...)` only when the eigenvectors
+    are actually wanted. The previous code unconditionally ran the full
+    SelfAdjointEigenSolver — wasted ~2-3× on the inner solve for the
+    common num_eigs=1+vectors=false workflow.
+* `include/ed/core/ed_wrapper.h`: removed the empty no-op
+  `ed_internal::normalize_method_and_fixed_sz()` shim (zero callers).
+
+Effect on `bench_minimalist_collapse` (single-rank CPU, Heisenberg
+1-D periodic):
+
+| N  | dim    | workflows::solve before | workflows::solve after | legacy `EDCore` | gap before / after |
+|---:|-------:|------------------------:|-----------------------:|----------------:|-------------------:|
+| 6  | 64     | 0.166 ms                | 0.147 ms               | 0.099 ms        | 1.68× → 1.48×      |
+| 8  | 256    | 0.260 ms                | 0.270 ms               | 0.188 ms        | 1.38× → 1.44×      |
+| 10 | 1 024  | 0.582 ms                | 0.589 ms               | 0.427 ms        | 1.36× → 1.38×      |
+| 12 | 4 096  | 2.01 ms                 | 1.79 ms                | 1.43 ms         | 1.41× → 1.25×      |
+| 14 | 16 384 | 5.32 ms                 | 4.74 ms                | 3.81 ms         | 1.40× → 1.24×      |
+
+The remaining gap (1.2-1.5× at the small end, ~1.24× at N=14)
+factorises into: (a) the `select_backend` + `unique_ptr<CpuBackend>`
+allocation per call, and (b) the `LinearOperator::bind<CpuBackend>`
+`std::function` envelope around the matvec — both amortizable across
+a longer-running session, neither a correctness issue. Full closure
+would require an "eager Backend" handle on `LinearOperator` so the
+visit machinery is bypassed; that's tracked as a future optimization,
+not cleanup.
