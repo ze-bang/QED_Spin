@@ -1,9 +1,7 @@
 #pragma once
 
 #include <ed/core/ed_config.h>
-#include <ed/core/ed_parameters.h>  // EDParameters (was: ed_wrapper.h, which
-                                    // dragged in TPQ/lanczos/FTLM/LTLM/HDF5/
-                                    // GPU headers — D-2 in the audit).
+#include <ed/core/ed_parameters.h>  // EDParameters
 
 /**
  * @brief Adapter to convert between new EDConfig and legacy EDParameters
@@ -18,28 +16,13 @@ namespace ed_adapter {
  */
 inline EDParameters toEDParameters(const EDConfig& config) {
     EDParameters params;
-    
+
     // Diagonalization
     params.max_iterations = config.diag.max_iterations;
     params.num_eigenvalues = config.diag.num_eigenvalues;
     params.tolerance = config.diag.tolerance;
     params.compute_eigenvectors = config.diag.compute_eigenvectors;
-    params.shift = config.diag.shift;
     params.block_size = config.diag.block_size;
-    params.max_subspace = config.diag.max_subspace;
-    params.target_lower = config.diag.target_lower;
-    params.target_upper = config.diag.target_upper;
-
-    // Phase 8 #5: ScaLAPACK knobs (CLI -> EDConfig -> EDParameters).
-    // ``scalapack_block_size_auto`` defaults to true on both sides, so
-    // legacy callers that only set the legacy ``scalapack_block_size``
-    // EDParameters field directly are unaffected -- they go through the
-    // adapter only when they came in via CLI / EDConfig in the first
-    // place.
-    params.scalapack_nprow            = config.diag.scalapack_nprow;
-    params.scalapack_npcol            = config.diag.scalapack_npcol;
-    params.scalapack_block_size       = config.diag.scalapack_block_size;
-    params.scalapack_block_size_auto  = config.diag.scalapack_block_size_auto;
 
     // Thermal
     params.num_samples = config.thermal.num_samples;
@@ -58,9 +41,9 @@ inline EDParameters toEDParameters(const EDConfig& config) {
     params.tpq_num_measure_points = config.thermal.tpq_num_measure_points;
     params.tpq_measure_beta_min = config.thermal.tpq_measure_beta_min;
     params.tpq_measure_beta_max = config.thermal.tpq_measure_beta_max;
-    // Note: Legacy alias methods (num_order(), delta_tau(), etc.) are deprecated
-    // and should not be used. The above tpq_* fields are the canonical ones.
-    
+    params.tpq_max_steps = config.thermal.tpq_max_steps;
+    params.tpq_beta_max = config.thermal.tpq_beta_max;
+
     // FTLM (via thermal config)
     params.ftlm_krylov_dim = config.thermal.ftlm_krylov_dim;
     params.ftlm_full_reorth = config.thermal.ftlm_full_reorth;
@@ -68,7 +51,7 @@ inline EDParameters toEDParameters(const EDConfig& config) {
     params.ftlm_seed = config.thermal.ftlm_seed;
     params.ftlm_store_samples = config.thermal.ftlm_store_samples;
     params.ftlm_error_bars = config.thermal.ftlm_error_bars;
-    
+
     // LTLM (via thermal config)
     params.ltlm_krylov_dim = config.thermal.ltlm_krylov_dim;
     params.ltlm_ground_krylov = config.thermal.ltlm_ground_krylov;
@@ -76,10 +59,7 @@ inline EDParameters toEDParameters(const EDConfig& config) {
     params.ltlm_reorth_freq = config.thermal.ltlm_reorth_freq;
     params.ltlm_seed = config.thermal.ltlm_seed;
     params.ltlm_store_data = config.thermal.ltlm_store_data;
-    // use_hybrid_method removed in Phase 7.3 (use method=HYBRID instead).
-    params.hybrid_crossover = config.thermal.hybrid_crossover;
-    params.hybrid_auto_crossover = config.thermal.hybrid_auto_crossover;
-    
+
     // Observable (TPQ thermal state and spin correlation options)
     params.save_thermal_states = config.observable.save_thermal_states;
     params.compute_spin_correlations = config.observable.compute_spin_correlations;
@@ -90,7 +70,7 @@ inline EDParameters toEDParameters(const EDConfig& config) {
     params.num_points = config.observable.num_points;
     params.t_end = config.observable.t_end;
     params.dt = config.observable.dt;
-    
+
     // System
     params.num_sites = config.system.num_sites;
     params.spin_length = config.system.spin_length;
@@ -99,41 +79,23 @@ inline EDParameters toEDParameters(const EDConfig& config) {
     params.n_up = config.system.n_up;
     params.full_sz_split = config.system.full_sz_split;
 
-    // Phase 7: orthogonal device / parallelism axes
+    // Orthogonal device / parallelism axes
     params.use_gpu = config.system.use_gpu;
     params.use_mpi = config.system.use_mpi;
-    // Phase 7.1: 5th orthogonal axis -- symmetry projection. Honour either
-    // the canonical SystemConfig flag or the legacy WorkflowConfig flag
-    // (the CLI parser sets both, but external callers may set only one).
+    // Symmetry projection. Honour either the canonical SystemConfig flag
+    // or the legacy WorkflowConfig flag (the CLI parser sets both, but
+    // external callers may set only one).
     params.use_symmetry = config.system.use_symmetry || config.workflow.run_symm_auto;
 
     // Output
     params.output_dir = config.workflow.output_dir;
-    
+
     // Sector selection
     params.selected_sectors = config.workflow.selected_sectors;
-    
+
     // Symmetry options
     params.translation_only = config.workflow.translation_only;
-    
-    // ARPACK
-    params.arpack_advanced_verbose = config.arpack.verbose;
-    params.arpack_which = config.arpack.which;
-    params.arpack_ncv = config.arpack.ncv;
-    params.arpack_max_restarts = config.arpack.max_restarts;
-    params.arpack_ncv_growth = config.arpack.ncv_growth;
-    params.arpack_auto_enlarge_ncv = config.arpack.auto_enlarge_ncv;
-    params.arpack_two_phase_refine = config.arpack.two_phase_refine;
-    params.arpack_relaxed_tol = config.arpack.relaxed_tol;
-    params.arpack_shift_invert = config.arpack.shift_invert;
-    params.arpack_sigma = config.arpack.sigma;
-    params.arpack_auto_switch_shift_invert = config.arpack.auto_switch_shift_invert;
-    params.arpack_switch_sigma = config.arpack.switch_sigma;
-    params.arpack_adaptive_inner_tol = config.arpack.adaptive_inner_tol;
-    params.arpack_inner_tol_factor = config.arpack.inner_tol_factor;
-    params.arpack_inner_tol_min = config.arpack.inner_tol_min;
-    params.arpack_inner_max_iter = config.arpack.inner_max_iter;
-    
+
     return params;
 }
 
@@ -142,23 +104,13 @@ inline EDParameters toEDParameters(const EDConfig& config) {
  */
 inline EDConfig fromEDParameters(const EDParameters& params, DiagonalizationMethod method) {
     EDConfig config(method);
-    
+
     // Diagonalization
     config.diag.max_iterations = params.max_iterations;
     config.diag.num_eigenvalues = params.num_eigenvalues;
     config.diag.tolerance = params.tolerance;
     config.diag.compute_eigenvectors = params.compute_eigenvectors;
-    config.diag.shift = params.shift;
     config.diag.block_size = params.block_size;
-    config.diag.max_subspace = params.max_subspace;
-    config.diag.target_lower = params.target_lower;
-    config.diag.target_upper = params.target_upper;
-
-    // Phase 8 #5: ScaLAPACK knobs (round-trip back into EDConfig).
-    config.diag.scalapack_nprow            = params.scalapack_nprow;
-    config.diag.scalapack_npcol            = params.scalapack_npcol;
-    config.diag.scalapack_block_size       = params.scalapack_block_size;
-    config.diag.scalapack_block_size_auto  = params.scalapack_block_size_auto;
 
     // Thermal
     config.thermal.num_samples = params.num_samples;
@@ -177,7 +129,9 @@ inline EDConfig fromEDParameters(const EDParameters& params, DiagonalizationMeth
     config.thermal.tpq_num_measure_points = params.tpq_num_measure_points;
     config.thermal.tpq_measure_beta_min = params.tpq_measure_beta_min;
     config.thermal.tpq_measure_beta_max = params.tpq_measure_beta_max;
-    
+    config.thermal.tpq_max_steps = params.tpq_max_steps;
+    config.thermal.tpq_beta_max = params.tpq_beta_max;
+
     // FTLM (via thermal config)
     config.thermal.ftlm_krylov_dim = params.ftlm_krylov_dim;
     config.thermal.ftlm_full_reorth = params.ftlm_full_reorth;
@@ -185,7 +139,7 @@ inline EDConfig fromEDParameters(const EDParameters& params, DiagonalizationMeth
     config.thermal.ftlm_seed = params.ftlm_seed;
     config.thermal.ftlm_store_samples = params.ftlm_store_samples;
     config.thermal.ftlm_error_bars = params.ftlm_error_bars;
-    
+
     // LTLM (via thermal config)
     config.thermal.ltlm_krylov_dim = params.ltlm_krylov_dim;
     config.thermal.ltlm_ground_krylov = params.ltlm_ground_krylov;
@@ -193,10 +147,8 @@ inline EDConfig fromEDParameters(const EDParameters& params, DiagonalizationMeth
     config.thermal.ltlm_reorth_freq = params.ltlm_reorth_freq;
     config.thermal.ltlm_seed = params.ltlm_seed;
     config.thermal.ltlm_store_data = params.ltlm_store_data;
-    // use_hybrid_method removed in Phase 7.3.
-    config.thermal.hybrid_crossover = params.hybrid_crossover;
-    
-    // Observable (TPQ thermal state and spin correlation options)
+
+    // Observable
     config.observable.save_thermal_states = params.save_thermal_states;
     config.observable.compute_spin_correlations = params.compute_spin_correlations;
     config.observable.operators = params.observables;
@@ -206,7 +158,7 @@ inline EDConfig fromEDParameters(const EDParameters& params, DiagonalizationMeth
     config.observable.num_points = params.num_points;
     config.observable.t_end = params.t_end;
     config.observable.dt = params.dt;
-    
+
     // System
     config.system.num_sites = params.num_sites;
     config.system.spin_length = params.spin_length;
@@ -215,13 +167,13 @@ inline EDConfig fromEDParameters(const EDParameters& params, DiagonalizationMeth
     config.system.n_up = params.n_up;
     config.system.full_sz_split = params.full_sz_split;
 
-    // Phase 7: orthogonal device / parallelism axes
+    // Orthogonal device / parallelism axes
     config.system.use_gpu = params.use_gpu;
     config.system.use_mpi = params.use_mpi;
-    // Phase 7.1: 5th orthogonal axis -- symmetry projection. Mirror the
-    // flag onto both the canonical SystemConfig field and the legacy
-    // WorkflowConfig flag so the existing ed_main.cpp dispatch keeps
-    // firing run_streaming_symmetry_workflow.
+    // Symmetry projection. Mirror the flag onto both the canonical
+    // SystemConfig field and the legacy WorkflowConfig flag so the
+    // existing ed_main.cpp dispatch keeps firing
+    // run_streaming_symmetry_workflow.
     config.system.use_symmetry = params.use_symmetry;
     if (params.use_symmetry) {
         config.workflow.run_symm_auto = true;
@@ -229,25 +181,11 @@ inline EDConfig fromEDParameters(const EDParameters& params, DiagonalizationMeth
 
     // Output
     config.workflow.output_dir = params.output_dir;
-    
-    // ARPACK
-    config.arpack.verbose = params.arpack_advanced_verbose;
-    config.arpack.which = params.arpack_which;
-    config.arpack.ncv = params.arpack_ncv;
-    config.arpack.max_restarts = params.arpack_max_restarts;
-    config.arpack.ncv_growth = params.arpack_ncv_growth;
-    config.arpack.auto_enlarge_ncv = params.arpack_auto_enlarge_ncv;
-    config.arpack.two_phase_refine = params.arpack_two_phase_refine;
-    config.arpack.relaxed_tol = params.arpack_relaxed_tol;
-    config.arpack.shift_invert = params.arpack_shift_invert;
-    config.arpack.sigma = params.arpack_sigma;
-    config.arpack.auto_switch_shift_invert = params.arpack_auto_switch_shift_invert;
-    config.arpack.switch_sigma = params.arpack_switch_sigma;
-    config.arpack.adaptive_inner_tol = params.arpack_adaptive_inner_tol;
-    config.arpack.inner_tol_factor = params.arpack_inner_tol_factor;
-    config.arpack.inner_tol_min = params.arpack_inner_tol_min;
-    config.arpack.inner_max_iter = params.arpack_inner_max_iter;
-    
+
+    // Sector selection + symmetry shape options
+    config.workflow.selected_sectors = params.selected_sectors;
+    config.workflow.translation_only = params.translation_only;
+
     return config;
 }
 

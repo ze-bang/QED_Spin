@@ -3,7 +3,7 @@
 //
 // Phase 5 Python interface expansion (Apr 2026): bind the high-level C++
 // dispatcher and the directory- / streaming-symmetry drivers so the entire
-// CPU iterative + dense + thermal + ARPACK + TPQ stack is reachable from a
+// Krylov + dense + thermal stack is reachable from a
 // single Python entry point. See the header for the full feature list.
 // =============================================================================
 
@@ -176,84 +176,32 @@ void bind_dispatcher(py::module_& m) {
     //    The numeric values are part of the public ABI (see ed_types.h);
     //    pybind11 preserves them, so cross-language IO via int casts works.
     // ------------------------------------------------------------------------
-    // Phase 7: pybind11's `.value(...)` helper takes the enum value as a
-    // template argument, which trips the deprecation warning even though
-    // we *want* to keep the legacy bindings live for backwards compatibility.
-    // Suppress the diagnostic for this single block.
-    #pragma GCC diagnostic push
-    #pragma GCC diagnostic ignored "-Wdeprecated-declarations"
     py::enum_<DiagonalizationMethod>(m, "DiagonalizationMethod", R"pbdoc(
-        Every solver the C++ dispatcher knows about.
+        The 9 solver algorithms the dispatcher supports.
 
-        The canonical surface is **algorithmic_solver** only.  Device
-        (CPU vs GPU) and parallelism (single-process vs MPI) are now
-        flags on :class:`EDParameters`:
+        Device (CPU vs GPU) and parallelism (single-process vs MPI) are
+        flags on :class:`EDParameters`, not enum values:
 
             params = EDParameters()
-            params.use_gpu = True   # canonical replacement for LANCZOS_GPU
-            params.use_mpi = True   # canonical replacement for mTPQ_MPI
-            params.use_fixed_sz = True  # always the right way to pick fixed-Sz
+            params.use_gpu = True       # run on GPU when WITH_CUDA=ON
+            params.use_mpi = True       # use MPI (distributed-memory)
+            params.use_fixed_sz = True  # restrict to one Sz sector
 
-        The legacy ``_GPU`` / ``_CUDA`` / ``_MPI`` / ``_FIXED_SZ`` enum
-        values are still recognised (the dispatcher canonicalizes them
-        on entry via ``ed::canonicalize_method_and_flags()``) but new
-        code is encouraged to use the base solver + flag form.
-
-        GPU values silently fall back to CPU when the build does not
-        have ``WITH_CUDA=ON`` (see ``has_cuda_build()``).
+        Setting ``use_gpu`` on a build without CUDA falls back to CPU
+        with a runtime warning (see ``has_cuda_build()``).
     )pbdoc")
-        // CPU iterative
+        // Ground-state / spectrum
         .value("LANCZOS",                  DiagonalizationMethod::LANCZOS)
-        .value("LANCZOS_SELECTIVE",        DiagonalizationMethod::LANCZOS_SELECTIVE)
-        .value("LANCZOS_NO_ORTHO",         DiagonalizationMethod::LANCZOS_NO_ORTHO)
         .value("BLOCK_LANCZOS",            DiagonalizationMethod::BLOCK_LANCZOS)
-        .value("CHEBYSHEV_FILTERED",       DiagonalizationMethod::CHEBYSHEV_FILTERED)
-        .value("SHIFT_INVERT",             DiagonalizationMethod::SHIFT_INVERT)
-        .value("SHIFT_INVERT_ROBUST",      DiagonalizationMethod::SHIFT_INVERT_ROBUST)
-        .value("DAVIDSON",                 DiagonalizationMethod::DAVIDSON)
-        .value("BICG",                     DiagonalizationMethod::BICG)
-        .value("LOBPCG",                   DiagonalizationMethod::LOBPCG)
         .value("KRYLOV_SCHUR",             DiagonalizationMethod::KRYLOV_SCHUR)
-        .value("BLOCK_KRYLOV_SCHUR",       DiagonalizationMethod::BLOCK_KRYLOV_SCHUR)
-        .value("IMPLICIT_RESTART_LANCZOS", DiagonalizationMethod::IMPLICIT_RESTART_LANCZOS)
-        .value("THICK_RESTART_LANCZOS",    DiagonalizationMethod::THICK_RESTART_LANCZOS)
-        // Dense / distributed dense
         .value("FULL",                     DiagonalizationMethod::FULL)
-        .value("OSS",                      DiagonalizationMethod::OSS)
-        .value("SCALAPACK",                DiagonalizationMethod::SCALAPACK)
-        .value("SCALAPACK_MIXED",          DiagonalizationMethod::SCALAPACK_MIXED)
         // Thermal
         .value("mTPQ",                     DiagonalizationMethod::mTPQ)
-        .value("mTPQ_MPI",                 DiagonalizationMethod::mTPQ_MPI)
         .value("cTPQ",                     DiagonalizationMethod::cTPQ)
-        .value("mTPQ_CUDA",                DiagonalizationMethod::mTPQ_CUDA)
         .value("FTLM",                     DiagonalizationMethod::FTLM)
         .value("LTLM",                     DiagonalizationMethod::LTLM)
-        .value("HYBRID",                   DiagonalizationMethod::HYBRID)
         .value("KPM_DOS",                  DiagonalizationMethod::KPM_DOS)
-        // ARPACK
-        .value("ARPACK_SM",                DiagonalizationMethod::ARPACK_SM)
-        .value("ARPACK_LM",                DiagonalizationMethod::ARPACK_LM)
-        .value("ARPACK_SHIFT_INVERT",      DiagonalizationMethod::ARPACK_SHIFT_INVERT)
-        .value("ARPACK_ADVANCED",          DiagonalizationMethod::ARPACK_ADVANCED)
-        // GPU (silently fall back to CPU when WITH_CUDA=OFF; see has_cuda_build)
-        .value("LANCZOS_GPU",              DiagonalizationMethod::LANCZOS_GPU)
-        .value("BLOCK_LANCZOS_GPU",        DiagonalizationMethod::BLOCK_LANCZOS_GPU)
-        .value("DAVIDSON_GPU",             DiagonalizationMethod::DAVIDSON_GPU)
-        .value("LOBPCG_GPU",               DiagonalizationMethod::LOBPCG_GPU)
-        .value("KRYLOV_SCHUR_GPU",         DiagonalizationMethod::KRYLOV_SCHUR_GPU)
-        .value("BLOCK_KRYLOV_SCHUR_GPU",   DiagonalizationMethod::BLOCK_KRYLOV_SCHUR_GPU)
-        .value("mTPQ_GPU",                 DiagonalizationMethod::mTPQ_GPU)
-        .value("cTPQ_GPU",                 DiagonalizationMethod::cTPQ_GPU)
-        .value("FTLM_GPU",                 DiagonalizationMethod::FTLM_GPU)
-        .value("FULL_GPU",                 DiagonalizationMethod::FULL_GPU)
-        // Deprecated combined GPU + FIXED_SZ variants (Phase 7: use base
-        // method + use_gpu=true + use_fixed_sz=true).
-        .value("LANCZOS_GPU_FIXED_SZ",       DiagonalizationMethod::LANCZOS_GPU_FIXED_SZ)
-        .value("BLOCK_LANCZOS_GPU_FIXED_SZ", DiagonalizationMethod::BLOCK_LANCZOS_GPU_FIXED_SZ)
-        .value("FTLM_GPU_FIXED_SZ",          DiagonalizationMethod::FTLM_GPU_FIXED_SZ)
         .export_values();
-    #pragma GCC diagnostic pop  // legacy _GPU / _CUDA / _MPI / _FIXED_SZ enum bindings
 
     // ------------------------------------------------------------------------
     // 2. HamiltonianFileFormat (used by the directory dispatchers).
@@ -303,11 +251,7 @@ void bind_dispatcher(py::module_& m) {
         .def_readwrite("compute_eigenvectors", &EDParameters::compute_eigenvectors)
         .def_readwrite("output_dir",           &EDParameters::output_dir)
         // Method-specific
-        .def_readwrite("shift",                &EDParameters::shift)
         .def_readwrite("block_size",           &EDParameters::block_size)
-        .def_readwrite("max_subspace",         &EDParameters::max_subspace)
-        .def_readwrite("target_lower",         &EDParameters::target_lower)
-        .def_readwrite("target_upper",         &EDParameters::target_upper)
         // Thermal common
         .def_readwrite("num_samples",          &EDParameters::num_samples)
         .def_readwrite("temp_min",             &EDParameters::temp_min)
@@ -341,9 +285,6 @@ void bind_dispatcher(py::module_& m) {
         .def_readwrite("ltlm_reorth_freq",     &EDParameters::ltlm_reorth_freq)
         .def_readwrite("ltlm_seed",            &EDParameters::ltlm_seed)
         .def_readwrite("ltlm_store_data",      &EDParameters::ltlm_store_data)
-        // Hybrid
-        .def_readwrite("hybrid_crossover",      &EDParameters::hybrid_crossover)
-        .def_readwrite("hybrid_auto_crossover", &EDParameters::hybrid_auto_crossover)
         // KPM-DOS (see include/ed/solvers/kpm_dos.h)
         .def_readwrite("kpm_num_moments",            &EDParameters::kpm_num_moments)
         .def_readwrite("kpm_num_random_vectors",     &EDParameters::kpm_num_random_vectors)
@@ -373,53 +314,16 @@ void bind_dispatcher(py::module_& m) {
         .def_readwrite("use_fixed_sz",   &EDParameters::use_fixed_sz)
         .def_readwrite("n_up",           &EDParameters::n_up)
         .def_readwrite("full_sz_split",  &EDParameters::full_sz_split)
-        // Phase 7: orthogonal device / parallelism axes. Setting these is
-        // equivalent to picking the deprecated `_GPU` / `_MPI` enum value.
-        // E.g. ``DiagonalizationMethod.LANCZOS`` + ``params.use_gpu = True``
-        // is the canonical replacement for ``DiagonalizationMethod.LANCZOS_GPU``.
-        // The dispatcher canonicalizes both forms via
-        // ``ed::canonicalize_method_and_flags()`` at entry.
-        .def_readwrite("use_gpu",        &EDParameters::use_gpu)
-        .def_readwrite("use_mpi",        &EDParameters::use_mpi)
-        // Phase 7.1: 5th orthogonal axis -- symmetry projection.
-        // Setting ``use_symmetry = True`` and calling
-        // ``exact_diagonalization_from_directory(...)`` is the canonical
-        // (and only non-deprecated) way to request symmetry-projected ED.
-        // Internally routes through the streaming symmetry kernel
-        // (per-sector, matrix-free, GPU-capable).
-        .def_readwrite("use_symmetry",   &EDParameters::use_symmetry)
-        // Symmetry sub-options
+        // Orthogonal device / parallelism axes (matches use_fixed_sz):
+        //   use_gpu  : route through CUDA backend when WITH_CUDA=ON
+        //   use_mpi  : use the MPI backend (distributed-memory)
+        .def_readwrite("use_gpu",          &EDParameters::use_gpu)
+        .def_readwrite("use_mpi",          &EDParameters::use_mpi)
+        // 5th orthogonal axis -- spatial-symmetry projection. Routes
+        // through the streaming-symmetry kernel (per-sector, matrix-free,
+        // GPU-capable).
+        .def_readwrite("use_symmetry",     &EDParameters::use_symmetry)
         .def_readwrite("translation_only", &EDParameters::translation_only)
-        // ScaLAPACK
-        .def_readwrite("scalapack_nprow",                &EDParameters::scalapack_nprow)
-        .def_readwrite("scalapack_npcol",                &EDParameters::scalapack_npcol)
-        .def_readwrite("scalapack_block_size",           &EDParameters::scalapack_block_size)
-        // Phase 8 #5: when true (default), ``scalapack_block_size`` is
-        // overridden by a dim/grid-aware heuristic at solve time. Setting
-        // ``scalapack_block_size`` from Python (or via the CLI) implicitly
-        // disables auto -- see ``run_diagonalization`` Python wrapper.
-        .def_readwrite("scalapack_block_size_auto",      &EDParameters::scalapack_block_size_auto)
-        .def_readwrite("scalapack_mixed_precision",      &EDParameters::scalapack_mixed_precision)
-        .def_readwrite("scalapack_refinement_tol",       &EDParameters::scalapack_refinement_tol)
-        .def_readwrite("scalapack_max_refinement_iter",  &EDParameters::scalapack_max_refinement_iter)
-        .def_readwrite("scalapack_verbose",              &EDParameters::scalapack_verbose)
-        // ARPACK
-        .def_readwrite("arpack_advanced_verbose",         &EDParameters::arpack_advanced_verbose)
-        .def_readwrite("arpack_which",                    &EDParameters::arpack_which)
-        .def_readwrite("arpack_ncv",                      &EDParameters::arpack_ncv)
-        .def_readwrite("arpack_max_restarts",             &EDParameters::arpack_max_restarts)
-        .def_readwrite("arpack_ncv_growth",               &EDParameters::arpack_ncv_growth)
-        .def_readwrite("arpack_auto_enlarge_ncv",         &EDParameters::arpack_auto_enlarge_ncv)
-        .def_readwrite("arpack_two_phase_refine",         &EDParameters::arpack_two_phase_refine)
-        .def_readwrite("arpack_relaxed_tol",              &EDParameters::arpack_relaxed_tol)
-        .def_readwrite("arpack_shift_invert",             &EDParameters::arpack_shift_invert)
-        .def_readwrite("arpack_sigma",                    &EDParameters::arpack_sigma)
-        .def_readwrite("arpack_auto_switch_shift_invert", &EDParameters::arpack_auto_switch_shift_invert)
-        .def_readwrite("arpack_switch_sigma",             &EDParameters::arpack_switch_sigma)
-        .def_readwrite("arpack_adaptive_inner_tol",       &EDParameters::arpack_adaptive_inner_tol)
-        .def_readwrite("arpack_inner_tol_factor",         &EDParameters::arpack_inner_tol_factor)
-        .def_readwrite("arpack_inner_tol_min",            &EDParameters::arpack_inner_tol_min)
-        .def_readwrite("arpack_inner_max_iter",           &EDParameters::arpack_inner_max_iter)
         .def("__repr__", [](const EDParameters& p) {
             return "<qed.EDParameters num_eigenvalues=" +
                    std::to_string(p.num_eigenvalues) +
@@ -435,7 +339,7 @@ void bind_dispatcher(py::module_& m) {
     // ------------------------------------------------------------------------
     py::class_<ThermodynamicData>(m, "ThermodynamicData",
         "Thermodynamic observables on the temperature grid the dispatcher "
-        "computed. Populated by FTLM/LTLM/HYBRID/TPQ; otherwise empty.")
+        "computed. Populated by FTLM/LTLM/TPQ/KPM_DOS; otherwise empty.")
         .def(py::init<>())
         .def_readwrite("temperatures",  &ThermodynamicData::temperatures)
         .def_readwrite("energy",        &ThermodynamicData::energy)
@@ -461,7 +365,7 @@ void bind_dispatcher(py::module_& m) {
             ``params.output_dir`` when present).
         thermo_data : ThermodynamicData
             Per-temperature ``E(T)``, ``Cv(T)``, ``S(T)``, ``F(T)`` for
-            FTLM/LTLM/HYBRID/TPQ runs.
+            FTLM/LTLM/TPQ/KPM_DOS runs.
 
         The fields are read-write so external code (notably the MPI
         Python wrapper that reads ``ed_distributed_main`` HDF5 dumps)
@@ -515,6 +419,24 @@ void bind_dispatcher(py::module_& m) {
         return results;
     };
 
+    // IMPORTANT: pybind11 dispatches overloads in *registration order*.
+    // FixedSzOperator inherits from Operator, so we must register the
+    // FixedSzOperator overload FIRST; otherwise pybind11 binds a
+    // FixedSzOperator argument to the base ``Operator`` overload, the
+    // dim is computed as ``1 << getNumBits()`` (the full Hilbert space),
+    // and the solver silently runs on the unprojected operator. This
+    // was the matvec-unification audit follow-up bug surfaced by the
+    // ``qed.thermal(...)`` end-to-end smoke test where every Sz sector
+    // came back with the global ground state energy.
+    m.def("exact_diagonalization_core", run_core_fixed,
+          py::arg("operator_"),
+          py::arg("method") = DiagonalizationMethod::LANCZOS,
+          py::arg("params") = EDParameters(),
+          "Same as the Operator overload but for a FixedSzOperator. "
+          "Internally sets `params.use_fixed_sz = True` and points "
+          "`params.fixed_sz_op` at the supplied operator so the "
+          "dispatcher reaches the fixed-Sz observable code paths.");
+
     m.def("exact_diagonalization_core", run_core_op,
           py::arg("operator_"),
           py::arg("method") = DiagonalizationMethod::LANCZOS,
@@ -523,18 +445,16 @@ void bind_dispatcher(py::module_& m) {
         Run the C++ high-level dispatcher on a matrix-free ``Operator``.
 
         This single function routes through the same backend table the
-        ``./ED`` CLI uses, so you get one entry point for every CPU
-        iterative method (LANCZOS family, BLOCK_LANCZOS, KRYLOV_SCHUR,
-        BLOCK_KRYLOV_SCHUR, DAVIDSON, LOBPCG, CHEBYSHEV_FILTERED,
-        SHIFT_INVERT[_ROBUST], IRL, TRL, BICG, ARPACK_*), the dense
-        backend (FULL, OSS, SCALAPACK / SCALAPACK_MIXED), and every
-        thermal solver (FTLM, LTLM, HYBRID, mTPQ, cTPQ).
+        ``./ED`` CLI uses, so you get one entry point for every
+        supported algorithm: the Krylov family (LANCZOS, BLOCK_LANCZOS,
+        KRYLOV_SCHUR), the dense LAPACK back-end (FULL), and every
+        thermal solver (FTLM, LTLM, mTPQ, cTPQ, KPM_DOS).
 
-        For GPU methods (``LANCZOS_GPU`` and friends) and per-sector
-        symmetry-projected GPU dispatch use
+        GPU execution is requested by setting ``params.use_gpu = True``
+        on a CUDA-enabled build. Streaming-symmetry / per-sector GPU
+        dispatch uses
         :func:`exact_diagonalization_streaming_symmetry` or the
-        directory dispatcher: ``exact_diagonalization_core`` itself
-        rejects GPU methods because they need a `GPUOperator` handle.
+        directory dispatcher.
 
         Parameters
         ----------
@@ -552,15 +472,6 @@ void bind_dispatcher(py::module_& m) {
             Eigenvalues, eigenvectors_path, and (for thermal methods)
             ``thermo_data``.
     )pbdoc");
-
-    m.def("exact_diagonalization_core", run_core_fixed,
-          py::arg("operator_"),
-          py::arg("method") = DiagonalizationMethod::LANCZOS,
-          py::arg("params") = EDParameters(),
-          "Same as the Operator overload but for a FixedSzOperator. "
-          "Internally sets `params.use_fixed_sz = True` and points "
-          "`params.fixed_sz_op` at the supplied operator so the "
-          "dispatcher reaches the fixed-Sz observable code paths.");
 
     // ------------------------------------------------------------------------
     // 6. Symmetry projection: attach the Operator.symmetry_info setter /
@@ -640,7 +551,7 @@ void bind_dispatcher(py::module_& m) {
     // 7. Streaming symmetry: directory-driven wrapper around
     //    exact_diagonalization_streaming_symmetry[_fixed_sz]. This is the
     //    canonical Python entry point for symmetry-projected ED with
-    //    optional GPU per-sector dispatch (just pass `LANCZOS_GPU` etc.).
+    //    optional GPU per-sector dispatch (set ``params.use_gpu``).
     //
     //    The C++ functions take a directory containing InterAll.dat /
     //    Trans.dat / automorphism_results/, run the streaming-symmetry
@@ -681,10 +592,8 @@ void bind_dispatcher(py::module_& m) {
         materialisation), and dispatches each symmetry sector to the
         chosen ``method``.
 
-        Pass any GPU-flavoured method (``LANCZOS_GPU``,
-        ``BLOCK_LANCZOS_GPU``, ``DAVIDSON_GPU``, ``LOBPCG_GPU``,
-        ``KRYLOV_SCHUR_GPU``, ``BLOCK_KRYLOV_SCHUR_GPU``) to run each
-        sector on the GPU via the streaming-symmetry dispatch in
+        Set ``params.use_gpu = True`` to run each sector on the GPU
+        via the streaming-symmetry dispatch in
         ``include/ed/core/ed_wrapper_streaming.h``.
 
         Parameters
@@ -693,8 +602,8 @@ void bind_dispatcher(py::module_& m) {
             Path containing the Hamiltonian dat files and
             ``automorphism_results/``.
         method : DiagonalizationMethod
-            Per-sector solver. CPU values run in single-process Python;
-            GPU values use cuSPARSE / per-sector kernels in
+            Per-sector solver. Setting ``params.use_gpu = True`` runs
+            each sector via the cuSPARSE / per-sector kernels in
             ``gpu_symmetrized_operator.cu``.
         params : EDParameters
             ``num_sites`` / ``spin_length`` MUST be set; everything else
@@ -792,8 +701,8 @@ void bind_dispatcher(py::module_& m) {
         Flag                  Effect
         ====================  ================================================
         ``use_fixed_sz``      restrict to the ``n_up`` Sz-sector
-        ``use_gpu``           use GPU kernels (legacy ``LANCZOS_GPU`` etc.)
-        ``use_mpi``           use MPI parallelism (ScaLAPACK, mTPQ_MPI, ...)
+        ``use_gpu``           use GPU kernels (requires WITH_CUDA=ON)
+        ``use_mpi``           use MPI parallelism (distributed-memory)
         ``use_symmetry``      project onto symmetry-adapted basis (streaming)
         ====================  ================================================
 
@@ -830,9 +739,8 @@ void bind_dispatcher(py::module_& m) {
 #endif
     },
         "True iff this build of ``qed._core`` was compiled with "
-        "``WITH_CUDA=ON``. GPU-flavoured methods (``LANCZOS_GPU`` etc.) "
-        "fall back to their CPU equivalents on builds where this is "
-        "False.");
+        "``WITH_CUDA=ON``. When False, setting ``params.use_gpu = True`` "
+        "falls back to the CPU code path with a runtime warning.");
 
     m.def("has_mpi_build", []() {
 #ifdef WITH_MPI
@@ -847,57 +755,4 @@ void bind_dispatcher(py::module_& m) {
         "(see ``qed.mpi.run_distributed(...)``) to drive the MPI "
         "solvers.");
 
-    m.def("has_scalapack_build", []() {
-#ifdef WITH_SCALAPACK
-        return true;
-#else
-        return false;
-#endif
-    },
-        "True iff this build was compiled with both ``WITH_MPI=ON`` and "
-        "ScaLAPACK linkage. When False the SCALAPACK / SCALAPACK_MIXED "
-        "method values silently fall back to FULL diagonalization.");
-
-    // ------------------------------------------------------------------------
-    // 10. Phase 7 introspection: expose the canonicalize() helper so
-    //     Python-side tooling and tests can verify that the orthogonal
-    //     (SOLVER, use_fixed_sz, use_gpu, use_mpi) decomposition is
-    //     correct without having to round-trip through the dispatcher.
-    // ------------------------------------------------------------------------
-    m.def("canonicalize_method",
-          [](DiagonalizationMethod method,
-             bool use_fixed_sz,
-             bool use_gpu,
-             bool use_mpi) {
-              const auto canon = ed::canonicalize_method_and_flags(
-                  method, use_fixed_sz, use_gpu, use_mpi);
-              py::dict d;
-              d["method"]       = canon.method;
-              d["use_fixed_sz"] = canon.use_fixed_sz;
-              d["use_gpu"]      = canon.use_gpu;
-              d["use_mpi"]      = canon.use_mpi;
-              return d;
-          },
-          py::arg("method"),
-          py::arg("use_fixed_sz") = false,
-          py::arg("use_gpu")      = false,
-          py::arg("use_mpi")      = false,
-          R"pbdoc(
-Collapse the deprecated ``_GPU`` / ``_CUDA`` / ``_MPI`` / ``_FIXED_SZ``
-enum variants of :class:`DiagonalizationMethod` onto the canonical
-``(method, use_fixed_sz, use_gpu, use_mpi)`` tuple.
-
-Returns a dict with keys ``method`` (the base solver), ``use_fixed_sz``,
-``use_gpu``, ``use_mpi``. The flags are *OR-ed* with the input values so
-calling with ``use_fixed_sz=True`` plus a deprecated ``LANCZOS_GPU_FIXED_SZ``
-enum value still returns ``use_fixed_sz=True``.
-
-Idempotent: feeding the output back in produces the same dict.
-
->>> canon = canonicalize_method(DiagonalizationMethod.LANCZOS_GPU)
->>> canon["method"], canon["use_gpu"]
-(DiagonalizationMethod.LANCZOS, True)
->>> canonicalize_method(DiagonalizationMethod.SCALAPACK)["use_mpi"]
-True
-)pbdoc");
 }

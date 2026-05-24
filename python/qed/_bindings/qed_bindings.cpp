@@ -16,7 +16,6 @@
 //                                     the spectrum.
 //   * finite_temperature_lanczos() -- FTLM thermodynamics.
 //   * low_temperature_lanczos()    -- LTLM thermodynamics.
-//   * hybrid_thermal_method()      -- LTLM+FTLM crossover.
 //   * compute_thermodynamics_from_spectrum() -- partition-function helper.
 //
 // Design notes:
@@ -40,7 +39,6 @@
 #include <ed/core/construct_ham.h>
 #include <ed/dssf/operator_spec.h>
 #include <ed/solvers/ftlm.h>
-#include <ed/solvers/hybrid_thermal.h>
 #include <ed/solvers/lanczos.h>
 #include <ed/solvers/ltlm.h>
 #include <ed/solvers/observables.h>
@@ -55,6 +53,7 @@
 
 #include "dispatcher_bindings.h"
 #include "input_bindings.h"
+#include "workflow_bindings.h"
 
 #include <complex>
 #include <cstdint>
@@ -117,6 +116,14 @@ void op_add_one_body(Operator& op,
     t.coefficient = coeff;
     t.is_two_body = false;
     op.transform_data_.push_back(t);
+    // Mark the SoA + isReal() + matvec backend caches stale so a subsequent
+    // apply()/isReal() rebuilds. The size-aware commitPendingTransforms()
+    // (S0 #2) would also catch this, but invalidating eagerly here also
+    // resets the isReal() cache --- without this, a real-coeff operator that
+    // had isReal() probed once will keep claiming real even after a complex
+    // coefficient is added, routing later lanczos() through the lanczos_real
+    // fast path with the wrong matvec.
+    op.invalidateMatrixCaches();
 }
 
 void op_add_two_body(Operator& op,
@@ -137,6 +144,7 @@ void op_add_two_body(Operator& op,
     t.coefficient = coeff;
     t.is_two_body = true;
     op.transform_data_.push_back(t);
+    op.invalidateMatrixCaches();
 }
 
 void op_add_three_body(Operator& op,
@@ -163,6 +171,7 @@ void op_add_three_body(Operator& op,
     t.site_index_3 = site_3;
     t.coefficient = coeff;
     op.three_body_data_.push_back(t);
+    op.invalidateMatrixCaches();
 }
 
 ComplexArray op_apply(const Operator& op, const ComplexArray& vin) {
@@ -316,23 +325,17 @@ make_hv(const Op& op) {
 inline uint64_t hv_dim(const Operator&        op) { return 1ULL << op.getNumBits(); }
 inline uint64_t hv_dim(const FixedSzOperator& op) { return op.getFixedSzDim(); }
 
-// Real-arithmetic mat-vec adapters for the lanczos_real fast path
-// (Phase 6 #7). These call directly into the operator's real CSR SpMV --
-// skipping the std::complex<double> wrapping layer entirely. Caller must
-// have verified ``op.isReal() == true`` before invoking.
+// Real-arithmetic mat-vec adapter for the lanczos_real fast path. Wraps
+// the operator's consolidated ``apply_real`` entry point (which itself
+// picks assembled-CSR vs matrix-free internally). Caller must have
+// verified ``op.isReal() == true`` before invoking; ``apply_real``
+// throws otherwise.
+template <class Op>
 inline std::function<void(const double*, double*, int)>
-make_hv_real(const Operator& op) {
-    const Operator* p = &op;
+make_hv_real(const Op& op) {
+    const Op* p = &op;
     return [p](const double* in, double* out, int n) {
-        p->apply_via_csr_parallel_real(in, out, static_cast<size_t>(n));
-    };
-}
-
-inline std::function<void(const double*, double*, int)>
-make_hv_real(const FixedSzOperator& op) {
-    const FixedSzOperator* p = &op;
-    return [p](const double* in, double* out, int n) {
-        p->apply_via_fixed_sz_csr_real(in, out, static_cast<size_t>(n));
+        p->apply_real(in, out, static_cast<std::size_t>(n));
     };
 }
 
@@ -545,48 +548,6 @@ py::dict py_low_temperature_lanczos_fixed_sz(const FixedSzOperator& op,
     }
     py::dict d = thermo_to_dict(res.thermo_data);
     d["ground_state_energy"] = res.ground_state_energy;
-    return d;
-}
-
-py::dict py_hybrid_thermal(const Operator& op,
-                           const HybridThermalParameters& params,
-                           double temp_min,
-                           double temp_max,
-                           uint64_t num_temp_bins,
-                           const std::string& output_dir) {
-    const uint64_t n = hv_dim(op);
-    const std::string dir = output_dir_or_devnull(output_dir);
-    HybridThermalResults res;
-    {
-        py::gil_scoped_release release;
-        res = hybrid_thermal_method(make_hv(op), n, params, temp_min, temp_max,
-                                    num_temp_bins, dir);
-    }
-    py::dict d = thermo_to_dict(res.thermo_data);
-    d["ground_state_energy"] = res.ground_state_energy;
-    d["ltlm_points"]         = res.ltlm_points;
-    d["ftlm_points"]         = res.ftlm_points;
-    return d;
-}
-
-py::dict py_hybrid_thermal_fixed_sz(const FixedSzOperator& op,
-                                    const HybridThermalParameters& params,
-                                    double temp_min,
-                                    double temp_max,
-                                    uint64_t num_temp_bins,
-                                    const std::string& output_dir) {
-    const uint64_t n = hv_dim(op);
-    const std::string dir = output_dir_or_devnull(output_dir);
-    HybridThermalResults res;
-    {
-        py::gil_scoped_release release;
-        res = hybrid_thermal_method(make_hv(op), n, params, temp_min, temp_max,
-                                    num_temp_bins, dir);
-    }
-    py::dict d = thermo_to_dict(res.thermo_data);
-    d["ground_state_energy"] = res.ground_state_energy;
-    d["ltlm_points"]         = res.ltlm_points;
-    d["ftlm_points"]         = res.ftlm_points;
     return d;
 }
 
@@ -807,37 +768,6 @@ PYBIND11_MODULE(_core, m) {
           py::arg("num_temp_bins"),
           py::arg("output_dir") = "",
           "LTLM on a fixed-Sz sector (Krylov dim = C(N, n_up)).");
-
-    // Hybrid --------------------------------------------------------------
-    py::class_<HybridThermalParameters>(m, "HybridThermalParameters")
-        .def(py::init<>())
-        .def_readwrite("crossover_temperature",       &HybridThermalParameters::crossover_temperature)
-        .def_readwrite("ltlm_krylov_dim",             &HybridThermalParameters::ltlm_krylov_dim)
-        .def_readwrite("ltlm_ground_krylov",          &HybridThermalParameters::ltlm_ground_krylov)
-        .def_readwrite("ltlm_full_reorth",            &HybridThermalParameters::ltlm_full_reorth)
-        .def_readwrite("ltlm_seed",                   &HybridThermalParameters::ltlm_seed)
-        .def_readwrite("ftlm_krylov_dim",             &HybridThermalParameters::ftlm_krylov_dim)
-        .def_readwrite("ftlm_num_samples",            &HybridThermalParameters::ftlm_num_samples)
-        .def_readwrite("ftlm_full_reorth",            &HybridThermalParameters::ftlm_full_reorth)
-        .def_readwrite("ftlm_seed",                   &HybridThermalParameters::ftlm_seed)
-        .def_readwrite("ftlm_error_bars",             &HybridThermalParameters::ftlm_error_bars)
-        .def_readwrite("tolerance",                   &HybridThermalParameters::tolerance);
-
-    m.def("hybrid_thermal_method", &py_hybrid_thermal,
-          py::arg("operator"),
-          py::arg("params"),
-          py::arg("temp_min"),
-          py::arg("temp_max"),
-          py::arg("num_temp_bins"),
-          py::arg("output_dir") = "");
-    m.def("hybrid_thermal_method", &py_hybrid_thermal_fixed_sz,
-          py::arg("operator"),
-          py::arg("params"),
-          py::arg("temp_min"),
-          py::arg("temp_max"),
-          py::arg("num_temp_bins"),
-          py::arg("output_dir") = "",
-          "Hybrid LTLM/FTLM on a fixed-Sz sector.");
 
     // ed::dssf -- structure-factor observable assembly (P2.8 / DSSF PR-G).
     auto m_dssf = m.def_submodule("dssf",
@@ -1120,13 +1050,36 @@ PYBIND11_MODULE(_core, m) {
     // The correlation kernels accept the wavefunction as a NumPy
     // complex128 array; we copy it into std::vector<Complex> for the
     // call. Long enough that we release the GIL.
+    // Helper: validate that `psi` is 1-D with exactly 2^n_sites entries.
+    // Without this, an under-sized array silently produces UB reads in the
+    // BFG correlation kernels (memcpy used to copy `psi.shape[0]` doubles
+    // into a `v(n)` vector but then the kernel reads `1<<n_sites` of them).
+    auto bfg_check_psi = [](const py::array& psi, int n_sites,
+                            const char* where) {
+        if (psi.ndim() != 1) {
+            throw std::runtime_error(std::string(where) +
+                ": psi must be a 1-D complex128 array");
+        }
+        if (n_sites < 0 || n_sites > 63) {
+            throw std::runtime_error(std::string(where) +
+                ": n_sites must be in [0, 63]");
+        }
+        const auto expected = (n_sites == 0)
+            ? std::size_t{1}
+            : (std::size_t{1} << static_cast<unsigned>(n_sites));
+        const auto got = static_cast<std::size_t>(psi.shape(0));
+        if (got != expected) {
+            throw std::runtime_error(std::string(where) +
+                ": psi length " + std::to_string(got) +
+                " disagrees with 2^n_sites = " + std::to_string(expected));
+        }
+    };
+
     m_bfg.def("compute_smsp_correlations",
-        [](py::array_t<std::complex<double>,
+        [bfg_check_psi](py::array_t<std::complex<double>,
                        py::array::c_style | py::array::forcecast> psi,
            int n_sites) {
-            if (psi.ndim() != 1) {
-                throw std::runtime_error("psi must be a 1-D complex128 array");
-            }
+            bfg_check_psi(psi, n_sites, "compute_smsp_correlations");
             const auto n = static_cast<std::size_t>(psi.shape(0));
             std::vector<ed::bfg::Complex> v(n);
             std::memcpy(v.data(), psi.data(), n * sizeof(ed::bfg::Complex));
@@ -1137,12 +1090,10 @@ PYBIND11_MODULE(_core, m) {
         "Site-to-site <S^- S^+> correlation matrix.");
 
     m_bfg.def("compute_szsz_correlations",
-        [](py::array_t<std::complex<double>,
+        [bfg_check_psi](py::array_t<std::complex<double>,
                        py::array::c_style | py::array::forcecast> psi,
            int n_sites) {
-            if (psi.ndim() != 1) {
-                throw std::runtime_error("psi must be a 1-D complex128 array");
-            }
+            bfg_check_psi(psi, n_sites, "compute_szsz_correlations");
             const auto n = static_cast<std::size_t>(psi.shape(0));
             std::vector<ed::bfg::Complex> v(n);
             std::memcpy(v.data(), psi.data(), n * sizeof(ed::bfg::Complex));
@@ -1153,12 +1104,10 @@ PYBIND11_MODULE(_core, m) {
         "Site-to-site <S^z S^z> correlation matrix.");
 
     m_bfg.def("compute_xy_bond_expectations",
-        [](py::array_t<std::complex<double>,
+        [bfg_check_psi](py::array_t<std::complex<double>,
                        py::array::c_style | py::array::forcecast> psi,
            const ed::bfg::Cluster& cluster) {
-            if (psi.ndim() != 1) {
-                throw std::runtime_error("psi must be a 1-D complex128 array");
-            }
+            bfg_check_psi(psi, cluster.n_sites, "compute_xy_bond_expectations");
             const auto n = static_cast<std::size_t>(psi.shape(0));
             std::vector<ed::bfg::Complex> v(n);
             std::memcpy(v.data(), psi.data(), n * sizeof(ed::bfg::Complex));
@@ -1169,12 +1118,10 @@ PYBIND11_MODULE(_core, m) {
         "<S^+_i S^-_j + S^-_i S^+_j> per nearest-neighbour edge.");
 
     m_bfg.def("compute_spsm_bond_expectations",
-        [](py::array_t<std::complex<double>,
+        [bfg_check_psi](py::array_t<std::complex<double>,
                        py::array::c_style | py::array::forcecast> psi,
            const ed::bfg::Cluster& cluster) {
-            if (psi.ndim() != 1) {
-                throw std::runtime_error("psi must be a 1-D complex128 array");
-            }
+            bfg_check_psi(psi, cluster.n_sites, "compute_spsm_bond_expectations");
             const auto n = static_cast<std::size_t>(psi.shape(0));
             std::vector<ed::bfg::Complex> v(n);
             std::memcpy(v.data(), psi.data(), n * sizeof(ed::bfg::Complex));
@@ -1185,12 +1132,10 @@ PYBIND11_MODULE(_core, m) {
         "<S^+_i S^-_j> per nearest-neighbour edge (asymmetric).");
 
     m_bfg.def("compute_szsz_bond_expectations",
-        [](py::array_t<std::complex<double>,
+        [bfg_check_psi](py::array_t<std::complex<double>,
                        py::array::c_style | py::array::forcecast> psi,
            const ed::bfg::Cluster& cluster) {
-            if (psi.ndim() != 1) {
-                throw std::runtime_error("psi must be a 1-D complex128 array");
-            }
+            bfg_check_psi(psi, cluster.n_sites, "compute_szsz_bond_expectations");
             const auto n = static_cast<std::size_t>(psi.shape(0));
             std::vector<ed::bfg::Complex> v(n);
             std::memcpy(v.data(), psi.data(), n * sizeof(ed::bfg::Complex));
@@ -1550,4 +1495,12 @@ PYBIND11_MODULE(_core, m) {
     // to them via m.attr("Operator")). See dispatcher_bindings.{h,cpp}.
     // -------------------------------------------------------------------------
     bind_dispatcher(m);
+
+    // -------------------------------------------------------------------------
+    // ED Cleanup Sweep Phase 1 (May 2026): `ed::workflows::solve/thermal/
+    // spectral` entry points. Routes through select_backend on every call;
+    // intended to replace the legacy `exact_diagonalization_*` family.
+    // See workflow_bindings.cpp.
+    // -------------------------------------------------------------------------
+    bind_workflows(m);
 }

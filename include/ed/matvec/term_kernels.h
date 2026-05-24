@@ -293,17 +293,14 @@ inline void apply_terms(
 
                 const uint64_t basis_state = basis.state_of(i);
 
-                // Prefetch the next state's bitstring + amplitude.
+                // Prefetch the next input amplitude. The basis lookup
+                // is policy-dependent; the FullBasisPolicy resolves
+                // state_of() to a no-op so no separate prefetch is
+                // needed there, and the FixedSzBasisPolicy uses a
+                // direct array index into basis_states_ which the
+                // hardware prefetcher catches on linear iteration.
                 if (i + 8 < block_end) {
                     __builtin_prefetch(&in[i + 8], 0, 1);
-                    if constexpr (!std::is_same_v<BasisPolicy,
-                                                  /* FullBasisPolicy */
-                                                  decltype(basis)>) {
-                        // For non-trivial basis policies (e.g. fixed-Sz)
-                        // the state lookup chases an additional pointer.
-                        // The optimizer elides this prefetch for the
-                        // FullBasisPolicy specialisation.
-                    }
                 }
 
                 // ----------------------------------------------------------
@@ -470,111 +467,13 @@ inline void apply_terms(
 }
 
 // ---------------------------------------------------------------------------
-// CSR triplet builder. Used by both the full-basis and fixed-Sz CSR
-// assembly paths. Emits Eigen-style triplets (row, col, value) into the
-// provided sink (anything with `.emplace_back(int row, int col, Scalar)`).
-//
-// Same template parameters and same duck-typed term containers as
-// apply_terms above. The only differences are: no parallelism (CSR build
-// is single-threaded; the SpMV is parallel later), and we emit triplets
-// instead of accumulating into out[].
+// CSR triplet assembly lives in term_kernels_assemble.h
+// (``ed::matvec::kernel::emit_term_triplets``). A previous version of
+// this header also carried a serial ``emit_csr_triplets`` helper, but it
+// was a strict subset of ``emit_term_triplets`` (no parallelism, no
+// zero-coeff pruning, no thread-local pre-allocation) with no callers.
+// The unified ASSEMBLE kernel in term_kernels_assemble.h is the only
+// triplet emitter the codebase uses.
 // ---------------------------------------------------------------------------
-template <
-    class BasisPolicy,
-    class Scalar,
-    class TripletSink,
-    class DiagOneBodyVec,
-    class OffDiagOneBodyVec,
-    class DiagTwoBodyVec,
-    class MixedTwoBodyVec,
-    class OffDiagTwoBodyVec,
-    class ThreeBodyVec>
-inline void emit_csr_triplets(
-    BasisPolicy              basis,
-    double                   spin_l,
-    const DiagOneBodyVec&    diag_one_body,
-    const OffDiagOneBodyVec& offdiag_one_body,
-    const DiagTwoBodyVec&    diag_two_body,
-    const MixedTwoBodyVec&   mixed_two_body,
-    const OffDiagTwoBodyVec& offdiag_two_body,
-    const ThreeBodyVec&      three_body,
-    TripletSink&             out_triplets)
-{
-    const uint64_t dim     = basis.dim();
-    const double   spin_sq = spin_l * spin_l;
-
-    auto emit = [&](uint64_t row, uint64_t col, Scalar v) {
-        out_triplets.emplace_back(static_cast<int>(row),
-                                  static_cast<int>(col),
-                                  v);
-    };
-
-    for (uint64_t i = 0; i < dim; ++i) {
-        const uint64_t basis_state = basis.state_of(i);
-
-        for (const auto& t : diag_one_body) {
-            const double sign = ((basis_state >> t.site_index) & 1) ? -1.0 : 1.0;
-            emit(i, i, coerce_coeff<Scalar>(t.coefficient) * spin_l * sign);
-        }
-        for (const auto& t : offdiag_one_body) {
-            const uint64_t bit = (basis_state >> t.site_index) & 1;
-            if (bit == t.op_type) continue;
-            const uint64_t new_state = basis_state ^ (1ULL << t.site_index);
-            const int64_t j = basis.index_of(new_state);
-            if (j < 0) continue;
-            emit(static_cast<uint64_t>(j), i, coerce_coeff<Scalar>(t.coefficient));
-        }
-        for (const auto& t : diag_two_body) {
-            const double sa = ((basis_state >> t.site_index_1) & 1) ? -1.0 : 1.0;
-            const double sb = ((basis_state >> t.site_index_2) & 1) ? -1.0 : 1.0;
-            emit(i, i, coerce_coeff<Scalar>(t.coefficient) * spin_sq * sa * sb);
-        }
-        for (const auto& t : mixed_two_body) {
-            const uint64_t fb = (basis_state >> t.flip_site) & 1;
-            if (fb == t.flip_op_type) continue;
-            const double sz_sign =
-                ((basis_state >> t.sz_site) & 1) ? -1.0 : 1.0;
-            const uint64_t new_state = basis_state ^ (1ULL << t.flip_site);
-            const int64_t j = basis.index_of(new_state);
-            if (j < 0) continue;
-            emit(static_cast<uint64_t>(j), i,
-                 coerce_coeff<Scalar>(t.coefficient) * spin_l * sz_sign);
-        }
-        for (const auto& t : offdiag_two_body) {
-            const uint64_t b1 = (basis_state >> t.site_index_1) & 1;
-            const uint64_t b2 = (basis_state >> t.site_index_2) & 1;
-            if (b1 == t.op_type_1 || b2 == t.op_type_2) continue;
-            const uint64_t new_state = basis_state
-                ^ (1ULL << t.site_index_1)
-                ^ (1ULL << t.site_index_2);
-            const int64_t j = basis.index_of(new_state);
-            if (j < 0) continue;
-            emit(static_cast<uint64_t>(j), i, coerce_coeff<Scalar>(t.coefficient));
-        }
-        for (const auto& t : three_body) {
-            uint64_t cur = basis_state;
-            Scalar   sc  = coerce_coeff<Scalar>(t.coefficient);
-            bool     ok  = true;
-            auto step = [&](uint8_t op, uint64_t site) {
-                if (op == kOpSz) {
-                    const double s = ((cur >> site) & 1) ? -1.0 : 1.0;
-                    sc *= spin_l * s;
-                } else {
-                    const uint64_t b = (cur >> site) & 1;
-                    if (b != op) cur ^= (1ULL << site);
-                    else         ok = false;
-                }
-            };
-            step(t.op_type_1, t.site_index_1);
-            if (ok) step(t.op_type_2, t.site_index_2);
-            if (ok) step(t.op_type_3, t.site_index_3);
-            if (!ok) continue;
-            if (std::abs(sc) < 1e-15) continue;
-            const int64_t j = basis.index_of(cur);
-            if (j < 0) continue;
-            emit(static_cast<uint64_t>(j), i, sc);
-        }
-    }
-}
 
 } // namespace ed::matvec::kernel

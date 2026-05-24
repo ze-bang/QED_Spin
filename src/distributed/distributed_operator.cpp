@@ -12,6 +12,9 @@
 // Pull in the full Operator definition (we need the SoA term storage).
 #include <ed/core/construct_ham.h>
 
+// GATHER-form bit-flip kernel (the dual of ed::matvec::kernel::apply_terms).
+#include <ed/matvec/term_kernels_gather.h>
+
 #include <algorithm>
 #include <cassert>
 #include <complex>
@@ -133,8 +136,8 @@ DistributedOperator::DistributedOperator(std::shared_ptr<Operator> op,
     }
     rank_offsets_[size_] = global_dim_;
 
-    // Make sure SoA term storage is built before we read it (idempotent).
-    op_->separateTransformsByType();
+    // Make sure SoA term storage is fresh before we read it (idempotent).
+    op_->commitPendingTransforms();
 
     extract_flip_patterns_();
     build_comm_pattern_();
@@ -165,11 +168,15 @@ void DistributedOperator::extract_flip_patterns_() {
     // Always include 0 -- the diagonal / "do nothing" case is structural.
     add(0);
 
-    for (const auto& t : op_->diag_one_body_)     { add(0); (void)t; }
-    for (const auto& t : op_->offdiag_one_body_)  { add(1ULL << t.site_index); }
-    for (const auto& t : op_->diag_two_body_)     { add(0); (void)t; }
-    for (const auto& t : op_->mixed_two_body_)    { add(1ULL << t.flip_site); }
-    for (const auto& t : op_->offdiag_two_body_) {
+    // SoA bins live on Operator::terms_ after the May-2026 term-storage
+    // unification. Rebuild the cache from the canonical AoS (cheap when
+    // already fresh) before reading the binned views.
+    op_->commitPendingTransforms();
+    for (const auto& t : op_->terms_.diag_one_body)    { add(0); (void)t; }
+    for (const auto& t : op_->terms_.offdiag_one_body) { add(1ULL << t.site_index); }
+    for (const auto& t : op_->terms_.diag_two_body)    { add(0); (void)t; }
+    for (const auto& t : op_->terms_.mixed_two_body)   { add(1ULL << t.flip_site); }
+    for (const auto& t : op_->terms_.offdiag_two_body) {
         add((1ULL << t.site_index_1) ^ (1ULL << t.site_index_2));
     }
     for (const auto& t : op_->three_body_data_) {
@@ -308,10 +315,12 @@ void DistributedOperator::build_comm_pattern_() {
 }
 
 // -----------------------------------------------------------------------------
-// SpMV
+// SpMV -- canonical implementation. Both the 2-arg ``apply(v, y)`` and
+// the 3-arg MatVecOperator ``apply(v, y, size)`` forward here.
+// (Audit STRUCTURAL_AUDIT.md S1 #10.)
 // -----------------------------------------------------------------------------
-void DistributedOperator::apply(const Complex* v_local,
-                                Complex* y_local) const {
+void DistributedOperator::apply_local_(const Complex* v_local,
+                                       Complex* y_local) const {
     // Pack send buffer. The destination buffer is the persistent
     // send_buf_ allocated once in build_comm_pattern_ -- no per-call
     // heap activity in the hot path (Phase 8 carryover of the
@@ -346,8 +355,10 @@ void DistributedOperator::apply(const Complex* v_local,
         return recv_buf[idx];
     };
 
-    const double spin    = static_cast<double>(op_->getSpin());
-    const double spin_sq = spin * spin;
+    // Ensure the SoA term cache is fresh (after May-2026 term-storage
+    // unification the SoA bins live on Operator::terms_, regenerated
+    // from the canonical AoS by commitPendingTransforms()).
+    op_->commitPendingTransforms();
 
     // Zero the output slab.
     std::fill(y_local, y_local + local_n_, Complex(0.0, 0.0));
@@ -355,163 +366,25 @@ void DistributedOperator::apply(const Complex* v_local,
     // -------------------------------------------------------------------------
     // GATHER-form matrix-free SpMV.
     //
-    // For each LOCAL output row r, accumulate y_local[r] = sum_c <r|H|c> v[c].
-    //
-    // The condition rewrites are derived below. Let SCATTER(b) be the
-    // condition that the original Operator::apply uses to scatter from
-    // input b to output c. For r = c, b = r XOR (term flip pattern). The
-    // GATHER condition is whatever condition holds on r such that there
-    // exists a b satisfying SCATTER(b) and producing c = r.
-    //
-    //   * diag_one_body_ (Sz):   c = b, no gating.
-    //                            => GATHER(r): always
-    //                            v contribution: v[r]
-    //                            sign: ((r >> site) & 1) ? -1 : +1
-    //
-    //   * offdiag_one_body_ (S+/S-): c = b XOR (1 << i)
-    //                                SCATTER: ((b >> i) & 1) == op_type
-    //                                b = r XOR (1 << i), so
-    //                                (b >> i) & 1 == 1 - (r >> i) & 1
-    //                                => GATHER: ((r >> i) & 1) != op_type
-    //                                v contribution: v[r XOR (1<<i)]
-    //
-    //   * diag_two_body_ (Sz Sz): c = b, no gating.
-    //                             v contribution: v[r]
-    //                             sign: product of Sz bits at i, j on r.
-    //
-    //   * mixed_two_body_ (Sz at sz_site, S+/- at flip_site):
-    //                              c = b XOR (1 << flip_site)
-    //                              SCATTER: ((b >> flip) & 1) == flip_op_type
-    //                                       sz_sign uses b at sz_site.
-    //                              GATHER: ((r >> flip) & 1) != flip_op_type
-    //                                      sz_sign uses (r XOR (1<<flip)) at
-    //                                      sz_site (== r at sz_site whenever
-    //                                      sz_site != flip_site, which is
-    //                                      enforced by addInteractAll).
-    //                              v contribution: v[r XOR (1 << flip)]
-    //
-    //   * offdiag_two_body_ (S+/-S+/-): c = b XOR (1<<i) XOR (1<<j)
-    //                              SCATTER: ((b>>i)&1)==op_type_1 &&
-    //                                       ((b>>j)&1)==op_type_2
-    //                              Both bits flip in b->c, so the GATHER
-    //                              condition on r is logically identical:
-    //                              ((r>>i)&1) != op_type_1 &&
-    //                              ((r>>j)&1) != op_type_2
-    //                              v contribution: v[r XOR (1<<i) XOR (1<<j)]
-    //
-    //   * three_body_data_: gather-rewrite per term. Currently we follow
-    //     the same pattern as scatter -- iterate the three operators in
-    //     order, accumulate `b = r XOR (1<<site_k)` for each S+/-, gate by
-    //     the same `(b >> site_k) & 1 == op_type_k` check used in
-    //     apply_real / apply_optimized but with `b` reconstructed from r.
-    //     Because we rebuild b explicitly we can reuse the SCATTER logic
-    //     verbatim with the source basis being `b`, not `r`.
+    // For each LOCAL output row r, accumulate
+    //   y_local[r] = sum_c <r|H|c> v[c]
+    // by dispatching to ``ed::matvec::kernel::gather_row``, which holds the
+    // single source of truth for the GATHER direction of the bit-flip
+    // algebra (the SCATTER counterpart lives in
+    // ``ed::matvec::kernel::apply_terms``). Reading ``v[c]`` for any
+    // global column c -- local OR off-rank -- is the ``get_v`` closure
+    // captured above; the kernel is unaware of MPI / NCCL / etc.
     // -------------------------------------------------------------------------
+
+    const double spin_l = static_cast<double>(op_->getSpin());
 
 #ifdef _OPENMP
     #pragma omp parallel for schedule(dynamic, 4096)
 #endif
     for (std::uint64_t r_local = 0; r_local < local_n_; ++r_local) {
         const std::uint64_t r = local_offset_ + r_local;
-        Complex acc(0.0, 0.0);
-
-        // Diagonal one-body.
-        for (const auto& t : op_->diag_one_body_) {
-            const double sign = ((r >> t.site_index) & 1) ? -1.0 : 1.0;
-            acc += t.coefficient * (spin * sign) * v_local[r_local];
-        }
-
-        // Off-diagonal one-body.
-        for (const auto& t : op_->offdiag_one_body_) {
-            const std::uint64_t bit = (r >> t.site_index) & 1ULL;
-            if (bit != t.op_type) {
-                const std::uint64_t c = r ^ (1ULL << t.site_index);
-                acc += t.coefficient * get_v(c);
-            }
-        }
-
-        // Diagonal two-body.
-        for (const auto& t : op_->diag_two_body_) {
-            const double si = ((r >> t.site_index_1) & 1) ? -1.0 : 1.0;
-            const double sj = ((r >> t.site_index_2) & 1) ? -1.0 : 1.0;
-            acc += t.coefficient * (spin_sq * si * sj) * v_local[r_local];
-        }
-
-        // Mixed two-body.
-        for (const auto& t : op_->mixed_two_body_) {
-            const std::uint64_t flip_bit = (r >> t.flip_site) & 1ULL;
-            if (flip_bit != t.flip_op_type) {
-                const std::uint64_t b = r ^ (1ULL << t.flip_site);
-                const double sz_sign = ((b >> t.sz_site) & 1) ? -1.0 : 1.0;
-                acc += t.coefficient * (spin * sz_sign) * get_v(b);
-            }
-        }
-
-        // Off-diagonal two-body.
-        for (const auto& t : op_->offdiag_two_body_) {
-            const std::uint64_t bit_1 = (r >> t.site_index_1) & 1ULL;
-            const std::uint64_t bit_2 = (r >> t.site_index_2) & 1ULL;
-            if (bit_1 != t.op_type_1 && bit_2 != t.op_type_2) {
-                const std::uint64_t c =
-                    r ^ (1ULL << t.site_index_1) ^ (1ULL << t.site_index_2);
-                acc += t.coefficient * get_v(c);
-            }
-        }
-
-        // Three-body. Mirrors apply_real exactly, but reads v[b] from the
-        // distributed lookup rather than v[basis] from a flat array.
-        for (const auto& tdata : op_->three_body_data_) {
-            std::uint64_t b = r;
-            // The scatter code in apply_real builds `new_basis` by flipping
-            // the S+/- bits in source `basis` and gating on
-            // `(new_basis >> site_k) & 1 != op_type_k` between flips. Here
-            // we reverse: we want b such that scatter from b produces r.
-            // The total flip pattern must equal r XOR b, so b = r XOR
-            // (XOR of (1<<site_k) for S+/- terms in this 3-body). We then
-            // re-validate the original gating: for each S+/- operator,
-            // ((b >> site_k) & 1) must equal op_type_k.
-            bool valid = true;
-            std::uint64_t flip_xor = 0;
-            if (tdata.op_type_1 != 2) flip_xor ^= (1ULL << tdata.site_index_1);
-            if (tdata.op_type_2 != 2) flip_xor ^= (1ULL << tdata.site_index_2);
-            if (tdata.op_type_3 != 2) flip_xor ^= (1ULL << tdata.site_index_3);
-            b = r ^ flip_xor;
-
-            // Recompute the scalar EXACTLY as apply_real does, walking the
-            // three operators in order with running `b` updated by flips.
-            std::uint64_t walking = b;
-            double scalar = tdata.coefficient.real();
-            // imag part dropped: 3-body apply_real is real-only by design;
-            // we mirror that for now. Complex 3-body needs apply_optimized
-            // gather rewrite as a follow-up.
-            auto step = [&](std::uint8_t op_type, std::uint64_t site) {
-                if (!valid) return;
-                if (op_type == 2) {
-                    const std::uint64_t bit = (walking >> site) & 1ULL;
-                    scalar *= spin * (bit ? -1.0 : 1.0);
-                } else {
-                    const std::uint64_t bit = (walking >> site) & 1ULL;
-                    if (bit != op_type) {
-                        walking ^= (1ULL << site);
-                    } else {
-                        valid = false;
-                    }
-                }
-            };
-            step(tdata.op_type_1, tdata.site_index_1);
-            step(tdata.op_type_2, tdata.site_index_2);
-            step(tdata.op_type_3, tdata.site_index_3);
-
-            // After the walk, the scatter would have produced output basis
-            // `walking`. We require walking == r (i.e., the flip bookkeeping
-            // is self-consistent). Ill-conditioned 3-body terms (e.g., two
-            // S+ on the same site) drop out via the `valid` flag.
-            if (valid && walking == r && std::abs(scalar) > 1e-15) {
-                acc += Complex(scalar, 0.0) * get_v(b);
-            }
-        }
-
-        y_local[r_local] = acc;
+        y_local[r_local] = ed::matvec::kernel::gather_row(
+            r, v_local[r_local], op_->terms_, spin_l, get_v);
     }
 }
 

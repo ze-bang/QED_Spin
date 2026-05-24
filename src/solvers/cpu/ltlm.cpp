@@ -545,9 +545,24 @@ void save_ltlm_results(
     // Extract directory from filename to create HDF5 file
     std::string directory = filename.substr(0, filename.find_last_of('/'));
     if (directory.empty()) directory = ".";
-    
+
+    // Honour the unified "/dev/null" sentinel for "skip all I/O".
+    // ``ed_wrapper.h`` substitutes an empty ``output_dir`` with
+    // ``/dev/null`` so the dispatcher can keep its uniform
+    // ``output_dir.empty()`` checks downstream. Without this guard
+    // the LTLM saver tries to open ``/dev/null/ed_results.h5`` which
+    // returns HDF5's ``/dev/null`` sentinel, then attempts an
+    // ``H5F_ACC_RDWR`` open on it and segfaults at truncate time.
+    if (HDF5IO::isDisabledOutputPath(directory) ||
+        HDF5IO::isDisabledOutputPath(filename)) {
+        return;
+    }
+
     try {
         std::string h5_path = HDF5IO::createOrOpenFile(directory);
+        if (HDF5IO::isDisabledOutputPath(h5_path)) {
+            return;
+        }
         
         HDF5IO::saveFTLMThermodynamics(
             h5_path,

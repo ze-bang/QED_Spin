@@ -231,13 +231,27 @@ inline void create_directory_or_throw(const std::string& path) {
  */
 inline void create_directory_mpi_safe(const std::string& path) {
     int rank = 0;
+    bool mpi_active = false;
 #ifdef WITH_MPI
-    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    // Phase 7.x audit fix: ``MPI_Comm_rank`` aborts when MPI was never
+    // initialised (the workflow is exercised from unit tests via
+    // ``compute_static_response_workflow`` and friends, where the
+    // Catch2 main doesn't call ``MPI_Init``). Guard with
+    // ``MPI_Initialized`` so we silently fall back to single-process
+    // semantics when MPI is not active.
+    {
+        int mpi_inited = 0;
+        MPI_Initialized(&mpi_inited);
+        if (mpi_inited) {
+            mpi_active = true;
+            MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+        }
+    }
 #endif
-    
+
     bool success = true;
     std::string error_msg;
-    
+
     if (rank == 0) {
         std::error_code ec;
         if (!std::filesystem::create_directories(path, ec) && !std::filesystem::exists(path)) {
@@ -245,27 +259,29 @@ inline void create_directory_mpi_safe(const std::string& path) {
             error_msg = "Failed to create directory: " + path + " (" + ec.message() + ")";
         }
     }
-    
+
 #ifdef WITH_MPI
-    // Broadcast success status to all ranks
-    int success_int = success ? 1 : 0;
-    MPI_Bcast(&success_int, 1, MPI_INT, 0, MPI_COMM_WORLD);
-    success = (success_int != 0);
-    
-    // If failed, broadcast error message length and content
-    if (!success) {
-        int msg_len = static_cast<int>(error_msg.size());
-        MPI_Bcast(&msg_len, 1, MPI_INT, 0, MPI_COMM_WORLD);
-        if (rank != 0) {
-            error_msg.resize(msg_len);
+    if (mpi_active) {
+        // Broadcast success status to all ranks
+        int success_int = success ? 1 : 0;
+        MPI_Bcast(&success_int, 1, MPI_INT, 0, MPI_COMM_WORLD);
+        success = (success_int != 0);
+
+        // If failed, broadcast error message length and content
+        if (!success) {
+            int msg_len = static_cast<int>(error_msg.size());
+            MPI_Bcast(&msg_len, 1, MPI_INT, 0, MPI_COMM_WORLD);
+            if (rank != 0) {
+                error_msg.resize(msg_len);
+            }
+            MPI_Bcast(&error_msg[0], msg_len, MPI_CHAR, 0, MPI_COMM_WORLD);
         }
-        MPI_Bcast(&error_msg[0], msg_len, MPI_CHAR, 0, MPI_COMM_WORLD);
+
+        // Synchronize before continuing
+        MPI_Barrier(MPI_COMM_WORLD);
     }
-    
-    // Synchronize before continuing
-    MPI_Barrier(MPI_COMM_WORLD);
 #endif
-    
+
     if (!success) {
         throw std::runtime_error(error_msg);
     }

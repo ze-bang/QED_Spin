@@ -99,6 +99,107 @@ inline void lanczos(const GPUOperator& op,
                                 tol, eigenvalues, std::move(dir), eigenvectors);
 }
 
+// ---------------------------------------------------------------------------
+// GPU Lanczos through the unified Krylov kernel
+// (`ed::krylov::lanczos_kernel<CudaBackend>`).
+//
+// First production migration onto the unified `Backend`-templated
+// Krylov kernel (May 2026). Replaces the corresponding paths of
+// `GPULanczos::run`. Full CGS2 reorth + basis held in device memory.
+//
+// Two entry points:
+//
+//   * `run_lanczos_eigenvalues_kernel_facade(...)` -- eigenvalues only.
+//     Diagonalises the small tridiagonal on the host (Eigen) and
+//     returns the lowest `num_eigs` Ritz values.
+//
+//   * `run_lanczos_eigenpairs_kernel_facade(...)` -- eigenvalues +
+//     eigenvectors. After the tridiag solve, reconstructs the lowest
+//     `num_eigs` Ritz vectors as
+//
+//         y_i = sum_{k=0}^{M-1} S(k, i) * V_k
+//
+//     by `num_eigs * M` backend axpys on the retained Krylov basis
+//     (V_k lives in device memory; the axpys use cuBLAS). The Ritz
+//     vectors are copied to host into the `eigenvectors_out`
+//     std::vector<std::vector<Complex>>, matching the legacy
+//     `GPULanczos::run` output type.
+//
+// Both implementations live in
+// `src/solvers/gpu/gpu_lanczos_kernel_facade.cu`. `runGPULanczos(...)`
+// in `gpu_ed_wrapper.cu` dispatches to one of the two based on
+// `eigenvectors`, so every existing call site picks up the new path
+// without a source change. The legacy `GPULanczos::run` is kept only
+// for the windowed-reorth / on-disk basis-spill regime (when the
+// basis won't fit in device memory).
+// ---------------------------------------------------------------------------
+void run_lanczos_eigenvalues_kernel_facade(
+    GPUOperator& gpu_op,
+    int N,
+    int max_iter,
+    int num_eigs,
+    double tol,
+    unsigned long long seed,
+    std::vector<double>& eigenvalues_out);
+
+void run_lanczos_eigenpairs_kernel_facade(
+    GPUOperator& gpu_op,
+    int N,
+    int max_iter,
+    int num_eigs,
+    double tol,
+    unsigned long long seed,
+    std::vector<double>& eigenvalues_out,
+    std::vector<std::vector<std::complex<double>>>& eigenvectors_out);
+
+// FTLM-shaped Lanczos build that takes a caller-provided starting
+// vector (already in device memory, already normalised) and writes
+// the resulting alpha / beta tridiagonal arrays plus -- optionally --
+// a caller-owned array of device basis pointers.
+//
+// Phase 2 of the gap-fill rollout (May 2026 day 11+): replaces the
+// hand-rolled inline Lanczos bodies in `gpu_ftlm.cu`
+// (`buildLanczosTridiagonalWithBasis`, `buildLanczosTridiagonalFromVector`)
+// that drove their reorthogonalisation through M sequential
+// `cublasZdotc` calls per step. Routes through the unified
+// `lanczos_kernel<CudaBackend>` which uses batched CGS2 via
+// `CudaBackend::dot_many` / `axpy_many` (a single cublasZgemv per
+// pass).
+//
+// Ownership: when `d_basis_out` is non-null, the facade releases
+// each basis vector from the kernel's RAII unique_ptr into a
+// heap-allocated `cuDoubleComplex**` array which the caller must
+// free with `cudaFreeAsync(...)` followed by `delete[]`. The
+// allocator inside `CudaBackend` is pool-backed
+// (`cudaMallocAsync`), so `cudaFreeAsync` is the matching free; a
+// plain `cudaFree` is undefined behaviour per the CUDA contract.
+// When `d_basis_out` is null, the kernel-owned basis is dropped
+// (RAII free) before the function returns.
+//
+// `reorth_freq` follows the legacy convention: `full_reorth=true`
+// forces full CGS2 on every step; `full_reorth=false` with
+// `reorth_freq > 0` triggers `PeriodicCGS2` (CGS2 every
+// `reorth_freq` steps); `full_reorth=false` with `reorth_freq == 0`
+// is unreorth (pure three-term recurrence -- only safe for very
+// short Krylov sequences).
+//
+// `tol` is the **breakdown** threshold on `beta_{j+1}`; defaults
+// match `GPUFTLMSolver::tolerance_` (1e-12).
+//
+// Return: number of iterations actually completed (equals
+// `alpha_out.size()`).
+int run_ftlm_lanczos_kernel_facade(
+    GPUOperator& gpu_op,
+    const void*  d_start_vec,            // cuDoubleComplex*; void* to keep cuda.h optional
+    int          N,
+    int          krylov_dim,
+    bool         full_reorth,
+    int          reorth_freq,
+    double       tol,
+    std::vector<double>& alpha_out,
+    std::vector<double>& beta_out,
+    void**       d_basis_out);           // cuDoubleComplex***; nullable
+
 inline void lanczos(const ed::matvec::MatVecOperator& op,
                     int N, int max_iter, int num_eigs, double tol,
                     std::vector<double>& eigenvalues,
@@ -109,243 +210,15 @@ inline void lanczos(const ed::matvec::MatVecOperator& op,
             eigenvectors);
 }
 
-inline void block_lanczos(const GPUOperator& op,
-                          int N, int max_iter, int num_eigs, int block_size,
-                          double tol, std::vector<double>& eigenvalues,
-                          std::string dir = "", bool eigenvectors = false)
-{
-    GPUEDWrapper::runGPUBlockLanczos(detail::gpu_handle(op), N, max_iter,
-                                     num_eigs, block_size, tol, eigenvalues,
-                                     std::move(dir), eigenvectors);
-}
-
-inline void block_lanczos(const ed::matvec::MatVecOperator& op,
-                          int N, int max_iter, int num_eigs, int block_size,
-                          double tol, std::vector<double>& eigenvalues,
-                          std::string dir = "", bool eigenvectors = false)
-{
-    block_lanczos(detail::require_gpu_operator(op, "block_lanczos"),
-                  N, max_iter, num_eigs, block_size, tol, eigenvalues,
-                  std::move(dir), eigenvectors);
-}
-
-inline void davidson(const GPUOperator& op,
-                     int N, int num_eigs, int max_iter, int max_subspace,
-                     double tol, std::vector<double>& eigenvalues,
-                     std::string dir = "",
-                     bool compute_eigenvectors = false)
-{
-    GPUEDWrapper::runGPUDavidson(detail::gpu_handle(op), N, num_eigs, max_iter,
-                                 max_subspace, tol, eigenvalues, std::move(dir),
-                                 compute_eigenvectors);
-}
-
-inline void davidson(const ed::matvec::MatVecOperator& op,
-                     int N, int num_eigs, int max_iter, int max_subspace,
-                     double tol, std::vector<double>& eigenvalues,
-                     std::string dir = "",
-                     bool compute_eigenvectors = false)
-{
-    davidson(detail::require_gpu_operator(op, "davidson"),
-             N, num_eigs, max_iter, max_subspace, tol, eigenvalues,
-             std::move(dir), compute_eigenvectors);
-}
-
-inline void krylov_schur(const GPUOperator& op,
-                         int N, int num_eigs, int max_iter, double tol,
-                         std::vector<double>& eigenvalues,
-                         std::string dir = "",
-                         bool compute_eigenvectors = false)
-{
-    GPUEDWrapper::runGPUKrylovSchur(detail::gpu_handle(op), N, num_eigs,
-                                    max_iter, tol, eigenvalues, std::move(dir),
-                                    compute_eigenvectors);
-}
-
-inline void krylov_schur(const ed::matvec::MatVecOperator& op,
-                         int N, int num_eigs, int max_iter, double tol,
-                         std::vector<double>& eigenvalues,
-                         std::string dir = "",
-                         bool compute_eigenvectors = false)
-{
-    krylov_schur(detail::require_gpu_operator(op, "krylov_schur"),
-                 N, num_eigs, max_iter, tol, eigenvalues, std::move(dir),
-                 compute_eigenvectors);
-}
-
-inline void block_krylov_schur(const GPUOperator& op,
-                               int N, int num_eigs, int max_iter,
-                               int block_size, double tol,
-                               std::vector<double>& eigenvalues,
-                               std::string dir = "",
-                               bool compute_eigenvectors = false)
-{
-    GPUEDWrapper::runGPUBlockKrylovSchur(detail::gpu_handle(op), N, num_eigs,
-                                         max_iter, block_size, tol,
-                                         eigenvalues, std::move(dir),
-                                         compute_eigenvectors);
-}
-
-inline void block_krylov_schur(const ed::matvec::MatVecOperator& op,
-                               int N, int num_eigs, int max_iter,
-                               int block_size, double tol,
-                               std::vector<double>& eigenvalues,
-                               std::string dir = "",
-                               bool compute_eigenvectors = false)
-{
-    block_krylov_schur(detail::require_gpu_operator(op, "block_krylov_schur"),
-                       N, num_eigs, max_iter, block_size, tol, eigenvalues,
-                       std::move(dir), compute_eigenvectors);
-}
-
-inline void lobpcg(const GPUOperator& op,
-                   int N, int num_eigs, int max_iter, double tol,
-                   std::vector<double>& eigenvalues,
-                   std::string dir = "",
-                   bool compute_eigenvectors = false)
-{
-    GPUEDWrapper::runGPULOBPCG(detail::gpu_handle(op), N, num_eigs, max_iter,
-                               tol, eigenvalues, std::move(dir),
-                               compute_eigenvectors);
-}
-
-inline void lobpcg(const ed::matvec::MatVecOperator& op,
-                   int N, int num_eigs, int max_iter, double tol,
-                   std::vector<double>& eigenvalues,
-                   std::string dir = "",
-                   bool compute_eigenvectors = false)
-{
-    lobpcg(detail::require_gpu_operator(op, "lobpcg"),
-           N, num_eigs, max_iter, tol, eigenvalues, std::move(dir),
-           compute_eigenvectors);
-}
-
-inline void full_diagonalization(const GPUOperator& op,
-                                 int N, int num_eigs,
-                                 std::vector<double>& eigenvalues,
-                                 std::string dir = "",
-                                 bool compute_eigenvectors = true)
-{
-    GPUEDWrapper::runGPUFullDiag(detail::gpu_handle(op), N, num_eigs,
-                                 eigenvalues, std::move(dir),
-                                 compute_eigenvectors);
-}
-
-inline void full_diagonalization(const ed::matvec::MatVecOperator& op,
-                                 int N, int num_eigs,
-                                 std::vector<double>& eigenvalues,
-                                 std::string dir = "",
-                                 bool compute_eigenvectors = true)
-{
-    full_diagonalization(detail::require_gpu_operator(op, "full_diagonalization"),
-                         N, num_eigs, eigenvalues, std::move(dir),
-                         compute_eigenvectors);
-}
-
-// ---------------------------------------------------------------------------
-// Thermal: FTLM and TPQ. (Only the most-used entry points are mirrored;
-// the full FTLM observable / dynamics surface lives in GPUEDWrapper and can
-// be reached the same way -- write a one-line forwarder when you need one.)
-// ---------------------------------------------------------------------------
-inline void ftlm(const GPUOperator& op,
-                 int N, int krylov_dim, int num_samples,
-                 double temp_min, double temp_max, int num_temp_bins,
-                 double tolerance, std::string dir = "",
-                 bool full_reorth = false, int reorth_freq = 10,
-                 unsigned int random_seed = 0)
-{
-    GPUEDWrapper::runGPUFTLM(detail::gpu_handle(op), N, krylov_dim, num_samples,
-                             temp_min, temp_max, num_temp_bins, tolerance,
-                             std::move(dir), full_reorth, reorth_freq,
-                             random_seed);
-}
-
-inline void ftlm(const ed::matvec::MatVecOperator& op,
-                 int N, int krylov_dim, int num_samples,
-                 double temp_min, double temp_max, int num_temp_bins,
-                 double tolerance, std::string dir = "",
-                 bool full_reorth = false, int reorth_freq = 10,
-                 unsigned int random_seed = 0)
-{
-    ftlm(detail::require_gpu_operator(op, "ftlm"),
-         N, krylov_dim, num_samples, temp_min, temp_max, num_temp_bins,
-         tolerance, std::move(dir), full_reorth, reorth_freq, random_seed);
-}
-
-inline void microcanonical_tpq(const GPUOperator& op,
-                               int N, int max_iter, int num_samples,
-                               int temp_interval,
-                               std::vector<double>& eigenvalues,
-                               std::string dir = "",
-                               double large_value = 1e5,
-                               bool continue_quenching = false,
-                               int continue_sample = 0,
-                               double continue_beta = 0.0,
-                               bool save_thermal_states = false,
-                               double target_beta = 1000.0,
-                               int num_measure_points = 20,
-                               double measure_beta_min = 1.0,
-                               double measure_beta_max = 1000.0)
-{
-    GPUEDWrapper::runGPUMicrocanonicalTPQ(
-        detail::gpu_handle(op), N, max_iter, num_samples, temp_interval,
-        eigenvalues, std::move(dir), large_value, continue_quenching,
-        continue_sample, continue_beta, save_thermal_states, target_beta,
-        num_measure_points, measure_beta_min, measure_beta_max);
-}
-
-inline void microcanonical_tpq(const ed::matvec::MatVecOperator& op,
-                               int N, int max_iter, int num_samples,
-                               int temp_interval,
-                               std::vector<double>& eigenvalues,
-                               std::string dir = "",
-                               double large_value = 1e5,
-                               bool continue_quenching = false,
-                               int continue_sample = 0,
-                               double continue_beta = 0.0,
-                               bool save_thermal_states = false,
-                               double target_beta = 1000.0,
-                               int num_measure_points = 20,
-                               double measure_beta_min = 1.0,
-                               double measure_beta_max = 1000.0)
-{
-    microcanonical_tpq(detail::require_gpu_operator(op, "microcanonical_tpq"),
-                       N, max_iter, num_samples, temp_interval, eigenvalues,
-                       std::move(dir), large_value, continue_quenching,
-                       continue_sample, continue_beta, save_thermal_states,
-                       target_beta, num_measure_points, measure_beta_min,
-                       measure_beta_max);
-}
-
-inline void canonical_tpq(const GPUOperator& op,
-                          int N, double beta_max, int num_samples,
-                          int temp_interval, std::vector<double>& energies,
-                          std::string dir = "",
-                          double delta_beta = 0.1, int taylor_order = 50,
-                          int num_measure_points = 20,
-                          double measure_beta_min = 1.0,
-                          double measure_beta_max = 1000.0)
-{
-    GPUEDWrapper::runGPUCanonicalTPQ(
-        detail::gpu_handle(op), N, beta_max, num_samples, temp_interval,
-        energies, std::move(dir), delta_beta, taylor_order,
-        num_measure_points, measure_beta_min, measure_beta_max);
-}
-
-inline void canonical_tpq(const ed::matvec::MatVecOperator& op,
-                          int N, double beta_max, int num_samples,
-                          int temp_interval, std::vector<double>& energies,
-                          std::string dir = "",
-                          double delta_beta = 0.1, int taylor_order = 50,
-                          int num_measure_points = 20,
-                          double measure_beta_min = 1.0,
-                          double measure_beta_max = 1000.0)
-{
-    canonical_tpq(detail::require_gpu_operator(op, "canonical_tpq"),
-                  N, beta_max, num_samples, temp_interval, energies,
-                  std::move(dir), delta_beta, taylor_order,
-                  num_measure_points, measure_beta_min, measure_beta_max);
-}
+// The `block_lanczos`, `krylov_schur`, `full_diagonalization`, `ftlm`,
+// `microcanonical_tpq`, and `canonical_tpq` Phase-4-GPU forwarders that
+// used to live here were retired in the minimalist-architecture rev
+// (May 2026): only the `lanczos` pair was ever called (from
+// test_cpu_gpu_equivalence.cpp; the rest were API scaffolding for an
+// unused unified surface). All remaining call sites go through
+// `GPUEDWrapper::runGPU*` directly from `ed_wrapper.h` /
+// `ed_wrapper_streaming.h`. To re-introduce one, write a one-line
+// forwarder following the `lanczos` template above.
 
 }  // namespace ed::matvec::gpu
 

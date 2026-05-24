@@ -1,9 +1,9 @@
 """qed: Python interface to the C++ exact-diagonalization engine.
 
 This package wraps the matrix-free C++ ``Operator`` / ``FixedSzOperator`` and
-the family of solvers (full diagonalization, every Lanczos / Krylov / Davidson
-variant, ARPACK, FTLM/LTLM/Hybrid, mTPQ/cTPQ, GPU per-sector dispatch under
-streaming symmetry, symmetrised block ED) through a thin pybind11 layer.
+the family of solvers (full diagonalization, Lanczos, Block Lanczos,
+Krylov-Schur, FTLM/LTLM, mTPQ/cTPQ, KPM_DOS, GPU per-sector dispatch under
+streaming symmetry) through a thin pybind11 layer.
 
 The package has **two stress-free entry points** plus three layers of
 deeper access for advanced use:
@@ -32,12 +32,10 @@ deeper access for advanced use:
 
   2. **Dispatcher-level** ``qed.exact_diagonalization_core(op, method,
      params)`` (and the directory + streaming-symmetry siblings). One Python
-     function reaches every solver the ``./ED`` CLI knows about, including
-     ARPACK, BLOCK_LANCZOS, KRYLOV_SCHUR, BLOCK_KRYLOV_SCHUR, DAVIDSON,
-     LOBPCG, CHEBYSHEV_FILTERED, SHIFT_INVERT[_ROBUST], IRL/TRL, BICG,
-     FULL/SCALAPACK, mTPQ/cTPQ, FTLM/LTLM/HYBRID. Pass a GPU method to the
-     streaming or directory dispatchers and each sector / matrix-vector goes
-     to a CUDA kernel (when the build was made with ``WITH_CUDA=ON``; check
+     function reaches every solver the ``./ED`` CLI knows about:
+     LANCZOS, BLOCK_LANCZOS, KRYLOV_SCHUR, FULL, mTPQ, cTPQ, FTLM, LTLM,
+     KPM_DOS. Set ``params.use_gpu = True`` on a CUDA-enabled build to
+     route each sector / matrix-vector through the CUDA kernels (check
      :func:`has_cuda_build`).
 
   3. **Library-level submodules**: ``qed.input`` (lattice + Hamiltonian
@@ -102,12 +100,10 @@ from ._core import (
     compute_thermodynamics_from_spectrum,
     finite_temperature_lanczos,
     low_temperature_lanczos,
-    hybrid_thermal_method,
     FTLMParameters,
     LTLMParameters,
-    HybridThermalParameters,
-    # Phase 5 (Apr 2026): high-level dispatcher + symmetry setter +
-    # streaming/directory dispatchers + build introspection.
+    # High-level dispatcher + symmetry setter + streaming/directory
+    # dispatchers + build introspection.
     DiagonalizationMethod,
     HamiltonianFileFormat,
     EDParameters,
@@ -119,8 +115,6 @@ from ._core import (
     exact_diagonalization_streaming_symmetry_fixed_sz,
     has_cuda_build,
     has_mpi_build,
-    has_scalapack_build,
-    canonicalize_method,
 )
 
 from . import dssf  # high-level DSSF observable-pair builder + ./ED dssf runner (P2.8)
@@ -142,6 +136,91 @@ from .workflow import (  # noqa: E402  (top-level re-exports)
     load_mpi_eigenvectors,
     solver_device_support,
 )
+from . import thermal as _thermal_module  # matvec-unification audit: one canonical finite-T entry point
+from .thermal import thermal, ThermalResult, ThermalSectorEntry  # noqa: E402
+
+# ---------------------------------------------------------------------------
+# Minimalist ED Collapse (May 2026) — canonical Python entry points.
+# ---------------------------------------------------------------------------
+# The collapse renames `qed.diag` -> `qed.solve` and adds `qed.spectral`
+# alongside the existing `qed.thermal`. The legacy names remain available
+# as thin deprecation aliases so existing notebooks continue to work.
+#
+#   * qed.solve(H, ...)               <- preferred (was qed.diag)
+#   * qed.thermal(directory, ...)     <- unchanged (audit follow-up)
+#   * qed.spectral(directory, ...)    <- preferred (was qed.dssf.compute)
+#
+# See docs/MIGRATION.md for the full porting guide.
+# ---------------------------------------------------------------------------
+import warnings as _warnings  # noqa: E402
+
+
+def solve(*args, **kwargs):
+    """Canonical ground-state / eigenvalue entry point.
+
+    This is the Minimalist ED Collapse name for what used to be
+    :func:`qed.diag`. Same signature, same return type; new code MUST
+    use this name. ``qed.diag`` is preserved as a deprecation alias.
+    """
+    return diag(*args, **kwargs)
+
+
+def spectral(*args, **kwargs):
+    """Canonical spectral-function / DSSF entry point.
+
+    Thin alias for :func:`qed.dssf.compute`. New code MUST use this name;
+    ``qed.dssf.compute`` is preserved as a deprecation alias.
+    """
+    return dssf.compute(*args, **kwargs)
+
+
+def _deprecated_alias(new_name, fn):
+    """Wrap ``fn`` so calling it emits a ``DeprecationWarning`` pointing
+    at ``new_name``. Returns a function with the same signature."""
+
+    def _wrapper(*args, **kwargs):
+        _warnings.warn(
+            f"{fn.__name__}() is deprecated; use qed.{new_name}() instead. "
+            f"See docs/MIGRATION.md.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return fn(*args, **kwargs)
+
+    _wrapper.__name__ = fn.__name__
+    _wrapper.__qualname__ = fn.__qualname__
+    _wrapper.__doc__ = (
+        f"Deprecated. Use :func:`qed.{new_name}` instead.\n\n"
+        + (fn.__doc__ or "")
+    )
+    return _wrapper
+
+
+# Deprecation aliases. These do NOT remove the underlying name; they only
+# wrap the user-facing call site so notebooks get a one-time warning the
+# first time they import-and-call. The underlying C++/Python implementation
+# is unchanged.
+#
+# NOTE: we deliberately do not wrap `lanczos` / `finite_temperature_lanczos`
+# at the package level because they are also used as method tags (e.g.
+# `solver='lanczos'` strings) — the warnings would fire for completely
+# benign re-imports inside `workflow.py`. The deprecation lives in the
+# module docstring + MIGRATION.md instead.
+#
+# ED Cleanup Sweep Phase 3 (May 2026): wrap the legacy
+# `exact_diagonalization_*` family with deprecation aliases pointing
+# to the canonical `qed.solve` / `qed._core.workflows_*` surface.
+# The legacy names continue to work; Phase 5 collapses
+# `dispatcher_bindings.cpp` to alias-forwarders into `workflows_*`,
+# at which point the deprecation message becomes load-bearing.
+exact_diagonalization_core = _deprecated_alias(
+    "solve", exact_diagonalization_core)
+exact_diagonalization_from_directory = _deprecated_alias(
+    "solve", exact_diagonalization_from_directory)
+exact_diagonalization_streaming_symmetry = _deprecated_alias(
+    "solve", exact_diagonalization_streaming_symmetry)
+exact_diagonalization_streaming_symmetry_fixed_sz = _deprecated_alias(
+    "solve", exact_diagonalization_streaming_symmetry_fixed_sz)
 from . import feasibility  # Phase 9 / Layer 6: pre-flight planner
 from .feasibility import (  # noqa: E402
     BasisChoice,
@@ -170,11 +249,9 @@ __all__ = [
     "compute_thermodynamics_from_spectrum",
     "finite_temperature_lanczos",
     "low_temperature_lanczos",
-    "hybrid_thermal_method",
     "FTLMParameters",
     "LTLMParameters",
-    "HybridThermalParameters",
-    # Phase 5 dispatcher surface
+    # Dispatcher surface
     "DiagonalizationMethod",
     "HamiltonianFileFormat",
     "EDParameters",
@@ -186,8 +263,13 @@ __all__ = [
     "exact_diagonalization_streaming_symmetry_fixed_sz",
     "has_cuda_build",
     "has_mpi_build",
-    "has_scalapack_build",
-    "canonicalize_method",
+    # Audit follow-up: one canonical finite-T entry point
+    "thermal",
+    "ThermalResult",
+    "ThermalSectorEntry",
+    # Minimalist ED Collapse (May 2026) — canonical entry points
+    "solve",
+    "spectral",
     # Submodules
     "dssf",
     "auto_tune",

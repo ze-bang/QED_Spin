@@ -7,12 +7,13 @@
 // stay buildable as Phase 2/3 progress.
 // =============================================================================
 
+#include <ed/core/fixed_sz_operator.h>
+#include <ed/core/operator.h>
 #include <ed/matvec/backend.h>
 #include <ed/matvec/backends/cpu_backend.h>
 #include <ed/matvec/basis_policy.h>
 #include <ed/matvec/matvec.h>
 #include <ed/matvec/memory_space.h>
-#include <ed/matvec/operator_adapter.h>
 #include <ed/matvec/term_kernels.h>
 
 namespace ed::matvec::detail {
@@ -29,9 +30,6 @@ namespace ed::matvec::detail {
     (void)mv2.dim();
     (void)mv1.memory_space();
     (void)mv2.description();
-    // OperatorRef shim still exists for unique_ptr handoff scenarios.
-    auto owned = adapt(op);
-    (void)owned->dim();
     (void)default_cpu_backend().memory_space();
 
     // Force one instantiation of the unified term kernel against each
@@ -40,12 +38,16 @@ namespace ed::matvec::detail {
     // resolves cleanly against the Operator SoA term structs. This
     // catches divergence between the kernel's expected schema and the
     // Operator class as Phase 2/3 progress.
-    const auto& diag1 = op.diag_one_body_;
-    const auto& off1  = op.offdiag_one_body_;
-    const auto& diag2 = op.diag_two_body_;
-    const auto& mix2  = op.mixed_two_body_;
-    const auto& off2  = op.offdiag_two_body_;
-    const auto& tri   = op.three_body_data_;
+    // SoA bins live on ``terms_`` after the May-2026 term-storage
+    // unification; rebuild the cache if stale so the references below
+    // see a consistent snapshot.
+    op.commitPendingTransforms();
+    const auto& diag1 = op.terms_.diag_one_body;
+    const auto& off1  = op.terms_.offdiag_one_body;
+    const auto& diag2 = op.terms_.diag_two_body;
+    const auto& mix2  = op.terms_.mixed_two_body;
+    const auto& off2  = op.terms_.offdiag_two_body;
+    const auto& tri   = op.terms_.three_body;
 
     // Full basis, complex.
     basis::FullBasisPolicy full = basis::make_full_basis(op.getNumBits());

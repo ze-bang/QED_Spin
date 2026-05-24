@@ -113,10 +113,22 @@ public:
             num_sectors_ds.read(&num_sectors, H5::PredType::NATIVE_UINT64);
             num_sectors_ds.close();
             
-            // Read sector dimensions
+            // Read sector dimensions and cross-check the dataset extent against
+            // the `num_sectors` attribute. A mismatched / hand-edited file
+            // would otherwise silently feed wrong-sized reads to symmetry
+            // workflows.
             H5::DataSet dataset = file.openDataSet("/metadata/sector_dimensions");
             H5::DataSpace dataspace = dataset.getSpace();
-            
+            hsize_t ds_dims[1] = {0};
+            if (dataspace.getSimpleExtentNdims() != 1 ||
+                dataspace.getSimpleExtentDims(ds_dims) != 1 ||
+                ds_dims[0] != num_sectors) {
+                throw std::runtime_error(
+                    "loadSectorDimensions: /metadata/num_sectors=" +
+                    std::to_string(num_sectors) +
+                    " disagrees with /metadata/sector_dimensions extent=" +
+                    std::to_string(ds_dims[0]));
+            }
             std::vector<uint64_t> dimensions(num_sectors);
             dataset.read(dimensions.data(), H5::PredType::NATIVE_UINT64);
             dataset.close();
@@ -263,8 +275,17 @@ public:
             std::vector<SparseElement> data(nnz);
             dataset.read(data.data(), sparse_vec_type);
             
-            // Fill result vector
+            // Defensive bounds check: a corrupt or hand-edited file could carry
+            // an `index >= dimension`, which would heap-overrun the dense `vec`.
+            // Fail loud rather than silently scribble past the end.
             for (size_t i = 0; i < nnz; ++i) {
+                if (data[i].index >= dimension) {
+                    throw std::runtime_error(
+                        "loadBasisVector: sparse element index " +
+                        std::to_string(data[i].index) +
+                        " is out of range for dimension " +
+                        std::to_string(dimension) + " (dataset " + dataset_name + ")");
+                }
                 vec[data[i].index] = Complex(data[i].real, data[i].imag);
             }
             

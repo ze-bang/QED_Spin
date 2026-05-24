@@ -91,13 +91,21 @@ def _check_level(level: str) -> Level:
 def estimate_bandwidth(operator, *, fallback: float = 4.0) -> float:
     """Cheap upper-bound estimate of the spectral bandwidth ``E_max - E_min``.
 
-    Uses Gershgorin-style summation of the operator's per-term coefficient
-    moduli scaled by ``num_sites``. For an Operator with ``len(transform_data_)``
-    accessible (the common case for the C++ ``Operator`` Python bindings)
-    we sum |c_t| · num_sites; otherwise we return ``fallback * num_sites``.
+    Walks the bound ``Operator``'s typed term iterators
+    (``iter_one_body_terms`` / ``iter_two_body_terms`` /
+    ``iter_three_body_terms``) and sums the moduli of every coefficient.
+    For any object that does not expose those iterators (e.g. a non-QED
+    operator-shaped duck type) we fall back to ``fallback * num_sites``.
 
     Conservative — the true bandwidth is typically 2–4× smaller, so the
     auto-tuned ω-window will always cover the spectrum.
+
+    Note: the previous version probed the private C++ attributes
+    ``transform_data_`` / ``three_body_data_`` which pybind never exposes,
+    so the function silently fell back to ``4 * num_sites`` for every
+    bound ``Operator``. The DSSF auto-tuner then chose η / ω-window /
+    Krylov against a bandwidth that ignored every coefficient. The
+    typed iterators are the supported surface.
     """
     try:
         n = int(operator.num_sites)
@@ -106,20 +114,32 @@ def estimate_bandwidth(operator, *, fallback: float = 4.0) -> float:
 
     total_coeff = 0.0
     seen_any = False
-    for attr in ("transform_data_", "three_body_data_"):
-        try:
-            terms = getattr(operator, attr)
-        except AttributeError:
+    # The bound Operator exposes (op_type, site, coeff) tuples for one-body,
+    # (op_type_1, site_1, op_type_2, site_2, coeff) for two-body, and
+    # (...six tags..., coeff) for three-body. We only care about |coeff|.
+    for iter_name in (
+        "iter_one_body_terms",
+        "iter_two_body_terms",
+        "iter_three_body_terms",
+    ):
+        it = getattr(operator, iter_name, None)
+        if it is None:
             continue
+        try:
+            terms = it()
+        except TypeError:
+            terms = it
         for t in terms or []:
             try:
-                total_coeff += abs(complex(t.coefficient))
+                coeff = t[-1]  # coefficient is always the last tuple element
+                total_coeff += abs(complex(coeff))
                 seen_any = True
-            except (AttributeError, TypeError, ValueError):
+            except (TypeError, ValueError, IndexError):
                 continue
     if not seen_any:
         return float(fallback) * n
-    # 2 × |Σ c| per site is a safe upper bound on the half-bandwidth.
+    # Each |coeff| acts on the full Hilbert space, so 2 × |Σ c| is a
+    # safe Gershgorin-style upper bound on the half-bandwidth.
     return 2.0 * total_coeff
 
 
@@ -390,10 +410,8 @@ __all__ = [
     "pick_device",
     "pick_solver",
     "pick_max_iterations",
-    "pick_max_subspace",
     "pick_block_size",
     "pick_tolerance",
-    "pick_arpack_ncv",
     "pick_ftlm_krylov_dim",
     "pick_ltlm_krylov_dim",
     "pick_tpq_taylor_order",
@@ -438,18 +456,13 @@ _TOLERANCE = {
     "aggressive":   1e-12,
 }
 
-# Lanczos / Krylov-Schur subspace bounds (per requested eigenvalue).
-# Each level: (max_iter_floor, max_iter_per_eig, max_sub_floor,
-# max_sub_per_eig). Used by pick_max_iterations / pick_max_subspace.
+# Lanczos / Krylov-Schur outer-iteration bounds (per requested eigenvalue).
+# Each level: (max_iter_floor, max_iter_per_eig). Used by pick_max_iterations.
 _KRYLOV_BOUNDS = {
-    "conservative": (150,  6, 60,  3),
-    "balanced":     (200,  8, 80,  4),
-    "aggressive":   (400, 16, 160, 8),
+    "conservative": (150,  6),
+    "balanced":     (200,  8),
+    "aggressive":   (400, 16),
 }
-
-# ARPACK ncv heuristic: ARPACK recommends 2·k + 1, but for thick-restart
-# Lanczos / Krylov-Schur 4·k typically converges in fewer restarts.
-_ARPACK_NCV_FACTOR = {"conservative": 2, "balanced": 4, "aggressive": 6}
 
 # FTLM / LTLM Krylov dim. Larger M reduces statistical error in
 # ⟨e^{-βH}⟩_R but costs O(M) reorthogonalisations per random vector.
@@ -494,26 +507,15 @@ def pick_max_iterations(num_eigenvalues: int, sector_dim: int,
                         *, level: Level = "balanced") -> int:
     """Krylov outer-iteration cap. Floor + per-eig term, capped at D-1."""
     level = _check_level(level)
-    floor, per_eig, _, _ = _KRYLOV_BOUNDS[level]
+    floor, per_eig = _KRYLOV_BOUNDS[level]
     target = max(floor, per_eig * max(1, num_eigenvalues) + 80)
     if sector_dim > 1:
         target = min(target, max(1, sector_dim - 1))
     return int(target)
 
 
-def pick_max_subspace(num_eigenvalues: int, sector_dim: int,
-                      *, level: Level = "balanced") -> int:
-    """Krylov subspace dim. Floor + per-eig term, capped at D-1."""
-    level = _check_level(level)
-    _, _, floor, per_eig = _KRYLOV_BOUNDS[level]
-    target = max(floor, per_eig * max(1, num_eigenvalues) + 40)
-    if sector_dim > 1:
-        target = min(target, max(1, sector_dim - 1))
-    return int(target)
-
-
 def pick_block_size(num_eigenvalues: int, *, level: Level = "balanced") -> int:
-    """Block size for BLOCK_LANCZOS / BLOCK_KRYLOV_SCHUR."""
+    """Block size for BLOCK_LANCZOS."""
     _ = _check_level(level)
     return max(1, min(num_eigenvalues, 4))
 
@@ -521,14 +523,6 @@ def pick_block_size(num_eigenvalues: int, *, level: Level = "balanced") -> int:
 def pick_tolerance(*, level: Level = "balanced") -> float:
     """Convergence tolerance for eigenvalue solvers."""
     return _TOLERANCE[_check_level(level)]
-
-
-def pick_arpack_ncv(num_eigenvalues: int,
-                    *, level: Level = "balanced") -> int:
-    """ARPACK Lanczos vector count. 2k+1 is the ARPACK floor; we
-    over-shoot by `_ARPACK_NCV_FACTOR[level]` for fewer restarts."""
-    factor = _ARPACK_NCV_FACTOR[_check_level(level)]
-    return max(2 * num_eigenvalues + 1, factor * num_eigenvalues)
 
 
 def pick_ftlm_krylov_dim(*, level: Level = "balanced") -> int:
@@ -602,9 +596,7 @@ class TunedDiagKnobs:
     device: str
     tolerance: float
     max_iterations: int
-    max_subspace: int
     block_size: int
-    arpack_ncv: int
     ftlm_krylov_dim: int
     ltlm_krylov_dim: int
     ltlm_ground_krylov: int
@@ -627,20 +619,16 @@ class TunedDiagKnobs:
         s = self.solver.upper()
         if "BLOCK" in s:
             d["block_size"] = self.block_size
-        if "ARPACK" in s:
-            d["arpack_ncv"] = self.arpack_ncv
-        if s.startswith("FTLM") or s == "HYBRID":
+        if s.startswith("FTLM"):
             d["ftlm_krylov_dim"] = self.ftlm_krylov_dim
-        if s.startswith("LTLM") or s == "HYBRID":
+        if s.startswith("LTLM"):
             d["ltlm_krylov_dim"] = self.ltlm_krylov_dim
             d["ltlm_ground_krylov"] = self.ltlm_ground_krylov
         if "TPQ" in s:
             d["tpq_taylor_order"] = self.tpq_taylor_order
             d["tpq_delta_beta"]   = self.tpq_delta_beta
-        if any(t in s for t in ("FTLM", "LTLM", "TPQ", "HYBRID")):
+        if any(t in s for t in ("FTLM", "LTLM", "TPQ")):
             d["num_samples"] = self.num_thermal_samples
-        else:
-            d["max_subspace"] = self.max_subspace
         return d
 
 
@@ -658,9 +646,7 @@ def tune_diag(
     # Per-knob overrides — anything provided wins over the heuristic.
     tolerance: Optional[float] = None,
     max_iterations: Optional[int] = None,
-    max_subspace: Optional[int] = None,
     block_size: Optional[int] = None,
-    arpack_ncv: Optional[int] = None,
     ftlm_krylov_dim: Optional[int] = None,
     ltlm_krylov_dim: Optional[int] = None,
     ltlm_ground_krylov: Optional[int] = None,
@@ -673,7 +659,7 @@ def tune_diag(
     Sister of :func:`tune_dssf`. Used by :func:`qed.diag` to fill in the
     family-specific fields of :class:`EDParameters` that the legacy
     ``_make_params`` path does not handle (FTLM / LTLM Krylov dim,
-    ARPACK ncv, mTPQ Taylor order + delta_beta, thermal sample count).
+    mTPQ Taylor order + delta_beta, thermal sample count).
 
     Anything left as ``None`` is auto-selected from
     (``operator`` / ``sector_dim`` / ``num_eigenvalues``) and the
@@ -712,13 +698,8 @@ def tune_diag(
         max_iterations=int(max_iterations if max_iterations is not None
                            else pick_max_iterations(num_eigenvalues,
                                                     sector_dim, level=level)),
-        max_subspace=int(max_subspace if max_subspace is not None
-                         else pick_max_subspace(num_eigenvalues,
-                                                sector_dim, level=level)),
         block_size=int(block_size if block_size is not None
                        else pick_block_size(num_eigenvalues, level=level)),
-        arpack_ncv=int(arpack_ncv if arpack_ncv is not None
-                       else pick_arpack_ncv(num_eigenvalues, level=level)),
         ftlm_krylov_dim=int(ftlm_krylov_dim if ftlm_krylov_dim is not None
                             else pick_ftlm_krylov_dim(level=level)),
         ltlm_krylov_dim=int(ltlm_krylov_dim if ltlm_krylov_dim is not None

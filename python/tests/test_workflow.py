@@ -308,23 +308,21 @@ def test_diag_rejects_unknown_solver_name():
         qed.diag(H, solver="MAGIC_NEW_SOLVER", verbose=False)
 
 
-def test_diag_results_match_explicit_dispatcher_call():
-    """Top-level ``qed.diag`` must agree with the low-level
-    ``exact_diagonalization_core`` it routes to (no off-by-one in
-    parameter setup)."""
+def test_diag_results_match_explicit_workflows_solve_call():
+    """Top-level ``qed.diag`` must agree with the canonical
+    ``_core.workflows_solve`` it routes to (no off-by-one in
+    parameter setup). Migrated from the legacy
+    ``exact_diagonalization_core`` reference call in ED Cleanup Sweep
+    Phase 3 (May 2026)."""
     H = _heisenberg_ring()
     high = qed.diag(H, num_eigenvalues=4, verbose=False)
 
-    p = qed.EDParameters()
-    p.num_sites = N_SITES
-    p.num_eigenvalues = 4
-    p.tolerance = 1e-10
-    p.compute_eigenvectors = False
-    p.max_iterations = 200
-    p.max_subspace = 80
-    low = qed.exact_diagonalization_core(
-        H, qed.DiagonalizationMethod.FULL, p
-    )
+    opts = qed._core.SolveOptions()
+    opts.num_eigs   = 4
+    opts.tolerance  = 1e-10
+    opts.max_iter   = 200
+    opts.method     = qed._core.SolveMethod.FullDiag
+    low = qed._core.workflows_solve(H, opts)
     np.testing.assert_allclose(
         sorted(high.eigenvalues)[:4], sorted(low.eigenvalues)[:4], atol=1e-9
     )
@@ -742,20 +740,37 @@ class TestDeviceMatrix:
             )
 
     def test_gpu_routes_through_directory_dispatcher(self, H, monkeypatch, tmp_path):
-        """When WITH_CUDA=ON, qed.diag must NOT call exact_diagonalization_core
-        for device='gpu' (it throws on GPU methods); it must take the
-        temp-dir + from_directory branch instead.
+        """When WITH_CUDA=ON, qed.diag must NOT call the in-process
+        single-Operator solver for device='gpu' (the in-process path
+        only knows host pointers); it must take the temp-dir +
+        from_directory branch instead, which can stand up a GPUOperator
+        from the on-disk InterAll deck.
 
-        We monkeypatch has_cuda_build to True and intercept both
-        dispatchers; the temp-dir one MUST be the one that fires.
+        We monkeypatch has_cuda_build to True and intercept the two
+        in-process dispatchers (the legacy `exact_diagonalization_core`
+        and its post-Phase-5 alias target `workflows_solve`) plus the
+        directory path; the temp-dir one MUST be the one that fires.
+        Migrated to also stub `workflows_solve` in the ED Cleanup Sweep
+        Phase 3 (May 2026); both stub names guard the routing invariant
+        across the Phase-5 alias collapse.
         """
         monkeypatch.chdir(tmp_path)
         from qed import workflow as wf
 
-        called = {"core": 0, "from_directory": 0}
+        called = {"core": 0, "workflows_solve": 0, "from_directory": 0}
 
         def fake_core(*a, **k):
             called["core"] += 1
+            class _R:
+                eigenvalues = [0.0]
+                eigenvector_paths = []
+                ground_state_filename = ""
+                thermodynamic_filename = ""
+                spectrum_filename = ""
+            return _R()
+
+        def fake_workflows_solve(*a, **k):
+            called["workflows_solve"] += 1
             class _R:
                 eigenvalues = [0.0]
                 eigenvector_paths = []
@@ -777,13 +792,20 @@ class TestDeviceMatrix:
         monkeypatch.setattr(wf, "has_cuda_build", lambda: True)
         monkeypatch.setattr(wf, "exact_diagonalization_core", fake_core)
         monkeypatch.setattr(wf, "exact_diagonalization_from_directory", fake_from_directory)
+        # `workflows_solve` is not yet imported into `qed.workflow`; stub
+        # it on the binding module directly so the test catches the
+        # routing once Phase 5 collapses `exact_diagonalization_core`
+        # into an alias for it.
+        from qed import _core as _qcore
+        monkeypatch.setattr(_qcore, "workflows_solve", fake_workflows_solve)
 
         # plan=False bypasses the pre-flight planner (which would correctly
         # refuse to dispatch to GPU on a no-GPU CI host); we're testing
         # dispatch routing here, not resource accounting.
         qed.diag(H, solver="LANCZOS", device="gpu",
                         num_eigenvalues=1, verbose=False, plan=False)
-        assert called == {"core": 0, "from_directory": 1}, (
+        assert called == {"core": 0, "workflows_solve": 0,
+                          "from_directory": 1}, (
             f"GPU path hit the wrong dispatcher: {called}"
         )
 

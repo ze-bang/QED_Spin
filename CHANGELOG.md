@@ -7,6 +7,2596 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### ED cleanup sweep — phased deletion of legacy dispatcher / auto-pilot surface (May 2026, days 15-16)
+
+The Minimalist ED Collapse landed the new `ed::workflows::solve / thermal /
+spectral` surface on top of five `<Backend>`-templated kernels. The legacy
+surface was kept buildable to avoid breaking the tree. This sweep retires
+the parts that are now genuinely unreachable, lands the FTLM/LTLM/KPM-DOS
+orchestrator wiring that Phase 6 needed, and documents the remaining
+phases whose deletions are blocked by the CLI / GPU-wrapper migrations
+still in flight.
+
+#### Phase 0 — Dead-code subtraction (~1.2 K LOC out, zero migration)
+
+* Deleted `include/ed/gpu/gpu_dynamics.cuh` + `src/solvers/gpu/gpu_dynamics.cu`
+  (`GPUDynamicsSolver` had zero callers).
+* Deleted `include/ed/core/ed_dispatch_symmetry.h` (55 LOC, 0 callers).
+* Removed dead methods from `GPUEDWrapper`:
+  `createGPUOperatorFromCPU`, `gpuMatVec`, `shouldUseGPU`,
+  `estimateGPUMemory`.
+* Removed dead methods from GPU solvers: `GPULanczos::runWithStartVector`,
+  `GPUBlockLanczos::runWithStartBlock`, `setReorthStrategy`,
+  `GPUKrylovSchur::setMaxOuterIterations`.
+* Removed `#if 0` archive blocks in `src/solvers/cpu/lanczos.cpp` and
+  `src/solvers/cpu/ftlm.cpp` (git is the archive).
+* Stripped the stale ARPACK benchmark from
+  `benchmarks/bench_lanczos_ground_state.cpp` (header `arpack.h` had
+  already been removed in a prior session).
+
+#### Phase 1 — `ed::workflows::*` Python bindings
+
+* New `python/qed/_bindings/workflow_bindings.{cpp,h}` bind
+  `ed::workflows::solve / thermal / spectral` (plus `SolveOptions /
+  ThermalOptions / SpectralOptions / SolveMethod` enum, `GroundStateResult
+  / ThermalResult / SpectralResult`, `KrylovDiagnostics`, `BackendMetadata`)
+  into `qed._core.workflows_*`.
+* Wired into `python/qed/CMakeLists.txt`.
+* Smoke-tested end-to-end on a 10-site Heisenberg chain.
+
+#### Phase 2 — C++ unit-test migration off `ed::auto_pilot::*`
+
+* `tests/unit/test_auto_solve.cpp` (7 cases),
+  `tests/unit/test_auto_thermal.cpp` (4 cases),
+  `tests/unit/test_auto_dssf.cpp` (3 cases),
+  `tests/unit/test_ed_solver_matrix_e2e.cpp` (7 cases) migrated from
+  `ed::auto_pilot::*` to `ed::workflows::*`.
+* `src/orchestrator.cpp` now wires the `FullDiag` lane to the legacy
+  `full_diagonalization` function for small `dim` (≤ 2¹²); fixed the
+  `LinearOperator::bind<Backend>()` call signature to invoke the returned
+  `std::function` directly.
+
+#### Phase 3 — Python test + API migration
+
+* `python/tests/test_dispatcher.py` Lanczos / BlockLanczos / KrylovSchur
+  / FullDiag method-loop cases (plus FixedSz + FullDiag fixtures) now
+  go through `qed._core.workflows_solve`.
+* `python/tests/test_workflow.py` retains its `qed.diag` surface but
+  the GPU-routing test monkeypatches both legacy and workflows names so
+  the directory dispatcher test stays green.
+* `python/qed/__init__.py`: legacy `qed.exact_diagonalization_*` and
+  `qed._from_directory*` names are now `_deprecated_alias` wrappers that
+  emit `DeprecationWarning` and forward to `qed.solve(...)`.
+
+#### Phase 4 — Helpers landed; CLI migration deferred
+
+* `include/ed/core/select_backend.h`: added `WithMpiCudaBackend(...)`
+  helper for the distributed `--gpu` lane.
+* `include/ed/core/make_operator.h`: extended `make_operator(OperatorSpec)`
+  to cover the full Hamiltonian file matrix (`InterAll.dat`, `Trans.dat`,
+  `CounterTerm.dat`, `ThreeBodyG.dat`) and to dispatch `fixed_sz`
+  projection via `FixedSzOperator`.
+* CLI body refactor of `src/cli/workflows.cpp` (4 callsites) and
+  `src/cli/ed_distributed_main.cpp` (~18 callsites) DEFERRED to follow-up
+  PR; depends on Phase 6 distributed FTLM/TPQ kernel landings and a
+  directory-driven streaming-symmetry path on `workflows::*`.
+
+#### Phase 5 — Hard removal of auto-pilot heuristic headers (~2.5 K LOC out)
+
+* Deleted `include/ed/auto/{solve,thermal,dssf,diag_tune,dssf_tune}.h`.
+* Deleted `tests/unit/test_diag_tune.cpp` and `tests/unit/test_dssf_tune.cpp`.
+* `include/ed/core/{dispatch,ed_wrapper,ed_wrapper_streaming}.h` and the
+  full `python/qed/_bindings/dispatcher_bindings.cpp` collapse DEFERRED:
+  depends on Phase 4 (CLI migration) and Phase 6 (distributed FTLM/TPQ
+  kernel landings).
+
+#### Phase 6 — FTLM/LTLM/KPM-DOS orchestrator wiring
+
+* `src/orchestrator.cpp`: `ed::workflows::thermal` now dispatches
+  `ThermalOptions::Method::{FTLM,LTLM,KpmDos}` through the existing
+  `ed::thermal::{ftlm,ltlm,kpm_dos}_kernel<Backend>` templates instead
+  of throwing `runtime_error`.
+* `tests/unit/test_auto_thermal.cpp` "FTLM/LTLM/KpmDos lanes throw" test
+  flipped to verify the lanes now run end-to-end on a 4-site Heisenberg
+  chain with a small beta grid.
+* Distributed solver shell removal (8 headers + 8 sources + 19 tests
+  retarget + 4 example binaries + CLI) DEFERRED: ~3 K LOC of mechanical
+  retargeting depending on Phase 4 (CLI) completion.
+
+#### Phase 7 — GPU shell collapse (DEFERRED)
+
+* Blocked by Phase 4 (`src/cli/workflows.cpp` still uses
+  `GPUEDWrapper::runGPUDynamicalCorrelationMultiTemp`) and Phase 5
+  (`include/ed/core/ed_wrapper.h` still includes `GPUEDWrapper`).
+* Requires landing `tpq_kernel<CudaBackend>` and
+  `block_lanczos_kernel<CudaBackend>` facades (~1 K LOC of new code)
+  before deletion of `gpu_lanczos.cuh`, `gpu_ed_wrapper.{h,cu}`,
+  `gpu_solvers.h`.
+
+#### Phase 8 — CPU solver shell collapse (DEFERRED)
+
+* Blocked: all 12 `include/ed/solvers/*.h` headers are still referenced
+  by the kernel-shim layer (`ctpq_kernel.h` delegates to legacy
+  `TPQ.cpp::run_tpq`; `ftlm_kernel.h` delegates to
+  `finite_temperature_lanczos`; etc), by the CLI (`src/cli/workflows.cpp`),
+  by examples (01_cpp_ground_state.cpp, 02_cpp_full_spectrum.cpp,
+  03_cpp_ftlm_thermal.cpp), and by 14 unit/bench files. Cleanly
+  collapsing them needs either (a) native kernel-body implementations, or
+  (b) inverting the delegation so legacy entry points dispatch through
+  `workflows::*`. Both are >1 K LOC and depend on Phase 4 / 7.
+
+#### Phase 9 — Docs + benchmark
+
+* This CHANGELOG entry.
+* `docs/architecture/STRUCTURAL_AUDIT.md` Part VII appended with the
+  phase-by-phase LOC deltas.
+* `docs/MIGRATION.md` updated: `include/ed/auto/{solve,thermal,dssf,
+  diag_tune,dssf_tune}.h` wording changed from "scheduled for removal" to
+  "removed".
+* `docs/architecture/ARCHITECTURE.md` legacy pre-collapse picture trimmed
+  to a single paragraph + link.
+
+##### Benchmark — `bench_minimalist_collapse` (N = 6..14 Heisenberg, single rank, CPU)
+
+`benchmarks/bench_minimalist_collapse.cpp` compares the new
+`ed::workflows::solve` lane against the legacy
+`exact_diagonalization_core` lane against direct LAPACK `zheevd` full
+diagonalization. All on the same 1-D periodic Heisenberg chain.
+
+| N  | dim    | `ed::workflows::solve` (Lanczos) | Legacy `EDCore` (Lanczos) | LAPACK full diag |
+|---:|-------:|---------------------------------:|---------------------------:|-----------------:|
+| 6  | 64     | 0.160 ms                         | 0.101 ms                   | 1.43 ms          |
+| 8  | 256    | 0.253 ms                         | 0.184 ms                   | 23.6 ms          |
+| 10 | 1 024  | 0.573 ms                         | 0.416 ms                   | 332 ms           |
+| 12 | 4 096  | 2.01 ms                          | 1.36 ms                    | 8 857 ms         |
+| 14 | 16 384 | 31.0 ms                          | 3.63 ms                    | (not run)        |
+
+Two observations from the sweep:
+
+1. **Lanczos vs LAPACK crossover stays where it was**: the workflows
+   lane beats LAPACK by ~9× at N = 8 and >100× by N = 12 — same
+   asymptotic behaviour as the legacy lane.
+2. **The new lane carries a constant per-call overhead** of ~50 µs at
+   small N (visible at N = 6: 0.16 ms vs 0.10 ms) from the
+   `select_backend` dispatch + Result-struct allocation. At N = 14
+   the gap widens to ~8.5×; the regression is traced to the
+   `lanczos_kernel<CpuBackend>` reorthogonalisation policy defaulting to
+   `LocalDGKS3` (3 passes) whereas the legacy CPU Lanczos defaulted to a
+   single MGS pass. The kernel exposes the policy via
+   `lanczos_options.reorth_policy`; the orchestrator will switch to a
+   `LocalDGKS1`-equivalent default in a follow-up PR to restore parity.
+
+#### Summary of LOC subtracted in this sweep
+
+| Phase | LOC out | Status |
+|------:|--------:|--------|
+| 0 | ~1 200 | landed |
+| 1 | +400 (new bindings) | landed |
+| 2 | 0 (test rewrite) | landed |
+| 3 | 0 (test rewrite) | landed |
+| 4 | 0 (helpers landed; CLI deferred) | partial |
+| 5 | ~2 500 | partial |
+| 6 | 0 (orchestrator wiring; deletions deferred) | partial |
+| 7 | 0 | deferred |
+| 8 | 0 | deferred |
+| 9 | docs only | landed |
+| **Net this sweep** | **~3 700 LOC out** | — |
+
+The remaining ~14 K LOC of deletions (distributed solver shells, GPU
+solver shells, CPU solver shells, `ed_wrapper.h` family,
+`dispatcher_bindings.cpp` collapse) will land in a follow-up PR once the
+CLI migration (Phase 4) and GPU-kernel facades (Phase 7) are in.
+
+---
+
+### Minimalist ED Collapse — unified `ed::workflows::*` entry points (May 2026, days 13-14)
+
+The minimalist-architecture rollout collapses the entire C++ public API
+down to three top-level entry points: `ed::workflows::solve`,
+`ed::workflows::thermal`, and `ed::workflows::spectral`. Every other
+public symbol that used to take an `Operator&` (or worse, parsed files
+itself) is now either a forwarder to these three or marked for removal.
+
+#### Phase 1 — Backend BLAS-3
+
+* `include/ed/matvec/backends/backend.h` — added `gemm`, `gemv`, `trsm`,
+  `qr_thin` to the `Backend` abstract interface. These dense BLAS-3 ops
+  let block kernels stay backend-agnostic.
+* `include/ed/matvec/backends/cpu_backend.h` — implemented via LAPACKE.
+* `include/ed/matvec/backends/cuda_backend.cuh` — implemented via cuBLAS
+  / cuSOLVER (`cublasZgemm`, `cusolverDnZgeqrf` + `Zungqr`).
+* `include/ed/matvec/backends/mpi_backend.h` — implemented as local
+  dispatch (BLAS-3 ops are intrinsically per-rank in the partitioning
+  used here; communication happens via `all_reduce_sum_vec`).
+* `tests/unit/test_backend_blas3.cpp` — round-trip correctness on
+  `CpuBackend` and (under `WITH_CUDA`) `CudaBackend`.
+
+#### Phase 2 — Kernel unification
+
+* **2.1 — `LocalDGKS3` reorth policy + Lanczos resume**:
+  `include/ed/krylov/lanczos_kernel.h` gained a `ReorthPolicy::LocalDGKS3`
+  three-pass local DGKS variant (matches the legacy CPU Lanczos
+  Phase-7 reorth) and a `LanczosResumeState` struct that bridges
+  `lanczos_checkpoint.h` to the kernel. `src/solvers/cpu/lanczos.cpp::lanczos()`
+  body is now a 30-line orchestrator over the kernel.
+* **2.2 — Krylov-Schur kernel templated**:
+  `include/ed/krylov/krylov_schur_kernel.h` lifted the `CpuBackend`
+  static_assert. `src/solvers/cpu/lanczos.cpp::krylov_schur()` body is a
+  thin orchestrator; the legacy hand-rolled restart loop is preserved
+  under `#if 0` for archival.
+* **2.3 — Block-Lanczos kernel templated**:
+  `include/ed/krylov/block_lanczos_kernel.h` rewritten on top of
+  `Backend::gemm` + `Backend::qr_thin`. Delivers CPU + CUDA out of the
+  box; MPI / MPI+CUDA `TSQR` deferred (`static_assert` enforces).
+  `src/solvers/cpu/lanczos.cpp::block_lanczos()` is now an orchestrator.
+* **2.4 — TPQ kernel**:
+  `include/ed/thermal/tpq_kernel.h` is a new unified
+  `tpq_kernel<Backend>` that covers microcanonical TPQ (mTPQ) and
+  canonical Taylor TPQ (cTPQ) via per-step callbacks.
+  `include/ed/thermal/mtpq_kernel.h` and `ctpq_kernel.h` are now thin
+  facades.
+* **2.5 — Continued-fraction spectral kernel**:
+  `include/ed/observables/cf_spectral_kernel.h` wraps
+  `lanczos_kernel<Backend>(keep_basis=false)` + the existing host-side
+  `continued_fraction_spectral_function`. The CF Lanczos path in
+  `src/solvers/cpu/ftlm.cpp::compute_dynamical_correlation_state_cf` is
+  now an orchestrator over this kernel.
+
+#### Phase 3 — Concepts
+
+* **3.1 — `LinearOperator` concept**:
+  `include/ed/core/linear_operator.h` defines the `Geometry`
+  (local_dim, global_dim, local_offset, memory_space, MPI_Comm) +
+  `bind<Backend>()` polymorphic interface that operators implement.
+* **3.2 — Operator models**: `Operator`, `DistributedOperator`,
+  `DistributedSymmetryOperator`, `GPUOperator`, and
+  `StreamingSymmetryOperator::SectorView` now all inherit from
+  `LinearOperator` (transparently through `MatVecOperator`).
+* **3.3 — Unified result types**: `include/ed/core/results.h` defines
+  `GroundStateResult`, `ThermalResult`, `SpectralResult`,
+  `BackendMetadata`, `KrylovDiagnostics`. Legacy `EDResults`,
+  `DistributedLanczosResult`, etc. remain available; new entry points
+  populate the unified shape.
+
+#### Phase 4 — Orchestrators
+
+* **4.1 — `select_backend`**: `include/ed/core/select_backend.h`
+  implements the runtime decision logic (CUDA available? MPI ranks > 1?
+  GPU memory fits?) and returns a `std::variant<CpuBackend, CudaBackend,
+  MpiBackend, MpiCudaBackend*>` for `std::visit` dispatch. Respects the
+  operator's declared `memory_space()` to avoid host/device mismatches.
+* **4.2 — Workflow orchestrators**:
+  `include/ed/orchestrator.h` + `src/orchestrator.cpp` deliver
+  `ed::workflows::solve(op, opts) -> GroundStateResult`,
+  `ed::workflows::thermal(op, opts) -> ThermalResult`,
+  `ed::workflows::spectral(op, observables, opts) -> SpectralResult`.
+  Each orchestrator uses `select_backend` + `std::visit` to dispatch
+  through the new kernel family. Default heuristics for
+  `SolveMethod::Auto` (Lanczos / Krylov-Schur / Block-Lanczos /
+  FullDiag) live in one place.
+* **4.3 — `make_operator(OperatorSpec)` factory**:
+  `include/ed/core/make_operator.h` exposes a unified entry point that
+  consumes either `FilePaths`, `DirectoryPath`, or an `InMemoryOperator`
+  (`std::variant`-based) and returns a `std::unique_ptr<Operator>`.
+  This collapses the old
+  `exact_diagonalization_from_files / _from_directory / _streaming_symmetry*`
+  entry surface to one.
+
+#### Phase 5 — Legacy entry-point soft-break
+
+The plan called for hard deletion of the legacy surface. In practice the
+in-tree call graph (CLI binary, Python binding, ~30 unit/integration
+tests) still depends on `ed::auto_pilot::*`, `ed_dispatch::*`, and the
+`exact_diagonalization_*` family, so a literal `rm -rf` would leave the
+tree non-buildable. The collapse landed as a **soft hard-break** in this
+release:
+
+* Top-of-file deprecation notices added to `ed/core/dispatch.h`,
+  `ed/core/ed_wrapper.h`, `ed/auto/solve.h`, `ed/auto/thermal.h`,
+  `ed/auto/dssf.h` documenting the `ed::workflows::*` migration path.
+* CHANGELOG and `docs/MIGRATION.md` (new) explain how to port C++ and
+  Python callers; in-tree migration to be completed by follow-up PRs.
+
+#### Phase 6 — Python bindings
+
+* `python/qed/__init__.py` and the pybind11 binding gained
+  `qed.solve / qed.thermal / qed.spectral` as the canonical entry
+  points. `qed.diag`, `qed.dssf.compute`, `qed.finite_temperature_lanczos`,
+  and `qed.lanczos` are preserved as deprecation aliases routed through
+  the new entry points so existing notebooks continue to run.
+
+#### Phase 7 — Tests + docs
+
+* `tests/unit/test_backend_blas3.cpp` — `gemm`, `qr_thin` round-trip.
+* `tests/unit/test_orchestrator.cpp` — small Heisenberg-chain smoke
+  through `ed::workflows::solve / thermal / spectral`.
+* `tests/unit/test_kernel_facades.cpp` — extended with
+  `krylov_schur_kernel<CpuBackend>` and `tpq_kernel<CpuBackend>`
+  facade tests.
+* `docs/architecture/STRUCTURAL_AUDIT.md` Part VI ("Minimalist
+  collapse") summarises the new architecture.
+
+### Krylov-unification gap-fill — fill every remaining Krylov-kernel deployment gap (May 2026, days 11-12)
+
+The structural audit shipped in Part IV of `docs/architecture/STRUCTURAL_AUDIT.md`
+identified the remaining Krylov-kernel unification gaps. This rollout closes
+them across all four (CPU / GPU / CPU+MPI / GPU+MPI) deployment lanes:
+
+#### Phase 1 — `CudaBackend` perf foundations
+
+* `include/ed/matvec/backends/cuda_backend.cuh` — overrode `dot_many` and
+  `axpy_many` with a single `cublasZgemv` call over a contiguous device
+  staging buffer that is incrementally grown with fingerprinted cache
+  hits. Replaces M sequential BLAS-1 round-trips with one BLAS-2 call;
+  ~600-1000 us latency saved per CGS2 pass at M=100. Added pool-backed
+  allocator via `cudaMemPool_t` + `cudaMallocFromPoolAsync` (release
+  threshold `UINT64_MAX` so allocations persist across runs). Replaced
+  `scale + axpy` with a fused `cublasZgeam`-based `axpby` override.
+* `tests/unit/test_cuda_backend.cpp` — new cases for `dot_many` /
+  `axpy_many` correctness vs sequential reference; pool churn smoke
+  test; fused `axpby` agreement check.
+
+#### Phase 2 — Single-GPU consumer migrations
+
+* `src/solvers/gpu/gpu_ftlm.cu` — `buildLanczosTridiagonalFromVector` and
+  `buildLanczosTridiagonalWithBasis` are now thin shims over a new
+  `run_ftlm_lanczos_kernel_facade` (in `gpu_lanczos_kernel_facade.cu`)
+  that wraps `lanczos_kernel<CudaBackend>` directly. `cudaFree` calls
+  for pool-backed allocations switched to `cudaFreeAsync(_, 0)`.
+* `src/solvers/gpu/gpu_krylov_schur.cu` — non-migration decision
+  documented in-file: the contiguous-basis layout is fundamental to the
+  `cublasZgemm`-based thick-restart and there is no perf gain (KS
+  already uses batched GEMV). Tracked as a separate "Backend BLAS-3
+  view" workstream.
+
+#### Phase 3 — GPU+MPI lane (Phase C completion)
+
+* `include/ed/matvec/backends/mpi_cuda_backend.cuh` — new
+  `MpiCudaBackend final : public CudaBackend`. Inherits every local
+  primitive; overrides `dot`, `nrm2`, `all_reduce_sum(Complex|double)`,
+  and `dot_many` to chain an `ncclAllReduce` after the local cuBLAS
+  pass. Single batched ncclAllReduce per CGS2 pass replaces M sequential
+  ones. NCCL-gated via `ED_HAVE_NCCL`.
+* `src/distributed/distributed_lanczos_gpu.cu` — entirely replaced the
+  ~220-LOC hand-rolled three-term recurrence (which had NO
+  reorthogonalisation — audit D2 silent-wrong-answer bug) with a call
+  to `lanczos_kernel<MpiCudaBackend>` configured for FullCGS2 reorth
+  and a `make_smallest_ritz_convergence` predicate. Closes audit items
+  **D2** and **D3** simultaneously.
+* `src/distributed/distributed_krylov_schur_gpu.cu` — `ks_gpu_impl`'s
+  per-cycle inner Arnoldi loop replaced with one
+  `lanczos_kernel<MpiCudaBackend>` call. `aux_ortho_ptrs` carries the
+  locked Ritz set so the kernel's CGS2 keeps the cycle basis
+  orthogonal to it. Output basis is copied back into the existing
+  `d_basis` contiguous slab to preserve the downstream restart logic.
+* `src/distributed/distributed_ftlm_gpu.cu` — per-sample Lanczos body
+  (`lanczos_loop_gpu`, ~150 LOC) gated behind
+  `ED_FTLM_GPU_LEGACY_LANCZOS`; the production per-sample build now
+  calls `lanczos_kernel<MpiCudaBackend>` and copies the resulting basis
+  into the pre-existing `d_basis` slab so the observable-projection
+  code path remains unchanged.
+* `tests/unit/test_distributed_lanczos_gpu.cpp` — new
+  `|| V^H V - I ||_inf < 1e-10` orthogonality lockdown calling
+  `lanczos_kernel<MpiCudaBackend>` directly.
+* `tests/unit/test_mpi_cuda_backend.cpp` — new NCCL-gated lockdown
+  suite for the `MpiCudaBackend` overrides: `dot`, `nrm2`, `dot_many`
+  parity vs `MPI_Allreduce` over CPU dot; `axpy_many` purely-local
+  correctness; `all_reduce_sum(double|Complex)` parity.
+
+#### Phase 4 — Top-level CPU `lanczos()`
+
+* `include/ed/krylov/lanczos_kernel.h` — new
+  `LanczosKernelOptions::on_step` checkpoint hook + matching
+  `on_step_interval` (Phase 4.1, infrastructure ready). Designed for
+  the `lanczos.cpp` checkpoint / restart + disk basis I/O path.
+* `src/solvers/cpu/lanczos.cpp` — body migration is **deferred** with
+  an in-file design note explaining the two interlocking blockers
+  (LocalDGKS3 reorth policy not in the kernel + kernel resume-from-state
+  not yet exposed). The on_step hook lands the foundational kernel API
+  change; the body migration itself is tracked as a follow-up rev.
+
+#### Phase 5 — FTLM / LTLM / Hybrid direct-kernel call
+
+* `include/ed/krylov/lanczos_tridiag.h` — new
+  `ed::krylov::lanczos_tridiag<MatvecFn>(...)` helper that delegates to
+  `lanczos_kernel<CpuBackend>` without the `std::function` adapter or
+  the `UniqueVec -> ComplexVector` translation copy.
+* `src/solvers/cpu/ftlm.cpp` — `build_lanczos_tridiagonal` now calls
+  the kernel directly through `lanczos_tridiag` on the full-reorth
+  fast path.
+* `include/ed/solvers/lanczos.h` —
+  `build_lanczos_tridiagonal_with_basis` marked `[[deprecated]]`
+  (Phase 5.3). The attribute is gated by `ED_BUILDING_INTERNAL` so the
+  library's own remaining legacy callsites do not produce warnings;
+  every EXTERNAL caller (Python bindings, downstream apps) gets the
+  diagnostic pointing at the kernel-direct replacement.
+
+#### Phase 6 — Hygiene + polish
+
+* `include/ed/matvec/backends/cpu_backend.h` — `CpuBackend::dot_many`
+  per-thread accumulator scratch is now persistent `mutable` member
+  storage instead of `std::vector<double>` constructed every call.
+  Saves ~50 KB of allocator churn per Lanczos step (Phase 6.1).
+* `include/ed/matvec/backends/mpi_backend.h` — `MpiBackend` constructor
+  now `MPI_Comm_dup`s the caller-supplied communicator so subsequent
+  app-level `MPI_Comm_split` / `MPI_Comm_free` cannot stomp the
+  library's stored handle (audit D6 / Phase 6.2). Destructor checks
+  `MPI_Finalized` before freeing to be safe at process shutdown.
+* `src/distributed/distributed_lanczos_gpu.cu` — the runtime no-reorth
+  warning from the legacy path is gone (replaced by the kernel-driven
+  body in Phase 3.2).
+
+#### Audit items closed
+
+* **D2** (`distributed_lanczos_gpu` no reorth) — fixed via Phase 3.2.
+* **D3** (`distributed_lanczos_gpu` incorrect convergence check) —
+  fixed via Phase 3.2.
+* **D6** (`MpiBackend` parent-comm hygiene) — fixed via Phase 6.2.
+* **S1 #32** (FTLM `std::function` matvec adapter) — fixed via Phase 5.
+
+#### Net LOC delta
+
+Roughly **-700 LOC** of duplicated hand-rolled Lanczos bodies deleted
+(`distributed_lanczos_gpu.cu` ~220 LOC, `distributed_krylov_schur_gpu.cu`
+~80 LOC inner loop, `distributed_ftlm_gpu.cu` ~150 LOC behind legacy
+flag, `gpu_ftlm.cu` ~120 LOC); **+450 LOC** new infrastructure
+(`MpiCudaBackend`, `lanczos_tridiag` helper, on_step hook, tests). The
+four-cell deployment matrix is now fully unified on
+`ed::krylov::lanczos_kernel` except for `lanczos.cpp::lanczos` (Phase
+4.2-4.3 deferred).
+
+### Minimalist-architecture rollout — distributed Krylov-Schur per-cycle Lanczos consolidated onto `lanczos_kernel<MpiBackend>` via new `aux_ortho_ptrs` (May 2026, day 9)
+
+The thick-restart distributed Krylov-Schur implementation in
+`src/distributed/distributed_krylov_schur.cpp` carried its own inline
+Lanczos build (recurrence + per-step CGS2 reorth against the union of
+the locked Ritz set and the current cycle's basis). The only thing that
+prevented it from using the unified `ed::krylov::lanczos_kernel` was
+that the kernel's CGS2 only knew about its own growing basis — not an
+extra fixed set the caller wanted to project out. Day 9 closes that gap
+with a single additive kernel option and migrates KS onto it.
+
+* `include/ed/krylov/lanczos_kernel.h` — new
+  `LanczosKernelOptions::aux_ortho_ptrs` (a `std::vector<const
+  Complex*>` of fixed backend-memory pointers). When non-empty AND
+  `reorth != ReorthPolicy::None`, every CGS2 pass projects `w` against
+  the union `aux_ortho_ptrs ∪ basis_ptrs` in a single batched
+  `dot_many` / `axpy_many` call. The pointers must remain valid for
+  the duration of the kernel run; the kernel does not take ownership
+  and does not append to the aux set. Per-step Allreduce count is
+  unchanged (still 2 per step for FullCGS2 — one per pass over the
+  combined set), so callers get aux orthogonality "for free" at the
+  network-traffic level.
+* `src/distributed/distributed_krylov_schur.cpp` — the per-restart-cycle
+  inline Lanczos body (three-term recurrence + per-vector
+  `reorth_against` loop + breakdown check + swap-rotate, ~50 LOC) is
+  replaced with one `ed::krylov::lanczos_kernel<MpiBackend>(...)` call
+  that takes the locked Ritz set as `aux_ortho_ptrs`. The kernel hands
+  back `alpha`, `beta`, and the backend-owned `basis`; we marshal the
+  basis into the `std::vector<std::vector<Complex>>` shape the locking
+  step + Ritz reconstruction below already speak. `breakdown_tol =
+  1e-13` matches the historical KS bar (distinct from the kernel's
+  plain-Lanczos `1e-14` default and the distributed-Lanczos `1e-14`
+  setting, all three of which are intentionally separate "what counts
+  as a real invariant subspace" thresholds for their respective
+  algorithms). `dim_cap = op.global_dim()` for the same small-problem
+  / small-slab correctness reason that landed on day 8.
+* `reorth_against` local helper in
+  `src/distributed/distributed_krylov_schur.cpp` is gone (it was the
+  hot path of the inline body's per-step orthogonalisation and is now
+  replaced by the kernel's batched CGS2 over the combined ortho set).
+* **Network-traffic improvement**: at `(|locked|, |basis|) = (k, m)`
+  per Lanczos step the inline body cost
+  `2 * (k + m)` *sequential* Allreduces. The kernel now does **2**
+  batched Allreduces (one per CGS2 pass, payload `2 * (k + m)` doubles
+  each). On a 4-rank build at the steady-state KS regime
+  `(k, m) ≈ (10, 100)`, that's a `220 → 2` Allreduce reduction per
+  step, i.e. the same headline speedup the day-1 batched-CGS2 work
+  brought to the plain Lanczos path now extends to thick-restart KS.
+* Test impact: `test_distributed_krylov_schur_symmetry` exercises both
+  the `DistributedOperator` row-slab path AND the
+  `DistributedSymmetryOperator` symmetry-projected path at np=1/2/4
+  across every momentum sector of an N=4 and N=6 PBC Heisenberg chain
+  (cross-checks every leading eigenvalue against the dense reference
+  AND against `distributed_lanczos_symmetry` on the same operator).
+  The N=6 case uses `exct=3`, which exercises multi-cycle locking
+  (`aux_ortho_ptrs` accumulates 1, then 2, then 3 entries across
+  restarts). All 30 assertions per process pass at every np.
+* `tests/unit/test_lanczos_kernel.cpp` — new dedicated regression case
+  for `aux_ortho_ptrs`. Two-pass design:
+    1. Pass 1 runs `lanczos_kernel<CpuBackend>` on a 6-site Heisenberg
+       chain and reconstructs the ground-state Ritz vector
+       `y_0 = Σ_j S(j, 0) * V_j`. Sanity-checks `E_0` against the
+       dense reference and `||y_0|| = 1`.
+    2. Pass 2 runs the kernel from a different seed with
+       `aux_ortho_ptrs = { y_0.data() }`. The caller-side
+       pre-orthogonalisation of `v_0` against `y_0` is performed
+       explicitly (matching the kernel's documented contract — the
+       kernel deflates new Krylov vectors against the aux set during
+       CGS2 but takes `v_0` as-is). The test then asserts
+       (a) `max |<y_0, V_j>| < 1e-10` over the entire returned basis,
+       (b) the lowest Ritz value of the deflated tridiagonal coincides
+       with `E_1` of the dense reference (not `E_0` — that's the proof
+       that the projection actually deflated the ground mode out).
+  Adds 4 new assertions on the kernel proper, plus 3 on the
+  reconstruction, totalling 7 new asserts and 1 new test case
+  (143 total assertions across 7 test cases in `test_lanczos_kernel`).
+* Documentation: tightened the contract on
+  `LanczosKernelOptions::aux_ortho_ptrs` in `lanczos_kernel.h` to
+  spell out the pre-orthogonalisation requirement on `v_0` (caught
+  by the test above on the first pass).
+* Full `ctest -j8` now reads **273/273 in 26.7 s** (was 272/272 before
+  the new test), with all 33 MPI tests still passing.
+
+#### Day 10 — pin the previously-untested `PeriodicCGS2` policy
+
+* `LanczosKernelOptions::reorth == ReorthPolicy::PeriodicCGS2` is
+  implemented in the kernel (the legacy `build_lanczos_tridiagonal_with_basis`
+  body has its own MGS-once-with-tol-filter periodic path and no
+  production caller has been switched onto the kernel's CGS2 periodic
+  branch yet) but had **zero test coverage**. Pinned today via a
+  two-section `TEST_CASE` in `tests/unit/test_lanczos_kernel.cpp`:
+    1. `reorth_freq = 1` (fire every step) is **numerically equivalent
+       to `FullCGS2`** on a 6-site PBC Heisenberg chain — same alpha,
+       same beta, same Ritz spectrum to 1e-12. This is the strongest
+       "the periodic code path actually runs reorth" assertion we can
+       make without re-doing a separate orthogonality bound.
+    2. `reorth_freq = 1000` with `max_iter = 40` (never fires within
+       the run) is **strictly different** from `reorth_freq = 1`: the
+       max off-diagonal basis overlap blows up to > 1e-4 (in practice
+       O(0.1)+), proving the cadence gate is honoured and the kernel
+       doesn't accidentally fall through to the full-reorth branch
+       when the period is large.
+  Adds 1 test case and 62 new assertions (`test_lanczos_kernel` now
+  reads 8 test cases / 205 assertions, up from 7 / 143).
+* Cleanup: removed the unused `LegacyResult` struct from
+  `test_lanczos_kernel.cpp` (a now-orphan helper from the original
+  Phase A comparison runs against the legacy MGS body — every
+  remaining test uses `run_kernel(...)` directly or the legacy
+  facade `build_lanczos_tridiagonal_with_basis`).
+* Full `ctest -j4` now reads **274/274 in 24.4 s**, all 33 MPI tests
+  passing at np=1/2/4.
+
+#### Day 10 — extend `aux_ortho_ptrs` coverage to `CudaBackend`
+
+* The `aux_ortho_ptrs` knob now has a **CUDA-backend regression test**
+  in `tests/unit/test_cuda_backend.cpp`, mirroring the CPU-backend
+  test added on day 9 but driving the deflation through cuBLAS:
+    1. Pass 1 runs `lanczos_kernel<CudaBackend>` on a 6-site PBC
+       Heisenberg chain (random `v_0` to span every Sz sector), pulls
+       the tridiagonal back to host, diagonalises it with Eigen, then
+       reconstructs the ground-state Ritz vector `y_0` **on device**
+       via `CudaBackend::axpy_many(coeffs, basis_ptrs, ...)`. Sanity-
+       checks `||y_0|| ≈ 1` via `CudaBackend::nrm2`.
+    2. Pass 2 builds a different random `v_0`, performs the caller-
+       side CGS2 pre-projection of `v_0` against `y_0` on device
+       (mirroring the kernel's documented contract), then re-runs
+       `lanczos_kernel<CudaBackend>` with
+       `opts.aux_ortho_ptrs = { d_y_0.get() }`.
+       Asserts `max |⟨y_0, V_j⟩| < 1 × 10⁻¹⁰` across the entire
+       device-resident basis (cuBLAS reduction round-off included),
+       and pins the deflated smallest Ritz value against the dense
+       reference `E_1` (not `E_0` — proves the projection deflated
+       the ground mode out on the GPU side too).
+* Why this matters: the CPU and CUDA `Backend::dot_many` /
+  `Backend::axpy_many` implementations are entirely different code
+  paths (OpenMP-driven host loops vs cuBLAS via the default `dot`/
+  `axpy` fallbacks). The CPU test verified the kernel's *control
+  flow* around the aux set; this test additionally verifies the
+  *device-side BLAS-1 chain* used to project against the aux vectors
+  during every CGS2 pass.
+* Diagnosis note: the first version of the test used `v_0 = |000…0⟩`
+  (single-basis-state seed). On Heisenberg PBC that's a state in the
+  1-dimensional `Sz = -N/2` sector, so `H v_0 = α_0 v_0` and the
+  recurrence breaks down after one iteration. Switched to a random
+  unit vector (the same `ed_tests::random_unit_vector` the CPU test
+  uses); spans every Sz sector and gives the kernel a full Krylov
+  subspace.
+* `test_cuda_backend` now reads **8 test cases / 2102 assertions**
+  (was 7 / 2090). Full `ctest -j4` is **275/275 in 28.8 s**, all 33
+  MPI tests still passing at np=1/2/4.
+
+#### Day 10 — pin previously-untested `convergence_check` callback
+
+* `LanczosKernelOptions::convergence_check` is the kernel's early-exit
+  hook (CPU+MPI distributed Lanczos wires it through
+  `make_smallest_ritz_convergence(exct, tol)` to reproduce the legacy
+  distributed Lanczos's relative-Δλ early-exit). Until today it had
+  **zero focused unit-test coverage** — exercised transitively by the
+  distributed Lanczos tests but never pinned for cadence / contract /
+  early-exit semantics directly.
+* New two-section `TEST_CASE` in `tests/unit/test_lanczos_kernel.cpp`:
+    1. A counting probe (always returns `false`) verifies the kernel
+       calls the callback at **exactly** `convergence_check_interval`
+       cadence. With `interval=5` and `max_iter=22`, the probe is
+       invoked at iters `j ∈ {4, 9, 14, 19}` (i.e. `(j+1) % 5 == 0`),
+       and the kernel runs to its full cap (22 iters) since the
+       callback never short-circuits. The probe also pins the
+       `alpha.size() / beta.size()` *contract* at each call: when the
+       callback fires the kernel has JUST pushed `alpha[j]` and
+       `beta[j+1]`, so the sizes are `j+1` and `j+2` respectively.
+       Off-by-ones here would cascade into wrong Ritz-residual
+       arithmetic in `make_smallest_ritz_convergence`.
+    2. The `make_smallest_ritz_convergence(1, 1e-8)` factory paired
+       with `max_iter=200` on a 6-site PBC Heisenberg chain
+       short-circuits **far** before the cap. Pinned: `iters_done <
+       max_iter`, `iters_done >= 5` (at least one cadence hit),
+       `basis.size() == iters_done` (no off-by-one between the
+       early-exit decision and the basis-storage bookkeeping), and
+       the converged E_0 matches the dense reference to the
+       callback's tol.
+* Adds 1 test case and 9 assertions. `test_lanczos_kernel` now reads
+  **9 test cases / 214 assertions** (was 8 / 205). Full `ctest -j4`
+  is **276/276 in 28.1 s**, all 33 MPI tests still passing.
+
+#### Day 10 — remove the dead `LanczosKernelOptions::tol` field
+
+* `LanczosKernelOptions::tol` was a leftover from before
+  `convergence_check` was introduced — documented in-line as
+  *"Reserved: Ritz convergence threshold"* but never actually
+  consulted by the kernel body. Four call sites set it as a dead
+  write:
+    1. `tests/unit/test_lanczos_kernel.cpp` (two spots, in
+       `run_kernel` and the trivial-breakdown test),
+    2. `src/solvers/gpu/gpu_lanczos_kernel_facade.cu` (the eigvals /
+       eigpairs facade — was being passed through from the public
+       `tol` parameter of `runGPULanczos`),
+    3. `src/solvers/cpu/lanczos.cpp::build_lanczos_tridiagonal_with_basis`
+       (the unified-kernel fast path).
+* Removed the field. Ritz-convergence handling is now exclusively
+  the `convergence_check` callback's job (matches the kernel's
+  documented semantics).
+* The four dead writers no longer set `opts.tol`. The facade and
+  legacy-ABI sites keep their *public* `tol` parameter intact — it's
+  not piped through to the kernel today; if a caller wants Ritz
+  early-exit, they wire up
+  `opts.convergence_check = make_smallest_ritz_convergence(exct, tol)`
+  the way `distributed_lanczos_kernel.h` does.
+* The legacy CPU `build_lanczos_tridiagonal_with_basis` fast path
+  previously *appeared* to honour `tol` via `opts.tol = tol` but
+  silently dropped it (the kernel ignored the field). Behaviour is
+  unchanged — explicit comments now document why.
+* Net: 1 dead field removed from the kernel's public options surface,
+  4 dead writes deleted. Full `ctest -j4` still **276/276 in 26.0 s**,
+  all 33 MPI tests passing — no behavioural regression.
+
+#### Day 10 — `block_lanczos_kernel` / `krylov_schur_kernel`: honest static-assert on the dishonest Backend template
+
+* Before today, `block_lanczos_kernel<Backend, MatvecFn>` and
+  `krylov_schur_kernel<Backend, MatvecFn>` accepted *any* Backend type
+  but **silently ignored** it — the bodies unconditionally delegated
+  to the CPU legacy `::block_lanczos` / `::krylov_schur`. The
+  templates also carried doc comments claiming "GPU and MPI
+  specialisations land alongside `CudaBackend` / `MpiBackend`" that
+  never landed. A caller writing
+  `block_lanczos_kernel(cuda_backend, ...)` would get a CPU run
+  silently, expecting a GPU one — a footgun.
+* Day-10 fix:
+    1. Added `static_assert(std::is_base_of_v<ed::matvec::CpuBackend,
+       std::decay_t<Backend>>, ...)` to both kernel facades. Now
+       passing a `CudaBackend` (or any non-CpuBackend-derived type)
+       gives a compile error with a clear message pointing to the
+       BLAS-3 dependency and to
+       `ed::distributed::distributed_krylov_schur` as the production
+       CPU+MPI Krylov-Schur path.
+    2. Rewrote the header doc comments to be **explicit** about the
+       current scope ("CPU-only") and the design reason no GPU
+       specialisation exists: `::block_lanczos` and `::krylov_schur`
+       use BLAS-3 (`gemm`, `geqrf`) and Schur-reordering primitives
+       (`dtrsen`-style) that the BLAS-1-only `ed::matvec::Backend`
+       interface does not expose today. Tracked against the audit's
+       "Phase B (block / KS GPU) — pending" rows.
+* `ARCHITECTURE.md` row 4 ("block_lanczos / krylov_schur kernel
+  headers") rewritten to match: "CPU-only facade, statically
+  enforced". Cross-references to day 9's
+  `distributed_krylov_schur.cpp` migration (the **real** CPU+MPI
+  consolidation) and to `STRUCTURAL_AUDIT.md`'s
+  "Phases B+D — what's now true" scoreboard.
+* `test_kernel_facades` (the existing CpuBackend smoke test for both
+  facades) still passes — the `static_assert` is a no-op there since
+  CpuBackend satisfies the constraint.
+* Net: 0 functional change, 1 footgun closed at compile time, 2 doc
+  comments now reflect actual scope rather than aspirational scope.
+  Full `ctest -j4` still **276/276 in 26.1 s**, all 33 MPI tests
+  passing.
+
+Cumulative scoreboard at end of day 9:
+
+|                | Lanczos | Block Lanczos | Krylov-Schur |
+|----------------|---------|---------------|--------------|
+| CPU            | ✔       | ✔             | ✔            |
+| GPU (1 device) | ✔ (eigvals + eigvecs through `lanczos_kernel<CudaBackend>` facade) | — | — |
+| CPU + MPI      | ✔ (delegates to `lanczos_kernel<MpiBackend>`) | — | **✔ (day 9: per-cycle build delegates via `aux_ortho_ptrs`)** |
+| GPU + MPI      | —       | —             | —            |
+
+### Minimalist-architecture rollout — row-slab `distributed_lanczos(DistributedOperator&, ...)` is now a thin v0-scatter + delegate (May 2026, day 8, follow-on)
+
+* `src/distributed/distributed_lanczos.cpp` — the row-slab entry point
+  `distributed_lanczos(DistributedOperator&, options)` no longer carries
+  its own ~200-LOC inline Lanczos body (three-term recurrence, batched
+  CGS2 reorth, breakdown, relative-Δλ early-exit, tridiagonal solve,
+  Ritz-vector storage). It now does just one thing: a row-slab-shaped
+  v0 scatter via `scatter_initial_vector(...)` (deterministic from
+  `options.seed`, balanced via `DistributedOperator::balanced_slab`),
+  then hands off to the templated
+  `kernel::distributed_lanczos_kernel<DistributedOperator>(op,
+  std::move(v_local), options)`. That templated kernel was made into
+  a thin facade over `lanczos_kernel<MpiBackend>` earlier in the same
+  day. Net: one Lanczos body, two geometry-specific v0 scatters, four
+  deployment targets.
+* The anonymous-namespace dead-code in the TU has been pruned:
+  `local_zdotc`, `local_axpy`, `dist_zdotc`, `dist_zdotc_batched`, and
+  the three `solve_tridiag*` helpers all lived here pre-May-2026 as the
+  hot path of the inline body. They are identically present (with
+  internal linkage) in `distributed_lanczos_kernel.h`, where they
+  remain in use; here they were just dead. `local_norm_sq`, `dist_norm`,
+  and `local_scal` are kept because `scatter_initial_vector` still
+  re-normalises locally + globally for numerical hygiene.
+* File LOC: 665 → 310 (-355). The remaining lines are
+  `scatter_initial_vector` (row-slab v0 scatter), the templated
+  delegate, `reconstruct_local_eigenvector` (rank-local Ritz vector
+  reconstruction — geometry-agnostic raw-index loop),
+  `distributed_lanczos_eigenvectors` (convenience wrapper that calls
+  the row-slab path with `compute_eigenvectors = true`), and
+  `distributed_lanczos_symmetry` (geometry-specific orbit-partition v0
+  scatter followed by the same templated delegate).
+* No new tests. The migration is byte-for-byte preserving — the row-
+  slab tests `test_distributed_lanczos`, `test_distributed_operator`,
+  `test_distributed_eigenvectors`, `test_distributed_ftlm`,
+  `test_distributed_tpq` all pass at np=1/2/4 with no source changes.
+  Full `ctest -j8` is **272/272 in 26.6 s**, with all 33 MPI tests
+  passing.
+
+### Minimalist-architecture rollout — `distributed_lanczos_kernel` consolidated onto `lanczos_kernel<MpiBackend>`, two correctness bugfixes (May 2026, day 8)
+
+Phase D ship — the templated CPU+MPI Lanczos kernel in
+`include/ed/distributed/distributed_lanczos_kernel.h` no longer carries
+its own inline three-term recurrence + batched CGS2 + relative-Δλ
+early-exit. Its body now constructs an `ed::matvec::MpiBackend(comm)`,
+sets up `LanczosKernelOptions`, and delegates to
+`ed::krylov::lanczos_kernel<MpiBackend>`. The previous ~140-line inline
+implementation was a near-line-for-line duplicate of the unified kernel;
+this collapse removes the duplication that had been the open item from
+the day-5 audit.
+
+* `include/ed/krylov/ritz_convergence.h` — new header. Single inline
+  factory `make_smallest_ritz_convergence(exct, tol, min_iters=0)` that
+  builds a stateful predicate suitable for
+  `LanczosKernelOptions::convergence_check`. The predicate solves the
+  small running tridiagonal via Eigen on every call and returns `true`
+  when `|Δλ_smallest| / max(|λ_smallest|, 1e-300) < tol` — the
+  Lanczos-convergence convention shared by ARPACK / SLEPc / Anasazi
+  and by every legacy ED Lanczos body in this repo (CPU, GPU, CPU+MPI).
+  Keeping it in a dedicated header lets the kernel itself stay
+  Eigen-free; callers who want the standard early-exit pull in this
+  header explicitly.
+* `include/ed/krylov/lanczos_kernel.h` —
+    * Added `LanczosKernelOptions::convergence_check` (a `std::function`
+      with the signature `bool(const alpha&, const beta&)`) and
+      `convergence_check_interval`. The kernel invokes the callback
+      after pushing `alpha[j] / beta[j+1]` and AFTER any reorth pass,
+      every `convergence_check_interval` iterations. A positive return
+      cleanly breaks out of the loop with the same post-state as a
+      natural cap-hit (the current step IS counted in `iters_done`).
+    * Added `LanczosKernelOptions::dim_cap` (default 0). The kernel's
+      effective iteration cap is now
+      `min(max_iter, dim_cap > 0 ? dim_cap : local_n)`. Serial / single-
+      GPU backends leave it at 0 (correct: `local_n == global_dim`
+      there); distributed backends MUST pass the global problem dim,
+      because on a rank with a small slab (global dim 6 / np=4 gives
+      `local_n ∈ {1,2}`) the previous `cap = min(max_iter, local_n)`
+      logic was silently terminating after a single iteration — a
+      ground-state-energy bug caught by
+      `test_distributed_lanczos_symmetry_np4`.
+    * Removed the `local_n == 0` early return. In distributed runs it
+      is legitimate for a rank to receive an empty slab (e.g. LPT-
+      balanced orbit partition on a small symmetry sector with
+      `global_dim < n_ranks`), and that rank still has to participate
+      in every collective (Allreduces inside `dot` / `nrm2` / `dot_many`
+      / `axpy_many` etc.). The early return was deadlocking
+      `test_distributed_ftlm_symmetry_np4` and
+      `test_distributed_krylov_schur_symmetry_np4` because non-empty
+      ranks proceeded into collectives the empty rank had skipped. The
+      backend allocators all accept `n == 0` (returning nullptr); the
+      BLAS-1 locals are length-respecting; the Allreduces have fixed
+      payload sizes; so the kernel is now correct on empty slabs.
+* `include/ed/distributed/distributed_lanczos_kernel.h` — kernel body
+  collapsed onto the unified template. The new body:
+    1. defensively re-normalises `v0_local` against its global L2 norm
+       (preserves bit-exact starting vector across MPI runs),
+    2. builds an `MpiBackend(op.comm())`,
+    3. sets `LanczosKernelOptions` — `keep_basis` and `reorth` per the
+       caller's `full_reorth / compute_eigenvectors`, `breakdown_tol =
+       1e-14` (matching the historic looser bar of the inline body, NOT
+       the kernel's default `1e-300`), `dim_cap = op.global_dim()`,
+       `convergence_check_interval = 5` (the legacy cadence),
+       `convergence_check = make_smallest_ritz_convergence(exct, tol)`,
+    4. wraps `op.apply` in a backend-shaped matvec lambda,
+    5. calls `ed::krylov::lanczos_kernel(mpi, ...)`,
+    6. post-processes `LanczosKernelResult` into
+       `DistributedLanczosResult` (`solve_tridiag` for eigvals only,
+       `solve_tridiag_with_weights` for FTLM/cTPQ weights, or
+       `solve_tridiag_with_eigenvectors` + `kres.basis` copy-out for
+       the eigvec path). The retained orthonormal basis structure
+       (`std::vector<std::vector<Complex>> krylov_basis_local`) matches
+       the legacy ABI exactly so every existing caller — `FTLM_LTLM`,
+       `distributed_krylov_schur`, `distributed_eigenvectors` — keeps
+       working unchanged.
+* `include/ed/matvec/backends/cpu_backend.h` — removed the `final`
+  qualifier on `CpuBackend`. `MpiBackend` inherits from it to reuse the
+  host allocators and BLAS-1 locals while overriding only the
+  reduction-bearing primitives, and the `final` keyword (a copy-paste
+  from `CudaBackend`) was blocking the day-8 distributed_lanczos
+  migration as soon as `MpiBackend` was first actually instantiated.
+* Test impact: full `ctest -j8` now finishes in 26.7 s with all 272
+  tests passing (was 269/272 with a timeout on
+  `test_distributed_lanczos_symmetry_np4` before the dim_cap fix, then
+  270/272 with timeouts on the two FTLM/Krylov-Schur np=4 tests before
+  the empty-slab fix). The 33 MPI tests all pass cleanly at np=1, np=2,
+  and np=4. No new tests were needed for this migration — the existing
+  `test_distributed_lanczos_symmetry`,
+  `test_distributed_krylov_schur_symmetry`,
+  `test_distributed_eigenvectors`, `test_distributed_ftlm_symmetry`,
+  and `test_distributed_tpq_symmetry` already lock down the kernel's
+  behaviour and they all still pass byte-for-byte.
+
+Cumulative scoreboard at end of day 8 (Phase D shipped):
+
+|                | Lanczos | Block Lanczos | Krylov-Schur |
+|----------------|---------|---------------|--------------|
+| CPU            | ✔       | ✔             | ✔            |
+| GPU (1 device) | ✔ (eigvals + eigvecs through `lanczos_kernel<CudaBackend>` facade) | — | — |
+| CPU + MPI      | ✔ (delegates to `lanczos_kernel<MpiBackend>`) | — | — |
+| GPU + MPI      | —       | —             | —            |
+
+Open items unchanged: Block-Lanczos and Krylov-Schur are still
+hand-rolled per backend; the GPU+MPI grid cell remains empty.
+
+### Minimalist-architecture rollout — GPU Lanczos eigvec path also unified, `CudaBackend` made movable (May 2026, day 7)
+
+Day 6 routed the eigenvalues-only path of `runGPULanczos(...)` /
+`runGPULanczosFixedSz(...)` through the `lanczos_kernel<CudaBackend>`
+facade. Day 7 extends the facade with Ritz-vector reconstruction and
+moves the eigenpair path onto the same unified kernel. The legacy
+`GPULanczos::run` body is now a defensive fallback only — invoked
+exclusively when the facade throws (e.g. because the basis won't fit
+in device memory and the kernel's `keep_basis = true` assertion fires).
+
+* `src/solvers/gpu/gpu_lanczos_kernel_facade.cu` — new entry point
+  `run_lanczos_eigenpairs_kernel_facade(...)`. Strategy:
+    1. drive the same shared kernel-driver (validates, allocates v0,
+       runs curand init, runs `lanczos_kernel<CudaBackend>` with
+       `keep_basis = true`),
+    2. diagonalise the tridiagonal on the host via Eigen's
+       `SelfAdjointEigenSolver` (one solve produces both eigenvalues
+       and eigenvectors of T),
+    3. for each requested Ritz index `i`, reconstruct
+       `y_i = sum_k S(k, i) * V_k` by `M` backend axpys into a device
+       scratch buffer (cuBLAS zaxpy under `CudaBackend`),
+    4. copy each Ritz vector to host via `Backend::copy_to_host`.
+  The host output type matches the legacy
+  `std::vector<std::vector<std::complex<double>>>` exactly, so callers
+  don't change. The shared preamble (input validation, curand v0 init,
+  kernel-driver, tridiag solve) was hoisted out of the
+  eigenvalues-only entry point so both paths now share ~70 LOC.
+* `include/ed/matvec/backends/cuda_backend.cuh` — `CudaBackend` is now
+  move-only (was move-deleted in day 5). The move ctor / move-assign
+  transfer ownership of the `cublasHandle_t` and null out the source;
+  the destructor already guarded on nullptr so moved-from objects
+  destroy safely. Required to let internal helpers return a
+  `CudaBackend` by value alongside a `LanczosKernelResult` (whose
+  retained `basis` keeps backend memory alive through the Ritz
+  reconstruction).
+* `src/solvers/gpu/gpu_ed_wrapper.cu` — `runGPULanczos` /
+  `runGPULanczosFixedSz` now route both branches through the
+  facade in a single try/catch. Eigvec branch dispatches to
+  `run_lanczos_eigenpairs_kernel_facade`, eigvals-only branch keeps
+  `run_lanczos_eigenvalues_kernel_facade`. The legacy `GPULanczos`
+  class is reached only inside the catch handler. Same HDF5 save +
+  throughput-stats output shape as before.
+* `tests/unit/test_cuda_backend.cpp` — new `TEST_CASE` exercises the
+  eigenpair facade on an 8-site periodic Heisenberg ring:
+    1. pins the recovered Ritz eigenvalue to `<1e-8` of the CPU
+       `lanczos(...)` reference,
+    2. checks `|| y_0 || == 1` to within 1e-8 (orthonormal Krylov
+       basis * orthonormal column of S),
+    3. checks the residual `|| H y_0 - lambda_0 y_0 || < 1e-6` on the
+       full Hilbert space (the strongest test — proves the recovered
+       Ritz pair really satisfies the eigenvalue equation).
+
+**Test posture:** 270/270 ctest green (was 269 / day 6). `test_cuda_backend`
+reports 2070 passing assertions across 5 test cases.
+
+### Minimalist-architecture rollout — first GPU production migration onto `lanczos_kernel<CudaBackend>` (May 2026, day 6)
+
+The unified Krylov kernel was proven backend-agnostic at the end of day 5
+(`test_cuda_backend`: bit-for-bit `(alpha, beta)` agreement between
+`CpuBackend` and `CudaBackend`). Day 6 moves the unified kernel into
+**production**: the eigenvalues-only path of `runGPULanczos(...)` and
+`runGPULanczosFixedSz(...)` now dispatches into a thin facade onto
+`ed::krylov::lanczos_kernel<CudaBackend>` instead of the legacy 1099-LOC
+`GPULanczos::run` body. Every existing call site picks up the new path
+without a source change because the dispatch happens behind the same
+`runGPULanczos` signature.
+
+* `src/solvers/gpu/gpu_lanczos_kernel_facade.cu` — new ~170-LOC
+  translation unit owning the migration. It:
+    1. allocates `v0` on the GPU via `CudaBackend::make_zero_vector`,
+    2. initialises it with the same curand-based real-only Gaussian the
+       legacy `GPULanczos::initializeRandomVector` uses (so seeds
+       reproduce across both paths),
+    3. drives `lanczos_kernel<Backend>` with a matvec callable that
+       forwards into `GPUOperator::matVecGPU` (works through the
+       `GPUFixedSzOperator` override automatically — no source change
+       to the fixed-Sz path),
+    4. diagonalises the small real-symmetric tridiagonal on the host
+       via `Eigen::SelfAdjointEigenSolver`, and
+    5. hands back the lowest `num_eigs` Ritz eigenvalues.
+* `include/ed/gpu/gpu_solvers.h` — forward-declares the facade entry
+  point; existing `ed::matvec::gpu::lanczos(...)` overloads unchanged
+  (they still go through `GPUEDWrapper::runGPULanczos` and pick up the
+  new path transparently).
+* `src/solvers/gpu/gpu_ed_wrapper.cu` — `runGPULanczos` /
+  `runGPULanczosFixedSz` now dispatch on `eigenvectors`:
+    * **`eigenvectors == false`**: facade path
+      (`lanczos_kernel<CudaBackend>`). The common case; this is what
+      `ed_wrapper.h` and `ed_wrapper_streaming.h` invoke from
+      `exact_diagonalization_core` for the LANCZOS branch when
+      `params.compute_eigenvectors == false` (the default).
+    * **`eigenvectors == true`**: legacy `GPULanczos::run`. Keeps the
+      Ritz reconstruction + windowed reorth + on-disk basis spill +
+      early-eigenvalue-convergence machinery for callers that need any
+      of those.
+  A try/catch around the facade falls back to `GPULanczos::run` on
+  failure (defensive — currently uncovered, but it keeps the change
+  zero-risk for production runs while the migration bakes in).
+* `tests/unit/test_cuda_backend.cpp` — two new `TEST_CASE`s exercise the
+  facade directly:
+    1. End-to-end on an 8-site periodic Heisenberg ring: pinned ground-
+       state energy at 1e-8 vs the legacy CPU `lanczos(...)` reference
+       (matches the established `test_cpu_gpu_equivalence` tolerance).
+    2. Input validation — rejects `N <= 0`, `max_iter <= 0`,
+       `num_eigs <= 0` with `std::invalid_argument`.
+
+The legacy `GPULanczos` class is **not** retired in this drop: it owns
+the Ritz reconstruction and the disk-spill regime, which the unified
+kernel doesn't yet support. It is now strictly the eigvec-path
+implementation, which removes another reason for it to grow.
+
+**Test posture:** 267/267 ctest green; `test_cuda_backend` reports
+2063 passing assertions across the 4 CUDA-only test cases (up from
+2060 / 2 cases). `test_cpu_gpu_equivalence` still passes — the two
+Phase-4 GPU overload tests now drive the facade transparently through
+`GPUEDWrapper::runGPULanczos` and match the legacy `GPULanczos` class
+at 1e-8.
+
+### Minimalist-architecture rollout — Gap 2 / Gap 3 / `ed_wrapper` sweep (May 2026, day 5)
+
+Continuation of the "swing at all of them" pass on the architectural
+gaps documented in `ARCHITECTURE.md`. Three independent landings, each
+self-contained:
+
+**Gap 2 — `CudaBackend` lands.** `include/ed/matvec/backends/cuda_backend.cuh`
+is the cuBLAS-driven sibling of `CpuBackend` / `MpiBackend`. RAII over a
+`cublasHandle_t` in `HOST` pointer mode; `allocate`/`fill_zero`/`copy*`
+route through `cudaMalloc` / `cudaMemset` / `cudaMemcpy` with the
+correct direction; `axpy` / `scale` / `dot` / `nrm2` hit `cublasZaxpy`
+/ `cublasZscal` / `cublasZdotc` / `cublasDznrm2` directly;
+`std::complex<double>*` reinterprets to `cuDoubleComplex*` (binary
+layout compat is part of the CUDA spec). `axpby` is a two-call
+decomposition (`scale` then `axpy`); `dot_many` / `axpy_many` use the
+inherited single-call defaults pending a fused-kernel follow-up. New
+`test_cuda_backend` (`tests/unit/test_cuda_backend.cpp`,
+`USE_CATCH2`, CUDA-only) pins:
+  * BLAS-1 round-trip (nrm2, dot, axpy, scale) against pure-host
+    reference vectors at 1e-10 relative.
+  * Per-iteration `(alpha, beta)` agreement of
+    `lanczos_kernel<Backend>` between `CpuBackend` and `CudaBackend`
+    on a 6-site periodic Heisenberg ring at ~1e-10 over a 24-step
+    Krylov subspace. Both backends drive the same kernel body — first
+    direct proof that `ed::krylov::lanczos_kernel` is genuinely
+    backend-agnostic and that the unified Krylov kernel runs on real
+    GPU hardware end-to-end.
+
+**Gap 3 — `compute_*_workflow` preamble factored.** Each of
+`compute_dynamical_response_workflow`,
+`compute_static_response_workflow`,
+`compute_ground_state_dssf_workflow`,
+`compute_kpm_thermodynamics_workflow` opened with ~50 lines of
+near-identical boilerplate (MPI rank/size init, audit #2 fixed-Sz vs
+full-Hilbert shared_ptr dispatch, three-body load, sector dim, `H_func`
+lambda). Replaced by two helpers in the file's anonymous namespace:
+`get_mpi_rank_size_safe()` (10 lines) and
+`build_workflow_hamiltonian(config, rank, verbose_label)` ->
+`WorkflowHamiltonian` POD (~70 lines). Workflows now open with four
+lines of state extraction. **Net: workflows.cpp shrinks from 2987
+to 2875 lines (~112 LOC).** Behaviour is preserved bit-for-bit —
+the helper carries the same audit #2 dispatch and the same Hilbert-dim
+binomial computation; only the spelling collapses.
+
+**Gap 1 / Gap 5 — `ed_wrapper.h` + `gpu_ed_wrapper.cu` dead-code sweep.**
+  * `ed_internal::create_operator<>` template factory (raw-new'd Operator*)
+    retired — zero callers, wrong ownership convention (everything else
+    uses `std::shared_ptr` pairs).
+  * `ed_internal::supports_fixed_sz(method)` retired — after Phase 1
+    every remaining method supports fixed-Sz, so the helper always
+    returned true and its single caller was a dead-branch guard.
+  * `gpu_ed_wrapper.cu` `#else // !WITH_CUDA` stub block (~178 lines of
+    no-op definitions covering every public `GPUEDWrapper::*` entry
+    point) deleted. It was unreachable: the translation unit is only
+    added to the build under `if(WITH_CUDA)`
+    (`cmake/EDLibraries.cmake:566`), and every `GPUEDWrapper::*`
+    callsite in `ed_wrapper.h` / `ed_wrapper_streaming.h` is itself
+    gated by `#ifdef WITH_CUDA`. An `#error` directive now catches
+    accidental inclusion in a non-CUDA build instead of silently
+    producing a library full of no-op symbols.
+
+**Test posture:** 267/267 green (was 265/265 before this drop;
+`test_cuda_backend` adds two CUDA-only TEST_CASEs that SKIP when no
+GPU is attached, matching the established `test_cpu_gpu_equivalence`
+pattern).
+
+### Krylov-kernel unification — Phase A (May 2026, day 3)
+
+The four Lanczos paths (CPU, single GPU, CPU+MPI, GPU+MPI) had been near-
+identical bodies with three reorth strategies and two convergence
+criteria between them — ~10000 lines of code that always agreed on the
+algorithm but never on the spelling. Phase A introduces the single
+`ed::krylov::lanczos_kernel<MatvecFn>(const Backend&, MatvecFn, ...)`
+template that will drive all four targets, and lands the CPU + CPU+MPI
+backends behind it. Single-GPU and GPU+MPI backends (Phases B–C) will
+slot in under the same kernel; the CPU and GPU+MPI distributed-Lanczos
+.cpp/.cu bodies become facades in Phase D.
+
+**Net delivered in Phase A:**
+
+- New `ed::matvec::Backend::dot_many` / `axpy_many` batched primitives
+  (with a default loop-over-singles fallback so pre-existing concrete
+  backends compile unchanged). `CpuBackend` specialises both with a
+  single OpenMP region that amortises the cache-residency of `v`
+  across all M inner products.
+- New `ed::matvec::MpiBackend` (`include/ed/matvec/backends/mpi_backend.h`):
+  inherits CpuBackend, overrides reduction-bearing primitives with
+  `MPI_Allreduce`, and collapses M sequential Allreduces into one
+  batched 2M-double Allreduce inside `dot_many` (CGS2 fast path).
+- New `ed::krylov::lanczos_kernel` (`include/ed/krylov/lanczos_kernel.h`):
+  one Lanczos algorithm body — three-term recurrence with swap-rotated
+  working vectors, CGS2 reorth (two batched-dot+batched-axpy passes —
+  one Allreduce per pass in MPI), genuine-invariant-subspace breakdown
+  detection (decoupled from the user-facing Ritz tol — the legacy
+  conflation broke at the CGS2 noise floor and tripped LTLM-static at
+  full Krylov), optional basis retention.
+- Legacy `build_lanczos_tridiagonal_with_basis(..., full_reorth=true,
+  basis_vectors != nullptr)` routes through the kernel. Every CPU
+  consumer (FTLM, LTLM, Hybrid-thermal, Lanczos itself) inherits CGS2
+  reorth with no callsite change. The legacy three-vector / periodic-
+  reorth branches stay as-is for callers that opt out.
+- Six new regression test cases (130 assertions) in
+  `tests/unit/test_lanczos_kernel.cpp` pinning:
+  * alpha/beta agreement with the legacy MGS-once body to 1e-10 at
+    partial Krylov,
+  * ground-state floor matches the dense reference,
+  * basis orthogonality `||V^H V - I||_∞ < 1e-10` (CGS2 guarantee),
+  * tridiagonal agreement on the physically meaningful half at full
+    Krylov `M=N=dim` (CGS2 and MGS diverge in the noise-dominated tail,
+    by design),
+  * trivial 1-D breakdown (alpha=0, beta=0, iters_done=1),
+  * misuse rejection (zero v0, reorth without keep_basis).
+
+**Performance signature (CPU FTLM at M=100):** reorth-step DRAM traffic
+drops from O(M²) streaming passes over `w` to O(2M); the full step
+becomes matvec-dominated again. **MPI:** Allreduce count per Lanczos
+step drops from ~M (one per basis vector) to 2 (one per CGS2 pass).
+
+**Test surface: 308/308** (up from 302).
+
+### Structural-audit second round (May 2026, day 2)
+
+A second-round audit was performed on the layers the first audit did not
+cover in depth: HDF5 / IO, Python bindings, distributed-Lanczos
+convergence math, and the EDConfig↔EDParameters adapter. Eleven
+additional S0/S1 items were surfaced and fixed; the deferred items are
+documented with rationale in `STRUCTURAL_AUDIT.md` Part III.
+
+**Test surface: 302/302** (up from 296), with six new lock-in
+regression tests covering the most impactful fixes.
+
+**HDF5 / IO layer (S0 fixes).**
+
+- `HDF5SymmetryIO::loadBasisVector` (`include/ed/core/hdf5_symmetry_io.h`)
+  now bounds-checks every sparse element index against the declared
+  `dimension` and throws on violation. The pre-fix code could heap-
+  overrun the dense output vector on a corrupt or hand-edited file.
+- `HDF5IO::loadTPQThermodynamics` / `loadTPQNorm` (`hdf5_io.h`) now
+  validate the dataset rank (must be 2) and exact column count (5 for
+  thermo, 4 for norm) before unpacking row-by-row. The pre-fix code
+  trusted whatever shape was on disk and would silently shuffle columns
+  if a producer wrote a 4-column thermo dataset. HDF5 exceptions on
+  real reads are now rethrown with `file:line` context; the
+  iterate-until-empty pattern (callers walking `sample_index = 0, 1,
+  …`) is preserved by catching the `nameExists`-on-missing-group case
+  explicitly and returning an empty vector.
+- `HDF5IO::saveCorrelationMatrix` (`hdf5_io.h`) explicitly rejects
+  empty matrices (previously UB on `matrix[0]`) and jagged matrices
+  (rows of unequal length).
+- `HDF5IO::saveThermodynamics` (`hdf5_io.h`) hard-checks that
+  `temperatures.size() == values.size()` before writing.
+- `HDF5SymmetryIO::loadSectorDimensions` (`hdf5_symmetry_io.h`)
+  cross-checks the `num_sectors` attribute against the dataset extent
+  and throws on mismatch (was: blindly read whatever the attribute
+  said, even if the dataset had a different length).
+- `BasisVectorStorage::read_vector` (`src/io/basis_vector_storage.cpp`)
+  now verifies the on-disk dataset is exactly `[dim, 2]` before
+  reading; previously a wrong-`N` caller would silently get garbage.
+- New regression tests in `tests/unit/test_hdf5_io.cpp`
+  `[regression][s0]`.
+
+**Python bindings (S0 fixes).**
+
+- `auto_tune.estimate_bandwidth` (`python/qed/auto_tune.py`) rewritten
+  to walk the exposed `iter_one_body_terms` / `iter_two_body_terms`
+  / `iter_three_body_terms` methods on the bound `Operator`. The
+  previous implementation probed the private C++ field
+  `transform_data_` which pybind never exposes, so every bound
+  `Operator` silently fell back to `fallback * num_sites` regardless
+  of its coupling magnitudes — DSSF auto-tune was picking η / ω /
+  Krylov against a bandwidth that ignored every coefficient. New
+  regression test in `python/tests/test_auto_tune.py`.
+- `op_add_one_body` / `op_add_two_body` / `op_add_three_body`
+  (`qed_bindings.cpp`) now call `op.invalidateMatrixCaches()` after
+  pushing into `transform_data_` / `three_body_data_`. Without this,
+  the `isReal()` cache stayed at its first-evaluated value, so a
+  real-built operator that later gained a complex term would still
+  report real, routing `lanczos()` through the `lanczos_real` fast
+  path with the wrong matvec. Regression test in
+  `tests/unit/test_operator_apply.cpp` `[regression][s0]`.
+- BFG correlation kernels (`compute_smsp_correlations`,
+  `compute_szsz_correlations`, three `*_bond_expectations`, all in
+  `qed_bindings.cpp`) now validate `psi.shape[0]` against
+  `2^n_sites` (or `2^cluster.n_sites` for the cluster-taking
+  variants) via a shared `bfg_check_psi` lambda. Previously a
+  wrong-length array would `memcpy` into a too-small `std::vector`
+  and then the C++ matvec would read past the end.
+
+**Distributed Lanczos (S0 fix).**
+
+- `distributed_lanczos.cpp` and `distributed_lanczos_kernel.h` now use
+  the same relative-Δλ / max(|λ|, 1e-300) convergence criterion as
+  the serial `lanczos()` kernel. The pre-fix absolute-Δλ test stopped
+  too early for large `|λ|` (e.g. systems with a non-trivial energy
+  shift) and never converged for very small `|λ|`. CPU-distributed
+  Lanczos now agrees with serial Lanczos on the convergence contract.
+  The GPU-distributed Lanczos path retains its own check (see
+  STRUCTURAL_AUDIT.md D2/D3 for the deferred GPU-side parity work).
+
+**EDConfig↔EDParameters adapter (S0 fixes).**
+
+- `EDConfig::ltlm_full_reorth` flipped from `false` to `true`
+  (`ed_config.h`). The pre-fix value contradicted
+  `EDParameters::ltlm_full_reorth = true` and silently disabled LTLM
+  reorth on the CLI / config-file path, regressing the May-2026
+  S1 #19 default fix for any user going through `EDConfig`.
+- `tpq_max_steps` and `tpq_beta_max` now propagate in both
+  directions through the adapter (`ed_config_adapter.h`). Pre-fix
+  these were parsed into `ThermalConfig` (so config-file users
+  thought they were setting them) but never copied to
+  `EDParameters` — so the dispatcher passed `params.max_iterations`
+  to `microcanonical_tpq` regardless and `cTPQ` took its `beta_max`
+  from `temp_max` regardless. The dispatcher
+  (`ed_wrapper.h::exact_diagonalization_core`) now honours
+  `tpq_max_steps > 0` as a hard `min(...)` cap on mTPQ
+  `max_iterations`, and uses `tpq_beta_max > 0` as the cTPQ
+  `beta_max` override over the generic `temp_max`.
+- `fromEDParameters` reverse-direction adapter gained the
+  previously-dropped fields `hybrid_auto_crossover`,
+  `selected_sectors`, `translation_only`, `tpq_max_steps`, and
+  `tpq_beta_max` — round-tripping `EDParameters → EDConfig →
+  EDParameters` is now identity-preserving for those knobs.
+- Adapter round-trip regression tests in
+  `tests/unit/test_method_canonicalize.cpp` `[regression][s0]`.
+
+**Auto-pilot completeness (S1 fix).**
+
+- `apply_auto_tune` (`include/ed/auto/diag_tune.h`) now wires
+  `pick_num_thermal_samples` for the thermal path: when
+  `params.num_samples == 1` (the EDParameters default for
+  ground-state solvers) AND the new `num_samples_locked` flag is
+  unset, the picker fills in a sector-dim-appropriate sample count.
+  `ThermalOptions::make_auto_tune_overrides` sets the lock so that
+  explicit `ThermalOptions::num_samples` values (default 40) survive
+  unchanged. The C++ thermal auto-pilot now agrees with the
+  Python `qed.auto_tune.pick_num_thermal_samples` it had been
+  contradicting since the picker was introduced. New regression
+  test in `tests/unit/test_diag_tune.cpp` `[regression][s1]`.
+
+**Deferred (with rationale in STRUCTURAL_AUDIT.md Part III).**
+
+- HDF5 schema fragmentation (3 complex-vector encodings, dual DSSF
+  schema) — needs a versioned schema work-stream.
+- `appendTPQThermodynamics` / `appendTPQNorm` O(n²) per-row scan —
+  needs a per-row append API.
+- MPI per-rank merge soft-fail (`copyTPQSamples`,
+  `mergePerRankTPQFiles`) — needs a per-rank error aggregator.
+- `hdf5_io.h` size (3506 lines, now the largest header) — same
+  workstream as the `ed_wrapper.h` split.
+- DSSF auto-pilot architectural fragmentation (Python subprocess CLI
+  vs C++ in-process auto-pilot vs raw CLI) — needs either binding
+  `auto_pilot::dssf::compute` or routing the CLI through it.
+- `qed.diag` auto-tune partial vs C++ `apply_auto_tune` — Python-
+  side refactor to match the lock-flag surface.
+- MPI device-picker gate (`has_mpi_build` vs `is_scalapack_compiled`)
+  divergence — shared compile-time probe.
+- GPU distributed Lanczos no-reorth + every-iter convergence — the
+  shipped behaviour is feature-reduced by design; full reorth +
+  serial-parity convergence is its own work-stream.
+- `EDConfig::merge` stub — coordinated with the bag-of-parameters
+  unification rev.
+- KPM / ScaLAPACK-mixed / DSSF-block fields on `EDConfig` — these
+  have no home on `EDConfig` today; needs structural extension.
+
+---
+
+### Structural-audit final follow-on (May 2026)
+
+This entry catalogues the remaining S1/S2 work items beyond the May-2026
+audit roll-out and the symmetry-SOTA pass. Test surface: **296/296**
+(up from 293), with new lock-in coverage for the GPU FP32 CSR
+invalidation, all six auto-tune `_locked` flags, and the deprecated
+public-API attributes. `docs/architecture/STRUCTURAL_AUDIT.md` reflects
+the new state. **Every** correctness-class item is now either fixed
+or has an explicit deferral rationale; the only outstanding work is
+multi-day refactor / API-rev material.
+
+**S1 #10 — Single `apply` surface on `DistributedOperator`.**
+Introduced a private `apply_local_` that owns the canonical SpMV
+body; the 2-arg `apply(v, y)` (legacy hot path) and the 3-arg
+`apply(v, y, size)` (MatVecOperator polymorphic surface) both forward
+to it. The 3-arg form additionally runs `check_size`; the 2-arg form
+trusts the caller-supplied buffer sizes (preserving the legacy
+fast-path contract). Stale comments referencing the removed
+`Operator::diag_one_body_` member updated to point at the SoA
+`terms_` storage and `commitPendingTransforms`.
+
+**S1 #19 + #20 — Krylov tridiagonal builder consolidation.**
+`ftlm.cpp:build_lanczos_tridiagonal` is now a thin forwarder to
+`lanczos.cpp:build_lanczos_tridiagonal_with_basis`. It allocates a
+local basis store when reorthogonalisation is requested and delegates.
+One canonical three-term recurrence + reorth body + breakdown check,
+shared by LTLM, FTLM, HYBRID and KPM. Also flipped the standalone
+solver-struct defaults to match the dispatcher: `FTLMParameters`,
+`LTLMParameters`, `StaticResponseParameters`,
+`DynamicalResponseParameters` `full_reorthogonalization` is now
+`true` (the per-`EDParameters` defaults were already `true`, so this
+closes the gap for direct callers of the solver structs --- Python
+bindings, examples).
+
+**S1 #21 — GPU determinism + windowed-reorth disclosure.**
+Added `EDParameters::lanczos_seed` (default 0 = legacy deterministic
+seed 42; nonzero passes through verbatim so a GPU run can reproduce a
+CPU run with the same seed). `GPULanczos` gained a public
+`setSeed(uint64_t)` accessor; `GPUEDWrapper::runGPULanczos` and
+`runGPULanczosFixedSz` both pass the new seed through. When the
+device-memory budget allows storing fewer Lanczos vectors than
+`max_iter`, the kernel now emits a one-line stderr warning naming the
+regime change (**windowed** reorth vs the CPU default of **full**
+reorth); the same path also warns when memory is exhausted and reorth
+is skipped entirely. The `GPUOperator::apply` `const_cast` cache hazard
+(concurrent const applies on the same operator are UB) is documented
+but not enforced --- the fix requires a mutex per call which would
+hurt SpMV throughput. Acceptable until a real concurrent use case
+appears.
+
+**S1 #22 — Full auto-tune lock-flag plumbing.**
+Extended the `tolerance_locked` pattern (added in the May roll-out) to
+every other auto-tunable field: `max_iterations`, `max_subspace`,
+`ftlm_krylov_dim`, `ltlm_krylov_dim`, `tpq_delta_beta`,
+`tpq_taylor_order`. The corresponding fields on `AutoSolveOptions` and
+`ThermalOptions` are now `std::optional<T>`; setting them propagates
+both the value and the lock flag to `apply_auto_tune`, so passing a
+value that happens to equal the struct default is no longer silently
+retuned. Fixed a propagation bug for `tpq_energy_shift`:
+`base_params_from_options` used to gate the propagation on `> 0.0`, so
+the user-facing `0` sentinel (which means "auto-pick") never reached
+the dispatcher --- the old code silently kept the `EDParameters`
+default `1e5` and mTPQ auto-pick never fired through `thermal()`. New
+helper `make_auto_tune_overrides` centralises the
+`std::optional<T> → AutoTuneOverrides::*_locked` translation across
+the four `thermal()` auto-tune call sites and the `solve()` site.
+
+**S1 #24 — Dead-code removal.** Deleted
+`estimate_extreme_eigenvalues` and `auto_tpq_energy_shift` (~35 lines)
+from `include/ed/auto/thermal.h`. The mTPQ `LargeValue` auto-pick lives
+inside `exact_diagonalization_core` (a 24-iter Lanczos at the dispatch
+site) and is now the only path. A short historical comment in
+`thermal.h` records where the API went so future maintainers don't
+reinvent it.
+
+**S1 #25 — CPU/GPU KPM reorth parity.**
+`estimate_spectral_bounds_gpu` (`src/solvers/gpu/kpm_dos_gpu.cu`) now
+takes a `bool full_reorth` argument that mirrors the CPU default. When
+the caller requests it AND the saved Krylov basis fits on-device, the
+GPU spectral-bound Lanczos does full classical Gram-Schmidt against
+its retained basis on every step. Falls back to the 3-vector path with
+a stderr warning when memory is short, so the regime change is no
+longer silent. Caller (`kpm_dos_gpu`) passes
+`params.full_reorthogonalization` so the CPU and GPU code paths agree
+by default.
+
+**S1 #27 — `ed_log::warning` routing for silent-fallback warnings.**
+The two silent-fallback paths that a `setVerbosity(SILENT)` caller
+could not previously suppress now route through `ed_log::warning`: the
+in-memory GPU CPU-fallback warning in `exact_diagonalization_core`
+(`ed_wrapper.h`) and the sector-thermo recombine failure in
+`ed_wrapper_streaming.h` (both the Sz+symmetry and the symmetry-only
+branches). The auto-pilot diagnostic streams (already gated on
+`opts.verbose`) remain on raw `std::cerr` since they are explicitly
+user-opt-in. The banner-style `std::cout` blocks in
+`ed_wrapper.h` / `workflows.cpp` / `lanczos.cpp` progress prints are
+deferred to a per-banner pass.
+
+**S0 #3 — GPU FP32 CSR cache regression test.** Locked in the
+``GPUOperator::invalidateDerivedCaches()`` →
+``freeCsrFp32DeviceData()`` chain with a new
+`tests/unit/test_gpu_mixed_precision_spmv.cpp` case that mutates the
+term list between two FP32 matvecs and asserts both that the
+post-mutation matvec **differs measurably** from the pre-mutation one
+(the cache was actually rebuilt) AND that it **matches the CPU
+reference** within FP32 tolerance. Builds cleanly under `WITH_CUDA`;
+skips at runtime when no GPU is present.
+
+**S2 #28 — Public-mutable-state guidance.** Added explicit API guidance
+in `include/ed/core/operator.h` pointing direct-AoS-write callers at
+the typed setters (`addOneBodyTerm` / `addTwoBodyTerm` /
+`addThreeBodyTerm`) and at `commitPendingTransforms` for the existing
+direct-push pattern. Migration of `transform_data_` /
+`three_body_data_` / `terms_` to `protected:` with typed accessors is
+deferred --- an in-tree scan found ≈20 external callers, and the
+move is a one-release deprecation cycle best coordinated with the
+matvec-API revision. The size-aware `commitPendingTransforms` from
+S0 #2 ensures direct pushes are safe in the meantime; the
+Python-binding cache bug that motivated this is fixed at the root.
+
+**S2 #29 — Deprecation markers on dead public API.** Applied
+`[[deprecated("...")]]` with explicit replacement pointers to every
+dead-in-tree symbol surfaced by the audit:
+`CrossSectorMatVecOperator`, `MatVecOperator::nnz_per_row_estimate`,
+`Operator::getSparseMatrix`, `Operator::getTransformData`,
+`Operator::getTerms`, `FixedSzOperator::binarySearchState`,
+`OperatorRef`, `ed::matvec::adapt`. Callers will get a compile-time
+warning; one-release sunset window. `lanczos_real` is kept
+undeprecated because `qed_bindings.cpp` (the Python facade) still uses
+it --- the audit's "no dispatch caller" finding was technically right
+but missed the Python surface.
+
+**S2 #34 — Stale-comment cleanup.** Fixed the four documented
+stale-comment cases in `distributed_operator.h`, `auto/solve.h`,
+`core/ed_types.h` (`LOBPCG_GPU` deprecation note), and
+`core/ed_method_traits.h` (`normalize_method` scope vs
+`canonicalize_method_and_flags`). Also clarified the cost docstring
+of `ed::matvec::as_apply_function` to make the "one virtual call, no
+extra `std::function` allocation" claim precise.
+
+**Deferred (now documented with rationale).**
+- **S1 #6 / #7 / #8 / #33** — moving the four giant headers
+  (`ed_wrapper.h`, `streaming_symmetry.h`, `ed_wrapper_streaming.h`,
+  `workflows.cpp`, total ~9700 lines) into `.cpp` files. Multi-day
+  refactor; not a correctness blocker; should follow a build-time
+  baseline measurement.
+- **S1 #9** — `DistributedGPUOperator` and `DistributedSymmetryOperatorGPU`
+  escape the `MatVecOperator` hierarchy because they need an
+  `(MPI_Comm, cudaStream, device-pointer)` signature that the current
+  base class can't express. Adding a `DistributedMatVecOperator` base
+  is the right call but a meaningful API design rev.
+- **S1 #32** — migrating CPU solver `.cpp` files from
+  `std::function<void(const Complex*, Complex*, int)>` to
+  `const MatVecOperator&` would touch ~4000 lines for zero measurable
+  perf delta (the bridge adapter is one indirection on top of an
+  inherent virtual call). The clean refactor needs a
+  templated-solver-vs-polymorphic-ref decision which is a separate
+  API design conversation.
+- **S1 #37** — DSSF + spatial symmetry. The reusable pieces are in
+  place; the missing pieces are a `CrossSectorOrbitObservable`
+  rectangular operator in irrep basis and workflow glue that resolves
+  the target sector for each `(Q, dn_up)` pair. Documented in
+  `docs/architecture/SYMMETRY.md` §3 as the highest-ROI follow-up
+  workstream.
+
+---
+
+### Symmetry SOTA pass: TPQ + spatial symmetry; DSSF gap documented (May 2026)
+
+Follow-on to the structural-audit roll-out, scoped specifically to the
+symmetry pipeline for the three primary workflows. Audit document:
+`docs/architecture/SYMMETRY.md`. Test surface: **294/294** (up from
+293), including a new exact-thermo physics validation on a 4-site
+Heisenberg chain.
+
+**TPQ + spatial symmetry enabled (`include/ed/auto/thermal.h`).** The
+auto-pilot finite-T entry point used to skip spatial-irrep
+decomposition for the TPQ family (mTPQ, cTPQ, and their GPU variants),
+on the (incorrect-as-stated) grounds that "TPQ runs a single random
+state and does not factor cleanly through spatial irreps". The fix
+removes the `!tpq_family` exclusion and routes TPQ through the same
+`(Sz, irrep)` streaming-kernel loop that FTLM/LTLM/HYBRID/KPM_DOS use,
+followed by Z-weighted recombination via
+`ed::core::combine_sector_thermodynamics`. The math is identical to
+the FTLM case: each `(Sz, irrep)` sector's random vector
+`|psi_R^s>` drives a valid mTPQ chain whose final-state
+trajectory measures the sector's partition function, and
+`Z(beta) = sum_{n_up, k} Z_{n_up,k}(beta)`. The streaming kernel was
+already configured to allocate per-sector `output_dir` paths for the
+HDF5 trajectory files; no other change was needed. As a side effect,
+TPQ on systems with small spatial sectors becomes **more** accurate
+than no-symmetry TPQ -- many `(Sz, irrep)` sectors are dim=1 and hit
+the exact dispatcher short-circuit, eliminating their statistical
+noise entirely.
+
+**Tests added (`tests/unit/test_auto_thermal.cpp`).**
+
+- `[auto_pilot][thermal][tpq][symmetry][sota]` — TPQ exploits spatial
+  symmetry when fixtures are present (replaces the inverted
+  "falls back" test which encoded the now-incorrect behaviour).
+- `[auto_pilot][thermal][tpq][symmetry][sota][regression][physics]` —
+  TPQ + symmetry recombination tracks exact F(T) on a 4-site Heisenberg
+  chain (the exact spectrum is computed by full diagonalization and
+  the recombined F is checked against the truth at every T bin).
+
+**DSSF + spatial symmetry: gap documented as the next workstream.** The
+`compute_dynamical_response_workflow`, `compute_static_response_workflow`,
+and `compute_ground_state_dssf_workflow` paths in `src/cli/workflows.cpp`
+exploit Sz (including Sz-cross-sector via `CrossSectorObservable`) but
+do **not** yet decompose by spatial irrep. SOTA codes (HPhi, EDLib,
+QuSpin) route a momentum-resolved operator `O_Q` from source sector
+`(n_up_0, k_0)` to target sector `(n_up_0 + dn, k_0 + Q)` and run
+double-Lanczos in the target sector basis. The reusable pieces are
+already in place (`SymmetrizedHamiltonian` per-sector orbit bases +
+`applySymmetrized*`, the `compute_ltlm_dynamical_correlation_cross_sector`
+solver that accepts arbitrary `(H_outer, H_inner, O1, O2)` callbacks);
+the missing pieces are (1) a `CrossSectorOrbitObservable` rectangular
+operator in irrep basis and (2) workflow glue that resolves the target
+sector index for each `(Q, dn_up)` pair. This is tracked as
+`STRUCTURAL_AUDIT.md` S1 #37 and explained in detail in
+`docs/architecture/SYMMETRY.md` §3.
+
+### Structural-audit S0 / S1 roll-out (May 2026)
+
+End-to-end fix of every S0 (latent break / correctness bug) and the
+high-impact S1 (silent fallbacks, dead enums, layer leaks) called out
+by the May-2026 structural audit. The three primary workflows --
+ground-state / low-energy spectrum, finite-temperature, DSSF -- are now
+optimised end to end across CPU / GPU / MPI device axes; their auto-pilot
+entries dispatch consistently, honour every orthogonal flag, and never
+silently degrade behind the user's back.
+
+Test surface: **293/293** (up from 289) -- the four new tests lock in
+the S0 fixes (size-tracking cache invalidation, ``FixedSzOperator::
+apply_real`` virtual dispatch, complex three-body GATHER kernel) and
+the S1 tolerance-lock contract (``apply_auto_tune`` no longer retunes
+a user value that happens to equal the struct default).
+
+**S0 — Latent breaks (now fixed).**
+
+- **`DistributedGPUOperator` (`src/distributed/distributed_gpu_operator.cu`).**
+  Switched the term uploader from the long-removed
+  ``serial->{diag,offdiag,mixed}_{one,two}_body_`` SoA members to the
+  canonical ``serial->terms_`` storage after a
+  ``commitPendingTransforms()`` call. The bug was latent on this dev
+  host (no NCCL) but would have been a hard build break for anyone with
+  ``NCCL_FOUND=TRUE``.
+- **`Operator::commitPendingTransforms()`
+  (`include/ed/core/operator.h`).** Size-tracking: the SoA rebuild
+  trigger now compares ``transform_data_`` / ``three_body_data_``
+  sizes against the values recorded at the last commit, so direct
+  pushes into the AoS vectors (Python bindings, fixture builders, every
+  ``examples/0[1-8]_*``, every ``benchmarks/bench_*``, several CLI and
+  test sites) now honour the SoA rebuild on the next ``apply()``. The
+  rebuild also invalidates the matvec backend's CSR cache and the
+  ``isReal()`` cache, closing the entire chain. Recorded sizes are
+  carried through copy / move ctors so derived classes don't accidentally
+  resurrect a stale flag.
+- **GATHER three-body kernel (`include/ed/matvec/term_kernels_gather.h`).**
+  Replaced the ``double scalar = coefficient.real()`` accumulator with
+  a full ``Complex`` accumulator that mirrors the SCATTER path. The
+  distributed CPU SpMV now produces the same answer as the serial CPU
+  SpMV for any Hamiltonian with a complex three-body coupling.
+- **``Operator::apply_real`` is virtual; ``FixedSzOperator::apply_real``
+  overrides it (`include/ed/core/{operator,fixed_sz_operator}.h`).**
+  Without ``virtual``, binding a ``FixedSzOperator`` through an
+  ``Operator&`` reference and calling ``apply_real`` sliced to the base
+  ``dim == 2^N`` check, throwing on the legitimate sector dim. The
+  fix is a one-keyword change but matters anywhere a solver receives
+  the base reference (the MatVecOperator polymorphic surface, the
+  generic auto-pilot routes).
+
+**S1 — Architectural smells (now fixed).**
+
+- **Dispatcher: ``BICG`` and ``mTPQ_MPI`` clean throws
+  (`include/ed/core/ed_wrapper.h`).** Both used to fall through to the
+  generic ``default`` throw (``BICG``) or print to stderr and re-throw
+  (``mTPQ_MPI``). They now hit dedicated ``case`` arms with actionable
+  messages: BICG points users at ``LANCZOS`` / ``KRYLOV_SCHUR`` /
+  ``ARPACK_SM``; ``mTPQ_MPI`` explains the canonicalisation contract
+  and points at ``ed::distributed::distributed_tpq``.
+- **In-memory GPU fallback policy (`include/ed/core/ed_parameters.h`,
+  `include/ed/core/ed_wrapper.h`, `include/ed/auto/solve.h`).** Added
+  ``EDParameters::allow_gpu_cpu_fallback`` (default ``true`` for
+  back-compat). When the in-memory ``exact_diagonalization_core`` is
+  asked for a ``*_GPU`` method, it falls back to CPU silently as before
+  iff the flag is true; otherwise it throws with a message pointing
+  the caller at the file-based ``GPUOperator`` path.
+  ``auto_pilot::solve(Device::GPU, allow_fallback=false)`` now sets
+  the flag false so an explicit GPU request fails loudly instead of
+  silently producing CPU results.
+- **Streaming-symmetry GPU dispatch
+  (`include/ed/core/ed_wrapper_streaming.h`).** Honours
+  ``params.use_gpu`` in addition to the legacy
+  ``is_gpu_method(method)`` enum-suffix check, so modern callers that
+  pass ``LANCZOS + use_gpu=true`` (the auto-pilot route) finally hit
+  the per-sector GPU kernels. Before the fix the streaming path was
+  silently CPU-only for the modern entry.
+- **Canonicalisation in ``ed::exact_diagonalization``
+  (`include/ed/core/dispatch.h`).** Both overloads (directory + file)
+  now call ``canonicalize_method_and_flags`` up-front, so legacy
+  compound enums (``LANCZOS_GPU``, ``LANCZOS_GPU_FIXED_SZ``,
+  ``FTLM_GPU``, ...) collapse to base method + orthogonal flags
+  consistently across every downstream kernel. The file overload also
+  gained the same ``automorphism_results/`` auto-detect logic the
+  directory overload already had -- the two entries were asymmetric
+  for no reason.
+- **``AutoSolveOptions::symmetry_dir`` (`include/ed/auto/solve.h`).**
+  New optional field. When set, ``auto_pilot::solve`` routes to
+  ``ed::exact_diagonalization(symmetry_dir, ...)`` (the directory
+  entry, which streams through irrep sectors) instead of building the
+  in-memory SpMV. Combined with the existing Sz auto-detect, this is
+  the first C++ entry point that exploits spatial **and** Sz symmetry
+  automatically. Mirrors the Python ``qed.diag(H, symmetry=...)``
+  shape.
+- **``Device::MPI`` documentation
+  (`include/ed/auto/solve.h`).** Honest about the ScaLAPACK semantics
+  (it's not a generic MPI route -- the Lanczos / FTLM / TPQ distributed
+  kernels reach via ``ed_distributed_main`` or the Python facade).
+- **Thermal full-Hilbert auto-tune
+  (`include/ed/auto/thermal.h`).** Both no-Sz branches (the in-memory
+  fall-through and the directory entry's ``!sz_conserved`` path) now
+  apply ``diag::apply_auto_tune`` before the solver fires, matching
+  the Sz-loop's behaviour. Before the fix the no-Sz branches ran with
+  unscaled defaults and were orders of magnitude slower for any
+  realistic ``num_T`` / Krylov dim.
+- **Tolerance sentinel hygiene -- full lock
+  (`include/ed/auto/solve.h`, `include/ed/auto/thermal.h`,
+  `include/ed/auto/diag_tune.h`).** Both
+  ``AutoSolveOptions::tolerance`` and ``ThermalOptions::tolerance``
+  are now ``std::optional<double>``. ``std::nullopt`` leaves the
+  auto-tuner free to size the tolerance from the sector dim; an
+  explicit value passes through verbatim. Critically, the
+  ``AutoTuneOverrides::tolerance_locked`` bit is now plumbed through
+  ``apply_auto_tune`` from ``options.tolerance.has_value()`` at every
+  call site (one in ``solve``, four in ``thermal``), so the case
+  ``options.tolerance = 1e-10`` (same value as the struct default) is
+  also untouched by the sentinel-based retune -- closing the last hole
+  the first round of the fix left open.
+
+**Tests added (`tests/unit/test_operator_apply.cpp`,
+`tests/unit/test_diag_tune.cpp`).**
+
+- ``[regression][s0]``: direct AoS push between applies is honoured.
+  Builds a Heisenberg chain, calls ``apply`` (priming the SoA cache),
+  pushes a new ``Sz_0`` term, calls ``apply`` again, asserts the
+  expected diagonal contribution lands in the output.
+- ``[regression][s0][fixed_sz]``: ``FixedSzOperator::apply_real``
+  dispatches virtually through ``Operator&``. Without the
+  ``virtual`` keyword on the base, this would throw.
+- ``[regression][s0][three_body]``: ``gather_row`` with a pure-imag
+  three-body coupling matches the SCATTER ``Operator::apply`` to
+  1e-12 and produces a non-zero output (the pre-fix code would
+  return identically zero).
+- ``[regression][s1]``: ``apply_auto_tune`` honours
+  ``tolerance_locked`` when the user value happens to equal the
+  struct default. Without the lock the Aggressive level would have
+  retuned 1e-10 to a coarser threshold.
+
+**Documented as deferred (intentionally).**
+
+- S1 #19 (reorth consolidation), S1 #20 (one Krylov tridiag builder),
+  S1 #25 (KPM GPU spectral-bound reorth parity), S2 #29 (dead public
+  API pruning). These are large structural refactors of 5000-line
+  files; they are deferred to a dedicated cleanup pass to keep the
+  current rollout focused on correctness / pipeline-end-to-end
+  behaviour. See ``docs/architecture/STRUCTURAL_AUDIT.md`` for status.
+
+### Operator-class audit — final flush-out
+
+Final structural / line-by-line pass over **every** concrete operator
+class (`Operator`, `FixedSzOperator`, the eight `operator_types.h` and
+eight `fixed_sz_operator_types.h` subclasses, the GPU operator family,
+and the distributed wrappers). The goal stated by the user — "all
+operator classes are fully well flushed out" — meant: no
+archaeological comment blocks for code that's already gone, no
+redundant per-class duplication of helpers that already live in
+`ed::core::detail`, no silent cache-invalidation holes when a derived
+cache outlives its source.
+
+**`Operator` (`include/ed/core/operator.h`).**
+
+- Replaced the ~18-line "DEAD CODE REMOVED" comment block (left over
+  from the previous audit's bulk deletion of the symmetry-block
+  builder family) with a 5-line pointer to the canonical pipelines
+  in `streaming_symmetry.h` / `distributed_symmetry_operator.h`.
+- Extracted the duplicated 5-line HPhi text-file header parser into
+  `Operator::open_hphi_file_(filename, stream) -> num_terms`. The
+  three loaders (`loadFromFile`, `loadFromInterAllFile`,
+  `loadThreeBodyTerm`) now share one parser; each is reduced to its
+  per-line body.
+- Tidied the symmetry-derived public members (`symmetrized_block_ham_sizes`,
+  `symmetry_info`) with a comment block explaining why they live on
+  the base class (so `StreamingSymmetryOperator` /
+  `FixedSzStreamingSymmetryOperator` can populate them through the
+  inherited interface without forcing every plain `Operator` to
+  carry the symmetry typing).
+- Dropped trailing whitespace and a redundant `// Core Operator
+  Functions` spacer comment.
+
+**`FixedSzOperator` (`include/ed/core/fixed_sz_operator.h`).**
+
+- Replaced the ~10-line "Symmetry-block builder family REMOVED"
+  comment block with a 3-line pointer to
+  `FixedSzStreamingSymmetryOperator`.
+- Added the missing `getNUp()` accessor. The DSSF cross-sector
+  observable used to call `popcount(getBasisStates().front())` as a
+  workaround; that has been simplified to `op.getNUp()`.
+- Tightened comments on `binarySearchState` / `lookupState` /
+  `projectToFixedSz` / `embedToFull` / `getFixedSzMatrix`. Each is
+  now a one-paragraph docstring with intent + guarantee rather than
+  a 6-line history note.
+- Sector / basis accessors (`getFixedSzDim`, `getFullDim`,
+  `getNUp`, `getBasisStates`, `lin_index_table`) collected under one
+  `// Sector / basis introspection.` block.
+
+**`operator_types_detail.h`.**
+
+- Added `add_experimental_site_term(op, site, phase, cos_theta,
+  sin_theta)`: the canonical per-site expansion of
+  `phase * (cos(theta) Sz + sin(theta) Sx)` into the
+  (Sz, S+, S-) AoS terms. Both `ExperimentalOperator` /
+  `TransverseExperimentalOperator` (`operator_types.h`) and their
+  fixed-Sz counterparts in `fixed_sz_operator_types.h` now route
+  through this helper. Eliminates the last bit of per-class
+  three-term duplication; ensures Cartesian-Sx-expansion semantics
+  stay byte-identical between full-basis and fixed-Sz operators.
+
+**`GPUOperator` (`src/solvers/gpu/gpu_operator.cu`).**
+
+- Fixed a real cache-invalidation bug: `invalidateDerivedCaches()`
+  freed the FP64 assembled CSR but **not** the mixed-precision FP32
+  CSR derived from it. Because `buildCsrFp32OnDevice` exited early
+  on `fp32_csr_assembled_ && csr_dim_fp32_ == N`, a sequence
+  `addOneBodyTerm; matVec; addOneBodyTerm; matVec` at the same
+  dimension would reuse the FP32 cache from the **first** call
+  against the new FP64 CSR — silently producing wrong results in
+  the mixed-precision path. The fix adds an explicit
+  `freeCsrFp32DeviceData()` call when `fp32_csr_assembled_` is set.
+
+**`streaming_symmetry.h`.**
+
+- Added the previously transitive `#include <H5Cpp.h>`. This header
+  uses `H5::H5File`, `H5::DataSpace`, etc. directly but was relying
+  on `hdf5_symmetry_io.h` being pulled in via the now-cleaned-up
+  `operator.h`. The new direct include makes the dependency
+  explicit and decouples it from `operator.h`'s include hygiene.
+
+**Verification.** Clean build + full `ctest` (289 / 289 PASS, ~33 s
+wall) after each independently-shippable cleanup. No public-API
+breakage: all eight `operator_types` constructors, all eight
+`fixed_sz_operator_types` constructors, `Operator::apply` /
+`apply_real` / `getSparseMatrix`, `FixedSzOperator::buildFixedSzMatrix`
+/ `getFixedSzMatrix`, the GPU `matVec` family, the distributed
+operators — all retain identical signatures and observable
+behaviour.
+
+### Operator / apply construction audit — structural + perf cleanup
+
+Follow-up to the term-storage / matvec-backend revamp. A focused audit
+of `Operator`, `FixedSzOperator`, `MatVecBackend`, and the term
+kernels identified one real performance regression, several dead
+fields, and a handful of redundant helpers that had survived the
+previous refactor. All addressed in this pass; no API breakage for
+callers of `apply()` / `getSparseMatrix()` / `getFixedSzMatrix()`.
+
+**Performance fix (Tier A).**
+
+`FixedSzOperator::buildFixedSzMatrix()` was assembling the projected
+sparse matrix by probing the matvec backend with `dim` unit vectors
+and scanning each output column for non-zeros — **O(dim² × num_terms)**.
+The doc comment in `ed_wrapper.h` even said
+"This is O(nnz) — much faster than dim SpMV calls" but the
+implementation *was* the dim SpMV calls. For dim = 924 (N=12, n_up=6)
+this was ~10⁶ extra apply() calls; for the dense diagonalisation paths
+that route through `getFixedSzMatrix()` this was minutes of wall time
+when it should have been seconds. The new implementation calls
+`ed::matvec::kernel::emit_term_triplets<FixedSzBasisPolicy>` directly
+on the canonical AoS terms (the same SoT triplet emitter used by
+`MatVecBackend`'s CSR cache), and folds in `transforms_` (legacy
+`std::function`) closures with per-state Sz-sector projection.
+Result: **O(dim × num_terms)** — asymptotically optimal, matching the
+matrix-free path.
+
+**Dead-code removal (Tier B).**
+
+- `ed::matvec::kernel::emit_csr_triplets` (`term_kernels.h`): unused
+  serial copy of the canonical parallel `emit_term_triplets` in
+  `term_kernels_assemble.h`. ~95 lines deleted; the assembler is now
+  the **sole** triplet emitter in the codebase.
+- `Operator::apply_sparse` / dead public API
+  (`std::vector<Complex>` and raw-pointer overloads). No callers in
+  `src/`, `tests/`, or `python/`. Removed.
+- `Operator::buildSparseMatrix()` / `sparseMatrix_` / `matrixBuilt_`:
+  the old ColMajor-Eigen cache that backed `apply_sparse` and a
+  redundant `getSparseMatrix`. The new `getSparseMatrix()` is a thin
+  free-standing assembler over `emit_term_triplets` + the legacy
+  `transforms_` projection — no internal caching, no const_cast
+  workaround.
+- `Operator::operators_` `std::array<std::array<double,4>,3>` dead
+  member. Never read anywhere in the codebase. Removed.
+- `MixedTwoBody::sz_first` field (and the corresponding parameter on
+  `add_mixed_two_body` / `classify_route` / the GPU
+  `GpuClassifySink`). The Sz factor and the S+/S- flip commute (they
+  act on different sites), so no consumer ever needed the flag.
+  Verified by grep: 0 read sites across CPU `apply_terms` / GPU
+  `mixed_two_body_kernel` / `emit_term_triplets` / `gather_row`.
+- `Operator::separateTransformsByType()` deprecated stub: zero callers
+  after the GPU side migrated to its own non-deprecated copy in the
+  previous session. Removed.
+- Empty `if constexpr` block inside `apply_terms` (a half-written
+  prefetch experiment) replaced with a clearer comment about why the
+  basis-policy lookup is already prefetcher-friendly.
+
+**Minor perf refinements (Tier C, cheap parts).**
+
+- `CpuMatVecBackend::input_is_real(...)` now does a 64-element prefix
+  bail before the full sweep. Complex Lanczos vectors (the common
+  case past iteration 1) now exit after ~one cache line of work
+  instead of scanning the full vector each matvec. No effect on
+  genuinely-real inputs (they still scan the whole thing — there is
+  no positive-branch shortcut).
+- `apply_legacy_transforms_*` helpers explicitly documented as
+  SEQUENTIAL slow paths, with a TODO listing the six remaining
+  subclasses (`ExperimentalOperator`, `TransverseExperimentalOperator`,
+  `FixedSzSingleSiteOperator`, `FixedSzDoubleSiteOperator`,
+  `FixedSzExperimentalOperator`,
+  `FixedSzTransverseExperimentalOperator`) that should migrate to the
+  canonical AoS API so the `transforms_` channel can be deleted
+  entirely.
+
+**Deferred (Tier C, judgment calls).**
+
+- `make_backend_` / `ensure_backend_` virtual dispatch on every
+  first-apply — cost is in the noise, no profile motivates a
+  rebuild on construction.
+- Backend lifetime fragility in `FixedSzOperator` (the
+  `~FixedSzOperator() { backend_.reset(); }` requirement) — kept the
+  explicit reset, would need a `shared_ptr` to basis tables to truly
+  fix and the atomic cost is probably not worth it.
+- `apply_terms` parallelism cliff at `dim ≈ num_threads × 1024` —
+  matters only in a narrow dim band; revisit with profiles.
+
+**Verification.** Clean build + full `ctest` (289/289 PASS,
+39.6 s wall) + Python smoke (Heisenberg-4 ring: E₀ = -2.0,
+E₁ = -1.0 in both full-Hilbert and Sz = 0 sectors;
+`getFixedSzMatrix()` agrees with `apply()` to 1e-12). The dense
+diagonalisation tests (`test_auto_thermal`,
+`test_ed_solver_matrix_e2e`) continue to pass with the new
+O(dim × num_terms) assembler.
+
+### Fixed — Two symmetric latent bugs in the dual term-storage model
+
+Closes the symmetric pair of latent correctness issues that the
+"continue to roll out" structural sweep surfaced while auditing
+Problem 4 (the FixedSzOperator inheritance graph).
+
+**Setup.** After the Phase-4 term-storage refactor, `Operator`
+carried two parallel input channels for terms:
+
+  1. **Canonical AoS** — `transform_data_` + `three_body_data_`,
+     populated by `addOneBodyTerm` / `addTwoBodyTerm` /
+     `addThreeBodyTerm` and the file loaders. Read by the matvec
+     backend via the SoA cache `terms_` after
+     `commitPendingTransforms()`.
+  2. **Legacy std::function closures** — `transforms_`, populated
+     by `addTransform(std::function<...>)`. Used by ~6 subclasses
+     in `operator_types.h` / `fixed_sz_operator_types.h`
+     (`FixedSzSingleSiteOperator`, `FixedSzDoubleSiteOperator`,
+     `ExperimentalOperator`, `TransverseExperimentalOperator`,
+     `FixedSzExperimentalOperator`,
+     `FixedSzTransverseExperimentalOperator`).
+
+The two channels were never reconciled. Before this release:
+
+  - `apply()` / `apply_real()` walked path (1) only — the matvec
+    backend reads `terms_`. Operators populated exclusively via
+    `addTransform` silently returned **zeros** from `apply()`.
+  - `buildSparseMatrix()` / `getSparseMatrix()` walked path (2)
+    only — the assembly loop iterated `transforms_`. Operators
+    populated via the typed AoS API silently returned an
+    **empty** sparse matrix.
+
+Both bugs only emitted a warning on `buildSparseMatrix()` (the
+warning is now removed). `apply()` produced no diagnostic at all.
+Neither path had test coverage for the affected subclass family.
+
+**Fix.**
+
+1. `Operator::apply` / `Operator::apply_real` now invoke an
+   `apply_legacy_transforms_(...)` accumulator after the matvec
+   backend. The accumulator walks `transforms_` and adds the
+   resulting contributions into `out`. The hot path is a single
+   `transforms_.empty()` test — users on the canonical AoS API
+   pay nothing.
+
+2. `FixedSzOperator::apply` / `apply_real` carry an analogous
+   `apply_legacy_transforms_fixed_sz_*_` that performs the
+   Sz-sector projection: each transform takes a full-Hilbert
+   basis index `basis_states_[i]`, the returned full-Hilbert
+   target index is mapped back to the sector via the existing
+   `lookupState(...)` (O(1) Lin table), and only in-sector hits
+   are accumulated. States that fall outside the sector are
+   silently dropped, matching the legacy `buildFixedSzMatrix`
+   projection semantics.
+
+3. `Operator::buildSparseMatrix` now appends a second pass that
+   walks `transform_data_` + `three_body_data_` via the new
+   `ed::matvec::kernel::emit_term_triplets<...>` helper (see
+   below). The assembled matrix is correct regardless of which
+   input channel populated the operator. The "WARNING:
+   buildSparseMatrix() called but operator data is in
+   transform_data_" message is gone.
+
+**Tests.** Full `ctest -j8` suite remains green (289/289). The
+two affected subclass families had no pre-existing regression
+tests; the Python `qed.diag` smoke on the canonical-AoS
+Heisenberg-4 ring continues to return `E0 = -2.0`, `E1 = -1.0`
+exactly through the now-doubly-defensive `buildSparseMatrix` /
+`apply` paths.
+
+### Changed — ASSEMBLE kernel factored out; matvec single-source-of-truth complete
+
+The unified term kernel now has all three structural forms living
+in dedicated headers in `ed/matvec/`:
+
+  | Direction  | Header                       | Operation                  |
+  |------------|------------------------------|----------------------------|
+  | SCATTER    | `term_kernels.h`             | `y[c] += <c|H|b> v[b]`     |
+  | GATHER     | `term_kernels_gather.h`      | `y[r] += <r|H|c> v[c]`     |
+  | ASSEMBLE   | `term_kernels_assemble.h`    | `triplets.emplace(c,b,…)`  |
+
+All three share **byte-identical** op_type / bit-flip / popcount
+semantics. The SCATTER kernel is the canonical reference; the
+other two are tested against it via the existing
+distributed-equivalence and CSR-vs-matrix-free unit tests.
+
+`emit_term_triplets<BasisPolicy, Scalar>(basis, spin_l,
+diag_one_body, offdiag_one_body, diag_two_body, mixed_two_body,
+offdiag_two_body, three_body, triplets)` is the public free
+template. The previously inlined private `emit_triplets_`
+(plus `emit_`, `emit_if_in_basis_`, `coerce_<Scalar>`) inside
+`CpuMatVecBackend` has been deleted (~140 lines). Both
+consumers — the backend's CSR cache (`ensure_csr_complex` /
+`ensure_csr_real`) and `Operator::buildSparseMatrix` — now
+delegate to the same free helper.
+
+### Changed — GPU classification migrated through `TermStorage::classify_route`
+
+`GPUOperator::separateTransformsByType` previously open-coded the
+op_type → SoA-bin decision tree against the GPU-side AoS
+(`GPUTransformData`) and GPU-side SoA bins (`GPUDiagonalOneBody`,
+`GPUOffDiagonalOneBody`, `GPUDiagonalTwoBody`, `GPUMixedTwoBody`,
+`GPUOffDiagonalTwoBody`). The classification logic was a
+byte-for-byte duplicate of the CPU's pre-refactor
+`separateTransformsByType` — any future change to the decision
+tree on one side risked drifting from the other.
+
+After this release, the GPU's `separateTransformsByType` builds
+a thin host-side `GpuClassifySink` adapter (six `add_*` setter
+methods that push into the GPU SoA `std::vector`s) and calls
+`ed::matvec::TermStorage::classify_route(sink, transform_data_,
+empty_three_body, /*conv=*/identity)`. The exact same template
+the CPU's `commitPendingTransforms()` uses now drives the GPU
+fan-out, so the decision tree lives in **exactly one** location
+across the whole codebase.
+
+GPU specifics preserved:
+  * The `sz_first` flag that the CPU mixed-two-body kernel uses
+    for Sz-evaluation-point disambiguation is silently dropped
+    by the GPU sink. The GPU kernel enforces
+    `sz_site != flip_site` (the `addInteractAll` invariant), so
+    the Sz bit is identical on source and destination states and
+    the flag is irrelevant on the device.
+  * Three-body terms still live in their own AoS (`three_body_data_`)
+    on the GPU; the sink's `add_three_body` is a no-op and the
+    classify_route call is made with an empty three-body input.
+
+### Changed — Triple term storage collapsed to a single canonical AoS + lazy SoA cache
+
+Closes Problem 1 of the "complete roll-out" structural audit follow-up.
+
+**Before.** `Operator` carried THREE coexisting term representations:
+
+  1. `transforms_`     — `std::vector<std::function<...>>` (legacy)
+  2. `transform_data_` — `std::vector<TransformData>` (AoS, the
+     classification source)
+  3. `diag_one_body_`, `offdiag_one_body_`, `diag_two_body_`,
+     `mixed_two_body_`, `offdiag_two_body_`, `three_body_data_` —
+     six independent `std::vector<...>`s holding the SoA bins
+     consumed by the hot-path matvec kernel
+     (`ed::matvec::kernel::apply_terms`)
+
+External code pushed into (2); a `transforms_separated_` flag plus a
+lazy `separateTransformsByType()` call inside the first `apply()`
+fanned the AoS list into the SoA bins. `invalidateMatrixCaches()`
+did NOT clear `transforms_separated_`, so the following innocuous
+sequence silently dropped the new term:
+
+```cpp
+op.transform_data_.push_back(new_term);
+op.invalidateMatrixCaches();   // ← did NOT mark SoA stale
+op.apply(in, out, n);          // ← reads SoA, sees the old terms
+```
+
+(The matrix-cache was correctly invalidated, but the SoA cache the
+matvec kernel actually reads was left untouched.) The lazy fan-out
+also required a `const_cast` inside the otherwise-`const`
+`apply()` chain, and the classification decision tree
+(`op_type ∈ {0,1,2}` → `{diag,offdiag,mixed} × {one,two}body`) was
+duplicated between `Operator::separateTransformsByType` and
+`GPUOperator::separateTransformsByType` with no mechanism enforcing
+that they stay in sync.
+
+**After.**
+
+  - A new header `include/ed/matvec/term_storage.h` defines
+    `ed::matvec::TermStorage`: a plain SoA carrier with six typed
+    bins (`diag_one_body`, `offdiag_one_body`, `diag_two_body`,
+    `mixed_two_body`, `offdiag_two_body`, `three_body`) and typed
+    setters (`add_diag_one_body`, `add_offdiag_one_body`, ...) plus
+    classify-and-route helpers (`add_one_body`, `add_two_body`).
+
+  - `Operator` keeps `transform_data_` and `three_body_data_` as the
+    **canonical AoS** (these are what file loaders and the
+    `addOneBodyTerm` / `addTwoBodyTerm` / `addThreeBodyTerm` public
+    setters write to). The six standalone SoA vectors are gone; in
+    their place a single `mutable ed::matvec::TermStorage terms_`
+    cache plus a `mutable bool terms_fresh_` flag.
+    `invalidateMatrixCaches()` now clears `terms_fresh_` along with
+    the CSR / real caches, restoring the invariant that any mutation
+    of the canonical AoS forces the SoA cache to be rebuilt.
+
+  - `commitPendingTransforms()` replaces the old
+    `separateTransformsByType()`: it's a no-op when
+    `terms_fresh_ == true`, otherwise it clears `terms_` and
+    repopulates it from the canonical AoS via
+    `TermStorage::classify_route(...)` (see below). It is called
+    eagerly from every reader of `terms_`
+    (`apply`, `apply_real`, `isReal`, `term_view_`, the distributed
+    operator's flip-pattern extractor, `has_zeeman_field`,
+    `sanity_check.cpp`).
+
+  - `TermStorage::classify_route<Sink, Aos, Aos3, Conv>(sink, aos,
+    aos3, conv)` is the new **single source of truth** for the
+    classification decision tree. The CPU's
+    `commitPendingTransforms()` delegates to it directly; the GPU's
+    analogous `GPUOperator::separateTransformsByType()` is now
+    structurally identical (same `op_type == 2` branches, same
+    `sz_first` convention for mixed two-body) and is documented as a
+    future migration target once the GPU and CPU share a sink
+    adapter (see "Deferred" below).
+
+**Net effect.** The latent
+`invalidate-without-cache-fresh-flag-clear` bug is gone by
+construction. The `const_cast` inside `apply()` is gone. The
+classification logic exists in exactly one place
+(`TermStorage::classify_route`). External code that pokes at the
+storage gets a clear API: typed setters route to typed bins, with
+no flag to keep in sync with cache invalidation.
+
+**Backward compatibility.** All existing read sites that referenced
+the old member-level SoA vectors (`op.diag_one_body_`,
+`op.offdiag_one_body_`, ...) have been migrated to
+`op.commitPendingTransforms(); auto& v = op.terms_.diag_one_body;`
+(see `sanity_check.cpp`, `distributed_operator.cpp`, `auto/solve.h`).
+The public typed setters (`addOneBodyTerm`, `addTwoBodyTerm`,
+`addThreeBodyTerm`) keep their signatures. File loaders
+(`loadFromFile`, `loadFromInterAllFile`, `loadThreeBodyTerm`,
+`loadonebodycorrelation`, `loadtwobodycorrelation`) now use the
+public typed setters instead of directly pushing into
+`transform_data_`, so they correctly trigger cache invalidation.
+
+`std::vector<Operator>` continues to work: `Operator` now has
+explicit copy/move constructors and assignment operators because
+of the `std::unique_ptr<MatVecBackendBase>` member it carries
+(the destination's backend is reset and lazily rebuilt against
+its own term list).
+
+### Changed — DistributedOperator GATHER kernel factored into `ed::matvec::kernel::gather_row`
+
+Closes Problem 3 of the structural audit follow-up.
+
+**Before.** `DistributedOperator::apply_local(...)` inlined six
+back-to-back `for` loops walking the SoA bins on `op_->terms_.*`
+in GATHER form: for each globally-owned output row `r`, scan every
+SoA bin, deduce the input row `c` from the bit-flip pattern, look
+up `v[c]` via the per-rank lookup table, and accumulate into
+`y[r]`. This was a byte-for-byte hand-reimplementation of the
+SCATTER kernel's `op_type` decision tree (`term_kernels.h`),
+specialized to one-flip / two-flip / Sz-only cases. Any future
+change to the bit-flip semantics on one side risked silently
+drifting from the other.
+
+**After.** A new header `include/ed/matvec/term_kernels_gather.h`
+defines `ed::matvec::kernel::gather_row<GetV>(r, v_local_at_r,
+terms, spin_l, get_v)`, the structural dual of
+`ed::matvec::kernel::apply_terms`. The `GetV` callable resolves
+remote-vs-local lookup at the call site (MPI per-rank tables,
+future NCCL, future page-faulting GPU buffers, ...).
+`DistributedOperator::apply_local` now reads:
+
+```cpp
+op_->commitPendingTransforms();
+const auto& terms = op_->terms_;
+for (uint64_t r_local = 0; r_local < local_dim; ++r_local) {
+    const uint64_t r = base + r_local;
+    y[r_local] = ed::matvec::kernel::gather_row(
+        r, v_local[r_local], terms, spin_l,
+        [&](uint64_t c){ return v_lookup_(c); });
+}
+```
+
+**Net effect.** GATHER and SCATTER semantics live in two
+templated headers in the same namespace, share the same
+`TermStorage` schema, and use the same `op_type` encoding. Bit-flip
+correctness is now enforced by reading both kernels side-by-side.
+The distributed-equivalence tests
+(`test_distributed_against_serial`) continue to pass at every
+problem size in the matrix.
+
+### Changed — Operator matvec dispatch unified behind a single `MatVecBackend` strategy
+
+Closes the follow-up to the structural audit: *"yeah let's rework this so
+that it is structurally clean and elegant. Make sure everything is
+production level clean. Also is there a point of doing all of these
+types of apply? I want to just keep one working one if possible."*
+
+**Before.** `Operator::apply()` and `FixedSzOperator::apply()` each
+contained the same three-way dispatch tree (assembled-CSR-complex /
+assembled-CSR-real / matrix-free) inlined against their own private
+row-major CSR caches (`sparseMatrixRow_` / `sparseMatrixRealRow_` /
+`fixed_sz_csr_` / `fixed_sz_csr_real_`) and scratch buffers. Both
+operators exposed four near-identical apply_* member functions
+(`apply_optimized`, `apply_real`, `apply_via_csr_parallel`,
+`apply_via_csr_parallel_real`, plus the Sz-projected variants), and
+the CSR caches were stored as `mutable` on the operator so a
+`const` `apply()` could lazily build them — which forced a
+`const_cast`-style pattern and made `Operator` accumulate state
+that isn't conceptually part of the term list.
+
+**After.** A new strategy class, `ed::matvec::MatVecBackendBase`
+(declared in `ed/matvec/matvec_backend.h`), encapsulates the SpMV
+dispatch. `Operator` and `FixedSzOperator` each expose exactly two
+matvec entry points — `apply(complex)` and `apply_real(double)` —
+and both are one-line delegations to the backend.
+
+The concrete backend, `CpuMatVecBackend<BasisPolicy, ...>`, owns the
+CSR caches and scratch buffers (no more `mutable` on the operator
+for these), chooses matrix-free vs assembled-CSR based on a single
+`MatVecTunables` struct read once at construction (no more
+`getenv()` per matvec), and dispatches real-vs-complex via the same
+`BasisPolicy` template the matrix-free kernel already uses. The
+Sz-projected backend is selected by `FixedSzOperator` overriding a
+single virtual factory method (`make_backend_()`); everything else
+is inherited.
+
+The four parallel CSR triplet builders that previously lived on
+`Operator` and `FixedSzOperator` (`buildSparseMatrixFromData`,
+`buildSparseMatrixFromDataReal`, `appendFixedSzTriplets`,
+`appendFixedSzTripletsReal`) have been deleted and replaced with a
+single templated emitter inside the backend; the `may_leave_basis`
+compile-time flag on the basis policy elides the index-lookup check
+when it's unreachable.
+
+**Net effect on the public API:**
+
+| Class               | Public matvec API after the refactor                         |
+|---------------------|--------------------------------------------------------------|
+| `Operator`          | `apply(Complex, ...)`, `apply_real(double, ...)`             |
+| `FixedSzOperator`   | `apply(Complex, ...)`, `apply_real(double, ...)`             |
+
+Internally that's still TWO entry points per class instead of one —
+because the real-arithmetic fast path is a genuine 2× perf win on
+real Hamiltonians (Heisenberg, Ising, transverse-field Ising, ...)
+that `lanczos_real` and the FTLM real path rely on — but neither
+the dispatch tree nor the CSR caches show up in the operator
+anymore.
+
+**Backward compatibility.** All existing callers of `apply()` see
+identical behaviour. The two Python-binding lambdas in
+`qed_bindings.cpp` (`make_hv_real`) now call the consolidated
+`apply_real`, so `lanczos_real` keeps its real-arithmetic fast
+path. Legacy `apply_sparse` / `getSparseMatrix` /
+`getFixedSzMatrix` (built from the `transforms_` std::function
+list) are preserved for code paths that need a materialised
+matrix (full diagonalisation, the Eigen dense path).
+
+**Knobs.** Two new environment variables apply to both bases
+uniformly; the legacy per-basis ones still work and take lower
+precedence:
+
+  - `ED_CSR_FORCE=0|1` — force matrix-free / assembled
+  - `ED_CSR_DIM_MAX=N` — basis-dim cutoff above which the backend
+    stays matrix-free (defaults: `1<<20` full, `1<<22` fixed-Sz)
+
+Legacy: `ED_USE_SPARSE` / `ED_SPARSE_DIM_MAX` (full only),
+`ED_FIXED_SZ_USE_SPARSE` / `ED_FIXED_SZ_SPARSE_DIM_MAX` (fixed-Sz).
+
+**Files touched:**
+
+  - `include/ed/matvec/matvec_backend.h` — NEW; the strategy class
+  - `include/ed/core/operator.h` — `apply()` / `apply_real()`
+    collapsed; CSR caches + 4 inlined SpMV variants deleted
+    (~470 lines removed)
+  - `include/ed/core/fixed_sz_operator.h` — `apply()` / `apply_real()`
+    collapsed; CSR caches + scratch buffers + 4 helper functions
+    deleted (~280 lines removed)
+  - `python/qed/_bindings/qed_bindings.cpp` — `make_hv_real`
+    consolidated into a single template
+
+**Tests.** Full `ctest -j8` suite is green: 289/289 tests pass
+(previously the same 289 also passed). Targeted suites
+`test_operator_apply`, `test_fixed_sz_operator`,
+`test_lanczos_variants`, `test_full_diagonalization`,
+`test_thermal_methods` cover both the full-Hilbert and the Sz-
+projected paths and report `apply_real(re) == real(apply(complex(re)))`
+to ‖·‖₂ < 1e-12 across multiple seeds. Python-side smoke test:
+`qed.diag` on a 4-site Heisenberg ring returns `E0 = -2.0`
+exactly in both the full-Hilbert and the `sz=0` runs; `qed.thermal`
+FTLM gives the expected Schottky-shaped `C_v(T)` across all
+n_up sectors.
+
+### Deferred — Problem 4 only (FixedSz collapse to composition)
+
+The structural audit identified four problems with the operator
+hierarchy. Problems 1 (term storage), 2 (GPU `MatVecBackend`
+integration via `classify_route`), and 3 (distributed GATHER
+kernel) all ship in this release. Problem 4 remains explicitly
+deferred to a dedicated session.
+
+**Problem 4 — FixedSz from inheritance to composition.**
+`FixedSzOperator` is a subclass of `Operator` carrying a
+`FixedSzBasis` index member and overriding `dim()` / `apply()`
+to walk the Sz-projected basis. The "LSP violation" framing in
+the original audit was overstated — virtual dispatch on
+`dim()` and `apply()` handles the projected-vs-full mismatch
+correctly, and every caller holds `FixedSzOperator&` /
+`FixedSzOperator*` specifically. The audit's actual concrete
+concerns turned out to be the two latent dual-storage bugs
+documented above, both of which are now closed.
+
+Full composition collapse would make `Operator` own a
+`BasisPolicy` variant (`FullBasis | FixedSzBasis |
+SymmetryBasis`) and turn `FixedSzOperator(...)` into a thin
+factory function. The migration touches ~54 implementation
+callsites holding `FixedSzOperator&` and ~10 convenience
+subclasses in `fixed_sz_operator_types.h`. With the latent
+bugs closed, the inheritance hierarchy has no observed
+behavioural issues; collapse is a 1-2 day mechanical-but-tedious
+refactor that does not change runtime semantics. Kept as-is
+until either (a) a dedicated session is available to land it
+cleanly, or (b) a new symptom surfaces that requires the
+collapse to fix.
+
+### Added — Universal coverage of every finite-T method through the unified `thermal()` entry point
+
+Closes the audit follow-up: *"implement an optimized, symmetry
+exploiting, but completely automatic routine for all the other
+finite temperature methods too. Make sure everything is unified and
+clean."*
+
+Prior to this change `ed::auto_pilot::thermal(...)` (and its Python
+mirror `qed.thermal(...)`) only delivered the unified Sz / symmetry
+recombination story for FTLM. Calling it with `LTLM`, `HYBRID`,
+`KPM_DOS`, `mTPQ`, or `cTPQ` either crashed (TPQ tried to write
+HDF5 trajectories to the `/dev/null` output sentinel), returned
+identically-zero recombined thermo (TPQ's chain didn't progress on
+small systems because `tpq_energy_shift` defaulted to `1e5`), or
+silently dropped the user's `T_min` / `T_max` (KPM_DOS was not
+flagged as a thermal method, so the `_compose_params_for_diag`
+shim left it at its built-in 1e-3 default).
+
+This release closes every one of those holes and ships the
+matching test coverage.
+
+**Per-method status after this change:**
+
+| Method   | Auto-Sz | Auto-Spatial-Symmetry | T_min/T_max honored | Tested via `thermal()` |
+|----------|:-------:|:---------------------:|:-------------------:|:----------------------:|
+| FTLM     | ✓       | ✓ (directory form)    | ✓                   | ✓ (statistical match)  |
+| LTLM     | ✓       | ✓ (directory form)    | ✓                   | ✓ (sanity)             |
+| HYBRID   | ✓       | ✓ (directory form)    | ✓                   | ✓ (sanity)             |
+| KPM_DOS  | ✓       | ✓ (directory form)    | ✓                   | ✓ (sanity + T-range)   |
+| mTPQ     | ✓       | n/a (single random state, see note) | ✓ | ✓ (finite + grid)      |
+| cTPQ     | ✓       | n/a (single random state, see note) | ✓ | ✓ (finite + grid)      |
+
+**Note on TPQ + spatial symmetry.** TPQ methods evolve a single
+random state on the full (Sz-projected) Hilbert space. Per-irrep
+streaming would require synthesizing a properly-projected random
+seed in each sector and recombining the trajectories with the
+correct irrep weights, which is genuinely a research-level
+problem -- the canonical TPQ literature does not address it. The
+unified `thermal()` entry point therefore silently disables
+spatial-symmetry decomposition for `mTPQ` / `cTPQ` even when
+`automorphism_results/` is present in the input directory; the Sz
+axis is still fully exploited. `used_symmetry_decomposition`
+reports `false` in this case so callers can see the fallback.
+
+**Key C++ changes:**
+
+  * `include/ed/auto/thermal.h`:
+    - `ThermalOptions` gained method-specific knobs:
+      `kpm_num_moments`, `kpm_num_random_vectors`,
+      `hybrid_crossover_temperature`, `hybrid_auto_crossover`,
+      `tpq_num_measure_points`, `tpq_measure_beta_min/max`
+      (auto-derived from (T_min, T_max) when left at 0),
+      `tpq_delta_beta`, `tpq_taylor_order`,
+      `tpq_measurement_interval`, `tpq_energy_shift` (0 = auto-pick).
+    - New helper `detail::make_tpq_sector_workdir(...)` allocates a
+      per-sector scratch directory when the user did not supply an
+      `output_dir`. TPQ writes its per-sample HDF5 trajectories
+      there; `compute_tpq_unified_thermo` reads them back inside
+      `exact_diagonalization_core` and populates
+      `EDResults.thermo_data`; `thermal()` cleans up afterwards.
+    - The directory form's `has_sym` is force-cleared for TPQ
+      methods so they bypass the streaming-symmetry path.
+
+  * `include/ed/core/ed_wrapper.h` (single source of truth for
+    `exact_diagonalization_core`):
+    - `mTPQ`: trivial-sector short-circuit for `dim == 1` (the
+      `D_S = log2(1) = 0` factor in the (L - H/D_S)|v> recursion
+      otherwise produces `β = -∞` and unusable trajectories) +
+      auto-pick of `tpq_energy_shift` via a 24-step Lanczos
+      spectral-bound estimate when the caller passes the sentinel
+      `tpq_energy_shift == 0`. Without auto-pick the historical
+      `1e5` default produces `β << 1` in `max_iterations` steps on
+      small/medium systems and `compute_tpq_unified_thermo` returns
+      zeros.
+    - `cTPQ`: same trivial-sector short-circuit (cTPQ's Taylor
+      expansion of `exp(-Δβ H)` is degenerate for `dim == 1`).
+    - Both short-circuits now lay down the standard
+      *log-spaced* T grid used by `compute_tpq_unified_thermo`, so
+      the recombiner sees a consistent T axis across sectors.
+    - mTPQ/cTPQ branches populate `results.thermo_data` after the
+      iteration completes by calling `compute_tpq_unified_thermo`
+      on `params.output_dir`. Before this, TPQ branches returned
+      empty `thermo_data` and the `thermal()` recombiner had
+      nothing to work with.
+
+  * `src/solvers/cpu/TPQ.cpp`:
+    - New free function `compute_tpq_unified_thermo(dir, T_min,
+      T_max, num_T)` extracts the trajectory-averaging + log-T
+      interpolation into a single source of truth and returns a
+      `ThermodynamicData` block. The legacy
+      `convert_tpq_to_unified_thermo` was refactored to delegate
+      to it so the on-disk HDF5 output and the in-memory
+      `EDResults.thermo_data` are byte-identical.
+    - Every `MPI_*` collective is now guarded by
+      `MPI_Initialized()`; building with `WITH_MPI=ON` no longer
+      crashes when MPI is not actually launched. This was a
+      pre-existing latent bug that only surfaced when running the
+      new TPQ tests outside `mpirun`.
+
+  * `src/solvers/cpu/ltlm.cpp`:
+    - `save_ltlm_results(...)` now honours the `/dev/null` output
+      sentinel via `HDF5IO::isDisabledOutputPath`. Before this,
+      passing `output_dir = ""` (which `ed_wrapper.h` substitutes
+      with `/dev/null` for uniform downstream checks) caused
+      `save_ltlm_results` to attempt an `H5F_ACC_RDWR` open on
+      `/dev/null/ed_results.h5`, leading to a HDF5 truncate error
+      and SIGSEGV at file close.
+
+  * `include/ed/core/symmetry_metadata.h`:
+    - `loadMinimalGenerators` now accepts both the top-level JSON
+      array form `[{"permutation":..., "order":...}, ...]` (what
+      the Python `automorphism` tool writes) and the
+      `{"generators": [...]}` object form (what some C++ pipelines
+      write). The smoke fixture
+      `tests/fixtures/chain4/automorphism_results/` uses the
+      array form, and was tripping the loader after the recent
+      `symmetry_data_present` auto-detection improvement.
+
+**Key Python changes:**
+
+  * `python/qed/thermal.py`:
+    - `qed.thermal(...)` signature gained the same method-specific
+      knobs as `ThermalOptions` (KPM, HYBRID, TPQ).
+    - TPQ scratch-directory mechanism implemented at the Python
+      level too: when `output_dir=""` and method is mTPQ/cTPQ, a
+      per-sector temp dir is allocated, passed into the C++
+      dispatcher, and `shutil.rmtree`'d in a `finally` after the
+      iteration. Mirrors the C++ helper.
+    - `used_symmetry_decomposition` returns `False` for TPQ
+      methods on the directory form to expose the symmetry skip.
+
+  * `python/qed/workflow.py`:
+    - `KPM_DOS` is now in `_thermal_method_names`, so
+      `_compose_params_for_diag` propagates the user's
+      `temp_min` / `temp_max` / `num_temp_bins` to the C++ side
+      instead of silently leaving them at the 1e-3 / 10.0
+      built-in defaults.
+
+**Tests added.** `tests/unit/test_auto_thermal.cpp` now covers
+LTLM, HYBRID, KPM_DOS, mTPQ, cTPQ through `thermal()` end-to-end,
+asserts that every T bin carries finite (non-NaN, non-Inf) data,
+asserts that per-sector blocks share a single T axis (the
+regression guard for the dim=1 mTPQ short-circuit), and asserts
+the silent symmetry skip for TPQ on a symmetry-enabled directory
+fixture. The full suite is 289/289 green.
+
+### Fixed — pybind11 overload order: `qed.exact_diagonalization_core(FixedSzOperator, ...)` ran on the full Hilbert space
+
+Discovered while smoke-testing the new ``qed.thermal(...)`` entry
+point on a 4-site Heisenberg PBC chain: every Sz sector came back
+with the **global** ground-state energy (-2.0), regardless of
+``n_up``. Tracing through the bindings showed that the
+``exact_diagonalization_core`` overload accepting ``const Operator&``
+was registered *before* the ``const FixedSzOperator&`` overload.
+``FixedSzOperator`` is-a ``Operator``, and pybind11 dispatches
+overloads in registration order, so every ``FixedSzOperator``
+argument silently bound to the base-class overload, the dim was
+computed as ``1 << op.getNumBits()`` (the FULL Hilbert space), and
+the solver ran on the unprojected matvec.
+
+Fix: register the ``FixedSzOperator`` overload first in
+``python/qed/_bindings/dispatcher_bindings.cpp`` so pybind11 tries
+the derived-class binding before falling back to the base. The
+``run_core_fixed`` lambda was already correct -- it set
+``params.use_fixed_sz = true`` and passed ``dim =
+op.getFixedSzDim()`` -- it was just never reached. Verified with
+``FULL`` per sector on the same chain:
+
+```
+n_up=0 dim=1   eig=  1.0     (FM all-down)
+n_up=1 dim=4   eig= -1.0     (one magnon, lowest)
+n_up=2 dim=6   eig= -2.0     (singlet ground state)
+n_up=3 dim=4   eig= -1.0
+n_up=4 dim=1   eig=  1.0     (FM all-up)
+```
+
+This bug had been silently disabling ALL Python-side ``sz=...``
+projections through ``qed.diag``/``qed.thermal`` for every method
+that does not route via the directory dispatcher. Existing tests
+did not catch it because they either (a) ran on the full Hilbert
+space (no sz=), (b) routed through the directory dispatcher (which
+goes through ``exact_diagonalization_from_directory`` and sets
+``params.use_fixed_sz`` directly), or (c) used the C++ tests
+exclusively. The new ``qed.thermal(...)`` reference comparison
+against the dense full spectrum on the same N=4 chain now agrees
+within FTLM statistical tolerance (max |ΔE| ~3e-2 with 32 samples,
+max |ΔC_v| ~1e-1).
+
+### Added — One canonical finite-T entry point: `ed::auto_pilot::thermal(...)`
+
+Closes the audit follow-up: *"why are there so many different ways here?
+I just want one unified way that automatically gives me the proper
+thermodynamics just fully optimized with the sz and symmetry sectors."*
+
+Before this change a user who wanted FTLM thermodynamics on a
+Sz-conserving, spatially-symmetric Hamiltonian had to either:
+
+  * call `ed::auto_pilot::solve(H, {solver=FTLM})` -- but auto-Sz would
+    project to a single sector, throwing away the partition-function
+    contributions of all other Sz blocks; or
+  * call `ed::exact_diagonalization(dir, FTLM, params)` and manually
+    pick `use_fixed_sz` / `n_up` / `use_symmetry` -- correct, but
+    operates on one (Sz, irrep) decomposition at a time and never
+    iterates Sz; or
+  * write their own outer loop over `n_up`, build a `FixedSzOperator`
+    per sector, dispatch FTLM, collect `ThermodynamicData`, and call
+    `combine_sector_thermodynamics` themselves.
+
+The new header `include/ed/auto/thermal.h` is the single answer to the
+audit question. Public surface:
+
+```cpp
+#include <ed/auto/thermal.h>
+
+// In-memory Hamiltonian. Auto-detects Sz conservation; iterates the
+// full n_up window; Z-recombines into full-Hilbert thermodynamics.
+auto thermo = ed::auto_pilot::thermal(
+    H, DiagonalizationMethod::FTLM,
+    { .T_min = 0.05, .T_max = 5.0, .num_T = 64 });
+
+// Directory-based Hamiltonian. Auto-detects BOTH Sz conservation and
+// spatial symmetry (`automorphism_results/`). Decomposes by
+// (Sz x irrep) when both axes are available, Z-recombines across both.
+auto thermo = ed::auto_pilot::thermal(
+    "ed_dir/", N, /*spin=*/0.5f, DiagonalizationMethod::FTLM,
+    { .T_min = 0.05, .T_max = 5.0, .num_T = 64 });
+
+// Optional: restrict to an adjacent-Sz window when the user knows
+// which sectors carry the partition-function weight at the T range
+// of interest.
+auto thermo = ed::auto_pilot::thermal(
+    H, DiagonalizationMethod::FTLM,
+    { .sz_min = N/2 - 2, .sz_max = N/2 + 2 });
+```
+
+Internals (matvec-unification audit + Phase 9 auto-pilot all the way
+through):
+
+  1. `ed::auto_pilot::detail::conserves_sz(op)` decides the Sz axis.
+  2. `ed::detail::symmetry_data_present(directory)` (now actually
+     recognises `automorphisms.json` / `max_clique.json` /
+     `sector_metadata.json` -- see Fixed below) decides the spatial
+     axis.
+  3. For each `n_up` in `[sz_min, sz_max]` (defaults to `[0, N]`),
+     `ed::exact_diagonalization(use_fixed_sz=true, use_symmetry=auto)`
+     dispatches the most-optimized kernel available. The streaming-
+     symmetry-fixed-Sz kernel itself iterates spatial irreps and
+     recombines them via the per-sector thermo hook added in the
+     previous Fixed entry.
+  4. `ed::core::combine_sector_thermodynamics` Z-recombines across the
+     Sz axis to produce the final full-Hilbert `ThermodynamicData`.
+
+Supports every finite-T method `method_produces_sector_thermo` knows
+about: FTLM, LTLM, HYBRID, KPM_DOS, mTPQ, cTPQ (and their GPU twins
+where the legacy enum values still resolve).
+
+Knobs surfaced through `ThermalOptions`:
+  * `T_min`, `T_max`, `num_T` -- temperature grid.
+  * `sz_min`, `sz_max` -- optional Sz window (n_up convention).
+  * `num_samples`, `ftlm_krylov_dim`, `ltlm_krylov_dim`,
+    `kpm_num_moments`, `tolerance`, `random_seed`, `max_iterations`.
+  * `auto_tune`, `auto_tune_level` -- mirror of `AutoSolveOptions`.
+  * `use_symmetry_if_available`, `use_sz_if_conserved` -- force-off
+    toggles for the auto-detection.
+  * `output_dir`, `verbose`.
+  * `tune_params(EDParameters&)` -- per-sector escape hatch for any
+    `EDParameters` field not surfaced directly.
+
+`ThermalResult` returns:
+  * `thermo` -- final Z-recombined `ThermodynamicData`.
+  * `per_sector[]` -- per-(Sz) breakdown, with each entry's
+    `ThermodynamicData` already recombined across irreps internally
+    when symmetry was used.
+  * `used_sz_decomposition`, `used_symmetry_decomposition` -- which
+    auto-axes fired.
+  * `ground_state_energy` -- minimum across sectors.
+
+Bonus fix: `ed::detail::symmetry_data_present(directory)` was looking
+for `automorphism_results/sectors.json` or
+`automorphism_results/generators.json`, neither of which the C++
+`generate_automorphisms()` or the Python automorphism tool ever
+emit. As a result, every directory-based `ed::exact_diagonalization`
+call silently bypassed the streaming-symmetry route, even on
+directories that had been processed end-to-end by the tooling. The
+auto-detector now recognises the actual layout:
+`automorphisms.json`, `max_clique.json`, `sector_metadata.json`,
+`minimal_generators.json` (and still accepts the legacy
+`sectors.json`/`generators.json` names).
+
+Python parity. The C++ surface is mirrored in
+``python/qed/thermal.py`` and re-exported from the top-level as
+``qed.thermal(H_or_dir, method="FTLM", ...)``. The Python form
+returns a ``ThermalResult`` dataclass with the same headline
+``temperatures`` / ``energy`` / ``specific_heat`` / ``entropy`` /
+``free_energy`` arrays plus the ``per_sector`` breakdown, and
+delegates the per-sector dispatch to
+``qed.exact_diagonalization_from_directory`` (directory form) or
+``qed.diag`` (in-memory form). The Z-recombination math
+(`combine_sector_thermodynamics`) is re-implemented in NumPy on the
+Python side for symmetry with the C++ surface; both implementations
+read from the same `F_ref = min_s F_s; w_s = e^{-β(F_s-F_ref)} /
+Σ; <E> = Σ w_s <E>_s; …` template.
+
+New tests: `tests/unit/test_auto_thermal.cpp` (6 cases):
+  1. In-memory FTLM with auto-Sz on a N=4 Heisenberg PBC chain
+     reproduces full-Hilbert FTLM within FTLM statistical tolerance.
+  2. Sz-window restriction emits exactly the requested per-sector
+     blocks (n_up=1..3 on N=4, dims C(4,1), C(4,2), C(4,3)).
+  3. Directory FTLM with auto-Sz + auto-symmetry on the same chain +
+     Z_4 translation fixtures reproduces unprojected FTLM thermo
+     and sets both `used_sz_decomposition` and
+     `used_symmetry_decomposition`.
+  4. Sz-broken Hamiltonian (single S+ injection) falls back to a
+     full-Hilbert FTLM and matches the reference bit-tight.
+  5. Method guard: ground-state methods (LANCZOS, FULL) throw.
+  6. Sz window validation: `sz_min > sz_max` and out-of-range
+     windows throw.
+
+### Fixed — Matvec-unification audit follow-up: finite-T + auto-symmetry recombination
+
+Closes the last correctness gap surfaced when the user asked the audit
+question: "make sure end-to-end ed solvers are all correct with the new
+auto-Sz + symmetry architecture across the board for first all the
+ground state finding algorithms then the finite temperatures (FTLM,
+KPM, etc)."
+
+What was wrong:
+
+- The streaming-symmetry kernel
+  (`exact_diagonalization_streaming_symmetry` /
+  `exact_diagonalization_streaming_symmetry_fixed_sz` in
+  `include/ed/core/ed_wrapper_streaming.h`) iterated per sector, ran
+  `exact_diagonalization_core(method, sector_dim, …)` once per sector,
+  and collected only `sector_results.eigenvalues`. For
+  ground-state methods that was fine. But for finite-temperature
+  methods (FTLM, LTLM, HYBRID, KPM_DOS, mTPQ, cTPQ) every sector also
+  populated `sector_results.thermo_data` -- and those blocks were
+  silently dropped. Callers running
+  `ed::exact_diagonalization(method=FTLM, use_symmetry=true)` got
+  back an empty `EDResults::thermo_data` instead of the full-Hilbert
+  thermodynamics.
+
+- `compute_static_response_workflow`, `compute_dynamical_response_workflow`,
+  `compute_ground_state_dssf_workflow`,
+  `compute_kpm_thermodynamics_workflow`, and
+  `create_directory_mpi_safe` all called `MPI_Comm_rank` /
+  `MPI_Comm_size` / `MPI_Bcast` / `MPI_Reduce` / `MPI_Barrier`
+  unconditionally inside `#ifdef WITH_MPI`. When the workflow was
+  invoked from a Catch2 unit-test binary (no `MPI_Init`), those
+  collectives aborted the process. This caused the pre-existing flake
+  in `auto_pilot::dssf::compute runs static_thermal end-to-end on a
+  4-site chain`.
+
+What changed:
+
+- New `ed::core::combine_sector_thermodynamics` helper
+  (`include/ed/core/sector_thermo.h`): generic free-energy
+  Z-recombination of per-sector `ThermodynamicData` blocks into a
+  single full-Hilbert thermo. Operates on the generic
+  `ThermodynamicData` payload so it works uniformly for FTLM, LTLM,
+  HYBRID, KPM_DOS, mTPQ, cTPQ -- whatever the finite-T solver populated.
+  Math mirrors the existing `combine_ftlm_sector_results` (free-energy
+  shift + Z-weighted mixture rule for `<E>`, `<E^2>`, `Cv`) but is
+  decoupled from the FTLM envelope.
+
+- New `ed::core::method_produces_sector_thermo` predicate: returns true
+  exactly for the finite-T methods that populate
+  `EDResults::thermo_data`. The streaming-symmetry kernel uses this to
+  decide whether to gather per-sector blocks and call the combiner.
+
+- Both `exact_diagonalization_streaming_symmetry` and
+  `exact_diagonalization_streaming_symmetry_fixed_sz` now stash
+  per-sector `ThermodynamicData` during the loop and call the combiner
+  after the loop (when no `selected_sectors` filter is active). The
+  combined block is written into `results.thermo_data` of the returned
+  `EDResults`.
+
+- `MPI_Initialized` guards added to every collective in
+  `src/cli/workflows.cpp` and `include/ed/core/system_utils.h`. The
+  workflow now degrades gracefully to single-process semantics when MPI
+  is not active, so the unit tests no longer abort on first
+  collective call.
+
+New test coverage (16 new tests; full suite 277/277 passing):
+
+- `tests/unit/test_ed_solver_matrix_e2e.cpp` (9 cases) -- end-to-end
+  validation that every ground-state algorithm reachable from
+  `ed::auto_pilot::solve` (FULL, LANCZOS, BLOCK_LANCZOS, KRYLOV_SCHUR,
+  DAVIDSON, LOBPCG, plus the heuristic default-picker, the auto-Sz
+  dimension-cap regression, and the `auto_basis=Off` escape hatch)
+  produces the same dense-reference ground-state energy on a small
+  Heisenberg PBC chain.
+- `tests/unit/test_sector_thermo.cpp` (4 cases) -- analytic correctness
+  of `combine_sector_thermodynamics`: partition of a dense spectrum
+  into sectors recombines to within 1e-8 of the direct dense thermo;
+  the result is invariant under partition choice; bad inputs throw;
+  `method_produces_sector_thermo` classifies the GS vs finite-T methods
+  exactly.
+- `tests/unit/test_dispatch_streaming_thermo.cpp` (2 cases) -- live
+  integration through `ed::exact_diagonalization(..., FTLM, ...)` on a
+  4-site Heisenberg PBC chain with Z_4 translation symmetry: the
+  recombined thermo agrees with the unprojected FTLM reference within
+  FTLM statistical tolerances (max relative `|ΔE|` < 0.15, max `|ΔF|`
+  < 0.5). The companion FULL case verifies the dispatch wiring lands
+  on the correct ground state through the streaming path.
+
 ### Changed — Matvec-unification: a single matrix-vector core for the whole library
 
 A full-audit refactor that collapses every Hamiltonian × vector code path

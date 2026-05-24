@@ -5,6 +5,7 @@
 
 #include <ed/gpu/gpu_operator.cuh>
 #include <ed/gpu/gpu_mixed_precision.h>
+#include <ed/matvec/term_storage.h>
 #include <iostream>
 #include <fstream>
 #include <sstream>
@@ -137,6 +138,12 @@ void GPUOperator::invalidateDerivedCaches() {
     // Drop the assembled CSR and any cuSPARSE descriptors that point into it.
     if (csr_assembled_) {
         freeCsrDeviceData();
+    }
+    // Drop the mixed-precision FP32 CSR derived from the FP64 CSR; without
+    // this the FP32 cache could be reused against stale matrix elements
+    // when terms are mutated between builds at the same dimension.
+    if (fp32_csr_assembled_) {
+        freeCsrFp32DeviceData();
     }
     // Drop cached transform_data_ device pointer (it'll get rebuilt on demand).
     if (d_transform_data_) {
@@ -291,74 +298,97 @@ bool GPUOperator::allocateGPUMemory(int N) {
 // Branch-Free Transform Separation for GPU
 // ============================================================================
 
+namespace {
+
+// Host-side adapter for ed::matvec::TermStorage::classify_route.
+// Forwards typed setter calls into the GPU-resident SoA vectors.
+//
+// Three-body terms are NOT routed through this sink. The GPU keeps its
+// own AoS ``three_body_data_`` populated directly by ``addThreeBodyTerm``;
+// classify_route is invoked with an empty three-body range.
+struct GpuClassifySink {
+    std::vector<GPUDiagonalOneBody>&    diag_one_body;
+    std::vector<GPUOffDiagonalOneBody>& offdiag_one_body;
+    std::vector<GPUDiagonalTwoBody>&    diag_two_body;
+    std::vector<GPUMixedTwoBody>&       mixed_two_body;
+    std::vector<GPUOffDiagonalTwoBody>& offdiag_two_body;
+
+    void add_diag_one_body(uint32_t site, cuDoubleComplex coeff) {
+        GPUDiagonalOneBody d;
+        d.site_index = site;
+        d.coefficient = coeff;
+        diag_one_body.push_back(d);
+    }
+    void add_offdiag_one_body(uint32_t site, uint8_t op_type,
+                              cuDoubleComplex coeff) {
+        GPUOffDiagonalOneBody od;
+        od.site_index = site;
+        od.op_type = op_type;
+        od.coefficient = coeff;
+        offdiag_one_body.push_back(od);
+    }
+    void add_diag_two_body(uint32_t site_1, uint32_t site_2,
+                           cuDoubleComplex coeff) {
+        GPUDiagonalTwoBody d;
+        d.site_index_1 = site_1;
+        d.site_index_2 = site_2;
+        d.coefficient = coeff;
+        diag_two_body.push_back(d);
+    }
+    void add_mixed_two_body(uint32_t sz_site, uint32_t flip_site,
+                            uint8_t flip_op_type, cuDoubleComplex coeff) {
+        GPUMixedTwoBody m;
+        m.sz_site = sz_site;
+        m.flip_site = flip_site;
+        m.flip_op_type = flip_op_type;
+        m.coefficient = coeff;
+        mixed_two_body.push_back(m);
+    }
+    void add_offdiag_two_body(uint32_t site_1, uint32_t site_2,
+                              uint8_t op_type_1, uint8_t op_type_2,
+                              cuDoubleComplex coeff) {
+        GPUOffDiagonalTwoBody od;
+        od.site_index_1 = site_1;
+        od.site_index_2 = site_2;
+        od.op_type_1 = op_type_1;
+        od.op_type_2 = op_type_2;
+        od.coefficient = coeff;
+        offdiag_two_body.push_back(od);
+    }
+    // Unused on the GPU path (three-body terms stay in their own AoS),
+    // but required by classify_route's interface.
+    void add_three_body(uint8_t, uint32_t, uint8_t, uint32_t,
+                        uint8_t, uint32_t, cuDoubleComplex) {}
+};
+
+} // anonymous namespace
+
 void GPUOperator::separateTransformsByType() {
     if (transforms_separated_) return;
-    
-    // Clear previous separations
+
     diag_one_body_.clear();
     offdiag_one_body_.clear();
     diag_two_body_.clear();
     mixed_two_body_.clear();
     offdiag_two_body_.clear();
-    
-    for (const auto& t : transform_data_) {
-        if (t.is_two_body == 0) {
-            // One-body term
-            if (t.op_type == 2) {
-                // Sz - diagonal
-                GPUDiagonalOneBody d;
-                d.site_index = t.site_index;
-                d.coefficient = t.coefficient;
-                diag_one_body_.push_back(d);
-            } else {
-                // S+ or S- - off-diagonal
-                GPUOffDiagonalOneBody od;
-                od.site_index = t.site_index;
-                od.op_type = t.op_type;
-                od.coefficient = t.coefficient;
-                offdiag_one_body_.push_back(od);
-            }
-        } else {
-            // Two-body term
-            bool op1_diag = (t.op_type == 2);
-            bool op2_diag = (t.op_type_2 == 2);
-            
-            if (op1_diag && op2_diag) {
-                // Sz * Sz - fully diagonal
-                GPUDiagonalTwoBody d;
-                d.site_index_1 = t.site_index;
-                d.site_index_2 = t.site_index_2;
-                d.coefficient = t.coefficient;
-                diag_two_body_.push_back(d);
-            } else if (op1_diag || op2_diag) {
-                // Mixed: one Sz, one S+/S-
-                GPUMixedTwoBody m;
-                if (op1_diag) {
-                    m.sz_site = t.site_index;
-                    m.flip_site = t.site_index_2;
-                    m.flip_op_type = t.op_type_2;
-                } else {
-                    m.sz_site = t.site_index_2;
-                    m.flip_site = t.site_index;
-                    m.flip_op_type = t.op_type;
-                }
-                m.coefficient = t.coefficient;
-                mixed_two_body_.push_back(m);
-            } else {
-                // Both S+/S- - fully off-diagonal
-                GPUOffDiagonalTwoBody od;
-                od.site_index_1 = t.site_index;
-                od.site_index_2 = t.site_index_2;
-                od.op_type_1 = t.op_type;
-                od.op_type_2 = t.op_type_2;
-                od.coefficient = t.coefficient;
-                offdiag_two_body_.push_back(od);
-            }
-        }
-    }
-    
+
+    // Delegate the op_type -> {diag,offdiag,mixed} x {one,two}body
+    // classification to the single source of truth in
+    // ed::matvec::TermStorage. The conv functor is identity
+    // (GPU AoS already stores cuDoubleComplex). The three-body input
+    // is empty because GPU three-body terms live in their own AoS bin
+    // and aren't expanded by classify_route.
+    GpuClassifySink sink{
+        diag_one_body_, offdiag_one_body_,
+        diag_two_body_, mixed_two_body_, offdiag_two_body_
+    };
+    std::vector<GPUThreeBodyTransformData> empty_three_body;
+    ed::matvec::TermStorage::classify_route(
+        sink, transform_data_, empty_three_body,
+        [](cuDoubleComplex c) { return c; });
+
     transforms_separated_ = true;
-    
+
     std::cout << "GPU transforms separated: "
               << diag_one_body_.size() << " diag-1B, "
               << offdiag_one_body_.size() << " offdiag-1B, "

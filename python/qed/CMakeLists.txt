@@ -4,14 +4,14 @@
 # Build target: pybind11 module `qed._core`.
 #
 # Linked against the project's CPU static-library stack (ed_solvers_cpu) so
-# the binding inherits BLAS/LAPACK/ARPACK/HDF5/OpenMP transitively. When the
+# the binding inherits BLAS/LAPACK/HDF5/OpenMP transitively. When the
 # top-level build sets ``WITH_CUDA=ON`` we additionally PRIVATE-link
 # ``ed_solvers_gpu`` so the dispatcher header (`ed_wrapper.h`) -- which
 # `dispatcher_bindings.cpp` ``#include``s and which references
 # ``GPUEDWrapper::*`` symbols inside ``#ifdef WITH_CUDA`` blocks at
 # compile time -- can resolve them at link time. The Python module
-# itself never instantiates GPU code from Python; it just routes GPU
-# methods (``LANCZOS_GPU`` etc.) into the directory / streaming-symmetry
+# itself never instantiates GPU code from Python; it just routes
+# ``params.use_gpu = True`` calls into the directory / streaming-symmetry
 # dispatchers, which then call into the CUDA kernels.
 #
 # When built via scikit-build-core (pip install [-e] .), the binary lands in
@@ -35,12 +35,14 @@ if(WITH_CUDA AND TARGET ed_solvers_gpu)
         _bindings/qed_bindings.cpp
         _bindings/input_bindings.cpp
         _bindings/dispatcher_bindings.cpp
+        _bindings/workflow_bindings.cpp
     )
 else()
     pybind11_add_module(_core MODULE
         _bindings/qed_bindings.cpp
         _bindings/input_bindings.cpp
         _bindings/dispatcher_bindings.cpp
+        _bindings/workflow_bindings.cpp
     )
 endif()
 

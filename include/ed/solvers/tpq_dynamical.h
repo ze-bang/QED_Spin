@@ -73,7 +73,6 @@
 
 #include <ed/core/blas_lapack_wrapper.h>
 #include <ed/core/matvec_types.h>
-#include <ed/solvers/ftlm_jp.h>      // JPDynamicalResult (for compat)
 
 #include <complex>
 #include <cstdint>

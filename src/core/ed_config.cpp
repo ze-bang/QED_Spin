@@ -84,11 +84,7 @@ EDConfig EDConfig::fromFile(const std::string& filename) {
                 else if (key == "max_iterations") config.diag.max_iterations = std::stoi(value);
                 else if (key == "tolerance") config.diag.tolerance = std::stod(value);
                 else if (key == "compute_eigenvectors") config.diag.compute_eigenvectors = parse_bool(value);
-                else if (key == "shift") config.diag.shift = std::stod(value);
                 else if (key == "block_size") config.diag.block_size = std::stoi(value);
-                else if (key == "max_subspace") config.diag.max_subspace = std::stoi(value);
-                else if (key == "target_lower") config.diag.target_lower = std::stod(value);
-                else if (key == "target_upper") config.diag.target_upper = std::stod(value);
             }
             // ========== [Output] section ==========
             else if (current_section == "output") {
@@ -243,10 +239,7 @@ EDConfig EDConfig::fromFile(const std::string& filename) {
                 else if (key == "max_iterations") config.diag.max_iterations = std::stoi(value);
                 else if (key == "tolerance") config.diag.tolerance = std::stod(value);
                 else if (key == "compute_eigenvectors") config.diag.compute_eigenvectors = parse_bool(value);
-                else if (key == "shift") config.diag.shift = std::stod(value);
                 else if (key == "block_size") config.diag.block_size = std::stoi(value);
-                else if (key == "target_lower") config.diag.target_lower = std::stod(value);
-                else if (key == "target_upper") config.diag.target_upper = std::stod(value);
                 else if (key == "num_sites") config.system.num_sites = std::stoi(value);
                 else if (key == "spin_length") config.system.spin_length = std::stof(value);
                 else if (key == "hamiltonian_dir") config.system.hamiltonian_dir = value;
@@ -344,25 +337,7 @@ EDConfig EDConfig::fromCommandLine(uint64_t argc, char* argv[]) {
             else if (arg.find("--iterations=") == 0) config.diag.max_iterations = std::stoi(parse_value("--iterations="));
             else if (arg.find("--tolerance=") == 0) config.diag.tolerance = std::stod(parse_value("--tolerance="));
             else if (arg == "--eigenvectors") config.diag.compute_eigenvectors = true;
-            else if (arg.find("--shift=") == 0) config.diag.shift = std::stod(parse_value("--shift="));
             else if (arg.find("--block-size=") == 0) config.diag.block_size = std::stoi(parse_value("--block-size="));
-            else if (arg.find("--target-lower=") == 0) config.diag.target_lower = std::stod(parse_value("--target-lower="));
-            else if (arg.find("--target-upper=") == 0) config.diag.target_upper = std::stod(parse_value("--target-upper="));
-            // Phase 8 #5: ScaLAPACK distributed-diag knobs. The original
-            // hierarchical-config layer only exposed these via Python
-            // (``EDParameters.scalapack_*``). Promoting them to CLI flags
-            // lets users tune the BLACS grid + block size from the C++
-            // entry points too. ``--scalapack-block-size N`` implicitly
-            // disables the new auto-block-size heuristic so the explicit
-            // value is honoured by the solver.
-            else if (arg.find("--scalapack-nprow=") == 0)       config.diag.scalapack_nprow = std::stoi(parse_value("--scalapack-nprow="));
-            else if (arg.find("--scalapack-npcol=") == 0)       config.diag.scalapack_npcol = std::stoi(parse_value("--scalapack-npcol="));
-            else if (arg.find("--scalapack-block-size=") == 0) {
-                config.diag.scalapack_block_size = std::stoi(parse_value("--scalapack-block-size="));
-                config.diag.scalapack_block_size_auto = false;  // explicit value -> opt out of auto
-            }
-            else if (arg == "--scalapack-block-size-auto")    config.diag.scalapack_block_size_auto = true;
-            else if (arg == "--no-scalapack-block-size-auto") config.diag.scalapack_block_size_auto = false;
             else if (arg.find("--num_sites=") == 0) config.system.num_sites = std::stoi(parse_value("--num_sites="));
             else if (arg.find("--spin_length=") == 0) config.system.spin_length = std::stof(parse_value("--spin_length="));
             else if (arg == "--fixed-sz") config.system.use_fixed_sz = true;
@@ -459,7 +434,6 @@ EDConfig EDConfig::fromCommandLine(uint64_t argc, char* argv[]) {
             else if (arg.find("--num_points=") == 0) config.observable.num_points = std::stoi(parse_value("--num_points="));
             else if (arg.find("--t_end=") == 0) config.observable.t_end = std::stod(parse_value("--t_end="));
             else if (arg.find("--dt=") == 0) config.observable.dt = std::stod(parse_value("--dt="));
-            else if (arg.find("--max_subspace=") == 0) config.diag.max_subspace = std::stoi(parse_value("--max_subspace="));
             // FTLM options
             else if (arg.find("--ftlm-krylov=") == 0) config.thermal.ftlm_krylov_dim = std::stoi(parse_value("--ftlm-krylov="));
             else if (arg == "--ftlm-full-reorth") config.thermal.ftlm_full_reorth = true;
@@ -474,15 +448,6 @@ EDConfig EDConfig::fromCommandLine(uint64_t argc, char* argv[]) {
             else if (arg.find("--ltlm-reorth-freq=") == 0) config.thermal.ltlm_reorth_freq = std::stoi(parse_value("--ltlm-reorth-freq="));
             else if (arg.find("--ltlm-seed=") == 0) config.thermal.ltlm_seed = std::stoul(parse_value("--ltlm-seed="));
             else if (arg == "--ltlm-store-data") config.thermal.ltlm_store_data = true;
-            // --hybrid-thermal was removed in matvec-unification Phase 7.3.
-            // Use `--method=HYBRID` (or the canonical DiagonalizationMethod::HYBRID).
-            else if (arg == "--hybrid-thermal") {
-                std::cerr << "[ED] WARNING: --hybrid-thermal has been removed "
-                          << "(matvec-unification Phase 7.3). Pass "
-                          << "'--method=HYBRID' instead. Ignoring.\n";
-            }
-            else if (arg.find("--hybrid-crossover=") == 0) config.thermal.hybrid_crossover = std::stod(parse_value("--hybrid-crossover="));
-            else if (arg == "--hybrid-auto-crossover") config.thermal.hybrid_auto_crossover = true;
             // Dynamical response options
             else if (arg == "--dyn-thermal") config.dynamical.thermal_average = true;
             else if (arg.find("--dyn-samples=") == 0) config.dynamical.num_random_states = std::stoi(parse_value("--dyn-samples="));
@@ -538,13 +503,6 @@ EDConfig EDConfig::fromCommandLine(uint64_t argc, char* argv[]) {
             else if (arg.find("--static-momentum-points=") == 0) config.static_resp.momentum_points = parse_value("--static-momentum-points=");
             else if (arg.find("--static-polarization=") == 0) config.static_resp.polarization = parse_value("--static-polarization=");
             else if (arg.find("--static-theta=") == 0) config.static_resp.theta = std::stod(parse_value("--static-theta="));
-            // ARPACK options
-            else if (arg.find("--arpack-which=") == 0) config.arpack.which = parse_value("--arpack-which=");
-            else if (arg.find("--arpack-ncv=") == 0) config.arpack.ncv = std::stoi(parse_value("--arpack-ncv="));
-            else if (arg.find("--arpack-max-restarts=") == 0) config.arpack.max_restarts = std::stoi(parse_value("--arpack-max-restarts="));
-            else if (arg == "--arpack-shift-invert") config.arpack.shift_invert = true;
-            else if (arg.find("--arpack-sigma=") == 0) config.arpack.sigma = std::stod(parse_value("--arpack-sigma="));
-            else if (arg == "--arpack-verbose") config.arpack.verbose = true;
             else if (arg.find("--config=") == 0) {
                 // Load from config file and merge
                 auto file_config = EDConfig::fromFile(parse_value("--config="));
@@ -844,695 +802,100 @@ bool EDConfig::autoDetectNumSites() {
 
 namespace ed_config {
 
-// The CLI / config parser must accept the legacy `_GPU` / `_CUDA` /
-// `_MPI` / `_FIXED_SZ` enum strings to stay backwards-compatible with
-// pre-Phase-7 user configs. Phase 7 collapses them onto base method +
-// flags via canonicalize_method_and_flags() at the dispatcher entry
-// point; here we just translate the string to its enum value, so the
-// deprecation warning emitted by referencing the deprecated enum
-// values is intentional noise that we suppress.
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
-
 std::optional<DiagonalizationMethod> parseMethod(const std::string& str) {
     std::string lower = str;
     std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
-    
-    // Standard Lanczos variants
-    if (lower == "lanczos") return DiagonalizationMethod::LANCZOS;
-    if (lower == "lanczos_selective") return DiagonalizationMethod::LANCZOS_SELECTIVE;
-    if (lower == "lanczos_no_ortho") return DiagonalizationMethod::LANCZOS_NO_ORTHO;
-    if (lower == "block_lanczos") return DiagonalizationMethod::BLOCK_LANCZOS;
-    if (lower == "chebyshev_filtered") return DiagonalizationMethod::CHEBYSHEV_FILTERED;
-    if (lower == "chebyshev") return DiagonalizationMethod::CHEBYSHEV_FILTERED;
-    if (lower == "shift_invert") return DiagonalizationMethod::SHIFT_INVERT;
-    if (lower == "shift_invert_robust") return DiagonalizationMethod::SHIFT_INVERT_ROBUST;
-    if (lower == "krylov_schur") return DiagonalizationMethod::KRYLOV_SCHUR;
-    if (lower == "block_krylov_schur") return DiagonalizationMethod::BLOCK_KRYLOV_SCHUR;
-    if (lower == "irl") return DiagonalizationMethod::IMPLICIT_RESTART_LANCZOS;
-    if (lower == "trlan") return DiagonalizationMethod::THICK_RESTART_LANCZOS;
-    
-    // Conjugate Gradient variants
-    if (lower == "bicg") return DiagonalizationMethod::BICG;
-    if (lower == "lobpcg") return DiagonalizationMethod::LOBPCG;
-    
-    // Other iterative methods
-    if (lower == "davidson") return DiagonalizationMethod::DAVIDSON;
-    
-    // Full diagonalization
-    if (lower == "full") return DiagonalizationMethod::FULL;
-    if (lower == "oss") return DiagonalizationMethod::OSS;
-    
-    // Distributed/Parallel methods
-    if (lower == "scalapack") return DiagonalizationMethod::SCALAPACK;
-    if (lower == "scalapack_mixed") return DiagonalizationMethod::SCALAPACK_MIXED;
-    
-    // Thermal methods
-    if (lower == "mtpq") return DiagonalizationMethod::mTPQ;
-    if (lower == "mtpq_mpi") return DiagonalizationMethod::mTPQ_MPI;
-    if (lower == "ctpq") return DiagonalizationMethod::cTPQ;
-    if (lower == "mtpq_cuda") return DiagonalizationMethod::mTPQ_CUDA;
-    if (lower == "ftlm") return DiagonalizationMethod::FTLM;
-    if (lower == "ltlm") return DiagonalizationMethod::LTLM;
-    if (lower == "hybrid") return DiagonalizationMethod::HYBRID;
-    if (lower == "kpm_dos" || lower == "kpmdos" || lower == "kpm") return DiagonalizationMethod::KPM_DOS;
-    
-    // ARPACK methods
-    if (lower == "arpack" || lower == "arpack_sm") return DiagonalizationMethod::ARPACK_SM;
-    if (lower == "arpack_lm") return DiagonalizationMethod::ARPACK_LM;
-    if (lower == "arpack_shift_invert") return DiagonalizationMethod::ARPACK_SHIFT_INVERT;
-    if (lower == "arpack_advanced") return DiagonalizationMethod::ARPACK_ADVANCED;
-    
-    // GPU methods
-    if (lower == "lanczos_gpu") return DiagonalizationMethod::LANCZOS_GPU;
-    if (lower == "lanczos_gpu_fixed_sz") return DiagonalizationMethod::LANCZOS_GPU_FIXED_SZ;
-    if (lower == "block_lanczos_gpu") return DiagonalizationMethod::BLOCK_LANCZOS_GPU;
-    if (lower == "block_lanczos_gpu_fixed_sz") return DiagonalizationMethod::BLOCK_LANCZOS_GPU_FIXED_SZ;
-    if (lower == "davidson_gpu") return DiagonalizationMethod::DAVIDSON_GPU;
-    if (lower == "lobpcg_gpu") return DiagonalizationMethod::LOBPCG_GPU;
-    if (lower == "krylov_schur_gpu") return DiagonalizationMethod::KRYLOV_SCHUR_GPU;
-    if (lower == "block_krylov_schur_gpu") return DiagonalizationMethod::BLOCK_KRYLOV_SCHUR_GPU;
-    if (lower == "mtpq_gpu") return DiagonalizationMethod::mTPQ_GPU;
-    if (lower == "ctpq_gpu") return DiagonalizationMethod::cTPQ_GPU;
-    if (lower == "ftlm_gpu") return DiagonalizationMethod::FTLM_GPU;
-    if (lower == "ftlm_gpu_fixed_sz") return DiagonalizationMethod::FTLM_GPU_FIXED_SZ;
-    if (lower == "full_gpu") return DiagonalizationMethod::FULL_GPU;
-    std::cerr << "Warning: Unknown method '" << str << "', using LANCZOS\n";
+
+    if (lower == "lanczos")        return DiagonalizationMethod::LANCZOS;
+    if (lower == "block_lanczos")  return DiagonalizationMethod::BLOCK_LANCZOS;
+    if (lower == "krylov_schur")   return DiagonalizationMethod::KRYLOV_SCHUR;
+    if (lower == "full")           return DiagonalizationMethod::FULL;
+
+    if (lower == "mtpq")           return DiagonalizationMethod::mTPQ;
+    if (lower == "ctpq")           return DiagonalizationMethod::cTPQ;
+    if (lower == "ftlm")           return DiagonalizationMethod::FTLM;
+    if (lower == "ltlm")           return DiagonalizationMethod::LTLM;
+    if (lower == "kpm_dos" || lower == "kpmdos" || lower == "kpm")
+        return DiagonalizationMethod::KPM_DOS;
+
+    std::cerr << "Warning: Unknown method '" << str
+              << "' (retired or never supported); falling back to LANCZOS.\n";
     return std::nullopt;
 }
 
 std::string methodToString(DiagonalizationMethod method) {
     switch (method) {
-        // Standard Lanczos variants
-        case DiagonalizationMethod::LANCZOS: return "LANCZOS";
-        case DiagonalizationMethod::LANCZOS_SELECTIVE: return "LANCZOS_SELECTIVE";
-        case DiagonalizationMethod::LANCZOS_NO_ORTHO: return "LANCZOS_NO_ORTHO";
+        case DiagonalizationMethod::LANCZOS:       return "LANCZOS";
         case DiagonalizationMethod::BLOCK_LANCZOS: return "BLOCK_LANCZOS";
-        case DiagonalizationMethod::CHEBYSHEV_FILTERED: return "CHEBYSHEV_FILTERED";
-        case DiagonalizationMethod::SHIFT_INVERT: return "SHIFT_INVERT";
-        case DiagonalizationMethod::SHIFT_INVERT_ROBUST: return "SHIFT_INVERT_ROBUST";
-        case DiagonalizationMethod::KRYLOV_SCHUR: return "KRYLOV_SCHUR";
-        case DiagonalizationMethod::BLOCK_KRYLOV_SCHUR: return "BLOCK_KRYLOV_SCHUR";
-        case DiagonalizationMethod::IMPLICIT_RESTART_LANCZOS: return "IMPLICIT_RESTART_LANCZOS";
-        case DiagonalizationMethod::THICK_RESTART_LANCZOS: return "THICK_RESTART_LANCZOS";
-        
-        // Conjugate Gradient variants
-        case DiagonalizationMethod::BICG: return "BICG";
-        case DiagonalizationMethod::LOBPCG: return "LOBPCG";
-        
-        // Other iterative methods
-        case DiagonalizationMethod::DAVIDSON: return "DAVIDSON";
-        
-        // Full diagonalization
-        case DiagonalizationMethod::FULL: return "FULL";
-        case DiagonalizationMethod::OSS: return "OSS";
-        
-        // Distributed/Parallel methods
-        case DiagonalizationMethod::SCALAPACK: return "SCALAPACK";
-        case DiagonalizationMethod::SCALAPACK_MIXED: return "SCALAPACK_MIXED";
-        
-        // Thermal methods
-        case DiagonalizationMethod::mTPQ: return "mTPQ";
-        case DiagonalizationMethod::mTPQ_MPI: return "mTPQ_MPI";
-        case DiagonalizationMethod::cTPQ: return "cTPQ";
-        case DiagonalizationMethod::mTPQ_CUDA: return "mTPQ_CUDA";
-        case DiagonalizationMethod::FTLM: return "FTLM";
-        case DiagonalizationMethod::LTLM: return "LTLM";
-        case DiagonalizationMethod::HYBRID: return "HYBRID";
-        case DiagonalizationMethod::KPM_DOS: return "KPM_DOS";
-        
-        // ARPACK methods
-        case DiagonalizationMethod::ARPACK_SM: return "ARPACK_SM";
-        case DiagonalizationMethod::ARPACK_LM: return "ARPACK_LM";
-        case DiagonalizationMethod::ARPACK_SHIFT_INVERT: return "ARPACK_SHIFT_INVERT";
-        case DiagonalizationMethod::ARPACK_ADVANCED: return "ARPACK_ADVANCED";
-        
-        // GPU methods
-        case DiagonalizationMethod::LANCZOS_GPU: return "LANCZOS_GPU";
-        case DiagonalizationMethod::LANCZOS_GPU_FIXED_SZ: return "LANCZOS_GPU_FIXED_SZ";
-        case DiagonalizationMethod::BLOCK_LANCZOS_GPU: return "BLOCK_LANCZOS_GPU";
-        case DiagonalizationMethod::BLOCK_LANCZOS_GPU_FIXED_SZ: return "BLOCK_LANCZOS_GPU_FIXED_SZ";
-        case DiagonalizationMethod::DAVIDSON_GPU: return "DAVIDSON_GPU";
-        case DiagonalizationMethod::LOBPCG_GPU: return "LOBPCG_GPU";
-        case DiagonalizationMethod::KRYLOV_SCHUR_GPU: return "KRYLOV_SCHUR_GPU";
-        case DiagonalizationMethod::BLOCK_KRYLOV_SCHUR_GPU: return "BLOCK_KRYLOV_SCHUR_GPU";
-        case DiagonalizationMethod::mTPQ_GPU: return "mTPQ_GPU";
-        case DiagonalizationMethod::cTPQ_GPU: return "cTPQ_GPU";
-        case DiagonalizationMethod::FTLM_GPU: return "FTLM_GPU";
-        case DiagonalizationMethod::FTLM_GPU_FIXED_SZ: return "FTLM_GPU_FIXED_SZ";
-        case DiagonalizationMethod::FULL_GPU: return "FULL_GPU";
-        
-        default: return "UNKNOWN";
+        case DiagonalizationMethod::KRYLOV_SCHUR:  return "KRYLOV_SCHUR";
+        case DiagonalizationMethod::FULL:          return "FULL";
+        case DiagonalizationMethod::mTPQ:          return "mTPQ";
+        case DiagonalizationMethod::cTPQ:          return "cTPQ";
+        case DiagonalizationMethod::FTLM:          return "FTLM";
+        case DiagonalizationMethod::LTLM:          return "LTLM";
+        case DiagonalizationMethod::KPM_DOS:       return "KPM_DOS";
     }
+    return "UNKNOWN";
 }
-
-#pragma GCC diagnostic pop  // legacy _GPU / _CUDA / _MPI / _FIXED_SZ string round-trip
 
 EDConfig defaultConfigFor(DiagonalizationMethod method) {
     EDConfig config(method);
-    
+
     switch (method) {
         case DiagonalizationMethod::mTPQ:
         case DiagonalizationMethod::cTPQ:
             config.thermal.num_samples = 10;
             config.workflow.compute_thermo = true;
             break;
-            
+
         case DiagonalizationMethod::FULL:
             config.diag.num_eigenvalues = -1; // Will be set based on system size
             config.workflow.compute_thermo = true;
             break;
-            
-        case DiagonalizationMethod::ARPACK_ADVANCED:
-            config.arpack.max_restarts = 3;
-            config.arpack.two_phase_refine = true;
-            break;
-            
+
         default:
             break;
     }
-    
+
     return config;
 }
 
 /**
- * @brief Get detailed parameter information for a diagonalization method
+ * @brief Compact parameter-info helper used by `--info <method>`.
+ * The exhaustive per-method text was retired in the minimalist
+ * refactor; for the kept solvers we point users at the relevant
+ * docs / header instead.
  */
-// Phase 7: this function legitimately enumerates legacy `_GPU` / `_CUDA`
-// / `_MPI` / `_FIXED_SZ` enum values to produce help text for the
-// `--info <method>` CLI subcommand. Suppress the deprecation diagnostic
-// for the case labels.
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
 std::string getMethodParameterInfo(DiagonalizationMethod method) {
     std::ostringstream info;
-    
     info << "\n========================================\n";
     info << "Method: " << methodToString(method) << "\n";
     info << "========================================\n\n";
-    
     switch (method) {
         case DiagonalizationMethod::LANCZOS:
-            info << "Standard Lanczos algorithm with full reorthogonalization.\n\n";
-            info << "Configurable Parameters:\n";
-            info << "  --eigenvalues=<n>     Number of eigenvalues to compute (default: 1)\n";
-            info << "  --iterations=<n>      Maximum iterations (default: 100000)\n";
-            info << "  --tolerance=<tol>     Convergence tolerance (default: 1e-10)\n";
-            info << "  --eigenvectors        Compute and save eigenvectors\n";
-            info << "\nBest for: Ground state and low-lying excited states\n";
-            break;
-            
-        case DiagonalizationMethod::LANCZOS_SELECTIVE:
-            info << "Lanczos with selective reorthogonalization for improved stability.\n\n";
-            info << "Configurable Parameters:\n";
-            info << "  --eigenvalues=<n>     Number of eigenvalues to compute (default: 1)\n";
-            info << "  --iterations=<n>      Maximum iterations (default: 100000)\n";
-            info << "  --tolerance=<tol>     Convergence tolerance (default: 1e-10)\n";
-            info << "  --eigenvectors        Compute and save eigenvectors\n";
-            info << "\nBest for: When standard Lanczos has convergence issues\n";
-            break;
-            
-        case DiagonalizationMethod::LANCZOS_NO_ORTHO:
-            info << "Lanczos without reorthogonalization (fastest but may lose orthogonality).\n\n";
-            info << "Configurable Parameters:\n";
-            info << "  --eigenvalues=<n>     Number of eigenvalues to compute (default: 1)\n";
-            info << "  --iterations=<n>      Maximum iterations (default: 100000)\n";
-            info << "  --tolerance=<tol>     Convergence tolerance (default: 1e-10)\n";
-            info << "  --eigenvectors        Compute and save eigenvectors\n";
-            info << "\nBest for: Quick estimates with well-conditioned Hamiltonians\n";
-            info << "Warning: May produce inaccurate results for ill-conditioned problems\n";
-            break;
-            
         case DiagonalizationMethod::BLOCK_LANCZOS:
-            info << "Block Lanczos for finding multiple eigenvalues simultaneously.\n\n";
-            info << "Configurable Parameters:\n";
-            info << "  --eigenvalues=<n>     Number of eigenvalues to compute (default: 1)\n";
-            info << "  --block_size=<b>      Block size (default: 10)\n";
-            info << "  --iterations=<n>      Maximum iterations (default: 100000)\n";
-            info << "  --tolerance=<tol>     Convergence tolerance (default: 1e-10)\n";
-            info << "  --eigenvectors        Compute and save eigenvectors\n";
-            info << "\nBest for: Degenerate or near-degenerate eigenvalues\n";
-            break;
-            
-        case DiagonalizationMethod::CHEBYSHEV_FILTERED:
-            info << "Chebyshev Filtered Lanczos for spectral slicing and interior eigenvalues.\n\n";
-            info << "Uses Chebyshev polynomial filtering to focus on eigenvalues within a target\n";
-            info << "energy window. Automatically estimates spectral bounds if not provided.\n\n";
-            info << "Configurable Parameters:\n";
-            info << "  --eigenvalues=<n>     Number of eigenvalues to compute (default: 1)\n";
-            info << "  --iterations=<n>      Maximum iterations (default: 100000)\n";
-            info << "  --tolerance=<tol>     Convergence tolerance (default: 1e-10)\n";
-            info << "  --target_lower=<E>    Lower bound of target energy window (default: auto)\n";
-            info << "  --target_upper=<E>    Upper bound of target energy window (default: auto)\n";
-            info << "  --eigenvectors        Compute and save eigenvectors\n";
-            info << "\nBest for: Computing eigenvalues in specific energy ranges\n";
-            info << "          Interior spectrum without shift-invert\n";
-            info << "          Avoiding eigenvalues outside target window\n";
-            info << "\nNote: If target range not specified, computes lowest eigenvalues\n";
-            info << "      Filter degree automatically determined from spectral properties\n";
-            break;
-            
-        case DiagonalizationMethod::SHIFT_INVERT:
-            info << "Shift-invert Lanczos for finding eigenvalues near a target value.\n\n";
-            info << "Configurable Parameters:\n";
-            info << "  --eigenvalues=<n>     Number of eigenvalues to compute (default: 1)\n";
-            info << "  --shift=<sigma>       Target shift value (default: 0.0)\n";
-            info << "  --iterations=<n>      Maximum iterations (default: 100000)\n";
-            info << "  --tolerance=<tol>     Convergence tolerance (default: 1e-10)\n";
-            info << "  --eigenvectors        Compute and save eigenvectors\n";
-            info << "\nBest for: Interior eigenvalues, excited states at specific energies\n";
-            info << "Note: Requires solving linear systems (H - sigma*I)x = b\n";
-            break;
-            
-        case DiagonalizationMethod::SHIFT_INVERT_ROBUST:
-            info << "Robust shift-invert (currently falls back to standard SHIFT_INVERT).\n\n";
-            info << "Configurable Parameters:\n";
-            info << "  --eigenvalues=<n>     Number of eigenvalues to compute (default: 1)\n";
-            info << "  --shift=<sigma>       Target shift value (default: 0.0)\n";
-            info << "  --iterations=<n>      Maximum iterations (default: 100000)\n";
-            info << "  --tolerance=<tol>     Convergence tolerance (default: 1e-10)\n";
-            info << "  --eigenvectors        Compute and save eigenvectors\n";
-            break;
-            
         case DiagonalizationMethod::KRYLOV_SCHUR:
-            info << "Krylov-Schur method (implicitly restarted Lanczos with Schur form).\n\n";
-            info << "Configurable Parameters:\n";
-            info << "  --eigenvalues=<n>     Number of eigenvalues to compute (default: 1)\n";
-            info << "  --iterations=<n>      Maximum iterations (default: 100000)\n";
-            info << "  --tolerance=<tol>     Convergence tolerance (default: 1e-10)\n";
-            info << "  --eigenvectors        Compute and save eigenvectors\n";
-            info << "\nBest for: Large-scale problems requiring multiple restarts\n";
-            break;
-            
-        case DiagonalizationMethod::BLOCK_KRYLOV_SCHUR:
-            info << "Block Krylov-Schur method (block Arnoldi with Schur restarts).\n\n";
-            info << "Processes multiple vectors per iteration using BLAS-3 GEMM.\n";
-            info << "Better for degenerate/clustered eigenvalues than standard Krylov-Schur.\n\n";
-            info << "Configurable Parameters:\n";
-            info << "  --eigenvalues=<n>     Number of eigenvalues to compute (default: 1)\n";
-            info << "  --block_size=<n>      Block size (default: 4)\n";
-            info << "  --iterations=<n>      Maximum block iterations (default: 1000)\n";
-            info << "  --tolerance=<tol>     Convergence tolerance (default: 1e-10)\n";
-            info << "  --eigenvectors        Compute and save eigenvectors\n";
-            info << "\nBest for: Degenerate eigenvalues, modern CPUs with BLAS-3 optimization\n";
-            break;
-            
-        case DiagonalizationMethod::IMPLICIT_RESTART_LANCZOS:
-            info << "Implicitly Restarted Lanczos Algorithm (IRLA).\n\n";
-            info << "Uses implicit filtering with polynomial restarts to compute eigenvalues.\n";
-            info << "More memory efficient than thick restart but doesn't preserve converged vectors.\n\n";
-            info << "Configurable Parameters:\n";
-            info << "  --eigenvalues=<n>     Number of eigenvalues to compute (default: 1)\n";
-            info << "  --iterations=<n>      Maximum Krylov space dimension (default: 100)\n";
-            info << "  --tolerance=<tol>     Convergence tolerance (default: 1e-10)\n";
-            info << "  --eigenvectors        Compute and save eigenvectors\n";
-            info << "\nBest for: Memory-constrained problems, fast convergence to few eigenvalues\n";
-            break;
-            
-        case DiagonalizationMethod::THICK_RESTART_LANCZOS:
-            info << "Thick Restart Lanczos Algorithm with Locking.\n\n";
-            info << "Preserves converged eigenvectors and uses refined Ritz vectors for restart.\n";
-            info << "Superior stability and convergence compared to implicit restart.\n\n";
-            info << "Configurable Parameters:\n";
-            info << "  --eigenvalues=<n>     Number of eigenvalues to compute (default: 1)\n";
-            info << "  --iterations=<n>      Maximum Krylov space dimension (default: 100)\n";
-            info << "  --tolerance=<tol>     Convergence tolerance (default: 1e-10)\n";
-            info << "  --eigenvectors        Compute and save eigenvectors\n";
-            info << "\nBest for: Computing many eigenvalues, better stability, problems with clusters\n";
-            info << "Features: Converged vector locking, Rayleigh quotient refinement\n";
-            break;
-            
-            
-        case DiagonalizationMethod::BICG:
-            info << "Biconjugate gradient method.\n\n";
-            info << "Configurable Parameters:\n";
-            info << "  --iterations=<n>      Maximum iterations (default: 100000)\n";
-            info << "  --tolerance=<tol>     Convergence tolerance (default: 1e-10)\n";
-            info << "\nBest for: Specialized applications\n";
-            break;
-            
-        case DiagonalizationMethod::LOBPCG:
-            info << "Locally optimal block preconditioned conjugate gradient.\n\n";
-            info << "Configurable Parameters:\n";
-            info << "  --eigenvalues=<n>     Number of eigenvalues to compute (default: 1)\n";
-            info << "  --iterations=<n>      Maximum iterations (default: 100000)\n";
-            info << "  --tolerance=<tol>     Convergence tolerance (default: 1e-10)\n";
-            info << "  --eigenvectors        Compute and save eigenvectors\n";
-            info << "\nBest for: Multiple eigenvalues with good preconditioning\n";
-            break;
-            
-        case DiagonalizationMethod::DAVIDSON:
-            info << "Davidson method for interior and exterior eigenvalues.\n\n";
-            info << "Configurable Parameters:\n";
-            info << "  --eigenvalues=<n>     Number of eigenvalues to compute (default: 1)\n";
-            info << "  --max_subspace=<m>    Maximum subspace size (default: 100)\n";
-            info << "  --iterations=<n>      Maximum iterations (default: 100000)\n";
-            info << "  --tolerance=<tol>     Convergence tolerance (default: 1e-10)\n";
-            info << "\nBest for: Low-lying eigenvalues with controlled memory usage\n";
-            break;
-            
         case DiagonalizationMethod::FULL:
-            info << "Full diagonalization using dense eigensolver.\n\n";
-            info << "Configurable Parameters:\n";
-            info << "  --eigenvalues=<n>     Number of eigenvalues (default: all)\n";
-            info << "  --eigenvectors        Compute and save eigenvectors\n";
-            info << "\nBest for: Complete spectrum, small systems (< 10^5 dimension)\n";
-            info << "Warning: Memory intensive - stores full matrix\n";
+            info << "Ground-state / low-spectrum solver. Common knobs:\n"
+                 << "  --eigenvalues=<n>   number of eigenpairs\n"
+                 << "  --iterations=<n>    max Krylov dimension\n"
+                 << "  --tolerance=<tol>   convergence tolerance\n"
+                 << "  --block-size=<b>    block size (BLOCK_LANCZOS only)\n";
             break;
-            
-        case DiagonalizationMethod::OSS:
-            info << "Optimal spectrum solver with adaptive slicing.\n\n";
-            info << "Configurable Parameters:\n";
-            info << "  --iterations=<n>      Maximum iterations per slice (default: 100000)\n";
-            info << "  --eigenvectors        Compute and save eigenvectors\n";
-            info << "\nBest for: Complete spectrum with memory constraints\n";
-            info << "Note: Automatically determines energy slicing\n";
-            break;
-            
-        case DiagonalizationMethod::mTPQ:
-            info << "Microcanonical Thermal Pure Quantum states method.\n\n";
-            info << "Configurable Parameters:\n";
-            info << "  --samples=<n>         Number of random samples (default: 1)\n";
-            info << "  --iterations=<n>      Maximum iterations (default: 100000)\n";
-            info << "  --temp_min=<T>        Minimum temperature (default: 1e-3)\n";
-            info << "  --temp_max=<T>        Maximum temperature (default: 20.0)\n";
-            info << "  --temp_bins=<n>       Number of temperature points (default: 100)\n";
-            info << "  --save-thermal-states Save TPQ states at target β values (for `ED dssf`)\n";
-            info << "  --compute-spin-correlations  Compute ⟨Si⟩ and ⟨Si·Sj⟩ correlations\n";
-            info << "  --tpq_num_measure_points=<n> Number of log-spaced measurement β points (default: 20)\n";
-            info << "  --tpq_measure_beta_min=<β>  Minimum β for measurement grid (default: 1.0)\n";
-            info << "  --tpq_measure_beta_max=<β>  Maximum β for measurement grid (default: 1000.0)\n";
-            info << "\nBest for: Thermal properties at finite temperature\n";
-            break;
-            
-        case DiagonalizationMethod::cTPQ:
-            info << "Canonical Thermal Pure Quantum states method.\n\n";
-            info << "Configurable Parameters:\n";
-            info << "  --samples=<n>         Number of random samples (default: 1)\n";
-            info << "  --num_order=<k>       Taylor expansion order (default: 100)\n";
-            info << "  --delta_tau=<dt>      Imaginary time step (default: 1e-2)\n";
-            info << "  --temp_min=<T>        Minimum temperature (default: 1e-3)\n";
-            info << "  --temp_max=<T>        Maximum temperature (default: 20.0)\n";
-            info << "  --temp_bins=<n>       Number of temperature points (default: 100)\n";
-            info << "  --save-thermal-states Save TPQ states at target β values (for `ED dssf`)\n";
-            info << "  --compute-spin-correlations  Compute ⟨Si⟩ and ⟨Si·Sj⟩ correlations\n";
-            info << "  --tpq_num_measure_points=<n> Number of log-spaced measurement β points (default: 20)\n";
-            info << "  --tpq_measure_beta_min=<β>  Minimum β for measurement grid (default: 1.0)\n";
-            info << "  --tpq_measure_beta_max=<β>  Maximum β for measurement grid (default: 1000.0)\n";
-            info << "\nBest for: Canonical ensemble thermal properties\n";
-            break;
-            
-        case DiagonalizationMethod::mTPQ_MPI:
-            info << "MPI-parallel microcanonical TPQ (requires MPI build).\n\n";
-            info << "Requires: MPI-enabled build\n";
-            info << "Status: Not available in current build\n";
-            break;
-            
-        case DiagonalizationMethod::mTPQ_CUDA:
-            info << "GPU-accelerated microcanonical TPQ (requires CUDA build).\n\n";
-            info << "Requires: CUDA-enabled build\n";
-            info << "Status: Not available in current build\n";
-            break;
-            
         case DiagonalizationMethod::FTLM:
-            info << "Finite Temperature Lanczos Method (FTLM).\n\n";
-            info << "Computes thermodynamic properties (energy, entropy, specific heat, free energy)\n";
-            info << "at finite temperature without computing the full spectrum. Uses random sampling\n";
-            info << "and Krylov subspace projections.\n\n";
-            info << "Configurable Parameters:\n";
-            info << "  --samples=<n>         Number of random samples (default: 10)\n";
-            info << "  --ftlm-krylov=<m>     Krylov dimension per sample (default: 100)\n";
-            info << "  --temp_min=<T>        Minimum temperature (default: 1e-3)\n";
-            info << "  --temp_max=<T>        Maximum temperature (default: 20.0)\n";
-            info << "  --temp_bins=<n>       Number of temperature points (default: 100)\n";
-            info << "  --ftlm-full-reorth    Use full reorthogonalization (slower, more stable)\n";
-            info << "  --ftlm-reorth-freq=<k>  Reorthogonalization frequency (default: 10)\n";
-            info << "  --ftlm-seed=<seed>    Random seed (0 = random, default: 0)\n";
-            info << "  --ftlm-store-samples  Store per-sample intermediate data for debugging\n";
-            info << "  --ftlm-no-error-bars  Disable error bar computation\n";
-            info << "\nOutput:\n";
-            info << "  Saves to: output_dir/thermo/ftlm_thermo.txt\n";
-            info << "  Format: Temperature  Energy  E_error  Specific_Heat  C_error  Entropy  S_error  Free_Energy  F_error\n";
-            info << "\nBest for: Finite-temperature thermodynamics without full spectrum\n";
-            info << "Advantages: Memory efficient, scales to larger systems than FULL diagonalization\n";
-            info << "Note: Accuracy improves with more samples and larger Krylov dimension\n";
-            break;
-        
         case DiagonalizationMethod::LTLM:
-            info << "Low Temperature Lanczos Method (LTLM).\n\n";
-            info << "Specialized method for low-temperature thermodynamics. First finds the ground\n";
-            info << "state, then builds Krylov subspace from it to capture low-lying excitations.\n";
-            info << "More accurate than FTLM at low temperatures.\n\n";
-            info << "Configurable Parameters:\n";
-            info << "  --ltlm-krylov=<m>        Krylov dimension for excitations (default: 200)\n";
-            info << "  --ltlm-ground-krylov=<m> Krylov dimension for ground state (default: 100)\n";
-            info << "  --temp_min=<T>           Minimum temperature (default: 1e-3)\n";
-            info << "  --temp_max=<T>           Maximum temperature (default: 20.0)\n";
-            info << "  --temp_bins=<n>          Number of temperature points (default: 100)\n";
-            info << "  --ltlm-full-reorth       Use full reorthogonalization (slower, more stable)\n";
-            info << "  --ltlm-reorth-freq=<k>   Reorthogonalization frequency (default: 10)\n";
-            info << "  --ltlm-seed=<seed>       Random seed for initial state (0 = random, default: 0)\n";
-            info << "  --ltlm-store-data        Store intermediate data (spectrum, etc.)\n";
-            info << "\nHybrid LTLM/FTLM Mode:\n";
-            info << "  --hybrid-thermal         Use hybrid method (LTLM at low T, FTLM at high T) [DEPRECATED: use --method=HYBRID]\n";
-            info << "  --hybrid-crossover=<T>   Temperature crossover (default: 1.0)\n";
-            info << "  --hybrid-auto-crossover  Automatically determine optimal crossover temperature\n";
-            info << "\nOutput:\n";
-            info << "  Saves to: output_dir/thermo/ltlm_thermo.txt (or hybrid_thermo.txt for hybrid)\n";
-            info << "  Format: Temperature  Energy  E_error  Specific_Heat  C_error  Entropy  S_error  Free_Energy  F_error\n";
-            info << "\nBest for: Low-temperature thermodynamics where ground state dominates\n";
-            info << "Advantages: More accurate than FTLM at low T, deterministic ground state\n";
-            info << "Note: Combine with FTLM using --hybrid-thermal for full temperature range\n";
-            break;
-            
-        case DiagonalizationMethod::ARPACK_SM:
-            info << "ARPACK smallest real (algebraically smallest) eigenvalues.\n\n";
-            info << "Configurable Parameters:\n";
-            info << "  --eigenvalues=<n>     Number of eigenvalues to compute (default: 1)\n";
-            info << "  --iterations=<n>      Maximum iterations (default: 100000)\n";
-            info << "  --tolerance=<tol>     Convergence tolerance (default: 1e-10)\n";
-            info << "  --eigenvectors        Compute and save eigenvectors\n";
-            info << "\nBest for: Ground state (most negative eigenvalues) using ARPACK\n";
-            info << "Note: Uses SR (Smallest Real) internally for Hermitian matrices\n";
-            break;
-            
-        case DiagonalizationMethod::ARPACK_LM:
-            info << "ARPACK largest real (algebraically largest) eigenvalues.\n\n";
-            info << "Configurable Parameters:\n";
-            info << "  --eigenvalues=<n>     Number of eigenvalues to compute (default: 1)\n";
-            info << "  --iterations=<n>      Maximum iterations (default: 100000)\n";
-            info << "  --tolerance=<tol>     Convergence tolerance (default: 1e-10)\n";
-            info << "  --eigenvectors        Compute and save eigenvectors\n";
-            info << "\nBest for: Highest energy states (most positive eigenvalues) using ARPACK\n";
-            info << "Note: Uses LR (Largest Real) internally for Hermitian matrices\n";
-            break;
-            
-        case DiagonalizationMethod::ARPACK_SHIFT_INVERT:
-            info << "ARPACK with shift-invert mode.\n\n";
-            info << "Configurable Parameters:\n";
-            info << "  --eigenvalues=<n>     Number of eigenvalues to compute (default: 1)\n";
-            info << "  --shift=<sigma>       Shift value (default: 0.0)\n";
-            info << "  --iterations=<n>      Maximum iterations (default: 100000)\n";
-            info << "  --tolerance=<tol>     Convergence tolerance (default: 1e-10)\n";
-            info << "  --eigenvectors        Compute and save eigenvectors\n";
-            info << "\nBest for: Eigenvalues near shift value using ARPACK\n";
-            break;
-            
-        case DiagonalizationMethod::ARPACK_ADVANCED:
-            info << "ARPACK with advanced multi-attempt strategy.\n\n";
-            info << "Configurable Parameters:\n";
-            info << "  --eigenvalues=<n>     Number of eigenvalues (default: 1)\n";
-            info << "  --iterations=<n>      Maximum iterations (default: 100000)\n";
-            info << "  --tolerance=<tol>     Convergence tolerance (default: 1e-10)\n";
-            info << "  --eigenvectors        Compute and save eigenvectors\n";
-            info << "\nAdvanced ARPACK Options (requires config file):\n";
-            info << "  arpack_which          Which eigenvalues: SR (ground state), LR (excited), SM, LM (default: SR)\n";
-            info << "  arpack_ncv            Number of Lanczos vectors (default: auto)\n";
-            info << "  arpack_max_restarts   Maximum restarts (default: 2)\n";
-            info << "  arpack_ncv_growth     NCV growth factor (default: 1.5)\n";
-            info << "  arpack_auto_enlarge_ncv      Auto-enlarge NCV (default: true)\n";
-            info << "  arpack_two_phase_refine      Two-phase refinement (default: true)\n";
-            info << "  arpack_relaxed_tol           Relaxed tolerance (default: 1e-6)\n";
-            info << "  arpack_shift_invert          Use shift-invert (default: false)\n";
-            info << "  arpack_sigma                 Shift value (default: 0.0)\n";
-            info << "  arpack_auto_switch_shift_invert  Auto-switch mode (default: true)\n";
-            info << "  arpack_adaptive_inner_tol    Adaptive tolerance (default: true)\n";
-            info << "\nBest for: Difficult convergence cases requiring fine-tuning\n";
-            break;
-            
-        case DiagonalizationMethod::LANCZOS_GPU:
-            info << "GPU-accelerated Lanczos (requires CUDA build).\n\n";
-            info << "Requires: CUDA-enabled build\n";
-            info << "Configurable Parameters:\n";
-            info << "  - num_eigenvalues: Number of eigenvalues to compute\n";
-            info << "  - max_iterations: Maximum Lanczos iterations\n";
-            info << "  - tolerance: Convergence tolerance\n";
-            info << "  - compute_eigenvectors: Whether to compute eigenvectors\n\n";
-            info << "Best for: Large systems requiring GPU acceleration\n";
-            break;
-            
-        case DiagonalizationMethod::LANCZOS_GPU_FIXED_SZ:
-            info << "GPU Lanczos for fixed Sz sector (requires CUDA build).\n\n";
-            info << "Requires: CUDA-enabled build\n";
-            info << "Configurable Parameters:\n";
-            info << "  - n_up: Number of up spins (determines Sz sector)\n";
-            info << "  - num_eigenvalues: Number of eigenvalues to compute\n";
-            info << "  - max_iterations: Maximum Lanczos iterations\n";
-            info << "  - tolerance: Convergence tolerance\n\n";
-            info << "Best for: Fixed Sz calculations with GPU acceleration\n";
-            break;
-            
-        case DiagonalizationMethod::DAVIDSON_GPU:
-            info << "GPU-accelerated Davidson method (requires CUDA build).\n\n";
-            info << "Requires: CUDA-enabled build\n";
-            info << "Configurable Parameters:\n";
-            info << "  - num_eigenvalues: Number of eigenvalues to compute\n";
-            info << "  - max_iterations: Maximum iterations\n";
-            info << "  - max_subspace: Maximum subspace dimension\n";
-            info << "  - tolerance: Convergence tolerance\n";
-            info << "  - compute_eigenvectors: Whether to compute eigenvectors\n\n";
-            info << "Best for: GPU-accelerated eigenvalue calculations with subspace expansion\n";
-            break;
-            
-        case DiagonalizationMethod::LOBPCG_GPU:
-            info << "GPU-accelerated LOBPCG method (requires CUDA build).\n";
-            info << "*** DEPRECATED: This method now redirects to DAVIDSON_GPU ***\n\n";
-            info << "Requires: CUDA-enabled build\n";
-            info << "Configurable Parameters:\n";
-            info << "  - num_eigenvalues: Number of eigenvalues to compute\n";
-            info << "  - max_iterations: Maximum iterations\n";
-            info << "  - tolerance: Convergence tolerance\n";
-            info << "  - compute_eigenvectors: Whether to compute eigenvectors\n\n";
-            info << "Note: LOBPCG_GPU has been retired due to numerical stability issues.\n";
-            info << "      It now redirects to DAVIDSON_GPU which provides superior accuracy.\n";
-            info << "      Please use DAVIDSON_GPU directly for new projects.\n";
-            break;
-            
-        case DiagonalizationMethod::KRYLOV_SCHUR_GPU:
-            info << "GPU-accelerated Krylov-Schur algorithm (requires CUDA build).\n\n";
-            info << "Restarted eigenvalue solver using Krylov-Schur decomposition.\n";
-            info << "Optimal for computing many eigenvalues with implicit restarts.\n";
-            info << "All operations performed on GPU with cuBLAS/cuSOLVER.\n\n";
-            info << "Requires: CUDA-enabled build\n";
-            info << "Configurable Parameters:\n";
-            info << "  --eigenvalues=<n>     Number of eigenvalues to compute (default: 1)\n";
-            info << "  --iterations=<n>      Maximum Krylov subspace size (default: 10000)\n";
-            info << "  --tolerance=<tol>     Convergence tolerance (default: 1e-10)\n";
-            info << "  --eigenvectors        Compute and save eigenvectors\n";
-            info << "  --fixed-sz            Use fixed Sz sector (recommended)\n";
-            info << "  --n_up=<n>            Number of up spins for fixed Sz\n\n";
-            info << "GPU Optimizations:\n";
-            info << "  - All Krylov vectors stored on GPU (no disk I/O)\n";
-            info << "  - Batched orthogonalization via cuBLAS GEMV\n";
-            info << "  - cuSOLVER for projected eigenvalue problem\n";
-            info << "  - cuBLAS GEMM for efficient basis update during restart\n\n";
-            info << "Best for: Computing many eigenvalues, systems requiring restarts\n";
-            break;
-            
-        case DiagonalizationMethod::BLOCK_KRYLOV_SCHUR_GPU:
-            info << "GPU-accelerated Block Krylov-Schur algorithm (requires CUDA build).\n\n";
-            info << "Block variant of Krylov-Schur using BLAS-3 operations (GEMM).\n";
-            info << "Better for degenerate/clustered eigenvalues than standard Krylov-Schur.\n";
-            info << "All operations performed on GPU with cuBLAS/cuSOLVER.\n\n";
-            info << "Requires: CUDA-enabled build\n";
-            info << "Configurable Parameters:\n";
-            info << "  --eigenvalues=<n>     Number of eigenvalues to compute (default: 1)\n";
-            info << "  --block_size=<n>      Block size (default: 4)\n";
-            info << "  --iterations=<n>      Maximum block iterations (default: 1000)\n";
-            info << "  --tolerance=<tol>     Convergence tolerance (default: 1e-10)\n";
-            info << "  --eigenvectors        Compute and save eigenvectors\n";
-            info << "  --fixed-sz            Use fixed Sz sector (recommended)\n";
-            info << "  --n_up=<n>            Number of up spins for fixed Sz\n\n";
-            info << "GPU Optimizations:\n";
-            info << "  - Block vectors stored on GPU\n";
-            info << "  - cuBLAS GEMM for block orthogonalization\n";
-            info << "  - cuSOLVER for block eigenvalue problem\n\n";
-            info << "Best for: Degenerate eigenvalues, clustered spectra, GPU acceleration\n";
-            break;
-            
-        case DiagonalizationMethod::mTPQ_GPU:
-            info << "GPU-accelerated microcanonical TPQ (requires CUDA build).\n\n";
-            info << "Requires: CUDA-enabled build\n";
-            info << "Configurable Parameters:\n";
-            info << "  - num_samples: Number of TPQ samples\n";
-            info << "  - max_iterations: Maximum iterations per sample\n";
-            info << "  - num_measure_freq: Measurement frequency\n";
-            info << "  - large_value: Large value parameter for TPQ\n";
-            info << "  - tpq_num_measure_points: Number of log-spaced measurement β points (default: 20)\n";
-            info << "  - tpq_measure_beta_min: Minimum β for measurement grid (default: 1.0)\n";
-            info << "  - tpq_measure_beta_max: Maximum β for measurement grid (default: 1000.0)\n\n";
-            info << "Best for: GPU-accelerated finite-temperature calculations (microcanonical)\n";
-            break;
-            
-        case DiagonalizationMethod::cTPQ_GPU:
-            info << "GPU-accelerated canonical TPQ (requires CUDA build).\n\n";
-            info << "Requires: CUDA-enabled build\n";
-            info << "Configurable Parameters:\n";
-            info << "  - num_samples: Number of TPQ samples\n";
-            info << "  - temp_max: Maximum temperature\n";
-            info << "  - num_measure_freq: Measurement frequency\n";
-            info << "  - delta_tau: Imaginary time step\n";
-            info << "  - num_order: Order parameter for TPQ\n";
-            info << "  - tpq_num_measure_points: Number of log-spaced measurement β points (default: 20)\n";
-            info << "  - tpq_measure_beta_min: Minimum β for measurement grid (default: 1.0)\n";
-            info << "  - tpq_measure_beta_max: Maximum β for measurement grid (default: 1000.0)\n\n";
-            info << "Best for: GPU-accelerated finite-temperature calculations (canonical)\n";
-            break;
-            
-        case DiagonalizationMethod::FTLM_GPU:
-            info << "GPU-accelerated Finite Temperature Lanczos Method (requires CUDA build).\n\n";
-            info << "Computes thermodynamic properties (energy, entropy, specific heat, free energy)\n";
-            info << "at finite temperature using GPU-accelerated Lanczos iterations. Significantly\n";
-            info << "faster than CPU FTLM for large systems.\n\n";
-            info << "Requires: CUDA-enabled build\n";
-            info << "Configurable Parameters:\n";
-            info << "  --samples=<n>         Number of random samples (default: 10)\n";
-            info << "  --ftlm-krylov=<m>     Krylov dimension per sample (default: 100)\n";
-            info << "  --temp_min=<T>        Minimum temperature (default: 1e-3)\n";
-            info << "  --temp_max=<T>        Maximum temperature (default: 20.0)\n";
-            info << "  --temp_bins=<n>       Number of temperature points (default: 100)\n";
-            info << "  --ftlm-full-reorth    Use full reorthogonalization (slower, more stable)\n";
-            info << "  --ftlm-reorth-freq=<k>  Reorthogonalization frequency (default: 10)\n";
-            info << "  --ftlm-seed=<seed>    Random seed (0 = random, default: 0)\n";
-            info << "\nOutput:\n";
-            info << "  Saves to: output_dir/thermo/ftlm_gpu_thermo.txt\n";
-            info << "  Format: Temperature  Energy  E_error  Specific_Heat  C_error  Entropy  S_error  Free_Energy  F_error\n";
-            info << "\nBest for: GPU-accelerated finite-temperature thermodynamics\n";
-            info << "Advantages: Much faster than CPU FTLM, scales to larger systems\n";
-            info << "Note: Requires sufficient GPU memory for Hamiltonian and Lanczos vectors\n";
-            break;
-            
-        case DiagonalizationMethod::FTLM_GPU_FIXED_SZ:
-            info << "GPU-accelerated FTLM for fixed Sz sector (requires CUDA build).\n\n";
-            info << "Computes thermodynamic properties in a specific Sz sector using GPU acceleration.\n";
-            info << "Useful when only a particular spin sector is of interest.\n\n";
-            info << "Requires: CUDA-enabled build\n";
-            info << "Configurable Parameters:\n";
-            info << "  --n_up=<n>            Number of up spins (determines Sz sector)\n";
-            info << "  --samples=<n>         Number of random samples (default: 10)\n";
-            info << "  --ftlm-krylov=<m>     Krylov dimension per sample (default: 100)\n";
-            info << "  --temp_min=<T>        Minimum temperature (default: 1e-3)\n";
-            info << "  --temp_max=<T>        Maximum temperature (default: 20.0)\n";
-            info << "  --temp_bins=<n>       Number of temperature points (default: 100)\n";
-            info << "  --ftlm-full-reorth    Use full reorthogonalization (slower, more stable)\n";
-            info << "  --ftlm-reorth-freq=<k>  Reorthogonalization frequency (default: 10)\n";
-            info << "  --ftlm-seed=<seed>    Random seed (0 = random, default: 0)\n";
-            info << "\nOutput:\n";
-            info << "  Saves to: output_dir/thermo/ftlm_gpu_fixedsz_thermo.txt\n";
-            info << "  Format: Temperature  Energy  E_error  Specific_Heat  C_error  Entropy  S_error  Free_Energy  F_error\n";
-            info << "\nBest for: Fixed Sz sector thermodynamics with GPU acceleration\n";
-            info << "Advantages: Reduced Hilbert space, faster than full space calculations\n";
-            break;
-            
-        default:
-            info << "No detailed information available for this method.\n";
+        case DiagonalizationMethod::mTPQ:
+        case DiagonalizationMethod::cTPQ:
+        case DiagonalizationMethod::KPM_DOS:
+            info << "Finite-temperature solver. Common knobs:\n"
+                 << "  --samples=<n>       number of random samples\n"
+                 << "  --temp_min/--temp_max/--temp_bins\n"
+                 << "  method-specific knobs in docs/guides/usage.md\n";
             break;
     }
-    
     info << "\n========================================\n";
     return info.str();
 }
-#pragma GCC diagnostic pop  // legacy _GPU / _CUDA / _MPI / _FIXED_SZ help text
 
 } // namespace ed_config
 

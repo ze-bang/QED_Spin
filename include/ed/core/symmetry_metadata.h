@@ -128,9 +128,15 @@ private:
     
     void loadMinimalGenerators(const std::string& auto_dir) {
         // P0.15: was a manual scan looking for "\"permutation\":" / "\"order\":"
-        // substrings; that approach broke the moment the JSON producer changed
-        // whitespace or key ordering. The on-disk schema is:
-        //   {"generators":[{"permutation":[...], "order":N}, ...]}
+        // substrings; that approach broke the moment the JSON producer
+        // changed whitespace or key ordering. We accept two on-disk
+        // schemas now:
+        //   (a) {"generators":[{"permutation":[...], "order":N}, ...]}
+        //   (b) [{"permutation":[...], "order":N, ...}, ...]
+        // (b) is what the Python ``automorphism`` tool emits, while
+        // (a) was a later add for C++ pipelines. Some fixtures and
+        // older snapshots use (b); accepting both keeps the
+        // auto-symmetry route from regressing in those workflows.
         const std::string filepath = auto_dir + "/minimal_generators.json";
         std::ifstream file(filepath);
         if (!file.is_open()) {
@@ -147,13 +153,19 @@ private:
         generators.clear();
         generator_orders.clear();
 
-        if (!j.contains("generators") || !j.at("generators").is_array()) {
-            throw std::runtime_error(filepath + ": missing or non-array 'generators' field");
+        const nlohmann::json* gens_ptr = nullptr;
+        if (j.is_array()) {
+            gens_ptr = &j;
+        } else if (j.contains("generators") && j.at("generators").is_array()) {
+            gens_ptr = &j.at("generators");
+        } else {
+            throw std::runtime_error(filepath +
+                ": expected either a top-level JSON array of generators "
+                "or an object with a 'generators' array field");
         }
-        const auto& gens = j.at("generators");
-        generators.reserve(gens.size());
-        generator_orders.reserve(gens.size());
-        for (const auto& g : gens) {
+        generators.reserve(gens_ptr->size());
+        generator_orders.reserve(gens_ptr->size());
+        for (const auto& g : *gens_ptr) {
             generators.push_back(g.at("permutation").get<std::vector<int>>());
             generator_orders.push_back(g.at("order").get<int>());
         }

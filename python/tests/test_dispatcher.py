@@ -141,35 +141,37 @@ def test_scalapack_block_size_auto_default_and_override():
 # ----------------------------------------------------------------------------
 
 
+# ----------------------------------------------------------------------------
+# Workflow-surface ground-state checks (migrated from the legacy
+# `qed.exact_diagonalization_core` dispatcher in ED Cleanup Sweep Phase 3,
+# May 2026). The dispatcher tests legacy methods (DAVIDSON / LOBPCG /
+# ARPACK_* / *_SELECTIVE / *_NO_ORTHO / *_RESTART) that have no
+# `_core.workflows_solve` equivalent; those are pinned with explicit
+# skip markers and will be deleted in Phase 5 along with the
+# dispatcher.
+# ----------------------------------------------------------------------------
+
+
 @pytest.mark.parametrize(
-    "method_name,extra_setup",
+    "method_name",
     [
-        ("LANCZOS",                  None),
-        ("LANCZOS_SELECTIVE",        None),
-        ("LANCZOS_NO_ORTHO",         None),
-        ("BLOCK_LANCZOS",            "block"),
-        ("KRYLOV_SCHUR",             None),
-        ("BLOCK_KRYLOV_SCHUR",       "block"),
-        ("DAVIDSON",                 None),
-        ("LOBPCG",                   None),
-        ("THICK_RESTART_LANCZOS",    None),
-        ("IMPLICIT_RESTART_LANCZOS", None),
-        # ARPACK_SM (smallest magnitude, ~ ground state). ARPACK_LM
-        # targets the *largest* eigenvalue and is intentionally excluded
-        # from the ground-state sanity sweep.
-        ("ARPACK_SM",                None),
+        "Lanczos",
+        "BlockLanczos",
+        "KrylovSchur",
+        "FullDiag",
     ],
 )
-def test_cpu_dispatcher_recovers_ground_state(method_name, extra_setup):
+def test_workflows_solve_recovers_ground_state(method_name):
     op = _build_heisenberg_ring()
-    method = getattr(qed.DiagonalizationMethod, method_name)
-    params = qed.EDParameters()
-    params.num_eigenvalues = 1
-    params.max_iterations = 200
-    params.tolerance = 1e-12
-    if extra_setup == "block":
-        params.block_size = 2
-    res = qed.exact_diagonalization_core(op, method, params)
+    method = getattr(qed._core.SolveMethod, method_name)
+    opts = qed._core.SolveOptions()
+    opts.num_eigs   = 1
+    opts.max_iter   = 200
+    opts.tolerance  = 1e-12
+    opts.method     = method
+    if method_name == "BlockLanczos":
+        opts.block_size = 2
+    res = qed._core.workflows_solve(op, opts)
     assert len(res.eigenvalues) >= 1
     e0 = min(res.eigenvalues)
     assert abs(e0 - GROUND_STATE_ENERGY) < 1e-5, (
@@ -177,30 +179,37 @@ def test_cpu_dispatcher_recovers_ground_state(method_name, extra_setup):
     )
 
 
-def test_arpack_lm_recovers_largest_eigenvalue():
-    """ARPACK_LM targets the largest-magnitude eigenvalue (= +1.5 for the chain)."""
-    op = _build_heisenberg_ring()
-    params = qed.EDParameters()
-    params.num_eigenvalues = 1
-    params.max_iterations = 200
-    params.tolerance = 1e-12
-    res = qed.exact_diagonalization_core(
-        op, qed.DiagonalizationMethod.ARPACK_LM, params
-    )
-    assert len(res.eigenvalues) >= 1
-    # Heisenberg-ring spectrum is bounded by |E| <= N*S^2*4 = 1.5 for N=6, S=1/2.
-    # The +1.5 maximum is the all-aligned state of the J SzSz piece.
-    assert max(abs(e) for e in res.eigenvalues) > 1.4
+@pytest.mark.parametrize(
+    "method_name",
+    [
+        "LANCZOS_SELECTIVE",
+        "LANCZOS_NO_ORTHO",
+        "BLOCK_KRYLOV_SCHUR",
+        "DAVIDSON",
+        "LOBPCG",
+        "THICK_RESTART_LANCZOS",
+        "IMPLICIT_RESTART_LANCZOS",
+        "ARPACK_SM",
+        "ARPACK_LM",
+    ],
+)
+@pytest.mark.skip(reason="Dispatcher-only method removed in ED Cleanup "
+                  "Sweep Phase 5 along with qed.exact_diagonalization_core "
+                  "and the auto-pilot. Numerical correctness of these "
+                  "kernels is covered by their dedicated unit tests "
+                  "(test_lanczos_variants, etc.).")
+def test_legacy_dispatcher_methods_removed_in_phase_5(method_name):
+    # Placeholder so the parametrize matrix documents the removed names.
+    pass
 
 
-def test_full_dispatcher_recovers_full_spectrum():
-    """LAPACK FULL diag should give the same set as the matrix-free apply path."""
+def test_workflows_solve_full_diag_recovers_full_spectrum():
+    """FullDiag should give the same set as the matrix-free apply path."""
     op = _build_heisenberg_ring(num_sites=4)  # smaller dim 16 to keep test fast
-    params = qed.EDParameters()
-    params.num_eigenvalues = 16
-    res = qed.exact_diagonalization_core(
-        op, qed.DiagonalizationMethod.FULL, params
-    )
+    opts = qed._core.SolveOptions()
+    opts.num_eigs = 16
+    opts.method   = qed._core.SolveMethod.FullDiag
+    res = qed._core.workflows_solve(op, opts)
     eigs = sorted(res.eigenvalues)
     assert len(eigs) == 16
     # Reference periodic 4-site Heisenberg ground state = -2.0
@@ -210,11 +219,12 @@ def test_full_dispatcher_recovers_full_spectrum():
 
 
 # ----------------------------------------------------------------------------
-# Fixed-Sz overload
+# FixedSzOperator overload (LinearOperator polymorphism: FixedSzOperator
+# inherits from Operator which inherits from LinearOperator).
 # ----------------------------------------------------------------------------
 
 
-def test_fixed_sz_dispatcher_recovers_ground_state():
+def test_workflows_solve_on_fixed_sz_recovers_ground_state():
     """At total Sz=0 (n_up=N/2) the chain ground state lives in this sector."""
     fop = qed.FixedSzOperator(num_sites=N_SITES, n_up=N_SITES // 2, spin=0.5)
     # Build the same Heisenberg Hamiltonian on the FixedSzOperator (which
@@ -224,13 +234,12 @@ def test_fixed_sz_dispatcher_recovers_ground_state():
         fop.add_two_body(qed.OP_SZ, i, qed.OP_SZ, j, 1.0 + 0.0j)
         fop.add_two_body(qed.OP_SPLUS, i, qed.OP_SMINUS, j, 0.5 + 0.0j)
         fop.add_two_body(qed.OP_SMINUS, i, qed.OP_SPLUS, j, 0.5 + 0.0j)
-    params = qed.EDParameters()
-    params.num_eigenvalues = 1
-    params.max_iterations = 200
-    params.tolerance = 1e-12
-    res = qed.exact_diagonalization_core(
-        fop, qed.DiagonalizationMethod.LANCZOS, params
-    )
+    opts = qed._core.SolveOptions()
+    opts.num_eigs  = 1
+    opts.max_iter  = 200
+    opts.tolerance = 1e-12
+    opts.method    = qed._core.SolveMethod.Lanczos
+    res = qed._core.workflows_solve(fop, opts)
     e0 = min(res.eigenvalues)
     assert abs(e0 - GROUND_STATE_ENERGY) < 1e-5
 

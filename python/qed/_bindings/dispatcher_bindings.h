@@ -1,40 +1,34 @@
 // =============================================================================
 // python/qed/_bindings/dispatcher_bindings.h
 //
-// Phase 5 of the Python interface modernization (Apr 2026): expose the
-// **single** high-level dispatcher and the directory- / streaming-symmetry
-// drivers to Python so that one binding call unlocks the entire CPU iterative
-// + dense + thermal + ARPACK + TPQ + per-sector GPU stack.
+// Expose the high-level ED dispatcher to Python: one binding call wires up the
+// Krylov / dense / thermal solver surface plus the directory / streaming-
+// symmetry drivers.
 //
 // `bind_dispatcher(m)` populates `qed._core` with:
-//   * `DiagonalizationMethod` enum (every value the C++ enum carries)
-//   * `EDParameters` mutable parameter bag
-//   * `EDResults` immutable result envelope
+//   * `DiagonalizationMethod` enum (9 values: LANCZOS, BLOCK_LANCZOS,
+//     KRYLOV_SCHUR, FULL, mTPQ, cTPQ, FTLM, LTLM, KPM_DOS).
+//   * `EDParameters` mutable parameter bag.
+//   * `EDResults` immutable result envelope.
 //   * `exact_diagonalization_core(operator_, method, params)` for both
-//     `Operator` and `FixedSzOperator` -- this single Python function
-//     dispatches to ~30 CPU solver variants (LANCZOS family,
-//     BLOCK_LANCZOS, KRYLOV_SCHUR, BLOCK_KRYLOV_SCHUR, DAVIDSON, LOBPCG,
-//     CHEBYSHEV_FILTERED, SHIFT_INVERT[_ROBUST], IRL/TRL, BICG, ARPACK_*,
-//     FULL/SCALAPACK, mTPQ/cTPQ, FTLM/LTLM/HYBRID).
-//   * `exact_diagonalization_from_directory[_symmetrized]` and
-//     `_fixed_sz_symmetrized` for directory-driven runs (also reaches
-//     the GPU per-sector dispatch via `_GPU` methods).
+//     `Operator` and `FixedSzOperator`. Device / parallelism / Sz /
+//     symmetry are flags on `EDParameters` (`use_gpu`, `use_mpi`,
+//     `use_fixed_sz`, `use_symmetry`).
+//   * `exact_diagonalization_from_directory(...)` for directory-driven runs
+//     -- the 5-axis dispatcher that also reaches the streaming-symmetry path.
 //   * `exact_diagonalization_streaming_symmetry[_fixed_sz]` for the
 //     in-memory streaming-symmetry path -- the canonical entry point for
 //     symmetry-projected ED with optional GPU sector solves.
 //   * `Operator.set_symmetry_info_from_dict()` /
 //     `FixedSzOperator.set_symmetry_info_from_dict()` so callers can wire
 //     the dict produced by `qed.symmetry.group_from_generators(...)`
-//     straight onto an in-process Operator without going through the
-//     legacy `automorphism_results/*.json` detour.
-//   * `qed._core.has_cuda_build()` /
-//     `has_mpi_build()` / `has_scalapack_build()` build introspection.
+//     straight onto an in-process Operator.
+//   * `qed._core.has_cuda_build()` / `has_mpi_build()` build introspection.
 //
 // The binding compiles against the same CMake target as the rest of
-// `qed._core`, so `WITH_CUDA` / `WITH_MPI` / `WITH_SCALAPACK`
-// macros are visible: GPU-only methods (`LANCZOS_GPU`, etc.) fall through
-// to the C++ runtime's existing CPU-fallback warning when CUDA is off,
-// and the introspection helpers report the exact build configuration.
+// `qed._core`, so `WITH_CUDA` / `WITH_MPI` macros are visible: setting
+// `params.use_gpu = True` on a build without CUDA falls back to the CPU
+// code path with a runtime warning.
 // =============================================================================
 
 #pragma once

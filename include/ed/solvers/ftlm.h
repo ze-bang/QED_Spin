@@ -26,7 +26,7 @@ struct FTLMParameters {
     uint64_t num_samples = 10;              // Number of random initial states
     uint64_t max_iterations = 1000;         // Maximum Lanczos iterations
     double tolerance = 1e-10;          // Convergence tolerance for Lanczos
-    bool full_reorthogonalization = false;  // Use full reorthogonalization
+    bool full_reorthogonalization = true;   // Full reorth (CPU-default, matches EDParameters::ftlm_full_reorth)
     uint64_t reorth_frequency = 10;         // Frequency of reorthogonalization (if not full)
     uint64_t random_seed = 0;      // Random seed (0 = use random_device)
     bool store_intermediate = false;   // Store per-sample intermediate data for debugging
@@ -52,7 +52,7 @@ struct DynamicalResponseParameters {
     uint64_t krylov_dim = 400;              // Dimension of Krylov subspace
     uint64_t num_samples = 40;              // Number of random initial states
     double tolerance = 1e-10;          // Convergence tolerance for Lanczos
-    bool full_reorthogonalization = false;  // Use full reorthogonalization
+    bool full_reorthogonalization = true;   // Full reorth (CPU-default, matches EDParameters)
     uint64_t reorth_frequency = 10;         // Frequency of reorthogonalization
     uint64_t random_seed = 0;      // Random seed (0 = use random_device)
     double broadening = 0.1;           // Lorentzian broadening parameter (eta)
@@ -109,7 +109,7 @@ struct StaticResponseParameters {
     uint64_t krylov_dim = 100;              // Dimension of Krylov subspace per sample
     uint64_t num_samples = 10;              // Number of random initial states
     double tolerance = 1e-10;          // Convergence tolerance for Lanczos
-    bool full_reorthogonalization = false;  // Use full reorthogonalization
+    bool full_reorthogonalization = true;   // Full reorth (CPU-default, matches EDParameters)
     uint64_t reorth_frequency = 10;         // Frequency of reorthogonalization
     uint64_t random_seed = 0;      // Random seed (0 = use random_device)
     bool store_intermediate = false;   // Store per-sample data
@@ -279,43 +279,9 @@ ThermodynamicData combine_ftlm_sector_results(
     const std::vector<uint64_t>& sector_dims
 );
 
-/**
- * @brief Compute dynamical response S(ω) for operator O using Lanczos method
- * 
- * Computes the spectral function S(ω) = <ψ|O†δ(ω - H)O|ψ> where:
- * - H is the Hamiltonian
- * - O is an operator (applied via matrix-vector product)
- * - |ψ> is an initial state (typically ground state or thermal state)
- * 
- * The calculation proceeds by:
- * 1. Apply O to initial state: |φ> = O|ψ>
- * 2. Build Krylov subspace from |φ> using Lanczos
- * 3. Diagonalize tridiagonal matrix to get eigenvalues and weights
- * 4. Construct spectral function with Lorentzian broadening
- * 
- * @param H Hamiltonian matrix-vector product function
- * @param O Operator matrix-vector product function
- * @param psi Initial state vector
- * @param N Hilbert space dimension
- * @param params Parameters for dynamical response calculation
- * @param omega_min Minimum frequency
- * @param omega_max Maximum frequency
- * @param num_omega_bins Number of frequency points
- * @param output_dir Directory for output files
- * @return DynamicalResponseResults containing S(ω) vs frequency
- */
-DynamicalResponseResults compute_dynamical_response(
-    std::function<void(const Complex*, Complex*, int)> H,
-    std::function<void(const Complex*, Complex*, int)> O,
-    const ComplexVector& psi,
-    uint64_t N,
-    const DynamicalResponseParameters& params,
-    double omega_min,
-    double omega_max,
-    uint64_t num_omega_bins,
-    double temperature = 0.0,  // Temperature (0 = no thermal weighting)
-    const std::string& output_dir = ""
-);
+// The single-state `compute_dynamical_response(psi, ...)` overload was retired
+// in the minimalist-architecture rev (May 2026); use
+// `ed::observables::cf_dynamical_correlator` for the |psi> -> S(omega) primitive.
 
 /**
  * @brief Compute dynamical response with random initial states (finite temperature)
@@ -402,43 +368,14 @@ DynamicalResponseResults compute_dynamical_correlation(
  * This is the single-state version of compute_dynamical_correlation.
  * Use this when you have a specific quantum state (e.g., ground state, 
  * excited state, or thermal state) rather than averaging over random samples.
- * 
- * The calculation uses the Lehmann representation:
- * - Applies O₂ to the given state: |φ⟩ = O₂|ψ⟩
- * - Builds Krylov subspace from |φ⟩ using H
- * - Diagonalizes H in Krylov basis to get approximate eigenstates |n⟩
- * - Computes ⟨ψ|O₁†|n⟩ and ⟨n|O₂|ψ⟩
- * - Constructs S(ω) with Lorentzian broadening
- * 
- * For the same operator (O1=O2=O), this gives the spectral density.
- * For different operators, it gives cross-correlations.
- * 
- * @param H Hamiltonian matrix-vector product function
- * @param O1 First operator (O₁) matrix-vector product function
- * @param O2 Second operator (O₂) matrix-vector product function
- * @param state Input quantum state |ψ⟩ (should be normalized)
- * @param N Hilbert space dimension
- * @param params Parameters for dynamical response calculation
- * @param omega_min Minimum frequency
- * @param omega_max Maximum frequency
- * @param num_omega_bins Number of frequency points
- * @param temperature Temperature for Boltzmann weighting (0 = no weighting)
- * @param energy_shift Energy shift to apply (typically ground state energy, 0 = auto-detect from Krylov)
- * @return DynamicalResponseResults containing S_{O1,O2}(ω) vs frequency
+ *
+ * The two-operator entry point `compute_dynamical_correlation_state(O1, O2, ...)`
+ * was retired in the minimalist-architecture rev (May 2026); use
+ * `ed::observables::cf_dynamical_correlator` for the self-correlator case
+ * (O1==O2) and call it twice for the cross-correlator case. The multi-
+ * temperature / multi-operator drivers below still use `compute_lanczos_spectral_data`
+ * internally for the precomputed shared Krylov basis.
  */
-DynamicalResponseResults compute_dynamical_correlation_state(
-    std::function<void(const Complex*, Complex*, int)> H,
-    std::function<void(const Complex*, Complex*, int)> O1,
-    std::function<void(const Complex*, Complex*, int)> O2,
-    const ComplexVector& state,
-    uint64_t N,
-    const DynamicalResponseParameters& params,
-    double omega_min,
-    double omega_max,
-    uint64_t num_omega_bins,
-    double temperature = 0.0,
-    double energy_shift = 0.0
-);
 
 /**
  * @brief MEMORY-EFFICIENT spectral function via continued fraction (O1=O2 case)
@@ -481,16 +418,9 @@ DynamicalResponseResults compute_dynamical_correlation_state_cf(
     double energy_shift = 0.0
 );
 
-/**
- * @brief Save dynamical response results to file
- * 
- * @param results Dynamical response results to save
- * @param filename Output filename
- */
-void save_dynamical_response_results(
-    const DynamicalResponseResults& results,
-    const std::string& filename
-);
+// save_dynamical_response_results was retired in the minimalist-
+// architecture rev (May 2026): no external callers. Persist directly via
+// HDF5IO::saveDynamicalResponseFull instead.
 
 /**
  * @brief Compute thermal expectation value ⟨O⟩_T and susceptibility
@@ -585,16 +515,9 @@ StaticResponseResults compute_connected_qh_response(
     const std::string& output_dir = ""
 );
 
-/**
- * @brief Save static response results to file
- * 
- * @param results Static response results to save
- * @param filename Output filename
- */
-void save_static_response_results(
-    const StaticResponseResults& results,
-    const std::string& filename
-);
+// save_static_response_results was retired in the minimalist-
+// architecture rev (May 2026): no external callers. Persist directly via
+// HDF5IO::saveStaticResponse instead.
 
 // ============================================================================
 // TEMPERATURE-INDEPENDENT SPECTRAL DECOMPOSITION (OPTIMIZATION)
@@ -975,23 +898,6 @@ DynamicalResponseResults compute_ground_state_dssf_cross_sector(
     const GroundStateDSSFParameters& params
 );
 
-/**
- * @brief Load ground state from eigenvector files
- * 
- * Attempts to load ground state from various possible file formats:
- * 1. Binary eigenvector file (eigenvector_0.dat)
- * 2. Text eigenvector file (eigenvector_0.txt)
- * 3. Block-structured files (eigenvector_block0_0.dat)
- * 
- * @param eigenvector_dir Directory containing eigenvector files
- * @param ground_state Output: loaded ground state vector
- * @param ground_state_energy Output: ground state energy
- * @param expected_dim Expected Hilbert space dimension (for validation)
- * @return true if successfully loaded, false otherwise
- */
-bool load_ground_state_from_file(
-    const std::string& eigenvector_dir,
-    ComplexVector& ground_state,
-    double& ground_state_energy,
-    uint64_t expected_dim = 0
-);
+// load_ground_state_from_file was retired in the minimalist-architecture
+// rev (May 2026): no external callers. Ground states are read from
+// the unified HDF5 store via HDF5IO::loadEigenvector(/0/) directly.

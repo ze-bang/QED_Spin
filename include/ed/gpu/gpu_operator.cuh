@@ -10,6 +10,7 @@
 #include <complex>
 #include <functional>
 #include <memory>
+#include <ed/core/linear_operator.h>
 #include <ed/gpu/kernel_config.h>
 #include <ed/gpu/bit_operations.cuh>
 #include <ed/matvec/matvec.h>
@@ -133,7 +134,7 @@ struct GPUThreeBodyTransformData {
  * 
  * OPTIMIZED: Uses Structure-of-Arrays to eliminate std::function overhead
  */
-class GPUOperator : public ed::matvec::MatVecOperator {
+class GPUOperator : public ed::LinearOperator {
 public:
     // Constructor
     GPUOperator(int n_sites, float spin_l = 0.5f);

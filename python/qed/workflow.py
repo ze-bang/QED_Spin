@@ -50,9 +50,9 @@ What ``diag`` does for you (smart defaults)
 -------------------------------------------
 
 * ``num_eigenvalues`` (default 1) feeds into a heuristic that sets
-  ``max_iterations`` and ``max_subspace`` so the requested eigenvalues
-  converge to the requested ``tolerance`` (default 1e-10) without the
-  caller having to reason about Krylov-space sizes.
+  ``max_iterations`` (the Krylov subspace size) so the requested
+  eigenvalues converge to the requested ``tolerance`` (default 1e-10)
+  without the caller having to reason about Krylov-space sizes.
 * ``solver=None`` lets the dispatcher pick: ``FULL`` for tiny
   Hilbert spaces (LAPACK is end-to-end faster than Lanczos below
   ``dim ~ 2048``), ``LANCZOS`` for the bottom of the spectrum at
@@ -592,12 +592,10 @@ def diag(
     sz: Optional[int] = None,
     output_dir: str = "",
     max_iterations: Optional[int] = None,
-    max_subspace: Optional[int] = None,
     block_size: Optional[int] = None,
     # Thermal-method first-class shortcuts (only consulted for
-    # mTPQ / cTPQ / FTLM / LTLM / HYBRID; ignored for eigenvalue
-    # solvers, where the relevant knobs are num_eigenvalues +
-    # max_subspace).
+    # mTPQ / cTPQ / FTLM / LTLM; ignored for eigenvalue solvers, where
+    # the relevant knob is num_eigenvalues + max_iterations).
     num_samples: Optional[int] = None,
     target_beta: Optional[float] = None,
     num_temp_points: Optional[int] = None,
@@ -615,11 +613,10 @@ def diag(
     dry_run: bool = False,
     force: bool = False,
     verbose: bool = True,
-    # Auto-tuner (Phase 9.3) — picks ARPACK ncv, FTLM/LTLM Krylov dim,
-    # mTPQ taylor order + delta_beta, tolerance level, and # thermal
-    # samples from sector dim, num_eigenvalues, and Hamiltonian
-    # bandwidth. Anything explicitly set on this call (or via
-    # ``extra_params``) wins.
+    # Auto-tuner -- picks FTLM/LTLM Krylov dim, mTPQ taylor order +
+    # delta_beta, tolerance level, and # thermal samples from sector
+    # dim, num_eigenvalues, and Hamiltonian bandwidth. Anything
+    # explicitly set on this call (or via ``extra_params``) wins.
     auto_tune: bool = True,
     level: str = "balanced",
     extra_params: Optional[dict[str, Any]] = None,
@@ -654,15 +651,11 @@ def diag(
         Supported families:
 
         * eigenvalue (returns ``EDResults.eigenvalues``):
-          ``LANCZOS`` (and BLOCK / NO_ORTHO / SELECTIVE / IRL / TRL
-          variants), ``KRYLOV_SCHUR`` (BLOCK), ``DAVIDSON``,
-          ``LOBPCG``, ``ARPACK_*``, ``CHEBYSHEV_FILTERED``,
-          ``SHIFT_INVERT[_ROBUST]``, ``BICG``, ``OSS``, ``FULL``,
-          ``SCALAPACK[_MIXED]``.
+          ``LANCZOS``, ``BLOCK_LANCZOS``, ``KRYLOV_SCHUR``, ``FULL``.
         * thermal (returns ``EDResults`` with the imaginary-time
           trajectory in ``eigenvalues`` and the post-processed
           thermodynamic curve on disk in ``output_dir``):
-          ``mTPQ``, ``cTPQ``, ``FTLM``, ``LTLM``, ``HYBRID``.
+          ``mTPQ``, ``cTPQ``, ``FTLM``, ``LTLM``, ``KPM_DOS``.
     device : str, optional
         Backend device. One of ``"auto"`` / ``"cpu"`` / ``"gpu"`` /
         ``"mpi"`` / ``"mpi_gpu"``. ``None`` (default) means ``"auto"``.
@@ -704,9 +697,10 @@ def diag(
         ``./qed_thermal_<timestamp>/`` directory whose path is
         printed when ``verbose=True``. Pass an explicit dir to keep
         the data alongside other artefacts.
-    max_iterations, max_subspace, block_size : int, optional
+    max_iterations, block_size : int, optional
         Manual overrides of the auto-tuned solver parameters. For
-        thermal methods, ``max_iterations`` is forwarded as
+        eigenvalue Krylov solvers ``max_iterations`` is the Krylov
+        subspace dimension; for thermal methods it is forwarded as
         ``tpq_max_steps`` (number of imaginary-time Taylor steps).
     num_samples : int, optional
         (Thermal only.) Number of random initial states to average
@@ -723,7 +717,7 @@ def diag(
         If True (default), prints what the auto-selector chose.
     extra_params : dict, optional
         Forwarded to :class:`EDParameters` as ``setattr`` calls.
-        Useful for niche flags (``arpack_*``, ``tpq_*``, ``ltlm_*``,
+        Useful for niche flags (``tpq_*``, ``ltlm_*``, ``kpm_*``,
         etc.) that the unified ``diag`` doesn't expose individually.
         Call :func:`list_diag_parameters` to see the full catalogue.
 
@@ -942,7 +936,6 @@ def diag(
             num_eigenvalues=num_eigenvalues,
             n_samples=num_samples,
             n_ranks=mpi_n_ranks,
-            max_subspace=max_subspace,
             max_iterations=max_iterations,
             block_size=block_size,
             compute_eigenvectors=compute_eigenvectors,
@@ -971,7 +964,6 @@ def diag(
         tolerance=tolerance,
         compute_eigenvectors=compute_eigenvectors,
         max_iterations=max_iterations,
-        max_subspace=max_subspace,
         block_size=block_size,
         sector_dim=sector_dim,
         method=method,
@@ -993,7 +985,7 @@ def diag(
                     f"EDParameters has no field {key!r}; "
                     "call qed.list_diag_parameters() to see every "
                     "available knob (or filter by category, e.g. "
-                    "qed.list_diag_parameters('arpack'))."
+                    "qed.list_diag_parameters('tpq'))."
                 )
             setattr(params, key, value)
 
@@ -1027,14 +1019,12 @@ def diag(
             tolerance=tolerance if "tolerance" not in explicit else
                       extra_params["tolerance"],
             max_iterations=max_iterations,
-            max_subspace=max_subspace,
             block_size=block_size,
         )
         # Fill only sentinel-defaulted fields. Each entry maps an
         # EDParameters field to its struct default (matching
         # include/ed/core/ed_parameters.h).
         _SENTINELS: dict[str, object] = {
-            "arpack_ncv":         -1,
             "ftlm_krylov_dim":    100,
             "ltlm_krylov_dim":    200,
             "ltlm_ground_krylov": 100,
@@ -1042,7 +1032,6 @@ def diag(
             "tpq_delta_beta":     1e-2,
         }
         _TUNED_VALUES = {
-            "arpack_ncv":         tuned.arpack_ncv,
             "ftlm_krylov_dim":    tuned.ftlm_krylov_dim,
             "ltlm_krylov_dim":    tuned.ltlm_krylov_dim,
             "ltlm_ground_krylov": tuned.ltlm_ground_krylov,
@@ -1060,20 +1049,18 @@ def diag(
         if verbose:
             print(f"[qed.diag] auto-tune (level={tuned.level}): "
                   f"tol={params.tolerance:g} max_iter={params.max_iterations} "
-                  f"max_sub={params.max_subspace} ftlm_M={params.ftlm_krylov_dim} "
+                  f"ftlm_M={params.ftlm_krylov_dim} "
                   f"ltlm_M={params.ltlm_krylov_dim} "
                   f"tpq_p={params.tpq_taylor_order} "
                   f"tpq_dbeta={params.tpq_delta_beta:g} "
-                  f"arpack_ncv={params.arpack_ncv} "
                   f"bandwidth≈{tuned.bandwidth:g}")
 
     # ------------------------------------------------------------------
     # 5. Dispatch. Three branches:
     #     * symmetry path → streaming kernel (handles GPU per-sector).
     #     * GPU + no-symmetry → temp-dir + from_directory (the
-    #       in-process exact_diagonalization_core throws on
-    #       LANCZOS_GPU / KRYLOV_SCHUR_GPU / mTPQ_GPU because GPU
-    #       kernels need a GPUOperator built from files; the
+    #       in-process exact_diagonalization_core cannot build a
+    #       GPUOperator handle from an in-memory Operator; the
     #       directory dispatcher handles that for us).
     #     * CPU + no-symmetry → in-process exact_diagonalization_core
     #       (the fastest path, no I/O).
@@ -1132,36 +1119,19 @@ _PARAMETER_CATEGORIES: list[tuple[str, str, list[str]]] = [
         "compute_eigenvectors", "output_dir",
     ]),
     ("krylov", "Lanczos / Krylov-Schur subspace shape", [
-        "max_subspace", "block_size", "shift",
-        "target_lower", "target_upper",
+        "block_size",
     ]),
     ("device", "Device & parallelism axes (orthogonal flags)", [
         "use_gpu", "use_mpi", "use_symmetry",
         "use_fixed_sz", "n_up", "translation_only", "full_sz_split",
     ]),
-    ("arpack", "ARPACK iterative solver (when method=ARPACK)", [
-        "arpack_advanced_verbose", "arpack_which", "arpack_ncv",
-        "arpack_max_restarts", "arpack_ncv_growth",
-        "arpack_auto_enlarge_ncv", "arpack_two_phase_refine",
-        "arpack_relaxed_tol", "arpack_shift_invert", "arpack_sigma",
-        "arpack_auto_switch_shift_invert", "arpack_switch_sigma",
-        "arpack_adaptive_inner_tol", "arpack_inner_tol_factor",
-        "arpack_inner_tol_min", "arpack_inner_max_iter",
-    ]),
-    ("scalapack", "ScaLAPACK distributed dense (use_mpi=True)", [
-        "scalapack_nprow", "scalapack_npcol",
-        "scalapack_block_size", "scalapack_block_size_auto",
-        "scalapack_mixed_precision", "scalapack_refinement_tol",
-        "scalapack_max_refinement_iter", "scalapack_verbose",
-    ]),
     ("ftlm", "Finite-Temperature Lanczos Method", [
         "ftlm_krylov_dim", "ftlm_full_reorth", "ftlm_reorth_freq",
         "ftlm_seed", "ftlm_store_samples", "ftlm_error_bars",
     ]),
-    ("ltlm", "Low-Temperature Lanczos Method (+ HYBRID crossover)", [
+    ("ltlm", "Low-Temperature Lanczos Method", [
         "ltlm_krylov_dim", "ltlm_ground_krylov", "ltlm_full_reorth",
         "ltlm_reorth_freq", "ltlm_seed", "ltlm_store_data",
-        "hybrid_crossover", "hybrid_auto_crossover",
     ]),
     ("tpq", "Thermal Pure Quantum / mTPQ imaginary-time evolution", [
         "tpq_max_steps", "tpq_measurement_interval",
@@ -1207,32 +1177,13 @@ _PARAMETER_CATEGORIES: list[tuple[str, str, list[str]]] = [
 _SOLVER_DEVICE_KERNELS: dict[str, dict[str, bool]] = {
     "LANCZOS":         {"cpu": True, "gpu": True,  "mpi": True,  "mpi_gpu": True},
     "BLOCK_LANCZOS":   {"cpu": True, "gpu": True,  "mpi": False, "mpi_gpu": False},
-    # Phase 9 / Layer 3: distributed_krylov_schur (thick-restart Lanczos
-    # with Ritz-pair locking) wires up real MPI support. Phase D step 3
-    # extends to mpi_gpu via distributed_krylov_schur_gpu (and the symm
-    # companion distributed_krylov_schur_gpu_symmetry).
     "KRYLOV_SCHUR":    {"cpu": True, "gpu": True,  "mpi": True,  "mpi_gpu": True},
-    "BLOCK_KRYLOV_SCHUR": {"cpu": True, "gpu": True, "mpi": False, "mpi_gpu": False},
-    "DAVIDSON":        {"cpu": True, "gpu": True,  "mpi": False, "mpi_gpu": False},
-    "LOBPCG":          {"cpu": True, "gpu": True,  "mpi": False, "mpi_gpu": False},
-    "ARPACK_*":        {"cpu": True, "gpu": False, "mpi": False, "mpi_gpu": False},
     "FULL":            {"cpu": True, "gpu": True,  "mpi": False, "mpi_gpu": False},
-    "SCALAPACK":       {"cpu": False,"gpu": False, "mpi": True,  "mpi_gpu": False},
-    # Phase 9 / Layer 2: distributed_tpq_gpu wires up mpi_gpu support
-    # via DistributedGPUOperator + cuBLAS axpys/dotcs + NCCL allreduces
-    # (when the build has WITH_CUDA=ON + NCCL_FOUND).
     "mTPQ":            {"cpu": True, "gpu": True,  "mpi": True,  "mpi_gpu": True},
     "cTPQ":            {"cpu": True, "gpu": True,  "mpi": True,  "mpi_gpu": True},
-    # distributed_ftlm_gpu (Phase 9 footnote ⁵) wires the multi-GPU
-    # cell; Phase D step 5 adds the symm companion
-    # distributed_ftlm_gpu_symmetry.
     "FTLM":            {"cpu": True, "gpu": True,  "mpi": True,  "mpi_gpu": True},
     "LTLM":            {"cpu": True, "gpu": False, "mpi": False, "mpi_gpu": False},
-    "HYBRID":          {"cpu": True, "gpu": False, "mpi": False, "mpi_gpu": False},
-    "SHIFT_INVERT":    {"cpu": True, "gpu": False, "mpi": False, "mpi_gpu": False},
-    "CHEBYSHEV_FILTERED": {"cpu": True, "gpu": False, "mpi": False, "mpi_gpu": False},
-    "BICG":            {"cpu": True, "gpu": False, "mpi": False, "mpi_gpu": False},
-    "OSS":             {"cpu": True, "gpu": False, "mpi": False, "mpi_gpu": False},
+    "KPM_DOS":         {"cpu": True, "gpu": False, "mpi": False, "mpi_gpu": False},
 }
 
 
@@ -1368,19 +1319,18 @@ def list_diag_parameters(
     Most users only need the keyword arguments :func:`diag` exposes
     directly (``num_eigenvalues``, ``tolerance``, ``solver``,
     ``device``, ``symmetry``, ``sz``, ``output_dir``,
-    ``compute_eigenvectors``, ``max_iterations``, ``max_subspace``,
-    ``block_size``). Everything else lives on :class:`EDParameters`
-    and is reachable via the ``extra_params`` dict; this helper lists
-    those fields with their defaults, organised by physical purpose.
+    ``compute_eigenvectors``, ``max_iterations``, ``block_size``).
+    Everything else lives on :class:`EDParameters` and is reachable
+    via the ``extra_params`` dict; this helper lists those fields
+    with their defaults, organised by physical purpose.
 
     Parameters
     ----------
     category : str, optional
         Filter to a single category. One of ``"general"``,
-        ``"krylov"``, ``"device"``, ``"arpack"``, ``"scalapack"``,
-        ``"ftlm"``, ``"ltlm"``, ``"tpq"``, ``"thermal"``,
-        ``"observables"``, ``"lattice"``, ``"other"``. Substring
-        matches are accepted (``"arp"`` selects ``"arpack"``).
+        ``"krylov"``, ``"device"``, ``"ftlm"``, ``"ltlm"``,
+        ``"tpq"``, ``"thermal"``, ``"observables"``, ``"lattice"``,
+        ``"other"``. Substring matches are accepted.
     return_dict : bool, optional
         If True, return the catalog as a dict instead of printing.
         Useful for programmatic discovery (e.g. autocomplete in a
@@ -1400,11 +1350,11 @@ def list_diag_parameters(
 
         qed.list_diag_parameters()
 
-    Just the ARPACK section:
+    Just the FTLM section:
 
     .. code-block:: python
 
-        qed.list_diag_parameters("arpack")
+        qed.list_diag_parameters("ftlm")
 
     Use a niche knob via ``extra_params``:
 
@@ -1413,9 +1363,8 @@ def list_diag_parameters(
         eigs = qed.diag(
             H,
             num_eigenvalues=6,
+            solver="FTLM",
             extra_params={
-                "arpack_which": "SA",      # smallest algebraic
-                "arpack_ncv": 64,          # bigger NCV
                 "ftlm_seed": 12345,        # only relevant if method=FTLM
             },
         ).eigenvalues
@@ -1669,13 +1618,19 @@ def _generators_equal(a: list[Permutation], b: list[Permutation]) -> bool:
 # ---------------------------------------------------------------------------
 
 def _thermal_method_names() -> set[str]:
-    """Names of every TPQ / FTLM / LTLM / HYBRID variant in the enum."""
+    """Names of every TPQ / FTLM / LTLM / KPM_DOS variant.
+
+    ``KPM_DOS`` belongs here too -- it produces a full
+    ``ThermodynamicData`` block keyed off the same ``temp_min`` /
+    ``temp_max`` / ``num_temp_bins`` grid as the random-vector
+    methods.
+    """
     return {
-        "mTPQ", "mTPQ_GPU", "mTPQ_CUDA", "mTPQ_MPI",
-        "cTPQ", "cTPQ_GPU",
-        "FTLM", "FTLM_GPU", "FTLM_GPU_FIXED_SZ",
+        "mTPQ",
+        "cTPQ",
+        "FTLM",
         "LTLM",
-        "HYBRID",
+        "KPM_DOS",
     }
 
 
@@ -1696,9 +1651,9 @@ def _resolve_solver(
 
     String lookup is case-insensitive: ``"lanczos"`` / ``"LANCZOS"`` /
     ``"Lanczos"`` all resolve to ``DiagonalizationMethod.LANCZOS``. The
-    TPQ enum names are mixed-case in C++ (``mTPQ``, ``cTPQ``,
-    ``mTPQ_GPU``, ``cTPQ_GPU``, ``mTPQ_MPI``, ``mTPQ_CUDA``); we accept
-    them in any case so users don't have to memorise the spelling.
+    TPQ enum names are mixed-case in C++ (``mTPQ``, ``cTPQ``); we
+    accept them in any case so users don't have to memorise the
+    spelling.
     """
     if solver is not None:
         if isinstance(solver, DiagonalizationMethod):
@@ -1797,7 +1752,6 @@ def _make_params(
     tolerance: float,
     compute_eigenvectors: bool,
     max_iterations: Optional[int],
-    max_subspace: Optional[int],
     block_size: Optional[int],
     sector_dim: int,
     method: DiagonalizationMethod,
@@ -1828,7 +1782,7 @@ def _make_params(
         p.n_up = int(sz)
 
     if _is_thermal_method(method):
-        # ---- Thermal solvers (TPQ / FTLM / LTLM / HYBRID) ----
+        # ---- Thermal solvers (TPQ / FTLM / LTLM / KPM_DOS) ----
         # These don't extract eigenvalues from a Krylov subspace; they
         # build thermodynamic averages from random-state imaginary-time
         # trajectories (TPQ) or from Lanczos micro-bases (FTLM/LTLM).
@@ -1870,23 +1824,19 @@ def _make_params(
     # ---- Eigenvalue solvers ----
     # Auto-tuned Krylov sizes. Heuristic: enough headroom that the
     # requested num_eigenvalues converge to `tolerance` without the
-    # caller having to think about it. The constants come from the
-    # bake-off vs xdiag (docs/benchmarks/bench_vs_xdiag.md).
+    # caller having to think about it. ``max_iterations`` now doubles
+    # as the Krylov subspace dimension (the legacy ``max_subspace``
+    # was retired together with the ARPACK / Davidson / LOBPCG
+    # solvers that used it).
     n_eigs = p.num_eigenvalues
     auto_iter = max(200, 8 * n_eigs + 80)
-    auto_sub = max(80, 4 * n_eigs + 40)
     if sector_dim > 1:
         auto_iter = min(auto_iter, sector_dim - 1)
-        auto_sub = min(auto_sub, sector_dim - 1)
     p.max_iterations = int(max_iterations) if max_iterations is not None \
         else auto_iter
-    p.max_subspace = int(max_subspace) if max_subspace is not None else auto_sub
     if block_size is not None:
         p.block_size = int(block_size)
-    elif method in (
-        DiagonalizationMethod.BLOCK_LANCZOS,
-        DiagonalizationMethod.BLOCK_KRYLOV_SCHUR,
-    ):
+    elif method == DiagonalizationMethod.BLOCK_LANCZOS:
         p.block_size = max(1, min(n_eigs, 4))
 
     if sector is not None:
@@ -1909,14 +1859,13 @@ def _diag_via_directory(
 ) -> EDResults:
     """Run the GPU-aware directory dispatcher on an in-memory Operator.
 
-    The in-process ``exact_diagonalization_core`` rejects GPU methods
-    (``LANCZOS_GPU``, ``KRYLOV_SCHUR_GPU``, ``mTPQ_GPU``, ...) because
-    the GPU kernels need a ``GPUOperator`` built from files via
-    ``GPUEDWrapper::createGPUOperatorFromFiles``. This helper bridges
-    that gap: it dumps the operator to a temp directory and calls the
-    canonical 5-axis ``exact_diagonalization_from_directory`` dispatch
-    (in ``ed_dispatch_symmetry.h``), which routes to the GPU branch
-    when ``params.use_gpu = True``.
+    The in-process ``exact_diagonalization_core`` cannot construct a
+    ``GPUOperator`` handle from an in-memory ``Operator`` (the GPU
+    kernels need files via ``GPUEDWrapper::createGPUOperatorFromFiles``).
+    This helper bridges that gap: it dumps the operator to a temp
+    directory and calls the canonical 5-axis
+    ``exact_diagonalization_from_directory`` dispatch, which routes
+    to the GPU branch when ``params.use_gpu = True``.
 
     Used for the (no-symmetry, GPU) cell of the matrix; the symmetry
     path goes through ``_diag_with_symmetry`` (the streaming kernel

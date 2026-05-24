@@ -82,12 +82,14 @@ public:
         return "MatVecOperator";
     }
 
-    // Optional: estimate of non-zeros per row, useful for choosing
-    // matrix-free vs assembled-CSR fast paths and for Krylov-iteration
-    // sizing. Defaults to 0 ("unknown"); concrete subclasses fill in.
-    [[nodiscard]] virtual std::size_t nnz_per_row_estimate() const {
-        return 0;
-    }
+    // nnz_per_row_estimate() was retired in the minimalist-architecture
+    // rev (May 2026): no concrete subclass overrode it and no solver
+    // path called it. The assembled-CSR decision lives inside
+    // ``GPUOperator::selectPathway`` (which queries its own counters);
+    // the matrix-free decision is implicit in ``MemorySpace``. For CPU
+    // estimates use ``Operator::getTransformData().size()`` /
+    // ``getThreeBodyData().size()``; for GPU use
+    // ``GPUOperator::getNumTransforms()``.
 
     // -------------------------------------------------------------------
     // Sanity helpers shared by all subclasses. Inlined into the hot
@@ -107,31 +109,13 @@ public:
     }
 };
 
-// =============================================================================
-// CrossSectorMatVecOperator: rectangular (M != N) matvecs used by DSSF for
-// cross-sector spectral functions where the source vector lives in one Sz /
-// symmetry sector and the destination lives in another. Distinct base
-// class because rectangular operators violate is_hermitian and have two
-// distinct dimensions; solvers that consume them (block-Lanczos for DSSF,
-// JP-style overlap routines) explicitly opt in by accepting this type.
-// =============================================================================
-class CrossSectorMatVecOperator {
-public:
-    virtual ~CrossSectorMatVecOperator() = default;
-
-    // out (dim = dst_dim()) = A * in (dim = src_dim()).
-    virtual void apply(const Complex* in, std::size_t src_size,
-                       Complex* out,      std::size_t dst_size) const = 0;
-
-    [[nodiscard]] virtual std::size_t src_dim() const = 0;
-    [[nodiscard]] virtual std::size_t dst_dim() const = 0;
-    [[nodiscard]] virtual MemorySpace memory_space() const {
-        return MemorySpace::Host;
-    }
-    [[nodiscard]] virtual std::string description() const {
-        return "CrossSectorMatVecOperator";
-    }
-};
+// CrossSectorMatVecOperator (rectangular matvec base for DSSF) was
+// retired in the minimalist-architecture rev (May 2026): zero
+// implementors in tree across its full lifetime. ``CrossSectorObservable``
+// (DSSF) carries its own ``apply(in, out)`` and does NOT derive from
+// this. The DSSF + spatial symmetry workstream (S1 #37) will need a
+// rectangular orbit-basis operator -- it will land as a fresh
+// ``CrossSectorOrbitObservable`` rather than reviving this base class.
 
 // =============================================================================
 // Legacy-bridge adapter. Many existing CPU solvers in this codebase take a

@@ -153,8 +153,12 @@ inline bool check_eigs_close(TestContext& ctx, std::vector<double> got,
 //
 //   H = J Σ_{i,j bond} ( 1/2*(S+_i S-_j + S-_i S+_j) + Sz_i Sz_j )
 //
-// We go through the optimized SoA path by pushing TransformData entries and
-// letting apply() separateTransformsByType() itself.
+// We go through the optimized SoA path by pushing TransformData entries
+// directly into ``op->transform_data_``; ``Operator::commitPendingTransforms``
+// (invoked automatically by every matvec entry point) tracks the vector size
+// and rebuilds the SoA ``terms_`` cache on the next apply(). The legacy
+// ``separateTransformsByType()`` lazy fan-out was retired with the term-
+// storage refactor in May 2026.
 inline std::unique_ptr<Operator> build_heisenberg_chain(uint64_t N, double J,
                                                        bool periodic = false) {
     auto op = std::make_unique<Operator>(N, 0.5f);

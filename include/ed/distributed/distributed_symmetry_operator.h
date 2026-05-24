@@ -68,6 +68,7 @@
 #include <memory>
 #include <vector>
 
+#include <ed/core/linear_operator.h>
 #include <ed/distributed/orbit_halo_plan.h>
 #include <ed/distributed/orbit_partition.h>
 #include <ed/matvec/matvec.h>          // MatVecOperator interface (Phase 2)
@@ -77,7 +78,7 @@ class Operator;
 
 namespace ed::distributed {
 
-class DistributedSymmetryOperator : public ed::matvec::MatVecOperator {
+class DistributedSymmetryOperator : public ed::LinearOperator {
 public:
     using Complex = std::complex<double>;
 
@@ -177,6 +178,16 @@ public:
     // -------------------------------------------------------------------------
     std::uint64_t local_size()   const noexcept;  // # orbits on this rank
     std::uint64_t local_offset() const noexcept;  // rank-major prefix offset
+
+    [[nodiscard]] ed::Geometry geometry() const override {
+        ed::Geometry g;
+        g.local_dim    = static_cast<std::size_t>(local_size());
+        g.global_dim   = static_cast<std::uint64_t>(global_dim());
+        g.local_offset = local_offset();
+        g.memory_space = ed::matvec::MemorySpace::DistributedHost;
+        g.comm         = comm_;
+        return g;
+    }
     int           rank()         const noexcept { return rank_; }
     int           comm_size()    const noexcept { return size_; }
     MPI_Comm      comm()         const noexcept { return comm_; }

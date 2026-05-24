@@ -263,9 +263,12 @@ TEST_CASE("ED_NUMA_FIRST_TOUCH=1 does not change Lanczos ground-state energy",
 
     auto run_lanczos = [&]() -> std::vector<double> {
         std::vector<double> evals;
-        lanczos_selective_reorth(Hv, dim, /*max_iter=*/60, /*exct=*/1,
-                                 /*tol=*/1e-10, evals, /*dir=*/"",
-                                 /*eigenvectors=*/false);
+        // lanczos_selective_reorth retired in the minimalist-architecture
+        // rev (May 2026); the standard ``lanczos`` kernel is what the
+        // NUMA first-touch knob drives now.
+        lanczos(Hv, dim, /*max_iter=*/60, /*exct=*/1,
+                /*tol=*/1e-10, evals, /*dir=*/"",
+                /*eigenvectors=*/false);
         return evals;
     };
 

@@ -239,6 +239,151 @@ TEST_CASE("distributed_lanczos_gpu: stage4 gpu_resident_spmv == stage2 host-stag
     }
 }
 
+// =============================================================================
+// Phase 3.5 (CGS2 orthogonality lockdown):
+//   Call `ed::krylov::lanczos_kernel<MpiCudaBackend>` directly on the
+//   N=6 PBC chain. The default options set by `distributed_lanczos_gpu`
+//   (FullCGS2 + keep_basis) must keep `||V^H V - I||_inf < 1e-10` across
+//   the whole basis at M up to 60. This is the regression that fires if
+//   `MpiCudaBackend::dot` / `dot_many` ever drops the cross-rank
+//   ncclAllReduce, or if the kernel's CGS2 path regresses.
+// =============================================================================
+#ifdef ED_HAVE_NCCL
+
+#  include <ed/krylov/lanczos_kernel.h>
+#  include <ed/matvec/backends/mpi_cuda_backend.cuh>
+#  include <ed/distributed/distributed_gpu_operator.h>
+
+namespace {
+
+// Allocate a scratch device vector with the same lifetime as the kernel
+// basis; the kernel uses `backend.allocate` so we mirror that.
+std::vector<std::complex<double>> v_to_host(
+    const ed::matvec::MpiCudaBackend& /*unused*/,
+    const std::complex<double>* d_v,
+    std::size_t n) {
+    std::vector<std::complex<double>> out(n);
+    if (n > 0) {
+        cudaMemcpy(out.data(), d_v,
+                   n * sizeof(std::complex<double>),
+                   cudaMemcpyDeviceToHost);
+    }
+    return out;
+}
+
+}  // namespace
+
+TEST_CASE("distributed_lanczos_gpu: CGS2 orthogonality "
+          "|| V^H V - I ||_inf < 1e-10",
+          "[distributed_lanczos_gpu][orthogonality][cgs2]") {
+    if (!runtime_supports_gpu_lanczos()) return;
+
+    auto op = std::shared_ptr<Operator>(
+        ed_tests::build_heisenberg_chain(/*N=*/6, /*J=*/1.0,
+                                          /*periodic=*/true).release());
+    DistributedOperator dop(op, MPI_COMM_WORLD);
+
+    // Set up MultiGpuCommunicator + MpiCudaBackend for direct kernel run.
+    ed::distributed::multi_gpu::MultiGpuCommunicator gpu_comm(MPI_COMM_WORLD);
+    ed::matvec::MpiCudaBackend backend(gpu_comm);
+
+    const std::size_t local_n = dop.local_size();
+    const std::uint64_t M = 30;
+
+    // Construct a deterministic device-side seed (rank-0 fills natural
+    // RNG, scatter, normalise — same shape as scatter_initial_vector
+    // inside distributed_lanczos_gpu.cu). For an orthogonality lockdown
+    // we don't need bit-identical RNG; a simple per-rank deterministic
+    // seed suffices.
+    std::vector<std::complex<double>> v0_host(local_n);
+    int rank = 0;
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    for (std::size_t i = 0; i < local_n; ++i) {
+        v0_host[i] = std::complex<double>(
+            std::sin(0.31 * static_cast<double>(rank * 1024 + i)),
+            std::cos(0.17 * static_cast<double>(rank * 2048 + i)));
+    }
+    // Normalise globally via the backend.
+    {
+        std::complex<double>* d_tmp = backend.allocate(local_n);
+        if (local_n > 0) {
+            cudaMemcpy(d_tmp, v0_host.data(),
+                       local_n * sizeof(std::complex<double>),
+                       cudaMemcpyHostToDevice);
+        }
+        const double nrm = backend.nrm2(d_tmp, local_n);
+        if (nrm > 0.0) {
+            const std::complex<double> inv(1.0 / nrm, 0.0);
+            backend.scale(inv, d_tmp, local_n);
+        }
+        cudaMemcpy(v0_host.data(), d_tmp,
+                   local_n * sizeof(std::complex<double>),
+                   cudaMemcpyDeviceToHost);
+        backend.deallocate(d_tmp, local_n);
+    }
+
+    // DistributedGPUOperator wants a shared_ptr that owns the underlying
+    // DistributedOperator; we have `dop` here as a stack object owned by
+    // this test scope, so wrap it in a non-owning shared_ptr (aliasing
+    // ctor with explicit empty deleter via `[](DistributedOperator*) {}`)
+    // exactly the way distributed_lanczos_gpu.cu does it.
+    std::shared_ptr<DistributedOperator> dop_alias(
+        &dop, [](DistributedOperator*) {});
+    ed::distributed::DistributedGPUOperator gop(dop_alias, gpu_comm);
+
+    std::complex<double>* d_v0 = backend.allocate(local_n);
+    if (local_n > 0) {
+        cudaMemcpy(d_v0, v0_host.data(),
+                   local_n * sizeof(std::complex<double>),
+                   cudaMemcpyHostToDevice);
+    }
+
+    auto matvec = [&](const std::complex<double>* in, std::complex<double>* out) {
+        gop.apply(gpu_comm, in, out, /*stream=*/nullptr);
+    };
+
+    ed::krylov::LanczosKernelOptions kopts;
+    kopts.max_iter = M;
+    kopts.reorth   = ed::krylov::ReorthPolicy::FullCGS2;
+    kopts.keep_basis = true;
+    kopts.dim_cap  = dop.global_dim();
+    kopts.breakdown_tol = 1e-14;
+
+    auto kres = ed::krylov::lanczos_kernel(
+        backend, matvec, local_n, d_v0, kopts);
+
+    backend.deallocate(d_v0, local_n);
+
+    REQUIRE(!kres.basis.empty());
+    const std::size_t mfinal = kres.basis.size();
+    INFO("CGS2 lockdown: mfinal=" << mfinal << "  local_n=" << local_n);
+
+    // Compute |<V_i | V_j>| with MpiCudaBackend::dot (NCCL-allreduced).
+    // Identity diagonal must be 1.0 within 1e-12; off-diagonal must be
+    // below 1e-10. We do all pairs (i,j) since mfinal is small.
+    double worst_off = 0.0;
+    double worst_diag = 0.0;
+    for (std::size_t i = 0; i < mfinal; ++i) {
+        for (std::size_t j = i; j < mfinal; ++j) {
+            std::complex<double> c = backend.dot(
+                reinterpret_cast<const std::complex<double>*>(kres.basis[i].get()),
+                reinterpret_cast<const std::complex<double>*>(kres.basis[j].get()),
+                local_n);
+            if (i == j) {
+                worst_diag = std::max(worst_diag, std::abs(c.real() - 1.0));
+                worst_diag = std::max(worst_diag, std::abs(c.imag()));
+            } else {
+                worst_off = std::max(worst_off, std::abs(c));
+            }
+        }
+    }
+    INFO("worst_diag=" << worst_diag << "  worst_off=" << worst_off);
+    REQUIRE(worst_diag < 1e-10);
+    REQUIRE(worst_off  < 1e-10);
+}
+
+#endif  // ED_HAVE_NCCL
+
 int main(int argc, char** argv) {
     int provided = 0;
     MPI_Init_thread(&argc, &argv, MPI_THREAD_FUNNELED, &provided);

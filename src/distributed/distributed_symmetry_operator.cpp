@@ -100,7 +100,7 @@ DistributedSymmetryOperator::DistributedSymmetryOperator(
             "factor PER GROUP ELEMENT, not per generator.");
     }
 
-    op_->separateTransformsByType();
+    op_->commitPendingTransforms();
 
     // -------------------------------------------------------------------------
     // Step 1: Enumerate orbits + projection coefficients.

@@ -6,10 +6,10 @@
 #   ed_io           Pure I/O helpers (basis vector storage, lanczos basis
 #                   buffer). No solver dependencies.
 #   ed_core         Core types/config (ed_config.cpp). Depends on ed_io.
-#   ed_solvers_cpu  All CPU eigensolvers + thermal methods (Lanczos, ARPACK,
-#                   CG, dynamics, TPQ, FTLM, LTLM, hybrid, observables, and
-#                   optionally ScaLAPACK distributed diag). Depends on ed_core
-#                   and ed_io.
+#   ed_solvers_cpu  CPU eigensolvers + thermal methods (Lanczos, block
+#                   Lanczos, Krylov-Schur, full diagonalization, TPQ, FTLM,
+#                   LTLM, KPM_DOS, observables, dynamics). Depends on
+#                   ed_core and ed_io.
 #   ed_solvers_gpu  All GPU/CUDA solvers (only built when WITH_CUDA). Depends
 #                   on ed_core, ed_io, and the CUDA runtime/cuBLAS/cuSPARSE/
 #                   cuRAND/cuSOLVER imported targets.
@@ -35,15 +35,11 @@
 # directory and we want the explicit one to win in RPATH search order.
 # -----------------------------------------------------------------------------
 set(ED_COMMON_LINK_LIBS "")
-if(WITH_SCALAPACK AND SCALAPACK_LIBRARIES)
-    list(APPEND ED_COMMON_LINK_LIBS ${SCALAPACK_LIBRARIES})
-endif()
 list(APPEND ED_COMMON_LINK_LIBS
     ${BLAS_LIBRARIES}
     ${LAPACK_LIBRARIES}
     ${LAPACKE_LIBRARIES}
     ${EXTRA_LINALG_LIBRARIES}
-    ${ARPACK_LIBRARY}
     ${HDF5_LIBRARIES}
 )
 if(WITH_MPI)
@@ -189,30 +185,27 @@ set_target_properties(ed_matvec PROPERTIES POSITION_INDEPENDENT_CODE ON)
 # ed_solvers_cpu: CPU eigensolvers + thermal methods.
 # -----------------------------------------------------------------------------
 set(ED_SOLVERS_CPU_SOURCES
-    ${SOLVERS_CPU_DIR}/arpack.cpp
     ${SOLVERS_CPU_DIR}/observables.cpp
     ${SOLVERS_CPU_DIR}/lanczos.cpp
-    ${SOLVERS_CPU_DIR}/CG.cpp
     ${SOLVERS_CPU_DIR}/dynamics.cpp
     ${SOLVERS_CPU_DIR}/TPQ.cpp
     ${SOLVERS_CPU_DIR}/ftlm.cpp
-    ${SOLVERS_CPU_DIR}/ftlm_jp.cpp
-    ${SOLVERS_CPU_DIR}/ftlm_ltlm_dyn.cpp
-    ${SOLVERS_CPU_DIR}/ftlm_sssf.cpp
     ${SOLVERS_CPU_DIR}/ftlm_kpm.cpp
     ${SOLVERS_CPU_DIR}/kpm_dos.cpp
     ${SOLVERS_CPU_DIR}/block_lanczos_dssf.cpp
     ${SOLVERS_CPU_DIR}/tpq_dynamical.cpp
     ${SOLVERS_CPU_DIR}/ltlm.cpp
-    ${SOLVERS_CPU_DIR}/hybrid_thermal.cpp
+    ${SRC_DIR}/orchestrator.cpp
 )
-if(WITH_SCALAPACK AND SCALAPACK_LIBRARIES)
-    list(APPEND ED_SOLVERS_CPU_SOURCES ${SOLVERS_CPU_DIR}/scalapack_diag.cpp)
-endif()
 
 add_library(ed_solvers_cpu STATIC ${ED_SOLVERS_CPU_SOURCES})
 target_include_directories(ed_solvers_cpu PUBLIC ${_ED_PUBLIC_INCLUDES})
 target_link_libraries(ed_solvers_cpu PUBLIC ed_matvec ed_core ed_io ed_parallel ${ED_COMMON_LINK_LIBS})
+# Phase 5.3 of the Krylov-unification gap-fill (May 2026 day 12+): suppress
+# the `[[deprecated]]` warning on `build_lanczos_tridiagonal_with_basis`
+# for our own legacy CPU callsites. The attribute remains active for every
+# external consumer of `<ed/solvers/lanczos.h>`.
+target_compile_definitions(ed_solvers_cpu PRIVATE ED_BUILDING_INTERNAL=1)
 target_link_libraries(ed_solvers_cpu PUBLIC
     "$<BUILD_INTERFACE:nlohmann_json::nlohmann_json>"
 )
@@ -548,7 +541,7 @@ set_target_properties(ed_bfg PROPERTIES POSITION_INDEPENDENT_CODE ON)
 # (`ED dssf` subcommand in P2.4) and by pybind11 bindings without also
 # pulling in the legacy `int main()` machinery.
 #
-# Depends on ed_solvers_cpu (Lanczos / FTLM / observables / ARPACK), ed_dssf
+# Depends on ed_solvers_cpu (Lanczos / FTLM / observables), ed_dssf
 # (build_observable_pairs), ed_io (HDF5IO via construct_ham), and
 # transitively on ed_core. When WITH_CUDA, also depends on ed_solvers_gpu
 # for the GPU dynamical/static-response code paths under the WITH_CUDA
@@ -570,6 +563,11 @@ target_compile_options(ed_cli PRIVATE
     $<$<COMPILE_LANGUAGE:CXX>:${CPU_OPT_FLAGS}>
 )
 set_target_properties(ed_cli PROPERTIES POSITION_INDEPENDENT_CODE ON)
+# Phase 5.3 (Krylov-unification gap-fill): suppress the legacy
+# `build_lanczos_tridiagonal_with_basis` deprecation warning inside the
+# CLI workflows -- they still call the legacy function through
+# `<ed/core/ed_wrapper.h>`.
+target_compile_definitions(ed_cli PRIVATE ED_BUILDING_INTERNAL=1)
 
 # -----------------------------------------------------------------------------
 # ed_solvers_gpu: CUDA-only library; depends on the CUDA imported targets.
@@ -587,13 +585,10 @@ if(WITH_CUDA)
         ${SOLVERS_GPU_DIR}/gpu_lanczos.cu
         ${SOLVERS_GPU_DIR}/gpu_block_lanczos.cu
         ${SOLVERS_GPU_DIR}/gpu_krylov_schur.cu
-        ${SOLVERS_GPU_DIR}/gpu_block_krylov_schur.cu
         ${SOLVERS_GPU_DIR}/gpu_ed_wrapper.cu
+        ${SOLVERS_GPU_DIR}/gpu_lanczos_kernel_facade.cu
         ${SOLVERS_GPU_DIR}/gpu_tpq.cu
         ${SOLVERS_GPU_DIR}/kpm_dos_gpu.cu
-        ${SOLVERS_GPU_DIR}/gpu_cg.cu
-        ${SOLVERS_GPU_DIR}/lobpcg_eigen_solve.cpp
-        ${SOLVERS_GPU_DIR}/gpu_dynamics.cu
         ${SOLVERS_GPU_DIR}/gpu_ftlm.cu
         ${SOLVERS_GPU_DIR}/gpu_mixed_precision.cu
     )
@@ -636,4 +631,9 @@ if(WITH_CUDA)
         $<$<COMPILE_LANGUAGE:CUDA>:--extended-lambda>
         $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr>
     )
+    # Phase 5.3 (Krylov-unification gap-fill): suppress the legacy
+    # `build_lanczos_tridiagonal_with_basis` deprecation warning -- the GPU
+    # ed_wrapper still calls the CPU legacy function for the eigenvector
+    # reconstruction path.
+    target_compile_definitions(ed_solvers_gpu PRIVATE ED_BUILDING_INTERNAL=1)
 endif()

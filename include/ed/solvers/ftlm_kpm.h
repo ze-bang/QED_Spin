@@ -77,8 +77,6 @@
 
 #include <ed/core/blas_lapack_wrapper.h>
 #include <ed/core/matvec_types.h>
-#include <ed/solvers/ftlm_jp.h>      // JPParameters (for combine helper)
-#include <ed/solvers/ftlm_ltlm_dyn.h> // LTLMParameters (outer Lanczos config)
 
 #include <complex>
 #include <cstdint>

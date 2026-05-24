@@ -1,6 +1,7 @@
 #pragma once
 
 #include <ed/core/ed_wrapper.h>
+#include <ed/core/sector_thermo.h>      // sector recombination for finite-T methods
 #include <ed/core/streaming_symmetry.h>
 #include <set>
 
@@ -118,58 +119,36 @@ inline EDResults dispatchGPUSymmetrizedSector(
     // Note: all symmetrized methods use the full-space kernel variants since
     // the symmetrized operator already handles the projection internally.
     //
-    // The {LANCZOS,BLOCK_LANCZOS,DAVIDSON,KRYLOV_SCHUR,BLOCK_KRYLOV_SCHUR,
-    // FULL}_GPU{,_FIXED_SZ} enum aliases below are intentionally kept (Python
-    // ABI / HDF5 metadata back-compat); they canonicalise to
-    // {base, use_gpu=true, use_fixed_sz=...} but this dispatcher still has to
-    // *name* them to handle inbound HDF5 / CLI traffic. Suppress the
-    // -Wdeprecated-declarations noise locally rather than letting it spam
-    // every CUDA-enabled rebuild.
-#if defined(__GNUC__) || defined(__clang__)
-#  pragma GCC diagnostic push
-#  pragma GCC diagnostic ignored "-Wdeprecated-declarations"
-#endif
-    if (method == DiagonalizationMethod::LANCZOS_GPU ||
-        method == DiagonalizationMethod::LANCZOS_GPU_FIXED_SZ) {
+    // The legacy `*_GPU{,_FIXED_SZ}` enum aliases were retired by the
+    // minimalist-architecture refactor; device + sector are now plain
+    // `params.use_gpu` / `params.use_fixed_sz` flags. The dispatch below
+    // therefore only switches on the *base* method (LANCZOS / BLOCK_LANCZOS /
+    // KRYLOV_SCHUR / FULL).
+    if (method == DiagonalizationMethod::LANCZOS) {
         GPUEDWrapper::runGPULanczos(
             gpu_op, static_cast<int>(sector_dim),
             params.max_iterations, num_eigs, params.tolerance,
-            eigenvalues, params.output_dir, params.compute_eigenvectors);
-    } else if (method == DiagonalizationMethod::BLOCK_LANCZOS_GPU ||
-               method == DiagonalizationMethod::BLOCK_LANCZOS_GPU_FIXED_SZ) {
+            eigenvalues, params.output_dir, params.compute_eigenvectors,
+            params.lanczos_seed);
+    } else if (method == DiagonalizationMethod::BLOCK_LANCZOS) {
         GPUEDWrapper::runGPUBlockLanczos(
             gpu_op, static_cast<int>(sector_dim),
             params.max_iterations, num_eigs, params.block_size,
             params.tolerance, eigenvalues, params.output_dir,
             params.compute_eigenvectors);
-    } else if (method == DiagonalizationMethod::DAVIDSON_GPU) {
-        GPUEDWrapper::runGPUDavidson(
-            gpu_op, static_cast<int>(sector_dim),
-            num_eigs, params.max_iterations, params.max_subspace,
-            params.tolerance, eigenvalues, params.output_dir,
-            params.compute_eigenvectors);
-    } else if (method == DiagonalizationMethod::KRYLOV_SCHUR_GPU) {
+    } else if (method == DiagonalizationMethod::KRYLOV_SCHUR) {
         GPUEDWrapper::runGPUKrylovSchur(
             gpu_op, static_cast<int>(sector_dim),
             num_eigs, params.max_iterations, params.tolerance,
             eigenvalues, params.output_dir, params.compute_eigenvectors);
-    } else if (method == DiagonalizationMethod::BLOCK_KRYLOV_SCHUR_GPU) {
-        GPUEDWrapper::runGPUBlockKrylovSchur(
-            gpu_op, static_cast<int>(sector_dim),
-            num_eigs, params.max_iterations, params.block_size,
-            params.tolerance, eigenvalues, params.output_dir,
-            params.compute_eigenvectors);
-    } else if (method == DiagonalizationMethod::FULL_GPU) {
+    } else if (method == DiagonalizationMethod::FULL) {
         GPUEDWrapper::runGPUFullDiag(
             gpu_op, static_cast<int>(sector_dim),
             num_eigs, eigenvalues, params.output_dir,
             params.compute_eigenvectors);
     } else {
-        throw std::runtime_error("Unsupported GPU method for symmetrized diagonalization: use Lanczos, Block Lanczos, Davidson, or Krylov-Schur GPU variants");
+        throw std::runtime_error("Unsupported GPU method for symmetrized diagonalization: use LANCZOS / BLOCK_LANCZOS / KRYLOV_SCHUR / FULL.");
     }
-#if defined(__GNUC__) || defined(__clang__)
-#  pragma GCC diagnostic pop
-#endif
 
     // gpu_op_guard destructor handles cleanup
 
@@ -319,8 +298,27 @@ inline EDResults exact_diagonalization_streaming_symmetry(
     };
     std::vector<EigenInfo> all_eigen_info;
 
+    // Matvec-unification audit follow-up: finite-T solvers populate
+    // ``sector_results.thermo_data`` per sector. Without this collection
+    // the per-sector thermo is silently discarded, leaving callers with
+    // empty (or last-sector) thermodynamic data when running
+    // ``ed::exact_diagonalization(method=FTLM, use_symmetry=true)``.
+    // Collect per-sector thermo + sector dims, then recombine via
+    // ``ed::core::combine_sector_thermodynamics`` after the loop.
+    const bool collect_thermo = ed::core::method_produces_sector_thermo(method);
+    std::vector<ThermodynamicData> per_sector_thermo;
+    std::vector<std::uint64_t>     per_sector_dims_for_thermo;
+
 #ifdef WITH_CUDA
-    bool use_gpu = ed_internal::is_gpu_method(method);
+    // Honour BOTH ``params.use_gpu`` (the canonical orthogonal flag, set
+    // by ``ed::canonicalize_method_and_flags`` in dispatch.h) AND the
+    // legacy ``is_gpu_method(method)`` check that reads the enum suffix.
+    // Pre-Phase-7 callers that pass ``LANCZOS_GPU`` without setting
+    // ``params.use_gpu=true`` still trigger GPU dispatch; modern callers
+    // that pass ``LANCZOS + use_gpu=true`` (the auto-pilot route) now
+    // also trigger it, fixing the silent CPU-only run that used to occur
+    // for the modern entry path.
+    bool use_gpu = params.use_gpu || ed_internal::is_gpu_method(method);
     int group_size = 0;
     if (use_gpu) {
         if (!GPUEDWrapper::isGPUAvailable()) {
@@ -331,7 +329,7 @@ inline EDResults exact_diagonalization_streaming_symmetry(
         std::cout << "Using GPU symmetrized matvec (group_size=" << group_size << ")" << std::endl;
     }
 #endif
-    
+
     for (size_t sector_idx = 0; sector_idx < num_sectors; ++sector_idx) {
         // Skip sectors not in the filter (if filter is active)
         if (!sector_filter.empty() && sector_filter.find(sector_idx) == sector_filter.end()) {
@@ -403,6 +401,13 @@ inline EDResults exact_diagonalization_streaming_symmetry(
             });
         }
 
+        // Stash per-sector thermo for the cross-sector Z-recombination step.
+        if (collect_thermo
+            && !sector_results.thermo_data.temperatures.empty()) {
+            per_sector_thermo.push_back(sector_results.thermo_data);
+            per_sector_dims_for_thermo.push_back(sector_dim);
+        }
+
         // Save per-sector eigenvalues to HDF5
         if (!params.output_dir.empty() && !sector_results.eigenvalues.empty()) {
             std::string sector_out = params.output_dir + "/sector_" + std::to_string(sector_idx);
@@ -457,7 +462,25 @@ inline EDResults exact_diagonalization_streaming_symmetry(
     for (size_t i = 0; i < all_eigen_info.size(); ++i) {
         results.eigenvalues[i] = all_eigen_info[i].value;
     }
-    
+
+    // Matvec-unification audit follow-up: recombine finite-T thermo
+    // across symmetry sectors. With sector_filter active we only cover a
+    // subset, so the recombination would be physically wrong (missing
+    // partition-function mass from skipped sectors). In that case we
+    // leave per-sector files on disk for the caller to merge offline.
+    if (collect_thermo && !per_sector_thermo.empty() && sector_filter.empty()) {
+        try {
+            results.thermo_data = ed::core::combine_sector_thermodynamics(
+                per_sector_thermo, per_sector_dims_for_thermo);
+            std::cout << "Combined finite-T thermodynamics across "
+                      << per_sector_thermo.size()
+                      << " symmetry sectors." << std::endl;
+        } catch (const std::exception& e) {
+            ed_log::warning(std::string("sector-thermo recombination failed: ")
+                            + e.what());
+        }
+    }
+
     results.eigenvectors_computed = params.compute_eigenvectors;
     if (params.compute_eigenvectors) {
         results.eigenvectors_path = params.output_dir;
@@ -698,8 +721,17 @@ inline EDResults exact_diagonalization_streaming_symmetry_fixed_sz(
     };
     std::vector<EigenInfo> all_eigen_info;
 
+    // Same audit follow-up as the unconstrained variant above:
+    // recombine per-sector thermo when a finite-T method is in use.
+    const bool collect_thermo = ed::core::method_produces_sector_thermo(method);
+    std::vector<ThermodynamicData> per_sector_thermo;
+    std::vector<std::uint64_t>     per_sector_dims_for_thermo;
+
 #ifdef WITH_CUDA
-    bool use_gpu = ed_internal::is_gpu_method(method);
+    // Honour BOTH ``params.use_gpu`` (the canonical orthogonal flag) AND
+    // the legacy ``is_gpu_method(method)`` check; see the equivalent
+    // comment on the full-Hilbert streaming path above.
+    bool use_gpu = params.use_gpu || ed_internal::is_gpu_method(method);
     int group_size = 0;
     if (use_gpu) {
         if (!GPUEDWrapper::isGPUAvailable()) {
@@ -707,7 +739,7 @@ inline EDResults exact_diagonalization_streaming_symmetry_fixed_sz(
         }
         GPUEDWrapper::printGPUInfo();
         group_size = static_cast<int>(hamiltonian.symmetry_info.max_clique.size());
-        std::cout << "Using GPU symmetrized matvec (group_size=" << group_size 
+        std::cout << "Using GPU symmetrized matvec (group_size=" << group_size
                   << ", fixed Sz, N_up=" << n_up << ")" << std::endl;
     }
 #endif
@@ -781,6 +813,13 @@ inline EDResults exact_diagonalization_streaming_symmetry_fixed_sz(
             });
         }
 
+        // Stash per-sector thermo for the post-loop Z-recombination.
+        if (collect_thermo
+            && !sector_results.thermo_data.temperatures.empty()) {
+            per_sector_thermo.push_back(sector_results.thermo_data);
+            per_sector_dims_for_thermo.push_back(sector_dim);
+        }
+
         // Save per-sector eigenvalues to HDF5
         if (!params.output_dir.empty() && !sector_results.eigenvalues.empty()) {
             std::string sector_out = params.output_dir + "/sector_" + std::to_string(sector_idx);
@@ -831,7 +870,24 @@ inline EDResults exact_diagonalization_streaming_symmetry_fixed_sz(
     for (size_t i = 0; i < all_eigen_info.size(); ++i) {
         results.eigenvalues[i] = all_eigen_info[i].value;
     }
-    
+
+    // Same audit fix: recombine finite-T thermo across (fixed-Sz x irrep)
+    // sectors when applicable. With a sector_filter the coverage is
+    // partial and the recombination is physically meaningless, so we
+    // leave the per-sector files on disk in that case.
+    if (collect_thermo && !per_sector_thermo.empty() && sector_filter.empty()) {
+        try {
+            results.thermo_data = ed::core::combine_sector_thermodynamics(
+                per_sector_thermo, per_sector_dims_for_thermo);
+            std::cout << "Combined finite-T thermodynamics across "
+                      << per_sector_thermo.size()
+                      << " (fixed-Sz x irrep) sectors." << std::endl;
+        } catch (const std::exception& e) {
+            ed_log::warning(std::string("sector-thermo recombination failed: ")
+                            + e.what());
+        }
+    }
+
     results.eigenvectors_computed = params.compute_eigenvectors;
     if (params.compute_eigenvectors) {
         results.eigenvectors_path = params.output_dir;

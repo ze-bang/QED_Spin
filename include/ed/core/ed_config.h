@@ -35,28 +35,7 @@ struct DiagonalizationConfig {
     bool compute_eigenvectors = false;
     
     // Method-specific
-    double shift = 0.0;           // For shift-invert
     uint64_t block_size = 4;          // For block methods
-    uint64_t max_subspace = 100;       // For Davidson
-    double target_lower = 0.0;    // For Chebyshev filtered (lower energy bound)
-    double target_upper = 0.0;    // For Chebyshev filtered (upper energy bound)
-
-    // ========== ScaLAPACK-specific knobs ==========
-    // These mirror the corresponding fields on ``EDParameters`` so that
-    // CLI flags (``--scalapack-block-size``, ``--scalapack-nprow``, ...)
-    // can be wired through the EDConfig -> EDParameters adapter without
-    // bypassing the hierarchical config layer.
-    //
-    // Phase 8 #5: ``scalapack_block_size_auto`` defaults to true; the
-    // explicit ``scalapack_block_size`` is only consulted when auto is
-    // disabled (which the CLI does implicitly when ``--scalapack-block-size``
-    // is set). The remaining ``scalapack_block_size`` default (64) is
-    // kept solely for users who flip auto off without specifying their
-    // own block size.
-    int scalapack_nprow = 0;            // 0 = auto (square-ish grid)
-    int scalapack_npcol = 0;            // 0 = auto
-    int scalapack_block_size = 64;      // honoured iff !scalapack_block_size_auto
-    bool scalapack_block_size_auto = true;
 };
 
 /**
@@ -119,16 +98,14 @@ struct ThermalConfig {
     // ========== LTLM-specific parameters ==========
     uint64_t ltlm_krylov_dim = 200;    // Krylov subspace dimension for excitations
     uint64_t ltlm_ground_krylov = 100; // Krylov dimension for finding ground state
-    bool ltlm_full_reorth = false;     // Use full reorthogonalization
+    // Full reorth on by default --- same reasoning as the FTLM default above
+    // (LTLM grows ghost duplicates at the same rate). Also matches the
+    // EDParameters / standalone-struct defaults so the CLI path and the
+    // direct-call path produce identical numerics.
+    bool ltlm_full_reorth = true;      // Use full reorthogonalization
     uint64_t ltlm_reorth_freq = 10;    // Reorthogonalization frequency
     uint64_t ltlm_seed = 0;            // Random seed (0 = auto)
     bool ltlm_store_data = false;      // Store intermediate data
-    
-    // ========== Hybrid Thermal parameters ==========
-    // `use_hybrid_method` was removed in matvec-unification Phase 7.3.
-    // Use `config.method = HYBRID` (DiagonalizationMethod::HYBRID) instead.
-    double hybrid_crossover = 1.0;     // Temperature crossover for hybrid method
-    bool hybrid_auto_crossover = false;// Automatically determine crossover temperature
     
     // Getter methods for backwards compatibility with old parameter names
     uint64_t get_num_order() const { return tpq_taylor_order; }
@@ -277,28 +254,6 @@ struct SystemConfig {
 };
 
 /**
- * @brief ARPACK advanced options (only used for ARPACK_ADVANCED)
- */
-struct ArpackConfig {
-    bool verbose = false;
-    std::string which = "SR";  // For Hermitian matrices: SR=Smallest Real (ground state), LR=Largest Real
-    int64_t ncv = -1;
-    uint64_t max_restarts = 2;
-    double ncv_growth = 1.5;
-    bool auto_enlarge_ncv = true;
-    bool two_phase_refine = true;
-    double relaxed_tol = 1e-6;
-    bool shift_invert = false;
-    double sigma = 0.0;
-    bool auto_switch_shift_invert = true;
-    double switch_sigma = 0.0;
-    bool adaptive_inner_tol = true;
-    double inner_tol_factor = 1e-2;
-    double inner_tol_min = 1e-14;
-    uint64_t inner_max_iter = 300;
-};
-
-/**
  * @brief Workflow control flags
  */
 struct WorkflowConfig {
@@ -340,7 +295,6 @@ public:
     DynamicalResponseConfig dynamical;
     StaticResponseConfig static_resp;
     SystemConfig system;
-    ArpackConfig arpack;
     WorkflowConfig workflow;
     
     // ========== Constructors ==========
@@ -354,13 +308,7 @@ public:
     EDConfig& iterations(uint64_t n) { diag.max_iterations = n; return *this; }
     EDConfig& tolerance(double t) { diag.tolerance = t; return *this; }
     EDConfig& eigenvectors(bool b = true) { diag.compute_eigenvectors = b; return *this; }
-    EDConfig& shift(double s) { diag.shift = s; return *this; }
     EDConfig& blockSize(uint64_t b) { diag.block_size = b; return *this; }
-    EDConfig& targetRange(double lower, double upper) { 
-        diag.target_lower = lower; 
-        diag.target_upper = upper; 
-        return *this; 
-    }
     
     // Thermal
     EDConfig& samples(uint64_t n) { thermal.num_samples = n; return *this; }

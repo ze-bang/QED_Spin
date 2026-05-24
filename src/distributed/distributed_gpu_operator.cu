@@ -284,7 +284,8 @@ DistributedGPUOperator::DistributedGPUOperator(
     }
 
     auto serial = op_->serial_operator();
-    if (!serial->three_body_data_.empty()) {
+    serial->commitPendingTransforms();
+    if (!serial->terms_.three_body.empty()) {
         throw std::invalid_argument(
             "DistributedGPUOperator: 3-body terms not supported in stage 3 "
             "(rejected at construction; use the host-staged "
@@ -345,31 +346,38 @@ void DistributedGPUOperator::upload_comm_plan_() {
 
 void DistributedGPUOperator::upload_term_tables_() {
     auto serial = op_->serial_operator();
+    // Force the serial Operator to commit any pending AoS pushes into the
+    // canonical SoA ``terms_`` cache so the device tables match the CPU
+    // matvec exactly. After the May 2026 term-storage refactor, this is the
+    // single source of truth -- the old per-class SoA members
+    // (``diag_one_body_`` etc.) are gone.
+    serial->commitPendingTransforms();
+    const auto& T = serial->terms_;
 
-    n_diag_one_ = static_cast<int>(serial->diag_one_body_.size());
+    n_diag_one_ = static_cast<int>(T.diag_one_body.size());
     if (n_diag_one_ > 0) {
         std::vector<std::uint64_t> sites(n_diag_one_);
         std::vector<double> re(n_diag_one_), im(n_diag_one_);
         for (int i = 0; i < n_diag_one_; ++i) {
-            sites[i] = serial->diag_one_body_[i].site_index;
-            re[i]    = serial->diag_one_body_[i].coefficient.real();
-            im[i]    = serial->diag_one_body_[i].coefficient.imag();
+            sites[i] = T.diag_one_body[i].site_index;
+            re[i]    = T.diag_one_body[i].coefficient.real();
+            im[i]    = T.diag_one_body[i].coefficient.imag();
         }
         d_d1_site_ = device_alloc_copy(sites.data(), n_diag_one_, plan_bytes_);
         d_d1_re_   = device_alloc_copy(re.data(),    n_diag_one_, plan_bytes_);
         d_d1_im_   = device_alloc_copy(im.data(),    n_diag_one_, plan_bytes_);
     }
 
-    n_offdiag_one_ = static_cast<int>(serial->offdiag_one_body_.size());
+    n_offdiag_one_ = static_cast<int>(T.offdiag_one_body.size());
     if (n_offdiag_one_ > 0) {
         std::vector<std::uint64_t> sites(n_offdiag_one_);
         std::vector<std::uint8_t>  ops(n_offdiag_one_);
         std::vector<double> re(n_offdiag_one_), im(n_offdiag_one_);
         for (int i = 0; i < n_offdiag_one_; ++i) {
-            sites[i] = serial->offdiag_one_body_[i].site_index;
-            ops[i]   = serial->offdiag_one_body_[i].op_type;
-            re[i]    = serial->offdiag_one_body_[i].coefficient.real();
-            im[i]    = serial->offdiag_one_body_[i].coefficient.imag();
+            sites[i] = T.offdiag_one_body[i].site_index;
+            ops[i]   = T.offdiag_one_body[i].op_type;
+            re[i]    = T.offdiag_one_body[i].coefficient.real();
+            im[i]    = T.offdiag_one_body[i].coefficient.imag();
         }
         d_o1_site_ = device_alloc_copy(sites.data(), n_offdiag_one_, plan_bytes_);
         d_o1_op_   = device_alloc_copy(ops.data(),   n_offdiag_one_, plan_bytes_);
@@ -377,15 +385,15 @@ void DistributedGPUOperator::upload_term_tables_() {
         d_o1_im_   = device_alloc_copy(im.data(),    n_offdiag_one_, plan_bytes_);
     }
 
-    n_diag_two_ = static_cast<int>(serial->diag_two_body_.size());
+    n_diag_two_ = static_cast<int>(T.diag_two_body.size());
     if (n_diag_two_ > 0) {
         std::vector<std::uint64_t> s1(n_diag_two_), s2(n_diag_two_);
         std::vector<double> re(n_diag_two_), im(n_diag_two_);
         for (int i = 0; i < n_diag_two_; ++i) {
-            s1[i] = serial->diag_two_body_[i].site_index_1;
-            s2[i] = serial->diag_two_body_[i].site_index_2;
-            re[i] = serial->diag_two_body_[i].coefficient.real();
-            im[i] = serial->diag_two_body_[i].coefficient.imag();
+            s1[i] = T.diag_two_body[i].site_index_1;
+            s2[i] = T.diag_two_body[i].site_index_2;
+            re[i] = T.diag_two_body[i].coefficient.real();
+            im[i] = T.diag_two_body[i].coefficient.imag();
         }
         d_d2_s1_ = device_alloc_copy(s1.data(), n_diag_two_, plan_bytes_);
         d_d2_s2_ = device_alloc_copy(s2.data(), n_diag_two_, plan_bytes_);
@@ -393,17 +401,17 @@ void DistributedGPUOperator::upload_term_tables_() {
         d_d2_im_ = device_alloc_copy(im.data(), n_diag_two_, plan_bytes_);
     }
 
-    n_mixed_two_ = static_cast<int>(serial->mixed_two_body_.size());
+    n_mixed_two_ = static_cast<int>(T.mixed_two_body.size());
     if (n_mixed_two_ > 0) {
         std::vector<std::uint64_t> sz(n_mixed_two_), fl(n_mixed_two_);
         std::vector<std::uint8_t>  op(n_mixed_two_);
         std::vector<double> re(n_mixed_two_), im(n_mixed_two_);
         for (int i = 0; i < n_mixed_two_; ++i) {
-            sz[i] = serial->mixed_two_body_[i].sz_site;
-            fl[i] = serial->mixed_two_body_[i].flip_site;
-            op[i] = serial->mixed_two_body_[i].flip_op_type;
-            re[i] = serial->mixed_two_body_[i].coefficient.real();
-            im[i] = serial->mixed_two_body_[i].coefficient.imag();
+            sz[i] = T.mixed_two_body[i].sz_site;
+            fl[i] = T.mixed_two_body[i].flip_site;
+            op[i] = T.mixed_two_body[i].flip_op_type;
+            re[i] = T.mixed_two_body[i].coefficient.real();
+            im[i] = T.mixed_two_body[i].coefficient.imag();
         }
         d_m2_sz_   = device_alloc_copy(sz.data(), n_mixed_two_, plan_bytes_);
         d_m2_flip_ = device_alloc_copy(fl.data(), n_mixed_two_, plan_bytes_);
@@ -412,18 +420,18 @@ void DistributedGPUOperator::upload_term_tables_() {
         d_m2_im_   = device_alloc_copy(im.data(), n_mixed_two_, plan_bytes_);
     }
 
-    n_offdiag_two_ = static_cast<int>(serial->offdiag_two_body_.size());
+    n_offdiag_two_ = static_cast<int>(T.offdiag_two_body.size());
     if (n_offdiag_two_ > 0) {
         std::vector<std::uint64_t> s1(n_offdiag_two_), s2(n_offdiag_two_);
         std::vector<std::uint8_t>  op1(n_offdiag_two_), op2(n_offdiag_two_);
         std::vector<double> re(n_offdiag_two_), im(n_offdiag_two_);
         for (int i = 0; i < n_offdiag_two_; ++i) {
-            s1[i]  = serial->offdiag_two_body_[i].site_index_1;
-            s2[i]  = serial->offdiag_two_body_[i].site_index_2;
-            op1[i] = serial->offdiag_two_body_[i].op_type_1;
-            op2[i] = serial->offdiag_two_body_[i].op_type_2;
-            re[i]  = serial->offdiag_two_body_[i].coefficient.real();
-            im[i]  = serial->offdiag_two_body_[i].coefficient.imag();
+            s1[i]  = T.offdiag_two_body[i].site_index_1;
+            s2[i]  = T.offdiag_two_body[i].site_index_2;
+            op1[i] = T.offdiag_two_body[i].op_type_1;
+            op2[i] = T.offdiag_two_body[i].op_type_2;
+            re[i]  = T.offdiag_two_body[i].coefficient.real();
+            im[i]  = T.offdiag_two_body[i].coefficient.imag();
         }
         d_o2_s1_  = device_alloc_copy(s1.data(),  n_offdiag_two_, plan_bytes_);
         d_o2_s2_  = device_alloc_copy(s2.data(),  n_offdiag_two_, plan_bytes_);

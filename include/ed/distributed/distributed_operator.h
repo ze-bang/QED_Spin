@@ -14,9 +14,9 @@
 //
 //   1.  Decompose [0, global_dim) into balanced 1D row slabs:
 //         rank r owns rows [offset_r, offset_r + n_r).
-//   2.  Walk the operator's separated-by-type term storage
-//       (Operator::diag_one_body_, offdiag_one_body_, diag_two_body_,
-//       mixed_two_body_, offdiag_two_body_, three_body_data_) and extract
+//   2.  Walk the operator's canonical SoA term storage
+//       (Operator::terms_.{diag_one_body, offdiag_one_body, diag_two_body,
+//       mixed_two_body, offdiag_two_body, three_body}) and extract
 //       the unique set of column-flip patterns
 //         { p in [0, 2^n_bits) : exists term s.t. col = row XOR p }
 //       For Heisenberg/Hubbard-style spin Hamiltonians this is bounded by
@@ -92,6 +92,7 @@
 #include <utility>
 #include <vector>
 
+#include <ed/core/linear_operator.h>
 #include <ed/core/sorted_uint64_index.h>
 #include <ed/matvec/matvec.h>          // MatVecOperator interface (Phase 2)
 #include <ed/matvec/memory_space.h>    // DistributedHost tag
@@ -101,7 +102,7 @@ class Operator;
 
 namespace ed::distributed {
 
-class DistributedOperator : public ed::matvec::MatVecOperator {
+class DistributedOperator : public ed::LinearOperator {
 public:
     using Complex = std::complex<double>;
 
@@ -123,15 +124,24 @@ public:
     /**
      * y_local = (H * v_global)[local_offset, local_offset + local_size).
      *
-     * v_local and y_local are sized exactly local_size().  Internally
-     * performs ONE MPI_Alltoallv of Complex values + one matrix-free local
-     * SpMV. Thread-safe within a single `apply()` call (the inner loop is
-     * parallelised with OpenMP).
+     * v_local and y_local must be sized exactly ``local_size()``.
+     * Internally performs ONE MPI_Alltoallv of Complex values + one
+     * matrix-free local SpMV. Thread-safe within a single ``apply()``
+     * call (the inner loop is parallelised with OpenMP).
+     *
+     * Both the 2-arg "legacy" entry and the 3-arg ``MatVecOperator``
+     * override now route through the same private ``apply_local_``
+     * implementation -- the 2-arg form is the back-compat fast path
+     * (trusts caller-sized buffers), the 3-arg form is the polymorphic
+     * surface and adds a defensive ``check_size`` first. Audit ref:
+     * STRUCTURAL_AUDIT.md S1 #10.
      */
-    void apply(const Complex* v_local, Complex* y_local) const;
+    void apply(const Complex* v_local, Complex* y_local) const {
+        apply_local_(v_local, y_local);
+    }
 
     // -------------------------------------------------------------------------
-    // Matvec-unification Phase 2: MatVecOperator overrides.
+    // Matvec-unification Phase 2: MatVecOperator override.
     //
     // dim() reports the LOCAL (per-rank) length so solvers that walk
     // through the polymorphic interface size their work buffers
@@ -148,8 +158,8 @@ public:
     {
         check_size(size);
         // ed::matvec::Complex is exactly std::complex<double>; identity cast.
-        apply(reinterpret_cast<const Complex*>(v_local),
-              reinterpret_cast<Complex*>(y_local));
+        apply_local_(reinterpret_cast<const Complex*>(v_local),
+                     reinterpret_cast<Complex*>(y_local));
     }
     [[nodiscard]] std::size_t dim() const override {
         return static_cast<std::size_t>(local_n_);
@@ -175,6 +185,18 @@ public:
     int           rank()         const noexcept { return rank_; }
     int           comm_size()    const noexcept { return size_; }
     MPI_Comm      comm()         const noexcept { return comm_; }
+
+    // Phase 3.1 of the Minimalist ED Collapse (May 2026): expose the
+    // distributed slab geometry to `ed::select_backend` / orchestrators.
+    [[nodiscard]] ed::Geometry geometry() const override {
+        ed::Geometry g;
+        g.local_dim    = static_cast<std::size_t>(local_n_);
+        g.global_dim   = global_dim_;
+        g.local_offset = local_offset_;
+        g.memory_space = ed::matvec::MemorySpace::DistributedHost;
+        g.comm         = comm_;
+        return g;
+    }
 
     /// Owner rank for a given GLOBAL row/column index, under this object's
     /// balanced 1D decomposition.
@@ -255,6 +277,15 @@ public:
                                    int size) noexcept;
 
 private:
+    /**
+     * Canonical SpMV implementation -- one body, two public surfaces.
+     * Called from both ``apply(v, y)`` (legacy 2-arg, back-compat) and
+     * ``apply(v, y, size)`` (MatVecOperator override). Trusts that the
+     * caller-supplied buffers are sized ``local_n_``; the 3-arg form
+     * runs ``check_size`` before delegating.
+     */
+    void apply_local_(const Complex* v_local, Complex* y_local) const;
+
     void extract_flip_patterns_();
     void build_comm_pattern_();
 

@@ -22,6 +22,41 @@ def test_estimate_bandwidth_falls_back_when_operator_missing():
     assert auto_tune.estimate_bandwidth(None) == pytest.approx(4.0)
 
 
+def test_estimate_bandwidth_uses_iter_term_methods():
+    """Regression: the bandwidth estimator must walk the bound
+    ``iter_*_terms`` methods, not the private ``transform_data_`` field
+    that pybind does not expose. Before the fix, every bound Operator
+    silently fell back to ``fallback * num_sites`` regardless of its
+    coupling magnitudes. This stub mimics the iterator surface.
+    """
+
+    class FakeOp:
+        num_sites = 4
+
+        def iter_one_body_terms(self):
+            # (op_type, site, coeff) triples; only the last element matters.
+            return [(2, 0, complex(0.5, 0.0)),
+                    (2, 1, complex(0.5, 0.0)),
+                    (2, 2, complex(0.5, 0.0)),
+                    (2, 3, complex(0.5, 0.0))]
+
+        def iter_two_body_terms(self):
+            return []
+
+        def iter_three_body_terms(self):
+            return []
+
+    # Bandwidth must reflect the four 0.5-magnitude terms (sum of |c|=2,
+    # gershgorin upper bound 2*sum=4) -- _not_ the fallback
+    # ``4 * num_sites = 16``.
+    bw = auto_tune.estimate_bandwidth(FakeOp())
+    assert bw == pytest.approx(2.0 * 4 * 0.5)
+    # Sanity check the fallback path stays put when no iterators exist.
+    class BareOp:
+        num_sites = 4
+    assert auto_tune.estimate_bandwidth(BareOp()) == pytest.approx(16.0)
+
+
 def test_pick_omega_window_is_symmetric_around_zero():
     omin, omax = auto_tune.pick_omega_window(8.0)
     assert omin < 0 < omax

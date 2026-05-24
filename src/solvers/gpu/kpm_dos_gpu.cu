@@ -10,9 +10,17 @@
 //   * Same Hutchinson normalisation: μ_k = (D / R) Σ_r ⟨r|T_k(H_sc)|r⟩.
 //
 // Differences from the CPU reference:
-//   * Spectral-bound Lanczos uses 3 device vectors and *no* reorthogonalisation
-//     (storing the basis at D ≈ 6×10⁸ would cost ~1.4 TB).  Extreme Ritz
-//     values are still accurate at the bandwidth scale we need.
+//   * Spectral-bound Lanczos uses 3 device vectors and -- when the user
+//     opts in via ``params.full_reorthogonalization`` AND the basis fits
+//     in device memory -- full classical Gram-Schmidt reorthogonalisation
+//     against the saved basis. Falls back to the 3-vector path with a
+//     stderr warning when the basis does not fit (typical case at
+//     Hilbert dim ~10^8: storing the full basis at D ≈ 6×10⁸ would cost
+//     ~1.4 TB so the user MUST be willing to pay the smaller-system tax).
+//     The CPU equivalent in ``estimate_spectral_bounds`` defaults to
+//     full reorth at all sizes; this fixes the audit S1 #25 silent
+//     parity gap for small/medium GPU runs while preserving the
+//     all-fits-in-memory contract.
 //   * Chebyshev moment recursion uses the standard "doubling trick" so each
 //     mat-vec produces *two* moments, which both halves the matvec count
 //     and lets us drop the saved random vector |r⟩ — fits in 3 device
@@ -160,12 +168,17 @@ inline void apply_Hsc(GPUOperator* gpu_op,
 }
 
 // ---------------------------------------------------------------------------
-// Spectral bound estimator: 3-vector Lanczos without reorthogonalization.
+// Spectral bound estimator: 3-vector Lanczos with optional full Gram-Schmidt
+// reorthogonalisation. Reorth is requested via ``full_reorth=true`` AND only
+// fires when the saved basis (krylov_dim × n complex doubles) fits in the
+// remaining device memory; otherwise falls back to plain 3-vector with a
+// stderr warning. Audit ref: STRUCTURAL_AUDIT.md S1 #25.
 // ---------------------------------------------------------------------------
 void estimate_spectral_bounds_gpu(
     GPUOperator* gpu_op,
     int n,
     int krylov_dim,
+    bool full_reorth,
     cublasHandle_t cublas_handle,
     curandGenerator_t curand_gen,
     double* d_real_scratch,
@@ -176,6 +189,33 @@ void estimate_spectral_bounds_gpu(
     double& e_max)
 {
     if (krylov_dim < 4) krylov_dim = 4;
+
+    // -----------------------------------------------------------------
+    // Try to allocate room for the full Krylov basis. The basis is
+    // contiguous: column k starts at d_basis + k * n. If allocation
+    // fails or the user did not request reorth, fall back to the
+    // historical 3-vector path.
+    // -----------------------------------------------------------------
+    cuDoubleComplex* d_basis = nullptr;
+    bool basis_alloc_ok = false;
+    if (full_reorth && krylov_dim > 0) {
+        const std::size_t bytes_basis = static_cast<std::size_t>(krylov_dim)
+            * static_cast<std::size_t>(n) * sizeof(cuDoubleComplex);
+        cudaError_t err = cudaMalloc(&d_basis, bytes_basis);
+        if (err == cudaSuccess) {
+            basis_alloc_ok = true;
+        } else {
+            cudaGetLastError();  // clear sticky error
+            std::fprintf(stderr,
+                "[kpm_dos_gpu] WARNING: full-reorth requested but "
+                "saving %d Krylov vectors of length %d (%.2f MB) "
+                "would not fit in device memory. Falling back to "
+                "3-vector Lanczos -- the spectral bounds may diverge "
+                "from the CPU reference on ill-conditioned spectra.\n",
+                krylov_dim, n, static_cast<double>(bytes_basis) / (1ULL << 20));
+            d_basis = nullptr;
+        }
+    }
 
     // Generate v_curr ~ Gaussian complex; normalise.
     ED_KPM_CHECK_CURAND(curandGenerateNormalDouble(
@@ -218,6 +258,17 @@ void estimate_spectral_bounds_gpu(
 
     double beta_prev = 0.0;
     for (int k = 0; k < krylov_dim; ++k) {
+        // Save the current Lanczos vector as basis column k (only when
+        // the alloc succeeded -- otherwise we run plain 3-vector).
+        if (basis_alloc_ok) {
+            cuDoubleComplex* col_k = d_basis
+                + static_cast<std::size_t>(k) * static_cast<std::size_t>(n);
+            ED_KPM_CHECK_CUDA(cudaMemcpyAsync(
+                col_k, d_v_curr,
+                static_cast<std::size_t>(n) * sizeof(cuDoubleComplex),
+                cudaMemcpyDeviceToDevice));
+        }
+
         // d_v_next = H d_v_curr
         gpu_op->matVecGPU(d_v_curr, d_v_next, n);
 
@@ -240,6 +291,31 @@ void estimate_spectral_bounds_gpu(
                 &c_neg_beta, d_v_prev, 1, d_v_next, 1));
         }
 
+        // -----------------------------------------------------------
+        // Full classical Gram-Schmidt reorthogonalisation against the
+        // saved basis (columns 0..k). The audit (S1 #25) flagged the
+        // missing reorth as a silent CPU/GPU divergence on
+        // ill-conditioned spectra; this closes that gap when the
+        // basis fits in device memory. One CGS sweep is the
+        // industry-standard "good enough" for Lanczos and matches the
+        // ``build_lanczos_tridiagonal_with_basis`` CPU path
+        // (``full_reorth=true`` performs one CGS pass per step).
+        // -----------------------------------------------------------
+        if (basis_alloc_ok) {
+            for (int j = 0; j <= k; ++j) {
+                const cuDoubleComplex* col_j = d_basis
+                    + static_cast<std::size_t>(j)
+                    * static_cast<std::size_t>(n);
+                cuDoubleComplex c;
+                ED_KPM_CHECK_CUBLAS(cublasZdotc(cublas_handle, n,
+                    col_j, 1, d_v_next, 1, &c));
+                const cuDoubleComplex neg_c = make_cuDoubleComplex(
+                    -cuCreal(c), -cuCimag(c));
+                ED_KPM_CHECK_CUBLAS(cublasZaxpy(cublas_handle, n,
+                    &neg_c, col_j, 1, d_v_next, 1));
+            }
+        }
+
         // beta_k = ||v_next||
         ED_KPM_CHECK_CUBLAS(cublasZdotc(cublas_handle, n,
             d_v_next, 1, d_v_next, 1, &z));
@@ -257,6 +333,11 @@ void estimate_spectral_bounds_gpu(
         std::swap(d_v_prev, d_v_curr);
         std::swap(d_v_curr, d_v_next);
         beta_prev = b_k;
+    }
+
+    if (d_basis) {
+        cudaFree(d_basis);
+        d_basis = nullptr;
     }
 
     // Diagonalise the symmetric tridiagonal (alpha, beta) with the standard
@@ -458,6 +539,7 @@ KPMDOSResult compute_kpm_dos_gpu(
         double e_min = 0.0, e_max = 0.0;
         estimate_spectral_bounds_gpu(
             gpu_op, n, params.spectral_bounds_krylov,
+            /*full_reorth=*/params.full_reorthogonalization,
             cublas_handle, curand_gen, d_real_scratch,
             d_v_prev, d_v_curr, d_v_next, e_min, e_max);
 

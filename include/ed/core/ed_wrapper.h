@@ -1,15 +1,36 @@
 #pragma once
 
 // ============================================================================
+// DEPRECATION NOTICE (Phase 5 — Minimalist ED Collapse, May 2026)
+// ============================================================================
+// This entire header is part of the LEGACY public surface that has been
+// SUPERSEDED by `ed/orchestrator.h` (`ed::workflows::solve / thermal /
+// spectral`). Every public entry point declared here — including
+// `exact_diagonalization_core()`, `exact_diagonalization_from_files()`,
+// `exact_diagonalization_fixed_sz()`, and the per-method routers — is
+// scheduled for removal once all in-tree callers (CLI + Python binding +
+// unit tests) have been migrated.
+//
+// MIGRATION PATH:
+//   * C++ callers:    `ed::workflows::solve(op, opts)`           (ground state)
+//                     `ed::workflows::thermal(op, opts)`         (mTPQ/cTPQ/FTLM)
+//                     `ed::workflows::spectral(op, obs, opts)`   (DSSF/CF)
+//   * Python:         `qed.solve(...)`, `qed.thermal(...)`, `qed.spectral(...)`
+//                     The old `qed.diag` / `qed.dssf.compute` symbols remain
+//                     as thin aliases (see `python/qed/_aliases.py`).
+//
+// During the transition, the entry points below continue to work and are
+// implemented in terms of the new kernels via `src/orchestrator.cpp`.
+// New code MUST use `ed::workflows::*`; legacy code is grandfathered.
+// ============================================================================
+
+// ============================================================================
 // INCLUDES
 // ============================================================================
 #include <ed/solvers/TPQ.h>
-#include <ed/solvers/CG.h>
-#include <ed/solvers/arpack.h>
 #include <ed/solvers/lanczos.h>
 #include <ed/solvers/ftlm.h>
 #include <ed/solvers/ltlm.h>
-#include <ed/solvers/hybrid_thermal.h>
 #include <ed/solvers/kpm_dos.h>
 #include <ed/core/construct_ham.h>
 #include <ed/core/hdf5_io.h>
@@ -23,109 +44,26 @@
 #include <chrono>
 #include <memory>  // For std::unique_ptr
 
-// ScaLAPACK support for distributed diagonalization
-#ifdef WITH_SCALAPACK
-#include <ed/solvers/scalapack_diag.h>
-#endif
-
 // GPU support
 #ifdef WITH_CUDA
 #include <ed/gpu/gpu_ed_wrapper.h>
 #endif
 
 // ============================================================================
-// Phase 7: this header is the legacy CPU/GPU dispatcher and must keep
-// branching on the deprecated `_GPU` / `_CUDA` / `_MPI` / `_FIXED_SZ`
-// enum variants for backwards compatibility (HDF5 metadata, pre-Phase-7
-// CLI configs, pre-Phase-7 Python code). The orthogonal axes
-// (use_gpu / use_mpi / use_fixed_sz on EDParameters) are folded onto
-// these enum values inside the dispatcher entry points via
-// `ed::canonicalize_method_and_flags()` + `ed::legacy_method_for_dispatch()`,
-// so external code only ever sees the deprecation warning if it uses
-// the deprecated enum values directly.
-//
-// We push/pop the deprecated-declarations diagnostic across the entire
-// header. The pop is at the very end of the file. Downstream
-// translation units that #include <ed/core/ed_wrapper.h> are NOT
-// affected: the pop restores their default diagnostic state before
-// any user code is parsed.
-// ============================================================================
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
-
-
-// ============================================================================
-// VECTOR OPERATIONS FOR COMPLEX VECTORS
+// Legacy CPU/GPU dispatcher header. The `_GPU` / `_CUDA` / `_MPI` /
+// `_FIXED_SZ` enum aliases were retired in the minimalist-architecture
+// rev (May 2026); device and parallelism are now plain
+// EDParameters::use_gpu / use_mpi / use_fixed_sz flags. See
+// docs/architecture/STRUCTURAL_AUDIT.md Part IV.
 // ============================================================================
 
-/**
- * @brief Vector addition operator for complex vectors
- * @param a First vector
- * @param b Second vector
- * @return Element-wise sum of the two vectors
- * @throws std::invalid_argument if vectors have different sizes
- */
-inline std::vector<Complex> operator+ (const std::vector<Complex>& a, const std::vector<Complex>& b) {
-    if (a.size() != b.size()) {
-        throw std::invalid_argument("Vectors must be of the same size for addition.");
-    }
-    std::vector<Complex> result(a.size());
-    for (size_t i = 0; i < a.size(); ++i) {
-        result[i] = a[i] + b[i];
-    }
-    return result;
-}
 
-/**
- * @brief Vector subtraction operator for complex vectors
- */
-inline std::vector<Complex> operator- (const std::vector<Complex>& a, const std::vector<Complex>& b) {
-    if (a.size() != b.size()) {
-        throw std::invalid_argument("Vectors must be of the same size for subtraction.");
-    }
-    std::vector<Complex> result(a.size());
-    for (size_t i = 0; i < a.size(); ++i) {
-        result[i] = a[i] - b[i];
-    }
-    return result;
-}
-
-/**
- * @brief In-place addition operator for complex vectors
- */
-inline std::vector<Complex>& operator+= (std::vector<Complex>& a, const std::vector<Complex>& b) {
-    if (a.size() != b.size()) {
-        throw std::invalid_argument("Vectors must be of the same size for addition.");
-    }
-    for (size_t i = 0; i < a.size(); ++i) {
-        a[i] += b[i];
-    }
-    return a;
-}
-
-/**
- * @brief In-place subtraction operator for complex vectors
- */
-inline std::vector<Complex>& operator-= (std::vector<Complex>& a, const std::vector<Complex>& b) {
-    if (a.size() != b.size()) {
-        throw std::invalid_argument("Vectors must be of the same size for subtraction.");
-    }
-    for (size_t i = 0; i < a.size(); ++i) {
-        a[i] -= b[i];
-    }
-    return a;
-}
-
-/**
- * @brief Scalar multiplication operator for complex vectors
- */
-inline std::vector<Complex> operator* (const std::vector<Complex>& a, const Complex& b) {
-    std::vector<Complex> result(a.size());
-    for (size_t i = 0; i < a.size(); ++i) {
-        result[i] = a[i] * b;
-    }
-    return result;
-}
+// The five `std::vector<Complex>` operator overloads (`operator+`, `operator-`,
+// `operator+=`, `operator-=`, `operator*` with a scalar) that used to live
+// here were retired in the minimalist-architecture rev (May 2026): every
+// vector-arithmetic hotspot already goes through cblas_z* / cublasZ* / the
+// `Backend::axpy` family, so the inline `for`-loop versions had no callers
+// and only existed to keep this header monolithic.
 
 // ============================================================================
 // ENUMS AND STRUCTURES
@@ -145,20 +83,14 @@ inline std::vector<Complex> operator* (const std::vector<Complex>& a, const Comp
 // ============================================================================
 
 /**
- * @brief Check if ScaLAPACK support was compiled in
- * @return true if WITH_SCALAPACK was defined at compile time
+ * @brief Check if ScaLAPACK support was compiled in. The dense ScaLAPACK
+ * kernel was retired in the minimalist-architecture rev; the helper is
+ * kept as `false` for back-compat with feature-check callers.
  */
-inline bool is_scalapack_compiled() {
-#ifdef WITH_SCALAPACK
-    return true;
-#else
-    return false;
-#endif
-}
+inline bool is_scalapack_compiled() { return false; }
 
 /**
  * @brief Check if CUDA/GPU support was compiled in
- * @return true if WITH_CUDA was defined at compile time
  */
 inline bool is_cuda_compiled() {
 #ifdef WITH_CUDA
@@ -168,103 +100,11 @@ inline bool is_cuda_compiled() {
 #endif
 }
 
-/**
- * @brief Get fallback method when requested method is unavailable
- * 
- * Provides graceful degradation when optional features aren't compiled in:
- * - ScaLAPACK methods -> FULL (dense diagonalization)
- * - GPU methods -> CPU equivalent
- * 
- * @param method The originally requested method
- * @param verbose Print warning message about fallback
- * @return The method to actually use (may be same as input)
- */
-inline DiagonalizationMethod get_fallback_method(DiagonalizationMethod method, bool verbose = true) {
-    DiagonalizationMethod fallback = method;
-    const char* reason = nullptr;
-    
-    // Check ScaLAPACK methods
-    if (method == DiagonalizationMethod::SCALAPACK || 
-        method == DiagonalizationMethod::SCALAPACK_MIXED) {
-        if (!is_scalapack_compiled()) {
-            fallback = DiagonalizationMethod::FULL;
-            reason = "ScaLAPACK not compiled (build with -DWITH_MPI=ON and ScaLAPACK-compatible BLAS)";
-        }
-    }
-    
-    // Check GPU methods
-    if (!is_cuda_compiled()) {
-        switch (method) {
-            case DiagonalizationMethod::LANCZOS_GPU:
-            case DiagonalizationMethod::LANCZOS_GPU_FIXED_SZ:
-                fallback = DiagonalizationMethod::LANCZOS;
-                reason = "CUDA not compiled (build with -DWITH_CUDA=ON)";
-                break;
-            case DiagonalizationMethod::BLOCK_LANCZOS_GPU:
-            case DiagonalizationMethod::BLOCK_LANCZOS_GPU_FIXED_SZ:
-                fallback = DiagonalizationMethod::BLOCK_LANCZOS;
-                reason = "CUDA not compiled (build with -DWITH_CUDA=ON)";
-                break;
-            case DiagonalizationMethod::DAVIDSON_GPU:
-                fallback = DiagonalizationMethod::DAVIDSON;
-                reason = "CUDA not compiled (build with -DWITH_CUDA=ON)";
-                break;
-            case DiagonalizationMethod::LOBPCG_GPU:
-                fallback = DiagonalizationMethod::LOBPCG;
-                reason = "CUDA not compiled (build with -DWITH_CUDA=ON)";
-                break;
-            case DiagonalizationMethod::KRYLOV_SCHUR_GPU:
-                fallback = DiagonalizationMethod::KRYLOV_SCHUR;
-                reason = "CUDA not compiled (build with -DWITH_CUDA=ON)";
-                break;
-            case DiagonalizationMethod::BLOCK_KRYLOV_SCHUR_GPU:
-                fallback = DiagonalizationMethod::BLOCK_KRYLOV_SCHUR;
-                reason = "CUDA not compiled (build with -DWITH_CUDA=ON)";
-                break;
-            case DiagonalizationMethod::FULL_GPU:
-                fallback = DiagonalizationMethod::FULL;
-                reason = "CUDA not compiled (build with -DWITH_CUDA=ON)";
-                break;
-            case DiagonalizationMethod::mTPQ_GPU:
-                fallback = DiagonalizationMethod::mTPQ;
-                reason = "CUDA not compiled (build with -DWITH_CUDA=ON)";
-                break;
-            case DiagonalizationMethod::cTPQ_GPU:
-                fallback = DiagonalizationMethod::cTPQ;
-                reason = "CUDA not compiled (build with -DWITH_CUDA=ON)";
-                break;
-            case DiagonalizationMethod::FTLM_GPU:
-            case DiagonalizationMethod::FTLM_GPU_FIXED_SZ:
-                fallback = DiagonalizationMethod::FTLM;
-                reason = "CUDA not compiled (build with -DWITH_CUDA=ON)";
-                break;
-            default:
-                break;
-        }
-    }
-    
-    // Print warning if method changed
-    if (verbose && fallback != method && reason != nullptr) {
-        std::cerr << "Warning: " << reason << "\n";
-        std::cerr << "         Falling back to ";
-        switch (fallback) {
-            case DiagonalizationMethod::FULL: std::cerr << "FULL"; break;
-            case DiagonalizationMethod::LANCZOS: std::cerr << "LANCZOS"; break;
-            case DiagonalizationMethod::BLOCK_LANCZOS: std::cerr << "BLOCK_LANCZOS"; break;
-            case DiagonalizationMethod::DAVIDSON: std::cerr << "DAVIDSON"; break;
-            case DiagonalizationMethod::LOBPCG: std::cerr << "LOBPCG"; break;
-            case DiagonalizationMethod::KRYLOV_SCHUR: std::cerr << "KRYLOV_SCHUR"; break;
-            case DiagonalizationMethod::BLOCK_KRYLOV_SCHUR: std::cerr << "BLOCK_KRYLOV_SCHUR"; break;
-            case DiagonalizationMethod::mTPQ: std::cerr << "mTPQ"; break;
-            case DiagonalizationMethod::cTPQ: std::cerr << "cTPQ"; break;
-            case DiagonalizationMethod::FTLM: std::cerr << "FTLM"; break;
-            default: std::cerr << "alternative method"; break;
-        }
-        std::cerr << " instead.\n\n";
-    }
-    
-    return fallback;
-}
+// `get_fallback_method` was retired in the minimalist-architecture rev
+// (May 2026): after the ScaLAPACK / ARPACK / Davidson / LOBPCG / Hybrid
+// cleanup it was an identity pass-through with zero callers. The use_gpu /
+// use_mpi fallback axes are handled directly in `ed::auto_pilot::solve`
+// (see include/ed/auto/solve.h).
 
 /**
  * @brief Structure to hold exact diagonalization results
@@ -326,59 +166,30 @@ namespace ed_internal {
     // working unchanged.
     
     /**
-     * @brief Normalize method and update use_fixed_sz flag if needed
-     * 
-     * If a deprecated _FIXED_SZ method is used, converts to base method
-     * and sets use_fixed_sz to true. This provides backwards compatibility.
-     * 
-     * @param method The method enum (will be normalized in-place)
-     * @param use_fixed_sz The fixed-Sz flag (will be set to true if _FIXED_SZ method used)
+     * @brief Pass-through. The legacy `_FIXED_SZ` enum variants were
+     * retired in the minimalist refactor; fixed-Sz is a plain
+     * EDParameters::use_fixed_sz flag now.
      */
-    inline void normalize_method_and_fixed_sz(DiagonalizationMethod& method, bool& use_fixed_sz) {
-        if (is_deprecated_fixed_sz_method(method)) {
-            std::cerr << "Warning: Using deprecated _FIXED_SZ method variant. "
-                      << "Use the base method with --fixed-sz flag instead.\n";
-            use_fixed_sz = true;  // Force fixed-Sz mode
-            method = normalize_method(method);  // Convert to base method
-        }
-    }
-    
-    /**
-     * @brief Check if method supports fixed-Sz operation
-     * 
-     * All methods support fixed-Sz via the appropriate operator class:
-     * - CPU methods: FixedSzOperator
-     * - GPU methods: GPUFixedSzOperator (for LANCZOS_GPU, BLOCK_LANCZOS_GPU, FTLM_GPU)
-     */
-    inline bool supports_fixed_sz(DiagonalizationMethod method) {
-        // Normalize first to handle deprecated variants
-        DiagonalizationMethod base = normalize_method(method);
-        
-        // All CPU methods support fixed-Sz
-        if (!is_gpu_method(base)) {
-            return true;
-        }
-        
-        // GPU methods that support fixed-Sz
-        return base == DiagonalizationMethod::LANCZOS_GPU ||
-               base == DiagonalizationMethod::BLOCK_LANCZOS_GPU ||
-               base == DiagonalizationMethod::FTLM_GPU ||
-               base == DiagonalizationMethod::DAVIDSON_GPU ||
-               base == DiagonalizationMethod::LOBPCG_GPU ||
-               base == DiagonalizationMethod::KRYLOV_SCHUR_GPU ||
-               base == DiagonalizationMethod::BLOCK_KRYLOV_SCHUR_GPU ||
-               base == DiagonalizationMethod::mTPQ_GPU ||
-               base == DiagonalizationMethod::cTPQ_GPU ||
-               base == DiagonalizationMethod::FULL_GPU;
+    inline void normalize_method_and_fixed_sz(DiagonalizationMethod& /*method*/, bool& /*use_fixed_sz*/) {
+        // No-op (kept for ABI compatibility with legacy call sites).
     }
 
+    // `supports_fixed_sz(method)` was retired in the minimalist-
+    // architecture rev (May 2026): after Phase 1 every remaining
+    // method (LANCZOS / BLOCK_LANCZOS / KRYLOV_SCHUR / FULL / FTLM /
+    // LTLM / TPQ_MICROCANONICAL / TPQ_CANONICAL / KPM_DOS) supports
+    // fixed-Sz via `FixedSzOperator` (or its GPU counterpart), so the
+    // helper unconditionally returned true. The downstream guard
+    // (line ~1640) that consulted it is now redundant and was
+    // removed alongside.
+
     // ========== Forward Declarations ==========
-    
-    void process_thermal_correlations(
-        const EDParameters& params,
-        uint64_t hilbert_space_dim
-    );
-    
+    //
+    // `process_thermal_correlations` and `diagonalize_matrix_free` were retired
+    // in the minimalist-architecture rev (May 2026): the former was wired only
+    // to a commented-out call site below and its body was already non-functional
+    // (TODO marker), the latter had zero callers anywhere in the tree.
+
     Operator load_hamiltonian_from_files(
         const std::string& interaction_file,
         const std::string& single_site_file,
@@ -389,28 +200,9 @@ namespace ed_internal {
         DiagonalizationMethod method,
         HamiltonianFileFormat format
     );
-    
+
     std::function<void(const Complex*, Complex*, int)> create_hamiltonian_apply_function(
         Operator& hamiltonian
-    );
-
-    /**
-     * @brief Matrix-free diagonalization using a custom apply function
-     *
-     * This enables truly matrix-free diagonalization where the Hamiltonian
-     * is never explicitly stored. The apply_func computes H*v on-the-fly.
-     *
-     * @param apply_func Function that computes out = H * in
-     * @param dim Dimension of the Hilbert space
-     * @param method Diagonalization method (LANCZOS recommended)
-     * @param params Diagonalization parameters
-     * @return EDResults with eigenvalues and optionally eigenvectors
-     */
-    EDResults diagonalize_matrix_free(
-        std::function<void(const Complex*, Complex*, uint64_t)> apply_func,
-        uint64_t dim,
-        DiagonalizationMethod method,
-        const EDParameters& params
     );
 
     // Phase 9 cleanup: the explicit-block symmetry helpers
@@ -500,156 +292,108 @@ inline EDResults exact_diagonalization_core(
                                  params.output_dir, params.compute_eigenvectors);
             break;
         
-        case DiagonalizationMethod::SCALAPACK:
-        case DiagonalizationMethod::SCALAPACK_MIXED:
-#ifdef WITH_SCALAPACK
-            {
-                ScaLAPACKConfig scalapack_config;
-                scalapack_config.nprow = params.scalapack_nprow;
-                scalapack_config.npcol = params.scalapack_npcol;
-                // Phase 8 #5: route the new auto flag through to the
-                // solver. When auto is on (the default), the explicit
-                // mb/nb values are ignored at solve time and replaced
-                // by ``get_optimal_block_size`` -- so we still set them
-                // from params for the case where the user disabled auto
-                // via the CLI / Python API.
-                scalapack_config.mb = params.scalapack_block_size;
-                scalapack_config.nb = params.scalapack_block_size;
-                scalapack_config.block_size_auto = params.scalapack_block_size_auto;
-                // SCALAPACK uses double precision, SCALAPACK_MIXED uses single with refinement
-                scalapack_config.use_mixed_precision = (method == DiagonalizationMethod::SCALAPACK_MIXED);
-                scalapack_config.refinement_tol = params.scalapack_refinement_tol;
-                scalapack_config.max_refinement_iter = params.scalapack_max_refinement_iter;
-                scalapack_config.compute_eigenvectors = params.compute_eigenvectors;
-                scalapack_config.num_eigenvalues = params.num_eigenvalues;
-                scalapack_config.output_dir = params.output_dir;
-                scalapack_config.verbose = params.scalapack_verbose;
-                
-                ScaLAPACKResults scalapack_results = scalapack_diagonalization(H, hilbert_space_dim, scalapack_config);
-                results.eigenvalues = std::move(scalapack_results.eigenvalues);
-                
-                std::cout << "ScaLAPACK completed in " << scalapack_results.total_time << " s" << std::endl;
-                std::cout << "  Matrix construction: " << scalapack_results.construction_time << " s" << std::endl;
-                std::cout << "  Diagonalization: " << scalapack_results.diagonalization_time << " s" << std::endl;
-                if (scalapack_config.use_mixed_precision) {
-                    std::cout << "  Refinement: " << scalapack_results.refinement_time << " s" << std::endl;
-                    std::cout << "  Max residual: " << scalapack_results.max_residual << std::endl;
-                }
-            }
-#else
-            // Graceful fallback to FULL diagonalization when ScaLAPACK is not available
-            std::cerr << "Warning: ScaLAPACK not available (build with -DWITH_MPI=ON and ScaLAPACK-compatible BLAS)\n";
-            std::cerr << "         Falling back to FULL diagonalization instead.\n\n";
-            full_diagonalization(H, hilbert_space_dim, params.num_eigenvalues, results.eigenvalues, 
-                                 params.output_dir, params.compute_eigenvectors);
-#endif
+        case DiagonalizationMethod::LANCZOS:
+            lanczos(H, hilbert_space_dim, params.max_iterations, params.num_eigenvalues,
+                    params.tolerance, results.eigenvalues, params.output_dir,
+                    params.compute_eigenvectors);
             break;
 
-        case DiagonalizationMethod::LANCZOS: {
-            // Audit follow-up: ARPACK (IRLM, ncv-restart) typically beats a plain
-            // Lanczos by 2-4x at our problem sizes -- it's what scipy.sparse.linalg.eigsh
-            // and quspin both wrap. Make it opt-in via env var so the default is
-            // identical to before, but a single flag (ED_USE_ARPACK_DEFAULT=1)
-            // drops the user onto the faster solver for k<=32 ground-state requests.
-            //  - ED_USE_ARPACK_DEFAULT=0 (or unset, default): plain in-house lanczos
-            //  - ED_USE_ARPACK_DEFAULT=1: route to arpack_ground_state when k<=32
-            const char* arpack_env = std::getenv("ED_USE_ARPACK_DEFAULT");
-            const bool use_arpack = (arpack_env && arpack_env[0] == '1');
-            if (use_arpack && params.num_eigenvalues <= 32) {
-                arpack_ground_state(H, hilbert_space_dim,
-                                    params.max_iterations, params.num_eigenvalues,
-                                    params.tolerance, results.eigenvalues,
-                                    params.output_dir, params.compute_eigenvectors);
-            } else {
-                lanczos(H, hilbert_space_dim, params.max_iterations, params.num_eigenvalues,
-                        params.tolerance, results.eigenvalues, params.output_dir,
-                        params.compute_eigenvectors);
-            }
-            break;
-        }
-            
-        case DiagonalizationMethod::LANCZOS_SELECTIVE:
-            lanczos_selective_reorth(H, hilbert_space_dim, params.max_iterations, 
-                                    params.num_eigenvalues, params.tolerance, 
-                                    results.eigenvalues, params.output_dir, 
-                                    params.compute_eigenvectors);
-            break;
-            
-        case DiagonalizationMethod::LANCZOS_NO_ORTHO:
-            lanczos_no_ortho(H, hilbert_space_dim, params.max_iterations, 
-                           params.num_eigenvalues, params.tolerance, 
-                           results.eigenvalues, params.output_dir, 
-                           params.compute_eigenvectors);
-            break;
-            
-        case DiagonalizationMethod::SHIFT_INVERT:
-            shift_invert_lanczos(H, hilbert_space_dim, params.max_iterations, 
-                                params.num_eigenvalues, params.shift, 
-                                params.tolerance, results.eigenvalues, 
-                                params.output_dir, params.compute_eigenvectors);
-            break;
-            
-        case DiagonalizationMethod::DAVIDSON:
-            {
-                std::vector<ComplexVector> eigenvectors;
-                davidson_method(H, hilbert_space_dim, params.max_iterations, 
-                             params.max_subspace, params.num_eigenvalues, 
-                             params.tolerance, results.eigenvalues, 
-                             eigenvectors, params.output_dir);
-            }
-            break;
-            
-        case DiagonalizationMethod::LOBPCG:
-            lobpcg_diagonalization(H, hilbert_space_dim, params.max_iterations, 
-                            params.num_eigenvalues, params.tolerance, 
-                            results.eigenvalues, params.output_dir, 
-                            params.compute_eigenvectors);
-            break;
-            
         case DiagonalizationMethod::KRYLOV_SCHUR:
-            krylov_schur(H, hilbert_space_dim, params.max_iterations, 
-                       params.num_eigenvalues, params.tolerance, 
-                       results.eigenvalues, params.output_dir, 
+            krylov_schur(H, hilbert_space_dim, params.max_iterations,
+                       params.num_eigenvalues, params.tolerance,
+                       results.eigenvalues, params.output_dir,
                        params.compute_eigenvectors);
             break;
-            
-        case DiagonalizationMethod::BLOCK_KRYLOV_SCHUR:
-            block_krylov_schur(H, hilbert_space_dim, params.max_iterations,
-                              params.num_eigenvalues, params.block_size, params.tolerance,
-                              results.eigenvalues, params.output_dir,
-                              params.compute_eigenvectors);
-            break;
-            
-        case DiagonalizationMethod::IMPLICIT_RESTART_LANCZOS:
-            implicitly_restarted_lanczos(H, hilbert_space_dim, params.max_iterations, 
-                                       params.num_eigenvalues, params.tolerance, 
-                                       results.eigenvalues, params.output_dir, 
-                                       params.compute_eigenvectors);
-            break;
-            
-        case DiagonalizationMethod::THICK_RESTART_LANCZOS:
-            thick_restart_lanczos(H, hilbert_space_dim, params.max_iterations, 
-                                params.num_eigenvalues, params.tolerance, 
-                                results.eigenvalues, params.output_dir, 
-                                params.compute_eigenvectors);
-            break;
-        
-        case DiagonalizationMethod::OSS:
-            optimal_spectrum_solver(
-                H, hilbert_space_dim, params.max_iterations,
-                results.eigenvalues, params.output_dir, 
-                params.compute_eigenvectors
-            );
-            break;
-            
-        case DiagonalizationMethod::mTPQ:
+
+        case DiagonalizationMethod::mTPQ: {
+            // Trivial-sector short-circuit: dim=1 yields ``D_S = log2(1) = 0``
+            // which makes the mTPQ β formula divide by zero (β goes
+            // negative and the trajectory is unusable). For a 1-D
+            // sector the thermodynamics are exact: <H>(β) = e_0,
+            // Cv(β) = 0, F(β) = e_0, S(β) = 0.
+            if (hilbert_space_dim == 1) {
+                Complex v0(1.0, 0.0), Hv0(0.0, 0.0);
+                H(&v0, &Hv0, 1);
+                double e0 = Hv0.real();
+                results.eigenvalues.push_back(e0);
+                // Match the LOG-spaced T grid used by
+                // ``compute_tpq_unified_thermo`` so the recombiner
+                // sees consistent temperature axes across sectors.
+                ThermodynamicData td;
+                td.temperatures.resize(params.num_temp_bins);
+                td.energy.assign(params.num_temp_bins, e0);
+                td.specific_heat.assign(params.num_temp_bins, 0.0);
+                td.entropy.assign(params.num_temp_bins, 0.0);
+                td.free_energy.assign(params.num_temp_bins, e0);
+                if (params.num_temp_bins <= 1) {
+                    td.temperatures[0] = params.temp_min;
+                } else {
+                    double log_min = std::log(std::max(params.temp_min, 1e-300));
+                    double log_max = std::log(std::max(params.temp_max, 1e-300));
+                    double step = (log_max - log_min) /
+                                  static_cast<double>(params.num_temp_bins - 1);
+                    for (std::uint64_t i = 0; i < params.num_temp_bins; ++i) {
+                        td.temperatures[i] =
+                            std::exp(log_min + step * static_cast<double>(i));
+                    }
+                }
+                results.thermo_data = std::move(td);
+                break;
+            }
+
+            // Auto-pick ``tpq_energy_shift`` (a.k.a. ``LargeValue``)
+            // when the caller passes the unified-pipeline sentinel
+            // ``tpq_energy_shift = 0``. mTPQ recurs via
+            // ``|v_{n+1}> = (L - H/D_S)|v_n>`` and needs ``L * D_S``
+            // greater than the largest eigenvalue of H. The
+            // historical default 1e5 is too large for small/medium
+            // systems: each step advances β by only ``2 / (L * D_S)``,
+            // so the chain only reaches ``β << 1`` in the budgeted
+            // ``max_iterations`` and the recombiner sees no usable
+            // data. A 24-step Lanczos sweep fixes this for ~all
+            // single-sector workloads.
+            double large_value = params.tpq_energy_shift;
+            if (large_value == 0.0) {
+                std::vector<double> alpha_lv, beta_lv;
+                std::mt19937 gen_lv(0xC0FFEEu);
+                ComplexVector v0_lv = generateGaussianRandomVector(
+                    static_cast<int>(hilbert_space_dim), gen_lv);
+                const std::uint64_t kdim = std::min<std::uint64_t>(
+                    24, hilbert_space_dim);
+                build_lanczos_tridiagonal_with_basis(
+                    H, v0_lv, hilbert_space_dim, kdim, /*tol=*/1e-12,
+                    /*full_reorth=*/true, /*reorth_freq=*/0,
+                    alpha_lv, beta_lv, /*basis_vectors=*/nullptr);
+                std::vector<double> ritz_lv, w_lv;
+                diagonalize_tridiagonal_ritz(
+                    alpha_lv, beta_lv, ritz_lv, w_lv, /*evecs=*/nullptr);
+                if (!ritz_lv.empty()) {
+                    double e_min = ritz_lv.front();
+                    double e_max = ritz_lv.back();
+                    double bw = std::max(e_max - e_min, 1.0);
+                    large_value = e_max + 0.05 * bw;
+                } else {
+                    large_value = 1.0;
+                }
+            }
+            // Honour ``tpq_max_steps`` as a hard cap on the chain length,
+            // independent of the more generic ``max_iterations``. The CLI
+            // / EDConfig path lets users say "stop after 5000 TPQ steps
+            // regardless of solver-iteration heuristics"; the field had
+            // previously been parsed but silently dropped before reaching
+            // the solver.
+            const std::uint64_t mtpq_max_steps =
+                (params.tpq_max_steps > 0)
+                    ? std::min<std::uint64_t>(params.max_iterations,
+                                              params.tpq_max_steps)
+                    : params.max_iterations;
             microcanonical_tpq(H, hilbert_space_dim,
-                            params.max_iterations, params.num_samples,
+                            mtpq_max_steps, params.num_samples,
                             params.tpq_measurement_interval,
                             results.eigenvalues,
                             params.output_dir,
                             params.compute_eigenvectors,
-                            params.tpq_energy_shift,
+                            large_value,
                             params.save_thermal_states, params.observables, params.observable_names,
                             params.omega_min, params.omega_max,
                             params.num_points, params.t_end, params.dt, params.spin_length, 
@@ -661,14 +405,65 @@ inline EDResults exact_diagonalization_core(
                             params.tpq_target_beta,
                             params.tpq_num_measure_points,
                             params.tpq_measure_beta_min,
-                            params.tpq_measure_beta_max); 
+                            params.tpq_measure_beta_max);
+            // Audit follow-up: populate ``results.thermo_data`` so the
+            // unified ``ed::auto_pilot::thermal`` entry point (and any
+            // other caller of ``exact_diagonalization_core``) can read
+            // the binned thermodynamics in-memory.
+            if (!params.output_dir.empty()) {
+                results.thermo_data = compute_tpq_unified_thermo(
+                    params.output_dir,
+                    params.temp_min,
+                    params.temp_max,
+                    params.num_temp_bins
+                );
+            }
             break;
+        }
 
         case DiagonalizationMethod::cTPQ:
-            canonical_tpq(
+            // Trivial-sector short-circuit (same rationale as mTPQ).
+            // cTPQ's Taylor expansion of ``exp(-Δβ H)`` is degenerate
+            // for a 1-D Hilbert space, so we fill in the exact thermo
+            // directly instead of running the iteration.
+            if (hilbert_space_dim == 1) {
+                Complex v0(1.0, 0.0), Hv0(0.0, 0.0);
+                H(&v0, &Hv0, 1);
+                double e0 = Hv0.real();
+                results.eigenvalues.push_back(e0);
+                ThermodynamicData td;
+                td.temperatures.resize(params.num_temp_bins);
+                td.energy.assign(params.num_temp_bins, e0);
+                td.specific_heat.assign(params.num_temp_bins, 0.0);
+                td.entropy.assign(params.num_temp_bins, 0.0);
+                td.free_energy.assign(params.num_temp_bins, e0);
+                if (params.num_temp_bins <= 1) {
+                    td.temperatures[0] = params.temp_min;
+                } else {
+                    double log_min = std::log(std::max(params.temp_min, 1e-300));
+                    double log_max = std::log(std::max(params.temp_max, 1e-300));
+                    double step = (log_max - log_min) /
+                                  static_cast<double>(params.num_temp_bins - 1);
+                    for (std::uint64_t i = 0; i < params.num_temp_bins; ++i) {
+                        td.temperatures[i] =
+                            std::exp(log_min + step * static_cast<double>(i));
+                    }
+                }
+                results.thermo_data = std::move(td);
+                break;
+            }
+            // beta_max: prefer the dedicated ``tpq_beta_max`` knob when the
+            // user has set it (config-file or auto-pilot path). Fall back
+            // to ``temp_max`` for back-compat with callers that only set
+            // the generic thermal grid bounds.
+            {
+                const double ctpq_beta_max =
+                    (params.tpq_beta_max > 0.0) ? params.tpq_beta_max
+                                                : params.temp_max;
+                canonical_tpq(
                 H,                      // Hamiltonian matvec
                 hilbert_space_dim,      // N
-                params.temp_max,        // beta_max (use configured max inverse temperature)
+                ctpq_beta_max,          // beta_max (tpq_beta_max if set, else temp_max)
                 params.num_samples,     // num_samples
                 params.tpq_measurement_interval, // temp_interval / measurement frequency
                 results.eigenvalues,    // energies output vector
@@ -692,6 +487,15 @@ inline EDResults exact_diagonalization_core(
                 params.tpq_measure_beta_min,
                 params.tpq_measure_beta_max
             );
+            }  // close ctpq_beta_max scope
+            if (!params.output_dir.empty()) {
+                results.thermo_data = compute_tpq_unified_thermo(
+                    params.output_dir,
+                    params.temp_min,
+                    params.temp_max,
+                    params.num_temp_bins
+                );
+            }
             break;
 
 
@@ -703,87 +507,12 @@ inline EDResults exact_diagonalization_core(
         // exact_diagonalization_from_files" diagnostic instead.
 
         case DiagonalizationMethod::BLOCK_LANCZOS:
-            block_lanczos(H, hilbert_space_dim, 
-                        params.max_iterations, params.num_eigenvalues, params.block_size, 
-                        params.tolerance, results.eigenvalues, 
+            block_lanczos(H, hilbert_space_dim,
+                        params.max_iterations, params.num_eigenvalues, params.block_size,
+                        params.tolerance, results.eigenvalues,
                         params.output_dir, params.compute_eigenvectors);
             break;
-            
-        case DiagonalizationMethod::CHEBYSHEV_FILTERED:
-            chebyshev_filtered_lanczos(H, hilbert_space_dim, 
-                                     params.max_iterations, params.num_eigenvalues, 
-                                     params.tolerance, results.eigenvalues, 
-                                     params.output_dir, params.compute_eigenvectors,
-                                     params.target_lower, params.target_upper);
-            break;
-            
-        
-        case DiagonalizationMethod::ARPACK_SM:
-            arpack_ground_state(H, hilbert_space_dim,
-                                params.max_iterations, params.num_eigenvalues, params.tolerance,
-                                results.eigenvalues, params.output_dir, params.compute_eigenvectors);
-            break;
-        
-        case DiagonalizationMethod::ARPACK_LM:
-            arpack_largest(H, hilbert_space_dim,
-                            params.max_iterations, params.num_eigenvalues, params.tolerance,
-                            results.eigenvalues, params.output_dir, params.compute_eigenvectors);
-            break;
 
-        case DiagonalizationMethod::ARPACK_SHIFT_INVERT:
-            arpack_shift_invert(H, hilbert_space_dim,
-                                params.max_iterations, params.num_eigenvalues, params.tolerance,
-                                params.shift,
-                                results.eigenvalues, params.output_dir,
-                                params.compute_eigenvectors);
-            break;
-
-        case DiagonalizationMethod::ARPACK_ADVANCED: {
-            detail_arpack::ArpackAdvancedOptions opts;
-            opts.nev = params.num_eigenvalues;
-            opts.which = params.arpack_which;
-            opts.tol = params.tolerance;
-            opts.max_iter = params.max_iterations;
-            opts.ncv = params.arpack_ncv;
-            opts.auto_enlarge_ncv = params.arpack_auto_enlarge_ncv;
-            opts.max_restarts = params.arpack_max_restarts;
-            opts.ncv_growth = params.arpack_ncv_growth;
-            opts.two_phase_refine = params.arpack_two_phase_refine;
-            opts.relaxed_tol = params.arpack_relaxed_tol;
-            opts.shift_invert = params.arpack_shift_invert;
-            opts.sigma = params.arpack_sigma;
-            opts.auto_switch_to_shift_invert = params.arpack_auto_switch_shift_invert;
-            opts.switch_sigma = params.arpack_switch_sigma;
-            opts.adaptive_inner_tol = params.arpack_adaptive_inner_tol;
-            opts.inner_tol_factor = params.arpack_inner_tol_factor;
-            opts.inner_tol_min = params.arpack_inner_tol_min;
-            opts.inner_max_iter = params.arpack_inner_max_iter;
-            opts.verbose = params.arpack_advanced_verbose;
-            std::vector<Complex> evecs; // optionally capture
-            uint64_t info = arpack_eigs_advanced(H, hilbert_space_dim, opts,
-                                            results.eigenvalues,
-                                            params.output_dir,
-                                            params.compute_eigenvectors,
-                                            params.compute_eigenvectors ? &evecs : nullptr);
-            if (info != 0) {
-                std::cerr << "ARPACK advanced solver returned info=" << info << std::endl;
-            }
-            break; }
-        
-        // Methods not yet fully implemented
-        case DiagonalizationMethod::SHIFT_INVERT_ROBUST:
-            std::cerr << "SHIFT_INVERT_ROBUST not yet implemented. Using standard SHIFT_INVERT instead." << std::endl;
-            shift_invert_lanczos(H, hilbert_space_dim, params.max_iterations, 
-                                params.num_eigenvalues, params.shift, 
-                                params.tolerance, results.eigenvalues, 
-                                params.output_dir, params.compute_eigenvectors);
-            break;
-        
-        case DiagonalizationMethod::mTPQ_MPI:
-            std::cerr << "Error: mTPQ_MPI requires MPI build. Use standard mTPQ instead." << std::endl;
-            throw std::runtime_error("mTPQ_MPI not available");
-            break;
-        
         case DiagonalizationMethod::FTLM:
             {
                 // Setup FTLM parameters
@@ -824,13 +553,9 @@ inline EDResults exact_diagonalization_core(
         
         case DiagonalizationMethod::LTLM:
             {
-                // The `use_hybrid_method` legacy flag was removed in
-                // matvec-unification Phase 7.3 (it had been
-                // [[deprecated]] for several releases and only emitted
-                // a warning + fell back to standard LTLM). Use
-                // DiagonalizationMethod::HYBRID instead.
-
-                // Standard LTLM
+                // Standard LTLM (the legacy `use_hybrid_method` flag and
+                // the HYBRID enum were retired in the minimalist refactor;
+                // workflow-level glue picks LTLM vs FTLM by temperature.)
                 // Setup LTLM parameters
                 LTLMParameters ltlm_params;
                 ltlm_params.krylov_dim = params.ltlm_krylov_dim;
@@ -863,55 +588,6 @@ inline EDResults exact_diagonalization_core(
             }
             break;
         
-        case DiagonalizationMethod::HYBRID:
-            {
-                // Setup Hybrid Thermal parameters
-                HybridThermalParameters hybrid_params;
-                
-                // Temperature and crossover settings
-                hybrid_params.crossover_temperature = params.hybrid_crossover;
-                hybrid_params.auto_crossover = params.hybrid_auto_crossover;
-                
-                // LTLM parameters (low temperature)
-                hybrid_params.ltlm_krylov_dim = params.ltlm_krylov_dim;
-                hybrid_params.ltlm_ground_krylov = params.ltlm_ground_krylov;
-                hybrid_params.ltlm_full_reorth = params.ltlm_full_reorth;
-                hybrid_params.ltlm_reorth_freq = params.ltlm_reorth_freq;
-                hybrid_params.ltlm_seed = params.ltlm_seed;
-                hybrid_params.ltlm_store_data = params.ltlm_store_data;
-                
-                // FTLM parameters (high temperature)
-                hybrid_params.ftlm_num_samples = params.num_samples;
-                hybrid_params.ftlm_krylov_dim = params.ftlm_krylov_dim;
-                hybrid_params.ftlm_full_reorth = params.ftlm_full_reorth;
-                hybrid_params.ftlm_reorth_freq = params.ftlm_reorth_freq;
-                hybrid_params.ftlm_seed = params.ftlm_seed;
-                hybrid_params.ftlm_store_samples = params.ftlm_store_samples;
-                hybrid_params.ftlm_error_bars = params.ftlm_error_bars;
-                
-                // General parameters
-                hybrid_params.max_iterations = params.max_iterations;
-                hybrid_params.tolerance = params.tolerance;
-                
-                // Run hybrid thermal method
-                HybridThermalResults hybrid_results = hybrid_thermal_method(
-                    H, hilbert_space_dim, hybrid_params,
-                    params.temp_min, params.temp_max, params.num_temp_bins,
-                    params.output_dir
-                );
-                
-                // Store results
-                results.thermo_data = hybrid_results.thermo_data;
-                results.eigenvalues.push_back(hybrid_results.ground_state_energy);
-                
-                // Save results to file (HDF5 goes to main output dir)
-                if (!params.output_dir.empty()) {
-                    safe_system_call("mkdir -p " + params.output_dir);
-                    save_hybrid_thermal_results(hybrid_results, params.output_dir + "/hybrid_thermo.txt");
-                }
-            }
-            break;
-
         case DiagonalizationMethod::KPM_DOS:
             {
                 // Build temperature grid (linear in T, matching what FTLM/LTLM do)
@@ -979,61 +655,6 @@ inline EDResults exact_diagonalization_core(
             }
             break;
 
-        case DiagonalizationMethod::LANCZOS_GPU:
-        case DiagonalizationMethod::LANCZOS_GPU_FIXED_SZ:
-        case DiagonalizationMethod::DAVIDSON_GPU:
-        case DiagonalizationMethod::LOBPCG_GPU:
-        case DiagonalizationMethod::KRYLOV_SCHUR_GPU:
-        case DiagonalizationMethod::BLOCK_KRYLOV_SCHUR_GPU:
-        case DiagonalizationMethod::BLOCK_LANCZOS_GPU:
-        case DiagonalizationMethod::BLOCK_LANCZOS_GPU_FIXED_SZ:
-        case DiagonalizationMethod::mTPQ_GPU:
-        case DiagonalizationMethod::cTPQ_GPU:
-        case DiagonalizationMethod::FTLM_GPU:
-        case DiagonalizationMethod::FTLM_GPU_FIXED_SZ:
-        case DiagonalizationMethod::FULL_GPU: {
-            // ----------------------------------------------------------
-            // Matvec-unification Phase 7.6: graceful CPU fallback.
-            //
-            // The in-memory exact_diagonalization_core() entry has no
-            // GPU code path (all GPU kernels live behind the file-based
-            // exact_diagonalization_from_files() entry, where they have
-            // a real device-resident Operator). Before Phase 7.6 this
-            // case list threw, which broke any in-memory caller (like
-            // auto_pilot::solve) that ran on a WITH_CUDA=ON build with
-            // GPU available: the legacy `_GPU` enum got promoted by
-            // legacy_method_for_dispatch() and we'd land here.
-            //
-            // The right semantic is "either GPU runs or we fall back to
-            // CPU silently", matching what auto_pilot::solve already
-            // documents for the WITH_CUDA=OFF case. So we now:
-            //   1. canonicalise back to the base CPU method,
-            //   2. clear params.use_gpu so downstream stays consistent,
-            //   3. emit a one-line stderr note (so the fallback is
-            //      visible in logs), and
-            //   4. recurse into exact_diagonalization_core() with the
-            //      CPU method.
-            //
-            // Throwing was the wrong default; if a caller genuinely
-            // *requires* a GPU run, they should use
-            // exact_diagonalization_from_files() / from_directory()
-            // directly (or pass allow_fallback=false through the
-            // auto_pilot::solve() options).
-            // ----------------------------------------------------------
-            const auto canon = ed::canonicalize_method_and_flags(
-                method, params.use_fixed_sz, /*use_gpu=*/true,
-                params.use_mpi);
-            std::cerr << "[ed] note: GPU method "
-                      << static_cast<int>(method)
-                      << " has no in-memory implementation; "
-                      << "running CPU base method "
-                      << static_cast<int>(canon.method)
-                      << " instead.\n";
-            params.use_gpu = false;
-            return exact_diagonalization_core(
-                H, hilbert_space_dim, canon.method, params);
-        }
-
         default:
             // Hard-fail on an unrecognised method instead of silently
             // returning empty results: in non-interactive runs the cerr
@@ -1050,11 +671,6 @@ inline EDResults exact_diagonalization_core(
         std::cout << "Eigenvectors computed and saved to " << params.output_dir << std::endl;
     }
 
-    // Calculate thermal observables if requested
-    // if (params.calc_observables) {
-    //     ed_internal::process_thermal_correlations(params, hilbert_space_dim);
-    // }
-
     return results;
 }
 
@@ -1064,226 +680,14 @@ inline EDResults exact_diagonalization_core(
 
 namespace ed_internal {
 
-/**
- * @brief Process thermal correlation functions
- * 
- * Searches for correlation files, loads operators, and calculates
- * thermal expectation values at different temperatures.
- * 
- * @param params ED parameters containing temperature ranges and observables
- * @param hilbert_space_dim Dimension of the Hilbert space
- */
-inline void process_thermal_correlations(
-    const EDParameters& params,
-    uint64_t hilbert_space_dim
-) {
-    std::cout << "Calculating custom observables..." << std::endl;
-    std::cout << "Calculating thermal expectation values for correlation operators..." << std::endl;
 
-    // Create output directory for thermal correlation results
-    std::string output_correlations_dir = params.output_dir + "/thermal_correlations";
-    std::string cmd_mkdir = "mkdir -p " + output_correlations_dir;
-    safe_system_call(cmd_mkdir);
-
-    // Determine base directory where correlation files might be located
-    std::string base_dir;
-    if (!params.output_dir.empty()) {
-        size_t pos = params.output_dir.find_last_of("/\\");
-        base_dir = (pos != std::string::npos) ? params.output_dir.substr(0, pos) : ".";
-    } else {
-        base_dir = ".";
-    }
-
-    std::cout << "Looking for correlation files in: " << base_dir << std::endl;
-
-    // Define correlation file patterns to search for
-    std::vector<std::pair<std::string, std::string>> patterns = {
-        {"one_body_correlations", "one_body_correlations*.dat"},
-        {"two_body_correlations", "two_body_correlations*.dat"}
-    };
-
-    // Process each type of correlation file
-    for (const auto& [prefix, pattern] : patterns) {
-            // Find matching files
-            std::string temp_list_file = output_correlations_dir + "/" + prefix + "_files.txt";
-            std::string find_command = "find \"" + base_dir + "\" -name \"" + pattern + "\" 2>/dev/null > \"" + temp_list_file + "\"";
-            safe_system_call(find_command);
-            
-            // Read the list of files
-            std::ifstream file_list(temp_list_file);
-            if (!file_list.is_open()) continue;
-            
-            std::string correlation_file;
-            uint64_t file_count = 0;
-
-            // Compute thermal expectations at different temperatures
-            std::string results_file_path = output_correlations_dir + "/thermal_expectation_" + 
-            prefix + ".dat";
-            std::ofstream results_file(results_file_path);
-            
-            if (!results_file.is_open()) {
-                std::cerr << "Error: Could not open output file: " << results_file_path << std::endl;
-                continue;
-            }
-                        
-            while (std::getline(file_list, correlation_file)) {
-                if (correlation_file.empty()) continue;
-                file_count++;
-                
-                // Extract operator type from filename
-                size_t prefix_pos = correlation_file.find(prefix);
-                if (prefix_pos == std::string::npos) continue;
-                
-                
-                std::cout << "Processing " << prefix << " file: " << correlation_file << std::endl;
-                
-                try {
-                    // Load the operator
-                    
-
-                    std::ifstream file(correlation_file);
-                    if (!file.is_open()) {
-                        throw std::runtime_error("Could not open file: " + correlation_file);
-                    }
-                    std::cout << "Reading file: " << correlation_file << std::endl;
-                    std::string line;
-                    
-                    // Skip the first line (header)
-                    std::getline(file, line);
-                    
-                    // Read the number of lines
-            
-                    std::getline(file, line);
-                    std::istringstream iss(line);
-                    uint64_t numLines;
-                    std::string m;
-                    iss >> m >> numLines;
-                    // std::cout << "Number of lines: " << numLines << std::endl;
-                    
-                    // Skip the next 3 lines (separators/headers)
-                    for (uint64_t i = 0; i < 3; ++i) {
-                        std::getline(file, line);
-                    }
-                                            
-                    if (prefix == "one_body_correlations") {
-                        results_file << std::setw(12) << "Temperatures" << " "
-                                    << std::setw(12) << "Beta" << " "
-                                    << std::setw(12) << "Op1" << " "
-                                    << std::setw(12) << "Index1" << " "
-                                    << std::setw(12) << "Expectation" << std::endl;
-                    } else if (prefix == "two_body_correlations") {
-                        results_file << std::setw(12) << "Temperatures" << " "
-                                    << std::setw(12) << "Beta" << " "
-                                    << std::setw(12) << "Op1" << " "
-                                    << std::setw(12) << "Op2" << " "
-                                    << std::setw(12) << "Index1" << " "
-                                    << std::setw(12) << "Index2" << " "
-                                    << std::setw(12) << "Expectation" << std::endl;
-                    }
-
-                    // Process transform data
-                    uint64_t lineCount = 0;
-                    while (std::getline(file, line) && lineCount < numLines) {
-                        Operator correlation_op(params.num_sites, params.spin_length);
-                        std::istringstream lineStream(line);
-                        uint64_t Op1, indx1, Op2, indx2;
-                        double E, F;
-                        if (prefix == "one_body_correlations") {
-
-                            // std::cout << "Reading line: " << line << std::endl;
-                            if (!(lineStream >> Op1 >> indx1 >> E >> F)) {
-                                continue; // Skip invalid lines
-                            }
-
-                            correlation_op.loadonebodycorrelation(Op1, indx1);
-                        } else if (prefix == "two_body_correlations") {
-
-                            // std::cout << "Reading line: " << line << std::endl;
-                            if (!(lineStream >> Op1 >> indx1 >> Op2 >> indx2 >> E >> F)) {
-                                continue; // Skip invalid lines
-                            }
-                            correlation_op.loadtwobodycorrelation(Op1, indx1, Op2, indx2);
-                        }
-
-                        // Create a lambda to apply the operator
-                        auto apply_correlation_op = [&correlation_op](const Complex* in, Complex* out, uint64_t n) {
-                            correlation_op.apply(in, out, n);
-                        };
-                        
-
-                        // Calculate thermal expectations at temperature points
-                        uint64_t num_temps = std::min(params.num_temp_bins, static_cast<uint64_t>(20));
-                        double log_temp_min = std::log(params.temp_min);
-                        double log_temp_max = std::log(params.temp_max);
-                        double log_temp_step = (log_temp_max - log_temp_min) / std::max(1, static_cast<int>(num_temps - 1));
-
-                        for (uint64_t i = 0; i < num_temps; i++) {
-                            double T = std::exp(log_temp_min + i * log_temp_step);
-                            double beta = 1.0 / T;
-                            
-                            // TODO: Fix thermal expectation calculation - 
-                            // compute_thermal_expectation_value has a different signature
-                            // and requires StaticResponseParameters. This code path is broken.
-                            Complex expectation(0.0, 0.0);
-                            std::cerr << "Warning: Thermal expectation calculation not implemented for correlation operators" << std::endl;
-                            
-                            /*
-                            // Old broken code:
-                            Complex expectation = calculate_thermal_expectation(
-                                apply_correlation_op, hilbert_space_dim, beta, params.output_dir + "/eigenvectors/");
-                            */
-                            
-                            std::cout << "T: " << T << ", beta: " << beta << ", expectation: " 
-                                        << expectation.real() << " + " << expectation.imag() << "i" << std::endl;
-
-                            // Write to file
-                            if (prefix == "one_body_correlations") {
-                                results_file << std::setw(12) << std::setprecision(6) << T << " "
-                                            << std::setw(12) << std::setprecision(6) << beta << " "
-                                            << std::setw(12) << std::setprecision(6) << Op1 << " "
-                                            << std::setw(12) << std::setprecision(6) << indx1 << " "
-                                            << std::setw(12) << std::setprecision(6) << expectation.real() << " "
-                                            << std::setw(12) << std::setprecision(6) << expectation.imag() << std::endl;
-                            } else if (prefix == "two_body_correlations") {
-                                results_file << std::setw(12) << std::setprecision(6) << T << " "
-                                            << std::setw(12) << std::setprecision(6) << beta << " "
-                                            << std::setw(12) << std::setprecision(6) << Op1 << " "
-                                            << std::setw(12) << std::setprecision(6) << Op2 << " "
-                                            << std::setw(12) << std::setprecision(6) << indx1 << " "
-                                            << std::setw(12) << std::setprecision(6) << indx2 << " "
-                                            << std::setw(12) << std::setprecision(6) << expectation.real() << " "
-                                            << std::setw(12) << std::setprecision(6) << expectation.imag() << std::endl;
-                            }
-                        }
-                    }
-                }
-                catch (const std::exception& e) {
-                    std::cerr << "Error processing " << correlation_file << ": " << e.what() << std::endl;
-                }
-            }
-            results_file.close();
-            std::cout << "Thermal expectations saved to: " << results_file_path << std::endl;
-            file_list.close();
-            std::cout << "Processed " << file_count << " " << prefix << " files" << std::endl;
-            std::remove(temp_list_file.c_str());
-        }
-
-    std::cout << "Thermal expectation calculations complete!" << std::endl;
-}
-
-/**
- * @brief Factory function to create the appropriate operator type
- * Creates either a standard Operator or FixedSzOperator based on config
- */
-template<typename OperatorType = Operator>
-OperatorType* create_operator(const SystemConfig& config) {
-    if (config.use_fixed_sz) {
-        int64_t n_up = (config.n_up >= 0) ? config.n_up : config.num_sites / 2;
-        return new FixedSzOperator(config.num_sites, config.spin_length, n_up);
-    } else {
-        return new OperatorType(config.num_sites, config.spin_length);
-    }
-}
+// `create_operator` was retired in the minimalist-architecture rev
+// (May 2026): no callers. It also leaked raw `new`-allocated
+// `Operator*`/`FixedSzOperator*` pointers, which is the wrong owner-
+// ship convention for the rest of this layer (the live workflows hold
+// `std::shared_ptr<Operator>` / `std::shared_ptr<FixedSzOperator>`
+// pairs and dispatch via a lambda -- see
+// `build_workflow_hamiltonian` in src/cli/workflows.cpp).
 
 /**
  * @brief Load Hamiltonian from files based on format
@@ -1314,14 +718,6 @@ inline Operator load_hamiltonian_from_files(
                 std::cout << "Loading three-body terms from: " << three_body_file << std::endl;
                 hamiltonian.loadThreeBodyTerm(three_body_file);
             }
-            // COUNTERTERM DISABLED
-            // if (!counterterm_file.empty()){
-            //     hamiltonian.loadCounterTerm(counterterm_file);
-            // }
-            // Build sparse matrix (except for full diagonalization)
-            // if (method == DiagonalizationMethod::FULL) {
-            //     hamiltonian.buildSparseMatrix();
-            // }
             break;
             
         case HamiltonianFileFormat::SPARSE_MATRIX:
@@ -1349,37 +745,10 @@ inline std::function<void(const Complex*, Complex*, int)> create_hamiltonian_app
     };
 }
 
-/**
- * @brief Matrix-free diagonalization using a custom apply function
- * 
- * This enables truly matrix-free diagonalization where the Hamiltonian
- * is never explicitly stored. The apply_func computes H*v on-the-fly.
- * 
- * Supports Lanczos and Davidson methods. ARPACK and FULL require matrix construction.
- */
-inline EDResults diagonalize_matrix_free(
-    std::function<void(const Complex*, Complex*, uint64_t)> apply_func,
-    uint64_t dim,
-    DiagonalizationMethod method,
-    const EDParameters& params
-) {
-    // Validate method - only Lanczos and Davidson support matrix-free
-    if (method == DiagonalizationMethod::FULL) {
-        throw std::runtime_error("FULL diagonalization requires explicit matrix. Use LANCZOS for matrix-free.");
-    }
-    if (method == DiagonalizationMethod::ARPACK_SM ||
-        method == DiagonalizationMethod::ARPACK_LM) {
-        std::cerr << "Warning: ARPACK requires matrix construction. Falling back to LANCZOS." << std::endl;
-        method = DiagonalizationMethod::LANCZOS;
-    }
-    
-    // Wrap the apply function to match expected signature
-    auto apply_wrapper = [&apply_func](const Complex* in, Complex* out, int size) {
-        apply_func(in, out, static_cast<uint64_t>(size));
-    };
-    
-    return exact_diagonalization_core(apply_wrapper, dim, method, params);
-}
+// `diagonalize_matrix_free` was retired in the minimalist-architecture rev
+// (May 2026); call `exact_diagonalization_core(apply_wrapper, dim, method, params)`
+// directly — the wrapper added no useful logic beyond a method-validity check
+// that lives in `exact_diagonalization_core` itself now.
 
 } // namespace ed_internal
 
@@ -1973,19 +1342,8 @@ inline EDResults exact_diagonalization_fixed_sz(
               << " (reduction: " << std::fixed << std::setprecision(1) 
               << (double)full_dim / fixed_sz_dim << "x)" << std::defaultfloat << std::endl;
     
-    // Check if GPU method requested
-    bool is_gpu_method = (method == DiagonalizationMethod::DAVIDSON_GPU ||
-                          method == DiagonalizationMethod::LOBPCG_GPU ||
-                          method == DiagonalizationMethod::KRYLOV_SCHUR_GPU ||
-                          method == DiagonalizationMethod::BLOCK_KRYLOV_SCHUR_GPU ||
-                          method == DiagonalizationMethod::LANCZOS_GPU ||
-                          method == DiagonalizationMethod::LANCZOS_GPU_FIXED_SZ ||
-                          method == DiagonalizationMethod::BLOCK_LANCZOS_GPU ||
-                          method == DiagonalizationMethod::BLOCK_LANCZOS_GPU_FIXED_SZ ||
-                          method == DiagonalizationMethod::mTPQ_GPU ||
-                          method == DiagonalizationMethod::cTPQ_GPU ||
-                          method == DiagonalizationMethod::FTLM_GPU_FIXED_SZ ||
-                          method == DiagonalizationMethod::FULL_GPU);
+    // GPU dispatch is gated solely on EDParameters::use_gpu now.
+    const bool is_gpu_method = params.use_gpu;
     
     EDResults results;
     
@@ -2076,26 +1434,7 @@ inline EDResults exact_diagonalization_fixed_sz(
         // Run appropriate GPU method
         std::vector<double> eigenvalues;
         
-        if (method == DiagonalizationMethod::DAVIDSON_GPU) {
-            GPUEDWrapper::runGPUDavidsonFixedSz(
-                gpu_op_handle, n_up,
-                params.num_eigenvalues,
-                params.max_iterations,
-                params.max_subspace,
-                params.tolerance,
-                eigenvalues,
-                params.output_dir,
-                params.compute_eigenvectors);
-        } else if (method == DiagonalizationMethod::LOBPCG_GPU) {
-            GPUEDWrapper::runGPULOBPCGFixedSz(
-                gpu_op_handle, n_up,
-                params.num_eigenvalues,
-                params.max_iterations,
-                params.tolerance,
-                eigenvalues,
-                params.output_dir,
-                params.compute_eigenvectors);
-        } else if (method == DiagonalizationMethod::LANCZOS_GPU || method == DiagonalizationMethod::LANCZOS_GPU_FIXED_SZ) {
+        if (method == DiagonalizationMethod::LANCZOS) {
             GPUEDWrapper::runGPULanczosFixedSz(
                 gpu_op_handle, n_up,
                 params.max_iterations,
@@ -2103,8 +1442,9 @@ inline EDResults exact_diagonalization_fixed_sz(
                 params.tolerance,
                 eigenvalues,
                 params.output_dir,
-                params.compute_eigenvectors);
-        } else if (method == DiagonalizationMethod::mTPQ_GPU) {
+                params.compute_eigenvectors,
+                params.lanczos_seed);
+        } else if (method == DiagonalizationMethod::mTPQ) {
             GPUEDWrapper::runGPUMicrocanonicalTPQFixedSz(
                 gpu_op_handle, n_up,
                 params.max_iterations,
@@ -2121,7 +1461,7 @@ inline EDResults exact_diagonalization_fixed_sz(
                 params.tpq_num_measure_points,
                 params.tpq_measure_beta_min,
                 params.tpq_measure_beta_max);
-        } else if (method == DiagonalizationMethod::cTPQ_GPU) {
+        } else if (method == DiagonalizationMethod::cTPQ) {
             GPUEDWrapper::runGPUCanonicalTPQFixedSz(
                 gpu_op_handle, n_up,
                 params.temp_max,  // beta_max
@@ -2134,8 +1474,7 @@ inline EDResults exact_diagonalization_fixed_sz(
                 params.tpq_num_measure_points,
                 params.tpq_measure_beta_min,
                 params.tpq_measure_beta_max);
-        } else if (method == DiagonalizationMethod::BLOCK_LANCZOS_GPU || 
-                   method == DiagonalizationMethod::BLOCK_LANCZOS_GPU_FIXED_SZ) {
+        } else if (method == DiagonalizationMethod::BLOCK_LANCZOS) {
             GPUEDWrapper::runGPUBlockLanczosFixedSz(
                 gpu_op_handle, n_up,
                 params.max_iterations,
@@ -2145,7 +1484,7 @@ inline EDResults exact_diagonalization_fixed_sz(
                 eigenvalues,
                 params.output_dir,
                 params.compute_eigenvectors);
-        } else if (method == DiagonalizationMethod::KRYLOV_SCHUR_GPU) {
+        } else if (method == DiagonalizationMethod::KRYLOV_SCHUR) {
             GPUEDWrapper::runGPUKrylovSchurFixedSz(
                 gpu_op_handle, n_up,
                 params.num_eigenvalues,
@@ -2154,17 +1493,7 @@ inline EDResults exact_diagonalization_fixed_sz(
                 eigenvalues,
                 params.output_dir,
                 params.compute_eigenvectors);
-        } else if (method == DiagonalizationMethod::BLOCK_KRYLOV_SCHUR_GPU) {
-            GPUEDWrapper::runGPUBlockKrylovSchurFixedSz(
-                gpu_op_handle, n_up,
-                params.num_eigenvalues,
-                params.max_iterations,
-                params.block_size,
-                params.tolerance,
-                eigenvalues,
-                params.output_dir,
-                params.compute_eigenvectors);
-        } else if (method == DiagonalizationMethod::FULL_GPU) {
+        } else if (method == DiagonalizationMethod::FULL) {
             GPUEDWrapper::runGPUFullDiag(
                 gpu_op_handle,
                 fixed_sz_dim,
@@ -2172,13 +1501,16 @@ inline EDResults exact_diagonalization_fixed_sz(
                 eigenvalues,
                 params.output_dir,
                 params.compute_eigenvectors);
+        } else {
+            throw std::runtime_error(
+                "exact_diagonalization_fixed_sz: GPU dispatch only "
+                "supports LANCZOS / BLOCK_LANCZOS / KRYLOV_SCHUR / "
+                "FULL / mTPQ / cTPQ at this revision.");
         }
-        
+
         results.eigenvalues = eigenvalues;
-        
-        // Note: GPU TPQ states are now automatically transformed during save (via saveTPQState)
-        // No post-processing transformation needed
-        if (method == DiagonalizationMethod::mTPQ_GPU || method == DiagonalizationMethod::cTPQ_GPU) {
+
+        if (method == DiagonalizationMethod::mTPQ || method == DiagonalizationMethod::cTPQ) {
             std::cout << "\nGPU TPQ states were automatically transformed to full Hilbert space during save." << std::endl;
             
             // MPI-safe HDF5 merge: merge per-rank files on rank 0
@@ -2229,8 +1561,7 @@ inline EDResults exact_diagonalization_fixed_sz(
     }
 
     // Check if this is a TPQ method
-    bool is_tpq_method = (method == DiagonalizationMethod::mTPQ || 
-                          method == DiagonalizationMethod::mTPQ_CUDA || 
+    bool is_tpq_method = (method == DiagonalizationMethod::mTPQ ||
                           method == DiagonalizationMethod::cTPQ);
 
     // Transform eigenvectors from fixed-Sz basis to full basis
@@ -2335,13 +1666,10 @@ inline EDResults exact_diagonalization_from_files(
             "explicitly. See docs/history/PHASE_7_SYMMETRY_AXIS.md.");
     }
 
-    // Check if method supports fixed-Sz when requested
-    if (use_fixed_sz && !ed_internal::supports_fixed_sz(method)) {
-        std::cerr << "Warning: Method does not support fixed-Sz mode. "
-                  << "Proceeding with full Hilbert space.\n";
-        use_fixed_sz = false;
-    }
-    
+    // (Method/fixed-Sz compatibility check retired May 2026 -- every
+    // remaining method supports fixed-Sz; see the note next to the
+    // former `supports_fixed_sz` helper.)
+
     // Route to fixed-Sz function if use_fixed_sz is true
     // This ensures all fixed-Sz GPU logic is handled in one place
     if (use_fixed_sz) {
@@ -2363,9 +1691,7 @@ inline EDResults exact_diagonalization_from_files(
     // dense block from 2^N to C(N,N/2) (e.g. 29x less memory at N=17).
     // The flag --full-sz-split can force it on (caller takes responsibility)
     // or it is auto-detected by scanning InterAll.dat / Trans.dat.
-    if (method == DiagonalizationMethod::FULL || 
-        method == DiagonalizationMethod::SCALAPACK ||
-        method == DiagonalizationMethod::SCALAPACK_MIXED) {
+    if (method == DiagonalizationMethod::FULL) {
         
         bool use_sz_split = params.full_sz_split;  // Explicitly requested?
         
@@ -2390,12 +1716,12 @@ inline EDResults exact_diagonalization_from_files(
         }
     }
     
-    // ========== GPU FULL_GPU Sz-Sector Split ==========
+    // ========== GPU FULL Sz-Sector Split ==========
     // Same auto-detection for GPU full diag: split into Sz sectors on GPU
 #ifdef WITH_CUDA
-    if (method == DiagonalizationMethod::FULL_GPU) {
+    if (params.use_gpu && method == DiagonalizationMethod::FULL) {
         bool use_sz_split = params.full_sz_split;
-        
+
         if (!use_sz_split) {
             bool sz_conserved = hamiltonian_conserves_sz(interaction_file, single_site_file);
             if (sz_conserved) {
@@ -2403,7 +1729,7 @@ inline EDResults exact_diagonalization_from_files(
                 use_sz_split = true;
             }
         }
-        
+
         if (use_sz_split) {
             std::cout << "Using GPU Sz-sector splitting for full diagonalization" << std::endl;
             return exact_diagonalization_all_sz_sectors_gpu(
@@ -2416,10 +1742,10 @@ inline EDResults exact_diagonalization_from_files(
         }
     }
 #endif
-    
+
     // Handle GPU methods separately (they don't need CPU Operator)
 #ifdef WITH_CUDA
-    if (ed_internal::is_gpu_method(method)) {
+    if (params.use_gpu) {
         
         std::cout << "Running GPU-accelerated algorithm (full Hilbert space)..." << std::endl;
         
@@ -2434,23 +1760,20 @@ inline EDResults exact_diagonalization_from_files(
         EDResults results;
         uint64_t hilbert_space_dim = static_cast<int>(1ULL << params.num_sites);
         
-        if (method == DiagonalizationMethod::LANCZOS_GPU) {
-            // Check if files exist
+        if (method == DiagonalizationMethod::LANCZOS) {
             if (!std::filesystem::exists(interaction_file)) {
                 std::cerr << "Error: " << interaction_file << " not found!" << std::endl;
                 throw std::runtime_error("InterAll.dat file not found");
             }
-            
-            // Create GPU operator from files (full Hilbert space)
+
             void* gpu_op = GPUEDWrapper::createGPUOperatorFromFiles(
                 params.num_sites, interaction_file, single_site_file);
-            
+
             if (!gpu_op) {
                 std::cerr << "Error: Failed to create GPU operator" << std::endl;
                 throw std::runtime_error("GPU operator creation failed");
             }
-            
-            // Run GPU Lanczos
+
             std::vector<double> eigenvalues;
             GPUEDWrapper::runGPULanczos(
                 gpu_op,
@@ -2460,86 +1783,15 @@ inline EDResults exact_diagonalization_from_files(
                 params.tolerance,
                 eigenvalues,
                 params.output_dir,
-                params.compute_eigenvectors
+                params.compute_eigenvectors,
+                params.lanczos_seed
             );
-            
-            // Store results
-            results.eigenvalues = eigenvalues;
-            
-            // Clean up
-            GPUEDWrapper::destroyGPUOperator(gpu_op);
-            
-            std::cout << "GPU Lanczos completed successfully!" << std::endl;
-            
-        } else if (method == DiagonalizationMethod::LANCZOS_GPU_FIXED_SZ) {
-            // Deprecated variant — normalize_method_and_fixed_sz() upstream
-            // should have collapsed this to LANCZOS_GPU + use_fixed_sz=true
-            // and routed it through exact_diagonalization_fixed_sz. If we
-            // ever hit here it means the dispatcher contract was broken.
-            // (D-6: removed a follow-up unreachable throw.)
-            throw std::runtime_error(
-                "Internal error: LANCZOS_GPU_FIXED_SZ reached the file-based "
-                "dispatcher without being normalized; this is a bug in the "
-                "method-dispatch path.");
 
-        } else if (method == DiagonalizationMethod::DAVIDSON_GPU) {
-            std::cout << "Running GPU Davidson method..." << std::endl;
-            
-            void* gpu_op = GPUEDWrapper::createGPUOperatorFromFiles(
-                params.num_sites, interaction_file, single_site_file);
-            
-            if (!gpu_op) {
-                std::cerr << "Error: Failed to create GPU operator" << std::endl;
-                throw std::runtime_error("GPU operator creation failed");
-            }
-            
-            std::vector<double> eigenvalues;
-            GPUEDWrapper::runGPUDavidson(
-                gpu_op,
-                hilbert_space_dim,
-                params.num_eigenvalues,
-                params.max_iterations,
-                params.max_subspace,
-                params.tolerance,
-                eigenvalues,
-                params.output_dir,
-                params.compute_eigenvectors
-            );
-            
             results.eigenvalues = eigenvalues;
             GPUEDWrapper::destroyGPUOperator(gpu_op);
-            
-            std::cout << "GPU Davidson completed successfully!" << std::endl;
-            
-        } else if (method == DiagonalizationMethod::LOBPCG_GPU) {
-            std::cout << "Running GPU LOBPCG method..." << std::endl;
-            
-            void* gpu_op = GPUEDWrapper::createGPUOperatorFromFiles(
-                params.num_sites, interaction_file, single_site_file);
-            
-            if (!gpu_op) {
-                std::cerr << "Error: Failed to create GPU operator" << std::endl;
-                throw std::runtime_error("GPU operator creation failed");
-            }
-            
-            std::vector<double> eigenvalues;
-            GPUEDWrapper::runGPULOBPCG(
-                gpu_op,
-                hilbert_space_dim,
-                params.num_eigenvalues,
-                params.max_iterations,
-                params.tolerance,
-                eigenvalues,
-                params.output_dir,
-                params.compute_eigenvectors
-            );
-            
-            results.eigenvalues = eigenvalues;
-            GPUEDWrapper::destroyGPUOperator(gpu_op);
-            
-            std::cout << "GPU LOBPCG completed successfully!" << std::endl;
-            
-        } else if (method == DiagonalizationMethod::mTPQ_GPU) {
+            std::cout << "GPU Lanczos completed successfully!" << std::endl;
+
+        } else if (method == DiagonalizationMethod::mTPQ) {
             std::cout << "Running GPU microcanonical TPQ..." << std::endl;
             
             void* gpu_op = GPUEDWrapper::createGPUOperatorFromFiles(
@@ -2595,7 +1847,7 @@ inline EDResults exact_diagonalization_from_files(
             
             std::cout << "GPU mTPQ completed successfully!" << std::endl;
             
-        } else if (method == DiagonalizationMethod::cTPQ_GPU) {
+        } else if (method == DiagonalizationMethod::cTPQ) {
             std::cout << "Running GPU canonical TPQ..." << std::endl;
             
             void* gpu_op = GPUEDWrapper::createGPUOperatorFromFiles(
@@ -2649,7 +1901,7 @@ inline EDResults exact_diagonalization_from_files(
             
             std::cout << "GPU cTPQ completed successfully!" << std::endl;
             
-        } else if (method == DiagonalizationMethod::FTLM_GPU) {
+        } else if (method == DiagonalizationMethod::FTLM) {
             std::cout << "Running GPU Finite Temperature Lanczos Method..." << std::endl;
             
             void* gpu_op = GPUEDWrapper::createGPUOperatorFromFiles(
@@ -2682,11 +1934,7 @@ inline EDResults exact_diagonalization_from_files(
             
             std::cout << "GPU FTLM completed successfully!" << std::endl;
             
-        } else if (method == DiagonalizationMethod::FTLM_GPU_FIXED_SZ) {
-            std::cerr << "Error: FTLM_GPU_FIXED_SZ file interface not yet implemented." << std::endl;
-            std::cerr << "Please use the fixed_sz wrapper function directly." << std::endl;
-            throw std::runtime_error("Fixed Sz GPU FTLM not yet integrated with file interface");
-        } else if (method == DiagonalizationMethod::BLOCK_LANCZOS_GPU) {
+        } else if (method == DiagonalizationMethod::BLOCK_LANCZOS) {
             std::cout << "Running GPU Block Lanczos method..." << std::endl;
             
             void* gpu_op = GPUEDWrapper::createGPUOperatorFromFiles(
@@ -2715,11 +1963,7 @@ inline EDResults exact_diagonalization_from_files(
             
             std::cout << "GPU Block Lanczos completed successfully!" << std::endl;
             
-        } else if (method == DiagonalizationMethod::BLOCK_LANCZOS_GPU_FIXED_SZ) {
-            std::cerr << "Error: BLOCK_LANCZOS_GPU_FIXED_SZ file interface not yet implemented." << std::endl;
-            std::cerr << "Please use the fixed_sz wrapper function directly." << std::endl;
-            throw std::runtime_error("Fixed Sz GPU Block Lanczos not yet integrated with file interface");
-        } else if (method == DiagonalizationMethod::KRYLOV_SCHUR_GPU) {
+        } else if (method == DiagonalizationMethod::KRYLOV_SCHUR) {
             std::cout << "Running GPU Krylov-Schur method..." << std::endl;
             
             void* gpu_op = GPUEDWrapper::createGPUOperatorFromFiles(
@@ -2746,35 +1990,7 @@ inline EDResults exact_diagonalization_from_files(
             GPUEDWrapper::destroyGPUOperator(gpu_op);
             
             std::cout << "GPU Krylov-Schur completed successfully!" << std::endl;
-        } else if (method == DiagonalizationMethod::BLOCK_KRYLOV_SCHUR_GPU) {
-            std::cout << "Running GPU Block Krylov-Schur method..." << std::endl;
-            
-            void* gpu_op = GPUEDWrapper::createGPUOperatorFromFiles(
-                params.num_sites, interaction_file, single_site_file);
-            
-            if (!gpu_op) {
-                std::cerr << "Error: Failed to create GPU operator" << std::endl;
-                throw std::runtime_error("GPU operator creation failed");
-            }
-            
-            std::vector<double> eigenvalues;
-            GPUEDWrapper::runGPUBlockKrylovSchur(
-                gpu_op,
-                hilbert_space_dim,
-                params.num_eigenvalues,
-                params.max_iterations,
-                params.block_size,
-                params.tolerance,
-                eigenvalues,
-                params.output_dir,
-                params.compute_eigenvectors
-            );
-            
-            results.eigenvalues = eigenvalues;
-            GPUEDWrapper::destroyGPUOperator(gpu_op);
-            
-            std::cout << "GPU Block Krylov-Schur completed successfully!" << std::endl;
-        } else if (method == DiagonalizationMethod::FULL_GPU) {
+        } else if (method == DiagonalizationMethod::FULL) {
             std::cout << "Running GPU full diagonalization (cuSOLVER zheevd)..." << std::endl;
             
             void* gpu_op = GPUEDWrapper::createGPUOperatorFromFiles(
@@ -2799,8 +2015,13 @@ inline EDResults exact_diagonalization_from_files(
             GPUEDWrapper::destroyGPUOperator(gpu_op);
             
             std::cout << "GPU full diagonalization completed successfully!" << std::endl;
+        } else {
+            throw std::runtime_error(
+                "exact_diagonalization_from_files: GPU dispatch only "
+                "supports LANCZOS / BLOCK_LANCZOS / KRYLOV_SCHUR / "
+                "FULL / mTPQ / cTPQ / FTLM at this revision.");
         }
-        
+
         return results;
     }
 #endif
@@ -2871,6 +2092,3 @@ inline EDResults exact_diagonalization_from_directory(
     );
 }
 
-
-// End of Phase 7 deprecated-declarations diagnostic scope (push at top of file).
-#pragma GCC diagnostic pop

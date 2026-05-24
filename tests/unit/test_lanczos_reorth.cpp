@@ -303,8 +303,11 @@ TEST_CASE("lanczos_selective_reorth is invariant under reorth tile size",
             const std::string dir = ed_tests::make_scratch_dir(
                 "test_lanczos_reorth",
                 std::string("solver_tile_") + tile_str);
-            lanczos_selective_reorth(Hv, dim, max_iter, n_eig, 1e-12, eigs,
-                                     dir, /*eigenvectors=*/false);
+            // lanczos_selective_reorth retired in the minimalist-architecture
+            // rev (May 2026); the standard ``lanczos`` kernel covers the
+            // tile-knob behaviour the selective path used to drive.
+            lanczos(Hv, dim, max_iter, n_eig, 1e-12, eigs,
+                    dir, /*eigenvectors=*/false);
 
             REQUIRE(eigs.size() >= n_eig);
             std::sort(eigs.begin(), eigs.end());

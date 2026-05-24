@@ -15,6 +15,8 @@
 #include <ed/distributed/distributed_symmetry_operator.h>
 #include <ed/distributed/distributed_symmetry_operator_gpu.h>
 #include <ed/distributed/multi_gpu.h>
+#include <ed/krylov/lanczos_kernel.h>
+#include <ed/matvec/backends/mpi_cuda_backend.cuh>
 
 #include <ed/parallel/thread_budget.h>
 
@@ -474,18 +476,12 @@ DistributedLanczosResult ks_gpu_impl(
 
     DeviceBuffer basis_buf(static_cast<std::size_t>(m_max) * vec_bytes);
     DeviceBuffer locked_buf(static_cast<std::size_t>(k_target) * vec_bytes);
-    DeviceBuffer v_curr_buf(vec_bytes);
-    DeviceBuffer v_prev_buf(vec_bytes);
     DeviceBuffer v_seed_buf(vec_bytes);
-    DeviceBuffer w_buf(vec_bytes);
     DeviceBuffer phi_buf(vec_bytes);
     DeviceBuffer scratch_buf(sizeof(cuDoubleComplex));
     auto* d_basis  = static_cast<cuDoubleComplex*>(basis_buf.ptr);
     auto* d_locked = static_cast<cuDoubleComplex*>(locked_buf.ptr);
-    auto* d_v_curr = static_cast<cuDoubleComplex*>(v_curr_buf.ptr);
-    auto* d_v_prev = static_cast<cuDoubleComplex*>(v_prev_buf.ptr);
     auto* d_v_seed = static_cast<cuDoubleComplex*>(v_seed_buf.ptr);
-    auto* d_w      = static_cast<cuDoubleComplex*>(w_buf.ptr);
     auto* d_phi    = static_cast<cuDoubleComplex*>(phi_buf.ptr);
     auto* d_scratch_complex =
         static_cast<cuDoubleComplex*>(scratch_buf.ptr);
@@ -494,6 +490,25 @@ DistributedLanczosResult ks_gpu_impl(
     cublasHandle_t handle = handle_guard.h;
     check_cublas(cublasSetPointerMode(handle, CUBLAS_POINTER_MODE_HOST),
                  "cublasSetPointerMode(HOST)");
+
+    // Phase 3.3 of the gap-fill rollout (May 2026 day 11+): the inner
+    // per-cycle Lanczos build is now driven by
+    // `lanczos_kernel<MpiCudaBackend>` with the locked Ritz set passed
+    // as `aux_ortho_ptrs`. The kernel handles the three-term recurrence
+    // + batched CGS2 reorthogonalisation (basis + locked set) via the
+    // backend's `dot_many` / `axpy_many` primitives. The outer
+    // restart loop (eigensolve + locking + seed selection) stays as-is,
+    // along with the `reorth_against_set_gpu` / `reconstruct_local_gpu`
+    // / `dist_norm_gpu` cuBLAS helpers that operate on the contiguous
+    // `d_basis` / `d_locked` slabs.
+    //
+    // Live-state shape after the migration: per cycle, the kernel
+    // returns its basis as a `vector<UniqueVec>`; we copy each into
+    // the pre-existing `d_basis` slab (M * local_n D2D memcpy per
+    // cycle) so the post-cycle host-side eigensolve + GPU
+    // reconstruction code paths work unchanged. Future work
+    // (Backend "contiguous basis view") would let us skip the copy.
+    ed::matvec::MpiCudaBackend backend(gpu_comm);
 
     {
         std::vector<Complex> v_seed_host;
@@ -551,89 +566,57 @@ DistributedLanczosResult ks_gpu_impl(
                          "cublasZdscal(seed normalise)");
         }
 
-        if (local_n > 0) {
-            check_cu(cudaMemcpy(d_basis, d_v_seed, vec_bytes,
-                                cudaMemcpyDeviceToDevice),
-                     "D2D V[0] <- v_seed");
-            check_cu(cudaMemcpy(d_v_curr, d_v_seed, vec_bytes,
-                                cudaMemcpyDeviceToDevice),
-                     "D2D v_curr <- v_seed");
-            check_cu(cudaMemset(d_v_prev, 0, vec_bytes),
-                     "cudaMemset(d_v_prev)");
+        // ----- Phase 3.3 inner Lanczos: lanczos_kernel<MpiCudaBackend>
+        // with the locked Ritz set as aux_ortho_ptrs. Replaces the
+        // hand-rolled three-term recurrence + reorth + manage-d_basis
+        // loop (~70 LOC) with a 30-line facade.
+        std::vector<const Complex*> locked_ptrs(n_locked);
+        for (std::size_t i = 0; i < n_locked; ++i) {
+            locked_ptrs[i] = reinterpret_cast<const Complex*>(
+                d_locked + i * local_n);
         }
 
-        std::vector<double> alpha; alpha.reserve(static_cast<std::size_t>(m_max));
-        std::vector<double> beta;  beta.reserve(static_cast<std::size_t>(m_max + 1));
-        beta.push_back(0.0);
+        auto matvec = [&](const Complex* in, Complex* out, std::size_t /*n*/) {
+            gop.apply(gpu_comm, in, out, /*stream=*/nullptr);
+        };
 
-        cuDoubleComplex* p_curr = d_v_curr;
-        cuDoubleComplex* p_prev = d_v_prev;
+        ed::krylov::LanczosKernelOptions kopts;
+        kopts.max_iter      = static_cast<std::size_t>(m_max);
+        kopts.reorth        = ed::krylov::ReorthPolicy::FullCGS2;
+        kopts.keep_basis    = true;
+        kopts.dim_cap       = static_cast<std::size_t>(global_dim);
+        kopts.aux_ortho_ptrs = locked_ptrs;
+        kopts.breakdown_tol = 1e-13;
 
-        std::uint64_t iters_done_cycle = 0;
-        for (std::uint64_t j = 0; j < m_max; ++j) {
-            gop.apply(gpu_comm,
-                      reinterpret_cast<const Complex*>(p_curr),
-                      reinterpret_cast<Complex*>(d_w),
-                      /*stream=*/nullptr);
-            ++total_iters;
+        if (options.verbose && rank == 0) {
+            std::cout << "  [dist-ks-gpu] cycle=" << restart
+                      << " kernel max_iter=" << m_max
+                      << " locked=" << n_locked << std::endl;
+        }
 
-            const cuDoubleComplex a_c = dist_zdotc_gpu(
-                handle, p_curr, d_w, local_n, gpu_comm, d_scratch_complex);
-            const double alpha_j = a_c.x;
-            alpha.push_back(alpha_j);
+        auto kres = ed::krylov::lanczos_kernel(
+            backend, matvec, static_cast<std::size_t>(local_n),
+            reinterpret_cast<const Complex*>(d_v_seed),
+            kopts);
 
-            if (local_n > 0) {
-                cuDoubleComplex neg_a = make_cuDoubleComplex(-alpha_j, 0.0);
-                check_cublas(cublasZaxpy(handle, static_cast<int>(local_n),
-                                          &neg_a, p_curr, 1, d_w, 1),
-                             "cublasZaxpy(w -= alpha v_curr)");
-                if (j > 0) {
-                    cuDoubleComplex neg_b = make_cuDoubleComplex(-beta.back(), 0.0);
-                    check_cublas(cublasZaxpy(handle, static_cast<int>(local_n),
-                                              &neg_b, p_prev, 1, d_w, 1),
-                                 "cublasZaxpy(w -= beta v_prev)");
-                }
-            }
+        std::vector<double> alpha = std::move(kres.alpha);
+        std::vector<double> beta  = std::move(kres.beta);
+        const std::uint64_t iters_done_cycle =
+            static_cast<std::uint64_t>(kres.iters_done);
+        total_iters += static_cast<int>(iters_done_cycle);
 
-            if (n_locked > 0) {
-                reorth_against_set_gpu(handle, d_locked, n_locked,
-                                        d_w, local_n, gpu_comm,
-                                        coeffs_host);
-            }
-            reorth_against_set_gpu(handle, d_basis, j + 1,
-                                    d_w, local_n, gpu_comm,
-                                    coeffs_host);
-
-            const double b = dist_norm_gpu(handle, d_w, local_n, gpu_comm,
-                                            d_scratch_complex);
-            beta.push_back(b);
-            ++iters_done_cycle;
-
-            if (options.verbose && rank == 0) {
-                std::cout << "  [dist-ks-gpu] cycle=" << restart
-                          << " j=" << j
-                          << " alpha=" << alpha_j
-                          << " beta_{j+1}=" << b
-                          << " locked=" << n_locked
-                          << std::endl;
-            }
-
-            if (b < 1e-13) break;
-
-            if (j + 1 < m_max && local_n > 0) {
-                const double inv = 1.0 / b;
-                check_cublas(cublasZdscal(handle, static_cast<int>(local_n),
-                                           &inv, d_w, 1),
-                             "cublasZdscal(w /= beta)");
-                check_cu(cudaMemcpy(d_basis + (j + 1) * local_n, d_w, vec_bytes,
-                                    cudaMemcpyDeviceToDevice),
-                         "D2D V[j+1] <- w");
-                std::swap(p_prev, p_curr);
-                check_cu(cudaMemcpy(p_curr,
-                                    d_basis + (j + 1) * local_n,
+        // Mirror the kernel's basis into the pre-existing d_basis slab
+        // so the post-cycle GPU helpers (`reconstruct_local_gpu`,
+        // `reorth_against_set_gpu`) stay agnostic to the migration.
+        // ~ M * local_n complex doubles of D2D per cycle; negligible
+        // next to the cycle's matvec cost.
+        if (local_n > 0) {
+            for (std::size_t k = 0; k < kres.basis.size(); ++k) {
+                check_cu(cudaMemcpy(d_basis + k * local_n,
+                                    kres.basis[k].get(),
                                     vec_bytes,
                                     cudaMemcpyDeviceToDevice),
-                         "D2D v_curr <- V[j+1]");
+                         "D2D V[k] <- kres.basis[k]");
             }
         }
 

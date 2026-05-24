@@ -1,7 +1,9 @@
 #pragma once
 
 #include <ed/core/construct_ham.h>
+#include <ed/core/linear_operator.h>
 #include <ed/core/sorted_uint64_index.h>   // Phase 3a #5: compact uint64->size_t map
+#include <H5Cpp.h>
 #include <unordered_set>
 #include <algorithm>
 #include <array>
@@ -521,7 +523,7 @@ public:
     // The view does not own the underlying operator -- the caller must
     // keep the StreamingSymmetryOperator alive for the view's lifetime.
     // -----------------------------------------------------------------
-    class SectorView final : public ed::matvec::MatVecOperator {
+    class SectorView final : public ed::LinearOperator {
     public:
         SectorView(const StreamingSymmetryOperator& op, std::size_t sector_idx)
             : op_(&op), sector_idx_(sector_idx)
@@ -692,15 +694,10 @@ public:
                + "_fullspace.h5";
     }
 
-    /**
-     * @brief Check whether an orbit cache file already exists.
-     */
-    static bool orbitCacheExists(const std::string& cache_dir,
-                                  uint64_t n_sites) {
-        std::string path = getOrbitCachePath(cache_dir, n_sites);
-        std::ifstream f(path);
-        return f.good();
-    }
+    // orbitCacheExists was retired in the minimalist-architecture rev
+    // (May 2026): the existence check inside saveOrbitBasisHDF5 /
+    // loadOrbitBasisHDF5 (and the HDF5 driver itself) raises if the
+    // file is missing, so the standalone probe had no callers.
 
     /**
      * @brief Save full orbit basis to HDF5 for later reuse (full-space variant).
@@ -1136,79 +1133,14 @@ public:
     // ===================== End eigenvector expansion =========================
     
 private:
-    /**
-     * @brief Fast orbit representative computation with caching
-     */
-    uint64_t getOrbitRepresentativeFast(uint64_t basis) const {
-        // Check cache first (sharded, thread-safe)
-        uint64_t cached;
-        if (state_to_orbit_cache_.find(basis, cached)) {
-            return cached;
-        }
+    // getOrbitRepresentativeFast / computeOrbitElements /
+    // computeSymmetrizedNorm were retired in the minimalist-architecture
+    // rev (May 2026): no callers. The streaming-symmetry path uses the
+    // standard `getOrbitRepresentative` (cache-free; populated during
+    // sector generation) and computes norms inline in
+    // `generateSymmetrySectorsStreaming`, so the standalone helpers had
+    // become vestigial.
 
-        // Compute orbit representative
-        uint64_t rep = basis;
-        for (const auto& perm : symmetry_info.max_clique) {
-            uint64_t permuted = applyPermutation(basis, perm);
-            if (permuted < rep) rep = permuted;
-        }
-
-        // Cache result (sharded, thread-safe)
-        state_to_orbit_cache_.insert(basis, rep);
-        return rep;
-    }
-    
-    /**
-     * @brief Compute all elements in the orbit of a given state
-     */
-    std::vector<uint64_t> computeOrbitElements(uint64_t basis) const {
-        std::unordered_set<uint64_t> orbit_set;
-        for (const auto& perm : symmetry_info.max_clique) {
-            orbit_set.insert(applyPermutation(basis, perm));
-        }
-        return std::vector<uint64_t>(orbit_set.begin(), orbit_set.end());
-    }
-    
-    /**
-     * @brief Compute squared norm of symmetrized state
-     * 
-     * ||P_q|basis⟩||² where P_q is the projection operator
-     */
-    double computeSymmetrizedNorm(uint64_t basis, 
-                                  const std::vector<int>& quantum_numbers,
-                                  const std::vector<Complex>& phase_factors) const {
-        double norm_sq = 0.0;
-        
-        // Apply symmetry projection and compute norm
-        std::unordered_map<uint64_t, Complex> orbit_coefficients;
-        
-        for (size_t g = 0; g < symmetry_info.max_clique.size(); ++g) {
-            const auto& perm = symmetry_info.max_clique[g];
-            const auto& powers = symmetry_info.power_representation[g];
-            
-            // Compute character: χ_q(g)
-            Complex character(1.0, 0.0);
-            for (size_t k = 0; k < powers.size(); ++k) {
-                Complex phase = phase_factors[k];
-                for (int p = 0; p < powers[k]; ++p) {
-                    character *= phase;
-                }
-            }
-            
-            uint64_t permuted_basis = applyPermutation(basis, perm);
-            orbit_coefficients[permuted_basis] += std::conj(character);  // Use conjugate for projection
-        }
-        
-        // Compute norm
-        for (const auto& [state, coeff] : orbit_coefficients) {
-            norm_sq += std::norm(coeff);
-        }
-        
-        // Normalization factor: 1/|G|
-        norm_sq /= symmetry_info.max_clique.size();
-        
-        return norm_sq;
-    }
     
     /**
      * @brief Compute orbit elements and coefficients for a basis state in a sector
@@ -1411,212 +1343,13 @@ private:
             }
         }
     }
-    
-    /**
-     * @brief Expand a symmetrized state to full Hilbert space
-     */
-    void expandSymmetrizedState(const SymBasisState& state,
-                                const std::vector<Complex>& phase_factors,
-                                Complex* full_vec) const {
-        const size_t full_dim = 1ULL << n_bits_;
-        std::fill(full_vec, full_vec + full_dim, Complex(0.0, 0.0));
-        
-        uint64_t basis = state.orbit_rep;
-        
-        // Apply symmetry projection: |ψ_q⟩ = (1/√|G|) Σ_g χ_q(g)* g|basis⟩
-        for (size_t g = 0; g < symmetry_info.max_clique.size(); ++g) {
-            const auto& perm = symmetry_info.max_clique[g];
-            const auto& powers = symmetry_info.power_representation[g];
-            
-            // Compute character
-            Complex character(1.0, 0.0);
-            for (size_t k = 0; k < powers.size(); ++k) {
-                Complex phase = phase_factors[k];
-                for (int p = 0; p < powers[k]; ++p) {
-                    character *= phase;
-                }
-            }
-            
-            uint64_t permuted_basis = applyPermutation(basis, perm);
-            full_vec[permuted_basis] += std::conj(character);
-        }
-        
-        // Normalize
-        double norm_factor = 1.0 / (std::sqrt(getGroupSize()) * state.norm);
-        for (size_t i = 0; i < full_dim; ++i) {
-            full_vec[i] *= norm_factor;
-        }
-    }
-    
-    /**
-     * @brief Project a full-space vector onto a symmetrized state
-     * 
-     * Returns ⟨ψ_sym|vec⟩ where |ψ_sym⟩ is the symmetrized state
-     */
-    Complex projectOntoSymmetrizedState(const Complex* full_vec,
-                                       const SymBasisState& state,
-                                       const std::vector<Complex>& phase_factors) const {
-        Complex result(0.0, 0.0);
-        uint64_t basis = state.orbit_rep;
-        
-        // ⟨ψ_sym| = (1/√|G|) Σ_g χ_q(g) ⟨basis|g†
-        for (size_t g = 0; g < symmetry_info.max_clique.size(); ++g) {
-            const auto& perm = symmetry_info.max_clique[g];
-            const auto& powers = symmetry_info.power_representation[g];
-            
-            // Compute character χ_q(g) for the bra
-            Complex character(1.0, 0.0);
-            for (size_t k = 0; k < powers.size(); ++k) {
-                Complex phase = phase_factors[k];
-                for (int p = 0; p < powers[k]; ++p) {
-                    character *= phase;
-                }
-            }
-            
-            uint64_t permuted_basis = applyPermutation(basis, perm);
-            result += character * full_vec[permuted_basis];
-        }
-        
-        // Normalize
-        result /= (std::sqrt(getGroupSize()) * state.norm);
-        
-        return result;
-    }
-    
-    /**
-     * @brief Apply Hamiltonian in full Hilbert space
-     * Uses optimized transform_data_ storage (same as standard ED)
-     */
-    void applyFullSpace(const Complex* in, Complex* out, size_t dim) const {
-        std::fill(out, out + dim, Complex(0.0, 0.0));
-        
-        for (size_t basis = 0; basis < dim; ++basis) {
-            if (std::abs(in[basis]) < 1e-14) continue;
-            
-            Complex coeff = in[basis];
-            
-            // Process all transforms using optimized transform_data_ representation
-            for (const auto& tdata : transform_data_) {
-                uint64_t new_basis = basis;
-                Complex scalar = tdata.coefficient;
-                bool valid = true;
 
-                if (!tdata.is_two_body) {
-                    // One-body operator: S^α_i
-                    if (tdata.op_type == 2) {
-                        // Sz: diagonal, just multiply by eigenvalue
-                        double sign = ((basis >> tdata.site_index) & 1) ? -1.0 : 1.0;
-                        scalar *= spin_l_ * sign;
-                    } else {
-                        // S+ or S-: off-diagonal, flip bit
-                        uint64_t bit = (basis >> tdata.site_index) & 1;
-                        if (bit != tdata.op_type) {
-                            new_basis ^= (1ULL << tdata.site_index);
-                        } else {
-                            valid = false;
-                        }
-                    }
-                } else {
-                    // Two-body operator: S^α_i S^β_j
-                    uint64_t bit_i = (basis >> tdata.site_index) & 1;
-                    uint64_t bit_j = (basis >> tdata.site_index_2) & 1;
-
-                    if (tdata.op_type == 2 && tdata.op_type_2 == 2) {
-                        // Sz_i Sz_j: purely diagonal
-                        double sign_i = bit_i ? -1.0 : 1.0;
-                        double sign_j = bit_j ? -1.0 : 1.0;
-                        scalar *= spin_l_ * spin_l_ * sign_i * sign_j;
-                    } else {
-                        // Mixed or off-diagonal terms
-                        if (tdata.op_type != 2) {
-                            if (bit_i != tdata.op_type) {
-                                new_basis ^= (1ULL << tdata.site_index);
-                            } else {
-                                valid = false;
-                            }
-                        } else {
-                            double sign_i = bit_i ? -1.0 : 1.0;
-                            scalar *= spin_l_ * sign_i;
-                        }
-
-                        if (valid && tdata.op_type_2 != 2) {
-                            uint64_t new_bit_j = (new_basis >> tdata.site_index_2) & 1;
-                            if (new_bit_j != tdata.op_type_2) {
-                                new_basis ^= (1ULL << tdata.site_index_2);
-                            } else {
-                                valid = false;
-                            }
-                        } else if (valid) {
-                            uint64_t new_bit_j = (new_basis >> tdata.site_index_2) & 1;
-                            double sign_j = new_bit_j ? -1.0 : 1.0;
-                            scalar *= spin_l_ * sign_j;
-                        }
-                    }
-                }
-
-                if (valid && std::abs(scalar) > 1e-15) {
-                    out[new_basis] += scalar * coeff;
-                }
-            }
-            
-            // Process three-body terms
-            for (const auto& tdata : three_body_data_) {
-                uint64_t new_basis = basis;
-                Complex scalar = tdata.coefficient;
-                bool valid = true;
-                
-                // Apply first operator
-                if (tdata.op_type_1 == 2) {
-                    uint64_t bit_1 = (new_basis >> tdata.site_index_1) & 1;
-                    double sign_1 = bit_1 ? -1.0 : 1.0;
-                    scalar *= spin_l_ * sign_1;
-                } else {
-                    uint64_t bit_1 = (new_basis >> tdata.site_index_1) & 1;
-                    if (bit_1 != tdata.op_type_1) {
-                        new_basis ^= (1ULL << tdata.site_index_1);
-                    } else {
-                        valid = false;
-                    }
-                }
-                
-                // Apply second operator
-                if (valid) {
-                    if (tdata.op_type_2 == 2) {
-                        uint64_t bit_2 = (new_basis >> tdata.site_index_2) & 1;
-                        double sign_2 = bit_2 ? -1.0 : 1.0;
-                        scalar *= spin_l_ * sign_2;
-                    } else {
-                        uint64_t bit_2 = (new_basis >> tdata.site_index_2) & 1;
-                        if (bit_2 != tdata.op_type_2) {
-                            new_basis ^= (1ULL << tdata.site_index_2);
-                        } else {
-                            valid = false;
-                        }
-                    }
-                }
-                
-                // Apply third operator
-                if (valid) {
-                    if (tdata.op_type_3 == 2) {
-                        uint64_t bit_3 = (new_basis >> tdata.site_index_3) & 1;
-                        double sign_3 = bit_3 ? -1.0 : 1.0;
-                        scalar *= spin_l_ * sign_3;
-                    } else {
-                        uint64_t bit_3 = (new_basis >> tdata.site_index_3) & 1;
-                        if (bit_3 != tdata.op_type_3) {
-                            new_basis ^= (1ULL << tdata.site_index_3);
-                        } else {
-                            valid = false;
-                        }
-                    }
-                }
-                
-                if (valid && std::abs(scalar) > 1e-15) {
-                    out[new_basis] += scalar * coeff;
-                }
-            }
-        }
-    }
+    // expandSymmetrizedState / projectOntoSymmetrizedState / applyFullSpace
+    // were retired in the minimalist-architecture rev (May 2026): no
+    // callers. The streaming-symmetry path projects the Hamiltonian
+    // action directly inside `applySymmetrized` (sector_idx) via
+    // `applyHamiltonianTermsFullSpace`, so these standalone full-space
+    // helpers had become vestigial.
 };
 
 // ============================================================================
@@ -1933,7 +1666,7 @@ public:
     // comment there); the only difference is that this view forwards to
     // applySymmetrizedFixedSz instead of applySymmetrized.
     // -----------------------------------------------------------------
-    class SectorView final : public ed::matvec::MatVecOperator {
+    class SectorView final : public ed::LinearOperator {
     public:
         SectorView(const FixedSzStreamingSymmetryOperator& op,
                    std::size_t sector_idx)
@@ -2009,15 +1742,9 @@ public:
                + "_nup" + std::to_string(n_up) + ".h5";
     }
 
-    /**
-     * @brief Check whether a valid orbit basis cache exists
-     */
-    static bool orbitCacheExists(const std::string& cache_dir,
-                                  uint64_t n_sites, int64_t n_up) {
-        std::string path = getOrbitCachePath(cache_dir, n_sites, n_up);
-        std::ifstream f(path);
-        return f.good();
-    }
+    // orbitCacheExists (fixed-Sz variant) was retired in the
+    // minimalist-architecture rev (May 2026): no callers; existence
+    // is implicit in saveOrbitBasisHDF5 / loadOrbitBasisHDF5.
 
     /**
      * @brief Save full orbit basis to HDF5 for later reuse
@@ -2660,25 +2387,11 @@ private:
         }
     }
     
-    uint64_t getOrbitRepresentativeFixedSzFast(uint64_t basis) const {
-        uint64_t cached;
-        if (state_to_orbit_cache_.find(basis, cached)) {
-            return cached;
-        }
+    // getOrbitRepresentativeFixedSzFast was retired in the
+    // minimalist-architecture rev (May 2026): no callers; sector
+    // generation populates state_to_orbit_cache_ directly via the
+    // standard FixedSz orbit-rep path.
 
-        uint64_t rep = basis;
-        for (const auto& perm : symmetry_info.max_clique) {
-            uint64_t permuted = applyPermutation(basis, perm);
-            // Permutation preserves popcount; defensive lookupState check.
-            if (lookupState(permuted) >= 0 && permuted < rep) {
-                rep = permuted;
-            }
-        }
-
-        state_to_orbit_cache_.insert(basis, rep);
-        return rep;
-    }
-    
     /**
      * @brief Compute orbit elements and coefficients for a basis state in a sector
      * 
@@ -2731,14 +2444,7 @@ private:
         norm_sq /= symmetry_info.max_clique.size();
     }
     
-    // Legacy methods kept for backward compatibility
-    double computeSymmetrizedNormFixedSz(uint64_t basis,
-                                        const std::vector<int>& quantum_numbers,
-                                        const std::vector<Complex>& phase_factors) const {
-        std::vector<uint64_t> dummy_elements;
-        std::vector<Complex> dummy_coeffs;
-        double norm_sq;
-        computeOrbitDataFixedSz(basis, phase_factors, dummy_elements, dummy_coeffs, norm_sq);
-        return norm_sq;
-    }
+    // computeSymmetrizedNormFixedSz was retired in the
+    // minimalist-architecture rev (May 2026): no callers. Norms come
+    // directly from computeOrbitDataFixedSz when sectors are generated.
 };

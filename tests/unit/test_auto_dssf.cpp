@@ -1,111 +1,106 @@
 // =============================================================================
 // test_auto_dssf  (Catch2 v3)
 //
-// Smoke-tests the modern-C++ DSSF auto-pilot façade
-// `ed::auto_pilot::dssf::pick_method(...)` and
-// `ed::auto_pilot::dssf::compute(...)`. We only exercise the method-
-// selection rule and the EDConfig-null guard here -- end-to-end DSSF
-// numerics live in test_dssf_engine, test_dssf_io, etc.
+// Smoke-tests the unified `ed::workflows::spectral(H, observables, opts)`
+// orchestrator (continued-fraction Lanczos for ground-state DSSF). The
+// FtlmDynamical lane is not yet wired and is gated by a documented
+// `runtime_error`; we lock in that contract here.
+//
+// Migrated from the legacy `ed::auto_pilot::dssf::compute(...)` API
+// during the ED Cleanup Sweep Phase 2 (May 2026). The legacy DSSF
+// auto-pilot was a router on top of `ed::dssf::run(...)` that picked
+// SINGLE_EXPECTATION / GROUND_STATE_DSSF / STATIC_THERMAL /
+// DYNAMICAL_THERMAL from the (has_temperature, has_frequency) tuple;
+// that decision is now the caller's responsibility (and the static /
+// static-thermal modes live outside `workflows::spectral`, which is
+// dedicated to S(omega)-resolved spectra).
 // =============================================================================
 
 #include "common/catch2_harness.h"
 
-#include <ed/auto/dssf.h>
-#include <ed/core/ed_config.h>
-#include <ed/input/hamiltonian_builder.h>
-#include <ed/input/lattice.h>
+#include <ed/core/operator.h>
+#include <ed/operators/spin_ops.h>
+#include <ed/orchestrator.h>
 
-#include <filesystem>
-#include <string>
+#include <cmath>
+#include <complex>
+#include <memory>
+#include <vector>
 
-using ed::auto_pilot::dssf::AutoDSSFOptions;
-using ed::auto_pilot::dssf::compute;
-using ed::auto_pilot::dssf::pick_method;
-using ed::dssf::DSSFMethod;
-using ed::dssf::DSSFRequest;
+using namespace ed_tests;
+using ed::workflows::SpectralOptions;
 
-TEST_CASE("auto_pilot::dssf::pick_method follows the (T, omega) truth table",
-          "[auto_pilot][dssf]") {
-    REQUIRE(pick_method(/*T=*/false, /*w=*/false)
-            == DSSFMethod::SINGLE_EXPECTATION);
-    REQUIRE(pick_method(/*T=*/false, /*w=*/true)
-            == DSSFMethod::GROUND_STATE_DSSF);
-    REQUIRE(pick_method(/*T=*/true,  /*w=*/false)
-            == DSSFMethod::STATIC_THERMAL);
-    REQUIRE(pick_method(/*T=*/true,  /*w=*/true)
-            == DSSFMethod::DYNAMICAL_THERMAL);
+namespace {
+
+std::unique_ptr<Operator> build_heisen(uint64_t N, bool periodic = true) {
+    return build_heisenberg_chain(N, 1.0, periodic);
 }
 
-TEST_CASE("auto_pilot::dssf::compute throws when EDConfig is required but null",
-          "[auto_pilot][dssf]") {
-    DSSFRequest req;          // .config = nullptr by default
-    req.output_dir = "/tmp/qed_dssf_autopilot_does_not_exist";
-
-    AutoDSSFOptions opts;
-    opts.has_temperature = true;
-    opts.has_frequency   = true;
-    opts.verbose         = false;
-
-    REQUIRE_THROWS_AS(compute(req, opts), std::invalid_argument);
+// Single-site Sz observable. The CF-spectral kernel needs a
+// LinearOperator that implements apply(); the simplest such observable
+// is a single Sz term at site 0.
+std::unique_ptr<Operator> build_single_site_sz(uint64_t N) {
+    auto op = std::make_unique<Operator>(N, 0.5f);
+    Operator::TransformData t{};
+    t.is_two_body  = false;
+    t.op_type      = 2;            // Sz
+    t.site_index   = 0;
+    t.coefficient  = Complex(1.0, 0.0);
+    op->transform_data_.push_back(t);
+    return op;
 }
 
-// ---------------------------------------------------------------------------
-// End-to-end smoke: build a 4-site Heisenberg chain deck on disk via
-// HamiltonianBuilder, populate an EDConfig + DSSFRequest, and round-trip
-// through `ed::auto_pilot::dssf::compute(...)`. This exercises the full
-// auto-pilot path -> ed::dssf::run -> compute_*_workflow on real data
-// and is the C++ analog of the Python `qed.dssf.compute(...)` smoke test.
-// ---------------------------------------------------------------------------
-TEST_CASE("auto_pilot::dssf::compute runs static_thermal end-to-end on a "
-          "4-site chain",
-          "[auto_pilot][dssf][e2e]") {
-    namespace fs = std::filesystem;
-    using ed::input::HamiltonianBuilder;
-    namespace lat = ed::input::lattice;
+}  // namespace
 
-    const uint64_t N = 4;
-    const std::string dir = ed_tests::make_scratch_dir("auto_dssf_e2e_static");
-    const std::string out_dir = dir + "/output";
-    fs::remove_all(out_dir);
+TEST_CASE("workflows::spectral GroundStateCF produces a finite S(omega) grid",
+          "[workflows][spectral][cf]") {
+    const uint64_t N = 6;          // small but exercises the CF kernel
+    auto H   = build_heisen(N);
+    auto Sz0 = build_single_site_sz(N);
 
-    auto chain = lat::chain(N, /*pbc=*/true);
-    HamiltonianBuilder builder(N);
-    builder.heisenberg(chain.nn_pairs(), 1.0);
-    ed::input::FileOptions fopts;
-    fopts.write_lattice_metadata = true;
-    builder.write_directory(dir, &chain, fopts);
+    SpectralOptions opts;
+    opts.method      = SpectralOptions::Method::GroundStateCF;
+    opts.krylov_dim  = 120;
+    opts.broadening  = 0.05;
+    opts.omega_min   = -4.0;
+    opts.omega_max   =  4.0;
+    opts.num_omega   = 64;
 
-    EDConfig cfg;
-    cfg.system.num_sites       = N;
-    cfg.system.spin_length     = 0.5f;
-    cfg.system.hamiltonian_dir = dir;
-    cfg.workflow.output_dir    = out_dir;
-    // Keep the static-response workload tiny so the test stays fast.
-    cfg.static_resp.num_random_states = 2;
-    cfg.static_resp.krylov_dim        = 16;
-    cfg.static_resp.temp_min          = 0.5;
-    cfg.static_resp.temp_max          = 0.5;
-    cfg.static_resp.num_temp_points   = 1;
-    cfg.static_resp.spin_combinations = "2,2";       // SzSz only
-    cfg.static_resp.momentum_points   = "0,0,0";     // Q = 0
+    std::vector<const ed::LinearOperator*> obs{ Sz0.get() };
+    auto res = ed::workflows::spectral(*H, obs, opts);
 
-    DSSFRequest req;
-    req.config     = &cfg;
-    req.output_dir = out_dir;
-    req.operators.num_sites      = N;
-    req.operators.spin_length    = 0.5f;
-    req.operators.positions_file = dir + "/positions.dat";
-    req.operators.spin_combinations = {{2, 2}};
-    req.operators.momentum_points   = {{0.0, 0.0, 0.0}};
+    REQUIRE(res.omega.size() == opts.num_omega);
+    REQUIRE(res.S_real.size() == opts.num_omega);
+    REQUIRE(res.backend.lane == "cpu");
 
-    AutoDSSFOptions opts;
-    opts.has_temperature = true;
-    opts.has_frequency   = false;
-    opts.verbose         = false;
+    // Every value must be finite; the spectral function may be zero at
+    // some grid points (e.g. inside the gap) but never NaN/inf.
+    for (double v : res.S_real) {
+        REQUIRE(std::isfinite(v));
+    }
+}
 
-    auto result = compute(req, opts);
-    REQUIRE(result.method == DSSFMethod::STATIC_THERMAL);
-    REQUIRE(result.output_dir == out_dir);
-    // The static_thermal workflow writes ed_results.h5 in output_dir.
-    REQUIRE(fs::exists(out_dir + "/ed_results.h5"));
+TEST_CASE("workflows::spectral throws when no observable is supplied",
+          "[workflows][spectral][guard]") {
+    auto H = build_heisen(4);
+    SpectralOptions opts;
+    std::vector<const ed::LinearOperator*> obs;
+    REQUIRE_THROWS_AS(ed::workflows::spectral(*H, obs, opts),
+                       std::invalid_argument);
+}
+
+TEST_CASE("workflows::spectral FtlmDynamical lane throws the documented "
+          "not-yet-wired message",
+          "[workflows][spectral][not_implemented]") {
+    auto H   = build_heisen(4);
+    auto Sz0 = build_single_site_sz(4);
+
+    SpectralOptions opts;
+    opts.method     = SpectralOptions::Method::FtlmDynamical;
+    opts.krylov_dim = 32;
+    opts.num_omega  = 16;
+
+    std::vector<const ed::LinearOperator*> obs{ Sz0.get() };
+    REQUIRE_THROWS_AS(ed::workflows::spectral(*H, obs, opts),
+                       std::runtime_error);
 }

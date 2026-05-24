@@ -40,11 +40,7 @@ struct EDParameters {
     std::string output_dir = "";
 
     // ========== Method-Specific Parameters ==========
-    double shift = 0.0;
     uint64_t block_size = 4;
-    uint64_t max_subspace = 100;
-    double target_lower = 0.0;
-    double target_upper = 0.0;
 
     // ========== Thermal Calculation Parameters ==========
     uint64_t num_samples = 1;
@@ -102,13 +98,6 @@ struct EDParameters {
     uint64_t ltlm_reorth_freq = 10;
     uint64_t ltlm_seed = 0;
     bool ltlm_store_data = false;
-    // use_hybrid_method was removed in matvec-unification Phase 7.3.
-    // It was [[deprecated]] for several releases and only emitted a
-    // warning + fell back to standard LTLM. Use `method=HYBRID` instead
-    // (DiagonalizationMethod::HYBRID) -- the canonical knob.
-    double hybrid_crossover = 1.0;
-    bool hybrid_auto_crossover = false;
-
     // ========== KPM-DOS-Specific Parameters ==========
     // Kernel Polynomial Method density-of-states + thermodynamics.
     // See include/ed/solvers/kpm_dos.h for full algorithmic specification.
@@ -122,6 +111,13 @@ struct EDParameters {
     bool kpm_full_reorth = true;
     uint64_t kpm_reorth_freq = 10;
     uint64_t kpm_seed = 0;
+
+    // ========== GPU Lanczos / Krylov-Schur Determinism ==========
+    // Starting-vector RNG seed for the GPU Lanczos / GPU Krylov-Schur
+    // family. 0 keeps the legacy deterministic seed (42); a nonzero
+    // value passes through verbatim so a GPU run can be made to
+    // reproduce a CPU run that uses the same seed (audit S1 #21).
+    uint64_t lanczos_seed = 0;
 
     // ========== Observable Calculations ==========
     mutable std::vector<Operator> observables = {};
@@ -175,12 +171,34 @@ struct EDParameters {
     //     SOLVER_type  ×  use_fixed_sz  ×  use_gpu  ×  use_mpi
     //
     // ScaLAPACK is *not* a "FULL + use_mpi" alias -- it's a distinct
-    // distributed dense kernel (different LAPACK call, different
-    // block-cyclic data layout, mixed-precision refinement). So
-    // ScaLAPACK / SCALAPACK_MIXED stay as their own DiagonalizationMethod
-    // values; they implicitly require MPI.
+    // distributed dense kernel. Retired in May 2026 (minimalist refactor).
     bool use_gpu = false;
     bool use_mpi = false;
+
+    // -----------------------------------------------------------------------
+    // GPU fallback policy (matvec-unification, May 2026).
+    //
+    // ``exact_diagonalization_core`` is an in-memory dispatcher with no GPU
+    // implementation; the GPU kernels live behind ``from_files`` /
+    // ``from_directory`` where the operator can be uploaded as a
+    // GPUOperator. When a caller sets ``use_gpu=true`` against the core
+    // dispatcher, the historical behaviour is to silently re-canonicalise
+    // to the CPU base method and emit one stderr line.
+    //
+    // ``allow_gpu_cpu_fallback`` makes this policy explicit:
+    //   * true  (default) -- keep historical silent-fallback behaviour
+    //                        (the Python facade depends on it: it routes
+    //                        device='gpu' through a temp-dir
+    //                        ``from_directory`` call, but the auto-pilot
+    //                        sets ``use_gpu`` even when WITH_CUDA=OFF).
+    //   * false           -- throw with an actionable message instead of
+    //                        falling back. Set this when the caller has
+    //                        explicitly asked for a GPU run and would
+    //                        rather fail than silently get CPU output.
+    //                        ``auto_pilot::solve`` with the explicit
+    //                        ``Device::GPU`` value (vs ``Device::AUTO``)
+    //                        sets this to false.
+    bool allow_gpu_cpu_fallback = true;
 
     // ========== Symmetry Options (Phase 7.1: 5th orthogonal axis) ==========
     //
@@ -245,44 +263,9 @@ struct EDParameters {
     std::string basis_cache_dir{};
     bool precompute_basis_only = false;
 
-    // ========== ScaLAPACK Distributed Diagonalization Options ==========
-    int scalapack_nprow = 0;
-    int scalapack_npcol = 0;
-    int scalapack_block_size = 64;
-    bool scalapack_mixed_precision = true;
-    double scalapack_refinement_tol = 1e-12;
-    int scalapack_max_refinement_iter = 5;
-    bool scalapack_verbose = true;
-
-    // Phase 8 #5: when true (the default), ``scalapack_block_size`` is
-    // ignored at solve time and replaced by ``get_optimal_block_size(N,
-    // nprow, npcol)`` -- a heuristic that balances the local-tile size
-    // against the BLACS process grid for the actual matrix dimension.
-    // The legacy default of 64 tends to be too small for the larger
-    // matrices we now run (N >> 64*sqrt(P)), and over-blocks the smaller
-    // ones; the auto path consistently beats the fixed default in the
-    // benchmarks against MKL ScaLAPACK 2024 on 4-32 MPI ranks.
-    //
-    // CLI ``--scalapack-block-size N`` overrides ``scalapack_block_size``
-    // *and* sets this flag to false, preserving backward compatibility
-    // for users who tune the block size manually.
-    bool scalapack_block_size_auto = true;
-
-    // ========== ARPACK Advanced Options ==========
-    bool arpack_advanced_verbose = false;
-    std::string arpack_which = "SR";
-    int64_t arpack_ncv = -1;
-    uint64_t arpack_max_restarts = 2;
-    double arpack_ncv_growth = 1.5;
-    bool arpack_auto_enlarge_ncv = true;
-    bool arpack_two_phase_refine = true;
-    double arpack_relaxed_tol = 1e-6;
-    bool arpack_shift_invert = false;
-    double arpack_sigma = 0.0;
-    bool arpack_auto_switch_shift_invert = true;
-    double arpack_switch_sigma = 0.0;
-    bool arpack_adaptive_inner_tol = true;
-    double arpack_inner_tol_factor = 1e-2;
-    double arpack_inner_tol_min = 1e-14;
-    uint64_t arpack_inner_max_iter = 300;
+    // ScaLAPACK / ARPACK / hybrid / Davidson / LOBPCG parameter blocks
+    // were retired with their solvers in the minimalist-architecture rev
+    // (May 2026). EDParameters now carries only the knobs that are still
+    // used by the kept solvers (LANCZOS / BLOCK_LANCZOS / KRYLOV_SCHUR /
+    // FULL / FTLM / LTLM / mTPQ / cTPQ / KPM_DOS).
 };

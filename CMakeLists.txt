@@ -403,7 +403,6 @@ if(TARGET GPU_LANCZOS_EXAMPLE)
         ${LAPACK_LIBRARIES}
         ${LAPACKE_LIBRARIES}
         ${EXTRA_LINALG_LIBRARIES}
-        ${ARPACK_LIBRARY}
         CUDA::cudart
         CUDA::cublas
         CUDA::cusparse
@@ -419,7 +418,6 @@ if(TARGET CUDA_EXAMPLE)
         ${LAPACK_LIBRARIES}
         ${LAPACKE_LIBRARIES}
         ${EXTRA_LINALG_LIBRARIES}
-        ${ARPACK_LIBRARY}
     )
 endif()
 
@@ -430,7 +428,6 @@ if(TARGET CUDA_TEST)
         ${LAPACK_LIBRARIES}
         ${LAPACKE_LIBRARIES}
         ${EXTRA_LINALG_LIBRARIES}
-        ${ARPACK_LIBRARY}
     )
 endif()
 
@@ -707,14 +704,63 @@ if(BUILD_ED_TESTS)
 
     ed_add_test(test_operator_apply             tests/unit/test_operator_apply.cpp USE_CATCH2)
     ed_add_test(test_fixed_sz_operator          tests/unit/test_fixed_sz_operator.cpp USE_CATCH2)
-    # Phase 7: pin the canonicalize_method_and_flags() / legacy_method_for_dispatch()
-    # contract — the SOLVER × FIXED_SZ × GPU × MPI orthogonality story.
-    ed_add_test(test_method_canonicalize        tests/unit/test_method_canonicalize.cpp USE_CATCH2)
+    # Krylov-kernel unification Phase A: one Lanczos algorithm shared by
+    # CPU / GPU / CPU+MPI / GPU+MPI via the abstract Backend interface.
+    # This test pins agreement with the legacy sequential-MGS body and
+    # orthogonality of the CGS2 basis.
+    ed_add_test(test_lanczos_kernel             tests/unit/test_lanczos_kernel.cpp USE_CATCH2)
+    # test_square_operator was retired in the minimalist-architecture rev
+    # (May 2026) together with `ed/core/square_operator.h`,
+    # `ed/core/square_operator_factories.h`,
+    # `ed/core/rectangular_operator.h`, and
+    # `ed/core/basis_policy_runtime.h`. Those types had zero production
+    # consumers -- the only call sites were this test and the headers
+    # mutually including each other. Solvers consume the unified
+    # `ed::matvec::MatVecOperator` (which `Operator` /
+    # `FixedSzOperator` / `GPUOperator` / `DistributedOperator` /
+    # `StreamingSymmetryOperator` all derive from) directly. If a
+    # future workstream needs a runtime BasisPolicy + wrapper, build
+    # it fresh against an actual consumer.
+    ed_add_test(test_kernel_facades             tests/unit/test_kernel_facades.cpp USE_CATCH2)
+    ed_add_test(test_orchestrator               tests/unit/test_orchestrator.cpp USE_CATCH2)
+    ed_add_test(test_minimalist_collapse        tests/unit/test_minimalist_collapse.cpp USE_CATCH2)
+    # test_method_canonicalize retired in the minimalist-architecture rev
+    # (May 2026): all the deprecated `_GPU`/`_FIXED_SZ`/`_MPI`/`_CUDA`
+    # enum aliases and ARPACK/SCALAPACK/DAVIDSON/LOBPCG variants this
+    # test was pinning have been removed; the canonicalizer is no longer
+    # required because GPU/MPI/fixed-Sz are now first-class EDParameters
+    # flags rather than embedded in the DiagonalizationMethod enum.
     ed_add_test(test_full_diagonalization       tests/unit/test_full_diagonalization.cpp USE_CATCH2)
     # Phase 9 façade: smoke-test the modern-C++ auto-pilot
     # `ed::auto_pilot::solve(Operator&, AutoSolveOptions)` — Sz guard,
     # auto fixed-Sz projection, default-method picker, GPU fallback.
     ed_add_test(test_auto_solve                 tests/unit/test_auto_solve.cpp USE_CATCH2)
+    # Matvec-unification audit follow-up: end-to-end correctness of every
+    # ground-state algorithm reachable through `ed::auto_pilot::solve`
+    # (LANCZOS, BLOCK_LANCZOS, KRYLOV_SCHUR, DAVIDSON, LOBPCG, FULL) with
+    # auto-Sz projection on. Validates the matvec-wiring through the
+    # virtual `Operator::apply` and the `exact_diagonalization_core`
+    # dispatch switch in one place.
+    ed_add_test(test_ed_solver_matrix_e2e       tests/unit/test_ed_solver_matrix_e2e.cpp USE_CATCH2)
+    # Matvec-unification audit follow-up: cross-sector Z-recombination of
+    # finite-T ThermodynamicData. The streaming-symmetry kernel relies on
+    # `ed::core::combine_sector_thermodynamics` to merge per-sector
+    # ThermodynamicData blocks back into the full-Hilbert thermo.
+    # Reference is the dense `calculate_thermodynamics_from_spectrum` on
+    # the union of all sector spectra.
+    ed_add_test(test_sector_thermo              tests/unit/test_sector_thermo.cpp USE_CATCH2)
+    # Matvec-unification audit follow-up: end-to-end integration through
+    # `ed::exact_diagonalization(method=FTLM, use_symmetry=auto)`. Drives
+    # the streaming-symmetry kernel + sector-thermo recombination on a
+    # 4-site Heisenberg PBC chain and asserts that the recombined thermo
+    # matches the unprojected FTLM reference within statistical tolerances.
+    ed_add_test(test_dispatch_streaming_thermo  tests/unit/test_dispatch_streaming_thermo.cpp USE_CATCH2)
+    target_link_libraries(test_dispatch_streaming_thermo PRIVATE ed_input)
+    # Audit follow-up: one canonical finite-T entry point
+    # `ed::auto_pilot::thermal(...)`. Exercises auto-Sz + auto-symmetry +
+    # Z-recombination via both the in-memory and the directory overloads.
+    ed_add_test(test_auto_thermal               tests/unit/test_auto_thermal.cpp USE_CATCH2)
+    target_link_libraries(test_auto_thermal PRIVATE ed_input)
     # Phase 9 façade: smoke-test the modern-C++ DSSF auto-pilot
     # `ed::auto_pilot::dssf::compute(DSSFRequest, AutoDSSFOptions)` --
     # method-selection rule + QEDConfig-null guard.
@@ -722,11 +768,9 @@ if(BUILD_ED_TESTS)
     target_link_libraries(test_auto_dssf PRIVATE ed_cli ed_dssf ed_input)
     # Phase 9.2: pure-numerical lockdown of the DSSF auto-tuner heuristics
     # (eta / omega / krylov / num_random / device pickers). Header-only so
-    # no extra link libs needed beyond the Catch2 main.
-    ed_add_test(test_dssf_tune                  tests/unit/test_dssf_tune.cpp USE_CATCH2)
-    # Phase 9.3: ED-solver auto-tuner heuristics (tolerance / max_iter /
-    # max_subspace / arpack_ncv / FTLM-LTLM Krylov / mTPQ Taylor + delta_beta).
-    ed_add_test(test_diag_tune                  tests/unit/test_diag_tune.cpp USE_CATCH2)
+    # ED Cleanup Sweep Phase 5 (May 2026): test_dssf_tune / test_diag_tune
+    # locked down the legacy `ed::auto_pilot::*::*tune*` heuristics that
+    # were deleted along with `include/ed/auto/{diag,dssf}_tune.h`.
     ed_add_test(test_lanczos_variants           tests/unit/test_lanczos_variants.cpp USE_CATCH2)
     ed_add_test(test_lanczos_basis_buffer       tests/unit/test_lanczos_basis_buffer.cpp USE_CATCH2)
     # Phase 3a #1: Krylov-state checkpoint / restart for the default Lanczos
@@ -901,6 +945,15 @@ if(BUILD_ED_TESTS)
             ed_add_phase3c_test(test_multi_gpu_nccl
                                 tests/unit/test_multi_gpu_nccl.cpp)
 
+            # Phase 3.5 (Krylov-unification gap-fill): direct lockdown for
+            # `ed::matvec::MpiCudaBackend` overrides (dot, nrm2, dot_many,
+            # axpy_many, all_reduce_sum). Mirrors `test_cuda_backend.cpp`
+            # for the distributed lane. NCCL-gated.
+            ed_add_phase3c_test(test_mpi_cuda_backend
+                                tests/unit/test_mpi_cuda_backend.cpp)
+            target_link_libraries(test_mpi_cuda_backend PRIVATE
+                ed_distributed)
+
             # Phase 3c #2 (stage 2): GPU-resident distributed Lanczos with
             # ncclAllReduce dot/norm + host-staged SpMV. Cross-checks the
             # CPU distributed_lanczos on small Heisenberg chains; SKIPs
@@ -1007,18 +1060,15 @@ if(BUILD_ED_TESTS)
     ed_add_test(test_input_library              tests/unit/test_input_library.cpp USE_CATCH2)
     target_link_libraries(test_input_library PRIVATE ed_input)
     ed_add_test(test_observables                tests/unit/test_observables.cpp USE_CATCH2)
-    ed_add_test(test_thermal_methods            tests/unit/test_thermal_methods.cpp USE_CATCH2)
-    # Phase A (SOTA two-point correlator): JP double-Lanczos kernel
-    # validated against full-diag Lehmann reference, detailed balance,
-    # and the Z-weighted sector recombination helper.
-    ed_add_test(test_ftlm_jp                    tests/unit/test_ftlm_jp.cpp USE_CATCH2)
-    # Phase B (LTLM dynamical + spin operator factories)
-    ed_add_test(test_ftlm_ltlm_dyn              tests/unit/test_ftlm_ltlm_dyn.cpp USE_CATCH2)
+    # Retired in the minimalist-architecture rev (May 2026):
+    #   * test_thermal_methods   (Hybrid thermal + GPU/MPI alias paths gone)
+    #   * test_ftlm_jp           (FTLM double-Lanczos dynamical kernel gone)
+    #   * test_ftlm_ltlm_dyn     (LTLM dynamical kernel gone)
+    #   * test_ftlm_sssf         (FTLM SSSF static-structure-factor kernel gone)
+    #   * test_ftlm_kpm          (KPM dynamical / FTLM-KPM kernel gone -- KPM_DOS
+    #                              stays; covered by test_kpm_dos)
+    # The dynamical-correlator coverage moves to Phase 6 primitives.
     ed_add_test(test_ltlm_static_connected_qh   tests/unit/test_ltlm_static_connected_qh.cpp USE_CATCH2)
-    # Phase C (SSSF finite-T static structure factor)
-    ed_add_test(test_ftlm_sssf                  tests/unit/test_ftlm_sssf.cpp USE_CATCH2)
-    # Phase D (KPM / Chebyshev moment spectral kernel)
-    ed_add_test(test_ftlm_kpm                   tests/unit/test_ftlm_kpm.cpp USE_CATCH2)
     # Phase D2 (KPM density-of-states + thermodynamics kernel)
     ed_add_test(test_kpm_dos                    tests/unit/test_kpm_dos.cpp USE_CATCH2)
     # Audit item #6: block / band Lanczos for multi-channel ground-state DSSF
@@ -1026,8 +1076,10 @@ if(BUILD_ED_TESTS)
     # Audit item #1 (full): cross-sector rectangular observable + DSSF kernel
     ed_add_test(test_cross_sector_dssf          tests/unit/test_cross_sector_dssf.cpp USE_CATCH2)
     target_link_libraries(test_cross_sector_dssf PRIVATE ed_dssf)
-    # Phase E (TPQ dynamical correlator)
-    ed_add_test(test_tpq_dynamical               tests/unit/test_tpq_dynamical.cpp USE_CATCH2)
+    # Phase E (TPQ dynamical correlator) -- retired in the
+    # minimalist-architecture rev (May 2026). TPQ dynamical correlators
+    # become workflow-level compositions of mtpq_kernel +
+    # time_evolution_correlator (Phase 6 / Phase 7).
     ed_add_test(test_hdf5_io                    tests/unit/test_hdf5_io.cpp USE_CATCH2)
     ed_add_test(test_symmetry                   tests/unit/test_symmetry.cpp USE_CATCH2)
     ed_add_test(test_dssf_operator_spec         tests/unit/test_dssf_operator_spec.cpp USE_CATCH2)
@@ -1114,7 +1166,19 @@ if(BUILD_ED_TESTS)
         ed_add_test(test_cpu_gpu_equivalence    tests/unit/test_cpu_gpu_equivalence.cpp USE_CATCH2)
         # Phase 3a #3: FP32 cuSPARSE SpMV + FP64 dot/norm/axpy mixed-precision path.
         ed_add_test(test_gpu_mixed_precision_spmv tests/unit/test_gpu_mixed_precision_spmv.cpp USE_CATCH2)
+        # Phase 2 of the matvec-unification (May 2026): CudaBackend BLAS-1
+        # round-trips + agreement of `lanczos_kernel<Backend&>` between
+        # CpuBackend and CudaBackend on a 6-site Heisenberg chain. First
+        # production consumer of `ed/matvec/backends/cuda_backend.cuh`.
+        ed_add_test(test_cuda_backend           tests/unit/test_cuda_backend.cpp USE_CATCH2)
     endif()
+
+    # Phase 1 of the Minimalist ED Collapse (May 2026): Backend BLAS-3
+    # surface (gemm / gemv / trsm / qr_thin) lockdown across CpuBackend
+    # (+ CudaBackend when WITH_CUDA). MpiBackend / MpiCudaBackend qr_thin
+    # CholeskyQR2 coverage lives in test_backend_blas3_mpi.cpp under the
+    # WITH_MPI guard below (when added).
+    ed_add_test(test_backend_blas3              tests/unit/test_backend_blas3.cpp USE_CATCH2)
 
     # Regression test of the on-disk fallback path for the Lanczos basis
     # buffer. `force_disk_storage()` is cached per-process, so we reuse the

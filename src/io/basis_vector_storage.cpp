@@ -144,6 +144,31 @@ ComplexVector BasisVectorStorage::read_vector(uint64_t index) {
         throw std::runtime_error("Error: Failed to open dataset " + dataset_name);
     }
     
+    // Verify on-disk shape matches [dimension_, 2]. Without this, callers
+    // passing a wrong N silently read past the end (or stop short) of the
+    // dataset and produce garbage vectors.
+    {
+        hid_t ds_space = H5Dget_space(dataset);
+        if (ds_space < 0 || H5Sget_simple_extent_ndims(ds_space) != 2) {
+            if (ds_space >= 0) H5Sclose(ds_space);
+            H5Dclose(dataset);
+            throw std::runtime_error(
+                "BasisVectorStorage::read_vector: dataset '" + dataset_name +
+                "' is not 2-D as expected");
+        }
+        hsize_t ds_dims[2] = {0, 0};
+        H5Sget_simple_extent_dims(ds_space, ds_dims, nullptr);
+        H5Sclose(ds_space);
+        if (ds_dims[0] != dimension_ || ds_dims[1] != 2) {
+            H5Dclose(dataset);
+            throw std::runtime_error(
+                "BasisVectorStorage::read_vector: dataset '" + dataset_name +
+                "' shape (" + std::to_string(ds_dims[0]) + "," +
+                std::to_string(ds_dims[1]) + ") disagrees with expected (" +
+                std::to_string(dimension_) + ",2)");
+        }
+    }
+    
     // Read data
     std::vector<double> data(2 * dimension_);
     herr_t status = H5Dread(dataset, H5T_NATIVE_DOUBLE, H5S_ALL, H5S_ALL, 

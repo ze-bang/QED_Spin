@@ -1,5 +1,14 @@
 # Code map: libraries, leaves, `ED` pipeline, redundancies
 
+> **Update (2026-05-22):** The minimalist ED architecture refactor
+> (see [`ARCHITECTURE.md`](ARCHITECTURE.md)) has cut the solver
+> surface roughly in half. The kernels, operators, backends, and
+> dispatch tables described in this document have been collapsed
+> into a much smaller set of orthogonal pieces. Read
+> `ARCHITECTURE.md` first for the post-refactor picture; this file
+> remains useful as the canonical guide to the directory layout
+> that the refactor is converging on.
+
 This document is a **structural atlas** of the C++ tree under `include/ed/`
 and `src/`, how the **`ED` binary** navigates solvers and workflows, and
 where **intentional duplication** lives vs. true technical debt.
@@ -352,6 +361,159 @@ distributed/MPI path is the canonical answer at those scales).
 | `examples/` | C++/MPI/CUDA/Python samples |
 | `benchmarks/` | Google Benchmark + `bench_all_backends.py` |
 | `tests/unit/` | Catch2 tests (one file per major subsystem) |
+
+---
+
+## 6.5 Finite-temperature solvers and the auto-Sz / auto-symmetry path
+
+The finite-T family is a *thin layer over the matvec*. Every method
+listed below operates on the same `Operator::apply(in, out, dim)`
+(matvec-unification Phase 2) and is therefore reachable through
+exactly the same dispatch axes as the ground-state solvers
+(`use_fixed_sz`, `use_symmetry`, `use_gpu`, `use_mpi`).
+
+| Method      | Header                                  | Math (one-line)                                                            | Sample budget                  |
+|-------------|------------------------------------------|----------------------------------------------------------------------------|--------------------------------|
+| `FTLM`      | `include/ed/solvers/ftlm.h`             | `Z ≈ (D/R) Σ_r Σ_k |<r|ψ_k>|^2 e^{-β E_k}`, R random Lanczos starts        | `num_samples × krylov_dim`     |
+| `LTLM`      | `include/ed/solvers/ltlm.h`             | FTLM with one Lanczos chain from the *ground state* (T → 0 specialisation)  | `1 × ground_state_krylov`      |
+| `HYBRID`    | `include/ed/solvers/hybrid_thermal.h`   | LTLM for `T < T_cross`, FTLM for `T ≥ T_cross`, auto-crossover from `Cv`     | union of LTLM/FTLM budgets     |
+| `KPM_DOS`   | `include/ed/solvers/kpm_dos.h`          | Chebyshev-expand DOS, Hutchinson stochastic trace, Jackson-kernel smoothing | `num_random × num_moments`     |
+| `mTPQ`      | `include/ed/solvers/TPQ.h`              | Microcanonical TPQ: `(L−H)^N |r⟩` chain, β inferred from `⟨H⟩, ⟨H²⟩`         | `num_samples × max_iterations` |
+| `cTPQ`      | `include/ed/solvers/TPQ.h`              | Canonical TPQ: Taylor-expanded `e^{−Δβ H/2} |r⟩` over a β grid               | `num_samples × #(β-grid)`      |
+
+Each of these solvers populates the same `ThermodynamicData` payload
+inside `EDResults` -- `temperatures`, `energy`, `specific_heat`,
+`entropy`, `free_energy`, and (for FTLM) the raw `Z_sample`,
+`E_weighted`, `E2_weighted`, `e_min` used for sample-level averaging
+with proper Jensen-inequality handling.
+
+**Coverage of the unified `thermal()` entry point** (post-audit):
+
+| Method   | Auto-Sz iteration | Auto-spatial-symmetry      | T_min / T_max honoured | Notes                                                    |
+|----------|:-----------------:|:--------------------------:|:----------------------:|----------------------------------------------------------|
+| FTLM     | ✓                 | ✓ (directory form)         | ✓                      | Reference random-vector method; statistical match.       |
+| LTLM     | ✓                 | ✓ (directory form)         | ✓                      | Designed for T → 0; biased high at high T.               |
+| HYBRID   | ✓                 | ✓ (directory form)         | ✓                      | LTLM below `T_cross`, FTLM above.                        |
+| KPM_DOS  | ✓                 | ✓ (directory form)         | ✓                      | Polynomial DOS fit; needs enough moments for fine T.     |
+| mTPQ     | ✓                 | **silently disabled**      | ✓                      | Single random state per sector. `tpq_energy_shift = 0` triggers a Lanczos auto-pick for `LargeValue`. `dim == 1` sectors short-circuit to the exact single-eigenstate thermo. |
+| cTPQ     | ✓                 | **silently disabled**      | ✓                      | Same single-random-state restriction. Same `dim == 1` short-circuit. |
+
+The TPQ family doesn't factor cleanly through spatial irreps
+(a single random state cannot be projected to a sum of per-irrep
+trajectories whose recombination matches the unprojected result),
+so `thermal(...)` explicitly clears `use_symmetry` for TPQ runs.
+`used_symmetry_decomposition` returns `false` in the
+`ThermalResult` to expose the fallback.
+
+### How the auto-Sz / auto-symmetry layers integrate
+
+The recommended path is one function call:
+
+```cpp
+#include <ed/auto/thermal.h>
+
+// In-memory: auto-Sz only.
+auto thermo = ed::auto_pilot::thermal(
+    H, DiagonalizationMethod::FTLM,
+    { .T_min = 0.05, .T_max = 5.0, .num_T = 64 });
+
+// Directory-based: auto-Sz AND auto-symmetry (`automorphism_results/`).
+auto thermo = ed::auto_pilot::thermal(
+    "ed_dir/", N, /*spin=*/0.5f, DiagonalizationMethod::FTLM,
+    { .T_min = 0.05, .T_max = 5.0, .num_T = 64,
+      .sz_min = N/2 - 2, .sz_max = N/2 + 2 });   // optional Sz window
+```
+
+`thermal(...)` is a thin orchestrator on top of the three lower layers
+listed below. It exists because none of the lower layers, on their own,
+covers "give me the proper thermodynamics, fully optimised by every
+symmetry the Hamiltonian possesses, in one call." Internally it:
+
+  * runs `detail::conserves_sz(op)` to decide whether to iterate the Sz
+    axis;
+  * runs `ed::detail::symmetry_data_present(directory)` to decide
+    whether to enable the streaming-symmetry kernel per Sz sector;
+  * dispatches `ed::exact_diagonalization(..., use_fixed_sz=true,
+    use_symmetry=auto, n_up=K)` for each `K` in `[sz_min, sz_max]`
+    (default `[0, N]`);
+  * Z-recombines the per-Sz `ThermodynamicData` blocks via
+    `ed::core::combine_sector_thermodynamics` to produce the
+    full-Hilbert thermo. Each per-Sz block has itself already been
+    irrep-recombined by the streaming kernel when symmetry was used.
+
+The lower layers are still there and still individually useful:
+
+1. **Auto-pilot (in-memory, single sector)** -- `ed::auto_pilot::solve(
+   Operator&, AutoSolveOptions)` (`include/ed/auto/solve.h`).
+
+   * Detects total-Sz conservation by inspecting `transform_data_`.
+   * With `auto_basis = On` (default) and no Zeeman field, projects to
+     the Marshall ground-state sector `n_up = N/2` and runs the
+     selected solver inside that sector. `Operator::apply` is virtual
+     (matvec-unification Phase 2) so the projected `FixedSzOperator`'s
+     `apply` is what the solver actually consumes.
+   * Auto-pilot's heuristic picks among FULL / LANCZOS /
+     BLOCK_LANCZOS / KRYLOV_SCHUR for ground-state requests, but the
+     caller can override with `opts.solver = FTLM` (or any other
+     method); the auto-Sz projection is independent of the solver
+     choice. For finite-T this gives the **sector-restricted**
+     thermodynamics, which is correct for "I want Z within the GS Sz
+     sector" but **not** the full-Hilbert thermo.
+
+2. **Canonical entry (file-based)** -- `ed::exact_diagonalization(directory,
+   method, params)` (`include/ed/core/dispatch.h`).
+
+   * Auto-detects spatial symmetry by probing
+     `<directory>/automorphism_results/` for any of
+     `automorphisms.json`, `max_clique.json`, `sector_metadata.json`,
+     `minimal_generators.json` (the layout written by the Python
+     automorphism tool and by C++ `generate_automorphisms`), plus the
+     legacy `sectors.json` / `generators.json` names. When present,
+     the dispatcher flips `params.use_symmetry = true` and routes
+     through `exact_diagonalization_streaming_symmetry`.
+   * The streaming kernel iterates over every (`irrep` or
+     `Sz × irrep`) sector, calls
+     `exact_diagonalization_core(matvec_per_sector, sector_dim,
+     method, sector_params)` once per sector, and (post-matvec-
+     unification follow-up):
+       - For ground-state methods: collects per-sector eigenvalues
+         into a global pool and sorts.
+       - For finite-T methods (`FTLM`, `LTLM`, `HYBRID`, `KPM_DOS`,
+         `mTPQ`, `cTPQ`): collects per-sector `ThermodynamicData` and
+         calls `ed::core::combine_sector_thermodynamics`
+         (`include/ed/core/sector_thermo.h`) to produce the
+         full-Hilbert thermo via free-energy Z-recombination.
+
+3. **DSSF / workflow (file-based, multi-stage)** --
+   `compute_*_response_workflow` in `src/cli/workflows.cpp`. These are
+   the operator-resolved equivalents of the basic finite-T flow:
+   FTLM-style averaging with an outer operator `O` and inner `H`
+   matvec, eventually pulling DOS / spectral functions / correlators
+   out per-(q, ω) point. The same matvec interface is used; the
+   workflow layer manages the operator inventory, q-grid, and
+   per-sample HDF5 layout.
+
+### The sector-recombination math (used by both the streaming kernel and `combine_ftlm_sector_results`)
+
+For sectors {s} with per-sector free energies `F_s(β)`:
+
+```text
+F_ref(β)         = min_s F_s(β)                            (numerical anchor)
+Z_s^{shift}(β)   = exp(−β (F_s − F_ref))
+Z_total(β)       = Σ_s Z_s^{shift}(β)
+w_s(β)           = Z_s^{shift}(β) / Z_total(β)
+<E>_total(β)     = Σ_s w_s(β) · <E>_s(β)
+<E^2>_s(β)       = C_s(β) / β^2 + <E>_s^2(β)               (reconstruct from Cv)
+<E^2>_total(β)   = Σ_s w_s(β) · <E^2>_s(β)
+F_total(β)       = F_ref − T ln(Z_total)
+S_total(β)       = β (<E>_total − F_total)                 (thermo identity)
+C_v,total(β)     = β^2 (<E^2>_total − <E>_total^2)
+```
+
+This is what `ed::core::combine_sector_thermodynamics` does. The
+`combine_ftlm_sector_results` helper in `src/solvers/cpu/ftlm.cpp` is
+the historical, FTLM-specific equivalent (kept for back-compat); the
+generic version is what the streaming kernel now calls.
 
 ---
 

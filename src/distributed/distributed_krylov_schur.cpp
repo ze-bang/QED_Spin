@@ -10,6 +10,8 @@
 #include <ed/distributed/distributed_krylov_schur.h>
 #include <ed/distributed/distributed_lanczos_kernel.h>
 #include <ed/distributed/distributed_symmetry_operator.h>
+#include <ed/krylov/lanczos_kernel.h>
+#include <ed/matvec/backends/mpi_backend.h>
 #include <ed/parallel/thread_budget.h>
 
 #include <algorithm>
@@ -152,26 +154,13 @@ void scatter_initial_vector(const DistributedSymmetryOperator& op,
     if (n2 > 0.0) local_scal(1.0 / n2, v_local.data(), local_n);
 }
 
-// Reorthogonalise w against the locked Ritz vectors and the in-cycle Krylov
-// basis. Two CGS passes ("twice-is-enough") for robustness; both passes
-// happen with the same `aux` set on every rank, so the cost per pass is
-// (|aux| + |basis|) Allreduces.
-void reorth_against(const std::vector<std::vector<Complex>>& aux,
-                    const std::vector<std::vector<Complex>>& basis,
-                    Complex* w,
-                    std::uint64_t local_n,
-                    MPI_Comm comm) {
-    for (int pass = 0; pass < 2; ++pass) {
-        for (const auto& v : aux) {
-            const Complex c = dist_zdotc(v.data(), w, local_n, comm);
-            local_axpy(-c, v.data(), w, local_n);
-        }
-        for (const auto& v : basis) {
-            const Complex c = dist_zdotc(v.data(), w, local_n, comm);
-            local_axpy(-c, v.data(), w, local_n);
-        }
-    }
-}
+// (`reorth_against(aux, basis, w, ...)` lived here before May 2026 day 9;
+// it was the inline body's per-Lanczos-step reorthogonalisation of `w`
+// against (locked Ritz set ∪ current cycle basis), implemented as
+// `2 * (|aux| + |basis|)` sequential Allreduces per step. The unified
+// `ed::krylov::lanczos_kernel<MpiBackend>` now does the same via batched
+// `dot_many` / `axpy_many` over the combined ortho set in 2 Allreduces
+// per step, so the helper is gone.)
 
 // Reconstruct phi_local = sum_j evec_j * basis[j] (purely local op).
 void reconstruct_local(const std::vector<std::vector<Complex>>& basis,
@@ -272,56 +261,65 @@ DistributedLanczosResult distributed_krylov_schur_impl(
             local_scal(1.0 / seed_norm, v_seed_local.data(), local_n);
         }
 
-        std::vector<std::vector<Complex>> basis;
-        basis.reserve(m_max);
-        basis.push_back(v_seed_local);
+        // Per-cycle Lanczos build via the unified kernel
+        // (`ed::krylov::lanczos_kernel<MpiBackend>`). The kernel handles
+        // the three-term recurrence, the CGS2 reorthogonalisation
+        // against the locked Ritz set + the current cycle's basis (via
+        // `aux_ortho_ptrs`), the global-norm reduction, and the
+        // breakdown detection. Allreduce count per step is unchanged at
+        // 2 (one per CGS2 pass over the combined ortho set) -- previously
+        // this inline body did `2 * (|locked| + |basis|)` Allreduces
+        // every Lanczos step via the per-vector `reorth_against`. The
+        // breakdown threshold matches the historical KS body's 1e-13
+        // bar, distinct from the kernel's plain-Lanczos 1e-14 default
+        // and from the lanczos_kernel's "genuine invariant subspace"
+        // 1e-300 default.
+        std::vector<const Complex*> aux_ortho_ptrs;
+        aux_ortho_ptrs.reserve(locked_vecs.size());
+        for (const auto& lv : locked_vecs) aux_ortho_ptrs.push_back(lv.data());
 
-        std::vector<Complex> v_curr = v_seed_local;
-        std::vector<Complex> v_prev(local_n, Complex(0.0, 0.0));
-        std::vector<Complex> w(local_n, Complex(0.0, 0.0));
+        ed::matvec::MpiBackend mpi(op.comm());
+        ed::krylov::LanczosKernelOptions kopts;
+        kopts.max_iter        = static_cast<std::size_t>(m_max);
+        kopts.reorth          = ed::krylov::ReorthPolicy::FullCGS2;
+        kopts.keep_basis      = true;
+        kopts.breakdown_tol   = 1e-13;
+        kopts.dim_cap         = static_cast<std::size_t>(global_dim);
+        kopts.aux_ortho_ptrs  = std::move(aux_ortho_ptrs);
 
-        std::vector<double> alpha; alpha.reserve(m_max);
-        std::vector<double> beta;  beta.reserve(m_max + 1);
-        beta.push_back(0.0);
+        auto kres = ed::krylov::lanczos_kernel(
+            mpi,
+            [&op](const Complex* in, Complex* out, std::size_t /*n*/) {
+                op.apply(in, out);
+            },
+            local_n,
+            v_seed_local.data(),
+            kopts);
 
-        std::uint64_t iters_done_cycle = 0;
-        for (std::uint64_t j = 0; j < m_max; ++j) {
-            op.apply(v_curr.data(), w.data());
-            ++total_iters;
+        total_iters += static_cast<int>(kres.iters_done);
 
-            const Complex alpha_c =
-                dist_zdotc(v_curr.data(), w.data(), local_n, op.comm());
-            alpha.push_back(alpha_c.real());
-
-            local_axpy(Complex(-alpha.back(), 0.0), v_curr.data(),
-                       w.data(), local_n);
-            if (j > 0) {
-                local_axpy(Complex(-beta.back(), 0.0), v_prev.data(),
-                           w.data(), local_n);
-            }
-
-            reorth_against(locked_vecs, basis, w.data(), local_n, op.comm());
-
-            const double b = dist_norm(w.data(), local_n, op.comm());
-            beta.push_back(b);
-            ++iters_done_cycle;
-
-            if (options.verbose && rank == 0) {
-                std::cout << "  [dist-ks] cycle=" << restart
-                          << " j=" << j
-                          << " alpha=" << alpha.back()
-                          << " beta_{j+1}=" << b
-                          << " locked=" << locked_evals.size()
-                          << std::endl;
-            }
-
-            if (b < 1e-13) break;
-
-            v_prev.swap(v_curr);
-            local_scal(1.0 / b, w.data(), local_n);
-            v_curr.swap(w);
-            if (j + 1 < m_max) basis.push_back(v_curr);
+        if (options.verbose && rank == 0) {
+            std::cout << "  [dist-ks] cycle=" << restart
+                      << " iters=" << kres.iters_done
+                      << " beta_last=" << (kres.beta.empty() ? 0.0
+                                                              : kres.beta.back())
+                      << " locked=" << locked_evals.size() << "\n";
         }
+
+        // The kernel returns the basis in backend memory (host for
+        // MpiBackend / CpuBackend). Marshal it into the
+        // `std::vector<std::vector<Complex>>` shape the locking step
+        // below expects.
+        std::vector<std::vector<Complex>> basis;
+        basis.reserve(kres.basis.size());
+        for (const auto& uv : kres.basis) {
+            const Complex* src = uv.get();
+            basis.emplace_back(src, src + local_n);
+        }
+        const std::vector<double>& alpha = kres.alpha;
+        const std::vector<double>& beta  = kres.beta;
+        const std::uint64_t iters_done_cycle =
+            static_cast<std::uint64_t>(kres.iters_done);
 
         if (alpha.empty()) break;
 
