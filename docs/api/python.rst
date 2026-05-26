@@ -16,13 +16,44 @@ internally from your kwargs).
    :local:
    :depth: 2
 
-Top-level facade
-----------------
+Top-level facade (``qed``)
+--------------------------
+
+``import qed`` exposes everything you need to drive a workflow
+end-to-end. The most common entry points are:
+
+* :func:`qed.solve` — ground state, eigenvalues, low-lying spectrum.
+* :func:`qed.thermal` — finite-temperature thermodynamics.
+* :func:`qed.spectral` — static and dynamical structure factors.
+* :func:`qed.full_diagonalization`, :func:`qed.lanczos` — explicit
+  low-level access to the dense LAPACK and Lanczos drivers.
+* :func:`qed.find_symmetries` — symmetry discovery returning
+  :class:`qed.SymmetryReport` + :class:`qed.GeneratorSet` candidates.
+* :func:`qed.estimate_resources`, :func:`qed.suggest_workflow` —
+  pre-flight planner; returns :class:`qed.HostResources`.
+* :func:`qed.has_cuda_build`, :func:`qed.has_mpi_build`,
+  :func:`qed.has_nccl_build`, :func:`qed.has_scalapack_build` — build
+  introspection.
+
+The helper classes (:class:`qed.Operator`, :class:`qed.FixedSzOperator`,
+:class:`qed.GeneratorSet`, :class:`qed.HostResources`,
+:class:`qed.SymmetryReport`, …) are re-exported from their canonical
+sub-modules; see the per-submodule sections below for full member
+listings.
 
 .. automodule:: qed
+   :no-members:
+
+Ground-state entry point (``qed.workflow``)
+-------------------------------------------
+
+:func:`qed.solve` and its plumbing live in :mod:`qed.workflow`.
+
+.. automodule:: qed.workflow
    :members:
    :undoc-members:
    :show-inheritance:
+   :exclude-members: GeneratorSet, SymmetryReport
 
 Thermal entry point (``qed.thermal``)
 -------------------------------------
@@ -31,6 +62,10 @@ Thermal entry point (``qed.thermal``)
    :members:
    :undoc-members:
    :show-inheritance:
+   :exclude-members: thermal
+
+.. autofunction:: qed.thermal.thermal
+   :no-index:
 
 Spectral / structure-factor entry point (``qed.spectral``)
 ----------------------------------------------------------
@@ -39,6 +74,10 @@ Spectral / structure-factor entry point (``qed.spectral``)
    :members:
    :undoc-members:
    :show-inheritance:
+   :exclude-members: spectral
+
+.. autofunction:: qed.spectral.spectral
+   :no-index:
 
 DSSF helpers (``qed.dssf``)
 ---------------------------
@@ -101,6 +140,12 @@ Resource estimation and ranked workflow suggestions
    :members:
    :undoc-members:
    :show-inheritance:
+   :exclude-members: HostResources
+
+.. autoclass:: qed.feasibility.HostResources
+   :members:
+   :undoc-members:
+   :no-index:
 
 MPI launcher helper (``qed.mpi``)
 ---------------------------------
@@ -110,6 +155,17 @@ Helpers that build the right ``mpiexec`` invocation for
 Python process.
 
 .. automodule:: qed.mpi
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
+Hamiltonian builder (``qed.hamiltonian``)
+-----------------------------------------
+
+Lower-level ``Operator`` / ``FixedSzOperator`` construction helpers
+shared between :mod:`qed.input` and direct callers.
+
+.. automodule:: qed.hamiltonian
    :members:
    :undoc-members:
    :show-inheritance:

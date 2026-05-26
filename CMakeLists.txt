@@ -702,10 +702,16 @@ if(BUILD_ED_TESTS)
 
         if(_use_catch2)
             target_link_libraries(${test_name} PRIVATE Catch2::Catch2WithMain)
+            # SKIP_RETURN_CODE 4: when a Catch2 v3 TEST_CASE explicitly
+            # calls SKIP(...) and is the only case matched by the
+            # `--test-name-pattern` ctest spec, Catch2 exits with code 4
+            # (== "no tests ran"). Without this property CTest reports the
+            # otherwise correct skip as a Failed test in the CI lane.
             catch_discover_tests(${test_name}
                 PROPERTIES
                     ENVIRONMENT "ED_TEST_TMP_DIR=${CMAKE_CURRENT_BINARY_DIR}/test_scratch"
                     TIMEOUT 180
+                    SKIP_RETURN_CODE 4
             )
         else()
             add_test(NAME ${test_name} COMMAND ${test_name})

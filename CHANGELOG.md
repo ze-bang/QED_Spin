@@ -7,6 +7,77 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### CI rehabilitation post-collapse (May 2026)
+
+A single-commit pass that gets every `.github/workflows/*.yml` lane
+green again after the post-collapse codebase drift. Net result: the
+default CPU-only CI configure-build-test cycle is 234/234 green (with
+3 GPU mirror tests cleanly **skipped** instead of failed), the full
+CUDA build remains 299/299 green, and the docs build is **zero
+warnings** under `sphinx-build -W`.
+
+**Root-cause C++ fix.** The CPU-only CI lane (`-DBUILD_ED_TESTS=ON
+-DWITH_CUDA=OFF -DWITH_MPI=OFF`) had not built since the matvec
+unification because `include/ed/krylov/krylov_schur_kernel.h` and
+`src/orchestrator.cpp` referenced the three small tridiagonal-
+eigenproblem helpers (`solve_tridiag` / `solve_tridiag_with_weights` /
+`solve_tridiag_with_eigenvectors`) by their `ed::distributed::kernel::`
+namespace — but those helpers lived inside an `#ifdef WITH_MPI` block
+in `include/ed/distributed/distributed_lanczos_kernel.h` despite
+being pure Eigen with **no** MPI dependency. The CPU-only Krylov-Schur
+kernel therefore could not see them and the build aborted at compile
+time.
+
+Extracted the three helpers verbatim into a new MPI-independent header
+`include/ed/krylov/tridiag_eigensolver.h` (namespace
+`ed::krylov::detail`), and updated:
+
+- `include/ed/krylov/krylov_schur_kernel.h` — `#include` the new
+  header, switch the `using` to `ed::krylov::detail::*`.
+- `include/ed/distributed/distributed_lanczos_kernel.h` — `#include`
+  the new header and re-export the three names via `using` aliases so
+  every existing `ed::distributed::kernel::*` callsite in
+  `src/distributed/*.cpp` keeps compiling without changes.
+- `src/orchestrator.cpp` — `#include` the new header, switch the two
+  direct callsites to `ed::krylov::detail::*`.
+
+The three helpers are unchanged byte-for-byte; this is a pure
+namespace / build-guard refactor.
+
+**Test-registration fix.** The `test_streaming_symmetry_gpu_mirror`
+binary contains three Catch2 v3 `TEST_CASE`s that each begin with
+`#ifndef WITH_CUDA SKIP(...) #endif`. When `WITH_CUDA=OFF`, Catch2
+exits with code 4 ("no tests ran") and CTest interprets that as a
+failure, turning three valid skips into three CI failures. Patched
+the `catch_discover_tests(... PROPERTIES ...)` block in
+`CMakeLists.txt` to add `SKIP_RETURN_CODE 4`, so each per-`TEST_CASE`
+ctest entry honours the Catch2 skip exit and is reported as
+**Skipped** rather than **Failed**.
+
+**Workflow hygiene.** Removed the unused `libarpack2-dev` install
+from all four `.github/workflows/*.yml` lanes (`ci.yml`'s four jobs
+plus `benchmarks.yml` and `docs.yml`); ARPACK was a transitive
+dependency of the `ARPACK_*` solver family retired in the May-2026
+minimalist-solver-matrix cleanup, and `cmake/EDDependencies.cmake`
+no longer probes for it.
+
+**Sphinx warnings cleanup.** The May-2026 documentation overhaul
+introduced explicit per-submodule `automodule::` blocks in
+`docs/api/python.rst`; combined with the existing top-level
+`automodule:: qed`, this produced 27 "duplicate object description"
+warnings under the strict `-W` flag (silently absorbed by the
+current `cmake --build ... --target sphinx` because the target does
+not pass `-W`, but the noise still showed up in the build log). The
+fix: the top-level `automodule:: qed` block now uses `:no-members:`
+(it carries only the module-level docstring + a hand-curated
+autosummary), and the per-submodule blocks `:exclude-members:` the
+dataclasses (`GeneratorSet`, `SymmetryReport`, `HostResources`) that
+re-export to the top level, with explicit `:no-index:`d
+`autofunction:: qed.thermal.thermal` / `autofunction::
+qed.spectral.spectral` blocks to keep the navigation anchors. End
+result: `sphinx-build -W` exits with `build succeeded` and zero
+warnings.
+
 ### Documentation overhaul (May 2026)
 
 A top-to-bottom rewrite of the public documentation that reflects the

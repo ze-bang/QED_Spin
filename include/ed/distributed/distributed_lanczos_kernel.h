@@ -44,6 +44,7 @@
 #include <ed/distributed/distributed_lanczos.h>
 #include <ed/krylov/lanczos_kernel.h>
 #include <ed/krylov/ritz_convergence.h>
+#include <ed/krylov/tridiag_eigensolver.h>
 #include <ed/matvec/backends/mpi_backend.h>
 #include <ed/parallel/thread_budget.h>
 
@@ -138,79 +139,13 @@ inline void dist_zdotc_batched(
 }
 
 // ----- tridiagonal solvers ---------------------------------------------------
-inline std::vector<double> solve_tridiag(const std::vector<double>& alpha,
-                                         const std::vector<double>& beta,
-                                         std::size_t m) {
-    if (m == 0) return {};
-    Eigen::MatrixXd T = Eigen::MatrixXd::Zero(m, m);
-    for (std::size_t i = 0; i < m; ++i) {
-        T(i, i) = alpha[i];
-        if (i + 1 < m) {
-            T(i, i + 1) = beta[i + 1];
-            T(i + 1, i) = beta[i + 1];
-        }
-    }
-    Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> es;
-    es.compute(T, Eigen::EigenvaluesOnly);
-    std::vector<double> evals(m);
-    for (std::size_t i = 0; i < m; ++i) evals[i] = es.eigenvalues()(i);
-    std::sort(evals.begin(), evals.end());
-    return evals;
-}
-
-inline void solve_tridiag_with_weights(const std::vector<double>& alpha,
-                                       const std::vector<double>& beta,
-                                       std::size_t m,
-                                       std::vector<double>& evals,
-                                       std::vector<double>& weights) {
-    evals.clear(); weights.clear();
-    if (m == 0) return;
-    Eigen::MatrixXd T = Eigen::MatrixXd::Zero(m, m);
-    for (std::size_t i = 0; i < m; ++i) {
-        T(i, i) = alpha[i];
-        if (i + 1 < m) {
-            T(i, i + 1) = beta[i + 1];
-            T(i + 1, i) = beta[i + 1];
-        }
-    }
-    Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> es(T);
-    evals.resize(m); weights.resize(m);
-    const auto& V = es.eigenvectors();
-    for (std::size_t k = 0; k < m; ++k) {
-        evals[k] = es.eigenvalues()(k);
-        const double v0k = V(0, k);
-        weights[k] = v0k * v0k;
-    }
-}
-
-inline void solve_tridiag_with_eigenvectors(const std::vector<double>& alpha,
-                                            const std::vector<double>& beta,
-                                            std::size_t m,
-                                            std::vector<double>& evals,
-                                            std::vector<double>& weights,
-                                            std::vector<double>& evecs_cm) {
-    evals.clear(); weights.clear(); evecs_cm.clear();
-    if (m == 0) return;
-    Eigen::MatrixXd T = Eigen::MatrixXd::Zero(m, m);
-    for (std::size_t i = 0; i < m; ++i) {
-        T(i, i) = alpha[i];
-        if (i + 1 < m) {
-            T(i, i + 1) = beta[i + 1];
-            T(i + 1, i) = beta[i + 1];
-        }
-    }
-    Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> es(T);
-    evals.resize(m); weights.resize(m); evecs_cm.resize(m * m);
-    const auto& V = es.eigenvectors();
-    for (std::size_t k = 0; k < m; ++k) {
-        evals[k] = es.eigenvalues()(k);
-        const double v0k = V(0, k);
-        weights[k] = v0k * v0k;
-        for (std::size_t j = 0; j < m; ++j) {
-            evecs_cm[k * m + j] = V(j, k);
-        }
-    }
-}
+// Re-exported from `ed::krylov::detail::solve_tridiag*` so the same Eigen-only
+// helpers are visible in both the MPI and the CPU-only Krylov-Schur kernels.
+// The CPU-only kernel cannot reach into this `#ifdef WITH_MPI` block, so the
+// canonical definitions now live in `ed/krylov/tridiag_eigensolver.h`.
+using ed::krylov::detail::solve_tridiag;
+using ed::krylov::detail::solve_tridiag_with_weights;
+using ed::krylov::detail::solve_tridiag_with_eigenvectors;
 
 // ----- the templated Lanczos kernel -----------------------------------------
 //
