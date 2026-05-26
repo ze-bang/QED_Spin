@@ -8,7 +8,7 @@ shared `OperatorSpec` / `SolveOptions` / `ThermalOptions` /
 `SpectralOptions` data model.
 
 For how to *invoke* each mode (files, `ED`, `import`, MPI), see
-[usage.md](usage.md).
+[`workflow.md`](workflow.md) and [`one_call_api.md`](one_call_api.md).
 
 ---
 
@@ -102,10 +102,13 @@ have to touch `subprocess` themselves; the helpers accept `binary=` /
 arbitrary `extra_args` so the full CLI surface remains accessible.
 
 For C++ snippet templates of every cell marked "yes" above, see
-[`docs/guides/usage.md` §8.3 (GPU)](usage.md#83-gpu-solvers-c-only-link-ed_solvers_gpu),
-[§8.4 (MPI)](usage.md#84-mpi-distributed-solvers-c-only-link-ed_distributed-mpi-required),
-[§8.5 (in-process symmetry)](usage.md#85-in-process-symmetry-projected-solve-c-only),
-and [§8.6 (streaming symmetry)](usage.md#86-streaming-symmetry-c-only-large-clusters).
+[`examples/00_unified_interface.cpp`](../../examples/00_unified_interface.cpp)
+(the full `OperatorSpec` → `ed::make_operator` →
+`ed::workflows::*` walkthrough across in-memory / file / directory
+sources) and the canonical kernel headers in
+[`include/ed/krylov/`](../../include/ed/krylov/),
+[`include/ed/thermal/`](../../include/ed/thermal/), and
+[`include/ed/observables/`](../../include/ed/observables/).
 
 ---
 
@@ -208,10 +211,16 @@ expectations, dimer / Heisenberg structure-factor kernels, ring observables,
 kernels the CPU/GPU BFG drivers call. This is **not** a separate "BFG
 diagonalization" API; you still need a state from ED or from `apply`.
 
-### 1.6 `qed.helpers`
+### 1.6 Legacy `edlib` helpers
 
-Lazy re-exports of **legacy** `edlib` (geometry writers, `hdf5_io`, optional
-`automorphism_finder`, …). This is the **bridge** to Mode 1 and NLCE.
+The old `python/edlib/helper_*.py` family has been replaced by the
+`qed.input` builder (`HamiltonianBuilder`, `lattice.*`,
+`write_directory`). The `edlib` package itself is no longer shipped
+as a top-level entry point; if you still have legacy notebooks that
+`from edlib import ...`, port them to `qed.input.HamiltonianBuilder`
++ `qed.input.lattice.*`. The directory format
+(`InterAll.dat` / `Trans.dat` / `positions.dat`) is unchanged and the
+`./ED` CLI consumes it byte-identically.
 
 ### 1.7 `qed.mpi`
 

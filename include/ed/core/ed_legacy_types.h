@@ -22,7 +22,7 @@
 // file-loading helpers, etc. -- was deleted in lockstep with the
 // pybind11 forwarder deletion. External consumers migrate to
 // `ed::make_operator(OperatorSpec)` + `ed::workflows::{solve,
-// thermal, spectral}` per `docs/MIGRATION.md`.
+// thermal, spectral}`; see `CHANGELOG.md` for the per-wave port log.
 // =============================================================================
 
 #include <ed/core/results.h>      // ThermodynamicData + FTLMResults

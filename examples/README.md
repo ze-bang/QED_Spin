@@ -35,7 +35,7 @@ into your own working directory, and edit the constants at the top.
    alongside the rest of the project via the parent CMake:
 
    ```bash
-   cd /path/to/exact_diagonalization_cpp
+   cd /path/to/QED
    cmake -B build \
          -DWITH_CUDA=ON -DWITH_MPI=ON \
          -DED_BUILD_BENCHMARKS=ON \
@@ -84,7 +84,7 @@ ED_BIN=./build/ED bash examples/11_cli_thermo.sh
 ## Where to go next
 
 * **Production CLI**: see the top-level [`README.md`](../README.md) and
-  [`docs/architecture/IMPLEMENTATION_REPORT.md`](../docs/architecture/IMPLEMENTATION_REPORT.md).
+  [`docs/architecture/ARCHITECTURE.md`](../docs/architecture/ARCHITECTURE.md).
 * **Pre-canned configs**: see [`../configs/`](../configs/) for 15+ worked
   config files covering every solver (`LANCZOS`, `FTLM`, `LTLM`, `mTPQ`,
   `cTPQ`, `OSS`, `DSSF`, ...).

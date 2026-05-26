@@ -2,28 +2,28 @@
 orphan: true
 ---
 
-# Advanced Python usage (`qed` Phase 5)
+# Advanced Python usage
 
 This guide is the **catalogue of advanced patterns** the Python API
-supports as of `qed` 0.2.0 (Phase 5, Apr 2026). It complements the
-quickstart at [`python_quickstart.md`](python_quickstart.md) and the
-capability matrix at [`python_api_coverage.md`](python_api_coverage.md).
+supports. It complements the quickstart at
+[`python_quickstart.md`](python_quickstart.md), the one-call reference
+at [`one_call_api.md`](one_call_api.md), and the capability matrix at
+[`python_api_coverage.md`](python_api_coverage.md).
 
 If your task is straightforward (build a Hamiltonian, run Lanczos, look
 at a few thermodynamic curves), use the quickstart. If you need:
 
-* A **specific solver** other than Lanczos (BLOCK_LANCZOS, KRYLOV_SCHUR,
-  DAVIDSON, LOBPCG, ARPACK_*, IRL, TRL, Chebyshev-filtered, shift-invert,
-  TPQ, …)
-* The **GPU** path (`LANCZOS_GPU`, `FULL_GPU`, `mTPQ_GPU`, …)
-* **ScaLAPACK** for distributed full-dense ED
+* A **specific solver** other than Lanczos (`BLOCK_LANCZOS`,
+  `KRYLOV_SCHUR`, `FTLM`, `LTLM`, `mTPQ`, `cTPQ`, `KPM_DOS`, `FULL`)
+* The **GPU** path (`device='gpu'` — auto-selects the right GPU
+  kernel for the requested solver)
 * **Symmetry projection** in-process (without writing
   `automorphism_results/*.json` to disk first)
 * **Streaming-symmetry** ED for the largest tractable clusters
 * **MPI distributed** Lanczos / FTLM / TPQ runs from a Python script
 * The **full `./ED dssf`** continued-fraction spectral driver
-* To **introspect the build** (CUDA / MPI / ScaLAPACK present?) at
-  runtime so the same Python script works on a laptop and a cluster
+* To **introspect the build** (CUDA / MPI present?) at runtime so the
+  same Python script works on a laptop and a cluster
 
 …this is the right document. Every pattern below is exercised by
 `python/tests/test_dispatcher.py`.

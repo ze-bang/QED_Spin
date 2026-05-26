@@ -35,8 +35,7 @@
 //     auto gs = ed::workflows::solve(*op, ed::SolveOptions{ .num_eigs = 5 });
 //
 // See `include/ed/core/make_operator.h` and `include/ed/orchestrator.h`
-// for the full surface, and `docs/MIGRATION.md` for the per-symbol
-// mapping table.
+// for the full surface, and `CHANGELOG.md` for the per-wave port log.
 // =============================================================================
 
 #include <ed/core/ed_legacy_types.h>

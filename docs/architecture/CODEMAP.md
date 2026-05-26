@@ -13,8 +13,11 @@ This document is a **structural atlas** of the C++ tree under `include/ed/`
 and `src/`, how the **`ED` binary** navigates solvers and workflows, and
 where **intentional duplication** lives vs. true technical debt.
 
-For algorithmic detail see [`IMPLEMENTATION_REPORT.md`](IMPLEMENTATION_REPORT.md).
-For scaling and env knobs see [`SCALING.md`](SCALING.md).
+For the post-collapse architecture see
+[`ARCHITECTURE.md`](ARCHITECTURE.md). For scaling and env knobs see
+[`SCALING.md`](SCALING.md). For the symmetry math + the
+`Subspace × ProjectorChain` decomposition see
+[`SYMMETRY.md`](SYMMETRY.md).
 
 ---
 
@@ -77,7 +80,7 @@ flowchart TB
 legacy `python/edlib/helper_*.py` family with a typed, in-process API
 that can either materialise an `ed::Operator` *or* emit the same
 `InterAll.dat` / `Trans.dat` / `positions.dat` directory that `./ED`
-already consumes — see [`usage.md` §9](../guides/usage.md#9-mode-8-standalone-ed_input-cpython-lattice--hamiltonian-builder).
+already consumes.
 
 *Figure: Dependency direction (not the exact CMake `target_link_libraries`
 list). `ed_cli` always pulls `ed_solvers_cpu`; it **also** links
@@ -612,9 +615,9 @@ generic version is what the streaming kernel now calls.
 When you add a new `.cpp` / `.cu` or static library, update:
 
 1. [`cmake/EDLibraries.cmake`](../../cmake/EDLibraries.cmake)
-2. This file’s **§5** file list
-3. If user-visible: [`README.md`](../../README.md) solver matrix and/or
-   [`docs/guides/usage.md`](../guides/usage.md)
+2. This file's **§5** file list
+3. If user-visible: [`README.md`](../../README.md) and/or the relevant
+   guide under [`docs/guides/`](../guides/)
 
 ---
 

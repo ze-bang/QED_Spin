@@ -891,7 +891,7 @@ std::string getMethodParameterInfo(DiagonalizationMethod method) {
             info << "Finite-temperature solver. Common knobs:\n"
                  << "  --samples=<n>       number of random samples\n"
                  << "  --temp_min/--temp_max/--temp_bins\n"
-                 << "  method-specific knobs in docs/guides/usage.md\n";
+                 << "  method-specific knobs in docs/guides/workflow.md\n";
             break;
     }
     info << "\n========================================\n";

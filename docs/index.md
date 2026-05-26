@@ -1,21 +1,29 @@
-# exact_diagonalization
+# QED — Quantum Exact Diagonalization
 
-A modern C++17 / CUDA / Python toolkit for **exact diagonalization (ED)** of
-spin-1/2 Hamiltonians, with first-class support for:
+A modern C++17 / CUDA / MPI / Python toolkit for **exact diagonalization
+(ED)** of spin Hamiltonians.
 
-- Full diagonalization, Lanczos, block-Lanczos (CPU **and** GPU);
-- Finite-temperature methods: **FTLM** and **LTLM**;
-- **Dynamical / static structure factors (DSSF / SSSF)** with momentum and
-  sublattice resolution;
-- Symmetry sectors (translation, point-group, fixed-Sz);
-- HDF5 I/O for eigenvectors, thermodynamic observables, and DSSF traces;
-- A first-class **Python interface** (`qed`) built via `pybind11` +
-  `scikit-build-core`, plus a compatibility shim for the legacy `edlib`
-  package.
+The user-facing surface is **three orchestrator verbs**, exposed in
+parallel in C++ and in Python:
 
-This site combines the **C++ API reference** (auto-extracted from the headers
-under `include/ed/` via Doxygen + Breathe) with **prose chapters** that walk
-through how the pieces fit together end-to-end.
+| C++                              | Python                                |
+|----------------------------------|---------------------------------------|
+| `ed::workflows::solve(op, opts)` | `qed.solve(H, **kw)`                  |
+| `ed::workflows::thermal(op, opts)` | `qed.thermal(H, **kw)`              |
+| `ed::workflows::spectral(op, opts)` | `qed.spectral(H, **kw)`            |
+
+Operators are built once via `ed::make_operator(OperatorSpec)` (or
+`qed.input.HamiltonianBuilder` in Python) and consumed by every
+backend (CPU / single-GPU / MPI / MPI+GPU) without further surgery.
+Symmetry projection is orthogonal: pick a `Subspace` (full Hilbert
+space or fixed total Sz) and a `ProjectorChain` (zero or more group
+representations such as the lattice point group); future axes
+(global Z₂ spin-flip, time-reversal antiunitary, SU(2) total-S) extend
+the chain through the same kwargs.
+
+This site combines the **C++ API reference** (auto-extracted from the
+headers under `include/ed/` via Doxygen + Breathe) with **prose
+chapters** that walk through how the pieces fit together end-to-end.
 
 ```{toctree}
 :maxdepth: 2
@@ -26,7 +34,7 @@ guides/quickstart
 guides/python_quickstart
 guides/one_call_api
 guides/workflow
-guides/usage
+guides/python_advanced
 guides/python_api_coverage
 ```
 
@@ -42,55 +50,49 @@ api/python
 :maxdepth: 2
 :caption: Architecture
 
+architecture/ARCHITECTURE
+architecture/SYMMETRY
 architecture/CODEMAP
+architecture/SCALING
+architecture/ADD_NEW_BASIS_POLICY
+architecture/ADD_NEW_GPU_CELL
+architecture/ADD_NEW_MPI_CELL
 ```
 
-## Why a "modern" rewrite?
+```{toctree}
+:maxdepth: 1
+:caption: Benchmarks
 
-The codebase is being modernized so collaborators can reuse it without
-needing institutional knowledge:
-
-- **CMake first**, with `find_package(ED CONFIG)` for downstream consumers,
-  install rules, presets, and a shared static-library layout
-  (`ed_core` / `ed_io` / `ed_dssf` / `ed_solvers_cpu` / `ed_solvers_gpu`).
-- **Catch2 v3** unit tests gating every commit (37+ test cases).
-- **CI** lanes for GCC Release, Clang Debug, clang-tidy, Python wheel +
-  pytest, and CUDA build-only.
-- **Python bindings** that expose the high-value entry points
-  (`Operator`, `FixedSzOperator`, `full_diagonalization`, `lanczos`,
-  `finite_temperature_lanczos`, …) under the new `qed` namespace.
+benchmarks/BENCHMARKS
+benchmarks/bench_vs_xdiag
+benchmarks/ORTHOGONAL_SYMMETRY
+```
 
 ## Project documents
 
 The following live at the repository root and are rendered on GitHub:
 
-- [`CHANGELOG.md`](https://github.com/ze-bang/exact_diagonalization_cpp/blob/main/CHANGELOG.md)
+- [`CHANGELOG.md`](https://github.com/ze-bang/QED/blob/main/CHANGELOG.md)
   — versioned release notes.
-- [`CONTRIBUTING.md`](https://github.com/ze-bang/exact_diagonalization_cpp/blob/main/CONTRIBUTING.md)
+- [`CONTRIBUTING.md`](https://github.com/ze-bang/QED/blob/main/CONTRIBUTING.md)
   — how to set up a dev environment and submit changes.
-- [`docs/architecture/CODEMAP.md`](https://github.com/ze-bang/exact_diagonalization_cpp/blob/main/docs/architecture/CODEMAP.md)
-  — static libraries, file-level tree, `ED` flowcharts, MPI vs GPU layers, redundancies.
-- [`docs/architecture/IMPLEMENTATION_REPORT.md`](https://github.com/ze-bang/exact_diagonalization_cpp/blob/main/docs/architecture/IMPLEMENTATION_REPORT.md)
-  — exhaustive subsystem reference.
-- [`docs/architecture/SCALING.md`](https://github.com/ze-bang/exact_diagonalization_cpp/blob/main/docs/architecture/SCALING.md)
-  — scaling envelope, memory tables, environment-variable controls.
-- [`docs/architecture/IMPLEMENTATION_NOTES.md`](https://github.com/ze-bang/exact_diagonalization_cpp/blob/main/docs/architecture/IMPLEMENTATION_NOTES.md)
-  — deferred work and HPC-gated milestones.
-- [`docs/benchmarks/BENCHMARKS.md`](https://github.com/ze-bang/exact_diagonalization_cpp/blob/main/docs/benchmarks/BENCHMARKS.md)
-  — head-to-head benchmark write-up vs QuSpin / SciPy.
-- [`docs/benchmarks/ORTHOGONAL_SYMMETRY.md`](https://github.com/ze-bang/exact_diagonalization_cpp/blob/main/docs/benchmarks/ORTHOGONAL_SYMMETRY.md)
+- [`docs/architecture/ARCHITECTURE.md`](https://github.com/ze-bang/QED/blob/main/docs/architecture/ARCHITECTURE.md)
+  — the post-collapse architectural picture (read first).
+- [`docs/architecture/SYMMETRY.md`](https://github.com/ze-bang/QED/blob/main/docs/architecture/SYMMETRY.md)
+  — Subspace × ProjectorChain math + workflows.
+- [`docs/architecture/CODEMAP.md`](https://github.com/ze-bang/QED/blob/main/docs/architecture/CODEMAP.md)
+  — directory-level tour.
+- [`docs/architecture/SCALING.md`](https://github.com/ze-bang/QED/blob/main/docs/architecture/SCALING.md)
+  — memory + N envelope, env-var knobs.
+- [`docs/benchmarks/BENCHMARKS.md`](https://github.com/ze-bang/QED/blob/main/docs/benchmarks/BENCHMARKS.md)
+  — head-to-head vs QuSpin / SciPy.
+- [`docs/benchmarks/ORTHOGONAL_SYMMETRY.md`](https://github.com/ze-bang/QED/blob/main/docs/benchmarks/ORTHOGONAL_SYMMETRY.md)
   — full 4 × 6 sweep (four `(Subspace, ProjectorChain)` cells × six
-  workflows) on CPU and GPU at N=8 and N=10. Pins the May-2026
-  orthogonal symmetry composition refactor (`include/ed/symmetry/`).
-- [`docs/guides/python_api_coverage.md`](https://github.com/ze-bang/exact_diagonalization_cpp/blob/main/docs/guides/python_api_coverage.md)
-  — what `import qed` covers vs the full `ED` binary.
-- [`examples/`](https://github.com/ze-bang/exact_diagonalization_cpp/tree/main/examples)
+  workflows) on CPU and GPU.
+- [`examples/`](https://github.com/ze-bang/QED/tree/main/examples)
   — runnable C++ / Python / CLI examples (one per use case).
-- [`docs/history/`](https://github.com/ze-bang/exact_diagonalization_cpp/tree/main/docs/history)
-  — historical phase summaries (`MODERNIZATION_AUDIT`, `PHASE_3A`, `PHASE_3`,
-  [`PHASE_7_SOLVER_AXES`](https://github.com/ze-bang/exact_diagonalization_cpp/blob/main/docs/history/PHASE_7_SOLVER_AXES.md),
-  [`PHASE_7_1_SYMMETRY_AXIS`](https://github.com/ze-bang/exact_diagonalization_cpp/blob/main/docs/history/PHASE_7_1_SYMMETRY_AXIS.md),
-  [`PHASE_8_GPU_MPI_OPT`](https://github.com/ze-bang/exact_diagonalization_cpp/blob/main/docs/history/PHASE_8_GPU_MPI_OPT.md)).
+- [`docs/history/`](https://github.com/ze-bang/QED/tree/main/docs/history)
+  — legacy phase summaries kept as time-capsules.
 
 ## Indices and tables
 

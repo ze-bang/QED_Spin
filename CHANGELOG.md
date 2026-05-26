@@ -7,6 +7,144 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Documentation overhaul (May 2026)
+
+A top-to-bottom rewrite of the public documentation that reflects the
+post-collapse architecture and the orthogonal symmetry composition.
+
+**README.md** rewritten from scratch (down from 665 lines to ≈280):
+
+- Drops the legacy three-mode landing page in favour of the
+  three-orchestrator-verb picture
+  (`ed::workflows::{solve, thermal, spectral}` /
+  `qed.solve / thermal / spectral`).
+- Adds the `(Subspace, ProjectorChain)` axis up front with the four
+  Python-kwarg cells.
+- Replaces the multi-screen "modes" feature matrix with a compact
+  status table and a directory tree.
+
+**docs/index.md** rewritten to mirror the new structure (3 verbs +
+`Subspace × ProjectorChain` framing) and to consolidate the toctrees
+into Getting Started / Reference / Architecture / Benchmarks.
+
+**Architecture docs refreshed.**
+
+- `docs/architecture/ARCHITECTURE.md` — drops references to the
+  retired `STRUCTURAL_AUDIT.md` and `MIGRATION.md`; the
+  "Reading order for new contributors" now points at the live docs
+  only.
+- `docs/architecture/SYMMETRY.md` — companion-link cleanup; the
+  distributed-MPI semantic note is rewritten to describe
+  `qed.mpi.run_distributed` + `ed_distributed` rather than the
+  retired audit entry.
+- `docs/architecture/CODEMAP.md` — algorithmic-detail link points at
+  `ARCHITECTURE.md` + `SYMMETRY.md` instead of the deleted
+  `IMPLEMENTATION_REPORT.md`; the in-tree §6 `usage.md` link is
+  removed.
+- `docs/architecture/SCALING.md` — provenance footer and the SU(2)
+  example reference the live `SYMMETRY.md` §6 instead of the deleted
+  `MODERNIZATION_AUDIT.md`.
+- `docs/architecture/ADD_NEW_BASIS_POLICY.md` — adds a "See also"
+  pointer to the `Subspace × ProjectorChain` decomposition, so
+  contributors picking a symmetry-sector extension are routed to the
+  smaller seam first.
+
+**Guides refreshed.**
+
+- `docs/guides/python_quickstart.md` rewritten end-to-end: the
+  retired `qe.diag` / `qe.dssf.compute` / `qed.helpers` surface is
+  gone; the three-verb surface, `qed.input.HamiltonianBuilder`,
+  and the orthogonal symmetry composition are now the first-class
+  surface.
+- `docs/guides/python_advanced.md` cleans up the "Choose the right
+  entry point" preamble (drops the `DAVIDSON` / `LOBPCG` / `ARPACK_*`
+  / `IRL` / `TRL` / `CHEBYSHEV_FILTERED` / `SHIFT_INVERT` /
+  `ScaLAPACK` bullets) to match the May-2026 solver matrix.
+- `docs/guides/python_api_coverage.md` repoints the `usage.md`
+  references at `workflow.md` + `one_call_api.md` +
+  `examples/00_unified_interface.cpp`; the §1.6 entry for the
+  deleted `qed.helpers` module is rewritten to point at
+  `qed.input.HamiltonianBuilder`.
+- `docs/guides/workflow.md` solver-matrix tables shrink to the
+  retained backends (`LANCZOS`, `BLOCK_LANCZOS`, `KRYLOV_SCHUR`,
+  `FULL`, `FTLM`, `LTLM`, `mTPQ`, `cTPQ`, `KPM_DOS`); a one-line
+  callout records which families were retired in the May-2026
+  cleanup. The cross-product caveats are tightened around the
+  shipped MPI / GPU symmetry cells.
+- `docs/guides/install.md` drops the obsolete ARPACK build
+  dependency and the legacy clone path; adds NCCL as the gate for
+  the multi-GPU lane.
+
+**Benchmark + API docs refreshed.**
+
+- `docs/benchmarks/BENCHMARKS.md` retitled to "QED vs peers"; the
+  symmetry-partitioning + multi-GPU paragraphs are rewritten to
+  describe the *shipped* state and reference
+  `ORTHOGONAL_SYMMETRY.md`.
+- `docs/api/cpp.rst` reorganised around the three orchestrator
+  verbs, `ed::make_operator`, and the new `ed::symmetry::*` family
+  (`Subspace`, `Projector`, `ProjectorChain`,
+  `compute_orbit_for_state`). Dead headers (`ftlm.h` /
+  `ltlm.h` / `gpu_dynamics.cuh` listings) are replaced with the
+  current template-kernel inventory under `ed/krylov`, `ed/thermal`,
+  `ed/observables`. Distributed and CUDA lanes get explicit
+  conditional-build sections.
+- `docs/api/python.rst` retitled and expanded to mirror the live
+  modules: `qed.thermal`, `qed.spectral`, `qed.dssf`, `qed.input`,
+  `qed.symmetry`, `qed.auto_tune`, `qed.feasibility`, `qed.mpi`,
+  `qed.bfg`. The dead `qed.helpers` section is removed.
+
+**CONTRIBUTING.md** rewritten:
+
+- Updates the clone path to the public `ze-bang/QED` URL.
+- Drops references to the retired `MODERNIZATION_AUDIT.md` phase
+  numbering and the dead "When adding a new method" Phase-1 checklist.
+- Adds an explicit "Where things live" section pointing at the
+  `Subspace × ProjectorChain` extension pattern and the
+  `ADD_NEW_*.md` recipes.
+
+**Deleted documents (redundant or superseded).**
+
+- `docs/MIGRATION.md` (305 lines) — the legacy → unified surface
+  port table; the legacy surface has been hard-removed for one full
+  release cycle and the per-symbol mapping now lives in the
+  per-wave `CHANGELOG.md` entries.
+- `docs/architecture/IMPLEMENTATION_REPORT.md` (1645 lines, last
+  updated 2026-04-24) — exhaustive pre-collapse subsystem
+  walkthrough; superseded by `ARCHITECTURE.md` + `CODEMAP.md` +
+  the auto-generated `docs/api/cpp.rst`.
+- `docs/architecture/STRUCTURAL_AUDIT.md` (1420 lines) — the
+  per-S0/S1/S2 audit hit-list; every actionable item has either
+  landed in the codebase (with regression tests captured in
+  `CHANGELOG.md`) or been explicitly descoped.
+- `docs/architecture/SOTA_PERFORMANCE_PLAN.md` (356 lines) — the
+  phased SOTA roadmap; the planned wins have shipped and are
+  recorded in `BENCHMARKS.md` + `ORTHOGONAL_SYMMETRY.md`.
+- `docs/architecture/IMPLEMENTATION_NOTES.md` (469 lines) — the
+  "deferred work / HPC-gated milestones" tracker; Phase 3b #7 +
+  the first three Phase 3c stages have landed (with cluster job
+  IDs locked in `CHANGELOG.md`) and the remaining items either
+  ship via the live `SCALING.md` §6 or are explicit non-goals.
+- `docs/guides/usage.md` (1425 lines) — the "every way to invoke
+  this toolkit" tour; subsumed by the much shorter
+  `python_quickstart.md` + `workflow.md` + `one_call_api.md`.
+- `docs/guides/unified_interface.md` (296 lines) — duplicates
+  `one_call_api.md` and the C++ portions of `workflow.md`.
+- `docs/benchmarks/unified_interface.md` (123 lines) — the
+  pre-collapse `bench_minimalist_collapse` numbers; superseded by
+  `BENCHMARKS.md` + `ORTHOGONAL_SYMMETRY.md`.
+- `benchmarks/bench_gpu_symmetry_matrix_SUMMARY.md` (173 lines) —
+  superseded by `docs/benchmarks/ORTHOGONAL_SYMMETRY.md`.
+
+Stale dangling references in source-level comments (`ed_config.cpp`
+help string, `ed_wrapper.h` and `ed_legacy_types.h` migration
+breadcrumbs) are repointed to `workflow.md` and `CHANGELOG.md`.
+
+Net diffstat: ~6 000 lines of stale documentation removed; ~1 000
+lines of rewritten / refreshed content. Every surviving doc was
+verified to be free of dangling references to the deleted set, and
+`ctest` is 299/299 green after the docs pass.
+
 ### Orthogonal symmetry composition: Subspace × ProjectorChain (May 2026)
 
 Refactors the four-mode symmetry taxonomy

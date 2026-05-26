@@ -1,13 +1,22 @@
-# Minimalist ED architecture
+# QED architecture (post-collapse)
 
-This document captures the post-refactor architecture of the QED Exact
-Diagonalization library, replacing the layered descriptions in
-`STRUCTURAL_AUDIT.md` and `CODEMAP.md` with a single picture of the
-final tree. The refactor was carried out in nine phases, summarised
-in `plans/minimalist-ed-architecture_*.plan.md`. The **Minimalist ED
-Collapse** (May 2026, Part VI of `STRUCTURAL_AUDIT.md`) further reduced
-the public surface to three entry points — see "Minimalist ED Collapse
-entry surface" below.
+This document captures the current architecture of the QED Exact
+Diagonalization library after the May 2026 surface-unification
+collapse and the orthogonal symmetry composition refactor. It is the
+canonical entry point for new contributors. Companion documents:
+
+* [`CODEMAP.md`](CODEMAP.md) — directory-by-directory tour.
+* [`SYMMETRY.md`](SYMMETRY.md) — symmetry math + `Subspace × ProjectorChain`.
+* [`SCALING.md`](SCALING.md) — memory and N envelope.
+* [`ADD_NEW_BASIS_POLICY.md`](ADD_NEW_BASIS_POLICY.md) /
+  [`ADD_NEW_GPU_CELL.md`](ADD_NEW_GPU_CELL.md) /
+  [`ADD_NEW_MPI_CELL.md`](ADD_NEW_MPI_CELL.md) — extension recipes.
+
+The full release / refactor history (including the Minimalist ED
+Collapse, the unified-interface waves, the 48-cell backend × symmetry
+× workflow closure, and the May-2026 orthogonal symmetry composition)
+lives in [`CHANGELOG.md`](../../CHANGELOG.md). The three-entry-point
+public surface is captured immediately below.
 
 ## Minimalist ED Collapse entry surface (canonical, May 2026)
 
@@ -36,17 +45,16 @@ entry surface" below.
 
 The pre-collapse auto-pilot picture (`ed/auto/solve.h`,
 `ed/auto/thermal.h`, `ed/auto/dssf.h`, `ed/auto/diag_tune.h`,
-`ed/auto/dssf_tune.h`) has been removed in the May 2026 cleanup sweep
-— see `docs/MIGRATION.md` for the port. The dispatcher header family
-(`ed/core/dispatch.h`, `ed/core/ed_wrapper.h`,
+`ed/auto/dssf_tune.h`) was removed in the May 2026 cleanup sweep. The
+dispatcher header family (`ed/core/dispatch.h`, `ed/core/ed_wrapper.h`,
 `ed/core/ed_wrapper_streaming.h`) has been **hard-removed**: the CLI
 binaries (`src/cli/workflows.cpp`, `src/cli/ed_distributed_main.cpp`)
 now route through `ed::make_operator(OperatorSpec)` +
-`ed::workflows::{solve,thermal,spectral}`, and `ed_wrapper.h` is
+`ed::workflows::{solve, thermal, spectral}`, and `ed_wrapper.h` is
 retained as a thin shim that re-exports the result/parameter types
-in `ed_legacy_types.h`. The historical pre-collapse
-diagram lived here; consult git history (`git log -p docs/architecture/
-ARCHITECTURE.md`) if you need to see the legacy graph.
+in `ed_legacy_types.h`. The historical pre-collapse diagram lives in
+[`CHANGELOG.md`](../../CHANGELOG.md) under the relevant wave entries
+(consult git history if you need the legacy graph).
 
 ## Three orthogonal axes
 
@@ -281,7 +289,7 @@ The dynamical-correlator coverage moves to Phase 6 primitives.
 | 1     | Retire algorithms + delete kernel files           | **Done** — ~11 kLOC deleted (CG/ARPACK/SCALAPACK/HYBRID/FTLM_JP/FTLM_LTLM_DYN/FTLM_SSSF + Davidson/LOBPCG/Block-Krylov-Schur + ARPACK_THRESHOLDS/IRLM/TRLM/Chebyshev_Filtered/Shift_Invert/OSS solver bodies, plus all retired enum values, dispatch cases, auto-pilot heuristics, Python `qed.solve` branches, GPU LOBPCG/Davidson/Block-Krylov-Schur paths + their `GPUIterativeSolver` + `GPUBlockKrylovSchur` classes + the LOBPCG Eigen helper. May-2026 follow-on: also removed the single-state / FTLM-thermal duplicates `compute_dynamical_response`, `compute_dynamical_correlation_state` (CPU), and their GPU counterparts `runGPUDynamicalResponse[Thermal]`, `runGPUDynamicalCorrelation[State,StateCF]`, `runGPUFTLMFixedSz`, `runGPUThermalExpectation` plus the underlying `GPUFTLMSolver::computeDynamicalResponse[Thermal]` / `computeDynamicalCorrelation[State,StateCF]` / `computeThermalExpectation` methods + their helper methods `computeSpectralFunction[Complex]` / `computeOverlapsWithBasis`, and the dead inline helpers `process_thermal_correlations`, `diagonalize_matrix_free`, `get_fallback_method` in `ed_wrapper.h`.) |
 | 2     | SquareOperator / RectangularOperator + factories  | **Retired (May 2026)** — the `ed::core::SquareOperator<MS>`, `ed::core::RectangularOperator<MS>`, `BasisPolicy<MS>` runtime hierarchy, and `square_operator_factories.h` were deleted along with their lockdown test `test_square_operator.cpp`. Zero production consumers had migrated. The unification work happened on the simpler axis: `Operator` / `FixedSzOperator` / `*Symmetry*` / `Distributed*` / `GPU*` all derive from the single `ed::matvec::MatVecOperator` base, which is what every solver consumes. |
 | 3     | CudaBackend / MpiCudaBackend headers + facades    | **Done (days 7-12)** — CudaBackend + GPU Lanczos (day 7), BOTH CPU+MPI Lanczos paths consolidated onto `lanczos_kernel<MpiBackend>` (day 8), distributed Krylov-Schur per-cycle Lanczos also delegating via new `aux_ortho_ptrs` (day 9), `MpiCudaBackend` + Phase C migration (days 11-12, GPU+MPI Lanczos / Krylov-Schur / FTLM all kernel-driven). `ed/matvec/backends/cuda_backend.cuh` is the real cuBLAS-driven `Backend` implementation. `runGPULanczos(...)` / `runGPULanczosFixedSz(...)` route *both* branches into `src/solvers/gpu/gpu_lanczos_kernel_facade.cu`. **Day 8:** templated CPU+MPI kernel in `include/ed/distributed/distributed_lanczos_kernel.h` is a ~30-line facade over `lanczos_kernel<MpiBackend>`; the row-slab entry point in `src/distributed/distributed_lanczos.cpp` was collapsed too (665 → 310 LOC). **Day 9:** the thick-restart `src/distributed/distributed_krylov_schur.cpp` had its own inline per-cycle Lanczos body that orthogonalised against the union of the locked Ritz set and the in-cycle basis. The kernel didn't speak that idiom yet, so day 9 added `LanczosKernelOptions::aux_ortho_ptrs` (a fixed user-supplied ortho set the CGS2 pass projects out alongside the basis) and migrated the KS body to use it. Per-step Allreduce count drops from `2*(k+m)` sequential to `2` batched, same headline speedup the day-1 batched-CGS2 work brought to plain Lanczos now extends to thick-restart KS. Same convergence semantics across all paths preserved via `LanczosKernelOptions::convergence_check` + the `ed::krylov::make_smallest_ritz_convergence(exct, tol)` factory in `include/ed/krylov/ritz_convergence.h`. Day 8 also fixed two correctness bugs surfaced by the migration: (i) `cap = min(max_iter, local_n)` was wrong for distributed runs where `local_n < global_dim` — added `LanczosKernelOptions::dim_cap`; (ii) the kernel's `if (local_n == 0) return` was deadlocking np=4 runs on small symmetry sectors where some ranks receive an empty slab — removed. Cumulative Lanczos-body LOC eliminated across days 8-9: ~410. `MpiCudaBackend` (NCCL + cuBLAS sibling) is the next deliverable. Remaining unmigrated Lanczos body: `src/distributed/distributed_lanczos_gpu.cu`. |
-| 4     | block_lanczos / krylov_schur kernel headers       | **CPU-only facade, statically enforced.** `block_lanczos_kernel<Backend>` and `krylov_schur_kernel<Backend>` are inline templates that delegate to the existing CPU bodies in `src/solvers/cpu/lanczos.cpp` and round-trip through `test_kernel_facades.cpp`. As of day-10 the Backend template parameter has a `static_assert(std::is_base_of_v<CpuBackend, Backend>)` to surface mis-use at compile time — the body does not consult the backend object and uses BLAS-3 / Schur-reordering primitives that the `Backend` interface does not expose. CPU+MPI Krylov-Schur **is** unified — `src/distributed/distributed_krylov_schur.cpp` delegates its per-cycle Lanczos build to `lanczos_kernel<MpiBackend>` with `aux_ortho_ptrs` (day 9). GPU Krylov-Schur / GPU Block-Lanczos remain hand-rolled (`gpu_krylov_schur.cu` / `gpu_block_lanczos.cu`) pending either a BLAS-3 expansion of the Backend interface or a contiguous-buffer Backend variant — see STRUCTURAL_AUDIT.md "Phases B+D — what's now true" section for the current scoreboard. |
+| 4     | block_lanczos / krylov_schur kernel headers       | **CPU-only facade, statically enforced.** `block_lanczos_kernel<Backend>` and `krylov_schur_kernel<Backend>` are inline templates that delegate to the existing CPU bodies in `src/solvers/cpu/lanczos.cpp` and round-trip through `test_kernel_facades.cpp`. As of day-10 the Backend template parameter has a `static_assert(std::is_base_of_v<CpuBackend, Backend>)` to surface mis-use at compile time — the body does not consult the backend object and uses BLAS-3 / Schur-reordering primitives that the `Backend` interface does not expose. CPU+MPI Krylov-Schur **is** unified — `src/distributed/distributed_krylov_schur.cpp` delegates its per-cycle Lanczos build to `lanczos_kernel<MpiBackend>` with `aux_ortho_ptrs` (day 9). GPU Krylov-Schur / GPU Block-Lanczos remain hand-rolled (`gpu_krylov_schur.cu` / `gpu_block_lanczos.cu`) pending either a BLAS-3 expansion of the Backend interface or a contiguous-buffer Backend variant. |
 | 5     | FTLM / LTLM / mTPQ / cTPQ / KPM-DOS kernel headers| **Working CPU facade** — all five `template<Backend, MatvecFn>` kernels have real inline bodies delegating to the CPU `finite_temperature_lanczos`, `low_temperature_lanczos`, `microcanonical_tpq`, `canonical_tpq`, and `ed::kpm_dos::compute_kpm_dos`. Round-tripped in `test_kernel_facades.cpp`. |
 | 6     | 5 correlator-primitive headers                    | **Working CPU facade** — `expectation_value`, `static_correlator`, `cf_dynamical_correlator`, `kpm_dynamical_correlator`, `time_evolution_correlator` are real inline templates. `time_evolution_correlator` is fully self-contained (composes `B.apply`, Krylov time-step from `ed/solvers/dynamics.h`, and `Backend::dot`); the others delegate to the CPU legacy entry points. |
 | 7     | Workflow facade `ed/workflows/workflows.h`        | **Retired (May 2026)** — header and namespace deleted. `WorkflowResult` had no consumers and the CLI workflow body in `src/cli/workflows.cpp` already composes the kernels above directly. |
@@ -323,6 +331,10 @@ hand-rolled. Both depend on a contiguous-device-basis layout (for
 interface does not currently expose; tracked as a separate "Backend
 BLAS-3 view" workstream rather than a Krylov-kernel gap.
 
+The day-10 `static_assert(std::is_base_of_v<CpuBackend, Backend>)` on
+`block_lanczos_kernel` and `krylov_schur_kernel` surfaces the
+restriction at compile time.
+
 The remaining forward path:
 
 1. Migrate the GPU / MPI bodies one at a time, replacing the legacy
@@ -357,9 +369,15 @@ The remaining forward path:
 ## Reading order for new contributors
 
 1. This document.
-2. `STRUCTURAL_AUDIT.md` for the historical context and the audit
-   items that motivated each phase.
-3. `CODEMAP.md` for the directory-by-directory tour.
-4. `SYMMETRY.md` for the spatial-symmetry projection internals.
-5. The individual kernel headers in `ed/krylov/`, `ed/thermal/`,
-   `ed/observables/` for the canonical API surface.
+2. [`CODEMAP.md`](CODEMAP.md) for the directory-by-directory tour.
+3. [`SYMMETRY.md`](SYMMETRY.md) for the
+   `Subspace × ProjectorChain` decomposition and the spatial-symmetry
+   math.
+4. [`SCALING.md`](SCALING.md) for memory / N envelope and env-var knobs.
+5. The individual kernel headers in
+   [`include/ed/krylov/`](../../include/ed/krylov/),
+   [`include/ed/thermal/`](../../include/ed/thermal/),
+   [`include/ed/observables/`](../../include/ed/observables/)
+   for the canonical API surface.
+6. [`CHANGELOG.md`](../../CHANGELOG.md) for the historical context and
+   the audit items that motivated each phase of the collapse.

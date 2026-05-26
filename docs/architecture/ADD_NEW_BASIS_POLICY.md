@@ -123,6 +123,18 @@ See [`ADD_NEW_GPU_CELL.md`](ADD_NEW_GPU_CELL.md).
 
 See [`ADD_NEW_MPI_CELL.md`](ADD_NEW_MPI_CELL.md).
 
+### See also
+
+If the new basis policy encodes a new symmetry sector (rather than
+a different storage layout), the **orthogonal symmetry composition**
+might be the better entry point. A new `Subspace` in
+[`include/ed/symmetry/subspace.h`](../../include/ed/symmetry/subspace.h)
+or a new `Projector` in
+[`include/ed/symmetry/projector.h`](../../include/ed/symmetry/projector.h)
+plugs into the host-side orbit / character builder without
+touching the matvec kernel templates at all. See
+[`SYMMETRY.md`](SYMMETRY.md) §6 for the routing table.
+
 ## Validation
 
 Add a cross-check test that runs the same Hamiltonian on the full

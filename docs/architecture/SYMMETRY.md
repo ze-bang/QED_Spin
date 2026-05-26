@@ -133,8 +133,8 @@ This note is the single source of truth for what symmetries QED exploits
 in each workflow, *how* it exploits them, the math behind the
 recombination, and where we stand relative to the standard reference
 codes (HPhi, EDLib, QuSpin, Pomerol). It complements
-`STRUCTURAL_AUDIT.md` (which catalogues weaknesses across the whole
-codebase) and `CODEMAP.md` (which tracks where each piece lives).
+[`ARCHITECTURE.md`](ARCHITECTURE.md) (the post-collapse picture) and
+[`CODEMAP.md`](CODEMAP.md) (which tracks where each piece lives).
 
 ---
 
@@ -492,8 +492,10 @@ irrep decomposition, not in any of the math kernels.
 - The auto-pilot `Device::MPI` route does **not** currently dispatch
   to the distributed Lanczos / FTLM / TPQ; that's the
   `ed_distributed_main` family (and `mpi4py` from Python). The
-  `workflows::solve(Device::MPI)` semantic is ScaLAPACK only — see the
-  S1 #13 audit entry in `STRUCTURAL_AUDIT.md`.
+  `workflows::solve(Device::MPI)` semantic is ScaLAPACK only; the
+  distributed iterative solvers are reached via
+  `qed.mpi.run_distributed(...)` from Python or by linking
+  `ed_distributed` directly from C++.
 
 ---
 

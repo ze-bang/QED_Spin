@@ -1,19 +1,22 @@
-# Contributing to `exact_diagonalization_cpp`
+# Contributing to QED
 
-This is a lab-internal exact-diagonalization toolkit. Contributions from collaborators are welcome. The goal is "research-grade with sane engineering": fast iteration, scientifically correct output, easy to debug, easy for new lab members to pick up.
+QED is a research-grade exact-diagonalization toolkit. Contributions
+from collaborators are welcome. The goal is "research-grade with sane
+engineering": fast iteration, scientifically correct output, easy to
+debug, easy for new lab members to pick up.
 
 ## TL;DR
 
 ```bash
-git clone <repo>
-cd exact_diagonalization_cpp
+git clone https://github.com/ze-bang/QED.git
+cd QED
 pre-commit install                  # one-time, after `pip install pre-commit`
 cmake --preset default              # Release + OpenBLAS, no CUDA/MPI
 cmake --build --preset default -j   # build
-ctest --preset default              # 146/146 must pass
+ctest --preset default              # all tests must pass
 ```
 
-If `ctest` is not 146/146 green on `main`, that is a bug. File an issue.
+If `ctest` is not 100 % green on `main`, that is a bug — file an issue.
 
 ## Build presets
 
@@ -23,54 +26,87 @@ See `CMakePresets.json` for the full list. The most common ones:
 |--------------------|----------------------------------------------------------|
 | `default`          | First-time setup, no CUDA, no MPI                        |
 | `debug`            | Stepping through with `gdb`                              |
-| `debug-asan`       | Hunting memory bugs / undefined behavior (slow!)         |
-| `release-mpi`      | Distributed TPQ samples, ScaLAPACK runs                  |
+| `debug-asan`       | Hunting memory bugs / undefined behavior (slow)          |
+| `release-mpi`      | Distributed Lanczos / FTLM / TPQ runs                    |
 | `release-cuda`     | GPU Lanczos / FTLM / TPQ                                 |
-| `release-cuda-mpi` | Full HPC build                                           |
+| `release-cuda-mpi` | Full HPC build (NCCL + CUDA + MPI)                       |
 | `ci-linux`         | What CI uses; pinned to system `gcc`/`g++`               |
 
 ## Local developer overrides
 
-The two paths the upstream `CMakeLists.txt` used to hardcode (LAPACKE root, BLAS shim dir) are now cache variables:
+The two paths the upstream `CMakeLists.txt` used to hardcode (LAPACKE
+root, BLAS shim dir) are cache variables:
 
 ```cmake
 -DED_LAPACKE_ROOT=/path/to/your/lapacke
 -DED_BLAS_SHIM_DIR=/path/to/blas_shim
 ```
 
-If you want them set automatically every time you configure, copy `local.cmake.example` to `local.cmake` (gitignored) and pass it via `cmake --preset default -C local.cmake`.
+If you want them set automatically every time you configure, copy
+`local.cmake.example` to `local.cmake` (gitignored) and pass it via
+`cmake --preset default -C local.cmake`.
 
 ## Style
 
 - C++17 (CUDA: C++17). No C++20 modules.
-- `clang-format` enforces formatting. Run `clang-format -i path/to/file.cpp` before committing, or just rely on the `pre-commit` hook.
-- `clang-tidy` runs in CI as warnings-only for now (will become an error gate in Phase 2).
-- 4-space indent, 100-col, pointer/reference attached to type. See `.clang-format`.
+- `clang-format` enforces formatting. Run `clang-format -i
+  path/to/file.cpp` before committing, or rely on the `pre-commit` hook.
+- `clang-tidy` runs in CI as warnings-only.
+- 4-space indent, 100-col, pointer/reference attached to type. See
+  `.clang-format`.
 - `#pragma once` for include guards (no `#ifndef X_H` boilerplate).
 - Use `std::filesystem`, not `system("mkdir -p ...")`.
 - Use `nlohmann::json`, not the bespoke parser in `construct_ham.h`.
 
 ## Tests
 
-- All new C++ code should land with at least one Catch2 test under `tests/unit/`. Until the Catch2 migration completes (Phase 1), the existing bespoke test harness in `tests/common/test_harness.h` is acceptable.
-- For numerics-changing PRs, add a regression test that pins a known-good value (energy, spectral peak, etc.) on a small system you can compute analytically.
-- Cross-checks: a CPU/GPU equivalence test on a 4–6 site lattice catches 90% of GPU bugs and runs in seconds. Tag it `[gpu][cpu-equivalent]` so CI can opt in/out.
+- All new C++ code should land with at least one Catch2 test under
+  `tests/unit/`. Integration tests live under `tests/integration/`.
+- For numerics-changing PRs, add a regression test that pins a
+  known-good value (energy, spectral peak, etc.) on a small system
+  you can compute analytically.
+- Cross-checks: a CPU/GPU equivalence test on a 4–6 site lattice
+  catches 90 % of GPU bugs and runs in seconds. Tag it
+  `[gpu][cpu-equivalent]` so CI can opt in/out.
+- New Python code should land with at least one `pytest` test under
+  `python/tests/`.
 
 ## Commits and PRs
 
-- One logical change per commit. Big refactors land as a series of small commits where every intermediate state still builds and `ctest` is green.
-- Commit messages: imperative subject ("add", "fix", "refactor"), 72-col first line, then a body that explains *why*.
-- Reference the audit phase if applicable: `(P0.7)`, `(P1.3)`, `(P2.2)`, etc. See `docs/history/MODERNIZATION_AUDIT.md` for the legacy numbering scheme.
-- PRs: small, focused, one author. Self-review before requesting review.
+- One logical change per commit. Big refactors land as a series of
+  small commits where every intermediate state still builds and
+  `ctest` is green.
+- Commit messages: imperative subject ("add", "fix", "refactor"),
+  72-col first line, then a body that explains *why*.
+- PRs: small, focused, one author. Self-review before requesting
+  review.
 - CI must be green before merge. No exceptions for `main`.
 
-## When adding a new method
+## Where things live
 
-1. Add the source under `src/solvers/cpu/` or `src/solvers/gpu/`. Header under `include/ed/solvers/`.
-2. If it changes the `DiagonalizationMethod` enum, update `include/ed/core/ed_types.h` (single source of truth — there used to be a duplicate in `src/core/ed_config.cpp`; do not re-introduce it).
-3. Wire the method into the dispatch in `src/core/ed_config.cpp`.
-4. Add a unit test that compares it against a brute-force ground state on a small system.
-5. Document the new method in `README.md` under the methods table.
+When extending the codebase, the relevant entry points are:
+
+- **A new solver / kernel** — under `include/ed/krylov/` (Krylov
+  family) or `include/ed/thermal/` (finite-T family), plus
+  implementation under `src/solvers/`. Register the new
+  `DiagonalizationMethod` enum in `include/ed/core/ed_types.h` and
+  wire it into `src/orchestrator.cpp`.
+- **A new symmetry axis** (spin-flip Z2, time reversal, SU(2)
+  total-S, etc.) — see
+  [`docs/architecture/SYMMETRY.md`](docs/architecture/SYMMETRY.md) §6
+  for the design pattern: extend `ProjectorChain` with a new
+  `Projector` (in `include/ed/symmetry/projector.h`) or add a new
+  `Subspace` specialisation (in `include/ed/symmetry/subspace.h`).
+  The operator hierarchy stays untouched.
+- **A new basis policy** — see
+  [`docs/architecture/ADD_NEW_BASIS_POLICY.md`](docs/architecture/ADD_NEW_BASIS_POLICY.md).
+- **A new GPU lane** — see
+  [`docs/architecture/ADD_NEW_GPU_CELL.md`](docs/architecture/ADD_NEW_GPU_CELL.md).
+- **A new MPI lane** — see
+  [`docs/architecture/ADD_NEW_MPI_CELL.md`](docs/architecture/ADD_NEW_MPI_CELL.md).
+- **A new example** — add a runnable file under `examples/`, register
+  it in `examples/CMakeLists.txt` if it is a C++ example, list it in
+  `examples/README.md` and the top-level `README.md`.
 
 ## Reporting bugs
 
@@ -78,13 +114,21 @@ Open a GitHub issue with:
 
 - The exact `cmake` command you used (or the preset name).
 - The compiler version (`g++ --version`, `nvcc --version`).
-- The full ctest output (`ctest --output-on-failure`).
-- A minimal config that reproduces (`configs/<your_repro>.cfg`).
+- The full `ctest` output (`ctest --output-on-failure`).
+- A minimal config that reproduces (`configs/<your_repro>.cfg`) or a
+  short Python script.
 
 ## Architecture documents
 
-- `docs/architecture/IMPLEMENTATION_REPORT.md` — exhaustive subsystem reference. Read this before making structural changes.
-- `docs/architecture/SCALING.md` — performance envelope and tunable knobs.
-- `docs/architecture/IMPLEMENTATION_NOTES.md` — deferred / HPC-gated work; pick from here if you have cluster time.
-- `docs/history/MODERNIZATION_AUDIT.md`, `docs/history/PHASE_3*_SUMMARY.md` — historical roadmap and phase summaries (frozen).
-- `README.md` — user-facing introduction to the toolkit.
+- [`docs/architecture/ARCHITECTURE.md`](docs/architecture/ARCHITECTURE.md)
+  — post-collapse architectural picture (read first).
+- [`docs/architecture/SYMMETRY.md`](docs/architecture/SYMMETRY.md)
+  — symmetry math + `Subspace × ProjectorChain` decomposition.
+- [`docs/architecture/CODEMAP.md`](docs/architecture/CODEMAP.md)
+  — directory-by-directory tour.
+- [`docs/architecture/SCALING.md`](docs/architecture/SCALING.md)
+  — memory + N envelope, env-var knobs.
+- [`docs/history/`](docs/history/) — historical phase summaries
+  (frozen time capsules).
+- [`CHANGELOG.md`](CHANGELOG.md) — versioned release notes.
+- [`README.md`](README.md) — user-facing introduction.

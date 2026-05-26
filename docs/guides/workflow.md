@@ -353,16 +353,20 @@ refers to the four basis choices the workflow can compose:
 
 | solver family             | full | sz | symm | symm + sz | returns                                |
 | ------------------------- | :--: | :-: | :--: | :-------: | -------------------------------------- |
-| `LANCZOS` (and NO_ORTHO / SELECTIVE / IRL / TRL variants) | ✅ | ✅ | ✅ | ✅ | `EDResults.eigenvalues` |
+| `LANCZOS`                 | ✅ | ✅ | ✅ | ✅ | `EDResults.eigenvalues` |
 | `KRYLOV_SCHUR`            | ✅ | ✅ | ✅ | ✅ | `EDResults.eigenvalues` |
-| `BLOCK_LANCZOS` / `BLOCK_KRYLOV_SCHUR` | ✅ | ✅ | ✅ | ✅ | `EDResults.eigenvalues` |
-| `DAVIDSON` / `LOBPCG`     | ✅ | ✅ | ✅ | ✅ | `EDResults.eigenvalues` |
-| `ARPACK_*` (`SM`, `LM`, `SHIFT_INVERT`, `ADVANCED`) | ✅ | ✅ | ✅ | ✅ | `EDResults.eigenvalues` |
-| `CHEBYSHEV_FILTERED`, `SHIFT_INVERT[_ROBUST]`, `BICG`, `OSS` | ✅ | ✅ | ✅ | ✅ | `EDResults.eigenvalues` |
-| `FULL`, `SCALAPACK[_MIXED]` | ✅ | ✅ | ✅ | ✅ | `EDResults.eigenvalues` |
+| `BLOCK_LANCZOS`           | ✅ | ✅ | ✅ | ✅ | `EDResults.eigenvalues` |
+| `FULL` (dense LAPACK)     | ✅ | ✅ | ✅ | ✅ | `EDResults.eigenvalues` |
 | `mTPQ` / `cTPQ`           | ✅ | ✅ | ❌¹ / ✅³ | ❌¹ / ✅³ | trajectory in `eigenvalues`; thermo curve in `output_dir`/`thermo_data` |
 | `FTLM`                    | ✅ | ✅ | ✅² | ✅² | `EDResults.thermo_data` (sectors are summed) |
-| `LTLM` / `HYBRID`         | ✅ | ✅ | ✅² | ✅² | `EDResults.thermo_data` |
+| `LTLM`                    | ✅ | ✅ | ✅² | ✅² | `EDResults.thermo_data` |
+| `KPM_DOS`                 | ✅ | ✅ | ✅² | ✅² | `EDResults.thermo_data` |
+
+(The May-2026 minimalist-solver-matrix cleanup retired the
+`ARPACK_*` / `DAVIDSON` / `LOBPCG` / `CHEBYSHEV_FILTERED` /
+`SHIFT_INVERT*` / `IRL` / `TRL` / `BICG` / `OSS` / `SCALAPACK*` /
+`HYBRID` families and every `_GPU` / `_MPI` enum suffix; backend
+choice now goes through the `device=` kwarg.)
 
 Notes:
 
@@ -373,7 +377,7 @@ raises a clear `ValueError` when this combination is requested on
 those devices. Pre-project to a fixed-Sz block instead, or use
 `device='mpi'`/`'mpi_gpu'` (see footnote ³).
 
-² FTLM/LTLM/HYBRID *do* combine across symmetry blocks correctly
+² FTLM/LTLM/KPM_DOS *do* combine across symmetry blocks correctly
 because each block contributes an additive term to the partition
 function. On `device='cpu'`/`'gpu'` the in-process dispatcher loops
 the sectors itself; on `device='mpi'`/`'mpi_gpu'` the Python
@@ -440,19 +444,15 @@ kernel for every cell -- the table below is the canonical record.
 
 | solver family            |  cpu  |  gpu  |  mpi  | mpi+gpu | how to invoke                                        |
 | ------------------------ | :---: | :---: | :---: | :-----: | ---------------------------------------------------- |
-| `LANCZOS`                |  ✅   |  ✅   |  ✅   |   ✅¹   | `qed.solve(H[, device='gpu'/'mpi'/'mpi_gpu'])` / `run_distributed("lanczos"[, use_gpu=True])` |
+| `LANCZOS`                |  ✅   |  ✅   |  ✅   |   ✅¹   | `qed.solve(H[, device='gpu'/'mpi'/'mpi_gpu'])` / `qed.mpi.run_distributed("lanczos"[, use_gpu=True])` |
 | `BLOCK_LANCZOS`          |  ✅   |  ✅   |  ❌   |   ❌    | `qed.solve(H, solver="BLOCK_LANCZOS"[, device='gpu'])` |
 | `KRYLOV_SCHUR`           |  ✅   |  ✅   |  ✅²  |   ✅⁶   | `qed.solve(H, solver="KRYLOV_SCHUR"[, device='gpu'/'mpi'/'mpi_gpu'])` |
-| `BLOCK_KRYLOV_SCHUR`     |  ✅   |  ✅   |  ❌   |   ❌    | `qed.solve(H, solver="BLOCK_KRYLOV_SCHUR"[, device='gpu'])` |
-| `DAVIDSON` / `LOBPCG`    |  ✅   |  ✅   |  ❌   |   ❌    | `qed.solve(H, solver="DAVIDSON"[, device='gpu'])`     |
-| `ARPACK_*`               |  ✅   |  ❌   |  ❌   |   ❌    | `qed.solve(H, solver="ARPACK_SM")`                    |
 | `FULL`                   |  ✅   |  ✅   |  ❌   |   ❌    | `qed.solve(H, solver="FULL"[, device='gpu'])`         |
-| `SCALAPACK[_MIXED]`      |  ❌   |  ❌   |  ✅   |   ❌    | `run_distributed("lanczos", ...)` (under the hood)   |
-| `mTPQ`                   |  ✅   |  ✅   |  ✅³  |   ✅⁴   | `qed.solve(H, solver="mTPQ"[, device='mpi'/'mpi_gpu'])` / `run_distributed("tpq"[, use_gpu=True], ...)` |
-| `cTPQ`                   |  ✅   |  ✅   |  ✅³  |   ✅⁴   | `qed.solve(H, solver="cTPQ"[, device='mpi'/'mpi_gpu'])` / `run_distributed("tpq"[, use_gpu=True], ...)` |
-| `FTLM`                   |  ✅   |  ✅   |  ✅   |   ✅⁵   | `qed.solve(H, solver="FTLM")` / `run_distributed("ftlm"[, use_gpu=True], ...)` |
-| `LTLM` / `HYBRID`        |  ✅   |  ❌   |  ❌   |   ❌    | `qed.solve(H, solver="LTLM")`                          |
-| `SHIFT_INVERT[_ROBUST]` etc. | ✅ |  ❌   |  ❌   |   ❌    | `qed.solve(H, solver="SHIFT_INVERT")`                  |
+| `mTPQ`                   |  ✅   |  ✅   |  ✅³  |   ✅⁴   | `qed.thermal(H, method="mTPQ"[, device='mpi'/'mpi_gpu'])` / `qed.mpi.run_distributed("tpq"[, use_gpu=True], ...)` |
+| `cTPQ`                   |  ✅   |  ✅   |  ✅³  |   ✅⁴   | `qed.thermal(H, method="cTPQ"[, device='mpi'/'mpi_gpu'])` / `qed.mpi.run_distributed("tpq"[, use_gpu=True], ...)` |
+| `FTLM`                   |  ✅   |  ✅   |  ✅   |   ✅⁵   | `qed.thermal(H, method="FTLM")` / `qed.mpi.run_distributed("ftlm"[, use_gpu=True], ...)` |
+| `LTLM`                   |  ✅   |  ❌   |  ❌   |   ❌    | `qed.thermal(H, method="LTLM")`                       |
+| `KPM_DOS`                |  ✅   |  ✅   |  ❌   |   ❌    | `qed.thermal(H, method="KPM_DOS"[, device='gpu'])`    |
 
 Notes:
 
@@ -529,12 +529,9 @@ two tables above don't capture on their own:
   projection happens before the Lanczos / TPQ kernel sees the
   vector, so the kernel itself is none the wiser).
 * `symm` × **mpi** is wired through `DistributedSymmetryOperator`
-  for `LANCZOS` and `FTLM` only at the time of writing. Other
-  distributed solvers (`KRYLOV_SCHUR`, `BLOCK_*`, `DAVIDSON`,
-  `LOBPCG`, `mTPQ`, `cTPQ`) currently fall back with an actionable
-  error if `symm` and `mpi` are both requested. Phase D extends the
-  dispatcher to wire them all uniformly once the GPU symmetry
-  operator (Phase C) lands.
+  for `LANCZOS`, `KRYLOV_SCHUR`, `FTLM`, `mTPQ`, and `cTPQ`. The
+  remaining `symm` × **mpi** cells (`BLOCK_LANCZOS`) fall back to the
+  CPU lane with an actionable warning.
 * `symm` × **mpi+gpu** is wired for `LANCZOS` via
   `distributed_lanczos_gpu_symmetry` (Phase D step 1 — builds a
   `DistributedSymmetryOperatorGPU` internally and runs the same
@@ -561,10 +558,8 @@ two tables above don't capture on their own:
   on-device J&P trace-estimator body shared with the unsymmetrised
   GPU FTLM, with the same orbit-aware scatter as the CPU symm path).
   The CLI accepts `--mode ftlm --gpu --use-symmetry --sector-index k`.
-  The remaining distributed solvers (`BLOCK_*`, `DAVIDSON`, `LOBPCG`)
-  still need their per-solver wiring. Until those land, drop to
-  `device='gpu'` per node for those solvers when `--use-symmetry`
-  is set.
+  The remaining `symm` × **mpi+gpu** cell (`BLOCK_LANCZOS`) drops to
+  `device='gpu'` per node automatically when `--use-symmetry` is set.
 * `mTPQ` / `cTPQ` × **mpi** is wired (Phase E step 1) via
   `distributed_tpq_symmetry` — templated per-sample canonical-TPQ
   body shared with the unsymmetrised TPQ, with an orbit-aware

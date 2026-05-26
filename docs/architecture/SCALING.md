@@ -2,7 +2,7 @@
 orphan: true
 ---
 
-# Scaling envelope of `exact_diagonalization_cpp`
+# Scaling envelope of QED
 
 > **One-sentence answer.** This codebase is genuinely peer-grade with QuSpin
 > / EDLib / Pomerol for **N ≤ 32 sites**, gets you to **N = 36 with care**
@@ -523,15 +523,16 @@ ED. Until then, claim only what we can deliver.
 
 ## 8. Provenance
 
-This document was written after Batches 1, 2, and 3 of the modernization
-audit landed (see `MODERNIZATION_AUDIT.md` §9 for the executive summary).
 The numbers in §1 are exact (from `python -c "from math import comb;
 print(comb(N, N//2))"`), the per-vector sizes assume
 `sizeof(std::complex<double>) == 16`, and the per-N status in §2 is
-calibrated against the actual code paths in `src/solvers/cpu/lanczos.cpp`,
-`src/solvers/cpu/ftlm.cpp`, `src/solvers/cpu/TPQ.cpp`, the GPU twins, and
-`include/ed/core/streaming_symmetry.h` as of this commit.
+calibrated against the actual code paths in
+`src/solvers/cpu/lanczos.cpp`, `src/solvers/cpu/ftlm.cpp`,
+`src/solvers/cpu/TPQ.cpp`, the GPU twins, and
+`include/ed/core/streaming_symmetry.h`.
 
-If you change the vector type (e.g., to `std::complex<float>`) or the
-symmetry reduction (e.g., add SU(2) total-spin projection), redo the
+If you change the vector type (e.g. to `std::complex<float>`) or
+extend the symmetry projection (e.g. add SU(2) total-S via a new
+`FixedS2Subspace`; see
+[`docs/architecture/SYMMETRY.md`](SYMMETRY.md) §6), redo the
 arithmetic — don't trust the table blindly.
